@@ -1,0 +1,51 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@7a3fe6cf4cb3a834922a1244abfce67bcef6a0c5  # v6.2.0
+        with:
+          go-version-file: "go.mod"
+          cache-dependency-path: go.sum
+
+      - name: Verify go.mod is tidy
+        run: |
+          go mod tidy
+          if ! git diff --exit-code go.mod go.sum; then
+            echo "::error::go.mod or go.sum is not tidy. Cannot release with untidy module files."
+            exit 1
+          fi
+
+      - name: Run GoReleaser
+        uses: goreleaser/goreleaser-action@ec59f474b9834571250b370d4735c50f8e2d1e29  # v7.0.0
+        with:
+          distribution: goreleaser
+          version: "~> v2"
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Update release with notes from tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          git fetch origin "refs/tags/${TAG}:refs/tags/${TAG}" --force
+          git tag -l --format='%(contents)' "${TAG}" > /tmp/release-notes.md
+          gh release edit "$TAG" --notes-file /tmp/release-notes.md
