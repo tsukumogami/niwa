@@ -4,11 +4,22 @@ description = "Declarative workspace manager for AI-assisted development"
 homepage = "https://github.com/tsukumogami/niwa"
 version_format = "semver"
 
+[version]
+github_repo = "tsukumogami/niwa"
+tag_prefix = "v"
+
 [[steps]]
-action = "github_file"
-repo = "tsukumogami/niwa"
-asset_pattern = "niwa-{os}-{arch}"
-binary = "niwa"
+action = "download"
+url = "https://github.com/tsukumogami/niwa/releases/download/v{version}/niwa-{os}-{arch}"
+checksum_url = "https://github.com/tsukumogami/niwa/releases/download/v{version}/checksums.txt"
+
+[[steps]]
+action = "chmod"
+files = ["niwa-{os}-{arch}"]
+
+[[steps]]
+action = "install_binaries"
+outputs = [{src = "niwa-{os}-{arch}", dest = "bin/niwa"}]
 
 [verify]
 command = "niwa version"
