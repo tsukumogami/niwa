@@ -1,0 +1,12 @@
+{
+  "topic": "workspace-config",
+  "decisions": [
+    {"id": 1, "question": "How should repos and groups be structured in the schema?", "status": "pending", "complexity": "standard"},
+    {"id": 2, "question": "How should the CLAUDE.md content hierarchy be declared?", "status": "pending", "complexity": "critical"},
+    {"id": 3, "question": "How should multi-instance workspaces work in the config and state model?", "status": "pending", "complexity": "standard"},
+    {"id": 4, "question": "How should hooks, settings, and environment distribution be expressed?", "status": "pending", "complexity": "standard"},
+    {"id": 5, "question": "How should per-host overrides and channel config work?", "status": "pending", "complexity": "standard"}
+  ],
+  "cross_validation": "pending",
+  "round": 0
+}
