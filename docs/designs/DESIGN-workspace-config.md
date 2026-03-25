@@ -251,6 +251,7 @@ Key assumptions: `hostname -s` is stable enough for host identification. XDG-sty
 
 Per-host overrides live in `~/.config/niwa/hosts/<hostname>.toml`, completely outside the workspace tree. Bot tokens and machine-specific secrets live here, never in workspace.toml.
 
+**Common case (single workspace per host):**
 ```toml
 # ~/.config/niwa/hosts/ryzen9.toml
 [channels.telegram.bots]
@@ -262,9 +263,34 @@ Per-host overrides live in `~/.config/niwa/hosts/<hostname>.toml`, completely ou
 GH_TOKEN = "ghp_xxxx"
 ```
 
-The workspace.toml declares non-secret channel config (access rules, plugin references). The host file overlays machine-specific values. Bot assignment maps instance suffix to bot key (tsuku-2 gets bot "2"). Any workspace.toml value can be overridden per-host.
+**Complex case (multiple workspaces per host):**
+```toml
+# ~/.config/niwa/hosts/ryzen9.toml
 
-Host identity defaults to `hostname -s` with an `$NIWA_HOST` override for edge cases. Host config survives workspace reset/recreation since it lives outside the workspace tree.
+# Host-level defaults (apply to workspaces without a specific section)
+[env]
+ANTHROPIC_API_KEY = "sk-ant-shared..."
+
+# Per-workspace overrides
+[workspaces.tsuku.channels.telegram.bots]
+"1" = "tsuku-bot-1-token"
+"2" = "tsuku-bot-2-token"
+"3" = "tsuku-bot-3-token"
+"4" = "tsuku-bot-4-token"
+
+[workspaces.tsuku.env]
+GH_TOKEN = "ghp_tsukumogami"
+
+[workspaces.my-project.channels.telegram.bots]
+"1" = "myproj-bot-1-token"
+
+[workspaces.my-project.env]
+GH_TOKEN = "ghp_other_org"
+```
+
+The workspace.toml declares non-secret channel config (access rules, plugin references). The host file overlays machine-specific values. Optional `[workspaces.<name>]` sections override host-level defaults for specific workspaces, matched by the `[workspace] name` field from workspace.toml. Bot assignment maps instance suffix to bot key (tsuku-2 gets bot "2"). When a workspace section declares bots, it fully replaces (not merges with) host-level bot defaults.
+
+The three-layer resolution order is: workspace.toml (shared) -> host config host-level (per-machine defaults) -> host config workspace section (per-workspace overrides). Host identity defaults to `hostname -s` with an `$NIWA_HOST` override for edge cases. Host config survives workspace reset/recreation since it lives outside the workspace tree.
 
 #### Alternatives considered
 
@@ -273,6 +299,10 @@ Host identity defaults to `hostname -s` with an `$NIWA_HOST` override for edge c
 **Environment variable references with `${VAR}` syntax**: Placeholders in workspace.toml resolved at runtime. Rejected because it can't express multi-bot-per-host routing and pushes structure into naming conventions.
 
 **Inline host routing in workspace.toml**: All bot tokens for all hosts declared in the committed config. Rejected outright because it puts secrets in a committed file.
+
+**Separate host x workspace files**: Per-workspace override files in a subdirectory (`~/.config/niwa/hosts/ryzen9/tsuku.toml`). Rejected because it scatters config across multiple files (4 files for 3 workspaces) and having both a file and directory at the same path level is confusing.
+
+**Bot pool partitioning**: Declare the full bot pool in host config, partition by range in workspace.toml. Rejected because it only solves Telegram, can't handle per-workspace env vars, and requires fragile cross-workspace range coordination.
 
 ## Decision Outcome
 
@@ -284,7 +314,7 @@ Each workspace instance gets a `.niwa/instance.json` state file tracking managed
 
 Hooks, settings, and environment variables are declared at workspace level with optional per-repo overrides. Secrets stay in `.env` files referenced by path. niwa generates `settings.local.json`, copies hooks, and merges env files into each repo during `niwa apply`.
 
-Per-host overrides (bot tokens, machine-specific API keys, permission modes) live in `~/.config/niwa/hosts/<hostname>.toml`, outside the workspace tree. The Telegram integration maps instance suffixes to bot keys from this file. The three-layer resolution is: workspace.toml (shared) -> host config (per-machine) -> instance state (runtime).
+Per-host overrides (bot tokens, machine-specific API keys, permission modes) live in `~/.config/niwa/hosts/<hostname>.toml`, outside the workspace tree. The host config supports optional `[workspaces.<name>]` sections for host x workspace overrides (e.g., different bot pools or API keys per workspace on the same machine). The three-layer resolution is: workspace.toml (shared) -> host config host-level defaults (per-machine) -> host config workspace section (per-workspace on this machine).
 
 ### Rationale
 
@@ -485,6 +515,30 @@ type TelegramAccessConfig struct {
 
 type TelegramGroupConfig struct {
     RequireMention bool `toml:"require_mention,omitempty"`
+}
+```
+
+// Host config types (~/.config/niwa/hosts/<hostname>.toml)
+
+type HostConfig struct {
+    Channels   HostChannels              `toml:"channels"`
+    Env        map[string]string         `toml:"env"`
+    Settings   map[string]string         `toml:"settings"`
+    Workspaces map[string]WorkspaceScope `toml:"workspaces"`
+}
+
+type WorkspaceScope struct {
+    Channels  HostChannels          `toml:"channels"`
+    Env       map[string]string     `toml:"env"`
+    Settings  map[string]string     `toml:"settings"`
+}
+
+type HostChannels struct {
+    Telegram HostTelegramConfig `toml:"telegram"`
+}
+
+type HostTelegramConfig struct {
+    Bots map[string]string `toml:"bots"`
 }
 ```
 
