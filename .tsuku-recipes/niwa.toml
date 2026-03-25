@@ -1,0 +1,15 @@
+[metadata]
+name = "niwa"
+description = "Declarative workspace manager for AI-assisted development"
+homepage = "https://github.com/tsukumogami/niwa"
+version_format = "semver"
+
+[[steps]]
+action = "github_file"
+repo = "tsukumogami/niwa"
+asset_pattern = "niwa-{os}-{arch}"
+binary = "niwa"
+
+[verify]
+command = "niwa version"
+pattern = "{version}"
