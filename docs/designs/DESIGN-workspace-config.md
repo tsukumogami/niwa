@@ -1,5 +1,5 @@
 ---
-status: Proposed
+status: Accepted
 problem: |
   niwa needs a declarative TOML schema to replace a 700-line imperative bash
   installer that hardcodes workspace structure, CLAUDE.md hierarchy, hooks,
@@ -22,7 +22,7 @@ rationale: |
 
 ## Status
 
-Proposed
+Accepted
 
 ## Context and Problem Statement
 
