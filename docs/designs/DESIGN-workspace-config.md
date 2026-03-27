@@ -128,11 +128,17 @@ source = "repos/tsuku.md"
 source = "repos/koto.md"
 ```
 
-Target paths follow fixed conventions:
-- Workspace content -> `$INSTANCE/CLAUDE.md` (committed)
-- Group content -> `$INSTANCE/{group}/CLAUDE.md` (committed)
-- Repo content -> `$INSTANCE/{group}/{repo}/CLAUDE.local.md` (generated, gitignored)
-- Subdirectory content -> `$INSTANCE/{group}/{repo}/{subdir}/CLAUDE.local.md` (generated, gitignored)
+Target paths follow a fixed convention based on whether the directory is a git repository:
+
+- **Non-git directories** (workspace root, group directories) get `CLAUDE.md` — these directories are managed by niwa, not checked into any repo, so there's no gitignore concern:
+  - Workspace content -> `$INSTANCE/CLAUDE.md`
+  - Group content -> `$INSTANCE/{group}/CLAUDE.md`
+
+- **Git directories** (cloned repos) get `CLAUDE.local.md` — the `.local` suffix keeps generated content out of the repo's version control:
+  - Repo content -> `$INSTANCE/{group}/{repo}/CLAUDE.local.md`
+  - Subdirectory content -> `$INSTANCE/{group}/{repo}/{subdir}/CLAUDE.local.md`
+
+niwa warns (but does not auto-modify) if a repo's `.gitignore` lacks a `*.local*` pattern when writing `CLAUDE.local.md` files. The user is responsible for adding the pattern to their repo.
 
 When `content_dir` is set and a repo has no explicit `[content.repos.X]` entry, niwa checks for `{content_dir}/repos/{repo_name}.md` and uses it automatically if found. This convention-over-configuration path means a minimal config can omit most content entries.
 
@@ -516,7 +522,6 @@ type TelegramAccessConfig struct {
 type TelegramGroupConfig struct {
     RequireMention bool `toml:"require_mention,omitempty"`
 }
-```
 
 // Host config types (~/.config/niwa/hosts/<hostname>.toml)
 
@@ -555,7 +560,7 @@ type HostTelegramConfig struct {
 7. For each repo in each group: clone if missing, verify URL matches
 8. Install workspace CLAUDE.md (expand template variables, write to instance root)
 9. Install group CLAUDE.md files (expand variables, write to group directories)
-10. Install repo CLAUDE.local.md files (expand variables, ensure `*.local*` in .gitignore)
+10. Install repo CLAUDE.local.md files (expand variables, warn if `*.local*` missing from .gitignore)
 11. Install subdirectory CLAUDE.local.md files
 12. (v0.2) Copy hooks, generate settings.local.json, merge env files per repo
 13. (v0.3) Configure channel state directories from host config
@@ -590,7 +595,7 @@ type HostTelegramConfig struct {
 ## Security Considerations
 
 - **Secrets isolation**: Bot tokens and API keys live in `~/.config/niwa/hosts/` (mode 600) or `.env` files, never in workspace.toml. The config format enforces this by design: `[channels.telegram]` in workspace.toml holds only access rules, not tokens.
-- **Gitignore enforcement**: niwa ensures `*.local*` is in each repo's `.gitignore` before writing any `.local.md` or `.local.env` files. `.niwa/` is added to `.gitignore` at the instance root. This prevents accidental commit of generated config and state.
+- **Gitignore awareness**: niwa warns if a repo's `.gitignore` lacks a `*.local*` pattern when writing `.local.md` or `.local.env` files, but does not modify the repo's `.gitignore` — that's the repo owner's responsibility. `.niwa/` is added to `.gitignore` at the instance root (a non-git directory managed by niwa). This separation keeps niwa from making unsolicited changes inside repos users control.
 - **Content drift detection**: instance.json tracks SHA-256 hashes of all managed files, enabling detection of unintended modifications (e.g., a user accidentally editing a generated file). This is drift detection, not tamper-proofing: an attacker who can modify CLAUDE.md can also modify instance.json.
 - **Template expansion must use plain string replacement**, not Go's `text/template` or similar engines that support method calls. This keeps the attack surface minimal: only the 4 declared variables are expanded, with no code execution path.
 - **Name validation**: Group and repo names become directory components. They must be constrained to a safe character set (`[a-zA-Z0-9._-]+`) to prevent directory traversal via names like `../../.ssh`.
