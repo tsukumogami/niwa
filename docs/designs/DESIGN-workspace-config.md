@@ -43,52 +43,73 @@ The config must generalize these operations into a TOML schema that any develope
 
 ## Considered Options
 
-### Decision 1: Repo and group schema structure
+### Decision 1: Sources, groups, and repo discovery
 
-The config must declare which repos to clone and how to organize them into groups. Groups serve double duty: they determine the directory layout on disk (group name = directory name) and provide a level in the CLAUDE.md content hierarchy. The schema needs to handle the common case (6 repos, 2 groups) concisely while scaling to larger workspaces.
+The config must declare where repos come from and how they're organized into groups. Groups determine the directory layout on disk (group name = directory name) and provide a level in the CLAUDE.md content hierarchy. The schema should minimize boilerplate for the common case (small org, all repos included) while scaling to multi-org workspaces.
 
-Key assumptions: most repos share a single GitHub org and need few per-repo overrides. Group names map 1:1 to directory names. Two groups (public/private) is common but the schema shouldn't limit the count.
+Key assumptions: most workspaces pull from one or two GitHub orgs. Group names map 1:1 to directory names. Repo membership in groups can often be derived from GitHub metadata (visibility) rather than declared explicitly.
 
-#### Chosen: Nested groups with structural repo membership
+#### Chosen: Sources with auto-discovery, groups as classification filters
 
-Repos are declared inside their group using TOML's nested table syntax. A repo physically inside `[groups.public.repos.tsuku]` can't reference a nonexistent group, eliminating an entire class of validation errors. The config structure mirrors the filesystem layout (`groups.public.repos.tsuku` -> `public/tsuku/`), reducing cognitive load.
+Repos come from **sources** (GitHub orgs). By default, niwa auto-discovers all repos in a source org via the GitHub API. Groups are **filters** that classify repos by metadata (e.g., visibility) or by explicit listing — they don't contain repo declarations.
+
+Auto-discovery has a threshold (default: 10 repos per source, configurable via `max_repos`). If an org exceeds the threshold, niwa errors and requires explicit repo listing in the source.
+
+**Classification rules:**
+- A repo matching no group is **excluded** with a warning
+- A repo matching multiple groups is an **error**
 
 ```toml
 [workspace]
 name = "tsuku"
+
+# --- Sources: where repos come from ---
+
+[[sources]]
 org = "tsukumogami"
+# All repos auto-discovered (org has <10 repos)
+
+[[sources]]
+org = "large-org"
+max_repos = 30                    # Override threshold for this source
+repos = ["repo-a", "repo-b"]     # Or list explicitly if preferred
+
+# --- Groups: how repos are classified ---
 
 [groups.public]
-visibility = "public"
-
-[groups.public.repos.tsuku]
-[groups.public.repos.koto]
-[groups.public.repos.niwa]
-[groups.public.repos.shirabe]
-
-[groups.public.repos.".github"]
-claude = false
+visibility = "public"             # Filter: matches repos with public visibility
 
 [groups.private]
-visibility = "private"
+visibility = "private"            # Filter: matches repos with private visibility
 
-[groups.private.repos.vision]
+# --- Per-repo overrides ---
+
+[repos.".github"]
+claude = false                    # Skip Claude Code configuration
+
+[repos.vision]
 scope = "strategic"
-
-[groups.private.repos.tools]
 ```
 
-Repos with no overrides are single-line headers. URLs default to `https://github.com/{org}/{name}.git`. The `.github` repo uses TOML quoted keys (valid but unusual) and `claude = false` to skip Claude Code configuration.
+Groups can also use explicit repo lists instead of (or in addition to) metadata filters:
 
-Go types map directly: `map[string]GroupConfig` where each group has `Repos map[string]RepoConfig`.
+```toml
+[groups.infra]
+repos = ["terraform-modules", "deploy-scripts"]
+
+[groups.services]
+repos = ["api-gateway", "user-service"]
+```
+
+niwa queries the GitHub API during `niwa create` and `niwa apply` to discover repos and resolve group membership. This means these commands require network access.
 
 #### Alternatives considered
 
-**Flat `[[repos]]` with group attribute**: All repos in a top-level array, group as a string field. Rejected because stringly-typed group references require validation and produce no visual clustering by group.
+**Nested groups with structural repo membership**: Repos declared inside their group using TOML nesting (`[groups.public.repos.tsuku]`). Rejected because it requires listing every repo explicitly under its group, duplicating information that's already available from GitHub metadata (visibility). The nesting also produces verbose configs for the common case where repos need no overrides.
 
-**Separate `[[groups]]` and `[[repos]]` arrays**: Groups and repos as independent arrays linked by name reference. Rejected as worst of both worlds: boilerplate of explicit group definitions without the structural safety of nesting.
+**Flat `[[repos]]` with group attribute**: All repos in a top-level array, group as a string field. Rejected because it still requires explicit listing of every repo with manual group assignment.
 
-**Hybrid `[groups]` metadata + `[[repos]]` references**: Groups defined as tables, repos as a flat array referencing them. Rejected because it's still stringly-typed with mixed table paradigms adding inconsistency.
+**No auto-discovery, sources only for URL resolution**: Sources provide the org for URL shorthand but repos are always listed explicitly. Rejected because it doesn't reduce boilerplate for small orgs where "include everything" is the intent.
 
 ### Decision 2: CLAUDE.md content hierarchy declaration
 
@@ -231,9 +252,9 @@ files = ["env/workspace.env"]
 vars = { LOG_LEVEL = "debug" }
 ```
 
-Per-repo overrides nest under the repo's group path:
+Per-repo overrides use the top-level `[repos]` section:
 ```toml
-[groups.private.repos.vision.settings]
+[repos.vision.settings]
 permissions = "ask"
 ```
 
@@ -310,13 +331,53 @@ The three-layer resolution order is: workspace.toml (shared) -> host config host
 
 **Bot pool partitioning**: Declare the full bot pool in host config, partition by range in workspace.toml. Rejected because it only solves Telegram, can't handle per-workspace env vars, and requires fragile cross-workspace range coordination.
 
+### Decision 7: Config and content file location
+
+workspace.toml and its referenced files (content, hooks, env) need a home that's version-controlled, shareable via GitHub, and discoverable by `niwa apply`. The workspace root itself is a plain directory containing instances — it's not a git repo. The config can't live flat in the root because it needs to be portable to GitHub as a repo.
+
+#### Chosen: .niwa/ directory at the workspace root
+
+workspace.toml and its content directory live in `.niwa/` at the workspace root. When initialized from a remote source (`niwa init --from <org/repo>`), `.niwa/` is the git checkout of the config repo. When scaffolded locally, it's a plain directory. All relative paths in workspace.toml (content_dir, hook paths, env file paths) resolve from `.niwa/`.
+
+Discovery: `niwa apply` walks up from cwd looking for `.niwa/workspace.toml`.
+
+```
+tsuku-root/
+  .niwa/                          # Config directory (git checkout if from remote)
+    workspace.toml
+    claude/
+      workspace.md
+      public.md
+      repos/tsuku.md
+    hooks/
+    env/
+  tsuku/                          # Instance 1
+    CLAUDE.md
+    public/
+      CLAUDE.md
+      tsuku/
+        CLAUDE.local.md
+```
+
+#### Alternatives considered
+
+**Flat in workspace root**: workspace.toml and claude/ sit directly at the root alongside instances. Rejected because the root isn't a git repo, so the config can't be pushed to GitHub without extra steps. Also clutters the root with config files mixed in with instance directories.
+
+**Inside a managed repo**: Config lives in one of the repos niwa manages (like the current bash installer in the tools repo). Rejected because it creates a circular dependency — the config defines the repos, so it can't live inside one.
+
+**Named subdirectory**: A visible directory like `niwa-config/` instead of a dotdir. Rejected because it adds a visible directory that isn't an instance, and doesn't reuse the `.niwa/` convention.
+
 ## Decision Outcome
 
 ### Summary
 
-niwa's workspace config is a TOML file (`workspace.toml`) that lives at the workspace root alongside a content directory. The config declares repos nested inside named groups, where each group name doubles as the directory name on disk. Content files for the CLAUDE.md hierarchy are referenced by source path with target locations derived from convention: workspace content goes to the instance root, group content to the group directory, and repo content to `CLAUDE.local.md` inside each repo.
+niwa's workspace config is a TOML file (`workspace.toml`) that lives in `.niwa/` at the workspace root, alongside a content directory and any hook or env files it references. When the config comes from a remote source, `.niwa/` is the git checkout of the config repo.
 
-Each workspace instance gets a `.niwa/instance.json` state file tracking managed files (with content hashes for drift detection), cloned repos, and creation metadata. A minimal global registry at `~/.config/niwa/config.toml` maps workspace names to root paths and optional remote sources. Instance enumeration works by scanning the root directory for `.niwa/` markers.
+Repos are discovered from source orgs via the GitHub API, with auto-discovery for small orgs (up to 10 repos by default) and explicit listing for larger ones. Groups are classification filters — they match repos by metadata (e.g., GitHub visibility) or by explicit listing. Each group name doubles as the directory name on disk. Repos matching no group are excluded with a warning; repos matching multiple groups cause an error.
+
+Content files for the CLAUDE.md hierarchy are referenced by source path with target locations derived from convention: workspace and group content goes as `CLAUDE.md` in non-git directories, repo content goes as `CLAUDE.local.md` in git directories.
+
+A minimal global registry at `~/.config/niwa/config.toml` maps workspace names to root paths and optional remote sources.
 
 Hooks, settings, and environment variables are declared at workspace level with optional per-repo overrides. Secrets stay in `.env` files referenced by path. niwa generates `settings.local.json`, copies hooks, and merges env files into each repo during `niwa apply`.
 
@@ -324,7 +385,7 @@ Per-host overrides (bot tokens, machine-specific API keys, permission modes) liv
 
 ### Rationale
 
-The five decisions reinforce each other through consistent conventions. Group names define directory structure (Decision 1), which determines where content files land (Decision 2), which is tracked by instance state (Decision 3). Hooks and settings distribute uniformly by default (Decision 4) but can be overridden per-host (Decision 5) without touching the shared config.
+The decisions reinforce each other through consistent conventions. The config lives in `.niwa/` (Decision 7), which declares source orgs and classification groups (Decision 1). Groups define directory structure, which determines where content files land (Decision 2). Hooks and settings distribute uniformly by default (Decision 4) but can be overridden per-host (Decision 5) without touching the shared config.
 
 The main trade-off is explicitness over brevity. Content files are referenced individually rather than auto-generated, which means more lines in the config but no hidden generation logic. This aligns with the convention-over-configuration driver: the convention is where files land, not whether they exist.
 
@@ -334,33 +395,56 @@ The schema is designed to be complete upfront. `[hooks]`, `[settings]`, `[env]`,
 
 ### Config file hierarchy
 
-```
-workspace-root/
-  workspace.toml              # Shared config (committed to git)
-  claude/                     # Content source directory
-    workspace.md              # -> $INSTANCE/CLAUDE.md
-    public.md                 # -> $INSTANCE/public/CLAUDE.md
-    private.md                # -> $INSTANCE/private/CLAUDE.md
-    repos/
-      tsuku.md                # -> $INSTANCE/public/tsuku/CLAUDE.local.md
-      tsuku-recipes.md        # -> $INSTANCE/public/tsuku/recipes/CLAUDE.local.md
-      koto.md                 # -> $INSTANCE/public/koto/CLAUDE.local.md
-      ...
-  tsuku/                      # Instance 1
-    .niwa/instance.json
-    public/
-      tsuku/
-      koto/
-    private/
-      vision/
-  tsuku-2/                    # Instance 2
-    .niwa/instance.json
-    ...
+The config directory (`.niwa/`) lives at the workspace root and is a git checkout when initialized from a remote source. Content files, hook scripts, and env files are versioned alongside workspace.toml. All relative paths in workspace.toml resolve from `.niwa/`.
 
+**Config repo (what you author and commit):**
+
+```
+.niwa/                            # Config repo (git checkout)
+  workspace.toml                  # Workspace definition
+  claude/                         # Content source directory
+    workspace.md                  # -> $INSTANCE/CLAUDE.md
+    public.md                     # -> $INSTANCE/public/CLAUDE.md
+    private.md                    # -> $INSTANCE/private/CLAUDE.md
+    repos/
+      tsuku.md                    # -> $INSTANCE/public/tsuku/CLAUDE.local.md
+      tsuku-recipes.md            # -> $INSTANCE/public/tsuku/recipes/CLAUDE.local.md
+      koto.md                     # -> $INSTANCE/public/koto/CLAUDE.local.md
+      ...
+  hooks/                          # Hook scripts referenced by [hooks]
+    gate-online.sh
+  env/                            # Env files referenced by [env]
+    workspace.env
+```
+
+**Workspace on disk (after `niwa create`):**
+
+```
+tsuku-root/                       # Workspace root
+  .niwa/                          # Config repo (as above)
+  tsuku/                          # Instance 1
+    CLAUDE.md                     # Generated from claude/workspace.md
+    public/
+      CLAUDE.md                   # Generated from claude/public.md
+      tsuku/                      # Cloned repo
+        CLAUDE.local.md           # Generated from claude/repos/tsuku.md
+      koto/
+        CLAUDE.local.md
+    private/
+      CLAUDE.md                   # Generated from claude/private.md
+      vision/
+        CLAUDE.local.md
+  tsuku-2/                        # Instance 2
+    ...
+```
+
+**Global config:**
+
+```
 ~/.config/niwa/
-  config.toml                 # Global registry
+  config.toml                     # Global registry
   hosts/
-    ryzen9.toml               # Per-host overrides
+    ryzen9.toml                   # Per-host overrides
     laptop.toml
 ```
 
@@ -371,30 +455,39 @@ workspace-root/
 
 [workspace]
 name = "tsuku"                        # Workspace name (used for registry, instance naming)
-org = "tsukumogami"                   # Default GitHub org for URL shorthand
-default_branch = "main"              # Default branch for all repos
-content_dir = "claude"               # Directory containing content source files
+default_branch = "main"               # Default branch for all repos
+content_dir = "claude"                # Directory containing content source files
 
-# --- Groups and repos ---
+# --- Sources: where repos come from ---
+
+[[sources]]
+org = "tsukumogami"                   # Auto-discover all repos (org has <10)
+
+# For larger orgs, override the threshold or list repos explicitly:
+# [[sources]]
+# org = "large-org"
+# max_repos = 30
+# repos = ["repo-a", "repo-b"]
+
+# --- Groups: how repos are classified ---
 
 [groups.public]
-visibility = "public"
-
-[groups.public.repos.tsuku]
-[groups.public.repos.koto]
-[groups.public.repos.niwa]
-[groups.public.repos.shirabe]
-
-[groups.public.repos.".github"]
-claude = false                        # Skip Claude Code configuration
+visibility = "public"                 # Filter: matches repos with public visibility
 
 [groups.private]
-visibility = "private"
+visibility = "private"                # Filter: matches repos with private visibility
 
-[groups.private.repos.vision]
+# Groups can also list repos explicitly:
+# [groups.infra]
+# repos = ["terraform-modules", "deploy-scripts"]
+
+# --- Per-repo overrides ---
+
+[repos.".github"]
+claude = false                        # Skip Claude Code configuration
+
+[repos.vision]
 scope = "strategic"
-
-[groups.private.repos.tools]
 
 # --- Content hierarchy ---
 
@@ -446,7 +539,9 @@ require_mention = true
 ```go
 type WorkspaceConfig struct {
     Workspace WorkspaceMeta              `toml:"workspace"`
+    Sources   []SourceConfig            `toml:"sources"`
     Groups    map[string]GroupConfig     `toml:"groups"`
+    Repos     map[string]RepoOverride   `toml:"repos"`
     Content   ContentConfig             `toml:"content"`
     Hooks     HooksConfig              `toml:"hooks"`
     Settings  SettingsConfig           `toml:"settings"`
@@ -456,17 +551,22 @@ type WorkspaceConfig struct {
 
 type WorkspaceMeta struct {
     Name          string `toml:"name"`
-    Org           string `toml:"org,omitempty"`
     DefaultBranch string `toml:"default_branch,omitempty"`
     ContentDir    string `toml:"content_dir,omitempty"`
 }
 
-type GroupConfig struct {
-    Visibility string                   `toml:"visibility,omitempty"`
-    Repos      map[string]RepoConfig   `toml:"repos"`
+type SourceConfig struct {
+    Org      string   `toml:"org"`
+    Repos    []string `toml:"repos,omitempty"`     // Explicit repo list (required if org exceeds max_repos)
+    MaxRepos int      `toml:"max_repos,omitempty"` // Auto-discovery threshold (default: 10)
 }
 
-type RepoConfig struct {
+type GroupConfig struct {
+    Visibility string   `toml:"visibility,omitempty"` // Filter by GitHub visibility
+    Repos      []string `toml:"repos,omitempty"`      // Explicit repo list (alternative to filters)
+}
+
+type RepoOverride struct {
     URL      string         `toml:"url,omitempty"`
     Branch   string         `toml:"branch,omitempty"`
     Scope    string         `toml:"scope,omitempty"`
@@ -551,20 +651,22 @@ type HostTelegramConfig struct {
 
 ### Command flow: `niwa apply`
 
-1. Find workspace.toml by walking up from cwd (or use registry if invoked with a name)
+1. Find `.niwa/workspace.toml` by walking up from cwd (or use registry if invoked with a name)
 2. Parse workspace.toml into `WorkspaceConfig`
-3. Load host config from `~/.config/niwa/hosts/<hostname>.toml` if it exists
-4. Merge host overrides onto workspace config (host wins on conflict)
-5. Determine target instance (from cwd if inside one, or create new)
-6. For each group: create group directory if missing
-7. For each repo in each group: clone if missing, verify URL matches
-8. Install workspace CLAUDE.md (expand template variables, write to instance root)
-9. Install group CLAUDE.md files (expand variables, write to group directories)
-10. Install repo CLAUDE.local.md files (expand variables, warn if `*.local*` missing from .gitignore)
-11. Install subdirectory CLAUDE.local.md files
-12. Copy hooks, generate settings.local.json, merge env files per repo
-13. Configure channel state directories from host config
-14. Update `.niwa/instance.json` with managed file hashes and repo state
+3. Query GitHub API for each source org to discover repos (respecting `max_repos` threshold)
+4. Classify repos into groups by matching filters (visibility) or explicit group repo lists
+5. Warn on repos matching no group (excluded); error on repos matching multiple groups
+6. Load host config from `~/.config/niwa/hosts/<hostname>.toml` if it exists
+7. Merge host overrides onto workspace config (host wins on conflict)
+8. Determine target instance (from cwd if inside one, or create new)
+9. For each group: create group directory if missing
+10. For each classified repo: clone if missing, verify URL matches
+11. Install workspace CLAUDE.md (expand template variables, write to instance root)
+12. Install group CLAUDE.md files (expand variables, write to group directories)
+13. Install repo CLAUDE.local.md files (expand variables, warn if `*.local*` missing from .gitignore)
+14. Install subdirectory CLAUDE.local.md files
+15. Copy hooks, generate settings.local.json, merge env files per repo
+16. Configure channel state directories from host config
 
 ## Scope
 
@@ -596,4 +698,4 @@ This design covers the workspace.toml schema, content hierarchy model, multi-ins
 
 - Content duplication across repo files (shared boilerplate like "Repo Visibility" headers) isn't addressed by this design. Mitigation: optional template system can be added later without schema changes.
 - Three configuration layers (workspace.toml, host config, instance state) add complexity. Mitigation: host config is optional and only needed for channel integration. Most users only interact with workspace.toml.
-- Nested group structure in TOML produces long key paths (`[groups.public.repos.tsuku]`). Mitigation: repos with no overrides are single-line headers, keeping the common case concise.
+- Auto-discovery requires GitHub API access during `niwa create` and `niwa apply`. Mitigation: discovered repos can be cached in instance state for offline re-applies. The threshold (default: 10) prevents runaway discovery in large orgs.

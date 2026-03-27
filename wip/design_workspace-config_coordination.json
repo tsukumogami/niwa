@@ -1,11 +1,12 @@
 {
   "topic": "workspace-config",
   "decisions": [
-    {"id": 1, "question": "How should repos and groups be structured in the schema?", "status": "complete", "complexity": "standard", "chosen": "Nested [groups.<name>.repos]", "report": "wip/design_workspace-config_decision_1_report.md"},
+    {"id": 1, "question": "How should repos and groups be structured in the schema?", "status": "complete", "complexity": "standard", "chosen": "Sources with auto-discovery, groups as classification filters", "report": "wip/design_workspace-config_decision_1_report.md"},
     {"id": 2, "question": "How should the CLAUDE.md content hierarchy be declared?", "status": "complete", "complexity": "critical", "chosen": "Hybrid with convention-driven placement", "report": "wip/design_workspace-config_decision_2_report.md"},
     {"id": 3, "question": "How should multi-instance workspaces work in the config and state model?", "status": "complete", "complexity": "standard", "chosen": "Instance-centric state with minimal registry", "report": "wip/design_workspace-config_decision_3_report.md"},
     {"id": 4, "question": "How should hooks, settings, and environment distribution be expressed?", "status": "complete", "complexity": "standard", "chosen": "Workspace-level sections with per-repo overrides", "report": "wip/design_workspace-config_decision_4_report.md"},
-    {"id": 5, "question": "How should per-host overrides and channel config work?", "status": "complete", "complexity": "standard", "chosen": "Separate host config file", "report": "wip/design_workspace-config_decision_5_report.md"}
+    {"id": 5, "question": "How should per-host overrides and channel config work?", "status": "complete", "complexity": "standard", "chosen": "Separate host config file", "report": "wip/design_workspace-config_decision_5_report.md"},
+    {"id": 7, "question": "Where should workspace.toml and its content files live?", "status": "complete", "complexity": "standard", "chosen": ".niwa/ directory at workspace root", "report": "wip/design_workspace-config_decision_7_report.md"}
   ],
   "cross_validation": "pending",
   "round": 0
