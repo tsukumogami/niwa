@@ -5,18 +5,17 @@ problem: |
   installer that hardcodes workspace structure, CLAUDE.md hierarchy, hooks,
   settings, and environment distribution for a single organization. The schema
   must generalize these operations for any multi-repo workspace with layered
-  AI context, supporting multi-instance workspaces and per-host overrides.
+  AI context, supporting multi-instance workspaces and multi-org sources.
 decision: |
-  A workspace.toml file with nested group/repo structure, convention-driven
-  content file placement, instance-centric state (JSON per instance, minimal
-  global registry), workspace-level hooks/settings/env with per-repo overrides,
-  and separate per-host config files for secrets and machine-specific values.
+  A workspace.toml file in .niwa/ at the workspace root, with source-based
+  repo discovery, group classification filters, convention-driven content file
+  placement, and workspace-level hooks/settings/env with per-repo overrides.
 rationale: |
-  Structural nesting makes group membership correct by construction. Convention-
-  driven content placement eliminates redundant target path declarations while
-  keeping the mapping transparent. Instance-centric state puts debuggable info
-  where the workspace lives. Separate host config files keep secrets outside the
-  workspace tree and survive workspace reset/recreation.
+  Source auto-discovery reduces boilerplate for small orgs. Group filters derive
+  membership from GitHub metadata instead of requiring explicit listing.
+  Convention-driven content placement eliminates redundant target path
+  declarations while keeping the mapping transparent. Storing the config in
+  .niwa/ keeps it portable to GitHub and separate from instances.
 ---
 
 # DESIGN: Workspace config format
@@ -29,7 +28,7 @@ Proposed
 
 niwa needs a declarative configuration format that expresses the workspace structure currently wired by an imperative 700-line bash installer. The installer performs 27 operations across repo cloning, CLAUDE.md hierarchy generation, per-repo hooks and settings distribution, environment file merging, and plugin registration. All of this is hardcoded for a single organization.
 
-The config must generalize these operations into a TOML schema that any developer can use to define a multi-repo workspace with layered AI context. It must support multi-instance workspaces from the same definition (e.g., tsuku/, tsuku-2/), template variable substitution in content files, and per-host overrides for channel and bot configuration.
+The config must generalize these operations into a TOML schema that any developer can use to define a multi-repo workspace with layered AI context. It must support multi-instance workspaces from the same definition (e.g., tsuku/, tsuku-2/), template variable substitution in content files, and multi-org source declarations.
 
 ## Decision Drivers
 
@@ -268,69 +267,6 @@ Secrets stay in `.env` files, never in TOML. niwa generates `settings.local.json
 
 **Workspace-only with no per-repo overrides**: Simplest schema but rejected because the schema must accommodate per-repo overrides even if their generation logic lands later.
 
-### Decision 5: Per-host overrides and channel configuration
-
-The Telegram bot integration assigns different bots per host and per workspace instance. Bot tokens are secrets that can't live in the committed workspace.toml. Beyond Telegram, per-host config is needed for different API keys, directory preferences, and permission modes across machines.
-
-Key assumptions: `hostname -s` is stable enough for host identification. XDG-style `~/.config/niwa/` is acceptable. The three-layer model (workspace.toml -> host config -> instance state) won't be too many layers for users.
-
-#### Chosen: Separate host config file
-
-Per-host overrides live in `~/.config/niwa/hosts/<hostname>.toml`, completely outside the workspace tree. Bot tokens and machine-specific secrets live here, never in workspace.toml.
-
-**Common case (single workspace per host):**
-```toml
-# ~/.config/niwa/hosts/ryzen9.toml
-[channels.telegram.bots]
-"1" = "8758431361:AAHHsx2I9..."
-"2" = "8667513242:AAFc2Q9Av..."
-"3" = "8790426367:AAFlmE-CF..."
-
-[env]
-GH_TOKEN = "ghp_xxxx"
-```
-
-**Complex case (multiple workspaces per host):**
-```toml
-# ~/.config/niwa/hosts/ryzen9.toml
-
-# Host-level defaults (apply to workspaces without a specific section)
-[env]
-ANTHROPIC_API_KEY = "sk-ant-shared..."
-
-# Per-workspace overrides
-[workspaces.tsuku.channels.telegram.bots]
-"1" = "tsuku-bot-1-token"
-"2" = "tsuku-bot-2-token"
-"3" = "tsuku-bot-3-token"
-"4" = "tsuku-bot-4-token"
-
-[workspaces.tsuku.env]
-GH_TOKEN = "ghp_tsukumogami"
-
-[workspaces.my-project.channels.telegram.bots]
-"1" = "myproj-bot-1-token"
-
-[workspaces.my-project.env]
-GH_TOKEN = "ghp_other_org"
-```
-
-The workspace.toml declares non-secret channel config (access rules, plugin references). The host file overlays machine-specific values. Optional `[workspaces.<name>]` sections override host-level defaults for specific workspaces, matched by the `[workspace] name` field from workspace.toml. Bot assignment maps instance suffix to bot key (tsuku-2 gets bot "2"). When a workspace section declares bots, it fully replaces (not merges with) host-level bot defaults.
-
-The three-layer resolution order is: workspace.toml (shared) -> host config host-level (per-machine defaults) -> host config workspace section (per-workspace overrides). Host identity defaults to `hostname -s` with an `$NIWA_HOST` override for edge cases. Host config survives workspace reset/recreation since it lives outside the workspace tree.
-
-#### Alternatives considered
-
-**In-workspace `workspace.toml.local`**: Gitignored file next to workspace.toml. Rejected because it's destroyed on workspace reset (frequent operation) and puts secrets inside the workspace tree.
-
-**Environment variable references with `${VAR}` syntax**: Placeholders in workspace.toml resolved at runtime. Rejected because it can't express multi-bot-per-host routing and pushes structure into naming conventions.
-
-**Inline host routing in workspace.toml**: All bot tokens for all hosts declared in the committed config. Rejected outright because it puts secrets in a committed file.
-
-**Separate host x workspace files**: Per-workspace override files in a subdirectory (`~/.config/niwa/hosts/ryzen9/tsuku.toml`). Rejected because it scatters config across multiple files (4 files for 3 workspaces) and having both a file and directory at the same path level is confusing.
-
-**Bot pool partitioning**: Declare the full bot pool in host config, partition by range in workspace.toml. Rejected because it only solves Telegram, can't handle per-workspace env vars, and requires fragile cross-workspace range coordination.
-
 ### Decision 7: Config and content file location
 
 workspace.toml and its referenced files (content, hooks, env) need a home that's version-controlled, shareable via GitHub, and discoverable by `niwa apply`. The workspace root itself is a plain directory containing instances — it's not a git repo. The config can't live flat in the root because it needs to be portable to GitHub as a repo.
@@ -381,11 +317,9 @@ A minimal global registry at `~/.config/niwa/config.toml` maps workspace names t
 
 Hooks, settings, and environment variables are declared at workspace level with optional per-repo overrides. Secrets stay in `.env` files referenced by path. niwa generates `settings.local.json`, copies hooks, and merges env files into each repo during `niwa apply`.
 
-Per-host overrides (bot tokens, machine-specific API keys, permission modes) live in `~/.config/niwa/hosts/<hostname>.toml`, outside the workspace tree. The host config supports optional `[workspaces.<name>]` sections for host x workspace overrides (e.g., different bot pools or API keys per workspace on the same machine). The three-layer resolution is: workspace.toml (shared) -> host config host-level defaults (per-machine) -> host config workspace section (per-workspace on this machine).
-
 ### Rationale
 
-The decisions reinforce each other through consistent conventions. The config lives in `.niwa/` (Decision 7), which declares source orgs and classification groups (Decision 1). Groups define directory structure, which determines where content files land (Decision 2). Hooks and settings distribute uniformly by default (Decision 4) but can be overridden per-host (Decision 5) without touching the shared config.
+The decisions reinforce each other through consistent conventions. The config lives in `.niwa/` (Decision 7), which declares source orgs and classification groups (Decision 1). Groups define directory structure, which determines where content files land (Decision 2). Hooks and settings distribute uniformly by default (Decision 4) with optional per-repo overrides.
 
 The main trade-off is explicitness over brevity. Content files are referenced individually rather than auto-generated, which means more lines in the config but no hidden generation logic. This aligns with the convention-over-configuration driver: the convention is where files land, not whether they exist.
 
@@ -443,9 +377,6 @@ tsuku-root/                       # Workspace root
 ```
 ~/.config/niwa/
   config.toml                     # Global registry
-  hosts/
-    ryzen9.toml                   # Per-host overrides
-    laptop.toml
 ```
 
 ### Full schema reference
@@ -623,28 +554,6 @@ type TelegramGroupConfig struct {
     RequireMention bool `toml:"require_mention,omitempty"`
 }
 
-// Host config types (~/.config/niwa/hosts/<hostname>.toml)
-
-type HostConfig struct {
-    Channels   HostChannels              `toml:"channels"`
-    Env        map[string]string         `toml:"env"`
-    Settings   map[string]string         `toml:"settings"`
-    Workspaces map[string]WorkspaceScope `toml:"workspaces"`
-}
-
-type WorkspaceScope struct {
-    Channels  HostChannels          `toml:"channels"`
-    Env       map[string]string     `toml:"env"`
-    Settings  map[string]string     `toml:"settings"`
-}
-
-type HostChannels struct {
-    Telegram HostTelegramConfig `toml:"telegram"`
-}
-
-type HostTelegramConfig struct {
-    Bots map[string]string `toml:"bots"`
-}
 ```
 
 **Implementation note:** `[hooks]`, `[settings]`, `[env]`, and `[channels]` sections should parse and validate before their generation logic is implemented. Consider using `map[string]any` for sections whose consumers don't exist yet, switching to typed structs when the generation logic lands.
@@ -656,25 +565,22 @@ type HostTelegramConfig struct {
 3. Query GitHub API for each source org to discover repos (respecting `max_repos` threshold)
 4. Classify repos into groups by matching filters (visibility) or explicit group repo lists
 5. Warn on repos matching no group (excluded); error on repos matching multiple groups
-6. Load host config from `~/.config/niwa/hosts/<hostname>.toml` if it exists
-7. Merge host overrides onto workspace config (host wins on conflict)
-8. Determine target instance (from cwd if inside one, or create new)
-9. For each group: create group directory if missing
-10. For each classified repo: clone if missing, verify URL matches
-11. Install workspace CLAUDE.md (expand template variables, write to instance root)
-12. Install group CLAUDE.md files (expand variables, write to group directories)
-13. Install repo CLAUDE.local.md files (expand variables, warn if `*.local*` missing from .gitignore)
-14. Install subdirectory CLAUDE.local.md files
-15. Copy hooks, generate settings.local.json, merge env files per repo
-16. Configure channel state directories from host config
+6. Determine target instance (from cwd if inside one, or create new)
+7. For each group: create group directory if missing
+8. For each classified repo: clone if missing, verify URL matches
+9. Install workspace CLAUDE.md (expand template variables, write to instance root)
+10. Install group CLAUDE.md files (expand variables, write to group directories)
+11. Install repo CLAUDE.local.md files (expand variables, warn if `*.local*` missing from .gitignore)
+12. Install subdirectory CLAUDE.local.md files
+13. Copy hooks, generate settings.local.json, merge env files per repo
 
 ## Scope
 
-This design covers the workspace.toml schema, content hierarchy model, multi-instance state, and configuration layering (hooks, settings, env, host overrides). It does not cover command UX (init scaffolding, apply convergence logic, status output format), plugin orchestration, shell integration, or the adopt command. See the niwa roadmap for the full feature set and delivery sequencing.
+This design covers the workspace.toml schema, content hierarchy model, and configuration layering (hooks, settings, env). It does not cover command UX (init scaffolding, apply convergence logic, status output format), per-host overrides, plugin orchestration, shell integration, or the adopt command. See the niwa roadmap for the full feature set and delivery sequencing.
 
 ## Security Considerations
 
-- **Secrets isolation**: Bot tokens and API keys live in `~/.config/niwa/hosts/` (mode 600) or `.env` files, never in workspace.toml. The config format enforces this by design: `[channels.telegram]` in workspace.toml holds only access rules, not tokens.
+- **Secrets isolation**: API keys and tokens live in `.env` files referenced by path, never inline in workspace.toml.
 - **Gitignore awareness**: niwa warns if a repo's `.gitignore` lacks a `*.local*` pattern when writing `.local.md` or `.local.env` files, but does not modify the repo's `.gitignore` — that's the repo owner's responsibility. `.niwa/` is added to `.gitignore` at the instance root (a non-git directory managed by niwa). This separation keeps niwa from making unsolicited changes inside repos users control.
 - **Content drift detection**: instance.json tracks SHA-256 hashes of all managed files, enabling detection of unintended modifications (e.g., a user accidentally editing a generated file). This is drift detection, not tamper-proofing: an attacker who can modify CLAUDE.md can also modify instance.json.
 - **Template expansion must use plain string replacement**, not Go's `text/template` or similar engines that support method calls. This keeps the attack surface minimal: only the 4 declared variables are expanded, with no code execution path.
@@ -682,7 +588,7 @@ This design covers the workspace.toml schema, content hierarchy model, multi-ins
 - **Path traversal validation**: Content source paths must be validated to stay within `content_dir`. Subdirectory keys must stay within the repo directory. niwa rejects paths containing `..` or absolute path components in source references. The implementation must use `filepath.EvalSymlinks` before containment checks to prevent symlink-based traversal.
 - **Trust model**: workspace.toml and its referenced files (content, hooks, env) should be treated with the same trust as executable scripts. They direct file writes, git clones, and hook installation. Content files are particularly sensitive: they become CLAUDE.md instructions that shape AI agent behavior, making a malicious content file a prompt injection vector. Users should only register workspace configs from sources they trust.
 - **Remote config pinning**: When `niwa init` fetches from a remote source, it should pin to a specific commit or tag rather than tracking a branch. A `--review` flag should show what the config will do before registering it.
-- **Host config permissions**: `~/.config/niwa/hosts/*.toml` files should be created with restrictive permissions (600). niwa warns if permissions are too open.
+
 - **Absolute paths in committed files**: The `{workspace}` variable expands to an absolute filesystem path, which appears in committed CLAUDE.md files at workspace and group levels. This is an intentional trade-off: Claude Code needs absolute paths for its context model. Users should be aware this exposes their directory structure in committed files.
 
 ## Consequences
@@ -697,5 +603,5 @@ This design covers the workspace.toml schema, content hierarchy model, multi-ins
 ### Negative
 
 - Content duplication across repo files (shared boilerplate like "Repo Visibility" headers) isn't addressed by this design. Mitigation: optional template system can be added later without schema changes.
-- Three configuration layers (workspace.toml, host config, instance state) add complexity. Mitigation: host config is optional and only needed for channel integration. Most users only interact with workspace.toml.
+- Auto-discovery requires GitHub API access, adding a network dependency to `niwa create` and `niwa apply`. Mitigation: the threshold (default: 10) limits API calls, and discovered repos can be cached for offline re-applies.
 - Auto-discovery requires GitHub API access during `niwa create` and `niwa apply`. Mitigation: discovered repos can be cached in instance state for offline re-applies. The threshold (default: 10) prevents runaway discovery in large orgs.
