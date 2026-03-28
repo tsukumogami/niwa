@@ -30,29 +30,145 @@ func NewApplier(gh github.Client) *Applier {
 // explicit repos list, discovery fails with a clear error.
 const DefaultMaxRepos = 10
 
-// Apply runs the full apply pipeline: discover repos, classify, clone, and
-// install content. It writes .niwa/instance.json to track state.
+// pipelineOpts configures shared pipeline behavior for Create vs Apply.
+type pipelineOpts struct {
+	existingState *InstanceState
+}
+
+// pipelineResult holds the outputs of the shared pipeline.
+type pipelineResult struct {
+	classified   []ClassifiedRepo
+	repoStates   map[string]RepoState
+	managedFiles []ManagedFile
+	warnings     []string
+}
+
+// Create creates a new workspace instance under workspaceRoot, runs the full
+// pipeline (discover, classify, clone, install content), assigns an instance
+// number, and writes fresh state. Returns the instance directory path.
+func (a *Applier) Create(ctx context.Context, cfg *config.WorkspaceConfig, configDir, workspaceRoot string) (string, error) {
+	now := time.Now()
+
+	instanceRoot := filepath.Join(workspaceRoot, cfg.Workspace.Name)
+	if err := os.MkdirAll(instanceRoot, 0o755); err != nil {
+		return "", fmt.Errorf("creating instance directory: %w", err)
+	}
+
+	result, err := a.runPipeline(ctx, cfg, configDir, instanceRoot, now, &pipelineOpts{
+		existingState: nil,
+	})
+	if err != nil {
+		return "", err
+	}
+
+	for _, w := range result.warnings {
+		fmt.Fprintf(os.Stderr, "warning: %s\n", w)
+	}
+
+	instanceNumber, err := NextInstanceNumber(workspaceRoot)
+	if err != nil {
+		return "", fmt.Errorf("determining instance number: %w", err)
+	}
+
+	configName := cfg.Workspace.Name
+	state := &InstanceState{
+		SchemaVersion:  SchemaVersion,
+		ConfigName:     &configName,
+		InstanceName:   cfg.Workspace.Name,
+		InstanceNumber: instanceNumber,
+		Root:           instanceRoot,
+		Created:        now,
+		LastApplied:    now,
+		ManagedFiles:   result.managedFiles,
+		Repos:          result.repoStates,
+	}
+
+	if err := SaveState(instanceRoot, state); err != nil {
+		return "", fmt.Errorf("saving instance state: %w", err)
+	}
+
+	return instanceRoot, nil
+}
+
+// Apply runs the full apply pipeline on an existing instance: discover repos,
+// classify, clone, install content, clean up removed repos, and update state.
 func (a *Applier) Apply(ctx context.Context, cfg *config.WorkspaceConfig, configDir, instanceRoot string) error {
 	now := time.Now()
-	var writtenFiles []string
 
-	// Load existing state if present (for drift detection and preserving created time).
-	existingState, _ := LoadState(instanceRoot)
+	// Load existing state (required for Apply).
+	existingState, err := LoadState(instanceRoot)
+	if err != nil {
+		return fmt.Errorf("loading existing state: %w", err)
+	}
 
-	// Step 1: Discover repos from all sources.
-	allRepos, err := a.discoverAllRepos(ctx, cfg.Sources)
+	// Check drift on existing managed files before overwriting.
+	for _, mf := range existingState.ManagedFiles {
+		drift, err := CheckDrift(mf)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "warning: could not check drift for %s: %v\n", mf.Path, err)
+			continue
+		}
+		if drift.Drifted() && !drift.FileRemoved {
+			fmt.Fprintf(os.Stderr, "warning: managed file %s has been modified outside niwa\n", mf.Path)
+		}
+	}
+
+	result, err := a.runPipeline(ctx, cfg, configDir, instanceRoot, now, &pipelineOpts{
+		existingState: existingState,
+	})
 	if err != nil {
 		return err
 	}
 
-	// Step 2: Classify repos into groups.
-	classified, warnings, err := Classify(allRepos, cfg.Groups)
-	if err != nil {
-		return fmt.Errorf("classifying repos: %w", err)
-	}
-	for _, w := range warnings {
+	for _, w := range result.warnings {
 		fmt.Fprintf(os.Stderr, "warning: %s\n", w)
 	}
+
+	// Clean up managed files from previous state that are no longer produced.
+	a.cleanRemovedFiles(existingState, result)
+
+	// Clean up empty group directories for repos that were removed.
+	a.cleanRemovedGroupDirs(existingState, result, instanceRoot)
+
+	configName := cfg.Workspace.Name
+	state := &InstanceState{
+		SchemaVersion:  SchemaVersion,
+		ConfigName:     &configName,
+		InstanceName:   cfg.Workspace.Name,
+		InstanceNumber: existingState.InstanceNumber,
+		Root:           instanceRoot,
+		Created:        existingState.Created,
+		LastApplied:    now,
+		ManagedFiles:   result.managedFiles,
+		Repos:          result.repoStates,
+	}
+
+	if err := SaveState(instanceRoot, state); err != nil {
+		return fmt.Errorf("saving instance state: %w", err)
+	}
+
+	return nil
+}
+
+// runPipeline executes the shared pipeline steps: discover repos, classify,
+// clone, and install content. It returns the pipeline results without writing
+// state.
+func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, configDir, instanceRoot string, now time.Time, opts *pipelineOpts) (*pipelineResult, error) {
+	var writtenFiles []string
+	var allWarnings []string
+
+	// Step 1: Discover repos from all sources.
+	allRepos, err := a.discoverAllRepos(ctx, cfg.Sources)
+	if err != nil {
+		return nil, err
+	}
+
+	// Step 2: Classify repos into groups.
+	classified, classifyWarnings, err := Classify(allRepos, cfg.Groups)
+	if err != nil {
+		return nil, fmt.Errorf("classifying repos: %w", err)
+	}
+	allWarnings = append(allWarnings, classifyWarnings...)
 
 	// Step 2.5: Warn about unknown repo names in [repos] overrides.
 	discoveredNames := make([]string, len(allRepos))
@@ -60,16 +176,14 @@ func (a *Applier) Apply(ctx context.Context, cfg *config.WorkspaceConfig, config
 		discoveredNames[i] = r.Name
 	}
 	known := KnownRepoNames(cfg, discoveredNames)
-	for _, w := range WarnUnknownRepos(cfg, known) {
-		fmt.Fprintf(os.Stderr, "warning: %s\n", w)
-	}
+	allWarnings = append(allWarnings, WarnUnknownRepos(cfg, known)...)
 
 	// Step 3: Create group directories and clone repos.
 	repoStates := map[string]RepoState{}
 	for _, cr := range classified {
 		groupDir := filepath.Join(instanceRoot, cr.Group)
 		if err := os.MkdirAll(groupDir, 0o755); err != nil {
-			return fmt.Errorf("creating group directory %s: %w", groupDir, err)
+			return nil, fmt.Errorf("creating group directory %s: %w", groupDir, err)
 		}
 
 		cloneURL := RepoCloneURL(cfg, cr.Repo.Name, cr.Repo.SSHURL, cr.Repo.CloneURL)
@@ -78,7 +192,7 @@ func (a *Applier) Apply(ctx context.Context, cfg *config.WorkspaceConfig, config
 		targetDir := filepath.Join(groupDir, cr.Repo.Name)
 		cloned, err := a.Cloner.CloneWithBranch(ctx, cloneURL, targetDir, branch)
 		if err != nil {
-			return fmt.Errorf("cloning repo %s: %w", cr.Repo.Name, err)
+			return nil, fmt.Errorf("cloning repo %s: %w", cr.Repo.Name, err)
 		}
 		if cloned {
 			fmt.Printf("cloned %s into %s\n", cr.Repo.Name, targetDir)
@@ -92,24 +206,10 @@ func (a *Applier) Apply(ctx context.Context, cfg *config.WorkspaceConfig, config
 		}
 	}
 
-	// Check drift on existing managed files before overwriting.
-	if existingState != nil {
-		for _, mf := range existingState.ManagedFiles {
-			drift, err := CheckDrift(mf)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "warning: could not check drift for %s: %v\n", mf.Path, err)
-				continue
-			}
-			if drift.Drifted() && !drift.FileRemoved {
-				fmt.Fprintf(os.Stderr, "warning: managed file %s has been modified outside niwa\n", mf.Path)
-			}
-		}
-	}
-
 	// Step 4: Install workspace-level CLAUDE.md.
 	wsFiles, err := InstallWorkspaceContent(cfg, configDir, instanceRoot)
 	if err != nil {
-		return fmt.Errorf("installing workspace content: %w", err)
+		return nil, fmt.Errorf("installing workspace content: %w", err)
 	}
 	writtenFiles = append(writtenFiles, wsFiles...)
 
@@ -123,7 +223,7 @@ func (a *Applier) Apply(ctx context.Context, cfg *config.WorkspaceConfig, config
 
 		groupFiles, err := InstallGroupContent(cfg, configDir, instanceRoot, cr.Group)
 		if err != nil {
-			return fmt.Errorf("installing group content for %q: %w", cr.Group, err)
+			return nil, fmt.Errorf("installing group content for %q: %w", cr.Group, err)
 		}
 		writtenFiles = append(writtenFiles, groupFiles...)
 	}
@@ -138,10 +238,10 @@ func (a *Applier) Apply(ctx context.Context, cfg *config.WorkspaceConfig, config
 
 		result, err := InstallRepoContent(cfg, configDir, instanceRoot, cr.Group, cr.Repo.Name)
 		if err != nil {
-			return fmt.Errorf("installing repo content for %q: %w", cr.Repo.Name, err)
+			return nil, fmt.Errorf("installing repo content for %q: %w", cr.Repo.Name, err)
 		}
 		for _, w := range result.Warnings {
-			fmt.Fprintf(os.Stderr, "warning: %s\n", w)
+			allWarnings = append(allWarnings, w.String())
 		}
 		writtenFiles = append(writtenFiles, result.WrittenFiles...)
 	}
@@ -151,7 +251,7 @@ func (a *Applier) Apply(ctx context.Context, cfg *config.WorkspaceConfig, config
 	for _, path := range writtenFiles {
 		hash, err := HashFile(path)
 		if err != nil {
-			return fmt.Errorf("hashing managed file %s: %w", path, err)
+			return nil, fmt.Errorf("hashing managed file %s: %w", path, err)
 		}
 		managedFiles = append(managedFiles, ManagedFile{
 			Path:      path,
@@ -160,32 +260,68 @@ func (a *Applier) Apply(ctx context.Context, cfg *config.WorkspaceConfig, config
 		})
 	}
 
-	// Step 8: Write instance state.
-	created := now
-	instanceNumber := 1
-	if existingState != nil {
-		created = existingState.Created
-		instanceNumber = existingState.InstanceNumber
+	return &pipelineResult{
+		classified:   classified,
+		repoStates:   repoStates,
+		managedFiles: managedFiles,
+		warnings:     allWarnings,
+	}, nil
+}
+
+// cleanRemovedFiles deletes managed files from the previous state that are
+// no longer present in the current pipeline result.
+func (a *Applier) cleanRemovedFiles(existingState *InstanceState, result *pipelineResult) {
+	currentFiles := make(map[string]bool, len(result.managedFiles))
+	for _, mf := range result.managedFiles {
+		currentFiles[mf.Path] = true
 	}
 
-	configName := cfg.Workspace.Name
-	state := &InstanceState{
-		SchemaVersion:  SchemaVersion,
-		ConfigName:     &configName,
-		InstanceName:   cfg.Workspace.Name,
-		InstanceNumber: instanceNumber,
-		Root:           instanceRoot,
-		Created:        created,
-		LastApplied:    now,
-		ManagedFiles:   managedFiles,
-		Repos:          repoStates,
+	for _, mf := range existingState.ManagedFiles {
+		if !currentFiles[mf.Path] {
+			if err := os.Remove(mf.Path); err != nil && !os.IsNotExist(err) {
+				fmt.Fprintf(os.Stderr, "warning: could not remove managed file %s: %v\n", mf.Path, err)
+			}
+		}
+	}
+}
+
+// cleanRemovedGroupDirs removes empty group directories for repos that
+// existed in the previous state but are no longer present.
+func (a *Applier) cleanRemovedGroupDirs(existingState *InstanceState, result *pipelineResult, instanceRoot string) {
+	// Build set of current group names.
+	currentGroups := make(map[string]bool)
+	for _, cr := range result.classified {
+		currentGroups[cr.Group] = true
 	}
 
-	if err := SaveState(instanceRoot, state); err != nil {
-		return fmt.Errorf("saving instance state: %w", err)
+	// Check previous classified repos by looking at managed file paths
+	// to infer group directories. We check if group dirs that held repos
+	// in the previous state are now empty.
+	entries, err := os.ReadDir(instanceRoot)
+	if err != nil {
+		return
 	}
-
-	return nil
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if name == StateDir {
+			continue
+		}
+		if currentGroups[name] {
+			continue
+		}
+		groupDir := filepath.Join(instanceRoot, name)
+		// Only remove if empty.
+		subEntries, err := os.ReadDir(groupDir)
+		if err != nil {
+			continue
+		}
+		if len(subEntries) == 0 {
+			os.Remove(groupDir)
+		}
+	}
 }
 
 // repoAlreadyCloned checks if a directory has a .git marker, indicating
