@@ -2,8 +2,8 @@
   "pr_status": "implementing",
   "design_doc": "docs/plans/PLAN-workspace-config.md",
   "branch": "impl/workspace-config",
-  "pr_number": null,
-  "integrity_hash": "sha256:cc1614c3877b3507d31512ef988ec60bde300c1f6c160ed76b0fd008a0c42f1c",
+  "pr_number": 5,
+  "integrity_hash": "sha256:6e39479b3e619dff182ac76d35cdcce25dba8339f5c94ea6b2e7a193ce34f3ff",
   "issues": [
     {
       "number": 1,
@@ -16,7 +16,18 @@
       "commits": [],
       "agent_type": "",
       "summary": null,
-      "testable_scenarios": [],
+      "testable_scenarios": [
+        "scenario-1",
+        "scenario-2",
+        "scenario-3",
+        "scenario-4",
+        "scenario-5",
+        "scenario-6",
+        "scenario-7",
+        "scenario-8",
+        "scenario-9",
+        "scenario-10"
+      ],
       "acceptance_criteria": [
         "Parse `.niwa/workspace.toml` into Go structs covering `[workspace]`, `[[sources]]`, `[groups]` with visibility filter, and `[content.workspace]`",
         "Unparsed sections (`[repos]`, `[hooks]`, `[settings]`, `[env]`, `[channels]`) parse into placeholder types without error",
@@ -42,7 +53,14 @@
       "commits": [],
       "agent_type": "",
       "summary": null,
-      "testable_scenarios": [],
+      "testable_scenarios": [
+        "scenario-11",
+        "scenario-12",
+        "scenario-13",
+        "scenario-14",
+        "scenario-15",
+        "scenario-16"
+      ],
       "acceptance_criteria": [
         "Group content: `[content.groups.\u003cname\u003e]` produces `CLAUDE.md` in group directory",
         "Repo content: `[content.repos.\u003cname\u003e]` produces `CLAUDE.local.md` in repo directory",
@@ -68,7 +86,12 @@
       "commits": [],
       "agent_type": "",
       "summary": null,
-      "testable_scenarios": [],
+      "testable_scenarios": [
+        "scenario-17",
+        "scenario-18",
+        "scenario-19",
+        "scenario-20"
+      ],
       "acceptance_criteria": [
         "Org exceeding `max_repos` produces clear error suggesting override or explicit listing",
         "Per-source `max_repos` overrides the default for that source only",
@@ -92,7 +115,9 @@
       "commits": [],
       "agent_type": "",
       "summary": null,
-      "testable_scenarios": [],
+      "testable_scenarios": [
+        "scenario-21"
+      ],
       "acceptance_criteria": [
         "`repos = [...]` field parses on GroupConfig",
         "Group with only `repos` classifies listed repos correctly",
@@ -115,7 +140,10 @@
       "commits": [],
       "agent_type": "",
       "summary": null,
-      "testable_scenarios": [],
+      "testable_scenarios": [
+        "scenario-22",
+        "scenario-23"
+      ],
       "acceptance_criteria": [
         "`[repos.\u003cname\u003e]` parses into RepoOverride with all fields (url, branch, scope, claude, hooks, settings, env)",
         "`claude = false` skips CLAUDE.local.md and hooks/settings/env for that repo",
@@ -139,7 +167,10 @@
       "commits": [],
       "agent_type": "",
       "summary": null,
-      "testable_scenarios": [],
+      "testable_scenarios": [
+        "scenario-24",
+        "scenario-25"
+      ],
       "acceptance_criteria": [
         "`niwa apply` writes `.niwa/instance.json` with schema_version, config_name, instance_name, instance_number, root, created, last_applied",
         "managed_files tracks path, sha256 hash, generated timestamp for each written file",
@@ -166,7 +197,9 @@
       "commits": [],
       "agent_type": "",
       "summary": null,
-      "testable_scenarios": [],
+      "testable_scenarios": [
+        "scenario-26"
+      ],
       "acceptance_criteria": [
         "Parse config.toml with [global] (clone_protocol) and [registry.\u003cname\u003e] (source, root)",
         "Respects XDG_CONFIG_HOME, falls back to ~/.config/niwa/config.toml",
@@ -193,7 +226,10 @@
       "commits": [],
       "agent_type": "",
       "summary": null,
-      "testable_scenarios": [],
+      "testable_scenarios": [
+        "scenario-27",
+        "scenario-28"
+      ],
       "acceptance_criteria": [
         "Name validation: group/repo/subdir names must match `[a-zA-Z0-9._-]+`; clear error on failure",
         "Path traversal: content source paths must resolve within content_dir; reject `..` and absolute components",
@@ -207,7 +243,8 @@
     }
   ],
   "skipped_issues": null,
-  "test_plan_file": null,
+  "test_plan_file": "wip/implement-workspace-config-test_plan.md",
+  "doc_plan_file": "wip/implement-workspace-config-doc_plan.md",
   "source_doc_type": "plan",
   "execution_mode": "single-pr",
   "deliverable_type": "code"
