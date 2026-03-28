@@ -13,8 +13,9 @@ import (
 
 // Applier orchestrates the apply pipeline.
 type Applier struct {
-	GitHubClient github.Client
-	Cloner       *Cloner
+	GitHubClient  github.Client
+	Cloner        *Cloner
+	Materializers []Materializer
 }
 
 // NewApplier creates an Applier with the given GitHub client.
@@ -22,6 +23,11 @@ func NewApplier(gh github.Client) *Applier {
 	return &Applier{
 		GitHubClient: gh,
 		Cloner:       &Cloner{},
+		Materializers: []Materializer{
+			&HooksMaterializer{},
+			&SettingsMaterializer{},
+			&EnvMaterializer{},
+		},
 	}
 }
 
@@ -244,6 +250,74 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 			allWarnings = append(allWarnings, w.String())
 		}
 		writtenFiles = append(writtenFiles, result.WrittenFiles...)
+	}
+
+	// Step 6.5: Run materializers (hooks, settings, env) for each repo.
+	discoveredHooks, _ := DiscoverHooks(configDir)
+	wsEnvFile, repoEnvFiles, _ := DiscoverEnvFiles(configDir)
+
+	// Convert discovered env paths to relative (the env materializer joins
+	// file paths with configDir, so they must be relative).
+	relWsEnv := wsEnvFile
+	if relWsEnv != "" {
+		if r, err := filepath.Rel(configDir, relWsEnv); err == nil {
+			relWsEnv = r
+		}
+	}
+
+	discoveredEnv := &DiscoveredEnv{
+		WorkspaceFile: relWsEnv,
+		RepoFiles:     repoEnvFiles,
+	}
+
+	for _, cr := range classified {
+		effective := MergeOverrides(cfg, cr.Repo.Name)
+
+		// Merge discovered hooks as base, explicit config wins per event.
+		if len(discoveredHooks) > 0 {
+			merged := make(config.HooksConfig, len(discoveredHooks)+len(effective.Claude.Hooks))
+			// Start with discovered hooks (converted to relative paths).
+			for event, scripts := range discoveredHooks {
+				relScripts := make([]string, 0, len(scripts))
+				for _, absPath := range scripts {
+					rel, err := filepath.Rel(configDir, absPath)
+					if err != nil {
+						return nil, fmt.Errorf("materializer hooks: computing relative path for %s: %w", absPath, err)
+					}
+					relScripts = append(relScripts, rel)
+				}
+				merged[event] = relScripts
+			}
+			// Explicit config overrides per event.
+			for event, scripts := range effective.Claude.Hooks {
+				merged[event] = scripts
+			}
+			effective.Claude.Hooks = merged
+		}
+
+		repoDir := filepath.Join(instanceRoot, cr.Group, cr.Repo.Name)
+		mctx := &MaterializeContext{
+			Config:        cfg,
+			Effective:     effective,
+			RepoName:      cr.Repo.Name,
+			RepoDir:       repoDir,
+			ConfigDir:     configDir,
+			DiscoveredEnv: discoveredEnv,
+		}
+
+		claudeOn := ClaudeEnabled(cfg, cr.Repo.Name)
+		for _, m := range a.Materializers {
+			// Skip hooks and settings materializers when claude is disabled.
+			if !claudeOn && (m.Name() == "hooks" || m.Name() == "settings") {
+				continue
+			}
+
+			files, err := m.Materialize(mctx)
+			if err != nil {
+				return nil, fmt.Errorf("materializer %s for repo %s: %w", m.Name(), cr.Repo.Name, err)
+			}
+			writtenFiles = append(writtenFiles, files...)
+		}
 	}
 
 	// Step 7: Build managed files with hashes.

@@ -2,6 +2,7 @@ package workspace
 
 import (
 	"maps"
+	"slices"
 
 	"github.com/tsukumogami/niwa/internal/config"
 )
@@ -10,57 +11,62 @@ import (
 // for a single repository. It holds the final hooks, settings, and env that
 // should apply after overlay semantics are resolved.
 type EffectiveConfig struct {
-	Hooks    map[string]any
-	Settings map[string]any
-	Env      map[string]any
+	Claude config.ClaudeConfig
+	Env    config.EnvConfig
 }
 
 // MergeOverrides produces the effective configuration for a repo by combining
 // workspace-level defaults with per-repo overrides. The merge semantics are:
 //
 //   - Settings: repo values win (override workspace values per key)
-//   - Env "files" key: repo values are appended to workspace values
-//   - Env non-"files" keys: repo values win (override workspace values per key)
+//   - Env files: repo values are appended to workspace values
+//   - Env vars: repo values win (override workspace values per key)
 //   - Hooks: repo values extend workspace values (lists are concatenated)
 func MergeOverrides(ws *config.WorkspaceConfig, repoName string) EffectiveConfig {
 	override, hasOverride := ws.Repos[repoName]
 
 	result := EffectiveConfig{
-		Hooks:    copyMap(ws.Hooks),
-		Settings: copyMap(ws.Settings),
-		Env:      copyMap(ws.Env),
+		Claude: config.ClaudeConfig{
+			Hooks:    copyHooks(ws.Claude.Hooks),
+			Settings: copySettings(ws.Claude.Settings),
+		},
+		Env: copyEnv(ws.Env),
 	}
 
 	if !hasOverride {
 		return result
 	}
 
-	// Settings: repo wins per key.
-	for k, v := range override.Settings {
-		if result.Settings == nil {
-			result.Settings = map[string]any{}
+	// Claude: apply repo overrides if present.
+	if override.Claude != nil {
+		// Settings: repo wins per key.
+		for k, v := range override.Claude.Settings {
+			if result.Claude.Settings == nil {
+				result.Claude.Settings = config.SettingsConfig{}
+			}
+			result.Claude.Settings[k] = v
 		}
-		result.Settings[k] = v
+
+		// Hooks: extend (concatenate lists per key).
+		for k, v := range override.Claude.Hooks {
+			if result.Claude.Hooks == nil {
+				result.Claude.Hooks = config.HooksConfig{}
+			}
+			result.Claude.Hooks[k] = append(result.Claude.Hooks[k], v...)
+		}
 	}
 
-	// Env: "files" appends, other keys: repo wins.
-	for k, v := range override.Env {
-		if result.Env == nil {
-			result.Env = map[string]any{}
-		}
-		if k == "files" {
-			result.Env[k] = appendSliceValues(result.Env[k], v)
-		} else {
-			result.Env[k] = v
-		}
+	// Env files: append repo files after workspace files.
+	if len(override.Env.Files) > 0 {
+		result.Env.Files = append(result.Env.Files, override.Env.Files...)
 	}
 
-	// Hooks: extend (concatenate lists per key).
-	for k, v := range override.Hooks {
-		if result.Hooks == nil {
-			result.Hooks = map[string]any{}
+	// Env vars: repo wins per key.
+	for k, v := range override.Env.Vars {
+		if result.Env.Vars == nil {
+			result.Env.Vars = map[string]string{}
 		}
-		result.Hooks[k] = appendSliceValues(result.Hooks[k], v)
+		result.Env.Vars[k] = v
 	}
 
 	return result
@@ -68,13 +74,14 @@ func MergeOverrides(ws *config.WorkspaceConfig, repoName string) EffectiveConfig
 
 // ClaudeEnabled returns whether Claude content installation (CLAUDE.local.md,
 // hooks, settings, env) should be performed for the given repo. When the
-// repo has no override or the override doesn't set claude, it defaults to true.
+// repo has no override or the override doesn't set claude.enabled, it
+// defaults to true.
 func ClaudeEnabled(ws *config.WorkspaceConfig, repoName string) bool {
 	override, ok := ws.Repos[repoName]
-	if !ok || override.Claude == nil {
+	if !ok || override.Claude == nil || override.Claude.Enabled == nil {
 		return true
 	}
-	return *override.Claude
+	return *override.Claude.Enabled
 }
 
 // RepoCloneURL returns the clone URL for a repo, preferring the per-repo
@@ -121,34 +128,37 @@ func WarnUnknownRepos(ws *config.WorkspaceConfig, known map[string]bool) []strin
 	return warnings
 }
 
-// copyMap returns a shallow copy of a map. Returns nil if input is nil.
-func copyMap(m map[string]any) map[string]any {
-	if m == nil {
+// copyHooks returns a deep copy of a HooksConfig. Each hook event's script
+// list is independently copied so mutations don't affect the original.
+func copyHooks(h config.HooksConfig) config.HooksConfig {
+	if h == nil {
 		return nil
 	}
-	out := make(map[string]any, len(m))
-	maps.Copy(out, m)
+	out := make(config.HooksConfig, len(h))
+	for k, v := range h {
+		out[k] = slices.Clone(v)
+	}
 	return out
 }
 
-// appendSliceValues concatenates two values that are expected to be []any
-// (TOML arrays). If either value is not a slice, it's treated as a single
-// element. Nil base returns the override as-is.
-func appendSliceValues(base, override any) any {
-	baseSlice := toSlice(base)
-	overrideSlice := toSlice(override)
-	if baseSlice == nil {
-		return overrideSlice
-	}
-	return append(baseSlice, overrideSlice...)
-}
-
-func toSlice(v any) []any {
-	if v == nil {
+// copySettings returns a shallow copy of a SettingsConfig.
+func copySettings(s config.SettingsConfig) config.SettingsConfig {
+	if s == nil {
 		return nil
 	}
-	if s, ok := v.([]any); ok {
-		return s
+	out := make(config.SettingsConfig, len(s))
+	maps.Copy(out, s)
+	return out
+}
+
+// copyEnv returns a deep copy of an EnvConfig.
+func copyEnv(e config.EnvConfig) config.EnvConfig {
+	out := config.EnvConfig{
+		Files: slices.Clone(e.Files),
 	}
-	return []any{v}
+	if e.Vars != nil {
+		out.Vars = make(map[string]string, len(e.Vars))
+		maps.Copy(out.Vars, e.Vars)
+	}
+	return out
 }

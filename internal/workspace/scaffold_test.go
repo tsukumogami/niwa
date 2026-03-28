@@ -57,7 +57,7 @@ func TestScaffold_WithName(t *testing.T) {
 	}
 
 	// Verify commented sections are present.
-	for _, section := range []string{"[[sources]]", "[groups.public]", "[repos.my-repo]", "[content.workspace]", "[hooks]", "[settings]", "[env]", "[channels]"} {
+	for _, section := range []string{"[[sources]]", "[groups.public]", "[repos.my-repo]", "[content.workspace]", "[claude.hooks]", "[claude.settings]", "[env]", "[channels]"} {
 		if !strings.Contains(content, "# "+section) {
 			t.Errorf("expected commented section %q in template", section)
 		}

@@ -35,10 +35,10 @@ content_dir = "claude"
 # [content.workspace]
 # source = "workspace.md"
 
-# --- Hooks, settings, environment, channels ---
+# --- Claude Code configuration, environment, channels ---
 # See docs/designs/DESIGN-workspace-config.md for full schema reference.
-# [hooks]
-# [settings]
+# [claude.hooks]
+# [claude.settings]
 # [env]
 # [channels]
 `
