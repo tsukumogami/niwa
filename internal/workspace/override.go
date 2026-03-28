@@ -11,9 +11,8 @@ import (
 // for a single repository. It holds the final hooks, settings, and env that
 // should apply after overlay semantics are resolved.
 type EffectiveConfig struct {
-	Hooks    config.HooksConfig
-	Settings config.SettingsConfig
-	Env      config.EnvConfig
+	Claude config.ClaudeConfig
+	Env    config.EnvConfig
 }
 
 // MergeOverrides produces the effective configuration for a repo by combining
@@ -27,21 +26,34 @@ func MergeOverrides(ws *config.WorkspaceConfig, repoName string) EffectiveConfig
 	override, hasOverride := ws.Repos[repoName]
 
 	result := EffectiveConfig{
-		Hooks:    copyHooks(ws.Hooks),
-		Settings: copySettings(ws.Settings),
-		Env:      copyEnv(ws.Env),
+		Claude: config.ClaudeConfig{
+			Hooks:    copyHooks(ws.Claude.Hooks),
+			Settings: copySettings(ws.Claude.Settings),
+		},
+		Env: copyEnv(ws.Env),
 	}
 
 	if !hasOverride {
 		return result
 	}
 
-	// Settings: repo wins per key.
-	for k, v := range override.Settings {
-		if result.Settings == nil {
-			result.Settings = config.SettingsConfig{}
+	// Claude: apply repo overrides if present.
+	if override.Claude != nil {
+		// Settings: repo wins per key.
+		for k, v := range override.Claude.Settings {
+			if result.Claude.Settings == nil {
+				result.Claude.Settings = config.SettingsConfig{}
+			}
+			result.Claude.Settings[k] = v
 		}
-		result.Settings[k] = v
+
+		// Hooks: extend (concatenate lists per key).
+		for k, v := range override.Claude.Hooks {
+			if result.Claude.Hooks == nil {
+				result.Claude.Hooks = config.HooksConfig{}
+			}
+			result.Claude.Hooks[k] = append(result.Claude.Hooks[k], v...)
+		}
 	}
 
 	// Env files: append repo files after workspace files.
@@ -57,26 +69,19 @@ func MergeOverrides(ws *config.WorkspaceConfig, repoName string) EffectiveConfig
 		result.Env.Vars[k] = v
 	}
 
-	// Hooks: extend (concatenate lists per key).
-	for k, v := range override.Hooks {
-		if result.Hooks == nil {
-			result.Hooks = config.HooksConfig{}
-		}
-		result.Hooks[k] = append(result.Hooks[k], v...)
-	}
-
 	return result
 }
 
 // ClaudeEnabled returns whether Claude content installation (CLAUDE.local.md,
 // hooks, settings, env) should be performed for the given repo. When the
-// repo has no override or the override doesn't set claude, it defaults to true.
+// repo has no override or the override doesn't set claude.enabled, it
+// defaults to true.
 func ClaudeEnabled(ws *config.WorkspaceConfig, repoName string) bool {
 	override, ok := ws.Repos[repoName]
-	if !ok || override.Claude == nil {
+	if !ok || override.Claude == nil || override.Claude.Enabled == nil {
 		return true
 	}
-	return *override.Claude
+	return *override.Claude.Enabled
 }
 
 // RepoCloneURL returns the clone URL for a repo, preferring the per-repo

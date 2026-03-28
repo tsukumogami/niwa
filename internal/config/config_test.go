@@ -46,8 +46,8 @@ visibility = "private"
 [groups.infra]
 repos = ["terraform-modules", "deploy-scripts"]
 
-[repos.".github"]
-claude = false
+[repos.".github".claude]
+enabled = false
 
 [repos.vision]
 scope = "strategic"
@@ -64,11 +64,11 @@ source = "repos/tsuku.md"
   [content.repos.tsuku.subdirs]
   recipes = "repos/tsuku-recipes.md"
 
-[hooks]
+[claude.hooks]
 pre_tool_use = ["hooks/gate-online.sh"]
 stop = ["hooks/workflow-continue.sh"]
 
-[settings]
+[claude.settings]
 permissions = "bypass"
 
 [env]
@@ -220,8 +220,8 @@ func TestParseFullConfig(t *testing.T) {
 	if !ok {
 		t.Fatal("repos[.github] missing")
 	}
-	if ghRepo.Claude == nil || *ghRepo.Claude != false {
-		t.Error("repos[.github].claude should be false")
+	if ghRepo.Claude == nil || ghRepo.Claude.Enabled == nil || *ghRepo.Claude.Enabled != false {
+		t.Error("repos[.github].claude.enabled should be false")
 	}
 
 	vision, ok := cfg.Repos["vision"]
@@ -242,20 +242,20 @@ func TestParseFullConfig(t *testing.T) {
 	}
 
 	// Typed sections parse correctly
-	if cfg.Hooks == nil {
-		t.Error("hooks should not be nil")
+	if cfg.Claude.Hooks == nil {
+		t.Error("claude.hooks should not be nil")
 	}
-	if len(cfg.Hooks["pre_tool_use"]) != 1 || cfg.Hooks["pre_tool_use"][0] != "hooks/gate-online.sh" {
-		t.Errorf("hooks.pre_tool_use = %v, want [hooks/gate-online.sh]", cfg.Hooks["pre_tool_use"])
+	if len(cfg.Claude.Hooks["pre_tool_use"]) != 1 || cfg.Claude.Hooks["pre_tool_use"][0] != "hooks/gate-online.sh" {
+		t.Errorf("claude.hooks.pre_tool_use = %v, want [hooks/gate-online.sh]", cfg.Claude.Hooks["pre_tool_use"])
 	}
-	if len(cfg.Hooks["stop"]) != 1 || cfg.Hooks["stop"][0] != "hooks/workflow-continue.sh" {
-		t.Errorf("hooks.stop = %v, want [hooks/workflow-continue.sh]", cfg.Hooks["stop"])
+	if len(cfg.Claude.Hooks["stop"]) != 1 || cfg.Claude.Hooks["stop"][0] != "hooks/workflow-continue.sh" {
+		t.Errorf("claude.hooks.stop = %v, want [hooks/workflow-continue.sh]", cfg.Claude.Hooks["stop"])
 	}
-	if cfg.Settings == nil {
-		t.Error("settings should not be nil")
+	if cfg.Claude.Settings == nil {
+		t.Error("claude.settings should not be nil")
 	}
-	if cfg.Settings["permissions"] != "bypass" {
-		t.Errorf("settings.permissions = %v, want bypass", cfg.Settings["permissions"])
+	if cfg.Claude.Settings["permissions"] != "bypass" {
+		t.Errorf("claude.settings.permissions = %v, want bypass", cfg.Claude.Settings["permissions"])
 	}
 	if len(cfg.Env.Files) != 1 || cfg.Env.Files[0] != "env/workspace.env" {
 		t.Errorf("env.files = %v, want [env/workspace.env]", cfg.Env.Files)
@@ -280,12 +280,14 @@ org = "myorg"
 url = "git@gitlab.com:custom/myapp.git"
 branch = "develop"
 scope = "tactical"
-claude = true
 
-[repos.myapp.hooks]
+[repos.myapp.claude]
+enabled = true
+
+[repos.myapp.claude.hooks]
 pre_tool_use = ["repo-gate.sh"]
 
-[repos.myapp.settings]
+[repos.myapp.claude.settings]
 permissions = "ask"
 
 [repos.myapp.env]
@@ -310,20 +312,20 @@ files = ["repo.env"]
 	if repo.Scope != "tactical" {
 		t.Errorf("scope = %q, want tactical", repo.Scope)
 	}
-	if repo.Claude == nil || *repo.Claude != true {
-		t.Error("claude should be true")
+	if repo.Claude == nil || repo.Claude.Enabled == nil || *repo.Claude.Enabled != true {
+		t.Error("claude.enabled should be true")
 	}
-	if repo.Hooks == nil {
-		t.Fatal("hooks should not be nil")
+	if repo.Claude.Hooks == nil {
+		t.Fatal("claude.hooks should not be nil")
 	}
-	if len(repo.Hooks["pre_tool_use"]) != 1 || repo.Hooks["pre_tool_use"][0] != "repo-gate.sh" {
-		t.Errorf("hooks.pre_tool_use = %v, want [repo-gate.sh]", repo.Hooks["pre_tool_use"])
+	if len(repo.Claude.Hooks["pre_tool_use"]) != 1 || repo.Claude.Hooks["pre_tool_use"][0] != "repo-gate.sh" {
+		t.Errorf("claude.hooks.pre_tool_use = %v, want [repo-gate.sh]", repo.Claude.Hooks["pre_tool_use"])
 	}
-	if repo.Settings == nil {
-		t.Fatal("settings should not be nil")
+	if repo.Claude.Settings == nil {
+		t.Fatal("claude.settings should not be nil")
 	}
-	if repo.Settings["permissions"] != "ask" {
-		t.Errorf("settings.permissions = %v, want ask", repo.Settings["permissions"])
+	if repo.Claude.Settings["permissions"] != "ask" {
+		t.Errorf("claude.settings.permissions = %v, want ask", repo.Claude.Settings["permissions"])
 	}
 	if len(repo.Env.Files) != 1 || repo.Env.Files[0] != "repo.env" {
 		t.Errorf("env.files = %v, want [repo.env]", repo.Env.Files)

@@ -14,6 +14,15 @@ import (
 // validName matches names that contain only alphanumerics, dots, hyphens, and underscores.
 var validName = regexp.MustCompile(`^[a-zA-Z0-9._-]+$`)
 
+// ClaudeConfig groups hooks and settings under a single [claude] namespace.
+// On RepoOverride, Enabled controls whether Claude Code configuration is
+// installed for the repo (defaults to true when nil).
+type ClaudeConfig struct {
+	Enabled  *bool          `toml:"enabled,omitempty"`
+	Hooks    HooksConfig    `toml:"hooks,omitempty"`
+	Settings SettingsConfig `toml:"settings,omitempty"`
+}
+
 // WorkspaceConfig is the top-level configuration parsed from workspace.toml.
 type WorkspaceConfig struct {
 	Workspace WorkspaceMeta           `toml:"workspace"`
@@ -21,8 +30,7 @@ type WorkspaceConfig struct {
 	Groups    map[string]GroupConfig  `toml:"groups"`
 	Repos     map[string]RepoOverride `toml:"repos"`
 	Content   ContentConfig           `toml:"content"`
-	Hooks     HooksConfig             `toml:"hooks"`
-	Settings  SettingsConfig          `toml:"settings"`
+	Claude    ClaudeConfig            `toml:"claude"`
 	Env       EnvConfig               `toml:"env"`
 	Channels  map[string]any          `toml:"channels"` // placeholder
 }
@@ -71,13 +79,11 @@ type EnvConfig struct {
 
 // RepoOverride holds per-repo configuration overrides.
 type RepoOverride struct {
-	URL      string         `toml:"url,omitempty"`
-	Branch   string         `toml:"branch,omitempty"`
-	Scope    string         `toml:"scope,omitempty"`
-	Claude   *bool          `toml:"claude,omitempty"`
-	Hooks    HooksConfig    `toml:"hooks,omitempty"`
-	Settings SettingsConfig `toml:"settings,omitempty"`
-	Env      EnvConfig      `toml:"env,omitempty"`
+	URL    string        `toml:"url,omitempty"`
+	Branch string        `toml:"branch,omitempty"`
+	Scope  string        `toml:"scope,omitempty"`
+	Claude *ClaudeConfig `toml:"claude,omitempty"`
+	Env    EnvConfig     `toml:"env,omitempty"`
 }
 
 // ContentConfig declares the CLAUDE.md content hierarchy.

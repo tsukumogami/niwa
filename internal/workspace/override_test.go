@@ -19,22 +19,22 @@ func TestClaudeEnabledDefault(t *testing.T) {
 func TestClaudeEnabledTrue(t *testing.T) {
 	ws := &config.WorkspaceConfig{
 		Repos: map[string]config.RepoOverride{
-			"myrepo": {Claude: boolPtr(true)},
+			"myrepo": {Claude: &config.ClaudeConfig{Enabled: boolPtr(true)}},
 		},
 	}
 	if !ClaudeEnabled(ws, "myrepo") {
-		t.Error("claude = true should return true")
+		t.Error("claude.enabled = true should return true")
 	}
 }
 
 func TestClaudeEnabledFalse(t *testing.T) {
 	ws := &config.WorkspaceConfig{
 		Repos: map[string]config.RepoOverride{
-			"myrepo": {Claude: boolPtr(false)},
+			"myrepo": {Claude: &config.ClaudeConfig{Enabled: boolPtr(false)}},
 		},
 	}
 	if ClaudeEnabled(ws, "myrepo") {
-		t.Error("claude = false should return false")
+		t.Error("claude.enabled = false should return false")
 	}
 }
 
@@ -97,37 +97,43 @@ func TestRepoCloneBranchOverride(t *testing.T) {
 
 func TestMergeOverridesNoOverride(t *testing.T) {
 	ws := &config.WorkspaceConfig{
-		Hooks:    config.HooksConfig{"pre_tool_use": {"a.sh"}},
-		Settings: config.SettingsConfig{"permissions": "bypass"},
-		Env:      config.EnvConfig{Files: []string{"ws.env"}},
+		Claude: config.ClaudeConfig{
+			Hooks:    config.HooksConfig{"pre_tool_use": {"a.sh"}},
+			Settings: config.SettingsConfig{"permissions": "bypass"},
+		},
+		Env: config.EnvConfig{Files: []string{"ws.env"}},
 	}
 	eff := MergeOverrides(ws, "unknown-repo")
 
 	// Should return copies of workspace values.
-	if len(eff.Hooks) != 1 {
-		t.Errorf("expected 1 hook key, got %d", len(eff.Hooks))
+	if len(eff.Claude.Hooks) != 1 {
+		t.Errorf("expected 1 hook key, got %d", len(eff.Claude.Hooks))
 	}
-	if eff.Settings["permissions"] != "bypass" {
-		t.Errorf("expected permissions=bypass, got %v", eff.Settings["permissions"])
+	if eff.Claude.Settings["permissions"] != "bypass" {
+		t.Errorf("expected permissions=bypass, got %v", eff.Claude.Settings["permissions"])
 	}
 }
 
 func TestMergeOverridesSettingsWin(t *testing.T) {
 	ws := &config.WorkspaceConfig{
-		Settings: config.SettingsConfig{"permissions": "bypass", "keep": "yes"},
+		Claude: config.ClaudeConfig{
+			Settings: config.SettingsConfig{"permissions": "bypass", "keep": "yes"},
+		},
 		Repos: map[string]config.RepoOverride{
 			"myrepo": {
-				Settings: config.SettingsConfig{"permissions": "ask"},
+				Claude: &config.ClaudeConfig{
+					Settings: config.SettingsConfig{"permissions": "ask"},
+				},
 			},
 		},
 	}
 	eff := MergeOverrides(ws, "myrepo")
 
-	if eff.Settings["permissions"] != "ask" {
-		t.Errorf("repo setting should win, got %v", eff.Settings["permissions"])
+	if eff.Claude.Settings["permissions"] != "ask" {
+		t.Errorf("repo setting should win, got %v", eff.Claude.Settings["permissions"])
 	}
-	if eff.Settings["keep"] != "yes" {
-		t.Errorf("workspace setting should be preserved, got %v", eff.Settings["keep"])
+	if eff.Claude.Settings["keep"] != "yes" {
+		t.Errorf("workspace setting should be preserved, got %v", eff.Claude.Settings["keep"])
 	}
 }
 
@@ -190,12 +196,16 @@ func TestMergeOverridesEnvVarsMerge(t *testing.T) {
 
 func TestMergeOverridesHooksExtend(t *testing.T) {
 	ws := &config.WorkspaceConfig{
-		Hooks: config.HooksConfig{"pre_tool_use": {"ws-gate.sh"}},
+		Claude: config.ClaudeConfig{
+			Hooks: config.HooksConfig{"pre_tool_use": {"ws-gate.sh"}},
+		},
 		Repos: map[string]config.RepoOverride{
 			"myrepo": {
-				Hooks: config.HooksConfig{
-					"pre_tool_use": {"repo-gate.sh"},
-					"stop":         {"repo-stop.sh"},
+				Claude: &config.ClaudeConfig{
+					Hooks: config.HooksConfig{
+						"pre_tool_use": {"repo-gate.sh"},
+						"stop":         {"repo-stop.sh"},
+					},
 				},
 			},
 		},
@@ -203,7 +213,7 @@ func TestMergeOverridesHooksExtend(t *testing.T) {
 	eff := MergeOverrides(ws, "myrepo")
 
 	// pre_tool_use should be extended (concatenated).
-	preToolUse := eff.Hooks["pre_tool_use"]
+	preToolUse := eff.Claude.Hooks["pre_tool_use"]
 	if len(preToolUse) != 2 {
 		t.Fatalf("expected 2 hooks, got %d: %v", len(preToolUse), preToolUse)
 	}
@@ -212,7 +222,7 @@ func TestMergeOverridesHooksExtend(t *testing.T) {
 	}
 
 	// stop should be a new hook key from repo.
-	stop := eff.Hooks["stop"]
+	stop := eff.Claude.Hooks["stop"]
 	if len(stop) != 1 || stop[0] != "repo-stop.sh" {
 		t.Errorf("expected [repo-stop.sh], got %v", stop)
 	}
@@ -223,18 +233,20 @@ func TestMergeOverridesNilWorkspaceFields(t *testing.T) {
 		// All nil/zero workspace-level hooks/settings/env.
 		Repos: map[string]config.RepoOverride{
 			"myrepo": {
-				Settings: config.SettingsConfig{"permissions": "ask"},
-				Hooks:    config.HooksConfig{"stop": {"stop.sh"}},
-				Env:      config.EnvConfig{Files: []string{"repo.env"}},
+				Claude: &config.ClaudeConfig{
+					Settings: config.SettingsConfig{"permissions": "ask"},
+					Hooks:    config.HooksConfig{"stop": {"stop.sh"}},
+				},
+				Env: config.EnvConfig{Files: []string{"repo.env"}},
 			},
 		},
 	}
 	eff := MergeOverrides(ws, "myrepo")
 
-	if eff.Settings["permissions"] != "ask" {
-		t.Errorf("expected permissions=ask, got %v", eff.Settings["permissions"])
+	if eff.Claude.Settings["permissions"] != "ask" {
+		t.Errorf("expected permissions=ask, got %v", eff.Claude.Settings["permissions"])
 	}
-	stop := eff.Hooks["stop"]
+	stop := eff.Claude.Hooks["stop"]
 	if len(stop) != 1 || stop[0] != "stop.sh" {
 		t.Errorf("expected [stop.sh], got %v", stop)
 	}
@@ -247,7 +259,7 @@ func TestWarnUnknownRepos(t *testing.T) {
 	ws := &config.WorkspaceConfig{
 		Repos: map[string]config.RepoOverride{
 			"known":   {Scope: "tactical"},
-			"unknown": {Claude: boolPtr(false)},
+			"unknown": {Claude: &config.ClaudeConfig{Enabled: boolPtr(false)}},
 		},
 	}
 	known := map[string]bool{"known": true, "other": true}
@@ -295,19 +307,23 @@ func TestMergeOverridesMutationSafety(t *testing.T) {
 	// Verify that merging doesn't mutate the workspace-level maps.
 	wsHooks := config.HooksConfig{"pre_tool_use": {"ws.sh"}}
 	ws := &config.WorkspaceConfig{
-		Hooks: wsHooks,
+		Claude: config.ClaudeConfig{
+			Hooks: wsHooks,
+		},
 		Repos: map[string]config.RepoOverride{
 			"myrepo": {
-				Hooks: config.HooksConfig{"pre_tool_use": {"repo.sh"}},
+				Claude: &config.ClaudeConfig{
+					Hooks: config.HooksConfig{"pre_tool_use": {"repo.sh"}},
+				},
 			},
 		},
 	}
 	_ = MergeOverrides(ws, "myrepo")
 
 	// The workspace hooks should not be modified.
-	original := ws.Hooks["pre_tool_use"]
+	original := ws.Claude.Hooks["pre_tool_use"]
 	if len(original) != 1 || original[0] != "ws.sh" {
-		t.Errorf("workspace hooks were mutated: %v", ws.Hooks["pre_tool_use"])
+		t.Errorf("workspace hooks were mutated: %v", ws.Claude.Hooks["pre_tool_use"])
 	}
 }
 

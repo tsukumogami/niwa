@@ -666,8 +666,8 @@ org = "testorg"
 [groups.public]
 visibility = "public"
 
-[repos.".github"]
-claude = false
+[repos.".github".claude]
+enabled = false
 
 [content.workspace]
 source = "workspace.md"
