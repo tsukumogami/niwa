@@ -25,3 +25,9 @@ go.work.sum
 .env
 
 *.local*
+
+# Built binary
+/niwa
+
+# Claude Code local config
+.claude/
