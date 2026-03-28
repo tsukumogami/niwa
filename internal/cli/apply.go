@@ -16,20 +16,44 @@ func init() {
 }
 
 var applyCmd = &cobra.Command{
-	Use:   "apply",
+	Use:   "apply [workspace-name]",
 	Short: "Apply workspace configuration",
 	Long: `Apply discovers .niwa/workspace.toml by walking up from the current
 directory, queries GitHub for repos in each source org, classifies them
-into groups, clones missing repos, and installs CLAUDE.md content files.`,
-	RunE: func(cmd *cobra.Command, args []string) error {
-		cwd, err := os.Getwd()
-		if err != nil {
-			return fmt.Errorf("getting working directory: %w", err)
-		}
+into groups, clones missing repos, and installs CLAUDE.md content files.
 
-		configPath, configDir, err := config.Discover(cwd)
-		if err != nil {
-			return err
+If a workspace name is given, it is resolved through the global registry
+(~/.config/niwa/config.toml) to find the workspace root directory.`,
+	Args: cobra.MaximumNArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		var configPath, configDir string
+
+		if len(args) == 1 {
+			// Resolve workspace name through the global registry.
+			globalCfg, err := config.LoadGlobalConfig()
+			if err != nil {
+				return fmt.Errorf("loading global config: %w", err)
+			}
+
+			entry := globalCfg.LookupWorkspace(args[0])
+			if entry == nil {
+				return fmt.Errorf("workspace %q not found in registry", args[0])
+			}
+
+			configPath = entry.Source
+			configDir = filepath.Dir(configPath)
+		} else {
+			// Discover from current directory.
+			cwd, err := os.Getwd()
+			if err != nil {
+				return fmt.Errorf("getting working directory: %w", err)
+			}
+
+			var discoverErr error
+			configPath, configDir, discoverErr = config.Discover(cwd)
+			if discoverErr != nil {
+				return discoverErr
+			}
 		}
 
 		cfg, err := config.Load(configPath)
@@ -44,6 +68,37 @@ into groups, clones missing repos, and installs CLAUDE.md content files.`,
 		gh := github.NewAPIClient(token)
 
 		applier := workspace.NewApplier(gh)
-		return applier.Apply(cmd.Context(), cfg, configDir, workspaceRoot)
+		if err := applier.Apply(cmd.Context(), cfg, configDir, workspaceRoot); err != nil {
+			return err
+		}
+
+		// Update the global registry after successful apply.
+		globalCfg, err := config.LoadGlobalConfig()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "warning: could not load global config for registry update: %v\n", err)
+			return nil
+		}
+
+		absConfigPath, err := filepath.Abs(configPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "warning: could not resolve config path: %v\n", err)
+			return nil
+		}
+		absRoot, err := filepath.Abs(workspaceRoot)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "warning: could not resolve workspace root: %v\n", err)
+			return nil
+		}
+
+		globalCfg.SetRegistryEntry(cfg.Workspace.Name, config.RegistryEntry{
+			Source: absConfigPath,
+			Root:   absRoot,
+		})
+
+		if err := config.SaveGlobalConfig(globalCfg); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: could not update registry: %v\n", err)
+		}
+
+		return nil
 	},
 }
