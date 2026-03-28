@@ -97,9 +97,9 @@ func TestRepoCloneBranchOverride(t *testing.T) {
 
 func TestMergeOverridesNoOverride(t *testing.T) {
 	ws := &config.WorkspaceConfig{
-		Hooks:    map[string]any{"pre_tool_use": []any{"a.sh"}},
-		Settings: map[string]any{"permissions": "bypass"},
-		Env:      map[string]any{"files": []any{"ws.env"}},
+		Hooks:    config.HooksConfig{"pre_tool_use": {"a.sh"}},
+		Settings: config.SettingsConfig{"permissions": "bypass"},
+		Env:      config.EnvConfig{Files: []string{"ws.env"}},
 	}
 	eff := MergeOverrides(ws, "unknown-repo")
 
@@ -114,10 +114,10 @@ func TestMergeOverridesNoOverride(t *testing.T) {
 
 func TestMergeOverridesSettingsWin(t *testing.T) {
 	ws := &config.WorkspaceConfig{
-		Settings: map[string]any{"permissions": "bypass", "keep": "yes"},
+		Settings: config.SettingsConfig{"permissions": "bypass", "keep": "yes"},
 		Repos: map[string]config.RepoOverride{
 			"myrepo": {
-				Settings: map[string]any{"permissions": "ask"},
+				Settings: config.SettingsConfig{"permissions": "ask"},
 			},
 		},
 	}
@@ -133,51 +133,69 @@ func TestMergeOverridesSettingsWin(t *testing.T) {
 
 func TestMergeOverridesEnvFilesAppend(t *testing.T) {
 	ws := &config.WorkspaceConfig{
-		Env: map[string]any{"files": []any{"ws.env"}},
+		Env: config.EnvConfig{Files: []string{"ws.env"}},
 		Repos: map[string]config.RepoOverride{
 			"myrepo": {
-				Env: map[string]any{"files": []any{"repo.env"}},
+				Env: config.EnvConfig{Files: []string{"repo.env"}},
 			},
 		},
 	}
 	eff := MergeOverrides(ws, "myrepo")
 
-	files, ok := eff.Env["files"].([]any)
-	if !ok {
-		t.Fatalf("expected files to be []any, got %T", eff.Env["files"])
+	if len(eff.Env.Files) != 2 {
+		t.Fatalf("expected 2 files, got %d: %v", len(eff.Env.Files), eff.Env.Files)
 	}
-	if len(files) != 2 {
-		t.Fatalf("expected 2 files, got %d: %v", len(files), files)
-	}
-	if files[0] != "ws.env" || files[1] != "repo.env" {
-		t.Errorf("expected [ws.env repo.env], got %v", files)
+	if eff.Env.Files[0] != "ws.env" || eff.Env.Files[1] != "repo.env" {
+		t.Errorf("expected [ws.env repo.env], got %v", eff.Env.Files)
 	}
 }
 
-func TestMergeOverridesEnvNonFilesWin(t *testing.T) {
+func TestMergeOverridesEnvVarsWin(t *testing.T) {
 	ws := &config.WorkspaceConfig{
-		Env: map[string]any{"mode": "development"},
+		Env: config.EnvConfig{Vars: map[string]string{"LOG_LEVEL": "info"}},
 		Repos: map[string]config.RepoOverride{
 			"myrepo": {
-				Env: map[string]any{"mode": "production"},
+				Env: config.EnvConfig{Vars: map[string]string{"LOG_LEVEL": "debug"}},
 			},
 		},
 	}
 	eff := MergeOverrides(ws, "myrepo")
 
-	if eff.Env["mode"] != "production" {
-		t.Errorf("repo env non-files key should win, got %v", eff.Env["mode"])
+	if eff.Env.Vars["LOG_LEVEL"] != "debug" {
+		t.Errorf("repo env var should win, got %v", eff.Env.Vars["LOG_LEVEL"])
+	}
+}
+
+func TestMergeOverridesEnvVarsMerge(t *testing.T) {
+	ws := &config.WorkspaceConfig{
+		Env: config.EnvConfig{Vars: map[string]string{"LOG_LEVEL": "info", "MODE": "prod"}},
+		Repos: map[string]config.RepoOverride{
+			"myrepo": {
+				Env: config.EnvConfig{Vars: map[string]string{"DEBUG": "true"}},
+			},
+		},
+	}
+	eff := MergeOverrides(ws, "myrepo")
+
+	if eff.Env.Vars["LOG_LEVEL"] != "info" {
+		t.Errorf("workspace var should be preserved, got %v", eff.Env.Vars["LOG_LEVEL"])
+	}
+	if eff.Env.Vars["MODE"] != "prod" {
+		t.Errorf("workspace var should be preserved, got %v", eff.Env.Vars["MODE"])
+	}
+	if eff.Env.Vars["DEBUG"] != "true" {
+		t.Errorf("repo var should be added, got %v", eff.Env.Vars["DEBUG"])
 	}
 }
 
 func TestMergeOverridesHooksExtend(t *testing.T) {
 	ws := &config.WorkspaceConfig{
-		Hooks: map[string]any{"pre_tool_use": []any{"ws-gate.sh"}},
+		Hooks: config.HooksConfig{"pre_tool_use": {"ws-gate.sh"}},
 		Repos: map[string]config.RepoOverride{
 			"myrepo": {
-				Hooks: map[string]any{
-					"pre_tool_use": []any{"repo-gate.sh"},
-					"stop":         []any{"repo-stop.sh"},
+				Hooks: config.HooksConfig{
+					"pre_tool_use": {"repo-gate.sh"},
+					"stop":         {"repo-stop.sh"},
 				},
 			},
 		},
@@ -185,10 +203,7 @@ func TestMergeOverridesHooksExtend(t *testing.T) {
 	eff := MergeOverrides(ws, "myrepo")
 
 	// pre_tool_use should be extended (concatenated).
-	preToolUse, ok := eff.Hooks["pre_tool_use"].([]any)
-	if !ok {
-		t.Fatalf("expected pre_tool_use to be []any, got %T", eff.Hooks["pre_tool_use"])
-	}
+	preToolUse := eff.Hooks["pre_tool_use"]
 	if len(preToolUse) != 2 {
 		t.Fatalf("expected 2 hooks, got %d: %v", len(preToolUse), preToolUse)
 	}
@@ -197,10 +212,7 @@ func TestMergeOverridesHooksExtend(t *testing.T) {
 	}
 
 	// stop should be a new hook key from repo.
-	stop, ok := eff.Hooks["stop"].([]any)
-	if !ok {
-		t.Fatalf("expected stop to be []any, got %T", eff.Hooks["stop"])
-	}
+	stop := eff.Hooks["stop"]
 	if len(stop) != 1 || stop[0] != "repo-stop.sh" {
 		t.Errorf("expected [repo-stop.sh], got %v", stop)
 	}
@@ -208,12 +220,12 @@ func TestMergeOverridesHooksExtend(t *testing.T) {
 
 func TestMergeOverridesNilWorkspaceFields(t *testing.T) {
 	ws := &config.WorkspaceConfig{
-		// All nil workspace-level hooks/settings/env.
+		// All nil/zero workspace-level hooks/settings/env.
 		Repos: map[string]config.RepoOverride{
 			"myrepo": {
-				Settings: map[string]any{"permissions": "ask"},
-				Hooks:    map[string]any{"stop": []any{"stop.sh"}},
-				Env:      map[string]any{"files": []any{"repo.env"}},
+				Settings: config.SettingsConfig{"permissions": "ask"},
+				Hooks:    config.HooksConfig{"stop": {"stop.sh"}},
+				Env:      config.EnvConfig{Files: []string{"repo.env"}},
 			},
 		},
 	}
@@ -222,13 +234,12 @@ func TestMergeOverridesNilWorkspaceFields(t *testing.T) {
 	if eff.Settings["permissions"] != "ask" {
 		t.Errorf("expected permissions=ask, got %v", eff.Settings["permissions"])
 	}
-	stop, ok := eff.Hooks["stop"].([]any)
-	if !ok || len(stop) != 1 {
-		t.Errorf("expected [stop.sh], got %v", eff.Hooks["stop"])
+	stop := eff.Hooks["stop"]
+	if len(stop) != 1 || stop[0] != "stop.sh" {
+		t.Errorf("expected [stop.sh], got %v", stop)
 	}
-	files, ok := eff.Env["files"].([]any)
-	if !ok || len(files) != 1 {
-		t.Errorf("expected [repo.env], got %v", eff.Env["files"])
+	if len(eff.Env.Files) != 1 || eff.Env.Files[0] != "repo.env" {
+		t.Errorf("expected [repo.env], got %v", eff.Env.Files)
 	}
 }
 
@@ -282,21 +293,46 @@ func TestKnownRepoNames(t *testing.T) {
 
 func TestMergeOverridesMutationSafety(t *testing.T) {
 	// Verify that merging doesn't mutate the workspace-level maps.
-	wsHooks := map[string]any{"pre_tool_use": []any{"ws.sh"}}
+	wsHooks := config.HooksConfig{"pre_tool_use": {"ws.sh"}}
 	ws := &config.WorkspaceConfig{
 		Hooks: wsHooks,
 		Repos: map[string]config.RepoOverride{
 			"myrepo": {
-				Hooks: map[string]any{"pre_tool_use": []any{"repo.sh"}},
+				Hooks: config.HooksConfig{"pre_tool_use": {"repo.sh"}},
 			},
 		},
 	}
 	_ = MergeOverrides(ws, "myrepo")
 
 	// The workspace hooks should not be modified.
-	original, ok := ws.Hooks["pre_tool_use"].([]any)
-	if !ok || len(original) != 1 || original[0] != "ws.sh" {
+	original := ws.Hooks["pre_tool_use"]
+	if len(original) != 1 || original[0] != "ws.sh" {
 		t.Errorf("workspace hooks were mutated: %v", ws.Hooks["pre_tool_use"])
+	}
+}
+
+func TestMergeOverridesEnvMutationSafety(t *testing.T) {
+	ws := &config.WorkspaceConfig{
+		Env: config.EnvConfig{
+			Files: []string{"ws.env"},
+			Vars:  map[string]string{"A": "1"},
+		},
+		Repos: map[string]config.RepoOverride{
+			"myrepo": {
+				Env: config.EnvConfig{
+					Files: []string{"repo.env"},
+					Vars:  map[string]string{"B": "2"},
+				},
+			},
+		},
+	}
+	_ = MergeOverrides(ws, "myrepo")
+
+	if len(ws.Env.Files) != 1 || ws.Env.Files[0] != "ws.env" {
+		t.Errorf("workspace env files were mutated: %v", ws.Env.Files)
+	}
+	if len(ws.Env.Vars) != 1 || ws.Env.Vars["A"] != "1" {
+		t.Errorf("workspace env vars were mutated: %v", ws.Env.Vars)
 	}
 }
 

@@ -1,0 +1,10 @@
+{
+  "topic": "config-distribution",
+  "decisions": [
+    {"id": 1, "question": "How should the materializer extensibility pattern work?", "status": "pending", "complexity": "standard"},
+    {"id": 2, "question": "How should typed config structs replace the map[string]any placeholders?", "status": "pending", "complexity": "standard"},
+    {"id": 3, "question": "How should each materializer write files to repos?", "status": "complete", "complexity": "standard"}
+  ],
+  "cross_validation": "pending",
+  "round": 0
+}

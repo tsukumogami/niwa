@@ -21,9 +21,9 @@ type WorkspaceConfig struct {
 	Groups    map[string]GroupConfig  `toml:"groups"`
 	Repos     map[string]RepoOverride `toml:"repos"`
 	Content   ContentConfig           `toml:"content"`
-	Hooks     map[string]any          `toml:"hooks"`    // placeholder
-	Settings  map[string]any          `toml:"settings"` // placeholder
-	Env       map[string]any          `toml:"env"`      // placeholder
+	Hooks     HooksConfig             `toml:"hooks"`
+	Settings  SettingsConfig          `toml:"settings"`
+	Env       EnvConfig               `toml:"env"`
 	Channels  map[string]any          `toml:"channels"` // placeholder
 }
 
@@ -54,15 +54,30 @@ type GroupConfig struct {
 	Repos      []string `toml:"repos,omitempty"`
 }
 
+// HooksConfig maps hook event names (e.g., "pre_tool_use", "stop") to lists
+// of script paths that should be executed for that event.
+type HooksConfig map[string][]string
+
+// SettingsConfig maps setting keys to their values. The primary key today is
+// "permissions" (values: "bypass", "ask").
+type SettingsConfig map[string]string
+
+// EnvConfig defines environment configuration with explicit file paths and
+// key-value variable pairs.
+type EnvConfig struct {
+	Files []string          `toml:"files,omitempty"`
+	Vars  map[string]string `toml:"vars,omitempty"`
+}
+
 // RepoOverride holds per-repo configuration overrides.
 type RepoOverride struct {
 	URL      string         `toml:"url,omitempty"`
 	Branch   string         `toml:"branch,omitempty"`
 	Scope    string         `toml:"scope,omitempty"`
 	Claude   *bool          `toml:"claude,omitempty"`
-	Hooks    map[string]any `toml:"hooks,omitempty"`
-	Settings map[string]any `toml:"settings,omitempty"`
-	Env      map[string]any `toml:"env,omitempty"`
+	Hooks    HooksConfig    `toml:"hooks,omitempty"`
+	Settings SettingsConfig `toml:"settings,omitempty"`
+	Env      EnvConfig      `toml:"env,omitempty"`
 }
 
 // ContentConfig declares the CLAUDE.md content hierarchy.

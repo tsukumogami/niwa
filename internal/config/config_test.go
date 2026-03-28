@@ -73,6 +73,7 @@ permissions = "bypass"
 
 [env]
 files = ["env/workspace.env"]
+vars = { LOG_LEVEL = "debug" }
 
 [channels.telegram]
 plugin = "telegram@claude-plugins-official"
@@ -240,15 +241,27 @@ func TestParseFullConfig(t *testing.T) {
 			cfg.Content.Repos["tsuku"].Subdirs["recipes"], "repos/tsuku-recipes.md")
 	}
 
-	// Placeholder sections parse without error
+	// Typed sections parse correctly
 	if cfg.Hooks == nil {
 		t.Error("hooks should not be nil")
+	}
+	if len(cfg.Hooks["pre_tool_use"]) != 1 || cfg.Hooks["pre_tool_use"][0] != "hooks/gate-online.sh" {
+		t.Errorf("hooks.pre_tool_use = %v, want [hooks/gate-online.sh]", cfg.Hooks["pre_tool_use"])
+	}
+	if len(cfg.Hooks["stop"]) != 1 || cfg.Hooks["stop"][0] != "hooks/workflow-continue.sh" {
+		t.Errorf("hooks.stop = %v, want [hooks/workflow-continue.sh]", cfg.Hooks["stop"])
 	}
 	if cfg.Settings == nil {
 		t.Error("settings should not be nil")
 	}
-	if cfg.Env == nil {
-		t.Error("env should not be nil")
+	if cfg.Settings["permissions"] != "bypass" {
+		t.Errorf("settings.permissions = %v, want bypass", cfg.Settings["permissions"])
+	}
+	if len(cfg.Env.Files) != 1 || cfg.Env.Files[0] != "env/workspace.env" {
+		t.Errorf("env.files = %v, want [env/workspace.env]", cfg.Env.Files)
+	}
+	if cfg.Env.Vars["LOG_LEVEL"] != "debug" {
+		t.Errorf("env.vars.LOG_LEVEL = %v, want debug", cfg.Env.Vars["LOG_LEVEL"])
 	}
 	if cfg.Channels == nil {
 		t.Error("channels should not be nil")
@@ -303,14 +316,17 @@ files = ["repo.env"]
 	if repo.Hooks == nil {
 		t.Fatal("hooks should not be nil")
 	}
+	if len(repo.Hooks["pre_tool_use"]) != 1 || repo.Hooks["pre_tool_use"][0] != "repo-gate.sh" {
+		t.Errorf("hooks.pre_tool_use = %v, want [repo-gate.sh]", repo.Hooks["pre_tool_use"])
+	}
 	if repo.Settings == nil {
 		t.Fatal("settings should not be nil")
 	}
 	if repo.Settings["permissions"] != "ask" {
 		t.Errorf("settings.permissions = %v, want ask", repo.Settings["permissions"])
 	}
-	if repo.Env == nil {
-		t.Fatal("env should not be nil")
+	if len(repo.Env.Files) != 1 || repo.Env.Files[0] != "repo.env" {
+		t.Errorf("env.files = %v, want [repo.env]", repo.Env.Files)
 	}
 }
 
