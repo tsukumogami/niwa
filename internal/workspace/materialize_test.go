@@ -1,6 +1,7 @@
 package workspace
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -308,4 +309,342 @@ func TestHooksMaterializerMissingSource(t *testing.T) {
 func TestMaterializerInterface(t *testing.T) {
 	// Verify HooksMaterializer satisfies the Materializer interface.
 	var _ Materializer = &HooksMaterializer{}
+	// Verify SettingsMaterializer satisfies the Materializer interface.
+	var _ Materializer = &SettingsMaterializer{}
+}
+
+func TestSettingsMaterializerName(t *testing.T) {
+	m := &SettingsMaterializer{}
+	if got := m.Name(); got != "settings" {
+		t.Errorf("Name() = %q, want %q", got, "settings")
+	}
+}
+
+func TestSettingsMaterializerNoopWhenEmpty(t *testing.T) {
+	ctx := &MaterializeContext{
+		Effective: EffectiveConfig{
+			Claude: config.ClaudeConfig{},
+		},
+	}
+
+	m := &SettingsMaterializer{}
+	written, err := m.Materialize(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if written != nil {
+		t.Errorf("expected nil, got %v", written)
+	}
+}
+
+func TestSettingsMaterializerPermissionsOnly(t *testing.T) {
+	tmpDir := t.TempDir()
+	repoDir := filepath.Join(tmpDir, "repo")
+	if err := os.MkdirAll(repoDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := &MaterializeContext{
+		Effective: EffectiveConfig{
+			Claude: config.ClaudeConfig{
+				Settings: config.SettingsConfig{"permissions": "bypass"},
+			},
+		},
+		RepoDir: repoDir,
+	}
+
+	m := &SettingsMaterializer{}
+	written, err := m.Materialize(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(written) != 1 {
+		t.Fatalf("expected 1 file written, got %d", len(written))
+	}
+
+	expectedPath := filepath.Join(repoDir, ".claude", "settings.local.json")
+	if written[0] != expectedPath {
+		t.Errorf("written[0] = %q, want %q", written[0], expectedPath)
+	}
+
+	data, err := os.ReadFile(expectedPath)
+	if err != nil {
+		t.Fatalf("reading settings file: %v", err)
+	}
+
+	var doc map[string]any
+	if err := json.Unmarshal(data, &doc); err != nil {
+		t.Fatalf("parsing settings JSON: %v", err)
+	}
+
+	perms, ok := doc["permissions"].(map[string]any)
+	if !ok {
+		t.Fatal("expected permissions key in output")
+	}
+	if perms["defaultMode"] != "bypassPermissions" {
+		t.Errorf("defaultMode = %v, want %q", perms["defaultMode"], "bypassPermissions")
+	}
+
+	if _, ok := doc["hooks"]; ok {
+		t.Error("hooks key should not be present when no hooks installed")
+	}
+}
+
+func TestSettingsMaterializerAskPermissions(t *testing.T) {
+	tmpDir := t.TempDir()
+	repoDir := filepath.Join(tmpDir, "repo")
+	if err := os.MkdirAll(repoDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := &MaterializeContext{
+		Effective: EffectiveConfig{
+			Claude: config.ClaudeConfig{
+				Settings: config.SettingsConfig{"permissions": "ask"},
+			},
+		},
+		RepoDir: repoDir,
+	}
+
+	m := &SettingsMaterializer{}
+	written, err := m.Materialize(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(written) != 1 {
+		t.Fatalf("expected 1 file, got %d", len(written))
+	}
+
+	data, err := os.ReadFile(written[0])
+	if err != nil {
+		t.Fatalf("reading settings file: %v", err)
+	}
+
+	var doc map[string]any
+	if err := json.Unmarshal(data, &doc); err != nil {
+		t.Fatalf("parsing JSON: %v", err)
+	}
+
+	perms := doc["permissions"].(map[string]any)
+	if perms["defaultMode"] != "askPermissions" {
+		t.Errorf("defaultMode = %v, want %q", perms["defaultMode"], "askPermissions")
+	}
+}
+
+func TestSettingsMaterializerUnknownPermissions(t *testing.T) {
+	tmpDir := t.TempDir()
+	repoDir := filepath.Join(tmpDir, "repo")
+	if err := os.MkdirAll(repoDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := &MaterializeContext{
+		Effective: EffectiveConfig{
+			Claude: config.ClaudeConfig{
+				Settings: config.SettingsConfig{"permissions": "invalid"},
+			},
+		},
+		RepoDir: repoDir,
+	}
+
+	m := &SettingsMaterializer{}
+	_, err := m.Materialize(ctx)
+	if err == nil {
+		t.Fatal("expected error for unknown permissions value, got nil")
+	}
+}
+
+func TestSettingsMaterializerHooksOnly(t *testing.T) {
+	tmpDir := t.TempDir()
+	repoDir := filepath.Join(tmpDir, "repo")
+	if err := os.MkdirAll(repoDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := &MaterializeContext{
+		Effective: EffectiveConfig{
+			Claude: config.ClaudeConfig{},
+		},
+		RepoDir: repoDir,
+		InstalledHooks: map[string][]string{
+			"pre_tool_use": {filepath.Join(repoDir, ".claude", "hooks", "pre_tool_use", "gate.sh")},
+		},
+	}
+
+	m := &SettingsMaterializer{}
+	written, err := m.Materialize(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(written) != 1 {
+		t.Fatalf("expected 1 file, got %d", len(written))
+	}
+
+	data, err := os.ReadFile(written[0])
+	if err != nil {
+		t.Fatalf("reading settings file: %v", err)
+	}
+
+	var doc map[string]any
+	if err := json.Unmarshal(data, &doc); err != nil {
+		t.Fatalf("parsing JSON: %v", err)
+	}
+
+	if _, ok := doc["permissions"]; ok {
+		t.Error("permissions key should not be present when no settings")
+	}
+
+	hooksDoc, ok := doc["hooks"].(map[string]any)
+	if !ok {
+		t.Fatal("expected hooks key in output")
+	}
+
+	entries, ok := hooksDoc["PreToolUse"].([]any)
+	if !ok {
+		t.Fatal("expected PreToolUse key in hooks")
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 hook entry, got %d", len(entries))
+	}
+
+	entry := entries[0].(map[string]any)
+	if entry["type"] != "command" {
+		t.Errorf("type = %v, want %q", entry["type"], "command")
+	}
+	if entry["command"] != ".claude/hooks/pre_tool_use/gate.sh" {
+		t.Errorf("command = %v, want %q", entry["command"], ".claude/hooks/pre_tool_use/gate.sh")
+	}
+}
+
+func TestSettingsMaterializerSettingsAndHooks(t *testing.T) {
+	tmpDir := t.TempDir()
+	repoDir := filepath.Join(tmpDir, "repo")
+	if err := os.MkdirAll(repoDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := &MaterializeContext{
+		Effective: EffectiveConfig{
+			Claude: config.ClaudeConfig{
+				Settings: config.SettingsConfig{"permissions": "bypass"},
+			},
+		},
+		RepoDir: repoDir,
+		InstalledHooks: map[string][]string{
+			"pre_tool_use": {filepath.Join(repoDir, ".claude", "hooks", "pre_tool_use", "gate.sh")},
+			"stop":         {filepath.Join(repoDir, ".claude", "hooks", "stop", "stop.sh")},
+		},
+	}
+
+	m := &SettingsMaterializer{}
+	written, err := m.Materialize(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(written) != 1 {
+		t.Fatalf("expected 1 file, got %d", len(written))
+	}
+
+	data, err := os.ReadFile(written[0])
+	if err != nil {
+		t.Fatalf("reading settings file: %v", err)
+	}
+
+	var doc map[string]any
+	if err := json.Unmarshal(data, &doc); err != nil {
+		t.Fatalf("parsing JSON: %v", err)
+	}
+
+	// Verify permissions.
+	perms := doc["permissions"].(map[string]any)
+	if perms["defaultMode"] != "bypassPermissions" {
+		t.Errorf("defaultMode = %v, want %q", perms["defaultMode"], "bypassPermissions")
+	}
+
+	// Verify hooks.
+	hooksDoc := doc["hooks"].(map[string]any)
+	for _, tc := range []struct {
+		event   string
+		command string
+	}{
+		{"PreToolUse", ".claude/hooks/pre_tool_use/gate.sh"},
+		{"Stop", ".claude/hooks/stop/stop.sh"},
+	} {
+		entries, ok := hooksDoc[tc.event].([]any)
+		if !ok {
+			t.Errorf("missing hook event %q", tc.event)
+			continue
+		}
+		if len(entries) != 1 {
+			t.Errorf("%s: expected 1 entry, got %d", tc.event, len(entries))
+			continue
+		}
+		entry := entries[0].(map[string]any)
+		if entry["command"] != tc.command {
+			t.Errorf("%s command = %v, want %q", tc.event, entry["command"], tc.command)
+		}
+	}
+}
+
+func TestSettingsMaterializerMultipleHooksPerEvent(t *testing.T) {
+	tmpDir := t.TempDir()
+	repoDir := filepath.Join(tmpDir, "repo")
+	if err := os.MkdirAll(repoDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := &MaterializeContext{
+		Effective: EffectiveConfig{
+			Claude: config.ClaudeConfig{},
+		},
+		RepoDir: repoDir,
+		InstalledHooks: map[string][]string{
+			"pre_tool_use": {
+				filepath.Join(repoDir, ".claude", "hooks", "pre_tool_use", "gate.sh"),
+				filepath.Join(repoDir, ".claude", "hooks", "pre_tool_use", "validate.sh"),
+			},
+		},
+	}
+
+	m := &SettingsMaterializer{}
+	written, err := m.Materialize(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(written) != 1 {
+		t.Fatalf("expected 1 file, got %d", len(written))
+	}
+
+	data, err := os.ReadFile(written[0])
+	if err != nil {
+		t.Fatalf("reading settings file: %v", err)
+	}
+
+	var doc map[string]any
+	if err := json.Unmarshal(data, &doc); err != nil {
+		t.Fatalf("parsing JSON: %v", err)
+	}
+
+	hooksDoc := doc["hooks"].(map[string]any)
+	entries := hooksDoc["PreToolUse"].([]any)
+	if len(entries) != 2 {
+		t.Fatalf("expected 2 entries for PreToolUse, got %d", len(entries))
+	}
+}
+
+func TestSnakeToPascal(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"pre_tool_use", "PreToolUse"},
+		{"stop", "Stop"},
+		{"post_tool_use", "PostToolUse"},
+		{"some_new_event", "SomeNewEvent"},
+	}
+	for _, tc := range tests {
+		if got := snakeToPascal(tc.input); got != tc.want {
+			t.Errorf("snakeToPascal(%q) = %q, want %q", tc.input, got, tc.want)
+		}
+	}
 }

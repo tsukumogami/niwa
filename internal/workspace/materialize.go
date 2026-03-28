@@ -1,9 +1,12 @@
 package workspace
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 
 	"github.com/tsukumogami/niwa/internal/config"
 )
@@ -84,4 +87,119 @@ func (h *HooksMaterializer) Materialize(ctx *MaterializeContext) ([]string, erro
 
 	ctx.InstalledHooks = installed
 	return written, nil
+}
+
+// permissionsMapping translates niwa permission values to Claude Code
+// settings.local.json permission mode strings.
+var permissionsMapping = map[string]string{
+	"bypass": "bypassPermissions",
+	"ask":    "askPermissions",
+}
+
+// hookEventMapping translates snake_case hook event names used in niwa config
+// to PascalCase event names expected by Claude Code settings.
+var hookEventMapping = map[string]string{
+	"pre_tool_use":  "PreToolUse",
+	"post_tool_use": "PostToolUse",
+	"stop":          "Stop",
+	"notification":  "Notification",
+}
+
+// snakeToPascal converts a snake_case string to PascalCase as a fallback when
+// the event name is not in hookEventMapping.
+func snakeToPascal(s string) string {
+	parts := strings.Split(s, "_")
+	for i, p := range parts {
+		if len(p) > 0 {
+			parts[i] = strings.ToUpper(p[:1]) + p[1:]
+		}
+	}
+	return strings.Join(parts, "")
+}
+
+// SettingsMaterializer generates the .claude/settings.local.json file from
+// effective settings and installed hooks.
+type SettingsMaterializer struct{}
+
+// Name returns the materializer identifier.
+func (s *SettingsMaterializer) Name() string {
+	return "settings"
+}
+
+// Materialize builds and writes {repoDir}/.claude/settings.local.json from
+// the effective settings and installed hooks. It returns the list of written
+// file paths, or nil if there is nothing to write.
+func (s *SettingsMaterializer) Materialize(ctx *MaterializeContext) ([]string, error) {
+	settings := ctx.Effective.Claude.Settings
+	hooks := ctx.InstalledHooks
+
+	if len(settings) == 0 && len(hooks) == 0 {
+		return nil, nil
+	}
+
+	doc := make(map[string]any)
+
+	// Build permissions block from settings.
+	if perm, ok := settings["permissions"]; ok {
+		mapped, known := permissionsMapping[perm]
+		if !known {
+			return nil, fmt.Errorf("unknown permissions value %q", perm)
+		}
+		doc["permissions"] = map[string]any{
+			"defaultMode": mapped,
+		}
+	}
+
+	// Build hooks block from installed hooks.
+	if len(hooks) > 0 {
+		hooksDoc := make(map[string]any, len(hooks))
+
+		// Sort event names for deterministic output.
+		events := make([]string, 0, len(hooks))
+		for event := range hooks {
+			events = append(events, event)
+		}
+		sort.Strings(events)
+
+		for _, event := range events {
+			paths := hooks[event]
+			pascalEvent, ok := hookEventMapping[event]
+			if !ok {
+				pascalEvent = snakeToPascal(event)
+			}
+
+			entries := make([]map[string]string, 0, len(paths))
+			for _, absPath := range paths {
+				rel, err := filepath.Rel(ctx.RepoDir, absPath)
+				if err != nil {
+					return nil, fmt.Errorf("computing relative path for hook %s: %w", absPath, err)
+				}
+				entries = append(entries, map[string]string{
+					"type":    "command",
+					"command": filepath.ToSlash(rel),
+				})
+			}
+			hooksDoc[pascalEvent] = entries
+		}
+		doc["hooks"] = hooksDoc
+	}
+
+	data, err := json.MarshalIndent(doc, "", "  ")
+	if err != nil {
+		return nil, fmt.Errorf("marshaling settings: %w", err)
+	}
+	// Append trailing newline for clean file output.
+	data = append(data, '\n')
+
+	claudeDir := filepath.Join(ctx.RepoDir, ".claude")
+	if err := os.MkdirAll(claudeDir, 0o755); err != nil {
+		return nil, fmt.Errorf("creating .claude directory: %w", err)
+	}
+
+	target := filepath.Join(claudeDir, "settings.local.json")
+	if err := os.WriteFile(target, data, 0o644); err != nil {
+		return nil, fmt.Errorf("writing settings file: %w", err)
+	}
+
+	return []string{target}, nil
 }
