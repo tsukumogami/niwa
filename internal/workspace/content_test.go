@@ -529,6 +529,188 @@ func TestCheckGitignoreWarningOnWrite(t *testing.T) {
 	}
 }
 
+func TestCheckContainmentAccepted(t *testing.T) {
+	tmpDir := t.TempDir()
+	childDir := filepath.Join(tmpDir, "sub", "deep")
+	if err := os.MkdirAll(childDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name   string
+		target string
+		parent string
+	}{
+		{"direct child", filepath.Join(tmpDir, "file.md"), tmpDir},
+		{"nested child", filepath.Join(tmpDir, "sub", "deep", "file.md"), tmpDir},
+		{"same dir", tmpDir, tmpDir},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := checkContainment(tt.target, tt.parent); err != nil {
+				t.Errorf("expected no error, got: %v", err)
+			}
+		})
+	}
+}
+
+func TestCheckContainmentRejected(t *testing.T) {
+	tmpDir := t.TempDir()
+	parentDir := filepath.Join(tmpDir, "content")
+	if err := os.MkdirAll(parentDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name   string
+		target string
+		parent string
+	}{
+		{"traversal escape", filepath.Join(parentDir, "..", "secret"), parentDir},
+		{"sibling directory", filepath.Join(tmpDir, "other", "file"), parentDir},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := checkContainment(tt.target, tt.parent)
+			if err == nil {
+				t.Error("expected containment error, got nil")
+			}
+			if !strings.Contains(err.Error(), "escapes") {
+				t.Errorf("error should mention escaping, got: %v", err)
+			}
+		})
+	}
+}
+
+func TestCheckContainmentSymlink(t *testing.T) {
+	tmpDir := t.TempDir()
+	parentDir := filepath.Join(tmpDir, "content")
+	outsideDir := filepath.Join(tmpDir, "outside")
+	if err := os.MkdirAll(parentDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(outsideDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create a symlink inside content that points outside.
+	symlinkPath := filepath.Join(parentDir, "escape-link")
+	if err := os.Symlink(outsideDir, symlinkPath); err != nil {
+		t.Skipf("cannot create symlinks: %v", err)
+	}
+
+	target := filepath.Join(symlinkPath, "secret.md")
+	err := checkContainment(target, parentDir)
+	if err == nil {
+		t.Error("expected containment error for symlink escape, got nil")
+	}
+}
+
+func TestInstallContentFileContainment(t *testing.T) {
+	tmpDir := t.TempDir()
+	configDir := filepath.Join(tmpDir, "config")
+	contentDir := filepath.Join(configDir, "claude")
+	if err := os.MkdirAll(contentDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Write a secret file outside the content directory.
+	secretPath := filepath.Join(configDir, "secret.md")
+	if err := os.WriteFile(secretPath, []byte("secret"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.WorkspaceConfig{
+		Workspace: config.WorkspaceMeta{
+			Name:       "test",
+			ContentDir: "claude",
+		},
+		Content: config.ContentConfig{
+			Workspace: config.ContentEntry{Source: "../secret.md"},
+		},
+	}
+
+	instanceRoot := filepath.Join(tmpDir, "instance")
+	_, err := InstallWorkspaceContent(cfg, configDir, instanceRoot)
+	if err == nil {
+		t.Fatal("expected error for path traversal, got nil")
+	}
+	if !strings.Contains(err.Error(), "escapes") {
+		t.Errorf("error should mention escaping, got: %v", err)
+	}
+}
+
+func TestInstallRepoContentSubdirContainment(t *testing.T) {
+	tmpDir := t.TempDir()
+	configDir := filepath.Join(tmpDir, "config")
+	contentDir := filepath.Join(configDir, "claude")
+	reposDir := filepath.Join(contentDir, "repos")
+	if err := os.MkdirAll(reposDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	repoSource := "# repo\n"
+	subdirSource := "# subdir\n"
+	if err := os.WriteFile(filepath.Join(reposDir, "myrepo.md"), []byte(repoSource), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(reposDir, "sub.md"), []byte(subdirSource), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.WorkspaceConfig{
+		Workspace: config.WorkspaceMeta{
+			Name:       "test",
+			ContentDir: "claude",
+		},
+		Content: config.ContentConfig{
+			Repos: map[string]config.RepoContentEntry{
+				"myrepo": {
+					Source: "repos/myrepo.md",
+					Subdirs: map[string]string{
+						"../../escape": "repos/sub.md",
+					},
+				},
+			},
+		},
+	}
+
+	instanceRoot := filepath.Join(tmpDir, "instance")
+	repoDir := filepath.Join(instanceRoot, "public", "myrepo")
+	if err := os.MkdirAll(filepath.Join(repoDir, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repoDir, ".gitignore"), []byte("*.local*\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := InstallRepoContent(cfg, configDir, instanceRoot, "public", "myrepo")
+	if err == nil {
+		t.Fatal("expected error for subdirectory escape, got nil")
+	}
+	if !strings.Contains(err.Error(), "escapes") {
+		t.Errorf("error should mention escaping, got: %v", err)
+	}
+}
+
+func TestExpandVarsUsesStringReplacement(t *testing.T) {
+	// Verify that expandVars uses plain string replacement (strings.NewReplacer),
+	// not text/template. Template syntax should pass through unchanged.
+	input := "Hello {{.Name}}, {{ range .Items }}{{ . }}{{ end }}"
+	vars := map[string]string{
+		"{workspace_name}": "test",
+	}
+
+	got := expandVars(input, vars)
+	// If text/template were used, this would either fail to parse or expand
+	// the template directives. With plain replacement, the input passes through.
+	if got != input {
+		t.Errorf("expandVars modified template syntax: got %q, want %q", got, input)
+	}
+}
+
 func TestHasLocalPattern(t *testing.T) {
 	tests := []struct {
 		name    string

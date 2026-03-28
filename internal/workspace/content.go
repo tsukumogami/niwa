@@ -134,7 +134,11 @@ func InstallRepoContent(cfg *config.WorkspaceConfig, configDir, instanceRoot, gr
 			if subdirSource == "" {
 				continue
 			}
-			target := filepath.Join(repoDir, subdir, "CLAUDE.local.md")
+			subdirPath := filepath.Join(repoDir, subdir)
+			if err := checkContainment(subdirPath, repoDir); err != nil {
+				return nil, fmt.Errorf("subdirectory %q for repo %q: %w", subdir, repoName, err)
+			}
+			target := filepath.Join(subdirPath, "CLAUDE.local.md")
 			if err := installContentFile(cfg, configDir, subdirSource, target, vars); err != nil {
 				return nil, err
 			}
@@ -201,13 +205,19 @@ func autoDiscoverRepoSource(cfg *config.WorkspaceConfig, configDir, repoName str
 
 // installContentFile reads a source file relative to content_dir, expands
 // template variables, and writes the result to the target path.
+// It verifies that the resolved source path stays within the content directory.
 func installContentFile(cfg *config.WorkspaceConfig, configDir, source, target string, vars map[string]string) error {
 	contentDir := cfg.Workspace.ContentDir
 	if contentDir == "" {
 		contentDir = "."
 	}
 
-	sourcePath := filepath.Join(configDir, contentDir, source)
+	contentRoot := filepath.Join(configDir, contentDir)
+	sourcePath := filepath.Join(contentRoot, source)
+
+	if err := checkContainment(sourcePath, contentRoot); err != nil {
+		return fmt.Errorf("content source %q: %w", source, err)
+	}
 
 	data, err := os.ReadFile(sourcePath)
 	if err != nil {
@@ -226,6 +236,60 @@ func installContentFile(cfg *config.WorkspaceConfig, configDir, source, target s
 	}
 
 	return nil
+}
+
+// checkContainment verifies that targetPath resolves within parentDir.
+// It uses filepath.EvalSymlinks on any existing prefix to detect symlink escapes,
+// then checks that the resolved path has the parent as a prefix.
+func checkContainment(targetPath, parentDir string) error {
+	absParent, err := filepath.Abs(parentDir)
+	if err != nil {
+		return fmt.Errorf("resolving parent directory: %w", err)
+	}
+
+	absTarget, err := filepath.Abs(targetPath)
+	if err != nil {
+		return fmt.Errorf("resolving target path: %w", err)
+	}
+
+	// Resolve symlinks for the parent directory (it must exist).
+	realParent, err := filepath.EvalSymlinks(absParent)
+	if err != nil {
+		// If parent doesn't exist, fall back to the cleaned abs path.
+		realParent = absParent
+	}
+
+	// For the target, resolve symlinks on the longest existing prefix.
+	realTarget := resolveExistingPrefix(absTarget)
+
+	// Ensure the resolved target starts with the resolved parent directory.
+	parentPrefix := realParent + string(filepath.Separator)
+	if realTarget != realParent && !strings.HasPrefix(realTarget, parentPrefix) {
+		return fmt.Errorf("path escapes its allowed directory %q", parentDir)
+	}
+
+	return nil
+}
+
+// resolveExistingPrefix walks the path from root to leaf, resolving symlinks
+// for each component that exists. This handles the case where the full path
+// doesn't yet exist but an intermediate symlink could redirect it.
+func resolveExistingPrefix(p string) string {
+	resolved, err := filepath.EvalSymlinks(p)
+	if err == nil {
+		return resolved
+	}
+
+	// Walk up until we find a path that exists, resolve that, then append the rest.
+	dir := filepath.Dir(p)
+	base := filepath.Base(p)
+	if dir == p {
+		// Root -- nothing more to resolve.
+		return p
+	}
+
+	resolvedDir := resolveExistingPrefix(dir)
+	return filepath.Join(resolvedDir, base)
 }
 
 // expandVars performs simple string replacement for template variables.

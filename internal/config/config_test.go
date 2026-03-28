@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -244,6 +245,95 @@ files = ["repo.env"]
 	}
 }
 
+func TestValidNameAccepted(t *testing.T) {
+	accepted := []string{
+		"simple",
+		"my-workspace",
+		"my_workspace",
+		"my.workspace",
+		"CamelCase",
+		"v1.2.3",
+		".github",
+		"a",
+		"A-B_C.D",
+	}
+	for _, name := range accepted {
+		t.Run(name, func(t *testing.T) {
+			input := fmt.Sprintf("[workspace]\nname = %q\n", name)
+			_, err := Parse([]byte(input))
+			if err != nil {
+				t.Errorf("name %q should be accepted, got error: %v", name, err)
+			}
+		})
+	}
+}
+
+func TestValidNameRejected(t *testing.T) {
+	rejected := []string{
+		"has space",
+		"has/slash",
+		"has\\backslash",
+		"has:colon",
+		"",
+	}
+	for _, name := range rejected {
+		t.Run(name, func(t *testing.T) {
+			if name == "" {
+				// Empty name is caught by the "required" check, not the regex.
+				return
+			}
+			input := fmt.Sprintf("[workspace]\nname = %q\n", name)
+			_, err := Parse([]byte(input))
+			if err == nil {
+				t.Errorf("name %q should be rejected", name)
+			}
+		})
+	}
+}
+
+func TestValidateContentSourcePaths(t *testing.T) {
+	// Valid content source paths should be accepted.
+	validSources := []string{
+		"workspace.md",
+		"repos/myapp.md",
+		"deep/nested/path.md",
+		"file-with-dashes.md",
+		"file_with_underscores.md",
+	}
+	for _, source := range validSources {
+		t.Run("accepted_"+source, func(t *testing.T) {
+			input := fmt.Sprintf(`[workspace]
+name = "ok"
+[content.workspace]
+source = %q
+`, source)
+			_, err := Parse([]byte(input))
+			if err != nil {
+				t.Errorf("source %q should be accepted, got: %v", source, err)
+			}
+		})
+	}
+}
+
+func TestValidateSubdirKeyAccepted(t *testing.T) {
+	accepted := []string{"website", "docs/api", "nested/deep/path"}
+	for _, subdir := range accepted {
+		t.Run(subdir, func(t *testing.T) {
+			input := fmt.Sprintf(`[workspace]
+name = "ok"
+[content.repos.myrepo]
+source = "repos/myrepo.md"
+[content.repos.myrepo.subdirs]
+%q = "repos/sub.md"
+`, subdir)
+			_, err := Parse([]byte(input))
+			if err != nil {
+				t.Errorf("subdir key %q should be accepted, got: %v", subdir, err)
+			}
+		})
+	}
+}
+
 func TestParseValidation(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -262,6 +352,94 @@ name = "ok"
 [[sources]]
 repos = ["a"]`,
 			wantErr: "source org is required",
+		},
+		{
+			name:    "invalid workspace name with spaces",
+			input:   `[workspace]` + "\n" + `name = "bad name"`,
+			wantErr: `workspace.name "bad name": must match`,
+		},
+		{
+			name:    "invalid workspace name with slash",
+			input:   `[workspace]` + "\n" + `name = "bad/name"`,
+			wantErr: `workspace.name "bad/name": must match`,
+		},
+		{
+			name: "invalid group name",
+			input: `[workspace]
+name = "ok"
+[groups."bad group"]
+visibility = "public"`,
+			wantErr: `group name "bad group": must match`,
+		},
+		{
+			name: "invalid repo override name",
+			input: `[workspace]
+name = "ok"
+[repos."bad/repo"]
+scope = "tactical"`,
+			wantErr: `repo override name "bad/repo": must match`,
+		},
+		{
+			name: "content source with path traversal",
+			input: `[workspace]
+name = "ok"
+[content.workspace]
+source = "../../../etc/passwd"`,
+			wantErr: `path traversal (..) is not allowed`,
+		},
+		{
+			name: "content source with absolute path",
+			input: `[workspace]
+name = "ok"
+[content.workspace]
+source = "/etc/passwd"`,
+			wantErr: `absolute paths are not allowed`,
+		},
+		{
+			name: "content group source with traversal",
+			input: `[workspace]
+name = "ok"
+[content.groups.public]
+source = "foo/../../secret.md"`,
+			wantErr: `path traversal (..) is not allowed`,
+		},
+		{
+			name: "content repo source with traversal",
+			input: `[workspace]
+name = "ok"
+[content.repos.myrepo]
+source = "../secret.md"`,
+			wantErr: `path traversal (..) is not allowed`,
+		},
+		{
+			name: "subdir source with traversal",
+			input: `[workspace]
+name = "ok"
+[content.repos.myrepo]
+source = "repos/myrepo.md"
+[content.repos.myrepo.subdirs]
+web = "../escape.md"`,
+			wantErr: `path traversal (..) is not allowed`,
+		},
+		{
+			name: "subdir key escapes repo",
+			input: `[workspace]
+name = "ok"
+[content.repos.myrepo]
+source = "repos/myrepo.md"
+[content.repos.myrepo.subdirs]
+"../../escape" = "valid-source.md"`,
+			wantErr: `must resolve within the repo directory`,
+		},
+		{
+			name: "subdir key absolute path",
+			input: `[workspace]
+name = "ok"
+[content.repos.myrepo]
+source = "repos/myrepo.md"
+[content.repos.myrepo.subdirs]
+"/etc" = "valid-source.md"`,
+			wantErr: `absolute paths are not allowed`,
 		},
 	}
 

@@ -4,9 +4,15 @@ package config
 import (
 	"fmt"
 	"os"
+	"path/filepath"
+	"regexp"
+	"strings"
 
 	"github.com/BurntSushi/toml"
 )
+
+// validName matches names that contain only alphanumerics, dots, hyphens, and underscores.
+var validName = regexp.MustCompile(`^[a-zA-Z0-9._-]+$`)
 
 // WorkspaceConfig is the top-level configuration parsed from workspace.toml.
 type WorkspaceConfig struct {
@@ -99,11 +105,81 @@ func validate(cfg *WorkspaceConfig) error {
 		return fmt.Errorf("workspace.name is required")
 	}
 
+	if !validName.MatchString(cfg.Workspace.Name) {
+		return fmt.Errorf("workspace.name %q: must match [a-zA-Z0-9._-]+", cfg.Workspace.Name)
+	}
+
 	for _, s := range cfg.Sources {
 		if s.Org == "" {
 			return fmt.Errorf("source org is required")
 		}
 	}
 
+	for name := range cfg.Groups {
+		if !validName.MatchString(name) {
+			return fmt.Errorf("group name %q: must match [a-zA-Z0-9._-]+", name)
+		}
+	}
+
+	for name := range cfg.Repos {
+		if !validName.MatchString(name) {
+			return fmt.Errorf("repo override name %q: must match [a-zA-Z0-9._-]+", name)
+		}
+	}
+
+	// Validate content source paths don't escape the content directory.
+	if err := validateContentSource("content.workspace.source", cfg.Content.Workspace.Source); err != nil {
+		return err
+	}
+	for name, entry := range cfg.Content.Groups {
+		if err := validateContentSource(fmt.Sprintf("content.groups.%s.source", name), entry.Source); err != nil {
+			return err
+		}
+	}
+	for name, entry := range cfg.Content.Repos {
+		if err := validateContentSource(fmt.Sprintf("content.repos.%s.source", name), entry.Source); err != nil {
+			return err
+		}
+		for subdir, src := range entry.Subdirs {
+			if err := validateContentSource(fmt.Sprintf("content.repos.%s.subdirs.%s", name, subdir), src); err != nil {
+				return err
+			}
+			if err := validateSubdirKey(name, subdir); err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
+}
+
+// validateContentSource rejects source paths that contain ".." components or
+// are absolute, which could escape the content directory.
+func validateContentSource(field, source string) error {
+	if source == "" {
+		return nil
+	}
+	if filepath.IsAbs(source) {
+		return fmt.Errorf("%s %q: absolute paths are not allowed", field, source)
+	}
+	for _, part := range strings.Split(filepath.ToSlash(source), "/") {
+		if part == ".." {
+			return fmt.Errorf("%s %q: path traversal (..) is not allowed", field, source)
+		}
+	}
+	return nil
+}
+
+// validateSubdirKey ensures a subdirectory key resolves within its repo
+// directory and doesn't escape via ".." or absolute path components.
+func validateSubdirKey(repoName, subdir string) error {
+	if filepath.IsAbs(subdir) {
+		return fmt.Errorf("content.repos.%s.subdirs key %q: absolute paths are not allowed", repoName, subdir)
+	}
+	// Clean the path and verify it doesn't escape.
+	cleaned := filepath.Clean(subdir)
+	if cleaned == ".." || strings.HasPrefix(cleaned, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("content.repos.%s.subdirs key %q: must resolve within the repo directory", repoName, subdir)
+	}
 	return nil
 }
