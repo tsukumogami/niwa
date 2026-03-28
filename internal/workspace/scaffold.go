@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 )
 
 // scaffoldTemplate is the commented workspace.toml template.
@@ -72,19 +71,4 @@ func Scaffold(dir, name string) error {
 	}
 
 	return nil
-}
-
-// stripTOMLComments removes lines that are entirely comments or blank,
-// and strips inline comments. It is used by tests to validate the template
-// produces valid TOML when comments are removed.
-func stripTOMLComments(s string) string {
-	var lines []string
-	for _, line := range strings.Split(s, "\n") {
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
-			continue
-		}
-		lines = append(lines, line)
-	}
-	return strings.Join(lines, "\n") + "\n"
 }

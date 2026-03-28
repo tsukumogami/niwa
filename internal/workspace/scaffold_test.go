@@ -9,6 +9,18 @@ import (
 	"github.com/BurntSushi/toml"
 )
 
+func stripTOMLComments(s string) string {
+	var lines []string
+	for _, line := range strings.Split(s, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		lines = append(lines, line)
+	}
+	return strings.Join(lines, "\n") + "\n"
+}
+
 func TestScaffold_WithName(t *testing.T) {
 	dir := t.TempDir()
 
