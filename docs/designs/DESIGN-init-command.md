@@ -1,5 +1,5 @@
 ---
-status: Proposed
+status: Accepted
 problem: |
   niwa has no way to create a new workspace. Users must manually create
   .niwa/workspace.toml and content files. There's no scaffolding, no way

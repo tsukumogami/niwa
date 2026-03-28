@@ -1,5 +1,5 @@
 ---
-status: Planned
+status: Current
 problem: |
   niwa needs a declarative TOML schema to replace a 700-line imperative bash
   installer that hardcodes workspace structure, CLAUDE.md hierarchy, hooks,
