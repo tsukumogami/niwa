@@ -914,6 +914,242 @@ visibility = "public"
 	}
 }
 
+func TestCreateMaterializersIntegration(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	niwaDir := filepath.Join(tmpDir, ".niwa")
+	contentDir := filepath.Join(niwaDir, "claude")
+	reposContentDir := filepath.Join(contentDir, "repos")
+	hooksDir := filepath.Join(niwaDir, "hooks", "pre_tool_use")
+	envDir := filepath.Join(niwaDir, "env")
+	if err := os.MkdirAll(reposContentDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(hooksDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(envDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Write a hook script into the hooks directory for auto-discovery.
+	hookScript := "#!/bin/bash\necho 'pre-tool-use hook'\n"
+	if err := os.WriteFile(filepath.Join(hooksDir, "lint.sh"), []byte(hookScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Write a workspace env file for auto-discovery.
+	wsEnv := "WORKSPACE_VAR=hello\n"
+	if err := os.WriteFile(filepath.Join(envDir, "workspace.env"), []byte(wsEnv), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	configTOML := `
+[workspace]
+name = "test-ws"
+content_dir = "claude"
+
+[[sources]]
+org = "testorg"
+
+[groups.public]
+visibility = "public"
+
+[claude.settings]
+permissions = "bypass"
+
+[env.vars]
+EXTRA_VAR = "world"
+
+[content.workspace]
+source = "workspace.md"
+`
+	if err := os.WriteFile(filepath.Join(niwaDir, "workspace.toml"), []byte(configTOML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	contentFiles := map[string]string{
+		"workspace.md": "# {workspace_name}\n",
+	}
+	for name, body := range contentFiles {
+		path := filepath.Join(contentDir, name)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	result, err := config.Load(filepath.Join(niwaDir, "workspace.toml"))
+	if err != nil {
+		t.Fatalf("loading config: %v", err)
+	}
+	cfg := result.Config
+
+	mockClient := &mockGitHubClient{
+		repos: map[string][]github.Repo{
+			"testorg": {
+				{Name: "app", Visibility: "public", SSHURL: "git@github.com:testorg/app.git"},
+			},
+		},
+	}
+
+	applier := NewApplier(mockClient)
+	applier.Cloner = &Cloner{}
+
+	workspaceRoot := tmpDir
+	instanceRoot := filepath.Join(workspaceRoot, "test-ws")
+
+	// Pre-create repo dir with .git marker so the cloner skips it.
+	repoDir := filepath.Join(instanceRoot, "public", "app")
+	if err := os.MkdirAll(filepath.Join(repoDir, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repoDir, ".gitignore"), []byte("*.local*\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	gotPath, err := applier.Create(context.Background(), cfg, niwaDir, workspaceRoot)
+	if err != nil {
+		t.Fatalf("create failed: %v", err)
+	}
+	if gotPath != instanceRoot {
+		t.Errorf("Create returned %q, want %q", gotPath, instanceRoot)
+	}
+
+	// Verify hook script was installed.
+	hookTarget := filepath.Join(repoDir, ".claude", "hooks", "pre_tool_use", "lint.sh")
+	assertFileContains(t, hookTarget, "pre-tool-use hook")
+
+	// Verify hook script is executable.
+	info, err := os.Stat(hookTarget)
+	if err != nil {
+		t.Fatalf("stat hook: %v", err)
+	}
+	if info.Mode()&0o111 == 0 {
+		t.Error("hook script should be executable")
+	}
+
+	// Verify settings.local.json was generated with permissions and hooks.
+	settingsPath := filepath.Join(repoDir, ".claude", "settings.local.json")
+	assertFileContains(t, settingsPath, `"defaultMode": "bypassPermissions"`)
+	assertFileContains(t, settingsPath, `"PreToolUse"`)
+	assertFileContains(t, settingsPath, "lint.sh")
+
+	// Verify .local.env was generated with both discovered and inline vars.
+	envPath := filepath.Join(repoDir, ".local.env")
+	assertFileContains(t, envPath, "WORKSPACE_VAR=hello")
+	assertFileContains(t, envPath, "EXTRA_VAR=world")
+
+	// Verify all generated files are tracked in managed files state.
+	state, err := LoadState(instanceRoot)
+	if err != nil {
+		t.Fatalf("loading state: %v", err)
+	}
+
+	managedPaths := make(map[string]bool)
+	for _, mf := range state.ManagedFiles {
+		managedPaths[mf.Path] = true
+	}
+
+	for _, expected := range []string{hookTarget, settingsPath, envPath} {
+		if !managedPaths[expected] {
+			t.Errorf("expected %s to be tracked in managed files", expected)
+		}
+	}
+}
+
+func TestCreateMaterializersClaudeFalseSkipsHooksAndSettings(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	niwaDir := filepath.Join(tmpDir, ".niwa")
+	hooksDir := filepath.Join(niwaDir, "hooks", "pre_tool_use")
+	envDir := filepath.Join(niwaDir, "env")
+	if err := os.MkdirAll(hooksDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(envDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Write a hook script.
+	if err := os.WriteFile(filepath.Join(hooksDir, "lint.sh"), []byte("#!/bin/bash\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Write workspace env.
+	if err := os.WriteFile(filepath.Join(envDir, "workspace.env"), []byte("MY_VAR=yes\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	configTOML := `
+[workspace]
+name = "test-ws"
+
+[[sources]]
+org = "testorg"
+
+[groups.public]
+visibility = "public"
+
+[claude.settings]
+permissions = "bypass"
+
+[repos.app.claude]
+enabled = false
+`
+	if err := os.WriteFile(filepath.Join(niwaDir, "workspace.toml"), []byte(configTOML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := config.Load(filepath.Join(niwaDir, "workspace.toml"))
+	if err != nil {
+		t.Fatalf("loading config: %v", err)
+	}
+	cfg := result.Config
+
+	mockClient := &mockGitHubClient{
+		repos: map[string][]github.Repo{
+			"testorg": {
+				{Name: "app", Visibility: "public", SSHURL: "git@github.com:testorg/app.git"},
+			},
+		},
+	}
+
+	applier := NewApplier(mockClient)
+	applier.Cloner = &Cloner{}
+
+	workspaceRoot := tmpDir
+	instanceRoot := filepath.Join(workspaceRoot, "test-ws")
+
+	repoDir := filepath.Join(instanceRoot, "public", "app")
+	if err := os.MkdirAll(filepath.Join(repoDir, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = applier.Create(context.Background(), cfg, niwaDir, workspaceRoot)
+	if err != nil {
+		t.Fatalf("create failed: %v", err)
+	}
+
+	// Hooks should NOT be installed (claude = false).
+	hookTarget := filepath.Join(repoDir, ".claude", "hooks", "pre_tool_use", "lint.sh")
+	if _, err := os.Stat(hookTarget); err == nil {
+		t.Error("hook script should not be installed when claude = false")
+	}
+
+	// Settings should NOT be installed (claude = false).
+	settingsPath := filepath.Join(repoDir, ".claude", "settings.local.json")
+	if _, err := os.Stat(settingsPath); err == nil {
+		t.Error("settings.local.json should not be installed when claude = false")
+	}
+
+	// Env SHOULD still be installed (env is tool-agnostic).
+	envPath := filepath.Join(repoDir, ".local.env")
+	assertFileContains(t, envPath, "MY_VAR=yes")
+}
+
 func assertFileContains(t *testing.T, path, substr string) {
 	t.Helper()
 	data, err := os.ReadFile(path)
