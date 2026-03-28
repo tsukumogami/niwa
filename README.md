@@ -77,14 +77,25 @@ source = "workspace.md"
 source = "public.md"
 ```
 
-### 5. Apply
+### 5. Create an instance
+
+```bash
+niwa create
+```
+
+This creates a workspace instance as a subdirectory, clones all repos, and
+installs CLAUDE.md files. Run `niwa create` again to create parallel instances
+(numbered automatically), or `niwa create --name hotfix` for a named one.
+
+### 6. Update after config changes
 
 ```bash
 niwa apply
 ```
 
-This discovers repos from your GitHub org, classifies them into groups, clones
-them, and installs CLAUDE.md files at each level of the hierarchy.
+From the workspace root, this applies config to all instances. From within an
+instance, it targets just that one. Apply is idempotent -- it clones missing
+repos, regenerates content files, and cleans up repos removed from the config.
 
 ## Commands
 
@@ -92,7 +103,11 @@ them, and installs CLAUDE.md files at each level of the hierarchy.
 |---------|-------------|
 | `niwa init [name]` | Create a new workspace with a scaffolded config |
 | `niwa init <name> --from <org/repo>` | Clone a shared workspace config from GitHub |
-| `niwa apply` | Apply the workspace config: clone repos, install content |
+| `niwa create [--name <name>]` | Create a new workspace instance |
+| `niwa apply [--instance <name>]` | Apply config to all instances (from root) or one (from instance) |
+| `niwa status [instance]` | Show workspace health: repos, drift, last applied |
+| `niwa reset [instance] [--force]` | Tear down and recreate an instance |
+| `niwa destroy [instance] [--force]` | Permanently remove an instance |
 | `niwa version` | Print version information |
 
 ## Shared workspace configs
