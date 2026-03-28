@@ -1,13 +1,25 @@
 package workspace
 
 import (
+	"bufio"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/tsukumogami/niwa/internal/config"
 )
+
+// ContentWarning represents a non-fatal issue found during content installation.
+type ContentWarning struct {
+	RepoName string
+	Message  string
+}
+
+func (w ContentWarning) String() string {
+	return fmt.Sprintf("repo %q: %s", w.RepoName, w.Message)
+}
 
 // InstallWorkspaceContent reads the workspace content source file, expands
 // template variables, and writes it to {instanceRoot}/CLAUDE.md.
@@ -16,16 +28,29 @@ func InstallWorkspaceContent(cfg *config.WorkspaceConfig, configDir, instanceRoo
 		return nil
 	}
 
-	contentDir := cfg.Workspace.ContentDir
-	if contentDir == "" {
-		contentDir = "."
+	absInstance, err := filepath.Abs(instanceRoot)
+	if err != nil {
+		return fmt.Errorf("resolving instance root: %w", err)
 	}
 
-	sourcePath := filepath.Join(configDir, contentDir, cfg.Content.Workspace.Source)
+	vars := map[string]string{
+		"{workspace}":      absInstance,
+		"{workspace_name}": cfg.Workspace.Name,
+	}
 
-	data, err := os.ReadFile(sourcePath)
-	if err != nil {
-		return fmt.Errorf("reading content source %s: %w", sourcePath, err)
+	source := cfg.Content.Workspace.Source
+	target := filepath.Join(instanceRoot, "CLAUDE.md")
+
+	return installContentFile(cfg, configDir, source, target, vars)
+}
+
+// InstallGroupContent reads the group content source file, expands template
+// variables, and writes it to {instanceRoot}/{groupName}/CLAUDE.md.
+// Group directories are non-git directories, so they get CLAUDE.md (not .local).
+func InstallGroupContent(cfg *config.WorkspaceConfig, configDir, instanceRoot, groupName string) error {
+	entry, ok := cfg.Content.Groups[groupName]
+	if !ok || entry.Source == "" {
+		return nil
 	}
 
 	absInstance, err := filepath.Abs(instanceRoot)
@@ -33,14 +58,151 @@ func InstallWorkspaceContent(cfg *config.WorkspaceConfig, configDir, instanceRoo
 		return fmt.Errorf("resolving instance root: %w", err)
 	}
 
-	content := expandVars(string(data), map[string]string{
+	vars := map[string]string{
 		"{workspace}":      absInstance,
 		"{workspace_name}": cfg.Workspace.Name,
-	})
+		"{group_name}":     groupName,
+	}
 
-	target := filepath.Join(instanceRoot, "CLAUDE.md")
-	if err := os.MkdirAll(instanceRoot, 0o755); err != nil {
-		return fmt.Errorf("creating instance root: %w", err)
+	target := filepath.Join(instanceRoot, groupName, "CLAUDE.md")
+
+	return installContentFile(cfg, configDir, entry.Source, target, vars)
+}
+
+// InstallRepoContent reads the repo content source file, expands template
+// variables, and writes it to {instanceRoot}/{groupName}/{repoName}/CLAUDE.local.md.
+// Repo directories are git directories, so they get CLAUDE.local.md.
+//
+// If no explicit content entry exists for the repo, auto-discovery checks for
+// {content_dir}/repos/{repoName}.md and uses it if found.
+//
+// Returns any content warnings (e.g., missing gitignore pattern).
+func InstallRepoContent(cfg *config.WorkspaceConfig, configDir, instanceRoot, groupName, repoName string) ([]ContentWarning, error) {
+	var warnings []ContentWarning
+
+	absInstance, err := filepath.Abs(instanceRoot)
+	if err != nil {
+		return nil, fmt.Errorf("resolving instance root: %w", err)
+	}
+
+	vars := map[string]string{
+		"{workspace}":      absInstance,
+		"{workspace_name}": cfg.Workspace.Name,
+		"{group_name}":     groupName,
+		"{repo_name}":      repoName,
+	}
+
+	repoDir := filepath.Join(instanceRoot, groupName, repoName)
+
+	// Resolve source: explicit entry or auto-discovery.
+	entry, hasExplicit := cfg.Content.Repos[repoName]
+	source := ""
+	if hasExplicit {
+		source = entry.Source
+	} else {
+		source = autoDiscoverRepoSource(cfg, configDir, repoName)
+	}
+
+	if source != "" {
+		target := filepath.Join(repoDir, "CLAUDE.local.md")
+		if err := installContentFile(cfg, configDir, source, target, vars); err != nil {
+			return nil, err
+		}
+
+		w := CheckGitignore(repoDir, repoName)
+		warnings = append(warnings, w...)
+	}
+
+	// Install subdirectory content if present.
+	if hasExplicit {
+		for subdir, subdirSource := range entry.Subdirs {
+			if subdirSource == "" {
+				continue
+			}
+			target := filepath.Join(repoDir, subdir, "CLAUDE.local.md")
+			if err := installContentFile(cfg, configDir, subdirSource, target, vars); err != nil {
+				return nil, err
+			}
+		}
+	}
+
+	return warnings, nil
+}
+
+// CheckGitignore checks if a repo directory's .gitignore contains a *.local*
+// pattern. Returns a warning if the pattern is missing.
+func CheckGitignore(repoDir, repoName string) []ContentWarning {
+	gitignorePath := filepath.Join(repoDir, ".gitignore")
+	f, err := os.Open(gitignorePath)
+	if err != nil {
+		// No .gitignore at all means the pattern is missing.
+		return []ContentWarning{{
+			RepoName: repoName,
+			Message:  ".gitignore missing or unreadable; add *.local* pattern to keep CLAUDE.local.md out of version control",
+		}}
+	}
+	defer f.Close()
+
+	if hasLocalPattern(f) {
+		return nil
+	}
+
+	return []ContentWarning{{
+		RepoName: repoName,
+		Message:  ".gitignore does not contain *.local* pattern; add it to keep CLAUDE.local.md out of version control",
+	}}
+}
+
+// hasLocalPattern scans a reader for a line containing "*.local*".
+func hasLocalPattern(r io.Reader) bool {
+	scanner := bufio.NewScanner(r)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "*.local*" {
+			return true
+		}
+	}
+	return false
+}
+
+// autoDiscoverRepoSource checks for {content_dir}/repos/{repoName}.md
+// and returns the relative source path if found, or empty string if not.
+func autoDiscoverRepoSource(cfg *config.WorkspaceConfig, configDir, repoName string) string {
+	contentDir := cfg.Workspace.ContentDir
+	if contentDir == "" {
+		return ""
+	}
+
+	candidate := filepath.Join("repos", repoName+".md")
+	fullPath := filepath.Join(configDir, contentDir, candidate)
+
+	if _, err := os.Stat(fullPath); err == nil {
+		return candidate
+	}
+
+	return ""
+}
+
+// installContentFile reads a source file relative to content_dir, expands
+// template variables, and writes the result to the target path.
+func installContentFile(cfg *config.WorkspaceConfig, configDir, source, target string, vars map[string]string) error {
+	contentDir := cfg.Workspace.ContentDir
+	if contentDir == "" {
+		contentDir = "."
+	}
+
+	sourcePath := filepath.Join(configDir, contentDir, source)
+
+	data, err := os.ReadFile(sourcePath)
+	if err != nil {
+		return fmt.Errorf("reading content source %s: %w", sourcePath, err)
+	}
+
+	content := expandVars(string(data), vars)
+
+	targetDir := filepath.Dir(target)
+	if err := os.MkdirAll(targetDir, 0o755); err != nil {
+		return fmt.Errorf("creating directory %s: %w", targetDir, err)
 	}
 
 	if err := os.WriteFile(target, []byte(content), 0o644); err != nil {

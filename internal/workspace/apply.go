@@ -75,6 +75,30 @@ func (a *Applier) Apply(ctx context.Context, cfg *config.WorkspaceConfig, config
 		return fmt.Errorf("installing workspace content: %w", err)
 	}
 
+	// Step 5: Install group-level CLAUDE.md files.
+	installedGroups := map[string]bool{}
+	for _, cr := range classified {
+		if installedGroups[cr.Group] {
+			continue
+		}
+		installedGroups[cr.Group] = true
+
+		if err := InstallGroupContent(cfg, configDir, instanceRoot, cr.Group); err != nil {
+			return fmt.Errorf("installing group content for %q: %w", cr.Group, err)
+		}
+	}
+
+	// Step 6: Install repo-level CLAUDE.local.md files (and subdirectories).
+	for _, cr := range classified {
+		contentWarnings, err := InstallRepoContent(cfg, configDir, instanceRoot, cr.Group, cr.Repo.Name)
+		if err != nil {
+			return fmt.Errorf("installing repo content for %q: %w", cr.Repo.Name, err)
+		}
+		for _, w := range contentWarnings {
+			fmt.Fprintf(os.Stderr, "warning: %s\n", w)
+		}
+	}
+
 	return nil
 }
 

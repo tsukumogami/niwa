@@ -26,7 +26,8 @@ func TestApplyIntegration(t *testing.T) {
 
 	niwaDir := filepath.Join(tmpDir, ".niwa")
 	contentDir := filepath.Join(niwaDir, "claude")
-	if err := os.MkdirAll(contentDir, 0o755); err != nil {
+	reposContentDir := filepath.Join(contentDir, "repos")
+	if err := os.MkdirAll(reposContentDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
 
@@ -46,15 +47,36 @@ visibility = "private"
 
 [content.workspace]
 source = "workspace.md"
+
+[content.groups.public]
+source = "public.md"
+
+[content.repos.app]
+source = "repos/app.md"
+
+  [content.repos.app.subdirs]
+  docs = "repos/app-docs.md"
 `
 	if err := os.WriteFile(filepath.Join(niwaDir, "workspace.toml"), []byte(configTOML), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
-	// Write content source with template variables.
-	contentSource := "# {workspace_name} Workspace\n\nRoot: {workspace}\n"
-	if err := os.WriteFile(filepath.Join(contentDir, "workspace.md"), []byte(contentSource), 0o644); err != nil {
-		t.Fatal(err)
+	// Write content sources with template variables.
+	contentFiles := map[string]string{
+		"workspace.md":      "# {workspace_name} Workspace\n\nRoot: {workspace}\n",
+		"public.md":         "# {group_name} Group\n\nWorkspace: {workspace_name}\n",
+		"repos/app.md":      "# {repo_name}\n\nGroup: {group_name}\nWorkspace: {workspace_name}\n",
+		"repos/app-docs.md": "# {repo_name} docs subdir\n",
+		"repos/secrets.md":  "# Auto-discovered {repo_name}\n",
+	}
+	for name, body := range contentFiles {
+		path := filepath.Join(contentDir, name)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	cfg, err := config.Load(filepath.Join(niwaDir, "workspace.toml"))
@@ -72,9 +94,7 @@ source = "workspace.md"
 	}
 
 	applier := NewApplier(mockClient)
-	// Replace the cloner with a no-op for integration testing (we don't want
-	// real git clones in tests).
-	applier.Cloner = &Cloner{} // Clone will just skip because .git won't exist; we pre-create dirs.
+	applier.Cloner = &Cloner{}
 
 	instanceRoot := filepath.Join(tmpDir, "test-ws")
 
@@ -89,31 +109,118 @@ source = "workspace.md"
 		{"public", "app"},
 		{"private", "secrets"},
 	} {
-		repoDir := filepath.Join(instanceRoot, repo.group, repo.name, ".git")
-		if err := os.MkdirAll(repoDir, 0o755); err != nil {
+		repoDir := filepath.Join(instanceRoot, repo.group, repo.name)
+		if err := os.MkdirAll(filepath.Join(repoDir, ".git"), 0o755); err != nil {
 			t.Fatal(err)
 		}
+		// Add .gitignore with *.local* to suppress warnings.
+		if err := os.WriteFile(filepath.Join(repoDir, ".gitignore"), []byte("*.local*\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Pre-create the docs subdir.
+	docsDir := filepath.Join(instanceRoot, "public", "app", "docs")
+	if err := os.MkdirAll(docsDir, 0o755); err != nil {
+		t.Fatal(err)
 	}
 
 	if err := applier.Apply(context.Background(), cfg, niwaDir, instanceRoot); err != nil {
 		t.Fatalf("apply failed: %v", err)
 	}
 
-	// Verify workspace CLAUDE.md was created with expanded variables.
-	claudeMD, err := os.ReadFile(filepath.Join(instanceRoot, "CLAUDE.md"))
-	if err != nil {
-		t.Fatalf("reading CLAUDE.md: %v", err)
+	// Verify workspace CLAUDE.md.
+	assertFileContains(t, filepath.Join(instanceRoot, "CLAUDE.md"), "# test-ws Workspace")
+	assertFileNotContains(t, filepath.Join(instanceRoot, "CLAUDE.md"), "{workspace}")
+
+	// Verify group CLAUDE.md (non-git directory gets CLAUDE.md).
+	assertFileContains(t, filepath.Join(instanceRoot, "public", "CLAUDE.md"), "# public Group")
+	assertFileContains(t, filepath.Join(instanceRoot, "public", "CLAUDE.md"), "Workspace: test-ws")
+
+	// Verify repo CLAUDE.local.md (git directory gets CLAUDE.local.md).
+	assertFileContains(t, filepath.Join(instanceRoot, "public", "app", "CLAUDE.local.md"), "# app")
+	assertFileContains(t, filepath.Join(instanceRoot, "public", "app", "CLAUDE.local.md"), "Group: public")
+
+	// Verify subdir CLAUDE.local.md.
+	assertFileContains(t, filepath.Join(docsDir, "CLAUDE.local.md"), "# app docs subdir")
+
+	// Verify auto-discovered repo content for "secrets" (no explicit entry,
+	// but repos/secrets.md exists in content_dir).
+	assertFileContains(t, filepath.Join(instanceRoot, "private", "secrets", "CLAUDE.local.md"), "# Auto-discovered secrets")
+}
+
+func TestApplyIntegrationNoContent(t *testing.T) {
+	tmpDir := t.TempDir()
+	niwaDir := filepath.Join(tmpDir, ".niwa")
+	if err := os.MkdirAll(niwaDir, 0o755); err != nil {
+		t.Fatal(err)
 	}
 
-	content := string(claudeMD)
-	if !strings.Contains(content, "# test-ws Workspace") {
-		t.Errorf("CLAUDE.md missing workspace name expansion:\n%s", content)
+	configTOML := `
+[workspace]
+name = "minimal"
+
+[[sources]]
+org = "testorg"
+
+[groups.all]
+visibility = "public"
+`
+	if err := os.WriteFile(filepath.Join(niwaDir, "workspace.toml"), []byte(configTOML), 0o644); err != nil {
+		t.Fatal(err)
 	}
-	if !strings.Contains(content, "Root: ") {
-		t.Errorf("CLAUDE.md missing workspace path expansion:\n%s", content)
+
+	cfg, err := config.Load(filepath.Join(niwaDir, "workspace.toml"))
+	if err != nil {
+		t.Fatalf("loading config: %v", err)
 	}
-	// The {workspace} variable should have been replaced with an absolute path.
-	if strings.Contains(content, "{workspace}") {
-		t.Errorf("CLAUDE.md still contains unexpanded {workspace} variable:\n%s", content)
+
+	mockClient := &mockGitHubClient{
+		repos: map[string][]github.Repo{
+			"testorg": {
+				{Name: "repo1", Visibility: "public", SSHURL: "git@github.com:testorg/repo1.git"},
+			},
+		},
+	}
+
+	applier := NewApplier(mockClient)
+	applier.Cloner = &Cloner{}
+
+	instanceRoot := filepath.Join(tmpDir, "minimal")
+	repoDir := filepath.Join(instanceRoot, "all", "repo1")
+	if err := os.MkdirAll(filepath.Join(repoDir, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Apply should succeed even with no content sections.
+	if err := applier.Apply(context.Background(), cfg, niwaDir, instanceRoot); err != nil {
+		t.Fatalf("apply failed: %v", err)
+	}
+
+	// No CLAUDE files should be created.
+	if _, err := os.Stat(filepath.Join(instanceRoot, "CLAUDE.md")); err == nil {
+		t.Error("workspace CLAUDE.md should not be created with no content config")
+	}
+}
+
+func assertFileContains(t *testing.T, path, substr string) {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading %s: %v", path, err)
+	}
+	if !strings.Contains(string(data), substr) {
+		t.Errorf("%s missing %q:\n%s", path, substr, data)
+	}
+}
+
+func assertFileNotContains(t *testing.T, path, substr string) {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading %s: %v", path, err)
+	}
+	if strings.Contains(string(data), substr) {
+		t.Errorf("%s unexpectedly contains %q:\n%s", path, substr, data)
 	}
 }
