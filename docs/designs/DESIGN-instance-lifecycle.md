@@ -165,15 +165,27 @@ Both are destructive operations on instance directories.
 
 #### Chosen: RemoveAll with shared CheckUncommittedChanges safety gate
 
-**`niwa destroy <instance>`**: load state, check for uncommitted changes in repos (unless `--force`), `os.RemoveAll(instanceDir)`.
+Both commands accept an optional instance name. If no name is given, they detect the current instance via `DiscoverInstance(cwd)`. This lets users run `niwa destroy` or `niwa reset` from within an instance without specifying a name.
 
-**`niwa reset <instance>`**: same safety check, capture config source, destroy, then re-run create + apply pipeline.
+**Instance resolution** (shared by both):
+1. If `<instance>` arg provided: find from workspace root by name (scan instances, match InstanceName)
+2. If no arg: `DiscoverInstance(cwd)` to detect current instance
+3. Error if neither resolves
+
+**Instance validation** (before any destructive action):
+- Target directory must contain `.niwa/instance.json` (prevents deleting arbitrary directories)
+- State file must parse successfully (prevents acting on corrupt state)
+- Target must not be the workspace root (`.niwa/workspace.toml` present = root, not instance)
+
+**`niwa destroy [instance]`**: resolve target, validate, check uncommitted changes (unless `--force`), `os.RemoveAll(instanceDir)`.
+
+**`niwa reset [instance]`**: same resolution and safety check, capture config source, destroy, then re-run create + apply pipeline.
 
 **`CheckUncommittedChanges(instanceDir)`**: loads state, runs `git -C <repo> status --porcelain` for each cloned repo, returns list of dirty repo names.
 
 Reset of local-only workspaces (no remote source) errors with a clear message since destroying the instance would lose the config.
 
-`DestroyInstance` validates `.niwa/instance.json` exists before calling `RemoveAll` (safety against deleting arbitrary directories).
+`DestroyInstance` validates `.niwa/instance.json` exists and `.niwa/workspace.toml` does NOT exist before calling `RemoveAll` (safety against deleting arbitrary directories or workspace roots).
 
 #### Alternatives considered
 
@@ -218,15 +230,20 @@ niwa status [instance]
   2. Load state(s), compute drift
   3. Display summary or detail view
 
-niwa reset <instance> [--force]
-  1. Check uncommitted changes
-  2. Capture config source
-  3. Destroy instance directory
-  4. Re-run create + apply
+niwa reset [instance] [--force]
+  1. Resolve target: if <instance> given, resolve by name from root;
+     if no arg, use DiscoverInstance(cwd) to detect current instance
+  2. Validate target is an instance (must have .niwa/instance.json)
+  3. Check uncommitted changes
+  4. Capture config source
+  5. Destroy instance directory
+  6. Re-run create + apply
 
-niwa destroy <instance> [--force]
-  1. Check uncommitted changes
-  2. Remove instance directory
+niwa destroy [instance] [--force]
+  1. Resolve target: same as reset (name arg or detect from cwd)
+  2. Validate target is an instance (must have .niwa/instance.json)
+  3. Check uncommitted changes
+  4. Remove instance directory
 ```
 
 ### Package changes
@@ -245,8 +262,10 @@ niwa destroy <instance> [--force]
 - `InstanceStatus`, `RepoStatus`, `FileStatus` types
 
 **New: `internal/workspace/destroy.go`**
+- `ResolveInstanceTarget(cwd, nameArg string) (string, error)` -- resolve instance dir from name or cwd
+- `ValidateInstanceDir(dir string) error` -- confirm .niwa/instance.json exists, workspace.toml does NOT
 - `CheckUncommittedChanges(instanceDir string) ([]string, error)`
-- `DestroyInstance(instanceDir string) error`
+- `DestroyInstance(instanceDir string) error` -- validates before RemoveAll
 
 **New CLI commands:**
 - `internal/cli/create.go` -- cobra create subcommand
@@ -260,8 +279,9 @@ niwa destroy <instance> [--force]
 
 ## Security Considerations
 
-- **Destroy safety**: `DestroyInstance` validates `.niwa/instance.json` exists before `os.RemoveAll`, preventing accidental deletion of arbitrary directories. The path must be a subdirectory of the workspace root.
+- **Destroy safety**: `DestroyInstance` validates `.niwa/instance.json` exists AND `.niwa/workspace.toml` does NOT exist before `os.RemoveAll`, preventing accidental deletion of arbitrary directories or workspace roots. The validation runs before any destructive operation.
 - **Uncommitted changes**: reset and destroy warn before deleting repos with uncommitted work. `--force` is explicit opt-in to data loss.
+- **Instance validation**: `ValidateInstanceDir` confirms the target is a real instance, not a workspace root or random directory. This catches mistakes like running destroy from the wrong directory.
 - **No elevated permissions**: all operations use user-level filesystem access. No sudo, no system directories.
 
 ## Consequences
