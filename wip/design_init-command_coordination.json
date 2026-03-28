@@ -1,0 +1,10 @@
+{
+  "topic": "init-command",
+  "decisions": [
+    {"id": 1, "question": "How should niwa init --from <org/repo> fetch and install a remote config repo?", "status": "complete", "complexity": "standard", "chosen": "Git clone (shallow)", "report": "wip/design_init-command_decision_1_report.md"},
+    {"id": 2, "question": "What should the scaffolded workspace.toml look like for local init (no --from)?", "status": "complete", "complexity": "standard", "chosen": "commented-template-with-active-workspace-block", "report": "wip/design_init-command_decision_2_report.md"},
+    {"id": 3, "question": "How should init handle conflicts and edge cases?", "status": "complete", "complexity": "standard", "chosen": "fail-fast-with-targeted-detection", "report": "wip/design_init-command_decision_3_report.md"}
+  ],
+  "cross_validation": "pending",
+  "round": 0
+}
