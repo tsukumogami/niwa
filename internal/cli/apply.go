@@ -37,13 +37,13 @@ into groups, clones missing repos, and installs CLAUDE.md content files.`,
 			return err
 		}
 
-		// Instance root is the parent of the config directory.
-		instanceRoot := filepath.Dir(configDir)
+		// Workspace root is the parent of the config directory.
+		workspaceRoot := filepath.Dir(configDir)
 
 		token := os.Getenv("GITHUB_TOKEN")
 		gh := github.NewAPIClient(token)
 
 		applier := workspace.NewApplier(gh)
-		return applier.Apply(cmd.Context(), cfg, configDir, instanceRoot)
+		return applier.Apply(cmd.Context(), cfg, configDir, workspaceRoot)
 	},
 }

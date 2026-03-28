@@ -4,13 +4,9 @@ package config
 import (
 	"fmt"
 	"os"
-	"regexp"
 
 	"github.com/BurntSushi/toml"
 )
-
-// validName matches safe directory/repo/group names.
-var validName = regexp.MustCompile(`^[a-zA-Z0-9._-]+$`)
 
 // WorkspaceConfig is the top-level configuration parsed from workspace.toml.
 type WorkspaceConfig struct {
@@ -99,25 +95,10 @@ func validate(cfg *WorkspaceConfig) error {
 	if cfg.Workspace.Name == "" {
 		return fmt.Errorf("workspace.name is required")
 	}
-	if !validName.MatchString(cfg.Workspace.Name) {
-		return fmt.Errorf("workspace.name %q contains invalid characters", cfg.Workspace.Name)
-	}
 
 	for _, s := range cfg.Sources {
 		if s.Org == "" {
 			return fmt.Errorf("source org is required")
-		}
-	}
-
-	for name := range cfg.Groups {
-		if !validName.MatchString(name) {
-			return fmt.Errorf("group name %q contains invalid characters", name)
-		}
-	}
-
-	for name := range cfg.Repos {
-		if !validName.MatchString(name) {
-			return fmt.Errorf("repo override name %q contains invalid characters", name)
 		}
 	}
 

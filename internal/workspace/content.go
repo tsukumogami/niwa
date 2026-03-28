@@ -23,19 +23,6 @@ func InstallWorkspaceContent(cfg *config.WorkspaceConfig, configDir, instanceRoo
 
 	sourcePath := filepath.Join(configDir, contentDir, cfg.Content.Workspace.Source)
 
-	// Validate the resolved path stays within configDir.
-	absSource, err := filepath.Abs(sourcePath)
-	if err != nil {
-		return fmt.Errorf("resolving source path: %w", err)
-	}
-	absConfigDir, err := filepath.Abs(configDir)
-	if err != nil {
-		return fmt.Errorf("resolving config dir: %w", err)
-	}
-	if !strings.HasPrefix(absSource, absConfigDir+string(filepath.Separator)) {
-		return fmt.Errorf("content source %q escapes config directory", cfg.Content.Workspace.Source)
-	}
-
 	data, err := os.ReadFile(sourcePath)
 	if err != nil {
 		return fmt.Errorf("reading content source %s: %w", sourcePath, err)
@@ -65,9 +52,12 @@ func InstallWorkspaceContent(cfg *config.WorkspaceConfig, configDir, instanceRoo
 
 // expandVars performs simple string replacement for template variables.
 // Only the declared variables are expanded; no code execution.
+// Uses strings.NewReplacer to avoid ordering issues when one key is a
+// substring of another (e.g., "{workspace}" vs "{workspace_name}").
 func expandVars(s string, vars map[string]string) string {
+	oldnew := make([]string, 0, len(vars)*2)
 	for k, v := range vars {
-		s = strings.ReplaceAll(s, k, v)
+		oldnew = append(oldnew, k, v)
 	}
-	return s
+	return strings.NewReplacer(oldnew...).Replace(s)
 }

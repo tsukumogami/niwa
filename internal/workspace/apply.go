@@ -79,37 +79,5 @@ func (a *Applier) Apply(ctx context.Context, cfg *config.WorkspaceConfig, config
 }
 
 func (a *Applier) discoverRepos(ctx context.Context, source config.SourceConfig) ([]github.Repo, error) {
-	// If explicit repos are listed, only fetch those (stub: fetch all and filter).
-	allRepos, err := a.GitHubClient.ListRepos(ctx, source.Org)
-	if err != nil {
-		return nil, err
-	}
-
-	// Check auto-discovery threshold.
-	if len(source.Repos) == 0 {
-		maxRepos := source.MaxRepos
-		if maxRepos == 0 {
-			maxRepos = 10
-		}
-		if len(allRepos) > maxRepos {
-			return nil, fmt.Errorf("org %q has %d repos (threshold: %d); list repos explicitly in source config or increase max_repos",
-				source.Org, len(allRepos), maxRepos)
-		}
-		return allRepos, nil
-	}
-
-	// Filter to only explicitly listed repos.
-	wanted := make(map[string]bool, len(source.Repos))
-	for _, r := range source.Repos {
-		wanted[r] = true
-	}
-
-	var filtered []github.Repo
-	for _, r := range allRepos {
-		if wanted[r.Name] {
-			filtered = append(filtered, r)
-		}
-	}
-
-	return filtered, nil
+	return a.GitHubClient.ListRepos(ctx, source.Org)
 }

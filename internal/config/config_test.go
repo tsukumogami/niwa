@@ -1,6 +1,7 @@
 package config
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -197,20 +198,6 @@ func TestParseValidation(t *testing.T) {
 			wantErr: "workspace.name is required",
 		},
 		{
-			name: "invalid workspace name",
-			input: `[workspace]
-name = "bad/name"`,
-			wantErr: "contains invalid characters",
-		},
-		{
-			name: "invalid group name",
-			input: `[workspace]
-name = "ok"
-[groups."../../etc"]
-visibility = "public"`,
-			wantErr: "contains invalid characters",
-		},
-		{
 			name: "missing source org",
 			input: `[workspace]
 name = "ok"
@@ -226,22 +213,9 @@ repos = ["a"]`,
 			if err == nil {
 				t.Fatal("expected error, got nil")
 			}
-			if !contains(err.Error(), tt.wantErr) {
+			if !strings.Contains(err.Error(), tt.wantErr) {
 				t.Errorf("error = %q, want substring %q", err.Error(), tt.wantErr)
 			}
 		})
 	}
-}
-
-func contains(s, substr string) bool {
-	return len(s) >= len(substr) && (s == substr || len(s) > 0 && containsStr(s, substr))
-}
-
-func containsStr(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
 }

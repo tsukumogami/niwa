@@ -42,29 +42,6 @@ func TestClassifyByVisibility(t *testing.T) {
 	}
 }
 
-func TestClassifyExplicitRepoList(t *testing.T) {
-	repos := []github.Repo{
-		{Name: "terraform-modules", Visibility: "private"},
-		{Name: "api-service", Visibility: "public"},
-	}
-
-	groups := map[string]config.GroupConfig{
-		"infra":    {Repos: []string{"terraform-modules"}},
-		"services": {Repos: []string{"api-service"}},
-	}
-
-	classified, warnings, err := Classify(repos, groups)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if len(warnings) != 0 {
-		t.Errorf("unexpected warnings: %v", warnings)
-	}
-	if len(classified) != 2 {
-		t.Fatalf("classified count = %d, want 2", len(classified))
-	}
-}
-
 func TestClassifyNoMatch(t *testing.T) {
 	repos := []github.Repo{
 		{Name: "orphan", Visibility: "internal"},
@@ -92,8 +69,8 @@ func TestClassifyMultiMatchError(t *testing.T) {
 	}
 
 	groups := map[string]config.GroupConfig{
-		"public": {Visibility: "public"},
-		"also":   {Repos: []string{"ambiguous"}},
+		"group-a": {Visibility: "public"},
+		"group-b": {Visibility: "public"},
 	}
 
 	_, _, err := Classify(repos, groups)

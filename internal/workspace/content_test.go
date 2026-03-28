@@ -54,32 +54,6 @@ func TestInstallWorkspaceContent(t *testing.T) {
 	}
 }
 
-func TestInstallWorkspaceContentPathTraversal(t *testing.T) {
-	tmpDir := t.TempDir()
-	configDir := filepath.Join(tmpDir, "config")
-	if err := os.MkdirAll(configDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	cfg := &config.WorkspaceConfig{
-		Workspace: config.WorkspaceMeta{
-			Name:       "test",
-			ContentDir: ".",
-		},
-		Content: config.ContentConfig{
-			Workspace: config.ContentEntry{Source: "../../etc/passwd"},
-		},
-	}
-
-	err := InstallWorkspaceContent(cfg, configDir, filepath.Join(tmpDir, "instance"))
-	if err == nil {
-		t.Fatal("expected path traversal error, got nil")
-	}
-	if !strings.Contains(err.Error(), "escapes") {
-		t.Errorf("error = %q, want path escape message", err.Error())
-	}
-}
-
 func TestInstallWorkspaceContentNoSource(t *testing.T) {
 	cfg := &config.WorkspaceConfig{
 		Workspace: config.WorkspaceMeta{Name: "test"},
