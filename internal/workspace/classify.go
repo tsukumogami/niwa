@@ -4,6 +4,7 @@ package workspace
 
 import (
 	"fmt"
+	"slices"
 
 	"github.com/tsukumogami/niwa/internal/config"
 	"github.com/tsukumogami/niwa/internal/github"
@@ -49,10 +50,8 @@ func Classify(repos []github.Repo, groups map[string]config.GroupConfig) ([]Clas
 
 func matchesGroup(repo github.Repo, group config.GroupConfig) bool {
 	// Check explicit repo list first.
-	for _, name := range group.Repos {
-		if name == repo.Name {
-			return true
-		}
+	if slices.Contains(group.Repos, repo.Name) {
+		return true
 	}
 
 	// Check visibility filter.
