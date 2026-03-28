@@ -1,5 +1,5 @@
 ---
-status: Planned
+status: Current
 upstream: docs/prds/PRD-config-distribution.md
 problem: |
   niwa's apply pipeline installs CLAUDE.md content but doesn't distribute
