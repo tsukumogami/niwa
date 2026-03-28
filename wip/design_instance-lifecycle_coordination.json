@@ -1,0 +1,11 @@
+{
+  "topic": "instance-lifecycle",
+  "decisions": [
+    {"id": 1, "question": "How should the Applier be refactored to separate create from apply?", "status": "pending", "complexity": "standard"},
+    {"id": 2, "question": "How should context detection work for apply's dual scope (root vs instance)?", "status": "decided", "complexity": "standard", "chosen": "marker-file-detection-instance-first"},
+    {"id": 3, "question": "What should niwa status display and how?", "status": "pending", "complexity": "standard"},
+    {"id": 4, "question": "How should reset and destroy work?", "status": "pending", "complexity": "standard"}
+  ],
+  "cross_validation": "pending",
+  "round": 0
+}
