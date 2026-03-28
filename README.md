@@ -97,20 +97,24 @@ them, and installs CLAUDE.md files at each level of the hierarchy.
 
 ## Shared workspace configs
 
-Teams can share workspace configs via GitHub repos:
+Teams can share workspace configs via a GitHub repo:
 
 ```bash
-# First time: clone config and register
+# Clone config from GitHub and set up the workspace
 niwa init my-team --from my-org/workspace-config
-
-# On another machine: use the registered name
-niwa init my-team
-
-# Apply to set up the workspace
 niwa apply
 ```
 
 The config repo is cloned as `.niwa/` (a git checkout), so it can be updated later.
+
+Once registered, the name can be reused on the same machine to create additional
+workspace instances in different directories:
+
+```bash
+cd ~/other-dir
+niwa init my-team    # uses the registered source from the first --from
+niwa apply
+```
 
 ## Config reference
 
