@@ -24,17 +24,18 @@ func NewApplier(gh github.Client) *Applier {
 	}
 }
 
+// DefaultMaxRepos is the threshold for auto-discovered repos per source.
+// When an org returns more repos than this limit and the source has no
+// explicit repos list, discovery fails with a clear error.
+const DefaultMaxRepos = 10
+
 // Apply runs the full apply pipeline: discover repos, classify, clone, and
 // install content.
 func (a *Applier) Apply(ctx context.Context, cfg *config.WorkspaceConfig, configDir, instanceRoot string) error {
 	// Step 1: Discover repos from all sources.
-	var allRepos []github.Repo
-	for _, source := range cfg.Sources {
-		repos, err := a.discoverRepos(ctx, source)
-		if err != nil {
-			return fmt.Errorf("discovering repos for org %q: %w", source.Org, err)
-		}
-		allRepos = append(allRepos, repos...)
+	allRepos, err := a.discoverAllRepos(ctx, cfg.Sources)
+	if err != nil {
+		return err
 	}
 
 	// Step 2: Classify repos into groups.
@@ -102,6 +103,67 @@ func (a *Applier) Apply(ctx context.Context, cfg *config.WorkspaceConfig, config
 	return nil
 }
 
+// discoverAllRepos collects repos from all sources, enforcing per-source
+// thresholds and detecting cross-source duplicate repo names.
+func (a *Applier) discoverAllRepos(ctx context.Context, sources []config.SourceConfig) ([]github.Repo, error) {
+	var allRepos []github.Repo
+	seen := map[string]string{} // repo name -> source org (for duplicate detection)
+
+	for _, source := range sources {
+		repos, err := a.discoverRepos(ctx, source)
+		if err != nil {
+			return nil, fmt.Errorf("discovering repos for org %q: %w", source.Org, err)
+		}
+
+		for _, r := range repos {
+			if prevOrg, exists := seen[r.Name]; exists {
+				return nil, fmt.Errorf(
+					"duplicate repo name %q found in orgs %q and %q; rename or use explicit repos lists to resolve",
+					r.Name, prevOrg, source.Org,
+				)
+			}
+			seen[r.Name] = source.Org
+		}
+
+		allRepos = append(allRepos, repos...)
+	}
+
+	return allRepos, nil
+}
+
 func (a *Applier) discoverRepos(ctx context.Context, source config.SourceConfig) ([]github.Repo, error) {
-	return a.GitHubClient.ListRepos(ctx, source.Org)
+	// If the source specifies explicit repos, build the list directly
+	// without calling the GitHub API.
+	if len(source.Repos) > 0 {
+		repos := make([]github.Repo, len(source.Repos))
+		for i, name := range source.Repos {
+			repos[i] = github.Repo{
+				Name:     name,
+				SSHURL:   fmt.Sprintf("git@github.com:%s/%s.git", source.Org, name),
+				CloneURL: fmt.Sprintf("https://github.com/%s/%s.git", source.Org, name),
+			}
+		}
+		return repos, nil
+	}
+
+	// Auto-discover via API.
+	repos, err := a.GitHubClient.ListRepos(ctx, source.Org)
+	if err != nil {
+		return nil, err
+	}
+
+	maxRepos := source.MaxRepos
+	if maxRepos == 0 {
+		maxRepos = DefaultMaxRepos
+	}
+
+	if len(repos) > maxRepos {
+		return nil, fmt.Errorf(
+			"org %q has %d repos, which exceeds the max_repos threshold of %d; "+
+				"set max_repos to a higher value in [[sources]] or provide an explicit repos list",
+			source.Org, len(repos), maxRepos,
+		)
+	}
+
+	return repos, nil
 }

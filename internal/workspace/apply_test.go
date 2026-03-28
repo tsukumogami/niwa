@@ -2,6 +2,7 @@ package workspace
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -200,6 +201,175 @@ visibility = "public"
 	// No CLAUDE files should be created.
 	if _, err := os.Stat(filepath.Join(instanceRoot, "CLAUDE.md")); err == nil {
 		t.Error("workspace CLAUDE.md should not be created with no content config")
+	}
+}
+
+func TestDiscoverReposThresholdDefault(t *testing.T) {
+	// An org returning more repos than DefaultMaxRepos should fail.
+	repos := make([]github.Repo, DefaultMaxRepos+1)
+	for i := range repos {
+		repos[i] = github.Repo{Name: fmt.Sprintf("repo-%d", i), Visibility: "public"}
+	}
+
+	mockClient := &mockGitHubClient{
+		repos: map[string][]github.Repo{"bigorg": repos},
+	}
+
+	applier := NewApplier(mockClient)
+	_, err := applier.discoverAllRepos(context.Background(), []config.SourceConfig{
+		{Org: "bigorg"},
+	})
+	if err == nil {
+		t.Fatal("expected error when repo count exceeds default threshold")
+	}
+	if !strings.Contains(err.Error(), "exceeds the max_repos threshold") {
+		t.Errorf("unexpected error message: %v", err)
+	}
+	if !strings.Contains(err.Error(), fmt.Sprintf("threshold of %d", DefaultMaxRepos)) {
+		t.Errorf("error should mention default threshold %d: %v", DefaultMaxRepos, err)
+	}
+}
+
+func TestDiscoverReposThresholdOverride(t *testing.T) {
+	// Setting max_repos on the source should override the default.
+	repos := make([]github.Repo, 15)
+	for i := range repos {
+		repos[i] = github.Repo{Name: fmt.Sprintf("repo-%d", i), Visibility: "public"}
+	}
+
+	mockClient := &mockGitHubClient{
+		repos: map[string][]github.Repo{"bigorg": repos},
+	}
+
+	applier := NewApplier(mockClient)
+
+	// Should fail with default (10).
+	_, err := applier.discoverAllRepos(context.Background(), []config.SourceConfig{
+		{Org: "bigorg"},
+	})
+	if err == nil {
+		t.Fatal("expected error with default threshold")
+	}
+
+	// Should succeed with override to 20.
+	result, err := applier.discoverAllRepos(context.Background(), []config.SourceConfig{
+		{Org: "bigorg", MaxRepos: 20},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error with raised threshold: %v", err)
+	}
+	if len(result) != 15 {
+		t.Errorf("expected 15 repos, got %d", len(result))
+	}
+}
+
+func TestDiscoverReposExplicitList(t *testing.T) {
+	// A source with explicit repos should skip the API entirely.
+	mockClient := &mockGitHubClient{
+		repos: map[string][]github.Repo{
+			// Even though the API would return these, they should be ignored.
+			"myorg": {
+				{Name: "api-should-not-be-called", Visibility: "public"},
+			},
+		},
+	}
+
+	applier := NewApplier(mockClient)
+	result, err := applier.discoverAllRepos(context.Background(), []config.SourceConfig{
+		{Org: "myorg", Repos: []string{"frontend", "backend"}},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(result) != 2 {
+		t.Fatalf("expected 2 repos, got %d", len(result))
+	}
+	if result[0].Name != "frontend" || result[1].Name != "backend" {
+		t.Errorf("unexpected repo names: %v", result)
+	}
+	if result[0].SSHURL != "git@github.com:myorg/frontend.git" {
+		t.Errorf("unexpected SSH URL: %s", result[0].SSHURL)
+	}
+}
+
+func TestDiscoverReposMultiSourceMerge(t *testing.T) {
+	mockClient := &mockGitHubClient{
+		repos: map[string][]github.Repo{
+			"org-a": {
+				{Name: "alpha", Visibility: "public"},
+			},
+			"org-b": {
+				{Name: "beta", Visibility: "private"},
+			},
+		},
+	}
+
+	applier := NewApplier(mockClient)
+	result, err := applier.discoverAllRepos(context.Background(), []config.SourceConfig{
+		{Org: "org-a"},
+		{Org: "org-b"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(result) != 2 {
+		t.Fatalf("expected 2 repos from two sources, got %d", len(result))
+	}
+	names := map[string]bool{}
+	for _, r := range result {
+		names[r.Name] = true
+	}
+	if !names["alpha"] || !names["beta"] {
+		t.Errorf("expected alpha and beta, got %v", names)
+	}
+}
+
+func TestDiscoverReposDuplicateAcrossSources(t *testing.T) {
+	mockClient := &mockGitHubClient{
+		repos: map[string][]github.Repo{
+			"org-a": {
+				{Name: "shared", Visibility: "public"},
+			},
+			"org-b": {
+				{Name: "shared", Visibility: "private"},
+			},
+		},
+	}
+
+	applier := NewApplier(mockClient)
+	_, err := applier.discoverAllRepos(context.Background(), []config.SourceConfig{
+		{Org: "org-a"},
+		{Org: "org-b"},
+	})
+	if err == nil {
+		t.Fatal("expected error for duplicate repo names across sources")
+	}
+	if !strings.Contains(err.Error(), "duplicate repo name") {
+		t.Errorf("unexpected error message: %v", err)
+	}
+	if !strings.Contains(err.Error(), "shared") {
+		t.Errorf("error should mention the duplicate repo name: %v", err)
+	}
+}
+
+func TestDiscoverReposExplicitListSkipsThreshold(t *testing.T) {
+	// Explicit repos should not be subject to the max_repos threshold.
+	names := make([]string, 20)
+	for i := range names {
+		names[i] = fmt.Sprintf("repo-%d", i)
+	}
+
+	mockClient := &mockGitHubClient{repos: map[string][]github.Repo{}}
+	applier := NewApplier(mockClient)
+
+	result, err := applier.discoverAllRepos(context.Background(), []config.SourceConfig{
+		{Org: "myorg", Repos: names},
+	})
+	if err != nil {
+		t.Fatalf("explicit list should not be subject to threshold: %v", err)
+	}
+	if len(result) != 20 {
+		t.Errorf("expected 20 repos, got %d", len(result))
 	}
 }
 
