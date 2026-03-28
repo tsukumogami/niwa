@@ -1,6 +1,6 @@
 ---
 schema: plan/v1
-status: Draft
+status: Done
 execution_mode: single-pr
 upstream: docs/designs/DESIGN-workspace-config.md
 milestone: "Workspace config format"
