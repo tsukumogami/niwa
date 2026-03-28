@@ -43,10 +43,13 @@ type GroupConfig struct {
 
 // RepoOverride holds per-repo configuration overrides.
 type RepoOverride struct {
-	URL    string `toml:"url,omitempty"`
-	Branch string `toml:"branch,omitempty"`
-	Scope  string `toml:"scope,omitempty"`
-	Claude *bool  `toml:"claude,omitempty"`
+	URL      string         `toml:"url,omitempty"`
+	Branch   string         `toml:"branch,omitempty"`
+	Scope    string         `toml:"scope,omitempty"`
+	Claude   *bool          `toml:"claude,omitempty"`
+	Hooks    map[string]any `toml:"hooks,omitempty"`
+	Settings map[string]any `toml:"settings,omitempty"`
+	Env      map[string]any `toml:"env,omitempty"`
 }
 
 // ContentConfig declares the CLAUDE.md content hierarchy.

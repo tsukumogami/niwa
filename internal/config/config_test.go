@@ -186,6 +186,64 @@ func TestParseFullConfig(t *testing.T) {
 	}
 }
 
+func TestParseRepoOverrideAllFields(t *testing.T) {
+	input := `
+[workspace]
+name = "test"
+
+[[sources]]
+org = "myorg"
+
+[repos.myapp]
+url = "git@gitlab.com:custom/myapp.git"
+branch = "develop"
+scope = "tactical"
+claude = true
+
+[repos.myapp.hooks]
+pre_tool_use = ["repo-gate.sh"]
+
+[repos.myapp.settings]
+permissions = "ask"
+
+[repos.myapp.env]
+files = ["repo.env"]
+`
+	cfg, err := Parse([]byte(input))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	repo, ok := cfg.Repos["myapp"]
+	if !ok {
+		t.Fatal("repos[myapp] missing")
+	}
+	if repo.URL != "git@gitlab.com:custom/myapp.git" {
+		t.Errorf("url = %q, want gitlab URL", repo.URL)
+	}
+	if repo.Branch != "develop" {
+		t.Errorf("branch = %q, want develop", repo.Branch)
+	}
+	if repo.Scope != "tactical" {
+		t.Errorf("scope = %q, want tactical", repo.Scope)
+	}
+	if repo.Claude == nil || *repo.Claude != true {
+		t.Error("claude should be true")
+	}
+	if repo.Hooks == nil {
+		t.Fatal("hooks should not be nil")
+	}
+	if repo.Settings == nil {
+		t.Fatal("settings should not be nil")
+	}
+	if repo.Settings["permissions"] != "ask" {
+		t.Errorf("settings.permissions = %v, want ask", repo.Settings["permissions"])
+	}
+	if repo.Env == nil {
+		t.Fatal("env should not be nil")
+	}
+}
+
 func TestParseValidation(t *testing.T) {
 	tests := []struct {
 		name    string

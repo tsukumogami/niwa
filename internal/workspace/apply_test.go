@@ -373,6 +373,168 @@ func TestDiscoverReposExplicitListSkipsThreshold(t *testing.T) {
 	}
 }
 
+func TestApplyClaudeFalseSkipsContent(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	niwaDir := filepath.Join(tmpDir, ".niwa")
+	contentDir := filepath.Join(niwaDir, "claude")
+	reposContentDir := filepath.Join(contentDir, "repos")
+	if err := os.MkdirAll(reposContentDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	configTOML := `
+[workspace]
+name = "test-ws"
+content_dir = "claude"
+
+[[sources]]
+org = "testorg"
+
+[groups.public]
+visibility = "public"
+
+[repos.".github"]
+claude = false
+
+[content.workspace]
+source = "workspace.md"
+
+[content.repos.app]
+source = "repos/app.md"
+`
+	if err := os.WriteFile(filepath.Join(niwaDir, "workspace.toml"), []byte(configTOML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	contentFiles := map[string]string{
+		"workspace.md": "# {workspace_name}\n",
+		"repos/app.md": "# {repo_name}\n",
+		// Auto-discoverable content for .github -- should be skipped.
+		"repos/.github.md": "# Should not appear\n",
+	}
+	for name, body := range contentFiles {
+		path := filepath.Join(contentDir, name)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	cfg, err := config.Load(filepath.Join(niwaDir, "workspace.toml"))
+	if err != nil {
+		t.Fatalf("loading config: %v", err)
+	}
+
+	mockClient := &mockGitHubClient{
+		repos: map[string][]github.Repo{
+			"testorg": {
+				{Name: "app", Visibility: "public", SSHURL: "git@github.com:testorg/app.git"},
+				{Name: ".github", Visibility: "public", SSHURL: "git@github.com:testorg/.github.git"},
+			},
+		},
+	}
+
+	applier := NewApplier(mockClient)
+	applier.Cloner = &Cloner{}
+
+	instanceRoot := filepath.Join(tmpDir, "test-ws")
+
+	// Pre-create repo dirs with .git markers so the cloner skips them.
+	for _, repo := range []string{"app", ".github"} {
+		repoDir := filepath.Join(instanceRoot, "public", repo)
+		if err := os.MkdirAll(filepath.Join(repoDir, ".git"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(repoDir, ".gitignore"), []byte("*.local*\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := applier.Apply(context.Background(), cfg, niwaDir, instanceRoot); err != nil {
+		t.Fatalf("apply failed: %v", err)
+	}
+
+	// app should have CLAUDE.local.md.
+	assertFileContains(t, filepath.Join(instanceRoot, "public", "app", "CLAUDE.local.md"), "# app")
+
+	// .github should NOT have CLAUDE.local.md because claude = false.
+	ghContentPath := filepath.Join(instanceRoot, "public", ".github", "CLAUDE.local.md")
+	if _, err := os.Stat(ghContentPath); err == nil {
+		t.Error("CLAUDE.local.md should not be created for repos with claude = false")
+	}
+}
+
+func TestApplyUnknownRepoWarning(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	niwaDir := filepath.Join(tmpDir, ".niwa")
+	if err := os.MkdirAll(niwaDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	configTOML := `
+[workspace]
+name = "test-ws"
+
+[[sources]]
+org = "testorg"
+
+[groups.public]
+visibility = "public"
+
+[repos.nonexistent]
+scope = "strategic"
+`
+	if err := os.WriteFile(filepath.Join(niwaDir, "workspace.toml"), []byte(configTOML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := config.Load(filepath.Join(niwaDir, "workspace.toml"))
+	if err != nil {
+		t.Fatalf("loading config: %v", err)
+	}
+
+	mockClient := &mockGitHubClient{
+		repos: map[string][]github.Repo{
+			"testorg": {
+				{Name: "app", Visibility: "public", SSHURL: "git@github.com:testorg/app.git"},
+			},
+		},
+	}
+
+	applier := NewApplier(mockClient)
+	applier.Cloner = &Cloner{}
+
+	instanceRoot := filepath.Join(tmpDir, "test-ws")
+	repoDir := filepath.Join(instanceRoot, "public", "app")
+	if err := os.MkdirAll(filepath.Join(repoDir, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Apply should succeed (warnings are printed to stderr, not returned as errors).
+	if err := applier.Apply(context.Background(), cfg, niwaDir, instanceRoot); err != nil {
+		t.Fatalf("apply failed: %v", err)
+	}
+}
+
+func TestApplyRepoURLOverride(t *testing.T) {
+	// Verify that RepoCloneURL picks the override URL.
+	ws := &config.WorkspaceConfig{
+		Repos: map[string]config.RepoOverride{
+			"myrepo": {URL: "git@gitlab.com:custom/myrepo.git"},
+		},
+	}
+
+	got := RepoCloneURL(ws, "myrepo", "git@github.com:org/myrepo.git", "https://github.com/org/myrepo.git")
+	want := "git@gitlab.com:custom/myrepo.git"
+	if got != want {
+		t.Errorf("RepoCloneURL = %q, want %q", got, want)
+	}
+}
+
 func assertFileContains(t *testing.T, path, substr string) {
 	t.Helper()
 	data, err := os.ReadFile(path)

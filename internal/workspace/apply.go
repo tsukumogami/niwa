@@ -47,6 +47,16 @@ func (a *Applier) Apply(ctx context.Context, cfg *config.WorkspaceConfig, config
 		fmt.Fprintf(os.Stderr, "warning: %s\n", w)
 	}
 
+	// Step 2.5: Warn about unknown repo names in [repos] overrides.
+	discoveredNames := make([]string, len(allRepos))
+	for i, r := range allRepos {
+		discoveredNames[i] = r.Name
+	}
+	known := KnownRepoNames(cfg, discoveredNames)
+	for _, w := range WarnUnknownRepos(cfg, known) {
+		fmt.Fprintf(os.Stderr, "warning: %s\n", w)
+	}
+
 	// Step 3: Create group directories and clone repos.
 	for _, cr := range classified {
 		groupDir := filepath.Join(instanceRoot, cr.Group)
@@ -54,13 +64,11 @@ func (a *Applier) Apply(ctx context.Context, cfg *config.WorkspaceConfig, config
 			return fmt.Errorf("creating group directory %s: %w", groupDir, err)
 		}
 
-		cloneURL := cr.Repo.SSHURL
-		if cloneURL == "" {
-			cloneURL = cr.Repo.CloneURL
-		}
+		cloneURL := RepoCloneURL(cfg, cr.Repo.Name, cr.Repo.SSHURL, cr.Repo.CloneURL)
+		branch := RepoCloneBranch(cfg, cr.Repo.Name)
 
 		targetDir := filepath.Join(groupDir, cr.Repo.Name)
-		cloned, err := a.Cloner.Clone(ctx, cloneURL, targetDir)
+		cloned, err := a.Cloner.CloneWithBranch(ctx, cloneURL, targetDir, branch)
 		if err != nil {
 			return fmt.Errorf("cloning repo %s: %w", cr.Repo.Name, err)
 		}
@@ -90,7 +98,13 @@ func (a *Applier) Apply(ctx context.Context, cfg *config.WorkspaceConfig, config
 	}
 
 	// Step 6: Install repo-level CLAUDE.local.md files (and subdirectories).
+	// Skip repos with claude = false.
 	for _, cr := range classified {
+		if !ClaudeEnabled(cfg, cr.Repo.Name) {
+			fmt.Printf("skipped content for %s (claude = false)\n", cr.Repo.Name)
+			continue
+		}
+
 		contentWarnings, err := InstallRepoContent(cfg, configDir, instanceRoot, cr.Group, cr.Repo.Name)
 		if err != nil {
 			return fmt.Errorf("installing repo content for %q: %w", cr.Repo.Name, err)
