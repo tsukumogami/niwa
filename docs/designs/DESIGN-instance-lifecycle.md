@@ -1,5 +1,5 @@
 ---
-status: Proposed
+status: Accepted
 problem: |
   niwa treats the workspace root as the instance -- repos are cloned directly
   alongside .niwa/. The PRD defines a two-level model where workspace roots
