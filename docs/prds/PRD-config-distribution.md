@@ -62,16 +62,23 @@ A new developer runs `niwa init --from org/config && niwa create`. They get the 
 ```
 .niwa/
   workspace.toml
-  claude/
+  claude/                         # content source files (existing)
     workspace.md
     repos/api.md
-  hooks/
-    gate-online.sh              # pre_tool_use hook script
-    workflow-continue.sh        # stop hook script
-  env/
-    workspace.env               # shared env vars (API_URL=..., LOG_LEVEL=...)
-    repos/api.env               # api-repo-specific vars (DB_HOST=...)
+  hooks/                          # hook scripts -- auto-discovered by convention
+    pre_tool_use/
+      gate-online.sh              # -> .claude/hooks/pre_tool_use/gate-online.sh
+    stop.sh                       # -> .claude/hooks/stop/stop.sh
+  env/                            # env files -- auto-discovered by convention
+    workspace.env                 # auto-discovered as workspace-level env
+    repos/
+      api.env                     # auto-discovered as per-repo env for "api"
 ```
+
+Hooks use convention-based discovery: files named `{event}.sh` or files inside
+`{event}/` directories map to Claude Code hook events. Env files at
+`env/workspace.env` and `env/repos/{repoName}.env` are auto-discovered. Explicit
+`[claude.hooks]` or `[env]` config overrides convention for the same event or repo.
 
 ### workspace.toml config
 
@@ -86,18 +93,21 @@ org = "my-org"
 [groups.public]
 visibility = "public"
 
-# --- Hooks: scripts distributed to .claude/hooks/ in each repo ---
+# --- Claude Code hooks: scripts distributed to .claude/hooks/ ---
+# Namespaced under [claude] because hook event names are Claude Code concepts.
 
-[hooks]
+[claude.hooks]
 pre_tool_use = ["hooks/gate-online.sh"]
 stop = ["hooks/workflow-continue.sh"]
 
-# --- Settings: generates .claude/settings.local.json per repo ---
+# --- Claude Code settings: generates .claude/settings.local.json ---
+# Namespaced under [claude] because the output format is Claude Code specific.
 
-[settings]
+[claude.settings]
 permissions = "bypass"
 
-# --- Env: merges into .local.env per repo ---
+# --- Environment: merges into .local.env per repo ---
+# Top-level because KEY=VALUE env files are tool-agnostic.
 
 [env]
 files = ["env/workspace.env"]
@@ -108,7 +118,7 @@ vars = { LOG_LEVEL = "info" }
 [repos.api]
 scope = "tactical"
 
-[repos.api.settings]
+[repos.api.claude.settings]
 permissions = "ask"              # api repo uses ask instead of bypass
 
 [repos.api.env]
@@ -228,51 +238,67 @@ my-project/public/.github/
 
 ### Functional
 
-**R1: Hook installation.** For each entry in `[hooks]`, niwa copies the referenced script from the config directory (`.niwa/`) to `{repoDir}/.claude/hooks/{eventName}/{scriptName}` and sets executable permissions (0755). The `.claude/hooks/` directory is created if missing.
+**R1: Hook installation.** For each entry in `[claude.hooks]`, niwa copies the referenced script from the config directory (`.niwa/`) to `{repoDir}/.claude/hooks/{eventName}/{scriptName}` and sets executable permissions (0755). The `.claude/hooks/` directory is created if missing.
 
-**R2: Hook source validation.** Hook script paths are relative to the config directory. Paths containing `..` or absolute components are rejected. Source files must exist.
+**R2: Hook auto-discovery.** If `.niwa/hooks/` directory exists, niwa scans for scripts matching Claude Code's hook event names by convention: a file named `{eventName}.sh` (e.g., `hooks/stop.sh`) or files in an `{eventName}/` subdirectory (e.g., `hooks/pre_tool_use/gate-online.sh`) are auto-discovered without explicit `[claude.hooks]` entries. Explicit config overrides auto-discovery for the same event.
 
-**R3: Settings generation.** niwa generates `{repoDir}/.claude/settings.local.json` from the merged `[settings]` config. The JSON includes the permissions field and references to installed hook scripts (using relative paths from the repo root).
+**R3: Hook source validation.** Hook script paths are relative to the config directory. Paths containing `..` or absolute components are rejected. Source files must exist.
 
-**R4: Settings format.** The generated `settings.local.json` must match Claude Code's expected schema. At minimum: `permissions.defaultMode` and hook event arrays referencing installed script paths.
+**R4: Settings generation.** niwa generates `{repoDir}/.claude/settings.local.json` from the merged `[claude.settings]` config. The JSON includes the permissions field and references to installed hook scripts (using relative paths from the repo root).
 
-**R5: Env file merging.** niwa reads env source files referenced in `[env].files` (relative to config directory), parses KEY=VALUE lines (ignoring comments and blanks), overlays inline `[env].vars`, and writes the merged result to `{repoDir}/.local.env`.
+**R5: Settings format.** The generated `settings.local.json` must match Claude Code's expected schema. At minimum: `permissions.defaultMode` and hook event arrays referencing installed script paths.
 
-**R6: Env merge semantics.** When workspace-level and per-repo env configs are both present: file lists are concatenated (repo files processed after workspace files, so repo values override for same key), inline vars are merged (repo wins for same key).
+**R6: Env file merging.** niwa reads env source files referenced in `[env].files` (relative to config directory), parses KEY=VALUE lines (ignoring comments and blanks), overlays inline `[env].vars`, and writes the merged result to `{repoDir}/.local.env`.
 
-**R7: Per-repo hook overrides.** `[repos.<name>.hooks]` entries extend (append to) workspace-level hooks. A repo can add hooks but not remove workspace-level ones.
+**R7: Env auto-discovery.** If `.niwa/env/workspace.env` exists and no `[env].files` is declared, niwa uses it automatically. If `.niwa/env/repos/{repoName}.env` exists, it is appended to the file list for that repo without requiring a `[repos.<name>.env]` entry. Explicit config overrides auto-discovery.
 
-**R8: Per-repo settings overrides.** `[repos.<name>.settings]` entries replace workspace-level settings on a per-key basis. A repo setting of `permissions = "ask"` overrides workspace `permissions = "bypass"`.
+**R8: Env merge semantics.** When workspace-level and per-repo env configs are both present: file lists are concatenated (repo files processed after workspace files, so repo values override for same key), inline vars are merged (repo wins for same key).
 
-**R9: Per-repo env overrides.** `[repos.<name>.env]` entries: `files` appends to workspace file list, `vars` overrides workspace vars for same key.
+**R9: Per-repo hook overrides.** `[repos.<name>.claude.hooks]` entries extend (append to) workspace-level hooks. A repo can add hooks but not remove workspace-level ones.
 
-**R10: Claude skip.** Repos with `claude = false` in `[repos.<name>]` skip all distribution (hooks, settings, env) in addition to skipping CLAUDE.local.md (existing behavior).
+**R10: Per-repo settings overrides.** `[repos.<name>.claude.settings]` entries replace workspace-level settings on a per-key basis. A repo setting of `permissions = "ask"` overrides workspace `permissions = "bypass"`.
 
-**R11: Managed file tracking.** All files written by distribution (hook scripts, settings.local.json, .local.env) are tracked in `.niwa/instance.json` with SHA-256 hashes, the same as CLAUDE.md files. Drift detection and cleanup on re-apply work for distributed files.
+**R11: Per-repo env overrides.** `[repos.<name>.env]` entries: `files` appends to workspace file list, `vars` overrides workspace vars for same key.
 
-**R12: Idempotent distribution.** Running `niwa apply` twice with no config changes produces identical files. Removing a hook from config and re-running apply removes the installed script and its reference from settings.local.json.
+**R12: Claude skip.** Repos with `claude = false` in `[repos.<name>]` skip all Claude Code distribution (hooks, settings) in addition to skipping CLAUDE.local.md (existing behavior). Env distribution still applies since it's tool-agnostic.
 
-**R13: No secrets in workspace.toml.** Environment values in workspace.toml are configuration (API URLs, log levels, feature flags), not secrets. Secrets should live in .env files referenced by path, which are typically gitignored. niwa does not provide special secret handling.
+**R13: Managed file tracking.** All files written by distribution (hook scripts, settings.local.json, .local.env) are tracked in `.niwa/instance.json` with SHA-256 hashes, the same as CLAUDE.md files. Drift detection and cleanup on re-apply work for distributed files.
+
+**R14: Idempotent distribution.** Running `niwa apply` twice with no config changes produces identical files. Removing a hook from config and re-running apply removes the installed script and its reference from settings.local.json.
+
+**R15: No secrets in workspace.toml.** Environment values in workspace.toml are configuration (API URLs, log levels, feature flags), not secrets. Secrets should live in .env files referenced by path, which are typically gitignored. niwa does not provide special secret handling.
 
 ### Non-functional
 
-**R14: Extensible distribution mechanism.** The apply pipeline's distribution step should support adding new distribution types (plugins, scripts, extensions) without modifying the core pipeline loop. Each distribution type owns its config reading, merging, and file writing.
+**R16: Extensible distribution mechanism.** The apply pipeline's distribution step should support adding new distribution types (plugins, scripts, extensions) without modifying the core pipeline loop. Each distribution type owns its config reading, merging, and file writing.
 
-**R15: Distribution ordering.** Hooks are installed before settings are generated, because settings.local.json references installed hook paths. Env distribution is independent of both.
+**R17: Distribution ordering.** Hooks are installed before settings are generated, because settings.local.json references installed hook paths. Env distribution is independent of both.
 
 ## Acceptance criteria
 
-- [ ] `niwa apply` with `[hooks] pre_tool_use = ["hooks/gate.sh"]` copies the script to `.claude/hooks/pre_tool_use/gate.sh` in each repo
+### Hooks
+- [ ] `[claude.hooks] pre_tool_use = ["hooks/gate.sh"]` copies the script to `.claude/hooks/pre_tool_use/gate.sh` in each repo
 - [ ] Installed hook scripts are executable (mode 0755)
 - [ ] Hook source paths with `..` are rejected with a clear error
-- [ ] `niwa apply` with `[settings] permissions = "bypass"` generates `.claude/settings.local.json` in each repo
+- [ ] A file at `.niwa/hooks/stop.sh` is auto-discovered as a stop hook without explicit config
+- [ ] Files in `.niwa/hooks/pre_tool_use/` directory are auto-discovered as pre_tool_use hooks
+- [ ] Explicit `[claude.hooks]` config overrides auto-discovered hooks for the same event
+
+### Settings
+- [ ] `[claude.settings] permissions = "bypass"` generates `.claude/settings.local.json` in each repo
 - [ ] Generated settings.local.json includes hook references matching installed hook paths
-- [ ] `niwa apply` with `[env] files = ["env/workspace.env"]` writes `.local.env` in each repo with merged content
+- [ ] Per-repo `[repos.api.claude.settings] permissions = "ask"` overrides workspace setting
+
+### Env
+- [ ] `[env] files = ["env/workspace.env"]` writes `.local.env` in each repo with merged content
 - [ ] `[env] vars = { KEY = "value" }` adds inline vars to .local.env
-- [ ] Per-repo hook override extends workspace hooks (both scripts installed)
-- [ ] Per-repo settings override replaces on per-key basis
+- [ ] `.niwa/env/workspace.env` is auto-discovered when no `[env].files` is declared
+- [ ] `.niwa/env/repos/{repoName}.env` is auto-discovered for per-repo env without explicit config
 - [ ] Per-repo env vars override workspace vars for same key
-- [ ] Repo with `claude = false` gets no hooks, settings, or env files
+
+### Overrides and lifecycle
+- [ ] Per-repo hook override extends workspace hooks (both scripts installed)
+- [ ] Repo with `claude = false` gets no hooks or settings; still gets env
 - [ ] Distributed files appear in `.niwa/instance.json` managed_files with hashes
 - [ ] `niwa status` shows drift for manually edited hook scripts or settings
 - [ ] Removing a hook from config and re-running apply deletes the installed script
