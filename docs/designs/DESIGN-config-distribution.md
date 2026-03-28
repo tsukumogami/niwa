@@ -1,5 +1,6 @@
 ---
 status: Proposed
+upstream: docs/prds/PRD-config-distribution.md
 problem: |
   niwa's apply pipeline installs CLAUDE.md content but doesn't distribute
   Claude Code operational configuration (hooks, settings, env files). The
