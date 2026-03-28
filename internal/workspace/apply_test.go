@@ -80,10 +80,11 @@ source = "repos/app.md"
 		}
 	}
 
-	cfg, err := config.Load(filepath.Join(niwaDir, "workspace.toml"))
+	result, err := config.Load(filepath.Join(niwaDir, "workspace.toml"))
 	if err != nil {
 		t.Fatalf("loading config: %v", err)
 	}
+	cfg := result.Config
 
 	mockClient := &mockGitHubClient{
 		repos: map[string][]github.Repo{
@@ -171,10 +172,11 @@ visibility = "public"
 		t.Fatal(err)
 	}
 
-	cfg, err := config.Load(filepath.Join(niwaDir, "workspace.toml"))
+	result, err := config.Load(filepath.Join(niwaDir, "workspace.toml"))
 	if err != nil {
 		t.Fatalf("loading config: %v", err)
 	}
+	cfg := result.Config
 
 	mockClient := &mockGitHubClient{
 		repos: map[string][]github.Repo{
@@ -423,10 +425,11 @@ source = "repos/app.md"
 		}
 	}
 
-	cfg, err := config.Load(filepath.Join(niwaDir, "workspace.toml"))
+	result, err := config.Load(filepath.Join(niwaDir, "workspace.toml"))
 	if err != nil {
 		t.Fatalf("loading config: %v", err)
 	}
+	cfg := result.Config
 
 	mockClient := &mockGitHubClient{
 		repos: map[string][]github.Repo{
@@ -492,10 +495,11 @@ scope = "strategic"
 		t.Fatal(err)
 	}
 
-	cfg, err := config.Load(filepath.Join(niwaDir, "workspace.toml"))
+	result, err := config.Load(filepath.Join(niwaDir, "workspace.toml"))
 	if err != nil {
 		t.Fatalf("loading config: %v", err)
 	}
+	cfg := result.Config
 
 	mockClient := &mockGitHubClient{
 		repos: map[string][]github.Repo{

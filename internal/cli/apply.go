@@ -56,10 +56,14 @@ If a workspace name is given, it is resolved through the global registry
 			}
 		}
 
-		cfg, err := config.Load(configPath)
+		result, err := config.Load(configPath)
 		if err != nil {
 			return err
 		}
+		for _, w := range result.Warnings {
+			fmt.Fprintf(os.Stderr, "warning: %s\n", w)
+		}
+		cfg := result.Config
 
 		// Workspace root is the parent of the config directory.
 		workspaceRoot := filepath.Dir(configDir)

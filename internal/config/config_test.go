@@ -79,10 +79,11 @@ plugin = "telegram@claude-plugins-official"
 `
 
 func TestParseMinimalConfig(t *testing.T) {
-	cfg, err := Parse([]byte(minimalConfig))
+	result, err := Parse([]byte(minimalConfig))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
+	cfg := result.Config
 
 	if cfg.Workspace.Name != "test-ws" {
 		t.Errorf("workspace.name = %q, want %q", cfg.Workspace.Name, "test-ws")
@@ -110,11 +111,78 @@ func TestParseMinimalConfig(t *testing.T) {
 	}
 }
 
-func TestParseFullConfig(t *testing.T) {
-	cfg, err := Parse([]byte(fullConfig))
+func TestParseVersionField(t *testing.T) {
+	input := `
+[workspace]
+name = "test"
+version = "0.1"
+
+[[sources]]
+org = "myorg"
+`
+	result, err := Parse([]byte(input))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
+	if result.Config.Workspace.Version != "0.1" {
+		t.Errorf("workspace.version = %q, want %q", result.Config.Workspace.Version, "0.1")
+	}
+}
+
+func TestParseUnknownFieldsWarning(t *testing.T) {
+	input := `
+[workspace]
+name = "test"
+version = "0.1"
+future_field = "something"
+
+[[sources]]
+org = "myorg"
+
+[groups.public]
+visibility = "public"
+some_new_option = true
+`
+	result, err := Parse([]byte(input))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(result.Warnings) == 0 {
+		t.Fatal("expected warnings for unknown fields, got none")
+	}
+
+	// Check that warnings mention the unknown fields.
+	found := map[string]bool{"future_field": false, "some_new_option": false}
+	for _, w := range result.Warnings {
+		for key := range found {
+			if strings.Contains(w, key) {
+				found[key] = true
+			}
+		}
+	}
+	for key, ok := range found {
+		if !ok {
+			t.Errorf("expected warning mentioning %q, not found in: %v", key, result.Warnings)
+		}
+	}
+}
+
+func TestParseNoWarningsForKnownFields(t *testing.T) {
+	result, err := Parse([]byte(minimalConfig))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(result.Warnings) != 0 {
+		t.Errorf("expected no warnings for known fields, got: %v", result.Warnings)
+	}
+}
+
+func TestParseFullConfig(t *testing.T) {
+	result, err := Parse([]byte(fullConfig))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	cfg := result.Config
 
 	if cfg.Workspace.Name != "tsuku" {
 		t.Errorf("workspace.name = %q, want %q", cfg.Workspace.Name, "tsuku")
@@ -210,10 +278,11 @@ permissions = "ask"
 [repos.myapp.env]
 files = ["repo.env"]
 `
-	cfg, err := Parse([]byte(input))
+	result, err := Parse([]byte(input))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
+	cfg := result.Config
 
 	repo, ok := cfg.Repos["myapp"]
 	if !ok {

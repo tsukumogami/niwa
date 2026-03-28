@@ -30,8 +30,15 @@ type WorkspaceConfig struct {
 // WorkspaceMeta holds top-level workspace metadata.
 type WorkspaceMeta struct {
 	Name          string `toml:"name"`
+	Version       string `toml:"version,omitempty"`
 	DefaultBranch string `toml:"default_branch,omitempty"`
 	ContentDir    string `toml:"content_dir,omitempty"`
+}
+
+// ParseResult holds the parsed config and any non-fatal warnings.
+type ParseResult struct {
+	Config   *WorkspaceConfig
+	Warnings []string
 }
 
 // SourceConfig defines a GitHub org source for repo discovery.
@@ -76,8 +83,9 @@ type RepoContentEntry struct {
 	Subdirs map[string]string `toml:"subdirs,omitempty"`
 }
 
-// Load parses a workspace.toml file at the given path and returns the config.
-func Load(path string) (*WorkspaceConfig, error) {
+// Load parses a workspace.toml file at the given path and returns the config
+// along with any non-fatal warnings (e.g., unknown fields).
+func Load(path string) (*ParseResult, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("reading config: %w", err)
@@ -87,9 +95,11 @@ func Load(path string) (*WorkspaceConfig, error) {
 }
 
 // Parse decodes TOML bytes into a WorkspaceConfig and validates it.
-func Parse(data []byte) (*WorkspaceConfig, error) {
+// Returns warnings for unknown fields (forward-compatibility).
+func Parse(data []byte) (*ParseResult, error) {
 	var cfg WorkspaceConfig
-	if err := toml.Unmarshal(data, &cfg); err != nil {
+	md, err := toml.Decode(string(data), &cfg)
+	if err != nil {
 		return nil, fmt.Errorf("parsing config: %w", err)
 	}
 
@@ -97,7 +107,12 @@ func Parse(data []byte) (*WorkspaceConfig, error) {
 		return nil, err
 	}
 
-	return &cfg, nil
+	var warnings []string
+	for _, key := range md.Undecoded() {
+		warnings = append(warnings, fmt.Sprintf("unknown config field: %s", key))
+	}
+
+	return &ParseResult{Config: &cfg, Warnings: warnings}, nil
 }
 
 func validate(cfg *WorkspaceConfig) error {
