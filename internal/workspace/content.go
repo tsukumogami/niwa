@@ -23,14 +23,15 @@ func (w ContentWarning) String() string {
 
 // InstallWorkspaceContent reads the workspace content source file, expands
 // template variables, and writes it to {instanceRoot}/CLAUDE.md.
-func InstallWorkspaceContent(cfg *config.WorkspaceConfig, configDir, instanceRoot string) error {
+// Returns the list of files written.
+func InstallWorkspaceContent(cfg *config.WorkspaceConfig, configDir, instanceRoot string) ([]string, error) {
 	if cfg.Content.Workspace.Source == "" {
-		return nil
+		return nil, nil
 	}
 
 	absInstance, err := filepath.Abs(instanceRoot)
 	if err != nil {
-		return fmt.Errorf("resolving instance root: %w", err)
+		return nil, fmt.Errorf("resolving instance root: %w", err)
 	}
 
 	vars := map[string]string{
@@ -41,21 +42,25 @@ func InstallWorkspaceContent(cfg *config.WorkspaceConfig, configDir, instanceRoo
 	source := cfg.Content.Workspace.Source
 	target := filepath.Join(instanceRoot, "CLAUDE.md")
 
-	return installContentFile(cfg, configDir, source, target, vars)
+	if err := installContentFile(cfg, configDir, source, target, vars); err != nil {
+		return nil, err
+	}
+	return []string{target}, nil
 }
 
 // InstallGroupContent reads the group content source file, expands template
 // variables, and writes it to {instanceRoot}/{groupName}/CLAUDE.md.
 // Group directories are non-git directories, so they get CLAUDE.md (not .local).
-func InstallGroupContent(cfg *config.WorkspaceConfig, configDir, instanceRoot, groupName string) error {
+// Returns the list of files written.
+func InstallGroupContent(cfg *config.WorkspaceConfig, configDir, instanceRoot, groupName string) ([]string, error) {
 	entry, ok := cfg.Content.Groups[groupName]
 	if !ok || entry.Source == "" {
-		return nil
+		return nil, nil
 	}
 
 	absInstance, err := filepath.Abs(instanceRoot)
 	if err != nil {
-		return fmt.Errorf("resolving instance root: %w", err)
+		return nil, fmt.Errorf("resolving instance root: %w", err)
 	}
 
 	vars := map[string]string{
@@ -66,7 +71,16 @@ func InstallGroupContent(cfg *config.WorkspaceConfig, configDir, instanceRoot, g
 
 	target := filepath.Join(instanceRoot, groupName, "CLAUDE.md")
 
-	return installContentFile(cfg, configDir, entry.Source, target, vars)
+	if err := installContentFile(cfg, configDir, entry.Source, target, vars); err != nil {
+		return nil, err
+	}
+	return []string{target}, nil
+}
+
+// RepoContentResult holds the results of installing repo content.
+type RepoContentResult struct {
+	Warnings     []ContentWarning
+	WrittenFiles []string
 }
 
 // InstallRepoContent reads the repo content source file, expands template
@@ -76,9 +90,9 @@ func InstallGroupContent(cfg *config.WorkspaceConfig, configDir, instanceRoot, g
 // If no explicit content entry exists for the repo, auto-discovery checks for
 // {content_dir}/repos/{repoName}.md and uses it if found.
 //
-// Returns any content warnings (e.g., missing gitignore pattern).
-func InstallRepoContent(cfg *config.WorkspaceConfig, configDir, instanceRoot, groupName, repoName string) ([]ContentWarning, error) {
-	var warnings []ContentWarning
+// Returns a result with content warnings and files written.
+func InstallRepoContent(cfg *config.WorkspaceConfig, configDir, instanceRoot, groupName, repoName string) (*RepoContentResult, error) {
+	result := &RepoContentResult{}
 
 	absInstance, err := filepath.Abs(instanceRoot)
 	if err != nil {
@@ -108,9 +122,10 @@ func InstallRepoContent(cfg *config.WorkspaceConfig, configDir, instanceRoot, gr
 		if err := installContentFile(cfg, configDir, source, target, vars); err != nil {
 			return nil, err
 		}
+		result.WrittenFiles = append(result.WrittenFiles, target)
 
 		w := CheckGitignore(repoDir, repoName)
-		warnings = append(warnings, w...)
+		result.Warnings = append(result.Warnings, w...)
 	}
 
 	// Install subdirectory content if present.
@@ -123,10 +138,11 @@ func InstallRepoContent(cfg *config.WorkspaceConfig, configDir, instanceRoot, gr
 			if err := installContentFile(cfg, configDir, subdirSource, target, vars); err != nil {
 				return nil, err
 			}
+			result.WrittenFiles = append(result.WrittenFiles, target)
 		}
 	}
 
-	return warnings, nil
+	return result, nil
 }
 
 // CheckGitignore checks if a repo directory's .gitignore contains a *.local*

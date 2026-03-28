@@ -33,8 +33,12 @@ func TestInstallWorkspaceContent(t *testing.T) {
 	}
 
 	instanceRoot := filepath.Join(tmpDir, "instance")
-	if err := InstallWorkspaceContent(cfg, configDir, instanceRoot); err != nil {
+	files, err := InstallWorkspaceContent(cfg, configDir, instanceRoot)
+	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(files) != 1 {
+		t.Fatalf("expected 1 written file, got %d", len(files))
 	}
 
 	data, err := os.ReadFile(filepath.Join(instanceRoot, "CLAUDE.md"))
@@ -61,8 +65,12 @@ func TestInstallWorkspaceContentNoSource(t *testing.T) {
 	}
 
 	// Should be a no-op, not an error.
-	if err := InstallWorkspaceContent(cfg, "/tmp", "/tmp/instance"); err != nil {
+	files, err := InstallWorkspaceContent(cfg, "/tmp", "/tmp/instance")
+	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(files) != 0 {
+		t.Errorf("expected no files, got %d", len(files))
 	}
 }
 
@@ -127,8 +135,12 @@ func TestInstallGroupContent(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := InstallGroupContent(cfg, configDir, instanceRoot, "public"); err != nil {
+	files, err := InstallGroupContent(cfg, configDir, instanceRoot, "public")
+	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(files) != 1 {
+		t.Fatalf("expected 1 written file, got %d", len(files))
 	}
 
 	// Group directory is non-git, so it gets CLAUDE.md (not .local).
@@ -156,8 +168,12 @@ func TestInstallGroupContentNoEntry(t *testing.T) {
 	}
 
 	// No group content entry -- should be a no-op.
-	if err := InstallGroupContent(cfg, "/tmp", "/tmp/instance", "public"); err != nil {
+	files, err := InstallGroupContent(cfg, "/tmp", "/tmp/instance", "public")
+	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(files) != 0 {
+		t.Errorf("expected no files, got %d", len(files))
 	}
 }
 
@@ -198,12 +214,15 @@ func TestInstallRepoContent(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	warnings, err := InstallRepoContent(cfg, configDir, instanceRoot, "public", "myapp")
+	result, err := InstallRepoContent(cfg, configDir, instanceRoot, "public", "myapp")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(warnings) != 0 {
-		t.Errorf("unexpected warnings: %v", warnings)
+	if len(result.Warnings) != 0 {
+		t.Errorf("unexpected warnings: %v", result.Warnings)
+	}
+	if len(result.WrittenFiles) != 1 {
+		t.Fatalf("expected 1 written file, got %d", len(result.WrittenFiles))
 	}
 
 	// Repo directory is a git directory, so it gets CLAUDE.local.md.
@@ -275,12 +294,15 @@ func TestInstallRepoContentSubdirs(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	warnings, err := InstallRepoContent(cfg, configDir, instanceRoot, "public", "tsuku")
+	result, err := InstallRepoContent(cfg, configDir, instanceRoot, "public", "tsuku")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(warnings) != 0 {
-		t.Errorf("unexpected warnings: %v", warnings)
+	if len(result.Warnings) != 0 {
+		t.Errorf("unexpected warnings: %v", result.Warnings)
+	}
+	if len(result.WrittenFiles) != 2 {
+		t.Fatalf("expected 2 written files, got %d", len(result.WrittenFiles))
 	}
 
 	// Verify repo-level CLAUDE.local.md.
@@ -336,12 +358,12 @@ func TestInstallRepoContentAutoDiscovery(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	warnings, err := InstallRepoContent(cfg, configDir, instanceRoot, "public", "myapp")
+	result, err := InstallRepoContent(cfg, configDir, instanceRoot, "public", "myapp")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(warnings) != 0 {
-		t.Errorf("unexpected warnings: %v", warnings)
+	if len(result.Warnings) != 0 {
+		t.Errorf("unexpected warnings: %v", result.Warnings)
 	}
 
 	data, err := os.ReadFile(filepath.Join(repoDir, "CLAUDE.local.md"))
@@ -376,12 +398,12 @@ func TestInstallRepoContentAutoDiscoveryNoFile(t *testing.T) {
 	}
 
 	// No auto-discovery file, no explicit entry -- should be a no-op.
-	warnings, err := InstallRepoContent(cfg, configDir, instanceRoot, "public", "myapp")
+	result, err := InstallRepoContent(cfg, configDir, instanceRoot, "public", "myapp")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(warnings) != 0 {
-		t.Errorf("unexpected warnings: %v", warnings)
+	if len(result.Warnings) != 0 {
+		t.Errorf("unexpected warnings: %v", result.Warnings)
 	}
 
 	// CLAUDE.local.md should NOT exist.
@@ -407,12 +429,12 @@ func TestInstallRepoContentAutoDiscoveryNoContentDir(t *testing.T) {
 	}
 
 	// Without content_dir, auto-discovery should not attempt anything.
-	warnings, err := InstallRepoContent(cfg, tmpDir, instanceRoot, "public", "myapp")
+	result, err := InstallRepoContent(cfg, tmpDir, instanceRoot, "public", "myapp")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(warnings) != 0 {
-		t.Errorf("unexpected warnings: %v", warnings)
+	if len(result.Warnings) != 0 {
+		t.Errorf("unexpected warnings: %v", result.Warnings)
 	}
 }
 
@@ -490,15 +512,15 @@ func TestCheckGitignoreWarningOnWrite(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	warnings, err := InstallRepoContent(cfg, configDir, instanceRoot, "public", "myapp")
+	result, err := InstallRepoContent(cfg, configDir, instanceRoot, "public", "myapp")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(warnings) != 1 {
-		t.Fatalf("expected 1 warning, got %d", len(warnings))
+	if len(result.Warnings) != 1 {
+		t.Fatalf("expected 1 warning, got %d", len(result.Warnings))
 	}
-	if !strings.Contains(warnings[0].Message, "*.local*") {
-		t.Errorf("unexpected warning message: %s", warnings[0].Message)
+	if !strings.Contains(result.Warnings[0].Message, "*.local*") {
+		t.Errorf("unexpected warning message: %s", result.Warnings[0].Message)
 	}
 
 	// File should still be written despite the warning.

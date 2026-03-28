@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/tsukumogami/niwa/internal/config"
 	"github.com/tsukumogami/niwa/internal/github"
@@ -30,8 +31,14 @@ func NewApplier(gh github.Client) *Applier {
 const DefaultMaxRepos = 10
 
 // Apply runs the full apply pipeline: discover repos, classify, clone, and
-// install content.
+// install content. It writes .niwa/instance.json to track state.
 func (a *Applier) Apply(ctx context.Context, cfg *config.WorkspaceConfig, configDir, instanceRoot string) error {
+	now := time.Now()
+	var writtenFiles []string
+
+	// Load existing state if present (for drift detection and preserving created time).
+	existingState, _ := LoadState(instanceRoot)
+
 	// Step 1: Discover repos from all sources.
 	allRepos, err := a.discoverAllRepos(ctx, cfg.Sources)
 	if err != nil {
@@ -58,6 +65,7 @@ func (a *Applier) Apply(ctx context.Context, cfg *config.WorkspaceConfig, config
 	}
 
 	// Step 3: Create group directories and clone repos.
+	repoStates := map[string]RepoState{}
 	for _, cr := range classified {
 		groupDir := filepath.Join(instanceRoot, cr.Group)
 		if err := os.MkdirAll(groupDir, 0o755); err != nil {
@@ -77,12 +85,33 @@ func (a *Applier) Apply(ctx context.Context, cfg *config.WorkspaceConfig, config
 		} else {
 			fmt.Printf("skipped %s (already exists)\n", cr.Repo.Name)
 		}
+
+		repoStates[cr.Repo.Name] = RepoState{
+			URL:    cloneURL,
+			Cloned: cloned || repoAlreadyCloned(targetDir),
+		}
+	}
+
+	// Check drift on existing managed files before overwriting.
+	if existingState != nil {
+		for _, mf := range existingState.ManagedFiles {
+			drift, err := CheckDrift(mf)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "warning: could not check drift for %s: %v\n", mf.Path, err)
+				continue
+			}
+			if drift.Drifted() && !drift.FileRemoved {
+				fmt.Fprintf(os.Stderr, "warning: managed file %s has been modified outside niwa\n", mf.Path)
+			}
+		}
 	}
 
 	// Step 4: Install workspace-level CLAUDE.md.
-	if err := InstallWorkspaceContent(cfg, configDir, instanceRoot); err != nil {
+	wsFiles, err := InstallWorkspaceContent(cfg, configDir, instanceRoot)
+	if err != nil {
 		return fmt.Errorf("installing workspace content: %w", err)
 	}
+	writtenFiles = append(writtenFiles, wsFiles...)
 
 	// Step 5: Install group-level CLAUDE.md files.
 	installedGroups := map[string]bool{}
@@ -92,9 +121,11 @@ func (a *Applier) Apply(ctx context.Context, cfg *config.WorkspaceConfig, config
 		}
 		installedGroups[cr.Group] = true
 
-		if err := InstallGroupContent(cfg, configDir, instanceRoot, cr.Group); err != nil {
+		groupFiles, err := InstallGroupContent(cfg, configDir, instanceRoot, cr.Group)
+		if err != nil {
 			return fmt.Errorf("installing group content for %q: %w", cr.Group, err)
 		}
+		writtenFiles = append(writtenFiles, groupFiles...)
 	}
 
 	// Step 6: Install repo-level CLAUDE.local.md files (and subdirectories).
@@ -105,16 +136,63 @@ func (a *Applier) Apply(ctx context.Context, cfg *config.WorkspaceConfig, config
 			continue
 		}
 
-		contentWarnings, err := InstallRepoContent(cfg, configDir, instanceRoot, cr.Group, cr.Repo.Name)
+		result, err := InstallRepoContent(cfg, configDir, instanceRoot, cr.Group, cr.Repo.Name)
 		if err != nil {
 			return fmt.Errorf("installing repo content for %q: %w", cr.Repo.Name, err)
 		}
-		for _, w := range contentWarnings {
+		for _, w := range result.Warnings {
 			fmt.Fprintf(os.Stderr, "warning: %s\n", w)
 		}
+		writtenFiles = append(writtenFiles, result.WrittenFiles...)
+	}
+
+	// Step 7: Build managed files with hashes.
+	managedFiles := make([]ManagedFile, 0, len(writtenFiles))
+	for _, path := range writtenFiles {
+		hash, err := HashFile(path)
+		if err != nil {
+			return fmt.Errorf("hashing managed file %s: %w", path, err)
+		}
+		managedFiles = append(managedFiles, ManagedFile{
+			Path:      path,
+			Hash:      hash,
+			Generated: now,
+		})
+	}
+
+	// Step 8: Write instance state.
+	created := now
+	instanceNumber := 1
+	if existingState != nil {
+		created = existingState.Created
+		instanceNumber = existingState.InstanceNumber
+	}
+
+	configName := cfg.Workspace.Name
+	state := &InstanceState{
+		SchemaVersion:  SchemaVersion,
+		ConfigName:     &configName,
+		InstanceName:   cfg.Workspace.Name,
+		InstanceNumber: instanceNumber,
+		Root:           instanceRoot,
+		Created:        created,
+		LastApplied:    now,
+		ManagedFiles:   managedFiles,
+		Repos:          repoStates,
+	}
+
+	if err := SaveState(instanceRoot, state); err != nil {
+		return fmt.Errorf("saving instance state: %w", err)
 	}
 
 	return nil
+}
+
+// repoAlreadyCloned checks if a directory has a .git marker, indicating
+// it was previously cloned.
+func repoAlreadyCloned(dir string) bool {
+	_, err := os.Stat(filepath.Join(dir, ".git"))
+	return err == nil
 }
 
 // discoverAllRepos collects repos from all sources, enforcing per-source
