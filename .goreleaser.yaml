@@ -37,6 +37,7 @@ release:
     owner: tsukumogami
     name: niwa
   draft: true
+  replace_existing_draft: true
   make_latest: true
   prerelease: auto
 
