@@ -18,9 +18,10 @@ var validName = regexp.MustCompile(`^[a-zA-Z0-9._-]+$`)
 // On RepoOverride, Enabled controls whether Claude Code configuration is
 // installed for the repo (defaults to true when nil).
 type ClaudeConfig struct {
-	Enabled  *bool          `toml:"enabled,omitempty"`
-	Hooks    HooksConfig    `toml:"hooks,omitempty"`
-	Settings SettingsConfig `toml:"settings,omitempty"`
+	Enabled  *bool             `toml:"enabled,omitempty"`
+	Hooks    HooksConfig       `toml:"hooks,omitempty"`
+	Settings SettingsConfig    `toml:"settings,omitempty"`
+	Env      map[string]string `toml:"env,omitempty"`
 }
 
 // WorkspaceConfig is the top-level configuration parsed from workspace.toml.

@@ -29,6 +29,7 @@ func MergeOverrides(ws *config.WorkspaceConfig, repoName string) EffectiveConfig
 		Claude: config.ClaudeConfig{
 			Hooks:    copyHooks(ws.Claude.Hooks),
 			Settings: copySettings(ws.Claude.Settings),
+			Env:      copyStringMap(ws.Claude.Env),
 		},
 		Env: copyEnv(ws.Env),
 	}
@@ -53,6 +54,14 @@ func MergeOverrides(ws *config.WorkspaceConfig, repoName string) EffectiveConfig
 				result.Claude.Hooks = config.HooksConfig{}
 			}
 			result.Claude.Hooks[k] = append(result.Claude.Hooks[k], v...)
+		}
+
+		// Claude env: repo wins per key.
+		for k, v := range override.Claude.Env {
+			if result.Claude.Env == nil {
+				result.Claude.Env = map[string]string{}
+			}
+			result.Claude.Env[k] = v
 		}
 	}
 
@@ -148,6 +157,16 @@ func copySettings(s config.SettingsConfig) config.SettingsConfig {
 	}
 	out := make(config.SettingsConfig, len(s))
 	maps.Copy(out, s)
+	return out
+}
+
+// copyStringMap returns a shallow copy of a string map.
+func copyStringMap(m map[string]string) map[string]string {
+	if m == nil {
+		return nil
+	}
+	out := make(map[string]string, len(m))
+	maps.Copy(out, m)
 	return out
 }
 

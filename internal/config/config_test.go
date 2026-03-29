@@ -71,6 +71,9 @@ stop = ["hooks/workflow-continue.sh"]
 [claude.settings]
 permissions = "bypass"
 
+[claude.env]
+GH_TOKEN = "ghp_workspace"
+
 [env]
 files = ["env/workspace.env"]
 vars = { LOG_LEVEL = "debug" }
@@ -262,6 +265,12 @@ func TestParseFullConfig(t *testing.T) {
 	}
 	if cfg.Env.Vars["LOG_LEVEL"] != "debug" {
 		t.Errorf("env.vars.LOG_LEVEL = %v, want debug", cfg.Env.Vars["LOG_LEVEL"])
+	}
+	if cfg.Claude.Env == nil {
+		t.Error("claude.env should not be nil")
+	}
+	if cfg.Claude.Env["GH_TOKEN"] != "ghp_workspace" {
+		t.Errorf("claude.env.GH_TOKEN = %v, want ghp_workspace", cfg.Claude.Env["GH_TOKEN"])
 	}
 	if cfg.Channels == nil {
 		t.Error("channels should not be nil")

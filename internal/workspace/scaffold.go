@@ -39,6 +39,8 @@ content_dir = "claude"
 # See docs/designs/DESIGN-workspace-config.md for full schema reference.
 # [claude.hooks]
 # [claude.settings]
+# [claude.env]
+# GH_TOKEN = "..."
 # [env]
 # [channels]
 `

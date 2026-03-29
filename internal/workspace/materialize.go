@@ -141,8 +141,9 @@ func (s *SettingsMaterializer) Name() string {
 func (s *SettingsMaterializer) Materialize(ctx *MaterializeContext) ([]string, error) {
 	settings := ctx.Effective.Claude.Settings
 	hooks := ctx.InstalledHooks
+	envVars := ctx.Effective.Claude.Env
 
-	if len(settings) == 0 && len(hooks) == 0 {
+	if len(settings) == 0 && len(hooks) == 0 && len(envVars) == 0 {
 		return nil, nil
 	}
 
@@ -191,6 +192,20 @@ func (s *SettingsMaterializer) Materialize(ctx *MaterializeContext) ([]string, e
 			hooksDoc[pascalEvent] = entries
 		}
 		doc["hooks"] = hooksDoc
+	}
+
+	// Build env block from claude.env vars.
+	if len(envVars) > 0 {
+		envDoc := make(map[string]any, len(envVars))
+		envKeys := make([]string, 0, len(envVars))
+		for k := range envVars {
+			envKeys = append(envKeys, k)
+		}
+		sort.Strings(envKeys)
+		for _, k := range envKeys {
+			envDoc[k] = envVars[k]
+		}
+		doc["env"] = envDoc
 	}
 
 	data, err := json.MarshalIndent(doc, "", "  ")

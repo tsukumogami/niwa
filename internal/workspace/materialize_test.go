@@ -652,6 +652,117 @@ func TestSnakeToPascal(t *testing.T) {
 	}
 }
 
+func TestSettingsMaterializerEnvOnly(t *testing.T) {
+	tmpDir := t.TempDir()
+	repoDir := filepath.Join(tmpDir, "repo")
+	if err := os.MkdirAll(repoDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := &MaterializeContext{
+		Effective: EffectiveConfig{
+			Claude: config.ClaudeConfig{
+				Env: map[string]string{
+					"GH_TOKEN":  "ghp_test123",
+					"API_TOKEN": "api_test456",
+				},
+			},
+		},
+		RepoDir: repoDir,
+	}
+
+	m := &SettingsMaterializer{}
+	written, err := m.Materialize(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(written) != 1 {
+		t.Fatalf("expected 1 file written, got %d", len(written))
+	}
+
+	data, err := os.ReadFile(written[0])
+	if err != nil {
+		t.Fatalf("reading settings file: %v", err)
+	}
+
+	var doc map[string]any
+	if err := json.Unmarshal(data, &doc); err != nil {
+		t.Fatalf("parsing settings JSON: %v", err)
+	}
+
+	envBlock, ok := doc["env"].(map[string]any)
+	if !ok {
+		t.Fatal("expected env key in output")
+	}
+	if envBlock["GH_TOKEN"] != "ghp_test123" {
+		t.Errorf("GH_TOKEN = %v, want %q", envBlock["GH_TOKEN"], "ghp_test123")
+	}
+	if envBlock["API_TOKEN"] != "api_test456" {
+		t.Errorf("API_TOKEN = %v, want %q", envBlock["API_TOKEN"], "api_test456")
+	}
+
+	if _, ok := doc["permissions"]; ok {
+		t.Error("permissions key should not be present when no settings configured")
+	}
+	if _, ok := doc["hooks"]; ok {
+		t.Error("hooks key should not be present when no hooks installed")
+	}
+}
+
+func TestSettingsMaterializerAllBlocks(t *testing.T) {
+	tmpDir := t.TempDir()
+	repoDir := filepath.Join(tmpDir, "repo")
+	if err := os.MkdirAll(repoDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := &MaterializeContext{
+		Effective: EffectiveConfig{
+			Claude: config.ClaudeConfig{
+				Settings: config.SettingsConfig{"permissions": "bypass"},
+				Env:      map[string]string{"GH_TOKEN": "ghp_test"},
+			},
+		},
+		RepoDir: repoDir,
+		InstalledHooks: map[string][]string{
+			"stop": {filepath.Join(repoDir, ".claude", "hooks", "stop", "continue.sh")},
+		},
+	}
+
+	m := &SettingsMaterializer{}
+	written, err := m.Materialize(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(written) != 1 {
+		t.Fatalf("expected 1 file, got %d", len(written))
+	}
+
+	data, err := os.ReadFile(written[0])
+	if err != nil {
+		t.Fatalf("reading settings file: %v", err)
+	}
+
+	var doc map[string]any
+	if err := json.Unmarshal(data, &doc); err != nil {
+		t.Fatalf("parsing JSON: %v", err)
+	}
+
+	if _, ok := doc["permissions"]; !ok {
+		t.Error("expected permissions key")
+	}
+	if _, ok := doc["hooks"]; !ok {
+		t.Error("expected hooks key")
+	}
+	envBlock, ok := doc["env"].(map[string]any)
+	if !ok {
+		t.Fatal("expected env key")
+	}
+	if envBlock["GH_TOKEN"] != "ghp_test" {
+		t.Errorf("GH_TOKEN = %v, want %q", envBlock["GH_TOKEN"], "ghp_test")
+	}
+}
+
 func TestEnvMaterializerName(t *testing.T) {
 	m := &EnvMaterializer{}
 	if got := m.Name(); got != "env" {
