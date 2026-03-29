@@ -21,3 +21,5 @@ jobs:
     with:
       tag: ${{ needs.extract-tag.outputs.tag }}
       expected-assets: 5
+    secrets:
+      token: ${{ secrets.RELEASE_PAT }}
