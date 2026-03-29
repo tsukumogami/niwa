@@ -24,3 +24,5 @@ jobs:
       version: ${{ inputs.version }}
       tag: ${{ inputs.tag }}
       ref: ${{ inputs.ref }}
+    secrets:
+      token: ${{ secrets.RELEASE_PAT }}
