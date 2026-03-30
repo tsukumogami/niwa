@@ -29,9 +29,16 @@ Proposed
 
 niwa has two independent systems for distributing environment variables to repos:
 
-1. **`[env]`** -- writes `.local.env` files. Supports file references (`files = [...]`)
-   and inline vars (`vars = { KEY = "value" }`). Per-repo overrides append files and
-   override vars per key.
+1. **`[env]`** -- writes `.local.env` files. Uses convention-over-configuration:
+   env files are auto-discovered from the config directory without explicit listing.
+   The convention is:
+   - `.niwa/env/workspace.env` -- workspace-wide vars, applied to all repos
+   - `.niwa/env/repos/{repo-name}.env` -- per-repo overrides, overlaid on top
+
+   Users can deviate from the convention by setting `[env].files` explicitly, which
+   replaces the auto-discovered workspace file. Inline vars via `[env].vars` always
+   overlay on top of file-based vars. Per-repo overrides (`[repos.X.env]`) append
+   files and override vars per key.
 
 2. **`[claude.env]`** -- writes the `env` block in `settings.local.json`. Currently
    supports only inline key-value pairs. Per-repo overrides win per key.
@@ -94,8 +101,11 @@ GH_TOKEN = "repo-specific-value"   # overrides promoted GH_TOKEN for this repo
 
 **Resolution order for a given repo's settings env block:**
 
-1. Resolve the repo's env pipeline (workspace `[env]` files + vars, repo `[env]`
-   overrides, auto-discovered env files). This produces the `.local.env` content.
+1. Resolve the repo's env pipeline. This follows convention-over-configuration:
+   auto-discovered files (`.niwa/env/workspace.env`, `.niwa/env/repos/{name}.env`)
+   are used by default. Setting `[env].files` explicitly replaces the auto-discovered
+   workspace file. `[env].vars` overlays on top. Per-repo `[repos.X.env]` appends
+   files and overrides vars. This produces the `.local.env` content.
 2. Collect promoted keys: workspace `[claude.env].promote` union with repo
    `[repos.X.claude.env].promote`.
 3. For each promoted key, look it up in the resolved env from step 1. If not found,
@@ -196,18 +206,38 @@ before settings) or a shared resolver is extracted.
 
 ### Data Flow
 
+The env pipeline resolves vars from multiple sources in a defined order. The
+promote mechanism taps into the pipeline's output without affecting it.
+
 ```
-workspace.toml
-    |
-    v
-[env] pipeline ──────> resolved vars ──> .local.env (env materializer)
-    |                       |
-    |                       v
-    |              promoted keys lookup
-    |                       |
-    v                       v
-[claude.env] inline ──> merge ──> settings.local.json env block
-                                  (settings materializer)
+Auto-discovery                     workspace.toml
+    |                                   |
+    v                                   v
+.niwa/env/workspace.env ----+    [env].files (if set,
+.niwa/env/repos/{name}.env  |     replaces auto-discovered
+                            |     workspace file)
+                            v          |
+                       file-based -----+
+                       vars            |
+                            |          v
+                            +---> [env].vars (inline overlay)
+                                       |
+                                       v
+                               [repos.X.env].files (append)
+                               [repos.X.env].vars (override per key)
+                                       |
+                                       v
+                               auto-discovered repo file overlay
+                                       |
+                                       v
+                              resolved env vars ──> .local.env
+                                       |
+                                       v
+                              promote lookup (by key name)
+                                       |
+                                       v
+                        [claude.env] inline overlay ──> settings.local.json
+                              (workspace, then repo)        env block
 ```
 
 ## Implementation Approach
