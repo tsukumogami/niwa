@@ -63,7 +63,7 @@ func TestHooksMaterializerSingleEvent(t *testing.T) {
 		Effective: EffectiveConfig{
 			Claude: config.ClaudeConfig{
 				Hooks: config.HooksConfig{
-					"pre_tool_use": {"hooks/pre_tool_use/check.sh"},
+					"pre_tool_use": {{Scripts: []string{"hooks/pre_tool_use/check.sh"}}},
 				},
 			},
 		},
@@ -108,12 +108,12 @@ func TestHooksMaterializerSingleEvent(t *testing.T) {
 	if ctx.InstalledHooks == nil {
 		t.Fatal("InstalledHooks should be set")
 	}
-	paths, ok := ctx.InstalledHooks["pre_tool_use"]
+	installedEntries, ok := ctx.InstalledHooks["pre_tool_use"]
 	if !ok {
 		t.Fatal("InstalledHooks should have pre_tool_use key")
 	}
-	if len(paths) != 1 || paths[0] != expectedTarget {
-		t.Errorf("InstalledHooks[pre_tool_use] = %v, want [%s]", paths, expectedTarget)
+	if len(installedEntries) != 1 || len(installedEntries[0].Paths) != 1 || installedEntries[0].Paths[0] != expectedTarget {
+		t.Errorf("InstalledHooks[pre_tool_use] = %v, want [{Paths: [%s]}]", installedEntries, expectedTarget)
 	}
 }
 
@@ -145,8 +145,8 @@ func TestHooksMaterializerMultipleEvents(t *testing.T) {
 		Effective: EffectiveConfig{
 			Claude: config.ClaudeConfig{
 				Hooks: config.HooksConfig{
-					"pre_tool_use": {"hooks/pre_tool_use/run.sh"},
-					"stop":         {"hooks/stop/run.sh"},
+					"pre_tool_use": {{Scripts: []string{"hooks/pre_tool_use/run.sh"}}},
+					"stop":         {{Scripts: []string{"hooks/stop/run.sh"}}},
 				},
 			},
 		},
@@ -201,10 +201,10 @@ func TestHooksMaterializerMultipleScriptsPerEvent(t *testing.T) {
 		Effective: EffectiveConfig{
 			Claude: config.ClaudeConfig{
 				Hooks: config.HooksConfig{
-					"pre_tool_use": {
+					"pre_tool_use": {{Scripts: []string{
 						"hooks/pre_tool_use/check.sh",
 						"hooks/pre_tool_use/validate.sh",
-					},
+					}}},
 				},
 			},
 		},
@@ -222,9 +222,9 @@ func TestHooksMaterializerMultipleScriptsPerEvent(t *testing.T) {
 		t.Fatalf("expected 2 files written, got %d", len(written))
 	}
 
-	paths := ctx.InstalledHooks["pre_tool_use"]
-	if len(paths) != 2 {
-		t.Errorf("expected 2 scripts for pre_tool_use, got %d", len(paths))
+	hookEntries := ctx.InstalledHooks["pre_tool_use"]
+	if len(hookEntries) != 1 || len(hookEntries[0].Paths) != 2 {
+		t.Errorf("expected 1 entry with 2 scripts for pre_tool_use, got %v", hookEntries)
 	}
 }
 
@@ -256,7 +256,7 @@ func TestHooksMaterializerContainmentReject(t *testing.T) {
 		Effective: EffectiveConfig{
 			Claude: config.ClaudeConfig{
 				Hooks: config.HooksConfig{
-					"pre_tool_use": {"../outside/evil.sh"},
+					"pre_tool_use": {{Scripts: []string{"../outside/evil.sh"}}},
 				},
 			},
 		},
@@ -291,7 +291,7 @@ func TestHooksMaterializerMissingSource(t *testing.T) {
 		Effective: EffectiveConfig{
 			Claude: config.ClaudeConfig{
 				Hooks: config.HooksConfig{
-					"pre_tool_use": {"hooks/nonexistent.sh"},
+					"pre_tool_use": {{Scripts: []string{"hooks/nonexistent.sh"}}},
 				},
 			},
 		},
@@ -469,8 +469,8 @@ func TestSettingsMaterializerHooksOnly(t *testing.T) {
 			Claude: config.ClaudeConfig{},
 		},
 		RepoDir: repoDir,
-		InstalledHooks: map[string][]string{
-			"pre_tool_use": {filepath.Join(repoDir, ".claude", "hooks", "pre_tool_use", "gate.sh")},
+		InstalledHooks: map[string][]InstalledHookEntry{
+			"pre_tool_use": {{Paths: []string{filepath.Join(repoDir, ".claude", "hooks", "pre_tool_use", "gate.sh")}}},
 		},
 	}
 
@@ -511,11 +511,16 @@ func TestSettingsMaterializerHooksOnly(t *testing.T) {
 	}
 
 	entry := entries[0].(map[string]any)
-	if entry["type"] != "command" {
-		t.Errorf("type = %v, want %q", entry["type"], "command")
+	hooksList := entry["hooks"].([]any)
+	if len(hooksList) != 1 {
+		t.Fatalf("expected 1 hook command, got %d", len(hooksList))
 	}
-	if entry["command"] != ".claude/hooks/pre_tool_use/gate.sh" {
-		t.Errorf("command = %v, want %q", entry["command"], ".claude/hooks/pre_tool_use/gate.sh")
+	hookCmd := hooksList[0].(map[string]any)
+	if hookCmd["type"] != "command" {
+		t.Errorf("type = %v, want %q", hookCmd["type"], "command")
+	}
+	if hookCmd["command"] != ".claude/hooks/pre_tool_use/gate.sh" {
+		t.Errorf("command = %v, want %q", hookCmd["command"], ".claude/hooks/pre_tool_use/gate.sh")
 	}
 }
 
@@ -533,9 +538,9 @@ func TestSettingsMaterializerSettingsAndHooks(t *testing.T) {
 			},
 		},
 		RepoDir: repoDir,
-		InstalledHooks: map[string][]string{
-			"pre_tool_use": {filepath.Join(repoDir, ".claude", "hooks", "pre_tool_use", "gate.sh")},
-			"stop":         {filepath.Join(repoDir, ".claude", "hooks", "stop", "stop.sh")},
+		InstalledHooks: map[string][]InstalledHookEntry{
+			"pre_tool_use": {{Paths: []string{filepath.Join(repoDir, ".claude", "hooks", "pre_tool_use", "gate.sh")}}},
+			"stop":         {{Paths: []string{filepath.Join(repoDir, ".claude", "hooks", "stop", "stop.sh")}}},
 		},
 	}
 
@@ -583,8 +588,14 @@ func TestSettingsMaterializerSettingsAndHooks(t *testing.T) {
 			continue
 		}
 		entry := entries[0].(map[string]any)
-		if entry["command"] != tc.command {
-			t.Errorf("%s command = %v, want %q", tc.event, entry["command"], tc.command)
+		hooksList := entry["hooks"].([]any)
+		if len(hooksList) != 1 {
+			t.Errorf("%s: expected 1 hook command, got %d", tc.event, len(hooksList))
+			continue
+		}
+		hookCmd := hooksList[0].(map[string]any)
+		if hookCmd["command"] != tc.command {
+			t.Errorf("%s command = %v, want %q", tc.event, hookCmd["command"], tc.command)
 		}
 	}
 }
@@ -601,11 +612,11 @@ func TestSettingsMaterializerMultipleHooksPerEvent(t *testing.T) {
 			Claude: config.ClaudeConfig{},
 		},
 		RepoDir: repoDir,
-		InstalledHooks: map[string][]string{
-			"pre_tool_use": {
+		InstalledHooks: map[string][]InstalledHookEntry{
+			"pre_tool_use": {{Paths: []string{
 				filepath.Join(repoDir, ".claude", "hooks", "pre_tool_use", "gate.sh"),
 				filepath.Join(repoDir, ".claude", "hooks", "pre_tool_use", "validate.sh"),
-			},
+			}}},
 		},
 	}
 
@@ -630,8 +641,13 @@ func TestSettingsMaterializerMultipleHooksPerEvent(t *testing.T) {
 
 	hooksDoc := doc["hooks"].(map[string]any)
 	entries := hooksDoc["PreToolUse"].([]any)
-	if len(entries) != 2 {
-		t.Fatalf("expected 2 entries for PreToolUse, got %d", len(entries))
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 entry for PreToolUse, got %d", len(entries))
+	}
+	entry := entries[0].(map[string]any)
+	hooksList := entry["hooks"].([]any)
+	if len(hooksList) != 2 {
+		t.Fatalf("expected 2 hook commands for PreToolUse, got %d", len(hooksList))
 	}
 }
 
@@ -874,8 +890,8 @@ func TestSettingsMaterializerAllBlocks(t *testing.T) {
 			},
 		},
 		RepoDir: repoDir,
-		InstalledHooks: map[string][]string{
-			"stop": {filepath.Join(repoDir, ".claude", "hooks", "stop", "continue.sh")},
+		InstalledHooks: map[string][]InstalledHookEntry{
+			"stop": {{Paths: []string{filepath.Join(repoDir, ".claude", "hooks", "stop", "continue.sh")}}},
 		},
 	}
 

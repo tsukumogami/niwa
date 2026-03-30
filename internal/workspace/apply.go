@@ -278,20 +278,27 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		if len(discoveredHooks) > 0 {
 			merged := make(config.HooksConfig, len(discoveredHooks)+len(effective.Claude.Hooks))
 			// Start with discovered hooks (converted to relative paths).
-			for event, scripts := range discoveredHooks {
-				relScripts := make([]string, 0, len(scripts))
-				for _, absPath := range scripts {
-					rel, err := filepath.Rel(configDir, absPath)
-					if err != nil {
-						return nil, fmt.Errorf("materializer hooks: computing relative path for %s: %w", absPath, err)
+			for event, entries := range discoveredHooks {
+				var relEntries []config.HookEntry
+				for _, entry := range entries {
+					relScripts := make([]string, 0, len(entry.Scripts))
+					for _, absPath := range entry.Scripts {
+						rel, err := filepath.Rel(configDir, absPath)
+						if err != nil {
+							return nil, fmt.Errorf("materializer hooks: computing relative path for %s: %w", absPath, err)
+						}
+						relScripts = append(relScripts, rel)
 					}
-					relScripts = append(relScripts, rel)
+					relEntries = append(relEntries, config.HookEntry{
+						Matcher: entry.Matcher,
+						Scripts: relScripts,
+					})
 				}
-				merged[event] = relScripts
+				merged[event] = relEntries
 			}
 			// Explicit config overrides per event.
-			for event, scripts := range effective.Claude.Hooks {
-				merged[event] = scripts
+			for event, entries := range effective.Claude.Hooks {
+				merged[event] = entries
 			}
 			effective.Claude.Hooks = merged
 		}

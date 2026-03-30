@@ -98,7 +98,7 @@ func TestRepoCloneBranchOverride(t *testing.T) {
 func TestMergeOverridesNoOverride(t *testing.T) {
 	ws := &config.WorkspaceConfig{
 		Claude: config.ClaudeConfig{
-			Hooks:    config.HooksConfig{"pre_tool_use": {"a.sh"}},
+			Hooks:    config.HooksConfig{"pre_tool_use": {{Scripts: []string{"a.sh"}}}},
 			Settings: config.SettingsConfig{"permissions": "bypass"},
 		},
 		Env: config.EnvConfig{Files: []string{"ws.env"}},
@@ -197,14 +197,14 @@ func TestMergeOverridesEnvVarsMerge(t *testing.T) {
 func TestMergeOverridesHooksExtend(t *testing.T) {
 	ws := &config.WorkspaceConfig{
 		Claude: config.ClaudeConfig{
-			Hooks: config.HooksConfig{"pre_tool_use": {"ws-gate.sh"}},
+			Hooks: config.HooksConfig{"pre_tool_use": {{Scripts: []string{"ws-gate.sh"}}}},
 		},
 		Repos: map[string]config.RepoOverride{
 			"myrepo": {
 				Claude: &config.ClaudeConfig{
 					Hooks: config.HooksConfig{
-						"pre_tool_use": {"repo-gate.sh"},
-						"stop":         {"repo-stop.sh"},
+						"pre_tool_use": {{Scripts: []string{"repo-gate.sh"}}},
+						"stop":         {{Scripts: []string{"repo-stop.sh"}}},
 					},
 				},
 			},
@@ -215,16 +215,16 @@ func TestMergeOverridesHooksExtend(t *testing.T) {
 	// pre_tool_use should be extended (concatenated).
 	preToolUse := eff.Claude.Hooks["pre_tool_use"]
 	if len(preToolUse) != 2 {
-		t.Fatalf("expected 2 hooks, got %d: %v", len(preToolUse), preToolUse)
+		t.Fatalf("expected 2 hook entries, got %d: %v", len(preToolUse), preToolUse)
 	}
-	if preToolUse[0] != "ws-gate.sh" || preToolUse[1] != "repo-gate.sh" {
+	if preToolUse[0].Scripts[0] != "ws-gate.sh" || preToolUse[1].Scripts[0] != "repo-gate.sh" {
 		t.Errorf("expected [ws-gate.sh repo-gate.sh], got %v", preToolUse)
 	}
 
 	// stop should be a new hook key from repo.
 	stop := eff.Claude.Hooks["stop"]
-	if len(stop) != 1 || stop[0] != "repo-stop.sh" {
-		t.Errorf("expected [repo-stop.sh], got %v", stop)
+	if len(stop) != 1 || stop[0].Scripts[0] != "repo-stop.sh" {
+		t.Errorf("expected [{scripts: [repo-stop.sh]}], got %v", stop)
 	}
 }
 
@@ -235,7 +235,7 @@ func TestMergeOverridesNilWorkspaceFields(t *testing.T) {
 			"myrepo": {
 				Claude: &config.ClaudeConfig{
 					Settings: config.SettingsConfig{"permissions": "ask"},
-					Hooks:    config.HooksConfig{"stop": {"stop.sh"}},
+					Hooks:    config.HooksConfig{"stop": {{Scripts: []string{"stop.sh"}}}},
 				},
 				Env: config.EnvConfig{Files: []string{"repo.env"}},
 			},
@@ -247,8 +247,8 @@ func TestMergeOverridesNilWorkspaceFields(t *testing.T) {
 		t.Errorf("expected permissions=ask, got %v", eff.Claude.Settings["permissions"])
 	}
 	stop := eff.Claude.Hooks["stop"]
-	if len(stop) != 1 || stop[0] != "stop.sh" {
-		t.Errorf("expected [stop.sh], got %v", stop)
+	if len(stop) != 1 || stop[0].Scripts[0] != "stop.sh" {
+		t.Errorf("expected [{scripts: [stop.sh]}], got %v", stop)
 	}
 	if len(eff.Env.Files) != 1 || eff.Env.Files[0] != "repo.env" {
 		t.Errorf("expected [repo.env], got %v", eff.Env.Files)
@@ -390,7 +390,7 @@ func TestKnownRepoNames(t *testing.T) {
 
 func TestMergeOverridesMutationSafety(t *testing.T) {
 	// Verify that merging doesn't mutate the workspace-level maps.
-	wsHooks := config.HooksConfig{"pre_tool_use": {"ws.sh"}}
+	wsHooks := config.HooksConfig{"pre_tool_use": {{Scripts: []string{"ws.sh"}}}}
 	ws := &config.WorkspaceConfig{
 		Claude: config.ClaudeConfig{
 			Hooks: wsHooks,
@@ -398,7 +398,7 @@ func TestMergeOverridesMutationSafety(t *testing.T) {
 		Repos: map[string]config.RepoOverride{
 			"myrepo": {
 				Claude: &config.ClaudeConfig{
-					Hooks: config.HooksConfig{"pre_tool_use": {"repo.sh"}},
+					Hooks: config.HooksConfig{"pre_tool_use": {{Scripts: []string{"repo.sh"}}}},
 				},
 			},
 		},
@@ -407,7 +407,7 @@ func TestMergeOverridesMutationSafety(t *testing.T) {
 
 	// The workspace hooks should not be modified.
 	original := ws.Claude.Hooks["pre_tool_use"]
-	if len(original) != 1 || original[0] != "ws.sh" {
+	if len(original) != 1 || original[0].Scripts[0] != "ws.sh" {
 		t.Errorf("workspace hooks were mutated: %v", ws.Claude.Hooks["pre_tool_use"])
 	}
 }

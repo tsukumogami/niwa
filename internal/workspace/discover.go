@@ -53,7 +53,7 @@ func DiscoverHooks(configDir string) (config.HooksConfig, error) {
 				if err := validateWithinDir(configDir, scriptPath); err != nil {
 					return nil, err
 				}
-				hooks[event] = append(hooks[event], scriptPath)
+				hooks[event] = append(hooks[event], config.HookEntry{Scripts: []string{scriptPath}})
 			}
 		} else if strings.HasSuffix(entry.Name(), ".sh") {
 			// Top-level .sh file: event name is filename without extension.
@@ -61,7 +61,7 @@ func DiscoverHooks(configDir string) (config.HooksConfig, error) {
 			if err := validateWithinDir(configDir, entryPath); err != nil {
 				return nil, err
 			}
-			hooks[event] = append(hooks[event], entryPath)
+			hooks[event] = append(hooks[event], config.HookEntry{Scripts: []string{entryPath}})
 		}
 	}
 

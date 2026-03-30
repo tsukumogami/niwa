@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"sort"
 	"testing"
+
+	"github.com/tsukumogami/niwa/internal/config"
 )
 
 // --- DiscoverHooks tests ---
@@ -33,8 +35,8 @@ func TestDiscoverHooks_TopLevelScripts(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	assertHookPaths(t, hooks, "pre_tool_use", []string{filepath.Join(hooksDir, "pre_tool_use.sh")})
-	assertHookPaths(t, hooks, "stop", []string{filepath.Join(hooksDir, "stop.sh")})
+	assertHookScripts(t, hooks, "pre_tool_use", []string{filepath.Join(hooksDir, "pre_tool_use.sh")})
+	assertHookScripts(t, hooks, "stop", []string{filepath.Join(hooksDir, "stop.sh")})
 }
 
 func TestDiscoverHooks_SubdirectoryScripts(t *testing.T) {
@@ -50,9 +52,9 @@ func TestDiscoverHooks_SubdirectoryScripts(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	paths := hooks["pre_tool_use"]
-	if len(paths) != 2 {
-		t.Fatalf("expected 2 scripts, got %d: %v", len(paths), paths)
+	entries := hooks["pre_tool_use"]
+	if len(entries) != 2 {
+		t.Fatalf("expected 2 entries, got %d: %v", len(entries), entries)
 	}
 }
 
@@ -91,9 +93,9 @@ func TestDiscoverHooks_IgnoresNonShInSubdir(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	paths := hooks["stop"]
-	if len(paths) != 1 {
-		t.Fatalf("expected 1 script, got %d: %v", len(paths), paths)
+	entries := hooks["stop"]
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 entry, got %d: %v", len(entries), entries)
 	}
 }
 
@@ -120,10 +122,10 @@ func TestDiscoverHooks_MixedLayout(t *testing.T) {
 		t.Fatalf("expected 2 events, got %d", len(hooks))
 	}
 	if len(hooks["stop"]) != 1 {
-		t.Fatalf("expected 1 stop script, got %d", len(hooks["stop"]))
+		t.Fatalf("expected 1 stop entry, got %d", len(hooks["stop"]))
 	}
 	if len(hooks["pre_tool_use"]) != 2 {
-		t.Fatalf("expected 2 pre_tool_use scripts, got %d", len(hooks["pre_tool_use"]))
+		t.Fatalf("expected 2 pre_tool_use entries, got %d", len(hooks["pre_tool_use"]))
 	}
 }
 
@@ -316,20 +318,25 @@ func mustWriteFile(t *testing.T, path, content string) {
 	}
 }
 
-func assertHookPaths(t *testing.T, hooks map[string][]string, event string, expected []string) {
+func assertHookScripts(t *testing.T, hooks config.HooksConfig, event string, expected []string) {
 	t.Helper()
-	got, ok := hooks[event]
+	entries, ok := hooks[event]
 	if !ok {
 		t.Fatalf("event %q not found in hooks", event)
+	}
+	// Collect all scripts from all entries for comparison.
+	var got []string
+	for _, e := range entries {
+		got = append(got, e.Scripts...)
 	}
 	sort.Strings(got)
 	sort.Strings(expected)
 	if len(got) != len(expected) {
-		t.Fatalf("event %q: expected %d paths, got %d: %v", event, len(expected), len(got), got)
+		t.Fatalf("event %q: expected %d scripts, got %d: %v", event, len(expected), len(got), got)
 	}
 	for i := range got {
 		if got[i] != expected[i] {
-			t.Fatalf("event %q path[%d]: expected %q, got %q", event, i, expected[i], got[i])
+			t.Fatalf("event %q script[%d]: expected %q, got %q", event, i, expected[i], got[i])
 		}
 	}
 }
