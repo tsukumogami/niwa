@@ -25,12 +25,14 @@ type RegistryEntry struct {
 	Root   string `toml:"root"`
 }
 
-// CloneProtocol returns the configured clone protocol, defaulting to "https".
+// CloneProtocol returns the configured clone protocol, defaulting to "ssh".
+// SSH is the default because it handles both public and private repos without
+// requiring a credential helper.
 func (g *GlobalConfig) CloneProtocol() string {
 	if g.Global.CloneProtocol != "" {
 		return g.Global.CloneProtocol
 	}
-	return "https"
+	return "ssh"
 }
 
 // LookupWorkspace returns the registry entry for the given workspace name.
