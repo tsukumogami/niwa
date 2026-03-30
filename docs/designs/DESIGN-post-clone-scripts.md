@@ -1,5 +1,5 @@
 ---
-status: Proposed
+status: Planned
 problem: |
   niwa clones repos during create/apply but can't run repo-provided setup scripts
   afterward. Some repos need git hooks installed, local config generated, or dev
