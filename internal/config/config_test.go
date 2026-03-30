@@ -64,6 +64,10 @@ source = "repos/tsuku.md"
   [content.repos.tsuku.subdirs]
   recipes = "repos/tsuku-recipes.md"
 
+[claude]
+marketplaces = ["tsukumogami/shirabe", "repo:tools/.claude-plugin/marketplace.json"]
+plugins = ["shirabe@shirabe", "tsukumogami@tsukumogami"]
+
 [claude.hooks]
 pre_tool_use = ["hooks/gate-online.sh"]
 stop = ["hooks/workflow-continue.sh"]
@@ -246,6 +250,20 @@ func TestParseFullConfig(t *testing.T) {
 	}
 
 	// Typed sections parse correctly
+	// Marketplaces and plugins
+	if len(cfg.Claude.Marketplaces) != 2 {
+		t.Fatalf("claude.marketplaces count = %d, want 2", len(cfg.Claude.Marketplaces))
+	}
+	if cfg.Claude.Marketplaces[0] != "tsukumogami/shirabe" {
+		t.Errorf("claude.marketplaces[0] = %q, want tsukumogami/shirabe", cfg.Claude.Marketplaces[0])
+	}
+	if cfg.Claude.Plugins == nil {
+		t.Fatal("claude.plugins should not be nil")
+	}
+	if len(*cfg.Claude.Plugins) != 2 || (*cfg.Claude.Plugins)[0] != "shirabe@shirabe" {
+		t.Errorf("claude.plugins = %v, want [shirabe@shirabe tsukumogami@tsukumogami]", *cfg.Claude.Plugins)
+	}
+
 	if cfg.Claude.Hooks == nil {
 		t.Error("claude.hooks should not be nil")
 	}

@@ -37,6 +37,9 @@ content_dir = "claude"
 
 # --- Claude Code configuration, environment, channels ---
 # See docs/designs/DESIGN-workspace-config.md for full schema reference.
+# [claude]
+# marketplaces = ["my-org/my-plugins"]
+# plugins = ["my-tool@my-plugins"]
 # [claude.hooks]
 # [claude.settings]
 # [claude.env]
