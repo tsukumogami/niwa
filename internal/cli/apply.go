@@ -75,7 +75,7 @@ func runApply(cmd *cobra.Command, args []string) error {
 	cfg := result.Config
 	configDir := filepath.Dir(configPath)
 
-	token := os.Getenv("GITHUB_TOKEN")
+	token := resolveGitHubToken()
 	gh := github.NewAPIClient(token)
 	applier := workspace.NewApplier(gh)
 

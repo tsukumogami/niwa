@@ -92,7 +92,7 @@ func runCreate(cmd *cobra.Command, args []string) error {
 	// Set the instance name on the config so Applier.Create uses it for the directory.
 	cfg.Workspace.Name = instanceName
 
-	token := os.Getenv("GITHUB_TOKEN")
+	token := resolveGitHubToken()
 	gh := github.NewAPIClient(token)
 
 	applier := workspace.NewApplier(gh)
