@@ -1019,7 +1019,7 @@ source = "workspace.md"
 	}
 
 	// Verify hook script was installed.
-	hookTarget := filepath.Join(repoDir, ".claude", "hooks", "pre_tool_use", "lint.sh")
+	hookTarget := filepath.Join(repoDir, ".claude", "hooks", "pre_tool_use", "lint.local.sh")
 	assertFileContains(t, hookTarget, "pre-tool-use hook")
 
 	// Verify hook script is executable.
@@ -1035,7 +1035,7 @@ source = "workspace.md"
 	settingsPath := filepath.Join(repoDir, ".claude", "settings.local.json")
 	assertFileContains(t, settingsPath, `"defaultMode": "bypassPermissions"`)
 	assertFileContains(t, settingsPath, `"PreToolUse"`)
-	assertFileContains(t, settingsPath, "lint.sh")
+	assertFileContains(t, settingsPath, "lint.local.sh")
 
 	// Verify .local.env was generated with both discovered and inline vars.
 	envPath := filepath.Join(repoDir, ".local.env")
@@ -1134,7 +1134,7 @@ enabled = false
 	}
 
 	// Hooks should NOT be installed (claude = false).
-	hookTarget := filepath.Join(repoDir, ".claude", "hooks", "pre_tool_use", "lint.sh")
+	hookTarget := filepath.Join(repoDir, ".claude", "hooks", "pre_tool_use", "lint.local.sh")
 	if _, err := os.Stat(hookTarget); err == nil {
 		t.Error("hook script should not be installed when claude = false")
 	}

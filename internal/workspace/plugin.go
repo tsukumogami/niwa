@@ -110,7 +110,7 @@ func InstallPlugins(plugins []string, repoDir string) []string {
 
 	var warnings []string
 	for _, plugin := range plugins {
-		cmd := exec.Command(claudePath, "plugin", "install", plugin, "--scope", "project")
+		cmd := exec.Command(claudePath, "plugin", "install", plugin, "--scope", "local")
 		cmd.Dir = repoDir
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr

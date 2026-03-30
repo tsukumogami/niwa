@@ -79,7 +79,7 @@ func (h *HooksMaterializer) Materialize(ctx *MaterializeContext) ([]string, erro
 				}
 
 				targetDir := filepath.Join(ctx.RepoDir, ".claude", "hooks", event)
-				target := filepath.Join(targetDir, filepath.Base(scriptPath))
+				target := filepath.Join(targetDir, localRename(filepath.Base(scriptPath)))
 
 				if err := os.MkdirAll(targetDir, 0o755); err != nil {
 					return nil, fmt.Errorf("creating hooks directory %s: %w", targetDir, err)
