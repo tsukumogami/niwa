@@ -1,6 +1,6 @@
 ---
 schema: plan/v1
-status: Draft
+status: Done
 execution_mode: single-pr
 upstream: docs/designs/DESIGN-settings-env.md
 milestone: "Settings env promote"
@@ -11,7 +11,7 @@ issue_count: 3
 
 ## Status
 
-Draft
+Done
 
 ## Scope Summary
 
