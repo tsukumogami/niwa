@@ -1409,3 +1409,212 @@ func TestEnvMaterializerSortedKeys(t *testing.T) {
 		t.Errorf("line 3 = %q, want %q", lines[3], "ZEBRA=z")
 	}
 }
+
+// --- localRename tests ---
+
+func TestLocalRename(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"design.md", "design.local.md"},
+		{"config.json", "config.local.json"},
+		{"script.sh", "script.local.sh"},
+		{"Makefile", "Makefile.local"},
+		{".eslintrc", ".eslintrc.local"},
+		{"archive.tar.gz", "archive.tar.local.gz"},
+	}
+	for _, tc := range tests {
+		if got := localRename(tc.input); got != tc.want {
+			t.Errorf("localRename(%q) = %q, want %q", tc.input, got, tc.want)
+		}
+	}
+}
+
+// --- FilesMaterializer tests ---
+
+func TestFilesMaterializerName(t *testing.T) {
+	m := &FilesMaterializer{}
+	if got := m.Name(); got != "files" {
+		t.Errorf("Name() = %q, want %q", got, "files")
+	}
+}
+
+func TestFilesMaterializerNoop(t *testing.T) {
+	ctx := &MaterializeContext{
+		Effective: EffectiveConfig{},
+	}
+	m := &FilesMaterializer{}
+	written, err := m.Materialize(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if written != nil {
+		t.Errorf("expected nil, got %v", written)
+	}
+}
+
+func TestFilesMaterializerSingleFileDirDest(t *testing.T) {
+	tmpDir := t.TempDir()
+	configDir := filepath.Join(tmpDir, "config")
+	repoDir := filepath.Join(tmpDir, "repo")
+	os.MkdirAll(filepath.Join(configDir, "extensions"), 0o755)
+	os.MkdirAll(repoDir, 0o755)
+
+	os.WriteFile(filepath.Join(configDir, "extensions", "design.md"), []byte("# Design"), 0o644)
+
+	ctx := &MaterializeContext{
+		Effective: EffectiveConfig{
+			Files: map[string]string{
+				"extensions/design.md": ".claude/shirabe-extensions/",
+			},
+		},
+		ConfigDir: configDir,
+		RepoDir:   repoDir,
+	}
+
+	m := &FilesMaterializer{}
+	written, err := m.Materialize(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(written) != 1 {
+		t.Fatalf("expected 1 file, got %d", len(written))
+	}
+
+	expectedPath := filepath.Join(repoDir, ".claude", "shirabe-extensions", "design.local.md")
+	if written[0] != expectedPath {
+		t.Errorf("written = %q, want %q", written[0], expectedPath)
+	}
+
+	data, err := os.ReadFile(expectedPath)
+	if err != nil {
+		t.Fatalf("reading output: %v", err)
+	}
+	if string(data) != "# Design" {
+		t.Errorf("content = %q, want %q", string(data), "# Design")
+	}
+}
+
+func TestFilesMaterializerExplicitDest(t *testing.T) {
+	tmpDir := t.TempDir()
+	configDir := filepath.Join(tmpDir, "config")
+	repoDir := filepath.Join(tmpDir, "repo")
+	os.MkdirAll(configDir, 0o755)
+	os.MkdirAll(repoDir, 0o755)
+
+	os.WriteFile(filepath.Join(configDir, "myconfig.json"), []byte(`{"key": "val"}`), 0o644)
+
+	ctx := &MaterializeContext{
+		Effective: EffectiveConfig{
+			Files: map[string]string{
+				"myconfig.json": ".tool/config.json",
+			},
+		},
+		ConfigDir: configDir,
+		RepoDir:   repoDir,
+	}
+
+	m := &FilesMaterializer{}
+	written, err := m.Materialize(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	expectedPath := filepath.Join(repoDir, ".tool", "config.json")
+	if written[0] != expectedPath {
+		t.Errorf("written = %q, want %q", written[0], expectedPath)
+	}
+}
+
+func TestFilesMaterializerPathTraversal(t *testing.T) {
+	tmpDir := t.TempDir()
+	configDir := filepath.Join(tmpDir, "config")
+	repoDir := filepath.Join(tmpDir, "repo")
+	os.MkdirAll(configDir, 0o755)
+	os.MkdirAll(repoDir, 0o755)
+
+	ctx := &MaterializeContext{
+		Effective: EffectiveConfig{
+			Files: map[string]string{
+				"../../../etc/passwd": ".claude/",
+			},
+		},
+		ConfigDir: configDir,
+		RepoDir:   repoDir,
+	}
+
+	m := &FilesMaterializer{}
+	_, err := m.Materialize(ctx)
+	if err == nil {
+		t.Fatal("expected error for path traversal")
+	}
+}
+
+func TestFilesMaterializerDirSource(t *testing.T) {
+	tmpDir := t.TempDir()
+	configDir := filepath.Join(tmpDir, "config")
+	repoDir := filepath.Join(tmpDir, "repo")
+	os.MkdirAll(filepath.Join(configDir, "commands", "sub"), 0o755)
+	os.MkdirAll(repoDir, 0o755)
+
+	os.WriteFile(filepath.Join(configDir, "commands", "hello.sh"), []byte("#!/bin/bash"), 0o644)
+	os.WriteFile(filepath.Join(configDir, "commands", "sub", "nested.md"), []byte("# Nested"), 0o644)
+
+	ctx := &MaterializeContext{
+		Effective: EffectiveConfig{
+			Files: map[string]string{
+				"commands/": ".claude/commands/",
+			},
+		},
+		ConfigDir: configDir,
+		RepoDir:   repoDir,
+	}
+
+	m := &FilesMaterializer{}
+	written, err := m.Materialize(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(written) != 2 {
+		t.Fatalf("expected 2 files, got %d: %v", len(written), written)
+	}
+
+	// Check .local renaming on directory files.
+	expected := map[string]bool{
+		filepath.Join(repoDir, ".claude", "commands", "hello.local.sh"):       true,
+		filepath.Join(repoDir, ".claude", "commands", "sub", "nested.local.md"): true,
+	}
+	for _, w := range written {
+		if !expected[w] {
+			t.Errorf("unexpected written file: %q", w)
+		}
+	}
+}
+
+func TestFilesMaterializerEmptyValueSkipped(t *testing.T) {
+	tmpDir := t.TempDir()
+	configDir := filepath.Join(tmpDir, "config")
+	repoDir := filepath.Join(tmpDir, "repo")
+	os.MkdirAll(configDir, 0o755)
+	os.MkdirAll(repoDir, 0o755)
+
+	ctx := &MaterializeContext{
+		Effective: EffectiveConfig{
+			Files: map[string]string{
+				"removed.md": "",
+			},
+		},
+		ConfigDir: configDir,
+		RepoDir:   repoDir,
+	}
+
+	m := &FilesMaterializer{}
+	written, err := m.Materialize(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(written) != 0 {
+		t.Errorf("expected 0 files, got %d", len(written))
+	}
+}

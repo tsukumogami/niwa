@@ -386,3 +386,187 @@ func parseEnvFile(path string) (map[string]string, error) {
 	}
 	return vars, nil
 }
+
+// localRename inserts ".local" before the file extension. Files without an
+// extension get ".local" appended. This ensures distributed files match the
+// *.local* gitignore pattern in target repos.
+//
+//	"design.md"    -> "design.local.md"
+//	"config.json"  -> "config.local.json"
+//	"Makefile"     -> "Makefile.local"
+//	".eslintrc"    -> ".eslintrc.local"
+func localRename(filename string) string {
+	ext := filepath.Ext(filename)
+	if ext == "" || ext == filename {
+		// No extension or dotfile where the whole name is the "extension" (e.g., ".eslintrc").
+		return filename + ".local"
+	}
+	base := strings.TrimSuffix(filename, ext)
+	if base == "" {
+		// Dotfile like ".eslintrc" where Ext returns the whole name.
+		return filename + ".local"
+	}
+	return base + ".local" + ext
+}
+
+// FilesMaterializer copies arbitrary files from the config directory into a
+// repository directory. It reads source-to-destination mappings from the
+// effective config and applies .local renaming when the destination is a
+// directory (ends with /).
+type FilesMaterializer struct{}
+
+// Name returns the materializer identifier.
+func (f *FilesMaterializer) Name() string {
+	return "files"
+}
+
+// Materialize copies files from configDir to repoDir based on effective file
+// mappings. Returns the list of written file paths.
+func (f *FilesMaterializer) Materialize(ctx *MaterializeContext) ([]string, error) {
+	files := ctx.Effective.Files
+	if len(files) == 0 {
+		return nil, nil
+	}
+
+	var written []string
+
+	// Sort source keys for deterministic output.
+	sources := make([]string, 0, len(files))
+	for src := range files {
+		sources = append(sources, src)
+	}
+	sort.Strings(sources)
+
+	for _, src := range sources {
+		dest := files[src]
+		if dest == "" {
+			continue // removed by per-repo override
+		}
+
+		isDir := strings.HasSuffix(src, "/")
+
+		if isDir {
+			w, err := f.materializeDir(ctx, src, dest)
+			if err != nil {
+				return nil, err
+			}
+			written = append(written, w...)
+		} else {
+			w, err := f.materializeFile(ctx, src, dest)
+			if err != nil {
+				return nil, err
+			}
+			written = append(written, w...)
+		}
+	}
+
+	return written, nil
+}
+
+// materializeFile copies a single file from the config directory to the repo.
+func (f *FilesMaterializer) materializeFile(ctx *MaterializeContext, src, dest string) ([]string, error) {
+	srcPath := filepath.Join(ctx.ConfigDir, src)
+	if err := checkContainment(srcPath, ctx.ConfigDir); err != nil {
+		return nil, fmt.Errorf("file source %q: %w", src, err)
+	}
+
+	data, err := os.ReadFile(srcPath)
+	if err != nil {
+		return nil, fmt.Errorf("reading file %s: %w", src, err)
+	}
+
+	var targetPath string
+	if strings.HasSuffix(dest, "/") {
+		// Directory destination: auto-rename with .local
+		targetDir := filepath.Join(ctx.RepoDir, dest)
+		targetPath = filepath.Join(targetDir, localRename(filepath.Base(src)))
+	} else {
+		// Explicit filename: use as-is
+		targetPath = filepath.Join(ctx.RepoDir, dest)
+	}
+
+	if err := checkContainment(targetPath, ctx.RepoDir); err != nil {
+		return nil, fmt.Errorf("file destination %q: %w", dest, err)
+	}
+
+	targetDir := filepath.Dir(targetPath)
+	if err := os.MkdirAll(targetDir, 0o755); err != nil {
+		return nil, fmt.Errorf("creating directory %s: %w", targetDir, err)
+	}
+
+	if err := os.WriteFile(targetPath, data, 0o644); err != nil {
+		return nil, fmt.Errorf("writing file %s: %w", targetPath, err)
+	}
+
+	return []string{targetPath}, nil
+}
+
+// materializeDir walks a source directory and copies each file to the
+// destination, preserving directory structure and applying .local renaming.
+func (f *FilesMaterializer) materializeDir(ctx *MaterializeContext, src, dest string) ([]string, error) {
+	srcDir := filepath.Join(ctx.ConfigDir, strings.TrimSuffix(src, "/"))
+	if err := checkContainment(srcDir, ctx.ConfigDir); err != nil {
+		return nil, fmt.Errorf("directory source %q: %w", src, err)
+	}
+
+	var written []string
+
+	err := filepath.Walk(srcDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.IsDir() {
+			return nil
+		}
+
+		rel, err := filepath.Rel(srcDir, path)
+		if err != nil {
+			return fmt.Errorf("computing relative path: %w", err)
+		}
+
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return fmt.Errorf("reading %s: %w", path, err)
+		}
+
+		// Apply .local renaming to the filename, preserving subdirectory structure.
+		dir := filepath.Dir(rel)
+		renamed := localRename(filepath.Base(rel))
+		var targetPath string
+		if strings.HasSuffix(dest, "/") {
+			if dir == "." {
+				targetPath = filepath.Join(ctx.RepoDir, dest, renamed)
+			} else {
+				targetPath = filepath.Join(ctx.RepoDir, dest, dir, renamed)
+			}
+		} else {
+			if dir == "." {
+				targetPath = filepath.Join(ctx.RepoDir, dest, filepath.Base(rel))
+			} else {
+				targetPath = filepath.Join(ctx.RepoDir, dest, dir, filepath.Base(rel))
+			}
+		}
+
+		if err := checkContainment(targetPath, ctx.RepoDir); err != nil {
+			return fmt.Errorf("file destination %q: %w", targetPath, err)
+		}
+
+		targetDir := filepath.Dir(targetPath)
+		if err := os.MkdirAll(targetDir, 0o755); err != nil {
+			return fmt.Errorf("creating directory %s: %w", targetDir, err)
+		}
+
+		if err := os.WriteFile(targetPath, data, 0o644); err != nil {
+			return fmt.Errorf("writing %s: %w", targetPath, err)
+		}
+
+		written = append(written, targetPath)
+		return nil
+	})
+
+	if err != nil {
+		return nil, fmt.Errorf("walking directory %s: %w", src, err)
+	}
+
+	return written, nil
+}

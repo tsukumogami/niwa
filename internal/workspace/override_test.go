@@ -459,3 +459,55 @@ func TestWarnUnknownReposDeterministic(t *testing.T) {
 		t.Errorf("unexpected warning[1]: %s", warnings[1])
 	}
 }
+
+func TestMergeOverridesFilesOverride(t *testing.T) {
+	ws := &config.WorkspaceConfig{
+		Files: map[string]string{
+			"ext/design.md": ".claude/ext/",
+			"ext/plan.md":   ".claude/ext/",
+		},
+		Repos: map[string]config.RepoOverride{
+			"myrepo": {
+				Files: map[string]string{
+					"ext/design.md":    ".claude/custom/",
+					"ext/extra.md":     ".claude/ext/",
+				},
+			},
+		},
+	}
+	eff := MergeOverrides(ws, "myrepo")
+
+	if eff.Files["ext/design.md"] != ".claude/custom/" {
+		t.Errorf("expected override, got %v", eff.Files["ext/design.md"])
+	}
+	if eff.Files["ext/plan.md"] != ".claude/ext/" {
+		t.Errorf("expected workspace default, got %v", eff.Files["ext/plan.md"])
+	}
+	if eff.Files["ext/extra.md"] != ".claude/ext/" {
+		t.Errorf("expected additive, got %v", eff.Files["ext/extra.md"])
+	}
+}
+
+func TestMergeOverridesFilesRemoval(t *testing.T) {
+	ws := &config.WorkspaceConfig{
+		Files: map[string]string{
+			"ext/design.md": ".claude/ext/",
+			"ext/plan.md":   ".claude/ext/",
+		},
+		Repos: map[string]config.RepoOverride{
+			"myrepo": {
+				Files: map[string]string{
+					"ext/design.md": "",
+				},
+			},
+		},
+	}
+	eff := MergeOverrides(ws, "myrepo")
+
+	if _, ok := eff.Files["ext/design.md"]; ok {
+		t.Error("expected design.md to be removed")
+	}
+	if eff.Files["ext/plan.md"] != ".claude/ext/" {
+		t.Errorf("expected plan.md unchanged, got %v", eff.Files["ext/plan.md"])
+	}
+}
