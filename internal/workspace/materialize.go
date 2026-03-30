@@ -27,8 +27,15 @@ type MaterializeContext struct {
 	RepoName       string
 	RepoDir        string
 	ConfigDir      string
-	InstalledHooks map[string][]string // event -> installed script paths, populated by hooks materializer
+	InstalledHooks map[string][]InstalledHookEntry // event -> installed hook entries, populated by hooks materializer
 	DiscoveredEnv  *DiscoveredEnv      // auto-discovered env files, may be nil
+}
+
+// InstalledHookEntry holds the installed paths for a single hook entry,
+// preserving the optional matcher from the source HookEntry.
+type InstalledHookEntry struct {
+	Matcher string
+	Paths   []string
 }
 
 // Materializer is the interface for components that install workspace
@@ -58,39 +65,46 @@ func (h *HooksMaterializer) Materialize(ctx *MaterializeContext) ([]string, erro
 		return nil, nil
 	}
 
-	installed := make(map[string][]string, len(hooks))
+	installed := make(map[string][]InstalledHookEntry, len(hooks))
 	var written []string
 
-	for event, scripts := range hooks {
-		for _, scriptPath := range scripts {
-			src := filepath.Join(ctx.ConfigDir, scriptPath)
+	for event, entries := range hooks {
+		for _, entry := range entries {
+			var installedPaths []string
+			for _, scriptPath := range entry.Scripts {
+				src := filepath.Join(ctx.ConfigDir, scriptPath)
 
-			if err := checkContainment(src, ctx.ConfigDir); err != nil {
-				return nil, fmt.Errorf("hook script %q: %w", scriptPath, err)
+				if err := checkContainment(src, ctx.ConfigDir); err != nil {
+					return nil, fmt.Errorf("hook script %q: %w", scriptPath, err)
+				}
+
+				targetDir := filepath.Join(ctx.RepoDir, ".claude", "hooks", event)
+				target := filepath.Join(targetDir, filepath.Base(scriptPath))
+
+				if err := os.MkdirAll(targetDir, 0o755); err != nil {
+					return nil, fmt.Errorf("creating hooks directory %s: %w", targetDir, err)
+				}
+
+				data, err := os.ReadFile(src)
+				if err != nil {
+					return nil, fmt.Errorf("reading hook script %s: %w", src, err)
+				}
+
+				if err := os.WriteFile(target, data, 0o644); err != nil {
+					return nil, fmt.Errorf("writing hook script %s: %w", target, err)
+				}
+
+				if err := os.Chmod(target, 0o755); err != nil {
+					return nil, fmt.Errorf("setting executable permission on %s: %w", target, err)
+				}
+
+				installedPaths = append(installedPaths, target)
+				written = append(written, target)
 			}
-
-			targetDir := filepath.Join(ctx.RepoDir, ".claude", "hooks", event)
-			target := filepath.Join(targetDir, filepath.Base(scriptPath))
-
-			if err := os.MkdirAll(targetDir, 0o755); err != nil {
-				return nil, fmt.Errorf("creating hooks directory %s: %w", targetDir, err)
-			}
-
-			data, err := os.ReadFile(src)
-			if err != nil {
-				return nil, fmt.Errorf("reading hook script %s: %w", src, err)
-			}
-
-			if err := os.WriteFile(target, data, 0o644); err != nil {
-				return nil, fmt.Errorf("writing hook script %s: %w", target, err)
-			}
-
-			if err := os.Chmod(target, 0o755); err != nil {
-				return nil, fmt.Errorf("setting executable permission on %s: %w", target, err)
-			}
-
-			installed[event] = append(installed[event], target)
-			written = append(written, target)
+			installed[event] = append(installed[event], InstalledHookEntry{
+				Matcher: entry.Matcher,
+				Paths:   installedPaths,
+			})
 		}
 	}
 
@@ -174,24 +188,34 @@ func (s *SettingsMaterializer) Materialize(ctx *MaterializeContext) ([]string, e
 		sort.Strings(events)
 
 		for _, event := range events {
-			paths := hooks[event]
+			installedEntries := hooks[event]
 			pascalEvent, ok := hookEventMapping[event]
 			if !ok {
 				pascalEvent = snakeToPascal(event)
 			}
 
-			entries := make([]map[string]string, 0, len(paths))
-			for _, absPath := range paths {
-				rel, err := filepath.Rel(ctx.RepoDir, absPath)
-				if err != nil {
-					return nil, fmt.Errorf("computing relative path for hook %s: %w", absPath, err)
+			var eventEntries []map[string]any
+			for _, ie := range installedEntries {
+				hookCommands := make([]map[string]string, 0, len(ie.Paths))
+				for _, absPath := range ie.Paths {
+					rel, err := filepath.Rel(ctx.RepoDir, absPath)
+					if err != nil {
+						return nil, fmt.Errorf("computing relative path for hook %s: %w", absPath, err)
+					}
+					hookCommands = append(hookCommands, map[string]string{
+						"type":    "command",
+						"command": filepath.ToSlash(rel),
+					})
 				}
-				entries = append(entries, map[string]string{
-					"type":    "command",
-					"command": filepath.ToSlash(rel),
-				})
+				entry := map[string]any{
+					"hooks": hookCommands,
+				}
+				if ie.Matcher != "" {
+					entry["matcher"] = ie.Matcher
+				}
+				eventEntries = append(eventEntries, entry)
 			}
-			hooksDoc[pascalEvent] = entries
+			hooksDoc[pascalEvent] = eventEntries
 		}
 		doc["hooks"] = hooksDoc
 	}

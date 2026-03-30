@@ -40,7 +40,9 @@ content_dir = "claude"
 # [claude]
 # marketplaces = ["my-org/my-plugins"]
 # plugins = ["my-tool@my-plugins"]
-# [claude.hooks]
+# [[claude.hooks.pre_tool_use]]
+# matcher = "Bash"
+# scripts = ["hooks/pre_tool_use/gate.sh"]
 # [claude.settings]
 # [claude.env]
 # promote = ["GH_TOKEN"]

@@ -78,8 +78,17 @@ type GroupConfig struct {
 }
 
 // HooksConfig maps hook event names (e.g., "pre_tool_use", "stop") to lists
-// of script paths that should be executed for that event.
-type HooksConfig map[string][]string
+// of hook entries. Each entry has an optional matcher (tool name filter) and
+// a list of script paths.
+type HooksConfig map[string][]HookEntry
+
+// HookEntry defines a hook with an optional matcher and script paths.
+// The matcher filters which tools trigger the hook (e.g., "Bash", "Edit|Write").
+// Empty matcher means match all tools.
+type HookEntry struct {
+	Matcher string   `toml:"matcher,omitempty"`
+	Scripts []string `toml:"scripts"`
+}
 
 // SettingsConfig maps setting keys to their values. The primary key today is
 // "permissions" (values: "bypass", "ask").

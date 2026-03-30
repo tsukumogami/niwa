@@ -68,9 +68,11 @@ source = "repos/tsuku.md"
 marketplaces = ["tsukumogami/shirabe", "repo:tools/.claude-plugin/marketplace.json"]
 plugins = ["shirabe@shirabe", "tsukumogami@tsukumogami"]
 
-[claude.hooks]
-pre_tool_use = ["hooks/gate-online.sh"]
-stop = ["hooks/workflow-continue.sh"]
+[[claude.hooks.pre_tool_use]]
+scripts = ["hooks/gate-online.sh"]
+
+[[claude.hooks.stop]]
+scripts = ["hooks/workflow-continue.sh"]
 
 [claude.settings]
 permissions = "bypass"
@@ -267,11 +269,11 @@ func TestParseFullConfig(t *testing.T) {
 	if cfg.Claude.Hooks == nil {
 		t.Error("claude.hooks should not be nil")
 	}
-	if len(cfg.Claude.Hooks["pre_tool_use"]) != 1 || cfg.Claude.Hooks["pre_tool_use"][0] != "hooks/gate-online.sh" {
-		t.Errorf("claude.hooks.pre_tool_use = %v, want [hooks/gate-online.sh]", cfg.Claude.Hooks["pre_tool_use"])
+	if len(cfg.Claude.Hooks["pre_tool_use"]) != 1 || cfg.Claude.Hooks["pre_tool_use"][0].Scripts[0] != "hooks/gate-online.sh" {
+		t.Errorf("claude.hooks.pre_tool_use = %v, want [{scripts: [hooks/gate-online.sh]}]", cfg.Claude.Hooks["pre_tool_use"])
 	}
-	if len(cfg.Claude.Hooks["stop"]) != 1 || cfg.Claude.Hooks["stop"][0] != "hooks/workflow-continue.sh" {
-		t.Errorf("claude.hooks.stop = %v, want [hooks/workflow-continue.sh]", cfg.Claude.Hooks["stop"])
+	if len(cfg.Claude.Hooks["stop"]) != 1 || cfg.Claude.Hooks["stop"][0].Scripts[0] != "hooks/workflow-continue.sh" {
+		t.Errorf("claude.hooks.stop = %v, want [{scripts: [hooks/workflow-continue.sh]}]", cfg.Claude.Hooks["stop"])
 	}
 	if cfg.Claude.Settings == nil {
 		t.Error("claude.settings should not be nil")
@@ -312,8 +314,8 @@ scope = "tactical"
 [repos.myapp.claude]
 enabled = true
 
-[repos.myapp.claude.hooks]
-pre_tool_use = ["repo-gate.sh"]
+[[repos.myapp.claude.hooks.pre_tool_use]]
+scripts = ["repo-gate.sh"]
 
 [repos.myapp.claude.settings]
 permissions = "ask"
@@ -346,8 +348,8 @@ files = ["repo.env"]
 	if repo.Claude.Hooks == nil {
 		t.Fatal("claude.hooks should not be nil")
 	}
-	if len(repo.Claude.Hooks["pre_tool_use"]) != 1 || repo.Claude.Hooks["pre_tool_use"][0] != "repo-gate.sh" {
-		t.Errorf("claude.hooks.pre_tool_use = %v, want [repo-gate.sh]", repo.Claude.Hooks["pre_tool_use"])
+	if len(repo.Claude.Hooks["pre_tool_use"]) != 1 || repo.Claude.Hooks["pre_tool_use"][0].Scripts[0] != "repo-gate.sh" {
+		t.Errorf("claude.hooks.pre_tool_use = %v, want [{scripts: [repo-gate.sh]}]", repo.Claude.Hooks["pre_tool_use"])
 	}
 	if repo.Claude.Settings == nil {
 		t.Fatal("claude.settings should not be nil")

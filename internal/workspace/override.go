@@ -177,7 +177,7 @@ func WarnUnknownRepos(ws *config.WorkspaceConfig, known map[string]bool) []strin
 	return warnings
 }
 
-// copyHooks returns a deep copy of a HooksConfig. Each hook event's script
+// copyHooks returns a deep copy of a HooksConfig. Each hook event's entry
 // list is independently copied so mutations don't affect the original.
 func copyHooks(h config.HooksConfig) config.HooksConfig {
 	if h == nil {
@@ -185,7 +185,14 @@ func copyHooks(h config.HooksConfig) config.HooksConfig {
 	}
 	out := make(config.HooksConfig, len(h))
 	for k, v := range h {
-		out[k] = slices.Clone(v)
+		entries := make([]config.HookEntry, len(v))
+		for i, e := range v {
+			entries[i] = config.HookEntry{
+				Matcher: e.Matcher,
+				Scripts: slices.Clone(e.Scripts),
+			}
+		}
+		out[k] = entries
 	}
 	return out
 }
