@@ -1,5 +1,5 @@
 ---
-status: Proposed
+status: Planned
 problem: |
   niwa distributes env vars to repos via [env] (.local.env files) and can inject
   vars into Claude Code's settings.local.json via [claude.env]. These are independent
