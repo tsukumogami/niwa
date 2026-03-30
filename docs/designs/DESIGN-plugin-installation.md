@@ -1,5 +1,5 @@
 ---
-status: Proposed
+status: Planned
 upstream: docs/prds/PRD-plugin-installation.md
 problem: |
   niwa manages hooks, settings, env, and files per-repo but can't install Claude
