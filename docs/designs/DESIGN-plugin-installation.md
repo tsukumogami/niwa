@@ -62,6 +62,7 @@ and how per-repo overrides work.
 type ClaudeConfig struct {
     Enabled      *bool           `toml:"enabled,omitempty"`
     Plugins      *[]string       `toml:"plugins,omitempty"`
+    // Marketplaces is workspace-wide. Not merged from per-repo overrides.
     Marketplaces []string        `toml:"marketplaces,omitempty"`
     Hooks        HooksConfig     `toml:"hooks,omitempty"`
     Settings     SettingsConfig  `toml:"settings,omitempty"`
@@ -98,6 +99,12 @@ plugins = []  # disable
 |-------|-----------|---------------|------|
 | `plugins` | `*[]string` | `*[]string` | nil = inherit; non-nil = replace entirely |
 | `marketplaces` | `[]string` | (not allowed) | workspace-only |
+
+**Post-merge:** `EffectiveConfig` gets a `Plugins []string` field (non-pointer)
+rather than inheriting `*[]string` through `ClaudeConfig`. `MergeOverrides`
+resolves the pointer: nil becomes workspace default, non-nil replaces. Consumers
+never see the pointer. This follows the same pattern as `ClaudeEnabled()` which
+wraps `Enabled *bool`.
 
 #### Alternatives Considered
 
@@ -137,20 +144,33 @@ func ResolveMarketplaceSource(source string, repoIndex map[string]string) (strin
 The `repoIndex` maps repo names to their absolute on-disk paths. It's built from
 the classified repos after cloning (Step 3) and passed into Step 6.9.
 
+**Note:** `repo:` ref resolution is independent of the referenced repo's
+`claude.enabled` state. A marketplace manifest is just a JSON file -- it doesn't
+require Claude Code to be active in the source repo. A repo with `claude = false`
+can still host a marketplace that other repos consume.
+
 **Dependency tracking:** The resolution function returns an error if the repo
 isn't cloned. The pipeline ordering (clone happens in Step 3, plugins in Step
 6.9) guarantees repos are available. For future lazy provisioning, a pre-scan
 of `repo:` refs in marketplaces can identify which repos must be cloned eagerly.
 This pre-scan is a future concern -- today all repos are cloned.
 
+**Error severity:** `repo:` resolution errors are **config errors** (typos,
+missing repos) not transient failures. They are fatal -- the pipeline stops
+and reports the error. This is distinct from CLI execution failures (marketplace
+registration, plugin install) which are non-fatal warnings. The distinction:
+if the config is wrong, stop early with a clear message. If the config is right
+but a CLI command fails, warn and continue.
+
 **Error messages:**
 
-| Condition | Message |
-|-----------|---------|
-| No `/` after prefix | `invalid repo ref "repo:tools": expected "repo:<name>/<path>"` |
-| Repo not managed | `marketplace "repo:tools/...": repo "tools" is not managed by this workspace` |
-| Repo not cloned | `marketplace "repo:tools/...": repo "tools" has not been cloned` |
-| File not found | `marketplace "repo:tools/.claude-plugin/marketplace.json": file not found at <resolved-path>` |
+| Condition | Severity | Message |
+|-----------|----------|---------|
+| No `/` after prefix | Fatal | `invalid repo ref "repo:tools": expected "repo:<name>/<path>"` |
+| Repo not managed | Fatal | `marketplace "repo:tools/...": repo "tools" is not managed by this workspace` |
+| Repo not cloned | Fatal | `marketplace "repo:tools/...": repo "tools" has not been cloned` |
+| File not found | Fatal | `marketplace "repo:tools/.claude-plugin/marketplace.json": file not found at <resolved-path>` |
+| Path escapes repo dir | Fatal | `marketplace "repo:tools/../../etc/passwd": path escapes repo directory` |
 
 #### Alternatives Considered
 
@@ -177,12 +197,15 @@ A new pipeline step runs after setup scripts (Step 6.75) and before managed
 file tracking (Step 7). It has two sub-phases:
 
 **Phase A: Marketplace registration (once per apply)**
-- Check if `claude` is on PATH; if not, warn and skip all plugin operations
+- Check if `claude` is on PATH; if not, warn (using the PRD's message with
+  install link) and skip all plugin operations
 - For each marketplace source:
-  - Resolve `repo:` refs to absolute paths
+  - Resolve `repo:` refs to absolute paths (fatal on resolution error)
   - Run `claude plugin marketplace add <source> --scope user`
-  - Run `claude plugin marketplace update <name>` to refresh cache
   - Non-zero exit: warn with source name, continue
+- After all registrations, run `claude plugin marketplace update` (no name
+  argument -- updates all registered marketplaces). This avoids needing to
+  derive marketplace names from source strings.
 
 **Phase B: Plugin installation (per repo)**
 - For each classified repo with a non-empty effective plugin list:
@@ -241,9 +264,10 @@ the pipeline step that drives `claude` CLI commands.
 - `ClaudeConfig.Marketplaces []string` -- workspace-only
 
 **Merge logic** (`override.go`):
-- `MergeOverrides` handles plugins with replace semantics (nil = inherit)
+- `MergeOverrides` resolves `*[]string` to `[]string` on `EffectiveConfig.Plugins`
+  (nil = use workspace default, non-nil = replace)
 - Marketplaces not merged (workspace-only)
-- `EffectiveConfig.Claude.Plugins` is `[]string` (non-pointer, post-merge)
+- `EffectiveConfig.Plugins` is `[]string` (non-pointer, separate from `ClaudeConfig`)
 
 **Reference resolver** (`plugin.go`):
 - `ResolveMarketplaceSource(source string, repoIndex map[string]string) (string, error)`
@@ -312,9 +336,10 @@ code from marketplace sources. This is the same trust model as the `claude` CLI
 itself -- if the user trusts their marketplace sources, they trust the plugins.
 
 `repo:` refs are validated against the managed repo set and resolved against
-known clone paths. Path traversal in the path segment is caught by filesystem
-resolution (the path must exist under the repo directory). niwa doesn't validate
-marketplace manifest content -- that's the `claude` CLI's responsibility.
+known clone paths. The resolved absolute path is checked with `checkContainment`
+to ensure it stays within the repo directory -- `repo:tools/../../etc/passwd`
+is rejected. niwa doesn't validate marketplace manifest content -- that's the
+`claude` CLI's responsibility.
 
 Marketplace registration happens at user scope, which means it affects all
 Claude Code sessions on the machine, not just the current workspace. This is
