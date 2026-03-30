@@ -58,22 +58,31 @@ If the `shirabe` marketplace isn't registered on this machine, niwa runs
 `claude plugin marketplace add "tsukumogami/shirabe" --scope user` before
 attempting plugin installs. If already registered, it's a no-op.
 
-### US3: Marketplace from the config repo itself
+### US3: Marketplace from a managed repo
 
-As a workspace author, I want to bundle a marketplace inside my `.niwa` config
-repo so that niwa registers it from the local path.
+As a workspace author, I want to reference a marketplace that lives inside one
+of the repos managed by niwa.
 
 ```toml
 [claude]
 marketplaces = [
-    "tsukumogami/shirabe",         # GitHub source
-    ".claude-plugin/marketplace.json"  # relative to .niwa config dir
+    "tsukumogami/shirabe",                  # GitHub source
+    "repo:tools/.claude-plugin/marketplace.json"  # inside managed repo "tools"
 ]
 ```
 
-Relative paths are resolved against the config directory. This avoids
-machine-specific absolute paths and lets the marketplace travel with the
-config repo.
+The `repo:<name>/<path>` syntax references a file inside a managed repo. niwa
+resolves the repo's location on disk (after cloning) and passes the absolute
+path to `claude plugin marketplace add`.
+
+This creates an implicit dependency: the referenced repo must be cloned before
+marketplace registration can happen. niwa must track this dependency so it can:
+- Ensure the repo is cloned before attempting registration
+- In the future, support lazy provisioning by knowing which repos are needed
+  early in the pipeline
+
+If the referenced repo isn't part of the workspace or hasn't been cloned yet,
+niwa emits a clear error naming the repo and the marketplace that depends on it.
 
 ### US4: Per-repo plugin override
 
@@ -137,7 +146,8 @@ intervention.
 |----|------------|-------|
 | R1 | `[claude].plugins` declares a list of plugins to install at project scope | US1 |
 | R2 | `[claude].marketplaces` declares a list of marketplace sources to register at user scope | US2 |
-| R3 | Marketplace sources can be GitHub refs (`org/repo`) or relative paths (resolved against config dir) | US3 |
+| R3 | Marketplace sources can be GitHub refs (`org/repo`) or managed repo refs (`repo:<name>/<path>`) | US3 |
+| R3a | Managed repo refs create an implicit dependency: the referenced repo must be cloned before registration | US3 |
 | R4 | Per-repo `[repos.X.claude].plugins` overrides the workspace plugin list (empty list disables) | US4 |
 | R5 | Missing `claude` CLI produces a warning, not a fatal error | US5 |
 | R6 | Marketplace registration is idempotent (no-op if already registered) | US2 |
@@ -163,6 +173,8 @@ Step 6.9 in the pipeline.
 | Marketplace registration fails | Warn with marketplace name, continue |
 | Plugin install fails | Warn with plugin name and repo, continue with next plugin/repo |
 | Unknown marketplace in plugin ref | `claude plugin install` handles this -- its error message is sufficient |
+| `repo:X` references unmanaged repo | Error naming the repo and the marketplace that depends on it |
+| `repo:X` repo not yet cloned | Error -- dependency ordering issue (should not happen if pipeline is correct) |
 
 ## Examples
 
@@ -186,13 +198,17 @@ name = "tsukumogami"
 [claude]
 marketplaces = [
     "tsukumogami/shirabe",
-    ".claude-plugin/marketplace.json",
+    "repo:tools/.claude-plugin/marketplace.json",
 ]
 plugins = ["shirabe@shirabe", "tsukumogami@tsukumogami"]
 
 [repos.shirabe.claude]
 plugins = []  # uses its own plugin via auto-discovery
 ```
+
+The `repo:tools/...` reference means the `tools` repo must be cloned before
+niwa can register the tsukumogami marketplace. niwa handles this ordering
+automatically.
 
 ### No plugins needed
 
