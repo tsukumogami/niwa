@@ -81,7 +81,7 @@ func TestHooksMaterializerSingleEvent(t *testing.T) {
 		t.Fatalf("expected 1 file written, got %d", len(written))
 	}
 
-	expectedTarget := filepath.Join(repoDir, ".claude", "hooks", "pre_tool_use", "check.sh")
+	expectedTarget := filepath.Join(repoDir, ".claude", "hooks", "pre_tool_use", "check.local.sh")
 	if written[0] != expectedTarget {
 		t.Errorf("written[0] = %q, want %q", written[0], expectedTarget)
 	}
@@ -470,7 +470,7 @@ func TestSettingsMaterializerHooksOnly(t *testing.T) {
 		},
 		RepoDir: repoDir,
 		InstalledHooks: map[string][]InstalledHookEntry{
-			"pre_tool_use": {{Paths: []string{filepath.Join(repoDir, ".claude", "hooks", "pre_tool_use", "gate.sh")}}},
+			"pre_tool_use": {{Paths: []string{filepath.Join(repoDir, ".claude", "hooks", "pre_tool_use", "gate.local.sh")}}},
 		},
 	}
 
@@ -519,8 +519,8 @@ func TestSettingsMaterializerHooksOnly(t *testing.T) {
 	if hookCmd["type"] != "command" {
 		t.Errorf("type = %v, want %q", hookCmd["type"], "command")
 	}
-	if hookCmd["command"] != ".claude/hooks/pre_tool_use/gate.sh" {
-		t.Errorf("command = %v, want %q", hookCmd["command"], ".claude/hooks/pre_tool_use/gate.sh")
+	if hookCmd["command"] != ".claude/hooks/pre_tool_use/gate.local.sh" {
+		t.Errorf("command = %v, want %q", hookCmd["command"], ".claude/hooks/pre_tool_use/gate.local.sh")
 	}
 }
 
@@ -539,8 +539,8 @@ func TestSettingsMaterializerSettingsAndHooks(t *testing.T) {
 		},
 		RepoDir: repoDir,
 		InstalledHooks: map[string][]InstalledHookEntry{
-			"pre_tool_use": {{Paths: []string{filepath.Join(repoDir, ".claude", "hooks", "pre_tool_use", "gate.sh")}}},
-			"stop":         {{Paths: []string{filepath.Join(repoDir, ".claude", "hooks", "stop", "stop.sh")}}},
+			"pre_tool_use": {{Paths: []string{filepath.Join(repoDir, ".claude", "hooks", "pre_tool_use", "gate.local.sh")}}},
+			"stop":         {{Paths: []string{filepath.Join(repoDir, ".claude", "hooks", "stop", "stop.local.sh")}}},
 		},
 	}
 
@@ -575,8 +575,8 @@ func TestSettingsMaterializerSettingsAndHooks(t *testing.T) {
 		event   string
 		command string
 	}{
-		{"PreToolUse", ".claude/hooks/pre_tool_use/gate.sh"},
-		{"Stop", ".claude/hooks/stop/stop.sh"},
+		{"PreToolUse", ".claude/hooks/pre_tool_use/gate.local.sh"},
+		{"Stop", ".claude/hooks/stop/stop.local.sh"},
 	} {
 		entries, ok := hooksDoc[tc.event].([]any)
 		if !ok {
@@ -614,8 +614,8 @@ func TestSettingsMaterializerMultipleHooksPerEvent(t *testing.T) {
 		RepoDir: repoDir,
 		InstalledHooks: map[string][]InstalledHookEntry{
 			"pre_tool_use": {{Paths: []string{
-				filepath.Join(repoDir, ".claude", "hooks", "pre_tool_use", "gate.sh"),
-				filepath.Join(repoDir, ".claude", "hooks", "pre_tool_use", "validate.sh"),
+				filepath.Join(repoDir, ".claude", "hooks", "pre_tool_use", "gate.local.sh"),
+				filepath.Join(repoDir, ".claude", "hooks", "pre_tool_use", "validate.local.sh"),
 			}}},
 		},
 	}
