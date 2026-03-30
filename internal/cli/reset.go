@@ -103,7 +103,7 @@ func runReset(cmd *cobra.Command, args []string) error {
 	// Re-create using the same instance name.
 	cfg.Workspace.Name = state.InstanceName
 
-	token := os.Getenv("GITHUB_TOKEN")
+	token := resolveGitHubToken()
 	gh := github.NewAPIClient(token)
 
 	applier := workspace.NewApplier(gh)
