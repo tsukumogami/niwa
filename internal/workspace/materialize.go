@@ -141,9 +141,11 @@ func (s *SettingsMaterializer) Name() string {
 func (s *SettingsMaterializer) Materialize(ctx *MaterializeContext) ([]string, error) {
 	settings := ctx.Effective.Claude.Settings
 	hooks := ctx.InstalledHooks
-	envVars := ctx.Effective.Claude.Env
+	claudeEnv := ctx.Effective.Claude.Env
 
-	if len(settings) == 0 && len(hooks) == 0 && len(envVars) == 0 {
+	hasEnv := len(claudeEnv.Promote) > 0 || len(claudeEnv.Vars) > 0
+
+	if len(settings) == 0 && len(hooks) == 0 && !hasEnv {
 		return nil, nil
 	}
 
@@ -194,18 +196,45 @@ func (s *SettingsMaterializer) Materialize(ctx *MaterializeContext) ([]string, e
 		doc["hooks"] = hooksDoc
 	}
 
-	// Build env block from claude.env vars.
-	if len(envVars) > 0 {
-		envDoc := make(map[string]any, len(envVars))
-		envKeys := make([]string, 0, len(envVars))
-		for k := range envVars {
-			envKeys = append(envKeys, k)
+	// Build env block from promoted keys + inline vars.
+	if hasEnv {
+		envResult := make(map[string]string)
+
+		// Step 1: resolve promoted keys from the env pipeline.
+		if len(claudeEnv.Promote) > 0 {
+			resolvedEnv, err := ResolveEnvVars(ctx)
+			if err != nil {
+				return nil, fmt.Errorf("resolving env for promote: %w", err)
+			}
+			if resolvedEnv == nil {
+				resolvedEnv = map[string]string{}
+			}
+			for _, key := range claudeEnv.Promote {
+				val, found := resolvedEnv[key]
+				if !found {
+					return nil, fmt.Errorf("claude.env: promoted key %q not found in resolved env vars", key)
+				}
+				envResult[key] = val
+			}
 		}
-		sort.Strings(envKeys)
-		for _, k := range envKeys {
-			envDoc[k] = envVars[k]
+
+		// Step 2: overlay inline vars (inline wins over promoted).
+		for k, v := range claudeEnv.Vars {
+			envResult[k] = v
 		}
-		doc["env"] = envDoc
+
+		if len(envResult) > 0 {
+			envDoc := make(map[string]any, len(envResult))
+			envKeys := make([]string, 0, len(envResult))
+			for k := range envResult {
+				envKeys = append(envKeys, k)
+			}
+			sort.Strings(envKeys)
+			for _, k := range envKeys {
+				envDoc[k] = envResult[k]
+			}
+			doc["env"] = envDoc
+		}
 	}
 
 	data, err := json.MarshalIndent(doc, "", "  ")
@@ -240,11 +269,14 @@ func (e *EnvMaterializer) Name() string {
 // Materialize reads env files and inline vars, merges them with discovered env
 // files, and writes the result to {repoDir}/.local.env. Returns the list of
 // written file paths, or nil if there is nothing to write.
-func (e *EnvMaterializer) Materialize(ctx *MaterializeContext) ([]string, error) {
+// ResolveEnvVars merges env files, inline vars, and discovered files into a
+// single key-value map. This is the canonical env resolution function used by
+// both the EnvMaterializer (to write .local.env) and the SettingsMaterializer
+// (to look up promoted keys).
+func ResolveEnvVars(ctx *MaterializeContext) (map[string]string, error) {
 	envCfg := ctx.Effective.Env
 	discovered := ctx.DiscoveredEnv
 
-	// Determine which explicit files to use.
 	files := envCfg.Files
 	if len(files) == 0 && discovered != nil && discovered.WorkspaceFile != "" {
 		files = []string{discovered.WorkspaceFile}
@@ -259,7 +291,6 @@ func (e *EnvMaterializer) Materialize(ctx *MaterializeContext) ([]string, error)
 
 	vars := make(map[string]string)
 
-	// Parse each env file in order.
 	for _, f := range files {
 		src := filepath.Join(ctx.ConfigDir, f)
 		if err := checkContainment(src, ctx.ConfigDir); err != nil {
@@ -275,12 +306,10 @@ func (e *EnvMaterializer) Materialize(ctx *MaterializeContext) ([]string, error)
 		}
 	}
 
-	// Overlay inline vars (explicit vars win).
 	for k, v := range envCfg.Vars {
 		vars[k] = v
 	}
 
-	// Overlay repo-specific discovered env file.
 	if hasRepoFile {
 		repoEnvPath := discovered.RepoFiles[ctx.RepoName]
 		parsed, err := parseEnvFile(repoEnvPath)
@@ -292,6 +321,21 @@ func (e *EnvMaterializer) Materialize(ctx *MaterializeContext) ([]string, error)
 		}
 	}
 
+	if len(vars) == 0 {
+		return nil, nil
+	}
+
+	return vars, nil
+}
+
+// Materialize reads env files and inline vars, merges them with discovered env
+// files, and writes the result to {repoDir}/.local.env. Returns the list of
+// written file paths, or nil if there is nothing to write.
+func (e *EnvMaterializer) Materialize(ctx *MaterializeContext) ([]string, error) {
+	vars, err := ResolveEnvVars(ctx)
+	if err != nil {
+		return nil, err
+	}
 	if len(vars) == 0 {
 		return nil, nil
 	}

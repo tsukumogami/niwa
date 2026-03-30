@@ -40,7 +40,8 @@ content_dir = "claude"
 # [claude.hooks]
 # [claude.settings]
 # [claude.env]
-# GH_TOKEN = "..."
+# promote = ["GH_TOKEN"]
+# vars = { EXTRA_FLAG = "settings-only" }
 # [env]
 # [channels]
 `

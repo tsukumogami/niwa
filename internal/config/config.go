@@ -18,10 +18,19 @@ var validName = regexp.MustCompile(`^[a-zA-Z0-9._-]+$`)
 // On RepoOverride, Enabled controls whether Claude Code configuration is
 // installed for the repo (defaults to true when nil).
 type ClaudeConfig struct {
-	Enabled  *bool             `toml:"enabled,omitempty"`
-	Hooks    HooksConfig       `toml:"hooks,omitempty"`
-	Settings SettingsConfig    `toml:"settings,omitempty"`
-	Env      map[string]string `toml:"env,omitempty"`
+	Enabled  *bool           `toml:"enabled,omitempty"`
+	Hooks    HooksConfig     `toml:"hooks,omitempty"`
+	Settings SettingsConfig  `toml:"settings,omitempty"`
+	Env      ClaudeEnvConfig `toml:"env,omitempty"`
+}
+
+// ClaudeEnvConfig declares env vars for the Claude Code settings.local.json env
+// block. Promote lists keys to pull from the resolved [env] pipeline. Vars are
+// inline key-value pairs for settings-only vars. When the same key appears in
+// both, Vars wins.
+type ClaudeEnvConfig struct {
+	Promote []string          `toml:"promote,omitempty"`
+	Vars    map[string]string `toml:"vars,omitempty"`
 }
 
 // WorkspaceConfig is the top-level configuration parsed from workspace.toml.
