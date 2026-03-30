@@ -356,10 +356,13 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 			return nil, fmt.Errorf("marketplace registration: %w", fatalErr)
 		}
 
-		// Phase B: Install plugins per repo.
+		// Phase B: Install plugins per repo (skip repos with claude = false).
 		_, claudeFound := FindClaude()
 		if claudeFound {
 			for _, cr := range classified {
+				if !ClaudeEnabled(cfg, cr.Repo.Name) {
+					continue
+				}
 				effective := MergeOverrides(cfg, cr.Repo.Name)
 				if len(effective.Plugins) == 0 {
 					continue
