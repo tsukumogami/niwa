@@ -27,6 +27,7 @@ func NewApplier(gh github.Client) *Applier {
 			&HooksMaterializer{},
 			&SettingsMaterializer{},
 			&EnvMaterializer{},
+			&FilesMaterializer{},
 		},
 	}
 }

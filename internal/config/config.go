@@ -42,6 +42,7 @@ type WorkspaceConfig struct {
 	Content   ContentConfig           `toml:"content"`
 	Claude    ClaudeConfig            `toml:"claude"`
 	Env       EnvConfig               `toml:"env"`
+	Files     map[string]string        `toml:"files,omitempty"`
 	Channels  map[string]any          `toml:"channels"` // placeholder
 }
 
@@ -89,11 +90,12 @@ type EnvConfig struct {
 
 // RepoOverride holds per-repo configuration overrides.
 type RepoOverride struct {
-	URL    string        `toml:"url,omitempty"`
-	Branch string        `toml:"branch,omitempty"`
-	Scope  string        `toml:"scope,omitempty"`
-	Claude *ClaudeConfig `toml:"claude,omitempty"`
-	Env    EnvConfig     `toml:"env,omitempty"`
+	URL    string            `toml:"url,omitempty"`
+	Branch string            `toml:"branch,omitempty"`
+	Scope  string            `toml:"scope,omitempty"`
+	Claude *ClaudeConfig     `toml:"claude,omitempty"`
+	Env    EnvConfig         `toml:"env,omitempty"`
+	Files  map[string]string `toml:"files,omitempty"`
 }
 
 // ContentConfig declares the CLAUDE.md content hierarchy.

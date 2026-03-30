@@ -13,6 +13,7 @@ import (
 type EffectiveConfig struct {
 	Claude config.ClaudeConfig
 	Env    config.EnvConfig
+	Files  map[string]string
 }
 
 // MergeOverrides produces the effective configuration for a repo by combining
@@ -31,7 +32,8 @@ func MergeOverrides(ws *config.WorkspaceConfig, repoName string) EffectiveConfig
 			Settings: copySettings(ws.Claude.Settings),
 			Env:      copyClaudeEnv(ws.Claude.Env),
 		},
-		Env: copyEnv(ws.Env),
+		Env:   copyEnv(ws.Env),
+		Files: copyStringMap(ws.Files),
 	}
 
 	if !hasOverride {
@@ -89,6 +91,18 @@ func MergeOverrides(ws *config.WorkspaceConfig, repoName string) EffectiveConfig
 			result.Env.Vars = map[string]string{}
 		}
 		result.Env.Vars[k] = v
+	}
+
+	// Files: repo wins per source key. Empty string removes workspace mapping.
+	for k, v := range override.Files {
+		if result.Files == nil {
+			result.Files = map[string]string{}
+		}
+		if v == "" {
+			delete(result.Files, k)
+		} else {
+			result.Files[k] = v
+		}
 	}
 
 	return result
@@ -170,6 +184,16 @@ func copySettings(s config.SettingsConfig) config.SettingsConfig {
 	}
 	out := make(config.SettingsConfig, len(s))
 	maps.Copy(out, s)
+	return out
+}
+
+// copyStringMap returns a shallow copy of a string map.
+func copyStringMap(m map[string]string) map[string]string {
+	if m == nil {
+		return nil
+	}
+	out := make(map[string]string, len(m))
+	maps.Copy(out, m)
 	return out
 }
 

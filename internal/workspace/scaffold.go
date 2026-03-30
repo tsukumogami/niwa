@@ -43,6 +43,8 @@ content_dir = "claude"
 # promote = ["GH_TOKEN"]
 # vars = { EXTRA_FLAG = "settings-only" }
 # [env]
+# [files]
+# "extensions/design.md" = ".claude/shirabe-extensions/"
 # [channels]
 `
 
