@@ -71,6 +71,10 @@ stop = ["hooks/workflow-continue.sh"]
 [claude.settings]
 permissions = "bypass"
 
+[claude.env]
+promote = ["GH_TOKEN"]
+vars = { EXTRA_FLAG = "claude-only" }
+
 [env]
 files = ["env/workspace.env"]
 vars = { LOG_LEVEL = "debug" }
@@ -262,6 +266,12 @@ func TestParseFullConfig(t *testing.T) {
 	}
 	if cfg.Env.Vars["LOG_LEVEL"] != "debug" {
 		t.Errorf("env.vars.LOG_LEVEL = %v, want debug", cfg.Env.Vars["LOG_LEVEL"])
+	}
+	if len(cfg.Claude.Env.Promote) != 1 || cfg.Claude.Env.Promote[0] != "GH_TOKEN" {
+		t.Errorf("claude.env.promote = %v, want [GH_TOKEN]", cfg.Claude.Env.Promote)
+	}
+	if cfg.Claude.Env.Vars["EXTRA_FLAG"] != "claude-only" {
+		t.Errorf("claude.env.vars.EXTRA_FLAG = %v, want claude-only", cfg.Claude.Env.Vars["EXTRA_FLAG"])
 	}
 	if cfg.Channels == nil {
 		t.Error("channels should not be nil")

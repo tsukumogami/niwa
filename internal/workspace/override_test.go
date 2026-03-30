@@ -255,6 +255,91 @@ func TestMergeOverridesNilWorkspaceFields(t *testing.T) {
 	}
 }
 
+func TestMergeOverridesClaudeEnvVarsWin(t *testing.T) {
+	ws := &config.WorkspaceConfig{
+		Claude: config.ClaudeConfig{
+			Env: config.ClaudeEnvConfig{
+				Vars: map[string]string{
+					"GH_TOKEN":  "ws_token",
+					"API_TOKEN": "ws_api",
+				},
+			},
+		},
+		Repos: map[string]config.RepoOverride{
+			"myrepo": {
+				Claude: &config.ClaudeConfig{
+					Env: config.ClaudeEnvConfig{
+						Vars: map[string]string{
+							"GH_TOKEN": "repo_token",
+						},
+					},
+				},
+			},
+		},
+	}
+	eff := MergeOverrides(ws, "myrepo")
+
+	if eff.Claude.Env.Vars["GH_TOKEN"] != "repo_token" {
+		t.Errorf("expected GH_TOKEN=repo_token, got %v", eff.Claude.Env.Vars["GH_TOKEN"])
+	}
+	if eff.Claude.Env.Vars["API_TOKEN"] != "ws_api" {
+		t.Errorf("expected API_TOKEN=ws_api, got %v", eff.Claude.Env.Vars["API_TOKEN"])
+	}
+}
+
+func TestMergeOverridesClaudeEnvPromoteUnion(t *testing.T) {
+	ws := &config.WorkspaceConfig{
+		Claude: config.ClaudeConfig{
+			Env: config.ClaudeEnvConfig{
+				Promote: []string{"GH_TOKEN", "API_KEY"},
+			},
+		},
+		Repos: map[string]config.RepoOverride{
+			"myrepo": {
+				Claude: &config.ClaudeConfig{
+					Env: config.ClaudeEnvConfig{
+						Promote: []string{"API_KEY", "REPO_SECRET"},
+					},
+				},
+			},
+		},
+	}
+	eff := MergeOverrides(ws, "myrepo")
+
+	want := []string{"GH_TOKEN", "API_KEY", "REPO_SECRET"}
+	if len(eff.Claude.Env.Promote) != len(want) {
+		t.Fatalf("expected promote %v, got %v", want, eff.Claude.Env.Promote)
+	}
+	for i, k := range want {
+		if eff.Claude.Env.Promote[i] != k {
+			t.Errorf("promote[%d] = %q, want %q", i, eff.Claude.Env.Promote[i], k)
+		}
+	}
+}
+
+func TestMergeOverridesClaudeEnvNilWorkspace(t *testing.T) {
+	ws := &config.WorkspaceConfig{
+		Repos: map[string]config.RepoOverride{
+			"myrepo": {
+				Claude: &config.ClaudeConfig{
+					Env: config.ClaudeEnvConfig{
+						Vars:    map[string]string{"GH_TOKEN": "repo_only"},
+						Promote: []string{"OTHER"},
+					},
+				},
+			},
+		},
+	}
+	eff := MergeOverrides(ws, "myrepo")
+
+	if eff.Claude.Env.Vars["GH_TOKEN"] != "repo_only" {
+		t.Errorf("expected GH_TOKEN=repo_only, got %v", eff.Claude.Env.Vars["GH_TOKEN"])
+	}
+	if len(eff.Claude.Env.Promote) != 1 || eff.Claude.Env.Promote[0] != "OTHER" {
+		t.Errorf("expected promote [OTHER], got %v", eff.Claude.Env.Promote)
+	}
+}
+
 func TestWarnUnknownRepos(t *testing.T) {
 	ws := &config.WorkspaceConfig{
 		Repos: map[string]config.RepoOverride{

@@ -29,6 +29,7 @@ func MergeOverrides(ws *config.WorkspaceConfig, repoName string) EffectiveConfig
 		Claude: config.ClaudeConfig{
 			Hooks:    copyHooks(ws.Claude.Hooks),
 			Settings: copySettings(ws.Claude.Settings),
+			Env:      copyClaudeEnv(ws.Claude.Env),
 		},
 		Env: copyEnv(ws.Env),
 	}
@@ -53,6 +54,27 @@ func MergeOverrides(ws *config.WorkspaceConfig, repoName string) EffectiveConfig
 				result.Claude.Hooks = config.HooksConfig{}
 			}
 			result.Claude.Hooks[k] = append(result.Claude.Hooks[k], v...)
+		}
+
+		// Claude env promote: repo extends (union).
+		if len(override.Claude.Env.Promote) > 0 {
+			seen := make(map[string]bool, len(result.Claude.Env.Promote))
+			for _, k := range result.Claude.Env.Promote {
+				seen[k] = true
+			}
+			for _, k := range override.Claude.Env.Promote {
+				if !seen[k] {
+					result.Claude.Env.Promote = append(result.Claude.Env.Promote, k)
+				}
+			}
+		}
+
+		// Claude env vars: repo wins per key.
+		for k, v := range override.Claude.Env.Vars {
+			if result.Claude.Env.Vars == nil {
+				result.Claude.Env.Vars = map[string]string{}
+			}
+			result.Claude.Env.Vars[k] = v
 		}
 	}
 
@@ -148,6 +170,18 @@ func copySettings(s config.SettingsConfig) config.SettingsConfig {
 	}
 	out := make(config.SettingsConfig, len(s))
 	maps.Copy(out, s)
+	return out
+}
+
+// copyClaudeEnv returns a deep copy of a ClaudeEnvConfig.
+func copyClaudeEnv(e config.ClaudeEnvConfig) config.ClaudeEnvConfig {
+	out := config.ClaudeEnvConfig{
+		Promote: slices.Clone(e.Promote),
+	}
+	if e.Vars != nil {
+		out.Vars = make(map[string]string, len(e.Vars))
+		maps.Copy(out.Vars, e.Vars)
+	}
 	return out
 }
 

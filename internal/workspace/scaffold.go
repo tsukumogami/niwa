@@ -39,6 +39,9 @@ content_dir = "claude"
 # See docs/designs/DESIGN-workspace-config.md for full schema reference.
 # [claude.hooks]
 # [claude.settings]
+# [claude.env]
+# promote = ["GH_TOKEN"]
+# vars = { EXTRA_FLAG = "settings-only" }
 # [env]
 # [channels]
 `
