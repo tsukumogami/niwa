@@ -321,6 +321,24 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		}
 	}
 
+	// Step 6.75: Run repo-provided setup scripts.
+	for _, cr := range classified {
+		setupDir := ResolveSetupDir(cfg, cr.Repo.Name)
+		repoDir := filepath.Join(instanceRoot, cr.Group, cr.Repo.Name)
+		result := RunSetupScripts(repoDir, setupDir)
+
+		if result.Disabled || result.Skipped {
+			continue
+		}
+
+		for _, sr := range result.Scripts {
+			if sr.Error != nil {
+				fmt.Fprintf(os.Stderr, "warning: setup script %s/%s failed for %s: %v\n",
+					setupDir, sr.Name, cr.Repo.Name, sr.Error)
+			}
+		}
+	}
+
 	// Step 7: Build managed files with hashes.
 	managedFiles := make([]ManagedFile, 0, len(writtenFiles))
 	for _, path := range writtenFiles {
