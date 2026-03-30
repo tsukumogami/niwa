@@ -308,7 +308,8 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 
 		claudeOn := ClaudeEnabled(cfg, cr.Repo.Name)
 		for _, m := range a.Materializers {
-			// Skip hooks and settings materializers when claude is disabled.
+			// Skip Claude-namespaced materializers when claude is disabled.
+			// env and files materializers are tool-agnostic and always run.
 			if !claudeOn && (m.Name() == "hooks" || m.Name() == "settings") {
 				continue
 			}
@@ -356,10 +357,13 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 			return nil, fmt.Errorf("marketplace registration: %w", fatalErr)
 		}
 
-		// Phase B: Install plugins per repo.
+		// Phase B: Install plugins per repo (skip repos with claude = false).
 		_, claudeFound := FindClaude()
 		if claudeFound {
 			for _, cr := range classified {
+				if !ClaudeEnabled(cfg, cr.Repo.Name) {
+					continue
+				}
 				effective := MergeOverrides(cfg, cr.Repo.Name)
 				if len(effective.Plugins) == 0 {
 					continue
