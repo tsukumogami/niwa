@@ -23,7 +23,7 @@ has properly scoped context in every repo from the first session. It handles:
 curl -fsSL https://raw.githubusercontent.com/tsukumogami/niwa/main/install.sh | sh
 ```
 
-Or via tsuku: `tsuku install niwa`
+Or via tsuku: `tsuku install tsukumogami/niwa`
 
 Or from source: `go install github.com/tsukumogami/niwa/cmd/niwa@latest`
 
