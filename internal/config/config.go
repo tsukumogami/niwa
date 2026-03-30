@@ -18,10 +18,13 @@ var validName = regexp.MustCompile(`^[a-zA-Z0-9._-]+$`)
 // On RepoOverride, Enabled controls whether Claude Code configuration is
 // installed for the repo (defaults to true when nil).
 type ClaudeConfig struct {
-	Enabled  *bool           `toml:"enabled,omitempty"`
-	Hooks    HooksConfig     `toml:"hooks,omitempty"`
-	Settings SettingsConfig  `toml:"settings,omitempty"`
-	Env      ClaudeEnvConfig `toml:"env,omitempty"`
+	Enabled *bool  `toml:"enabled,omitempty"`
+	Plugins *[]string `toml:"plugins,omitempty"`
+	// Marketplaces is workspace-wide. Not merged from per-repo overrides.
+	Marketplaces []string        `toml:"marketplaces,omitempty"`
+	Hooks        HooksConfig     `toml:"hooks,omitempty"`
+	Settings     SettingsConfig  `toml:"settings,omitempty"`
+	Env          ClaudeEnvConfig `toml:"env,omitempty"`
 }
 
 // ClaudeEnvConfig declares env vars for the Claude Code settings.local.json env

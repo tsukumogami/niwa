@@ -11,9 +11,10 @@ import (
 // for a single repository. It holds the final hooks, settings, and env that
 // should apply after overlay semantics are resolved.
 type EffectiveConfig struct {
-	Claude config.ClaudeConfig
-	Env    config.EnvConfig
-	Files  map[string]string
+	Claude  config.ClaudeConfig
+	Env     config.EnvConfig
+	Files   map[string]string
+	Plugins []string
 }
 
 // MergeOverrides produces the effective configuration for a repo by combining
@@ -26,14 +27,21 @@ type EffectiveConfig struct {
 func MergeOverrides(ws *config.WorkspaceConfig, repoName string) EffectiveConfig {
 	override, hasOverride := ws.Repos[repoName]
 
+	// Resolve workspace-level plugins (deref pointer to plain slice).
+	var wsPlugins []string
+	if ws.Claude.Plugins != nil {
+		wsPlugins = slices.Clone(*ws.Claude.Plugins)
+	}
+
 	result := EffectiveConfig{
 		Claude: config.ClaudeConfig{
 			Hooks:    copyHooks(ws.Claude.Hooks),
 			Settings: copySettings(ws.Claude.Settings),
 			Env:      copyClaudeEnv(ws.Claude.Env),
 		},
-		Env:   copyEnv(ws.Env),
-		Files: copyStringMap(ws.Files),
+		Env:     copyEnv(ws.Env),
+		Files:   copyStringMap(ws.Files),
+		Plugins: wsPlugins,
 	}
 
 	if !hasOverride {
@@ -77,6 +85,11 @@ func MergeOverrides(ws *config.WorkspaceConfig, repoName string) EffectiveConfig
 				result.Claude.Env.Vars = map[string]string{}
 			}
 			result.Claude.Env.Vars[k] = v
+		}
+
+		// Plugins: repo replaces workspace entirely (nil = inherit).
+		if override.Claude.Plugins != nil {
+			result.Plugins = slices.Clone(*override.Claude.Plugins)
 		}
 	}
 

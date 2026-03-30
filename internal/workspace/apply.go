@@ -339,6 +339,40 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		}
 	}
 
+	// Step 6.9: Register marketplaces and install plugins.
+	if len(cfg.Claude.Marketplaces) > 0 || cfg.Claude.Plugins != nil {
+		// Build repo name -> on-disk path index.
+		repoIndex := make(map[string]string, len(classified))
+		for _, cr := range classified {
+			repoIndex[cr.Repo.Name] = filepath.Join(instanceRoot, cr.Group, cr.Repo.Name)
+		}
+
+		// Phase A: Register marketplaces.
+		mktWarnings, fatalErr := RegisterMarketplaces(cfg.Claude.Marketplaces, repoIndex)
+		for _, w := range mktWarnings {
+			fmt.Fprintf(os.Stderr, "warning: %s\n", w)
+		}
+		if fatalErr != nil {
+			return nil, fmt.Errorf("marketplace registration: %w", fatalErr)
+		}
+
+		// Phase B: Install plugins per repo.
+		_, claudeFound := FindClaude()
+		if claudeFound {
+			for _, cr := range classified {
+				effective := MergeOverrides(cfg, cr.Repo.Name)
+				if len(effective.Plugins) == 0 {
+					continue
+				}
+				repoDir := filepath.Join(instanceRoot, cr.Group, cr.Repo.Name)
+				pluginWarnings := InstallPlugins(effective.Plugins, repoDir)
+				for _, w := range pluginWarnings {
+					fmt.Fprintf(os.Stderr, "warning: %s\n", w)
+				}
+			}
+		}
+	}
+
 	// Step 7: Build managed files with hashes.
 	managedFiles := make([]ManagedFile, 0, len(writtenFiles))
 	for _, path := range writtenFiles {
