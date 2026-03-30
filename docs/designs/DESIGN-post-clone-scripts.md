@@ -4,19 +4,19 @@ problem: |
   niwa clones repos during create/apply but can't run repo-provided setup scripts
   afterward. Some repos need git hooks installed, local config generated, or dev
   environments bootstrapped. Today this requires a separate manual step or an
-  external installer. niwa should support running a repo's own setup script as
+  external installer. niwa should support running a repo's own setup scripts as
   part of the apply pipeline.
 decision: |
-  Add a workspace-level setup_script convention (default: scripts/niwa-setup.sh)
-  that niwa runs after materializers for each repo where the script exists.
-  Per-repo overrides can change the path or set it to empty to disable. Scripts
-  run from the repo directory with the working directory set to the repo root.
-  Non-zero exit codes are reported as warnings, not fatal errors.
+  Scan a configurable setup directory (default: scripts/setup/) in each repo for
+  executable scripts and run them in lexical order. Workspace-level config changes
+  the directory name; per-repo override changes or disables. Non-zero exit codes
+  produce warnings, not fatal errors.
 rationale: |
-  Convention-over-configuration matches niwa's philosophy -- repos that follow the
-  convention need zero config. The non-fatal approach avoids blocking the entire
-  apply pipeline when one repo's setup script fails, while still surfacing the
-  failure clearly. Per-repo override to empty string gives a clean disable mechanism.
+  A directory convention is more extensible than a single file -- repos can split
+  setup across multiple scripts without merge conflicts or monolithic files. The
+  generic directory name (scripts/setup/) doesn't imply niwa ownership, so repos
+  can use the same convention with or without niwa. Lexical ordering via numeric
+  prefixes (01-git-hooks.sh, 02-build.sh) follows established Unix patterns.
 ---
 
 # DESIGN: Post-Clone Scripts
@@ -34,7 +34,7 @@ script, generating local configuration files, or bootstrapping development tooli
 
 Today these setup steps happen outside niwa: either manually by the developer, or
 through a separate installer script. This breaks the "one command to set up the
-workspace" promise. niwa should be able to run a repo's own setup script as part
+workspace" promise. niwa should be able to run a repo's own setup scripts as part
 of the apply pipeline, after cloning and materialization are complete.
 
 This is distinct from niwa's materializers, which distribute config FROM the
@@ -44,131 +44,156 @@ INSIDE the target repo.
 ## Decision Drivers
 
 - Convention over configuration: repos that follow the convention need zero config
+- Non-intrusive: the convention should use generic names, not niwa-specific ones
+- Extensible: repos with multiple setup concerns shouldn't be forced into one file
 - Non-destructive: a failing setup script shouldn't block the entire workspace apply
 - Idempotent: scripts must be safe to re-run on every `niwa apply`
-- Transparent: users should see what scripts are being executed
-- Per-repo control: some repos may need a different script path or no script at all
+- Per-repo control: some repos may need a different setup path or no setup at all
 
 ## Considered Options
 
-### Decision 1: Script path configuration and convention
+### Decision 1: Script discovery convention
 
-How to declare which script niwa should run in each repo, and what the default
-convention is.
+How niwa discovers which scripts to run in each repo after cloning/applying.
 
-#### Chosen: Workspace-level default with per-repo override
+#### Chosen: Setup directory with lexical ordering
 
-A single workspace-level setting declares the default script path. Per-repo
-overrides can change the path or disable it.
+niwa scans a directory in each repo for executable scripts and runs them in
+lexical order. The default directory is `scripts/setup/`. Repos organize setup
+into as many scripts as they need; each runs independently.
+
+```
+myrepo/
+  scripts/
+    setup/
+      01-git-hooks.sh
+      02-install-deps.sh
+      03-generate-config.sh
+```
+
+**TOML configuration:**
 
 ```toml
 [workspace]
-setup_script = "scripts/niwa-setup.sh"   # default, can be omitted
+setup_dir = "scripts/setup"    # default, can be omitted
 
 [repos.legacy-app]
-setup_script = "setup/bootstrap.sh"      # different path for this repo
+setup_dir = "setup/bootstrap"  # different directory for this repo
 
 [repos.static-site]
-setup_script = ""                        # disable for this repo
+setup_dir = ""                 # disable for this repo
 ```
 
-The default value is `scripts/niwa-setup.sh` when `setup_script` is not set.
-This follows the convention-over-configuration pattern used throughout niwa.
-Repos that want setup just create the file at the conventional path; repos
-that don't need setup do nothing (the script is silently skipped when absent).
-
 **Convention details:**
-- Default path: `scripts/niwa-setup.sh`
-- The script must be executable (`chmod +x`)
-- Scripts that don't exist are silently skipped
-- Empty string explicitly disables (even if the default-path file exists)
+- Default directory: `scripts/setup/`
+- Scripts must be executable (`chmod +x`)
+- Non-executable files are skipped with a warning
+- Empty directory or missing directory: silently skipped
+- Lexical order: `01-foo.sh` runs before `10-bar.sh` (numeric prefix convention)
+- Only top-level files are scanned (no recursive descent into subdirectories)
+- Empty string on per-repo override explicitly disables
+
+**Why this approach:**
+- Generic name (`scripts/setup/`) doesn't imply niwa ownership -- repos can use
+  this convention with any tool or manually
+- Multiple scripts compose naturally -- add a file, get a new setup step
+- Lexical ordering via numeric prefixes is a well-established Unix pattern
+  (`/etc/cron.d/`, `/etc/init.d/`, `run-parts`)
+- Repos with a single setup step just put one script in the directory
 
 #### Alternatives Considered
 
-**No default convention (always explicit):** Require every workspace to declare
-`setup_script` for each repo that needs one. Rejected because it defeats
-convention-over-configuration -- most repos that need setup will use a standard
-path, and requiring explicit config for each is boilerplate.
+**Single well-known file (`scripts/niwa-setup.sh`):** One file, one entry point.
+Rejected because (1) the `niwa-` prefix is intrusive -- repos shouldn't need
+niwa-specific files, (2) a single file doesn't compose -- repos with multiple
+setup concerns end up with a monolithic script that grows over time, and (3)
+multiple contributors editing the same file creates merge conflicts.
 
-**Auto-discover multiple scripts:** Scan for all `*.sh` files in a setup directory
-and run them in alphabetical order. Rejected because it's unpredictable -- adding
-a file to a directory silently changes behavior. A single well-known entry point
-is more transparent.
+**Hybrid entry point + directory (`setup.sh` + `setup.d/`):** A single entry
+point runs first, then directory scripts. Rejected because it adds complexity
+without clear benefit -- if you have an entry point, you'll put everything there
+and the directory becomes an afterthought. One convention is simpler than two.
+
+**Single configurable file path:** Workspace declares a file path, niwa runs
+that one file. Most flexible for per-repo override, but the same extensibility
+problem as the single-file approach -- one file doesn't compose.
 
 ### Decision 2: Execution semantics
 
 How scripts are invoked, what environment they receive, and how failures are
 handled.
 
-#### Chosen: Run from repo root, warn on failure
+#### Chosen: Run from repo root, warn on failure, stop on first script error
 
 Scripts are executed with:
 - Working directory: the repo root
-- Shell: `sh -e` (POSIX shell, exit on error)
+- Invocation: direct execution (script's shebang determines interpreter)
 - Environment: inherits the niwa process environment
 - Stdout/stderr: printed to niwa's output, prefixed with the repo name
-- Exit code 0: success (no output beyond the script's own output)
-- Exit code non-zero: warning printed, apply continues with remaining repos
+- Exit code 0: success
+- Exit code non-zero: warning printed, **remaining scripts for that repo are
+  skipped**, pipeline continues with next repo
 
 ```
-Running setup script for tsuku... (scripts/niwa-setup.sh)
-  Installing git hooks...
-  Done.
-Running setup script for koto... (scripts/niwa-setup.sh)
-  Warning: setup script failed (exit code 1)
-Running setup script for niwa... (skipped, not found)
+Running setup for tsuku...
+  [01-git-hooks.sh] Installing git hooks... done.
+  [02-install-deps.sh] Installing dependencies... done.
+Running setup for koto...
+  [01-git-hooks.sh] Warning: failed (exit code 1). Skipping remaining scripts.
+Running setup for niwa... (no setup directory)
 ```
 
-**Why warnings, not errors:** A workspace with 6 repos shouldn't fail entirely
-because one repo's setup script has a transient issue. The user sees the warning
-and can fix it manually. The remaining repos still get their setup.
+**Why stop-on-error per repo:** If `01-git-hooks.sh` fails, running
+`02-install-deps.sh` may not make sense (scripts often have implicit ordering).
+But one repo's failure shouldn't block other repos from setting up. This gives
+fail-fast within a repo and resilience across repos.
 
-**Why `sh -e`:** Scripts should fail fast on individual command errors rather than
-silently continuing after a failure. The `-e` flag ensures this. Scripts that need
-to handle errors can use `set +e` explicitly.
+**Why shebang, not `sh -e`:** Scripts choose their own interpreter via shebang
+(`#!/bin/bash`, `#!/usr/bin/env python3`). This is more flexible than forcing
+`sh -e`, and aligns with how executable scripts work everywhere else.
 
 #### Alternatives Considered
 
-**Fatal on failure:** Stop the entire apply pipeline if any setup script fails.
-Rejected because it makes the pipeline fragile -- one repo's broken setup script
-blocks all other repos from getting set up. Partial success is better than
-complete failure.
+**Fatal on any failure:** Stop the entire apply pipeline if any script fails.
+Rejected because it makes the pipeline fragile -- one repo's broken script
+blocks all other repos.
 
-**Run only on first clone (not on re-apply):** Track which repos have had their
-setup script run and skip on subsequent applies. Rejected because the issue
-explicitly requires idempotent execution on every apply -- setup scripts should
-be written to handle re-runs, and running them ensures the repo stays in a good
-state after config changes.
+**Continue all scripts on failure:** Run every script regardless of exit codes,
+report all failures at the end. Rejected because scripts within a repo often
+have ordering dependencies -- running later scripts after an earlier failure
+can produce confusing results.
 
 ## Decision Outcome
 
-Post-clone scripts use a convention-based approach: niwa looks for
-`scripts/niwa-setup.sh` (configurable) in each repo after materialization. If
-the script exists and is executable, niwa runs it from the repo root. Non-zero
-exit codes produce warnings but don't block the pipeline.
+Post-clone scripts use a directory-based convention: niwa scans
+`scripts/setup/` (configurable) in each repo for executable scripts and runs
+them in lexical order. The directory name is generic and not niwa-specific, so
+repos can use the same convention independently.
 
-The workspace-level `setup_script` sets the default path. Per-repo overrides
-change the path or disable with empty string. Scripts that don't exist are
-silently skipped, so repos that don't need setup pay no configuration cost.
+Failures stop remaining scripts for that repo but don't block other repos.
+The workspace-level `setup_dir` changes the default directory. Per-repo overrides
+change or disable with empty string. Missing or empty directories are silently
+skipped.
 
 ## Solution Architecture
 
 ### Overview
 
 A new pipeline step runs after materializers (Step 6.5) and before managed file
-tracking (Step 7). It iterates classified repos, resolves the setup script path,
-checks for existence, and executes if found.
+tracking (Step 7). It iterates classified repos, resolves the setup directory
+path, scans for executable scripts, and runs each in lexical order.
 
 ### Components
 
-**`WorkspaceMeta.SetupScript`** -- new optional field on the workspace metadata.
-Defaults to `scripts/niwa-setup.sh` when empty.
+**`WorkspaceMeta.SetupDir`** -- new optional field on workspace metadata.
+Defaults to `scripts/setup` when empty.
 
-**`RepoOverride.SetupScript`** -- new optional field. When set, overrides the
-workspace default for that repo. Empty string disables.
+**`RepoOverride.SetupDir`** -- new optional field. When set, overrides the
+workspace default for that repo. Empty string disables. Uses `*string` to
+distinguish "not set" from "explicitly empty."
 
-**`RunSetupScript`** -- new function that executes a script from a repo directory
-and returns success/warning.
+**`RunSetupScripts`** -- new function that scans a directory for executable
+scripts and runs them in lexical order.
 
 ### Key Interfaces
 
@@ -176,30 +201,30 @@ and returns success/warning.
 // In config.go
 type WorkspaceMeta struct {
     // ... existing fields ...
-    SetupScript string `toml:"setup_script,omitempty"`
+    SetupDir string `toml:"setup_dir,omitempty"`
 }
 
 type RepoOverride struct {
     // ... existing fields ...
-    SetupScript *string `toml:"setup_script,omitempty"`
+    SetupDir *string `toml:"setup_dir,omitempty"`
 }
 ```
 
-Note: `RepoOverride.SetupScript` is `*string` (pointer) to distinguish "not set"
-(use workspace default) from "explicitly empty" (disable). This is the same
-pattern used by `ClaudeConfig.Enabled`.
-
 ```go
-// In apply.go or a new setup.go
+// In setup.go
 type SetupResult struct {
     RepoName string
-    Script   string
-    Skipped  bool   // script not found
-    Disabled bool   // explicitly disabled via empty string
-    Error    error  // non-nil means warning (non-zero exit)
+    Scripts  []ScriptResult
+    Skipped  bool  // directory not found
+    Disabled bool  // explicitly disabled
 }
 
-func RunSetupScript(repoDir, scriptPath string) *SetupResult
+type ScriptResult struct {
+    Name   string
+    Error  error  // nil = success
+}
+
+func RunSetupScripts(repoDir, setupDir string) *SetupResult
 ```
 
 ### Data Flow
@@ -207,56 +232,59 @@ func RunSetupScript(repoDir, scriptPath string) *SetupResult
 ```
 For each classified repo:
     |
-    +-- Resolve script path:
-    |     repo override (pointer set) -> use override value
+    +-- Resolve setup directory:
+    |     repo override (*string set) -> use override value
     |     repo override (nil)         -> use workspace default
-    |     workspace default empty     -> use "scripts/niwa-setup.sh"
+    |     workspace default empty     -> use "scripts/setup"
     |
     +-- Is resolved path ""?
     |     yes -> skip (disabled)
     |
-    +-- Does script exist at repoDir/scriptPath?
+    +-- Does directory exist at repoDir/setupDir?
     |     no  -> skip silently
     |
-    +-- Is script executable?
-    |     no  -> warn and skip
+    +-- Scan for executable files (top-level only, lexical order)
+    |     none found -> skip silently
     |
-    +-- Execute: sh -e scriptPath (cwd = repoDir)
-    |     exit 0   -> success
-    |     exit !0  -> warn, continue
+    +-- For each script in order:
+          execute (cwd = repoDir)
+          exit 0   -> continue to next script
+          exit !0  -> warn, skip remaining scripts for this repo
 ```
 
 ## Implementation Approach
 
-### Phase 1: Config types
+### Phase 1: Config types and resolution
 
-- Add `SetupScript string` to `WorkspaceMeta`
-- Add `SetupScript *string` to `RepoOverride`
-- Add resolution logic to `MergeOverrides` or a standalone resolver
-- Tests for config parsing and override resolution
+- Add `SetupDir string` to `WorkspaceMeta`
+- Add `SetupDir *string` to `RepoOverride`
+- Add resolution function (repo override -> workspace default -> "scripts/setup")
+- Tests for config parsing and resolution
 
 ### Phase 2: Script execution and pipeline integration
 
-- Implement `RunSetupScript` function
-- Add Step 6.75 to the apply pipeline (after materializers, before managed files)
-- Print progress lines per repo
-- Tests: script exists and succeeds, script doesn't exist (skip), script fails
-  (warning), disabled via empty string, non-executable script
+- Implement `RunSetupScripts` (scan dir, filter executable, run in order)
+- Add Step 6.75 to apply pipeline
+- Print progress lines per repo and per script
+- Tests: scripts exist and succeed, directory missing (skip), script fails
+  (warn + skip remaining), disabled via empty string, non-executable file
+  (warn + skip), empty directory (skip)
 
 ## Security Considerations
 
 Post-clone scripts run arbitrary code from the cloned repo. This is inherently
-trusted -- the user chose to clone the repo, and the script is part of the repo's
-codebase. niwa surfaces what it's about to run (prints the script path before
-execution) so the user can verify.
+trusted -- the user chose to clone the repo, and the scripts are part of the
+repo's codebase. niwa surfaces what it's about to run (prints each script name
+before execution) so the user can verify.
 
 The security boundary is the same as `git clone` itself: if you clone a repo, you
 trust its contents. niwa doesn't elevate privileges -- scripts run as the current
 user with the current environment.
 
-One mitigation: niwa checks that the script is executable before running it. A
-non-executable script is a warning, not a silent skip, so the user knows the
-convention exists but the script needs `chmod +x`.
+Mitigations:
+- Only executable files are run (non-executable are warned, not silently executed)
+- No recursive descent into subdirectories (limits discovery scope)
+- Script paths are validated to stay within the repo directory
 
 ## Consequences
 
@@ -264,17 +292,18 @@ convention exists but the script needs `chmod +x`.
 
 - "One command to set up the workspace" becomes achievable
 - Repos that follow the convention need zero config
-- Idempotent execution means apply always converges to the right state
-- Non-fatal failures keep the pipeline resilient
+- Multiple setup concerns compose naturally (one script per concern)
+- Generic directory name works with or without niwa
+- Idempotent execution means apply always converges
 
 ### Negative
 
-- Running arbitrary scripts adds a trust surface (mitigated by transparency)
-- Scripts must be idempotent, which is the repo author's responsibility
+- Lexical ordering requires discipline (numeric prefixes)
+- Adding a script to the directory silently changes behavior on next apply
 - No structured output from scripts -- niwa can only report pass/fail
 
 ### Mitigations
 
-- Print script path before execution for transparency
-- Warn on non-executable scripts so authors know to chmod +x
-- Document the idempotency requirement in the setup script convention
+- Numeric prefix convention is well-documented and widely understood
+- niwa prints each script name before execution, so changes are visible
+- Per-repo disable provides an escape hatch when auto-execution is unwanted
