@@ -1,5 +1,5 @@
 ---
-status: Proposed
+status: Planned
 problem: |
   niwa distributes hooks, settings, and env files through dedicated materializers,
   but some workflows need to copy arbitrary files into repos (plugin extensions,
