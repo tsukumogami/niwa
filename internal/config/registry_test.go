@@ -58,8 +58,8 @@ func TestParseGlobalConfigEmpty(t *testing.T) {
 
 func TestCloneProtocolDefault(t *testing.T) {
 	cfg := &GlobalConfig{}
-	if got := cfg.CloneProtocol(); got != "https" {
-		t.Errorf("CloneProtocol() = %q, want %q", got, "https")
+	if got := cfg.CloneProtocol(); got != "ssh" {
+		t.Errorf("CloneProtocol() = %q, want %q", got, "ssh")
 	}
 }
 
