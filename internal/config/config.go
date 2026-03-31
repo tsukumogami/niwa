@@ -104,6 +104,7 @@ type EnvConfig struct {
 // RepoOverride holds per-repo configuration overrides.
 type RepoOverride struct {
 	URL      string            `toml:"url,omitempty"`
+	Group    string            `toml:"group,omitempty"`
 	Branch   string            `toml:"branch,omitempty"`
 	Scope    string            `toml:"scope,omitempty"`
 	Claude   *ClaudeConfig     `toml:"claude,omitempty"`
@@ -183,9 +184,14 @@ func validate(cfg *WorkspaceConfig) error {
 		}
 	}
 
-	for name := range cfg.Repos {
+	for name, override := range cfg.Repos {
 		if !validName.MatchString(name) {
 			return fmt.Errorf("repo override name %q: must match [a-zA-Z0-9._-]+", name)
+		}
+		// Explicit repos: group requires url (url without group is a valid
+		// clone URL override for discovered repos).
+		if override.Group != "" && override.URL == "" {
+			return fmt.Errorf("repo %q has group but no url: explicit repos require both url and group", name)
 		}
 	}
 

@@ -1,5 +1,5 @@
 ---
-status: Planned
+status: Current
 problem: |
   niwa discovers repos from GitHub org sources, but workspaces sometimes need
   repos from outside those orgs -- a config repo from a personal account, a
