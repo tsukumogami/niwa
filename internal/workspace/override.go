@@ -169,7 +169,11 @@ func KnownRepoNames(ws *config.WorkspaceConfig, discovered []string) map[string]
 // and returns warnings for any that don't match a discovered repo.
 func WarnUnknownRepos(ws *config.WorkspaceConfig, known map[string]bool) []string {
 	var warnings []string
-	for name := range ws.Repos {
+	for name, override := range ws.Repos {
+		// Skip explicit repos (url set) -- they're intentionally outside discovery.
+		if override.URL != "" {
+			continue
+		}
 		if !known[name] {
 			warnings = append(warnings, "repos override "+name+" does not match any discovered repo")
 		}

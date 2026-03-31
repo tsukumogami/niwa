@@ -191,3 +191,80 @@ func TestClassifyNoMatchWithRepos(t *testing.T) {
 		t.Fatalf("warnings count = %d, want 1", len(warnings))
 	}
 }
+
+// --- InjectExplicitRepos tests ---
+
+func TestInjectExplicitRepos(t *testing.T) {
+	classified := []ClassifiedRepo{
+		{Repo: github.Repo{Name: "existing"}, Group: "public"},
+	}
+	repos := map[string]config.RepoOverride{
+		"external": {URL: "git@github.com:other-org/external.git", Group: "private"},
+	}
+	groups := map[string]config.GroupConfig{
+		"public":  {Visibility: "public"},
+		"private": {Visibility: "private"},
+	}
+
+	result, _, err := InjectExplicitRepos(classified, repos, groups)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(result) != 2 {
+		t.Fatalf("expected 2, got %d", len(result))
+	}
+	found := false
+	for _, cr := range result {
+		if cr.Repo.Name == "external" && cr.Group == "private" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected external repo in private group")
+	}
+}
+
+func TestInjectExplicitReposSkipDiscovered(t *testing.T) {
+	classified := []ClassifiedRepo{
+		{Repo: github.Repo{Name: "myrepo"}, Group: "public"},
+	}
+	repos := map[string]config.RepoOverride{
+		"myrepo": {URL: "git@github.com:other/myrepo.git", Group: "public"},
+	}
+	groups := map[string]config.GroupConfig{"public": {Visibility: "public"}}
+
+	result, _, err := InjectExplicitRepos(classified, repos, groups)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(result) != 1 {
+		t.Errorf("expected 1, got %d", len(result))
+	}
+}
+
+func TestInjectExplicitReposInvalidGroup(t *testing.T) {
+	repos := map[string]config.RepoOverride{
+		"ext": {URL: "git@github.com:other/ext.git", Group: "nonexistent"},
+	}
+	groups := map[string]config.GroupConfig{"public": {Visibility: "public"}}
+
+	_, _, err := InjectExplicitRepos(nil, repos, groups)
+	if err == nil {
+		t.Fatal("expected error for invalid group")
+	}
+}
+
+func TestInjectExplicitReposIgnoresWithoutGroup(t *testing.T) {
+	repos := map[string]config.RepoOverride{
+		"override": {URL: "git@github.com:other/repo.git"},
+	}
+	groups := map[string]config.GroupConfig{"public": {Visibility: "public"}}
+
+	result, _, err := InjectExplicitRepos(nil, repos, groups)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(result) != 0 {
+		t.Errorf("expected 0, got %d", len(result))
+	}
+}

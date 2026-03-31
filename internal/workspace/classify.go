@@ -59,3 +59,58 @@ func matchesGroup(repo github.Repo, group config.GroupConfig) bool {
 
 	return false
 }
+
+// InjectExplicitRepos adds repos from [repos] that have both url and group set
+// but weren't discovered from any source. These are external repos explicitly
+// declared in the config. They join the classified list and flow through the
+// full pipeline.
+func InjectExplicitRepos(
+	classified []ClassifiedRepo,
+	repos map[string]config.RepoOverride,
+	groups map[string]config.GroupConfig,
+) ([]ClassifiedRepo, []string, error) {
+	// Build a set of already-classified repo names.
+	existing := make(map[string]bool, len(classified))
+	for _, cr := range classified {
+		existing[cr.Repo.Name] = true
+	}
+
+	var warnings []string
+
+	for name, override := range repos {
+		// Only process entries with both url and group.
+		if override.URL == "" || override.Group == "" {
+			continue
+		}
+
+		// Skip if already discovered.
+		if existing[name] {
+			continue
+		}
+
+		// Validate group exists.
+		if _, ok := groups[override.Group]; !ok {
+			return nil, nil, fmt.Errorf("explicit repo %q: group %q is not defined in [groups]", name, override.Group)
+		}
+
+		// Infer visibility from the group config.
+		groupCfg := groups[override.Group]
+		visibility := groupCfg.Visibility
+		if visibility == "" {
+			visibility = "private"
+		}
+
+		classified = append(classified, ClassifiedRepo{
+			Repo: github.Repo{
+				Name:       name,
+				CloneURL:   override.URL,
+				SSHURL:     override.URL,
+				Visibility: visibility,
+				Private:    visibility == "private",
+			},
+			Group: override.Group,
+		})
+	}
+
+	return classified, warnings, nil
+}

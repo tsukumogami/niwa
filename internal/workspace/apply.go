@@ -177,6 +177,13 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 	}
 	allWarnings = append(allWarnings, classifyWarnings...)
 
+	// Step 2.1: Inject explicit repos (url + group set, not from sources).
+	classified, explicitWarnings, err := InjectExplicitRepos(classified, cfg.Repos, cfg.Groups)
+	if err != nil {
+		return nil, err
+	}
+	allWarnings = append(allWarnings, explicitWarnings...)
+
 	// Step 2.5: Warn about unknown repo names in [repos] overrides.
 	discoveredNames := make([]string, len(allRepos))
 	for i, r := range allRepos {

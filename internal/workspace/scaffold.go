@@ -30,6 +30,11 @@ content_dir = "claude"
 # --- Per-repo overrides ---
 # [repos.my-repo]
 # claude = false
+#
+# --- Explicit repos (from outside source orgs) ---
+# [repos.external-tool]
+# url = "git@github.com:other-org/tool.git"
+# group = "private"
 
 # --- Content hierarchy ---
 # [content.workspace]
