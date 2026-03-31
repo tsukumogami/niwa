@@ -227,6 +227,21 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 	}
 	writtenFiles = append(writtenFiles, wsFiles...)
 
+	// Step 4.5: Install workspace-root context and settings.
+	// Context file uses @import for level-scoped visibility.
+	// Settings uses settings.json (not .local) since instance root is non-git.
+	ctxFiles, err := InstallWorkspaceContext(cfg, classified, instanceRoot)
+	if err != nil {
+		return nil, fmt.Errorf("installing workspace context: %w", err)
+	}
+	writtenFiles = append(writtenFiles, ctxFiles...)
+
+	rootSettingsFiles, err := InstallWorkspaceRootSettings(cfg, configDir, instanceRoot)
+	if err != nil {
+		return nil, fmt.Errorf("installing workspace root settings: %w", err)
+	}
+	writtenFiles = append(writtenFiles, rootSettingsFiles...)
+
 	// Step 5: Install group-level CLAUDE.md files.
 	installedGroups := map[string]bool{}
 	for _, cr := range classified {
@@ -373,6 +388,16 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		// Phase B: Install plugins per repo (skip repos with claude = false).
 		_, claudeFound := FindClaude()
 		if claudeFound {
+			// Install at instance root first.
+			wsEffective := MergeOverrides(cfg, "")
+			if len(wsEffective.Plugins) > 0 {
+				rootWarnings := InstallPlugins(wsEffective.Plugins, instanceRoot)
+				for _, w := range rootWarnings {
+					fmt.Fprintf(os.Stderr, "warning: %s\n", w)
+				}
+			}
+
+			// Install per repo.
 			for _, cr := range classified {
 				if !ClaudeEnabled(cfg, cr.Repo.Name) {
 					continue
