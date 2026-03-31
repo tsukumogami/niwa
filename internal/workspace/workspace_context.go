@@ -213,8 +213,8 @@ func mapMarketplaceSourceWithIndex(source string, repoIndex map[string]string) (
 		name := ref[:slashIdx]
 		return name, map[string]any{
 			"source": map[string]any{
-				"source":    "directory",
-				"directory": dir,
+				"source": "directory",
+				"path":   dir,
 			},
 			"autoUpdate": true,
 		}, nil
