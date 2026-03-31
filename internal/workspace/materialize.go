@@ -29,6 +29,7 @@ type MaterializeContext struct {
 	ConfigDir      string
 	InstalledHooks map[string][]InstalledHookEntry // event -> installed hook entries, populated by hooks materializer
 	DiscoveredEnv  *DiscoveredEnv      // auto-discovered env files, may be nil
+	RepoIndex      map[string]string   // repo name -> on-disk path, for marketplace resolution
 }
 
 // InstalledHookEntry holds the installed paths for a single hook entry,
@@ -140,33 +141,28 @@ func snakeToPascal(s string) string {
 	return strings.Join(parts, "")
 }
 
-// SettingsMaterializer generates the .claude/settings.local.json file from
-// effective settings and installed hooks.
-type SettingsMaterializer struct{}
-
-// Name returns the materializer identifier.
-func (s *SettingsMaterializer) Name() string {
-	return "settings"
+// BuildSettingsConfig holds the inputs for buildSettingsDoc, which produces
+// the JSON document written to settings.local.json (repos) or settings.json
+// (instance root).
+type BuildSettingsConfig struct {
+	Settings               config.SettingsConfig
+	InstalledHooks         map[string][]InstalledHookEntry
+	ResolvedEnvVars        map[string]string
+	Plugins                []string
+	Marketplaces           []string
+	RepoIndex              map[string]string
+	BaseDir                string // for computing relative hook paths
+	IncludeGitInstructions *bool
 }
 
-// Materialize builds and writes {repoDir}/.claude/settings.local.json from
-// the effective settings and installed hooks. It returns the list of written
-// file paths, or nil if there is nothing to write.
-func (s *SettingsMaterializer) Materialize(ctx *MaterializeContext) ([]string, error) {
-	settings := ctx.Effective.Claude.Settings
-	hooks := ctx.InstalledHooks
-	claudeEnv := ctx.Effective.Claude.Env
-
-	hasEnv := len(claudeEnv.Promote) > 0 || len(claudeEnv.Vars) > 0
-
-	if len(settings) == 0 && len(hooks) == 0 && !hasEnv {
-		return nil, nil
-	}
-
+// buildSettingsDoc produces the map[string]any JSON document for Claude Code
+// settings. It handles permissions, hooks, env, enabledPlugins,
+// extraKnownMarketplaces, and includeGitInstructions blocks.
+func buildSettingsDoc(cfg BuildSettingsConfig) (map[string]any, error) {
 	doc := make(map[string]any)
 
 	// Build permissions block from settings.
-	if perm, ok := settings["permissions"]; ok {
+	if perm, ok := cfg.Settings["permissions"]; ok {
 		mapped, known := permissionsMapping[perm]
 		if !known {
 			return nil, fmt.Errorf("unknown permissions value %q", perm)
@@ -177,18 +173,18 @@ func (s *SettingsMaterializer) Materialize(ctx *MaterializeContext) ([]string, e
 	}
 
 	// Build hooks block from installed hooks.
-	if len(hooks) > 0 {
-		hooksDoc := make(map[string]any, len(hooks))
+	if len(cfg.InstalledHooks) > 0 {
+		hooksDoc := make(map[string]any, len(cfg.InstalledHooks))
 
 		// Sort event names for deterministic output.
-		events := make([]string, 0, len(hooks))
-		for event := range hooks {
+		events := make([]string, 0, len(cfg.InstalledHooks))
+		for event := range cfg.InstalledHooks {
 			events = append(events, event)
 		}
 		sort.Strings(events)
 
 		for _, event := range events {
-			installedEntries := hooks[event]
+			installedEntries := cfg.InstalledHooks[event]
 			pascalEvent, ok := hookEventMapping[event]
 			if !ok {
 				pascalEvent = snakeToPascal(event)
@@ -198,7 +194,7 @@ func (s *SettingsMaterializer) Materialize(ctx *MaterializeContext) ([]string, e
 			for _, ie := range installedEntries {
 				hookCommands := make([]map[string]string, 0, len(ie.Paths))
 				for _, absPath := range ie.Paths {
-					rel, err := filepath.Rel(ctx.RepoDir, absPath)
+					rel, err := filepath.Rel(cfg.BaseDir, absPath)
 					if err != nil {
 						return nil, fmt.Errorf("computing relative path for hook %s: %w", absPath, err)
 					}
@@ -220,45 +216,134 @@ func (s *SettingsMaterializer) Materialize(ctx *MaterializeContext) ([]string, e
 		doc["hooks"] = hooksDoc
 	}
 
-	// Build env block from promoted keys + inline vars.
-	if hasEnv {
-		envResult := make(map[string]string)
+	// Build env block from resolved env vars.
+	if len(cfg.ResolvedEnvVars) > 0 {
+		envDoc := make(map[string]any, len(cfg.ResolvedEnvVars))
+		envKeys := make([]string, 0, len(cfg.ResolvedEnvVars))
+		for k := range cfg.ResolvedEnvVars {
+			envKeys = append(envKeys, k)
+		}
+		sort.Strings(envKeys)
+		for _, k := range envKeys {
+			envDoc[k] = cfg.ResolvedEnvVars[k]
+		}
+		doc["env"] = envDoc
+	}
 
-		// Step 1: resolve promoted keys from the env pipeline.
-		if len(claudeEnv.Promote) > 0 {
-			resolvedEnv, err := ResolveEnvVars(ctx)
+	// includeGitInstructions (optional).
+	if cfg.IncludeGitInstructions != nil {
+		doc["includeGitInstructions"] = *cfg.IncludeGitInstructions
+	}
+
+	// enabledPlugins from plugins list.
+	if len(cfg.Plugins) > 0 {
+		pluginsDoc := make(map[string]any, len(cfg.Plugins))
+		for _, plugin := range cfg.Plugins {
+			pluginsDoc[plugin] = true
+		}
+		doc["enabledPlugins"] = pluginsDoc
+	}
+
+	// extraKnownMarketplaces from marketplaces list.
+	if len(cfg.Marketplaces) > 0 {
+		mkts := make(map[string]any, len(cfg.Marketplaces))
+		for _, source := range cfg.Marketplaces {
+			name, entry, err := mapMarketplaceSourceWithIndex(source, cfg.RepoIndex)
 			if err != nil {
-				return nil, fmt.Errorf("resolving env for promote: %w", err)
+				return nil, fmt.Errorf("marketplace %q: %w", source, err)
 			}
-			if resolvedEnv == nil {
-				resolvedEnv = map[string]string{}
-			}
-			for _, key := range claudeEnv.Promote {
-				val, found := resolvedEnv[key]
-				if !found {
-					return nil, fmt.Errorf("claude.env: promoted key %q not found in resolved env vars", key)
-				}
-				envResult[key] = val
+			if name != "" {
+				mkts[name] = entry
 			}
 		}
+		if len(mkts) > 0 {
+			doc["extraKnownMarketplaces"] = mkts
+		}
+	}
 
-		// Step 2: overlay inline vars (inline wins over promoted).
-		for k, v := range claudeEnv.Vars {
-			envResult[k] = v
-		}
+	return doc, nil
+}
 
-		if len(envResult) > 0 {
-			envDoc := make(map[string]any, len(envResult))
-			envKeys := make([]string, 0, len(envResult))
-			for k := range envResult {
-				envKeys = append(envKeys, k)
-			}
-			sort.Strings(envKeys)
-			for _, k := range envKeys {
-				envDoc[k] = envResult[k]
-			}
-			doc["env"] = envDoc
+// resolveClaudeEnvVars resolves the claude.env promote + inline vars into a
+// single map. Returns nil if there are no env vars to resolve.
+func resolveClaudeEnvVars(ctx *MaterializeContext) (map[string]string, error) {
+	claudeEnv := ctx.Effective.Claude.Env
+	hasEnv := len(claudeEnv.Promote) > 0 || len(claudeEnv.Vars) > 0
+	if !hasEnv {
+		return nil, nil
+	}
+
+	envResult := make(map[string]string)
+
+	// Step 1: resolve promoted keys from the env pipeline.
+	if len(claudeEnv.Promote) > 0 {
+		resolvedEnv, err := ResolveEnvVars(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("resolving env for promote: %w", err)
 		}
+		if resolvedEnv == nil {
+			resolvedEnv = map[string]string{}
+		}
+		for _, key := range claudeEnv.Promote {
+			val, found := resolvedEnv[key]
+			if !found {
+				return nil, fmt.Errorf("claude.env: promoted key %q not found in resolved env vars", key)
+			}
+			envResult[key] = val
+		}
+	}
+
+	// Step 2: overlay inline vars (inline wins over promoted).
+	for k, v := range claudeEnv.Vars {
+		envResult[k] = v
+	}
+
+	if len(envResult) == 0 {
+		return nil, nil
+	}
+	return envResult, nil
+}
+
+// SettingsMaterializer generates the .claude/settings.local.json file from
+// effective settings and installed hooks.
+type SettingsMaterializer struct{}
+
+// Name returns the materializer identifier.
+func (s *SettingsMaterializer) Name() string {
+	return "settings"
+}
+
+// Materialize builds and writes {repoDir}/.claude/settings.local.json from
+// the effective settings and installed hooks. It returns the list of written
+// file paths, or nil if there is nothing to write.
+func (s *SettingsMaterializer) Materialize(ctx *MaterializeContext) ([]string, error) {
+	settings := ctx.Effective.Claude.Settings
+	hooks := ctx.InstalledHooks
+	plugins := ctx.Effective.Plugins
+	marketplaces := ctx.Effective.Claude.Marketplaces
+
+	// Resolve env vars.
+	resolvedEnv, err := resolveClaudeEnvVars(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(settings) == 0 && len(hooks) == 0 && len(resolvedEnv) == 0 &&
+		len(plugins) == 0 && len(marketplaces) == 0 {
+		return nil, nil
+	}
+
+	doc, err := buildSettingsDoc(BuildSettingsConfig{
+		Settings:        settings,
+		InstalledHooks:  hooks,
+		ResolvedEnvVars: resolvedEnv,
+		Plugins:         plugins,
+		Marketplaces:    marketplaces,
+		RepoIndex:       ctx.RepoIndex,
+		BaseDir:         ctx.RepoDir,
+	})
+	if err != nil {
+		return nil, err
 	}
 
 	data, err := json.MarshalIndent(doc, "", "  ")

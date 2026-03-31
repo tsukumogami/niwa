@@ -62,7 +62,7 @@ func ensureImportInCLAUDE(claudePath, importLine string) error {
 // settings.json (not .local) because the instance root is a non-git directory.
 // Plugins and marketplaces are declared declaratively -- Claude Code's startup
 // reconciler handles materialization.
-func InstallWorkspaceRootSettings(cfg *config.WorkspaceConfig, configDir, instanceRoot string) ([]string, error) {
+func InstallWorkspaceRootSettings(cfg *config.WorkspaceConfig, configDir, instanceRoot string, repoIndex map[string]string) ([]string, error) {
 	effective := MergeInstanceOverrides(cfg)
 
 	// Merge discovered hooks.
@@ -88,35 +88,12 @@ func InstallWorkspaceRootSettings(cfg *config.WorkspaceConfig, configDir, instan
 		}
 	}
 
-	doc := make(map[string]any)
-
-	// Permissions.
-	if perm, ok := effective.Claude.Settings["permissions"]; ok {
-		if mapped, known := permissionsMapping[perm]; known {
-			doc["permissions"] = map[string]any{"defaultMode": mapped}
-		}
-	}
-
-	// Hooks: copy scripts and build JSON.
+	// Copy hook scripts to .claude/hooks/ (no .local rename for instance root).
+	installedHooks := make(map[string][]InstalledHookEntry)
 	if len(effective.Claude.Hooks) > 0 {
-		hooksDoc := make(map[string]any)
-		events := make([]string, 0, len(effective.Claude.Hooks))
-		for event := range effective.Claude.Hooks {
-			events = append(events, event)
-		}
-		sort.Strings(events)
-
-		var hookFiles []string
-		for _, event := range events {
-			entries := effective.Claude.Hooks[event]
-			pascalEvent, ok := hookEventMapping[event]
-			if !ok {
-				pascalEvent = snakeToPascal(event)
-			}
-
-			var eventEntries []map[string]any
+		for event, entries := range effective.Claude.Hooks {
 			for _, entry := range entries {
-				var hookCommands []map[string]string
+				var installedPaths []string
 				for _, script := range entry.Scripts {
 					src := filepath.Join(configDir, script)
 					targetName := filepath.Base(script)
@@ -129,29 +106,20 @@ func InstallWorkspaceRootSettings(cfg *config.WorkspaceConfig, configDir, instan
 					}
 					os.MkdirAll(targetDir, 0o755)
 					os.WriteFile(target, data, 0o755)
-					hookFiles = append(hookFiles, target)
 
-					rel, _ := filepath.Rel(instanceRoot, target)
-					hookCommands = append(hookCommands, map[string]string{
-						"type":    "command",
-						"command": filepath.ToSlash(rel),
-					})
+					installedPaths = append(installedPaths, target)
 				}
-				e := map[string]any{"hooks": hookCommands}
-				if entry.Matcher != "" {
-					e["matcher"] = entry.Matcher
-				}
-				eventEntries = append(eventEntries, e)
+				installedHooks[event] = append(installedHooks[event], InstalledHookEntry{
+					Matcher: entry.Matcher,
+					Paths:   installedPaths,
+				})
 			}
-			hooksDoc[pascalEvent] = eventEntries
 		}
-		doc["hooks"] = hooksDoc
-		_ = hookFiles // tracked via written files below
 	}
 
-	// Env: promote + inline vars.
+	// Resolve env vars.
+	envResult := make(map[string]string)
 	if len(cfg.Claude.Env.Promote) > 0 || len(cfg.Claude.Env.Vars) > 0 {
-		envResult := make(map[string]string)
 		if len(cfg.Claude.Env.Promote) > 0 {
 			resolved, _ := resolveEnvFromConfig(cfg, configDir)
 			for _, key := range cfg.Claude.Env.Promote {
@@ -163,39 +131,21 @@ func InstallWorkspaceRootSettings(cfg *config.WorkspaceConfig, configDir, instan
 		for k, v := range cfg.Claude.Env.Vars {
 			envResult[k] = v
 		}
-		if len(envResult) > 0 {
-			envDoc := make(map[string]any, len(envResult))
-			for k, v := range envResult {
-				envDoc[k] = v
-			}
-			doc["env"] = envDoc
-		}
 	}
 
-	// includeGitInstructions: false (instance root is non-git).
-	doc["includeGitInstructions"] = false
-
-	// enabledPlugins from effective config.
-	if len(effective.Plugins) > 0 {
-		pluginsDoc := make(map[string]any, len(effective.Plugins))
-		for _, plugin := range effective.Plugins {
-			pluginsDoc[plugin] = true
-		}
-		doc["enabledPlugins"] = pluginsDoc
-	}
-
-	// extraKnownMarketplaces from workspace config.
-	if len(effective.Claude.Marketplaces) > 0 {
-		mkts := make(map[string]any, len(effective.Claude.Marketplaces))
-		for _, source := range effective.Claude.Marketplaces {
-			name, entry := mapMarketplaceSource(source)
-			if name != "" {
-				mkts[name] = entry
-			}
-		}
-		if len(mkts) > 0 {
-			doc["extraKnownMarketplaces"] = mkts
-		}
+	includeGit := false
+	doc, err := buildSettingsDoc(BuildSettingsConfig{
+		Settings:               effective.Claude.Settings,
+		InstalledHooks:         installedHooks,
+		ResolvedEnvVars:        envResult,
+		Plugins:                effective.Plugins,
+		Marketplaces:           effective.Claude.Marketplaces,
+		RepoIndex:              repoIndex,
+		BaseDir:                instanceRoot,
+		IncludeGitInstructions: &includeGit,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("building workspace root settings: %w", err)
 	}
 
 	data, err := json.MarshalIndent(doc, "", "  ")
@@ -244,15 +194,30 @@ func resolveEnvFromConfig(cfg *config.WorkspaceConfig, configDir string) (map[st
 	return vars, nil
 }
 
-// mapMarketplaceSource converts a niwa marketplace source string to the
-// Claude Code extraKnownMarketplaces format. Returns the marketplace name
-// and the entry object.
-func mapMarketplaceSource(source string) (string, map[string]any) {
+// mapMarketplaceSourceWithIndex converts a niwa marketplace source string to the
+// Claude Code extraKnownMarketplaces format. Returns the marketplace name,
+// the entry object, and an error. It accepts a repoIndex for resolving repo:
+// references to absolute directory paths.
+func mapMarketplaceSourceWithIndex(source string, repoIndex map[string]string) (string, map[string]any, error) {
 	if strings.HasPrefix(source, repoRefPrefix) {
 		// repo:tools/.claude-plugin/marketplace.json -> directory source
-		// Can't resolve at this point (repo may not be cloned yet for
-		// workspace root settings generated before clone), so skip repo: refs.
-		return "", nil
+		resolved, err := ResolveMarketplaceSource(source, repoIndex)
+		if err != nil {
+			return "", nil, err
+		}
+		// Extract the directory from the resolved absolute path.
+		dir := filepath.Dir(resolved)
+		// Use the repo name as the marketplace name.
+		ref := strings.TrimPrefix(source, repoRefPrefix)
+		slashIdx := strings.IndexByte(ref, '/')
+		name := ref[:slashIdx]
+		return name, map[string]any{
+			"source": map[string]any{
+				"source":    "directory",
+				"directory": dir,
+			},
+			"autoUpdate": true,
+		}, nil
 	}
 
 	// GitHub ref: "org/repo" -> {source: {source: "github", repo: "org/repo"}}
@@ -265,10 +230,10 @@ func mapMarketplaceSource(source string) (string, map[string]any) {
 				"repo":   source,
 			},
 			"autoUpdate": true,
-		}
+		}, nil
 	}
 
-	return "", nil
+	return "", nil, nil
 }
 
 // generateWorkspaceContext produces the markdown content for the workspace
