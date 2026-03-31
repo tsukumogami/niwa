@@ -52,6 +52,9 @@ content_dir = "claude"
 # [claude.env]
 # promote = ["GH_TOKEN"]
 # vars = { EXTRA_FLAG = "settings-only" }
+# --- Instance root overrides (workspace-level Claude Code session) ---
+# [instance.claude.settings]
+# permissions = "ask"
 # [env]
 # [files]
 # "extensions/design.md" = ".claude/shirabe-extensions/"

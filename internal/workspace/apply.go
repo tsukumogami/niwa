@@ -386,18 +386,10 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		}
 
 		// Phase B: Install plugins per repo (skip repos with claude = false).
+		// Instance root plugins are handled declaratively via settings.json
+		// (enabledPlugins + extraKnownMarketplaces).
 		_, claudeFound := FindClaude()
 		if claudeFound {
-			// Install at instance root first.
-			wsEffective := MergeOverrides(cfg, "")
-			if len(wsEffective.Plugins) > 0 {
-				rootWarnings := InstallPlugins(wsEffective.Plugins, instanceRoot)
-				for _, w := range rootWarnings {
-					fmt.Fprintf(os.Stderr, "warning: %s\n", w)
-				}
-			}
-
-			// Install per repo.
 			for _, cr := range classified {
 				if !ClaudeEnabled(cfg, cr.Repo.Name) {
 					continue

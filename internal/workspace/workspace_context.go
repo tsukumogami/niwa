@@ -58,11 +58,12 @@ func ensureImportInCLAUDE(claudePath, importLine string) error {
 }
 
 // InstallWorkspaceRootSettings generates .claude/settings.json at the instance
-// root with hooks, permissions, and env. Uses settings.json (not .local) because
-// the instance root is a non-git directory. Plugins are installed separately via
-// claude plugin install --scope local.
+// root with hooks, permissions, env, plugins, and marketplaces. Uses
+// settings.json (not .local) because the instance root is a non-git directory.
+// Plugins and marketplaces are declared declaratively -- Claude Code's startup
+// reconciler handles materialization.
 func InstallWorkspaceRootSettings(cfg *config.WorkspaceConfig, configDir, instanceRoot string) ([]string, error) {
-	effective := MergeOverrides(cfg, "")
+	effective := MergeInstanceOverrides(cfg)
 
 	// Merge discovered hooks.
 	discoveredHooks, _ := DiscoverHooks(configDir)
@@ -171,6 +172,32 @@ func InstallWorkspaceRootSettings(cfg *config.WorkspaceConfig, configDir, instan
 		}
 	}
 
+	// includeGitInstructions: false (instance root is non-git).
+	doc["includeGitInstructions"] = false
+
+	// enabledPlugins from effective config.
+	if len(effective.Plugins) > 0 {
+		pluginsDoc := make(map[string]any, len(effective.Plugins))
+		for _, plugin := range effective.Plugins {
+			pluginsDoc[plugin] = true
+		}
+		doc["enabledPlugins"] = pluginsDoc
+	}
+
+	// extraKnownMarketplaces from workspace config.
+	if len(effective.Claude.Marketplaces) > 0 {
+		mkts := make(map[string]any, len(effective.Claude.Marketplaces))
+		for _, source := range effective.Claude.Marketplaces {
+			name, entry := mapMarketplaceSource(source)
+			if name != "" {
+				mkts[name] = entry
+			}
+		}
+		if len(mkts) > 0 {
+			doc["extraKnownMarketplaces"] = mkts
+		}
+	}
+
 	data, err := json.MarshalIndent(doc, "", "  ")
 	if err != nil {
 		return nil, fmt.Errorf("marshaling workspace root settings: %w", err)
@@ -215,6 +242,33 @@ func resolveEnvFromConfig(cfg *config.WorkspaceConfig, configDir string) (map[st
 		vars[k] = v
 	}
 	return vars, nil
+}
+
+// mapMarketplaceSource converts a niwa marketplace source string to the
+// Claude Code extraKnownMarketplaces format. Returns the marketplace name
+// and the entry object.
+func mapMarketplaceSource(source string) (string, map[string]any) {
+	if strings.HasPrefix(source, repoRefPrefix) {
+		// repo:tools/.claude-plugin/marketplace.json -> directory source
+		// Can't resolve at this point (repo may not be cloned yet for
+		// workspace root settings generated before clone), so skip repo: refs.
+		return "", nil
+	}
+
+	// GitHub ref: "org/repo" -> {source: {source: "github", repo: "org/repo"}}
+	parts := strings.SplitN(source, "/", 3)
+	if len(parts) == 2 && parts[0] != "" && parts[1] != "" {
+		name := parts[1] // use repo name as marketplace name
+		return name, map[string]any{
+			"source": map[string]any{
+				"source": "github",
+				"repo":   source,
+			},
+			"autoUpdate": true,
+		}
+	}
+
+	return "", nil
 }
 
 // generateWorkspaceContext produces the markdown content for the workspace
