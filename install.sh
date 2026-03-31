@@ -5,6 +5,9 @@
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/tsukumogami/niwa/main/install.sh | sh
 #
+# Options:
+#   --no-modify-path  Skip adding niwa to PATH in shell config files
+#
 # Environment variables:
 #   INSTALL_DIR   Override install directory (default: ~/.niwa/bin)
 #   GITHUB_TOKEN  Use for GitHub API requests to avoid rate limits
@@ -12,9 +15,18 @@
 main() {
     set -eu
 
+    MODIFY_PATH=true
+    for arg in "$@"; do
+        case "$arg" in
+            --no-modify-path) MODIFY_PATH=false ;;
+        esac
+    done
+
     REPO="tsukumogami/niwa"
     API_URL="https://api.github.com/repos/${REPO}/releases/latest"
     INSTALL_DIR="${INSTALL_DIR:-$HOME/.niwa/bin}"
+    NIWA_HOME="${INSTALL_DIR%/bin}"
+    ENV_FILE="$NIWA_HOME/env"
 
     # Detect OS
     OS=$(uname -s | tr '[:upper:]' '[:lower:]')
@@ -89,15 +101,67 @@ main() {
 
     printf "\nniwa %s installed to %s/niwa\n" "$LATEST" "$INSTALL_DIR"
 
-    # PATH guidance
-    case ":${PATH}:" in
-        *":${INSTALL_DIR}:"*) ;;
-        *)
-            printf "\nAdd niwa to your PATH:\n"
-            printf "  export PATH=\"%s:\$PATH\"\n" "$INSTALL_DIR"
-            printf "\nOr add that line to your shell config (~/.bashrc, ~/.zshrc, etc.)\n"
-            ;;
-    esac
+    # Create env file with PATH export
+    cat > "$ENV_FILE" << ENVEOF
+# niwa shell configuration
+export PATH="${INSTALL_DIR}:\$PATH"
+ENVEOF
+
+    # Configure shell if requested
+    if [ "$MODIFY_PATH" = true ]; then
+        SHELL_NAME=$(basename "$SHELL")
+
+        # Helper function to add source line to a config file (idempotent)
+        add_to_config() {
+            local config_file="$1"
+            local source_line=". \"$ENV_FILE\""
+
+            if [ -f "$config_file" ] && grep -qF "$ENV_FILE" "$config_file" 2>/dev/null; then
+                printf "  Already configured: %s\n" "$config_file"
+                return 0
+            fi
+
+            {
+                echo ""
+                echo "# niwa"
+                echo "$source_line"
+            } >> "$config_file"
+            printf "  Configured: %s\n" "$config_file"
+        }
+
+        case "$SHELL_NAME" in
+            bash)
+                printf "Configuring bash...\n"
+                if [ -f "$HOME/.bashrc" ]; then
+                    add_to_config "$HOME/.bashrc"
+                fi
+                if [ -f "$HOME/.bash_profile" ]; then
+                    add_to_config "$HOME/.bash_profile"
+                elif [ -f "$HOME/.profile" ]; then
+                    add_to_config "$HOME/.profile"
+                else
+                    add_to_config "$HOME/.bash_profile"
+                fi
+                ;;
+            zsh)
+                printf "Configuring zsh...\n"
+                add_to_config "$HOME/.zshenv"
+                ;;
+            *)
+                printf "Unknown shell: %s\n" "$SHELL_NAME"
+                printf "Add this to your shell config:\n\n"
+                printf "  . \"%s\"\n\n" "$ENV_FILE"
+                ;;
+        esac
+
+        if [ "$SHELL_NAME" = "bash" ] || [ "$SHELL_NAME" = "zsh" ]; then
+            printf "\nTo use niwa now, run:\n"
+            printf "  . \"%s\"\n" "$ENV_FILE"
+        fi
+    else
+        printf "\nTo add niwa to your PATH, add this to your shell config:\n"
+        printf "  . \"%s\"\n" "$ENV_FILE"
+    fi
 }
 
 main "$@"
