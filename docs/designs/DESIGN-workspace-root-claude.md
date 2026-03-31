@@ -184,8 +184,11 @@ Three mechanisms work together:
    instructions that don't leak into repos.
 
 2. **settings.json** (not `.local`) at the instance root configures hooks,
-   permissions, and env for Claude Code in the non-git directory. Plugins
-   use `--scope local` into `settings.local.json`.
+   permissions, env, plugins, and marketplaces for Claude Code in the
+   non-git directory. The settings materializer writes `enabledPlugins`
+   and `extraKnownMarketplaces` declaratively -- Claude Code's startup
+   reconciler handles materialization automatically. Also sets
+   `includeGitInstructions: false` since the instance root has no git.
 
 3. **`[instance]` section** in workspace.toml lets users override the
    shared `[claude]` config for the instance root. The override merges
@@ -193,6 +196,10 @@ Three mechanisms work together:
 
 When generating instance root settings, niwa resolves:
 workspace `[claude]` defaults -> `[instance.claude]` overrides -> effective config.
+
+**Note:** The declarative approach for plugins and marketplaces (via
+`enabledPlugins` and `extraKnownMarketplaces` in settings.json) should
+eventually replace the CLI-based approach used for repos too. See #35.
 
 ## Solution Architecture
 
@@ -231,8 +238,18 @@ func MergeInstanceOverrides(ws *WorkspaceConfig) EffectiveConfig
 ```
 
 **Pipeline Step 4.5**: generates `workspace-context.md`, `settings.json`,
-hooks, and runs plugin install at the instance root. Uses
-`MergeInstanceOverrides` to resolve effective config.
+and hooks at the instance root. Uses `MergeInstanceOverrides` to resolve
+effective config. Plugins and marketplaces are written declaratively into
+settings.json (no CLI calls).
+
+The generated `settings.json` includes:
+- `permissions` (from claude.settings)
+- `hooks` (from claude.hooks, with scripts copied to .claude/hooks/)
+- `env` (from claude.env promote + vars)
+- `enabledPlugins` (from claude.plugins)
+- `extraKnownMarketplaces` (from claude.marketplaces, mapped to the format
+  Claude Code expects)
+- `includeGitInstructions: false` (hardcoded, since instance root is non-git)
 
 ### Data Flow
 
@@ -249,9 +266,8 @@ MergeInstanceOverrides
     v
 Step 4.5:
     +-- workspace-context.md (auto-generated, @imported)
-    +-- .claude/settings.json (hooks, permissions, env)
+    +-- .claude/settings.json (hooks, permissions, env, plugins, marketplaces)
     +-- .claude/hooks/{event}/ (hook scripts, no .local rename)
-    +-- claude plugin install --scope local (plugins)
 ```
 
 ## Implementation Approach
