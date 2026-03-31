@@ -1,5 +1,5 @@
 ---
-status: Proposed
+status: Planned
 problem: |
   niwa needs to configure Claude Code at the workspace instance root (above all
   repos) with context, hooks, settings, env, and plugins. The instance root is
