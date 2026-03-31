@@ -54,6 +54,10 @@ const (
 // It returns the mode, workspace name, and source URL (empty for scaffold/named).
 func resolveInitMode(args []string, from string, globalCfg *config.GlobalConfig) (initMode, string, string) {
 	if len(args) == 0 {
+		if from != "" {
+			// Clone without explicit name -- name will be derived from config after cloning.
+			return modeClone, "", from
+		}
 		return modeScaffold, "", ""
 	}
 
