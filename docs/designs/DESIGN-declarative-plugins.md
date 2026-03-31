@@ -1,5 +1,5 @@
 ---
-status: Proposed
+status: Planned
 problem: |
   niwa manages plugins and marketplaces by spawning CLI subprocess calls
   (claude plugin marketplace add, claude plugin install) during the apply
