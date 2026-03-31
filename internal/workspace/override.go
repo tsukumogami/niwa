@@ -121,6 +121,96 @@ func MergeOverrides(ws *config.WorkspaceConfig, repoName string) EffectiveConfig
 	return result
 }
 
+// MergeInstanceOverrides produces the effective configuration for the
+// instance root by combining workspace-level defaults with [instance]
+// overrides. Uses the same merge semantics as MergeOverrides.
+func MergeInstanceOverrides(ws *config.WorkspaceConfig) EffectiveConfig {
+	// Start with workspace defaults.
+	var wsPlugins []string
+	if ws.Claude.Plugins != nil {
+		wsPlugins = slices.Clone(*ws.Claude.Plugins)
+	}
+
+	result := EffectiveConfig{
+		Claude: config.ClaudeConfig{
+			Hooks:        copyHooks(ws.Claude.Hooks),
+			Settings:     copySettings(ws.Claude.Settings),
+			Env:          copyClaudeEnv(ws.Claude.Env),
+			Marketplaces: slices.Clone(ws.Claude.Marketplaces),
+		},
+		Env:     copyEnv(ws.Env),
+		Files:   copyStringMap(ws.Files),
+		Plugins: wsPlugins,
+	}
+
+	override := ws.Instance
+	if override.Claude == nil && len(override.Env.Files) == 0 && len(override.Env.Vars) == 0 && len(override.Files) == 0 {
+		return result
+	}
+
+	if override.Claude != nil {
+		for k, v := range override.Claude.Settings {
+			if result.Claude.Settings == nil {
+				result.Claude.Settings = config.SettingsConfig{}
+			}
+			result.Claude.Settings[k] = v
+		}
+
+		for k, v := range override.Claude.Hooks {
+			if result.Claude.Hooks == nil {
+				result.Claude.Hooks = config.HooksConfig{}
+			}
+			result.Claude.Hooks[k] = append(result.Claude.Hooks[k], v...)
+		}
+
+		if len(override.Claude.Env.Promote) > 0 {
+			seen := make(map[string]bool, len(result.Claude.Env.Promote))
+			for _, k := range result.Claude.Env.Promote {
+				seen[k] = true
+			}
+			for _, k := range override.Claude.Env.Promote {
+				if !seen[k] {
+					result.Claude.Env.Promote = append(result.Claude.Env.Promote, k)
+				}
+			}
+		}
+
+		for k, v := range override.Claude.Env.Vars {
+			if result.Claude.Env.Vars == nil {
+				result.Claude.Env.Vars = map[string]string{}
+			}
+			result.Claude.Env.Vars[k] = v
+		}
+
+		if override.Claude.Plugins != nil {
+			result.Plugins = slices.Clone(*override.Claude.Plugins)
+		}
+	}
+
+	if len(override.Env.Files) > 0 {
+		result.Env.Files = append(result.Env.Files, override.Env.Files...)
+	}
+	for k, v := range override.Env.Vars {
+		if result.Env.Vars == nil {
+			result.Env.Vars = map[string]string{}
+		}
+		result.Env.Vars[k] = v
+	}
+
+	for k, v := range override.Files {
+		if result.Files == nil {
+			result.Files = map[string]string{}
+		}
+		if v == "" {
+			delete(result.Files, k)
+		} else {
+			result.Files[k] = v
+		}
+	}
+
+	return result
+}
+
 // ClaudeEnabled returns whether Claude content installation (CLAUDE.local.md,
 // hooks, settings, env) should be performed for the given repo. When the
 // repo has no override or the override doesn't set claude.enabled, it

@@ -46,7 +46,17 @@ type WorkspaceConfig struct {
 	Claude    ClaudeConfig            `toml:"claude"`
 	Env       EnvConfig               `toml:"env"`
 	Files     map[string]string        `toml:"files,omitempty"`
+	Instance  InstanceConfig          `toml:"instance,omitempty"`
 	Channels  map[string]any          `toml:"channels"` // placeholder
+}
+
+// InstanceConfig holds overrides for the workspace instance root.
+// Uses the same fields and merge semantics as RepoOverride but applies
+// to the instance root directory (above all repos).
+type InstanceConfig struct {
+	Claude *ClaudeConfig     `toml:"claude,omitempty"`
+	Env    EnvConfig         `toml:"env,omitempty"`
+	Files  map[string]string `toml:"files,omitempty"`
 }
 
 // WorkspaceMeta holds top-level workspace metadata.
