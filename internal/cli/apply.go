@@ -15,9 +15,13 @@ import (
 func init() {
 	rootCmd.AddCommand(applyCmd)
 	applyCmd.Flags().StringVar(&applyInstance, "instance", "", "target a specific instance by name")
+	applyCmd.Flags().BoolVar(&applyAllowDirty, "allow-dirty", false, "apply even if config directory has uncommitted changes")
 }
 
-var applyInstance string
+var (
+	applyInstance   string
+	applyAllowDirty bool
+)
 
 var applyCmd = &cobra.Command{
 	Use:   "apply [workspace-name]",
@@ -65,6 +69,12 @@ func runApply(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("could not locate workspace configuration")
 	}
 
+	// Auto-pull config from origin if it's a git repo with a remote.
+	configDir := filepath.Dir(configPath)
+	if syncErr := workspace.SyncConfigDir(configDir, applyAllowDirty); syncErr != nil {
+		return syncErr
+	}
+
 	result, err := config.Load(configPath)
 	if err != nil {
 		return err
@@ -73,7 +83,6 @@ func runApply(cmd *cobra.Command, args []string) error {
 		fmt.Fprintf(os.Stderr, "warning: %s\n", w)
 	}
 	cfg := result.Config
-	configDir := filepath.Dir(configPath)
 
 	token := resolveGitHubToken()
 	gh := github.NewAPIClient(token)
