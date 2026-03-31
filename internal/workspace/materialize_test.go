@@ -1728,9 +1728,8 @@ func TestBuildSettingsDocRepoMarketplace(t *testing.T) {
 	if source["source"] != "directory" {
 		t.Errorf("source type = %v, want directory", source["source"])
 	}
-	expectedDir := filepath.Join(repoDir, ".claude-plugin")
-	if source["path"] != expectedDir {
-		t.Errorf("path = %v, want %v", source["path"], expectedDir)
+	if source["path"] != repoDir {
+		t.Errorf("path = %v, want %v", source["path"], repoDir)
 	}
 }
 

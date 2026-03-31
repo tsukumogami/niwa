@@ -205,8 +205,10 @@ func mapMarketplaceSourceWithIndex(source string, repoIndex map[string]string) (
 		if err != nil {
 			return "", nil, err
 		}
-		// Extract the directory from the resolved absolute path.
-		dir := filepath.Dir(resolved)
+		// The directory source type points to the directory containing
+		// .claude-plugin/marketplace.json. Strip the filename and the
+		// .claude-plugin directory to get the root.
+		dir := filepath.Dir(filepath.Dir(resolved))
 		// Use the repo name as the marketplace name.
 		ref := strings.TrimPrefix(source, repoRefPrefix)
 		slashIdx := strings.IndexByte(ref, '/')
