@@ -1,5 +1,5 @@
 ---
-status: Proposed
+status: Accepted
 problem: |
   After initial workspace creation, niwa has no mechanism to keep managed repos
   current. Existing repos are skipped on apply, leaving clones at their original
@@ -23,7 +23,7 @@ rationale: |
 
 ## Status
 
-Proposed
+Accepted
 
 ## Context and Problem Statement
 
