@@ -143,6 +143,7 @@ func InstallWorkspaceRootSettings(cfg *config.WorkspaceConfig, configDir, instan
 		RepoIndex:              repoIndex,
 		BaseDir:                instanceRoot,
 		IncludeGitInstructions: &includeGit,
+		UseAbsolutePaths:       true,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("building workspace root settings: %w", err)
