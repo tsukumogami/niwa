@@ -147,26 +147,31 @@ func EnumerateInstances(workspaceRoot string) ([]string, error) {
 	return instances, nil
 }
 
-// NextInstanceNumber returns max(existing instance numbers) + 1 by scanning
-// subdirectories of workspaceRoot. Returns 1 if no instances exist.
+// NextInstanceNumber finds the lowest unused instance number by scanning
+// subdirectories of workspaceRoot. It fills gaps left by deleted instances
+// (e.g., if instances 2, 4, 5 exist, it returns 3). Returns 1 if no
+// instances exist.
 func NextInstanceNumber(workspaceRoot string) (int, error) {
 	instances, err := EnumerateInstances(workspaceRoot)
 	if err != nil {
 		return 0, err
 	}
 
-	maxNum := 0
+	used := make(map[int]bool)
 	for _, dir := range instances {
 		state, err := LoadState(dir)
 		if err != nil {
 			continue
 		}
-		if state.InstanceNumber > maxNum {
-			maxNum = state.InstanceNumber
-		}
+		used[state.InstanceNumber] = true
 	}
 
-	return maxNum + 1, nil
+	// Find the first unused number starting from 1.
+	for n := 1; ; n++ {
+		if !used[n] {
+			return n, nil
+		}
+	}
 }
 
 // HashFile computes the SHA-256 hash of a file and returns it with a "sha256:"

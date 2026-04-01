@@ -1,6 +1,7 @@
 package workspace
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -326,16 +327,15 @@ func TestNextInstanceNumber(t *testing.T) {
 		t.Errorf("NextInstanceNumber = %d, want 1", num)
 	}
 
-	// Create instances with numbers 1 and 3.
+	// Create instances with numbers 1 and 3 (gap at 2).
 	for _, n := range []int{1, 3} {
-		name := "ws"
-		dir := filepath.Join(root, name+"-"+string(rune('0'+n)))
+		dir := filepath.Join(root, fmt.Sprintf("ws-%d", n))
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			t.Fatal(err)
 		}
 		state := &InstanceState{
 			SchemaVersion:  SchemaVersion,
-			InstanceName:   name,
+			InstanceName:   "ws",
 			InstanceNumber: n,
 			Root:           dir,
 			Created:        time.Now(),
@@ -347,12 +347,75 @@ func TestNextInstanceNumber(t *testing.T) {
 		}
 	}
 
+	// Should fill the gap at 2, not jump to 4.
 	num, err = NextInstanceNumber(root)
 	if err != nil {
 		t.Fatalf("NextInstanceNumber: %v", err)
 	}
-	if num != 4 {
-		t.Errorf("NextInstanceNumber = %d, want 4", num)
+	if num != 2 {
+		t.Errorf("NextInstanceNumber = %d, want 2 (should fill gap)", num)
+	}
+}
+
+func TestNextInstanceNumber_FillsDeletedGap(t *testing.T) {
+	root := t.TempDir()
+
+	// Simulate instances 1, 2, 4, 5 existing (3 was deleted).
+	for _, n := range []int{1, 2, 4, 5} {
+		dir := filepath.Join(root, fmt.Sprintf("ws-%d", n))
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := SaveState(dir, &InstanceState{
+			SchemaVersion:  SchemaVersion,
+			InstanceName:   "ws",
+			InstanceNumber: n,
+			Root:           dir,
+			Created:        time.Now(),
+			LastApplied:    time.Now(),
+			Repos:          map[string]RepoState{},
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	num, err := NextInstanceNumber(root)
+	if err != nil {
+		t.Fatalf("NextInstanceNumber: %v", err)
+	}
+	if num != 3 {
+		t.Errorf("NextInstanceNumber = %d, want 3 (should fill gap left by deleted instance)", num)
+	}
+}
+
+func TestNextInstanceNumber_Contiguous(t *testing.T) {
+	root := t.TempDir()
+
+	// Instances 1, 2, 3, 4 with no gaps.
+	for _, n := range []int{1, 2, 3, 4} {
+		dir := filepath.Join(root, fmt.Sprintf("ws-%d", n))
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := SaveState(dir, &InstanceState{
+			SchemaVersion:  SchemaVersion,
+			InstanceName:   "ws",
+			InstanceNumber: n,
+			Root:           dir,
+			Created:        time.Now(),
+			LastApplied:    time.Now(),
+			Repos:          map[string]RepoState{},
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	num, err := NextInstanceNumber(root)
+	if err != nil {
+		t.Fatalf("NextInstanceNumber: %v", err)
+	}
+	if num != 5 {
+		t.Errorf("NextInstanceNumber = %d, want 5", num)
 	}
 }
 
