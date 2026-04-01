@@ -16,6 +16,7 @@ type Applier struct {
 	GitHubClient  github.Client
 	Cloner        *Cloner
 	Materializers []Materializer
+	NoPull        bool
 }
 
 // NewApplier creates an Applier with the given GitHub client.
@@ -210,6 +211,22 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		}
 		if cloned {
 			fmt.Printf("cloned %s into %s\n", cr.Repo.Name, targetDir)
+		} else if !a.NoPull {
+			defaultBranch := DefaultBranch(cfg, cr.Repo.Name)
+			result, syncErr := SyncRepo(ctx, targetDir, defaultBranch)
+			switch result.Action {
+			case "pulled":
+				fmt.Printf("pulled %s (%d commits)\n", cr.Repo.Name, result.Commits)
+			case "up-to-date":
+				fmt.Printf("skipped %s (up to date)\n", cr.Repo.Name)
+			case "fetch-failed":
+				fmt.Fprintf(os.Stderr, "warning: could not fetch %s: %s\n", cr.Repo.Name, result.Reason)
+			case "skipped":
+				fmt.Printf("skipped %s (%s)\n", cr.Repo.Name, result.Reason)
+			}
+			if syncErr != nil {
+				fmt.Fprintf(os.Stderr, "warning: sync failed for %s: %v\n", cr.Repo.Name, syncErr)
+			}
 		} else {
 			fmt.Printf("skipped %s (already exists)\n", cr.Repo.Name)
 		}
