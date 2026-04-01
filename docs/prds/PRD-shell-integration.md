@@ -71,11 +71,19 @@ automatically changes to the new workspace directory.
 **US-6**: As a developer, I can use `niwa create --from <template> --cd <repo>`
 to land directly in a specific repo within the new workspace.
 
-**US-7**: As a developer, I can run `niwa go <workspace> <repo>` to jump to any
-repo in any workspace by name.
+**US-7**: As a developer working inside an instance, I can run `niwa go <repo>`
+to jump to a different repo within my current instance without repeating the
+workspace name.
 
 **US-8**: As a developer, I can run `niwa go` (no arguments) to return to the
-root of whichever workspace I'm currently in.
+root of my current instance.
+
+**US-8a**: As a developer, I can run `niwa go <workspace>` to jump to a different
+workspace's instance. If I'm already in that workspace, I stay in my current
+instance. If I'm outside it, I land in the first instance.
+
+**US-8b**: As a developer with multiple instances of a workspace, I can use
+`niwa go --instance <name>` to jump to a specific instance by name.
 
 **US-9**: As a developer, I get tab completions for niwa subcommands, flags,
 workspace names, and repo names.
@@ -133,10 +141,19 @@ overwritten on each install.sh run, serving as the automatic upgrade mechanism.
 instance root. A `--cd <repo>` flag overrides the landing target to a specific
 repo within the instance, resolved after the classification pipeline completes.
 
-**R10 (go command)**: `niwa go [workspace] [repo]` navigates to workspaces and
-repos. No arguments: current workspace root from cwd. Workspace name: resolve via
-global registry (most recently used instance if multiple exist). Workspace + repo:
-repo directory within the instance.
+**R10 (go command)**: `niwa go` is a real binary subcommand that resolves
+navigation targets and prints a directory path to stdout. Without the shell
+wrapper, the path is printed but cd doesn't happen. The command uses
+context-aware resolution:
+- No arguments: current instance root from cwd
+- Single argument: try as repo name in current instance first, then as workspace
+  name in global registry. If both match, prefer current-instance repo
+  (`--workspace` flag forces registry lookup)
+- Two arguments (target + repo): resolve target as workspace, then find repo
+  within an instance of that workspace
+- `--instance <name>` flag: select a specific instance when multiple exist
+- `--workspace <name>` flag: disambiguate when a single arg could be a repo
+  name or workspace name
 
 **R11 (Runtime hint)**: When a cd-eligible command runs and `_NIWA_SHELL_INIT` is
 unset, niwa prints a hint to stderr suggesting `niwa shell-init install`. The hint
@@ -189,11 +206,18 @@ binary. Missing or old binaries degrade gracefully to PATH-only.
 - [ ] `niwa create --from x --cd repo` with wrapper: shell cwd changes to repo directory
 - [ ] `niwa create --from x --cd nonexistent`: non-zero exit, no cd, workspace still created
 - [ ] `niwa create` failure: non-zero exit, empty stdout, no cd
-- [ ] `niwa go`: cwd changes to current workspace root
-- [ ] `niwa go <name>`: cwd changes to named workspace instance
-- [ ] `niwa go <name> <repo>`: cwd changes to repo directory within workspace
-- [ ] `niwa go <name> ../../etc`: error, path traversal rejected
-- [ ] Without wrapper: stdout prints bare path, hint appears on stderr
+- [ ] `niwa go` (inside instance): cwd changes to current instance root
+- [ ] `niwa go` (outside any instance): error with "not inside a workspace instance"
+- [ ] `niwa go <repo>` (inside instance): cwd changes to repo dir in current instance
+- [ ] `niwa go <workspace>` (outside workspace): cwd changes to an instance of that workspace
+- [ ] `niwa go <workspace>` (inside that workspace): stays in current instance
+- [ ] `niwa go <workspace> <repo>`: cwd changes to repo dir within workspace instance
+- [ ] `niwa go --instance <name>`: cwd changes to specific named instance
+- [ ] `niwa go --workspace <name>`: forces registry lookup even if name matches a repo
+- [ ] `niwa go <arg>` where arg matches both a repo and workspace: prefers current-instance repo, suggests --workspace
+- [ ] `niwa go ../../etc`: error, path traversal rejected
+- [ ] `niwa go` without wrapper: path printed to stdout, hint on stderr suggesting shell-init install
+- [ ] `cd $(niwa go <repo>)`: works without wrapper as manual workaround
 
 ### Lifecycle
 - [ ] `niwa shell-init status`: reports wrapper loaded state + env file state
@@ -263,3 +287,22 @@ creation error. The workspace exists and can be navigated to with `niwa go`.
 **D5: Predecessor flag rename (-c to --cd).** The predecessor's `-c <repo>` flag
 becomes `--cd <repo>` for clarity. The single-letter flag was ambiguous and didn't
 follow niwa's flag naming conventions.
+
+**D6: go is a real binary subcommand, not wrapper-only.** `niwa go` resolves paths
+in the binary and prints to stdout, following the zoxide pattern. Without the
+wrapper, the path is still printed and useful for scripting (`cd $(niwa go ...)`).
+This preserves R14 (niwa works without wrapper).
+
+**D7: Context-aware single-arg resolution for go.** `niwa go <arg>` tries
+current-instance repo first, then registry workspace lookup. This avoids
+redundant workspace names for the common case (jumping between repos in the
+current instance). `--workspace` flag available for disambiguation.
+
+**D8: No-args go targets instance root, not workspace root.** The instance root
+is where CLAUDE.md lives and is the natural "home" for a working session. The
+workspace root is a container directory with no working content.
+
+**D9: Multi-instance disambiguation uses "prefer current, fall back to first."**
+No visit tracking introduced. If cwd is inside an instance of the target workspace,
+stay in it. Otherwise pick the first (lowest-numbered) instance. `--instance` flag
+for explicit selection.
