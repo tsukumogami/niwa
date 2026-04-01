@@ -113,6 +113,8 @@ fmt.Fprintln(cmd.OutOrStdout(), instancePath)
 Shell function output for bash:
 
 ```bash
+export _NIWA_SHELL_INIT=1
+
 niwa() {
     case "$1" in
         create|go)
@@ -231,24 +233,67 @@ shell function only reads the path and calls cd.
 - **Intercept `create` + `apply`**: `apply` has no clear single navigation target
   (can target multiple instances) and doesn't address repo-level navigation.
 
+### Decision 4: Shell integration activation for non-install.sh installs
+
+When niwa is installed via tsuku (or `go install`, or manual binary placement),
+install.sh doesn't run and `~/.niwa/env` is never created. How does the shell
+function wrapper get loaded?
+
+Key assumptions:
+- Users who install via tsuku already have `eval $(tsuku shellenv)` in their rc
+  file and are comfortable with the eval-line pattern.
+- The shell function is an enhancement, not a requirement. Niwa works without it.
+
+#### Chosen: Document the eval line + runtime hint
+
+For non-install.sh installs, niwa's documentation and tsuku's post-install message
+tell users to add `eval "$(niwa shell-init auto)"` to their shell config. This is
+the same requirement direnv, mise, and zoxide have.
+
+As a quality-of-life enhancement, the shell-init output sets `_NIWA_SHELL_INIT=1`.
+When niwa runs a cd-eligible command (`create`, `go`) and this variable is unset,
+it prints a hint to stderr:
+
+```
+hint: shell integration not detected. For auto-cd and completions, add to your shell config:
+  eval "$(niwa shell-init auto)"
+```
+
+The hint fires only on cd-eligible commands when the wrapper is missing — targeted
+and not noisy.
+
+#### Alternatives Considered
+
+- **Piggyback on tsuku's shellenv**: Extend tsuku's shellenv to source a `shell.d/`
+  directory for installed tools. Rejected: requires tsuku changes with no second
+  consumer. Valid future tsuku feature but not niwa's problem to solve.
+
+- **Recipe runs install.sh via run_command**: Have the tsuku recipe execute
+  install.sh. Rejected: the env file is useless without the source line in rc
+  files, and `run_command` can't modify user rc files.
+
 ## Decision Outcome
 
-The three decisions compose into a clean architecture:
+The four decisions compose into a clean architecture:
 
 1. **Protocol**: cd-eligible commands print a bare path to stdout, messages to stderr.
    The shell function captures stdout and cds. Zoxide's pattern, proven and simple.
 
-2. **Distribution**: The existing `~/.niwa/env` file delegates to `niwa shell-init auto`,
-   so users get shell integration automatically on upgrade without changing their
-   rc files. The `command -v` guard makes the rollout safe.
+2. **Distribution (install.sh)**: The existing `~/.niwa/env` file delegates to
+   `niwa shell-init auto`, so install.sh users get shell integration automatically
+   on upgrade without changing their rc files.
 
-3. **Scope**: The wrapper intercepts `create` and a new `go` command, covering
+3. **Distribution (other methods)**: Users add `eval "$(niwa shell-init auto)"` to
+   their shell config, same as direnv/mise/zoxide. A runtime hint on cd-eligible
+   commands prompts users who haven't set this up.
+
+4. **Scope**: The wrapper intercepts `create` and a new `go` command, covering
    both post-create navigation and workspace/repo jumping. All other commands pass
    through to the binary unchanged.
 
 The decisions reinforce each other: the stdout protocol keeps the shell function
 simple enough that intercepting two commands is trivial. The env-file delegation
-means the shell function is loaded automatically. And limiting scope to two
+and the runtime hint cover both installation paths. And limiting scope to two
 commands keeps the wrapper auditable and testable.
 
 ## Solution Architecture
