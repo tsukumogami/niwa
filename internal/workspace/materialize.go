@@ -153,6 +153,7 @@ type BuildSettingsConfig struct {
 	RepoIndex              map[string]string
 	BaseDir                string // for computing relative hook paths
 	IncludeGitInstructions *bool
+	UseAbsolutePaths      bool // use absolute paths for hooks (instance root)
 }
 
 // buildSettingsDoc produces the map[string]any JSON document for Claude Code
@@ -194,13 +195,19 @@ func buildSettingsDoc(cfg BuildSettingsConfig) (map[string]any, error) {
 			for _, ie := range installedEntries {
 				hookCommands := make([]map[string]string, 0, len(ie.Paths))
 				for _, absPath := range ie.Paths {
-					rel, err := filepath.Rel(cfg.BaseDir, absPath)
-					if err != nil {
-						return nil, fmt.Errorf("computing relative path for hook %s: %w", absPath, err)
+					var cmdPath string
+					if cfg.UseAbsolutePaths {
+						cmdPath = filepath.ToSlash(absPath)
+					} else {
+						rel, err := filepath.Rel(cfg.BaseDir, absPath)
+						if err != nil {
+							return nil, fmt.Errorf("computing relative path for hook %s: %w", absPath, err)
+						}
+						cmdPath = filepath.ToSlash(rel)
 					}
 					hookCommands = append(hookCommands, map[string]string{
 						"type":    "command",
-						"command": filepath.ToSlash(rel),
+						"command": cmdPath,
 					})
 				}
 				entry := map[string]any{
