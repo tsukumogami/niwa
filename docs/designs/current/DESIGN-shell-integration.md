@@ -272,9 +272,52 @@ and not noisy.
   install.sh. Rejected: the env file is useless without the source line in rc
   files, and `run_command` can't modify user rc files.
 
+### Decision 5: Landing directory for create (and why not apply)
+
+What directory should `niwa create` land in, and does `niwa apply` need landing
+behavior?
+
+Key assumptions:
+- Landing in a specific repo after create is common enough to warrant a flag,
+  rather than requiring a separate `niwa go` command.
+- `niwa apply` is non-destructive (updates in place), unlike resettsuku which
+  deleted and recreated. The user's cwd stays valid, so no cd is needed.
+
+#### Chosen: Instance root default with --cd flag
+
+`niwa create` defaults to landing at the instance root directory. A `--cd <repo>`
+flag overrides the landing target to a specific repo within the instance:
+
+- `niwa create --from example` -- lands at instance root
+- `niwa create --from example --cd niwa` -- lands at the niwa repo directory
+- `niwa create --from example --cd nonexistent` -- errors, no cd
+
+The `--cd` flag resolves the repo name against the classified repo list after the
+creation pipeline completes. Since repos are organized as `{instance}/{group}/{repo}`,
+the binary resolves the group from classification. If ambiguous (repo appears in
+multiple groups), error with a message suggesting the qualified form.
+
+`niwa apply` does NOT get landing behavior. It's non-destructive — the user's cwd
+remains valid throughout. This is a fundamental difference from resettsuku, which
+deleted and recreated the workspace. If navigation is needed after apply, use
+`niwa go`.
+
+#### Alternatives Considered
+
+- **Instance root only, use go afterward**: Always land at instance root; require
+  `niwa go <workspace> <repo>` for repo-level navigation. Rejected: forces a
+  two-step workflow for something the predecessor handled in one command.
+
+- **Interactive repo selection**: Prompt the user to choose after creation. Rejected:
+  adds interactive complexity to a scriptable command.
+
+- **Full predecessor match (create --cd + apply returns to current repo)**: Replicate
+  both newtsuku and resettsuku. Rejected: apply is non-destructive, so post-apply
+  navigation is unnecessary. Intercepting apply was already rejected in Decision 3.
+
 ## Decision Outcome
 
-The four decisions compose into a clean architecture:
+The five decisions compose into a clean architecture:
 
 1. **Protocol**: cd-eligible commands print a bare path to stdout, messages to stderr.
    The shell function captures stdout and cds. Zoxide's pattern, proven and simple.
@@ -291,10 +334,15 @@ The four decisions compose into a clean architecture:
    both post-create navigation and workspace/repo jumping. All other commands pass
    through to the binary unchanged.
 
+5. **Landing target**: `create` defaults to instance root with `--cd <repo>` for
+   repo-level landing. `apply` has no landing behavior (non-destructive, cwd stays
+   valid).
+
 The decisions reinforce each other: the stdout protocol keeps the shell function
-simple enough that intercepting two commands is trivial. The env-file delegation
-and the runtime hint cover both installation paths. And limiting scope to two
-commands keeps the wrapper auditable and testable.
+simple enough that intercepting two commands is trivial. The `--cd` flag is handled
+entirely in the binary (it just changes which path goes to stdout). The env-file
+delegation and the runtime hint cover both installation paths. And limiting scope
+to two commands keeps the wrapper auditable and testable.
 
 ## Solution Architecture
 
@@ -373,7 +421,22 @@ For `niwa create --from example`:
 3. Shell function captures stdout into __niwa_dir
 4. Checks: exit 0, non-empty, -d passes
 5. Runs: builtin cd /home/user/.niwa/instances/example
-6. User's shell cwd is now the workspace
+6. User's shell cwd is now the instance root
+```
+
+For `niwa create --from example --cd api-service`:
+
+```
+1. Shell function intercepts "create"
+2. Runs: command niwa create --from example --cd api-service
+   - Binary clones repos, writes state, creates instance
+   - Resolves "api-service" against classified repos -> public/api-service
+   - Stderr: "Cloning repo-a... Created instance: /home/user/.niwa/instances/example"
+   - Stdout: "/home/user/.niwa/instances/example/public/api-service"
+   - Exit code: 0
+3. Shell function captures stdout, verifies directory exists
+4. Runs: builtin cd /home/user/.niwa/instances/example/public/api-service
+5. User's shell cwd is the target repo within the workspace
 ```
 
 For `niwa go example api-service`:
@@ -395,12 +458,14 @@ For `niwa go example api-service`:
 ### Phase 1: Init subcommand and stdout protocol
 
 Add `niwa shell-init <shell|auto>` that generates the wrapper function and completion
-registration. Change `create.go` to use stdout/stderr discipline.
+registration. Change `create.go` to use stdout/stderr discipline and add `--cd` flag.
 
 Deliverables:
-- `internal/cli/shell_init.go` -- init subcommand with bash/zsh/auto support
-- `internal/cli/create.go` -- move human output to stderr, path to stdout
-- Tests for init output (valid bash/zsh syntax) and create stdout protocol
+- `internal/cli/shell_init.go` -- shell-init subcommand with bash/zsh/auto support
+- `internal/cli/create.go` -- move human output to stderr, path to stdout, add
+  `--cd <repo>` flag that resolves repo path after classification pipeline
+- Tests for init output (valid bash/zsh syntax), create stdout protocol, and
+  --cd repo resolution (including ambiguous repo names)
 
 ### Phase 2: Env file delegation
 
