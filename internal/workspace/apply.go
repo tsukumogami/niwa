@@ -227,6 +227,13 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 	}
 	writtenFiles = append(writtenFiles, wsFiles...)
 
+	// Build repo name -> on-disk path index (used by marketplace resolution
+	// and materializers).
+	repoIndex := make(map[string]string, len(classified))
+	for _, cr := range classified {
+		repoIndex[cr.Repo.Name] = filepath.Join(instanceRoot, cr.Group, cr.Repo.Name)
+	}
+
 	// Step 4.5: Install workspace-root context and settings.
 	// Context file uses @import for level-scoped visibility.
 	// Settings uses settings.json (not .local) since instance root is non-git.
@@ -236,7 +243,7 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 	}
 	writtenFiles = append(writtenFiles, ctxFiles...)
 
-	rootSettingsFiles, err := InstallWorkspaceRootSettings(cfg, configDir, instanceRoot)
+	rootSettingsFiles, err := InstallWorkspaceRootSettings(cfg, configDir, instanceRoot, repoIndex)
 	if err != nil {
 		return nil, fmt.Errorf("installing workspace root settings: %w", err)
 	}
@@ -333,6 +340,7 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 			RepoDir:       repoDir,
 			ConfigDir:     configDir,
 			DiscoveredEnv: discoveredEnv,
+			RepoIndex:     repoIndex,
 		}
 
 		claudeOn := ClaudeEnabled(cfg, cr.Repo.Name)
@@ -364,45 +372,6 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 			if sr.Error != nil {
 				fmt.Fprintf(os.Stderr, "warning: setup script %s/%s failed for %s: %v\n",
 					setupDir, sr.Name, cr.Repo.Name, sr.Error)
-			}
-		}
-	}
-
-	// Step 6.9: Register marketplaces and install plugins.
-	if len(cfg.Claude.Marketplaces) > 0 || cfg.Claude.Plugins != nil {
-		// Build repo name -> on-disk path index.
-		repoIndex := make(map[string]string, len(classified))
-		for _, cr := range classified {
-			repoIndex[cr.Repo.Name] = filepath.Join(instanceRoot, cr.Group, cr.Repo.Name)
-		}
-
-		// Phase A: Register marketplaces.
-		mktWarnings, fatalErr := RegisterMarketplaces(cfg.Claude.Marketplaces, repoIndex)
-		for _, w := range mktWarnings {
-			fmt.Fprintf(os.Stderr, "warning: %s\n", w)
-		}
-		if fatalErr != nil {
-			return nil, fmt.Errorf("marketplace registration: %w", fatalErr)
-		}
-
-		// Phase B: Install plugins per repo (skip repos with claude = false).
-		// Instance root plugins are handled declaratively via settings.json
-		// (enabledPlugins + extraKnownMarketplaces).
-		_, claudeFound := FindClaude()
-		if claudeFound {
-			for _, cr := range classified {
-				if !ClaudeEnabled(cfg, cr.Repo.Name) {
-					continue
-				}
-				effective := MergeOverrides(cfg, cr.Repo.Name)
-				if len(effective.Plugins) == 0 {
-					continue
-				}
-				repoDir := filepath.Join(instanceRoot, cr.Group, cr.Repo.Name)
-				pluginWarnings := InstallPlugins(effective.Plugins, repoDir)
-				for _, w := range pluginWarnings {
-					fmt.Fprintf(os.Stderr, "warning: %s\n", w)
-				}
 			}
 		}
 	}

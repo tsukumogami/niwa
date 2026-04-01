@@ -1634,3 +1634,243 @@ func TestFilesMaterializerEmptyValueSkipped(t *testing.T) {
 		t.Errorf("expected 0 files, got %d", len(written))
 	}
 }
+
+// --- buildSettingsDoc tests ---
+
+func TestBuildSettingsDocPlugins(t *testing.T) {
+	doc, err := buildSettingsDoc(BuildSettingsConfig{
+		Plugins: []string{"plugin-a@marketplace", "plugin-b@marketplace"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	plugins, ok := doc["enabledPlugins"].(map[string]any)
+	if !ok {
+		t.Fatal("expected enabledPlugins key in output")
+	}
+	if plugins["plugin-a@marketplace"] != true {
+		t.Error("expected plugin-a@marketplace = true")
+	}
+	if plugins["plugin-b@marketplace"] != true {
+		t.Error("expected plugin-b@marketplace = true")
+	}
+}
+
+func TestBuildSettingsDocEmptyPlugins(t *testing.T) {
+	doc, err := buildSettingsDoc(BuildSettingsConfig{
+		Settings: config.SettingsConfig{"permissions": "bypass"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if _, ok := doc["enabledPlugins"]; ok {
+		t.Error("enabledPlugins should not be present when plugins list is empty")
+	}
+}
+
+func TestBuildSettingsDocGitHubMarketplace(t *testing.T) {
+	doc, err := buildSettingsDoc(BuildSettingsConfig{
+		Marketplaces: []string{"tsukumogami/shirabe"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	mkts, ok := doc["extraKnownMarketplaces"].(map[string]any)
+	if !ok {
+		t.Fatal("expected extraKnownMarketplaces key")
+	}
+
+	entry, ok := mkts["shirabe"].(map[string]any)
+	if !ok {
+		t.Fatal("expected shirabe entry")
+	}
+
+	source := entry["source"].(map[string]any)
+	if source["source"] != "github" {
+		t.Errorf("source type = %v, want github", source["source"])
+	}
+	if source["repo"] != "tsukumogami/shirabe" {
+		t.Errorf("repo = %v, want tsukumogami/shirabe", source["repo"])
+	}
+}
+
+func TestBuildSettingsDocRepoMarketplace(t *testing.T) {
+	tmpDir := t.TempDir()
+	repoDir := filepath.Join(tmpDir, "tools")
+	pluginDir := filepath.Join(repoDir, ".claude-plugin")
+	os.MkdirAll(pluginDir, 0o755)
+	os.WriteFile(filepath.Join(pluginDir, "marketplace.json"), []byte("{}"), 0o644)
+
+	repoIndex := map[string]string{"tools": repoDir}
+
+	doc, err := buildSettingsDoc(BuildSettingsConfig{
+		Marketplaces: []string{"repo:tools/.claude-plugin/marketplace.json"},
+		RepoIndex:    repoIndex,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	mkts, ok := doc["extraKnownMarketplaces"].(map[string]any)
+	if !ok {
+		t.Fatal("expected extraKnownMarketplaces key")
+	}
+
+	entry, ok := mkts["tools"].(map[string]any)
+	if !ok {
+		t.Fatal("expected tools entry")
+	}
+
+	source := entry["source"].(map[string]any)
+	if source["source"] != "directory" {
+		t.Errorf("source type = %v, want directory", source["source"])
+	}
+	if source["path"] != repoDir {
+		t.Errorf("path = %v, want %v", source["path"], repoDir)
+	}
+}
+
+func TestBuildSettingsDocRepoMarketplaceMissingRepo(t *testing.T) {
+	repoIndex := map[string]string{"other": "/tmp/other"}
+
+	_, err := buildSettingsDoc(BuildSettingsConfig{
+		Marketplaces: []string{"repo:tools/.claude-plugin/marketplace.json"},
+		RepoIndex:    repoIndex,
+	})
+	if err == nil {
+		t.Fatal("expected error for missing repo in index")
+	}
+	if !strings.Contains(err.Error(), "not managed") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestBuildSettingsDocIncludeGitInstructions(t *testing.T) {
+	f := false
+	doc, err := buildSettingsDoc(BuildSettingsConfig{
+		Settings:               config.SettingsConfig{"permissions": "bypass"},
+		IncludeGitInstructions: &f,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	val, ok := doc["includeGitInstructions"]
+	if !ok {
+		t.Fatal("expected includeGitInstructions key")
+	}
+	if val != false {
+		t.Errorf("includeGitInstructions = %v, want false", val)
+	}
+}
+
+func TestBuildSettingsDocNoIncludeGitInstructionsWhenNil(t *testing.T) {
+	doc, err := buildSettingsDoc(BuildSettingsConfig{
+		Settings: config.SettingsConfig{"permissions": "bypass"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if _, ok := doc["includeGitInstructions"]; ok {
+		t.Error("includeGitInstructions should not be present when nil")
+	}
+}
+
+func TestSettingsMaterializerWithPlugins(t *testing.T) {
+	tmpDir := t.TempDir()
+	repoDir := filepath.Join(tmpDir, "repo")
+	os.MkdirAll(repoDir, 0o755)
+
+	ctx := &MaterializeContext{
+		Effective: EffectiveConfig{
+			Claude: config.ClaudeConfig{
+				Settings: config.SettingsConfig{"permissions": "bypass"},
+			},
+			Plugins: []string{"my-plugin@marketplace"},
+		},
+		RepoDir: repoDir,
+	}
+
+	m := &SettingsMaterializer{}
+	written, err := m.Materialize(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(written) != 1 {
+		t.Fatalf("expected 1 file, got %d", len(written))
+	}
+
+	data, err := os.ReadFile(written[0])
+	if err != nil {
+		t.Fatalf("reading settings: %v", err)
+	}
+
+	var doc map[string]any
+	if err := json.Unmarshal(data, &doc); err != nil {
+		t.Fatalf("parsing JSON: %v", err)
+	}
+
+	plugins := doc["enabledPlugins"].(map[string]any)
+	if plugins["my-plugin@marketplace"] != true {
+		t.Error("expected my-plugin@marketplace = true")
+	}
+}
+
+func TestSettingsMaterializerNoopWithEmptyPlugins(t *testing.T) {
+	ctx := &MaterializeContext{
+		Effective: EffectiveConfig{
+			Claude:  config.ClaudeConfig{},
+			Plugins: []string{},
+		},
+	}
+
+	m := &SettingsMaterializer{}
+	written, err := m.Materialize(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if written != nil {
+		t.Errorf("expected nil, got %v", written)
+	}
+}
+
+func TestSettingsMaterializerPluginsOnlyTriggersWrite(t *testing.T) {
+	tmpDir := t.TempDir()
+	repoDir := filepath.Join(tmpDir, "repo")
+	os.MkdirAll(repoDir, 0o755)
+
+	ctx := &MaterializeContext{
+		Effective: EffectiveConfig{
+			Claude:  config.ClaudeConfig{},
+			Plugins: []string{"my-plugin@marketplace"},
+		},
+		RepoDir: repoDir,
+	}
+
+	m := &SettingsMaterializer{}
+	written, err := m.Materialize(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(written) != 1 {
+		t.Fatalf("expected 1 file, got %d", len(written))
+	}
+
+	data, err := os.ReadFile(written[0])
+	if err != nil {
+		t.Fatalf("reading settings: %v", err)
+	}
+
+	var doc map[string]any
+	if err := json.Unmarshal(data, &doc); err != nil {
+		t.Fatalf("parsing JSON: %v", err)
+	}
+
+	if _, ok := doc["enabledPlugins"]; !ok {
+		t.Error("expected enabledPlugins key in output")
+	}
+}
