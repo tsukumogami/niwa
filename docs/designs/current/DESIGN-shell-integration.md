@@ -4,9 +4,19 @@ problem: |
   After niwa create, users must manually cd into the workspace directory because
   a compiled binary cannot change the parent shell's working directory. The tool
   needs shell integration that wraps certain commands with a shell function to
-  enable transparent navigation. The eval-init pattern (used by zoxide, direnv,
-  mise) is the right approach, but the specific protocol, subcommand design, and
-  relationship to niwa's existing env file need architectural decisions.
+  enable transparent navigation.
+decision: |
+  Add a `niwa shell-init <shell|auto>` subcommand that emits a shell function
+  wrapper and cobra completions. The wrapper intercepts `create` and a new `go`
+  command, capturing stdout (a bare directory path) and calling cd. The existing
+  ~/.niwa/env file delegates to shell-init via a command -v guard, so existing
+  users get shell integration automatically on upgrade.
+rationale: |
+  Follows the eval-init pattern proven by zoxide, direnv, and mise. The stdout
+  protocol is race-condition free and requires under 15 lines of shell code. Env
+  file delegation avoids rc file changes for existing users. Tsuku generalization
+  was considered but deferred -- no second consumer exists, and cobra handles
+  completions per-tool.
 ---
 
 # DESIGN: Shell Integration
@@ -36,7 +46,7 @@ Niwa should own its shell integration.
 
 The remaining design questions are:
 - Binary-to-shell communication protocol (how the binary tells the wrapper "cd here")
-- Init subcommand structure and output format
+- Shell-init subcommand structure and output format
 - Relationship to the existing ~/.niwa/env file and install.sh
 - Which subcommands the shell function intercepts
 - Whether completions bundle into the init output
@@ -73,7 +83,7 @@ These choices were settled during exploration and should be treated as constrain
 
 ### Decision 1: Init subcommand protocol and completions bundling
 
-What does `niwa init <shell>` emit, and how does the shell function know when to cd?
+What does `niwa shell-init <shell>` emit, and how does the shell function know when to cd?
 
 Key assumptions:
 - Niwa has no stable stdout contract. No known scripts parse the `Created instance:`
@@ -86,7 +96,7 @@ cd-eligible subcommands (initially `create` and `go`) print the target directory
 path to stdout and human-readable messages to stderr. The shell function captures
 stdout, verifies it's a non-empty existing directory, and runs `builtin cd`.
 
-`niwa init <shell>` emits two things concatenated:
+`niwa shell-init <shell>` emits two things concatenated:
 1. A `niwa()` wrapper function that intercepts cd-eligible subcommands, captures
    stdout, and cds on success. All other subcommands pass through.
 2. Cobra-generated completion registration for the active shell.
@@ -140,40 +150,40 @@ per-process), zero file I/O, under 15 lines of shell code.
 
 ### Decision 2: Env file migration strategy
 
-What happens to `~/.niwa/env` and `install.sh` when `niwa init` is introduced?
+What happens to `~/.niwa/env` and `install.sh` when `niwa shell-init` is introduced?
 
 Key assumptions:
 - Existing user base is very small (early-stage project).
 - install.sh remains the primary installation method.
-- `niwa init` includes PATH setup in its output, making the env file's PATH
+- `niwa shell-init` includes PATH setup in its output, making the env file's PATH
   export redundant once init runs (but kept as a safety net).
 
-#### Chosen: Env file delegates to niwa init
+#### Chosen: Env file delegates to niwa shell-init
 
 The env file becomes a stable entrypoint that bootstraps PATH and delegates to
-`niwa init`. install.sh updates `~/.niwa/env` on each install to contain:
+`niwa shell-init`. install.sh updates `~/.niwa/env` on each install to contain:
 
 ```sh
 # niwa shell configuration
 export PATH="$HOME/.niwa/bin:$PATH"
 if command -v niwa >/dev/null 2>&1; then
-  eval "$(niwa init auto 2>/dev/null)"
+  eval "$(niwa shell-init auto 2>/dev/null)"
 fi
 ```
 
 Existing users keep their `. "$HOME/.niwa/env"` line in rc files unchanged. The
 env file is already overwritten on each install, so the delegation happens
-automatically on upgrade. `niwa init auto` detects the running shell via
+automatically on upgrade. `niwa shell-init auto` detects the running shell via
 environment variables ($BASH_VERSION, $ZSH_VERSION).
 
 The `command -v` guard makes it safe to deploy the env file change before the
-`niwa init` subcommand ships. If the binary doesn't support init yet, PATH is
+`niwa shell-init` subcommand ships. If the binary doesn't support init yet, PATH is
 still set correctly.
 
 #### Alternatives Considered
 
 - **Env file as bootstrap + separate eval line**: install.sh appends a second line
-  (`eval "$(niwa init bash)"`) to rc files alongside the existing source line.
+  (`eval "$(niwa shell-init bash)"`) to rc files alongside the existing source line.
   Rejected: two integration lines splits the source of truth and complicates
   install.sh with shell-specific eval logic.
 
@@ -228,7 +238,7 @@ The three decisions compose into a clean architecture:
 1. **Protocol**: cd-eligible commands print a bare path to stdout, messages to stderr.
    The shell function captures stdout and cds. Zoxide's pattern, proven and simple.
 
-2. **Distribution**: The existing `~/.niwa/env` file delegates to `niwa init auto`,
+2. **Distribution**: The existing `~/.niwa/env` file delegates to `niwa shell-init auto`,
    so users get shell integration automatically on upgrade without changing their
    rc files. The `command -v` guard makes the rollout safe.
 
@@ -260,10 +270,10 @@ User's shell
 ~/.niwa/env (sourced from .bashrc/.zshenv)
     |
     +-- export PATH="$HOME/.niwa/bin:$PATH"
-    +-- eval "$(niwa init auto 2>/dev/null)"  [guarded by command -v]
+    +-- eval "$(niwa shell-init auto 2>/dev/null)"  [guarded by command -v]
             |
             v
-        niwa init auto
+        niwa shell-init auto
             |
             +-- Detects shell ($BASH_VERSION / $ZSH_VERSION)
             +-- Emits niwa() wrapper function
@@ -278,7 +288,7 @@ User's shell
 
 ### Key Interfaces
 
-**`niwa init <shell|auto>` subcommand** (`internal/cli/init.go`)
+**`niwa shell-init <shell|auto>` subcommand** (`internal/cli/shell_init.go`)
 - Arguments: `bash`, `zsh`, or `auto` (detects from environment)
 - Output: shell code to stdout (wrapper function + completions)
 - No side effects (prints only, writes no files)
@@ -291,13 +301,15 @@ User's shell
 
 **`niwa go [workspace] [repo]` subcommand** (`internal/cli/go.go`)
 - `niwa go` -- resolve current workspace root from cwd, print to stdout
-- `niwa go <name>` -- resolve workspace by name via global registry, print instance
-  path to stdout
-- `niwa go <name> <repo>` -- resolve repo directory within workspace instance,
+- `niwa go <name>` -- resolve workspace by name via global registry. If multiple
+  instances exist for the workspace (e.g., `tsuku`, `tsuku-2`), print the most
+  recently used instance. If no usage data exists, print the first (original)
+  instance. Error if the workspace name is not found.
+- `niwa go <name> <repo>` -- resolve repo directory within the selected instance,
   print to stdout
 - Error messages to stderr; empty stdout + non-zero exit on failure
 
-**`niwa init auto` shell detection**
+**`niwa shell-init auto` shell detection**
 - Checks `$ZSH_VERSION` first (set in zsh)
 - Falls back to `$BASH_VERSION` (set in bash)
 - Fails silently (empty output) if shell is unrecognized
@@ -337,18 +349,18 @@ For `niwa go example api-service`:
 
 ### Phase 1: Init subcommand and stdout protocol
 
-Add `niwa init <shell|auto>` that generates the wrapper function and completion
+Add `niwa shell-init <shell|auto>` that generates the wrapper function and completion
 registration. Change `create.go` to use stdout/stderr discipline.
 
 Deliverables:
-- `internal/cli/init.go` -- init subcommand with bash/zsh/auto support
+- `internal/cli/shell_init.go` -- init subcommand with bash/zsh/auto support
 - `internal/cli/create.go` -- move human output to stderr, path to stdout
 - Tests for init output (valid bash/zsh syntax) and create stdout protocol
 
 ### Phase 2: Env file delegation
 
 Update `install.sh` to write the new env file content with `command -v` guard
-and `niwa init auto` delegation.
+and `niwa shell-init auto` delegation.
 
 Deliverables:
 - `install.sh` -- updated env file template
@@ -370,22 +382,33 @@ attack surface is small: generated shell code is static (no user-controlled
 interpolation), stdout capture uses proper double-quoting, and the trust boundary
 is the niwa binary itself.
 
-Two implementation-level considerations:
+Four implementation-level considerations:
 
 **Stdout protocol contract.** cd-eligible commands must emit exactly one line
-containing an absolute directory path to stdout. The shell function depends on
-double-quoting (`builtin cd "$__niwa_dir"`) to prevent word splitting, glob
-expansion, and shell metacharacter injection. This invariant must be maintained
-by all cd-eligible commands. The `-d` directory check provides a secondary
-validation that the path points to an existing directory.
+containing an absolute directory path to stdout. The Go side should validate that
+the path contains no newlines before emitting (filesystem paths can't contain
+newlines, but explicit validation prevents accidental multi-line output from being
+misinterpreted). The shell function depends on double-quoting
+(`builtin cd "$__niwa_dir"`) to prevent word splitting, glob expansion, and shell
+metacharacter injection. The `-d` directory check provides secondary validation.
 
 **Path containment for `go` subcommand.** The `go <name> <repo>` form resolves
 a repo directory relative to the workspace instance root. Without validation, a
 crafted repo argument like `../../etc` would resolve outside the instance via
-`filepath.Join`. While not a privilege escalation (the user can already cd
-anywhere), it violates the command's intended scope. The `go` command must
-validate that the resolved path falls within the instance root using
-`filepath.Rel` or prefix checking after `filepath.EvalSymlinks`.
+`filepath.Join`. The `go` command must validate that the resolved path falls
+within the instance root using logical-path validation (pre-symlink resolution
+with `filepath.Rel`). This permits symlinked repos while blocking `../` traversal.
+
+**Shell startup hang.** If the niwa binary hangs during `eval "$(niwa shell-init auto)"`,
+new terminal sessions block indefinitely. The `2>/dev/null` suppresses stderr but
+does not prevent hangs. Recovery: `bash --norc` or `zsh -f` opens a shell without
+rc files. This is inherent to the eval-init pattern (same risk exists with direnv,
+mise, etc.) and does not warrant a timeout wrapper.
+
+**Binary compromise blast radius.** If the niwa binary is compromised, the eval
+in the env file executes arbitrary code in every new shell. This is the standard
+trust model for eval-init tools and is not unique to this design. Users can audit
+by running `niwa shell-init bash` directly.
 
 ## Consequences
 
@@ -406,7 +429,7 @@ validate that the resolved path falls within the instance root using
 - The shell function shadows the niwa binary. Users who want to call the binary
   directly must use `command niwa` -- though this is standard practice with
   shell wrappers (same as zoxide).
-- `niwa init auto` adds a subprocess spawn to shell startup. This is one exec
+- `niwa shell-init auto` adds a subprocess spawn to shell startup. This is one exec
   call per new shell, typically under 10ms.
 
 ### Mitigations
