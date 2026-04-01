@@ -235,6 +235,19 @@ func RepoCloneURL(ws *config.WorkspaceConfig, repoName, sshURL, cloneURL string)
 	return cloneURL
 }
 
+// DefaultBranch resolves the effective default branch for a repo.
+// It checks: per-repo branch override -> workspace default_branch -> "main".
+// Unlike RepoCloneBranch, this never returns an empty string.
+func DefaultBranch(ws *config.WorkspaceConfig, repoName string) string {
+	if override, ok := ws.Repos[repoName]; ok && override.Branch != "" {
+		return override.Branch
+	}
+	if ws.Workspace.DefaultBranch != "" {
+		return ws.Workspace.DefaultBranch
+	}
+	return "main"
+}
+
 // RepoCloneBranch returns the branch override for a repo, or empty string
 // if no override is set (meaning use the default branch).
 func RepoCloneBranch(ws *config.WorkspaceConfig, repoName string) string {

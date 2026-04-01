@@ -95,6 +95,36 @@ func TestRepoCloneBranchOverride(t *testing.T) {
 	}
 }
 
+func TestDefaultBranch_PerRepoOverride(t *testing.T) {
+	ws := &config.WorkspaceConfig{
+		Workspace: config.WorkspaceMeta{Name: "test", DefaultBranch: "master"},
+		Repos: map[string]config.RepoOverride{
+			"myrepo": {Branch: "develop"},
+		},
+	}
+	if got := DefaultBranch(ws, "myrepo"); got != "develop" {
+		t.Errorf("expected develop, got %q", got)
+	}
+}
+
+func TestDefaultBranch_WorkspaceDefault(t *testing.T) {
+	ws := &config.WorkspaceConfig{
+		Workspace: config.WorkspaceMeta{Name: "test", DefaultBranch: "master"},
+	}
+	if got := DefaultBranch(ws, "myrepo"); got != "master" {
+		t.Errorf("expected master, got %q", got)
+	}
+}
+
+func TestDefaultBranch_FallbackMain(t *testing.T) {
+	ws := &config.WorkspaceConfig{
+		Workspace: config.WorkspaceMeta{Name: "test"},
+	}
+	if got := DefaultBranch(ws, "myrepo"); got != "main" {
+		t.Errorf("expected main, got %q", got)
+	}
+}
+
 func TestMergeOverridesNoOverride(t *testing.T) {
 	ws := &config.WorkspaceConfig{
 		Claude: config.ClaudeConfig{

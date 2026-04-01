@@ -16,18 +16,26 @@ func init() {
 	rootCmd.AddCommand(applyCmd)
 	applyCmd.Flags().StringVar(&applyInstance, "instance", "", "target a specific instance by name")
 	applyCmd.Flags().BoolVar(&applyAllowDirty, "allow-dirty", false, "apply even if config directory has uncommitted changes")
+	applyCmd.Flags().BoolVar(&applyNoPull, "no-pull", false, "skip pulling latest changes into existing repos")
 }
 
 var (
 	applyInstance   string
 	applyAllowDirty bool
+	applyNoPull     bool
 )
 
 var applyCmd = &cobra.Command{
 	Use:   "apply [workspace-name]",
 	Short: "Apply workspace configuration",
 	Long: `Apply discovers the workspace configuration and applies it to one or more
-instances.
+instances. For each managed repo, apply clones missing repos and pulls latest
+changes into existing repos that are clean and on their configured default branch.
+Repos with uncommitted changes or on non-default branches are skipped with a
+warning. Use --no-pull to skip pulling entirely.
+
+The default branch for each repo is resolved from: per-repo branch config,
+workspace default_branch setting, or "main" as the fallback.
 
 Scope resolution (when no workspace-name argument is given):
   1. If --instance is set, find the workspace root and apply to that instance.
@@ -87,6 +95,7 @@ func runApply(cmd *cobra.Command, args []string) error {
 	token := resolveGitHubToken()
 	gh := github.NewAPIClient(token)
 	applier := workspace.NewApplier(gh)
+	applier.NoPull = applyNoPull
 
 	// Apply to each instance, collecting errors instead of aborting on first failure.
 	var applyErrors []instanceError
