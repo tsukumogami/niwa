@@ -1,5 +1,5 @@
 ---
-status: Proposed
+status: Planned
 problem: |
   After niwa create, users must manually cd into the workspace directory because
   a compiled binary cannot change the parent shell's working directory. The tool
@@ -8,9 +8,12 @@ problem: |
 decision: |
   Add a `niwa shell-init <shell|auto>` subcommand that emits a shell function
   wrapper and cobra completions. The wrapper intercepts `create` and a new `go`
-  command, capturing stdout (a bare directory path) and calling cd. The existing
-  ~/.niwa/env file delegates to shell-init via a command -v guard, so existing
-  users get shell integration automatically on upgrade.
+  command, capturing stdout (a bare directory path) and calling cd. Both commands
+  share `-r/--repo` for repo targeting; `go` adds `-w/--workspace` for
+  disambiguation. Single-arg `go` uses context-aware resolution (repo in current
+  instance first, then workspace in registry). The existing ~/.niwa/env file
+  delegates to shell-init via a command -v guard, so existing users get shell
+  integration automatically on upgrade.
 rationale: |
   Follows the eval-init pattern proven by zoxide, direnv, and mise. The stdout
   protocol is race-condition free and requires under 15 lines of shell code. Env
@@ -23,7 +26,7 @@ rationale: |
 
 ## Status
 
-Proposed
+Planned
 
 ## Context and Problem Statement
 
@@ -213,14 +216,17 @@ Key assumptions:
 #### Chosen: Intercept `create` + new `go` command
 
 The shell function intercepts two subcommands:
-- **`create`**: navigates to the new workspace instance after creation
-- **`go [workspace] [repo]`**: navigates to existing workspaces and repos within
-  them. Without arguments, navigates to the current workspace root. With a
-  workspace name, resolves via the global registry. With both, navigates to
-  the repo directory within the instance.
+- **`create`**: navigates to the new workspace instance after creation. Accepts an
+  optional workspace name positional arg (for remote creation) and `-r <repo>` to
+  land in a specific repo.
+- **`go`**: navigates to existing workspaces and repos. Uses context-aware
+  resolution for a single positional arg (repo in current instance first, then
+  workspace via registry). Two flags: `-w/--workspace` forces workspace lookup,
+  `-r/--repo` targets a repo explicitly. No multi-positional forms.
 
-Both use the same stdout protocol. The binary handles all resolution logic; the
-shell function only reads the path and calls cd.
+Both use the same stdout protocol and share the `-r` flag for repo targeting.
+The binary handles all resolution logic; the shell function only reads the path
+and calls cd.
 
 #### Alternatives Considered
 
@@ -286,16 +292,23 @@ Key assumptions:
 - `niwa apply` is non-destructive (updates in place), unlike resettsuku which
   deleted and recreated. The user's cwd stays valid, so no cd is needed.
 
-#### Chosen: Instance root default with --cd flag
+#### Chosen: Instance root default with -r flag; optional workspace positional arg
 
-`niwa create` defaults to landing at the instance root directory. A `--cd <repo>`
-flag overrides the landing target to a specific repo within the instance:
+`niwa create` defaults to landing at the instance root directory. It accepts an
+optional workspace name as a positional argument (resolved via global registry)
+and a `-r/--repo <repo>` flag to override the landing target:
 
-- `niwa create --from example` -- lands at instance root
-- `niwa create --from example --cd niwa` -- lands at the niwa repo directory
-- `niwa create --from example --cd nonexistent` -- errors, no cd
+- `niwa create` -- discovers workspace from cwd, lands at instance root
+- `niwa create tsukumogami` -- creates instance in named workspace (from anywhere)
+- `niwa create -r niwa` -- lands at the niwa repo directory
+- `niwa create tsukumogami -r niwa` -- named workspace, lands at repo
+- `niwa create -r nonexistent` -- instance created, navigation fails with error
+  including the instance path for manual recovery
 
-The `--cd` flag resolves the repo name against the classified repo list after the
+The `-r` flag is shared with `niwa go`, giving both commands the same repo
+targeting semantics. It replaces the predecessor's `-c <repo>` flag.
+
+The `-r` flag resolves the repo name against the classified repo list after the
 creation pipeline completes. Since repos are organized as `{instance}/{group}/{repo}`,
 the binary resolves the group from classification. If ambiguous (repo appears in
 multiple groups), error with a message suggesting the qualified form.
@@ -308,8 +321,8 @@ deleted and recreated the workspace. If navigation is needed after apply, use
 #### Alternatives Considered
 
 - **Instance root only, use go afterward**: Always land at instance root; require
-  `niwa go <workspace> <repo>` for repo-level navigation. Rejected: forces a
-  two-step workflow for something the predecessor handled in one command.
+  `niwa go <repo>` for repo-level navigation. Rejected: forces a two-step
+  workflow for something the predecessor handled in one command.
 
 - **Interactive repo selection**: Prompt the user to choose after creation. Rejected:
   adds interactive complexity to a scriptable command.
@@ -377,8 +390,9 @@ The six decisions compose into a clean architecture:
    both post-create navigation and workspace/repo jumping. All other commands pass
    through to the binary unchanged.
 
-5. **Landing target**: `create` defaults to instance root with `--cd <repo>` for
-   repo-level landing. `apply` has no landing behavior (non-destructive, cwd stays
+5. **Landing target**: `create` defaults to instance root with `-r <repo>` for
+   repo-level landing. `create` also accepts a workspace name positional arg for
+   remote creation. `apply` has no landing behavior (non-destructive, cwd stays
    valid).
 
 6. **Optionality**: Shell integration is explicitly optional. `--no-shell-init` on
@@ -386,7 +400,7 @@ The six decisions compose into a clean architecture:
    lifecycle control regardless of how niwa was installed.
 
 The decisions reinforce each other: the stdout protocol keeps the shell function
-simple enough that intercepting two commands is trivial. The `--cd` flag is handled
+simple enough that intercepting two commands is trivial. The `-r` flag is handled
 entirely in the binary (it just changes which path goes to stdout). The env-file
 delegation and the runtime hint cover both installation paths. And limiting scope
 to two commands keeps the wrapper auditable and testable.
@@ -442,15 +456,32 @@ User's shell
 - On failure, stdout is empty; exit code is non-zero
 - The shell function checks: exit code 0 AND stdout non-empty AND path is a directory
 
-**`niwa go [workspace] [repo]` subcommand** (`internal/cli/go.go`)
+**`niwa go` subcommand** (`internal/cli/go.go`)
 - `niwa go` -- resolve current workspace root from cwd, print to stdout
-- `niwa go <name>` -- resolve workspace by name via global registry. If multiple
-  instances exist for the workspace (e.g., `tsuku`, `tsuku-2`), print the most
-  recently used instance. If no usage data exists, print the first (original)
-  instance. Error if the workspace name is not found.
-- `niwa go <name> <repo>` -- resolve repo directory within the selected instance,
-  print to stdout
+- `niwa go <target>` -- context-aware single-arg resolution:
+  1. If cwd is inside an instance (including group subdirectories), try `<target>`
+     as a repo name in the current instance
+  2. If not found (or not inside an instance), try `<target>` as a workspace name
+     in the global registry
+  3. If both match, prefer the repo; print a hint about `-w` to stderr
+  4. If neither matches, error listing registered workspaces
+- `niwa go -w/--workspace <name>` -- force workspace resolution via registry
+- `niwa go -r/--repo <repo>` -- explicit repo in current instance
+- `niwa go -w <workspace> -r <repo>` -- repo in first instance of named workspace
+- Positional arg + flag for the same level is an error (e.g., `niwa go foo -w bar`)
+- Multiple positional args is an error
+- On success, print resolution trace to stderr (e.g., `go: repo "niwa" in
+  tsukumogami-4` or `go: workspace "codespar"`)
+- Error messages include recovery guidance and list available options
 - Error messages to stderr; empty stdout + non-zero exit on failure
+
+**`niwa create` changes** (`internal/cli/create.go`)
+- Accepts optional positional arg: workspace name (resolved via global registry)
+- `-r/--repo <repo>` flag overrides landing target to a specific repo
+- Human output to stderr, bare path to stdout (existing stdout protocol change)
+- Without positional arg: discovers workspace from cwd (existing behavior)
+- `-r` failure: non-zero exit, empty stdout, instance still created; error
+  message includes the instance path for manual recovery
 
 **`niwa shell-init auto` shell detection**
 - Checks `$ZSH_VERSION` first (set in zsh)
@@ -474,11 +505,11 @@ For `niwa create --from example`:
 6. User's shell cwd is now the instance root
 ```
 
-For `niwa create --from example --cd api-service`:
+For `niwa create --from example -r api-service`:
 
 ```
 1. Shell function intercepts "create"
-2. Runs: command niwa create --from example --cd api-service
+2. Runs: command niwa create --from example -r api-service
    - Binary clones repos, writes state, creates instance
    - Resolves "api-service" against classified repos -> public/api-service
    - Stderr: "Cloning repo-a... Created instance: /home/user/.niwa/instances/example"
@@ -489,18 +520,32 @@ For `niwa create --from example --cd api-service`:
 5. User's shell cwd is the target repo within the workspace
 ```
 
-For `niwa go example api-service`:
+For `niwa go api-service` (inside an instance of the "example" workspace):
 
 ```
 1. Shell function intercepts "go"
-2. Runs: command niwa go example api-service
-   - Binary reads global config, finds instance for "example"
-   - Locates repo "api-service" within the instance
-   - Stderr: (nothing on success)
-   - Stdout: "/home/user/.niwa/instances/example/api-service"
+2. Runs: command niwa go api-service
+   - Binary discovers current instance from cwd
+   - Tries "api-service" as repo in current instance -> found at public/api-service
+   - Stderr: "go: repo "api-service" in example"
+   - Stdout: "/home/user/.niwa/instances/example/public/api-service"
    - Exit code: 0
 3. Shell function captures stdout, verifies directory exists
-4. Runs: builtin cd /home/user/.niwa/instances/example/api-service
+4. Runs: builtin cd /home/user/.niwa/instances/example/public/api-service
+```
+
+For `niwa go example` (from outside the workspace):
+
+```
+1. Shell function intercepts "go"
+2. Runs: command niwa go example
+   - Binary has no instance context (cwd outside workspace)
+   - Tries "example" in global registry -> found
+   - Stderr: "go: workspace "example""
+   - Stdout: "/home/user/.niwa/instances/example"
+   - Exit code: 0
+3. Shell function captures stdout, verifies directory exists
+4. Runs: builtin cd /home/user/.niwa/instances/example
 ```
 
 ## Implementation Approach
@@ -509,15 +554,18 @@ For `niwa go example api-service`:
 
 Add `niwa shell-init` with all subcommands (bash/zsh/auto for code generation,
 install/uninstall/status for lifecycle). Change `create.go` to use stdout/stderr
-discipline and add `--cd` flag.
+discipline, add `-r/--repo` flag, and accept optional workspace positional arg.
 
 Deliverables:
 - `internal/cli/shell_init.go` -- shell-init subcommand with bash/zsh/auto,
   install/uninstall/status
 - `internal/cli/create.go` -- move human output to stderr, path to stdout, add
-  `--cd <repo>` flag that resolves repo path after classification pipeline
+  `-r/--repo <repo>` flag that resolves repo path after classification pipeline,
+  accept optional workspace name positional arg (cobra.MaximumNArgs(1)) resolved
+  via global registry
 - Tests for init output (valid bash/zsh syntax), create stdout protocol,
-  --cd repo resolution, and install/uninstall/status behavior
+  -r repo resolution, workspace positional arg, and install/uninstall/status
+  behavior
 
 ### Phase 2: Env file delegation and install.sh changes
 
@@ -531,11 +579,22 @@ Deliverables:
 
 ### Phase 3: Go command
 
-Add `niwa go [workspace] [repo]` using the same stdout protocol.
+Add `niwa go` with context-aware resolution, `-w/--workspace` and `-r/--repo`
+flags, and resolution trace output.
 
 Deliverables:
-- `internal/cli/go.go` -- go subcommand with workspace/repo resolution
-- Tests for workspace resolution via global registry
+- `internal/cli/go.go` -- go subcommand with context-aware single-arg resolution
+  (repo in current instance first, then workspace in registry), `-w` flag for
+  workspace disambiguation, `-r` flag for explicit repo targeting, combined
+  `-w -r` for cross-workspace repo navigation
+- Resolution trace to stderr on success, collision hints when repo/workspace
+  names overlap
+- Error messages with recovery guidance (list registered workspaces on lookup
+  failure, suggest flag combinations on context errors)
+- Input validation: reject multiple positional args, reject positional + flag
+  conflicts, reject path traversal attempts
+- Tests for each resolution path, flag combinations, edge cases (stale registry,
+  group directory cwd, zero-instance workspace)
 - Update init output to intercept `go` alongside `create`
 
 ## Security Considerations
@@ -555,12 +614,13 @@ misinterpreted). The shell function depends on double-quoting
 (`builtin cd "$__niwa_dir"`) to prevent word splitting, glob expansion, and shell
 metacharacter injection. The `-d` directory check provides secondary validation.
 
-**Path containment for `go` subcommand.** The `go <name> <repo>` form resolves
-a repo directory relative to the workspace instance root. Without validation, a
-crafted repo argument like `../../etc` would resolve outside the instance via
-`filepath.Join`. The `go` command must validate that the resolved path falls
-within the instance root using logical-path validation (pre-symlink resolution
-with `filepath.Rel`). This permits symlinked repos while blocking `../` traversal.
+**Path containment for `go` and `create` subcommands.** The `-r <repo>` flag and
+single-arg repo resolution resolve a repo directory relative to the workspace
+instance root. Without validation, a crafted argument like `../../etc` would
+resolve outside the instance via `filepath.Join`. Both commands must validate that
+the resolved path falls within the instance root using logical-path validation
+(pre-symlink resolution with `filepath.Rel`). This permits symlinked repos while
+blocking `../` traversal.
 
 **Shell startup hang.** If the niwa binary hangs during `eval "$(niwa shell-init auto)"`,
 new terminal sessions block indefinitely. The `2>/dev/null` suppresses stderr but
