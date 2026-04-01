@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/tsukumogami/niwa/internal/workspace"
@@ -96,5 +97,93 @@ func TestComputeInstanceName_DirExistsWithoutState(t *testing.T) {
 	// Directory exists but no instances with state, so NextInstanceNumber returns 1.
 	if name != "tsuku-1" {
 		t.Errorf("expected %q, got %q", "tsuku-1", name)
+	}
+}
+
+func TestFindRepoDir_SingleMatch(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "public", "niwa"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := findRepoDir(root, "niwa")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	want := filepath.Join(root, "public", "niwa")
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestFindRepoDir_NotFound(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "public", "niwa"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := findRepoDir(root, "missing")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "not found") {
+		t.Errorf("expected 'not found' in error, got: %v", err)
+	}
+}
+
+func TestFindRepoDir_Ambiguous(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "public", "niwa"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "private", "niwa"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := findRepoDir(root, "niwa")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "ambiguous") {
+		t.Errorf("expected 'ambiguous' in error, got: %v", err)
+	}
+}
+
+func TestFindRepoDir_PathTraversal(t *testing.T) {
+	root := t.TempDir()
+
+	_, err := findRepoDir(root, "../etc")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "invalid repo name") {
+		t.Errorf("expected 'invalid repo name' in error, got: %v", err)
+	}
+
+	_, err = findRepoDir(root, "foo/bar")
+	if err == nil {
+		t.Fatal("expected error for slash, got nil")
+	}
+	if !strings.Contains(err.Error(), "invalid repo name") {
+		t.Errorf("expected 'invalid repo name' in error, got: %v", err)
+	}
+}
+
+func TestFindRepoDir_SkipsDotDirs(t *testing.T) {
+	root := t.TempDir()
+	// Put repo under .niwa and .claude — should not be found.
+	if err := os.MkdirAll(filepath.Join(root, ".niwa", "myrepo"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, ".claude", "myrepo"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := findRepoDir(root, "myrepo")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "not found") {
+		t.Errorf("expected 'not found' in error, got: %v", err)
 	}
 }

@@ -7,6 +7,7 @@
 #
 # Options:
 #   --no-modify-path  Skip adding niwa to PATH in shell config files
+#   --no-shell-init   Skip adding shell-init delegation to env file
 #
 # Environment variables:
 #   INSTALL_DIR   Override install directory (default: ~/.niwa/bin)
@@ -16,9 +17,11 @@ main() {
     set -eu
 
     MODIFY_PATH=true
+    NO_SHELL_INIT=false
     for arg in "$@"; do
         case "$arg" in
             --no-modify-path) MODIFY_PATH=false ;;
+            --no-shell-init) NO_SHELL_INIT=true ;;
         esac
     done
 
@@ -101,11 +104,21 @@ main() {
 
     printf "\nniwa %s installed to %s/niwa\n" "$LATEST" "$INSTALL_DIR"
 
-    # Create env file with PATH export
-    cat > "$ENV_FILE" << ENVEOF
+    # Create env file with PATH export (and optional shell-init delegation)
+    if [ "$NO_SHELL_INIT" = "true" ]; then
+        cat > "$ENV_FILE" << ENVEOF
 # niwa shell configuration
 export PATH="${INSTALL_DIR}:\$PATH"
 ENVEOF
+    else
+        cat > "$ENV_FILE" << ENVEOF
+# niwa shell configuration
+export PATH="${INSTALL_DIR}:\$PATH"
+if command -v niwa >/dev/null 2>&1; then
+  eval "\$(niwa shell-init auto 2>/dev/null)"
+fi
+ENVEOF
+    fi
 
     # Configure shell if requested
     if [ "$MODIFY_PATH" = true ]; then
