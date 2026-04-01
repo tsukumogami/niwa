@@ -1,5 +1,5 @@
 ---
-status: Planned
+status: Current
 problem: |
   After niwa create, users must manually cd into the workspace directory because
   a compiled binary cannot change the parent shell's working directory. The tool
@@ -26,7 +26,7 @@ rationale: |
 
 ## Status
 
-Planned
+Current
 
 ## Context and Problem Statement
 

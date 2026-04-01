@@ -1,5 +1,5 @@
 ---
-status: Draft
+status: Accepted
 problem: |
   After niwa create, users must manually cd into the workspace directory because
   compiled binaries can't change the parent shell's working directory. There's no
@@ -18,7 +18,7 @@ source_issue: 31
 
 ## Status
 
-Draft
+Accepted
 
 ## Problem Statement
 
