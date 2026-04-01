@@ -1,5 +1,5 @@
 ---
-status: Planned
+status: Current
 problem: |
   After initial workspace creation, niwa has no mechanism to keep managed repos
   current. Existing repos are skipped on apply, leaving clones at their original
