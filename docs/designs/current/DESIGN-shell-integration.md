@@ -65,6 +65,9 @@ The remaining design questions are:
   changes
 - **Install simplicity**: adding shell integration should be a one-line rc file change
 - **Independence from tsuku**: niwa must work when installed standalone
+- **Shell integration is optional**: niwa must work without the shell function
+  wrapper. Users must be able to explicitly opt in and opt out, with symmetrical
+  install/uninstall commands
 
 ## Decisions Already Made
 
@@ -255,8 +258,8 @@ When niwa runs a cd-eligible command (`create`, `go`) and this variable is unset
 it prints a hint to stderr:
 
 ```
-hint: shell integration not detected. For auto-cd and completions, add to your shell config:
-  eval "$(niwa shell-init auto)"
+hint: shell integration not detected. For auto-cd and completions, run:
+  niwa shell-init install
 ```
 
 The hint fires only on cd-eligible commands when the wrapper is missing — targeted
@@ -315,20 +318,60 @@ deleted and recreated the workspace. If navigation is needed after apply, use
   both newtsuku and resettsuku. Rejected: apply is non-destructive, so post-apply
   navigation is unnecessary. Intercepting apply was already rejected in Decision 3.
 
+### Decision 6: Shell integration optionality and lifecycle
+
+Shell integration is an enhancement, not a requirement. Users need explicit control
+over whether it's enabled, and symmetrical commands to install and uninstall it.
+
+#### Chosen: --no-shell-init flag + shell-init install/uninstall/status subcommands
+
+Three changes:
+
+1. **install.sh gains `--no-shell-init`**. When passed, the env file contains only
+   the PATH export — no delegation to `niwa shell-init auto`. Parallels the existing
+   `--no-modify-path` flag.
+
+2. **`niwa shell-init install`** enables shell integration. Writes the delegation
+   block to `~/.niwa/env` (creating it if needed for tsuku users). If the source
+   line isn't in rc files yet, adds it. This is the explicit opt-in path that
+   replaces the "manually add eval line" instruction.
+
+3. **`niwa shell-init uninstall`** disables shell integration. Rewrites
+   `~/.niwa/env` to contain only the PATH export. The source line in rc files
+   stays (still needed for PATH).
+
+4. **`niwa shell-init status`** reports whether shell integration is active.
+   Checks two things: whether `_NIWA_SHELL_INIT` is set in the current shell
+   (wrapper loaded), and whether `~/.niwa/env` contains the delegation block
+   (will load on next shell).
+
+The runtime hint (Decision 4) becomes: `run 'niwa shell-init install'` instead
+of telling users to manually edit rc files.
+
+#### Alternatives Considered
+
+- **Flag only, no subcommands**: install.sh gets `--no-shell-init` but no way to
+  change afterward. Rejected: users need to enable/disable without re-running
+  the installer.
+
+- **Subcommands only, no flag**: install.sh always installs shell integration;
+  users uninstall afterward. Rejected: CI and containerized environments
+  shouldn't need a post-install cleanup step.
+
 ## Decision Outcome
 
-The five decisions compose into a clean architecture:
+The six decisions compose into a clean architecture:
 
 1. **Protocol**: cd-eligible commands print a bare path to stdout, messages to stderr.
    The shell function captures stdout and cds. Zoxide's pattern, proven and simple.
 
 2. **Distribution (install.sh)**: The existing `~/.niwa/env` file delegates to
    `niwa shell-init auto`, so install.sh users get shell integration automatically
-   on upgrade without changing their rc files.
+   on upgrade without changing their rc files. Skippable with `--no-shell-init`.
 
-3. **Distribution (other methods)**: Users add `eval "$(niwa shell-init auto)"` to
-   their shell config, same as direnv/mise/zoxide. A runtime hint on cd-eligible
-   commands prompts users who haven't set this up.
+3. **Distribution (other methods)**: Users run `niwa shell-init install` to set up
+   shell integration. A runtime hint on cd-eligible commands prompts users who
+   haven't done this.
 
 4. **Scope**: The wrapper intercepts `create` and a new `go` command, covering
    both post-create navigation and workspace/repo jumping. All other commands pass
@@ -337,6 +380,10 @@ The five decisions compose into a clean architecture:
 5. **Landing target**: `create` defaults to instance root with `--cd <repo>` for
    repo-level landing. `apply` has no landing behavior (non-destructive, cwd stays
    valid).
+
+6. **Optionality**: Shell integration is explicitly optional. `--no-shell-init` on
+   install.sh skips it. `niwa shell-init install/uninstall/status` gives users full
+   lifecycle control regardless of how niwa was installed.
 
 The decisions reinforce each other: the stdout protocol keeps the shell function
 simple enough that intercepting two commands is trivial. The `--cd` flag is handled
@@ -381,10 +428,13 @@ User's shell
 
 ### Key Interfaces
 
-**`niwa shell-init <shell|auto>` subcommand** (`internal/cli/shell_init.go`)
-- Arguments: `bash`, `zsh`, or `auto` (detects from environment)
-- Output: shell code to stdout (wrapper function + completions)
-- No side effects (prints only, writes no files)
+**`niwa shell-init` subcommand** (`internal/cli/shell_init.go`)
+- `niwa shell-init bash|zsh|auto` -- print shell code to stdout (wrapper + completions)
+- `niwa shell-init install` -- write delegation block to `~/.niwa/env`, add source
+  line to rc files if absent. Creates env file for tsuku/manual installs.
+- `niwa shell-init uninstall` -- rewrite `~/.niwa/env` to PATH-only (remove delegation)
+- `niwa shell-init status` -- report whether wrapper is loaded (`_NIWA_SHELL_INIT`)
+  and whether env file has delegation block
 
 **Stdout protocol for cd-eligible commands**
 - cd-eligible commands print a single directory path to stdout on success
@@ -455,26 +505,29 @@ For `niwa go example api-service`:
 
 ## Implementation Approach
 
-### Phase 1: Init subcommand and stdout protocol
+### Phase 1: Shell-init subcommand and stdout protocol
 
-Add `niwa shell-init <shell|auto>` that generates the wrapper function and completion
-registration. Change `create.go` to use stdout/stderr discipline and add `--cd` flag.
+Add `niwa shell-init` with all subcommands (bash/zsh/auto for code generation,
+install/uninstall/status for lifecycle). Change `create.go` to use stdout/stderr
+discipline and add `--cd` flag.
 
 Deliverables:
-- `internal/cli/shell_init.go` -- shell-init subcommand with bash/zsh/auto support
+- `internal/cli/shell_init.go` -- shell-init subcommand with bash/zsh/auto,
+  install/uninstall/status
 - `internal/cli/create.go` -- move human output to stderr, path to stdout, add
   `--cd <repo>` flag that resolves repo path after classification pipeline
-- Tests for init output (valid bash/zsh syntax), create stdout protocol, and
-  --cd repo resolution (including ambiguous repo names)
+- Tests for init output (valid bash/zsh syntax), create stdout protocol,
+  --cd repo resolution, and install/uninstall/status behavior
 
-### Phase 2: Env file delegation
+### Phase 2: Env file delegation and install.sh changes
 
 Update `install.sh` to write the new env file content with `command -v` guard
-and `niwa shell-init auto` delegation.
+and `niwa shell-init auto` delegation. Add `--no-shell-init` flag.
 
 Deliverables:
-- `install.sh` -- updated env file template
+- `install.sh` -- updated env file template, `--no-shell-init` flag
 - Test that env file works when niwa is not yet on PATH (PATH-only fallback)
+- Test that `--no-shell-init` produces a PATH-only env file
 
 ### Phase 3: Go command
 
