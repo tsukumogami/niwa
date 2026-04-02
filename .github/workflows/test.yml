@@ -8,6 +8,7 @@ on:
       - 'go.mod'
       - 'go.sum'
       - '.github/workflows/test.yml'
+      - '.tsuku-recipes/**'
   pull_request:
     branches: [main]
     paths:
@@ -15,6 +16,7 @@ on:
       - 'go.mod'
       - 'go.sum'
       - '.github/workflows/test.yml'
+      - '.tsuku-recipes/**'
 
 jobs:
   test:
@@ -44,3 +46,19 @@ jobs:
 
       - name: Test
         run: go test ./...
+
+      - name: Verify shell-init output
+        run: |
+          go build -o niwa-test ./cmd/niwa
+          for shell in bash zsh; do
+            output=$(./niwa-test shell-init "$shell")
+            if [ -z "$output" ]; then
+              echo "::error::niwa shell-init $shell produced empty output"
+              exit 1
+            fi
+            if ! echo "$output" | grep -q 'niwa()'; then
+              echo "::error::niwa shell-init $shell missing wrapper function"
+              exit 1
+            fi
+          done
+          rm niwa-test
