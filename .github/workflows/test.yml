@@ -47,18 +47,36 @@ jobs:
       - name: Test
         run: go test ./...
 
-      - name: Verify shell-init output
+      - name: Install tsuku
+        run: curl -fsSL https://tsuku.dev/install.sh | bash
+
+      - name: Verify shell integration via tsuku install
         run: |
-          go build -o niwa-test ./cmd/niwa
+          export PATH="$HOME/.tsuku/bin:$PATH"
+          eval "$(tsuku shellenv)"
+          tsuku install --recipe .tsuku-recipes/niwa.toml
+
+          # Verify shell.d init files were created
           for shell in bash zsh; do
-            output=$(./niwa-test shell-init "$shell")
-            if [ -z "$output" ]; then
-              echo "::error::niwa shell-init $shell produced empty output"
+            init_file="$HOME/.tsuku/share/shell.d/niwa.$shell"
+            if [ ! -f "$init_file" ]; then
+              echo "::error::$init_file was not created by install_shell_init"
               exit 1
             fi
-            if ! echo "$output" | grep -q 'niwa()'; then
-              echo "::error::niwa shell-init $shell missing wrapper function"
+            if ! grep -q 'niwa()' "$init_file"; then
+              echo "::error::$init_file missing niwa() wrapper function"
+              exit 1
+            fi
+            echo "OK: $init_file exists and contains wrapper function"
+          done
+
+          # Verify tsuku remove cleans up shell.d files
+          tsuku remove niwa
+          for shell in bash zsh; do
+            init_file="$HOME/.tsuku/share/shell.d/niwa.$shell"
+            if [ -f "$init_file" ]; then
+              echo "::error::$init_file was not cleaned up by tsuku remove"
               exit 1
             fi
           done
-          rm niwa-test
+          echo "OK: shell.d files cleaned up after tsuku remove"
