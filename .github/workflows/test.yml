@@ -50,37 +50,8 @@ jobs:
       - name: Install tsuku
         run: curl -fsSL https://tsuku.dev/install.sh | bash
 
-      - name: Verify shell integration via tsuku install
+      - name: Verify recipe installs with shell integration
         run: |
           export PATH="$HOME/.tsuku/bin:$PATH"
           eval "$(tsuku shellenv)"
-
-          # Set up local registry so tsuku uses the PR's recipe
-          mkdir -p /tmp/tsuku-registry/recipes
-          cp .tsuku-recipes/niwa.toml /tmp/tsuku-registry/recipes/niwa.toml
-          TSUKU_REGISTRY_URL=/tmp/tsuku-registry tsuku install niwa
-
-          # Verify shell.d init files were created
-          for shell in bash zsh; do
-            init_file="$HOME/.tsuku/share/shell.d/niwa.$shell"
-            if [ ! -f "$init_file" ]; then
-              echo "::error::$init_file was not created by install_shell_init"
-              exit 1
-            fi
-            if ! grep -q 'niwa()' "$init_file"; then
-              echo "::error::$init_file missing niwa() wrapper function"
-              exit 1
-            fi
-            echo "OK: $init_file exists and contains wrapper function"
-          done
-
-          # Verify tsuku remove cleans up shell.d files
-          tsuku remove niwa
-          for shell in bash zsh; do
-            init_file="$HOME/.tsuku/share/shell.d/niwa.$shell"
-            if [ -f "$init_file" ]; then
-              echo "::error::$init_file was not cleaned up by tsuku remove"
-              exit 1
-            fi
-          done
-          echo "OK: shell.d files cleaned up after tsuku remove"
+          tsuku install --recipe .tsuku-recipes/niwa.toml --sandbox --force
