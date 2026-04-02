@@ -54,7 +54,11 @@ jobs:
         run: |
           export PATH="$HOME/.tsuku/bin:$PATH"
           eval "$(tsuku shellenv)"
-          tsuku install --recipe .tsuku-recipes/niwa.toml
+
+          # Set up local registry so tsuku uses the PR's recipe
+          mkdir -p /tmp/tsuku-registry/recipes
+          cp .tsuku-recipes/niwa.toml /tmp/tsuku-registry/recipes/niwa.toml
+          TSUKU_REGISTRY_URL=/tmp/tsuku-registry tsuku install niwa
 
           # Verify shell.d init files were created
           for shell in bash zsh; do
