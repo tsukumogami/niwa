@@ -21,12 +21,6 @@ files = ["niwa-{os}-{arch}"]
 action = "install_binaries"
 outputs = [{src = "niwa-{os}-{arch}", dest = "bin/niwa"}]
 
-[[steps]]
-action = "install_shell_init"
-phase = "post-install"
-source_command = "niwa shell-init {shell}"
-target = "niwa"
-shells = ["bash", "zsh"]
 
 [verify]
 command = "niwa version"

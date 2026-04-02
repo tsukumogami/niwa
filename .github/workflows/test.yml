@@ -47,9 +47,6 @@ jobs:
       - name: Test
         run: go test ./...
 
-      - name: Install tsuku
-        run: curl -fsSL https://tsuku.dev/install.sh | bash
-
       - name: Verify shell-init output
         run: |
           go build -o niwa-test ./cmd/niwa
@@ -66,36 +63,3 @@ jobs:
             echo "OK: shell-init $shell produces valid wrapper output"
           done
           rm niwa-test
-
-      - name: Verify recipe installs via tsuku
-        run: |
-          export PATH="$HOME/.tsuku/bin:$PATH"
-          eval "$(tsuku shellenv)"
-          tsuku install tsukumogami/niwa:niwa --force
-
-          # Verify shell.d init files if install_shell_init ran.
-          # The distributed source fetches the recipe from main. Once the
-          # install_shell_init step is on main, this validates the full
-          # lifecycle. Until then it validates recipe parsing and install.
-          # Full e2e blocked by tsukumogami/tsuku#2218 (--recipe skips
-          # post-install phase).
-          for shell in bash zsh; do
-            init_file="$HOME/.tsuku/share/shell.d/niwa.$shell"
-            if [ -f "$init_file" ]; then
-              if ! grep -q 'niwa()' "$init_file"; then
-                echo "::error::$init_file missing niwa() wrapper function"
-                exit 1
-              fi
-              echo "OK: $init_file exists and contains wrapper function"
-            fi
-          done
-
-          tsuku remove niwa
-          for shell in bash zsh; do
-            init_file="$HOME/.tsuku/share/shell.d/niwa.$shell"
-            if [ -f "$init_file" ]; then
-              echo "::error::$init_file was not cleaned up by tsuku remove"
-              exit 1
-            fi
-          done
-          echo "OK: tsuku install/remove cycle completed successfully"
