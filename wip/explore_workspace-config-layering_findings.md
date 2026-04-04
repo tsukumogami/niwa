@@ -40,6 +40,8 @@ How should niwa support a personal config layer -- a user-owned GitHub repo that
 
 User confirmed personal config is a distinct concept from host-level overrides (user identity vs machine identity). Plugins should union across layers for user-friendliness. The team is ready to move to design artifact production.
 
+## Decision: Crystallize
+
 ## Accumulated Understanding
 
 The problem is well-understood: team workspaces mix personal preferences and user-specific secrets with shared config, making them hard to share. The solution is a two-layer model: shared workspace config (existing, GitHub-backed) + personal config layer (new, user-owned GitHub repo, synced at apply time).
