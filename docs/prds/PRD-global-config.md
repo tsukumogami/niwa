@@ -64,7 +64,7 @@ As a CI/CD operator, I initialize the workspace instance with `niwa init --skip-
 ### Functional
 
 **R1: Global config registration.**
-niwa provides a `niwa config set global <repo>` command that registers a GitHub-backed global config repo for the current machine. Registration is stored in the machine-level niwa config file. The repo is cloned locally at registration time. Running the command when global config is already registered silently updates the registration to the new repo.
+niwa provides a `niwa config set global <repo>` command that registers a GitHub-backed global config repo for the current machine. Registration and the local clone path are stored in `~/.config/niwa/config.toml` (XDG_CONFIG_HOME aware). The repo is cloned to `$XDG_CONFIG_HOME/niwa/global/` at registration time. Running the command when global config is already registered silently updates the registration and re-clones from the new repo URL. If the new repo is unreachable at registration time, the command fails and the previous registration is preserved.
 
 **R2: Global config schema.**
 The global config repo supports two scopes:
@@ -86,7 +86,7 @@ Global env vars take precedence over workspace env vars on a per-key basis. If g
 Global plugins are added to workspace plugins -- they do not replace them. Both global and workspace plugins are active after apply.
 
 **R7: Managed files layering.**
-Global managed files take precedence over workspace managed files on a per-source basis. A global config can suppress a workspace-managed file by mapping it to an empty value.
+Global managed files take precedence over workspace managed files on a per-source basis. A global config can suppress a workspace-managed file by mapping its source key to an empty string (`""`). The suppressed file is not written to the instance during apply.
 
 **R8: Global Claude instructions.**
 A file named `CLAUDE.global.md` in the global config repo root is injected into each workspace instance's CLAUDE.md context via an import directive at apply time. This file applies across all workspaces where global config is enabled. Global Claude content is additive -- it does not replace or override shared workspace CLAUDE.md content.
@@ -98,7 +98,7 @@ Marketplace configuration is workspace-wide and cannot be overridden by global c
 `niwa init` accepts a `--skip-global` flag that permanently disables global config for the initialized instance. The opt-out is stored in instance state and persists for the lifetime of the instance -- subsequent `niwa apply` calls on that instance always skip global config without requiring the flag again.
 
 **R11: Sync failure handling.**
-If global config sync fails at apply time, the apply aborts and prints an error with actionable guidance (e.g., check network access, verify repo permissions). Apply does not proceed with stale global config.
+If the global config repo pull fails at apply time, the apply aborts and prints an error that identifies whether the failure is a network issue, an authentication failure, or a missing repo. Apply does not proceed with stale global config.
 
 **R12: Unregistration.**
 `niwa config unset global` removes global config registration from the machine-level config and deletes the local clone.
@@ -106,7 +106,7 @@ If global config sync fails at apply time, the apply aborts and prints an error 
 ### Non-functional
 
 **R13: Registration is machine-scoped.**
-Global config registration is stored in the machine-level niwa config, not in workspace or instance config. It applies to all global-config-enabled instances on the machine.
+Global config registration is stored in `~/.config/niwa/config.toml` (the machine-level niwa config), not in workspace or instance config. It applies to all global-config-enabled instances on the machine. If global config is unregistered while instances exist that were initialized with it enabled, those instances skip global config on subsequent applies without error.
 
 **R14: Global config does not affect workspace structural settings.**
 Global config cannot modify workspace source discovery (GitHub org sources), group definitions, or workspace metadata. These remain workspace-only.
@@ -131,6 +131,11 @@ The existing `--allow-dirty` flag on `niwa apply` bypasses the dirty-state check
 - [ ] `niwa apply --allow-dirty` bypasses the dirty-state check for both workspace config and global config
 - [ ] `niwa config unset global` removes the registration and local clone; subsequent applies on enabled instances run without global config
 - [ ] Per-workspace global config sections apply only to the workspace with the matching name
+- [ ] Per-workspace global config sections do not apply to workspaces with a different name
+- [ ] A workspace-managed file whose source key is mapped to an empty string in global config is not written to the instance after apply
+- [ ] Declaring marketplace configuration in global config has no effect on the applied marketplace settings (workspace marketplace config is unchanged)
+- [ ] If global config is unregistered and `niwa apply` is run on an instance that was previously initialized with global config enabled, apply completes without error using workspace config only
+- [ ] `niwa apply` with a global config repo that has uncommitted local changes fails unless `--allow-dirty` is passed
 - [ ] Workspace config source discovery, group definitions, and workspace metadata are unchanged by global config
 
 ## Out of scope
