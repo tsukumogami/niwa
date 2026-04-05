@@ -96,6 +96,14 @@ func runApply(cmd *cobra.Command, args []string) error {
 	gh := github.NewAPIClient(token)
 	applier := workspace.NewApplier(gh)
 	applier.NoPull = applyNoPull
+	applier.AllowDirty = applyAllowDirty
+
+	// Wire global config if registered and reachable.
+	if globalCfg, gErr := config.LoadGlobalConfig(); gErr == nil && globalCfg.GlobalConfig.Repo != "" {
+		if gDir, gErr := config.GlobalConfigDir(); gErr == nil {
+			applier.GlobalConfigDir = gDir
+		}
+	}
 
 	// Apply to each instance, collecting errors instead of aborting on first failure.
 	var applyErrors []instanceError

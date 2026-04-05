@@ -541,3 +541,227 @@ func TestMergeOverridesFilesRemoval(t *testing.T) {
 		t.Errorf("expected plan.md unchanged, got %v", eff.Files["ext/plan.md"])
 	}
 }
+
+// --- ResolveGlobalOverride tests ---
+
+func TestResolveGlobalOverrideNoWorkspace(t *testing.T) {
+	g := &config.GlobalConfigOverride{
+		Global: config.GlobalOverride{
+			Env: config.EnvConfig{Vars: map[string]string{"LANG": "en"}},
+		},
+	}
+	result := ResolveGlobalOverride(g, "nonexistent")
+	if result.Env.Vars["LANG"] != "en" {
+		t.Errorf("expected global LANG=en, got %q", result.Env.Vars["LANG"])
+	}
+}
+
+func TestResolveGlobalOverrideNil(t *testing.T) {
+	result := ResolveGlobalOverride(nil, "anything")
+	if result.Claude != nil || len(result.Env.Files) > 0 || len(result.Files) > 0 {
+		t.Error("expected zero value for nil input")
+	}
+}
+
+func TestResolveGlobalOverrideWorkspaceVarsWin(t *testing.T) {
+	g := &config.GlobalConfigOverride{
+		Global: config.GlobalOverride{
+			Env: config.EnvConfig{Vars: map[string]string{"TOKEN": "global"}},
+		},
+		Workspaces: map[string]config.GlobalOverride{
+			"my-ws": {
+				Env: config.EnvConfig{Vars: map[string]string{"TOKEN": "ws-specific"}},
+			},
+		},
+	}
+	result := ResolveGlobalOverride(g, "my-ws")
+	if result.Env.Vars["TOKEN"] != "ws-specific" {
+		t.Errorf("workspace TOKEN should win, got %q", result.Env.Vars["TOKEN"])
+	}
+}
+
+// --- MergeGlobalOverride tests ---
+
+func TestMergeGlobalOverrideHooksAppend(t *testing.T) {
+	globalDir := "/global/config"
+	ws := &config.WorkspaceConfig{
+		Workspace: config.WorkspaceMeta{Name: "test"},
+		Claude: config.ClaudeConfig{
+			Hooks: config.HooksConfig{
+				"pre_tool_use": {
+					{Scripts: []string{"ws-hook.sh"}},
+				},
+			},
+		},
+	}
+	g := config.GlobalOverride{
+		Claude: &config.ClaudeConfig{
+			Hooks: config.HooksConfig{
+				"pre_tool_use": {
+					{Scripts: []string{"global/gate.sh"}},
+				},
+			},
+		},
+	}
+	merged := MergeGlobalOverride(ws, g, globalDir)
+
+	entries := merged.Claude.Hooks["pre_tool_use"]
+	if len(entries) != 2 {
+		t.Fatalf("expected 2 hook entries, got %d", len(entries))
+	}
+	// Workspace hook first.
+	if entries[0].Scripts[0] != "ws-hook.sh" {
+		t.Errorf("first hook should be workspace, got %q", entries[0].Scripts[0])
+	}
+	// Global hook appended, script resolved to absolute path.
+	wantAbs := "/global/config/global/gate.sh"
+	if entries[1].Scripts[0] != wantAbs {
+		t.Errorf("second hook script = %q, want %q", entries[1].Scripts[0], wantAbs)
+	}
+}
+
+func TestMergeGlobalOverrideSettingsGlobalWins(t *testing.T) {
+	ws := &config.WorkspaceConfig{
+		Workspace: config.WorkspaceMeta{Name: "test"},
+		Claude: config.ClaudeConfig{
+			Settings: config.SettingsConfig{"permissions": "ask"},
+		},
+	}
+	g := config.GlobalOverride{
+		Claude: &config.ClaudeConfig{
+			Settings: config.SettingsConfig{"permissions": "bypass"},
+		},
+	}
+	merged := MergeGlobalOverride(ws, g, "/global")
+	if merged.Claude.Settings["permissions"] != "bypass" {
+		t.Errorf("global settings should win, got %q", merged.Claude.Settings["permissions"])
+	}
+}
+
+func TestMergeGlobalOverrideEnvPromoteUnion(t *testing.T) {
+	ws := &config.WorkspaceConfig{
+		Workspace: config.WorkspaceMeta{Name: "test"},
+		Claude: config.ClaudeConfig{
+			Env: config.ClaudeEnvConfig{Promote: []string{"A", "B"}},
+		},
+	}
+	g := config.GlobalOverride{
+		Claude: &config.ClaudeConfig{
+			Env: config.ClaudeEnvConfig{Promote: []string{"B", "C"}},
+		},
+	}
+	merged := MergeGlobalOverride(ws, g, "/global")
+	promote := merged.Claude.Env.Promote
+	seen := make(map[string]bool)
+	for _, k := range promote {
+		seen[k] = true
+	}
+	for _, want := range []string{"A", "B", "C"} {
+		if !seen[want] {
+			t.Errorf("promote should contain %q", want)
+		}
+	}
+}
+
+func TestMergeGlobalOverrideEnvVarsGlobalWins(t *testing.T) {
+	ws := &config.WorkspaceConfig{
+		Workspace: config.WorkspaceMeta{Name: "test"},
+		Claude: config.ClaudeConfig{
+			Env: config.ClaudeEnvConfig{Vars: map[string]string{"LANG": "ws"}},
+		},
+	}
+	g := config.GlobalOverride{
+		Claude: &config.ClaudeConfig{
+			Env: config.ClaudeEnvConfig{Vars: map[string]string{"LANG": "global"}},
+		},
+	}
+	merged := MergeGlobalOverride(ws, g, "/global")
+	if merged.Claude.Env.Vars["LANG"] != "global" {
+		t.Errorf("global env var should win, got %q", merged.Claude.Env.Vars["LANG"])
+	}
+}
+
+func TestMergeGlobalOverridePluginsUnion(t *testing.T) {
+	wsPlugins := []string{"plugA", "plugB"}
+	ws := &config.WorkspaceConfig{
+		Workspace: config.WorkspaceMeta{Name: "test"},
+		Claude:    config.ClaudeConfig{Plugins: &wsPlugins},
+	}
+	globalPlugins := []string{"plugB", "plugC"}
+	g := config.GlobalOverride{
+		Claude: &config.ClaudeConfig{Plugins: &globalPlugins},
+	}
+	merged := MergeGlobalOverride(ws, g, "/global")
+
+	if merged.Claude.Plugins == nil {
+		t.Fatal("merged plugins should not be nil")
+	}
+	pluginSet := make(map[string]bool)
+	for _, p := range *merged.Claude.Plugins {
+		pluginSet[p] = true
+	}
+	for _, want := range []string{"plugA", "plugB", "plugC"} {
+		if !pluginSet[want] {
+			t.Errorf("merged plugins should contain %q", want)
+		}
+	}
+	if len(*merged.Claude.Plugins) != 3 {
+		t.Errorf("expected 3 unique plugins, got %d", len(*merged.Claude.Plugins))
+	}
+}
+
+func TestMergeGlobalOverrideEnvFilesAppend(t *testing.T) {
+	ws := &config.WorkspaceConfig{
+		Workspace: config.WorkspaceMeta{Name: "test"},
+		Env:       config.EnvConfig{Files: []string{"ws.env"}},
+	}
+	g := config.GlobalOverride{
+		Env: config.EnvConfig{Files: []string{"global.env"}},
+	}
+	merged := MergeGlobalOverride(ws, g, "/global")
+	if len(merged.Env.Files) != 2 || merged.Env.Files[0] != "ws.env" || merged.Env.Files[1] != "global.env" {
+		t.Errorf("env files should be [ws.env, global.env], got %v", merged.Env.Files)
+	}
+}
+
+func TestMergeGlobalOverrideFilesGlobalWins(t *testing.T) {
+	ws := &config.WorkspaceConfig{
+		Workspace: config.WorkspaceMeta{Name: "test"},
+		Files:     map[string]string{"key.env": "dest/ws/"},
+	}
+	g := config.GlobalOverride{
+		Files: map[string]string{"key.env": "dest/global/"},
+	}
+	merged := MergeGlobalOverride(ws, g, "/global")
+	if merged.Files["key.env"] != "dest/global/" {
+		t.Errorf("global files should win, got %q", merged.Files["key.env"])
+	}
+}
+
+func TestMergeGlobalOverrideFilesEmptyStringSuppresses(t *testing.T) {
+	ws := &config.WorkspaceConfig{
+		Workspace: config.WorkspaceMeta{Name: "test"},
+		Files:     map[string]string{"key.env": "dest/"},
+	}
+	g := config.GlobalOverride{
+		Files: map[string]string{"key.env": ""},
+	}
+	merged := MergeGlobalOverride(ws, g, "/global")
+	if _, ok := merged.Files["key.env"]; ok {
+		t.Error("empty global value should suppress workspace mapping")
+	}
+}
+
+func TestMergeGlobalOverrideDoesNotMutateInput(t *testing.T) {
+	ws := &config.WorkspaceConfig{
+		Workspace: config.WorkspaceMeta{Name: "test"},
+		Env:       config.EnvConfig{Vars: map[string]string{"X": "original"}},
+	}
+	g := config.GlobalOverride{
+		Env: config.EnvConfig{Vars: map[string]string{"X": "global"}},
+	}
+	_ = MergeGlobalOverride(ws, g, "/global")
+	if ws.Env.Vars["X"] != "original" {
+		t.Error("MergeGlobalOverride should not mutate the input ws")
+	}
+}

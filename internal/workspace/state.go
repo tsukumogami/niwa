@@ -31,6 +31,7 @@ type InstanceState struct {
 	InstanceNumber int                    `json:"instance_number"`
 	Root           string                 `json:"root"`
 	Detached       bool                   `json:"detached,omitempty"`
+	SkipGlobal     bool                   `json:"skip_global,omitempty"`
 	Created        time.Time              `json:"created"`
 	LastApplied    time.Time              `json:"last_applied"`
 	ManagedFiles   []ManagedFile          `json:"managed_files"`

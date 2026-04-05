@@ -13,10 +13,12 @@ import (
 
 // Applier orchestrates the apply pipeline.
 type Applier struct {
-	GitHubClient  github.Client
-	Cloner        *Cloner
-	Materializers []Materializer
-	NoPull        bool
+	GitHubClient    github.Client
+	Cloner          *Cloner
+	Materializers   []Materializer
+	NoPull          bool
+	AllowDirty      bool
+	GlobalConfigDir string // empty string means global config not registered
 }
 
 // NewApplier creates an Applier with the given GitHub client.
@@ -38,9 +40,14 @@ func NewApplier(gh github.Client) *Applier {
 // explicit repos list, discovery fails with a clear error.
 const DefaultMaxRepos = 10
 
+// GlobalConfigOverrideFile is the filename for global config overrides in
+// the global config repo.
+const GlobalConfigOverrideFile = "niwa.toml"
+
 // pipelineOpts configures shared pipeline behavior for Create vs Apply.
 type pipelineOpts struct {
 	existingState *InstanceState
+	skipGlobal    bool
 }
 
 // pipelineResult holds the outputs of the shared pipeline.
@@ -123,6 +130,7 @@ func (a *Applier) Apply(ctx context.Context, cfg *config.WorkspaceConfig, config
 
 	result, err := a.runPipeline(ctx, cfg, configDir, instanceRoot, now, &pipelineOpts{
 		existingState: existingState,
+		skipGlobal:    existingState.SkipGlobal,
 	})
 	if err != nil {
 		return err
@@ -193,6 +201,31 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 	known := KnownRepoNames(cfg, discoveredNames)
 	allWarnings = append(allWarnings, WarnUnknownRepos(cfg, known)...)
 
+	// Step 2a: Sync global config repo if registered and not skipped.
+	if a.GlobalConfigDir != "" && !opts.skipGlobal {
+		if syncErr := SyncConfigDir(a.GlobalConfigDir, a.AllowDirty); syncErr != nil {
+			return nil, fmt.Errorf("syncing global config: %w", syncErr)
+		}
+	}
+
+	// Steps 3a–3c: Load and merge global config override into workspace config.
+	// cfg remains the original for per-instance reads; effectiveCfg carries the merge.
+	effectiveCfg := cfg
+	if a.GlobalConfigDir != "" && !opts.skipGlobal {
+		overridePath := filepath.Join(a.GlobalConfigDir, GlobalConfigOverrideFile)
+		data, readErr := os.ReadFile(overridePath)
+		if readErr == nil {
+			globalOverride, parseErr := config.ParseGlobalConfigOverride(data)
+			if parseErr != nil {
+				return nil, fmt.Errorf("parsing global config override: %w", parseErr)
+			}
+			resolved := ResolveGlobalOverride(globalOverride, cfg.Workspace.Name)
+			effectiveCfg = MergeGlobalOverride(cfg, resolved, a.GlobalConfigDir)
+		} else if !os.IsNotExist(readErr) {
+			return nil, fmt.Errorf("reading global config override: %w", readErr)
+		}
+	}
+
 	// Step 3: Create group directories and clone repos.
 	repoStates := map[string]RepoState{}
 	for _, cr := range classified {
@@ -201,8 +234,8 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 			return nil, fmt.Errorf("creating group directory %s: %w", groupDir, err)
 		}
 
-		cloneURL := RepoCloneURL(cfg, cr.Repo.Name, cr.Repo.SSHURL, cr.Repo.CloneURL)
-		branch := RepoCloneBranch(cfg, cr.Repo.Name)
+		cloneURL := RepoCloneURL(effectiveCfg, cr.Repo.Name, cr.Repo.SSHURL, cr.Repo.CloneURL)
+		branch := RepoCloneBranch(effectiveCfg, cr.Repo.Name)
 
 		targetDir := filepath.Join(groupDir, cr.Repo.Name)
 		cloned, err := a.Cloner.CloneWithBranch(ctx, cloneURL, targetDir, branch)
@@ -212,7 +245,7 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		if cloned {
 			fmt.Printf("cloned %s into %s\n", cr.Repo.Name, targetDir)
 		} else if !a.NoPull {
-			defaultBranch := DefaultBranch(cfg, cr.Repo.Name)
+			defaultBranch := DefaultBranch(effectiveCfg, cr.Repo.Name)
 			result, syncErr := SyncRepo(ctx, targetDir, defaultBranch)
 			switch result.Action {
 			case "pulled":
@@ -238,7 +271,7 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 	}
 
 	// Step 4: Install workspace-level CLAUDE.md.
-	wsFiles, err := InstallWorkspaceContent(cfg, configDir, instanceRoot)
+	wsFiles, err := InstallWorkspaceContent(effectiveCfg, configDir, instanceRoot)
 	if err != nil {
 		return nil, fmt.Errorf("installing workspace content: %w", err)
 	}
@@ -254,13 +287,13 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 	// Step 4.5: Install workspace-root context and settings.
 	// Context file uses @import for level-scoped visibility.
 	// Settings uses settings.json (not .local) since instance root is non-git.
-	ctxFiles, err := InstallWorkspaceContext(cfg, classified, instanceRoot)
+	ctxFiles, err := InstallWorkspaceContext(effectiveCfg, classified, instanceRoot)
 	if err != nil {
 		return nil, fmt.Errorf("installing workspace context: %w", err)
 	}
 	writtenFiles = append(writtenFiles, ctxFiles...)
 
-	rootSettingsFiles, err := InstallWorkspaceRootSettings(cfg, configDir, instanceRoot, repoIndex)
+	rootSettingsFiles, err := InstallWorkspaceRootSettings(effectiveCfg, configDir, instanceRoot, repoIndex)
 	if err != nil {
 		return nil, fmt.Errorf("installing workspace root settings: %w", err)
 	}
@@ -274,22 +307,31 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		}
 		installedGroups[cr.Group] = true
 
-		groupFiles, err := InstallGroupContent(cfg, configDir, instanceRoot, cr.Group)
+		groupFiles, err := InstallGroupContent(effectiveCfg, configDir, instanceRoot, cr.Group)
 		if err != nil {
 			return nil, fmt.Errorf("installing group content for %q: %w", cr.Group, err)
 		}
 		writtenFiles = append(writtenFiles, groupFiles...)
 	}
 
+	// Step 5c: Install global CLAUDE.md content if global config is active.
+	if a.GlobalConfigDir != "" && !opts.skipGlobal {
+		globalFiles, err := InstallGlobalClaudeContent(a.GlobalConfigDir, instanceRoot)
+		if err != nil {
+			return nil, fmt.Errorf("installing global claude content: %w", err)
+		}
+		writtenFiles = append(writtenFiles, globalFiles...)
+	}
+
 	// Step 6: Install repo-level CLAUDE.local.md files (and subdirectories).
 	// Skip repos with claude = false.
 	for _, cr := range classified {
-		if !ClaudeEnabled(cfg, cr.Repo.Name) {
+		if !ClaudeEnabled(effectiveCfg, cr.Repo.Name) {
 			fmt.Printf("skipped content for %s (claude = false)\n", cr.Repo.Name)
 			continue
 		}
 
-		result, err := InstallRepoContent(cfg, configDir, instanceRoot, cr.Group, cr.Repo.Name)
+		result, err := InstallRepoContent(effectiveCfg, configDir, instanceRoot, cr.Group, cr.Repo.Name)
 		if err != nil {
 			return nil, fmt.Errorf("installing repo content for %q: %w", cr.Repo.Name, err)
 		}
@@ -318,7 +360,7 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 	}
 
 	for _, cr := range classified {
-		effective := MergeOverrides(cfg, cr.Repo.Name)
+		effective := MergeOverrides(effectiveCfg, cr.Repo.Name)
 
 		// Merge discovered hooks as base, explicit config wins per event.
 		if len(discoveredHooks) > 0 {
@@ -351,7 +393,7 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 
 		repoDir := filepath.Join(instanceRoot, cr.Group, cr.Repo.Name)
 		mctx := &MaterializeContext{
-			Config:        cfg,
+			Config:        effectiveCfg,
 			Effective:     effective,
 			RepoName:      cr.Repo.Name,
 			RepoDir:       repoDir,
@@ -360,7 +402,7 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 			RepoIndex:     repoIndex,
 		}
 
-		claudeOn := ClaudeEnabled(cfg, cr.Repo.Name)
+		claudeOn := ClaudeEnabled(effectiveCfg, cr.Repo.Name)
 		for _, m := range a.Materializers {
 			// Skip hooks and settings materializers when claude is disabled.
 			if !claudeOn && (m.Name() == "hooks" || m.Name() == "settings") {
@@ -377,7 +419,7 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 
 	// Step 6.75: Run repo-provided setup scripts.
 	for _, cr := range classified {
-		setupDir := ResolveSetupDir(cfg, cr.Repo.Name)
+		setupDir := ResolveSetupDir(effectiveCfg, cr.Repo.Name)
 		repoDir := filepath.Join(instanceRoot, cr.Group, cr.Repo.Name)
 		result := RunSetupScripts(repoDir, setupDir)
 

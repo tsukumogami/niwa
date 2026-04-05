@@ -572,3 +572,110 @@ source = "repos/myrepo.md"
 		})
 	}
 }
+
+func TestParseGlobalConfigOverrideRoundTrip(t *testing.T) {
+	input := `
+[global.claude.settings]
+permissions = "bypass"
+
+[[global.claude.hooks.pre_tool_use]]
+scripts = ["hooks/gate.sh"]
+
+[global.env]
+files = ["shared.env"]
+vars = { LANG = "en_US.UTF-8" }
+
+[global.files]
+"secrets/api.env" = "config/"
+
+[workspaces.my-ws.env.vars]
+MY_TOKEN = "abc"
+`
+	cfg, err := ParseGlobalConfigOverride([]byte(input))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if cfg.Global.Claude == nil {
+		t.Fatal("global.claude should not be nil")
+	}
+	if cfg.Global.Claude.Settings["permissions"] != "bypass" {
+		t.Errorf("global.claude.settings.permissions = %q, want bypass", cfg.Global.Claude.Settings["permissions"])
+	}
+	hooks := cfg.Global.Claude.Hooks["pre_tool_use"]
+	if len(hooks) == 0 || len(hooks[0].Scripts) == 0 || hooks[0].Scripts[0] != "hooks/gate.sh" {
+		t.Errorf("global.claude.hooks.pre_tool_use[0].scripts[0] = %v, want hooks/gate.sh", hooks)
+	}
+	if len(cfg.Global.Env.Files) != 1 || cfg.Global.Env.Files[0] != "shared.env" {
+		t.Errorf("global.env.files = %v, want [shared.env]", cfg.Global.Env.Files)
+	}
+	if cfg.Global.Env.Vars["LANG"] != "en_US.UTF-8" {
+		t.Errorf("global.env.vars.LANG = %q, want en_US.UTF-8", cfg.Global.Env.Vars["LANG"])
+	}
+	if cfg.Global.Files["secrets/api.env"] != "config/" {
+		t.Errorf("global.files[secrets/api.env] = %q, want config/", cfg.Global.Files["secrets/api.env"])
+	}
+	ws, ok := cfg.Workspaces["my-ws"]
+	if !ok {
+		t.Fatal("workspaces.my-ws missing")
+	}
+	if ws.Env.Vars["MY_TOKEN"] != "abc" {
+		t.Errorf("workspaces.my-ws.env.vars.MY_TOKEN = %q, want abc", ws.Env.Vars["MY_TOKEN"])
+	}
+}
+
+func TestParseGlobalConfigOverrideRejectsAbsoluteFileDest(t *testing.T) {
+	input := `
+[global.files]
+"source.env" = "/etc/secrets"
+`
+	_, err := ParseGlobalConfigOverride([]byte(input))
+	if err == nil {
+		t.Fatal("expected error for absolute Files destination, got nil")
+	}
+	if !strings.Contains(err.Error(), "absolute") {
+		t.Errorf("error %q should mention absolute", err.Error())
+	}
+}
+
+func TestParseGlobalConfigOverrideRejectsTraversalFileDest(t *testing.T) {
+	input := `
+[global.files]
+"source.env" = "../../etc/secrets"
+`
+	_, err := ParseGlobalConfigOverride([]byte(input))
+	if err == nil {
+		t.Fatal("expected error for .. Files destination, got nil")
+	}
+	if !strings.Contains(err.Error(), "traversal") {
+		t.Errorf("error %q should mention traversal", err.Error())
+	}
+}
+
+func TestParseGlobalConfigOverrideRejectsAbsoluteEnvFilesSrc(t *testing.T) {
+	input := `
+[global.env]
+files = ["/home/user/secrets.env"]
+`
+	_, err := ParseGlobalConfigOverride([]byte(input))
+	if err == nil {
+		t.Fatal("expected error for absolute Env.Files source, got nil")
+	}
+	if !strings.Contains(err.Error(), "absolute") {
+		t.Errorf("error %q should mention absolute", err.Error())
+	}
+}
+
+func TestParseGlobalConfigOverrideRejectsTraversalEnvFilesSrc(t *testing.T) {
+	input := `
+[global.env]
+files = ["../secrets.env"]
+`
+	_, err := ParseGlobalConfigOverride([]byte(input))
+	if err == nil {
+		t.Fatal("expected error for .. Env.Files source, got nil")
+	}
+	if !strings.Contains(err.Error(), "traversal") {
+		t.Errorf("error %q should mention traversal", err.Error())
+	}
+}

@@ -230,3 +230,60 @@ func TestGlobalConfigPathFallback(t *testing.T) {
 		t.Errorf("path = %q, want %q", path, want)
 	}
 }
+
+func TestGlobalConfigDirRespectsXDG(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", tmpDir)
+
+	dir, err := GlobalConfigDir()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	want := filepath.Join(tmpDir, "niwa", "global")
+	if dir != want {
+		t.Errorf("dir = %q, want %q", dir, want)
+	}
+}
+
+func TestSaveGlobalConfigToFilePermissions(t *testing.T) {
+	tmpDir := t.TempDir()
+	path := filepath.Join(tmpDir, "config.toml")
+
+	cfg := &GlobalConfig{
+		Global: GlobalSettings{CloneProtocol: "ssh"},
+	}
+	if err := SaveGlobalConfigTo(path, cfg); err != nil {
+		t.Fatalf("save error: %v", err)
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat error: %v", err)
+	}
+
+	perm := info.Mode().Perm()
+	if perm != 0o600 {
+		t.Errorf("file permissions = %o, want 0o600", perm)
+	}
+}
+
+func TestGlobalConfigSourceRoundTrip(t *testing.T) {
+	tmpDir := t.TempDir()
+	path := filepath.Join(tmpDir, "config.toml")
+
+	original := &GlobalConfig{
+		GlobalConfig: GlobalConfigSource{Repo: "myorg/my-config"},
+	}
+	if err := SaveGlobalConfigTo(path, original); err != nil {
+		t.Fatalf("save error: %v", err)
+	}
+
+	loaded, err := LoadGlobalConfigFrom(path)
+	if err != nil {
+		t.Fatalf("load error: %v", err)
+	}
+	if loaded.GlobalConfig.Repo != "myorg/my-config" {
+		t.Errorf("GlobalConfig.Repo = %q, want myorg/my-config", loaded.GlobalConfig.Repo)
+	}
+}
