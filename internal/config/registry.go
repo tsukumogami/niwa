@@ -10,8 +10,15 @@ import (
 
 // GlobalConfig is the top-level structure parsed from ~/.config/niwa/config.toml.
 type GlobalConfig struct {
-	Global   GlobalSettings           `toml:"global"`
-	Registry map[string]RegistryEntry `toml:"registry"`
+	Global       GlobalSettings           `toml:"global"`
+	GlobalConfig GlobalConfigSource       `toml:"global_config"`
+	Registry     map[string]RegistryEntry `toml:"registry"`
+}
+
+// GlobalConfigSource records the registered global config repo. The local clone
+// path is derived at runtime from XDG_CONFIG_HOME so it is never stored.
+type GlobalConfigSource struct {
+	Repo string `toml:"repo,omitempty"`
 }
 
 // GlobalSettings holds global niwa settings.
@@ -112,14 +119,15 @@ func SaveGlobalConfig(cfg *GlobalConfig) error {
 }
 
 // SaveGlobalConfigTo writes the global config to the given path, creating
-// parent directories as needed.
+// parent directories as needed. The file is created with 0o600 permissions
+// because config.toml may contain sensitive values like repo URLs.
 func SaveGlobalConfigTo(path string, cfg *GlobalConfig) error {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("creating config directory: %w", err)
 	}
 
-	f, err := os.Create(path)
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
 		return fmt.Errorf("creating global config file: %w", err)
 	}
@@ -130,4 +138,18 @@ func SaveGlobalConfigTo(path string, cfg *GlobalConfig) error {
 		return fmt.Errorf("encoding global config: %w", err)
 	}
 	return nil
+}
+
+// GlobalConfigDir returns the path to the global config clone directory,
+// respecting XDG_CONFIG_HOME. Falls back to ~/.config/niwa/global.
+func GlobalConfigDir() (string, error) {
+	configHome := os.Getenv("XDG_CONFIG_HOME")
+	if configHome == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", fmt.Errorf("determining home directory: %w", err)
+		}
+		configHome = filepath.Join(home, ".config")
+	}
+	return filepath.Join(configHome, "niwa", "global"), nil
 }

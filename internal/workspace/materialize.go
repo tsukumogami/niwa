@@ -73,10 +73,17 @@ func (h *HooksMaterializer) Materialize(ctx *MaterializeContext) ([]string, erro
 		for _, entry := range entries {
 			var installedPaths []string
 			for _, scriptPath := range entry.Scripts {
-				src := filepath.Join(ctx.ConfigDir, scriptPath)
-
-				if err := checkContainment(src, ctx.ConfigDir); err != nil {
-					return nil, fmt.Errorf("hook script %q: %w", scriptPath, err)
+				var src string
+				if filepath.IsAbs(scriptPath) {
+					// Absolute paths originate from global config hooks; they are
+					// pre-validated by ParseGlobalConfigOverride and resolved in
+					// MergeGlobalOverride so no containment check is needed.
+					src = scriptPath
+				} else {
+					src = filepath.Join(ctx.ConfigDir, scriptPath)
+					if err := checkContainment(src, ctx.ConfigDir); err != nil {
+						return nil, fmt.Errorf("hook script %q: %w", scriptPath, err)
+					}
 				}
 
 				targetDir := filepath.Join(ctx.RepoDir, ".claude", "hooks", event)

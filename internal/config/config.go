@@ -248,6 +248,62 @@ func validateContentSource(field, source string) error {
 	return nil
 }
 
+// GlobalOverride defines the global config layer that applies on top of
+// workspace config before per-repo overrides. Fields mirror RepoOverride
+// but omit repo-specific fields (URL, Branch, Group, Scope, SetupDir)
+// and Claude.Enabled.
+type GlobalOverride struct {
+	Claude *ClaudeConfig     `toml:"claude,omitempty"`
+	Env    EnvConfig         `toml:"env,omitempty"`
+	Files  map[string]string `toml:"files,omitempty"`
+}
+
+// GlobalConfigOverride is the top-level structure parsed from the global
+// config repo's niwa.toml (or equivalent). It defines a [global] section
+// applied to all workspaces and per-workspace overrides under [workspaces].
+type GlobalConfigOverride struct {
+	Global     GlobalOverride            `toml:"global"`
+	Workspaces map[string]GlobalOverride `toml:"workspaces"`
+}
+
+// ParseGlobalConfigOverride parses TOML bytes into a GlobalConfigOverride and
+// validates path safety: Files destination values and Env.Files source paths
+// must not contain ".." traversal or be absolute paths.
+func ParseGlobalConfigOverride(data []byte) (*GlobalConfigOverride, error) {
+	var cfg GlobalConfigOverride
+	if err := toml.Unmarshal(data, &cfg); err != nil {
+		return nil, fmt.Errorf("parsing global config override: %w", err)
+	}
+	if err := validateGlobalOverridePaths("global", cfg.Global); err != nil {
+		return nil, err
+	}
+	for name, ws := range cfg.Workspaces {
+		if err := validateGlobalOverridePaths(fmt.Sprintf("workspaces.%s", name), ws); err != nil {
+			return nil, err
+		}
+	}
+	return &cfg, nil
+}
+
+// validateGlobalOverridePaths checks that Files destination values and
+// Env.Files source paths in a GlobalOverride are safe (no ".." or absolute).
+func validateGlobalOverridePaths(prefix string, g GlobalOverride) error {
+	for src, dest := range g.Files {
+		if dest == "" {
+			continue // empty value suppresses a workspace mapping, no destination to validate
+		}
+		if err := validateContentSource(fmt.Sprintf("%s.files[%q]", prefix, src), dest); err != nil {
+			return err
+		}
+	}
+	for _, src := range g.Env.Files {
+		if err := validateContentSource(fmt.Sprintf("%s.env.files", prefix), src); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // validateSubdirKey ensures a subdirectory key resolves within its repo
 // directory and doesn't escape via ".." or absolute path components.
 func validateSubdirKey(repoName, subdir string) error {
