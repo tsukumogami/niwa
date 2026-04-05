@@ -1,5 +1,5 @@
 ---
-status: Accepted
+status: In Progress
 problem: |
   niwa workspace config is a team artifact stored in a shared GitHub repo. This
   makes it impossible to separate user preferences and user-specific credentials
@@ -20,7 +20,7 @@ goals: |
 
 ## Status
 
-Accepted
+In Progress
 
 ## Problem statement
 
