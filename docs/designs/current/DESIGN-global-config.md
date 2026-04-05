@@ -1,5 +1,5 @@
 ---
-status: Planned
+status: Current
 upstream: docs/prds/PRD-global-config.md
 problem: |
   The niwa apply pipeline loads a single workspace config and materializes it to
@@ -27,7 +27,7 @@ rationale: |
 
 ## Status
 
-Accepted
+Current
 
 ## Context and Problem Statement
 
