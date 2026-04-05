@@ -1,0 +1,31 @@
+{
+  "topic": "global-config",
+  "decisions": [
+    {
+      "id": 1,
+      "question": "How should global config be represented as Go types and how does the workspace -> global -> per-repo merge chain work?",
+      "status": "complete",
+      "complexity": "critical",
+      "chosen": "Option B — New GlobalOverride struct",
+      "report": "wip/design_global-config_decision_1_report.md"
+    },
+    {
+      "id": 2,
+      "question": "How should the niwa config set/unset global subcommand be structured in the CLI?",
+      "status": "complete",
+      "complexity": "standard",
+      "chosen": "Option A — niwa config subcommand tree",
+      "report": "wip/design_global-config_decision_2_report.md"
+    },
+    {
+      "id": 3,
+      "question": "How should CLAUDE.global.md be injected into each workspace instance's CLAUDE.md at apply time?",
+      "status": "complete",
+      "complexity": "standard",
+      "chosen": "Option A — Copy file + inject @import",
+      "report": "wip/design_global-config_decision_3_report.md"
+    }
+  ],
+  "cross_validation": "passed",
+  "round": 1
+}
