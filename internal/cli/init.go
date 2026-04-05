@@ -14,9 +14,13 @@ import (
 func init() {
 	rootCmd.AddCommand(initCmd)
 	initCmd.Flags().StringVar(&initFrom, "from", "", "org/repo or URL to clone workspace config from")
+	initCmd.Flags().BoolVar(&initSkipGlobal, "skip-global", false, "disable global config overlay for this instance")
 }
 
-var initFrom string
+var (
+	initFrom       string
+	initSkipGlobal bool
+)
 
 var initCmd = &cobra.Command{
 	Use:   "init [name]",
@@ -159,6 +163,19 @@ func runInit(cmd *cobra.Command, args []string) error {
 		globalCfg.SetRegistryEntry(registryName, entry)
 		if err := config.SaveGlobalConfig(globalCfg); err != nil {
 			fmt.Fprintf(os.Stderr, "warning: could not update registry: %v\n", err)
+		}
+	}
+
+	// If --skip-global was requested, write instance state with SkipGlobal: true.
+	// This lets the user pre-configure the current directory as an instance root
+	// that opts out of global config before the first apply.
+	if initSkipGlobal {
+		state := &workspace.InstanceState{
+			SchemaVersion: workspace.SchemaVersion,
+			SkipGlobal:    true,
+		}
+		if saveErr := workspace.SaveState(cwd, state); saveErr != nil {
+			fmt.Fprintf(os.Stderr, "warning: could not write instance state: %v\n", saveErr)
 		}
 	}
 

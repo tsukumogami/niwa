@@ -14,6 +14,9 @@ import (
 const workspaceContextFile = "workspace-context.md"
 const workspaceContextImport = "@workspace-context.md"
 
+const globalClaudeFile = "CLAUDE.global.md"
+const globalClaudeImport = "@CLAUDE.global.md"
+
 // InstallWorkspaceContext generates a workspace context file at the instance
 // root and adds an @import to the workspace CLAUDE.md. The @import resolves
 // at the instance root but silently fails in child repos (the file doesn't
@@ -95,7 +98,12 @@ func InstallWorkspaceRootSettings(cfg *config.WorkspaceConfig, configDir, instan
 			for _, entry := range entries {
 				var installedPaths []string
 				for _, script := range entry.Scripts {
-					src := filepath.Join(configDir, script)
+					var src string
+					if filepath.IsAbs(script) {
+						src = script
+					} else {
+						src = filepath.Join(configDir, script)
+					}
 					targetName := filepath.Base(script)
 					targetDir := filepath.Join(instanceRoot, ".claude", "hooks", event)
 					target := filepath.Join(targetDir, targetName)
@@ -174,6 +182,32 @@ func InstallWorkspaceRootSettings(cfg *config.WorkspaceConfig, configDir, instan
 	})
 
 	return written, nil
+}
+
+// InstallGlobalClaudeContent copies CLAUDE.global.md from the global config
+// directory into the instance root and adds an @import directive to CLAUDE.md.
+// Returns nil, nil when CLAUDE.global.md does not exist in globalConfigDir.
+func InstallGlobalClaudeContent(globalConfigDir, instanceRoot string) ([]string, error) {
+	srcPath := filepath.Join(globalConfigDir, globalClaudeFile)
+	data, err := os.ReadFile(srcPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("reading %s: %w", globalClaudeFile, err)
+	}
+
+	destPath := filepath.Join(instanceRoot, globalClaudeFile)
+	if err := os.WriteFile(destPath, data, 0o644); err != nil {
+		return nil, fmt.Errorf("writing %s: %w", globalClaudeFile, err)
+	}
+
+	claudePath := filepath.Join(instanceRoot, "CLAUDE.md")
+	if err := ensureImportInCLAUDE(claudePath, globalClaudeImport); err != nil {
+		return nil, fmt.Errorf("adding global claude import: %w", err)
+	}
+
+	return []string{destPath}, nil
 }
 
 // resolveEnvFromConfig resolves env vars from config files without a full

@@ -2,6 +2,7 @@ package workspace
 
 import (
 	"maps"
+	"path/filepath"
 	"slices"
 
 	"github.com/tsukumogami/niwa/internal/config"
@@ -209,6 +210,246 @@ func MergeInstanceOverrides(ws *config.WorkspaceConfig) EffectiveConfig {
 	}
 
 	return result
+}
+
+// ResolveGlobalOverride merges the flat [global] section with any
+// [workspaces.<workspaceName>] override and returns the result as a single
+// GlobalOverride. Workspace-specific values win per field. Returns the flat
+// [global] section unchanged when no matching workspace entry exists.
+func ResolveGlobalOverride(g *config.GlobalConfigOverride, workspaceName string) config.GlobalOverride {
+	if g == nil {
+		return config.GlobalOverride{}
+	}
+	base := g.Global
+	ws, ok := g.Workspaces[workspaceName]
+	if !ok {
+		return base
+	}
+
+	result := config.GlobalOverride{
+		Claude: base.Claude,
+		Env:    copyEnv(base.Env),
+		Files:  copyStringMap(base.Files),
+	}
+
+	// Claude: workspace-specific wins per field.
+	if ws.Claude != nil {
+		if base.Claude == nil {
+			result.Claude = ws.Claude
+		} else {
+			merged := *base.Claude
+			if ws.Claude.Enabled != nil {
+				merged.Enabled = ws.Claude.Enabled
+			}
+			// Settings: ws wins per key.
+			if len(ws.Claude.Settings) > 0 {
+				if merged.Settings == nil {
+					merged.Settings = config.SettingsConfig{}
+				}
+				for k, v := range ws.Claude.Settings {
+					merged.Settings[k] = v
+				}
+			}
+			// Hooks: ws wins per event (replace, not append).
+			if len(ws.Claude.Hooks) > 0 {
+				if merged.Hooks == nil {
+					merged.Hooks = config.HooksConfig{}
+				}
+				for k, v := range ws.Claude.Hooks {
+					merged.Hooks[k] = v
+				}
+			}
+			// Plugins: ws wins.
+			if ws.Claude.Plugins != nil {
+				merged.Plugins = ws.Claude.Plugins
+			}
+			// Claude.Env.Promote: union.
+			if len(ws.Claude.Env.Promote) > 0 {
+				seen := make(map[string]bool)
+				for _, k := range merged.Env.Promote {
+					seen[k] = true
+				}
+				for _, k := range ws.Claude.Env.Promote {
+					if !seen[k] {
+						merged.Env.Promote = append(merged.Env.Promote, k)
+					}
+				}
+			}
+			// Claude.Env.Vars: ws wins.
+			for k, v := range ws.Claude.Env.Vars {
+				if merged.Env.Vars == nil {
+					merged.Env.Vars = map[string]string{}
+				}
+				merged.Env.Vars[k] = v
+			}
+			result.Claude = &merged
+		}
+	}
+
+	// Env.Files: append ws files.
+	if len(ws.Env.Files) > 0 {
+		result.Env.Files = append(result.Env.Files, ws.Env.Files...)
+	}
+	// Env.Vars: ws wins per key.
+	for k, v := range ws.Env.Vars {
+		if result.Env.Vars == nil {
+			result.Env.Vars = map[string]string{}
+		}
+		result.Env.Vars[k] = v
+	}
+
+	// Files: ws wins per key.
+	for k, v := range ws.Files {
+		if result.Files == nil {
+			result.Files = map[string]string{}
+		}
+		result.Files[k] = v
+	}
+
+	return result
+}
+
+// MergeGlobalOverride applies a resolved GlobalOverride on top of a workspace
+// config baseline and returns a new *WorkspaceConfig. The input ws is never
+// mutated. The globalConfigDir is used to resolve hook script paths to absolute
+// paths so the HooksMaterializer can locate them without knowing their origin.
+//
+// Merge semantics:
+//   - Claude.Hooks: global hooks appended after workspace hooks; scripts
+//     resolved to absolute paths using globalConfigDir.
+//   - Claude.Settings: global value wins per key.
+//   - Claude.Env.Promote: union (no entries dropped).
+//   - Claude.Env.Vars: global value wins per key.
+//   - Claude.Plugins: global plugins unioned with workspace plugins (deduplicated).
+//   - Env.Files: global files appended after workspace files.
+//   - Env.Vars: global value wins per key.
+//   - Files: global value wins per key; empty global value suppresses workspace mapping.
+func MergeGlobalOverride(ws *config.WorkspaceConfig, g config.GlobalOverride, globalConfigDir string) *config.WorkspaceConfig {
+	// Deep-copy the workspace config so we never mutate the original.
+	merged := *ws
+	merged.Claude = *copyClaudeConfigFull(&ws.Claude)
+	merged.Env = copyEnv(ws.Env)
+	merged.Files = copyStringMap(ws.Files)
+
+	// Claude overrides.
+	if g.Claude != nil {
+		// Hooks: append global hooks after workspace hooks; resolve scripts to absolute paths.
+		for event, entries := range g.Claude.Hooks {
+			absEntries := make([]config.HookEntry, 0, len(entries))
+			for _, e := range entries {
+				absScripts := make([]string, 0, len(e.Scripts))
+				for _, s := range e.Scripts {
+					if filepath.IsAbs(s) {
+						absScripts = append(absScripts, s)
+					} else {
+						absScripts = append(absScripts, filepath.Join(globalConfigDir, s))
+					}
+				}
+				absEntries = append(absEntries, config.HookEntry{
+					Matcher: e.Matcher,
+					Scripts: absScripts,
+				})
+			}
+			if merged.Claude.Hooks == nil {
+				merged.Claude.Hooks = config.HooksConfig{}
+			}
+			merged.Claude.Hooks[event] = append(merged.Claude.Hooks[event], absEntries...)
+		}
+
+		// Settings: global wins per key.
+		for k, v := range g.Claude.Settings {
+			if merged.Claude.Settings == nil {
+				merged.Claude.Settings = config.SettingsConfig{}
+			}
+			merged.Claude.Settings[k] = v
+		}
+
+		// Claude.Env.Promote: union.
+		if len(g.Claude.Env.Promote) > 0 {
+			seen := make(map[string]bool)
+			for _, k := range merged.Claude.Env.Promote {
+				seen[k] = true
+			}
+			for _, k := range g.Claude.Env.Promote {
+				if !seen[k] {
+					merged.Claude.Env.Promote = append(merged.Claude.Env.Promote, k)
+				}
+			}
+		}
+
+		// Claude.Env.Vars: global wins per key.
+		for k, v := range g.Claude.Env.Vars {
+			if merged.Claude.Env.Vars == nil {
+				merged.Claude.Env.Vars = map[string]string{}
+			}
+			merged.Claude.Env.Vars[k] = v
+		}
+
+		// Plugins: union, deduplicated; workspace plugins are never removed.
+		if g.Claude.Plugins != nil {
+			existing := make(map[string]bool)
+			if merged.Claude.Plugins != nil {
+				for _, p := range *merged.Claude.Plugins {
+					existing[p] = true
+				}
+			}
+			var combined []string
+			if merged.Claude.Plugins != nil {
+				combined = slices.Clone(*merged.Claude.Plugins)
+			}
+			for _, p := range *g.Claude.Plugins {
+				if !existing[p] {
+					combined = append(combined, p)
+					existing[p] = true
+				}
+			}
+			merged.Claude.Plugins = &combined
+		}
+	}
+
+	// Env.Files: append global files after workspace files.
+	if len(g.Env.Files) > 0 {
+		merged.Env.Files = append(merged.Env.Files, g.Env.Files...)
+	}
+
+	// Env.Vars: global wins per key.
+	for k, v := range g.Env.Vars {
+		if merged.Env.Vars == nil {
+			merged.Env.Vars = map[string]string{}
+		}
+		merged.Env.Vars[k] = v
+	}
+
+	// Files: global wins per key; empty global value suppresses workspace mapping.
+	for k, v := range g.Files {
+		if merged.Files == nil {
+			merged.Files = map[string]string{}
+		}
+		if v == "" {
+			delete(merged.Files, k)
+		} else {
+			merged.Files[k] = v
+		}
+	}
+
+	return &merged
+}
+
+// copyClaudeConfigFull returns a deep copy of a ClaudeConfig pointer, including
+// all nested fields. Returns a pointer to a zero-value ClaudeConfig if nil.
+func copyClaudeConfigFull(c *config.ClaudeConfig) *config.ClaudeConfig {
+	if c == nil {
+		return &config.ClaudeConfig{}
+	}
+	out := *c
+	out.Hooks = copyHooks(c.Hooks)
+	out.Settings = copySettings(c.Settings)
+	out.Env = copyClaudeEnv(c.Env)
+	if c.Plugins != nil {
+		p := slices.Clone(*c.Plugins)
+		out.Plugins = &p
+	}
+	return &out
 }
 
 // ClaudeEnabled returns whether Claude content installation (CLAUDE.local.md,
