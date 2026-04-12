@@ -271,14 +271,33 @@ return $__niwa_rc
 ```go
 // writeLandingPath writes path to NIWA_RESPONSE_FILE if set,
 // or to stdout otherwise (for backward compat with scripts).
+// NIWA_RESPONSE_FILE must point inside $TMPDIR or /tmp; other paths are rejected.
 func writeLandingPath(cmd *cobra.Command, path string) error {
     if f := os.Getenv("NIWA_RESPONSE_FILE"); f != "" {
+        tmpDir := os.Getenv("TMPDIR")
+        if tmpDir == "" {
+            tmpDir = "/tmp"
+        }
+        if !strings.HasPrefix(f, tmpDir+"/") && !strings.HasPrefix(f, "/tmp/") {
+            return fmt.Errorf("NIWA_RESPONSE_FILE %q is outside temp directory", f)
+        }
         return os.WriteFile(f, []byte(path+"\n"), 0o600)
     }
     fmt.Fprintln(cmd.OutOrStdout(), path)
     return nil
 }
 ```
+
+The CLI must also unset `NIWA_RESPONSE_FILE` from its own environment before
+spawning any subprocess, to prevent inheritance:
+
+```go
+os.Unsetenv("NIWA_RESPONSE_FILE")
+```
+
+This call belongs in the CLI initialisation path (e.g., `PersistentPreRunE` on
+the root command) so it runs before any subprocess exec, regardless of which
+command is invoked.
 
 ### Data Flow
 
@@ -322,18 +341,29 @@ Deliverables:
 
 ### Phase 3: Fix existing stdout pollution (issue #48)
 
-Route subprocess stdout to stderr in `internal/workspace/`: `apply.go` (6
-`fmt.Printf` calls), `clone.go` (lines 61, 70), `setup.go` (line 105),
-`sync.go` (lines 68, 88), `configsync.go` (line 42). This is belt-and-suspenders
-— the new protocol doesn't require clean stdout, but correct routing is good
-practice and keeps the old stdout-capture path working for scripts.
+Route workspace progress output away from stdout. Two distinct pollution types
+need separate fixes:
+
+**Direct writes in `apply.go`**: six `fmt.Printf` progress lines ("cloned X",
+"pulled Y", "skipped Z") write directly to process stdout. Change these to
+`fmt.Fprintf(os.Stderr, ...)`.
+
+**Subprocess stdout routing in `clone.go`, `setup.go`, `sync.go`,
+`configsync.go`**: these files set `cmd.Stdout = os.Stdout` on exec.Cmd
+instances, causing subprocess stdout (git clone progress, hook output, git
+pull) to inherit the process's stdout fd. Change `cmd.Stdout = os.Stdout`
+to `cmd.Stdout = os.Stderr` in each.
+
+This is belt-and-suspenders — the new protocol doesn't require clean stdout,
+but correct routing is good practice and keeps the old stdout-capture path
+working for scripts that call `$(niwa go ...)` directly without the wrapper.
 
 Deliverables:
-- Updated `internal/workspace/apply.go`
-- Updated `internal/workspace/clone.go`
-- Updated `internal/workspace/setup.go`
-- Updated `internal/workspace/sync.go`
-- Updated `internal/workspace/configsync.go`
+- Updated `internal/workspace/apply.go` (6 `fmt.Printf` → `fmt.Fprintf(os.Stderr, ...)`)
+- Updated `internal/workspace/clone.go` (`cmd.Stdout = os.Stdout` → `cmd.Stdout = os.Stderr`, lines 61 and 70)
+- Updated `internal/workspace/setup.go` (`cmd.Stdout = os.Stdout` → `cmd.Stdout = os.Stderr`, line 105)
+- Updated `internal/workspace/sync.go` (`cmd.Stdout = os.Stdout` → `cmd.Stdout = os.Stderr`, lines 68 and 88)
+- Updated `internal/workspace/configsync.go` (`cmd.Stdout = os.Stdout` → `cmd.Stdout = os.Stderr`, line 42)
 
 ## Security Considerations
 
@@ -341,16 +371,21 @@ The primary security surface is the temp file lifecycle and the `NIWA_RESPONSE_F
 trust model.
 
 **NIWA_RESPONSE_FILE injection.** A process that can set environment variables
-before invoking niwa (e.g., a compromised build tool or CI runner) could point
-`NIWA_RESPONSE_FILE` at an arbitrary file. The Go binary would then write the
-landing path — an absolute directory path string — to that file. The attacker
-cannot control what gets written; they can only cause niwa to overwrite a file
-with a workspace path. If the target file is sensitive (e.g., `~/.bashrc`),
-this is destructive but not a code-execution vector. The implementation should
-validate that `NIWA_RESPONSE_FILE` points inside `$TMPDIR` or `/tmp` before
-writing, preventing confused-deputy writes outside the temp directory.
-`NIWA_RESPONSE_FILE` should be documented as an internal protocol variable not
-intended for direct use.
+before invoking niwa (e.g., a CI runner propagating the variable from an outer
+session) could point `NIWA_RESPONSE_FILE` at an arbitrary file. The destructive
+case is concrete: if it points at `~/.bashrc`, niwa overwrites it with a
+workspace path string. Two required mitigations:
+
+1. `writeLandingPath` must validate that the path begins with `$TMPDIR` (or
+   `/tmp` as fallback) and reject anything outside the temp directory with an
+   error rather than silently writing.
+2. The Go binary must unset `NIWA_RESPONSE_FILE` from its own environment
+   before spawning any subprocess (git, gh, setup hooks). Every child process
+   inherits the variable otherwise. A buggy or malicious child that writes to
+   the path before the wrapper reads it would redirect the `cd` target.
+
+`NIWA_RESPONSE_FILE` must be documented as an internal protocol variable not
+intended for direct use by callers.
 
 **Temp file TOCTOU and symlink attacks.** Between `mktemp` creating the file
 and the Go binary writing to it, an attacker could attempt to replace the file
@@ -395,14 +430,13 @@ or new dependencies.
   Users on the old wrapper continue to see broken navigation until they upgrade.
 - A temp file is created and destroyed for every `create` or `go` invocation,
   adding a filesystem operation per call (negligible in practice).
-- `NIWA_RESPONSE_FILE` leaks into the subprocess environment. A subprocess that
-  happens to read it could misinterpret it — contrived given the name, but worth
-  noting.
+- `NIWA_RESPONSE_FILE` is inherited by every subprocess niwa spawns unless
+  explicitly unset. This is mitigated by the required unsetting step in Phase 1.
 
 ### Mitigations
 
 - Release notes must prominently document the required `niwa shell-init install`
   re-run. The `shell-init status` command can detect old wrappers and warn.
 - Temp file overhead is immaterial for interactive CLI use.
-- The env var can be unset before spawning subprocesses if isolation becomes a
-  concern in the future.
+- `NIWA_RESPONSE_FILE` is unset from the Go process environment before any
+  subprocess exec (required, not optional — see Security Considerations).
