@@ -3,6 +3,7 @@ package cli
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -38,6 +39,9 @@ func captureNiwaResponseFile() error {
 // When NIWA_RESPONSE_FILE was absent, the path is written to stdout (one line),
 // preserving backward compatibility with scripts that call niwa directly via
 // command substitution (e.g., `dir=$(niwa go workspace)`).
+//
+// Must be called after the root command's PersistentPreRunE; reads from the
+// cache populated by captureNiwaResponseFile.
 func writeLandingPath(cmd *cobra.Command, path string) error {
 	if f := niwaResponseFile; f != "" {
 		if err := validateResponseFilePath(f); err != nil {
@@ -51,13 +55,42 @@ func writeLandingPath(cmd *cobra.Command, path string) error {
 
 // validateResponseFilePath ensures NIWA_RESPONSE_FILE points inside the temp
 // directory ($TMPDIR or /tmp). Any other location is rejected.
+//
+// The path is cleaned with filepath.Clean before the prefix check so traversal
+// sequences like "/tmp/../home/user/.bashrc" are collapsed and rejected. See
+// the "NIWA_RESPONSE_FILE injection" section of
+// docs/designs/current/DESIGN-shell-navigation-protocol.md for the threat
+// model: an attacker who can set this env var must not be able to use it to
+// overwrite files outside the temp directory.
 func validateResponseFilePath(f string) error {
-	tmpDir := strings.TrimRight(os.Getenv("TMPDIR"), "/")
-	if tmpDir == "" {
-		tmpDir = "/tmp"
+	if !filepath.IsAbs(f) {
+		return fmt.Errorf("%s %q is not an absolute path", niwaResponseFileEnv, f)
 	}
-	if strings.HasPrefix(f, tmpDir+"/") || strings.HasPrefix(f, "/tmp/") {
+	cleaned := filepath.Clean(f)
+	tmpDir := strings.TrimRight(os.Getenv("TMPDIR"), "/")
+	if tmpDir != "" {
+		tmpDir = filepath.Clean(tmpDir)
+		if cleaned == tmpDir || strings.HasPrefix(cleaned, tmpDir+string(filepath.Separator)) {
+			return nil
+		}
+	}
+	const fallback = "/tmp"
+	if cleaned == fallback || strings.HasPrefix(cleaned, fallback+string(filepath.Separator)) {
 		return nil
 	}
 	return fmt.Errorf("%s %q is outside temp directory", niwaResponseFileEnv, f)
+}
+
+// validateLandingPath ensures the path is safe for the landing-path protocol.
+// Both the stdout branch and the NIWA_RESPONSE_FILE branch require an absolute
+// path with no embedded newlines (a newline would break the one-line-per-path
+// contract the shell wrapper reads).
+func validateLandingPath(path string) error {
+	if !filepath.IsAbs(path) {
+		return fmt.Errorf("internal error: landing path is not absolute: %s", path)
+	}
+	if strings.Contains(path, "\n") {
+		return fmt.Errorf("internal error: landing path contains newline: %s", path)
+	}
+	return nil
 }

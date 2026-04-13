@@ -145,7 +145,7 @@ func runCreate(cmd *cobra.Command, args []string) error {
 		landingPath = repoDir
 	}
 
-	if err := validateStdoutPath(landingPath); err != nil {
+	if err := validateLandingPath(landingPath); err != nil {
 		return err
 	}
 
@@ -156,16 +156,5 @@ func runCreate(cmd *cobra.Command, args []string) error {
 
 	hintShellInit(cmd)
 
-	return nil
-}
-
-// validateStdoutPath ensures the path is safe for the stdout protocol.
-func validateStdoutPath(path string) error {
-	if !filepath.IsAbs(path) {
-		return fmt.Errorf("internal error: stdout path is not absolute: %s", path)
-	}
-	if strings.Contains(path, "\n") {
-		return fmt.Errorf("internal error: stdout path contains newline: %s", path)
-	}
 	return nil
 }

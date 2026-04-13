@@ -157,6 +157,52 @@ func TestWriteLandingPath_ResponseFileInSlashTmp_Accepted(t *testing.T) {
 	}
 }
 
+func TestWriteLandingPath_ResponseFileTraversal_Rejected(t *testing.T) {
+	// An attacker-controlled NIWA_RESPONSE_FILE containing ".." must not
+	// escape the temp directory via filepath cleaning. Prior to the fix, a
+	// plain HasPrefix(f, "/tmp/") check accepted "/tmp/../home/user/.bashrc"
+	// and os.WriteFile would then overwrite /home/user/.bashrc.
+	// Point TMPDIR at a directory that doesn't share a parent with /tmp so
+	// traversal targets escape both the configured temp dir and the /tmp
+	// fallback prefix check.
+	t.Setenv("TMPDIR", "/var/tmp/niwa-test-does-not-exist")
+
+	cases := []string{
+		"/tmp/../home/user/.bashrc",
+		"/tmp/./../etc/passwd",
+		"/tmp/sub/../../home/user/.bashrc",
+	}
+	for _, attack := range cases {
+		t.Run(attack, func(t *testing.T) {
+			withResponseFile(t, attack)
+
+			cmd, out, _ := newTestCmd()
+			err := writeLandingPath(cmd, "/home/user/ws/myrepo")
+			if err == nil {
+				t.Fatalf("expected error for traversal path %q, got nil", attack)
+			}
+			if !strings.Contains(err.Error(), "NIWA_RESPONSE_FILE") {
+				t.Errorf("error should mention NIWA_RESPONSE_FILE, got: %v", err)
+			}
+			if out.Len() != 0 {
+				t.Errorf("stdout must be empty on error, got: %q", out.String())
+			}
+			// Resolve to the canonical target the traversal points at and
+			// confirm no file was created there.
+			resolved := filepath.Clean(attack)
+			if _, statErr := os.Stat(resolved); statErr == nil {
+				// If the file happens to pre-exist on the host (e.g.
+				// /etc/passwd), we can't assert absence, but we can at
+				// least assert we didn't create it with our landing
+				// content. Reading is out of scope here; the core
+				// assertion is that validateResponseFilePath returned an
+				// error before os.WriteFile ran.
+				t.Logf("note: %q pre-exists on host, skipping absence check", resolved)
+			}
+		})
+	}
+}
+
 func TestCaptureNiwaResponseFile_UnsetsEnv(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("TMPDIR", tmp)

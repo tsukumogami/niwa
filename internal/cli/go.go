@@ -73,7 +73,7 @@ func runGo(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	if err := validateStdoutPath(targetPath); err != nil {
+	if err := validateLandingPath(targetPath); err != nil {
 		return err
 	}
 
