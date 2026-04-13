@@ -150,7 +150,9 @@ func runCreate(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Fprintf(cmd.ErrOrStderr(), "Created instance: %s\n", instancePath)
-	fmt.Fprintln(cmd.OutOrStdout(), landingPath)
+	if err := writeLandingPath(cmd, landingPath); err != nil {
+		return err
+	}
 
 	hintShellInit(cmd)
 

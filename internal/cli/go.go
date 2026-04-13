@@ -77,7 +77,9 @@ func runGo(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	fmt.Fprintln(cmd.OutOrStdout(), targetPath)
+	if err := writeLandingPath(cmd, targetPath); err != nil {
+		return err
+	}
 	hintShellInit(cmd)
 	return nil
 }
