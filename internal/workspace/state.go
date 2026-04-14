@@ -9,7 +9,9 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"time"
+	"unicode"
 )
 
 const (
@@ -128,6 +130,8 @@ func DiscoverInstance(startPath string) (string, error) {
 
 // EnumerateInstances scans immediate subdirectories of workspaceRoot for
 // .niwa/instance.json markers and returns the directories that contain them.
+// Entries with names containing ASCII controls or Unicode Cf/Zl/Zp codepoints
+// are filtered out; see ValidName for the full rationale.
 func EnumerateInstances(workspaceRoot string) ([]string, error) {
 	entries, err := os.ReadDir(workspaceRoot)
 	if err != nil {
@@ -139,6 +143,9 @@ func EnumerateInstances(workspaceRoot string) ([]string, error) {
 		if !entry.IsDir() {
 			continue
 		}
+		if !ValidName(entry.Name()) {
+			continue
+		}
 		dir := filepath.Join(workspaceRoot, entry.Name())
 		if _, err := os.Stat(statePath(dir)); err == nil {
 			instances = append(instances, dir)
@@ -146,6 +153,98 @@ func EnumerateInstances(workspaceRoot string) ([]string, error) {
 	}
 
 	return instances, nil
+}
+
+// EnumerateRepos scans instanceRoot for repo directories and returns a sorted,
+// deduped list of repo names (names only, no paths). The scan walks two
+// levels: each immediate child of instanceRoot is treated as a group
+// directory, and each subdirectory inside a group is treated as a repo.
+//
+// Entries are skipped when:
+//   - The top-level entry is one of the reserved control directories
+//     (".niwa", ".claude") or starts with "."
+//   - The second-level entry starts with "."
+//   - Either name fails ValidName (see ValidName for details)
+//
+// When the same repo name appears under multiple groups, it is returned
+// once. Callers that need group-level disambiguation should walk the
+// filesystem directly.
+//
+// Returns ([]string{}, nil) when the instance root is empty or has no
+// matching entries. Returns (nil, err) when os.ReadDir(instanceRoot) itself
+// fails. Unreadable group directories are skipped rather than failing the
+// whole walk.
+func EnumerateRepos(instanceRoot string) ([]string, error) {
+	entries, err := os.ReadDir(instanceRoot)
+	if err != nil {
+		return nil, fmt.Errorf("reading instance root: %w", err)
+	}
+
+	seen := make(map[string]struct{})
+	for _, entry := range entries {
+		name := entry.Name()
+		if !entry.IsDir() {
+			continue
+		}
+		if name == StateDir || name == ".claude" {
+			continue
+		}
+		if len(name) > 0 && name[0] == '.' {
+			continue
+		}
+		if !ValidName(name) {
+			continue
+		}
+
+		groupDir := filepath.Join(instanceRoot, name)
+		repos, err := os.ReadDir(groupDir)
+		if err != nil {
+			// Skip unreadable groups rather than failing the whole walk.
+			continue
+		}
+		for _, r := range repos {
+			rname := r.Name()
+			if !r.IsDir() {
+				continue
+			}
+			if len(rname) > 0 && rname[0] == '.' {
+				continue
+			}
+			if !ValidName(rname) {
+				continue
+			}
+			seen[rname] = struct{}{}
+		}
+	}
+
+	if len(seen) == 0 {
+		return []string{}, nil
+	}
+	out := make([]string, 0, len(seen))
+	for name := range seen {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+// ValidName reports whether a filesystem-derived name is safe to emit through
+// cobra's __complete line/TAB protocol. It rejects any character matching
+// unicode.IsControl (ASCII controls plus Unicode Cc) as well as Unicode
+// format, line separator, and paragraph separator categories (Cf/Zl/Zp).
+// Those codepoints could corrupt cobra's line-oriented output, confuse the
+// completion test parser, or visually spoof legitimate names via bidi
+// overrides.
+func ValidName(name string) bool {
+	for _, r := range name {
+		if unicode.IsControl(r) {
+			return false
+		}
+		if unicode.In(r, unicode.Cf, unicode.Zl, unicode.Zp) {
+			return false
+		}
+	}
+	return true
 }
 
 // NextInstanceNumber finds the lowest unused instance number by scanning

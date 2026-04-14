@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
+	"unicode"
 
 	"github.com/BurntSushi/toml"
 )
@@ -40,6 +42,54 @@ func (g *GlobalConfig) CloneProtocol() string {
 		return g.Global.CloneProtocol
 	}
 	return "ssh"
+}
+
+// RegisteredNames returns a sorted, sanitized list of workspace names from
+// g.Registry. Names containing ASCII controls or Unicode Cf/Zl/Zp codepoints
+// are filtered out for the same reason filesystem-derived names are (see
+// workspace.ValidName). Registry entries are validated at registration time,
+// so in practice no entries should be filtered; the guard is defense in
+// depth.
+func (g *GlobalConfig) RegisteredNames() []string {
+	if g == nil || len(g.Registry) == 0 {
+		return []string{}
+	}
+	names := make([]string, 0, len(g.Registry))
+	for name := range g.Registry {
+		if !validRegistryName(name) {
+			continue
+		}
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// ListRegisteredWorkspaces loads the global config and returns
+// RegisteredNames on it. Returns (nil, err) on config load error. Returns
+// ([]string{}, nil) when the config file is absent, when the registry
+// section is empty, or when no entries pass the sanitization filter.
+func ListRegisteredWorkspaces() ([]string, error) {
+	cfg, err := LoadGlobalConfig()
+	if err != nil {
+		return nil, err
+	}
+	return cfg.RegisteredNames(), nil
+}
+
+// validRegistryName mirrors workspace.ValidName but is duplicated here to
+// avoid a config -> workspace import edge. Kept internal because the
+// registration path already validates names at write time.
+func validRegistryName(name string) bool {
+	for _, r := range name {
+		if unicode.IsControl(r) {
+			return false
+		}
+		if unicode.In(r, unicode.Cf, unicode.Zl, unicode.Zp) {
+			return false
+		}
+	}
+	return true
 }
 
 // LookupWorkspace returns the registry entry for the given workspace name.

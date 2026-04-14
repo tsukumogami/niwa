@@ -564,3 +564,231 @@ func TestCheckDriftFileRemoved(t *testing.T) {
 		t.Error("FileRemoved should be true")
 	}
 }
+
+func TestValidName(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want bool
+	}{
+		{"plain", "tsuku", true},
+		{"hyphen", "my-repo", true},
+		{"underscore", "my_repo", true},
+		{"dots", "my.repo.v2", true},
+		{"unicode-letters", "プロジェクト", true},
+		{"empty", "", true},
+		{"tab", "bad\tname", false},
+		{"newline", "bad\nname", false},
+		{"null", "bad\x00name", false},
+		{"ascii-control", "bad\x1fname", false},
+		{"delete", "bad\x7fname", false},
+		{"bidi-override-rtl", "file\u202e.txt", false},
+		{"zero-width-joiner", "rep\u200do", false},
+		{"bom", "\ufeffrepo", false},
+		{"line-separator", "bad\u2028name", false},
+		{"paragraph-separator", "bad\u2029name", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := ValidName(tc.in); got != tc.want {
+				t.Errorf("ValidName(%q) = %v, want %v", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestEnumerateInstancesSkipsInvalidNames(t *testing.T) {
+	root := t.TempDir()
+
+	// Legitimate instance.
+	goodDir := filepath.Join(root, "ws-1")
+	if err := os.MkdirAll(goodDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	state := &InstanceState{
+		SchemaVersion:  SchemaVersion,
+		InstanceName:   "ws-1",
+		InstanceNumber: 1,
+		Root:           goodDir,
+		Created:        time.Now(),
+		LastApplied:    time.Now(),
+		Repos:          map[string]RepoState{},
+	}
+	if err := SaveState(goodDir, state); err != nil {
+		t.Fatal(err)
+	}
+
+	// Planted bogus instance with a name containing a bidi-override codepoint.
+	badName := "evil\u202etxt"
+	badDir := filepath.Join(root, badName)
+	if err := os.MkdirAll(badDir, 0o755); err != nil {
+		// Some filesystems may reject; skip the rest of this check without failing.
+		t.Logf("skipping planted-bad-name case: %v", err)
+	} else {
+		state2 := *state
+		state2.InstanceName = badName
+		state2.Root = badDir
+		if err := SaveState(badDir, &state2); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	instances, err := EnumerateInstances(root)
+	if err != nil {
+		t.Fatalf("EnumerateInstances: %v", err)
+	}
+
+	for _, dir := range instances {
+		base := filepath.Base(dir)
+		if !ValidName(base) {
+			t.Errorf("EnumerateInstances returned entry with invalid name: %q", base)
+		}
+	}
+	// At least the legitimate instance should be present.
+	if len(instances) == 0 {
+		t.Fatal("expected at least one legitimate instance")
+	}
+}
+
+func TestEnumerateReposEmpty(t *testing.T) {
+	root := t.TempDir()
+	names, err := EnumerateRepos(root)
+	if err != nil {
+		t.Fatalf("EnumerateRepos: %v", err)
+	}
+	if len(names) != 0 {
+		t.Errorf("expected no repos, got %v", names)
+	}
+}
+
+func TestEnumerateReposMissingRoot(t *testing.T) {
+	names, err := EnumerateRepos(filepath.Join(t.TempDir(), "does-not-exist"))
+	if err == nil {
+		t.Fatalf("expected error for missing root, got nil (names=%v)", names)
+	}
+	if names != nil {
+		t.Errorf("expected nil slice on error, got %v", names)
+	}
+}
+
+func TestEnumerateReposHappyPath(t *testing.T) {
+	root := t.TempDir()
+
+	layout := map[string][]string{
+		"group-a": {"api", "web", "cli"},
+		"group-b": {"sdk"},
+	}
+	for group, repos := range layout {
+		for _, repo := range repos {
+			if err := os.MkdirAll(filepath.Join(root, group, repo), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+
+	names, err := EnumerateRepos(root)
+	if err != nil {
+		t.Fatalf("EnumerateRepos: %v", err)
+	}
+
+	want := []string{"api", "cli", "sdk", "web"}
+	if len(names) != len(want) {
+		t.Fatalf("length mismatch: got %v, want %v", names, want)
+	}
+	for i := range want {
+		if names[i] != want[i] {
+			t.Errorf("names[%d] = %q, want %q (full: %v)", i, names[i], want[i], names)
+		}
+	}
+}
+
+func TestEnumerateReposSkipsControlDirsAndDotfiles(t *testing.T) {
+	root := t.TempDir()
+
+	// Legitimate group with a repo.
+	if err := os.MkdirAll(filepath.Join(root, "group", "api"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Reserved control dirs must be skipped at the top level.
+	if err := os.MkdirAll(filepath.Join(root, ".niwa", "should-not-show"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, ".claude", "should-not-show"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Dot-prefixed groups skipped.
+	if err := os.MkdirAll(filepath.Join(root, ".hidden-group", "not-visible"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Dot-prefixed repos inside a legitimate group skipped.
+	if err := os.MkdirAll(filepath.Join(root, "group", ".hidden-repo"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	names, err := EnumerateRepos(root)
+	if err != nil {
+		t.Fatalf("EnumerateRepos: %v", err)
+	}
+
+	if len(names) != 1 || names[0] != "api" {
+		t.Errorf("expected [api], got %v", names)
+	}
+}
+
+func TestEnumerateReposDedupsCrossGroup(t *testing.T) {
+	root := t.TempDir()
+
+	// Same repo name in two groups -> appears once.
+	for _, group := range []string{"group-a", "group-b"} {
+		if err := os.MkdirAll(filepath.Join(root, group, "shared"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	names, err := EnumerateRepos(root)
+	if err != nil {
+		t.Fatalf("EnumerateRepos: %v", err)
+	}
+
+	if len(names) != 1 || names[0] != "shared" {
+		t.Errorf("expected [shared], got %v", names)
+	}
+}
+
+func TestEnumerateReposFiltersInvalidNames(t *testing.T) {
+	root := t.TempDir()
+
+	// Legitimate group with a legitimate repo.
+	if err := os.MkdirAll(filepath.Join(root, "group", "api"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// A repo containing a bidi-override codepoint -- must be filtered.
+	badName := "evil\u202ename"
+	if err := os.MkdirAll(filepath.Join(root, "group", badName), 0o755); err != nil {
+		t.Logf("skipping planted-bad-name case: %v", err)
+	}
+
+	// A group name containing a control char -- its contents must be filtered.
+	badGroup := "group\u2028b"
+	if err := os.MkdirAll(filepath.Join(root, badGroup, "shouldnt-show"), 0o755); err != nil {
+		t.Logf("skipping planted-bad-group case: %v", err)
+	}
+
+	names, err := EnumerateRepos(root)
+	if err != nil {
+		t.Fatalf("EnumerateRepos: %v", err)
+	}
+
+	for _, n := range names {
+		if !ValidName(n) {
+			t.Errorf("returned invalid name: %q", n)
+		}
+	}
+	if len(names) < 1 || names[0] != "api" {
+		t.Errorf("expected at least [api], got %v", names)
+	}
+}
