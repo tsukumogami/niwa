@@ -5,10 +5,11 @@ problem: |
   names (niwa cre<tab> -> niwa create) already complete. What it does not do is
   resolve identifiers from runtime state: workspace names from the global registry,
   instance names from the current workspace, repo names from the current instance.
-  Eleven positions across ten commands accept such identifiers.
+  Ten positions across ten commands accept such identifiers and are in scope for v1
+  (four additional free-form positions are deferred).
 decision: |
   Attach cobra `ValidArgsFunction` / `RegisterFlagCompletionFunc` closures for
-  11 identifier positions across 10 commands. Closures live in
+  10 identifier positions across 10 commands. Closures live in
   `internal/cli/completion.go` as thin wrappers over new data-listing functions
   in the data-owning packages (`workspace.EnumerateRepos`,
   `config.ListRegisteredWorkspaces`). `niwa go [target]` decorates candidates
@@ -125,8 +126,10 @@ The architectural questions that remain open:
 
 - **Minimize surface area of new helpers**: three helper functions
   (`completeWorkspaceNames`, `completeInstanceNames`, `completeRepoNames`)
-  should cover 13 of the 14 identifier positions. Duplication across command
-  files is a smell; the helpers belong in a single `internal/cli/completion.go`.
+  cover 10 of the 14 identifier positions niwa exposes; the bare positional
+  of `niwa go` needs a fourth specialized closure. The other four positions
+  are free-form and stay out of v1. Duplication across command files is a
+  smell; the helpers belong in a single `internal/cli/completion.go`.
 
 - **No friction on destructive commands**: `niwa destroy` and `niwa reset`
   should complete normally, matching `git branch -D`, `docker rm`, and
@@ -247,7 +250,7 @@ The three completion helpers (`completeWorkspaceNames`,
 - **Option 2: New `internal/completion/` package.** Closures exported from a
   dedicated package; command files import it.
 - **Option 3: Per-command attachment.** Each command defines its own closure;
-  no shared helpers. Violates the "three helpers cover 13 of 14 positions"
+  no shared helpers. Violates the "three shared helpers cover most positions"
   constraint.
 
 **Chosen: Option 4 — closures in `internal/cli/completion.go`; data-listing
@@ -259,8 +262,11 @@ functions in the packages that own the data.**
   `([]string, ShellCompDirective)` result.
 - `workspace.EnumerateRepos(instanceRoot string) ([]string, error)` is added
   next to `workspace.EnumerateInstances`, which it mirrors in shape.
-- `config.ListRegisteredWorkspaces() []string` is added, returning sorted
-  registry keys.
+- `config.ListRegisteredWorkspaces() ([]string, error)` is added, returning
+  sorted registry keys. Errors are returned (rather than swallowed into an
+  empty list) so that non-completion call sites can distinguish "registry
+  missing" from "registry empty"; completion closures collapse the error
+  into an empty list per Implicit Decision C.
 
 **Rationale:** Three closures live in one cli file (discoverable by `grep`);
 raw data enumeration lives with the package that owns the data; tests split
@@ -420,15 +426,15 @@ The eight decisions compose into a coherent implementation plan:
 1. **Surface wiring (Decision 4, 5).** A new `internal/cli/completion.go`
    holds three thin closure helpers. Each command's `init()` registers
    `ValidArgsFunction` or `RegisterFlagCompletionFunc` with the appropriate
-   helper. 11 of 14 identifier positions get dynamic completion in v1
-   (skipping `create -r`, `config set global <repo>`, `create --name` — all
-   free-form or pre-existence positions).
+   helper. 10 of 14 identifier positions get dynamic completion in v1
+   (skipping `create -r`, `create --name`, `init --from`, and
+   `config set global <repo>` — all free-form or pre-existence positions).
 
 2. **Data layer (Decision 4).** Two new exported functions:
    `workspace.EnumerateRepos(instanceRoot) ([]string, error)` consolidates
    the two-level group scan that `findRepoDir` inlines today; four existing
    callers (`findRepoDir`, `niwa create`, `niwa go` context-aware,
-   `niwa go -r`) migrate to it. `config.ListRegisteredWorkspaces() []string`
+   `niwa go -r`) migrate to it. `config.ListRegisteredWorkspaces() ([]string, error)`
    returns sorted registry keys and replaces four existing copies of the
    "iterate Registry keys and sort" idiom.
 
@@ -510,8 +516,8 @@ Three layers:
 
 2. **Data layer (`internal/config/`, `internal/workspace/`).** Two new
    exported functions:
-   - `config.ListRegisteredWorkspaces() []string` — sorted registry keys
-     from `GlobalConfig.Registry`.
+   - `config.ListRegisteredWorkspaces() ([]string, error)` — sorted registry
+     keys from `GlobalConfig.Registry`.
    - `workspace.EnumerateRepos(instanceRoot string) ([]string, error)` —
      sorted repo directory names (two-level group scan, matching
      `findRepoDir`'s traversal pattern).
@@ -555,14 +561,33 @@ func ListRegisteredWorkspaces() ([]string, error) // sorted, nil on missing conf
 
 ```go
 // internal/workspace/state.go
-func EnumerateRepos(instanceRoot string) ([]string, error) // sorted, two-level scan
+func EnumerateRepos(instanceRoot string) ([]string, error) // sorted, deduped, sanitized
 ```
 
-`EnumerateRepos` skips the `.niwa` and `.claude` control directories and
-returns repo directory names (no paths). When a name appears in multiple
-groups under one instance, it's returned once (matching `findRepoDir`'s
-ambiguous-name detection semantics, surfaced as a duplicated entry is not
-useful for completion).
+`EnumerateRepos` contract:
+
+- Scans two levels of subdirectories under `instanceRoot`: each immediate
+  child of `instanceRoot` is treated as a group directory, and each of its
+  children that is a directory is treated as a repo.
+- Skips control directories at the top level: `.niwa` and `.claude`. Skips
+  any entry whose name begins with `.` at either level (matches the
+  implicit convention in `findRepoDir`).
+- Skips any entry whose name contains `\t`, `\n`, or characters that
+  satisfy `unicode.IsControl` / `unicode.In(r, unicode.Cf, unicode.Zl, unicode.Zp)`
+  (see Security Considerations — Unicode sanitization).
+- Returns repo names (no group prefix, no paths). Duplicate names across
+  groups are returned once (a crossed-group collision is surfaced to the
+  user by the runtime's ambiguous-name handling in `findRepoDir`, not here).
+- Returns `[]string{}`, not nil, when the instance root is empty or
+  unreadable-but-existing; returns `(nil, err)` when `os.ReadDir` on
+  `instanceRoot` itself fails.
+- Sort order is `sort.Strings` — stable, case-sensitive, byte-lexicographic.
+
+`findRepoDir` keeps its existing contract (short-circuit on first match,
+return "ambiguous" error on cross-group collision) by delegating internal
+enumeration to `EnumerateRepos` but continuing to resolve paths and detect
+ambiguity in its own body. The extraction is a refactor, not a
+behavior change.
 
 ### Data Flow
 
@@ -635,9 +660,9 @@ verified with unit tests before completion closures exist.
 Deliverables:
 - `internal/config/registry.go` — add `ListRegisteredWorkspaces() ([]string, error)`.
 - `internal/workspace/state.go` — add `EnumerateRepos(instanceRoot string) ([]string, error)`.
-- Both enumeration helpers (including `EnumerateInstances`) filter out
-  entries whose names contain `\t`, `\n`, or ASCII control characters
-  (< 0x20) before returning them — see Security Considerations for why.
+- Both enumeration helpers (including `EnumerateInstances`) apply the
+  filesystem-name sanitization filter (ASCII controls + Unicode
+  Cf/Zl/Zp categories — see Security Considerations).
 - Unit tests for both, including sanitization coverage.
 - Migrate existing call sites: four "iterate Registry keys and sort"
   copies in `go.go` and `create.go` replace inline code with
@@ -744,16 +769,33 @@ reachable surface is whatever they can place under the user's workspace
 root or `$XDG_CONFIG_HOME`, which means the attacker already has the
 privileges that matter.
 
+**Shell wrapper assumption.** The "no sub-process execution" claim depends
+on the wrapper scripts cobra emits (`GenBashCompletionV2` and
+`GenZshCompletion`) treating completion output as data, not as code to
+`eval`. Bash V2 and zsh both do. Any custom shell integration that
+re-evaluates candidates (e.g., a user's personal `complete -F` wrapper
+around niwa's wrapper) would break this assumption; that's out of niwa's
+threat model.
+
 **Filesystem name sanitization.** `EnumerateInstances` and
-`EnumerateRepos` must filter out entries whose names contain `\t`, `\n`,
-or ASCII control characters (< 0x20) before returning them. Cobra's
-`__complete` protocol uses `\n` as the candidate separator and `\t` as
-the description separator; a filename containing either byte would be
-parsed by cobra as multiple phantom candidates and confuse the
-functional-test `completionSuggestions` helper (Decision 5) the same
-way. The filter is a one-liner per enumeration function and has no
-effect on legitimate niwa-created directories (instance numbers and repo
-names generated by niwa never contain control bytes).
+`EnumerateRepos` must filter out entries whose names contain:
+
+- `\t` or `\n` — cobra's `__complete` protocol uses these as delimiters.
+- ASCII control characters (`unicode.IsControl`, includes < 0x20 and
+  0x7F–0x9F).
+- Unicode format / line / paragraph separators (`unicode.In(r, unicode.Cf,
+  unicode.Zl, unicode.Zp)`) — rejects bidi-override (U+202A–U+202E),
+  zero-width joiners (U+200B–U+200D), NEL (U+0085), line / paragraph
+  separators (U+2028 / U+2029), BOM (U+FEFF), and similar spoofing
+  codepoints.
+
+Without this filter, a crafted repo or instance name could surface as
+phantom candidates under cobra's parser and under the test parser. On
+shared or team workspaces — where "attacker owns workspace root" is a
+weaker assumption than single-user — a crafted repo name could also
+visually spoof a familiar one via bidi override. The filter has no effect
+on legitimate niwa-created directories (niwa allocates numeric instance
+names and rejects traversal characters in repo names during clone).
 
 **Symlink semantics.** Enumeration uses `os.Stat` (follows symlinks) to
 match existing `findRepoDir` behavior. A symlinked instance directory
@@ -767,6 +809,24 @@ pre-feature behavior.
 candidate list on any error rather than `ShellCompDirectiveError`. This
 avoids leaking pathnames or stack traces into the shell's completion
 banner on transient filesystem failures.
+
+**Resource caps (deferred).** `EnumerateInstances` and `EnumerateRepos`
+walk `os.ReadDir` output unbounded; a workspace root with 100k instance
+dirs would produce a multi-second tab press and a megabyte-sized
+candidate list. Similarly, `LoadGlobalConfig` will parse an arbitrarily
+large `config.toml`. These are DoS against the user's own shell, not
+privilege boundary crossings, and realistic workspaces stay far below
+any cap that would matter. Tracked as a follow-up: apply a cap (e.g.,
+1000 entries) in the enumeration helpers if telemetry shows real
+workloads approaching it.
+
+**Privilege drop on `sudo niwa`.** If the user runs `sudo niwa <TAB>`,
+completion runs as the UID sudo elevates to, reading that UID's
+`$XDG_CONFIG_HOME` and `$HOME`. This is the standard sudo semantic
+(niwa does not otherwise track the invoking user), but it means
+completion results may not match the user's expectations if niwa is
+typed under sudo. No mitigation planned; sudo-elevating `niwa` is not a
+supported invocation pattern.
 
 **Destructive commands.** Decision 3's choice to complete normally is a
 UX trade-off, not a security one. Instance numbers are allocated by niwa
