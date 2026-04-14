@@ -1,0 +1,139 @@
+// Package functional contains end-to-end tests driven by godog (cucumber-style).
+// Tests require a prebuilt niwa binary; invoke via `make test-functional`.
+package functional
+
+import (
+	"context"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/cucumber/godog"
+)
+
+type stateKeyType struct{}
+
+var stateKey = stateKeyType{}
+
+// testState holds per-scenario state. The Before hook resets it so each
+// scenario starts from a clean sandbox (fresh $HOME, fresh workspace root).
+type testState struct {
+	binPath       string            // absolute path to the niwa test binary
+	homeDir       string            // sandboxed $HOME for this scenario (holds .niwa/, .bashrc, etc.)
+	workspaceRoot string            // sandboxed directory where workspaces live
+	stdout        string            // last command's stdout
+	stderr        string            // last command's stderr
+	exitCode      int               // last command's exit code
+	shellPwd      string            // pwd reported by the last wrapped-shell run
+	shellStartPwd string            // cwd the wrapped shell started in (for "did not change" assertions)
+	envOverrides  map[string]string // per-scenario env var overrides (win over defaults)
+}
+
+func getState(ctx context.Context) *testState {
+	if s, ok := ctx.Value(stateKey).(*testState); ok {
+		return s
+	}
+	return nil
+}
+
+func setState(ctx context.Context, s *testState) context.Context {
+	return context.WithValue(ctx, stateKey, s)
+}
+
+// TestFeatures is the godog entry point. It's skipped when NIWA_TEST_BINARY
+// isn't set so plain `go test ./...` doesn't try to invoke a missing binary;
+// the Makefile's test-functional target sets NIWA_TEST_BINARY after building.
+func TestFeatures(t *testing.T) {
+	binPath := os.Getenv("NIWA_TEST_BINARY")
+	if binPath == "" {
+		t.Skip("NIWA_TEST_BINARY not set; run via 'make test-functional'")
+	}
+
+	absBin, err := filepath.Abs(binPath)
+	if err != nil {
+		t.Fatalf("resolving binary path: %v", err)
+	}
+	binPath = absBin
+
+	paths := []string{"features"}
+	if p := os.Getenv("NIWA_TEST_PATHS"); p != "" {
+		paths = strings.Split(p, string(os.PathListSeparator))
+	}
+
+	opts := &godog.Options{
+		Format:   "pretty",
+		Paths:    paths,
+		TestingT: t,
+	}
+	if tags := os.Getenv("NIWA_TEST_TAGS"); tags != "" {
+		opts.Tags = tags
+	}
+
+	suite := godog.TestSuite{
+		ScenarioInitializer: func(ctx *godog.ScenarioContext) {
+			initializeScenario(ctx, binPath)
+		},
+		Options: opts,
+	}
+	if suite.Run() != 0 {
+		t.Fatal("functional tests failed")
+	}
+}
+
+func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
+	ctx.Before(func(ctx context.Context, sc *godog.Scenario) (context.Context, error) {
+		// Each scenario gets its own sandbox under the binary's directory.
+		// Using t.TempDir() would work but placing it alongside the binary
+		// makes test artifacts easier to inspect on failure.
+		repoRoot := filepath.Dir(binPath)
+		sandbox := filepath.Join(repoRoot, ".niwa-test")
+		_ = os.RemoveAll(sandbox)
+		if err := os.MkdirAll(sandbox, 0o755); err != nil {
+			return ctx, err
+		}
+		homeDir := filepath.Join(sandbox, "home")
+		workspaceRoot := filepath.Join(sandbox, "workspaces")
+		if err := os.MkdirAll(homeDir, 0o755); err != nil {
+			return ctx, err
+		}
+		if err := os.MkdirAll(workspaceRoot, 0o755); err != nil {
+			return ctx, err
+		}
+
+		state := &testState{
+			binPath:       binPath,
+			homeDir:       homeDir,
+			workspaceRoot: workspaceRoot,
+			envOverrides:  make(map[string]string),
+		}
+		return setState(ctx, state), nil
+	})
+
+	// Environment
+	ctx.Step(`^a clean niwa environment$`, aCleanNiwaEnvironment)
+	ctx.Step(`^a workspace "([^"]*)" exists$`, aWorkspaceExists)
+	ctx.Step(`^I set env "([^"]*)" to "([^"]*)"$`, iSetEnv)
+	ctx.Step(`^I set env "([^"]*)" to a temp path$`, iSetEnvToTempPath)
+
+	// Commands
+	ctx.Step(`^I run "([^"]*)"$`, iRun)
+	ctx.Step(`^I run "([^"]*)" from workspace "([^"]*)"$`, iRunFromWorkspace)
+	ctx.Step(`^I source the bash wrapper and run "([^"]*)" from workspace "([^"]*)"$`, iSourceWrapperAndRunFromWorkspace)
+	ctx.Step(`^I source the bash wrapper and run "([^"]*)"$`, iSourceWrapperAndRun)
+
+	// Assertions
+	ctx.Step(`^the exit code is (\d+)$`, theExitCodeIs)
+	ctx.Step(`^the exit code is not (\d+)$`, theExitCodeIsNot)
+	ctx.Step(`^the output contains "([^"]*)"$`, theOutputContains)
+	ctx.Step(`^the output does not contain "([^"]*)"$`, theOutputDoesNotContain)
+	ctx.Step(`^the output equals "([^"]*)"$`, theOutputEquals)
+	ctx.Step(`^the output is empty$`, theOutputIsEmpty)
+	ctx.Step(`^the error output contains "([^"]*)"$`, theErrorOutputContains)
+	ctx.Step(`^the error output does not contain "([^"]*)"$`, theErrorOutputDoesNotContain)
+	ctx.Step(`^the response file contains the path to workspace "([^"]*)"$`, theResponseFileContainsWorkspace)
+	ctx.Step(`^the response file does not exist$`, theResponseFileDoesNotExist)
+	ctx.Step(`^the wrapped shell ended in workspace "([^"]*)"$`, theWrappedShellEndedInWorkspace)
+	ctx.Step(`^the wrapped shell did not change directory$`, theWrappedShellDidNotChangeDirectory)
+	ctx.Step(`^the home file "([^"]*)" does not exist$`, theHomeFileDoesNotExist)
+}

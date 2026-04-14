@@ -7,6 +7,8 @@ on:
       - '**/*.go'
       - 'go.mod'
       - 'go.sum'
+      - 'Makefile'
+      - 'test/functional/**'
       - '.github/workflows/test.yml'
       - '.tsuku-recipes/**'
   pull_request:
@@ -15,6 +17,8 @@ on:
       - '**/*.go'
       - 'go.mod'
       - 'go.sum'
+      - 'Makefile'
+      - 'test/functional/**'
       - '.github/workflows/test.yml'
       - '.tsuku-recipes/**'
 
@@ -46,6 +50,9 @@ jobs:
 
       - name: Test
         run: go test ./...
+
+      - name: Functional tests
+        run: make test-functional
 
       - name: Install tsuku
         run: curl -fsSL https://tsuku.dev/install.sh | bash
