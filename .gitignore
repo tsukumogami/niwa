@@ -26,8 +26,12 @@ go.work.sum
 
 *.local*
 
-# Built binary
+# Built binaries
 /niwa
+/niwa-test
+
+# Functional test sandbox (per-scenario scratch)
+/.niwa-test/
 
 # Claude Code local config
 .claude/

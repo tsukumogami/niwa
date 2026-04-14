@@ -16,6 +16,15 @@ var rootCmd = &cobra.Command{
 It clones repositories into a structured workspace directory, generates
 CLAUDE.md files at each level of the hierarchy, and keeps everything
 in sync when configuration changes.`,
+	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+		// NIWA_RESPONSE_FILE is the shell-wrapper/CLI protocol channel for
+		// landing-path delivery. Capture its value into a package-level cache
+		// and unset the environment variable so subprocesses (git, gh, hook
+		// scripts, etc.) don't inherit it -- a buggy or malicious child that
+		// writes to the response file would redirect the shell wrapper's cd
+		// target. See docs/designs/current/DESIGN-shell-navigation-protocol.md.
+		return captureNiwaResponseFile()
+	},
 }
 
 func init() {

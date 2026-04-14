@@ -40,20 +40,20 @@ func TestHintShellInit_Shown(t *testing.T) {
 	}
 }
 
-func TestValidateStdoutPath_AbsolutePass(t *testing.T) {
-	if err := validateStdoutPath("/home/user/workspace"); err != nil {
+func TestValidateLandingPath_AbsolutePass(t *testing.T) {
+	if err := validateLandingPath("/home/user/workspace"); err != nil {
 		t.Errorf("expected no error for absolute path, got %v", err)
 	}
 }
 
-func TestValidateStdoutPath_RelativeFails(t *testing.T) {
-	if err := validateStdoutPath("relative/path"); err == nil {
+func TestValidateLandingPath_RelativeFails(t *testing.T) {
+	if err := validateLandingPath("relative/path"); err == nil {
 		t.Error("expected error for relative path")
 	}
 }
 
-func TestValidateStdoutPath_NewlineFails(t *testing.T) {
-	if err := validateStdoutPath("/home/user/work\nspace"); err == nil {
+func TestValidateLandingPath_NewlineFails(t *testing.T) {
+	if err := validateLandingPath("/home/user/work\nspace"); err == nil {
 		t.Error("expected error for path with newline")
 	}
 }

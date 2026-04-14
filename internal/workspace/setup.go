@@ -102,7 +102,7 @@ func RunSetupScripts(repoDir, setupDir string) *SetupResult {
 
 		cmd := exec.Command(scriptPath)
 		cmd.Dir = repoDir
-		cmd.Stdout = os.Stdout
+		cmd.Stdout = os.Stderr
 		cmd.Stderr = os.Stderr
 
 		if err := cmd.Run(); err != nil {

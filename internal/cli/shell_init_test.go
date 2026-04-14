@@ -22,6 +22,10 @@ func TestShellInitBash_ValidSyntax(t *testing.T) {
 		"niwa()",
 		"create|go)",
 		"command niwa",
+		"mktemp",
+		`NIWA_RESPONSE_FILE="$__niwa_tmp"`,
+		"builtin cd",
+		"rm -f",
 	} {
 		if !strings.Contains(output, want) {
 			t.Errorf("bash output missing %q", want)
@@ -43,10 +47,68 @@ func TestShellInitZsh_ValidSyntax(t *testing.T) {
 		"niwa()",
 		"create|go)",
 		"command niwa",
+		"mktemp",
+		`NIWA_RESPONSE_FILE="$__niwa_tmp"`,
+		"builtin cd",
+		"rm -f",
 	} {
 		if !strings.Contains(output, want) {
 			t.Errorf("zsh output missing %q", want)
 		}
+	}
+}
+
+// TestShellWrapperTemplate_ProtocolStructure verifies the wrapper implements
+// the temp-file protocol described in the design doc: mktemp with fallback,
+// NIWA_RESPONSE_FILE export, exit-code preservation, and file cleanup.
+func TestShellWrapperTemplate_ProtocolStructure(t *testing.T) {
+	tmpl := shellWrapperTemplate
+
+	// mktemp failure falls back to running niwa without navigation (not a hard error).
+	if !strings.Contains(tmpl, `__niwa_tmp=$(mktemp) || { command niwa "$@"; return $?; }`) {
+		t.Error("wrapper missing mktemp-failure fallback that still runs niwa and preserves exit code")
+	}
+
+	// NIWA_RESPONSE_FILE is scoped to the niwa invocation (prefix assignment),
+	// so it is not inherited by later shell functions.
+	if !strings.Contains(tmpl, `NIWA_RESPONSE_FILE="$__niwa_tmp" command niwa "$@"`) {
+		t.Error("wrapper missing NIWA_RESPONSE_FILE export scoped to the niwa invocation")
+	}
+
+	// Exit code from niwa must be captured before cleanup so cat/rm don't overwrite $?.
+	rcIdx := strings.Index(tmpl, "__niwa_rc=$?")
+	catIdx := strings.Index(tmpl, `__niwa_dir=$(cat "$__niwa_tmp"`)
+	if rcIdx == -1 || catIdx == -1 || rcIdx > catIdx {
+		t.Error("wrapper must capture $? into __niwa_rc before reading the temp file")
+	}
+
+	// Temp file must be removed after reading.
+	if !strings.Contains(tmpl, `rm -f "$__niwa_tmp"`) {
+		t.Error("wrapper must remove the temp file after reading it")
+	}
+
+	// Final return preserves the niwa exit code.
+	if !strings.Contains(tmpl, "return $__niwa_rc") {
+		t.Error("wrapper must return niwa's exit code")
+	}
+
+	// Non-cd commands delegate directly without any wrapping.
+	// The default branch must be a bare `command niwa "$@"` with no temp-file setup.
+	defaultBranchStart := strings.Index(tmpl, "*)")
+	if defaultBranchStart == -1 {
+		t.Fatal("wrapper missing default case branch")
+	}
+	defaultBranch := tmpl[defaultBranchStart:]
+	esacIdx := strings.Index(defaultBranch, "esac")
+	if esacIdx == -1 {
+		t.Fatal("wrapper default branch not terminated by esac")
+	}
+	defaultBranch = defaultBranch[:esacIdx]
+	if strings.Contains(defaultBranch, "mktemp") || strings.Contains(defaultBranch, "NIWA_RESPONSE_FILE") {
+		t.Errorf("default branch should delegate without wrapping, got:\n%s", defaultBranch)
+	}
+	if !strings.Contains(defaultBranch, `command niwa "$@"`) {
+		t.Errorf("default branch must delegate to `command niwa \"$@\"`, got:\n%s", defaultBranch)
 	}
 }
 

@@ -58,7 +58,7 @@ func (c *Cloner) CloneWith(ctx context.Context, url, targetDir string, opts Clon
 	args = append(args, url, targetDir)
 
 	cmd := exec.CommandContext(ctx, "git", args...)
-	cmd.Stdout = os.Stdout
+	cmd.Stdout = os.Stderr
 	cmd.Stderr = os.Stderr
 
 	if err := cmd.Run(); err != nil {
@@ -67,7 +67,7 @@ func (c *Cloner) CloneWith(ctx context.Context, url, targetDir string, opts Clon
 
 	if sha {
 		checkout := exec.CommandContext(ctx, "git", "-C", targetDir, "checkout", opts.Ref)
-		checkout.Stdout = os.Stdout
+		checkout.Stdout = os.Stderr
 		checkout.Stderr = os.Stderr
 		if err := checkout.Run(); err != nil {
 			return false, fmt.Errorf("checking out %s: %w", opts.Ref, err)

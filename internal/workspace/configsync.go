@@ -39,7 +39,7 @@ func SyncConfigDir(configDir string, allowDirty bool) error {
 
 	// Pull latest from origin.
 	cmd = exec.Command("git", "-C", configDir, "pull", "--ff-only", "origin")
-	cmd.Stdout = os.Stdout
+	cmd.Stdout = os.Stderr
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("pulling config from origin: %w", err)

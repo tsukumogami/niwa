@@ -39,9 +39,12 @@ const shellWrapperTemplate = `export _NIWA_SHELL_INIT=1
 niwa() {
     case "$1" in
         create|go)
-            local __niwa_dir
-            __niwa_dir=$(command niwa "$@")
-            local __niwa_rc=$?
+            local __niwa_tmp __niwa_dir __niwa_rc
+            __niwa_tmp=$(mktemp) || { command niwa "$@"; return $?; }
+            NIWA_RESPONSE_FILE="$__niwa_tmp" command niwa "$@"
+            __niwa_rc=$?
+            __niwa_dir=$(cat "$__niwa_tmp" 2>/dev/null)
+            rm -f "$__niwa_tmp"
             if [ $__niwa_rc -eq 0 ] && [ -n "$__niwa_dir" ] && [ -d "$__niwa_dir" ]; then
                 builtin cd "$__niwa_dir" || return
             fi
