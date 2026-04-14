@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -264,6 +265,215 @@ exit $__rc
 	}
 	s.exitCode = 0
 	return nil
+}
+
+// aRegisteredWorkspaceExists creates the workspace directory AND adds a
+// matching entry to the scenario's sandboxed global config at
+// $HOME/.config/niwa/config.toml. Completion tests rely on the registry
+// being present because completeWorkspaceNames reads it via
+// config.ListRegisteredWorkspaces.
+func aRegisteredWorkspaceExists(ctx context.Context, name string) (context.Context, error) {
+	ctx, err := aWorkspaceExists(ctx, name)
+	if err != nil {
+		return ctx, err
+	}
+	s := getState(ctx)
+	if s == nil {
+		return ctx, fmt.Errorf("no test state")
+	}
+	cfgDir := filepath.Join(s.homeDir, ".config", "niwa")
+	if err := os.MkdirAll(cfgDir, 0o755); err != nil {
+		return ctx, fmt.Errorf("creating config dir: %w", err)
+	}
+	cfgPath := filepath.Join(cfgDir, "config.toml")
+	wsRoot := filepath.Join(s.workspaceRoot, name)
+	entry := fmt.Sprintf("\n[registry.%q]\nsource = %q\nroot = %q\n",
+		name, filepath.Join(wsRoot, ".niwa", "workspace.toml"), wsRoot)
+	f, err := os.OpenFile(cfgPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		return ctx, fmt.Errorf("opening global config: %w", err)
+	}
+	defer f.Close()
+	if _, err := f.WriteString(entry); err != nil {
+		return ctx, fmt.Errorf("appending registry entry: %w", err)
+	}
+	return ctx, nil
+}
+
+// aWorkspaceInstanceExists creates a workspace instance directory at
+// <workspaceRoot>/<workspaceName>/<instanceName>/ with a valid
+// .niwa/instance.json state file. Optionally creates repo subdirs of the
+// form <group>/<repo> under the instance. `reposSpec` is a comma-separated
+// list like "group-a/api,group-a/web,group-b/sdk". Empty reposSpec skips
+// repo creation.
+func aWorkspaceInstanceExistsWithRepos(ctx context.Context, workspaceName, instanceName, reposSpec string) (context.Context, error) {
+	s := getState(ctx)
+	if s == nil {
+		return ctx, fmt.Errorf("no test state")
+	}
+	instanceRoot := filepath.Join(s.workspaceRoot, workspaceName, instanceName)
+	if err := os.MkdirAll(filepath.Join(instanceRoot, ".niwa"), 0o755); err != nil {
+		return ctx, fmt.Errorf("creating instance dir: %w", err)
+	}
+	// Minimal instance.json. instance_number is derived heuristically from
+	// the tail of the instance name (e.g., "alpha" -> 1, "alpha-2" -> 2).
+	instanceNumber := 1
+	if idx := strings.LastIndexByte(instanceName, '-'); idx >= 0 {
+		if n, err := strconv.Atoi(instanceName[idx+1:]); err == nil {
+			instanceNumber = n
+		}
+	}
+	stateJSON := fmt.Sprintf(`{"schema_version":1,"config_name":null,"instance_name":%q,"instance_number":%d,"root":%q,"created":"2024-01-01T00:00:00Z","last_applied":"2024-01-01T00:00:00Z","managed_files":[],"repos":{}}`,
+		instanceName, instanceNumber, instanceRoot)
+	if err := os.WriteFile(filepath.Join(instanceRoot, ".niwa", "instance.json"), []byte(stateJSON), 0o644); err != nil {
+		return ctx, fmt.Errorf("writing instance.json: %w", err)
+	}
+	if reposSpec == "" {
+		return ctx, nil
+	}
+	for _, spec := range strings.Split(reposSpec, ",") {
+		spec = strings.TrimSpace(spec)
+		if spec == "" {
+			continue
+		}
+		repoDir := filepath.Join(instanceRoot, filepath.FromSlash(spec))
+		if err := os.MkdirAll(repoDir, 0o755); err != nil {
+			return ctx, fmt.Errorf("creating repo dir %q: %w", spec, err)
+		}
+	}
+	return ctx, nil
+}
+
+// iRunCompletion runs `niwa __complete <tokens...> <prefix>` and captures
+// output into stdout/stderr/exitCode. Wrapping __complete in its own step
+// avoids argument-quoting headaches in Gherkin: the prefix is passed as a
+// separate quoted table cell so empty strings ("") round-trip correctly.
+func iRunCompletion(ctx context.Context, command, prefix string) (context.Context, error) {
+	s := getState(ctx)
+	if s == nil {
+		return ctx, fmt.Errorf("no test state")
+	}
+	tokens := strings.Fields(command)
+	args := append([]string{"__complete"}, tokens...)
+	args = append(args, prefix)
+
+	cmd := exec.CommandContext(ctx, s.binPath, args...)
+	cmd.Dir = s.homeDir
+	cmd.Env = s.buildEnv()
+	var stdout, stderr strings.Builder
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	s.stdout = stdout.String()
+	s.stderr = stderr.String()
+	s.shellPwd = ""
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			s.exitCode = exitErr.ExitCode()
+			return ctx, nil
+		}
+		return ctx, fmt.Errorf("completion command failed: %w", err)
+	}
+	s.exitCode = 0
+	return ctx, nil
+}
+
+// iRunCompletionFromInstance is iRunCompletion but with cwd set to a
+// specific workspace instance so closures that discover the current
+// instance have a realistic context.
+func iRunCompletionFromInstance(ctx context.Context, command, prefix, workspaceName, instanceName string) (context.Context, error) {
+	s := getState(ctx)
+	if s == nil {
+		return ctx, fmt.Errorf("no test state")
+	}
+	cwd := filepath.Join(s.workspaceRoot, workspaceName, instanceName)
+	tokens := strings.Fields(command)
+	args := append([]string{"__complete"}, tokens...)
+	args = append(args, prefix)
+
+	cmd := exec.CommandContext(ctx, s.binPath, args...)
+	cmd.Dir = cwd
+	cmd.Env = s.buildEnv()
+	var stdout, stderr strings.Builder
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	s.stdout = stdout.String()
+	s.stderr = stderr.String()
+	s.shellPwd = ""
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			s.exitCode = exitErr.ExitCode()
+			return ctx, nil
+		}
+		return ctx, fmt.Errorf("completion command failed: %w", err)
+	}
+	s.exitCode = 0
+	return ctx, nil
+}
+
+// completionSuggestions parses cobra's __complete stdout, returning candidate
+// names with TAB-separated descriptions stripped. Drops the ":<directive>"
+// trailer and the "Completion ended with directive:" line that cobra
+// unconditionally emits.
+func completionSuggestions(stdout string) []string {
+	var out []string
+	for _, line := range strings.Split(stdout, "\n") {
+		if line == "" {
+			continue
+		}
+		if strings.HasPrefix(line, ":") {
+			continue
+		}
+		if strings.HasPrefix(line, "Completion ended with directive:") {
+			continue
+		}
+		if idx := strings.IndexByte(line, '\t'); idx >= 0 {
+			line = line[:idx]
+		}
+		out = append(out, line)
+	}
+	return out
+}
+
+// theCompletionOutputContains asserts that one of the parsed candidate names
+// equals the expected text.
+func theCompletionOutputContains(ctx context.Context, text string) error {
+	s := getState(ctx)
+	for _, line := range completionSuggestions(s.stdout) {
+		if line == text {
+			return nil
+		}
+	}
+	return fmt.Errorf("expected completion candidate %q, got candidates:\n%v\nraw stdout:\n%s",
+		text, completionSuggestions(s.stdout), s.stdout)
+}
+
+// theCompletionOutputDoesNotContain asserts that none of the parsed
+// candidate names equals the forbidden text.
+func theCompletionOutputDoesNotContain(ctx context.Context, text string) error {
+	s := getState(ctx)
+	for _, line := range completionSuggestions(s.stdout) {
+		if line == text {
+			return fmt.Errorf("expected completion not to include %q, got candidates:\n%v",
+				text, completionSuggestions(s.stdout))
+		}
+	}
+	return nil
+}
+
+// theCompletionDescriptionMatches asserts that the candidate `name` appears
+// in the output with the given TAB-separated description. Useful for
+// verifying the `repo in <N>` and `workspace` decorations.
+func theCompletionDescriptionMatches(ctx context.Context, name, description string) error {
+	s := getState(ctx)
+	want := name + "\t" + description
+	for _, line := range strings.Split(s.stdout, "\n") {
+		if line == want {
+			return nil
+		}
+	}
+	return fmt.Errorf("expected decorated candidate %q, stdout:\n%s", want, s.stdout)
 }
 
 // --- Assertions ---
