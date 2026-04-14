@@ -27,6 +27,11 @@ Or via tsuku: `tsuku install tsukumogami/niwa`
 
 Or from source: `go install github.com/tsukumogami/niwa/cmd/niwa@latest`
 
+The installer and the tsuku recipe both wire up shell integration, including
+dynamic tab-completion for workspace, instance, and repo names. Open a new
+shell after installing and `niwa go <tab>` will list matches from your
+current workspace and registered workspaces.
+
 ### 2. Create a workspace
 
 ```bash

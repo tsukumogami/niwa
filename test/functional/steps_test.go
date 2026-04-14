@@ -267,6 +267,102 @@ exit $__rc
 	return nil
 }
 
+// shellInitContains asserts that `niwa shell-init <shell>` output contains
+// the given text. Used to prove that the tsuku recipe's install_shell_init
+// bake (which captures this output) includes the wrapper function and the
+// cobra completion function -- both required for dynamic completion to
+// work OOTB after `tsuku install`.
+func shellInitContains(ctx context.Context, shell, text string) error {
+	s := getState(ctx)
+	if s == nil {
+		return fmt.Errorf("no test state")
+	}
+	cmd := exec.CommandContext(ctx, s.binPath, "shell-init", shell)
+	cmd.Env = s.buildEnv()
+	out, err := cmd.Output()
+	if err != nil {
+		return fmt.Errorf("running shell-init %s: %w", shell, err)
+	}
+	if !strings.Contains(string(out), text) {
+		return fmt.Errorf("shell-init %s output does not contain %q\nactual output:\n%s",
+			shell, text, string(out))
+	}
+	return nil
+}
+
+// iSourceShellInitAndRunCompletion simulates the install.sh runtime: writes
+// an env file that evals `niwa shell-init auto` (same content install.sh
+// produces), spawns a fresh login bash that sources it, and runs
+// `niwa __complete <args> <prefix>` inside that shell. Output is captured
+// into stdout/stderr/exit for downstream assertions. This proves the
+// install.sh delivery chain (rc -> env -> eval -> wrapper + completion
+// registered -> __complete dispatches).
+func iSourceShellInitAndRunCompletion(ctx context.Context, command, prefix string) (context.Context, error) {
+	s := getState(ctx)
+	if s == nil {
+		return ctx, fmt.Errorf("no test state")
+	}
+
+	// Place the binary on PATH the same way install.sh does ($HOME/.niwa/bin).
+	binDir := filepath.Join(s.homeDir, ".niwa", "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		return ctx, fmt.Errorf("mkdir bin: %w", err)
+	}
+	installedBin := filepath.Join(binDir, "niwa")
+	_ = os.Remove(installedBin)
+	if err := os.Symlink(s.binPath, installedBin); err != nil {
+		return ctx, fmt.Errorf("symlinking niwa: %w", err)
+	}
+
+	// Build the args for __complete.
+	tokens := strings.Fields(command)
+	args := append([]string{"__complete"}, tokens...)
+	args = append(args, prefix)
+	quoted := make([]string, len(args))
+	for i, a := range args {
+		quoted[i] = fmt.Sprintf("%q", a)
+	}
+
+	// The env file mirrors install.sh's ENV_FILE content.
+	envFile := filepath.Join(s.homeDir, ".niwa", "env")
+	envContent := fmt.Sprintf(`# niwa shell configuration
+export PATH=%q:"$PATH"
+if command -v niwa >/dev/null 2>&1; then
+  eval "$(niwa shell-init auto 2>/dev/null)"
+fi
+`, binDir)
+	if err := os.WriteFile(envFile, []byte(envContent), 0o644); err != nil {
+		return ctx, fmt.Errorf("writing env file: %w", err)
+	}
+
+	// Source the env file in a fresh bash, then run __complete.
+	script := fmt.Sprintf(`set +e
+. %q
+niwa %s
+__rc=$?
+exit $__rc
+`, envFile, strings.Join(quoted, " "))
+
+	cmd := exec.CommandContext(ctx, "bash", "-c", script)
+	cmd.Env = s.buildEnv()
+	var stdout, stderr strings.Builder
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	s.stdout = stdout.String()
+	s.stderr = stderr.String()
+	s.shellPwd = ""
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			s.exitCode = exitErr.ExitCode()
+			return ctx, nil
+		}
+		return ctx, fmt.Errorf("install-sourced completion failed: %w\nstderr: %s", err, s.stderr)
+	}
+	s.exitCode = 0
+	return ctx, nil
+}
+
 // aRegisteredWorkspaceExists creates the workspace directory AND adds a
 // matching entry to the scenario's sandboxed global config at
 // $HOME/.config/niwa/config.toml. Completion tests rely on the registry

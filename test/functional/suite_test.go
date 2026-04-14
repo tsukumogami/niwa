@@ -130,6 +130,8 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 	ctx.Step(`^I source the noisy bash wrapper and run "([^"]*)" from workspace "([^"]*)"$`, iSourceNoisyWrapperAndRunFromWorkspace)
 	ctx.Step(`^I run completion for "([^"]*)" with prefix "([^"]*)"$`, iRunCompletion)
 	ctx.Step(`^I run completion for "([^"]*)" with prefix "([^"]*)" from instance "([^"]*)" of workspace "([^"]*)"$`, iRunCompletionFromInstance)
+	ctx.Step(`^I source the installer env file and run completion for "([^"]*)" with prefix "([^"]*)"$`, iSourceShellInitAndRunCompletion)
+	ctx.Step(`^the "([^"]*)" shell-init output contains "([^"]*)"$`, shellInitContains)
 
 	// Assertions
 	ctx.Step(`^the exit code is (\d+)$`, theExitCodeIs)
