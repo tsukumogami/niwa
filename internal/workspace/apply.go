@@ -243,25 +243,25 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 			return nil, fmt.Errorf("cloning repo %s: %w", cr.Repo.Name, err)
 		}
 		if cloned {
-			fmt.Printf("cloned %s into %s\n", cr.Repo.Name, targetDir)
+			fmt.Fprintf(os.Stderr, "cloned %s into %s\n", cr.Repo.Name, targetDir)
 		} else if !a.NoPull {
 			defaultBranch := DefaultBranch(effectiveCfg, cr.Repo.Name)
 			result, syncErr := SyncRepo(ctx, targetDir, defaultBranch)
 			switch result.Action {
 			case "pulled":
-				fmt.Printf("pulled %s (%d commits)\n", cr.Repo.Name, result.Commits)
+				fmt.Fprintf(os.Stderr, "pulled %s (%d commits)\n", cr.Repo.Name, result.Commits)
 			case "up-to-date":
-				fmt.Printf("skipped %s (up to date)\n", cr.Repo.Name)
+				fmt.Fprintf(os.Stderr, "skipped %s (up to date)\n", cr.Repo.Name)
 			case "fetch-failed":
 				fmt.Fprintf(os.Stderr, "warning: could not fetch %s: %s\n", cr.Repo.Name, result.Reason)
 			case "skipped":
-				fmt.Printf("skipped %s (%s)\n", cr.Repo.Name, result.Reason)
+				fmt.Fprintf(os.Stderr, "skipped %s (%s)\n", cr.Repo.Name, result.Reason)
 			}
 			if syncErr != nil {
 				fmt.Fprintf(os.Stderr, "warning: sync failed for %s: %v\n", cr.Repo.Name, syncErr)
 			}
 		} else {
-			fmt.Printf("skipped %s (already exists)\n", cr.Repo.Name)
+			fmt.Fprintf(os.Stderr, "skipped %s (already exists)\n", cr.Repo.Name)
 		}
 
 		repoStates[cr.Repo.Name] = RepoState{
@@ -327,7 +327,7 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 	// Skip repos with claude = false.
 	for _, cr := range classified {
 		if !ClaudeEnabled(effectiveCfg, cr.Repo.Name) {
-			fmt.Printf("skipped content for %s (claude = false)\n", cr.Repo.Name)
+			fmt.Fprintf(os.Stderr, "skipped content for %s (claude = false)\n", cr.Repo.Name)
 			continue
 		}
 
