@@ -17,6 +17,8 @@ func init() {
 	applyCmd.Flags().StringVar(&applyInstance, "instance", "", "target a specific instance by name")
 	applyCmd.Flags().BoolVar(&applyAllowDirty, "allow-dirty", false, "apply even if config directory has uncommitted changes")
 	applyCmd.Flags().BoolVar(&applyNoPull, "no-pull", false, "skip pulling latest changes into existing repos")
+	applyCmd.ValidArgsFunction = completeWorkspaceNames
+	_ = applyCmd.RegisterFlagCompletionFunc("instance", completeInstanceNames)
 }
 
 var (

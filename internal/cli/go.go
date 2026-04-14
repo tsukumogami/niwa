@@ -16,6 +16,9 @@ func init() {
 	rootCmd.AddCommand(goCmd)
 	goCmd.Flags().StringVarP(&goWorkspace, "workspace", "w", "", "force workspace resolution via registry")
 	goCmd.Flags().StringVarP(&goRepo, "repo", "r", "", "target repo in current instance")
+	goCmd.ValidArgsFunction = completeGoTarget
+	_ = goCmd.RegisterFlagCompletionFunc("workspace", completeWorkspaceNames)
+	_ = goCmd.RegisterFlagCompletionFunc("repo", completeRepoNames)
 }
 
 var (

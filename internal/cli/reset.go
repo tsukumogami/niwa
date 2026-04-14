@@ -15,6 +15,7 @@ import (
 func init() {
 	rootCmd.AddCommand(resetCmd)
 	resetCmd.Flags().BoolVar(&resetForce, "force", false, "skip uncommitted changes check")
+	resetCmd.ValidArgsFunction = completeInstanceNames
 }
 
 var resetForce bool

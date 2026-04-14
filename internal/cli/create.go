@@ -16,6 +16,7 @@ func init() {
 	rootCmd.AddCommand(createCmd)
 	createCmd.Flags().StringVar(&createName, "name", "", "custom instance name suffix (e.g., --name=hotfix produces <config>-hotfix)")
 	createCmd.Flags().StringVarP(&createRepo, "repo", "r", "", "land in this repo after creation")
+	createCmd.ValidArgsFunction = completeWorkspaceNames
 }
 
 var (
