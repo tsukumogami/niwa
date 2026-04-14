@@ -1,5 +1,5 @@
 ---
-status: Accepted
+status: Current
 problem: |
   The shell wrapper's stdout-as-cd protocol assumes niwa's entire stdout is
   the landing path. Any other stdout content — from subprocesses, third-party
@@ -25,7 +25,7 @@ rationale: |
 
 ## Status
 
-Accepted
+Current
 
 ## Context and Problem Statement
 
