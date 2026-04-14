@@ -15,6 +15,7 @@ func init() {
 	rootCmd.AddCommand(initCmd)
 	initCmd.Flags().StringVar(&initFrom, "from", "", "org/repo or URL to clone workspace config from")
 	initCmd.Flags().BoolVar(&initSkipGlobal, "skip-global", false, "disable global config overlay for this instance")
+	initCmd.ValidArgsFunction = completeWorkspaceNames
 }
 
 var (

@@ -287,3 +287,75 @@ func TestGlobalConfigSourceRoundTrip(t *testing.T) {
 		t.Errorf("GlobalConfig.Repo = %q, want myorg/my-config", loaded.GlobalConfig.Repo)
 	}
 }
+
+func TestRegisteredNamesEmpty(t *testing.T) {
+	var g *GlobalConfig
+	if names := g.RegisteredNames(); len(names) != 0 {
+		t.Errorf("nil receiver: got %v, want empty", names)
+	}
+
+	g = &GlobalConfig{}
+	if names := g.RegisteredNames(); len(names) != 0 {
+		t.Errorf("empty receiver: got %v, want empty", names)
+	}
+}
+
+func TestRegisteredNamesSortedAndFiltered(t *testing.T) {
+	g := &GlobalConfig{Registry: map[string]RegistryEntry{
+		"beta":            {Source: "b.toml", Root: "/b"},
+		"alpha":           {Source: "a.toml", Root: "/a"},
+		"gamma":           {Source: "g.toml", Root: "/g"},
+		"bad\tname":       {Source: "x.toml", Root: "/x"},
+		"bidi\u202ename":  {Source: "y.toml", Root: "/y"},
+	}}
+
+	got := g.RegisteredNames()
+	want := []string{"alpha", "beta", "gamma"}
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("got[%d] = %q, want %q (full: %v)", i, got[i], want[i], got)
+		}
+	}
+}
+
+func TestListRegisteredWorkspacesMissingConfig(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	names, err := ListRegisteredWorkspaces()
+	if err != nil {
+		t.Fatalf("ListRegisteredWorkspaces: %v", err)
+	}
+	if len(names) != 0 {
+		t.Errorf("expected no names on missing config, got %v", names)
+	}
+}
+
+func TestListRegisteredWorkspacesHappyPath(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", home)
+	cfgDir := filepath.Join(home, "niwa")
+	if err := os.MkdirAll(cfgDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	contents := `[registry.alpha]
+source = "/tmp/alpha/.niwa/workspace.toml"
+root = "/tmp/alpha"
+
+[registry.beta]
+source = "/tmp/beta/.niwa/workspace.toml"
+root = "/tmp/beta"
+`
+	if err := os.WriteFile(filepath.Join(cfgDir, "config.toml"), []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	names, err := ListRegisteredWorkspaces()
+	if err != nil {
+		t.Fatalf("ListRegisteredWorkspaces: %v", err)
+	}
+	if len(names) != 2 || names[0] != "alpha" || names[1] != "beta" {
+		t.Errorf("got %v, want [alpha beta]", names)
+	}
+}

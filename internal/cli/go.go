@@ -16,6 +16,9 @@ func init() {
 	rootCmd.AddCommand(goCmd)
 	goCmd.Flags().StringVarP(&goWorkspace, "workspace", "w", "", "force workspace resolution via registry")
 	goCmd.Flags().StringVarP(&goRepo, "repo", "r", "", "target repo in current instance")
+	goCmd.ValidArgsFunction = completeGoTarget
+	_ = goCmd.RegisterFlagCompletionFunc("workspace", completeWorkspaceNames)
+	_ = goCmd.RegisterFlagCompletionFunc("repo", completeRepoNames)
 }
 
 var (
@@ -212,26 +215,17 @@ func resolveContextAware(cmd *cobra.Command, target string) (string, error) {
 
 func formatNotInWorkspaceError() error {
 	globalCfg, _ := config.LoadGlobalConfig()
-	if globalCfg != nil && len(globalCfg.Registry) > 0 {
-		var names []string
-		for name := range globalCfg.Registry {
-			names = append(names, name)
-		}
-		sort.Strings(names)
+	if names := globalCfg.RegisteredNames(); len(names) > 0 {
 		return fmt.Errorf("not inside a workspace\nhint: use \"niwa go <workspace>\" to navigate to a registered workspace: %s", strings.Join(names, ", "))
 	}
 	return fmt.Errorf("not inside a workspace (no workspaces registered)")
 }
 
 func formatWorkspaceNotFoundError(name string, globalCfg *config.GlobalConfig) error {
-	if globalCfg == nil || len(globalCfg.Registry) == 0 {
+	names := globalCfg.RegisteredNames()
+	if len(names) == 0 {
 		return fmt.Errorf("workspace %q not found (no workspaces registered)", name)
 	}
-	var names []string
-	for n := range globalCfg.Registry {
-		names = append(names, n)
-	}
-	sort.Strings(names)
 	return fmt.Errorf("workspace %q not found. Registered workspaces: %s", name, strings.Join(names, ", "))
 }
 
@@ -240,14 +234,8 @@ func formatTargetNotFoundError(target string, inInstance bool, globalCfg *config
 	if inInstance {
 		hints = append(hints, "not a repo in the current instance")
 	}
-	var wsNames []string
-	if globalCfg != nil {
-		for n := range globalCfg.Registry {
-			wsNames = append(wsNames, n)
-		}
-	}
+	wsNames := globalCfg.RegisteredNames()
 	if len(wsNames) > 0 {
-		sort.Strings(wsNames)
 		hints = append(hints, fmt.Sprintf("not a registered workspace (registered: %s)", strings.Join(wsNames, ", ")))
 	} else {
 		hints = append(hints, "no workspaces registered")

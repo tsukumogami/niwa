@@ -115,6 +115,10 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 	// Environment
 	ctx.Step(`^a clean niwa environment$`, aCleanNiwaEnvironment)
 	ctx.Step(`^a workspace "([^"]*)" exists$`, aWorkspaceExists)
+	ctx.Step(`^a registered workspace "([^"]*)" exists$`, aRegisteredWorkspaceExists)
+	ctx.Step(`^an instance "([^"]*)" of workspace "([^"]*)" exists with repos "([^"]*)"$`, func(ctx context.Context, instanceName, workspaceName, repos string) (context.Context, error) {
+		return aWorkspaceInstanceExistsWithRepos(ctx, workspaceName, instanceName, repos)
+	})
 	ctx.Step(`^I set env "([^"]*)" to "([^"]*)"$`, iSetEnv)
 	ctx.Step(`^I set env "([^"]*)" to a temp path$`, iSetEnvToTempPath)
 
@@ -124,6 +128,10 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 	ctx.Step(`^I source the bash wrapper and run "([^"]*)" from workspace "([^"]*)"$`, iSourceWrapperAndRunFromWorkspace)
 	ctx.Step(`^I source the bash wrapper and run "([^"]*)"$`, iSourceWrapperAndRun)
 	ctx.Step(`^I source the noisy bash wrapper and run "([^"]*)" from workspace "([^"]*)"$`, iSourceNoisyWrapperAndRunFromWorkspace)
+	ctx.Step(`^I run completion for "([^"]*)" with prefix "([^"]*)"$`, iRunCompletion)
+	ctx.Step(`^I run completion for "([^"]*)" with prefix "([^"]*)" from instance "([^"]*)" of workspace "([^"]*)"$`, iRunCompletionFromInstance)
+	ctx.Step(`^I source the installer env file and run completion for "([^"]*)" with prefix "([^"]*)"$`, iSourceShellInitAndRunCompletion)
+	ctx.Step(`^the "([^"]*)" shell-init output contains "([^"]*)"$`, shellInitContains)
 
 	// Assertions
 	ctx.Step(`^the exit code is (\d+)$`, theExitCodeIs)
@@ -139,4 +147,7 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 	ctx.Step(`^the wrapped shell ended in workspace "([^"]*)"$`, theWrappedShellEndedInWorkspace)
 	ctx.Step(`^the wrapped shell did not change directory$`, theWrappedShellDidNotChangeDirectory)
 	ctx.Step(`^no niwa temp files remain in the system temp directory$`, noNiwaTempFilesRemain)
+	ctx.Step(`^the completion output contains "([^"]*)"$`, theCompletionOutputContains)
+	ctx.Step(`^the completion output does not contain "([^"]*)"$`, theCompletionOutputDoesNotContain)
+	ctx.Step(`^the completion description for "([^"]*)" is "([^"]*)"$`, theCompletionDescriptionMatches)
 }

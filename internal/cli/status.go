@@ -15,6 +15,7 @@ import (
 
 func init() {
 	rootCmd.AddCommand(statusCmd)
+	statusCmd.ValidArgsFunction = completeInstanceNames
 }
 
 var statusCmd = &cobra.Command{

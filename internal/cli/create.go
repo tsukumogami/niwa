@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -17,6 +16,7 @@ func init() {
 	rootCmd.AddCommand(createCmd)
 	createCmd.Flags().StringVar(&createName, "name", "", "custom instance name suffix (e.g., --name=hotfix produces <config>-hotfix)")
 	createCmd.Flags().StringVarP(&createRepo, "repo", "r", "", "land in this repo after creation")
+	createCmd.ValidArgsFunction = completeWorkspaceNames
 }
 
 var (
@@ -77,14 +77,10 @@ func runCreate(cmd *cobra.Command, args []string) error {
 		}
 		entry := globalCfg.LookupWorkspace(workspaceName)
 		if entry == nil {
-			var names []string
-			for name := range globalCfg.Registry {
-				names = append(names, name)
-			}
+			names := globalCfg.RegisteredNames()
 			if len(names) == 0 {
 				return fmt.Errorf("workspace %q not found in registry (no workspaces registered)", workspaceName)
 			}
-			sort.Strings(names)
 			return fmt.Errorf("workspace %q not found in registry. Registered workspaces: %s", workspaceName, strings.Join(names, ", "))
 		}
 		configPath = entry.Source

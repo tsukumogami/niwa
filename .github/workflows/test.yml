@@ -70,7 +70,11 @@ jobs:
               echo "::error::niwa shell-init $shell missing wrapper function"
               exit 1
             fi
-            echo "OK: shell-init $shell produces valid wrapper output"
+            if ! echo "$output" | grep -q '__complete'; then
+              echo "::error::niwa shell-init $shell missing cobra completion dispatch"
+              exit 1
+            fi
+            echo "OK: shell-init $shell produces valid wrapper + completion output"
           done
           rm niwa-test
 
@@ -93,7 +97,11 @@ jobs:
                 echo "::error::$init_file missing niwa() wrapper function"
                 exit 1
               fi
-              echo "OK: $init_file exists and contains wrapper function"
+              if ! grep -q '__complete' "$init_file"; then
+                echo "::error::$init_file missing cobra completion dispatch"
+                exit 1
+              fi
+              echo "OK: $init_file contains wrapper + completion dispatch"
             fi
           done
 

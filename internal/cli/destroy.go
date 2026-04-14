@@ -12,6 +12,7 @@ import (
 func init() {
 	rootCmd.AddCommand(destroyCmd)
 	destroyCmd.Flags().BoolVar(&destroyForce, "force", false, "skip uncommitted changes check")
+	destroyCmd.ValidArgsFunction = completeInstanceNames
 }
 
 var destroyForce bool
