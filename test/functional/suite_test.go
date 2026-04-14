@@ -21,6 +21,7 @@ var stateKey = stateKeyType{}
 type testState struct {
 	binPath       string            // absolute path to the niwa test binary
 	homeDir       string            // sandboxed $HOME for this scenario (holds .niwa/, .bashrc, etc.)
+	tmpDir        string            // scenario-scoped $TMPDIR (writes landed here stay isolated)
 	workspaceRoot string            // sandboxed directory where workspaces live
 	stdout        string            // last command's stdout
 	stderr        string            // last command's stderr
@@ -94,16 +95,17 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 		}
 		homeDir := filepath.Join(sandbox, "home")
 		workspaceRoot := filepath.Join(sandbox, "workspaces")
-		if err := os.MkdirAll(homeDir, 0o755); err != nil {
-			return ctx, err
-		}
-		if err := os.MkdirAll(workspaceRoot, 0o755); err != nil {
-			return ctx, err
+		tmpDir := filepath.Join(sandbox, "tmp")
+		for _, d := range []string{homeDir, workspaceRoot, tmpDir} {
+			if err := os.MkdirAll(d, 0o755); err != nil {
+				return ctx, err
+			}
 		}
 
 		state := &testState{
 			binPath:       binPath,
 			homeDir:       homeDir,
+			tmpDir:        tmpDir,
 			workspaceRoot: workspaceRoot,
 			envOverrides:  make(map[string]string),
 		}
@@ -121,6 +123,7 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 	ctx.Step(`^I run "([^"]*)" from workspace "([^"]*)"$`, iRunFromWorkspace)
 	ctx.Step(`^I source the bash wrapper and run "([^"]*)" from workspace "([^"]*)"$`, iSourceWrapperAndRunFromWorkspace)
 	ctx.Step(`^I source the bash wrapper and run "([^"]*)"$`, iSourceWrapperAndRun)
+	ctx.Step(`^I source the noisy bash wrapper and run "([^"]*)" from workspace "([^"]*)"$`, iSourceNoisyWrapperAndRunFromWorkspace)
 
 	// Assertions
 	ctx.Step(`^the exit code is (\d+)$`, theExitCodeIs)
@@ -135,5 +138,5 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 	ctx.Step(`^the response file does not exist$`, theResponseFileDoesNotExist)
 	ctx.Step(`^the wrapped shell ended in workspace "([^"]*)"$`, theWrappedShellEndedInWorkspace)
 	ctx.Step(`^the wrapped shell did not change directory$`, theWrappedShellDidNotChangeDirectory)
-	ctx.Step(`^the home file "([^"]*)" does not exist$`, theHomeFileDoesNotExist)
+	ctx.Step(`^no niwa temp files remain in the system temp directory$`, noNiwaTempFilesRemain)
 }

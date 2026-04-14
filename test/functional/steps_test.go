@@ -47,34 +47,37 @@ func iSetEnv(ctx context.Context, key, value string) (context.Context, error) {
 }
 
 // iSetEnvToTempPath sets an env var to a freshly-created path under the
-// system tmp directory. Used when the test needs a valid NIWA_RESPONSE_FILE
-// path but doesn't care about its exact value.
+// scenario's scoped TMPDIR. Used when the test needs a valid
+// NIWA_RESPONSE_FILE path but doesn't care about its exact value. The
+// file is created inside the per-scenario sandbox so it's automatically
+// cleaned up by the next Before hook.
 func iSetEnvToTempPath(ctx context.Context, key string) (context.Context, error) {
 	s := getState(ctx)
 	if s == nil {
 		return ctx, fmt.Errorf("no test state")
 	}
-	f, err := os.CreateTemp("", "niwa-test-*")
+	f, err := os.CreateTemp(s.tmpDir, "response-*")
 	if err != nil {
 		return ctx, fmt.Errorf("creating temp file: %w", err)
 	}
 	path := f.Name()
 	_ = f.Close()
-	// Empty the file so later assertions see only what niwa wrote.
 	_ = os.Truncate(path, 0)
 	s.envOverrides[key] = path
 	return ctx, nil
 }
 
 // buildEnv returns the environment for invoking the niwa binary. It overrides
-// HOME to the sandbox so .niwa/config.toml etc. don't leak into the user's
-// actual home, and lets per-scenario overrides win.
+// HOME, XDG_CONFIG_HOME, and TMPDIR to the sandbox so config, state, and
+// temp files don't leak across scenarios or into the real user environment.
+// Per-scenario overrides win last.
 func (s *testState) buildEnv() []string {
 	base := os.Environ()
-	// Strip any HOME and XDG_CONFIG_HOME that leaked in from the parent env.
 	filtered := base[:0]
 	for _, kv := range base {
-		if strings.HasPrefix(kv, "HOME=") || strings.HasPrefix(kv, "XDG_CONFIG_HOME=") {
+		if strings.HasPrefix(kv, "HOME=") ||
+			strings.HasPrefix(kv, "XDG_CONFIG_HOME=") ||
+			strings.HasPrefix(kv, "TMPDIR=") {
 			continue
 		}
 		filtered = append(filtered, kv)
@@ -82,6 +85,7 @@ func (s *testState) buildEnv() []string {
 	env := append(filtered,
 		"HOME="+s.homeDir,
 		"XDG_CONFIG_HOME="+filepath.Join(s.homeDir, ".config"),
+		"TMPDIR="+s.tmpDir,
 	)
 	for k, v := range s.envOverrides {
 		env = append(env, k+"="+v)
@@ -157,6 +161,37 @@ func iSourceWrapperAndRun(ctx context.Context, command string) (context.Context,
 	return ctx, runWrappedShell(s, s.homeDir, command)
 }
 
+// iSourceNoisyWrapperAndRunFromWorkspace is the regression test for the
+// feature's primary motivation: under the old stdout-capture protocol, any
+// subprocess that wrote to stdout broke navigation. We simulate that by
+// placing a "niwa" shell script on PATH that emits stdout noise before
+// exec'ing the real binary. Inside the wrapper function, `command niwa
+// "$@"` picks up this script. With the temp-file protocol, the landing
+// path arrives via NIWA_RESPONSE_FILE, so stdout noise is harmless.
+func iSourceNoisyWrapperAndRunFromWorkspace(ctx context.Context, command, workspace string) (context.Context, error) {
+	s := getState(ctx)
+	if s == nil {
+		return ctx, fmt.Errorf("no test state")
+	}
+	// The noisy script writes the kind of output that used to corrupt
+	// navigation: git clone progress, verbose log lines.
+	noisyDir := filepath.Join(s.homeDir, "noisy-bin")
+	if err := os.MkdirAll(noisyDir, 0o755); err != nil {
+		return ctx, fmt.Errorf("mkdir noisy-bin: %w", err)
+	}
+	script := fmt.Sprintf(`#!/bin/sh
+echo "Cloning into 'fake-repo'..."
+echo "remote: Enumerating objects: 1234, done."
+exec %q "$@"
+`, s.binPath)
+	noisyPath := filepath.Join(noisyDir, "niwa")
+	if err := os.WriteFile(noisyPath, []byte(script), 0o755); err != nil {
+		return ctx, fmt.Errorf("writing noisy niwa script: %w", err)
+	}
+	cwd := filepath.Join(s.workspaceRoot, workspace, ".niwa")
+	return ctx, runWrappedShellWithPATH(s, cwd, command, noisyDir)
+}
+
 // runWrappedShell invokes bash, sources the niwa wrapper, runs the given
 // command, then prints `__NIWA_SHELL_PWD=<pwd>` so we can read the final
 // directory out-of-band from the command's own output. Any error from the
@@ -175,20 +210,32 @@ func runWrappedShell(s *testState, cwd, command string) error {
 	if err := os.Symlink(s.binPath, link); err != nil {
 		return fmt.Errorf("symlinking test binary: %w", err)
 	}
+	return runWrappedShellWithPATH(s, cwd, command, linkDir)
+}
 
+// runWrappedShellWithPATH is the shared shell-invocation worker. pathPrefix
+// is prepended to $PATH before the wrapper is sourced; runWrappedShell uses
+// a symlink directory, while the noisy-wrapper scenario passes a directory
+// containing a script that adds stdout noise before exec'ing the real niwa.
+func runWrappedShellWithPATH(s *testState, cwd, command, pathPrefix string) error {
 	s.shellStartPwd = cwd
+	// Source the wrapper via the real binary's absolute path — this ensures
+	// `shell-init` output isn't polluted by any niwa stand-in on PATH (e.g.,
+	// the noisy-wrapper scenario). AFTER the wrapper function is loaded,
+	// prepend pathPrefix so subsequent bare `niwa` calls through the wrapper
+	// hit whatever pathPrefix provides.
 	script := fmt.Sprintf(`set +e
+eval "$(%q shell-init bash)"
 export PATH=%q:"$PATH"
-eval "$(niwa shell-init bash)"
 cd %q
 %s
 __rc=$?
 printf '__NIWA_SHELL_PWD=%%s\n' "$(pwd)" >&2
 exit $__rc
-`, linkDir, cwd, command)
+`, s.binPath, pathPrefix, cwd, command)
 
 	cmd := exec.Command("bash", "-c", script)
-	cmd.Env = append(s.buildEnv(), "PATH="+linkDir+":"+os.Getenv("PATH"))
+	cmd.Env = s.buildEnv()
 	var stdout, stderr strings.Builder
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -351,11 +398,23 @@ func theWrappedShellDidNotChangeDirectory(ctx context.Context) error {
 	return nil
 }
 
-func theHomeFileDoesNotExist(ctx context.Context, path string) error {
+// noNiwaTempFilesRemain scans the scenario's scoped TMPDIR for wrapper
+// leftovers. TMPDIR is set to s.tmpDir in buildEnv, so the wrapper's
+// `mktemp` creates files there; its `rm -f` should clean them up. Any
+// remaining entry in s.tmpDir after the wrapped command ran indicates a
+// missing or failed cleanup in the wrapper.
+func noNiwaTempFilesRemain(ctx context.Context) error {
 	s := getState(ctx)
-	full := filepath.Join(s.homeDir, path)
-	if _, err := os.Stat(full); err == nil {
-		return fmt.Errorf("expected home file %s to not exist", full)
+	entries, err := os.ReadDir(s.tmpDir)
+	if err != nil {
+		return fmt.Errorf("scanning %s: %w", s.tmpDir, err)
 	}
-	return nil
+	if len(entries) == 0 {
+		return nil
+	}
+	var names []string
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	return fmt.Errorf("expected %s to be empty after wrapped run; found %d leftover(s): %v", s.tmpDir, len(entries), names)
 }
