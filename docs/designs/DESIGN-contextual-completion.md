@@ -483,3 +483,319 @@ The eight decisions compose into a coherent implementation plan:
   sufficient for v1; MRU ordering would need a usage-tracking store.
 - **Shadowing via duplicated entries on bash V1** (Option E from
   Decision 1). Defer until usage shows collisions are common.
+
+## Solution Architecture
+
+### Overview
+
+Dynamic completion in niwa is a thin layer over cobra's native completion
+pipeline. Cobra's generated shell scripts (already emitted by `niwa
+shell-init bash/zsh`) dispatch every tab press to `niwa __complete <args>`,
+which walks the command tree, finds the relevant `ValidArgsFunction` or
+`RegisterFlagCompletionFunc` closure, and returns suggestions plus a
+directive. This design attaches closures; nothing else in the pipeline
+changes.
+
+### Components
+
+Three layers:
+
+1. **Closure layer (`internal/cli/completion.go`).** Three package-private
+   functions with cobra's `ValidArgsFunction` signature:
+   - `completeWorkspaceNames(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective)`
+   - `completeInstanceNames(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective)`
+   - `completeRepoNames(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective)`
+   Plus one specialized closure for `niwa go [target]`:
+   - `completeGoTarget(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective)` — unions repos and workspaces with decoration.
+
+2. **Data layer (`internal/config/`, `internal/workspace/`).** Two new
+   exported functions:
+   - `config.ListRegisteredWorkspaces() []string` — sorted registry keys
+     from `GlobalConfig.Registry`.
+   - `workspace.EnumerateRepos(instanceRoot string) ([]string, error)` —
+     sorted repo directory names (two-level group scan, matching
+     `findRepoDir`'s traversal pattern).
+
+   Existing functions already present:
+   - `config.LoadGlobalConfig() (*GlobalConfig, error)`
+   - `workspace.EnumerateInstances(workspaceRoot string) ([]string, error)`
+   - `workspace.LoadState(instanceRoot string) (*State, error)`
+   - `workspace.DiscoverInstance(cwd string) (string, error)`
+
+3. **Wiring (per-command `init()` blocks).** Each cobra command declares its
+   completion function inline at registration:
+   ```go
+   func init() {
+       rootCmd.AddCommand(applyCmd)
+       applyCmd.ValidArgsFunction = completeWorkspaceNames
+       applyCmd.RegisterFlagCompletionFunc("instance", completeInstanceNames)
+       // ...
+   }
+   ```
+
+### Key Interfaces
+
+**Cobra completion signature (closure layer):**
+
+```go
+type CompletionFunc = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective)
+```
+
+Closures return:
+- `[]string` — filtered candidates (possibly TAB-decorated with a
+  description per Decision 8), each matching `toComplete` as a prefix.
+- `cobra.ShellCompDirective` — always includes `ShellCompDirectiveNoFileComp`.
+
+**Data layer additions:**
+
+```go
+// internal/config/registry.go
+func ListRegisteredWorkspaces() ([]string, error) // sorted, nil on missing config
+```
+
+```go
+// internal/workspace/state.go
+func EnumerateRepos(instanceRoot string) ([]string, error) // sorted, two-level scan
+```
+
+`EnumerateRepos` skips the `.niwa` and `.claude` control directories and
+returns repo directory names (no paths). When a name appears in multiple
+groups under one instance, it's returned once (matching `findRepoDir`'s
+ambiguous-name detection semantics, surfaced as a duplicated entry is not
+useful for completion).
+
+### Data Flow
+
+```
+user presses TAB
+     │
+     ▼
+shell wrapper (loaded via shell-init)
+     │
+     ▼  spawns `niwa __complete <args>`
+cobra __complete subcommand (auto-registered on rootCmd)
+     │
+     ▼  dispatches to ValidArgsFunction or RegisterFlagCompletionFunc
+closure in internal/cli/completion.go
+     │
+     ├─── os.Getwd() for cwd (completion closures only; command closures
+     │    receive cwd via cmd.Flag() or os.Getwd())
+     │
+     ▼
+data-layer calls:
+  - config.LoadGlobalConfig() + ListRegisteredWorkspaces()
+  - workspace.DiscoverInstance(cwd) + EnumerateRepos(instanceRoot)
+  - workspace.EnumerateInstances(workspaceRoot) + LoadState(...)
+     │
+     ▼  returns []string + ShellCompDirective
+cobra prints one suggestion per line + :<directive> trailer
+     │
+     ▼
+shell wrapper renders candidates in the completion menu
+```
+
+Per-tab-press cost (measured, Lead 3): ~2ms cold start, ~3ms for a
+500-workspace TOML, <5ms for scoped filesystem walks even at 100k repo dirs.
+
+### Completion coverage table (v1)
+
+| Command | Position | Kind | Closure |
+|---------|----------|------|---------|
+| `niwa apply [workspace-name]` | positional | workspace | `completeWorkspaceNames` |
+| `niwa apply --instance <name>` | flag | instance | `completeInstanceNames` |
+| `niwa create [workspace-name]` | positional | workspace | `completeWorkspaceNames` |
+| `niwa destroy [instance]` | positional | instance | `completeInstanceNames` |
+| `niwa go [target]` | positional | repo + workspace | `completeGoTarget` (decorated) |
+| `niwa go -w <workspace>` | flag | workspace | `completeWorkspaceNames` |
+| `niwa go -r <repo>` | flag | repo | `completeRepoNames` (reads `-w` via `cmd.Flag`) |
+| `niwa reset [instance]` | positional | instance | `completeInstanceNames` |
+| `niwa status [instance]` | positional | instance | `completeInstanceNames` |
+| `niwa init [name]` | positional | workspace (registry-only) | `completeWorkspaceNames` |
+
+### Test layout
+
+```
+internal/cli/completion_test.go          Tier 1 — unit tests
+test/functional/features/completion.feature   Tier 2 — functional tests
+test/functional/steps_test.go             augmented with:
+  - aRegisteredWorkspaceExists
+  - theCompletionOutputContains
+  - theCompletionOutputDoesNotContain
+  - completionSuggestions (helper)
+test/functional/suite_test.go             augmented to register the new steps
+```
+
+## Implementation Approach
+
+### Phase 1: Data layer
+
+Add the two enumeration helpers first. These have no dependencies and can be
+verified with unit tests before completion closures exist.
+
+Deliverables:
+- `internal/config/registry.go` — add `ListRegisteredWorkspaces() ([]string, error)`.
+- `internal/workspace/state.go` — add `EnumerateRepos(instanceRoot string) ([]string, error)`.
+- Unit tests for both.
+- Migrate existing call sites: four "iterate Registry keys and sort"
+  copies in `go.go` and `create.go` replace inline code with
+  `config.ListRegisteredWorkspaces()`. `findRepoDir` (and its three callers)
+  migrate to `workspace.EnumerateRepos` for listing semantics.
+
+### Phase 2: Closure layer + completion tests
+
+Add `internal/cli/completion.go` with the four closures. Wire into each
+command's `init()` via `ValidArgsFunction` / `RegisterFlagCompletionFunc`.
+
+Deliverables:
+- `internal/cli/completion.go` with four closures.
+- Wiring edits to `apply.go`, `create.go`, `destroy.go`, `go.go`, `reset.go`,
+  `status.go`, `init.go`.
+- `internal/cli/completion_test.go` — unit tests covering prefix filtering,
+  empty registry, missing config, directive correctness, `-r` reading `-w`,
+  and `completeGoTarget` decoration/collision behavior.
+
+### Phase 3: Functional tests
+
+Add a new feature file and the step implementations. No production code
+changes — this phase only validates that Phase 2's wiring is correct
+end-to-end.
+
+Deliverables:
+- `test/functional/features/completion.feature` with scenarios covering
+  the headline paths (workspace completion, instance completion, repo
+  completion in current instance, `go` decoration, `go -r` under `-w`).
+- `test/functional/steps_test.go` additions: `aRegisteredWorkspaceExists`,
+  `theCompletionOutputContains`, `theCompletionOutputDoesNotContain`,
+  helper `completionSuggestions(stdout string) []string`.
+- `test/functional/suite_test.go` step registrations.
+
+### Phase 4: Polish
+
+Verify cross-shell behavior on bash V2, zsh, and bash V1 (manual smoke
+test). Update `docs/` if any user-facing documentation describes shell
+integration (a brief note that completion is on by default).
+
+Deliverables:
+- `make test-functional` runs cleanly; new completion scenarios pass.
+- No changes to `install.sh` or `.tsuku-recipes/niwa.toml` (confirmed from
+  exploration).
+- Doc snippet update (if applicable).
+
+## Implicit Decisions
+
+Re-reading Solution Architecture and Implementation Approach, three
+implementation choices were made in prose without explicit decision
+treatment. Each had a viable alternative; documenting them keeps future
+readers from wondering.
+
+### Implicit Decision A: `EnumerateRepos` returns repo names, not paths
+
+The helper returns `[]string` of repo directory names (e.g.,
+`["api", "web"]`) rather than paths or `(group, name)` pairs.
+
+- **Alternative:** return full paths or tuples so callers can distinguish
+  `group-a/api` from `group-b/api`.
+- **Chosen:** names only, dedupe on collision. Completion needs the string
+  the user will type, which is the repo name. The runtime
+  (`resolveContextAware`) already rejects traversal characters, so names
+  are safe to surface verbatim. Ambiguous cross-group names are rare in
+  practice and surfaced to the user via the same stderr hint the runtime
+  already produces.
+
+### Implicit Decision B: `completeGoTarget` as a specialized closure, not a composition
+
+The design adds a dedicated `completeGoTarget` closure rather than
+composing `completeRepoNames` and `completeWorkspaceNames` at the
+per-command wiring layer.
+
+- **Alternative:** wire `ValidArgsFunction` to an inline lambda that calls
+  both helpers and concatenates.
+- **Chosen:** explicit closure. Decoration logic (Option 3 from Decision 8)
+  and collision handling (Option B from Decision 1) live in one named
+  function that's easy to find and test. The other completion positions use
+  the shared helpers directly; only `go [target]`'s bare positional needs
+  this special shape, and naming it surfaces that intent.
+
+### Implicit Decision C: Completion closures swallow errors silently
+
+Shell completion functions return `[]string{}, ShellCompDirectiveNoFileComp`
+on error rather than `ShellCompDirectiveError`.
+
+- **Alternative:** return `ShellCompDirectiveError` so the shell surfaces a
+  stderr message when completion fails. Provides debuggability but breaks
+  the user's flow on every tab press during (e.g.) transient filesystem
+  errors.
+- **Chosen:** silent empty. Cobra's shell wrappers deal with `Error`
+  directive by printing a stderr banner that the user's completion menu
+  interrupts, which is worse UX than no suggestions. This matches the
+  convention in cobra's own `completions_test.go`.
+
+## Consequences
+
+### Positive
+
+- **Tab-completion works for every command identifier users actually
+  type**: workspaces, instances, and repos. Typing `niwa go ts<TAB>`
+  produces the right suggestions immediately, including disambiguation
+  when a name collides.
+- **Code cleanup alongside feature work.** Four duplicated copies of the
+  "iterate Registry keys and sort" idiom collapse into
+  `config.ListRegisteredWorkspaces()`. The inlined two-level group scan in
+  `findRepoDir` becomes `workspace.EnumerateRepos` — a named function
+  other features can use.
+- **No install-path work.** Every existing niwa user gets completion on
+  their next shell start, via the same shell-init machinery that already
+  ships the wrapper function. No migration, no environment variable
+  opt-in, no new documentation.
+- **Low implementation risk.** Cobra's pipeline is stable and well-tested;
+  this design only attaches closures. No new frameworks, no new
+  dependencies.
+- **Design-doc trail for future contributors.** Every decision has a
+  recorded alternative and rationale. If UX expectations change (e.g.,
+  someone wants paths in descriptions later), the design explicitly names
+  the trade-off that ruled them out.
+
+### Negative
+
+- **Cross-shell UX varies.** Bash V1 (macOS default) silently drops
+  descriptions, so users on that shell see undecorated candidates and lose
+  the `repo in 1` / `workspace` disambiguation. No completion-time signal
+  distinguishes a repo from a workspace of the same name.
+- **Drift between instances hides repos.** `niwa go -w ws -r <TAB>`
+  enumerates only the sorted-first instance's repos (Decision 7). If a
+  repo exists only in instance 2 but not in instance 1, completion won't
+  surface it. Matches runtime behavior but may surprise users who expect
+  completion to be more permissive.
+- **Lexicographic sort quirk propagates.** Sorted-first instance uses
+  lexicographic order, which puts `"1" < "10" < "2"`. Completion inherits
+  this quirk unchanged. Pre-existing runtime behavior, but now more
+  visible.
+- **Every tab press spawns a fresh `niwa` process.** ~2ms cold start on
+  Linux; untested on WSL, macOS, or machines with enterprise AV hooks
+  that add process-exec latency. Could feel sluggish in hostile
+  environments.
+- **Destructive commands have no completion-time friction.** A user
+  `niwa destroy <TAB> <Enter>` destroys an instance in two keystrokes.
+  Matches precedent from other CLIs, but is the feature that most
+  deserves a follow-up UX review.
+
+### Mitigations
+
+- **Bash V1 description loss:** acknowledged in Decision 1 rationale.
+  Candidate names still resolve correctly, so users only lose the
+  decoration enhancement, not functionality. Option E (duplicated entries
+  on bash V1) stays in the deferred list.
+- **Drift between instances:** the workaround is to navigate into the
+  desired instance and use bare `-r` (no `-w`), which correctly scopes to
+  cwd. If future usage shows the limitation hurts, `resolveWorkspaceRepo`
+  itself can be extended; completion will track.
+- **Sort quirk:** tracked separately from completion. A future fix to
+  `EnumerateInstances` sort order propagates through this design
+  automatically.
+- **Cold-start latency:** if user reports surface sluggishness, add the
+  on-disk cache sketched in Lead 3's research (keyed by config.toml and
+  workspace-root mtimes). Data-layer functions are already factored for
+  easy memoization.
+- **Destructive-command footgun:** a follow-up design can add
+  confirmation, an env-var gate, or completion suppression. Separable and
+  non-blocking.
