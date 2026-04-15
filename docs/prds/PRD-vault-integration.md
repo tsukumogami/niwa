@@ -131,14 +131,72 @@ Depending on which backend the team chose, the bootstrap looks like:
 Either path must avoid requiring a shared service token distributed
 via Slack or 1Password-to-1Password hand-off.
 
-### US-3: Developer uses different PATs for different orgs
+### US-3: Developer has a team vault AND a personal vault, composed per workspace
 
-As a developer whose personal config declares PATs for both `tsukumogami`
-and `codespar`, I want niwa to pick the `tsukumogami` PAT when I
-`niwa apply` in a `tsukumogami` workspace and the `codespar` PAT in a
-`codespar` workspace, so that I never have to manually switch credentials
-between sessions. The scoping should be automatic in the 80% case
-(single-source workspaces) and explicit for multi-source workspaces.
+As a developer who belongs to the `tsukumogami` team and also has my own
+personal secrets, I want:
+
+1. The team's shared secrets (API tokens the team pays for) to come
+   from a **team vault declared in `tsukumogami/dot-niwa`**. When a
+   team secret rotates, my next `niwa apply` picks it up without
+   me touching my personal config.
+2. My personal secrets (PATs, personal API keys) to come from a
+   **personal vault declared in my own `dangazineu/dot-niwa`
+   repo**, scoped per-project: my `tsukumogami` PAT is used for
+   `tsukumogami` workspaces, my `codespar` PAT for `codespar`
+   workspaces. I never have to manually switch credentials between
+   sessions.
+3. Both vaults resolved at the same `niwa apply` — team refs hit
+   the team vault, personal refs hit the personal vault, all in one
+   command.
+
+Concretely:
+
+**Team config** (`tsukumogami/dot-niwa/.niwa/workspace.toml`, safe to be
+a public repo):
+
+```toml
+[workspace]
+name = "tsukumogami"
+
+[vault.providers.team]
+kind    = "infisical"        # or "sops"
+project = "tsukumogami"
+
+[env.vars]
+ANTHROPIC_API_KEY = "vault://team/anthropic-api-key"
+OPENAI_API_KEY    = "vault://team/openai-api-key"
+
+[repos.niwa.env.vars]
+GITHUB_TOKEN = "vault://personal/github-pat"
+```
+
+**Personal config** (`dangazineu/dot-niwa/niwa.toml`, always private):
+
+```toml
+# Personal vault provider, per-org scoping.
+[workspaces.tsukumogami.vault.providers.personal]
+kind     = "op"                # or "infisical", "sops", etc.
+account  = "my.1password.com"
+vault_id = "dangazineu-tsukumogami"
+
+[workspaces.codespar.vault.providers.personal]
+kind     = "op"
+account  = "my.1password.com"
+vault_id = "dangazineu-codespar"
+```
+
+**What happens on `niwa apply` in a `tsukumogami` workspace:**
+
+- `ANTHROPIC_API_KEY` → looked up as `anthropic-api-key` in the
+  **team** Infisical project `tsukumogami`.
+- `GITHUB_TOKEN` → looked up as `github-pat` in my **personal**
+  1Password vault `dangazineu-tsukumogami`.
+
+Same binary, same command, two backends resolved in one pass. Scoping
+is automatic because the workspace has one source (`tsukumogami`). For
+multi-source workspaces, I set `[workspace].vault_scope = "..."`
+explicitly (R5).
 
 ### US-4: Developer overrides a team secret for a debug session
 
