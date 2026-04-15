@@ -132,7 +132,7 @@ func TestMergeOverridesPluginsReplace(t *testing.T) {
 		},
 		Repos: map[string]config.RepoOverride{
 			"myrepo": {
-				Claude: &config.ClaudeConfig{
+				Claude: &config.ClaudeOverride{
 					Plugins: &repoPlugins,
 				},
 			},
@@ -154,7 +154,7 @@ func TestMergeOverridesPluginsDisable(t *testing.T) {
 		},
 		Repos: map[string]config.RepoOverride{
 			"myrepo": {
-				Claude: &config.ClaudeConfig{
+				Claude: &config.ClaudeOverride{
 					Plugins: &empty,
 				},
 			},

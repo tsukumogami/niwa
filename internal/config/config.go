@@ -14,17 +14,40 @@ import (
 // validName matches names that contain only alphanumerics, dots, hyphens, and underscores.
 var validName = regexp.MustCompile(`^[a-zA-Z0-9._-]+$`)
 
-// ClaudeConfig groups hooks and settings under a single [claude] namespace.
-// On RepoOverride, Enabled controls whether Claude Code configuration is
-// installed for the repo (defaults to true when nil).
+// ClaudeConfig is the workspace-level Claude configuration under [claude].
+// It carries every Claude-related field: the common subset used at override
+// positions (Enabled, Plugins, Hooks, Settings, Env) plus workspace-scoped
+// fields (Marketplaces, Content) that don't flow through override merges.
+// For override positions (RepoOverride.Claude, InstanceConfig.Claude,
+// GlobalOverride.Claude), use ClaudeOverride instead.
 type ClaudeConfig struct {
-	Enabled *bool  `toml:"enabled,omitempty"`
+	Enabled *bool     `toml:"enabled,omitempty"`
 	Plugins *[]string `toml:"plugins,omitempty"`
 	// Marketplaces is workspace-wide. Not merged from per-repo overrides.
 	Marketplaces []string        `toml:"marketplaces,omitempty"`
 	Hooks        HooksConfig     `toml:"hooks,omitempty"`
 	Settings     SettingsConfig  `toml:"settings,omitempty"`
 	Env          ClaudeEnvConfig `toml:"env,omitempty"`
+	// Content declares the CLAUDE.md content hierarchy under
+	// [claude.content]. Workspace-scoped: per-repo overrides are not
+	// honored via RepoOverride.Claude. Migrated from the deprecated
+	// top-level [content] in v0.7; the old path is accepted as an alias
+	// with a deprecation warning until v1.0.
+	Content ContentConfig `toml:"content,omitempty"`
+}
+
+// ClaudeOverride is the narrower Claude configuration used at override
+// positions where workspace-scoped fields (Content, Marketplaces) are
+// not meaningful. Keeping Content and Marketplaces off this type makes
+// [repos.<name>.claude.content] (and marketplaces) surface as a TOML
+// "unknown field" warning automatically -- no runtime validation
+// needed.
+type ClaudeOverride struct {
+	Enabled  *bool           `toml:"enabled,omitempty"`
+	Plugins  *[]string       `toml:"plugins,omitempty"`
+	Hooks    HooksConfig     `toml:"hooks,omitempty"`
+	Settings SettingsConfig  `toml:"settings,omitempty"`
+	Env      ClaudeEnvConfig `toml:"env,omitempty"`
 }
 
 // ClaudeEnvConfig declares env vars for the Claude Code settings.local.json env
@@ -54,7 +77,7 @@ type WorkspaceConfig struct {
 // Uses the same fields and merge semantics as RepoOverride but applies
 // to the instance root directory (above all repos).
 type InstanceConfig struct {
-	Claude *ClaudeConfig     `toml:"claude,omitempty"`
+	Claude *ClaudeOverride   `toml:"claude,omitempty"`
 	Env    EnvConfig         `toml:"env,omitempty"`
 	Files  map[string]string `toml:"files,omitempty"`
 }
@@ -117,7 +140,7 @@ type RepoOverride struct {
 	Group    string            `toml:"group,omitempty"`
 	Branch   string            `toml:"branch,omitempty"`
 	Scope    string            `toml:"scope,omitempty"`
-	Claude   *ClaudeConfig     `toml:"claude,omitempty"`
+	Claude   *ClaudeOverride   `toml:"claude,omitempty"`
 	Env      EnvConfig         `toml:"env,omitempty"`
 	Files    map[string]string `toml:"files,omitempty"`
 	SetupDir *string           `toml:"setup_dir,omitempty"`
@@ -253,7 +276,7 @@ func validateContentSource(field, source string) error {
 // but omit repo-specific fields (URL, Branch, Group, Scope, SetupDir)
 // and Claude.Enabled.
 type GlobalOverride struct {
-	Claude *ClaudeConfig     `toml:"claude,omitempty"`
+	Claude *ClaudeOverride   `toml:"claude,omitempty"`
 	Env    EnvConfig         `toml:"env,omitempty"`
 	Files  map[string]string `toml:"files,omitempty"`
 }

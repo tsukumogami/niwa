@@ -19,7 +19,7 @@ func TestClaudeEnabledDefault(t *testing.T) {
 func TestClaudeEnabledTrue(t *testing.T) {
 	ws := &config.WorkspaceConfig{
 		Repos: map[string]config.RepoOverride{
-			"myrepo": {Claude: &config.ClaudeConfig{Enabled: boolPtr(true)}},
+			"myrepo": {Claude: &config.ClaudeOverride{Enabled: boolPtr(true)}},
 		},
 	}
 	if !ClaudeEnabled(ws, "myrepo") {
@@ -30,7 +30,7 @@ func TestClaudeEnabledTrue(t *testing.T) {
 func TestClaudeEnabledFalse(t *testing.T) {
 	ws := &config.WorkspaceConfig{
 		Repos: map[string]config.RepoOverride{
-			"myrepo": {Claude: &config.ClaudeConfig{Enabled: boolPtr(false)}},
+			"myrepo": {Claude: &config.ClaudeOverride{Enabled: boolPtr(false)}},
 		},
 	}
 	if ClaudeEnabled(ws, "myrepo") {
@@ -151,7 +151,7 @@ func TestMergeOverridesSettingsWin(t *testing.T) {
 		},
 		Repos: map[string]config.RepoOverride{
 			"myrepo": {
-				Claude: &config.ClaudeConfig{
+				Claude: &config.ClaudeOverride{
 					Settings: config.SettingsConfig{"permissions": "ask"},
 				},
 			},
@@ -231,7 +231,7 @@ func TestMergeOverridesHooksExtend(t *testing.T) {
 		},
 		Repos: map[string]config.RepoOverride{
 			"myrepo": {
-				Claude: &config.ClaudeConfig{
+				Claude: &config.ClaudeOverride{
 					Hooks: config.HooksConfig{
 						"pre_tool_use": {{Scripts: []string{"repo-gate.sh"}}},
 						"stop":         {{Scripts: []string{"repo-stop.sh"}}},
@@ -263,7 +263,7 @@ func TestMergeOverridesNilWorkspaceFields(t *testing.T) {
 		// All nil/zero workspace-level hooks/settings/env.
 		Repos: map[string]config.RepoOverride{
 			"myrepo": {
-				Claude: &config.ClaudeConfig{
+				Claude: &config.ClaudeOverride{
 					Settings: config.SettingsConfig{"permissions": "ask"},
 					Hooks:    config.HooksConfig{"stop": {{Scripts: []string{"stop.sh"}}}},
 				},
@@ -297,7 +297,7 @@ func TestMergeOverridesClaudeEnvVarsWin(t *testing.T) {
 		},
 		Repos: map[string]config.RepoOverride{
 			"myrepo": {
-				Claude: &config.ClaudeConfig{
+				Claude: &config.ClaudeOverride{
 					Env: config.ClaudeEnvConfig{
 						Vars: map[string]string{
 							"GH_TOKEN": "repo_token",
@@ -326,7 +326,7 @@ func TestMergeOverridesClaudeEnvPromoteUnion(t *testing.T) {
 		},
 		Repos: map[string]config.RepoOverride{
 			"myrepo": {
-				Claude: &config.ClaudeConfig{
+				Claude: &config.ClaudeOverride{
 					Env: config.ClaudeEnvConfig{
 						Promote: []string{"API_KEY", "REPO_SECRET"},
 					},
@@ -351,7 +351,7 @@ func TestMergeOverridesClaudeEnvNilWorkspace(t *testing.T) {
 	ws := &config.WorkspaceConfig{
 		Repos: map[string]config.RepoOverride{
 			"myrepo": {
-				Claude: &config.ClaudeConfig{
+				Claude: &config.ClaudeOverride{
 					Env: config.ClaudeEnvConfig{
 						Vars:    map[string]string{"GH_TOKEN": "repo_only"},
 						Promote: []string{"OTHER"},
@@ -374,7 +374,7 @@ func TestWarnUnknownRepos(t *testing.T) {
 	ws := &config.WorkspaceConfig{
 		Repos: map[string]config.RepoOverride{
 			"known":   {Scope: "tactical"},
-			"unknown": {Claude: &config.ClaudeConfig{Enabled: boolPtr(false)}},
+			"unknown": {Claude: &config.ClaudeOverride{Enabled: boolPtr(false)}},
 		},
 	}
 	known := map[string]bool{"known": true, "other": true}
@@ -427,7 +427,7 @@ func TestMergeOverridesMutationSafety(t *testing.T) {
 		},
 		Repos: map[string]config.RepoOverride{
 			"myrepo": {
-				Claude: &config.ClaudeConfig{
+				Claude: &config.ClaudeOverride{
 					Hooks: config.HooksConfig{"pre_tool_use": {{Scripts: []string{"repo.sh"}}}},
 				},
 			},
@@ -595,7 +595,7 @@ func TestMergeGlobalOverrideHooksAppend(t *testing.T) {
 		},
 	}
 	g := config.GlobalOverride{
-		Claude: &config.ClaudeConfig{
+		Claude: &config.ClaudeOverride{
 			Hooks: config.HooksConfig{
 				"pre_tool_use": {
 					{Scripts: []string{"global/gate.sh"}},
@@ -628,7 +628,7 @@ func TestMergeGlobalOverrideSettingsGlobalWins(t *testing.T) {
 		},
 	}
 	g := config.GlobalOverride{
-		Claude: &config.ClaudeConfig{
+		Claude: &config.ClaudeOverride{
 			Settings: config.SettingsConfig{"permissions": "bypass"},
 		},
 	}
@@ -646,7 +646,7 @@ func TestMergeGlobalOverrideEnvPromoteUnion(t *testing.T) {
 		},
 	}
 	g := config.GlobalOverride{
-		Claude: &config.ClaudeConfig{
+		Claude: &config.ClaudeOverride{
 			Env: config.ClaudeEnvConfig{Promote: []string{"B", "C"}},
 		},
 	}
@@ -671,7 +671,7 @@ func TestMergeGlobalOverrideEnvVarsGlobalWins(t *testing.T) {
 		},
 	}
 	g := config.GlobalOverride{
-		Claude: &config.ClaudeConfig{
+		Claude: &config.ClaudeOverride{
 			Env: config.ClaudeEnvConfig{Vars: map[string]string{"LANG": "global"}},
 		},
 	}
@@ -689,7 +689,7 @@ func TestMergeGlobalOverridePluginsUnion(t *testing.T) {
 	}
 	globalPlugins := []string{"plugB", "plugC"}
 	g := config.GlobalOverride{
-		Claude: &config.ClaudeConfig{Plugins: &globalPlugins},
+		Claude: &config.ClaudeOverride{Plugins: &globalPlugins},
 	}
 	merged := MergeGlobalOverride(ws, g, "/global")
 

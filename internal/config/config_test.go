@@ -679,3 +679,61 @@ files = ["../secrets.env"]
 		t.Errorf("error %q should mention traversal", err.Error())
 	}
 }
+
+// TestParseRejectsContentAtRepoOverride is the Issue 1 proof that the type
+// split enforces workspace-scoped-only content at the type level: the TOML
+// decoder surfaces [repos.<name>.claude.content] as an unknown-config-field
+// warning because RepoOverride.Claude is *ClaudeOverride (narrower), which
+// has no Content field.
+func TestParseRejectsContentAtRepoOverride(t *testing.T) {
+	input := `
+[workspace]
+name = "test-ws"
+
+[repos.tsuku]
+url = "https://github.com/example/tsuku"
+
+[repos.tsuku.claude.content]
+workspace = { source = "should-not-work.md" }
+`
+	result, err := Parse([]byte(input))
+	if err != nil {
+		t.Fatalf("Parse returned error: %v", err)
+	}
+	found := false
+	for _, w := range result.Warnings {
+		if strings.Contains(w, "repos") && strings.Contains(w, "claude") && strings.Contains(w, "content") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected an unknown-config-field warning for repos.tsuku.claude.content, got warnings: %v", result.Warnings)
+	}
+}
+
+// TestParseAcceptsContentOnInstanceOverrideIsRejected proves the same for
+// [instance.claude.content].
+func TestParseRejectsContentAtInstanceOverride(t *testing.T) {
+	input := `
+[workspace]
+name = "test-ws"
+
+[instance.claude.content]
+workspace = { source = "should-not-work.md" }
+`
+	result, err := Parse([]byte(input))
+	if err != nil {
+		t.Fatalf("Parse returned error: %v", err)
+	}
+	found := false
+	for _, w := range result.Warnings {
+		if strings.Contains(w, "instance") && strings.Contains(w, "claude") && strings.Contains(w, "content") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected an unknown-config-field warning for instance.claude.content, got warnings: %v", result.Warnings)
+	}
+}
