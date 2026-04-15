@@ -116,6 +116,7 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 	ctx.Step(`^a clean niwa environment$`, aCleanNiwaEnvironment)
 	ctx.Step(`^a workspace "([^"]*)" exists$`, aWorkspaceExists)
 	ctx.Step(`^a registered workspace "([^"]*)" exists$`, aRegisteredWorkspaceExists)
+	ctx.Step(`^a workspace "([^"]*)" exists with body:$`, aWorkspaceExistsWithBody)
 	ctx.Step(`^an instance "([^"]*)" of workspace "([^"]*)" exists with repos "([^"]*)"$`, func(ctx context.Context, instanceName, workspaceName, repos string) (context.Context, error) {
 		return aWorkspaceInstanceExistsWithRepos(ctx, workspaceName, instanceName, repos)
 	})

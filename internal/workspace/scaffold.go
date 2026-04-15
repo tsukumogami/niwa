@@ -36,12 +36,10 @@ content_dir = "claude"
 # url = "git@github.com:other-org/tool.git"
 # group = "private"
 
-# --- Content hierarchy ---
-# [content.workspace]
-# source = "workspace.md"
-
-# --- Claude Code configuration, environment, channels ---
+# --- Claude Code configuration, content hierarchy, environment ---
 # See docs/designs/DESIGN-workspace-config.md for full schema reference.
+# [claude.content.workspace]
+# source = "workspace.md"
 # [claude]
 # marketplaces = ["my-org/my-plugins"]
 # plugins = ["my-tool@my-plugins"]

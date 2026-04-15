@@ -127,24 +127,24 @@ Content files are referenced by source path. Target paths are derived from conve
 name = "tsukumogami"
 content_dir = "claude"
 
-[content.workspace]
+[claude.content.workspace]
 source = "workspace.md"
 
-[content.groups.public]
+[claude.content.groups.public]
 source = "public.md"
 
-[content.groups.private]
+[claude.content.groups.private]
 source = "private.md"
 
-[content.repos.tsuku]
+[claude.content.repos.tsuku]
 source = "repos/tsuku.md"
 
-  [content.repos.tsuku.subdirs]
+  [claude.content.repos.tsuku.subdirs]
   recipes = "repos/tsuku-recipes.md"
   website = "repos/tsuku-website.md"
   telemetry = "repos/tsuku-telemetry.md"
 
-[content.repos.koto]
+[claude.content.repos.koto]
 source = "repos/koto.md"
 ```
 
@@ -160,7 +160,7 @@ Target paths follow a fixed convention based on whether the directory is a git r
 
 niwa warns (but does not auto-modify) if a repo's `.gitignore` lacks a `*.local*` pattern when writing `CLAUDE.local.md` files. The user is responsible for adding the pattern to their repo.
 
-When `content_dir` is set and a repo has no explicit `[content.repos.X]` entry, niwa checks for `{content_dir}/repos/{repo_name}.md` and uses it automatically if found. This convention-over-configuration path means a minimal config can omit most content entries.
+When `content_dir` is set and a repo has no explicit `[claude.content.repos.X]` entry, niwa checks for `{content_dir}/repos/{repo_name}.md` and uses it automatically if found. This convention-over-configuration path means a minimal config can omit most content entries.
 
 Template variables are expanded during `niwa apply`:
 
@@ -422,19 +422,19 @@ scope = "strategic"
 
 # --- Content hierarchy ---
 
-[content.workspace]
+[claude.content.workspace]
 source = "workspace.md"
 
-[content.groups.public]
+[claude.content.groups.public]
 source = "public.md"
 
-[content.groups.private]
+[claude.content.groups.private]
 source = "private.md"
 
-[content.repos.tsuku]
+[claude.content.repos.tsuku]
 source = "repos/tsuku.md"
 
-  [content.repos.tsuku.subdirs]
+  [claude.content.repos.tsuku.subdirs]
   recipes = "repos/tsuku-recipes.md"
   website = "repos/tsuku-website.md"
   telemetry = "repos/tsuku-telemetry.md"
