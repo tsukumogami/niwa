@@ -90,11 +90,16 @@ migration doesn't introduce new leaks.
   invariants enforced by the type system, pipeline, and filesystem
   permissions. Fixes a pre-existing `0o644` bug where materialized env
   and settings files were world-readable.
-- **Pluggable backend from v1.** sops + age ships as the default
-  (zero-cost, git-native, vendor-neutral) and Infisical ships as the
-  hosted-backend peer in v1. The interface allows additional backends
-  (Doppler, 1Password, HashiCorp Vault OSS, Bitwarden Secrets Manager)
-  to be added without rearchitecting.
+- **Pluggable backend from v1, with two peer backends optimized for
+  different team preferences.** Infisical Cloud ships as the OOTB
+  low-effort option (free tier covers 5 identities / 3 projects /
+  3 envs; bootstrap is `infisical login` → browser OAuth → done). sops +
+  age ships as the vendor-neutral / git-native option (zero cost, zero
+  hosted service, but requires age-key management). Neither is "the
+  default"; users pick based on whether they want hosted
+  convenience or fully-offline gitops. The interface allows additional
+  backends (Doppler, 1Password, HashiCorp Vault OSS, Bitwarden Secrets
+  Manager) to be added without rearchitecting.
 
 ## User Stories
 
@@ -106,13 +111,25 @@ without leaking secrets. I expect niwa to detect plaintext values in my
 committed config and refuse to apply on a public remote once a vault is
 configured, so I can't accidentally re-introduce plaintext.
 
-### US-2: Team member bootstraps vault access via GitHub org
+### US-2: Team member bootstraps vault access with minimal setup
 
 As a new developer joining `tsukumogami`, I want to unlock the team
-vault using only credentials I already have (my GitHub org membership),
-so that my first `niwa apply` succeeds without asking a teammate for a
-shared password or service token. I expect the bootstrap to take less
-than 10 minutes end-to-end.
+vault with minimal setup, so that my first `niwa apply` succeeds
+without asking a teammate for a shared password or service token.
+
+Depending on which backend the team chose, the bootstrap looks like:
+
+- **Infisical** (hosted, OOTB): `infisical login` → browser OAuth →
+  done. Under 2 minutes end-to-end. My GitHub identity (or any IdP
+  Infisical supports) unlocks vault access.
+- **sops + age** (vendor-neutral, self-hosted-keys): install `age` +
+  `sops`, generate my own age key pair, open a PR to add my public
+  key to the team's `.sops.yaml`, wait for the team lead to merge and
+  re-encrypt. Target 10 minutes once the PR is merged, budgeted for
+  the team-lead review delay.
+
+Either path must avoid requiring a shared service token distributed
+via Slack or 1Password-to-1Password hand-off.
 
 ### US-3: Developer uses different PATs for different orgs
 
@@ -167,11 +184,24 @@ plaintext vs. already vault-backed, so I can track migration progress.
 ### Functional Requirements
 
 **R1. Pluggable vault provider interface.** niwa MUST support multiple
-vault backends through a single interface. v1 ships with two backends:
-sops + age (git-native, no external service) and Infisical (hosted, with
-self-host option). Additional backends (Doppler, 1Password, HashiCorp
-Vault OSS, Bitwarden Secrets Manager) are out of scope for v1 but must
-be addable without changing the interface.
+vault backends through a single interface. v1 ships with two peer
+backends, positioned for different team preferences:
+
+- **Infisical** (hosted, OOTB, free-tier cloud). Bootstrap is
+  `infisical login` → browser OAuth → done. Free tier covers 5
+  identities, 3 projects, 3 envs. MIT-licensed core with a self-host
+  option (Docker). This is the low-effort path for teams that want
+  minimal setup and managed rotation/audit.
+- **sops + age** (git-native, vendor-neutral, self-hosted-keys).
+  Secrets live encrypted inside the team repo; decryption uses a local
+  age key pair; no external service. This is the path for teams that
+  want zero-cost, zero-vendor, fully-offline operation and are
+  comfortable managing age keys.
+
+Neither backend is "the default"; both are supported in v1 and users
+pick per team. Additional backends (Doppler, 1Password, HashiCorp Vault
+OSS, Bitwarden Secrets Manager, Pulumi ESC) are out of scope for v1 but
+must be addable without changing the interface.
 
 **R2. Top-level `[vault.providers.*]` registry.** The workspace config
 MUST support a top-level `[vault]` table with a `providers` sub-table
@@ -522,21 +552,29 @@ captures what was decided, what alternatives were considered, and why
 the chosen option won. Downstream design docs should treat these as
 settled.
 
-### D-1. Pluggable backend interface from v1
+### D-1. Pluggable backend interface from v1, with Infisical + sops as peer backends
 
-**Decided:** Ship a pluggable provider interface from v1, with sops+age
-as the default backend and Infisical as the hosted peer.
+**Decided:** Ship a pluggable provider interface from v1 with **two
+peer backends — Infisical Cloud as the OOTB hosted option, sops+age as
+the vendor-neutral self-hosted-keys option.** Neither is framed as
+"the default"; users pick per team.
 
 **Alternatives considered:** (a) ship sops-only in v1, add Infisical in
-v2 with a refactor; (b) ship one commercial backend with free tier; (c)
-ship sops-only forever (vendor-neutral orthodoxy).
+v2 with a refactor; (b) ship Infisical-only in v1 and defer sops for
+OSS-purists; (c) ship one commercial backend with free tier (Doppler
+has the cleanest OAuth UX but is closed-source SaaS); (d) ship sops as
+"default" with Infisical as "the upgrade" (earlier draft of this PRD).
 
-**Rationale:** If niwa commits to sops alone, the Infisical integration
-becomes a later refactor where the abstraction is exposed late and
-risks being wrong. The interface is small (`Resolve(key) -> Secret +
-metadata`); the cost of building it from v1 is one extra indirection.
-Vendor-neutrality is a stated niwa value, so Infisical must be a peer,
-not "the upgrade path."
+**Rationale:** The OOTB-low-effort axis and the vendor-neutral axis
+pull in different directions, and neither should be sacrificed.
+Shipping both peer backends means indie developers and small teams get
+a true browser-OAuth bootstrap (Infisical) as a first-class option,
+while OSS-conscious teams get a fully-local-keys option (sops) without
+the hosted-service-dependency. The interface is small (`Resolve(key)
+-> Secret + metadata`); the cost of building it from v1 is one extra
+indirection vs. later refactoring once a second backend is added.
+Doppler was rejected as a third v1 backend because it's closed-source
+SaaS, which conflicts with niwa's stated vendor-neutrality goals.
 
 ### D-2. Scoping via source org with explicit escape hatch
 
@@ -659,11 +697,13 @@ Questions to resolve before the PRD transitions to Accepted:
   public dot-niwa, new-dev who doesn't have GitHub org access on day
   one?
 
-- **Q-2 v1 scope boundary.** Does v1 ship both sops+age AND Infisical
-  as peer backends, or does sops ship in v1.0 and Infisical in v1.1?
-  The decision affects the pluggable interface's validation surface.
-  Leaning toward both in v1.0 so the interface is battle-tested from
-  the start.
+- **Q-2 v1 ordering.** RESOLVED: both Infisical and sops+age ship in
+  v1.0 as peer backends (see D-1). Open sub-question: if implementation
+  must be sequential, which backend lands first? Leaning Infisical
+  first because its bootstrap exercises every layer (browser OAuth,
+  API calls, session caching in the provider CLI) while sops is
+  simpler (subprocess + file decrypt) and can follow. Sequencing does
+  not change what ships in v1.0.
 
 - **Q-3 Plaintext-deprecation timeline.** When does the public-repo
   plaintext-secret guardrail (R14/R32) become the default? On day one
