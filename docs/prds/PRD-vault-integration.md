@@ -149,54 +149,89 @@ personal secrets, I want:
 3. Both vaults resolved at the same `niwa apply` — team refs hit
    the team vault, personal refs hit the personal vault, all in one
    command.
+4. Neither config leaks names into the other's namespace. The team
+   config doesn't know how I name my vaults; my personal config
+   doesn't know how the team names theirs. The team declares what it
+   owns and what it needs; I supply bindings for what's needed.
 
 Concretely:
 
-**Team config** (`tsukumogami/dot-niwa/.niwa/workspace.toml`, safe to be
-a public repo):
+**Team config** (`tsukumogami/dot-niwa/.niwa/workspace.toml`, safe to
+be a public repo):
 
 ```toml
 [workspace]
 name = "tsukumogami"
 
-[vault.providers.team]
-kind    = "infisical"        # or "sops"
+# The team declares its OWN single vault anonymously. Because there's
+# exactly one provider in this file, naming is optional (R2).
+[vault.provider]
+kind    = "infisical"
 project = "tsukumogami"
 
+# Team-supplied secrets: team-declared provider, team-declared keys.
 [env.vars]
-ANTHROPIC_API_KEY = "vault://team/anthropic-api-key"
-OPENAI_API_KEY    = "vault://team/openai-api-key"
+ANTHROPIC_API_KEY = "vault://anthropic-api-key"
+OPENAI_API_KEY    = "vault://openai-api-key"
 
-[repos.niwa.env.vars]
-GITHUB_TOKEN = "vault://personal/github-pat"
+# Team-required secrets the USER must supply from their own overlay.
+# The team names what it NEEDS and describes why, without naming the
+# user's vaults or keys. Apply fails if unset at resolve time.
+[env.required]
+GITHUB_TOKEN = "GitHub PAT with repo:read scope"
+
+# Recommended: apply continues with a loud stderr warning if unset.
+[env.recommended]
+SENTRY_DSN = "Sentry error reporting — optional but helpful"
+
+# Optional: apply continues with an info log if unset.
+[env.optional]
+DEBUG_WEBHOOK_URL = "Personal debug webhook — entirely optional"
 ```
 
 **Personal config** (`dangazineu/dot-niwa/niwa.toml`, always private):
 
 ```toml
-# Personal vault provider, per-org scoping.
-[workspaces.tsukumogami.vault.providers.personal]
-kind     = "op"                # or "infisical", "sops", etc.
-account  = "my.1password.com"
-vault_id = "dangazineu-tsukumogami"
+# Personal single vault declared anonymously (R2).
+[global.vault.provider]
+kind    = "infisical"
+project = "dangazineu-personal"
 
-[workspaces.codespar.vault.providers.personal]
-kind     = "op"
-account  = "my.1password.com"
-vault_id = "dangazineu-codespar"
+# Per-org bindings. Key names here must match the team's
+# [env.required]/[env.recommended]/[env.optional] tables (or
+# [env.vars] for team-supplied defaults I want to override).
+# I name my vault paths however I want -- the team config doesn't
+# care and can't see the names.
+[workspaces.tsukumogami.env.vars]
+GITHUB_TOKEN = "vault://tsukumogami/github-pat"
+SENTRY_DSN   = "vault://tsukumogami/sentry-dsn"
+# DEBUG_WEBHOOK_URL intentionally omitted; I'll just get an info log.
+
+[workspaces.codespar.env.vars]
+GITHUB_TOKEN = "vault://codespar/github-pat"
 ```
 
 **What happens on `niwa apply` in a `tsukumogami` workspace:**
 
-- `ANTHROPIC_API_KEY` → looked up as `anthropic-api-key` in the
-  **team** Infisical project `tsukumogami`.
-- `GITHUB_TOKEN` → looked up as `github-pat` in my **personal**
-  1Password vault `dangazineu-tsukumogami`.
+- `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` → resolved by the team
+  config's `[vault.provider]`; no provider name in the URI because
+  the team declared anonymously.
+- `GITHUB_TOKEN`, `SENTRY_DSN` → resolved by my personal
+  `[global.vault.provider]` via the folder path I chose
+  (`tsukumogami/github-pat`, `tsukumogami/sentry-dsn`). The team
+  config has no opinion on where in my vault they live.
+- `DEBUG_WEBHOOK_URL` → missing, declared `[env.optional]`, info
+  log only, apply proceeds.
 
-Same binary, same command, two backends resolved in one pass. Scoping
-is automatic because the workspace has one source (`tsukumogami`). For
-multi-source workspaces, I set `[workspace].vault_scope = "..."`
-explicitly (R5).
+Same binary, same command, two backends resolved in one pass. Each
+config owns only its own vault names and its own URI references; the
+contract between them is the key-name vocabulary in `[env.required]`
+/ `[env.recommended]` / `[env.optional]` (and `[env.vars]` for
+team-supplied defaults).
+
+Scoping is automatic because the workspace has one source
+(`tsukumogami`). For multi-source workspaces, I set
+`[workspace].vault_scope = "..."` explicitly (R5).
 
 ### US-4: Developer overrides a team secret for a debug session
 
@@ -319,17 +354,47 @@ pick per team. Additional backends (Doppler, 1Password, HashiCorp Vault
 OSS, Bitwarden Secrets Manager, Pulumi ESC) are out of scope for v1 but
 must be addable without changing the interface.
 
-**R2. Top-level `[vault.providers.*]` registry.** The workspace config
-MUST support a top-level `[vault]` table with a `providers` sub-table
-registering named vault backends. Each provider entry carries a `kind`
-(which backend) plus provider-specific locator fields (e.g.,
-`project = "..."` for Infisical, `config = ".sops.yaml"` for sops).
+**R2. Vault provider declaration: anonymous singular or named
+multiple.** The workspace config MUST support a top-level `[vault]`
+table with two accepted declaration shapes:
 
-**R3. `vault://<provider>/<key>` URI reference scheme.** Any string
-value in a workspace config that begins with `vault://` MUST be
-interpreted as a reference to a secret in the named provider. The URI
-format is `vault://<provider>/<key>[?required=<bool>]`. References are
-accepted in: `[env.vars]`, `[claude.env.vars]`, `[repos.<name>.env.vars]`,
+- **Anonymous singular**: `[vault.provider]` declares exactly one
+  unnamed provider. Used when the file has only one vault and the
+  author prefers a name-free URI.
+- **Named**: `[vault.providers.<name>]` declares one or more named
+  providers. Required when the file has two or more providers;
+  allowed (but optional) when the file has one.
+
+Mixing `[vault.provider]` and `[vault.providers.*]` in the same file
+MUST be rejected at parse time as ambiguous. Each provider entry
+carries a `kind` (which backend) plus provider-specific locator
+fields (e.g., `project = "..."` for Infisical, `file = "..."` for
+sops).
+
+**R3. `vault://` URI reference scheme, with file-local scoping.** Any
+string value that begins with `vault://` MUST be interpreted as a
+reference to a secret. The URI form follows the provider-declaration
+form in the same config file:
+
+- If the file uses `[vault.provider]` (anonymous): URIs take the form
+  `vault://<key>[?required=<bool>]`. No provider name.
+- If the file uses `[vault.providers.<name>]` (named, one or more):
+  URIs take the form `vault://<name>/<key>[?required=<bool>]`. The
+  `<name>` MUST match a key declared under `[vault.providers.*]` in
+  this same config file.
+- If the file declares no providers, any `vault://` URI is a parse
+  error.
+
+**Cross-config references forbidden.** A config file's `vault://`
+URIs MUST reference only providers declared in that same config
+file. Team configs cannot reference user-declared provider names;
+user overlays cannot reference team-declared provider names. The
+contract between the two layers is the key-name vocabulary in
+`[env.vars]` and the `[env.required]` / `[env.recommended]` /
+`[env.optional]` tables (R33), NOT shared provider names.
+
+**Reference-accepting locations.** References are accepted in:
+`[env.vars]`, `[claude.env.vars]`, `[repos.<name>.env.vars]`,
 `[instance.env.vars]`, `[files]` source keys, and `[claude.settings]`
 values. References are NOT accepted in: `[claude.content.*]`,
 `[env.files]`, `[vault.providers.*]` fields, or anywhere an
@@ -524,33 +589,100 @@ does not pass `os.Environ()` to child processes without filtering.
 and a vault configured MUST fail unless the user explicitly overrides
 with `--allow-plaintext-secrets` (NOT a default-friendly flag).
 
+### Contract Requirements
+
+**R33. Three-level env requirement tables: required / recommended /
+optional.** The team config declares which env vars the workspace
+expects, without naming where they come from. Three tables, each
+mapping key names to human-readable description strings:
+
+- `[env.required]`: keys that MUST resolve to a non-empty value by
+  apply time. Missing ≥1 required key is a hard error; `niwa apply`
+  fails with a message listing every missing key and its description.
+- `[env.recommended]`: keys the workspace expects but can operate
+  without. Missing recommended keys emit a loud stderr warning
+  naming each missing key; `niwa apply` proceeds.
+- `[env.optional]`: keys that are genuinely nice-to-have. Missing
+  optional keys emit an info log (visible only with `--verbose` or
+  equivalent); `niwa apply` proceeds without warning.
+
+Same pattern MUST be supported for Claude-scoped env declarations
+(`[claude.env.required]`, `[claude.env.recommended]`,
+`[claude.env.optional]`), per-repo env declarations
+(`[repos.<name>.env.required]` and the other two), per-instance env
+declarations (`[instance.env.required]` and the other two), and for
+file-based declarations (`[files.required]`, `[files.recommended]`,
+`[files.optional]` — where the table keys are file destinations and
+the description strings document why the file is expected).
+
+The description string values MUST be carried into the error /
+warning / info message so missing-secret diagnostics are
+self-documenting. A user running `niwa apply` against an unmet
+requirement sees the team-authored description telling them what the
+key is for.
+
+**R34. `[env.required]` has precedence over `--allow-missing-secrets`.**
+The `--allow-missing-secrets` flag (R10) downgrades unresolved
+`vault://` references to empty strings. It does NOT downgrade
+unresolved `[env.required]` keys. A missing required key is always a
+hard error regardless of flags, because the team config explicitly
+marked the key as load-bearing. This separation lets users use
+`--allow-missing-secrets` for exploratory runs without accidentally
+bypassing team-declared requirements.
+
 ## Acceptance Criteria
 
 ### Schema
 
-- [ ] `workspace.toml` accepts `[vault.providers.<name>]` with `kind`
-  plus provider-specific fields.
-- [ ] `workspace.toml` accepts `vault://<provider>/<key>` URI values in
-  `[env.vars]`, `[claude.env.vars]`, `[repos.<name>.env.vars]`,
-  `[instance.env.vars]`, `[files]` source keys, and `[claude.settings]`
-  values.
+- [ ] `workspace.toml` accepts `[vault.provider]` (anonymous
+  singular) with `kind` plus provider-specific fields.
+- [ ] `workspace.toml` accepts `[vault.providers.<name>]` (named) with
+  `kind` plus provider-specific fields; multiple named providers in
+  the same file are accepted.
+- [ ] `workspace.toml` rejects a file that declares both
+  `[vault.provider]` and `[vault.providers.*]` at parse time.
+- [ ] `workspace.toml` accepts `vault://<key>` URIs in a file that
+  declares `[vault.provider]`.
+- [ ] `workspace.toml` accepts `vault://<name>/<key>` URIs in a file
+  that declares `[vault.providers.<name>]` where `<name>` matches.
+- [ ] `workspace.toml` rejects `vault://<name>/<key>` URIs where
+  `<name>` is not declared in the same file (including names declared
+  only in a different config layer) with a parse-time error.
 - [ ] `workspace.toml` rejects `vault://` URIs in `[claude.content.*]`
-  source paths, `[env.files]` source paths, `[vault.providers.*]`
-  fields, and identifier fields (workspace name, source org, repo URL,
-  group name) with parse-time errors.
+  source paths, `[env.files]` source paths, `[vault.providers.*]` /
+  `[vault.provider]` fields, and identifier fields (workspace name,
+  source org, repo URL, group name) with parse-time errors.
 - [ ] `workspace.toml` accepts `[workspace].vault_scope = "<string>"`.
 - [ ] `workspace.toml` accepts `[vault].team_only = ["KEY1", ...]`.
-- [ ] The personal config (`GlobalConfigOverride`) accepts a `[vault]`
-  block and per-workspace `[workspaces.<scope>]` blocks.
+- [ ] `workspace.toml` accepts `[env.required]`, `[env.recommended]`,
+  `[env.optional]` with key→description-string entries.
+- [ ] The same three tables are accepted under `[claude.env]`,
+  `[repos.<name>.env]`, `[instance.env]`, and as
+  `[files.required]` / `[files.recommended]` / `[files.optional]`.
+- [ ] The personal config (`GlobalConfigOverride`) accepts the
+  anonymous-or-named provider declaration and per-workspace
+  `[workspaces.<scope>]` blocks.
 - [ ] `raw:vault://...` literal escape is accepted wherever string
   values appear.
 
 ### Resolution
 
 - [ ] A workspace with `[[sources]] org = "tsukumogami"` and a personal
-  config with `[workspaces.tsukumogami.vault.providers.personal] kind = "sops"`
-  resolves `vault://personal/github-pat` via the sops provider scoped
-  to `tsukumogami`.
+  config whose `[workspaces.tsukumogami.vault.provider]` declares a
+  sops backend resolves a `vault://<key>` URI written in the same
+  personal-overlay file against the declared sops provider.
+- [ ] An `[env.required]` key in the team config that has no matching
+  entry in any resolved `env.vars` source MUST cause `niwa apply` to
+  fail with an error listing the key and its description string.
+- [ ] An `[env.recommended]` key with no matching resolved value MUST
+  emit a stderr warning naming the key and description, and
+  `niwa apply` MUST continue.
+- [ ] An `[env.optional]` key with no matching resolved value MUST
+  emit an info log (visible only under verbose mode) and
+  `niwa apply` MUST continue with no warning.
+- [ ] `niwa apply --allow-missing-secrets` MUST NOT downgrade
+  `[env.required]` misses to warnings; required keys remain a hard
+  error even with the flag set.
 - [ ] A workspace with 2 sources and no `vault_scope` fails `niwa apply`
   with an error naming the ambiguity.
 - [ ] A workspace with 2 sources and `vault_scope = "tsukumogami"`
@@ -834,6 +966,85 @@ no escape (any string starting with `vault://` is always a reference).
 expectations. No-escape risks user confusion if a downstream tool
 happens to use `vault://` for its own URI scheme. `raw:` is rare
 enough not to collide and mnemonic enough to read naturally.
+
+### D-9. File-local provider scoping; team and personal configs can't cross-reference each other's provider names
+
+**Decided:** Each config file's `vault://` URIs may only reference
+providers declared in the same file. Team configs cannot write
+`vault://personal/...`; personal configs cannot write
+`vault://team/...`. The contract between the two layers is the key
+names in `[env.vars]` / `[env.required]` / `[env.recommended]` /
+`[env.optional]` (and the Claude / repos / instance / files
+variants), NOT shared vault provider names.
+
+**Alternatives considered:** (a) shared "rendezvous" names (team
+config could reference `vault://personal/github-pat`, user overlay
+supplies the provider named `personal`); (b) symbolic URI scheme
+(`user://` or `external://`) for user-supplied refs; (c) no
+separation — either layer can reference anything in the other.
+
+**Rationale:** Rendezvous names leak: the team config dictates how
+users name their vaults AND what key path they use. A team couldn't
+publish its config without accidentally prescribing the user-side
+layout. Users couldn't reorganize their vaults without editing team
+configs. The symbolic-URI approach adds a new scheme without solving
+the root problem (the team still names user-facing refs). File-local
+scoping with an `[env.required]`-style contract keeps each layer
+owning only its own namespace and reduces the team/personal coupling
+to a vocabulary of key names.
+
+### D-10. Three-level env requirements: required / recommended / optional
+
+**Decided:** The team config declares expected env var names and
+their failure policy via three tables:
+- `[env.required]` — hard error on miss.
+- `[env.recommended]` — loud warning on miss, apply continues.
+- `[env.optional]` — info log on miss, apply continues.
+
+Same pattern for `[claude.env.*]`, `[repos.<name>.env.*]`,
+`[instance.env.*]`, and `[files.*]`. Values are human-readable
+description strings surfaced in the diagnostic message.
+
+**Alternatives considered:** (a) single `[env.required]` binary
+table (required vs silent — too blunt); (b) per-key inline flag
+syntax in `[env.vars]` like `GITHUB_TOKEN = "required"` (mixes value
+and metadata, ugly); (c) rely on downstream tools to error on
+missing env (too implicit; niwa can't self-document needs).
+
+**Rationale:** Three levels match the observed pattern in real
+workspaces — some env vars block operation, some degrade
+functionality, some are pure polish. A binary "required or silent"
+forces teams to pick between "apply crashes on polish" or "apply
+silently proceeds with broken functionality." The recommended tier
+is the pragmatic middle.
+
+The description-string value is a small UX win: when `niwa apply`
+reports a missing required key, it says *why* the key is needed in
+the team's own words, not just the key name.
+
+### D-11. Anonymous singular vs named multiple provider declarations
+
+**Decided:** A config file declares vault providers using either
+`[vault.provider]` (anonymous, exactly one) or
+`[vault.providers.<name>]` (named, any count). Mixing in a single
+file is a parse error.
+
+**Alternatives considered:** (a) always require naming (every
+provider gets a name even if there's only one); (b) always anonymous
+with a single provider allowed (no multi-provider files); (c)
+implicit "default" name for the sole named provider when URIs omit
+the name.
+
+**Rationale:** Always-requiring-names adds ceremony for the 80% case
+(one personal vault, one team vault). Always-anonymous prevents
+legitimate multi-vault setups (a team with separate prod/sandbox
+vaults, or a user with work + home 1Password accounts). Implicit
+"default" name for a sole named provider is magic — same URI
+behaves differently depending on whether there's one or two
+providers. The dual-shape approach keeps anonymous URIs
+(`vault://key`) and named URIs (`vault://name/key`) visually
+distinct, and the parser can tell at config-load time which shape
+the file uses.
 
 ## Open Questions
 
