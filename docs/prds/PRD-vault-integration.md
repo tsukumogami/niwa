@@ -237,6 +237,64 @@ As a developer migrating an existing workspace to use a vault, I want a
 command that scans my config and tells me which env values are still
 plaintext vs. already vault-backed, so I can track migration progress.
 
+### US-9: External contributor forks a public niwa config without team vault access
+
+As an external contributor who is not a member of the `tsukumogami`
+team but wants to submit a PR against `tsukumogami/dot-niwa` (or use
+any public niwa workspace that declares a team vault), I want
+`niwa apply` to work without me needing access to the team's vault
+provider.
+
+Three distinct paths, all expected to work without changes to the team
+config:
+
+1. **Replace the team provider in my personal overlay.** In my
+   personal `dot-niwa/niwa.toml`:
+   ```toml
+   [workspaces.tsukumogami.vault.providers.team]
+   kind = "sops"
+   config = ".sops.yaml"
+   ```
+   My local sops store now answers what the team's Infisical project
+   would have answered. Vault refs in the team config
+   (`vault://team/...`) resolve against my backend without any edit
+   to the team config itself. (This rides R12's per-provider-name
+   last-writer-wins merge in `GlobalOverride.Vault.Providers`.)
+
+2. **Override individual secret refs at the key level.** In my
+   personal overlay:
+   ```toml
+   [workspaces.tsukumogami.env.vars]
+   ANTHROPIC_API_KEY = "vault://personal/my-own-anthropic-key"
+   # Or, for a throwaway test session (personal repo is private, OK):
+   # OPENAI_API_KEY = "sk-my-personal-key"
+   ```
+   Personal wins per R7. The team-supplied ref is shadowed only for
+   the keys I redeclare.
+
+3. **Skip secrets I don't need.** If my PR only touches docs and
+   doesn't exercise code paths that hit the team vault's API:
+   ```
+   niwa apply --allow-missing-secrets
+   ```
+   Unresolved refs become empty strings with stderr warnings.
+
+The default failure mode when a contributor runs `niwa apply` without
+any of the three above must be a clear, actionable error: it MUST name
+the provider that failed to resolve (e.g., "provider `team` is not
+accessible: Infisical auth required") and MUST suggest the three
+paths above with copy-pasteable pointers. A contributor must not get
+a cryptic "vault reference failed" and have to reverse-engineer the
+override mechanics.
+
+Constraint: keys the team has locked via `team_only` (R8) cannot be
+shadowed at the personal layer even with plaintext. This is by
+design — see R8's rationale. A contributor wanting to PR against
+team-locked behavior must negotiate the lock change with the team
+first. `niwa apply` surfaces the `team_only` block as a distinct
+error from a general provider-auth error so the contributor knows
+which path forward applies.
+
 ## Requirements
 
 ### Functional Requirements
@@ -308,10 +366,26 @@ personal config tries to supply a value for any key in this list
 (either via a `vault://` reference or a plaintext override), niwa MUST
 refuse to apply with an error naming the conflicting key.
 
-**R9. Fail-hard resolution by default.** When a `vault://` reference
-can't be resolved (provider unreachable, auth expired, key missing),
-`niwa apply` MUST fail with a clear error naming the reference, unless
-overridden by R10 or R11.
+**R9. Fail-hard resolution by default, with actionable error
+messages.** When a `vault://` reference can't be resolved (provider
+unreachable, auth expired, key missing), `niwa apply` MUST fail with
+an error that:
+- Names the specific provider that failed (e.g., `providers.team`).
+- Names the specific key(s) that couldn't resolve.
+- Distinguishes between distinct failure modes: (a) provider
+  unreachable / auth missing; (b) key not found in an otherwise-
+  reachable provider; (c) key blocked by `team_only` (R8).
+- For fork-and-PR scenarios (contributor has no team vault access),
+  the error MUST include copy-pasteable remediation pointers to
+  US-9's three paths: override provider in personal overlay, override
+  individual key in personal overlay, or run with
+  `--allow-missing-secrets`.
+- MUST NOT print the value (or any resolved bytes) of secrets the
+  contributor does have access to — the error is about the *missing*
+  reference only.
+
+R10 (`--allow-missing-secrets`) and R11 (`?required=false`) are the
+opt-outs.
 
 **R10. `--allow-missing-secrets` CLI flag.** `niwa apply` MUST accept
 an `--allow-missing-secrets` flag that downgrades unresolved references
@@ -492,6 +566,23 @@ with `--allow-plaintext-secrets` (NOT a default-friendly flag).
   to empty strings and emits stderr warnings.
 - [ ] `vault://provider/key?required=false` resolves to empty string
   when missing, with no warning.
+- [ ] When a contributor without team-vault access runs `niwa apply`
+  against a team config declaring a team provider, the error message
+  names the specific provider and key, distinguishes provider-auth
+  failure from key-not-found, and includes copy-pasteable pointers to
+  the three override paths (US-9).
+- [ ] A contributor can replace the team provider entirely by
+  declaring `[workspaces.<scope>.vault.providers.team]` in their
+  personal overlay with a different `kind`; subsequent
+  `niwa apply` resolves team refs via the overlay's provider without
+  any edit to the team config.
+- [ ] A contributor can shadow an individual team vault reference by
+  declaring a literal or a different `vault://` URI for the same key
+  in their personal overlay's `[workspaces.<scope>.env.vars]`
+  (et al.); personal value wins per R7.
+- [ ] A `team_only` lock (R8) surfaces as a distinct error from
+  provider-auth failure and is NOT bypassable by the contributor's
+  personal overlay.
 
 ### Backends (v1: sops + Infisical)
 
