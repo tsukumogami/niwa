@@ -19,7 +19,7 @@ visibility = "public"
 [groups.private]
 visibility = "private"
 
-[content.workspace]
+[claude.content.workspace]
 source = "workspace.md"
 `
 
@@ -52,16 +52,16 @@ enabled = false
 [repos.vision]
 scope = "strategic"
 
-[content.workspace]
+[claude.content.workspace]
 source = "workspace.md"
 
-[content.groups.public]
+[claude.content.groups.public]
 source = "public.md"
 
-[content.repos.tsuku]
+[claude.content.repos.tsuku]
 source = "repos/tsuku.md"
 
-  [content.repos.tsuku.subdirs]
+  [claude.content.repos.tsuku.subdirs]
   recipes = "repos/tsuku-recipes.md"
 
 [claude]
@@ -117,8 +117,8 @@ func TestParseMinimalConfig(t *testing.T) {
 		t.Errorf("groups.private.visibility = %q, want %q", cfg.Groups["private"].Visibility, "private")
 	}
 
-	if cfg.Content.Workspace.Source != "workspace.md" {
-		t.Errorf("content.workspace.source = %q, want %q", cfg.Content.Workspace.Source, "workspace.md")
+	if cfg.Claude.Content.Workspace.Source != "workspace.md" {
+		t.Errorf("content.workspace.source = %q, want %q", cfg.Claude.Content.Workspace.Source, "workspace.md")
 	}
 }
 
@@ -243,12 +243,12 @@ func TestParseFullConfig(t *testing.T) {
 	}
 
 	// Content
-	if cfg.Content.Repos["tsuku"].Source != "repos/tsuku.md" {
-		t.Errorf("content.repos.tsuku.source = %q, want %q", cfg.Content.Repos["tsuku"].Source, "repos/tsuku.md")
+	if cfg.Claude.Content.Repos["tsuku"].Source != "repos/tsuku.md" {
+		t.Errorf("content.repos.tsuku.source = %q, want %q", cfg.Claude.Content.Repos["tsuku"].Source, "repos/tsuku.md")
 	}
-	if cfg.Content.Repos["tsuku"].Subdirs["recipes"] != "repos/tsuku-recipes.md" {
+	if cfg.Claude.Content.Repos["tsuku"].Subdirs["recipes"] != "repos/tsuku-recipes.md" {
 		t.Errorf("content.repos.tsuku.subdirs.recipes = %q, want %q",
-			cfg.Content.Repos["tsuku"].Subdirs["recipes"], "repos/tsuku-recipes.md")
+			cfg.Claude.Content.Repos["tsuku"].Subdirs["recipes"], "repos/tsuku-recipes.md")
 	}
 
 	// Typed sections parse correctly
@@ -421,7 +421,7 @@ func TestValidateContentSourcePaths(t *testing.T) {
 		t.Run("accepted_"+source, func(t *testing.T) {
 			input := fmt.Sprintf(`[workspace]
 name = "ok"
-[content.workspace]
+[claude.content.workspace]
 source = %q
 `, source)
 			_, err := Parse([]byte(input))
@@ -438,9 +438,9 @@ func TestValidateSubdirKeyAccepted(t *testing.T) {
 		t.Run(subdir, func(t *testing.T) {
 			input := fmt.Sprintf(`[workspace]
 name = "ok"
-[content.repos.myrepo]
+[claude.content.repos.myrepo]
 source = "repos/myrepo.md"
-[content.repos.myrepo.subdirs]
+[claude.content.repos.myrepo.subdirs]
 %q = "repos/sub.md"
 `, subdir)
 			_, err := Parse([]byte(input))
@@ -500,7 +500,7 @@ scope = "tactical"`,
 			name: "content source with path traversal",
 			input: `[workspace]
 name = "ok"
-[content.workspace]
+[claude.content.workspace]
 source = "../../../etc/passwd"`,
 			wantErr: `path traversal (..) is not allowed`,
 		},
@@ -508,7 +508,7 @@ source = "../../../etc/passwd"`,
 			name: "content source with absolute path",
 			input: `[workspace]
 name = "ok"
-[content.workspace]
+[claude.content.workspace]
 source = "/etc/passwd"`,
 			wantErr: `absolute paths are not allowed`,
 		},
@@ -516,7 +516,7 @@ source = "/etc/passwd"`,
 			name: "content group source with traversal",
 			input: `[workspace]
 name = "ok"
-[content.groups.public]
+[claude.content.groups.public]
 source = "foo/../../secret.md"`,
 			wantErr: `path traversal (..) is not allowed`,
 		},
@@ -524,7 +524,7 @@ source = "foo/../../secret.md"`,
 			name: "content repo source with traversal",
 			input: `[workspace]
 name = "ok"
-[content.repos.myrepo]
+[claude.content.repos.myrepo]
 source = "../secret.md"`,
 			wantErr: `path traversal (..) is not allowed`,
 		},
@@ -532,9 +532,9 @@ source = "../secret.md"`,
 			name: "subdir source with traversal",
 			input: `[workspace]
 name = "ok"
-[content.repos.myrepo]
+[claude.content.repos.myrepo]
 source = "repos/myrepo.md"
-[content.repos.myrepo.subdirs]
+[claude.content.repos.myrepo.subdirs]
 web = "../escape.md"`,
 			wantErr: `path traversal (..) is not allowed`,
 		},
@@ -542,9 +542,9 @@ web = "../escape.md"`,
 			name: "subdir key escapes repo",
 			input: `[workspace]
 name = "ok"
-[content.repos.myrepo]
+[claude.content.repos.myrepo]
 source = "repos/myrepo.md"
-[content.repos.myrepo.subdirs]
+[claude.content.repos.myrepo.subdirs]
 "../../escape" = "valid-source.md"`,
 			wantErr: `must resolve within the repo directory`,
 		},
@@ -552,9 +552,9 @@ source = "repos/myrepo.md"
 			name: "subdir key absolute path",
 			input: `[workspace]
 name = "ok"
-[content.repos.myrepo]
+[claude.content.repos.myrepo]
 source = "repos/myrepo.md"
-[content.repos.myrepo.subdirs]
+[claude.content.repos.myrepo.subdirs]
 "/etc" = "valid-source.md"`,
 			wantErr: `absolute paths are not allowed`,
 		},
@@ -735,5 +735,111 @@ workspace = { source = "should-not-work.md" }
 	}
 	if !found {
 		t.Errorf("expected an unknown-config-field warning for instance.claude.content, got warnings: %v", result.Warnings)
+	}
+}
+
+// TestParseDeprecatedContentMigrates proves that a workspace.toml using the
+// legacy [content] path still parses cleanly, emits exactly one deprecation
+// warning, and its content ends up under cfg.Claude.Content so downstream
+// consumers see the canonical location.
+func TestParseDeprecatedContentMigrates(t *testing.T) {
+	input := `
+[workspace]
+name = "test-ws"
+
+[content.workspace]
+source = "workspace.md"
+
+[content.groups.public]
+source = "groups/public.md"
+
+[content.repos.myrepo]
+source = "repos/myrepo.md"
+`
+	result, err := Parse([]byte(input))
+	if err != nil {
+		t.Fatalf("Parse returned error: %v", err)
+	}
+
+	// Canonical location must be populated.
+	if result.Config.Claude.Content.Workspace.Source != "workspace.md" {
+		t.Errorf("claude.content.workspace.source = %q, want %q",
+			result.Config.Claude.Content.Workspace.Source, "workspace.md")
+	}
+	if result.Config.Claude.Content.Groups["public"].Source != "groups/public.md" {
+		t.Errorf("claude.content.groups.public.source = %q, want %q",
+			result.Config.Claude.Content.Groups["public"].Source, "groups/public.md")
+	}
+	if result.Config.Claude.Content.Repos["myrepo"].Source != "repos/myrepo.md" {
+		t.Errorf("claude.content.repos.myrepo.source = %q, want %q",
+			result.Config.Claude.Content.Repos["myrepo"].Source, "repos/myrepo.md")
+	}
+
+	// Legacy location must be cleared after migration.
+	if !isContentConfigZero(result.Config.Content) {
+		t.Errorf("expected cfg.Content to be zero after migration, got %+v", result.Config.Content)
+	}
+
+	// Exactly one deprecation warning must be emitted.
+	found := false
+	for _, w := range result.Warnings {
+		if strings.Contains(w, "[content] is deprecated") && strings.Contains(w, "[claude.content]") {
+			if found {
+				t.Errorf("expected exactly one deprecation warning, got multiple: %v", result.Warnings)
+			}
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected deprecation warning for [content], got warnings: %v", result.Warnings)
+	}
+}
+
+// TestParseRejectsBothContentForms proves that using both [content] and
+// [claude.content] in the same workspace.toml is a hard error.
+func TestParseRejectsBothContentForms(t *testing.T) {
+	input := `
+[workspace]
+name = "test-ws"
+
+[content.workspace]
+source = "old.md"
+
+[claude.content.workspace]
+source = "new.md"
+`
+	_, err := Parse([]byte(input))
+	if err == nil {
+		t.Fatal("expected error when both [content] and [claude.content] are set, got nil")
+	}
+	if !strings.Contains(err.Error(), "[content]") || !strings.Contains(err.Error(), "[claude.content]") {
+		t.Errorf("error %q should mention both [content] and [claude.content]", err.Error())
+	}
+}
+
+// TestParseCanonicalContentHasNoWarning is the happy path: a workspace.toml
+// that only uses [claude.content] should parse clean, with no deprecation
+// warning and with content in the expected location.
+func TestParseCanonicalContentHasNoWarning(t *testing.T) {
+	input := `
+[workspace]
+name = "test-ws"
+
+[claude.content.workspace]
+source = "workspace.md"
+`
+	result, err := Parse([]byte(input))
+	if err != nil {
+		t.Fatalf("Parse returned error: %v", err)
+	}
+
+	if result.Config.Claude.Content.Workspace.Source != "workspace.md" {
+		t.Errorf("claude.content.workspace.source = %q, want %q",
+			result.Config.Claude.Content.Workspace.Source, "workspace.md")
+	}
+	for _, w := range result.Warnings {
+		if strings.Contains(w, "deprecated") {
+			t.Errorf("expected no deprecation warning for canonical form, got: %v", result.Warnings)
+		}
 	}
 }

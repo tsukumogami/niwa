@@ -25,7 +25,7 @@ func (w ContentWarning) String() string {
 // template variables, and writes it to {instanceRoot}/CLAUDE.md.
 // Returns the list of files written.
 func InstallWorkspaceContent(cfg *config.WorkspaceConfig, configDir, instanceRoot string) ([]string, error) {
-	if cfg.Content.Workspace.Source == "" {
+	if cfg.Claude.Content.Workspace.Source == "" {
 		return nil, nil
 	}
 
@@ -39,7 +39,7 @@ func InstallWorkspaceContent(cfg *config.WorkspaceConfig, configDir, instanceRoo
 		"{workspace_name}": cfg.Workspace.Name,
 	}
 
-	source := cfg.Content.Workspace.Source
+	source := cfg.Claude.Content.Workspace.Source
 	target := filepath.Join(instanceRoot, "CLAUDE.md")
 
 	if err := installContentFile(cfg, configDir, source, target, vars); err != nil {
@@ -53,7 +53,7 @@ func InstallWorkspaceContent(cfg *config.WorkspaceConfig, configDir, instanceRoo
 // Group directories are non-git directories, so they get CLAUDE.md (not .local).
 // Returns the list of files written.
 func InstallGroupContent(cfg *config.WorkspaceConfig, configDir, instanceRoot, groupName string) ([]string, error) {
-	entry, ok := cfg.Content.Groups[groupName]
+	entry, ok := cfg.Claude.Content.Groups[groupName]
 	if !ok || entry.Source == "" {
 		return nil, nil
 	}
@@ -109,7 +109,7 @@ func InstallRepoContent(cfg *config.WorkspaceConfig, configDir, instanceRoot, gr
 	repoDir := filepath.Join(instanceRoot, groupName, repoName)
 
 	// Resolve source: explicit entry or auto-discovery.
-	entry, hasExplicit := cfg.Content.Repos[repoName]
+	entry, hasExplicit := cfg.Claude.Content.Repos[repoName]
 	source := ""
 	if hasExplicit {
 		source = entry.Source
