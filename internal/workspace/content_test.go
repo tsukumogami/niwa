@@ -27,8 +27,10 @@ func TestInstallWorkspaceContent(t *testing.T) {
 			Name:       "myws",
 			ContentDir: "claude",
 		},
-		Content: config.ContentConfig{
-			Workspace: config.ContentEntry{Source: "ws.md"},
+		Claude: config.ClaudeConfig{
+			Content: config.ContentConfig{
+				Workspace: config.ContentEntry{Source: "ws.md"},
+			},
 		},
 	}
 
@@ -122,9 +124,11 @@ func TestInstallGroupContent(t *testing.T) {
 			Name:       "myws",
 			ContentDir: "claude",
 		},
-		Content: config.ContentConfig{
-			Groups: map[string]config.ContentEntry{
-				"public": {Source: "public.md"},
+		Claude: config.ClaudeConfig{
+			Content: config.ContentConfig{
+				Groups: map[string]config.ContentEntry{
+					"public": {Source: "public.md"},
+				},
 			},
 		},
 	}
@@ -196,9 +200,11 @@ func TestInstallRepoContent(t *testing.T) {
 			Name:       "myws",
 			ContentDir: "claude",
 		},
-		Content: config.ContentConfig{
-			Repos: map[string]config.RepoContentEntry{
-				"myapp": {Source: "repos/myapp.md"},
+		Claude: config.ClaudeConfig{
+			Content: config.ContentConfig{
+				Repos: map[string]config.RepoContentEntry{
+					"myapp": {Source: "repos/myapp.md"},
+				},
 			},
 		},
 	}
@@ -269,12 +275,14 @@ func TestInstallRepoContentSubdirs(t *testing.T) {
 			Name:       "myws",
 			ContentDir: "claude",
 		},
-		Content: config.ContentConfig{
-			Repos: map[string]config.RepoContentEntry{
-				"tsuku": {
-					Source: "repos/tsuku.md",
-					Subdirs: map[string]string{
-						"website": "repos/tsuku-website.md",
+		Claude: config.ClaudeConfig{
+			Content: config.ContentConfig{
+				Repos: map[string]config.RepoContentEntry{
+					"tsuku": {
+						Source: "repos/tsuku.md",
+						Subdirs: map[string]string{
+							"website": "repos/tsuku-website.md",
+						},
 					},
 				},
 			},
@@ -344,8 +352,10 @@ func TestInstallRepoContentAutoDiscovery(t *testing.T) {
 			Name:       "myws",
 			ContentDir: "claude",
 		},
-		Content: config.ContentConfig{
-			// No explicit repos entries.
+		Claude: config.ClaudeConfig{
+			Content: config.ContentConfig{
+				// No explicit repos entries.
+			},
 		},
 	}
 
@@ -388,7 +398,7 @@ func TestInstallRepoContentAutoDiscoveryNoFile(t *testing.T) {
 			Name:       "myws",
 			ContentDir: "claude",
 		},
-		Content: config.ContentConfig{},
+		Claude: config.ClaudeConfig{Content: config.ContentConfig{}},
 	}
 
 	instanceRoot := filepath.Join(tmpDir, "instance")
@@ -418,7 +428,7 @@ func TestInstallRepoContentAutoDiscoveryNoContentDir(t *testing.T) {
 			Name: "myws",
 			// No ContentDir set.
 		},
-		Content: config.ContentConfig{},
+		Claude: config.ClaudeConfig{Content: config.ContentConfig{}},
 	}
 
 	tmpDir := t.TempDir()
@@ -495,9 +505,11 @@ func TestCheckGitignoreWarningOnWrite(t *testing.T) {
 			Name:       "myws",
 			ContentDir: "claude",
 		},
-		Content: config.ContentConfig{
-			Repos: map[string]config.RepoContentEntry{
-				"myapp": {Source: "repos/myapp.md"},
+		Claude: config.ClaudeConfig{
+			Content: config.ContentConfig{
+				Repos: map[string]config.RepoContentEntry{
+					"myapp": {Source: "repos/myapp.md"},
+				},
 			},
 		},
 	}
@@ -627,8 +639,10 @@ func TestInstallContentFileContainment(t *testing.T) {
 			Name:       "test",
 			ContentDir: "claude",
 		},
-		Content: config.ContentConfig{
-			Workspace: config.ContentEntry{Source: "../secret.md"},
+		Claude: config.ClaudeConfig{
+			Content: config.ContentConfig{
+				Workspace: config.ContentEntry{Source: "../secret.md"},
+			},
 		},
 	}
 
@@ -665,12 +679,14 @@ func TestInstallRepoContentSubdirContainment(t *testing.T) {
 			Name:       "test",
 			ContentDir: "claude",
 		},
-		Content: config.ContentConfig{
-			Repos: map[string]config.RepoContentEntry{
-				"myrepo": {
-					Source: "repos/myrepo.md",
-					Subdirs: map[string]string{
-						"../../escape": "repos/sub.md",
+		Claude: config.ClaudeConfig{
+			Content: config.ContentConfig{
+				Repos: map[string]config.RepoContentEntry{
+					"myrepo": {
+						Source: "repos/myrepo.md",
+						Subdirs: map[string]string{
+							"../../escape": "repos/sub.md",
+						},
 					},
 				},
 			},

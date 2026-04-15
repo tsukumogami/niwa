@@ -75,12 +75,15 @@ Create content files in `.niwa/claude/` that become CLAUDE.md files in your work
 Reference them in the config:
 
 ```toml
-[content.workspace]
+[claude.content.workspace]
 source = "workspace.md"
 
-[content.groups.public]
+[claude.content.groups.public]
 source = "public.md"
 ```
+
+The top-level `[content]` key is a deprecated alias for `[claude.content]`
+and still parses cleanly (with a warning) until niwa v1.0.
 
 ### 5. Create an instance
 

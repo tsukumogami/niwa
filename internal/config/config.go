@@ -14,17 +14,40 @@ import (
 // validName matches names that contain only alphanumerics, dots, hyphens, and underscores.
 var validName = regexp.MustCompile(`^[a-zA-Z0-9._-]+$`)
 
-// ClaudeConfig groups hooks and settings under a single [claude] namespace.
-// On RepoOverride, Enabled controls whether Claude Code configuration is
-// installed for the repo (defaults to true when nil).
+// ClaudeConfig is the workspace-level Claude configuration under [claude].
+// It carries every Claude-related field: the common subset used at override
+// positions (Enabled, Plugins, Hooks, Settings, Env) plus workspace-scoped
+// fields (Marketplaces, Content) that don't flow through override merges.
+// For override positions (RepoOverride.Claude, InstanceConfig.Claude,
+// GlobalOverride.Claude), use ClaudeOverride instead.
 type ClaudeConfig struct {
-	Enabled *bool  `toml:"enabled,omitempty"`
+	Enabled *bool     `toml:"enabled,omitempty"`
 	Plugins *[]string `toml:"plugins,omitempty"`
 	// Marketplaces is workspace-wide. Not merged from per-repo overrides.
 	Marketplaces []string        `toml:"marketplaces,omitempty"`
 	Hooks        HooksConfig     `toml:"hooks,omitempty"`
 	Settings     SettingsConfig  `toml:"settings,omitempty"`
 	Env          ClaudeEnvConfig `toml:"env,omitempty"`
+	// Content declares the CLAUDE.md content hierarchy under
+	// [claude.content]. Workspace-scoped: per-repo overrides are not
+	// honored via RepoOverride.Claude. Migrated from the deprecated
+	// top-level [content] in v0.7; the old path is accepted as an alias
+	// with a deprecation warning until v1.0.
+	Content ContentConfig `toml:"content,omitempty"`
+}
+
+// ClaudeOverride is the narrower Claude configuration used at override
+// positions where workspace-scoped fields (Content, Marketplaces) are
+// not meaningful. Keeping Content and Marketplaces off this type makes
+// [repos.<name>.claude.content] (and marketplaces) surface as a TOML
+// "unknown field" warning automatically -- no runtime validation
+// needed.
+type ClaudeOverride struct {
+	Enabled  *bool           `toml:"enabled,omitempty"`
+	Plugins  *[]string       `toml:"plugins,omitempty"`
+	Hooks    HooksConfig     `toml:"hooks,omitempty"`
+	Settings SettingsConfig  `toml:"settings,omitempty"`
+	Env      ClaudeEnvConfig `toml:"env,omitempty"`
 }
 
 // ClaudeEnvConfig declares env vars for the Claude Code settings.local.json env
@@ -54,7 +77,7 @@ type WorkspaceConfig struct {
 // Uses the same fields and merge semantics as RepoOverride but applies
 // to the instance root directory (above all repos).
 type InstanceConfig struct {
-	Claude *ClaudeConfig     `toml:"claude,omitempty"`
+	Claude *ClaudeOverride   `toml:"claude,omitempty"`
 	Env    EnvConfig         `toml:"env,omitempty"`
 	Files  map[string]string `toml:"files,omitempty"`
 }
@@ -117,7 +140,7 @@ type RepoOverride struct {
 	Group    string            `toml:"group,omitempty"`
 	Branch   string            `toml:"branch,omitempty"`
 	Scope    string            `toml:"scope,omitempty"`
-	Claude   *ClaudeConfig     `toml:"claude,omitempty"`
+	Claude   *ClaudeOverride   `toml:"claude,omitempty"`
 	Env      EnvConfig         `toml:"env,omitempty"`
 	Files    map[string]string `toml:"files,omitempty"`
 	SetupDir *string           `toml:"setup_dir,omitempty"`
@@ -153,7 +176,8 @@ func Load(path string) (*ParseResult, error) {
 }
 
 // Parse decodes TOML bytes into a WorkspaceConfig and validates it.
-// Returns warnings for unknown fields (forward-compatibility).
+// Returns warnings for unknown fields (forward-compatibility) and for the
+// deprecated [content] path.
 func Parse(data []byte) (*ParseResult, error) {
 	var cfg WorkspaceConfig
 	md, err := toml.Decode(string(data), &cfg)
@@ -161,16 +185,50 @@ func Parse(data []byte) (*ParseResult, error) {
 		return nil, fmt.Errorf("parsing config: %w", err)
 	}
 
+	var warnings []string
+
+	// Handle deprecated [content] alias. The canonical location is
+	// [claude.content]; [content] is accepted through the deprecation
+	// window (until v1.0) with a warning. Both forms together is a
+	// configuration error -- we don't want silent precedence rules.
+	legacyHasContent := !isContentConfigZero(cfg.Content)
+	canonicalHasContent := !isContentConfigZero(cfg.Claude.Content)
+	switch {
+	case legacyHasContent && canonicalHasContent:
+		return nil, fmt.Errorf("config uses both [content] and [claude.content]; " +
+			"pick one -- [claude.content] is canonical, [content] is deprecated")
+	case legacyHasContent:
+		cfg.Claude.Content = cfg.Content
+		cfg.Content = ContentConfig{}
+		warnings = append(warnings,
+			"[content] is deprecated; use [claude.content] instead (removed at v1.0)")
+	}
+
 	if err := validate(&cfg); err != nil {
 		return nil, err
 	}
 
-	var warnings []string
 	for _, key := range md.Undecoded() {
 		warnings = append(warnings, fmt.Sprintf("unknown config field: %s", key))
 	}
 
 	return &ParseResult{Config: &cfg, Warnings: warnings}, nil
+}
+
+// isContentConfigZero reports whether a ContentConfig carries any data.
+// A zero ContentConfig has an empty Workspace source and nil/empty
+// Groups and Repos maps.
+func isContentConfigZero(c ContentConfig) bool {
+	if c.Workspace.Source != "" {
+		return false
+	}
+	if len(c.Groups) > 0 {
+		return false
+	}
+	if len(c.Repos) > 0 {
+		return false
+	}
+	return true
 }
 
 func validate(cfg *WorkspaceConfig) error {
@@ -206,20 +264,22 @@ func validate(cfg *WorkspaceConfig) error {
 	}
 
 	// Validate content source paths don't escape the content directory.
-	if err := validateContentSource("content.workspace.source", cfg.Content.Workspace.Source); err != nil {
+	// Reads from cfg.Claude.Content because Parse() migrates the legacy
+	// top-level [content] into [claude.content] before validate() runs.
+	if err := validateContentSource("claude.content.workspace.source", cfg.Claude.Content.Workspace.Source); err != nil {
 		return err
 	}
-	for name, entry := range cfg.Content.Groups {
-		if err := validateContentSource(fmt.Sprintf("content.groups.%s.source", name), entry.Source); err != nil {
+	for name, entry := range cfg.Claude.Content.Groups {
+		if err := validateContentSource(fmt.Sprintf("claude.content.groups.%s.source", name), entry.Source); err != nil {
 			return err
 		}
 	}
-	for name, entry := range cfg.Content.Repos {
-		if err := validateContentSource(fmt.Sprintf("content.repos.%s.source", name), entry.Source); err != nil {
+	for name, entry := range cfg.Claude.Content.Repos {
+		if err := validateContentSource(fmt.Sprintf("claude.content.repos.%s.source", name), entry.Source); err != nil {
 			return err
 		}
 		for subdir, src := range entry.Subdirs {
-			if err := validateContentSource(fmt.Sprintf("content.repos.%s.subdirs.%s", name, subdir), src); err != nil {
+			if err := validateContentSource(fmt.Sprintf("claude.content.repos.%s.subdirs.%s", name, subdir), src); err != nil {
 				return err
 			}
 			if err := validateSubdirKey(name, subdir); err != nil {
@@ -253,7 +313,7 @@ func validateContentSource(field, source string) error {
 // but omit repo-specific fields (URL, Branch, Group, Scope, SetupDir)
 // and Claude.Enabled.
 type GlobalOverride struct {
-	Claude *ClaudeConfig     `toml:"claude,omitempty"`
+	Claude *ClaudeOverride   `toml:"claude,omitempty"`
 	Env    EnvConfig         `toml:"env,omitempty"`
 	Files  map[string]string `toml:"files,omitempty"`
 }
@@ -308,12 +368,12 @@ func validateGlobalOverridePaths(prefix string, g GlobalOverride) error {
 // directory and doesn't escape via ".." or absolute path components.
 func validateSubdirKey(repoName, subdir string) error {
 	if filepath.IsAbs(subdir) {
-		return fmt.Errorf("content.repos.%s.subdirs key %q: absolute paths are not allowed", repoName, subdir)
+		return fmt.Errorf("claude.content.repos.%s.subdirs key %q: absolute paths are not allowed", repoName, subdir)
 	}
 	// Clean the path and verify it doesn't escape.
 	cleaned := filepath.Clean(subdir)
 	if cleaned == ".." || strings.HasPrefix(cleaned, ".."+string(filepath.Separator)) {
-		return fmt.Errorf("content.repos.%s.subdirs key %q: must resolve within the repo directory", repoName, subdir)
+		return fmt.Errorf("claude.content.repos.%s.subdirs key %q: must resolve within the repo directory", repoName, subdir)
 	}
 	return nil
 }

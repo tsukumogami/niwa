@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"github.com/cucumber/godog"
 )
 
 // aCleanNiwaEnvironment is a no-op. The Before hook already sets up a fresh
@@ -265,6 +267,35 @@ exit $__rc
 	}
 	s.exitCode = 0
 	return nil
+}
+
+// aWorkspaceExistsWithBody writes a workspace directory whose
+// .niwa/workspace.toml contains the supplied TOML body verbatim. Used by
+// scenarios that need to exercise specific config shapes (e.g., the
+// deprecated [content] key vs the canonical [claude.content]). The
+// Gherkin form uses a docstring:
+//
+//	Given a workspace "myws" exists with body:
+//	  """
+//	  [workspace]
+//	  name = "myws"
+//	  [content.workspace]
+//	  source = "ws.md"
+//	  """
+func aWorkspaceExistsWithBody(ctx context.Context, name string, body *godog.DocString) (context.Context, error) {
+	s := getState(ctx)
+	if s == nil {
+		return ctx, fmt.Errorf("no test state")
+	}
+	wsDir := filepath.Join(s.workspaceRoot, name)
+	niwaDir := filepath.Join(wsDir, ".niwa")
+	if err := os.MkdirAll(niwaDir, 0o755); err != nil {
+		return ctx, fmt.Errorf("creating workspace dir: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(niwaDir, "workspace.toml"), []byte(body.Content), 0o644); err != nil {
+		return ctx, fmt.Errorf("writing workspace.toml: %w", err)
+	}
+	return ctx, nil
 }
 
 // shellInitContains asserts that `niwa shell-init <shell>` output contains
