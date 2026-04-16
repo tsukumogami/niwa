@@ -211,6 +211,11 @@ token distributed via Slack or 1Password-to-1Password hand-off.
 longer — install `age` + `sops`, generate key pair, PR to
 `.sops.yaml`, team lead re-encrypts — but is out of scope for v1.)
 
+In CI environments, authenticate via the provider CLI's service-token
+mechanism (e.g., `INFISICAL_TOKEN` env var for Infisical). niwa
+doesn't need CI-specific auth — it invokes the provider CLI, which
+reads the token from its own env.
+
 ### US-3: Developer has a team vault AND a personal vault, composed per workspace
 
 As a developer who belongs to the `tsukumogami` team and also has my own
@@ -1354,12 +1359,6 @@ Listed here so they're not forgotten when the feature starts landing:
 
 Questions to resolve before the PRD transitions to Accepted:
 
-- **Q-1 Personas sign-off.** This draft's nine user stories cover the
-  three archetypes identified during exploration (indie, team-lead,
-  team-member). Are there other archetypes that need explicit stories
-  before shipping — e.g., CI-only caller, external contributor to a
-  public dot-niwa, new-dev who doesn't have GitHub org access on day
-  one?
 
 
 - **Q-2 Source-org detection for workspace with no sources.** R5
