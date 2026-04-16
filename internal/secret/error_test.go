@@ -191,6 +191,30 @@ func TestErrorNilReceiver(t *testing.T) {
 	}
 }
 
+// TestWrapDoesNotDropOuterLayer guards against a subtle bug in the
+// Wrap fast-path: if the type check used errors.As, it would bind
+// to the first *Error anywhere in the chain and return it — silently
+// discarding any outer fmt.Errorf layers wrapping it (e.g., the
+// "reading %s: " prefix below). The correct behavior is to use a
+// direct type assertion so outer layers are preserved by wrapping
+// into a new *Error.
+func TestWrapDoesNotDropOuterLayer(t *testing.T) {
+	v := secret.New([]byte("long-enough-secret-value"), secret.Origin{})
+	baseErr := fmt.Errorf("permission denied")
+	inner := secret.Wrap(baseErr, v)
+	outer := fmt.Errorf("reading %s: %w", "path", inner)
+
+	// Re-wrap outer. Wrap must NOT reach past the fmt.Errorf
+	// layer and return inner directly — doing so would drop the
+	// "reading path: " prefix. It MUST produce a wrapper whose
+	// Error() retains the prefix.
+	wrapped := secret.Wrap(outer)
+	msg := wrapped.Error()
+	if !strings.Contains(msg, "reading path:") {
+		t.Fatalf("Wrap dropped outer fmt.Errorf layer; got %q, want prefix %q", msg, "reading path:")
+	}
+}
+
 // TestErrorRedactorAccessor covers the Redactor accessor used by
 // callers who want to register additional fragments after the fact.
 func TestErrorRedactorAccessor(t *testing.T) {

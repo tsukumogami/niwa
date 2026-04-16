@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"sort"
+	"strings"
 	"sync"
 )
 
@@ -103,51 +104,9 @@ func (r *Redactor) Scrub(s string) string {
 
 	out := s
 	for _, frag := range frags {
-		// strings.ReplaceAll equivalent, but working off []byte
-		// fragments so we don't have to re-encode.
-		out = replaceAll(out, string(frag), redactedPlaceholder)
+		out = strings.ReplaceAll(out, string(frag), redactedPlaceholder)
 	}
 	return out
-}
-
-// replaceAll is strings.ReplaceAll inlined to avoid importing the
-// strings package alongside bytes — keeps the dependency footprint
-// minimal and mirrors the byte-oriented design.
-func replaceAll(s, old, new string) string {
-	if old == "" || old == new {
-		return s
-	}
-	var b bytes.Buffer
-	b.Grow(len(s))
-	for {
-		i := indexOf(s, old)
-		if i < 0 {
-			b.WriteString(s)
-			return b.String()
-		}
-		b.WriteString(s[:i])
-		b.WriteString(new)
-		s = s[i+len(old):]
-	}
-}
-
-// indexOf is a tiny substring-index helper. We avoid strings.Index
-// to keep imports tight; the standard bytes-based matcher would
-// require an additional allocation.
-func indexOf(s, sub string) int {
-	n := len(sub)
-	if n == 0 {
-		return 0
-	}
-	if n > len(s) {
-		return -1
-	}
-	for i := 0; i+n <= len(s); i++ {
-		if s[i:i+n] == sub {
-			return i
-		}
-	}
-	return -1
 }
 
 // redactorKey is the typed context key under which WithRedactor

@@ -81,13 +81,16 @@ func Wrap(err error, values ...Value) error {
 	for _, v := range values {
 		r.RegisterValue(v)
 	}
-	// If err is already a *Error with the same Redactor, we don't
+	// If err is itself a *Error with the same Redactor, we don't
 	// need a new wrapper layer — just return it so the chain stays
-	// shallow. If the Redactor pointer differs, wrap so Error()
-	// uses the updated fragment set.
-	var existing *Error
-	if errors.As(err, &existing) && existing.redactor == r {
-		return existing
+	// shallow. We use a direct type assertion rather than
+	// errors.As: errors.As would bind to the first *Error anywhere
+	// in the chain, which could be buried under outer fmt.Errorf
+	// layers (e.g., fmt.Errorf("reading %s: %w", path, innerErr)).
+	// Returning that inner *Error would silently drop every
+	// wrapping layer above it.
+	if se, ok := err.(*Error); ok && se.redactor == r {
+		return se
 	}
 	return &Error{inner: err, redactor: r}
 }
