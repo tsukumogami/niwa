@@ -100,15 +100,24 @@ migration doesn't introduce new leaks.
   separate PATs for `tsukumogami` and `codespar` can declare both in
   their personal overlay repo and have niwa pick the right one
   automatically when working on a workspace in either org.
-- **New-member bootstrap is under 10 minutes.** A new developer joining
-  `tsukumogami` who already has GitHub org membership can run
-  `niwa init tsukumogami --from tsukumogami/dot-niwa` plus one bootstrap
-  step (generate age key, publish via PR) and be fully productive on
-  `niwa apply` within 10 minutes.
-- **Zero new leak classes.** The feature ships with 12 "never leaks"
-  invariants enforced by the type system, pipeline, and filesystem
-  permissions. Fixes a pre-existing `0o644` bug where materialized env
-  and settings files were world-readable.
+- **New-member bootstrap is fast.** A new developer joining
+  `tsukumogami` who already has GitHub org membership is productive
+  on `niwa apply` in minutes, not hours. Target for the Infisical
+  backend: `infisical login` → browser OAuth → first successful
+  `niwa apply` in under 2 minutes. Target for the sops backend:
+  install age + sops, generate key, open PR to `.sops.yaml`, first
+  successful `niwa apply` under 10 minutes once the PR is merged
+  (team-lead response time dominates). The design doc defines the
+  measurement protocol for both.
+- **Apply-time resolution is imperceptible for typical workspaces.**
+  Realistic workspaces (≤ ~20 vault references) resolve without
+  user-visible latency. Larger workspaces emit a progress indicator
+  so users aren't left wondering. The design doc defines the
+  benchmark harness and concrete thresholds.
+- **Zero new leak classes.** The feature ships with the "never leaks"
+  invariants (R21–R30) enforced by the type system, pipeline, and
+  filesystem permissions. Fixes a pre-existing `0o644` bug where
+  materialized env and settings files were world-readable.
 - **Pluggable backend from v1, with two peer backends optimized for
   different team preferences.** Infisical Cloud ships as the OOTB
   low-effort option (free tier covers 5 identities / 3 projects /
@@ -127,7 +136,8 @@ requirements this PRD enumerates:
 |------|--------------|
 | Team configs can be publishable | R14, R30, R22–R29 (the invariant floor that lets secrets stay out of the repo) |
 | Per-org personal secret scoping | R4, R5, R6, US-3, D-2 |
-| New-member bootstrap under 10 minutes | R18, US-2 (two-path bootstrap), R1 (CLI-exec interface means no niwa-specific auth bootstrap) |
+| New-member bootstrap is fast | US-2 (two-path bootstrap), R1 (CLI-exec interface means no niwa-specific auth bootstrap). Measurement protocol deferred to the design doc. |
+| Apply-time resolution imperceptible for typical workspaces | R16 (re-resolve on every apply), R1 (interface allows session caching inside provider CLIs). Benchmark harness deferred to the design doc. |
 | Zero new leak classes | R21–R30 (the "never leaks" invariants) |
 | Pluggable backend from v1 | R1, D-1 |
 
@@ -570,28 +580,20 @@ Provider CLIs may cache their own auth sessions (out of niwa's scope).
 
 ### Non-Functional Requirements
 
-**R18. Bootstrap under 10 minutes (sops backend).** A new developer
-joining a team with the sops+age backend must complete: install niwa +
-sops + age, generate an age key, publish the public key to the team's
-`dot-niwa` repo via a PR, wait for the team lead to re-encrypt and
-merge. End-to-end target: under 10 minutes once the PR is merged. This
-is a usability budget; the PRD does not prescribe the UX to achieve
-it, but the design doc that follows must demonstrate that the budget
-is met.
-
-**R19. Apply-time resolution under 5 seconds for workspaces with
-≤ 20 vault references.** Resolution happens once per `niwa apply` per
-reference. Total resolution time MUST stay under 5 seconds in the 80%
-case. Large workspaces with > 20 references may exceed this and should
-emit a progress indicator.
-
 **R20. Zero additional external dependencies on niwa's side.** The
 pluggable interface MUST be implemented in niwa's Go code without
 pulling in a vault-specific Go library. niwa invokes provider CLIs
 (`sops`, `age`, `infisical`) as subprocesses. Users install provider
 CLIs themselves; niwa does not bundle them.
 
-### Security Requirements (the 12 "never leaks" invariants)
+(R18 and R19 were earlier numbered here as bootstrap-time and
+resolution-time budgets. They moved to the Goals section as product
+outcomes because the PRD can't specify a measurement protocol
+precise enough to make them binary pass/fail requirements; the
+design doc will define concrete benchmarks when the implementation
+exists to benchmark.)
+
+### Security Requirements (the 10 "never leaks" invariants)
 
 **R21 (INV-NO-ARGV).** No niwa subcommand accepts a secret value on
 argv, flags, or environment variables that would appear in shell
