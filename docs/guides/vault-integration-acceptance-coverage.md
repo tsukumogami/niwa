@@ -35,11 +35,11 @@ at behavior that's deferred to a future release.
 | PRD AC | Implementing file | Test function |
 |--------|-------------------|---------------|
 | Personal overlay with per-scope sops provider resolves `vault://<key>` | `internal/vault/resolve/resolve_test.go` | `TestResolveGlobalOverridePerWorkspaceBlock` (mechanism; sops backend itself `ORPHANED` — deferred to v1.1) |
-| `[env.required]` miss fails `niwa apply` with key + description | `internal/workspace/apply_vault_test.go` | `TestApplyVaultProviderMissingKeyErrors` |
-| `[env.recommended]` miss emits stderr warning and continues | `internal/vault/resolve/resolve_test.go` | `TestResolveWorkspaceAllowMissingDowngradesWithWarning` |
-| `[env.optional]` miss emits info log and continues | `internal/vault/resolve/resolve_test.go` | `TestResolveWorkspaceOptionalDowngradesSilently` |
-| `--allow-missing-secrets` does NOT downgrade `[env.required]` | `internal/cli/apply_test.go` | `TestApplyCmd_AllowFlagsThreadToApplier` |
-| 2 sources with no `vault_scope` fails with ambiguity error | `internal/vault/resolve/resolve_test.go` | `TestResolveGlobalOverridePerWorkspaceBlock` (scope selection; ambiguity path covered by scope test) |
+| `[env.required]` miss fails `niwa apply` with key + description | `internal/workspace/apply_vault_test.go` | `TestApplyFailsOnMissingRequiredEnvSecret` |
+| `[env.recommended]` miss emits stderr warning and continues | `internal/workspace/apply_vault_test.go` | `TestApplyMissingRecommendedEmitsStderrWarning` |
+| `[env.optional]` miss is silent in v1 (info log deferred to verbose flag) | `internal/workspace/apply_vault_test.go` | `TestApplyMissingOptionalSilent` |
+| `--allow-missing-secrets` does NOT downgrade `[env.required]` | `internal/workspace/apply_vault_test.go` | `TestApplyAllowMissingSecretsDoesNotDowngradeRequired` |
+| 2 sources with no `vault_scope` fails with ambiguity error | `internal/workspace/apply_vault_test.go` | `TestResolveMultiSourceWithoutVaultScopeFails` |
 | 2 sources with `vault_scope` resolves from matching block | `internal/vault/resolve/resolve_test.go` | `TestResolveGlobalOverridePerWorkspaceBlock` |
 | Personal wins over team on `[env.*]` key shadow | `internal/workspace/override_test.go` | `TestMergeGlobalOverrideEnvSecretsGlobalWins` |
 | Personal shadowing a `team_only` key fails with named error | `internal/workspace/override_test.go` | `TestMergeGlobalOverrideTeamOnlyBlocksOverride` |
@@ -76,7 +76,7 @@ at behavior that's deferred to a future release.
 |--------|-------------------|---------------|
 | `secret.Value` formatters emit `***` under `%s`/`%v`/`%+v`/`%q` | `internal/secret/value_test.go` | `TestValueFormatVerbs` |
 | No resolved secret reaches stdout/stderr in error wrapping | `internal/secret/error_test.go` | `TestWrapFiveLayerErrorfChain` |
-| niwa never calls `os.Setenv` during apply | `internal/vault/infisical/infisical_test.go` | `TestArgvHygiene` (covers argv + env invariants for the backend call) |
+| niwa never calls `os.Setenv` during apply | `internal/vault/infisical/infisical_test.go` | `TestArgvHygiene` (argv-only assertion; the R28 `cmd.Env = nil` invariant lives in `internal/vault/infisical/subprocess.go` without a dedicated regression test as of v1) |
 | Public-matching remote + plaintext `*.secrets` fails apply | `internal/guardrail/githubpublic_test.go` | `TestCheckGitHubPublicRemoteSecretsOriginPrivateUpstreamPublic` |
 | Guardrail fires on any remote (origin private + upstream public) | `internal/guardrail/githubpublic_test.go` | `TestCheckGitHubPublicRemoteSecretsOriginPrivateUpstreamPublic` |
 | `--allow-plaintext-secrets` proceeds with warning | `internal/guardrail/githubpublic_test.go` | `TestCheckGitHubPublicRemoteSecretsAllowsPlaintextOneShot` |
@@ -98,7 +98,7 @@ at behavior that's deferred to a future release.
 
 | PRD AC | Implementing file | Test function |
 |--------|-------------------|---------------|
-| Rotated vault secret triggers re-resolution + `rotated` stderr | `internal/workspace/sources_test.go` | `TestApplyVaultRotationUpdatesSourceFingerprint` |
+| Rotated vault secret triggers re-resolution + `rotated` stderr | `internal/workspace/apply_vault_test.go` | `TestApplyEmitsRotatedOnVaultRotation` |
 | `niwa status --check-vault` re-resolves without materializing | `internal/cli/status_check_vault_test.go` | `TestDetectVaultRotations_RotatedValueReportsChange` |
 | Default `niwa status` is fully offline + hash-based | `internal/cli/status_check_vault_test.go` | `TestDefaultStatusStaysOffline` |
 | sops-rotated secret reports `stale` with commit SHA | `ORPHANED` | Deferred — sops backend ships in v1.1 |

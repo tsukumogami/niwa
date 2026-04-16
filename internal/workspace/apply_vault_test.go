@@ -579,3 +579,505 @@ ANTHROPIC_KEY = "vault://ANTHROPIC_KEY?required=false"
 		t.Errorf("unexpected vault warning for optional key:\n%s", out)
 	}
 }
+
+// TestApplyEmitsRotatedOnVaultRotation verifies the PRD Rotation AC:
+// after a team rotates a vault secret upstream, the next niwa apply
+// re-resolves, re-materializes, and reports `rotated <path>` to stderr.
+//
+// The scenario:
+//
+//  1. First apply resolves vault://TOKEN against the fake provider
+//     (value A), writes .local.env, persists state.
+//  2. The fake provider's value changes to B (same key).
+//  3. Second apply re-resolves, re-materializes (new plaintext lands on
+//     disk), and MUST emit `rotated <absolute-path>` to stderr. The
+//     rotation is detected via the SourceFingerprint flip + the vault
+//     source's VersionToken change.
+//
+// The test also asserts `rotated` does NOT appear on the FIRST apply —
+// a first-time materialization is not a rotation.
+func TestApplyEmitsRotatedOnVaultRotation(t *testing.T) {
+	withFakeVaultBackend(t)
+
+	tmpDir := t.TempDir()
+	niwaDir := filepath.Join(tmpDir, ".niwa")
+	if err := os.MkdirAll(niwaDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfgTOMLFmt := `
+[workspace]
+name = "apply-rot-ws"
+
+[[sources]]
+org = "testorg"
+
+[groups.default]
+repos = ["app"]
+
+[vault.provider]
+kind = "fake"
+
+[vault.provider.values]
+TOKEN = "%s"
+
+[env.secrets]
+TOKEN = "vault://TOKEN"
+`
+	writeCfg := func(value string) {
+		body := strings.Replace(cfgTOMLFmt, "%s", value, 1)
+		if err := os.WriteFile(filepath.Join(niwaDir, "workspace.toml"), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	writeCfg("first-value-aaaaaaaaaaaa")
+	result, err := config.Load(filepath.Join(niwaDir, "workspace.toml"))
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+
+	mockClient := &mockGitHubClient{
+		repos: map[string][]github.Repo{
+			"testorg": {{Name: "app", SSHURL: "git@github.com:testorg/app.git"}},
+		},
+	}
+
+	workspaceRoot := tmpDir
+	instanceRoot := filepath.Join(workspaceRoot, "apply-rot-ws")
+	groupDir := filepath.Join(instanceRoot, "default")
+	if err := os.MkdirAll(filepath.Join(groupDir, "app", ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	applier := NewApplier(mockClient)
+	applier.Cloner = &Cloner{}
+
+	// First apply: capture stderr. The file is being materialized for
+	// the first time — `rotated` must NOT appear.
+	origStderr := os.Stderr
+	r1, w1, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stderr = w1
+	_, createErr := applier.Create(context.Background(), result.Config, niwaDir, workspaceRoot)
+	w1.Close()
+	os.Stderr = origStderr
+	stderr1, _ := io.ReadAll(r1)
+	if createErr != nil {
+		t.Fatalf("first Create: %v\nstderr: %s", createErr, string(stderr1))
+	}
+	envFilePath := filepath.Join(instanceRoot, "default", "app", ".local.env")
+	if strings.Contains(string(stderr1), "rotated ") {
+		t.Errorf("first-time materialization must not emit `rotated`, got:\n%s", string(stderr1))
+	}
+
+	// Rotate upstream: rewrite the fake provider's value, reparse.
+	writeCfg("second-value-bbbbbbbbbbbb")
+	result2, err := config.Load(filepath.Join(niwaDir, "workspace.toml"))
+	if err != nil {
+		t.Fatalf("config.Load after rotation: %v", err)
+	}
+
+	// Second apply: stderr MUST contain "rotated <envFilePath>".
+	r2, w2, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stderr = w2
+	applyErr := applier.Apply(context.Background(), result2.Config, niwaDir, instanceRoot)
+	w2.Close()
+	os.Stderr = origStderr
+	stderr2, _ := io.ReadAll(r2)
+	if applyErr != nil {
+		t.Fatalf("Apply after rotation: %v\nstderr: %s", applyErr, string(stderr2))
+	}
+
+	want := "rotated " + envFilePath
+	if !strings.Contains(string(stderr2), want) {
+		t.Errorf("stderr missing %q after vault rotation\nfull stderr:\n%s", want, string(stderr2))
+	}
+
+	// The materialized file must contain the new value (sanity check
+	// that re-resolution actually happened, not just that we emitted
+	// the message in isolation).
+	data, err := os.ReadFile(envFilePath)
+	if err != nil {
+		t.Fatalf("reading rotated env file: %v", err)
+	}
+	if !strings.Contains(string(data), "second-value-bbbbbbbbbbbb") {
+		t.Errorf("env file does not contain rotated plaintext, got:\n%s", string(data))
+	}
+}
+
+// TestApplyFailsOnMissingRequiredEnvSecret enforces PRD R33: a
+// [env.secrets.required] key with no corresponding value MUST cause
+// niwa apply to fail. The error must name the missing key and include
+// the team-authored description string.
+func TestApplyFailsOnMissingRequiredEnvSecret(t *testing.T) {
+	withFakeVaultBackend(t)
+
+	configTOML := `
+[workspace]
+name = "required-miss-ws"
+
+[[sources]]
+org = "testorg"
+
+[groups.default]
+repos = ["app"]
+
+[env.secrets.required]
+GITHUB_TOKEN = "GitHub PAT with repo:read scope"
+`
+
+	tmpDir := t.TempDir()
+	niwaDir := filepath.Join(tmpDir, ".niwa")
+	if err := os.MkdirAll(niwaDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(niwaDir, "workspace.toml"), []byte(configTOML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	parsed, err := config.Load(filepath.Join(niwaDir, "workspace.toml"))
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+
+	mockClient := &mockGitHubClient{
+		repos: map[string][]github.Repo{
+			"testorg": {{Name: "app", SSHURL: "git@github.com:testorg/app.git"}},
+		},
+	}
+
+	workspaceRoot := tmpDir
+	instanceRoot := filepath.Join(workspaceRoot, "required-miss-ws")
+	groupDir := filepath.Join(instanceRoot, "default")
+	if err := os.MkdirAll(filepath.Join(groupDir, "app", ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	applier := NewApplier(mockClient)
+	applier.Cloner = &Cloner{}
+
+	_, err = applier.Create(context.Background(), parsed.Config, niwaDir, workspaceRoot)
+	if err == nil {
+		t.Fatal("expected apply to fail when a required env secret is missing")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "GITHUB_TOKEN") {
+		t.Errorf("error must name the missing key, got: %v", err)
+	}
+	if !strings.Contains(msg, "GitHub PAT with repo:read scope") {
+		t.Errorf("error must include the required-table description, got: %v", err)
+	}
+	if !strings.Contains(msg, "env.secrets") {
+		t.Errorf("error must name the offending scope, got: %v", err)
+	}
+}
+
+// TestApplyAllowMissingSecretsDoesNotDowngradeRequired enforces PRD R34:
+// --allow-missing-secrets downgrades missing vault refs to empty, but
+// MUST NOT downgrade a [env.*.required] declaration. The required
+// check runs on the post-resolve value and fires on the empty
+// MaybeSecret the resolver produced.
+func TestApplyAllowMissingSecretsDoesNotDowngradeRequired(t *testing.T) {
+	withFakeVaultBackend(t)
+
+	configTOML := `
+[workspace]
+name = "required-allow-ws"
+
+[[sources]]
+org = "testorg"
+
+[groups.default]
+repos = ["app"]
+
+[vault.provider]
+kind = "fake"
+
+[env.secrets.required]
+GITHUB_TOKEN = "GitHub PAT with repo:read scope"
+
+[env.secrets]
+GITHUB_TOKEN = "vault://GITHUB_TOKEN"
+`
+
+	tmpDir := t.TempDir()
+	niwaDir := filepath.Join(tmpDir, ".niwa")
+	if err := os.MkdirAll(niwaDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(niwaDir, "workspace.toml"), []byte(configTOML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	parsed, err := config.Load(filepath.Join(niwaDir, "workspace.toml"))
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+
+	mockClient := &mockGitHubClient{
+		repos: map[string][]github.Repo{
+			"testorg": {{Name: "app", SSHURL: "git@github.com:testorg/app.git"}},
+		},
+	}
+
+	workspaceRoot := tmpDir
+	instanceRoot := filepath.Join(workspaceRoot, "required-allow-ws")
+	groupDir := filepath.Join(instanceRoot, "default")
+	if err := os.MkdirAll(filepath.Join(groupDir, "app", ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	applier := NewApplier(mockClient)
+	applier.Cloner = &Cloner{}
+	applier.AllowMissingSecrets = true
+
+	_, err = applier.Create(context.Background(), parsed.Config, niwaDir, workspaceRoot)
+	if err == nil {
+		t.Fatal("expected apply to fail even with --allow-missing-secrets when a required key is missing (R34)")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "GITHUB_TOKEN") {
+		t.Errorf("error must name the missing key, got: %v", err)
+	}
+	if !strings.Contains(msg, "GitHub PAT with repo:read scope") {
+		t.Errorf("error must include the required-table description, got: %v", err)
+	}
+}
+
+// TestApplyMissingRecommendedEmitsStderrWarning enforces the
+// recommended-sub-table contract: a miss emits a stderr warning line
+// (loud but non-fatal) and apply continues.
+func TestApplyMissingRecommendedEmitsStderrWarning(t *testing.T) {
+	withFakeVaultBackend(t)
+
+	configTOML := `
+[workspace]
+name = "recommended-miss-ws"
+
+[[sources]]
+org = "testorg"
+
+[groups.default]
+repos = ["app"]
+
+[env.secrets.recommended]
+SENTRY_DSN = "Sentry error reporting"
+`
+
+	tmpDir := t.TempDir()
+	niwaDir := filepath.Join(tmpDir, ".niwa")
+	if err := os.MkdirAll(niwaDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(niwaDir, "workspace.toml"), []byte(configTOML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	parsed, err := config.Load(filepath.Join(niwaDir, "workspace.toml"))
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+
+	mockClient := &mockGitHubClient{
+		repos: map[string][]github.Repo{
+			"testorg": {{Name: "app", SSHURL: "git@github.com:testorg/app.git"}},
+		},
+	}
+
+	workspaceRoot := tmpDir
+	instanceRoot := filepath.Join(workspaceRoot, "recommended-miss-ws")
+	groupDir := filepath.Join(instanceRoot, "default")
+	if err := os.MkdirAll(filepath.Join(groupDir, "app", ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Capture stderr.
+	origStderr := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stderr = w
+
+	applier := NewApplier(mockClient)
+	applier.Cloner = &Cloner{}
+	_, createErr := applier.Create(context.Background(), parsed.Config, niwaDir, workspaceRoot)
+	w.Close()
+	os.Stderr = origStderr
+
+	stderrBytes, _ := io.ReadAll(r)
+	if createErr != nil {
+		t.Fatalf("apply should succeed when a recommended key is missing, got: %v\nstderr:\n%s", createErr, string(stderrBytes))
+	}
+
+	out := string(stderrBytes)
+	if !strings.Contains(out, "SENTRY_DSN") {
+		t.Errorf("stderr must name the missing recommended key, got:\n%s", out)
+	}
+	if !strings.Contains(out, "Sentry error reporting") {
+		t.Errorf("stderr must include the description, got:\n%s", out)
+	}
+	if !strings.Contains(out, "warning: recommended") {
+		t.Errorf("stderr must flag the line as a recommended-key warning, got:\n%s", out)
+	}
+}
+
+// TestApplyMissingOptionalSilent enforces the optional-sub-table
+// contract: a miss is silent in v1 (no verbose flag yet). Apply
+// succeeds and stderr carries no mention of the missing optional key.
+func TestApplyMissingOptionalSilent(t *testing.T) {
+	withFakeVaultBackend(t)
+
+	configTOML := `
+[workspace]
+name = "optional-miss-ws"
+
+[[sources]]
+org = "testorg"
+
+[groups.default]
+repos = ["app"]
+
+[env.vars.optional]
+DEBUG_WEBHOOK_URL = "Personal debug webhook"
+`
+
+	tmpDir := t.TempDir()
+	niwaDir := filepath.Join(tmpDir, ".niwa")
+	if err := os.MkdirAll(niwaDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(niwaDir, "workspace.toml"), []byte(configTOML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	parsed, err := config.Load(filepath.Join(niwaDir, "workspace.toml"))
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+
+	mockClient := &mockGitHubClient{
+		repos: map[string][]github.Repo{
+			"testorg": {{Name: "app", SSHURL: "git@github.com:testorg/app.git"}},
+		},
+	}
+
+	workspaceRoot := tmpDir
+	instanceRoot := filepath.Join(workspaceRoot, "optional-miss-ws")
+	groupDir := filepath.Join(instanceRoot, "default")
+	if err := os.MkdirAll(filepath.Join(groupDir, "app", ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	origStderr := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stderr = w
+
+	applier := NewApplier(mockClient)
+	applier.Cloner = &Cloner{}
+	_, createErr := applier.Create(context.Background(), parsed.Config, niwaDir, workspaceRoot)
+	w.Close()
+	os.Stderr = origStderr
+
+	stderrBytes, _ := io.ReadAll(r)
+	if createErr != nil {
+		t.Fatalf("apply should succeed when an optional key is missing, got: %v\nstderr:\n%s", createErr, string(stderrBytes))
+	}
+
+	out := string(stderrBytes)
+	if strings.Contains(out, "DEBUG_WEBHOOK_URL") {
+		t.Errorf("optional-key miss must be silent in v1, but stderr mentioned the key:\n%s", out)
+	}
+}
+
+// TestResolveMultiSourceWithoutVaultScopeFails enforces PRD R5: a
+// workspace with more than one [[sources]] block AND an active
+// personal overlay MUST fail apply if [workspace].vault_scope is
+// unset. The error names the candidate source orgs so the user has
+// an obvious path forward.
+func TestResolveMultiSourceWithoutVaultScopeFails(t *testing.T) {
+	withFakeVaultBackend(t)
+
+	// Multi-source workspace with no vault_scope. Two different orgs
+	// so the ambiguity is obvious in the error message.
+	configTOML := `
+[workspace]
+name = "multi-source-ws"
+
+[[sources]]
+org = "tsukumogami"
+
+[[sources]]
+org = "codespar"
+
+[groups.default]
+repos = ["app"]
+`
+
+	// Personal overlay that offers scope-specific blocks for both
+	// orgs. The resolver has no way to pick between them without
+	// explicit vault_scope.
+	overlayTOML := `
+[workspaces.tsukumogami.env.vars]
+LOG_LEVEL = "tsukumogami-debug"
+
+[workspaces.codespar.env.vars]
+LOG_LEVEL = "codespar-debug"
+`
+
+	tmpDir := t.TempDir()
+	niwaDir := filepath.Join(tmpDir, ".niwa")
+	if err := os.MkdirAll(niwaDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(niwaDir, "workspace.toml"), []byte(configTOML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	globalDir := filepath.Join(tmpDir, "global-config")
+	if err := os.MkdirAll(globalDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(globalDir, "niwa.toml"), []byte(overlayTOML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	parsed, err := config.Load(filepath.Join(niwaDir, "workspace.toml"))
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+
+	// Point the resolver at BOTH orgs so Classify doesn't reject the
+	// fixture for a missing repo lookup. For this test the classifier
+	// runs but fails the scope check before touching the providers.
+	mockClient := &mockGitHubClient{
+		repos: map[string][]github.Repo{
+			"tsukumogami": {{Name: "app", SSHURL: "git@github.com:tsukumogami/app.git"}},
+		},
+	}
+
+	workspaceRoot := tmpDir
+	applier := NewApplier(mockClient)
+	applier.Cloner = &Cloner{}
+	applier.GlobalConfigDir = globalDir
+
+	_, err = applier.Create(context.Background(), parsed.Config, niwaDir, workspaceRoot)
+	if err == nil {
+		t.Fatal("expected apply to fail on multi-source workspace without vault_scope (R5)")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "vault_scope") {
+		t.Errorf("error must name vault_scope as the remediation, got: %v", err)
+	}
+	if !strings.Contains(msg, "tsukumogami") || !strings.Contains(msg, "codespar") {
+		t.Errorf("error must list both source orgs so the user can pick, got: %v", err)
+	}
+}

@@ -5,6 +5,7 @@ import (
 	"maps"
 	"path/filepath"
 	"slices"
+	"strings"
 
 	"github.com/tsukumogami/niwa/internal/config"
 	"github.com/tsukumogami/niwa/internal/vault"
@@ -248,6 +249,49 @@ func MergeInstanceOverrides(ws *config.WorkspaceConfig) EffectiveConfig {
 	}
 
 	return result
+}
+
+// CheckVaultScopeAmbiguity enforces PRD R5: a workspace with more than
+// one [[sources]] block MUST declare [workspace].vault_scope so niwa
+// knows which [workspaces.<scope>] entry in the personal overlay
+// applies. Single-source or zero-source workspaces do not need
+// vault_scope (single-source scopes implicitly by source org; zero-
+// source workspaces fall back to team-only resolution).
+//
+// The check has an escape: when globalOverride is nil (no personal
+// overlay registered), the scope selection is moot and this function
+// returns nil regardless of source count. That keeps multi-source
+// team-only workspaces usable without forcing a vault_scope value
+// that has nothing to select against.
+func CheckVaultScopeAmbiguity(cfg *config.WorkspaceConfig, globalOverride *config.GlobalConfigOverride) error {
+	if cfg == nil {
+		return nil
+	}
+	// No personal overlay → scope selection is moot.
+	if globalOverride == nil {
+		return nil
+	}
+	// Explicit scope wins; no ambiguity possible.
+	if cfg.Workspace.VaultScope != "" {
+		return nil
+	}
+	if len(cfg.Sources) <= 1 {
+		return nil
+	}
+
+	// Surface the declared source orgs so the user has an obvious
+	// candidate list to pick from when writing vault_scope.
+	orgs := make([]string, 0, len(cfg.Sources))
+	for _, s := range cfg.Sources {
+		orgs = append(orgs, s.Org)
+	}
+	return fmt.Errorf(
+		"[workspace].vault_scope is required for multi-source workspaces "+
+			"(sources: %s); set it to the name of a [workspaces.<scope>] block "+
+			"in your personal overlay (or any string if you want to target the "+
+			"default [global] block and skip per-scope routing)",
+		strings.Join(orgs, ", "),
+	)
 }
 
 // ResolveGlobalOverride merges the flat [global] section with any

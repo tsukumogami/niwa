@@ -68,7 +68,16 @@ niwa apply
 
 niwa resolves `vault://ANTHROPIC_API_KEY` against the Infisical CLI,
 materializes the `.local.env` file at mode `0o600`, and writes an
-instance-root `.gitignore` covering `*.local*`.
+instance-root `.gitignore` covering `*.local*`. When a team secret
+rotates upstream between two applies, the second apply re-resolves
+and prints `rotated <path>` to stderr for every materialized file
+whose vault-backed sources changed.
+
+If your current directory is not a git repository (or is a git repo
+with no remotes configured), the public-repo guardrail can't
+enumerate remotes and silently skips with a warning. See
+[§Public-repo guardrail](#public-repo-guardrail) for what the
+guardrail actually checks.
 
 ## Schema anatomy
 
@@ -156,9 +165,9 @@ DEBUG_WEBHOOK_URL = "Personal debug webhook"
 
 | Sub-table | Behavior on miss |
 |-----------|------------------|
-| `*.required` | Hard error; `niwa apply` fails. |
-| `*.recommended` | Stderr warning; apply continues. |
-| `*.optional` | Info log (verbose mode only); apply continues. |
+| `*.required` | Hard error; `niwa apply` fails. Error names the key, the scope (e.g. `env.secrets`), and the description string. |
+| `*.recommended` | Stderr warning per missing key; apply continues. |
+| `*.optional` | Silent in v1; apply continues. Info-log output will land when a verbose flag is added. |
 
 `--allow-missing-secrets` downgrades vault misses to empty strings
 but does NOT downgrade `*.required` misses. A required key remains
@@ -176,6 +185,11 @@ in the personal overlay applies:
 name        = "my-monorepo"
 vault_scope = "tsukumogami"
 ```
+
+Apply fails on a multi-source workspace that has a personal overlay
+registered and no `vault_scope`. The error names the declared source
+orgs so the remediation is obvious (pick one, or pick a string that
+targets the default `[global]` block).
 
 ### `[vault].team_only`
 
@@ -310,9 +324,11 @@ Exit zero confirms every value is either a `vault://` ref or empty.
 niwa apply
 ```
 
-niwa resolves the refs, re-materializes the affected files, and
-(if a team secret rotated upstream) prints `rotated <path>` to
-stderr.
+niwa resolves the refs and re-materializes the affected files. When
+the next apply detects that an upstream vault value has rotated (the
+provider returns a new `VersionToken` for a key a managed file
+depends on), the affected file's stored `SourceFingerprint` changes
+and stderr carries a `rotated <path>` line per affected file.
 
 ## Public-repo guardrail
 
@@ -334,9 +350,11 @@ latency cost. It fires whether the public remote is `origin`,
   self-hosted Gitea are in a deferred list.
 - Non-GitHub hosts (`github.mycorp.com`, `gitlab.com`,
   `bitbucket.org`) do NOT trigger the guardrail.
-- When the config directory has no `.git` tree, the guardrail emits
-  a warning and proceeds. It doesn't block apply on workspaces
-  that aren't tracked in git.
+- When `git remote -v` produces no output — either because the
+  config directory has no `.git` tree or because the repo has no
+  remotes configured — the guardrail emits a warning and proceeds.
+  It doesn't block apply on workspaces that aren't tracked in git
+  or aren't yet published.
 - The guardrail walks `*.secrets` tables only. Plaintext in
   `[env.vars]` is allowed; that's exactly why the vars/secrets
   split exists.

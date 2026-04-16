@@ -3,6 +3,7 @@ package workspace
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"time"
@@ -185,6 +186,14 @@ func (a *Applier) Apply(ctx context.Context, cfg *config.WorkspaceConfig, config
 		fmt.Fprintf(os.Stderr, "warning: %s\n", w)
 	}
 
+	// Emit `rotated <path>` to stderr for every managed file whose
+	// SourceFingerprint changed against the previous state AND whose
+	// change includes a vault source token flip. First-time
+	// materializations (no prior state entry for the path) are NOT
+	// rotations — they're the initial write of that file. See PRD
+	// Rotation AC.
+	emitRotatedFiles(existingState, result, os.Stderr)
+
 	// Clean up managed files from previous state that are no longer produced.
 	a.cleanRemovedFiles(existingState, result)
 
@@ -298,6 +307,16 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		}
 	}
 
+	// R5 enforcement: a workspace with more than one [[sources]] block
+	// AND an active personal overlay must declare [workspace].vault_scope
+	// to disambiguate which [workspaces.<scope>] block applies. Single-
+	// source or zero-source workspaces are unaffected. Runs before the
+	// resolver builds bundles so we fail fast without issuing provider
+	// RPCs.
+	if err := CheckVaultScopeAmbiguity(cfg, globalOverride); err != nil {
+		return nil, err
+	}
+
 	// Build provider bundles from each layer independently. Bundle
 	// lifetime is scoped to this apply: defer CloseAll so providers
 	// shut down cleanly even on error paths (R29 no-disk-cache).
@@ -405,6 +424,15 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 			return nil, err
 		}
 		effectiveCfg = merged
+	}
+
+	// Post-merge required/recommended enforcement (PRD R33/R34). The
+	// required check is NOT downgraded by AllowMissingSecrets; the
+	// resolver already turned missing vault-backed keys into empty
+	// MaybeSecret values when the flag is set, and checkRequiredKeys
+	// catches those empty values via the required list.
+	if err := checkRequiredKeys(effectiveCfg, os.Stderr); err != nil {
+		return nil, err
 	}
 
 	// Step 3: Create group directories and clone repos.
@@ -705,6 +733,81 @@ func (a *Applier) cleanRemovedGroupDirs(existingState *InstanceState, result *pi
 			os.Remove(groupDir)
 		}
 	}
+}
+
+// emitRotatedFiles prints `rotated <path>` to stderrOut for every
+// managed file in the new pipeline result whose SourceFingerprint
+// differs from the previous state's entry for the same path AND whose
+// difference is driven by at least one vault SourceEntry with a
+// changed VersionToken (i.e., the upstream provider returned a new
+// revision for a key this file depends on).
+//
+// Brand-new files (no entry in the previous state for the path) are
+// SKIPPED: a first-time materialization is not a rotation.
+// Plaintext-only changes (content edits in env.files, for example)
+// also don't count as rotations — they surface through drift, not
+// rotation. This mirrors the semantics described in PRD-vault-
+// integration §Rotation AC and matches the user-visible `vault-rotated`
+// output emitted by `niwa status --check-vault`.
+func emitRotatedFiles(prev *InstanceState, result *pipelineResult, stderrOut io.Writer) {
+	if prev == nil {
+		return
+	}
+
+	// Index previous managed files by path for O(1) lookup. A nil
+	// result or empty ManagedFiles list yields an empty map, in which
+	// case the loop below finds no matches and emits nothing — the
+	// correct "no rotations to report" path.
+	prevByPath := make(map[string]ManagedFile, len(prev.ManagedFiles))
+	for _, mf := range prev.ManagedFiles {
+		prevByPath[mf.Path] = mf
+	}
+
+	for _, mfNew := range result.managedFiles {
+		mfOld, existed := prevByPath[mfNew.Path]
+		if !existed {
+			// First-time materialization, not a rotation.
+			continue
+		}
+		if mfNew.SourceFingerprint == mfOld.SourceFingerprint {
+			continue
+		}
+		if !hasVaultRotation(mfOld.Sources, mfNew.Sources) {
+			continue
+		}
+		fmt.Fprintf(stderrOut, "rotated %s\n", mfNew.Path)
+	}
+}
+
+// hasVaultRotation reports whether any vault SourceEntry in newSources
+// has a different VersionToken than the same-SourceID entry in
+// oldSources. A new vault source (not present in oldSources) also
+// counts as a rotation relative to the previous state because the file
+// is now backed by a vault key it wasn't backed by before.
+//
+// Only vault sources drive rotation output. A plaintext-source change
+// (different file content hash) is drift, not rotation, and is
+// reported via the existing drift-check path in niwa status.
+func hasVaultRotation(oldSources, newSources []SourceEntry) bool {
+	oldTokens := make(map[string]string, len(oldSources))
+	for _, s := range oldSources {
+		if s.Kind == SourceKindVault {
+			oldTokens[s.SourceID] = s.VersionToken
+		}
+	}
+	for _, s := range newSources {
+		if s.Kind != SourceKindVault {
+			continue
+		}
+		oldToken, existed := oldTokens[s.SourceID]
+		if !existed {
+			return true
+		}
+		if oldToken != s.VersionToken {
+			return true
+		}
+	}
+	return false
 }
 
 // repoAlreadyCloned checks if a directory has a .git marker, indicating
