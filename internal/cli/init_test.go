@@ -339,6 +339,73 @@ func TestVaultKindsDeclared_DedupAndSort(t *testing.T) {
 // io.Writer, which *strings.Builder already satisfies.
 type stringWriter = strings.Builder
 
+func TestRunInit_OverlayAndNoOverlayMutuallyExclusive(t *testing.T) {
+	dir := t.TempDir()
+	origDir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chdir(origDir) })
+
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, "xdg"))
+
+	// Reset flags.
+	initOverlay = "acme/my-overlay"
+	initNoOverlay = true
+	t.Cleanup(func() {
+		initOverlay = ""
+		initNoOverlay = false
+	})
+
+	err = initCmd.RunE(initCmd, []string{})
+	if err == nil {
+		t.Fatal("expected error when both --overlay and --no-overlay are set, got nil")
+	}
+}
+
+func TestRunInit_NoOverlayWritesState(t *testing.T) {
+	dir := t.TempDir()
+	origDir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chdir(origDir) })
+
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, "xdg"))
+
+	// Scaffold first so workspace.toml exists.
+	if err := executeInit(t); err != nil {
+		t.Fatalf("scaffold init failed: %v", err)
+	}
+
+	// Reset flags.
+	initNoOverlay = true
+	initOverlay = ""
+	initSkipGlobal = false
+	t.Cleanup(func() {
+		initNoOverlay = false
+	})
+
+	// Remove the existing .niwa dir so we can reinit — or just call buildInitState directly.
+	// Since executeInit will fail (workspace.toml already exists), call buildInitState directly.
+	state := buildInitState(initCmd, modeScaffold, "")
+	if state == nil {
+		t.Fatal("buildInitState returned nil with --no-overlay set")
+	}
+	if !state.NoOverlay {
+		t.Error("NoOverlay = false, want true")
+	}
+	if state.OverlayURL != "" {
+		t.Errorf("OverlayURL = %q, want empty for --no-overlay", state.OverlayURL)
+	}
+}
+
 func TestRunInit_ConflictOrphanedNiwaDir(t *testing.T) {
 	dir := t.TempDir()
 	origDir, err := os.Getwd()

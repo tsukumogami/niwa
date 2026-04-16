@@ -16,12 +16,16 @@ func init() {
 	rootCmd.AddCommand(initCmd)
 	initCmd.Flags().StringVar(&initFrom, "from", "", "org/repo or URL to clone workspace config from")
 	initCmd.Flags().BoolVar(&initSkipGlobal, "skip-global", false, "disable global config overlay for this instance")
+	initCmd.Flags().StringVar(&initOverlay, "overlay", "", "overlay repo (org/repo or URL) to clone and associate with this workspace")
+	initCmd.Flags().BoolVar(&initNoOverlay, "no-overlay", false, "disable overlay discovery and association for this workspace")
 	initCmd.ValidArgsFunction = completeWorkspaceNames
 }
 
 var (
 	initFrom       string
 	initSkipGlobal bool
+	initOverlay    string
+	initNoOverlay  bool
 )
 
 var initCmd = &cobra.Command{
@@ -83,6 +87,11 @@ func resolveInitMode(args []string, from string, globalCfg *config.GlobalConfig)
 }
 
 func runInit(cmd *cobra.Command, args []string) error {
+	// Mutual exclusion: --overlay and --no-overlay cannot be used together.
+	if initOverlay != "" && initNoOverlay {
+		return fmt.Errorf("--overlay and --no-overlay are mutually exclusive")
+	}
+
 	cwd, err := os.Getwd()
 	if err != nil {
 		return fmt.Errorf("getting working directory: %w", err)
@@ -179,14 +188,10 @@ func runInit(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// If --skip-global was requested, write instance state with SkipGlobal: true.
-	// This lets the user pre-configure the current directory as an instance root
-	// that opts out of global config before the first apply.
-	if initSkipGlobal {
-		state := &workspace.InstanceState{
-			SchemaVersion: workspace.SchemaVersion,
-			SkipGlobal:    true,
-		}
+	// Build the instance state to persist. Always write when any state flag is
+	// set; a missing state file is fine (apply will create it later).
+	state := buildInitState(cmd, mode, source)
+	if state != nil {
 		if saveErr := workspace.SaveState(cwd, state); saveErr != nil {
 			fmt.Fprintf(os.Stderr, "warning: could not write instance state: %v\n", saveErr)
 		}
@@ -263,6 +268,76 @@ func bootstrapCommandFor(kind string) string {
 	default:
 		return fmt.Sprintf("%s-specific setup (see provider docs)", kind)
 	}
+}
+
+// buildInitState constructs an InstanceState for the flags that require
+// pre-apply state (--skip-global, --no-overlay, --overlay). Returns nil when
+// no state flags were set so that no state file is written.
+func buildInitState(cmd *cobra.Command, mode initMode, source string) *workspace.InstanceState {
+	needsState := initSkipGlobal || initNoOverlay || initOverlay != ""
+	if !needsState {
+		return nil
+	}
+
+	state := &workspace.InstanceState{
+		SchemaVersion: workspace.SchemaVersion,
+		SkipGlobal:    initSkipGlobal,
+	}
+
+	switch {
+	case initNoOverlay:
+		state.NoOverlay = true
+
+	case initOverlay != "":
+		overlayDir, err := config.OverlayDir(initOverlay)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "warning: could not determine overlay directory: %v\n", err)
+			break
+		}
+		_, cloneErr := config.CloneOrSyncOverlay(initOverlay, overlayDir)
+		if cloneErr != nil {
+			fmt.Fprintf(cmd.ErrOrStderr(), "error: overlay clone failed: %v\n", cloneErr)
+			// Return a partial state without overlay fields so the caller
+			// can still persist skip-global etc., but signal failure.
+			break
+		}
+		sha, shaErr := config.HeadSHA(overlayDir)
+		if shaErr != nil {
+			fmt.Fprintf(os.Stderr, "warning: could not read overlay HEAD: %v\n", shaErr)
+		}
+		state.OverlayURL = initOverlay
+		state.OverlayCommit = sha
+
+	default:
+		// Convention discovery in modeClone: derive URL from the workspace source.
+		if mode == modeClone && source != "" {
+			conventionURL, ok := config.DeriveOverlayURL(source)
+			if ok {
+				fmt.Fprintf(cmd.OutOrStdout(), "Checking for companion overlay: %s\n", conventionURL)
+				overlayDir, dirErr := config.OverlayDir(conventionURL)
+				if dirErr == nil {
+					firstTime, cloneErr := config.CloneOrSyncOverlay(conventionURL, overlayDir)
+					if cloneErr != nil {
+						if firstTime {
+							// Inaccessible — print note and skip silently.
+							fmt.Fprintf(cmd.OutOrStdout(), "Note: no companion overlay repository found (%s).\n", conventionURL)
+							fmt.Fprintf(cmd.OutOrStdout(), "Workspace publishers can create a companion %s-overlay repository to provide additional configuration.\n", source)
+						}
+						// firstTime=false errors are non-fatal at init time as well (no state written).
+					} else {
+						sha, shaErr := config.HeadSHA(overlayDir)
+						if shaErr != nil {
+							fmt.Fprintf(os.Stderr, "warning: could not read overlay HEAD: %v\n", shaErr)
+						}
+						state.OverlayURL = conventionURL
+						state.OverlayCommit = sha
+					}
+				}
+			}
+		}
+	}
+
+	return state
 }
 
 // printSuccess outputs a success message with next steps.

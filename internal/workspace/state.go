@@ -57,6 +57,9 @@ type InstanceState struct {
 	Root           string               `json:"root"`
 	Detached       bool                 `json:"detached,omitempty"`
 	SkipGlobal     bool                 `json:"skip_global,omitempty"`
+	OverlayURL     string               `json:"overlay_url,omitempty"`
+	NoOverlay      bool                 `json:"no_overlay,omitempty"`
+	OverlayCommit  string               `json:"overlay_commit,omitempty"`
 	Created        time.Time            `json:"created"`
 	LastApplied    time.Time            `json:"last_applied"`
 	ManagedFiles   []ManagedFile        `json:"managed_files"`
