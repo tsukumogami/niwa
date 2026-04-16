@@ -3,7 +3,7 @@
   "design_doc": "docs/plans/PLAN-vault-integration.md",
   "branch": "docs/vault-integration",
   "pr_number": 52,
-  "integrity_hash": "sha256:c160650d51e68707ffd831ec9be94daae2ece29dda21b7ca04ba55cdee6490df",
+  "integrity_hash": "sha256:7528a0e883375fd0732d2cf533a3f1c7c8cb26c14d56bca8a523319cc2a41447",
   "issues": [
     {
       "number": 1,
@@ -152,8 +152,8 @@
     {
       "number": 3,
       "title": "feat(config): vault schema, env.vars/env.secrets split, MaybeSecret type",
-      "status": "scrutinized",
-      "ci_status": "pending",
+      "status": "completed",
+      "ci_status": "passed",
       "ci_fix_attempts": 0,
       "issue_type": "code",
       "dependencies": [],
@@ -192,19 +192,76 @@
           }
         ]
       },
+      "reviewer_results": {
+        "issue": 3,
+        "round": 1,
+        "reviewers": [
+          {
+            "role": "pragmatic",
+            "blocking_count": 0,
+            "non_blocking_count": 3,
+            "detail_file": "wip/research/implement-vault-integration-issue_3_pragmatic.md"
+          },
+          {
+            "role": "architect",
+            "blocking_count": 0,
+            "non_blocking_count": 2,
+            "detail_file": "wip/research/implement-vault-integration-issue_3_architect.md"
+          },
+          {
+            "role": "maintainer",
+            "blocking_count": 2,
+            "non_blocking_count": 4,
+            "detail_file": "wip/research/implement-vault-integration-issue_3_maintainer.md"
+          }
+        ],
+        "resolution": "Both maintainer blockers addressed in commit 3d437f3: B1 reserved-keyword error now points to the sub-table user should use; B2 anonymous-vs-named URI mismatch error lists declared providers and both fix paths. Symmetric named-vs-anonymous error also added.",
+        "out_of_scope_finding_for_issue_4": "Architect flagged that internal/workspace/override.go doesn't merge override.Env.Secrets.Values — only Env.Vars is merged. This is a dormant merge gap surfaced by Issue 3's schema addition. Must be fixed in Issue 4 resolver/merge integration.",
+        "advisory_deferred": [
+          "pragmatic: VaultRegistry.IsEmpty() has no callers (speculative); redundant len check in coerceDescriptionMap; MaybeSecret.MarshalText unused",
+          "architect: MaybeSecret Plain XOR Secret not mechanically enforced (public fields); extractProviderName could route through vault.ParseRef",
+          "maintainer advisory: KnownProviderNames nil-safe call pattern; scaffold template visual separator; stale (Issue 4) pointer comments"
+        ]
+      },
+      "qa_skipped": true,
       "testable_scenarios": []
     },
     {
       "number": 4,
       "title": "feat(workspace): resolver stage and apply.go pipeline wiring",
-      "status": "pending",
+      "status": "scrutinized",
       "ci_status": "pending",
       "ci_fix_attempts": 0,
-      "issue_type": "",
+      "issue_type": "code",
       "dependencies": [],
-      "commits": [],
-      "agent_type": "",
-      "summary": null,
+      "commits": [
+        "1ad548b22a87b8b81f2ee2589db44ba31618bb88"
+      ],
+      "agent_type": "coder",
+      "summary": {
+        "narrative": "",
+        "files_changed": [
+          "internal/vault/fake/fake.go",
+          "internal/vault/registry.go",
+          "internal/vault/registry_test.go",
+          "internal/vault/resolve/resolve.go",
+          "internal/vault/resolve/deepcopy.go",
+          "internal/vault/resolve/resolve_test.go",
+          "internal/workspace/apply.go",
+          "internal/workspace/apply_vault_test.go",
+          "internal/workspace/override.go",
+          "internal/workspace/override_test.go"
+        ],
+        "tests_added": 27,
+        "key_decisions": "Placed resolver in internal/vault/resolve sub-package (not internal/vault/resolver.go) to avoid import cycle: internal/config imports internal/vault (for VersionToken in MaybeSecret.Token); a resolver in internal/vault operating on *config.WorkspaceConfig would cycle. Sub-package internal/vault/resolve depends on both while internal/vault stays config-free. Extended fake backend config to accept map[string]any for TOML-decoded values. Added Bundle.Names() for R12 collision check without exposing internal map. MergeGlobalOverride signature changed to (cfg, error) for team_only reporting; call site + fixtures migrated via mustMerge helper",
+        "requirements_map": [
+          {
+            "ac": "Issue 4 full AC list + Issue 3 architect finding (env.secrets merge fixed)",
+            "status": "implemented",
+            "evidence": "see coder return with 10 per-AC mappings"
+          }
+        ]
+      },
       "testable_scenarios": []
     },
     {

@@ -1,0 +1,15 @@
+{
+  "issue": 4,
+  "round": 1,
+  "reviewers": [
+    {"role": "pragmatic", "blocking_count": 0, "non_blocking_count": 2, "detail_file": "wip/research/implement-vault-integration-issue_4_pragmatic.md"},
+    {"role": "architect", "blocking_count": 0, "non_blocking_count": 3, "detail_file": "wip/research/implement-vault-integration-issue_4_architect.md"},
+    {"role": "maintainer", "blocking_count": 0, "non_blocking_count": 3, "detail_file": "wip/research/implement-vault-integration-issue_4_maintainer.md"}
+  ],
+  "resolution": "No blockers — all three reviewers approved. 8 non-blocking advisories deferred (documentation polish, single-layer consolidation opportunities, naming nits).",
+  "advisory_deferred": [
+    "pragmatic: walkFilesKeys no-op; SourceFile mostly test-only",
+    "architect: resolve.ResolveGlobalOverride vs workspace.ResolveGlobalOverride name collision; parallel deepcopy helpers; isVaultURI duplicates config.hasVaultPrefix",
+    "maintainer A1 (walkFilesKeys doc self-contradiction — worth fixing pre-merge but not blocking this issue); A2 (ResolveWorkspace ownership doc); A3 (stale effectiveCfg comment)"
+  ]
+}
