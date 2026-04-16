@@ -483,3 +483,99 @@ MISSING = "vault://MISSING"
 		t.Fatalf("expected apply to succeed with AllowMissingSecrets, got %v", err)
 	}
 }
+
+// TestApplyVaultRequiredFalseDowngradesSilently exercises the
+// `?required=false` URI flag end-to-end through the apply pipeline.
+// The key is NOT configured in the fake backend; because the URI
+// opts out of the required check, apply must succeed without any
+// stderr warning AND without AllowMissingSecrets being set.
+//
+// This locks in Issue 10 AC #4: the CLI path must not strip or
+// mangle the query string; `vault://team/anthropic?required=false`
+// flows from config through the resolver unchanged.
+func TestApplyVaultRequiredFalseDowngradesSilently(t *testing.T) {
+	withFakeVaultBackend(t)
+
+	configTOML := `
+[workspace]
+name = "vault-optional-ws"
+
+[[sources]]
+org = "testorg"
+
+[groups.default]
+repos = ["app"]
+
+[vault.provider]
+kind = "fake"
+
+[env.secrets]
+ANTHROPIC_KEY = "vault://ANTHROPIC_KEY?required=false"
+`
+
+	tmpDir := t.TempDir()
+	niwaDir := filepath.Join(tmpDir, ".niwa")
+	if err := os.MkdirAll(niwaDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(niwaDir, "workspace.toml"), []byte(configTOML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := config.Load(filepath.Join(niwaDir, "workspace.toml"))
+	if err != nil {
+		t.Fatalf("loading workspace config: %v", err)
+	}
+	cfg := result.Config
+
+	mockClient := &mockGitHubClient{
+		repos: map[string][]github.Repo{"testorg": {{Name: "app", SSHURL: "git@github.com:testorg/app.git"}}},
+	}
+
+	workspaceRoot := tmpDir
+	instanceRoot := filepath.Join(workspaceRoot, "vault-optional-ws")
+	groupDir := filepath.Join(instanceRoot, "default")
+	if err := os.MkdirAll(filepath.Join(groupDir, "app", ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Capture stderr through a pipe so we can assert no warning
+	// line is emitted. AllowMissingSecrets is intentionally false —
+	// the ?required=false query flag alone must drive the downgrade.
+	origStderr := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stderr = w
+
+	applier := NewApplier(mockClient)
+	applier.Cloner = &Cloner{}
+
+	_, createErr := applier.Create(context.Background(), cfg, niwaDir, workspaceRoot)
+	w.Close()
+	os.Stderr = origStderr
+
+	stderrBytes, readErr := io.ReadAll(r)
+	if readErr != nil {
+		t.Fatalf("reading captured stderr: %v", readErr)
+	}
+
+	if createErr != nil {
+		t.Fatalf("expected apply to succeed with ?required=false, got %v\nstderr:\n%s",
+			createErr, string(stderrBytes))
+	}
+
+	out := string(stderrBytes)
+	// The canonical AllowMissing warning shape is
+	// "warning: vault: ... --allow-missing-secrets". ?required=false
+	// must downgrade silently, so that string must NOT appear.
+	if strings.Contains(out, "--allow-missing-secrets") {
+		t.Errorf("?required=false must not emit AllowMissing warning, got:\n%s", out)
+	}
+	// Broader check: no "warning: vault:" line at all, since the
+	// URI opts into the silent downgrade.
+	if strings.Contains(out, "warning: vault:") {
+		t.Errorf("unexpected vault warning for optional key:\n%s", out)
+	}
+}

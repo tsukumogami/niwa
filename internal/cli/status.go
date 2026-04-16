@@ -15,8 +15,19 @@ import (
 
 func init() {
 	rootCmd.AddCommand(statusCmd)
+	statusCmd.Flags().BoolVar(&statusAuditSecrets, "audit-secrets", false,
+		"classify every *.secrets table value (vault-ref/plaintext/empty/resolved); "+
+			"exits non-zero when plaintext values are found and a vault is configured")
+	statusCmd.Flags().BoolVar(&statusCheckVault, "check-vault", false,
+		"re-resolve every vault:// reference (invokes providers) and report rotations "+
+			"without materializing files")
 	statusCmd.ValidArgsFunction = completeInstanceNames
 }
+
+var (
+	statusAuditSecrets bool
+	statusCheckVault   bool
+)
 
 var statusCmd = &cobra.Command{
 	Use:   "status [instance]",
@@ -28,7 +39,19 @@ status and managed file drift. When run from the workspace root, shows a
 summary table of all instances.
 
 An optional instance name argument can be provided from the workspace root
-to show detail for a specific instance.`,
+to show detail for a specific instance.
+
+Flags:
+  --audit-secrets   Classify every *.secrets table value across the
+                    workspace config (team + resolved overlay). Prints a
+                    KEY / CLASSIFICATION / TABLE / SHADOWED table and
+                    exits non-zero when any plaintext values are found
+                    and a vault is configured.
+  --check-vault     Re-resolve every vault:// reference by invoking the
+                    configured providers and compare the resulting source
+                    fingerprints against the stored state. Does NOT
+                    materialize any files. Requires network access to
+                    the backends.`,
 	Args: cobra.MaximumNArgs(1),
 	RunE: runStatus,
 }
@@ -37,6 +60,13 @@ func runStatus(cmd *cobra.Command, args []string) error {
 	cwd, err := os.Getwd()
 	if err != nil {
 		return fmt.Errorf("getting working directory: %w", err)
+	}
+
+	if statusAuditSecrets {
+		return runAuditSecrets(cmd, cwd)
+	}
+	if statusCheckVault {
+		return runCheckVault(cmd, cwd)
 	}
 
 	// If an instance name was provided, find it and show detail.

@@ -69,6 +69,69 @@ func TestApplyCmd_HasInstanceFlag(t *testing.T) {
 	}
 }
 
+// TestApplyCmd_HasAllowMissingSecretsFlag verifies the Issue 10 flag
+// is registered and defaults to false. The flag is plumbed into
+// workspace.Applier.AllowMissingSecrets, which is exercised in
+// internal/workspace/apply_vault_test.go; here we only check the CLI
+// wiring.
+func TestApplyCmd_HasAllowMissingSecretsFlag(t *testing.T) {
+	flag := applyCmd.Flags().Lookup("allow-missing-secrets")
+	if flag == nil {
+		t.Fatal("expected --allow-missing-secrets flag to be registered")
+	}
+	if flag.DefValue != "false" {
+		t.Errorf("expected default false, got %q", flag.DefValue)
+	}
+}
+
+// TestApplyCmd_HasAllowPlaintextSecretsFlag verifies the Issue 10 flag
+// is registered and defaults to false. The flag is plumbed into
+// workspace.Applier.AllowPlaintextSecrets, which the guardrail test
+// covers; here we only check the CLI wiring.
+func TestApplyCmd_HasAllowPlaintextSecretsFlag(t *testing.T) {
+	flag := applyCmd.Flags().Lookup("allow-plaintext-secrets")
+	if flag == nil {
+		t.Fatal("expected --allow-plaintext-secrets flag to be registered")
+	}
+	if flag.DefValue != "false" {
+		t.Errorf("expected default false, got %q", flag.DefValue)
+	}
+}
+
+// TestApplyCmd_AllowFlagsThreadToApplier verifies that parsing the
+// two flags populates the package-level vars that runApply copies
+// onto the Applier struct. The full pipeline integration (that the
+// Applier then honors these fields) lives in
+// internal/workspace/apply_vault_test.go and
+// internal/guardrail/githubpublic_test.go; this test pins the CLI
+// wiring so a future refactor can't silently drop the plumbing.
+func TestApplyCmd_AllowFlagsThreadToApplier(t *testing.T) {
+	// Save and restore package-level state so the test is idempotent
+	// relative to other tests that inspect applyAllowMissingSecrets.
+	savedMissing := applyAllowMissingSecrets
+	savedPlain := applyAllowPlaintextSecrets
+	t.Cleanup(func() {
+		applyAllowMissingSecrets = savedMissing
+		applyAllowPlaintextSecrets = savedPlain
+	})
+
+	// Reset to false to make sure the ParseFlags call actually sets
+	// them; start from true so a no-op parse wouldn't accidentally
+	// pass the assertions below.
+	applyAllowMissingSecrets = false
+	applyAllowPlaintextSecrets = false
+
+	if err := applyCmd.ParseFlags([]string{"--allow-missing-secrets", "--allow-plaintext-secrets"}); err != nil {
+		t.Fatalf("ParseFlags: %v", err)
+	}
+	if !applyAllowMissingSecrets {
+		t.Error("expected applyAllowMissingSecrets to be true after --allow-missing-secrets")
+	}
+	if !applyAllowPlaintextSecrets {
+		t.Error("expected applyAllowPlaintextSecrets to be true after --allow-plaintext-secrets")
+	}
+}
+
 func TestApplyCmd_AcceptsPositionalArg(t *testing.T) {
 	// cobra.MaximumNArgs(1) should accept 0 or 1 args.
 	if err := applyCmd.Args(applyCmd, []string{}); err != nil {

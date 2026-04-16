@@ -3,6 +3,7 @@ package cli
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/tsukumogami/niwa/internal/config"
@@ -233,6 +234,110 @@ func TestRunInit_ConflictExistingWorkspace(t *testing.T) {
 		t.Fatal("expected error for existing workspace, got nil")
 	}
 }
+
+// TestEmitVaultBootstrapPointer_Infisical confirms the note names
+// `infisical login` for an infisical provider. Issue 10 AC: the pointer
+// fires when the cloned template declares [vault.provider] or
+// [vault.providers.*].
+func TestEmitVaultBootstrapPointer_Infisical(t *testing.T) {
+	cfg := &config.WorkspaceConfig{
+		Vault: &config.VaultRegistry{
+			Provider: &config.VaultProviderConfig{Kind: "infisical"},
+		},
+	}
+
+	errBuf := &stringWriter{}
+	cmd := initCmd
+	cmd.SetErr(errBuf)
+	defer cmd.SetErr(os.Stderr)
+
+	emitVaultBootstrapPointer(cmd, cfg)
+
+	got := errBuf.String()
+	if !strings.Contains(got, "kind: infisical") {
+		t.Errorf("expected note to name the kind, got:\n%s", got)
+	}
+	if !strings.Contains(got, "infisical login") {
+		t.Errorf("expected infisical-specific bootstrap command, got:\n%s", got)
+	}
+	if !strings.Contains(got, "niwa apply") {
+		t.Errorf("expected note to point at next step, got:\n%s", got)
+	}
+}
+
+// TestEmitVaultBootstrapPointer_UnknownKind falls through to the
+// generic "<kind>-specific setup" message. Issue 10 keeps this path
+// useful for backends not yet wired into the CLI (sops, future
+// providers).
+func TestEmitVaultBootstrapPointer_UnknownKind(t *testing.T) {
+	cfg := &config.WorkspaceConfig{
+		Vault: &config.VaultRegistry{
+			Providers: map[string]config.VaultProviderConfig{
+				"team": {Kind: "sops"},
+			},
+		},
+	}
+
+	errBuf := &stringWriter{}
+	cmd := initCmd
+	cmd.SetErr(errBuf)
+	defer cmd.SetErr(os.Stderr)
+
+	emitVaultBootstrapPointer(cmd, cfg)
+
+	got := errBuf.String()
+	if !strings.Contains(got, "kind: sops") {
+		t.Errorf("expected generic note for sops, got:\n%s", got)
+	}
+	if !strings.Contains(got, "sops-specific setup") {
+		t.Errorf("expected fallback bootstrap phrase, got:\n%s", got)
+	}
+}
+
+// TestEmitVaultBootstrapPointer_NoVaultNoOp confirms the pointer is
+// a no-op when no [vault.*] is declared. The scaffolded template has
+// only commented examples, so new workspaces never see the note
+// spuriously.
+func TestEmitVaultBootstrapPointer_NoVaultNoOp(t *testing.T) {
+	cfg := &config.WorkspaceConfig{}
+
+	errBuf := &stringWriter{}
+	cmd := initCmd
+	cmd.SetErr(errBuf)
+	defer cmd.SetErr(os.Stderr)
+
+	emitVaultBootstrapPointer(cmd, cfg)
+
+	if got := errBuf.String(); got != "" {
+		t.Errorf("expected no output without vault config, got:\n%s", got)
+	}
+}
+
+// TestVaultKindsDeclared_DedupAndSort verifies the helper that drives
+// the bootstrap pointer. Order stability is a test-ergonomics
+// concern, not a product feature, but it keeps the output stable for
+// CI and muscle memory alike.
+func TestVaultKindsDeclared_DedupAndSort(t *testing.T) {
+	vr := &config.VaultRegistry{
+		Provider: &config.VaultProviderConfig{Kind: "infisical"},
+		Providers: map[string]config.VaultProviderConfig{
+			"team":    {Kind: "sops"},
+			"another": {Kind: "infisical"}, // duplicate kind
+		},
+	}
+	got := vaultKindsDeclared(vr)
+	if len(got) != 2 {
+		t.Fatalf("expected 2 unique kinds, got %v", got)
+	}
+	if got[0] != "infisical" || got[1] != "sops" {
+		t.Errorf("unexpected order: %v", got)
+	}
+}
+
+// stringWriter is a type alias for strings.Builder, used in these
+// tests to capture cobra's stderr output. cmd.SetErr requires an
+// io.Writer, which *strings.Builder already satisfies.
+type stringWriter = strings.Builder
 
 func TestRunInit_ConflictOrphanedNiwaDir(t *testing.T) {
 	dir := t.TempDir()
