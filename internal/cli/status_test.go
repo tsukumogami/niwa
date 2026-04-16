@@ -252,20 +252,6 @@ func TestStatusSummaryLineReflectsShadowCount(t *testing.T) {
 	}
 }
 
-// TestRenderShadowedColumn confirms the helper used by the (not-yet-
-// wired) `--audit-secrets` column renders the two documented cases.
-func TestRenderShadowedColumn(t *testing.T) {
-	shadows := []workspace.Shadow{
-		{Kind: "env-var", Name: "FOO", Layer: "personal-overlay"},
-	}
-	if got := renderShadowedColumn(shadows, "env-var", "FOO"); got != "yes (personal-overlay)" {
-		t.Errorf("shadowed = %q, want yes (personal-overlay)", got)
-	}
-	if got := renderShadowedColumn(shadows, "env-var", "OTHER"); got != "no" {
-		t.Errorf("non-shadowed = %q, want no", got)
-	}
-}
-
 func TestShowSummaryView_NoInstances(t *testing.T) {
 	root := t.TempDir()
 

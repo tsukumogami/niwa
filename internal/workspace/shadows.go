@@ -17,6 +17,9 @@ import (
 // MUST NOT depend on inspecting the resolved secret bytes: the shadow
 // record is a structural fact about which layer declared which key,
 // not a statement about the value's content.
+//
+// The `niwa status --audit-secrets` SHADOWED column that consumes this
+// slice is owned by Issue 10.
 type Shadow struct {
 	// Kind names the category being shadowed. One of:
 	// "env-var", "env-secret", "claude-env-var", "claude-env-secret",
