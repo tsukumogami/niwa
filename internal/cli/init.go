@@ -278,7 +278,7 @@ func bootstrapCommandFor(kind string) string {
 // when no state flags were set so that no state file is written. Returns a
 // non-nil error when an explicit --overlay clone fails (hard error by design).
 func buildInitState(cmd *cobra.Command, mode initMode, source string) (*workspace.InstanceState, error) {
-	needsState := initSkipGlobal || initNoOverlay || initOverlay != ""
+	needsState := initSkipGlobal || initNoOverlay || initOverlay != "" || (mode == modeClone)
 	if !needsState {
 		return nil, nil
 	}

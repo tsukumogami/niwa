@@ -534,10 +534,10 @@ func TestBuildInitState_ConventionDiscoverySilentSkipNoURL(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", xdgDir)
 
 	// Ensure globals are clear so convention discovery branch is taken.
+	// modeClone alone is sufficient to enter buildInitState (no flag bypass needed).
 	initOverlay = ""
 	initNoOverlay = false
-	// needsState requires at least one flag set; set initSkipGlobal so we enter buildInitState.
-	initSkipGlobal = true
+	initSkipGlobal = false
 	t.Cleanup(func() {
 		initOverlay = ""
 		initNoOverlay = false
@@ -562,6 +562,64 @@ func TestBuildInitState_ConventionDiscoverySilentSkipNoURL(t *testing.T) {
 	}
 	if state.OverlayCommit != "" {
 		t.Errorf("OverlayCommit = %q, want empty after silent-skip convention discovery failure", state.OverlayCommit)
+	}
+}
+
+// TestBuildInitState_ConventionDiscoverySuccessWritesBothFields verifies that
+// when convention discovery (modeClone, no --overlay flag) succeeds, both
+// OverlayURL and OverlayCommit are written to state.
+func TestBuildInitState_ConventionDiscoverySuccessWritesBothFields(t *testing.T) {
+	tmp := t.TempDir()
+
+	xdgDir := filepath.Join(tmp, "xdg")
+	t.Setenv("XDG_CONFIG_HOME", xdgDir)
+
+	// Create a local git repo to serve as the workspace source.
+	// DeriveOverlayURL("acme/dot-niwa") = "acme/dot-niwa-overlay".
+	// OverlayDir("acme/dot-niwa-overlay") = <xdg>/niwa/overlays/acme-dot-niwa-overlay.
+	// Pre-clone a real git repo there so CloneOrSyncOverlay takes the pull path
+	// (firstTime=false) and succeeds.
+	remoteDir := filepath.Join(tmp, "remote")
+	makeLocalGitRepo(t, remoteDir)
+
+	overlayCloneTarget := filepath.Join(xdgDir, "niwa", "overlays", "acme-dot-niwa-overlay")
+	if err := os.MkdirAll(filepath.Dir(overlayCloneTarget), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cloneCmd := exec.Command("git", "clone", remoteDir, overlayCloneTarget)
+	cloneCmd.Env = append(os.Environ(),
+		"GIT_CONFIG_GLOBAL=/dev/null",
+		"GIT_CONFIG_SYSTEM=/dev/null",
+	)
+	if out, err := cloneCmd.CombinedOutput(); err != nil {
+		t.Fatalf("pre-clone failed: %v\n%s", err, out)
+	}
+
+	// Ensure overlay flags are clear so convention discovery branch is taken.
+	// modeClone alone is sufficient to enter buildInitState.
+	initOverlay = ""
+	initNoOverlay = false
+	initSkipGlobal = false
+	t.Cleanup(func() {
+		initOverlay = ""
+		initNoOverlay = false
+		initSkipGlobal = false
+	})
+
+	source := "acme/dot-niwa"
+
+	state, err := buildInitState(initCmd, modeClone, source)
+	if err != nil {
+		t.Fatalf("buildInitState returned unexpected error: %v", err)
+	}
+	if state == nil {
+		t.Fatal("buildInitState returned nil state")
+	}
+	if state.OverlayURL != "acme/dot-niwa-overlay" {
+		t.Errorf("OverlayURL = %q, want %q", state.OverlayURL, "acme/dot-niwa-overlay")
+	}
+	if state.OverlayCommit == "" {
+		t.Error("OverlayCommit is empty; expected a HEAD SHA to be written")
 	}
 }
 
