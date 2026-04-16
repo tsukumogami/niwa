@@ -1,5 +1,5 @@
 ---
-status: Proposed
+status: Accepted
 upstream: docs/prds/PRD-workspace-visibility-overlay.md
 problem: |
   The niwa apply pipeline has no concept of a secondary configuration layer that is
@@ -32,7 +32,7 @@ rationale: |
 
 ## Status
 
-Proposed
+Accepted
 
 ## Context and Problem Statement
 
