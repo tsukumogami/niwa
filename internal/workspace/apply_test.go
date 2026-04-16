@@ -1391,3 +1391,82 @@ visibility = "public"
 		t.Errorf("*.local* not appended:\n%s", content)
 	}
 }
+
+// TestApplyWritesInstanceGitignore ensures Applier.Apply runs the
+// EnsureInstanceGitignore guard (previously only Applier.Create did).
+// This covers the upgrade path where an instance was created before
+// the guard was introduced and never had its .gitignore written.
+func TestApplyWritesInstanceGitignore(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	niwaDir := filepath.Join(tmpDir, ".niwa")
+	if err := os.MkdirAll(niwaDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	configTOML := `
+[workspace]
+name = "test-ws"
+
+[[sources]]
+org = "testorg"
+
+[groups.all]
+visibility = "public"
+`
+	if err := os.WriteFile(filepath.Join(niwaDir, "workspace.toml"), []byte(configTOML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := config.Load(filepath.Join(niwaDir, "workspace.toml"))
+	if err != nil {
+		t.Fatalf("loading config: %v", err)
+	}
+	cfg := result.Config
+
+	mockClient := &mockGitHubClient{
+		repos: map[string][]github.Repo{
+			"testorg": {
+				{Name: "repo1", Visibility: "public", SSHURL: "git@github.com:testorg/repo1.git"},
+			},
+		},
+	}
+
+	applier := NewApplier(mockClient)
+	applier.Cloner = &Cloner{}
+
+	workspaceRoot := tmpDir
+	instanceRoot := filepath.Join(workspaceRoot, "test-ws")
+	repoDir := filepath.Join(instanceRoot, "all", "repo1")
+	if err := os.MkdirAll(filepath.Join(repoDir, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Seed state via Create so Apply has something to load.
+	if _, err := applier.Create(context.Background(), cfg, niwaDir, workspaceRoot); err != nil {
+		t.Fatalf("create failed: %v", err)
+	}
+
+	// Simulate the upgrade path: an instance created before the
+	// .gitignore guard existed. Remove the file that Create wrote so
+	// we can assert Apply puts it back.
+	gitignorePath := filepath.Join(instanceRoot, ".gitignore")
+	if err := os.Remove(gitignorePath); err != nil {
+		t.Fatalf("removing pre-existing .gitignore: %v", err)
+	}
+	if _, err := os.Stat(gitignorePath); !os.IsNotExist(err) {
+		t.Fatalf("expected .gitignore to be absent before Apply, stat err = %v", err)
+	}
+
+	if err := applier.Apply(context.Background(), cfg, niwaDir, instanceRoot); err != nil {
+		t.Fatalf("apply failed: %v", err)
+	}
+
+	data, err := os.ReadFile(gitignorePath)
+	if err != nil {
+		t.Fatalf("reading .gitignore after apply: %v", err)
+	}
+	if !strings.Contains(string(data), "*.local*") {
+		t.Errorf("Apply did not write *.local* to .gitignore, got:\n%s", string(data))
+	}
+}

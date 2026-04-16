@@ -3,6 +3,7 @@ package workspace
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -66,8 +67,8 @@ type MaterializeContext struct {
 	RepoDir        string
 	ConfigDir      string
 	InstalledHooks map[string][]InstalledHookEntry // event -> installed hook entries, populated by hooks materializer
-	DiscoveredEnv  *DiscoveredEnv      // auto-discovered env files, may be nil
-	RepoIndex      map[string]string   // repo name -> on-disk path, for marketplace resolution
+	DiscoveredEnv  *DiscoveredEnv                  // auto-discovered env files, may be nil
+	RepoIndex      map[string]string               // repo name -> on-disk path, for marketplace resolution
 }
 
 // InstalledHookEntry holds the installed paths for a single hook entry,
@@ -198,7 +199,7 @@ type BuildSettingsConfig struct {
 	RepoIndex              map[string]string
 	BaseDir                string // for computing relative hook paths
 	IncludeGitInstructions *bool
-	UseAbsolutePaths      bool // use absolute paths for hooks (instance root)
+	UseAbsolutePaths       bool // use absolute paths for hooks (instance root)
 }
 
 // buildSettingsDoc produces the map[string]any JSON document for Claude Code
@@ -591,11 +592,53 @@ func localRename(filename string) string {
 // repository directory. It reads source-to-destination mappings from the
 // effective config and applies .local renaming when the destination is a
 // directory (ends with /).
-type FilesMaterializer struct{}
+//
+// Stderr, if non-nil, receives one-line notices when the materializer
+// rewrites a user-written destination to include the ".local" infix.
+// When nil, notices go to os.Stderr. Tests set this to a bytes.Buffer
+// to capture output.
+type FilesMaterializer struct {
+	Stderr io.Writer
+
+	// noticed tracks destination paths that already emitted a .local
+	// injection notice for the current Materialize call, so a repeated
+	// [files] entry for the same destination does not re-notify.
+	noticed map[string]bool
+}
 
 // Name returns the materializer identifier.
 func (f *FilesMaterializer) Name() string {
 	return "files"
+}
+
+// stderr returns the writer to use for diagnostic notices, defaulting
+// to os.Stderr when no writer has been wired into the struct.
+func (f *FilesMaterializer) stderr() io.Writer {
+	if f.Stderr != nil {
+		return f.Stderr
+	}
+	return os.Stderr
+}
+
+// noteLocalInfix emits a one-line notice that the user-written
+// destination path was rewritten to include ".local". It is a no-op
+// when original == rewritten (the path already contained the infix)
+// or when the same rewritten destination has already been noticed in
+// this Materialize call.
+func (f *FilesMaterializer) noteLocalInfix(original, rewritten string) {
+	if original == rewritten {
+		return
+	}
+	if f.noticed[rewritten] {
+		return
+	}
+	if f.noticed == nil {
+		f.noticed = map[string]bool{}
+	}
+	f.noticed[rewritten] = true
+	fmt.Fprintf(f.stderr(),
+		"note: files destination %q rewritten to %q for .local infix (secret-bearing files must match *.local* gitignore pattern)\n",
+		original, rewritten)
 }
 
 // Materialize copies files from configDir to repoDir based on effective file
@@ -605,6 +648,11 @@ func (f *FilesMaterializer) Materialize(ctx *MaterializeContext) ([]string, erro
 	if len(files) == 0 {
 		return nil, nil
 	}
+
+	// Reset the per-call notice dedup set so a fresh Materialize
+	// run starts from a clean slate; the same struct is reused across
+	// repos in Applier.runPipeline.
+	f.noticed = map[string]bool{}
 
 	var written []string
 
@@ -665,7 +713,11 @@ func (f *FilesMaterializer) materializeFile(ctx *MaterializeContext, src, dest s
 		// basename so every materialized file matches the *.local*
 		// gitignore pattern maintained by `niwa create`.
 		destDir, destBase := filepath.Split(dest)
-		targetPath = filepath.Join(ctx.RepoDir, destDir, injectLocalInfix(destBase))
+		rewritten := injectLocalInfix(destBase)
+		if rewritten != destBase {
+			f.noteLocalInfix(dest, filepath.Join(destDir, rewritten))
+		}
+		targetPath = filepath.Join(ctx.RepoDir, destDir, rewritten)
 	}
 
 	if err := checkContainment(targetPath, ctx.RepoDir); err != nil {
@@ -717,7 +769,19 @@ func (f *FilesMaterializer) materializeDir(ctx *MaterializeContext, src, dest st
 		// wrote the destination. injectLocalInfix is a no-op when
 		// the basename already contains ".local".
 		dir := filepath.Dir(rel)
-		renamed := injectLocalInfix(filepath.Base(rel))
+		baseName := filepath.Base(rel)
+		renamed := injectLocalInfix(baseName)
+		if renamed != baseName {
+			var originalRel, rewrittenRel string
+			if dir == "." {
+				originalRel = filepath.Join(dest, baseName)
+				rewrittenRel = filepath.Join(dest, renamed)
+			} else {
+				originalRel = filepath.Join(dest, dir, baseName)
+				rewrittenRel = filepath.Join(dest, dir, renamed)
+			}
+			f.noteLocalInfix(originalRel, rewrittenRel)
+		}
 		var targetPath string
 		if strings.HasSuffix(dest, "/") {
 			if dir == "." {

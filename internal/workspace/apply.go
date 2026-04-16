@@ -127,6 +127,15 @@ func (a *Applier) Create(ctx context.Context, cfg *config.WorkspaceConfig, confi
 func (a *Applier) Apply(ctx context.Context, cfg *config.WorkspaceConfig, configDir, instanceRoot string) error {
 	now := time.Now()
 
+	// Ensure the instance root's .gitignore covers *.local*. Applier.
+	// Create already runs this during initial scaffolding, but an
+	// instance created before this guard landed won't have the file;
+	// running it here closes the upgrade-path gap. The helper is
+	// idempotent, so no-op on subsequent applies.
+	if err := EnsureInstanceGitignore(instanceRoot); err != nil {
+		return fmt.Errorf("preparing instance .gitignore: %w", err)
+	}
+
 	// Load existing state (required for Apply).
 	existingState, err := LoadState(instanceRoot)
 	if err != nil {

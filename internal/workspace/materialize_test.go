@@ -1,6 +1,7 @@
 package workspace
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -839,7 +840,7 @@ func TestSettingsMaterializerPromoteInlineOverride(t *testing.T) {
 			Claude: config.ClaudeConfig{
 				Env: config.ClaudeEnvConfig{
 					Promote: []string{"GH_TOKEN"},
-					Vars: config.EnvVarsTable{Values: map[string]config.MaybeSecret{"GH_TOKEN": config.MaybeSecret{Plain: "ghp_inline_wins"}}},
+					Vars:    config.EnvVarsTable{Values: map[string]config.MaybeSecret{"GH_TOKEN": config.MaybeSecret{Plain: "ghp_inline_wins"}}},
 				},
 			},
 			Env: config.EnvConfig{
@@ -1069,7 +1070,7 @@ func TestEnvMaterializerVarsOverrideFileVars(t *testing.T) {
 		Effective: EffectiveConfig{
 			Env: config.EnvConfig{
 				Files: []string{"base.env"},
-				Vars: config.EnvVarsTable{Values: map[string]config.MaybeSecret{"FOO": config.MaybeSecret{Plain: "from_vars"}}},
+				Vars:  config.EnvVarsTable{Values: map[string]config.MaybeSecret{"FOO": config.MaybeSecret{Plain: "from_vars"}}},
 			},
 		},
 		RepoName:  "myrepo",
@@ -1595,7 +1596,7 @@ func TestFilesMaterializerDirSource(t *testing.T) {
 
 	// Check .local renaming on directory files.
 	expected := map[string]bool{
-		filepath.Join(repoDir, ".claude", "commands", "hello.local.sh"):       true,
+		filepath.Join(repoDir, ".claude", "commands", "hello.local.sh"):         true,
 		filepath.Join(repoDir, ".claude", "commands", "sub", "nested.local.md"): true,
 	}
 	for _, w := range written {
@@ -2179,5 +2180,78 @@ func TestSettingsMaterializerRevealsResolvedEnvSecret(t *testing.T) {
 	}
 	if envBlock["GH_TOKEN"] != plaintext {
 		t.Errorf("GH_TOKEN = %v, want %q", envBlock["GH_TOKEN"], plaintext)
+	}
+}
+
+// TestFilesMaterializerNotifiesOnLocalInfixInjection asserts the files
+// materializer prints a one-line stderr notice when it rewrites a
+// user-written destination to include ".local", and stays silent when
+// the destination already contains the infix. Users need the notice
+// to understand why a file they referenced by one name landed at a
+// different path on disk.
+func TestFilesMaterializerNotifiesOnLocalInfixInjection(t *testing.T) {
+	tmpDir := t.TempDir()
+	configDir := filepath.Join(tmpDir, "config")
+	repoDir := filepath.Join(tmpDir, "repo")
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(repoDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(configDir, "foo.env"), []byte("KEY=value\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Destination without ".local" — materializer should inject and notify.
+	var buf bytes.Buffer
+	m := &FilesMaterializer{Stderr: &buf}
+	ctx := &MaterializeContext{
+		Effective: EffectiveConfig{
+			Files: map[string]string{
+				"foo.env": ".tool/config.json",
+			},
+		},
+		ConfigDir: configDir,
+		RepoDir:   repoDir,
+	}
+	if _, err := m.Materialize(ctx); err != nil {
+		t.Fatalf("materialize: %v", err)
+	}
+
+	out := buf.String()
+	if !strings.Contains(out, "note:") {
+		t.Errorf("expected stderr notice prefix 'note:', got:\n%s", out)
+	}
+	if !strings.Contains(out, ".tool/config.json") {
+		t.Errorf("expected original destination in notice, got:\n%s", out)
+	}
+	if !strings.Contains(out, "config.local.json") {
+		t.Errorf("expected rewritten destination in notice, got:\n%s", out)
+	}
+	if !strings.Contains(out, "*.local*") {
+		t.Errorf("expected gitignore pattern reference in notice, got:\n%s", out)
+	}
+
+	// Destination already containing ".local" — materializer must stay silent.
+	var buf2 bytes.Buffer
+	m2 := &FilesMaterializer{Stderr: &buf2}
+	ctx2 := &MaterializeContext{
+		Effective: EffectiveConfig{
+			Files: map[string]string{
+				"foo.env": ".tool/config.local.json",
+			},
+		},
+		ConfigDir: configDir,
+		RepoDir:   filepath.Join(tmpDir, "repo2"),
+	}
+	if err := os.MkdirAll(ctx2.RepoDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m2.Materialize(ctx2); err != nil {
+		t.Fatalf("materialize (already-local): %v", err)
+	}
+	if got := buf2.String(); got != "" {
+		t.Errorf("destination already containing .local must not emit a notice, got:\n%s", got)
 	}
 }
