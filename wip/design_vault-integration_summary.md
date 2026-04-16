@@ -23,5 +23,19 @@ merge runs, inverting the current parse → merge → materialize flow.
 
 ## Current Status
 
-**Phase:** 0 - Setup (PRD) complete
+**Phase:** 3 - Cross-Validation complete
 **Last Updated:** 2026-04-15
+
+## Phase Progress
+
+- **Phase 0** (Setup + Context): complete — design skeleton with
+  Context and Problem Statement + Decision Drivers.
+- **Phase 1** (Decision Decomposition): complete — 6 decisions
+  identified (D1 critical, D2 critical, D3-D6 standard).
+- **Phase 2** (Decision Execution): complete — all 6 decision
+  agents returned high-confidence recommendations. Reports at
+  `wip/design_vault-integration_decision_<N>_report.md`.
+- **Phase 3** (Cross-Validation): complete — no hard conflicts.
+  Two minor reconciliations logged (shadow timing, VersionToken
+  field names). Considered Options + Decision Outcome written.
+- **Phase 4** (Architecture): next.
