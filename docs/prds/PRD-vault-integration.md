@@ -29,6 +29,25 @@ goals: |
 
 Draft
 
+## Glossary
+
+- **Team config**: the workspace configuration repo (e.g.,
+  `tsukumogami/dot-niwa`) that declares shared structure and
+  team-owned secrets. Read by `niwa init <name> --from <repo>`.
+- **Personal overlay**: a user-owned configuration layer that
+  merges on top of the team config. Provides personal vault
+  providers and per-scope bindings for team-declared requirements.
+  Same thing as `GlobalOverride` / `GlobalConfigOverride` in Go
+  types; "personal overlay" is the canonical name in this PRD.
+  Stored in a repo named by `niwa config set global <org/repo>`.
+- **Scope** (for vault resolution): the string key used to pick the
+  right `[workspaces.<scope>]` block in the personal overlay. By
+  default this is the workspace's `[[sources]][0].org`; the team
+  config can override it via `[workspace].vault_scope`. R4 and R5.
+- **Provider**: a named vault backend declared under `[vault.provider]`
+  (anonymous singular) or `[vault.providers.<name>]` (named). Each
+  config file's provider names are local to that file (R3, D-9).
+
 ## Problem Statement
 
 niwa's `tsukumogami/dot-niwa` team config repo is private today primarily
@@ -43,7 +62,7 @@ Separately, each developer has **personal** secrets — GitHub PATs scoped to
 specific orgs, personal API keys, SSH keys for org-specific clones. Today
 these live in ad-hoc dotfiles, shell exports, or (worst case) are pasted
 into the team config by accident. niwa has the `GlobalOverride` mechanism
-(introduced in v0.5.0) that layers a personal config repo over the team
+(introduced in v0.5.0) that layers a personal overlay repo over the team
 config repo, but the overlay carries plaintext values too.
 
 The three user archetypes affected:
@@ -79,7 +98,7 @@ migration doesn't introduce new leaks.
   appearing in git history, current content, or future content.
 - **Per-org personal secret scoping works end-to-end.** A developer with
   separate PATs for `tsukumogami` and `codespar` can declare both in
-  their personal config repo and have niwa pick the right one
+  their personal overlay repo and have niwa pick the right one
   automatically when working on a workspace in either org.
 - **New-member bootstrap is under 10 minutes.** A new developer joining
   `tsukumogami` who already has GitHub org membership can run
@@ -100,6 +119,17 @@ migration doesn't introduce new leaks.
   convenience or fully-offline gitops. The interface allows additional
   backends (Doppler, 1Password, HashiCorp Vault OSS, Bitwarden Secrets
   Manager) to be added without rearchitecting.
+
+**Goal traceability to requirements.** The five goals above map to
+requirements this PRD enumerates:
+
+| Goal | Satisfied by |
+|------|--------------|
+| Team configs can be publishable | R14, R32, R22–R30 (the invariant floor that lets secrets stay out of the repo) |
+| Per-org personal secret scoping | R4, R5, R6, US-3, D-2 |
+| New-member bootstrap under 10 minutes | R18, US-2 (two-path bootstrap), R1 (CLI-exec interface means no niwa-specific auth bootstrap) |
+| Zero new leak classes | R21–R32 (the 12 "never leaks" invariants) |
+| Pluggable backend from v1 | R1, D-1 |
 
 ## User Stories
 
@@ -139,7 +169,7 @@ personal secrets, I want:
 1. The team's shared secrets (API tokens the team pays for) to come
    from a **team vault declared in `tsukumogami/dot-niwa`**. When a
    team secret rotates, my next `niwa apply` picks it up without
-   me touching my personal config.
+   me touching my personal overlay.
 2. My personal secrets (PATs, personal API keys) to come from a
    **personal vault declared in my own `dangazineu/dot-niwa`
    repo**, scoped per-project: my `tsukumogami` PAT is used for
@@ -150,7 +180,7 @@ personal secrets, I want:
    the team vault, personal refs hit the personal vault, all in one
    command.
 4. Neither config leaks names into the other's namespace. The team
-   config doesn't know how I name my vaults; my personal config
+   config doesn't know how I name my vaults; my personal overlay
    doesn't know how the team names theirs. The team declares what it
    owns and what it needs; I supply bindings for what's needed.
 
@@ -237,7 +267,7 @@ Scoping is automatic because the workspace has one source
 
 As a developer debugging an integration, I want to override a specific
 team-supplied secret with my own local value for one session, without
-editing the team config repo. My personal config layer should let me
+editing the team config repo. My personal overlay layer should let me
 shadow individual vault references, with the shadow visible in
 `niwa status` so I remember to remove it later.
 
@@ -263,7 +293,7 @@ CLI flag for exceptional runs, and mark specific references as
 As a team lead, some team-shared secrets must never be overridden
 per-user (e.g., a telemetry endpoint that rolls up to a team
 dashboard). I want the team config to declare an allow-list of keys
-that personal configs cannot shadow, with a clear error when a personal
+that personal overlays cannot shadow, with a clear error when a personal
 config tries.
 
 ### US-8: Developer audits their plaintext-to-vault migration
@@ -354,6 +384,24 @@ pick per team. Additional backends (Doppler, 1Password, HashiCorp Vault
 OSS, Bitwarden Secrets Manager, Pulumi ESC) are out of scope for v1 but
 must be addable without changing the interface.
 
+**Interface surface.** The pluggable provider interface MUST expose at
+least these operations (exact Go signatures deferred to the design
+doc, but the contract is PRD-fixed):
+
+- `Resolve(ctx, ref) -> (secret.Value, version-token, error)`.
+  Returns the resolved secret as the opaque `secret.Value` type (R22),
+  plus a version-token string that feeds `SourceFingerprint` (R15).
+  Providers with no native versioning MUST synthesize the token
+  deterministically (e.g., sops uses the encrypted blob's SHA-256).
+- `Close() -> error`. Releases any session-scoped resources
+  (1Password session tokens, HashiCorp Vault leases, long-lived
+  HTTP clients). Stateless backends (sops) implement as a no-op.
+- Identity accessors (`Name()`, `Kind()`) for diagnostic messages.
+
+A provider MAY hold authenticated state across `Resolve` calls within
+a single niwa command invocation. It MUST NOT persist state across
+command invocations (no disk cache; R30).
+
 **R2. Vault provider declaration: anonymous singular or named
 multiple.** The workspace config MUST support a top-level `[vault]`
 table with two accepted declaration shapes:
@@ -405,7 +453,7 @@ workspace personal vault declarations via the existing
 `GlobalConfigOverride.Workspaces` map, keyed by the workspace's source
 org name. When a workspace has one source (`len(ws.Sources) == 1`),
 niwa resolves personal vault providers and references from
-`[workspaces.<ws.Sources[0].Org>]` in the personal config.
+`[workspaces.<ws.Sources[0].Org>]` in the personal overlay.
 
 **R5. Explicit `workspace.vault_scope` escape hatch.** A workspace
 config MAY set `[workspace].vault_scope = "<string>"` to override
@@ -416,8 +464,8 @@ targeting.
 
 **R6. Resolution chain.** When resolving a `vault://` reference, niwa
 MUST consult vault providers in this order: personal-scoped (from
-`[workspaces.<scope>]` in personal config) → personal-default (from
-`[global]` in personal config) → team (from workspace config). First
+`[workspaces.<scope>]` in personal overlay) → personal-default (from
+`[global]` in personal overlay) → team (from workspace config). First
 successful lookup wins.
 
 **R7. Personal-wins conflict resolution.** When the same secret key
@@ -427,7 +475,7 @@ MUST win. This mirrors the existing `MergeGlobalOverride` precedence.
 
 **R8. `team_only` opt-in for team-controlled keys.** A team workspace
 config MAY declare `[vault].team_only = ["KEY1", "KEY2"]`. When a
-personal config tries to supply a value for any key in this list
+personal overlay tries to supply a value for any key in this list
 (either via a `vault://` reference or a plaintext override), niwa MUST
 refuse to apply with an error naming the conflicting key.
 
@@ -484,13 +532,35 @@ uses the git remote URL.
 
 **R15. `ManagedFile.SourceFingerprint` field.** The instance state
 MUST carry a `SourceFingerprint` per managed file, distinct from the
-content hash. The fingerprint captures the resolution inputs (config
-reference + vault version/etag metadata). `niwa status` uses the
-fingerprint to report:
+content hash. The fingerprint is a reduction over the file's
+resolution inputs, computed as the SHA-256 of a stable-sorted list
+of `(source-id, version-token)` tuples where:
+- **Plaintext sources** contribute `(file-path, content-hash)` tuples.
+  The content-hash is SHA-256 of the source file's bytes at
+  resolution time.
+- **Vault sources** contribute `(provider-name, vault-key, version-token)`
+  tuples. The `version-token` is an opaque string returned by the
+  provider's `Resolve` call (see R1): Infisical's secret version,
+  sops's file content-hash, 1Password's version int, HashiCorp
+  Vault's lease+version, Bitwarden's revisionDate. Providers with
+  no native version MUST synthesize one deterministically (e.g.,
+  sops uses the encrypted blob's SHA-256).
+
+For a materialized file that blends multiple sources (the common
+case — `.local.env` combines workspace env files, discovered repo
+env files, `env.vars` entries, and overlay-merged values), the
+fingerprint is the SHA-256 of every contributing tuple sorted and
+concatenated. The tuple list itself MAY be stored alongside the
+fingerprint in `state.json` to enable precise "what changed"
+diagnostics; storing only the rollup hash is allowed when state
+size is a concern, but loses per-source attribution.
+
+`niwa status` uses the fingerprint to report:
 - `drifted` when content hash differs AND source fingerprint unchanged
-  (user edited the file).
+  (user edited the file; no source changed).
 - `stale` when content hash differs AND source fingerprint also differs
-  (upstream vault rotated).
+  (at least one source changed — vault rotated, plaintext source
+  edited upstream, or both).
 - `ok` when content hash matches.
 
 **R16. Re-resolution on every apply.** `niwa apply` MUST re-resolve
@@ -535,11 +605,27 @@ history. All secret values arrive via `vault://` references in config
 or interactive TTY prompts.
 
 **R22 (INV-REDACT-LOGS).** All resolved secret values MUST flow through
-a `secret.Value` opaque type whose default formatters (`String`,
-`GoString`) emit `***`. Any stderr, stdout, or structured log output
-that prints a `secret.Value` renders the redacted form. Compile-time
-and test-time checks enforce that no bare string originating from
-vault resolution reaches a formatter.
+a `secret.Value` opaque type whose formatters emit `***` for `String`,
+`GoString`, `Format("%s"/%q/%v/%+v)`, `MarshalJSON`, `MarshalText`,
+and `gob.GobEncoder`. Any stderr, stdout, or structured log output
+that prints a `secret.Value` renders the redacted form regardless of
+verb. Compile-time and test-time checks enforce that no bare string
+originating from vault resolution reaches a formatter.
+
+**Error-wrapping coverage.** The redaction guarantee MUST survive
+error wrapping. Concrete requirements:
+- Any error wrapped via `fmt.Errorf("...: %w", err)` whose
+  `Unwrap()` chain touches a `secret.Value` MUST redact through a
+  `secret.Error` wrapper type (or equivalent) whose `Error()`
+  method suppresses any secret-derived substring.
+- Any provider-CLI stderr captured by niwa (e.g., `infisical`'s
+  stderr on auth failure) MUST be scrubbed through the redactor
+  before being wrapped into a returned error. Raw provider stderr
+  SHOULD NOT be interpolated into error strings without redaction.
+- An acceptance test exists that induces an auth error from the
+  provider CLI with a known-secret-fragment in stderr, runs the
+  resolver, and asserts the fragment does NOT appear anywhere in
+  the returned error's `Error()` string.
 
 **R23 (INV-NO-CONFIG-WRITEBACK).** niwa MUST NEVER write a resolved
 secret value back into `ConfigDir` (the cloned config repo working
@@ -659,7 +745,7 @@ bypassing team-declared requirements.
 - [ ] The same three tables are accepted under `[claude.env]`,
   `[repos.<name>.env]`, `[instance.env]`, and as
   `[files.required]` / `[files.recommended]` / `[files.optional]`.
-- [ ] The personal config (`GlobalConfigOverride`) accepts the
+- [ ] The personal overlay (`GlobalConfigOverride`) accepts the
   anonymous-or-named provider declaration and per-workspace
   `[workspaces.<scope>]` blocks.
 - [ ] `raw:vault://...` literal escape is accepted wherever string
@@ -687,9 +773,9 @@ bypassing team-declared requirements.
   with an error naming the ambiguity.
 - [ ] A workspace with 2 sources and `vault_scope = "tsukumogami"`
   resolves personal vault from `[workspaces.tsukumogami]`.
-- [ ] When personal config shadows a team-supplied key, the personal
+- [ ] When personal overlay shadows a team-supplied key, the personal
   value wins in the resolved env.
-- [ ] When personal config tries to shadow a key listed in team
+- [ ] When personal overlay tries to shadow a key listed in team
   `team_only`, `niwa apply` fails with an error naming the key.
 - [ ] A `vault://` reference to a nonexistent key fails `niwa apply`
   with a clear error, unless `--allow-missing-secrets` or
@@ -723,7 +809,7 @@ bypassing team-declared requirements.
 - [ ] `kind = "infisical"` with `project = "<proj-id>"` resolves secrets
   from Infisical Cloud or self-hosted Infisical.
 - [ ] Each backend can be used standalone (team uses sops, or team uses
-  Infisical; users' personal configs may mix backends).
+  Infisical; users' personal overlays may mix backends).
 - [ ] Adding a new backend requires implementing a single Go interface
   and registering it — no changes to the resolver or schema.
 
@@ -857,6 +943,12 @@ indirection vs. later refactoring once a second backend is added.
 Doppler was rejected as a third v1 backend because it's closed-source
 SaaS, which conflicts with niwa's stated vendor-neutrality goals.
 
+**Implementation ordering.** If implementation must be sequential,
+Infisical lands first: its bootstrap exercises every layer (browser
+OAuth, API calls, session caching in the provider CLI) and battle-tests
+the interface. sops is simpler (subprocess + file decrypt) and follows.
+Sequencing does not change what ships in v1.0 — both are v1 peers.
+
 ### D-2. Scoping via source org with explicit escape hatch
 
 **Decided:** Implicit scoping by `ws.Sources[0].Org` + explicit
@@ -876,7 +968,7 @@ team configs to user conventions silently.
 
 ### D-3. Personal-wins conflict resolution with `team_only` opt-in
 
-**Decided:** When team and personal configs supply the same key,
+**Decided:** When team and personal overlays supply the same key,
 personal wins. Teams may declare `team_only = [...]` to enforce
 team-controlled keys.
 
@@ -938,6 +1030,17 @@ binding table would demand new merge logic for every scope that could
 resolve secrets. Implicit resolution (no schema change) removes
 discoverability of which provider resolves what.
 
+**Resolution order (required for D-9 compliance).** URIs MUST be
+resolved to `secret.Value` (opaque type per R22) *before* the merge
+pipeline runs, inside the source file's provider context. The merge
+then operates on already-resolved typed values, preserving both
+last-writer-wins semantics AND D-9's file-local provider scoping.
+Resolving post-merge would flatten the origin and make
+`vault://<name>/...` ambiguous when layers declare providers with
+the same name. Order: (per-file-parse → per-file-resolve →
+cross-layer-merge → materialize), not the naïve (parse → merge →
+resolve) that D-6's original phrasing implied.
+
 ### D-7. No niwa-internal secret caching
 
 **Decided:** niwa never caches resolved secrets between commands.
@@ -967,11 +1070,11 @@ expectations. No-escape risks user confusion if a downstream tool
 happens to use `vault://` for its own URI scheme. `raw:` is rare
 enough not to collide and mnemonic enough to read naturally.
 
-### D-9. File-local provider scoping; team and personal configs can't cross-reference each other's provider names
+### D-9. File-local provider scoping; team and personal overlays can't cross-reference each other's provider names
 
 **Decided:** Each config file's `vault://` URIs may only reference
 providers declared in the same file. Team configs cannot write
-`vault://personal/...`; personal configs cannot write
+`vault://personal/...`; personal overlays cannot write
 `vault://team/...`. The contract between the two layers is the key
 names in `[env.vars]` / `[env.required]` / `[env.recommended]` /
 `[env.optional]` (and the Claude / repos / instance / files
@@ -1050,20 +1153,13 @@ the file uses.
 
 Questions to resolve before the PRD transitions to Accepted:
 
-- **Q-1 Personas sign-off.** This draft's eight user stories cover the
+- **Q-1 Personas sign-off.** This draft's nine user stories cover the
   three archetypes identified during exploration (indie, team-lead,
   team-member). Are there other archetypes that need explicit stories
   before shipping — e.g., CI-only caller, external contributor to a
   public dot-niwa, new-dev who doesn't have GitHub org access on day
   one?
 
-- **Q-2 v1 ordering.** RESOLVED: both Infisical and sops+age ship in
-  v1.0 as peer backends (see D-1). Open sub-question: if implementation
-  must be sequential, which backend lands first? Leaning Infisical
-  first because its bootstrap exercises every layer (browser OAuth,
-  API calls, session caching in the provider CLI) while sops is
-  simpler (subprocess + file decrypt) and can follow. Sequencing does
-  not change what ships in v1.0.
 
 - **Q-3 Plaintext-deprecation timeline.** When does the public-repo
   plaintext-secret guardrail (R14/R32) become the default? On day one
@@ -1075,11 +1171,14 @@ Questions to resolve before the PRD transitions to Accepted:
   GitHub secret-scanning alerts? Number of users running
   `niwa apply --allow-plaintext-secrets` stays below some threshold?
 
-- **Q-5 Source-org detection for workspace with no sources.** A
-  workspace created with `niwa init <name>` (no `--from`) has no
-  `[[sources]]`. The implicit scoping falls back to empty. Should
-  `vault_scope` default to the workspace name in this case, or require
-  explicit declaration?
+- **Q-5 Source-org detection for workspace with no sources.** R5
+  already specifies that zero-source workspaces *may* set
+  `vault_scope` explicitly for personal overlay targeting. The open
+  question is narrower: when zero-source AND no `vault_scope`, should
+  niwa apply silently fall back to "no personal overlay resolution"
+  (treat as team-only), or warn that the workspace has no scope and
+  personal refs will be unresolvable? Leaning warn — silent fallback
+  hides a real misconfiguration.
 
 - **Q-6 Migration UX details.** What does the first-time migration
   walkthrough look like? A dedicated `niwa vault init` subcommand, or
@@ -1088,7 +1187,7 @@ Questions to resolve before the PRD transitions to Accepted:
   but a guided walkthrough might be worth it for onboarding.
 
 - **Q-7 `team_only` enforcement layer.** Is violation caught at
-  parse time (static check against the committed personal config) or
+  parse time (static check against the committed personal overlay) or
   at materialize time (runtime check when resolving)? Static is
   cleaner but requires `niwa status` to load the team config's
   `team_only` list, which means remote read of team repo. Runtime is
