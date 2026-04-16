@@ -91,6 +91,54 @@ Moving secrets into a vault is necessary to make team configs
 publishable; fixing the materialization pipeline is necessary so the vault
 migration doesn't introduce new leaks.
 
+## Threat Model
+
+The invariants (R21–R31) defend a specific perimeter. This section
+names what's inside, what's outside, and where the boundaries are.
+
+**Trusted** (niwa assumes these are not compromised):
+
+- The user's local machine — filesystem, process memory, OS keychain.
+- The vault provider CLI (`infisical`, `sops`, `age`, `op`, etc.) —
+  niwa invokes these as subprocesses and trusts their stdout output.
+- Git credentials on the machine used to clone config repos.
+
+**Not defended against** (out of scope for niwa's threat model):
+
+- Malicious processes running as the same user (can read `0o600` files).
+- Physical laptop theft without full-disk encryption.
+- Compromised vault provider credentials or a breached provider service.
+- Root-level attackers on the machine.
+- A compromised provider CLI binary on `$PATH` (trojan `infisical`).
+
+**Explicitly defended against** (the invariants' raison d'etre):
+
+- Accidental `git commit` of plaintext secrets into the config repo
+  (R14/R30 guardrail, R25 `.local` + `.gitignore` defense).
+- Accidental inclusion of secrets in CLAUDE.md shared with the team
+  (R26 forbids secret interpolation in Markdown).
+- Log / CI / stderr disclosure (R22 `secret.Value` redaction + error-
+  wrapping coverage).
+- Shell-history exposure (R21 no-argv secrets).
+- Silent personal-overlay override injection (R31 override-visibility
+  diagnostics).
+
+**Trust boundaries** (where data crosses a security-relevant edge):
+
+| Boundary | What crosses | Defense |
+|----------|-------------|---------|
+| Vault service ↔ vault CLI | Auth tokens, secret bytes | Provider's own auth (out of niwa's scope) |
+| Vault CLI ↔ niwa process | Secret bytes on subprocess stdout | R22 wraps into `secret.Value` immediately; R22 error-wrapping scrubs provider stderr |
+| niwa process ↔ disk | Materialized `.local.env`, `settings.local.json` | R24 `0o600` mode; R25 `.local` infix + `.gitignore` |
+| Disk ↔ git push | Config repo contents | R14/R30 guardrail; R23 no-config-writeback |
+| niwa process ↔ logs/stderr | Diagnostic messages, error output | R22 redaction; R27 no-status-content |
+| Team config ↔ personal overlay | Key names, provider declarations | R3/D-9 file-local scoping; R31 override-visibility |
+
+This model explicitly excludes sophisticated adversaries (state-level,
+root-access, supply-chain attacks on provider binaries). niwa's job is
+to prevent the accidents that happen during normal development — not
+to be a zero-trust vault client.
+
 ## Goals
 
 - **Team configs can be publishable.** A team using niwa can move their
