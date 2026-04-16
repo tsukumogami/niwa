@@ -1380,12 +1380,6 @@ Questions to resolve before the PRD transitions to Accepted:
 
 
 
-- **Q-4 `team_only` enforcement layer.** Is violation caught at
-  parse time (static check against the committed personal overlay) or
-  at materialize time (runtime check when resolving)? Static is
-  cleaner but requires `niwa status` to load the team config's
-  `team_only` list, which means remote read of team repo. Runtime is
-  always available.
 
 - **Q-5 Sign-off stakeholders.** Does this PRD need explicit review
   from anyone beyond the niwa maintainer before transitioning to
