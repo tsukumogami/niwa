@@ -125,10 +125,10 @@ requirements this PRD enumerates:
 
 | Goal | Satisfied by |
 |------|--------------|
-| Team configs can be publishable | R14, R32, R22–R30 (the invariant floor that lets secrets stay out of the repo) |
+| Team configs can be publishable | R14, R30, R22–R29 (the invariant floor that lets secrets stay out of the repo) |
 | Per-org personal secret scoping | R4, R5, R6, US-3, D-2 |
 | New-member bootstrap under 10 minutes | R18, US-2 (two-path bootstrap), R1 (CLI-exec interface means no niwa-specific auth bootstrap) |
-| Zero new leak classes | R21–R32 (the 12 "never leaks" invariants) |
+| Zero new leak classes | R21–R30 (the "never leaks" invariants) |
 | Pluggable backend from v1 | R1, D-1 |
 
 ## User Stories
@@ -400,7 +400,7 @@ doc, but the contract is PRD-fixed):
 
 A provider MAY hold authenticated state across `Resolve` calls within
 a single niwa command invocation. It MUST NOT persist state across
-command invocations (no disk cache; R30).
+command invocations (no disk cache; R29).
 
 **R2. Vault provider declaration: anonymous singular or named
 multiple.** The workspace config MUST support a top-level `[vault]`
@@ -630,44 +630,49 @@ resolved secret MUST be written with mode `0o600`. This fixes a
 pre-existing `0o644` bug in `SettingsMaterializer` and
 `EnvMaterializer` where settings and env files were world-readable.
 
-**R25 (INV-LOCAL-INFIX).** Every materialized file that contains a
-resolved secret MUST carry the `.local` infix in its name so it
-matches the existing niwa/Claude gitignore conventions.
+**R25 (INV-LOCAL-GITIGNORED).** Every materialized file that contains
+a resolved secret MUST (a) carry the `.local` infix in its filename
+AND (b) be covered by an instance-root `.gitignore` matching
+`*.local*`. `niwa create` MUST ensure the instance-root `.gitignore`
+exists with the required pattern: generating the file if missing,
+merging the pattern if present (idempotent). The two mechanisms
+(filename convention and gitignore coverage) are the two halves of
+one guarantee — removing either one weakens the protection, so they
+are stated as a single invariant.
 
-**R26 (INV-GITIGNORE-ROOT).** `niwa create` MUST ensure the instance
-root has a `.gitignore` that covers `*.local*`. If the file is
-missing, `niwa create` generates it. If present, niwa merges the
-required patterns in (idempotent).
-
-**R27 (INV-NO-CLAUDE-MD-INTERP).** CLAUDE.md, CLAUDE.local.md, and
+**R26 (INV-NO-CLAUDE-MD-INTERP).** CLAUDE.md, CLAUDE.local.md, and
 all materialized Markdown files MUST be treated as opaque text. No
 secret interpolation into Markdown content. Secrets reach Claude via
 env var injection in `settings.local.json`, not via inline Markdown
 templates.
 
-**R28 (INV-NO-STATUS-CONTENT).** `niwa status` MUST NOT print the
+**R27 (INV-NO-STATUS-CONTENT).** `niwa status` MUST NOT print the
 content or diff of any managed file. Output is limited to path +
 status (`ok | drifted | stale | removed`). Future `--verbose` modes
 MUST exclude files flagged as secret-bearing.
 
-**R29 (INV-NO-PROCESS-ENV-PUBLICATION).** niwa MUST NEVER call
+**R28 (INV-NO-PROCESS-ENV-PUBLICATION).** niwa MUST NEVER call
 `os.Setenv` with a resolved secret. Secrets are project data owned by
 the materializer, not niwa's process-level state.
 
-**R30 (INV-NO-DISK-CACHE).** niwa MUST NOT cache resolved secrets on
+**R29 (INV-NO-DISK-CACHE).** niwa MUST NOT cache resolved secrets on
 disk between commands. Provider CLIs may cache their own auth sessions
 (out of scope); niwa does not store secret values beyond the lifetime
 of a single command invocation.
 
-**R31 (INV-EXPLICIT-SUBPROCESS-ENV).** When niwa eventually spawns a
-subprocess that needs secrets (vault CLI calls, future hook scripts),
-the child env MUST be built explicitly from the resolved map. niwa
-does not pass `os.Environ()` to child processes without filtering.
-
-**R32 (INV-PUBLIC-REPO-GUARDRAIL).** The R14 guardrail is a hard block:
+**R30 (INV-PUBLIC-REPO-GUARDRAIL).** The R14 guardrail is a hard block:
 `niwa apply` on a public-remote config repo with plaintext env values
 and a vault configured MUST fail unless the user explicitly overrides
 with `--allow-plaintext-secrets` (NOT a default-friendly flag).
+
+**Deferred invariants.** An earlier draft included
+`INV-EXPLICIT-SUBPROCESS-ENV` (niwa builds child process env
+explicitly, never passes `os.Environ()` unfiltered to subprocesses).
+It was removed because niwa today has no subprocess-spawn path that
+touches resolved secrets — the invariant enforces nothing against
+existing code. When niwa later adds a subprocess-spawn path carrying
+secrets (e.g., invoking hook scripts or launching Claude Code), this
+invariant re-enters scope as part of that feature's design.
 
 ### Contract Requirements
 
@@ -912,7 +917,7 @@ bypassing team-declared requirements.
 - **`[env.files]` vault-backed source paths.** `[env.files]` takes
   filesystem paths only. If a `.env` file itself needs to come from a
   vault, use `[files]` with a `vault://` source key.
-- **CLAUDE.md secret interpolation.** Explicitly forbidden per R27.
+- **CLAUDE.md secret interpolation.** Explicitly forbidden per R26.
   Secrets reach Claude via settings env, not via Markdown templates.
 - **Non-GitHub source control.** Public-repo guardrail (R14) detects
   via GitHub remote URL patterns only in v1. GitLab, Bitbucket,
@@ -1160,7 +1165,7 @@ Questions to resolve before the PRD transitions to Accepted:
 
 
 - **Q-3 Plaintext-deprecation timeline.** When does the public-repo
-  plaintext-secret guardrail (R14/R32) become the default? On day one
+  plaintext-secret guardrail (R14/R30) become the default? On day one
   (feature-flag off → hard guardrail) or staged through a release
   cycle (warn for two minor releases, then error)?
 
