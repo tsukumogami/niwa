@@ -1,6 +1,6 @@
 ---
 status: Accepted
-version: 2
+version: 3
 problem: |
   When a niwa workspace config repo is made public, the workspace.toml exposes private information through several surfaces: source org identifiers in [[sources]], group names that imply private categories exist, [repos.*] section keys (which are repo names), [claude.content.repos.*] entries including subdirectory mappings that reveal internal code structure, and [channels.*.access] sections containing user IDs. Teams that want to publish their workspace config — to enable open contribution, share it as a reference, or reduce maintenance burden — currently have no way to keep private repo references out of the public config without maintaining a completely separate private workspace config that duplicates all the public configuration.
 goals: |
@@ -76,7 +76,7 @@ As a CI/CD pipeline, I want to apply the workspace config with only public repos
 
 **R9**: A private companion repo contains a file named `workspace-extension.toml` at the repo root. This file is the extension configuration.
 
-**R10**: `workspace-extension.toml` supports these additive sections: `[[sources]]`, `[groups.*]`, `[repos.*]`, `[claude.content.*]`.
+**R10**: `workspace-extension.toml` supports these additive sections: `[[sources]]`, `[groups.*]`, `[repos.*]`, `[claude.content.*]`. Within `[claude.content.repos.*]`, two field variants are supported: `source` (for repos introduced by the companion) and `overlay` (for repos already defined in the public config — see R16).
 
 **R11**: `workspace-extension.toml` supports these override sections: `[claude.hooks]`, `[claude.settings]`, `[env]`, `[files]`. Merge semantics match GlobalOverride: hooks append (companion hooks added after public config hooks); settings per-key (companion value used only if key absent in public config); `env.files` append (companion files sourced after public config files); `env` vars per-key (companion value used only if key absent in public config); `files` per-key (companion file used only if destination absent in public config).
 
@@ -84,7 +84,7 @@ As a CI/CD pipeline, I want to apply the workspace config with only public repos
 
 ### Merge Semantics
 
-When an entry exists in both the public config and the companion, "public config takes precedence" means the public config's entry is used in its entirety and the companion's entry for that key is discarded without warning or error. No field-level merging occurs within a group, repo, or content entry — the entire entry from the public config replaces the companion's.
+When an entry exists in both the public config and the companion, "public config takes precedence" means the public config's entry is used in its entirety and the companion's entry for that key is discarded without warning or error. No field-level merging occurs within a group or repo entry — the entire entry from the public config replaces the companion's. Content entries are the exception: companions may use the `overlay` field to append private context to a public-config repo's generated `CLAUDE.local.md` without replacing it (see R16).
 
 **R13**: Sources from the companion are appended to the public config's sources after parsing. The combined sources list drives repo discovery. If the same repo is discovered from multiple sources, it is deduplicated (keeping the first occurrence) and the duplicate is silently skipped.
 
@@ -92,7 +92,13 @@ When an entry exists in both the public config and the companion, "public config
 
 **R15**: Repo overrides from the companion are added to the public config's repos map. If a repo entry exists in both the public config and the companion, the public config's entry is used and the companion's is discarded without warning.
 
-**R16**: Content entries from the companion are added to the public config's content map. If a content entry exists for the same repo in both configs, the public config's entry is used and the companion's is discarded without warning.
+**R16**: Content entries from the companion are handled differently depending on whether the repo is introduced by the companion or already defined in the public config:
+
+- **Companion-only repo** (`source` field): The companion's `source` entry creates `CLAUDE.local.md` for that repo, exactly as the public config does for its own repos.
+- **Public-config repo with `overlay` field**: The companion may declare `overlay = "<path>"` for a repo already in the public config. niwa appends the overlay file's content to the end of the generated `CLAUDE.local.md` for that repo, separated from the public content by a blank line. The overlay path is resolved relative to the companion's local clone directory and is subject to the same path-traversal validation as R21.
+- **Public-config repo with `source` field**: Using `source` for a repo that already exists in the public config is an error. niwa aborts with a non-zero exit code and a message indicating that `source` is not allowed for public-config repos — use `overlay` instead.
+
+Users without private access receive the public `CLAUDE.local.md` only; no overlay is applied and no indication of the overlay's existence is produced.
 
 **R17**: During companion parsing (before any git clone or pull operations on workspace repos), if any org in the companion's `[[sources]]` entries matches an org in the public config's `[[sources]]` entries, `niwa apply` aborts with a non-zero exit code and an error: `"Duplicate source org '<org>' found in workspace config and private companion. Use explicit repos lists in both source declarations to resolve."` Companion source entries without explicit `repos` lists are rejected at parse time (see R12).
 
@@ -106,7 +112,7 @@ When an entry exists in both the public config and the companion, "public config
 
 **R20**: Private companion registration is stored in `~/.config/niwa/config.toml` under a `[private_workspace]` section containing the repo URL only. The local clone path is derived at runtime as `$XDG_CONFIG_HOME/niwa/private/` (falling back to `~/.config/niwa/private/` if `XDG_CONFIG_HOME` is unset) and is never stored in the config file.
 
-**R21**: Parsing `workspace-extension.toml` must validate all `files` destination paths and `env.files` source paths using the same path-traversal rejection rules applied to GlobalOverride config: reject any path that is absolute (starts with `/`) or contains `..` as a path component. Rejection occurs during companion parsing, before any workspace file operations. niwa exits with a non-zero exit code and an error identifying the invalid path. No files are written to the workspace.
+**R21**: Parsing `workspace-extension.toml` must validate all `files` destination paths, `env.files` source paths, and `[claude.content.repos.*] overlay` paths using the same path-traversal rejection rules applied to GlobalOverride config: reject any path that is absolute (starts with `/`) or contains `..` as a path component. Rejection occurs during companion parsing, before any workspace file operations. niwa exits with a non-zero exit code and an error identifying the invalid path. No files are written to the workspace.
 
 **R22**: Hook scripts declared in `workspace-extension.toml` are resolved to absolute paths using the companion's local clone directory before merging, following the same pattern as GlobalOverride hook script resolution. Relative hook script paths are resolved relative to the companion's local clone directory.
 
@@ -139,7 +145,10 @@ When an entry exists in both the public config and the companion, "public config
 
 ### Content and CLAUDE Injection
 
-- [ ] Companion with `[claude.content.repos.vision] source = "repos/vision.md"` and `repos/vision.md` present in the companion repo: after `niwa apply`, the workspace instance contains `vision/CLAUDE.local.md` generated from that content file.
+- [ ] Companion with `[claude.content.repos.vision] source = "repos/vision.md"` and `repos/vision.md` present in the companion repo, and `vision` not defined in the public config: after `niwa apply`, the workspace instance contains `vision/CLAUDE.local.md` generated from that content file.
+- [ ] Companion with `[claude.content.repos.niwa] overlay = "private/niwa-context.md"` and `niwa` already defined in the public config's content map: after `niwa apply`, the workspace instance's `niwa/CLAUDE.local.md` contains the public content followed by a blank line and then the overlay content.
+- [ ] Companion with `[claude.content.repos.niwa] overlay = "private/niwa-context.md"` and no companion registered (or companion skipped): after `niwa apply`, `niwa/CLAUDE.local.md` contains only the public content. No indication of the overlay's existence is present.
+- [ ] Companion with `[claude.content.repos.niwa] source = "repos/niwa.md"` and `niwa` already defined in the public config's content map: `niwa apply` exits with a non-zero exit code and an error stating that `source` is not allowed for repos already defined in the public config.
 - [ ] Companion with `CLAUDE.private.md` at its root: after `niwa apply`, the instance root contains `CLAUDE.private.md` and the workspace `CLAUDE.md` contains `@CLAUDE.private.md`.
 - [ ] Companion without `CLAUDE.private.md`: after `niwa apply`, the workspace `CLAUDE.md` does not contain `@CLAUDE.private.md`. No error.
 - [ ] Workspace `CLAUDE.md` import order (when both private and global configs are registered): reading the workspace `CLAUDE.md` file top-to-bottom, the `@CLAUDE.private.md` import line appears after the workspace context import and before the `@CLAUDE.global.md` import line.
@@ -157,7 +166,7 @@ When an entry exists in both the public config and the companion, "public config
 - **Secrets management**: Vault integration for removing secrets from workspace configs. Covered separately.
 - **Per-developer personal config**: The GlobalOverride (`niwa config set global`) handles personal hooks, env, and settings. The private workspace extension is for team-shared private repo configuration, not personal preferences.
 - **Selective per-repo access within the companion**: Access to the private companion is all-or-nothing. Users either have permission to clone the companion (and get all private repos) or they don't (and get none). Fine-grained per-repo access within the companion is not supported in v1.
-- **Content override for repos in the public config**: The companion can provide CLAUDE.md content for repos it introduces. It cannot override or augment CLAUDE.md content for repos already defined in the public config.
+- **Full content replacement for repos in the public config**: The companion can provide CLAUDE.md content for repos it introduces (`source` field) and can append private context to public repos (`overlay` field). It cannot replace the public config's content entry for a public repo — `source` on a public-config repo is an error.
 - **Multiple private companions per workspace**: A workspace has at most one registered private companion. Stacking multiple companions is out of scope.
 - **Auto-hiding of auto-discovered repos**: If the public config uses `[[sources]] org = "shared-org"` without explicit repo lists, auto-discovery queries the GitHub API and may expose private repo names in warning output ("matched no group"). Teams that need to hide private repo names must use explicit repo lists in their public config for shared orgs.
 - **Migration tooling**: No `niwa migrate-private` command in v1. Teams split their config manually. Documentation covers the process.
@@ -184,8 +193,8 @@ When the companion has never been cloned on a machine and the clone fails, niwa 
 **Companion format uses `workspace-extension.toml`, not `workspace.toml`.**
 A distinct filename clarifies that the companion is an extension (additive and override), not a standalone workspace config. A companion named `workspace.toml` would mislead contributors into thinking it can be used as a standalone workspace config. The distinct name also allows niwa to apply different parsing rules (no `[workspace]` metadata, restricted `[[sources]]` behavior).
 
-**Public config precedence on collisions.**
-When both the public config and the companion define the same group, repo, or content entry, the public config wins. The alternative (companion wins) would allow private config to silently override public config behavior, which is unexpected for teams that think of the companion as additive-only. Public-config-wins is the conservative default; teams that need companion overrides can remove the entry from the public config.
+**Public config precedence on structural collisions; overlay allowed for content.**
+When both the public config and the companion define the same group or repo entry, the public config wins — the companion's entry is discarded entirely. This prevents private config from silently changing structural behavior (which repo a group contains, which URL a repo clones from). Content is different in character: it's documentation text, not structural configuration, and "append private context" is a valid and useful semantic. The companion therefore supports an `overlay` field for content entries that augments rather than replaces the public content. Full content replacement (`source` on a public-config repo) remains prohibited to preserve the one-directional nature of the companion's influence.
 
 **`niwa status` does not display companion registration state.**
 Companion registration state is omitted from `niwa status` output entirely. Any mention of the companion in status output could be visible to users without access (shared terminals, log aggregation). Users who need to debug companion state can use `niwa config show private`. This aligns with R23.
