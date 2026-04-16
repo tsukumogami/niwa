@@ -203,33 +203,35 @@ be a public repo):
 [workspace]
 name = "tsukumogami"
 
-# The team declares its OWN single vault anonymously. Because there's
-# exactly one provider in this file, naming is optional (R2).
+# The team declares its OWN single vault anonymously (R2).
 [vault.provider]
 kind    = "infisical"
 project = "tsukumogami"
 
-# Team-supplied secrets: team-declared provider, team-declared keys.
+# --- Non-sensitive config the team supplies ---
 [env.vars]
+LOG_LEVEL = "info"
+DEFAULT_ORG = "tsukumogami"
+
+# --- Sensitive values the team supplies (vault-backed) ---
+[env.secrets]
 ANTHROPIC_API_KEY = "vault://anthropic-api-key"
 OPENAI_API_KEY    = "vault://openai-api-key"
 
-# Team-required secrets the USER must supply from their own overlay.
-# The team names what it NEEDS and describes why, without naming the
-# user's vaults or keys. Apply fails if unset at resolve time.
-[env.required]
+# --- Sensitive values the user must supply (error if missing) ---
+[env.secrets.required]
 GITHUB_TOKEN = "GitHub PAT with repo:read scope"
 
-# Recommended: apply continues with a loud stderr warning if unset.
-[env.recommended]
-SENTRY_DSN = "Sentry error reporting — optional but helpful"
+# --- Sensitive values the user should supply (warning if missing) ---
+[env.secrets.recommended]
+SENTRY_DSN = "Sentry error reporting"
 
-# Optional: apply continues with an info log if unset.
-[env.optional]
-DEBUG_WEBHOOK_URL = "Personal debug webhook — entirely optional"
+# --- Non-sensitive values the user may supply (info log if missing) ---
+[env.vars.optional]
+DEBUG_WEBHOOK_URL = "Personal debug webhook"
 ```
 
-**Personal config** (`dangazineu/dot-niwa/niwa.toml`, always private):
+**Personal overlay** (`dangazineu/dot-niwa/niwa.toml`, always private):
 
 ```toml
 # Personal single vault declared anonymously (R2).
@@ -237,17 +239,18 @@ DEBUG_WEBHOOK_URL = "Personal debug webhook — entirely optional"
 kind    = "infisical"
 project = "dangazineu-personal"
 
-# Per-org bindings. Key names here must match the team's
-# [env.required]/[env.recommended]/[env.optional] tables (or
-# [env.vars] for team-supplied defaults I want to override).
-# I name my vault paths however I want -- the team config doesn't
-# care and can't see the names.
-[workspaces.tsukumogami.env.vars]
+# --- Satisfy team's env.secrets.required ---
+[workspaces.tsukumogami.env.secrets]
 GITHUB_TOKEN = "vault://tsukumogami/github-pat"
 SENTRY_DSN   = "vault://tsukumogami/sentry-dsn"
 # DEBUG_WEBHOOK_URL intentionally omitted; I'll just get an info log.
 
-[workspaces.codespar.env.vars]
+# --- Override a team non-sensitive value ---
+[workspaces.tsukumogami.env.vars]
+LOG_LEVEL = "debug"
+
+# --- Same for codespar ---
+[workspaces.codespar.env.secrets]
 GITHUB_TOKEN = "vault://codespar/github-pat"
 ```
 
@@ -256,18 +259,22 @@ GITHUB_TOKEN = "vault://codespar/github-pat"
 - `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` → resolved by the team
   config's `[vault.provider]`; no provider name in the URI because
   the team declared anonymously.
-- `GITHUB_TOKEN`, `SENTRY_DSN` → resolved by my personal
-  `[global.vault.provider]` via the folder path I chose
-  (`tsukumogami/github-pat`, `tsukumogami/sentry-dsn`). The team
-  config has no opinion on where in my vault they live.
-- `DEBUG_WEBHOOK_URL` → missing, declared `[env.optional]`, info
+- `GITHUB_TOKEN`, `SENTRY_DSN` → from `[env.secrets]` in my personal
+  overlay, resolved by my `[global.vault.provider]` via the folder
+  path I chose (`tsukumogami/github-pat`, `tsukumogami/sentry-dsn`).
+  The team config has no opinion on where in my vault they live.
+  Both are wrapped in `secret.Value` (redacted in logs).
+- `LOG_LEVEL` → personal overlay overrides team's `"info"` with
+  `"debug"` (from `[env.vars]` — plain string, no redaction).
+- `DEBUG_WEBHOOK_URL` → missing, declared `[env.vars.optional]`, info
   log only, apply proceeds.
 
 Same binary, same command, two backends resolved in one pass. Each
-config owns only its own vault names and its own URI references; the
-contract between them is the key-name vocabulary in `[env.required]`
-/ `[env.recommended]` / `[env.optional]` (and `[env.vars]` for
-team-supplied defaults).
+config owns only its own vault names and its own URI references. The
+contract between them is the key-name vocabulary in
+`[env.secrets.required]` / `[env.secrets.recommended]` /
+`[env.vars.optional]` and the value tables (`[env.vars]` for
+non-sensitive, `[env.secrets]` for sensitive).
 
 Scoping is automatic because the workspace has one source
 (`tsukumogami`). For multi-source workspaces, I set
@@ -451,11 +458,17 @@ contract between the two layers is the key-name vocabulary in
 `[env.vars]` and the `[env.required]` / `[env.recommended]` /
 `[env.optional]` tables (R33), NOT shared provider names.
 
-**Reference-accepting locations.** References are accepted in:
-`[env.vars]`, `[claude.env.vars]`, `[repos.<name>.env.vars]`,
-`[instance.env.vars]`, `[files]` source keys, and `[claude.settings]`
-values. References are NOT accepted in: `[claude.content.*]`,
-`[env.files]`, `[vault.providers.*]` fields, or anywhere an
+**Reference-accepting locations.** `vault://` references are accepted
+in: `[env.secrets]`, `[claude.env.secrets]`,
+`[repos.<name>.env.secrets]`, `[instance.env.secrets]`, `[files]`
+source keys, and `[claude.settings]` values. References are also
+syntactically accepted in `[env.vars]` and its variants (niwa does
+not forbid vault-backing a non-sensitive value), but the
+`*.vars` / `*.secrets` split determines guardrail and redaction
+behavior, not reference acceptance. References are NOT accepted in:
+`[claude.content.*]`, `[env.files]`, `[vault.providers.*]` /
+`[vault.provider]` fields, requirement-description tables
+(`*.required`, `*.recommended`, `*.optional`), or anywhere an
 identifier (workspace name, org, repo URL, group name) lives.
 
 **R4. Per-project personal vault scoping.** niwa MUST support per-
@@ -527,18 +540,24 @@ name last-writer-wins (personal can add new providers or replace a
 team-declared provider for the same name).
 
 **R13. `niwa status --audit-secrets` subcommand.** niwa MUST provide
-a command that enumerates all `[env]`, `[claude.env]`, and
-`[repos.*.env]` entries across the current workspace, classifies each
-value as `plaintext`, `vault-ref`, or `empty`, and prints a table.
-Exits non-zero if any plaintext values are present AND a vault is
-configured.
+a command that enumerates all `*.secrets` tables (`[env.secrets]`,
+`[claude.env.secrets]`, etc.) across the current workspace, classifies
+each value as `vault-ref`, `plaintext` (not vault-backed — a commit
+risk), or `empty`, and prints a table. Exits non-zero if any
+`*.secrets` value is plaintext AND a vault is configured. `*.vars`
+tables are excluded from the audit because they are non-sensitive by
+declaration.
 
 **R14. Public-repo plaintext-secret guardrail.** When the workspace
 config's source git remote resolves to a public GitHub repository AND
-a vault is configured AND plaintext values are present in `[env.vars]`
-or `[claude.env.vars]`, `niwa apply` MUST refuse to proceed with an
-error listing the plaintext keys and recommending migration. Detection
-uses the git remote URL.
+a vault is configured AND any value in `[env.secrets]` or
+`[claude.env.secrets]` in the team config is NOT a `vault://`
+reference (i.e., a plaintext secret committed to a public repo),
+`niwa apply` MUST refuse to proceed with an error listing the
+offending keys and recommending migration to vault refs. The
+guardrail checks only `*.secrets` tables — `*.vars` tables are
+non-sensitive by declaration and are never flagged. Detection uses
+the git remote URL.
 
 **R15. `ManagedFile.SourceFingerprint` field.** The instance state
 MUST carry a `SourceFingerprint` per managed file, distinct from the
@@ -728,33 +747,42 @@ invariant re-enters scope as part of that feature's design.
 
 ### Contract Requirements
 
-**R33. Three-level env requirement tables: required / recommended /
-optional.** The team config declares which env vars the workspace
-expects, without naming where they come from. Three tables, each
-mapping key names to human-readable description strings:
+**R33. `env.vars` / `env.secrets` split with three-level requirement
+sub-tables.** Env values in workspace config are split into two
+namespaces by sensitivity:
 
-- `[env.required]`: keys that MUST resolve to a non-empty value by
-  apply time. Missing ≥1 required key is a hard error; `niwa apply`
-  fails with a message listing every missing key and its description.
-- `[env.recommended]`: keys the workspace expects but can operate
-  without. Missing recommended keys emit a loud stderr warning
-  naming each missing key; `niwa apply` proceeds.
-- `[env.optional]`: keys that are genuinely nice-to-have. Missing
-  optional keys emit an info log (visible only with `--verbose` or
-  equivalent); `niwa apply` proceeds without warning.
+- `[env.vars]` — non-sensitive configuration. Values are plain
+  strings. Guardrail (R14) never checks these. Materialized as
+  plain strings.
+- `[env.secrets]` — sensitive values. Values SHOULD be `vault://`
+  references. Guardrail checks these on public repos. Materialized
+  as `secret.Value` (redacted in logs per R22).
 
-Same pattern MUST be supported for Claude-scoped env declarations:
-`[claude.env.required]`, `[claude.env.recommended]`,
-`[claude.env.optional]`. These apply to env vars consumed by Claude
-Code via `settings.local.json` (promoted or set directly).
+Each namespace carries three optional requirement sub-tables for
+keys the team expects but does not supply:
+
+- `[env.vars.required]` / `[env.secrets.required]` — keys that MUST
+  resolve to a non-empty value by apply time. Missing ≥1 required
+  key is a hard error; `niwa apply` fails with a message listing
+  every missing key and its description.
+- `[env.vars.recommended]` / `[env.secrets.recommended]` — keys the
+  workspace expects but can operate without. Missing → loud stderr
+  warning; `niwa apply` proceeds.
+- `[env.vars.optional]` / `[env.secrets.optional]` — keys that are
+  genuinely nice-to-have. Missing → info log (visible only with
+  `--verbose`); `niwa apply` proceeds.
+
+Requirement sub-table values are human-readable description strings,
+not env values. The actual value comes from whichever layer supplies
+it (`*.vars` or `*.secrets` in the team config or personal overlay).
+
+Same split and sub-table pattern MUST be supported for Claude-scoped
+env: `[claude.env.vars]` / `[claude.env.secrets]` with the six
+requirement sub-tables nested accordingly.
 
 Per-repo, per-instance, and `[files]`-scoped requirement tables are
-NOT supported in v1. Teams that need a requirement only inside a
-specific repo or instance declare it at the workspace level and
-accept that the requirement applies across the workspace. If concrete
-use cases for scoped requirements emerge post-v1, adding
-`[repos.<name>.env.required]`, `[instance.env.required]`, or
-`[files.required]` tables is additive and non-breaking.
+NOT supported in v1 (deferred; additive and non-breaking to add
+later).
 
 The description string values MUST be carried into the error /
 warning / info message so missing-secret diagnostics are
@@ -762,12 +790,13 @@ self-documenting. A user running `niwa apply` against an unmet
 requirement sees the team-authored description telling them what the
 key is for.
 
-**R34. `[env.required]` has precedence over `--allow-missing-secrets`.**
-The `--allow-missing-secrets` flag (R10) downgrades unresolved
-`vault://` references to empty strings. It does NOT downgrade
-unresolved `[env.required]` keys. A missing required key is always a
-hard error regardless of flags, because the team config explicitly
-marked the key as load-bearing. This separation lets users use
+**R34. `*.required` tables have precedence over
+`--allow-missing-secrets`.** The `--allow-missing-secrets` flag (R10)
+downgrades unresolved `vault://` references to empty strings. It does
+NOT downgrade unresolved `[env.vars.required]` or
+`[env.secrets.required]` keys. A missing required key is always a hard
+error regardless of flags, because the team config explicitly marked
+the key as load-bearing. This separation lets users use
 `--allow-missing-secrets` for exploratory runs without accidentally
 bypassing team-declared requirements.
 
@@ -795,14 +824,17 @@ bypassing team-declared requirements.
   source org, repo URL, group name) with parse-time errors.
 - [ ] `workspace.toml` accepts `[workspace].vault_scope = "<string>"`.
 - [ ] `workspace.toml` accepts `[vault].team_only = ["KEY1", ...]`.
-- [ ] `workspace.toml` accepts `[env.required]`, `[env.recommended]`,
-  `[env.optional]` with key→description-string entries.
-- [ ] The same three tables are accepted under `[claude.env]`.
-- [ ] `workspace.toml` parse-rejects `[repos.<name>.env.required]`,
-  `[instance.env.required]`, and `[files.required]` (plus their
-  `.recommended` / `.optional` siblings) as unknown-field warnings.
-  These locations are reserved for future expansion; v1 does not
-  accept them.
+- [ ] `workspace.toml` accepts `[env.vars]` (non-sensitive values)
+  and `[env.secrets]` (sensitive values) as sibling tables.
+- [ ] `workspace.toml` accepts `[env.vars.required]`,
+  `[env.vars.recommended]`, `[env.vars.optional]`,
+  `[env.secrets.required]`, `[env.secrets.recommended]`,
+  `[env.secrets.optional]` with key→description-string entries.
+- [ ] The same vars/secrets split and requirement sub-tables are
+  accepted under `[claude.env]`.
+- [ ] Values from `*.secrets` tables are materialized wrapped in
+  `secret.Value` (R22 redaction); values from `*.vars` are
+  materialized as plain strings.
 - [ ] The personal overlay (`GlobalOverride`) accepts the
   anonymous-or-named provider declaration and per-workspace
   `[workspaces.<scope>]` blocks.
@@ -1146,9 +1178,9 @@ time, the next optimization is a process-lifetime in-memory cache only
 providers declared in the same file. Team configs cannot write
 `vault://personal/...`; personal overlays cannot write
 `vault://team/...`. The contract between the two layers is the key
-names in `[env.vars]` / `[env.required]` / `[env.recommended]` /
-`[env.optional]` (and the Claude / repos / instance / files
-variants), NOT shared vault provider names.
+names in `[env.vars]` / `[env.secrets]` and their
+`.required` / `.recommended` / `.optional` sub-tables, NOT shared
+vault provider names.
 
 **Alternatives considered:** (a) shared "rendezvous" names (team
 config could reference `vault://personal/github-pat`, user overlay
@@ -1162,33 +1194,40 @@ publish its config without accidentally prescribing the user-side
 layout. Users couldn't reorganize their vaults without editing team
 configs. The symbolic-URI approach adds a new scheme without solving
 the root problem (the team still names user-facing refs). File-local
-scoping with an `[env.required]`-style contract keeps each layer
+scoping with an `[env.secrets.required]`-style contract keeps each layer
 owning only its own namespace and reduces the team/personal coupling
 to a vocabulary of key names.
 
-### D-10. Three-level env requirements: required / recommended / optional
+### D-10. `env.vars` / `env.secrets` split with three-level requirement sub-tables
 
-**Decided:** The team config declares expected env var names and
-their failure policy via three tables:
-- `[env.required]` — hard error on miss.
-- `[env.recommended]` — loud warning on miss, apply continues.
-- `[env.optional]` — info log on miss, apply continues.
+**Decided:** Env values split by sensitivity (`[env.vars]` for non-
+sensitive config, `[env.secrets]` for sensitive values), each carrying
+three optional sub-tables for team-declared requirements:
+- `*.required` — hard error on miss.
+- `*.recommended` — loud warning on miss, apply continues.
+- `*.optional` — info log on miss, apply continues.
 
-Same pattern for `[claude.env.*]`. Values are human-readable
-description strings surfaced in the diagnostic message.
+Same pattern for `[claude.env.*]`. Values in sub-tables are
+human-readable description strings surfaced in the diagnostic
+message. The sensitivity scope comes first, the requirement level
+nests under it.
 
 Requirement tables at `[repos.<name>.env.*]`, `[instance.env.*]`,
-and `[files.*]` scopes are deferred. Without a concrete user story
-asking for repo- or instance-scoped requirements, shipping them in
-v1 is speculative generality. If such use cases emerge (e.g., a repo
-that strictly needs a particular PAT type), adding the tables is
-additive and non-breaking.
+and `[files.*]` are deferred. Without a concrete user story,
+shipping them in v1 is speculative generality.
 
-**Alternatives considered:** (a) single `[env.required]` binary
-table (required vs silent — too blunt); (b) per-key inline flag
-syntax in `[env.vars]` like `GITHUB_TOKEN = "required"` (mixes value
-and metadata, ugly); (c) rely on downstream tools to error on
-missing env (too implicit; niwa can't self-document needs).
+**Alternatives considered:** (a) single flat `[env.vars]` table with
+no vars/secrets distinction — the guardrail (R14) can't tell
+`EDITOR = "nvim"` from `GITHUB_TOKEN = "ghp_abc123"` and would
+false-positive on every plaintext config value in a public repo;
+(b) a `[env].secrets = [...]` list naming which keys are sensitive —
+DRY violation (the key is declared in the value table AND in the
+secrets list); (c) per-key inline metadata like
+`GITHUB_TOKEN = { value = "vault://...", secret = true }` — verbose;
+mixes value and metadata; breaks the string-slot convention.
+
+The `vars` / `secrets` table split is the least-ceremony option that
+gives the guardrail a clean signal without heuristics or annotations.
 
 **Rationale:** Three levels match the observed pattern in real
 workspaces — some env vars block operation, some degrade
