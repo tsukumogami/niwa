@@ -3,7 +3,7 @@
   "design_doc": "docs/plans/PLAN-vault-integration.md",
   "branch": "docs/vault-integration",
   "pr_number": 52,
-  "integrity_hash": "sha256:7528a0e883375fd0732d2cf533a3f1c7c8cb26c14d56bca8a523319cc2a41447",
+  "integrity_hash": "sha256:0e28627d87dcb302c7023466a25ac7e56690dec0b08cdee0d9fc15ec77e4c7b7",
   "issues": [
     {
       "number": 1,
@@ -229,8 +229,8 @@
     {
       "number": 4,
       "title": "feat(workspace): resolver stage and apply.go pipeline wiring",
-      "status": "scrutinized",
-      "ci_status": "pending",
+      "status": "completed",
+      "ci_status": "passed",
       "ci_fix_attempts": 0,
       "issue_type": "code",
       "dependencies": [],
@@ -262,19 +262,70 @@
           }
         ]
       },
+      "reviewer_results": {
+        "issue": 4,
+        "round": 1,
+        "reviewers": [
+          {
+            "role": "pragmatic",
+            "blocking_count": 0,
+            "non_blocking_count": 2,
+            "detail_file": "wip/research/implement-vault-integration-issue_4_pragmatic.md"
+          },
+          {
+            "role": "architect",
+            "blocking_count": 0,
+            "non_blocking_count": 3,
+            "detail_file": "wip/research/implement-vault-integration-issue_4_architect.md"
+          },
+          {
+            "role": "maintainer",
+            "blocking_count": 0,
+            "non_blocking_count": 3,
+            "detail_file": "wip/research/implement-vault-integration-issue_4_maintainer.md"
+          }
+        ],
+        "resolution": "No blockers — all three reviewers approved. 8 non-blocking advisories deferred (documentation polish, single-layer consolidation opportunities, naming nits).",
+        "advisory_deferred": [
+          "pragmatic: walkFilesKeys no-op; SourceFile mostly test-only",
+          "architect: resolve.ResolveGlobalOverride vs workspace.ResolveGlobalOverride name collision; parallel deepcopy helpers; isVaultURI duplicates config.hasVaultPrefix",
+          "maintainer A1 (walkFilesKeys doc self-contradiction — worth fixing pre-merge but not blocking this issue); A2 (ResolveWorkspace ownership doc); A3 (stale effectiveCfg comment)"
+        ]
+      },
+      "qa_skipped": true,
       "testable_scenarios": []
     },
     {
       "number": 5,
       "title": "feat(vault): Infisical backend with batch resolve and stderr scrub",
-      "status": "pending",
+      "status": "scrutinized",
       "ci_status": "pending",
       "ci_fix_attempts": 0,
-      "issue_type": "",
+      "issue_type": "code",
       "dependencies": [],
-      "commits": [],
-      "agent_type": "",
-      "summary": null,
+      "commits": [
+        "dbc217e240bd0884328a595c97c1ff5dca6595ee",
+        "dbc217e240bd0884328a595c97c1ff5dca6595ee",
+        "39e52092ef14045691e9fd0dd1d338455a75f7d9"
+      ],
+      "agent_type": "coder",
+      "summary": {
+        "narrative": "",
+        "files_changed": [
+          "internal/vault/infisical/infisical.go",
+          "internal/vault/infisical/subprocess.go",
+          "internal/vault/infisical/infisical_test.go"
+        ],
+        "tests_added": 24,
+        "key_decisions": "Issue 5 core + rework: VersionToken.Token derives from (key + value-length) not plaintext (architect blocker); auth-failure marker set tightened to explicit phrases (401/403/unauthorized/forbidden/not logged in/...); anonymous-provider error messages print '\u003canonymous\u003e'; v1 coarse-grain trade-off documented — same-length rotations don't flip token, v1.1 will use infisical secrets get --format json for per-key version UUIDs",
+        "requirements_map": [
+          {
+            "ac": "Issue 5 full AC list + architect blocker + auth heuristic + cosmetic A3",
+            "status": "implemented",
+            "evidence": "per-AC mapping in initial coder return; rework addresses plaintext-derivation leak"
+          }
+        ]
+      },
       "testable_scenarios": []
     },
     {

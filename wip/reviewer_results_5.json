@@ -1,0 +1,16 @@
+{
+  "issue": 5,
+  "round": 1,
+  "reviewers": [
+    {"role": "pragmatic", "blocking_count": 0, "non_blocking_count": 2, "detail_file": "wip/research/implement-vault-integration-issue_5_pragmatic.md"},
+    {"role": "architect", "blocking_count": 1, "non_blocking_count": 3, "detail_file": "wip/research/implement-vault-integration-issue_5_architect.md"},
+    {"role": "maintainer", "blocking_count": 0, "non_blocking_count": 2, "detail_file": "wip/research/implement-vault-integration-issue_5_maintainer.md"}
+  ],
+  "resolution": "Architect blocker addressed in commit 39e5209: VersionToken.Token now derives from SHA-256(sorted key + big-endian value length) per key — plaintext never touched. v1.1 TODO to switch to per-key `infisical secrets get --format json`. Also tightened looksLikeAuthFailure (A1) and cosmetic A3 ('<anonymous>' for empty provider name).",
+  "advisory_deferred": [
+    "pragmatic: NewFactory no production callers yet; subprocess nil-guard unreachable",
+    "architect A2 (ensureLoaded not single-flight — documented rough edge, sync.Once refactor deferred)",
+    "maintainer M1 (subprocess errors lack project/env/path context)",
+    "maintainer M2 (stale defaultCommander comment)"
+  ]
+}
