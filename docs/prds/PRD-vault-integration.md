@@ -692,14 +692,18 @@ mapping key names to human-readable description strings:
   optional keys emit an info log (visible only with `--verbose` or
   equivalent); `niwa apply` proceeds without warning.
 
-Same pattern MUST be supported for Claude-scoped env declarations
-(`[claude.env.required]`, `[claude.env.recommended]`,
-`[claude.env.optional]`), per-repo env declarations
-(`[repos.<name>.env.required]` and the other two), per-instance env
-declarations (`[instance.env.required]` and the other two), and for
-file-based declarations (`[files.required]`, `[files.recommended]`,
-`[files.optional]` — where the table keys are file destinations and
-the description strings document why the file is expected).
+Same pattern MUST be supported for Claude-scoped env declarations:
+`[claude.env.required]`, `[claude.env.recommended]`,
+`[claude.env.optional]`. These apply to env vars consumed by Claude
+Code via `settings.local.json` (promoted or set directly).
+
+Per-repo, per-instance, and `[files]`-scoped requirement tables are
+NOT supported in v1. Teams that need a requirement only inside a
+specific repo or instance declare it at the workspace level and
+accept that the requirement applies across the workspace. If concrete
+use cases for scoped requirements emerge post-v1, adding
+`[repos.<name>.env.required]`, `[instance.env.required]`, or
+`[files.required]` tables is additive and non-breaking.
 
 The description string values MUST be carried into the error /
 warning / info message so missing-secret diagnostics are
@@ -742,9 +746,12 @@ bypassing team-declared requirements.
 - [ ] `workspace.toml` accepts `[vault].team_only = ["KEY1", ...]`.
 - [ ] `workspace.toml` accepts `[env.required]`, `[env.recommended]`,
   `[env.optional]` with key→description-string entries.
-- [ ] The same three tables are accepted under `[claude.env]`,
-  `[repos.<name>.env]`, `[instance.env]`, and as
-  `[files.required]` / `[files.recommended]` / `[files.optional]`.
+- [ ] The same three tables are accepted under `[claude.env]`.
+- [ ] `workspace.toml` parse-rejects `[repos.<name>.env.required]`,
+  `[instance.env.required]`, and `[files.required]` (plus their
+  `.recommended` / `.optional` siblings) as unknown-field warnings.
+  These locations are reserved for future expansion; v1 does not
+  accept them.
 - [ ] The personal overlay (`GlobalConfigOverride`) accepts the
   anonymous-or-named provider declaration and per-workspace
   `[workspaces.<scope>]` blocks.
@@ -1104,9 +1111,15 @@ their failure policy via three tables:
 - `[env.recommended]` — loud warning on miss, apply continues.
 - `[env.optional]` — info log on miss, apply continues.
 
-Same pattern for `[claude.env.*]`, `[repos.<name>.env.*]`,
-`[instance.env.*]`, and `[files.*]`. Values are human-readable
+Same pattern for `[claude.env.*]`. Values are human-readable
 description strings surfaced in the diagnostic message.
+
+Requirement tables at `[repos.<name>.env.*]`, `[instance.env.*]`,
+and `[files.*]` scopes are deferred. Without a concrete user story
+asking for repo- or instance-scoped requirements, shipping them in
+v1 is speculative generality. If such use cases emerge (e.g., a repo
+that strictly needs a particular PAT type), adding the tables is
+additive and non-breaking.
 
 **Alternatives considered:** (a) single `[env.required]` binary
 table (required vs silent — too blunt); (b) per-key inline flag
