@@ -254,6 +254,50 @@ STILL_OK = "this-is-plaintext-but-ok"
 	}
 }
 
+// TestRunAuditSecrets_NonEmptyTeamOnlyOnlyDoesNotTriggerError covers
+// the regression where a [vault] block that only declares team_only
+// (no [vault.provider] or [vault.providers.*]) was treated as a
+// "configured vault" by the audit's exit predicate, causing a
+// spurious failure. The sibling paths — emitVaultBootstrapPointer
+// (init.go) and runCheckVault (status_check_vault.go) — both treat
+// this shape as "no provider to route through", so the audit must
+// agree to avoid a confusing three-way divergence.
+func TestRunAuditSecrets_NonEmptyTeamOnlyOnlyDoesNotTriggerError(t *testing.T) {
+	workspaceRoot, _ := setupAuditWorkspace(t, `
+[workspace]
+name = "team-only-ws"
+
+[vault]
+team_only = ["KEY1"]
+
+[env.secrets]
+LEAKED = "plaintext-value"
+`)
+
+	origDir, _ := os.Getwd()
+	if err := os.Chdir(workspaceRoot); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chdir(origDir) })
+
+	buf := &strings.Builder{}
+	statusCmd.SetOut(buf)
+	defer statusCmd.SetOut(os.Stdout)
+	if err := runAuditSecrets(statusCmd, workspaceRoot); err != nil {
+		t.Fatalf("expected nil error for team_only-only vault (no providers), got: %v", err)
+	}
+	// The plaintext value should still be reported in the table
+	// even though the command exits zero — the audit is still
+	// informational; only the exit-code contract differs.
+	out := buf.String()
+	if !strings.Contains(out, "LEAKED") {
+		t.Errorf("audit table should still list plaintext key: %s", out)
+	}
+	if !strings.Contains(out, classPlaintext) {
+		t.Errorf("audit table should still label plaintext classification: %s", out)
+	}
+}
+
 // TestRunAuditSecrets_ExitsZeroWithOnlyVaultRefsOrEmpty is the happy
 // path: vault refs and empty values are compliant even with a vault
 // configured.

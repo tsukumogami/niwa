@@ -65,6 +65,13 @@ func runAuditSecrets(cmd *cobra.Command, cwd string) error {
 	// opted into the vault workflow, so plaintext values are their
 	// intentional baseline. With a vault configured, plaintext is a
 	// leak the user has the machinery to fix.
+	//
+	// "Configured" here means the same thing it means in init.go's
+	// emitVaultBootstrapPointer and status_check_vault.go's
+	// runCheckVault: at least one provider is declared. A [vault]
+	// block with only team_only is not enough — there is no provider
+	// to route vault:// refs to, so the user has no machinery to fix
+	// plaintext even if they want to.
 	hasPlaintext := false
 	for _, e := range entries {
 		if e.Classification == classPlaintext {
@@ -72,7 +79,7 @@ func runAuditSecrets(cmd *cobra.Command, cwd string) error {
 			break
 		}
 	}
-	if hasPlaintext && cfg.Vault != nil {
+	if hasPlaintext && cfg.Vault != nil && !cfg.Vault.IsEmpty() {
 		return fmt.Errorf("plaintext values present in *.secrets tables while a vault is configured")
 	}
 	return nil

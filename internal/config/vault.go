@@ -129,14 +129,15 @@ func (v *VaultRegistry) Validate(fileLabel string) error {
 }
 
 // IsEmpty reports whether the registry declares no providers. team_only
-// alone does not count as "non-empty" for routing purposes, but callers
-// that need to detect a wholly-empty block can still inspect the
-// individual fields.
+// alone does not count as "non-empty" for routing purposes: a [vault]
+// block with only team_only and no providers has nothing to bootstrap,
+// nothing to resolve, and nothing to re-check. Callers that need to
+// detect a wholly-empty block can still inspect the individual fields.
 func (v *VaultRegistry) IsEmpty() bool {
 	if v == nil {
 		return true
 	}
-	return v.Provider == nil && len(v.Providers) == 0 && len(v.TeamOnly) == 0
+	return v.Provider == nil && len(v.Providers) == 0
 }
 
 // KnownProviderNames returns the set of provider names declared in this

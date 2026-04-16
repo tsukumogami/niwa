@@ -206,7 +206,11 @@ func refFromSourceID(sourceID string) (vault.Ref, bool) {
 
 // printVaultRotations writes the rotation list to the command's
 // stdout. When no rotations are detected, emits a single
-// "no rotations" line so the user sees the all-clear signal.
+// "no rotations" line so the user sees the all-clear signal. When
+// rotations are present, closes with a call-to-action pointing at
+// `niwa apply` so the user knows the next step without having to
+// infer it from the command's name — mirroring the pattern used by
+// emitVaultBootstrapPointer after init.
 func printVaultRotations(cmd *cobra.Command, rotations []vaultRotation) {
 	out := cmd.OutOrStdout()
 	if len(rotations) == 0 {
@@ -227,4 +231,6 @@ func printVaultRotations(cmd *cobra.Command, rotations []vaultRotation) {
 			}
 		}
 	}
+	fmt.Fprintln(out, "")
+	fmt.Fprintln(out, "Run `niwa apply` to re-materialize affected files with the rotated values.")
 }
