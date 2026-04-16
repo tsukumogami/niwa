@@ -50,6 +50,223 @@ As a CI/CD pipeline, I want to apply the workspace config with only public repos
 
 *Scenario*: A GitHub Actions workflow calls `niwa apply --skip-private`. The private companion is not touched. The workspace has 8 public repos. The build succeeds.
 
+## Worked Example
+
+This section walks through a complete setup for a team at `acmecorp` that has public and private repos in the same GitHub org.
+
+### GitHub org shape
+
+```
+acmecorp/
+├── dot-niwa          (public)  — workspace config repo
+├── dot-niwa-private  (private) — workspace extension repo
+├── website           (public)  — marketing site
+├── docs              (public)  — public documentation
+├── api               (public)  — public API
+├── billing           (private) — billing service
+├── auth-service      (private) — internal auth service
+└── internal-tools    (private) — developer tooling
+```
+
+### Public workspace config
+
+`acmecorp/dot-niwa/workspace.toml` — committed to the public repo:
+
+```toml
+[workspace]
+name = "acmecorp"
+
+[[sources]]
+org = "acmecorp"
+repos = ["website", "docs", "api"]
+
+[groups.frontend]
+repos = ["website", "docs"]
+
+[groups.backend]
+repos = ["api"]
+
+[claude.content.repos.api]
+source = "content/api.md"
+```
+
+`acmecorp/dot-niwa/content/api.md` — public context injected into `api/CLAUDE.local.md`:
+
+```markdown
+# api
+
+Public REST API. See docs/ for the OpenAPI spec.
+Routes live in internal/routes/. Add new endpoints in their own file.
+```
+
+### Private workspace extension
+
+`acmecorp/dot-niwa-private/workspace-extension.toml` — committed to the private repo:
+
+```toml
+[[sources]]
+org = "acmecorp"
+repos = ["billing", "auth-service", "internal-tools"]
+
+[groups.private]
+repos = ["billing", "auth-service", "internal-tools"]
+
+[claude.content.repos.billing]
+source = "content/billing.md"
+
+[claude.content.repos.api]
+overlay = "overlays/api-internal.md"
+
+[env]
+ACMECORP_INTERNAL = "true"
+```
+
+`acmecorp/dot-niwa-private/content/billing.md` — context for the billing repo:
+
+```markdown
+# billing
+
+Internal billing service. Stripe keys are in Vault at secret/billing/stripe.
+Never log request bodies — they contain card data.
+```
+
+`acmecorp/dot-niwa-private/overlays/api-internal.md` — appended to `api/CLAUDE.local.md` for users with private access:
+
+```markdown
+## Internal notes
+
+The public API has a shadow admin API at /internal/. It is not documented
+externally. Auth uses the ACMECORP_ADMIN_TOKEN env var (see Vault).
+```
+
+`acmecorp/dot-niwa-private/CLAUDE.private.md` — workspace-level private context:
+
+```markdown
+@workspace-context.md
+
+Internal contributor notes for acmecorp. The private repos are billing,
+auth-service, and internal-tools. Treat all data in these repos as
+confidential. Do not reference internal repo names in public issues or PRs.
+```
+
+### Setup: one-time steps for a team member with full access
+
+```bash
+# 1. Register the private companion (once per machine)
+niwa config set private acmecorp/dot-niwa-private
+
+# 2. Initialize the workspace from the public config
+niwa init --from acmecorp/dot-niwa ~/acmecorp
+
+# 3. Apply — clones all repos and installs CLAUDE context
+cd ~/acmecorp
+niwa apply
+```
+
+### Local workspace — full access
+
+After `niwa apply` with the private companion registered and accessible:
+
+```
+~/acmecorp/
+├── .niwa/
+│   ├── workspace.toml     — clone of acmecorp/dot-niwa
+│   └── instance.json      — {skip_private: false}
+├── CLAUDE.md              — workspace context imports
+├── CLAUDE.private.md      — copied from dot-niwa-private
+├── website/               — cloned from acmecorp/website
+├── docs/                  — cloned from acmecorp/docs
+├── api/
+│   └── CLAUDE.local.md    — public content + private overlay (see below)
+├── billing/
+│   └── CLAUDE.local.md    — private content only
+├── auth-service/          — cloned from acmecorp/auth-service
+└── internal-tools/        — cloned from acmecorp/internal-tools
+```
+
+`CLAUDE.md` at the workspace root:
+
+```markdown
+@workspace-context.md
+@CLAUDE.private.md
+```
+
+`api/CLAUDE.local.md` — public content followed by private overlay:
+
+```markdown
+# api
+
+Public REST API. See docs/ for the OpenAPI spec.
+Routes live in internal/routes/. Add new endpoints in their own file.
+
+## Internal notes
+
+The public API has a shadow admin API at /internal/. It is not documented
+externally. Auth uses the ACMECORP_ADMIN_TOKEN env var (see Vault).
+```
+
+### Setup: one-time steps for a contributor with public access only
+
+```bash
+# No companion registration — contributor has no access to dot-niwa-private
+
+# 1. Initialize the workspace from the public config
+niwa init --from acmecorp/dot-niwa ~/acmecorp
+
+# 2. Apply — clone attempt for the private companion fails silently
+cd ~/acmecorp
+niwa apply
+```
+
+The companion clone fails (GitHub returns 404) and is silently skipped. No error is shown.
+
+### Local workspace — public access only
+
+After `niwa apply` with no private companion registered or companion inaccessible:
+
+```
+~/acmecorp/
+├── .niwa/
+│   ├── workspace.toml     — clone of acmecorp/dot-niwa
+│   └── instance.json      — {skip_private: false}
+├── CLAUDE.md              — workspace context imports (no @CLAUDE.private.md)
+├── website/               — cloned from acmecorp/website
+├── docs/                  — cloned from acmecorp/docs
+└── api/
+    └── CLAUDE.local.md    — public content only (no overlay)
+```
+
+`CLAUDE.md` at the workspace root:
+
+```markdown
+@workspace-context.md
+```
+
+`api/CLAUDE.local.md` — public content only:
+
+```markdown
+# api
+
+Public REST API. See docs/ for the OpenAPI spec.
+Routes live in internal/routes/. Add new endpoints in their own file.
+```
+
+The billing, auth-service, and internal-tools repos are absent. No warning is produced about missing repos. The workspace is fully functional for public development.
+
+### Later: contributor is granted private access
+
+When the contributor is later added to `acmecorp/dot-niwa-private`, no reconfiguration is needed:
+
+```bash
+# Register the companion (one-time)
+niwa config set private acmecorp/dot-niwa-private
+
+# Next apply automatically picks up private repos
+niwa apply
+```
+
+The companion is cloned, private repos are added to the workspace, `CLAUDE.private.md` is installed, and `api/CLAUDE.local.md` is updated to include the internal overlay.
+
 ## Requirements
 
 ### Registration and CLI
