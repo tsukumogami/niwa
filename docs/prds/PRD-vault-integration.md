@@ -568,12 +568,6 @@ every `vault://` reference on every invocation. No niwa-internal cache
 between commands. This picks up upstream rotations automatically.
 Provider CLIs may cache their own auth sessions (out of niwa's scope).
 
-**R17. Escape syntax for literal `vault://` strings.** A string value
-whose literal content legitimately begins with `vault://` MUST be
-escapable via a `raw:` prefix: `raw:vault://...` decodes to the
-literal string `vault://...`. This covers the edge case where a
-non-niwa tool uses `vault://` for its own URI scheme.
-
 ### Non-Functional Requirements
 
 **R18. Bootstrap under 10 minutes (sops backend).** A new developer
@@ -752,11 +746,9 @@ bypassing team-declared requirements.
   `.recommended` / `.optional` siblings) as unknown-field warnings.
   These locations are reserved for future expansion; v1 does not
   accept them.
-- [ ] The personal overlay (`GlobalConfigOverride`) accepts the
+- [ ] The personal overlay (`GlobalOverride`) accepts the
   anonymous-or-named provider declaration and per-workspace
   `[workspaces.<scope>]` blocks.
-- [ ] `raw:vault://...` literal escape is accepted wherever string
-  values appear.
 
 ### Resolution
 
@@ -892,6 +884,13 @@ bypassing team-declared requirements.
   migration is deferred. Users migrate by hand via the provider CLI
   (`sops edit`, `infisical secrets set`) plus `niwa status
   --audit-secrets`.
+- **Escape syntax for literal `vault://` strings.** No mechanism in v1
+  for TOML string values whose content legitimately begins with
+  `vault://`. The expected collision rate is effectively zero (`vault://`
+  is not a widely-used URI scheme outside niwa's proposed semantics),
+  and shipping an escape now locks a design choice before any concrete
+  use case justifies it. Addable later via parse-time unescape without
+  breaking existing configs.
 - **Additional vault backends beyond sops and Infisical.** Doppler,
   1Password, HashiCorp Vault OSS, Bitwarden Secrets Manager, Pulumi
   ESC, AWS Secrets Manager, Azure Key Vault all stay deferred. The
@@ -1062,20 +1061,6 @@ does it live? at what perms? invalidated how?). Vault provider CLIs
 already solve this. If niwa performance becomes an issue at apply
 time, the next optimization is a process-lifetime in-memory cache only
 — never disk.
-
-### D-8. `raw:` prefix for literal `vault://` escape
-
-**Decided:** A string literal that legitimately begins with `vault://`
-is escaped via a `raw:` prefix: `raw:vault://...` decodes to
-`vault://...`.
-
-**Alternatives considered:** (a) `\vault://...` backslash escape; (b)
-no escape (any string starting with `vault://` is always a reference).
-
-**Rationale:** Backslash escape collides with shell quoting
-expectations. No-escape risks user confusion if a downstream tool
-happens to use `vault://` for its own URI scheme. `raw:` is rare
-enough not to collide and mnemonic enough to read naturally.
 
 ### D-9. File-local provider scoping; team and personal overlays can't cross-reference each other's provider names
 
