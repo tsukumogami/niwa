@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 )
 
@@ -105,6 +106,38 @@ func validateNoVaultRefs(cfg *WorkspaceConfig) error {
 	return nil
 }
 
+// vaultRegistryShape captures the declared shape of a file's [vault]
+// block so mismatch errors can name what's declared and what the author
+// should switch to. It is computed once per file and passed to the
+// walker's check closure rather than recomputed per URI.
+type vaultRegistryShape struct {
+	// hasAnon is true when the file declares [vault.provider] (the
+	// anonymous single-provider shape).
+	hasAnon bool
+	// namedProviders lists the names declared under
+	// [vault.providers.*], sorted for stable error wording.
+	namedProviders []string
+}
+
+// describeShape inspects cfg.Vault and returns the declared shape. A
+// nil or empty registry yields the zero shape (neither anon nor named);
+// callers should handle the "no providers declared" case separately.
+func describeShape(cfg *WorkspaceConfig) vaultRegistryShape {
+	shape := vaultRegistryShape{}
+	if cfg.Vault == nil {
+		return shape
+	}
+	shape.hasAnon = cfg.Vault.Provider != nil
+	if len(cfg.Vault.Providers) > 0 {
+		shape.namedProviders = make([]string, 0, len(cfg.Vault.Providers))
+		for name := range cfg.Vault.Providers {
+			shape.namedProviders = append(shape.namedProviders, name)
+		}
+		sort.Strings(shape.namedProviders)
+	}
+	return shape
+}
+
 // checkContentSourcesForVault walks [claude.content.*] entries and
 // rejects any source that begins with vault://.
 func checkContentSourcesForVault(c *ContentConfig) error {
@@ -193,24 +226,53 @@ func checkAnyForVault(field string, v any) error {
 // the URI's grammar is well-formed; this function only extracts the
 // provider-name segment.
 func walkVaultRefsForUnknownProvider(cfg *WorkspaceConfig, known map[string]bool) error {
+	shape := describeShape(cfg)
 	check := func(location, uri string) error {
 		if !hasVaultPrefix(uri) {
 			return nil
 		}
 		name := extractProviderName(uri)
-		if !known[name] {
-			if len(known) == 0 {
-				return fmt.Errorf(
-					"%s references %q but the config declares no [vault] providers",
-					location, uri,
-				)
-			}
+		if known[name] {
+			return nil
+		}
+		if len(known) == 0 {
 			return fmt.Errorf(
-				"%s references provider %q via %q, but the config declares no such provider",
-				location, name, uri,
+				"%s references %q but the config declares no [vault] providers",
+				location, uri,
 			)
 		}
-		return nil
+		// Shape-mismatch detection. At this point the URI's provider
+		// segment does not match any declared provider; distinguish
+		// the two common authoring mistakes so the error tells the
+		// user which knob to turn. Generic "no such provider" is the
+		// fallback for honest typos (named URI + wrong name).
+		if name == "" && len(shape.namedProviders) > 0 {
+			return fmt.Errorf(
+				"%s: vault URI %q uses anonymous form (no provider "+
+					"name) but this file declares named providers "+
+					"[%s]. Use a named URI like "+
+					"%q or switch the vault declaration to "+
+					"[vault.provider] (anonymous)",
+				location, uri,
+				strings.Join(shape.namedProviders, ", "),
+				"vault://<name>/<key>",
+			)
+		}
+		if name != "" && shape.hasAnon {
+			key := extractKeyAfterProvider(uri)
+			return fmt.Errorf(
+				"%s: vault URI %q uses named form %q but this file "+
+					"declares an anonymous [vault.provider]. Use "+
+					"%q (anonymous form) or switch the declaration "+
+					"to [vault.providers.%s]",
+				location, uri, name+"/"+key,
+				"vault://<key>", name,
+			)
+		}
+		return fmt.Errorf(
+			"%s references provider %q via %q, but the config declares no such provider",
+			location, name, uri,
+		)
 	}
 
 	checkEnvMap := func(prefix string, env EnvConfig) error {
@@ -321,4 +383,16 @@ func extractProviderName(uri string) string {
 	}
 	// vault://key — anonymous provider.
 	return ""
+}
+
+// extractKeyAfterProvider returns the key segment of vault://name/key.
+// For vault://key (no separator) it returns the whole rest (treating
+// the URI as anonymous). Query strings are preserved; error messages
+// echo back what the user wrote.
+func extractKeyAfterProvider(uri string) string {
+	rest := strings.TrimPrefix(uri, vaultURIPrefix)
+	if i := strings.IndexByte(rest, '/'); i >= 0 {
+		return rest[i+1:]
+	}
+	return rest
 }

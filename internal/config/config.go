@@ -231,6 +231,14 @@ func Parse(data []byte) (*ParseResult, error) {
 		return nil, fmt.Errorf("parsing config: %w", err)
 	}
 
+	// Reserved-keyword scan: a scalar value at env.vars.required et al.
+	// is almost always a mistake -- reject with a clear path hint before
+	// any other validation runs, so the user sees this over a downstream
+	// "type mismatch" error.
+	if err := validateReservedEnvKeys(md); err != nil {
+		return nil, err
+	}
+
 	var warnings []string
 
 	// Handle deprecated [content] alias. The canonical location is

@@ -491,7 +491,10 @@ GITHUB_TOKEN = "vault://nonexistent/GITHUB_TOKEN"
 
 // TestParseRejectsAnonymousRefWithNamedProvider exercises the
 // anonymous-URI-against-named-provider mismatch: vault://key where
-// the config uses [vault.providers.<name>] instead.
+// the config uses [vault.providers.<name>] instead. The error must
+// name what's actually declared so the user can pick between the two
+// fix paths (switch URI form, or switch registry shape) without
+// re-reading the PRD.
 func TestParseRejectsAnonymousRefWithNamedProvider(t *testing.T) {
 	input := `
 [workspace]
@@ -500,12 +503,68 @@ name = "ws"
 [vault.providers.team]
 kind = "fake"
 
+[vault.providers.shared]
+kind = "fake"
+
 [env.secrets]
 GITHUB_TOKEN = "vault://GITHUB_TOKEN"
 `
 	_, err := Parse([]byte(input))
 	if err == nil {
 		t.Fatal("expected error for anonymous-URI with named provider only")
+	}
+	msg := err.Error()
+	// The error must tell the user: (a) the URI form they used
+	// (anonymous), (b) the registry shape declared (named), and (c)
+	// both fix paths. Assert on substrings rather than the full
+	// sentence so phrasing can evolve without test churn.
+	wantSubs := []string{
+		"anonymous form",
+		"named providers",
+		"shared, team", // sorted alphabetically for stable output
+		"vault://<name>/<key>",
+		"[vault.provider]",
+		`"vault://GITHUB_TOKEN"`,
+	}
+	for _, want := range wantSubs {
+		if !strings.Contains(msg, want) {
+			t.Errorf("error missing %q; got: %v", want, err)
+		}
+	}
+}
+
+// TestParseRejectsNamedRefWithAnonymousProvider is the symmetric
+// mismatch: vault://name/key against a file declaring
+// [vault.provider] (anonymous). The error must identify the shape
+// (anonymous) and offer both fix paths (switch URI form, or switch
+// registry shape by adopting the URI's name).
+func TestParseRejectsNamedRefWithAnonymousProvider(t *testing.T) {
+	input := `
+[workspace]
+name = "ws"
+
+[vault.provider]
+kind = "fake"
+
+[env.secrets]
+GITHUB_TOKEN = "vault://team/GITHUB_TOKEN"
+`
+	_, err := Parse([]byte(input))
+	if err == nil {
+		t.Fatal("expected error for named-URI with anonymous provider")
+	}
+	msg := err.Error()
+	wantSubs := []string{
+		"named form",
+		"anonymous [vault.provider]",
+		"vault://<key>",
+		"[vault.providers.team]",
+		`"vault://team/GITHUB_TOKEN"`,
+	}
+	for _, want := range wantSubs {
+		if !strings.Contains(msg, want) {
+			t.Errorf("error missing %q; got: %v", want, err)
+		}
 	}
 }
 
