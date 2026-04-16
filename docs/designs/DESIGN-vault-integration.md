@@ -10,9 +10,31 @@ problem: |
   BEFORE the merge runs, which inverts the current parse → merge →
   materialize flow into parse → resolve-per-file → merge → materialize.
 decision: |
-  Placeholder — populated by Phase 4.
+  Introduce three new packages (`internal/secret`, `internal/vault`,
+  `internal/guardrail`) and a `config.MaybeSecret` leaf type. Insert a
+  resolver stage between parse and merge in `apply.go:runPipeline` so
+  that each config file's `vault://` URIs resolve within the same
+  file's provider table (enforcing D-9). `secret.Value` is a struct
+  wrapper with redacted formatters; `secret.Error` + a context-scoped
+  redactor scrub error-chain interpolation. Provider backends are
+  subprocess-only (R20); v1 ships Infisical, v1.1 adds sops+age.
+  Merge and materializer signatures stay the same; only their leaf
+  types change.
 rationale: |
-  Placeholder — populated by Phase 4.
+  Keeping the config package pure TOML and the merge pipeline a pure
+  reduction preserves two valuable test-surface invariants while
+  still satisfying D-6's resolve-before-merge ordering. The typed-
+  value discipline starting immediately after parse means no
+  downstream layer ever handles vault URIs as bare strings — R22's
+  redaction story is structural. Subprocess-per-backend with an
+  optional `BatchResolver` interface accommodates both
+  session-caching backends (Infisical) and stateless ones (sops)
+  without forcing one pattern on the other. The alternative
+  approaches (resolve-at-materialize with provenance sidecar, lazy
+  resolution handles, merge-embedded resolution) all either spread
+  security-critical routing across more surface area or break
+  existing test invariants. State-file schema-version 1→2 is
+  additive and backwards-compatible; old states load fine.
 ---
 
 # DESIGN: Vault Integration
@@ -652,11 +674,468 @@ JSON-omitempty.
 
 ## Solution Architecture
 
-Populated by Phase 4.
+### Overview
+
+Three new packages + leaf-type changes to the existing config and state
+schemas. The existing `apply` orchestrator in
+`internal/workspace/apply.go` gains five new stages that slot between
+parse and merge. No existing merge or materialize logic is rewritten;
+only their input types change.
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│ internal/cli/apply.go                                                │
+│   flags: --allow-missing-secrets, --allow-plaintext-secrets           │
+└─────────────────────────────────────────────────────────────────────┘
+                               │
+                               ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│ internal/workspace/apply.go :: runPipeline                           │
+│                                                                       │
+│   1. config.Load(path)                       → *WorkspaceConfig       │
+│   2. config.ParseGlobalConfigOverride(data)  → *GlobalConfigOverride  │
+│   3. vault.ResolveWorkspace(ctx, cfg)        → *WorkspaceConfig      ◄─── NEW
+│   4. vault.ResolveGlobalOverride(ctx, gco)   → *GlobalConfigOverride ◄─── NEW
+│   5. vault.DetectProviderShadows(team,over)  → []Shadow              ◄─── NEW
+│   6. (if collision) R12 hard error                                  ◄─── NEW
+│   7. guardrail.CheckGitHubPublicRemoteSecrets(configDir, team)      ◄─── NEW
+│   8. workspace.ResolveGlobalOverride(…)      → GlobalOverride         │
+│   9. workspace.DetectShadows(team, over)     → []Shadow              ◄─── NEW
+│  10. workspace.MergeGlobalOverride(…)        → *WorkspaceConfig       │
+│  11. workspace.MergeOverrides(…)             → EffectiveConfig        │
+│  12. Close all providers (Resolver.CloseAll)                         ◄─── NEW
+│  13. emit stderr shadows + persist to state.json                     ◄─── NEW
+│  14. materializers → files                                           │
+└─────────────────────────────────────────────────────────────────────┘
+                               │
+                               ▼
+                        files on disk (0o600, .local.*)
+```
+
+### Components
+
+**New packages:**
+
+| Package | Purpose | Key types |
+|---------|---------|-----------|
+| `internal/secret` | Opaque secret runtime type | `Value`, `Error`, `Redactor`, `Wrap`, `Errorf` |
+| `internal/secret/reveal` | Allow-listed plaintext accessor | `UnsafeReveal(v Value) []byte` |
+| `internal/vault` | Provider interface + resolver | `Provider`, `Factory`, `Registry`, `Resolver`, `Ref`, `VersionToken` |
+| `internal/vault/infisical` | v1 Infisical backend | `Factory` implementing `BatchResolver` |
+| `internal/vault/sops` | v1.1 sops+age backend (stub in v1) | `Factory` |
+| `internal/guardrail` | Apply-time hard blocks | `CheckGitHubPublicRemoteSecrets` |
+
+**Modified packages:**
+
+| Package | Changes |
+|---------|---------|
+| `internal/config` | Add `[vault]`, `[vault.provider]`, `[vault.providers.*]` schema. Split `[env.vars]` from new `[env.secrets]`. Add `.required`/`.recommended`/`.optional` sub-tables. Add `MaybeSecret` leaf type. Add `GlobalOverride.Vault`. Add `workspace.vault_scope`, `vault.team_only`. Parser rejects mixed anon/named provider tables, `vault://` in forbidden contexts, and cross-file provider name references. |
+| `internal/workspace` | New files: `shadows.go` (DetectShadows), `resolve.go` (orchestrator helper for steps 3-12). `materialize.go` consumes `MaybeSecret` and reveals via `secret.UnsafeReveal`. `EnvMaterializer`, `SettingsMaterializer`, `FilesMaterializer` switch to `0o600` unconditionally (fixes pre-existing `0o644` bug). `state.go` adds `ManagedFile.Sources []SourceEntry` and `InstanceState.Shadows []Shadow`; `SchemaVersion` bumps 1→2. |
+| `internal/cli` | New flags: `--allow-missing-secrets`, `--allow-plaintext-secrets`. New subcommand: `niwa status --audit-secrets`, `niwa status --check-vault`. `niwa create` ensures instance-root `.gitignore` covers `*.local*` (idempotent merge). |
+
+### Key Interfaces
+
+**Secret runtime (Decision 2):**
+
+```go
+package secret
+
+type Value struct { /* private bytes */ }
+
+func (v Value) String() string                     // "***"
+func (v Value) GoString() string                   // "secret.Value(***)"
+func (v Value) Format(s fmt.State, verb rune)      // all verbs -> ***
+func (v Value) MarshalJSON() ([]byte, error)       // "\"***\""
+func (v Value) MarshalText() ([]byte, error)       // "***"
+func (v Value) GobEncode() ([]byte, error)         // refuse
+func (v Value) IsEmpty() bool
+func (v Value) Origin() Origin                     // provider name, key, token (non-secret)
+
+type Error struct { /* wraps an error; scrubs fragments */ }
+type Redactor struct { /* per-apply; holds known secret fragments */ }
+
+func Wrap(err error, values ...Value) error
+func Errorf(format string, args ...any) error
+func WithRedactor(ctx context.Context, r *Redactor) context.Context
+func RedactorFrom(ctx context.Context) *Redactor
+```
+
+```go
+package reveal  // import: internal/secret/reveal
+
+// UnsafeReveal is the sole plaintext accessor. Linter flags any caller
+// outside the allow-list (materializers + vault providers).
+func UnsafeReveal(v secret.Value) []byte
+```
+
+**Provider interface (Decision 3):**
+
+```go
+package vault
+
+type Provider interface {
+    Name() string
+    Kind() string
+    Resolve(ctx context.Context, ref Ref) (secret.Value, VersionToken, error)
+    Close() error
+}
+
+type BatchResolver interface {
+    ResolveBatch(ctx context.Context, refs []Ref) ([]BatchResult, error)
+}
+
+type Factory interface {
+    Kind() string
+    Open(ctx context.Context, cfg ProviderConfig) (Provider, error)
+}
+
+type Ref struct {
+    ProviderName string    // "" for anonymous singular
+    Key          string    // the path after vault://[name]/
+    Optional     bool      // ?required=false
+}
+
+type VersionToken struct {
+    Token      string      // opaque provider-side version ID
+    Provenance string      // user-facing: git SHA, audit URL, "" if none
+}
+
+type Registry struct { /* indexed by Kind */ }
+
+func (r *Registry) Register(f Factory)
+func (r *Registry) Build(ctx context.Context, specs []ProviderSpec) (*Bundle, error)
+
+// Bundle holds opened providers keyed by ProviderName, with Close-all.
+type Bundle struct { /* ... */ }
+
+func (b *Bundle) Get(name string) (Provider, error)
+func (b *Bundle) CloseAll() error
+
+type Resolver struct { /* walks MaybeSecret fields, calls provider.Resolve */ }
+
+func ResolveWorkspace(ctx context.Context, cfg *config.WorkspaceConfig, opts ResolveOptions) (*config.WorkspaceConfig, error)
+func ResolveGlobalOverride(ctx context.Context, gco *config.GlobalConfigOverride, opts ResolveOptions) (*config.GlobalConfigOverride, error)
+
+type ResolveOptions struct {
+    AllowMissing bool   // --allow-missing-secrets
+}
+```
+
+Infisical backend in `internal/vault/infisical/` implements `Factory`
+and uses the optional `BatchResolver` via `infisical export --format
+json`. Stderr is scrubbed through `vault.ScrubStderr(raw, known...)`
+before being wrapped into returned errors.
+
+**Config leaf type (Decision 1):**
+
+```go
+package config
+
+// MaybeSecret is a sum type; exactly one of Plain or Secret is set.
+type MaybeSecret struct {
+    Plain  string          // populated by parser if value doesn't start with vault://
+    Secret secret.Value    // populated by resolver after provider.Resolve
+    Token  vault.VersionToken // populated by resolver alongside Secret
+}
+
+func (m MaybeSecret) IsSecret() bool
+func (m MaybeSecret) String() string  // plain text OR *** for secrets (no leak)
+```
+
+`EnvConfig`, `ClaudeEnvConfig`, `SettingsConfig`, `FilesConfig` leaf
+string values become `MaybeSecret`. The `[env.vars]` / `[env.secrets]`
+split (R33) is a separate classification dimension: both map types
+use `MaybeSecret`, but `*.secrets` values are wrapped in `secret.Value`
+unconditionally by the resolver even when the plaintext doesn't start
+with `vault://` (so a user who writes a plaintext value in `*.secrets`
+still gets redaction — the guardrail fires, but if suppressed by
+`--allow-plaintext-secrets`, the value is still treated as secret).
+
+**Shadow detection (Decision 6):**
+
+```go
+package workspace
+
+type Shadow struct {
+    Kind           string // "env-var" | "env-secret" | "files" | "settings"
+    Name           string // key name
+    TeamSource     string // file path of team declaration
+    PersonalSource string // file path of personal-overlay declaration
+    Layer          string // "personal-overlay"
+}
+
+func DetectShadows(team *config.WorkspaceConfig, overlay *config.GlobalConfigOverride) []Shadow
+```
+
+```go
+package vault
+
+type ProviderShadow struct {
+    Name           string
+    TeamSource     string
+    PersonalSource string
+}
+
+func DetectProviderShadows(team, overlay *Bundle) []ProviderShadow
+```
+
+**State schema (Decision 4 + Decision 6):**
+
+```go
+package workspace
+
+type SchemaVersion int
+const CurrentSchemaVersion SchemaVersion = 2  // was 1
+
+type ManagedFile struct {
+    Path              string
+    ContentHash       string
+    SourceFingerprint string          // SHA-256 rollup (new in v2)
+    Sources           []SourceEntry   `json:"sources,omitempty"`
+}
+
+type SourceEntry struct {
+    Kind         string   // "plaintext" | "vault"
+    SourceID     string   // file path OR provider-name/key
+    VersionToken string   // opaque per-backend; content-hash for plaintext
+    Provenance   string   // user-facing; never a secret
+}
+
+type InstanceState struct {
+    SchemaVersion SchemaVersion
+    ManagedFiles  []ManagedFile
+    Shadows       []Shadow `json:"shadows,omitempty"`  // new in v2
+    // ... existing fields ...
+}
+```
+
+**Guardrail (Decision 5):**
+
+```go
+package guardrail
+
+func CheckGitHubPublicRemoteSecrets(
+    configDir string,
+    cfg *config.WorkspaceConfig,
+    allowPlaintextSecrets bool,
+) error
+```
+
+Shells out to `git -C <configDir> remote -v`, matches GitHub URL
+patterns, walks team's `[env.secrets]` and `[claude.env.secrets]` for
+`MaybeSecret.Plain != ""` entries. If any match and
+`allowPlaintextSecrets` is false, returns a structured error listing
+offending keys.
+
+### Data Flow
+
+**Happy path for `niwa apply` on a workspace with vault refs:**
+
+1. Parse team `workspace.toml` → `*WorkspaceConfig` with
+   `MaybeSecret{Plain: "vault://github-pat"}` in `env.secrets`.
+2. Parse personal overlay → `*GlobalConfigOverride` with its own
+   `[workspaces.tsukumogami.env.secrets]` mapping.
+3. Build provider bundles: team bundle from `cfg.Vault`, personal
+   bundle from `gco.Vault`.
+4. `DetectProviderShadows(team, personal)` — if both declare a
+   provider named `team`, emit stderr shadow then raise R12 error
+   and exit.
+5. `vault.ResolveWorkspace(ctx, cfg)` — for each `MaybeSecret` with
+   `Plain` starting with `vault://`, dispatch to team bundle.
+   Replace `Plain` with `Secret` + `Token`. `Redactor` registers each
+   resolved byte string as a scrub fragment.
+6. `vault.ResolveGlobalOverride(ctx, gco)` — same, against personal
+   bundle.
+7. `guardrail.CheckGitHubPublicRemoteSecrets` on team config — if
+   team's `env.secrets` still has `Plain != ""` entries and any
+   remote is public GitHub, error out (unless
+   `--allow-plaintext-secrets`).
+8. `workspace.ResolveGlobalOverride(gco, scope)` — selects the
+   `[workspaces.<scope>]` block.
+9. `DetectShadows(team, flattenedOverlay)` — diffs env/files/settings;
+   emit stderr diagnostic per shadow.
+10. `MergeGlobalOverride(team, flattenedOverlay)` — pure last-
+    writer-wins over `MaybeSecret` values. Personal wins per R7;
+    `team_only` keys raise R8 error.
+11. `MergeOverrides(merged, repoName)` — existing logic, unchanged.
+12. `Resolver.CloseAll()` — teardown provider sessions.
+13. Persist `Shadows` + `ManagedFiles` with new `Sources[]` to
+    `state.json`.
+14. Materializers write files at `0o600` with `.local` infix. Each
+    materializer reads `MaybeSecret.Plain` or calls
+    `secret.UnsafeReveal(m.Secret)` for bytes. `SourceFingerprint`
+    is computed from the `Sources[]` tuple list per materialized file.
+
+**Error paths:**
+
+- Provider unreachable (network, auth expired) → resolver returns
+  `secret.Errorf("provider %s unreachable: %w", p.Name(), err)`.
+  Scrubbed stderr of the CLI is wrapped in the `%w` chain via
+  `vault.ScrubStderr` before the wrap — no secret bytes escape.
+- Key not found → resolver returns a distinct error type
+  `vault.ErrKeyNotFound` so `apply.go` can format the R9 remediation
+  pointers.
+- R12 collision → emitted after `DetectProviderShadows` as a hard
+  error listing the colliding provider name and pointing to per-key
+  override syntax.
+- R14 guardrail fires → error names offending keys and recommends
+  `vault://` migration; `--allow-plaintext-secrets` overrides for
+  one apply only (no state write).
+
+### wip/ artifacts
+
+Shadow records and source-fingerprint tuples are persisted to
+`state.json` at the end of each apply. No new wip/ artifacts
+introduced by this design beyond the standard `implement-doc`
+flow.
 
 ## Implementation Approach
 
-Populated by Phase 4.
+Walking-skeleton-first: get a vault URI resolved end-to-end with a
+trivial provider before touching the materialization or guardrail
+machinery. Each phase is one commit / one atomic PR.
+
+### Phase 1: Secret runtime foundation
+
+Build `internal/secret/` with `Value`, `Error`, `Redactor`, `Wrap`,
+`Errorf`. Add `internal/secret/reveal/UnsafeReveal`. Ship with the
+R22 acceptance tests (formatter coverage, gob refusal, error-wrap
+scrub, context redactor).
+
+Deliverables:
+- `internal/secret/value.go` with full formatter coverage
+- `internal/secret/error.go` with `Error` + `Wrap` + `Errorf` + `Redactor`
+- `internal/secret/reveal/reveal.go`
+- `internal/secret/value_test.go` + `internal/secret/error_test.go`
+
+### Phase 2: Provider interface + registry + fake backend
+
+Build `internal/vault/` with `Provider`, `Factory`, `Registry`,
+`Bundle`, `Ref`, `VersionToken`. Ship a `fake` backend for unit tests
+(implements `Factory`, returns pre-configured values). No real
+backend yet.
+
+Deliverables:
+- `internal/vault/provider.go`, `registry.go`, `ref.go`, `token.go`
+- `internal/vault/fake/fake.go` (test-only)
+- `internal/vault/scrub.go` (`ScrubStderr` helper)
+- Unit tests exercising Registry, Bundle, Resolve, Close
+
+### Phase 3: Config schema additions (no resolver yet)
+
+Extend `internal/config/` to accept `[vault.provider]`,
+`[vault.providers.*]`, the `[env.vars]`/`[env.secrets]` split with
+`.required`/`.recommended`/`.optional` sub-tables,
+`workspace.vault_scope`, and `vault.team_only`. Add `MaybeSecret`
+leaf type. Add `GlobalOverride.Vault`. Parser rejects mixed anon/named,
+cross-file provider refs, and `vault://` in forbidden contexts. v0.6
+configs without vault parse unchanged (backwards compat).
+
+Deliverables:
+- `internal/config/config.go` schema extensions
+- `internal/config/maybesecret.go`
+- `internal/config/config_test.go` + fixtures for accept/reject cases
+
+### Phase 4: Resolver stage
+
+Build `internal/vault/resolver.go` with `ResolveWorkspace` and
+`ResolveGlobalOverride`. Wire into `apply.go:runPipeline` between
+parse and merge. Use the `fake` backend for integration tests.
+Existing merge tests get their one-time fixture update to wrap
+plain strings in `MaybeSecret{Plain: ...}`.
+
+Deliverables:
+- `internal/vault/resolver.go`
+- `internal/workspace/apply.go` edit (insert resolve calls)
+- Update `internal/workspace/override_test.go` fixtures
+- Integration test: parse → resolve → merge → materialize with fake
+  backend carrying a secret
+
+### Phase 5: Infisical backend
+
+Build `internal/vault/infisical/` as a real backend. Shells out to
+`infisical export --format json`. Implements `BatchResolver`. Scrubs
+stderr via `vault.ScrubStderr` before wrapping errors. Depends on
+users having `infisical` CLI installed and authed.
+
+Deliverables:
+- `internal/vault/infisical/infisical.go`
+- Acceptance test inducing auth-failure stderr with known-secret
+  fragment; assert fragment absent from returned error
+- README walkthrough for Infisical bootstrap
+
+### Phase 6: Materialization hardening
+
+Modify `EnvMaterializer`, `SettingsMaterializer`, `FilesMaterializer`
+to consume `MaybeSecret` and write `0o600` unconditionally (fixes
+pre-existing `0o644` bug). Add `.local` infix enforcement. Add
+`niwa create` instance-root `.gitignore` maintenance.
+
+Deliverables:
+- `internal/workspace/materialize.go` edits
+- `internal/cli/create.go` `.gitignore` maintenance
+- Functional tests covering 0o600, .local, .gitignore scenarios
+
+### Phase 7: Source fingerprint + status
+
+Add `ManagedFile.Sources[]` and `SourceFingerprint`. Update materializers
+to record per-source tuples. `niwa status` reports drifted/stale/ok
+with per-source attribution. Bump schema 1→2 with backwards-compatible
+load.
+
+Deliverables:
+- `internal/workspace/state.go` schema bump + migration
+- `internal/workspace/materialize.go` fingerprint emission
+- `internal/cli/status.go` output formatting
+- Functional tests: drift-only, vault-rotated, mixed-source
+
+### Phase 8: Shadow detection + diagnostics
+
+Add `workspace.DetectShadows` and `vault.DetectProviderShadows`. Wire
+into `apply.go` at steps 5 and 9. Persist `Shadows[]` to state.
+`niwa status` reads shadows from state and renders summary line.
+`niwa status --audit-secrets` adds SHADOWED column.
+
+Deliverables:
+- `internal/workspace/shadows.go`
+- `internal/vault/shadows.go`
+- `internal/cli/status.go` summary line + audit column
+- R22-compliance acceptance test: print Shadow slice, assert no secret
+  bytes
+
+### Phase 9: Public-repo guardrail
+
+Build `internal/guardrail/` with `CheckGitHubPublicRemoteSecrets`. Wire
+into `apply.go` at step 7. Add `--allow-plaintext-secrets` flag (one-
+shot, no state persistence).
+
+Deliverables:
+- `internal/guardrail/githubpublic.go`
+- `internal/cli/apply.go` flag
+- Functional tests: origin-private/upstream-public, both-private, both-public
+
+### Phase 10: CLI surface and migration UX
+
+Add `--allow-missing-secrets`, `?required=false`. Add `niwa status
+--audit-secrets` and `niwa status --check-vault` subcommands. Update
+`niwa init` to emit vault bootstrap pointer when template declares a
+vault.
+
+Deliverables:
+- `internal/cli/status.go` new subcommands
+- `internal/cli/apply.go` flag plumbing
+- `internal/cli/init.go` post-clone message
+- README migration walkthrough
+
+### Phase 11: Docs + acceptance checklist verification
+
+Walk every PRD acceptance criterion and confirm a test exists.
+Bootstrap walkthrough for Infisical in the niwa docs. Call out the
+v1-sops-stub status (interface present, backend arrives in v1.1).
+
+Deliverables:
+- `docs/guides/vault-integration.md`
+- Test-coverage matrix in PR description
 
 ## Security Considerations
 
@@ -664,4 +1143,86 @@ Populated by Phase 5.
 
 ## Consequences
 
-Populated by Phase 6.
+### Positive
+
+- **Team configs become publishable.** Moving `tsukumogami/dot-niwa`
+  from private to public is a schema-level exercise once secrets are
+  in a vault. The guardrail prevents regressions.
+- **Per-org personal scoping works without ceremony.** US-3 is
+  satisfied end-to-end with no custom user code: a developer with
+  separate PATs for `tsukumogami` and `codespar` writes one personal
+  overlay, niwa picks the right one automatically.
+- **Zero new Go dependencies.** The subprocess-based provider model
+  means niwa's binary size and attack surface don't grow.
+- **Pre-existing `0o644` bug fixed.** Materialized env and settings
+  files become `0o600` across the board, including paths that don't
+  use vault (tighter-by-default without user action).
+- **Rotation investigation is cheap.** `niwa status` tells a user
+  "what rotated and when" via git commit SHA or audit-log URL,
+  without re-running apply.
+- **Override-visibility makes supply-chain attacks visible.** A
+  compromised personal overlay silently replacing a team provider
+  would otherwise be invisible; R31's stderr + status integration
+  surfaces it.
+- **`secret.Value` discipline is enforceable.** One type, one grep-
+  able plaintext-access point, one error-wrapping idiom. Future
+  niwa features that touch secrets inherit the redaction story
+  without custom work.
+
+### Negative
+
+- **New subprocess dependency on `git`.** The public-repo guardrail
+  shells out to `git remote -v`. Users who have cloned a workspace
+  outside a git working tree (e.g., extracted from a tarball) can't
+  use the guardrail. Addressed by: emitting a warning "no git
+  remotes detected; guardrail skipped" and trusting `--allow-
+  plaintext-secrets` path.
+- **VersionToken shape leaks provider vocabulary.** `Provenance`
+  format varies per backend (commit SHA, URL, empty). Tooling that
+  wants to cross-reference provenance has to know the backend. Lives
+  with it — centralizing on one shape would force least-common-
+  denominator output.
+- **Subprocess-per-key latency.** Calling `infisical secrets get`
+  N times per apply would be slow. Mitigated by the optional
+  `BatchResolver` — Infisical uses `infisical export` once per
+  project. sops has no batching benefit but also has no network.
+- **Redactor-in-context is a mild anti-pattern.** Go stdlib
+  discourages context values for non-request-scoped data. The
+  per-apply redactor IS request-scoped in the HTTP-server sense, but
+  teams used to strict context-value hygiene may push back.
+  Addressed by: documentation explaining the request-scoped
+  semantics; linter (Option 4, post-v1) would catch misuse.
+- **Linter-as-hardening is deferred.** The `go/analysis` linter that
+  would trap every `fmt.Errorf("...: %w", err)` touching a `Value`
+  outside `secret.Wrap`/`Errorf` is v1.1 scope. v1 relies on runtime
+  redaction + acceptance tests, which is weaker than compile-time
+  rejection.
+- **`MaybeSecret` leaf type ripples through merge tests.** Every
+  existing merge test gains a one-time fixture migration (wrap
+  plain strings). Non-trivial churn in `override_test.go`.
+- **State file schema bump.** `state.json` schema-version 1 → 2.
+  Additive, backwards-compatible load (old states parse with empty
+  `Sources`/`Shadows`), but any external tooling that reads
+  `state.json` has to tolerate the new fields.
+
+### Mitigations
+
+- **`--allow-plaintext-secrets` is strictly one-shot.** The guardrail
+  regression path is documented and re-triggers on every apply;
+  CI catches stale plaintext within one cycle after a vault rotation
+  makes it obsolete.
+- **`vault.ScrubStderr` is shared across all backends.** Stderr
+  scrubbing is not reinvented per backend, so a new backend author
+  can't forget it.
+- **`UnsafeReveal` has a grep-able name + lives in a sub-package.**
+  Code review for "did this introduce a new plaintext read site?"
+  is a five-line grep. A linter can enforce the allow-list without
+  changing runtime.
+- **Test layering is preserved.** Config parse tests stay pure TOML;
+  vault resolver tests use a fake backend; merge tests use
+  `MaybeSecret` fixtures. No test category requires the others to
+  set up.
+- **Backwards-compat path for v0.6 configs.** The parser accepts
+  v0.6 `[env.vars]` flat maps; the resolver no-ops on files without
+  `[vault]`. A user who doesn't opt into vault sees zero change
+  except the `0o600` file-mode (strictly-safer).

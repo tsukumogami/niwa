@@ -38,4 +38,7 @@ merge runs, inverting the current parse → merge → materialize flow.
 - **Phase 3** (Cross-Validation): complete — no hard conflicts.
   Two minor reconciliations logged (shadow timing, VersionToken
   field names). Considered Options + Decision Outcome written.
-- **Phase 4** (Architecture): next.
+- **Phase 4** (Architecture): complete — Solution Architecture,
+  Implementation Approach (11 phases), and Consequences written.
+  Frontmatter decision + rationale populated.
+- **Phase 5** (Security): next (mandatory).
