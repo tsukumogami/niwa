@@ -1066,6 +1066,18 @@ bypassing team-declared requirements.
 - [ ] The scaffolded `workspace.toml` from `niwa init` includes a
   commented `[vault]` example.
 
+## Known Limitations
+
+- **Migration from plaintext to vault is manual in v1.** No
+  `niwa vault init` or `niwa vault import` subcommand. The migration
+  workflow is provider-specific: the user runs the provider CLI (e.g.,
+  `infisical secrets set`) to import each secret, then edits the
+  workspace config to move keys from `[env.vars]` to `[env.secrets]`
+  with `vault://` refs. `niwa status --audit-secrets` (R13) verifies
+  completeness. The README documents the step-by-step walkthrough for
+  the Infisical backend. A `niwa vault import` helper may follow in a
+  later version if the manual workflow proves too tedious at scale.
+
 ## Out of Scope
 
 - **v1 niwa `vault import` tool.** Automated plaintext-to-vault
@@ -1367,11 +1379,6 @@ Questions to resolve before the PRD transitions to Accepted:
 
 
 
-- **Q-3 Migration UX details.** What does the first-time migration
-  walkthrough look like? A dedicated `niwa vault init` subcommand, or
-  a combination of manual steps documented in the README? Research
-  leaned toward manual steps for v1 (`niwa vault import` is deferred),
-  but a guided walkthrough might be worth it for onboarding.
 
 - **Q-4 `team_only` enforcement layer.** Is violation caught at
   parse time (static check against the committed personal overlay) or
