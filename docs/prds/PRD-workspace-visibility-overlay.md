@@ -1,9 +1,10 @@
 ---
 status: Draft
+version: 2
 problem: |
   When a niwa workspace config repo is made public, the workspace.toml exposes private information through several surfaces: source org identifiers in [[sources]], group names that imply private categories exist, [repos.*] section keys (which are repo names), [claude.content.repos.*] entries including subdirectory mappings that reveal internal code structure, and [channels.*.access] sections containing user IDs. Teams that want to publish their workspace config — to enable open contribution, share it as a reference, or reduce maintenance burden — currently have no way to keep private repo references out of the public config without maintaining a completely separate private workspace config that duplicates all the public configuration.
 goals: |
-  Teams can publish their niwa workspace config as a public GitHub repo without exposing private repo names, group names, source org identifiers, or operational config for private repos. Private repo configuration is kept in a separate companion repo that niwa fetches automatically when the user has permission, and ignores silently when they don't. Users without private access experience a fully functional workspace with only the public repos, with no indication that private configuration exists.
+  Teams can publish their niwa workspace config as a public GitHub repo without exposing private repo names, group names, source org identifiers, or operational config for private repos. Private repo configuration is kept in a separate companion repo that niwa fetches automatically when the user has permission, and ignores silently when they don't. Users without private access experience a complete workspace with only the public repos — all configured repos are cloned, hooks execute without error, and environment setup matches the workspace config — with no output (stdout, stderr, or log files) referencing private configuration.
 ---
 
 # PRD: Private workspace extension
@@ -24,7 +25,7 @@ Teams that want the benefits of a public workspace config — enabling contribut
 
 1. Teams can publish their workspace config repo without exposing private repo names, group names, or operational config for private repos.
 2. Users with access to the private companion repo get a complete workspace (public and private repos) from a single `niwa apply` command.
-3. Users without access to the private companion (new contributors, CI/CD runners) get a fully functional workspace with public repos only — with no errors and no indication that private configuration exists.
+3. Users without access to the private companion (new contributors, CI/CD runners) get a complete workspace with public repos only — all configured repos are cloned, hooks execute without error, and environment setup matches the workspace config — with no output (stdout, stderr, or log files) referencing the companion or any private configuration.
 4. Registering a private companion requires one command (`niwa config set private <repo>`), and the private companion is silently ignored when not registered.
 
 ## User Stories
@@ -63,13 +64,13 @@ As a CI/CD pipeline, I want to apply the workspace config with only public repos
 
 ### Companion Sync and Discovery
 
-**R5**: When `niwa apply` runs with a private companion registered and no `skip_private` flag, niwa syncs the companion (equivalent to the global config sync step).
+**R5**: When `niwa apply` runs with a private companion registered and no `skip_private` flag, niwa syncs the companion using the same git pull mechanism as the global config sync step (see `SyncConfigDir`). If the companion has never been cloned, this step attempts an initial clone. Failure behavior is governed by R6–R8.
 
-**R6**: If the companion has never been successfully cloned on the current machine and the clone fails for any reason (not found, access denied, network error), niwa silently skips the private companion and continues apply with the public config only. No error message, no warning.
+**R6**: If the companion has never been successfully cloned on the current machine and the clone fails for any reason — including not found (HTTP 404), access denied (HTTP 403), network timeout, or DNS failure — niwa silently skips the private companion and continues apply with the public config only. No error message, no warning, no non-zero exit code related to the companion. All failure reasons are treated identically.
 
-**R7**: If the companion was previously successfully cloned on the current machine and the sync fails for any reason, `niwa apply` aborts with an error identifying the companion as the cause. Example: `"Private workspace extension sync failed: <error>. Check access with \`niwa config set private\` or skip with --skip-private."`
+**R7**: If the companion was previously successfully cloned on the current machine and the sync fails for any reason (network error, access revoked, or other), `niwa apply` aborts with a non-zero exit code and an error message identifying the companion as the cause. Example: `"Private workspace extension sync failed: <error>. Check access with \`niwa config set private\` or skip with --skip-private."` The error must not include the companion's URL or path in standard output.
 
-**R8**: niwa derives "previously cloned" state from the presence of a git repository in the companion's local clone directory (`$XDG_CONFIG_HOME/niwa/private/`). If the directory exists and is a valid git repo, it was previously cloned.
+**R8**: niwa derives "previously cloned" state using the following check: the directory `$XDG_CONFIG_HOME/niwa/private/` exists AND `git -C $XDG_CONFIG_HOME/niwa/private/ rev-parse HEAD` exits with code 0. If both conditions are true, the companion is treated as previously cloned and R7 applies on sync failure. Otherwise R6 applies. If `$XDG_CONFIG_HOME` is not set, niwa uses `~/.config` as the default, following the XDG Base Directory specification.
 
 ### Private Companion Format
 
@@ -77,21 +78,23 @@ As a CI/CD pipeline, I want to apply the workspace config with only public repos
 
 **R10**: `workspace-extension.toml` supports these additive sections: `[[sources]]`, `[groups.*]`, `[repos.*]`, `[claude.content.*]`.
 
-**R11**: `workspace-extension.toml` supports these override sections: `[claude.hooks]`, `[claude.settings]`, `[env]`, `[files]`. Merge semantics match GlobalOverride (hooks append; settings per-key; env files append, env vars per-key; files per-key).
+**R11**: `workspace-extension.toml` supports these override sections: `[claude.hooks]`, `[claude.settings]`, `[env]`, `[files]`. Merge semantics match GlobalOverride: hooks append (companion hooks added after public config hooks); settings per-key (companion value used only if key absent in public config); `env.files` append (companion files sourced after public config files); `env` vars per-key (companion value used only if key absent in public config); `files` per-key (companion file used only if destination absent in public config).
 
-**R12**: `workspace-extension.toml` does not support workspace metadata fields (`[workspace]`, `[channels]`, `[[sources]]` auto-discovery without explicit `repos` list — see R17).
+**R12**: `workspace-extension.toml` does not support workspace metadata fields (`[workspace]`, `[channels]`). All `[[sources]]` entries in `workspace-extension.toml` must include explicit `repos` lists — auto-discovery is prohibited for all companion source org declarations regardless of whether the org also appears in the public config. If `workspace-extension.toml` is missing from an otherwise valid companion repo, `niwa apply` aborts with an error identifying the missing file.
 
 ### Merge Semantics
 
-**R13**: Sources from the companion are appended to the public config's sources after parsing. The combined sources list drives repo discovery.
+When an entry exists in both the public config and the companion, "public config takes precedence" means the public config's entry is used in its entirety and the companion's entry for that key is discarded without warning or error. No field-level merging occurs within a group, repo, or content entry — the entire entry from the public config replaces the companion's.
 
-**R14**: Groups from the companion are added to the public config's group map. If a group name exists in both the public config and the companion, the public config's definition takes precedence.
+**R13**: Sources from the companion are appended to the public config's sources after parsing. The combined sources list drives repo discovery. If the same repo is discovered from multiple sources, it is deduplicated (keeping the first occurrence) and the duplicate is silently skipped.
 
-**R15**: Repo overrides from the companion are added to the public config's repos map. If a repo entry exists in both the public config and the companion, the public config's entry takes precedence.
+**R14**: Groups from the companion are added to the public config's group map. If a group name exists in both the public config and the companion, the public config's definition is used and the companion's is discarded without warning.
 
-**R16**: Content entries from the companion are added to the public config's content map. If a content entry exists for the same repo in both configs, the public config's entry takes precedence.
+**R15**: Repo overrides from the companion are added to the public config's repos map. If a repo entry exists in both the public config and the companion, the public config's entry is used and the companion's is discarded without warning.
 
-**R17**: If both the public config and the companion declare a `[[sources]]` entry for the same GitHub org, `niwa apply` aborts with an error: `"Duplicate source org '<org>' found in workspace config and private companion. Use explicit repos lists in both source declarations to resolve."` Auto-discovery (`[[sources]] org = "X"` without an explicit `repos` list) is prohibited in companion files for orgs that also appear in the public config.
+**R16**: Content entries from the companion are added to the public config's content map. If a content entry exists for the same repo in both configs, the public config's entry is used and the companion's is discarded without warning.
+
+**R17**: During companion parsing (before any git clone or pull operations on workspace repos), if any org in the companion's `[[sources]]` entries matches an org in the public config's `[[sources]]` entries, `niwa apply` aborts with a non-zero exit code and an error: `"Duplicate source org '<org>' found in workspace config and private companion. Use explicit repos lists in both source declarations to resolve."` Companion source entries without explicit `repos` lists are rejected at parse time (see R12).
 
 ### CLAUDE Context Injection
 
@@ -101,49 +104,53 @@ As a CI/CD pipeline, I want to apply the workspace config with only public repos
 
 ### Security
 
-**R20**: Private companion registration is stored in `~/.config/niwa/config.toml` under a `[private_workspace]` section. The local clone path is derived at runtime from `$XDG_CONFIG_HOME/niwa/private/` and is not stored in the config file.
+**R20**: Private companion registration is stored in `~/.config/niwa/config.toml` under a `[private_workspace]` section containing the repo URL only. The local clone path is derived at runtime as `$XDG_CONFIG_HOME/niwa/private/` (falling back to `~/.config/niwa/private/` if `XDG_CONFIG_HOME` is unset) and is never stored in the config file.
 
-**R21**: Parsing `workspace-extension.toml` must validate all `files` destination paths and `env.files` source paths using the same path-traversal rejection rules applied to GlobalOverride config (reject absolute paths and `..` path components).
+**R21**: Parsing `workspace-extension.toml` must validate all `files` destination paths and `env.files` source paths using the same path-traversal rejection rules applied to GlobalOverride config: reject any path that is absolute (starts with `/`) or contains `..` as a path component. Rejection occurs during companion parsing, before any workspace file operations. niwa exits with a non-zero exit code and an error identifying the invalid path. No files are written to the workspace.
 
-**R22**: Hook scripts declared in `workspace-extension.toml` are resolved to absolute paths using the companion's local directory before merging, following the same pattern as GlobalOverride hook script resolution.
+**R22**: Hook scripts declared in `workspace-extension.toml` are resolved to absolute paths using the companion's local clone directory before merging, following the same pattern as GlobalOverride hook script resolution. Relative hook script paths are resolved relative to the companion's local clone directory.
 
-**R23**: niwa must not include the companion's registration URL, local path, or any reference to the companion's existence in standard apply output. These may appear in verbose/debug output only.
+**R23**: In standard apply output (without `--debug` or `--verbose` flags), niwa must not include the companion's registration URL, local path, repo name, or any text that would indicate a private companion was consulted. Companion details may appear in debug-level output when `--debug` or `--verbose` is passed. The error message in R7 must not include the companion's URL or repository name.
 
 ## Acceptance Criteria
 
 ### Registration
 
-- [ ] `niwa config set private acmecorp/dot-niwa-private` stores the URL in `~/.config/niwa/config.toml` under `[private_workspace]` and clones the companion to `$XDG_CONFIG_HOME/niwa/private/`.
-- [ ] `niwa config unset private` removes the `[private_workspace]` section from config and deletes `$XDG_CONFIG_HOME/niwa/private/`.
-- [ ] After `niwa config set private <inaccessible-repo>`, `niwa apply` produces no error and no output related to the companion. The workspace applies with public config only.
+- [ ] `niwa config set private acmecorp/dot-niwa-private` stores the URL in `~/.config/niwa/config.toml` under `[private_workspace]` and clones the companion to `$XDG_CONFIG_HOME/niwa/private/` (or `~/.config/niwa/private/` if `XDG_CONFIG_HOME` is unset).
+- [ ] `niwa config unset private` removes the `[private_workspace]` section from config and deletes the local companion directory (`$XDG_CONFIG_HOME/niwa/private/`). After unset, the directory no longer exists on the filesystem.
+- [ ] After `niwa config set private <inaccessible-repo>`, `niwa apply` stdout and stderr contain no text referencing the companion, its URL, or private configuration. The workspace applies with public config only and exits with code 0.
 - [ ] `niwa init --skip-private` results in `.niwa/instance.json` with `skip_private: true`. Subsequent `niwa apply` on that instance does not attempt to sync the companion, even if one is registered.
 
 ### First-Time and Graceful Degradation
 
-- [ ] First `niwa apply` with a private companion registered on a machine where the companion was never cloned: if clone fails (auth error, not found, network error), apply completes successfully with public repos only. No error or warning output related to the companion.
-- [ ] First `niwa apply` with a private companion registered and clone succeeds: companion repos are merged into the workspace. Apply produces a workspace with repos from both configs.
-- [ ] Subsequent `niwa apply` after companion was previously cloned successfully: if sync fails, apply aborts with an error that identifies the companion as the cause.
+- [ ] First `niwa apply` with a private companion registered on a machine where the companion was never cloned: if clone fails (HTTP 404, HTTP 403, network timeout, or DNS failure), apply exits with code 0 and stdout/stderr contain no text referencing the companion or private configuration. The workspace contains only public repos.
+- [ ] First `niwa apply` with a private companion registered and clone succeeds: companion repos are merged into the workspace. Apply produces a workspace with repos from both the public config and the companion.
+- [ ] Subsequent `niwa apply` after companion was previously cloned successfully (i.e., `$XDG_CONFIG_HOME/niwa/private/` exists and `git -C $XDG_CONFIG_HOME/niwa/private/ rev-parse HEAD` exits 0): if sync fails, apply exits with a non-zero exit code and an error message that identifies the companion sync as the cause without disclosing the companion's URL in standard output.
 - [ ] `niwa apply --skip-private` on an instance with `skip_private: false` skips the companion for that invocation only. The next `niwa apply` without the flag uses the companion normally.
 
 ### Merge Semantics
 
 - [ ] With a companion that adds `[[sources]] org = "internal-org" repos = ["vision"]`, and public config with `[[sources]] org = "tsukumogami"`: after `niwa apply`, the workspace contains repos from both orgs.
-- [ ] With companion and public config both defining a group named `tools`: the public config's `tools` group definition is used; the companion's is silently ignored.
-- [ ] With companion and public config both defining `[repos.vision]`: the public config's entry is used; the companion's is silently ignored.
-- [ ] With companion declaring `[[sources]] org = "tsukumogami"` (same org as public config), and public config also declaring `[[sources]] org = "tsukumogami"`: `niwa apply` aborts with a duplicate-source-org error before any repos are modified.
+- [ ] With companion and public config both defining a group named `tools`: the public config's `tools` group definition is used; the companion's is discarded. No warning or error is produced for the collision.
+- [ ] With companion and public config both defining `[repos.vision]`: the public config's entry is used; the companion's is discarded. No warning or error is produced for the collision.
+- [ ] With companion declaring `[[sources]] org = "tsukumogami"` (same org as public config), and public config also declaring `[[sources]] org = "tsukumogami"`: `niwa apply` exits with a non-zero exit code and a duplicate-source-org error before any git clone or pull operations execute on workspace repos.
+- [ ] With a companion that defines `[env] PRIVATE_TOKEN = "secret"` and public config that defines `[env] PUBLIC_KEY = "key"`: after `niwa apply`, both env vars are available in the workspace environment (per-key merge, no collision).
+- [ ] With a companion that defines `env.files = ["private.env"]` and public config that defines `env.files = ["public.env"]`: after `niwa apply`, both files are sourced (append semantics), with public config files sourced first.
 
 ### Content and CLAUDE Injection
 
 - [ ] Companion with `[claude.content.repos.vision] source = "repos/vision.md"` and `repos/vision.md` present in the companion repo: after `niwa apply`, the workspace instance contains `vision/CLAUDE.local.md` generated from that content file.
 - [ ] Companion with `CLAUDE.private.md` at its root: after `niwa apply`, the instance root contains `CLAUDE.private.md` and the workspace `CLAUDE.md` contains `@CLAUDE.private.md`.
 - [ ] Companion without `CLAUDE.private.md`: after `niwa apply`, the workspace `CLAUDE.md` does not contain `@CLAUDE.private.md`. No error.
-- [ ] Workspace `CLAUDE.md` import order: workspace context appears before `@CLAUDE.private.md`, which appears before `@CLAUDE.global.md` (if global config is also registered).
+- [ ] Workspace `CLAUDE.md` import order (when both private and global configs are registered): reading the workspace `CLAUDE.md` file top-to-bottom, the `@CLAUDE.private.md` import line appears after the workspace context import and before the `@CLAUDE.global.md` import line.
+- [ ] Companion with a hook script declared as `[claude.hooks] on_apply = ["scripts/post-apply.sh"]`: after `niwa apply`, the hook's path is resolved to the companion's local clone directory (absolute path), not the workspace root.
 
 ### Security
 
-- [ ] `workspace-extension.toml` with `files` containing a destination path of `../../.ssh/authorized_keys` is rejected at parse time with an error. No disk writes occur.
-- [ ] `workspace-extension.toml` with `env.files` containing an absolute path is rejected at parse time with an error.
-- [ ] Standard `niwa apply` output (non-verbose) contains no reference to the private companion's repo name, URL, or registration status.
+- [ ] `workspace-extension.toml` with `files` containing a destination path that includes `..` as a path component (e.g., `../../.ssh/authorized_keys`) is rejected during companion parsing. `niwa apply` exits with a non-zero exit code and an error identifying the invalid path. No workspace files are written.
+- [ ] `workspace-extension.toml` with `env.files` containing a path that starts with `/` (absolute path) is rejected during companion parsing. `niwa apply` exits with a non-zero exit code and an error identifying the invalid path.
+- [ ] `niwa apply` stdout and stderr (without `--debug` or `--verbose` flags) contain no text matching the companion's repo name, URL, local path, or the string "companion". Running `niwa apply 2>&1 | grep -iE '(companion|/niwa/private)'` on a workspace with a registered companion returns no output.
+- [ ] Companion repo is accessible but `workspace-extension.toml` is absent: `niwa apply` exits with a non-zero exit code and an error identifying the missing file.
 
 ## Out of Scope
 
@@ -180,13 +187,11 @@ A distinct filename clarifies that the companion is an extension (additive and o
 **Public config precedence on collisions.**
 When both the public config and the companion define the same group, repo, or content entry, the public config wins. The alternative (companion wins) would allow private config to silently override public config behavior, which is unexpected for teams that think of the companion as additive-only. Public-config-wins is the conservative default; teams that need companion overrides can remove the entry from the public config.
 
-## Open Questions
+**`niwa status` does not display companion registration state.**
+Companion registration state is omitted from `niwa status` output entirely. Any mention of the companion in status output could be visible to users without access (shared terminals, log aggregation). Users who need to debug companion state can use `niwa config show private`. This aligns with R23.
 
-**Q1 — Should `niwa status` display companion registration state?**
-Showing companion registration state (registered URL, sync state) in `niwa status` improves debuggability for users with access. But any output about the companion is potentially visible to users without access (shared terminals, log aggregation). Options: (a) always show in status output, (b) show only when a companion is registered and accessible, (c) omit from status entirely, available via a separate `niwa config show private` command. Decision needed before acceptance.
+**Companion-only orgs require explicit `repos` lists.**
+Auto-discovery is prohibited in `workspace-extension.toml` for all source org declarations, including orgs that don't appear in the public config. Auto-discovery queries the GitHub API, and querying a companion-only org's repos exposes repo names to the apply pipeline. Requiring explicit lists enforces intentional configuration. Teams pay a small configuration cost but gain stronger isolation guarantees.
 
-**Q2 — Should `workspace-extension.toml` permit auto-discovery for companion-only orgs?**
-R17 prohibits auto-discovery for orgs that also appear in the public config's sources, but what about orgs that exist only in the companion (not referenced anywhere in the public config)? Auto-discovery for companion-only orgs would work without collision risk, and would reduce the companion's required configuration. The concern is that auto-discovery queries the GitHub API, and a companion-only org's repos would be visible to the apply pipeline (even if not in the public config). Permitting auto-discovery for companion-only orgs is the simpler model; requiring explicit lists everywhere is the safer model.
-
-**Q3 — Should there be a `niwa config check` command to audit the public/private split?**
-A command that validates that no private repo names appear in the public workspace config (by cross-referencing the GitHub visibility API) would help teams preparing to publish their config. Out of scope for v1, but worth noting as a follow-on feature.
+**`niwa config check` deferred to a future release.**
+A command to audit the public/private split is a useful follow-on feature but adds scope beyond v1. Teams can prepare to publish their config by manually reviewing their `workspace.toml` for private identifiers.
