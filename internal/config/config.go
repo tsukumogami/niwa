@@ -208,6 +208,10 @@ type ContentEntry struct {
 type RepoContentEntry struct {
 	Source  string            `toml:"source,omitempty"`
 	Subdirs map[string]string `toml:"subdirs,omitempty"`
+	// OverlaySource is not parsed from TOML (toml:"-"). It is set exclusively
+	// by MergeWorkspaceOverlay to record the overlay file path that should be
+	// appended after Source content in InstallRepoContent.
+	OverlaySource string `toml:"-"`
 }
 
 // Load parses a workspace.toml file at the given path and returns the config

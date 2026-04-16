@@ -625,6 +625,225 @@ func teamOnlyKeys(vr *config.VaultRegistry) map[string]bool {
 	return out
 }
 
+// MergeWorkspaceOverlay merges an overlay config on top of a base WorkspaceConfig
+// and returns a new *WorkspaceConfig. The input ws is never mutated.
+//
+// Merge semantics (base-wins where applicable):
+//   - Sources: overlay sources appended after base sources. Error if any overlay
+//     source org already exists in the base (duplicate-org check).
+//   - Groups: overlay groups added; base wins on key collision.
+//   - Repos: overlay repos added; base wins on key collision.
+//   - Claude.Hooks: overlay hooks appended after base hooks; each script path
+//     is resolved to an absolute path via filepath.Join(overlayDir, script), then
+//     confirmed to remain within overlayDir using symlink-resolving containment.
+//   - Claude.Settings: base wins per key.
+//   - Claude.Env.Promote: union (no entries dropped).
+//   - Claude.Env.Vars: base wins per key.
+//   - Env.Files: overlay files appended after base files.
+//   - Env.Vars: base wins per key.
+//   - Files: base wins per key; overlay keys not in base are added, but only
+//     after checking destination is not a protected path.
+//   - Claude.Content.Repos: overlay entries with source= add new content entries
+//     (base wins on key collision). Overlay entries with overlay= set OverlaySource
+//     on an existing base entry (error if the base entry does not exist).
+func MergeWorkspaceOverlay(ws *config.WorkspaceConfig, overlay *config.WorkspaceOverlay, overlayDir string) (*config.WorkspaceConfig, error) {
+	// Deep-copy the input config.
+	merged := *ws
+	merged.Claude = *copyClaudeConfigFull(&ws.Claude)
+	merged.Claude.Content = copyContentConfig(ws.Claude.Content)
+	merged.Env = copyEnv(ws.Env)
+	merged.Files = copyStringMap(ws.Files)
+	merged.Sources = append([]config.SourceConfig(nil), ws.Sources...)
+	merged.Groups = copyGroupMap(ws.Groups)
+	merged.Repos = copyRepoOverrideMap(ws.Repos)
+
+	// Build a set of orgs already in the base config for the duplicate-org check.
+	baseOrgs := make(map[string]bool, len(ws.Sources))
+	for _, src := range ws.Sources {
+		baseOrgs[src.Org] = true
+	}
+
+	// Sources: append overlay sources; error on duplicate org.
+	for _, src := range overlay.Sources {
+		if baseOrgs[src.Org] {
+			return nil, fmt.Errorf("overlay source org %q already exists in base workspace config", src.Org)
+		}
+		merged.Sources = append(merged.Sources, config.SourceConfig{
+			Org:   src.Org,
+			Repos: append([]string(nil), src.Repos...),
+		})
+		baseOrgs[src.Org] = true
+	}
+
+	// Groups: add overlay groups; base wins on collision.
+	for k, v := range overlay.Groups {
+		if _, exists := merged.Groups[k]; !exists {
+			if merged.Groups == nil {
+				merged.Groups = make(map[string]config.GroupConfig)
+			}
+			g := v
+			g.Repos = append([]string(nil), v.Repos...)
+			merged.Groups[k] = g
+		}
+	}
+
+	// Repos: add overlay repos; base wins on collision.
+	for k, v := range overlay.Repos {
+		if _, exists := merged.Repos[k]; !exists {
+			if merged.Repos == nil {
+				merged.Repos = make(map[string]config.RepoOverride)
+			}
+			merged.Repos[k] = v
+		}
+	}
+
+	// Claude.Hooks: append overlay hooks; resolve scripts to absolute paths within overlayDir.
+	for event, entries := range overlay.Claude.Hooks {
+		absEntries := make([]config.HookEntry, 0, len(entries))
+		for _, e := range entries {
+			absScripts := make([]string, 0, len(e.Scripts))
+			for _, s := range e.Scripts {
+				absScript := filepath.Join(overlayDir, s)
+				if err := checkContainment(absScript, overlayDir); err != nil {
+					return nil, fmt.Errorf("overlay hook script %q escapes overlay directory: %w", s, err)
+				}
+				absScripts = append(absScripts, absScript)
+			}
+			absEntries = append(absEntries, config.HookEntry{
+				Matcher: e.Matcher,
+				Scripts: absScripts,
+			})
+		}
+		if merged.Claude.Hooks == nil {
+			merged.Claude.Hooks = config.HooksConfig{}
+		}
+		merged.Claude.Hooks[event] = append(merged.Claude.Hooks[event], absEntries...)
+	}
+
+	// Claude.Settings: base wins per key (only add keys not in base).
+	for k, v := range overlay.Claude.Settings {
+		if _, exists := merged.Claude.Settings[k]; !exists {
+			if merged.Claude.Settings == nil {
+				merged.Claude.Settings = config.SettingsConfig{}
+			}
+			merged.Claude.Settings[k] = v
+		}
+	}
+
+	// Claude.Env.Promote and Claude.Env.Vars: OverlayClaudeConfig does not carry
+	// a Claude env section (claude env is workspace-scoped and flows through the
+	// top-level Env pipeline). Nothing to merge here.
+
+	// Env.Files: append overlay files after base files.
+	if len(overlay.Env.Files) > 0 {
+		merged.Env.Files = append(merged.Env.Files, overlay.Env.Files...)
+	}
+
+	// Env.Vars: base wins per key.
+	for k, v := range overlay.Env.Vars.Values {
+		if _, exists := merged.Env.Vars.Values[k]; !exists {
+			if merged.Env.Vars.Values == nil {
+				merged.Env.Vars.Values = map[string]config.MaybeSecret{}
+			}
+			merged.Env.Vars.Values[k] = v
+		}
+	}
+
+	// Files: base wins per key; add overlay keys not already in base.
+	for k, v := range overlay.Files {
+		if _, exists := merged.Files[k]; !exists {
+			if merged.Files == nil {
+				merged.Files = map[string]string{}
+			}
+			merged.Files[k] = v
+		}
+	}
+
+	// Claude.Content.Repos: process overlay content entries.
+	for repoName, entry := range overlay.Claude.Content.Repos {
+		if entry.Source != "" {
+			// Overlay adds a new content entry for a repo not in base.
+			if _, exists := merged.Claude.Content.Repos[repoName]; !exists {
+				if merged.Claude.Content.Repos == nil {
+					merged.Claude.Content.Repos = make(map[string]config.RepoContentEntry)
+				}
+				merged.Claude.Content.Repos[repoName] = config.RepoContentEntry{
+					Source:        entry.Source,
+					OverlaySource: "",
+				}
+			}
+			// Base wins: if already in base, skip.
+		} else if entry.Overlay != "" {
+			// Overlay appends to an existing base entry via OverlaySource.
+			base, exists := merged.Claude.Content.Repos[repoName]
+			if !exists {
+				return nil, fmt.Errorf("overlay content entry for repo %q uses overlay= but the repo has no entry in the base config", repoName)
+			}
+			base.OverlaySource = entry.Overlay
+			merged.Claude.Content.Repos[repoName] = base
+		}
+	}
+
+	return &merged, nil
+}
+
+// copyContentConfig returns a deep copy of a ContentConfig, including the
+// Repos map (with OverlaySource preserved per entry).
+func copyContentConfig(c config.ContentConfig) config.ContentConfig {
+	out := config.ContentConfig{
+		Workspace: c.Workspace,
+		Groups:    nil,
+		Repos:     nil,
+	}
+	if c.Groups != nil {
+		out.Groups = make(map[string]config.ContentEntry, len(c.Groups))
+		for k, v := range c.Groups {
+			out.Groups[k] = v
+		}
+	}
+	if c.Repos != nil {
+		out.Repos = make(map[string]config.RepoContentEntry, len(c.Repos))
+		for k, v := range c.Repos {
+			entry := v
+			if v.Subdirs != nil {
+				entry.Subdirs = make(map[string]string, len(v.Subdirs))
+				for sk, sv := range v.Subdirs {
+					entry.Subdirs[sk] = sv
+				}
+			}
+			out.Repos[k] = entry
+		}
+	}
+	return out
+}
+
+// copyGroupMap returns a deep copy of a groups map.
+func copyGroupMap(m map[string]config.GroupConfig) map[string]config.GroupConfig {
+	if m == nil {
+		return nil
+	}
+	out := make(map[string]config.GroupConfig, len(m))
+	for k, v := range m {
+		g := v
+		g.Repos = append([]string(nil), v.Repos...)
+		out[k] = g
+	}
+	return out
+}
+
+// copyRepoOverrideMap returns a shallow copy of a repos map. RepoOverride
+// values are value types (no deep copy needed for the overlay merge use case).
+func copyRepoOverrideMap(m map[string]config.RepoOverride) map[string]config.RepoOverride {
+	if m == nil {
+		return nil
+	}
+	out := make(map[string]config.RepoOverride, len(m))
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
+}
+
 // copyClaudeConfigFull returns a deep copy of a ClaudeConfig pointer, including
 // all nested fields. Returns a pointer to a zero-value ClaudeConfig if nil.
 func copyClaudeConfigFull(c *config.ClaudeConfig) *config.ClaudeConfig {

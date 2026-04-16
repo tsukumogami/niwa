@@ -228,6 +228,246 @@ func TestOverlayDir_DeriveAndDir_RoundTrip(t *testing.T) {
 	}
 }
 
+// writeOverlayFile writes content to workspace-overlay.toml in a temp dir
+// and returns the path.
+func writeOverlayFile(t *testing.T, content string) string {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "workspace-overlay.toml")
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("writing overlay file: %v", err)
+	}
+	return path
+}
+
+// TestParseOverlay_Valid verifies a well-formed overlay parses without error.
+func TestParseOverlay_Valid(t *testing.T) {
+	toml := `
+[[sources]]
+org = "myorg"
+repos = ["repo-a", "repo-b"]
+
+[groups.alpha]
+visibility = "public"
+repos = ["repo-a"]
+
+[claude.content.repos.repo-a]
+source = "repos/repo-a.md"
+
+[claude.content.repos.repo-b]
+overlay = "overlay/repo-b.md"
+
+[files]
+"src/extra.md" = "docs/extra.md"
+`
+	path := writeOverlayFile(t, toml)
+	o, err := ParseOverlay(path)
+	if err != nil {
+		t.Fatalf("ParseOverlay returned unexpected error: %v", err)
+	}
+	if len(o.Sources) != 1 {
+		t.Errorf("expected 1 source, got %d", len(o.Sources))
+	}
+}
+
+// TestParseOverlay_SourceWithoutRepos verifies that sources without explicit
+// repos list are rejected.
+func TestParseOverlay_SourceWithoutRepos(t *testing.T) {
+	toml := `
+[[sources]]
+org = "myorg"
+`
+	path := writeOverlayFile(t, toml)
+	_, err := ParseOverlay(path)
+	if err == nil {
+		t.Fatal("expected error for source without repos, got nil")
+	}
+	if !strings.Contains(err.Error(), "repos list is required") {
+		t.Errorf("error %q does not mention repos list requirement", err.Error())
+	}
+}
+
+// TestParseOverlay_ContentBothSourceAndOverlay verifies that content entries
+// with both source and overlay set are rejected.
+func TestParseOverlay_ContentBothSourceAndOverlay(t *testing.T) {
+	toml := `
+[[sources]]
+org = "myorg"
+repos = ["repo-a"]
+
+[claude.content.repos.repo-a]
+source = "repos/repo-a.md"
+overlay = "overlay/repo-a.md"
+`
+	path := writeOverlayFile(t, toml)
+	_, err := ParseOverlay(path)
+	if err == nil {
+		t.Fatal("expected error for content entry with both source and overlay, got nil")
+	}
+	if !strings.Contains(err.Error(), "exactly one of source or overlay") {
+		t.Errorf("error %q does not mention source/overlay exclusivity", err.Error())
+	}
+}
+
+// TestParseOverlay_ContentNeitherSourceNorOverlay verifies that content entries
+// with neither source nor overlay set are rejected.
+func TestParseOverlay_ContentNeitherSourceNorOverlay(t *testing.T) {
+	toml := `
+[[sources]]
+org = "myorg"
+repos = ["repo-a"]
+
+[claude.content.repos.repo-a]
+`
+	path := writeOverlayFile(t, toml)
+	_, err := ParseOverlay(path)
+	if err == nil {
+		t.Fatal("expected error for content entry with neither source nor overlay, got nil")
+	}
+	if !strings.Contains(err.Error(), "exactly one of source or overlay") {
+		t.Errorf("error %q does not mention source/overlay exclusivity", err.Error())
+	}
+}
+
+// TestParseOverlay_AbsolutePathInFiles verifies that absolute destination paths
+// in [files] are rejected.
+func TestParseOverlay_AbsolutePathInFiles(t *testing.T) {
+	toml := `
+[files]
+"src/file.md" = "/absolute/dest.md"
+`
+	path := writeOverlayFile(t, toml)
+	_, err := ParseOverlay(path)
+	if err == nil {
+		t.Fatal("expected error for absolute path in files, got nil")
+	}
+	if !strings.Contains(err.Error(), "absolute paths are not allowed") {
+		t.Errorf("error %q does not mention absolute paths", err.Error())
+	}
+}
+
+// TestParseOverlay_DotDotInFiles verifies that ".." components in [files]
+// destination paths are rejected.
+func TestParseOverlay_DotDotInFiles(t *testing.T) {
+	toml := `
+[files]
+"src/file.md" = "../escape/dest.md"
+`
+	path := writeOverlayFile(t, toml)
+	_, err := ParseOverlay(path)
+	if err == nil {
+		t.Fatal("expected error for .. in files destination, got nil")
+	}
+	if !strings.Contains(err.Error(), "path traversal") {
+		t.Errorf("error %q does not mention path traversal", err.Error())
+	}
+}
+
+// TestParseOverlay_ProtectedDestinationClaude verifies that [files] destination
+// paths beginning with .claude/ are rejected.
+func TestParseOverlay_ProtectedDestinationClaude(t *testing.T) {
+	toml := `
+[files]
+"src/file.md" = ".claude/settings.json"
+`
+	path := writeOverlayFile(t, toml)
+	_, err := ParseOverlay(path)
+	if err == nil {
+		t.Fatal("expected error for .claude/ destination, got nil")
+	}
+	if !strings.Contains(err.Error(), "protected directory") {
+		t.Errorf("error %q does not mention protected directory", err.Error())
+	}
+}
+
+// TestParseOverlay_ProtectedDestinationNiwa verifies that [files] destination
+// paths beginning with .niwa/ are rejected.
+func TestParseOverlay_ProtectedDestinationNiwa(t *testing.T) {
+	toml := `
+[files]
+"src/file.md" = ".niwa/workspace.toml"
+`
+	path := writeOverlayFile(t, toml)
+	_, err := ParseOverlay(path)
+	if err == nil {
+		t.Fatal("expected error for .niwa/ destination, got nil")
+	}
+	if !strings.Contains(err.Error(), "protected directory") {
+		t.Errorf("error %q does not mention protected directory", err.Error())
+	}
+}
+
+// TestParseOverlay_AbsoluteHookScript verifies that absolute hook script paths
+// are rejected.
+func TestParseOverlay_AbsoluteHookScript(t *testing.T) {
+	toml := `
+[[claude.hooks.pre_tool_use]]
+scripts = ["/etc/evil.sh"]
+`
+	path := writeOverlayFile(t, toml)
+	_, err := ParseOverlay(path)
+	if err == nil {
+		t.Fatal("expected error for absolute hook script path, got nil")
+	}
+	if !strings.Contains(err.Error(), "must be relative") {
+		t.Errorf("error %q does not mention relative path requirement", err.Error())
+	}
+}
+
+// TestParseOverlay_DotDotInHookScript verifies that ".." components in hook
+// script paths are rejected.
+func TestParseOverlay_DotDotInHookScript(t *testing.T) {
+	toml := `
+[[claude.hooks.pre_tool_use]]
+scripts = ["../escape/evil.sh"]
+`
+	path := writeOverlayFile(t, toml)
+	_, err := ParseOverlay(path)
+	if err == nil {
+		t.Fatal("expected error for .. in hook script path, got nil")
+	}
+	if !strings.Contains(err.Error(), "path traversal") {
+		t.Errorf("error %q does not mention path traversal", err.Error())
+	}
+}
+
+// TestParseOverlay_DotDotInContentSource verifies that ".." in content source
+// paths is rejected.
+func TestParseOverlay_DotDotInContentSource(t *testing.T) {
+	toml := `
+[[sources]]
+org = "myorg"
+repos = ["repo-a"]
+
+[claude.content.repos.repo-a]
+source = "../outside/repo-a.md"
+`
+	path := writeOverlayFile(t, toml)
+	_, err := ParseOverlay(path)
+	if err == nil {
+		t.Fatal("expected error for .. in content source, got nil")
+	}
+	if !strings.Contains(err.Error(), "path traversal") {
+		t.Errorf("error %q does not mention path traversal", err.Error())
+	}
+}
+
+// TestParseOverlay_DotDotInEnvFiles verifies that ".." in env file paths is rejected.
+func TestParseOverlay_DotDotInEnvFiles(t *testing.T) {
+	toml := `
+[env]
+files = ["../escape.env"]
+`
+	path := writeOverlayFile(t, toml)
+	_, err := ParseOverlay(path)
+	if err == nil {
+		t.Fatal("expected error for .. in env files, got nil")
+	}
+	if !strings.Contains(err.Error(), "path traversal") {
+		t.Errorf("error %q does not mention path traversal", err.Error())
+	}
+}
+
 // gitRunIn runs a git command inside dir, failing the test on error.
 func gitRunIn(t *testing.T, dir string, args ...string) {
 	t.Helper()

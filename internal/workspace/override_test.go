@@ -2,6 +2,8 @@ package workspace
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"testing"
@@ -351,7 +353,7 @@ func TestMergeOverridesClaudeEnvNilWorkspace(t *testing.T) {
 			"myrepo": {
 				Claude: &config.ClaudeOverride{
 					Env: config.ClaudeEnvConfig{
-						Vars: config.EnvVarsTable{Values: map[string]config.MaybeSecret{"GH_TOKEN": config.MaybeSecret{Plain: "repo_only"}}},
+						Vars:    config.EnvVarsTable{Values: map[string]config.MaybeSecret{"GH_TOKEN": config.MaybeSecret{Plain: "repo_only"}}},
 						Promote: []string{"OTHER"},
 					},
 				},
@@ -444,13 +446,13 @@ func TestMergeOverridesEnvMutationSafety(t *testing.T) {
 	ws := &config.WorkspaceConfig{
 		Env: config.EnvConfig{
 			Files: []string{"ws.env"},
-			Vars: config.EnvVarsTable{Values: map[string]config.MaybeSecret{"A": config.MaybeSecret{Plain: "1"}}},
+			Vars:  config.EnvVarsTable{Values: map[string]config.MaybeSecret{"A": config.MaybeSecret{Plain: "1"}}},
 		},
 		Repos: map[string]config.RepoOverride{
 			"myrepo": {
 				Env: config.EnvConfig{
 					Files: []string{"repo.env"},
-					Vars: config.EnvVarsTable{Values: map[string]config.MaybeSecret{"B": config.MaybeSecret{Plain: "2"}}},
+					Vars:  config.EnvVarsTable{Values: map[string]config.MaybeSecret{"B": config.MaybeSecret{Plain: "2"}}},
 				},
 			},
 		},
@@ -497,8 +499,8 @@ func TestMergeOverridesFilesOverride(t *testing.T) {
 		Repos: map[string]config.RepoOverride{
 			"myrepo": {
 				Files: map[string]string{
-					"ext/design.md":    ".claude/custom/",
-					"ext/extra.md":     ".claude/ext/",
+					"ext/design.md": ".claude/custom/",
+					"ext/extra.md":  ".claude/ext/",
 				},
 			},
 		},
@@ -884,7 +886,7 @@ func TestMergeGlobalOverrideTeamOnlyAllowsOverlayAdd(t *testing.T) {
 func TestMergeGlobalOverrideTeamOnlyBlocksClaudeSettings(t *testing.T) {
 	ws := &config.WorkspaceConfig{
 		Workspace: config.WorkspaceMeta{Name: "test"},
-		Vault: &config.VaultRegistry{TeamOnly: []string{"permissions"}},
+		Vault:     &config.VaultRegistry{TeamOnly: []string{"permissions"}},
 		Claude: config.ClaudeConfig{
 			Settings: config.SettingsConfig{"permissions": {Plain: "bypass"}},
 		},
@@ -940,5 +942,384 @@ func TestMergeInstanceOverridesEnvSecretsWin(t *testing.T) {
 	eff := MergeInstanceOverrides(ws)
 	if eff.Env.Secrets.Values["K"].Plain != "inst" {
 		t.Errorf("instance env.secrets should win, got %q", eff.Env.Secrets.Values["K"].Plain)
+	}
+}
+
+// --- MergeWorkspaceOverlay tests ---
+
+func baseWS() *config.WorkspaceConfig {
+	return &config.WorkspaceConfig{
+		Workspace: config.WorkspaceMeta{Name: "test"},
+		Sources: []config.SourceConfig{
+			{Org: "baseorg", Repos: []string{"repo-a"}},
+		},
+		Groups: map[string]config.GroupConfig{
+			"base-group": {Visibility: "public", Repos: []string{"repo-a"}},
+		},
+		Repos: map[string]config.RepoOverride{
+			"repo-a": {Branch: "main"},
+		},
+		Claude: config.ClaudeConfig{
+			Hooks:    config.HooksConfig{"pre_tool_use": {{Scripts: []string{"base.sh"}}}},
+			Settings: config.SettingsConfig{"permissions": config.MaybeSecret{Plain: "bypass"}},
+			Content: config.ContentConfig{
+				Repos: map[string]config.RepoContentEntry{
+					"repo-a": {Source: "repos/repo-a.md"},
+				},
+			},
+		},
+		Env: config.EnvConfig{
+			Files: []string{"base.env"},
+			Vars:  config.EnvVarsTable{Values: map[string]config.MaybeSecret{"LOG": {Plain: "info"}}},
+		},
+		Files: map[string]string{"base-src": "base-dest"},
+	}
+}
+
+func emptyOverlay() *config.WorkspaceOverlay {
+	return &config.WorkspaceOverlay{}
+}
+
+// TestMergeWorkspaceOverlay_DoesNotMutate verifies the base WorkspaceConfig is
+// not mutated by the merge.
+func TestMergeWorkspaceOverlay_DoesNotMutate(t *testing.T) {
+	ws := baseWS()
+	overlay := &config.WorkspaceOverlay{
+		Sources: []config.OverlaySourceConfig{{Org: "neworg", Repos: []string{"repo-b"}}},
+	}
+	_, err := MergeWorkspaceOverlay(ws, overlay, t.TempDir())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(ws.Sources) != 1 {
+		t.Error("base ws.Sources was mutated")
+	}
+}
+
+// TestMergeWorkspaceOverlay_SourcesAppended verifies overlay sources are appended.
+func TestMergeWorkspaceOverlay_SourcesAppended(t *testing.T) {
+	ws := baseWS()
+	overlay := &config.WorkspaceOverlay{
+		Sources: []config.OverlaySourceConfig{{Org: "neworg", Repos: []string{"repo-b"}}},
+	}
+	merged, err := MergeWorkspaceOverlay(ws, overlay, t.TempDir())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(merged.Sources) != 2 {
+		t.Fatalf("expected 2 sources, got %d", len(merged.Sources))
+	}
+	if merged.Sources[1].Org != "neworg" {
+		t.Errorf("expected overlay source org=neworg, got %q", merged.Sources[1].Org)
+	}
+}
+
+// TestMergeWorkspaceOverlay_DuplicateOrgReturnsError verifies that adding an
+// overlay source whose org already exists in the base returns an error.
+func TestMergeWorkspaceOverlay_DuplicateOrgReturnsError(t *testing.T) {
+	ws := baseWS()
+	overlay := &config.WorkspaceOverlay{
+		Sources: []config.OverlaySourceConfig{{Org: "baseorg", Repos: []string{"repo-x"}}},
+	}
+	_, err := MergeWorkspaceOverlay(ws, overlay, t.TempDir())
+	if err == nil {
+		t.Fatal("expected error for duplicate org, got nil")
+	}
+	if !strings.Contains(err.Error(), "already exists") {
+		t.Errorf("error %q does not mention already exists", err.Error())
+	}
+}
+
+// TestMergeWorkspaceOverlay_GroupsBaseWins verifies base wins on group key collision.
+func TestMergeWorkspaceOverlay_GroupsBaseWins(t *testing.T) {
+	ws := baseWS()
+	overlay := &config.WorkspaceOverlay{
+		Groups: map[string]config.GroupConfig{
+			"base-group":    {Visibility: "private"}, // collision — base should win
+			"overlay-group": {Visibility: "public"},  // new — should be added
+		},
+	}
+	merged, err := MergeWorkspaceOverlay(ws, overlay, t.TempDir())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if merged.Groups["base-group"].Visibility != "public" {
+		t.Errorf("base-group visibility should be public (base wins), got %q", merged.Groups["base-group"].Visibility)
+	}
+	if _, ok := merged.Groups["overlay-group"]; !ok {
+		t.Error("overlay-group was not added")
+	}
+}
+
+// TestMergeWorkspaceOverlay_ReposBaseWins verifies base wins on repo key collision.
+func TestMergeWorkspaceOverlay_ReposBaseWins(t *testing.T) {
+	ws := baseWS()
+	overlay := &config.WorkspaceOverlay{
+		Repos: map[string]config.RepoOverride{
+			"repo-a": {Branch: "overlay-branch"}, // collision — base wins
+			"repo-b": {Branch: "feature"},        // new — added
+		},
+	}
+	merged, err := MergeWorkspaceOverlay(ws, overlay, t.TempDir())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if merged.Repos["repo-a"].Branch != "main" {
+		t.Errorf("repo-a branch should be main (base wins), got %q", merged.Repos["repo-a"].Branch)
+	}
+	if merged.Repos["repo-b"].Branch != "feature" {
+		t.Errorf("repo-b branch should be feature (added), got %q", merged.Repos["repo-b"].Branch)
+	}
+}
+
+// TestMergeWorkspaceOverlay_SettingsBaseWins verifies base wins on settings key collision.
+func TestMergeWorkspaceOverlay_SettingsBaseWins(t *testing.T) {
+	ws := baseWS()
+	overlay := &config.WorkspaceOverlay{
+		Claude: config.OverlayClaudeConfig{
+			Settings: config.SettingsConfig{
+				"permissions": config.MaybeSecret{Plain: "ask"}, // collision — base wins
+				"new-setting": config.MaybeSecret{Plain: "val"}, // new — added
+			},
+		},
+	}
+	merged, err := MergeWorkspaceOverlay(ws, overlay, t.TempDir())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if merged.Claude.Settings["permissions"].Plain != "bypass" {
+		t.Errorf("permissions should be bypass (base wins), got %q", merged.Claude.Settings["permissions"].Plain)
+	}
+	if merged.Claude.Settings["new-setting"].Plain != "val" {
+		t.Errorf("new-setting should be val (added), got %q", merged.Claude.Settings["new-setting"].Plain)
+	}
+}
+
+// TestMergeWorkspaceOverlay_EnvVarsBaseWins verifies base wins on env var collision.
+func TestMergeWorkspaceOverlay_EnvVarsBaseWins(t *testing.T) {
+	ws := baseWS()
+	overlay := &config.WorkspaceOverlay{
+		Env: config.EnvConfig{
+			Vars: config.EnvVarsTable{Values: map[string]config.MaybeSecret{
+				"LOG":     {Plain: "debug"},   // collision — base wins
+				"NEW_VAR": {Plain: "overlay"}, // new — added
+			}},
+		},
+	}
+	merged, err := MergeWorkspaceOverlay(ws, overlay, t.TempDir())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if merged.Env.Vars.Values["LOG"].Plain != "info" {
+		t.Errorf("LOG should be info (base wins), got %q", merged.Env.Vars.Values["LOG"].Plain)
+	}
+	if merged.Env.Vars.Values["NEW_VAR"].Plain != "overlay" {
+		t.Errorf("NEW_VAR should be overlay (added), got %q", merged.Env.Vars.Values["NEW_VAR"].Plain)
+	}
+}
+
+// TestMergeWorkspaceOverlay_EnvFilesAppended verifies overlay env files are
+// appended after base env files.
+func TestMergeWorkspaceOverlay_EnvFilesAppended(t *testing.T) {
+	ws := baseWS()
+	overlay := &config.WorkspaceOverlay{
+		Env: config.EnvConfig{Files: []string{"overlay.env"}},
+	}
+	merged, err := MergeWorkspaceOverlay(ws, overlay, t.TempDir())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(merged.Env.Files) != 2 {
+		t.Fatalf("expected 2 env files, got %d: %v", len(merged.Env.Files), merged.Env.Files)
+	}
+	if merged.Env.Files[0] != "base.env" || merged.Env.Files[1] != "overlay.env" {
+		t.Errorf("expected [base.env overlay.env], got %v", merged.Env.Files)
+	}
+}
+
+// TestMergeWorkspaceOverlay_FilesBaseWins verifies base wins on files key collision.
+func TestMergeWorkspaceOverlay_FilesBaseWins(t *testing.T) {
+	ws := baseWS()
+	overlay := &config.WorkspaceOverlay{
+		Files: map[string]string{
+			"base-src":    "overlay-dest",  // collision — base wins
+			"overlay-src": "overlay-dest2", // new — added
+		},
+	}
+	merged, err := MergeWorkspaceOverlay(ws, overlay, t.TempDir())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if merged.Files["base-src"] != "base-dest" {
+		t.Errorf("base-src should be base-dest (base wins), got %q", merged.Files["base-src"])
+	}
+	if merged.Files["overlay-src"] != "overlay-dest2" {
+		t.Errorf("overlay-src should be overlay-dest2 (added), got %q", merged.Files["overlay-src"])
+	}
+}
+
+// TestMergeWorkspaceOverlay_HookResolutionToAbsolute verifies hook scripts are
+// resolved to absolute paths within overlayDir.
+func TestMergeWorkspaceOverlay_HookResolutionToAbsolute(t *testing.T) {
+	overlayDir := t.TempDir()
+	// Create the hook script file so containment check can resolve it.
+	hookPath := filepath.Join(overlayDir, "hooks", "my-hook.sh")
+	if err := os.MkdirAll(filepath.Dir(hookPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(hookPath, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	ws := baseWS()
+	overlay := &config.WorkspaceOverlay{
+		Claude: config.OverlayClaudeConfig{
+			Hooks: config.HooksConfig{
+				"pre_tool_use": {{Scripts: []string{"hooks/my-hook.sh"}}},
+			},
+		},
+	}
+	merged, err := MergeWorkspaceOverlay(ws, overlay, overlayDir)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	entries := merged.Claude.Hooks["pre_tool_use"]
+	// Base has 1 entry (base.sh), overlay appends one more.
+	if len(entries) != 2 {
+		t.Fatalf("expected 2 hook entries, got %d", len(entries))
+	}
+	overlayEntry := entries[1]
+	if len(overlayEntry.Scripts) != 1 {
+		t.Fatalf("expected 1 script in overlay entry, got %d", len(overlayEntry.Scripts))
+	}
+	want := filepath.Join(overlayDir, "hooks", "my-hook.sh")
+	if overlayEntry.Scripts[0] != want {
+		t.Errorf("hook script = %q, want %q", overlayEntry.Scripts[0], want)
+	}
+}
+
+// TestMergeWorkspaceOverlay_HookSymlinkEscape verifies that a hook script path
+// that resolves outside overlayDir via a symlink returns an error.
+func TestMergeWorkspaceOverlay_HookSymlinkEscape(t *testing.T) {
+	overlayDir := t.TempDir()
+	// Create a symlink inside overlayDir that points outside.
+	outside := t.TempDir()
+	linkPath := filepath.Join(overlayDir, "hooks")
+	if err := os.Symlink(outside, linkPath); err != nil {
+		t.Skip("cannot create symlink:", err)
+	}
+
+	ws := baseWS()
+	overlay := &config.WorkspaceOverlay{
+		Claude: config.OverlayClaudeConfig{
+			Hooks: config.HooksConfig{
+				"pre_tool_use": {{Scripts: []string{"hooks/evil.sh"}}},
+			},
+		},
+	}
+	_, err := MergeWorkspaceOverlay(ws, overlay, overlayDir)
+	if err == nil {
+		t.Fatal("expected error for symlink escaping overlayDir, got nil")
+	}
+}
+
+// TestMergeWorkspaceOverlay_ContentSourceAddsNewEntry verifies that a content
+// overlay entry with source= adds a new entry for a repo not in base.
+func TestMergeWorkspaceOverlay_ContentSourceAddsNewEntry(t *testing.T) {
+	ws := baseWS()
+	overlay := &config.WorkspaceOverlay{
+		Claude: config.OverlayClaudeConfig{
+			Content: config.OverlayContentConfig{
+				Repos: map[string]config.OverlayContentRepoConfig{
+					"repo-new": {Source: "repos/repo-new.md"},
+				},
+			},
+		},
+	}
+	merged, err := MergeWorkspaceOverlay(ws, overlay, t.TempDir())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	entry, ok := merged.Claude.Content.Repos["repo-new"]
+	if !ok {
+		t.Fatal("repo-new not found in merged content repos")
+	}
+	if entry.Source != "repos/repo-new.md" {
+		t.Errorf("repo-new source = %q, want repos/repo-new.md", entry.Source)
+	}
+	if entry.OverlaySource != "" {
+		t.Errorf("repo-new OverlaySource should be empty, got %q", entry.OverlaySource)
+	}
+}
+
+// TestMergeWorkspaceOverlay_ContentSourceBaseWins verifies that a content overlay
+// entry with source= does not overwrite an existing base entry.
+func TestMergeWorkspaceOverlay_ContentSourceBaseWins(t *testing.T) {
+	ws := baseWS()
+	overlay := &config.WorkspaceOverlay{
+		Claude: config.OverlayClaudeConfig{
+			Content: config.OverlayContentConfig{
+				Repos: map[string]config.OverlayContentRepoConfig{
+					"repo-a": {Source: "repos/overlay-repo-a.md"}, // collision — base wins
+				},
+			},
+		},
+	}
+	merged, err := MergeWorkspaceOverlay(ws, overlay, t.TempDir())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	entry := merged.Claude.Content.Repos["repo-a"]
+	if entry.Source != "repos/repo-a.md" {
+		t.Errorf("repo-a source should be base value repos/repo-a.md, got %q", entry.Source)
+	}
+}
+
+// TestMergeWorkspaceOverlay_ContentOverlaySetsOverlaySource verifies that a
+// content overlay entry with overlay= sets OverlaySource on the existing base entry.
+func TestMergeWorkspaceOverlay_ContentOverlaySetsOverlaySource(t *testing.T) {
+	ws := baseWS()
+	overlay := &config.WorkspaceOverlay{
+		Claude: config.OverlayClaudeConfig{
+			Content: config.OverlayContentConfig{
+				Repos: map[string]config.OverlayContentRepoConfig{
+					"repo-a": {Overlay: "overlay/repo-a-extra.md"},
+				},
+			},
+		},
+	}
+	merged, err := MergeWorkspaceOverlay(ws, overlay, t.TempDir())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	entry := merged.Claude.Content.Repos["repo-a"]
+	if entry.OverlaySource != "overlay/repo-a-extra.md" {
+		t.Errorf("repo-a OverlaySource = %q, want overlay/repo-a-extra.md", entry.OverlaySource)
+	}
+	// Base source must be preserved.
+	if entry.Source != "repos/repo-a.md" {
+		t.Errorf("repo-a Source = %q, want repos/repo-a.md", entry.Source)
+	}
+}
+
+// TestMergeWorkspaceOverlay_ContentOverlayMissingBaseReturnsError verifies that
+// an overlay content entry with overlay= for a repo not in the base returns an error.
+func TestMergeWorkspaceOverlay_ContentOverlayMissingBaseReturnsError(t *testing.T) {
+	ws := baseWS()
+	overlay := &config.WorkspaceOverlay{
+		Claude: config.OverlayClaudeConfig{
+			Content: config.OverlayContentConfig{
+				Repos: map[string]config.OverlayContentRepoConfig{
+					"no-such-repo": {Overlay: "overlay/no-such.md"},
+				},
+			},
+		},
+	}
+	_, err := MergeWorkspaceOverlay(ws, overlay, t.TempDir())
+	if err == nil {
+		t.Fatal("expected error for overlay= on repo not in base, got nil")
+	}
+	if !strings.Contains(err.Error(), "no-such-repo") {
+		t.Errorf("error %q does not mention no-such-repo", err.Error())
 	}
 }
