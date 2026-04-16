@@ -3,7 +3,7 @@
   "design_doc": "docs/plans/PLAN-vault-integration.md",
   "branch": "docs/vault-integration",
   "pr_number": 52,
-  "integrity_hash": "sha256:0e28627d87dcb302c7023466a25ac7e56690dec0b08cdee0d9fc15ec77e4c7b7",
+  "integrity_hash": "sha256:371a0e275d7f04b2faeac5649532d1aeaf54d56108d60994d78ea2b8f6cd447d",
   "issues": [
     {
       "number": 1,
@@ -298,8 +298,8 @@
     {
       "number": 5,
       "title": "feat(vault): Infisical backend with batch resolve and stderr scrub",
-      "status": "scrutinized",
-      "ci_status": "pending",
+      "status": "completed",
+      "ci_status": "passed",
       "ci_fix_attempts": 0,
       "issue_type": "code",
       "dependencies": [],
@@ -326,19 +326,75 @@
           }
         ]
       },
+      "reviewer_results": {
+        "issue": 5,
+        "round": 1,
+        "reviewers": [
+          {
+            "role": "pragmatic",
+            "blocking_count": 0,
+            "non_blocking_count": 2,
+            "detail_file": "wip/research/implement-vault-integration-issue_5_pragmatic.md"
+          },
+          {
+            "role": "architect",
+            "blocking_count": 1,
+            "non_blocking_count": 3,
+            "detail_file": "wip/research/implement-vault-integration-issue_5_architect.md"
+          },
+          {
+            "role": "maintainer",
+            "blocking_count": 0,
+            "non_blocking_count": 2,
+            "detail_file": "wip/research/implement-vault-integration-issue_5_maintainer.md"
+          }
+        ],
+        "resolution": "Architect blocker addressed in commit 39e5209: VersionToken.Token now derives from SHA-256(sorted key + big-endian value length) per key — plaintext never touched. v1.1 TODO to switch to per-key `infisical secrets get --format json`. Also tightened looksLikeAuthFailure (A1) and cosmetic A3 ('\u003canonymous\u003e' for empty provider name).",
+        "advisory_deferred": [
+          "pragmatic: NewFactory no production callers yet; subprocess nil-guard unreachable",
+          "architect A2 (ensureLoaded not single-flight — documented rough edge, sync.Once refactor deferred)",
+          "maintainer M1 (subprocess errors lack project/env/path context)",
+          "maintainer M2 (stale defaultCommander comment)"
+        ]
+      },
+      "qa_skipped": true,
       "testable_scenarios": []
     },
     {
       "number": 6,
       "title": "feat(workspace): materialization hardening (0o600, .local infix, .gitignore)",
-      "status": "pending",
+      "status": "scrutinized",
       "ci_status": "pending",
       "ci_fix_attempts": 0,
-      "issue_type": "",
+      "issue_type": "code",
       "dependencies": [],
-      "commits": [],
-      "agent_type": "",
-      "summary": null,
+      "commits": [
+        "ddfbf36f261523ebf4a23f8d068bccadf709a8ca",
+        "ddfbf36f261523ebf4a23f8d068bccadf709a8ca",
+        "5b1d68218d73b25215033e307fe9c8f052527d95"
+      ],
+      "agent_type": "coder",
+      "summary": {
+        "narrative": "",
+        "files_changed": [
+          "internal/workspace/apply.go",
+          "internal/workspace/apply_test.go",
+          "internal/workspace/apply_vault_test.go",
+          "internal/workspace/materialize.go",
+          "internal/workspace/materialize_test.go",
+          "internal/workspace/gitignore.go",
+          "internal/workspace/gitignore_test.go"
+        ],
+        "tests_added": 17,
+        "key_decisions": "Issue 6 core + rework: added Stderr io.Writer on FilesMaterializer with per-Materialize-call dedup map; EnsureInstanceGitignore now called from both Create and Apply (idempotent)",
+        "requirements_map": [
+          {
+            "ac": "Issue 6 full AC list + maintainer B1 + architect advisory",
+            "status": "implemented",
+            "evidence": "see coder returns"
+          }
+        ]
+      },
       "testable_scenarios": []
     },
     {
