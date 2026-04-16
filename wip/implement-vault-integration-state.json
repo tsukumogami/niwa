@@ -3,7 +3,7 @@
   "design_doc": "docs/plans/PLAN-vault-integration.md",
   "branch": "docs/vault-integration",
   "pr_number": 52,
-  "integrity_hash": "sha256:dfb3cfa6774cc150ad3a89379d6e2f59893d7ca42ed22af3b1954434dbabc8b8",
+  "integrity_hash": "sha256:a44e3f1c775613958dde9c93bd4d81179992a58ce0a6e804d21ff2fb41437160",
   "issues": [
     {
       "number": 1,
@@ -569,8 +569,8 @@
     {
       "number": 9,
       "title": "feat(guardrail): public-repo plaintext-secrets hard block",
-      "status": "scrutinized",
-      "ci_status": "pending",
+      "status": "completed",
+      "ci_status": "passed",
       "ci_fix_attempts": 0,
       "issue_type": "code",
       "dependencies": [],
@@ -597,19 +597,78 @@
           }
         ]
       },
+      "reviewer_results": {
+        "issue": 9,
+        "round": 1,
+        "reviewers": [
+          {
+            "role": "pragmatic",
+            "blocking_count": 0,
+            "non_blocking_count": 2,
+            "detail_file": "wip/research/implement-vault-integration-issue_9_pragmatic.md"
+          },
+          {
+            "role": "architect",
+            "blocking_count": 1,
+            "non_blocking_count": 2,
+            "detail_file": "wip/research/implement-vault-integration-issue_9_architect.md"
+          },
+          {
+            "role": "maintainer",
+            "blocking_count": 0,
+            "non_blocking_count": 3,
+            "detail_file": "wip/research/implement-vault-integration-issue_9_maintainer.md"
+          }
+        ],
+        "resolution": "Architect blocker (guardrail misclassified pre-resolve vault:// URIs as plaintext) addressed in commit a4c323f: extracted isPlaintextSecret helper with explicit 3-way classification; added regression tests for pre-resolve shape.",
+        "advisory_deferred": [
+          "pragmatic A1 (remoteLineFields single-caller helper), A2 (overlap between regex-table and e2e tests)",
+          "architect A1 (case-variant URL dedup), A2 ('guardrail skipped' message collapses 3 branches)",
+          "maintainer: enumerateGitHubRemotes returns haveGit=false for two different conditions; test name uses fixture not behavior; regex \\. literal not called out explicitly"
+        ]
+      },
+      "qa_skipped": true,
       "testable_scenarios": []
     },
     {
       "number": 10,
       "title": "feat(cli): vault flags, status subcommands, bootstrap pointer",
-      "status": "pending",
+      "status": "scrutinized",
       "ci_status": "pending",
       "ci_fix_attempts": 0,
-      "issue_type": "",
+      "issue_type": "code",
       "dependencies": [],
-      "commits": [],
-      "agent_type": "",
-      "summary": null,
+      "commits": [
+        "26655fab4938a752d2867390851f5b74f650a022",
+        "26655fab4938a752d2867390851f5b74f650a022",
+        "6feef8ed05e5a6216a0deb892c2fb93d82bcea2d"
+      ],
+      "agent_type": "coder",
+      "summary": {
+        "narrative": "",
+        "files_changed": [
+          "internal/cli/apply.go",
+          "internal/cli/apply_test.go",
+          "internal/cli/init.go",
+          "internal/cli/init_test.go",
+          "internal/cli/status.go",
+          "internal/cli/status_audit.go",
+          "internal/cli/status_audit_test.go",
+          "internal/cli/status_check_vault.go",
+          "internal/cli/status_check_vault_test.go",
+          "internal/config/vault.go",
+          "internal/workspace/apply_vault_test.go"
+        ],
+        "tests_added": 17,
+        "key_decisions": "Issue 10 core + rework: audit predicate now uses !cfg.Vault.IsEmpty() aligning with init.go and check-vault; IsEmpty() tightened so TeamOnly alone does not count as non-empty (doc already claimed this; code was inconsistent); printVaultRotations closes with 'Run niwa apply' call-to-action",
+        "requirements_map": [
+          {
+            "ac": "Issue 10 full AC list + maintainer blocker",
+            "status": "implemented",
+            "evidence": "see coder returns"
+          }
+        ]
+      },
       "testable_scenarios": []
     },
     {
