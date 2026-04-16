@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -99,17 +100,22 @@ func (defaultCommander) Run(ctx context.Context, name string, args []string) ([]
 // VersionToken derivation: the Infisical CLI's export command does
 // not (as of v0.x) include per-secret version IDs in its JSON
 // payload. We synthesise a single project-level token as a SHA-256
-// of the sorted keys + value-bytes digest of the export payload.
-// This is stable across identical exports and changes when any
-// secret rotates. The Provenance field points at the Infisical
-// audit-log URL for the project.
+// digest over the sorted key names and their plaintext byte-lengths
+// — never over plaintext byte content. This keeps decrypted secret
+// entropy out of state.json and the Provenance URL while still
+// flipping the token whenever keys are added, removed, renamed, or
+// change length. Same-length rotations are the acknowledged v1
+// coarse-grain trade-off (see buildVersionToken). The Provenance
+// field points at the Infisical audit-log URL for the project.
 //
-// TODO: when `infisical secrets get --format json` per-key version
-// IDs become reliably available across the CLI versions we support,
-// replace the synthesised token with the upstream ID. The single-
-// token-per-export approximation is acceptable for v1 because our
-// primary use of VersionToken is rotation detection (any change to
-// any value rotates the token) — not single-key provenance.
+// TODO(v1.1): when `infisical secrets get --format json` per-key
+// version IDs become reliably available across the CLI versions we
+// support, replace the synthesised token with the upstream per-
+// secret version UUID (matching the design contract
+// "Token = Infisical secret-version UUID"). The current length-only
+// approximation is acceptable for v1 because our primary use of
+// VersionToken is rotation detection — most rotations change value
+// length — not single-key provenance.
 func runInfisicalExport(ctx context.Context, c commander, project, env, path string) (map[string]string, vault.VersionToken, error) {
 	if c == nil {
 		c = defaultCommander{}
@@ -227,25 +233,37 @@ func parseExportJSON(raw []byte) (map[string]string, error) {
 }
 
 // looksLikeAuthFailure scans a scrubbed stderr string for common
-// markers of an auth / login / token failure. The match is case-
-// insensitive and substring-based: any of "authentication", "auth",
-// "login", "unauthori" (catches "unauthorised" and "unauthorized"),
-// or "token" triggers a positive result.
+// markers of an auth / login failure. The match is case-insensitive
+// and substring-based.
+//
+// The marker set is deliberately specific: broad tokens like "auth"
+// or "token" were removed in a v1 tightening because they
+// misclassified transient network errors (e.g., "token refresh
+// pending") as auth failures, which under --allow-missing-secrets
+// silently downgrades the result to empty. The current list focuses
+// on phrases that unambiguously signal a credential / session
+// problem. Expand with care when new Infisical CLI versions ship
+// additional error phrasing.
 //
 // The match runs AFTER scrubbing, so a stderr that happened to
-// contain a secret fragment matching "authentication" has already
-// been redacted to "***" before we scan — no leakage risk.
+// contain a secret fragment matching one of these markers has
+// already been redacted to "***" before we scan — no leakage risk.
 func looksLikeAuthFailure(scrubbedStderr string) bool {
 	if scrubbedStderr == "" {
 		return false
 	}
 	lower := strings.ToLower(scrubbedStderr)
 	markers := []string{
-		"authentication",
-		"unauthori", // "unauthorized" / "unauthorised"
-		"auth",
-		"login",
-		"token",
+		"401",          // HTTP unauthorized
+		"403",          // HTTP forbidden
+		"unauthorized", // case-insensitive; "unauthorised" is the other spelling
+		"unauthorised",
+		"forbidden",
+		"not logged in",
+		"login expired",
+		"invalid credentials",
+		"authentication failed",
+		"session expired",
 	}
 	for _, m := range markers {
 		if strings.Contains(lower, m) {
@@ -255,13 +273,28 @@ func looksLikeAuthFailure(scrubbedStderr string) bool {
 	return false
 }
 
-// buildVersionToken synthesises a VersionToken from the export
-// payload. Token is a SHA-256 hex digest over the sorted (key,
-// value) pairs — stable across identical exports, changes on any
-// rotation. Provenance is the Infisical audit-log URL for the
-// project; when Token is empty (no secrets exported) the Provenance
-// still points at the project's audit page so users have a landing
-// target for the "why is this stale" investigation.
+// buildVersionToken returns a rotation-sensitive token derived ONLY
+// from provider-side metadata — never from decrypted plaintext
+// bytes. For v1 Infisical (no per-key version IDs in the export
+// output), we use a project-level digest: SHA-256 of the sorted key
+// names concatenated with the sorted plaintext byte-lengths. This
+// flips whenever keys are added, removed, renamed, or lengths
+// change. It misses rotations where the new plaintext has the same
+// length — that's a known v1 coarse-grain trade-off, documented in
+// the TODO below. It does NOT touch plaintext byte content, so no
+// secret entropy reaches the token (which in turn feeds state.json
+// via SourceEntry.VersionToken and the user-visible Provenance URL).
+//
+// Provenance is the Infisical audit-log URL for the project; when
+// the payload is empty the Provenance still points at the project's
+// audit page so users have a landing target for the "why is this
+// stale" investigation.
+//
+// TODO(v1.1): switch to `infisical secrets get --format json` per-
+// key calls to obtain Infisical's native per-secret version UUIDs.
+// That is the true rotation signal and matches the design's
+// "Token = Infisical secret-version UUID" contract. See PLAN Issue 5
+// key_decisions.
 func buildVersionToken(project string, values map[string]string) vault.VersionToken {
 	h := sha256.New()
 	keys := make([]string, 0, len(values))
@@ -271,10 +304,14 @@ func buildVersionToken(project string, values map[string]string) vault.VersionTo
 	sort.Strings(keys)
 	for _, k := range keys {
 		// Null-byte separators prevent ambiguity between e.g.,
-		// ("a", "bc") and ("ab", "c").
+		// ("a", len=23) and ("ab", len=3). We hash the key name
+		// (non-secret metadata) and the LENGTH of the value only —
+		// never the value bytes themselves.
 		h.Write([]byte(k))
 		h.Write([]byte{0})
-		h.Write([]byte(values[k]))
+		lenBuf := make([]byte, 8)
+		binary.BigEndian.PutUint64(lenBuf, uint64(len(values[k])))
+		h.Write(lenBuf)
 		h.Write([]byte{0})
 	}
 	token := hex.EncodeToString(h.Sum(nil))

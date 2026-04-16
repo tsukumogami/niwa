@@ -175,6 +175,16 @@ func (p *Provider) Name() string {
 	return p.name
 }
 
+// displayName returns p.name, substituting "<anonymous>" when the
+// provider has no configured name. Used for error-message
+// interpolation so users don't see the bare `provider ""` string.
+func (p *Provider) displayName() string {
+	if p.name == "" {
+		return "<anonymous>"
+	}
+	return p.name
+}
+
 // Kind returns the backend kind string ("infisical").
 func (p *Provider) Kind() string {
 	return Kind
@@ -197,7 +207,7 @@ func (p *Provider) Resolve(ctx context.Context, ref vault.Ref) (secret.Value, va
 
 	if p.closed {
 		return secret.Value{}, vault.VersionToken{}, secret.Errorf(
-			"infisical: provider %q: %w", p.name, vault.ErrProviderUnreachable,
+			"infisical: provider %q: %w", p.displayName(), vault.ErrProviderUnreachable,
 		)
 	}
 
@@ -237,7 +247,7 @@ func (p *Provider) ResolveBatch(ctx context.Context, refs []vault.Ref) ([]vault.
 
 	if p.closed {
 		return nil, secret.Errorf(
-			"infisical: provider %q: %w", p.name, vault.ErrProviderUnreachable,
+			"infisical: provider %q: %w", p.displayName(), vault.ErrProviderUnreachable,
 		)
 	}
 
@@ -289,7 +299,7 @@ func (p *Provider) ensureLoaded(ctx context.Context) error {
 	if p.closed {
 		p.mu.Unlock()
 		return secret.Errorf(
-			"infisical: provider %q: %w", p.name, vault.ErrProviderUnreachable,
+			"infisical: provider %q: %w", p.displayName(), vault.ErrProviderUnreachable,
 		)
 	}
 	if p.loaded {
@@ -311,7 +321,7 @@ func (p *Provider) ensureLoaded(ctx context.Context) error {
 	defer p.mu.Unlock()
 	if p.closed {
 		return secret.Errorf(
-			"infisical: provider %q: %w", p.name, vault.ErrProviderUnreachable,
+			"infisical: provider %q: %w", p.displayName(), vault.ErrProviderUnreachable,
 		)
 	}
 	if !p.loaded {

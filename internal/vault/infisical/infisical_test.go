@@ -292,21 +292,37 @@ func TestArgvHygiene(t *testing.T) {
 }
 
 // TestAuthFailureMapsToUnreachable covers the non-zero-exit + auth-
-// marker path.
+// marker path across the tightened marker set. Each sub-case feeds
+// a different marker through stderr; all must map to
+// ErrProviderUnreachable.
 func TestAuthFailureMapsToUnreachable(t *testing.T) {
-	cmd := &fakeCommander{
-		exitCode: 1,
-		stderr:   []byte("Error: authentication required, please run `infisical login`"),
+	cases := []struct {
+		name   string
+		stderr string
+	}{
+		{"401", "Error: 401 Unauthorized"},
+		{"unauthorized", "Error: unauthorized access"},
+		{"not logged in", "Error: not logged in, run `infisical login`"},
+		{"login expired", "Error: login expired, please re-authenticate"},
+		{"authentication failed", "Error: authentication failed for project"},
 	}
-	p := openWithCommander(t, nil, cmd)
-	defer p.Close()
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			cmd := &fakeCommander{
+				exitCode: 1,
+				stderr:   []byte(c.stderr),
+			}
+			p := openWithCommander(t, nil, cmd)
+			defer p.Close()
 
-	_, _, err := p.Resolve(context.Background(), vault.Ref{Key: "k"})
-	if err == nil {
-		t.Fatalf("Resolve should have failed")
-	}
-	if !errors.Is(err, vault.ErrProviderUnreachable) {
-		t.Fatalf("expected ErrProviderUnreachable, got: %v", err)
+			_, _, err := p.Resolve(context.Background(), vault.Ref{Key: "k"})
+			if err == nil {
+				t.Fatalf("Resolve should have failed")
+			}
+			if !errors.Is(err, vault.ErrProviderUnreachable) {
+				t.Fatalf("expected ErrProviderUnreachable, got: %v", err)
+			}
+		})
 	}
 }
 
@@ -556,8 +572,14 @@ func TestResolveReturnsSecretValue(t *testing.T) {
 }
 
 // TestTokenChangesOnRotation asserts that the synthesised version
-// token changes when any secret value rotates. This is what makes
-// the rotation-detection story in Issue 7 work.
+// token changes when a secret value rotation changes the plaintext
+// byte-length. This is the primary rotation-detection signal for
+// the Issue 7 story. Note: under the key-metadata-only v1
+// derivation, same-length rotations do NOT flip the token — that
+// case is pinned down separately by
+// TestVersionTokenDoesNotDeriveFromPlaintext. See the v1.1 TODO in
+// buildVersionToken for the planned upgrade to native per-secret
+// version IDs.
 func TestTokenChangesOnRotation(t *testing.T) {
 	cmd1 := &fakeCommander{stdout: jsonBody(map[string]string{"k": "alpha-long-enough"})}
 	p1 := openWithCommander(t, nil, cmd1)
@@ -567,7 +589,7 @@ func TestTokenChangesOnRotation(t *testing.T) {
 		t.Fatalf("Resolve: %v", err)
 	}
 
-	cmd2 := &fakeCommander{stdout: jsonBody(map[string]string{"k": "bravo-long-enough"})}
+	cmd2 := &fakeCommander{stdout: jsonBody(map[string]string{"k": "bravo-long-enough-and-then-some"})}
 	p2 := openWithCommander(t, nil, cmd2)
 	defer p2.Close()
 	_, token2, err := p2.Resolve(context.Background(), vault.Ref{Key: "k"})
@@ -576,7 +598,7 @@ func TestTokenChangesOnRotation(t *testing.T) {
 	}
 
 	if token1.Token == token2.Token {
-		t.Fatalf("version token did not change on rotation: %q", token1.Token)
+		t.Fatalf("version token did not change on length-affecting rotation: %q", token1.Token)
 	}
 }
 
@@ -584,25 +606,134 @@ func TestTokenChangesOnRotation(t *testing.T) {
 // directly, locking in the substring set. Keeping this as an
 // internal test lets us iterate on markers without affecting the
 // package's public surface.
+//
+// The marker set was tightened in a v1 pass: broad tokens like
+// "auth" and "token" were removed because they misclassified
+// transient network errors (e.g., "token refresh pending") as auth
+// failures. The cases below exercise the current tighter list.
 func TestLooksLikeAuthFailure(t *testing.T) {
 	cases := []struct {
 		in   string
 		want bool
 	}{
 		{"", false},
-		{"Error: authentication required", true},
+		{"Error: 401 Unauthorized", true},
+		{"Error: 403 Forbidden", true},
 		{"Error: unauthorized access", true},
 		{"Error: unauthorised access", true},
-		{"please run infisical login", true},
-		{"invalid token", true},
-		{"Error: auth scheme mismatch", true},
+		{"Error: authentication failed", true},
+		{"Error: not logged in", true},
+		{"Error: login expired, please re-authenticate", true},
+		{"Error: invalid credentials", true},
+		{"Error: session expired", true},
 		{"Error: project not found", false},
 		{"Error: internal server error", false},
+		// Tightening assertions: these used to match under the old
+		// "auth"/"token" markers but must NOT match now.
+		{"Error: token refresh pending", false},
+		{"Error: auth scheme mismatch", false},
+		{"please run infisical login", false},
+		{"invalid token", false},
 	}
 	for _, c := range cases {
 		if got := looksLikeAuthFailure(c.in); got != c.want {
 			t.Fatalf("looksLikeAuthFailure(%q) = %v, want %v", c.in, got, c.want)
 		}
+	}
+}
+
+// TestTransientErrorDoesNotMapToUnreachable guards the tightening
+// of looksLikeAuthFailure: a transient network error whose stderr
+// mentions "token refresh pending" must NOT be classified as an
+// auth failure. Under --allow-missing-secrets (Issue 10) that
+// classification would silently downgrade the result to empty,
+// masking a retriable fault.
+func TestTransientErrorDoesNotMapToUnreachable(t *testing.T) {
+	cmd := &fakeCommander{
+		exitCode: 1,
+		stderr:   []byte("Error: token refresh pending, please retry"),
+	}
+	p := openWithCommander(t, nil, cmd)
+	defer p.Close()
+
+	_, _, err := p.Resolve(context.Background(), vault.Ref{Key: "k"})
+	if err == nil {
+		t.Fatalf("Resolve should have failed")
+	}
+	if errors.Is(err, vault.ErrProviderUnreachable) {
+		t.Fatalf("transient error should NOT map to ErrProviderUnreachable: %v", err)
+	}
+}
+
+// TestVersionTokenDoesNotDeriveFromPlaintext is the headline
+// security regression test for Design Decision 4: VersionToken.Token
+// MUST NOT incorporate decrypted plaintext bytes (that entropy would
+// flow into state.json via SourceEntry.VersionToken and into the
+// user-visible Provenance URL).
+//
+// The v1 Infisical backend hashes only (sorted key name + plaintext
+// byte length). This test builds two export payloads with the same
+// keys and same value lengths but completely different value bytes.
+// If the token derivation ever re-introduces a dependence on
+// plaintext content, the tokens will diverge and this test will
+// fail — flagging the regression.
+//
+// This is the inverse of TestVersionTokenChangesOnLengthChange: the
+// two together pin down the exact shape of the token (key + length
+// only).
+func TestVersionTokenDoesNotDeriveFromPlaintext(t *testing.T) {
+	payloadA := jsonBody(map[string]string{"KEY1": "aaaaaa", "KEY2": "bbbbbb"})
+	payloadB := jsonBody(map[string]string{"KEY1": "cccccc", "KEY2": "dddddd"})
+
+	cmdA := &fakeCommander{stdout: payloadA}
+	pA := openWithCommander(t, nil, cmdA)
+	defer pA.Close()
+	_, tokenA, err := pA.Resolve(context.Background(), vault.Ref{Key: "KEY1"})
+	if err != nil {
+		t.Fatalf("Resolve A: %v", err)
+	}
+
+	cmdB := &fakeCommander{stdout: payloadB}
+	pB := openWithCommander(t, nil, cmdB)
+	defer pB.Close()
+	_, tokenB, err := pB.Resolve(context.Background(), vault.Ref{Key: "KEY1"})
+	if err != nil {
+		t.Fatalf("Resolve B: %v", err)
+	}
+
+	if tokenA.Token != tokenB.Token {
+		t.Fatalf("tokens differ across equal-shape payloads — plaintext likely contributing to digest:\n  A=%q\n  B=%q",
+			tokenA.Token, tokenB.Token)
+	}
+	if tokenA.Token == "" {
+		t.Fatalf("token is empty; derivation produced no digest")
+	}
+}
+
+// TestVersionTokenChangesOnLengthChange is the complementary
+// assertion to TestVersionTokenDoesNotDeriveFromPlaintext: while
+// content changes alone do not flip the token (v1 trade-off), a
+// change in plaintext byte-length MUST flip it. This is the primary
+// rotation signal for the key-metadata-only derivation.
+func TestVersionTokenChangesOnLengthChange(t *testing.T) {
+	cmdA := &fakeCommander{stdout: jsonBody(map[string]string{"KEY1": "aaaaaa"})}
+	pA := openWithCommander(t, nil, cmdA)
+	defer pA.Close()
+	_, tokenA, err := pA.Resolve(context.Background(), vault.Ref{Key: "KEY1"})
+	if err != nil {
+		t.Fatalf("Resolve A: %v", err)
+	}
+
+	cmdB := &fakeCommander{stdout: jsonBody(map[string]string{"KEY1": "aaaaaaa"})}
+	pB := openWithCommander(t, nil, cmdB)
+	defer pB.Close()
+	_, tokenB, err := pB.Resolve(context.Background(), vault.Ref{Key: "KEY1"})
+	if err != nil {
+		t.Fatalf("Resolve B: %v", err)
+	}
+
+	if tokenA.Token == tokenB.Token {
+		t.Fatalf("token did not change when value length changed: %q", tokenA.Token)
 	}
 }
 
