@@ -278,20 +278,20 @@ func TestParseFullConfig(t *testing.T) {
 	if cfg.Claude.Settings == nil {
 		t.Error("claude.settings should not be nil")
 	}
-	if cfg.Claude.Settings["permissions"] != "bypass" {
-		t.Errorf("claude.settings.permissions = %v, want bypass", cfg.Claude.Settings["permissions"])
+	if cfg.Claude.Settings["permissions"].Plain != "bypass" {
+		t.Errorf("claude.settings.permissions = %v, want bypass", cfg.Claude.Settings["permissions"].Plain)
 	}
 	if len(cfg.Env.Files) != 1 || cfg.Env.Files[0] != "env/workspace.env" {
 		t.Errorf("env.files = %v, want [env/workspace.env]", cfg.Env.Files)
 	}
-	if cfg.Env.Vars["LOG_LEVEL"] != "debug" {
-		t.Errorf("env.vars.LOG_LEVEL = %v, want debug", cfg.Env.Vars["LOG_LEVEL"])
+	if cfg.Env.Vars.Values["LOG_LEVEL"].Plain != "debug" {
+		t.Errorf("env.vars.LOG_LEVEL = %v, want debug", cfg.Env.Vars.Values["LOG_LEVEL"].Plain)
 	}
 	if len(cfg.Claude.Env.Promote) != 1 || cfg.Claude.Env.Promote[0] != "GH_TOKEN" {
 		t.Errorf("claude.env.promote = %v, want [GH_TOKEN]", cfg.Claude.Env.Promote)
 	}
-	if cfg.Claude.Env.Vars["EXTRA_FLAG"] != "claude-only" {
-		t.Errorf("claude.env.vars.EXTRA_FLAG = %v, want claude-only", cfg.Claude.Env.Vars["EXTRA_FLAG"])
+	if cfg.Claude.Env.Vars.Values["EXTRA_FLAG"].Plain != "claude-only" {
+		t.Errorf("claude.env.vars.EXTRA_FLAG = %v, want claude-only", cfg.Claude.Env.Vars.Values["EXTRA_FLAG"].Plain)
 	}
 	if cfg.Channels == nil {
 		t.Error("channels should not be nil")
@@ -354,8 +354,8 @@ files = ["repo.env"]
 	if repo.Claude.Settings == nil {
 		t.Fatal("claude.settings should not be nil")
 	}
-	if repo.Claude.Settings["permissions"] != "ask" {
-		t.Errorf("claude.settings.permissions = %v, want ask", repo.Claude.Settings["permissions"])
+	if repo.Claude.Settings["permissions"].Plain != "ask" {
+		t.Errorf("claude.settings.permissions = %v, want ask", repo.Claude.Settings["permissions"].Plain)
 	}
 	if len(repo.Env.Files) != 1 || repo.Env.Files[0] != "repo.env" {
 		t.Errorf("env.files = %v, want [repo.env]", repo.Env.Files)
@@ -599,8 +599,8 @@ MY_TOKEN = "abc"
 	if cfg.Global.Claude == nil {
 		t.Fatal("global.claude should not be nil")
 	}
-	if cfg.Global.Claude.Settings["permissions"] != "bypass" {
-		t.Errorf("global.claude.settings.permissions = %q, want bypass", cfg.Global.Claude.Settings["permissions"])
+	if cfg.Global.Claude.Settings["permissions"].Plain != "bypass" {
+		t.Errorf("global.claude.settings.permissions = %q, want bypass", cfg.Global.Claude.Settings["permissions"].Plain)
 	}
 	hooks := cfg.Global.Claude.Hooks["pre_tool_use"]
 	if len(hooks) == 0 || len(hooks[0].Scripts) == 0 || hooks[0].Scripts[0] != "hooks/gate.sh" {
@@ -609,8 +609,8 @@ MY_TOKEN = "abc"
 	if len(cfg.Global.Env.Files) != 1 || cfg.Global.Env.Files[0] != "shared.env" {
 		t.Errorf("global.env.files = %v, want [shared.env]", cfg.Global.Env.Files)
 	}
-	if cfg.Global.Env.Vars["LANG"] != "en_US.UTF-8" {
-		t.Errorf("global.env.vars.LANG = %q, want en_US.UTF-8", cfg.Global.Env.Vars["LANG"])
+	if cfg.Global.Env.Vars.Values["LANG"].Plain != "en_US.UTF-8" {
+		t.Errorf("global.env.vars.LANG = %q, want en_US.UTF-8", cfg.Global.Env.Vars.Values["LANG"].Plain)
 	}
 	if cfg.Global.Files["secrets/api.env"] != "config/" {
 		t.Errorf("global.files[secrets/api.env] = %q, want config/", cfg.Global.Files["secrets/api.env"])
@@ -619,8 +619,8 @@ MY_TOKEN = "abc"
 	if !ok {
 		t.Fatal("workspaces.my-ws missing")
 	}
-	if ws.Env.Vars["MY_TOKEN"] != "abc" {
-		t.Errorf("workspaces.my-ws.env.vars.MY_TOKEN = %q, want abc", ws.Env.Vars["MY_TOKEN"])
+	if ws.Env.Vars.Values["MY_TOKEN"].Plain != "abc" {
+		t.Errorf("workspaces.my-ws.env.vars.MY_TOKEN = %q, want abc", ws.Env.Vars.Values["MY_TOKEN"].Plain)
 	}
 }
 

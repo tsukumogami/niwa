@@ -127,7 +127,7 @@ func InstallWorkspaceRootSettings(cfg *config.WorkspaceConfig, configDir, instan
 
 	// Resolve env vars.
 	envResult := make(map[string]string)
-	if len(cfg.Claude.Env.Promote) > 0 || len(cfg.Claude.Env.Vars) > 0 {
+	if len(cfg.Claude.Env.Promote) > 0 || len(cfg.Claude.Env.Vars.Values) > 0 {
 		if len(cfg.Claude.Env.Promote) > 0 {
 			resolved, _ := resolveEnvFromConfig(cfg, configDir)
 			for _, key := range cfg.Claude.Env.Promote {
@@ -136,8 +136,8 @@ func InstallWorkspaceRootSettings(cfg *config.WorkspaceConfig, configDir, instan
 				}
 			}
 		}
-		for k, v := range cfg.Claude.Env.Vars {
-			envResult[k] = v
+		for k, v := range cfg.Claude.Env.Vars.Values {
+			envResult[k] = v.String()
 		}
 	}
 
@@ -223,8 +223,11 @@ func resolveEnvFromConfig(cfg *config.WorkspaceConfig, configDir string) (map[st
 			vars[k] = v
 		}
 	}
-	for k, v := range cfg.Env.Vars {
-		vars[k] = v
+	for k, v := range cfg.Env.Vars.Values {
+		vars[k] = v.String()
+	}
+	for k, v := range cfg.Env.Secrets.Values {
+		vars[k] = v.String()
 	}
 	return vars, nil
 }

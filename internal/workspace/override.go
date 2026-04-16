@@ -81,11 +81,11 @@ func MergeOverrides(ws *config.WorkspaceConfig, repoName string) EffectiveConfig
 		}
 
 		// Claude env vars: repo wins per key.
-		for k, v := range override.Claude.Env.Vars {
-			if result.Claude.Env.Vars == nil {
-				result.Claude.Env.Vars = map[string]string{}
+		for k, v := range override.Claude.Env.Vars.Values {
+			if result.Claude.Env.Vars.Values == nil {
+				result.Claude.Env.Vars.Values = map[string]config.MaybeSecret{}
 			}
-			result.Claude.Env.Vars[k] = v
+			result.Claude.Env.Vars.Values[k] = v
 		}
 
 		// Plugins: repo replaces workspace entirely (nil = inherit).
@@ -100,11 +100,11 @@ func MergeOverrides(ws *config.WorkspaceConfig, repoName string) EffectiveConfig
 	}
 
 	// Env vars: repo wins per key.
-	for k, v := range override.Env.Vars {
-		if result.Env.Vars == nil {
-			result.Env.Vars = map[string]string{}
+	for k, v := range override.Env.Vars.Values {
+		if result.Env.Vars.Values == nil {
+			result.Env.Vars.Values = map[string]config.MaybeSecret{}
 		}
-		result.Env.Vars[k] = v
+		result.Env.Vars.Values[k] = v
 	}
 
 	// Files: repo wins per source key. Empty string removes workspace mapping.
@@ -145,7 +145,7 @@ func MergeInstanceOverrides(ws *config.WorkspaceConfig) EffectiveConfig {
 	}
 
 	override := ws.Instance
-	if override.Claude == nil && len(override.Env.Files) == 0 && len(override.Env.Vars) == 0 && len(override.Files) == 0 {
+	if override.Claude == nil && len(override.Env.Files) == 0 && override.Env.Vars.IsEmpty() && override.Env.Secrets.IsEmpty() && len(override.Files) == 0 {
 		return result
 	}
 
@@ -176,11 +176,11 @@ func MergeInstanceOverrides(ws *config.WorkspaceConfig) EffectiveConfig {
 			}
 		}
 
-		for k, v := range override.Claude.Env.Vars {
-			if result.Claude.Env.Vars == nil {
-				result.Claude.Env.Vars = map[string]string{}
+		for k, v := range override.Claude.Env.Vars.Values {
+			if result.Claude.Env.Vars.Values == nil {
+				result.Claude.Env.Vars.Values = map[string]config.MaybeSecret{}
 			}
-			result.Claude.Env.Vars[k] = v
+			result.Claude.Env.Vars.Values[k] = v
 		}
 
 		if override.Claude.Plugins != nil {
@@ -191,11 +191,11 @@ func MergeInstanceOverrides(ws *config.WorkspaceConfig) EffectiveConfig {
 	if len(override.Env.Files) > 0 {
 		result.Env.Files = append(result.Env.Files, override.Env.Files...)
 	}
-	for k, v := range override.Env.Vars {
-		if result.Env.Vars == nil {
-			result.Env.Vars = map[string]string{}
+	for k, v := range override.Env.Vars.Values {
+		if result.Env.Vars.Values == nil {
+			result.Env.Vars.Values = map[string]config.MaybeSecret{}
 		}
-		result.Env.Vars[k] = v
+		result.Env.Vars.Values[k] = v
 	}
 
 	for k, v := range override.Files {
@@ -276,11 +276,11 @@ func ResolveGlobalOverride(g *config.GlobalConfigOverride, workspaceName string)
 				}
 			}
 			// Claude.Env.Vars: ws wins.
-			for k, v := range ws.Claude.Env.Vars {
-				if merged.Env.Vars == nil {
-					merged.Env.Vars = map[string]string{}
+			for k, v := range ws.Claude.Env.Vars.Values {
+				if merged.Env.Vars.Values == nil {
+					merged.Env.Vars.Values = map[string]config.MaybeSecret{}
 				}
-				merged.Env.Vars[k] = v
+				merged.Env.Vars.Values[k] = v
 			}
 			result.Claude = &merged
 		}
@@ -291,11 +291,11 @@ func ResolveGlobalOverride(g *config.GlobalConfigOverride, workspaceName string)
 		result.Env.Files = append(result.Env.Files, ws.Env.Files...)
 	}
 	// Env.Vars: ws wins per key.
-	for k, v := range ws.Env.Vars {
-		if result.Env.Vars == nil {
-			result.Env.Vars = map[string]string{}
+	for k, v := range ws.Env.Vars.Values {
+		if result.Env.Vars.Values == nil {
+			result.Env.Vars.Values = map[string]config.MaybeSecret{}
 		}
-		result.Env.Vars[k] = v
+		result.Env.Vars.Values[k] = v
 	}
 
 	// Files: ws wins per key.
@@ -378,11 +378,11 @@ func MergeGlobalOverride(ws *config.WorkspaceConfig, g config.GlobalOverride, gl
 		}
 
 		// Claude.Env.Vars: global wins per key.
-		for k, v := range g.Claude.Env.Vars {
-			if merged.Claude.Env.Vars == nil {
-				merged.Claude.Env.Vars = map[string]string{}
+		for k, v := range g.Claude.Env.Vars.Values {
+			if merged.Claude.Env.Vars.Values == nil {
+				merged.Claude.Env.Vars.Values = map[string]config.MaybeSecret{}
 			}
-			merged.Claude.Env.Vars[k] = v
+			merged.Claude.Env.Vars.Values[k] = v
 		}
 
 		// Plugins: union, deduplicated; workspace plugins are never removed.
@@ -413,11 +413,11 @@ func MergeGlobalOverride(ws *config.WorkspaceConfig, g config.GlobalOverride, gl
 	}
 
 	// Env.Vars: global wins per key.
-	for k, v := range g.Env.Vars {
-		if merged.Env.Vars == nil {
-			merged.Env.Vars = map[string]string{}
+	for k, v := range g.Env.Vars.Values {
+		if merged.Env.Vars.Values == nil {
+			merged.Env.Vars.Values = map[string]config.MaybeSecret{}
 		}
-		merged.Env.Vars[k] = v
+		merged.Env.Vars.Values[k] = v
 	}
 
 	// Files: global wins per key; empty global value suppresses workspace mapping.
@@ -545,7 +545,9 @@ func copyHooks(h config.HooksConfig) config.HooksConfig {
 	return out
 }
 
-// copySettings returns a shallow copy of a SettingsConfig.
+// copySettings returns a shallow copy of a SettingsConfig. SettingsConfig
+// values are MaybeSecret which is already a value-type copy per entry, so
+// a simple maps.Copy is sufficient.
 func copySettings(s config.SettingsConfig) config.SettingsConfig {
 	if s == nil {
 		return nil
@@ -567,24 +569,42 @@ func copyStringMap(m map[string]string) map[string]string {
 
 // copyClaudeEnv returns a deep copy of a ClaudeEnvConfig.
 func copyClaudeEnv(e config.ClaudeEnvConfig) config.ClaudeEnvConfig {
-	out := config.ClaudeEnvConfig{
+	return config.ClaudeEnvConfig{
 		Promote: slices.Clone(e.Promote),
+		Vars:    copyEnvVarsTable(e.Vars),
+		Secrets: copyEnvVarsTable(e.Secrets),
 	}
-	if e.Vars != nil {
-		out.Vars = make(map[string]string, len(e.Vars))
-		maps.Copy(out.Vars, e.Vars)
-	}
-	return out
 }
 
 // copyEnv returns a deep copy of an EnvConfig.
 func copyEnv(e config.EnvConfig) config.EnvConfig {
-	out := config.EnvConfig{
-		Files: slices.Clone(e.Files),
+	return config.EnvConfig{
+		Files:   slices.Clone(e.Files),
+		Vars:    copyEnvVarsTable(e.Vars),
+		Secrets: copyEnvVarsTable(e.Secrets),
 	}
-	if e.Vars != nil {
-		out.Vars = make(map[string]string, len(e.Vars))
-		maps.Copy(out.Vars, e.Vars)
+}
+
+// copyEnvVarsTable returns a deep copy of an EnvVarsTable, cloning
+// each of the four underlying maps so the result can be mutated
+// without aliasing the source.
+func copyEnvVarsTable(t config.EnvVarsTable) config.EnvVarsTable {
+	out := config.EnvVarsTable{}
+	if t.Values != nil {
+		out.Values = make(map[string]config.MaybeSecret, len(t.Values))
+		maps.Copy(out.Values, t.Values)
+	}
+	if t.Required != nil {
+		out.Required = make(map[string]string, len(t.Required))
+		maps.Copy(out.Required, t.Required)
+	}
+	if t.Recommended != nil {
+		out.Recommended = make(map[string]string, len(t.Recommended))
+		maps.Copy(out.Recommended, t.Recommended)
+	}
+	if t.Optional != nil {
+		out.Optional = make(map[string]string, len(t.Optional))
+		maps.Copy(out.Optional, t.Optional)
 	}
 	return out
 }

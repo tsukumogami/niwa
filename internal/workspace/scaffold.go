@@ -49,14 +49,43 @@ content_dir = "claude"
 # [claude.settings]
 # [claude.env]
 # promote = ["GH_TOKEN"]
-# vars = { EXTRA_FLAG = "settings-only" }
+# [claude.env.vars]
+# EXTRA_FLAG = "settings-only"
+# [claude.env.secrets]
+# ANTHROPIC_API_KEY = "vault://team/ANTHROPIC_API_KEY"
 # --- Instance root overrides (workspace-level Claude Code session) ---
 # [instance.claude.settings]
 # permissions = "ask"
 # [env]
+# [env.vars]
+# LOG_LEVEL = "debug"
+# [env.secrets]
+# GITHUB_TOKEN = "vault://team/GITHUB_TOKEN"
 # [files]
 # "extensions/design.md" = ".claude/shirabe-extensions/"
 # [channels]
+#
+# --- Vault providers (optional) ---
+# Pick ONE shape. The anonymous singular shape lets vault:// URIs omit
+# the provider name (e.g., vault://API_KEY). The named shape allows
+# multiple providers; URIs must name one (e.g., vault://team/API_KEY).
+#
+# [vault.provider]
+# kind = "infisical"
+# project_id = "your-project-id"
+# env = "prod"
+#
+# OR:
+#
+# [vault.providers.team]
+# kind = "infisical"
+# project_id = "team-project"
+# [vault.providers.personal]
+# kind = "sops"
+# key_path = "keys/personal.age"
+#
+# [vault]
+# team_only = ["CRITICAL_TOKEN"]
 `
 
 // defaultWorkspaceName is used when no name is provided to Scaffold.

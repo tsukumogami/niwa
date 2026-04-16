@@ -171,9 +171,10 @@ func buildSettingsDoc(cfg BuildSettingsConfig) (map[string]any, error) {
 
 	// Build permissions block from settings.
 	if perm, ok := cfg.Settings["permissions"]; ok {
-		mapped, known := permissionsMapping[perm]
+		permStr := perm.String()
+		mapped, known := permissionsMapping[permStr]
 		if !known {
-			return nil, fmt.Errorf("unknown permissions value %q", perm)
+			return nil, fmt.Errorf("unknown permissions value %q", permStr)
 		}
 		doc["permissions"] = map[string]any{
 			"defaultMode": mapped,
@@ -282,7 +283,7 @@ func buildSettingsDoc(cfg BuildSettingsConfig) (map[string]any, error) {
 // single map. Returns nil if there are no env vars to resolve.
 func resolveClaudeEnvVars(ctx *MaterializeContext) (map[string]string, error) {
 	claudeEnv := ctx.Effective.Claude.Env
-	hasEnv := len(claudeEnv.Promote) > 0 || len(claudeEnv.Vars) > 0
+	hasEnv := len(claudeEnv.Promote) > 0 || len(claudeEnv.Vars.Values) > 0
 	if !hasEnv {
 		return nil, nil
 	}
@@ -307,9 +308,12 @@ func resolveClaudeEnvVars(ctx *MaterializeContext) (map[string]string, error) {
 		}
 	}
 
-	// Step 2: overlay inline vars (inline wins over promoted).
-	for k, v := range claudeEnv.Vars {
-		envResult[k] = v
+	// Step 2: overlay inline vars (inline wins over promoted). The
+	// resolver is not yet wired in (Issue 4), so every MaybeSecret
+	// carries Plain and no resolved Secret; String() returns the
+	// literal plaintext here.
+	for k, v := range claudeEnv.Vars.Values {
+		envResult[k] = v.String()
 	}
 
 	if len(envResult) == 0 {
@@ -405,7 +409,7 @@ func ResolveEnvVars(ctx *MaterializeContext) (map[string]string, error) {
 		files = []string{discovered.WorkspaceFile}
 	}
 
-	hasVars := len(envCfg.Vars) > 0
+	hasVars := len(envCfg.Vars.Values) > 0 || len(envCfg.Secrets.Values) > 0
 	hasRepoFile := discovered != nil && discovered.RepoFiles != nil && discovered.RepoFiles[ctx.RepoName] != ""
 
 	if len(files) == 0 && !hasVars && !hasRepoFile {
@@ -429,8 +433,15 @@ func ResolveEnvVars(ctx *MaterializeContext) (map[string]string, error) {
 		}
 	}
 
-	for k, v := range envCfg.Vars {
-		vars[k] = v
+	// The resolver (Issue 4) has not yet processed MaybeSecret values,
+	// so Plain holds the raw string. Secrets[...] values are not yet
+	// redacted; downstream materializer changes in Issue 4 will
+	// distinguish vars from secrets for file mode purposes.
+	for k, v := range envCfg.Vars.Values {
+		vars[k] = v.String()
+	}
+	for k, v := range envCfg.Secrets.Values {
+		vars[k] = v.String()
 	}
 
 	if hasRepoFile {

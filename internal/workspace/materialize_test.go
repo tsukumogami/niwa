@@ -350,7 +350,7 @@ func TestSettingsMaterializerPermissionsOnly(t *testing.T) {
 	ctx := &MaterializeContext{
 		Effective: EffectiveConfig{
 			Claude: config.ClaudeConfig{
-				Settings: config.SettingsConfig{"permissions": "bypass"},
+				Settings: config.SettingsConfig{"permissions": config.MaybeSecret{Plain: "bypass"}},
 			},
 		},
 		RepoDir: repoDir,
@@ -403,7 +403,7 @@ func TestSettingsMaterializerAskPermissions(t *testing.T) {
 	ctx := &MaterializeContext{
 		Effective: EffectiveConfig{
 			Claude: config.ClaudeConfig{
-				Settings: config.SettingsConfig{"permissions": "ask"},
+				Settings: config.SettingsConfig{"permissions": config.MaybeSecret{Plain: "ask"}},
 			},
 		},
 		RepoDir: repoDir,
@@ -444,7 +444,7 @@ func TestSettingsMaterializerUnknownPermissions(t *testing.T) {
 	ctx := &MaterializeContext{
 		Effective: EffectiveConfig{
 			Claude: config.ClaudeConfig{
-				Settings: config.SettingsConfig{"permissions": "invalid"},
+				Settings: config.SettingsConfig{"permissions": config.MaybeSecret{Plain: "invalid"}},
 			},
 		},
 		RepoDir: repoDir,
@@ -534,7 +534,7 @@ func TestSettingsMaterializerSettingsAndHooks(t *testing.T) {
 	ctx := &MaterializeContext{
 		Effective: EffectiveConfig{
 			Claude: config.ClaudeConfig{
-				Settings: config.SettingsConfig{"permissions": "bypass"},
+				Settings: config.SettingsConfig{"permissions": config.MaybeSecret{Plain: "bypass"}},
 			},
 		},
 		RepoDir: repoDir,
@@ -679,10 +679,7 @@ func TestSettingsMaterializerInlineEnvOnly(t *testing.T) {
 		Effective: EffectiveConfig{
 			Claude: config.ClaudeConfig{
 				Env: config.ClaudeEnvConfig{
-					Vars: map[string]string{
-						"GH_TOKEN":  "ghp_test123",
-						"API_TOKEN": "api_test456",
-					},
+					Vars: config.EnvVarsTable{Values: map[string]config.MaybeSecret{"GH_TOKEN": config.MaybeSecret{Plain: "ghp_test123"}, "API_TOKEN": config.MaybeSecret{Plain: "api_test456"}}},
 				},
 			},
 		},
@@ -841,7 +838,7 @@ func TestSettingsMaterializerPromoteInlineOverride(t *testing.T) {
 			Claude: config.ClaudeConfig{
 				Env: config.ClaudeEnvConfig{
 					Promote: []string{"GH_TOKEN"},
-					Vars:    map[string]string{"GH_TOKEN": "ghp_inline_wins"},
+					Vars: config.EnvVarsTable{Values: map[string]config.MaybeSecret{"GH_TOKEN": config.MaybeSecret{Plain: "ghp_inline_wins"}}},
 				},
 			},
 			Env: config.EnvConfig{
@@ -885,8 +882,8 @@ func TestSettingsMaterializerAllBlocks(t *testing.T) {
 	ctx := &MaterializeContext{
 		Effective: EffectiveConfig{
 			Claude: config.ClaudeConfig{
-				Settings: config.SettingsConfig{"permissions": "bypass"},
-				Env:      config.ClaudeEnvConfig{Vars: map[string]string{"GH_TOKEN": "ghp_test"}},
+				Settings: config.SettingsConfig{"permissions": config.MaybeSecret{Plain: "bypass"}},
+				Env:      config.ClaudeEnvConfig{Vars: config.EnvVarsTable{Values: map[string]config.MaybeSecret{"GH_TOKEN": config.MaybeSecret{Plain: "ghp_test"}}}},
 			},
 		},
 		RepoDir: repoDir,
@@ -1022,7 +1019,7 @@ func TestEnvMaterializerInlineVarsOnly(t *testing.T) {
 	ctx := &MaterializeContext{
 		Effective: EffectiveConfig{
 			Env: config.EnvConfig{
-				Vars: map[string]string{"KEY": "value"},
+				Vars: config.EnvVarsTable{Values: map[string]config.MaybeSecret{"KEY": config.MaybeSecret{Plain: "value"}}},
 			},
 		},
 		RepoName:  "myrepo",
@@ -1071,7 +1068,7 @@ func TestEnvMaterializerVarsOverrideFileVars(t *testing.T) {
 		Effective: EffectiveConfig{
 			Env: config.EnvConfig{
 				Files: []string{"base.env"},
-				Vars:  map[string]string{"FOO": "from_vars"},
+				Vars: config.EnvVarsTable{Values: map[string]config.MaybeSecret{"FOO": config.MaybeSecret{Plain: "from_vars"}}},
 			},
 		},
 		RepoName:  "myrepo",
@@ -1387,11 +1384,7 @@ func TestEnvMaterializerSortedKeys(t *testing.T) {
 	ctx := &MaterializeContext{
 		Effective: EffectiveConfig{
 			Env: config.EnvConfig{
-				Vars: map[string]string{
-					"ZEBRA": "z",
-					"ALPHA": "a",
-					"MIKE":  "m",
-				},
+				Vars: config.EnvVarsTable{Values: map[string]config.MaybeSecret{"ZEBRA": config.MaybeSecret{Plain: "z"}, "ALPHA": config.MaybeSecret{Plain: "a"}, "MIKE": config.MaybeSecret{Plain: "m"}}},
 			},
 		},
 		RepoName:  "myrepo",
@@ -1659,7 +1652,7 @@ func TestBuildSettingsDocPlugins(t *testing.T) {
 
 func TestBuildSettingsDocEmptyPlugins(t *testing.T) {
 	doc, err := buildSettingsDoc(BuildSettingsConfig{
-		Settings: config.SettingsConfig{"permissions": "bypass"},
+		Settings: config.SettingsConfig{"permissions": config.MaybeSecret{Plain: "bypass"}},
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -1751,7 +1744,7 @@ func TestBuildSettingsDocRepoMarketplaceMissingRepo(t *testing.T) {
 func TestBuildSettingsDocIncludeGitInstructions(t *testing.T) {
 	f := false
 	doc, err := buildSettingsDoc(BuildSettingsConfig{
-		Settings:               config.SettingsConfig{"permissions": "bypass"},
+		Settings:               config.SettingsConfig{"permissions": config.MaybeSecret{Plain: "bypass"}},
 		IncludeGitInstructions: &f,
 	})
 	if err != nil {
@@ -1769,7 +1762,7 @@ func TestBuildSettingsDocIncludeGitInstructions(t *testing.T) {
 
 func TestBuildSettingsDocNoIncludeGitInstructionsWhenNil(t *testing.T) {
 	doc, err := buildSettingsDoc(BuildSettingsConfig{
-		Settings: config.SettingsConfig{"permissions": "bypass"},
+		Settings: config.SettingsConfig{"permissions": config.MaybeSecret{Plain: "bypass"}},
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -1788,7 +1781,7 @@ func TestSettingsMaterializerWithPlugins(t *testing.T) {
 	ctx := &MaterializeContext{
 		Effective: EffectiveConfig{
 			Claude: config.ClaudeConfig{
-				Settings: config.SettingsConfig{"permissions": "bypass"},
+				Settings: config.SettingsConfig{"permissions": config.MaybeSecret{Plain: "bypass"}},
 			},
 			Plugins: []string{"my-plugin@marketplace"},
 		},

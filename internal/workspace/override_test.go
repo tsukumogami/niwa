@@ -129,7 +129,7 @@ func TestMergeOverridesNoOverride(t *testing.T) {
 	ws := &config.WorkspaceConfig{
 		Claude: config.ClaudeConfig{
 			Hooks:    config.HooksConfig{"pre_tool_use": {{Scripts: []string{"a.sh"}}}},
-			Settings: config.SettingsConfig{"permissions": "bypass"},
+			Settings: config.SettingsConfig{"permissions": config.MaybeSecret{Plain: "bypass"}},
 		},
 		Env: config.EnvConfig{Files: []string{"ws.env"}},
 	}
@@ -139,31 +139,31 @@ func TestMergeOverridesNoOverride(t *testing.T) {
 	if len(eff.Claude.Hooks) != 1 {
 		t.Errorf("expected 1 hook key, got %d", len(eff.Claude.Hooks))
 	}
-	if eff.Claude.Settings["permissions"] != "bypass" {
-		t.Errorf("expected permissions=bypass, got %v", eff.Claude.Settings["permissions"])
+	if eff.Claude.Settings["permissions"].Plain != "bypass" {
+		t.Errorf("expected permissions=bypass, got %v", eff.Claude.Settings["permissions"].Plain)
 	}
 }
 
 func TestMergeOverridesSettingsWin(t *testing.T) {
 	ws := &config.WorkspaceConfig{
 		Claude: config.ClaudeConfig{
-			Settings: config.SettingsConfig{"permissions": "bypass", "keep": "yes"},
+			Settings: config.SettingsConfig{"permissions": config.MaybeSecret{Plain: "bypass"}, "keep": config.MaybeSecret{Plain: "yes"}},
 		},
 		Repos: map[string]config.RepoOverride{
 			"myrepo": {
 				Claude: &config.ClaudeOverride{
-					Settings: config.SettingsConfig{"permissions": "ask"},
+					Settings: config.SettingsConfig{"permissions": config.MaybeSecret{Plain: "ask"}},
 				},
 			},
 		},
 	}
 	eff := MergeOverrides(ws, "myrepo")
 
-	if eff.Claude.Settings["permissions"] != "ask" {
-		t.Errorf("repo setting should win, got %v", eff.Claude.Settings["permissions"])
+	if eff.Claude.Settings["permissions"].Plain != "ask" {
+		t.Errorf("repo setting should win, got %v", eff.Claude.Settings["permissions"].Plain)
 	}
-	if eff.Claude.Settings["keep"] != "yes" {
-		t.Errorf("workspace setting should be preserved, got %v", eff.Claude.Settings["keep"])
+	if eff.Claude.Settings["keep"].Plain != "yes" {
+		t.Errorf("workspace setting should be preserved, got %v", eff.Claude.Settings["keep"].Plain)
 	}
 }
 
@@ -188,39 +188,39 @@ func TestMergeOverridesEnvFilesAppend(t *testing.T) {
 
 func TestMergeOverridesEnvVarsWin(t *testing.T) {
 	ws := &config.WorkspaceConfig{
-		Env: config.EnvConfig{Vars: map[string]string{"LOG_LEVEL": "info"}},
+		Env: config.EnvConfig{Vars: config.EnvVarsTable{Values: map[string]config.MaybeSecret{"LOG_LEVEL": config.MaybeSecret{Plain: "info"}}}},
 		Repos: map[string]config.RepoOverride{
 			"myrepo": {
-				Env: config.EnvConfig{Vars: map[string]string{"LOG_LEVEL": "debug"}},
+				Env: config.EnvConfig{Vars: config.EnvVarsTable{Values: map[string]config.MaybeSecret{"LOG_LEVEL": config.MaybeSecret{Plain: "debug"}}}},
 			},
 		},
 	}
 	eff := MergeOverrides(ws, "myrepo")
 
-	if eff.Env.Vars["LOG_LEVEL"] != "debug" {
-		t.Errorf("repo env var should win, got %v", eff.Env.Vars["LOG_LEVEL"])
+	if eff.Env.Vars.Values["LOG_LEVEL"].Plain != "debug" {
+		t.Errorf("repo env var should win, got %v", eff.Env.Vars.Values["LOG_LEVEL"].Plain)
 	}
 }
 
 func TestMergeOverridesEnvVarsMerge(t *testing.T) {
 	ws := &config.WorkspaceConfig{
-		Env: config.EnvConfig{Vars: map[string]string{"LOG_LEVEL": "info", "MODE": "prod"}},
+		Env: config.EnvConfig{Vars: config.EnvVarsTable{Values: map[string]config.MaybeSecret{"LOG_LEVEL": config.MaybeSecret{Plain: "info"}, "MODE": config.MaybeSecret{Plain: "prod"}}}},
 		Repos: map[string]config.RepoOverride{
 			"myrepo": {
-				Env: config.EnvConfig{Vars: map[string]string{"DEBUG": "true"}},
+				Env: config.EnvConfig{Vars: config.EnvVarsTable{Values: map[string]config.MaybeSecret{"DEBUG": config.MaybeSecret{Plain: "true"}}}},
 			},
 		},
 	}
 	eff := MergeOverrides(ws, "myrepo")
 
-	if eff.Env.Vars["LOG_LEVEL"] != "info" {
-		t.Errorf("workspace var should be preserved, got %v", eff.Env.Vars["LOG_LEVEL"])
+	if eff.Env.Vars.Values["LOG_LEVEL"].Plain != "info" {
+		t.Errorf("workspace var should be preserved, got %v", eff.Env.Vars.Values["LOG_LEVEL"].Plain)
 	}
-	if eff.Env.Vars["MODE"] != "prod" {
-		t.Errorf("workspace var should be preserved, got %v", eff.Env.Vars["MODE"])
+	if eff.Env.Vars.Values["MODE"].Plain != "prod" {
+		t.Errorf("workspace var should be preserved, got %v", eff.Env.Vars.Values["MODE"].Plain)
 	}
-	if eff.Env.Vars["DEBUG"] != "true" {
-		t.Errorf("repo var should be added, got %v", eff.Env.Vars["DEBUG"])
+	if eff.Env.Vars.Values["DEBUG"].Plain != "true" {
+		t.Errorf("repo var should be added, got %v", eff.Env.Vars.Values["DEBUG"].Plain)
 	}
 }
 
@@ -264,7 +264,7 @@ func TestMergeOverridesNilWorkspaceFields(t *testing.T) {
 		Repos: map[string]config.RepoOverride{
 			"myrepo": {
 				Claude: &config.ClaudeOverride{
-					Settings: config.SettingsConfig{"permissions": "ask"},
+					Settings: config.SettingsConfig{"permissions": config.MaybeSecret{Plain: "ask"}},
 					Hooks:    config.HooksConfig{"stop": {{Scripts: []string{"stop.sh"}}}},
 				},
 				Env: config.EnvConfig{Files: []string{"repo.env"}},
@@ -273,8 +273,8 @@ func TestMergeOverridesNilWorkspaceFields(t *testing.T) {
 	}
 	eff := MergeOverrides(ws, "myrepo")
 
-	if eff.Claude.Settings["permissions"] != "ask" {
-		t.Errorf("expected permissions=ask, got %v", eff.Claude.Settings["permissions"])
+	if eff.Claude.Settings["permissions"].Plain != "ask" {
+		t.Errorf("expected permissions=ask, got %v", eff.Claude.Settings["permissions"].Plain)
 	}
 	stop := eff.Claude.Hooks["stop"]
 	if len(stop) != 1 || stop[0].Scripts[0] != "stop.sh" {
@@ -289,19 +289,14 @@ func TestMergeOverridesClaudeEnvVarsWin(t *testing.T) {
 	ws := &config.WorkspaceConfig{
 		Claude: config.ClaudeConfig{
 			Env: config.ClaudeEnvConfig{
-				Vars: map[string]string{
-					"GH_TOKEN":  "ws_token",
-					"API_TOKEN": "ws_api",
-				},
+				Vars: config.EnvVarsTable{Values: map[string]config.MaybeSecret{"GH_TOKEN": config.MaybeSecret{Plain: "ws_token"}, "API_TOKEN": config.MaybeSecret{Plain: "ws_api"}}},
 			},
 		},
 		Repos: map[string]config.RepoOverride{
 			"myrepo": {
 				Claude: &config.ClaudeOverride{
 					Env: config.ClaudeEnvConfig{
-						Vars: map[string]string{
-							"GH_TOKEN": "repo_token",
-						},
+						Vars: config.EnvVarsTable{Values: map[string]config.MaybeSecret{"GH_TOKEN": config.MaybeSecret{Plain: "repo_token"}}},
 					},
 				},
 			},
@@ -309,11 +304,11 @@ func TestMergeOverridesClaudeEnvVarsWin(t *testing.T) {
 	}
 	eff := MergeOverrides(ws, "myrepo")
 
-	if eff.Claude.Env.Vars["GH_TOKEN"] != "repo_token" {
-		t.Errorf("expected GH_TOKEN=repo_token, got %v", eff.Claude.Env.Vars["GH_TOKEN"])
+	if eff.Claude.Env.Vars.Values["GH_TOKEN"].Plain != "repo_token" {
+		t.Errorf("expected GH_TOKEN=repo_token, got %v", eff.Claude.Env.Vars.Values["GH_TOKEN"].Plain)
 	}
-	if eff.Claude.Env.Vars["API_TOKEN"] != "ws_api" {
-		t.Errorf("expected API_TOKEN=ws_api, got %v", eff.Claude.Env.Vars["API_TOKEN"])
+	if eff.Claude.Env.Vars.Values["API_TOKEN"].Plain != "ws_api" {
+		t.Errorf("expected API_TOKEN=ws_api, got %v", eff.Claude.Env.Vars.Values["API_TOKEN"].Plain)
 	}
 }
 
@@ -353,7 +348,7 @@ func TestMergeOverridesClaudeEnvNilWorkspace(t *testing.T) {
 			"myrepo": {
 				Claude: &config.ClaudeOverride{
 					Env: config.ClaudeEnvConfig{
-						Vars:    map[string]string{"GH_TOKEN": "repo_only"},
+						Vars: config.EnvVarsTable{Values: map[string]config.MaybeSecret{"GH_TOKEN": config.MaybeSecret{Plain: "repo_only"}}},
 						Promote: []string{"OTHER"},
 					},
 				},
@@ -362,8 +357,8 @@ func TestMergeOverridesClaudeEnvNilWorkspace(t *testing.T) {
 	}
 	eff := MergeOverrides(ws, "myrepo")
 
-	if eff.Claude.Env.Vars["GH_TOKEN"] != "repo_only" {
-		t.Errorf("expected GH_TOKEN=repo_only, got %v", eff.Claude.Env.Vars["GH_TOKEN"])
+	if eff.Claude.Env.Vars.Values["GH_TOKEN"].Plain != "repo_only" {
+		t.Errorf("expected GH_TOKEN=repo_only, got %v", eff.Claude.Env.Vars.Values["GH_TOKEN"].Plain)
 	}
 	if len(eff.Claude.Env.Promote) != 1 || eff.Claude.Env.Promote[0] != "OTHER" {
 		t.Errorf("expected promote [OTHER], got %v", eff.Claude.Env.Promote)
@@ -446,13 +441,13 @@ func TestMergeOverridesEnvMutationSafety(t *testing.T) {
 	ws := &config.WorkspaceConfig{
 		Env: config.EnvConfig{
 			Files: []string{"ws.env"},
-			Vars:  map[string]string{"A": "1"},
+			Vars: config.EnvVarsTable{Values: map[string]config.MaybeSecret{"A": config.MaybeSecret{Plain: "1"}}},
 		},
 		Repos: map[string]config.RepoOverride{
 			"myrepo": {
 				Env: config.EnvConfig{
 					Files: []string{"repo.env"},
-					Vars:  map[string]string{"B": "2"},
+					Vars: config.EnvVarsTable{Values: map[string]config.MaybeSecret{"B": config.MaybeSecret{Plain: "2"}}},
 				},
 			},
 		},
@@ -462,7 +457,7 @@ func TestMergeOverridesEnvMutationSafety(t *testing.T) {
 	if len(ws.Env.Files) != 1 || ws.Env.Files[0] != "ws.env" {
 		t.Errorf("workspace env files were mutated: %v", ws.Env.Files)
 	}
-	if len(ws.Env.Vars) != 1 || ws.Env.Vars["A"] != "1" {
+	if len(ws.Env.Vars.Values) != 1 || ws.Env.Vars.Values["A"].Plain != "1" {
 		t.Errorf("workspace env vars were mutated: %v", ws.Env.Vars)
 	}
 }
@@ -547,12 +542,12 @@ func TestMergeOverridesFilesRemoval(t *testing.T) {
 func TestResolveGlobalOverrideNoWorkspace(t *testing.T) {
 	g := &config.GlobalConfigOverride{
 		Global: config.GlobalOverride{
-			Env: config.EnvConfig{Vars: map[string]string{"LANG": "en"}},
+			Env: config.EnvConfig{Vars: config.EnvVarsTable{Values: map[string]config.MaybeSecret{"LANG": config.MaybeSecret{Plain: "en"}}}},
 		},
 	}
 	result := ResolveGlobalOverride(g, "nonexistent")
-	if result.Env.Vars["LANG"] != "en" {
-		t.Errorf("expected global LANG=en, got %q", result.Env.Vars["LANG"])
+	if result.Env.Vars.Values["LANG"].Plain != "en" {
+		t.Errorf("expected global LANG=en, got %q", result.Env.Vars.Values["LANG"].Plain)
 	}
 }
 
@@ -566,17 +561,17 @@ func TestResolveGlobalOverrideNil(t *testing.T) {
 func TestResolveGlobalOverrideWorkspaceVarsWin(t *testing.T) {
 	g := &config.GlobalConfigOverride{
 		Global: config.GlobalOverride{
-			Env: config.EnvConfig{Vars: map[string]string{"TOKEN": "global"}},
+			Env: config.EnvConfig{Vars: config.EnvVarsTable{Values: map[string]config.MaybeSecret{"TOKEN": config.MaybeSecret{Plain: "global"}}}},
 		},
 		Workspaces: map[string]config.GlobalOverride{
 			"my-ws": {
-				Env: config.EnvConfig{Vars: map[string]string{"TOKEN": "ws-specific"}},
+				Env: config.EnvConfig{Vars: config.EnvVarsTable{Values: map[string]config.MaybeSecret{"TOKEN": config.MaybeSecret{Plain: "ws-specific"}}}},
 			},
 		},
 	}
 	result := ResolveGlobalOverride(g, "my-ws")
-	if result.Env.Vars["TOKEN"] != "ws-specific" {
-		t.Errorf("workspace TOKEN should win, got %q", result.Env.Vars["TOKEN"])
+	if result.Env.Vars.Values["TOKEN"].Plain != "ws-specific" {
+		t.Errorf("workspace TOKEN should win, got %q", result.Env.Vars.Values["TOKEN"].Plain)
 	}
 }
 
@@ -624,17 +619,17 @@ func TestMergeGlobalOverrideSettingsGlobalWins(t *testing.T) {
 	ws := &config.WorkspaceConfig{
 		Workspace: config.WorkspaceMeta{Name: "test"},
 		Claude: config.ClaudeConfig{
-			Settings: config.SettingsConfig{"permissions": "ask"},
+			Settings: config.SettingsConfig{"permissions": config.MaybeSecret{Plain: "ask"}},
 		},
 	}
 	g := config.GlobalOverride{
 		Claude: &config.ClaudeOverride{
-			Settings: config.SettingsConfig{"permissions": "bypass"},
+			Settings: config.SettingsConfig{"permissions": config.MaybeSecret{Plain: "bypass"}},
 		},
 	}
 	merged := MergeGlobalOverride(ws, g, "/global")
-	if merged.Claude.Settings["permissions"] != "bypass" {
-		t.Errorf("global settings should win, got %q", merged.Claude.Settings["permissions"])
+	if merged.Claude.Settings["permissions"].Plain != "bypass" {
+		t.Errorf("global settings should win, got %q", merged.Claude.Settings["permissions"].Plain)
 	}
 }
 
@@ -667,17 +662,17 @@ func TestMergeGlobalOverrideEnvVarsGlobalWins(t *testing.T) {
 	ws := &config.WorkspaceConfig{
 		Workspace: config.WorkspaceMeta{Name: "test"},
 		Claude: config.ClaudeConfig{
-			Env: config.ClaudeEnvConfig{Vars: map[string]string{"LANG": "ws"}},
+			Env: config.ClaudeEnvConfig{Vars: config.EnvVarsTable{Values: map[string]config.MaybeSecret{"LANG": config.MaybeSecret{Plain: "ws"}}}},
 		},
 	}
 	g := config.GlobalOverride{
 		Claude: &config.ClaudeOverride{
-			Env: config.ClaudeEnvConfig{Vars: map[string]string{"LANG": "global"}},
+			Env: config.ClaudeEnvConfig{Vars: config.EnvVarsTable{Values: map[string]config.MaybeSecret{"LANG": config.MaybeSecret{Plain: "global"}}}},
 		},
 	}
 	merged := MergeGlobalOverride(ws, g, "/global")
-	if merged.Claude.Env.Vars["LANG"] != "global" {
-		t.Errorf("global env var should win, got %q", merged.Claude.Env.Vars["LANG"])
+	if merged.Claude.Env.Vars.Values["LANG"].Plain != "global" {
+		t.Errorf("global env var should win, got %q", merged.Claude.Env.Vars.Values["LANG"].Plain)
 	}
 }
 
@@ -755,13 +750,13 @@ func TestMergeGlobalOverrideFilesEmptyStringSuppresses(t *testing.T) {
 func TestMergeGlobalOverrideDoesNotMutateInput(t *testing.T) {
 	ws := &config.WorkspaceConfig{
 		Workspace: config.WorkspaceMeta{Name: "test"},
-		Env:       config.EnvConfig{Vars: map[string]string{"X": "original"}},
+		Env:       config.EnvConfig{Vars: config.EnvVarsTable{Values: map[string]config.MaybeSecret{"X": config.MaybeSecret{Plain: "original"}}}},
 	}
 	g := config.GlobalOverride{
-		Env: config.EnvConfig{Vars: map[string]string{"X": "global"}},
+		Env: config.EnvConfig{Vars: config.EnvVarsTable{Values: map[string]config.MaybeSecret{"X": config.MaybeSecret{Plain: "global"}}}},
 	}
 	_ = MergeGlobalOverride(ws, g, "/global")
-	if ws.Env.Vars["X"] != "original" {
+	if ws.Env.Vars.Values["X"].Plain != "original" {
 		t.Error("MergeGlobalOverride should not mutate the input ws")
 	}
 }
