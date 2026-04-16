@@ -1,5 +1,5 @@
 ---
-status: Draft
+status: Accepted
 version: 2
 problem: |
   When a niwa workspace config repo is made public, the workspace.toml exposes private information through several surfaces: source org identifiers in [[sources]], group names that imply private categories exist, [repos.*] section keys (which are repo names), [claude.content.repos.*] entries including subdirectory mappings that reveal internal code structure, and [channels.*.access] sections containing user IDs. Teams that want to publish their workspace config — to enable open contribution, share it as a reference, or reduce maintenance burden — currently have no way to keep private repo references out of the public config without maintaining a completely separate private workspace config that duplicates all the public configuration.
@@ -11,7 +11,7 @@ goals: |
 
 ## Status
 
-Draft
+Accepted
 
 ## Problem Statement
 
