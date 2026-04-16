@@ -3,7 +3,7 @@
   "design_doc": "docs/plans/PLAN-vault-integration.md",
   "branch": "docs/vault-integration",
   "pr_number": 52,
-  "integrity_hash": "sha256:371a0e275d7f04b2faeac5649532d1aeaf54d56108d60994d78ea2b8f6cd447d",
+  "integrity_hash": "sha256:85196002cb6f45eae3e5bd21a03683481ba15f4ae4531ffea8d1e66562875f24",
   "issues": [
     {
       "number": 1,
@@ -363,8 +363,8 @@
     {
       "number": 6,
       "title": "feat(workspace): materialization hardening (0o600, .local infix, .gitignore)",
-      "status": "scrutinized",
-      "ci_status": "pending",
+      "status": "completed",
+      "ci_status": "passed",
       "ci_fix_attempts": 0,
       "issue_type": "code",
       "dependencies": [],
@@ -395,19 +395,74 @@
           }
         ]
       },
+      "reviewer_results": {
+        "issue": 6,
+        "round": 1,
+        "reviewers": [
+          {
+            "role": "pragmatic",
+            "blocking_count": 0,
+            "non_blocking_count": 0,
+            "detail_file": "wip/research/implement-vault-integration-issue_6_pragmatic.md"
+          },
+          {
+            "role": "architect",
+            "blocking_count": 0,
+            "non_blocking_count": 1,
+            "detail_file": "wip/research/implement-vault-integration-issue_6_architect.md"
+          },
+          {
+            "role": "maintainer",
+            "blocking_count": 1,
+            "non_blocking_count": 2,
+            "detail_file": "wip/research/implement-vault-integration-issue_6_maintainer.md"
+          }
+        ],
+        "resolution": "Maintainer B1 addressed in commit 5b1d682 (FilesMaterializer emits stderr notice on .local injection, deduped per Materialize call). Architect non-blocking advisory also addressed in same commit (EnsureInstanceGitignore now called from Apply in addition to Create).",
+        "advisory_deferred": [
+          "maintainer A1 (injectLocalInfix substring edge cases not tested)",
+          "maintainer A2 (materializeDir parallel-branch cleanup)"
+        ]
+      },
+      "qa_skipped": true,
       "testable_scenarios": []
     },
     {
       "number": 7,
       "title": "feat(workspace): SourceFingerprint and per-source tuples in state.json",
-      "status": "pending",
+      "status": "scrutinized",
       "ci_status": "pending",
       "ci_fix_attempts": 0,
-      "issue_type": "",
+      "issue_type": "code",
       "dependencies": [],
-      "commits": [],
-      "agent_type": "",
-      "summary": null,
+      "commits": [
+        "b2c56490c2148e34eeddeb731210bdbf0b360fcf"
+      ],
+      "agent_type": "coder",
+      "summary": {
+        "narrative": "",
+        "files_changed": [
+          "internal/cli/status.go",
+          "internal/cli/status_test.go",
+          "internal/workspace/apply.go",
+          "internal/workspace/fingerprint_test.go",
+          "internal/workspace/materialize.go",
+          "internal/workspace/sources_test.go",
+          "internal/workspace/state.go",
+          "internal/workspace/state_test.go",
+          "internal/workspace/status.go",
+          "internal/workspace/status_test.go"
+        ],
+        "tests_added": 8,
+        "key_decisions": "ContentHash JSON tag kept as 'hash' to let v1 state files load via omitempty-based migration shim without custom Unmarshal path; SourceTuples added on MaterializeContext rather than changing Materializer.Materialize signature; ComputeStatus uses candidate-path walk to locate SourceID files without adding configDir argument; vault rotation visibility deferred to Issue 10's --check-vault flag",
+        "requirements_map": [
+          {
+            "ac": "Issue 7 full AC list",
+            "status": "implemented",
+            "evidence": "per-AC mapping in coder return (13 entries)"
+          }
+        ]
+      },
       "testable_scenarios": []
     },
     {
