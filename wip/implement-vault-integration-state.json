@@ -3,7 +3,7 @@
   "design_doc": "docs/plans/PLAN-vault-integration.md",
   "branch": "docs/vault-integration",
   "pr_number": 52,
-  "integrity_hash": "sha256:a44e3f1c775613958dde9c93bd4d81179992a58ce0a6e804d21ff2fb41437160",
+  "integrity_hash": "sha256:044f98a802be5286afe25f5f35d0e942439ad5838068913ed7c61788113bf5d5",
   "issues": [
     {
       "number": 1,
@@ -633,8 +633,8 @@
     {
       "number": 10,
       "title": "feat(cli): vault flags, status subcommands, bootstrap pointer",
-      "status": "scrutinized",
-      "ci_status": "pending",
+      "status": "completed",
+      "ci_status": "passed",
       "ci_fix_attempts": 0,
       "issue_type": "code",
       "dependencies": [],
@@ -669,19 +669,73 @@
           }
         ]
       },
+      "reviewer_results": {
+        "issue": 10,
+        "round": 1,
+        "reviewers": [
+          {
+            "role": "pragmatic",
+            "blocking_count": 0,
+            "non_blocking_count": 3,
+            "detail_file": "wip/research/implement-vault-integration-issue_10_pragmatic.md"
+          },
+          {
+            "role": "architect",
+            "blocking_count": 0,
+            "non_blocking_count": 2,
+            "detail_file": "wip/research/implement-vault-integration-issue_10_architect.md"
+          },
+          {
+            "role": "maintainer",
+            "blocking_count": 1,
+            "non_blocking_count": 3,
+            "detail_file": "wip/research/implement-vault-integration-issue_10_maintainer.md"
+          }
+        ],
+        "resolution": "Maintainer blocker addressed in commit 6feef8e: audit predicate now uses !cfg.Vault.IsEmpty() matching sibling paths (init.go, check-vault); IsEmpty() tightened so TeamOnly alone is no longer non-empty (aligns with existing doc comment); printVaultRotations closes with call-to-action.",
+        "advisory_deferred": [
+          "pragmatic: classResolved dead branch; pre-existing driftLabel dead branch in status.go:160-162; AllowFlags test binds cobra flags but doesn't verify runApply wiring",
+          "architect: showDetailView vs runStatus test parity (nice-to-have)",
+          "maintainer: printVaultRotations exit code not set when rotations detected; pre-existing driftLabel dead branch"
+        ]
+      },
+      "qa_skipped": true,
       "testable_scenarios": []
     },
     {
       "number": 11,
       "title": "docs(vault): bootstrap walkthrough and acceptance coverage",
-      "status": "pending",
+      "status": "scrutinized",
       "ci_status": "pending",
       "ci_fix_attempts": 0,
-      "issue_type": "",
+      "issue_type": "code",
       "dependencies": [],
-      "commits": [],
-      "agent_type": "",
-      "summary": null,
+      "commits": [
+        "f1dd62bb290fc63b1c8acaa2d40342bb848bd685",
+        "f1dd62bb290fc63b1c8acaa2d40342bb848bd685",
+        "c7caf903416e64e8d67e31184effda42315a38b2"
+      ],
+      "agent_type": "techwriter",
+      "summary": {
+        "narrative": "",
+        "files_changed": [
+          "docs/guides/vault-integration.md",
+          "docs/guides/vault-integration-acceptance-coverage.md",
+          "internal/workspace/apply.go",
+          "internal/workspace/apply_vault_test.go",
+          "internal/workspace/override.go",
+          "internal/workspace/required.go"
+        ],
+        "tests_added": 6,
+        "key_decisions": "Issue 11 docs + rework: fixed B1 (niwa apply now emits 'rotated \u003cpath\u003e' on vault-source changes), B2 (new workspace.checkRequiredKeys enforces *.required as hard errors + recommended warnings + optional silent per v1), B3 (vault_scope ambiguity check for multi-source workspaces with personal overlay); AC coverage matrix corrected for R34 row; TestArgvHygiene R28 gap documented in matrix (fixing out-of-scope)",
+        "requirements_map": [
+          {
+            "ac": "Issue 11 full AC list + 3 review blockers",
+            "status": "implemented",
+            "evidence": "per-AC evidence in both coder return trips; final rework addresses B1/B2/B3"
+          }
+        ]
+      },
       "testable_scenarios": []
     }
   ],

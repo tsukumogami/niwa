@@ -176,4 +176,3 @@ func filterPrefix(names []string, prefix string) []cobra.Completion {
 	}
 	return out
 }
-
