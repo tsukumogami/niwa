@@ -69,12 +69,26 @@ func (Factory) Open(_ context.Context, config vault.ProviderConfig) (vault.Provi
 	}
 
 	if raw, ok := config["values"]; ok {
-		values, ok := raw.(map[string]string)
-		if !ok {
-			return nil, fmt.Errorf("fake: config[values] must be map[string]string, got %T", raw)
-		}
-		for k, v := range values {
-			p.values[k] = v
+		switch values := raw.(type) {
+		case map[string]string:
+			for k, v := range values {
+				p.values[k] = v
+			}
+		case map[string]any:
+			// TOML decoding produces map[string]any by default; accept
+			// it as long as every entry is a string. This keeps the
+			// fake usable both from Go-level tests (that build their
+			// own map[string]string) and from tests that drive the
+			// pipeline through a TOML fixture.
+			for k, v := range values {
+				s, ok := v.(string)
+				if !ok {
+					return nil, fmt.Errorf("fake: config[values][%q] must be string, got %T", k, v)
+				}
+				p.values[k] = s
+			}
+		default:
+			return nil, fmt.Errorf("fake: config[values] must be map[string]string or map[string]any, got %T", raw)
 		}
 	}
 

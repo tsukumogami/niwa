@@ -199,6 +199,49 @@ func TestBundleGetUnknownProvider(t *testing.T) {
 	}
 }
 
+// TestBundleNames asserts Names returns the sorted set of provider
+// names held in the bundle, including the empty string for the
+// anonymous singular shape. Added in Issue 4 alongside
+// resolve.CheckProviderNameCollision to support R12 enforcement.
+func TestBundleNames(t *testing.T) {
+	r := vault.NewRegistry()
+	if err := r.Register(&stubFactory{kind: "fake"}); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	// Empty bundle: empty Names.
+	empty, err := r.Build(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("Build empty: %v", err)
+	}
+	if got := empty.Names(); len(got) != 0 {
+		t.Errorf("empty Names should be empty, got %v", got)
+	}
+	defer empty.CloseAll()
+
+	// Named + anonymous providers: Names includes both.
+	bundle, err := r.Build(context.Background(), []vault.ProviderSpec{
+		{Name: "beta", Kind: "fake"},
+		{Name: "alpha", Kind: "fake"},
+		{Name: "", Kind: "fake"},
+	})
+	if err != nil {
+		t.Fatalf("Build named: %v", err)
+	}
+	defer bundle.CloseAll()
+
+	got := bundle.Names()
+	want := []string{"", "alpha", "beta"}
+	if len(got) != len(want) {
+		t.Fatalf("Names len = %d, want %d: %v", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("Names[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
 // TestBundleCloseAllInvokesEveryProvider asserts AC: Bundle.CloseAll
 // invokes Close on every opened provider.
 func TestBundleCloseAllInvokesEveryProvider(t *testing.T) {

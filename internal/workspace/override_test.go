@@ -1,10 +1,13 @@
 package workspace
 
 import (
+	"errors"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/tsukumogami/niwa/internal/config"
+	"github.com/tsukumogami/niwa/internal/vault"
 )
 
 func boolPtr(b bool) *bool { return &b }
@@ -577,6 +580,19 @@ func TestResolveGlobalOverrideWorkspaceVarsWin(t *testing.T) {
 
 // --- MergeGlobalOverride tests ---
 
+// mustMerge wraps MergeGlobalOverride for tests that expect success.
+// After Issue 4, MergeGlobalOverride returns (*WorkspaceConfig, error)
+// so it can surface vault.ErrTeamOnlyLocked; success-path tests use
+// this helper to keep their assertions uncluttered.
+func mustMerge(t *testing.T, ws *config.WorkspaceConfig, g config.GlobalOverride, globalConfigDir string) *config.WorkspaceConfig {
+	t.Helper()
+	merged, err := MergeGlobalOverride(ws, g, globalConfigDir)
+	if err != nil {
+		t.Fatalf("MergeGlobalOverride: %v", err)
+	}
+	return merged
+}
+
 func TestMergeGlobalOverrideHooksAppend(t *testing.T) {
 	globalDir := "/global/config"
 	ws := &config.WorkspaceConfig{
@@ -598,7 +614,7 @@ func TestMergeGlobalOverrideHooksAppend(t *testing.T) {
 			},
 		},
 	}
-	merged := MergeGlobalOverride(ws, g, globalDir)
+	merged := mustMerge(t, ws, g, globalDir)
 
 	entries := merged.Claude.Hooks["pre_tool_use"]
 	if len(entries) != 2 {
@@ -627,7 +643,7 @@ func TestMergeGlobalOverrideSettingsGlobalWins(t *testing.T) {
 			Settings: config.SettingsConfig{"permissions": config.MaybeSecret{Plain: "bypass"}},
 		},
 	}
-	merged := MergeGlobalOverride(ws, g, "/global")
+	merged := mustMerge(t, ws, g, "/global")
 	if merged.Claude.Settings["permissions"].Plain != "bypass" {
 		t.Errorf("global settings should win, got %q", merged.Claude.Settings["permissions"].Plain)
 	}
@@ -645,7 +661,7 @@ func TestMergeGlobalOverrideEnvPromoteUnion(t *testing.T) {
 			Env: config.ClaudeEnvConfig{Promote: []string{"B", "C"}},
 		},
 	}
-	merged := MergeGlobalOverride(ws, g, "/global")
+	merged := mustMerge(t, ws, g, "/global")
 	promote := merged.Claude.Env.Promote
 	seen := make(map[string]bool)
 	for _, k := range promote {
@@ -670,7 +686,7 @@ func TestMergeGlobalOverrideEnvVarsGlobalWins(t *testing.T) {
 			Env: config.ClaudeEnvConfig{Vars: config.EnvVarsTable{Values: map[string]config.MaybeSecret{"LANG": config.MaybeSecret{Plain: "global"}}}},
 		},
 	}
-	merged := MergeGlobalOverride(ws, g, "/global")
+	merged := mustMerge(t, ws, g, "/global")
 	if merged.Claude.Env.Vars.Values["LANG"].Plain != "global" {
 		t.Errorf("global env var should win, got %q", merged.Claude.Env.Vars.Values["LANG"].Plain)
 	}
@@ -686,7 +702,7 @@ func TestMergeGlobalOverridePluginsUnion(t *testing.T) {
 	g := config.GlobalOverride{
 		Claude: &config.ClaudeOverride{Plugins: &globalPlugins},
 	}
-	merged := MergeGlobalOverride(ws, g, "/global")
+	merged := mustMerge(t, ws, g, "/global")
 
 	if merged.Claude.Plugins == nil {
 		t.Fatal("merged plugins should not be nil")
@@ -713,7 +729,7 @@ func TestMergeGlobalOverrideEnvFilesAppend(t *testing.T) {
 	g := config.GlobalOverride{
 		Env: config.EnvConfig{Files: []string{"global.env"}},
 	}
-	merged := MergeGlobalOverride(ws, g, "/global")
+	merged := mustMerge(t, ws, g, "/global")
 	if len(merged.Env.Files) != 2 || merged.Env.Files[0] != "ws.env" || merged.Env.Files[1] != "global.env" {
 		t.Errorf("env files should be [ws.env, global.env], got %v", merged.Env.Files)
 	}
@@ -727,7 +743,7 @@ func TestMergeGlobalOverrideFilesGlobalWins(t *testing.T) {
 	g := config.GlobalOverride{
 		Files: map[string]string{"key.env": "dest/global/"},
 	}
-	merged := MergeGlobalOverride(ws, g, "/global")
+	merged := mustMerge(t, ws, g, "/global")
 	if merged.Files["key.env"] != "dest/global/" {
 		t.Errorf("global files should win, got %q", merged.Files["key.env"])
 	}
@@ -741,7 +757,7 @@ func TestMergeGlobalOverrideFilesEmptyStringSuppresses(t *testing.T) {
 	g := config.GlobalOverride{
 		Files: map[string]string{"key.env": ""},
 	}
-	merged := MergeGlobalOverride(ws, g, "/global")
+	merged := mustMerge(t, ws, g, "/global")
 	if _, ok := merged.Files["key.env"]; ok {
 		t.Error("empty global value should suppress workspace mapping")
 	}
@@ -755,8 +771,174 @@ func TestMergeGlobalOverrideDoesNotMutateInput(t *testing.T) {
 	g := config.GlobalOverride{
 		Env: config.EnvConfig{Vars: config.EnvVarsTable{Values: map[string]config.MaybeSecret{"X": config.MaybeSecret{Plain: "global"}}}},
 	}
-	_ = MergeGlobalOverride(ws, g, "/global")
+	_ = mustMerge(t, ws, g, "/global")
 	if ws.Env.Vars.Values["X"].Plain != "original" {
 		t.Error("MergeGlobalOverride should not mutate the input ws")
+	}
+}
+
+// TestMergeGlobalOverrideEnvSecretsGlobalWins covers the Issue 4
+// fix where MergeGlobalOverride merges Env.Secrets.Values. Before the
+// fix, values in a personal overlay's env.secrets were silently
+// dropped during merge, defeating the resolver's auto-wrap contract
+// for overlay-supplied plaintext.
+func TestMergeGlobalOverrideEnvSecretsGlobalWins(t *testing.T) {
+	ws := &config.WorkspaceConfig{
+		Workspace: config.WorkspaceMeta{Name: "test"},
+		Env: config.EnvConfig{
+			Secrets: config.EnvVarsTable{Values: map[string]config.MaybeSecret{"TOKEN": {Plain: "ws-secret"}}},
+		},
+	}
+	g := config.GlobalOverride{
+		Env: config.EnvConfig{
+			Secrets: config.EnvVarsTable{Values: map[string]config.MaybeSecret{"TOKEN": {Plain: "overlay-secret"}}},
+		},
+	}
+	merged := mustMerge(t, ws, g, "/global")
+	if merged.Env.Secrets.Values["TOKEN"].Plain != "overlay-secret" {
+		t.Errorf("overlay env.secrets should win, got %q", merged.Env.Secrets.Values["TOKEN"].Plain)
+	}
+}
+
+// TestMergeGlobalOverrideClaudeEnvSecretsGlobalWins covers the same
+// fix for the claude.env.secrets branch.
+func TestMergeGlobalOverrideClaudeEnvSecretsGlobalWins(t *testing.T) {
+	ws := &config.WorkspaceConfig{
+		Workspace: config.WorkspaceMeta{Name: "test"},
+		Claude: config.ClaudeConfig{
+			Env: config.ClaudeEnvConfig{Secrets: config.EnvVarsTable{Values: map[string]config.MaybeSecret{"K": {Plain: "ws"}}}},
+		},
+	}
+	g := config.GlobalOverride{
+		Claude: &config.ClaudeOverride{
+			Env: config.ClaudeEnvConfig{Secrets: config.EnvVarsTable{Values: map[string]config.MaybeSecret{"K": {Plain: "overlay"}}}},
+		},
+	}
+	merged := mustMerge(t, ws, g, "/global")
+	if merged.Claude.Env.Secrets.Values["K"].Plain != "overlay" {
+		t.Errorf("overlay claude.env.secrets should win, got %q", merged.Claude.Env.Secrets.Values["K"].Plain)
+	}
+}
+
+// TestMergeGlobalOverrideTeamOnlyBlocksOverride: a personal overlay
+// that writes over a team-declared key listed in [vault].team_only is
+// rejected with ErrTeamOnlyLocked.
+func TestMergeGlobalOverrideTeamOnlyBlocksOverride(t *testing.T) {
+	ws := &config.WorkspaceConfig{
+		Workspace: config.WorkspaceMeta{Name: "test"},
+		Vault: &config.VaultRegistry{
+			TeamOnly: []string{"LOCKED"},
+		},
+		Env: config.EnvConfig{
+			Secrets: config.EnvVarsTable{Values: map[string]config.MaybeSecret{"LOCKED": {Plain: "team-secret"}}},
+		},
+	}
+	g := config.GlobalOverride{
+		Env: config.EnvConfig{
+			Secrets: config.EnvVarsTable{Values: map[string]config.MaybeSecret{"LOCKED": {Plain: "overlay-attempt"}}},
+		},
+	}
+	_, err := MergeGlobalOverride(ws, g, "/global")
+	if err == nil {
+		t.Fatal("expected ErrTeamOnlyLocked, got nil")
+	}
+	if !errors.Is(err, vault.ErrTeamOnlyLocked) {
+		t.Errorf("expected ErrTeamOnlyLocked, got %v", err)
+	}
+	if msg := err.Error(); !strings.Contains(msg, "LOCKED") {
+		t.Errorf("error must name the locked key, got %q", msg)
+	}
+}
+
+// TestMergeGlobalOverrideTeamOnlyAllowsOverlayAdd: a personal overlay
+// that adds a key NOT previously declared by the team is allowed even
+// if the key name appears in team_only (team_only protects team-
+// declared keys; new overlay additions are fine). Realistically this
+// only matters when team_only lists a key that the team has NOT yet
+// populated -- the list is aspirational.
+func TestMergeGlobalOverrideTeamOnlyAllowsOverlayAdd(t *testing.T) {
+	ws := &config.WorkspaceConfig{
+		Workspace: config.WorkspaceMeta{Name: "test"},
+		Vault: &config.VaultRegistry{
+			TeamOnly: []string{"LOCKED_BUT_UNSET"},
+		},
+		// No team value for LOCKED_BUT_UNSET; team_only in that case
+		// does not trigger because there is nothing to protect.
+	}
+	g := config.GlobalOverride{
+		Env: config.EnvConfig{
+			Secrets: config.EnvVarsTable{Values: map[string]config.MaybeSecret{"LOCKED_BUT_UNSET": {Plain: "overlay"}}},
+		},
+	}
+	merged, err := MergeGlobalOverride(ws, g, "/global")
+	if err != nil {
+		t.Fatalf("expected overlay add to succeed, got %v", err)
+	}
+	if merged.Env.Secrets.Values["LOCKED_BUT_UNSET"].Plain != "overlay" {
+		t.Errorf("overlay-added value should be present, got %q", merged.Env.Secrets.Values["LOCKED_BUT_UNSET"].Plain)
+	}
+}
+
+// TestMergeGlobalOverrideTeamOnlyBlocksClaudeSettings: team_only also
+// applies to settings and claude env.
+func TestMergeGlobalOverrideTeamOnlyBlocksClaudeSettings(t *testing.T) {
+	ws := &config.WorkspaceConfig{
+		Workspace: config.WorkspaceMeta{Name: "test"},
+		Vault: &config.VaultRegistry{TeamOnly: []string{"permissions"}},
+		Claude: config.ClaudeConfig{
+			Settings: config.SettingsConfig{"permissions": {Plain: "bypass"}},
+		},
+	}
+	g := config.GlobalOverride{
+		Claude: &config.ClaudeOverride{
+			Settings: config.SettingsConfig{"permissions": {Plain: "ask"}},
+		},
+	}
+	_, err := MergeGlobalOverride(ws, g, "/global")
+	if err == nil {
+		t.Fatal("expected ErrTeamOnlyLocked for settings override")
+	}
+	if !errors.Is(err, vault.ErrTeamOnlyLocked) {
+		t.Errorf("expected ErrTeamOnlyLocked, got %v", err)
+	}
+}
+
+// TestMergeOverridesEnvSecretsWin: per-repo env.secrets values win
+// over workspace-level env.secrets values.
+func TestMergeOverridesEnvSecretsWin(t *testing.T) {
+	ws := &config.WorkspaceConfig{
+		Env: config.EnvConfig{
+			Secrets: config.EnvVarsTable{Values: map[string]config.MaybeSecret{"K": {Plain: "ws"}}},
+		},
+		Repos: map[string]config.RepoOverride{
+			"myrepo": {
+				Env: config.EnvConfig{
+					Secrets: config.EnvVarsTable{Values: map[string]config.MaybeSecret{"K": {Plain: "repo"}}},
+				},
+			},
+		},
+	}
+	eff := MergeOverrides(ws, "myrepo")
+	if eff.Env.Secrets.Values["K"].Plain != "repo" {
+		t.Errorf("per-repo env.secrets should win, got %q", eff.Env.Secrets.Values["K"].Plain)
+	}
+}
+
+// TestMergeInstanceOverridesEnvSecretsWin: instance-level env.secrets
+// values win over workspace-level env.secrets values.
+func TestMergeInstanceOverridesEnvSecretsWin(t *testing.T) {
+	ws := &config.WorkspaceConfig{
+		Env: config.EnvConfig{
+			Secrets: config.EnvVarsTable{Values: map[string]config.MaybeSecret{"K": {Plain: "ws"}}},
+		},
+		Instance: config.InstanceConfig{
+			Env: config.EnvConfig{
+				Secrets: config.EnvVarsTable{Values: map[string]config.MaybeSecret{"K": {Plain: "inst"}}},
+			},
+		},
+	}
+	eff := MergeInstanceOverrides(ws)
+	if eff.Env.Secrets.Values["K"].Plain != "inst" {
+		t.Errorf("instance env.secrets should win, got %q", eff.Env.Secrets.Values["K"].Plain)
 	}
 }

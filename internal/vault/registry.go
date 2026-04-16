@@ -145,6 +145,24 @@ func (b *Bundle) Get(name string) (Provider, error) {
 	return p, nil
 }
 
+// Names returns the sorted list of provider names held by this
+// Bundle. The anonymous singular provider contributes the empty
+// string; named providers contribute their respective keys.
+//
+// Used by the resolver stage to detect R12 provider-name collisions
+// between team and personal bundles without exposing the underlying
+// map. Safe for concurrent use alongside Get.
+func (b *Bundle) Names() []string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	names := make([]string, 0, len(b.providers))
+	for name := range b.providers {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
 // CloseAll invokes Close on every Provider in the bundle. It
 // aggregates any errors into a single error value. CloseAll is
 // idempotent: calling it after a successful close is a no-op.

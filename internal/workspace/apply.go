@@ -9,6 +9,8 @@ import (
 
 	"github.com/tsukumogami/niwa/internal/config"
 	"github.com/tsukumogami/niwa/internal/github"
+	"github.com/tsukumogami/niwa/internal/secret"
+	"github.com/tsukumogami/niwa/internal/vault/resolve"
 )
 
 // Applier orchestrates the apply pipeline.
@@ -19,6 +21,13 @@ type Applier struct {
 	NoPull          bool
 	AllowDirty      bool
 	GlobalConfigDir string // empty string means global config not registered
+
+	// AllowMissingSecrets threads through to the vault resolver's
+	// ResolveOptions.AllowMissing. When true, missing vault keys are
+	// downgraded to empty MaybeSecret values with a stderr warning.
+	// The CLI --allow-missing-secrets flag (Issue 10) populates this
+	// field; default false preserves the strict-apply behavior.
+	AllowMissingSecrets bool
 }
 
 // NewApplier creates an Applier with the given GitHub client.
@@ -208,22 +217,98 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		}
 	}
 
-	// Steps 3a–3c: Load and merge global config override into workspace config.
-	// cfg remains the original for per-instance reads; effectiveCfg carries the merge.
+	// Steps 3a–3c: Parse the global config override, then run the
+	// vault resolver stage against BOTH team (ws) and personal
+	// (overlay) layers before the merge. The resolver must run
+	// before merge so that each layer's provider bundle is built
+	// from its own [vault] block only (file-local scoping, D-6 in
+	// the vault-integration design). Resolving post-merge would
+	// flatten provider declarations and make R12 collision
+	// detection impossible.
+	//
+	// cfg remains the original for per-instance reads; effectiveCfg
+	// carries the merge.
 	effectiveCfg := cfg
+
+	// Build a redactor for this apply invocation and attach it to
+	// ctx so every secret.Errorf / Wrap call downstream scrubs
+	// resolved values automatically.
+	redactor := secret.NewRedactor()
+	ctx = secret.WithRedactor(ctx, redactor)
+
+	var globalOverride *config.GlobalConfigOverride
 	if a.GlobalConfigDir != "" && !opts.skipGlobal {
 		overridePath := filepath.Join(a.GlobalConfigDir, GlobalConfigOverrideFile)
 		data, readErr := os.ReadFile(overridePath)
 		if readErr == nil {
-			globalOverride, parseErr := config.ParseGlobalConfigOverride(data)
+			parsed, parseErr := config.ParseGlobalConfigOverride(data)
 			if parseErr != nil {
 				return nil, fmt.Errorf("parsing global config override: %w", parseErr)
 			}
-			resolved := ResolveGlobalOverride(globalOverride, cfg.Workspace.Name)
-			effectiveCfg = MergeGlobalOverride(cfg, resolved, a.GlobalConfigDir)
+			globalOverride = parsed
 		} else if !os.IsNotExist(readErr) {
 			return nil, fmt.Errorf("reading global config override: %w", readErr)
 		}
+	}
+
+	// Build provider bundles from each layer independently. Bundle
+	// lifetime is scoped to this apply: defer CloseAll so providers
+	// shut down cleanly even on error paths (R29 no-disk-cache).
+	teamBundle, err := resolve.BuildBundle(ctx, nil, cfg.Vault, "workspace config")
+	if err != nil {
+		return nil, err
+	}
+	defer teamBundle.CloseAll()
+
+	// BuildBundle is a safe no-op for a nil config.VaultRegistry, so
+	// we always call it regardless of whether globalOverride is
+	// present; that keeps the defer and the R12 check uniform.
+	var overlayRegistry *config.VaultRegistry
+	if globalOverride != nil {
+		overlayRegistry = globalOverride.Global.Vault
+	}
+	personalBundle, err := resolve.BuildBundle(ctx, nil, overlayRegistry, "global overlay")
+	if err != nil {
+		return nil, err
+	}
+	defer personalBundle.CloseAll()
+
+	// R12 enforcement: personal overlay MUST NOT redeclare any
+	// provider name present in the team bundle. This is checked
+	// here (not in the resolver) because only this call site has
+	// both bundles in scope.
+	if err := resolve.CheckProviderNameCollision(teamBundle, personalBundle); err != nil {
+		return nil, err
+	}
+
+	// Resolve the team workspace config.
+	resolvedCfg, err := resolve.ResolveWorkspace(ctx, cfg, resolve.ResolveOptions{
+		AllowMissing: a.AllowMissingSecrets,
+		TeamBundle:   teamBundle,
+	})
+	if err != nil {
+		return nil, err
+	}
+	effectiveCfg = resolvedCfg
+
+	// Resolve the personal overlay, then merge it into the team
+	// workspace. The merge happens AFTER resolution so that R8
+	// team_only enforcement in MergeGlobalOverride sees the
+	// overlay's resolved MaybeSecret values, not pre-resolve URIs.
+	if globalOverride != nil {
+		resolvedOverride, err := resolve.ResolveGlobalOverride(ctx, globalOverride, resolve.ResolveOptions{
+			AllowMissing:   a.AllowMissingSecrets,
+			PersonalBundle: personalBundle,
+		})
+		if err != nil {
+			return nil, err
+		}
+		flattened := ResolveGlobalOverride(resolvedOverride, cfg.Workspace.Name)
+		merged, err := MergeGlobalOverride(resolvedCfg, flattened, a.GlobalConfigDir)
+		if err != nil {
+			return nil, err
+		}
+		effectiveCfg = merged
 	}
 
 	// Step 3: Create group directories and clone repos.
