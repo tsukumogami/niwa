@@ -78,6 +78,14 @@ func (a *Applier) Create(ctx context.Context, cfg *config.WorkspaceConfig, confi
 		return "", fmt.Errorf("creating instance directory: %w", err)
 	}
 
+	// Ensure the instance root's .gitignore covers *.local*. The
+	// materializers always emit files with the ".local" infix so
+	// this single pattern is sufficient; running create twice on
+	// the same instance is a no-op after the first run.
+	if err := EnsureInstanceGitignore(instanceRoot); err != nil {
+		return "", fmt.Errorf("preparing instance .gitignore: %w", err)
+	}
+
 	result, err := a.runPipeline(ctx, cfg, configDir, instanceRoot, now, &pipelineOpts{
 		existingState: nil,
 	})

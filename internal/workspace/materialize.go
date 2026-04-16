@@ -9,7 +9,45 @@ import (
 	"strings"
 
 	"github.com/tsukumogami/niwa/internal/config"
+	"github.com/tsukumogami/niwa/internal/secret/reveal"
 )
+
+// secretFileMode is the permission bits used for any file that may
+// contain resolved secret material. The materializers write every
+// file with this mode unconditionally so non-vault configs also get
+// the tighter permissions (this fixes a pre-existing 0o644 bug where
+// env and settings files were world-readable).
+const secretFileMode os.FileMode = 0o600
+
+// maybeSecretString returns the plaintext string of m, revealing
+// the secret bytes when m carries a resolved Secret. This is the
+// materializer counterpart to MaybeSecret.String (which redacts
+// secrets to "***"); it is used only inside the write path where
+// the plaintext must reach the destination file.
+//
+// Callers must not retain the returned string past the short-lived
+// write operation that needs plaintext: it carries a copy of the
+// underlying buffer from reveal.UnsafeReveal.
+func maybeSecretString(m config.MaybeSecret) string {
+	if m.IsSecret() {
+		return string(reveal.UnsafeReveal(m.Secret))
+	}
+	return m.Plain
+}
+
+// injectLocalInfix ensures the given filename contains ".local". If
+// the filename already contains ".local" (as a substring of the
+// basename), it is returned unchanged; otherwise localRename is used
+// to insert ".local" before the extension. This enforces the
+// invariant that every materialized file matches the *.local*
+// gitignore pattern, even when the user-written destination path did
+// not include the infix.
+func injectLocalInfix(filename string) string {
+	if strings.Contains(filename, ".local") {
+		return filename
+	}
+	return localRename(filename)
+}
 
 // DiscoveredEnv holds auto-discovered env file paths at workspace and repo
 // levels. These are used as fallbacks when no explicit [env].files are
@@ -169,9 +207,12 @@ type BuildSettingsConfig struct {
 func buildSettingsDoc(cfg BuildSettingsConfig) (map[string]any, error) {
 	doc := make(map[string]any)
 
-	// Build permissions block from settings.
+	// Build permissions block from settings. maybeSecretString
+	// reveals secret-backed values (rare for permissions, but a
+	// user may back any SettingsConfig value via vault://) and
+	// returns the literal plaintext otherwise.
 	if perm, ok := cfg.Settings["permissions"]; ok {
-		permStr := perm.String()
+		permStr := maybeSecretString(perm)
 		mapped, known := permissionsMapping[permStr]
 		if !known {
 			return nil, fmt.Errorf("unknown permissions value %q", permStr)
@@ -308,12 +349,14 @@ func resolveClaudeEnvVars(ctx *MaterializeContext) (map[string]string, error) {
 		}
 	}
 
-	// Step 2: overlay inline vars (inline wins over promoted). The
-	// resolver is not yet wired in (Issue 4), so every MaybeSecret
-	// carries Plain and no resolved Secret; String() returns the
-	// literal plaintext here.
+	// Step 2: overlay inline vars (inline wins over promoted). Post-
+	// resolver (Issue 4) a MaybeSecret may carry a resolved Secret;
+	// String redacts those to "***", which is wrong for a file
+	// materializer. maybeSecretString reaches through reveal.
+	// UnsafeReveal for secret-bearing entries and returns m.Plain
+	// otherwise.
 	for k, v := range claudeEnv.Vars.Values {
-		envResult[k] = v.String()
+		envResult[k] = maybeSecretString(v)
 	}
 
 	if len(envResult) == 0 {
@@ -377,7 +420,7 @@ func (s *SettingsMaterializer) Materialize(ctx *MaterializeContext) ([]string, e
 	}
 
 	target := filepath.Join(claudeDir, "settings.local.json")
-	if err := os.WriteFile(target, data, 0o644); err != nil {
+	if err := os.WriteFile(target, data, secretFileMode); err != nil {
 		return nil, fmt.Errorf("writing settings file: %w", err)
 	}
 
@@ -433,15 +476,16 @@ func ResolveEnvVars(ctx *MaterializeContext) (map[string]string, error) {
 		}
 	}
 
-	// The resolver (Issue 4) has not yet processed MaybeSecret values,
-	// so Plain holds the raw string. Secrets[...] values are not yet
-	// redacted; downstream materializer changes in Issue 4 will
-	// distinguish vars from secrets for file mode purposes.
+	// Post-resolver, MaybeSecret.Secret holds the resolved plaintext
+	// wrapped in secret.Value. Its String method redacts to "***" by
+	// design; for the env materializer we need the actual bytes to
+	// land in the .local.env file, so reach through reveal.
+	// UnsafeReveal. Plain values pass through unchanged.
 	for k, v := range envCfg.Vars.Values {
-		vars[k] = v.String()
+		vars[k] = maybeSecretString(v)
 	}
 	for k, v := range envCfg.Secrets.Values {
-		vars[k] = v.String()
+		vars[k] = maybeSecretString(v)
 	}
 
 	if hasRepoFile {
@@ -491,7 +535,7 @@ func (e *EnvMaterializer) Materialize(ctx *MaterializeContext) ([]string, error)
 	}
 
 	target := filepath.Join(ctx.RepoDir, ".local.env")
-	if err := os.WriteFile(target, []byte(buf.String()), 0o644); err != nil {
+	if err := os.WriteFile(target, []byte(buf.String()), secretFileMode); err != nil {
 		return nil, fmt.Errorf("writing env file: %w", err)
 	}
 
@@ -611,12 +655,17 @@ func (f *FilesMaterializer) materializeFile(ctx *MaterializeContext, src, dest s
 
 	var targetPath string
 	if strings.HasSuffix(dest, "/") {
-		// Directory destination: auto-rename with .local
+		// Directory destination: auto-rename with .local.
 		targetDir := filepath.Join(ctx.RepoDir, dest)
 		targetPath = filepath.Join(targetDir, localRename(filepath.Base(src)))
 	} else {
-		// Explicit filename: use as-is
-		targetPath = filepath.Join(ctx.RepoDir, dest)
+		// Explicit filename: inject .local before the extension if
+		// the user-written path doesn't already contain it. An
+		// injected .local takes precedence over the user's literal
+		// basename so every materialized file matches the *.local*
+		// gitignore pattern maintained by `niwa create`.
+		destDir, destBase := filepath.Split(dest)
+		targetPath = filepath.Join(ctx.RepoDir, destDir, injectLocalInfix(destBase))
 	}
 
 	if err := checkContainment(targetPath, ctx.RepoDir); err != nil {
@@ -628,7 +677,7 @@ func (f *FilesMaterializer) materializeFile(ctx *MaterializeContext, src, dest s
 		return nil, fmt.Errorf("creating directory %s: %w", targetDir, err)
 	}
 
-	if err := os.WriteFile(targetPath, data, 0o644); err != nil {
+	if err := os.WriteFile(targetPath, data, secretFileMode); err != nil {
 		return nil, fmt.Errorf("writing file %s: %w", targetPath, err)
 	}
 
@@ -663,9 +712,12 @@ func (f *FilesMaterializer) materializeDir(ctx *MaterializeContext, src, dest st
 			return fmt.Errorf("reading %s: %w", path, err)
 		}
 
-		// Apply .local renaming to the filename, preserving subdirectory structure.
+		// Apply .local renaming to every file so the output matches
+		// the *.local* gitignore pattern regardless of how the user
+		// wrote the destination. injectLocalInfix is a no-op when
+		// the basename already contains ".local".
 		dir := filepath.Dir(rel)
-		renamed := localRename(filepath.Base(rel))
+		renamed := injectLocalInfix(filepath.Base(rel))
 		var targetPath string
 		if strings.HasSuffix(dest, "/") {
 			if dir == "." {
@@ -675,9 +727,9 @@ func (f *FilesMaterializer) materializeDir(ctx *MaterializeContext, src, dest st
 			}
 		} else {
 			if dir == "." {
-				targetPath = filepath.Join(ctx.RepoDir, dest, filepath.Base(rel))
+				targetPath = filepath.Join(ctx.RepoDir, dest, renamed)
 			} else {
-				targetPath = filepath.Join(ctx.RepoDir, dest, dir, filepath.Base(rel))
+				targetPath = filepath.Join(ctx.RepoDir, dest, dir, renamed)
 			}
 		}
 
@@ -690,7 +742,7 @@ func (f *FilesMaterializer) materializeDir(ctx *MaterializeContext, src, dest st
 			return fmt.Errorf("creating directory %s: %w", targetDir, err)
 		}
 
-		if err := os.WriteFile(targetPath, data, 0o644); err != nil {
+		if err := os.WriteFile(targetPath, data, secretFileMode); err != nil {
 			return fmt.Errorf("writing %s: %w", targetPath, err)
 		}
 

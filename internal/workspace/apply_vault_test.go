@@ -129,24 +129,32 @@ API_TOKEN = "vault://API_TOKEN"
 		t.Fatalf("reading materialized env file: %v", err)
 	}
 	content := string(data)
-	// MaterializeEnv writes KEY=VALUE lines. After the resolver runs,
-	// the MaybeSecret{Secret: v} String() returns "***", but the
-	// materializer (to be hardened in Issue 6) currently calls
-	// MaybeSecret.String() for both Plain and Secret paths. That
-	// means this integration-style check has to tolerate the "***"
-	// placeholder. The critical invariant Issue 4 establishes is:
-	// - The resolver ran (Plain is cleared, Secret is populated).
-	// - The materializer consumed the resolved MaybeSecret (i.e., it
-	//   wrote something for API_TOKEN and did NOT write the literal
-	//   "vault://API_TOKEN" URI).
-	// Issue 6 switches the materializer to reveal.UnsafeReveal so the
-	// plaintext reaches the file; at that point this test should
-	// assert on the plaintext instead.
-	if !strings.Contains(content, "API_TOKEN=") {
-		t.Errorf("env file missing API_TOKEN line: %s", content)
+	// After Issue 6 hardening, the materializer uses
+	// reveal.UnsafeReveal to extract plaintext from resolved
+	// MaybeSecret values, so the plaintext from the fake provider
+	// lands in the file verbatim. The integration-level invariants
+	// are:
+	//   - The resolved plaintext bytes reach the file.
+	//   - The redacted "***" placeholder does not.
+	//   - The literal "vault://" URI does not.
+	want := "API_TOKEN=resolved-token-value-xxxxx"
+	if !strings.Contains(content, want) {
+		t.Errorf("env file missing %q, got:\n%s", want, content)
+	}
+	if strings.Contains(content, "***") {
+		t.Errorf("env file must not contain redacted placeholder: %s", content)
 	}
 	if strings.Contains(content, "vault://API_TOKEN") {
 		t.Errorf("env file must not contain the unresolved vault URI: %s", content)
+	}
+
+	// Issue 6 also enforces 0o600 on every materialized file.
+	info, err := os.Stat(envPath)
+	if err != nil {
+		t.Fatalf("stat env file: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Errorf("env file mode = %o, want 0o600", got)
 	}
 }
 
