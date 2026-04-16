@@ -1,76 +1,78 @@
 ---
-status: Accepted
-version: 3
+status: Draft
+version: 4
 problem: |
-  When a niwa workspace config repo is made public, the workspace.toml exposes private information through several surfaces: source org identifiers in [[sources]], group names that imply private categories exist, [repos.*] section keys (which are repo names), [claude.content.repos.*] entries including subdirectory mappings that reveal internal code structure, and [channels.*.access] sections containing user IDs. Teams that want to publish their workspace config — to enable open contribution, share it as a reference, or reduce maintenance burden — currently have no way to keep private repo references out of the public config without maintaining a completely separate private workspace config that duplicates all the public configuration.
+  When a niwa workspace config repo is made public, the workspace.toml exposes information through several surfaces: source org identifiers in [[sources]], group names, [repos.*] section keys (which are repo names), [claude.content.repos.*] entries including subdirectory mappings that reveal code structure, and [channels.*.access] sections containing user IDs. Teams that want to publish their workspace config — to enable open contribution, share it as a reference, or reduce maintenance burden — currently have no way to keep certain repo references out of the public config without maintaining a completely separate workspace config that duplicates all the public configuration.
 goals: |
-  Teams can publish their niwa workspace config as a public GitHub repo without exposing private repo names, group names, source org identifiers, or operational config for private repos. Private repo configuration is kept in a separate companion repo that niwa fetches automatically when the user has permission, and ignores silently when they don't. Users without private access experience a complete workspace with only the public repos — all configured repos are cloned, hooks execute without error, and environment setup matches the workspace config — with no output (stdout, stderr, or log files) referencing private configuration.
+  Teams can publish their niwa workspace config while keeping additional repo references, group definitions, and operational config in a separately access-controlled overlay repo that niwa fetches automatically when accessible. Users without overlay access experience a complete workspace with the base repos only — all configured repos are cloned, hooks execute without error, and environment setup matches the workspace config — with no output referencing the overlay or its contents.
 ---
 
-# PRD: Private workspace extension
+# PRD: Workspace overlay
 
 ## Status
 
-Accepted
+Draft
 
 ## Problem Statement
 
-When a niwa workspace config repo is made public, the workspace.toml reveals private information through several surfaces: `[[sources]]` entries expose which GitHub orgs and repos the workspace includes; `[groups.*]` definitions expose organizational taxonomy (a group named `private` tells readers the team has private repos); `[repos.*]` TOML section keys are repo names that leak identities of private repositories; `[claude.content.repos.*]` entries identify private repos and reveal their internal directory structure via subdirectory mappings; and `[channels.*.access]` sections expose user IDs.
+When a niwa workspace config repo is published, the `workspace.toml` reveals information through several surfaces: `[[sources]]` entries expose which GitHub orgs and repos the workspace includes; `[groups.*]` definitions expose organizational taxonomy; `[repos.*]` TOML section keys are repo names; `[claude.content.repos.*]` entries reveal internal directory structure via subdirectory mappings; and `[channels.*.access]` sections expose user IDs.
 
-Vault integration (enabling teams to remove secrets from workspace configs) creates the possibility of publishing workspace configs — but secrets are only one category of sensitive information. A workspace config that contains no secrets but does contain private repo names is still not safe to publish.
+Teams that want the benefits of a published workspace config — enabling contributors to initialize from it, using it as documentation of workspace structure, sharing tooling practices — need a way to separate base configuration from additional configuration without abandoning niwa's single-source-of-truth model.
 
-Teams that want the benefits of a public workspace config — enabling contributors to initialize from it, using it as documentation of team structure, sharing tooling practices — need a way to separate public-safe configuration from private configuration without abandoning niwa's single-source-of-truth model.
+The overlay mechanism is about layering, not visibility. Both the base workspace config and the overlay repo can be public or private — a team might overlay a public supplemental config on top of a public base, or an access-controlled repo on top of a published one. The mechanism works the same either way.
 
 ## Goals
 
-1. Teams can publish their workspace config repo without exposing private repo names, group names, or operational config for private repos.
-2. Users with access to the private companion repo get a complete workspace (public and private repos) from a single `niwa apply` command.
-3. Users without access to the private companion (new contributors, CI/CD runners) get a complete workspace with public repos only — all configured repos are cloned, hooks execute without error, and environment setup matches the workspace config — with no output (stdout, stderr, or log files) referencing the companion or any private configuration.
-4. Registering a private companion requires one command (`niwa config set private <repo>`), and the private companion is silently ignored when not registered.
+1. Teams can publish their workspace config repo while keeping additional repo references, group definitions, or operational config in a separate overlay repo.
+2. Users with access to the overlay repo get a complete workspace (base and overlay repos) from a single `niwa init` + `niwa apply` — no additional registration step.
+3. Users without overlay access get a complete workspace with base repos only, with no output (stdout, stderr, or log files) referencing the overlay or its contents.
+4. Overlay discovery is automatic by convention with no configuration required for the common case.
 
 ## User Stories
 
-**US1 — Team lead publishing workspace config**
-As a team lead with both public and private repos, I want to publish the workspace config to GitHub without revealing which private repos the team uses, so that contributors can initialize from it and it can serve as documentation of the team's public tooling.
+**US1 — Team publishing a workspace config**
+As a team lead, I want to publish the workspace config to GitHub while keeping additional repo configuration in a separate overlay, so that contributors can initialize from the public config and it can serve as documentation of the team's shared tooling.
 
-*Scenario*: A team has 8 public repos and 5 private repos, all managed by niwa. The lead splits the workspace config: `acmecorp/dot-niwa` (public) contains only the 8 public repos; `acmecorp/dot-niwa-private` (private GitHub repo) contains the 5 private repos. The public config is published. New contributors initialize from it and get 8 repos. Existing team members register the companion and get all 13.
+*Scenario*: A team has repos managed by niwa. The lead splits the config: `acmecorp/dot-niwa` (the base) contains the public repos; `acmecorp/dot-niwa-overlay` (the overlay) contains additional repos and private context. When a contributor runs `niwa init --from acmecorp/dot-niwa`, niwa automatically discovers and applies `acmecorp/dot-niwa-overlay` if accessible. If not accessible, the workspace initializes with the base repos only.
 
-**US2 — Contributor with full access**
-As an existing contributor, I want to register a private companion once and have niwa automatically include the private repos on every `niwa apply`, so I don't have to manage separate workspace configs.
+**US2 — Contributor with overlay access**
+As a contributor with access to both the base and overlay repos, I want `niwa init` to automatically discover and apply the overlay so I get a complete workspace without any additional steps.
 
-*Scenario*: A senior engineer with access to all private repos runs `niwa config set private acmecorp/dot-niwa-private` once. All subsequent `niwa apply` invocations merge the companion automatically, producing a workspace with all 13 repos.
+*Scenario*: An engineer runs `niwa init --from acmecorp/dot-niwa ~/acmecorp`. niwa discovers `acmecorp/dot-niwa-overlay` automatically, clones it, and applies it. `niwa apply` subsequently keeps both in sync. No separate registration command is needed.
 
-**US3 — New contributor with public access only**
-As a new contributor who hasn't yet been granted access to private repos, I want to initialize my workspace from the public config and work productively with public repos, without hitting errors or learning that private repos exist.
+**US3 — Contributor without overlay access**
+As a contributor who doesn't have access to the overlay, I want to initialize from the base config and work productively with those repos, without hitting errors or learning what the overlay contains.
 
-*Scenario*: A new hire runs `niwa init --from acmecorp/dot-niwa` and `niwa apply`. The private companion clone fails silently (no access). The workspace has 8 public repos. No error messages. When the new hire is later granted private access, the next `niwa apply` clones the companion and adds the 5 private repos automatically.
+*Scenario*: A new contributor runs `niwa init --from acmecorp/dot-niwa ~/acmecorp`. niwa tries `acmecorp/dot-niwa-overlay`, gets a 404, silently skips it, and initializes with the base repos only. No error or warning is shown. When the contributor is later granted overlay access, the next `niwa apply` discovers and applies it automatically.
 
 **US4 — CI/CD environment**
-As a CI/CD pipeline, I want to apply the workspace config with only public repos and no private access required, so that builds are deterministic and don't fail due to missing private repo permissions.
+As a CI/CD pipeline, I want to apply the workspace config with only the base repos and no overlay access required, so that builds are deterministic.
 
-*Scenario*: A GitHub Actions workflow calls `niwa apply --skip-private`. The private companion is not touched. The workspace has 8 public repos. The build succeeds.
+*Scenario*: A GitHub Actions workflow calls `niwa init --from acmecorp/dot-niwa --no-overlay`. The overlay is not attempted. The workspace has the base repos only. The build succeeds.
 
 ## Worked Example
 
-This section walks through a complete setup for a team at `acmecorp` that has public and private repos in the same GitHub org.
+This section walks through a complete setup for a team at `acmecorp`.
 
 ### GitHub org shape
 
 ```
 acmecorp/
-├── dot-niwa          (public)  — workspace config repo
-├── dot-niwa-private  (private) — workspace extension repo
-├── website           (public)  — marketing site
-├── docs              (public)  — public documentation
-├── api               (public)  — public API
-├── billing           (private) — billing service
-├── auth-service      (private) — internal auth service
-└── internal-tools    (private) — developer tooling
+├── dot-niwa          — base workspace config repo
+├── dot-niwa-overlay  — overlay repo (matches convention)
+├── website           — marketing site
+├── docs              — public documentation
+├── api               — public API
+├── billing           — billing service
+├── auth-service      — internal auth service
+└── internal-tools    — developer tooling
 ```
 
-### Public workspace config
+The base and overlay repos can have any visibility. In this example `dot-niwa` is public and `dot-niwa-overlay` is access-controlled, but the mechanism is the same if both are public.
 
-`acmecorp/dot-niwa/workspace.toml` — committed to the public repo:
+### Base workspace config
+
+`acmecorp/dot-niwa/workspace.toml`:
 
 ```toml
 [workspace]
@@ -90,7 +92,7 @@ repos = ["api"]
 source = "content/api.md"
 ```
 
-`acmecorp/dot-niwa/content/api.md` — public context injected into `api/CLAUDE.local.md`:
+`acmecorp/dot-niwa/content/api.md`:
 
 ```markdown
 # api
@@ -99,16 +101,16 @@ Public REST API. See docs/ for the OpenAPI spec.
 Routes live in internal/routes/. Add new endpoints in their own file.
 ```
 
-### Private workspace extension
+### Overlay repo
 
-`acmecorp/dot-niwa-private/workspace-extension.toml` — committed to the private repo:
+`acmecorp/dot-niwa-overlay/workspace-overlay.toml`:
 
 ```toml
 [[sources]]
 org = "acmecorp"
 repos = ["billing", "auth-service", "internal-tools"]
 
-[groups.private]
+[groups.extended]
 repos = ["billing", "auth-service", "internal-tools"]
 
 [claude.content.repos.billing]
@@ -121,7 +123,7 @@ overlay = "overlays/api-internal.md"
 ACMECORP_INTERNAL = "true"
 ```
 
-`acmecorp/dot-niwa-private/content/billing.md` — context for the billing repo:
+`acmecorp/dot-niwa-overlay/content/billing.md`:
 
 ```markdown
 # billing
@@ -130,7 +132,7 @@ Internal billing service. Stripe keys are in Vault at secret/billing/stripe.
 Never log request bodies — they contain card data.
 ```
 
-`acmecorp/dot-niwa-private/overlays/api-internal.md` — appended to `api/CLAUDE.local.md` for users with private access:
+`acmecorp/dot-niwa-overlay/overlays/api-internal.md` — appended to `api/CLAUDE.local.md` for users with overlay access:
 
 ```markdown
 ## Internal notes
@@ -139,60 +141,45 @@ The public API has a shadow admin API at /internal/. It is not documented
 externally. Auth uses the ACMECORP_ADMIN_TOKEN env var (see Vault).
 ```
 
-`acmecorp/dot-niwa-private/CLAUDE.private.md` — workspace-level private context:
+`acmecorp/dot-niwa-overlay/CLAUDE.overlay.md`:
 
 ```markdown
-@workspace-context.md
-
-Internal contributor notes for acmecorp. The private repos are billing,
-auth-service, and internal-tools. Treat all data in these repos as
-confidential. Do not reference internal repo names in public issues or PRs.
+Internal contributor context for acmecorp. Treat all data in the extended
+repos as confidential. Do not reference internal repo names in public issues
+or PRs.
 ```
 
-### Setup: one-time steps for a team member with full access
+### Init and apply — contributor with overlay access
 
 ```bash
-# 1. Initialize the workspace from the public config
+# Init discovers dot-niwa-overlay automatically (convention: <repo>-overlay)
 niwa init --from acmecorp/dot-niwa ~/acmecorp
 
-# 2. Register the private companion (machine-level, not workspace-specific)
-#    Stored in ~/.config/niwa/config.toml — applies to all workspaces on this machine
-niwa config set private acmecorp/dot-niwa-private
-
-# 3. Apply — clones all repos and installs CLAUDE context
+# Apply clones all repos and installs CLAUDE context
 cd ~/acmecorp
 niwa apply
 ```
 
-### Local workspace — full access
-
-After `niwa apply` with the private companion registered and accessible:
+### Local workspace — overlay accessible
 
 ```
 ~/acmecorp/
 ├── .niwa/
 │   ├── workspace.toml     — clone of acmecorp/dot-niwa
-│   └── instance.json      — {skip_private: false}
-├── CLAUDE.md              — workspace context imports
-├── CLAUDE.private.md      — copied from dot-niwa-private
-├── website/               — cloned from acmecorp/website
-├── docs/                  — cloned from acmecorp/docs
+│   └── instance.json      — {overlay_url: "acmecorp/dot-niwa-overlay"}
+├── CLAUDE.md              — @workspace-context.md, @CLAUDE.overlay.md
+├── CLAUDE.overlay.md      — copied from dot-niwa-overlay
+├── website/
+├── docs/
 ├── api/
-│   └── CLAUDE.local.md    — public content + private overlay (see below)
+│   └── CLAUDE.local.md    — public content + overlay (see below)
 ├── billing/
-│   └── CLAUDE.local.md    — private content only
-├── auth-service/          — cloned from acmecorp/auth-service
-└── internal-tools/        — cloned from acmecorp/internal-tools
+│   └── CLAUDE.local.md    — overlay content only
+├── auth-service/
+└── internal-tools/
 ```
 
-`CLAUDE.md` at the workspace root:
-
-```markdown
-@workspace-context.md
-@CLAUDE.private.md
-```
-
-`api/CLAUDE.local.md` — public content followed by private overlay:
+`api/CLAUDE.local.md`:
 
 ```markdown
 # api
@@ -206,44 +193,32 @@ The public API has a shadow admin API at /internal/. It is not documented
 externally. Auth uses the ACMECORP_ADMIN_TOKEN env var (see Vault).
 ```
 
-### Setup: one-time steps for a contributor with public access only
+### Init and apply — contributor without overlay access
 
 ```bash
-# No companion registration — contributor has no access to dot-niwa-private
-
-# 1. Initialize the workspace from the public config
+# Init tries dot-niwa-overlay, gets 404, silently skips
 niwa init --from acmecorp/dot-niwa ~/acmecorp
 
-# 2. Apply — clone attempt for the private companion fails silently
+# Apply with base repos only
 cd ~/acmecorp
 niwa apply
 ```
 
-The companion clone fails (GitHub returns 404) and is silently skipped. No error is shown.
-
-### Local workspace — public access only
-
-After `niwa apply` with no private companion registered or companion inaccessible:
+### Local workspace — overlay inaccessible
 
 ```
 ~/acmecorp/
 ├── .niwa/
 │   ├── workspace.toml     — clone of acmecorp/dot-niwa
-│   └── instance.json      — {skip_private: false}
-├── CLAUDE.md              — workspace context imports (no @CLAUDE.private.md)
-├── website/               — cloned from acmecorp/website
-├── docs/                  — cloned from acmecorp/docs
+│   └── instance.json      — {} (no overlay_url stored)
+├── CLAUDE.md              — @workspace-context.md
+├── website/
+├── docs/
 └── api/
-    └── CLAUDE.local.md    — public content only (no overlay)
+    └── CLAUDE.local.md    — public content only
 ```
 
-`CLAUDE.md` at the workspace root:
-
-```markdown
-@workspace-context.md
-```
-
-`api/CLAUDE.local.md` — public content only:
+`api/CLAUDE.local.md`:
 
 ```markdown
 # api
@@ -252,173 +227,185 @@ Public REST API. See docs/ for the OpenAPI spec.
 Routes live in internal/routes/. Add new endpoints in their own file.
 ```
 
-The billing, auth-service, and internal-tools repos are absent. No warning is produced about missing repos. The workspace is fully functional for public development.
+The billing, auth-service, and internal-tools repos are absent. No warning is produced. The workspace is fully functional for development against the base repos.
 
-### Later: contributor is granted private access
+### Later: contributor gains overlay access
 
-When the contributor is later added to `acmecorp/dot-niwa-private`, no reconfiguration is needed:
+No reconfiguration needed. The next `niwa apply` tries the convention, succeeds, stores the overlay URL in `instance.json`, and adds the overlay repos and context:
 
 ```bash
-# Register the companion (one-time)
-niwa config set private acmecorp/dot-niwa-private
-
-# Next apply automatically picks up private repos
 niwa apply
 ```
 
-The companion is cloned, private repos are added to the workspace, `CLAUDE.private.md` is installed, and `api/CLAUDE.local.md` is updated to include the internal overlay.
+### CI/CD: opt out of overlay discovery
+
+```bash
+niwa init --from acmecorp/dot-niwa ~/acmecorp --no-overlay
+cd ~/acmecorp
+niwa apply   # overlay never attempted; instance.json has no_overlay: true
+```
+
+### Explicit overlay (non-convention name)
+
+```bash
+niwa init --from acmecorp/dot-niwa ~/acmecorp --overlay acmecorp/niwa-internal
+```
+
+If `acmecorp/niwa-internal` is inaccessible, `niwa init` aborts with a hard error. Explicit intent requires explicit success.
 
 ## Requirements
 
-### Registration and CLI
+### Overlay Discovery and Init
 
-**R1**: `niwa config set private <repo>` registers a private workspace extension. `<repo>` is an org/repo shorthand (`acmecorp/dot-niwa-private`) or full HTTPS/SSH URL.
+**R1**: `niwa init --from <repo>` automatically attempts overlay discovery by trying `<org>/<repo-name>-overlay` (the overlay convention — same org, repo name with `-overlay` appended). If the clone succeeds, `overlay_url` is stored in `.niwa/instance.json`. If the clone fails for any reason (HTTP 404, HTTP 403, network timeout, DNS failure), discovery is silently skipped and nothing is stored. All failure reasons are treated identically.
 
-**R2**: `niwa config unset private` removes the registration and deletes the local clone of the companion.
+**R2**: `niwa init --from <repo> --overlay <overlay-repo>` uses the specified overlay URL. `<overlay-repo>` is an org/repo shorthand or full HTTPS/SSH URL. If the clone fails for any reason, `niwa init` aborts with a non-zero exit code and an error identifying the overlay as the cause. If successful, `overlay_url` is stored in `.niwa/instance.json`.
 
-**R3**: `niwa init --skip-private` stores a `skip_private` flag in the instance's `.niwa/instance.json`. Subsequent applies on that instance skip the private companion without requiring the flag again.
+**R3**: `niwa init --from <repo> --no-overlay` stores `no_overlay: true` in `.niwa/instance.json`. All subsequent `niwa apply` invocations on this instance skip overlay discovery and sync entirely, even if an overlay repo matching the convention later becomes accessible.
 
-**R4**: `niwa apply --skip-private` skips the private companion for that single apply invocation, regardless of registration state or instance flags.
+### Overlay Sync
 
-### Companion Sync and Discovery
+**R4**: When `niwa apply` runs, it determines overlay behavior from `.niwa/instance.json`:
+- If `no_overlay: true` → skip overlay entirely, proceed with base config only
+- If `overlay_url` is set → sync the overlay (git pull); failure behavior governed by R5–R6
+- If neither is set → attempt convention-based discovery identical to R1: try `<org>/<repo-name>-overlay`; if successful, store `overlay_url` in `instance.json` and apply the overlay; if not, skip silently
 
-**R5**: When `niwa apply` runs with a private companion registered and no `skip_private` flag, niwa syncs the companion using the same git pull mechanism as the global config sync step (see `SyncConfigDir`). If the companion has never been cloned, this step attempts an initial clone. Failure behavior is governed by R6–R8.
+**R5**: If the overlay has never been successfully cloned on the current machine and the clone or sync fails for any reason, niwa silently skips the overlay and continues apply with the base config only. No error message, no warning, no non-zero exit code related to the overlay.
 
-**R6**: If the companion has never been successfully cloned on the current machine and the clone fails for any reason — including not found (HTTP 404), access denied (HTTP 403), network timeout, or DNS failure — niwa silently skips the private companion and continues apply with the public config only. No error message, no warning, no non-zero exit code related to the companion. All failure reasons are treated identically.
+**R6**: If the overlay was previously successfully cloned on the current machine and the sync fails for any reason, `niwa apply` aborts with a non-zero exit code and an error message identifying the overlay sync as the cause. The error must not include the overlay's URL or path in standard output. Example: `"Workspace overlay sync failed: <error>. Use --no-overlay to skip."` 
 
-**R7**: If the companion was previously successfully cloned on the current machine and the sync fails for any reason (network error, access revoked, or other), `niwa apply` aborts with a non-zero exit code and an error message identifying the companion as the cause. Example: `"Private workspace extension sync failed: <error>. Check access with \`niwa config set private\` or skip with --skip-private."` The error must not include the companion's URL or path in standard output.
+**R7**: niwa derives "previously cloned" state using the following check: the overlay's local clone directory (see R19) exists AND `git -C <clone-dir> rev-parse HEAD` exits with code 0. If both conditions are true, the overlay is treated as previously cloned and R6 applies on sync failure. Otherwise R5 applies.
 
-**R8**: niwa derives "previously cloned" state using the following check: the directory `$XDG_CONFIG_HOME/niwa/private/` exists AND `git -C $XDG_CONFIG_HOME/niwa/private/ rev-parse HEAD` exits with code 0. If both conditions are true, the companion is treated as previously cloned and R7 applies on sync failure. Otherwise R6 applies. If `$XDG_CONFIG_HOME` is not set, niwa uses `~/.config` as the default, following the XDG Base Directory specification.
+### Overlay Format
 
-### Private Companion Format
+**R8**: A workspace overlay repo contains a file named `workspace-overlay.toml` at the repo root. If the overlay repo is accessible but `workspace-overlay.toml` is missing, `niwa apply` aborts with a non-zero exit code and an error identifying the missing file.
 
-**R9**: A private companion repo contains a file named `workspace-extension.toml` at the repo root. This file is the extension configuration.
+**R9**: `workspace-overlay.toml` supports these additive sections: `[[sources]]`, `[groups.*]`, `[repos.*]`, `[claude.content.*]`. Within `[claude.content.repos.*]`, two field variants are supported: `source` (for repos introduced by the overlay) and `overlay` (for repos already defined in the base config — see R13).
 
-**R10**: `workspace-extension.toml` supports these additive sections: `[[sources]]`, `[groups.*]`, `[repos.*]`, `[claude.content.*]`. Within `[claude.content.repos.*]`, two field variants are supported: `source` (for repos introduced by the companion) and `overlay` (for repos already defined in the public config — see R16).
+**R10**: `workspace-overlay.toml` supports these override sections: `[claude.hooks]`, `[claude.settings]`, `[env]`, `[files]`. Merge semantics: hooks append (overlay hooks added after base config hooks); settings per-key (overlay value used only if key absent in base config); `env.files` append (overlay files sourced after base config files); `env` vars per-key (overlay value used only if key absent in base config); `files` per-key (overlay file used only if destination absent in base config).
 
-**R11**: `workspace-extension.toml` supports these override sections: `[claude.hooks]`, `[claude.settings]`, `[env]`, `[files]`. Merge semantics match GlobalOverride: hooks append (companion hooks added after public config hooks); settings per-key (companion value used only if key absent in public config); `env.files` append (companion files sourced after public config files); `env` vars per-key (companion value used only if key absent in public config); `files` per-key (companion file used only if destination absent in public config).
-
-**R12**: `workspace-extension.toml` does not support workspace metadata fields (`[workspace]`, `[channels]`). All `[[sources]]` entries in `workspace-extension.toml` must include explicit `repos` lists — auto-discovery is prohibited for all companion source org declarations regardless of whether the org also appears in the public config. If `workspace-extension.toml` is missing from an otherwise valid companion repo, `niwa apply` aborts with an error identifying the missing file.
+**R11**: `workspace-overlay.toml` does not support workspace metadata fields (`[workspace]`, `[channels]`). All `[[sources]]` entries must include explicit `repos` lists — auto-discovery is prohibited in overlay source declarations for all orgs.
 
 ### Merge Semantics
 
-When an entry exists in both the public config and the companion, "public config takes precedence" means the public config's entry is used in its entirety and the companion's entry for that key is discarded without warning or error. No field-level merging occurs within a group or repo entry — the entire entry from the public config replaces the companion's. Content entries are the exception: companions may use the `overlay` field to append private context to a public-config repo's generated `CLAUDE.local.md` without replacing it (see R16).
+When an entry exists in both the base config and the overlay, "base config takes precedence" means the base config's entry is used in its entirety and the overlay's entry for that key is discarded without warning or error. No field-level merging occurs within a group or repo entry. Content entries are the exception: overlays may use the `overlay` field to append context to a base-config repo's generated `CLAUDE.local.md` without replacing it (see R13).
 
-**R13**: Sources from the companion are appended to the public config's sources after parsing. The combined sources list drives repo discovery. If the same repo is discovered from multiple sources, it is deduplicated (keeping the first occurrence) and the duplicate is silently skipped.
+**R12**: Sources from the overlay are appended to the base config's sources after parsing. The combined sources list drives repo discovery. If the same repo is discovered from multiple sources, it is deduplicated (keeping the first occurrence) and the duplicate is silently skipped. If any org in the overlay's `[[sources]]` entries matches an org in the base config's `[[sources]]` entries, `niwa apply` aborts before any git operations with: `"Duplicate source org '<org>' found in workspace config and overlay. Use explicit repos lists in both source declarations to resolve."`
 
-**R14**: Groups from the companion are added to the public config's group map. If a group name exists in both the public config and the companion, the public config's definition is used and the companion's is discarded without warning.
+**R13**: Content entries from the overlay are handled by field:
+- **Overlay-only repo** (`source` field): creates `CLAUDE.local.md` for that repo from the specified file.
+- **Base-config repo with `overlay` field**: appends the overlay file's content to the generated `CLAUDE.local.md` for that repo, separated from the base content by a blank line. The overlay path is resolved relative to the overlay's local clone directory and is subject to the same path-traversal validation as R20.
+- **Base-config repo with `source` field**: error — `niwa apply` aborts with a message stating that `source` is not allowed for repos already defined in the base config; use `overlay` instead.
 
-**R15**: Repo overrides from the companion are added to the public config's repos map. If a repo entry exists in both the public config and the companion, the public config's entry is used and the companion's is discarded without warning.
+Users without overlay access receive the base `CLAUDE.local.md` only; no overlay content is applied.
 
-**R16**: Content entries from the companion are handled differently depending on whether the repo is introduced by the companion or already defined in the public config:
+**R14**: Groups from the overlay are added to the base config's group map. If a group name exists in both, the base config's definition is used and the overlay's is discarded without warning.
 
-- **Companion-only repo** (`source` field): The companion's `source` entry creates `CLAUDE.local.md` for that repo, exactly as the public config does for its own repos.
-- **Public-config repo with `overlay` field**: The companion may declare `overlay = "<path>"` for a repo already in the public config. niwa appends the overlay file's content to the end of the generated `CLAUDE.local.md` for that repo, separated from the public content by a blank line. The overlay path is resolved relative to the companion's local clone directory and is subject to the same path-traversal validation as R21.
-- **Public-config repo with `source` field**: Using `source` for a repo that already exists in the public config is an error. niwa aborts with a non-zero exit code and a message indicating that `source` is not allowed for public-config repos — use `overlay` instead.
-
-Users without private access receive the public `CLAUDE.local.md` only; no overlay is applied and no indication of the overlay's existence is produced.
-
-**R17**: During companion parsing (before any git clone or pull operations on workspace repos), if any org in the companion's `[[sources]]` entries matches an org in the public config's `[[sources]]` entries, `niwa apply` aborts with a non-zero exit code and an error: `"Duplicate source org '<org>' found in workspace config and private companion. Use explicit repos lists in both source declarations to resolve."` Companion source entries without explicit `repos` lists are rejected at parse time (see R12).
+**R15**: Repo overrides from the overlay are added to the base config's repos map. If a repo entry exists in both, the base config's entry is used and the overlay's is discarded without warning.
 
 ### CLAUDE Context Injection
 
-**R18**: If `CLAUDE.private.md` exists in the companion's root directory, niwa copies it to the instance root and injects `@CLAUDE.private.md` into the workspace's `CLAUDE.md`, placed after the workspace context import and before the global config import.
+**R16**: If `CLAUDE.overlay.md` exists in the overlay repo's root directory, niwa copies it to the instance root and injects `@CLAUDE.overlay.md` into the workspace's `CLAUDE.md`, placed after the workspace context import and before the global config import (if registered).
 
-**R19**: If `CLAUDE.private.md` does not exist in the companion, no injection occurs and no error is produced.
+**R17**: If `CLAUDE.overlay.md` does not exist in the overlay repo, no injection occurs and no error is produced.
 
 ### Security
 
-**R20**: Private companion registration is stored in `~/.config/niwa/config.toml` under a `[private_workspace]` section containing the repo URL only. The local clone path is derived at runtime as `$XDG_CONFIG_HOME/niwa/private/` (falling back to `~/.config/niwa/private/` if `XDG_CONFIG_HOME` is unset) and is never stored in the config file.
+**R18**: The overlay URL is stored in `.niwa/instance.json` as `overlay_url`. The local clone path is derived at runtime as `$XDG_CONFIG_HOME/niwa/overlays/<workspace-id>/` where `<workspace-id>` is derived from the overlay URL. The local path is never stored in `instance.json`. If `XDG_CONFIG_HOME` is not set, niwa uses `~/.config` as the default, following the XDG Base Directory specification.
 
-**R21**: Parsing `workspace-extension.toml` must validate all `files` destination paths, `env.files` source paths, and `[claude.content.repos.*] overlay` paths using the same path-traversal rejection rules applied to GlobalOverride config: reject any path that is absolute (starts with `/`) or contains `..` as a path component. Rejection occurs during companion parsing, before any workspace file operations. niwa exits with a non-zero exit code and an error identifying the invalid path. No files are written to the workspace.
+**R19**: Previously-cloned detection uses the clone directory derived from `instance.json`'s `overlay_url` at runtime (see R18). The check: directory exists AND `git -C <dir> rev-parse HEAD` exits 0.
 
-**R22**: Hook scripts declared in `workspace-extension.toml` are resolved to absolute paths using the companion's local clone directory before merging, following the same pattern as GlobalOverride hook script resolution. Relative hook script paths are resolved relative to the companion's local clone directory.
+**R20**: Parsing `workspace-overlay.toml` must validate all `files` destination paths, `env.files` source paths, and `[claude.content.repos.*] overlay` paths: reject any path that is absolute (starts with `/`) or contains `..` as a path component. Rejection occurs during overlay parsing, before any workspace file operations. niwa exits with a non-zero exit code and an error identifying the invalid path. No workspace files are written.
 
-**R23**: In standard apply output (without `--debug` or `--verbose` flags), niwa must not include the companion's registration URL, local path, repo name, or any text that would indicate a private companion was consulted. Companion details may appear in debug-level output when `--debug` or `--verbose` is passed. The error message in R7 must not include the companion's URL or repository name.
+**R21**: Hook scripts declared in `workspace-overlay.toml` are resolved to absolute paths using the overlay's local clone directory before merging. Relative hook script paths are resolved relative to the overlay's local clone directory.
+
+**R22**: In standard apply output (without `--debug` or `--verbose` flags), niwa must not include the overlay's URL, local path, repo name, or any text indicating an overlay was consulted. Overlay details may appear in debug-level output when `--debug` or `--verbose` is passed. The error message in R6 must not include the overlay's URL or repository name.
 
 ## Acceptance Criteria
 
-### Registration
+### Discovery and Init
 
-- [ ] `niwa config set private acmecorp/dot-niwa-private` stores the URL in `~/.config/niwa/config.toml` under `[private_workspace]` and clones the companion to `$XDG_CONFIG_HOME/niwa/private/` (or `~/.config/niwa/private/` if `XDG_CONFIG_HOME` is unset).
-- [ ] `niwa config unset private` removes the `[private_workspace]` section from config and deletes the local companion directory (`$XDG_CONFIG_HOME/niwa/private/`). After unset, the directory no longer exists on the filesystem.
-- [ ] After `niwa config set private <inaccessible-repo>`, `niwa apply` stdout and stderr contain no text referencing the companion, its URL, or private configuration. The workspace applies with public config only and exits with code 0.
-- [ ] `niwa init --skip-private` results in `.niwa/instance.json` with `skip_private: true`. Subsequent `niwa apply` on that instance does not attempt to sync the companion, even if one is registered.
+- [ ] `niwa init --from acmecorp/dot-niwa ~/acmecorp` where `acmecorp/dot-niwa-overlay` exists and is accessible: `instance.json` contains `overlay_url: "acmecorp/dot-niwa-overlay"`.
+- [ ] `niwa init --from acmecorp/dot-niwa ~/acmecorp` where `acmecorp/dot-niwa-overlay` returns 404 or 403: `instance.json` contains no `overlay_url`. stdout and stderr contain no text referencing an overlay attempt. Exit code 0.
+- [ ] `niwa init --from acmecorp/dot-niwa --overlay acmecorp/niwa-internal ~/acmecorp` where `acmecorp/niwa-internal` is inaccessible: `niwa init` exits with a non-zero exit code and an error. No workspace directory is created.
+- [ ] `niwa init --from acmecorp/dot-niwa --no-overlay ~/acmecorp`: `instance.json` contains `no_overlay: true`. Subsequent `niwa apply` does not attempt overlay discovery or sync even if `acmecorp/dot-niwa-overlay` is accessible.
 
-### First-Time and Graceful Degradation
+### Overlay Sync
 
-- [ ] First `niwa apply` with a private companion registered on a machine where the companion was never cloned: if clone fails (HTTP 404, HTTP 403, network timeout, or DNS failure), apply exits with code 0 and stdout/stderr contain no text referencing the companion or private configuration. The workspace contains only public repos.
-- [ ] First `niwa apply` with a private companion registered and clone succeeds: companion repos are merged into the workspace. Apply produces a workspace with repos from both the public config and the companion.
-- [ ] Subsequent `niwa apply` after companion was previously cloned successfully (i.e., `$XDG_CONFIG_HOME/niwa/private/` exists and `git -C $XDG_CONFIG_HOME/niwa/private/ rev-parse HEAD` exits 0): if sync fails, apply exits with a non-zero exit code and an error message that identifies the companion sync as the cause without disclosing the companion's URL in standard output.
-- [ ] `niwa apply --skip-private` on an instance with `skip_private: false` skips the companion for that invocation only. The next `niwa apply` without the flag uses the companion normally.
+- [ ] `niwa apply` on an instance with no `overlay_url` and no `no_overlay` where `<repo>-overlay` is now accessible: apply stores `overlay_url` in `instance.json` and applies the overlay. Workspace contains overlay repos.
+- [ ] `niwa apply` on an instance with `overlay_url` set, overlay previously cloned, sync fails: apply exits with a non-zero exit code and an error message identifying the overlay sync as the cause without disclosing the overlay's URL.
+- [ ] `niwa apply` on an instance with `overlay_url` set, overlay never cloned on this machine, sync fails: apply exits with code 0. stdout and stderr contain no text referencing the overlay. Workspace contains only base repos.
 
 ### Merge Semantics
 
-- [ ] With a companion that adds `[[sources]] org = "internal-org" repos = ["vision"]`, and public config with `[[sources]] org = "tsukumogami"`: after `niwa apply`, the workspace contains repos from both orgs.
-- [ ] With companion and public config both defining a group named `tools`: the public config's `tools` group definition is used; the companion's is discarded. No warning or error is produced for the collision.
-- [ ] With companion and public config both defining `[repos.vision]`: the public config's entry is used; the companion's is discarded. No warning or error is produced for the collision.
-- [ ] With companion declaring `[[sources]] org = "tsukumogami"` (same org as public config), and public config also declaring `[[sources]] org = "tsukumogami"`: `niwa apply` exits with a non-zero exit code and a duplicate-source-org error before any git clone or pull operations execute on workspace repos.
-- [ ] With a companion that defines `[env] PRIVATE_TOKEN = "secret"` and public config that defines `[env] PUBLIC_KEY = "key"`: after `niwa apply`, both env vars are available in the workspace environment (per-key merge, no collision).
-- [ ] With a companion that defines `env.files = ["private.env"]` and public config that defines `env.files = ["public.env"]`: after `niwa apply`, both files are sourced (append semantics), with public config files sourced first.
+- [ ] Overlay with `[[sources]] org = "acmecorp" repos = ["billing"]` and base config with `[[sources]] org = "acmecorp" repos = ["api"]` (same org, different explicit repo lists): `niwa apply` exits with a non-zero exit code and a duplicate-source-org error before any git operations on workspace repos.
+- [ ] Overlay with `[[sources]] org = "internal-org" repos = ["vision"]` and base config with `[[sources]] org = "acmecorp" repos = ["api"]` (different orgs): after `niwa apply`, workspace contains repos from both orgs.
+- [ ] Overlay and base config both defining a group named `tools`: base config's `tools` group is used; overlay's is discarded. No warning or error.
+- [ ] Overlay and base config both defining `[repos.api]`: base config's entry is used; overlay's is discarded. No warning or error.
+- [ ] Overlay with `[env] OVERLAY_TOKEN = "x"` and base config with `[env] BASE_KEY = "y"`: after `niwa apply`, both env vars are available.
+- [ ] Overlay with `env.files = ["overlay.env"]` and base config with `env.files = ["base.env"]`: after `niwa apply`, both files are sourced, base config files first.
 
 ### Content and CLAUDE Injection
 
-- [ ] Companion with `[claude.content.repos.vision] source = "repos/vision.md"` and `repos/vision.md` present in the companion repo, and `vision` not defined in the public config: after `niwa apply`, the workspace instance contains `vision/CLAUDE.local.md` generated from that content file.
-- [ ] Companion with `[claude.content.repos.niwa] overlay = "private/niwa-context.md"` and `niwa` already defined in the public config's content map: after `niwa apply`, the workspace instance's `niwa/CLAUDE.local.md` contains the public content followed by a blank line and then the overlay content.
-- [ ] Companion with `[claude.content.repos.niwa] overlay = "private/niwa-context.md"` and no companion registered (or companion skipped): after `niwa apply`, `niwa/CLAUDE.local.md` contains only the public content. No indication of the overlay's existence is present.
-- [ ] Companion with `[claude.content.repos.niwa] source = "repos/niwa.md"` and `niwa` already defined in the public config's content map: `niwa apply` exits with a non-zero exit code and an error stating that `source` is not allowed for repos already defined in the public config.
-- [ ] Companion with `CLAUDE.private.md` at its root: after `niwa apply`, the instance root contains `CLAUDE.private.md` and the workspace `CLAUDE.md` contains `@CLAUDE.private.md`.
-- [ ] Companion without `CLAUDE.private.md`: after `niwa apply`, the workspace `CLAUDE.md` does not contain `@CLAUDE.private.md`. No error.
-- [ ] Workspace `CLAUDE.md` import order (when both private and global configs are registered): reading the workspace `CLAUDE.md` file top-to-bottom, the `@CLAUDE.private.md` import line appears after the workspace context import and before the `@CLAUDE.global.md` import line.
-- [ ] Companion with a hook script declared as `[claude.hooks] on_apply = ["scripts/post-apply.sh"]`: after `niwa apply`, the hook's path is resolved to the companion's local clone directory (absolute path), not the workspace root.
+- [ ] Overlay with `[claude.content.repos.billing] source = "content/billing.md"` and `billing` not defined in the base config: after `niwa apply`, `billing/CLAUDE.local.md` is generated from that file.
+- [ ] Overlay with `[claude.content.repos.api] overlay = "overlays/api-internal.md"` and `api` defined in the base config's content map: after `niwa apply`, `api/CLAUDE.local.md` contains the base content followed by a blank line and the overlay content.
+- [ ] Same as above, but overlay is inaccessible or skipped: `api/CLAUDE.local.md` contains only the base content. No indication of overlay content is present.
+- [ ] Overlay with `[claude.content.repos.api] source = "..."` and `api` defined in the base config's content map: `niwa apply` exits with a non-zero exit code and an error stating `source` is not allowed for base-config repos.
+- [ ] Overlay with `CLAUDE.overlay.md` at its root: after `niwa apply`, instance root contains `CLAUDE.overlay.md` and workspace `CLAUDE.md` contains `@CLAUDE.overlay.md`.
+- [ ] Overlay without `CLAUDE.overlay.md`: workspace `CLAUDE.md` does not contain `@CLAUDE.overlay.md`. No error.
+- [ ] `CLAUDE.md` import order (when both overlay and global config are registered): reading top-to-bottom, `@CLAUDE.overlay.md` appears after workspace context import and before `@CLAUDE.global.md`.
+- [ ] Overlay with `[claude.hooks] on_apply = ["scripts/post-apply.sh"]`: after `niwa apply`, the hook path is resolved to the overlay's local clone directory (absolute path).
 
 ### Security
 
-- [ ] `workspace-extension.toml` with `files` containing a destination path that includes `..` as a path component (e.g., `../../.ssh/authorized_keys`) is rejected during companion parsing. `niwa apply` exits with a non-zero exit code and an error identifying the invalid path. No workspace files are written.
-- [ ] `workspace-extension.toml` with `env.files` containing a path that starts with `/` (absolute path) is rejected during companion parsing. `niwa apply` exits with a non-zero exit code and an error identifying the invalid path.
-- [ ] `niwa apply` stdout and stderr (without `--debug` or `--verbose` flags) contain no text matching the companion's repo name, URL, local path, or the string "companion". Running `niwa apply 2>&1 | grep -iE '(companion|/niwa/private)'` on a workspace with a registered companion returns no output.
-- [ ] Companion repo is accessible but `workspace-extension.toml` is absent: `niwa apply` exits with a non-zero exit code and an error identifying the missing file.
+- [ ] `workspace-overlay.toml` with a `files` destination containing `..` as a path component: `niwa apply` exits with a non-zero exit code before writing any workspace files.
+- [ ] `workspace-overlay.toml` with `env.files` containing an absolute path: `niwa apply` exits with a non-zero exit code before writing any workspace files.
+- [ ] `niwa apply` stdout and stderr (without `--debug` or `--verbose`) contain no text matching the overlay's repo name, URL, or local path.
+- [ ] Overlay repo accessible but `workspace-overlay.toml` absent: `niwa apply` exits with a non-zero exit code and an error identifying the missing file.
 
 ## Out of Scope
 
+- **Registering a non-convention overlay after init**: If an overlay repo with a non-convention name is created after the workspace is initialized, there is no v1 command to register it. Teams in this situation must use `--overlay` at init time, or use the convention name. A workspace-level `niwa config set` command is deferred to a future release.
 - **Secrets management**: Vault integration for removing secrets from workspace configs. Covered separately.
-- **Per-developer personal config**: The GlobalOverride (`niwa config set global`) handles personal hooks, env, and settings. The private workspace extension is for team-shared private repo configuration, not personal preferences.
-- **Selective per-repo access within the companion**: Access to the private companion is all-or-nothing. Users either have permission to clone the companion (and get all private repos) or they don't (and get none). Fine-grained per-repo access within the companion is not supported in v1.
-- **Full content replacement for repos in the public config**: The companion can provide CLAUDE.md content for repos it introduces (`source` field) and can append private context to public repos (`overlay` field). It cannot replace the public config's content entry for a public repo — `source` on a public-config repo is an error.
-- **Multiple private companions per workspace**: A workspace has at most one registered private companion. Stacking multiple companions is out of scope.
-- **Auto-hiding of auto-discovered repos**: If the public config uses `[[sources]] org = "shared-org"` without explicit repo lists, auto-discovery queries the GitHub API and may expose private repo names in warning output ("matched no group"). Teams that need to hide private repo names must use explicit repo lists in their public config for shared orgs.
-- **Migration tooling**: No `niwa migrate-private` command in v1. Teams split their config manually. Documentation covers the process.
-- **Workspace.toml companion declaration field**: The public `workspace.toml` does not gain a `private_extension` field. The companion is registered per-machine via `niwa config set private`, not declared in the public config. This preserves the property that the public config is completely unaware of the companion.
+- **Per-developer personal config**: The GlobalOverride (`niwa config set global`) handles personal hooks, env, and settings. The overlay is for workspace-level supplemental configuration, not personal preferences.
+- **Selective per-repo access within the overlay**: Access to the overlay is all-or-nothing. Users either clone the overlay and get all overlay config, or they don't and get none.
+- **Full content replacement for repos in the base config**: The overlay can provide content for repos it introduces (`source`) and can append context to base repos (`overlay` field). It cannot replace the base config's content entry for a base repo — `source` on a base-config repo is an error.
+- **Multiple overlays per workspace**: A workspace instance has at most one overlay. Stacking multiple overlays is out of scope.
+- **Auto-hiding of auto-discovered repos**: If the base config uses `[[sources]]` without explicit repo lists, auto-discovery queries the GitHub API and may expose repo names in warning output. Teams that need to hide repo names must use explicit repo lists.
+- **Migration tooling**: No migration command in v1. Teams restructure their config manually.
 
 ## Known Limitations
 
-**Shared GitHub orgs require explicit repo lists.** If a team's public and private repos share a GitHub org, the public config's `[[sources]]` for that org must use an explicit `repos` list rather than auto-discovery (which would expose private repo names in warning output). This is a constraint on the public config's structure, not a niwa limitation per se, but it reduces the zero-configuration benefit of auto-discovery for mixed-visibility orgs.
+**Explicit repos lists required for shared source orgs.** If the base and overlay configs share a source org declaration, both must use explicit `repos` lists. A shared org without explicit lists triggers a duplicate-source-org error.
 
-**All-or-nothing private access.** A user either has access to the entire companion repo or none of it. Teams with more granular access needs (contributor A sees private repos P1 and P2 but not P3) cannot express this through niwa's companion model. They would need multiple workspace configs or per-repo access controls outside niwa.
+**All-or-nothing overlay access.** A user either has access to the entire overlay repo or none of it. Fine-grained per-repo access within the overlay is not supported.
 
-**Machine-level registration.** The private companion is registered per machine, not per workspace instance. All instances of a workspace on the same machine use the same companion (unless initialized with `--skip-private`). If different instances should use different companions, `--skip-private` can disable the companion per-instance, but there is no positive per-instance companion override.
+**Non-convention overlay names require `--overlay` at init.** If the overlay repo does not follow the `<base-repo>-overlay` naming convention, it must be specified explicitly at init. There is no mechanism to add or change the overlay URL after init in v1.
 
-**Companion sync failure is fatal after initial access.** Once a user has successfully cloned the companion, any subsequent sync failure causes the apply to abort. This provides a fail-safe against silently operating with a stale companion after network or permission changes, but means users with intermittent connectivity issues must use `--skip-private` to work offline.
+**Overlay sync failure is fatal after initial access.** Once the overlay has been cloned, any subsequent sync failure causes the apply to abort. Users with intermittent connectivity must re-initialize with `--no-overlay` to work offline.
 
 ## Decisions and Trade-offs
 
-**Registration-only, no workspace.toml field.**
-The companion is registered via `niwa config set private`, not declared in `workspace.toml`. An explicit field in `workspace.toml` would disclose the companion's existence in the public config — even without revealing the companion's contents. Keeping the public config unaware of the companion's existence is the stronger privacy model, and it mirrors how the GlobalOverride layer works (registered per machine, not declared in workspace.toml). Tradeoff: new team members must know to register the companion; there's no self-documenting pointer in the public config. Mitigation: teams can add a comment to their public `workspace.toml` or README explaining the companion's existence, without niwa requiring it.
+**Overlay discovery at init time, stored in `instance.json`.**
+The overlay URL is discovered at `niwa init` time and stored in `.niwa/instance.json` as a workspace property. This means each workspace instance owns its overlay relationship independently — multiple workspaces on the same machine each have their own `instance.json` and therefore their own overlay URL. No machine-level config file entry is needed. The `niwa apply` command reads `instance.json` to determine overlay intent, and re-tries convention discovery if no URL is stored (to handle the "granted access later" case).
 
-**Silent skip on first-time clone failure.**
-When the companion has never been cloned on a machine and the clone fails, niwa skips it silently. The alternative (warn the user) would reveal the companion's existence to users without access. GitHub returns HTTP 404 for both "repo doesn't exist" and "access denied" — niwa cannot distinguish these, so any user-visible message would require revealing that a companion was attempted. The local-clone-presence heuristic (if `$XDG_CONFIG_HOME/niwa/private/` exists and is a git repo, the user has access) is the practical way to distinguish "never had access" from "had access but something went wrong."
+**No `niwa config set private` in v1.**
+The explicit registration command is unnecessary when discovery is init-time and convention-based. The only gap is an overlay repo with a non-convention name that is created after the workspace is initialized — this is an acceptable v1 limitation. A workspace-level config command can address it in a future release without changing the core discovery model.
 
-**Companion format uses `workspace-extension.toml`, not `workspace.toml`.**
-A distinct filename clarifies that the companion is an extension (additive and override), not a standalone workspace config. A companion named `workspace.toml` would mislead contributors into thinking it can be used as a standalone workspace config. The distinct name also allows niwa to apply different parsing rules (no `[workspace]` metadata, restricted `[[sources]]` behavior).
+**Convention suffix is `-overlay`.**
+The suffix describes the mechanism (layering) rather than the access model (private/public). Both the base and overlay repos can have any visibility. A team might overlay a public supplemental config on top of a public base; the suffix correctly describes what it is regardless of visibility.
 
-**Public config precedence on structural collisions; overlay allowed for content.**
-When both the public config and the companion define the same group or repo entry, the public config wins — the companion's entry is discarded entirely. This prevents private config from silently changing structural behavior (which repo a group contains, which URL a repo clones from). Content is different in character: it's documentation text, not structural configuration, and "append private context" is a valid and useful semantic. The companion therefore supports an `overlay` field for content entries that augments rather than replaces the public content. Full content replacement (`source` on a public-config repo) remains prohibited to preserve the one-directional nature of the companion's influence.
+**`niwa apply` re-tries convention discovery when no overlay is stored.**
+If `instance.json` has no `overlay_url` and no `no_overlay` flag, `niwa apply` attempts convention discovery on every run. This is how a contributor automatically gains the overlay when they're later granted access — no user action required. The overhead is one git clone attempt per apply when no overlay exists, which fails fast (HTTP 404/403).
 
-**`niwa status` does not display companion registration state.**
-Companion registration state is omitted from `niwa status` output entirely. Any mention of the companion in status output could be visible to users without access (shared terminals, log aggregation). Users who need to debug companion state can use `niwa config show private`. This aligns with R23.
+**Silent skip on first-time clone failure; hard error on explicit `--overlay`.**
+Convention-based discovery silently skips on any failure because the user may simply not have access, and revealing that a discovery was attempted contradicts the goal of not leaking overlay existence. Explicit `--overlay` fails hard because the user has stated intent — a silent skip would leave them with an unexpectedly incomplete workspace.
 
-**Companion-only orgs require explicit `repos` lists.**
-Auto-discovery is prohibited in `workspace-extension.toml` for all source org declarations, including orgs that don't appear in the public config. Auto-discovery queries the GitHub API, and querying a companion-only org's repos exposes repo names to the apply pipeline. Requiring explicit lists enforces intentional configuration. Teams pay a small configuration cost but gain stronger isolation guarantees.
+**`workspace-overlay.toml`, not `workspace.toml`.**
+A distinct filename clarifies that the overlay is additive, not a standalone workspace config. It also allows niwa to enforce different parsing rules (no `[workspace]` metadata, explicit repos required in sources).
 
-**`niwa config check` deferred to a future release.**
-A command to audit the public/private split is a useful follow-on feature but adds scope beyond v1. Teams can prepare to publish their config by manually reviewing their `workspace.toml` for private identifiers.
+**Base config precedence on structural collisions; append allowed for content.**
+Groups and repo entries: base config wins entirely. Content is different — appending overlay context to a base repo's `CLAUDE.local.md` is additive augmentation, not structural override. The `overlay` field in content entries captures this distinction explicitly. Full content replacement (`source` on a base-config repo) remains an error.
+
+**`niwa status` does not display overlay state.**
+Any mention of the overlay in status output could reveal its existence to users who shouldn't know about it. Users who need to inspect overlay state can read `.niwa/instance.json` directly.
