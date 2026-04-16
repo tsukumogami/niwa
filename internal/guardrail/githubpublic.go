@@ -107,14 +107,39 @@ func enumerateGitHubRemotes(configDir string) (matches []string, haveGit bool) {
 	return matches, true
 }
 
+// isPlaintextSecret reports whether v holds a plaintext secret value
+// that the guardrail should flag. It returns false for:
+//
+//   - An already-resolved secret (IsSecret() == true): the resolver has
+//     replaced the vault URI with secret material, so the config is in
+//     its intended end state.
+//   - An unresolved vault URI (Plain starts with "vault://"): the
+//     guardrail runs pre-resolve, so a vault-ref config slot looks like
+//     {Plain: "vault://...", Secret: zero}. That is the CORRECT way to
+//     reference a secret — flagging it would block the very migration
+//     path the guardrail's error message recommends.
+//   - An empty slot: nothing to flag.
+//
+// Only a non-empty, non-vault-URI Plain with no resolved Secret is an
+// offending plaintext secret.
+func isPlaintextSecret(v config.MaybeSecret) bool {
+	if v.IsSecret() {
+		return false
+	}
+	if strings.HasPrefix(v.Plain, "vault://") {
+		return false
+	}
+	return v.Plain != ""
+}
+
 // offendingKeys returns the sorted list of plaintext secret-table keys
 // in cfg. An entry is "offending" when:
 //
 //   - it lives in a *.secrets table (never in *.vars — the whole point
 //     of the vars/secrets split is that vars values aren't secret-class);
-//   - its MaybeSecret has a non-empty Plain AND has not been promoted
-//     to a resolved secret (IsSecret() == false). A resolved vault-ref
-//     has IsSecret() == true and is skipped.
+//   - its MaybeSecret has a non-empty Plain that is neither a resolved
+//     secret (IsSecret() == true) nor an unresolved vault:// URI. See
+//     isPlaintextSecret for the classification details.
 //
 // The keys returned are env var names only; no values are included in
 // the output. This is deliberate (PRD R22: diagnostics never contain
@@ -132,10 +157,7 @@ func offendingKeys(cfg *config.WorkspaceConfig) []string {
 
 	walk := func(t config.EnvVarsTable) {
 		for k, v := range t.Values {
-			if v.IsSecret() {
-				continue
-			}
-			if v.Plain == "" {
+			if !isPlaintextSecret(v) {
 				continue
 			}
 			keys[k] = struct{}{}
