@@ -1371,18 +1371,3 @@ Listed here so they're not forgotten when the feature starts landing:
   count of `niwa apply --allow-plaintext-secrets` invocations (target:
   near-zero), GitHub secret-scanning alerts on niwa-using repos.
   Pick and instrument when shipping; not a PRD acceptance gate.
-
-## Open Questions
-
-Questions to resolve before the PRD transitions to Accepted:
-
-
-
-
-
-
-- **Q-5 Sign-off stakeholders.** Does this PRD need explicit review
-  from anyone beyond the niwa maintainer before transitioning to
-  Accepted — e.g., security-minded community members, the
-  `tsukumogami/tsuku` ecosystem maintainers, or contributors with
-  signaled interest in the feature?
