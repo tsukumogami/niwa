@@ -1,5 +1,5 @@
 ---
-status: Accepted
+status: Planned
 upstream: docs/prds/PRD-vault-integration.md
 problem: |
   Wiring a vault layer into niwa forces structural changes across three
@@ -41,7 +41,7 @@ rationale: |
 
 ## Status
 
-Accepted
+Planned
 
 ## Context and Problem Statement
 
