@@ -25,13 +25,29 @@ func TestFactoryKind(t *testing.T) {
 }
 
 // TestNotRegisteredInDefaultRegistry asserts the deliberate design
-// choice: the fake backend must not auto-register with
-// vault.DefaultRegistry. Tests use a fresh Registry and Register
-// the fake explicitly.
+// choice: the fake backend must NOT be registered in
+// vault.DefaultRegistry. If this test fails, someone added an init()
+// somewhere that auto-registers the fake, which would let production
+// code paths (any caller using DefaultRegistry) accidentally open the
+// test fixture.
+//
+// We assert by trying to register the fake into DefaultRegistry
+// directly: if it's already there, Register returns an error; if it
+// isn't, Register succeeds and we roll it back with Unregister so we
+// don't pollute DefaultRegistry for later tests.
 func TestNotRegisteredInDefaultRegistry(t *testing.T) {
-	r := vault.NewRegistry()
-	if err := r.Register(fake.NewFactory()); err != nil {
-		t.Fatalf("fresh registry could not register fake: %v", err)
+	factory := fake.NewFactory()
+	if err := vault.DefaultRegistry.Register(factory); err != nil {
+		// Already registered — that's the failure mode this test
+		// exists to prevent.
+		t.Fatalf("fake backend is registered in DefaultRegistry; "+
+			"this violates the fixture-isolation invariant. "+
+			"Register error: %v", err)
+	}
+	// Rollback: we just registered it, so un-register it now so the
+	// rest of the test suite sees a clean DefaultRegistry.
+	if err := vault.DefaultRegistry.Unregister(factory.Kind()); err != nil {
+		t.Fatalf("rollback Unregister failed: %v", err)
 	}
 }
 

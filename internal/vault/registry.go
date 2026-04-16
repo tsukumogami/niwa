@@ -57,6 +57,27 @@ func (r *Registry) Register(f Factory) error {
 	return nil
 }
 
+// Unregister removes the Factory registered for kind. It returns an
+// error if kind is empty or if no Factory is registered for kind.
+//
+// Unregister is primarily intended for tests that need to probe the
+// Register path against DefaultRegistry and then roll back so they do
+// not leak registrations into later tests. Production code should not
+// call Unregister: backend registrations via init() are intended to
+// be permanent for the process lifetime.
+func (r *Registry) Unregister(kind string) error {
+	if kind == "" {
+		return fmt.Errorf("vault: cannot unregister empty Kind")
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, exists := r.factories[kind]; !exists {
+		return fmt.Errorf("vault: Factory kind %q is not registered", kind)
+	}
+	delete(r.factories, kind)
+	return nil
+}
+
 // Build opens a Provider for each ProviderSpec and returns a Bundle
 // holding them. Provider names in specs must be unique within the
 // slice; Build returns an error on duplicates. If any Factory.Open

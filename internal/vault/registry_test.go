@@ -276,6 +276,43 @@ func TestBundleCloseAllAggregatesErrors(t *testing.T) {
 	}
 }
 
+// TestRegistryUnregister covers the Unregister contract: a kind that
+// was previously registered can be removed and then registered again;
+// unknown and empty kinds return errors.
+func TestRegistryUnregister(t *testing.T) {
+	t.Run("register then unregister then register again", func(t *testing.T) {
+		r := vault.NewRegistry()
+		if err := r.Register(&stubFactory{kind: "fake"}); err != nil {
+			t.Fatalf("first Register: %v", err)
+		}
+		if err := r.Unregister("fake"); err != nil {
+			t.Fatalf("Unregister after Register returned error: %v", err)
+		}
+		if err := r.Register(&stubFactory{kind: "fake"}); err != nil {
+			t.Fatalf("Register after Unregister returned error: %v", err)
+		}
+	})
+
+	t.Run("unregister unknown kind returns error", func(t *testing.T) {
+		r := vault.NewRegistry()
+		err := r.Unregister("ghost")
+		if err == nil {
+			t.Fatalf("Unregister of unknown kind did not return error")
+		}
+		if !strings.Contains(err.Error(), "ghost") {
+			t.Fatalf("expected error to name unknown kind, got: %v", err)
+		}
+	})
+
+	t.Run("unregister empty kind returns error", func(t *testing.T) {
+		r := vault.NewRegistry()
+		err := r.Unregister("")
+		if err == nil {
+			t.Fatalf("Unregister of empty kind did not return error")
+		}
+	})
+}
+
 // TestDefaultRegistryInitialized asserts AC: DefaultRegistry is
 // populated (initialised) by the package, ready for backend init()
 // registration.
