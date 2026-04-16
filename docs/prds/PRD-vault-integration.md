@@ -556,6 +556,34 @@ of `(source-id, version-token)` tuples where:
   no native version MUST synthesize one deterministically (e.g.,
   sops uses the encrypted blob's SHA-256).
 
+**Provenance requirement.** Each version-token MUST carry enough
+metadata for a user to trace a rotation back to a specific change
+event. The goal is making rotations investigable — a user seeing
+`stale` in `niwa status` should be able to answer "what change
+caused this?" without re-running the rotation themselves:
+
+- **Git-hosted backends (sops+age, any future git-native backend).**
+  The version-token includes the commit SHA of the commit that
+  touched the secret-bearing file. niwa derives this at resolve
+  time by asking git for the last-modifying commit of the file.
+  `niwa status` reports the SHA alongside `stale` so the user can
+  `git show <sha>` and see who rotated the secret when.
+- **API-hosted backends (Infisical, 1Password, Vault OSS, Bitwarden,
+  Doppler, ...).** The version-token includes the provider's native
+  version identifier in a shape that resolves back to the provider's
+  audit log (e.g., Infisical's secret-version ID paired with a
+  pointer to the audit-log entry). `niwa status` surfaces both so
+  the user can cross-reference.
+- **Synthesized-version backends** (providers with no native
+  versioning). Fall back to content-hash of the encrypted blob plus
+  best-available metadata (e.g., `.sops.yaml` commit SHA for
+  sops).
+
+The design doc defines the exact per-backend version-token
+structure. The PRD requires the *property* (rotation is
+investigable via provenance that accompanies `stale` reports), not
+the specific mechanism.
+
 For a materialized file that blends multiple sources (the common
 case — `.local.env` combines workspace env files, discovered repo
 env files, `env.vars` entries, and overlay-merged values), the
@@ -905,6 +933,14 @@ bypassing team-declared requirements.
   re-resolution without materialization and reports which files would
   change if `niwa apply` ran.
 - [ ] Default `niwa status` (no flag) is fully offline and hash-based.
+- [ ] When a sops-backed secret is rotated (the encrypted file is
+  edited and committed), `niwa status` reports `stale` with the
+  commit SHA that produced the change, so a user can run
+  `git show <sha>` to see the rotation.
+- [ ] When an Infisical-backed (or other API-hosted) secret is
+  rotated, `niwa status` reports `stale` with the provider's
+  native version identifier in a shape that can be resolved back to
+  the provider's audit log.
 
 ### Bootstrap and Documentation
 
