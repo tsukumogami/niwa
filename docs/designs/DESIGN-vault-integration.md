@@ -396,6 +396,46 @@ type VersionToken struct {
 }
 
 type Registry struct { /* indexed by Kind() */ }
+
+// ProviderConfig is the per-provider TOML subtree (backend-specific
+// fields alongside a shared Kind). Parsed into backend-specific structs
+// via each Factory.
+type ProviderConfig map[string]any
+
+// ProviderSpec is one entry from cfg.Vault after normalization.
+type ProviderSpec struct {
+    Name   string         // "" for anonymous singular
+    Kind   string         // "infisical", "sops", ...
+    Config ProviderConfig // backend-specific fields
+    Source string         // file path for diagnostics
+}
+
+// BatchResult is one entry returned by BatchResolver.
+type BatchResult struct {
+    Ref   Ref
+    Value secret.Value
+    Token VersionToken
+    Err   error           // per-ref; nil on success
+}
+
+// ScrubStderr runs raw provider-CLI stderr through the caller's
+// Redactor, also applying the known-fragments deny-list before the
+// return. Callers wrap the result in secret.Errorf without further
+// interpolation.
+func ScrubStderr(ctx context.Context, raw []byte, known ...secret.Value) string
+
+// ParseRef parses a vault:// URI. Lives in internal/vault (not
+// internal/config) so the URI grammar stays colocated with the
+// Provider machinery. Called from the resolver, not the parser.
+func ParseRef(uri string) (Ref, error)
+
+// Sentinel errors for apply.go's remediation formatting (R9, R12, R14).
+var (
+    ErrKeyNotFound           = errors.New("vault: key not found")
+    ErrProviderUnreachable   = errors.New("vault: provider unreachable")
+    ErrProviderNameCollision = errors.New("vault: personal overlay cannot replace team-declared provider")
+    ErrTeamOnlyLocked        = errors.New("vault: key is locked by team_only")
+)
 ```
 
 **Rationale:** Option 3 matches PRD R1 vocabulary exactly; construction
@@ -842,6 +882,22 @@ func (m MaybeSecret) IsSecret() bool
 func (m MaybeSecret) String() string  // plain text OR *** for secrets (no leak)
 ```
 
+Zero-value semantics: `MaybeSecret{}` has `Plain == ""` and
+`!IsSecret()` — equivalent to "empty non-secret." The parser never
+produces a zero value; it either parses a TOML string into
+`{Plain: "..."}` or omits the field entirely (map entry absent).
+
+**Resolver auto-wraps `*.secrets` plaintext.** When the resolver
+walks an `[env.secrets]` or `[claude.env.secrets]` value that is NOT
+a `vault://` URI (a plaintext literal), it MUST still wrap the
+plaintext in `secret.Value` before returning. The R14 guardrail
+catches this case and blocks apply on public repos, but if the user
+opts out via `--allow-plaintext-secrets`, the plaintext still flows
+through the pipeline as a `secret.Value` so downstream redaction,
+`secret.Error` wrapping, and materializer `0o600` mode still apply.
+Authoring a plaintext in `*.secrets` is a commit risk, not a
+redaction risk.
+
 `EnvConfig`, `ClaudeEnvConfig`, `SettingsConfig`, `FilesConfig` leaf
 string values become `MaybeSecret`. The `[env.vars]` / `[env.secrets]`
 split (R33) is a separate classification dimension: both map types
@@ -1071,6 +1127,18 @@ to consume `MaybeSecret` and write `0o600` unconditionally (fixes
 pre-existing `0o644` bug). Add `.local` infix enforcement. Add
 `niwa create` instance-root `.gitignore` maintenance.
 
+**Release-coupling note.** Phases 4 (resolver + `MaybeSecret` leaf
+type) and 6 (materializer consumption of `MaybeSecret`) form one
+logical release unit — intermediate builds that ship Phase 4 without
+Phase 6 would have materializers that can't handle the new field
+shape. If the work lands across multiple PRs, the phases between
+Phase 4 and Phase 6 MUST either (a) land behind a feature flag that
+keeps materializers on the old flat-string path, or (b) ship as a
+single merged-and-released unit. The `0o600` bug-fix half of Phase 6
+is independent — it can land as a precursor PR alongside Phase 1,
+fully decoupled from the vault chain, because `0o644` → `0o600` for
+existing non-vault configs is strictly safer.
+
 Deliverables:
 - `internal/workspace/materialize.go` edits
 - `internal/cli/create.go` `.gitignore` maintenance
@@ -1088,6 +1156,14 @@ Deliverables:
 - `internal/workspace/materialize.go` fingerprint emission
 - `internal/cli/status.go` output formatting
 - Functional tests: drift-only, vault-rotated, mixed-source
+
+**State-file write semantics.** Once Phase 7 lands, niwa
+UNCONDITIONALLY writes `SchemaVersion: 2`. v1 states load via a
+migration shim that zeros `Sources[]` and `Shadows[]`, then niwa
+rewrites them as v2 on the next apply. There is no mixed v1/v2 state
+— a niwa binary that can read v2 always writes v2. Downgrading to a
+pre-Phase-7 binary after a Phase-7 apply would fail to parse
+`state.json`; document this in the release notes.
 
 ### Phase 8: Shadow detection + diagnostics
 
@@ -1222,7 +1298,8 @@ probes. Explicit boundaries:
   the guardrail even if public. Non-GitHub host coverage is tracked
   as deferred in the PRD Out-of-Scope list.
 - **No git working tree:** If `git -C <configDir> remote -v` errors
-  (no `.git`, missing binary, corrupted refs), the guardrail emits a
+  (no `.git`, missing binary, corrupted refs, symlinked `.git`
+  pointing at a no-longer-existent directory), the guardrail emits a
   warning and proceeds. Users extracting a config tarball outside a
   git clone bypass the guardrail by construction; the guardrail's
   purpose is to prevent future commits, which a non-git tree cannot
@@ -1236,10 +1313,10 @@ se), but matter for error-message usability:
 
 - **Minimum fragment length.** Short secrets (< 6 bytes) have high
   collision rates with ordinary English/log text. The `Redactor`
-  SHOULD skip registering fragments shorter than a safe threshold
-  and SHOULD NOT apply substring matching to such fragments.
-  Secrets that short should be rejected at resolution time with a
-  hard error.
+  MUST skip registering fragments shorter than a safe threshold
+  (6 bytes) and MUST NOT apply substring matching to such
+  fragments. Secrets that short must be rejected at resolution time
+  with a hard error.
 - **Fragment ordering.** Scrub longest fragments first to avoid a
   substring of fragment A shadowing fragment B.
 - **Whole-token matching.** Consider word-boundary or

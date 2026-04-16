@@ -45,7 +45,24 @@ merge runs, inverting the current parse → merge → materialize flow.
   considerations). Full review at
   `wip/research/design_vault-integration_phase5_security.md`.
   Security Considerations section written.
-- **Phase 6** (Final Review): next.
+- **Phase 6** (Final Review): complete — both architecture
+  (APPROVE_WITH_CHANGES, 8 non-blocking) and security (APPROVE, 3
+  non-blocking) reviews applied. Strawman check passed (6
+  decisions, all alternatives have genuine depth from Phase 2
+  reports). Structure validated. Frontmatter complete.
+
+## Review Applied
+- Architecture non-blockers: added missing type defs
+  (ProviderConfig, BatchResult, ProviderSpec, ScrubStderr, ParseRef),
+  error catalog (ErrKeyNotFound, ErrProviderUnreachable,
+  ErrProviderNameCollision, ErrTeamOnlyLocked), MaybeSecret
+  zero-value semantics, resolver-auto-wraps-plaintext-secrets note,
+  release-coupling for Phases 4+6, v1→v2 state-file write semantics.
+- Security non-blockers: Redactor min-fragment SHOULD → MUST,
+  symlinked .git case in guardrail boundary.
+- Skipped (deferred to implementation): fake-backend subpackage
+  convention and 0o600 precursor-PR placement (already mentioned;
+  level-of-detail judgement).
 
 ## Security Review (Phase 5)
 **Outcome:** Option 2 — document considerations
