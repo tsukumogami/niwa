@@ -3,7 +3,7 @@
   "design_doc": "docs/plans/PLAN-vault-integration.md",
   "branch": "docs/vault-integration",
   "pr_number": 52,
-  "integrity_hash": "sha256:13a004ea12d94850d5e6de145461b555881361039e8c5db985e67f56dca1ad97",
+  "integrity_hash": "sha256:dfb3cfa6774cc150ad3a89379d6e2f59893d7ca42ed22af3b1954434dbabc8b8",
   "issues": [
     {
       "number": 1,
@@ -499,8 +499,8 @@
     {
       "number": 8,
       "title": "feat(workspace): shadow detection and diagnostics across apply/status",
-      "status": "scrutinized",
-      "ci_status": "pending",
+      "status": "completed",
+      "ci_status": "passed",
       "ci_fix_attempts": 0,
       "issue_type": "code",
       "dependencies": [],
@@ -533,19 +533,70 @@
           }
         ]
       },
+      "reviewer_results": {
+        "issue": 8,
+        "round": 1,
+        "reviewers": [
+          {
+            "role": "pragmatic",
+            "blocking_count": 1,
+            "non_blocking_count": 1,
+            "detail_file": "wip/research/implement-vault-integration-issue_8_pragmatic.md"
+          },
+          {
+            "role": "architect",
+            "blocking_count": 0,
+            "non_blocking_count": 3,
+            "detail_file": "wip/research/implement-vault-integration-issue_8_architect.md"
+          },
+          {
+            "role": "maintainer",
+            "blocking_count": 0,
+            "non_blocking_count": 1,
+            "detail_file": "wip/research/implement-vault-integration-issue_8_maintainer.md"
+          }
+        ],
+        "resolution": "Pragmatic blocker addressed in commit 553ca1c: removed renderShadowedColumn and TestRenderShadowedColumn — Issue 10 owns --audit-secrets SHADOWED column. Ownership note added to Shadow struct docstring.",
+        "advisory_deferred": [
+          "pragmatic non-blocking consumed by blocker fix",
+          "architect: attribution defaults live in two spots; renderShadowedColumn concatenates Layer verbatim (removed anyway); provider shadows not persisted (documented)",
+          "maintainer: apply.go hard-codes 'workspace.toml'/'niwa.toml' instead of using teamSourceDefault/personalSourceDefault constants from shadows.go"
+        ]
+      },
+      "qa_skipped": true,
       "testable_scenarios": []
     },
     {
       "number": 9,
       "title": "feat(guardrail): public-repo plaintext-secrets hard block",
-      "status": "pending",
+      "status": "scrutinized",
       "ci_status": "pending",
       "ci_fix_attempts": 0,
-      "issue_type": "",
+      "issue_type": "code",
       "dependencies": [],
-      "commits": [],
-      "agent_type": "",
-      "summary": null,
+      "commits": [
+        "a3ee5b6d63c03216290cef1d9c79297328a4e2ac",
+        "a3ee5b6d63c03216290cef1d9c79297328a4e2ac",
+        "a4c323fe1a8bfcced6dbe6a943cc0bdf47fb0e34"
+      ],
+      "agent_type": "coder",
+      "summary": {
+        "narrative": "",
+        "files_changed": [
+          "internal/guardrail/githubpublic.go",
+          "internal/guardrail/githubpublic_test.go",
+          "internal/workspace/apply.go"
+        ],
+        "tests_added": 18,
+        "key_decisions": "Issue 9 core + rework: extracted isPlaintextSecret helper with 3-way classification (empty/unresolved-vault-URI/plaintext); skip unresolved vault:// URIs in guardrail so pre-resolve configs with legitimate vault refs aren't blocked; regression test covers pre-resolve shape",
+        "requirements_map": [
+          {
+            "ac": "Issue 9 full AC list + architect blocker",
+            "status": "implemented",
+            "evidence": "see coder returns"
+          }
+        ]
+      },
       "testable_scenarios": []
     },
     {

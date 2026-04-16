@@ -1,0 +1,15 @@
+{
+  "issue": 9,
+  "round": 1,
+  "reviewers": [
+    {"role": "pragmatic", "blocking_count": 0, "non_blocking_count": 2, "detail_file": "wip/research/implement-vault-integration-issue_9_pragmatic.md"},
+    {"role": "architect", "blocking_count": 1, "non_blocking_count": 2, "detail_file": "wip/research/implement-vault-integration-issue_9_architect.md"},
+    {"role": "maintainer", "blocking_count": 0, "non_blocking_count": 3, "detail_file": "wip/research/implement-vault-integration-issue_9_maintainer.md"}
+  ],
+  "resolution": "Architect blocker (guardrail misclassified pre-resolve vault:// URIs as plaintext) addressed in commit a4c323f: extracted isPlaintextSecret helper with explicit 3-way classification; added regression tests for pre-resolve shape.",
+  "advisory_deferred": [
+    "pragmatic A1 (remoteLineFields single-caller helper), A2 (overlap between regex-table and e2e tests)",
+    "architect A1 (case-variant URL dedup), A2 ('guardrail skipped' message collapses 3 branches)",
+    "maintainer: enumerateGitHubRemotes returns haveGit=false for two different conditions; test name uses fixture not behavior; regex \\. literal not called out explicitly"
+  ]
+}
