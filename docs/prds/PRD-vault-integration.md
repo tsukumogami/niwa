@@ -1154,6 +1154,25 @@ providers. The dual-shape approach keeps anonymous URIs
 distinct, and the parser can tell at config-load time which shape
 the file uses.
 
+## Rollout Notes
+
+The following are release-planning concerns deliberately kept outside
+the PRD's Open Questions because they don't change what the PRD
+specifies — only the schedule or measurement around its rollout.
+Listed here so they're not forgotten when the feature starts landing:
+
+- **Plaintext-deprecation schedule.** R14/R30 defines the public-repo
+  plaintext-secret guardrail. Whether it ships as a hard block in
+  v1.0 or warns for one or two minor releases before flipping to
+  default-on is a release choice. A staged "warn-then-block" rollout
+  is friendlier to existing users; a day-one hard block is cleaner
+  semantically. Decide during release planning when v1.0 gets cut.
+- **Rollout success metrics.** Candidate signals to watch after v1.0:
+  number of plaintext values in `tsukumogami/dot-niwa` (target: 0),
+  count of `niwa apply --allow-plaintext-secrets` invocations (target:
+  near-zero), GitHub secret-scanning alerts on niwa-using repos.
+  Pick and instrument when shipping; not a PRD acceptance gate.
+
 ## Open Questions
 
 Questions to resolve before the PRD transitions to Accepted:
@@ -1166,17 +1185,7 @@ Questions to resolve before the PRD transitions to Accepted:
   one?
 
 
-- **Q-3 Plaintext-deprecation timeline.** When does the public-repo
-  plaintext-secret guardrail (R14/R30) become the default? On day one
-  (feature-flag off → hard guardrail) or staged through a release
-  cycle (warn for two minor releases, then error)?
-
-- **Q-4 Rollout metrics.** What's the success signal? Number of
-  plaintext values in `tsukumogami/dot-niwa` drops to zero? Number of
-  GitHub secret-scanning alerts? Number of users running
-  `niwa apply --allow-plaintext-secrets` stays below some threshold?
-
-- **Q-5 Source-org detection for workspace with no sources.** R5
+- **Q-2 Source-org detection for workspace with no sources.** R5
   already specifies that zero-source workspaces *may* set
   `vault_scope` explicitly for personal overlay targeting. The open
   question is narrower: when zero-source AND no `vault_scope`, should
@@ -1185,20 +1194,20 @@ Questions to resolve before the PRD transitions to Accepted:
   personal refs will be unresolvable? Leaning warn — silent fallback
   hides a real misconfiguration.
 
-- **Q-6 Migration UX details.** What does the first-time migration
+- **Q-3 Migration UX details.** What does the first-time migration
   walkthrough look like? A dedicated `niwa vault init` subcommand, or
   a combination of manual steps documented in the README? Research
   leaned toward manual steps for v1 (`niwa vault import` is deferred),
   but a guided walkthrough might be worth it for onboarding.
 
-- **Q-7 `team_only` enforcement layer.** Is violation caught at
+- **Q-4 `team_only` enforcement layer.** Is violation caught at
   parse time (static check against the committed personal overlay) or
   at materialize time (runtime check when resolving)? Static is
   cleaner but requires `niwa status` to load the team config's
   `team_only` list, which means remote read of team repo. Runtime is
   always available.
 
-- **Q-8 Sign-off stakeholders.** Does this PRD need explicit review
+- **Q-5 Sign-off stakeholders.** Does this PRD need explicit review
   from anyone beyond the niwa maintainer before transitioning to
   Accepted — e.g., security-minded community members, the
   `tsukumogami/tsuku` ecosystem maintainers, or contributors with
