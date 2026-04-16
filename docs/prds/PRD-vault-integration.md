@@ -138,7 +138,7 @@ requirements this PRD enumerates:
 | Per-org personal secret scoping | R4, R5, R6, US-3, D-2 |
 | New-member bootstrap is fast | US-2 (two-path bootstrap), R1 (CLI-exec interface means no niwa-specific auth bootstrap). Measurement protocol deferred to the design doc. |
 | Apply-time resolution imperceptible for typical workspaces | R16 (re-resolve on every apply), R1 (interface allows session caching inside provider CLIs). Benchmark harness deferred to the design doc. |
-| Zero new leak classes | R21–R30 (the "never leaks" invariants) |
+| Zero new leak classes | R21–R31 (the "never leaks" invariants, including override visibility) |
 | Pluggable backend from v1 | R1, D-1 |
 
 ## User Stories
@@ -593,7 +593,7 @@ precise enough to make them binary pass/fail requirements; the
 design doc will define concrete benchmarks when the implementation
 exists to benchmark.)
 
-### Security Requirements (the 10 "never leaks" invariants)
+### Security Requirements (the 11 "never leaks" invariants)
 
 **R21 (INV-NO-ARGV).** No niwa subcommand accepts a secret value on
 argv, flags, or environment variables that would appear in shell
@@ -666,6 +666,28 @@ of a single command invocation.
 `niwa apply` on a public-remote config repo with plaintext env values
 and a vault configured MUST fail unless the user explicitly overrides
 with `--allow-plaintext-secrets` (NOT a default-friendly flag).
+
+**R31 (INV-OVERRIDE-VISIBILITY).** When the personal overlay shadows a
+team-declared vault provider (R12) or a key that appears in the team
+config's `[env.vars]` / `[claude.env.vars]`, niwa MUST surface the
+shadow so the user can detect unexpected overrides (a compromised
+personal overlay repo silently replacing a team provider is otherwise
+invisible). Concrete requirements:
+
+- `niwa apply` MUST emit a structured "shadowed" diagnostic to
+  stderr naming each overridden provider or key and identifying
+  `personal-overlay` as the effective source layer.
+- `niwa status` MUST include a shadowed-count summary in its output
+  (e.g., "3 keys shadowed by personal overlay").
+- `niwa status --audit-secrets` MUST flag every shadowed team key in
+  its output so the user can audit for unexpected shadowing.
+
+The diagnostic names the provider or key and the source layer. It
+MUST NOT print the shadowed or shadowing values (R22 redaction still
+applies). A user who legitimately overrides sees the noise and
+confirms it's theirs; a user whose overlay has been tampered with
+sees shadowing they didn't expect and has a concrete diagnostic to
+investigate.
 
 **Deferred invariants.** An earlier draft included
 `INV-EXPLICIT-SUBPROCESS-ENV` (niwa builds child process env
@@ -852,6 +874,19 @@ bypassing team-declared requirements.
   proceeds under the same conditions with a loud warning.
 - [ ] A functional test confirms no argv accepts a secret value on any
   subcommand.
+- [ ] A personal overlay shadowing a team-declared `[env.vars]` key
+  produces a stderr diagnostic during `niwa apply` that names the key
+  and identifies `personal-overlay` as the effective source layer.
+  The diagnostic MUST NOT print the shadowed or shadowing values.
+- [ ] A personal overlay shadowing a team-declared vault provider via
+  R12 (same provider name declared in both layers) produces a stderr
+  diagnostic during `niwa apply` that names the provider and the
+  source layer.
+- [ ] `niwa status` output includes a shadowed-count summary when a
+  personal overlay shadows any team-declared provider or `[env.vars]`
+  key.
+- [ ] `niwa status --audit-secrets` flags every shadowed team key in
+  its output.
 
 ### Audit and Migration
 
