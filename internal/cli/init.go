@@ -190,7 +190,10 @@ func runInit(cmd *cobra.Command, args []string) error {
 
 	// Build the instance state to persist. Always write when any state flag is
 	// set; a missing state file is fine (apply will create it later).
-	state := buildInitState(cmd, mode, source)
+	state, stateErr := buildInitState(cmd, mode, source)
+	if stateErr != nil {
+		return stateErr
+	}
 	if state != nil {
 		if saveErr := workspace.SaveState(cwd, state); saveErr != nil {
 			fmt.Fprintf(os.Stderr, "warning: could not write instance state: %v\n", saveErr)
@@ -271,12 +274,13 @@ func bootstrapCommandFor(kind string) string {
 }
 
 // buildInitState constructs an InstanceState for the flags that require
-// pre-apply state (--skip-global, --no-overlay, --overlay). Returns nil when
-// no state flags were set so that no state file is written.
-func buildInitState(cmd *cobra.Command, mode initMode, source string) *workspace.InstanceState {
+// pre-apply state (--skip-global, --no-overlay, --overlay). Returns (nil, nil)
+// when no state flags were set so that no state file is written. Returns a
+// non-nil error when an explicit --overlay clone fails (hard error by design).
+func buildInitState(cmd *cobra.Command, mode initMode, source string) (*workspace.InstanceState, error) {
 	needsState := initSkipGlobal || initNoOverlay || initOverlay != ""
 	if !needsState {
-		return nil
+		return nil, nil
 	}
 
 	state := &workspace.InstanceState{
@@ -289,17 +293,14 @@ func buildInitState(cmd *cobra.Command, mode initMode, source string) *workspace
 		state.NoOverlay = true
 
 	case initOverlay != "":
+		// --overlay is explicit user intent: clone failure is a hard error.
 		overlayDir, err := config.OverlayDir(initOverlay)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "warning: could not determine overlay directory: %v\n", err)
-			break
+			return nil, fmt.Errorf("could not determine overlay directory: %w", err)
 		}
 		_, cloneErr := config.CloneOrSyncOverlay(initOverlay, overlayDir)
 		if cloneErr != nil {
-			fmt.Fprintf(cmd.ErrOrStderr(), "error: overlay clone failed: %v\n", cloneErr)
-			// Return a partial state without overlay fields so the caller
-			// can still persist skip-global etc., but signal failure.
-			break
+			return nil, fmt.Errorf("overlay clone failed: %w", cloneErr)
 		}
 		sha, shaErr := config.HeadSHA(overlayDir)
 		if shaErr != nil {
@@ -319,11 +320,14 @@ func buildInitState(cmd *cobra.Command, mode initMode, source string) *workspace
 					firstTime, cloneErr := config.CloneOrSyncOverlay(conventionURL, overlayDir)
 					if cloneErr != nil {
 						if firstTime {
-							// Inaccessible — print note and skip silently.
+							// Inaccessible on first attempt — print note and skip silently.
+							// conventionURL is already derived from DeriveOverlayURL(source),
+							// so it is the well-formed shorthand (e.g. acme/dot-niwa-overlay),
+							// not the raw source URL with "-overlay" appended.
 							fmt.Fprintf(cmd.OutOrStdout(), "Note: no companion overlay repository found (%s).\n", conventionURL)
-							fmt.Fprintf(cmd.OutOrStdout(), "Workspace publishers can create a companion %s-overlay repository to provide additional configuration.\n", source)
+							fmt.Fprintf(cmd.OutOrStdout(), "Workspace publishers can create a companion %s repository to provide additional configuration.\n", conventionURL)
 						}
-						// firstTime=false errors are non-fatal at init time as well (no state written).
+						// firstTime=false errors are non-fatal at init time (no state written).
 					} else {
 						sha, shaErr := config.HeadSHA(overlayDir)
 						if shaErr != nil {
@@ -337,7 +341,7 @@ func buildInitState(cmd *cobra.Command, mode initMode, source string) *workspace
 		}
 	}
 
-	return state
+	return state, nil
 }
 
 // printSuccess outputs a success message with next steps.
