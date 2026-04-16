@@ -367,47 +367,47 @@ any public niwa workspace that declares a team vault), I want
 `niwa apply` to work without me needing access to the team's vault
 provider.
 
-Three distinct paths, all expected to work without changes to the team
-config:
+Two paths, both expected to work without changes to the team config:
 
-1. **Replace the team provider in my personal overlay.** In my
-   personal `dot-niwa/niwa.toml`:
-   ```toml
-   [workspaces.tsukumogami.vault.providers.team]
-   kind = "sops"
-   config = ".sops.yaml"
-   ```
-   My local sops store now answers what the team's Infisical project
-   would have answered. Vault refs in the team config
-   (`vault://team/...`) resolve against my backend without any edit
-   to the team config itself. (This rides R12's per-provider-name
-   last-writer-wins merge in `GlobalOverride.Vault.Providers`.)
-
-2. **Override individual secret refs at the key level.** In my
+1. **Override individual secret refs at the key level.** In my
    personal overlay:
    ```toml
-   [workspaces.tsukumogami.env.vars]
-   ANTHROPIC_API_KEY = "vault://personal/my-own-anthropic-key"
-   # Or, for a throwaway test session (personal repo is private, OK):
-   # OPENAI_API_KEY = "sk-my-personal-key"
+   [workspaces.tsukumogami.env.secrets]
+   ANTHROPIC_API_KEY = "vault://my-own-anthropic-key"
+   OPENAI_API_KEY    = "vault://my-own-openai-key"
    ```
    Personal wins per R7. The team-supplied ref is shadowed only for
-   the keys I redeclare.
+   the keys I redeclare. Each override is visible in R31's
+   override-visibility diagnostic, so unexpected shadowing is
+   auditable.
 
-3. **Skip secrets I don't need.** If my PR only touches docs and
+2. **Skip secrets I don't need.** If my PR only touches docs and
    doesn't exercise code paths that hit the team vault's API:
    ```
    niwa apply --allow-missing-secrets
    ```
    Unresolved refs become empty strings with stderr warnings.
 
+**Why there's no "replace the whole team provider" path.** An earlier
+draft included a path where the personal overlay declared
+`[workspaces.<scope>.vault.providers.team]` to swap the team's
+provider in bulk. This was dropped because (a) it contradicts D-9's
+file-local provider scoping (the personal overlay would be using a
+name the team config declared), and (b) it opens a supply-chain
+attack surface where a compromised personal overlay silently
+redirects ALL team vault refs via a single provider swap. Per-key
+overrides (path 1) are slightly more verbose for the contributor
+(one line per key instead of one provider declaration), but each
+override is individually visible and bounded. See R12 for the
+enforcement rule.
+
 The default failure mode when a contributor runs `niwa apply` without
-any of the three above must be a clear, actionable error: it MUST name
-the provider that failed to resolve (e.g., "provider `team` is not
-accessible: Infisical auth required") and MUST suggest the three
-paths above with copy-pasteable pointers. A contributor must not get
-a cryptic "vault reference failed" and have to reverse-engineer the
-override mechanics.
+either path must be a clear, actionable error: it MUST name the
+provider that failed to resolve (e.g., "provider is not accessible:
+Infisical auth required") and MUST suggest the two paths above with
+copy-pasteable pointers. A contributor must not get a cryptic
+"vault reference failed" and have to reverse-engineer the override
+mechanics.
 
 Constraint: keys the team has locked via `team_only` (R8) cannot be
 shadowed at the personal layer even with plaintext. This is by
@@ -579,9 +579,16 @@ or a warning.
 
 **R12. `GlobalOverride.Vault` field.** The `GlobalOverride` struct
 MUST support an optional `Vault *VaultRegistry` field so a personal
-config can declare its own providers. Merge semantics: per-provider-
-name last-writer-wins (personal can add new providers or replace a
-team-declared provider for the same name).
+overlay can declare its own providers. Merge semantics: the personal
+overlay can **add** new provider names that the team config didn't
+declare; it **cannot replace** a team-declared provider name. If the
+personal overlay declares a provider whose name matches one already
+declared in the team config, `niwa apply` MUST fail with an error:
+*"personal overlay cannot override team-declared provider `<name>`
+— use per-key overrides in `[env.secrets]` instead."* This prevents
+bulk-redirection of all team vault references via a single provider
+swap (a supply-chain attack surface flagged during review) while
+preserving per-key override flexibility (R7).
 
 **R13. `niwa status --audit-secrets` subcommand.** niwa MUST provide
 a command that enumerates all `*.secrets` tables (`[env.secrets]`,
@@ -935,30 +942,26 @@ bypassing team-declared requirements.
   against a team config declaring a team provider, the error message
   names the specific provider and key, distinguishes provider-auth
   failure from key-not-found, and includes copy-pasteable pointers to
-  the three override paths (US-9).
-- [ ] A contributor can replace the team provider entirely by
-  declaring `[workspaces.<scope>.vault.providers.team]` in their
-  personal overlay with a different `kind`; subsequent
-  `niwa apply` resolves team refs via the overlay's provider without
-  any edit to the team config.
+  the two override paths (US-9).
+- [ ] A personal overlay declaring a provider with the SAME name as a
+  team-declared provider causes `niwa apply` to fail with an error
+  naming the collision and pointing to per-key overrides instead
+  (R12 enforcement).
 - [ ] A contributor can shadow an individual team vault reference by
-  declaring a literal or a different `vault://` URI for the same key
-  in their personal overlay's `[workspaces.<scope>.env.vars]`
-  (et al.); personal value wins per R7.
+  declaring a different `vault://` URI or a literal for the same key
+  in their personal overlay's `[workspaces.<scope>.env.secrets]`;
+  personal value wins per R7.
 - [ ] A `team_only` lock (R8) surfaces as a distinct error from
   provider-auth failure and is NOT bypassable by the contributor's
   personal overlay.
 
-### Backends (v1: sops + Infisical)
+### Backends (v1: Infisical; v1.1: sops)
 
-- [ ] `kind = "sops"` with `config = ".sops.yaml"` resolves secrets from
-  sops-encrypted files in the config repo.
 - [ ] `kind = "infisical"` with `project = "<proj-id>"` resolves secrets
   from Infisical Cloud or self-hosted Infisical.
-- [ ] Each backend can be used standalone (team uses sops, or team uses
-  Infisical; users' personal overlays may mix backends).
-- [ ] Adding a new backend requires implementing a single Go interface
-  and registering it — no changes to the resolver or schema.
+- [ ] Adding a new backend (e.g., sops for v1.1) requires implementing
+  a single Go interface and registering it — no changes to the
+  resolver or schema.
 
 ### Materialization
 
