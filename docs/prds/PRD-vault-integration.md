@@ -524,9 +524,12 @@ R10 (`--allow-missing-secrets`) and R11 (`?required=false`) are the
 opt-outs.
 
 **R10. `--allow-missing-secrets` CLI flag.** `niwa apply` MUST accept
-an `--allow-missing-secrets` flag that downgrades unresolved references
-to empty strings with stderr warnings. Intended for debug and CI
-fallback cases.
+an `--allow-missing-secrets` flag that downgrades unresolved
+`vault://` references to empty strings. Each downgraded reference
+MUST produce a stderr warning naming the key and the provider that
+failed, so that silent identity-pivot (e.g., an empty
+`AWS_ACCESS_KEY_ID` falling through to ambient credentials) doesn't
+go unnoticed. Intended for debug and CI fallback cases.
 
 **R11. Per-reference `?required=false` query parameter.** A vault URI
 MAY include `?required=false` to mark the reference as optional.
@@ -548,16 +551,23 @@ risk), or `empty`, and prints a table. Exits non-zero if any
 tables are excluded from the audit because they are non-sensitive by
 declaration.
 
-**R14. Public-repo plaintext-secret guardrail.** When the workspace
-config's source git remote resolves to a public GitHub repository AND
-a vault is configured AND any value in `[env.secrets]` or
-`[claude.env.secrets]` in the team config is NOT a `vault://`
+**R14. Public-repo plaintext-secret guardrail.** When ANY configured
+git remote of the workspace config repo resolves to a public GitHub
+repository AND a vault is configured AND any value in `[env.secrets]`
+or `[claude.env.secrets]` in the team config is NOT a `vault://`
 reference (i.e., a plaintext secret committed to a public repo),
 `niwa apply` MUST refuse to proceed with an error listing the
-offending keys and recommending migration to vault refs. The
-guardrail checks only `*.secrets` tables — `*.vars` tables are
-non-sensitive by declaration and are never flagged. Detection uses
-the git remote URL.
+offending keys and recommending migration to vault refs.
+
+Detection MUST enumerate ALL configured git remotes (via
+`git remote -v`), not just `origin`. A dev whose `origin` points at
+a private fork but whose `upstream` points at a public repo MUST
+still be caught. Newly added remotes are re-checked on every apply
+(the check is cheap). v1 detection is limited to GitHub HTTPS/SSH
+URL patterns (see Out of Scope for non-GitHub hosts).
+
+The guardrail checks only `*.secrets` tables — `*.vars` tables are
+non-sensitive by declaration and are never flagged.
 
 **R15. `ManagedFile.SourceFingerprint` field.** The instance state
 MUST carry a `SourceFingerprint` per managed file, distinct from the
@@ -709,10 +719,18 @@ disk between commands. Provider CLIs may cache their own auth sessions
 (out of scope); niwa does not store secret values beyond the lifetime
 of a single command invocation.
 
-**R30 (INV-PUBLIC-REPO-GUARDRAIL).** The R14 guardrail is a hard block:
-`niwa apply` on a public-remote config repo with plaintext env values
-and a vault configured MUST fail unless the user explicitly overrides
-with `--allow-plaintext-secrets` (NOT a default-friendly flag).
+**R30 (INV-PUBLIC-REPO-GUARDRAIL).** The R14 guardrail is a hard
+block: `niwa apply` on a public-remote config repo with plaintext
+`*.secrets` values and a vault configured MUST fail unless the user
+explicitly overrides with `--allow-plaintext-secrets` (NOT a
+default-friendly flag).
+
+**The `--allow-plaintext-secrets` flag is strictly one-shot.** It
+affects only the current `niwa apply` invocation. It MUST NOT write
+state, persist to config, or be remembered across invocations. Every
+`niwa apply` re-evaluates the guardrail from scratch. A user who
+needs to bypass for two applies runs the flag twice; there is no
+"remember my answer" behavior.
 
 **R31 (INV-OVERRIDE-VISIBILITY).** When the personal overlay shadows a
 team-declared vault provider (R12) or a key that appears in the team
@@ -927,11 +945,17 @@ bypassing team-declared requirements.
   any error wrapping path, under a test that deliberately induces
   errors.
 - [ ] A unit test confirms niwa never calls `os.Setenv` during apply.
-- [ ] A functional test confirms `niwa apply` on a public-remote config
-  with plaintext values and a vault configured fails without
-  `--allow-plaintext-secrets`.
+- [ ] A functional test confirms `niwa apply` on a config repo with a
+  public-matching remote (not necessarily `origin`) and plaintext
+  `*.secrets` values fails without `--allow-plaintext-secrets`.
+- [ ] The guardrail fires when ANY remote is public, not just `origin`
+  — a test with `origin` private and `upstream` public triggers the
+  guardrail.
 - [ ] A functional test confirms `niwa apply --allow-plaintext-secrets`
   proceeds under the same conditions with a loud warning.
+- [ ] Running `niwa apply --allow-plaintext-secrets` once, then running
+  `niwa apply` again without the flag, re-triggers the guardrail
+  (the flag does not persist to state).
 - [ ] A functional test confirms no argv accepts a secret value on any
   subcommand.
 - [ ] A personal overlay shadowing a team-declared `[env.vars]` key
