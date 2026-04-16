@@ -41,4 +41,16 @@ merge runs, inverting the current parse → merge → materialize flow.
 - **Phase 4** (Architecture): complete — Solution Architecture,
   Implementation Approach (11 phases), and Consequences written.
   Frontmatter decision + rationale populated.
-- **Phase 5** (Security): next (mandatory).
+- **Phase 5** (Security): complete — Option 2 (document
+  considerations). Full review at
+  `wip/research/design_vault-integration_phase5_security.md`.
+  Security Considerations section written.
+- **Phase 6** (Final Review): next.
+
+## Security Review (Phase 5)
+**Outcome:** Option 2 — document considerations
+**Summary:** Design is substantively secure; all 11 PRD invariants
+(R21–R31) realized structurally. No architectural changes needed.
+Security Considerations section drafted with three forward-looking
+items (subprocess env hygiene, sops ProviderConfig path-safety,
+Redactor implementation notes).

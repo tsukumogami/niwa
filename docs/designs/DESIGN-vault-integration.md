@@ -1139,7 +1139,159 @@ Deliverables:
 
 ## Security Considerations
 
-Populated by Phase 5.
+This design implements the eleven "never leaks" invariants (R21–R31)
+enumerated in the PRD. The threat model and scope boundaries defined
+in PRD §"Threat Model" apply unchanged; this section documents how
+each invariant is realized, the residual risks niwa does not defend
+against (by design), and the small number of forward-looking concerns
+implementers must keep in mind.
+
+### Invariant Coverage
+
+| Invariant | Realized by |
+|-----------|-------------|
+| R21 (no-argv) | Infisical and sops subprocess invocations read auth from provider-CLI env/keychain, never from argv. Confirmed by Phase 5 and Phase 11 acceptance tests. |
+| R22 (redact-logs) | `secret.Value` opaque type (Decision 2) with formatters returning `***` for every standard Go emission path (`String`, `GoString`, `Format`, `MarshalJSON`, `MarshalText`, `GobEncode`). `secret.Error` + context-scoped `Redactor` scrub error-chain interpolation including captured provider-CLI stderr via `vault.ScrubStderr`. |
+| R23 (no-config-writeback) | Resolver is a pure function `(*WorkspaceConfig) → (*WorkspaceConfig)` returning a new struct; no filesystem write into `configDir`. |
+| R24 (file-mode 0o600) | `EnvMaterializer`, `SettingsMaterializer`, `FilesMaterializer` write `0o600` unconditionally (Phase 6). Fixes the pre-existing `0o644` bug. |
+| R25 (.local + .gitignore) | Materializer filename convention + `niwa create` idempotent `.gitignore` maintenance. |
+| R26 (no CLAUDE.md interpolation) | Parser rejects `vault://` URIs in `[claude.content.*]` at load time. |
+| R27 (no status content) | `niwa status` reads `state.json` only; renders `path + status` plus non-secret `Provenance` strings. |
+| R28 (no process env publication) | No `os.Setenv` call in any code path. Secrets flow into the materializer's file-write path and nowhere else. |
+| R29 (no disk cache) | `Resolver.CloseAll` at pipeline step 12; resolved secrets exist in process memory only for the duration of a single `niwa apply`. |
+| R30 (public-repo guardrail) | `guardrail.CheckGitHubPublicRemoteSecrets` at pipeline step 7; one-shot `--allow-plaintext-secrets` flag with no state persistence. |
+| R31 (override-visibility) | `DetectShadows` + `DetectProviderShadows` persist shadow records in `state.json`; stderr diagnostic at apply time; `niwa status` summary line; `--audit-secrets` SHADOWED column. |
+
+Additionally, `SourceEntry.VersionToken` and `SourceEntry.Provenance`
+fields (Decision 4) are non-secret by contract — the design forbids
+backends from deriving these fields from decrypted secret bytes.
+`Shadow` struct fields are all strings (names, paths, layer labels);
+the type must never gain a `secret.Value`-typed field.
+
+### Explicit Non-Scope
+
+niwa is a developer-tool workspace manager, not a zero-trust vault
+client. The following adversaries are out of scope per PRD §"Threat
+Model":
+
+- **Malicious same-user processes.** Can read `0o600` files the user
+  owns; niwa does not encrypt state or materialized files at rest.
+- **Root attackers or compromised kernel.** Out of scope.
+- **Physical laptop theft without FDE.** Out of scope.
+- **Compromised provider CLI binary** (trojan `infisical` on PATH,
+  unsigned `sops` binary, etc.). niwa invokes provider CLIs via
+  standard PATH lookup and trusts their stdout output. We do not
+  verify binary signatures, pin versions, or lock the subprocess
+  PATH.
+- **Compromised vault service or credentials.** niwa's security story
+  assumes the provider backend is honest and the user's vault
+  credentials are uncompromised.
+
+### Explicit In-Scope Defenses
+
+niwa actively prevents the following accidents:
+
+- **Accidental `git commit` of plaintext secrets in a public config
+  repo** — R14/R30 guardrail enumerates ALL remotes (not just
+  `origin`), regex-matches GitHub HTTPS/SSH URL patterns, and blocks
+  apply when `[env.secrets]` or `[claude.env.secrets]` contains a
+  non-`vault://` value. Bypass requires explicit one-shot
+  `--allow-plaintext-secrets`.
+- **Accidental materialization under world-readable permissions** —
+  `0o600` is unconditional.
+- **Accidental inclusion in CLAUDE.md** — parser-level rejection.
+- **Accidental disclosure via logs, stderr, error chains, or
+  provider-CLI stderr** — structural via `secret.Value`,
+  `secret.Error`, and the `Redactor`.
+- **Silent personal-overlay supply-chain attack** — R12 forbids
+  personal overlays from replacing team-declared provider NAMES
+  (hard error at apply time); R31 surfaces per-key shadowing at
+  three diagnostic surfaces so a compromised overlay cannot silently
+  redirect individual secrets.
+
+### Guardrail Detection Boundary
+
+The public-repo guardrail uses URL pattern matching, not authenticated
+probes. Explicit boundaries:
+
+- **Detects:** `github.com` HTTPS and SSH URLs across all remotes
+  reported by `git remote -v`.
+- **Does NOT detect:** GitHub Enterprise Server hosts, GitLab,
+  Bitbucket, Gitea, self-hosted git at arbitrary hosts. A repo on
+  `github.mycorp.com` or any non-`github.com` host will NOT trigger
+  the guardrail even if public. Non-GitHub host coverage is tracked
+  as deferred in the PRD Out-of-Scope list.
+- **No git working tree:** If `git -C <configDir> remote -v` errors
+  (no `.git`, missing binary, corrupted refs), the guardrail emits a
+  warning and proceeds. Users extracting a config tarball outside a
+  git clone bypass the guardrail by construction; the guardrail's
+  purpose is to prevent future commits, which a non-git tree cannot
+  perform.
+
+### Redactor Implementation Notes
+
+The `Redactor` scrubs strings by replacing registered fragments with
+`***`. Two implementation notes affect correctness (not security per
+se), but matter for error-message usability:
+
+- **Minimum fragment length.** Short secrets (< 6 bytes) have high
+  collision rates with ordinary English/log text. The `Redactor`
+  SHOULD skip registering fragments shorter than a safe threshold
+  and SHOULD NOT apply substring matching to such fragments.
+  Secrets that short should be rejected at resolution time with a
+  hard error.
+- **Fragment ordering.** Scrub longest fragments first to avoid a
+  substring of fragment A shadowing fragment B.
+- **Whole-token matching.** Consider word-boundary or
+  base64/hex-alphabet-boundary matching to prevent false positives
+  in user-facing error text. This is a quality bar for the
+  Redactor's acceptance tests.
+
+### Forward-Looking: Explicit Subprocess Env
+
+The PRD deferred `INV-EXPLICIT-SUBPROCESS-ENV` because niwa today
+carries no secret-bearing env. This design changes that: the vault
+resolver holds `secret.Value`s in process memory during apply. The
+subprocesses niwa spawns during that window (provider CLIs, `git
+remote -v`) inherit `os.Environ()` by default. Three invariants
+implementers MUST honor:
+
+1. **No `os.Setenv(secret)`.** Ever. Secret bytes never enter the
+   niwa process's own environment. (R28.)
+2. **No injection of secrets into subprocess env.** Provider CLIs
+   obtain their auth from the user's shell env or keychain, not
+   from niwa-built env. niwa does not forward `secret.Value` bytes
+   into `exec.Cmd.Env`.
+3. **Inherited env is passed through unchanged.** `exec.Cmd.Env =
+   nil` (inherit) is the default; do not filter, do not extend with
+   secrets.
+
+A future feature that spawns Claude Code or hook scripts with
+materialized secrets will need to revisit this section and
+potentially promote these points to a formal invariant with
+acceptance tests.
+
+### Forward-Looking: Backend `ProviderConfig` Safety
+
+The v1.1 sops backend and any future backend that reads identity or
+key material from a filesystem path MUST NOT accept that path from
+team-declared provider config. Identity file paths belong in
+personal-overlay config or environment variables only. This prevents
+a malicious team config from redirecting sops at an attacker-chosen
+path on the user's machine. When the sops backend lands in v1.1, its
+`ProviderConfig` schema MUST reject `identity_file` / `key_file` /
+equivalent fields from team-layer sources.
+
+### Residual Risks Accepted
+
+- Provider CLI binary integrity (user responsibility).
+- Same-user process memory inspection (out of scope per threat
+  model; covered by OS user isolation).
+- GitHub Enterprise public repos (deferred; same bucket as GitLab,
+  Bitbucket).
+- Users who bypass the guardrail with `--allow-plaintext-secrets`
+  and then `git push` (the flag is explicit, one-shot, loud; this is
+  user agency, not a niwa bug).
 
 ## Consequences
 
