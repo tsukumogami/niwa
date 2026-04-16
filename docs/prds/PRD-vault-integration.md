@@ -529,7 +529,12 @@ config MAY set `[workspace].vault_scope = "<string>"` to override
 the implicit source-org scoping. Multi-source workspaces
 (`len(ws.Sources) > 1`) MUST set this field or niwa fails to apply.
 Zero-source workspaces MAY set this field for personal overlay
-targeting.
+targeting. When a zero-source workspace has no `vault_scope` set,
+`niwa apply` MUST emit a warning ("workspace has no sources and no
+vault_scope — personal overlay vault resolution skipped") and
+proceed with team-only resolution. Team-supplied secrets still
+resolve normally; only user-supplied secrets from the personal
+overlay's per-workspace block are affected.
 
 **R6. Resolution chain.** When resolving a `vault://` reference, niwa
 MUST consult vault providers in this order: personal-scoped (from
@@ -1361,14 +1366,6 @@ Questions to resolve before the PRD transitions to Accepted:
 
 
 
-- **Q-2 Source-org detection for workspace with no sources.** R5
-  already specifies that zero-source workspaces *may* set
-  `vault_scope` explicitly for personal overlay targeting. The open
-  question is narrower: when zero-source AND no `vault_scope`, should
-  niwa apply silently fall back to "no personal overlay resolution"
-  (treat as team-only), or warn that the workspace has no scope and
-  personal refs will be unresolvable? Leaning warn — silent fallback
-  hides a real misconfiguration.
 
 - **Q-3 Migration UX details.** What does the first-time migration
   walkthrough look like? A dedicated `niwa vault init` subcommand, or
