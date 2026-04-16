@@ -3,7 +3,7 @@
   "design_doc": "docs/plans/PLAN-vault-integration.md",
   "branch": "docs/vault-integration",
   "pr_number": 52,
-  "integrity_hash": "sha256:85196002cb6f45eae3e5bd21a03683481ba15f4ae4531ffea8d1e66562875f24",
+  "integrity_hash": "sha256:13a004ea12d94850d5e6de145461b555881361039e8c5db985e67f56dca1ad97",
   "issues": [
     {
       "number": 1,
@@ -430,8 +430,8 @@
     {
       "number": 7,
       "title": "feat(workspace): SourceFingerprint and per-source tuples in state.json",
-      "status": "scrutinized",
-      "ci_status": "pending",
+      "status": "completed",
+      "ci_status": "passed",
       "ci_fix_attempts": 0,
       "issue_type": "code",
       "dependencies": [],
@@ -463,19 +463,76 @@
           }
         ]
       },
+      "reviewer_results": {
+        "issue": 7,
+        "round": 1,
+        "reviewers": [
+          {
+            "role": "pragmatic",
+            "blocking_count": 0,
+            "non_blocking_count": 3,
+            "detail_file": "wip/research/implement-vault-integration-issue_7_pragmatic.md"
+          },
+          {
+            "role": "architect",
+            "blocking_count": 0,
+            "non_blocking_count": 3,
+            "detail_file": "wip/research/implement-vault-integration-issue_7_architect.md"
+          },
+          {
+            "role": "maintainer",
+            "blocking_count": 0,
+            "non_blocking_count": 1,
+            "detail_file": "wip/research/implement-vault-integration-issue_7_maintainer.md"
+          }
+        ],
+        "resolution": "No blockers — all three reviewers approved. 7 non-blocking advisories deferred (docstring drift, coverage gaps, display-label cleanup, brittle candidate-path walk).",
+        "advisory_deferred": [
+          "pragmatic: recomputeChangedPlaintextSources comment mentions 3 candidates but code uses 2; missing-file branch coverage; synthesized-SourceID skip",
+          "architect: configDir not threaded into ComputeStatus; hook SourceID display shows raw absolute paths; looksLikePath colon heuristic",
+          "maintainer: CLI status.go uses raw 'vault'/'plaintext' literals instead of workspace.SourceKind* constants"
+        ]
+      },
+      "qa_skipped": true,
       "testable_scenarios": []
     },
     {
       "number": 8,
       "title": "feat(workspace): shadow detection and diagnostics across apply/status",
-      "status": "pending",
+      "status": "scrutinized",
       "ci_status": "pending",
       "ci_fix_attempts": 0,
-      "issue_type": "",
+      "issue_type": "code",
       "dependencies": [],
-      "commits": [],
-      "agent_type": "",
-      "summary": null,
+      "commits": [
+        "5ffd02adbb00b899a32c7e4e4e90e7d182fefa62",
+        "5ffd02adbb00b899a32c7e4e4e90e7d182fefa62",
+        "553ca1c24e20018c98e644d3d54db9067787a26d"
+      ],
+      "agent_type": "coder",
+      "summary": {
+        "narrative": "",
+        "files_changed": [
+          "internal/workspace/shadows.go",
+          "internal/workspace/shadows_test.go",
+          "internal/workspace/apply.go",
+          "internal/workspace/apply_vault_test.go",
+          "internal/workspace/state.go",
+          "internal/vault/shadows.go",
+          "internal/vault/shadows_test.go",
+          "internal/cli/status.go",
+          "internal/cli/status_test.go"
+        ],
+        "tests_added": 15,
+        "key_decisions": "Issue 8 core + rework: removed renderShadowedColumn and TestRenderShadowedColumn (Issue 10 scope leak); ownership note added to Shadow docstring",
+        "requirements_map": [
+          {
+            "ac": "Issue 8 full AC list + scope cleanup",
+            "status": "implemented",
+            "evidence": "see coder returns"
+          }
+        ]
+      },
       "testable_scenarios": []
     },
     {
