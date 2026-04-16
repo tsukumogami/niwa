@@ -3,7 +3,7 @@
   "design_doc": "docs/plans/PLAN-vault-integration.md",
   "branch": "docs/vault-integration",
   "pr_number": 52,
-  "integrity_hash": "sha256:ea8b6bc2b7a23ecdb4761e6e337c4e49f8da948c96b20c7bac563cc01c3b94ae",
+  "integrity_hash": "sha256:c160650d51e68707ffd831ec9be94daae2ece29dda21b7ca04ba55cdee6490df",
   "issues": [
     {
       "number": 1,
@@ -79,8 +79,8 @@
     {
       "number": 2,
       "title": "feat(vault): provider interface, registry, factory, and fake backend",
-      "status": "scrutinized",
-      "ci_status": "pending",
+      "status": "completed",
+      "ci_status": "passed",
       "ci_fix_attempts": 0,
       "issue_type": "code",
       "dependencies": [],
@@ -116,19 +116,82 @@
           }
         ]
       },
+      "reviewer_results": {
+        "issue": 2,
+        "round": 1,
+        "reviewers": [
+          {
+            "role": "pragmatic",
+            "blocking_count": 0,
+            "non_blocking_count": 4,
+            "detail_file": "wip/research/implement-vault-integration-issue_2_pragmatic.md"
+          },
+          {
+            "role": "architect",
+            "blocking_count": 0,
+            "non_blocking_count": 2,
+            "detail_file": "wip/research/implement-vault-integration-issue_2_architect.md"
+          },
+          {
+            "role": "maintainer",
+            "blocking_count": 1,
+            "non_blocking_count": 5,
+            "detail_file": "wip/research/implement-vault-integration-issue_2_maintainer.md"
+          }
+        ],
+        "resolution": "Maintainer B1 addressed in commit baf2e829b8c7342e9594f95e9fb0ae6355e5df9a: TestNotRegisteredInDefaultRegistry rewritten to probe vault.DefaultRegistry directly with rollback; added Registry.Unregister for test-only rollback; added TestRegistryUnregister covering round-trip, unknown-kind error, empty-kind error.",
+        "advisory_deferred": [
+          "pragmatic: fake.NewFactory() wraps empty struct; redundant strings.Contains(\"#\") + parsed.Fragment check; Bundle.CloseAll sort comment overstates benefit; knownProviderNames single-caller helper",
+          "architect: Source attribution when ProviderSpec.Source is empty; Factory.Open once-per-spec doc clarification",
+          "maintainer advisory: Bundle.CloseAll could use errors.Join; closed-provider error vs network-outage; Provider.Resolve references secret.Errorf without package pointer; typo in Registry.Build doc; ProviderSpec.Source equality caveat placement"
+        ]
+      },
+      "qa_skipped": true,
       "testable_scenarios": []
     },
     {
       "number": 3,
       "title": "feat(config): vault schema, env.vars/env.secrets split, MaybeSecret type",
-      "status": "pending",
+      "status": "scrutinized",
       "ci_status": "pending",
       "ci_fix_attempts": 0,
-      "issue_type": "",
+      "issue_type": "code",
       "dependencies": [],
-      "commits": [],
-      "agent_type": "",
-      "summary": null,
+      "commits": [
+        "bb1615e90532ecc0c3aec2e0e4ff79c75530a454",
+        "bb1615e90532ecc0c3aec2e0e4ff79c75530a454",
+        "3d437f3f87128c80f224c96b207ed6c88af9866a"
+      ],
+      "agent_type": "coder",
+      "summary": {
+        "narrative": "",
+        "files_changed": [
+          "internal/config/maybesecret.go",
+          "internal/config/maybesecret_test.go",
+          "internal/config/vault.go",
+          "internal/config/vault_test.go",
+          "internal/config/env_tables.go",
+          "internal/config/env_tables_test.go",
+          "internal/config/validate_vault_refs.go",
+          "internal/config/config.go",
+          "internal/config/config_test.go",
+          "internal/workspace/override.go",
+          "internal/workspace/override_test.go",
+          "internal/workspace/materialize.go",
+          "internal/workspace/materialize_test.go",
+          "internal/workspace/workspace_context.go",
+          "internal/workspace/scaffold.go"
+        ],
+        "tests_added": 29,
+        "key_decisions": "Issue 3 core + rework: B1 reserved keyword detection moved to post-decode pass using toml.MetaData.Keys() to emit path-aware errors; B2 named/anonymous registry shape mismatch now produces actionable errors listing declared providers and both fix paths; shape struct computed once per Parse",
+        "requirements_map": [
+          {
+            "ac": "Issue 3 full AC list + reviewer blockers B1 B2",
+            "status": "implemented",
+            "evidence": "see coder returns with per-AC test mapping"
+          }
+        ]
+      },
       "testable_scenarios": []
     },
     {

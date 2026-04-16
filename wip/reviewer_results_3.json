@@ -1,0 +1,16 @@
+{
+  "issue": 3,
+  "round": 1,
+  "reviewers": [
+    {"role": "pragmatic", "blocking_count": 0, "non_blocking_count": 3, "detail_file": "wip/research/implement-vault-integration-issue_3_pragmatic.md"},
+    {"role": "architect", "blocking_count": 0, "non_blocking_count": 2, "detail_file": "wip/research/implement-vault-integration-issue_3_architect.md"},
+    {"role": "maintainer", "blocking_count": 2, "non_blocking_count": 4, "detail_file": "wip/research/implement-vault-integration-issue_3_maintainer.md"}
+  ],
+  "resolution": "Both maintainer blockers addressed in commit 3d437f3: B1 reserved-keyword error now points to the sub-table user should use; B2 anonymous-vs-named URI mismatch error lists declared providers and both fix paths. Symmetric named-vs-anonymous error also added.",
+  "out_of_scope_finding_for_issue_4": "Architect flagged that internal/workspace/override.go doesn't merge override.Env.Secrets.Values — only Env.Vars is merged. This is a dormant merge gap surfaced by Issue 3's schema addition. Must be fixed in Issue 4 resolver/merge integration.",
+  "advisory_deferred": [
+    "pragmatic: VaultRegistry.IsEmpty() has no callers (speculative); redundant len check in coerceDescriptionMap; MaybeSecret.MarshalText unused",
+    "architect: MaybeSecret Plain XOR Secret not mechanically enforced (public fields); extractProviderName could route through vault.ParseRef",
+    "maintainer advisory: KnownProviderNames nil-safe call pattern; scaffold template visual separator; stale (Issue 4) pointer comments"
+  ]
+}
