@@ -77,7 +77,7 @@ func TestShowDetailView(t *testing.T) {
 		Created:        now,
 		LastApplied:    now,
 		ManagedFiles: []workspace.ManagedFile{
-			{Path: claudeMD, Hash: hash, Generated: now},
+			{Path: claudeMD, ContentHash: hash, Generated: now},
 		},
 		Repos: map[string]workspace.RepoState{
 			"app": {URL: "git@github.com:org/app.git", Cloned: true},

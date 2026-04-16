@@ -185,10 +185,45 @@ func showDetailView(cmd *cobra.Command, instanceRoot string) error {
 				displayPath = rel
 			}
 			fmt.Fprintf(out, "  %-40s %s\n", displayPath, f.Status)
+			// For stale files, print the changed sources with their
+			// old->new version tokens and provenance. Indent under
+			// the file line so the attribution is visually grouped.
+			for _, cs := range f.ChangedSources {
+				prefix := "vault"
+				if cs.Kind == workspace.SourceKindPlaintext {
+					prefix = "plaintext"
+				}
+				fmt.Fprintf(out, "    changed source: %s://%s\n", prefix, cs.SourceID)
+				if cs.Description != "" {
+					fmt.Fprintf(out, "      note: %s\n", cs.Description)
+				}
+				if cs.OldToken != "" || cs.NewToken != "" {
+					fmt.Fprintf(out, "      version: %s -> %s\n",
+						shortToken(cs.OldToken), shortToken(cs.NewToken))
+				}
+				if cs.Provenance != "" {
+					fmt.Fprintf(out, "      provenance: %s\n", cs.Provenance)
+				}
+			}
 		}
 	}
 
 	return nil
+}
+
+// shortToken returns a compact form of a version token for display.
+// Long opaque tokens (SHA-256 hex = 64 chars) are truncated to the
+// first 12 characters + an ellipsis; short or empty tokens are
+// returned verbatim. The truncation is display-only — the full token
+// remains in state.json.
+func shortToken(t string) string {
+	if t == "" {
+		return "(none)"
+	}
+	if len(t) > 14 {
+		return t[:12] + "..."
+	}
+	return t
 }
 
 // formatRelativeTime returns a human-readable relative time string.

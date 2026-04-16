@@ -42,7 +42,7 @@ func TestComputeStatusAllCloned(t *testing.T) {
 			"lib": {URL: "git@github.com:org/lib.git", Cloned: true},
 		},
 		ManagedFiles: []ManagedFile{
-			{Path: claudeMD, Hash: hash, Generated: now},
+			{Path: claudeMD, ContentHash: hash, Generated: now},
 		},
 	}
 
@@ -143,7 +143,7 @@ func TestComputeStatusDriftedFile(t *testing.T) {
 		LastApplied:    now,
 		Repos:          map[string]RepoState{},
 		ManagedFiles: []ManagedFile{
-			{Path: filePath, Hash: hash, Generated: now},
+			{Path: filePath, ContentHash: hash, Generated: now},
 		},
 	}
 
@@ -179,7 +179,7 @@ func TestComputeStatusRemovedFile(t *testing.T) {
 		LastApplied:    now,
 		Repos:          map[string]RepoState{},
 		ManagedFiles: []ManagedFile{
-			{Path: filePath, Hash: "sha256:abc", Generated: now},
+			{Path: filePath, ContentHash: "sha256:abc", Generated: now},
 		},
 	}
 

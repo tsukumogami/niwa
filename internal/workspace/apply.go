@@ -198,6 +198,16 @@ func (a *Applier) Apply(ctx context.Context, cfg *config.WorkspaceConfig, config
 func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, configDir, instanceRoot string, now time.Time, opts *pipelineOpts) (*pipelineResult, error) {
 	var writtenFiles []string
 	var allWarnings []string
+	// sourceTuples aggregates per-file source provenance across every
+	// materializer call. The key is the absolute on-disk path of the
+	// written file; the value is the ordered list of SourceEntry
+	// tuples reported by the materializer that produced it. Used in
+	// Step 7 below to populate ManagedFile.Sources and compute
+	// SourceFingerprint. Files not recorded here (content files,
+	// hook scripts, etc.) get empty Sources and an empty
+	// SourceFingerprint, which is semantically "no upstream to
+	// attribute" — drift for those files is pure content-hash drift.
+	sourceTuples := map[string][]SourceEntry{}
 
 	// Step 1: Discover repos from all sources.
 	allRepos, err := a.discoverAllRepos(ctx, cfg.Sources)
@@ -502,6 +512,7 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 			ConfigDir:     configDir,
 			DiscoveredEnv: discoveredEnv,
 			RepoIndex:     repoIndex,
+			SourceTuples:  sourceTuples,
 		}
 
 		claudeOn := ClaudeEnabled(effectiveCfg, cr.Repo.Name)
@@ -537,18 +548,29 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		}
 	}
 
-	// Step 7: Build managed files with hashes.
+	// Step 7: Build managed files with hashes and per-source
+	// provenance. Sources are populated by materializers via
+	// MaterializeContext.SourceTuples; files written outside the
+	// materializer pipeline (content files, workspace CLAUDE.md,
+	// etc.) have no recorded sources, which is fine — their drift
+	// check falls back to the ContentHash-only path.
 	managedFiles := make([]ManagedFile, 0, len(writtenFiles))
 	for _, path := range writtenFiles {
 		hash, err := HashFile(path)
 		if err != nil {
 			return nil, fmt.Errorf("hashing managed file %s: %w", path, err)
 		}
-		managedFiles = append(managedFiles, ManagedFile{
-			Path:      path,
-			Hash:      hash,
-			Generated: now,
-		})
+		sources := sourceTuples[path]
+		mf := ManagedFile{
+			Path:        path,
+			ContentHash: hash,
+			Generated:   now,
+			Sources:     sources,
+		}
+		if len(sources) > 0 {
+			mf.SourceFingerprint = ComputeSourceFingerprint(sources)
+		}
+		managedFiles = append(managedFiles, mf)
 	}
 
 	return &pipelineResult{
