@@ -152,11 +152,12 @@ confidential. Do not reference internal repo names in public issues or PRs.
 ### Setup: one-time steps for a team member with full access
 
 ```bash
-# 1. Register the private companion (once per machine)
-niwa config set private acmecorp/dot-niwa-private
-
-# 2. Initialize the workspace from the public config
+# 1. Initialize the workspace from the public config
 niwa init --from acmecorp/dot-niwa ~/acmecorp
+
+# 2. Register the private companion (machine-level, not workspace-specific)
+#    Stored in ~/.config/niwa/config.toml — applies to all workspaces on this machine
+niwa config set private acmecorp/dot-niwa-private
 
 # 3. Apply — clones all repos and installs CLAUDE context
 cd ~/acmecorp
