@@ -111,6 +111,8 @@ repos, regenerates content files, and cleans up repos removed from the config.
 |---------|-------------|
 | `niwa init [name]` | Create a new workspace with a scaffolded config |
 | `niwa init <name> --from <org/repo>` | Clone a shared workspace config from GitHub |
+| `niwa init <name> --from <org/repo> --overlay <repo>` | Use `<repo>` as the overlay instead of auto-discovering one (`--overlay` and `--no-overlay` are mutually exclusive) |
+| `niwa init <name> --from <org/repo> --no-overlay` | Skip overlay discovery entirely |
 | `niwa create [--name <name>]` | Create a new workspace instance |
 | `niwa apply [--instance <name>]` | Apply config to all instances (from root) or one (from instance) |
 | `niwa status [instance]` | Show workspace health: repos, drift, last applied |
