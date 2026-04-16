@@ -3,13 +3,13 @@
   "design_doc": "docs/plans/PLAN-vault-integration.md",
   "branch": "docs/vault-integration",
   "pr_number": 52,
-  "integrity_hash": "sha256:a8ef138256facc7a659fd2948a49be2af00c51474e487113cfaf2f8ac0cb4e09",
+  "integrity_hash": "sha256:ea8b6bc2b7a23ecdb4761e6e337c4e49f8da948c96b20c7bac563cc01c3b94ae",
   "issues": [
     {
       "number": 1,
       "title": "feat(secret): introduce secret.Value opaque type and error-wrap machinery",
-      "status": "scrutinized",
-      "ci_status": "pending",
+      "status": "completed",
+      "ci_status": "passed",
       "ci_fix_attempts": 0,
       "issue_type": "code",
       "dependencies": [],
@@ -41,19 +41,81 @@
           }
         ]
       },
+      "reviewer_results": {
+        "issue": 1,
+        "round": 1,
+        "reviewers": [
+          {
+            "role": "pragmatic",
+            "blocking_count": 1,
+            "non_blocking_count": 3,
+            "detail_file": "wip/research/implement-vault-integration-issue_1_pragmatic.md"
+          },
+          {
+            "role": "architect",
+            "blocking_count": 0,
+            "non_blocking_count": 2,
+            "detail_file": "wip/research/implement-vault-integration-issue_1_architect.md"
+          },
+          {
+            "role": "maintainer",
+            "blocking_count": 1,
+            "non_blocking_count": 5,
+            "detail_file": "wip/research/implement-vault-integration-issue_1_maintainer.md"
+          }
+        ],
+        "resolution": "Both blocking findings addressed in commit 804b6d9e6dc9fc83084bb2af7eaa9b85bd3b1d3b. Pragmatic F1 (hand-rolled replaceAll/indexOf) fixed by using strings.ReplaceAll. Maintainer B1 (Wrap errors.As drops outer layer) fixed by tightening to direct type assertion + regression test TestWrapDoesNotDropOuterLayer.",
+        "advisory_deferred": [
+          "pragmatic F2: Error.Redactor accessor has no production caller",
+          "pragmatic F3: bytes() duplicates Bytes",
+          "pragmatic F4: nil-receiver guards on *Error",
+          "architect non-blocking: secret.Bytes export concern (mitigated by internal/ module boundary)",
+          "maintainer A1-A5: documentation polish items (see detail file)"
+        ]
+      },
+      "qa_skipped": true,
       "testable_scenarios": []
     },
     {
       "number": 2,
       "title": "feat(vault): provider interface, registry, factory, and fake backend",
-      "status": "pending",
+      "status": "scrutinized",
       "ci_status": "pending",
       "ci_fix_attempts": 0,
-      "issue_type": "",
+      "issue_type": "code",
       "dependencies": [],
-      "commits": [],
-      "agent_type": "",
-      "summary": null,
+      "commits": [
+        "553d92c86ce6b70f8ae8b7be80ea1c70d2de68d5",
+        "553d92c86ce6b70f8ae8b7be80ea1c70d2de68d5",
+        "baf2e829b8c7342e9594f95e9fb0ae6355e5df9a"
+      ],
+      "agent_type": "coder",
+      "summary": {
+        "narrative": "",
+        "files_changed": [
+          "internal/vault/provider.go",
+          "internal/vault/registry.go",
+          "internal/vault/ref.go",
+          "internal/vault/errors.go",
+          "internal/vault/scrub.go",
+          "internal/vault/provider_test.go",
+          "internal/vault/registry_test.go",
+          "internal/vault/ref_test.go",
+          "internal/vault/errors_test.go",
+          "internal/vault/scrub_test.go",
+          "internal/vault/fake/fake.go",
+          "internal/vault/fake/fake_test.go"
+        ],
+        "tests_added": 41,
+        "key_decisions": "Issue 2 core + rework: fake backend not-registered-in-DefaultRegistry test now probes DefaultRegistry directly with rollback; added Registry.Unregister for test-only rollback",
+        "requirements_map": [
+          {
+            "ac": "Issue 2 full AC list + maintainer B1",
+            "status": "implemented",
+            "evidence": "see coder returns"
+          }
+        ]
+      },
       "testable_scenarios": []
     },
     {
