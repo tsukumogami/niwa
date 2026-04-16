@@ -9,6 +9,7 @@ import (
 
 	"github.com/tsukumogami/niwa/internal/config"
 	"github.com/tsukumogami/niwa/internal/github"
+	"github.com/tsukumogami/niwa/internal/guardrail"
 	"github.com/tsukumogami/niwa/internal/secret"
 	"github.com/tsukumogami/niwa/internal/vault"
 	"github.com/tsukumogami/niwa/internal/vault/resolve"
@@ -29,6 +30,17 @@ type Applier struct {
 	// The CLI --allow-missing-secrets flag (Issue 10) populates this
 	// field; default false preserves the strict-apply behavior.
 	AllowMissingSecrets bool
+
+	// AllowPlaintextSecrets threads through to the public-repo
+	// plaintext-secrets guardrail
+	// (internal/guardrail.CheckGitHubPublicRemoteSecrets). When true,
+	// the guardrail downgrades a blocking error to a loud stderr
+	// warning and allows the apply to proceed. One-shot by contract:
+	// no state is written, so the next apply re-runs the check. The
+	// CLI --allow-plaintext-secrets flag (Issue 10) populates this
+	// field; default false preserves the block-on-public-GitHub
+	// behavior.
+	AllowPlaintextSecrets bool
 }
 
 // NewApplier creates an Applier with the given GitHub client.
@@ -333,6 +345,20 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 	// here (not in the resolver) because only this call site has
 	// both bundles in scope.
 	if err := resolve.CheckProviderNameCollision(teamBundle, personalBundle); err != nil {
+		return nil, err
+	}
+
+	// R14/R30 enforcement: a workspace config repo with a public
+	// GitHub remote MUST NOT carry plaintext values in its *.secrets
+	// tables. The guardrail takes the pre-resolve cfg on purpose —
+	// the resolver auto-wraps plaintext secrets-table values into
+	// secret.Value (so downstream redaction/mode-0o600/Error wrapping
+	// still apply even under --allow-plaintext-secrets), which means
+	// the post-resolve cfg no longer distinguishes "was plaintext" from
+	// "was a vault ref". The original cfg still has Plain populated
+	// for plaintext entries and Secret populated only for vault-resolved
+	// ones, which is exactly the signal the guardrail reads.
+	if err := guardrail.CheckGitHubPublicRemoteSecrets(configDir, cfg, a.AllowPlaintextSecrets, os.Stderr); err != nil {
 		return nil, err
 	}
 
