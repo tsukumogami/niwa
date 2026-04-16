@@ -43,6 +43,12 @@ const (
 )
 
 // InstanceState represents the persisted state of a workspace instance.
+//
+// Shadows are persisted alongside ManagedFiles as part of schema v2:
+// they record the personal-overlay-vs-team key conflicts detected at
+// the last apply so offline `niwa status` can surface a summary line
+// without re-running the resolver. Empty when the last apply saw no
+// shadows.
 type InstanceState struct {
 	SchemaVersion  int                  `json:"schema_version"`
 	ConfigName     *string              `json:"config_name"`
@@ -55,6 +61,7 @@ type InstanceState struct {
 	LastApplied    time.Time            `json:"last_applied"`
 	ManagedFiles   []ManagedFile        `json:"managed_files"`
 	Repos          map[string]RepoState `json:"repos"`
+	Shadows        []Shadow             `json:"shadows,omitempty"`
 }
 
 // ManagedFile tracks a file written by niwa apply.

@@ -208,7 +208,44 @@ func showDetailView(cmd *cobra.Command, instanceRoot string) error {
 		}
 	}
 
+	// Personal-overlay shadow summary. Omitted when the last apply
+	// recorded zero shadows so the default happy-path output stays
+	// clean. Issue 10 wires `--audit-secrets` to a detailed table
+	// keyed on the same Shadows[] slice; renderShadowedColumn below
+	// sketches that format.
+	if len(state.Shadows) > 0 {
+		fmt.Fprintln(out)
+		suffix := "keys"
+		if len(state.Shadows) == 1 {
+			suffix = "key"
+		}
+		fmt.Fprintf(out, "%d %s shadowed by personal overlay (see niwa status --audit-secrets)\n",
+			len(state.Shadows), suffix)
+	}
+
 	return nil
+}
+
+// renderShadowedColumn returns the SHADOWED-column cell for the
+// `niwa status --audit-secrets` table. Issue 10 wires the flag and
+// subcommand surface; Issue 8 installs this helper so the state-side
+// data is already in place once the flag parser lands.
+//
+// For a key that appears in state.Shadows the cell reads
+// "yes (personal-overlay[, scope=<s>])"; for a key with no matching
+// shadow it reads "no". The scope= suffix is populated only when the
+// Shadow originated from a [workspaces.<scope>] sub-block — v1
+// DetectShadows tags those with Layer == ShadowLayerPersonalOverlay
+// and no separate scope attribution, so the helper currently emits
+// just "yes (personal-overlay)". Threading scope into Shadow is a
+// follow-up once Issue 10 designs the column header.
+func renderShadowedColumn(shadows []workspace.Shadow, kind, name string) string {
+	for _, sh := range shadows {
+		if sh.Kind == kind && sh.Name == name {
+			return "yes (" + sh.Layer + ")"
+		}
+	}
+	return "no"
 }
 
 // shortToken returns a compact form of a version token for display.

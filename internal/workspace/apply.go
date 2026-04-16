@@ -10,6 +10,7 @@ import (
 	"github.com/tsukumogami/niwa/internal/config"
 	"github.com/tsukumogami/niwa/internal/github"
 	"github.com/tsukumogami/niwa/internal/secret"
+	"github.com/tsukumogami/niwa/internal/vault"
 	"github.com/tsukumogami/niwa/internal/vault/resolve"
 )
 
@@ -65,6 +66,11 @@ type pipelineResult struct {
 	repoStates   map[string]RepoState
 	managedFiles []ManagedFile
 	warnings     []string
+	// shadows carries the personal-overlay-vs-team key conflicts
+	// detected during this apply invocation. Empty when no overlay
+	// is active or no keys overlapped. Persisted into
+	// InstanceState.Shadows by Create/Apply.
+	shadows []Shadow
 }
 
 // Create creates a new workspace instance under workspaceRoot, runs the full
@@ -113,6 +119,7 @@ func (a *Applier) Create(ctx context.Context, cfg *config.WorkspaceConfig, confi
 		LastApplied:    now,
 		ManagedFiles:   result.managedFiles,
 		Repos:          result.repoStates,
+		Shadows:        result.shadows,
 	}
 
 	if err := SaveState(instanceRoot, state); err != nil {
@@ -183,6 +190,7 @@ func (a *Applier) Apply(ctx context.Context, cfg *config.WorkspaceConfig, config
 		LastApplied:    now,
 		ManagedFiles:   result.managedFiles,
 		Repos:          result.repoStates,
+		Shadows:        result.shadows,
 	}
 
 	if err := SaveState(instanceRoot, state); err != nil {
@@ -300,12 +308,47 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 	}
 	defer personalBundle.CloseAll()
 
+	// Provider-level shadow detection (informational). Fires BEFORE
+	// the R12 hard error so the user sees the shadow diagnostic
+	// even though apply will fail on the collision. The
+	// CheckProviderNameCollision call below is the enforcement; this
+	// call only emits stderr. The shadow record itself is synthesized
+	// at a higher layer (pipelineResult.shadows) from
+	// DetectShadows; vault.ProviderShadow is not persisted as a
+	// workspace.Shadow today because the pipeline rejects the apply
+	// before it could reach SaveState.
+	providerShadows := vault.DetectProviderShadows(teamBundle, personalBundle)
+	for _, sh := range providerShadows {
+		label := sh.Name
+		if label == "" {
+			label = "(anonymous)"
+		}
+		fmt.Fprintf(os.Stderr,
+			"shadowed provider %q [personal-overlay shadows team: team=%s, personal=%s]\n",
+			label, "workspace.toml", "niwa.toml")
+	}
+
 	// R12 enforcement: personal overlay MUST NOT redeclare any
 	// provider name present in the team bundle. This is checked
 	// here (not in the resolver) because only this call site has
 	// both bundles in scope.
 	if err := resolve.CheckProviderNameCollision(teamBundle, personalBundle); err != nil {
 		return nil, err
+	}
+
+	// Env/files/settings shadow detection. Pure function over the
+	// parsed team config and the parsed (pre-resolve) overlay so no
+	// vault calls are needed. Emitted to stderr immediately so the
+	// user sees the override-visibility hints during apply; also
+	// collected for persistence into InstanceState.Shadows below.
+	var pipelineShadows []Shadow
+	if globalOverride != nil {
+		pipelineShadows = DetectShadows(cfg, globalOverride)
+		for _, sh := range pipelineShadows {
+			fmt.Fprintf(os.Stderr,
+				"shadowed %s %q [personal-overlay shadows team: team=%s, personal=%s]\n",
+				sh.Kind, sh.Name, sh.TeamSource, sh.PersonalSource)
+		}
 	}
 
 	// Resolve the team workspace config.
@@ -578,6 +621,7 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		repoStates:   repoStates,
 		managedFiles: managedFiles,
 		warnings:     allWarnings,
+		shadows:      pipelineShadows,
 	}, nil
 }
 

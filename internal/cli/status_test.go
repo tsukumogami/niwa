@@ -178,6 +178,94 @@ func TestShowSummaryView(t *testing.T) {
 	}
 }
 
+// TestStatusSummaryLineReflectsShadowCount locks in the state:
+//   - state.Shadows empty → no summary line.
+//   - state.Shadows non-empty → a summary line reflecting the count
+//     (with proper singular/plural "key"/"keys").
+func TestStatusSummaryLineReflectsShadowCount(t *testing.T) {
+	tests := []struct {
+		name    string
+		shadows []workspace.Shadow
+		want    string // empty means "no summary line should appear"
+	}{
+		{
+			name:    "zero shadows emits no summary",
+			shadows: nil,
+			want:    "",
+		},
+		{
+			name: "one shadow uses singular noun",
+			shadows: []workspace.Shadow{
+				{Kind: "env-var", Name: "FOO", TeamSource: "workspace.toml", PersonalSource: "niwa.toml", Layer: "personal-overlay"},
+			},
+			want: "1 key shadowed by personal overlay",
+		},
+		{
+			name: "multiple shadows use plural noun",
+			shadows: []workspace.Shadow{
+				{Kind: "env-var", Name: "FOO", TeamSource: "workspace.toml", PersonalSource: "niwa.toml", Layer: "personal-overlay"},
+				{Kind: "env-var", Name: "BAR", TeamSource: "workspace.toml", PersonalSource: "niwa.toml", Layer: "personal-overlay"},
+			},
+			want: "2 keys shadowed by personal overlay",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root := t.TempDir()
+			now := time.Date(2026, 4, 15, 12, 0, 0, 0, time.UTC)
+			configName := "shadow-ws"
+
+			state := &workspace.InstanceState{
+				SchemaVersion:  workspace.SchemaVersion,
+				ConfigName:     &configName,
+				InstanceName:   "shadow-ws",
+				InstanceNumber: 1,
+				Root:           root,
+				Created:        now,
+				LastApplied:    now,
+				Shadows:        tt.shadows,
+			}
+			if err := workspace.SaveState(root, state); err != nil {
+				t.Fatalf("SaveState: %v", err)
+			}
+
+			buf := &strings.Builder{}
+			statusCmd.SetOut(buf)
+			defer statusCmd.SetOut(os.Stdout)
+
+			if err := showDetailView(statusCmd, root); err != nil {
+				t.Fatalf("showDetailView: %v", err)
+			}
+			output := buf.String()
+
+			if tt.want == "" {
+				if strings.Contains(output, "shadowed by personal overlay") {
+					t.Errorf("expected no summary line, got:\n%s", output)
+				}
+			} else {
+				if !strings.Contains(output, tt.want) {
+					t.Errorf("expected %q in output, got:\n%s", tt.want, output)
+				}
+			}
+		})
+	}
+}
+
+// TestRenderShadowedColumn confirms the helper used by the (not-yet-
+// wired) `--audit-secrets` column renders the two documented cases.
+func TestRenderShadowedColumn(t *testing.T) {
+	shadows := []workspace.Shadow{
+		{Kind: "env-var", Name: "FOO", Layer: "personal-overlay"},
+	}
+	if got := renderShadowedColumn(shadows, "env-var", "FOO"); got != "yes (personal-overlay)" {
+		t.Errorf("shadowed = %q, want yes (personal-overlay)", got)
+	}
+	if got := renderShadowedColumn(shadows, "env-var", "OTHER"); got != "no" {
+		t.Errorf("non-shadowed = %q, want no", got)
+	}
+}
+
 func TestShowSummaryView_NoInstances(t *testing.T) {
 	root := t.TempDir()
 

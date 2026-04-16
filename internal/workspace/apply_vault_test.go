@@ -2,6 +2,7 @@ package workspace
 
 import (
 	"context"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -210,6 +211,218 @@ MISSING = "vault://MISSING"
 	}
 	if !strings.Contains(err.Error(), "MISSING") {
 		t.Errorf("expected error to name the missing key, got %v", err)
+	}
+}
+
+// TestApplyEmitsShadowStderr wires the end-to-end apply flow with a
+// team config and a personal overlay that redeclares the same
+// env.secrets key. It captures the pipeline's stderr output through
+// os.Pipe so the assertion covers the exact diagnostic line emitted
+// by runPipeline, including that no secret bytes reach stderr.
+func TestApplyEmitsShadowStderr(t *testing.T) {
+	withFakeVaultBackend(t)
+
+	const teamPlaintext = "team-resolved-token-zzzzz"
+	const overlayPlaintext = "overlay-resolved-token-zzzzz"
+
+	configTOML := `
+[workspace]
+name = "shadow-it-ws"
+
+[[sources]]
+org = "testorg"
+
+[groups.default]
+repos = ["app"]
+
+[vault.provider]
+kind = "fake"
+
+[vault.provider.values]
+API_TOKEN = "` + teamPlaintext + `"
+
+[env.secrets]
+API_TOKEN = "vault://API_TOKEN"
+`
+
+	// Overlay re-declares API_TOKEN under a DIFFERENT provider name
+	// so R12 collision does not fire. DetectShadows must still flag
+	// the env.secrets key as shadowed.
+	overlayTOML := `
+[global.vault.providers.personal]
+kind = "fake"
+
+[global.vault.providers.personal.values]
+API_TOKEN = "` + overlayPlaintext + `"
+
+[global.env.secrets]
+API_TOKEN = "vault://personal/API_TOKEN"
+`
+
+	tmpDir := t.TempDir()
+	niwaDir := filepath.Join(tmpDir, ".niwa")
+	if err := os.MkdirAll(niwaDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(niwaDir, "workspace.toml"), []byte(configTOML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	globalDir := filepath.Join(tmpDir, "global-config")
+	if err := os.MkdirAll(globalDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(globalDir, "niwa.toml"), []byte(overlayTOML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := config.Load(filepath.Join(niwaDir, "workspace.toml"))
+	if err != nil {
+		t.Fatalf("loading workspace config: %v", err)
+	}
+	cfg := result.Config
+
+	mockClient := &mockGitHubClient{
+		repos: map[string][]github.Repo{
+			"testorg": {{Name: "app", SSHURL: "git@github.com:testorg/app.git"}},
+		},
+	}
+
+	workspaceRoot := tmpDir
+	instanceRoot := filepath.Join(workspaceRoot, "shadow-it-ws")
+	groupDir := filepath.Join(instanceRoot, "default")
+	if err := os.MkdirAll(filepath.Join(groupDir, "app", ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Redirect os.Stderr to capture the pipeline's shadow diagnostic.
+	// runPipeline writes directly to os.Stderr via fmt.Fprintf, so
+	// we swap the file descriptor for the duration of the Create
+	// call and restore it on cleanup.
+	origStderr := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stderr = w
+
+	applier := NewApplier(mockClient)
+	applier.Cloner = &Cloner{}
+	applier.GlobalConfigDir = globalDir
+
+	if _, err := applier.Create(context.Background(), cfg, niwaDir, workspaceRoot); err != nil {
+		os.Stderr = origStderr
+		w.Close()
+		t.Fatalf("Create: %v", err)
+	}
+	w.Close()
+	os.Stderr = origStderr
+
+	stderrBytes, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("reading captured stderr: %v", err)
+	}
+	stderrStr := string(stderrBytes)
+
+	want := `shadowed env-secret "API_TOKEN" [personal-overlay shadows team: team=workspace.toml, personal=niwa.toml]`
+	if !strings.Contains(stderrStr, want) {
+		t.Errorf("stderr missing shadow diagnostic %q\nfull stderr:\n%s", want, stderrStr)
+	}
+
+	// R22: no secret bytes anywhere in the captured stderr. Covers
+	// both the team-resolved and overlay-resolved plaintext.
+	if strings.Contains(stderrStr, teamPlaintext) {
+		t.Errorf("stderr leaked team secret bytes %q:\n%s", teamPlaintext, stderrStr)
+	}
+	if strings.Contains(stderrStr, overlayPlaintext) {
+		t.Errorf("stderr leaked overlay secret bytes %q:\n%s", overlayPlaintext, stderrStr)
+	}
+}
+
+// TestApplyPersistsShadowsInState runs apply with a shadowing overlay
+// and asserts the saved InstanceState.Shadows slice carries the
+// detected record.
+func TestApplyPersistsShadowsInState(t *testing.T) {
+	withFakeVaultBackend(t)
+
+	configTOML := `
+[workspace]
+name = "shadow-persist-ws"
+
+[[sources]]
+org = "testorg"
+
+[groups.default]
+repos = ["app"]
+
+[env.vars]
+LOG_LEVEL = "debug"
+`
+
+	// Overlay shadows the [env.vars] LOG_LEVEL key. No vault in
+	// play; the shadow path is independent of the resolver.
+	overlayTOML := `
+[global.env.vars]
+LOG_LEVEL = "trace"
+`
+
+	tmpDir := t.TempDir()
+	niwaDir := filepath.Join(tmpDir, ".niwa")
+	if err := os.MkdirAll(niwaDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(niwaDir, "workspace.toml"), []byte(configTOML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	globalDir := filepath.Join(tmpDir, "global-config")
+	if err := os.MkdirAll(globalDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(globalDir, "niwa.toml"), []byte(overlayTOML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := config.Load(filepath.Join(niwaDir, "workspace.toml"))
+	if err != nil {
+		t.Fatalf("loading workspace config: %v", err)
+	}
+	cfg := result.Config
+
+	mockClient := &mockGitHubClient{
+		repos: map[string][]github.Repo{
+			"testorg": {{Name: "app", SSHURL: "git@github.com:testorg/app.git"}},
+		},
+	}
+
+	workspaceRoot := tmpDir
+	instanceRoot := filepath.Join(workspaceRoot, "shadow-persist-ws")
+	groupDir := filepath.Join(instanceRoot, "default")
+	if err := os.MkdirAll(filepath.Join(groupDir, "app", ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	applier := NewApplier(mockClient)
+	applier.Cloner = &Cloner{}
+	applier.GlobalConfigDir = globalDir
+
+	if _, err := applier.Create(context.Background(), cfg, niwaDir, workspaceRoot); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	state, err := LoadState(instanceRoot)
+	if err != nil {
+		t.Fatalf("LoadState: %v", err)
+	}
+	if len(state.Shadows) != 1 {
+		t.Fatalf("state.Shadows = %+v, want one entry", state.Shadows)
+	}
+	got := state.Shadows[0]
+	if got.Kind != "env-var" || got.Name != "LOG_LEVEL" {
+		t.Errorf("state.Shadows[0] = %+v, want env-var LOG_LEVEL", got)
+	}
+	if got.Layer != "personal-overlay" {
+		t.Errorf("Layer = %q, want personal-overlay", got.Layer)
 	}
 }
 
