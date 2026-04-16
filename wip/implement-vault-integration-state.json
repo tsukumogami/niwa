@@ -3,19 +3,44 @@
   "design_doc": "docs/plans/PLAN-vault-integration.md",
   "branch": "docs/vault-integration",
   "pr_number": 52,
-  "integrity_hash": "sha256:de2d766abf51b076b944ab9a0af93053db2174e49559b312ba5134c774d4928e",
+  "integrity_hash": "sha256:a8ef138256facc7a659fd2948a49be2af00c51474e487113cfaf2f8ac0cb4e09",
   "issues": [
     {
       "number": 1,
       "title": "feat(secret): introduce secret.Value opaque type and error-wrap machinery",
-      "status": "pending",
+      "status": "scrutinized",
       "ci_status": "pending",
       "ci_fix_attempts": 0,
-      "issue_type": "",
+      "issue_type": "code",
       "dependencies": [],
-      "commits": [],
-      "agent_type": "",
-      "summary": null,
+      "commits": [
+        "b4cdbeaa8632a799bab16231bb1fe11fa20e1c1c",
+        "b4cdbeaa8632a799bab16231bb1fe11fa20e1c1c",
+        "804b6d9e6dc9fc83084bb2af7eaa9b85bd3b1d3b"
+      ],
+      "agent_type": "coder",
+      "summary": {
+        "narrative": "",
+        "files_changed": [
+          "internal/secret/value.go",
+          "internal/secret/error.go",
+          "internal/secret/redactor.go",
+          "internal/secret/value_test.go",
+          "internal/secret/error_test.go",
+          "internal/secret/redactor_test.go",
+          "internal/secret/reveal/reveal.go",
+          "internal/secret/reveal/reveal_test.go"
+        ],
+        "tests_added": 35,
+        "key_decisions": "rework addressed reviewer blockers: strings.ReplaceAll instead of NIH helpers; direct type assertion in Wrap instead of errors.As (prevents silent drop of outer fmt.Errorf layers)",
+        "requirements_map": [
+          {
+            "ac": "secret runtime Issue 1 full AC list + reviewer blockers",
+            "status": "implemented",
+            "evidence": "see per-AC mapping in first commit; reviewer blockers fixed in 804b6d9"
+          }
+        ]
+      },
       "testable_scenarios": []
     },
     {
