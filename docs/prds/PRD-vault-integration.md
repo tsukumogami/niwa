@@ -1,5 +1,5 @@
 ---
-status: Accepted
+status: In Progress
 problem: |
   niwa's team-shared workspace config repos (e.g., tsukumogami/dot-niwa) are
   private today primarily because they store plaintext API tokens and
@@ -27,7 +27,7 @@ goals: |
 
 ## Status
 
-Accepted
+In Progress
 
 ## Glossary
 
