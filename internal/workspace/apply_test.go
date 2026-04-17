@@ -10,6 +10,8 @@ import (
 
 	"github.com/tsukumogami/niwa/internal/config"
 	"github.com/tsukumogami/niwa/internal/github"
+	"github.com/tsukumogami/niwa/internal/vault"
+	"github.com/tsukumogami/niwa/internal/vault/fake"
 )
 
 // mockGitHubClient is a test double that returns canned repos.
@@ -1792,6 +1794,235 @@ visibility = "public"
 	// State should preserve the overlay fields.
 	if state.OverlayURL != "testorg/test-ws-overlay" {
 		t.Errorf("OverlayURL = %q, want %q", state.OverlayURL, "testorg/test-ws-overlay")
+	}
+}
+
+// newFakeVaultRegistry returns a vault.Registry with the fake backend registered.
+// Tests use this to inject known secrets without touching vault.DefaultRegistry.
+func newFakeVaultRegistry(t *testing.T) *vault.Registry {
+	t.Helper()
+	reg := vault.NewRegistry()
+	if err := reg.Register(fake.NewFactory()); err != nil {
+		t.Fatalf("register fake vault factory: %v", err)
+	}
+	return reg
+}
+
+// TestApplyOverlayVaultProvider verifies R23: when workspace-overlay.toml declares
+// [vault.provider], vault:// references in the overlay's [env.secrets] are resolved
+// against that provider before the overlay is merged into the base config. The
+// resolved secret values land in per-repo .local.env files alongside base env vars.
+func TestApplyOverlayVaultProvider(t *testing.T) {
+	// Overlay declares a fake vault provider and resolves a secret.
+	overlayTOML := `
+[vault.provider]
+kind = "fake"
+
+[vault.provider.values]
+OVERLAY_SECRET = "resolved-from-overlay-vault"
+
+[env.secrets]
+OVERLAY_SECRET = "vault://OVERLAY_SECRET"
+`
+	overlayDir := setupOverlayDir(t, overlayTOML)
+
+	configTOML := `
+[workspace]
+name = "test-ws"
+
+[[sources]]
+org = "testorg"
+
+[groups.all]
+visibility = "public"
+
+[env.secrets.required]
+OVERLAY_SECRET = "Secret resolved by overlay vault"
+`
+	niwaDir, instanceRoot := setupTestWorkspace(t, configTOML, nil, []struct{ group, name string }{
+		{"all", "repo1"},
+	})
+
+	result, err := config.Load(filepath.Join(niwaDir, "workspace.toml"))
+	if err != nil {
+		t.Fatalf("loading config: %v", err)
+	}
+
+	mockClient := &mockGitHubClient{
+		repos: map[string][]github.Repo{
+			"testorg": {
+				{Name: "repo1", Visibility: "public", SSHURL: "git@github.com:testorg/repo1.git"},
+			},
+		},
+	}
+
+	initialState := &InstanceState{
+		SchemaVersion:  SchemaVersion,
+		InstanceName:   "test-ws",
+		InstanceNumber: 1,
+		Root:           instanceRoot,
+		OverlayURL:     "testorg/test-ws-overlay",
+		OverlayCommit:  "deadbeef",
+	}
+	if err := SaveState(instanceRoot, initialState); err != nil {
+		t.Fatal(err)
+	}
+
+	cloneFn := func(url, dir string) (bool, error) {
+		if err := os.MkdirAll(filepath.Join(dir, ".git"), 0o755); err != nil {
+			return false, err
+		}
+		data, err := os.ReadFile(filepath.Join(overlayDir, "workspace-overlay.toml"))
+		if err != nil {
+			return false, err
+		}
+		return false, os.WriteFile(filepath.Join(dir, "workspace-overlay.toml"), data, 0o644)
+	}
+
+	applier := NewApplier(mockClient)
+	applier.cloneOrSync = cloneFn
+	applier.headSHA = func(string) (string, error) { return "deadbeef", nil }
+	applier.vaultRegistry = newFakeVaultRegistry(t)
+
+	if err := applier.Apply(context.Background(), result.Config, niwaDir, instanceRoot); err != nil {
+		t.Fatalf("apply with overlay vault failed: %v", err)
+	}
+
+	// The resolved secret must appear in repo1's .local.env.
+	envPath := filepath.Join(instanceRoot, "all", "repo1", ".local.env")
+	assertFileContains(t, envPath, "OVERLAY_SECRET=")
+	assertFileContains(t, envPath, "resolved-from-overlay-vault")
+}
+
+// TestApplyOverlayVaultSecretTiers verifies R24: base config declarations in
+// [env.secrets.required] and [env.secrets.recommended] are enforced after the
+// overlay vault provides values for the required keys.
+func TestApplyOverlayVaultSecretTiers(t *testing.T) {
+	// Overlay provides vault resolution for the required key only.
+	overlayTOML := `
+[vault.provider]
+kind = "fake"
+
+[vault.provider.values]
+REQUIRED_KEY = "required-value"
+
+[env.secrets]
+REQUIRED_KEY = "vault://REQUIRED_KEY"
+`
+	overlayDir := setupOverlayDir(t, overlayTOML)
+
+	// Base config declares REQUIRED_KEY as required and OPTIONAL_KEY as recommended.
+	// OPTIONAL_KEY is not provided — apply should succeed with a warning.
+	configTOML := `
+[workspace]
+name = "test-ws"
+
+[[sources]]
+org = "testorg"
+
+[groups.all]
+visibility = "public"
+
+[env.secrets.required]
+REQUIRED_KEY = "Must be present - resolved by overlay vault"
+
+[env.secrets.recommended]
+RECOMMENDED_KEY = "Should be present - resolved by overlay vault"
+`
+	niwaDir, instanceRoot := setupTestWorkspace(t, configTOML, nil, []struct{ group, name string }{
+		{"all", "repo1"},
+	})
+
+	result, err := config.Load(filepath.Join(niwaDir, "workspace.toml"))
+	if err != nil {
+		t.Fatalf("loading config: %v", err)
+	}
+
+	mockClient := &mockGitHubClient{
+		repos: map[string][]github.Repo{
+			"testorg": {
+				{Name: "repo1", Visibility: "public", SSHURL: "git@github.com:testorg/repo1.git"},
+			},
+		},
+	}
+
+	initialState := &InstanceState{
+		SchemaVersion:  SchemaVersion,
+		InstanceName:   "test-ws",
+		InstanceNumber: 1,
+		Root:           instanceRoot,
+		OverlayURL:     "testorg/test-ws-overlay",
+		OverlayCommit:  "deadbeef",
+	}
+	if err := SaveState(instanceRoot, initialState); err != nil {
+		t.Fatal(err)
+	}
+
+	cloneFn := func(url, dir string) (bool, error) {
+		if err := os.MkdirAll(filepath.Join(dir, ".git"), 0o755); err != nil {
+			return false, err
+		}
+		data, err := os.ReadFile(filepath.Join(overlayDir, "workspace-overlay.toml"))
+		if err != nil {
+			return false, err
+		}
+		return false, os.WriteFile(filepath.Join(dir, "workspace-overlay.toml"), data, 0o644)
+	}
+
+	applier := NewApplier(mockClient)
+	applier.cloneOrSync = cloneFn
+	applier.headSHA = func(string) (string, error) { return "deadbeef", nil }
+	applier.vaultRegistry = newFakeVaultRegistry(t)
+
+	// Apply succeeds: REQUIRED_KEY is resolved, RECOMMENDED_KEY is absent (warning only).
+	if err := applier.Apply(context.Background(), result.Config, niwaDir, instanceRoot); err != nil {
+		t.Fatalf("apply with secret tiers failed: %v", err)
+	}
+
+	// REQUIRED_KEY must appear in the env file (it was resolved by the overlay vault).
+	envPath := filepath.Join(instanceRoot, "all", "repo1", ".local.env")
+	assertFileContains(t, envPath, "REQUIRED_KEY=")
+
+	// Now verify a missing required key fails the apply.
+	// Use a new workspace with REQUIRED_KEY required but no overlay vault resolution.
+	configTOMLMissing := `
+[workspace]
+name = "test-ws2"
+
+[[sources]]
+org = "testorg"
+
+[groups.all]
+visibility = "public"
+
+[env.secrets.required]
+MUST_HAVE = "This key is never provided"
+`
+	niwaDir2, instanceRoot2 := setupTestWorkspace(t, configTOMLMissing, nil, []struct{ group, name string }{
+		{"all", "repo1"},
+	})
+	result2, err := config.Load(filepath.Join(niwaDir2, "workspace.toml"))
+	if err != nil {
+		t.Fatalf("loading config2: %v", err)
+	}
+	// Seed a minimal state so Apply can load it (no overlay set).
+	if err := SaveState(instanceRoot2, &InstanceState{
+		SchemaVersion:  SchemaVersion,
+		InstanceName:   "test-ws2",
+		InstanceNumber: 1,
+		Root:           instanceRoot2,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// No overlay — MUST_HAVE is never resolved.
+	applier2 := NewApplier(mockClient)
+	applier2.vaultRegistry = newFakeVaultRegistry(t)
+	applyErr := applier2.Apply(context.Background(), result2.Config, niwaDir2, instanceRoot2)
+	if applyErr == nil {
+		t.Fatal("expected error for missing required secret, got nil")
+	}
+	if !strings.Contains(applyErr.Error(), "MUST_HAVE") {
+		t.Errorf("error should name the missing key, got: %v", applyErr)
 	}
 }
 

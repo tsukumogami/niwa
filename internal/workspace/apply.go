@@ -58,6 +58,12 @@ type Applier struct {
 	// headSHA is the function used to read the HEAD commit SHA of a repo.
 	// Defaults to HeadSHA. Overridable in tests.
 	headSHA func(dir string) (string, error)
+
+	// vaultRegistry overrides vault.DefaultRegistry for vault bundle building.
+	// Nil means use the process-wide DefaultRegistry (production behaviour).
+	// Tests set this to a fresh *vault.Registry with the fake backend registered
+	// so they can inject known secrets without touching DefaultRegistry.
+	vaultRegistry *vault.Registry
 }
 
 // NewApplier creates an Applier with the given GitHub client.
@@ -359,6 +365,12 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 	// Step 0.6: Parse and merge the overlay config when overlayDir is set.
 	// The merged config replaces cfg for all subsequent pipeline steps, including
 	// discoverAllRepos, so overlay sources contribute repos to discovery.
+	//
+	// Vault resolution for the overlay's env happens here (per-layer isolation,
+	// R23): the overlay's [vault.provider] resolves its own [env.secrets] before
+	// the overlay is merged into the base config. This mirrors how the personal
+	// overlay (global config) resolves its own secrets against its own provider
+	// bundle before MergeGlobalOverride runs.
 	if overlayDir != "" {
 		overlayTOML := filepath.Join(overlayDir, "workspace-overlay.toml")
 		overlay, parseErr := config.ParseOverlay(overlayTOML)
@@ -368,6 +380,30 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 			}
 			return nil, fmt.Errorf("parsing workspace overlay: %w", parseErr)
 		}
+
+		// Build the overlay's own vault bundle. A nil Vault field produces an
+		// empty bundle, which is still valid — overlay env without vault:// refs
+		// passes through unchanged; any vault:// ref without a declared provider
+		// fails with a clear "provider not declared" error.
+		overlayVaultBundle, bundleErr := resolve.BuildBundle(ctx, a.vaultRegistry, overlay.Vault, "workspace-overlay.toml")
+		if bundleErr != nil {
+			return nil, fmt.Errorf("building overlay vault bundle: %w", bundleErr)
+		}
+		defer overlayVaultBundle.CloseAll()
+
+		// Resolve the overlay's env (vars and secrets) against the overlay's own
+		// vault bundle. Wrap in a temporary WorkspaceConfig so ResolveWorkspace
+		// can be reused without duplicating the resolution walker.
+		tmpCfg := &config.WorkspaceConfig{Env: overlay.Env}
+		resolvedTmp, resolveErr := resolve.ResolveWorkspace(ctx, tmpCfg, resolve.ResolveOptions{
+			AllowMissing: a.AllowMissingSecrets,
+			TeamBundle:   overlayVaultBundle,
+		})
+		if resolveErr != nil {
+			return nil, fmt.Errorf("resolving overlay vault references: %w", resolveErr)
+		}
+		overlay.Env = resolvedTmp.Env
+
 		mergedWS, mergeErr := MergeWorkspaceOverlay(cfg, overlay, overlayDir)
 		if mergeErr != nil {
 			return nil, fmt.Errorf("merging workspace overlay: %w", mergeErr)
@@ -472,7 +508,7 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 	// Build provider bundles from each layer independently. Bundle
 	// lifetime is scoped to this apply: defer CloseAll so providers
 	// shut down cleanly even on error paths (R29 no-disk-cache).
-	teamBundle, err := resolve.BuildBundle(ctx, nil, cfg.Vault, "workspace config")
+	teamBundle, err := resolve.BuildBundle(ctx, a.vaultRegistry, cfg.Vault, "workspace config")
 	if err != nil {
 		return nil, err
 	}
@@ -485,7 +521,7 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 	if globalOverride != nil {
 		overlayRegistry = globalOverride.Global.Vault
 	}
-	personalBundle, err := resolve.BuildBundle(ctx, nil, overlayRegistry, "global overlay")
+	personalBundle, err := resolve.BuildBundle(ctx, a.vaultRegistry, overlayRegistry, "global overlay")
 	if err != nil {
 		return nil, err
 	}

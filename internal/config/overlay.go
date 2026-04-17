@@ -22,6 +22,7 @@ type WorkspaceOverlay struct {
 	Claude  OverlayClaudeConfig     `toml:"claude"`
 	Env     EnvConfig               `toml:"env"`
 	Files   map[string]string       `toml:"files,omitempty"`
+	Vault   *VaultRegistry          `toml:"vault,omitempty"`
 }
 
 // OverlaySourceConfig defines a GitHub org source in the overlay. Unlike the

@@ -640,7 +640,10 @@ func teamOnlyKeys(vr *config.VaultRegistry) map[string]bool {
 //   - Claude.Env.Promote: union (no entries dropped).
 //   - Claude.Env.Vars: base wins per key.
 //   - Env.Files: overlay files appended after base files.
-//   - Env.Vars: base wins per key.
+//   - Env.Vars: base wins per key for Values; tier maps (Required/Recommended/Optional)
+//     are merged additively (union of declarations, base description wins on key collision).
+//   - Env.Secrets: base wins per key for Values (overlay supplies vault-resolved values
+//     for keys not present in the base); tier maps merged additively.
 //   - Files: base wins per key; overlay keys not in base are added, but only
 //     after checking destination is not a protected path.
 //   - Claude.Content.Repos: overlay entries with source= add new content entries
@@ -739,7 +742,7 @@ func MergeWorkspaceOverlay(ws *config.WorkspaceConfig, overlay *config.Workspace
 		merged.Env.Files = append(merged.Env.Files, overlay.Env.Files...)
 	}
 
-	// Env.Vars: base wins per key.
+	// Env.Vars: base wins per key for Values; tier maps merged additively.
 	for k, v := range overlay.Env.Vars.Values {
 		if _, exists := merged.Env.Vars.Values[k]; !exists {
 			if merged.Env.Vars.Values == nil {
@@ -748,6 +751,25 @@ func MergeWorkspaceOverlay(ws *config.WorkspaceConfig, overlay *config.Workspace
 			merged.Env.Vars.Values[k] = v
 		}
 	}
+	merged.Env.Vars.Required = mergeStringMapBaseWins(merged.Env.Vars.Required, overlay.Env.Vars.Required)
+	merged.Env.Vars.Recommended = mergeStringMapBaseWins(merged.Env.Vars.Recommended, overlay.Env.Vars.Recommended)
+	merged.Env.Vars.Optional = mergeStringMapBaseWins(merged.Env.Vars.Optional, overlay.Env.Vars.Optional)
+
+	// Env.Secrets: base wins per key for Values; tier maps merged additively.
+	// The overlay's Values have already been vault-resolved against the overlay's
+	// own provider bundle before MergeWorkspaceOverlay is called, so they arrive
+	// here as resolved MaybeSecret values (no vault:// URIs).
+	for k, v := range overlay.Env.Secrets.Values {
+		if _, exists := merged.Env.Secrets.Values[k]; !exists {
+			if merged.Env.Secrets.Values == nil {
+				merged.Env.Secrets.Values = map[string]config.MaybeSecret{}
+			}
+			merged.Env.Secrets.Values[k] = v
+		}
+	}
+	merged.Env.Secrets.Required = mergeStringMapBaseWins(merged.Env.Secrets.Required, overlay.Env.Secrets.Required)
+	merged.Env.Secrets.Recommended = mergeStringMapBaseWins(merged.Env.Secrets.Recommended, overlay.Env.Secrets.Recommended)
+	merged.Env.Secrets.Optional = mergeStringMapBaseWins(merged.Env.Secrets.Optional, overlay.Env.Secrets.Optional)
 
 	// Files: base wins per key; add overlay keys not already in base.
 	for k, v := range overlay.Files {
@@ -995,6 +1017,23 @@ func copySettings(s config.SettingsConfig) config.SettingsConfig {
 	}
 	out := make(config.SettingsConfig, len(s))
 	maps.Copy(out, s)
+	return out
+}
+
+// mergeStringMapBaseWins returns the union of base and overlay maps. When both
+// maps contain the same key, the base value is used (base wins). Neither input
+// map is mutated. Returns nil when both inputs are nil or empty.
+func mergeStringMapBaseWins(base, overlay map[string]string) map[string]string {
+	if len(base) == 0 && len(overlay) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(base)+len(overlay))
+	for k, v := range overlay {
+		out[k] = v
+	}
+	for k, v := range base {
+		out[k] = v // base wins on collision
+	}
 	return out
 }
 
