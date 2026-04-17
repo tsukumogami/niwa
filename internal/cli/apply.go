@@ -170,6 +170,17 @@ func resolveRegistryScope(name string) (*workspace.ApplyScope, error) {
 		return nil, fmt.Errorf("enumerating instances: %w", err)
 	}
 
+	// Single-instance layout: the workspace root is itself the instance
+	// (instance.json lives at workspaceRoot/.niwa/instance.json rather than
+	// in a child subdirectory). EnumerateInstances only scans children, so
+	// it returns empty for this layout. Fall back to treating workspaceRoot
+	// as the sole instance.
+	if len(instances) == 0 {
+		if _, statErr := os.Stat(filepath.Join(workspaceRoot, workspace.StateDir, workspace.StateFile)); statErr == nil {
+			instances = []string{workspaceRoot}
+		}
+	}
+
 	return &workspace.ApplyScope{
 		Mode:      workspace.ApplyAll,
 		Instances: instances,
