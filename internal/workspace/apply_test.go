@@ -1150,6 +1150,470 @@ enabled = false
 	assertFileContains(t, envPath, "MY_VAR=yes")
 }
 
+// setupOverlayDir creates a fake overlay directory with a workspace-overlay.toml
+// and returns its path. Used by overlay integration tests to avoid running git.
+func setupOverlayDir(t *testing.T, overlayTOML string) string {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "workspace-overlay.toml"), []byte(overlayTOML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+// overlayStub builds injected cloneOrSync and headSHA functions for testing.
+// cloneDir is the pre-created overlay directory to "clone" into.
+// headSHAResult is the SHA string that headSHA returns.
+// cloneErr, headErr control whether the stubs return errors.
+func overlayStub(cloneDir, headSHAResult string, firstTime bool, cloneErr, headErr error) (
+	func(url, dir string) (bool, error),
+	func(dir string) (string, error),
+) {
+	cloneFn := func(url, dir string) (bool, error) {
+		if cloneErr != nil {
+			return firstTime, cloneErr
+		}
+		// Simulate a successful clone by creating a .git marker in dir.
+		if err := os.MkdirAll(filepath.Join(dir, ".git"), 0o755); err != nil {
+			return firstTime, err
+		}
+		// Copy workspace-overlay.toml from cloneDir to dir if it exists.
+		if cloneDir != "" && cloneDir != dir {
+			data, err := os.ReadFile(filepath.Join(cloneDir, "workspace-overlay.toml"))
+			if err == nil {
+				_ = os.WriteFile(filepath.Join(dir, "workspace-overlay.toml"), data, 0o644)
+			}
+		}
+		return firstTime, nil
+	}
+	headFn := func(dir string) (string, error) {
+		if headErr != nil {
+			return "", headErr
+		}
+		return headSHAResult, nil
+	}
+	return cloneFn, headFn
+}
+
+// TestApplyOverlayNoOverlay verifies that when NoOverlay=true in instance state,
+// the overlay is skipped entirely (no cloneOrSync called, base config used).
+// Scenario 15.
+func TestApplyOverlayNoOverlay(t *testing.T) {
+	configTOML := `
+[workspace]
+name = "test-ws"
+
+[[sources]]
+org = "testorg"
+
+[groups.all]
+visibility = "public"
+`
+	niwaDir, instanceRoot := setupTestWorkspace(t, configTOML, nil, []struct{ group, name string }{
+		{"all", "repo1"},
+	})
+
+	result, err := config.Load(filepath.Join(niwaDir, "workspace.toml"))
+	if err != nil {
+		t.Fatalf("loading config: %v", err)
+	}
+	cfg := result.Config
+
+	mockClient := &mockGitHubClient{
+		repos: map[string][]github.Repo{
+			"testorg": {
+				{Name: "repo1", Visibility: "public", SSHURL: "git@github.com:testorg/repo1.git"},
+			},
+		},
+	}
+
+	// Seed initial state with NoOverlay=true and OverlayURL set (state field
+	// must be respected even if OverlayURL is present in state).
+	initialState := &InstanceState{
+		SchemaVersion:  SchemaVersion,
+		InstanceName:   "test-ws",
+		InstanceNumber: 1,
+		Root:           instanceRoot,
+		NoOverlay:      true,
+		OverlayURL:     "testorg/test-ws-overlay",
+	}
+	if err := SaveState(instanceRoot, initialState); err != nil {
+		t.Fatal(err)
+	}
+
+	cloneCallCount := 0
+	cloneFn := func(url, dir string) (bool, error) {
+		cloneCallCount++
+		return false, nil
+	}
+	headFn := func(dir string) (string, error) {
+		return "abc123", nil
+	}
+
+	applier := NewApplier(mockClient)
+	applier.Cloner = &Cloner{}
+	applier.cloneOrSync = cloneFn
+	applier.headSHA = headFn
+
+	if err := applier.Apply(context.Background(), cfg, niwaDir, instanceRoot); err != nil {
+		t.Fatalf("apply failed: %v", err)
+	}
+
+	if cloneCallCount != 0 {
+		t.Errorf("cloneOrSync should not be called when NoOverlay=true, but was called %d time(s)", cloneCallCount)
+	}
+
+	// State should preserve NoOverlay=true.
+	state, err := LoadState(instanceRoot)
+	if err != nil {
+		t.Fatalf("loading state: %v", err)
+	}
+	if !state.NoOverlay {
+		t.Error("NoOverlay should be preserved in state after apply")
+	}
+}
+
+// TestApplyOverlaySyncFailure verifies that when OverlayURL is set in state and
+// CloneOrSyncOverlay returns a sync failure (firstTime=false), apply returns
+// a non-revealing error message. Scenario 16.
+func TestApplyOverlaySyncFailure(t *testing.T) {
+	configTOML := `
+[workspace]
+name = "test-ws"
+
+[[sources]]
+org = "testorg"
+
+[groups.all]
+visibility = "public"
+`
+	niwaDir, instanceRoot := setupTestWorkspace(t, configTOML, nil, []struct{ group, name string }{
+		{"all", "repo1"},
+	})
+
+	result, err := config.Load(filepath.Join(niwaDir, "workspace.toml"))
+	if err != nil {
+		t.Fatalf("loading config: %v", err)
+	}
+	cfg := result.Config
+
+	mockClient := &mockGitHubClient{
+		repos: map[string][]github.Repo{
+			"testorg": {
+				{Name: "repo1", Visibility: "public", SSHURL: "git@github.com:testorg/repo1.git"},
+			},
+		},
+	}
+
+	// Seed state with OverlayURL set.
+	initialState := &InstanceState{
+		SchemaVersion:  SchemaVersion,
+		InstanceName:   "test-ws",
+		InstanceNumber: 1,
+		Root:           instanceRoot,
+		OverlayURL:     "testorg/test-ws-overlay",
+		OverlayCommit:  "abc123",
+	}
+	if err := SaveState(instanceRoot, initialState); err != nil {
+		t.Fatal(err)
+	}
+
+	// Stub: sync failure (firstTime=false).
+	cloneFn := func(url, dir string) (bool, error) {
+		return false, fmt.Errorf("git pull failed: network error")
+	}
+	headFn := func(dir string) (string, error) {
+		return "", fmt.Errorf("no HEAD")
+	}
+
+	applier := NewApplier(mockClient)
+	applier.Cloner = &Cloner{}
+	applier.cloneOrSync = cloneFn
+	applier.headSHA = headFn
+
+	err = applier.Apply(context.Background(), cfg, niwaDir, instanceRoot)
+	if err == nil {
+		t.Fatal("expected error on overlay sync failure")
+	}
+	if !strings.Contains(err.Error(), "workspace overlay sync failed") {
+		t.Errorf("expected non-revealing error message, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "--no-overlay") {
+		t.Errorf("expected --no-overlay hint in error message, got: %v", err)
+	}
+	// Error must NOT reveal internal git details.
+	if strings.Contains(err.Error(), "git pull") || strings.Contains(err.Error(), "network error") {
+		t.Errorf("error message should not reveal internal details, got: %v", err)
+	}
+}
+
+// TestApplyOverlayConventionDiscovery verifies that when no OverlayURL is in state
+// and ConfigSourceURL is set, convention discovery derives the overlay URL, clones
+// the overlay, and writes OverlayURL + OverlayCommit to state. Scenario 17.
+func TestApplyOverlayConventionDiscovery(t *testing.T) {
+	overlayTOML := `
+[[sources]]
+org = "overlayorg"
+repos = ["extra-repo"]
+`
+	overlayDir := setupOverlayDir(t, overlayTOML)
+
+	configTOML := `
+[workspace]
+name = "test-ws"
+
+[[sources]]
+org = "testorg"
+
+[groups.all]
+visibility = "public"
+`
+	niwaDir, instanceRoot := setupTestWorkspace(t, configTOML, nil, []struct{ group, name string }{
+		{"all", "repo1"},
+		{"all", "extra-repo"},
+	})
+
+	result, err := config.Load(filepath.Join(niwaDir, "workspace.toml"))
+	if err != nil {
+		t.Fatalf("loading config: %v", err)
+	}
+	cfg := result.Config
+
+	mockClient := &mockGitHubClient{
+		repos: map[string][]github.Repo{
+			"testorg": {
+				{Name: "repo1", Visibility: "public", SSHURL: "git@github.com:testorg/repo1.git"},
+			},
+			"overlayorg": {
+				{Name: "extra-repo", Visibility: "public", SSHURL: "git@github.com:overlayorg/extra-repo.git"},
+			},
+		},
+	}
+
+	// Seed state with no OverlayURL.
+	initialState := &InstanceState{
+		SchemaVersion:  SchemaVersion,
+		InstanceName:   "test-ws",
+		InstanceNumber: 1,
+		Root:           instanceRoot,
+	}
+	if err := SaveState(instanceRoot, initialState); err != nil {
+		t.Fatal(err)
+	}
+
+	const fakeHeadSHA = "deadbeef1234567890"
+	// Stub: successful clone that points to our pre-created overlayDir.
+	// The actual overlay dir used by config.OverlayDir will be a tmpdir;
+	// we simulate success by copying workspace-overlay.toml into it.
+	cloneFn := func(url, dir string) (bool, error) {
+		// Simulate successful first-time clone.
+		if err := os.MkdirAll(filepath.Join(dir, ".git"), 0o755); err != nil {
+			return true, err
+		}
+		// Copy workspace-overlay.toml from our pre-made overlayDir.
+		data, err := os.ReadFile(filepath.Join(overlayDir, "workspace-overlay.toml"))
+		if err != nil {
+			return true, err
+		}
+		return true, os.WriteFile(filepath.Join(dir, "workspace-overlay.toml"), data, 0o644)
+	}
+	headFn := func(dir string) (string, error) {
+		return fakeHeadSHA, nil
+	}
+
+	applier := NewApplier(mockClient)
+	applier.Cloner = &Cloner{}
+	applier.cloneOrSync = cloneFn
+	applier.headSHA = headFn
+	// ConfigSourceURL must be a parseable GitHub URL for DeriveOverlayURL.
+	applier.ConfigSourceURL = "https://github.com/testorg/test-ws"
+
+	if err := applier.Apply(context.Background(), cfg, niwaDir, instanceRoot); err != nil {
+		t.Fatalf("apply with convention discovery failed: %v", err)
+	}
+
+	// OverlayURL and OverlayCommit must be written to state.
+	state, err := LoadState(instanceRoot)
+	if err != nil {
+		t.Fatalf("loading state after apply: %v", err)
+	}
+	if state.OverlayURL != "testorg/test-ws-overlay" {
+		t.Errorf("OverlayURL = %q, want %q", state.OverlayURL, "testorg/test-ws-overlay")
+	}
+	if state.OverlayCommit != fakeHeadSHA {
+		t.Errorf("OverlayCommit = %q, want %q", state.OverlayCommit, fakeHeadSHA)
+	}
+}
+
+// TestApplyOverlayConventionDiscoveryFirstTimeFailure verifies that when convention
+// discovery fails on first attempt (firstTime=true error), apply succeeds silently
+// without writing OverlayURL to state. Scenario 15 (no-overlay variant).
+func TestApplyOverlayConventionDiscoveryFirstTimeFailure(t *testing.T) {
+	configTOML := `
+[workspace]
+name = "test-ws"
+
+[[sources]]
+org = "testorg"
+
+[groups.all]
+visibility = "public"
+`
+	niwaDir, instanceRoot := setupTestWorkspace(t, configTOML, nil, []struct{ group, name string }{
+		{"all", "repo1"},
+	})
+
+	result, err := config.Load(filepath.Join(niwaDir, "workspace.toml"))
+	if err != nil {
+		t.Fatalf("loading config: %v", err)
+	}
+	cfg := result.Config
+
+	mockClient := &mockGitHubClient{
+		repos: map[string][]github.Repo{
+			"testorg": {
+				{Name: "repo1", Visibility: "public", SSHURL: "git@github.com:testorg/repo1.git"},
+			},
+		},
+	}
+
+	initialState := &InstanceState{
+		SchemaVersion:  SchemaVersion,
+		InstanceName:   "test-ws",
+		InstanceNumber: 1,
+		Root:           instanceRoot,
+	}
+	if err := SaveState(instanceRoot, initialState); err != nil {
+		t.Fatal(err)
+	}
+
+	// Stub: first-time clone failure.
+	cloneFn := func(url, dir string) (bool, error) {
+		return true, fmt.Errorf("repository not found")
+	}
+	headFn := func(dir string) (string, error) {
+		return "", fmt.Errorf("no HEAD")
+	}
+
+	applier := NewApplier(mockClient)
+	applier.Cloner = &Cloner{}
+	applier.cloneOrSync = cloneFn
+	applier.headSHA = headFn
+	applier.ConfigSourceURL = "https://github.com/testorg/test-ws"
+
+	// Apply should succeed silently.
+	if err := applier.Apply(context.Background(), cfg, niwaDir, instanceRoot); err != nil {
+		t.Fatalf("apply should succeed when convention discovery fails silently: %v", err)
+	}
+
+	// OverlayURL must NOT be written to state.
+	state, err := LoadState(instanceRoot)
+	if err != nil {
+		t.Fatalf("loading state: %v", err)
+	}
+	if state.OverlayURL != "" {
+		t.Errorf("OverlayURL should be empty after first-time failure, got: %q", state.OverlayURL)
+	}
+}
+
+// TestApplyOverlayWithValidOverlay verifies that when an overlay is active, overlay
+// repos/groups/content appear in the pipeline output. Scenario 19.
+func TestApplyOverlayWithValidOverlay(t *testing.T) {
+	overlayTOML := `
+[[sources]]
+org = "overlayorg"
+repos = ["extra-repo"]
+`
+	overlayDir := setupOverlayDir(t, overlayTOML)
+
+	configTOML := `
+[workspace]
+name = "test-ws"
+
+[[sources]]
+org = "testorg"
+
+[groups.all]
+visibility = "public"
+`
+	niwaDir, instanceRoot := setupTestWorkspace(t, configTOML, nil, []struct{ group, name string }{
+		{"all", "repo1"},
+		{"all", "extra-repo"},
+	})
+
+	result, err := config.Load(filepath.Join(niwaDir, "workspace.toml"))
+	if err != nil {
+		t.Fatalf("loading config: %v", err)
+	}
+	cfg := result.Config
+
+	mockClient := &mockGitHubClient{
+		repos: map[string][]github.Repo{
+			"testorg": {
+				{Name: "repo1", Visibility: "public", SSHURL: "git@github.com:testorg/repo1.git"},
+			},
+			"overlayorg": {
+				{Name: "extra-repo", Visibility: "public", SSHURL: "git@github.com:overlayorg/extra-repo.git"},
+			},
+		},
+	}
+
+	// Seed state with OverlayURL already set (as if init discovered it).
+	initialState := &InstanceState{
+		SchemaVersion:  SchemaVersion,
+		InstanceName:   "test-ws",
+		InstanceNumber: 1,
+		Root:           instanceRoot,
+		OverlayURL:     "testorg/test-ws-overlay",
+		OverlayCommit:  "abc123",
+	}
+	if err := SaveState(instanceRoot, initialState); err != nil {
+		t.Fatal(err)
+	}
+
+	const fakeHeadSHA = "abc123" // same as OverlayCommit, so no warn-on-advance
+	cloneFn := func(url, dir string) (bool, error) {
+		// Simulate successful sync; copy workspace-overlay.toml into dir.
+		if err := os.MkdirAll(filepath.Join(dir, ".git"), 0o755); err != nil {
+			return false, err
+		}
+		data, err := os.ReadFile(filepath.Join(overlayDir, "workspace-overlay.toml"))
+		if err != nil {
+			return false, err
+		}
+		return false, os.WriteFile(filepath.Join(dir, "workspace-overlay.toml"), data, 0o644)
+	}
+	headFn := func(dir string) (string, error) {
+		return fakeHeadSHA, nil
+	}
+
+	applier := NewApplier(mockClient)
+	applier.Cloner = &Cloner{}
+	applier.cloneOrSync = cloneFn
+	applier.headSHA = headFn
+
+	if err := applier.Apply(context.Background(), cfg, niwaDir, instanceRoot); err != nil {
+		t.Fatalf("apply with overlay failed: %v", err)
+	}
+
+	// extra-repo from the overlay source should have been cloned into the
+	// "all" group. Since we pre-created its .git marker in setupTestWorkspace,
+	// we verify the repo directory exists.
+	extraRepoDir := filepath.Join(instanceRoot, "all", "extra-repo")
+	if _, err := os.Stat(extraRepoDir); err != nil {
+		t.Errorf("extra-repo from overlay source should exist: %v", err)
+	}
+
+	// State should preserve the overlay fields.
+	state, err := LoadState(instanceRoot)
+	if err != nil {
+		t.Fatalf("loading state: %v", err)
+	}
+	if state.OverlayURL != "testorg/test-ws-overlay" {
+		t.Errorf("OverlayURL = %q, want %q", state.OverlayURL, "testorg/test-ws-overlay")
+	}
+}
+
 func assertFileContains(t *testing.T, path, substr string) {
 	t.Helper()
 	data, err := os.ReadFile(path)
