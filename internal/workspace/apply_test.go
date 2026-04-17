@@ -1482,6 +1482,119 @@ visibility = "public"
 	}
 }
 
+// TestApplyOverlaySHAMismatchWarning verifies that when the overlay HEAD SHA differs
+// from the stored OverlayCommit, apply emits a warning to stderr but continues
+// successfully. Scenario 18.
+func TestApplyOverlaySHAMismatchWarning(t *testing.T) {
+	overlayTOML := `
+[[sources]]
+org = "overlayorg"
+repos = ["extra-repo"]
+`
+	overlayDir := setupOverlayDir(t, overlayTOML)
+
+	configTOML := `
+[workspace]
+name = "test-ws"
+
+[[sources]]
+org = "testorg"
+
+[groups.all]
+visibility = "public"
+`
+	niwaDir, instanceRoot := setupTestWorkspace(t, configTOML, nil, []struct{ group, name string }{
+		{"all", "repo1"},
+		{"all", "extra-repo"},
+	})
+
+	result, err := config.Load(filepath.Join(niwaDir, "workspace.toml"))
+	if err != nil {
+		t.Fatalf("loading config: %v", err)
+	}
+	cfg := result.Config
+
+	mockClient := &mockGitHubClient{
+		repos: map[string][]github.Repo{
+			"testorg": {
+				{Name: "repo1", Visibility: "public", SSHURL: "git@github.com:testorg/repo1.git"},
+			},
+			"overlayorg": {
+				{Name: "extra-repo", Visibility: "public", SSHURL: "git@github.com:overlayorg/extra-repo.git"},
+			},
+		},
+	}
+
+	// Seed state with old OverlayCommit so the new HEAD triggers the warning.
+	initialState := &InstanceState{
+		SchemaVersion:  SchemaVersion,
+		InstanceName:   "test-ws",
+		InstanceNumber: 1,
+		Root:           instanceRoot,
+		OverlayURL:     "testorg/test-ws-overlay",
+		OverlayCommit:  "abc123", // old SHA
+	}
+	if err := SaveState(instanceRoot, initialState); err != nil {
+		t.Fatal(err)
+	}
+
+	cloneFn := func(url, dir string) (bool, error) {
+		if err := os.MkdirAll(filepath.Join(dir, ".git"), 0o755); err != nil {
+			return false, err
+		}
+		data, err := os.ReadFile(filepath.Join(overlayDir, "workspace-overlay.toml"))
+		if err != nil {
+			return false, err
+		}
+		return false, os.WriteFile(filepath.Join(dir, "workspace-overlay.toml"), data, 0o644)
+	}
+	// headSHA returns a different SHA than OverlayCommit to trigger the warning.
+	headFn := func(dir string) (string, error) {
+		return "def456newsha", nil
+	}
+
+	// Capture stderr by redirecting os.Stderr through a pipe.
+	r, w, pipeErr := os.Pipe()
+	if pipeErr != nil {
+		t.Fatalf("creating pipe: %v", pipeErr)
+	}
+	oldStderr := os.Stderr
+	os.Stderr = w
+
+	applier := NewApplier(mockClient)
+	applier.Cloner = &Cloner{}
+	applier.cloneOrSync = cloneFn
+	applier.headSHA = headFn
+
+	applyErr := applier.Apply(context.Background(), cfg, niwaDir, instanceRoot)
+
+	// Restore stderr before checking results.
+	os.Stderr = oldStderr
+	w.Close()
+	var stderrBuf strings.Builder
+	buf := make([]byte, 4096)
+	for {
+		n, readErr := r.Read(buf)
+		if n > 0 {
+			stderrBuf.Write(buf[:n])
+		}
+		if readErr != nil {
+			break
+		}
+	}
+	r.Close()
+
+	if applyErr != nil {
+		t.Fatalf("apply with SHA mismatch should succeed, got: %v", applyErr)
+	}
+
+	stderrOutput := stderrBuf.String()
+	const wantWarning = "workspace overlay has new commits since last apply"
+	if !strings.Contains(stderrOutput, wantWarning) {
+		t.Errorf("stderr missing SHA mismatch warning %q; got: %s", wantWarning, stderrOutput)
+	}
+}
+
 // TestApplyOverlayWithValidOverlay verifies that when an overlay is active, overlay
 // repos/groups/content appear in the pipeline output. Scenario 19.
 //
