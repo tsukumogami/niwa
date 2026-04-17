@@ -233,8 +233,8 @@ func (a *Applier) Apply(ctx context.Context, cfg *config.WorkspaceConfig, config
 	a.cleanRemovedGroupDirs(existingState, result, instanceRoot)
 
 	// Determine overlay fields for the final state. Convention discovery in
-	// runPipeline may have updated OverlayURL/OverlayCommit and called
-	// SaveState already; carry those forward. If not updated, preserve the
+	// runPipeline returns the discovered URL/commit via pipelineResult; carry
+	// those forward into the final SaveState. If not updated, preserve the
 	// values from existingState. NoOverlay is never cleared by apply.
 	finalOverlayURL := existingState.OverlayURL
 	finalOverlayCommit := existingState.OverlayCommit
