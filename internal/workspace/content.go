@@ -152,10 +152,22 @@ func InstallRepoContent(cfg *config.WorkspaceConfig, configDir, overlayDir, inst
 			}
 		}
 	} else if hasExplicit && entry.OverlaySource != "" {
-		// No base source, but OverlaySource is set — validate overlayDir.
+		// No base source, but OverlaySource is set — write overlay content as CLAUDE.local.md.
 		if overlayDir == "" {
 			return nil, fmt.Errorf("repo %q has OverlaySource %q but overlayDir is empty", repoName, entry.OverlaySource)
 		}
+		target := filepath.Join(repoDir, "CLAUDE.local.md")
+		overlaySrcPath := filepath.Join(overlayDir, entry.OverlaySource)
+		overlayData, readErr := os.ReadFile(overlaySrcPath)
+		if readErr != nil {
+			return nil, fmt.Errorf("reading overlay content for repo %q: %w", repoName, readErr)
+		}
+		if writeErr := os.WriteFile(target, overlayData, 0o644); writeErr != nil {
+			return nil, fmt.Errorf("writing overlay CLAUDE.local.md for repo %q: %w", repoName, writeErr)
+		}
+		result.WrittenFiles = append(result.WrittenFiles, target)
+		w := CheckGitignore(repoDir, repoName)
+		result.Warnings = append(result.Warnings, w...)
 	}
 
 	// Install subdirectory content if present.

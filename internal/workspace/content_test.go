@@ -63,7 +63,7 @@ func TestInstallWorkspaceContent(t *testing.T) {
 func TestInstallWorkspaceContentNoSource(t *testing.T) {
 	cfg := &config.WorkspaceConfig{
 		Workspace: config.WorkspaceMeta{Name: "test"},
-		Content:   config.ContentConfig{},
+		Claude:    config.ClaudeConfig{Content: config.ContentConfig{}},
 	}
 
 	// Should be a no-op, not an error.
@@ -168,7 +168,7 @@ func TestInstallGroupContent(t *testing.T) {
 func TestInstallGroupContentNoEntry(t *testing.T) {
 	cfg := &config.WorkspaceConfig{
 		Workspace: config.WorkspaceMeta{Name: "test"},
-		Content:   config.ContentConfig{},
+		Claude:    config.ClaudeConfig{Content: config.ContentConfig{}},
 	}
 
 	// No group content entry -- should be a no-op.
@@ -899,6 +899,94 @@ func TestInstallRepoContentOverlaySourceEmptyOverlayDir(t *testing.T) {
 	}
 
 	_, err := InstallRepoContent(cfg, configDir, "", instanceRoot, "public", "myapp")
+	if err == nil {
+		t.Fatal("expected error when OverlaySource is set but overlayDir is empty")
+	}
+	if !strings.Contains(err.Error(), "overlayDir is empty") {
+		t.Errorf("error should mention overlayDir: %v", err)
+	}
+}
+
+// TestInstallRepoContentOverlayOnlyNoBase verifies that when OverlaySource is
+// set but Source is empty, the overlay content is written as CLAUDE.local.md.
+func TestInstallRepoContentOverlayOnlyNoBase(t *testing.T) {
+	tmpDir := t.TempDir()
+	configDir := filepath.Join(tmpDir, "config")
+	overlayDir := filepath.Join(tmpDir, "overlay")
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(overlayDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	overlayContent := "# overlay-only content\n"
+	if err := os.WriteFile(filepath.Join(overlayDir, "myapp-overlay.md"), []byte(overlayContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.WorkspaceConfig{
+		Workspace: config.WorkspaceMeta{
+			Name:       "myws",
+			ContentDir: "claude",
+		},
+		Claude: config.ClaudeConfig{
+			Content: config.ContentConfig{
+				Repos: map[string]config.RepoContentEntry{
+					"myapp": {
+						// Source is intentionally empty; OverlaySource only.
+						OverlaySource: "myapp-overlay.md",
+					},
+				},
+			},
+		},
+	}
+
+	instanceRoot := filepath.Join(tmpDir, "instance")
+	repoDir := filepath.Join(instanceRoot, "public", "myapp")
+	if err := os.MkdirAll(filepath.Join(repoDir, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repoDir, ".gitignore"), []byte("*.local*\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := InstallRepoContent(cfg, configDir, overlayDir, instanceRoot, "public", "myapp")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(result.Warnings) != 0 {
+		t.Errorf("unexpected warnings: %v", result.Warnings)
+	}
+	if len(result.WrittenFiles) != 1 {
+		t.Fatalf("expected 1 written file, got %d", len(result.WrittenFiles))
+	}
+
+	data, err := os.ReadFile(filepath.Join(repoDir, "CLAUDE.local.md"))
+	if err != nil {
+		t.Fatalf("reading CLAUDE.local.md: %v", err)
+	}
+	if string(data) != overlayContent {
+		t.Errorf("CLAUDE.local.md = %q, want %q", string(data), overlayContent)
+	}
+}
+
+// TestInstallRepoContentOverlayOnlyNoBaseEmptyDir verifies that OverlaySource
+// set without a base Source returns an error when overlayDir is empty.
+func TestInstallRepoContentOverlayOnlyNoBaseEmptyDir(t *testing.T) {
+	cfg := &config.WorkspaceConfig{
+		Workspace: config.WorkspaceMeta{Name: "myws", ContentDir: "claude"},
+		Claude: config.ClaudeConfig{
+			Content: config.ContentConfig{
+				Repos: map[string]config.RepoContentEntry{
+					"myapp": {OverlaySource: "myapp-overlay.md"},
+				},
+			},
+		},
+	}
+
+	tmpDir := t.TempDir()
+	_, err := InstallRepoContent(cfg, tmpDir, "", filepath.Join(tmpDir, "instance"), "public", "myapp")
 	if err == nil {
 		t.Fatal("expected error when OverlaySource is set but overlayDir is empty")
 	}
