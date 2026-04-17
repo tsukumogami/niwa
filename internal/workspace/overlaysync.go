@@ -18,13 +18,13 @@ func CloneOrSyncOverlay(url, dir string) (firstTime bool, err error) {
 		return true, fmt.Errorf("resolving overlay URL %q: %w", url, resolveErr)
 	}
 	if !isValidGitDir(dir) {
-		// Clone fresh.
+		// Clone fresh. Suppress git output: callers treat first-time clone
+		// failure as a silent skip (overlay repo may not exist), so printing
+		// git's "Repository not found" error would alarm users needlessly.
 		if mkErr := os.MkdirAll(filepath.Dir(dir), 0o755); mkErr != nil {
 			return true, fmt.Errorf("creating overlay parent directory: %w", mkErr)
 		}
 		cmd := exec.Command("git", "clone", cloneURL, dir)
-		cmd.Stdout = os.Stderr
-		cmd.Stderr = os.Stderr
 		if runErr := cmd.Run(); runErr != nil {
 			return true, fmt.Errorf("cloning overlay %s: %w", url, runErr)
 		}
