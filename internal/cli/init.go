@@ -79,8 +79,8 @@ func resolveInitMode(args []string, from string, globalCfg *config.GlobalConfig)
 
 	// Check the registry for a source URL.
 	entry := globalCfg.LookupWorkspace(name)
-	if entry != nil && entry.Source != "" {
-		return modeClone, name, entry.Source
+	if entry != nil && entry.SourceURL != "" {
+		return modeClone, name, entry.SourceURL
 	}
 
 	return modeNamed, name, ""
@@ -179,7 +179,7 @@ func runInit(cmd *cobra.Command, args []string) error {
 			Source: absConfigPath,
 		}
 		if source != "" {
-			entry.Source = source
+			entry.SourceURL = source
 		}
 
 		globalCfg.SetRegistryEntry(registryName, entry)

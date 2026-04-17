@@ -30,8 +30,9 @@ type GlobalSettings struct {
 
 // RegistryEntry records a workspace's source config file and root directory.
 type RegistryEntry struct {
-	Source string `toml:"source"`
-	Root   string `toml:"root"`
+	Source    string `toml:"source"`
+	Root      string `toml:"root"`
+	SourceURL string `toml:"source_url,omitempty"`
 }
 
 // CloneProtocol returns the configured clone protocol, defaulting to "ssh".

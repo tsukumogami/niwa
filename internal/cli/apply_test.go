@@ -1,8 +1,11 @@
 package cli
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
+	"github.com/tsukumogami/niwa/internal/config"
 	"github.com/tsukumogami/niwa/internal/workspace"
 )
 
@@ -159,6 +162,65 @@ func TestApplyModes_Values(t *testing.T) {
 			t.Errorf("duplicate ApplyMode value: %d", m)
 		}
 		seen[m] = true
+	}
+}
+
+// TestUpdateRegistry_PreservesSourceURL verifies that updateRegistry does not
+// overwrite an existing SourceURL in the registry entry. This ensures that the
+// original GitHub URL recorded at init time remains available for convention
+// overlay discovery across subsequent apply invocations.
+func TestUpdateRegistry_PreservesSourceURL(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", tmpDir)
+
+	// Seed the registry with an entry that has SourceURL set (as init --from would).
+	cfgDir := filepath.Join(tmpDir, "niwa")
+	if err := os.MkdirAll(cfgDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	seedCfg := &config.GlobalConfig{}
+	seedCfg.SetRegistryEntry("my-ws", config.RegistryEntry{
+		Source:    "/old/path/.niwa/workspace.toml",
+		Root:      "/old/path",
+		SourceURL: "https://github.com/acme/my-ws",
+	})
+	if err := config.SaveGlobalConfigTo(filepath.Join(cfgDir, "config.toml"), seedCfg); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create a fake workspace.toml so updateRegistry can resolve an abs path.
+	wsDir := filepath.Join(tmpDir, "workspace")
+	niwaConfigDir := filepath.Join(wsDir, ".niwa")
+	if err := os.MkdirAll(niwaConfigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(niwaConfigDir, "workspace.toml")
+	if err := os.WriteFile(configPath, []byte("[workspace]\nname=\"my-ws\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Call updateRegistry as apply does after each run.
+	if err := updateRegistry(configPath, niwaConfigDir, "my-ws"); err != nil {
+		t.Fatalf("updateRegistry failed: %v", err)
+	}
+
+	// Reload and verify SourceURL is preserved.
+	loaded, err := config.LoadGlobalConfig()
+	if err != nil {
+		t.Fatalf("loading global config: %v", err)
+	}
+	entry := loaded.LookupWorkspace("my-ws")
+	if entry == nil {
+		t.Fatal("expected registry entry after updateRegistry")
+	}
+	if entry.SourceURL != "https://github.com/acme/my-ws" {
+		t.Errorf("SourceURL = %q, want %q", entry.SourceURL, "https://github.com/acme/my-ws")
+	}
+	// Source should now be the local config path.
+	absConfigPath, _ := filepath.Abs(configPath)
+	if entry.Source != absConfigPath {
+		t.Errorf("Source = %q, want %q", entry.Source, absConfigPath)
 	}
 }
 

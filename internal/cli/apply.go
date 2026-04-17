@@ -109,10 +109,18 @@ func runApply(cmd *cobra.Command, args []string) error {
 	applier.AllowMissingSecrets = applyAllowMissingSecrets
 	applier.AllowPlaintextSecrets = applyAllowPlaintextSecrets
 
-	// Wire global config if registered and reachable.
-	if globalCfg, gErr := config.LoadGlobalConfig(); gErr == nil && globalCfg.GlobalConfig.Repo != "" {
-		if gDir, gErr := config.GlobalConfigDir(); gErr == nil {
-			applier.GlobalConfigDir = gDir
+	// Wire global config and ConfigSourceURL from the registry if available.
+	if globalCfg, gErr := config.LoadGlobalConfig(); gErr == nil {
+		if globalCfg.GlobalConfig.Repo != "" {
+			if gDir, gErr := config.GlobalConfigDir(); gErr == nil {
+				applier.GlobalConfigDir = gDir
+			}
+		}
+		// ConfigSourceURL is the original GitHub URL stored at init time.
+		// It enables convention overlay discovery when OverlayURL is not yet
+		// in InstanceState (i.e., overlay was never discovered for this instance).
+		if entry := globalCfg.LookupWorkspace(cfg.Workspace.Name); entry != nil {
+			applier.ConfigSourceURL = entry.SourceURL
 		}
 	}
 
@@ -169,7 +177,8 @@ func resolveRegistryScope(name string) (*workspace.ApplyScope, error) {
 	}, nil
 }
 
-// updateRegistry updates the global registry with the workspace config path.
+// updateRegistry updates the global registry with the workspace config path,
+// preserving any existing SourceURL from a prior init --from registration.
 func updateRegistry(configPath, configDir, workspaceName string) error {
 	globalCfg, err := config.LoadGlobalConfig()
 	if err != nil {
@@ -187,10 +196,18 @@ func updateRegistry(configPath, configDir, workspaceName string) error {
 		return fmt.Errorf("could not resolve workspace root: %w", err)
 	}
 
-	globalCfg.SetRegistryEntry(workspaceName, config.RegistryEntry{
+	// Preserve SourceURL from any existing registry entry so that convention
+	// overlay discovery (which needs the original GitHub URL) keeps working
+	// across multiple apply invocations.
+	entry := config.RegistryEntry{
 		Source: absConfigPath,
 		Root:   absRoot,
-	})
+	}
+	if existing := globalCfg.LookupWorkspace(workspaceName); existing != nil {
+		entry.SourceURL = existing.SourceURL
+	}
+
+	globalCfg.SetRegistryEntry(workspaceName, entry)
 
 	if err := config.SaveGlobalConfig(globalCfg); err != nil {
 		return fmt.Errorf("could not update registry: %w", err)

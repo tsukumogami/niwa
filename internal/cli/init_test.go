@@ -44,8 +44,9 @@ func TestResolveInitMode_NamedUnregistered(t *testing.T) {
 func TestResolveInitMode_NamedRegisteredWithSource(t *testing.T) {
 	globalCfg := &config.GlobalConfig{}
 	globalCfg.SetRegistryEntry("my-project", config.RegistryEntry{
-		Source: "my-org/my-config",
-		Root:   "/some/path",
+		Source:    "/some/path/.niwa/workspace.toml",
+		SourceURL: "my-org/my-config",
+		Root:      "/some/path",
 	})
 
 	mode, name, source := resolveInitMode([]string{"my-project"}, "", globalCfg)
