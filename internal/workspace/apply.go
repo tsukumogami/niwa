@@ -317,6 +317,28 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		return nil, err
 	}
 
+	// Multi-org auth: read local credential file, obtain per-provider
+	// tokens. The credential file lives at ~/.config/niwa/provider-auth.toml
+	// (same directory that holds the global config clone). When the file
+	// is absent, this is a no-op (single-org path unchanged).
+	niwaConfigDir, niwaConfigErr := NiwaConfigDir()
+	if niwaConfigErr == nil {
+		authEntries, authErr := LoadProviderAuth(niwaConfigDir)
+		if authErr != nil {
+			return nil, authErr
+		}
+		if len(authEntries) > 0 {
+			if err := injectProviderTokens(ctx, authEntries, cfg.Vault); err != nil {
+				return nil, err
+			}
+			if globalOverride != nil {
+				if err := injectProviderTokens(ctx, authEntries, globalOverride.Global.Vault); err != nil {
+					return nil, err
+				}
+			}
+		}
+	}
+
 	// Build provider bundles from each layer independently. Bundle
 	// lifetime is scoped to this apply: defer CloseAll so providers
 	// shut down cleanly even on error paths (R29 no-disk-cache).
