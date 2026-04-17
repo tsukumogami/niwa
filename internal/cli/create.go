@@ -126,6 +126,17 @@ func runCreate(cmd *cobra.Command, args []string) error {
 	gh := github.NewAPIClient(token)
 
 	applier := workspace.NewApplier(gh)
+
+	// Wire up the global config overlay (personal overlay) so vault
+	// resolution and personal-wins merging work during create, not
+	// just apply. Without this, [env.secrets.required] keys that the
+	// personal overlay supplies via vault:// would fail as "not supplied".
+	if globalCfg, gErr := config.LoadGlobalConfig(); gErr == nil && globalCfg.GlobalConfig.Repo != "" {
+		if gDir, gErr := config.GlobalConfigDir(); gErr == nil {
+			applier.GlobalConfigDir = gDir
+		}
+	}
+
 	instancePath, err := applier.Create(cmd.Context(), cfg, configDir, workspaceRoot)
 	if err != nil {
 		return err

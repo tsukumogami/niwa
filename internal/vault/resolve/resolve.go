@@ -147,18 +147,26 @@ func CheckProviderNameCollision(team, personal *vault.Bundle) error {
 	if team == nil || personal == nil {
 		return nil
 	}
+	// R12 compares NAMED providers only. Anonymous providers (empty-
+	// string name) are file-scoped by D-9: each config file's
+	// [vault.provider] is independent of the other file's. Two files
+	// can each declare an anonymous provider without conflict because
+	// their vault:// URIs resolve within their own file's context
+	// before the merge runs (D-6 resolve-before-merge ordering).
 	teamNames := map[string]bool{}
 	for _, n := range team.Names() {
+		if n == "" {
+			continue // anonymous — file-scoped, not a shared name
+		}
 		teamNames[n] = true
 	}
 	var colliding []string
 	for _, n := range personal.Names() {
+		if n == "" {
+			continue // anonymous — file-scoped
+		}
 		if teamNames[n] {
-			label := n
-			if label == "" {
-				label = "(anonymous)"
-			}
-			colliding = append(colliding, label)
+			colliding = append(colliding, n)
 		}
 	}
 	if len(colliding) == 0 {

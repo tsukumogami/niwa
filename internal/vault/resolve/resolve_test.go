@@ -485,7 +485,9 @@ func TestCheckProviderNameCollisionEmpty(t *testing.T) {
 }
 
 // TestCheckProviderNameCollisionAnonymous: both sides declare the
-// anonymous singular provider; the empty-string name collides.
+// anonymous singular provider. Anonymous providers are file-scoped per
+// D-9: each file's [vault.provider] resolves its own URIs independently
+// before merge. R12 applies only to NAMED providers.
 func TestCheckProviderNameCollisionAnonymous(t *testing.T) {
 	reg := newFakeRegistry(t)
 	team, err := reg.Build(context.Background(), []vault.ProviderSpec{
@@ -504,14 +506,8 @@ func TestCheckProviderNameCollisionAnonymous(t *testing.T) {
 	defer personal.CloseAll()
 
 	err = resolve.CheckProviderNameCollision(team, personal)
-	if err == nil {
-		t.Fatal("expected collision error")
-	}
-	if !errors.Is(err, vault.ErrProviderNameCollision) {
-		t.Errorf("expected ErrProviderNameCollision, got %v", err)
-	}
-	if !strings.Contains(err.Error(), "anonymous") {
-		t.Errorf("expected message to mention anonymous, got %q", err.Error())
+	if err != nil {
+		t.Fatalf("anonymous providers should NOT collide (file-scoped per D-9), got: %v", err)
 	}
 }
 
