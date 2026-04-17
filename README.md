@@ -141,6 +141,26 @@ niwa init my-team    # uses the registered source from the first --from
 niwa apply
 ```
 
+### Overlay discovery
+
+When you run `niwa init --from <org/repo>`, niwa looks for a companion repo named
+`<repo>-overlay` in the same org. If it exists and you have access, it's cloned
+alongside the base config and merged in before workspace setup runs. Subsequent
+`niwa apply` calls pull the latest overlay automatically.
+
+You don't have to do anything for this to work -- it's automatic. But you have two
+escape hatches:
+
+```bash
+# Point to a specific overlay repo instead of the auto-discovered one
+niwa init my-team --from my-org/workspace-config --overlay my-org/my-custom-overlay
+
+# Skip overlay discovery entirely
+niwa init my-team --from my-org/workspace-config --no-overlay
+```
+
+`--overlay` and `--no-overlay` are mutually exclusive.
+
 ## Config reference
 
 See the [workspace config design](docs/designs/current/DESIGN-workspace-config.md)
