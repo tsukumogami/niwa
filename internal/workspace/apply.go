@@ -51,10 +51,11 @@ type Applier struct {
 	// Empty string disables convention discovery.
 	ConfigSourceURL string
 
-	// overlayDir is set during step 2.5 of runPipeline when an overlay is
-	// successfully cloned or synced. It is made available to downstream steps
-	// (step 4.5 and step 6) via the Applier so that Issue 4's content
-	// generation can reference it. Empty string means no overlay is active.
+	// overlayDir is set during Step 0.5 of runPipeline when an overlay is
+	// successfully cloned or synced. It is available to downstream pipeline
+	// steps (0.6, 4.5, and 6) via the Applier struct. Read it from within
+	// runPipeline only — it is reset at the start of each pipeline call.
+	// Empty string means no overlay is active.
 	overlayDir string
 
 	// cloneOrSync is the function used to clone or sync the overlay repo.
@@ -155,15 +156,6 @@ func (a *Applier) Create(ctx context.Context, cfg *config.WorkspaceConfig, confi
 
 	// Overlay fields are not set for a fresh create: overlay discovery happens
 	// at init time (when configSourceURL is known) or on subsequent applies.
-	// Carry any result.overlayURL/overlayCommit forward in case the caller
-	// configures the Applier to run discovery even at create time in the future.
-	var finalOverlayURL string
-	var finalOverlayCommit string
-	if result.overlayURL != "" {
-		finalOverlayURL = result.overlayURL
-		finalOverlayCommit = result.overlayCommit
-	}
-
 	configName := cfg.Workspace.Name
 	state := &InstanceState{
 		SchemaVersion:  SchemaVersion,
@@ -173,8 +165,6 @@ func (a *Applier) Create(ctx context.Context, cfg *config.WorkspaceConfig, confi
 		Root:           instanceRoot,
 		Created:        now,
 		LastApplied:    now,
-		OverlayURL:     finalOverlayURL,
-		OverlayCommit:  finalOverlayCommit,
 		ManagedFiles:   result.managedFiles,
 		Repos:          result.repoStates,
 		Shadows:        result.shadows,
@@ -365,7 +355,7 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		}
 	}
 
-	// Step overlay-2.6: Parse and merge the overlay config when overlayDir is set.
+	// Step 0.6: Parse and merge the overlay config when overlayDir is set.
 	// The merged config replaces cfg for all subsequent pipeline steps, including
 	// discoverAllRepos, so overlay sources contribute repos to discovery.
 	if a.overlayDir != "" {
