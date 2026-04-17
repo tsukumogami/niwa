@@ -97,14 +97,14 @@ Four schema options considered:
 
 [[providers]]
 kind          = "infisical"
-project       = "c6673ab0-c95d-4570-b947-5f77501ce38a"
-client_id     = "1ad0012d-f55d-430e-abb0-858e30029f2e"
-client_secret = "b67723bd..."
+project       = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+client_id     = "11111111-2222-3333-4444-555555555555"
+client_secret = "abcdef01..."
 # api_url     = "https://self-hosted.example.com/api"  # optional; defaults to https://app.infisical.com/api
 
 [[providers]]
 kind          = "infisical"
-project       = "ec1d0537-0283-4360-995f-e476e159e2ec"
+project       = "ffffffff-gggg-hhhh-iiii-jjjjjjjjjjjj"
 client_id     = "..."
 client_secret = "..."
 ```
@@ -163,15 +163,78 @@ filesystem-free. resolve.BuildBundle stays a pure transformer. The
 token is injected as `ProviderConfig["token"]` — the same mechanism
 the Infisical backend already uses for `project`, `env`, `path`.
 
+### Decision 4: Credential file ownership — generic envelope vs backend-specific files
+
+The credential file schema started Infisical-specific (`project`,
+`client_id`, `client_secret`, `api_url` — all Infisical concepts).
+Other backends have completely different auth models: sops needs an
+age key file path, 1Password needs a service account token, Vault
+needs role_id + secret_id. The schema must be forward-compatible.
+
+- **Option A — Backend-specific files**: separate
+  `~/.config/niwa/auth/infisical.toml`, `sops.toml`, etc. Each backend
+  owns its file and schema. Strong isolation, but fragments the user
+  experience and duplicates file-reading infrastructure.
+- **Option B — Single generic envelope**: one
+  `~/.config/niwa/provider-auth.toml` with `[[providers]]` entries,
+  each declaring `kind` and backend-specific fields as a flat map.
+  niwa core routes by `kind`; backends parse their own fields.
+  Matches the existing `ProviderConfig map[string]any` pattern from
+  workspace.toml.
+- **Option C — Backend-specific sections in one file**: TOML tables
+  named by backend kind (`[infisical]`, `[sops]`). Hybrid that doesn't
+  clearly improve on A or B.
+
+#### Chosen: Option B — Single generic envelope
+
+```toml
+# ~/.config/niwa/provider-auth.toml (0o600)
+
+[[providers]]
+kind          = "infisical"
+project       = "aaaaaaaa-..."
+client_id     = "..."
+client_secret = "..."
+
+[[providers]]
+kind          = "infisical"
+project       = "ffffffff-..."
+client_id     = "..."
+client_secret = "..."
+api_url       = "https://infisical.corp.example.com/api"
+
+[[providers]]
+kind      = "onepassword"
+vault     = "Engineering"
+token     = "ops_..."
+```
+
+niwa core reads the file once, enforces 0o600, and groups entries by
+`kind`. Each backend receives its entries as `[]map[string]any` — the
+same contract `Factory.Open(ProviderConfig)` already uses. Backends
+that handle auth externally (sops reads `~/.age/key.txt`, Infisical
+CLI reads `~/.infisical` for interactive users) need no entry. The
+matching key is backend-defined: Infisical matches by `project`,
+1Password might match by `vault`, sops might not match at all (one
+global identity).
+
+**Rationale**: directly extends the `VaultProviderConfig` pattern
+already established in workspace.toml. niwa core handles file I/O
+and permission enforcement once; backends parse only their own fields
+from the opaque map they already expect. Enables a future `niwa vault
+auth list` command without backend-specific discovery.
+
 ## Decision Outcome
 
-The three decisions compose into a simple, additive feature:
+The four decisions compose into a simple, additive feature:
 
 1. **apply.go** reads `~/.config/niwa/provider-auth.toml` (if it
-   exists) once per apply. For each ProviderSpec whose `(Kind,
-   Config["project"])` matches a credential entry, it does a single
-   HTTP POST to Infisical's universal-auth login endpoint, gets a JWT,
-   and sets `spec.Config["token"] = jwt`.
+   exists) once per apply. Entries are grouped by `kind`. For each
+   ProviderSpec, apply.go hands the matching credential entries (same
+   `kind`) to the backend, which performs its own matching (Infisical
+   matches by `project`; other backends define their own key). If
+   matched, the backend authenticates (Infisical: HTTP POST → JWT)
+   and the token is set on `spec.Config["token"]`.
 
 2. **Infisical Factory.Open** reads `config["token"]` (new optional
    field, empty string when absent). Passes it to the Provider struct.
@@ -210,14 +273,14 @@ internal/vault/infisical/ (read token from ProviderConfig, pass --token)
 
 [[providers]]
 kind          = "infisical"
-project       = "c6673ab0-c95d-4570-b947-5f77501ce38a"  # Tsukumogami dot-niwa
-client_id     = "1ad0012d-f55d-430e-abb0-858e30029f2e"
-client_secret = "b67723bd..."
+project       = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"  # Tsukumogami dot-niwa
+client_id     = "11111111-2222-3333-4444-555555555555"
+client_secret = "abcdef01..."
 # api_url     = "https://self-hosted.example.com/api"  # optional
 
 [[providers]]
 kind          = "infisical"
-project       = "ec1d0537-0283-4360-995f-e476e159e2ec"  # dangazineu-personal
+project       = "ffffffff-gggg-hhhh-iiii-jjjjjjjjjjjj"  # dangazineu-personal
 client_id     = "..."
 client_secret = "..."
 ```
