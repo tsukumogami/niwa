@@ -307,7 +307,7 @@ If `acmecorp/niwa-internal` is inaccessible, `niwa init` aborts with a hard erro
 
 ### Vault in the Overlay
 
-**R23**: When `workspace-overlay.toml` declares `[vault.provider]`, niwa builds a vault provider bundle from that declaration and resolves `vault://` references in the overlay's `[env.secrets]` entries against it, before merging the overlay into the base config. The overlay vault provider is built and torn down independently of any vault provider declared in the base config — each layer resolves its own secrets in isolation (the same per-layer scoping applied to the global config overlay). If the overlay declares a named provider (`[vault.providers.<name>]`) that collides with a named provider in the base config, `niwa apply` aborts with a collision error naming the duplicate. The anonymous provider (`[vault.provider]`) does not collide with any base config provider.
+**R23**: When `workspace-overlay.toml` declares `[vault.provider]`, niwa builds a vault provider bundle from that declaration and resolves `vault://` references in the overlay's `[env.secrets]` entries against it, before merging the overlay into the base config. The overlay vault provider is built and torn down independently of any vault provider declared in the base config — each layer resolves its own secrets in isolation (the same per-layer scoping applied to the global config overlay). Provider names are scoped to their layer; a named provider in the overlay and a same-named provider in the base config do not collide because they never interact.
 
 **R24**: The base config may declare what env vars are needed without specifying vault addresses, using three sub-tables of `[env.secrets]`:
 
@@ -400,8 +400,8 @@ Users without overlay access receive the base `CLAUDE.local.md` only; no overlay
 - [ ] Base config with `[env.secrets.required] FOO = "description"`, no overlay, `FOO` absent from environment: `niwa apply` aborts with a non-zero exit code and an error naming `FOO`.
 - [ ] Base config with `[env.secrets.recommended] BAR = "description"`, `BAR` absent after all resolution: `niwa apply` exits with code 0 and emits a stderr warning naming `BAR`.
 - [ ] Base config with `[env.secrets.optional] BAZ = "description"`, `BAZ` absent: `niwa apply` exits with code 0, no warning produced.
-- [ ] Overlay with `[vault.provider]` and base config with `[vault.provider]`: both resolve their own layer's `[env.secrets]` independently; no collision error for anonymous providers.
-- [ ] Overlay with `[vault.providers.shared]` and base config with `[vault.providers.shared]` (same name): `niwa apply` aborts with a collision error naming `shared` before any git operations.
+- [ ] Overlay with `[vault.provider]` and base config with `[vault.provider]`: both resolve their own layer's `[env.secrets]` independently; no collision error.
+- [ ] Overlay with `[vault.providers.infisical]` and base config with `[vault.providers.infisical]` (same name, different layers): each resolves its own layer's secrets independently; no collision error.
 
 ## Out of Scope
 
