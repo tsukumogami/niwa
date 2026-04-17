@@ -11,13 +11,18 @@ import (
 // CloneOrSyncOverlay clones the overlay repo to dir when dir does not exist or
 // contains no valid git repository (returning firstTime=true). When a valid
 // clone already exists it pulls with --ff-only (returning firstTime=false).
+// url may be an org/repo shorthand, a full HTTPS URL, or an SSH URL.
 func CloneOrSyncOverlay(url, dir string) (firstTime bool, err error) {
+	cloneURL, resolveErr := ResolveCloneURL(url, "ssh")
+	if resolveErr != nil {
+		return true, fmt.Errorf("resolving overlay URL %q: %w", url, resolveErr)
+	}
 	if !isValidGitDir(dir) {
 		// Clone fresh.
 		if mkErr := os.MkdirAll(filepath.Dir(dir), 0o755); mkErr != nil {
 			return true, fmt.Errorf("creating overlay parent directory: %w", mkErr)
 		}
-		cmd := exec.Command("git", "clone", url, dir)
+		cmd := exec.Command("git", "clone", cloneURL, dir)
 		cmd.Stdout = os.Stderr
 		cmd.Stderr = os.Stderr
 		if runErr := cmd.Run(); runErr != nil {

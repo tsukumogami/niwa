@@ -90,8 +90,9 @@ func isCommitSHA(ref string) bool {
 // If the input already looks like a full URL (contains "://" or starts
 // with "git@"), it is returned unchanged.
 func ResolveCloneURL(orgRepo, protocol string) (string, error) {
-	// Already a full URL -- pass through.
-	if strings.Contains(orgRepo, "://") || strings.HasPrefix(orgRepo, "git@") {
+	// Already a full URL or absolute filesystem path -- pass through.
+	if strings.Contains(orgRepo, "://") || strings.HasPrefix(orgRepo, "git@") ||
+		(strings.HasPrefix(orgRepo, "/") && strings.Count(orgRepo, "/") > 1) {
 		return orgRepo, nil
 	}
 
