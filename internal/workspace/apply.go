@@ -51,13 +51,6 @@ type Applier struct {
 	// Empty string disables convention discovery.
 	ConfigSourceURL string
 
-	// overlayDir is set during Step 0.5 of runPipeline when an overlay is
-	// successfully cloned or synced. It is available to downstream pipeline
-	// steps (0.6, 4.5, and 6) via the Applier struct. Read it from within
-	// runPipeline only — it is reset at the start of each pipeline call.
-	// Empty string means no overlay is active.
-	overlayDir string
-
 	// cloneOrSync is the function used to clone or sync the overlay repo.
 	// Defaults to CloneOrSyncOverlay. Overridable in tests.
 	cloneOrSync func(url, dir string) (bool, error)
@@ -278,9 +271,10 @@ func (a *Applier) Apply(ctx context.Context, cfg *config.WorkspaceConfig, config
 // clone, and install content. It returns the pipeline results without writing
 // state.
 func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, configDir, instanceRoot string, now time.Time, opts *pipelineOpts) (*pipelineResult, error) {
-	// Reset overlayDir at the start of each pipeline run so that multiple
-	// sequential calls on the same Applier do not leak state across runs.
-	a.overlayDir = ""
+	// overlayDir is the local clone path of the overlay repo when one is active.
+	// It is local to this pipeline run; downstream steps that need it receive it
+	// as a function argument rather than reading it from the Applier.
+	var overlayDir string
 
 	var writtenFiles []string
 	var allWarnings []string
@@ -327,7 +321,7 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 					)
 				}
 			}
-			a.overlayDir = dir
+			overlayDir = dir
 
 		case opts.configSourceURL != "":
 			// Branch 3: Convention discovery from ConfigSourceURL.
@@ -335,13 +329,13 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 			if ok {
 				dir, dirErr := config.OverlayDir(conventionURL)
 				if dirErr == nil {
-					firstTime, cloneErr := a.cloneOrSync(conventionURL, dir)
+					wasCloneAttempt, cloneErr := a.cloneOrSync(conventionURL, dir)
 					if cloneErr != nil {
-						if firstTime {
-							// First-time failure: no overlay repo exists — skip silently.
+						if wasCloneAttempt {
+							// Fresh clone failed: overlay repo likely doesn't exist — skip silently.
 							break
 						}
-						// Sync failure on a previously-discovered overlay: hard error.
+						// Pull failed on a previously-cloned overlay: hard error.
 						return nil, fmt.Errorf("workspace overlay sync failed. Use --no-overlay to skip.")
 					}
 					// Clone/sync succeeded. Record URL and commit to return via
@@ -349,7 +343,7 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 					sha, _ := a.headSHA(dir)
 					pipelineOverlayURL = conventionURL
 					pipelineOverlayCommit = sha
-					a.overlayDir = dir
+					overlayDir = dir
 				}
 			}
 		}
@@ -358,8 +352,8 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 	// Step 0.6: Parse and merge the overlay config when overlayDir is set.
 	// The merged config replaces cfg for all subsequent pipeline steps, including
 	// discoverAllRepos, so overlay sources contribute repos to discovery.
-	if a.overlayDir != "" {
-		overlayTOML := filepath.Join(a.overlayDir, "workspace-overlay.toml")
+	if overlayDir != "" {
+		overlayTOML := filepath.Join(overlayDir, "workspace-overlay.toml")
 		overlay, parseErr := config.ParseOverlay(overlayTOML)
 		if parseErr != nil {
 			if errors.Is(parseErr, os.ErrNotExist) {
@@ -367,7 +361,7 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 			}
 			return nil, fmt.Errorf("parsing workspace overlay: %w", parseErr)
 		}
-		mergedWS, mergeErr := MergeWorkspaceOverlay(cfg, overlay, a.overlayDir)
+		mergedWS, mergeErr := MergeWorkspaceOverlay(cfg, overlay, overlayDir)
 		if mergeErr != nil {
 			return nil, fmt.Errorf("merging workspace overlay: %w", mergeErr)
 		}
@@ -646,8 +640,8 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 	// Overlay CLAUDE.overlay.md is injected after @workspace-context.md
 	// (now present) so that @CLAUDE.global.md (added at step 5c) ends up
 	// after both — completing the required import order.
-	if a.overlayDir != "" {
-		overlayCtxPath, overlayCtxErr := InstallOverlayClaudeContent(a.overlayDir, instanceRoot)
+	if overlayDir != "" {
+		overlayCtxPath, overlayCtxErr := InstallOverlayClaudeContent(overlayDir, instanceRoot)
 		if overlayCtxErr != nil {
 			return nil, fmt.Errorf("installing overlay claude content: %w", overlayCtxErr)
 		}
@@ -694,7 +688,7 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 			continue
 		}
 
-		result, err := InstallRepoContent(effectiveCfg, configDir, a.overlayDir, instanceRoot, cr.Group, cr.Repo.Name)
+		result, err := InstallRepoContent(effectiveCfg, configDir, overlayDir, instanceRoot, cr.Group, cr.Repo.Name)
 		if err != nil {
 			return nil, fmt.Errorf("installing repo content for %q: %w", cr.Repo.Name, err)
 		}

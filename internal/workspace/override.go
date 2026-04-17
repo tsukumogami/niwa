@@ -762,17 +762,19 @@ func MergeWorkspaceOverlay(ws *config.WorkspaceConfig, overlay *config.Workspace
 	// Claude.Content.Repos: process overlay content entries.
 	for repoName, entry := range overlay.Claude.Content.Repos {
 		if entry.Source != "" {
-			// Overlay adds a new content entry for a repo not in base.
-			if _, exists := merged.Claude.Content.Repos[repoName]; !exists {
-				if merged.Claude.Content.Repos == nil {
-					merged.Claude.Content.Repos = make(map[string]config.RepoContentEntry)
-				}
-				merged.Claude.Content.Repos[repoName] = config.RepoContentEntry{
-					Source:        entry.Source,
-					OverlaySource: "",
-				}
+			if _, exists := merged.Claude.Content.Repos[repoName]; exists {
+				// R13: source= on a repo already defined in the base config is an error.
+				// Use overlay= to append content to a base-config repo's CLAUDE.local.md.
+				return nil, fmt.Errorf("overlay content entry for repo %q uses source= but %q is already defined in the base config; use overlay= to append content instead", repoName, repoName)
 			}
-			// Base wins: if already in base, skip.
+			// Overlay-only repo: add a new content entry.
+			if merged.Claude.Content.Repos == nil {
+				merged.Claude.Content.Repos = make(map[string]config.RepoContentEntry)
+			}
+			merged.Claude.Content.Repos[repoName] = config.RepoContentEntry{
+				Source:        entry.Source,
+				OverlaySource: "",
+			}
 		} else if entry.Overlay != "" {
 			// Overlay appends to an existing base entry via OverlaySource.
 			base, exists := merged.Claude.Content.Repos[repoName]

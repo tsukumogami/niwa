@@ -314,20 +314,15 @@ func buildInitState(cmd *cobra.Command, mode initMode, source string) (*workspac
 		if mode == modeClone && source != "" {
 			conventionURL, ok := config.DeriveOverlayURL(source)
 			if ok {
-				fmt.Fprintf(cmd.OutOrStdout(), "Checking for companion overlay: %s\n", conventionURL)
 				overlayDir, dirErr := config.OverlayDir(conventionURL)
 				if dirErr == nil {
-					firstTime, cloneErr := workspace.CloneOrSyncOverlay(conventionURL, overlayDir)
+					wasCloneAttempt, cloneErr := workspace.CloneOrSyncOverlay(conventionURL, overlayDir)
 					if cloneErr != nil {
-						if firstTime {
-							// Inaccessible on first attempt — print note and skip silently.
-							// conventionURL is already derived from DeriveOverlayURL(source),
-							// so it is the well-formed shorthand (e.g. acme/dot-niwa-overlay),
-							// not the raw source URL with "-overlay" appended.
-							fmt.Fprintf(cmd.OutOrStdout(), "Note: no companion overlay repository found (%s).\n", conventionURL)
-							fmt.Fprintf(cmd.OutOrStdout(), "Workspace publishers can create a companion %s repository to provide additional configuration.\n", conventionURL)
-						}
-						// firstTime=false errors are non-fatal at init time (no state written).
+						// Any clone failure is silently skipped — the overlay repo may
+						// not exist or may be inaccessible. wasCloneAttempt=false errors
+						// (pull failure on an existing clone) are also non-fatal at init
+						// time since no state has been written yet.
+						_ = wasCloneAttempt
 					} else {
 						sha, shaErr := workspace.HeadSHA(overlayDir)
 						if shaErr != nil {

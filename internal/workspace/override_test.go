@@ -1252,26 +1252,26 @@ func TestMergeWorkspaceOverlay_ContentSourceAddsNewEntry(t *testing.T) {
 	}
 }
 
-// TestMergeWorkspaceOverlay_ContentSourceBaseWins verifies that a content overlay
-// entry with source= does not overwrite an existing base entry.
-func TestMergeWorkspaceOverlay_ContentSourceBaseWins(t *testing.T) {
+// TestMergeWorkspaceOverlay_ContentSourceOnBaseRepoIsError verifies that a
+// content overlay entry with source= on a repo already in the base config
+// returns an error (R13). Overlays must use overlay= to append to base-config repos.
+func TestMergeWorkspaceOverlay_ContentSourceOnBaseRepoIsError(t *testing.T) {
 	ws := baseWS()
 	overlay := &config.WorkspaceOverlay{
 		Claude: config.OverlayClaudeConfig{
 			Content: config.OverlayContentConfig{
 				Repos: map[string]config.OverlayContentRepoConfig{
-					"repo-a": {Source: "repos/overlay-repo-a.md"}, // collision — base wins
+					"repo-a": {Source: "repos/overlay-repo-a.md"}, // illegal: repo-a is in base
 				},
 			},
 		},
 	}
-	merged, err := MergeWorkspaceOverlay(ws, overlay, t.TempDir())
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	_, err := MergeWorkspaceOverlay(ws, overlay, t.TempDir())
+	if err == nil {
+		t.Fatal("expected error when overlay uses source= on a base-config repo, got nil")
 	}
-	entry := merged.Claude.Content.Repos["repo-a"]
-	if entry.Source != "repos/repo-a.md" {
-		t.Errorf("repo-a source should be base value repos/repo-a.md, got %q", entry.Source)
+	if !strings.Contains(err.Error(), "source=") || !strings.Contains(err.Error(), "repo-a") {
+		t.Errorf("error message should mention source= and repo-a, got: %v", err)
 	}
 }
 

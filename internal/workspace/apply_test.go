@@ -1313,6 +1313,91 @@ visibility = "public"
 	}
 }
 
+// TestApplyOverlayReApply verifies the most common overlay path: OverlayURL is
+// already in instance.json from a prior init or apply (branch 2 of step 0.5),
+// the sync succeeds, the overlay config is merged into the workspace, and the
+// pipeline completes without error. This is the path taken on every subsequent
+// apply after the overlay has been discovered.
+func TestApplyOverlayReApply(t *testing.T) {
+	overlayTOML := `
+[env.vars]
+OVERLAY_ACTIVE = "true"
+`
+	overlayDir := setupOverlayDir(t, overlayTOML)
+
+	configTOML := `
+[workspace]
+name = "test-ws"
+
+[[sources]]
+org = "testorg"
+
+[groups.all]
+visibility = "public"
+`
+	niwaDir, instanceRoot := setupTestWorkspace(t, configTOML, nil, []struct{ group, name string }{
+		{"all", "repo1"},
+	})
+
+	result, err := config.Load(filepath.Join(niwaDir, "workspace.toml"))
+	if err != nil {
+		t.Fatalf("loading config: %v", err)
+	}
+	cfg := result.Config
+
+	mockClient := &mockGitHubClient{
+		repos: map[string][]github.Repo{
+			"testorg": {
+				{Name: "repo1", Visibility: "public", SSHURL: "git@github.com:testorg/repo1.git"},
+			},
+		},
+	}
+
+	// State already has OverlayURL — simulates a re-apply after initial discovery.
+	initialState := &InstanceState{
+		SchemaVersion:  SchemaVersion,
+		InstanceName:   "test-ws",
+		InstanceNumber: 1,
+		Root:           instanceRoot,
+		OverlayURL:     "testorg/test-ws-overlay",
+		OverlayCommit:  "deadbeef",
+	}
+	if err := SaveState(instanceRoot, initialState); err != nil {
+		t.Fatal(err)
+	}
+
+	// Stub: sync succeeds (wasCloneAttempt=false, nil error); copies overlay TOML.
+	cloneFn := func(url, dir string) (bool, error) {
+		if err := os.MkdirAll(filepath.Join(dir, ".git"), 0o755); err != nil {
+			return false, err
+		}
+		data, err := os.ReadFile(filepath.Join(overlayDir, "workspace-overlay.toml"))
+		if err != nil {
+			return false, err
+		}
+		return false, os.WriteFile(filepath.Join(dir, "workspace-overlay.toml"), data, 0o644)
+	}
+	headFn := func(dir string) (string, error) { return "deadbeef", nil }
+
+	applier := NewApplier(mockClient)
+	applier.Cloner = &Cloner{}
+	applier.cloneOrSync = cloneFn
+	applier.headSHA = headFn
+
+	if err := applier.Apply(context.Background(), cfg, niwaDir, instanceRoot); err != nil {
+		t.Fatalf("re-apply with overlay failed: %v", err)
+	}
+
+	// State OverlayURL must be preserved after re-apply.
+	state, err := LoadState(instanceRoot)
+	if err != nil {
+		t.Fatalf("loading state after re-apply: %v", err)
+	}
+	if state.OverlayURL != "testorg/test-ws-overlay" {
+		t.Errorf("OverlayURL = %q after re-apply, want testorg/test-ws-overlay", state.OverlayURL)
+	}
+}
+
 // TestApplyOverlayConventionDiscovery verifies that when no OverlayURL is in state
 // and ConfigSourceURL is set, convention discovery derives the overlay URL, clones
 // the overlay, and writes OverlayURL + OverlayCommit to state. Scenario 17.
