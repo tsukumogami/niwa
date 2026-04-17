@@ -2227,7 +2227,6 @@ marketplaces = ["repo:tools/.claude-plugin/marketplace.json"]
 // (like tsukumogami@tsukumogami which needs repo:tools/...) must not appear in the
 // output when the overlay is not accessible.
 func TestApplyOverlayPluginsIsolation(t *testing.T) {
-	basePlugins := `["shirabe@shirabe"]`
 	overlayTOML := `
 [claude]
 plugins = ["tsukumogami@tsukumogami"]
@@ -2247,7 +2246,6 @@ visibility = "public"
 [claude]
 plugins = ["shirabe@shirabe"]
 `
-	_ = basePlugins
 
 	mockClient := &mockGitHubClient{
 		repos: map[string][]github.Repo{
