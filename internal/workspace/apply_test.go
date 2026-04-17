@@ -1518,10 +1518,17 @@ visibility = "public"
 
 // TestApplyOverlayWithValidOverlay verifies that when an overlay is active, overlay
 // repos/groups/content appear in the pipeline output. Scenario 19.
+//
+// The overlay merge now happens BEFORE discoverAllRepos, so the merged config
+// (base + overlay) feeds into discovery. extra-repo from the overlay source must
+// appear in the final state's Repos map — not just as a pre-existing directory.
 func TestApplyOverlayWithValidOverlay(t *testing.T) {
 	overlayTOML := `
 [[sources]]
 org = "overlayorg"
+repos = ["extra-repo"]
+
+[groups.overlay-group]
 repos = ["extra-repo"]
 `
 	overlayDir := setupOverlayDir(t, overlayTOML)
@@ -1536,9 +1543,14 @@ org = "testorg"
 [groups.all]
 visibility = "public"
 `
+	// Pre-create repo directories with .git markers so the Cloner skips actual git
+	// operations. extra-repo lives under overlay-group (defined by the overlay),
+	// not under "all" (the base group). Its presence in state.Repos confirms it
+	// was discovered through the overlay source after the merge ran before
+	// discoverAllRepos.
 	niwaDir, instanceRoot := setupTestWorkspace(t, configTOML, nil, []struct{ group, name string }{
 		{"all", "repo1"},
-		{"all", "extra-repo"},
+		{"overlay-group", "extra-repo"},
 	})
 
 	result, err := config.Load(filepath.Join(niwaDir, "workspace.toml"))
@@ -1596,19 +1608,24 @@ visibility = "public"
 		t.Fatalf("apply with overlay failed: %v", err)
 	}
 
-	// extra-repo from the overlay source should have been cloned into the
-	// "all" group. Since we pre-created its .git marker in setupTestWorkspace,
-	// we verify the repo directory exists.
-	extraRepoDir := filepath.Join(instanceRoot, "all", "extra-repo")
-	if _, err := os.Stat(extraRepoDir); err != nil {
-		t.Errorf("extra-repo from overlay source should exist: %v", err)
-	}
-
-	// State should preserve the overlay fields.
 	state, err := LoadState(instanceRoot)
 	if err != nil {
 		t.Fatalf("loading state: %v", err)
 	}
+
+	// extra-repo must appear in the state Repos map, proving it was discovered
+	// via the overlay source (overlayorg) after the overlay merge ran before
+	// discoverAllRepos. A pre-seeded directory alone would not produce this entry.
+	if _, ok := state.Repos["extra-repo"]; !ok {
+		t.Error("extra-repo from overlay source should appear in state Repos map after apply")
+	}
+
+	// repo1 from the base source must also be present.
+	if _, ok := state.Repos["repo1"]; !ok {
+		t.Error("repo1 from base source should appear in state Repos map after apply")
+	}
+
+	// State should preserve the overlay fields.
 	if state.OverlayURL != "testorg/test-ws-overlay" {
 		t.Errorf("OverlayURL = %q, want %q", state.OverlayURL, "testorg/test-ws-overlay")
 	}

@@ -289,35 +289,9 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 	// attribute" — drift for those files is pure content-hash drift.
 	sourceTuples := map[string][]SourceEntry{}
 
-	// Step 1: Discover repos from all sources.
-	allRepos, err := a.discoverAllRepos(ctx, cfg.Sources)
-	if err != nil {
-		return nil, err
-	}
-
-	// Step 2: Classify repos into groups.
-	classified, classifyWarnings, err := Classify(allRepos, cfg.Groups)
-	if err != nil {
-		return nil, fmt.Errorf("classifying repos: %w", err)
-	}
-	allWarnings = append(allWarnings, classifyWarnings...)
-
-	// Step 2.1: Inject explicit repos (url + group set, not from sources).
-	classified, explicitWarnings, err := InjectExplicitRepos(classified, cfg.Repos, cfg.Groups)
-	if err != nil {
-		return nil, err
-	}
-	allWarnings = append(allWarnings, explicitWarnings...)
-
-	// Step 2.5: Warn about unknown repo names in [repos] overrides.
-	discoveredNames := make([]string, len(allRepos))
-	for i, r := range allRepos {
-		discoveredNames[i] = r.Name
-	}
-	known := KnownRepoNames(cfg, discoveredNames)
-	allWarnings = append(allWarnings, WarnUnknownRepos(cfg, known)...)
-
 	// Step overlay-2.5: Determine and sync the workspace overlay.
+	// This must run BEFORE discoverAllRepos so that the merged config (base +
+	// overlay) feeds into discovery — overlay sources can then contribute repos.
 	// Three branches based on NoOverlay and OverlayURL from instance state:
 	//   1. NoOverlay=true  → skip entirely; overlayDir stays empty.
 	//   2. OverlayURL set  → sync existing clone; hard error on sync failure.
@@ -332,14 +306,9 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 			if dirErr != nil {
 				return nil, fmt.Errorf("resolving overlay directory: %w", dirErr)
 			}
-			firstTime, syncErr := a.cloneOrSync(opts.overlayURL, dir)
+			_, syncErr := a.cloneOrSync(opts.overlayURL, dir)
 			if syncErr != nil {
-				if !firstTime {
-					// Sync failure (previously cloned) is a hard error.
-					return nil, fmt.Errorf("workspace overlay sync failed. Use --no-overlay to skip.")
-				}
-				// firstTime=true means the clone directory was lost/invalid.
-				// Treat as sync failure (we had a registered overlay URL).
+				// Any sync failure is a hard error when OverlayURL is registered.
 				return nil, fmt.Errorf("workspace overlay sync failed. Use --no-overlay to skip.")
 			}
 			// Sync succeeded. Check whether the overlay has advanced.
@@ -369,18 +338,11 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 						// Sync failure on a previously-discovered overlay: hard error.
 						return nil, fmt.Errorf("workspace overlay sync failed. Use --no-overlay to skip.")
 					}
-					// Clone/sync succeeded. Write OverlayURL and OverlayCommit to state.
+					// Clone/sync succeeded. Record URL and commit to return via
+					// pipelineResult; Apply() will write them in the final SaveState.
 					sha, _ := a.headSHA(dir)
 					pipelineOverlayURL = conventionURL
 					pipelineOverlayCommit = sha
-
-					// Persist the newly discovered overlay URL before proceeding so that
-					// subsequent applies use branch 2 (sync) instead of re-discovering.
-					if opts.existingState != nil {
-						opts.existingState.OverlayURL = conventionURL
-						opts.existingState.OverlayCommit = sha
-						_ = SaveState(instanceRoot, opts.existingState)
-					}
 					a.overlayDir = dir
 				}
 			}
@@ -388,7 +350,8 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 	}
 
 	// Step overlay-2.6: Parse and merge the overlay config when overlayDir is set.
-	// The merged config replaces cfg for all subsequent pipeline steps.
+	// The merged config replaces cfg for all subsequent pipeline steps, including
+	// discoverAllRepos, so overlay sources contribute repos to discovery.
 	if a.overlayDir != "" {
 		overlayTOML := filepath.Join(a.overlayDir, "workspace-overlay.toml")
 		overlay, parseErr := config.ParseOverlay(overlayTOML)
@@ -404,6 +367,34 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		}
 		cfg = mergedWS
 	}
+
+	// Step 1: Discover repos from all sources (base + overlay after merge).
+	allRepos, err := a.discoverAllRepos(ctx, cfg.Sources)
+	if err != nil {
+		return nil, err
+	}
+
+	// Step 2: Classify repos into groups.
+	classified, classifyWarnings, err := Classify(allRepos, cfg.Groups)
+	if err != nil {
+		return nil, fmt.Errorf("classifying repos: %w", err)
+	}
+	allWarnings = append(allWarnings, classifyWarnings...)
+
+	// Step 2.1: Inject explicit repos (url + group set, not from sources).
+	classified, explicitWarnings, err := InjectExplicitRepos(classified, cfg.Repos, cfg.Groups)
+	if err != nil {
+		return nil, err
+	}
+	allWarnings = append(allWarnings, explicitWarnings...)
+
+	// Step 2.5: Warn about unknown repo names in [repos] overrides.
+	discoveredNames := make([]string, len(allRepos))
+	for i, r := range allRepos {
+		discoveredNames[i] = r.Name
+	}
+	known := KnownRepoNames(cfg, discoveredNames)
+	allWarnings = append(allWarnings, WarnUnknownRepos(cfg, known)...)
 
 	// Step 2a: Sync global config repo if registered and not skipped.
 	if a.GlobalConfigDir != "" && !opts.skipGlobal {
