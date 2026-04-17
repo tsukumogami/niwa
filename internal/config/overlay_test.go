@@ -89,6 +89,33 @@ func TestDeriveOverlayURL(t *testing.T) {
 	}
 }
 
+func TestOverlayRepoName(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		wantName string
+		wantOK   bool
+	}{
+		{"shorthand", "myorg/myrepo-overlay", "myrepo-overlay", true},
+		{"https", "https://github.com/myorg/myrepo-overlay.git", "myrepo-overlay", true},
+		{"ssh", "git@github.com:myorg/myrepo-overlay.git", "myrepo-overlay", true},
+		{"no git suffix", "myorg/myrepo-overlay", "myrepo-overlay", true},
+		{"invalid", "notavalidurl", "", false},
+		{"empty", "", "", false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := OverlayRepoName(tc.input)
+			if ok != tc.wantOK {
+				t.Errorf("OverlayRepoName(%q) ok=%v, want %v", tc.input, ok, tc.wantOK)
+			}
+			if ok && got != tc.wantName {
+				t.Errorf("OverlayRepoName(%q) = %q, want %q", tc.input, got, tc.wantName)
+			}
+		})
+	}
+}
+
 func TestOverlayDir_WithXDGConfigHome(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", tmp)

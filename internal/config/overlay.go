@@ -179,6 +179,14 @@ func DeriveOverlayURL(sourceURL string) (conventionURL string, ok bool) {
 	return org + "/" + repo + "-overlay", true
 }
 
+// OverlayRepoName extracts the repository name from an overlay URL.
+// Accepts HTTPS URLs, SSH URLs, or shorthand (org/repo). Returns ok=false
+// when the URL cannot be parsed.
+func OverlayRepoName(overlayURL string) (string, bool) {
+	_, repo, ok := parseOrgRepo(overlayURL)
+	return repo, ok
+}
+
 // parseOrgRepo extracts (org, repo) from an HTTPS URL, SSH URL, or shorthand.
 // Strips a trailing ".git" suffix from the repo name.
 func parseOrgRepo(s string) (org, repo string, ok bool) {
