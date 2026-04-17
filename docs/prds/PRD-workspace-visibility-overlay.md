@@ -1,32 +1,33 @@
 ---
-status: Delivered
-version: 4
+status: Delivered (extended)
+version: 5
 problem: |
-  When a niwa workspace config repo is made public, the workspace.toml exposes information through several surfaces: source org identifiers in [[sources]], group names, [repos.*] section keys (which are repo names), [claude.content.repos.*] entries including subdirectory mappings that reveal code structure, and [channels.*.access] sections containing user IDs. Teams that want to publish their workspace config — to enable open contribution, share it as a reference, or reduce maintenance burden — currently have no way to keep certain repo references out of the public config without maintaining a completely separate workspace config that duplicates all the public configuration.
+  When a niwa workspace config repo is made public, the workspace.toml exposes information through several surfaces: source org identifiers in [[sources]], group names, [repos.*] section keys (which are repo names), [claude.content.repos.*] entries including subdirectory mappings that reveal code structure, [channels.*.access] sections containing user IDs, and vault infrastructure details such as provider kind, project IDs, and secret names in [vault.provider] and [env.secrets]. Teams that want to publish their workspace config — to enable open contribution, share it as a reference, or reduce maintenance burden — currently have no way to keep these details out of the public config without maintaining a completely separate workspace config that duplicates all the public configuration.
 goals: |
-  Teams can publish their niwa workspace config while keeping additional repo references, group definitions, and operational config in a separately access-controlled overlay repo that niwa fetches automatically when accessible. Users without overlay access experience a complete workspace with the base repos only — all configured repos are cloned, hooks execute without error, and environment setup matches the workspace config — with no output referencing the overlay or its contents.
+  Teams can publish their niwa workspace config while keeping additional repo references, group definitions, operational config, and vault infrastructure in a separately access-controlled overlay repo that niwa fetches automatically when accessible. Users without overlay access experience a complete workspace with the base repos only — all configured repos are cloned, hooks execute without error, and environment setup matches the workspace config — with no output referencing the overlay or its contents. The base config documents what secrets are needed; the overlay specifies how to obtain them.
 ---
 
 # PRD: Workspace overlay
 
 ## Status
 
-Delivered
+Delivered (extended — R23/R24 open)
 
 ## Problem Statement
 
-When a niwa workspace config repo is published, the `workspace.toml` reveals information through several surfaces: `[[sources]]` entries expose which GitHub orgs and repos the workspace includes; `[groups.*]` definitions expose organizational taxonomy; `[repos.*]` TOML section keys are repo names; `[claude.content.repos.*]` entries reveal internal directory structure via subdirectory mappings; and `[channels.*.access]` sections expose user IDs.
+When a niwa workspace config repo is published, the `workspace.toml` reveals information through several surfaces: `[[sources]]` entries expose which GitHub orgs and repos the workspace includes; `[groups.*]` definitions expose organizational taxonomy; `[repos.*]` TOML section keys are repo names; `[claude.content.repos.*]` entries reveal internal directory structure via subdirectory mappings; `[channels.*.access]` sections expose user IDs; and `[vault.provider]` entries expose vault infrastructure details (provider kind, project IDs) while `[env.secrets]` entries expose the names of secrets the team depends on.
 
-Teams that want the benefits of a published workspace config — enabling contributors to initialize from it, using it as documentation of workspace structure, sharing tooling practices — need a way to separate base configuration from additional configuration without abandoning niwa's single-source-of-truth model.
+Teams that want the benefits of a published workspace config — enabling contributors to initialize from it, using it as documentation of workspace structure, sharing tooling practices — need a way to separate base configuration from additional configuration without abandoning niwa's single-source-of-truth model. This includes keeping vault infrastructure and secret resolution out of the public file while still documenting what secrets are required.
 
 The overlay mechanism is about layering, not visibility. Both the base workspace config and the overlay repo can be public or private — a team might overlay a public supplemental config on top of a public base, or an access-controlled repo on top of a published one. The mechanism works the same either way.
 
 ## Goals
 
-1. Teams can publish their workspace config repo while keeping additional repo references, group definitions, or operational config in a separate overlay repo.
+1. Teams can publish their workspace config repo while keeping additional repo references, group definitions, operational config, and vault infrastructure in a separate overlay repo.
 2. Users with access to the overlay repo get a complete workspace (base and overlay repos) from a single `niwa init` + `niwa apply` — no additional registration step.
 3. Users without overlay access get a complete workspace with base repos only, with no output (stdout, stderr, or log files) referencing the overlay or its contents.
 4. Overlay discovery is automatic by convention with no configuration required for the common case.
+5. The base config documents what secrets are needed (and at what tier: required, recommended, or optional) without specifying vault addresses. The overlay provides the vault provider and resolution paths.
 
 ## User Stories
 
@@ -90,6 +91,14 @@ repos = ["api"]
 
 [claude.content.repos.api]
 source = "content/api.md"
+
+# Declare what secrets this workspace needs without specifying how to obtain them.
+# The overlay provides vault addresses for these vars.
+[env.secrets.required]
+ACMECORP_API_KEY = "API key for acmecorp services - resolved by overlay vault"
+
+[env.secrets.recommended]
+ACMECORP_MONITORING_TOKEN = "Monitoring integration token - see internal runbook"
 ```
 
 `acmecorp/dot-niwa/content/api.md`:
@@ -106,6 +115,16 @@ Routes live in internal/routes/. Add new endpoints in their own file.
 `acmecorp/dot-niwa-overlay/workspace-overlay.toml`:
 
 ```toml
+# Vault provider — kept private so project IDs don't appear in the public base config.
+[vault.provider]
+kind    = "infisical"
+project = "c6673ab0-c95d-4570-b947-5f77501ce38a"
+
+# Vault resolution for secrets declared as required/recommended in the base config.
+[env.secrets]
+ACMECORP_API_KEY           = "vault://ACMECORP_API_KEY"
+ACMECORP_MONITORING_TOKEN  = "vault://ACMECORP_MONITORING_TOKEN"
+
 [[sources]]
 org = "acmecorp"
 repos = ["billing", "auth-service", "internal-tools"]
@@ -119,7 +138,7 @@ source = "content/billing.md"
 [claude.content.repos.api]
 overlay = "overlays/api-internal.md"
 
-[env]
+[env.vars]
 ACMECORP_INTERNAL = "true"
 ```
 
@@ -280,11 +299,23 @@ If `acmecorp/niwa-internal` is inaccessible, `niwa init` aborts with a hard erro
 
 **R8**: A workspace overlay repo contains a file named `workspace-overlay.toml` at the repo root. If the overlay repo is accessible but `workspace-overlay.toml` is missing, `niwa apply` aborts with a non-zero exit code and an error identifying the missing file.
 
-**R9**: `workspace-overlay.toml` supports these additive sections: `[[sources]]`, `[groups.*]`, `[repos.*]`, `[claude.content.*]`. Within `[claude.content.repos.*]`, two field variants are supported: `source` (for repos introduced by the overlay) and `overlay` (for repos already defined in the base config — see R13).
+**R9**: `workspace-overlay.toml` supports these additive sections: `[[sources]]`, `[groups.*]`, `[repos.*]`, `[claude.content.*]`, `[vault.provider]`. Within `[claude.content.repos.*]`, two field variants are supported: `source` (for repos introduced by the overlay) and `overlay` (for repos already defined in the base config — see R13).
 
-**R10**: `workspace-overlay.toml` supports these override sections: `[claude.hooks]`, `[claude.settings]`, `[env]`, `[files]`. Merge semantics: hooks append (overlay hooks added after base config hooks); settings per-key (overlay value used only if key absent in base config); `env.files` append (overlay files sourced after base config files); `env` vars per-key (overlay value used only if key absent in base config); `files` per-key (overlay file used only if destination absent in base config).
+**R10**: `workspace-overlay.toml` supports these override sections: `[claude.hooks]`, `[claude.settings]`, `[env]`, `[files]`. Merge semantics: hooks append (overlay hooks added after base config hooks); settings per-key (overlay value used only if key absent in base config); `env.files` append (overlay files sourced after base config files); `env` vars per-key (overlay value used only if key absent in base config); `env.secrets` per-key (overlay resolution used only if key absent in base config's `[env.secrets]`); `files` per-key (overlay file used only if destination absent in base config).
 
 **R11**: `workspace-overlay.toml` does not support workspace metadata fields (`[workspace]`, `[channels]`). All `[[sources]]` entries must include explicit `repos` lists — auto-discovery is prohibited in overlay source declarations for all orgs.
+
+### Vault in the Overlay
+
+**R23**: When `workspace-overlay.toml` declares `[vault.provider]`, niwa builds a vault provider bundle from that declaration and resolves `vault://` references in the overlay's `[env.secrets]` entries against it, before merging the overlay into the base config. The overlay vault provider is built and torn down independently of any vault provider declared in the base config — each layer resolves its own secrets in isolation (the same per-layer scoping applied to the global config overlay). If the overlay declares a named provider (`[vault.providers.<name>]`) that collides with a named provider in the base config, `niwa apply` aborts with a collision error naming the duplicate. The anonymous provider (`[vault.provider]`) does not collide with any base config provider.
+
+**R24**: The base config may declare what env vars are needed without specifying vault addresses, using three sub-tables of `[env.secrets]`:
+
+- `[env.secrets.required]`: env vars that must be present when `niwa apply` completes. If a required var is absent after all vault resolution and env file sourcing, `niwa apply` aborts with a non-zero exit code naming the missing var.
+- `[env.secrets.recommended]`: env vars that should be present. If absent after all resolution, `niwa apply` emits a stderr warning and continues.
+- `[env.secrets.optional]`: env vars that are documented as useful but not expected to be present universally. If absent, no diagnostic is produced.
+
+All three sub-tables use `KEY = "description"` syntax, where the description explains the var's purpose and how to obtain it. These declarations coexist with vault:// references: a key declared in `[env.secrets.required]` and also appearing in the overlay's `[env.secrets]` (with a vault:// value) is not a conflict — the required check verifies the var is present, and the overlay's vault ref provides its value.
 
 ### Merge Semantics
 
@@ -363,10 +394,18 @@ Users without overlay access receive the base `CLAUDE.local.md` only; no overlay
 - [ ] `niwa apply` stdout and stderr (without `--debug` or `--verbose`) contain no text matching the overlay's repo name, URL, or local path.
 - [ ] Overlay repo accessible but `workspace-overlay.toml` absent: `niwa apply` exits with a non-zero exit code and an error identifying the missing file.
 
+### Overlay Vault and Secret Tiers
+
+- [ ] Base config with `[env.secrets.required] FOO = "description"` and overlay with `[vault.provider]` + `[env.secrets] FOO = "vault://FOO"`: after `niwa apply`, `FOO` is written to `.local.env` resolved from the overlay vault.
+- [ ] Base config with `[env.secrets.required] FOO = "description"`, no overlay, `FOO` absent from environment: `niwa apply` aborts with a non-zero exit code and an error naming `FOO`.
+- [ ] Base config with `[env.secrets.recommended] BAR = "description"`, `BAR` absent after all resolution: `niwa apply` exits with code 0 and emits a stderr warning naming `BAR`.
+- [ ] Base config with `[env.secrets.optional] BAZ = "description"`, `BAZ` absent: `niwa apply` exits with code 0, no warning produced.
+- [ ] Overlay with `[vault.provider]` and base config with `[vault.provider]`: both resolve their own layer's `[env.secrets]` independently; no collision error for anonymous providers.
+- [ ] Overlay with `[vault.providers.shared]` and base config with `[vault.providers.shared]` (same name): `niwa apply` aborts with a collision error naming `shared` before any git operations.
+
 ## Out of Scope
 
 - **Registering a non-convention overlay after init**: If an overlay repo with a non-convention name is created after the workspace is initialized, there is no v1 command to register it. Teams in this situation must use `--overlay` at init time, or use the convention name. A workspace-level `niwa config set` command is deferred to a future release.
-- **Secrets management**: Vault integration for removing secrets from workspace configs. Covered separately.
 - **Per-developer personal config**: The GlobalOverride (`niwa config set global`) handles personal hooks, env, and settings. The overlay is for workspace-level supplemental configuration, not personal preferences.
 - **Selective per-repo access within the overlay**: Access to the overlay is all-or-nothing. Users either clone the overlay and get all overlay config, or they don't and get none.
 - **Full content replacement for repos in the base config**: The overlay can provide content for repos it introduces (`source`) and can append context to base repos (`overlay` field). It cannot replace the base config's content entry for a base repo — `source` on a base-config repo is an error.
@@ -409,3 +448,6 @@ Groups and repo entries: base config wins entirely. Content is different — app
 
 **`niwa status` does not display overlay state.**
 Any mention of the overlay in status output could reveal its existence to users who shouldn't know about it. Users who need to inspect overlay state can read `.niwa/instance.json` directly.
+
+**Vault infrastructure belongs in the overlay, not the base config.**
+The base config documents what secrets a workspace needs (`[env.secrets.required]`, `[env.secrets.recommended]`, `[env.secrets.optional]`). The overlay supplies how to obtain them (`[vault.provider]` + `[env.secrets]` vault:// references). This mirrors the separation between the personal overlay (global config) and the base config — each layer owns its vault provider and resolves its own secrets in isolation. The base config stays publishable without leaking vault project IDs or the names of secrets the team depends on. Teams without an overlay still get the required/recommended/optional declarations as documentation for manual secret setup.
