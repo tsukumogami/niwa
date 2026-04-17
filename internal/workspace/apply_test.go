@@ -2220,6 +2220,119 @@ marketplaces = ["repo:tools/.claude-plugin/marketplace.json"]
 	}
 }
 
+// TestApplyOverlayPluginsIsolation verifies that overlay plugins are absent from
+// settings.json when no overlay is active, and present when the overlay is active.
+//
+// This is the critical isolation test: a plugin that requires a private marketplace
+// (like tsukumogami@tsukumogami which needs repo:tools/...) must not appear in the
+// output when the overlay is not accessible.
+func TestApplyOverlayPluginsIsolation(t *testing.T) {
+	basePlugins := `["shirabe@shirabe"]`
+	overlayTOML := `
+[claude]
+plugins = ["tsukumogami@tsukumogami"]
+`
+	overlayDir := setupOverlayDir(t, overlayTOML)
+
+	configTOML := `
+[workspace]
+name = "test-ws"
+
+[[sources]]
+org = "testorg"
+
+[groups.all]
+visibility = "public"
+
+[claude]
+plugins = ["shirabe@shirabe"]
+`
+	_ = basePlugins
+
+	mockClient := &mockGitHubClient{
+		repos: map[string][]github.Repo{
+			"testorg": {
+				{Name: "repo1", Visibility: "public", SSHURL: "git@github.com:testorg/repo1.git"},
+			},
+		},
+	}
+
+	// ---- Sub-test: no overlay ----
+	// Settings.json must contain only the base plugin, not the overlay plugin.
+	t.Run("no overlay", func(t *testing.T) {
+		niwaDir, instanceRoot := setupTestWorkspace(t, configTOML, nil, []struct{ group, name string }{
+			{"all", "repo1"},
+		})
+		result, err := config.Load(filepath.Join(niwaDir, "workspace.toml"))
+		if err != nil {
+			t.Fatalf("loading config: %v", err)
+		}
+		if err := SaveState(instanceRoot, &InstanceState{
+			SchemaVersion:  SchemaVersion,
+			InstanceName:   "test-ws",
+			InstanceNumber: 1,
+			Root:           instanceRoot,
+		}); err != nil {
+			t.Fatal(err)
+		}
+
+		applier := NewApplier(mockClient)
+		if err := applier.Apply(context.Background(), result.Config, niwaDir, instanceRoot); err != nil {
+			t.Fatalf("apply (no overlay) failed: %v", err)
+		}
+
+		settingsPath := filepath.Join(instanceRoot, ".claude", "settings.json")
+		assertFileContains(t, settingsPath, "shirabe@shirabe")
+		assertFileNotContains(t, settingsPath, "tsukumogami@tsukumogami")
+	})
+
+	// ---- Sub-test: with overlay ----
+	// Settings.json must contain both base and overlay plugins.
+	t.Run("with overlay", func(t *testing.T) {
+		niwaDir, instanceRoot := setupTestWorkspace(t, configTOML, nil, []struct{ group, name string }{
+			{"all", "repo1"},
+		})
+		result, err := config.Load(filepath.Join(niwaDir, "workspace.toml"))
+		if err != nil {
+			t.Fatalf("loading config: %v", err)
+		}
+		if err := SaveState(instanceRoot, &InstanceState{
+			SchemaVersion:  SchemaVersion,
+			InstanceName:   "test-ws",
+			InstanceNumber: 1,
+			Root:           instanceRoot,
+			OverlayURL:     "testorg/test-ws-overlay",
+			OverlayCommit:  "abc123",
+		}); err != nil {
+			t.Fatal(err)
+		}
+
+		cloneFn := func(url, dir string) (bool, error) {
+			if err := os.MkdirAll(filepath.Join(dir, ".git"), 0o755); err != nil {
+				return false, err
+			}
+			data, err := os.ReadFile(filepath.Join(overlayDir, "workspace-overlay.toml"))
+			if err != nil {
+				return false, err
+			}
+			return false, os.WriteFile(filepath.Join(dir, "workspace-overlay.toml"), data, 0o644)
+		}
+
+		applier := NewApplier(mockClient)
+		applier.Cloner = &Cloner{}
+		applier.cloneOrSync = cloneFn
+		applier.headSHA = func(string) (string, error) { return "abc123", nil }
+
+		if err := applier.Apply(context.Background(), result.Config, niwaDir, instanceRoot); err != nil {
+			t.Fatalf("apply (with overlay) failed: %v", err)
+		}
+
+		settingsPath := filepath.Join(instanceRoot, ".claude", "settings.json")
+		assertFileContains(t, settingsPath, "shirabe@shirabe")
+		assertFileContains(t, settingsPath, "tsukumogami@tsukumogami")
+	})
+}
+
 func assertFileContains(t *testing.T, path, substr string) {
 	t.Helper()
 	data, err := os.ReadFile(path)
