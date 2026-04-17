@@ -1323,3 +1323,45 @@ func TestMergeWorkspaceOverlay_ContentOverlayMissingBaseReturnsError(t *testing.
 		t.Errorf("error %q does not mention no-such-repo", err.Error())
 	}
 }
+
+// TestMergeWorkspaceOverlay_RepoOverrideDeepCopy verifies that mutating a hook
+// list on the merged config's repo override does not corrupt the original
+// WorkspaceConfig. This guards against the shallow-copy bug where
+// RepoOverride.Claude pointer was shared between the original and merged config.
+func TestMergeWorkspaceOverlay_RepoOverrideDeepCopy(t *testing.T) {
+	ws := &config.WorkspaceConfig{
+		Workspace: config.WorkspaceMeta{Name: "test"},
+		Repos: map[string]config.RepoOverride{
+			"repo-a": {
+				Claude: &config.ClaudeOverride{
+					Hooks: config.HooksConfig{
+						"pre_tool_use": {{Scripts: []string{"original.sh"}}},
+					},
+				},
+			},
+		},
+	}
+	overlay := &config.WorkspaceOverlay{}
+
+	merged, err := MergeWorkspaceOverlay(ws, overlay, t.TempDir())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Mutate the hook list on the merged result's repo override.
+	mergedOverride := merged.Repos["repo-a"]
+	mergedOverride.Claude.Hooks["pre_tool_use"] = append(
+		mergedOverride.Claude.Hooks["pre_tool_use"],
+		config.HookEntry{Scripts: []string{"injected.sh"}},
+	)
+	merged.Repos["repo-a"] = mergedOverride
+
+	// The original ws must be unchanged.
+	origHooks := ws.Repos["repo-a"].Claude.Hooks["pre_tool_use"]
+	if len(origHooks) != 1 {
+		t.Errorf("original ws repo-a hooks mutated: got %d entries, want 1", len(origHooks))
+	}
+	if origHooks[0].Scripts[0] != "original.sh" {
+		t.Errorf("original ws repo-a hook script = %q, want original.sh", origHooks[0].Scripts[0])
+	}
+}

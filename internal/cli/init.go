@@ -298,11 +298,11 @@ func buildInitState(cmd *cobra.Command, mode initMode, source string) (*workspac
 		if err != nil {
 			return nil, fmt.Errorf("could not determine overlay directory: %w", err)
 		}
-		_, cloneErr := config.CloneOrSyncOverlay(initOverlay, overlayDir)
+		_, cloneErr := workspace.CloneOrSyncOverlay(initOverlay, overlayDir)
 		if cloneErr != nil {
 			return nil, fmt.Errorf("overlay clone failed: %w", cloneErr)
 		}
-		sha, shaErr := config.HeadSHA(overlayDir)
+		sha, shaErr := workspace.HeadSHA(overlayDir)
 		if shaErr != nil {
 			fmt.Fprintf(os.Stderr, "warning: could not read overlay HEAD: %v\n", shaErr)
 		}
@@ -317,7 +317,7 @@ func buildInitState(cmd *cobra.Command, mode initMode, source string) (*workspac
 				fmt.Fprintf(cmd.OutOrStdout(), "Checking for companion overlay: %s\n", conventionURL)
 				overlayDir, dirErr := config.OverlayDir(conventionURL)
 				if dirErr == nil {
-					firstTime, cloneErr := config.CloneOrSyncOverlay(conventionURL, overlayDir)
+					firstTime, cloneErr := workspace.CloneOrSyncOverlay(conventionURL, overlayDir)
 					if cloneErr != nil {
 						if firstTime {
 							// Inaccessible on first attempt — print note and skip silently.
@@ -329,7 +329,7 @@ func buildInitState(cmd *cobra.Command, mode initMode, source string) (*workspac
 						}
 						// firstTime=false errors are non-fatal at init time (no state written).
 					} else {
-						sha, shaErr := config.HeadSHA(overlayDir)
+						sha, shaErr := workspace.HeadSHA(overlayDir)
 						if shaErr != nil {
 							fmt.Fprintf(os.Stderr, "warning: could not read overlay HEAD: %v\n", shaErr)
 						}

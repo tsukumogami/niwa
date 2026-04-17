@@ -831,17 +831,47 @@ func copyGroupMap(m map[string]config.GroupConfig) map[string]config.GroupConfig
 	return out
 }
 
-// copyRepoOverrideMap returns a shallow copy of a repos map. RepoOverride
-// values are value types (no deep copy needed for the overlay merge use case).
+// copyRepoOverrideMap returns a deep copy of a repos map. RepoOverride
+// contains pointer and reference fields (Claude *ClaudeOverride, Env.Files,
+// Env.Vars, Files, SetupDir) that must be deep-copied so downstream mutations
+// of the merged result's repo overrides do not corrupt the original config.
 func copyRepoOverrideMap(m map[string]config.RepoOverride) map[string]config.RepoOverride {
 	if m == nil {
 		return nil
 	}
 	out := make(map[string]config.RepoOverride, len(m))
 	for k, v := range m {
-		out[k] = v
+		out[k] = deepCopyRepoOverride(v)
 	}
 	return out
+}
+
+// deepCopyRepoOverride returns a deep copy of a RepoOverride, including all
+// pointer and reference fields.
+func deepCopyRepoOverride(v config.RepoOverride) config.RepoOverride {
+	c := v
+	// Deep-copy Claude *ClaudeOverride.
+	if v.Claude != nil {
+		claude := *v.Claude
+		claude.Hooks = copyHooks(v.Claude.Hooks)
+		claude.Settings = copySettings(v.Claude.Settings)
+		claude.Env = copyClaudeEnv(v.Claude.Env)
+		if v.Claude.Plugins != nil {
+			p := slices.Clone(*v.Claude.Plugins)
+			claude.Plugins = &p
+		}
+		c.Claude = &claude
+	}
+	// Deep-copy Env (contains Files slice and Vars map).
+	c.Env = copyEnv(v.Env)
+	// Deep-copy Files map.
+	c.Files = copyStringMap(v.Files)
+	// Deep-copy SetupDir *string.
+	if v.SetupDir != nil {
+		s := *v.SetupDir
+		c.SetupDir = &s
+	}
+	return c
 }
 
 // copyClaudeConfigFull returns a deep copy of a ClaudeConfig pointer, including
