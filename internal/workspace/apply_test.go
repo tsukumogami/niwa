@@ -1161,40 +1161,6 @@ func setupOverlayDir(t *testing.T, overlayTOML string) string {
 	return dir
 }
 
-// overlayStub builds injected cloneOrSync and headSHA functions for testing.
-// cloneDir is the pre-created overlay directory to "clone" into.
-// headSHAResult is the SHA string that headSHA returns.
-// cloneErr, headErr control whether the stubs return errors.
-func overlayStub(cloneDir, headSHAResult string, firstTime bool, cloneErr, headErr error) (
-	func(url, dir string) (bool, error),
-	func(dir string) (string, error),
-) {
-	cloneFn := func(url, dir string) (bool, error) {
-		if cloneErr != nil {
-			return firstTime, cloneErr
-		}
-		// Simulate a successful clone by creating a .git marker in dir.
-		if err := os.MkdirAll(filepath.Join(dir, ".git"), 0o755); err != nil {
-			return firstTime, err
-		}
-		// Copy workspace-overlay.toml from cloneDir to dir if it exists.
-		if cloneDir != "" && cloneDir != dir {
-			data, err := os.ReadFile(filepath.Join(cloneDir, "workspace-overlay.toml"))
-			if err == nil {
-				_ = os.WriteFile(filepath.Join(dir, "workspace-overlay.toml"), data, 0o644)
-			}
-		}
-		return firstTime, nil
-	}
-	headFn := func(dir string) (string, error) {
-		if headErr != nil {
-			return "", headErr
-		}
-		return headSHAResult, nil
-	}
-	return cloneFn, headFn
-}
-
 // TestApplyOverlayNoOverlay verifies that when NoOverlay=true in instance state,
 // the overlay is skipped entirely (no cloneOrSync called, base config used).
 // Scenario 15.

@@ -134,6 +134,9 @@ func (a *Applier) Create(ctx context.Context, cfg *config.WorkspaceConfig, confi
 		return "", fmt.Errorf("preparing instance .gitignore: %w", err)
 	}
 
+	// configSourceURL is intentionally not set here: overlay discovery is an
+	// apply-time concern. Create initializes the workspace; the overlay URL (if
+	// any) is discovered on the first apply and stored in state from that point.
 	result, err := a.runPipeline(ctx, cfg, configDir, instanceRoot, now, &pipelineOpts{
 		existingState: nil,
 	})
@@ -150,6 +153,17 @@ func (a *Applier) Create(ctx context.Context, cfg *config.WorkspaceConfig, confi
 		return "", fmt.Errorf("determining instance number: %w", err)
 	}
 
+	// Overlay fields are not set for a fresh create: overlay discovery happens
+	// at init time (when configSourceURL is known) or on subsequent applies.
+	// Carry any result.overlayURL/overlayCommit forward in case the caller
+	// configures the Applier to run discovery even at create time in the future.
+	var finalOverlayURL string
+	var finalOverlayCommit string
+	if result.overlayURL != "" {
+		finalOverlayURL = result.overlayURL
+		finalOverlayCommit = result.overlayCommit
+	}
+
 	configName := cfg.Workspace.Name
 	state := &InstanceState{
 		SchemaVersion:  SchemaVersion,
@@ -159,6 +173,8 @@ func (a *Applier) Create(ctx context.Context, cfg *config.WorkspaceConfig, confi
 		Root:           instanceRoot,
 		Created:        now,
 		LastApplied:    now,
+		OverlayURL:     finalOverlayURL,
+		OverlayCommit:  finalOverlayCommit,
 		ManagedFiles:   result.managedFiles,
 		Repos:          result.repoStates,
 		Shadows:        result.shadows,
@@ -289,7 +305,7 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 	// attribute" — drift for those files is pure content-hash drift.
 	sourceTuples := map[string][]SourceEntry{}
 
-	// Step overlay-2.5: Determine and sync the workspace overlay.
+	// Step 0.5: overlay sync and merge — determine and sync the workspace overlay.
 	// This must run BEFORE discoverAllRepos so that the merged config (base +
 	// overlay) feeds into discovery — overlay sources can then contribute repos.
 	// Three branches based on NoOverlay and OverlayURL from instance state:
