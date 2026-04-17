@@ -2026,6 +2026,200 @@ MUST_HAVE = "This key is never provided"
 	}
 }
 
+// TestApplyMissingMarketplaceRepo verifies that when the base config declares a
+// marketplace source referencing a repo that is not managed by the workspace,
+// apply fails with a clear error identifying the repo name and the problem.
+func TestApplyMissingMarketplaceRepo(t *testing.T) {
+	configTOML := `
+[workspace]
+name = "test-ws"
+
+[[sources]]
+org = "testorg"
+
+[groups.all]
+visibility = "public"
+
+[claude]
+marketplaces = ["repo:tools/.claude-plugin/marketplace.json"]
+`
+	niwaDir, instanceRoot := setupTestWorkspace(t, configTOML, nil, []struct{ group, name string }{
+		{"all", "repo1"},
+	})
+
+	result, err := config.Load(filepath.Join(niwaDir, "workspace.toml"))
+	if err != nil {
+		t.Fatalf("loading config: %v", err)
+	}
+
+	mockClient := &mockGitHubClient{
+		repos: map[string][]github.Repo{
+			"testorg": {
+				{Name: "repo1", Visibility: "public", SSHURL: "git@github.com:testorg/repo1.git"},
+			},
+		},
+	}
+
+	if err := SaveState(instanceRoot, &InstanceState{
+		SchemaVersion:  SchemaVersion,
+		InstanceName:   "test-ws",
+		InstanceNumber: 1,
+		Root:           instanceRoot,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	applier := NewApplier(mockClient)
+	applyErr := applier.Apply(context.Background(), result.Config, niwaDir, instanceRoot)
+	if applyErr == nil {
+		t.Fatal("expected error for marketplace referencing unmanaged repo, got nil")
+	}
+	if !strings.Contains(applyErr.Error(), "tools") {
+		t.Errorf("error should identify repo name %q, got: %v", "tools", applyErr)
+	}
+	if !strings.Contains(applyErr.Error(), "not managed") {
+		t.Errorf("error should say 'not managed by this workspace', got: %v", applyErr)
+	}
+}
+
+// TestApplyOverlayMarketplacesAppend verifies R25: when workspace-overlay.toml
+// declares [claude.marketplaces], overlay entries are appended to the base
+// config's marketplace list. The merged list appears in the instance root
+// settings.json. Marketplace sources that reference overlay-managed repos (via
+// repo: prefix) resolve correctly when the overlay is accessible.
+func TestApplyOverlayMarketplacesAppend(t *testing.T) {
+	overlayTOML := `
+[[sources]]
+org = "toolsorg"
+repos = ["tools"]
+
+[groups.private]
+repos = ["tools"]
+
+[claude]
+marketplaces = ["repo:tools/.claude-plugin/marketplace.json"]
+`
+	overlayDir := setupOverlayDir(t, overlayTOML)
+
+	configTOML := `
+[workspace]
+name = "test-ws"
+
+[[sources]]
+org = "testorg"
+
+[groups.public]
+visibility = "public"
+
+[claude]
+marketplaces = ["tsukumogami/shirabe"]
+`
+	niwaDir, instanceRoot := setupTestWorkspace(t, configTOML, nil, []struct{ group, name string }{
+		{"public", "repo1"},
+		{"private", "tools"},
+	})
+
+	// Pre-create the marketplace file inside the tools repo directory so
+	// ResolveMarketplaceSource finds it when building the settings doc.
+	toolsDir := filepath.Join(instanceRoot, "private", "tools")
+	marketplaceFile := filepath.Join(toolsDir, ".claude-plugin", "marketplace.json")
+	if err := os.MkdirAll(filepath.Dir(marketplaceFile), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(marketplaceFile, []byte(`{}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := config.Load(filepath.Join(niwaDir, "workspace.toml"))
+	if err != nil {
+		t.Fatalf("loading config: %v", err)
+	}
+
+	mockClient := &mockGitHubClient{
+		repos: map[string][]github.Repo{
+			"testorg": {
+				{Name: "repo1", Visibility: "public", SSHURL: "git@github.com:testorg/repo1.git"},
+			},
+			"toolsorg": {
+				{Name: "tools", Visibility: "private", SSHURL: "git@github.com:toolsorg/tools.git"},
+			},
+		},
+	}
+
+	if err := SaveState(instanceRoot, &InstanceState{
+		SchemaVersion:  SchemaVersion,
+		InstanceName:   "test-ws",
+		InstanceNumber: 1,
+		Root:           instanceRoot,
+		OverlayURL:     "testorg/test-ws-overlay",
+		OverlayCommit:  "abc123",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	cloneFn := func(url, dir string) (bool, error) {
+		if err := os.MkdirAll(filepath.Join(dir, ".git"), 0o755); err != nil {
+			return false, err
+		}
+		data, err := os.ReadFile(filepath.Join(overlayDir, "workspace-overlay.toml"))
+		if err != nil {
+			return false, err
+		}
+		return false, os.WriteFile(filepath.Join(dir, "workspace-overlay.toml"), data, 0o644)
+	}
+
+	applier := NewApplier(mockClient)
+	applier.Cloner = &Cloner{}
+	applier.cloneOrSync = cloneFn
+	applier.headSHA = func(string) (string, error) { return "abc123", nil }
+
+	if err := applier.Apply(context.Background(), result.Config, niwaDir, instanceRoot); err != nil {
+		t.Fatalf("apply with overlay marketplaces failed: %v", err)
+	}
+
+	// The instance root settings.json should contain both marketplace entries:
+	// the base-config "tsukumogami/shirabe" and the overlay "tools" (from repo:).
+	settingsPath := filepath.Join(instanceRoot, ".claude", "settings.json")
+	assertFileContains(t, settingsPath, "shirabe")
+	assertFileContains(t, settingsPath, "tools")
+
+	// Apply without overlay (tools repo not in workspace) should fail because
+	// a repo: marketplace ref for an unmanaged repo is a hard error. This verifies
+	// that moving repo: refs to the overlay is the correct design.
+	configTOMLBroken := `
+[workspace]
+name = "test-ws-broken"
+
+[[sources]]
+org = "testorg"
+
+[groups.public]
+visibility = "public"
+
+[claude]
+marketplaces = ["repo:tools/.claude-plugin/marketplace.json"]
+`
+	niwaDir2, instanceRoot2 := setupTestWorkspace(t, configTOMLBroken, nil, []struct{ group, name string }{
+		{"public", "repo1"},
+	})
+	result2, err := config.Load(filepath.Join(niwaDir2, "workspace.toml"))
+	if err != nil {
+		t.Fatalf("loading broken config: %v", err)
+	}
+	if err := SaveState(instanceRoot2, &InstanceState{
+		SchemaVersion:  SchemaVersion,
+		InstanceName:   "test-ws-broken",
+		InstanceNumber: 1,
+		Root:           instanceRoot2,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	applier2 := NewApplier(mockClient)
+	if applyErr := applier2.Apply(context.Background(), result2.Config, niwaDir2, instanceRoot2); applyErr == nil {
+		t.Error("expected error when repo: marketplace refs an unmanaged repo without overlay, got nil")
+	}
+}
+
 func assertFileContains(t *testing.T, path, substr string) {
 	t.Helper()
 	data, err := os.ReadFile(path)

@@ -1,6 +1,6 @@
 ---
 status: Delivered (extended)
-version: 5
+version: 6
 problem: |
   When a niwa workspace config repo is made public, the workspace.toml exposes information through several surfaces: source org identifiers in [[sources]], group names, [repos.*] section keys (which are repo names), [claude.content.repos.*] entries including subdirectory mappings that reveal code structure, [channels.*.access] sections containing user IDs, and vault infrastructure details such as provider kind, project IDs, and secret names in [vault.provider] and [env.secrets]. Teams that want to publish their workspace config — to enable open contribution, share it as a reference, or reduce maintenance burden — currently have no way to keep these details out of the public config without maintaining a completely separate workspace config that duplicates all the public configuration.
 goals: |
@@ -11,7 +11,7 @@ goals: |
 
 ## Status
 
-Delivered (extended — R23/R24 open)
+Delivered (extended — R25 open)
 
 ## Problem Statement
 
@@ -303,6 +303,8 @@ If `acmecorp/niwa-internal` is inaccessible, `niwa init` aborts with a hard erro
 
 **R10**: `workspace-overlay.toml` supports these override sections: `[claude.hooks]`, `[claude.settings]`, `[env]`, `[files]`. Merge semantics: hooks append (overlay hooks added after base config hooks); settings per-key (overlay value used only if key absent in base config); `env.files` append (overlay files sourced after base config files); `env` vars per-key (overlay value used only if key absent in base config); `env.secrets` per-key (overlay resolution used only if key absent in base config's `[env.secrets]`); `files` per-key (overlay file used only if destination absent in base config).
 
+**R25**: `workspace-overlay.toml` supports `[claude.marketplaces]` and `[claude.plugins]` as additive-only fields. Marketplace sources from the overlay are appended to the base config's list after deduplication — a source already present in the base config is silently skipped. Plugin names from the overlay are unioned with the base config's list using the same semantics. This allows a private overlay to add marketplace sources that reference overlay-managed repos (via `repo:<name>/...` syntax) without exposing those repo names in the public base config. When the overlay is inaccessible, only the base config's marketplaces and plugins are active. A `repo:` marketplace source in the base config that references a repo not managed by the workspace is a hard error at apply time — such sources must be placed in the overlay instead.
+
 **R11**: `workspace-overlay.toml` does not support workspace metadata fields (`[workspace]`, `[channels]`). All `[[sources]]` entries must include explicit `repos` lists — auto-discovery is prohibited in overlay source declarations for all orgs.
 
 ### Vault in the Overlay
@@ -402,6 +404,13 @@ Users without overlay access receive the base `CLAUDE.local.md` only; no overlay
 - [ ] Base config with `[env.secrets.optional] BAZ = "description"`, `BAZ` absent: `niwa apply` exits with code 0, no warning produced.
 - [ ] Overlay with `[vault.provider]` and base config with `[vault.provider]`: both resolve their own layer's `[env.secrets]` independently; no collision error.
 - [ ] Overlay with `[vault.providers.infisical]` and base config with `[vault.providers.infisical]` (same name, different layers): each resolves its own layer's secrets independently; no collision error.
+
+### Overlay Marketplaces and Plugins
+
+- [ ] Base config with `[claude] marketplaces = ["tsukumogami/shirabe"]` and overlay with `[claude] marketplaces = ["repo:tools/.claude-plugin/marketplace.json"]`, `tools` managed by the overlay: after `niwa apply`, the instance root `settings.json` contains both marketplace entries.
+- [ ] Same as above but `"tsukumogami/shirabe"` appears in both base and overlay lists: after `niwa apply`, the marketplace appears only once in `settings.json`.
+- [ ] Base config with `[claude] marketplaces = ["repo:tools/.claude-plugin/marketplace.json"]`, `tools` not managed by the workspace (no overlay): `niwa apply` exits with a non-zero exit code and an error identifying `tools` as not managed by the workspace.
+- [ ] Base config with `[claude] plugins = ["shirabe@shirabe"]` and overlay with `[claude] plugins = ["private@private"]`: after `niwa apply`, `settings.json` has both plugins enabled.
 
 ## Out of Scope
 

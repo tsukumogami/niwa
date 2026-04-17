@@ -1324,6 +1324,102 @@ func TestMergeWorkspaceOverlay_ContentOverlayMissingBaseReturnsError(t *testing.
 	}
 }
 
+// TestMergeWorkspaceOverlay_MarketplacesAppend verifies that overlay marketplaces
+// are appended to the base config's list using union semantics (dedup by value).
+func TestMergeWorkspaceOverlay_MarketplacesAppend(t *testing.T) {
+	base := []string{"org/shirabe"}
+	ws := &config.WorkspaceConfig{
+		Workspace: config.WorkspaceMeta{Name: "test"},
+		Claude:    config.ClaudeConfig{Marketplaces: append([]string(nil), base...)},
+	}
+	overlay := &config.WorkspaceOverlay{
+		Claude: config.OverlayClaudeConfig{
+			// "org/shirabe" already in base — should be skipped.
+			// "repo:tools/..." is new — should be appended.
+			Marketplaces: []string{"org/shirabe", "repo:tools/.claude-plugin/marketplace.json"},
+		},
+	}
+
+	merged, err := MergeWorkspaceOverlay(ws, overlay, t.TempDir())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	want := []string{"org/shirabe", "repo:tools/.claude-plugin/marketplace.json"}
+	if len(merged.Claude.Marketplaces) != len(want) {
+		t.Fatalf("Marketplaces = %v, want %v", merged.Claude.Marketplaces, want)
+	}
+	for i, w := range want {
+		if merged.Claude.Marketplaces[i] != w {
+			t.Errorf("Marketplaces[%d] = %q, want %q", i, merged.Claude.Marketplaces[i], w)
+		}
+	}
+
+	// Original must not be mutated.
+	if len(ws.Claude.Marketplaces) != 1 || ws.Claude.Marketplaces[0] != "org/shirabe" {
+		t.Errorf("original Marketplaces mutated: %v", ws.Claude.Marketplaces)
+	}
+}
+
+// TestMergeWorkspaceOverlay_PluginsAppend verifies that overlay plugins are
+// appended to the base config's plugin list using union semantics.
+func TestMergeWorkspaceOverlay_PluginsAppend(t *testing.T) {
+	base := []string{"shirabe@shirabe"}
+	ws := &config.WorkspaceConfig{
+		Workspace: config.WorkspaceMeta{Name: "test"},
+		Claude:    config.ClaudeConfig{Plugins: &base},
+	}
+	overlay := &config.WorkspaceOverlay{
+		Claude: config.OverlayClaudeConfig{
+			// "shirabe@shirabe" already in base — deduped.
+			Plugins: []string{"shirabe@shirabe", "private@private"},
+		},
+	}
+
+	merged, err := MergeWorkspaceOverlay(ws, overlay, t.TempDir())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if merged.Claude.Plugins == nil {
+		t.Fatal("merged Plugins is nil")
+	}
+
+	want := []string{"shirabe@shirabe", "private@private"}
+	if len(*merged.Claude.Plugins) != len(want) {
+		t.Fatalf("Plugins = %v, want %v", *merged.Claude.Plugins, want)
+	}
+	for i, w := range want {
+		if (*merged.Claude.Plugins)[i] != w {
+			t.Errorf("Plugins[%d] = %q, want %q", i, (*merged.Claude.Plugins)[i], w)
+		}
+	}
+}
+
+// TestMergeWorkspaceOverlay_PluginsNilBase verifies that when the base config
+// has no plugin list, overlay plugins create a new list.
+func TestMergeWorkspaceOverlay_PluginsNilBase(t *testing.T) {
+	ws := &config.WorkspaceConfig{
+		Workspace: config.WorkspaceMeta{Name: "test"},
+		// Claude.Plugins intentionally nil
+	}
+	overlay := &config.WorkspaceOverlay{
+		Claude: config.OverlayClaudeConfig{
+			Plugins: []string{"overlay@overlay"},
+		},
+	}
+
+	merged, err := MergeWorkspaceOverlay(ws, overlay, t.TempDir())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if merged.Claude.Plugins == nil {
+		t.Fatal("merged Plugins is nil when overlay added plugins to nil base")
+	}
+	if len(*merged.Claude.Plugins) != 1 || (*merged.Claude.Plugins)[0] != "overlay@overlay" {
+		t.Errorf("merged Plugins = %v, want [overlay@overlay]", *merged.Claude.Plugins)
+	}
+}
+
 // TestMergeWorkspaceOverlay_RepoOverrideDeepCopy verifies that mutating a hook
 // list on the merged config's repo override does not corrupt the original
 // WorkspaceConfig. This guards against the shallow-copy bug where

@@ -733,6 +733,43 @@ func MergeWorkspaceOverlay(ws *config.WorkspaceConfig, overlay *config.Workspace
 		}
 	}
 
+	// Claude.Marketplaces: append overlay entries not already in base (union).
+	// Sources that reference overlay-managed repos (via repo: prefix) belong in
+	// the overlay so they are only active when the overlay is accessible.
+	if len(overlay.Claude.Marketplaces) > 0 {
+		existing := make(map[string]bool, len(merged.Claude.Marketplaces))
+		for _, m := range merged.Claude.Marketplaces {
+			existing[m] = true
+		}
+		for _, m := range overlay.Claude.Marketplaces {
+			if !existing[m] {
+				merged.Claude.Marketplaces = append(merged.Claude.Marketplaces, m)
+				existing[m] = true
+			}
+		}
+	}
+
+	// Claude.Plugins: append overlay plugins not already in base (union).
+	// Nil base Plugins means no workspace-wide plugin list declared; a non-nil
+	// result means at least one plugin is active (from base or overlay).
+	if len(overlay.Claude.Plugins) > 0 {
+		var combined []string
+		if merged.Claude.Plugins != nil {
+			combined = slices.Clone(*merged.Claude.Plugins)
+		}
+		existing := make(map[string]bool, len(combined))
+		for _, p := range combined {
+			existing[p] = true
+		}
+		for _, p := range overlay.Claude.Plugins {
+			if !existing[p] {
+				combined = append(combined, p)
+				existing[p] = true
+			}
+		}
+		merged.Claude.Plugins = &combined
+	}
+
 	// Claude.Env.Promote and Claude.Env.Vars: OverlayClaudeConfig does not carry
 	// a Claude env section (claude env is workspace-scoped and flows through the
 	// top-level Env pipeline). Nothing to merge here.
@@ -908,6 +945,7 @@ func copyClaudeConfigFull(c *config.ClaudeConfig) *config.ClaudeConfig {
 	out.Hooks = copyHooks(c.Hooks)
 	out.Settings = copySettings(c.Settings)
 	out.Env = copyClaudeEnv(c.Env)
+	out.Marketplaces = slices.Clone(c.Marketplaces)
 	if c.Plugins != nil {
 		p := slices.Clone(*c.Plugins)
 		out.Plugins = &p
