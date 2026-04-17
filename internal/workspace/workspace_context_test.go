@@ -193,6 +193,100 @@ func TestInstallOverlayClaudeContentIdempotent(t *testing.T) {
 	}
 }
 
+// TestInstallGlobalClaudeContentOrderingWithOverlay verifies the three-way
+// import ordering on first apply when overlay is active: workspace-context
+// is injected first, then overlay inserts after it, then global inserts after
+// overlay — producing @workspace-context.md → @CLAUDE.overlay.md → @CLAUDE.global.md.
+func TestInstallGlobalClaudeContentOrderingWithOverlay(t *testing.T) {
+	tmpDir := t.TempDir()
+	globalDir := filepath.Join(tmpDir, "global")
+	instanceRoot := filepath.Join(tmpDir, "instance")
+	if err := os.MkdirAll(globalDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(instanceRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.WriteFile(filepath.Join(globalDir, "CLAUDE.global.md"), []byte("# global\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate state after workspace-context and overlay have been injected
+	// (as produced by InstallWorkspaceContext then InstallOverlayClaudeContent
+	// on a fresh apply).
+	claudeContent := "@workspace-context.md\n\n@CLAUDE.overlay.md\n\n# Workspace\n"
+	if err := os.WriteFile(filepath.Join(instanceRoot, "CLAUDE.md"), []byte(claudeContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := InstallGlobalClaudeContent(globalDir, instanceRoot); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(instanceRoot, "CLAUDE.md"))
+	if err != nil {
+		t.Fatalf("reading CLAUDE.md: %v", err)
+	}
+	claudeMd := string(data)
+
+	wsIdx := strings.Index(claudeMd, "@workspace-context.md")
+	overlayIdx := strings.Index(claudeMd, "@CLAUDE.overlay.md")
+	globalIdx := strings.Index(claudeMd, "@CLAUDE.global.md")
+
+	if wsIdx < 0 || overlayIdx < 0 || globalIdx < 0 {
+		t.Fatalf("missing expected imports in CLAUDE.md:\n%s", claudeMd)
+	}
+	if !(wsIdx < overlayIdx && overlayIdx < globalIdx) {
+		t.Errorf("import ordering incorrect: @workspace-context.md=%d, @CLAUDE.overlay.md=%d, @CLAUDE.global.md=%d\n%s",
+			wsIdx, overlayIdx, globalIdx, claudeMd)
+	}
+}
+
+// TestInstallGlobalClaudeContentOrderingWithoutOverlay verifies that when no
+// overlay is active, global is inserted after @workspace-context.md (not before).
+func TestInstallGlobalClaudeContentOrderingWithoutOverlay(t *testing.T) {
+	tmpDir := t.TempDir()
+	globalDir := filepath.Join(tmpDir, "global")
+	instanceRoot := filepath.Join(tmpDir, "instance")
+	if err := os.MkdirAll(globalDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(instanceRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.WriteFile(filepath.Join(globalDir, "CLAUDE.global.md"), []byte("# global\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate state after workspace-context has been injected (no overlay).
+	claudeContent := "@workspace-context.md\n\n# Workspace\n"
+	if err := os.WriteFile(filepath.Join(instanceRoot, "CLAUDE.md"), []byte(claudeContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := InstallGlobalClaudeContent(globalDir, instanceRoot); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(instanceRoot, "CLAUDE.md"))
+	if err != nil {
+		t.Fatalf("reading CLAUDE.md: %v", err)
+	}
+	claudeMd := string(data)
+
+	wsIdx := strings.Index(claudeMd, "@workspace-context.md")
+	globalIdx := strings.Index(claudeMd, "@CLAUDE.global.md")
+
+	if wsIdx < 0 || globalIdx < 0 {
+		t.Fatalf("missing expected imports in CLAUDE.md:\n%s", claudeMd)
+	}
+	if wsIdx >= globalIdx {
+		t.Errorf("@workspace-context.md should appear before @CLAUDE.global.md in CLAUDE.md:\n%s", claudeMd)
+	}
+}
+
 // TestEnsureImportAfterInCLAUDENoAnchor verifies that when the anchor line is
 // absent, the import is prepended.
 func TestEnsureImportAfterInCLAUDENoAnchor(t *testing.T) {

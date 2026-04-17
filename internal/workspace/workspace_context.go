@@ -264,6 +264,10 @@ func InstallWorkspaceRootSettings(cfg *config.WorkspaceConfig, configDir, instan
 // InstallGlobalClaudeContent copies CLAUDE.global.md from the global config
 // directory into the instance root and adds an @import directive to CLAUDE.md.
 // Returns nil, nil when CLAUDE.global.md does not exist in globalConfigDir.
+//
+// The global import is inserted after @CLAUDE.overlay.md when the overlay is
+// active, or after @workspace-context.md otherwise — preserving the required
+// import order (@workspace-context.md → @CLAUDE.overlay.md → @CLAUDE.global.md).
 func InstallGlobalClaudeContent(globalConfigDir, instanceRoot string) ([]string, error) {
 	srcPath := filepath.Join(globalConfigDir, globalClaudeFile)
 	data, err := os.ReadFile(srcPath)
@@ -279,8 +283,20 @@ func InstallGlobalClaudeContent(globalConfigDir, instanceRoot string) ([]string,
 		return nil, fmt.Errorf("writing %s: %w", globalClaudeFile, err)
 	}
 
+	// Prefer inserting after @CLAUDE.overlay.md (overlay active) or after
+	// @workspace-context.md (overlay absent). Falls back to prepend when
+	// neither anchor is present (e.g., content-only workspace with no context).
 	claudePath := filepath.Join(instanceRoot, "CLAUDE.md")
-	if err := ensureImportInCLAUDE(claudePath, globalClaudeImport); err != nil {
+	existing, readErr := os.ReadFile(claudePath)
+	if readErr != nil && !os.IsNotExist(readErr) {
+		return nil, fmt.Errorf("reading CLAUDE.md: %w", readErr)
+	}
+	content := string(existing)
+	anchor := workspaceContextImport // default anchor
+	if strings.Contains(content, overlayClaudeImport) {
+		anchor = overlayClaudeImport
+	}
+	if err := ensureImportAfterInCLAUDE(claudePath, globalClaudeImport, anchor); err != nil {
 		return nil, fmt.Errorf("adding global claude import: %w", err)
 	}
 

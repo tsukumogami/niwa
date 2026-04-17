@@ -633,12 +633,19 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 	// Context file uses @import for level-scoped visibility.
 	// Settings uses settings.json (not .local) since instance root is non-git.
 
-	// Install overlay CLAUDE.overlay.md before workspace context so that
-	// the import ordering @workspace-context.md → @CLAUDE.overlay.md →
-	// @CLAUDE.global.md is established correctly. InstallOverlayClaudeContent
-	// injects @CLAUDE.overlay.md after @workspace-context.md (if present in
-	// CLAUDE.md), so it must run after InstallWorkspaceContent but before
-	// InstallGlobalClaudeContent.
+	// Workspace context must be installed first so @workspace-context.md is
+	// present in CLAUDE.md before overlay and global imports are injected.
+	// This ensures the three-way ordering (@workspace-context.md →
+	// @CLAUDE.overlay.md → @CLAUDE.global.md) is established on first apply.
+	ctxFiles, err := InstallWorkspaceContext(effectiveCfg, classified, instanceRoot)
+	if err != nil {
+		return nil, fmt.Errorf("installing workspace context: %w", err)
+	}
+	writtenFiles = append(writtenFiles, ctxFiles...)
+
+	// Overlay CLAUDE.overlay.md is injected after @workspace-context.md
+	// (now present) so that @CLAUDE.global.md (added at step 5c) ends up
+	// after both — completing the required import order.
 	if a.overlayDir != "" {
 		overlayCtxPath, overlayCtxErr := InstallOverlayClaudeContent(a.overlayDir, instanceRoot)
 		if overlayCtxErr != nil {
@@ -648,12 +655,6 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 			writtenFiles = append(writtenFiles, overlayCtxPath)
 		}
 	}
-
-	ctxFiles, err := InstallWorkspaceContext(effectiveCfg, classified, instanceRoot)
-	if err != nil {
-		return nil, fmt.Errorf("installing workspace context: %w", err)
-	}
-	writtenFiles = append(writtenFiles, ctxFiles...)
 
 	rootSettingsFiles, err := InstallWorkspaceRootSettings(effectiveCfg, configDir, instanceRoot, repoIndex)
 	if err != nil {
