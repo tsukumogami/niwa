@@ -100,9 +100,13 @@ func validateOverlay(o *WorkspaceOverlay) error {
 		}
 	}
 
-	// Files: destination values must not be absolute, must not contain "..",
-	// and must not target protected directories (.claude/ or .niwa/).
+	// Files: source keys and destination values must not be absolute, must not
+	// contain "..", and destinations must not target protected directories
+	// (.claude/ or .niwa/).
 	for src, dest := range o.Files {
+		if err := validateContentSource(fmt.Sprintf("overlay.files[%q] source", src), src); err != nil {
+			return err
+		}
 		if dest == "" {
 			continue
 		}

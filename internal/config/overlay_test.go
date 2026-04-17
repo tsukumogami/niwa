@@ -363,6 +363,40 @@ func TestParseOverlay_DotDotInFiles(t *testing.T) {
 	}
 }
 
+// TestParseOverlay_DotDotInFilesSource verifies that ".." components in [files]
+// source keys (the TOML key side of the map) are rejected.
+func TestParseOverlay_DotDotInFilesSource(t *testing.T) {
+	tests := []struct {
+		name    string
+		tomlDoc string
+	}{
+		{
+			name: "dotdot source key",
+			tomlDoc: `
+[files]
+"../../../etc/passwd" = "docs/safe.md"
+`,
+		},
+		{
+			name: "absolute source key",
+			tomlDoc: `
+[files]
+"/etc/passwd" = "docs/safe.md"
+`,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			path := writeOverlayFile(t, tc.tomlDoc)
+			_, err := ParseOverlay(path)
+			if err == nil {
+				t.Fatal("expected error for unsafe files source key, got nil")
+			}
+		})
+	}
+}
+
 // TestParseOverlay_ProtectedDestinationClaude verifies that [files] destination
 // paths beginning with .claude/ are rejected.
 func TestParseOverlay_ProtectedDestinationClaude(t *testing.T) {
