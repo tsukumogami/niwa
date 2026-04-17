@@ -1,8 +1,0 @@
-{
-  "issue": 4,
-  "all_passed": true,
-  "passed": 7,
-  "failed": 0,
-  "summary": "All 7 automatable scenarios (20-26) passed via unit tests. Scenario 27 skipped: environment requires live overlay repo. 15 unit tests executed across content_test.go, workspace_context_test.go, and materialize_test.go.",
-  "detail_file": "wip/research/implement-doc_validation_issue4.md"
-}
