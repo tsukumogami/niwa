@@ -14,6 +14,9 @@ import (
 const workspaceContextFile = "workspace-context.md"
 const workspaceContextImport = "@workspace-context.md"
 
+const overlayClaudeFile = "CLAUDE.overlay.md"
+const overlayClaudeImport = "@CLAUDE.overlay.md"
+
 const globalClaudeFile = "CLAUDE.global.md"
 const globalClaudeImport = "@CLAUDE.global.md"
 
@@ -58,6 +61,80 @@ func ensureImportInCLAUDE(claudePath, importLine string) error {
 	content = importLine + "\n\n" + content
 
 	return os.WriteFile(claudePath, []byte(content), 0o644)
+}
+
+// ensureImportAfterInCLAUDE inserts importLine into a CLAUDE.md file
+// immediately after the first occurrence of afterLine (on its own line).
+// If afterLine is absent, the import is prepended (same behavior as
+// ensureImportInCLAUDE). If importLine is already present, it is a no-op.
+// Returns nil when CLAUDE.md does not exist.
+func ensureImportAfterInCLAUDE(claudePath, importLine, afterLine string) error {
+	existing, err := os.ReadFile(claudePath)
+	if os.IsNotExist(err) {
+		return nil // no CLAUDE.md, nothing to add import to
+	}
+	if err != nil {
+		return err
+	}
+
+	content := string(existing)
+	if strings.Contains(content, importLine) {
+		return nil // already present
+	}
+
+	// Find the position of afterLine as a complete line.
+	lines := strings.Split(content, "\n")
+	insertIdx := -1
+	for i, line := range lines {
+		if line == afterLine {
+			insertIdx = i + 1
+			break
+		}
+	}
+
+	var updated string
+	if insertIdx < 0 {
+		// afterLine not found — prepend.
+		updated = importLine + "\n\n" + content
+	} else {
+		// Insert after the found line, preserving surrounding blank lines.
+		// We insert the importLine followed by a blank line.
+		before := strings.Join(lines[:insertIdx], "\n")
+		after := strings.Join(lines[insertIdx:], "\n")
+		// Trim a leading blank line from `after` to avoid double-blank
+		// when there's already a blank line after the anchor.
+		trimmedAfter := strings.TrimPrefix(after, "\n")
+		updated = before + "\n" + importLine + "\n\n" + trimmedAfter
+	}
+
+	return os.WriteFile(claudePath, []byte(updated), 0o644)
+}
+
+// InstallOverlayClaudeContent copies CLAUDE.overlay.md from the overlay clone
+// into the instance root and injects @CLAUDE.overlay.md into CLAUDE.md after
+// @workspace-context.md and before @CLAUDE.global.md. Returns the installed
+// path when the file was present, or ("", nil) when it was absent.
+func InstallOverlayClaudeContent(overlayDir, instanceRoot string) (string, error) {
+	srcPath := filepath.Join(overlayDir, overlayClaudeFile)
+	data, err := os.ReadFile(srcPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", nil
+		}
+		return "", fmt.Errorf("reading %s: %w", overlayClaudeFile, err)
+	}
+
+	destPath := filepath.Join(instanceRoot, overlayClaudeFile)
+	if err := os.WriteFile(destPath, data, 0o644); err != nil {
+		return "", fmt.Errorf("writing %s: %w", overlayClaudeFile, err)
+	}
+
+	claudePath := filepath.Join(instanceRoot, "CLAUDE.md")
+	if err := ensureImportAfterInCLAUDE(claudePath, overlayClaudeImport, workspaceContextImport); err != nil {
+		return "", fmt.Errorf("adding overlay claude import: %w", err)
+	}
+
+	return destPath, nil
 }
 
 // InstallWorkspaceRootSettings generates .claude/settings.json at the instance

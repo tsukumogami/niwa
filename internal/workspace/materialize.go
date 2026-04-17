@@ -487,6 +487,13 @@ func (s *SettingsMaterializer) Materialize(ctx *MaterializeContext) ([]string, e
 	}
 	ctx.recordSources(target, sources)
 
+	// Check that the repo's .gitignore has a *.local* pattern. Surface any
+	// warnings but do not fail — settings.local.json has already been written.
+	gitignoreWarnings := CheckGitignore(ctx.RepoDir, ctx.RepoName)
+	for _, w := range gitignoreWarnings {
+		fmt.Fprintf(os.Stderr, "warning: %s\n", w)
+	}
+
 	return []string{target}, nil
 }
 

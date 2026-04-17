@@ -90,8 +90,13 @@ type RepoContentResult struct {
 // If no explicit content entry exists for the repo, auto-discovery checks for
 // {content_dir}/repos/{repoName}.md and uses it if found.
 //
+// When the repo has an OverlaySource set in its content entry, the overlay
+// content is appended to CLAUDE.local.md (separated by a blank line). In that
+// case overlayDir must be non-empty; if overlayDir is empty and OverlaySource
+// is set, an error is returned.
+//
 // Returns a result with content warnings and files written.
-func InstallRepoContent(cfg *config.WorkspaceConfig, configDir, instanceRoot, groupName, repoName string) (*RepoContentResult, error) {
+func InstallRepoContent(cfg *config.WorkspaceConfig, configDir, overlayDir, instanceRoot, groupName, repoName string) (*RepoContentResult, error) {
 	result := &RepoContentResult{}
 
 	absInstance, err := filepath.Abs(instanceRoot)
@@ -126,6 +131,31 @@ func InstallRepoContent(cfg *config.WorkspaceConfig, configDir, instanceRoot, gr
 
 		w := CheckGitignore(repoDir, repoName)
 		result.Warnings = append(result.Warnings, w...)
+
+		// Append overlay content if present.
+		if hasExplicit && entry.OverlaySource != "" {
+			if overlayDir == "" {
+				return nil, fmt.Errorf("repo %q has OverlaySource %q but overlayDir is empty", repoName, entry.OverlaySource)
+			}
+			overlaySrcPath := filepath.Join(overlayDir, entry.OverlaySource)
+			overlayData, readErr := os.ReadFile(overlaySrcPath)
+			if readErr != nil {
+				return nil, fmt.Errorf("reading overlay content for repo %q: %w", repoName, readErr)
+			}
+			existing, readErr := os.ReadFile(target)
+			if readErr != nil {
+				return nil, fmt.Errorf("reading CLAUDE.local.md for overlay append for repo %q: %w", repoName, readErr)
+			}
+			combined := string(existing) + "\n" + string(overlayData)
+			if writeErr := os.WriteFile(target, []byte(combined), 0o644); writeErr != nil {
+				return nil, fmt.Errorf("writing overlay-appended CLAUDE.local.md for repo %q: %w", repoName, writeErr)
+			}
+		}
+	} else if hasExplicit && entry.OverlaySource != "" {
+		// No base source, but OverlaySource is set — validate overlayDir.
+		if overlayDir == "" {
+			return nil, fmt.Errorf("repo %q has OverlaySource %q but overlayDir is empty", repoName, entry.OverlaySource)
+		}
 	}
 
 	// Install subdirectory content if present.

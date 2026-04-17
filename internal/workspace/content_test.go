@@ -220,7 +220,7 @@ func TestInstallRepoContent(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	result, err := InstallRepoContent(cfg, configDir, instanceRoot, "public", "myapp")
+	result, err := InstallRepoContent(cfg, configDir, "", instanceRoot, "public", "myapp")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -302,7 +302,7 @@ func TestInstallRepoContentSubdirs(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	result, err := InstallRepoContent(cfg, configDir, instanceRoot, "public", "tsuku")
+	result, err := InstallRepoContent(cfg, configDir, "", instanceRoot, "public", "tsuku")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -368,7 +368,7 @@ func TestInstallRepoContentAutoDiscovery(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	result, err := InstallRepoContent(cfg, configDir, instanceRoot, "public", "myapp")
+	result, err := InstallRepoContent(cfg, configDir, "", instanceRoot, "public", "myapp")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -408,7 +408,7 @@ func TestInstallRepoContentAutoDiscoveryNoFile(t *testing.T) {
 	}
 
 	// No auto-discovery file, no explicit entry -- should be a no-op.
-	result, err := InstallRepoContent(cfg, configDir, instanceRoot, "public", "myapp")
+	result, err := InstallRepoContent(cfg, configDir, "", instanceRoot, "public", "myapp")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -439,7 +439,7 @@ func TestInstallRepoContentAutoDiscoveryNoContentDir(t *testing.T) {
 	}
 
 	// Without content_dir, auto-discovery should not attempt anything.
-	result, err := InstallRepoContent(cfg, tmpDir, instanceRoot, "public", "myapp")
+	result, err := InstallRepoContent(cfg, tmpDir, "", instanceRoot, "public", "myapp")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -524,7 +524,7 @@ func TestCheckGitignoreWarningOnWrite(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	result, err := InstallRepoContent(cfg, configDir, instanceRoot, "public", "myapp")
+	result, err := InstallRepoContent(cfg, configDir, "", instanceRoot, "public", "myapp")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -702,7 +702,7 @@ func TestInstallRepoContentSubdirContainment(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err := InstallRepoContent(cfg, configDir, instanceRoot, "public", "myrepo")
+	_, err := InstallRepoContent(cfg, configDir, "", instanceRoot, "public", "myrepo")
 	if err == nil {
 		t.Fatal("expected error for subdirectory escape, got nil")
 	}
@@ -724,6 +724,186 @@ func TestExpandVarsUsesStringReplacement(t *testing.T) {
 	// the template directives. With plain replacement, the input passes through.
 	if got != input {
 		t.Errorf("expandVars modified template syntax: got %q, want %q", got, input)
+	}
+}
+
+// TestInstallRepoContentOverlayAppend verifies that overlay content is appended
+// to CLAUDE.local.md separated by a blank line.
+func TestInstallRepoContentOverlayAppend(t *testing.T) {
+	tmpDir := t.TempDir()
+	configDir := filepath.Join(tmpDir, "config")
+	contentDir := filepath.Join(configDir, "claude")
+	reposDir := filepath.Join(contentDir, "repos")
+	if err := os.MkdirAll(reposDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	overlayDir := filepath.Join(tmpDir, "overlay")
+	if err := os.MkdirAll(overlayDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	baseContent := "# myapp base content\n"
+	overlayContent := "# overlay section\n"
+	if err := os.WriteFile(filepath.Join(reposDir, "myapp.md"), []byte(baseContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(overlayDir, "myapp-overlay.md"), []byte(overlayContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.WorkspaceConfig{
+		Workspace: config.WorkspaceMeta{
+			Name:       "myws",
+			ContentDir: "claude",
+		},
+		Claude: config.ClaudeConfig{
+			Content: config.ContentConfig{
+				Repos: map[string]config.RepoContentEntry{
+					"myapp": {
+						Source:        "repos/myapp.md",
+						OverlaySource: "myapp-overlay.md",
+					},
+				},
+			},
+		},
+	}
+
+	instanceRoot := filepath.Join(tmpDir, "instance")
+	repoDir := filepath.Join(instanceRoot, "public", "myapp")
+	if err := os.MkdirAll(filepath.Join(repoDir, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repoDir, ".gitignore"), []byte("*.local*\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := InstallRepoContent(cfg, configDir, overlayDir, instanceRoot, "public", "myapp")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(result.Warnings) != 0 {
+		t.Errorf("unexpected warnings: %v", result.Warnings)
+	}
+
+	data, err := os.ReadFile(filepath.Join(repoDir, "CLAUDE.local.md"))
+	if err != nil {
+		t.Fatalf("reading CLAUDE.local.md: %v", err)
+	}
+
+	content := string(data)
+	if !strings.Contains(content, "# myapp base content") {
+		t.Errorf("missing base content: %s", content)
+	}
+	if !strings.Contains(content, "# overlay section") {
+		t.Errorf("missing overlay content: %s", content)
+	}
+	// Verify blank-line separation: base ends with \n, then \n separator, then overlay.
+	if !strings.Contains(content, "# myapp base content\n\n# overlay section") {
+		t.Errorf("content not blank-line separated: %q", content)
+	}
+}
+
+// TestInstallRepoContentOverlayNoRegression verifies that when no OverlaySource
+// is set, CLAUDE.local.md is written normally without modification.
+func TestInstallRepoContentOverlayNoRegression(t *testing.T) {
+	tmpDir := t.TempDir()
+	configDir := filepath.Join(tmpDir, "config")
+	contentDir := filepath.Join(configDir, "claude")
+	reposDir := filepath.Join(contentDir, "repos")
+	if err := os.MkdirAll(reposDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	baseContent := "# myapp no overlay\n"
+	if err := os.WriteFile(filepath.Join(reposDir, "myapp.md"), []byte(baseContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.WorkspaceConfig{
+		Workspace: config.WorkspaceMeta{
+			Name:       "myws",
+			ContentDir: "claude",
+		},
+		Claude: config.ClaudeConfig{
+			Content: config.ContentConfig{
+				Repos: map[string]config.RepoContentEntry{
+					"myapp": {Source: "repos/myapp.md"},
+				},
+			},
+		},
+	}
+
+	instanceRoot := filepath.Join(tmpDir, "instance")
+	repoDir := filepath.Join(instanceRoot, "public", "myapp")
+	if err := os.MkdirAll(filepath.Join(repoDir, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repoDir, ".gitignore"), []byte("*.local*\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Pass a non-empty overlayDir — it should be ignored when OverlaySource is empty.
+	result, err := InstallRepoContent(cfg, configDir, "/any/overlay/dir", instanceRoot, "public", "myapp")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(result.Warnings) != 0 {
+		t.Errorf("unexpected warnings: %v", result.Warnings)
+	}
+
+	data, err := os.ReadFile(filepath.Join(repoDir, "CLAUDE.local.md"))
+	if err != nil {
+		t.Fatalf("reading CLAUDE.local.md: %v", err)
+	}
+	if string(data) != baseContent {
+		t.Errorf("content modified unexpectedly: got %q, want %q", string(data), baseContent)
+	}
+}
+
+// TestInstallRepoContentOverlaySourceEmptyOverlayDir verifies that
+// OverlaySource set with an empty overlayDir returns an error.
+func TestInstallRepoContentOverlaySourceEmptyOverlayDir(t *testing.T) {
+	tmpDir := t.TempDir()
+	configDir := filepath.Join(tmpDir, "config")
+	contentDir := filepath.Join(configDir, "claude")
+	reposDir := filepath.Join(contentDir, "repos")
+	if err := os.MkdirAll(reposDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(reposDir, "myapp.md"), []byte("base\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.WorkspaceConfig{
+		Workspace: config.WorkspaceMeta{
+			Name:       "myws",
+			ContentDir: "claude",
+		},
+		Claude: config.ClaudeConfig{
+			Content: config.ContentConfig{
+				Repos: map[string]config.RepoContentEntry{
+					"myapp": {
+						Source:        "repos/myapp.md",
+						OverlaySource: "myapp-overlay.md",
+					},
+				},
+			},
+		},
+	}
+
+	instanceRoot := filepath.Join(tmpDir, "instance")
+	repoDir := filepath.Join(instanceRoot, "public", "myapp")
+	if err := os.MkdirAll(repoDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := InstallRepoContent(cfg, configDir, "", instanceRoot, "public", "myapp")
+	if err == nil {
+		t.Fatal("expected error when OverlaySource is set but overlayDir is empty")
+	}
+	if !strings.Contains(err.Error(), "overlayDir is empty") {
+		t.Errorf("error should mention overlayDir: %v", err)
 	}
 }
 
