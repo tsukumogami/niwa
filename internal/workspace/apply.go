@@ -391,10 +391,15 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		}
 		defer overlayVaultBundle.CloseAll()
 
-		// Resolve the overlay's env (vars and secrets) against the overlay's own
-		// vault bundle. Wrap in a temporary WorkspaceConfig so ResolveWorkspace
-		// can be reused without duplicating the resolution walker.
-		tmpCfg := &config.WorkspaceConfig{Env: overlay.Env}
+		// Resolve the overlay's env (top-level and per-repo) against the overlay's
+		// own vault bundle. Wrap in a temporary WorkspaceConfig so ResolveWorkspace
+		// can be reused without duplicating the resolution walker. Both overlay.Env
+		// and overlay.Repos carry the same types as WorkspaceConfig fields, so
+		// direct assignment works.
+		tmpCfg := &config.WorkspaceConfig{
+			Env:   overlay.Env,
+			Repos: overlay.Repos,
+		}
 		resolvedTmp, resolveErr := resolve.ResolveWorkspace(ctx, tmpCfg, resolve.ResolveOptions{
 			AllowMissing: a.AllowMissingSecrets,
 			TeamBundle:   overlayVaultBundle,
@@ -403,6 +408,7 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 			return nil, fmt.Errorf("resolving overlay vault references: %w", resolveErr)
 		}
 		overlay.Env = resolvedTmp.Env
+		overlay.Repos = resolvedTmp.Repos
 
 		mergedWS, mergeErr := MergeWorkspaceOverlay(cfg, overlay, overlayDir)
 		if mergeErr != nil {
