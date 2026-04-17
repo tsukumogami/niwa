@@ -3,12 +3,17 @@ package workspace
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"time"
 
 	"github.com/tsukumogami/niwa/internal/config"
 	"github.com/tsukumogami/niwa/internal/github"
+	"github.com/tsukumogami/niwa/internal/guardrail"
+	"github.com/tsukumogami/niwa/internal/secret"
+	"github.com/tsukumogami/niwa/internal/vault"
+	"github.com/tsukumogami/niwa/internal/vault/resolve"
 )
 
 // Applier orchestrates the apply pipeline.
@@ -19,6 +24,24 @@ type Applier struct {
 	NoPull          bool
 	AllowDirty      bool
 	GlobalConfigDir string // empty string means global config not registered
+
+	// AllowMissingSecrets threads through to the vault resolver's
+	// ResolveOptions.AllowMissing. When true, missing vault keys are
+	// downgraded to empty MaybeSecret values with a stderr warning.
+	// The CLI --allow-missing-secrets flag (Issue 10) populates this
+	// field; default false preserves the strict-apply behavior.
+	AllowMissingSecrets bool
+
+	// AllowPlaintextSecrets threads through to the public-repo
+	// plaintext-secrets guardrail
+	// (internal/guardrail.CheckGitHubPublicRemoteSecrets). When true,
+	// the guardrail downgrades a blocking error to a loud stderr
+	// warning and allows the apply to proceed. One-shot by contract:
+	// no state is written, so the next apply re-runs the check. The
+	// CLI --allow-plaintext-secrets flag (Issue 10) populates this
+	// field; default false preserves the block-on-public-GitHub
+	// behavior.
+	AllowPlaintextSecrets bool
 }
 
 // NewApplier creates an Applier with the given GitHub client.
@@ -56,6 +79,11 @@ type pipelineResult struct {
 	repoStates   map[string]RepoState
 	managedFiles []ManagedFile
 	warnings     []string
+	// shadows carries the personal-overlay-vs-team key conflicts
+	// detected during this apply invocation. Empty when no overlay
+	// is active or no keys overlapped. Persisted into
+	// InstanceState.Shadows by Create/Apply.
+	shadows []Shadow
 }
 
 // Create creates a new workspace instance under workspaceRoot, runs the full
@@ -67,6 +95,14 @@ func (a *Applier) Create(ctx context.Context, cfg *config.WorkspaceConfig, confi
 	instanceRoot := filepath.Join(workspaceRoot, cfg.Workspace.Name)
 	if err := os.MkdirAll(instanceRoot, 0o755); err != nil {
 		return "", fmt.Errorf("creating instance directory: %w", err)
+	}
+
+	// Ensure the instance root's .gitignore covers *.local*. The
+	// materializers always emit files with the ".local" infix so
+	// this single pattern is sufficient; running create twice on
+	// the same instance is a no-op after the first run.
+	if err := EnsureInstanceGitignore(instanceRoot); err != nil {
+		return "", fmt.Errorf("preparing instance .gitignore: %w", err)
 	}
 
 	result, err := a.runPipeline(ctx, cfg, configDir, instanceRoot, now, &pipelineOpts{
@@ -96,6 +132,7 @@ func (a *Applier) Create(ctx context.Context, cfg *config.WorkspaceConfig, confi
 		LastApplied:    now,
 		ManagedFiles:   result.managedFiles,
 		Repos:          result.repoStates,
+		Shadows:        result.shadows,
 	}
 
 	if err := SaveState(instanceRoot, state); err != nil {
@@ -109,6 +146,15 @@ func (a *Applier) Create(ctx context.Context, cfg *config.WorkspaceConfig, confi
 // classify, clone, install content, clean up removed repos, and update state.
 func (a *Applier) Apply(ctx context.Context, cfg *config.WorkspaceConfig, configDir, instanceRoot string) error {
 	now := time.Now()
+
+	// Ensure the instance root's .gitignore covers *.local*. Applier.
+	// Create already runs this during initial scaffolding, but an
+	// instance created before this guard landed won't have the file;
+	// running it here closes the upgrade-path gap. The helper is
+	// idempotent, so no-op on subsequent applies.
+	if err := EnsureInstanceGitignore(instanceRoot); err != nil {
+		return fmt.Errorf("preparing instance .gitignore: %w", err)
+	}
 
 	// Load existing state (required for Apply).
 	existingState, err := LoadState(instanceRoot)
@@ -140,6 +186,14 @@ func (a *Applier) Apply(ctx context.Context, cfg *config.WorkspaceConfig, config
 		fmt.Fprintf(os.Stderr, "warning: %s\n", w)
 	}
 
+	// Emit `rotated <path>` to stderr for every managed file whose
+	// SourceFingerprint changed against the previous state AND whose
+	// change includes a vault source token flip. First-time
+	// materializations (no prior state entry for the path) are NOT
+	// rotations — they're the initial write of that file. See PRD
+	// Rotation AC.
+	emitRotatedFiles(existingState, result, os.Stderr)
+
 	// Clean up managed files from previous state that are no longer produced.
 	a.cleanRemovedFiles(existingState, result)
 
@@ -157,6 +211,7 @@ func (a *Applier) Apply(ctx context.Context, cfg *config.WorkspaceConfig, config
 		LastApplied:    now,
 		ManagedFiles:   result.managedFiles,
 		Repos:          result.repoStates,
+		Shadows:        result.shadows,
 	}
 
 	if err := SaveState(instanceRoot, state); err != nil {
@@ -172,6 +227,16 @@ func (a *Applier) Apply(ctx context.Context, cfg *config.WorkspaceConfig, config
 func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, configDir, instanceRoot string, now time.Time, opts *pipelineOpts) (*pipelineResult, error) {
 	var writtenFiles []string
 	var allWarnings []string
+	// sourceTuples aggregates per-file source provenance across every
+	// materializer call. The key is the absolute on-disk path of the
+	// written file; the value is the ordered list of SourceEntry
+	// tuples reported by the materializer that produced it. Used in
+	// Step 7 below to populate ManagedFile.Sources and compute
+	// SourceFingerprint. Files not recorded here (content files,
+	// hook scripts, etc.) get empty Sources and an empty
+	// SourceFingerprint, which is semantically "no upstream to
+	// attribute" — drift for those files is pure content-hash drift.
+	sourceTuples := map[string][]SourceEntry{}
 
 	// Step 1: Discover repos from all sources.
 	allRepos, err := a.discoverAllRepos(ctx, cfg.Sources)
@@ -208,22 +273,166 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		}
 	}
 
-	// Steps 3a–3c: Load and merge global config override into workspace config.
-	// cfg remains the original for per-instance reads; effectiveCfg carries the merge.
+	// Steps 3a–3c: Parse the global config override, then run the
+	// vault resolver stage against BOTH team (ws) and personal
+	// (overlay) layers before the merge. The resolver must run
+	// before merge so that each layer's provider bundle is built
+	// from its own [vault] block only (file-local scoping, D-6 in
+	// the vault-integration design). Resolving post-merge would
+	// flatten provider declarations and make R12 collision
+	// detection impossible.
+	//
+	// cfg remains the original for per-instance reads; effectiveCfg
+	// carries the merge.
 	effectiveCfg := cfg
+
+	// Build a redactor for this apply invocation and attach it to
+	// ctx so every secret.Errorf / Wrap call downstream scrubs
+	// resolved values automatically.
+	redactor := secret.NewRedactor()
+	ctx = secret.WithRedactor(ctx, redactor)
+
+	var globalOverride *config.GlobalConfigOverride
 	if a.GlobalConfigDir != "" && !opts.skipGlobal {
 		overridePath := filepath.Join(a.GlobalConfigDir, GlobalConfigOverrideFile)
 		data, readErr := os.ReadFile(overridePath)
 		if readErr == nil {
-			globalOverride, parseErr := config.ParseGlobalConfigOverride(data)
+			parsed, parseErr := config.ParseGlobalConfigOverride(data)
 			if parseErr != nil {
 				return nil, fmt.Errorf("parsing global config override: %w", parseErr)
 			}
-			resolved := ResolveGlobalOverride(globalOverride, cfg.Workspace.Name)
-			effectiveCfg = MergeGlobalOverride(cfg, resolved, a.GlobalConfigDir)
+			globalOverride = parsed
 		} else if !os.IsNotExist(readErr) {
 			return nil, fmt.Errorf("reading global config override: %w", readErr)
 		}
+	}
+
+	// R5 enforcement: a workspace with more than one [[sources]] block
+	// AND an active personal overlay must declare [workspace].vault_scope
+	// to disambiguate which [workspaces.<scope>] block applies. Single-
+	// source or zero-source workspaces are unaffected. Runs before the
+	// resolver builds bundles so we fail fast without issuing provider
+	// RPCs.
+	if err := CheckVaultScopeAmbiguity(cfg, globalOverride); err != nil {
+		return nil, err
+	}
+
+	// Build provider bundles from each layer independently. Bundle
+	// lifetime is scoped to this apply: defer CloseAll so providers
+	// shut down cleanly even on error paths (R29 no-disk-cache).
+	teamBundle, err := resolve.BuildBundle(ctx, nil, cfg.Vault, "workspace config")
+	if err != nil {
+		return nil, err
+	}
+	defer teamBundle.CloseAll()
+
+	// BuildBundle is a safe no-op for a nil config.VaultRegistry, so
+	// we always call it regardless of whether globalOverride is
+	// present; that keeps the defer and the R12 check uniform.
+	var overlayRegistry *config.VaultRegistry
+	if globalOverride != nil {
+		overlayRegistry = globalOverride.Global.Vault
+	}
+	personalBundle, err := resolve.BuildBundle(ctx, nil, overlayRegistry, "global overlay")
+	if err != nil {
+		return nil, err
+	}
+	defer personalBundle.CloseAll()
+
+	// Provider-level shadow detection (informational). Fires BEFORE
+	// the R12 hard error so the user sees the shadow diagnostic
+	// even though apply will fail on the collision. The
+	// CheckProviderNameCollision call below is the enforcement; this
+	// call only emits stderr. The shadow record itself is synthesized
+	// at a higher layer (pipelineResult.shadows) from
+	// DetectShadows; vault.ProviderShadow is not persisted as a
+	// workspace.Shadow today because the pipeline rejects the apply
+	// before it could reach SaveState.
+	providerShadows := vault.DetectProviderShadows(teamBundle, personalBundle)
+	for _, sh := range providerShadows {
+		label := sh.Name
+		if label == "" {
+			label = "(anonymous)"
+		}
+		fmt.Fprintf(os.Stderr,
+			"shadowed provider %q [personal-overlay shadows team: team=%s, personal=%s]\n",
+			label, "workspace.toml", "niwa.toml")
+	}
+
+	// R12 enforcement: personal overlay MUST NOT redeclare any
+	// provider name present in the team bundle. This is checked
+	// here (not in the resolver) because only this call site has
+	// both bundles in scope.
+	if err := resolve.CheckProviderNameCollision(teamBundle, personalBundle); err != nil {
+		return nil, err
+	}
+
+	// R14/R30 enforcement: a workspace config repo with a public
+	// GitHub remote MUST NOT carry plaintext values in its *.secrets
+	// tables. The guardrail takes the pre-resolve cfg on purpose —
+	// the resolver auto-wraps plaintext secrets-table values into
+	// secret.Value (so downstream redaction/mode-0o600/Error wrapping
+	// still apply even under --allow-plaintext-secrets), which means
+	// the post-resolve cfg no longer distinguishes "was plaintext" from
+	// "was a vault ref". The original cfg still has Plain populated
+	// for plaintext entries and Secret populated only for vault-resolved
+	// ones, which is exactly the signal the guardrail reads.
+	if err := guardrail.CheckGitHubPublicRemoteSecrets(configDir, cfg, a.AllowPlaintextSecrets, os.Stderr); err != nil {
+		return nil, err
+	}
+
+	// Env/files/settings shadow detection. Pure function over the
+	// parsed team config and the parsed (pre-resolve) overlay so no
+	// vault calls are needed. Emitted to stderr immediately so the
+	// user sees the override-visibility hints during apply; also
+	// collected for persistence into InstanceState.Shadows below.
+	var pipelineShadows []Shadow
+	if globalOverride != nil {
+		pipelineShadows = DetectShadows(cfg, globalOverride)
+		for _, sh := range pipelineShadows {
+			fmt.Fprintf(os.Stderr,
+				"shadowed %s %q [personal-overlay shadows team: team=%s, personal=%s]\n",
+				sh.Kind, sh.Name, sh.TeamSource, sh.PersonalSource)
+		}
+	}
+
+	// Resolve the team workspace config.
+	resolvedCfg, err := resolve.ResolveWorkspace(ctx, cfg, resolve.ResolveOptions{
+		AllowMissing: a.AllowMissingSecrets,
+		TeamBundle:   teamBundle,
+	})
+	if err != nil {
+		return nil, err
+	}
+	effectiveCfg = resolvedCfg
+
+	// Resolve the personal overlay, then merge it into the team
+	// workspace. The merge happens AFTER resolution so that R8
+	// team_only enforcement in MergeGlobalOverride sees the
+	// overlay's resolved MaybeSecret values, not pre-resolve URIs.
+	if globalOverride != nil {
+		resolvedOverride, err := resolve.ResolveGlobalOverride(ctx, globalOverride, resolve.ResolveOptions{
+			AllowMissing:   a.AllowMissingSecrets,
+			PersonalBundle: personalBundle,
+		})
+		if err != nil {
+			return nil, err
+		}
+		flattened := ResolveGlobalOverride(resolvedOverride, cfg.Workspace.Name)
+		merged, err := MergeGlobalOverride(resolvedCfg, flattened, a.GlobalConfigDir)
+		if err != nil {
+			return nil, err
+		}
+		effectiveCfg = merged
+	}
+
+	// Post-merge required/recommended enforcement (PRD R33/R34). The
+	// required check is NOT downgraded by AllowMissingSecrets; the
+	// resolver already turned missing vault-backed keys into empty
+	// MaybeSecret values when the flag is set, and checkRequiredKeys
+	// catches those empty values via the required list.
+	if err := checkRequiredKeys(effectiveCfg, os.Stderr); err != nil {
+		return nil, err
 	}
 
 	// Step 3: Create group directories and clone repos.
@@ -400,6 +609,7 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 			ConfigDir:     configDir,
 			DiscoveredEnv: discoveredEnv,
 			RepoIndex:     repoIndex,
+			SourceTuples:  sourceTuples,
 		}
 
 		claudeOn := ClaudeEnabled(effectiveCfg, cr.Repo.Name)
@@ -435,18 +645,29 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		}
 	}
 
-	// Step 7: Build managed files with hashes.
+	// Step 7: Build managed files with hashes and per-source
+	// provenance. Sources are populated by materializers via
+	// MaterializeContext.SourceTuples; files written outside the
+	// materializer pipeline (content files, workspace CLAUDE.md,
+	// etc.) have no recorded sources, which is fine — their drift
+	// check falls back to the ContentHash-only path.
 	managedFiles := make([]ManagedFile, 0, len(writtenFiles))
 	for _, path := range writtenFiles {
 		hash, err := HashFile(path)
 		if err != nil {
 			return nil, fmt.Errorf("hashing managed file %s: %w", path, err)
 		}
-		managedFiles = append(managedFiles, ManagedFile{
-			Path:      path,
-			Hash:      hash,
-			Generated: now,
-		})
+		sources := sourceTuples[path]
+		mf := ManagedFile{
+			Path:        path,
+			ContentHash: hash,
+			Generated:   now,
+			Sources:     sources,
+		}
+		if len(sources) > 0 {
+			mf.SourceFingerprint = ComputeSourceFingerprint(sources)
+		}
+		managedFiles = append(managedFiles, mf)
 	}
 
 	return &pipelineResult{
@@ -454,6 +675,7 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		repoStates:   repoStates,
 		managedFiles: managedFiles,
 		warnings:     allWarnings,
+		shadows:      pipelineShadows,
 	}, nil
 }
 
@@ -511,6 +733,81 @@ func (a *Applier) cleanRemovedGroupDirs(existingState *InstanceState, result *pi
 			os.Remove(groupDir)
 		}
 	}
+}
+
+// emitRotatedFiles prints `rotated <path>` to stderrOut for every
+// managed file in the new pipeline result whose SourceFingerprint
+// differs from the previous state's entry for the same path AND whose
+// difference is driven by at least one vault SourceEntry with a
+// changed VersionToken (i.e., the upstream provider returned a new
+// revision for a key this file depends on).
+//
+// Brand-new files (no entry in the previous state for the path) are
+// SKIPPED: a first-time materialization is not a rotation.
+// Plaintext-only changes (content edits in env.files, for example)
+// also don't count as rotations — they surface through drift, not
+// rotation. This mirrors the semantics described in PRD-vault-
+// integration §Rotation AC and matches the user-visible `vault-rotated`
+// output emitted by `niwa status --check-vault`.
+func emitRotatedFiles(prev *InstanceState, result *pipelineResult, stderrOut io.Writer) {
+	if prev == nil {
+		return
+	}
+
+	// Index previous managed files by path for O(1) lookup. A nil
+	// result or empty ManagedFiles list yields an empty map, in which
+	// case the loop below finds no matches and emits nothing — the
+	// correct "no rotations to report" path.
+	prevByPath := make(map[string]ManagedFile, len(prev.ManagedFiles))
+	for _, mf := range prev.ManagedFiles {
+		prevByPath[mf.Path] = mf
+	}
+
+	for _, mfNew := range result.managedFiles {
+		mfOld, existed := prevByPath[mfNew.Path]
+		if !existed {
+			// First-time materialization, not a rotation.
+			continue
+		}
+		if mfNew.SourceFingerprint == mfOld.SourceFingerprint {
+			continue
+		}
+		if !hasVaultRotation(mfOld.Sources, mfNew.Sources) {
+			continue
+		}
+		fmt.Fprintf(stderrOut, "rotated %s\n", mfNew.Path)
+	}
+}
+
+// hasVaultRotation reports whether any vault SourceEntry in newSources
+// has a different VersionToken than the same-SourceID entry in
+// oldSources. A new vault source (not present in oldSources) also
+// counts as a rotation relative to the previous state because the file
+// is now backed by a vault key it wasn't backed by before.
+//
+// Only vault sources drive rotation output. A plaintext-source change
+// (different file content hash) is drift, not rotation, and is
+// reported via the existing drift-check path in niwa status.
+func hasVaultRotation(oldSources, newSources []SourceEntry) bool {
+	oldTokens := make(map[string]string, len(oldSources))
+	for _, s := range oldSources {
+		if s.Kind == SourceKindVault {
+			oldTokens[s.SourceID] = s.VersionToken
+		}
+	}
+	for _, s := range newSources {
+		if s.Kind != SourceKindVault {
+			continue
+		}
+		oldToken, existed := oldTokens[s.SourceID]
+		if !existed {
+			return true
+		}
+		if oldToken != s.VersionToken {
+			return true
+		}
+	}
+	return false
 }
 
 // repoAlreadyCloned checks if a directory has a .git marker, indicating

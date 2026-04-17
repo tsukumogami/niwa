@@ -23,9 +23,9 @@ func TestSaveAndLoadState(t *testing.T) {
 		LastApplied:    now,
 		ManagedFiles: []ManagedFile{
 			{
-				Path:      filepath.Join(dir, "CLAUDE.md"),
-				Hash:      "sha256:abc123",
-				Generated: now,
+				Path:        filepath.Join(dir, "CLAUDE.md"),
+				ContentHash: "sha256:abc123",
+				Generated:   now,
 			},
 		},
 		Repos: map[string]RepoState{
@@ -65,8 +65,8 @@ func TestSaveAndLoadState(t *testing.T) {
 	if len(loaded.ManagedFiles) != 1 {
 		t.Fatalf("ManagedFiles count = %d, want 1", len(loaded.ManagedFiles))
 	}
-	if loaded.ManagedFiles[0].Hash != "sha256:abc123" {
-		t.Errorf("ManagedFiles[0].Hash = %q, want %q", loaded.ManagedFiles[0].Hash, "sha256:abc123")
+	if loaded.ManagedFiles[0].ContentHash != "sha256:abc123" {
+		t.Errorf("ManagedFiles[0].ContentHash = %q, want %q", loaded.ManagedFiles[0].ContentHash, "sha256:abc123")
 	}
 	if len(loaded.Repos) != 1 {
 		t.Fatalf("Repos count = %d, want 1", len(loaded.Repos))
@@ -147,7 +147,7 @@ func TestStateUpdatePreservesCreated(t *testing.T) {
 	// Update state with new LastApplied.
 	state.LastApplied = time.Date(2025, 6, 1, 0, 0, 0, 0, time.UTC)
 	state.ManagedFiles = []ManagedFile{
-		{Path: "/some/file", Hash: "sha256:aaa", Generated: state.LastApplied},
+		{Path: "/some/file", ContentHash: "sha256:aaa", Generated: state.LastApplied},
 	}
 
 	if err := SaveState(dir, state); err != nil {
@@ -488,9 +488,9 @@ func TestCheckDriftNoChange(t *testing.T) {
 	}
 
 	mf := ManagedFile{
-		Path:      path,
-		Hash:      hash,
-		Generated: time.Now(),
+		Path:        path,
+		ContentHash: hash,
+		Generated:   time.Now(),
 	}
 
 	result, err := CheckDrift(mf)
@@ -515,9 +515,9 @@ func TestCheckDriftChanged(t *testing.T) {
 	}
 
 	mf := ManagedFile{
-		Path:      path,
-		Hash:      hash,
-		Generated: time.Now(),
+		Path:        path,
+		ContentHash: hash,
+		Generated:   time.Now(),
 	}
 
 	// Modify the file.
@@ -548,9 +548,9 @@ func TestCheckDriftFileRemoved(t *testing.T) {
 	path := filepath.Join(dir, "file.md")
 
 	mf := ManagedFile{
-		Path:      path,
-		Hash:      "sha256:abc123",
-		Generated: time.Now(),
+		Path:        path,
+		ContentHash: "sha256:abc123",
+		Generated:   time.Now(),
 	}
 
 	result, err := CheckDrift(mf)

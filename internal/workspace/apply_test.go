@@ -1171,3 +1171,302 @@ func assertFileNotContains(t *testing.T, path, substr string) {
 		t.Errorf("%s unexpectedly contains %q:\n%s", path, substr, data)
 	}
 }
+
+// TestCreateNonVaultConfigStillWrites0o600 is the Issue 6 bug-fix
+// coverage: a workspace that declares no vault providers still gets
+// 0o600 permissions on every materialized file. The test drives a
+// non-vault config through Applier.Create and asserts mode on the
+// env file, settings file, and hook script.
+func TestCreateNonVaultConfigStillWrites0o600(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	niwaDir := filepath.Join(tmpDir, ".niwa")
+	envDir := filepath.Join(niwaDir, "env")
+	if err := os.MkdirAll(envDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(envDir, "workspace.env"), []byte("WS=yes\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	configTOML := `
+[workspace]
+name = "perm-ws"
+
+[[sources]]
+org = "testorg"
+
+[groups.public]
+visibility = "public"
+
+[claude.settings]
+permissions = "bypass"
+
+[env.vars]
+PLAIN = "not-a-secret"
+`
+	if err := os.WriteFile(filepath.Join(niwaDir, "workspace.toml"), []byte(configTOML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := config.Load(filepath.Join(niwaDir, "workspace.toml"))
+	if err != nil {
+		t.Fatalf("loading config: %v", err)
+	}
+	cfg := result.Config
+
+	mockClient := &mockGitHubClient{
+		repos: map[string][]github.Repo{
+			"testorg": {
+				{Name: "app", Visibility: "public", SSHURL: "git@github.com:testorg/app.git"},
+			},
+		},
+	}
+
+	workspaceRoot := tmpDir
+	instanceRoot := filepath.Join(workspaceRoot, "perm-ws")
+	repoDir := filepath.Join(instanceRoot, "public", "app")
+	if err := os.MkdirAll(filepath.Join(repoDir, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	applier := NewApplier(mockClient)
+	applier.Cloner = &Cloner{}
+
+	if _, err := applier.Create(context.Background(), cfg, niwaDir, workspaceRoot); err != nil {
+		t.Fatalf("create failed: %v", err)
+	}
+
+	// Every materialized file under the repo must be 0o600. The
+	// bug that Issue 6 fixes is that these were previously 0o644
+	// even when no vault was declared.
+	for _, path := range []string{
+		filepath.Join(repoDir, ".local.env"),
+		filepath.Join(repoDir, ".claude", "settings.local.json"),
+	} {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatalf("stat %s: %v", path, err)
+		}
+		if got := info.Mode().Perm(); got != 0o600 {
+			t.Errorf("%s mode = %o, want 0o600", path, got)
+		}
+	}
+}
+
+// TestCreateWritesInstanceGitignore covers that Applier.Create
+// writes a fresh .gitignore at the instance root containing
+// *.local*. No prior file exists.
+func TestCreateWritesInstanceGitignore(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	niwaDir := filepath.Join(tmpDir, ".niwa")
+	if err := os.MkdirAll(niwaDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configTOML := `
+[workspace]
+name = "gi-ws"
+
+[[sources]]
+org = "testorg"
+
+[groups.public]
+visibility = "public"
+`
+	if err := os.WriteFile(filepath.Join(niwaDir, "workspace.toml"), []byte(configTOML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := config.Load(filepath.Join(niwaDir, "workspace.toml"))
+	if err != nil {
+		t.Fatalf("loading config: %v", err)
+	}
+	cfg := result.Config
+
+	mockClient := &mockGitHubClient{
+		repos: map[string][]github.Repo{
+			"testorg": {
+				{Name: "app", Visibility: "public", SSHURL: "git@github.com:testorg/app.git"},
+			},
+		},
+	}
+
+	workspaceRoot := tmpDir
+	instanceRoot := filepath.Join(workspaceRoot, "gi-ws")
+	repoDir := filepath.Join(instanceRoot, "public", "app")
+	if err := os.MkdirAll(filepath.Join(repoDir, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	applier := NewApplier(mockClient)
+	applier.Cloner = &Cloner{}
+
+	if _, err := applier.Create(context.Background(), cfg, niwaDir, workspaceRoot); err != nil {
+		t.Fatalf("create failed: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(instanceRoot, ".gitignore"))
+	if err != nil {
+		t.Fatalf("reading instance .gitignore: %v", err)
+	}
+	if !strings.Contains(string(data), "*.local*") {
+		t.Errorf("instance .gitignore missing *.local*:\n%s", string(data))
+	}
+}
+
+// TestCreateMergesInstanceGitignore covers the case where the user
+// has pre-seeded the instance root with a .gitignore containing
+// node_modules/. Applier.Create must preserve that content and
+// append *.local*.
+func TestCreateMergesInstanceGitignore(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	niwaDir := filepath.Join(tmpDir, ".niwa")
+	if err := os.MkdirAll(niwaDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configTOML := `
+[workspace]
+name = "gi-merge-ws"
+
+[[sources]]
+org = "testorg"
+
+[groups.public]
+visibility = "public"
+`
+	if err := os.WriteFile(filepath.Join(niwaDir, "workspace.toml"), []byte(configTOML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	workspaceRoot := tmpDir
+	instanceRoot := filepath.Join(workspaceRoot, "gi-merge-ws")
+	if err := os.MkdirAll(instanceRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Pre-seed the instance .gitignore with unrelated content. The
+	// CLI guards against a pre-existing instance directory, but
+	// Applier.Create itself does not -- this test exercises the
+	// helper's merge path directly via Create.
+	if err := os.WriteFile(filepath.Join(instanceRoot, ".gitignore"), []byte("node_modules/\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := config.Load(filepath.Join(niwaDir, "workspace.toml"))
+	if err != nil {
+		t.Fatalf("loading config: %v", err)
+	}
+	cfg := result.Config
+
+	mockClient := &mockGitHubClient{
+		repos: map[string][]github.Repo{
+			"testorg": {
+				{Name: "app", Visibility: "public", SSHURL: "git@github.com:testorg/app.git"},
+			},
+		},
+	}
+
+	repoDir := filepath.Join(instanceRoot, "public", "app")
+	if err := os.MkdirAll(filepath.Join(repoDir, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	applier := NewApplier(mockClient)
+	applier.Cloner = &Cloner{}
+
+	if _, err := applier.Create(context.Background(), cfg, niwaDir, workspaceRoot); err != nil {
+		t.Fatalf("create failed: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(instanceRoot, ".gitignore"))
+	if err != nil {
+		t.Fatalf("reading .gitignore: %v", err)
+	}
+	content := string(data)
+	if !strings.Contains(content, "node_modules/") {
+		t.Errorf("pre-existing content lost:\n%s", content)
+	}
+	if !strings.Contains(content, "*.local*") {
+		t.Errorf("*.local* not appended:\n%s", content)
+	}
+}
+
+// TestApplyWritesInstanceGitignore ensures Applier.Apply runs the
+// EnsureInstanceGitignore guard (previously only Applier.Create did).
+// This covers the upgrade path where an instance was created before
+// the guard was introduced and never had its .gitignore written.
+func TestApplyWritesInstanceGitignore(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	niwaDir := filepath.Join(tmpDir, ".niwa")
+	if err := os.MkdirAll(niwaDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	configTOML := `
+[workspace]
+name = "test-ws"
+
+[[sources]]
+org = "testorg"
+
+[groups.all]
+visibility = "public"
+`
+	if err := os.WriteFile(filepath.Join(niwaDir, "workspace.toml"), []byte(configTOML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := config.Load(filepath.Join(niwaDir, "workspace.toml"))
+	if err != nil {
+		t.Fatalf("loading config: %v", err)
+	}
+	cfg := result.Config
+
+	mockClient := &mockGitHubClient{
+		repos: map[string][]github.Repo{
+			"testorg": {
+				{Name: "repo1", Visibility: "public", SSHURL: "git@github.com:testorg/repo1.git"},
+			},
+		},
+	}
+
+	applier := NewApplier(mockClient)
+	applier.Cloner = &Cloner{}
+
+	workspaceRoot := tmpDir
+	instanceRoot := filepath.Join(workspaceRoot, "test-ws")
+	repoDir := filepath.Join(instanceRoot, "all", "repo1")
+	if err := os.MkdirAll(filepath.Join(repoDir, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Seed state via Create so Apply has something to load.
+	if _, err := applier.Create(context.Background(), cfg, niwaDir, workspaceRoot); err != nil {
+		t.Fatalf("create failed: %v", err)
+	}
+
+	// Simulate the upgrade path: an instance created before the
+	// .gitignore guard existed. Remove the file that Create wrote so
+	// we can assert Apply puts it back.
+	gitignorePath := filepath.Join(instanceRoot, ".gitignore")
+	if err := os.Remove(gitignorePath); err != nil {
+		t.Fatalf("removing pre-existing .gitignore: %v", err)
+	}
+	if _, err := os.Stat(gitignorePath); !os.IsNotExist(err) {
+		t.Fatalf("expected .gitignore to be absent before Apply, stat err = %v", err)
+	}
+
+	if err := applier.Apply(context.Background(), cfg, niwaDir, instanceRoot); err != nil {
+		t.Fatalf("apply failed: %v", err)
+	}
+
+	data, err := os.ReadFile(gitignorePath)
+	if err != nil {
+		t.Fatalf("reading .gitignore after apply: %v", err)
+	}
+	if !strings.Contains(string(data), "*.local*") {
+		t.Errorf("Apply did not write *.local* to .gitignore, got:\n%s", string(data))
+	}
+}

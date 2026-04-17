@@ -15,8 +15,19 @@ import (
 
 func init() {
 	rootCmd.AddCommand(statusCmd)
+	statusCmd.Flags().BoolVar(&statusAuditSecrets, "audit-secrets", false,
+		"classify every *.secrets table value (vault-ref/plaintext/empty/resolved); "+
+			"exits non-zero when plaintext values are found and a vault is configured")
+	statusCmd.Flags().BoolVar(&statusCheckVault, "check-vault", false,
+		"re-resolve every vault:// reference (invokes providers) and report rotations "+
+			"without materializing files")
 	statusCmd.ValidArgsFunction = completeInstanceNames
 }
+
+var (
+	statusAuditSecrets bool
+	statusCheckVault   bool
+)
 
 var statusCmd = &cobra.Command{
 	Use:   "status [instance]",
@@ -28,7 +39,19 @@ status and managed file drift. When run from the workspace root, shows a
 summary table of all instances.
 
 An optional instance name argument can be provided from the workspace root
-to show detail for a specific instance.`,
+to show detail for a specific instance.
+
+Flags:
+  --audit-secrets   Classify every *.secrets table value across the
+                    workspace config (team + resolved overlay). Prints a
+                    KEY / CLASSIFICATION / TABLE / SHADOWED table and
+                    exits non-zero when any plaintext values are found
+                    and a vault is configured.
+  --check-vault     Re-resolve every vault:// reference by invoking the
+                    configured providers and compare the resulting source
+                    fingerprints against the stored state. Does NOT
+                    materialize any files. Requires network access to
+                    the backends.`,
 	Args: cobra.MaximumNArgs(1),
 	RunE: runStatus,
 }
@@ -37,6 +60,13 @@ func runStatus(cmd *cobra.Command, args []string) error {
 	cwd, err := os.Getwd()
 	if err != nil {
 		return fmt.Errorf("getting working directory: %w", err)
+	}
+
+	if statusAuditSecrets {
+		return runAuditSecrets(cmd, cwd)
+	}
+	if statusCheckVault {
+		return runCheckVault(cmd, cwd)
 	}
 
 	// If an instance name was provided, find it and show detail.
@@ -185,10 +215,59 @@ func showDetailView(cmd *cobra.Command, instanceRoot string) error {
 				displayPath = rel
 			}
 			fmt.Fprintf(out, "  %-40s %s\n", displayPath, f.Status)
+			// For stale files, print the changed sources with their
+			// old->new version tokens and provenance. Indent under
+			// the file line so the attribution is visually grouped.
+			for _, cs := range f.ChangedSources {
+				prefix := "vault"
+				if cs.Kind == workspace.SourceKindPlaintext {
+					prefix = "plaintext"
+				}
+				fmt.Fprintf(out, "    changed source: %s://%s\n", prefix, cs.SourceID)
+				if cs.Description != "" {
+					fmt.Fprintf(out, "      note: %s\n", cs.Description)
+				}
+				if cs.OldToken != "" || cs.NewToken != "" {
+					fmt.Fprintf(out, "      version: %s -> %s\n",
+						shortToken(cs.OldToken), shortToken(cs.NewToken))
+				}
+				if cs.Provenance != "" {
+					fmt.Fprintf(out, "      provenance: %s\n", cs.Provenance)
+				}
+			}
 		}
 	}
 
+	// Personal-overlay shadow summary. Omitted when the last apply
+	// recorded zero shadows so the default happy-path output stays
+	// clean. The `--audit-secrets` SHADOWED column is owned by
+	// Issue 10.
+	if len(state.Shadows) > 0 {
+		fmt.Fprintln(out)
+		suffix := "keys"
+		if len(state.Shadows) == 1 {
+			suffix = "key"
+		}
+		fmt.Fprintf(out, "%d %s shadowed by personal overlay (see niwa status --audit-secrets)\n",
+			len(state.Shadows), suffix)
+	}
+
 	return nil
+}
+
+// shortToken returns a compact form of a version token for display.
+// Long opaque tokens (SHA-256 hex = 64 chars) are truncated to the
+// first 12 characters + an ellipsis; short or empty tokens are
+// returned verbatim. The truncation is display-only — the full token
+// remains in state.json.
+func shortToken(t string) string {
+	if t == "" {
+		return "(none)"
+	}
+	if len(t) > 14 {
+		return t[:12] + "..."
+	}
+	return t
 }
 
 // formatRelativeTime returns a human-readable relative time string.

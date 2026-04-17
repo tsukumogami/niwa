@@ -1,11 +1,14 @@
 package workspace
 
 import (
+	"fmt"
 	"maps"
 	"path/filepath"
 	"slices"
+	"strings"
 
 	"github.com/tsukumogami/niwa/internal/config"
+	"github.com/tsukumogami/niwa/internal/vault"
 )
 
 // EffectiveConfig represents the merged workspace-level and per-repo config
@@ -81,11 +84,22 @@ func MergeOverrides(ws *config.WorkspaceConfig, repoName string) EffectiveConfig
 		}
 
 		// Claude env vars: repo wins per key.
-		for k, v := range override.Claude.Env.Vars {
-			if result.Claude.Env.Vars == nil {
-				result.Claude.Env.Vars = map[string]string{}
+		for k, v := range override.Claude.Env.Vars.Values {
+			if result.Claude.Env.Vars.Values == nil {
+				result.Claude.Env.Vars.Values = map[string]config.MaybeSecret{}
 			}
-			result.Claude.Env.Vars[k] = v
+			result.Claude.Env.Vars.Values[k] = v
+		}
+
+		// Claude env secrets: repo wins per key. Mirrors the vars
+		// merge: env.vars and env.secrets are sensitivity-coded
+		// siblings (PRD R33/Issue 3), so the merge must flow through
+		// both branches identically.
+		for k, v := range override.Claude.Env.Secrets.Values {
+			if result.Claude.Env.Secrets.Values == nil {
+				result.Claude.Env.Secrets.Values = map[string]config.MaybeSecret{}
+			}
+			result.Claude.Env.Secrets.Values[k] = v
 		}
 
 		// Plugins: repo replaces workspace entirely (nil = inherit).
@@ -100,11 +114,20 @@ func MergeOverrides(ws *config.WorkspaceConfig, repoName string) EffectiveConfig
 	}
 
 	// Env vars: repo wins per key.
-	for k, v := range override.Env.Vars {
-		if result.Env.Vars == nil {
-			result.Env.Vars = map[string]string{}
+	for k, v := range override.Env.Vars.Values {
+		if result.Env.Vars.Values == nil {
+			result.Env.Vars.Values = map[string]config.MaybeSecret{}
 		}
-		result.Env.Vars[k] = v
+		result.Env.Vars.Values[k] = v
+	}
+
+	// Env secrets: repo wins per key. See Claude env secrets comment
+	// above for the rationale.
+	for k, v := range override.Env.Secrets.Values {
+		if result.Env.Secrets.Values == nil {
+			result.Env.Secrets.Values = map[string]config.MaybeSecret{}
+		}
+		result.Env.Secrets.Values[k] = v
 	}
 
 	// Files: repo wins per source key. Empty string removes workspace mapping.
@@ -145,7 +168,7 @@ func MergeInstanceOverrides(ws *config.WorkspaceConfig) EffectiveConfig {
 	}
 
 	override := ws.Instance
-	if override.Claude == nil && len(override.Env.Files) == 0 && len(override.Env.Vars) == 0 && len(override.Files) == 0 {
+	if override.Claude == nil && len(override.Env.Files) == 0 && override.Env.Vars.IsEmpty() && override.Env.Secrets.IsEmpty() && len(override.Files) == 0 {
 		return result
 	}
 
@@ -176,11 +199,19 @@ func MergeInstanceOverrides(ws *config.WorkspaceConfig) EffectiveConfig {
 			}
 		}
 
-		for k, v := range override.Claude.Env.Vars {
-			if result.Claude.Env.Vars == nil {
-				result.Claude.Env.Vars = map[string]string{}
+		for k, v := range override.Claude.Env.Vars.Values {
+			if result.Claude.Env.Vars.Values == nil {
+				result.Claude.Env.Vars.Values = map[string]config.MaybeSecret{}
 			}
-			result.Claude.Env.Vars[k] = v
+			result.Claude.Env.Vars.Values[k] = v
+		}
+
+		// Instance-level claude env secrets: mirror vars.
+		for k, v := range override.Claude.Env.Secrets.Values {
+			if result.Claude.Env.Secrets.Values == nil {
+				result.Claude.Env.Secrets.Values = map[string]config.MaybeSecret{}
+			}
+			result.Claude.Env.Secrets.Values[k] = v
 		}
 
 		if override.Claude.Plugins != nil {
@@ -191,11 +222,19 @@ func MergeInstanceOverrides(ws *config.WorkspaceConfig) EffectiveConfig {
 	if len(override.Env.Files) > 0 {
 		result.Env.Files = append(result.Env.Files, override.Env.Files...)
 	}
-	for k, v := range override.Env.Vars {
-		if result.Env.Vars == nil {
-			result.Env.Vars = map[string]string{}
+	for k, v := range override.Env.Vars.Values {
+		if result.Env.Vars.Values == nil {
+			result.Env.Vars.Values = map[string]config.MaybeSecret{}
 		}
-		result.Env.Vars[k] = v
+		result.Env.Vars.Values[k] = v
+	}
+
+	// Instance-level env secrets: mirror vars.
+	for k, v := range override.Env.Secrets.Values {
+		if result.Env.Secrets.Values == nil {
+			result.Env.Secrets.Values = map[string]config.MaybeSecret{}
+		}
+		result.Env.Secrets.Values[k] = v
 	}
 
 	for k, v := range override.Files {
@@ -210,6 +249,49 @@ func MergeInstanceOverrides(ws *config.WorkspaceConfig) EffectiveConfig {
 	}
 
 	return result
+}
+
+// CheckVaultScopeAmbiguity enforces PRD R5: a workspace with more than
+// one [[sources]] block MUST declare [workspace].vault_scope so niwa
+// knows which [workspaces.<scope>] entry in the personal overlay
+// applies. Single-source or zero-source workspaces do not need
+// vault_scope (single-source scopes implicitly by source org; zero-
+// source workspaces fall back to team-only resolution).
+//
+// The check has an escape: when globalOverride is nil (no personal
+// overlay registered), the scope selection is moot and this function
+// returns nil regardless of source count. That keeps multi-source
+// team-only workspaces usable without forcing a vault_scope value
+// that has nothing to select against.
+func CheckVaultScopeAmbiguity(cfg *config.WorkspaceConfig, globalOverride *config.GlobalConfigOverride) error {
+	if cfg == nil {
+		return nil
+	}
+	// No personal overlay → scope selection is moot.
+	if globalOverride == nil {
+		return nil
+	}
+	// Explicit scope wins; no ambiguity possible.
+	if cfg.Workspace.VaultScope != "" {
+		return nil
+	}
+	if len(cfg.Sources) <= 1 {
+		return nil
+	}
+
+	// Surface the declared source orgs so the user has an obvious
+	// candidate list to pick from when writing vault_scope.
+	orgs := make([]string, 0, len(cfg.Sources))
+	for _, s := range cfg.Sources {
+		orgs = append(orgs, s.Org)
+	}
+	return fmt.Errorf(
+		"[workspace].vault_scope is required for multi-source workspaces "+
+			"(sources: %s); set it to the name of a [workspaces.<scope>] block "+
+			"in your personal overlay (or any string if you want to target the "+
+			"default [global] block and skip per-scope routing)",
+		strings.Join(orgs, ", "),
+	)
 }
 
 // ResolveGlobalOverride merges the flat [global] section with any
@@ -276,11 +358,21 @@ func ResolveGlobalOverride(g *config.GlobalConfigOverride, workspaceName string)
 				}
 			}
 			// Claude.Env.Vars: ws wins.
-			for k, v := range ws.Claude.Env.Vars {
-				if merged.Env.Vars == nil {
-					merged.Env.Vars = map[string]string{}
+			for k, v := range ws.Claude.Env.Vars.Values {
+				if merged.Env.Vars.Values == nil {
+					merged.Env.Vars.Values = map[string]config.MaybeSecret{}
 				}
-				merged.Env.Vars[k] = v
+				merged.Env.Vars.Values[k] = v
+			}
+			// Claude.Env.Secrets: ws wins. Mirrors the vars branch --
+			// both tables carry MaybeSecret and must flow through
+			// merges identically so the resolver's output in either
+			// table survives the overlay step.
+			for k, v := range ws.Claude.Env.Secrets.Values {
+				if merged.Env.Secrets.Values == nil {
+					merged.Env.Secrets.Values = map[string]config.MaybeSecret{}
+				}
+				merged.Env.Secrets.Values[k] = v
 			}
 			result.Claude = &merged
 		}
@@ -291,11 +383,20 @@ func ResolveGlobalOverride(g *config.GlobalConfigOverride, workspaceName string)
 		result.Env.Files = append(result.Env.Files, ws.Env.Files...)
 	}
 	// Env.Vars: ws wins per key.
-	for k, v := range ws.Env.Vars {
-		if result.Env.Vars == nil {
-			result.Env.Vars = map[string]string{}
+	for k, v := range ws.Env.Vars.Values {
+		if result.Env.Vars.Values == nil {
+			result.Env.Vars.Values = map[string]config.MaybeSecret{}
 		}
-		result.Env.Vars[k] = v
+		result.Env.Vars.Values[k] = v
+	}
+	// Env.Secrets: ws wins per key. Required so per-workspace
+	// personal overlays can supply secret-table values that flow
+	// through to the resolver output.
+	for k, v := range ws.Env.Secrets.Values {
+		if result.Env.Secrets.Values == nil {
+			result.Env.Secrets.Values = map[string]config.MaybeSecret{}
+		}
+		result.Env.Secrets.Values[k] = v
 	}
 
 	// Files: ws wins per key.
@@ -320,11 +421,26 @@ func ResolveGlobalOverride(g *config.GlobalConfigOverride, workspaceName string)
 //   - Claude.Settings: global value wins per key.
 //   - Claude.Env.Promote: union (no entries dropped).
 //   - Claude.Env.Vars: global value wins per key.
+//   - Claude.Env.Secrets: global value wins per key (mirrors vars).
 //   - Claude.Plugins: global plugins unioned with workspace plugins (deduplicated).
 //   - Env.Files: global files appended after workspace files.
 //   - Env.Vars: global value wins per key.
+//   - Env.Secrets: global value wins per key (mirrors vars).
 //   - Files: global value wins per key; empty global value suppresses workspace mapping.
-func MergeGlobalOverride(ws *config.WorkspaceConfig, g config.GlobalOverride, globalConfigDir string) *config.WorkspaceConfig {
+//
+// R8 enforcement (team_only): before an overlay value wins over a team
+// value, MergeGlobalOverride consults cfg.Vault.TeamOnly. A personal
+// overlay attempting to override a listed key returns an error wrapping
+// vault.ErrTeamOnlyLocked, naming the key. This is defense in depth: the
+// resolver has already rejected a personal-overlay attempt to replace
+// team-declared providers (R12); team_only is the per-key version of
+// that rule for env and settings leaves.
+func MergeGlobalOverride(ws *config.WorkspaceConfig, g config.GlobalOverride, globalConfigDir string) (*config.WorkspaceConfig, error) {
+	// Build the team_only key set up front so we can flag overlay
+	// writes before spending work on the merge. The set is nil-safe
+	// and empty for configs without a [vault] block.
+	teamOnly := teamOnlyKeys(ws.Vault)
+
 	// Deep-copy the workspace config so we never mutate the original.
 	merged := *ws
 	merged.Claude = *copyClaudeConfigFull(&ws.Claude)
@@ -358,6 +474,13 @@ func MergeGlobalOverride(ws *config.WorkspaceConfig, g config.GlobalOverride, gl
 
 		// Settings: global wins per key.
 		for k, v := range g.Claude.Settings {
+			if _, existed := merged.Claude.Settings[k]; existed && teamOnly[k] {
+				return nil, fmt.Errorf(
+					"claude.settings.%s: key is locked by [vault].team_only; "+
+						"remove it from the personal overlay or drop it from team_only: %w",
+					k, vault.ErrTeamOnlyLocked,
+				)
+			}
 			if merged.Claude.Settings == nil {
 				merged.Claude.Settings = config.SettingsConfig{}
 			}
@@ -378,11 +501,33 @@ func MergeGlobalOverride(ws *config.WorkspaceConfig, g config.GlobalOverride, gl
 		}
 
 		// Claude.Env.Vars: global wins per key.
-		for k, v := range g.Claude.Env.Vars {
-			if merged.Claude.Env.Vars == nil {
-				merged.Claude.Env.Vars = map[string]string{}
+		for k, v := range g.Claude.Env.Vars.Values {
+			if _, existed := merged.Claude.Env.Vars.Values[k]; existed && teamOnly[k] {
+				return nil, fmt.Errorf(
+					"claude.env.vars.%s: key is locked by [vault].team_only; "+
+						"remove it from the personal overlay or drop it from team_only: %w",
+					k, vault.ErrTeamOnlyLocked,
+				)
 			}
-			merged.Claude.Env.Vars[k] = v
+			if merged.Claude.Env.Vars.Values == nil {
+				merged.Claude.Env.Vars.Values = map[string]config.MaybeSecret{}
+			}
+			merged.Claude.Env.Vars.Values[k] = v
+		}
+
+		// Claude.Env.Secrets: global wins per key. Mirrors vars.
+		for k, v := range g.Claude.Env.Secrets.Values {
+			if _, existed := merged.Claude.Env.Secrets.Values[k]; existed && teamOnly[k] {
+				return nil, fmt.Errorf(
+					"claude.env.secrets.%s: key is locked by [vault].team_only; "+
+						"remove it from the personal overlay or drop it from team_only: %w",
+					k, vault.ErrTeamOnlyLocked,
+				)
+			}
+			if merged.Claude.Env.Secrets.Values == nil {
+				merged.Claude.Env.Secrets.Values = map[string]config.MaybeSecret{}
+			}
+			merged.Claude.Env.Secrets.Values[k] = v
 		}
 
 		// Plugins: union, deduplicated; workspace plugins are never removed.
@@ -413,15 +558,45 @@ func MergeGlobalOverride(ws *config.WorkspaceConfig, g config.GlobalOverride, gl
 	}
 
 	// Env.Vars: global wins per key.
-	for k, v := range g.Env.Vars {
-		if merged.Env.Vars == nil {
-			merged.Env.Vars = map[string]string{}
+	for k, v := range g.Env.Vars.Values {
+		if _, existed := merged.Env.Vars.Values[k]; existed && teamOnly[k] {
+			return nil, fmt.Errorf(
+				"env.vars.%s: key is locked by [vault].team_only; "+
+					"remove it from the personal overlay or drop it from team_only: %w",
+				k, vault.ErrTeamOnlyLocked,
+			)
 		}
-		merged.Env.Vars[k] = v
+		if merged.Env.Vars.Values == nil {
+			merged.Env.Vars.Values = map[string]config.MaybeSecret{}
+		}
+		merged.Env.Vars.Values[k] = v
+	}
+
+	// Env.Secrets: global wins per key. Mirrors vars; team_only also
+	// applies here (the common case).
+	for k, v := range g.Env.Secrets.Values {
+		if _, existed := merged.Env.Secrets.Values[k]; existed && teamOnly[k] {
+			return nil, fmt.Errorf(
+				"env.secrets.%s: key is locked by [vault].team_only; "+
+					"remove it from the personal overlay or drop it from team_only: %w",
+				k, vault.ErrTeamOnlyLocked,
+			)
+		}
+		if merged.Env.Secrets.Values == nil {
+			merged.Env.Secrets.Values = map[string]config.MaybeSecret{}
+		}
+		merged.Env.Secrets.Values[k] = v
 	}
 
 	// Files: global wins per key; empty global value suppresses workspace mapping.
 	for k, v := range g.Files {
+		if _, existed := merged.Files[k]; existed && teamOnly[k] {
+			return nil, fmt.Errorf(
+				"files[%q]: key is locked by [vault].team_only; "+
+					"remove it from the personal overlay or drop it from team_only: %w",
+				k, vault.ErrTeamOnlyLocked,
+			)
+		}
 		if merged.Files == nil {
 			merged.Files = map[string]string{}
 		}
@@ -432,7 +607,22 @@ func MergeGlobalOverride(ws *config.WorkspaceConfig, g config.GlobalOverride, gl
 		}
 	}
 
-	return &merged
+	return &merged, nil
+}
+
+// teamOnlyKeys builds a set of key names that the team config has
+// locked against personal-overlay override via [vault].team_only. A
+// nil *VaultRegistry yields an empty set; the rest of MergeGlobalOverride
+// can safely index without further nil checks.
+func teamOnlyKeys(vr *config.VaultRegistry) map[string]bool {
+	if vr == nil || len(vr.TeamOnly) == 0 {
+		return nil
+	}
+	out := make(map[string]bool, len(vr.TeamOnly))
+	for _, k := range vr.TeamOnly {
+		out[k] = true
+	}
+	return out
 }
 
 // copyClaudeConfigFull returns a deep copy of a ClaudeConfig pointer, including
@@ -545,7 +735,9 @@ func copyHooks(h config.HooksConfig) config.HooksConfig {
 	return out
 }
 
-// copySettings returns a shallow copy of a SettingsConfig.
+// copySettings returns a shallow copy of a SettingsConfig. SettingsConfig
+// values are MaybeSecret which is already a value-type copy per entry, so
+// a simple maps.Copy is sufficient.
 func copySettings(s config.SettingsConfig) config.SettingsConfig {
 	if s == nil {
 		return nil
@@ -567,24 +759,42 @@ func copyStringMap(m map[string]string) map[string]string {
 
 // copyClaudeEnv returns a deep copy of a ClaudeEnvConfig.
 func copyClaudeEnv(e config.ClaudeEnvConfig) config.ClaudeEnvConfig {
-	out := config.ClaudeEnvConfig{
+	return config.ClaudeEnvConfig{
 		Promote: slices.Clone(e.Promote),
+		Vars:    copyEnvVarsTable(e.Vars),
+		Secrets: copyEnvVarsTable(e.Secrets),
 	}
-	if e.Vars != nil {
-		out.Vars = make(map[string]string, len(e.Vars))
-		maps.Copy(out.Vars, e.Vars)
-	}
-	return out
 }
 
 // copyEnv returns a deep copy of an EnvConfig.
 func copyEnv(e config.EnvConfig) config.EnvConfig {
-	out := config.EnvConfig{
-		Files: slices.Clone(e.Files),
+	return config.EnvConfig{
+		Files:   slices.Clone(e.Files),
+		Vars:    copyEnvVarsTable(e.Vars),
+		Secrets: copyEnvVarsTable(e.Secrets),
 	}
-	if e.Vars != nil {
-		out.Vars = make(map[string]string, len(e.Vars))
-		maps.Copy(out.Vars, e.Vars)
+}
+
+// copyEnvVarsTable returns a deep copy of an EnvVarsTable, cloning
+// each of the four underlying maps so the result can be mutated
+// without aliasing the source.
+func copyEnvVarsTable(t config.EnvVarsTable) config.EnvVarsTable {
+	out := config.EnvVarsTable{}
+	if t.Values != nil {
+		out.Values = make(map[string]config.MaybeSecret, len(t.Values))
+		maps.Copy(out.Values, t.Values)
+	}
+	if t.Required != nil {
+		out.Required = make(map[string]string, len(t.Required))
+		maps.Copy(out.Required, t.Required)
+	}
+	if t.Recommended != nil {
+		out.Recommended = make(map[string]string, len(t.Recommended))
+		maps.Copy(out.Recommended, t.Recommended)
+	}
+	if t.Optional != nil {
+		out.Optional = make(map[string]string, len(t.Optional))
+		maps.Copy(out.Optional, t.Optional)
 	}
 	return out
 }

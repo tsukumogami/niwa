@@ -1,6 +1,7 @@
 package workspace
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -8,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/tsukumogami/niwa/internal/config"
+	"github.com/tsukumogami/niwa/internal/secret"
 )
 
 func TestHooksMaterializerName(t *testing.T) {
@@ -350,7 +352,7 @@ func TestSettingsMaterializerPermissionsOnly(t *testing.T) {
 	ctx := &MaterializeContext{
 		Effective: EffectiveConfig{
 			Claude: config.ClaudeConfig{
-				Settings: config.SettingsConfig{"permissions": "bypass"},
+				Settings: config.SettingsConfig{"permissions": config.MaybeSecret{Plain: "bypass"}},
 			},
 		},
 		RepoDir: repoDir,
@@ -403,7 +405,7 @@ func TestSettingsMaterializerAskPermissions(t *testing.T) {
 	ctx := &MaterializeContext{
 		Effective: EffectiveConfig{
 			Claude: config.ClaudeConfig{
-				Settings: config.SettingsConfig{"permissions": "ask"},
+				Settings: config.SettingsConfig{"permissions": config.MaybeSecret{Plain: "ask"}},
 			},
 		},
 		RepoDir: repoDir,
@@ -444,7 +446,7 @@ func TestSettingsMaterializerUnknownPermissions(t *testing.T) {
 	ctx := &MaterializeContext{
 		Effective: EffectiveConfig{
 			Claude: config.ClaudeConfig{
-				Settings: config.SettingsConfig{"permissions": "invalid"},
+				Settings: config.SettingsConfig{"permissions": config.MaybeSecret{Plain: "invalid"}},
 			},
 		},
 		RepoDir: repoDir,
@@ -534,7 +536,7 @@ func TestSettingsMaterializerSettingsAndHooks(t *testing.T) {
 	ctx := &MaterializeContext{
 		Effective: EffectiveConfig{
 			Claude: config.ClaudeConfig{
-				Settings: config.SettingsConfig{"permissions": "bypass"},
+				Settings: config.SettingsConfig{"permissions": config.MaybeSecret{Plain: "bypass"}},
 			},
 		},
 		RepoDir: repoDir,
@@ -679,10 +681,7 @@ func TestSettingsMaterializerInlineEnvOnly(t *testing.T) {
 		Effective: EffectiveConfig{
 			Claude: config.ClaudeConfig{
 				Env: config.ClaudeEnvConfig{
-					Vars: map[string]string{
-						"GH_TOKEN":  "ghp_test123",
-						"API_TOKEN": "api_test456",
-					},
+					Vars: config.EnvVarsTable{Values: map[string]config.MaybeSecret{"GH_TOKEN": config.MaybeSecret{Plain: "ghp_test123"}, "API_TOKEN": config.MaybeSecret{Plain: "api_test456"}}},
 				},
 			},
 		},
@@ -841,7 +840,7 @@ func TestSettingsMaterializerPromoteInlineOverride(t *testing.T) {
 			Claude: config.ClaudeConfig{
 				Env: config.ClaudeEnvConfig{
 					Promote: []string{"GH_TOKEN"},
-					Vars:    map[string]string{"GH_TOKEN": "ghp_inline_wins"},
+					Vars:    config.EnvVarsTable{Values: map[string]config.MaybeSecret{"GH_TOKEN": config.MaybeSecret{Plain: "ghp_inline_wins"}}},
 				},
 			},
 			Env: config.EnvConfig{
@@ -885,8 +884,8 @@ func TestSettingsMaterializerAllBlocks(t *testing.T) {
 	ctx := &MaterializeContext{
 		Effective: EffectiveConfig{
 			Claude: config.ClaudeConfig{
-				Settings: config.SettingsConfig{"permissions": "bypass"},
-				Env:      config.ClaudeEnvConfig{Vars: map[string]string{"GH_TOKEN": "ghp_test"}},
+				Settings: config.SettingsConfig{"permissions": config.MaybeSecret{Plain: "bypass"}},
+				Env:      config.ClaudeEnvConfig{Vars: config.EnvVarsTable{Values: map[string]config.MaybeSecret{"GH_TOKEN": config.MaybeSecret{Plain: "ghp_test"}}}},
 			},
 		},
 		RepoDir: repoDir,
@@ -1022,7 +1021,7 @@ func TestEnvMaterializerInlineVarsOnly(t *testing.T) {
 	ctx := &MaterializeContext{
 		Effective: EffectiveConfig{
 			Env: config.EnvConfig{
-				Vars: map[string]string{"KEY": "value"},
+				Vars: config.EnvVarsTable{Values: map[string]config.MaybeSecret{"KEY": config.MaybeSecret{Plain: "value"}}},
 			},
 		},
 		RepoName:  "myrepo",
@@ -1071,7 +1070,7 @@ func TestEnvMaterializerVarsOverrideFileVars(t *testing.T) {
 		Effective: EffectiveConfig{
 			Env: config.EnvConfig{
 				Files: []string{"base.env"},
-				Vars:  map[string]string{"FOO": "from_vars"},
+				Vars:  config.EnvVarsTable{Values: map[string]config.MaybeSecret{"FOO": config.MaybeSecret{Plain: "from_vars"}}},
 			},
 		},
 		RepoName:  "myrepo",
@@ -1387,11 +1386,7 @@ func TestEnvMaterializerSortedKeys(t *testing.T) {
 	ctx := &MaterializeContext{
 		Effective: EffectiveConfig{
 			Env: config.EnvConfig{
-				Vars: map[string]string{
-					"ZEBRA": "z",
-					"ALPHA": "a",
-					"MIKE":  "m",
-				},
+				Vars: config.EnvVarsTable{Values: map[string]config.MaybeSecret{"ZEBRA": config.MaybeSecret{Plain: "z"}, "ALPHA": config.MaybeSecret{Plain: "a"}, "MIKE": config.MaybeSecret{Plain: "m"}}},
 			},
 		},
 		RepoName:  "myrepo",
@@ -1524,6 +1519,9 @@ func TestFilesMaterializerExplicitDest(t *testing.T) {
 	ctx := &MaterializeContext{
 		Effective: EffectiveConfig{
 			Files: map[string]string{
+				// Destination lacks ".local"; the materializer injects it
+				// before the extension so every written file matches the
+				// *.local* gitignore pattern.
 				"myconfig.json": ".tool/config.json",
 			},
 		},
@@ -1537,7 +1535,7 @@ func TestFilesMaterializerExplicitDest(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	expectedPath := filepath.Join(repoDir, ".tool", "config.json")
+	expectedPath := filepath.Join(repoDir, ".tool", "config.local.json")
 	if written[0] != expectedPath {
 		t.Errorf("written = %q, want %q", written[0], expectedPath)
 	}
@@ -1598,7 +1596,7 @@ func TestFilesMaterializerDirSource(t *testing.T) {
 
 	// Check .local renaming on directory files.
 	expected := map[string]bool{
-		filepath.Join(repoDir, ".claude", "commands", "hello.local.sh"):       true,
+		filepath.Join(repoDir, ".claude", "commands", "hello.local.sh"):         true,
 		filepath.Join(repoDir, ".claude", "commands", "sub", "nested.local.md"): true,
 	}
 	for _, w := range written {
@@ -1659,7 +1657,7 @@ func TestBuildSettingsDocPlugins(t *testing.T) {
 
 func TestBuildSettingsDocEmptyPlugins(t *testing.T) {
 	doc, err := buildSettingsDoc(BuildSettingsConfig{
-		Settings: config.SettingsConfig{"permissions": "bypass"},
+		Settings: config.SettingsConfig{"permissions": config.MaybeSecret{Plain: "bypass"}},
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -1751,7 +1749,7 @@ func TestBuildSettingsDocRepoMarketplaceMissingRepo(t *testing.T) {
 func TestBuildSettingsDocIncludeGitInstructions(t *testing.T) {
 	f := false
 	doc, err := buildSettingsDoc(BuildSettingsConfig{
-		Settings:               config.SettingsConfig{"permissions": "bypass"},
+		Settings:               config.SettingsConfig{"permissions": config.MaybeSecret{Plain: "bypass"}},
 		IncludeGitInstructions: &f,
 	})
 	if err != nil {
@@ -1769,7 +1767,7 @@ func TestBuildSettingsDocIncludeGitInstructions(t *testing.T) {
 
 func TestBuildSettingsDocNoIncludeGitInstructionsWhenNil(t *testing.T) {
 	doc, err := buildSettingsDoc(BuildSettingsConfig{
-		Settings: config.SettingsConfig{"permissions": "bypass"},
+		Settings: config.SettingsConfig{"permissions": config.MaybeSecret{Plain: "bypass"}},
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -1788,7 +1786,7 @@ func TestSettingsMaterializerWithPlugins(t *testing.T) {
 	ctx := &MaterializeContext{
 		Effective: EffectiveConfig{
 			Claude: config.ClaudeConfig{
-				Settings: config.SettingsConfig{"permissions": "bypass"},
+				Settings: config.SettingsConfig{"permissions": config.MaybeSecret{Plain: "bypass"}},
 			},
 			Plugins: []string{"my-plugin@marketplace"},
 		},
@@ -1872,5 +1870,388 @@ func TestSettingsMaterializerPluginsOnlyTriggersWrite(t *testing.T) {
 
 	if _, ok := doc["enabledPlugins"]; !ok {
 		t.Error("expected enabledPlugins key in output")
+	}
+}
+
+// --- Issue 6: materialization hardening (0o600, .local infix) ---
+
+// TestEnvMaterializerWritesMode0600 asserts the env materializer
+// writes .local.env with 0o600 permissions regardless of whether any
+// secret backs the file. This covers both the vault and non-vault
+// cases: the mode change is strictly safer for non-vault users too.
+func TestEnvMaterializerWritesMode0600(t *testing.T) {
+	tmpDir := t.TempDir()
+	repoDir := filepath.Join(tmpDir, "repo")
+	if err := os.MkdirAll(repoDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := &MaterializeContext{
+		Effective: EffectiveConfig{
+			Env: config.EnvConfig{
+				Vars: config.EnvVarsTable{Values: map[string]config.MaybeSecret{
+					"KEY": {Plain: "value"},
+				}},
+			},
+		},
+		RepoDir:   repoDir,
+		ConfigDir: tmpDir,
+	}
+
+	m := &EnvMaterializer{}
+	written, err := m.Materialize(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(written) != 1 {
+		t.Fatalf("expected 1 file, got %d", len(written))
+	}
+
+	info, err := os.Stat(written[0])
+	if err != nil {
+		t.Fatalf("stat env file: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Errorf("env file mode = %o, want 0o600", got)
+	}
+}
+
+// TestSettingsMaterializerWritesMode0600 asserts the settings
+// materializer writes .claude/settings.local.json with 0o600
+// permissions. Applies regardless of whether settings carry secrets.
+func TestSettingsMaterializerWritesMode0600(t *testing.T) {
+	tmpDir := t.TempDir()
+	repoDir := filepath.Join(tmpDir, "repo")
+	if err := os.MkdirAll(repoDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := &MaterializeContext{
+		Effective: EffectiveConfig{
+			Claude: config.ClaudeConfig{
+				Settings: config.SettingsConfig{"permissions": config.MaybeSecret{Plain: "bypass"}},
+			},
+		},
+		RepoDir: repoDir,
+	}
+
+	m := &SettingsMaterializer{}
+	written, err := m.Materialize(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(written) != 1 {
+		t.Fatalf("expected 1 file, got %d", len(written))
+	}
+
+	info, err := os.Stat(written[0])
+	if err != nil {
+		t.Fatalf("stat settings file: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Errorf("settings file mode = %o, want 0o600", got)
+	}
+}
+
+// TestFilesMaterializerWritesMode0600 asserts the files materializer
+// writes with 0o600 even when nothing in the source content looks
+// sensitive. The 0o600 invariant is unconditional.
+func TestFilesMaterializerWritesMode0600(t *testing.T) {
+	tmpDir := t.TempDir()
+	configDir := filepath.Join(tmpDir, "config")
+	repoDir := filepath.Join(tmpDir, "repo")
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(repoDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(configDir, "settings.json"), []byte(`{"k":"v"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := &MaterializeContext{
+		Effective: EffectiveConfig{
+			Files: map[string]string{
+				"settings.json": ".tool/settings.json",
+			},
+		},
+		ConfigDir: configDir,
+		RepoDir:   repoDir,
+	}
+
+	m := &FilesMaterializer{}
+	written, err := m.Materialize(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(written) != 1 {
+		t.Fatalf("expected 1 file, got %d", len(written))
+	}
+
+	info, err := os.Stat(written[0])
+	if err != nil {
+		t.Fatalf("stat materialized file: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Errorf("files materializer mode = %o, want 0o600", got)
+	}
+}
+
+// TestFilesMaterializerInjectsLocalInfix covers the [files] entry
+// whose destination lacks ".local". The materializer injects the
+// infix before the extension so the output matches the *.local*
+// gitignore pattern.
+func TestFilesMaterializerInjectsLocalInfix(t *testing.T) {
+	tmpDir := t.TempDir()
+	configDir := filepath.Join(tmpDir, "config")
+	repoDir := filepath.Join(tmpDir, "repo")
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(repoDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(configDir, "foo.json"), []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := &MaterializeContext{
+		Effective: EffectiveConfig{
+			Files: map[string]string{
+				"foo.json": ".config/foo.json",
+			},
+		},
+		ConfigDir: configDir,
+		RepoDir:   repoDir,
+	}
+
+	m := &FilesMaterializer{}
+	written, err := m.Materialize(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(written) != 1 {
+		t.Fatalf("expected 1 file, got %d", len(written))
+	}
+
+	want := filepath.Join(repoDir, ".config", "foo.local.json")
+	if written[0] != want {
+		t.Errorf("written = %q, want %q (.local injected)", written[0], want)
+	}
+}
+
+// TestFilesMaterializerPreservesExistingLocal covers the case where
+// the user-written destination already contains ".local". The
+// materializer must not double-inject.
+func TestFilesMaterializerPreservesExistingLocal(t *testing.T) {
+	tmpDir := t.TempDir()
+	configDir := filepath.Join(tmpDir, "config")
+	repoDir := filepath.Join(tmpDir, "repo")
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(repoDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(configDir, "foo.json"), []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := &MaterializeContext{
+		Effective: EffectiveConfig{
+			Files: map[string]string{
+				"foo.json": ".config/foo.local.json",
+			},
+		},
+		ConfigDir: configDir,
+		RepoDir:   repoDir,
+	}
+
+	m := &FilesMaterializer{}
+	written, err := m.Materialize(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	want := filepath.Join(repoDir, ".config", "foo.local.json")
+	if written[0] != want {
+		t.Errorf("written = %q, want %q (no double infix)", written[0], want)
+	}
+}
+
+// TestEnvMaterializerRevealsResolvedSecret ensures the env
+// materializer writes the plaintext bytes of a resolved secret into
+// the output file (via reveal.UnsafeReveal). Before Issue 6 the
+// materializer consumed MaybeSecret.String, which would redact to
+// "***"; the integration-style coverage lives under TestApplyResolvesVaultSecretEndToEnd.
+func TestEnvMaterializerRevealsResolvedSecret(t *testing.T) {
+	tmpDir := t.TempDir()
+	repoDir := filepath.Join(tmpDir, "repo")
+	if err := os.MkdirAll(repoDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	plaintext := "super-secret-token-value"
+	v := secret.New([]byte(plaintext), secret.Origin{Key: "API_TOKEN"})
+
+	ctx := &MaterializeContext{
+		Effective: EffectiveConfig{
+			Env: config.EnvConfig{
+				Secrets: config.EnvVarsTable{Values: map[string]config.MaybeSecret{
+					"API_TOKEN": {Secret: v},
+				}},
+			},
+		},
+		RepoDir:   repoDir,
+		ConfigDir: tmpDir,
+	}
+
+	m := &EnvMaterializer{}
+	written, err := m.Materialize(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(written) != 1 {
+		t.Fatalf("expected 1 file, got %d", len(written))
+	}
+
+	data, err := os.ReadFile(written[0])
+	if err != nil {
+		t.Fatalf("reading env file: %v", err)
+	}
+	content := string(data)
+	want := "API_TOKEN=" + plaintext + "\n"
+	if !strings.Contains(content, want) {
+		t.Errorf("env file should contain %q, got:\n%s", want, content)
+	}
+	if strings.Contains(content, "***") {
+		t.Errorf("env file must not contain redacted placeholder, got:\n%s", content)
+	}
+}
+
+// TestSettingsMaterializerRevealsResolvedEnvSecret asserts promoted
+// secrets land as plaintext in .claude/settings.local.json after the
+// resolver has populated MaybeSecret.Secret.
+func TestSettingsMaterializerRevealsResolvedEnvSecret(t *testing.T) {
+	tmpDir := t.TempDir()
+	repoDir := filepath.Join(tmpDir, "repo")
+	if err := os.MkdirAll(repoDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	plaintext := "inline-secret-value"
+	v := secret.New([]byte(plaintext), secret.Origin{Key: "GH_TOKEN"})
+
+	ctx := &MaterializeContext{
+		Effective: EffectiveConfig{
+			Claude: config.ClaudeConfig{
+				Env: config.ClaudeEnvConfig{
+					Vars: config.EnvVarsTable{Values: map[string]config.MaybeSecret{
+						"GH_TOKEN": {Secret: v},
+					}},
+				},
+			},
+		},
+		RepoDir: repoDir,
+	}
+
+	m := &SettingsMaterializer{}
+	written, err := m.Materialize(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(written) != 1 {
+		t.Fatalf("expected 1 file, got %d", len(written))
+	}
+
+	data, err := os.ReadFile(written[0])
+	if err != nil {
+		t.Fatalf("reading settings file: %v", err)
+	}
+
+	var doc map[string]any
+	if err := json.Unmarshal(data, &doc); err != nil {
+		t.Fatalf("parsing settings JSON: %v", err)
+	}
+	envBlock, ok := doc["env"].(map[string]any)
+	if !ok {
+		t.Fatal("expected env key in settings doc")
+	}
+	if envBlock["GH_TOKEN"] != plaintext {
+		t.Errorf("GH_TOKEN = %v, want %q", envBlock["GH_TOKEN"], plaintext)
+	}
+}
+
+// TestFilesMaterializerNotifiesOnLocalInfixInjection asserts the files
+// materializer prints a one-line stderr notice when it rewrites a
+// user-written destination to include ".local", and stays silent when
+// the destination already contains the infix. Users need the notice
+// to understand why a file they referenced by one name landed at a
+// different path on disk.
+func TestFilesMaterializerNotifiesOnLocalInfixInjection(t *testing.T) {
+	tmpDir := t.TempDir()
+	configDir := filepath.Join(tmpDir, "config")
+	repoDir := filepath.Join(tmpDir, "repo")
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(repoDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(configDir, "foo.env"), []byte("KEY=value\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Destination without ".local" — materializer should inject and notify.
+	var buf bytes.Buffer
+	m := &FilesMaterializer{Stderr: &buf}
+	ctx := &MaterializeContext{
+		Effective: EffectiveConfig{
+			Files: map[string]string{
+				"foo.env": ".tool/config.json",
+			},
+		},
+		ConfigDir: configDir,
+		RepoDir:   repoDir,
+	}
+	if _, err := m.Materialize(ctx); err != nil {
+		t.Fatalf("materialize: %v", err)
+	}
+
+	out := buf.String()
+	if !strings.Contains(out, "note:") {
+		t.Errorf("expected stderr notice prefix 'note:', got:\n%s", out)
+	}
+	if !strings.Contains(out, ".tool/config.json") {
+		t.Errorf("expected original destination in notice, got:\n%s", out)
+	}
+	if !strings.Contains(out, "config.local.json") {
+		t.Errorf("expected rewritten destination in notice, got:\n%s", out)
+	}
+	if !strings.Contains(out, "*.local*") {
+		t.Errorf("expected gitignore pattern reference in notice, got:\n%s", out)
+	}
+
+	// Destination already containing ".local" — materializer must stay silent.
+	var buf2 bytes.Buffer
+	m2 := &FilesMaterializer{Stderr: &buf2}
+	ctx2 := &MaterializeContext{
+		Effective: EffectiveConfig{
+			Files: map[string]string{
+				"foo.env": ".tool/config.local.json",
+			},
+		},
+		ConfigDir: configDir,
+		RepoDir:   filepath.Join(tmpDir, "repo2"),
+	}
+	if err := os.MkdirAll(ctx2.RepoDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m2.Materialize(ctx2); err != nil {
+		t.Fatalf("materialize (already-local): %v", err)
+	}
+	if got := buf2.String(); got != "" {
+		t.Errorf("destination already containing .local must not emit a notice, got:\n%s", got)
 	}
 }

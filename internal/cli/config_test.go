@@ -118,4 +118,3 @@ func TestRunInit_SkipGlobal(t *testing.T) {
 		t.Error("SkipGlobal should be true after niwa init --skip-global")
 	}
 }
-

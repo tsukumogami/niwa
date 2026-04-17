@@ -50,13 +50,45 @@ type ClaudeOverride struct {
 	Env      ClaudeEnvConfig `toml:"env,omitempty"`
 }
 
+// EnvVarsTable holds a map of env key→value paired with the three
+// requirement-description sub-tables (required / recommended / optional)
+// that classify the key's importance when it's missing at resolve time
+// (PRD R33/R34).
+//
+// The table's top-level string entries populate Values; the reserved
+// nested tables required/recommended/optional populate Required,
+// Recommended, and Optional.
+//
+// TOML authors write:
+//
+//	[env.vars]
+//	LOG_LEVEL = "debug"
+//	[env.vars.required]
+//	GH_TOKEN = "GitHub token used by niwa apply"
+//
+// and the decoder routes each sub-key to the right field via a custom
+// UnmarshalTOML hook (see env_tables.go).
+type EnvVarsTable struct {
+	Values      map[string]MaybeSecret `toml:"-"`
+	Required    map[string]string      `toml:"required,omitempty"`
+	Recommended map[string]string      `toml:"recommended,omitempty"`
+	Optional    map[string]string      `toml:"optional,omitempty"`
+}
+
 // ClaudeEnvConfig declares env vars for the Claude Code settings.local.json env
-// block. Promote lists keys to pull from the resolved [env] pipeline. Vars are
-// inline key-value pairs for settings-only vars. When the same key appears in
-// both, Vars wins.
+// block. Promote lists keys to pull from the resolved [env] pipeline. Vars and
+// Secrets are sensitivity-coded siblings (PRD R33): both are inline key→value
+// maps usable for settings-only vars, but values under [claude.env.secrets]
+// are wrapped by the resolver into secret.Value regardless of whether the
+// configured value is a vault:// reference. When a key appears in both the
+// [env] pipeline (via Promote) and Vars/Secrets, the inline entry wins.
+//
+// Vars and Secrets carry the same three-level requirement sub-tables as
+// EnvConfig (required / recommended / optional).
 type ClaudeEnvConfig struct {
-	Promote []string          `toml:"promote,omitempty"`
-	Vars    map[string]string `toml:"vars,omitempty"`
+	Promote []string     `toml:"promote,omitempty"`
+	Vars    EnvVarsTable `toml:"vars,omitempty"`
+	Secrets EnvVarsTable `toml:"secrets,omitempty"`
 }
 
 // WorkspaceConfig is the top-level configuration parsed from workspace.toml.
@@ -68,9 +100,13 @@ type WorkspaceConfig struct {
 	Content   ContentConfig           `toml:"content"`
 	Claude    ClaudeConfig            `toml:"claude"`
 	Env       EnvConfig               `toml:"env"`
-	Files     map[string]string        `toml:"files,omitempty"`
+	Files     map[string]string       `toml:"files,omitempty"`
 	Instance  InstanceConfig          `toml:"instance,omitempty"`
 	Channels  map[string]any          `toml:"channels"` // placeholder
+	// Vault carries the optional [vault] block (anonymous [vault.provider]
+	// or named [vault.providers.<name>] shape, plus [vault].team_only).
+	// nil when the config declares no vault providers.
+	Vault *VaultRegistry `toml:"vault,omitempty"`
 }
 
 // InstanceConfig holds overrides for the workspace instance root.
@@ -89,6 +125,11 @@ type WorkspaceMeta struct {
 	DefaultBranch string `toml:"default_branch,omitempty"`
 	ContentDir    string `toml:"content_dir,omitempty"`
 	SetupDir      string `toml:"setup_dir,omitempty"`
+	// VaultScope (PRD D-11) selects which [workspaces.<scope>] entry in
+	// the personal overlay applies to this workspace. When unset, the
+	// personal overlay falls back to matching on workspace source-org
+	// name (see internal/workspace/scope.go).
+	VaultScope string `toml:"vault_scope,omitempty"`
 }
 
 // ParseResult holds the parsed config and any non-fatal warnings.
@@ -124,14 +165,19 @@ type HookEntry struct {
 }
 
 // SettingsConfig maps setting keys to their values. The primary key today is
-// "permissions" (values: "bypass", "ask").
-type SettingsConfig map[string]string
+// "permissions" (values: "bypass", "ask"). Values are MaybeSecret so a vault
+// reference can back a setting value per PRD R3; the plaintext path still
+// accepts raw strings through MaybeSecret's TextUnmarshaler.
+type SettingsConfig map[string]MaybeSecret
 
-// EnvConfig defines environment configuration with explicit file paths and
-// key-value variable pairs.
+// EnvConfig defines environment configuration under [env]. It carries a list
+// of env files, a non-sensitive var map ([env.vars]) and a sensitive var map
+// ([env.secrets]), plus the three requirement-description sub-tables under
+// each (required / recommended / optional).
 type EnvConfig struct {
-	Files []string          `toml:"files,omitempty"`
-	Vars  map[string]string `toml:"vars,omitempty"`
+	Files   []string     `toml:"files,omitempty"`
+	Vars    EnvVarsTable `toml:"vars,omitempty"`
+	Secrets EnvVarsTable `toml:"secrets,omitempty"`
 }
 
 // RepoOverride holds per-repo configuration overrides.
@@ -185,6 +231,14 @@ func Parse(data []byte) (*ParseResult, error) {
 		return nil, fmt.Errorf("parsing config: %w", err)
 	}
 
+	// Reserved-keyword scan: a scalar value at env.vars.required et al.
+	// is almost always a mistake -- reject with a clear path hint before
+	// any other validation runs, so the user sees this over a downstream
+	// "type mismatch" error.
+	if err := validateReservedEnvKeys(md); err != nil {
+		return nil, err
+	}
+
 	var warnings []string
 
 	// Handle deprecated [content] alias. The canonical location is
@@ -205,6 +259,17 @@ func Parse(data []byte) (*ParseResult, error) {
 	}
 
 	if err := validate(&cfg); err != nil {
+		return nil, err
+	}
+
+	// Validate [vault] shape (anon-vs-named, kind requirement).
+	if err := cfg.Vault.Validate("workspace config"); err != nil {
+		return nil, err
+	}
+
+	// Post-parse vault:// ref validation (R3 deny list + same-file
+	// provider-name resolution).
+	if err := validateNoVaultRefs(&cfg); err != nil {
 		return nil, err
 	}
 
@@ -312,10 +377,16 @@ func validateContentSource(field, source string) error {
 // workspace config before per-repo overrides. Fields mirror RepoOverride
 // but omit repo-specific fields (URL, Branch, Group, Scope, SetupDir)
 // and Claude.Enabled.
+//
+// Vault is the personal-overlay counterpart to WorkspaceConfig.Vault and
+// accepts the same anonymous-or-named shapes. A personal overlay may
+// declare its own providers for a workspace; the resolver (Issue 4)
+// stacks team and personal bundles per-source-org.
 type GlobalOverride struct {
 	Claude *ClaudeOverride   `toml:"claude,omitempty"`
 	Env    EnvConfig         `toml:"env,omitempty"`
 	Files  map[string]string `toml:"files,omitempty"`
+	Vault  *VaultRegistry    `toml:"vault,omitempty"`
 }
 
 // GlobalConfigOverride is the top-level structure parsed from the global
@@ -337,8 +408,14 @@ func ParseGlobalConfigOverride(data []byte) (*GlobalConfigOverride, error) {
 	if err := validateGlobalOverridePaths("global", cfg.Global); err != nil {
 		return nil, err
 	}
+	if err := cfg.Global.Vault.Validate("global overlay"); err != nil {
+		return nil, err
+	}
 	for name, ws := range cfg.Workspaces {
 		if err := validateGlobalOverridePaths(fmt.Sprintf("workspaces.%s", name), ws); err != nil {
+			return nil, err
+		}
+		if err := ws.Vault.Validate(fmt.Sprintf("workspaces.%s overlay", name)); err != nil {
 			return nil, err
 		}
 	}

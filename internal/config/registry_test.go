@@ -302,11 +302,11 @@ func TestRegisteredNamesEmpty(t *testing.T) {
 
 func TestRegisteredNamesSortedAndFiltered(t *testing.T) {
 	g := &GlobalConfig{Registry: map[string]RegistryEntry{
-		"beta":            {Source: "b.toml", Root: "/b"},
-		"alpha":           {Source: "a.toml", Root: "/a"},
-		"gamma":           {Source: "g.toml", Root: "/g"},
-		"bad\tname":       {Source: "x.toml", Root: "/x"},
-		"bidi\u202ename":  {Source: "y.toml", Root: "/y"},
+		"beta":           {Source: "b.toml", Root: "/b"},
+		"alpha":          {Source: "a.toml", Root: "/a"},
+		"gamma":          {Source: "g.toml", Root: "/g"},
+		"bad\tname":      {Source: "x.toml", Root: "/x"},
+		"bidi\u202ename": {Source: "y.toml", Root: "/y"},
 	}}
 
 	got := g.RegisteredNames()

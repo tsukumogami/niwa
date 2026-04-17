@@ -17,14 +17,21 @@ func init() {
 	applyCmd.Flags().StringVar(&applyInstance, "instance", "", "target a specific instance by name")
 	applyCmd.Flags().BoolVar(&applyAllowDirty, "allow-dirty", false, "apply even if config directory has uncommitted changes")
 	applyCmd.Flags().BoolVar(&applyNoPull, "no-pull", false, "skip pulling latest changes into existing repos")
+	applyCmd.Flags().BoolVar(&applyAllowMissingSecrets, "allow-missing-secrets", false,
+		"downgrade unresolved vault:// references to empty strings with stderr warnings. "+
+			"Does NOT override *.required misses. One-shot -- re-evaluated each invocation.")
+	applyCmd.Flags().BoolVar(&applyAllowPlaintextSecrets, "allow-plaintext-secrets", false,
+		"bypass the public-repo plaintext-secrets guardrail. Strictly one-shot -- no state persistence.")
 	applyCmd.ValidArgsFunction = completeWorkspaceNames
 	_ = applyCmd.RegisterFlagCompletionFunc("instance", completeInstanceNames)
 }
 
 var (
-	applyInstance   string
-	applyAllowDirty bool
-	applyNoPull     bool
+	applyInstance              string
+	applyAllowDirty            bool
+	applyNoPull                bool
+	applyAllowMissingSecrets   bool
+	applyAllowPlaintextSecrets bool
 )
 
 var applyCmd = &cobra.Command{
@@ -99,6 +106,8 @@ func runApply(cmd *cobra.Command, args []string) error {
 	applier := workspace.NewApplier(gh)
 	applier.NoPull = applyNoPull
 	applier.AllowDirty = applyAllowDirty
+	applier.AllowMissingSecrets = applyAllowMissingSecrets
+	applier.AllowPlaintextSecrets = applyAllowPlaintextSecrets
 
 	// Wire global config if registered and reachable.
 	if globalCfg, gErr := config.LoadGlobalConfig(); gErr == nil && globalCfg.GlobalConfig.Repo != "" {

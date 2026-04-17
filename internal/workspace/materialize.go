@@ -1,15 +1,56 @@
 package workspace
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 
 	"github.com/tsukumogami/niwa/internal/config"
+	"github.com/tsukumogami/niwa/internal/secret/reveal"
 )
+
+// secretFileMode is the permission bits used for any file that may
+// contain resolved secret material. The materializers write every
+// file with this mode unconditionally so non-vault configs also get
+// the tighter permissions (this fixes a pre-existing 0o644 bug where
+// env and settings files were world-readable).
+const secretFileMode os.FileMode = 0o600
+
+// maybeSecretString returns the plaintext string of m, revealing
+// the secret bytes when m carries a resolved Secret. This is the
+// materializer counterpart to MaybeSecret.String (which redacts
+// secrets to "***"); it is used only inside the write path where
+// the plaintext must reach the destination file.
+//
+// Callers must not retain the returned string past the short-lived
+// write operation that needs plaintext: it carries a copy of the
+// underlying buffer from reveal.UnsafeReveal.
+func maybeSecretString(m config.MaybeSecret) string {
+	if m.IsSecret() {
+		return string(reveal.UnsafeReveal(m.Secret))
+	}
+	return m.Plain
+}
+
+// injectLocalInfix ensures the given filename contains ".local". If
+// the filename already contains ".local" (as a substring of the
+// basename), it is returned unchanged; otherwise localRename is used
+// to insert ".local" before the extension. This enforces the
+// invariant that every materialized file matches the *.local*
+// gitignore pattern, even when the user-written destination path did
+// not include the infix.
+func injectLocalInfix(filename string) string {
+	if strings.Contains(filename, ".local") {
+		return filename
+	}
+	return localRename(filename)
+}
 
 // DiscoveredEnv holds auto-discovered env file paths at workspace and repo
 // levels. These are used as fallbacks when no explicit [env].files are
@@ -28,8 +69,34 @@ type MaterializeContext struct {
 	RepoDir        string
 	ConfigDir      string
 	InstalledHooks map[string][]InstalledHookEntry // event -> installed hook entries, populated by hooks materializer
-	DiscoveredEnv  *DiscoveredEnv      // auto-discovered env files, may be nil
-	RepoIndex      map[string]string   // repo name -> on-disk path, for marketplace resolution
+	DiscoveredEnv  *DiscoveredEnv                  // auto-discovered env files, may be nil
+	RepoIndex      map[string]string               // repo name -> on-disk path, for marketplace resolution
+
+	// SourceTuples, when non-nil, is populated by materializers with
+	// the per-file list of SourceEntry tuples describing which inputs
+	// contributed bytes to each written file. apply.go wires a shared
+	// map across the materializer loop and consumes it after all
+	// materializers run to compute ManagedFile.SourceFingerprint.
+	// Materializers must not mutate entries already present for a
+	// key; tests relying on map identity pass a nil map explicitly.
+	SourceTuples map[string][]SourceEntry
+}
+
+// recordSources appends the given SourceEntry slice to the context's
+// SourceTuples map keyed by path. It is a no-op when the map is nil
+// (tests that exercise a materializer in isolation commonly leave it
+// nil because they only care about file contents). Splitting the
+// append from the call site keeps each materializer free of nil checks.
+func (c *MaterializeContext) recordSources(path string, sources []SourceEntry) {
+	if c == nil || c.SourceTuples == nil || len(sources) == 0 {
+		return
+	}
+	// Copy so callers can reuse their slice after calling
+	// recordSources; the materializer pipeline holds these values
+	// until state is written.
+	entries := make([]SourceEntry, len(sources))
+	copy(entries, sources)
+	c.SourceTuples[path] = append(c.SourceTuples[path], entries...)
 }
 
 // InstalledHookEntry holds the installed paths for a single hook entry,
@@ -106,6 +173,16 @@ func (h *HooksMaterializer) Materialize(ctx *MaterializeContext) ([]string, erro
 					return nil, fmt.Errorf("setting executable permission on %s: %w", target, err)
 				}
 
+				// Record the hook-script source bytes so fingerprinting
+				// treats an upstream script edit as a rotation rather
+				// than local drift.
+				sum := sha256.Sum256(data)
+				ctx.recordSources(target, []SourceEntry{{
+					Kind:         SourceKindPlaintext,
+					SourceID:     scriptPath,
+					VersionToken: "sha256:" + hex.EncodeToString(sum[:]),
+				}})
+
 				installedPaths = append(installedPaths, target)
 				written = append(written, target)
 			}
@@ -160,7 +237,7 @@ type BuildSettingsConfig struct {
 	RepoIndex              map[string]string
 	BaseDir                string // for computing relative hook paths
 	IncludeGitInstructions *bool
-	UseAbsolutePaths      bool // use absolute paths for hooks (instance root)
+	UseAbsolutePaths       bool // use absolute paths for hooks (instance root)
 }
 
 // buildSettingsDoc produces the map[string]any JSON document for Claude Code
@@ -169,11 +246,15 @@ type BuildSettingsConfig struct {
 func buildSettingsDoc(cfg BuildSettingsConfig) (map[string]any, error) {
 	doc := make(map[string]any)
 
-	// Build permissions block from settings.
+	// Build permissions block from settings. maybeSecretString
+	// reveals secret-backed values (rare for permissions, but a
+	// user may back any SettingsConfig value via vault://) and
+	// returns the literal plaintext otherwise.
 	if perm, ok := cfg.Settings["permissions"]; ok {
-		mapped, known := permissionsMapping[perm]
+		permStr := maybeSecretString(perm)
+		mapped, known := permissionsMapping[permStr]
 		if !known {
-			return nil, fmt.Errorf("unknown permissions value %q", perm)
+			return nil, fmt.Errorf("unknown permissions value %q", permStr)
 		}
 		doc["permissions"] = map[string]any{
 			"defaultMode": mapped,
@@ -279,21 +360,25 @@ func buildSettingsDoc(cfg BuildSettingsConfig) (map[string]any, error) {
 }
 
 // resolveClaudeEnvVars resolves the claude.env promote + inline vars into a
-// single map. Returns nil if there are no env vars to resolve.
-func resolveClaudeEnvVars(ctx *MaterializeContext) (map[string]string, error) {
+// single map. Returns nil if there are no env vars to resolve. The
+// second return is the ordered list of SourceEntry tuples describing
+// the inputs that contributed bytes: forwarded from ResolveEnvVars
+// when any keys are promoted, plus inline vars.
+func resolveClaudeEnvVars(ctx *MaterializeContext) (map[string]string, []SourceEntry, error) {
 	claudeEnv := ctx.Effective.Claude.Env
-	hasEnv := len(claudeEnv.Promote) > 0 || len(claudeEnv.Vars) > 0
+	hasEnv := len(claudeEnv.Promote) > 0 || len(claudeEnv.Vars.Values) > 0
 	if !hasEnv {
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	envResult := make(map[string]string)
+	var sources []SourceEntry
 
 	// Step 1: resolve promoted keys from the env pipeline.
 	if len(claudeEnv.Promote) > 0 {
-		resolvedEnv, err := ResolveEnvVars(ctx)
+		resolvedEnv, envSources, err := ResolveEnvVars(ctx)
 		if err != nil {
-			return nil, fmt.Errorf("resolving env for promote: %w", err)
+			return nil, nil, fmt.Errorf("resolving env for promote: %w", err)
 		}
 		if resolvedEnv == nil {
 			resolvedEnv = map[string]string{}
@@ -301,21 +386,35 @@ func resolveClaudeEnvVars(ctx *MaterializeContext) (map[string]string, error) {
 		for _, key := range claudeEnv.Promote {
 			val, found := resolvedEnv[key]
 			if !found {
-				return nil, fmt.Errorf("claude.env: promoted key %q not found in resolved env vars", key)
+				return nil, nil, fmt.Errorf("claude.env: promoted key %q not found in resolved env vars", key)
 			}
 			envResult[key] = val
 		}
+		// Every env source contributes to the rollup because any
+		// plaintext-file rotation upstream can change promoted
+		// values. Pruning to only the promoted keys would require
+		// re-parsing each source file to know which keys it supplied;
+		// keeping the full list is simpler and correct — the
+		// fingerprint rolls up inputs, not per-key derivations.
+		sources = append(sources, envSources...)
 	}
 
-	// Step 2: overlay inline vars (inline wins over promoted).
-	for k, v := range claudeEnv.Vars {
-		envResult[k] = v
+	// Step 2: overlay inline vars (inline wins over promoted). Post-
+	// resolver (Issue 4) a MaybeSecret may carry a resolved Secret;
+	// String redacts those to "***", which is wrong for a file
+	// materializer. maybeSecretString reaches through reveal.
+	// UnsafeReveal for secret-bearing entries and returns m.Plain
+	// otherwise.
+	for _, k := range sortedKeys(claudeEnv.Vars.Values) {
+		v := claudeEnv.Vars.Values[k]
+		envResult[k] = maybeSecretString(v)
+		sources = append(sources, sourceForMaybeSecret("workspace.toml:claude.env.vars."+k, v))
 	}
 
 	if len(envResult) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
-	return envResult, nil
+	return envResult, sources, nil
 }
 
 // SettingsMaterializer generates the .claude/settings.local.json file from
@@ -337,7 +436,7 @@ func (s *SettingsMaterializer) Materialize(ctx *MaterializeContext) ([]string, e
 	marketplaces := ctx.Effective.Claude.Marketplaces
 
 	// Resolve env vars.
-	resolvedEnv, err := resolveClaudeEnvVars(ctx)
+	resolvedEnv, envSources, err := resolveClaudeEnvVars(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -373,11 +472,34 @@ func (s *SettingsMaterializer) Materialize(ctx *MaterializeContext) ([]string, e
 	}
 
 	target := filepath.Join(claudeDir, "settings.local.json")
-	if err := os.WriteFile(target, data, 0o644); err != nil {
+	if err := os.WriteFile(target, data, secretFileMode); err != nil {
 		return nil, fmt.Errorf("writing settings file: %w", err)
 	}
 
+	// Merge settings-key sources with env sources so rotating either
+	// input shifts the file's SourceFingerprint. Settings keys are
+	// rare vault consumers but R3 allows it, so the fingerprint
+	// tracks them consistently.
+	sources := envSources
+	for _, k := range sortedKeysSettings(settings) {
+		v := settings[k]
+		sources = append(sources, sourceForMaybeSecret("workspace.toml:claude.settings."+k, v))
+	}
+	ctx.recordSources(target, sources)
+
 	return []string{target}, nil
+}
+
+// sortedKeysSettings is the SettingsConfig counterpart to sortedKeys,
+// kept separate because Go generics would force a wider refactor for
+// negligible reuse.
+func sortedKeysSettings(m config.SettingsConfig) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // EnvMaterializer generates a .local.env file in the repository directory from
@@ -396,7 +518,17 @@ func (e *EnvMaterializer) Name() string {
 // single key-value map. This is the canonical env resolution function used by
 // both the EnvMaterializer (to write .local.env) and the SettingsMaterializer
 // (to look up promoted keys).
-func ResolveEnvVars(ctx *MaterializeContext) (map[string]string, error) {
+//
+// Alongside the resolved map, ResolveEnvVars returns the ordered list
+// of SourceEntry tuples describing each input that contributed bytes.
+// Callers that write a file from this map pass the slice to
+// MaterializeContext.recordSources so the apply pipeline can build a
+// SourceFingerprint for the written file. Plaintext-file inputs
+// contribute a SHA-256 content-hash VersionToken; inline TOML entries
+// contribute the redactor-fed plaintext bytes of the resolved
+// MaybeSecret; vault-resolved MaybeSecrets contribute the provider-
+// opaque VersionToken.Token carried on the MaybeSecret.Token field.
+func ResolveEnvVars(ctx *MaterializeContext) (map[string]string, []SourceEntry, error) {
 	envCfg := ctx.Effective.Env
 	discovered := ctx.DiscoveredEnv
 
@@ -405,57 +537,151 @@ func ResolveEnvVars(ctx *MaterializeContext) (map[string]string, error) {
 		files = []string{discovered.WorkspaceFile}
 	}
 
-	hasVars := len(envCfg.Vars) > 0
+	hasVars := len(envCfg.Vars.Values) > 0 || len(envCfg.Secrets.Values) > 0
 	hasRepoFile := discovered != nil && discovered.RepoFiles != nil && discovered.RepoFiles[ctx.RepoName] != ""
 
 	if len(files) == 0 && !hasVars && !hasRepoFile {
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	vars := make(map[string]string)
+	var sources []SourceEntry
 
 	for _, f := range files {
 		src := filepath.Join(ctx.ConfigDir, f)
 		if err := checkContainment(src, ctx.ConfigDir); err != nil {
-			return nil, fmt.Errorf("env file %q: %w", f, err)
+			return nil, nil, fmt.Errorf("env file %q: %w", f, err)
 		}
 
 		parsed, err := parseEnvFile(src)
 		if err != nil {
-			return nil, fmt.Errorf("reading env file %s: %w", f, err)
+			return nil, nil, fmt.Errorf("reading env file %s: %w", f, err)
 		}
 		for k, v := range parsed {
 			vars[k] = v
 		}
+		hash, err := HashFile(src)
+		if err != nil {
+			return nil, nil, fmt.Errorf("hashing env file %s: %w", f, err)
+		}
+		sources = append(sources, SourceEntry{
+			Kind:         SourceKindPlaintext,
+			SourceID:     f,
+			VersionToken: hash,
+		})
 	}
 
-	for k, v := range envCfg.Vars {
-		vars[k] = v
+	// Post-resolver, MaybeSecret.Secret holds the resolved plaintext
+	// wrapped in secret.Value. Its String method redacts to "***" by
+	// design; for the env materializer we need the actual bytes to
+	// land in the .local.env file, so reach through reveal.
+	// UnsafeReveal. Plain values pass through unchanged.
+	//
+	// Every vars/secrets entry is recorded as a SourceEntry so the
+	// fingerprint rolls up the post-resolve state. Vault-resolved
+	// MaybeSecrets carry a Token field copied from
+	// vault.VersionToken; plaintext entries synthesize a content-hash
+	// VersionToken from the materialized string so the rollup can
+	// tell inline-plaintext rotations from file-source rotations.
+	for _, k := range sortedKeys(envCfg.Vars.Values) {
+		v := envCfg.Vars.Values[k]
+		vars[k] = maybeSecretString(v)
+		sources = append(sources, sourceForMaybeSecret("workspace.toml:env.vars."+k, v))
+	}
+	for _, k := range sortedKeys(envCfg.Secrets.Values) {
+		v := envCfg.Secrets.Values[k]
+		vars[k] = maybeSecretString(v)
+		sources = append(sources, sourceForMaybeSecret("workspace.toml:env.secrets."+k, v))
 	}
 
 	if hasRepoFile {
 		repoEnvPath := discovered.RepoFiles[ctx.RepoName]
 		parsed, err := parseEnvFile(repoEnvPath)
 		if err != nil {
-			return nil, fmt.Errorf("reading discovered repo env file %s: %w", repoEnvPath, err)
+			return nil, nil, fmt.Errorf("reading discovered repo env file %s: %w", repoEnvPath, err)
 		}
 		for k, v := range parsed {
 			vars[k] = v
 		}
+		hash, err := HashFile(repoEnvPath)
+		if err != nil {
+			return nil, nil, fmt.Errorf("hashing discovered repo env file %s: %w", repoEnvPath, err)
+		}
+		sources = append(sources, SourceEntry{
+			Kind:         SourceKindPlaintext,
+			SourceID:     repoEnvPath,
+			VersionToken: hash,
+		})
 	}
 
 	if len(vars) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 
-	return vars, nil
+	return vars, sources, nil
+}
+
+// sortedKeys returns the keys of a MaybeSecret map in lexical order.
+// Used to make sources/provenance lists deterministic regardless of
+// Go's map-iteration randomization.
+func sortedKeys(m map[string]config.MaybeSecret) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+// sourceForMaybeSecret builds a SourceEntry for a MaybeSecret value.
+//
+// For vault-resolved MaybeSecrets (ms.IsSecret() && ms.Token.Token != ""),
+// the SourceEntry uses the vault kind with the provider-opaque
+// VersionToken.Token and Provenance. The SourceID is the value's
+// secret.Origin ProviderName + "/" + Key (consistent with Issue 5's
+// Infisical backend), falling back to the supplied location-based
+// fallback when Origin is empty.
+//
+// For plaintext (or auto-wrapped plaintext in secrets tables), the
+// VersionToken is a SHA-256 hex of the resolved plaintext bytes. That
+// bytestream is already present in memory via maybeSecretString in
+// the caller, but computing the hash here keeps the plaintext local
+// to this function — no callers of SourceEntry ever see the bytes.
+func sourceForMaybeSecret(fallbackLocation string, ms config.MaybeSecret) SourceEntry {
+	if ms.IsSecret() && ms.Token.Token != "" {
+		origin := ms.Secret.Origin()
+		sourceID := fmt.Sprintf("%s/%s", origin.ProviderName, origin.Key)
+		// An unset Origin yields "/", which is useless for the user.
+		// Fall back to the caller-supplied location in that case.
+		if origin.ProviderName == "" && origin.Key == "" {
+			sourceID = fallbackLocation
+		}
+		return SourceEntry{
+			Kind:         SourceKindVault,
+			SourceID:     sourceID,
+			VersionToken: ms.Token.Token,
+			Provenance:   ms.Token.Provenance,
+		}
+	}
+	// Plaintext (literal or auto-wrapped in a *.secrets table). The
+	// VersionToken hashes the revealed bytes so two configs with the
+	// same plaintext produce the same rollup; this lets status
+	// detect plaintext rotation (the hash changes when a user edits
+	// the TOML value) without persisting the plaintext itself.
+	plain := maybeSecretString(ms)
+	sum := sha256.Sum256([]byte(plain))
+	return SourceEntry{
+		Kind:         SourceKindPlaintext,
+		SourceID:     fallbackLocation,
+		VersionToken: hex.EncodeToString(sum[:]),
+	}
 }
 
 // Materialize reads env files and inline vars, merges them with discovered env
 // files, and writes the result to {repoDir}/.local.env. Returns the list of
 // written file paths, or nil if there is nothing to write.
 func (e *EnvMaterializer) Materialize(ctx *MaterializeContext) ([]string, error) {
-	vars, err := ResolveEnvVars(ctx)
+	vars, sources, err := ResolveEnvVars(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -480,9 +706,11 @@ func (e *EnvMaterializer) Materialize(ctx *MaterializeContext) ([]string, error)
 	}
 
 	target := filepath.Join(ctx.RepoDir, ".local.env")
-	if err := os.WriteFile(target, []byte(buf.String()), 0o644); err != nil {
+	if err := os.WriteFile(target, []byte(buf.String()), secretFileMode); err != nil {
 		return nil, fmt.Errorf("writing env file: %w", err)
 	}
+
+	ctx.recordSources(target, sources)
 
 	return []string{target}, nil
 }
@@ -536,11 +764,53 @@ func localRename(filename string) string {
 // repository directory. It reads source-to-destination mappings from the
 // effective config and applies .local renaming when the destination is a
 // directory (ends with /).
-type FilesMaterializer struct{}
+//
+// Stderr, if non-nil, receives one-line notices when the materializer
+// rewrites a user-written destination to include the ".local" infix.
+// When nil, notices go to os.Stderr. Tests set this to a bytes.Buffer
+// to capture output.
+type FilesMaterializer struct {
+	Stderr io.Writer
+
+	// noticed tracks destination paths that already emitted a .local
+	// injection notice for the current Materialize call, so a repeated
+	// [files] entry for the same destination does not re-notify.
+	noticed map[string]bool
+}
 
 // Name returns the materializer identifier.
 func (f *FilesMaterializer) Name() string {
 	return "files"
+}
+
+// stderr returns the writer to use for diagnostic notices, defaulting
+// to os.Stderr when no writer has been wired into the struct.
+func (f *FilesMaterializer) stderr() io.Writer {
+	if f.Stderr != nil {
+		return f.Stderr
+	}
+	return os.Stderr
+}
+
+// noteLocalInfix emits a one-line notice that the user-written
+// destination path was rewritten to include ".local". It is a no-op
+// when original == rewritten (the path already contained the infix)
+// or when the same rewritten destination has already been noticed in
+// this Materialize call.
+func (f *FilesMaterializer) noteLocalInfix(original, rewritten string) {
+	if original == rewritten {
+		return
+	}
+	if f.noticed[rewritten] {
+		return
+	}
+	if f.noticed == nil {
+		f.noticed = map[string]bool{}
+	}
+	f.noticed[rewritten] = true
+	fmt.Fprintf(f.stderr(),
+		"note: files destination %q rewritten to %q for .local infix (secret-bearing files must match *.local* gitignore pattern)\n",
+		original, rewritten)
 }
 
 // Materialize copies files from configDir to repoDir based on effective file
@@ -550,6 +820,11 @@ func (f *FilesMaterializer) Materialize(ctx *MaterializeContext) ([]string, erro
 	if len(files) == 0 {
 		return nil, nil
 	}
+
+	// Reset the per-call notice dedup set so a fresh Materialize
+	// run starts from a clean slate; the same struct is reused across
+	// repos in Applier.runPipeline.
+	f.noticed = map[string]bool{}
 
 	var written []string
 
@@ -600,12 +875,21 @@ func (f *FilesMaterializer) materializeFile(ctx *MaterializeContext, src, dest s
 
 	var targetPath string
 	if strings.HasSuffix(dest, "/") {
-		// Directory destination: auto-rename with .local
+		// Directory destination: auto-rename with .local.
 		targetDir := filepath.Join(ctx.RepoDir, dest)
 		targetPath = filepath.Join(targetDir, localRename(filepath.Base(src)))
 	} else {
-		// Explicit filename: use as-is
-		targetPath = filepath.Join(ctx.RepoDir, dest)
+		// Explicit filename: inject .local before the extension if
+		// the user-written path doesn't already contain it. An
+		// injected .local takes precedence over the user's literal
+		// basename so every materialized file matches the *.local*
+		// gitignore pattern maintained by `niwa create`.
+		destDir, destBase := filepath.Split(dest)
+		rewritten := injectLocalInfix(destBase)
+		if rewritten != destBase {
+			f.noteLocalInfix(dest, filepath.Join(destDir, rewritten))
+		}
+		targetPath = filepath.Join(ctx.RepoDir, destDir, rewritten)
 	}
 
 	if err := checkContainment(targetPath, ctx.RepoDir); err != nil {
@@ -617,9 +901,18 @@ func (f *FilesMaterializer) materializeFile(ctx *MaterializeContext, src, dest s
 		return nil, fmt.Errorf("creating directory %s: %w", targetDir, err)
 	}
 
-	if err := os.WriteFile(targetPath, data, 0o644); err != nil {
+	if err := os.WriteFile(targetPath, data, secretFileMode); err != nil {
 		return nil, fmt.Errorf("writing file %s: %w", targetPath, err)
 	}
+
+	// Record the source (path + content-hash) for fingerprinting.
+	// Hashing the already-loaded bytes avoids a second file read.
+	sum := sha256.Sum256(data)
+	ctx.recordSources(targetPath, []SourceEntry{{
+		Kind:         SourceKindPlaintext,
+		SourceID:     src,
+		VersionToken: "sha256:" + hex.EncodeToString(sum[:]),
+	}})
 
 	return []string{targetPath}, nil
 }
@@ -652,9 +945,24 @@ func (f *FilesMaterializer) materializeDir(ctx *MaterializeContext, src, dest st
 			return fmt.Errorf("reading %s: %w", path, err)
 		}
 
-		// Apply .local renaming to the filename, preserving subdirectory structure.
+		// Apply .local renaming to every file so the output matches
+		// the *.local* gitignore pattern regardless of how the user
+		// wrote the destination. injectLocalInfix is a no-op when
+		// the basename already contains ".local".
 		dir := filepath.Dir(rel)
-		renamed := localRename(filepath.Base(rel))
+		baseName := filepath.Base(rel)
+		renamed := injectLocalInfix(baseName)
+		if renamed != baseName {
+			var originalRel, rewrittenRel string
+			if dir == "." {
+				originalRel = filepath.Join(dest, baseName)
+				rewrittenRel = filepath.Join(dest, renamed)
+			} else {
+				originalRel = filepath.Join(dest, dir, baseName)
+				rewrittenRel = filepath.Join(dest, dir, renamed)
+			}
+			f.noteLocalInfix(originalRel, rewrittenRel)
+		}
 		var targetPath string
 		if strings.HasSuffix(dest, "/") {
 			if dir == "." {
@@ -664,9 +972,9 @@ func (f *FilesMaterializer) materializeDir(ctx *MaterializeContext, src, dest st
 			}
 		} else {
 			if dir == "." {
-				targetPath = filepath.Join(ctx.RepoDir, dest, filepath.Base(rel))
+				targetPath = filepath.Join(ctx.RepoDir, dest, renamed)
 			} else {
-				targetPath = filepath.Join(ctx.RepoDir, dest, dir, filepath.Base(rel))
+				targetPath = filepath.Join(ctx.RepoDir, dest, dir, renamed)
 			}
 		}
 
@@ -679,9 +987,21 @@ func (f *FilesMaterializer) materializeDir(ctx *MaterializeContext, src, dest st
 			return fmt.Errorf("creating directory %s: %w", targetDir, err)
 		}
 
-		if err := os.WriteFile(targetPath, data, 0o644); err != nil {
+		if err := os.WriteFile(targetPath, data, secretFileMode); err != nil {
 			return fmt.Errorf("writing %s: %w", targetPath, err)
 		}
+
+		// Record (source-rel-path, content-hash) so fingerprinting
+		// treats each file in the walked tree as its own source.
+		// Using the path relative to srcDir keeps the SourceID stable
+		// across platforms and independent of ctx.ConfigDir.
+		sum := sha256.Sum256(data)
+		relFromConfig := filepath.Join(strings.TrimSuffix(src, "/"), rel)
+		ctx.recordSources(targetPath, []SourceEntry{{
+			Kind:         SourceKindPlaintext,
+			SourceID:     relFromConfig,
+			VersionToken: "sha256:" + hex.EncodeToString(sum[:]),
+		}})
 
 		written = append(written, targetPath)
 		return nil
