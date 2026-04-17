@@ -1,0 +1,53 @@
+{
+  "pr_status": "implementing",
+  "design_doc": "docs/plans/PLAN-vault-multi-org-auth.md",
+  "branch": "docs/vault-multi-org-auth",
+  "pr_number": 58,
+  "integrity_hash": "sha256:53b1cac3124d762401260612644d0bd8a4fe405b67c33a01eac0b7229ced6894",
+  "issues": [
+    {
+      "number": 1,
+      "title": "feat(vault): Infisical backend --token support",
+      "status": "pending",
+      "ci_status": "pending",
+      "ci_fix_attempts": 0,
+      "issue_type": "",
+      "dependencies": [],
+      "commits": [],
+      "agent_type": "",
+      "summary": null,
+      "testable_scenarios": []
+    },
+    {
+      "number": 2,
+      "title": "feat(workspace): credential file reading + token injection",
+      "status": "pending",
+      "ci_status": "pending",
+      "ci_fix_attempts": 0,
+      "issue_type": "",
+      "dependencies": [],
+      "commits": [],
+      "agent_type": "",
+      "summary": null,
+      "testable_scenarios": []
+    },
+    {
+      "number": 3,
+      "title": "docs(vault): multi-org setup walkthrough",
+      "status": "pending",
+      "ci_status": "pending",
+      "ci_fix_attempts": 0,
+      "issue_type": "",
+      "dependencies": [],
+      "commits": [],
+      "agent_type": "",
+      "summary": null,
+      "testable_scenarios": []
+    }
+  ],
+  "skipped_issues": null,
+  "test_plan_file": null,
+  "source_doc_type": "plan",
+  "execution_mode": "single-pr",
+  "deliverable_type": "mixed"
+}
