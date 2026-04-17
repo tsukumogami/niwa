@@ -100,6 +100,7 @@ kind          = "infisical"
 project       = "c6673ab0-c95d-4570-b947-5f77501ce38a"
 client_id     = "1ad0012d-f55d-430e-abb0-858e30029f2e"
 client_secret = "b67723bd..."
+# api_url     = "https://self-hosted.example.com/api"  # optional; defaults to https://app.infisical.com/api
 
 [[providers]]
 kind          = "infisical"
@@ -212,6 +213,7 @@ kind          = "infisical"
 project       = "c6673ab0-c95d-4570-b947-5f77501ce38a"  # Tsukumogami dot-niwa
 client_id     = "1ad0012d-f55d-430e-abb0-858e30029f2e"
 client_secret = "b67723bd..."
+# api_url     = "https://self-hosted.example.com/api"  # optional
 
 [[providers]]
 kind          = "infisical"
@@ -231,11 +233,15 @@ New function `loadProviderAuth(configDir string) ([]ProviderAuthEntry, error)`:
   (security guardrail).
 
 New function `authenticateProvider(ctx, entry) (string, error)`:
-- HTTP POST to `https://app.infisical.com/api/v1/auth/universal-auth/login`
-  with `clientId` + `clientSecret`.
+- HTTP POST to `entry.APIURL + "/v1/auth/universal-auth/login"` with
+  `clientId` + `clientSecret`. `APIURL` defaults to
+  `https://app.infisical.com/api` when absent — supports self-hosted
+  Infisical instances via the `api_url` field in `provider-auth.toml`.
 - Returns the JWT string.
 - Uses `net/http` + `encoding/json` (stdlib, R20 compliant).
 - Errors wrapped via `secret.Errorf` since `clientSecret` is sensitive.
+  HTTP response bodies are scrubbed before interpolation into errors
+  (Infisical may echo credentials in error payloads).
 
 In `runPipeline`, after reading the global overlay and before building
 bundles:
@@ -343,19 +349,40 @@ The client_secret is NOT passed on argv — it goes via HTTP POST body
 
 ### HTTP call for token acquisition
 
-niwa makes a single HTTPS POST to `app.infisical.com` (or the
-configured domain) to acquire the JWT. The request body contains
-`clientId` + `clientSecret`. This uses Go's `net/http` with default
-TLS — no certificate pinning, but the Infisical API is TLS-only.
+niwa makes a single HTTPS POST to the Infisical API to acquire the
+JWT. The target URL comes from the credential entry's `api_url` field
+(defaulting to `https://app.infisical.com/api` for cloud users). The
+request body contains `clientId` + `clientSecret`. This uses Go's
+`net/http` with default TLS — no certificate pinning, but the
+Infisical API is TLS-only.
+
 Error responses are scrubbed via `secret.Errorf` before being
-surfaced to the user (the client_secret must not appear in error
-messages).
+surfaced to the user. An acceptance test MUST verify that an HTTP
+error response containing the `client_secret` in its body does NOT
+leak the secret into the returned error's `Error()` string.
+
+### Self-hosted Infisical support
+
+The `api_url` field in `provider-auth.toml` allows self-hosted
+Infisical users to point the HTTP POST at their own instance. When
+absent, the cloud URL is used. The `infisical export --token`
+subprocess already respects the Infisical CLI's `--domain` flag or
+`INFISICAL_API_URL` env var for the export call itself — no change
+needed there.
 
 ### Fallback behavior
 
 When no credential file exists (single-org path), no HTTP calls are
 made and no tokens are injected. The Infisical CLI's stored session
 handles auth. This path is unchanged from v0.7.1.
+
+Note: silent fallback from a scoped machine identity to the broader
+CLI session means a user who forgets to populate `provider-auth.toml`
+for one org will use whatever org the CLI session is logged into — 
+which may succeed against a different org's project with different
+access controls. This is documented (not blocked) because the
+alternative (failing when no credential entry exists) would break
+single-org users.
 
 ## Consequences
 
