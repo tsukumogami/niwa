@@ -10,7 +10,7 @@ Total entries: 4
 **Section**: Commands
 **Prerequisite issues**: Issue 1
 **Update type**: modify
-**Status**: pending
+**Status**: updated
 **Details**: Update the `niwa init` row in the commands table to show the new `--overlay <repo>` and `--no-overlay` flags. Add a brief note that the two flags are mutually exclusive.
 
 ---
@@ -28,7 +28,7 @@ Total entries: 4
 **Section**: What it does
 **Prerequisite issues**: Issue 1, Issue 3, Issue 4
 **Update type**: modify
-**Status**: pending
+**Status**: updated
 **Details**: Add a bullet to the feature list for overlay support: auto-discovered companion repos that layer additional repos, groups, and context onto the base workspace config. Also note that `niwa apply` keeps the overlay clone in sync automatically.
 
 ---
@@ -37,7 +37,7 @@ Total entries: 4
 **Section**: Configure (or a new "Overlay content" subsection near step 4)
 **Prerequisite issues**: Issue 4
 **Update type**: modify
-**Status**: pending
+**Status**: updated
 **Details**: Document that `CLAUDE.local.md` files can receive overlay content appended by the apply pipeline (from the overlay's content entries), and that `CLAUDE.overlay.md` is installed at the workspace root when the overlay provides one. Describe the `@CLAUDE.overlay.md` import injection and where it appears in the `CLAUDE.md` import order (`@workspace-context.md` → `@CLAUDE.overlay.md` → `@CLAUDE.global.md`).
 
 ---

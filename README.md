@@ -13,6 +13,7 @@ has properly scoped context in every repo from the first session. It handles:
 - **CLAUDE.md hierarchy** -- generate context files at workspace, group, and repo levels
 - **Template expansion** -- variables like `{workspace_name}` and `{repo_name}` in content files
 - **Per-repo overrides** -- custom settings, hooks, and env per repo
+- **Overlay layer** -- companion repos that layer additional repos, groups, and Claude context onto the base config; auto-synced on every apply
 - **Multi-instance** -- run multiple workspace instances from the same config
 
 ## Quick start
@@ -160,6 +161,29 @@ niwa init my-team --from my-org/workspace-config --no-overlay
 ```
 
 `--overlay` and `--no-overlay` are mutually exclusive.
+
+### Overlay content
+
+When the overlay repo provides content files, `niwa apply` integrates them into the
+workspace without touching base config files:
+
+- **Repo CLAUDE.local.md** -- if the overlay config maps `OverlaySource` to a repo, its
+  content is appended to that repo's `CLAUDE.local.md` after a blank line. Base content
+  comes first; overlay content is added below it.
+- **CLAUDE.overlay.md** -- if the overlay provides a `CLAUDE.overlay.md` file at its root,
+  it's copied to the workspace instance root. niwa injects `@CLAUDE.overlay.md` into the
+  workspace `CLAUDE.md` automatically.
+
+The import order in `CLAUDE.md` is always:
+
+```
+@workspace-context.md
+@CLAUDE.overlay.md
+@CLAUDE.global.md
+```
+
+Users without overlay access see none of these additions. Their workspace is identical to
+one set up from the base config alone.
 
 ## Config reference
 
