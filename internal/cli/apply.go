@@ -111,10 +111,13 @@ func runApply(cmd *cobra.Command, args []string) error {
 
 	// Wire global config and ConfigSourceURL from the registry if available.
 	if globalCfg, gErr := config.LoadGlobalConfig(); gErr == nil {
-		if globalCfg.GlobalConfig.Repo != "" {
-			if gDir, gErr := config.GlobalConfigDir(); gErr == nil {
-				applier.GlobalConfigDir = gDir
-			}
+		// Always set GlobalConfigDir when the path resolves. SyncConfigDir
+		// is a no-op when the directory has no git remote, and the niwa.toml
+		// reader silently skips the file when it doesn't exist — so the guard
+		// on GlobalConfig.Repo is not needed for safety, and omitting it lets
+		// manually-maintained personal overlays (no remote configured) work.
+		if gDir, gErr := config.GlobalConfigDir(); gErr == nil {
+			applier.GlobalConfigDir = gDir
 		}
 		// ConfigSourceURL is the original GitHub URL stored at init time.
 		// It enables convention overlay discovery when OverlayURL is not yet

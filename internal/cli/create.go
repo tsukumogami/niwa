@@ -132,10 +132,8 @@ func runCreate(cmd *cobra.Command, args []string) error {
 	// ConfigSourceURL is set as a fallback for overlay discovery when no
 	// init-time state exists (e.g., create inside a bare .niwa/ dir).
 	if globalCfg, gErr := config.LoadGlobalConfig(); gErr == nil {
-		if globalCfg.GlobalConfig.Repo != "" {
-			if gDir, gErr := config.GlobalConfigDir(); gErr == nil {
-				applier.GlobalConfigDir = gDir
-			}
+		if gDir, gErr := config.GlobalConfigDir(); gErr == nil {
+			applier.GlobalConfigDir = gDir
 		}
 		if entry := globalCfg.LookupWorkspace(cfg.Workspace.Name); entry != nil {
 			applier.ConfigSourceURL = entry.SourceURL
