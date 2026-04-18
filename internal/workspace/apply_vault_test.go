@@ -2,7 +2,10 @@ package workspace
 
 import (
 	"context"
+	"encoding/json"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -1079,5 +1082,116 @@ LOG_LEVEL = "codespar-debug"
 	}
 	if !strings.Contains(msg, "tsukumogami") || !strings.Contains(msg, "codespar") {
 		t.Errorf("error must list both source orgs so the user can pick, got: %v", err)
+	}
+}
+
+// TestApplyOverlayInjectsMachineIdentityToken locks in the multi-org auth
+// wiring for the workspace overlay layer. Without this regression, the
+// overlay's [vault.provider] is built before token injection runs, so a
+// matching provider-auth.toml entry is silently ignored and the infisical
+// subprocess falls through to the CLI session.
+//
+// The test asserts that the universal-auth endpoint is hit exactly once
+// during apply, proving injectProviderTokens runs against the overlay
+// vault registry. The overlay declares a provider but no vault:// refs,
+// so Open is exercised but Resolve (which would shell out to the
+// infisical CLI) is not — keeping the test self-contained.
+func TestApplyOverlayInjectsMachineIdentityToken(t *testing.T) {
+	var authHits int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		authHits++
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]string{"accessToken": "test-jwt"})
+	}))
+	defer srv.Close()
+
+	xdgHome := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", xdgHome)
+	niwaConfigDir := filepath.Join(xdgHome, "niwa")
+	if err := os.MkdirAll(niwaConfigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	authTOML := `
+[[providers]]
+kind          = "infisical"
+project       = "test-project-uuid"
+client_id     = "test-client-id"
+client_secret = "test-client-secret"
+api_url       = "` + srv.URL + `"
+`
+	if err := os.WriteFile(filepath.Join(niwaConfigDir, "provider-auth.toml"), []byte(authTOML), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	overlayTOML := `
+[vault.provider]
+kind    = "infisical"
+project = "test-project-uuid"
+`
+	overlayDir := setupOverlayDir(t, overlayTOML)
+
+	configTOML := `
+[workspace]
+name = "test-ws"
+
+[[sources]]
+org = "testorg"
+
+[groups.all]
+visibility = "public"
+`
+	niwaDir, instanceRoot := setupTestWorkspace(t, configTOML, nil, []struct{ group, name string }{
+		{"all", "repo1"},
+	})
+
+	result, err := config.Load(filepath.Join(niwaDir, "workspace.toml"))
+	if err != nil {
+		t.Fatalf("loading config: %v", err)
+	}
+	cfg := result.Config
+
+	mockClient := &mockGitHubClient{
+		repos: map[string][]github.Repo{
+			"testorg": {
+				{Name: "repo1", Visibility: "public", SSHURL: "git@github.com:testorg/repo1.git"},
+			},
+		},
+	}
+
+	initialState := &InstanceState{
+		SchemaVersion:  SchemaVersion,
+		InstanceName:   "test-ws",
+		InstanceNumber: 1,
+		Root:           instanceRoot,
+		OverlayURL:     "testorg/test-ws-overlay",
+		OverlayCommit:  "abc123",
+	}
+	if err := SaveState(instanceRoot, initialState); err != nil {
+		t.Fatal(err)
+	}
+
+	cloneFn := func(_, dir string) (bool, error) {
+		if err := os.MkdirAll(filepath.Join(dir, ".git"), 0o755); err != nil {
+			return false, err
+		}
+		data, err := os.ReadFile(filepath.Join(overlayDir, "workspace-overlay.toml"))
+		if err != nil {
+			return false, err
+		}
+		return false, os.WriteFile(filepath.Join(dir, "workspace-overlay.toml"), data, 0o644)
+	}
+	headFn := func(_ string) (string, error) { return "abc123", nil }
+
+	applier := NewApplier(mockClient)
+	applier.Cloner = &Cloner{}
+	applier.cloneOrSync = cloneFn
+	applier.headSHA = headFn
+
+	if err := applier.Apply(context.Background(), cfg, niwaDir, instanceRoot); err != nil {
+		t.Fatalf("apply with overlay+provider-auth failed: %v", err)
+	}
+
+	if authHits != 1 {
+		t.Errorf("expected exactly 1 hit on universal-auth endpoint (proving overlay vault token injection ran), got %d", authHits)
 	}
 }
