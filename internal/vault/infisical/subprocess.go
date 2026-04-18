@@ -116,7 +116,7 @@ func (defaultCommander) Run(ctx context.Context, name string, args []string) ([]
 // approximation is acceptable for v1 because our primary use of
 // VersionToken is rotation detection — most rotations change value
 // length — not single-key provenance.
-func runInfisicalExport(ctx context.Context, c commander, project, env, path string) (map[string]string, vault.VersionToken, error) {
+func runInfisicalExport(ctx context.Context, c commander, project, env, path, token string) (map[string]string, vault.VersionToken, error) {
 	if c == nil {
 		c = defaultCommander{}
 	}
@@ -126,6 +126,13 @@ func runInfisicalExport(ctx context.Context, c commander, project, env, path str
 		"--env", env,
 		"--path", path,
 		"--format", "json",
+	}
+	// Multi-org auth: when a per-provider token is available, pass it
+	// via --token to bypass the CLI's stored session. The token is a
+	// short-lived JWT obtained from Infisical's universal-auth endpoint.
+	// When empty, the CLI uses its stored session (single-org default).
+	if token != "" {
+		args = append(args, "--token", token)
 	}
 	stdout, stderrBytes, exitCode, err := c.Run(ctx, "infisical", args)
 	if err != nil {

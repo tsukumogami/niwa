@@ -266,6 +266,158 @@ compromised personal overlay silently redirects every team secret.
 Per-key shadowing (the pattern above) is slightly more verbose but
 each override is individually visible in the shadow diagnostics.
 
+## Multi-org setup
+
+### When you need this
+
+The Infisical CLI session can only be logged into one organization at a
+time. If all your vault providers point at projects in the same org,
+`infisical login` is enough and you can skip this section entirely.
+
+You need multi-org auth when your workspace references Infisical
+projects across different organizations. Common scenarios:
+
+- A team org for shared secrets plus a personal org for your own PATs.
+- Two team orgs (different products or companies) plus a personal org.
+- Any mix where a single `niwa apply` needs to reach more than one org.
+
+### How it works
+
+niwa reads an optional credential file at
+`~/.config/niwa/provider-auth.toml` (must be `0o600`). For each vault
+provider declared in your workspace or personal overlay, niwa checks
+whether the credential file has a matching entry (same `kind` and
+`project`). When it finds one, niwa authenticates via Infisical's
+machine-identity API (a single HTTPS POST) and passes the resulting
+short-lived token to the CLI with `--token`. Providers without a
+matching entry fall back to the CLI's stored session, which is the
+single-org default.
+
+The pattern: log into whichever org you use most often with
+`infisical login`. Create credential entries only for the other org(s).
+You never need an entry for the org you're already logged into.
+
+### Walkthrough: two-org setup
+
+Suppose your team config references an Infisical project in the
+Tsukumogami org, and your personal overlay references a project in your
+own org. You log into Tsukumogami via `infisical login` (the org you
+use most). The personal org needs a credential entry.
+
+#### 1. Create a machine identity in Infisical
+
+Open the Infisical dashboard for your personal org. Go to
+**Organization Settings > Machine Identities** and create a new
+identity. Give it read access to the project your personal overlay
+references.
+
+#### 2. Add universal auth to the identity
+
+On the identity's detail page, enable **Universal Auth**. This gives
+you a `client_id`.
+
+#### 3. Create a client secret
+
+Under the universal auth section, generate a new client secret. Copy
+both the `client_id` and `client_secret` — you won't see the secret
+again.
+
+#### 4. Create the credential file
+
+```bash
+touch ~/.config/niwa/provider-auth.toml
+chmod 0600 ~/.config/niwa/provider-auth.toml
+```
+
+niwa refuses to read this file if permissions aren't exactly `0o600`.
+
+#### 5. Add the provider entry
+
+Edit `~/.config/niwa/provider-auth.toml`:
+
+```toml
+[[providers]]
+kind          = "infisical"
+project       = "ffffffff-gggg-hhhh-iiii-jjjjjjjjjjjj"   # your personal project ID
+client_id     = "11111111-2222-3333-4444-555555555555"
+client_secret = "abcdef01..."
+```
+
+The `project` value must match the project ID in your workspace or
+personal overlay's `[vault.provider]` block. You can find it in the
+Infisical dashboard URL or project settings.
+
+#### 6. Apply
+
+```bash
+niwa apply
+```
+
+niwa authenticates against your personal org via the credential entry,
+uses the CLI session for the Tsukumogami org, and resolves secrets from
+both.
+
+### Credential file format
+
+The file uses a `[[providers]]` array. Each entry is a flat TOML table
+with a required `kind` field and backend-specific fields:
+
+```toml
+# ~/.config/niwa/provider-auth.toml
+# Machine-identity credentials for multi-org auth.
+# NEVER commit this file.
+
+[[providers]]
+kind          = "infisical"
+project       = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+client_id     = "11111111-2222-3333-4444-555555555555"
+client_secret = "abcdef01..."
+
+[[providers]]
+kind          = "infisical"
+project       = "ffffffff-gggg-hhhh-iiii-jjjjjjjjjjjj"
+client_id     = "..."
+client_secret = "..."
+api_url       = "https://infisical.corp.example.com/api"
+```
+
+For Infisical entries:
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `kind` | Yes | Must be `"infisical"` |
+| `project` | Yes | Infisical project UUID (used for matching) |
+| `client_id` | Yes | Machine identity client ID |
+| `client_secret` | Yes | Machine identity client secret |
+| `api_url` | No | API base URL for self-hosted instances. Defaults to `https://app.infisical.com/api` |
+
+niwa matches credential entries to workspace providers by the
+`(kind, project)` pair. Each workspace provider is checked against the
+credential file; if no match is found, that provider uses the CLI
+session as usual.
+
+Backends that don't need credential entries — sops, or single-org
+Infisical where `infisical login` is enough — simply have no entries in
+the file. The file itself is optional; single-org users never create it.
+
+### Security notes
+
+- **File permissions**: niwa checks that `provider-auth.toml` is
+  exactly `0o600` before reading. If the file is world-readable or
+  group-readable, apply fails with an error telling you to fix
+  permissions.
+- **Never commit this file.** It contains long-lived credentials.
+  It lives in `~/.config/niwa/`, outside any git repo.
+- **client_secret stays off argv.** niwa sends `client_id` and
+  `client_secret` via HTTPS POST body to the Infisical API. The
+  resulting JWT is passed to the CLI subprocess via `--token`, but the
+  secret itself never appears in the process table.
+- **No token cache.** niwa re-authenticates on every apply (~100ms per
+  org). This avoids stale-token edge cases at a small latency cost.
+- **Rotate periodically.** Infisical machine-identity client secrets
+  don't expire by default. Rotate them via the Infisical dashboard on
+  a schedule that fits your security policy.
+
 ## Plaintext-to-vault migration
 
 There is no `niwa vault import` helper in v1. Migration is manual,

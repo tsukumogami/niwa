@@ -779,3 +779,61 @@ func TestRegistryBuildsInfisicalProvider(t *testing.T) {
 		t.Fatalf("value = %q", got)
 	}
 }
+
+func TestTokenPassedToSubprocess(t *testing.T) {
+	cmd := &fakeCommander{stdout: jsonBody(map[string]string{"K": "value-long-enough"})}
+	f := &Factory{}
+	p, err := f.Open(context.Background(), vault.ProviderConfig{
+		"project":    "proj-1",
+		"token":      "eyJhbGciOiJIUzI1NiJ9.test-jwt-body.sig",
+		"_commander": commander(cmd),
+	})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer p.Close()
+
+	_, _, err = p.Resolve(context.Background(), vault.Ref{Key: "K"})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+
+	// Verify --token appears in the captured args.
+	found := false
+	for i, arg := range cmd.capturedArgs {
+		if arg == "--token" {
+			if i+1 < len(cmd.capturedArgs) && cmd.capturedArgs[i+1] == "eyJhbGciOiJIUzI1NiJ9.test-jwt-body.sig" {
+				found = true
+			}
+			break
+		}
+	}
+	if !found {
+		t.Errorf("--token not found in args: %v", cmd.capturedArgs)
+	}
+}
+
+func TestNoTokenOmitsFlag(t *testing.T) {
+	cmd := &fakeCommander{stdout: jsonBody(map[string]string{"K": "value-long-enough"})}
+	f := &Factory{}
+	p, err := f.Open(context.Background(), vault.ProviderConfig{
+		"project":    "proj-1",
+		"_commander": commander(cmd),
+	})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer p.Close()
+
+	_, _, err = p.Resolve(context.Background(), vault.Ref{Key: "K"})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+
+	for _, arg := range cmd.capturedArgs {
+		if arg == "--token" {
+			t.Errorf("--token should not be in args when token is empty: %v", cmd.capturedArgs)
+			break
+		}
+	}
+}

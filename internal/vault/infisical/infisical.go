@@ -134,6 +134,19 @@ func (Factory) Open(_ context.Context, config vault.ProviderConfig) (vault.Provi
 		p.name = s
 	}
 
+	// Optional per-provider auth token. When present, passed via --token
+	// to infisical export, bypassing the CLI's stored session. Used for
+	// multi-org scenarios where the CLI session is scoped to a different
+	// org than this provider's project. Injected by apply.go from the
+	// local credential file (~/.config/niwa/provider-auth.toml).
+	if raw, ok := config["token"]; ok {
+		s, ok := raw.(string)
+		if !ok {
+			return nil, fmt.Errorf("infisical: config[token] must be string, got %T", raw)
+		}
+		p.token = s
+	}
+
 	// Test-only hook: allow a caller to inject a fake commander.
 	if raw, ok := config["_commander"]; ok {
 		c, ok := raw.(commander)
@@ -154,6 +167,7 @@ type Provider struct {
 	project string
 	env     string
 	path    string
+	token   string // optional JWT for multi-org auth; passed via --token to subprocess
 
 	commander commander
 
@@ -312,7 +326,7 @@ func (p *Provider) ensureLoaded(ctx context.Context) error {
 	// swallow the second-caller race.
 	p.mu.Unlock()
 
-	values, token, err := runInfisicalExport(ctx, p.commander, p.project, p.env, p.path)
+	values, token, err := runInfisicalExport(ctx, p.commander, p.project, p.env, p.path, p.token)
 	if err != nil {
 		return err
 	}
