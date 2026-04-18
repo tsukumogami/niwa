@@ -386,7 +386,8 @@ type Factory interface {
 
 type Ref struct {
     ProviderName string    // empty for anonymous singular
-    Key          string
+    Path         string    // folder path (anonymous URIs only); "" if absent
+    Key          string    // the final segment after the last '/'
     Optional     bool      // from ?required=false
 }
 
@@ -451,6 +452,28 @@ Stderr scrubbing lives in each backend's subprocess invocation via a
 shared helper `vault.ScrubStderr(stderr, known...)`; every backend's
 Resolve must route captured stderr through it before wrapping into
 returned errors.
+
+**URI grammar and per-resolve path handling** (see Decision 7 below):
+
+`Ref` carries a `Path` field alongside `Key`. `ParseRef` populates
+`Path` from the leading segments of an anonymous-provider URI
+(`vault://<segments.../>/<key>` → `Path = "/<segments…>"`, `Key =
+"<key>"`). Named-provider URIs (`vault://<name>/<key>`) keep their
+one-slash-max shape and leave `Path` empty. Backends receive the full
+`Ref` per resolve and decide how to use `Path`:
+
+- Infisical uses `Ref.Path` to override its `Factory.Open`-time
+  `config["path"]` default when non-empty, passing it as `--path` on
+  each `infisical export` call.
+- sops ignores `Ref.Path` (its key namespace is flat within the
+  encrypted file).
+- Future backends document their own interpretation.
+
+Config-load validation rejects any named-provider-file URI whose first
+segment is not a declared provider name, with an error listing the
+URI, the unknown name, and the declared names. No silent fallback to
+folder-path interpretation in named-provider files. See
+`internal/config/validate_vault_refs.go`.
 
 #### Alternatives Considered
 
@@ -667,9 +690,95 @@ offline. `Shadow` carries only strings (names, paths, layer labels)
 - **Option 4** — rejected: double-compute requires status to load
   configs, violating the offline-status design.
 
+### Decision 7: URI grammar for folder-path resolution under anonymous providers
+
+PRD R3 as originally written restricted anonymous-provider files to
+segment-free URIs (`vault://<key>`) and named-provider files to
+one-slash URIs (`vault://<name>/<key>`). PRD US-3 (the headline
+user story) showed `vault://tsukumogami/github-pat` against an
+anonymous `[global.vault.provider]` with prose calling the leading
+segment "the folder path I chose" — contradicting R3. The
+implementation followed R3 and the US-3 pattern was unreachable.
+Users wanting to reach multiple folder paths within a single
+Infisical project had to declare one named provider per folder,
+which scales poorly.
+
+- **Option 1 — Extend anonymous URIs to accept path segments
+  (`vault://[<path.../>]<key>`).** File-local provider-declaration
+  shape disambiguates (anonymous → path form; named → one-slash
+  form). The existing R3 principle is extended, not replaced.
+- **Option 2 — Triple-slash delimiter (`vault:///<path>/<key>`).**
+  Unambiguous but uglier, breaks US-3's two-slash syntax.
+- **Option 3 — Query parameter (`vault://<key>?path=/folder`).**
+  Works for every backend uniformly but verbose, and still doesn't
+  match US-3.
+- **Option 4 — Status quo: named providers for every folder path.**
+  Forces `[vault.providers.<scope>]` per folder, polluting personal
+  overlays with providers that differ only in path.
+- **Option 5 — Concatenate `Factory.Open.path` with `Ref.Path`.**
+  More flexible (a provider can be "based" at `/team/` with URIs
+  narrowing further) but no current use case demands it; harder to
+  reason about than plain override.
+
+#### Chosen: Option 1 — extend anonymous URIs to accept path segments
+
+The anonymous grammar becomes
+`vault://[<path-segments.../>]<key>[?required=<bool>]`: leading
+segments (zero or more) form the folder path; the final segment
+is the key. `Ref` gains a `Path` field populated from the leading
+segments. Backends receive `Ref` per resolve and decide what to
+do with `Path` — Infisical uses it to override the
+`Factory.Open`-time default when non-empty; sops (stateless file
+backend) ignores it; future backends opt in or reject as
+appropriate.
+
+Named-provider URIs retain their `vault://<name>/<key>` shape with
+one-slash-max enforced. Validation at config-load time rejects any
+named-file URI whose first segment doesn't match a declared
+provider name, with an error listing the URI, the unknown name,
+and the declared providers. No silent fallback to folder-path
+interpretation in named-provider files. Named-provider-plus-folder-
+path is deferred and may be added later without breaking the
+grammar introduced here.
+
+**Rationale:** Option 1 matches US-3 as written, keeps
+named-provider URIs working unchanged, and lets one anonymous
+`[vault.provider]` reach every folder in a project. File-local
+disambiguation is already an established R3 principle — extending
+the anonymous form is strictly additive.
+
+**Consequences:**
+
+- US-3 becomes reachable as written; personal overlays collapse
+  from N named-per-folder providers to one anonymous provider
+  with folder-path URIs.
+- Backends opt in to path semantics by honoring `Ref.Path`;
+  path-unaware backends work unchanged.
+- Named-provider URIs that typo a provider name now fail at
+  config-load time with an actionable error instead of at resolve
+  time with a backend-level "key not found".
+- `Ref.ProviderName` and `Ref.Path` are mutually exclusive in this
+  iteration (named files forbid path segments).
+- The old "nested slashes rejected" assertion no longer holds for
+  anonymous URIs; ref-parser tests were rewritten to cover both
+  grammars.
+
+#### Alternatives Considered
+
+- **Option 2** — rejected: visually noisier and breaks US-3's
+  two-slash syntax for no structural benefit.
+- **Option 3** — rejected: verbose, doesn't match US-3, and makes
+  the backend contract messier (free-form query params per
+  backend vs. a structured `Ref.Path` field).
+- **Option 4** — rejected: explicit user feedback that
+  per-folder named providers are the wrong modeling.
+- **Option 5** — rejected: no use case yet; simpler override
+  semantics ship now, concat can be added later without breaking
+  callers.
+
 ## Decision Outcome
 
-The six decisions compose into a single coherent architecture:
+The seven decisions compose into a single coherent architecture:
 
 **1. Pipeline shape.** Two new stages (vault resolve + shadow/guardrail
 checks) slot between the existing parse and merge stages, in
@@ -831,7 +940,8 @@ type Factory interface {
 
 type Ref struct {
     ProviderName string    // "" for anonymous singular
-    Key          string    // the path after vault://[name]/
+    Path         string    // folder path (anonymous URIs only); "" if absent
+    Key          string    // the final segment after the last '/'
     Optional     bool      // ?required=false
 }
 

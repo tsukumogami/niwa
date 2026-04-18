@@ -488,11 +488,19 @@ reference to a secret. The URI form follows the provider-declaration
 form in the same config file:
 
 - If the file uses `[vault.provider]` (anonymous): URIs take the form
-  `vault://<key>[?required=<bool>]`. No provider name.
+  `vault://[<path-segments.../>]<key>[?required=<bool>]`. Leading
+  segments (zero or more) form an optional folder path passed to the
+  backend per resolve; the final segment is the key. No provider name.
+  See DESIGN-vault-integration.md Decision 7 for the folder-path
+  contract and backend responsibilities.
 - If the file uses `[vault.providers.<name>]` (named, one or more):
   URIs take the form `vault://<name>/<key>[?required=<bool>]`. The
   `<name>` MUST match a key declared under `[vault.providers.*]` in
-  this same config file.
+  this same config file. A URI whose first segment doesn't match any
+  declared name MUST fail config validation with an error that names
+  the URI, the unknown first segment, and the list of declared
+  provider names. Folder-path segments are not accepted in
+  named-provider URIs in this iteration.
 - If the file declares no providers, any `vault://` URI is a parse
   error.
 

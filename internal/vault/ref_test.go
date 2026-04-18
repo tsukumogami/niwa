@@ -7,15 +7,18 @@ import (
 	"github.com/tsukumogami/niwa/internal/vault"
 )
 
-// TestParseRefAnonymous covers the "vault://key" form: empty
-// ProviderName, key in host segment, no Optional.
-func TestParseRefAnonymous(t *testing.T) {
-	ref, err := vault.ParseRef("vault://api-token")
+// TestParseRefAnonymousNoPath covers the "vault://key" form under
+// ParseAnonymous: empty ProviderName, empty Path, key in final segment.
+func TestParseRefAnonymousNoPath(t *testing.T) {
+	ref, err := vault.ParseRef("vault://api-token", vault.ParseAnonymous)
 	if err != nil {
 		t.Fatalf("ParseRef(vault://api-token) returned error: %v", err)
 	}
 	if ref.ProviderName != "" {
 		t.Fatalf("ProviderName = %q, want empty", ref.ProviderName)
+	}
+	if ref.Path != "" {
+		t.Fatalf("Path = %q, want empty", ref.Path)
 	}
 	if ref.Key != "api-token" {
 		t.Fatalf("Key = %q, want %q", ref.Key, "api-token")
@@ -25,14 +28,50 @@ func TestParseRefAnonymous(t *testing.T) {
 	}
 }
 
-// TestParseRefNamed covers the "vault://name/key" form.
+// TestParseRefAnonymousWithPath covers vault://<folder>/<key> under
+// ParseAnonymous. The leading segment becomes Ref.Path (with a leading
+// slash); the final segment is Ref.Key. ProviderName stays empty.
+func TestParseRefAnonymousWithPath(t *testing.T) {
+	ref, err := vault.ParseRef("vault://codespar/ANTHROPIC_API_KEY", vault.ParseAnonymous)
+	if err != nil {
+		t.Fatalf("ParseRef returned error: %v", err)
+	}
+	if ref.ProviderName != "" {
+		t.Fatalf("ProviderName = %q, want empty", ref.ProviderName)
+	}
+	if ref.Path != "/codespar" {
+		t.Fatalf("Path = %q, want %q", ref.Path, "/codespar")
+	}
+	if ref.Key != "ANTHROPIC_API_KEY" {
+		t.Fatalf("Key = %q, want %q", ref.Key, "ANTHROPIC_API_KEY")
+	}
+}
+
+// TestParseRefAnonymousDeepPath covers multi-segment folder paths.
+func TestParseRefAnonymousDeepPath(t *testing.T) {
+	ref, err := vault.ParseRef("vault://a/b/c/d", vault.ParseAnonymous)
+	if err != nil {
+		t.Fatalf("ParseRef returned error: %v", err)
+	}
+	if ref.Path != "/a/b/c" {
+		t.Fatalf("Path = %q, want %q", ref.Path, "/a/b/c")
+	}
+	if ref.Key != "d" {
+		t.Fatalf("Key = %q, want %q", ref.Key, "d")
+	}
+}
+
+// TestParseRefNamed covers the "vault://name/key" form under ParseNamed.
 func TestParseRefNamed(t *testing.T) {
-	ref, err := vault.ParseRef("vault://team-vault/db-password")
+	ref, err := vault.ParseRef("vault://team-vault/db-password", vault.ParseNamed)
 	if err != nil {
 		t.Fatalf("ParseRef returned error: %v", err)
 	}
 	if ref.ProviderName != "team-vault" {
 		t.Fatalf("ProviderName = %q, want %q", ref.ProviderName, "team-vault")
+	}
+	if ref.Path != "" {
+		t.Fatalf("Path = %q, want empty", ref.Path)
 	}
 	if ref.Key != "db-password" {
 		t.Fatalf("Key = %q, want %q", ref.Key, "db-password")
@@ -42,25 +81,55 @@ func TestParseRefNamed(t *testing.T) {
 	}
 }
 
-// TestParseRefRequiredFalse asserts AC: ?required=false sets
-// Ref.Optional to true; anything else leaves it false.
+// TestParseRefNamedRejectsBareKey asserts that ParseNamed requires the
+// name/key form. A bare "vault://key" must fail with a shape-specific
+// error so config validation can surface the right remediation.
+func TestParseRefNamedRejectsBareKey(t *testing.T) {
+	_, err := vault.ParseRef("vault://key", vault.ParseNamed)
+	if err == nil {
+		t.Fatal("expected error for bare-key URI in ParseNamed mode")
+	}
+	if !strings.Contains(err.Error(), "named form") {
+		t.Fatalf("error should mention named form: %v", err)
+	}
+}
+
+// TestParseRefNamedRejectsNestedSlashes asserts that ParseNamed
+// continues to reject URIs with more than one slash — folder-path
+// segments are only accepted under ParseAnonymous.
+func TestParseRefNamedRejectsNestedSlashes(t *testing.T) {
+	_, err := vault.ParseRef("vault://name/folder/key", vault.ParseNamed)
+	if err == nil {
+		t.Fatal("expected error for nested-slash URI in ParseNamed mode")
+	}
+	if !strings.Contains(err.Error(), "nested slashes") {
+		t.Fatalf("error should mention nested slashes: %v", err)
+	}
+}
+
+// TestParseRefRequiredFalse asserts that ?required=false sets
+// Ref.Optional to true; any truthy value leaves it false. Covers both
+// modes.
 func TestParseRefRequiredFalse(t *testing.T) {
 	cases := []struct {
 		uri      string
+		mode     vault.ParseMode
 		wantOpt  bool
 		wantName string
+		wantPath string
 		wantKey  string
 	}{
-		{"vault://api-token?required=false", true, "", "api-token"},
-		{"vault://api-token?required=true", false, "", "api-token"},
-		{"vault://team/db?required=false", true, "team", "db"},
-		{"vault://team/db?required=true", false, "team", "db"},
-		{"vault://team/db?required=0", true, "team", "db"},
-		{"vault://team/db?required=1", false, "team", "db"},
+		{"vault://api-token?required=false", vault.ParseAnonymous, true, "", "", "api-token"},
+		{"vault://api-token?required=true", vault.ParseAnonymous, false, "", "", "api-token"},
+		{"vault://folder/key?required=false", vault.ParseAnonymous, true, "", "/folder", "key"},
+		{"vault://team/db?required=false", vault.ParseNamed, true, "team", "", "db"},
+		{"vault://team/db?required=true", vault.ParseNamed, false, "team", "", "db"},
+		{"vault://team/db?required=0", vault.ParseNamed, true, "team", "", "db"},
+		{"vault://team/db?required=1", vault.ParseNamed, false, "team", "", "db"},
 	}
 	for _, c := range cases {
 		t.Run(c.uri, func(t *testing.T) {
-			ref, err := vault.ParseRef(c.uri)
+			ref, err := vault.ParseRef(c.uri, c.mode)
 			if err != nil {
 				t.Fatalf("ParseRef returned error: %v", err)
 			}
@@ -70,6 +139,9 @@ func TestParseRefRequiredFalse(t *testing.T) {
 			if ref.ProviderName != c.wantName {
 				t.Fatalf("ProviderName = %q, want %q", ref.ProviderName, c.wantName)
 			}
+			if ref.Path != c.wantPath {
+				t.Fatalf("Path = %q, want %q", ref.Path, c.wantPath)
+			}
 			if ref.Key != c.wantKey {
 				t.Fatalf("Key = %q, want %q", ref.Key, c.wantKey)
 			}
@@ -77,50 +149,31 @@ func TestParseRefRequiredFalse(t *testing.T) {
 	}
 }
 
-// TestParseRefRoundTripAC is the AC-named test: ParseRef round-trips
-// vault://key and vault://name/key?required=false; rejects malformed
-// URIs.
-func TestParseRefRoundTripAC(t *testing.T) {
-	ref1, err := vault.ParseRef("vault://key")
-	if err != nil {
-		t.Fatalf("ParseRef(vault://key) returned error: %v", err)
-	}
-	if ref1.ProviderName != "" || ref1.Key != "key" || ref1.Optional {
-		t.Fatalf("vault://key did not parse as anonymous required key: %+v", ref1)
-	}
-
-	ref2, err := vault.ParseRef("vault://name/key?required=false")
-	if err != nil {
-		t.Fatalf("ParseRef(vault://name/key?required=false) returned error: %v", err)
-	}
-	if ref2.ProviderName != "name" || ref2.Key != "key" || !ref2.Optional {
-		t.Fatalf("vault://name/key?required=false did not parse as optional: %+v", ref2)
-	}
-}
-
-// TestParseRefRejectsMalformed asserts AC: malformed URIs return
-// descriptive errors. Each case exercises a distinct rejection
-// branch in the parser.
+// TestParseRefRejectsMalformed asserts that malformed URIs return
+// descriptive errors under both modes.
 func TestParseRefRejectsMalformed(t *testing.T) {
 	cases := []struct {
 		name string
 		uri  string
+		mode vault.ParseMode
 	}{
-		{"empty", ""},
-		{"wrong scheme", "http://x"},
-		{"no scheme", "key"},
-		{"missing key", "vault://"},
-		{"nested slashes", "vault://name/key/sub"},
-		{"empty provider with path", "vault:///key"},
-		{"unknown query param", "vault://key?foo=bar"},
-		{"bogus required value", "vault://key?required=maybe"},
-		{"fragment", "vault://key#frag"},
-		{"userinfo", "vault://user:pw@name/key"},
-		{"repeated required", "vault://key?required=true&required=false"},
+		{"empty anon", "", vault.ParseAnonymous},
+		{"empty named", "", vault.ParseNamed},
+		{"wrong scheme", "http://x", vault.ParseAnonymous},
+		{"no scheme", "key", vault.ParseAnonymous},
+		{"missing key anon", "vault://", vault.ParseAnonymous},
+		{"missing key named", "vault://", vault.ParseNamed},
+		{"empty provider with path", "vault:///key", vault.ParseAnonymous},
+		{"empty segment", "vault://a//b", vault.ParseAnonymous},
+		{"unknown query param", "vault://key?foo=bar", vault.ParseAnonymous},
+		{"bogus required value", "vault://key?required=maybe", vault.ParseAnonymous},
+		{"fragment", "vault://key#frag", vault.ParseAnonymous},
+		{"userinfo", "vault://user:pw@name/key", vault.ParseNamed},
+		{"repeated required", "vault://key?required=true&required=false", vault.ParseAnonymous},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			_, err := vault.ParseRef(c.uri)
+			_, err := vault.ParseRef(c.uri, c.mode)
 			if err == nil {
 				t.Fatalf("ParseRef(%q) returned no error, want descriptive error", c.uri)
 			}

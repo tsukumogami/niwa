@@ -302,9 +302,11 @@ func TestResolveWorkspaceMissingErrorsByDefault(t *testing.T) {
 // distinct from the parse-time same-file check (which covers the
 // simpler typo case).
 //
-// We set up this failure by pre-building a bundle from a different
-// (empty) VaultRegistry via TeamBundle, decoupling the parse-time
-// check from the resolver.
+// We set up this failure by pre-building a bundle with one named
+// provider ("other") and referencing a different named provider
+// ("team-vault") in the config. The resolver sees HasNamedProviders
+// on the bundle and parses the URI in named mode; Get("team-vault")
+// fails, surfacing the unknown-provider error at resolve time.
 func TestResolveWorkspaceUnknownProviderAtResolveTime(t *testing.T) {
 	cfg := &config.WorkspaceConfig{
 		Workspace: config.WorkspaceMeta{Name: "test"},
@@ -316,14 +318,20 @@ func TestResolveWorkspaceUnknownProviderAtResolveTime(t *testing.T) {
 			},
 		},
 	}
-	// An empty bundle -- "team-vault" isn't in it.
-	emptyBundle, err := vault.NewRegistry().Build(context.Background(), nil)
+	// Build a bundle with one named provider ("other") so the bundle
+	// reports HasNamedProviders=true — this forces ParseNamed at
+	// resolve time. The referenced provider "team-vault" is still
+	// absent, so Get fails.
+	reg := newFakeRegistry(t)
+	bundle, err := reg.Build(context.Background(), []vault.ProviderSpec{
+		{Name: "other", Kind: fake.Kind, Config: vault.ProviderConfig{}, Source: "test"},
+	})
 	if err != nil {
-		t.Fatalf("Build empty bundle: %v", err)
+		t.Fatalf("Build bundle: %v", err)
 	}
 
 	_, err = resolve.ResolveWorkspace(context.Background(), cfg, resolve.ResolveOptions{
-		TeamBundle: emptyBundle,
+		TeamBundle: bundle,
 	})
 	if err == nil {
 		t.Fatal("expected error for unknown provider")

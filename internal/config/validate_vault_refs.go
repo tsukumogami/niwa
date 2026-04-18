@@ -231,48 +231,68 @@ func walkVaultRefsForUnknownProvider(cfg *WorkspaceConfig, known map[string]bool
 		if !hasVaultPrefix(uri) {
 			return nil
 		}
-		name := extractProviderName(uri)
-		if known[name] {
-			return nil
-		}
 		if len(known) == 0 {
 			return fmt.Errorf(
 				"%s references %q but the config declares no [vault] providers",
 				location, uri,
 			)
 		}
-		// Shape-mismatch detection. At this point the URI's provider
-		// segment does not match any declared provider; distinguish
-		// the two common authoring mistakes so the error tells the
-		// user which knob to turn. Generic "no such provider" is the
-		// fallback for honest typos (named URI + wrong name).
-		if name == "" && len(shape.namedProviders) > 0 {
+
+		// Anonymous-shape files use path-form URIs
+		// (vault://[<path.../>]<key>). Any leading segments are a
+		// folder path the backend interprets; no provider-name
+		// validation applies. Syntax-level errors (empty segments,
+		// fragments, etc.) are caught later by ParseRef at resolve
+		// time. See DESIGN-vault-integration.md Decision 7.
+		if shape.hasAnon {
+			return nil
+		}
+
+		// Named-shape files require vault://<name>/<key> with <name>
+		// matching a declared provider. Reject bare keys, nested
+		// slashes, and unknown names at config-load time so the error
+		// surfaces before any resolver work.
+		rest := strings.TrimPrefix(uri, vaultURIPrefix)
+		if q := strings.IndexByte(rest, '?'); q >= 0 {
+			rest = rest[:q]
+		}
+		slashCount := strings.Count(rest, "/")
+		name := extractProviderName(uri)
+
+		if slashCount == 0 {
 			return fmt.Errorf(
 				"%s: vault URI %q uses anonymous form (no provider "+
 					"name) but this file declares named providers "+
-					"[%s]. Use a named URI like "+
-					"%q or switch the vault declaration to "+
-					"[vault.provider] (anonymous)",
+					"[%s]. Use a named URI like %q, or switch the "+
+					"vault declaration to [vault.provider] to enable "+
+					"folder-path URIs.",
 				location, uri,
 				strings.Join(shape.namedProviders, ", "),
 				"vault://<name>/<key>",
 			)
 		}
-		if name != "" && shape.hasAnon {
-			key := extractKeyAfterProvider(uri)
+		if slashCount > 1 {
 			return fmt.Errorf(
-				"%s: vault URI %q uses named form %q but this file "+
-					"declares an anonymous [vault.provider]. Use "+
-					"%q (anonymous form) or switch the declaration "+
-					"to [vault.providers.%s]",
-				location, uri, name+"/"+key,
-				"vault://<key>", name,
+				"%s: vault URI %q has nested slashes; named-provider "+
+					"URIs accept only vault://<name>/<key>. Declared "+
+					"providers in this file: [%s]. Switch the "+
+					"declaration to [vault.provider] for folder-path "+
+					"URIs.",
+				location, uri,
+				strings.Join(shape.namedProviders, ", "),
 			)
 		}
-		return fmt.Errorf(
-			"%s references provider %q via %q, but the config declares no such provider",
-			location, name, uri,
-		)
+		if !known[name] {
+			return fmt.Errorf(
+				"%s: vault URI %q references unknown provider %q. "+
+					"Declared providers in this file: [%s]. Fix the "+
+					"provider name, or switch the declaration to "+
+					"[vault.provider] to enable folder-path URIs.",
+				location, uri, name,
+				strings.Join(shape.namedProviders, ", "),
+			)
+		}
+		return nil
 	}
 
 	checkEnvMap := func(prefix string, env EnvConfig) error {
@@ -385,14 +405,3 @@ func extractProviderName(uri string) string {
 	return ""
 }
 
-// extractKeyAfterProvider returns the key segment of vault://name/key.
-// For vault://key (no separator) it returns the whole rest (treating
-// the URI as anonymous). Query strings are preserved; error messages
-// echo back what the user wrote.
-func extractKeyAfterProvider(uri string) string {
-	rest := strings.TrimPrefix(uri, vaultURIPrefix)
-	if i := strings.IndexByte(rest, '/'); i >= 0 {
-		return rest[i+1:]
-	}
-	return rest
-}
