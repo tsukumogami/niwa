@@ -312,6 +312,22 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 	// attribute" — drift for those files is pure content-hash drift.
 	sourceTuples := map[string][]SourceEntry{}
 
+	// Multi-org auth: read the local credential file once for the whole
+	// pipeline. authEntries is consumed by every layer that builds a vault
+	// bundle — the overlay (Step 0.6), the team config (Step 6), and the
+	// personal global overlay (Step 6). The file lives at
+	// ~/.config/niwa/provider-auth.toml (same directory that holds the
+	// global config clone). When the file is absent, authEntries is nil
+	// and every injection call is a no-op (single-org path unchanged).
+	var authEntries []ProviderAuthEntry
+	if niwaConfigDir, err := NiwaConfigDir(); err == nil {
+		entries, err := LoadProviderAuth(niwaConfigDir)
+		if err != nil {
+			return nil, err
+		}
+		authEntries = entries
+	}
+
 	// Step 0.5: overlay sync and merge — determine and sync the workspace overlay.
 	// This must run BEFORE discoverAllRepos so that the merged config (base +
 	// overlay) feeds into discovery — overlay sources can then contribute repos.
@@ -396,6 +412,14 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 				return nil, fmt.Errorf("workspace overlay is missing workspace-overlay.toml")
 			}
 			return nil, fmt.Errorf("parsing workspace overlay: %w", parseErr)
+		}
+
+		// Inject machine-identity tokens into the overlay's [vault.provider]
+		// before building its bundle. Without this, multi-org users whose
+		// secrets live in the workspace overlay fall through to the CLI
+		// session for that provider.
+		if err := injectProviderTokens(ctx, authEntries, overlay.Vault); err != nil {
+			return nil, err
 		}
 
 		// Build the overlay's own vault bundle. A nil Vault field produces an
@@ -528,24 +552,16 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		return nil, err
 	}
 
-	// Multi-org auth: read local credential file, obtain per-provider
-	// tokens. The credential file lives at ~/.config/niwa/provider-auth.toml
-	// (same directory that holds the global config clone). When the file
-	// is absent, this is a no-op (single-org path unchanged).
-	niwaConfigDir, niwaConfigErr := NiwaConfigDir()
-	if niwaConfigErr == nil {
-		authEntries, authErr := LoadProviderAuth(niwaConfigDir)
-		if authErr != nil {
-			return nil, authErr
+	// Multi-org auth: inject machine-identity tokens into the team config
+	// and personal global overlay vault registries. authEntries was loaded
+	// at the top of runPipeline so the overlay layer (Step 0.6) could see it.
+	if len(authEntries) > 0 {
+		if err := injectProviderTokens(ctx, authEntries, cfg.Vault); err != nil {
+			return nil, err
 		}
-		if len(authEntries) > 0 {
-			if err := injectProviderTokens(ctx, authEntries, cfg.Vault); err != nil {
+		if globalOverride != nil {
+			if err := injectProviderTokens(ctx, authEntries, globalOverride.Global.Vault); err != nil {
 				return nil, err
-			}
-			if globalOverride != nil {
-				if err := injectProviderTokens(ctx, authEntries, globalOverride.Global.Vault); err != nil {
-					return nil, err
-				}
 			}
 		}
 	}
