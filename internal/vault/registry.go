@@ -145,6 +145,22 @@ func (b *Bundle) Get(name string) (Provider, error) {
 	return p, nil
 }
 
+// HasNamedProviders reports whether the Bundle contains any provider
+// registered under a non-empty name. Callers use this to select the
+// URI parse mode for references destined against this bundle —
+// anonymous-provider files use ParseAnonymous; named-provider files
+// use ParseNamed.
+func (b *Bundle) HasNamedProviders() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for name := range b.providers {
+		if name != "" {
+			return true
+		}
+	}
+	return false
+}
+
 // Names returns the sorted list of provider names held by this
 // Bundle. The anonymous singular provider contributes the empty
 // string; named providers contribute their respective keys.

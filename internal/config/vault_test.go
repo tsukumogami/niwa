@@ -533,12 +533,13 @@ GITHUB_TOKEN = "vault://GITHUB_TOKEN"
 	}
 }
 
-// TestParseRejectsNamedRefWithAnonymousProvider is the symmetric
-// mismatch: vault://name/key against a file declaring
-// [vault.provider] (anonymous). The error must identify the shape
-// (anonymous) and offer both fix paths (switch URI form, or switch
-// registry shape by adopting the URI's name).
-func TestParseRejectsNamedRefWithAnonymousProvider(t *testing.T) {
+// TestParseAcceptsFolderPathRefWithAnonymousProvider verifies the
+// anonymous-provider + folder-path URI form introduced in
+// ADR-vault-uri-folder-paths.md: vault://<path.../>/<key> against a
+// file declaring [vault.provider] (anonymous) parses successfully.
+// The leading segments are a folder path the backend interprets at
+// resolve time; config-load validation does not reject the URI.
+func TestParseAcceptsFolderPathRefWithAnonymousProvider(t *testing.T) {
 	input := `
 [workspace]
 name = "ws"
@@ -548,23 +549,76 @@ kind = "fake"
 
 [env.secrets]
 GITHUB_TOKEN = "vault://team/GITHUB_TOKEN"
+NESTED       = "vault://a/b/c/KEY"
+`
+	result, err := Parse([]byte(input))
+	if err != nil {
+		t.Fatalf("expected anonymous + folder-path URIs to parse, got error: %v", err)
+	}
+	for _, k := range []string{"GITHUB_TOKEN", "NESTED"} {
+		if _, ok := result.Config.Env.Secrets.Values[k]; !ok {
+			t.Errorf("env.secrets.%s missing from parsed config", k)
+		}
+	}
+}
+
+// TestParseRejectsUnknownNameRefWithNamedProviders covers the
+// short-circuit validation from ADR-vault-uri-folder-paths.md:
+// in a named-provider file, any vault://<first>/<key> URI whose
+// <first> doesn't match a declared provider name is a hard error at
+// config-load time, naming the URI, the unknown name, and the list
+// of declared provider names.
+func TestParseRejectsUnknownNameRefWithNamedProviders(t *testing.T) {
+	input := `
+[workspace]
+name = "ws"
+
+[vault.providers.team]
+kind = "fake"
+
+[vault.providers.shared]
+kind = "fake"
+
+[env.secrets]
+GITHUB_TOKEN = "vault://teem/GITHUB_TOKEN"
 `
 	_, err := Parse([]byte(input))
 	if err == nil {
-		t.Fatal("expected error for named-URI with anonymous provider")
+		t.Fatal("expected error for unknown provider name in named-provider file")
 	}
 	msg := err.Error()
 	wantSubs := []string{
-		"named form",
-		"anonymous [vault.provider]",
-		"vault://<key>",
-		"[vault.providers.team]",
-		`"vault://team/GITHUB_TOKEN"`,
+		`"vault://teem/GITHUB_TOKEN"`,
+		`unknown provider "teem"`,
+		"shared, team", // declared names, sorted
 	}
 	for _, want := range wantSubs {
 		if !strings.Contains(msg, want) {
 			t.Errorf("error missing %q; got: %v", want, err)
 		}
+	}
+}
+
+// TestParseRejectsNestedSlashRefWithNamedProviders asserts that a
+// named-provider file still rejects URIs with more than one slash —
+// folder-path segments are only accepted under an anonymous provider.
+func TestParseRejectsNestedSlashRefWithNamedProviders(t *testing.T) {
+	input := `
+[workspace]
+name = "ws"
+
+[vault.providers.team]
+kind = "fake"
+
+[env.secrets]
+GITHUB_TOKEN = "vault://team/folder/GITHUB_TOKEN"
+`
+	_, err := Parse([]byte(input))
+	if err == nil {
+		t.Fatal("expected error for nested-slash URI in named-provider file")
+	}
+	if !strings.Contains(err.Error(), "nested slashes") {
+		t.Errorf("error should mention nested slashes: %v", err)
 	}
 }
 

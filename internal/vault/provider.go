@@ -93,6 +93,18 @@ type Ref struct {
 	// declared via [vault.providers.<name>].
 	ProviderName string
 
+	// Path carries the folder-path segments of an anonymous-provider
+	// URI (everything between "vault://" and the final "/"). Non-empty
+	// only for URIs of the form vault://<segments.../>/<key> in files
+	// that use an anonymous [vault.provider]. Named-provider URIs leave
+	// this empty. Backends that understand folder paths (e.g. Infisical)
+	// honor Path on each resolve, overriding any Factory.Open-time
+	// default path when non-empty. Backends without folder semantics
+	// (e.g. sops) ignore Path.
+	//
+	// See docs/decisions/ADR-vault-uri-folder-paths.md.
+	Path string
+
 	// Key is the lookup key within the provider. Treated as non-
 	// secret: it is the path, not the stored value.
 	Key string

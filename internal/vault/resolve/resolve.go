@@ -490,7 +490,11 @@ func (w *walker) resolveOne(location string, ms config.MaybeSecret, isSecretsTab
 		return config.MaybeSecret{Secret: val}, nil
 	}
 
-	ref, err := vault.ParseRef(ms.Plain)
+	mode := vault.ParseAnonymous
+	if w.bundle.HasNamedProviders() {
+		mode = vault.ParseNamed
+	}
+	ref, err := vault.ParseRef(ms.Plain, mode)
 	if err != nil {
 		return config.MaybeSecret{}, fmt.Errorf("vault: %s: %w", location, err)
 	}

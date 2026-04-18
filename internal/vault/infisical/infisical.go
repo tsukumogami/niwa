@@ -161,24 +161,33 @@ func (Factory) Open(_ context.Context, config vault.ProviderConfig) (vault.Provi
 
 // Provider is the Infisical backend's vault.Provider implementation.
 // It is safe for concurrent Resolve and ResolveBatch calls; the
-// lazy-fetch and cache are protected by a mutex.
+// lazy-fetch and per-path cache are protected by a mutex.
 type Provider struct {
 	name    string
 	project string
 	env     string
-	path    string
+	path    string // Factory.Open-time default path (used when Ref.Path is empty)
 	token   string // optional JWT for multi-org auth; passed via --token to subprocess
 
 	commander commander
 
 	mu     sync.Mutex
-	loaded bool
 	closed bool
-	// values maps Infisical secret keys to plaintext values as
-	// returned by `infisical export --format json`.
-	values map[string]string
-	// versionToken is derived once per load; see subprocess.go for
-	// the derivation rules.
+	// paths caches `infisical export` results per effective folder
+	// path. Each entry is loaded lazily on the first Resolve against
+	// that path. Populated by ensureLoaded; cleared by Close.
+	//
+	// See docs/decisions/ADR-vault-uri-folder-paths.md for why a
+	// single Provider fetches multiple paths: Ref.Path can override
+	// p.path per resolve, so one anonymous [vault.provider] can reach
+	// every folder in the project.
+	paths map[string]*pathCache
+}
+
+// pathCache holds one loaded path's secrets and its derived version
+// token. A Provider keeps one pathCache per effective folder path.
+type pathCache struct {
+	values       map[string]string
 	versionToken vault.VersionToken
 }
 
@@ -204,15 +213,27 @@ func (p *Provider) Kind() string {
 	return Kind
 }
 
-// Resolve fetches a single secret by key. On first call, Resolve
-// invokes `infisical export` once to populate the in-memory cache;
-// subsequent calls hit the cache.
+// effectivePath returns the folder path to use for a given Ref:
+// Ref.Path wins when non-empty, otherwise the provider's Open-time
+// default p.path. See ADR-vault-uri-folder-paths.md.
+func (p *Provider) effectivePath(ref vault.Ref) string {
+	if ref.Path != "" {
+		return ref.Path
+	}
+	return p.path
+}
+
+// Resolve fetches a single secret by key. Triggers an
+// `infisical export --path <effective-path>` the first time a given
+// effective path is seen; subsequent resolves against the same path
+// hit the cache.
 //
 // Returns vault.ErrKeyNotFound when the requested key is not present
 // in the exported payload, and vault.ErrProviderUnreachable when the
 // CLI exits non-zero with an auth-failure marker in stderr.
 func (p *Provider) Resolve(ctx context.Context, ref vault.Ref) (secret.Value, vault.VersionToken, error) {
-	if err := p.ensureLoaded(ctx); err != nil {
+	effPath := p.effectivePath(ref)
+	if err := p.ensureLoaded(ctx, effPath); err != nil {
 		return secret.Value{}, vault.VersionToken{}, err
 	}
 
@@ -225,35 +246,47 @@ func (p *Provider) Resolve(ctx context.Context, ref vault.Ref) (secret.Value, va
 		)
 	}
 
-	raw, ok := p.values[ref.Key]
+	cache := p.paths[effPath]
+	raw, ok := cache.values[ref.Key]
 	if !ok {
 		return secret.Value{}, vault.VersionToken{}, secret.Errorf(
 			"infisical: project %q env %q path %q key %q: %w",
-			p.project, p.env, p.path, ref.Key, vault.ErrKeyNotFound,
+			p.project, p.env, effPath, ref.Key, vault.ErrKeyNotFound,
 		)
 	}
 
 	origin := secret.Origin{
 		ProviderName: p.name,
 		Key:          ref.Key,
-		VersionToken: p.versionToken.Token,
+		VersionToken: cache.versionToken.Token,
 	}
-	return secret.New([]byte(raw), origin), p.versionToken, nil
+	return secret.New([]byte(raw), origin), cache.versionToken, nil
 }
 
-// ResolveBatch implements vault.BatchResolver. It triggers the
-// single `infisical export` invocation on first use, then looks up
-// every requested ref in the cached payload. Missing keys are
-// signalled per-entry by setting BatchResult.Err to
-// vault.ErrKeyNotFound; ResolveBatch never returns a top-level error
-// for a partial miss.
+// ResolveBatch implements vault.BatchResolver. It groups refs by
+// effective folder path and issues one `infisical export` per unique
+// path (cached). Missing keys are signalled per-entry by setting
+// BatchResult.Err to vault.ErrKeyNotFound; ResolveBatch never returns
+// a top-level error for a partial miss.
 //
 // A top-level error is returned only for infrastructure failures
 // (load failed, provider closed). In that case the returned slice is
 // nil.
 func (p *Provider) ResolveBatch(ctx context.Context, refs []vault.Ref) ([]vault.BatchResult, error) {
-	if err := p.ensureLoaded(ctx); err != nil {
-		return nil, err
+	// Walk refs to discover every unique effective path and load each
+	// one. Loading any single path failing aborts the whole batch —
+	// callers treat ResolveBatch top-level errors as infrastructure
+	// failures, which matches "auth broke" or "CLI missing".
+	seenPaths := make(map[string]bool, 1)
+	for _, ref := range refs {
+		effPath := p.effectivePath(ref)
+		if seenPaths[effPath] {
+			continue
+		}
+		seenPaths[effPath] = true
+		if err := p.ensureLoaded(ctx, effPath); err != nil {
+			return nil, err
+		}
 	}
 
 	p.mu.Lock()
@@ -267,13 +300,15 @@ func (p *Provider) ResolveBatch(ctx context.Context, refs []vault.Ref) ([]vault.
 
 	results := make([]vault.BatchResult, len(refs))
 	for i, ref := range refs {
-		raw, ok := p.values[ref.Key]
+		effPath := p.effectivePath(ref)
+		cache := p.paths[effPath]
+		raw, ok := cache.values[ref.Key]
 		if !ok {
 			results[i] = vault.BatchResult{
 				Ref: ref,
 				Err: secret.Errorf(
 					"infisical: project %q env %q path %q key %q: %w",
-					p.project, p.env, p.path, ref.Key, vault.ErrKeyNotFound,
+					p.project, p.env, effPath, ref.Key, vault.ErrKeyNotFound,
 				),
 			}
 			continue
@@ -281,12 +316,12 @@ func (p *Provider) ResolveBatch(ctx context.Context, refs []vault.Ref) ([]vault.
 		origin := secret.Origin{
 			ProviderName: p.name,
 			Key:          ref.Key,
-			VersionToken: p.versionToken.Token,
+			VersionToken: cache.versionToken.Token,
 		}
 		results[i] = vault.BatchResult{
 			Ref:   ref,
 			Value: secret.New([]byte(raw), origin),
-			Token: p.versionToken,
+			Token: cache.versionToken,
 		}
 	}
 	return results, nil
@@ -299,16 +334,16 @@ func (p *Provider) Close() error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.closed = true
-	p.values = nil
-	p.loaded = false
+	p.paths = nil
 	return nil
 }
 
-// ensureLoaded triggers the `infisical export` subprocess on first
-// call and caches the result. Safe for concurrent callers — the
-// mutex serialises the initial fetch; later callers hit the cache
-// without re-running the subprocess.
-func (p *Provider) ensureLoaded(ctx context.Context) error {
+// ensureLoaded triggers the `infisical export` subprocess for the
+// given effective path on first call. Results are cached per path;
+// later callers hit the cache without re-running the subprocess.
+// Safe for concurrent callers — the mutex serialises the initial
+// fetch for each path.
+func (p *Provider) ensureLoaded(ctx context.Context, effPath string) error {
 	p.mu.Lock()
 	if p.closed {
 		p.mu.Unlock()
@@ -316,17 +351,17 @@ func (p *Provider) ensureLoaded(ctx context.Context) error {
 			"infisical: provider %q: %w", p.displayName(), vault.ErrProviderUnreachable,
 		)
 	}
-	if p.loaded {
+	if _, ok := p.paths[effPath]; ok {
 		p.mu.Unlock()
 		return nil
 	}
 	// Release the mutex while the subprocess runs so concurrent
 	// Resolve callers do not hold the lock through network I/O. We
-	// re-acquire before mutating state and re-check loaded to
+	// re-acquire before mutating state and re-check the cache to
 	// swallow the second-caller race.
 	p.mu.Unlock()
 
-	values, token, err := runInfisicalExport(ctx, p.commander, p.project, p.env, p.path, p.token)
+	values, token, err := runInfisicalExport(ctx, p.commander, p.project, p.env, effPath, p.token)
 	if err != nil {
 		return err
 	}
@@ -338,10 +373,11 @@ func (p *Provider) ensureLoaded(ctx context.Context) error {
 			"infisical: provider %q: %w", p.displayName(), vault.ErrProviderUnreachable,
 		)
 	}
-	if !p.loaded {
-		p.values = values
-		p.versionToken = token
-		p.loaded = true
+	if p.paths == nil {
+		p.paths = map[string]*pathCache{}
+	}
+	if _, ok := p.paths[effPath]; !ok {
+		p.paths[effPath] = &pathCache{values: values, versionToken: token}
 	}
 	return nil
 }
