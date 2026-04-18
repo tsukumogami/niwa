@@ -690,14 +690,38 @@ func MergeWorkspaceOverlay(ws *config.WorkspaceConfig, overlay *config.Workspace
 		}
 	}
 
-	// Repos: add overlay repos; base wins on collision.
+	// Repos: add overlay repos; base wins on collision for structural fields
+	// (URL, Group, Branch, Scope, Claude, Files, SetupDir). For env values,
+	// overlay supplies vault-resolved secrets/vars for keys not present in the
+	// base — same base-wins-per-key semantics as the top-level Env merge.
 	for k, v := range overlay.Repos {
-		if _, exists := merged.Repos[k]; !exists {
+		base, exists := merged.Repos[k]
+		if !exists {
 			if merged.Repos == nil {
 				merged.Repos = make(map[string]config.RepoOverride)
 			}
 			merged.Repos[k] = v
+			continue
 		}
+		// Repo exists in both: merge env values from overlay into base.
+		mergedRepo := base
+		for envKey, envVal := range v.Env.Vars.Values {
+			if _, exists := mergedRepo.Env.Vars.Values[envKey]; !exists {
+				if mergedRepo.Env.Vars.Values == nil {
+					mergedRepo.Env.Vars.Values = map[string]config.MaybeSecret{}
+				}
+				mergedRepo.Env.Vars.Values[envKey] = envVal
+			}
+		}
+		for envKey, envVal := range v.Env.Secrets.Values {
+			if _, exists := mergedRepo.Env.Secrets.Values[envKey]; !exists {
+				if mergedRepo.Env.Secrets.Values == nil {
+					mergedRepo.Env.Secrets.Values = map[string]config.MaybeSecret{}
+				}
+				mergedRepo.Env.Secrets.Values[envKey] = envVal
+			}
+		}
+		merged.Repos[k] = mergedRepo
 	}
 
 	// Claude.Hooks: append overlay hooks; resolve scripts to absolute paths within overlayDir.
