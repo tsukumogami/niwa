@@ -134,11 +134,9 @@ func (a *Applier) Create(ctx context.Context, cfg *config.WorkspaceConfig, confi
 		return "", fmt.Errorf("preparing instance .gitignore: %w", err)
 	}
 
-	// configSourceURL is intentionally not set here: overlay discovery is an
-	// apply-time concern. Create initializes the workspace; the overlay URL (if
-	// any) is discovered on the first apply and stored in state from that point.
 	result, err := a.runPipeline(ctx, cfg, configDir, instanceRoot, now, &pipelineOpts{
-		existingState: nil,
+		existingState:   nil,
+		configSourceURL: a.ConfigSourceURL,
 	})
 	if err != nil {
 		return "", err
@@ -153,8 +151,6 @@ func (a *Applier) Create(ctx context.Context, cfg *config.WorkspaceConfig, confi
 		return "", fmt.Errorf("determining instance number: %w", err)
 	}
 
-	// Overlay fields are not set for a fresh create: overlay discovery happens
-	// at init time (when configSourceURL is known) or on subsequent applies.
 	configName := cfg.Workspace.Name
 	state := &InstanceState{
 		SchemaVersion:  SchemaVersion,
@@ -167,6 +163,8 @@ func (a *Applier) Create(ctx context.Context, cfg *config.WorkspaceConfig, confi
 		ManagedFiles:   result.managedFiles,
 		Repos:          result.repoStates,
 		Shadows:        result.shadows,
+		OverlayURL:     result.overlayURL,
+		OverlayCommit:  result.overlayCommit,
 	}
 
 	if err := SaveState(instanceRoot, state); err != nil {
