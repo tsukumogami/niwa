@@ -127,13 +127,17 @@ func runCreate(cmd *cobra.Command, args []string) error {
 
 	applier := workspace.NewApplier(gh)
 
-	// Wire up the global config overlay (personal overlay) so vault
-	// resolution and personal-wins merging work during create, not
-	// just apply. Without this, [env.secrets.required] keys that the
-	// personal overlay supplies via vault:// would fail as "not supplied".
-	if globalCfg, gErr := config.LoadGlobalConfig(); gErr == nil && globalCfg.GlobalConfig.Repo != "" {
-		if gDir, gErr := config.GlobalConfigDir(); gErr == nil {
-			applier.GlobalConfigDir = gDir
+	// Wire up the global config overlay (personal overlay) and ConfigSourceURL
+	// so that vault resolution, personal-wins merging, and convention overlay
+	// discovery all work during create, not just apply.
+	if globalCfg, gErr := config.LoadGlobalConfig(); gErr == nil {
+		if globalCfg.GlobalConfig.Repo != "" {
+			if gDir, gErr := config.GlobalConfigDir(); gErr == nil {
+				applier.GlobalConfigDir = gDir
+			}
+		}
+		if entry := globalCfg.LookupWorkspace(cfg.Workspace.Name); entry != nil {
+			applier.ConfigSourceURL = entry.SourceURL
 		}
 	}
 
