@@ -1,5 +1,5 @@
 ---
-status: Planned
+status: Current
 problem: |
   The Infisical backend relies on the CLI's global session for auth, but
   that session is scoped to one organization. Users who work across
@@ -31,7 +31,7 @@ rationale: |
 
 ## Status
 
-Planned
+Current
 
 ## Context and Problem Statement
 
