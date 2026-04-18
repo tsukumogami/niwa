@@ -177,10 +177,10 @@ type Provider struct {
 	// path. Each entry is loaded lazily on the first Resolve against
 	// that path. Populated by ensureLoaded; cleared by Close.
 	//
-	// See docs/decisions/ADR-vault-uri-folder-paths.md for why a
-	// single Provider fetches multiple paths: Ref.Path can override
-	// p.path per resolve, so one anonymous [vault.provider] can reach
-	// every folder in the project.
+	// See DESIGN-vault-integration.md Decision 7 for why a single
+	// Provider fetches multiple paths: Ref.Path can override p.path
+	// per resolve, so one anonymous [vault.provider] can reach every
+	// folder in the project.
 	paths map[string]*pathCache
 }
 
@@ -215,7 +215,7 @@ func (p *Provider) Kind() string {
 
 // effectivePath returns the folder path to use for a given Ref:
 // Ref.Path wins when non-empty, otherwise the provider's Open-time
-// default p.path. See ADR-vault-uri-folder-paths.md.
+// default p.path. See DESIGN-vault-integration.md Decision 7.
 func (p *Provider) effectivePath(ref vault.Ref) string {
 	if ref.Path != "" {
 		return ref.Path

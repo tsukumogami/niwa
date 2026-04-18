@@ -243,7 +243,7 @@ func walkVaultRefsForUnknownProvider(cfg *WorkspaceConfig, known map[string]bool
 		// folder path the backend interprets; no provider-name
 		// validation applies. Syntax-level errors (empty segments,
 		// fragments, etc.) are caught later by ParseRef at resolve
-		// time. See ADR-vault-uri-folder-paths.md.
+		// time. See DESIGN-vault-integration.md Decision 7.
 		if shape.hasAnon {
 			return nil
 		}

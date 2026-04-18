@@ -534,11 +534,11 @@ GITHUB_TOKEN = "vault://GITHUB_TOKEN"
 }
 
 // TestParseAcceptsFolderPathRefWithAnonymousProvider verifies the
-// anonymous-provider + folder-path URI form introduced in
-// ADR-vault-uri-folder-paths.md: vault://<path.../>/<key> against a
-// file declaring [vault.provider] (anonymous) parses successfully.
-// The leading segments are a folder path the backend interprets at
-// resolve time; config-load validation does not reject the URI.
+// anonymous-provider + folder-path URI form (DESIGN-vault-integration.md
+// Decision 7): vault://<path.../>/<key> against a file declaring
+// [vault.provider] (anonymous) parses successfully. The leading
+// segments are a folder path the backend interprets at resolve time;
+// config-load validation does not reject the URI.
 func TestParseAcceptsFolderPathRefWithAnonymousProvider(t *testing.T) {
 	input := `
 [workspace]
@@ -563,11 +563,11 @@ NESTED       = "vault://a/b/c/KEY"
 }
 
 // TestParseRejectsUnknownNameRefWithNamedProviders covers the
-// short-circuit validation from ADR-vault-uri-folder-paths.md:
-// in a named-provider file, any vault://<first>/<key> URI whose
-// <first> doesn't match a declared provider name is a hard error at
-// config-load time, naming the URI, the unknown name, and the list
-// of declared provider names.
+// short-circuit validation from DESIGN-vault-integration.md
+// Decision 7: in a named-provider file, any vault://<first>/<key>
+// URI whose <first> doesn't match a declared provider name is a
+// hard error at config-load time, naming the URI, the unknown
+// name, and the list of declared provider names.
 func TestParseRejectsUnknownNameRefWithNamedProviders(t *testing.T) {
 	input := `
 [workspace]

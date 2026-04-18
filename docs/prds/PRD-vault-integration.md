@@ -491,7 +491,8 @@ form in the same config file:
   `vault://[<path-segments.../>]<key>[?required=<bool>]`. Leading
   segments (zero or more) form an optional folder path passed to the
   backend per resolve; the final segment is the key. No provider name.
-  See ADR-vault-uri-folder-paths.md for the folder-path contract.
+  See DESIGN-vault-integration.md Decision 7 for the folder-path
+  contract and backend responsibilities.
 - If the file uses `[vault.providers.<name>]` (named, one or more):
   URIs take the form `vault://<name>/<key>[?required=<bool>]`. The
   `<name>` MUST match a key declared under `[vault.providers.*]` in

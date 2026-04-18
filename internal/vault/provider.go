@@ -102,7 +102,7 @@ type Ref struct {
 	// default path when non-empty. Backends without folder semantics
 	// (e.g. sops) ignore Path.
 	//
-	// See docs/decisions/ADR-vault-uri-folder-paths.md.
+	// See DESIGN-vault-integration.md Decision 7.
 	Path string
 
 	// Key is the lookup key within the provider. Treated as non-

@@ -52,7 +52,7 @@ const (
 // parameter is rejected. required=true is accepted but is the default,
 // so Ref.Optional is left false in that case.
 //
-// See docs/decisions/ADR-vault-uri-folder-paths.md for the rationale
+// See DESIGN-vault-integration.md Decision 7 for the rationale
 // behind the two grammars and the per-resolve Path contract.
 func ParseRef(uri string, mode ParseMode) (Ref, error) {
 	if uri == "" {
