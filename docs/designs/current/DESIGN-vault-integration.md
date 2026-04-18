@@ -386,7 +386,8 @@ type Factory interface {
 
 type Ref struct {
     ProviderName string    // empty for anonymous singular
-    Key          string
+    Path         string    // folder path (anonymous URIs only); "" if absent
+    Key          string    // the final segment after the last '/'
     Optional     bool      // from ?required=false
 }
 
@@ -451,6 +452,29 @@ Stderr scrubbing lives in each backend's subprocess invocation via a
 shared helper `vault.ScrubStderr(stderr, known...)`; every backend's
 Resolve must route captured stderr through it before wrapping into
 returned errors.
+
+**URI grammar and per-resolve path handling** (see
+[ADR-vault-uri-folder-paths.md](../../decisions/ADR-vault-uri-folder-paths.md)):
+
+`Ref` carries a `Path` field alongside `Key`. `ParseRef` populates
+`Path` from the leading segments of an anonymous-provider URI
+(`vault://<segments.../>/<key>` → `Path = "/<segments…>"`, `Key =
+"<key>"`). Named-provider URIs (`vault://<name>/<key>`) keep their
+one-slash-max shape and leave `Path` empty. Backends receive the full
+`Ref` per resolve and decide how to use `Path`:
+
+- Infisical uses `Ref.Path` to override its `Factory.Open`-time
+  `config["path"]` default when non-empty, passing it as `--path` on
+  each `infisical export` call.
+- sops ignores `Ref.Path` (its key namespace is flat within the
+  encrypted file).
+- Future backends document their own interpretation.
+
+Config-load validation rejects any named-provider-file URI whose first
+segment is not a declared provider name, with an error listing the
+URI, the unknown name, and the declared names. No silent fallback to
+folder-path interpretation in named-provider files. See
+`internal/config/validate_vault_refs.go`.
 
 #### Alternatives Considered
 
@@ -831,7 +855,8 @@ type Factory interface {
 
 type Ref struct {
     ProviderName string    // "" for anonymous singular
-    Key          string    // the path after vault://[name]/
+    Path         string    // folder path (anonymous URIs only); "" if absent
+    Key          string    // the final segment after the last '/'
     Optional     bool      // ?required=false
 }
 
