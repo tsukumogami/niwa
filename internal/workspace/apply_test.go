@@ -2220,6 +2220,142 @@ marketplaces = ["repo:tools/.claude-plugin/marketplace.json"]
 	}
 }
 
+// TestApplyOverlayGroupContentIsolation verifies that group content declared in
+// the overlay is absent when no overlay is active, and present when it is.
+//
+// This covers the private.md pattern: the base config has a public group with
+// public content; the overlay introduces a private group and its content file.
+// Without the overlay, no private content is written. With the overlay, the
+// private group CLAUDE.md is installed from the overlay's content directory.
+func TestApplyOverlayGroupContentIsolation(t *testing.T) {
+	const privateContent = "internal-only guidance"
+
+	overlayTOML := `
+[[sources]]
+org = "privateorg"
+repos = ["vision"]
+
+[groups.private]
+repos = ["vision"]
+
+[claude.content.groups.private]
+source = "claude/private.md"
+`
+	overlayDir := setupOverlayDir(t, overlayTOML)
+	// Write the overlay's private.md content file.
+	if err := os.MkdirAll(filepath.Join(overlayDir, "claude"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(overlayDir, "claude", "private.md"), []byte(privateContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	configTOML := `
+[workspace]
+name = "test-ws"
+content_dir = "claude"
+
+[[sources]]
+org = "testorg"
+
+[groups.public]
+visibility = "public"
+
+[claude.content.groups.public]
+source = "claude/public.md"
+`
+	mockClient := &mockGitHubClient{
+		repos: map[string][]github.Repo{
+			"testorg":    {{Name: "repo1", Visibility: "public", SSHURL: "git@github.com:testorg/repo1.git"}},
+			"privateorg": {{Name: "vision", Visibility: "private", SSHURL: "git@github.com:privateorg/vision.git"}},
+		},
+	}
+
+	// cloneFn simulates a git clone by copying the full overlay directory tree to dir.
+	cloneFn := func(url, dir string) (bool, error) {
+		return false, copyDirTree(overlayDir, dir)
+	}
+
+	// ---- Sub-test: no overlay ----
+	// The private group CLAUDE.md must not be written.
+	t.Run("no overlay", func(t *testing.T) {
+		niwaDir, instanceRoot := setupTestWorkspace(t, configTOML,
+			map[string]string{"claude/public.md": "public group context"},
+			[]struct{ group, name string }{{"public", "repo1"}},
+		)
+		result, err := config.Load(filepath.Join(niwaDir, "workspace.toml"))
+		if err != nil {
+			t.Fatalf("loading config: %v", err)
+		}
+		if err := SaveState(instanceRoot, &InstanceState{
+			SchemaVersion:  SchemaVersion,
+			InstanceName:   "test-ws",
+			InstanceNumber: 1,
+			Root:           instanceRoot,
+		}); err != nil {
+			t.Fatal(err)
+		}
+
+		applier := NewApplier(mockClient)
+		if err := applier.Apply(context.Background(), result.Config, niwaDir, instanceRoot); err != nil {
+			t.Fatalf("apply (no overlay) failed: %v", err)
+		}
+
+		// Private group CLAUDE.md must not exist anywhere under instanceRoot.
+		privateCLAUDE := filepath.Join(instanceRoot, "private", "CLAUDE.md")
+		if _, err := os.Stat(privateCLAUDE); err == nil {
+			t.Errorf("private/CLAUDE.md should not exist without overlay, but it does")
+		}
+
+		// Public group CLAUDE.md must still be written.
+		publicCLAUDE := filepath.Join(instanceRoot, "public", "CLAUDE.md")
+		assertFileContains(t, publicCLAUDE, "public group context")
+	})
+
+	// ---- Sub-test: with overlay ----
+	// The private group CLAUDE.md must be written from overlay content.
+	t.Run("with overlay", func(t *testing.T) {
+		niwaDir, instanceRoot := setupTestWorkspace(t, configTOML,
+			map[string]string{"claude/public.md": "public group context"},
+			[]struct{ group, name string }{
+				{"public", "repo1"},
+				{"private", "vision"},
+			},
+		)
+		result, err := config.Load(filepath.Join(niwaDir, "workspace.toml"))
+		if err != nil {
+			t.Fatalf("loading config: %v", err)
+		}
+		if err := SaveState(instanceRoot, &InstanceState{
+			SchemaVersion:  SchemaVersion,
+			InstanceName:   "test-ws",
+			InstanceNumber: 1,
+			Root:           instanceRoot,
+			OverlayURL:     "testorg/test-ws-overlay",
+			OverlayCommit:  "abc123",
+		}); err != nil {
+			t.Fatal(err)
+		}
+
+		applier := NewApplier(mockClient)
+		applier.Cloner = &Cloner{}
+		applier.cloneOrSync = cloneFn
+		applier.headSHA = func(string) (string, error) { return "abc123", nil }
+
+		if err := applier.Apply(context.Background(), result.Config, niwaDir, instanceRoot); err != nil {
+			t.Fatalf("apply (with overlay) failed: %v", err)
+		}
+
+		// Private group CLAUDE.md must be written with overlay content.
+		privateCLAUDE := filepath.Join(instanceRoot, "private", "CLAUDE.md")
+		assertFileContains(t, privateCLAUDE, privateContent)
+
+		// Public group CLAUDE.md must still be written.
+		publicCLAUDE := filepath.Join(instanceRoot, "public", "CLAUDE.md")
+		assertFileContains(t, publicCLAUDE, "public group context")
+	})
+}
+
 // TestApplyOverlayPluginsIsolation verifies that overlay plugins are absent from
 // settings.json when no overlay is active, and present when the overlay is active.
 //
@@ -2328,6 +2464,33 @@ plugins = ["shirabe@shirabe"]
 		settingsPath := filepath.Join(instanceRoot, ".claude", "settings.json")
 		assertFileContains(t, settingsPath, "shirabe@shirabe")
 		assertFileContains(t, settingsPath, "tsukumogami@tsukumogami")
+	})
+}
+
+// copyDirTree recursively copies all files from src to dst. Only regular files
+// and directories are copied; symlinks are not followed. Used in tests to fully
+// replicate an overlay directory tree into a cloneOrSync destination.
+func copyDirTree(src, dst string) error {
+	return filepath.WalkDir(src, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(src, path)
+		if err != nil {
+			return err
+		}
+		target := filepath.Join(dst, rel)
+		if d.IsDir() {
+			return os.MkdirAll(target, 0o755)
+		}
+		if !d.Type().IsRegular() {
+			return nil
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(target, data, 0o644)
 	})
 }
 

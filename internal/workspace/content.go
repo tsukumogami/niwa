@@ -42,7 +42,7 @@ func InstallWorkspaceContent(cfg *config.WorkspaceConfig, configDir, instanceRoo
 	source := cfg.Claude.Content.Workspace.Source
 	target := filepath.Join(instanceRoot, "CLAUDE.md")
 
-	if err := installContentFile(cfg, configDir, source, target, vars); err != nil {
+	if err := installContentFile(contentDirRoot(cfg, configDir), source, target, vars); err != nil {
 		return nil, err
 	}
 	return []string{target}, nil
@@ -71,7 +71,15 @@ func InstallGroupContent(cfg *config.WorkspaceConfig, configDir, instanceRoot, g
 
 	target := filepath.Join(instanceRoot, groupName, "CLAUDE.md")
 
-	if err := installContentFile(cfg, configDir, entry.Source, target, vars); err != nil {
+	// Overlay-added groups have OverlayDir set; source is resolved directly from
+	// that directory (not from configDir/contentDir) because the overlay has its
+	// own file layout independent of the workspace content_dir.
+	contentRoot := contentDirRoot(cfg, configDir)
+	if entry.OverlayDir != "" {
+		contentRoot = entry.OverlayDir
+	}
+
+	if err := installContentFile(contentRoot, entry.Source, target, vars); err != nil {
 		return nil, err
 	}
 	return []string{target}, nil
@@ -124,7 +132,7 @@ func InstallRepoContent(cfg *config.WorkspaceConfig, configDir, overlayDir, inst
 
 	if source != "" {
 		target := filepath.Join(repoDir, "CLAUDE.local.md")
-		if err := installContentFile(cfg, configDir, source, target, vars); err != nil {
+		if err := installContentFile(contentDirRoot(cfg, configDir), source, target, vars); err != nil {
 			return nil, err
 		}
 		result.WrittenFiles = append(result.WrittenFiles, target)
@@ -181,7 +189,7 @@ func InstallRepoContent(cfg *config.WorkspaceConfig, configDir, overlayDir, inst
 				return nil, fmt.Errorf("subdirectory %q for repo %q: %w", subdir, repoName, err)
 			}
 			target := filepath.Join(subdirPath, "CLAUDE.local.md")
-			if err := installContentFile(cfg, configDir, subdirSource, target, vars); err != nil {
+			if err := installContentFile(contentDirRoot(cfg, configDir), subdirSource, target, vars); err != nil {
 				return nil, err
 			}
 			result.WrittenFiles = append(result.WrittenFiles, target)
@@ -245,16 +253,21 @@ func autoDiscoverRepoSource(cfg *config.WorkspaceConfig, configDir, repoName str
 	return ""
 }
 
-// installContentFile reads a source file relative to content_dir, expands
-// template variables, and writes the result to the target path.
-// It verifies that the resolved source path stays within the content directory.
-func installContentFile(cfg *config.WorkspaceConfig, configDir, source, target string, vars map[string]string) error {
+// contentDirRoot returns the absolute content directory for a workspace config
+// and configDir. This is the directory that source= paths are resolved against
+// for base-config content entries.
+func contentDirRoot(cfg *config.WorkspaceConfig, configDir string) string {
 	contentDir := cfg.Workspace.ContentDir
 	if contentDir == "" {
 		contentDir = "."
 	}
+	return filepath.Join(configDir, contentDir)
+}
 
-	contentRoot := filepath.Join(configDir, contentDir)
+// installContentFile reads a source file relative to contentRoot, expands
+// template variables, and writes the result to the target path.
+// It verifies that the resolved source path stays within contentRoot.
+func installContentFile(contentRoot, source, target string, vars map[string]string) error {
 	sourcePath := filepath.Join(contentRoot, source)
 
 	if err := checkContainment(sourcePath, contentRoot); err != nil {

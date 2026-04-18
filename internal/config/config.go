@@ -202,6 +202,12 @@ type ContentConfig struct {
 // ContentEntry is a single content source reference.
 type ContentEntry struct {
 	Source string `toml:"source"`
+	// OverlayDir is not parsed from TOML (toml:"-"). It is set exclusively
+	// by MergeWorkspaceOverlay when the entry originates from the overlay,
+	// pointing to the overlay clone directory. When non-empty, the source
+	// path is resolved relative to OverlayDir directly (not relative to
+	// the workspace content_dir). Empty means the entry comes from the base config.
+	OverlayDir string `toml:"-"`
 }
 
 // RepoContentEntry is a content entry for a repo, with optional subdirectory mappings.

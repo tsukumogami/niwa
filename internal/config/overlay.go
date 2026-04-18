@@ -51,9 +51,16 @@ type OverlayClaudeConfig struct {
 	Plugins      []string             `toml:"plugins,omitempty"`
 }
 
-// OverlayContentConfig holds the content.repos map for the overlay.
+// OverlayContentConfig holds the content groups and repos maps for the overlay.
 type OverlayContentConfig struct {
-	Repos map[string]OverlayContentRepoConfig `toml:"repos"`
+	Groups map[string]OverlayContentGroupConfig `toml:"groups"`
+	Repos  map[string]OverlayContentRepoConfig  `toml:"repos"`
+}
+
+// OverlayContentGroupConfig is a content entry for a group in the overlay.
+// Only groups not already defined in the base config may be added; base wins on collision.
+type OverlayContentGroupConfig struct {
+	Source string `toml:"source"`
 }
 
 // OverlayContentRepoConfig is a content entry in the overlay. Exactly one of
@@ -138,6 +145,16 @@ func validateOverlay(o *WorkspaceOverlay) error {
 					return err
 				}
 			}
+		}
+	}
+
+	// Claude.Content.Groups: source must be set and must be a valid relative path.
+	for groupName, entry := range o.Claude.Content.Groups {
+		if entry.Source == "" {
+			return fmt.Errorf("overlay.claude.content.groups.%s: source is required", groupName)
+		}
+		if err := validateContentSource(fmt.Sprintf("overlay.claude.content.groups.%s.source", groupName), entry.Source); err != nil {
+			return err
 		}
 	}
 

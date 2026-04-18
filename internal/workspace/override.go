@@ -845,6 +845,22 @@ func MergeWorkspaceOverlay(ws *config.WorkspaceConfig, overlay *config.Workspace
 		}
 	}
 
+	// Claude.Content.Groups: overlay entries add new group content; base wins on collision.
+	// The source path is relative to the overlay directory directly (not the workspace
+	// content_dir), so OverlayDir is recorded on the entry for resolution at install time.
+	for groupName, entry := range overlay.Claude.Content.Groups {
+		if _, exists := merged.Claude.Content.Groups[groupName]; exists {
+			continue // base wins
+		}
+		if merged.Claude.Content.Groups == nil {
+			merged.Claude.Content.Groups = make(map[string]config.ContentEntry)
+		}
+		merged.Claude.Content.Groups[groupName] = config.ContentEntry{
+			Source:     entry.Source,
+			OverlayDir: overlayDir,
+		}
+	}
+
 	return &merged, nil
 }
 
