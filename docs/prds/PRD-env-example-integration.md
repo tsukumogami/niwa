@@ -126,6 +126,12 @@ of each cloned managed repo, regardless of visibility (public or
 private). Files at other paths (e.g., `src/.env.example`,
 `.env.sample`) are not discovered in v1.
 
+**R1a. Absence is not a problem.** When a managed repo has no
+`.env.example` file at its root, niwa MUST treat the absence as
+the normal case: emit an info/debug-level log line (not a warning,
+not an error) and continue apply. Silence at normal log levels;
+visibility only when the user opts into verbose or debug output.
+
 **R2. Per-repo materialization.** Values parsed from a repo's
 `.env.example` MUST flow into that repo's `.local.env` file, not
 into other repos' files or into a workspace-level file.
@@ -301,10 +307,22 @@ managed repo for discovery + parse, measured on a local disk.
 Real-world files are small (typically under 2 KB); this budget
 has headroom.
 
-**R23. Parser robustness.** A malformed `.env.example` file MUST
-NOT crash niwa. Parse errors on individual lines emit a warning
-naming the file, line number, and problem, and the parser
-continues past the malformed line.
+**R23. Parser robustness.** A malformed or unreadable
+`.env.example` MUST NOT crash niwa or fail apply. Two failure
+modes, both resolve to warnings (not errors):
+
+- **Per-line parse errors** (e.g., `= missing-key`, unmatched
+  quotes): emit a warning naming the file, line number, and
+  problem. The parser continues past the bad line; other lines
+  in the same file still contribute to materialization.
+- **Whole-file failures** (e.g., permission denied, binary file,
+  empty read): emit a warning naming the file and the failure
+  reason. The repo is treated as having no `.env.example` for
+  the rest of the apply. Other repos' `.env.example` files are
+  processed normally.
+
+In both cases, apply continues and exits 0 unless a separate
+failure (probable-secret, guardrail, non-env cause) blocks it.
 
 ## Acceptance Criteria
 
@@ -315,6 +333,15 @@ continues past the malformed line.
   that file, in addition to workspace-declared values.
 - [ ] A managed repo without `.env.example` produces the same
   `.local.env` as before the feature shipped (no regression).
+  Apply completes with exit code 0; no warning or error is
+  emitted at the default log level.
+- [ ] A managed repo whose `.env.example` is unreadable
+  (permission denied, binary content, etc.) produces a
+  warning naming the file and reason; apply still exits 0 and
+  materializes the repo's other env sources normally.
+- [ ] A managed repo whose `.env.example` has one malformed
+  line among otherwise-valid lines emits a warning for the bad
+  line and materializes the other lines' values.
 - [ ] `.env.example` at a path other than the repo root (e.g.,
   `src/.env.example`) is ignored.
 - [ ] niwa never writes to a managed app repo's working tree
@@ -570,6 +597,29 @@ bits/char, higher than truffleHog's 3.0.
 codespar example where readable defaults must pass and
 randomized-looking values must fail. Users can adjust the
 threshold via config for different preferences.
+
+### Decision: absence is silent; parse failures are warnings; neither blocks apply
+
+**Decided:** A missing `.env.example` is the normal case — niwa
+emits only an info/debug log line. A malformed or unreadable
+`.env.example` emits a warning and skips the file; apply still
+succeeds.
+
+**Alternatives considered:**
+- Absence emits a warning. Rejected — the absence is common (non-
+  Node repos, repos with env managed elsewhere); warning on the
+  normal case is noise.
+- Parse failures emit errors that block apply. Rejected — a
+  corrupt file in one repo shouldn't prevent niwa from
+  materializing the other repos' env vars, and workspace intent
+  (inline `[env.vars]`) can still supply the values the bad file
+  would have covered.
+
+**Reasoning:** The feature is additive defaults. An additive
+feature should never block apply on its own. Visibility into
+problems (warnings) without blocking behavior matches the
+precedent set by other optional layers like Claude content
+files.
 
 ### Decision: `niwa status --audit-env` not `niwa env audit`
 
