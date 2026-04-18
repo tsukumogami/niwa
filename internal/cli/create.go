@@ -127,9 +127,10 @@ func runCreate(cmd *cobra.Command, args []string) error {
 
 	applier := workspace.NewApplier(gh)
 
-	// Wire up the global config overlay (personal overlay) and ConfigSourceURL
-	// so that vault resolution, personal-wins merging, and convention overlay
-	// discovery all work during create, not just apply.
+	// Wire up the global config overlay (personal overlay) so vault
+	// resolution and personal-wins merging work during create.
+	// ConfigSourceURL is set as a fallback for overlay discovery when no
+	// init-time state exists (e.g., create inside a bare .niwa/ dir).
 	if globalCfg, gErr := config.LoadGlobalConfig(); gErr == nil {
 		if globalCfg.GlobalConfig.Repo != "" {
 			if gDir, gErr := config.GlobalConfigDir(); gErr == nil {

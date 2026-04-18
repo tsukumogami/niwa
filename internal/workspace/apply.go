@@ -134,8 +134,27 @@ func (a *Applier) Create(ctx context.Context, cfg *config.WorkspaceConfig, confi
 		return "", fmt.Errorf("preparing instance .gitignore: %w", err)
 	}
 
+	// Load init-time state from the workspace root. `niwa init` writes
+	// overlay URL, SkipGlobal, and NoOverlay to {workspaceRoot}/.niwa/instance.json
+	// before any instance directory exists. Reading it here lets create honour
+	// everything init discovered (overlay clone, flags) without re-running
+	// discovery and without depending on workspace repos being cloned.
+	initState, _ := LoadState(workspaceRoot)
+
+	var initOverlayURL string
+	var initNoOverlay bool
+	var initSkipGlobal bool
+	if initState != nil {
+		initOverlayURL = initState.OverlayURL
+		initNoOverlay = initState.NoOverlay
+		initSkipGlobal = initState.SkipGlobal
+	}
+
 	result, err := a.runPipeline(ctx, cfg, configDir, instanceRoot, now, &pipelineOpts{
 		existingState:   nil,
+		overlayURL:      initOverlayURL,
+		noOverlay:       initNoOverlay,
+		skipGlobal:      initSkipGlobal,
 		configSourceURL: a.ConfigSourceURL,
 	})
 	if err != nil {
