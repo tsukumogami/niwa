@@ -2,6 +2,7 @@ package workspace
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -42,6 +43,27 @@ type Applier struct {
 	// field; default false preserves the block-on-public-GitHub
 	// behavior.
 	AllowPlaintextSecrets bool
+
+	// ConfigSourceURL is the original source URL used to clone the workspace
+	// config (e.g., from RegistryEntry.Source or --from at init time). When
+	// set and no OverlayURL is stored in InstanceState, runPipeline uses this
+	// URL for convention overlay discovery (derives "<org>/<repo>-overlay").
+	// Empty string disables convention discovery.
+	ConfigSourceURL string
+
+	// cloneOrSync is the function used to clone or sync the overlay repo.
+	// Defaults to CloneOrSyncOverlay. Overridable in tests.
+	cloneOrSync func(url, dir string) (bool, error)
+
+	// headSHA is the function used to read the HEAD commit SHA of a repo.
+	// Defaults to HeadSHA. Overridable in tests.
+	headSHA func(dir string) (string, error)
+
+	// vaultRegistry overrides vault.DefaultRegistry for vault bundle building.
+	// Nil means use the process-wide DefaultRegistry (production behaviour).
+	// Tests set this to a fresh *vault.Registry with the fake backend registered
+	// so they can inject known secrets without touching DefaultRegistry.
+	vaultRegistry *vault.Registry
 }
 
 // NewApplier creates an Applier with the given GitHub client.
@@ -55,6 +77,8 @@ func NewApplier(gh github.Client) *Applier {
 			&EnvMaterializer{},
 			&FilesMaterializer{},
 		},
+		cloneOrSync: CloneOrSyncOverlay,
+		headSHA:     HeadSHA,
 	}
 }
 
@@ -69,8 +93,11 @@ const GlobalConfigOverrideFile = "niwa.toml"
 
 // pipelineOpts configures shared pipeline behavior for Create vs Apply.
 type pipelineOpts struct {
-	existingState *InstanceState
-	skipGlobal    bool
+	existingState   *InstanceState
+	skipGlobal      bool
+	overlayURL      string // from InstanceState.OverlayURL (empty = no overlay URL in state)
+	noOverlay       bool   // from InstanceState.NoOverlay
+	configSourceURL string // original source URL for convention overlay discovery
 }
 
 // pipelineResult holds the outputs of the shared pipeline.
@@ -83,7 +110,9 @@ type pipelineResult struct {
 	// detected during this apply invocation. Empty when no overlay
 	// is active or no keys overlapped. Persisted into
 	// InstanceState.Shadows by Create/Apply.
-	shadows []Shadow
+	shadows       []Shadow
+	overlayURL    string // set when convention discovery succeeds; empty otherwise
+	overlayCommit string // HEAD SHA when overlayURL was set; empty otherwise
 }
 
 // Create creates a new workspace instance under workspaceRoot, runs the full
@@ -105,6 +134,9 @@ func (a *Applier) Create(ctx context.Context, cfg *config.WorkspaceConfig, confi
 		return "", fmt.Errorf("preparing instance .gitignore: %w", err)
 	}
 
+	// configSourceURL is intentionally not set here: overlay discovery is an
+	// apply-time concern. Create initializes the workspace; the overlay URL (if
+	// any) is discovered on the first apply and stored in state from that point.
 	result, err := a.runPipeline(ctx, cfg, configDir, instanceRoot, now, &pipelineOpts{
 		existingState: nil,
 	})
@@ -121,6 +153,8 @@ func (a *Applier) Create(ctx context.Context, cfg *config.WorkspaceConfig, confi
 		return "", fmt.Errorf("determining instance number: %w", err)
 	}
 
+	// Overlay fields are not set for a fresh create: overlay discovery happens
+	// at init time (when configSourceURL is known) or on subsequent applies.
 	configName := cfg.Workspace.Name
 	state := &InstanceState{
 		SchemaVersion:  SchemaVersion,
@@ -175,8 +209,11 @@ func (a *Applier) Apply(ctx context.Context, cfg *config.WorkspaceConfig, config
 	}
 
 	result, err := a.runPipeline(ctx, cfg, configDir, instanceRoot, now, &pipelineOpts{
-		existingState: existingState,
-		skipGlobal:    existingState.SkipGlobal,
+		existingState:   existingState,
+		skipGlobal:      existingState.SkipGlobal,
+		overlayURL:      existingState.OverlayURL,
+		noOverlay:       existingState.NoOverlay,
+		configSourceURL: a.ConfigSourceURL,
 	})
 	if err != nil {
 		return err
@@ -200,6 +237,17 @@ func (a *Applier) Apply(ctx context.Context, cfg *config.WorkspaceConfig, config
 	// Clean up empty group directories for repos that were removed.
 	a.cleanRemovedGroupDirs(existingState, result, instanceRoot)
 
+	// Determine overlay fields for the final state. Convention discovery in
+	// runPipeline returns the discovered URL/commit via pipelineResult; carry
+	// those forward into the final SaveState. If not updated, preserve the
+	// values from existingState. NoOverlay is never cleared by apply.
+	finalOverlayURL := existingState.OverlayURL
+	finalOverlayCommit := existingState.OverlayCommit
+	if result.overlayURL != "" {
+		finalOverlayURL = result.overlayURL
+		finalOverlayCommit = result.overlayCommit
+	}
+
 	configName := cfg.Workspace.Name
 	state := &InstanceState{
 		SchemaVersion:  SchemaVersion,
@@ -209,6 +257,10 @@ func (a *Applier) Apply(ctx context.Context, cfg *config.WorkspaceConfig, config
 		Root:           instanceRoot,
 		Created:        existingState.Created,
 		LastApplied:    now,
+		SkipGlobal:     existingState.SkipGlobal,
+		NoOverlay:      existingState.NoOverlay,
+		OverlayURL:     finalOverlayURL,
+		OverlayCommit:  finalOverlayCommit,
 		ManagedFiles:   result.managedFiles,
 		Repos:          result.repoStates,
 		Shadows:        result.shadows,
@@ -225,6 +277,11 @@ func (a *Applier) Apply(ctx context.Context, cfg *config.WorkspaceConfig, config
 // clone, and install content. It returns the pipeline results without writing
 // state.
 func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, configDir, instanceRoot string, now time.Time, opts *pipelineOpts) (*pipelineResult, error) {
+	// overlayDir is the local clone path of the overlay repo when one is active.
+	// It is local to this pipeline run; downstream steps that need it receive it
+	// as a function argument rather than reading it from the Applier.
+	var overlayDir string
+
 	var writtenFiles []string
 	var allWarnings []string
 	// sourceTuples aggregates per-file source provenance across every
@@ -238,10 +295,147 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 	// attribute" — drift for those files is pure content-hash drift.
 	sourceTuples := map[string][]SourceEntry{}
 
-	// Step 1: Discover repos from all sources.
+	// Step 0.5: overlay sync and merge — determine and sync the workspace overlay.
+	// This must run BEFORE discoverAllRepos so that the merged config (base +
+	// overlay) feeds into discovery — overlay sources can then contribute repos.
+	// Three branches based on NoOverlay and OverlayURL from instance state:
+	//   1. NoOverlay=true  → skip entirely; overlayDir stays empty.
+	//   2. OverlayURL set  → sync existing clone; hard error on sync failure.
+	//   3. Neither         → attempt convention discovery from ConfigSourceURL.
+	var pipelineOverlayURL string    // non-empty when convention discovery sets OverlayURL
+	var pipelineOverlayCommit string // non-empty when convention discovery sets OverlayCommit
+	if !opts.noOverlay {
+		switch {
+		case opts.overlayURL != "":
+			// Branch 2: OverlayURL was set in state — sync the existing clone.
+			dir, dirErr := config.OverlayDir(opts.overlayURL)
+			if dirErr != nil {
+				return nil, fmt.Errorf("resolving overlay directory: %w", dirErr)
+			}
+			_, syncErr := a.cloneOrSync(opts.overlayURL, dir)
+			if syncErr != nil {
+				// Any sync failure is a hard error when OverlayURL is registered.
+				return nil, fmt.Errorf("workspace overlay sync failed. Use --no-overlay to skip.")
+			}
+			// Sync succeeded. Check whether the overlay has advanced.
+			sha, shaErr := a.headSHA(dir)
+			if shaErr == nil && opts.existingState != nil && opts.existingState.OverlayCommit != "" {
+				if sha != opts.existingState.OverlayCommit {
+					fmt.Fprintf(os.Stderr, "warning: workspace overlay has new commits since last apply (was %s, now %s)\n",
+						opts.existingState.OverlayCommit[:min(7, len(opts.existingState.OverlayCommit))],
+						sha[:min(7, len(sha))],
+					)
+				}
+			}
+			overlayDir = dir
+
+		case opts.configSourceURL != "":
+			// Branch 3: Convention discovery from ConfigSourceURL.
+			conventionURL, ok := config.DeriveOverlayURL(opts.configSourceURL)
+			if ok {
+				dir, dirErr := config.OverlayDir(conventionURL)
+				if dirErr == nil {
+					wasCloneAttempt, cloneErr := a.cloneOrSync(conventionURL, dir)
+					if cloneErr != nil {
+						if wasCloneAttempt {
+							// Fresh clone failed: overlay repo likely doesn't exist — skip silently.
+							break
+						}
+						// Pull failed on a previously-cloned overlay: hard error.
+						return nil, fmt.Errorf("workspace overlay sync failed. Use --no-overlay to skip.")
+					}
+					// Clone/sync succeeded. Record URL and commit to return via
+					// pipelineResult; Apply() will write them in the final SaveState.
+					sha, _ := a.headSHA(dir)
+					pipelineOverlayURL = conventionURL
+					pipelineOverlayCommit = sha
+					overlayDir = dir
+				}
+			}
+		}
+	}
+
+	// Determine the active overlay URL for repo filtering below.
+	// Either branch 2 (opts.overlayURL) or branch 3 (pipelineOverlayURL) may have set it.
+	activeOverlayURL := opts.overlayURL
+	if activeOverlayURL == "" {
+		activeOverlayURL = pipelineOverlayURL
+	}
+
+	// Step 0.6: Parse and merge the overlay config when overlayDir is set.
+	// The merged config replaces cfg for all subsequent pipeline steps, including
+	// discoverAllRepos, so overlay sources contribute repos to discovery.
+	//
+	// Vault resolution for the overlay's env happens here (per-layer isolation,
+	// R23): the overlay's [vault.provider] resolves its own [env.secrets] before
+	// the overlay is merged into the base config. This mirrors how the personal
+	// overlay (global config) resolves its own secrets against its own provider
+	// bundle before MergeGlobalOverride runs.
+	if overlayDir != "" {
+		overlayTOML := filepath.Join(overlayDir, "workspace-overlay.toml")
+		overlay, parseErr := config.ParseOverlay(overlayTOML)
+		if parseErr != nil {
+			if errors.Is(parseErr, os.ErrNotExist) {
+				return nil, fmt.Errorf("workspace overlay is missing workspace-overlay.toml")
+			}
+			return nil, fmt.Errorf("parsing workspace overlay: %w", parseErr)
+		}
+
+		// Build the overlay's own vault bundle. A nil Vault field produces an
+		// empty bundle, which is still valid — overlay env without vault:// refs
+		// passes through unchanged; any vault:// ref without a declared provider
+		// fails with a clear "provider not declared" error.
+		overlayVaultBundle, bundleErr := resolve.BuildBundle(ctx, a.vaultRegistry, overlay.Vault, "workspace-overlay.toml")
+		if bundleErr != nil {
+			return nil, fmt.Errorf("building overlay vault bundle: %w", bundleErr)
+		}
+		defer overlayVaultBundle.CloseAll()
+
+		// Resolve the overlay's env (top-level and per-repo) against the overlay's
+		// own vault bundle. Wrap in a temporary WorkspaceConfig so ResolveWorkspace
+		// can be reused without duplicating the resolution walker. Both overlay.Env
+		// and overlay.Repos carry the same types as WorkspaceConfig fields, so
+		// direct assignment works.
+		tmpCfg := &config.WorkspaceConfig{
+			Env:   overlay.Env,
+			Repos: overlay.Repos,
+		}
+		resolvedTmp, resolveErr := resolve.ResolveWorkspace(ctx, tmpCfg, resolve.ResolveOptions{
+			AllowMissing: a.AllowMissingSecrets,
+			TeamBundle:   overlayVaultBundle,
+		})
+		if resolveErr != nil {
+			return nil, fmt.Errorf("resolving overlay vault references: %w", resolveErr)
+		}
+		overlay.Env = resolvedTmp.Env
+		overlay.Repos = resolvedTmp.Repos
+
+		mergedWS, mergeErr := MergeWorkspaceOverlay(cfg, overlay, overlayDir)
+		if mergeErr != nil {
+			return nil, fmt.Errorf("merging workspace overlay: %w", mergeErr)
+		}
+		cfg = mergedWS
+	}
+
+	// Step 1: Discover repos from all sources (base + overlay after merge).
 	allRepos, err := a.discoverAllRepos(ctx, cfg.Sources)
 	if err != nil {
 		return nil, err
+	}
+
+	// Filter the overlay repo itself out of allRepos. When the overlay repo lives
+	// in the same org as the workspace source, the org-level auto-scan picks it up
+	// as a regular workspace repo. Leaving it in causes spurious output like
+	// "skipped fake-dot-niwa-overlay (dirty working tree)" — R22 requires zero
+	// output referencing the overlay in standard apply mode.
+	if overlayRepoName, ok := config.OverlayRepoName(activeOverlayURL); ok {
+		filtered := allRepos[:0]
+		for _, r := range allRepos {
+			if r.Name != overlayRepoName {
+				filtered = append(filtered, r)
+			}
+		}
+		allRepos = filtered
 	}
 
 	// Step 2: Classify repos into groups.
@@ -342,7 +536,7 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 	// Build provider bundles from each layer independently. Bundle
 	// lifetime is scoped to this apply: defer CloseAll so providers
 	// shut down cleanly even on error paths (R29 no-disk-cache).
-	teamBundle, err := resolve.BuildBundle(ctx, nil, cfg.Vault, "workspace config")
+	teamBundle, err := resolve.BuildBundle(ctx, a.vaultRegistry, cfg.Vault, "workspace config")
 	if err != nil {
 		return nil, err
 	}
@@ -355,7 +549,7 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 	if globalOverride != nil {
 		overlayRegistry = globalOverride.Global.Vault
 	}
-	personalBundle, err := resolve.BuildBundle(ctx, nil, overlayRegistry, "global overlay")
+	personalBundle, err := resolve.BuildBundle(ctx, a.vaultRegistry, overlayRegistry, "global overlay")
 	if err != nil {
 		return nil, err
 	}
@@ -518,11 +712,29 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 	// Step 4.5: Install workspace-root context and settings.
 	// Context file uses @import for level-scoped visibility.
 	// Settings uses settings.json (not .local) since instance root is non-git.
+
+	// Workspace context must be installed first so @workspace-context.md is
+	// present in CLAUDE.md before overlay and global imports are injected.
+	// This ensures the three-way ordering (@workspace-context.md →
+	// @CLAUDE.overlay.md → @CLAUDE.global.md) is established on first apply.
 	ctxFiles, err := InstallWorkspaceContext(effectiveCfg, classified, instanceRoot)
 	if err != nil {
 		return nil, fmt.Errorf("installing workspace context: %w", err)
 	}
 	writtenFiles = append(writtenFiles, ctxFiles...)
+
+	// Overlay CLAUDE.overlay.md is injected after @workspace-context.md
+	// (now present) so that @CLAUDE.global.md (added at step 5c) ends up
+	// after both — completing the required import order.
+	if overlayDir != "" {
+		overlayCtxPath, overlayCtxErr := InstallOverlayClaudeContent(overlayDir, instanceRoot)
+		if overlayCtxErr != nil {
+			return nil, fmt.Errorf("installing overlay claude content: %w", overlayCtxErr)
+		}
+		if overlayCtxPath != "" {
+			writtenFiles = append(writtenFiles, overlayCtxPath)
+		}
+	}
 
 	rootSettingsFiles, err := InstallWorkspaceRootSettings(effectiveCfg, configDir, instanceRoot, repoIndex)
 	if err != nil {
@@ -562,7 +774,7 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 			continue
 		}
 
-		result, err := InstallRepoContent(effectiveCfg, configDir, instanceRoot, cr.Group, cr.Repo.Name)
+		result, err := InstallRepoContent(effectiveCfg, configDir, overlayDir, instanceRoot, cr.Group, cr.Repo.Name)
 		if err != nil {
 			return nil, fmt.Errorf("installing repo content for %q: %w", cr.Repo.Name, err)
 		}
@@ -693,11 +905,13 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 	}
 
 	return &pipelineResult{
-		classified:   classified,
-		repoStates:   repoStates,
-		managedFiles: managedFiles,
-		warnings:     allWarnings,
-		shadows:      pipelineShadows,
+		classified:    classified,
+		repoStates:    repoStates,
+		managedFiles:  managedFiles,
+		warnings:      allWarnings,
+		shadows:       pipelineShadows,
+		overlayURL:    pipelineOverlayURL,
+		overlayCommit: pipelineOverlayCommit,
 	}, nil
 }
 

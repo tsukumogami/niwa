@@ -42,7 +42,7 @@ func InstallWorkspaceContent(cfg *config.WorkspaceConfig, configDir, instanceRoo
 	source := cfg.Claude.Content.Workspace.Source
 	target := filepath.Join(instanceRoot, "CLAUDE.md")
 
-	if err := installContentFile(cfg, configDir, source, target, vars); err != nil {
+	if err := installContentFile(contentDirRoot(cfg, configDir), source, target, vars); err != nil {
 		return nil, err
 	}
 	return []string{target}, nil
@@ -71,7 +71,15 @@ func InstallGroupContent(cfg *config.WorkspaceConfig, configDir, instanceRoot, g
 
 	target := filepath.Join(instanceRoot, groupName, "CLAUDE.md")
 
-	if err := installContentFile(cfg, configDir, entry.Source, target, vars); err != nil {
+	// Overlay-added groups have OverlayDir set; source is resolved directly from
+	// that directory (not from configDir/contentDir) because the overlay has its
+	// own file layout independent of the workspace content_dir.
+	contentRoot := contentDirRoot(cfg, configDir)
+	if entry.OverlayDir != "" {
+		contentRoot = entry.OverlayDir
+	}
+
+	if err := installContentFile(contentRoot, entry.Source, target, vars); err != nil {
 		return nil, err
 	}
 	return []string{target}, nil
@@ -90,8 +98,13 @@ type RepoContentResult struct {
 // If no explicit content entry exists for the repo, auto-discovery checks for
 // {content_dir}/repos/{repoName}.md and uses it if found.
 //
+// When the repo has an OverlaySource set in its content entry, the overlay
+// content is appended to CLAUDE.local.md (separated by a blank line). In that
+// case overlayDir must be non-empty; if overlayDir is empty and OverlaySource
+// is set, an error is returned.
+//
 // Returns a result with content warnings and files written.
-func InstallRepoContent(cfg *config.WorkspaceConfig, configDir, instanceRoot, groupName, repoName string) (*RepoContentResult, error) {
+func InstallRepoContent(cfg *config.WorkspaceConfig, configDir, overlayDir, instanceRoot, groupName, repoName string) (*RepoContentResult, error) {
 	result := &RepoContentResult{}
 
 	absInstance, err := filepath.Abs(instanceRoot)
@@ -119,11 +132,48 @@ func InstallRepoContent(cfg *config.WorkspaceConfig, configDir, instanceRoot, gr
 
 	if source != "" {
 		target := filepath.Join(repoDir, "CLAUDE.local.md")
-		if err := installContentFile(cfg, configDir, source, target, vars); err != nil {
+		if err := installContentFile(contentDirRoot(cfg, configDir), source, target, vars); err != nil {
 			return nil, err
 		}
 		result.WrittenFiles = append(result.WrittenFiles, target)
 
+		w := CheckGitignore(repoDir, repoName)
+		result.Warnings = append(result.Warnings, w...)
+
+		// Append overlay content if present.
+		if hasExplicit && entry.OverlaySource != "" {
+			if overlayDir == "" {
+				return nil, fmt.Errorf("repo %q has OverlaySource %q but overlayDir is empty", repoName, entry.OverlaySource)
+			}
+			overlaySrcPath := filepath.Join(overlayDir, entry.OverlaySource)
+			overlayData, readErr := os.ReadFile(overlaySrcPath)
+			if readErr != nil {
+				return nil, fmt.Errorf("reading overlay content for repo %q: %w", repoName, readErr)
+			}
+			existing, readErr := os.ReadFile(target)
+			if readErr != nil {
+				return nil, fmt.Errorf("reading CLAUDE.local.md for overlay append for repo %q: %w", repoName, readErr)
+			}
+			combined := string(existing) + "\n" + string(overlayData)
+			if writeErr := os.WriteFile(target, []byte(combined), 0o644); writeErr != nil {
+				return nil, fmt.Errorf("writing overlay-appended CLAUDE.local.md for repo %q: %w", repoName, writeErr)
+			}
+		}
+	} else if hasExplicit && entry.OverlaySource != "" {
+		// No base source, but OverlaySource is set — write overlay content as CLAUDE.local.md.
+		if overlayDir == "" {
+			return nil, fmt.Errorf("repo %q has OverlaySource %q but overlayDir is empty", repoName, entry.OverlaySource)
+		}
+		target := filepath.Join(repoDir, "CLAUDE.local.md")
+		overlaySrcPath := filepath.Join(overlayDir, entry.OverlaySource)
+		overlayData, readErr := os.ReadFile(overlaySrcPath)
+		if readErr != nil {
+			return nil, fmt.Errorf("reading overlay content for repo %q: %w", repoName, readErr)
+		}
+		if writeErr := os.WriteFile(target, overlayData, 0o644); writeErr != nil {
+			return nil, fmt.Errorf("writing overlay CLAUDE.local.md for repo %q: %w", repoName, writeErr)
+		}
+		result.WrittenFiles = append(result.WrittenFiles, target)
 		w := CheckGitignore(repoDir, repoName)
 		result.Warnings = append(result.Warnings, w...)
 	}
@@ -139,7 +189,7 @@ func InstallRepoContent(cfg *config.WorkspaceConfig, configDir, instanceRoot, gr
 				return nil, fmt.Errorf("subdirectory %q for repo %q: %w", subdir, repoName, err)
 			}
 			target := filepath.Join(subdirPath, "CLAUDE.local.md")
-			if err := installContentFile(cfg, configDir, subdirSource, target, vars); err != nil {
+			if err := installContentFile(contentDirRoot(cfg, configDir), subdirSource, target, vars); err != nil {
 				return nil, err
 			}
 			result.WrittenFiles = append(result.WrittenFiles, target)
@@ -203,16 +253,21 @@ func autoDiscoverRepoSource(cfg *config.WorkspaceConfig, configDir, repoName str
 	return ""
 }
 
-// installContentFile reads a source file relative to content_dir, expands
-// template variables, and writes the result to the target path.
-// It verifies that the resolved source path stays within the content directory.
-func installContentFile(cfg *config.WorkspaceConfig, configDir, source, target string, vars map[string]string) error {
+// contentDirRoot returns the absolute content directory for a workspace config
+// and configDir. This is the directory that source= paths are resolved against
+// for base-config content entries.
+func contentDirRoot(cfg *config.WorkspaceConfig, configDir string) string {
 	contentDir := cfg.Workspace.ContentDir
 	if contentDir == "" {
 		contentDir = "."
 	}
+	return filepath.Join(configDir, contentDir)
+}
 
-	contentRoot := filepath.Join(configDir, contentDir)
+// installContentFile reads a source file relative to contentRoot, expands
+// template variables, and writes the result to the target path.
+// It verifies that the resolved source path stays within contentRoot.
+func installContentFile(contentRoot, source, target string, vars map[string]string) error {
 	sourcePath := filepath.Join(contentRoot, source)
 
 	if err := checkContainment(sourcePath, contentRoot); err != nil {

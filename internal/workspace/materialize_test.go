@@ -1916,6 +1916,41 @@ func TestEnvMaterializerWritesMode0600(t *testing.T) {
 	}
 }
 
+// TestSettingsMaterializerCheckGitignoreWarning verifies that when
+// settings.local.json is written and the repo .gitignore is missing the
+// *.local* pattern, a warning is emitted to stderr. The materializer must
+// not return an error in this case.
+func TestSettingsMaterializerCheckGitignoreWarning(t *testing.T) {
+	tmpDir := t.TempDir()
+	repoDir := filepath.Join(tmpDir, "repo")
+	if err := os.MkdirAll(repoDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Write a .gitignore that lacks *.local*.
+	if err := os.WriteFile(filepath.Join(repoDir, ".gitignore"), []byte("*.log\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := &MaterializeContext{
+		Effective: EffectiveConfig{
+			Claude:  config.ClaudeConfig{},
+			Plugins: []string{"my-plugin@marketplace"},
+		},
+		RepoName: "testrepo",
+		RepoDir:  repoDir,
+	}
+
+	m := &SettingsMaterializer{}
+	written, err := m.Materialize(ctx)
+	// Must not return an error — warnings are non-fatal.
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(written) != 1 {
+		t.Fatalf("expected 1 file written, got %d", len(written))
+	}
+}
+
 // TestSettingsMaterializerWritesMode0600 asserts the settings
 // materializer writes .claude/settings.local.json with 0o600
 // permissions. Applies regardless of whether settings carry secrets.
@@ -1950,6 +1985,38 @@ func TestSettingsMaterializerWritesMode0600(t *testing.T) {
 	}
 	if got := info.Mode().Perm(); got != 0o600 {
 		t.Errorf("settings file mode = %o, want 0o600", got)
+	}
+}
+
+// TestSettingsMaterializerCheckGitignoreHasPattern verifies that when the
+// repo .gitignore already contains *.local*, no warning is emitted (the
+// materializer still writes and returns without error).
+func TestSettingsMaterializerCheckGitignoreHasPattern(t *testing.T) {
+	tmpDir := t.TempDir()
+	repoDir := filepath.Join(tmpDir, "repo")
+	if err := os.MkdirAll(repoDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repoDir, ".gitignore"), []byte("*.local*\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := &MaterializeContext{
+		Effective: EffectiveConfig{
+			Claude:  config.ClaudeConfig{},
+			Plugins: []string{"my-plugin@marketplace"},
+		},
+		RepoName: "testrepo",
+		RepoDir:  repoDir,
+	}
+
+	m := &SettingsMaterializer{}
+	written, err := m.Materialize(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(written) != 1 {
+		t.Fatalf("expected 1 file written, got %d", len(written))
 	}
 }
 

@@ -1,0 +1,300 @@
+package config
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+
+	"github.com/BurntSushi/toml"
+)
+
+// WorkspaceOverlay is parsed from workspace-overlay.toml in the overlay clone.
+// It carries additive configuration (sources, groups, repos, content) and
+// override configuration (hooks, settings, env, files) that MergeWorkspaceOverlay
+// layers on top of the base WorkspaceConfig. It is intentionally a distinct type
+// from WorkspaceConfig — overlay TOML has different validation rules and lacks
+// workspace metadata fields.
+type WorkspaceOverlay struct {
+	Sources []OverlaySourceConfig   `toml:"sources"`
+	Groups  map[string]GroupConfig  `toml:"groups"`
+	Repos   map[string]RepoOverride `toml:"repos"`
+	Claude  OverlayClaudeConfig     `toml:"claude"`
+	Env     EnvConfig               `toml:"env"`
+	Files   map[string]string       `toml:"files,omitempty"`
+	Vault   *VaultRegistry          `toml:"vault,omitempty"`
+}
+
+// OverlaySourceConfig defines a GitHub org source in the overlay. Unlike the
+// base SourceConfig, the Repos field is required — auto-discovery is not
+// permitted in overlay sources.
+type OverlaySourceConfig struct {
+	Org   string   `toml:"org"`
+	Repos []string `toml:"repos"`
+}
+
+// OverlayClaudeConfig is the Claude section of workspace-overlay.toml.
+// It carries hooks (appended to base), settings (base-wins per key),
+// content (additive repos), marketplaces (append-union), and plugins
+// (append-union). It does not carry Enabled.
+//
+// Marketplaces and Plugins use append-union semantics: entries already
+// present in the base config are silently skipped; new entries are appended
+// after the base config's entries. This lets a private overlay add marketplace
+// sources that reference overlay-managed repos (via repo: prefix) without
+// exposing those repo names in the public base config.
+type OverlayClaudeConfig struct {
+	Hooks        HooksConfig          `toml:"hooks"`
+	Settings     SettingsConfig       `toml:"settings"`
+	Content      OverlayContentConfig `toml:"content"`
+	Marketplaces []string             `toml:"marketplaces,omitempty"`
+	Plugins      []string             `toml:"plugins,omitempty"`
+}
+
+// OverlayContentConfig holds the content groups and repos maps for the overlay.
+type OverlayContentConfig struct {
+	Groups map[string]OverlayContentGroupConfig `toml:"groups"`
+	Repos  map[string]OverlayContentRepoConfig  `toml:"repos"`
+}
+
+// OverlayContentGroupConfig is a content entry for a group in the overlay.
+// Only groups not already defined in the base config may be added; base wins on collision.
+type OverlayContentGroupConfig struct {
+	Source string `toml:"source"`
+}
+
+// OverlayContentRepoConfig is a content entry in the overlay. Exactly one of
+// Source or Overlay must be set:
+//   - Source: the overlay adds a new content entry for a repo not in the base.
+//   - Overlay: the overlay appends a file to the base repo's CLAUDE.local.md.
+type OverlayContentRepoConfig struct {
+	Source  string `toml:"source"`
+	Overlay string `toml:"overlay"`
+}
+
+// ParseOverlay reads workspace-overlay.toml from path and returns a validated
+// WorkspaceOverlay. Validation rejects:
+//   - Absolute paths and ".." components in any path field.
+//   - Hook script paths that are not relative.
+//   - [files] destination paths beginning with ".claude/" or ".niwa/".
+//   - Content entries where both source and overlay are set, or neither is set.
+//   - Sources without an explicit repos list (no auto-discovery).
+func ParseOverlay(path string) (*WorkspaceOverlay, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("reading overlay config: %w", err)
+	}
+
+	var o WorkspaceOverlay
+	if err := toml.Unmarshal(data, &o); err != nil {
+		return nil, fmt.Errorf("parsing overlay config: %w", err)
+	}
+
+	if err := validateOverlay(&o); err != nil {
+		return nil, err
+	}
+
+	return &o, nil
+}
+
+// validateOverlay applies all overlay-specific validation rules.
+func validateOverlay(o *WorkspaceOverlay) error {
+	// Sources: every source must have an explicit repos list.
+	for i, src := range o.Sources {
+		if src.Org == "" {
+			return fmt.Errorf("overlay sources[%d]: org is required", i)
+		}
+		if len(src.Repos) == 0 {
+			return fmt.Errorf("overlay sources[%d] (org %q): repos list is required; auto-discovery is not permitted in overlay sources", i, src.Org)
+		}
+	}
+
+	// Env.Files: no absolute paths or ".." components.
+	for _, f := range o.Env.Files {
+		if err := validateContentSource("overlay.env.files", f); err != nil {
+			return err
+		}
+	}
+
+	// Files: source keys and destination values must not be absolute, must not
+	// contain "..", and destinations must not target protected directories
+	// (.claude/ or .niwa/).
+	for src, dest := range o.Files {
+		if err := validateContentSource(fmt.Sprintf("overlay.files[%q] source", src), src); err != nil {
+			return err
+		}
+		if dest == "" {
+			continue
+		}
+		if err := validateContentSource(fmt.Sprintf("overlay.files[%q]", src), dest); err != nil {
+			return err
+		}
+		if isProtectedDestination(dest) {
+			return fmt.Errorf("overlay.files[%q]: destination %q targets a protected directory (.claude/ or .niwa/)", src, dest)
+		}
+	}
+
+	// Claude.Hooks: all hook script paths must be relative (not absolute, no "..").
+	for event, entries := range o.Claude.Hooks {
+		for i, entry := range entries {
+			for j, script := range entry.Scripts {
+				if filepath.IsAbs(script) {
+					return fmt.Errorf("overlay.claude.hooks.%s[%d].scripts[%d]: hook script path %q must be relative", event, i, j, script)
+				}
+				if err := validateContentSource(fmt.Sprintf("overlay.claude.hooks.%s[%d].scripts[%d]", event, i, j), script); err != nil {
+					return err
+				}
+			}
+		}
+	}
+
+	// Claude.Content.Groups: source must be set and must be a valid relative path.
+	for groupName, entry := range o.Claude.Content.Groups {
+		if entry.Source == "" {
+			return fmt.Errorf("overlay.claude.content.groups.%s: source is required", groupName)
+		}
+		if err := validateContentSource(fmt.Sprintf("overlay.claude.content.groups.%s.source", groupName), entry.Source); err != nil {
+			return err
+		}
+	}
+
+	// Claude.Content.Repos: exactly one of source or overlay must be set.
+	for repoName, entry := range o.Claude.Content.Repos {
+		hasSource := entry.Source != ""
+		hasOverlay := entry.Overlay != ""
+		if hasSource && hasOverlay {
+			return fmt.Errorf("overlay.claude.content.repos.%s: exactly one of source or overlay must be set, not both", repoName)
+		}
+		if !hasSource && !hasOverlay {
+			return fmt.Errorf("overlay.claude.content.repos.%s: exactly one of source or overlay must be set; neither is set", repoName)
+		}
+		// Validate the path that is set.
+		if hasSource {
+			if err := validateContentSource(fmt.Sprintf("overlay.claude.content.repos.%s.source", repoName), entry.Source); err != nil {
+				return err
+			}
+		}
+		if hasOverlay {
+			if err := validateContentSource(fmt.Sprintf("overlay.claude.content.repos.%s.overlay", repoName), entry.Overlay); err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
+}
+
+// isProtectedDestination reports whether a file destination path targets a
+// directory that overlay authors are not permitted to write into (.claude/ or
+// .niwa/ subtrees). These directories contain generated artifacts and Claude
+// Code configuration that must not be overwritten by additive overlay keys.
+func isProtectedDestination(dest string) bool {
+	// Normalize slashes for consistent prefix matching.
+	d := filepath.ToSlash(dest)
+	return strings.HasPrefix(d, ".claude/") || strings.HasPrefix(d, ".niwa/")
+}
+
+// DeriveOverlayURL converts a workspace source URL into a convention overlay
+// URL of the form "org/repo-overlay". Accepts HTTPS URLs
+// (https://github.com/org/repo[.git]), SSH URLs (git@github.com:org/repo.git),
+// and shorthand (org/repo). Returns ok=false when the input cannot be parsed.
+func DeriveOverlayURL(sourceURL string) (conventionURL string, ok bool) {
+	org, repo, parsed := parseOrgRepo(sourceURL)
+	if !parsed {
+		return "", false
+	}
+	return org + "/" + repo + "-overlay", true
+}
+
+// OverlayRepoName extracts the repository name from an overlay URL.
+// Accepts HTTPS URLs, SSH URLs, or shorthand (org/repo). Returns ok=false
+// when the URL cannot be parsed.
+func OverlayRepoName(overlayURL string) (string, bool) {
+	_, repo, ok := parseOrgRepo(overlayURL)
+	return repo, ok
+}
+
+// parseOrgRepo extracts (org, repo) from an HTTPS URL, SSH URL, or shorthand.
+// Strips a trailing ".git" suffix from the repo name.
+func parseOrgRepo(s string) (org, repo string, ok bool) {
+	s = strings.TrimSpace(s)
+
+	switch {
+	case strings.HasPrefix(s, "https://"):
+		// https://github.com/org/repo[.git]
+		rest := strings.TrimPrefix(s, "https://")
+		// drop host
+		slash := strings.Index(rest, "/")
+		if slash < 0 {
+			return "", "", false
+		}
+		rest = rest[slash+1:]
+		parts := strings.SplitN(rest, "/", 3)
+		if len(parts) < 2 || parts[0] == "" || parts[1] == "" {
+			return "", "", false
+		}
+		org = parts[0]
+		repo = strings.TrimSuffix(parts[1], ".git")
+		if repo == "" {
+			return "", "", false
+		}
+		return org, repo, true
+
+	case strings.HasPrefix(s, "git@"):
+		// git@github.com:org/repo.git
+		colon := strings.Index(s, ":")
+		if colon < 0 {
+			return "", "", false
+		}
+		rest := s[colon+1:]
+		parts := strings.SplitN(rest, "/", 3)
+		if len(parts) < 2 || parts[0] == "" || parts[1] == "" {
+			return "", "", false
+		}
+		org = parts[0]
+		repo = strings.TrimSuffix(parts[1], ".git")
+		if repo == "" {
+			return "", "", false
+		}
+		return org, repo, true
+
+	default:
+		// shorthand org/repo
+		parts := strings.SplitN(s, "/", 3)
+		if len(parts) < 2 || parts[0] == "" || parts[1] == "" {
+			return "", "", false
+		}
+		// reject anything that looks like an absolute path or has a scheme
+		if strings.Contains(parts[0], ":") || strings.HasPrefix(s, "/") {
+			return "", "", false
+		}
+		org = parts[0]
+		repo = strings.TrimSuffix(parts[1], ".git")
+		if repo == "" {
+			return "", "", false
+		}
+		return org, repo, true
+	}
+}
+
+// OverlayDir returns the local directory where the overlay repo is cloned.
+// The path is $XDG_CONFIG_HOME/niwa/overlays/<org>-<repo>/ (falling back to
+// $HOME/.config/niwa/overlays/<org>-<repo>/ when XDG_CONFIG_HOME is unset).
+// overlayURL may be a shorthand (org/repo), HTTPS URL, or SSH URL.
+func OverlayDir(overlayURL string) (string, error) {
+	org, repo, ok := parseOrgRepo(overlayURL)
+	if !ok {
+		return "", fmt.Errorf("cannot parse overlay URL %q", overlayURL)
+	}
+	dirName := org + "-" + repo
+
+	configHome := os.Getenv("XDG_CONFIG_HOME")
+	if configHome == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", fmt.Errorf("determining home directory: %w", err)
+		}
+		configHome = filepath.Join(home, ".config")
+	}
+	return filepath.Join(configHome, "niwa", "overlays", dirName), nil
+}

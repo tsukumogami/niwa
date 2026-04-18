@@ -758,6 +758,121 @@ func TestEnumerateReposDedupsCrossGroup(t *testing.T) {
 	}
 }
 
+func TestInstanceStateOverlayFieldsRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+
+	state := &InstanceState{
+		SchemaVersion:  SchemaVersion,
+		InstanceName:   "test-overlay",
+		InstanceNumber: 1,
+		Root:           dir,
+		OverlayURL:     "acme/myconfig-overlay",
+		NoOverlay:      false,
+		OverlayCommit:  "abc1234def5678901234567890123456789012345",
+		Created:        time.Now().Truncate(time.Second),
+		LastApplied:    time.Now().Truncate(time.Second),
+		Repos:          map[string]RepoState{},
+	}
+
+	if err := SaveState(dir, state); err != nil {
+		t.Fatalf("SaveState: %v", err)
+	}
+
+	loaded, err := LoadState(dir)
+	if err != nil {
+		t.Fatalf("LoadState: %v", err)
+	}
+
+	if loaded.OverlayURL != state.OverlayURL {
+		t.Errorf("OverlayURL = %q, want %q", loaded.OverlayURL, state.OverlayURL)
+	}
+	if loaded.OverlayCommit != state.OverlayCommit {
+		t.Errorf("OverlayCommit = %q, want %q", loaded.OverlayCommit, state.OverlayCommit)
+	}
+	if loaded.NoOverlay != state.NoOverlay {
+		t.Errorf("NoOverlay = %v, want %v", loaded.NoOverlay, state.NoOverlay)
+	}
+}
+
+func TestInstanceStateNoOverlayRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+
+	state := &InstanceState{
+		SchemaVersion:  SchemaVersion,
+		InstanceName:   "test-no-overlay",
+		InstanceNumber: 1,
+		Root:           dir,
+		NoOverlay:      true,
+		Created:        time.Now().Truncate(time.Second),
+		LastApplied:    time.Now().Truncate(time.Second),
+		Repos:          map[string]RepoState{},
+	}
+
+	if err := SaveState(dir, state); err != nil {
+		t.Fatalf("SaveState: %v", err)
+	}
+
+	loaded, err := LoadState(dir)
+	if err != nil {
+		t.Fatalf("LoadState: %v", err)
+	}
+
+	if !loaded.NoOverlay {
+		t.Error("NoOverlay = false, want true")
+	}
+	if loaded.OverlayURL != "" {
+		t.Errorf("OverlayURL = %q, want empty for no-overlay state", loaded.OverlayURL)
+	}
+	if loaded.OverlayCommit != "" {
+		t.Errorf("OverlayCommit = %q, want empty for no-overlay state", loaded.OverlayCommit)
+	}
+}
+
+func TestInstanceStateOverlayFieldsOmitEmpty(t *testing.T) {
+	// When overlay fields are zero, they should not appear in the JSON output
+	// (omitempty ensures backward compatibility).
+	dir := t.TempDir()
+
+	state := &InstanceState{
+		SchemaVersion:  SchemaVersion,
+		InstanceName:   "test-no-overlay-fields",
+		InstanceNumber: 1,
+		Root:           dir,
+		Created:        time.Now().Truncate(time.Second),
+		LastApplied:    time.Now().Truncate(time.Second),
+		Repos:          map[string]RepoState{},
+	}
+
+	if err := SaveState(dir, state); err != nil {
+		t.Fatalf("SaveState: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(dir, StateDir, StateFile))
+	if err != nil {
+		t.Fatalf("reading state file: %v", err)
+	}
+
+	// None of the overlay keys should appear in JSON when zero.
+	for _, key := range []string{"overlay_url", "no_overlay", "overlay_commit"} {
+		if containsKey(string(data), key) {
+			t.Errorf("JSON contains %q when it should be omitted (zero value)", key)
+		}
+	}
+}
+
+// containsKey reports whether raw JSON contains the given key as a JSON string.
+func containsKey(json, key string) bool {
+	return len(json) > 0 && (len(key) > 0) && (func() bool {
+		target := `"` + key + `"`
+		for i := 0; i <= len(json)-len(target); i++ {
+			if json[i:i+len(target)] == target {
+				return true
+			}
+		}
+		return false
+	})()
+}
+
 func TestEnumerateReposFiltersInvalidNames(t *testing.T) {
 	root := t.TempDir()
 

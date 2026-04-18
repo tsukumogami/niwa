@@ -16,12 +16,16 @@ func init() {
 	rootCmd.AddCommand(initCmd)
 	initCmd.Flags().StringVar(&initFrom, "from", "", "org/repo or URL to clone workspace config from")
 	initCmd.Flags().BoolVar(&initSkipGlobal, "skip-global", false, "disable global config overlay for this instance")
+	initCmd.Flags().StringVar(&initOverlay, "overlay", "", "overlay repo (org/repo or URL) to clone and associate with this workspace")
+	initCmd.Flags().BoolVar(&initNoOverlay, "no-overlay", false, "disable overlay discovery and association for this workspace")
 	initCmd.ValidArgsFunction = completeWorkspaceNames
 }
 
 var (
 	initFrom       string
 	initSkipGlobal bool
+	initOverlay    string
+	initNoOverlay  bool
 )
 
 var initCmd = &cobra.Command{
@@ -75,14 +79,19 @@ func resolveInitMode(args []string, from string, globalCfg *config.GlobalConfig)
 
 	// Check the registry for a source URL.
 	entry := globalCfg.LookupWorkspace(name)
-	if entry != nil && entry.Source != "" {
-		return modeClone, name, entry.Source
+	if entry != nil && entry.SourceURL != "" {
+		return modeClone, name, entry.SourceURL
 	}
 
 	return modeNamed, name, ""
 }
 
 func runInit(cmd *cobra.Command, args []string) error {
+	// Mutual exclusion: --overlay and --no-overlay cannot be used together.
+	if initOverlay != "" && initNoOverlay {
+		return fmt.Errorf("--overlay and --no-overlay are mutually exclusive")
+	}
+
 	cwd, err := os.Getwd()
 	if err != nil {
 		return fmt.Errorf("getting working directory: %w", err)
@@ -170,7 +179,7 @@ func runInit(cmd *cobra.Command, args []string) error {
 			Source: absConfigPath,
 		}
 		if source != "" {
-			entry.Source = source
+			entry.SourceURL = source
 		}
 
 		globalCfg.SetRegistryEntry(registryName, entry)
@@ -179,14 +188,13 @@ func runInit(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// If --skip-global was requested, write instance state with SkipGlobal: true.
-	// This lets the user pre-configure the current directory as an instance root
-	// that opts out of global config before the first apply.
-	if initSkipGlobal {
-		state := &workspace.InstanceState{
-			SchemaVersion: workspace.SchemaVersion,
-			SkipGlobal:    true,
-		}
+	// Build the instance state to persist. Always write when any state flag is
+	// set; a missing state file is fine (apply will create it later).
+	state, stateErr := buildInitState(cmd, mode, source)
+	if stateErr != nil {
+		return stateErr
+	}
+	if state != nil {
 		if saveErr := workspace.SaveState(cwd, state); saveErr != nil {
 			fmt.Fprintf(os.Stderr, "warning: could not write instance state: %v\n", saveErr)
 		}
@@ -263,6 +271,72 @@ func bootstrapCommandFor(kind string) string {
 	default:
 		return fmt.Sprintf("%s-specific setup (see provider docs)", kind)
 	}
+}
+
+// buildInitState constructs an InstanceState for the flags that require
+// pre-apply state (--skip-global, --no-overlay, --overlay). Returns (nil, nil)
+// when no state flags were set so that no state file is written. Returns a
+// non-nil error when an explicit --overlay clone fails (hard error by design).
+func buildInitState(cmd *cobra.Command, mode initMode, source string) (*workspace.InstanceState, error) {
+	needsState := initSkipGlobal || initNoOverlay || initOverlay != "" || (mode == modeClone)
+	if !needsState {
+		return nil, nil
+	}
+
+	state := &workspace.InstanceState{
+		SchemaVersion: workspace.SchemaVersion,
+		SkipGlobal:    initSkipGlobal,
+	}
+
+	switch {
+	case initNoOverlay:
+		state.NoOverlay = true
+
+	case initOverlay != "":
+		// --overlay is explicit user intent: clone failure is a hard error.
+		overlayDir, err := config.OverlayDir(initOverlay)
+		if err != nil {
+			return nil, fmt.Errorf("could not determine overlay directory: %w", err)
+		}
+		_, cloneErr := workspace.CloneOrSyncOverlay(initOverlay, overlayDir)
+		if cloneErr != nil {
+			return nil, fmt.Errorf("overlay clone failed: %w", cloneErr)
+		}
+		sha, shaErr := workspace.HeadSHA(overlayDir)
+		if shaErr != nil {
+			fmt.Fprintf(os.Stderr, "warning: could not read overlay HEAD: %v\n", shaErr)
+		}
+		state.OverlayURL = initOverlay
+		state.OverlayCommit = sha
+
+	default:
+		// Convention discovery in modeClone: derive URL from the workspace source.
+		if mode == modeClone && source != "" {
+			conventionURL, ok := config.DeriveOverlayURL(source)
+			if ok {
+				overlayDir, dirErr := config.OverlayDir(conventionURL)
+				if dirErr == nil {
+					wasCloneAttempt, cloneErr := workspace.CloneOrSyncOverlay(conventionURL, overlayDir)
+					if cloneErr != nil {
+						// Any clone failure is silently skipped — the overlay repo may
+						// not exist or may be inaccessible. wasCloneAttempt=false errors
+						// (pull failure on an existing clone) are also non-fatal at init
+						// time since no state has been written yet.
+						_ = wasCloneAttempt
+					} else {
+						sha, shaErr := workspace.HeadSHA(overlayDir)
+						if shaErr != nil {
+							fmt.Fprintf(os.Stderr, "warning: could not read overlay HEAD: %v\n", shaErr)
+						}
+						state.OverlayURL = conventionURL
+						state.OverlayCommit = sha
+					}
+				}
+			}
+		}
+	}
+
+	return state, nil
 }
 
 // printSuccess outputs a success message with next steps.

@@ -27,7 +27,7 @@ func SyncConfigDir(configDir string, allowDirty bool) error {
 
 	// Check for dirty working tree.
 	if !allowDirty {
-		cmd = exec.Command("git", "-C", configDir, "status", "--porcelain")
+		cmd = exec.Command("git", "-C", configDir, "status", "--porcelain", "--untracked-files=no")
 		out, err := cmd.Output()
 		if err != nil {
 			return fmt.Errorf("checking config directory status: %w", err)
