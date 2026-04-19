@@ -1,12 +1,12 @@
 package config
 
-// effectiveReadEnvExample returns whether the .env.example pre-pass should
+// EffectiveReadEnvExample returns whether the .env.example pre-pass should
 // run for the named repo. Resolution order:
 //
 //  1. If the repo has an explicit per-repo override, that value wins.
 //  2. Otherwise the workspace-level setting applies.
 //  3. When both are nil the feature is enabled (opt-out default).
-func effectiveReadEnvExample(ws *WorkspaceConfig, repoName string) bool {
+func EffectiveReadEnvExample(ws *WorkspaceConfig, repoName string) bool {
 	if ws == nil {
 		return true
 	}

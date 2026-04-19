@@ -74,9 +74,9 @@ func TestEffectiveReadEnvExample(t *testing.T) {
 				ws.Repos[tt.repoName] = RepoOverride{ReadEnvExample: tt.repoLevel}
 			}
 
-			got := effectiveReadEnvExample(ws, tt.repoName)
+			got := EffectiveReadEnvExample(ws, tt.repoName)
 			if got != tt.want {
-				t.Errorf("effectiveReadEnvExample(..., %q) = %v, want %v", tt.repoName, got, tt.want)
+				t.Errorf("EffectiveReadEnvExample(..., %q) = %v, want %v", tt.repoName, got, tt.want)
 			}
 		})
 	}
@@ -84,8 +84,8 @@ func TestEffectiveReadEnvExample(t *testing.T) {
 
 func TestEffectiveReadEnvExampleNilWorkspace(t *testing.T) {
 	// A nil workspace should return true (safe default).
-	if got := effectiveReadEnvExample(nil, "any"); !got {
-		t.Error("effectiveReadEnvExample(nil, ...) = false, want true")
+	if got := EffectiveReadEnvExample(nil, "any"); !got {
+		t.Error("EffectiveReadEnvExample(nil, ...) = false, want true")
 	}
 }
 
