@@ -130,6 +130,10 @@ type WorkspaceMeta struct {
 	// personal overlay falls back to matching on workspace source-org
 	// name (see internal/workspace/scope.go).
 	VaultScope string `toml:"vault_scope,omitempty"`
+	// ReadEnvExample controls whether the .env.example pre-pass runs for
+	// all repos in the workspace. nil means enabled (opt-out default).
+	// Per-repo overrides in RepoOverride.ReadEnvExample take precedence.
+	ReadEnvExample *bool `toml:"read_env_example,omitempty"`
 }
 
 // ParseResult holds the parsed config and any non-fatal warnings.
@@ -190,6 +194,9 @@ type RepoOverride struct {
 	Env      EnvConfig         `toml:"env,omitempty"`
 	Files    map[string]string `toml:"files,omitempty"`
 	SetupDir *string           `toml:"setup_dir,omitempty"`
+	// ReadEnvExample overrides the workspace-level read_env_example setting
+	// for this repo. nil means inherit from WorkspaceMeta.ReadEnvExample.
+	ReadEnvExample *bool `toml:"read_env_example,omitempty"`
 }
 
 // ContentConfig declares the CLAUDE.md content hierarchy.
