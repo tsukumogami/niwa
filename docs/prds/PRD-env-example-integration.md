@@ -1,5 +1,5 @@
 ---
-status: Draft
+status: In Progress
 problem: |
   Managed app repos commonly ship `.env.example` files declaring the env
   vars they need, with sensible defaults for non-sensitive fields and
@@ -14,18 +14,20 @@ goals: |
   Let the app repo's `.env.example` be the source of truth for env var
   defaults. niwa discovers these files automatically on every apply,
   merges them into the materialized `.local.env` as the lowest-priority
-  defaults layer, and preserves the existing precedence rules so
-  deliberate workspace overrides always win. Surface drift (new keys,
-  overridden keys, redundant workspace entries) through an audit
-  command so maintainers can consolidate over time. Keep managed app
-  repos read-only; all niwa output still lands in `.local.env`.
+  defaults layer for var-eligible keys, and preserves the existing
+  precedence rules so deliberate workspace overrides always win. Keys
+  declared as secrets are excluded from this merge — they follow the
+  vault and overlay resolution path exclusively, keeping the .required
+  contract intact. Undeclared keys are surfaced with per-key warnings
+  on every apply. Keep managed app repos read-only; all niwa output
+  still lands in `.local.env`.
 ---
 
 # PRD: .env.example Integration
 
 ## Status
 
-Draft
+In Progress
 
 ## Problem Statement
 
@@ -65,11 +67,16 @@ onboards to niwa.
 
 - niwa reads each managed repo's `.env.example` on every apply and
   merges it into the repo's materialized `.local.env`.
-- `.env.example` acts as the lowest-priority defaults layer;
-  workspace-declared overrides always win on collision.
-- Drift is visible: users can audit which keys flow from
-  `.env.example` versus workspace config, and new keys from
-  `.env.example` are surfaced on every apply.
+- `.env.example` acts as the lowest-priority defaults layer for
+  var-eligible keys; workspace-declared overrides always win on
+  collision.
+- Keys declared under any `[env.secrets.*]` table are excluded from
+  `.env.example` materialization — they follow the vault and overlay
+  path exclusively, so the `.required` contract cannot be silently
+  satisfied by a stub value.
+- Undeclared keys flowing from `.env.example` are surfaced with
+  per-key warnings on every apply so workspace maintainers can
+  decide whether to declare them explicitly.
 - Values that look like real secrets in `.env.example` are rejected
   at apply time with an actionable error; intentional stubs and
   known-safe test values are permitted.
@@ -94,23 +101,17 @@ onboards to niwa.
 
 3. **As an app repo owner,** I want adding a new entry to
    `.env.example` to flow through to every workspace on the next
-   `niwa apply`, with a visible banner listing the new keys, so
-   that teammates don't need to notice the diff by reading the
-   raw `.env.example` file themselves.
+   `niwa apply`, with a per-key warning on stderr for each
+   undeclared key, so that teammates don't need to notice the diff
+   by reading the raw `.env.example` file themselves.
 
-4. **As a security-conscious reviewer,** I want niwa to refuse to
-   materialize values from `.env.example` that look like real
-   secrets (high entropy, known secret-vendor prefixes), so that a
-   misconfigured app repo doesn't silently leak an accidentally
-   committed API key into my team's `.local.env` files.
+4. **As a workspace maintainer,** I want niwa to error when an
+   undeclared key in `.env.example` looks like a real secret, so
+   that I'm forced to make an explicit choice — declare it as
+   `[env.vars]` or `[env.secrets]` — rather than having niwa
+   silently assume it's safe to materialize as a var.
 
-5. **As a workspace maintainer auditing drift,** I want a command
-   that reports per-repo which `.env.example` keys are new, which
-   are redundant with workspace.toml, and which are overridden, so
-   that I can consolidate duplicated entries and catch drift
-   before it reaches production.
-
-6. **As a workspace maintainer onboarding a third-party repo I
+5. **As a workspace maintainer onboarding a third-party repo I
    don't fully trust,** I want to opt that repo out of
    `.env.example` discovery while keeping the feature on for my
    own repos, so that an untrusted contributor's `.env.example`
@@ -145,11 +146,27 @@ covered by the existing `.gitignore *.local*` invariant.
 ### Merge precedence
 
 **R4. Lowest-priority defaults layer.** `.env.example` values MUST
-sit at the lowest priority in the merge stack. Precedence, from
-lowest to highest: `.env.example` → workspace `[env.vars]` /
-`[env.secrets]` → `[repos.<n>.env.vars]` / `[repos.<n>.env.secrets]`
-→ vault-resolved values → personal-overlay bindings. Higher-priority
-entries override lower entries per key.
+sit at the lowest priority in the merge stack for var-eligible keys.
+Precedence, from lowest to highest: `.env.example` → `[env.files]`
+(static env files declared in workspace config) → workspace
+`[env.vars]` → `[repos.<n>.env.vars]` → workspace-overlay var
+bindings → global-override var bindings. Higher-priority entries
+override lower entries per key. Keys declared under any
+`[env.secrets.*]` table are excluded from this merge path; see R4a.
+
+**R4a. Secrets declarations excluded.** A key declared under any
+`[env.secrets]` table at any config layer — including flat
+`[env.secrets]`, `[env.secrets.required]`, `[env.secrets.recommended]`,
+`[env.secrets.optional]`, and their per-repo equivalents
+(`[repos.<n>.env.secrets.*]`) — MUST NOT receive a value from
+`.env.example`. The exclusion check MUST run against the
+fully-merged config (base workspace + overlay + global override
+applied) so that secrets declared only in an overlay or global
+config are also excluded. niwa MUST discard the `.env.example`
+value for that key at merge entry, before writing to the output
+map, not as a post-filter pass. This preserves the `.required`
+contract: a missing required secret remains visibly unresolved
+rather than silently satisfied by a placeholder stub.
 
 **R5. Workspace wins on collision.** When a key appears in both
 `.env.example` and any workspace-declared layer, the workspace layer
@@ -179,23 +196,34 @@ v1's contract.
 
 ### Secret detection
 
-**R8. Stub vs. probable-secret classification.** For each
-`.env.example` value, niwa MUST classify it as one of: "safe stub"
-(empty value, allowlisted prefix, or allowlisted placeholder
-pattern), "probable secret" (high Shannon entropy or matches a
-known secret-vendor prefix), or "neutral default" (neither). Safe
-stubs and neutral defaults flow through materialization. Probable
-secrets fail apply with an actionable error.
+**R8. Declaration-scoped value inspection.** niwa applies secret
+detection only to keys with no declaration in the active workspace
+config. The path taken depends on how the key is declared:
 
-**R9. Entropy threshold.** Probable-secret detection MUST use
-Shannon entropy over the value's characters. Values above **3.5
-bits/char** (a deliberately conservative threshold chosen to avoid
-flagging readable English defaults like `postgres://localhost/dev`
-while catching randomized-looking tokens) are flagged. The
-threshold MUST be adjustable via a workspace-level config knob.
+- **Declared as `[env.secrets.*]`**: excluded from materialization
+  entirely (R4a). No value inspection.
+- **Declared as `[env.vars.*]`**: materialized without value
+  inspection. The workspace has made the decision; niwa trusts it.
+- **Undeclared**: the `.env.example` value is classified:
+  - **Probable secret** (high Shannon entropy or matches a
+    known-secret-vendor prefix, per R9–R11): fail apply with an
+    actionable error naming the repo, file, key, and reason,
+    prompting the user to declare the key explicitly.
+  - **Safe value** (below entropy threshold or matches the
+    safe-prefix allowlist, per R10): warn and materialize,
+    treating the key as an implicit var.
 
-**R10. Safe-prefix allowlist.** Values matching any of these
-patterns MUST be classified as safe stubs regardless of entropy:
+**R9. Entropy threshold.** For undeclared keys, probable-secret
+detection MUST use Shannon entropy over the value's characters.
+Values above **3.5 bits/char** (a deliberately conservative
+threshold chosen to avoid flagging readable English defaults like
+`postgres://localhost/dev` while catching randomized-looking tokens)
+are flagged.
+
+**R10. Safe-prefix allowlist.** For undeclared keys, values matching
+any of these patterns MUST be treated as safe (warn and materialize)
+regardless of entropy, preventing false errors for known-harmless
+values:
 - Empty values (`KEY=`).
 - `changeme`, `change-me`, `CHANGE_ME` (case-insensitive).
 - `<your-*>`, `<...>`, `example.com`, `example.org`,
@@ -207,13 +235,10 @@ patterns MUST be classified as safe stubs regardless of entropy:
 - Values matching `localhost`, `127.0.0.1`, or `0.0.0.0` URL
   patterns.
 
-The allowlist MUST be extensible via a workspace-level config
-knob. Documenting that teams can add their own patterns is a
-goal; the exact config key name is an open question.
 
-**R11. Known-secret-prefix detection.** Values matching known
-secret-vendor prefixes MUST be flagged as probable secrets
-regardless of entropy or allowlist. Initial list:
+**R11. Known-secret-prefix detection.** For undeclared keys, values
+matching known secret-vendor prefixes MUST be flagged as probable
+secrets regardless of entropy or allowlist. Initial list:
 - `sk_live_`, `sk_test_` (Stripe secret keys — even test secret
   keys are server-side secrets)
 - `AKIA`, `ASIA` (AWS access keys)
@@ -222,65 +247,63 @@ regardless of entropy or allowlist. Initial list:
 - `xoxb-`, `xoxp-`, `xapp-` (Slack)
 - `sq0atp-`, `sq0csp-` (Square)
 
-**R12. Escape hatch.** A `--allow-plaintext-secrets` flag on `niwa
-apply` (mirroring the existing flag for inline values) MUST
-downgrade probable-secret failures to warnings, allowing the apply
-to proceed. The flag is one-shot; there is no persistent override.
+**R12. Escape hatch.** The existing `--allow-plaintext-secrets` flag
+on `niwa apply` MUST also downgrade `.env.example` probable-secret
+failures to warnings, allowing apply to proceed. This includes the
+public-repo guardrail in R13. Note: the flag already disables the
+config-repo plaintext guardrail; extending it to `.env.example`
+detection means a single flag disables all secret checks for that
+apply invocation. The flag is one-shot; there is no persistent
+override.
 
 **R13. Guardrail coverage.** When a managed repo's git remote is a
-public GitHub URL and its `.env.example` contains a probable
-secret, niwa MUST fail apply with the same guardrail that already
-blocks plaintext in `[env.secrets]` for public remotes. The error
-MUST name the offending file and line.
+public GitHub URL and its `.env.example` contains a probable-secret
+value for an undeclared key, niwa MUST fail apply with the same
+guardrail that already blocks plaintext in `[env.secrets]` for
+public remotes. The check MUST be performed against the managed
+app repo's remote (not the workspace config repo's remote) using
+a per-repo remote detection call during the materializer loop.
+The error MUST name the offending file and line. Declared-var keys
+are outside this guardrail — the workspace has explicitly accepted
+responsibility for the value.
 
 ### Drift policy
 
-**R14. Additive-loud default.** When `.env.example` introduces a
-new key not present in any workspace-declared layer, niwa MUST
-add it to `.local.env` and emit a stderr line during apply:
-`new from .env.example: <repo>/<key>`. Multiple new keys
-produce one line per key. This behavior is the default; there is
-no flag to opt into "additive-silent" in v1.
+**R14. Additive-loud default.** When `.env.example` contains a key
+not declared in any workspace layer, niwa handles it based on the
+value classification (R8):
+
+- **Safe undeclared key**: add to `.local.env` and emit a warning
+  on stderr: `warn: <repo>: undeclared key <key> read from
+  .env.example, treating as var`. Multiple undeclared safe keys
+  produce one line per key.
+- **Probable-secret undeclared key**: fail apply with an error
+  (R9–R11); the key is not materialized.
+
+There is no flag to suppress undeclared-key warnings in v1; the
+intent is to prompt the workspace maintainer to make an explicit
+declaration.
 
 **R15. Silent on overrides.** When `.env.example` supplies a key
 that workspace config overrides, niwa MUST NOT emit a line on
-apply — the override is deliberate, not noise. Users query the
-audit command (R16) to see overrides.
+apply — the override is deliberate, not noise.
 
 ### Observability
 
-**R16. Audit command.** `niwa status --audit-env` MUST report,
-per repo:
-- **new-in-example**: keys present in `.env.example` with no
-  workspace override.
-- **redundant**: keys present in both with matching values
-  (consolidation candidates).
-- **overridden**: keys present in both with different values
-  (deliberate overrides; shows both values).
-- **probable-secret**: keys whose `.env.example` value was flagged
-  as a probable secret (refused to materialize).
-
-Exit code is 0 when no issues exist and no `.env.example` files
-were found. Exit code is 0 when only `new-in-example` or
-`redundant` entries exist (informational). Exit code is 1 when any
-`probable-secret` entries exist. Exit code is 1 when the guardrail
-would fail apply for any repo.
-
-**R17. Source traceability.** `niwa status --verbose` (or a new
-`niwa status --env-sources` subcommand — exact flag is an open
-question) MUST list, for each materialized env var in each repo:
-the key, the resolved value (redacted to `***` for secrets), and
-the source (`.env.example`, `[env.vars]`, `[repos.<n>.env.vars]`,
+**R16. Source traceability.** `niwa status --verbose` MUST list,
+for each materialized env var in each repo: the key, the resolved
+value (redacted to `***` for secrets), and the source
+(`.env.example`, `[env.vars]`, `[repos.<n>.env.vars]`,
 `[env.secrets]`, vault://..., or personal overlay).
 
 ### Opt-outs
 
-**R18. Workspace-level opt-out.** A top-level `[config]
+**R17. Workspace-level opt-out.** A top-level `[config]
 read_env_example = false` flag in workspace.toml MUST disable
 `.env.example` discovery for every managed repo in the workspace.
 Default when unset: `true`.
 
-**R19. Per-repo opt-out.** A per-repo
+**R18. Per-repo opt-out.** A per-repo
 `[repos.<n>] read_env_example = false` flag MUST disable
 discovery for that specific repo, overriding the workspace-level
 setting for that repo only. Useful for third-party or untrusted
@@ -288,26 +311,27 @@ repos.
 
 ### Backwards compatibility
 
-**R20. Existing workspaces unaffected.** Workspaces that currently
+**R19. Existing workspaces unaffected.** Workspaces that currently
 duplicate vars in `[repos.<n>.env.vars]` MUST continue to work
 without modification. The feature ships on by default;
 collisions resolve via R5 (workspace wins), so no materialized
 value changes unless the `.env.example` introduces a key the
 workspace has not acknowledged.
 
-**R21. No workspace.toml rewrite.** v1 does NOT provide a
+**R20. No workspace.toml rewrite.** v1 does NOT provide a
 `--apply-diff` or similar auto-rewrite of workspace.toml. Users
-consolidate manually based on `niwa status --audit-env` output.
+consolidate manually by inspecting apply output and `niwa status
+--verbose`.
 
 ### Non-functional
 
-**R22. Performance.** `.env.example` discovery and parsing MUST
+**R21. Performance.** `.env.example` discovery and parsing MUST
 NOT add measurable latency to `niwa apply`. Budget: 5ms per
 managed repo for discovery + parse, measured on a local disk.
 Real-world files are small (typically under 2 KB); this budget
 has headroom.
 
-**R23. Parser robustness.** A malformed or unreadable
+**R22. Parser robustness.** A malformed or unreadable
 `.env.example` MUST NOT crash niwa or fail apply. Two failure
 modes, both resolve to warnings (not errors):
 
@@ -356,9 +380,14 @@ failure (probable-secret, guardrail, non-env cause) blocks it.
   has `KEY=bar`, the materialized value is `bar`.
 - [ ] When `.env.example` has `KEY=foo` and nothing else
   declares KEY, the materialized value is `foo`.
-- [ ] When `.env.example` has `KEY=foo` and `[env.secrets]` has
-  `KEY=vault://…`, the materialized value is the vault-resolved
-  value.
+- [ ] When `.env.example` has `KEY=foo` and any workspace layer
+  declares `KEY` under `[env.secrets.*]`, the `.env.example` value
+  is not contributed: the key follows the secrets resolution path
+  (vault, overlay) exclusively.
+- [ ] When a required secret declared under `[env.secrets.required]`
+  has no vault or overlay binding, it remains unresolved even if
+  `.env.example` declares that key — the `.env.example` value does
+  not silently satisfy the requirement.
 
 ### Parser
 
@@ -378,37 +407,42 @@ failure (probable-secret, guardrail, non-env cause) blocks it.
 
 ### Secret detection
 
-- [ ] A value with entropy above 3.5 bits/char not matching any
-  allowlist pattern is flagged as probable-secret and blocks
-  apply.
-- [ ] `pk_test_Y2FyaW5nLXNocmV3LTc5LmNsZXJrLmFjY291bnRzLmRldiQ`
-  (the codespar example value) is allowed through (safe-prefix).
-- [ ] An empty value (`KEY=`) passes regardless of other rules.
-- [ ] `KEY=changeme` and `KEY=<your-api-key>` pass (allowlist).
-- [ ] A value with `sk_live_` prefix is flagged regardless of
-  entropy or allowlist.
-- [ ] `--allow-plaintext-secrets` downgrades probable-secret
-  failures to warnings for a single apply.
-- [ ] A managed repo with a public GitHub remote containing a
-  probable-secret value fails apply with the public-repo
-  guardrail error; a private-remote repo does not.
+- [ ] A key declared as `[env.vars]` with a high-entropy value in
+  `.env.example` is materialized without error or warning — the
+  declaration is trusted.
+- [ ] An undeclared key with a value above 3.5 bits/char not
+  matching any allowlist pattern blocks apply with an error
+  naming the repo, file, key, and reason.
+- [ ] An undeclared key with `pk_test_Y2FyaW5nLXNocmV3LTc5...`
+  (codespar example) is treated as safe (allowlist match): apply
+  warns and materializes.
+- [ ] An undeclared key with an empty value (`KEY=`) warns and
+  materializes.
+- [ ] An undeclared key with `KEY=changeme` or `KEY=<your-api-key>`
+  warns and materializes (allowlist match).
+- [ ] An undeclared key with a `sk_live_` prefix blocks apply
+  regardless of entropy or allowlist.
+- [ ] `--allow-plaintext-secrets` downgrades probable-secret errors
+  to warnings for undeclared keys, allowing apply to proceed.
+- [ ] A managed repo with a public GitHub remote whose `.env.example`
+  has an undeclared probable-secret key fails apply with the
+  public-repo guardrail error; a private-remote repo does not.
 
 ### Drift policy
 
-- [ ] A new key in `.env.example` produces `new from
-  .env.example: <repo>/<key>` on apply stderr.
+- [ ] A safe undeclared key in `.env.example` produces a warning
+  on apply stderr: `warn: <repo>: undeclared key <key> read from
+  .env.example, treating as var`.
+- [ ] A probable-secret undeclared key blocks apply with an error;
+  no warning line is emitted (error replaces it).
 - [ ] A key overridden by workspace config does NOT produce a
   stderr line on apply.
 
 ### Observability
 
-- [ ] `niwa status --audit-env` lists new-in-example, redundant,
-  and overridden keys per repo with exit code 0 when no
-  probable-secret entries exist.
-- [ ] `niwa status --audit-env` exits 1 when any
-  probable-secret entries exist.
-- [ ] `niwa status --verbose` (or the chosen equivalent)
-  reports the source of each materialized env var per repo.
+- [ ] `niwa status --verbose` reports the source of each
+  materialized env var per repo (`.env.example`, `[env.vars]`,
+  vault, overlay, etc.), with secret values redacted to `***`.
 
 ### Opt-outs
 
@@ -445,42 +479,27 @@ failure (probable-secret, guardrail, non-env cause) blocks it.
 - **Variable expansion and multi-line values.** Deferred until a
   user with a real `.env.example` requiring them is found.
 - **`--apply-diff` auto-rewrite of workspace.toml.** Users
-  consolidate manually based on audit output.
+  consolidate manually based on apply output and `--verbose`.
+- **`niwa status --audit-env`.** Structured per-repo drift report
+  (new-in-example, redundant, overridden, probable-secret
+  categories). Deferred; the apply-time warnings and `--verbose`
+  cover v1 observability needs.
 - **Issue #61 (static env-files parity).** Related but separate
   scope. This feature may eventually subsume the
   `[env].files` path, but v1 ships both side-by-side.
 - **Issue #62 (vault URIs in recommended/optional sub-tables).**
   Unrelated.
 
-## Open Questions
-
-- **Exact workspace-level config key names** for the entropy
-  threshold override and the allowlist extension. Candidates:
-  `[config.env_example] entropy_threshold = 3.5`,
-  `[config.env_example] allowlist = [...]`. Pin these during
-  design or first implementation PR.
-- **`niwa status` flag name** for source traceability: `--verbose`
-  (reuse existing) vs. new `--env-sources` vs. new
-  `--show-sources`. Preference: extend existing `--verbose` to
-  include env sources rather than add a new flag, but this
-  depends on whether the existing `--verbose` output is already
-  cluttered.
-- **JSON output for audit command.** `niwa status --audit-env
-  --format json` would be useful for CI scripts. Ship in v1 or
-  defer? Preference: defer to a follow-up so v1 ships smaller;
-  CI consumers can parse the text output until JSON lands.
-
 ## Known Limitations
 
 - **Secret-detection false positives.** The entropy threshold is
   conservative (3.5 bits/char vs. truffleHog's 3.0) to minimize
-  flagging readable English defaults. This means some
-  genuinely-random test values (e.g., a randomly-generated UUID
-  used as a webhook token) will slip through unflagged unless
-  they match a known-prefix rule. Users who care about these
-  cases can add their own prefix patterns to the allowlist
-  (forbidden direction) or lower the threshold via the config
-  knob.
+  flagging readable English defaults. Some genuinely-random test
+  values (e.g., a randomly-generated UUID used as a webhook token)
+  will slip through unflagged unless they match a known-prefix
+  rule. The right response is to declare the key explicitly as
+  `[env.vars]` or `[env.secrets]`, at which point detection no
+  longer applies.
 - **Safe-prefix allowlist needs curation.** The initial list is
   based on observed patterns in the codespar workspace and
   well-known vendor conventions. Teams with their own test-token
@@ -493,6 +512,11 @@ failure (probable-secret, guardrail, non-env cause) blocks it.
 - **Windows line endings tolerated, not optimized.** The parser
   handles CRLF but niwa today targets macOS + Linux; Windows is
   via WSL per the vault-integration guide.
+- **`--allow-plaintext-secrets` disables all secret checks.** The
+  flag already bypasses the config-repo plaintext guardrail; R12
+  extends it to `.env.example` detection as well. A user passing
+  the flag to unblock a single classification error implicitly
+  disables all plaintext checks for that apply run.
 
 ## Decisions and Trade-offs
 
@@ -513,11 +537,66 @@ workspace-declared layer, the workspace value wins.
 on this direction. Workspace overrides are deliberate; app defaults
 are baselines; the precedence should match that intent.
 
+### Decision: secret detection scoped to undeclared keys; declared vars are trusted without value inspection
+
+**Decided:** niwa applies secret detection only to keys that are
+not declared anywhere in the active workspace config. A key
+declared as `[env.vars]` is materialized from `.env.example`
+without inspecting the value — the workspace has made the decision.
+Secret detection fires only when the workspace has said nothing
+about the key.
+
+**Alternatives considered:**
+- Inspect all `.env.example` values regardless of declaration.
+  Rejected — if a team intentionally declares a high-entropy
+  test token as a var (e.g., a seeded test database password),
+  niwa would block apply on the team's own deliberate choice.
+  That's paternalistic and defeats the purpose of explicit
+  declarations.
+- Inspect undeclared keys only, but allow through with a warning
+  instead of an error for probable secrets. Rejected — a silent
+  materialization of an accidentally-committed real secret is
+  worse than a blocked apply. The error prompts an explicit
+  decision; the warning would be easy to miss.
+
+**Reasoning:** Explicit declarations are the user's escape hatch.
+If a key looks like a secret, the right response is "declare it
+one way or the other" — not "let it through anyway." Keeping
+detection scoped to undeclared keys means the feature never
+second-guesses an intentional workspace choice.
+
+### Decision: `.env.example` applies only to var-eligible keys; secrets declarations are excluded
+
+**Decided:** Keys declared under any `[env.secrets.*]` table
+(required, recommended, optional, or flat) are excluded from
+`.env.example` materialization. `.env.example` values flow only to
+keys that are either entirely undeclared (treated as vars) or
+explicitly declared under `[env.vars]`.
+
+**Alternatives considered:**
+- Allow `.env.example` to supply a value for a secrets-declared key,
+  with vault/overlay taking precedence. Rejected — if vault resolution
+  fails and no personal overlay provides the key, the `.env.example`
+  placeholder silently satisfies the `.required` contract. The
+  developer never learns their required secret is missing; the app
+  likely starts with a stub value and fails in a way that's hard to
+  trace.
+- Warn when a secrets-declared key appears in `.env.example` but
+  still allow it through if no higher-priority source resolves.
+  Rejected — a warning is better than silence, but the unsafe
+  outcome (stub value masking a missing secret) remains.
+
+**Reasoning:** The `.required` mechanism exists to catch absent
+secrets at apply time rather than at runtime. Silently satisfying
+it via `.env.example` defeats the contract. The feature is about
+default values for non-sensitive vars, not secrets — keeping those
+concerns separate makes the model predictable and safe.
+
 ### Decision: additive-loud drift policy
 
-**Decided:** New keys in `.env.example` flow into `.local.env`
-automatically; apply output emits `new from .env.example:
-<repo>/<key>` for each.
+**Decided:** Undeclared keys in `.env.example` flow into `.local.env`
+automatically; apply emits one warning per key:
+`warn: <repo>: undeclared key <key> read from .env.example, treating as var`.
 
 **Alternatives considered:**
 - Additive-silent (add without comment). Rejected — reintroduces
@@ -579,7 +658,10 @@ with ~50 LOC rather than depending on `godotenv` or `gotenv`.
   surface across two nearly-identical parsers.
 
 **Reasoning:** The dependency boundary is cheap to extend, and
-niwa's R20 no-Go-deps-beyond-stdlib preference applies.
+niwa's no-Go-deps-beyond-stdlib preference applies. Note: the
+existing `parseEnvFile` does not support quoted values, `export`
+prefixes, or CRLF — implementing R6 requires rewriting it to spec,
+not merely extending it.
 
 ### Decision: entropy threshold 3.5 bits/char
 
@@ -595,8 +677,9 @@ bits/char, higher than truffleHog's 3.0.
 
 **Reasoning:** 3.5 is a deliberate trade-off calibrated to the
 codespar example where readable defaults must pass and
-randomized-looking values must fail. Users can adjust the
-threshold via config for different preferences.
+randomized-looking values must fail. No config knob is provided —
+teams needing a different threshold should declare the key
+explicitly as `[env.vars]`, which bypasses detection entirely.
 
 ### Decision: absence is silent; parse failures are warnings; neither blocks apply
 
@@ -621,18 +704,3 @@ problems (warnings) without blocking behavior matches the
 precedent set by other optional layers like Claude content
 files.
 
-### Decision: `niwa status --audit-env` not `niwa env audit`
-
-**Decided:** Extend the existing `niwa status` command with an
-`--audit-env` flag, mirroring the existing `--audit-secrets`
-pattern.
-
-**Alternatives considered:**
-- New `niwa env` subcommand family. Rejected — adds a new
-  top-level verb for a single operation; violates "one obvious
-  way" by fragmenting audit surfaces.
-- `niwa env audit` as a standalone verb. Rejected for the same
-  reason.
-
-**Reasoning:** Consistency with `--audit-secrets` is worth more
-than a marginally-more-discoverable new verb.
