@@ -114,8 +114,8 @@ repos, regenerates content files, and cleans up repos removed from the config.
 | `niwa init <name> --from <org/repo>` | Clone a shared workspace config from GitHub |
 | `niwa init <name> --from <org/repo> --overlay <repo>` | Use `<repo>` as the overlay instead of auto-discovering one (`--overlay` and `--no-overlay` are mutually exclusive) |
 | `niwa init <name> --from <org/repo> --no-overlay` | Skip overlay discovery entirely |
-| `niwa create [--name <name>]` | Create a new workspace instance |
-| `niwa apply [--instance <name>]` | Apply config to all instances (from root) or one (from instance) |
+| `niwa create [--name <name>]` | Create a new workspace instance; on a TTY, shows a live status line ("cloning <repo>...") while each repo is processed |
+| `niwa apply [--instance <name>]` | Apply config to all instances (from root) or one (from instance); on a TTY, shows a live status line ("cloning <repo>...", "syncing <repo>...") while each repo is processed |
 | `niwa status [instance]` | Show workspace health: repos, drift, last applied |
 | `niwa reset [instance] [--force]` | Tear down and recreate an instance |
 | `niwa destroy [instance] [--force]` | Permanently remove an instance |
@@ -123,6 +123,8 @@ repos, regenerates content files, and cleans up repos removed from the config.
 | `niwa --no-progress <command>` | Suppress the animated status line regardless of TTY state |
 
 `--no-progress` is a persistent flag -- it applies to all subcommands. Use it in CI pipelines and scripts where the animated status line is unwanted.
+
+On a TTY, `niwa create` and `niwa apply` show a single in-place status line for the current operation; completed-repo lines scroll normally above it. On non-TTY output (piped, redirected, or CI), output is append-only, identical to previous behavior.
 
 ## Shared workspace configs
 

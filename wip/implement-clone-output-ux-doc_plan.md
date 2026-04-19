@@ -19,5 +19,5 @@ Total entries: 2
 **Section**: Commands
 **Prerequisite issues**: #2, #3
 **Update type**: modify
-**Status**: pending
+**Status**: updated
 **Details**: Update the `niwa apply` and `niwa create` command descriptions to mention the new TTY output behavior: on a TTY, a single status line shows the current operation ("cloning <repo>...", "syncing <repo>...") in place, and completed-repo lines scroll normally. On non-TTY (piped output, CI), output is unchanged from the previous append-only behavior.
