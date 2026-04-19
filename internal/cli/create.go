@@ -108,7 +108,9 @@ func runCreate(cmd *cobra.Command, args []string) error {
 
 	workspaceRoot := filepath.Dir(configDir)
 
-	instanceName, err := computeInstanceName(cfg.Workspace.Name, createName, workspaceRoot)
+	configName := cfg.Workspace.Name
+
+	instanceName, err := computeInstanceName(configName, createName, workspaceRoot)
 	if err != nil {
 		return err
 	}
@@ -131,11 +133,13 @@ func runCreate(cmd *cobra.Command, args []string) error {
 	// resolution and personal-wins merging work during create.
 	// ConfigSourceURL is set as a fallback for overlay discovery when no
 	// init-time state exists (e.g., create inside a bare .niwa/ dir).
+	// Use configName (the original workspace config name) not instanceName
+	// so the registry lookup succeeds for -2, -3, ... instances too.
 	if globalCfg, gErr := config.LoadGlobalConfig(); gErr == nil {
 		if gDir, gErr := config.GlobalConfigDir(); gErr == nil {
 			applier.GlobalConfigDir = gDir
 		}
-		if entry := globalCfg.LookupWorkspace(cfg.Workspace.Name); entry != nil {
+		if entry := globalCfg.LookupWorkspace(configName); entry != nil {
 			applier.ConfigSourceURL = entry.SourceURL
 		}
 	}

@@ -53,6 +53,19 @@ func TestDeriveOverlayURL(t *testing.T) {
 			wantURL: "acme/myrepo-overlay",
 			wantOK:  true,
 		},
+		// file:// URLs
+		{
+			name:    "file with .git suffix",
+			input:   "file:///sandbox/gitserver/ws.git",
+			wantURL: "file:///sandbox/gitserver/ws-overlay.git",
+			wantOK:  true,
+		},
+		{
+			name:    "file without .git suffix",
+			input:   "file:///sandbox/gitserver/ws",
+			wantURL: "file:///sandbox/gitserver/ws-overlay.git",
+			wantOK:  true,
+		},
 		// Unparseable inputs
 		{
 			name:   "empty string",
@@ -201,6 +214,64 @@ func TestOverlayDir_DeriveAndDir_RoundTrip(t *testing.T) {
 		t.Fatalf("OverlayDir error: %v", err)
 	}
 	want := filepath.Join(tmp, "niwa", "overlays", "myorg-myconfig-overlay")
+	if dir != want {
+		t.Errorf("OverlayDir = %q, want %q", dir, want)
+	}
+}
+
+func TestOverlayDir_FileURL(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", tmp)
+
+	tests := []struct {
+		name     string
+		input    string
+		wantName string
+	}{
+		{
+			name:     "file with .git suffix",
+			input:    "file:///sandbox/gitserver/ws-overlay.git",
+			wantName: "file-ws-overlay",
+		},
+		{
+			name:     "file without .git suffix",
+			input:    "file:///sandbox/gitserver/ws-overlay",
+			wantName: "file-ws-overlay",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := OverlayDir(tc.input)
+			if err != nil {
+				t.Fatalf("OverlayDir(%q) error: %v", tc.input, err)
+			}
+			want := filepath.Join(tmp, "niwa", "overlays", tc.wantName)
+			if got != want {
+				t.Errorf("OverlayDir(%q) = %q, want %q", tc.input, got, want)
+			}
+		})
+	}
+}
+
+func TestOverlayDir_FileURL_DeriveRoundTrip(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", tmp)
+
+	sourceURL := "file:///sandbox/gitserver/ws.git"
+	conventionURL, ok := DeriveOverlayURL(sourceURL)
+	if !ok {
+		t.Fatal("DeriveOverlayURL returned ok=false for file:// URL")
+	}
+	if conventionURL != "file:///sandbox/gitserver/ws-overlay.git" {
+		t.Errorf("DeriveOverlayURL = %q, want %q", conventionURL, "file:///sandbox/gitserver/ws-overlay.git")
+	}
+
+	dir, err := OverlayDir(conventionURL)
+	if err != nil {
+		t.Fatalf("OverlayDir error: %v", err)
+	}
+	want := filepath.Join(tmp, "niwa", "overlays", "file-ws-overlay")
 	if dir != want {
 		t.Errorf("OverlayDir = %q, want %q", dir, want)
 	}
