@@ -87,12 +87,7 @@ func runApply(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("could not locate workspace configuration")
 	}
 
-	// Auto-pull config from origin if it's a git repo with a remote.
 	configDir := filepath.Dir(configPath)
-	if syncErr := workspace.SyncConfigDir(configDir, applyAllowDirty); syncErr != nil {
-		return syncErr
-	}
-
 	result, err := config.Load(configPath)
 	if err != nil {
 		return err

@@ -1,6 +1,7 @@
 package workspace
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"os/exec"
@@ -87,7 +88,7 @@ func TestSyncRepo_CleanDefaultBehind(t *testing.T) {
 	// Push a commit to remote that local doesn't have.
 	pushCommitFromHelper(t, bareDir, "new.txt", "new content")
 
-	result, err := SyncRepo(context.Background(), localDir, "main")
+	result, err := SyncRepo(context.Background(), localDir, "main", NewReporterWithTTY(&bytes.Buffer{}, false))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -110,7 +111,7 @@ func TestSyncRepo_DirtyDefault(t *testing.T) {
 	// Dirty the working tree.
 	writeFile(t, filepath.Join(localDir, "dirty.txt"), "uncommitted")
 
-	result, err := SyncRepo(context.Background(), localDir, "main")
+	result, err := SyncRepo(context.Background(), localDir, "main", NewReporterWithTTY(&bytes.Buffer{}, false))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -128,7 +129,7 @@ func TestSyncRepo_CleanOtherBranch(t *testing.T) {
 	// Switch to a different branch.
 	run(t, "git", "-C", localDir, "checkout", "-b", "feature")
 
-	result, err := SyncRepo(context.Background(), localDir, "main")
+	result, err := SyncRepo(context.Background(), localDir, "main", NewReporterWithTTY(&bytes.Buffer{}, false))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -154,7 +155,7 @@ func TestSyncRepo_CleanDefaultDiverged(t *testing.T) {
 	run(t, "git", "-C", localDir, "add", ".")
 	run(t, "git", "-C", localDir, "commit", "-m", "local commit")
 
-	result, err := SyncRepo(context.Background(), localDir, "main")
+	result, err := SyncRepo(context.Background(), localDir, "main", NewReporterWithTTY(&bytes.Buffer{}, false))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -169,7 +170,7 @@ func TestSyncRepo_CleanDefaultDiverged(t *testing.T) {
 func TestSyncRepo_CleanDefaultUpToDate(t *testing.T) {
 	_, localDir := setupBareAndClone(t)
 
-	result, err := SyncRepo(context.Background(), localDir, "main")
+	result, err := SyncRepo(context.Background(), localDir, "main", NewReporterWithTTY(&bytes.Buffer{}, false))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

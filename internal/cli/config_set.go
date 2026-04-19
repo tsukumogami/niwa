@@ -62,7 +62,7 @@ func runConfigSetGlobal(cmd *cobra.Command, args []string) error {
 	fmt.Fprintf(cmd.OutOrStdout(), "Cloning global config from: %s\n", cloneURL)
 
 	cloner := &workspace.Cloner{}
-	if _, err := cloner.Clone(cmd.Context(), cloneURL, globalConfigDir); err != nil {
+	if _, err := cloner.Clone(cmd.Context(), cloneURL, globalConfigDir, workspace.NewReporter(os.Stderr)); err != nil {
 		return fmt.Errorf("cloning global config repo: %w", err)
 	}
 

@@ -229,6 +229,12 @@ func (a *Applier) Create(ctx context.Context, cfg *config.WorkspaceConfig, confi
 func (a *Applier) Apply(ctx context.Context, cfg *config.WorkspaceConfig, configDir, instanceRoot string) error {
 	now := time.Now()
 
+	// Auto-pull config from origin if it's a git repo with a remote.
+	// Moved here from cli/apply.go so that the Reporter routes output.
+	if syncErr := SyncConfigDir(configDir, a.Reporter, a.AllowDirty); syncErr != nil {
+		return syncErr
+	}
+
 	// Ensure the instance root's .gitignore covers *.local*. Applier.
 	// Create already runs this during initial scaffolding, but an
 	// instance created before this guard landed won't have the file;
@@ -535,7 +541,7 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 	// Step 2a: Sync global config repo if registered and not skipped.
 	if a.GlobalConfigDir != "" && !opts.skipGlobal {
 		a.Reporter.Status("syncing config...")
-		if syncErr := SyncConfigDir(a.GlobalConfigDir, a.AllowDirty); syncErr != nil {
+		if syncErr := SyncConfigDir(a.GlobalConfigDir, a.Reporter, a.AllowDirty); syncErr != nil {
 			a.Reporter.Warn("could not sync config: %v", syncErr)
 			return nil, fmt.Errorf("syncing global config: %w", syncErr)
 		}
@@ -729,7 +735,7 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 
 		targetDir := filepath.Join(groupDir, cr.Repo.Name)
 		a.Reporter.Status(fmt.Sprintf("cloning %s...", cr.Repo.Name))
-		cloned, err := a.Cloner.CloneWithBranch(ctx, cloneURL, targetDir, branch)
+		cloned, err := a.Cloner.CloneWithBranch(ctx, cloneURL, targetDir, branch, a.Reporter)
 		if err != nil {
 			a.Reporter.Warn("failed to clone %s", cr.Repo.Name)
 			return nil, fmt.Errorf("cloning repo %s: %w", cr.Repo.Name, err)
@@ -739,7 +745,7 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		} else if !a.NoPull {
 			a.Reporter.Status(fmt.Sprintf("syncing %s...", cr.Repo.Name))
 			defaultBranch := DefaultBranch(effectiveCfg, cr.Repo.Name)
-			result, syncErr := SyncRepo(ctx, targetDir, defaultBranch)
+			result, syncErr := SyncRepo(ctx, targetDir, defaultBranch, a.Reporter)
 			switch result.Action {
 			case "pulled":
 				a.Reporter.Log("pulled %s (%d commits)", cr.Repo.Name, result.Commits)
@@ -934,7 +940,7 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 	for _, cr := range classified {
 		setupDir := ResolveSetupDir(effectiveCfg, cr.Repo.Name)
 		repoDir := filepath.Join(instanceRoot, cr.Group, cr.Repo.Name)
-		result := RunSetupScripts(repoDir, setupDir)
+		result := RunSetupScripts(repoDir, setupDir, a.Reporter)
 
 		if result.Disabled || result.Skipped {
 			continue
