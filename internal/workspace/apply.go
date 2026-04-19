@@ -539,6 +539,7 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 			a.Reporter.Warn("could not sync config: %v", syncErr)
 			return nil, fmt.Errorf("syncing global config: %w", syncErr)
 		}
+		a.Reporter.Log("synced config")
 	}
 
 	// Steps 3a–3c: Parse the global config override, then run the
@@ -730,7 +731,6 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		a.Reporter.Status(fmt.Sprintf("cloning %s...", cr.Repo.Name))
 		cloned, err := a.Cloner.CloneWithBranch(ctx, cloneURL, targetDir, branch)
 		if err != nil {
-			a.Reporter.Warn("could not clone %s: %v", cr.Repo.Name, err)
 			return nil, fmt.Errorf("cloning repo %s: %w", cr.Repo.Name, err)
 		}
 		if cloned {
