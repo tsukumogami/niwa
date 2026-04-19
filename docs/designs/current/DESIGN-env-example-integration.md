@@ -1,5 +1,5 @@
 ---
-status: Accepted
+status: Planned
 upstream: docs/prds/PRD-env-example-integration.md
 problem: |
   niwa's ResolveEnvVars function builds the .local.env map by merging config layers
@@ -35,7 +35,7 @@ rationale: |
 
 ## Status
 
-Accepted
+Planned
 
 ## Context and Problem Statement
 
@@ -597,3 +597,32 @@ path.
   the 5 ms budget has significant headroom.
 - The `claude.env.promote` gap is documented in the PRD as a Known Limitation
   and will be resolved if settings promotion of `.env.example` keys is requested.
+
+## Implementation Issues
+
+Plan: `docs/plans/PLAN-env-example-integration.md`
+
+| # | Title | Complexity | Blocked By |
+|---|-------|------------|------------|
+| 1 | feat(config): add read_env_example opt-out flags to workspace config | simple | — |
+| 2 | feat(workspace): implement parseDotEnvExample for Node-style .env.example syntax | testable | — |
+| 3 | feat(workspace): implement classifyEnvValue for probable-secret detection | testable | — |
+| 4 | feat(workspace): integrate .env.example pre-pass into EnvMaterializer | critical | 1, 2, 3 |
+| 5 | feat(workspace): add per-repo public-remote guardrail for .env.example secrets | testable | 4 |
+| 6 | feat(workspace): add SourceKindEnvExample and verbose source attribution | testable | 4 |
+
+```mermaid
+graph LR
+  I1["#1 config opt-out flags"]
+  I2["#2 parseDotEnvExample"]
+  I3["#3 classifyEnvValue"]
+  I4["#4 pre-pass integration"]
+  I5["#5 public-remote guardrail"]
+  I6["#6 SourceKindEnvExample"]
+
+  I1 --> I4
+  I2 --> I4
+  I3 --> I4
+  I4 --> I5
+  I4 --> I6
+```
