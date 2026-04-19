@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -299,47 +298,30 @@ API_TOKEN = "vault://personal/API_TOKEN"
 		t.Fatal(err)
 	}
 
-	// Redirect os.Stderr to capture the pipeline's shadow diagnostic.
-	// runPipeline writes directly to os.Stderr via fmt.Fprintf, so
-	// we swap the file descriptor for the duration of the Create
-	// call and restore it on cleanup.
-	origStderr := os.Stderr
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	os.Stderr = w
-
+	var buf bytes.Buffer
 	applier := NewApplier(mockClient)
+	applier.Reporter = NewReporterWithTTY(&buf, false)
 	applier.Cloner = &Cloner{}
 	applier.GlobalConfigDir = globalDir
 
 	if _, err := applier.Create(context.Background(), cfg, niwaDir, workspaceRoot, cfg.Workspace.Name); err != nil {
-		os.Stderr = origStderr
-		w.Close()
 		t.Fatalf("Create: %v", err)
 	}
-	w.Close()
-	os.Stderr = origStderr
 
-	stderrBytes, err := io.ReadAll(r)
-	if err != nil {
-		t.Fatalf("reading captured stderr: %v", err)
-	}
-	stderrStr := string(stderrBytes)
+	out := buf.String()
 
 	want := `shadowed env-secret "API_TOKEN" [personal-overlay shadows team: team=workspace.toml, personal=niwa.toml]`
-	if !strings.Contains(stderrStr, want) {
-		t.Errorf("stderr missing shadow diagnostic %q\nfull stderr:\n%s", want, stderrStr)
+	if !strings.Contains(out, want) {
+		t.Errorf("output missing shadow diagnostic %q\nfull output:\n%s", want, out)
 	}
 
-	// R22: no secret bytes anywhere in the captured stderr. Covers
+	// R22: no secret bytes anywhere in the captured output. Covers
 	// both the team-resolved and overlay-resolved plaintext.
-	if strings.Contains(stderrStr, teamPlaintext) {
-		t.Errorf("stderr leaked team secret bytes %q:\n%s", teamPlaintext, stderrStr)
+	if strings.Contains(out, teamPlaintext) {
+		t.Errorf("output leaked team secret bytes %q:\n%s", teamPlaintext, out)
 	}
-	if strings.Contains(stderrStr, overlayPlaintext) {
-		t.Errorf("stderr leaked overlay secret bytes %q:\n%s", overlayPlaintext, stderrStr)
+	if strings.Contains(out, overlayPlaintext) {
+		t.Errorf("output leaked overlay secret bytes %q:\n%s", overlayPlaintext, out)
 	}
 }
 
@@ -543,34 +525,21 @@ ANTHROPIC_KEY = "vault://ANTHROPIC_KEY?required=false"
 		t.Fatal(err)
 	}
 
-	// Capture stderr through a pipe so we can assert no warning
-	// line is emitted. AllowMissingSecrets is intentionally false —
-	// the ?required=false query flag alone must drive the downgrade.
-	origStderr := os.Stderr
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	os.Stderr = w
-
+	// Capture output via Reporter injection. AllowMissingSecrets is
+	// intentionally false — the ?required=false query flag alone must
+	// drive the downgrade.
+	var buf bytes.Buffer
 	applier := NewApplier(mockClient)
+	applier.Reporter = NewReporterWithTTY(&buf, false)
 	applier.Cloner = &Cloner{}
 
 	_, createErr := applier.Create(context.Background(), cfg, niwaDir, workspaceRoot, cfg.Workspace.Name)
-	w.Close()
-	os.Stderr = origStderr
-
-	stderrBytes, readErr := io.ReadAll(r)
-	if readErr != nil {
-		t.Fatalf("reading captured stderr: %v", readErr)
-	}
-
 	if createErr != nil {
-		t.Fatalf("expected apply to succeed with ?required=false, got %v\nstderr:\n%s",
-			createErr, string(stderrBytes))
+		t.Fatalf("expected apply to succeed with ?required=false, got %v\noutput:\n%s",
+			createErr, buf.String())
 	}
 
-	out := string(stderrBytes)
+	out := buf.String()
 	// The canonical AllowMissing warning shape is
 	// "warning: vault: ... --allow-missing-secrets". ?required=false
 	// must downgrade silently, so that string must NOT appear.
@@ -887,34 +856,24 @@ SENTRY_DSN = "Sentry error reporting"
 		t.Fatal(err)
 	}
 
-	// Capture stderr.
-	origStderr := os.Stderr
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	os.Stderr = w
-
+	var buf bytes.Buffer
 	applier := NewApplier(mockClient)
+	applier.Reporter = NewReporterWithTTY(&buf, false)
 	applier.Cloner = &Cloner{}
 	_, createErr := applier.Create(context.Background(), parsed.Config, niwaDir, workspaceRoot, parsed.Config.Workspace.Name)
-	w.Close()
-	os.Stderr = origStderr
-
-	stderrBytes, _ := io.ReadAll(r)
 	if createErr != nil {
-		t.Fatalf("apply should succeed when a recommended key is missing, got: %v\nstderr:\n%s", createErr, string(stderrBytes))
+		t.Fatalf("apply should succeed when a recommended key is missing, got: %v\noutput:\n%s", createErr, buf.String())
 	}
 
-	out := string(stderrBytes)
+	out := buf.String()
 	if !strings.Contains(out, "SENTRY_DSN") {
-		t.Errorf("stderr must name the missing recommended key, got:\n%s", out)
+		t.Errorf("output must name the missing recommended key, got:\n%s", out)
 	}
 	if !strings.Contains(out, "Sentry error reporting") {
-		t.Errorf("stderr must include the description, got:\n%s", out)
+		t.Errorf("output must include the description, got:\n%s", out)
 	}
 	if !strings.Contains(out, "warning: recommended") {
-		t.Errorf("stderr must flag the line as a recommended-key warning, got:\n%s", out)
+		t.Errorf("output must flag the line as a recommended-key warning, got:\n%s", out)
 	}
 }
 
@@ -965,27 +924,18 @@ DEBUG_WEBHOOK_URL = "Personal debug webhook"
 		t.Fatal(err)
 	}
 
-	origStderr := os.Stderr
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	os.Stderr = w
-
+	var buf bytes.Buffer
 	applier := NewApplier(mockClient)
+	applier.Reporter = NewReporterWithTTY(&buf, false)
 	applier.Cloner = &Cloner{}
 	_, createErr := applier.Create(context.Background(), parsed.Config, niwaDir, workspaceRoot, parsed.Config.Workspace.Name)
-	w.Close()
-	os.Stderr = origStderr
-
-	stderrBytes, _ := io.ReadAll(r)
 	if createErr != nil {
-		t.Fatalf("apply should succeed when an optional key is missing, got: %v\nstderr:\n%s", createErr, string(stderrBytes))
+		t.Fatalf("apply should succeed when an optional key is missing, got: %v\noutput:\n%s", createErr, buf.String())
 	}
 
-	out := string(stderrBytes)
+	out := buf.String()
 	if strings.Contains(out, "DEBUG_WEBHOOK_URL") {
-		t.Errorf("optional-key miss must be silent in v1, but stderr mentioned the key:\n%s", out)
+		t.Errorf("optional-key miss must be silent in v1, but output mentioned the key:\n%s", out)
 	}
 }
 

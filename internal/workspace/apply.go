@@ -71,22 +71,41 @@ type Applier struct {
 	vaultRegistry *vault.Registry
 }
 
+// applierWriter is an io.Writer that always delegates to whatever
+// a.Reporter is at the time of the Write call. This lets callers
+// replace a.Reporter after construction (e.g., to inject a TTY-aware
+// reporter) without leaving materializer Stderr fields pointing at a
+// stale reporter instance.
+type applierWriter struct{ a *Applier }
+
+func (aw *applierWriter) Write(p []byte) (int, error) {
+	s := string(p)
+	if len(s) > 0 && s[len(s)-1] == '\n' {
+		s = s[:len(s)-1]
+	}
+	if s != "" {
+		aw.a.Reporter.Log("%s", s)
+	}
+	return len(p), nil
+}
+
 // NewApplier creates an Applier with the given GitHub client.
 func NewApplier(gh github.Client) *Applier {
-	rep := NewReporter(os.Stderr)
-	return &Applier{
+	a := &Applier{
 		GitHubClient: gh,
 		Cloner:       &Cloner{},
-		Materializers: []Materializer{
-			&HooksMaterializer{},
-			&SettingsMaterializer{},
-			&EnvMaterializer{Stderr: rep.Writer()},
-			&FilesMaterializer{Stderr: rep.Writer()},
-		},
-		Reporter:    rep,
-		cloneOrSync: CloneOrSyncOverlay,
-		headSHA:     HeadSHA,
+		Reporter:     NewReporter(os.Stderr),
+		cloneOrSync:  CloneOrSyncOverlay,
+		headSHA:      HeadSHA,
 	}
+	aw := &applierWriter{a: a}
+	a.Materializers = []Materializer{
+		&HooksMaterializer{},
+		&SettingsMaterializer{},
+		&EnvMaterializer{Stderr: aw},
+		&FilesMaterializer{Stderr: aw},
+	}
+	return a
 }
 
 // DefaultMaxRepos is the threshold for auto-discovered repos per source.
