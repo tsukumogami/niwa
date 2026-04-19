@@ -29,6 +29,8 @@ type testState struct {
 	shellPwd      string            // pwd reported by the last wrapped-shell run
 	shellStartPwd string            // cwd the wrapped shell started in (for "did not change" assertions)
 	envOverrides  map[string]string // per-scenario env var overrides (win over defaults)
+	gitServer     *localGitServer   // local bare-repo server for offline clone tests
+	repoURLs      map[string]string // name → file:// URL for repos created by localGitServer
 }
 
 func getState(ctx context.Context) *testState {
@@ -102,12 +104,20 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 			}
 		}
 
+		gitServerDir := filepath.Join(sandbox, "gitserver")
+		gs, err := newLocalGitServer(gitServerDir)
+		if err != nil {
+			return ctx, err
+		}
+
 		state := &testState{
 			binPath:       binPath,
 			homeDir:       homeDir,
 			tmpDir:        tmpDir,
 			workspaceRoot: workspaceRoot,
 			envOverrides:  make(map[string]string),
+			gitServer:     gs,
+			repoURLs:      make(map[string]string),
 		}
 		return setState(ctx, state), nil
 	})
