@@ -534,7 +534,9 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 
 	// Step 2a: Sync global config repo if registered and not skipped.
 	if a.GlobalConfigDir != "" && !opts.skipGlobal {
+		a.Reporter.Status("syncing config...")
 		if syncErr := SyncConfigDir(a.GlobalConfigDir, a.AllowDirty); syncErr != nil {
+			a.Reporter.Warn("could not sync config: %v", syncErr)
 			return nil, fmt.Errorf("syncing global config: %w", syncErr)
 		}
 	}
@@ -725,13 +727,16 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		branch := RepoCloneBranch(effectiveCfg, cr.Repo.Name)
 
 		targetDir := filepath.Join(groupDir, cr.Repo.Name)
+		a.Reporter.Status(fmt.Sprintf("cloning %s...", cr.Repo.Name))
 		cloned, err := a.Cloner.CloneWithBranch(ctx, cloneURL, targetDir, branch)
 		if err != nil {
+			a.Reporter.Warn("could not clone %s: %v", cr.Repo.Name, err)
 			return nil, fmt.Errorf("cloning repo %s: %w", cr.Repo.Name, err)
 		}
 		if cloned {
 			a.Reporter.Log("cloned %s into %s", cr.Repo.Name, targetDir)
 		} else if !a.NoPull {
+			a.Reporter.Status(fmt.Sprintf("syncing %s...", cr.Repo.Name))
 			defaultBranch := DefaultBranch(effectiveCfg, cr.Repo.Name)
 			result, syncErr := SyncRepo(ctx, targetDir, defaultBranch)
 			switch result.Action {
