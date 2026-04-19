@@ -1,5 +1,5 @@
 ---
-status: Proposed
+status: Planned
 problem: |
   The niwa critical path — init, create, apply — has zero functional test coverage.
   Two bugs shipped in v0.7.x that would have been caught immediately by e2e tests:
@@ -31,7 +31,7 @@ rationale: |
 
 ## Status
 
-Proposed
+Planned
 
 ## Context and Problem Statement
 
