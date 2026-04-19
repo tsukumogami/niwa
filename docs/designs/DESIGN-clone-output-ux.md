@@ -1,5 +1,5 @@
 ---
-status: Proposed
+status: Accepted
 problem: |
   Niwa's create and apply commands dump a linear log of git subprocess output
   and status messages to stderr with no TTY awareness. Users see git progress
@@ -29,7 +29,7 @@ rationale: |
 
 ## Status
 
-Proposed
+Accepted
 
 ## Context and Problem Statement
 
