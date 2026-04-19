@@ -1,6 +1,7 @@
 package workspace
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -652,27 +653,20 @@ TOKEN = "vault://TOKEN"
 		t.Fatal(err)
 	}
 
+	// First apply: capture output via Reporter. The file is being materialized
+	// for the first time — `rotated` must NOT appear.
+	var buf1 bytes.Buffer
 	applier := NewApplier(mockClient)
+	applier.Reporter = NewReporterWithTTY(&buf1, false)
 	applier.Cloner = &Cloner{}
 
-	// First apply: capture stderr. The file is being materialized for
-	// the first time — `rotated` must NOT appear.
-	origStderr := os.Stderr
-	r1, w1, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	os.Stderr = w1
 	_, createErr := applier.Create(context.Background(), result.Config, niwaDir, workspaceRoot, result.Config.Workspace.Name)
-	w1.Close()
-	os.Stderr = origStderr
-	stderr1, _ := io.ReadAll(r1)
 	if createErr != nil {
-		t.Fatalf("first Create: %v\nstderr: %s", createErr, string(stderr1))
+		t.Fatalf("first Create: %v\noutput: %s", createErr, buf1.String())
 	}
 	envFilePath := filepath.Join(instanceRoot, "default", "app", ".local.env")
-	if strings.Contains(string(stderr1), "rotated ") {
-		t.Errorf("first-time materialization must not emit `rotated`, got:\n%s", string(stderr1))
+	if strings.Contains(buf1.String(), "rotated ") {
+		t.Errorf("first-time materialization must not emit `rotated`, got:\n%s", buf1.String())
 	}
 
 	// Rotate upstream: rewrite the fake provider's value, reparse.
@@ -682,23 +676,17 @@ TOKEN = "vault://TOKEN"
 		t.Fatalf("config.Load after rotation: %v", err)
 	}
 
-	// Second apply: stderr MUST contain "rotated <envFilePath>".
-	r2, w2, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	os.Stderr = w2
+	// Second apply: output MUST contain "rotated <envFilePath>".
+	var buf2 bytes.Buffer
+	applier.Reporter = NewReporterWithTTY(&buf2, false)
 	applyErr := applier.Apply(context.Background(), result2.Config, niwaDir, instanceRoot)
-	w2.Close()
-	os.Stderr = origStderr
-	stderr2, _ := io.ReadAll(r2)
 	if applyErr != nil {
-		t.Fatalf("Apply after rotation: %v\nstderr: %s", applyErr, string(stderr2))
+		t.Fatalf("Apply after rotation: %v\noutput: %s", applyErr, buf2.String())
 	}
 
 	want := "rotated " + envFilePath
-	if !strings.Contains(string(stderr2), want) {
-		t.Errorf("stderr missing %q after vault rotation\nfull stderr:\n%s", want, string(stderr2))
+	if !strings.Contains(buf2.String(), want) {
+		t.Errorf("output missing %q after vault rotation\nfull output:\n%s", want, buf2.String())
 	}
 
 	// The materialized file must contain the new value (sanity check

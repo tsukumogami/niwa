@@ -26,6 +26,11 @@ type Applier struct {
 	AllowDirty      bool
 	GlobalConfigDir string // empty string means global config not registered
 
+	// Reporter receives all progress and diagnostic output for this applier.
+	// NewApplier initializes it with NewReporter(os.Stderr). Callers may
+	// replace it (e.g., with NewReporterWithTTY) before calling Apply or Create.
+	Reporter *Reporter
+
 	// AllowMissingSecrets threads through to the vault resolver's
 	// ResolveOptions.AllowMissing. When true, missing vault keys are
 	// downgraded to empty MaybeSecret values with a stderr warning.
@@ -68,15 +73,17 @@ type Applier struct {
 
 // NewApplier creates an Applier with the given GitHub client.
 func NewApplier(gh github.Client) *Applier {
+	rep := NewReporter(os.Stderr)
 	return &Applier{
 		GitHubClient: gh,
 		Cloner:       &Cloner{},
 		Materializers: []Materializer{
 			&HooksMaterializer{},
 			&SettingsMaterializer{},
-			&EnvMaterializer{},
-			&FilesMaterializer{},
+			&EnvMaterializer{Stderr: rep.Writer()},
+			&FilesMaterializer{Stderr: rep.Writer()},
 		},
+		Reporter:    rep,
 		cloneOrSync: CloneOrSyncOverlay,
 		headSHA:     HeadSHA,
 	}
@@ -167,7 +174,7 @@ func (a *Applier) Create(ctx context.Context, cfg *config.WorkspaceConfig, confi
 	}
 
 	for _, w := range result.warnings {
-		fmt.Fprintf(os.Stderr, "warning: %s\n", w)
+		a.Reporter.Warn("%s", w)
 	}
 
 	instanceNumber, err := NextInstanceNumber(workspaceRoot)
@@ -222,11 +229,11 @@ func (a *Applier) Apply(ctx context.Context, cfg *config.WorkspaceConfig, config
 	for _, mf := range existingState.ManagedFiles {
 		drift, err := CheckDrift(mf)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "warning: could not check drift for %s: %v\n", mf.Path, err)
+			a.Reporter.Warn("could not check drift for %s: %v", mf.Path, err)
 			continue
 		}
 		if drift.Drifted() && !drift.FileRemoved {
-			fmt.Fprintf(os.Stderr, "warning: managed file %s has been modified outside niwa\n", mf.Path)
+			a.Reporter.Warn("managed file %s has been modified outside niwa", mf.Path)
 		}
 	}
 
@@ -242,7 +249,7 @@ func (a *Applier) Apply(ctx context.Context, cfg *config.WorkspaceConfig, config
 	}
 
 	for _, w := range result.warnings {
-		fmt.Fprintf(os.Stderr, "warning: %s\n", w)
+		a.Reporter.Warn("%s", w)
 	}
 
 	// Emit `rotated <path>` to stderr for every managed file whose
@@ -251,7 +258,7 @@ func (a *Applier) Apply(ctx context.Context, cfg *config.WorkspaceConfig, config
 	// materializations (no prior state entry for the path) are NOT
 	// rotations — they're the initial write of that file. See PRD
 	// Rotation AC.
-	emitRotatedFiles(existingState, result, os.Stderr)
+	emitRotatedFiles(existingState, result, a.Reporter.Writer())
 
 	// Clean up managed files from previous state that are no longer produced.
 	a.cleanRemovedFiles(existingState, result)
@@ -359,7 +366,7 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 			sha, shaErr := a.headSHA(dir)
 			if shaErr == nil && opts.existingState != nil && opts.existingState.OverlayCommit != "" {
 				if sha != opts.existingState.OverlayCommit {
-					fmt.Fprintf(os.Stderr, "warning: workspace overlay has new commits since last apply (was %s, now %s)\n",
+					a.Reporter.Warn("workspace overlay has new commits since last apply (was %s, now %s)",
 						opts.existingState.OverlayCommit[:min(7, len(opts.existingState.OverlayCommit))],
 						sha[:min(7, len(sha))],
 					)
@@ -608,8 +615,7 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		if label == "" {
 			label = "(anonymous)"
 		}
-		fmt.Fprintf(os.Stderr,
-			"shadowed provider %q [personal-overlay shadows team: team=%s, personal=%s]\n",
+		a.Reporter.Log("shadowed provider %q [personal-overlay shadows team: team=%s, personal=%s]",
 			label, "workspace.toml", "niwa.toml")
 	}
 
@@ -631,7 +637,7 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 	// "was a vault ref". The original cfg still has Plain populated
 	// for plaintext entries and Secret populated only for vault-resolved
 	// ones, which is exactly the signal the guardrail reads.
-	if err := guardrail.CheckGitHubPublicRemoteSecrets(configDir, cfg, a.AllowPlaintextSecrets, os.Stderr); err != nil {
+	if err := guardrail.CheckGitHubPublicRemoteSecrets(configDir, cfg, a.AllowPlaintextSecrets, a.Reporter.Writer()); err != nil {
 		return nil, err
 	}
 
@@ -644,8 +650,7 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 	if globalOverride != nil {
 		pipelineShadows = DetectShadows(cfg, globalOverride)
 		for _, sh := range pipelineShadows {
-			fmt.Fprintf(os.Stderr,
-				"shadowed %s %q [personal-overlay shadows team: team=%s, personal=%s]\n",
+			a.Reporter.Log("shadowed %s %q [personal-overlay shadows team: team=%s, personal=%s]",
 				sh.Kind, sh.Name, sh.TeamSource, sh.PersonalSource)
 		}
 	}
@@ -685,7 +690,7 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 	// resolver already turned missing vault-backed keys into empty
 	// MaybeSecret values when the flag is set, and checkRequiredKeys
 	// catches those empty values via the required list.
-	if err := checkRequiredKeys(effectiveCfg, os.Stderr); err != nil {
+	if err := checkRequiredKeys(effectiveCfg, a.Reporter.Writer()); err != nil {
 		return nil, err
 	}
 
@@ -706,25 +711,25 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 			return nil, fmt.Errorf("cloning repo %s: %w", cr.Repo.Name, err)
 		}
 		if cloned {
-			fmt.Fprintf(os.Stderr, "cloned %s into %s\n", cr.Repo.Name, targetDir)
+			a.Reporter.Log("cloned %s into %s", cr.Repo.Name, targetDir)
 		} else if !a.NoPull {
 			defaultBranch := DefaultBranch(effectiveCfg, cr.Repo.Name)
 			result, syncErr := SyncRepo(ctx, targetDir, defaultBranch)
 			switch result.Action {
 			case "pulled":
-				fmt.Fprintf(os.Stderr, "pulled %s (%d commits)\n", cr.Repo.Name, result.Commits)
+				a.Reporter.Log("pulled %s (%d commits)", cr.Repo.Name, result.Commits)
 			case "up-to-date":
-				fmt.Fprintf(os.Stderr, "skipped %s (up to date)\n", cr.Repo.Name)
+				a.Reporter.Log("skipped %s (up to date)", cr.Repo.Name)
 			case "fetch-failed":
-				fmt.Fprintf(os.Stderr, "warning: could not fetch %s: %s\n", cr.Repo.Name, result.Reason)
+				a.Reporter.Warn("could not fetch %s: %s", cr.Repo.Name, result.Reason)
 			case "skipped":
-				fmt.Fprintf(os.Stderr, "skipped %s (%s)\n", cr.Repo.Name, result.Reason)
+				a.Reporter.Log("skipped %s (%s)", cr.Repo.Name, result.Reason)
 			}
 			if syncErr != nil {
-				fmt.Fprintf(os.Stderr, "warning: sync failed for %s: %v\n", cr.Repo.Name, syncErr)
+				a.Reporter.Warn("sync failed for %s: %v", cr.Repo.Name, syncErr)
 			}
 		} else {
-			fmt.Fprintf(os.Stderr, "skipped %s (already exists)\n", cr.Repo.Name)
+			a.Reporter.Log("skipped %s (already exists)", cr.Repo.Name)
 		}
 
 		repoStates[cr.Repo.Name] = RepoState{
@@ -808,7 +813,7 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 	// Skip repos with claude = false.
 	for _, cr := range classified {
 		if !ClaudeEnabled(effectiveCfg, cr.Repo.Name) {
-			fmt.Fprintf(os.Stderr, "skipped content for %s (claude = false)\n", cr.Repo.Name)
+			a.Reporter.Log("skipped content for %s (claude = false)", cr.Repo.Name)
 			continue
 		}
 
@@ -912,7 +917,7 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 
 		for _, sr := range result.Scripts {
 			if sr.Error != nil {
-				fmt.Fprintf(os.Stderr, "warning: setup script %s/%s failed for %s: %v\n",
+				a.Reporter.Warn("setup script %s/%s failed for %s: %v",
 					setupDir, sr.Name, cr.Repo.Name, sr.Error)
 			}
 		}
@@ -965,7 +970,7 @@ func (a *Applier) cleanRemovedFiles(existingState *InstanceState, result *pipeli
 	for _, mf := range existingState.ManagedFiles {
 		if !currentFiles[mf.Path] {
 			if err := os.Remove(mf.Path); err != nil && !os.IsNotExist(err) {
-				fmt.Fprintf(os.Stderr, "warning: could not remove managed file %s: %v\n", mf.Path, err)
+				a.Reporter.Warn("could not remove managed file %s: %v", mf.Path, err)
 			}
 		}
 	}
