@@ -120,6 +120,9 @@ repos, regenerates content files, and cleans up repos removed from the config.
 | `niwa reset [instance] [--force]` | Tear down and recreate an instance |
 | `niwa destroy [instance] [--force]` | Permanently remove an instance |
 | `niwa version` | Print version information |
+| `niwa --no-progress <command>` | Suppress the animated status line regardless of TTY state |
+
+`--no-progress` is a persistent flag -- it applies to all subcommands. Use it in CI pipelines and scripts where the animated status line is unwanted.
 
 ## Shared workspace configs
 
