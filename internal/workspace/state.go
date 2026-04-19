@@ -40,6 +40,10 @@ const (
 	// provider. VersionToken carries the provider-opaque revision
 	// identifier returned by Provider.Resolve.
 	SourceKindVault = "vault"
+
+	// SourceKindEnvExample identifies a source whose values were read from a
+	// .env.example file in the repository directory during the pre-pass.
+	SourceKindEnvExample = "env_example"
 )
 
 // InstanceState represents the persisted state of a workspace instance.
@@ -92,8 +96,8 @@ type ManagedFile struct {
 // MUST NOT populate these fields from decrypted secret bytes (see
 // DESIGN-vault-integration.md Decision 4 and R15).
 type SourceEntry struct {
-	// Kind names the source category. One of SourceKindPlaintext or
-	// SourceKindVault.
+	// Kind names the source category. One of SourceKindPlaintext,
+	// SourceKindVault, or SourceKindEnvExample.
 	Kind string `json:"kind"`
 
 	// SourceID identifies the origin: a file path for plaintext

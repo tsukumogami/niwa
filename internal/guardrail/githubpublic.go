@@ -62,23 +62,21 @@ func isGitHubPublicRemote(url string) bool {
 	return githubHTTPSRemote.MatchString(url) || githubSSHRemote.MatchString(url)
 }
 
-// enumerateGitHubRemotes runs `git -C <configDir> remote -v` and
-// returns the sorted, deduplicated list of unique URLs that match a
-// public GitHub pattern. `git remote -v` lists every remote twice (one
-// `(fetch)` line and one `(push)` line, often with identical URLs);
-// this function collapses those duplicates before classifying.
+// EnumerateGitHubRemotes runs `git -C <dir> remote -v` and returns the sorted,
+// deduplicated list of unique URLs that match a public GitHub pattern.
+// `git remote -v` lists every remote twice (fetch + push); this function
+// collapses those duplicates before classifying.
 //
 // The second return value is true iff the git subprocess succeeded AND
-// produced at least one parseable remote line. A false second return
-// means "no git working tree (or no remotes at all)" and callers should
-// skip the guardrail with a warning.
-func enumerateGitHubRemotes(configDir string) (matches []string, haveGit bool) {
-	cmd := exec.Command("git", "-C", configDir, "remote", "-v")
-	// Silence git's own "fatal: not a git repository" stderr when
-	// configDir is not a git tree. The guardrail emits its own
-	// single-line "guardrail skipped" warning in that case; the raw
-	// git error would be redundant noise in test output and in the
-	// niwa apply log.
+// produced at least one parseable remote line. haveGit=false means the
+// directory is not a git tree or git is unavailable; callers should skip the
+// guardrail with a warning.
+func EnumerateGitHubRemotes(dir string) (matches []string, haveGit bool) {
+	cmd := exec.Command("git", "-C", dir, "remote", "-v")
+	// Silence git's own "fatal: not a git repository" stderr when dir
+	// is not a git tree. The guardrail emits its own single-line
+	// "guardrail skipped" warning in that case; the raw git error would
+	// be redundant noise in test output and in the niwa apply log.
 	cmd.Stderr = io.Discard
 	out, err := cmd.Output()
 	if err != nil {
@@ -225,7 +223,7 @@ func CheckGitHubPublicRemoteSecrets(
 	allowPlaintextSecrets bool,
 	stderr io.Writer,
 ) error {
-	remotes, haveGit := enumerateGitHubRemotes(configDir)
+	remotes, haveGit := EnumerateGitHubRemotes(configDir)
 	if !haveGit {
 		fmt.Fprintln(stderr,
 			"warning: no git remotes detected; public-repo guardrail skipped")

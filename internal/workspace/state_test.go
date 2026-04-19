@@ -907,3 +907,17 @@ func TestEnumerateReposFiltersInvalidNames(t *testing.T) {
 		t.Errorf("expected at least [api], got %v", names)
 	}
 }
+
+// TestSourceKindEnvExample asserts that SourceKindEnvExample has the string
+// value "env_example" and is distinct from the other two source kind constants.
+func TestSourceKindEnvExample(t *testing.T) {
+	if SourceKindEnvExample != "env_example" {
+		t.Errorf("SourceKindEnvExample = %q, want %q", SourceKindEnvExample, "env_example")
+	}
+	if SourceKindEnvExample == SourceKindPlaintext {
+		t.Errorf("SourceKindEnvExample must not equal SourceKindPlaintext (%q)", SourceKindPlaintext)
+	}
+	if SourceKindEnvExample == SourceKindVault {
+		t.Errorf("SourceKindEnvExample must not equal SourceKindVault (%q)", SourceKindVault)
+	}
+}
