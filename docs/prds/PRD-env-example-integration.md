@@ -1,5 +1,5 @@
 ---
-status: In Progress
+status: Delivered
 problem: |
   Managed app repos commonly ship `.env.example` files declaring the env
   vars they need, with sensible defaults for non-sensitive fields and
@@ -27,7 +27,7 @@ goals: |
 
 ## Status
 
-In Progress
+Delivered
 
 ## Problem Statement
 

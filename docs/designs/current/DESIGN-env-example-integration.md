@@ -1,5 +1,5 @@
 ---
-status: Planned
+status: Current
 upstream: docs/prds/PRD-env-example-integration.md
 problem: |
   niwa's ResolveEnvVars function builds the .local.env map by merging config layers
@@ -35,7 +35,7 @@ rationale: |
 
 ## Status
 
-Planned
+Current
 
 ## Context and Problem Statement
 
