@@ -34,7 +34,10 @@ func isGitErrorLine(line string) bool {
 
 // runGitWithReporter runs cmd and routes its combined stdout+stderr through r.
 // Lines that begin with a git diagnostic prefix ("fatal:", "error:",
-// "warning:") are routed through r.Warn; all other lines through r.Log.
+// "warning:") are routed through r.Warn; all other lines are discarded.
+// Discarding non-diagnostic lines keeps output clean: niwa emits its own
+// curated completion messages ("cloned X", "synced X") so git's internal
+// progress lines ("Cloning into '...'", "Already up to date.") are noise.
 // ANSI and OSC escape sequences are stripped unconditionally before routing.
 //
 // When cmd.Run() fails and at least one error-classified line was captured,
@@ -64,9 +67,9 @@ func runGitWithReporter(r *Reporter, cmd *exec.Cmd) error {
 			if isGitErrorLine(line) {
 				r.Warn("%s", line)
 				errorLines = append(errorLines, line)
-			} else {
-				r.Log("%s", line)
 			}
+			// non-diagnostic git lines (e.g. "Cloning into '...'") are discarded;
+			// niwa emits its own completion messages.
 		}
 		pr.Close()
 	}()
