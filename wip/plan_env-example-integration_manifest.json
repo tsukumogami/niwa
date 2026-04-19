@@ -1,0 +1,50 @@
+[
+  {
+    "issue_id": "1",
+    "title": "feat(config): add read_env_example opt-out flags to workspace config",
+    "complexity": "simple",
+    "file": "wip/plan_env-example-integration_issue_1_body.md",
+    "status": "PASS",
+    "dependencies": []
+  },
+  {
+    "issue_id": "2",
+    "title": "feat(workspace): implement parseDotEnvExample for Node-style .env.example syntax",
+    "complexity": "testable",
+    "file": "wip/plan_env-example-integration_issue_2_body.md",
+    "status": "PASS",
+    "dependencies": []
+  },
+  {
+    "issue_id": "3",
+    "title": "feat(workspace): implement classifyEnvValue for probable-secret detection",
+    "complexity": "testable",
+    "file": "wip/plan_env-example-integration_issue_3_body.md",
+    "status": "PASS",
+    "dependencies": []
+  },
+  {
+    "issue_id": "4",
+    "title": "feat(workspace): integrate .env.example pre-pass into EnvMaterializer",
+    "complexity": "critical",
+    "file": "wip/plan_env-example-integration_issue_4_body.md",
+    "status": "PASS",
+    "dependencies": ["1", "2", "3"]
+  },
+  {
+    "issue_id": "5",
+    "title": "feat(workspace): add per-repo public-remote guardrail for .env.example secrets",
+    "complexity": "testable",
+    "file": "wip/plan_env-example-integration_issue_5_body.md",
+    "status": "PASS",
+    "dependencies": ["4"]
+  },
+  {
+    "issue_id": "6",
+    "title": "feat(workspace): add SourceKindEnvExample and verbose source attribution",
+    "complexity": "testable",
+    "file": "wip/plan_env-example-integration_issue_6_body.md",
+    "status": "PASS",
+    "dependencies": ["4"]
+  }
+]
