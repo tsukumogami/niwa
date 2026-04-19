@@ -877,6 +877,23 @@ func theRepoExistsInInstance(ctx context.Context, groupRepo, instance string) er
 	return nil
 }
 
+// iWriteFileToRepoInInstance writes content to a file at the given relative
+// path inside a managed repo directory. The repo is identified as
+// "<group>/<repo>" (forward-slash separated); the file is created relative to
+// the repo root. Use this to plant files (e.g. .env.example) after
+// `niwa create` has cloned the repo, without needing them committed upstream.
+func iWriteFileToRepoInInstance(ctx context.Context, content, relFilePath, groupRepo, instanceName string) (context.Context, error) {
+	s := getState(ctx)
+	if s == nil {
+		return ctx, fmt.Errorf("no test state")
+	}
+	repoDir := filepath.Join(s.workspaceRoot, instanceName, filepath.FromSlash(groupRepo))
+	dst := filepath.Join(repoDir, filepath.FromSlash(relFilePath))
+	if err := os.WriteFile(dst, []byte(content), 0o644); err != nil {
+		return ctx, fmt.Errorf("writing %s: %w", dst, err)
+	}
+	return ctx, nil
+}
 // noNiwaTempFilesRemain scans the scenario's scoped TMPDIR for wrapper
 // leftovers. TMPDIR is set to s.tmpDir in buildEnv, so the wrapper's
 // `mktemp` creates files there; its `rm -f` should clean them up. Any

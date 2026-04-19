@@ -598,7 +598,7 @@ func TestEnumerateGitHubRemotesRegexSamples(t *testing.T) {
 // top-level "guardrail skipped" warning.
 func TestEnumerateGitHubRemotesRejectsUnknownPath(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "nope")
-	_, haveGit := enumerateGitHubRemotes(dir)
+	_, haveGit := EnumerateGitHubRemotes(dir)
 	if haveGit {
 		t.Error("expected haveGit=false for non-existent path")
 	}

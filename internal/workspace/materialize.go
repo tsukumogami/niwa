@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"sort"
@@ -72,6 +73,11 @@ type MaterializeContext struct {
 	DiscoveredEnv  *DiscoveredEnv                  // auto-discovered env files, may be nil
 	RepoIndex      map[string]string               // repo name -> on-disk path, for marketplace resolution
 
+	// AllowPlaintextSecrets, when true, bypasses the public-remote guardrail for
+	// .env.example probable-secret keys. Populated from Applier.AllowPlaintextSecrets
+	// via apply.go. Does not bypass the basic probable-secret classification.
+	AllowPlaintextSecrets bool
+
 	// SourceTuples, when non-nil, is populated by materializers with
 	// the per-file list of SourceEntry tuples describing which inputs
 	// contributed bytes to each written file. apply.go wires a shared
@@ -80,6 +86,15 @@ type MaterializeContext struct {
 	// Materializers must not mutate entries already present for a
 	// key; tests relying on map identity pass a nil map explicitly.
 	SourceTuples map[string][]SourceEntry
+
+	// EnvExampleVars holds key-value pairs loaded from .env.example during the
+	// pre-pass. Nil when the feature is disabled, file is absent, or pre-pass
+	// failed. ResolveEnvVars seeds vars from this before other layers so
+	// .env.example is the lowest-priority source.
+	EnvExampleVars map[string]string
+	// EnvExampleSources holds the SourceEntry tuples for the .env.example layer,
+	// parallel to EnvExampleVars. Populated when EnvExampleVars is set.
+	EnvExampleSources []SourceEntry
 }
 
 // recordSources appends the given SourceEntry slice to the context's
@@ -511,16 +526,29 @@ func sortedKeysSettings(m config.SettingsConfig) []string {
 
 // EnvMaterializer generates a .local.env file in the repository directory from
 // explicit env config, discovered env files, and inline variables.
-type EnvMaterializer struct{}
+//
+// Stderr, if non-nil, receives diagnostic warnings emitted during the
+// .env.example pre-pass (absent file is silent; symlinks, parse errors, and
+// undeclared-but-safe keys emit warnings). When nil, warnings go to os.Stderr.
+// Tests set this to a bytes.Buffer to capture output.
+type EnvMaterializer struct {
+	Stderr io.Writer
+}
 
 // Name returns the materializer identifier.
 func (e *EnvMaterializer) Name() string {
 	return "env"
 }
 
-// Materialize reads env files and inline vars, merges them with discovered env
-// files, and writes the result to {repoDir}/.local.env. Returns the list of
-// written file paths, or nil if there is nothing to write.
+// stderr returns the writer to use for diagnostic output, defaulting to
+// os.Stderr when no writer has been wired into the struct.
+func (e *EnvMaterializer) stderr() io.Writer {
+	if e.Stderr != nil {
+		return e.Stderr
+	}
+	return os.Stderr
+}
+
 // ResolveEnvVars merges env files, inline vars, and discovered files into a
 // single key-value map. This is the canonical env resolution function used by
 // both the EnvMaterializer (to write .local.env) and the SettingsMaterializer
@@ -547,12 +575,16 @@ func ResolveEnvVars(ctx *MaterializeContext) (map[string]string, []SourceEntry, 
 	hasVars := len(envCfg.Vars.Values) > 0 || len(envCfg.Secrets.Values) > 0
 	hasRepoFile := discovered != nil && discovered.RepoFiles != nil && discovered.RepoFiles[ctx.RepoName] != ""
 
-	if len(files) == 0 && !hasVars && !hasRepoFile {
+	if len(files) == 0 && !hasVars && !hasRepoFile && len(ctx.EnvExampleVars) == 0 {
 		return nil, nil, nil
 	}
 
 	vars := make(map[string]string)
 	var sources []SourceEntry
+
+	// Seed from .env.example pre-pass (lowest-priority layer).
+	maps.Copy(vars, ctx.EnvExampleVars)
+	sources = append(sources, ctx.EnvExampleSources...)
 
 	for _, f := range files {
 		src := filepath.Join(ctx.ConfigDir, f)
@@ -688,6 +720,10 @@ func sourceForMaybeSecret(fallbackLocation string, ms config.MaybeSecret) Source
 // files, and writes the result to {repoDir}/.local.env. Returns the list of
 // written file paths, or nil if there is nothing to write.
 func (e *EnvMaterializer) Materialize(ctx *MaterializeContext) ([]string, error) {
+	if err := e.runEnvExamplePrePass(ctx); err != nil {
+		return nil, err
+	}
+
 	vars, sources, err := ResolveEnvVars(ctx)
 	if err != nil {
 		return nil, err

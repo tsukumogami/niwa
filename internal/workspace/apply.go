@@ -871,14 +871,15 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 
 		repoDir := filepath.Join(instanceRoot, cr.Group, cr.Repo.Name)
 		mctx := &MaterializeContext{
-			Config:        effectiveCfg,
-			Effective:     effective,
-			RepoName:      cr.Repo.Name,
-			RepoDir:       repoDir,
-			ConfigDir:     configDir,
-			DiscoveredEnv: discoveredEnv,
-			RepoIndex:     repoIndex,
-			SourceTuples:  sourceTuples,
+			Config:                effectiveCfg,
+			Effective:             effective,
+			RepoName:              cr.Repo.Name,
+			RepoDir:               repoDir,
+			ConfigDir:             configDir,
+			DiscoveredEnv:         discoveredEnv,
+			RepoIndex:             repoIndex,
+			SourceTuples:          sourceTuples,
+			AllowPlaintextSecrets: a.AllowPlaintextSecrets,
 		}
 
 		claudeOn := ClaudeEnabled(effectiveCfg, cr.Repo.Name)
