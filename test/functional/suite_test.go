@@ -144,6 +144,16 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 	ctx.Step(`^I source the installer env file and run completion for "([^"]*)" with prefix "([^"]*)"$`, iSourceShellInitAndRunCompletion)
 	ctx.Step(`^the "([^"]*)" shell-init output contains "([^"]*)"$`, shellInitContains)
 
+	// Local git server
+	ctx.Step(`^a local git server is set up$`, aLocalGitServerIsSetUp)
+	ctx.Step(`^a config repo "([^"]*)" exists with body:$`, aConfigRepoExistsWithBody)
+	ctx.Step(`^a source repo "([^"]*)" exists$`, aSourceRepoExists)
+	ctx.Step(`^I run niwa init from config repo "([^"]*)"$`, iRunNiwaInitFromConfigRepo)
+	ctx.Step(`^I run niwa init from config repo "([^"]*)" with overlay "([^"]*)"$`, iRunNiwaInitFromConfigRepoWithOverlay)
+	ctx.Step(`^the instance "([^"]*)" exists$`, theInstanceExists)
+	ctx.Step(`^the instance "([^"]*)" does not exist$`, theInstanceDoesNotExist)
+	ctx.Step(`^the repo "([^"]*)" exists in instance "([^"]*)"$`, theRepoExistsInInstance)
+
 	// Assertions
 	ctx.Step(`^the exit code is (\d+)$`, theExitCodeIs)
 	ctx.Step(`^the exit code is not (\d+)$`, theExitCodeIsNot)
