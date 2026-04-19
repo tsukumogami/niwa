@@ -731,6 +731,7 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		a.Reporter.Status(fmt.Sprintf("cloning %s...", cr.Repo.Name))
 		cloned, err := a.Cloner.CloneWithBranch(ctx, cloneURL, targetDir, branch)
 		if err != nil {
+			a.Reporter.Warn("failed to clone %s", cr.Repo.Name)
 			return nil, fmt.Errorf("cloning repo %s: %w", cr.Repo.Name, err)
 		}
 		if cloned {
