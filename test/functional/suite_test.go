@@ -29,6 +29,8 @@ type testState struct {
 	shellPwd      string            // pwd reported by the last wrapped-shell run
 	shellStartPwd string            // cwd the wrapped shell started in (for "did not change" assertions)
 	envOverrides  map[string]string // per-scenario env var overrides (win over defaults)
+	gitServer     *localGitServer   // local bare-repo server for offline clone tests
+	repoURLs      map[string]string // name → file:// URL for repos created by localGitServer
 }
 
 func getState(ctx context.Context) *testState {
@@ -94,12 +96,28 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 			return ctx, err
 		}
 		homeDir := filepath.Join(sandbox, "home")
-		workspaceRoot := filepath.Join(sandbox, "workspaces")
 		tmpDir := filepath.Join(sandbox, "tmp")
-		for _, d := range []string{homeDir, workspaceRoot, tmpDir} {
+		for _, d := range []string{homeDir, tmpDir} {
 			if err := os.MkdirAll(d, 0o755); err != nil {
 				return ctx, err
 			}
+		}
+
+		// workspaceRoot must live outside any existing niwa instance tree so that
+		// niwa init's CheckInitConflicts check does not fire when the developer's
+		// machine has a niwa workspace ancestor covering the repo root. Using the
+		// system temp dir guarantees a clean parent regardless of repo location.
+		wsParent := filepath.Join(os.TempDir(), "niwa-test-workspaces")
+		_ = os.RemoveAll(wsParent)
+		if err := os.MkdirAll(wsParent, 0o755); err != nil {
+			return ctx, err
+		}
+		workspaceRoot := wsParent
+
+		gitServerDir := filepath.Join(sandbox, "gitserver")
+		gs, err := newLocalGitServer(gitServerDir)
+		if err != nil {
+			return ctx, err
 		}
 
 		state := &testState{
@@ -108,6 +126,8 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 			tmpDir:        tmpDir,
 			workspaceRoot: workspaceRoot,
 			envOverrides:  make(map[string]string),
+			gitServer:     gs,
+			repoURLs:      make(map[string]string),
 		}
 		return setState(ctx, state), nil
 	})
@@ -134,6 +154,17 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 	ctx.Step(`^I source the installer env file and run completion for "([^"]*)" with prefix "([^"]*)"$`, iSourceShellInitAndRunCompletion)
 	ctx.Step(`^the "([^"]*)" shell-init output contains "([^"]*)"$`, shellInitContains)
 
+	// Local git server
+	ctx.Step(`^a local git server is set up$`, aLocalGitServerIsSetUp)
+	ctx.Step(`^a config repo "([^"]*)" exists with body:$`, aConfigRepoExistsWithBody)
+	ctx.Step(`^an overlay repo "([^"]*)" exists with body:$`, anOverlayRepoExistsWithBody)
+	ctx.Step(`^a source repo "([^"]*)" exists$`, aSourceRepoExists)
+	ctx.Step(`^I run niwa init from config repo "([^"]*)"$`, iRunNiwaInitFromConfigRepo)
+	ctx.Step(`^I run niwa init from config repo "([^"]*)" with overlay "([^"]*)"$`, iRunNiwaInitFromConfigRepoWithOverlay)
+	ctx.Step(`^the instance "([^"]*)" exists$`, theInstanceExists)
+	ctx.Step(`^the instance "([^"]*)" does not exist$`, theInstanceDoesNotExist)
+	ctx.Step(`^the repo "([^"]*)" exists in instance "([^"]*)"$`, theRepoExistsInInstance)
+
 	// Assertions
 	ctx.Step(`^the exit code is (\d+)$`, theExitCodeIs)
 	ctx.Step(`^the exit code is not (\d+)$`, theExitCodeIsNot)
@@ -148,6 +179,9 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 	ctx.Step(`^the wrapped shell ended in workspace "([^"]*)"$`, theWrappedShellEndedInWorkspace)
 	ctx.Step(`^the wrapped shell did not change directory$`, theWrappedShellDidNotChangeDirectory)
 	ctx.Step(`^no niwa temp files remain in the system temp directory$`, noNiwaTempFilesRemain)
+	ctx.Step(`^I write "([^"]*)" to file "([^"]*)" in repo "([^"]*)" of instance "([^"]*)"$`, func(ctx context.Context, content, relPath, groupRepo, instanceName string) (context.Context, error) {
+		return iWriteFileToRepoInInstance(ctx, content, relPath, groupRepo, instanceName)
+	})
 	ctx.Step(`^the completion output contains "([^"]*)"$`, theCompletionOutputContains)
 	ctx.Step(`^the completion output does not contain "([^"]*)"$`, theCompletionOutputDoesNotContain)
 	ctx.Step(`^the completion description for "([^"]*)" is "([^"]*)"$`, theCompletionDescriptionMatches)

@@ -268,3 +268,90 @@ func TestShowSummaryView_NoInstances(t *testing.T) {
 		t.Errorf("output should indicate no instances, got:\n%s", output)
 	}
 }
+
+// TestSourceLabel verifies that sourceLabel maps each SourceKind constant to its
+// expected display string, and that an unknown kind falls back to the kind itself.
+func TestSourceLabel(t *testing.T) {
+	cases := []struct {
+		kind string
+		want string
+	}{
+		{workspace.SourceKindPlaintext, "plaintext"},
+		{workspace.SourceKindVault, "vault"},
+		{workspace.SourceKindEnvExample, ".env.example"},
+		{"unknown_kind", "unknown_kind"},
+	}
+	for _, tc := range cases {
+		got := sourceLabel(tc.kind)
+		if got != tc.want {
+			t.Errorf("sourceLabel(%q) = %q, want %q", tc.kind, got, tc.want)
+		}
+	}
+}
+
+// TestShowDetailView_VerboseEnvExampleSource verifies that showDetailView with
+// --verbose shows ".env.example" as the source label for a managed file whose
+// Sources slice contains a SourceKindEnvExample entry.
+func TestShowDetailView_VerboseEnvExampleSource(t *testing.T) {
+	root := t.TempDir()
+	now := time.Now().Truncate(time.Second)
+	configName := "test-ws"
+
+	// Create a managed file.
+	envFile := filepath.Join(root, ".local.env")
+	if err := os.WriteFile(envFile, []byte("PORT=8080\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	hash, err := workspace.HashFile(envFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	state := &workspace.InstanceState{
+		SchemaVersion:  workspace.SchemaVersion,
+		ConfigName:     &configName,
+		InstanceName:   "test-ws",
+		InstanceNumber: 1,
+		Root:           root,
+		Created:        now,
+		LastApplied:    now,
+		ManagedFiles: []workspace.ManagedFile{
+			{
+				Path:        envFile,
+				ContentHash: hash,
+				Generated:   now,
+				Sources: []workspace.SourceEntry{
+					{Kind: workspace.SourceKindEnvExample, SourceID: ".env.example"},
+				},
+			},
+		},
+	}
+
+	if err := workspace.SaveState(root, state); err != nil {
+		t.Fatal(err)
+	}
+
+	buf := &strings.Builder{}
+	statusCmd.SetOut(buf)
+	defer statusCmd.SetOut(os.Stdout)
+
+	// Set verbose flag, reset after test.
+	statusVerbose = true
+	defer func() { statusVerbose = false }()
+
+	if err := showDetailView(statusCmd, root); err != nil {
+		t.Fatalf("showDetailView: %v", err)
+	}
+
+	output := buf.String()
+	if !strings.Contains(output, ".env.example") {
+		t.Errorf("verbose output should contain .env.example source label, got:\n%s", output)
+	}
+	// Must not fall back to vault or plaintext label.
+	if strings.Contains(output, "vault://.env.example") {
+		t.Errorf("must not display vault label for env_example source, got:\n%s", output)
+	}
+	if strings.Contains(output, "plaintext://.env.example") {
+		t.Errorf("must not display plaintext label for env_example source, got:\n%s", output)
+	}
+}

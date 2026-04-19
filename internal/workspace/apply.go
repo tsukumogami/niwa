@@ -131,6 +131,7 @@ func (a *Applier) Create(ctx context.Context, cfg *config.WorkspaceConfig, confi
 	// this single pattern is sufficient; running create twice on
 	// the same instance is a no-op after the first run.
 	if err := EnsureInstanceGitignore(instanceRoot); err != nil {
+		_ = os.RemoveAll(instanceRoot)
 		return "", fmt.Errorf("preparing instance .gitignore: %w", err)
 	}
 
@@ -158,6 +159,7 @@ func (a *Applier) Create(ctx context.Context, cfg *config.WorkspaceConfig, confi
 		configSourceURL: a.ConfigSourceURL,
 	})
 	if err != nil {
+		_ = os.RemoveAll(instanceRoot)
 		return "", err
 	}
 
@@ -869,14 +871,15 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 
 		repoDir := filepath.Join(instanceRoot, cr.Group, cr.Repo.Name)
 		mctx := &MaterializeContext{
-			Config:        effectiveCfg,
-			Effective:     effective,
-			RepoName:      cr.Repo.Name,
-			RepoDir:       repoDir,
-			ConfigDir:     configDir,
-			DiscoveredEnv: discoveredEnv,
-			RepoIndex:     repoIndex,
-			SourceTuples:  sourceTuples,
+			Config:                effectiveCfg,
+			Effective:             effective,
+			RepoName:              cr.Repo.Name,
+			RepoDir:               repoDir,
+			ConfigDir:             configDir,
+			DiscoveredEnv:         discoveredEnv,
+			RepoIndex:             repoIndex,
+			SourceTuples:          sourceTuples,
+			AllowPlaintextSecrets: a.AllowPlaintextSecrets,
 		}
 
 		claudeOn := ClaudeEnabled(effectiveCfg, cr.Repo.Name)

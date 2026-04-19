@@ -735,6 +735,166 @@ func theWrappedShellDidNotChangeDirectory(ctx context.Context) error {
 	return nil
 }
 
+// --- Local git server steps ---
+
+// aLocalGitServerIsSetUp is a no-op — the localGitServer is initialized in
+// the Before hook. This step exists so scenarios read naturally.
+func aLocalGitServerIsSetUp(ctx context.Context) (context.Context, error) {
+	s := getState(ctx)
+	if s == nil || s.gitServer == nil {
+		return ctx, fmt.Errorf("no git server in test state")
+	}
+	return ctx, nil
+}
+
+// aConfigRepoExistsWithBody creates a bare repo with a committed workspace.toml
+// and stores its file:// URL in state keyed by name. Before creating the repo,
+// it substitutes {repo:<name>} placeholders in the body with the stored URL for
+// that repo, allowing feature files to reference dynamic file:// URLs.
+func aConfigRepoExistsWithBody(ctx context.Context, name string, body *godog.DocString) (context.Context, error) {
+	s := getState(ctx)
+	if s == nil {
+		return ctx, fmt.Errorf("no test state")
+	}
+	content := body.Content
+	for repoName, repoURL := range s.repoURLs {
+		content = strings.ReplaceAll(content, "{repo:"+repoName+"}", repoURL)
+	}
+	url, err := s.gitServer.ConfigRepo(name, content)
+	if err != nil {
+		return ctx, fmt.Errorf("creating config repo %q: %w", name, err)
+	}
+	s.repoURLs[name] = url
+	return ctx, nil
+}
+
+// anOverlayRepoExistsWithBody creates a bare repo with a committed
+// workspace-overlay.toml and stores its file:// URL in state keyed by name.
+func anOverlayRepoExistsWithBody(ctx context.Context, name string, body *godog.DocString) (context.Context, error) {
+	s := getState(ctx)
+	if s == nil {
+		return ctx, fmt.Errorf("no test state")
+	}
+	url, err := s.gitServer.OverlayRepo(name, body.Content)
+	if err != nil {
+		return ctx, fmt.Errorf("creating overlay repo %q: %w", name, err)
+	}
+	s.repoURLs[name] = url
+	return ctx, nil
+}
+
+// aSourceRepoExists creates a bare repo and stores its file:// URL in state.
+func aSourceRepoExists(ctx context.Context, name string) (context.Context, error) {
+	s := getState(ctx)
+	if s == nil {
+		return ctx, fmt.Errorf("no test state")
+	}
+	url, err := s.gitServer.Repo(name)
+	if err != nil {
+		return ctx, fmt.Errorf("creating source repo %q: %w", name, err)
+	}
+	s.repoURLs[name] = url
+	return ctx, nil
+}
+
+// iRunNiwaInitFromConfigRepo runs niwa init --from <url> from workspaceRoot so
+// that the workspace root (and subsequent instance directories) land under the
+// sandboxed workspaces directory rather than homeDir.
+func iRunNiwaInitFromConfigRepo(ctx context.Context, name string) (context.Context, error) {
+	s := getState(ctx)
+	if s == nil {
+		return ctx, fmt.Errorf("no test state")
+	}
+	url, ok := s.repoURLs[name]
+	if !ok {
+		return ctx, fmt.Errorf("no URL stored for config repo %q", name)
+	}
+	return ctx, runNiwa(s, s.workspaceRoot, "niwa init --from "+url)
+}
+
+// iRunNiwaInitFromConfigRepoWithOverlay runs niwa init --from <url> --overlay
+// <overlay-url> from workspaceRoot.
+func iRunNiwaInitFromConfigRepoWithOverlay(ctx context.Context, name, overlayName string) (context.Context, error) {
+	s := getState(ctx)
+	if s == nil {
+		return ctx, fmt.Errorf("no test state")
+	}
+	url, ok := s.repoURLs[name]
+	if !ok {
+		return ctx, fmt.Errorf("no URL stored for config repo %q", name)
+	}
+	overlayURL, ok := s.repoURLs[overlayName]
+	if !ok {
+		return ctx, fmt.Errorf("no URL stored for overlay repo %q", overlayName)
+	}
+	return ctx, runNiwa(s, s.workspaceRoot, "niwa init --from "+url+" --overlay "+overlayURL)
+}
+
+// theInstanceExists asserts that <workspaceRoot>/<name> is a directory.
+func theInstanceExists(ctx context.Context, name string) error {
+	s := getState(ctx)
+	if s == nil {
+		return fmt.Errorf("no test state")
+	}
+	dir := filepath.Join(s.workspaceRoot, name)
+	info, err := os.Stat(dir)
+	if err != nil {
+		return fmt.Errorf("instance %q does not exist at %s: %w", name, dir, err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("expected %s to be a directory", dir)
+	}
+	return nil
+}
+
+// theInstanceDoesNotExist asserts that <workspaceRoot>/<name> is absent.
+func theInstanceDoesNotExist(ctx context.Context, name string) error {
+	s := getState(ctx)
+	if s == nil {
+		return fmt.Errorf("no test state")
+	}
+	dir := filepath.Join(s.workspaceRoot, name)
+	if _, err := os.Stat(dir); err == nil {
+		return fmt.Errorf("instance directory %q exists but should not", dir)
+	}
+	return nil
+}
+
+// theRepoExistsInInstance asserts that <workspaceRoot>/<instance>/<group>/<repo> is a directory.
+func theRepoExistsInInstance(ctx context.Context, groupRepo, instance string) error {
+	s := getState(ctx)
+	if s == nil {
+		return fmt.Errorf("no test state")
+	}
+	dir := filepath.Join(s.workspaceRoot, instance, filepath.FromSlash(groupRepo))
+	info, err := os.Stat(dir)
+	if err != nil {
+		return fmt.Errorf("repo %q in instance %q does not exist at %s: %w", groupRepo, instance, dir, err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("expected %s to be a directory", dir)
+	}
+	return nil
+}
+
+// iWriteFileToRepoInInstance writes content to a file at the given relative
+// path inside a managed repo directory. The repo is identified as
+// "<group>/<repo>" (forward-slash separated); the file is created relative to
+// the repo root. Use this to plant files (e.g. .env.example) after
+// `niwa create` has cloned the repo, without needing them committed upstream.
+func iWriteFileToRepoInInstance(ctx context.Context, content, relFilePath, groupRepo, instanceName string) (context.Context, error) {
+	s := getState(ctx)
+	if s == nil {
+		return ctx, fmt.Errorf("no test state")
+	}
+	repoDir := filepath.Join(s.workspaceRoot, instanceName, filepath.FromSlash(groupRepo))
+	dst := filepath.Join(repoDir, filepath.FromSlash(relFilePath))
+	if err := os.WriteFile(dst, []byte(content), 0o644); err != nil {
+		return ctx, fmt.Errorf("writing %s: %w", dst, err)
+	}
+	return ctx, nil
+}
+
 // noNiwaTempFilesRemain scans the scenario's scoped TMPDIR for wrapper
 // leftovers. TMPDIR is set to s.tmpDir in buildEnv, so the wrapper's
 // `mktemp` creates files there; its `rm -f` should clean them up. Any

@@ -21,12 +21,15 @@ func init() {
 	statusCmd.Flags().BoolVar(&statusCheckVault, "check-vault", false,
 		"re-resolve every vault:// reference (invokes providers) and report rotations "+
 			"without materializing files")
+	statusCmd.Flags().BoolVar(&statusVerbose, "verbose", false,
+		"show full source attribution for every managed file")
 	statusCmd.ValidArgsFunction = completeInstanceNames
 }
 
 var (
 	statusAuditSecrets bool
 	statusCheckVault   bool
+	statusVerbose      bool
 )
 
 var statusCmd = &cobra.Command{
@@ -42,6 +45,9 @@ An optional instance name argument can be provided from the workspace root
 to show detail for a specific instance.
 
 Flags:
+  --verbose         Show full source attribution for every managed file,
+                    including the kind (plaintext, vault, .env.example)
+                    and source ID for each input.
   --audit-secrets   Classify every *.secrets table value across the
                     workspace config (team + resolved overlay). Prints a
                     KEY / CLASSIFICATION / TABLE / SHADOWED table and
@@ -204,6 +210,18 @@ func showDetailView(cmd *cobra.Command, instanceRoot string) error {
 		}
 	}
 
+	// Build a path → sources map for --verbose; populated from state so all
+	// sources are available, not just the changed subset ComputeStatus returns.
+	var fileSources map[string][]workspace.SourceEntry
+	if statusVerbose {
+		fileSources = make(map[string][]workspace.SourceEntry, len(state.ManagedFiles))
+		for _, mf := range state.ManagedFiles {
+			if len(mf.Sources) > 0 {
+				fileSources[mf.Path] = mf.Sources
+			}
+		}
+	}
+
 	if len(status.Files) > 0 {
 		fmt.Fprintln(out)
 		fmt.Fprintln(out, "Managed files:")
@@ -219,11 +237,7 @@ func showDetailView(cmd *cobra.Command, instanceRoot string) error {
 			// old->new version tokens and provenance. Indent under
 			// the file line so the attribution is visually grouped.
 			for _, cs := range f.ChangedSources {
-				prefix := "vault"
-				if cs.Kind == workspace.SourceKindPlaintext {
-					prefix = "plaintext"
-				}
-				fmt.Fprintf(out, "    changed source: %s://%s\n", prefix, cs.SourceID)
+				fmt.Fprintf(out, "    changed source: %s://%s\n", sourceLabel(cs.Kind), cs.SourceID)
 				if cs.Description != "" {
 					fmt.Fprintf(out, "      note: %s\n", cs.Description)
 				}
@@ -233,6 +247,12 @@ func showDetailView(cmd *cobra.Command, instanceRoot string) error {
 				}
 				if cs.Provenance != "" {
 					fmt.Fprintf(out, "      provenance: %s\n", cs.Provenance)
+				}
+			}
+			// Under --verbose, show every source entry (not just changed ones).
+			if statusVerbose {
+				for _, se := range fileSources[f.Path] {
+					fmt.Fprintf(out, "    source: %s://%s\n", sourceLabel(se.Kind), se.SourceID)
 				}
 			}
 		}
@@ -253,6 +273,21 @@ func showDetailView(cmd *cobra.Command, instanceRoot string) error {
 	}
 
 	return nil
+}
+
+// sourceLabel maps a SourceKind constant to its display prefix.
+// Unknown kinds fall back to the kind string itself.
+func sourceLabel(kind string) string {
+	switch kind {
+	case workspace.SourceKindPlaintext:
+		return "plaintext"
+	case workspace.SourceKindVault:
+		return "vault"
+	case workspace.SourceKindEnvExample:
+		return ".env.example"
+	default:
+		return kind
+	}
 }
 
 // shortToken returns a compact form of a version token for display.
