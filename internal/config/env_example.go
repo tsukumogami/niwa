@@ -6,6 +6,9 @@ package config
 //  1. If the repo has an explicit per-repo override, that value wins.
 //  2. Otherwise the workspace-level setting applies.
 //  3. When both are nil the feature is enabled (opt-out default).
+//
+// It is exported so that internal/workspace can call it without duplicating
+// the resolution logic.
 func EffectiveReadEnvExample(ws *WorkspaceConfig, repoName string) bool {
 	if ws == nil {
 		return true
