@@ -51,6 +51,13 @@ type Applier struct {
 	// Empty string disables convention discovery.
 	ConfigSourceURL string
 
+	// ConfigName is the original workspace config name (e.g. "codespar") before
+	// create.go renames cfg.Workspace.Name to the instance name ("codespar-2").
+	// Used for personal overlay scope lookup (ResolveGlobalOverride) and for
+	// recording ConfigName in InstanceState. When empty, cfg.Workspace.Name is
+	// used as the fallback (correct for apply, where no rename has occurred).
+	ConfigName string
+
 	// cloneOrSync is the function used to clone or sync the overlay repo.
 	// Defaults to CloneOrSyncOverlay. Overridable in tests.
 	cloneOrSync func(url, dir string) (bool, error)
@@ -172,7 +179,10 @@ func (a *Applier) Create(ctx context.Context, cfg *config.WorkspaceConfig, confi
 		return "", fmt.Errorf("determining instance number: %w", err)
 	}
 
-	configName := cfg.Workspace.Name
+	configName := a.ConfigName
+	if configName == "" {
+		configName = cfg.Workspace.Name
+	}
 	state := &InstanceState{
 		SchemaVersion:  SchemaVersion,
 		ConfigName:     &configName,
@@ -669,7 +679,11 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		if err != nil {
 			return nil, err
 		}
-		flattened := ResolveGlobalOverride(resolvedOverride, cfg.Workspace.Name)
+		overlayScope := a.ConfigName
+		if overlayScope == "" {
+			overlayScope = cfg.Workspace.Name
+		}
+		flattened := ResolveGlobalOverride(resolvedOverride, overlayScope)
 		merged, err := MergeGlobalOverride(resolvedCfg, flattened, a.GlobalConfigDir)
 		if err != nil {
 			return nil, err

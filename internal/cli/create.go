@@ -135,6 +135,7 @@ func runCreate(cmd *cobra.Command, args []string) error {
 	// init-time state exists (e.g., create inside a bare .niwa/ dir).
 	// Use configName (the original workspace config name) not instanceName
 	// so the registry lookup succeeds for -2, -3, ... instances too.
+	applier.ConfigName = configName
 	if globalCfg, gErr := config.LoadGlobalConfig(); gErr == nil {
 		if gDir, gErr := config.GlobalConfigDir(); gErr == nil {
 			applier.GlobalConfigDir = gDir
