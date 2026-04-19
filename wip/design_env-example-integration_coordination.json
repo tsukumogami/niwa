@@ -1,0 +1,31 @@
+{
+  "topic": "env-example-integration",
+  "decisions": [
+    {
+      "id": 1,
+      "question": "Parser implementation strategy: rewrite parseEnvFile in-place to support Node-style syntax (quoted values, export prefix, CRLF, escape sequences), or introduce a new parseDotEnvExample function alongside the existing one?",
+      "status": "complete",
+      "chosen": "Option B — new parseDotEnvExample function; leave parseEnvFile unchanged",
+      "report": "wip/design_env-example-integration_decision_1_report.md",
+      "complexity": "standard"
+    },
+    {
+      "id": 2,
+      "question": "Integration point, opt-out flag checking, and output routing: where in the pipeline does .env.example processing happen (first step inside ResolveEnvVars, pre-pass in Materialize, or new materializer step), where are opt-out flags checked, and how is stderr threaded through?",
+      "status": "complete",
+      "chosen": "Option B — pre-pass in EnvMaterializer.Materialize; result in MaterializeContext fields; Stderr io.Writer on EnvMaterializer",
+      "report": "wip/design_env-example-integration_decision_2_report.md",
+      "complexity": "standard"
+    },
+    {
+      "id": 3,
+      "question": "Classification structure: should entropy + known-prefix detection for undeclared keys be an inline helper inside the integration point, or a standalone exported Classifier type with its own test coverage?",
+      "status": "complete",
+      "chosen": "Option B — standalone unexported helper in internal/workspace/envclassify.go",
+      "report": "wip/design_env-example-integration_decision_3_report.md",
+      "complexity": "standard"
+    }
+  ],
+  "cross_validation": "passed",
+  "round": 0
+}
