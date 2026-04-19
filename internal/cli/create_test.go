@@ -100,6 +100,44 @@ func TestComputeInstanceName_DirExistsWithoutState(t *testing.T) {
 	}
 }
 
+func TestComputeInstanceName_SkipsNonInstanceDir(t *testing.T) {
+	dir := t.TempDir()
+
+	// Create the first instance (valid, InstanceNumber=1).
+	firstDir := filepath.Join(dir, "tsuku")
+	stateDir := filepath.Join(firstDir, ".niwa")
+	if err := os.MkdirAll(stateDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	state := workspace.InstanceState{
+		SchemaVersion:  1,
+		InstanceName:   "tsuku",
+		InstanceNumber: 1,
+		Root:           firstDir,
+	}
+	data, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stateDir, "instance.json"), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// tsuku-2 exists but has no .niwa/instance.json (leftover or foreign dir).
+	if err := os.MkdirAll(filepath.Join(dir, "tsuku-2", "some-content"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// computeInstanceName should skip tsuku-2 and return tsuku-3.
+	name, err := computeInstanceName("tsuku", "", dir)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if name != "tsuku-3" {
+		t.Errorf("expected %q, got %q", "tsuku-3", name)
+	}
+}
+
 func TestFindRepoDir_SingleMatch(t *testing.T) {
 	root := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(root, "public", "niwa"), 0o755); err != nil {

@@ -57,13 +57,24 @@ func computeInstanceName(configName, customName, workspaceRoot string) (string, 
 		return configName, nil
 	}
 
-	// Subsequent instances: find the next available number.
+	// Subsequent instances: find the next available number, skipping any
+	// directories that exist on disk but are not valid niwa instances.
+	// NextInstanceNumber accounts for valid instances only, so the candidate
+	// it produces may collide with a leftover or foreign directory.
 	nextNum, err := workspace.NextInstanceNumber(workspaceRoot)
 	if err != nil {
 		return "", fmt.Errorf("determining next instance number: %w", err)
 	}
 
-	return fmt.Sprintf("%s-%d", configName, nextNum), nil
+	for {
+		candidate := fmt.Sprintf("%s-%d", configName, nextNum)
+		candidateDir := filepath.Join(workspaceRoot, candidate)
+		if _, err := os.Stat(candidateDir); os.IsNotExist(err) {
+			return candidate, nil
+		}
+		fmt.Fprintf(os.Stderr, "warning: skipping %s: directory exists but is not a valid niwa instance\n", candidateDir)
+		nextNum++
+	}
 }
 
 func runCreate(cmd *cobra.Command, args []string) error {
