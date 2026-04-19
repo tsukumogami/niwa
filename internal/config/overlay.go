@@ -195,11 +195,19 @@ func isProtectedDestination(dest string) bool {
 }
 
 // DeriveOverlayURL converts a workspace source URL into a convention overlay
-// URL of the form "org/repo-overlay". Accepts HTTPS URLs
-// (https://github.com/org/repo[.git]), SSH URLs (git@github.com:org/repo.git),
-// and shorthand (org/repo). Returns ok=false when the input cannot be parsed.
+// URL. Accepts HTTPS URLs (https://github.com/org/repo[.git]), SSH URLs
+// (git@github.com:org/repo.git), shorthand (org/repo), and file:// URLs
+// (file:///path/to/repo[.git]). Returns ok=false when the input cannot be
+// parsed.
 func DeriveOverlayURL(sourceURL string) (conventionURL string, ok bool) {
-	org, repo, parsed := parseOrgRepo(sourceURL)
+	s := strings.TrimSpace(sourceURL)
+	if strings.HasPrefix(s, "file://") {
+		// file:///path/to/ws.git  →  file:///path/to/ws-overlay.git
+		path := strings.TrimPrefix(s, "file://")
+		path = strings.TrimSuffix(path, ".git")
+		return "file://" + path + "-overlay.git", true
+	}
+	org, repo, parsed := parseOrgRepo(s)
 	if !parsed {
 		return "", false
 	}
@@ -278,15 +286,27 @@ func parseOrgRepo(s string) (org, repo string, ok bool) {
 }
 
 // OverlayDir returns the local directory where the overlay repo is cloned.
-// The path is $XDG_CONFIG_HOME/niwa/overlays/<org>-<repo>/ (falling back to
-// $HOME/.config/niwa/overlays/<org>-<repo>/ when XDG_CONFIG_HOME is unset).
-// overlayURL may be a shorthand (org/repo), HTTPS URL, or SSH URL.
+// The path is $XDG_CONFIG_HOME/niwa/overlays/<name>/ (falling back to
+// $HOME/.config/niwa/overlays/<name>/ when XDG_CONFIG_HOME is unset).
+// overlayURL may be a shorthand (org/repo), HTTPS URL, SSH URL, or file://
+// URL.
 func OverlayDir(overlayURL string) (string, error) {
-	org, repo, ok := parseOrgRepo(overlayURL)
-	if !ok {
-		return "", fmt.Errorf("cannot parse overlay URL %q", overlayURL)
+	s := strings.TrimSpace(overlayURL)
+
+	var dirName string
+	if strings.HasPrefix(s, "file://") {
+		// Derive a stable local dir name from the last path component.
+		// file:///sandbox/gitserver/ws-overlay.git → file-ws-overlay
+		path := strings.TrimPrefix(s, "file://")
+		path = filepath.Clean(strings.TrimSuffix(path, ".git"))
+		dirName = "file-" + filepath.Base(path)
+	} else {
+		org, repo, ok := parseOrgRepo(s)
+		if !ok {
+			return "", fmt.Errorf("cannot parse overlay URL %q", overlayURL)
+		}
+		dirName = org + "-" + repo
 	}
-	dirName := org + "-" + repo
 
 	configHome := os.Getenv("XDG_CONFIG_HOME")
 	if configHome == "" {
