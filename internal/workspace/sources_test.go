@@ -192,7 +192,7 @@ TOKEN = "vault://TOKEN"
 
 	applier := NewApplier(mockClient)
 	applier.Cloner = &Cloner{}
-	if _, err := applier.Create(context.Background(), cfg, niwaDir, workspaceRoot); err != nil {
+	if _, err := applier.Create(context.Background(), cfg, niwaDir, workspaceRoot, cfg.Workspace.Name); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 
@@ -483,7 +483,7 @@ TOKEN = "vault://TOKEN"
 
 	applier := NewApplier(mockClient)
 	applier.Cloner = &Cloner{}
-	if _, err := applier.Create(context.Background(), cfg, niwaDir, workspaceRoot); err != nil {
+	if _, err := applier.Create(context.Background(), cfg, niwaDir, workspaceRoot, cfg.Workspace.Name); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 

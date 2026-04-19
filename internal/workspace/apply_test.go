@@ -175,7 +175,7 @@ source = "repos/app.md"
 		t.Fatal(err)
 	}
 
-	gotPath, err := applier.Create(context.Background(), cfg, niwaDir, workspaceRoot)
+	gotPath, err := applier.Create(context.Background(), cfg, niwaDir, workspaceRoot, cfg.Workspace.Name)
 	if err != nil {
 		t.Fatalf("create failed: %v", err)
 	}
@@ -323,7 +323,7 @@ source = "repos/app.md"
 	}
 
 	// First, create to seed state.
-	_, err = applier.Create(context.Background(), cfg, niwaDir, workspaceRoot)
+	_, err = applier.Create(context.Background(), cfg, niwaDir, workspaceRoot, cfg.Workspace.Name)
 	if err != nil {
 		t.Fatalf("create failed: %v", err)
 	}
@@ -464,7 +464,7 @@ visibility = "public"
 	}
 
 	// Create should succeed even with no content sections.
-	gotPath, err := applier.Create(context.Background(), cfg, niwaDir, workspaceRoot)
+	gotPath, err := applier.Create(context.Background(), cfg, niwaDir, workspaceRoot, cfg.Workspace.Name)
 	if err != nil {
 		t.Fatalf("create failed: %v", err)
 	}
@@ -729,7 +729,7 @@ source = "repos/app.md"
 		}
 	}
 
-	gotPath, err := applier.Create(context.Background(), cfg, niwaDir, workspaceRoot)
+	gotPath, err := applier.Create(context.Background(), cfg, niwaDir, workspaceRoot, cfg.Workspace.Name)
 	if err != nil {
 		t.Fatalf("create failed: %v", err)
 	}
@@ -797,7 +797,7 @@ scope = "strategic"
 	}
 
 	// Create should succeed (warnings are printed to stderr, not returned as errors).
-	if _, err := applier.Create(context.Background(), cfg, niwaDir, workspaceRoot); err != nil {
+	if _, err := applier.Create(context.Background(), cfg, niwaDir, workspaceRoot, cfg.Workspace.Name); err != nil {
 		t.Fatalf("create failed: %v", err)
 	}
 }
@@ -873,7 +873,7 @@ source = "workspace.md"
 	}
 
 	// Create initial state with workspace content.
-	_, err = applier.Create(context.Background(), cfg, niwaDir, workspaceRoot)
+	_, err = applier.Create(context.Background(), cfg, niwaDir, workspaceRoot, cfg.Workspace.Name)
 	if err != nil {
 		t.Fatalf("create failed: %v", err)
 	}
@@ -1012,7 +1012,7 @@ source = "workspace.md"
 		t.Fatal(err)
 	}
 
-	gotPath, err := applier.Create(context.Background(), cfg, niwaDir, workspaceRoot)
+	gotPath, err := applier.Create(context.Background(), cfg, niwaDir, workspaceRoot, cfg.Workspace.Name)
 	if err != nil {
 		t.Fatalf("create failed: %v", err)
 	}
@@ -1130,7 +1130,7 @@ enabled = false
 		t.Fatal(err)
 	}
 
-	_, err = applier.Create(context.Background(), cfg, niwaDir, workspaceRoot)
+	_, err = applier.Create(context.Background(), cfg, niwaDir, workspaceRoot, cfg.Workspace.Name)
 	if err != nil {
 		t.Fatalf("create failed: %v", err)
 	}
@@ -2577,7 +2577,7 @@ PLAIN = "not-a-secret"
 	applier := NewApplier(mockClient)
 	applier.Cloner = &Cloner{}
 
-	if _, err := applier.Create(context.Background(), cfg, niwaDir, workspaceRoot); err != nil {
+	if _, err := applier.Create(context.Background(), cfg, niwaDir, workspaceRoot, cfg.Workspace.Name); err != nil {
 		t.Fatalf("create failed: %v", err)
 	}
 
@@ -2646,7 +2646,7 @@ visibility = "public"
 	applier := NewApplier(mockClient)
 	applier.Cloner = &Cloner{}
 
-	if _, err := applier.Create(context.Background(), cfg, niwaDir, workspaceRoot); err != nil {
+	if _, err := applier.Create(context.Background(), cfg, niwaDir, workspaceRoot, cfg.Workspace.Name); err != nil {
 		t.Fatalf("create failed: %v", err)
 	}
 
@@ -2719,7 +2719,7 @@ visibility = "public"
 	applier := NewApplier(mockClient)
 	applier.Cloner = &Cloner{}
 
-	if _, err := applier.Create(context.Background(), cfg, niwaDir, workspaceRoot); err != nil {
+	if _, err := applier.Create(context.Background(), cfg, niwaDir, workspaceRoot, cfg.Workspace.Name); err != nil {
 		t.Fatalf("create failed: %v", err)
 	}
 
@@ -2787,7 +2787,7 @@ visibility = "public"
 	}
 
 	// Seed state via Create so Apply has something to load.
-	if _, err := applier.Create(context.Background(), cfg, niwaDir, workspaceRoot); err != nil {
+	if _, err := applier.Create(context.Background(), cfg, niwaDir, workspaceRoot, cfg.Workspace.Name); err != nil {
 		t.Fatalf("create failed: %v", err)
 	}
 

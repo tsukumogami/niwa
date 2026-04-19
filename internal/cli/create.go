@@ -121,20 +121,16 @@ func runCreate(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("instance directory already exists: %s", instanceDir)
 	}
 
-	// Set the instance name on the config so Applier.Create uses it for the directory.
-	cfg.Workspace.Name = instanceName
-
 	token := resolveGitHubToken()
 	gh := github.NewAPIClient(token)
 
 	applier := workspace.NewApplier(gh)
 
-	// Wire up the global config overlay (personal overlay) so vault
-	// resolution and personal-wins merging work during create.
-	// ConfigSourceURL is set as a fallback for overlay discovery when no
-	// init-time state exists (e.g., create inside a bare .niwa/ dir).
-	// Use configName (the original workspace config name) not instanceName
-	// so the registry lookup succeeds for -2, -3, ... instances too.
+	// Wire up the global config overlay so vault resolution and personal-wins
+	// merging work during create. ConfigSourceURL is a fallback for overlay
+	// discovery when no init-time state exists (e.g., bare .niwa/ dir).
+	// The registry lookup uses configName (not instanceName) so -2, -3, ...
+	// instances find the same entry as the first instance.
 	if globalCfg, gErr := config.LoadGlobalConfig(); gErr == nil {
 		if gDir, gErr := config.GlobalConfigDir(); gErr == nil {
 			applier.GlobalConfigDir = gDir
@@ -144,7 +140,7 @@ func runCreate(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	instancePath, err := applier.Create(cmd.Context(), cfg, configDir, workspaceRoot)
+	instancePath, err := applier.Create(cmd.Context(), cfg, configDir, workspaceRoot, instanceName)
 	if err != nil {
 		return err
 	}

@@ -154,6 +154,9 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 	ctx.Step(`^I source the installer env file and run completion for "([^"]*)" with prefix "([^"]*)"$`, iSourceShellInitAndRunCompletion)
 	ctx.Step(`^the "([^"]*)" shell-init output contains "([^"]*)"$`, shellInitContains)
 
+	// Personal overlay
+	ctx.Step(`^a personal overlay exists with body:$`, aPersonalOverlayExistsWithBody)
+
 	// Local git server
 	ctx.Step(`^a local git server is set up$`, aLocalGitServerIsSetUp)
 	ctx.Step(`^a config repo "([^"]*)" exists with body:$`, aConfigRepoExistsWithBody)

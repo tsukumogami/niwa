@@ -118,10 +118,13 @@ type pipelineResult struct {
 // Create creates a new workspace instance under workspaceRoot, runs the full
 // pipeline (discover, classify, clone, install content), assigns an instance
 // number, and writes fresh state. Returns the instance directory path.
-func (a *Applier) Create(ctx context.Context, cfg *config.WorkspaceConfig, configDir, workspaceRoot string) (string, error) {
+// instanceName is the directory name for the new instance (e.g. "myws-2");
+// cfg.Workspace.Name is the config identity and must not be mutated by the
+// caller — it is used for personal overlay scope lookup and InstanceState.ConfigName.
+func (a *Applier) Create(ctx context.Context, cfg *config.WorkspaceConfig, configDir, workspaceRoot, instanceName string) (string, error) {
 	now := time.Now()
 
-	instanceRoot := filepath.Join(workspaceRoot, cfg.Workspace.Name)
+	instanceRoot := filepath.Join(workspaceRoot, instanceName)
 	if err := os.MkdirAll(instanceRoot, 0o755); err != nil {
 		return "", fmt.Errorf("creating instance directory: %w", err)
 	}
@@ -176,7 +179,7 @@ func (a *Applier) Create(ctx context.Context, cfg *config.WorkspaceConfig, confi
 	state := &InstanceState{
 		SchemaVersion:  SchemaVersion,
 		ConfigName:     &configName,
-		InstanceName:   cfg.Workspace.Name,
+		InstanceName:   instanceName,
 		InstanceNumber: instanceNumber,
 		Root:           instanceRoot,
 		Created:        now,

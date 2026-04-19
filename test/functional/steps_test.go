@@ -783,6 +783,26 @@ func anOverlayRepoExistsWithBody(ctx context.Context, name string, body *godog.D
 	return ctx, nil
 }
 
+// aPersonalOverlayExistsWithBody writes the given TOML content to
+// $XDG_CONFIG_HOME/niwa/global/niwa.toml so niwa treats it as the personal
+// global overlay for the scenario. The file is written inside the sandboxed
+// homeDir, so it is isolated between scenarios.
+func aPersonalOverlayExistsWithBody(ctx context.Context, body *godog.DocString) (context.Context, error) {
+	s := getState(ctx)
+	if s == nil {
+		return ctx, fmt.Errorf("no test state")
+	}
+	dir := filepath.Join(s.homeDir, ".config", "niwa", "global")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return ctx, fmt.Errorf("creating personal overlay dir: %w", err)
+	}
+	path := filepath.Join(dir, "niwa.toml")
+	if err := os.WriteFile(path, []byte(body.Content), 0o644); err != nil {
+		return ctx, fmt.Errorf("writing personal overlay: %w", err)
+	}
+	return ctx, nil
+}
+
 // aSourceRepoExists creates a bare repo and stores its file:// URL in state.
 func aSourceRepoExists(ctx context.Context, name string) (context.Context, error) {
 	s := getState(ctx)

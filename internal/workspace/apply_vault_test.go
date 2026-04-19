@@ -122,7 +122,7 @@ API_TOKEN = "vault://API_TOKEN"
 	applier := NewApplier(mockClient)
 	applier.Cloner = &Cloner{}
 
-	if _, err := applier.Create(context.Background(), cfg, niwaDir, workspaceRoot); err != nil {
+	if _, err := applier.Create(context.Background(), cfg, niwaDir, workspaceRoot, cfg.Workspace.Name); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 
@@ -208,7 +208,7 @@ MISSING = "vault://MISSING"
 	applier := NewApplier(mockClient)
 	applier.Cloner = &Cloner{}
 
-	_, err = applier.Create(context.Background(), cfg, niwaDir, workspaceRoot)
+	_, err = applier.Create(context.Background(), cfg, niwaDir, workspaceRoot, cfg.Workspace.Name)
 	if err == nil {
 		t.Fatal("expected error for missing vault key")
 	}
@@ -313,7 +313,7 @@ API_TOKEN = "vault://personal/API_TOKEN"
 	applier.Cloner = &Cloner{}
 	applier.GlobalConfigDir = globalDir
 
-	if _, err := applier.Create(context.Background(), cfg, niwaDir, workspaceRoot); err != nil {
+	if _, err := applier.Create(context.Background(), cfg, niwaDir, workspaceRoot, cfg.Workspace.Name); err != nil {
 		os.Stderr = origStderr
 		w.Close()
 		t.Fatalf("Create: %v", err)
@@ -409,7 +409,7 @@ LOG_LEVEL = "trace"
 	applier.Cloner = &Cloner{}
 	applier.GlobalConfigDir = globalDir
 
-	if _, err := applier.Create(context.Background(), cfg, niwaDir, workspaceRoot); err != nil {
+	if _, err := applier.Create(context.Background(), cfg, niwaDir, workspaceRoot, cfg.Workspace.Name); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 
@@ -482,7 +482,7 @@ MISSING = "vault://MISSING"
 	applier.Cloner = &Cloner{}
 	applier.AllowMissingSecrets = true
 
-	if _, err := applier.Create(context.Background(), cfg, niwaDir, workspaceRoot); err != nil {
+	if _, err := applier.Create(context.Background(), cfg, niwaDir, workspaceRoot, cfg.Workspace.Name); err != nil {
 		t.Fatalf("expected apply to succeed with AllowMissingSecrets, got %v", err)
 	}
 }
@@ -555,7 +555,7 @@ ANTHROPIC_KEY = "vault://ANTHROPIC_KEY?required=false"
 	applier := NewApplier(mockClient)
 	applier.Cloner = &Cloner{}
 
-	_, createErr := applier.Create(context.Background(), cfg, niwaDir, workspaceRoot)
+	_, createErr := applier.Create(context.Background(), cfg, niwaDir, workspaceRoot, cfg.Workspace.Name)
 	w.Close()
 	os.Stderr = origStderr
 
@@ -663,7 +663,7 @@ TOKEN = "vault://TOKEN"
 		t.Fatal(err)
 	}
 	os.Stderr = w1
-	_, createErr := applier.Create(context.Background(), result.Config, niwaDir, workspaceRoot)
+	_, createErr := applier.Create(context.Background(), result.Config, niwaDir, workspaceRoot, result.Config.Workspace.Name)
 	w1.Close()
 	os.Stderr = origStderr
 	stderr1, _ := io.ReadAll(r1)
@@ -764,7 +764,7 @@ GITHUB_TOKEN = "GitHub PAT with repo:read scope"
 	applier := NewApplier(mockClient)
 	applier.Cloner = &Cloner{}
 
-	_, err = applier.Create(context.Background(), parsed.Config, niwaDir, workspaceRoot)
+	_, err = applier.Create(context.Background(), parsed.Config, niwaDir, workspaceRoot, parsed.Config.Workspace.Name)
 	if err == nil {
 		t.Fatal("expected apply to fail when a required env secret is missing")
 	}
@@ -839,7 +839,7 @@ GITHUB_TOKEN = "vault://GITHUB_TOKEN"
 	applier.Cloner = &Cloner{}
 	applier.AllowMissingSecrets = true
 
-	_, err = applier.Create(context.Background(), parsed.Config, niwaDir, workspaceRoot)
+	_, err = applier.Create(context.Background(), parsed.Config, niwaDir, workspaceRoot, parsed.Config.Workspace.Name)
 	if err == nil {
 		t.Fatal("expected apply to fail even with --allow-missing-secrets when a required key is missing (R34)")
 	}
@@ -909,7 +909,7 @@ SENTRY_DSN = "Sentry error reporting"
 
 	applier := NewApplier(mockClient)
 	applier.Cloner = &Cloner{}
-	_, createErr := applier.Create(context.Background(), parsed.Config, niwaDir, workspaceRoot)
+	_, createErr := applier.Create(context.Background(), parsed.Config, niwaDir, workspaceRoot, parsed.Config.Workspace.Name)
 	w.Close()
 	os.Stderr = origStderr
 
@@ -986,7 +986,7 @@ DEBUG_WEBHOOK_URL = "Personal debug webhook"
 
 	applier := NewApplier(mockClient)
 	applier.Cloner = &Cloner{}
-	_, createErr := applier.Create(context.Background(), parsed.Config, niwaDir, workspaceRoot)
+	_, createErr := applier.Create(context.Background(), parsed.Config, niwaDir, workspaceRoot, parsed.Config.Workspace.Name)
 	w.Close()
 	os.Stderr = origStderr
 
@@ -1072,7 +1072,7 @@ LOG_LEVEL = "codespar-debug"
 	applier.Cloner = &Cloner{}
 	applier.GlobalConfigDir = globalDir
 
-	_, err = applier.Create(context.Background(), parsed.Config, niwaDir, workspaceRoot)
+	_, err = applier.Create(context.Background(), parsed.Config, niwaDir, workspaceRoot, parsed.Config.Workspace.Name)
 	if err == nil {
 		t.Fatal("expected apply to fail on multi-source workspace without vault_scope (R5)")
 	}

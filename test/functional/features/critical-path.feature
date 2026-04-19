@@ -155,3 +155,35 @@ Feature: Critical path: init, create, and apply
     Then the exit code is 0
     When I run "niwa apply myws"
     Then the exit code is 0
+
+  # --- Regression: personal overlay scope must use config name, not instance name ---
+  # Before the fix, runPipeline used cfg.Workspace.Name (already mutated to the
+  # instance name "myws-2") for the personal overlay scope lookup, so the
+  # [workspaces.myws.*] block was never found, required keys were not merged in,
+  # and create failed with "required env keys not supplied".
+
+  @critical
+  Scenario: create second instance resolves personal overlay by config name not instance name
+    Given a clean niwa environment
+    And a local git server is set up
+    And a config repo "myws" exists with body:
+      """
+      [workspace]
+      name = "myws"
+
+      [env.secrets.required]
+      MY_KEY = "Required key supplied by personal overlay"
+      """
+    And a personal overlay exists with body:
+      """
+      [workspaces.myws.env.secrets]
+      MY_KEY = "plaintext-value"
+      """
+    When I run niwa init from config repo "myws"
+    Then the exit code is 0
+    When I run "niwa create myws"
+    Then the exit code is 0
+    And the instance "myws" exists
+    When I run "niwa create myws"
+    Then the exit code is 0
+    And the instance "myws-2" exists
