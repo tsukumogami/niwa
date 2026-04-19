@@ -96,13 +96,23 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 			return ctx, err
 		}
 		homeDir := filepath.Join(sandbox, "home")
-		workspaceRoot := filepath.Join(sandbox, "workspaces")
 		tmpDir := filepath.Join(sandbox, "tmp")
-		for _, d := range []string{homeDir, workspaceRoot, tmpDir} {
+		for _, d := range []string{homeDir, tmpDir} {
 			if err := os.MkdirAll(d, 0o755); err != nil {
 				return ctx, err
 			}
 		}
+
+		// workspaceRoot must live outside any existing niwa instance tree so that
+		// niwa init's CheckInitConflicts check does not fire when the developer's
+		// machine has a niwa workspace ancestor covering the repo root. Using the
+		// system temp dir guarantees a clean parent regardless of repo location.
+		wsParent := filepath.Join(os.TempDir(), "niwa-test-workspaces")
+		_ = os.RemoveAll(wsParent)
+		if err := os.MkdirAll(wsParent, 0o755); err != nil {
+			return ctx, err
+		}
+		workspaceRoot := wsParent
 
 		gitServerDir := filepath.Join(sandbox, "gitserver")
 		gs, err := newLocalGitServer(gitServerDir)
@@ -147,6 +157,7 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 	// Local git server
 	ctx.Step(`^a local git server is set up$`, aLocalGitServerIsSetUp)
 	ctx.Step(`^a config repo "([^"]*)" exists with body:$`, aConfigRepoExistsWithBody)
+	ctx.Step(`^an overlay repo "([^"]*)" exists with body:$`, anOverlayRepoExistsWithBody)
 	ctx.Step(`^a source repo "([^"]*)" exists$`, aSourceRepoExists)
 	ctx.Step(`^I run niwa init from config repo "([^"]*)"$`, iRunNiwaInitFromConfigRepo)
 	ctx.Step(`^I run niwa init from config repo "([^"]*)" with overlay "([^"]*)"$`, iRunNiwaInitFromConfigRepoWithOverlay)

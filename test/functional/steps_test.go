@@ -748,15 +748,36 @@ func aLocalGitServerIsSetUp(ctx context.Context) (context.Context, error) {
 }
 
 // aConfigRepoExistsWithBody creates a bare repo with a committed workspace.toml
-// and stores its file:// URL in state keyed by name.
+// and stores its file:// URL in state keyed by name. Before creating the repo,
+// it substitutes {repo:<name>} placeholders in the body with the stored URL for
+// that repo, allowing feature files to reference dynamic file:// URLs.
 func aConfigRepoExistsWithBody(ctx context.Context, name string, body *godog.DocString) (context.Context, error) {
 	s := getState(ctx)
 	if s == nil {
 		return ctx, fmt.Errorf("no test state")
 	}
-	url, err := s.gitServer.ConfigRepo(name, body.Content)
+	content := body.Content
+	for repoName, repoURL := range s.repoURLs {
+		content = strings.ReplaceAll(content, "{repo:"+repoName+"}", repoURL)
+	}
+	url, err := s.gitServer.ConfigRepo(name, content)
 	if err != nil {
 		return ctx, fmt.Errorf("creating config repo %q: %w", name, err)
+	}
+	s.repoURLs[name] = url
+	return ctx, nil
+}
+
+// anOverlayRepoExistsWithBody creates a bare repo with a committed
+// workspace-overlay.toml and stores its file:// URL in state keyed by name.
+func anOverlayRepoExistsWithBody(ctx context.Context, name string, body *godog.DocString) (context.Context, error) {
+	s := getState(ctx)
+	if s == nil {
+		return ctx, fmt.Errorf("no test state")
+	}
+	url, err := s.gitServer.OverlayRepo(name, body.Content)
+	if err != nil {
+		return ctx, fmt.Errorf("creating overlay repo %q: %w", name, err)
 	}
 	s.repoURLs[name] = url
 	return ctx, nil
@@ -776,8 +797,9 @@ func aSourceRepoExists(ctx context.Context, name string) (context.Context, error
 	return ctx, nil
 }
 
-// iRunNiwaInitFromConfigRepo runs niwa init --from <url> using the stored URL
-// for the named config repo.
+// iRunNiwaInitFromConfigRepo runs niwa init --from <url> from workspaceRoot so
+// that the workspace root (and subsequent instance directories) land under the
+// sandboxed workspaces directory rather than homeDir.
 func iRunNiwaInitFromConfigRepo(ctx context.Context, name string) (context.Context, error) {
 	s := getState(ctx)
 	if s == nil {
@@ -787,10 +809,11 @@ func iRunNiwaInitFromConfigRepo(ctx context.Context, name string) (context.Conte
 	if !ok {
 		return ctx, fmt.Errorf("no URL stored for config repo %q", name)
 	}
-	return ctx, runNiwa(s, s.homeDir, "niwa init --from "+url)
+	return ctx, runNiwa(s, s.workspaceRoot, "niwa init --from "+url)
 }
 
-// iRunNiwaInitFromConfigRepoWithOverlay runs niwa init --from <url> --overlay <overlay-url>.
+// iRunNiwaInitFromConfigRepoWithOverlay runs niwa init --from <url> --overlay
+// <overlay-url> from workspaceRoot.
 func iRunNiwaInitFromConfigRepoWithOverlay(ctx context.Context, name, overlayName string) (context.Context, error) {
 	s := getState(ctx)
 	if s == nil {
@@ -804,7 +827,7 @@ func iRunNiwaInitFromConfigRepoWithOverlay(ctx context.Context, name, overlayNam
 	if !ok {
 		return ctx, fmt.Errorf("no URL stored for overlay repo %q", overlayName)
 	}
-	return ctx, runNiwa(s, s.homeDir, "niwa init --from "+url+" --overlay "+overlayURL)
+	return ctx, runNiwa(s, s.workspaceRoot, "niwa init --from "+url+" --overlay "+overlayURL)
 }
 
 // theInstanceExists asserts that <workspaceRoot>/<name> is a directory.

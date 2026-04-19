@@ -33,9 +33,10 @@ func (s *localGitServer) Repo(name string) (string, error) {
 	return "file://" + repoPath, nil
 }
 
-// ConfigRepo creates a bare repo named <name>.git, commits workspace.toml
-// with the given TOML body, and returns its file:// URL.
-func (s *localGitServer) ConfigRepo(name, toml string) (string, error) {
+// createRepoWithFile creates a bare repo named <name>.git, commits a single
+// file with the given content, and returns its file:// URL. It is the shared
+// implementation behind ConfigRepo and OverlayRepo.
+func (s *localGitServer) createRepoWithFile(name, filename, content string) (string, error) {
 	repoPath := filepath.Join(s.root, name+".git")
 	out, err := exec.Command("git", "init", "--bare", repoPath).CombinedOutput()
 	if err != nil {
@@ -54,8 +55,8 @@ func (s *localGitServer) ConfigRepo(name, toml string) (string, error) {
 		return "", fmt.Errorf("git clone %q: %w\n%s", fileURL, err, out)
 	}
 
-	if err = os.WriteFile(filepath.Join(workDir, "workspace.toml"), []byte(toml), 0o644); err != nil {
-		return "", fmt.Errorf("writing workspace.toml: %w", err)
+	if err = os.WriteFile(filepath.Join(workDir, filename), []byte(content), 0o644); err != nil {
+		return "", fmt.Errorf("writing %s: %w", filename, err)
 	}
 
 	gitEnv := append(os.Environ(),
@@ -65,7 +66,7 @@ func (s *localGitServer) ConfigRepo(name, toml string) (string, error) {
 		"GIT_COMMITTER_EMAIL=niwa-test@example.com",
 	)
 
-	addCmd := exec.Command("git", "add", "workspace.toml")
+	addCmd := exec.Command("git", "add", filename)
 	addCmd.Dir = workDir
 	addCmd.Env = gitEnv
 	if out, err = addCmd.CombinedOutput(); err != nil {
@@ -87,4 +88,16 @@ func (s *localGitServer) ConfigRepo(name, toml string) (string, error) {
 	}
 
 	return fileURL, nil
+}
+
+// ConfigRepo creates a bare repo named <name>.git, commits workspace.toml
+// with the given TOML body, and returns its file:// URL.
+func (s *localGitServer) ConfigRepo(name, toml string) (string, error) {
+	return s.createRepoWithFile(name, "workspace.toml", toml)
+}
+
+// OverlayRepo creates a bare repo named <name>.git, commits
+// workspace-overlay.toml with the given TOML body, and returns its file:// URL.
+func (s *localGitServer) OverlayRepo(name, toml string) (string, error) {
+	return s.createRepoWithFile(name, "workspace-overlay.toml", toml)
 }
