@@ -101,14 +101,23 @@ func runReset(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	// Re-create using the same instance name.
-	cfg.Workspace.Name = state.InstanceName
-
+	// Re-create using the same instance name. cfg.Workspace.Name is the
+	// config name from workspace.toml (never mutated); state.InstanceName
+	// is the directory name being recreated (e.g. "myws-2").
 	token := resolveGitHubToken()
 	gh := github.NewAPIClient(token)
 
 	applier := workspace.NewApplier(gh)
-	instancePath, err := applier.Create(cmd.Context(), cfg, configDir, workspaceRoot)
+	configName := cfg.Workspace.Name
+	if globalCfg, gErr := config.LoadGlobalConfig(); gErr == nil {
+		if gDir, gErr := config.GlobalConfigDir(); gErr == nil {
+			applier.GlobalConfigDir = gDir
+		}
+		if entry := globalCfg.LookupWorkspace(configName); entry != nil {
+			applier.ConfigSourceURL = entry.SourceURL
+		}
+	}
+	instancePath, err := applier.Create(cmd.Context(), cfg, configDir, workspaceRoot, state.InstanceName)
 	if err != nil {
 		return fmt.Errorf("recreating instance: %w", err)
 	}
