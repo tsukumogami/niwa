@@ -187,3 +187,85 @@ Feature: Critical path: init, create, and apply
     When I run "niwa create myws"
     Then the exit code is 0
     And the instance "myws-2" exists
+
+  # --- clone-output-ux: --no-progress produces clean append-only output ---
+  # Ensures that when --no-progress is passed, the Reporter is constructed in
+  # non-TTY mode and the resulting stderr is free of ANSI escape sequences.
+
+  @critical
+  Scenario: niwa apply --no-progress produces clean line-by-line output
+    Given a clean niwa environment
+    And a local git server is set up
+    And a source repo "myapp" exists
+    And a config repo "myws" exists with body:
+      """
+      [workspace]
+      name = "myws"
+
+      [groups.tools]
+
+      [repos.myapp]
+      url = "{repo:myapp}"
+      group = "tools"
+      """
+    When I run niwa init from config repo "myws"
+    Then the exit code is 0
+    When I run "niwa create myws"
+    Then the exit code is 0
+    When I run "niwa apply myws --no-progress"
+    Then the exit code is 0
+    And the error output does not contain an ANSI escape sequence
+
+  # --- clone-output-ux: git error messages surface through Reporter on failure ---
+  # Ensures that clone failures expose git's own diagnostic text ("fatal:") so
+  # users see actionable information rather than a bare exit-status error.
+
+  @critical
+  Scenario: clone failure surfaces git diagnostic text rather than exit status
+    Given a clean niwa environment
+    And a local git server is set up
+    And a config repo "myws" exists with body:
+      """
+      [workspace]
+      name = "myws"
+
+      [groups.tools]
+
+      [repos.broken]
+      url = "file:///nonexistent/does-not-exist.git"
+      group = "tools"
+      """
+    When I run niwa init from config repo "myws"
+    Then the exit code is 0
+    When I run "niwa create myws"
+    Then the exit code is not 0
+    And the error output contains "fatal:"
+
+  # --- clone-output-ux: overlay sync produces no output (privacy) ---
+  # The overlay repo name and URL must not appear in apply output because the
+  # overlay repo name typically encodes the user's identity or organisation.
+
+  @critical
+  Scenario: overlay repo name and URL do not appear in apply output
+    Given a clean niwa environment
+    And a local git server is set up
+    And a source repo "myapp" exists
+    And a config repo "myws" exists with body:
+      """
+      [workspace]
+      name = "myws"
+
+      [groups.tools]
+
+      [repos.myapp]
+      url = "{repo:myapp}"
+      group = "tools"
+      """
+    And an overlay repo "myws-overlay" exists with body:
+      """
+      """
+    When I run niwa init from config repo "myws"
+    Then the exit code is 0
+    When I run "niwa apply myws"
+    Then the exit code is 0
+    And the error output does not contain "myws-overlay"
