@@ -30,3 +30,9 @@ init → create → apply workflow, add a `@critical` Gherkin scenario in
 `test/functional/features/`. See
 `docs/guides/functional-testing.md` for patterns and the
 `localGitServer` helper that provides offline bare-repo fakes.
+
+## Contributor Guides
+
+- `docs/guides/functional-testing.md` — end-to-end test patterns and the `localGitServer` helper
+- `docs/guides/one-time-notices.md` — how to add informational messages that appear once per workspace instance
+- `docs/guides/vault-integration.md` — vault provider architecture and acceptance coverage

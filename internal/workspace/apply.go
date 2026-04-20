@@ -125,6 +125,29 @@ const GlobalConfigOverrideFile = "niwa.toml"
 // subsequent runs.
 const noticeProviderShadow = "provider-shadow"
 
+// cloneWorkers is the maximum number of repos cloned concurrently.
+const cloneWorkers = 8
+
+// cloneJob carries per-repo inputs to a clone worker.
+type cloneJob struct {
+	cr            ClassifiedRepo
+	cloneURL      string
+	branch        string
+	targetDir     string
+	defaultBranch string
+	noPull        bool
+}
+
+// cloneResult carries per-repo outputs back to the orchestrator.
+type cloneResult struct {
+	name      string
+	cloneURL  string // echoed from job so the orchestrator can populate RepoState.URL
+	targetDir string // echoed from job so the orchestrator can call repoAlreadyCloned
+	cloned    bool
+	syncWarn  string // non-empty if sync produced a deferred warning
+	err       error  // non-nil on clone failure; does not include sync errors
+}
+
 // pipelineOpts configures shared pipeline behavior for Create vs Apply.
 type pipelineOpts struct {
 	existingState    *InstanceState
@@ -768,39 +791,72 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		return nil, err
 	}
 
-	// Step 3: Create group directories and clone repos.
+	// Step 3: Create group directories and clone repos concurrently.
+	//
+	// Group directory creation runs sequentially (fast local I/O; repos in the
+	// same group share a dir, so deduplication would be needed if parallelized).
+	// Cloning then runs via a bounded worker pool — see cloneWorker for the
+	// concurrency model. Both channels must be buffered to len(classified), not
+	// to cloneWorkers: workers must always be able to send without blocking so
+	// the cancel-then-drain path in the orchestrator cannot deadlock.
+	//
+	// If a partially-written .git dir survives a cancelled niwa apply, the next
+	// apply will attempt git fetch on it via SyncRepo. Remove the affected repo
+	// directory and re-run apply to recover.
 	repoStates := map[string]RepoState{}
 	for _, cr := range classified {
 		groupDir := filepath.Join(instanceRoot, cr.Group)
 		if err := os.MkdirAll(groupDir, 0o755); err != nil {
 			return nil, fmt.Errorf("creating group directory %s: %w", groupDir, err)
 		}
+	}
 
-		cloneURL := RepoCloneURL(effectiveCfg, cr.Repo.Name, cr.Repo.SSHURL, cr.Repo.CloneURL)
-		branch := RepoCloneBranch(effectiveCfg, cr.Repo.Name)
+	{
+		ctx, cancel := context.WithCancel(ctx)
+		defer cancel()
 
-		targetDir := filepath.Join(groupDir, cr.Repo.Name)
-		a.Reporter.Status(fmt.Sprintf("cloning %s...", cr.Repo.Name))
-		cloned, err := a.Cloner.CloneWithBranch(ctx, cloneURL, targetDir, branch, a.Reporter)
-		if err != nil {
-			a.Reporter.Warn("failed to clone %s", cr.Repo.Name)
-			return nil, fmt.Errorf("cloning repo %s: %w", cr.Repo.Name, err)
+		total := len(classified)
+		jobs := make(chan cloneJob, total)
+		results := make(chan cloneResult, total)
+
+		workers := min(cloneWorkers, total)
+		for range workers {
+			go a.cloneWorker(ctx, jobs, results)
 		}
-		if !cloned && !a.NoPull {
-			a.Reporter.Status(fmt.Sprintf("syncing %s...", cr.Repo.Name))
-			defaultBranch := DefaultBranch(effectiveCfg, cr.Repo.Name)
-			result, syncErr := SyncRepo(ctx, targetDir, defaultBranch, a.Reporter)
-			if result.Action == "fetch-failed" {
-				a.Reporter.DeferWarn("could not fetch %s: %s", cr.Repo.Name, result.Reason)
-			}
-			if syncErr != nil {
-				a.Reporter.DeferWarn("sync failed for %s: %v", cr.Repo.Name, syncErr)
+		for _, cr := range classified {
+			groupDir := filepath.Join(instanceRoot, cr.Group)
+			jobs <- cloneJob{
+				cr:            cr,
+				cloneURL:      RepoCloneURL(effectiveCfg, cr.Repo.Name, cr.Repo.SSHURL, cr.Repo.CloneURL),
+				branch:        RepoCloneBranch(effectiveCfg, cr.Repo.Name),
+				targetDir:     filepath.Join(groupDir, cr.Repo.Name),
+				defaultBranch: DefaultBranch(effectiveCfg, cr.Repo.Name),
+				noPull:        a.NoPull,
 			}
 		}
+		close(jobs)
 
-		repoStates[cr.Repo.Name] = RepoState{
-			URL:    cloneURL,
-			Cloned: cloned || repoAlreadyCloned(targetDir),
+		a.Reporter.Status(fmt.Sprintf("cloning repos... (0/%d done)", total))
+		var cloneErr error
+		for done := 0; done < total; done++ {
+			r := <-results
+			if r.err != nil && cloneErr == nil {
+				cloneErr = fmt.Errorf("cloning repo %s: %w", r.name, r.err)
+				cancel()
+			}
+			if cloneErr == nil {
+				if r.syncWarn != "" {
+					a.Reporter.DeferWarn("%s", r.syncWarn)
+				}
+				repoStates[r.name] = RepoState{
+					URL:    r.cloneURL,
+					Cloned: r.cloned || repoAlreadyCloned(r.targetDir),
+				}
+			}
+			a.Reporter.Status(fmt.Sprintf("cloning repos... (%d/%d done)", done+1, total))
+		}
+		if cloneErr != nil {
+			return nil, cloneErr
 		}
 	}
 
@@ -1205,6 +1261,45 @@ func hasVaultRotation(oldSources, newSources []SourceEntry) bool {
 func repoAlreadyCloned(dir string) bool {
 	_, err := os.Stat(filepath.Join(dir, ".git"))
 	return err == nil
+}
+
+// cloneWorker pulls jobs from the jobs channel until it is closed, clones or
+// syncs each repo, and sends a cloneResult for each. Workers use a no-op
+// reporter so all Reporter calls remain on the orchestrator goroutine.
+func (a *Applier) cloneWorker(ctx context.Context, jobs <-chan cloneJob, results chan<- cloneResult) {
+	noop := NewReporterWithTTY(io.Discard, false)
+	for job := range jobs {
+		cloned, err := a.Cloner.CloneWithBranch(ctx, job.cloneURL, job.targetDir, job.branch, noop)
+		if err != nil {
+			results <- cloneResult{
+				name:      job.cr.Repo.Name,
+				cloneURL:  job.cloneURL,
+				targetDir: job.targetDir,
+				err:       err,
+			}
+			continue
+		}
+		var syncWarn string
+		if !cloned && !job.noPull {
+			result, syncErr := SyncRepo(ctx, job.targetDir, job.defaultBranch, noop)
+			if result.Action == "fetch-failed" {
+				syncWarn = fmt.Sprintf("could not fetch %s: %s", job.cr.Repo.Name, result.Reason)
+			}
+			if syncErr != nil {
+				if syncWarn != "" {
+					syncWarn += "; "
+				}
+				syncWarn += fmt.Sprintf("sync failed for %s: %v", job.cr.Repo.Name, syncErr)
+			}
+		}
+		results <- cloneResult{
+			name:      job.cr.Repo.Name,
+			cloneURL:  job.cloneURL,
+			targetDir: job.targetDir,
+			cloned:    cloned,
+			syncWarn:  syncWarn,
+		}
+	}
 }
 
 // discoverAllRepos collects repos from all sources, enforcing per-source
