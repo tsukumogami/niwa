@@ -224,10 +224,16 @@ flow back through a result channel. The orchestrator drives all Reporter updates
 runPipeline (orchestrator)
   ├── ctx, cancel = context.WithCancel(ctx)
   ├── jobs     chan cloneJob    (buffered, len = total repos)
-  ├── results  chan cloneResult (buffered, len = total repos)
+  ├── results  chan cloneResult (buffered, len = total repos — must be this size)
   └── N worker goroutines
         └── calls Cloner.CloneWithBranch / SyncRepo → sends cloneResult
 ```
+
+**Buffer size is a correctness constraint, not a style choice.** Both channels must be
+buffered to `len(classified)` (the total repo count, not `cloneWorkers`). Workers can
+then always send without blocking. If `results` were buffered to `cloneWorkers` instead,
+workers that complete after the orchestrator breaks the drain loop on error would block
+forever trying to send — a goroutine leak.
 
 ### Key interfaces
 
@@ -245,6 +251,7 @@ type cloneJob struct {
 // cloneResult carries per-repo outputs back to the orchestrator.
 type cloneResult struct {
     name     string
+    cloneURL string // echoed from job for RepoState.URL population
     cloned   bool
     syncWarn string // non-empty if sync produced a DeferWarn message
     err      error  // non-nil on clone failure; does not include sync errors
@@ -253,6 +260,15 @@ type cloneResult struct {
 
 Workers and the two types are unexported and contained in `apply.go`. No new
 files or packages.
+
+Workers receive a **no-op reporter** (`NewReporterWithTTY(io.Discard, false)`)
+rather than `a.Reporter`. `Cloner.CloneWithBranch` and `SyncRepo` pass this
+reporter to `runGitWithReporter`, which would otherwise call `r.Status(line)` from
+the worker goroutine — concurrent with the orchestrator also calling
+`a.Reporter.Status(...)` for the progress counter. Passing `io.Discard` as the
+reporter to workers discards per-repo git progress lines, which are replaced by the
+summary counter. This is consistent with the UX decision: during parallel clones,
+the meaningful display is the overall count, not individual git progress streams.
 
 ### Data flow
 
@@ -264,9 +280,10 @@ files or packages.
    then closes it.
 4. Orchestrator starts `min(cloneWorkers, len(classified))` worker goroutines.
 5. Each worker pulls from `jobs` until the channel is closed. For each job:
-   - Calls `a.Cloner.CloneWithBranch(ctx, ...)` (or the equivalent clone path).
-   - On clone success where `!cloned && !job.noPull`: calls `SyncRepo(ctx, ...)`.
-   - Sends a `cloneResult` to the results channel.
+   - Creates `noop := NewReporterWithTTY(io.Discard, false)` for git output.
+   - Calls `a.Cloner.CloneWithBranch(ctx, ..., noop)` — git progress is discarded.
+   - On clone success where `!cloned && !job.noPull`: calls `SyncRepo(ctx, ..., noop)`.
+   - Sends a `cloneResult` to the results channel (including `cloneURL` for `RepoState`).
 6. Orchestrator reads `len(classified)` results. After each:
    - Increments done counter.
    - Calls `a.Reporter.Status(fmt.Sprintf("cloning repos... (%d/%d done)", done, total))`.
@@ -325,8 +342,12 @@ they reach Step 3. No new permissions, dependencies, or data flows are introduce
 Context cancellation kills git processes mid-clone and leaves partial clone
 directories. These are within the instance root, which is owned by the user and
 cleaned up by the existing `os.RemoveAll(instanceRoot)` call in Create on failure.
-For `apply`, partial directories are harmless: the missing `.git` dir causes a
-fresh clone on the next apply.
+For `apply`, partial directories are mostly benign, but git writes a `.git` dir
+early in the clone process — a cancelled clone can leave a partially-populated
+`.git`, not a missing one. On the next apply, `CloneWith` sees `.git` and skips
+the clone; `SyncRepo` then runs `git fetch` against a possibly-corrupt object store.
+A code comment near the cancel call should document the recovery: `rm -rf` the repo
+directory and re-apply.
 
 ## Consequences
 
@@ -354,9 +375,10 @@ fresh clone on the next apply.
 
 - The cap of 8 is conservative for typical office and home broadband. Users who
   observe saturation can file an issue to make the cap configurable.
-- Partial directories from interrupted `apply` operations are benign: the next
-  apply re-clones cleanly (missing `.git` is the signal). A code comment near
-  the cancel call documents this.
+- Partial directories from interrupted `apply` operations may include a
+  partially-written `.git` dir (git writes it early). If a repo behaves oddly
+  after an interrupted apply, `rm -rf` the repo directory and re-apply. A code
+  comment near the cancel call documents this recovery step.
 - Worker pool complexity is self-contained in Step 3 of `runPipeline()`. A
   comment block explains the orchestrator-worker protocol and the two channel
   roles.
