@@ -1,5 +1,5 @@
 ---
-status: Planned
+status: Current
 problem: |
   The clone and sync loop in `niwa apply/create` runs sequentially. For workspaces
   with ten or more repos, users wait for each git clone to finish before the next
@@ -25,7 +25,7 @@ rationale: |
 
 ## Status
 
-Planned
+Current
 
 ## Context and Problem Statement
 
