@@ -908,6 +908,110 @@ func TestEnumerateReposFiltersInvalidNames(t *testing.T) {
 	}
 }
 
+func TestNoticeDisclosed(t *testing.T) {
+	t.Run("nil state", func(t *testing.T) {
+		if noticeDisclosed(nil, "foo") {
+			t.Error("noticeDisclosed(nil, ...) must return false")
+		}
+	})
+	t.Run("empty state", func(t *testing.T) {
+		s := &InstanceState{}
+		if noticeDisclosed(s, "foo") {
+			t.Error("noticeDisclosed with empty DisclosedNotices must return false")
+		}
+	})
+	t.Run("notice present", func(t *testing.T) {
+		s := &InstanceState{DisclosedNotices: []string{"foo", "bar"}}
+		if !noticeDisclosed(s, "foo") {
+			t.Error("noticeDisclosed must return true when notice is present")
+		}
+		if !noticeDisclosed(s, "bar") {
+			t.Error("noticeDisclosed must return true for second notice")
+		}
+	})
+	t.Run("notice absent", func(t *testing.T) {
+		s := &InstanceState{DisclosedNotices: []string{"foo"}}
+		if noticeDisclosed(s, "baz") {
+			t.Error("noticeDisclosed must return false when notice is absent")
+		}
+	})
+}
+
+func TestMergeDisclosedNotices(t *testing.T) {
+	t.Run("empty added returns existing", func(t *testing.T) {
+		existing := []string{"a", "b"}
+		got := mergeDisclosedNotices(existing, nil)
+		if len(got) != 2 || got[0] != "a" || got[1] != "b" {
+			t.Errorf("got %v, want [a b]", got)
+		}
+	})
+	t.Run("deduplicates", func(t *testing.T) {
+		got := mergeDisclosedNotices([]string{"a"}, []string{"a", "b"})
+		if len(got) != 2 || got[0] != "a" || got[1] != "b" {
+			t.Errorf("got %v, want [a b]", got)
+		}
+	})
+	t.Run("nil existing", func(t *testing.T) {
+		got := mergeDisclosedNotices(nil, []string{"x"})
+		if len(got) != 1 || got[0] != "x" {
+			t.Errorf("got %v, want [x]", got)
+		}
+	})
+	t.Run("both nil", func(t *testing.T) {
+		got := mergeDisclosedNotices(nil, nil)
+		if len(got) != 0 {
+			t.Errorf("got %v, want []", got)
+		}
+	})
+}
+
+func TestDisclosedNoticesRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	state := &InstanceState{
+		SchemaVersion:    SchemaVersion,
+		InstanceName:     "test-notices",
+		InstanceNumber:   1,
+		Root:             dir,
+		Created:          time.Now().Truncate(time.Second),
+		LastApplied:      time.Now().Truncate(time.Second),
+		Repos:            map[string]RepoState{},
+		DisclosedNotices: []string{"provider-shadow"},
+	}
+	if err := SaveState(dir, state); err != nil {
+		t.Fatalf("SaveState: %v", err)
+	}
+	loaded, err := LoadState(dir)
+	if err != nil {
+		t.Fatalf("LoadState: %v", err)
+	}
+	if len(loaded.DisclosedNotices) != 1 || loaded.DisclosedNotices[0] != "provider-shadow" {
+		t.Errorf("DisclosedNotices = %v, want [provider-shadow]", loaded.DisclosedNotices)
+	}
+}
+
+func TestDisclosedNoticesOmitEmpty(t *testing.T) {
+	dir := t.TempDir()
+	state := &InstanceState{
+		SchemaVersion:  SchemaVersion,
+		InstanceName:   "test-no-notices",
+		InstanceNumber: 1,
+		Root:           dir,
+		Created:        time.Now().Truncate(time.Second),
+		LastApplied:    time.Now().Truncate(time.Second),
+		Repos:          map[string]RepoState{},
+	}
+	if err := SaveState(dir, state); err != nil {
+		t.Fatalf("SaveState: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, StateDir, StateFile))
+	if err != nil {
+		t.Fatalf("reading state file: %v", err)
+	}
+	if containsKey(string(data), "disclosed_notices") {
+		t.Error("disclosed_notices must be omitted from JSON when empty")
+	}
+}
+
 // TestSourceKindEnvExample asserts that SourceKindEnvExample has the string
 // value "env_example" and is distinct from the other two source kind constants.
 func TestSourceKindEnvExample(t *testing.T) {

@@ -146,29 +146,27 @@ func TestRunGitWithReporter_EmbedsDiagnostic(t *testing.T) {
 	}
 }
 
-// TestRunCmdWithReporter_AllLinesViaLog verifies that all output from a
-// non-git command is routed through r.Log with no classifier.
+// TestRunCmdWithReporter_AllLinesViaStatus verifies that all output from a
+// non-git command is routed through r.Status (transient) with no classifier.
 // Scenario: scenario-9 (gitutil helpers exist with correct structure)
-func TestRunCmdWithReporter_AllLinesViaLog(t *testing.T) {
+func TestRunCmdWithReporter_AllLinesViaStatus(t *testing.T) {
 	var buf bytes.Buffer
-	r := NewReporterWithTTY(&buf, false)
+	r := NewReporterWithTTY(&buf, true) // TTY mode so Status drives spinner
 
 	cmd := exec.CommandContext(context.Background(), "sh", "-c", "echo fatal: this is fine && echo hello")
 	if err := runCmdWithReporter(r, cmd); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
+	r.Log("end") // stop spinner so output is deterministic
 
 	out := buf.String()
-	// All lines should be logged. Neither should be prefixed "warning: " since
-	// runCmdWithReporter has no classifier.
+	// "fatal:" lines go through Status (transient), not Warn — no "warning:" prefix.
 	if strings.Contains(out, "warning: fatal") {
 		t.Errorf("runCmdWithReporter: 'fatal:' line incorrectly routed through Warn: %q", out)
 	}
-	if !strings.Contains(out, "fatal: this is fine") {
-		t.Errorf("runCmdWithReporter: expected 'fatal: this is fine' in output, got: %q", out)
-	}
-	if !strings.Contains(out, "hello") {
-		t.Errorf("runCmdWithReporter: expected 'hello' in output, got: %q", out)
+	// Script output is transient — permanent newline-terminated lines must not appear.
+	if strings.Contains(out, "fatal: this is fine\n") {
+		t.Errorf("runCmdWithReporter: script output should be transient, not permanent: %q", out)
 	}
 }
 
@@ -177,7 +175,7 @@ func TestRunCmdWithReporter_AllLinesViaLog(t *testing.T) {
 // Scenario: scenario-11 (ANSI/OSC escape sequences are stripped from git output lines)
 func TestRunGitWithReporter_StripEscapesInOutput(t *testing.T) {
 	var buf bytes.Buffer
-	r := NewReporterWithTTY(&buf, false)
+	r := NewReporterWithTTY(&buf, true) // TTY mode so spinner runs
 
 	// Use printf to emit a line with CSI escape sequences; git is not involved
 	// here but the same helper is used for subprocess output.
@@ -185,11 +183,16 @@ func TestRunGitWithReporter_StripEscapesInOutput(t *testing.T) {
 	if err := runCmdWithReporter(r, cmd); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
+	r.Log("end") // stop spinner; goroutine ticks at least once before exiting
 
 	out := buf.String()
-	if strings.ContainsRune(out, '\x1b') {
-		t.Errorf("expected escape sequences stripped, but output contains ESC: %q", out)
+	// The reporter itself writes ANSI status sequences; check the INPUT bold
+	// escape was stripped, not just that no ESC byte exists.
+	if strings.Contains(out, "\x1b[1m") {
+		t.Errorf("expected input bold escape stripped, but \\x1b[1m present in output: %q", out)
 	}
+	// "hello" appears in the spinner output (the goroutine ticks at least once
+	// before stopSpinner completes, since doTick runs unconditionally at goroutine start).
 	if !strings.Contains(out, "hello") {
 		t.Errorf("expected 'hello' in stripped output, got: %q", out)
 	}

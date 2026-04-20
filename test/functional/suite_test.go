@@ -183,6 +183,7 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 	ctx.Step(`^the wrapped shell ended in workspace "([^"]*)"$`, theWrappedShellEndedInWorkspace)
 	ctx.Step(`^the wrapped shell did not change directory$`, theWrappedShellDidNotChangeDirectory)
 	ctx.Step(`^no niwa temp files remain in the system temp directory$`, noNiwaTempFilesRemain)
+	ctx.Step(`^a foreign directory "([^"]*)" exists in the workspace root$`, aForeignDirectoryExistsAtInstancePath)
 	ctx.Step(`^I write "([^"]*)" to file "([^"]*)" in repo "([^"]*)" of instance "([^"]*)"$`, func(ctx context.Context, content, relPath, groupRepo, instanceName string) (context.Context, error) {
 		return iWriteFileToRepoInInstance(ctx, content, relPath, groupRepo, instanceName)
 	})

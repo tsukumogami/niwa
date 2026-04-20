@@ -931,6 +931,21 @@ func iWriteFileToRepoInInstance(ctx context.Context, content, relFilePath, group
 // `mktemp` creates files there; its `rm -f` should clean them up. Any
 // remaining entry in s.tmpDir after the wrapped command ran indicates a
 // missing or failed cleanup in the wrapper.
+// aForeignDirectoryExistsAtInstancePath creates an empty directory at
+// workspaceRoot/name without a .niwa/instance.json, simulating a leftover or
+// foreign directory that blocks the numbered instance slot.
+func aForeignDirectoryExistsAtInstancePath(ctx context.Context, name string) (context.Context, error) {
+	s := getState(ctx)
+	if s == nil {
+		return ctx, fmt.Errorf("no test state")
+	}
+	dir := filepath.Join(s.workspaceRoot, name)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return ctx, fmt.Errorf("creating foreign directory %s: %w", dir, err)
+	}
+	return ctx, nil
+}
+
 func noNiwaTempFilesRemain(ctx context.Context) error {
 	s := getState(ctx)
 	entries, err := os.ReadDir(s.tmpDir)

@@ -85,10 +85,11 @@ func runGitWithReporter(r *Reporter, cmd *exec.Cmd) error {
 }
 
 // runCmdWithReporter runs cmd and routes its combined stdout+stderr through
-// r.Log. ANSI and OSC escape sequences are stripped unconditionally.
+// r.Status. ANSI and OSC escape sequences are stripped unconditionally.
 // Unlike runGitWithReporter there is no line classifier — all output is
-// treated as informational (used for setup scripts whose output format is
-// not predictable).
+// treated as transient progress (used for setup scripts whose output format is
+// not predictable). On non-TTY output Status is a no-op, so script output is
+// silent in piped/CI contexts.
 func runCmdWithReporter(r *Reporter, cmd *exec.Cmd) error {
 	pr, pw := io.Pipe()
 	defer pw.Close()
@@ -102,7 +103,7 @@ func runCmdWithReporter(r *Reporter, cmd *exec.Cmd) error {
 		scanner := bufio.NewScanner(pr)
 		for scanner.Scan() {
 			line := stripEscapes(scanner.Text())
-			r.Log("%s", line)
+			r.Status(line)
 		}
 		pr.Close()
 	}()

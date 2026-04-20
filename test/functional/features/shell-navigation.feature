@@ -1,8 +1,8 @@
 Feature: Shell navigation protocol
   After `niwa create` and `niwa go`, the shell should cd to the resulting
   directory. The CLI communicates the landing path to the shell wrapper via
-  NIWA_RESPONSE_FILE when set, or stdout when absent (backward compat for
-  scripts that call $(niwa go ...) directly).
+  NIWA_RESPONSE_FILE. When the env var is absent the call is a no-op; the
+  landing path appears in the command's stderr summary line instead.
 
   Design: docs/designs/current/DESIGN-shell-navigation-protocol.md
 
@@ -58,8 +58,7 @@ Feature: Shell navigation protocol
   #
   # These scenarios exercise the binary directly — no wrapper, so pwd
   # can't be asserted. They lock the protocol-writer contract the wrapper
-  # depends on: file format on success, stdout fallback when the env
-  # var is absent (preserves $(niwa go ...) scripts).
+  # depends on: file format on success, stdout empty when the env var is absent.
 
   @critical
   Scenario: NIWA_RESPONSE_FILE receives the landing path, stdout stays empty
@@ -71,11 +70,11 @@ Feature: Shell navigation protocol
     And the response file contains the path to workspace "myws"
 
   @critical
-  Scenario: NIWA_RESPONSE_FILE absent prints path on stdout (backward compat)
+  Scenario: NIWA_RESPONSE_FILE absent produces no stdout output
     Given a workspace "myws" exists
     When I run "niwa go" from workspace "myws"
     Then the exit code is 0
-    And the output contains "myws"
+    And the output is empty
 
   @critical
   Scenario: niwa go on unknown workspace exits non-zero

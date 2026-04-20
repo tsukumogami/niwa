@@ -7,7 +7,6 @@ import (
 )
 
 // TestReporterNonTTYStatus verifies that Status is a no-op on non-TTY output.
-// Scenario: scenario-1 (Reporter non-TTY output — no ANSI sequences)
 func TestReporterNonTTYStatus(t *testing.T) {
 	var buf bytes.Buffer
 	r := NewReporterWithTTY(&buf, false)
@@ -18,7 +17,6 @@ func TestReporterNonTTYStatus(t *testing.T) {
 }
 
 // TestReporterNonTTYLog verifies that Log appends a line with no ANSI sequences.
-// Scenario: scenario-1 (Reporter non-TTY output — no ANSI sequences)
 func TestReporterNonTTYLog(t *testing.T) {
 	var buf bytes.Buffer
 	r := NewReporterWithTTY(&buf, false)
@@ -33,7 +31,6 @@ func TestReporterNonTTYLog(t *testing.T) {
 }
 
 // TestReporterNonTTYWarn verifies that Warn prefixes with "warning: " on non-TTY.
-// Scenario: scenario-1 (Reporter non-TTY output — no ANSI sequences)
 func TestReporterNonTTYWarn(t *testing.T) {
 	var buf bytes.Buffer
 	r := NewReporterWithTTY(&buf, false)
@@ -49,7 +46,6 @@ func TestReporterNonTTYWarn(t *testing.T) {
 }
 
 // TestReporterNonTTYWriter verifies that Writer() routes through Log on non-TTY.
-// Scenario: scenario-3 (Reporter.Writer() routes through Log)
 func TestReporterNonTTYWriter(t *testing.T) {
 	var buf bytes.Buffer
 	r := NewReporterWithTTY(&buf, false)
@@ -64,35 +60,37 @@ func TestReporterNonTTYWriter(t *testing.T) {
 	}
 }
 
-// TestReporterTTYStatus verifies that Status writes a CR+erase sequence on TTY.
-// Scenario: scenario-2 (Reporter TTY output — carriage-return status line)
+// TestReporterTTYStatus verifies that Status starts the spinner goroutine and
+// sets needsClear on TTY output.
 func TestReporterTTYStatus(t *testing.T) {
 	var buf bytes.Buffer
 	r := NewReporterWithTTY(&buf, true)
 	r.Status("cloning foo...")
-	got := buf.String()
-	want := "\r\033[Kcloning foo..."
-	if got != want {
-		t.Errorf("Status TTY: got %q, want %q", got, want)
-	}
 	if !r.needsClear {
 		t.Error("Status TTY: needsClear should be true after Status call")
 	}
+	r.mu.Lock()
+	active := r.spinStop != nil
+	r.mu.Unlock()
+	if !active {
+		t.Error("Status TTY: spinner goroutine should be running after Status call")
+	}
+	r.Log("done") // stop goroutine before test exits
 }
 
-// TestReporterTTYLogClearsStatus verifies that Log clears the status line when
-// needsClear is set.
-// Scenario: scenario-2 (Reporter TTY output — carriage-return status line)
+// TestReporterTTYLogClearsStatus verifies that Log stops the spinner and the
+// permanent log line appears cleanly at the end of output.
 func TestReporterTTYLogClearsStatus(t *testing.T) {
 	var buf bytes.Buffer
 	r := NewReporterWithTTY(&buf, true)
 	r.Status("cloning foo...")
-	buf.Reset() // ignore Status output for the assertion below
 	r.Log("cloned foo")
 	got := buf.String()
+	// Output ends with the clear sequence + log line, regardless of how many
+	// spinner frames the goroutine wrote before being stopped.
 	want := "\r\033[Kcloned foo\n"
-	if got != want {
-		t.Errorf("Log after Status TTY: got %q, want %q", got, want)
+	if !strings.HasSuffix(got, want) {
+		t.Errorf("Log after Status TTY: got %q, want suffix %q", got, want)
 	}
 	if r.needsClear {
 		t.Error("Log TTY: needsClear should be false after Log call")
@@ -100,8 +98,7 @@ func TestReporterTTYLogClearsStatus(t *testing.T) {
 }
 
 // TestReporterTTYLogNoClearWhenNotNeeded verifies that Log does not write the
-// CR+erase prefix when needsClear is false.
-// Scenario: scenario-2 (Reporter TTY output — carriage-return status line)
+// CR+erase prefix when no spinner is active.
 func TestReporterTTYLogNoClearWhenNotNeeded(t *testing.T) {
 	var buf bytes.Buffer
 	r := NewReporterWithTTY(&buf, true)
@@ -113,29 +110,25 @@ func TestReporterTTYLogNoClearWhenNotNeeded(t *testing.T) {
 	}
 }
 
-// TestReporterTTYWarn verifies that Warn clears status and prefixes "warning: ".
-// Scenario: scenario-2 (Reporter TTY output — carriage-return status line)
+// TestReporterTTYWarn verifies that Warn stops the spinner and prepends "warning: ".
 func TestReporterTTYWarn(t *testing.T) {
 	var buf bytes.Buffer
 	r := NewReporterWithTTY(&buf, true)
 	r.Status("doing work...")
-	buf.Reset()
 	r.Warn("oops: %s", "detail")
 	got := buf.String()
 	want := "\r\033[Kwarning: oops: detail\n"
-	if got != want {
-		t.Errorf("Warn after Status TTY: got %q, want %q", got, want)
+	if !strings.HasSuffix(got, want) {
+		t.Errorf("Warn after Status TTY: got %q, want suffix %q", got, want)
 	}
 }
 
 // TestReporterTTYWriter verifies that Writer() routes writes through Log on TTY,
-// including that a preceding Status line is cleared.
-// Scenario: scenario-3 (Reporter.Writer() routes through Log)
+// stopping the spinner first.
 func TestReporterTTYWriter(t *testing.T) {
 	var buf bytes.Buffer
 	r := NewReporterWithTTY(&buf, true)
 	r.Status("working...")
-	buf.Reset()
 	w := r.Writer()
 	_, err := w.Write([]byte("output line\n"))
 	if err != nil {
@@ -143,8 +136,8 @@ func TestReporterTTYWriter(t *testing.T) {
 	}
 	got := buf.String()
 	want := "\r\033[Koutput line\n"
-	if got != want {
-		t.Errorf("Writer TTY: got %q, want %q", got, want)
+	if !strings.HasSuffix(got, want) {
+		t.Errorf("Writer TTY: got %q, want suffix %q", got, want)
 	}
 }
 
@@ -168,5 +161,82 @@ func TestNewReporterNonFileWriter(t *testing.T) {
 	r := NewReporter(&buf)
 	if r.isTTY {
 		t.Error("NewReporter with bytes.Buffer: expected isTTY=false")
+	}
+}
+
+// TestReporterSpinnerTickFormat verifies that doTick writes the correct
+// spinner frame format: CR+erase + frame + space + message.
+// Called directly (no goroutine) to avoid timing dependencies.
+func TestReporterSpinnerTickFormat(t *testing.T) {
+	var buf bytes.Buffer
+	r := NewReporterWithTTY(&buf, true)
+	r.spinMsg = "cloning foo..."
+	r.spinFrame = 0
+	r.doTick()
+	got := buf.String()
+	wantPrefix := "\r\033[K"
+	wantSuffix := " cloning foo..."
+	if !strings.HasPrefix(got, wantPrefix) {
+		t.Errorf("doTick: got %q, want prefix %q", got, wantPrefix)
+	}
+	if !strings.HasSuffix(got, wantSuffix) {
+		t.Errorf("doTick: got %q, want suffix %q", got, wantSuffix)
+	}
+	if r.spinFrame != 1 {
+		t.Errorf("spinFrame after one tick: got %d, want 1", r.spinFrame)
+	}
+}
+
+// TestReporterSpinnerFrameCycles verifies that the spinner cycles through all
+// frames and wraps back to the start.
+func TestReporterSpinnerFrameCycles(t *testing.T) {
+	var buf bytes.Buffer
+	r := NewReporterWithTTY(&buf, true)
+	r.spinMsg = "working..."
+	n := len(spinFrames)
+	for i := 0; i < n+1; i++ {
+		r.doTick()
+	}
+	if r.spinFrame != n+1 {
+		t.Errorf("spinFrame after %d ticks: got %d, want %d", n+1, r.spinFrame, n+1)
+	}
+	// The (n+1)th tick uses spinFrames[(n+1-1) % n] = spinFrames[n % n] = spinFrames[0]
+	wantFrame := spinFrames[0]
+	lastTick := buf.String()
+	// Extract the last tick output (last \r\033[K... segment)
+	parts := strings.Split(lastTick, "\r\033[K")
+	last := parts[len(parts)-1]
+	if !strings.HasPrefix(last, wantFrame) {
+		t.Errorf("after full cycle, frame should wrap to %q, got segment %q", wantFrame, last)
+	}
+}
+
+// TestReporterSpinnerNoOpWhenMsgEmpty verifies that doTick is a no-op when
+// spinMsg is empty (e.g., after stopSpinner clears it).
+func TestReporterSpinnerNoOpWhenMsgEmpty(t *testing.T) {
+	var buf bytes.Buffer
+	r := NewReporterWithTTY(&buf, true)
+	r.spinMsg = ""
+	r.doTick()
+	if buf.Len() != 0 {
+		t.Errorf("doTick with empty spinMsg wrote %q, want empty", buf.String())
+	}
+}
+
+// TestReporterMultipleStatusUpdates verifies that updating the message while the
+// spinner is active shows the latest message after Log stops the goroutine.
+func TestReporterMultipleStatusUpdates(t *testing.T) {
+	var buf bytes.Buffer
+	r := NewReporterWithTTY(&buf, true)
+	r.Status("step 1")
+	r.Status("step 2")
+	r.Status("step 3")
+	r.Log("complete")
+	got := buf.String()
+	if !strings.HasSuffix(got, "\r\033[Kcomplete\n") {
+		t.Errorf("after multiple Status + Log: got %q, want suffix %q", got, "\r\033[Kcomplete\n")
+	}
+	if r.needsClear {
+		t.Error("needsClear should be false after Log")
 	}
 }

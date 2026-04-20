@@ -58,23 +58,18 @@ func computeInstanceName(configName, customName, workspaceRoot string) (string, 
 		return configName, nil
 	}
 
-	// Subsequent instances: find the next available number, skipping any
-	// directories that exist on disk but are not valid niwa instances.
-	// NextInstanceNumber accounts for valid instances only, so the candidate
-	// it produces may collide with a leftover or foreign directory.
-	nextNum, err := workspace.NextInstanceNumber(workspaceRoot)
-	if err != nil {
-		return "", fmt.Errorf("determining next instance number: %w", err)
-	}
-
-	for {
-		candidate := fmt.Sprintf("%s-%d", configName, nextNum)
+	// Subsequent instances: scan from 2 upward for the first directory name
+	// that does not exist on disk. Valid instances are silently skipped (their
+	// slot is taken). Non-valid directories are warned about and skipped.
+	for n := 2; ; n++ {
+		candidate := fmt.Sprintf("%s-%d", configName, n)
 		candidateDir := filepath.Join(workspaceRoot, candidate)
 		if _, err := os.Stat(candidateDir); os.IsNotExist(err) {
 			return candidate, nil
 		}
-		fmt.Fprintf(os.Stderr, "warning: skipping %s: directory exists but is not a valid niwa instance\n", candidateDir)
-		nextNum++
+		if _, err := workspace.LoadState(candidateDir); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: skipping %s: directory exists but is not a valid niwa instance\n", candidateDir)
+		}
 	}
 }
 
@@ -172,8 +167,7 @@ func runCreate(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	fmt.Fprintf(cmd.ErrOrStderr(), "Created instance: %s\n", instancePath)
-	if err := writeLandingPath(cmd, landingPath); err != nil {
+	if err := writeLandingPath(landingPath); err != nil {
 		return err
 	}
 

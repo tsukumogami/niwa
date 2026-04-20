@@ -1,5 +1,5 @@
 ---
-status: Planned
+status: Current
 problem: |
   Niwa's create and apply commands dump a linear log of git subprocess output
   and status messages to stderr with no TTY awareness. Users see git progress
@@ -9,13 +9,14 @@ problem: |
   incompatible without an explicit capture layer, and 29 niwa-authored output
   sites are scattered across the workspace package with no shared abstraction.
 decision: |
-  Introduce a Reporter struct (~50 lines, zero new deps beyond golang.org/x/term)
-  with Status/Log/Warn methods and a needsClear flag. On TTY, Status rewrites a
-  single bottom line in place via \r\033[K; Log and Warn clear it before printing.
-  Git subprocess stderr is captured via io.Pipe + goroutine + bufio.Scanner, which
-  classifies lines by prefix and routes them through Reporter while naturally
-  discarding \r-terminated git progress frames. TTY mode activates only when
-  term.IsTerminal returns true and --no-progress is absent.
+  Introduce a Reporter struct with Status/Log/Warn methods. On TTY, Status starts
+  a background goroutine that redraws the current message with an advancing braille
+  spinner (~100 ms ticks) so the display stays live during long git clones where all
+  subprocess output is discarded. Log and Warn stop the goroutine and clear the line
+  before printing. Git subprocess stderr is captured via io.Pipe + goroutine +
+  bufio.Scanner, which classifies lines by prefix and routes them through Reporter
+  while naturally discarding \r-terminated git progress frames. TTY mode activates
+  only when term.IsTerminal returns true and --no-progress is absent.
 rationale: |
   The sequential apply loop needs only a single status line, making the manual
   ANSI approach simpler and cheaper than any terminal library. Capturing git
@@ -29,7 +30,7 @@ rationale: |
 
 ## Status
 
-Planned
+Current
 
 ## Context and Problem Statement
 
@@ -137,34 +138,46 @@ evaluated.
 **Key assumptions:** apply loop remains sequential; overlay sync stays suppressed
 independently of Reporter; `golang.org/x/term` provides TTY detection.
 
-#### Chosen: No-library manual ANSI
+#### Chosen: No-library manual ANSI with background spinner goroutine
 
-A small `Reporter` type in `internal/workspace/` (or `internal/output/`) with:
+A small `Reporter` type in `internal/workspace/` with:
 
 ```go
 type Reporter struct {
     w          io.Writer
     isTTY      bool
-    needsClear bool
+    needsClear bool        // true while spinner goroutine is active
+    mu         sync.Mutex
+    spinMsg    string
+    spinFrame  int
+    spinStop   chan struct{} // closed to signal goroutine exit
+    spinDone   chan struct{} // closed by goroutine on exit
 }
 
 func NewReporter(w io.Writer) *Reporter  // detects TTY from w if *os.File
-func (r *Reporter) Status(msg string)            // \r\033[K<msg> on TTY; no-op on non-TTY
-func (r *Reporter) Log(format string, a ...any)  // clears status if set, prints line
+func (r *Reporter) Status(msg string)            // starts/updates spinner goroutine on TTY; no-op on non-TTY
+func (r *Reporter) Log(format string, a ...any)  // stops spinner, clears line, prints permanently
 func (r *Reporter) Warn(format string, a ...any) // same as Log, prefixes "warning: "
 func (r *Reporter) Writer() io.Writer            // adapter for io.Writer call sites
 ```
 
 The `Applier` struct gains a `Reporter *Reporter` field, defaulting to
-`NewReporter(os.Stderr)` in `NewApplier`. The `needsClear` flag tracks whether
-`\r\033[K` must precede the next output. `Log` and `Warn` both clear it before
-printing; `Status` sets it after writing. On non-TTY, all three methods behave
-identically: append-only writes with no ANSI sequences.
+`NewReporter(os.Stderr)` in `NewApplier`. `Status` starts a background goroutine
+(if not already running) that ticks a braille spinner frame (`⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏`)
+every ~100 ms, rewriting the current line via `\r\033[K`. The goroutine ticks
+immediately on startup so the status appears without a 100 ms delay. `Log` and
+`Warn` stop the goroutine via a channel and wait for it to exit before writing —
+guaranteeing no interleaved output. On non-TTY, `Status` is a no-op.
+
+The background goroutine is necessary because `runGitWithReporter` discards all
+non-error git output: without it, the status line would freeze for the entire
+duration of a clone. With it, the spinner keeps advancing through any operation
+regardless of subprocess output volume.
 
 Status line lifecycle per repo:
-1. `reporter.Status("cloning " + repo)` — before `CloneWithBranch`
-2. On clone completion: `reporter.Log("cloned %s", repo)` — clears status, prints line
-3. Warnings: `reporter.Warn("could not fetch %s: ...", repo)` — clears status, prints warning
+1. `reporter.Status("cloning " + repo)` — starts spinner goroutine before `CloneWithBranch`
+2. On clone completion: `reporter.Log("cloned %s", repo)` — stops goroutine, clears line, prints
+3. Warnings: `reporter.Warn("could not fetch %s: ...", repo)` — same, prefixes "warning: "
 
 #### Alternatives Considered
 
@@ -310,12 +323,13 @@ false positives from `CI_TOKEN`-style variables.
 
 The three decisions compose into a coherent architecture:
 
-1. A `Reporter` struct in `internal/workspace/` (or `internal/output/`) provides
-   `Status`, `Log`, and `Warn` methods. It detects TTY mode at construction time
-   via `golang.org/x/term.IsTerminal`. On TTY, `Status` uses `\r\033[K` to
-   rewrite a single status line in place; `Log` and `Warn` clear the status line
-   before printing. On non-TTY, all three methods produce append-only output
-   identical to today.
+1. A `Reporter` struct in `internal/workspace/` provides `Status`, `Log`, and
+   `Warn` methods. It detects TTY mode at construction time via
+   `golang.org/x/term.IsTerminal`. On TTY, `Status` starts a background goroutine
+   that advances a braille spinner frame every ~100 ms, keeping the display live
+   during long git operations where subprocess output is fully discarded. `Log` and
+   `Warn` stop the goroutine before printing, guaranteeing clean output. On non-TTY,
+   `Status` is a no-op and all output is append-only, identical to today.
 
 2. The `Applier` struct holds a `*Reporter`. Every git subprocess call site
    (`clone.go`, `sync.go`, `configsync.go`, `setup.go`) uses a shared
@@ -387,22 +401,26 @@ internal/workspace/overlaysync.go -- unchanged (R22 privacy requirement)
 **Reporter type** (`internal/workspace/reporter.go`):
 
 ```go
-type Reporter struct {
-    w          io.Writer
-    isTTY      bool
-    needsClear bool
-}
-
 // NewReporter detects TTY from w if it is *os.File; isTTY=false otherwise.
 // Pass isTTY=false explicitly for tests: NewReporterWithTTY(w, false).
 func NewReporter(w io.Writer) *Reporter
 func NewReporterWithTTY(w io.Writer, isTTY bool) *Reporter
 
-func (r *Reporter) Status(msg string)            // TTY: \r\033[K + msg (no newline)
-                                                 // non-TTY: no-op
-func (r *Reporter) Log(format string, a ...any)  // clears status if set; appends line
-func (r *Reporter) Warn(format string, a ...any) // same as Log, prefixes "warning: "
-func (r *Reporter) Writer() io.Writer            // for call sites needing io.Writer
+// Status sets the current message and starts the spinner goroutine if not
+// already running. The goroutine ticks a braille spinner frame every ~100 ms,
+// writing \r\033[K + frame + msg. First tick is immediate (no 100 ms delay).
+// No-op on non-TTY.
+func (r *Reporter) Status(msg string)
+
+// Log stops the spinner goroutine (if running), clears the spinner line, then
+// writes a permanent newline-terminated log entry.
+func (r *Reporter) Log(format string, a ...any)
+
+// Warn behaves like Log but prepends "warning: ".
+func (r *Reporter) Warn(format string, a ...any)
+
+// Writer returns an io.Writer that routes Write calls through Log.
+func (r *Reporter) Writer() io.Writer
 ```
 
 **runGitWithReporter helper** (`internal/workspace/gitutil.go`):
@@ -415,7 +433,8 @@ func (r *Reporter) Writer() io.Writer            // for call sites needing io.Wr
 func runGitWithReporter(r *Reporter, cmd *exec.Cmd) error
 
 // runCmdWithReporter is the general-purpose variant for non-git subprocesses
-// (e.g., setup scripts). No line classification — all output through r.Log.
+// (e.g., setup scripts). No line classification — all output through r.Status
+// (transient; silent in non-TTY/CI contexts).
 func runCmdWithReporter(r *Reporter, cmd *exec.Cmd) error
 ```
 
