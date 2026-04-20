@@ -95,6 +95,21 @@ type MaterializeContext struct {
 	// EnvExampleSources holds the SourceEntry tuples for the .env.example layer,
 	// parallel to EnvExampleVars. Populated when EnvExampleVars is set.
 	EnvExampleSources []SourceEntry
+
+	// Stderr, if non-nil, receives diagnostic warnings emitted during
+	// materialization. When nil, warnings fall back to os.Stderr.
+	// apply.go wires a.Reporter.Writer() so warnings clear the spinner
+	// before printing.
+	Stderr io.Writer
+}
+
+// stderr returns the writer to use for diagnostic output, defaulting to
+// os.Stderr when no writer has been wired into the context.
+func (c *MaterializeContext) stderr() io.Writer {
+	if c != nil && c.Stderr != nil {
+		return c.Stderr
+	}
+	return os.Stderr
 }
 
 // recordSources appends the given SourceEntry slice to the context's
@@ -506,7 +521,7 @@ func (s *SettingsMaterializer) Materialize(ctx *MaterializeContext) ([]string, e
 	// warnings but do not fail — settings.local.json has already been written.
 	gitignoreWarnings := CheckGitignore(ctx.RepoDir, ctx.RepoName)
 	for _, w := range gitignoreWarnings {
-		fmt.Fprintf(os.Stderr, "warning: %s\n", w)
+		fmt.Fprintf(ctx.stderr(), "warning: %s\n", w)
 	}
 
 	return []string{target}, nil

@@ -78,12 +78,24 @@ func runGoTest(t *testing.T, args []string, wsFlag, repoFlag string) (stdout, st
 	// Suppress shell-init hint.
 	t.Setenv("_NIWA_SHELL_INIT", "1")
 
+	// Wire a temp response file so writeLandingPath has somewhere to write.
+	// Read it back and return as stdout so callers don't need to change.
+	tmp := t.TempDir()
+	t.Setenv("TMPDIR", tmp)
+	responseFile := filepath.Join(tmp, "niwa-response")
+	withResponseFile(t, responseFile)
+
 	cmd := &cobra.Command{}
 	var outBuf, errBuf bytes.Buffer
 	cmd.SetOut(&outBuf)
 	cmd.SetErr(&errBuf)
 
 	err = runGo(cmd, args)
+	if err == nil {
+		if data, readErr := os.ReadFile(responseFile); readErr == nil {
+			outBuf.WriteString(strings.TrimRight(string(data), "\n"))
+		}
+	}
 	return outBuf.String(), errBuf.String(), err
 }
 

@@ -12,7 +12,8 @@ import (
 // is a git repo with a remote. Returns nil if the directory is not a git repo
 // or has no remote. Returns an error if the working tree is dirty (unless
 // allowDirty is true).
-func SyncConfigDir(configDir string, allowDirty bool) error {
+// r receives all git output; pass a non-nil *Reporter.
+func SyncConfigDir(configDir string, r *Reporter, allowDirty bool) error {
 	// Check if it's a git repo.
 	gitDir := filepath.Join(configDir, ".git")
 	if _, err := os.Stat(gitDir); os.IsNotExist(err) {
@@ -39,9 +40,7 @@ func SyncConfigDir(configDir string, allowDirty bool) error {
 
 	// Pull latest from origin.
 	cmd = exec.Command("git", "-C", configDir, "pull", "--ff-only", "origin")
-	cmd.Stdout = os.Stderr
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
+	if err := runGitWithReporter(r, cmd); err != nil {
 		return fmt.Errorf("pulling config from origin: %w", err)
 	}
 

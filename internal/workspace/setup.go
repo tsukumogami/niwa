@@ -42,7 +42,8 @@ func ResolveSetupDir(ws *config.WorkspaceConfig, repoName string) string {
 // RunSetupScripts scans setupDir within repoDir for executable scripts and
 // runs them in lexical order. Stops on the first script that exits non-zero.
 // Returns nil if the directory doesn't exist or is empty.
-func RunSetupScripts(repoDir, setupDir string) *SetupResult {
+// r receives all script output; pass a non-nil *Reporter.
+func RunSetupScripts(repoDir, setupDir string, r *Reporter) *SetupResult {
 	result := &SetupResult{RepoName: filepath.Base(repoDir)}
 
 	if setupDir == "" {
@@ -102,10 +103,8 @@ func RunSetupScripts(repoDir, setupDir string) *SetupResult {
 
 		cmd := exec.Command(scriptPath)
 		cmd.Dir = repoDir
-		cmd.Stdout = os.Stderr
-		cmd.Stderr = os.Stderr
 
-		if err := cmd.Run(); err != nil {
+		if err := runCmdWithReporter(r, cmd); err != nil {
 			result.Scripts = append(result.Scripts, ScriptResult{
 				Name:  name,
 				Error: err,

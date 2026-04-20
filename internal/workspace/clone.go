@@ -21,15 +21,17 @@ type Cloner struct{}
 
 // Clone clones a repo into the target directory if it doesn't already exist.
 // It returns true if a clone was performed, false if the directory already existed.
-func (c *Cloner) Clone(ctx context.Context, url, targetDir string) (bool, error) {
-	return c.CloneWith(ctx, url, targetDir, CloneOptions{})
+// r receives all git output; pass a non-nil *Reporter.
+func (c *Cloner) Clone(ctx context.Context, url, targetDir string, r *Reporter) (bool, error) {
+	return c.CloneWith(ctx, url, targetDir, CloneOptions{}, r)
 }
 
 // CloneWithBranch clones a repo into the target directory, optionally checking
 // out a specific branch. If branch is empty, the default branch is used.
 // It returns true if a clone was performed, false if the directory already existed.
-func (c *Cloner) CloneWithBranch(ctx context.Context, url, targetDir, branch string) (bool, error) {
-	return c.CloneWith(ctx, url, targetDir, CloneOptions{Ref: branch})
+// r receives all git output; pass a non-nil *Reporter.
+func (c *Cloner) CloneWithBranch(ctx context.Context, url, targetDir, branch string, r *Reporter) (bool, error) {
+	return c.CloneWith(ctx, url, targetDir, CloneOptions{Ref: branch}, r)
 }
 
 // CloneWith clones a repo into the target directory with the given options.
@@ -37,7 +39,8 @@ func (c *Cloner) CloneWithBranch(ctx context.Context, url, targetDir, branch str
 // the default branch then checks out the commit. Otherwise, Ref is passed
 // as --branch (works for both branches and tags).
 // It returns true if a clone was performed, false if the directory already existed.
-func (c *Cloner) CloneWith(ctx context.Context, url, targetDir string, opts CloneOptions) (bool, error) {
+// r receives all git output; pass a non-nil *Reporter.
+func (c *Cloner) CloneWith(ctx context.Context, url, targetDir string, opts CloneOptions, r *Reporter) (bool, error) {
 	if _, err := os.Stat(filepath.Join(targetDir, ".git")); err == nil {
 		return false, nil
 	}
@@ -58,18 +61,13 @@ func (c *Cloner) CloneWith(ctx context.Context, url, targetDir string, opts Clon
 	args = append(args, url, targetDir)
 
 	cmd := exec.CommandContext(ctx, "git", args...)
-	cmd.Stdout = os.Stderr
-	cmd.Stderr = os.Stderr
-
-	if err := cmd.Run(); err != nil {
+	if err := runGitWithReporter(r, cmd); err != nil {
 		return false, fmt.Errorf("cloning %s: %w", url, err)
 	}
 
 	if sha {
 		checkout := exec.CommandContext(ctx, "git", "-C", targetDir, "checkout", opts.Ref)
-		checkout.Stdout = os.Stderr
-		checkout.Stderr = os.Stderr
-		if err := checkout.Run(); err != nil {
+		if err := runGitWithReporter(r, checkout); err != nil {
 			return false, fmt.Errorf("checking out %s: %w", opts.Ref, err)
 		}
 	}

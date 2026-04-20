@@ -187,3 +187,151 @@ Feature: Critical path: init, create, and apply
     When I run "niwa create myws"
     Then the exit code is 0
     And the instance "myws-2" exists
+
+  # --- clone-output-ux: --no-progress produces clean append-only output ---
+  # Ensures that when --no-progress is passed, the Reporter is constructed in
+  # non-TTY mode and the resulting stderr is free of ANSI escape sequences.
+
+  @critical
+  Scenario: niwa apply --no-progress produces clean line-by-line output
+    Given a clean niwa environment
+    And a local git server is set up
+    And a source repo "myapp" exists
+    And a config repo "myws" exists with body:
+      """
+      [workspace]
+      name = "myws"
+
+      [groups.tools]
+
+      [repos.myapp]
+      url = "{repo:myapp}"
+      group = "tools"
+      """
+    When I run niwa init from config repo "myws"
+    Then the exit code is 0
+    When I run "niwa create myws"
+    Then the exit code is 0
+    When I run "niwa apply myws --no-progress"
+    Then the exit code is 0
+    And the error output does not contain an ANSI escape sequence
+
+  # --- clone-output-ux: git error messages surface through Reporter on failure ---
+  # Ensures that clone failures expose git's own diagnostic text ("fatal:") so
+  # users see actionable information rather than a bare exit-status error.
+
+  @critical
+  Scenario: clone failure surfaces git diagnostic text rather than exit status
+    Given a clean niwa environment
+    And a local git server is set up
+    And a config repo "myws" exists with body:
+      """
+      [workspace]
+      name = "myws"
+
+      [groups.tools]
+
+      [repos.broken]
+      url = "file:///nonexistent/does-not-exist.git"
+      group = "tools"
+      """
+    When I run niwa init from config repo "myws"
+    Then the exit code is 0
+    When I run "niwa create myws"
+    Then the exit code is not 0
+    And the error output contains "fatal:"
+
+  # --- clone-output-ux: overlay sync produces no output (privacy) ---
+  # The overlay repo name and URL must not appear in apply output because the
+  # overlay repo name typically encodes the user's identity or organisation.
+
+  @critical
+  Scenario: overlay repo name and URL do not appear in apply output
+    Given a clean niwa environment
+    And a local git server is set up
+    And a source repo "myapp" exists
+    And a config repo "myws" exists with body:
+      """
+      [workspace]
+      name = "myws"
+
+      [groups.tools]
+
+      [repos.myapp]
+      url = "{repo:myapp}"
+      group = "tools"
+      """
+    And an overlay repo "myws-overlay" exists with body:
+      """
+      """
+    When I run niwa init from config repo "myws"
+    Then the exit code is 0
+    When I run "niwa apply myws"
+    Then the exit code is 0
+    And the error output does not contain "myws-overlay"
+
+  # --- One-time notice suppression ---
+  # The provider-shadow notice must appear on the first create for a workspace
+  # but be suppressed on all subsequent creates in the same workspace. The
+  # disclosure is stored in the workspace root state (.niwa/instance.json at
+  # the workspace root), shared by all instances.
+
+  @critical
+  Scenario: provider-shadow notice appears on first create and is suppressed on subsequent creates
+    Given a clean niwa environment
+    And a local git server is set up
+    And a config repo "myws" exists with body:
+      """
+      [workspace]
+      name = "myws"
+
+      [vault.provider]
+      kind = "infisical"
+      project = "dummy-team-project"
+      """
+    And a personal overlay exists with body:
+      """
+      [global.vault.provider]
+      kind = "infisical"
+      project = "dummy-personal-project"
+      """
+    When I run niwa init from config repo "myws"
+    Then the exit code is 0
+    When I run "niwa create myws"
+    Then the exit code is 0
+    And the error output contains "shadowed provider"
+    When I run "niwa create myws"
+    Then the exit code is 0
+    And the error output does not contain "shadowed provider"
+
+  # --- Instance numbering: foreign directory is warned once, valid instances are silent ---
+  # A foreign (non-niwa) directory at a numbered slot must produce exactly one
+  # warning for that slot and must not produce a warning for valid instances
+  # created afterwards.
+
+  @critical
+  Scenario: foreign directory at numbered slot warns once and subsequent creates are silent
+    Given a clean niwa environment
+    And a local git server is set up
+    And a config repo "myws" exists with body:
+      """
+      [workspace]
+      name = "myws"
+      """
+    When I run niwa init from config repo "myws"
+    Then the exit code is 0
+    When I run "niwa create myws"
+    Then the exit code is 0
+    And the instance "myws" exists
+    And a foreign directory "myws-2" exists in the workspace root
+    When I run "niwa create myws"
+    Then the exit code is 0
+    And the instance "myws-3" exists
+    And the error output contains "myws-2: directory exists but is not a valid niwa instance"
+    And the error output does not contain "myws-3: directory exists"
+    When I run "niwa create myws"
+    Then the exit code is 0
+    And the instance "myws-4" exists
+    And the error output contains "myws-2: directory exists but is not a valid niwa instance"
+    And the error output does not contain "myws-3: directory exists"
+    And the error output does not contain "myws-4: directory exists"

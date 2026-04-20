@@ -8,6 +8,18 @@ import (
 	"github.com/tsukumogami/niwa/internal/buildinfo"
 )
 
+var (
+	// noProgress disables the TTY status-line animations when set. When true
+	// the Reporter is constructed in non-TTY mode regardless of the actual
+	// terminal state. Set by --no-progress on the root command.
+	noProgress bool
+
+	// noColor is true when the NO_COLOR environment variable is non-empty.
+	// It is populated in PersistentPreRunE and available to all subcommands.
+	// NO_COLOR does not affect progress/status-line behavior.
+	noColor bool
+)
+
 var rootCmd = &cobra.Command{
 	Use:   "niwa",
 	Short: "Declarative workspace manager for AI-assisted development",
@@ -23,12 +35,18 @@ in sync when configuration changes.`,
 		// scripts, etc.) don't inherit it -- a buggy or malicious child that
 		// writes to the response file would redirect the shell wrapper's cd
 		// target. See docs/designs/current/DESIGN-shell-navigation-protocol.md.
-		return captureNiwaResponseFile()
+		if err := captureNiwaResponseFile(); err != nil {
+			return err
+		}
+		noColor = os.Getenv("NO_COLOR") != ""
+		return nil
 	},
 }
 
 func init() {
 	rootCmd.Version = buildinfo.Version()
+	rootCmd.PersistentFlags().BoolVar(&noProgress, "no-progress", false,
+		"disable TTY status-line animations; use append-only output regardless of terminal state")
 }
 
 // Execute runs the root command.

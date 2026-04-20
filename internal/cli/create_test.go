@@ -84,7 +84,7 @@ func TestComputeInstanceName_DirExistsWithoutState(t *testing.T) {
 	dir := t.TempDir()
 
 	// Create a directory that exists but has no instance state.
-	// NextInstanceNumber should return 1, so we get tsuku-1.
+	// Numbered suffixes start at 2, so we get tsuku-2 (not tsuku-1).
 	firstDir := filepath.Join(dir, "tsuku")
 	if err := os.MkdirAll(firstDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -94,9 +94,9 @@ func TestComputeInstanceName_DirExistsWithoutState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	// Directory exists but no instances with state, so NextInstanceNumber returns 1.
-	if name != "tsuku-1" {
-		t.Errorf("expected %q, got %q", "tsuku-1", name)
+	// Numbered suffixes start at 2, so the first numbered instance is tsuku-2.
+	if name != "tsuku-2" {
+		t.Errorf("expected %q, got %q", "tsuku-2", name)
 	}
 }
 

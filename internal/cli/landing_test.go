@@ -1,13 +1,10 @@
 package cli
 
 import (
-	"bytes"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
-
-	"github.com/spf13/cobra"
 )
 
 // withResponseFile sets the package-level cache that writeLandingPath reads
@@ -20,29 +17,15 @@ func withResponseFile(t *testing.T, value string) {
 	t.Cleanup(func() { niwaResponseFile = prev })
 }
 
-func newTestCmd() (*cobra.Command, *bytes.Buffer, *bytes.Buffer) {
-	cmd := &cobra.Command{}
-	var outBuf, errBuf bytes.Buffer
-	cmd.SetOut(&outBuf)
-	cmd.SetErr(&errBuf)
-	return cmd, &outBuf, &errBuf
-}
-
-func TestWriteLandingPath_ResponseFileSet_WritesFileAndNotStdout(t *testing.T) {
+func TestWriteLandingPath_ResponseFileSet_WritesFile(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("TMPDIR", tmp)
 	responseFile := filepath.Join(tmp, "niwa-response")
 	withResponseFile(t, responseFile)
 
-	cmd, out, _ := newTestCmd()
 	landing := "/home/user/ws/myrepo"
-
-	if err := writeLandingPath(cmd, landing); err != nil {
+	if err := writeLandingPath(landing); err != nil {
 		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if out.Len() != 0 {
-		t.Errorf("stdout must be empty when NIWA_RESPONSE_FILE is set, got: %q", out.String())
 	}
 
 	data, err := os.ReadFile(responseFile)
@@ -69,15 +52,11 @@ func TestWriteLandingPath_ResponseFileSet_DefaultTmpDir(t *testing.T) {
 
 	withResponseFile(t, path)
 
-	cmd, out, _ := newTestCmd()
 	landing := "/home/user/ws/myrepo"
-	if err := writeLandingPath(cmd, landing); err != nil {
+	if err := writeLandingPath(landing); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if out.Len() != 0 {
-		t.Errorf("stdout must be empty, got: %q", out.String())
-	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("reading response file: %v", err)
@@ -87,22 +66,11 @@ func TestWriteLandingPath_ResponseFileSet_DefaultTmpDir(t *testing.T) {
 	}
 }
 
-func TestWriteLandingPath_ResponseFileAbsent_WritesStdout(t *testing.T) {
+func TestWriteLandingPath_ResponseFileAbsent_IsNoOp(t *testing.T) {
 	withResponseFile(t, "")
-
-	cmd, out, _ := newTestCmd()
-	landing := "/home/user/ws/myrepo"
-
-	if err := writeLandingPath(cmd, landing); err != nil {
+	// Must not error and must not panic; stdout is untouched.
+	if err := writeLandingPath("/home/user/ws/myrepo"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
-	}
-
-	got := strings.TrimRight(out.String(), "\n")
-	if got != landing {
-		t.Errorf("stdout: got %q, want %q", got, landing)
-	}
-	if !strings.HasSuffix(out.String(), "\n") {
-		t.Errorf("stdout output must end with a newline, got: %q", out.String())
 	}
 }
 
@@ -110,12 +78,10 @@ func TestWriteLandingPath_ResponseFileOutsideTmp_ReturnsError(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("TMPDIR", tmp)
 
-	// Path outside both $TMPDIR and /tmp.
 	outsidePath := "/home/user/.bashrc"
 	withResponseFile(t, outsidePath)
 
-	cmd, out, _ := newTestCmd()
-	err := writeLandingPath(cmd, "/home/user/ws/myrepo")
+	err := writeLandingPath("/home/user/ws/myrepo")
 	if err == nil {
 		t.Fatal("expected error for path outside temp directory, got nil")
 	}
@@ -125,19 +91,13 @@ func TestWriteLandingPath_ResponseFileOutsideTmp_ReturnsError(t *testing.T) {
 	if !strings.Contains(err.Error(), outsidePath) {
 		t.Errorf("error should mention the rejected path, got: %v", err)
 	}
-	if out.Len() != 0 {
-		t.Errorf("stdout must be empty on error, got: %q", out.String())
-	}
 
-	// Ensure no file was created at the rejected location.
 	if _, err := os.Stat(outsidePath); err == nil {
 		t.Errorf("writeLandingPath created file at rejected path %q", outsidePath)
 	}
 }
 
 func TestWriteLandingPath_ResponseFileInSlashTmp_Accepted(t *testing.T) {
-	// When TMPDIR is set to something else, /tmp paths are still accepted
-	// (per the helper's fallback prefix check).
 	tmp := t.TempDir()
 	t.Setenv("TMPDIR", tmp)
 
@@ -150,21 +110,12 @@ func TestWriteLandingPath_ResponseFileInSlashTmp_Accepted(t *testing.T) {
 	t.Cleanup(func() { os.Remove(path) })
 
 	withResponseFile(t, path)
-
-	cmd, _, _ := newTestCmd()
-	if err := writeLandingPath(cmd, "/home/user/ws/myrepo"); err != nil {
+	if err := writeLandingPath("/home/user/ws/myrepo"); err != nil {
 		t.Fatalf("unexpected error for /tmp path with unrelated TMPDIR: %v", err)
 	}
 }
 
 func TestWriteLandingPath_ResponseFileTraversal_Rejected(t *testing.T) {
-	// An attacker-controlled NIWA_RESPONSE_FILE containing ".." must not
-	// escape the temp directory via filepath cleaning. Prior to the fix, a
-	// plain HasPrefix(f, "/tmp/") check accepted "/tmp/../home/user/.bashrc"
-	// and os.WriteFile would then overwrite /home/user/.bashrc.
-	// Point TMPDIR at a directory that doesn't share a parent with /tmp so
-	// traversal targets escape both the configured temp dir and the /tmp
-	// fallback prefix check.
 	t.Setenv("TMPDIR", "/var/tmp/niwa-test-does-not-exist")
 
 	cases := []string{
@@ -176,27 +127,15 @@ func TestWriteLandingPath_ResponseFileTraversal_Rejected(t *testing.T) {
 		t.Run(attack, func(t *testing.T) {
 			withResponseFile(t, attack)
 
-			cmd, out, _ := newTestCmd()
-			err := writeLandingPath(cmd, "/home/user/ws/myrepo")
+			err := writeLandingPath("/home/user/ws/myrepo")
 			if err == nil {
 				t.Fatalf("expected error for traversal path %q, got nil", attack)
 			}
 			if !strings.Contains(err.Error(), "NIWA_RESPONSE_FILE") {
 				t.Errorf("error should mention NIWA_RESPONSE_FILE, got: %v", err)
 			}
-			if out.Len() != 0 {
-				t.Errorf("stdout must be empty on error, got: %q", out.String())
-			}
-			// Resolve to the canonical target the traversal points at and
-			// confirm no file was created there.
 			resolved := filepath.Clean(attack)
 			if _, statErr := os.Stat(resolved); statErr == nil {
-				// If the file happens to pre-exist on the host (e.g.
-				// /etc/passwd), we can't assert absence, but we can at
-				// least assert we didn't create it with our landing
-				// content. Reading is out of scope here; the core
-				// assertion is that validateResponseFilePath returned an
-				// error before os.WriteFile ran.
 				t.Logf("note: %q pre-exists on host, skipping absence check", resolved)
 			}
 		})
@@ -209,7 +148,6 @@ func TestCaptureNiwaResponseFile_UnsetsEnv(t *testing.T) {
 	responseFile := filepath.Join(tmp, "niwa-response")
 	t.Setenv(niwaResponseFileEnv, responseFile)
 
-	// Reset the cache after the test so we don't leak into other tests.
 	prev := niwaResponseFile
 	t.Cleanup(func() { niwaResponseFile = prev })
 

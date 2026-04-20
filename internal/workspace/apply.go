@@ -7,6 +7,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/tsukumogami/niwa/internal/config"
@@ -25,6 +27,11 @@ type Applier struct {
 	NoPull          bool
 	AllowDirty      bool
 	GlobalConfigDir string // empty string means global config not registered
+
+	// Reporter receives all progress and diagnostic output for this applier.
+	// NewApplier initializes it with NewReporter(os.Stderr). Callers may
+	// replace it (e.g., with NewReporterWithTTY) before calling Apply or Create.
+	Reporter *Reporter
 
 	// AllowMissingSecrets threads through to the vault resolver's
 	// ResolveOptions.AllowMissing. When true, missing vault keys are
@@ -66,20 +73,41 @@ type Applier struct {
 	vaultRegistry *vault.Registry
 }
 
+// applierWriter is an io.Writer that always delegates to whatever
+// a.Reporter is at the time of the Write call. This lets callers
+// replace a.Reporter after construction (e.g., to inject a TTY-aware
+// reporter) without leaving materializer Stderr fields pointing at a
+// stale reporter instance.
+type applierWriter struct{ a *Applier }
+
+func (aw *applierWriter) Write(p []byte) (int, error) {
+	s := string(p)
+	if len(s) > 0 && s[len(s)-1] == '\n' {
+		s = s[:len(s)-1]
+	}
+	if s != "" {
+		aw.a.Reporter.Log("%s", s)
+	}
+	return len(p), nil
+}
+
 // NewApplier creates an Applier with the given GitHub client.
 func NewApplier(gh github.Client) *Applier {
-	return &Applier{
+	a := &Applier{
 		GitHubClient: gh,
 		Cloner:       &Cloner{},
-		Materializers: []Materializer{
-			&HooksMaterializer{},
-			&SettingsMaterializer{},
-			&EnvMaterializer{},
-			&FilesMaterializer{},
-		},
-		cloneOrSync: CloneOrSyncOverlay,
-		headSHA:     HeadSHA,
+		Reporter:     NewReporter(os.Stderr),
+		cloneOrSync:  CloneOrSyncOverlay,
+		headSHA:      HeadSHA,
 	}
+	aw := &applierWriter{a: a}
+	a.Materializers = []Materializer{
+		&HooksMaterializer{},
+		&SettingsMaterializer{},
+		&EnvMaterializer{Stderr: aw},
+		&FilesMaterializer{Stderr: aw},
+	}
+	return a
 }
 
 // DefaultMaxRepos is the threshold for auto-discovered repos per source.
@@ -91,13 +119,20 @@ const DefaultMaxRepos = 10
 // the global config repo.
 const GlobalConfigOverrideFile = "niwa.toml"
 
+// noticeProviderShadow is the one-time notice key for the personal-overlay
+// provider shadow disclosure. After the first apply that detects a provider
+// shadow, the notice is recorded in DisclosedNotices and suppressed on
+// subsequent runs.
+const noticeProviderShadow = "provider-shadow"
+
 // pipelineOpts configures shared pipeline behavior for Create vs Apply.
 type pipelineOpts struct {
-	existingState   *InstanceState
-	skipGlobal      bool
-	overlayURL      string // from InstanceState.OverlayURL (empty = no overlay URL in state)
-	noOverlay       bool   // from InstanceState.NoOverlay
-	configSourceURL string // original source URL for convention overlay discovery
+	existingState    *InstanceState
+	skipGlobal       bool
+	overlayURL       string   // from InstanceState.OverlayURL (empty = no overlay URL in state)
+	noOverlay        bool     // from InstanceState.NoOverlay
+	configSourceURL  string   // original source URL for convention overlay discovery
+	disclosedNotices []string // workspace-root-level notices already shown to the user
 }
 
 // pipelineResult holds the outputs of the shared pipeline.
@@ -110,9 +145,10 @@ type pipelineResult struct {
 	// detected during this apply invocation. Empty when no overlay
 	// is active or no keys overlapped. Persisted into
 	// InstanceState.Shadows by Create/Apply.
-	shadows       []Shadow
-	overlayURL    string // set when convention discovery succeeds; empty otherwise
-	overlayCommit string // HEAD SHA when overlayURL was set; empty otherwise
+	shadows          []Shadow
+	overlayURL       string   // set when convention discovery succeeds; empty otherwise
+	overlayCommit    string   // HEAD SHA when overlayURL was set; empty otherwise
+	disclosedNotices []string // one-time notices emitted during this run
 }
 
 // Create creates a new workspace instance under workspaceRoot, runs the full
@@ -148,32 +184,30 @@ func (a *Applier) Create(ctx context.Context, cfg *config.WorkspaceConfig, confi
 	var initOverlayURL string
 	var initNoOverlay bool
 	var initSkipGlobal bool
+	var initDisclosedNotices []string
 	if initState != nil {
 		initOverlayURL = initState.OverlayURL
 		initNoOverlay = initState.NoOverlay
 		initSkipGlobal = initState.SkipGlobal
+		initDisclosedNotices = initState.DisclosedNotices
 	}
 
 	result, err := a.runPipeline(ctx, cfg, configDir, instanceRoot, now, &pipelineOpts{
-		existingState:   nil,
-		overlayURL:      initOverlayURL,
-		noOverlay:       initNoOverlay,
-		skipGlobal:      initSkipGlobal,
-		configSourceURL: a.ConfigSourceURL,
+		existingState:    nil,
+		overlayURL:       initOverlayURL,
+		noOverlay:        initNoOverlay,
+		skipGlobal:       initSkipGlobal,
+		configSourceURL:  a.ConfigSourceURL,
+		disclosedNotices: initDisclosedNotices,
 	})
 	if err != nil {
 		_ = os.RemoveAll(instanceRoot)
 		return "", err
 	}
 
-	for _, w := range result.warnings {
-		fmt.Fprintf(os.Stderr, "warning: %s\n", w)
-	}
+	instanceNumber := instanceNumberFromName(cfg.Workspace.Name, instanceName)
 
-	instanceNumber, err := NextInstanceNumber(workspaceRoot)
-	if err != nil {
-		return "", fmt.Errorf("determining instance number: %w", err)
-	}
+	saveWorkspaceRootDisclosures(workspaceRoot, initState, result.disclosedNotices)
 
 	configName := cfg.Workspace.Name
 	state := &InstanceState{
@@ -195,6 +229,17 @@ func (a *Applier) Create(ctx context.Context, cfg *config.WorkspaceConfig, confi
 		return "", fmt.Errorf("saving instance state: %w", err)
 	}
 
+	n := len(result.repoStates)
+	if n == 1 {
+		a.Reporter.Log("created %s (1 repo) → %s", instanceName, instanceRoot)
+	} else {
+		a.Reporter.Log("created %s (%d repos) → %s", instanceName, n, instanceRoot)
+	}
+	for _, w := range result.warnings {
+		a.Reporter.DeferWarn("%s", w)
+	}
+	a.Reporter.FlushDeferred()
+
 	return instanceRoot, nil
 }
 
@@ -202,6 +247,12 @@ func (a *Applier) Create(ctx context.Context, cfg *config.WorkspaceConfig, confi
 // classify, clone, install content, clean up removed repos, and update state.
 func (a *Applier) Apply(ctx context.Context, cfg *config.WorkspaceConfig, configDir, instanceRoot string) error {
 	now := time.Now()
+
+	// Auto-pull config from origin if it's a git repo with a remote.
+	// Moved here from cli/apply.go so that the Reporter routes output.
+	if syncErr := SyncConfigDir(configDir, a.Reporter, a.AllowDirty); syncErr != nil {
+		return syncErr
+	}
 
 	// Ensure the instance root's .gitignore covers *.local*. Applier.
 	// Create already runs this during initial scaffolding, but an
@@ -218,31 +269,39 @@ func (a *Applier) Apply(ctx context.Context, cfg *config.WorkspaceConfig, config
 		return fmt.Errorf("loading existing state: %w", err)
 	}
 
+	// Load workspace root state for workspace-level disclosures. The workspace
+	// root is the parent of the instance directory. Errors are silently ignored:
+	// a missing workspace root state just means no notices have been disclosed yet.
+	workspaceRoot := filepath.Dir(instanceRoot)
+	wsRootState, _ := LoadState(workspaceRoot)
+
 	// Check drift on existing managed files before overwriting.
 	for _, mf := range existingState.ManagedFiles {
 		drift, err := CheckDrift(mf)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "warning: could not check drift for %s: %v\n", mf.Path, err)
+			a.Reporter.DeferWarn("could not check drift for %s: %v", mf.Path, err)
 			continue
 		}
 		if drift.Drifted() && !drift.FileRemoved {
-			fmt.Fprintf(os.Stderr, "warning: managed file %s has been modified outside niwa\n", mf.Path)
+			a.Reporter.DeferWarn("managed file %s has been modified outside niwa", mf.Path)
 		}
 	}
 
+	var wsDisclosedNotices []string
+	if wsRootState != nil {
+		wsDisclosedNotices = wsRootState.DisclosedNotices
+	}
+
 	result, err := a.runPipeline(ctx, cfg, configDir, instanceRoot, now, &pipelineOpts{
-		existingState:   existingState,
-		skipGlobal:      existingState.SkipGlobal,
-		overlayURL:      existingState.OverlayURL,
-		noOverlay:       existingState.NoOverlay,
-		configSourceURL: a.ConfigSourceURL,
+		existingState:    existingState,
+		skipGlobal:       existingState.SkipGlobal,
+		overlayURL:       existingState.OverlayURL,
+		noOverlay:        existingState.NoOverlay,
+		configSourceURL:  a.ConfigSourceURL,
+		disclosedNotices: wsDisclosedNotices,
 	})
 	if err != nil {
 		return err
-	}
-
-	for _, w := range result.warnings {
-		fmt.Fprintf(os.Stderr, "warning: %s\n", w)
 	}
 
 	// Emit `rotated <path>` to stderr for every managed file whose
@@ -251,7 +310,7 @@ func (a *Applier) Apply(ctx context.Context, cfg *config.WorkspaceConfig, config
 	// materializations (no prior state entry for the path) are NOT
 	// rotations — they're the initial write of that file. See PRD
 	// Rotation AC.
-	emitRotatedFiles(existingState, result, os.Stderr)
+	emitRotatedFiles(existingState, result, a.Reporter.Writer())
 
 	// Clean up managed files from previous state that are no longer produced.
 	a.cleanRemovedFiles(existingState, result)
@@ -269,6 +328,8 @@ func (a *Applier) Apply(ctx context.Context, cfg *config.WorkspaceConfig, config
 		finalOverlayURL = result.overlayURL
 		finalOverlayCommit = result.overlayCommit
 	}
+
+	saveWorkspaceRootDisclosures(workspaceRoot, wsRootState, result.disclosedNotices)
 
 	configName := cfg.Workspace.Name
 	state := &InstanceState{
@@ -291,6 +352,17 @@ func (a *Applier) Apply(ctx context.Context, cfg *config.WorkspaceConfig, config
 	if err := SaveState(instanceRoot, state); err != nil {
 		return fmt.Errorf("saving instance state: %w", err)
 	}
+
+	n := len(result.repoStates)
+	if n == 1 {
+		a.Reporter.Log("applied %s (1 repo)", filepath.Base(instanceRoot))
+	} else {
+		a.Reporter.Log("applied %s (%d repos)", filepath.Base(instanceRoot), n)
+	}
+	for _, w := range result.warnings {
+		a.Reporter.DeferWarn("%s", w)
+	}
+	a.Reporter.FlushDeferred()
 
 	return nil
 }
@@ -324,6 +396,10 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 	// ~/.config/niwa/provider-auth.toml (same directory that holds the
 	// global config clone). When the file is absent, authEntries is nil
 	// and every injection call is a no-op (single-org path unchanged).
+	// newDisclosures collects one-time notice keys first shown during this run.
+	// Returned in pipelineResult so callers can merge them into DisclosedNotices.
+	var newDisclosures []string
+
 	var authEntries []ProviderAuthEntry
 	if niwaConfigDir, err := NiwaConfigDir(); err == nil {
 		entries, err := LoadProviderAuth(niwaConfigDir)
@@ -359,7 +435,7 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 			sha, shaErr := a.headSHA(dir)
 			if shaErr == nil && opts.existingState != nil && opts.existingState.OverlayCommit != "" {
 				if sha != opts.existingState.OverlayCommit {
-					fmt.Fprintf(os.Stderr, "warning: workspace overlay has new commits since last apply (was %s, now %s)\n",
+					a.Reporter.DeferWarn("workspace overlay has new commits since last apply (was %s, now %s)",
 						opts.existingState.OverlayCommit[:min(7, len(opts.existingState.OverlayCommit))],
 						sha[:min(7, len(sha))],
 					)
@@ -508,7 +584,9 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 
 	// Step 2a: Sync global config repo if registered and not skipped.
 	if a.GlobalConfigDir != "" && !opts.skipGlobal {
-		if syncErr := SyncConfigDir(a.GlobalConfigDir, a.AllowDirty); syncErr != nil {
+		a.Reporter.Status("syncing config...")
+		if syncErr := SyncConfigDir(a.GlobalConfigDir, a.Reporter, a.AllowDirty); syncErr != nil {
+			a.Reporter.Warn("could not sync config: %v", syncErr)
 			return nil, fmt.Errorf("syncing global config: %w", syncErr)
 		}
 	}
@@ -603,14 +681,16 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 	// workspace.Shadow today because the pipeline rejects the apply
 	// before it could reach SaveState.
 	providerShadows := vault.DetectProviderShadows(teamBundle, personalBundle)
-	for _, sh := range providerShadows {
-		label := sh.Name
-		if label == "" {
-			label = "(anonymous)"
+	if len(providerShadows) > 0 && !sliceContains(opts.disclosedNotices, noticeProviderShadow) {
+		for _, sh := range providerShadows {
+			label := sh.Name
+			if label == "" {
+				label = "(anonymous)"
+			}
+			a.Reporter.Defer("shadowed provider %q [personal-overlay shadows team: team=%s, personal=%s]",
+				label, "workspace.toml", "niwa.toml")
 		}
-		fmt.Fprintf(os.Stderr,
-			"shadowed provider %q [personal-overlay shadows team: team=%s, personal=%s]\n",
-			label, "workspace.toml", "niwa.toml")
+		newDisclosures = append(newDisclosures, noticeProviderShadow)
 	}
 
 	// R12 enforcement: personal overlay MUST NOT redeclare any
@@ -631,7 +711,7 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 	// "was a vault ref". The original cfg still has Plain populated
 	// for plaintext entries and Secret populated only for vault-resolved
 	// ones, which is exactly the signal the guardrail reads.
-	if err := guardrail.CheckGitHubPublicRemoteSecrets(configDir, cfg, a.AllowPlaintextSecrets, os.Stderr); err != nil {
+	if err := guardrail.CheckGitHubPublicRemoteSecrets(configDir, cfg, a.AllowPlaintextSecrets, a.Reporter.Writer()); err != nil {
 		return nil, err
 	}
 
@@ -644,8 +724,7 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 	if globalOverride != nil {
 		pipelineShadows = DetectShadows(cfg, globalOverride)
 		for _, sh := range pipelineShadows {
-			fmt.Fprintf(os.Stderr,
-				"shadowed %s %q [personal-overlay shadows team: team=%s, personal=%s]\n",
+			a.Reporter.Defer("shadowed %s %q [personal-overlay shadows team: team=%s, personal=%s]",
 				sh.Kind, sh.Name, sh.TeamSource, sh.PersonalSource)
 		}
 	}
@@ -685,7 +764,7 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 	// resolver already turned missing vault-backed keys into empty
 	// MaybeSecret values when the flag is set, and checkRequiredKeys
 	// catches those empty values via the required list.
-	if err := checkRequiredKeys(effectiveCfg, os.Stderr); err != nil {
+	if err := checkRequiredKeys(effectiveCfg, a.Reporter.Writer()); err != nil {
 		return nil, err
 	}
 
@@ -701,30 +780,22 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		branch := RepoCloneBranch(effectiveCfg, cr.Repo.Name)
 
 		targetDir := filepath.Join(groupDir, cr.Repo.Name)
-		cloned, err := a.Cloner.CloneWithBranch(ctx, cloneURL, targetDir, branch)
+		a.Reporter.Status(fmt.Sprintf("cloning %s...", cr.Repo.Name))
+		cloned, err := a.Cloner.CloneWithBranch(ctx, cloneURL, targetDir, branch, a.Reporter)
 		if err != nil {
+			a.Reporter.Warn("failed to clone %s", cr.Repo.Name)
 			return nil, fmt.Errorf("cloning repo %s: %w", cr.Repo.Name, err)
 		}
-		if cloned {
-			fmt.Fprintf(os.Stderr, "cloned %s into %s\n", cr.Repo.Name, targetDir)
-		} else if !a.NoPull {
+		if !cloned && !a.NoPull {
+			a.Reporter.Status(fmt.Sprintf("syncing %s...", cr.Repo.Name))
 			defaultBranch := DefaultBranch(effectiveCfg, cr.Repo.Name)
-			result, syncErr := SyncRepo(ctx, targetDir, defaultBranch)
-			switch result.Action {
-			case "pulled":
-				fmt.Fprintf(os.Stderr, "pulled %s (%d commits)\n", cr.Repo.Name, result.Commits)
-			case "up-to-date":
-				fmt.Fprintf(os.Stderr, "skipped %s (up to date)\n", cr.Repo.Name)
-			case "fetch-failed":
-				fmt.Fprintf(os.Stderr, "warning: could not fetch %s: %s\n", cr.Repo.Name, result.Reason)
-			case "skipped":
-				fmt.Fprintf(os.Stderr, "skipped %s (%s)\n", cr.Repo.Name, result.Reason)
+			result, syncErr := SyncRepo(ctx, targetDir, defaultBranch, a.Reporter)
+			if result.Action == "fetch-failed" {
+				a.Reporter.DeferWarn("could not fetch %s: %s", cr.Repo.Name, result.Reason)
 			}
 			if syncErr != nil {
-				fmt.Fprintf(os.Stderr, "warning: sync failed for %s: %v\n", cr.Repo.Name, syncErr)
+				a.Reporter.DeferWarn("sync failed for %s: %v", cr.Repo.Name, syncErr)
 			}
-		} else {
-			fmt.Fprintf(os.Stderr, "skipped %s (already exists)\n", cr.Repo.Name)
 		}
 
 		repoStates[cr.Repo.Name] = RepoState{
@@ -808,7 +879,6 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 	// Skip repos with claude = false.
 	for _, cr := range classified {
 		if !ClaudeEnabled(effectiveCfg, cr.Repo.Name) {
-			fmt.Fprintf(os.Stderr, "skipped content for %s (claude = false)\n", cr.Repo.Name)
 			continue
 		}
 
@@ -883,6 +953,7 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 			RepoIndex:             repoIndex,
 			SourceTuples:          sourceTuples,
 			AllowPlaintextSecrets: a.AllowPlaintextSecrets,
+			Stderr:                a.Reporter.Writer(),
 		}
 
 		claudeOn := ClaudeEnabled(effectiveCfg, cr.Repo.Name)
@@ -904,7 +975,7 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 	for _, cr := range classified {
 		setupDir := ResolveSetupDir(effectiveCfg, cr.Repo.Name)
 		repoDir := filepath.Join(instanceRoot, cr.Group, cr.Repo.Name)
-		result := RunSetupScripts(repoDir, setupDir)
+		result := RunSetupScripts(repoDir, setupDir, a.Reporter)
 
 		if result.Disabled || result.Skipped {
 			continue
@@ -912,7 +983,7 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 
 		for _, sr := range result.Scripts {
 			if sr.Error != nil {
-				fmt.Fprintf(os.Stderr, "warning: setup script %s/%s failed for %s: %v\n",
+				a.Reporter.DeferWarn("setup script %s/%s failed for %s: %v",
 					setupDir, sr.Name, cr.Repo.Name, sr.Error)
 			}
 		}
@@ -944,13 +1015,14 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 	}
 
 	return &pipelineResult{
-		classified:    classified,
-		repoStates:    repoStates,
-		managedFiles:  managedFiles,
-		warnings:      allWarnings,
-		shadows:       pipelineShadows,
-		overlayURL:    pipelineOverlayURL,
-		overlayCommit: pipelineOverlayCommit,
+		classified:       classified,
+		repoStates:       repoStates,
+		managedFiles:     managedFiles,
+		warnings:         allWarnings,
+		shadows:          pipelineShadows,
+		overlayURL:       pipelineOverlayURL,
+		overlayCommit:    pipelineOverlayCommit,
+		disclosedNotices: newDisclosures,
 	}, nil
 }
 
@@ -965,7 +1037,7 @@ func (a *Applier) cleanRemovedFiles(existingState *InstanceState, result *pipeli
 	for _, mf := range existingState.ManagedFiles {
 		if !currentFiles[mf.Path] {
 			if err := os.Remove(mf.Path); err != nil && !os.IsNotExist(err) {
-				fmt.Fprintf(os.Stderr, "warning: could not remove managed file %s: %v\n", mf.Path, err)
+				a.Reporter.DeferWarn("could not remove managed file %s: %v", mf.Path, err)
 			}
 		}
 	}
@@ -1008,6 +1080,49 @@ func (a *Applier) cleanRemovedGroupDirs(existingState *InstanceState, result *pi
 			os.Remove(groupDir)
 		}
 	}
+}
+
+// instanceNumberFromName derives the InstanceNumber to store from the instance
+// directory name. For the base instance (name == configName) it returns 1.
+// For numbered instances (configName-N) it returns N. For custom-suffix names
+// (configName-hotfix) it returns 0 so the status display omits the number.
+func instanceNumberFromName(configName, instanceName string) int {
+	if instanceName == configName {
+		return 1
+	}
+	if strings.HasPrefix(instanceName, configName+"-") {
+		suffix := instanceName[len(configName)+1:]
+		if n, err := strconv.Atoi(suffix); err == nil && n > 0 {
+			return n
+		}
+	}
+	return 0
+}
+
+// sliceContains reports whether s contains elem.
+func sliceContains(s []string, elem string) bool {
+	for _, v := range s {
+		if v == elem {
+			return true
+		}
+	}
+	return false
+}
+
+// saveWorkspaceRootDisclosures merges new notice keys into the workspace root
+// state file. It is a best-effort call: errors are silently ignored because a
+// failed write only means the notice reappears on the next run — a recoverable
+// annoyance rather than a data-loss scenario.
+func saveWorkspaceRootDisclosures(workspaceRoot string, existing *InstanceState, newNotices []string) {
+	if len(newNotices) == 0 {
+		return
+	}
+	s := existing
+	if s == nil {
+		s = &InstanceState{}
+	}
+	s.DisclosedNotices = mergeDisclosedNotices(s.DisclosedNotices, newNotices)
+	_ = SaveState(workspaceRoot, s)
 }
 
 // emitRotatedFiles prints `rotated <path>` to stderrOut for every

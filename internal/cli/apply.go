@@ -10,6 +10,7 @@ import (
 	"github.com/tsukumogami/niwa/internal/config"
 	"github.com/tsukumogami/niwa/internal/github"
 	"github.com/tsukumogami/niwa/internal/workspace"
+	"golang.org/x/term"
 )
 
 func init() {
@@ -86,12 +87,7 @@ func runApply(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("could not locate workspace configuration")
 	}
 
-	// Auto-pull config from origin if it's a git repo with a remote.
 	configDir := filepath.Dir(configPath)
-	if syncErr := workspace.SyncConfigDir(configDir, applyAllowDirty); syncErr != nil {
-		return syncErr
-	}
-
 	result, err := config.Load(configPath)
 	if err != nil {
 		return err
@@ -104,6 +100,7 @@ func runApply(cmd *cobra.Command, args []string) error {
 	token := resolveGitHubToken()
 	gh := github.NewAPIClient(token)
 	applier := workspace.NewApplier(gh)
+	applier.Reporter = workspace.NewReporterWithTTY(os.Stderr, !noProgress && term.IsTerminal(int(os.Stderr.Fd())))
 	applier.NoPull = applyNoPull
 	applier.AllowDirty = applyAllowDirty
 	applier.AllowMissingSecrets = applyAllowMissingSecrets

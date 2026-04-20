@@ -672,6 +672,18 @@ func theErrorOutputDoesNotContain(ctx context.Context, text string) error {
 	return nil
 }
 
+// theErrorOutputDoesNotContainAnsiEscapeSequence asserts that the last
+// command's stderr contains no ANSI escape sequences (byte 0x1b / ESC).
+// Use this to verify that --no-progress output is plain text with no
+// terminal control codes.
+func theErrorOutputDoesNotContainAnsiEscapeSequence(ctx context.Context) error {
+	s := getState(ctx)
+	if strings.Contains(s.stderr, "\x1b") {
+		return fmt.Errorf("expected stderr to contain no ANSI escape sequences (0x1b), got:\n%s", s.stderr)
+	}
+	return nil
+}
+
 // theResponseFileContainsWorkspace reads NIWA_RESPONSE_FILE from envOverrides
 // and asserts its content is the absolute path to the named workspace (with
 // a trailing newline — that's the format writeLandingPath produces).
@@ -919,6 +931,21 @@ func iWriteFileToRepoInInstance(ctx context.Context, content, relFilePath, group
 // `mktemp` creates files there; its `rm -f` should clean them up. Any
 // remaining entry in s.tmpDir after the wrapped command ran indicates a
 // missing or failed cleanup in the wrapper.
+// aForeignDirectoryExistsAtInstancePath creates an empty directory at
+// workspaceRoot/name without a .niwa/instance.json, simulating a leftover or
+// foreign directory that blocks the numbered instance slot.
+func aForeignDirectoryExistsAtInstancePath(ctx context.Context, name string) (context.Context, error) {
+	s := getState(ctx)
+	if s == nil {
+		return ctx, fmt.Errorf("no test state")
+	}
+	dir := filepath.Join(s.workspaceRoot, name)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return ctx, fmt.Errorf("creating foreign directory %s: %w", dir, err)
+	}
+	return ctx, nil
+}
+
 func noNiwaTempFilesRemain(ctx context.Context) error {
 	s := getState(ctx)
 	entries, err := os.ReadDir(s.tmpDir)

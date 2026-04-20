@@ -80,7 +80,7 @@ func runGo(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	if err := writeLandingPath(cmd, targetPath); err != nil {
+	if err := writeLandingPath(targetPath); err != nil {
 		return err
 	}
 	hintShellInit(cmd)

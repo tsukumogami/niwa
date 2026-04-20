@@ -68,7 +68,8 @@ type InstanceState struct {
 	LastApplied    time.Time            `json:"last_applied"`
 	ManagedFiles   []ManagedFile        `json:"managed_files"`
 	Repos          map[string]RepoState `json:"repos"`
-	Shadows        []Shadow             `json:"shadows,omitempty"`
+	Shadows          []Shadow   `json:"shadows,omitempty"`
+	DisclosedNotices []string   `json:"disclosed_notices,omitempty"`
 }
 
 // ManagedFile tracks a file written by niwa apply.
@@ -392,6 +393,42 @@ func NextInstanceNumber(workspaceRoot string) (int, error) {
 			return n, nil
 		}
 	}
+}
+
+// noticeDisclosed reports whether notice has been recorded in s.DisclosedNotices.
+func noticeDisclosed(s *InstanceState, notice string) bool {
+	if s == nil {
+		return false
+	}
+	for _, n := range s.DisclosedNotices {
+		if n == notice {
+			return true
+		}
+	}
+	return false
+}
+
+// mergeDisclosedNotices returns the union of existing and added, preserving
+// order and omitting duplicates. Returns existing unchanged when added is empty.
+func mergeDisclosedNotices(existing, added []string) []string {
+	if len(added) == 0 {
+		return existing
+	}
+	seen := make(map[string]struct{}, len(existing)+len(added))
+	merged := make([]string, 0, len(existing)+len(added))
+	for _, n := range existing {
+		if _, ok := seen[n]; !ok {
+			seen[n] = struct{}{}
+			merged = append(merged, n)
+		}
+	}
+	for _, n := range added {
+		if _, ok := seen[n]; !ok {
+			seen[n] = struct{}{}
+			merged = append(merged, n)
+		}
+	}
+	return merged
 }
 
 // HashFile computes the SHA-256 hash of a file and returns it with a "sha256:"

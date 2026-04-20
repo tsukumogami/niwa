@@ -3,7 +3,6 @@ package workspace
 import (
 	"context"
 	"fmt"
-	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -63,11 +62,10 @@ func InspectRepo(repoDir, defaultBranch string) (RepoSyncStatus, error) {
 }
 
 // FetchRepo runs git fetch origin for the given repository directory.
-func FetchRepo(ctx context.Context, repoDir string) error {
+// r receives all git output; pass a non-nil *Reporter.
+func FetchRepo(ctx context.Context, repoDir string, r *Reporter) error {
 	cmd := exec.CommandContext(ctx, "git", "-C", repoDir, "fetch", "origin")
-	cmd.Stdout = os.Stderr
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
+	if err := runGitWithReporter(r, cmd); err != nil {
 		return fmt.Errorf("fetching %s: %w", repoDir, err)
 	}
 	return nil
@@ -75,7 +73,8 @@ func FetchRepo(ctx context.Context, repoDir string) error {
 
 // PullRepo performs a fast-forward-only pull on the given branch and returns
 // the number of new commits that were pulled.
-func PullRepo(ctx context.Context, repoDir, branch string) (int, error) {
+// r receives all git output; pass a non-nil *Reporter.
+func PullRepo(ctx context.Context, repoDir, branch string, r *Reporter) (int, error) {
 	// Record current HEAD before pull.
 	out, err := exec.Command("git", "-C", repoDir, "rev-parse", "HEAD").Output()
 	if err != nil {
@@ -85,9 +84,7 @@ func PullRepo(ctx context.Context, repoDir, branch string) (int, error) {
 
 	// Pull with fast-forward only.
 	cmd := exec.CommandContext(ctx, "git", "-C", repoDir, "pull", "--ff-only", "origin", branch)
-	cmd.Stdout = os.Stderr
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
+	if err := runGitWithReporter(r, cmd); err != nil {
 		return 0, fmt.Errorf("pulling %s: %w", branch, err)
 	}
 
@@ -102,12 +99,13 @@ func PullRepo(ctx context.Context, repoDir, branch string) (int, error) {
 
 // SyncRepo fetches, inspects, and optionally pulls a repository. It returns a
 // SyncResult describing what action was taken.
-func SyncRepo(ctx context.Context, repoDir, defaultBranch string) (SyncResult, error) {
+// r receives all git output; pass a non-nil *Reporter.
+func SyncRepo(ctx context.Context, repoDir, defaultBranch string, r *Reporter) (SyncResult, error) {
 	if defaultBranch == "" {
 		defaultBranch = "main"
 	}
 
-	if err := FetchRepo(ctx, repoDir); err != nil {
+	if err := FetchRepo(ctx, repoDir, r); err != nil {
 		return SyncResult{Action: "fetch-failed", Reason: err.Error()}, nil
 	}
 
@@ -143,7 +141,7 @@ func SyncRepo(ctx context.Context, repoDir, defaultBranch string) (SyncResult, e
 		return SyncResult{Action: "up-to-date"}, nil
 	}
 
-	commits, err := PullRepo(ctx, repoDir, defaultBranch)
+	commits, err := PullRepo(ctx, repoDir, defaultBranch, r)
 	if err != nil {
 		return SyncResult{}, err
 	}

@@ -1,6 +1,7 @@
 package workspace
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"path/filepath"
@@ -14,15 +15,15 @@ func TestIsCommitSHA(t *testing.T) {
 	}{
 		{"abc1234", true},
 		{"abc1234567890abc1234567890abc123456789ab", true}, // 40 chars
-		{"abcdef1", true},                                   // 7 chars, minimum
-		{"ABC1234", false},                                  // uppercase
-		{"abc123", false},                                   // too short (6)
+		{"abcdef1", true},  // 7 chars, minimum
+		{"ABC1234", false}, // uppercase
+		{"abc123", false},  // too short (6)
 		{"main", false},
 		{"v1.2.3", false},
 		{"refs/tags/v1", false},
 		{"", false},
 		{"abc1234567890abc1234567890abc1234567890abc", false}, // 41 chars
-		{"ghijkl1", false},                                   // non-hex letters
+		{"ghijkl1", false}, // non-hex letters
 	}
 
 	for _, tt := range tests {
@@ -124,8 +125,9 @@ func TestCloneWith_SkipsExistingRepo(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	r := NewReporterWithTTY(&bytes.Buffer{}, false)
 	c := &Cloner{}
-	cloned, err := c.CloneWith(context.Background(), "https://example.com/repo.git", dir, CloneOptions{})
+	cloned, err := c.CloneWith(context.Background(), "https://example.com/repo.git", dir, CloneOptions{}, r)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -141,8 +143,9 @@ func TestClone_DelegatesToCloneWith(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	r := NewReporterWithTTY(&bytes.Buffer{}, false)
 	c := &Cloner{}
-	cloned, err := c.Clone(context.Background(), "https://example.com/repo.git", dir)
+	cloned, err := c.Clone(context.Background(), "https://example.com/repo.git", dir, r)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -158,8 +161,9 @@ func TestCloneWithBranch_DelegatesToCloneWith(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	r := NewReporterWithTTY(&bytes.Buffer{}, false)
 	c := &Cloner{}
-	cloned, err := c.CloneWithBranch(context.Background(), "https://example.com/repo.git", dir, "main")
+	cloned, err := c.CloneWithBranch(context.Background(), "https://example.com/repo.git", dir, "main", r)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -189,10 +193,11 @@ func TestCloneWith_CreatesParentDir(t *testing.T) {
 	base := t.TempDir()
 	targetDir := filepath.Join(base, "nested", "deep", "repo")
 
+	r := NewReporterWithTTY(&bytes.Buffer{}, false)
 	c := &Cloner{}
 	// This will fail because the URL is invalid, but the parent dir
 	// should still be created before the git command runs.
-	_, _ = c.CloneWith(context.Background(), "invalid-url", targetDir, CloneOptions{})
+	_, _ = c.CloneWith(context.Background(), "invalid-url", targetDir, CloneOptions{}, r)
 
 	parentDir := filepath.Dir(targetDir)
 	if _, err := os.Stat(parentDir); os.IsNotExist(err) {

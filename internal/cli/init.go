@@ -134,7 +134,7 @@ func runInit(cmd *cobra.Command, args []string) error {
 
 		niwaDir := filepath.Join(cwd, workspace.StateDir)
 		cloner := &workspace.Cloner{}
-		_, err = cloner.CloneWith(cmd.Context(), cloneURL, niwaDir, workspace.CloneOptions{Depth: 1})
+		_, err = cloner.CloneWith(cmd.Context(), cloneURL, niwaDir, workspace.CloneOptions{Depth: 1}, workspace.NewReporter(os.Stderr))
 		if err != nil {
 			return fmt.Errorf("cloning config repo: %w", err)
 		}

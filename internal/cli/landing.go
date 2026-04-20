@@ -5,8 +5,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-
-	"github.com/spf13/cobra"
 )
 
 // niwaResponseFileEnv is the internal protocol environment variable used by the
@@ -36,20 +34,19 @@ func captureNiwaResponseFile() error {
 // path must live under $TMPDIR or /tmp; any other location is rejected to
 // prevent arbitrary file overwrites via env var injection.
 //
-// When NIWA_RESPONSE_FILE was absent, the path is written to stdout (one line),
-// preserving backward compatibility with scripts that call niwa directly via
-// command substitution (e.g., `dir=$(niwa go workspace)`).
+// When NIWA_RESPONSE_FILE was absent, the call is a no-op. The shell wrapper
+// always sets NIWA_RESPONSE_FILE; callers without the wrapper see the landing
+// path in the command's summary line on stderr instead.
 //
 // Must be called after the root command's PersistentPreRunE; reads from the
 // cache populated by captureNiwaResponseFile.
-func writeLandingPath(cmd *cobra.Command, path string) error {
+func writeLandingPath(path string) error {
 	if f := niwaResponseFile; f != "" {
 		if err := validateResponseFilePath(f); err != nil {
 			return err
 		}
 		return os.WriteFile(f, []byte(path+"\n"), 0o600)
 	}
-	fmt.Fprintln(cmd.OutOrStdout(), path)
 	return nil
 }
 
@@ -82,9 +79,9 @@ func validateResponseFilePath(f string) error {
 }
 
 // validateLandingPath ensures the path is safe for the landing-path protocol.
-// Both the stdout branch and the NIWA_RESPONSE_FILE branch require an absolute
-// path with no embedded newlines (a newline would break the one-line-per-path
-// contract the shell wrapper reads).
+// The NIWA_RESPONSE_FILE branch requires an absolute path with no embedded
+// newlines (a newline would break the one-line-per-path contract the shell
+// wrapper reads).
 func validateLandingPath(path string) error {
 	if !filepath.IsAbs(path) {
 		return fmt.Errorf("internal error: landing path is not absolute: %s", path)
