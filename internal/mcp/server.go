@@ -355,13 +355,6 @@ func (s *Server) resolveRole(role string) (*SessionEntry, error) {
 	return nil, fmt.Errorf("role not found")
 }
 
-func (s *Server) moveToExpired(path string, _ Message) {
-	expDir := filepath.Join(s.inboxDir, "expired")
-	_ = os.MkdirAll(expDir, 0o755)
-	dest := filepath.Join(expDir, filepath.Base(path))
-	_ = os.Rename(path, dest)
-	// TODO: write expiry notification to sender inbox
-}
 
 func (s *Server) markSeen(name string) {
 	s.seenMu.Lock()
