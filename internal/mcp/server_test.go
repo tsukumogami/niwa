@@ -9,8 +9,7 @@ import (
 )
 
 // TestServer_Initialize_ToolsList verifies the MCP server responds to
-// initialize and tools/list with the expected tool names. This is a partial
-// validation — niwa_ask and niwa_wait are added in Issue 5.
+// initialize and tools/list with all four expected tool names.
 func TestServer_Initialize_ToolsList(t *testing.T) {
 	pr, pw := io.Pipe()
 	var outBuf strings.Builder

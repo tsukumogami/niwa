@@ -161,6 +161,8 @@ func buildChannelsSection(cfg *config.WorkspaceConfig) string {
 	sb.WriteString("### Tools\n\n")
 	sb.WriteString("- `niwa_check_messages` — check this session's inbox for new messages\n")
 	sb.WriteString("- `niwa_send_message` — send a typed message to another session by role\n")
+	sb.WriteString("- `niwa_ask` — send a question and block until the recipient replies (or timeout)\n")
+	sb.WriteString("- `niwa_wait` — block until a threshold number of messages matching type/from filters arrive\n")
 
 	return sb.String()
 }

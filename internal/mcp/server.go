@@ -467,14 +467,12 @@ func (s *Server) handleWait(args waitArgs) toolResult {
 	s.scanExistingForWaiter(tw)
 
 	tw.mu.Lock()
-	done := len(tw.msgs) >= tw.threshold
-	tw.mu.Unlock()
-	if done {
-		tw.mu.Lock()
+	if len(tw.msgs) >= tw.threshold {
 		msgs := append([]Message(nil), tw.msgs...)
 		tw.mu.Unlock()
 		return formatWaitResult(msgs)
 	}
+	tw.mu.Unlock()
 
 	select {
 	case <-tw.signal:
@@ -536,6 +534,9 @@ func (s *Server) scanExistingForWaiter(tw *typeWaiter) {
 			tw.msgs = append(tw.msgs, m)
 			tw.mu.Unlock()
 		}
+		// Mark seen so pollInbox does not deliver the same file a second time
+		// via notifyNewFile, which would double-count it in tw.msgs.
+		s.markSeen(e.Name())
 	}
 }
 
