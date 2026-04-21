@@ -106,7 +106,9 @@ within the existing `Applier.runPipeline` call.
 **R4** — The `ChannelMaterializer` shall write `<instance-root>/.claude/.mcp.json`
 declaring a `niwa` MCP server entry that invokes `niwa mcp-serve` with
 `NIWA_INSTANCE_ROOT` baked in at apply time. This file shall be tracked in
-`InstanceState.ManagedFiles` so drift detection and cleanup work automatically.
+`InstanceState.ManagedFiles` so drift detection and cleanup work automatically. The
+server shall declare `capabilities.experimental["claude/channel"]` so it is
+forward-compatible with Claude Code's native Channels push protocol.
 
 **R5** — The `ChannelMaterializer` shall append a `## Channels` section to
 `workspace-context.md` containing: the sessions registry path, the MCP tool names
@@ -117,6 +119,19 @@ idle points and as a backstop every M tool calls (default M=10, overridable in
 `workspace.toml`); (c) emit `task.progress` messages at a defined cadence (default: every
 5 minutes of wall time or every 20 tool calls, whichever comes first) while executing
 a delegated task.
+
+**R5a** — The `ChannelMaterializer` shall write a `SessionStart` hook entry into each
+session's `.claude/settings.json` (via `HooksMaterializer`). The hook shall call
+`niwa session register` and, if pending messages exist, return a JSON response with
+`initialUserMessage` directing Claude to call `niwa_check_messages` before starting
+work. This ensures a session that was offline when messages were sent sees them
+immediately at startup without requiring polling.
+
+**R5b** — The `ChannelMaterializer` shall write a `UserPromptSubmit` hook that checks
+the inbox on every user prompt submission and injects a `additionalContext` reminder
+when unread messages are present. This ensures that an idle session which the user
+manually activates (by typing anything) surfaces pending messages in Claude's next
+context window, even if the session never polled during its idle period.
 
 ### Session Identity and Registration
 
@@ -389,31 +404,40 @@ niwa to manage a process lifecycle it currently lacks. The file-based approach c
 replaced by a broker in v2 when push delivery becomes a priority, without changing the
 MCP tool interface or message schema.
 
-**MCP Channels is the target architecture; v1 file-based polling is a stepping stone**
+**Hooks solve idle sessions; Channels is still the future push path**
 
-Claude Code's native `claude/channel` protocol is the right primitive for inter-session
-communication — messages arrive as push notifications in Claude's context without
-polling, without consuming tool-call budget, and without requiring Claude to remember
-to check. It is not available for v1 because the research preview requires `claude.ai`
-OAuth and `--dangerously-load-development-channels`, constraints that make reliable
-provisioning impossible today.
+The key user concern is idle sessions: a Claude session sitting at the prompt waiting
+for work has no tool-call cadence, so polling is useless for it. Prototyping confirmed
+two things that change the architecture:
 
-Niwa's role is to be the provisioner that wires Channels into workspaces automatically.
-That is the real reason to build this feature in niwa rather than wrapping a community
-tool: none of the community tools (mcp_agent_mail, MACP, session-bridge) are workspace
-provisioners. They are standalone messaging servers that users install and configure
-manually. Niwa's differentiated contribution is making Channels — or any equivalent
-push transport — invisible to the user: run `niwa create`, open your sessions, and the
-mesh is already there.
+First, `notifications/claude/channel` (the Channels push protocol) **cannot** solve
+this today. The `--channels` flag cannot be configured via `settings.json` — it is
+CLI-flag-only and requires `claude.ai` OAuth. Even with both in place, there is a
+confirmed open bug (GitHub #44380) where channel notifications display in the terminal
+but the idle REPL does not interrupt to process them. Channels is not a viable
+mechanism for waking idle sessions in v1.
 
-The v1 file-based polling design is explicitly transitional. The message schema
-(typed envelope with role-based `from`/`to`), the session identity model (role derived
-from repo path), and the tool names (`niwa_check_messages`, `niwa_send_message`) are
-stable across the delivery path upgrade. When Channels lifts the OAuth requirement,
-`niwa apply` writes a Channels broker entry instead of a stdio `niwa mcp-serve` entry;
-no session-side changes are required. The interim pull model (Claude calls
-`niwa_check_messages` every M tool calls) is reliable, testable, and imposes no
-platform-specific wiring while the native primitive matures.
+Second, Claude Code's hook system solves the idle session problem cleanly. The
+`SessionStart` hook fires when a session opens (including resume and `/clear`) and its
+response can include `initialUserMessage` — a synthetic first user turn that Claude
+processes before any user input. Niwa's `SessionStart` hook calls `niwa session register`
+and, if the inbox has pending messages from when the session was offline, injects an
+`initialUserMessage` directing Claude to call `niwa_check_messages`. The
+`UserPromptSubmit` hook fires when the user types anything into an idle session, and its
+`additionalContext` field injects a pending-message reminder into Claude's next context
+window. Together these hooks eliminate the idle-session gap without OAuth, without the
+Channels flag, and without tmux.
+
+The v1 delivery model is therefore:
+
+1. **Session start / resume**: `SessionStart` hook injects `initialUserMessage` with pending count → Claude calls `niwa_check_messages` immediately
+2. **User-activated idle session**: `UserPromptSubmit` hook injects `additionalContext` → Claude sees pending count in next context
+3. **Active session (working)**: behavioral instructions in `workspace-context.md` → poll every M tool calls
+4. **`notifications/claude/channel` push**: declared as a server capability; fires via fsnotify when new messages arrive; displayed in terminal as a best-effort signal while the idle-wakeup bug exists in Claude Code
+
+The message schema, role-based addressing, and tool names are stable across all four
+paths. When Channels lifts the OAuth requirement and fixes the idle-wakeup bug, path 4
+becomes the primary mechanism and paths 1–3 become fallbacks, with no session-side changes.
 
 **Error-on-duplicate roles over silent routing**
 
