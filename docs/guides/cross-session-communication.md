@@ -20,28 +20,77 @@ where sessions run in parallel and need to synchronize.
 
 ## Enabling the session mesh
 
-Add a `[channels.mesh]` table to your `workspace.toml`:
+There are three ways to enable the mesh, ordered by commitment level:
+
+**Flag** — one-off, no config changes needed:
+
+```bash
+niwa create my-instance --channels
+niwa apply --channels
+```
+
+Use `--no-channels` to skip mesh provisioning even if the env var or config says
+otherwise.
+
+**Env var** — persist the preference for yourself without touching shared config:
+
+```bash
+export NIWA_CHANNELS=1
+```
+
+Any subsequent `niwa create` or `niwa apply` will provision the mesh. Set this in your
+shell profile to make it permanent.
+
+**workspace.toml** — persist the preference for the whole team:
+
+```toml
+[channels.mesh]
+```
+
+A bare `[channels.mesh]` section with no sub-keys is valid and provisions the full mesh.
+Roles are auto-derived from the workspace topology (see [Roles](#roles) below).
+
+The flag overrides the env var, which overrides the config. `--no-channels` suppresses
+provisioning regardless of env var or config.
+
+### Roles
+
+Roles are the addresses sessions use to reach each other — `niwa_send_message(to="coordinator", ...)`.
+
+By default, roles are derived from the workspace topology:
+
+- A session running at the instance root gets the role `coordinator`
+- A session running in `<instance-root>/myrepo/` gets the role `myrepo`
+
+This works without any configuration for typical layouts. If a repo's directory name
+doesn't make a useful role name, you can override it two ways:
+
+- At session start: pass `--role <name>` to the relevant command, or set
+  `NIWA_SESSION_ROLE=<name>` in the environment
+- In workspace.toml: add an explicit `[channels.mesh.roles]` map
+
+The explicit map takes precedence over auto-derivation:
 
 ```toml
 [channels.mesh]
 
 [channels.mesh.roles]
-coordinator = ""          # "" means the role lives at the workspace root
-worker = "tools/worker"   # repo-relative path for a per-repo session
+coordinator = ""          # "" means the instance root
+worker = "tools/worker"   # relative path from the instance root
 ```
 
-The `roles` map assigns names to sessions. The value is the repo directory relative to
-the instance root (or `""` for the workspace root). Role names become the addresses used
-in MCP tool calls — `niwa_send_message(to="worker", ...)`.
+Role names become the addresses used in MCP tool calls. They must match
+`^[a-zA-Z0-9._-]{1,64}$`.
 
 ### Config reference
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `[channels.mesh.roles]` | map[string]string | — | Role name → repo path. Required; at least one role needed to enable mesh. |
+| `[channels.mesh]` | section | — | Presence enables the mesh. No sub-keys required; roles are auto-derived from directory names if `[channels.mesh.roles]` is omitted. |
+| `[channels.mesh.roles]` | map[string]string | — | Optional. Role name → repo path (relative to instance root; `""` for root). Overrides auto-derivation for any listed role. |
 | `message_ttl` | string | `"24h"` | How long consumed messages are kept in `inbox/read/` before the TTL sweep deletes them. Standard Go duration syntax. |
 
-Example with a custom TTL:
+Example with a custom TTL and explicit roles:
 
 ```toml
 [channels.mesh]
@@ -76,9 +125,9 @@ following at step 4.75 of the pipeline, before any per-repo materializers run:
 
 **workspace-context.md additions:**
 
-A `## Channels` section is appended that lists the configured roles, the four MCP tool
-names, and behavioral instructions. This section is idempotent — re-applying won't
-duplicate it.
+A `## Channels` section is appended that explains how roles are assigned (auto-derivation
+rules and any explicit overrides), lists the four MCP tool names, and gives behavioral
+instructions. This section is idempotent — re-applying won't duplicate it.
 
 **Hook injection:**
 
