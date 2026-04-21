@@ -243,6 +243,15 @@ socket → TCP) without changes to the MCP tool layer or message schema.
 from `internal/cli/config.go`, with each subcommand in a separate file under
 `internal/cli/`.
 
+**R28** — The v1 design shall be forward-compatible with Claude Code's native
+`claude/channel` delivery protocol. Concretely: the message envelope schema, role-based
+addressing model, and session-side tool names (`niwa_check_messages`,
+`niwa_send_message`) shall remain stable when the delivery path is upgraded from
+file-based polling to Channels push delivery. The `ChannelMaterializer` shall write the
+MCP server entry in a way that can be replaced with a Channels broker entry in a
+subsequent `niwa apply` without requiring any changes to session-side configuration or
+behavioral instructions.
+
 ## Acceptance Criteria
 
 ### Provisioning
@@ -322,9 +331,14 @@ from `internal/cli/config.go`, with each subcommand in a separate file under
 - **Automated session spawning**: the user opens Claude sessions manually. Niwa
   provisions the channel and injects configuration; it does not start or manage Claude
   processes.
-- **MCP channels integration** (`claude/channel` research preview): requires `claude.ai`
-  OAuth and `--dangerously-load-development-channels`. Deferred until the feature
-  graduates from research preview.
+- **MCP Channels as delivery path**: Claude Code's native `claude/channel` protocol is
+  the right long-term delivery mechanism — push notifications arrive in session context
+  without polling, which is the ideal UX. It is out of scope for v1 because the research
+  preview requires `claude.ai` OAuth and `--dangerously-load-development-channels`. The
+  v1 design is explicitly forward-compatible: the message schema, role-based addressing,
+  and session-side tool names are stable across the delivery path upgrade. When Channels
+  graduates from research preview, niwa's provisioning step writes a Channels broker
+  entry instead of a stdio MCP server entry; sessions notice no difference.
 - **Agent Teams integration**: Anthropic's Agent Teams requires a spawning lead session
   and does not support independently-opened sessions. Not a target for v1.
 - **Real-time push delivery via inotify**: `inotify`-based wake-up for instant message
@@ -375,14 +389,31 @@ niwa to manage a process lifecycle it currently lacks. The file-based approach c
 replaced by a broker in v2 when push delivery becomes a priority, without changing the
 MCP tool interface or message schema.
 
-**Pull model over push delivery for v1**
+**MCP Channels is the target architecture; v1 file-based polling is a stepping stone**
 
-Push delivery (session receives a message without polling) is the right long-term UX,
-but Claude Code's native push primitive (MCP channels) requires `claude.ai` OAuth and a
-development flag today. A custom push mechanism via `inotify` is zero-dependency but
-adds MCP server complexity beyond what v1 warrants. The pull model (Claude calls
-`niwa_check_messages` at idle points and every M tool calls) is reliable, testable, and
-requires no platform-specific wiring. Push via `inotify` is the planned v2 enhancement.
+Claude Code's native `claude/channel` protocol is the right primitive for inter-session
+communication — messages arrive as push notifications in Claude's context without
+polling, without consuming tool-call budget, and without requiring Claude to remember
+to check. It is not available for v1 because the research preview requires `claude.ai`
+OAuth and `--dangerously-load-development-channels`, constraints that make reliable
+provisioning impossible today.
+
+Niwa's role is to be the provisioner that wires Channels into workspaces automatically.
+That is the real reason to build this feature in niwa rather than wrapping a community
+tool: none of the community tools (mcp_agent_mail, MACP, session-bridge) are workspace
+provisioners. They are standalone messaging servers that users install and configure
+manually. Niwa's differentiated contribution is making Channels — or any equivalent
+push transport — invisible to the user: run `niwa create`, open your sessions, and the
+mesh is already there.
+
+The v1 file-based polling design is explicitly transitional. The message schema
+(typed envelope with role-based `from`/`to`), the session identity model (role derived
+from repo path), and the tool names (`niwa_check_messages`, `niwa_send_message`) are
+stable across the delivery path upgrade. When Channels lifts the OAuth requirement,
+`niwa apply` writes a Channels broker entry instead of a stdio `niwa mcp-serve` entry;
+no session-side changes are required. The interim pull model (Claude calls
+`niwa_check_messages` every M tool calls) is reliable, testable, and imposes no
+platform-specific wiring while the native primitive matures.
 
 **Error-on-duplicate roles over silent routing**
 
@@ -401,15 +432,25 @@ users get a working mesh without writing any config. Explicit override is availa
 `NIWA_SESSION_ROLE` or `[channels.mesh.roles]` in `workspace.toml` for cases where
 auto-derive is ambiguous (monorepos, generic repo names).
 
-**Go-native implementation over wrapping existing tools**
+**Go-native implementation because provisioning integration matters, not just runtime purity**
 
-`mcp_agent_mail` is the most feature-complete community solution and supports
-independently-opened sessions, but it requires a Python or Rust runtime. `MACP`
-requires npm. Building natively in Go eliminates all external runtime dependencies,
-keeps the binary self-contained, and allows the broker address and session registration
-to integrate tightly with niwa's existing provisioning pipeline and state model. The
-design patterns from `mcp_agent_mail` (named agent identities, async inbox, ACK-based
-state) are adopted directly; the implementation is not.
+The most feature-complete community tool (`mcp_agent_mail_rust`) was evaluated as a
+potential backend. It is not a fit: its message schema is a flat mail-style model with
+no typed routing keys, no structured `from`/`to` objects, no per-message TTL, no
+delivery status, and no liveness tracking. Adopting it would require niwa to either
+discard the envelope design or maintain a translation layer indefinitely. The Rust
+runtime dependency is a secondary concern; the schema incompatibility is the blocker.
+
+The deeper reason to build natively in Go is provisioning integration. Niwa's value is
+wiring the mesh into the workspace at `niwa apply` time — that means modifying
+`InstanceState.ManagedFiles`, extending the `Applier.runPipeline`, writing
+`workspace-context.md` with session-specific behavioral instructions, and transitioning
+the delivery path to Channels when it matures. These are tight integrations with niwa's
+internals that an external binary cannot provide. A Go-native implementation makes the
+provisioner and the broker the same binary, which simplifies the Channels upgrade path:
+when niwa writes a Channels server entry, it points at itself rather than coordinating
+with an external process. Design patterns from community tools (named agent identities,
+async inbox, ACK-based state) are adopted directly; their implementations are not.
 
 **Workspace-scoped broker over machine-global registry**
 
