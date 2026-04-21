@@ -1,5 +1,5 @@
 ---
-status: Proposed
+status: Planned
 upstream: docs/prds/PRD-cross-session-communication.md
 problem: |
   Niwa workspaces run multiple Claude sessions simultaneously — one per repo, one at
@@ -51,7 +51,7 @@ rationale: |
 
 ## Status
 
-Proposed
+Planned
 
 ## Context and Problem Statement
 
