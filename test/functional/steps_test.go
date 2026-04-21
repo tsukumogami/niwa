@@ -1906,6 +1906,30 @@ func iRunNiwaSessionRegisterFromRepoDir(ctx context.Context, repoName string) (c
 	return ctx, nil
 }
 
+// iRunNiwaSessionRegisterFromInstanceRoot runs "niwa session register" from the
+// instance root without NIWA_SESSION_ROLE set, so the pwd-based fallback returns
+// "coordinator".
+func iRunNiwaSessionRegisterFromInstanceRoot(ctx context.Context) (context.Context, error) {
+	s := getState(ctx)
+	if s == nil {
+		return ctx, fmt.Errorf("no test state")
+	}
+	ms := getMeshState(ctx)
+	if ms == nil {
+		return ctx, fmt.Errorf("no mesh state; call NIWA_INSTANCE_ROOT setup first")
+	}
+
+	savedRole := s.envOverrides["NIWA_SESSION_ROLE"]
+	delete(s.envOverrides, "NIWA_SESSION_ROLE")
+	defer func() {
+		if savedRole != "" {
+			s.envOverrides["NIWA_SESSION_ROLE"] = savedRole
+		}
+	}()
+
+	return ctx, runNiwa(s, ms.instanceRoot, "niwa session register")
+}
+
 // iSetNiwaInstanceRootToInstance sets NIWA_INSTANCE_ROOT to the path of the
 // named workspace instance and initialises meshState to match, so subsequent
 // session register / send-message steps target the right instance.

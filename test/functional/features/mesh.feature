@@ -301,14 +301,24 @@ Feature: Session mesh: filesystem-based inter-session messaging
   Scenario: session registered from instance root gets role coordinator via pwd fallback
     Given a clean niwa environment
     And NIWA_INSTANCE_ROOT is set to a temp directory
-    When I run "niwa session register" as role "coordinator"
+    When I run "niwa session register" from instance root
     Then the exit code is 0
     And a sessions.json entry exists for role "coordinator"
+
+  @critical
+  Scenario: NIWA_SESSION_ROLE overrides pwd-derived role
+    Given a clean niwa environment
+    And NIWA_INSTANCE_ROOT is set to a temp directory
+    And I set env "NIWA_SESSION_ROLE" to "custom"
+    When I run "niwa session register"
+    Then the exit code is 0
+    And a sessions.json entry exists for role "custom"
 
   @critical
   Scenario: --role flag overrides NIWA_SESSION_ROLE and pwd fallback
     Given a clean niwa environment
     And NIWA_INSTANCE_ROOT is set to a temp directory
+    And I set env "NIWA_SESSION_ROLE" to "env-role"
     When I run "niwa session register --role explicit"
     Then the exit code is 0
     And a sessions.json entry exists for role "explicit"
