@@ -97,7 +97,7 @@ func InstallChannelInfrastructure(cfg *config.WorkspaceConfig, instanceRoot stri
 
 	// 5. Append ## Channels section to workspace-context.md (idempotent).
 	ctxPath := filepath.Join(instanceRoot, workspaceContextFile)
-	if err := appendChannelsSection(ctxPath, cfg); err != nil {
+	if err := appendChannelsSection(ctxPath); err != nil {
 		return fmt.Errorf("appending channels section: %w", err)
 	}
 
@@ -118,7 +118,7 @@ func buildMCPJSON(instanceRoot string) ([]byte, error) {
 // appendChannelsSection appends the ## Channels section to the workspace
 // context file when it is not already present. No-op when the section header
 // already exists anywhere in the file.
-func appendChannelsSection(ctxPath string, cfg *config.WorkspaceConfig) error {
+func appendChannelsSection(ctxPath string) error {
 	existing, err := os.ReadFile(ctxPath)
 	if err != nil && !os.IsNotExist(err) {
 		return err
@@ -128,7 +128,7 @@ func appendChannelsSection(ctxPath string, cfg *config.WorkspaceConfig) error {
 		return nil
 	}
 
-	section := buildChannelsSection(cfg)
+	section := buildChannelsSection()
 
 	content := string(existing)
 	if len(content) > 0 && !strings.HasSuffix(content, "\n") {
@@ -139,8 +139,8 @@ func appendChannelsSection(ctxPath string, cfg *config.WorkspaceConfig) error {
 	return writeFileMode(ctxPath, []byte(content), 0o644)
 }
 
-// buildChannelsSection generates the ## Channels markdown section from config.
-func buildChannelsSection(cfg *config.WorkspaceConfig) string {
+// buildChannelsSection generates the ## Channels markdown section.
+func buildChannelsSection() string {
 	var sb strings.Builder
 	sb.WriteString("## Channels\n\n")
 	sb.WriteString("This workspace uses niwa cross-session communication. Sessions can exchange\n")
