@@ -88,7 +88,7 @@ The implementation touches: `internal/workspace/apply.go` (new materializer),
 - Stateless daemon: restartable without data loss or re-registration
 - Claude session ID must be discoverable from within a Claude Code session's shell environment at registration time
 - ChannelMaterializer integrates cleanly with the existing `Applier.runPipeline` step 6.5 without breaking existing materializers
-- The daemon lifecycle must be manageable as part of workspace lifecycle (`niwa apply` starts, `niwa destroy` stops)
+- The daemon lifecycle must be manageable as part of instance lifecycle (`niwa apply` starts, `niwa destroy` stops)
 - `niwa_ask` must not leak goroutines on timeout
 
 ## Considered Options
@@ -102,7 +102,7 @@ sessions whose PID is dead. The question is how this daemon should be started,
 supervised, and stopped as part of the workspace lifecycle.
 
 The daemon must be running before the first Claude session opens so it is ready to
-resume sessions, and must stop cleanly when the workspace is destroyed. It must survive
+resume sessions, and must stop cleanly when the instance is destroyed. It must survive
 its own crash restartably without message loss, because the inbox is file-based and
 stateless. The user must not need to manually run `niwa mesh watch` — zero-friction
 provisioning requires automatic startup.
@@ -110,8 +110,8 @@ provisioning requires automatic startup.
 Key assumptions: `niwa apply` is the canonical provisioning step; the daemon is fully
 stateless (all durable state is the inbox filesystem); PID tracking must use the
 start-time verification pattern from `internal/mcp/liveness.go` to prevent false
-positives from PID recycling; the daemon is workspace-instance-scoped (one per
-instance, not one per machine).
+positives from PID recycling; the daemon is instance-scoped (one per instance, not one
+per machine or workspace root).
 
 #### Chosen: niwa apply spawns the daemon directly via exec
 
@@ -139,6 +139,26 @@ If the daemon crashes between apply runs, `daemon.pid` remains on disk but `IsPI
 returns false. The next `niwa apply` detects the stale PID and spawns a fresh daemon.
 Messages that arrived during downtime sit in the inbox directories and are delivered
 when the daemon restarts or when sessions next open manually.
+
+**Machine restart**: `niwa mesh watch` is a regular user process, not a system service.
+After a machine restart or logout, all instance daemons are gone. `niwa apply` is the
+documented recovery path — run it on an individual instance, or from the workspace root
+to restart daemons for all instances at once (each instance's `IsPIDAlive` check will
+return false and trigger a fresh spawn).
+
+**Multi-instance `niwa apply` from workspace root**: when `niwa apply` is run from the
+workspace root (applying to all instances), the daemon spawn step runs once per instance
+in sequence. Since the `IsPIDAlive` check is per-instance and the PID file is scoped to
+each instance root, concurrent instances do not interfere with each other.
+
+**Handling `rm -rf`**: if a user removes the instance directory without calling `niwa
+destroy`, the daemon's fsnotify watcher will receive errors or `REMOVE` events for its
+watched path and must detect this condition and exit cleanly rather than looping on
+errors. The daemon startup loop should check whether `<instance-root>/.niwa/sessions/`
+still exists on each iteration; if missing, log a warning and exit. This prevents a
+leaked daemon process from consuming resources indefinitely after an unclean removal.
+Users should be directed to use `niwa destroy` rather than `rm -rf` for instances with
+mesh configured.
 
 #### Alternatives Considered
 
@@ -769,9 +789,15 @@ exiting. This prevents partial writes to `sessions.json` during `niwa destroy`.
   the `~/.claude/sessions/` file is absent or stale, `claude_session_id` is left empty
   and the daemon cannot resume that session autonomously. The session is still reachable
   via SessionStart delivery when it opens manually.
-- **Daemon not auto-restarted on crash**: if the daemon crashes between `niwa apply`
-  runs, it stays down until the next `niwa apply`. Sessions that receive messages during
-  daemon downtime queue them durably but are not woken until the daemon restarts.
+- **Daemon not auto-restarted on crash or machine restart**: `niwa mesh watch` is a
+  regular user process, not a system service. It does not survive machine restarts or
+  logouts. After a reboot, all instance daemons must be restarted manually via `niwa
+  apply`. Sessions that arrive while the daemon is down queue messages durably but are
+  not woken until the daemon is back.
+- **`rm -rf` on an instance leaves a transient leaked daemon**: removing an instance
+  directory without `niwa destroy` bypasses daemon shutdown. The daemon detects the
+  missing instance root via fsnotify errors and exits, but this is an unclean termination.
+  There is no recovery path for the leaked process other than waiting for it to self-exit.
 - **`SysProcAttr.Setsid` is Unix-specific**: a Windows port would need a different
   process detachment mechanism (Windows is out of scope for v1).
 - **Forward-compatibility risk for filesystem scan**: the base64url encoding of the CWD
@@ -790,9 +816,13 @@ exiting. This prevents partial writes to `sessions.json` during `niwa destroy`.
 - **Session ID failure**: graceful degradation is the designed behavior. A warning log
   entry makes the gap observable. Future work: functional test with a fake
   `~/.claude/sessions/` fixture to catch regressions in the discovery logic.
-- **Daemon restart**: users can run `niwa apply` at any time to restart a crashed daemon
-  (idempotent apply makes this safe). A future `niwa mesh restart` subcommand could
-  expose this more explicitly.
+- **Daemon not running (crash or reboot)**: `niwa apply` is the recovery path for any
+  instance. Running `niwa apply` from the workspace root restarts daemons for all
+  instances at once. A future `niwa mesh restart` subcommand could expose targeted
+  per-instance restart more explicitly.
+- **`rm -rf` safety**: document in user-facing guides that instances with mesh configured
+  must be removed via `niwa destroy`, not `rm -rf`. The daemon's self-exit on missing
+  instance root limits blast radius, but the guidance should be explicit.
 - **Windows**: `SysProcAttr` is set behind a `//go:build !windows` build tag if Windows
   support is added in the future.
 - **Encoding forward-compat**: document the base64url algorithm dependency in a code

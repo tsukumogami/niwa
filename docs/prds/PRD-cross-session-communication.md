@@ -490,6 +490,17 @@ None. All open questions resolved via the decision protocol.
 - **Context-window budget**: a session resumed by the daemon with many queued messages will
   consume context-window tokens reading them. Sessions with extended offline periods may see
   significant context usage from the first `niwa_check_messages` call after resume.
+- **Daemon does not survive machine restarts**: `niwa mesh watch` is a regular user process
+  (not a registered system service). After a machine restart or user logout, all instance
+  daemons are gone. The recovery path is `niwa apply` on each affected instance, or `niwa
+  apply` from the workspace root to restart daemons for all instances at once. Sessions that
+  arrive while the daemon is down queue their messages durably in the inbox; no messages are
+  lost, but idle sessions will not be woken until the daemon restarts.
+- **`niwa destroy` is required to remove instances with mesh configured**: removing an
+  instance directory with `rm -rf` bypasses the daemon shutdown step. The daemon process
+  will continue running until fsnotify detects that its watched directory is gone and exits,
+  which is an unclean termination that may leave a stale `daemon.pid` entry. Always use
+  `niwa destroy` to remove instances when the session mesh is active.
 
 ## Decisions and Trade-offs
 
