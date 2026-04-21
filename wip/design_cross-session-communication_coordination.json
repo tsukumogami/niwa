@@ -4,32 +4,32 @@
     {
       "id": 1,
       "question": "Daemon lifecycle management: how is niwa mesh watch started, supervised, and stopped as part of workspace lifecycle?",
-      "status": "pending",
+      "status": "complete",
       "complexity": "standard",
       "report_file": "wip/design_cross-session-communication_decision_1_report.md"
     },
     {
       "id": 2,
       "question": "Claude session ID discovery: how does niwa session register obtain the Claude Code session ID needed for claude --resume, given that it runs inside a shell hook with no direct access to Claude Code internals?",
-      "status": "pending",
+      "status": "complete",
       "complexity": "standard",
       "report_file": "wip/design_cross-session-communication_decision_2_report.md"
     },
     {
       "id": 3,
       "question": "niwa_ask blocking mechanism: how does the MCP server hold a tool call open without returning until the target session has written a reply into the caller's inbox, including timeout and goroutine cleanup?",
-      "status": "pending",
+      "status": "complete",
       "complexity": "critical",
       "report_file": "wip/design_cross-session-communication_decision_3_report.md"
     },
     {
       "id": 4,
       "question": "ChannelMaterializer integration: where in runPipeline does the materializer run, what exactly does it write, and how does it extend workspace-context.md without breaking the existing workspace_context.go generation?",
-      "status": "pending",
+      "status": "complete",
       "complexity": "standard",
       "report_file": "wip/design_cross-session-communication_decision_4_report.md"
     }
   ],
-  "cross_validation": "pending",
+  "cross_validation": "passed",
   "round": 0
 }
