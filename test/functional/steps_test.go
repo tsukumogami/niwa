@@ -1571,3 +1571,286 @@ func theDaemonForInstanceEventuallyStops(ctx context.Context, instanceName strin
 	}
 	return fmt.Errorf("daemon for instance %q did not stop within 10s", instanceName)
 }
+
+// --- niwa_ask / niwa_wait step implementations ---
+
+// askAnswerStateKeyType is the context key for storing niwa_ask response output.
+type askAnswerStateKeyType struct{}
+
+var askAnswerStateKey = askAnswerStateKeyType{}
+
+// theCoordinatorAsksWorkerAndReplies runs the coordinator's MCP server with
+// niwa_ask and concurrently places a question.answer reply in the coordinator
+// inbox once the ask message appears in the worker inbox.
+func theCoordinatorAsksWorkerAndReplies(ctx context.Context) (context.Context, error) {
+	s := getState(ctx)
+	if s == nil {
+		return ctx, fmt.Errorf("no test state")
+	}
+	ms := getMeshState(ctx)
+	if ms == nil {
+		return ctx, fmt.Errorf("no mesh state")
+	}
+
+	coordinatorID := ms.sessionIDs["coordinator"]
+	workerID := ms.sessionIDs["worker"]
+	instanceRoot := ms.instanceRoot
+	sessionsDir := instanceRoot + "/.niwa/sessions"
+	coordinatorInboxDir := sessionsDir + "/" + coordinatorID + "/inbox"
+	workerInboxDir := sessionsDir + "/" + workerID + "/inbox"
+
+	// Build the niwa_ask request for the coordinator.
+	input := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"0.0.1"}}}` + "\n" +
+		`{"jsonrpc":"2.0","method":"notifications/initialized"}` + "\n" +
+		`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"niwa_ask","arguments":{"to":"worker","body":{"question":"what is 2+2?"},"timeout":15}}}` + "\n"
+
+	env := s.buildEnv()
+	envMap := make(map[string]string)
+	for _, kv := range env {
+		idx := strings.IndexByte(kv, '=')
+		if idx >= 0 {
+			envMap[kv[:idx]] = kv[idx+1:]
+		}
+	}
+	envMap["NIWA_INSTANCE_ROOT"] = instanceRoot
+	envMap["NIWA_SESSION_ID"] = coordinatorID
+	envMap["NIWA_SESSION_ROLE"] = "coordinator"
+	envMap["NIWA_INBOX_DIR"] = coordinatorInboxDir
+
+	var envSlice []string
+	for k, v := range envMap {
+		envSlice = append(envSlice, k+"="+v)
+	}
+
+	cmd := exec.Command(s.binPath, "mcp-serve")
+	cmd.Env = envSlice
+	stdinPipe, err := cmd.StdinPipe()
+	if err != nil {
+		return ctx, fmt.Errorf("creating stdin pipe: %w", err)
+	}
+	var stdout, stderr strings.Builder
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	if err := cmd.Start(); err != nil {
+		return ctx, fmt.Errorf("starting mcp-serve: %w", err)
+	}
+
+	// Write the JSON-RPC input to stdin.
+	if _, err := stdinPipe.Write([]byte(input)); err != nil {
+		_ = cmd.Process.Kill()
+		return ctx, fmt.Errorf("writing to stdin: %w", err)
+	}
+
+	// In a goroutine: poll the worker inbox for the ask message, then place a reply
+	// in the coordinator inbox.
+	go func() {
+		const answerText = "the answer is 4"
+		deadline := time.Now().Add(10 * time.Second)
+
+		// Poll for the ask message in the worker inbox.
+		var askMsgID string
+		for time.Now().Before(deadline) {
+			entries, err := os.ReadDir(workerInboxDir)
+			if err != nil {
+				time.Sleep(50 * time.Millisecond)
+				continue
+			}
+			for _, e := range entries {
+				if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+					continue
+				}
+				data, err := os.ReadFile(filepath.Join(workerInboxDir, e.Name()))
+				if err != nil {
+					continue
+				}
+				var m struct {
+					ID   string `json:"id"`
+					Type string `json:"type"`
+				}
+				if err := json.Unmarshal(data, &m); err != nil {
+					continue
+				}
+				if m.Type == "question.ask" {
+					askMsgID = m.ID
+					break
+				}
+			}
+			if askMsgID != "" {
+				break
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+
+		if askMsgID == "" {
+			// No ask found; close stdin so coordinator times out cleanly.
+			_ = stdinPipe.Close()
+			return
+		}
+
+		// Write a question.answer message to the coordinator inbox.
+		replyID := newTestUUID()
+		reply := map[string]any{
+			"v":        1,
+			"id":       replyID,
+			"type":     "question.answer",
+			"from":     map[string]any{"role": "worker"},
+			"to":       map[string]any{"role": "coordinator"},
+			"reply_to": askMsgID,
+			"sent_at":  time.Now().UTC().Format(time.RFC3339),
+			"body":     map[string]any{"answer": answerText},
+		}
+		replyData, err := json.Marshal(reply)
+		if err != nil {
+			_ = stdinPipe.Close()
+			return
+		}
+		if err := os.MkdirAll(coordinatorInboxDir, 0o700); err != nil {
+			_ = stdinPipe.Close()
+			return
+		}
+		tmpPath := filepath.Join(coordinatorInboxDir, replyID+".json.tmp")
+		destPath := filepath.Join(coordinatorInboxDir, replyID+".json")
+		if err := os.WriteFile(tmpPath, replyData, 0o600); err != nil {
+			_ = stdinPipe.Close()
+			return
+		}
+		_ = os.Rename(tmpPath, destPath)
+
+		// Close stdin after placing the reply so the server can exit.
+		time.Sleep(500 * time.Millisecond)
+		_ = stdinPipe.Close()
+	}()
+
+	if err := cmd.Wait(); err != nil {
+		if _, ok := err.(*exec.ExitError); !ok {
+			return ctx, fmt.Errorf("mcp-serve failed: %w\nstderr: %s", err, stderr.String())
+		}
+	}
+
+	s.stdout = stdout.String()
+	s.exitCode = 0
+	return context.WithValue(ctx, askAnswerStateKey, stdout.String()), nil
+}
+
+// theAskResponseContainsAnswer asserts that the ask response contains the expected answer text.
+func theAskResponseContainsAnswer(ctx context.Context) error {
+	s := getState(ctx)
+	if s == nil {
+		return fmt.Errorf("no test state")
+	}
+	if !strings.Contains(s.stdout, "the answer is 4") {
+		return fmt.Errorf("ask response does not contain expected answer; got:\n%s", s.stdout)
+	}
+	return nil
+}
+
+// theCoordinatorCallsAskWithTimeout calls niwa_ask with a short timeout and no reply placed.
+func theCoordinatorCallsAskWithTimeout(ctx context.Context, timeoutSecs int) (context.Context, error) {
+	s := getState(ctx)
+	if s == nil {
+		return ctx, fmt.Errorf("no test state")
+	}
+	ms := getMeshState(ctx)
+	if ms == nil {
+		return ctx, fmt.Errorf("no mesh state")
+	}
+	coordinatorID := ms.sessionIDs["coordinator"]
+	argsJSON := fmt.Sprintf(`{"to":"worker","body":{"question":"will you answer?"},"timeout":%d}`, timeoutSecs)
+	out, err := callMCPTool(s, coordinatorID, "coordinator", "niwa_ask", argsJSON)
+	if err != nil {
+		return ctx, err
+	}
+	s.stdout = out
+	s.exitCode = 0
+	return ctx, nil
+}
+
+// nMessagesPlacedInCoordinatorInbox places n synthetic messages of the given type
+// directly into the coordinator inbox (bypassing MCP).
+func nMessagesPlacedInCoordinatorInbox(ctx context.Context, n int, msgType string) (context.Context, error) {
+	ms := getMeshState(ctx)
+	if ms == nil {
+		return ctx, fmt.Errorf("no mesh state")
+	}
+	coordinatorID, ok := ms.sessionIDs["coordinator"]
+	if !ok {
+		return ctx, fmt.Errorf("no coordinator session ID")
+	}
+	inboxDir := filepath.Join(ms.instanceRoot, ".niwa", "sessions", coordinatorID, "inbox")
+	if err := os.MkdirAll(inboxDir, 0o700); err != nil {
+		return ctx, fmt.Errorf("creating coordinator inbox: %w", err)
+	}
+	for i := 0; i < n; i++ {
+		msgID := newTestUUID()
+		msg := map[string]any{
+			"v":       1,
+			"id":      msgID,
+			"type":    msgType,
+			"from":    map[string]any{"role": "worker"},
+			"to":      map[string]any{"role": "coordinator"},
+			"sent_at": time.Now().UTC().Format(time.RFC3339),
+			"body":    map[string]any{"index": i},
+		}
+		data, err := json.Marshal(msg)
+		if err != nil {
+			return ctx, fmt.Errorf("marshaling message: %w", err)
+		}
+		tmpPath := filepath.Join(inboxDir, msgID+".json.tmp")
+		destPath := filepath.Join(inboxDir, msgID+".json")
+		if err := os.WriteFile(tmpPath, data, 0o600); err != nil {
+			return ctx, fmt.Errorf("writing message: %w", err)
+		}
+		if err := os.Rename(tmpPath, destPath); err != nil {
+			return ctx, fmt.Errorf("renaming message: %w", err)
+		}
+	}
+	return ctx, nil
+}
+
+// theCoordinatorCallsWait calls niwa_wait for the given message type and count.
+func theCoordinatorCallsWait(ctx context.Context, msgType string, count int) (context.Context, error) {
+	s := getState(ctx)
+	if s == nil {
+		return ctx, fmt.Errorf("no test state")
+	}
+	ms := getMeshState(ctx)
+	if ms == nil {
+		return ctx, fmt.Errorf("no mesh state")
+	}
+	coordinatorID := ms.sessionIDs["coordinator"]
+	argsJSON := fmt.Sprintf(`{"types":[%q],"count":%d,"timeout":10}`, msgType, count)
+	out, err := callMCPTool(s, coordinatorID, "coordinator", "niwa_wait", argsJSON)
+	if err != nil {
+		return ctx, err
+	}
+	s.stdout = out
+	s.exitCode = 0
+	return ctx, nil
+}
+
+// coordinatorSendsWithInvalidType calls niwa_send_message with the given invalid type.
+func coordinatorSendsWithInvalidType(ctx context.Context, invalidType string) (context.Context, error) {
+	s := getState(ctx)
+	if s == nil {
+		return ctx, fmt.Errorf("no test state")
+	}
+	ms := getMeshState(ctx)
+	if ms == nil {
+		return ctx, fmt.Errorf("no mesh state")
+	}
+	coordinatorID := ms.sessionIDs["coordinator"]
+	argsJSON := `{"to":"worker","type":"` + invalidType + `","body":{"text":"hello"}}`
+	out, err := callMCPTool(s, coordinatorID, "coordinator", "niwa_send_message", argsJSON)
+	if err != nil {
+		return ctx, err
+	}
+	s.stdout = out
+	s.exitCode = 0
+	return ctx, nil
+}
+
+// newTestUUID generates a simple pseudo-random UUID for test use.
+func newTestUUID() string {
+	return fmt.Sprintf("%d-%d", time.Now().UnixNano(), os.Getpid())
+}

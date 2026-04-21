@@ -144,3 +144,16 @@ type sendMessageArgs struct {
 	TaskID    string          `json:"task_id,omitempty"`
 	ExpiresAt string          `json:"expires_at,omitempty"`
 }
+
+type askArgs struct {
+	To      string          `json:"to"`
+	Body    json.RawMessage `json:"body"`
+	Timeout int             `json:"timeout,omitempty"`
+}
+
+type waitArgs struct {
+	Types   []string `json:"types,omitempty"`
+	From    []string `json:"from,omitempty"`
+	Count   int      `json:"count,omitempty"`
+	Timeout int      `json:"timeout,omitempty"`
+}

@@ -15,7 +15,7 @@ func TestServer_Initialize_ToolsList(t *testing.T) {
 	pr, pw := io.Pipe()
 	var outBuf strings.Builder
 
-	srv := New("", "", "coordinator", "test-session-id")
+	srv := New("", "", "coordinator", "test-session-id", "")
 
 	done := make(chan error, 1)
 	go func() {
@@ -88,7 +88,7 @@ func TestServer_Initialize_ToolsList(t *testing.T) {
 		}
 	}
 
-	for _, want := range []string{"niwa_check_messages", "niwa_send_message"} {
+	for _, want := range []string{"niwa_check_messages", "niwa_send_message", "niwa_ask", "niwa_wait"} {
 		if !names[want] {
 			t.Errorf("tool %q not in tools/list response; got names: %v", want, names)
 		}

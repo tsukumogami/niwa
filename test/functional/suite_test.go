@@ -189,6 +189,14 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 	ctx.Step(`^I remove the sessions directory from instance "([^"]*)"$`, iRemoveSessionsDirFromInstance)
 	ctx.Step(`^the daemon for instance "([^"]*)" eventually stops$`, theDaemonForInstanceEventuallyStops)
 
+	// niwa_ask / niwa_wait steps
+	ctx.Step(`^the coordinator asks the worker a question and the worker replies$`, theCoordinatorAsksWorkerAndReplies)
+	ctx.Step(`^the ask response contains the answer$`, theAskResponseContainsAnswer)
+	ctx.Step(`^the coordinator calls niwa_ask with timeout (\d+) seconds and no reply$`, theCoordinatorCallsAskWithTimeout)
+	ctx.Step(`^(\d+) "([^"]*)" messages are placed in the coordinator inbox$`, nMessagesPlacedInCoordinatorInbox)
+	ctx.Step(`^the coordinator calls niwa_wait for "([^"]*)" messages with count (\d+)$`, theCoordinatorCallsWait)
+	ctx.Step(`^the coordinator sends a message with invalid type "([^"]*)"$`, coordinatorSendsWithInvalidType)
+
 	// Assertions
 	ctx.Step(`^the exit code is (\d+)$`, theExitCodeIs)
 	ctx.Step(`^the exit code is not (\d+)$`, theExitCodeIsNot)

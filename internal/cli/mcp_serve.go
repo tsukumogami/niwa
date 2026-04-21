@@ -34,6 +34,6 @@ func runMCPServe(cmd *cobra.Command, args []string) error {
 		inboxDir = sessionsDir + "/" + sessionID + "/inbox"
 	}
 
-	srv := mcp.New(inboxDir, sessionsDir, sessionRole, sessionID)
+	srv := mcp.New(inboxDir, sessionsDir, sessionRole, sessionID, instanceRoot)
 	return srv.Run(os.Stdin, os.Stdout)
 }

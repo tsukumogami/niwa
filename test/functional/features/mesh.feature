@@ -203,3 +203,47 @@ Feature: Session mesh: filesystem-based inter-session messaging
     And the file ".niwa/daemon.pid" exists in instance "selfstop-ws"
     When I remove the sessions directory from instance "selfstop-ws"
     Then the daemon for instance "selfstop-ws" eventually stops
+
+  @critical
+  Scenario: niwa_ask receives an answer from another session
+    Given a clean niwa environment
+    And NIWA_INSTANCE_ROOT is set to a temp directory
+    When I run "niwa session register" as role "coordinator"
+    Then the exit code is 0
+    When I run "niwa session register" as role "worker"
+    Then the exit code is 0
+    When the coordinator asks the worker a question and the worker replies
+    Then the ask response contains the answer
+
+  @critical
+  Scenario: niwa_ask returns ASK_TIMEOUT when no reply arrives
+    Given a clean niwa environment
+    And NIWA_INSTANCE_ROOT is set to a temp directory
+    When I run "niwa session register" as role "coordinator"
+    Then the exit code is 0
+    When I run "niwa session register" as role "worker"
+    Then the exit code is 0
+    When the coordinator calls niwa_ask with timeout 2 seconds and no reply
+    Then the output contains "ASK_TIMEOUT"
+
+  @critical
+  Scenario: niwa_wait unblocks when count threshold is met
+    Given a clean niwa environment
+    And NIWA_INSTANCE_ROOT is set to a temp directory
+    When I run "niwa session register" as role "coordinator"
+    Then the exit code is 0
+    When 2 "task.result" messages are placed in the coordinator inbox
+    When the coordinator calls niwa_wait for "task.result" messages with count 2
+    Then the output contains "task.result"
+    And the output contains "2 message"
+
+  @critical
+  Scenario: niwa_send_message rejects invalid field
+    Given a clean niwa environment
+    And NIWA_INSTANCE_ROOT is set to a temp directory
+    When I run "niwa session register" as role "coordinator"
+    Then the exit code is 0
+    When I run "niwa session register" as role "worker"
+    Then the exit code is 0
+    When the coordinator sends a message with invalid type "../../evil"
+    Then the output contains "isError"
