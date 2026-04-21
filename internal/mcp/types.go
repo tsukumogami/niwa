@@ -96,7 +96,6 @@ type channelNotificationParams struct {
 //	<session-uuid>/
 //	  inbox/                   — incoming message files (<msg-uuid>.json)
 //	    read/                  — consumed messages (moved here by notifyNewFile for reply-awaited messages, TTL sweep for others)
-//	    expired/               — expired messages (moved here on check)
 type SessionEntry struct {
 	ID              string `json:"id"`
 	Role            string `json:"role"`
