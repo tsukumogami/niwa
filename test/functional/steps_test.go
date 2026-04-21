@@ -1086,3 +1086,274 @@ func runClaudeP(s *testState, cwd, prompt string) error {
 	s.exitCode = 0
 	return nil
 }
+
+// --- Mesh / session steps ---
+
+// meshState holds per-scenario mesh state: session IDs keyed by role.
+type meshState struct {
+	sessionIDs   map[string]string // role → session ID
+	instanceRoot string
+}
+
+type meshStateKeyType struct{}
+
+var meshStateKey = meshStateKeyType{}
+
+func getMeshState(ctx context.Context) *meshState {
+	if ms, ok := ctx.Value(meshStateKey).(*meshState); ok {
+		return ms
+	}
+	return nil
+}
+
+func setMeshState(ctx context.Context, ms *meshState) context.Context {
+	return context.WithValue(ctx, meshStateKey, ms)
+}
+
+// niwaInstanceRootIsSetToATempDirectory creates a temp directory and sets
+// NIWA_INSTANCE_ROOT in the scenario env overrides, also storing it in
+// meshState for assertions that need the path.
+func niwaInstanceRootIsSetToATempDirectory(ctx context.Context) (context.Context, error) {
+	s := getState(ctx)
+	if s == nil {
+		return ctx, fmt.Errorf("no test state")
+	}
+	dir := filepath.Join(s.tmpDir, "mesh-instance")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return ctx, fmt.Errorf("creating instance root: %w", err)
+	}
+	s.envOverrides["NIWA_INSTANCE_ROOT"] = dir
+
+	ms := &meshState{
+		sessionIDs:   make(map[string]string),
+		instanceRoot: dir,
+	}
+	return setMeshState(ctx, ms), nil
+}
+
+// iRunNiwaSessionRegisterAsRole runs "niwa session register" with
+// NIWA_SESSION_ROLE set to the given role. It captures the session ID
+// from the output and stores it in meshState.
+func iRunNiwaSessionRegisterAsRole(ctx context.Context, role string) (context.Context, error) {
+	s := getState(ctx)
+	if s == nil {
+		return ctx, fmt.Errorf("no test state")
+	}
+
+	// Override NIWA_SESSION_ROLE for this invocation.
+	saved := s.envOverrides["NIWA_SESSION_ROLE"]
+	s.envOverrides["NIWA_SESSION_ROLE"] = role
+	defer func() {
+		if saved == "" {
+			delete(s.envOverrides, "NIWA_SESSION_ROLE")
+		} else {
+			s.envOverrides["NIWA_SESSION_ROLE"] = saved
+		}
+	}()
+
+	if err := runNiwa(s, s.homeDir, "niwa session register"); err != nil {
+		return ctx, err
+	}
+
+	// Parse session_id from stdout: "session_id=<uuid> role=<role>"
+	sessionID := ""
+	for _, line := range strings.Split(s.stdout, "\n") {
+		if strings.HasPrefix(line, "session_id=") {
+			parts := strings.Fields(line)
+			if len(parts) >= 1 {
+				sessionID = strings.TrimPrefix(parts[0], "session_id=")
+			}
+		}
+	}
+	if sessionID == "" {
+		return ctx, fmt.Errorf("no session_id in output: %q", s.stdout)
+	}
+
+	ms := getMeshState(ctx)
+	if ms == nil {
+		ms = &meshState{sessionIDs: make(map[string]string)}
+		ctx = setMeshState(ctx, ms)
+	}
+	ms.sessionIDs[role] = sessionID
+	return ctx, nil
+}
+
+// aSessionsJSONEntryExistsForRole asserts that sessions.json in the
+// instance root contains an entry for the given role.
+func aSessionsJSONEntryExistsForRole(ctx context.Context, role string) error {
+	s := getState(ctx)
+	if s == nil {
+		return fmt.Errorf("no test state")
+	}
+	ms := getMeshState(ctx)
+	if ms == nil {
+		return fmt.Errorf("no mesh state; call NIWA_INSTANCE_ROOT setup first")
+	}
+	jsonPath := filepath.Join(ms.instanceRoot, ".niwa", "sessions", "sessions.json")
+	data, err := os.ReadFile(jsonPath)
+	if err != nil {
+		return fmt.Errorf("reading sessions.json: %w", err)
+	}
+	// sessions.json is written with MarshalIndent so spacing varies; match
+	// both compact and pretty-printed forms.
+	found := strings.Contains(string(data), `"role":"`+role+`"`) ||
+		strings.Contains(string(data), `"role": "`+role+`"`)
+	if !found {
+		return fmt.Errorf("sessions.json does not contain role %q:\n%s", role, string(data))
+	}
+	return nil
+}
+
+// theInboxDirectoryExistsForRole asserts that the inbox directory for
+// the given role's session exists.
+func theInboxDirectoryExistsForRole(ctx context.Context, role string) error {
+	ms := getMeshState(ctx)
+	if ms == nil {
+		return fmt.Errorf("no mesh state")
+	}
+	sessionID, ok := ms.sessionIDs[role]
+	if !ok {
+		return fmt.Errorf("no session ID recorded for role %q", role)
+	}
+	inboxDir := filepath.Join(ms.instanceRoot, ".niwa", "sessions", sessionID, "inbox")
+	info, err := os.Stat(inboxDir)
+	if err != nil {
+		return fmt.Errorf("inbox directory for role %q (session %s) does not exist: %w", role, sessionID, err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("expected %s to be a directory", inboxDir)
+	}
+	return nil
+}
+
+// callMCPTool calls a single MCP tool on the niwa mcp-serve command by
+// piping a JSON-RPC initialize + tools/call sequence to stdin and
+// capturing stdout. Returns the raw JSON-RPC response bytes.
+func callMCPTool(s *testState, sessionID, sessionRole, toolName, argsJSON string) (string, int, error) {
+	instanceRoot := s.envOverrides["NIWA_INSTANCE_ROOT"]
+	if instanceRoot == "" {
+		return "", 0, fmt.Errorf("NIWA_INSTANCE_ROOT not set")
+	}
+	sessionsDir := instanceRoot + "/.niwa/sessions"
+	inboxDir := ""
+	if sessionID != "" {
+		inboxDir = sessionsDir + "/" + sessionID + "/inbox"
+	}
+
+	// Build the JSON-RPC sequence:
+	// 1. initialize request
+	// 2. notifications/initialized notification
+	// 3. tools/call request
+	// We use id=1 for initialize and id=2 for tools/call.
+	input := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"0.0.1"}}}` + "\n" +
+		`{"jsonrpc":"2.0","method":"notifications/initialized"}` + "\n" +
+		`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"` + toolName + `","arguments":` + argsJSON + `}}` + "\n"
+
+	env := s.buildEnv()
+	// Override for this specific session.
+	envMap := make(map[string]string)
+	for _, kv := range env {
+		idx := strings.IndexByte(kv, '=')
+		if idx >= 0 {
+			envMap[kv[:idx]] = kv[idx+1:]
+		}
+	}
+	envMap["NIWA_INSTANCE_ROOT"] = instanceRoot
+	envMap["NIWA_SESSION_ID"] = sessionID
+	envMap["NIWA_SESSION_ROLE"] = sessionRole
+	envMap["NIWA_INBOX_DIR"] = inboxDir
+
+	var envSlice []string
+	for k, v := range envMap {
+		envSlice = append(envSlice, k+"="+v)
+	}
+
+	cmd := exec.Command(s.binPath, "mcp-serve")
+	cmd.Env = envSlice
+	cmd.Stdin = strings.NewReader(input)
+	var stdout, stderr strings.Builder
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	exitCode := 0
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			exitCode = exitErr.ExitCode()
+			_ = exitCode
+		} else {
+			return "", 0, fmt.Errorf("mcp-serve failed: %w\nstderr: %s", err, stderr.String())
+		}
+	}
+	return stdout.String(), 0, nil
+}
+
+// theWorkerSessionSendsAMessageToWithBody sends a typed message from the
+// worker session to the coordinator session using the MCP niwa_send_message tool.
+func theWorkerSessionSendsAMessageToWithBody(ctx context.Context, msgType, targetRole, body string) (context.Context, error) {
+	s := getState(ctx)
+	if s == nil {
+		return ctx, fmt.Errorf("no test state")
+	}
+	ms := getMeshState(ctx)
+	if ms == nil {
+		return ctx, fmt.Errorf("no mesh state")
+	}
+	workerSessionID := ms.sessionIDs["worker"]
+	argsJSON := `{"to":"` + targetRole + `","type":"` + msgType + `","body":{"text":"` + body + `"}}`
+	out, _, err := callMCPTool(s, workerSessionID, "worker", "niwa_send_message", argsJSON)
+	if err != nil {
+		return ctx, err
+	}
+	s.stdout = out
+	s.exitCode = 0
+	return ctx, nil
+}
+
+// theCoordinatorInboxContainsNMessages asserts that the coordinator's
+// inbox directory contains exactly n message files (excluding subdirectories).
+func theCoordinatorInboxContainsNMessages(ctx context.Context, n int) error {
+	ms := getMeshState(ctx)
+	if ms == nil {
+		return fmt.Errorf("no mesh state")
+	}
+	sessionID, ok := ms.sessionIDs["coordinator"]
+	if !ok {
+		return fmt.Errorf("no session ID for coordinator")
+	}
+	inboxDir := filepath.Join(ms.instanceRoot, ".niwa", "sessions", sessionID, "inbox")
+	entries, err := os.ReadDir(inboxDir)
+	if err != nil {
+		return fmt.Errorf("reading coordinator inbox: %w", err)
+	}
+	count := 0
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasSuffix(e.Name(), ".json") {
+			count++
+		}
+	}
+	if count != n {
+		return fmt.Errorf("coordinator inbox contains %d message(s), want %d", count, n)
+	}
+	return nil
+}
+
+// theCoordinatorSessionChecksMessages calls niwa_check_messages as the
+// coordinator session and records the output.
+func theCoordinatorSessionChecksMessages(ctx context.Context) (context.Context, error) {
+	s := getState(ctx)
+	if s == nil {
+		return ctx, fmt.Errorf("no test state")
+	}
+	ms := getMeshState(ctx)
+	if ms == nil {
+		return ctx, fmt.Errorf("no mesh state")
+	}
+	coordinatorSessionID := ms.sessionIDs["coordinator"]
+	out, _, err := callMCPTool(s, coordinatorSessionID, "coordinator", "niwa_check_messages", "{}")
+	if err != nil {
+		return ctx, err
+	}
+	s.stdout = out
+	s.exitCode = 0
+	return ctx, nil
+}

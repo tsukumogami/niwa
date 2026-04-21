@@ -52,15 +52,15 @@ type toolsListResult struct {
 }
 
 type toolDef struct {
-	Name        string     `json:"name"`
-	Description string     `json:"description"`
+	Name        string      `json:"name"`
+	Description string      `json:"description"`
 	InputSchema inputSchema `json:"inputSchema"`
 }
 
 type inputSchema struct {
-	Type       string              `json:"type"`
+	Type       string                `json:"type"`
 	Properties map[string]schemaProp `json:"properties,omitempty"`
-	Required   []string            `json:"required,omitempty"`
+	Required   []string              `json:"required,omitempty"`
 }
 
 type schemaProp struct {
@@ -90,14 +90,22 @@ type channelNotificationParams struct {
 
 // Domain types
 
+// Sessions directory layout under <instance-root>/.niwa/sessions/:
+//
+//	sessions.json              — SessionRegistry: all active sessions
+//	<session-uuid>/
+//	  inbox/                   — incoming message files (<msg-uuid>.json)
+//	    read/                  — consumed messages (moved here by handleCheckMessages)
+//	    expired/               — expired messages (moved here on check)
 type SessionEntry struct {
-	ID           string `json:"id"`
-	Role         string `json:"role"`
-	Repo         string `json:"repo,omitempty"`
-	PID          int    `json:"pid"`
-	StartTime    int64  `json:"start_time"`
-	InboxDir     string `json:"inbox_dir"`
-	RegisteredAt string `json:"registered_at"`
+	ID              string `json:"id"`
+	Role            string `json:"role"`
+	Repo            string `json:"repo,omitempty"`
+	PID             int    `json:"pid"`
+	StartTime       int64  `json:"start_time"`
+	InboxDir        string `json:"inbox_dir"`
+	RegisteredAt    string `json:"registered_at"`
+	ClaudeSessionID string `json:"claude_session_id,omitempty"`
 }
 
 type SessionRegistry struct {

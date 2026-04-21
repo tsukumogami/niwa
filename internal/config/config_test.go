@@ -85,8 +85,12 @@ vars = { EXTRA_FLAG = "claude-only" }
 files = ["env/workspace.env"]
 vars = { LOG_LEVEL = "debug" }
 
-[channels.telegram]
-plugin = "telegram@claude-plugins-official"
+[channels.mesh]
+message_ttl = "24h"
+
+[channels.mesh.roles]
+coordinator = "niwa"
+worker = "tsuku"
 `
 
 func TestParseMinimalConfig(t *testing.T) {
@@ -293,8 +297,14 @@ func TestParseFullConfig(t *testing.T) {
 	if cfg.Claude.Env.Vars.Values["EXTRA_FLAG"].Plain != "claude-only" {
 		t.Errorf("claude.env.vars.EXTRA_FLAG = %v, want claude-only", cfg.Claude.Env.Vars.Values["EXTRA_FLAG"].Plain)
 	}
-	if cfg.Channels == nil {
-		t.Error("channels should not be nil")
+	if cfg.Channels.IsEmpty() {
+		t.Error("channels should not be empty when [channels.mesh.roles] is configured")
+	}
+	if cfg.Channels.Mesh.MessageTTL != "24h" {
+		t.Errorf("channels.mesh.message_ttl = %q, want %q", cfg.Channels.Mesh.MessageTTL, "24h")
+	}
+	if cfg.Channels.Mesh.Roles["coordinator"] != "niwa" {
+		t.Errorf("channels.mesh.roles.coordinator = %q, want %q", cfg.Channels.Mesh.Roles["coordinator"], "niwa")
 	}
 }
 

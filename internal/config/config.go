@@ -91,6 +91,24 @@ type ClaudeEnvConfig struct {
 	Secrets EnvVarsTable `toml:"secrets,omitempty"`
 }
 
+// ChannelsMeshConfig holds the [channels.mesh] table.
+type ChannelsMeshConfig struct {
+	Roles      map[string]string `toml:"roles"`       // role → repo name
+	MessageTTL string            `toml:"message_ttl"` // default "24h"
+}
+
+// ChannelsConfig is the top-level [channels] table.
+type ChannelsConfig struct {
+	Mesh ChannelsMeshConfig `toml:"mesh"`
+}
+
+// IsEmpty reports true when the channels config carries no meaningful
+// configuration (mesh roles are absent). Used by downstream pipeline steps
+// to skip channel infrastructure setup when [channels] is omitted.
+func (c ChannelsConfig) IsEmpty() bool {
+	return len(c.Mesh.Roles) == 0
+}
+
 // WorkspaceConfig is the top-level configuration parsed from workspace.toml.
 type WorkspaceConfig struct {
 	Workspace WorkspaceMeta           `toml:"workspace"`
@@ -102,7 +120,7 @@ type WorkspaceConfig struct {
 	Env       EnvConfig               `toml:"env"`
 	Files     map[string]string       `toml:"files,omitempty"`
 	Instance  InstanceConfig          `toml:"instance,omitempty"`
-	Channels  map[string]any          `toml:"channels"` // placeholder
+	Channels  ChannelsConfig          `toml:"channels,omitempty"`
 	// Vault carries the optional [vault] block (anonymous [vault.provider]
 	// or named [vault.providers.<name>] shape, plus [vault].team_only).
 	// nil when the config declares no vault providers.

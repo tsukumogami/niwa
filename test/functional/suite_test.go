@@ -168,6 +168,17 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 	ctx.Step(`^the instance "([^"]*)" does not exist$`, theInstanceDoesNotExist)
 	ctx.Step(`^the repo "([^"]*)" exists in instance "([^"]*)"$`, theRepoExistsInInstance)
 
+	// Mesh / session steps
+	ctx.Step(`^NIWA_INSTANCE_ROOT is set to a temp directory$`, niwaInstanceRootIsSetToATempDirectory)
+	ctx.Step(`^I run "niwa session register" as role "([^"]*)"$`, iRunNiwaSessionRegisterAsRole)
+	ctx.Step(`^a sessions\.json entry exists for role "([^"]*)"$`, aSessionsJSONEntryExistsForRole)
+	ctx.Step(`^the coordinator inbox directory exists$`, func(ctx context.Context) (context.Context, error) {
+		return ctx, theInboxDirectoryExistsForRole(ctx, "coordinator")
+	})
+	ctx.Step(`^the worker session sends a "([^"]*)" message to "([^"]*)" with body "([^"]*)"$`, theWorkerSessionSendsAMessageToWithBody)
+	ctx.Step(`^the coordinator inbox contains (\d+) message$`, theCoordinatorInboxContainsNMessages)
+	ctx.Step(`^the coordinator session checks messages$`, theCoordinatorSessionChecksMessages)
+
 	// Assertions
 	ctx.Step(`^the exit code is (\d+)$`, theExitCodeIs)
 	ctx.Step(`^the exit code is not (\d+)$`, theExitCodeIsNot)
