@@ -48,7 +48,7 @@ Feature: workspace imports via .claude/rules
       """
     When I run niwa init from config repo "myws"
     Then the exit code is 0
-    When I run "niwa create myws"
+    When I run "niwa create niwatest-xq7749"
     Then the exit code is 0
     And the instance "niwatest-xq7749" exists
     And the repo "tools/myapp" exists in instance "niwatest-xq7749"
