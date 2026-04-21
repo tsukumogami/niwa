@@ -23,6 +23,8 @@ func init() {
 			"Does NOT override *.required misses. One-shot -- re-evaluated each invocation.")
 	applyCmd.Flags().BoolVar(&applyAllowPlaintextSecrets, "allow-plaintext-secrets", false,
 		"bypass the public-repo plaintext-secrets guardrail. Strictly one-shot -- no state persistence.")
+	applyCmd.Flags().BoolVar(&applyChannels, "channels", false, "enable channel infrastructure for this invocation (overrides NIWA_CHANNELS)")
+	applyCmd.Flags().BoolVar(&applyNoChannels, "no-channels", false, "disable channel infrastructure for this invocation (overrides --channels and NIWA_CHANNELS)")
 	applyCmd.ValidArgsFunction = completeWorkspaceNames
 	_ = applyCmd.RegisterFlagCompletionFunc("instance", completeInstanceNames)
 }
@@ -33,6 +35,8 @@ var (
 	applyNoPull                bool
 	applyAllowMissingSecrets   bool
 	applyAllowPlaintextSecrets bool
+	applyChannels              bool
+	applyNoChannels            bool
 )
 
 var applyCmd = &cobra.Command{
@@ -105,6 +109,10 @@ func runApply(cmd *cobra.Command, args []string) error {
 	applier.AllowDirty = applyAllowDirty
 	applier.AllowMissingSecrets = applyAllowMissingSecrets
 	applier.AllowPlaintextSecrets = applyAllowPlaintextSecrets
+
+	// Resolve effective channel activation and synthesize cfg.Channels.Mesh when
+	// --channels or NIWA_CHANNELS activates channels without a config section.
+	cfg, applier.ChannelsFromFlag = resolveChannelsActivation(cmd, cfg, applyChannels, applyNoChannels)
 
 	// Wire global config and ConfigSourceURL from the registry if available.
 	if globalCfg, gErr := config.LoadGlobalConfig(); gErr == nil {

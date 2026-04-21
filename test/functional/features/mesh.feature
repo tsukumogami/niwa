@@ -324,6 +324,59 @@ Feature: Session mesh: filesystem-based inter-session messaging
     And a sessions.json entry exists for role "explicit"
 
   @critical
+  Scenario: niwa create --channels provisions channel infrastructure on a plain workspace
+    Given a clean niwa environment
+    And a local git server is set up
+    And a config repo "flag-chan-ws" exists with body:
+      """
+      [workspace]
+      name = "flag-chan-ws"
+      """
+    When I run niwa init from config repo "flag-chan-ws"
+    Then the exit code is 0
+    When I run "niwa create --channels flag-chan-ws"
+    Then the exit code is 0
+    And the instance "flag-chan-ws" exists
+    And the file ".niwa/sessions/sessions.json" exists in instance "flag-chan-ws"
+    And the file ".niwa/daemon.pid" exists in instance "flag-chan-ws"
+
+  @critical
+  Scenario: NIWA_CHANNELS=1 provisions channel infrastructure on a plain workspace
+    Given a clean niwa environment
+    And a local git server is set up
+    And a config repo "env-chan-ws" exists with body:
+      """
+      [workspace]
+      name = "env-chan-ws"
+      """
+    When I run niwa init from config repo "env-chan-ws"
+    Then the exit code is 0
+    And I set env "NIWA_CHANNELS" to "1"
+    When I run "niwa create env-chan-ws"
+    Then the exit code is 0
+    And the instance "env-chan-ws" exists
+    And the file ".niwa/sessions/sessions.json" exists in instance "env-chan-ws"
+    And the file ".niwa/daemon.pid" exists in instance "env-chan-ws"
+
+  @critical
+  Scenario: NIWA_CHANNELS=1 with --no-channels does NOT provision channel infrastructure
+    Given a clean niwa environment
+    And a local git server is set up
+    And a config repo "no-chan-ws" exists with body:
+      """
+      [workspace]
+      name = "no-chan-ws"
+      """
+    When I run niwa init from config repo "no-chan-ws"
+    Then the exit code is 0
+    And I set env "NIWA_CHANNELS" to "1"
+    When I run "niwa create --no-channels no-chan-ws"
+    Then the exit code is 0
+    And the instance "no-chan-ws" exists
+    And the file ".niwa/sessions" does not exist in instance "no-chan-ws"
+    And the file ".niwa/daemon.pid" does not exist in instance "no-chan-ws"
+
+  @critical
   Scenario: daemon log records message type but not body content
     Given a clean niwa environment
     And a local git server is set up

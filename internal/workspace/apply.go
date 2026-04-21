@@ -58,6 +58,12 @@ type Applier struct {
 	// Empty string disables convention discovery.
 	ConfigSourceURL string
 
+	// ChannelsFromFlag is true when the caller activated channels via --channels
+	// or NIWA_CHANNELS rather than a [channels.mesh] config section. When true,
+	// runPipeline emits a one-time notice advising the user how to persist the
+	// setting permanently.
+	ChannelsFromFlag bool
+
 	// cloneOrSync is the function used to clone or sync the overlay repo.
 	// Defaults to CloneOrSyncOverlay. Overridable in tests.
 	cloneOrSync func(url, dir string) (bool, error)
@@ -125,6 +131,11 @@ const GlobalConfigOverrideFile = "niwa.toml"
 // subsequent runs.
 const noticeProviderShadow = "provider-shadow"
 
+// noticeChannelsFromFlag is the one-time notice key emitted when channels were
+// activated via --channels or NIWA_CHANNELS rather than a [channels.mesh] config
+// section. Hints the user how to persist the setting permanently.
+const noticeChannelsFromFlag = "channels-from-flag"
+
 // cloneWorkers is the maximum number of repos cloned concurrently.
 const cloneWorkers = 8
 
@@ -156,6 +167,7 @@ type pipelineOpts struct {
 	noOverlay        bool     // from InstanceState.NoOverlay
 	configSourceURL  string   // original source URL for convention overlay discovery
 	disclosedNotices []string // workspace-root-level notices already shown to the user
+	channelsFromFlag bool     // true when channels were activated by --channels or NIWA_CHANNELS
 }
 
 // pipelineResult holds the outputs of the shared pipeline.
@@ -222,6 +234,7 @@ func (a *Applier) Create(ctx context.Context, cfg *config.WorkspaceConfig, confi
 		skipGlobal:       initSkipGlobal,
 		configSourceURL:  a.ConfigSourceURL,
 		disclosedNotices: initDisclosedNotices,
+		channelsFromFlag: a.ChannelsFromFlag,
 	})
 	if err != nil {
 		_ = os.RemoveAll(instanceRoot)
@@ -329,6 +342,7 @@ func (a *Applier) Apply(ctx context.Context, cfg *config.WorkspaceConfig, config
 		noOverlay:        existingState.NoOverlay,
 		configSourceURL:  a.ConfigSourceURL,
 		disclosedNotices: wsDisclosedNotices,
+		channelsFromFlag: a.ChannelsFromFlag,
 	})
 	if err != nil {
 		return err
@@ -933,6 +947,13 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 	// .mcp.json, ## Channels section) when [channels.mesh] is configured.
 	if err := InstallChannelInfrastructure(effectiveCfg, instanceRoot, &writtenFiles); err != nil {
 		return nil, fmt.Errorf("installing channel infrastructure: %w", err)
+	}
+
+	// Emit a one-time hint when channels were activated via --channels or
+	// NIWA_CHANNELS rather than a permanent [channels.mesh] config section.
+	if opts.channelsFromFlag && !sliceContains(opts.disclosedNotices, noticeChannelsFromFlag) {
+		a.Reporter.Log("Hint: to persist channels for this workspace, add [channels.mesh] to workspace.toml or set NIWA_CHANNELS=1 in your shell profile.")
+		newDisclosures = append(newDisclosures, noticeChannelsFromFlag)
 	}
 
 	// Step 5: Install group-level CLAUDE.md files.
