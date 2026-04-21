@@ -111,9 +111,12 @@ declaring a `niwa` MCP server entry that invokes `niwa mcp-serve` with
 **R5** — The `ChannelMaterializer` shall append a `## Channels` section to
 `workspace-context.md` containing: the sessions registry path, the MCP tool names
 (`niwa_check_messages`, `niwa_send_message`), the registration command, the session's
-assigned role, and behavioral instructions directing Claude to check for messages at
-natural idle points and as a backstop every M tool calls (default M=10, overridable in
-`workspace.toml`).
+assigned role, and behavioral instructions directing Claude to: (a) call
+`niwa_check_messages` immediately after registering; (b) check for messages at natural
+idle points and as a backstop every M tool calls (default M=10, overridable in
+`workspace.toml`); (c) emit `task.progress` messages at a defined cadence (default: every
+5 minutes of wall time or every 20 tool calls, whichever comes first) while executing
+a delegated task.
 
 ### Session Identity and Registration
 
@@ -338,48 +341,7 @@ from `internal/cli/config.go`, with each subcommand in a separate file under
 
 ## Open Questions
 
-**OQ1 — Task progress heartbeats: mandatory protocol or advisory convention?**
-
-Worker sessions executing a delegated task should emit `task.progress` messages
-periodically so coordinators can detect abandonment (session crashed). Should the PRD
-require this (mandatory: the system prompt instructions direct Claude to emit a
-heartbeat every N minutes; the coordinator surfaces tasks with no heartbeat as
-`suspect`), or treat it as an advisory convention that agents follow by best effort?
-
-Mandatory gives the coordinator reliable crash detection but requires every Claude
-session to follow a structured emission loop that may be interrupted. Advisory is
-easier to implement but leaves coordinators blind to crashes until the human notices.
-**Recommendation: make heartbeats mandatory** — the expected failure mode (coordinator
-stalls indefinitely) is worse than the implementation cost (one extra instruction in
-the CLAUDE.md behavioral section and one periodic tool call).
-
-**OQ2 — Automatic re-delivery of pending messages after session restart?**
-
-When a worker session crashes mid-task and restarts, its inbox still contains the
-original `task.delegate` message (unprocessed). Should the system surface pending inbox
-messages to Claude at session start (via the `niwa session register` MCP response or a
-startup hook), or should the worker start fresh and require the coordinator to re-send?
-
-Automatic surfacing risks re-executing partially completed work if the session doesn't
-detect prior context. Not surfacing means the coordinator must notice the crash and
-re-delegate. **Recommendation: surface pending messages at registration time** — the
-MCP registration response should include a count and type summary of unread messages,
-and Claude should be instructed to check its inbox immediately after registering. Full
-re-execution risk is mitigated by requiring workers to check git state before re-starting
-a task.
-
-**OQ3 — Config namespace: `[channels.mesh]` or a top-level `[mesh]` key?**
-
-The existing `WorkspaceConfig.Channels` placeholder was designed for external plugin
-channels (e.g., `[channels.telegram]`). Using `[channels.mesh]` for the built-in
-inter-session broker places it alongside plugin-backed channels — semantically different
-kinds of channels. A separate top-level `[mesh]` key avoids the confusion but breaks
-the existing placeholder convention.
-
-**Recommendation: use `[channels.mesh]`** — the config already reserves `Channels` for
-this purpose; introducing a top-level `[mesh]` key splits the concept. The distinction
-between built-in and plugin-backed channels can be documented, and the `[channels.mesh]`
-key can be treated as always-enabled when present (no plugin loader needed).
+None. All open questions resolved via the decision protocol.
 
 ## Known Limitations
 
@@ -456,3 +418,33 @@ Niwa's broker is scoped to the workspace instance (`<instance-root>/.niwa/sessio
 so sessions in different workspaces cannot accidentally message each other and workspace
 teardown (`niwa destroy`) cleanly removes all mesh state. Cross-workspace messaging is
 a future concern that can be addressed with a machine-level router layer if needed.
+
+**Task progress heartbeats are a mandatory protocol, not advisory**
+
+The behavioral instructions in `workspace-context.md` require worker sessions to emit
+`task.progress` messages at a defined cadence while executing delegated tasks. Advisory
+heartbeats are the failure mode being solved — a coordinator that cannot detect worker
+crashes stalls indefinitely. Making heartbeats mandatory surfaces abandonment as an
+observable `suspect` state rather than an invisible deadlock. The implementation cost
+is one extra instruction in the `## Channels` behavioral section plus one periodic
+`niwa_send_message` tool call.
+
+**Pending messages surface at registration time, not discarded on restart**
+
+When a session re-registers after a crash, `niwa session register` includes a pending
+message count in its output when the inbox is non-empty, and the `workspace-context.md`
+behavioral instructions direct Claude to call `niwa_check_messages` immediately after
+registering. The durability guarantee of the file-based inbox is only meaningful if
+pending messages are surfaced to the restarting session. Re-execution risk is mitigated
+by requiring workers to check git state before acting on a delegated task — an existing
+Claude Code best practice.
+
+**Config namespace: `[channels.mesh]`, not a top-level `[mesh]` key**
+
+`WorkspaceConfig.Channels map[string]any` exists in `internal/config/config.go` as a
+reserved placeholder for extensible channel configuration. Using `[channels.mesh]`
+is consistent with that field name, matches all existing requirement text in this PRD,
+and imposes no migration cost. A top-level `[mesh]` key would split the concept and
+require a new struct field with no benefit. The distinction between built-in mesh
+(`[channels.mesh]`) and future plugin-backed channels (`[channels.telegram]`) is
+documented by naming convention.
