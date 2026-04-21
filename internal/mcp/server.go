@@ -55,8 +55,9 @@ type sendResult struct {
 	Status    string
 }
 
-// Server is a stateless stdio MCP server. It reads from in, writes to out,
+// Server is a stdio MCP server. It reads from in, writes to out,
 // and watches inboxDir for new message files to push as channel notifications.
+// It also maintains reply-waiter and type-waiter maps for niwa_ask and niwa_wait.
 type Server struct {
 	inboxDir     string // this session's inbox: <instance-root>/.niwa/sessions/<id>/inbox/
 	sessionsDir  string // <instance-root>/.niwa/sessions/
@@ -319,10 +320,17 @@ func (s *Server) handleSendMessage(args sendMessageArgs) toolResult {
 	return textResult(fmt.Sprintf("Message sent.\n- **ID**: %s\n- **Status**: %s\n- **To**: %s", sr.MessageID, sr.Status, args.To))
 }
 
-// sendMessage is the internal implementation that writes a message file.
-// It validates fields and returns (sendResult, toolResult) where toolResult.IsError
-// is true on failure.
+// sendMessage validates args, generates a fresh message ID, and writes the
+// message to the target's inbox atomically. Returns (sendResult, errTR) where
+// errTR.IsError is true on failure.
 func (s *Server) sendMessage(args sendMessageArgs) (sendResult, toolResult) {
+	return s.sendMessageWithID(newUUID(), args)
+}
+
+// sendMessageWithID is like sendMessage but uses the caller-supplied msgID.
+// handleAsk uses this to register a reply waiter for the ID before the message
+// is written, eliminating the race between send and waiter registration.
+func (s *Server) sendMessageWithID(msgID string, args sendMessageArgs) (sendResult, toolResult) {
 	if args.To == "" || args.Type == "" {
 		return sendResult{}, errResult("to and type are required")
 	}
@@ -332,7 +340,8 @@ func (s *Server) sendMessage(args sendMessageArgs) (sendResult, toolResult) {
 	if !fieldPattern.MatchString(args.Type) || strings.Contains(args.Type, "..") {
 		return sendResult{}, errResult("invalid type field: must match ^[a-zA-Z0-9._-]{1,64}$ and not contain ..")
 	}
-	if len(args.Body) == 0 {
+	// Reject null JSON (len==4) and truly empty bodies.
+	if len(args.Body) == 0 || string(args.Body) == "null" {
 		return sendResult{}, errResult("body is required")
 	}
 	if len(args.Body) > 64*1024 {
@@ -349,7 +358,6 @@ func (s *Server) sendMessage(args sendMessageArgs) (sendResult, toolResult) {
 		return sendResult{}, errResultCode("INBOX_UNWRITABLE", "cannot create inbox: "+err.Error())
 	}
 
-	msgID := newUUID()
 	msg := Message{
 		V:    1,
 		ID:   msgID,
@@ -392,6 +400,8 @@ func (s *Server) sendMessage(args sendMessageArgs) (sendResult, toolResult) {
 
 // handleAsk sends a question.ask message to the target role and blocks until
 // a reply arrives (matched by reply_to == msgID) or the timeout elapses.
+// The reply waiter is registered before sending so no reply can arrive between
+// send and registration.
 func (s *Server) handleAsk(args askArgs) toolResult {
 	if args.Timeout <= 0 {
 		args.Timeout = 600
@@ -400,7 +410,14 @@ func (s *Server) handleAsk(args askArgs) toolResult {
 		return errResult("to is required")
 	}
 
-	sr, errTR := s.sendMessage(sendMessageArgs{
+	// Reserve a message ID so we can register the waiter before the message
+	// is written. A reply arriving between write and registration would
+	// otherwise be dropped.
+	msgID := newUUID()
+	replyCh, cancel := s.registerWaiter(msgID)
+	defer cancel()
+
+	_, errTR := s.sendMessageWithID(msgID, sendMessageArgs{
 		To:   args.To,
 		Type: "question.ask",
 		Body: args.Body,
@@ -408,9 +425,6 @@ func (s *Server) handleAsk(args askArgs) toolResult {
 	if errTR.IsError {
 		return errTR
 	}
-
-	replyCh, cancel := s.registerWaiter(sr.MessageID)
-	defer cancel()
 
 	select {
 	case reply := <-replyCh:
@@ -489,7 +503,8 @@ func (s *Server) registerWaiter(msgID string) (chan toolResult, func()) {
 }
 
 // scanExistingForWaiter reads existing inbox files and appends matching messages
-// to tw. Called before tw is registered, so no locking is needed on tw.
+// to tw. The waiter is already registered before this is called, so notifyNewFile
+// may run concurrently — tw.mu guards all appends.
 func (s *Server) scanExistingForWaiter(tw *typeWaiter) {
 	if s.inboxDir == "" {
 		return
@@ -510,8 +525,16 @@ func (s *Server) scanExistingForWaiter(tw *typeWaiter) {
 		if err := json.Unmarshal(data, &m); err != nil {
 			continue
 		}
+		if m.ExpiresAt != "" {
+			exp, err := time.Parse(time.RFC3339, m.ExpiresAt)
+			if err == nil && time.Now().After(exp) {
+				continue
+			}
+		}
 		if tw.matches(m) {
+			tw.mu.Lock()
 			tw.msgs = append(tw.msgs, m)
+			tw.mu.Unlock()
 		}
 	}
 }
@@ -542,12 +565,13 @@ func toSet(ss []string) map[string]bool {
 }
 
 // pollInbox is called by watchInboxPolling as the fsnotify fallback.
+// It routes each unseen file through notifyNewFile so that reply-waiter and
+// type-waiter correlation works on platforms without fsnotify support.
 func (s *Server) pollInbox() {
 	entries, err := os.ReadDir(s.inboxDir)
 	if err != nil {
 		return
 	}
-	var newMsgs []Message
 	for _, e := range entries {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
 			continue
@@ -556,38 +580,8 @@ func (s *Server) pollInbox() {
 			continue
 		}
 		path := filepath.Join(s.inboxDir, e.Name())
-		data, err := os.ReadFile(path)
-		if err != nil {
-			continue
-		}
-		var m Message
-		if err := json.Unmarshal(data, &m); err != nil {
-			continue
-		}
-		if m.ExpiresAt != "" {
-			exp, err := time.Parse(time.RFC3339, m.ExpiresAt)
-			if err == nil && time.Now().After(exp) {
-				continue
-			}
-		}
-		newMsgs = append(newMsgs, m)
-		s.markSeen(e.Name())
+		s.notifyNewFile(path, e.Name())
 	}
-	if len(newMsgs) == 0 {
-		return
-	}
-
-	var sb strings.Builder
-	fmt.Fprintf(&sb, "You have %d new message(s) in your niwa inbox.\n\n", len(newMsgs))
-	for _, m := range newMsgs {
-		fmt.Fprintf(&sb, "- **%s** from **%s**\n", m.Type, m.From.Role)
-	}
-	fmt.Fprintf(&sb, "\nCall `niwa_check_messages` to read them.")
-
-	s.notify("notifications/claude/channel", channelNotificationParams{
-		Source:  "niwa",
-		Content: sb.String(),
-	})
 }
 
 func (s *Server) resolveRole(role string) (*SessionEntry, error) {
