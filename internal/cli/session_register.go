@@ -114,7 +114,12 @@ func isAlreadyRegistered(instanceRoot, role string) bool {
 //  1. --role flag (explicit, highest priority)
 //  2. NIWA_SESSION_ROLE environment variable
 //  3. --repo flag (basename of the repo path)
-//  4. pwd relative to instanceRoot (basename of cwd; "coordinator" when cwd == instanceRoot)
+//  4. pwd relative to instanceRoot (filepath.Base of the relative path;
+//     "coordinator" when cwd == instanceRoot). For a shallow path like
+//     <root>/myrepo this returns "myrepo". For a deeper path like
+//     <root>/myrepo/src/pkg it returns "pkg" (the immediate directory
+//     name), not "myrepo". Register from the repo root to get the expected
+//     repo name.
 func deriveRole(flagRole, repo, instanceRoot string) string {
 	if flagRole != "" {
 		return flagRole
