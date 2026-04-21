@@ -398,7 +398,9 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 	// writes them per-repo. Must run before any per-repo processing so that
 	// every repo in the workspace receives the channel hook scripts.
 	// cfg is a pointer; injectChannelHooks mutates its Hooks map in place.
-	injectChannelHooks(cfg)
+	// The hook scripts are written to disk by InstallChannelInfrastructure
+	// (step 4.75) before HooksMaterializer reads them, so the order matters.
+	injectChannelHooks(cfg, instanceRoot)
 
 	// overlayDir is the local clone path of the overlay repo when one is active.
 	// It is local to this pipeline run; downstream steps that need it receive it

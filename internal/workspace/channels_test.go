@@ -238,13 +238,14 @@ func TestInstallChannelInfrastructure_SessionsJSONNotOverwrittenWhenPresent(t *t
 
 func TestInjectChannelHooks_EmptyConfig(t *testing.T) {
 	cfg := &config.WorkspaceConfig{}
-	injectChannelHooks(cfg)
+	injectChannelHooks(cfg, t.TempDir())
 	if len(cfg.Claude.Hooks) != 0 {
 		t.Errorf("expected no hooks injected for empty channels config, got %v", cfg.Claude.Hooks)
 	}
 }
 
 func TestInjectChannelHooks_InjectsHooks(t *testing.T) {
+	dir := t.TempDir()
 	cfg := &config.WorkspaceConfig{
 		Channels: config.ChannelsConfig{
 			Mesh: config.ChannelsMeshConfig{
@@ -252,7 +253,7 @@ func TestInjectChannelHooks_InjectsHooks(t *testing.T) {
 			},
 		},
 	}
-	injectChannelHooks(cfg)
+	injectChannelHooks(cfg, dir)
 
 	if _, ok := cfg.Claude.Hooks["session_start"]; !ok {
 		t.Error("session_start hook not injected")
@@ -260,9 +261,19 @@ func TestInjectChannelHooks_InjectsHooks(t *testing.T) {
 	if _, ok := cfg.Claude.Hooks["user_prompt_submit"]; !ok {
 		t.Error("user_prompt_submit hook not injected")
 	}
+
+	// Scripts must be file paths into .niwa/hooks/, not bare CLI commands.
+	startScripts := cfg.Claude.Hooks["session_start"][0].Scripts
+	if len(startScripts) == 0 || !filepath.IsAbs(startScripts[0]) {
+		t.Errorf("session_start script must be an absolute file path, got %v", startScripts)
+	}
+	if !strings.Contains(startScripts[0], "mesh-session-start.sh") {
+		t.Errorf("session_start script must reference mesh-session-start.sh, got %v", startScripts)
+	}
 }
 
 func TestInjectChannelHooks_PrependToExisting(t *testing.T) {
+	dir := t.TempDir()
 	existingEntry := config.HookEntry{Scripts: []string{"existing.sh"}}
 	cfg := &config.WorkspaceConfig{
 		Claude: config.ClaudeConfig{
@@ -276,15 +287,16 @@ func TestInjectChannelHooks_PrependToExisting(t *testing.T) {
 			},
 		},
 	}
-	injectChannelHooks(cfg)
+	injectChannelHooks(cfg, dir)
 
 	entries := cfg.Claude.Hooks["session_start"]
 	if len(entries) != 2 {
 		t.Fatalf("expected 2 session_start entries, got %d", len(entries))
 	}
-	// Channel hook must come first.
-	if entries[0].Scripts[0] != "niwa session register" {
-		t.Errorf("channel hook not prepended: first entry scripts %v", entries[0].Scripts)
+	// Channel hook must come first and reference the real script file path.
+	wantScript := filepath.Join(dir, ".niwa", "hooks", "mesh-session-start.sh")
+	if entries[0].Scripts[0] != wantScript {
+		t.Errorf("channel hook script: got %q, want %q", entries[0].Scripts[0], wantScript)
 	}
 	if entries[1].Scripts[0] != "existing.sh" {
 		t.Errorf("existing hook not preserved: second entry scripts %v", entries[1].Scripts)

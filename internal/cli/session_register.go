@@ -13,10 +13,12 @@ import (
 )
 
 var sessionRegisterRepo string
+var sessionRegisterCheckOnly bool
 
 func init() {
 	sessionCmd.AddCommand(sessionRegisterCmd)
 	sessionRegisterCmd.Flags().StringVar(&sessionRegisterRepo, "repo", "", "repo name (defaults to cwd-inferred repo)")
+	sessionRegisterCmd.Flags().BoolVar(&sessionRegisterCheckOnly, "check-only", false, "check if already registered and exit 0 silently if so; register normally if not (full behavior implemented in Issue 3)")
 }
 
 var sessionRegisterCmd = &cobra.Command{
@@ -26,6 +28,13 @@ var sessionRegisterCmd = &cobra.Command{
 }
 
 func runSessionRegister(cmd *cobra.Command, args []string) error {
+	// --check-only: no-op placeholder until Issue 3 implements the full
+	// already-registered detection. The flag is accepted so the hook script
+	// written by InstallChannelInfrastructure does not fail at the CLI level.
+	if sessionRegisterCheckOnly {
+		return nil
+	}
+
 	instanceRoot := os.Getenv("NIWA_INSTANCE_ROOT")
 	if instanceRoot == "" {
 		return fmt.Errorf("NIWA_INSTANCE_ROOT is not set")

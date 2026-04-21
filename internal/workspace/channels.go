@@ -10,7 +10,7 @@ import (
 	"github.com/tsukumogami/niwa/internal/config"
 )
 
-// channelsMCPJSON is the template for .claude/.mcp.json. It registers the
+// channelsMCPEntry is the template for .claude/.mcp.json. It registers the
 // niwa mcp-serve command with NIWA_INSTANCE_ROOT baked in so Claude Code
 // can start the MCP server without any user configuration.
 const channelsMCPEntry = `{
@@ -77,7 +77,25 @@ func InstallChannelInfrastructure(cfg *config.WorkspaceConfig, instanceRoot stri
 	}
 	*writtenFiles = append(*writtenFiles, mcpJSONPath)
 
-	// 4. Append ## Channels section to workspace-context.md (idempotent).
+	// 4. Write hook scripts to .niwa/hooks/ so HooksMaterializer can copy
+	// them by file path. Scripts are small wrappers that invoke niwa commands.
+	hooksDir := filepath.Join(instanceRoot, ".niwa", "hooks")
+	if err := os.MkdirAll(hooksDir, 0o700); err != nil {
+		return fmt.Errorf("creating hooks directory: %w", err)
+	}
+	sessionStartScript := filepath.Join(hooksDir, "mesh-session-start.sh")
+	if err := writeFileMode(sessionStartScript, []byte("#!/bin/sh\nniwa session register\n"), 0o755); err != nil {
+		return fmt.Errorf("writing mesh-session-start.sh: %w", err)
+	}
+	*writtenFiles = append(*writtenFiles, sessionStartScript)
+
+	userPromptScript := filepath.Join(hooksDir, "mesh-user-prompt-submit.sh")
+	if err := writeFileMode(userPromptScript, []byte("#!/bin/sh\nniwa session register --check-only\n"), 0o755); err != nil {
+		return fmt.Errorf("writing mesh-user-prompt-submit.sh: %w", err)
+	}
+	*writtenFiles = append(*writtenFiles, userPromptScript)
+
+	// 5. Append ## Channels section to workspace-context.md (idempotent).
 	ctxPath := filepath.Join(instanceRoot, workspaceContextFile)
 	if err := appendChannelsSection(ctxPath, cfg); err != nil {
 		return fmt.Errorf("appending channels section: %w", err)
@@ -118,7 +136,7 @@ func appendChannelsSection(ctxPath string, cfg *config.WorkspaceConfig) error {
 	}
 	content += "\n" + section
 
-	return os.WriteFile(ctxPath, []byte(content), 0o644)
+	return writeFileMode(ctxPath, []byte(content), 0o644)
 }
 
 // buildChannelsSection generates the ## Channels markdown section from config.
@@ -170,8 +188,10 @@ func writeFileMode(path string, data []byte, mode os.FileMode) error {
 // into cfg.Claude.Hooks when the workspace has channel config. Hook entries
 // are prepended so they run before any user-defined hooks for the same event.
 // This mutates cfg in place and is called at the top of runPipeline before
-// any per-repo processing. HooksMaterializer writes them per-repo unchanged.
-func injectChannelHooks(cfg *config.WorkspaceConfig) {
+// any per-repo processing. HooksMaterializer reads Scripts as file paths and
+// copies them with os.ReadFile, so these must point to real files on disk.
+// The hook scripts are written by InstallChannelInfrastructure in step 4.75.
+func injectChannelHooks(cfg *config.WorkspaceConfig, instanceRoot string) {
 	if cfg.Channels.IsEmpty() {
 		return
 	}
@@ -180,13 +200,17 @@ func injectChannelHooks(cfg *config.WorkspaceConfig) {
 		cfg.Claude.Hooks = make(config.HooksConfig)
 	}
 
+	hooksDir := filepath.Join(instanceRoot, ".niwa", "hooks")
+	sessionStartScript := filepath.Join(hooksDir, "mesh-session-start.sh")
+	userPromptScript := filepath.Join(hooksDir, "mesh-user-prompt-submit.sh")
+
 	// SessionStart: register this session with the mesh.
 	sessionStartEntry := config.HookEntry{
-		Scripts: []string{"niwa session register"},
+		Scripts: []string{sessionStartScript},
 	}
 	// UserPromptSubmit: check messages at each prompt.
 	userPromptEntry := config.HookEntry{
-		Scripts: []string{"niwa session register --check-only"},
+		Scripts: []string{userPromptScript},
 	}
 
 	cfg.Claude.Hooks["session_start"] = prependHookEntry(cfg.Claude.Hooks["session_start"], sessionStartEntry)
