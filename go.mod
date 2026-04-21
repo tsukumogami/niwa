@@ -5,6 +5,7 @@ go 1.25.3
 require (
 	github.com/BurntSushi/toml v1.6.0
 	github.com/cucumber/godog v0.15.1
+	github.com/fsnotify/fsnotify v1.9.0
 	github.com/spf13/cobra v1.10.2
 	golang.org/x/term v0.42.0
 )
@@ -12,7 +13,6 @@ require (
 require (
 	github.com/cucumber/gherkin/go/v26 v26.2.0 // indirect
 	github.com/cucumber/messages/go/v21 v21.0.1 // indirect
-	github.com/fsnotify/fsnotify v1.9.0 // indirect
 	github.com/gofrs/uuid v4.3.1+incompatible // indirect
 	github.com/hashicorp/go-immutable-radix v1.3.1 // indirect
 	github.com/hashicorp/go-memdb v1.3.4 // indirect
