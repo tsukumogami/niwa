@@ -46,6 +46,10 @@ func runSessionRegister(cmd *cobra.Command, args []string) error {
 
 	startTime, _ := mcp.PIDStartTime(pid)
 
+	homeDir, _ := os.UserHomeDir()
+	cwd, _ := os.Getwd()
+	claudeSessionID := mcp.DiscoverClaudeSessionID(homeDir, cwd)
+
 	sessionsDir := filepath.Join(instanceRoot, ".niwa", "sessions")
 	inboxDir := filepath.Join(sessionsDir, sessionID, "inbox")
 
@@ -54,13 +58,14 @@ func runSessionRegister(cmd *cobra.Command, args []string) error {
 	}
 
 	entry := mcp.SessionEntry{
-		ID:           sessionID,
-		Role:         role,
-		Repo:         sessionRegisterRepo,
-		PID:          pid,
-		StartTime:    startTime,
-		InboxDir:     inboxDir,
-		RegisteredAt: time.Now().UTC().Format(time.RFC3339),
+		ID:              sessionID,
+		Role:            role,
+		Repo:            sessionRegisterRepo,
+		PID:             pid,
+		StartTime:       startTime,
+		InboxDir:        inboxDir,
+		RegisteredAt:    time.Now().UTC().Format(time.RFC3339),
+		ClaudeSessionID: claudeSessionID,
 	}
 
 	if err := writeSessionEntry(sessionsDir, entry); err != nil {

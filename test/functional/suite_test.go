@@ -178,6 +178,10 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 	ctx.Step(`^the worker session sends a "([^"]*)" message to "([^"]*)" with body "([^"]*)"$`, theWorkerSessionSendsAMessageToWithBody)
 	ctx.Step(`^the coordinator inbox contains (\d+) message$`, theCoordinatorInboxContainsNMessages)
 	ctx.Step(`^the coordinator session checks messages$`, theCoordinatorSessionChecksMessages)
+	ctx.Step(`^a Claude session file exists for the parent process with session ID "([^"]*)" and matching cwd$`, aClaudeSessionFileExistsForParentProcessWithMatchingCwd)
+	ctx.Step(`^a Claude session file exists for the parent process with session ID "([^"]*)" and mismatched cwd$`, aClaudeSessionFileExistsForParentProcessWithMismatchedCwd)
+	ctx.Step(`^the sessions\.json entry for role "([^"]*)" has claude_session_id "([^"]*)"$`, theSessionsJSONEntryForRoleHasClaudeSessionID)
+	ctx.Step(`^the sessions\.json entry for role "([^"]*)" has no claude_session_id$`, theSessionsJSONEntryForRoleHasNoClaudeSessionID)
 
 	// Assertions
 	ctx.Step(`^the exit code is (\d+)$`, theExitCodeIs)

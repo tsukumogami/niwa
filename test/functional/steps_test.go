@@ -2,6 +2,7 @@ package functional
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -1365,4 +1366,97 @@ func theCoordinatorSessionChecksMessages(ctx context.Context) (context.Context, 
 	s.stdout = out
 	s.exitCode = 0
 	return ctx, nil
+}
+
+// aClaudeSessionFileExistsForParentProcess writes a fake Claude session file to
+// <home>/.claude/sessions/<test-pid>.json. When niwa session register runs as a
+// child of this test process, its PPID equals os.Getpid(), so tier-2 discovery
+// will find the file. The cwd field is set to s.homeDir because runNiwa runs the
+// binary from that directory.
+//
+// matchCwd controls whether the file's cwd matches: pass true for the happy path,
+// false for the cwd-mismatch scenario.
+func aClaudeSessionFileExistsForParentProcess(ctx context.Context, sessionID string, matchCwd bool) (context.Context, error) {
+	s := getState(ctx)
+	if s == nil {
+		return ctx, fmt.Errorf("no test state")
+	}
+
+	sessionsDir := filepath.Join(s.homeDir, ".claude", "sessions")
+	if err := os.MkdirAll(sessionsDir, 0o755); err != nil {
+		return ctx, fmt.Errorf("creating claude sessions dir: %w", err)
+	}
+
+	cwd := s.homeDir // matches runNiwa cwd used by iRunNiwaSessionRegisterAsRole
+	if !matchCwd {
+		cwd = "/wrong/path/that/does/not/match"
+	}
+
+	type sessionFile struct {
+		SessionID string `json:"sessionId"`
+		CWD       string `json:"cwd"`
+	}
+	data, err := json.Marshal(sessionFile{SessionID: sessionID, CWD: cwd})
+	if err != nil {
+		return ctx, fmt.Errorf("marshaling session file: %w", err)
+	}
+
+	// Write at <pid>.json where pid is this test process — the niwa binary's PPID.
+	path := filepath.Join(sessionsDir, fmt.Sprintf("%d.json", os.Getpid()))
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		return ctx, fmt.Errorf("writing session file: %w", err)
+	}
+
+	return ctx, nil
+}
+
+// aClaudeSessionFileExistsForParentProcessWithMatchingCwd is the step function
+// for the happy-path scenario.
+func aClaudeSessionFileExistsForParentProcessWithMatchingCwd(ctx context.Context, sessionID string) (context.Context, error) {
+	return aClaudeSessionFileExistsForParentProcess(ctx, sessionID, true)
+}
+
+// aClaudeSessionFileExistsForParentProcessWithMismatchedCwd is the step function
+// for the cwd-mismatch scenario.
+func aClaudeSessionFileExistsForParentProcessWithMismatchedCwd(ctx context.Context, sessionID string) (context.Context, error) {
+	return aClaudeSessionFileExistsForParentProcess(ctx, sessionID, false)
+}
+
+// theSessionsJSONEntryForRoleHasClaudeSessionID asserts that the sessions.json
+// entry for the given role contains the expected claude_session_id value.
+func theSessionsJSONEntryForRoleHasClaudeSessionID(ctx context.Context, role, expectedID string) error {
+	ms := getMeshState(ctx)
+	if ms == nil {
+		return fmt.Errorf("no mesh state")
+	}
+	jsonPath := filepath.Join(ms.instanceRoot, ".niwa", "sessions", "sessions.json")
+	data, err := os.ReadFile(jsonPath)
+	if err != nil {
+		return fmt.Errorf("reading sessions.json: %w", err)
+	}
+	// Match both compact and pretty-printed forms.
+	found := strings.Contains(string(data), `"claude_session_id":"`+expectedID+`"`) ||
+		strings.Contains(string(data), `"claude_session_id": "`+expectedID+`"`)
+	if !found {
+		return fmt.Errorf("sessions.json entry for role %q does not contain claude_session_id %q:\n%s", role, expectedID, string(data))
+	}
+	return nil
+}
+
+// theSessionsJSONEntryForRoleHasNoClaudeSessionID asserts that the sessions.json
+// entry for the given role does not contain a claude_session_id field.
+func theSessionsJSONEntryForRoleHasNoClaudeSessionID(ctx context.Context, role string) error {
+	ms := getMeshState(ctx)
+	if ms == nil {
+		return fmt.Errorf("no mesh state")
+	}
+	jsonPath := filepath.Join(ms.instanceRoot, ".niwa", "sessions", "sessions.json")
+	data, err := os.ReadFile(jsonPath)
+	if err != nil {
+		return fmt.Errorf("reading sessions.json: %w", err)
+	}
+	if strings.Contains(string(data), `"claude_session_id"`) {
+		return fmt.Errorf("sessions.json entry for role %q should not contain claude_session_id:\n%s", role, string(data))
+	}
+	return nil
 }

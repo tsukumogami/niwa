@@ -72,6 +72,31 @@ Feature: Session mesh: filesystem-based inter-session messaging
     And the file ".niwa/sessions/sessions.json" in instance "chan-ws" contains "{\"sessions\":[]}"
 
   @critical
+  Scenario: niwa session register populates claude_session_id via tier-2 PPID walk
+    Given a clean niwa environment
+    And NIWA_INSTANCE_ROOT is set to a temp directory
+    And a Claude session file exists for the parent process with session ID "test-claude-session-abc1" and matching cwd
+    When I run "niwa session register" as role "coordinator"
+    Then the exit code is 0
+    And the sessions.json entry for role "coordinator" has claude_session_id "test-claude-session-abc1"
+
+  @critical
+  Scenario: niwa session register omits claude_session_id when no session file exists
+    Given a clean niwa environment
+    And NIWA_INSTANCE_ROOT is set to a temp directory
+    When I run "niwa session register" as role "coordinator"
+    Then the exit code is 0
+    And the sessions.json entry for role "coordinator" has no claude_session_id
+
+  Scenario: claude_session_id is skipped when cwd does not match session file
+    Given a clean niwa environment
+    And NIWA_INSTANCE_ROOT is set to a temp directory
+    And a Claude session file exists for the parent process with session ID "test-claude-session-abc1" and mismatched cwd
+    When I run "niwa session register" as role "coordinator"
+    Then the exit code is 0
+    And the sessions.json entry for role "coordinator" has no claude_session_id
+
+  @critical
   Scenario: workspace without [channels.mesh] does not create channel artifacts
     Given a clean niwa environment
     And a local git server is set up
