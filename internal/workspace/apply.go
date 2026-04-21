@@ -252,6 +252,13 @@ func (a *Applier) Create(ctx context.Context, cfg *config.WorkspaceConfig, confi
 		return "", fmt.Errorf("saving instance state: %w", err)
 	}
 
+	// Spawn mesh watch daemon if channels are configured and no daemon is alive.
+	if !cfg.Channels.IsEmpty() {
+		if err := EnsureDaemonRunning(instanceRoot); err != nil {
+			a.Reporter.DeferWarn("could not start mesh daemon: %v", err)
+		}
+	}
+
 	n := len(result.repoStates)
 	if n == 1 {
 		a.Reporter.Log("created %s (1 repo) → %s", instanceName, instanceRoot)
@@ -374,6 +381,13 @@ func (a *Applier) Apply(ctx context.Context, cfg *config.WorkspaceConfig, config
 
 	if err := SaveState(instanceRoot, state); err != nil {
 		return fmt.Errorf("saving instance state: %w", err)
+	}
+
+	// Spawn mesh watch daemon if channels are configured and no daemon is alive.
+	if !cfg.Channels.IsEmpty() {
+		if err := EnsureDaemonRunning(instanceRoot); err != nil {
+			a.Reporter.DeferWarn("could not start mesh daemon: %v", err)
+		}
 	}
 
 	n := len(result.repoStates)

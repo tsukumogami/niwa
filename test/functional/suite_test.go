@@ -183,6 +183,12 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 	ctx.Step(`^the sessions\.json entry for role "([^"]*)" has claude_session_id "([^"]*)"$`, theSessionsJSONEntryForRoleHasClaudeSessionID)
 	ctx.Step(`^the sessions\.json entry for role "([^"]*)" has no claude_session_id$`, theSessionsJSONEntryForRoleHasNoClaudeSessionID)
 
+	// Mesh daemon steps
+	ctx.Step(`^I remember the daemon PID for instance "([^"]*)"$`, iRememberDaemonPIDForInstance)
+	ctx.Step(`^the daemon PID for instance "([^"]*)" has not changed$`, theDaemonPIDForInstanceHasNotChanged)
+	ctx.Step(`^I remove the sessions directory from instance "([^"]*)"$`, iRemoveSessionsDirFromInstance)
+	ctx.Step(`^the daemon for instance "([^"]*)" eventually stops$`, theDaemonForInstanceEventuallyStops)
+
 	// Assertions
 	ctx.Step(`^the exit code is (\d+)$`, theExitCodeIs)
 	ctx.Step(`^the exit code is not (\d+)$`, theExitCodeIsNot)

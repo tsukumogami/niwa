@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
+	"time"
 
 	"github.com/cucumber/godog"
 )
@@ -1461,4 +1463,111 @@ func theSessionsJSONEntryForRoleHasNoClaudeSessionID(ctx context.Context, role s
 		return fmt.Errorf("sessions.json entry for role %q should not contain claude_session_id:\n%s", role, string(data))
 	}
 	return nil
+}
+
+// --- Mesh daemon steps ---
+
+// daemonPIDStateKeyType is the context key for storing the daemon PID between steps.
+type daemonPIDStateKeyType struct{}
+
+var daemonPIDStateKey = daemonPIDStateKeyType{}
+
+// iRememberDaemonPIDForInstance reads daemon.pid from the instance and stores
+// the PID in context for later comparison.
+func iRememberDaemonPIDForInstance(ctx context.Context, instanceName string) (context.Context, error) {
+	s := getState(ctx)
+	if s == nil {
+		return ctx, fmt.Errorf("no test state")
+	}
+	pidPath := filepath.Join(s.workspaceRoot, instanceName, ".niwa", "daemon.pid")
+	data, err := os.ReadFile(pidPath)
+	if err != nil {
+		return ctx, fmt.Errorf("reading daemon.pid for instance %q: %w", instanceName, err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(lines) < 1 || lines[0] == "" {
+		return ctx, fmt.Errorf("daemon.pid is empty for instance %q", instanceName)
+	}
+	return context.WithValue(ctx, daemonPIDStateKey, lines[0]), nil
+}
+
+// theDaemonPIDForInstanceHasNotChanged asserts the daemon.pid still has the
+// same PID as when iRememberDaemonPIDForInstance was called.
+func theDaemonPIDForInstanceHasNotChanged(ctx context.Context, instanceName string) error {
+	s := getState(ctx)
+	if s == nil {
+		return fmt.Errorf("no test state")
+	}
+	savedPID, ok := ctx.Value(daemonPIDStateKey).(string)
+	if !ok || savedPID == "" {
+		return fmt.Errorf("no saved daemon PID; call 'I remember the daemon PID' first")
+	}
+	pidPath := filepath.Join(s.workspaceRoot, instanceName, ".niwa", "daemon.pid")
+	data, err := os.ReadFile(pidPath)
+	if err != nil {
+		return fmt.Errorf("reading daemon.pid for instance %q: %w", instanceName, err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(lines) < 1 {
+		return fmt.Errorf("daemon.pid is empty after second apply")
+	}
+	currentPID := lines[0]
+	if currentPID != savedPID {
+		return fmt.Errorf("daemon PID changed from %s to %s (second daemon was spawned)", savedPID, currentPID)
+	}
+	return nil
+}
+
+// iRemoveSessionsDirFromInstance removes the .niwa/sessions directory from
+// the named instance to trigger daemon self-exit.
+func iRemoveSessionsDirFromInstance(ctx context.Context, instanceName string) (context.Context, error) {
+	s := getState(ctx)
+	if s == nil {
+		return ctx, fmt.Errorf("no test state")
+	}
+	sessionsDir := filepath.Join(s.workspaceRoot, instanceName, ".niwa", "sessions")
+	if err := os.RemoveAll(sessionsDir); err != nil {
+		return ctx, fmt.Errorf("removing sessions dir for instance %q: %w", instanceName, err)
+	}
+	return ctx, nil
+}
+
+// theDaemonForInstanceEventuallyStops polls daemon.pid for up to 10 seconds
+// waiting for the daemon to exit (PID no longer alive or file removed).
+func theDaemonForInstanceEventuallyStops(ctx context.Context, instanceName string) error {
+	s := getState(ctx)
+	if s == nil {
+		return fmt.Errorf("no test state")
+	}
+	pidPath := filepath.Join(s.workspaceRoot, instanceName, ".niwa", "daemon.pid")
+
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		data, err := os.ReadFile(pidPath)
+		if os.IsNotExist(err) {
+			return nil // daemon removed its pid file
+		}
+		if err != nil {
+			time.Sleep(200 * time.Millisecond)
+			continue
+		}
+		lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+		if len(lines) == 0 || lines[0] == "" {
+			return nil
+		}
+		var pid int
+		if _, err := fmt.Sscanf(lines[0], "%d", &pid); err != nil {
+			return nil
+		}
+		proc, err := os.FindProcess(pid)
+		if err != nil {
+			return nil // process gone
+		}
+		if err := proc.Signal(os.Signal(syscall.Signal(0))); err != nil {
+			// kill(0) failed: process is dead
+			return nil
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	return fmt.Errorf("daemon for instance %q did not stop within 10s", instanceName)
 }

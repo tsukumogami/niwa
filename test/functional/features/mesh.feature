@@ -116,3 +116,90 @@ Feature: Session mesh: filesystem-based inter-session messaging
     And the file ".niwa/sessions" does not exist in instance "plain-ws"
     And the file ".claude/.mcp.json" does not exist in instance "plain-ws"
     And the file ".niwa/hooks/mesh-session-start.sh" does not exist in instance "plain-ws"
+
+  @critical
+  Scenario: apply with [channels.mesh] spawns mesh watch daemon
+    Given a clean niwa environment
+    And a local git server is set up
+    And a config repo "daemon-ws" exists with body:
+      """
+      [workspace]
+      name = "daemon-ws"
+
+      [channels.mesh]
+      [channels.mesh.roles]
+      coordinator = ""
+      """
+    When I run niwa init from config repo "daemon-ws"
+    Then the exit code is 0
+    When I run "niwa create daemon-ws"
+    Then the exit code is 0
+    And the instance "daemon-ws" exists
+    And the file ".niwa/daemon.pid" exists in instance "daemon-ws"
+
+  @critical
+  Scenario: second apply does not spawn a second daemon
+    Given a clean niwa environment
+    And a local git server is set up
+    And a config repo "daemon2-ws" exists with body:
+      """
+      [workspace]
+      name = "daemon2-ws"
+
+      [channels.mesh]
+      [channels.mesh.roles]
+      coordinator = ""
+      """
+    When I run niwa init from config repo "daemon2-ws"
+    Then the exit code is 0
+    When I run "niwa create daemon2-ws"
+    Then the exit code is 0
+    And the file ".niwa/daemon.pid" exists in instance "daemon2-ws"
+    When I remember the daemon PID for instance "daemon2-ws"
+    When I run "niwa apply daemon2-ws"
+    Then the exit code is 0
+    And the file ".niwa/daemon.pid" exists in instance "daemon2-ws"
+    And the daemon PID for instance "daemon2-ws" has not changed
+
+  @critical
+  Scenario: destroy terminates the mesh watch daemon
+    Given a clean niwa environment
+    And a local git server is set up
+    And a config repo "destroy-daemon-ws" exists with body:
+      """
+      [workspace]
+      name = "destroy-daemon-ws"
+
+      [channels.mesh]
+      [channels.mesh.roles]
+      coordinator = ""
+      """
+    When I run niwa init from config repo "destroy-daemon-ws"
+    Then the exit code is 0
+    When I run "niwa create destroy-daemon-ws"
+    Then the exit code is 0
+    And the file ".niwa/daemon.pid" exists in instance "destroy-daemon-ws"
+    When I run "niwa destroy --force destroy-daemon-ws"
+    Then the exit code is 0
+    And the instance "destroy-daemon-ws" does not exist
+
+  @critical
+  Scenario: daemon self-exits when sessions directory is removed
+    Given a clean niwa environment
+    And a local git server is set up
+    And a config repo "selfstop-ws" exists with body:
+      """
+      [workspace]
+      name = "selfstop-ws"
+
+      [channels.mesh]
+      [channels.mesh.roles]
+      coordinator = ""
+      """
+    When I run niwa init from config repo "selfstop-ws"
+    Then the exit code is 0
+    When I run "niwa create selfstop-ws"
+    Then the exit code is 0
+    And the file ".niwa/daemon.pid" exists in instance "selfstop-ws"
+    When I remove the sessions directory from instance "selfstop-ws"
+    Then the daemon for instance "selfstop-ws" eventually stops
