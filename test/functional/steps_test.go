@@ -1243,10 +1243,10 @@ func theInboxDirectoryExistsForRole(ctx context.Context, role string) error {
 // callMCPTool calls a single MCP tool on the niwa mcp-serve command by
 // piping a JSON-RPC initialize + tools/call sequence to stdin and
 // capturing stdout. Returns the raw JSON-RPC response bytes.
-func callMCPTool(s *testState, sessionID, sessionRole, toolName, argsJSON string) (string, int, error) {
+func callMCPTool(s *testState, sessionID, sessionRole, toolName, argsJSON string) (string, error) {
 	instanceRoot := s.envOverrides["NIWA_INSTANCE_ROOT"]
 	if instanceRoot == "" {
-		return "", 0, fmt.Errorf("NIWA_INSTANCE_ROOT not set")
+		return "", fmt.Errorf("NIWA_INSTANCE_ROOT not set")
 	}
 	sessionsDir := instanceRoot + "/.niwa/sessions"
 	inboxDir := ""
@@ -1288,17 +1288,12 @@ func callMCPTool(s *testState, sessionID, sessionRole, toolName, argsJSON string
 	var stdout, stderr strings.Builder
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	err := cmd.Run()
-	exitCode := 0
-	if err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			exitCode = exitErr.ExitCode()
-			_ = exitCode
-		} else {
-			return "", 0, fmt.Errorf("mcp-serve failed: %w\nstderr: %s", err, stderr.String())
+	if err := cmd.Run(); err != nil {
+		if _, ok := err.(*exec.ExitError); !ok {
+			return "", fmt.Errorf("mcp-serve failed: %w\nstderr: %s", err, stderr.String())
 		}
 	}
-	return stdout.String(), 0, nil
+	return stdout.String(), nil
 }
 
 // theWorkerSessionSendsAMessageToWithBody sends a typed message from the
@@ -1314,7 +1309,7 @@ func theWorkerSessionSendsAMessageToWithBody(ctx context.Context, msgType, targe
 	}
 	workerSessionID := ms.sessionIDs["worker"]
 	argsJSON := `{"to":"` + targetRole + `","type":"` + msgType + `","body":{"text":"` + body + `"}}`
-	out, _, err := callMCPTool(s, workerSessionID, "worker", "niwa_send_message", argsJSON)
+	out, err := callMCPTool(s, workerSessionID, "worker", "niwa_send_message", argsJSON)
 	if err != nil {
 		return ctx, err
 	}
@@ -1363,7 +1358,7 @@ func theCoordinatorSessionChecksMessages(ctx context.Context) (context.Context, 
 		return ctx, fmt.Errorf("no mesh state")
 	}
 	coordinatorSessionID := ms.sessionIDs["coordinator"]
-	out, _, err := callMCPTool(s, coordinatorSessionID, "coordinator", "niwa_check_messages", "{}")
+	out, err := callMCPTool(s, coordinatorSessionID, "coordinator", "niwa_check_messages", "{}")
 	if err != nil {
 		return ctx, err
 	}

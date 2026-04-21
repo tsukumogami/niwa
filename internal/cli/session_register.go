@@ -67,14 +67,7 @@ func runSessionRegister(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("cannot write session entry: %w", err)
 	}
 
-	// Count pending messages across all peer sessions in the instance.
-	pending := countPending(sessionsDir, sessionID)
-
 	fmt.Printf("session_id=%s role=%s\n", sessionID, role)
-	if pending > 0 {
-		fmt.Printf("pending=%d\n", pending)
-	}
-
 	return nil
 }
 
@@ -120,34 +113,10 @@ func writeSessionEntry(sessionsDir string, entry mcp.SessionEntry) error {
 	if err := os.WriteFile(tmp, data, 0o600); err != nil {
 		return err
 	}
+	if err := os.Chmod(tmp, 0o600); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
 	return os.Rename(tmp, registryPath)
 }
 
-// countPending counts pending (.json) messages across all peer sessions in the
-// instance (every session directory other than currentSessionID). It provides
-// no per-role filtering because callers use it only to surface a "you have
-// messages waiting" hint at registration time.
-func countPending(sessionsDir, currentSessionID string) int {
-	// Look for any inbox dir belonging to a peer session.
-	entries, err := os.ReadDir(sessionsDir)
-	if err != nil {
-		return 0
-	}
-	count := 0
-	for _, e := range entries {
-		if !e.IsDir() || e.Name() == currentSessionID {
-			continue
-		}
-		inboxDir := filepath.Join(sessionsDir, e.Name(), "inbox")
-		files, err := os.ReadDir(inboxDir)
-		if err != nil {
-			continue
-		}
-		for _, f := range files {
-			if !f.IsDir() && strings.HasSuffix(f.Name(), ".json") {
-				count++
-			}
-		}
-	}
-	return count
-}

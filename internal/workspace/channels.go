@@ -190,7 +190,12 @@ func writeFileMode(path string, data []byte, mode os.FileMode) error {
 // This mutates cfg in place and is called at the top of runPipeline before
 // any per-repo processing. HooksMaterializer reads Scripts as file paths and
 // copies them with os.ReadFile, so these must point to real files on disk.
-// The hook scripts are written by InstallChannelInfrastructure in step 4.75.
+//
+// ORDERING CONTRACT: Call InstallChannelInfrastructure (step 4.75) before
+// HooksMaterializer runs (step 6.5). injectChannelHooks records paths to
+// scripts that don't yet exist on disk; InstallChannelInfrastructure writes
+// them. Calling injectChannelHooks without a subsequent InstallChannelInfrastructure
+// produces hook entries pointing to nonexistent files that fail at materialize time.
 func injectChannelHooks(cfg *config.WorkspaceConfig, instanceRoot string) {
 	if cfg.Channels.IsEmpty() {
 		return
