@@ -67,7 +67,7 @@ Feature: Session mesh: filesystem-based inter-session messaging
     When I run "niwa apply chan-ws"
     Then the exit code is 0
     And the file "workspace-context.md" in instance "chan-ws" contains "## Channels"
-    And the file ".niwa/sessions/sessions.json" in instance "chan-ws" contains "[]"
+    And the file ".niwa/sessions/sessions.json" in instance "chan-ws" contains "{\"sessions\":[]}"
 
   @critical
   Scenario: workspace without [channels.mesh] does not create channel artifacts
