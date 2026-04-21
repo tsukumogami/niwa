@@ -24,6 +24,10 @@
 **Decision count:** 4 (within 1-5 range, proceed normally)
 **All independent:** no coupling requiring sequential execution
 
+## Security Review (Phase 5)
+**Outcome:** Option 2 - Document considerations
+**Summary:** No blocking architectural changes required. Key implementation-time mitigations: file permissions (0700/0600 on .niwa/sessions/), input validation for ClaudeSessionID and message routing fields, sessions.json file locking for concurrent writes, message retention TTL in inbox/read/, binary path resolution via exec.LookPath at daemon start, and graceful SIGTERM shutdown. HMAC signing is tracked as a follow-on requirement.
+
 ## Current Status
-**Phase:** 1 - Decomposition complete
+**Phase:** 5 - Security complete
 **Last Updated:** 2026-04-21
