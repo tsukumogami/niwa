@@ -14,6 +14,7 @@ import (
 )
 
 var sessionRegisterRepo string
+var sessionRegisterRole string
 var sessionRegisterCheckOnly bool
 
 // errAlreadyRegistered is returned by writeSessionEntry when a live session
@@ -23,6 +24,7 @@ var errAlreadyRegistered = errors.New("already registered")
 func init() {
 	sessionCmd.AddCommand(sessionRegisterCmd)
 	sessionRegisterCmd.Flags().StringVar(&sessionRegisterRepo, "repo", "", "repo name (defaults to cwd-inferred repo)")
+	sessionRegisterCmd.Flags().StringVar(&sessionRegisterRole, "role", "", "role override (highest priority; overrides NIWA_SESSION_ROLE, --repo, and pwd fallback)")
 	sessionRegisterCmd.Flags().BoolVar(&sessionRegisterCheckOnly, "check-only", false, "skip registration silently when this role is already registered with an active session; register normally otherwise")
 }
 
@@ -38,7 +40,7 @@ func runSessionRegister(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("NIWA_INSTANCE_ROOT is not set")
 	}
 
-	role := deriveRole(sessionRegisterRepo)
+	role := deriveRole(sessionRegisterRole, sessionRegisterRepo, instanceRoot)
 
 	if sessionRegisterCheckOnly && isAlreadyRegistered(instanceRoot, role) {
 		return nil
@@ -107,13 +109,42 @@ func isAlreadyRegistered(instanceRoot, role string) bool {
 	return false
 }
 
-func deriveRole(repo string) string {
+// deriveRole determines the session role using a four-tier priority:
+//
+//  1. --role flag (explicit, highest priority)
+//  2. NIWA_SESSION_ROLE environment variable
+//  3. --repo flag (basename of the repo path)
+//  4. pwd relative to instanceRoot (basename of cwd; "coordinator" when cwd == instanceRoot)
+func deriveRole(flagRole, repo, instanceRoot string) string {
+	if flagRole != "" {
+		return flagRole
+	}
 	if role := os.Getenv("NIWA_SESSION_ROLE"); role != "" {
 		return role
 	}
 	if repo != "" {
 		parts := strings.Split(strings.TrimRight(repo, "/"), "/")
 		return parts[len(parts)-1]
+	}
+	// Tier 4: derive from pwd relative to instanceRoot.
+	if instanceRoot != "" {
+		cwd, err := os.Getwd()
+		if err == nil {
+			// Resolve symlinks so comparison works on platforms where /tmp is a symlink.
+			resolvedCwd, err1 := filepath.EvalSymlinks(cwd)
+			resolvedRoot, err2 := filepath.EvalSymlinks(instanceRoot)
+			if err1 == nil && err2 == nil {
+				cwd = resolvedCwd
+				instanceRoot = resolvedRoot
+			}
+			if cwd == instanceRoot {
+				return "coordinator"
+			}
+			rel, err := filepath.Rel(instanceRoot, cwd)
+			if err == nil && rel != "" && rel != "." && !strings.HasPrefix(rel, "..") {
+				return filepath.Base(rel)
+			}
+		}
 	}
 	return "coordinator"
 }

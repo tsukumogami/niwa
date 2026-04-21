@@ -171,6 +171,7 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 	// Mesh / session steps
 	ctx.Step(`^NIWA_INSTANCE_ROOT is set to a temp directory$`, niwaInstanceRootIsSetToATempDirectory)
 	ctx.Step(`^I run "niwa session register" as role "([^"]*)"$`, iRunNiwaSessionRegisterAsRole)
+	ctx.Step(`^I run "niwa session register" from repo directory "([^"]*)"$`, iRunNiwaSessionRegisterFromRepoDir)
 	ctx.Step(`^a sessions\.json entry exists for role "([^"]*)"$`, aSessionsJSONEntryExistsForRole)
 	ctx.Step(`^the coordinator inbox directory exists$`, func(ctx context.Context) (context.Context, error) {
 		return ctx, theInboxDirectoryExistsForRole(ctx, "coordinator")

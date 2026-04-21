@@ -1855,6 +1855,57 @@ func newTestUUID() string {
 	return fmt.Sprintf("%d-%d", time.Now().UnixNano(), os.Getpid())
 }
 
+// iRunNiwaSessionRegisterFromRepoDir runs "niwa session register" from a
+// subdirectory of the instance root, without setting NIWA_SESSION_ROLE, so
+// that the pwd-based role derivation tier takes effect. The role is derived
+// from the directory name passed as repoName. The session ID is stored in
+// meshState under that role.
+func iRunNiwaSessionRegisterFromRepoDir(ctx context.Context, repoName string) (context.Context, error) {
+	s := getState(ctx)
+	if s == nil {
+		return ctx, fmt.Errorf("no test state")
+	}
+	ms := getMeshState(ctx)
+	if ms == nil {
+		return ctx, fmt.Errorf("no mesh state; call NIWA_INSTANCE_ROOT setup first")
+	}
+
+	repoDir := filepath.Join(ms.instanceRoot, repoName)
+	if err := os.MkdirAll(repoDir, 0o755); err != nil {
+		return ctx, fmt.Errorf("creating repo dir %q: %w", repoDir, err)
+	}
+
+	// Run without NIWA_SESSION_ROLE so pwd fallback triggers.
+	savedRole := s.envOverrides["NIWA_SESSION_ROLE"]
+	delete(s.envOverrides, "NIWA_SESSION_ROLE")
+	defer func() {
+		if savedRole != "" {
+			s.envOverrides["NIWA_SESSION_ROLE"] = savedRole
+		}
+	}()
+
+	if err := runNiwa(s, repoDir, "niwa session register"); err != nil {
+		return ctx, err
+	}
+
+	// Parse session_id from stdout: "session_id=<uuid> role=<role>"
+	sessionID := ""
+	for _, line := range strings.Split(s.stdout, "\n") {
+		if strings.HasPrefix(line, "session_id=") {
+			parts := strings.Fields(line)
+			if len(parts) >= 1 {
+				sessionID = strings.TrimPrefix(parts[0], "session_id=")
+			}
+		}
+	}
+	if sessionID == "" {
+		return ctx, fmt.Errorf("no session_id in output: %q", s.stdout)
+	}
+
+	ms.sessionIDs[repoName] = sessionID
+	return ctx, nil
+}
+
 // iSetNiwaInstanceRootToInstance sets NIWA_INSTANCE_ROOT to the path of the
 // named workspace instance and initialises meshState to match, so subsequent
 // session register / send-message steps target the right instance.

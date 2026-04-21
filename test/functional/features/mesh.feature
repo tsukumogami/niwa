@@ -290,6 +290,30 @@ Feature: Session mesh: filesystem-based inter-session messaging
     And the file ".niwa/hooks/mesh-session-start.sh" exists in instance "bare-mesh-ws"
 
   @critical
+  Scenario: session registered from a repo directory gets role matching repo basename
+    Given a clean niwa environment
+    And NIWA_INSTANCE_ROOT is set to a temp directory
+    When I run "niwa session register" from repo directory "myrepo"
+    Then the exit code is 0
+    And a sessions.json entry exists for role "myrepo"
+
+  @critical
+  Scenario: session registered from instance root gets role coordinator via pwd fallback
+    Given a clean niwa environment
+    And NIWA_INSTANCE_ROOT is set to a temp directory
+    When I run "niwa session register" as role "coordinator"
+    Then the exit code is 0
+    And a sessions.json entry exists for role "coordinator"
+
+  @critical
+  Scenario: --role flag overrides NIWA_SESSION_ROLE and pwd fallback
+    Given a clean niwa environment
+    And NIWA_INSTANCE_ROOT is set to a temp directory
+    When I run "niwa session register --role explicit"
+    Then the exit code is 0
+    And a sessions.json entry exists for role "explicit"
+
+  @critical
   Scenario: daemon log records message type but not body content
     Given a clean niwa environment
     And a local git server is set up
