@@ -394,6 +394,12 @@ func (a *Applier) Apply(ctx context.Context, cfg *config.WorkspaceConfig, config
 // clone, and install content. It returns the pipeline results without writing
 // state.
 func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, configDir, instanceRoot string, now time.Time, opts *pipelineOpts) (*pipelineResult, error) {
+	// Step 0: Inject channel hooks into cfg.Claude.Hooks so HooksMaterializer
+	// writes them per-repo. Must run before any per-repo processing so that
+	// every repo in the workspace receives the channel hook scripts.
+	// cfg is a pointer; injectChannelHooks mutates its Hooks map in place.
+	injectChannelHooks(cfg)
+
 	// overlayDir is the local clone path of the overlay repo when one is active.
 	// It is local to this pipeline run; downstream steps that need it receive it
 	// as a function argument rather than reading it from the Applier.
@@ -906,6 +912,12 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		return nil, fmt.Errorf("installing workspace root settings: %w", err)
 	}
 	writtenFiles = append(writtenFiles, rootSettingsFiles...)
+
+	// Step 4.75: Install channel infrastructure (sessions dir, sessions.json,
+	// .mcp.json, ## Channels section) when [channels.mesh] is configured.
+	if err := InstallChannelInfrastructure(effectiveCfg, instanceRoot, &writtenFiles); err != nil {
+		return nil, fmt.Errorf("installing channel infrastructure: %w", err)
+	}
 
 	// Step 5: Install group-level CLAUDE.md files.
 	installedGroups := map[string]bool{}

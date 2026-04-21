@@ -19,3 +19,68 @@ Feature: Session mesh: filesystem-based inter-session messaging
     When the coordinator session checks messages
     Then the output contains "task.delegate"
     And the output contains "hello"
+
+  @critical
+  Scenario: niwa apply with [channels.mesh] creates channel infrastructure artifacts
+    Given a clean niwa environment
+    And a local git server is set up
+    And a config repo "chan-ws" exists with body:
+      """
+      [workspace]
+      name = "chan-ws"
+
+      [channels.mesh]
+      [channels.mesh.roles]
+      coordinator = ""
+      worker = "tools/worker"
+      """
+    When I run niwa init from config repo "chan-ws"
+    Then the exit code is 0
+    When I run "niwa create chan-ws"
+    Then the exit code is 0
+    And the instance "chan-ws" exists
+    And the file ".niwa/sessions/sessions.json" exists in instance "chan-ws"
+    And the file ".claude/.mcp.json" exists in instance "chan-ws"
+    And the file ".claude/.mcp.json" in instance "chan-ws" contains "mcp-serve"
+    And the file ".claude/.mcp.json" in instance "chan-ws" contains "NIWA_INSTANCE_ROOT"
+    And the file "workspace-context.md" in instance "chan-ws" contains "## Channels"
+    And the file "workspace-context.md" in instance "chan-ws" contains "coordinator"
+
+  @critical
+  Scenario: second niwa apply does not duplicate channel artifacts
+    Given a clean niwa environment
+    And a local git server is set up
+    And a config repo "chan-ws" exists with body:
+      """
+      [workspace]
+      name = "chan-ws"
+
+      [channels.mesh]
+      [channels.mesh.roles]
+      coordinator = ""
+      """
+    When I run niwa init from config repo "chan-ws"
+    Then the exit code is 0
+    When I run "niwa create chan-ws"
+    Then the exit code is 0
+    And the file "workspace-context.md" in instance "chan-ws" contains "## Channels"
+    When I run "niwa apply chan-ws"
+    Then the exit code is 0
+    And the file "workspace-context.md" in instance "chan-ws" contains "## Channels"
+    And the file ".niwa/sessions/sessions.json" in instance "chan-ws" contains "[]"
+
+  @critical
+  Scenario: workspace without [channels.mesh] does not create channel artifacts
+    Given a clean niwa environment
+    And a local git server is set up
+    And a config repo "plain-ws" exists with body:
+      """
+      [workspace]
+      name = "plain-ws"
+      """
+    When I run niwa init from config repo "plain-ws"
+    Then the exit code is 0
+    When I run "niwa create plain-ws"
+    Then the exit code is 0
+    And the instance "plain-ws" exists
+    And the file "workspace-context.md" in instance "plain-ws" does not contain "## Channels"
