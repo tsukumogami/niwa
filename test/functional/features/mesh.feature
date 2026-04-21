@@ -286,6 +286,8 @@ Feature: Session mesh: filesystem-based inter-session messaging
     And the file ".niwa/sessions/sessions.json" exists in instance "bare-mesh-ws"
     And the file ".claude/.mcp.json" exists in instance "bare-mesh-ws"
     And the file ".niwa/daemon.pid" exists in instance "bare-mesh-ws"
+    And the file "workspace-context.md" in instance "bare-mesh-ws" contains "## Channels"
+    And the file ".niwa/hooks/mesh-session-start.sh" exists in instance "bare-mesh-ws"
 
   @critical
   Scenario: daemon log records message type but not body content
