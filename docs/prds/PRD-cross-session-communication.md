@@ -1,5 +1,5 @@
 ---
-status: Draft
+status: Accepted
 problem: |
   Developers using niwa to manage multi-repo workspaces routinely run multiple Claude
   sessions simultaneously — one per repo and one at the workspace root. When sessions
