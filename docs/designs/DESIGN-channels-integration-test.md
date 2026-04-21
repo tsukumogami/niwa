@@ -69,89 +69,156 @@ startup — would not be caught by the existing tests.
 
 ## Considered Options
 
-### Session setup: Pre-register vs rely on session_start hook
+### Decision 1: How should the test wire NIWA_SESSION_ID for the MCP server?
 
-**Option A — Rely on session_start hook only**
+The MCP server spawned by `claude -p` needs `NIWA_SESSION_ID` to locate its inbox and
+serve tool calls. Without it, every call to `niwa_check_messages`, `niwa_ask`, or
+`niwa_wait` returns "NIWA_SESSION_ID not set; is this session registered?".
 
-Let `claude -p` register the session via the hook. Don't set `NIWA_SESSION_ID`
-before launching Claude. The MCP server starts without knowing its inbox, so
-`niwa_check_messages` immediately returns `"NIWA_SESSION_ID not set"`.
+The `.claude/.mcp.json` written by `InstallChannelInfrastructure` only bakes in
+`NIWA_INSTANCE_ROOT` — the workspace-scoped root. Session identity is dynamic:
+each `claude -p` invocation creates a new process with a new session UUID, so it
+cannot be written into a static config file. The MCP server must receive it through
+the process environment instead.
 
-Verdict: unusable. The MCP server must have `NIWA_SESSION_ID` to serve any
-meaningful tool call.
+This means the test must arrange for `NIWA_SESSION_ID` to be set in `claude -p`'s
+environment before the process starts, while also ensuring the inbox directory that
+UUID corresponds to actually exists.
 
-**Option B — Pre-register and set NIWA_SESSION_ID in env (chosen)**
+#### Chosen: Pre-register and set NIWA_SESSION_ID in env
 
-Run `niwa session register` from the test, capture the UUID, set
-`NIWA_SESSION_ID=<uuid>` in envOverrides before `claude -p` starts. The MCP
-server (subprocess of `claude`) inherits this env var and watches the correct
-inbox. When the `session_start` hook fires and re-registers with Claude's PID
-(pruning the dead subprocess entry), the MCP server continues using the
-pre-registration inbox.
+Run `niwa session register --role coordinator` from the test subprocess before
+launching `claude -p`. The register command creates the inbox directory and prints
+`session_id=<uuid>` to stdout. The test captures that UUID, writes it into
+`envOverrides["NIWA_SESSION_ID"]`, and sets `envOverrides["NIWA_SESSION_ROLE"]`.
 
-Pre-seeded messages in that inbox are still visible to the server. The test
-goroutine in Scenario 2 writes the worker reply directly to that inbox dir,
-bypassing sessions.json routing. This works because the goroutine has the
-inbox path from meshState, not from sessions.json.
+When `claude -p` starts, the MCP server subprocess inherits the full env and
+immediately has a valid session ID pointing at an existing inbox. The `session_start`
+hook fires shortly after and re-registers the coordinator with Claude's PID and a
+fresh UUID. The MCP server ignores this: it already bound to `NIWA_SESSION_ID` from
+env and continues watching the pre-registration inbox. Pre-seeded messages and
+goroutine-written replies target that same inbox via meshState, not sessions.json.
 
-**Option C — Modify MCP server to discover session ID by parent PID**
+#### Alternatives Considered
 
-Have the server look up its own session entry from sessions.json by matching
-its parent process PID (the Claude Code PID). No env var pre-setting needed.
+**Rely on session_start hook only**: Let `claude -p` register the session via the
+hook without pre-setting `NIWA_SESSION_ID`. The MCP server starts before the hook
+fires, so any tool call that arrives before the hook completes returns "NIWA_SESSION_ID
+not set". Even if the hook fires quickly, there is a race window. Rejected because
+the MCP server must have `NIWA_SESSION_ID` from the moment it starts — the hook is
+too late.
 
-Verdict: cleaner long-term but requires a production code change that is out
-of scope for this test infrastructure work.
+**Modify MCP server to discover session ID by parent PID**: Have the server look up
+its own session entry in sessions.json by matching the parent process PID (Claude's
+PID). No env var pre-setting needed and no race window. Rejected because this requires
+a production code change that is out of scope for test infrastructure work. It may be
+the right long-term design, but the pre-registration pattern achieves the same outcome
+without changing production code.
 
-### Worker simulation: Concurrent claude -p vs test goroutine
+### Decision 2: How should the test simulate the worker in the ask/answer scenario?
 
-**Option A — Two concurrent claude -p sessions**
+The `niwa_ask` scenario requires a worker that receives an ask message and writes a
+reply. Running a full `claude -p` worker session alongside the coordinator introduces
+two live LLM processes communicating through the mesh, which creates non-deterministic
+ordering, unpredictable latency, and failure modes that are hard to attribute to
+specific components. These properties conflict with the requirement for deterministic,
+diagnosable tests.
 
-Start worker and coordinator in separate goroutines, both running `claude -p`.
-The worker waits for a message via `niwa_wait`, then replies.
+The existing functional suite already solved a structurally identical problem in
+`theCoordinatorAsksWorkerAndReplies`: a Go goroutine polls the worker inbox, detects
+the ask message, and writes a hardcoded reply to the coordinator inbox. The coordinator
+side runs as a direct JSON-RPC call, not `claude -p`. The new scenario needs the
+coordinator to be `claude -p` instead, but the worker-simulation pattern is reusable
+without modification.
 
-Verdict: non-deterministic. Two LLM sessions exchange messages with no
-guaranteed ordering. Test runtime is unpredictable and failure modes are hard
-to diagnose. Coordination protocol reliability belongs in a separate manual
-integration test.
+#### Chosen: Test goroutine simulates worker
 
-**Option B — Test goroutine simulates worker (chosen)**
+A Go goroutine runs concurrently with the coordinator `claude -p` subprocess. It polls
+the worker inbox directory every 200 ms for a `question.ask` file. When one appears, it
+writes a hardcoded `{"answer":"42"}` directly to the coordinator inbox as `question.answer`
+via atomic rename. The coordinator's `niwa_ask` call is blocking and resolves when the
+answer file appears.
 
-The goroutine polls the worker inbox for the ask message, writes a hardcoded
-reply directly to the coordinator inbox, then exits. Only the coordinator runs
-`claude -p`. This matches `theCoordinatorAsksWorkerAndReplies` in the existing
-suite.
+Only the coordinator runs `claude -p`. The goroutine represents the worker at the
+file-system protocol level without involving an LLM. This proves that the coordinator
+can use `niwa_ask`, interpret the response, and produce observable output — which is
+the actual coverage goal. Routing of the ask message from coordinator to worker still
+goes through sessions.json (the `resolveRole` path), so the routing code is exercised
+even though the worker itself is simulated.
 
-Deterministic: the reply is written as soon as the ask appears, with no LLM
-latency on the worker side. The test proves the coordinator's ability to use
-`niwa_ask` and process the response, which is the goal.
+#### Alternatives Considered
 
-### Inbox seeding: Pre-seed vs live round-trip for check/wait scenarios
+**Two concurrent claude -p sessions**: Start both coordinator and worker as headless
+Claude processes. The worker calls `niwa_wait`, then replies to the coordinator's ask.
+Rejected because the ordering of two LLM processes is non-deterministic: the worker
+might not register before the coordinator sends the ask, reply latency is unbounded, and
+a flaky LLM response on either side produces a test failure with no clear root cause.
+Proving that two LLM agents can coordinate in real time is a separate concern that
+belongs in manual integration testing.
 
-**Option A — Live round-trip (two sessions)**
+### Decision 3: How should the test supply messages for check/wait scenarios?
 
-Run a background `claude -p` worker that sends a message, then coordinator
-reads it. Same concurrency problems as above.
+The `niwa_check_messages` and `niwa_wait` scenarios require messages to be present in
+the coordinator inbox when the coordinator calls those tools. A live round-trip — where
+a background process sends messages while the coordinator is running — reintroduces the
+same concurrency problems as two concurrent `claude -p` sessions: ordering is not
+guaranteed, the sender might not have written all messages before the coordinator scans
+the inbox, and diagnosis is harder.
 
-**Option B — Pre-seed inbox (chosen)**
+`handleWait` uses `scanExistingForWaiter` which scans the inbox for matching messages
+immediately after registering the type-waiter. If messages are already present, they are
+returned on the first scan without waiting. This makes pre-seeded messages invisible to
+any race condition.
 
-Write message files directly to the coordinator inbox before `claude -p`
-starts. The coordinator's `niwa_check_messages` or `niwa_wait` call finds
-them immediately. Test is deterministic and fast.
+#### Chosen: Pre-seed the coordinator inbox before claude -p starts
+
+Write message files directly to the coordinator inbox directory before launching
+`claude -p`. The existing `nMessagesPlacedInCoordinatorInbox` step handles this: it uses
+the inbox path from `meshState.coordinatorInbox` (set during the coordinator session
+setup step) and writes files via atomic rename, matching the production message delivery
+pattern.
+
+When the coordinator calls `niwa_check_messages` or `niwa_wait`, the messages are already
+present and returned immediately. The test is deterministic regardless of LLM scheduling
+or inbox-watch timing.
+
+#### Alternatives Considered
+
+**Live round-trip via a background sender process**: Run a background subprocess or
+goroutine that sends messages to the coordinator inbox after `claude -p` starts. Rejected
+because it reintroduces ordering uncertainty: if the sender is delayed, `niwa_wait` times
+out before the messages arrive. Pre-seeding eliminates this risk entirely and does not
+sacrifice coverage — message delivery through atomic rename is already tested by the
+`@critical` MCP scenarios in the same suite.
 
 ## Decision Outcome
 
-Three `@channels-e2e` scenarios in `test/functional/features/mesh.feature`:
+**Chosen: Decision 1B + Decision 2B + Decision 3B**
 
-| Scenario | MCP tool tested | Worker side | Assert |
-|----------|----------------|-------------|--------|
-| S1 — check messages | `niwa_check_messages` | Pre-seeded inbox | output contains `"task.result"` |
-| S2 — ask/answer | `niwa_ask` | Test goroutine replies | output contains `"42"` |
-| S3 — wait/collect | `niwa_wait` | Pre-seeded inbox (2 msgs) | output contains `"2"` |
+### Summary
 
-All three use `niwa create --channels` on a plain workspace (no `[channels.mesh]`
-in config). Each scenario is tagged `@channels-e2e` and is skipped automatically
-when `claude` is not on PATH or `ANTHROPIC_API_KEY` is unset (via the existing
-`claudeIsAvailable` step).
+All three scenarios use `niwa create --channels` on a plain workspace (no `[channels.mesh]`
+config section needed) to provision the full channel infrastructure in an isolated sandbox.
+Before launching `claude -p`, the test runs `niwa session register` to pre-register the
+coordinator and capture its UUID, then sets `NIWA_SESSION_ID` and `NIWA_SESSION_ROLE` in
+`envOverrides` so the MCP server inherits them. For the check and wait scenarios, the
+coordinator inbox is pre-seeded with message files via atomic rename. For the ask/answer
+scenario, a Go goroutine simulates the worker by polling the worker inbox and writing a
+hardcoded reply. Only the coordinator runs `claude -p`. Each scenario is tagged
+`@channels-e2e` and is automatically skipped when `claude` is not on PATH or
+`ANTHROPIC_API_KEY` is unset.
+
+### Rationale
+
+The three decisions reinforce each other. Pre-registration (Decision 1B) gives the MCP
+server a stable session identity with no race window, which is the foundation all three
+scenarios depend on. Pre-seeding (Decision 3B) removes the need for any concurrent sender
+process in the check and wait scenarios, making them fully deterministic. The goroutine
+worker (Decision 2B) limits LLM involvement to exactly one process — the coordinator —
+which is the component under test. Together, the combination produces fast, diagnosable
+scenarios that prove channels infrastructure is loadable by Claude Code and that each MCP
+tool returns correct data from within a live session, while keeping the test suite free
+of timing dependencies and concurrent LLM coordination.
 
 ## Solution Architecture
 
