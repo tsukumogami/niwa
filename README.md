@@ -118,7 +118,8 @@ repos, regenerates content files, and cleans up repos removed from the config.
 | `niwa apply [--instance <name>]` | Apply config to all instances (from root) or one (from instance); on a TTY, shows a live status line ("cloning <repo>...", "syncing <repo>...") while each repo is processed |
 | `niwa status [instance]` | Show workspace health: repos, drift, last applied |
 | `niwa reset [instance] [--force]` | Tear down and recreate an instance |
-| `niwa destroy [instance] [--force]` | Permanently remove an instance |
+| `niwa destroy [instance] [--force]` | Permanently remove an instance; stops the mesh watch daemon first when `[channels.mesh]` is configured |
+| `niwa mesh watch --instance-root <path>` | Run the mesh watch daemon (started automatically by `niwa apply` when `[channels.mesh]` is configured; not normally invoked directly) |
 | `niwa version` | Print version information |
 | `niwa --no-progress <command>` | Suppress the animated status line regardless of TTY state |
 
