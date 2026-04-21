@@ -188,6 +188,8 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 	ctx.Step(`^the daemon PID for instance "([^"]*)" has not changed$`, theDaemonPIDForInstanceHasNotChanged)
 	ctx.Step(`^I remove the sessions directory from instance "([^"]*)"$`, iRemoveSessionsDirFromInstance)
 	ctx.Step(`^the daemon for instance "([^"]*)" eventually stops$`, theDaemonForInstanceEventuallyStops)
+	ctx.Step(`^I set NIWA_INSTANCE_ROOT to instance "([^"]*)"$`, iSetNiwaInstanceRootToInstance)
+	ctx.Step(`^the daemon log for instance "([^"]*)" eventually contains "([^"]*)"$`, theDaemonLogForInstanceEventuallyContains)
 
 	// niwa_ask / niwa_wait steps
 	ctx.Step(`^the coordinator asks the worker a question and the worker replies$`, theCoordinatorAsksWorkerAndReplies)

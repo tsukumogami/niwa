@@ -1854,3 +1854,41 @@ func coordinatorSendsWithInvalidType(ctx context.Context, invalidType string) (c
 func newTestUUID() string {
 	return fmt.Sprintf("%d-%d", time.Now().UnixNano(), os.Getpid())
 }
+
+// iSetNiwaInstanceRootToInstance sets NIWA_INSTANCE_ROOT to the path of the
+// named workspace instance and initialises meshState to match, so subsequent
+// session register / send-message steps target the right instance.
+func iSetNiwaInstanceRootToInstance(ctx context.Context, instanceName string) (context.Context, error) {
+	s := getState(ctx)
+	if s == nil {
+		return ctx, fmt.Errorf("no test state")
+	}
+	instanceDir := filepath.Join(s.workspaceRoot, instanceName)
+	s.envOverrides["NIWA_INSTANCE_ROOT"] = instanceDir
+
+	ms := &meshState{
+		sessionIDs:   make(map[string]string),
+		instanceRoot: instanceDir,
+	}
+	return setMeshState(ctx, ms), nil
+}
+
+// theDaemonLogForInstanceEventuallyContains polls daemon.log for up to 5
+// seconds waiting for text to appear. Used to assert async daemon log output.
+func theDaemonLogForInstanceEventuallyContains(ctx context.Context, instanceName, text string) error {
+	s := getState(ctx)
+	if s == nil {
+		return fmt.Errorf("no test state")
+	}
+	logPath := filepath.Join(s.workspaceRoot, instanceName, ".niwa", "daemon.log")
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		data, err := os.ReadFile(logPath)
+		if err == nil && strings.Contains(string(data), text) {
+			return nil
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	data, _ := os.ReadFile(logPath)
+	return fmt.Errorf("daemon log for instance %q did not contain %q within 5s\nlog:\n%s", instanceName, text, string(data))
+}

@@ -247,3 +247,51 @@ Feature: Session mesh: filesystem-based inter-session messaging
     Then the exit code is 0
     When the coordinator sends a message with invalid type "../../evil"
     Then the output contains "isError"
+
+  @critical
+  Scenario: CLAUDE_SESSION_ID env var is used as tier-1 session ID
+    Given a clean niwa environment
+    And NIWA_INSTANCE_ROOT is set to a temp directory
+    And I set env "CLAUDE_SESSION_ID" to "abcd1234EFGH"
+    When I run "niwa session register" as role "coordinator"
+    Then the exit code is 0
+    And the sessions.json entry for role "coordinator" has claude_session_id "abcd1234EFGH"
+
+  @critical
+  Scenario: invalid CLAUDE_SESSION_ID is rejected with a warning
+    Given a clean niwa environment
+    And NIWA_INSTANCE_ROOT is set to a temp directory
+    And I set env "CLAUDE_SESSION_ID" to "../../evil"
+    When I run "niwa session register" as role "coordinator"
+    Then the exit code is 0
+    And the sessions.json entry for role "coordinator" has no claude_session_id
+    And the error output contains "CLAUDE_SESSION_ID has invalid format"
+
+  @critical
+  Scenario: daemon log records message type but not body content
+    Given a clean niwa environment
+    And a local git server is set up
+    And a config repo "logcheck-ws" exists with body:
+      """
+      [workspace]
+      name = "logcheck-ws"
+
+      [channels.mesh]
+      [channels.mesh.roles]
+      coordinator = ""
+      worker = ""
+      """
+    When I run niwa init from config repo "logcheck-ws"
+    Then the exit code is 0
+    When I run "niwa create logcheck-ws"
+    Then the exit code is 0
+    And the file ".niwa/daemon.pid" exists in instance "logcheck-ws"
+    When I set NIWA_INSTANCE_ROOT to instance "logcheck-ws"
+    When I run "niwa session register" as role "coordinator"
+    Then the exit code is 0
+    When I run "niwa session register" as role "worker"
+    Then the exit code is 0
+    When the worker session sends a "task.result" message to "coordinator" with body "DAEMON-BODY-EXCLUSION-MARKER"
+    Then the exit code is 0
+    And the daemon log for instance "logcheck-ws" eventually contains "new message"
+    And the file ".niwa/daemon.log" in instance "logcheck-ws" does not contain "DAEMON-BODY-EXCLUSION-MARKER"
