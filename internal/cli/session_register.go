@@ -48,7 +48,16 @@ func runSessionRegister(cmd *cobra.Command, args []string) error {
 
 	homeDir, _ := os.UserHomeDir()
 	cwd, _ := os.Getwd()
+
+	// Warn when the caller explicitly set CLAUDE_SESSION_ID but it fails validation.
+	if envID := os.Getenv("CLAUDE_SESSION_ID"); envID != "" && !mcp.SessionIDRegex.MatchString(envID) {
+		fmt.Fprintln(os.Stderr, "warning: CLAUDE_SESSION_ID has invalid format; ignoring")
+	}
+
 	claudeSessionID := mcp.DiscoverClaudeSessionID(homeDir, cwd)
+	if claudeSessionID == "" {
+		fmt.Fprintln(os.Stderr, "warning: could not discover Claude session ID; claude_session_id will be omitted")
+	}
 
 	sessionsDir := filepath.Join(instanceRoot, ".niwa", "sessions")
 	inboxDir := filepath.Join(sessionsDir, sessionID, "inbox")

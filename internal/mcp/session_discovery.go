@@ -11,10 +11,11 @@ import (
 	"strings"
 )
 
-// sessionIDRegex validates Claude session IDs before they are stored or used.
-// Values that don't match are silently discarded so invalid input can never
-// reach sessions.json or exec.Command.
-var sessionIDRegex = regexp.MustCompile(`^[a-zA-Z0-9_-]{8,128}$`)
+// SessionIDRegex validates Claude session IDs before they are stored or used.
+// Values that don't match are rejected so invalid input can never reach
+// sessions.json or exec.Command. Exported for use in callers that need to
+// validate or warn before calling DiscoverClaudeSessionID.
+var SessionIDRegex = regexp.MustCompile(`^[a-zA-Z0-9_-]{8,128}$`)
 
 // DiscoverClaudeSessionID tries three tiers to find the Claude session ID:
 //
@@ -27,7 +28,7 @@ var sessionIDRegex = regexp.MustCompile(`^[a-zA-Z0-9_-]{8,128}$`)
 func DiscoverClaudeSessionID(homeDir, cwd string) string {
 	// Tier 1: env var.
 	if id := os.Getenv("CLAUDE_SESSION_ID"); id != "" {
-		if sessionIDRegex.MatchString(id) {
+		if SessionIDRegex.MatchString(id) {
 			return id
 		}
 	}
@@ -111,7 +112,7 @@ func readClaudeSessionFile(path, cwd string) string {
 	if sf.CWD != cwd {
 		return ""
 	}
-	if !sessionIDRegex.MatchString(sf.SessionID) {
+	if !SessionIDRegex.MatchString(sf.SessionID) {
 		return ""
 	}
 	return sf.SessionID
@@ -151,7 +152,7 @@ func discoverViaProjectScan(homeDir, cwd string) string {
 
 	for _, f := range files {
 		name := strings.TrimSuffix(f.name, ".jsonl")
-		if sessionIDRegex.MatchString(name) {
+		if SessionIDRegex.MatchString(name) {
 			return name
 		}
 	}

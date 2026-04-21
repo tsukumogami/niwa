@@ -87,6 +87,7 @@ Feature: Session mesh: filesystem-based inter-session messaging
     When I run "niwa session register" as role "coordinator"
     Then the exit code is 0
     And the sessions.json entry for role "coordinator" has no claude_session_id
+    And the error output contains "could not discover Claude session ID"
 
   Scenario: claude_session_id is skipped when cwd does not match session file
     Given a clean niwa environment
