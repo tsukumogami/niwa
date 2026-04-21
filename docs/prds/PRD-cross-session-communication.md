@@ -14,9 +14,11 @@ goals: |
   Niwa provisions a workspace-scoped messaging layer when a workspace is created or
   updated. Sessions that open inside the workspace find their role and broker address
   already configured, register themselves without any user action, and can exchange
-  directed messages by role without the user acting as an intermediary. The user can
-  observe mesh state with a single command and receive structured error feedback when
-  something goes wrong.
+  directed messages by role without the user acting as an intermediary. When a session
+  needs input from another session, it calls a blocking ask tool that returns the answer
+  directly — no polling, no inbox management, no timing coordination. The mesh daemon
+  handles routing and wakes idle sessions as needed. The user can observe mesh state with
+  a single command and receive structured error feedback when something goes wrong.
 ---
 
 # PRD: Cross-Session Communication
@@ -51,8 +53,9 @@ a controlling process.
 1. Sessions find their communication role and broker address already configured when
    they open inside a niwa workspace — no manual setup step beyond running
    `niwa create` or `niwa apply`.
-2. Sessions can send directed messages to each other by role, and receive messages by
-   polling a tool, without the user acting as a relay.
+2. Sessions can send directed messages to each other by role. When a session needs input
+   from another session, it calls a blocking ask tool that waits for the answer — the
+   calling session does not poll or manage delivery timing itself.
 3. Delivery failures (offline recipients, expired messages, registry corruption) surface
    structured errors to the sending session rather than silent data loss.
 4. The user can inspect mesh state (which sessions are registered, what's live, pending
@@ -66,9 +69,15 @@ message to the niwa-worker session by its role so that the worker receives its
 assignment without the user copy-pasting instructions between terminals.
 
 **US2 — Worker asks a clarifying question**
-As a worker Claude session mid-implementation, I want to send a question to the
-coordinator and receive an answer so that I can continue working without interrupting
-the user or making an assumption I'd have to undo later.
+As a worker Claude session mid-implementation, I want to call a blocking ask tool that
+sends my question to the coordinator and returns the answer directly so that I can
+continue working immediately — without polling, without managing inbox timing, and
+without the user copy-pasting between terminals.
+
+**US6 — Coordinator waits for multiple workers**
+As a coordinator Claude session that has delegated tasks to several workers, I want to
+block on a single wait call until all expected results arrive so that I can aggregate
+them and report to the user without writing a polling loop.
 
 **US3 — Coordinator reviews a PR and delivers feedback**
 As a coordinator Claude session that has reviewed a pull request, I want to send
@@ -111,35 +120,42 @@ server shall declare `capabilities.experimental["claude/channel"]` so it is
 forward-compatible with Claude Code's native Channels push protocol.
 
 **R5** — The `ChannelMaterializer` shall append a `## Channels` section to
-`workspace-context.md` containing: the sessions registry path, the MCP tool names
-(`niwa_check_messages`, `niwa_send_message`), the registration command, the session's
-assigned role, and behavioral instructions directing Claude to: (a) call
-`niwa_check_messages` immediately after registering; (b) check for messages at natural
-idle points and as a backstop every M tool calls (default M=10, overridable in
-`workspace.toml`); (c) emit `task.progress` messages at a defined cadence (default: every
-5 minutes of wall time or every 20 tool calls, whichever comes first) while executing
-a delegated task.
+`workspace-context.md` containing: the sessions registry path, the available MCP tool
+names (`niwa_check_messages`, `niwa_send_message`, `niwa_ask`, `niwa_wait`), the
+registration command, the session's assigned role, and behavioral instructions directing
+Claude to: (a) call `niwa_check_messages` immediately when woken by the daemon with
+pending messages; (b) use `niwa_ask` when a blocking answer is required from another
+session — do not poll or manage inbox timing manually; (c) use `niwa_send_message` for
+one-way messages (task.result, task.progress, session.bye) where no synchronous reply is
+expected; (d) always deliver answers and task results via `niwa_send_message` tool calls,
+never as plain conversational output — the mesh daemon detects responses in the inbox, not
+in stdout; (e) emit `task.progress` messages at a defined cadence (default: every 5
+minutes of wall time or every 20 tool calls, whichever comes first) while executing a
+delegated task.
 
-**R5a** — The `ChannelMaterializer` shall write a `SessionStart` hook entry into each
-session's `.claude/settings.json` (via `HooksMaterializer`). The hook shall call
-`niwa session register` and, if pending messages exist, return a JSON response with
-`initialUserMessage` directing Claude to call `niwa_check_messages` before starting
-work. This ensures a session that was offline when messages were sent sees them
-immediately at startup without requiring polling.
+**R5a** — The `ChannelMaterializer` shall write a `SessionStart` hook into each session's
+`.claude/settings.json`. The hook shall call `niwa session register` (updating the PID
+and Claude session ID on every start or resume) and, if pending messages exist, return a
+JSON response with `initialUserMessage` directing Claude to call `niwa_check_messages`
+before doing anything else. This fires both when a user opens a session manually and when
+the daemon wakes an idle session via `claude --resume` — in both cases, pending messages
+are surfaced as the session's first action.
 
-**R5b** — The `ChannelMaterializer` shall write a `UserPromptSubmit` hook that checks
-the inbox on every user prompt submission and injects a `additionalContext` reminder
-when unread messages are present. This ensures that an idle session which the user
-manually activates (by typing anything) surfaces pending messages in Claude's next
-context window, even if the session never polled during its idle period.
+**R5b** — The `ChannelMaterializer` shall write a `UserPromptSubmit` hook as a fallback
+for interactive (coordinator-style) sessions. When the user types anything, the hook
+checks the inbox and injects an `additionalContext` reminder if unread messages are
+present. This applies only when messages arrive for an interactive session that the
+daemon cannot resume (because its PID is alive). It is not the primary delivery path.
 
 ### Session Identity and Registration
 
 **R6** — `niwa session register` shall be a new CLI subcommand under a `niwa session`
 subcommand group. It shall accept a `--repo <name>` flag (defaulting to the repo
 inferred from the current working directory) and write a `SessionEntry` to
-`sessions.json` under `<instance-root>/.niwa/sessions/`. It shall print the assigned
-session ID and role to stdout on success.
+`sessions.json` under `<instance-root>/.niwa/sessions/`. The entry shall include the
+niwa session UUID, role, PID, process start time, inbox directory path, registration
+timestamp, and Claude Code session ID (see R32). It shall print the assigned session ID
+and role to stdout on success.
 
 **R7** — Role assignment shall follow this precedence order (highest to lowest):
 `NIWA_SESSION_ROLE` environment variable; `[channels.mesh.roles]` entry in
@@ -174,10 +190,12 @@ part of unregister. `niwa session unregister` shall also run as part of `niwa de
 
 ### Messaging Tools
 
-**R13** — `niwa mcp-serve` shall be a new CLI subcommand that starts a stdio MCP
-server exposing at minimum two tools: `niwa_check_messages` and `niwa_send_message`.
-The server shall be stateless across invocations — it reads from and writes to the
-filesystem on each tool call, with no in-memory state between calls.
+**R13** — `niwa mcp-serve` shall be a new CLI subcommand that starts a stdio MCP server
+exposing four tools: `niwa_check_messages`, `niwa_send_message`, `niwa_ask`, and
+`niwa_wait`. The server shall be stateless across tool calls for the two one-way tools
+(`niwa_check_messages`, `niwa_send_message`) — reading from and writing to the filesystem
+with no in-memory state between calls. The two blocking tools (`niwa_ask`, `niwa_wait`)
+hold an open goroutine watching the inbox until the reply or timeout condition is met.
 
 **R14** — `niwa_check_messages` shall return all unread messages in the calling
 session's inbox directory, formatted as structured markdown summaries (not raw JSON)
@@ -191,8 +209,10 @@ expiry notification shall be written to the original sender's inbox.
 key from the defined vocabulary), `body` (type-specific object), and optionally
 `reply_to` (message ID for correlation) and `expires_at` (ISO 8601 deadline). It shall
 write the message to the recipient's inbox via atomic rename and return a `status` field
-of either `queued` (recipient offline at send time) or `delivered` (recipient PID alive
-at send time), plus the assigned message ID.
+of either `queued` (recipient PID dead at send time) or `delivered` (recipient PID alive
+at send time), plus the assigned message ID. `niwa_send_message` is for one-way messages
+where the sender does not wait for a reply. For request-reply exchanges, use `niwa_ask`
+(R30).
 
 **R16** — `niwa_send_message` shall reject messages with unrecognized `type` values
 synchronously with a structured error response. Defined type vocabulary for v1:
@@ -204,6 +224,51 @@ machine-readable `error_code` field and a human-readable `detail` string. Define
 codes: `MESH_NOT_PROVISIONED`, `RECIPIENT_NOT_REGISTERED`, `RECIPIENT_OFFLINE` (inbox
 exists, PID dead), `INBOX_UNWRITABLE`, `MESSAGE_TOO_LARGE`. All send errors shall be
 non-fatal to the calling session.
+
+**R29** — `niwa mesh watch` shall be a persistent daemon scoped to the workspace instance.
+It shall watch all session inbox directories via fsnotify and, when a message arrives for
+a session whose PID is dead, resume that session using `claude --resume <claude-session-id>`
+as a background subprocess so the session processes its pending messages and responds. When
+a message arrives for a session whose PID is alive, the daemon shall take no action — the
+message waits in the inbox for the live session's `niwa_ask` reply-watch goroutine or its
+next `niwa_check_messages` call. The daemon is stateless: if it crashes, messages are not
+lost; restarting it resumes normal operation. The daemon's lifecycle (start on provision,
+stop on destroy) is managed by `niwa apply` / `niwa destroy`.
+
+**R30** — `niwa_ask` shall be a blocking MCP tool that sends a `question.ask` message to a
+target role and does not return until the target responds with a `question.answer` bearing a
+matching `reply_to`. Internally, `niwa_ask` writes the question to the target's inbox,
+then watches the caller's own inbox for the reply. The daemon is responsible for waking the
+target if its PID is dead. `niwa_ask` shall accept: `to` (role string), `body` (question
+payload), and optionally `timeout` (ISO 8601 duration, default 10 minutes) and `task_id`.
+It shall return the full response body on success, or a structured timeout error if no reply
+arrives within the deadline.
+
+**R31** — `niwa_wait` shall be a blocking MCP tool that returns when one or more messages
+matching a filter arrive in the calling session's inbox. It shall accept: `types` (list of
+message types to accept), `from` (optional list of sender roles), `count` (minimum number of
+matching messages to collect before returning, default 1), and `timeout` (ISO 8601 duration).
+The coordinator uses `niwa_wait` after delegating tasks to multiple workers: it specifies
+`types=["task.result"]`, `from=["koto","shirabe"]`, `count=2`, and blocks until both results
+arrive, rather than polling in a loop.
+
+**R32** — `niwa session register` shall record the session's Claude Code session ID in
+`SessionEntry` alongside the niwa UUID, PID, and start time. The Claude session ID is
+required by the daemon to resume idle sessions via `claude --resume`. The registration hook
+shall locate the session ID from the environment variable `CLAUDE_SESSION_ID` if set, or
+from the most-recently-modified session file under `~/.claude/projects/<encoded-cwd>/`. If
+the session ID cannot be determined, the `claude_session_id` field shall be left empty and
+the daemon shall skip resume for that session, falling back to SessionStart hook delivery
+when the session next opens manually.
+
+**R33** — Sessions shall deliver all answers and task results via `niwa_send_message` tool
+calls. Responding via plain conversational output is not a valid delivery mechanism: the
+daemon detects responses in the recipient's inbox file, not in the subprocess stdout.
+This constraint is a forward-compatibility requirement: when Claude Code's Channels protocol
+can wake sessions natively (replacing `claude --resume`), the response path is identical —
+the awakened session calls `niwa_send_message`, and the waiting `niwa_ask` goroutine detects
+the reply in the inbox regardless of how the session was woken. Workspace-context.md
+behavioral instructions (R5) shall make this explicit.
 
 ### Message Lifecycle
 
@@ -259,13 +324,14 @@ from `internal/cli/config.go`, with each subcommand in a separate file under
 `internal/cli/`.
 
 **R28** — The v1 design shall be forward-compatible with Claude Code's native
-`claude/channel` delivery protocol. Concretely: the message envelope schema, role-based
-addressing model, and session-side tool names (`niwa_check_messages`,
-`niwa_send_message`) shall remain stable when the delivery path is upgraded from
-file-based polling to Channels push delivery. The `ChannelMaterializer` shall write the
-MCP server entry in a way that can be replaced with a Channels broker entry in a
-subsequent `niwa apply` without requiring any changes to session-side configuration or
-behavioral instructions.
+`claude/channel` delivery protocol. The upgrade path is: when Channels can wake idle
+sessions natively, the daemon's `claude --resume` step is removed and a Channels push
+notification takes its place. The response path is unchanged in both cases: the awakened
+session calls `niwa_send_message`, and the waiting `niwa_ask` goroutine detects the reply
+in the inbox. The message envelope schema, role-based addressing model, tool names, and
+behavioral instructions shall require no changes when the wakeup mechanism changes. The
+`ChannelMaterializer` shall write the MCP server entry in a way that supports this
+transition in a subsequent `niwa apply`.
 
 ## Acceptance Criteria
 
@@ -324,6 +390,30 @@ behavioral instructions.
   to the sender's inbox.
 - [ ] The expiry notification appears in the sender's inbox on the sender's next
   `niwa_check_messages` call and includes the original `id`, `type`, and `sent_at`.
+- [ ] Calling `niwa_ask` writes a `question.ask` message to the target's inbox, blocks
+  the tool call, and returns the response body when the target calls `niwa_send_message`
+  with a matching `reply_to`.
+- [ ] `niwa_ask` returns a structured timeout error if no reply arrives within the
+  specified timeout without leaving any dangling goroutines.
+- [ ] Calling `niwa_wait` with `types=["task.result"]`, `from=["koto","shirabe"]`,
+  `count=2` blocks until two `task.result` messages from those roles arrive, then returns
+  both as a batch.
+- [ ] `niwa session register` records the Claude session ID in `sessions.json` when
+  `CLAUDE_SESSION_ID` is set; leaves `claude_session_id` empty and logs a warning when it
+  cannot be determined.
+
+### Daemon
+
+- [ ] `niwa mesh watch` starts without error and watches all inbox directories under
+  `<instance-root>/.niwa/sessions/`.
+- [ ] When a `*.json` message file appears in a session's inbox whose PID is dead, the
+  daemon runs `claude --resume <claude-session-id>` as a background subprocess within 2
+  seconds of file creation.
+- [ ] When a message arrives for a session whose PID is alive, the daemon takes no action
+  and the file remains in the inbox.
+- [ ] If the daemon crashes and restarts, no messages are lost and no sessions are
+  double-resumed.
+- [ ] `niwa destroy` terminates the daemon and removes its PID file.
 
 ### Observability
 
@@ -343,21 +433,20 @@ behavioral instructions.
 - **Network/cross-machine transport**: same-machine only for v1. The message schema
   and transport interfaces are designed for future network upgrade, but no network
   transport is implemented.
-- **Automated session spawning**: the user opens Claude sessions manually. Niwa
-  provisions the channel and injects configuration; it does not start or manage Claude
-  processes.
-- **MCP Channels as delivery path**: Claude Code's native `claude/channel` protocol is
-  the right long-term delivery mechanism — push notifications arrive in session context
-  without polling, which is the ideal UX. It is out of scope for v1 because the research
-  preview requires `claude.ai` OAuth and `--dangerously-load-development-channels`. The
-  v1 design is explicitly forward-compatible: the message schema, role-based addressing,
-  and session-side tool names are stable across the delivery path upgrade. When Channels
-  graduates from research preview, niwa's provisioning step writes a Channels broker
-  entry instead of a stdio MCP server entry; sessions notice no difference.
+- **Initial session spawning**: the user opens Claude sessions manually in each repo.
+  The daemon resumes idle sessions (`claude --resume`) when messages arrive for them, but
+  does not create sessions that have never been opened. Starting the initial session for
+  each role is a user action, not a niwa action.
+- **MCP Channels as wakeup path**: Claude Code's native `claude/channel` protocol is the
+  right long-term wakeup mechanism — push notifications arrive without requiring
+  `claude --resume`. It is out of scope for v1 because it requires `claude.ai` OAuth and
+  a CLI flag that cannot be set via config files, and has a confirmed open bug where
+  idle REPLs display the notification but do not process it. The v1 design is explicitly
+  forward-compatible: when Channels lifts those constraints, the daemon's `claude --resume`
+  step is replaced by a Channels push, with no change to the response path (sessions still
+  respond via `niwa_send_message` into the inbox).
 - **Agent Teams integration**: Anthropic's Agent Teams requires a spawning lead session
   and does not support independently-opened sessions. Not a target for v1.
-- **Real-time push delivery via inotify**: `inotify`-based wake-up for instant message
-  notification is a v2 enhancement. V1 uses a pull model via the MCP poll tool.
 - **Intentional duplicate roles / fan-out delivery**: two sessions sharing the same
   role for broadcast scenarios. V1 enforces uniqueness. Fan-out is a v2 concern.
 - **Cross-workspace routing**: sessions in different niwa workspace instances on the
@@ -374,22 +463,33 @@ None. All open questions resolved via the decision protocol.
 
 ## Known Limitations
 
-- **Pull model latency**: messages arrive in the recipient's context at the next poll
-  cycle, not instantly. With a 10-tool-call default cadence at human interaction speeds,
-  round-trip latency is typically 30–120 seconds. Users with tighter latency requirements
-  can lower the poll cadence in `workspace.toml`, accepting more context-window noise.
+- **Busy session serialization**: the daemon only resumes sessions whose PID is dead. If a
+  session is actively running when a message arrives for it, the message queues in the inbox
+  and is not delivered until the session exits and the daemon resumes it. Concurrent message
+  injection into a running session is not supported in v1. In practice this means if session
+  A is blocked in `niwa_ask` waiting for B, and C simultaneously sends a message to A, C's
+  message waits until A finishes its exchange with B. This is the accepted tradeoff for the
+  `claude --resume` wakeup model.
+- **Live coordinator delivery gap**: the daemon cannot inject messages into a live
+  interactive session (the coordinator at the REPL). Messages for a live coordinator queue
+  in the inbox and surface via the `UserPromptSubmit` hook when the user next types
+  something, or when the coordinator calls `niwa_wait` explicitly. This is acceptable
+  because the coordinator is the session the user is watching.
+- **Claude session ID discovery**: if `CLAUDE_SESSION_ID` is not set in the environment
+  and the session file cannot be reliably determined (e.g., multiple recent sessions for
+  the same directory), the daemon cannot resume the session and falls back to SessionStart
+  hook delivery on next manual open.
 - **PID liveness false positives**: on systems with high PID recycling rates, the
   start-time liveness check may still produce false positives in edge cases. The system
   will wrongly treat a new process as the old session, blocking re-registration. The
   recovery path is `niwa session unregister <role>` followed by re-registration.
 - **Session self-registration required**: sessions must call `niwa session register` at
-  startup (directed by the `workspace-context.md` behavioral instructions). A session
-  that opens without reading its CLAUDE.md (e.g., bare mode) will not be registered and
-  cannot receive messages until it registers explicitly.
-- **Context-window budget**: large message batches returned by `niwa_check_messages`
-  consume context-window tokens. Sessions receiving many messages simultaneously (e.g.,
-  after an extended offline period) may see significant context usage from the poll
-  result.
+  startup (via the SessionStart hook). A session that opens without loading its CLAUDE.md
+  (e.g., bare mode) will not be registered and cannot send or receive messages until it
+  registers explicitly.
+- **Context-window budget**: a session resumed by the daemon with many queued messages will
+  consume context-window tokens reading them. Sessions with extended offline periods may see
+  significant context usage from the first `niwa_check_messages` call after resume.
 
 ## Decisions and Trade-offs
 
@@ -397,47 +497,56 @@ None. All open questions resolved via the decision protocol.
 
 A file-based inbox (atomic `rename` into per-session directories) was chosen over a
 Unix socket broker. File-based delivery is crash-safe (messages survive process
-crashes), requires no daemon or supervised process, and has been validated by community
-tools (session-bridge, mcp_agent_mail) at the interaction speeds niwa targets.
-A Unix socket broker would provide lower latency and native push semantics but requires
-niwa to manage a process lifecycle it currently lacks. The file-based approach can be
-replaced by a broker in v2 when push delivery becomes a priority, without changing the
-MCP tool interface or message schema.
+crashes) and inspectable with standard tools. The daemon (`niwa mesh watch`) is a
+required process for idle-session wakeup, but it is stateless — it reads from and writes
+to the filesystem and can be restarted without message loss or coordination. A Unix
+socket broker would be the broker and the transport in one process, creating a single
+point of failure. The file-based approach separates durability (inbox files) from
+delivery (daemon + `claude --resume`), so each can fail independently.
 
-**Hooks solve idle sessions; Channels is still the future push path**
+**Daemon-managed wakeup via `claude --resume`; response always via tool call**
 
-The key user concern is idle sessions: a Claude session sitting at the prompt waiting
-for work has no tool-call cadence, so polling is useless for it. Prototyping confirmed
-two things that change the architecture:
+The fundamental problem with idle sessions is that a session at the REPL makes no tool
+calls, so polling-based delivery never fires. Three alternative mechanisms were evaluated:
 
-First, `notifications/claude/channel` (the Channels push protocol) **cannot** solve
-this today. The `--channels` flag cannot be configured via `settings.json` — it is
-CLI-flag-only and requires `claude.ai` OAuth. Even with both in place, there is a
-confirmed open bug (GitHub #44380) where channel notifications display in the terminal
-but the idle REPL does not interrupt to process them. Channels is not a viable
-mechanism for waking idle sessions in v1.
+*`notifications/claude/channel`* cannot solve this today. The `--channels` flag is
+CLI-flag-only (cannot be configured via `settings.json`) and requires `claude.ai` OAuth.
+There is also a confirmed open bug where idle REPLs display channel notifications but do
+not process them. Channels is the right long-term mechanism but is not viable in v1.
 
-Second, Claude Code's hook system solves the idle session problem cleanly. The
-`SessionStart` hook fires when a session opens (including resume and `/clear`) and its
-response can include `initialUserMessage` — a synthetic first user turn that Claude
-processes before any user input. Niwa's `SessionStart` hook calls `niwa session register`
-and, if the inbox has pending messages from when the session was offline, injects an
-`initialUserMessage` directing Claude to call `niwa_check_messages`. The
-`UserPromptSubmit` hook fires when the user types anything into an idle session, and its
-`additionalContext` field injects a pending-message reminder into Claude's next context
-window. Together these hooks eliminate the idle-session gap without OAuth, without the
-Channels flag, and without tmux.
+*Hook-based delivery* (SessionStart `initialUserMessage`, UserPromptSubmit
+`additionalContext`) works for specific moments: session open/resume, or when the user
+manually types something. But if an idle session (PID alive, at the REPL) receives a
+message from another agent, neither hook fires. The user must intervene.
 
-The v1 delivery model is therefore:
+*Daemon + `claude --resume`* is the correct solution. The daemon watches all session
+inboxes via fsnotify. When a message arrives for a session whose PID is dead, the daemon
+runs `claude --resume <claude-session-id>` as a background subprocess. The SessionStart
+hook fires, detects pending messages, and injects an `initialUserMessage` directing
+Claude to call `niwa_check_messages`. The session reads its messages, responds via
+`niwa_send_message`, and exits. The calling session's `niwa_ask` goroutine detects the
+reply in its inbox and returns the answer to Claude.
 
-1. **Session start / resume**: `SessionStart` hook injects `initialUserMessage` with pending count → Claude calls `niwa_check_messages` immediately
-2. **User-activated idle session**: `UserPromptSubmit` hook injects `additionalContext` → Claude sees pending count in next context
-3. **Active session (working)**: behavioral instructions in `workspace-context.md` → poll every M tool calls
-4. **`notifications/claude/channel` push**: declared as a server capability; fires via fsnotify when new messages arrive; displayed in terminal as a best-effort signal while the idle-wakeup bug exists in Claude Code
+The critical design choice is that **responses always travel through `niwa_send_message`
+into the inbox, never via subprocess stdout**. This is a forward-compatibility
+requirement: when Claude Code's Channels protocol can wake sessions natively, the daemon's
+`claude --resume` step is replaced by a Channels push notification, but the response path
+is identical — the awakened session calls `niwa_send_message`, and the waiting `niwa_ask`
+goroutine detects the reply in the inbox. No session-side changes are needed when the
+wakeup mechanism changes.
 
-The message schema, role-based addressing, and tool names are stable across all four
-paths. When Channels lifts the OAuth requirement and fixes the idle-wakeup bug, path 4
-becomes the primary mechanism and paths 1–3 become fallbacks, with no session-side changes.
+The v1 delivery model is:
+
+1. **Message for idle session** (PID dead): daemon detects inbox file → runs
+   `claude --resume` → SessionStart hook injects `initialUserMessage` → session calls
+   `niwa_check_messages` → session responds via `niwa_send_message` → exits
+2. **Message for live coordinator** (interactive, PID alive): message queues → surfaces
+   via `niwa_wait` if coordinator is blocking, or `UserPromptSubmit` hook if user types
+3. **Future Channels wakeup**: Channels push replaces step 1's `claude --resume` → session
+   responds via `niwa_send_message` (unchanged) → `niwa_ask` detects reply (unchanged)
+
+Sessions do not poll. They are started with a task, use `niwa_ask` when they need input,
+emit progress via `niwa_send_message`, and exit when done.
 
 **Error-on-duplicate roles over silent routing**
 
