@@ -6,6 +6,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"syscall"
 )
 
 // IsPIDAlive returns true if the given PID exists and its recorded start time
@@ -19,7 +20,7 @@ func IsPIDAlive(pid int, startTime int64) bool {
 		return false
 	}
 	// os.FindProcess on Unix always succeeds; use kill(0) via /proc.
-	if err := proc.Signal(os.Signal(nil)); err != nil {
+	if err := proc.Signal(syscall.Signal(0)); err != nil {
 		return false
 	}
 	if startTime == 0 {

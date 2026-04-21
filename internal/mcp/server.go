@@ -161,7 +161,7 @@ func (s *Server) callTool(p toolCallParams) toolResult {
 // sweep for everything else.
 func (s *Server) handleCheckMessages() toolResult {
 	if s.inboxDir == "" {
-		return errResult("NIWA_INBOX_DIR not set; is this session registered?")
+		return errResult("NIWA_SESSION_ID not set; is this session registered?")
 	}
 
 	entries, err := os.ReadDir(s.inboxDir)
@@ -243,7 +243,7 @@ func (s *Server) handleSendMessage(args sendMessageArgs) toolResult {
 			fmt.Sprintf("no session registered with role %q: %v", args.To, err))
 	}
 
-	if err := os.MkdirAll(target.InboxDir, 0o755); err != nil {
+	if err := os.MkdirAll(target.InboxDir, 0o700); err != nil {
 		return errResultCode("INBOX_UNWRITABLE", "cannot create inbox: "+err.Error())
 	}
 
@@ -270,7 +270,7 @@ func (s *Server) handleSendMessage(args sendMessageArgs) toolResult {
 
 	// Atomic write: write to temp file in same directory, then rename.
 	tmpFile := filepath.Join(target.InboxDir, msgID+".json.tmp")
-	if err := os.WriteFile(tmpFile, data, 0o644); err != nil {
+	if err := os.WriteFile(tmpFile, data, 0o600); err != nil {
 		return errResultCode("INBOX_UNWRITABLE", "cannot write message: "+err.Error())
 	}
 	dest := filepath.Join(target.InboxDir, msgID+".json")

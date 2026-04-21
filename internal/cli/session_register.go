@@ -40,7 +40,7 @@ func runSessionRegister(cmd *cobra.Command, args []string) error {
 	sessionsDir := filepath.Join(instanceRoot, ".niwa", "sessions")
 	inboxDir := filepath.Join(sessionsDir, sessionID, "inbox")
 
-	if err := os.MkdirAll(inboxDir, 0o755); err != nil {
+	if err := os.MkdirAll(inboxDir, 0o700); err != nil {
 		return fmt.Errorf("cannot create inbox: %w", err)
 	}
 
@@ -58,8 +58,8 @@ func runSessionRegister(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("cannot write session entry: %w", err)
 	}
 
-	// Count pending messages from any prior inbox for this role.
-	pending := countPending(sessionsDir, role, sessionID)
+	// Count pending messages across all peer sessions in the instance.
+	pending := countPending(sessionsDir, sessionID)
 
 	fmt.Printf("session_id=%s role=%s\n", sessionID, role)
 	if pending > 0 {
@@ -108,14 +108,18 @@ func writeSessionEntry(sessionsDir string, entry mcp.SessionEntry) error {
 		return err
 	}
 	tmp := registryPath + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
 		return err
 	}
 	return os.Rename(tmp, registryPath)
 }
 
-func countPending(sessionsDir, _ string, currentSessionID string) int {
-	// Look for any prior inbox dir for sessions with this role.
+// countPending counts pending (.json) messages across all peer sessions in the
+// instance (every session directory other than currentSessionID). It provides
+// no per-role filtering because callers use it only to surface a "you have
+// messages waiting" hint at registration time.
+func countPending(sessionsDir, currentSessionID string) int {
+	// Look for any inbox dir belonging to a peer session.
 	entries, err := os.ReadDir(sessionsDir)
 	if err != nil {
 		return 0
