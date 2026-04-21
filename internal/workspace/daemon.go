@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/tsukumogami/niwa/internal/mcp"
 )
@@ -31,14 +32,12 @@ func EnsureDaemonRunning(instanceRoot string) error {
 		return nil // daemon already running
 	}
 
-	// Find the niwa binary (same executable as ourselves).
-	niwaBin, err := exec.LookPath("niwa")
+	// Use the current executable as the daemon binary so the daemon is always
+	// the same version as the process that spawned it. exec.LookPath("niwa")
+	// would find a system-installed binary that may be a different version.
+	niwaBin, err := os.Executable()
 	if err != nil {
-		// Fallback: use os.Executable.
-		niwaBin, err = os.Executable()
-		if err != nil {
-			return fmt.Errorf("cannot find niwa binary: %w", err)
-		}
+		return fmt.Errorf("cannot determine own binary path: %w", err)
 	}
 
 	// Ensure .niwa dir and log file are accessible.
@@ -68,6 +67,21 @@ func EnsureDaemonRunning(instanceRoot string) error {
 		_ = cmd.Process.Release()
 	}
 
+	// Wait for the daemon to write its PID file before returning. The daemon
+	// writes daemon.pid atomically after establishing the fsnotify watcher, so
+	// its presence confirms the watch loop is running. Poll up to 3s so callers
+	// can assert daemon liveness immediately after Create/Apply returns.
+	pidPath := filepath.Join(niwaDir, "daemon.pid")
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(pidPath); err == nil {
+			return nil
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	// Timed out — daemon may have failed to start (e.g. missing fsnotify
+	// support). Return nil so Create/Apply still succeed; the missing PID
+	// file is the observable failure signal.
 	return nil
 }
 

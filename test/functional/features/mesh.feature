@@ -179,7 +179,7 @@ Feature: Session mesh: filesystem-based inter-session messaging
     When I run "niwa create destroy-daemon-ws"
     Then the exit code is 0
     And the file ".niwa/daemon.pid" exists in instance "destroy-daemon-ws"
-    When I run "niwa destroy --force destroy-daemon-ws"
+    When I run "niwa destroy --force destroy-daemon-ws" from workspace "destroy-daemon-ws"
     Then the exit code is 0
     And the instance "destroy-daemon-ws" does not exist
 

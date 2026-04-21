@@ -46,12 +46,6 @@ func runMeshWatch(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("instance root does not exist: %s", instanceRoot)
 	}
 
-	// Resolve claude binary once at startup.
-	claudeBin, err := exec.LookPath("claude")
-	if err != nil {
-		return fmt.Errorf("claude binary not found on PATH: %w", err)
-	}
-
 	niwaDir := filepath.Join(instanceRoot, ".niwa")
 	if err := os.MkdirAll(niwaDir, 0o700); err != nil {
 		return fmt.Errorf("creating .niwa directory: %w", err)
@@ -179,7 +173,7 @@ func runMeshWatch(cmd *cobra.Command, args []string) error {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				handleNewMessage(path, sessionsDir, claudeBin, logger)
+				handleNewMessage(path, sessionsDir, logger)
 			}()
 
 		case err, ok := <-watcher.Errors:
@@ -225,7 +219,8 @@ func watchExistingInboxes(watcher *fsnotify.Watcher, sessionsDir string, logger 
 // handleNewMessage processes a new message file event. It reads sessions.json
 // (with advisory lock), finds the target session entry, checks liveness, and
 // if dead, calls `claude --resume <session-id>`.
-func handleNewMessage(msgPath, sessionsDir, claudeBin string, logger *log.Logger) {
+func handleNewMessage(msgPath, sessionsDir string, logger *log.Logger) {
+	claudeBin, _ := exec.LookPath("claude")
 	// Brief pause to let the write complete before reading.
 	time.Sleep(10 * time.Millisecond)
 
@@ -287,6 +282,11 @@ func handleNewMessage(msgPath, sessionsDir, claudeBin string, logger *log.Logger
 
 		if entry.ClaudeSessionID == "" {
 			logger.Printf("session %s (role=%s) is dead but has no claude_session_id, cannot resume", sessionUUID, entry.Role)
+			return
+		}
+
+		if claudeBin == "" {
+			logger.Printf("session %s (role=%s) is dead but claude not on PATH, cannot resume", sessionUUID, entry.Role)
 			return
 		}
 
