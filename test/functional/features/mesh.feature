@@ -86,3 +86,6 @@ Feature: Session mesh: filesystem-based inter-session messaging
     Then the exit code is 0
     And the instance "plain-ws" exists
     And the file "workspace-context.md" in instance "plain-ws" does not contain "## Channels"
+    And the file ".niwa/sessions/sessions.json" does not exist in instance "plain-ws"
+    And the file ".claude/.mcp.json" does not exist in instance "plain-ws"
+    And the file ".niwa/hooks/mesh-session-start.sh" does not exist in instance "plain-ws"

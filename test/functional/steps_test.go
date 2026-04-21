@@ -998,6 +998,20 @@ func theFileInInstanceContains(ctx context.Context, relPath, instance, text stri
 	return nil
 }
 
+// theFileDoesNotExistInInstance verifies that a file does not exist at relPath
+// within the named instance directory.
+func theFileDoesNotExistInInstance(ctx context.Context, relPath, instance string) error {
+	s := getState(ctx)
+	if s == nil {
+		return fmt.Errorf("no test state")
+	}
+	path := filepath.Join(s.workspaceRoot, instance, relPath)
+	if _, err := os.Stat(path); err == nil {
+		return fmt.Errorf("expected file %q to not exist in instance %q, but it does", relPath, instance)
+	}
+	return nil
+}
+
 // theFileInInstanceDoesNotContain verifies the file at relPath does not contain text.
 func theFileInInstanceDoesNotContain(ctx context.Context, relPath, instance, text string) error {
 	s := getState(ctx)

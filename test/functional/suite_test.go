@@ -204,6 +204,7 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 
 	// File assertions
 	ctx.Step(`^the file "([^"]*)" exists in instance "([^"]*)"$`, theFileExistsInInstance)
+	ctx.Step(`^the file "([^"]*)" does not exist in instance "([^"]*)"$`, theFileDoesNotExistInInstance)
 	ctx.Step(`^the file "([^"]*)" in instance "([^"]*)" contains "([^"]*)"$`, theFileInInstanceContains)
 	ctx.Step(`^the file "([^"]*)" in instance "([^"]*)" does not contain "([^"]*)"$`, theFileInInstanceDoesNotContain)
 
