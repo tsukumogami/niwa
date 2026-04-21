@@ -983,7 +983,7 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 	for _, cr := range classified {
 		effective := MergeOverrides(effectiveCfg, cr.Repo.Name)
 
-		// Merge discovered hooks as base, explicit config wins per event.
+		// Merge discovered hooks as base; explicit config entries run first per event.
 		if len(discoveredHooks) > 0 {
 			merged := make(config.HooksConfig, len(discoveredHooks)+len(effective.Claude.Hooks))
 			// Start with discovered hooks (converted to relative paths).
@@ -1005,9 +1005,15 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 				}
 				merged[event] = relEntries
 			}
-			// Explicit config overrides per event.
+			// Explicit config runs before discovered hooks for the same event.
+			// Channel hooks injected by injectChannelHooks are in effective.Claude.Hooks
+			// and must not silently discard user-authored discovered hooks.
 			for event, entries := range effective.Claude.Hooks {
-				merged[event] = entries
+				if existing, ok := merged[event]; ok {
+					merged[event] = append(entries, existing...)
+				} else {
+					merged[event] = entries
+				}
 			}
 			effective.Claude.Hooks = merged
 		}
