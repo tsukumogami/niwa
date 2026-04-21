@@ -112,7 +112,7 @@ func runApply(cmd *cobra.Command, args []string) error {
 
 	// Resolve effective channel activation and synthesize cfg.Channels.Mesh when
 	// --channels or NIWA_CHANNELS activates channels without a config section.
-	cfg, applier.ChannelsFromFlag = resolveChannelsActivation(cmd, cfg, applyChannels, applyNoChannels)
+	cfg, applier.ChannelsSynthesized = resolveChannelsActivation(cmd, cfg, applyChannels, applyNoChannels)
 
 	// Wire global config and ConfigSourceURL from the registry if available.
 	if globalCfg, gErr := config.LoadGlobalConfig(); gErr == nil {

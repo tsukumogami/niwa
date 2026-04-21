@@ -157,7 +157,7 @@ func runCreate(cmd *cobra.Command, args []string) error {
 	//   2. --channels flag    → channels enabled
 	//   3. [channels.mesh] config section present → channels already enabled (no synthesis needed)
 	//   4. NIWA_CHANNELS=1 env var → channels enabled default
-	cfg, applier.ChannelsFromFlag = resolveChannelsActivation(cmd, cfg, createChannels, createNoChannels)
+	cfg, applier.ChannelsSynthesized = resolveChannelsActivation(cmd, cfg, createChannels, createNoChannels)
 
 	instancePath, err := applier.Create(cmd.Context(), cfg, configDir, workspaceRoot, instanceName)
 	if err != nil {

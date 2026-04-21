@@ -58,11 +58,11 @@ type Applier struct {
 	// Empty string disables convention discovery.
 	ConfigSourceURL string
 
-	// ChannelsFromFlag is true when the caller activated channels via --channels
-	// or NIWA_CHANNELS rather than a [channels.mesh] config section. When true,
-	// runPipeline emits a one-time notice advising the user how to persist the
-	// setting permanently.
-	ChannelsFromFlag bool
+	// ChannelsSynthesized is true when cfg.Channels.Mesh was synthesized from
+	// --channels or NIWA_CHANNELS rather than a permanent [channels.mesh] config
+	// section. When true, runPipeline emits a one-time notice advising the user
+	// how to persist the setting.
+	ChannelsSynthesized bool
 
 	// cloneOrSync is the function used to clone or sync the overlay repo.
 	// Defaults to CloneOrSyncOverlay. Overridable in tests.
@@ -167,7 +167,7 @@ type pipelineOpts struct {
 	noOverlay        bool     // from InstanceState.NoOverlay
 	configSourceURL  string   // original source URL for convention overlay discovery
 	disclosedNotices []string // workspace-root-level notices already shown to the user
-	channelsFromFlag bool     // true when channels were activated by --channels or NIWA_CHANNELS
+	channelsSynthesized bool // true when channels were synthesized by --channels or NIWA_CHANNELS
 }
 
 // pipelineResult holds the outputs of the shared pipeline.
@@ -234,7 +234,7 @@ func (a *Applier) Create(ctx context.Context, cfg *config.WorkspaceConfig, confi
 		skipGlobal:       initSkipGlobal,
 		configSourceURL:  a.ConfigSourceURL,
 		disclosedNotices: initDisclosedNotices,
-		channelsFromFlag: a.ChannelsFromFlag,
+		channelsSynthesized: a.ChannelsSynthesized,
 	})
 	if err != nil {
 		_ = os.RemoveAll(instanceRoot)
@@ -342,7 +342,7 @@ func (a *Applier) Apply(ctx context.Context, cfg *config.WorkspaceConfig, config
 		noOverlay:        existingState.NoOverlay,
 		configSourceURL:  a.ConfigSourceURL,
 		disclosedNotices: wsDisclosedNotices,
-		channelsFromFlag: a.ChannelsFromFlag,
+		channelsSynthesized: a.ChannelsSynthesized,
 	})
 	if err != nil {
 		return err
@@ -951,8 +951,8 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 
 	// Emit a one-time hint when channels were activated via --channels or
 	// NIWA_CHANNELS rather than a permanent [channels.mesh] config section.
-	if opts.channelsFromFlag && !sliceContains(opts.disclosedNotices, noticeChannelsFromFlag) {
-		a.Reporter.Log("Hint: to persist channels for this workspace, add [channels.mesh] to workspace.toml or set NIWA_CHANNELS=1 in your shell profile.")
+	if opts.channelsSynthesized && !sliceContains(opts.disclosedNotices, noticeChannelsFromFlag) {
+		a.Reporter.Defer("Hint: to persist channels for this workspace, add [channels.mesh] to workspace.toml or set NIWA_CHANNELS=1 in your shell profile.")
 		newDisclosures = append(newDisclosures, noticeChannelsFromFlag)
 	}
 

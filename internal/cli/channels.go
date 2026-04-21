@@ -10,7 +10,8 @@ import (
 
 // resolveChannelsActivation applies the channels activation priority rules and
 // returns the (possibly modified) config along with a boolean indicating whether
-// channels were activated via flag or env var rather than a config section.
+// cfg.Channels.Mesh was synthesized (i.e. channels were activated via --channels
+// or NIWA_CHANNELS rather than a permanent [channels.mesh] config section).
 //
 // Priority (highest to lowest):
 //  1. --no-channels flag → channels disabled regardless of all else
@@ -24,17 +25,13 @@ import (
 // The returned bool is true only in that synthesized case (not when the config
 // already had the section), so callers can emit a one-time "add config" hint.
 func resolveChannelsActivation(cmd *cobra.Command, cfg *config.WorkspaceConfig, channelsFlag, noChannelsFlag bool) (*config.WorkspaceConfig, bool) {
-	// Tier 1: --no-channels wins over everything.
+	// Priority 1: --no-channels wins over everything.
 	if noChannelsFlag {
-		// If the config had a mesh section, we still honor --no-channels.
-		// Synthesize a nil Mesh to disable provisioning.
-		if cfg.Channels.Mesh != nil {
-			cfg.Channels.Mesh = nil
-		}
+		cfg.Channels.Mesh = nil
 		return cfg, false
 	}
 
-	// Tier 2: --channels explicit flag.
+	// Priority 2: --channels explicit flag.
 	if channelsFlag {
 		if cfg.Channels.Mesh == nil {
 			cfg.Channels.Mesh = &config.ChannelsMeshConfig{}
@@ -44,12 +41,12 @@ func resolveChannelsActivation(cmd *cobra.Command, cfg *config.WorkspaceConfig, 
 		return cfg, false
 	}
 
-	// Tier 3: [channels.mesh] config section already present — no synthesis needed.
+	// Priority 3: [channels.mesh] config section already present — no synthesis needed.
 	if cfg.Channels.Mesh != nil {
 		return cfg, false
 	}
 
-	// Tier 4: NIWA_CHANNELS env var.
+	// Priority 4: NIWA_CHANNELS env var.
 	niwaChannels := os.Getenv("NIWA_CHANNELS")
 	switch niwaChannels {
 	case "":
