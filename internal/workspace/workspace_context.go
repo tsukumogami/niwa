@@ -20,10 +20,64 @@ const overlayClaudeImport = "@CLAUDE.overlay.md"
 const globalClaudeFile = "CLAUDE.global.md"
 const globalClaudeImport = "@CLAUDE.global.md"
 
+const workspaceRulesFile = ".claude/rules/workspace-imports.md"
+
+// writeWorkspaceRulesFile creates (or overwrites) the rules file with a single
+// @import line pointing to absPath.
+func writeWorkspaceRulesFile(rulesPath, absPath string) error {
+	if err := os.MkdirAll(filepath.Dir(rulesPath), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(rulesPath, []byte("@"+absPath+"\n"), 0o644)
+}
+
+// appendToWorkspaceRulesFile appends an @import line to the rules file if not
+// already present. Creates the file and its parent directory if needed.
+func appendToWorkspaceRulesFile(rulesPath, absPath string) error {
+	importLine := "@" + absPath
+	existing, err := os.ReadFile(rulesPath)
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	if strings.Contains(string(existing), importLine) {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(rulesPath), 0o755); err != nil {
+		return err
+	}
+	content := string(existing)
+	if len(content) > 0 && !strings.HasSuffix(content, "\n") {
+		content += "\n"
+	}
+	content += importLine + "\n"
+	return os.WriteFile(rulesPath, []byte(content), 0o644)
+}
+
+// removeImportFromCLAUDE removes an old relative @import from CLAUDE.md
+// (migration support). No-op if not present or file does not exist.
+func removeImportFromCLAUDE(claudePath, importLine string) error {
+	data, err := os.ReadFile(claudePath)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	content := string(data)
+	if !strings.Contains(content, importLine) {
+		return nil
+	}
+	// ensureImportInCLAUDE always added "line\n\n"; try that form first.
+	content = strings.Replace(content, importLine+"\n\n", "", 1)
+	content = strings.Replace(content, importLine+"\n", "", 1)
+	return os.WriteFile(claudePath, []byte(content), 0o644)
+}
+
 // InstallWorkspaceContext generates a workspace context file at the instance
-// root and adds an @import to the workspace CLAUDE.md. The @import resolves
-// at the instance root but silently fails in child repos (the file doesn't
-// exist relative to them), giving level-scoped visibility without inheritance.
+// root and writes an @import to .claude/rules/workspace-imports.md using an
+// absolute path. This gives workspace-level visibility without triggering the
+// "Allow external CLAUDE.md file imports?" dialog when starting Claude from a
+// sub-repo directory.
 func InstallWorkspaceContext(cfg *config.WorkspaceConfig, classified []ClassifiedRepo, instanceRoot string) ([]string, error) {
 	content := generateWorkspaceContext(cfg, classified)
 
@@ -32,88 +86,24 @@ func InstallWorkspaceContext(cfg *config.WorkspaceConfig, classified []Classifie
 		return nil, fmt.Errorf("writing workspace context: %w", err)
 	}
 
-	// Add @import to the workspace CLAUDE.md if not already present.
+	rulesPath := filepath.Join(instanceRoot, workspaceRulesFile)
+	if err := writeWorkspaceRulesFile(rulesPath, contextPath); err != nil {
+		return nil, fmt.Errorf("writing workspace rules file: %w", err)
+	}
+
+	// Migrate: remove old relative import from CLAUDE.md if present.
 	claudePath := filepath.Join(instanceRoot, "CLAUDE.md")
-	if err := ensureImportInCLAUDE(claudePath, workspaceContextImport); err != nil {
-		return nil, fmt.Errorf("adding workspace context import: %w", err)
+	if err := removeImportFromCLAUDE(claudePath, workspaceContextImport); err != nil {
+		return nil, fmt.Errorf("removing old workspace context import: %w", err)
 	}
 
-	return []string{contextPath}, nil
-}
-
-// ensureImportInCLAUDE adds an @import line to a CLAUDE.md file if not
-// already present. Creates the file if it doesn't exist.
-func ensureImportInCLAUDE(claudePath, importLine string) error {
-	existing, err := os.ReadFile(claudePath)
-	if os.IsNotExist(err) {
-		return nil // no CLAUDE.md, nothing to add import to
-	}
-	if err != nil {
-		return err
-	}
-
-	content := string(existing)
-	if strings.Contains(content, importLine) {
-		return nil // already present
-	}
-
-	// Prepend the import line.
-	content = importLine + "\n\n" + content
-
-	return os.WriteFile(claudePath, []byte(content), 0o644)
-}
-
-// ensureImportAfterInCLAUDE inserts importLine into a CLAUDE.md file
-// immediately after the first occurrence of afterLine (on its own line).
-// If afterLine is absent, the import is prepended (same behavior as
-// ensureImportInCLAUDE). If importLine is already present, it is a no-op.
-// Returns nil when CLAUDE.md does not exist.
-func ensureImportAfterInCLAUDE(claudePath, importLine, afterLine string) error {
-	existing, err := os.ReadFile(claudePath)
-	if os.IsNotExist(err) {
-		return nil // no CLAUDE.md, nothing to add import to
-	}
-	if err != nil {
-		return err
-	}
-
-	content := string(existing)
-	if strings.Contains(content, importLine) {
-		return nil // already present
-	}
-
-	// Find the position of afterLine as a complete line.
-	lines := strings.Split(content, "\n")
-	insertIdx := -1
-	for i, line := range lines {
-		if line == afterLine {
-			insertIdx = i + 1
-			break
-		}
-	}
-
-	var updated string
-	if insertIdx < 0 {
-		// afterLine not found — prepend.
-		updated = importLine + "\n\n" + content
-	} else {
-		// Insert after the found line, preserving surrounding blank lines.
-		// We insert the importLine followed by a blank line.
-		before := strings.Join(lines[:insertIdx], "\n")
-		after := strings.Join(lines[insertIdx:], "\n")
-		// Trim a leading blank line from `after` to avoid double-blank
-		// when there's already a blank line after the anchor.
-		trimmedAfter := strings.TrimPrefix(after, "\n")
-		updated = before + "\n" + importLine + "\n\n" + trimmedAfter
-	}
-
-	return os.WriteFile(claudePath, []byte(updated), 0o644)
+	return []string{contextPath, rulesPath}, nil
 }
 
 // InstallOverlayClaudeContent copies CLAUDE.overlay.md from the overlay clone
-// into the instance root and injects @CLAUDE.overlay.md into CLAUDE.md after
-// @workspace-context.md and before @CLAUDE.global.md. Returns the installed
-// path when the file was present, or ("", nil) when it was absent.
+// into the instance root and appends an absolute @import to
+// .claude/rules/workspace-imports.md. Returns the installed path when the file
+// was present, or ("", nil) when it was absent.
 func InstallOverlayClaudeContent(overlayDir, instanceRoot string) (string, error) {
 	srcPath := filepath.Join(overlayDir, overlayClaudeFile)
 	data, err := os.ReadFile(srcPath)
@@ -129,9 +119,15 @@ func InstallOverlayClaudeContent(overlayDir, instanceRoot string) (string, error
 		return "", fmt.Errorf("writing %s: %w", overlayClaudeFile, err)
 	}
 
+	rulesPath := filepath.Join(instanceRoot, workspaceRulesFile)
+	if err := appendToWorkspaceRulesFile(rulesPath, destPath); err != nil {
+		return "", fmt.Errorf("adding overlay to workspace rules file: %w", err)
+	}
+
+	// Migrate: remove old relative import from CLAUDE.md if present.
 	claudePath := filepath.Join(instanceRoot, "CLAUDE.md")
-	if err := ensureImportAfterInCLAUDE(claudePath, overlayClaudeImport, workspaceContextImport); err != nil {
-		return "", fmt.Errorf("adding overlay claude import: %w", err)
+	if err := removeImportFromCLAUDE(claudePath, overlayClaudeImport); err != nil {
+		return "", fmt.Errorf("removing old overlay import: %w", err)
 	}
 
 	return destPath, nil
@@ -262,12 +258,9 @@ func InstallWorkspaceRootSettings(cfg *config.WorkspaceConfig, configDir, instan
 }
 
 // InstallGlobalClaudeContent copies CLAUDE.global.md from the global config
-// directory into the instance root and adds an @import directive to CLAUDE.md.
+// directory into the instance root and appends an absolute @import to
+// .claude/rules/workspace-imports.md.
 // Returns nil, nil when CLAUDE.global.md does not exist in globalConfigDir.
-//
-// The global import is inserted after @CLAUDE.overlay.md when the overlay is
-// active, or after @workspace-context.md otherwise — preserving the required
-// import order (@workspace-context.md → @CLAUDE.overlay.md → @CLAUDE.global.md).
 func InstallGlobalClaudeContent(globalConfigDir, instanceRoot string) ([]string, error) {
 	srcPath := filepath.Join(globalConfigDir, globalClaudeFile)
 	data, err := os.ReadFile(srcPath)
@@ -283,21 +276,15 @@ func InstallGlobalClaudeContent(globalConfigDir, instanceRoot string) ([]string,
 		return nil, fmt.Errorf("writing %s: %w", globalClaudeFile, err)
 	}
 
-	// Prefer inserting after @CLAUDE.overlay.md (overlay active) or after
-	// @workspace-context.md (overlay absent). Falls back to prepend when
-	// neither anchor is present (e.g., content-only workspace with no context).
+	rulesPath := filepath.Join(instanceRoot, workspaceRulesFile)
+	if err := appendToWorkspaceRulesFile(rulesPath, destPath); err != nil {
+		return nil, fmt.Errorf("adding global to workspace rules file: %w", err)
+	}
+
+	// Migrate: remove old relative import from CLAUDE.md if present.
 	claudePath := filepath.Join(instanceRoot, "CLAUDE.md")
-	existing, readErr := os.ReadFile(claudePath)
-	if readErr != nil && !os.IsNotExist(readErr) {
-		return nil, fmt.Errorf("reading CLAUDE.md: %w", readErr)
-	}
-	content := string(existing)
-	anchor := workspaceContextImport // default anchor
-	if strings.Contains(content, overlayClaudeImport) {
-		anchor = overlayClaudeImport
-	}
-	if err := ensureImportAfterInCLAUDE(claudePath, globalClaudeImport, anchor); err != nil {
-		return nil, fmt.Errorf("adding global claude import: %w", err)
+	if err := removeImportFromCLAUDE(claudePath, globalClaudeImport); err != nil {
+		return nil, fmt.Errorf("removing old global import: %w", err)
 	}
 
 	return []string{destPath}, nil

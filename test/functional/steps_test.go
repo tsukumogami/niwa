@@ -961,3 +961,128 @@ func noNiwaTempFilesRemain(ctx context.Context) error {
 	}
 	return fmt.Errorf("expected %s to be empty after wrapped run; found %d leftover(s): %v", s.tmpDir, len(entries), names)
 }
+
+// --- File assertion steps ---
+
+// theFileExistsInInstance verifies that a file exists at relPath within the
+// named instance directory.
+func theFileExistsInInstance(ctx context.Context, relPath, instance string) error {
+	s := getState(ctx)
+	if s == nil {
+		return fmt.Errorf("no test state")
+	}
+	path := filepath.Join(s.workspaceRoot, instance, relPath)
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return fmt.Errorf("expected file %q to exist in instance %q", relPath, instance)
+	} else if err != nil {
+		return fmt.Errorf("stat %q: %w", path, err)
+	}
+	return nil
+}
+
+// theFileInInstanceContains verifies that the file at relPath within the named
+// instance contains text.
+func theFileInInstanceContains(ctx context.Context, relPath, instance, text string) error {
+	s := getState(ctx)
+	if s == nil {
+		return fmt.Errorf("no test state")
+	}
+	path := filepath.Join(s.workspaceRoot, instance, relPath)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("reading %q in instance %q: %w", relPath, instance, err)
+	}
+	if !strings.Contains(string(data), text) {
+		return fmt.Errorf("file %q does not contain %q\ncontent:\n%s", path, text, string(data))
+	}
+	return nil
+}
+
+// theFileInInstanceDoesNotContain verifies the file at relPath does not contain text.
+func theFileInInstanceDoesNotContain(ctx context.Context, relPath, instance, text string) error {
+	s := getState(ctx)
+	if s == nil {
+		return fmt.Errorf("no test state")
+	}
+	path := filepath.Join(s.workspaceRoot, instance, relPath)
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return nil // absent file trivially does not contain the text
+	}
+	if err != nil {
+		return fmt.Errorf("reading %q in instance %q: %w", relPath, instance, err)
+	}
+	if strings.Contains(string(data), text) {
+		return fmt.Errorf("file %q should not contain %q\ncontent:\n%s", path, text, string(data))
+	}
+	return nil
+}
+
+// --- Claude integration steps ---
+
+// claudeIsAvailable checks that the claude CLI and ANTHROPIC_API_KEY are
+// available. Returns godog.ErrPending to skip the scenario when either is absent.
+func claudeIsAvailable(ctx context.Context) (context.Context, error) {
+	if _, err := exec.LookPath("claude"); err != nil {
+		return ctx, godog.ErrPending
+	}
+	if os.Getenv("ANTHROPIC_API_KEY") == "" {
+		return ctx, godog.ErrPending
+	}
+	return ctx, nil
+}
+
+// iRunClaudePFromInstanceRoot runs claude -p with the given prompt from the
+// named instance's workspace root and records output into state.
+func iRunClaudePFromInstanceRoot(ctx context.Context, instance string, prompt *godog.DocString) (context.Context, error) {
+	s := getState(ctx)
+	if s == nil {
+		return ctx, fmt.Errorf("no test state")
+	}
+	cwd := filepath.Join(s.workspaceRoot, instance)
+	return ctx, runClaudeP(s, cwd, strings.TrimSpace(prompt.Content))
+}
+
+// iRunClaudePFromRepoInInstance runs claude -p with the given prompt from
+// groupRepo (e.g. "tools/myapp") inside the named instance.
+func iRunClaudePFromRepoInInstance(ctx context.Context, groupRepo, instance string, prompt *godog.DocString) (context.Context, error) {
+	s := getState(ctx)
+	if s == nil {
+		return ctx, fmt.Errorf("no test state")
+	}
+	cwd := filepath.Join(s.workspaceRoot, instance, groupRepo)
+	return ctx, runClaudeP(s, cwd, strings.TrimSpace(prompt.Content))
+}
+
+// runClaudeP executes claude -p <prompt> in cwd with a sandboxed environment.
+// stdout is stored lowercased so callers can assert "yes"/"no" without caring
+// about capitalisation. Returns godog.ErrPending if claude is not on PATH.
+func runClaudeP(s *testState, cwd, prompt string) error {
+	claudeBin, err := exec.LookPath("claude")
+	if err != nil {
+		return godog.ErrPending
+	}
+	env := s.buildEnv()
+	if key := os.Getenv("ANTHROPIC_API_KEY"); key != "" {
+		env = append(env, "ANTHROPIC_API_KEY="+key)
+	}
+	cmd := exec.Command(claudeBin, "-p", prompt)
+	cmd.Dir = cwd
+	cmd.Env = env
+	var stdout, stderr strings.Builder
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	runErr := cmd.Run()
+	s.stdout = strings.ToLower(stdout.String())
+	s.stderr = stderr.String()
+	s.shellPwd = ""
+	if runErr != nil {
+		if exitErr, ok := runErr.(*exec.ExitError); ok {
+			s.exitCode = exitErr.ExitCode()
+			return nil
+		}
+		return fmt.Errorf("claude -p failed: %w\nstderr: %s", runErr, s.stderr)
+	}
+	s.exitCode = 0
+	return nil
+}

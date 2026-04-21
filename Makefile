@@ -1,4 +1,4 @@
-.PHONY: build test build-test test-functional test-functional-critical test-install clean
+.PHONY: build test build-test test-functional test-functional-critical test-functional-claude-integration test-install clean
 
 # Build the niwa binary.
 build:
@@ -21,6 +21,11 @@ test-functional: build-test
 # Run only scenarios tagged @critical — fast feedback for core flows.
 test-functional-critical: build-test
 	NIWA_TEST_BINARY=$(CURDIR)/niwa-test NIWA_TEST_TAGS=@critical go test -v ./test/functional/...
+	rm -rf .niwa-test
+
+# Run only scenarios tagged @claude-integration — requires claude CLI and ANTHROPIC_API_KEY.
+test-functional-claude-integration: build-test
+	NIWA_TEST_BINARY=$(CURDIR)/niwa-test NIWA_TEST_TAGS=@claude-integration go test -v ./test/functional/...
 	rm -rf .niwa-test
 
 # Run only install-path integration scenarios. Proves that `niwa shell-init`

@@ -5,11 +5,133 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/tsukumogami/niwa/internal/config"
 )
 
+// minimalCfg returns a *config.WorkspaceConfig suitable for calling
+// InstallWorkspaceContext. The workspace name is set to "test-ws".
+func minimalCfg() *config.WorkspaceConfig {
+	return &config.WorkspaceConfig{
+		Workspace: config.WorkspaceMeta{
+			Name: "test-ws",
+		},
+	}
+}
+
+// TestInstallWorkspaceContextWritesRulesFile verifies that InstallWorkspaceContext
+// creates .claude/rules/workspace-imports.md with an absolute @import, and does
+// not add any @import to CLAUDE.md.
+func TestInstallWorkspaceContextWritesRulesFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	instanceRoot := filepath.Join(tmpDir, "instance")
+	if err := os.MkdirAll(instanceRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	paths, err := InstallWorkspaceContext(minimalCfg(), nil, instanceRoot)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(paths) != 2 {
+		t.Fatalf("expected 2 returned paths, got %d: %v", len(paths), paths)
+	}
+
+	// Verify rules file contains absolute @import.
+	rulesPath := filepath.Join(instanceRoot, workspaceRulesFile)
+	data, err := os.ReadFile(rulesPath)
+	if err != nil {
+		t.Fatalf("reading rules file: %v", err)
+	}
+	contextPath := filepath.Join(instanceRoot, workspaceContextFile)
+	wantImport := "@" + contextPath
+	if !strings.Contains(string(data), wantImport) {
+		t.Errorf("rules file missing absolute import %q:\n%s", wantImport, string(data))
+	}
+
+	// CLAUDE.md should not contain the old relative import.
+	claudePath := filepath.Join(instanceRoot, "CLAUDE.md")
+	if _, err := os.Stat(claudePath); err == nil {
+		claudeData, _ := os.ReadFile(claudePath)
+		if strings.Contains(string(claudeData), workspaceContextImport) {
+			t.Errorf("CLAUDE.md should not contain %q:\n%s", workspaceContextImport, string(claudeData))
+		}
+	}
+}
+
+// TestInstallWorkspaceContextMigratesOldImport verifies that if CLAUDE.md has
+// the old relative @workspace-context.md import, it is removed after install.
+func TestInstallWorkspaceContextMigratesOldImport(t *testing.T) {
+	tmpDir := t.TempDir()
+	instanceRoot := filepath.Join(tmpDir, "instance")
+	if err := os.MkdirAll(instanceRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate old format.
+	oldContent := "@workspace-context.md\n\n# Workspace\n"
+	claudePath := filepath.Join(instanceRoot, "CLAUDE.md")
+	if err := os.WriteFile(claudePath, []byte(oldContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := InstallWorkspaceContext(minimalCfg(), nil, instanceRoot); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Old import must be gone from CLAUDE.md.
+	claudeData, err := os.ReadFile(claudePath)
+	if err != nil {
+		t.Fatalf("reading CLAUDE.md: %v", err)
+	}
+	if strings.Contains(string(claudeData), workspaceContextImport) {
+		t.Errorf("old relative import still present in CLAUDE.md:\n%s", string(claudeData))
+	}
+
+	// Absolute import must be in rules file.
+	rulesPath := filepath.Join(instanceRoot, workspaceRulesFile)
+	rulesData, err := os.ReadFile(rulesPath)
+	if err != nil {
+		t.Fatalf("reading rules file: %v", err)
+	}
+	contextPath := filepath.Join(instanceRoot, workspaceContextFile)
+	if !strings.Contains(string(rulesData), "@"+contextPath) {
+		t.Errorf("rules file missing absolute import for workspace-context:\n%s", string(rulesData))
+	}
+}
+
+// TestInstallWorkspaceContextIdempotent verifies that calling
+// InstallWorkspaceContext twice produces exactly one @workspace-context line in
+// the rules file.
+func TestInstallWorkspaceContextIdempotent(t *testing.T) {
+	tmpDir := t.TempDir()
+	instanceRoot := filepath.Join(tmpDir, "instance")
+	if err := os.MkdirAll(instanceRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := InstallWorkspaceContext(minimalCfg(), nil, instanceRoot); err != nil {
+		t.Fatalf("first call error: %v", err)
+	}
+	if _, err := InstallWorkspaceContext(minimalCfg(), nil, instanceRoot); err != nil {
+		t.Fatalf("second call error: %v", err)
+	}
+
+	rulesPath := filepath.Join(instanceRoot, workspaceRulesFile)
+	data, err := os.ReadFile(rulesPath)
+	if err != nil {
+		t.Fatalf("reading rules file: %v", err)
+	}
+	contextPath := filepath.Join(instanceRoot, workspaceContextFile)
+	count := strings.Count(string(data), "@"+contextPath)
+	if count != 1 {
+		t.Errorf("workspace-context import appears %d times in rules file, want 1:\n%s", count, string(data))
+	}
+}
+
 // TestInstallOverlayClaudeContentPresent verifies that CLAUDE.overlay.md is
-// copied to the instance root and @CLAUDE.overlay.md is injected into CLAUDE.md
-// after @workspace-context.md.
+// copied to the instance root, and the rules file contains both workspace-context
+// and overlay imports. CLAUDE.md must not contain @CLAUDE.overlay.md.
 func TestInstallOverlayClaudeContentPresent(t *testing.T) {
 	tmpDir := t.TempDir()
 	overlayDir := filepath.Join(tmpDir, "overlay")
@@ -26,9 +148,10 @@ func TestInstallOverlayClaudeContentPresent(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Write a CLAUDE.md with @workspace-context.md already present.
-	claudeContent := "@workspace-context.md\n\n# Workspace\n"
-	if err := os.WriteFile(filepath.Join(instanceRoot, "CLAUDE.md"), []byte(claudeContent), 0o644); err != nil {
+	// Simulate prior workspace-context install by creating the rules file.
+	contextPath := filepath.Join(instanceRoot, workspaceContextFile)
+	rulesPath := filepath.Join(instanceRoot, workspaceRulesFile)
+	if err := writeWorkspaceRulesFile(rulesPath, contextPath); err != nil {
 		t.Fatal(err)
 	}
 
@@ -49,26 +172,33 @@ func TestInstallOverlayClaudeContentPresent(t *testing.T) {
 		t.Errorf("CLAUDE.overlay.md content = %q, want %q", string(data), overlayContent)
 	}
 
-	// Verify the import was injected.
-	claudeData, err := os.ReadFile(filepath.Join(instanceRoot, "CLAUDE.md"))
+	// Rules file must contain both imports.
+	rulesData, err := os.ReadFile(rulesPath)
 	if err != nil {
-		t.Fatalf("reading CLAUDE.md: %v", err)
+		t.Fatalf("reading rules file: %v", err)
 	}
-	claudeMd := string(claudeData)
-	if !strings.Contains(claudeMd, "@CLAUDE.overlay.md") {
-		t.Errorf("@CLAUDE.overlay.md import not injected: %s", claudeMd)
+	rulesContent := string(rulesData)
+	overlayDestPath := filepath.Join(instanceRoot, overlayClaudeFile)
+	if !strings.Contains(rulesContent, "@"+contextPath) {
+		t.Errorf("rules file missing workspace-context import:\n%s", rulesContent)
 	}
-	// Verify ordering: @workspace-context.md comes before @CLAUDE.overlay.md.
-	wsIdx := strings.Index(claudeMd, "@workspace-context.md")
-	overlayIdx := strings.Index(claudeMd, "@CLAUDE.overlay.md")
-	if wsIdx >= overlayIdx {
-		t.Errorf("@workspace-context.md should appear before @CLAUDE.overlay.md in CLAUDE.md:\n%s", claudeMd)
+	if !strings.Contains(rulesContent, "@"+overlayDestPath) {
+		t.Errorf("rules file missing overlay import:\n%s", rulesContent)
+	}
+
+	// CLAUDE.md must not contain the relative overlay import.
+	claudePath := filepath.Join(instanceRoot, "CLAUDE.md")
+	if _, err := os.Stat(claudePath); err == nil {
+		claudeData, _ := os.ReadFile(claudePath)
+		if strings.Contains(string(claudeData), overlayClaudeImport) {
+			t.Errorf("CLAUDE.md should not contain %q:\n%s", overlayClaudeImport, string(claudeData))
+		}
 	}
 }
 
 // TestInstallOverlayClaudeContentAbsent verifies that when CLAUDE.overlay.md
-// does not exist in the overlay clone, the function returns ("", nil) and
-// CLAUDE.md is not modified.
+// does not exist in the overlay clone, the function returns ("", nil) and the
+// rules file is unchanged.
 func TestInstallOverlayClaudeContentAbsent(t *testing.T) {
 	tmpDir := t.TempDir()
 	overlayDir := filepath.Join(tmpDir, "overlay")
@@ -80,10 +210,13 @@ func TestInstallOverlayClaudeContentAbsent(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	claudeContent := "@workspace-context.md\n\n# Workspace\n"
-	if err := os.WriteFile(filepath.Join(instanceRoot, "CLAUDE.md"), []byte(claudeContent), 0o644); err != nil {
+	// Simulate prior workspace-context install.
+	contextPath := filepath.Join(instanceRoot, workspaceContextFile)
+	rulesPath := filepath.Join(instanceRoot, workspaceRulesFile)
+	if err := writeWorkspaceRulesFile(rulesPath, contextPath); err != nil {
 		t.Fatal(err)
 	}
+	originalRules, _ := os.ReadFile(rulesPath)
 
 	path, err := InstallOverlayClaudeContent(overlayDir, instanceRoot)
 	if err != nil {
@@ -93,24 +226,23 @@ func TestInstallOverlayClaudeContentAbsent(t *testing.T) {
 		t.Errorf("expected empty path when CLAUDE.overlay.md is absent, got %q", path)
 	}
 
-	// CLAUDE.md should be unchanged.
-	data, err := os.ReadFile(filepath.Join(instanceRoot, "CLAUDE.md"))
+	// Rules file should be unchanged.
+	rulesData, err := os.ReadFile(rulesPath)
 	if err != nil {
-		t.Fatalf("reading CLAUDE.md: %v", err)
+		t.Fatalf("reading rules file: %v", err)
 	}
-	if string(data) != claudeContent {
-		t.Errorf("CLAUDE.md modified unexpectedly: got %q", string(data))
+	if string(rulesData) != string(originalRules) {
+		t.Errorf("rules file modified unexpectedly:\ngot  %q\nwant %q", string(rulesData), string(originalRules))
 	}
 
-	// CLAUDE.overlay.md should not exist.
+	// CLAUDE.overlay.md should not exist in instance root.
 	if _, err := os.Stat(filepath.Join(instanceRoot, "CLAUDE.overlay.md")); err == nil {
 		t.Error("CLAUDE.overlay.md should not exist when absent from overlay")
 	}
 }
 
-// TestInstallOverlayClaudeContentImportOrdering verifies that when both
-// @workspace-context.md and @CLAUDE.global.md are present in CLAUDE.md,
-// @CLAUDE.overlay.md is injected between them.
+// TestInstallOverlayClaudeContentImportOrdering verifies that workspace-context
+// import appears before overlay import in the rules file.
 func TestInstallOverlayClaudeContentImportOrdering(t *testing.T) {
 	tmpDir := t.TempDir()
 	overlayDir := filepath.Join(tmpDir, "overlay")
@@ -126,38 +258,52 @@ func TestInstallOverlayClaudeContentImportOrdering(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Simulate CLAUDE.md after both workspace-context and global imports have been added.
-	claudeContent := "@workspace-context.md\n\n@CLAUDE.global.md\n\n# Workspace content\n"
-	if err := os.WriteFile(filepath.Join(instanceRoot, "CLAUDE.md"), []byte(claudeContent), 0o644); err != nil {
+	// Step 1: workspace-context install.
+	if _, err := InstallWorkspaceContext(minimalCfg(), nil, instanceRoot); err != nil {
+		t.Fatalf("InstallWorkspaceContext error: %v", err)
+	}
+
+	// Step 2: overlay install.
+	if _, err := InstallOverlayClaudeContent(overlayDir, instanceRoot); err != nil {
+		t.Fatalf("InstallOverlayClaudeContent error: %v", err)
+	}
+
+	// Step 3: global install.
+	globalDir := filepath.Join(tmpDir, "global")
+	if err := os.MkdirAll(globalDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(globalDir, "CLAUDE.global.md"), []byte("# global\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := InstallGlobalClaudeContent(globalDir, instanceRoot); err != nil {
+		t.Fatalf("InstallGlobalClaudeContent error: %v", err)
+	}
 
-	_, err := InstallOverlayClaudeContent(overlayDir, instanceRoot)
+	rulesPath := filepath.Join(instanceRoot, workspaceRulesFile)
+	rulesData, err := os.ReadFile(rulesPath)
 	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+		t.Fatalf("reading rules file: %v", err)
 	}
+	rulesContent := string(rulesData)
 
-	data, err := os.ReadFile(filepath.Join(instanceRoot, "CLAUDE.md"))
-	if err != nil {
-		t.Fatalf("reading CLAUDE.md: %v", err)
+	contextPath := filepath.Join(instanceRoot, workspaceContextFile)
+	overlayDestPath := filepath.Join(instanceRoot, overlayClaudeFile)
+
+	wsIdx := strings.Index(rulesContent, "@"+contextPath)
+	overlayIdx := strings.Index(rulesContent, "@"+overlayDestPath)
+
+	if wsIdx < 0 || overlayIdx < 0 {
+		t.Fatalf("missing expected imports in rules file:\n%s", rulesContent)
 	}
-	claudeMd := string(data)
-
-	wsIdx := strings.Index(claudeMd, "@workspace-context.md")
-	overlayIdx := strings.Index(claudeMd, "@CLAUDE.overlay.md")
-	globalIdx := strings.Index(claudeMd, "@CLAUDE.global.md")
-
-	if wsIdx < 0 || overlayIdx < 0 || globalIdx < 0 {
-		t.Fatalf("missing expected imports in CLAUDE.md:\n%s", claudeMd)
-	}
-	if !(wsIdx < overlayIdx && overlayIdx < globalIdx) {
-		t.Errorf("import ordering incorrect: @workspace-context.md=%d, @CLAUDE.overlay.md=%d, @CLAUDE.global.md=%d\n%s",
-			wsIdx, overlayIdx, globalIdx, claudeMd)
+	if wsIdx >= overlayIdx {
+		t.Errorf("workspace-context import should appear before overlay import in rules file:\n%s", rulesContent)
 	}
 }
 
 // TestInstallOverlayClaudeContentIdempotent verifies that calling
-// InstallOverlayClaudeContent twice does not duplicate the import.
+// InstallOverlayClaudeContent twice produces exactly one overlay import in the
+// rules file.
 func TestInstallOverlayClaudeContentIdempotent(t *testing.T) {
 	tmpDir := t.TempDir()
 	overlayDir := filepath.Join(tmpDir, "overlay")
@@ -172,7 +318,11 @@ func TestInstallOverlayClaudeContentIdempotent(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(overlayDir, "CLAUDE.overlay.md"), []byte("# overlay\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(instanceRoot, "CLAUDE.md"), []byte("@workspace-context.md\n\n# Workspace\n"), 0o644); err != nil {
+
+	// Simulate prior workspace-context install.
+	contextPath := filepath.Join(instanceRoot, workspaceContextFile)
+	rulesPath := filepath.Join(instanceRoot, workspaceRulesFile)
+	if err := writeWorkspaceRulesFile(rulesPath, contextPath); err != nil {
 		t.Fatal(err)
 	}
 
@@ -183,20 +333,57 @@ func TestInstallOverlayClaudeContentIdempotent(t *testing.T) {
 		t.Fatalf("second call error: %v", err)
 	}
 
-	data, err := os.ReadFile(filepath.Join(instanceRoot, "CLAUDE.md"))
+	rulesData, err := os.ReadFile(rulesPath)
 	if err != nil {
-		t.Fatalf("reading CLAUDE.md: %v", err)
+		t.Fatalf("reading rules file: %v", err)
 	}
-	count := strings.Count(string(data), "@CLAUDE.overlay.md")
+	overlayDestPath := filepath.Join(instanceRoot, overlayClaudeFile)
+	count := strings.Count(string(rulesData), "@"+overlayDestPath)
 	if count != 1 {
-		t.Errorf("@CLAUDE.overlay.md appears %d times, want 1:\n%s", count, string(data))
+		t.Errorf("overlay import appears %d times in rules file, want 1:\n%s", count, string(rulesData))
 	}
 }
 
-// TestInstallGlobalClaudeContentOrderingWithOverlay verifies the three-way
-// import ordering on first apply when overlay is active: workspace-context
-// is injected first, then overlay inserts after it, then global inserts after
-// overlay — producing @workspace-context.md → @CLAUDE.overlay.md → @CLAUDE.global.md.
+// TestInstallOverlayClaudeContentMigratesOldImport verifies that the old
+// relative @CLAUDE.overlay.md import is removed from CLAUDE.md after install.
+func TestInstallOverlayClaudeContentMigratesOldImport(t *testing.T) {
+	tmpDir := t.TempDir()
+	overlayDir := filepath.Join(tmpDir, "overlay")
+	instanceRoot := filepath.Join(tmpDir, "instance")
+	if err := os.MkdirAll(overlayDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(instanceRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.WriteFile(filepath.Join(overlayDir, "CLAUDE.overlay.md"), []byte("# overlay\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate old CLAUDE.md with relative import.
+	oldContent := "@workspace-context.md\n\n@CLAUDE.overlay.md\n\n# Workspace\n"
+	claudePath := filepath.Join(instanceRoot, "CLAUDE.md")
+	if err := os.WriteFile(claudePath, []byte(oldContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := InstallOverlayClaudeContent(overlayDir, instanceRoot); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	claudeData, err := os.ReadFile(claudePath)
+	if err != nil {
+		t.Fatalf("reading CLAUDE.md: %v", err)
+	}
+	if strings.Contains(string(claudeData), overlayClaudeImport) {
+		t.Errorf("old relative overlay import still present in CLAUDE.md:\n%s", string(claudeData))
+	}
+}
+
+// TestInstallGlobalClaudeContentOrderingWithOverlay verifies that when
+// workspace-context and overlay imports are already in the rules file, the
+// global import is appended after them in the correct order.
 func TestInstallGlobalClaudeContentOrderingWithOverlay(t *testing.T) {
 	tmpDir := t.TempDir()
 	globalDir := filepath.Join(tmpDir, "global")
@@ -212,11 +399,14 @@ func TestInstallGlobalClaudeContentOrderingWithOverlay(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Simulate state after workspace-context and overlay have been injected
-	// (as produced by InstallWorkspaceContext then InstallOverlayClaudeContent
-	// on a fresh apply).
-	claudeContent := "@workspace-context.md\n\n@CLAUDE.overlay.md\n\n# Workspace\n"
-	if err := os.WriteFile(filepath.Join(instanceRoot, "CLAUDE.md"), []byte(claudeContent), 0o644); err != nil {
+	// Simulate state after workspace-context and overlay installs.
+	contextPath := filepath.Join(instanceRoot, workspaceContextFile)
+	overlayDestPath := filepath.Join(instanceRoot, overlayClaudeFile)
+	rulesPath := filepath.Join(instanceRoot, workspaceRulesFile)
+	if err := writeWorkspaceRulesFile(rulesPath, contextPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := appendToWorkspaceRulesFile(rulesPath, overlayDestPath); err != nil {
 		t.Fatal(err)
 	}
 
@@ -224,27 +414,29 @@ func TestInstallGlobalClaudeContentOrderingWithOverlay(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	data, err := os.ReadFile(filepath.Join(instanceRoot, "CLAUDE.md"))
+	rulesData, err := os.ReadFile(rulesPath)
 	if err != nil {
-		t.Fatalf("reading CLAUDE.md: %v", err)
+		t.Fatalf("reading rules file: %v", err)
 	}
-	claudeMd := string(data)
+	rulesContent := string(rulesData)
 
-	wsIdx := strings.Index(claudeMd, "@workspace-context.md")
-	overlayIdx := strings.Index(claudeMd, "@CLAUDE.overlay.md")
-	globalIdx := strings.Index(claudeMd, "@CLAUDE.global.md")
+	globalDestPath := filepath.Join(instanceRoot, globalClaudeFile)
+	wsIdx := strings.Index(rulesContent, "@"+contextPath)
+	overlayIdx := strings.Index(rulesContent, "@"+overlayDestPath)
+	globalIdx := strings.Index(rulesContent, "@"+globalDestPath)
 
 	if wsIdx < 0 || overlayIdx < 0 || globalIdx < 0 {
-		t.Fatalf("missing expected imports in CLAUDE.md:\n%s", claudeMd)
+		t.Fatalf("missing expected imports in rules file:\n%s", rulesContent)
 	}
 	if !(wsIdx < overlayIdx && overlayIdx < globalIdx) {
-		t.Errorf("import ordering incorrect: @workspace-context.md=%d, @CLAUDE.overlay.md=%d, @CLAUDE.global.md=%d\n%s",
-			wsIdx, overlayIdx, globalIdx, claudeMd)
+		t.Errorf("import ordering incorrect: workspace=%d, overlay=%d, global=%d\n%s",
+			wsIdx, overlayIdx, globalIdx, rulesContent)
 	}
 }
 
-// TestInstallGlobalClaudeContentOrderingWithoutOverlay verifies that when no
-// overlay is active, global is inserted after @workspace-context.md (not before).
+// TestInstallGlobalClaudeContentOrderingWithoutOverlay verifies that when only
+// the workspace-context import is in the rules file, the global import is
+// appended after it.
 func TestInstallGlobalClaudeContentOrderingWithoutOverlay(t *testing.T) {
 	tmpDir := t.TempDir()
 	globalDir := filepath.Join(tmpDir, "global")
@@ -260,9 +452,10 @@ func TestInstallGlobalClaudeContentOrderingWithoutOverlay(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Simulate state after workspace-context has been injected (no overlay).
-	claudeContent := "@workspace-context.md\n\n# Workspace\n"
-	if err := os.WriteFile(filepath.Join(instanceRoot, "CLAUDE.md"), []byte(claudeContent), 0o644); err != nil {
+	// Simulate state after workspace-context install only (no overlay).
+	contextPath := filepath.Join(instanceRoot, workspaceContextFile)
+	rulesPath := filepath.Join(instanceRoot, workspaceRulesFile)
+	if err := writeWorkspaceRulesFile(rulesPath, contextPath); err != nil {
 		t.Fatal(err)
 	}
 
@@ -270,56 +463,64 @@ func TestInstallGlobalClaudeContentOrderingWithoutOverlay(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	data, err := os.ReadFile(filepath.Join(instanceRoot, "CLAUDE.md"))
+	rulesData, err := os.ReadFile(rulesPath)
+	if err != nil {
+		t.Fatalf("reading rules file: %v", err)
+	}
+	rulesContent := string(rulesData)
+
+	globalDestPath := filepath.Join(instanceRoot, globalClaudeFile)
+	wsIdx := strings.Index(rulesContent, "@"+contextPath)
+	globalIdx := strings.Index(rulesContent, "@"+globalDestPath)
+
+	if wsIdx < 0 || globalIdx < 0 {
+		t.Fatalf("missing expected imports in rules file:\n%s", rulesContent)
+	}
+	if wsIdx >= globalIdx {
+		t.Errorf("workspace-context import should appear before global import:\n%s", rulesContent)
+	}
+}
+
+// TestInstallGlobalClaudeContentMigratesOldImport verifies that the old
+// relative @CLAUDE.global.md import is removed from CLAUDE.md after install.
+func TestInstallGlobalClaudeContentMigratesOldImport(t *testing.T) {
+	tmpDir := t.TempDir()
+	globalDir := filepath.Join(tmpDir, "global")
+	instanceRoot := filepath.Join(tmpDir, "instance")
+	if err := os.MkdirAll(globalDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(instanceRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.WriteFile(filepath.Join(globalDir, "CLAUDE.global.md"), []byte("# global\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate old CLAUDE.md with relative global import.
+	oldContent := "@workspace-context.md\n\n@CLAUDE.global.md\n\n# Workspace\n"
+	claudePath := filepath.Join(instanceRoot, "CLAUDE.md")
+	if err := os.WriteFile(claudePath, []byte(oldContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Also need rules file to exist for appendToWorkspaceRulesFile to work.
+	contextPath := filepath.Join(instanceRoot, workspaceContextFile)
+	rulesPath := filepath.Join(instanceRoot, workspaceRulesFile)
+	if err := writeWorkspaceRulesFile(rulesPath, contextPath); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := InstallGlobalClaudeContent(globalDir, instanceRoot); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	claudeData, err := os.ReadFile(claudePath)
 	if err != nil {
 		t.Fatalf("reading CLAUDE.md: %v", err)
 	}
-	claudeMd := string(data)
-
-	wsIdx := strings.Index(claudeMd, "@workspace-context.md")
-	globalIdx := strings.Index(claudeMd, "@CLAUDE.global.md")
-
-	if wsIdx < 0 || globalIdx < 0 {
-		t.Fatalf("missing expected imports in CLAUDE.md:\n%s", claudeMd)
-	}
-	if wsIdx >= globalIdx {
-		t.Errorf("@workspace-context.md should appear before @CLAUDE.global.md in CLAUDE.md:\n%s", claudeMd)
-	}
-}
-
-// TestEnsureImportAfterInCLAUDENoAnchor verifies that when the anchor line is
-// absent, the import is prepended.
-func TestEnsureImportAfterInCLAUDENoAnchor(t *testing.T) {
-	tmpDir := t.TempDir()
-	claudePath := filepath.Join(tmpDir, "CLAUDE.md")
-	if err := os.WriteFile(claudePath, []byte("# content\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := ensureImportAfterInCLAUDE(claudePath, "@new-import.md", "@missing-anchor.md"); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	data, err := os.ReadFile(claudePath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.HasPrefix(string(data), "@new-import.md") {
-		t.Errorf("import not prepended: %s", string(data))
-	}
-}
-
-// TestEnsureImportAfterInCLAUDENoCLAUDE verifies that when CLAUDE.md does not
-// exist, the function returns nil without creating the file.
-func TestEnsureImportAfterInCLAUDENoCLAUDE(t *testing.T) {
-	tmpDir := t.TempDir()
-	claudePath := filepath.Join(tmpDir, "NONEXISTENT.md")
-
-	if err := ensureImportAfterInCLAUDE(claudePath, "@foo.md", "@anchor.md"); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if _, err := os.Stat(claudePath); err == nil {
-		t.Error("file should not have been created")
+	if strings.Contains(string(claudeData), globalClaudeImport) {
+		t.Errorf("old relative global import still present in CLAUDE.md:\n%s", string(claudeData))
 	}
 }

@@ -190,4 +190,14 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 	ctx.Step(`^the completion output contains "([^"]*)"$`, theCompletionOutputContains)
 	ctx.Step(`^the completion output does not contain "([^"]*)"$`, theCompletionOutputDoesNotContain)
 	ctx.Step(`^the completion description for "([^"]*)" is "([^"]*)"$`, theCompletionDescriptionMatches)
+
+	// File assertions
+	ctx.Step(`^the file "([^"]*)" exists in instance "([^"]*)"$`, theFileExistsInInstance)
+	ctx.Step(`^the file "([^"]*)" in instance "([^"]*)" contains "([^"]*)"$`, theFileInInstanceContains)
+	ctx.Step(`^the file "([^"]*)" in instance "([^"]*)" does not contain "([^"]*)"$`, theFileInInstanceDoesNotContain)
+
+	// Claude integration
+	ctx.Step(`^claude is available$`, claudeIsAvailable)
+	ctx.Step(`^I run claude -p from instance root "([^"]*)" with prompt:$`, iRunClaudePFromInstanceRoot)
+	ctx.Step(`^I run claude -p from repo "([^"]*)" in instance "([^"]*)" with prompt:$`, iRunClaudePFromRepoInInstance)
 }
