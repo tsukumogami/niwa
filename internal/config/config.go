@@ -99,14 +99,14 @@ type ChannelsMeshConfig struct {
 
 // ChannelsConfig is the top-level [channels] table.
 type ChannelsConfig struct {
-	Mesh ChannelsMeshConfig `toml:"mesh"`
+	Mesh *ChannelsMeshConfig `toml:"mesh"`
 }
 
-// IsEmpty reports true when the channels config carries no meaningful
-// configuration (mesh roles are absent). Used by downstream pipeline steps
-// to skip channel infrastructure setup when [channels] is omitted.
-func (c ChannelsConfig) IsEmpty() bool {
-	return len(c.Mesh.Roles) == 0
+// IsEnabled reports true when the [channels.mesh] section is present in the
+// config, regardless of whether any sub-keys are set. The Mesh field is nil
+// when the section is absent and non-nil (even if zero-value) when present.
+func (c ChannelsConfig) IsEnabled() bool {
+	return c.Mesh != nil
 }
 
 // WorkspaceConfig is the top-level configuration parsed from workspace.toml.

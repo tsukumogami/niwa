@@ -297,8 +297,8 @@ func TestParseFullConfig(t *testing.T) {
 	if cfg.Claude.Env.Vars.Values["EXTRA_FLAG"].Plain != "claude-only" {
 		t.Errorf("claude.env.vars.EXTRA_FLAG = %v, want claude-only", cfg.Claude.Env.Vars.Values["EXTRA_FLAG"].Plain)
 	}
-	if cfg.Channels.IsEmpty() {
-		t.Error("channels should not be empty when [channels.mesh.roles] is configured")
+	if !cfg.Channels.IsEnabled() {
+		t.Error("channels should be enabled when [channels.mesh] is configured")
 	}
 	if cfg.Channels.Mesh.MessageTTL != "24h" {
 		t.Errorf("channels.mesh.message_ttl = %q, want %q", cfg.Channels.Mesh.MessageTTL, "24h")

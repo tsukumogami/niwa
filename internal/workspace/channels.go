@@ -39,10 +39,10 @@ const channelsSectionHeader = "## Channels"
 //   - <instanceRoot>/.claude/.mcp.json (mode 0600, always overwritten)
 //   - ## Channels section appended to workspace-context.md (idempotent)
 //
-// Returns immediately without creating anything when cfg.Channels is empty.
+// Returns immediately without creating anything when cfg.Channels is not enabled.
 // writtenFiles is appended with the paths of any files written.
 func InstallChannelInfrastructure(cfg *config.WorkspaceConfig, instanceRoot string, writtenFiles *[]string) error {
-	if cfg.Channels.IsEmpty() {
+	if !cfg.Channels.IsEnabled() {
 		return nil
 	}
 
@@ -146,17 +146,8 @@ func buildChannelsSection(cfg *config.WorkspaceConfig) string {
 	sb.WriteString("This workspace uses niwa cross-session communication. Sessions can exchange\n")
 	sb.WriteString("messages using the niwa MCP tools.\n\n")
 
-	if len(cfg.Channels.Mesh.Roles) > 0 {
-		sb.WriteString("### Roles\n\n")
-		for role, repo := range cfg.Channels.Mesh.Roles {
-			if repo != "" {
-				fmt.Fprintf(&sb, "- `%s` — %s\n", role, repo)
-			} else {
-				fmt.Fprintf(&sb, "- `%s`\n", role)
-			}
-		}
-		sb.WriteString("\n")
-	}
+	sb.WriteString("Roles are auto-derived from the workspace topology: the coordinator session\n")
+	sb.WriteString("runs at the instance root, and each repo session uses its repo name as its role.\n\n")
 
 	sb.WriteString("### Tools\n\n")
 	sb.WriteString("- `niwa_check_messages` — check this session's inbox for new messages\n")
@@ -199,7 +190,7 @@ func writeFileMode(path string, data []byte, mode os.FileMode) error {
 // them. Calling injectChannelHooks without a subsequent InstallChannelInfrastructure
 // produces hook entries pointing to nonexistent files that fail at materialize time.
 func injectChannelHooks(cfg *config.WorkspaceConfig, instanceRoot string) {
-	if cfg.Channels.IsEmpty() {
+	if !cfg.Channels.IsEnabled() {
 		return
 	}
 

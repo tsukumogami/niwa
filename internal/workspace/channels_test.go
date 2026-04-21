@@ -31,7 +31,7 @@ func TestInstallChannelInfrastructure_CreatesArtifacts(t *testing.T) {
 	cfg := &config.WorkspaceConfig{
 		Workspace: config.WorkspaceMeta{Name: "test-ws"},
 		Channels: config.ChannelsConfig{
-			Mesh: config.ChannelsMeshConfig{
+			Mesh: &config.ChannelsMeshConfig{
 				Roles: map[string]string{"coordinator": "", "worker": "tools/worker"},
 			},
 		},
@@ -129,7 +129,7 @@ func TestInstallChannelInfrastructure_Idempotent(t *testing.T) {
 	cfg := &config.WorkspaceConfig{
 		Workspace: config.WorkspaceMeta{Name: "test-ws"},
 		Channels: config.ChannelsConfig{
-			Mesh: config.ChannelsMeshConfig{
+			Mesh: &config.ChannelsMeshConfig{
 				Roles: map[string]string{"coordinator": ""},
 			},
 		},
@@ -201,7 +201,7 @@ func TestInstallChannelInfrastructure_SessionsJSONNotOverwrittenWhenPresent(t *t
 	dir := t.TempDir()
 	cfg := &config.WorkspaceConfig{
 		Channels: config.ChannelsConfig{
-			Mesh: config.ChannelsMeshConfig{
+			Mesh: &config.ChannelsMeshConfig{
 				Roles: map[string]string{"coordinator": ""},
 			},
 		},
@@ -248,7 +248,7 @@ func TestInjectChannelHooks_InjectsHooks(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &config.WorkspaceConfig{
 		Channels: config.ChannelsConfig{
-			Mesh: config.ChannelsMeshConfig{
+			Mesh: &config.ChannelsMeshConfig{
 				Roles: map[string]string{"coordinator": ""},
 			},
 		},
@@ -282,7 +282,7 @@ func TestInjectChannelHooks_PrependToExisting(t *testing.T) {
 			},
 		},
 		Channels: config.ChannelsConfig{
-			Mesh: config.ChannelsMeshConfig{
+			Mesh: &config.ChannelsMeshConfig{
 				Roles: map[string]string{"coordinator": ""},
 			},
 		},

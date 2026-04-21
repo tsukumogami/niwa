@@ -253,7 +253,7 @@ func (a *Applier) Create(ctx context.Context, cfg *config.WorkspaceConfig, confi
 	}
 
 	// Spawn mesh watch daemon if channels are configured and no daemon is alive.
-	if !cfg.Channels.IsEmpty() {
+	if cfg.Channels.IsEnabled() {
 		if err := EnsureDaemonRunning(instanceRoot); err != nil {
 			a.Reporter.DeferWarn("could not start mesh daemon: %v", err)
 		}
@@ -384,7 +384,7 @@ func (a *Applier) Apply(ctx context.Context, cfg *config.WorkspaceConfig, config
 	}
 
 	// Spawn mesh watch daemon if channels are configured and no daemon is alive.
-	if !cfg.Channels.IsEmpty() {
+	if cfg.Channels.IsEnabled() {
 		if err := EnsureDaemonRunning(instanceRoot); err != nil {
 			a.Reporter.DeferWarn("could not start mesh daemon: %v", err)
 		}

@@ -268,6 +268,26 @@ Feature: Session mesh: filesystem-based inter-session messaging
     And the error output contains "CLAUDE_SESSION_ID has invalid format"
 
   @critical
+  Scenario: niwa create with bare [channels.mesh] (no roles) provisions channel infrastructure
+    Given a clean niwa environment
+    And a local git server is set up
+    And a config repo "bare-mesh-ws" exists with body:
+      """
+      [workspace]
+      name = "bare-mesh-ws"
+
+      [channels.mesh]
+      """
+    When I run niwa init from config repo "bare-mesh-ws"
+    Then the exit code is 0
+    When I run "niwa create bare-mesh-ws"
+    Then the exit code is 0
+    And the instance "bare-mesh-ws" exists
+    And the file ".niwa/sessions/sessions.json" exists in instance "bare-mesh-ws"
+    And the file ".claude/.mcp.json" exists in instance "bare-mesh-ws"
+    And the file ".niwa/daemon.pid" exists in instance "bare-mesh-ws"
+
+  @critical
   Scenario: daemon log records message type but not body content
     Given a clean niwa environment
     And a local git server is set up
