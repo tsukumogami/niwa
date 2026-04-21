@@ -13,12 +13,16 @@ import (
 )
 
 // EnsureDaemonRunning spawns the mesh watch daemon for instanceRoot if one is
-// not already alive. It locates the niwa binary via exec.LookPath, so the
-// daemon inherits the same binary as the running process.
+// not already alive. It uses os.Executable() to locate the daemon binary so
+// the daemon always runs the same binary version as the caller — exec.LookPath
+// would find an installed system binary that may differ (e.g. in tests, the
+// running binary is niwa-test, not the installed niwa).
 //
 // The daemon is spawned with Setsid=true so it is fully detached from the
 // current terminal session. stdout/stderr are appended to daemon.log.
 // cmd.Start() is used (not Run()) so the function returns immediately.
+// After spawning, the function polls for daemon.pid for up to 500ms so
+// callers can assert daemon liveness right after Create/Apply returns.
 func EnsureDaemonRunning(instanceRoot string) error {
 	niwaDir := filepath.Join(instanceRoot, ".niwa")
 	pid, startTime, err := readPIDFile(niwaDir)
@@ -69,10 +73,10 @@ func EnsureDaemonRunning(instanceRoot string) error {
 
 	// Wait for the daemon to write its PID file before returning. The daemon
 	// writes daemon.pid atomically after establishing the fsnotify watcher, so
-	// its presence confirms the watch loop is running. Poll up to 3s so callers
-	// can assert daemon liveness immediately after Create/Apply returns.
+	// its presence confirms the watch loop is running. Poll up to 500ms — the
+	// daemon writes the PID file in well under 100ms in normal conditions.
 	pidPath := filepath.Join(niwaDir, "daemon.pid")
-	deadline := time.Now().Add(3 * time.Second)
+	deadline := time.Now().Add(500 * time.Millisecond)
 	for time.Now().Before(deadline) {
 		if _, err := os.Stat(pidPath); err == nil {
 			return nil

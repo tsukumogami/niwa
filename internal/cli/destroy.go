@@ -88,7 +88,7 @@ func runDestroy(cmd *cobra.Command, args []string) error {
 // daemon.pid when the daemon is confirmed dead or was never running.
 func terminateDaemon(instanceRoot string) error {
 	niwaDir := filepath.Join(instanceRoot, ".niwa")
-	pid, startTime, err := ReadPIDFile(niwaDir)
+	pid, startTime, err := readPIDFile(niwaDir)
 	if err != nil {
 		return fmt.Errorf("reading daemon pid: %w", err)
 	}

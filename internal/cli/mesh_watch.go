@@ -46,6 +46,10 @@ func runMeshWatch(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("instance root does not exist: %s", instanceRoot)
 	}
 
+	// Resolve claude binary once at startup. An empty claudeBin means claude
+	// is not on PATH; resume attempts will log a warning and be skipped.
+	claudeBin, _ := exec.LookPath("claude")
+
 	niwaDir := filepath.Join(instanceRoot, ".niwa")
 	if err := os.MkdirAll(niwaDir, 0o700); err != nil {
 		return fmt.Errorf("creating .niwa directory: %w", err)
@@ -173,7 +177,7 @@ func runMeshWatch(cmd *cobra.Command, args []string) error {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				handleNewMessage(path, sessionsDir, logger)
+				handleNewMessage(path, sessionsDir, claudeBin, logger)
 			}()
 
 		case err, ok := <-watcher.Errors:
@@ -218,9 +222,9 @@ func watchExistingInboxes(watcher *fsnotify.Watcher, sessionsDir string, logger 
 
 // handleNewMessage processes a new message file event. It reads sessions.json
 // (with advisory lock), finds the target session entry, checks liveness, and
-// if dead, calls `claude --resume <session-id>`.
-func handleNewMessage(msgPath, sessionsDir string, logger *log.Logger) {
-	claudeBin, _ := exec.LookPath("claude")
+// if dead, calls `claude --resume <session-id>`. claudeBin is the resolved
+// claude binary path (empty if not installed; resume is skipped in that case).
+func handleNewMessage(msgPath, sessionsDir, claudeBin string, logger *log.Logger) {
 	// Brief pause to let the write complete before reading.
 	time.Sleep(10 * time.Millisecond)
 
@@ -295,14 +299,16 @@ func handleNewMessage(msgPath, sessionsDir string, logger *log.Logger) {
 		// Release lock before spawning claude.
 		_ = lockFile.Close()
 
+		// Not tracked by wg: claude is intentionally detached. The daemon's
+		// responsibility ends at spawning; claude manages its own lifecycle.
 		go func(sessionID string) {
 			resumeCmd := exec.Command(claudeBin, "--resume", sessionID)
 			if err := resumeCmd.Start(); err != nil {
 				logger.Printf("failed to start claude --resume %s: %v", sessionID, err)
 				return
 			}
-			logger.Printf("spawned claude --resume %s (pid=%d)", sessionID, resumeCmd.Process.Pid)
-			// Detach: don't Wait() so we don't block.
+			_ = resumeCmd.Process.Release()
+			logger.Printf("spawned claude --resume %s", sessionID)
 		}(entry.ClaudeSessionID)
 
 		return
@@ -342,7 +348,9 @@ func tryLockFile(path string) (*os.File, error) {
 }
 
 // writePIDFile writes the current PID and start time to daemon.pid atomically.
-// Format: "<pid>\n<start-jiffies>\n"
+// Format: "<pid>\n<start-time>\n" where start-time is /proc/<pid>/stat field 22
+// (clock ticks since boot; see mcp.PIDStartTime). A zero start-time means the
+// value was unavailable; PID-recycling protection is disabled in that case.
 func writePIDFile(niwaDir string) error {
 	pid := os.Getpid()
 	startTime, err := mcp.PIDStartTime(pid)
@@ -360,9 +368,9 @@ func writePIDFile(niwaDir string) error {
 	return os.Rename(tmpPath, finalPath)
 }
 
-// ReadPIDFile reads the daemon PID file at <niwaDir>/daemon.pid and returns
+// readPIDFile reads the daemon PID file at <niwaDir>/daemon.pid and returns
 // the pid and startTime. Returns (0, 0, nil) if the file does not exist.
-func ReadPIDFile(niwaDir string) (pid int, startTime int64, err error) {
+func readPIDFile(niwaDir string) (pid int, startTime int64, err error) {
 	pidPath := filepath.Join(niwaDir, "daemon.pid")
 	data, err := os.ReadFile(pidPath)
 	if os.IsNotExist(err) {
