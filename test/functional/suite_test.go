@@ -234,4 +234,9 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 	ctx.Step(`^claude is available$`, claudeIsAvailable)
 	ctx.Step(`^I run claude -p from instance root "([^"]*)" with prompt:$`, iRunClaudePFromInstanceRoot)
 	ctx.Step(`^I run claude -p from repo "([^"]*)" in instance "([^"]*)" with prompt:$`, iRunClaudePFromRepoInInstance)
+
+	// Headless coordination steps
+	ctx.Step(`^I set up coordinator session for instance "([^"]*)"$`, iSetUpCoordinatorSessionForInstance)
+	ctx.Step(`^I set up worker session for instance "([^"]*)"$`, iSetUpWorkerSessionForInstance)
+	ctx.Step(`^I run claude -p from instance root "([^"]*)" with simulated worker reply and prompt:$`, iRunClaudePFromInstanceRootWithSimulatedWorkerReply)
 }

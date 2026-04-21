@@ -404,3 +404,72 @@ Feature: Session mesh: filesystem-based inter-session messaging
     Then the exit code is 0
     And the daemon log for instance "logcheck-ws" eventually contains "new message"
     And the file ".niwa/daemon.log" in instance "logcheck-ws" does not contain "DAEMON-BODY-EXCLUSION-MARKER"
+
+  @channels-e2e
+  Scenario: headless coordinator reads messages via niwa_check_messages after channels provision
+    Given a clean niwa environment
+    And claude is available
+    And a local git server is set up
+    And a config repo "headless-check-ws" exists with body:
+      """
+      [workspace]
+      name = "headless-check-ws"
+      """
+    When I run niwa init from config repo "headless-check-ws"
+    Then the exit code is 0
+    When I run "niwa create --channels headless-check-ws"
+    Then the exit code is 0
+    When I set up coordinator session for instance "headless-check-ws"
+    And 1 "task.result" messages are placed in the coordinator inbox
+    When I run claude -p from instance root "headless-check-ws" with prompt:
+      """
+      Use the niwa_check_messages tool to check your inbox. Find the message type of the first message and output exactly: FOUND:<type> where <type> is the message type value.
+      """
+    Then the exit code is 0
+    And the output contains "found:task.result"
+
+  @channels-e2e
+  Scenario: headless coordinator completes ask round-trip with simulated worker
+    Given a clean niwa environment
+    And claude is available
+    And a local git server is set up
+    And a config repo "headless-ask-ws" exists with body:
+      """
+      [workspace]
+      name = "headless-ask-ws"
+      """
+    When I run niwa init from config repo "headless-ask-ws"
+    Then the exit code is 0
+    When I run "niwa create --channels headless-ask-ws"
+    Then the exit code is 0
+    When I set up coordinator session for instance "headless-ask-ws"
+    And I set up worker session for instance "headless-ask-ws"
+    When I run claude -p from instance root "headless-ask-ws" with simulated worker reply and prompt:
+      """
+      Use the niwa_ask tool to ask the worker the question "What is the answer?". When you receive the reply, output exactly: ANSWER:<value> where <value> is the answer field from the reply body.
+      """
+    Then the exit code is 0
+    And the output contains "answer:42"
+
+  @channels-e2e
+  Scenario: headless coordinator collects task results via niwa_wait after channels provision
+    Given a clean niwa environment
+    And claude is available
+    And a local git server is set up
+    And a config repo "headless-wait-ws" exists with body:
+      """
+      [workspace]
+      name = "headless-wait-ws"
+      """
+    When I run niwa init from config repo "headless-wait-ws"
+    Then the exit code is 0
+    When I run "niwa create --channels headless-wait-ws"
+    Then the exit code is 0
+    When I set up coordinator session for instance "headless-wait-ws"
+    And 2 "task.result" messages are placed in the coordinator inbox
+    When I run claude -p from instance root "headless-wait-ws" with prompt:
+      """
+      Use the niwa_wait tool with types=["task.result"] and count=2 to collect 2 task results. When you receive them, output exactly: COLLECTED:<n> where <n> is the number of messages collected.
+      """
+    Then the exit code is 0
+    And the output contains "collected:2"

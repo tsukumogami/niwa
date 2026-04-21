@@ -1967,3 +1967,220 @@ func theDaemonLogForInstanceEventuallyContains(ctx context.Context, instanceName
 	data, _ := os.ReadFile(logPath)
 	return fmt.Errorf("daemon log for instance %q did not contain %q within 5s\nlog:\n%s", instanceName, text, string(data))
 }
+
+// --- Headless Claude integration steps ---
+
+// iSetUpCoordinatorSessionForInstance registers a coordinator session for the
+// given workspace instance and sets NIWA_INSTANCE_ROOT, NIWA_SESSION_ID, and
+// NIWA_SESSION_ROLE in envOverrides so subsequent claude -p invocations run as
+// coordinator with the correct MCP server env.
+func iSetUpCoordinatorSessionForInstance(ctx context.Context, instanceName string) (context.Context, error) {
+	s := getState(ctx)
+	if s == nil {
+		return ctx, fmt.Errorf("no test state")
+	}
+	instanceDir := filepath.Join(s.workspaceRoot, instanceName)
+
+	s.envOverrides["NIWA_INSTANCE_ROOT"] = instanceDir
+	s.envOverrides["NIWA_SESSION_ROLE"] = "coordinator"
+
+	if err := runNiwa(s, instanceDir, "niwa session register"); err != nil {
+		return ctx, err
+	}
+
+	sessionID := ""
+	for _, line := range strings.Split(s.stdout, "\n") {
+		if strings.HasPrefix(line, "session_id=") {
+			parts := strings.Fields(line)
+			if len(parts) >= 1 {
+				sessionID = strings.TrimPrefix(parts[0], "session_id=")
+			}
+		}
+	}
+	if sessionID == "" {
+		return ctx, fmt.Errorf("no session_id in output: %q", s.stdout)
+	}
+
+	// Set NIWA_SESSION_ID so the MCP server started by claude -p watches the
+	// correct inbox even after the session_start hook re-registers the session.
+	s.envOverrides["NIWA_SESSION_ID"] = sessionID
+
+	ms := getMeshState(ctx)
+	if ms == nil {
+		ms = &meshState{
+			sessionIDs:   make(map[string]string),
+			instanceRoot: instanceDir,
+		}
+		ctx = setMeshState(ctx, ms)
+	}
+	ms.sessionIDs["coordinator"] = sessionID
+	ms.instanceRoot = instanceDir
+	return ctx, nil
+}
+
+// iSetUpWorkerSessionForInstance registers a worker session for the given
+// workspace instance and stores the session ID in meshState. envOverrides are
+// left pointing at the coordinator so subsequent claude -p invocations still
+// run as coordinator.
+func iSetUpWorkerSessionForInstance(ctx context.Context, instanceName string) (context.Context, error) {
+	s := getState(ctx)
+	if s == nil {
+		return ctx, fmt.Errorf("no test state")
+	}
+	ms := getMeshState(ctx)
+	if ms == nil {
+		return ctx, fmt.Errorf("no mesh state; call iSetUpCoordinatorSessionForInstance first")
+	}
+	instanceDir := filepath.Join(s.workspaceRoot, instanceName)
+
+	// Register worker temporarily; restore coordinator role after.
+	prevRole := s.envOverrides["NIWA_SESSION_ROLE"]
+	s.envOverrides["NIWA_SESSION_ROLE"] = "worker"
+
+	if err := runNiwa(s, instanceDir, "niwa session register"); err != nil {
+		s.envOverrides["NIWA_SESSION_ROLE"] = prevRole
+		return ctx, err
+	}
+	s.envOverrides["NIWA_SESSION_ROLE"] = prevRole
+
+	sessionID := ""
+	for _, line := range strings.Split(s.stdout, "\n") {
+		if strings.HasPrefix(line, "session_id=") {
+			parts := strings.Fields(line)
+			if len(parts) >= 1 {
+				sessionID = strings.TrimPrefix(parts[0], "session_id=")
+			}
+		}
+	}
+	if sessionID == "" {
+		return ctx, fmt.Errorf("no session_id in output: %q", s.stdout)
+	}
+
+	ms.sessionIDs["worker"] = sessionID
+	return ctx, nil
+}
+
+// iRunClaudePFromInstanceRootWithSimulatedWorkerReply runs claude -p as coordinator
+// from the instance root while a goroutine simulates a worker that replies to any
+// question.ask message with body {"answer":"42"}. The coordinator calls niwa_ask,
+// the goroutine polls the worker inbox, writes the reply to the coordinator inbox,
+// and claude -p exits once it processes the answer.
+func iRunClaudePFromInstanceRootWithSimulatedWorkerReply(ctx context.Context, instance string, prompt *godog.DocString) (context.Context, error) {
+	s := getState(ctx)
+	if s == nil {
+		return ctx, fmt.Errorf("no test state")
+	}
+	ms := getMeshState(ctx)
+	if ms == nil {
+		return ctx, fmt.Errorf("no mesh state; set up sessions first")
+	}
+
+	claudeBin, err := exec.LookPath("claude")
+	if err != nil {
+		return ctx, godog.ErrPending
+	}
+
+	coordinatorID := ms.sessionIDs["coordinator"]
+	workerID, hasWorker := ms.sessionIDs["worker"]
+	if !hasWorker {
+		return ctx, fmt.Errorf("no worker session registered; call iSetUpWorkerSessionForInstance first")
+	}
+
+	sessionsDir := ms.instanceRoot + "/.niwa/sessions"
+	coordinatorInboxDir := sessionsDir + "/" + coordinatorID + "/inbox"
+	workerInboxDir := sessionsDir + "/" + workerID + "/inbox"
+
+	cwd := filepath.Join(s.workspaceRoot, instance)
+	env := s.buildEnv()
+	if key := os.Getenv("ANTHROPIC_API_KEY"); key != "" {
+		env = append(env, "ANTHROPIC_API_KEY="+key)
+	}
+
+	cmd := exec.Command(claudeBin, "-p", strings.TrimSpace(prompt.Content))
+	cmd.Dir = cwd
+	cmd.Env = env
+	var stdout, stderr strings.Builder
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	if err := cmd.Start(); err != nil {
+		return ctx, fmt.Errorf("starting claude: %w", err)
+	}
+
+	// Goroutine: poll worker inbox for question.ask from coordinator, then
+	// write question.answer to coordinator inbox. Uses the same atomic-rename
+	// pattern as theCoordinatorAsksWorkerAndReplies.
+	go func() {
+		deadline := time.Now().Add(120 * time.Second)
+		var askMsgID string
+		for time.Now().Before(deadline) {
+			entries, rErr := os.ReadDir(workerInboxDir)
+			if rErr != nil {
+				time.Sleep(200 * time.Millisecond)
+				continue
+			}
+			for _, e := range entries {
+				if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+					continue
+				}
+				data, rErr := os.ReadFile(filepath.Join(workerInboxDir, e.Name()))
+				if rErr != nil {
+					continue
+				}
+				var m struct {
+					ID   string `json:"id"`
+					Type string `json:"type"`
+				}
+				if json.Unmarshal(data, &m) == nil && m.Type == "question.ask" {
+					askMsgID = m.ID
+					break
+				}
+			}
+			if askMsgID != "" {
+				break
+			}
+			time.Sleep(200 * time.Millisecond)
+		}
+		if askMsgID == "" {
+			return
+		}
+
+		replyID := newTestUUID()
+		reply := map[string]any{
+			"v":        1,
+			"id":       replyID,
+			"type":     "question.answer",
+			"from":     map[string]any{"role": "worker"},
+			"to":       map[string]any{"role": "coordinator"},
+			"reply_to": askMsgID,
+			"sent_at":  time.Now().UTC().Format(time.RFC3339),
+			"body":     json.RawMessage(`{"answer":"42"}`),
+		}
+		replyData, mErr := json.Marshal(reply)
+		if mErr != nil {
+			return
+		}
+		if os.MkdirAll(coordinatorInboxDir, 0o700) != nil {
+			return
+		}
+		tmpPath := filepath.Join(coordinatorInboxDir, replyID+".json.tmp")
+		destPath := filepath.Join(coordinatorInboxDir, replyID+".json")
+		if os.WriteFile(tmpPath, replyData, 0o600) != nil {
+			return
+		}
+		_ = os.Rename(tmpPath, destPath)
+	}()
+
+	if wErr := cmd.Wait(); wErr != nil {
+		if _, ok := wErr.(*exec.ExitError); !ok {
+			return ctx, fmt.Errorf("claude -p failed: %w\nstderr: %s", wErr, stderr.String())
+		}
+	}
+	s.stdout = strings.ToLower(stdout.String())
+	s.stderr = stderr.String()
+	s.shellPwd = ""
+	if cmd.ProcessState != nil {
+		s.exitCode = cmd.ProcessState.ExitCode()
+	}
+	return ctx, nil
+}

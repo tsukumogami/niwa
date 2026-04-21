@@ -282,3 +282,107 @@ PID is still alive.
 | `the daemon PID for instance "<name>" has not changed` | `theDaemonPIDForInstanceHasNotChanged` | Compares with stored PID |
 | `I remove the sessions directory from instance "<name>"` | `iRemoveSessionsDirFromInstance` | `os.RemoveAll` on `.niwa/sessions` |
 | `the daemon for instance "<name>" eventually stops` | `theDaemonForInstanceEventuallyStops` | Polls for up to 10 seconds |
+
+## Testing with headless Claude sessions
+
+Scenarios tagged `@channels-e2e` drive actual `claude -p` (headless Claude Code)
+invocations to prove the MCP tools are accessible from live sessions. They require:
+
+- `claude` on PATH
+- `ANTHROPIC_API_KEY` set
+
+Both are checked at the start of each scenario by the `claude is available` step,
+which returns `godog.ErrPending` (skip) if either is absent. This keeps `@critical`
+CI fast while allowing optional end-to-end validation.
+
+Run channel integration scenarios with:
+
+```
+make test-functional NIWA_TEST_TAGS=channels-e2e
+```
+
+Or run all scenarios (critical + channels-e2e):
+
+```
+make test-functional
+```
+
+### Setting up sessions for headless coordinator tests
+
+`@channels-e2e` scenarios use `niwa create --channels` to provision infrastructure
+(no `[channels.mesh]` config section needed). They then call session setup steps
+to register sessions and wire env vars before starting `claude -p`:
+
+```gherkin
+When I set up coordinator session for instance "myws"
+```
+
+This step runs `niwa session register --role coordinator` (subprocess), captures
+the session UUID, and sets `NIWA_INSTANCE_ROOT`, `NIWA_SESSION_ID`, and
+`NIWA_SESSION_ROLE` in the scenario's `envOverrides`. Subsequent `claude -p`
+invocations inherit these, so the MCP server knows which inbox to watch.
+
+The `session_start` hook fires when `claude -p` starts and re-registers the
+coordinator under a new UUID in sessions.json. The MCP server continues watching
+the pre-registration inbox (from `NIWA_SESSION_ID` in env). Pre-seeded messages
+and goroutine-written replies go directly to that inbox, so the server sees them.
+
+### Pre-seeding the coordinator inbox
+
+For `niwa_check_messages` and `niwa_wait` scenarios, write messages before
+starting `claude -p`:
+
+```gherkin
+When I set up coordinator session for instance "myws"
+And 2 "task.result" messages are placed in the coordinator inbox
+When I run claude -p from instance root "myws" with prompt:
+  """
+  Use niwa_wait with count=2 ...
+  """
+```
+
+`nMessagesPlacedInCoordinatorInbox` uses `meshState.sessionIDs["coordinator"]`
+(set by the session setup step) to locate the correct inbox.
+
+### Simulating a worker for niwa_ask tests
+
+For `niwa_ask` round-trips, register a worker session and use the combined step:
+
+```gherkin
+When I set up coordinator session for instance "myws"
+And I set up worker session for instance "myws"
+When I run claude -p from instance root "myws" with simulated worker reply and prompt:
+  """
+  Use niwa_ask to ask the worker "What is the answer?" ...
+  """
+```
+
+`iSetUpWorkerSessionForInstance` registers the worker role without changing
+`NIWA_SESSION_ROLE` in envOverrides (coordinator env stays set). The combined
+step launches `claude -p` for the coordinator and runs a goroutine that polls
+the worker inbox, finds the `question.ask`, and writes `{"answer":"42"}` to the
+coordinator inbox via atomic rename.
+
+### Assertion style for headless tests
+
+`runClaudeP` lowercases stdout before storing it. Assert with lowercase strings:
+
+```gherkin
+And the output contains "found:task.result"
+And the output contains "answer:42"
+And the output contains "collected:2"
+```
+
+Keep assertion strings short and distinctive to tolerate LLM rephrasing. Design
+prompts so the coordinator outputs a specific format ("output exactly: FOUND:<type>")
+to avoid false positives.
+
+### Step reference (headless Claude)
+
+| Step | Function | Notes |
+|------|----------|-------|
+| `claude is available` | `claudeIsAvailable` | Skips scenario if claude not on PATH or no ANTHROPIC_API_KEY |
+| `I set up coordinator session for instance "<name>"` | `iSetUpCoordinatorSessionForInstance` | Registers coordinator, sets NIWA_SESSION_ID in env |
+| `I set up worker session for instance "<name>"` | `iSetUpWorkerSessionForInstance` | Registers worker, stores UUID in meshState |
+| `I run claude -p from instance root "<name>" with prompt:` | `iRunClaudePFromInstanceRoot` | Runs headless Claude, lowercases stdout |
+| `I run claude -p from instance root "<name>" with simulated worker reply and prompt:` | `iRunClaudePFromInstanceRootWithSimulatedWorkerReply` | Coordinator claude -p + goroutine worker |
