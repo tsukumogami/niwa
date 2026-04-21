@@ -2,6 +2,7 @@ package cli
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -14,6 +15,10 @@ import (
 
 var sessionRegisterRepo string
 var sessionRegisterCheckOnly bool
+
+// errAlreadyRegistered is returned by writeSessionEntry when a live session
+// for the same role already exists.
+var errAlreadyRegistered = errors.New("already registered")
 
 func init() {
 	sessionCmd.AddCommand(sessionRegisterCmd)
@@ -71,6 +76,11 @@ func runSessionRegister(cmd *cobra.Command, args []string) error {
 	}
 
 	if err := writeSessionEntry(sessionsDir, entry); err != nil {
+		// In --check-only mode a concurrent registration between our liveness
+		// check and the write means the goal is achieved; return success.
+		if sessionRegisterCheckOnly && errors.Is(err, errAlreadyRegistered) {
+			return nil
+		}
 		return fmt.Errorf("cannot write session entry: %w", err)
 	}
 
@@ -122,8 +132,8 @@ func writeSessionEntry(sessionsDir string, entry mcp.SessionEntry) error {
 	for _, s := range registry.Sessions {
 		if s.Role == entry.Role {
 			if mcp.IsPIDAlive(s.PID, s.StartTime) {
-				return fmt.Errorf("role %q already registered by live session PID %d (registered %s); use NIWA_SESSION_ROLE to override or run: niwa session unregister %s",
-					entry.Role, s.PID, s.RegisteredAt, entry.Role)
+				return fmt.Errorf("%w: role %q already registered by live session PID %d (registered %s); use NIWA_SESSION_ROLE to override or run: niwa session unregister %s",
+					errAlreadyRegistered, entry.Role, s.PID, s.RegisteredAt, entry.Role)
 			}
 			continue // prune stale entry
 		}
@@ -137,10 +147,6 @@ func writeSessionEntry(sessionsDir string, entry mcp.SessionEntry) error {
 	}
 	tmp := registryPath + ".tmp"
 	if err := os.WriteFile(tmp, data, 0o600); err != nil {
-		return err
-	}
-	if err := os.Chmod(tmp, 0o600); err != nil {
-		_ = os.Remove(tmp)
 		return err
 	}
 	return os.Rename(tmp, registryPath)
