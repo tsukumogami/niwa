@@ -18,7 +18,7 @@ var sessionRegisterCheckOnly bool
 func init() {
 	sessionCmd.AddCommand(sessionRegisterCmd)
 	sessionRegisterCmd.Flags().StringVar(&sessionRegisterRepo, "repo", "", "repo name (defaults to cwd-inferred repo)")
-	sessionRegisterCmd.Flags().BoolVar(&sessionRegisterCheckOnly, "check-only", false, "check if already registered and exit 0 silently if so; register normally if not (full behavior implemented in Issue 3)")
+	sessionRegisterCmd.Flags().BoolVar(&sessionRegisterCheckOnly, "check-only", false, "skip registration silently when this role is already registered with an active session; register normally otherwise")
 }
 
 var sessionRegisterCmd = &cobra.Command{
@@ -28,19 +28,17 @@ var sessionRegisterCmd = &cobra.Command{
 }
 
 func runSessionRegister(cmd *cobra.Command, args []string) error {
-	// --check-only: no-op placeholder until Issue 3 implements the full
-	// already-registered detection. The flag is accepted so the hook script
-	// written by InstallChannelInfrastructure does not fail at the CLI level.
-	if sessionRegisterCheckOnly {
-		return nil
-	}
-
 	instanceRoot := os.Getenv("NIWA_INSTANCE_ROOT")
 	if instanceRoot == "" {
 		return fmt.Errorf("NIWA_INSTANCE_ROOT is not set")
 	}
 
 	role := deriveRole(sessionRegisterRepo)
+
+	if sessionRegisterCheckOnly && isAlreadyRegistered(instanceRoot, role) {
+		return nil
+	}
+
 	sessionID := mcp.NewSessionID()
 	pid := os.Getpid()
 
@@ -48,11 +46,6 @@ func runSessionRegister(cmd *cobra.Command, args []string) error {
 
 	homeDir, _ := os.UserHomeDir()
 	cwd, _ := os.Getwd()
-
-	// Warn when the caller explicitly set CLAUDE_SESSION_ID but it fails validation.
-	if envID := os.Getenv("CLAUDE_SESSION_ID"); envID != "" && !mcp.SessionIDRegex.MatchString(envID) {
-		fmt.Fprintln(os.Stderr, "warning: CLAUDE_SESSION_ID has invalid format; ignoring")
-	}
 
 	claudeSessionID := mcp.DiscoverClaudeSessionID(homeDir, cwd)
 	if claudeSessionID == "" {
@@ -83,6 +76,25 @@ func runSessionRegister(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("session_id=%s role=%s\n", sessionID, role)
 	return nil
+}
+
+// isAlreadyRegistered returns true when sessions.json has a live entry for role.
+func isAlreadyRegistered(instanceRoot, role string) bool {
+	jsonPath := filepath.Join(instanceRoot, ".niwa", "sessions", "sessions.json")
+	data, err := os.ReadFile(jsonPath)
+	if err != nil {
+		return false
+	}
+	var registry mcp.SessionRegistry
+	if err := json.Unmarshal(data, &registry); err != nil {
+		return false
+	}
+	for _, s := range registry.Sessions {
+		if s.Role == role && mcp.IsPIDAlive(s.PID, s.StartTime) {
+			return true
+		}
+	}
+	return false
 }
 
 func deriveRole(repo string) string {
@@ -133,4 +145,3 @@ func writeSessionEntry(sessionsDir string, entry mcp.SessionEntry) error {
 	}
 	return os.Rename(tmp, registryPath)
 }
-

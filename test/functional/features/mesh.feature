@@ -89,6 +89,7 @@ Feature: Session mesh: filesystem-based inter-session messaging
     And the sessions.json entry for role "coordinator" has no claude_session_id
     And the error output contains "could not discover Claude session ID"
 
+  @critical
   Scenario: claude_session_id is skipped when cwd does not match session file
     Given a clean niwa environment
     And NIWA_INSTANCE_ROOT is set to a temp directory

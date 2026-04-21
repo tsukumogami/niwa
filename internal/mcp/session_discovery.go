@@ -11,26 +11,28 @@ import (
 	"strings"
 )
 
-// SessionIDRegex validates Claude session IDs before they are stored or used.
+// sessionIDRegex validates Claude session IDs before they are stored or used.
 // Values that don't match are rejected so invalid input can never reach
-// sessions.json or exec.Command. Exported for use in callers that need to
-// validate or warn before calling DiscoverClaudeSessionID.
-var SessionIDRegex = regexp.MustCompile(`^[a-zA-Z0-9_-]{8,128}$`)
+// sessions.json or exec.Command.
+var sessionIDRegex = regexp.MustCompile(`^[a-zA-Z0-9_-]{8,128}$`)
 
 // DiscoverClaudeSessionID tries three tiers to find the Claude session ID:
 //
-//  1. CLAUDE_SESSION_ID env var (validated, returned immediately if valid)
-//  2. ~/.claude/sessions/<ppid>.json PPID walk (up to depth 2, cwd cross-check)
+//  1. CLAUDE_SESSION_ID env var (validated, returned immediately if valid;
+//     warns to stderr when set but invalid)
+//  2. ~/.claude/sessions/<ppid>.json PPID walk (two levels, cwd cross-check)
 //  3. ~/.claude/projects/<base64url-cwd>/*.jsonl mtime scan
 //
 // homeDir and cwd are passed as parameters so unit tests can inject fake roots.
-// Returns "" if all tiers fail; the caller writes SessionEntry without the field.
+// Returns "" if all tiers fail; the caller should warn when that happens.
 func DiscoverClaudeSessionID(homeDir, cwd string) string {
 	// Tier 1: env var.
 	if id := os.Getenv("CLAUDE_SESSION_ID"); id != "" {
-		if SessionIDRegex.MatchString(id) {
+		if sessionIDRegex.MatchString(id) {
 			return id
 		}
+		// Set but invalid — warn here so the user knows their value was rejected.
+		fmt.Fprintln(os.Stderr, "warning: CLAUDE_SESSION_ID has invalid format; ignoring")
 	}
 
 	// Tier 2: PPID walk.
@@ -52,27 +54,31 @@ type claudeSessionFile struct {
 	CWD       string `json:"cwd"`
 }
 
-// discoverViaPPIDWalk walks up to 2 levels of PPID, looking for a
-// ~/.claude/sessions/<pid>.json whose cwd matches.
+// discoverViaPPIDWalk tries two levels of the process tree:
+//
+//	Level 1 (direct parent):  os.Getppid() — cross-platform.
+//	Level 2 (grandparent):    readPPID(ppid1) — Linux only, 0 elsewhere.
+//
+// In production the chain is: Claude Code → hook script → niwa.
+// Level 1 is the hook script; level 2 is the Claude Code process whose
+// session file lives at ~/.claude/sessions/<pid>.json.
 func discoverViaPPIDWalk(homeDir, cwd string) string {
 	sessionsDir := filepath.Join(homeDir, ".claude", "sessions")
 
-	pid := os.Getpid()
-	for range 2 {
-		ppid := readPPID(pid)
+	ppid1 := os.Getppid()
+	for _, ppid := range []int{ppid1, readPPID(ppid1)} {
 		if ppid <= 1 {
-			break
+			continue
 		}
 		path := filepath.Join(sessionsDir, fmt.Sprintf("%d.json", ppid))
 		if id := readClaudeSessionFile(path, cwd); id != "" {
 			return id
 		}
-		pid = ppid
 	}
 	return ""
 }
 
-// readPPID reads the PPID of a process from /proc/<pid>/stat.
+// readPPID reads the PPID of a process from /proc/<pid>/stat (Linux only).
 // Returns 0 on any error or on non-Linux platforms.
 func readPPID(pid int) int {
 	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
@@ -112,7 +118,7 @@ func readClaudeSessionFile(path, cwd string) string {
 	if sf.CWD != cwd {
 		return ""
 	}
-	if !SessionIDRegex.MatchString(sf.SessionID) {
+	if !sessionIDRegex.MatchString(sf.SessionID) {
 		return ""
 	}
 	return sf.SessionID
@@ -121,6 +127,9 @@ func readClaudeSessionFile(path, cwd string) string {
 // discoverViaProjectScan lists *.jsonl files in ~/.claude/projects/<encoded-cwd>/
 // sorted by mtime descending and returns the session ID from the most recent
 // filename whose basename (minus .jsonl) passes the regex.
+//
+// The base64url encoding (no padding) matches Claude Code's project directory
+// naming convention as of Claude Code CLI v1.x.
 func discoverViaProjectScan(homeDir, cwd string) string {
 	encoded := base64.URLEncoding.WithPadding(base64.NoPadding).EncodeToString([]byte(cwd))
 	projectDir := filepath.Join(homeDir, ".claude", "projects", encoded)
@@ -152,7 +161,7 @@ func discoverViaProjectScan(homeDir, cwd string) string {
 
 	for _, f := range files {
 		name := strings.TrimSuffix(f.name, ".jsonl")
-		if SessionIDRegex.MatchString(name) {
+		if sessionIDRegex.MatchString(name) {
 			return name
 		}
 	}

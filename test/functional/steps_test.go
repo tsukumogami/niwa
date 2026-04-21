@@ -1392,6 +1392,8 @@ func aClaudeSessionFileExistsForParentProcess(ctx context.Context, sessionID str
 		cwd = "/wrong/path/that/does/not/match"
 	}
 
+	// Mirrors mcp.claudeSessionFile (unexported). If the JSON field names there
+	// change, update this struct too.
 	type sessionFile struct {
 		SessionID string `json:"sessionId"`
 		CWD       string `json:"cwd"`
