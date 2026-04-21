@@ -155,7 +155,10 @@ func (s *Server) callTool(p toolCallParams) toolResult {
 }
 
 // handleCheckMessages reads all message files from the inbox, formats them as
-// markdown, marks them as seen, and moves them to read/.
+// markdown, and marks them as seen so pollInbox does not re-notify within
+// this server session. Files stay in inbox/ — moving to read/ is handled
+// by Issue 5's notifyNewFile for reply-awaited messages, and by the TTL
+// sweep for everything else.
 func (s *Server) handleCheckMessages() toolResult {
 	if s.inboxDir == "" {
 		return errResult("NIWA_INBOX_DIR not set; is this session registered?")
@@ -170,7 +173,6 @@ func (s *Server) handleCheckMessages() toolResult {
 	}
 
 	var msgs []Message
-	var filePaths []string
 	for _, e := range entries {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
 			continue
@@ -193,7 +195,7 @@ func (s *Server) handleCheckMessages() toolResult {
 			}
 		}
 		msgs = append(msgs, m)
-		filePaths = append(filePaths, path)
+		s.markSeen(e.Name())
 	}
 
 	if len(msgs) == 0 {
@@ -221,15 +223,6 @@ func (s *Server) handleCheckMessages() toolResult {
 			fmt.Fprintf(&sb, "- **Expires**: %s\n", m.ExpiresAt)
 		}
 		fmt.Fprintf(&sb, "\n**Body**:\n```json\n%s\n```\n\n", prettyJSON(m.Body))
-	}
-
-	// Move processed files to read/ subdirectory.
-	readDir := filepath.Join(s.inboxDir, "read")
-	_ = os.MkdirAll(readDir, 0o755)
-	for _, p := range filePaths {
-		dest := filepath.Join(readDir, filepath.Base(p))
-		_ = os.Rename(p, dest)
-		s.markSeen(filepath.Base(p))
 	}
 
 	return textResult(sb.String())
@@ -277,7 +270,7 @@ func (s *Server) handleSendMessage(args sendMessageArgs) toolResult {
 	}
 
 	// Atomic write: write to temp file in same directory, then rename.
-	tmpFile := filepath.Join(target.InboxDir, ".tmp-"+msgID+".json")
+	tmpFile := filepath.Join(target.InboxDir, msgID+".json.tmp")
 	if err := os.WriteFile(tmpFile, data, 0o644); err != nil {
 		return errResultCode("INBOX_UNWRITABLE", "cannot write message: "+err.Error())
 	}

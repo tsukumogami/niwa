@@ -95,7 +95,7 @@ type channelNotificationParams struct {
 //	sessions.json              — SessionRegistry: all active sessions
 //	<session-uuid>/
 //	  inbox/                   — incoming message files (<msg-uuid>.json)
-//	    read/                  — consumed messages (moved here by handleCheckMessages)
+//	    read/                  — consumed messages (moved here by notifyNewFile for reply-awaited messages, TTL sweep for others)
 //	    expired/               — expired messages (moved here on check)
 type SessionEntry struct {
 	ID              string `json:"id"`
