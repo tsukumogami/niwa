@@ -186,11 +186,10 @@ func (s *Server) handleCheckMessages() toolResult {
 		if err := json.Unmarshal(data, &m); err != nil {
 			continue
 		}
-		// Skip expired messages, move them out.
+		// Skip expired messages without touching the filesystem.
 		if m.ExpiresAt != "" {
 			exp, err := time.Parse(time.RFC3339, m.ExpiresAt)
 			if err == nil && time.Now().After(exp) {
-				s.moveToExpired(path, m)
 				continue
 			}
 		}
