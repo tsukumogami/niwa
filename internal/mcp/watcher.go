@@ -15,7 +15,7 @@ import (
 // and sends a notifications/claude/channel push when new message files arrive.
 // This replaces the polling goroutine in server.go.
 func (s *Server) watchInbox() {
-	if err := os.MkdirAll(s.inboxDir, 0o755); err != nil {
+	if err := os.MkdirAll(s.inboxDir, 0o700); err != nil {
 		return
 	}
 
