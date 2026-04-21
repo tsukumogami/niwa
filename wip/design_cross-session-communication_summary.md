@@ -1,16 +1,29 @@
 # Design Summary: cross-session-communication
 
 ## Input Context (Phase 0)
-**Source:** /explore handoff
-**Problem:** Niwa workspaces contain multiple repos with independently-opened Claude sessions that have no way to communicate without the user acting as a manual relay. Niwa should provision a workspace-aware messaging layer so sessions can exchange messages (questions, delegation, review feedback, status updates) without user intermediation.
-**Constraints:**
-- Same-machine first; design path to network transport required
-- No external dependencies for same-machine v1 (no Redis, no NATS daemon)
-- Sessions are independently opened by the user, not spawned by a lead
-- Must survive individual session restarts (crash-safe messaging)
-- Niwa provisions the channel at workspace create/apply time; sessions self-register
-- Session spawning is out of scope for Phase 1
+**Source PRD:** docs/prds/PRD-cross-session-communication.md (status: Draft — user explicitly directed design phase)
+**Problem (implementation framing):** Niwa needs a ChannelMaterializer that provisions a file-based session mesh at apply time, a daemon that resumes idle sessions via `claude --resume`, and blocking MCP tools (`niwa_ask`, `niwa_wait`) that hold goroutines open waiting for inbox events — all connected by the invariant that sessions respond via `niwa_send_message` into the inbox, never via stdout.
+
+**Architecture decisions already settled by PRD:**
+- File-based inbox as transport (atomic rename, crash-safe)
+- Daemon (`niwa mesh watch`) watches all inboxes via fsnotify, resumes dead-PID sessions via `claude --resume`
+- `niwa_ask`: blocking tool, holds goroutine open watching caller's inbox for reply_to match
+- `niwa_wait`: blocking tool, collects N messages of specified types before returning
+- Sessions respond via `niwa_send_message` (not stdout) — forward-compat with Channels wakeup path
+- `[channels.mesh]` namespace in workspace.toml
+- SessionStart hook: registers session + delivers pending messages as initialUserMessage
+- UserPromptSubmit hook: fallback for live coordinator sessions
+
+**Open design questions (for Phase 2):**
+1. Daemon lifecycle management (standard)
+2. Claude session ID discovery (standard)
+3. niwa_ask blocking mechanism (critical)
+4. ChannelMaterializer integration point in runPipeline (standard)
+
+## Phase 1 Decomposition
+**Decision count:** 4 (within 1-5 range, proceed normally)
+**All independent:** no coupling requiring sequential execution
 
 ## Current Status
-**Phase:** 0 - Setup (Explore Handoff)
-**Last Updated:** 2026-04-20
+**Phase:** 1 - Decomposition complete
+**Last Updated:** 2026-04-21
