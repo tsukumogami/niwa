@@ -45,6 +45,8 @@ Feature: Session mesh: filesystem-based inter-session messaging
     And the file ".claude/.mcp.json" in instance "chan-ws" contains "NIWA_INSTANCE_ROOT"
     And the file "workspace-context.md" in instance "chan-ws" contains "## Channels"
     And the file "workspace-context.md" in instance "chan-ws" contains "coordinator"
+    And the file ".niwa/hooks/mesh-session-start.sh" exists in instance "chan-ws"
+    And the file ".niwa/hooks/mesh-user-prompt-submit.sh" exists in instance "chan-ws"
 
   @critical
   Scenario: second niwa apply does not duplicate channel artifacts
