@@ -115,33 +115,23 @@ func runMeshWatch(cmd *cobra.Command, args []string) error {
 		case <-existenceTicker.C:
 			// Per-iteration existence check: exit cleanly if sessions dir is removed.
 			if _, err := os.Stat(sessionsDir); os.IsNotExist(err) {
-				logger.Printf("sessions directory removed, exiting cleanly")
-				wg.Wait()
+				logger.Printf("sessions directory removed, draining in-flight work (up to 5s)")
+				drainWithTimeout(&wg, 5*time.Second, logger)
 				_ = os.Remove(pidFilePath)
 				return nil
 			}
 
 		case <-done:
 			logger.Printf("shutting down, draining in-flight work (up to 5s)")
-			waitDone := make(chan struct{})
-			go func() {
-				wg.Wait()
-				close(waitDone)
-			}()
-			select {
-			case <-waitDone:
-				logger.Printf("all work drained")
-			case <-time.After(5 * time.Second):
-				logger.Printf("drain timeout exceeded")
-			}
+			drainWithTimeout(&wg, 5*time.Second, logger)
 			_ = os.Remove(pidFilePath)
 			logger.Printf("daemon exiting")
 			return nil
 
 		case event, ok := <-watcher.Events:
 			if !ok {
-				logger.Printf("watcher events channel closed, exiting")
-				wg.Wait()
+				logger.Printf("watcher events channel closed, draining in-flight work (up to 5s)")
+				drainWithTimeout(&wg, 5*time.Second, logger)
 				_ = os.Remove(pidFilePath)
 				return nil
 			}
@@ -186,6 +176,22 @@ func runMeshWatch(cmd *cobra.Command, args []string) error {
 			}
 			logger.Printf("watcher error: %v", err)
 		}
+	}
+}
+
+// drainWithTimeout waits for wg to reach zero, with a hard upper bound. Used
+// on all three exit paths so none can block indefinitely on in-flight goroutines.
+func drainWithTimeout(wg *sync.WaitGroup, timeout time.Duration, logger *log.Logger) {
+	waitDone := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(waitDone)
+	}()
+	select {
+	case <-waitDone:
+		logger.Printf("all work drained")
+	case <-time.After(timeout):
+		logger.Printf("drain timeout exceeded")
 	}
 }
 
@@ -255,19 +261,20 @@ func handleNewMessage(msgPath, sessionsDir, claudeBin string, logger *log.Logger
 		logger.Printf("could not acquire sessions lock for message %s: %v (skipping)", msg.ID, err)
 		return
 	}
-	defer func() {
-		_ = lockFile.Close()
-	}()
+	// Lock is released explicitly on each exit path so we can control when
+	// it is freed relative to spawning claude (must release before spawn).
 
 	sessionsJSON := filepath.Join(sessionsDir, "sessions.json")
 	regData, err := os.ReadFile(sessionsJSON)
 	if err != nil {
+		_ = lockFile.Close()
 		logger.Printf("could not read sessions.json: %v", err)
 		return
 	}
 
 	var registry mcp.SessionRegistry
 	if err := json.Unmarshal(regData, &registry); err != nil {
+		_ = lockFile.Close()
 		logger.Printf("could not parse sessions.json: %v", err)
 		return
 	}
@@ -280,16 +287,19 @@ func handleNewMessage(msgPath, sessionsDir, claudeBin string, logger *log.Logger
 
 		alive := mcp.IsPIDAlive(entry.PID, entry.StartTime)
 		if alive {
+			_ = lockFile.Close()
 			logger.Printf("session %s (role=%s) is alive, no resume needed", sessionUUID, entry.Role)
 			return
 		}
 
 		if entry.ClaudeSessionID == "" {
+			_ = lockFile.Close()
 			logger.Printf("session %s (role=%s) is dead but has no claude_session_id, cannot resume", sessionUUID, entry.Role)
 			return
 		}
 
 		if claudeBin == "" {
+			_ = lockFile.Close()
 			logger.Printf("session %s (role=%s) is dead but claude not on PATH, cannot resume", sessionUUID, entry.Role)
 			return
 		}
@@ -314,6 +324,7 @@ func handleNewMessage(msgPath, sessionsDir, claudeBin string, logger *log.Logger
 		return
 	}
 
+	_ = lockFile.Close()
 	logger.Printf("no session entry found for uuid %s", sessionUUID)
 }
 
@@ -366,36 +377,4 @@ func writePIDFile(niwaDir string) error {
 		return err
 	}
 	return os.Rename(tmpPath, finalPath)
-}
-
-// readPIDFile reads the daemon PID file at <niwaDir>/daemon.pid and returns
-// the pid and startTime. Returns (0, 0, nil) if the file does not exist.
-func readPIDFile(niwaDir string) (pid int, startTime int64, err error) {
-	pidPath := filepath.Join(niwaDir, "daemon.pid")
-	data, err := os.ReadFile(pidPath)
-	if os.IsNotExist(err) {
-		return 0, 0, nil
-	}
-	if err != nil {
-		return 0, 0, err
-	}
-
-	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
-	if len(lines) < 1 {
-		return 0, 0, fmt.Errorf("daemon.pid: empty file")
-	}
-
-	var p int
-	if _, err := fmt.Sscanf(lines[0], "%d", &p); err != nil {
-		return 0, 0, fmt.Errorf("daemon.pid: invalid pid: %w", err)
-	}
-
-	var st int64
-	if len(lines) >= 2 {
-		if _, err := fmt.Sscanf(lines[1], "%d", &st); err != nil {
-			st = 0
-		}
-	}
-
-	return p, st, nil
 }

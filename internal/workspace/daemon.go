@@ -25,7 +25,7 @@ import (
 // callers can assert daemon liveness right after Create/Apply returns.
 func EnsureDaemonRunning(instanceRoot string) error {
 	niwaDir := filepath.Join(instanceRoot, ".niwa")
-	pid, startTime, err := readPIDFile(niwaDir)
+	pid, startTime, err := ReadPIDFile(niwaDir)
 	if err != nil {
 		// Non-fatal: treat as no daemon.
 		pid = 0
@@ -89,9 +89,54 @@ func EnsureDaemonRunning(instanceRoot string) error {
 	return nil
 }
 
-// readPIDFile reads <niwaDir>/daemon.pid and returns (pid, startTime, err).
+// TerminateDaemon sends SIGTERM to the mesh watch daemon for instanceRoot,
+// polls IsPIDAlive for up to 5 seconds, then sends SIGKILL if still alive.
+// It removes daemon.pid once the daemon is confirmed dead or was never running.
+func TerminateDaemon(instanceRoot string) error {
+	niwaDir := filepath.Join(instanceRoot, ".niwa")
+	pid, startTime, err := ReadPIDFile(niwaDir)
+	if err != nil {
+		return fmt.Errorf("reading daemon pid: %w", err)
+	}
+	if pid == 0 {
+		return nil // no daemon running
+	}
+
+	if !mcp.IsPIDAlive(pid, startTime) {
+		_ = os.Remove(filepath.Join(niwaDir, "daemon.pid"))
+		return nil
+	}
+
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		_ = os.Remove(filepath.Join(niwaDir, "daemon.pid"))
+		return nil
+	}
+
+	// Send SIGTERM and poll for up to 5 seconds.
+	if err := proc.Signal(syscall.SIGTERM); err != nil {
+		_ = os.Remove(filepath.Join(niwaDir, "daemon.pid"))
+		return nil
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		time.Sleep(100 * time.Millisecond)
+		if !mcp.IsPIDAlive(pid, startTime) {
+			_ = os.Remove(filepath.Join(niwaDir, "daemon.pid"))
+			return nil
+		}
+	}
+
+	// Still alive: send SIGKILL.
+	_ = proc.Signal(syscall.SIGKILL)
+	_ = os.Remove(filepath.Join(niwaDir, "daemon.pid"))
+	return nil
+}
+
+// ReadPIDFile reads <niwaDir>/daemon.pid and returns (pid, startTime, err).
 // Returns (0, 0, nil) if the file does not exist.
-func readPIDFile(niwaDir string) (pid int, startTime int64, err error) {
+func ReadPIDFile(niwaDir string) (pid int, startTime int64, err error) {
 	pidPath := filepath.Join(niwaDir, "daemon.pid")
 	data, err := os.ReadFile(pidPath)
 	if os.IsNotExist(err) {

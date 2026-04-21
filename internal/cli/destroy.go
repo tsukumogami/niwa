@@ -3,13 +3,9 @@ package cli
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 	"sort"
-	"syscall"
-	"time"
 
 	"github.com/spf13/cobra"
-	"github.com/tsukumogami/niwa/internal/mcp"
 	"github.com/tsukumogami/niwa/internal/workspace"
 )
 
@@ -71,7 +67,7 @@ func runDestroy(cmd *cobra.Command, args []string) error {
 	}
 
 	// Terminate the mesh watch daemon if it is running.
-	if err := terminateDaemon(instanceDir); err != nil {
+	if err := workspace.TerminateDaemon(instanceDir); err != nil {
 		fmt.Fprintf(cmd.ErrOrStderr(), "warning: could not stop mesh daemon: %v\n", err)
 	}
 
@@ -80,50 +76,5 @@ func runDestroy(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Fprintf(cmd.OutOrStdout(), "Destroyed instance: %s\n", instanceDir)
-	return nil
-}
-
-// terminateDaemon sends SIGTERM to the mesh watch daemon (if running), polls
-// IsPIDAlive for up to 5 seconds, then sends SIGKILL if still alive. It removes
-// daemon.pid when the daemon is confirmed dead or was never running.
-func terminateDaemon(instanceRoot string) error {
-	niwaDir := filepath.Join(instanceRoot, ".niwa")
-	pid, startTime, err := readPIDFile(niwaDir)
-	if err != nil {
-		return fmt.Errorf("reading daemon pid: %w", err)
-	}
-	if pid == 0 {
-		return nil // no daemon running
-	}
-
-	if !mcp.IsPIDAlive(pid, startTime) {
-		_ = os.Remove(filepath.Join(niwaDir, "daemon.pid"))
-		return nil
-	}
-
-	proc, err := os.FindProcess(pid)
-	if err != nil {
-		_ = os.Remove(filepath.Join(niwaDir, "daemon.pid"))
-		return nil
-	}
-
-	// Send SIGTERM and poll for up to 5 seconds.
-	if err := proc.Signal(syscall.SIGTERM); err != nil {
-		_ = os.Remove(filepath.Join(niwaDir, "daemon.pid"))
-		return nil
-	}
-
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		time.Sleep(100 * time.Millisecond)
-		if !mcp.IsPIDAlive(pid, startTime) {
-			_ = os.Remove(filepath.Join(niwaDir, "daemon.pid"))
-			return nil
-		}
-	}
-
-	// Still alive: send SIGKILL.
-	_ = proc.Signal(syscall.SIGKILL)
-	_ = os.Remove(filepath.Join(niwaDir, "daemon.pid"))
 	return nil
 }
