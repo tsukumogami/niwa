@@ -1,5 +1,5 @@
 ---
-status: Implemented
+status: Proposed
 upstream: docs/prds/PRD-cross-session-communication.md
 problem: |
   Niwa workspaces run multiple Claude sessions simultaneously — one per repo, one at
@@ -11,7 +11,9 @@ problem: |
   that watches session inboxes via fsnotify and resumes idle sessions using
   `claude --resume`, combined with a blocking MCP tool (`niwa_ask`) that holds a
   goroutine open until the target session responds via `niwa_send_message` into the
-  caller's inbox.
+  caller's inbox. A second problem is activation friction: the initial design required
+  users to enumerate all repo roles in workspace.toml before any infrastructure
+  materialized, even though the role mapping is obvious from the workspace topology.
 decision: |
   Niwa provisions a workspace-scoped session mesh at `niwa apply` time via a new
   ChannelMaterializer. The materializer writes a file-based inbox tree under
@@ -24,6 +26,11 @@ decision: |
   that hold the tool call open until inbox events arrive). Sessions always respond via
   `niwa_send_message` — never via stdout — so the response path is identical whether
   the session was woken by the daemon or by Claude Code's future Channels push protocol.
+  Roles are auto-derived from workspace topology (coordinator = instance root, role =
+  repo basename) so a bare `[channels.mesh]` section is sufficient to provision the
+  full mesh; explicit `[channels.mesh.roles]` overrides are optional. Users may also
+  activate channels per-invocation via `--channels`/`--no-channels` flags, with the
+  `NIWA_CHANNELS` environment variable as a persistent global default.
 rationale: |
   The response-via-tool-call constraint is the key forward-compatibility invariant:
   when Channels can wake sessions natively, the daemon's `claude --resume` step is
@@ -33,14 +40,18 @@ rationale: |
   with standard tools. The daemon is stateless (no in-memory message state) so it
   can be restarted without data loss. `niwa_ask` blocking at the MCP tool layer means
   sessions never need polling instructions — they call `niwa_ask` when they need input
-  and block naturally, matching how any other tool call works.
+  and block naturally, matching how any other tool call works. Role auto-derivation
+  removes config boilerplate: the instance root is always the coordinator by convention,
+  and repos already have unique, descriptive names by design. The hybrid activation
+  model (config + flag + env var) separates the "team-shared" concern (workspace.toml)
+  from the "personal preference" concern (flag default via env var or personal overlay).
 ---
 
 # DESIGN: Cross-Session Communication
 
 ## Status
 
-Implemented
+Proposed
 
 ## Context and Problem Statement
 
@@ -90,6 +101,9 @@ The implementation touches: `internal/workspace/apply.go` (new materializer),
 - ChannelMaterializer integrates cleanly with the existing `Applier.runPipeline` step 6.5 without breaking existing materializers
 - The daemon lifecycle must be manageable as part of instance lifecycle (`niwa apply` starts, `niwa destroy` stops)
 - `niwa_ask` must not leak goroutines on timeout
+- Role assignment must not require users to enumerate what can be derived from workspace topology
+- Channel activation must be expressible both declaratively (workspace config) and imperatively (CLI flag) without the two mechanisms conflicting
+- User-level channel defaults must not require modifying shared workspace configuration
 
 ## Considered Options
 
@@ -428,9 +442,171 @@ behavioral instructions, and all other channel infrastructure (`.mcp.json`, sess
 directory) still needs a separate step. Co-locating the workspace-context.md write does
 not justify splitting channel provisioning across two pipeline positions.
 
+---
+
+### Decision 5: Dynamic Role Derivation
+
+The initial implementation requires an explicit `[channels.mesh.roles]` map in
+workspace.toml to assign each repo a role name. This map is documentation-only at
+runtime: it renders into `workspace-context.md` to tell sessions their role, but no
+routing table reads from it at message-delivery time. Sessions discover their own role
+via `NIWA_SESSION_ROLE` at registration time. The provisioning gate uses `IsEmpty()`,
+which returns true when the roles map has zero entries — meaning `[channels.mesh]`
+with an empty (or absent) roles map provisions nothing.
+
+The consequence is that users must enumerate all repos with explicit role names before
+any infrastructure materializes, even though the mapping is obvious: the instance root
+session is always the coordinator, and each repo session's natural role is the repo
+name. The roles map ends up restating what the workspace topology already expresses.
+
+Key constraints: the roles map was never used for routing; role derivation from CWD
+is already the implicit fallback in `niwa session register`; repo names are unique and
+descriptive by design in well-structured workspaces.
+
+#### Chosen: Auto-derive roles from workspace topology; roles map becomes optional override
+
+The coordinator convention is fixed by topology: the session running at the instance
+root is always the coordinator. Per-repo session roles default to the repo directory
+basename — the key used in `[[sources]]` or `[[repos]]` workspace config entries. No
+configuration is required for this mapping.
+
+The `[channels.mesh.roles]` map becomes optional. When present, it provides name
+overrides for specific repos (e.g., mapping repo `codespar-enterprise` to role
+`enterprise` for a shorter token). When absent or incomplete, the fallback is the
+repo basename. This preserves backwards compatibility: existing configs with explicit
+role maps continue to work.
+
+Two things change:
+
+**Provisioning gate**: `IsEmpty()` is replaced by an `IsEnabled()` method that returns
+true whenever the `[channels.mesh]` TOML section is present in the config, regardless
+of role map content. A bare `[channels.mesh]` section now provisions the full channel
+infrastructure.
+
+**Role resolution in `niwa session register`**: The priority chain becomes:
+1. `--role` flag (explicit invocation override)
+2. `NIWA_SESSION_ROLE` environment variable (hook script injects this per-repo)
+3. `[channels.mesh.roles]` map lookup for the current repo (explicit name override)
+4. Repo directory basename derived from `pwd` relative to `NIWA_INSTANCE_ROOT`
+
+The `## Channels` section in `workspace-context.md` describes roles as auto-derived
+rather than hardcoding a list, since the list is now a runtime property.
+
+#### Alternatives Considered
+
+**Option A — retain explicit roles map as required**: Keep `IsEmpty()` behavior;
+channels require explicit role declarations.
+Rejected because the roles map states what the workspace topology already expresses.
+Any workspace with N repos has an obvious N+1 role assignment; requiring users to type
+it out adds friction with no semantic value over the auto-derived default.
+
+**Option B — auto-derive only, no override**: Remove `[channels.mesh.roles]` entirely;
+roles are always derived from topology.
+Rejected because some workspaces have repos with generic names (`core`, `api`, `web`)
+where the repo name is a poor role identifier in multi-session instructions. The
+override mechanism has minimal implementation cost and avoids a later breaking change
+when users need it.
+
+---
+
+### Decision 6: Channels Activation Model
+
+With Decision 5's auto-derivation, a bare `[channels.mesh]` section in workspace.toml
+now activates channels. But this is still a config-only trigger: it is committed to
+the shared workspace config and applies equally to all contributors. There is no way to
+enable channels for an existing workspace without modifying the shared config, and no
+way to disable channels for a specific instance when the shared config enables them.
+
+Two use cases are unserved: (a) a user who wants to try channels on their own machine
+without touching the team config; (b) a user who wants to create a lightweight instance
+from a workspace where channels are normally enabled. The question is whether CLI flags
+should complement the config trigger, and if so, how the two interact.
+
+#### Chosen: Hybrid — `[channels.mesh]` config section + `--channels`/`--no-channels` flags
+
+The config section is the declarative "always on for this workspace" path — appropriate
+for team workspaces where channels are a shared expectation. The flags are the
+per-invocation path:
+
+- `--channels` on `niwa create` or `niwa apply` enables channel provisioning even when
+  `[channels.mesh]` is absent from workspace.toml. The auto-derivation logic (Decision
+  5) determines roles when no explicit config section exists.
+- `--no-channels` disables provisioning even when `[channels.mesh]` is present. This
+  is the escape hatch for lightweight instances from channel-enabled workspaces.
+
+Priority order (highest to lowest): `--no-channels` explicit flag > `--channels`
+explicit flag > `[channels.mesh]` config section > user-level default (Decision 7).
+
+The flag result is merged into the runtime config before the provisioning step runs,
+so `InstallChannelInfrastructure` remains oblivious to whether channels were activated
+via config or flag. When `--channels` is passed without a config section, the runtime
+behaves as if a bare `[channels.mesh]` were present.
+
+#### Alternatives Considered
+
+**Option A — config-only (current)**: `[channels.mesh]` is the only activation path.
+Rejected because it requires shared-config edits for personal preferences and provides
+no escape hatch when the config enables channels but the user wants a lightweight instance.
+
+**Option B — flag-only**: Remove config-based activation; `--channels` required on
+every invocation.
+Rejected because team workspaces where channels are always desired would require every
+contributor to pass `--channels` on every `niwa create` and `niwa apply` with no
+persistent expression of the workspace's intent in the committed config.
+
+---
+
+### Decision 7: User-Level Channels Default
+
+With Decision 6's hybrid activation model, a user who always wants channels enabled
+needs a mechanism to express this preference without modifying shared workspace configs
+or passing `--channels` on every command. Two scopes need independent solutions:
+
+**Workspace-scoped**: the user wants channels on for a specific workspace on their
+machine, without editing the shared workspace.toml.
+
+**Global**: the user wants channels on for every workspace they ever create or apply,
+as a persistent personal preference.
+
+#### Chosen: Personal overlay for workspace-scoped; NIWA_CHANNELS env var for global
+
+**Workspace-scoped**: the personal overlay (already supported by `niwa init --overlay`)
+can include a `[channels.mesh]` section. When the personal overlay is loaded, it merges
+with the workspace config before the provisioning step — channels are enabled for all
+instances the user creates from this workspace without committing to the shared config.
+No new mechanism needed; this is a direct consequence of Decision 6's hybrid model and
+the existing overlay merge.
+
+**Global**: the `NIWA_CHANNELS=1` environment variable acts as a persistent global
+default. If set in the user's shell profile (`.bashrc`, `.zshrc`), it is equivalent to
+passing `--channels` on every `niwa create` and `niwa apply`. `NIWA_CHANNELS=0` disables
+channels globally. The priority order from Decision 6 applies: explicit flag beats env
+var, env var beats absence (but not a config section, which is a declarative workspace
+intent). The env var is read at CLI argument parsing time and applied as the pre-flag
+default for `--channels`. Values other than `"1"` and `"0"` are ignored (treated as
+unset) with a warning logged to stderr.
+
+This is consistent with niwa's existing env var pattern (`NIWA_INSTANCE_ROOT`,
+`NIWA_SESSION_ROLE`) and requires no new file format or config schema.
+
+#### Alternatives Considered
+
+**Option B — global config file `~/.config/niwa/config.toml`**: A structured global
+preferences file with `[channels] default = true`.
+Rejected as over-engineering for a single boolean preference. A new config format
+requires a parser, validation, and documentation. An env var provides identical
+semantics with one `os.Getenv` call. If global config requirements grow beyond one
+flag, this option is the natural next step.
+
+**Option C — personal overlay only**: Require the personal overlay approach for both
+workspace-scoped and global defaults; no separate global mechanism.
+Rejected because the personal overlay is per-workspace — a user with many workspaces
+would need to add `[channels.mesh]` to each overlay. The env var solves the global case
+with zero per-workspace configuration.
+
 ## Decision Outcome
 
-**Chosen: 1B + 2(A+B+fallback) + 3A + 4B**
+**Chosen: 1B + 2(A+B+fallback) + 3A + 4B + 5C + 6C + 7(C+A)**
 
 ### Summary
 
@@ -447,6 +623,24 @@ spawns `niwa mesh watch` as a detached child process (via `Setsid: true`) gated 
 an `IsPIDAlive` check so repeated applies are idempotent. `niwa destroy` terminates the
 daemon with SIGTERM (5-second grace period, then SIGKILL) before removing the instance
 directory.
+
+Channels are activated when any of the following is true: `[channels.mesh]` is present
+in workspace.toml (or the personal overlay), the `--channels` flag is passed to `niwa
+create` or `niwa apply`, or the `NIWA_CHANNELS=1` environment variable is set. The
+`--no-channels` flag disables provisioning even when config enables it. This priority
+order (explicit flag > config section > env var) is enforced at the start of
+`runPipeline` before any provisioning step runs. When channels are activated without an
+explicit `[channels.mesh]` section, the runtime synthesizes a minimal config equivalent
+to a bare section with no role overrides.
+
+Session roles are auto-derived from workspace topology: the session running at the
+instance root is always registered as `coordinator`; per-repo sessions default to the
+repo directory basename as their role. When `niwa session register` is called, it
+resolves the role via priority chain: (1) `--role` flag, (2) `NIWA_SESSION_ROLE` env
+var injected by the hook script, (3) explicit entry in `[channels.mesh.roles]` for this
+repo, (4) basename of `pwd` relative to `NIWA_INSTANCE_ROOT`. The roles map is now
+purely an override mechanism — workspaces with descriptive repo names need no role
+config at all.
 
 When a Claude session opens, the SessionStart hook runs `niwa session register`, which
 records the session's role, PID, start time, inbox path, and Claude session ID in
@@ -480,7 +674,7 @@ complete its current task and become idle. This is the accepted busy-session tra
 
 ### Rationale
 
-The four decisions form a coherent stack: the provisioning step creates the filesystem
+The seven decisions form a coherent stack: the provisioning step creates the filesystem
 structures the daemon watches; the daemon uses the session IDs that `session register`
 records; the blocking `niwa_ask` uses the watcher goroutine that is already running in
 every MCP server instance; and the response routing invariant (answer via
@@ -489,6 +683,15 @@ regardless of whether the session was woken by the daemon or by a future Channel
 protocol. The combination is crash-safe at every level: messages survive in inbox files
 if the daemon crashes, the daemon restarts without data loss on the next `niwa apply`,
 and `niwa_ask` goroutines clean up via `defer cancel()` even on timeout.
+
+The activation and role decisions layer cleanly on top: the provisioning gate moves
+from a content check (roles map non-empty) to a presence check (`[channels.mesh]`
+section exists or equivalent flag/env is set), which makes the config simpler without
+changing what gets provisioned. Role auto-derivation does not affect the daemon or MCP
+tools at all — they continue to use roles as stored in `sessions.json` at registration
+time. The hybrid activation model separates team intent (config) from personal
+preference (flag/env var) without introducing runtime branching in the provisioning
+code itself.
 
 ## Solution Architecture
 
@@ -518,6 +721,7 @@ niwa mesh watch (daemon, internal/cli/mesh_watch.go)
   └─ PID file: .niwa/daemon.pid (pid\nstart-jiffies\n, written atomically)
 
 niwa session register (internal/cli/session_register.go)
+  ├─ resolveRole: --role flag → NIWA_SESSION_ROLE env → roles map → pwd basename
   ├─ discoverClaudeSessionID: env var → ~/.claude/sessions/<ppid>.json → fs scan
   └─ upserts SessionEntry in sessions.json
 
@@ -591,10 +795,25 @@ Written atomically: `daemon.pid.tmp` → rename to `daemon.pid`. The daemon writ
 file only after establishing its fsnotify watch loop, so `niwa apply` never sees a
 partial PID as a valid daemon.
 
+**Channels activation check** (at top of `runPipeline`, before step 4.75):
+
+```go
+// Priority: --no-channels flag > --channels flag > config section > NIWA_CHANNELS env var
+channelsEnabled := cfg.Channels.IsEnabled() // [channels.mesh] section present
+if os.Getenv("NIWA_CHANNELS") == "1" { channelsEnabled = true }
+if opts.ChannelsFlag { channelsEnabled = true }    // --channels passed
+if opts.NoChannelsFlag { channelsEnabled = false }  // --no-channels passed
+// When enabled without config section, synthesize a bare MeshConfig so
+// InstallChannelInfrastructure can proceed with auto-derived roles.
+if channelsEnabled && !cfg.Channels.IsEnabled() {
+    cfg.Channels.Mesh = &MeshConfig{}
+}
+```
+
 **Daemon spawn** (in `Applier.Apply` / `Applier.Create`, after `SaveState`):
 
 ```go
-if cfg.Channels non-empty && !IsPIDAlive(readPIDFile(instanceRoot)) {
+if cfg.Channels.IsEnabled() && !IsPIDAlive(readPIDFile(instanceRoot)) {
     cmd := exec.Command(os.Args[0], "mesh", "watch", "--instance-root", instanceRoot)
     cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
     cmd.Stdin, cmd.Stdout, cmd.Stderr = nil, daemonLog, daemonLog
@@ -711,6 +930,23 @@ Deliverables:
 - `notifyNewFile()` extension: check `ReplyTo` against `waiters`, check type/sender against `typeWaiters`, move file to `read/` before signaling
 - Refactor `handleSendMessage` to return a struct (message ID + status) rather than text output, so `handleAsk` does not need `extractSentMessageID` string parsing
 
+### Phase 6: Channels Ergonomics
+
+Implement role auto-derivation, hybrid activation flags, and the NIWA_CHANNELS env var.
+
+Depends on: Phase 1 (config struct), Phase 2 (provisioning gate), Phase 3 (session register role resolution).
+
+Deliverables:
+- `internal/config/config.go`: replace `IsEmpty()` with `IsEnabled()` (presence-based); add `MeshConfig.IsEnabled()` method; `[channels.mesh.roles]` map remains optional
+- `internal/workspace/apply.go`: add `--channels`/`--no-channels` bool flags to `niwa create` and `niwa apply`; read `NIWA_CHANNELS` env var; apply priority logic at top of `runPipeline`; synthesize bare `MeshConfig{}` when channels enabled without config section
+- `internal/cli/session_register.go`: add `resolveRole()` function implementing the four-tier priority chain (`--role` flag → `NIWA_SESSION_ROLE` → roles map lookup → `pwd` basename relative to `NIWA_INSTANCE_ROOT`)
+- `internal/workspace/channels.go`: update `buildChannelsSection` to describe roles as auto-derived rather than hardcoding the roles list; remove the `IsEmpty()` guard (caller now uses `IsEnabled()`)
+- Functional tests:
+  - `niwa create --channels` on a workspace without `[channels.mesh]` provisions channel infrastructure with auto-derived roles
+  - `niwa create` on a workspace with `[channels.mesh]` followed by `niwa apply --no-channels` does not duplicate infrastructure
+  - `NIWA_CHANNELS=1 niwa create` enables channels (env var default)
+  - `niwa session register` in a repo assigns role = repo basename when no explicit role is configured
+
 ## Security Considerations
 
 **Threat model.** This feature's security properties hold when all processes running as
@@ -727,6 +963,17 @@ modes explicitly, independent of umask.
 and logged; they must not be written to `sessions.json` or used in `exec.Command`
 arguments. All `Message` fields used as path components (`Type`, `From`, `To`) must be
 validated against a similarly constrained pattern.
+
+**Role auto-derivation.** When `resolveRole()` falls back to the repo basename (tier 4),
+the derived string is validated against the same path-component pattern before being
+written to `sessions.json`. A repo with a non-conformant name (unlikely but possible
+with non-standard workspace configs) must fall back gracefully: log a warning and use
+`unknown` as the role rather than writing an invalid value.
+
+**NIWA_CHANNELS env var.** Only the literal values `"1"` (enable) and `"0"` (disable)
+are recognized. Any other value is ignored with a warning logged to stderr. The env var
+has no path or command components, so there is no injection risk beyond the boolean
+behavior.
 
 **Message authentication.** The HMAC-SHA256 signing scheme — a per-instance shared
 secret at `.niwa/channel.key` (mode `0600`, generated at `InstallChannelInfrastructure`
@@ -774,6 +1021,12 @@ exiting. This prevents partial writes to `sessions.json` during `niwa destroy`.
   without modification; no second hook-writing path to maintain
 - **`instanceRoot` stays out of `MaterializeContext`**: existing materializer interface
   is stable
+- **Zero-config for common case**: a bare `[channels.mesh]` section (or `--channels`
+  flag) is sufficient to provision a full session mesh; workspaces with descriptive
+  repo names need no role configuration at all
+- **Personal channels without shared config changes**: users can enable channels via
+  personal overlay or `NIWA_CHANNELS=1` without modifying workspace.toml; team-shared
+  config stays clean
 
 ### Negative
 
@@ -794,6 +1047,15 @@ exiting. This prevents partial writes to `sessions.json` during `niwa destroy`.
   logouts. After a reboot, all instance daemons must be restarted manually via `niwa
   apply`. Sessions that arrive while the daemon is down queue messages durably but are
   not woken until the daemon is back.
+- **Role auto-derivation can surprise users with generic repo names**: a repo named
+  `core` gets role `core`; if multiple workspaces have a repo named `core`, sessions
+  across those workspaces will have the same role name. The roles map override exists
+  to handle this, but users must know to use it.
+- **`--channels` flag activates without config validation**: when passed without
+  `[channels.mesh]` in workspace.toml, there is no config section to validate; the
+  runtime synthesizes a bare `MeshConfig{}`. Users who pass `--channels` and later
+  forget it on re-apply will get channels disabled on that apply (unless `NIWA_CHANNELS`
+  is set or the personal overlay includes the section).
 - **`rm -rf` on an instance leaves a transient leaked daemon**: removing an instance
   directory without `niwa destroy` bypasses daemon shutdown. The daemon detects the
   missing instance root via fsnotify errors and exits, but this is an unclean termination.
@@ -828,3 +1090,12 @@ exiting. This prevents partial writes to `sessions.json` during `niwa destroy`.
 - **Encoding forward-compat**: document the base64url algorithm dependency in a code
   comment adjacent to the filesystem scan fallback so it is easy to locate and update
   independently if Claude Code changes the encoding.
+- **Generic repo name role collisions**: document in the `## Channels` section of
+  workspace-context.md that roles are derived from repo names, so coordinators
+  addressing workers by role are addressing by repo name. If a workspace has ambiguous
+  repo names, the user should add `[channels.mesh.roles]` overrides.
+- **Transient `--channels` flag without config**: if persistent channel activation is
+  desired without a shared `[channels.mesh]` config, users should add the section to
+  their personal overlay or set `NIWA_CHANNELS=1` in their shell profile. The
+  `niwa apply` output should include a note when channels were activated via flag rather
+  than config, suggesting the persistent alternatives.
