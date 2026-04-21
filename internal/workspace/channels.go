@@ -56,7 +56,7 @@ func InstallChannelInfrastructure(cfg *config.WorkspaceConfig, instanceRoot stri
 	// Always add to writtenFiles so cleanRemovedFiles does not delete it on re-apply.
 	sessionsJSONPath := filepath.Join(sessionsDir, "sessions.json")
 	if _, err := os.Stat(sessionsJSONPath); os.IsNotExist(err) {
-		if err := writeFileMode(sessionsJSONPath, []byte("[]\n"), 0o600); err != nil {
+		if err := writeFileMode(sessionsJSONPath, []byte("{\"sessions\":[]}\n"), 0o600); err != nil {
 			return fmt.Errorf("creating sessions.json: %w", err)
 		}
 	}

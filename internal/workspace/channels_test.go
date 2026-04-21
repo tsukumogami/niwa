@@ -72,8 +72,8 @@ func TestInstallChannelInfrastructure_CreatesArtifacts(t *testing.T) {
 	}
 	data, _ := os.ReadFile(sessionsJSON)
 	content := strings.TrimSpace(string(data))
-	if content != "[]" {
-		t.Errorf("sessions.json content: got %q, want []", content)
+	if content != `{"sessions":[]}` {
+		t.Errorf("sessions.json content: got %q, want {\"sessions\":[]}", content)
 	}
 
 	// .claude/.mcp.json must exist with 0600 mode and contain niwa mcp-serve.
