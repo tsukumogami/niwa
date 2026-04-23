@@ -1,23 +1,49 @@
 ---
 upstream: docs/prds/PRD-workspace-config-sources.md
-status: Proposed
+status: Accepted
 problem: |
   niwa's three clone primitives (team config, personal overlay, workspace
   overlay) all materialize git working trees and sync via `git pull
   --ff-only`, which wedges on remote rewrite (issue #72), forces
   whole-repo sourcing (no subpath support), and silently invites edits
-  that the next refresh discards.
+  that the next refresh discards. Replacing this requires symmetric
+  changes to all three clone sites plus replacement of two
+  `.git/`-dependent code paths (`isClonedConfig`, the plaintext-secrets
+  guardrail) and addition of a canonical source-identity surface that
+  five readers consume.
 decision: |
-  TBD — populated after Phase 3 cross-validation.
+  Five composed choices: (1) typed `internal/source.Source` as the
+  canonical five-tuple slug parser, leaf package consumed everywhere;
+  (2) two-rename atomic snapshot swap on a sibling staging directory,
+  with `instance.json` relocated to `<workspace>/.niwa-state/` (sibling
+  subdir), dual-path read fallback and lazy migration on first save;
+  (3) TOML provenance marker at `<workspace>/.niwa/.niwa-snapshot.toml`
+  inside the snapshot dir; (4) `httptest.Server`-based `tarballFakeServer`
+  alongside `localGitServer`, `NIWA_TEST_FAULT` env-var seam backed by
+  `internal/testfault/`, and Gherkin step pair with Go state-file
+  factory; (5) extension of `internal/github/APIClient` with
+  `HeadCommit` + `FetchTarball` methods and a package-local
+  `extractSubpath` (Go's `archive/tar`, no system `tar`), with
+  `BaseURL` substitution as the test seam.
 rationale: |
-  TBD — populated after Phase 4 architecture synthesis.
+  Each decision applies the workspace-wide self-contained-no-system-deps
+  invariant and prefers leaf packages to break import cycles. The slug
+  parser must be a leaf so all consumers can import it; the swap
+  primitive is shared across three clone sites for R13 symmetry; the
+  TOML marker matches niwa's existing config-readability convention and
+  reuses the already-vendored BurntSushi/toml; the GitHub client extension
+  mirrors every established pattern in `internal/github/` (typed
+  `APIClient`, `BaseURL` test seam, no third-party deps). Test
+  infrastructure choices are dictated by the process boundary functional
+  tests cross — env-var fault injection is the only mechanism that
+  survives.
 ---
 
 # DESIGN: Workspace Config Sources
 
 ## Status
 
-Proposed
+Accepted
 
 ## Context and Problem Statement
 
