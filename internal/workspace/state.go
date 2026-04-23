@@ -16,10 +16,21 @@ import (
 
 const (
 	// StateDir is the directory name used for instance state markers.
+	// TODO(workspace-config-sources Issue 5): rename to ".niwa-state" when
+	// the state file relocates out of the snapshot directory.
 	StateDir = ".niwa"
+
+	// SnapshotDir is the directory name where the workspace config snapshot
+	// is materialized at the workspace root. Today this collides with
+	// StateDir; Issue 5 separates them.
+	SnapshotDir = ".niwa"
 
 	// StateFile is the filename for instance state within StateDir.
 	StateFile = "instance.json"
+
+	// ProvenanceFile is the filename for the snapshot provenance marker
+	// within SnapshotDir. See internal/workspace/provenance.go.
+	ProvenanceFile = ".niwa-snapshot.toml"
 
 	// SchemaVersion is the current schema version for instance state files.
 	// v2 adds ManagedFile.SourceFingerprint and ManagedFile.Sources; v1
@@ -54,22 +65,22 @@ const (
 // without re-running the resolver. Empty when the last apply saw no
 // shadows.
 type InstanceState struct {
-	SchemaVersion  int                  `json:"schema_version"`
-	ConfigName     *string              `json:"config_name"`
-	InstanceName   string               `json:"instance_name"`
-	InstanceNumber int                  `json:"instance_number"`
-	Root           string               `json:"root"`
-	Detached       bool                 `json:"detached,omitempty"`
-	SkipGlobal     bool                 `json:"skip_global,omitempty"`
-	OverlayURL     string               `json:"overlay_url,omitempty"`
-	NoOverlay      bool                 `json:"no_overlay,omitempty"`
-	OverlayCommit  string               `json:"overlay_commit,omitempty"`
-	Created        time.Time            `json:"created"`
-	LastApplied    time.Time            `json:"last_applied"`
-	ManagedFiles   []ManagedFile        `json:"managed_files"`
-	Repos          map[string]RepoState `json:"repos"`
-	Shadows          []Shadow   `json:"shadows,omitempty"`
-	DisclosedNotices []string   `json:"disclosed_notices,omitempty"`
+	SchemaVersion    int                  `json:"schema_version"`
+	ConfigName       *string              `json:"config_name"`
+	InstanceName     string               `json:"instance_name"`
+	InstanceNumber   int                  `json:"instance_number"`
+	Root             string               `json:"root"`
+	Detached         bool                 `json:"detached,omitempty"`
+	SkipGlobal       bool                 `json:"skip_global,omitempty"`
+	OverlayURL       string               `json:"overlay_url,omitempty"`
+	NoOverlay        bool                 `json:"no_overlay,omitempty"`
+	OverlayCommit    string               `json:"overlay_commit,omitempty"`
+	Created          time.Time            `json:"created"`
+	LastApplied      time.Time            `json:"last_applied"`
+	ManagedFiles     []ManagedFile        `json:"managed_files"`
+	Repos            map[string]RepoState `json:"repos"`
+	Shadows          []Shadow             `json:"shadows,omitempty"`
+	DisclosedNotices []string             `json:"disclosed_notices,omitempty"`
 }
 
 // ManagedFile tracks a file written by niwa apply.
