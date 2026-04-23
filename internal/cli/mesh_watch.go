@@ -195,25 +195,13 @@ func runMeshWatch(cmd *cobra.Command, args []string) error {
 	var supervisorWG sync.WaitGroup
 	exitCh := make(chan supervisorExit, 32)
 
-	// Issue 7: reconciliation of pre-existing state.json entries. MUST
-	// run BEFORE the catch-up inbox scan and BEFORE the event loop so
-	// any adopted-live-orphan entries are in the orphan list before a
-	// fsnotify CREATE tries to claim a re-queued envelope, and so that
-	// crash-mid-spawn tasks get a fresh retry before the catch-up path
-	// tries to re-claim their in-progress envelope.
-	tasksDir := filepath.Join(niwaDir, "tasks")
-	reconcileResult := reconcileRunningTasks(tasksDir, logger)
-
-	// 4. Catch-up inbox scan. Run AFTER reconciliation so reconciliation
-	// can re-hydrate orphan workers before the catch-up claim path runs.
-	catchupEvents, err := scanExistingInboxes(rolesRoot, watchedRoles)
-	if err != nil {
-		logger.Printf("warning: catch-up scan failed: %v", err)
-	}
-
-	// 5. Acquire the daemon.pid.lock flock BEFORE writing the PID file.
-	// Held for the daemon's lifetime. If the exclusive flock is already
-	// held by a sibling daemon, log and exit 0 (AC-C3 / scenario-21).
+	// 4. Acquire the daemon.pid.lock flock BEFORE any code that mutates
+	// state.json or transitions.log (reconciliation, fresh-retry hand-
+	// off, catch-up claim). If two daemons race on EnsureDaemonRunning
+	// the losing daemon must exit without having written anything — the
+	// winner then owns the only set of crash-recovery entries. Acquiring
+	// the lock here is what enforces "concurrent niwa apply never
+	// produces duplicate reconciliation output" (AC-C3 / scenario-21).
 	pidLockPath := filepath.Join(niwaDir, "daemon.pid.lock")
 	pidLockFile, err := acquireDaemonPIDLock(pidLockPath)
 	if err != nil {
@@ -221,6 +209,9 @@ func runMeshWatch(cmd *cobra.Command, args []string) error {
 			logger.Printf("another daemon is running; exiting")
 			return nil
 		}
+		// Non-EWOULDBLOCK failure: log loudly so the daemon does not die
+		// silently on a startup error (e.g. EACCES, read-only FS).
+		logger.Printf("warning: acquire daemon.pid.lock failed: %v", err)
 		return fmt.Errorf("acquiring daemon.pid.lock: %w", err)
 	}
 	defer func() {
@@ -228,16 +219,33 @@ func runMeshWatch(cmd *cobra.Command, args []string) error {
 		_ = pidLockFile.Close()
 	}()
 
-	// 6. Write PID file atomically AFTER watches are registered so
-	// EnsureDaemonRunning's "pid-file-appears" signal means the daemon
-	// really can accept events.
+	// 5. Reconciliation of pre-existing state.json entries. MUST run
+	// AFTER the lock is held (so we don't double-write crash-recovery
+	// entries on a lost race) and BEFORE the catch-up inbox scan so
+	// adopted-live-orphan entries are classified before a fsnotify
+	// CREATE tries to claim a re-queued envelope, and so that
+	// crash-mid-spawn tasks get a fresh retry before the catch-up path
+	// tries to re-claim their in-progress envelope.
+	tasksDir := filepath.Join(niwaDir, "tasks")
+	reconcileResult := reconcileRunningTasks(tasksDir, logger)
+
+	// 6. Catch-up inbox scan. Run AFTER reconciliation so reconciliation
+	// can re-hydrate orphan workers before the catch-up claim path runs.
+	catchupEvents, err := scanExistingInboxes(rolesRoot, watchedRoles)
+	if err != nil {
+		logger.Printf("warning: catch-up scan failed: %v", err)
+	}
+
+	// 7. Write PID file atomically AFTER watches are registered and the
+	// lock is held so EnsureDaemonRunning's "pid-file-appears" signal
+	// means the daemon really can accept events.
 	if err := writePIDFile(niwaDir); err != nil {
 		return fmt.Errorf("writing PID file: %w", err)
 	}
 	pidFilePath := filepath.Join(niwaDir, "daemon.pid")
 	logger.Printf("daemon ready, PID file written")
 
-	// 7. Central event loop. Everything state-changing flows through
+	// 8. Central event loop. Everything state-changing flows through
 	// this goroutine: fsnotify events, catch-up queue, per-task exits.
 	spawnCtx := spawnContext{
 		instanceRoot:  instanceRoot,
@@ -260,24 +268,52 @@ func runMeshWatch(cmd *cobra.Command, args []string) error {
 	}
 	close(catchupCh)
 
-	// Issue 7: re-spawn any tasks whose state.json was written but whose
+	// Re-spawn any tasks whose state.json was written but whose
 	// cmd.Start never completed. These are the "spawn_never_completed"
 	// classifications from reconcileRunningTasks; the re-spawn happens
 	// here, after the event loop's supervisor plumbing is in scope.
 	for _, taskID := range reconcileResult.freshRetries {
 		respawnFreshRetry(taskID, spawnCtx)
 	}
-	// Issue 7: feed dead/PID-reuse classifications through Issue 5's
-	// unexpected-exit path. Done after spawnCtx is set up so the retry
-	// scheduler goroutines are owned by the same WaitGroup the central
-	// loop drains.
-	for _, taskID := range reconcileResult.deadWorkers {
-		handleSupervisorExit(supervisorExit{taskID: taskID, exitCode: -1}, spawnCtx)
+	// Feed dead/PID-reuse classifications through the same exitCh that
+	// real supervisor goroutines use. The central loop's
+	// handleSupervisorExit branch is the single entry point into the
+	// classifier — piping the startup hand-off through exitCh avoids
+	// maintaining a second call site that could drift from the primary
+	// path as Issue 5's classifier evolves.
+	//
+	// Sent from a goroutine so a larger-than-buffer reconcileResult
+	// cannot deadlock startup: the central loop is not yet reading, and
+	// exitCh's capacity (32) is a performance hint, not a contract on
+	// the number of dead workers a recovered daemon might see.
+	if len(reconcileResult.deadWorkers) > 0 {
+		supervisorWG.Add(1)
+		go func(deadWorkers []string) {
+			defer supervisorWG.Done()
+			for _, taskID := range deadWorkers {
+				select {
+				case exitCh <- supervisorExit{taskID: taskID, exitCode: -1}:
+				case <-ctx.Done():
+					return
+				}
+			}
+		}(reconcileResult.deadWorkers)
+	}
+
+	// Orphan supervisor goroutine: owns the 2s orphan poll. Runs in
+	// parallel with the central loop so a slow ReadState under flock
+	// contention cannot stall fsnotify / exitCh / shutdown handling.
+	if len(reconcileResult.orphans) > 0 {
+		supervisorWG.Add(1)
+		go func(orphans []orphanEntry) {
+			defer supervisorWG.Done()
+			runOrphanSupervisor(orphans, spawnCtx)
+		}(reconcileResult.orphans)
 	}
 
 	logger.Printf("watch loop started orphans=%d fresh_retries=%d dead_workers=%d",
 		len(reconcileResult.orphans), len(reconcileResult.freshRetries), len(reconcileResult.deadWorkers))
-	runEventLoop(ctx, watcher, catchupCh, exitCh, spawnCtx, reconcileResult.orphans)
+	runEventLoop(ctx, watcher, catchupCh, exitCh, spawnCtx)
 
 	// Shutdown: stop accepting new events, let supervisors finish draining.
 	logger.Printf("shutting down, draining in-flight supervisors (up to 5s)")
@@ -321,18 +357,19 @@ type spawnContext struct {
 
 // orphanEntry tracks a live-orphan worker adopted at startup (Issue 7).
 // The daemon did not parent the worker process, so there is no
-// supervisor goroutine and no cmd.Wait signal. Instead the central loop
-// polls each orphan every orphanPollInterval via the authoritative
-// IsPIDAlive(pid, start_time) check and synthesizes a supervisorExit
-// when the worker disappears or the recorded start_time diverges (PID
-// reuse defense).
+// supervisor goroutine and no cmd.Wait signal. Instead the orphan
+// supervisor goroutine (runOrphanSupervisor) polls each orphan every
+// orphanPollInterval via the authoritative IsPIDAlive(pid, start_time)
+// check and synthesizes a supervisorExit — delivered via exitCh — when
+// the worker disappears or the recorded start_time diverges (PID reuse
+// defense).
 type orphanEntry struct {
 	taskID    string
 	pid       int
 	startTime int64
 }
 
-// orphanPollInterval is the cadence at which the central loop polls
+// orphanPollInterval is the cadence at which runOrphanSupervisor polls
 // adopted orphans for liveness. PRD spec is 2 s. Exposed as a var so
 // tests can compress it via setOrphanPollIntervalForTest; production
 // callers must not mutate it.
@@ -350,27 +387,16 @@ func setOrphanPollIntervalForTest(d time.Duration) func() {
 // runEventLoop owns the central `select`. It returns only when ctx is
 // cancelled (signal) or fsnotify closes its events channel.
 //
-// orphans is the initial list of adopted live orphans produced by
-// reconcileRunningTasks. The event loop polls them every
-// orphanPollInterval via pollOrphans and prunes the list when a worker
-// transitions to a terminal state or dies; the polled hand-off to
-// Issue 5's retry classifier is the analogue of the supervisor goroutine
-// that the daemon never got a chance to start for these workers.
+// Adopted-orphan polling lives in runOrphanSupervisor (its own
+// goroutine) so a flock contention on ReadState inside pollOrphans
+// cannot stall the central loop.
 func runEventLoop(
 	ctx context.Context,
 	watcher *fsnotify.Watcher,
 	catchupCh <-chan inboxEvent,
 	exitCh <-chan supervisorExit,
 	spawnCtx spawnContext,
-	orphans []orphanEntry,
 ) {
-	var orphanTickerC <-chan time.Time
-	if len(orphans) > 0 {
-		orphanTicker := time.NewTicker(orphanPollInterval)
-		defer orphanTicker.Stop()
-		orphanTickerC = orphanTicker.C
-	}
-
 	for {
 		select {
 		case <-ctx.Done():
@@ -420,46 +446,40 @@ func runEventLoop(
 				continue
 			}
 			handleSupervisorExit(ex, spawnCtx)
-
-		case <-orphanTickerC:
-			// Poll every adopted orphan; prune terminal/dead entries and
-			// hand dead workers off to Issue 5's classifier via a
-			// synthetic supervisorExit.
-			orphans = pollOrphans(orphans, spawnCtx)
-			if len(orphans) == 0 {
-				// Stop waking on a stopped ticker.
-				orphanTickerC = nil
-			}
 		}
 	}
 }
 
-// pollOrphans is the per-tick worker for adopted-orphan liveness. It
-// reads each orphan's state.json (under the shared flock used by
-// mcp.ReadState) and classifies:
+// pollOrphans is the pure per-tick classifier for adopted-orphan
+// liveness. It reads each orphan's state.json and partitions the input
+// into (remaining, deadExits):
 //
 //   - state is terminal → worker finished (via niwa_finish_task) or
-//     was cancelled. Drop from list; no action.
+//     was cancelled. Drop from list; no exit event.
 //   - IsPIDAlive true AND start_time matches → worker still running.
-//     Keep in list.
-//   - IsPIDAlive false, OR start_time differs (PID reuse) → hand off to
-//     the unexpected-exit classifier so Issue 5 can bump restart_count
-//     and schedule a retry or abandon. Drop from list.
+//     Keep in remaining.
+//   - IsPIDAlive false, OR start_time differs (PID reuse) → drop from
+//     remaining and emit a synthetic supervisorExit so the central
+//     loop's handleSupervisorExit classifier can run under the same
+//     flock discipline as every other exit event.
 //
-// The returned slice contains the orphans still being tracked after
-// this tick. When empty, the caller should stop the orphan ticker.
-func pollOrphans(orphans []orphanEntry, s spawnContext) []orphanEntry {
+// The function is intentionally side-effect-free (aside from logging):
+// the caller — the orphan supervisor goroutine — is responsible for
+// delivering deadExits to exitCh. Keeping the classifier pure lets
+// tests exercise the decision logic without having to pump the event
+// loop.
+func pollOrphans(orphans []orphanEntry, s spawnContext) (remaining []orphanEntry, deadExits []supervisorExit) {
 	if len(orphans) == 0 {
-		return orphans
+		return orphans, nil
 	}
-	kept := orphans[:0]
+	remaining = orphans[:0]
 	for _, o := range orphans {
 		taskDir := filepath.Join(s.instanceRoot, ".niwa", "tasks", o.taskID)
 		_, st, err := mcp.ReadState(taskDir)
 		if err != nil {
 			// Transient read failure (concurrent writer, disk pressure).
 			// Keep polling; do not misclassify on a flaky read.
-			kept = append(kept, o)
+			remaining = append(remaining, o)
 			continue
 		}
 		if stateIsTerminal(st.State) {
@@ -479,20 +499,80 @@ func pollOrphans(orphans []orphanEntry, s spawnContext) []orphanEntry {
 			startTime = o.startTime
 		}
 		if mcp.IsPIDAlive(pid, startTime) {
-			kept = append(kept, o)
+			remaining = append(remaining, o)
 			continue
 		}
-		// Dead or PID reuse. Hand off to Issue 5's classifier via the
-		// same supervisorExit shape a real supervisor goroutine would
-		// emit. ExitCode is unavailable for orphans (we never had the
-		// child handle); use -1 as a sentinel distinct from 0 / 1.
+		// Dead or PID reuse. Synthesize a supervisorExit that matches
+		// the shape a real supervisor goroutine would emit. ExitCode is
+		// unavailable for orphans (we never had the child handle); use
+		// -1 as a sentinel distinct from 0 / 1.
 		s.logger.Printf("orphan_poll task=%s pid=%d action=unexpected_exit", o.taskID, pid)
-		handleSupervisorExit(supervisorExit{
+		deadExits = append(deadExits, supervisorExit{
 			taskID:   o.taskID,
 			exitCode: -1,
-		}, s)
+		})
 	}
-	return kept
+	return remaining, deadExits
+}
+
+// runOrphanSupervisor is the goroutine that owns adopted-orphan
+// polling. Moving the tick out of the central event loop was the fix
+// for a starvation bug: a flock contention on ReadState inside
+// pollOrphans would stall the central select indefinitely, so
+// fsnotify events, supervisor exits, and shutdown signals would all
+// queue behind a single slow orphan.
+//
+// The goroutine owns the orphan list internally. Startup-time
+// additions happen before the goroutine starts (no concurrent access);
+// removals happen only inside this goroutine. The mutex is defensive
+// against a future code path that might want to add orphans at
+// runtime — a low-cost safety net, not a correctness requirement
+// today.
+//
+// Dead-worker exits are delivered to exitCh via the same channel real
+// supervisor goroutines use. The select on shutdownCtx prevents a
+// stuck send from blocking shutdown when the central loop has already
+// stopped reading exitCh.
+func runOrphanSupervisor(initial []orphanEntry, s spawnContext) {
+	if len(initial) == 0 {
+		return
+	}
+	var mu sync.Mutex
+	list := initial
+
+	ticker := time.NewTicker(orphanPollInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-s.shutdownCtx.Done():
+			return
+		case <-ticker.C:
+			mu.Lock()
+			snapshot := list
+			mu.Unlock()
+			if len(snapshot) == 0 {
+				return
+			}
+			remaining, deadExits := pollOrphans(snapshot, s)
+			mu.Lock()
+			list = remaining
+			empty := len(list) == 0
+			mu.Unlock()
+			for _, ex := range deadExits {
+				select {
+				case s.exitCh <- ex:
+				case <-s.shutdownCtx.Done():
+					return
+				}
+			}
+			if empty {
+				// No orphans left to poll; exit the goroutine so the
+				// ticker channel does not keep waking us.
+				return
+			}
+		}
+	}
 }
 
 // handleInboxEvent runs the claim → spawn flow for a single queued
@@ -1361,14 +1441,14 @@ func drainSupervisors(wg *sync.WaitGroup, timeout time.Duration, logger *log.Log
 // state.json entries at daemon startup. The caller wires each bucket
 // into the appropriate follow-up path:
 //
-//   - orphans:       adopted live workers → handed to runEventLoop for
-//     2 s polling.
+//   - orphans:       adopted live workers → handed to runOrphanSupervisor
+//     for 2 s polling in its own goroutine.
 //   - freshRetries:  crash-mid-spawn entries → respawnFreshRetry is
 //     called for each (no restart_count bump).
-//   - deadWorkers:   dead or PID-reuse entries → handleSupervisorExit
-//     is called with a synthetic supervisorExit so Issue
-//     5's classifier bumps restart_count and schedules a
-//     retry or abandon.
+//   - deadWorkers:   dead or PID-reuse entries → a synthetic
+//     supervisorExit is pushed through exitCh so Issue 5's
+//     classifier bumps restart_count and schedules a retry
+//     or abandon via the same code path real exits use.
 type reconcileResult struct {
 	orphans      []orphanEntry
 	freshRetries []string // task IDs classified as spawn_never_completed

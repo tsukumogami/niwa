@@ -495,7 +495,7 @@ func TestRunEventLoop_CatchupSpawnsWorker(t *testing.T) {
 
 	loopDone := make(chan struct{})
 	go func() {
-		runEventLoop(ctx, watcher, catchupCh, exitCh, spawnCtx, nil)
+		runEventLoop(ctx, watcher, catchupCh, exitCh, spawnCtx)
 		close(loopDone)
 	}()
 
@@ -2592,9 +2592,12 @@ func TestOrphanPolling_WorkerCompletes(t *testing.T) {
 		logger:       log.New(io.Discard, "", 0),
 		backoffs:     []time.Duration{60 * time.Second},
 	}
-	remaining := pollOrphans(orphans, s)
+	remaining, deadExits := pollOrphans(orphans, s)
 	if len(remaining) != 0 {
 		t.Errorf("pollOrphans remaining = %v, want empty (terminal state must drop)", remaining)
+	}
+	if len(deadExits) != 0 {
+		t.Errorf("pollOrphans deadExits = %v, want empty (terminal state is not an unexpected exit)", deadExits)
 	}
 	// No retry path must have been engaged.
 	if logHasKind(t, f.tasksDir, taskID, "retry_scheduled") {
@@ -2653,10 +2656,21 @@ func TestOrphanPolling_WorkerDies(t *testing.T) {
 		backoffs:     []time.Duration{60 * time.Second},
 	}
 
-	remaining := pollOrphans(orphans, s)
+	remaining, deadExits := pollOrphans(orphans, s)
 	if len(remaining) != 0 {
 		t.Errorf("pollOrphans remaining = %v, want empty (dead worker must be dropped)", remaining)
 	}
+	if len(deadExits) != 1 || deadExits[0].taskID != taskID {
+		t.Fatalf("pollOrphans deadExits = %v, want one entry for %s", deadExits, taskID)
+	}
+	if deadExits[0].exitCode != -1 {
+		t.Errorf("deadExits[0].exitCode = %d, want -1 (sentinel for orphan with no child handle)", deadExits[0].exitCode)
+	}
+
+	// Drive the supervisorExit through the classifier the way the
+	// orphan supervisor goroutine does at runtime — via exitCh →
+	// handleSupervisorExit — so we can assert the resulting log entries.
+	handleSupervisorExit(deadExits[0], s)
 
 	// Issue 5 classifier must have recorded unexpected_exit and
 	// scheduled a retry.
@@ -2766,56 +2780,40 @@ func readDaemonPIDFile(path string) (int, int64, error) {
 	return pid, st, nil
 }
 
-// TestOrphanPolling_EmptyOrphansShortCircuits verifies that an empty
-// orphan slice passed to runEventLoop does not start a 2-second ticker
-// goroutine — we rely on this to avoid wakes in the zero-orphan case
-// (the common path on a healthy daemon).
+// TestOrphanPolling_EmptyOrphansShortCircuits verifies that
+// runOrphanSupervisor returns immediately when passed an empty orphan
+// list — we rely on this to avoid starting a 2-second ticker goroutine
+// in the zero-orphan case (the common path on a healthy daemon).
 func TestOrphanPolling_EmptyOrphansShortCircuits(t *testing.T) {
 	defer setOrphanPollIntervalForTest(10 * time.Millisecond)()
 
 	f := newDaemonTestFixture(t)
-	watcher, err := fsnotify.NewWatcher()
-	if err != nil {
-		t.Fatalf("fsnotify: %v", err)
-	}
-	defer watcher.Close()
-	if _, err := registerInboxWatches(watcher, f.rolesRoot, log.New(io.Discard, "", 0)); err != nil {
-		t.Fatalf("register watches: %v", err)
-	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	var wg sync.WaitGroup
 	exitCh := make(chan supervisorExit, 1)
-	catchupCh := make(chan inboxEvent)
-	close(catchupCh)
 	s := spawnContext{
 		instanceRoot: f.root,
 		niwaDir:      f.niwaDir,
-		spawnBin:     "/bin/true",
 		logger:       log.New(io.Discard, "", 0),
 		exitCh:       exitCh,
-		wg:           &wg,
 		shutdownCtx:  ctx,
 		backoffs:     []time.Duration{60 * time.Second},
 	}
 
-	loopDone := make(chan struct{})
+	done := make(chan struct{})
 	go func() {
-		runEventLoop(ctx, watcher, catchupCh, exitCh, s, nil)
-		close(loopDone)
+		runOrphanSupervisor(nil, s)
+		close(done)
 	}()
 
-	// Let the loop run briefly to prove it does not spin on a nil ticker.
-	time.Sleep(50 * time.Millisecond)
-	cancel()
-
+	// An empty orphan list must cause the goroutine to return
+	// immediately, long before the ticker would fire.
 	select {
-	case <-loopDone:
-	case <-time.After(2 * time.Second):
-		t.Fatalf("loop did not exit after cancel")
+	case <-done:
+	case <-time.After(1 * time.Second):
+		t.Fatalf("runOrphanSupervisor did not short-circuit on empty input")
 	}
-	wg.Wait()
 }
 
 // TestPollOrphans_TransientReadErrorKeepsEntry: if ReadState returns an
@@ -2847,8 +2845,11 @@ func TestPollOrphans_TransientReadErrorKeepsEntry(t *testing.T) {
 		niwaDir:      f.niwaDir,
 		logger:       log.New(io.Discard, "", 0),
 	}
-	remaining := pollOrphans(orphans, s)
+	remaining, deadExits := pollOrphans(orphans, s)
 	if len(remaining) != 1 {
 		t.Errorf("pollOrphans remaining = %d, want 1 (transient read error must keep entry)", len(remaining))
+	}
+	if len(deadExits) != 0 {
+		t.Errorf("pollOrphans deadExits = %v, want empty (transient read error must not misclassify)", deadExits)
 	}
 }
