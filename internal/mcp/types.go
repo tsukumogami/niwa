@@ -250,10 +250,13 @@ type TaskWorker struct {
 	AdoptedAt      string `json:"adopted_at,omitempty"`
 }
 
-// TaskProgress is the most recent progress event summary. The `body` field is
-// intentionally NOT stored in state.json for the security-critical
-// progress-summary redaction: only the 200-char summary persists across
-// restarts. Full bodies live in transitions.log are not re-read.
+// TaskProgress is the most recent progress event summary. The progress `body`
+// field is intentionally NOT persisted anywhere: TransitionLogEntry has no
+// body field, so bodies are never written to transitions.log either. Only the
+// 200-char summary is persisted (here in state.json.last_progress, overwritten
+// per event). This is the security-critical progress redaction guarantee: the
+// full progress body exists only transiently in the in-process taskEvent and
+// is dropped after the waiter fan-out.
 type TaskProgress struct {
 	Summary string `json:"summary"`
 	At      string `json:"at"` // RFC3339
@@ -317,7 +320,7 @@ func (k TaskEventKind) String() string {
 	case EvtUnexpectedExit:
 		return "unexpected_exit"
 	case EvtAdopted:
-		return "adoption"
+		return "adopted"
 	}
 	return "unknown"
 }

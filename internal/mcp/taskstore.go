@@ -57,7 +57,18 @@ var (
 // section (state.json rewrite + short log append) never pushes a reader past
 // the timeout, while short enough that a wedged holder surfaces as
 // ErrLockTimeout instead of deadlocking the caller.
-const lockTimeout = 30 * time.Second
+//
+// This is a package-level var rather than a const so tests can shorten the
+// bound via setLockTimeoutForTest. Production callers must not mutate it.
+var lockTimeout = 30 * time.Second
+
+// setLockTimeoutForTest swaps lockTimeout for the duration of a test and
+// returns a restore function. Only intended for use from *_test.go files.
+func setLockTimeoutForTest(d time.Duration) func() {
+	prev := lockTimeout
+	lockTimeout = d
+	return func() { lockTimeout = prev }
+}
 
 // lockPollInterval is the retry interval inside acquireFlock. 20 ms is a
 // pragmatic balance: short enough that most contention-free lock hand-offs
