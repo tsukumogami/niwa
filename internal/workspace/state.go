@@ -33,10 +33,11 @@ const (
 	ProvenanceFile = ".niwa-snapshot.toml"
 
 	// SchemaVersion is the current schema version for instance state files.
-	// v2 adds ManagedFile.SourceFingerprint and ManagedFile.Sources; v1
-	// files load through the migration shim in LoadState and are rewritten
-	// as v2 on the next SaveState.
-	SchemaVersion = 2
+	// v2 adds ManagedFile.SourceFingerprint and ManagedFile.Sources.
+	// v3 adds InstanceState.ConfigSource (the source-identity tuple
+	// recorded at last apply). v1 and v2 files load through migration
+	// shims in LoadState and are rewritten on the next SaveState.
+	SchemaVersion = 3
 )
 
 // SourceKind enumerates the provenance categories recognised by
@@ -64,6 +65,12 @@ const (
 // the last apply so offline `niwa status` can surface a summary line
 // without re-running the resolver. Empty when the last apply saw no
 // shadows.
+//
+// ConfigSource arrives in schema v3: it carries the source-identity
+// tuple recorded at the last apply. Lazy-populated from the registry
+// mirror plus the snapshot provenance marker on the first v3-aware
+// SaveState; nil for state files written by older binaries until they
+// next save.
 type InstanceState struct {
 	SchemaVersion    int                  `json:"schema_version"`
 	ConfigName       *string              `json:"config_name"`
@@ -81,6 +88,23 @@ type InstanceState struct {
 	Repos            map[string]RepoState `json:"repos"`
 	Shadows          []Shadow             `json:"shadows,omitempty"`
 	DisclosedNotices []string             `json:"disclosed_notices,omitempty"`
+	ConfigSource     *ConfigSource        `json:"config_source,omitempty"`
+}
+
+// ConfigSource records the resolved source identity for a workspace's
+// config snapshot. Persisted alongside InstanceState in schema v3 per
+// PRD R24. Equivalent in shape to the on-disk provenance marker
+// (workspace/provenance.go); state retains a copy so `niwa status`
+// can render source identity without cracking the snapshot dir.
+type ConfigSource struct {
+	URL            string    `json:"url"`
+	Host           string    `json:"host"`
+	Owner          string    `json:"owner"`
+	Repo           string    `json:"repo"`
+	Subpath        string    `json:"subpath,omitempty"`
+	Ref            string    `json:"ref,omitempty"`
+	ResolvedCommit string    `json:"resolved_commit"`
+	FetchedAt      time.Time `json:"fetched_at"`
 }
 
 // ManagedFile tracks a file written by niwa apply.
@@ -196,14 +220,15 @@ func statePath(dir string) string {
 
 // LoadState reads an InstanceState from the .niwa/instance.json file in dir.
 //
-// v1 state files (SchemaVersion == 1) load via an in-memory migration
-// shim: the new v2 fields on each ManagedFile (SourceFingerprint,
-// Sources) are already JSON-omitempty, so unmarshaling a v1 file
-// leaves them at the zero value. LoadState does NOT bump the schema
-// version on read — the caller's next SaveState rewrites the file as
-// v2. Downgrading a v2-written state back to a pre-Issue-7 binary
-// will fail to parse (the unknown schema_version value trips the
-// strict-parse path there).
+// v1 and v2 state files load via an in-memory migration shim: new
+// fields are JSON-omitempty so older files unmarshal cleanly. LoadState
+// does NOT bump the schema version on read — the caller's next
+// SaveState rewrites the file at the current SchemaVersion.
+//
+// Forward-version state files (schema_version > SchemaVersion) are
+// rejected per PRD R25. The on-disk file is byte-identical to its
+// pre-load state when this happens; LoadState does not attempt
+// down-conversion.
 func LoadState(dir string) (*InstanceState, error) {
 	data, err := os.ReadFile(statePath(dir))
 	if err != nil {
@@ -213,6 +238,12 @@ func LoadState(dir string) (*InstanceState, error) {
 	var state InstanceState
 	if err := json.Unmarshal(data, &state); err != nil {
 		return nil, fmt.Errorf("parsing instance state: %w", err)
+	}
+
+	if state.SchemaVersion > SchemaVersion {
+		return nil, fmt.Errorf(
+			"state file at schema_version %d is newer than this binary supports (max %d); upgrade niwa to read this state",
+			state.SchemaVersion, SchemaVersion)
 	}
 
 	return &state, nil
