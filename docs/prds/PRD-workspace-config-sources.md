@@ -69,7 +69,8 @@ and remove the silent-edit-loss footgun.
   bytes that subpath contains, never the rest of the brain repo.
 - **Preserve the existing standalone `dot-niwa` workflow.** Existing
   registries pointing at whole-repo sources continue to apply with no
-  user action after upgrading.
+  user action after upgrading. Their on-disk working trees lazy-convert
+  to snapshots transparently.
 - **Make convention-based discovery the default ergonomic path.** Users
   who type `niwa init --from owner/brain-repo` get the right thing
   without having to know or type the subpath, when the brain repo
@@ -84,9 +85,6 @@ and remove the silent-edit-loss footgun.
   emerges.
 
 ## User Stories
-
-These are the four scenarios v1 must support directly. Each is written
-from the developer's first-person view, present tense.
 
 ### Story 1: First-time subpath adoption
 
@@ -104,15 +102,33 @@ they could.
 
 A developer has an existing workspace pointing at
 `tsukumogami/dot-niwa`. The maintainer announces the config has moved
-into the brain repo at `tsukumogami/vision:.niwa`. The developer runs
-`niwa config set global tsukumogami/vision` (convention discovery
-resolves the subpath to `.niwa` automatically) and then `niwa apply`.
-niwa detects the source URL changed, refuses to proceed, prints a
-diagnostic naming both URLs and instructing the developer to inspect
-`<workspace>/.niwa/` for pending edits before re-running with `--force`.
-After `niwa apply --force`, niwa atomically replaces the snapshot.
-From this point forward, edits to `.niwa/` are never silently lost
-because there's no working tree to commit into.
+into the brain repo at `tsukumogami/vision:.niwa`. The developer
+updates the registered source via either path:
+
+- CLI: `niwa config set global tsukumogami/vision`
+- Manual: edit `~/.config/niwa/config.toml` and change the
+  `[registry.<name>] source_url` field
+
+Both paths leave the existing on-disk `<workspace>/.niwa/` working
+tree untouched. The developer runs `niwa apply`. niwa detects the
+source URL changed, refuses to proceed, and prints:
+
+```
+error: workspace config source changed
+  was:  tsukumogami/dot-niwa
+  now:  tsukumogami/vision (subpath: .niwa, discovered)
+  The current .niwa/ on disk is a working tree from the old source.
+  Replacing it will discard any uncommitted edits.
+To proceed:
+  1. cd .niwa && git status   # check for uncommitted work
+  2. niwa apply --force        # discard .niwa/ and re-materialize
+```
+
+After `niwa apply --force`, niwa validates that the new source's
+`[workspace].name` matches the registered name (otherwise refusing
+without `--rename`), then atomically replaces the snapshot. From this
+point forward, edits to `.niwa/` are never silently lost because
+there's no working tree to commit into.
 
 ### Story 3: Brain-repo maintainer publishing
 
@@ -134,7 +150,82 @@ representation of the new default-branch tip, computes the new resolved
 commit, sees it differs from the snapshot's recorded commit, and
 atomically replaces the snapshot. No merge conflicts, no fast-forward
 errors, no manual reconciliation. `niwa status` shows the new commit
-and the latest fetched-at timestamp. Issue #72 is invisible.
+and the latest fetched-at timestamp. The failure mode that wedged this
+workflow before this redesign no longer exists.
+
+### Story 5: Existing standalone-`dot-niwa` user upgrades
+
+A developer with an established workspace pointing at
+`tsukumogami/dot-niwa` upgrades to a v3-aware niwa binary. Their
+registry source URL is unchanged; their on-disk `<workspace>/.niwa/`
+is still a git working tree. They run `niwa apply` as usual. niwa
+detects the working-tree shape under an unchanged URL, lazy-converts
+to a snapshot in place (atomic rename), proceeds with apply, and
+prints a one-time notice: `note: <workspace>/.niwa/ converted from
+working tree to snapshot. Manual edits inside this directory will
+no longer persist across apply.` Subsequent applies behave like Story
+1. No `--force` flag, no destroy/re-init ritual.
+
+### Story 6: CI / automation operator
+
+A CI pipeline runs `niwa apply` against a workspace pointing at
+`tsukumogami/vision:.niwa`. The pipeline runs after every push to a
+related repo and must use the latest config or fail loudly. The
+operator notices that v1 niwa, when the network is unreachable
+mid-apply, falls back to the cached snapshot with a stderr warning
+and exit 0 — acceptable for human developers but unacceptable for
+CI where stale config is unsafe. The operator documents this as a
+known limitation for now and tracks the planned `--strict-refresh`
+flag (deferred to a follow-up release) for the use case. They
+confirm that the workspace's normal failure modes (subpath not
+found, host unreachable on first fetch with no cache, source URL
+mismatch) all produce non-zero exits suitable for CI gating.
+
+## Test Strategy
+
+The acceptance criteria below depend on test fixtures niwa does not
+have today. v1 commits to building the following fixtures as part of
+this work; without them the GitHub-path acceptance criteria cannot be
+verified mechanically.
+
+### In-scope fixture deliverables
+
+- **`tarballFakeServer`** — an in-process HTTP test server (paired
+  helper alongside `localGitServer`) that serves
+  `GET /repos/{owner}/{repo}/tarball/{ref}` and
+  `GET /repos/{owner}/{repo}/commits/{ref}` against a
+  test-controlled repo state. Supports:
+  - configurable response bodies, status codes, and ETags
+  - `If-None-Match` conditional GETs returning 304
+  - request logging (so tests can assert "no tarball request was made")
+  - fault-injection modes: `truncate-after:N` (close connection
+    after N bytes), `delay:N`, `return-status:N`, `drop-next-request`
+- **State-file factory step** — Gherkin step that authors a v1, v2,
+  or v3 `InstanceState` file with arbitrary `schema_version` for the
+  lazy-upgrade and forward-version-rejection scenarios.
+- **Legacy working-tree fixture step** — Gherkin step that sets up a
+  real `git clone`-shape `<workspace>/.niwa/` (with `.git/` present)
+  for the snapshot-conversion migration scenarios.
+- **Tarball-extraction fault-injection seam** — a niwa-side test hook
+  (e.g., `NIWA_TEST_FAULT=truncate-after:N` env var) that simulates
+  partial-write failures during snapshot materialization.
+
+These fixtures live in `test/functional/` alongside `localGitServer`
+and follow the same Go test-helper conventions. Each acceptance
+criterion below that depends on a fixture names the fixture
+explicitly.
+
+### Acceptance-criterion conventions
+
+- Each AC begins with a Given (precondition / fixture state), implicit
+  When (the niwa command being verified), and Then (observable
+  assertion).
+- Observables include: process exit code, stderr substring presence,
+  file/directory existence and contents, request counts on a fake
+  server, byte-identity of state files.
+- Performance targets are documented as expected behavior in Known
+  Limitations rather than acceptance criteria; v1 does not gate-block
+  on performance.
 
 ## Requirements
 
@@ -151,13 +242,20 @@ and the latest fetched-at timestamp. Issue #72 is invisible.
   (`source_host`, `source_owner`, `source_repo`, `source_subpath`,
   `source_ref`) as registry mirror fields alongside the canonical
   opaque `source_url` slug.
-- **R3.** niwa MUST treat the slug parser as strict: empty subpath after
-  a colon, malformed ordering of separators, embedded whitespace, and
-  multiple `:` or `@` separators MUST be rejected at parse time with a
-  diagnostic naming the offending input.
+- **R3.** niwa MUST treat the slug parser as strict: the following
+  inputs MUST be rejected at parse time with a diagnostic naming the
+  offending input:
+  (a) empty subpath after a colon (`org/repo:`),
+  (b) malformed separator ordering (e.g., `@ref` appearing before
+  `:subpath`: `org/repo@v1:.niwa`),
+  (c) embedded whitespace anywhere in the slug,
+  (d) multiple `:` separators (e.g., `org/repo:a:b`),
+  (e) multiple `@` separators (e.g., `org/repo@v1@v2`).
 - **R4.** niwa MUST accept a subpath that resolves to a regular file
   (not a directory) and treat the parent directory as the config
-  directory.
+  directory. If the file is not a syntactically valid `workspace.toml`
+  or `niwa.toml`, niwa MUST fail with the standard config-validation
+  error path.
 
 **Convention-based discovery**
 
@@ -175,9 +273,11 @@ and the latest fetched-at timestamp. Issue #72 is invisible.
 - **R8.** When discovery resolves to repo root via the rank-3
   `niwa.toml` convention, niwa MUST require `[workspace] content_dir`
   to be set explicitly in the resolved config; an omitted
-  `content_dir` in this case MUST fail with a diagnostic. The explicit
-  value `content_dir = "."` is valid (opt-in to "the whole brain repo
-  is content").
+  `content_dir` in this case MUST fail with a diagnostic naming the
+  resolved source slug, the resolved subpath (`/`), the missing
+  setting (`[workspace] content_dir`), and the explicit-opt-in escape
+  hatch (`content_dir = "."`). The explicit value `content_dir = "."`
+  is valid (opt-in to "the whole brain repo is content").
 - **R9.** Explicit subpath in the slug MUST bypass discovery entirely.
   If the explicit subpath does not contain a `workspace.toml`, niwa
   MUST fail without falling back to discovery.
@@ -185,274 +285,464 @@ and the latest fetched-at timestamp. Issue #72 is invisible.
 **Snapshot materialization**
 
 - **R10.** niwa MUST materialize the workspace config as a pure file
-  tree at `<workspace>/.niwa/` containing only the files from the
-  resolved source subpath plus a single provenance marker. No `.git/`
-  directory MUST exist in the materialized snapshot.
-- **R11.** The provenance marker MUST record at minimum: the source URL,
-  parsed source tuple, resolved commit oid, fetched-at timestamp, and
-  fetch mechanism used.
-- **R12.** Snapshot refresh MUST be atomic: niwa writes the new
-  materialization to a sibling location and renames it into place on
-  success. A failed refresh MUST leave the existing snapshot intact.
+  tree at `<workspace>/.niwa/` containing exactly:
+  (a) every regular file present at the resolved subpath in the source
+  commit, with directory structure preserved;
+  (b) one provenance marker file (location and format determined at
+  design time, subject to R11 and R34).
+  No additional files MUST persist, including (but not limited to)
+  `.git/`, `pax_global_header`, tarball-wrapper directories, or other
+  VCS metadata.
+- **R11.** The provenance marker MUST record at minimum: the source URL
+  as a single canonical string, the parsed source tuple
+  (`host`, `owner`, `repo`, `subpath`, `ref`), the resolved commit
+  oid, the fetched-at timestamp (RFC 3339), and the fetch mechanism
+  identifier (e.g., `github-tarball`, `git-clone-fallback`).
+- **R12.** Snapshot refresh MUST be atomic from the perspective of
+  concurrent readers: niwa MUST materialize the new snapshot at a
+  sibling path (e.g., `<workspace>/.niwa.next/`), then swap it into
+  place such that at no point during the swap is `<workspace>/.niwa/`
+  absent or partially populated. The previous snapshot MUST be
+  removed only after the new snapshot is observable at the canonical
+  path. On platforms where atomic directory-swap is not available,
+  niwa MUST use a documented best-effort sequence (rename old to
+  backup, rename new to canonical, then delete backup) and accept the
+  brief sub-microsecond non-atomic window.
 - **R13.** The same snapshot model MUST apply symmetrically to the team
   config clone, the personal overlay clone, and the workspace overlay
   clone. All three must share the no-`.git/`, atomic-refresh, marker-
-  bearing posture.
+  bearing posture, and all three MUST use the same fetch-mechanism
+  selection (R14/R15) based on their source host.
 
 **Fetch mechanisms**
 
 - **R14.** When the source host is `github.com`, niwa MUST use the
-  GitHub REST tarball endpoint with selective `tar` extraction filtered
-  to the requested subpath. Files outside the subpath MUST never persist
-  to disk.
+  GitHub REST tarball endpoint with selective extraction filtered to
+  the requested subpath. niwa MUST stream-extract using Go's
+  `archive/tar` package without invoking a system `tar` binary. Files
+  outside the subpath MUST never be written to disk during extraction.
 - **R15.** When the source host is anything other than `github.com`
   (including GitHub Enterprise Server, GitLab, Bitbucket, Gitea, and
   `file://` URLs), niwa MUST use a temp-directory `git clone --depth=1`
   fallback followed by a copy of the requested subpath into the
-  snapshot location. The temporary clone MUST be removed after copy.
+  snapshot location. The temporary clone MUST be removed after copy
+  per R33.
 - **R16.** Drift detection on the GitHub path MUST use the 40-byte
   `commits/{ref}` SHA endpoint with `Accept: application/vnd.github.sha`
   and `If-None-Match` ETag-conditional GETs against the tarball
   endpoint. Drift detection on the fallback path MUST use
   `git ls-remote <url> <ref>`.
+- **R17.** Authentication for GitHub fetches MUST read the `GH_TOKEN`
+  environment variable. When `GH_TOKEN` is unset, niwa MUST attempt
+  the request anonymously (suitable for public repos). Authentication
+  for the git-clone fallback MUST defer to git's existing credential
+  resolution (SSH agent, `~/.netrc`, `git config insteadOf`,
+  credential helpers) — niwa MUST NOT inject or override credentials
+  for the fallback path.
+- **R18.** When the GitHub API responds with a 301 redirect for a
+  renamed repository, niwa MUST follow the redirect once for the
+  immediate request to complete successfully, and MUST emit a
+  one-time `note:`-prefixed notice (using the existing
+  `DisclosedNotices` mechanism) naming the old and new repository
+  paths. Subsequent applies against the same registry entry MUST NOT
+  silently re-follow; the user is expected to update the registry to
+  the new canonical name.
 
 **Default branch and ref resolution**
 
-- **R17.** When the slug omits `@ref`, niwa MUST re-resolve the source
+- **R19.** When the slug omits `@ref`, niwa MUST re-resolve the source
   repo's default branch on every `niwa apply` (not pin at init time).
   niwa MUST record the latest resolved commit oid in
   `InstanceState.config_source.resolved_commit` after each apply.
-- **R18.** `niwa status` MUST distinguish a pinned ref from an
+- **R20.** `niwa status` MUST distinguish a pinned ref from an
   auto-resolved default branch in its detail-view output (e.g., the
   string "(default branch)" appended when no ref was specified).
-- **R19.** When a source URL omits `@ref` and the default branch
+- **R21.** When a source URL omits `@ref` and the default branch
   cannot be re-resolved (network unreachable), niwa MUST continue with
   the cached snapshot and emit a `warning:`-prefixed notice naming the
   source URL, the cached commit oid, and the cached fetched-at
-  timestamp. Apply MUST NOT abort.
+  timestamp. Apply MUST NOT abort. (CI/automation operators wanting
+  fail-on-stale behavior are deferred to a future `--strict-refresh`
+  flag.)
 
 **Registry and state schema**
 
-- **R20.** niwa MUST persist registry entries with the parsed mirror
-  fields (R2) populated. Existing entries written by older binaries
-  (no mirror fields) MUST parse on read and MUST be lazily upgraded by
-  populating the mirror fields on the next registry write.
-- **R21.** niwa MUST bump the per-instance state schema to v3 and add a
+- **R22.** niwa MUST persist registry entries with the parsed mirror
+  fields (R2) populated. The opaque `source_url` field MUST be
+  treated as canonical: when the parsed mirror fields disagree with
+  the canonical slug (e.g., user hand-edited the registry file), niwa
+  MUST re-parse `source_url`, overwrite the mirror fields on next
+  save, and emit a stderr warning naming the inconsistency.
+- **R23.** Existing registry entries written by older binaries (no
+  mirror fields) MUST parse on read. The mirror fields MUST be
+  populated on the first invocation of any command that loads the
+  registry, and MUST be persisted to disk on the next save (lazy-
+  upgrade-on-first-write). Read-only commands like `niwa status` MUST
+  NOT mutate the file but MUST behave as if the mirror were present.
+- **R24.** niwa MUST bump the per-instance state schema to v3 and add a
   `config_source` block carrying `(url, host, owner, repo, subpath,
   ref, resolved_commit, fetched_at)`. v2 state files MUST load
-  successfully and MUST be lazily upgraded to v3 on the next save.
-- **R22.** When niwa reads a state file with `schema_version` greater
+  successfully; the next `niwa apply` MUST populate `config_source`
+  from the registry mirror plus the current snapshot's provenance and
+  write a v3 file on next save.
+- **R25.** When niwa reads a state file with `schema_version` greater
   than the highest version this binary supports, it MUST fail with a
-  diagnostic naming the observed and supported versions. niwa MUST NOT
-  attempt to silently down-convert.
+  diagnostic naming the observed and supported versions. The on-disk
+  state file MUST be byte-identical to its pre-failure state. niwa
+  MUST NOT attempt down-conversion.
 
-**Migration from working tree to snapshot**
+**Migration: working tree to snapshot**
 
-- **R23.** When `niwa apply` runs against a workspace whose registry
-  source URL has changed and whose `<workspace>/.niwa/` is the legacy
+- **R26.** When `niwa apply` runs against a workspace whose registry
+  source URL has changed AND whose `<workspace>/.niwa/` is the legacy
   working-tree form (has `.git/` present), niwa MUST refuse to proceed
-  without `--force`. The error MUST name the old and new source URLs
-  and MUST suggest an inspection command (e.g., `cd .niwa && git
-  status`) before re-running with `--force`.
-- **R24.** When `--force` is passed (or `<workspace>/.niwa/` is already
+  without `--force`. The error MUST name the old and new source URLs,
+  the discovered subpath in the new source, and an inspection command
+  (`cd .niwa && git status`).
+- **R27.** When `--force` is passed (or `<workspace>/.niwa/` is already
   a snapshot), niwa MUST atomically replace the materialization from
-  the new source per R12.
+  the new source per R12. Before replacement, niwa MUST validate that
+  the new source's `[workspace].name` matches the registered workspace
+  name; on mismatch niwa MUST refuse without `--rename` and MUST name
+  both the registered name and the new source's name in the error.
+- **R28.** When `niwa apply` runs against a workspace whose registry
+  source URL is UNCHANGED but whose `<workspace>/.niwa/` is the legacy
+  working-tree form, niwa MUST lazy-convert the working tree to a
+  snapshot in place (atomic, per R12) and proceed with apply. niwa
+  MUST emit a one-time `note:`-prefixed notice (via the existing
+  `DisclosedNotices` mechanism) naming the conversion. No `--force`
+  flag is required for this case.
+- **R29.** Both the `niwa config set global <slug>` CLI and direct
+  edit of `~/.config/niwa/config.toml` MUST be supported as entry
+  points for changing the registered source. The next `niwa apply`
+  MUST detect the URL change identically regardless of which entry
+  point was used.
 
 **Replacement of `.git/`-dependent paths**
 
-- **R25.** `niwa reset`'s "is this config from a remote" check MUST read
-  the snapshot provenance marker rather than `.git/` presence. When the
-  marker is present, niwa MUST treat the config as cloned and offer
-  re-fetch as the recovery path. When absent, niwa MUST treat the
-  config as user-authored (matching today's local-only-workspace
-  semantics).
-- **R26.** The plaintext-secrets public-repo guardrail MUST enumerate
-  remotes by reading the snapshot provenance marker's host/owner/repo
+- **R30.** `niwa reset`'s "is this config from a remote" check
+  (currently `isClonedConfig` in `internal/cli/reset.go`) MUST read
+  the snapshot provenance marker rather than `<configDir>/.git/`
+  presence. When the marker is present, niwa MUST treat the config
+  as cloned and offer re-fetch as the recovery path. When absent,
+  niwa MUST treat the config as user-authored (matching today's
+  local-only-workspace semantics).
+- **R31.** The plaintext-secrets public-repo guardrail (currently
+  `CheckGitHubPublicRemoteSecrets` in
+  `internal/guardrail/githubpublic.go`) MUST enumerate remotes by
+  reading the snapshot provenance marker's `host`/`owner`/`repo`
   fields rather than by invoking `git -C <configDir> remote -v`. The
-  GitHub-public pattern match MUST run against the marker tuple.
-- **R27.** The `--allow-dirty` flag MUST be silently accepted for one
-  release with a stderr deprecation notice ("--allow-dirty is no longer
-  meaningful under the snapshot model and will be removed in a future
-  release"). It MUST be hard-removed in a subsequent release.
+  existing GitHub-public detection contract is preserved (case-
+  insensitive `host == "github.com"` plus public-visibility check via
+  the configured GitHub API for the owner/repo); only the input
+  source changes.
+- **R32.** The `--allow-dirty` flag MUST be silently accepted in v1
+  with a stderr deprecation notice (`warning: --allow-dirty is no
+  longer meaningful under the snapshot model and will be removed in
+  v1.1`). The notice MUST be printed once per process invocation. The
+  flag MUST be hard-removed in the v1.1 release.
 
 **Backwards compatibility**
 
-- **R28.** Existing registries with `source_url = "org/dot-niwa"` (no
+- **R33.** Existing registries with `source_url = "org/dot-niwa"` (no
   subpath) MUST continue to resolve via discovery rank 2 (root
-  `workspace.toml`) without user action. Registry behavior, state
-  behavior, and on-disk content (subject to the snapshot conversion
-  in R23/R24) MUST be unchanged.
-- **R29.** No existing user MUST be required to take any action after
+  `workspace.toml`) without user action. R28 covers the on-disk
+  working-tree-to-snapshot conversion; R23 covers the registry
+  schema upgrade. No upgrade-time prompt MUST fire for these users.
+- **R34.** No existing user MUST be required to take any action after
   upgrading to the v3-aware niwa binary. The first `niwa apply` after
-  upgrade triggers the lazy migrations (R20, R21) automatically.
+  upgrade triggers all lazy migrations (R23 registry, R24 state, R28
+  on-disk conversion) automatically.
 
 ### Non-functional requirements
 
-- **R30.** A first-time GitHub fetch SHOULD complete in under 5 seconds
-  for a typical config-sized subpath (≤1 MB compressed) on a normal
-  broadband connection. The 40-byte SHA-endpoint drift check on
-  subsequent applies SHOULD complete in under 500 ms.
-- **R31.** A snapshot refresh on a source whose commit oid has not
-  changed MUST NOT incur the cost of re-extracting the tarball.
-- **R32.** Files outside the resolved subpath MUST NOT persist to disk
-  on the GitHub path, even temporarily during materialization.
-- **R33.** The fallback path's temporary clone directory MUST be cleaned
-  up on success and on most failure paths (process kill is the
-  exception; document the resulting cleanup ritual).
-- **R34.** The provenance marker MUST be readable with no specialized
-  tooling — a future contributor inspecting `<workspace>/.niwa/`
-  manually must be able to identify origin, ref, and fetched-at without
-  running niwa.
+- **R35.** Files outside the resolved subpath MUST NOT be written to
+  disk during materialization on the GitHub path, even temporarily
+  (verified via the no-side-effect-files invariant in R10 plus the
+  stream-extract requirement in R14).
+- **R36.** The provenance marker MUST be readable with no specialized
+  tooling — a contributor inspecting `<workspace>/.niwa/` manually
+  with `cat`, `jq`, or `toml` (depending on the chosen format) MUST
+  be able to identify origin, ref, and fetched-at without running
+  niwa.
 
 ## Acceptance Criteria
 
-The criteria below are organized by capability. Each is binary
-pass/fail and verifiable by a developer who didn't write the PRD.
+Each AC is binary pass/fail. ACs that depend on a fixture name it
+explicitly. The Test Strategy section above defines fixtures.
 
 ### AC: Subpath sourcing (verifies R1-R4)
 
-- [ ] `niwa init <name> --from owner/repo:path/to/config@v1.2.0` parses
-  the slug into the four-tuple and stores all mirror fields plus the
-  opaque slug in the registry.
-- [ ] `niwa init <name> --from owner/repo` (bare slug) triggers
-  discovery and persists the resolved subpath in the registry.
-- [ ] `niwa init <name> --from owner/repo:` (empty subpath after colon)
-  fails with a parse error naming the empty subpath.
-- [ ] `niwa init <name> --from owner/repo:path/to/niwa.toml` (subpath
-  resolves to a file) treats the parent directory as the config dir
-  and validates the file as the workspace config.
-- [ ] `niwa init <name> --from owner/repo:nonexistent` fails after
-  fetch with a "subpath not found" diagnostic naming the subpath, the
-  resolved commit oid, and the source slug. The on-disk snapshot is
-  not modified.
+- [ ] **AC-S1**. Given a slug `owner/repo:path/to/config@v1.2.0`,
+  `niwa init <name> --from <slug>` parses into the four-tuple and
+  stores all five mirror fields plus the opaque slug in
+  `~/.config/niwa/config.toml` under `[registry.<name>]`.
+- [ ] **AC-S2**. Given a bare slug `owner/repo`,
+  `niwa init <name> --from <slug>` triggers discovery and persists
+  the resolved subpath in `source_subpath`.
+- [ ] **AC-S3a**. `niwa init <name> --from owner/repo:` exits non-zero
+  with stderr containing the literal string "empty subpath".
+- [ ] **AC-S3b**. `niwa init <name> --from owner/repo@v1:.niwa` exits
+  non-zero with stderr naming the malformed separator ordering.
+- [ ] **AC-S3c**. `niwa init <name> --from "owner/repo: .niwa"` (with
+  embedded whitespace) exits non-zero with stderr naming the
+  whitespace.
+- [ ] **AC-S3d**. `niwa init <name> --from owner/repo:a:b` exits
+  non-zero with stderr naming the multiple-colon error.
+- [ ] **AC-S3e**. `niwa init <name> --from owner/repo@v1@v2` exits
+  non-zero with stderr naming the multiple-`@` error.
+- [ ] **AC-S4a**. Given a fixture source whose `path/to/niwa.toml`
+  is a valid one-file workspace config,
+  `niwa init <name> --from owner/repo:path/to/niwa.toml` treats
+  `path/to/` as the config directory and validates the file as the
+  workspace config.
+- [ ] **AC-S4b**. Given a fixture source whose `path/to/notconfig`
+  is a non-TOML file,
+  `niwa init <name> --from owner/repo:path/to/notconfig` exits
+  non-zero with the standard config-validation error.
+- [ ] **AC-S5**. Given a slug `owner/repo:nonexistent` and a
+  successful tarball fetch that does not contain the subpath, niwa
+  fails with a "subpath not found" diagnostic naming the subpath, the
+  resolved commit oid, and the source slug. The on-disk
+  `<workspace>/.niwa/` is byte-identical to its pre-apply state.
 
 ### AC: Convention-based discovery (verifies R5-R9)
 
-- [ ] When the source repo contains only `.niwa/workspace.toml`,
-  discovery resolves `source_subpath = ".niwa/"`.
-- [ ] When the source repo contains only a root `workspace.toml`,
-  discovery resolves `source_subpath = ""` and the existing
-  standalone-`dot-niwa` workflow continues to work.
-- [ ] When the source repo contains only a root `niwa.toml`,
-  discovery resolves `source_subpath = ""` and validates the file as
-  the workspace config; a `niwa.toml` without `[workspace] content_dir`
-  fails apply with a targeted diagnostic.
-- [ ] When the source repo contains both `.niwa/workspace.toml` and a
-  root `workspace.toml`, niwa fails with an "ambiguous niwa config"
-  error naming both files.
-- [ ] When the source repo contains a `.niwa/` directory but no
-  `.niwa/workspace.toml` inside it, discovery skips rank 1 and tries
-  ranks 2 and 3.
-- [ ] When the source repo contains none of the three markers, niwa
-  fails with a discovery error naming all three accepted markers.
-- [ ] An explicit subpath bypasses discovery; a missing
-  `workspace.toml` in the explicit subpath fails immediately rather
-  than falling back to discovery.
+- [ ] **AC-D1**. Given a `tarballFakeServer` source containing only
+  `.niwa/workspace.toml`, discovery resolves
+  `source_subpath = ".niwa/"`.
+- [ ] **AC-D2**. Given a source containing only a root
+  `workspace.toml` (the standalone-`dot-niwa` shape), discovery
+  resolves `source_subpath = ""` and apply succeeds without prompts.
+- [ ] **AC-D3**. Given a source containing only a root `niwa.toml`
+  with `[workspace] content_dir = "claude"`, discovery resolves
+  `source_subpath = ""` and apply succeeds.
+- [ ] **AC-D4**. Given a source containing a root `niwa.toml`
+  without `[workspace] content_dir`, apply exits non-zero with stderr
+  containing the resolved slug, the resolved subpath (`/`), the
+  literal `content_dir`, and the literal `content_dir = "."`.
+- [ ] **AC-D5**. Given a source containing a root `niwa.toml` with
+  `[workspace] content_dir = "."`, apply succeeds and
+  `InstallWorkspaceContent` reads from repo root as the content root.
+- [ ] **AC-D6**. Given a source containing both `.niwa/workspace.toml`
+  AND a root `workspace.toml`, apply exits non-zero with stderr
+  naming both files and the literal "ambiguous niwa config".
+- [ ] **AC-D7**. Given a source containing a `.niwa/` directory but
+  no `.niwa/workspace.toml` inside it, AND a root `workspace.toml`,
+  discovery resolves to rank 2 (no error fires for the empty
+  `.niwa/`).
+- [ ] **AC-D8**. Given a source containing none of the three
+  markers, apply exits non-zero with stderr listing all three
+  accepted marker paths.
+- [ ] **AC-D9**. Given an explicit slug
+  `owner/repo:custom/path` and a source where `custom/path/` exists
+  but contains no `workspace.toml`, apply exits non-zero without
+  attempting discovery; stderr names the missing `workspace.toml` at
+  `custom/path/`.
 
 ### AC: Snapshot materialization (verifies R10-R13)
 
-- [ ] After `niwa apply` (first run), `<workspace>/.niwa/` contains the
-  source subpath's files plus a provenance marker; no `.git/`
-  directory is present; `git status` inside the directory exits
-  with "not a git repository".
-- [ ] After `niwa apply` against a snapshot whose source has been
-  force-pushed, niwa fetches the new commit oid and re-materializes
-  the snapshot atomically. The previous snapshot is removed only
-  after the rename completes. niwa does NOT fail with `fatal: Not
-  possible to fast-forward, aborting` (issue #72 regression).
-- [ ] After a snapshot refresh interrupted partway (network cut,
-  tarball truncation, disk-full during extraction), the previous
-  snapshot at `<workspace>/.niwa/` is intact.
-- [ ] When the source's resolved commit oid matches the provenance
-  marker's `resolved_commit`, niwa skips re-extraction and updates
-  only the `fetched_at` timestamp.
-- [ ] The same snapshot posture applies to the personal overlay clone
-  and the workspace overlay clone (no `.git/`, atomic refresh,
-  provenance marker present in each).
+- [ ] **AC-M1**. After first `niwa apply` against a configured
+  source, `<workspace>/.niwa/` contains the source subpath's regular
+  files and the provenance marker, and ONLY those. `find
+  <workspace>/.niwa/ -name '.git*' -o -name 'pax_global_header'`
+  returns no results. `git -C <workspace>/.niwa/ status` exits with a
+  "not a git repository" status code.
+- [ ] **AC-M2**. The provenance marker file in `<workspace>/.niwa/`
+  contains values for keys `source_url`, `host`, `owner`, `repo`,
+  `subpath`, `ref`, `resolved_commit`, `fetched_at`, and
+  `fetch_mechanism`, parseable with a generic TOML / JSON / YAML
+  reader (per the format chosen at design time) without invoking
+  niwa.
+- [ ] **AC-M3**. Given a snapshot whose source has been force-pushed
+  (the `tarballFakeServer` returns a different commit oid for the
+  same ref), `niwa apply` re-fetches and re-materializes the
+  snapshot. The previous `<workspace>/.niwa/` directory is observable
+  at the canonical path until the swap completes; partial
+  intermediate states are not. niwa exits with code 0 (no
+  fast-forward error).
+- [ ] **AC-M4**. Given a snapshot mid-refresh (using the
+  `truncate-after:N` fixture mode that closes the connection mid-
+  tarball), the previous `<workspace>/.niwa/` is byte-identical to
+  its pre-refresh tree. The provenance marker's `resolved_commit` is
+  the pre-refresh oid.
+- [ ] **AC-M5**. Given a snapshot whose source's `commits/{ref}`
+  endpoint returns the same oid as the snapshot's
+  `resolved_commit`, `niwa apply` does not extract the tarball. The
+  `tarballFakeServer` records zero `GET /tarball` requests during
+  this apply. The snapshot's `fetched_at` is updated.
+- [ ] **AC-M6**. After first `niwa apply` against a workspace with a
+  personal overlay AND a workspace overlay both pointing at GitHub
+  sources, no `.git/` directories exist in any of the three
+  snapshots (`<workspace>/.niwa/`, the personal overlay clone path,
+  the workspace overlay clone path), and each contains a provenance
+  marker.
 
-### AC: GitHub tarball fetch (verifies R14-R16)
+### AC: GitHub tarball fetch and auth (verifies R14-R18)
 
-- [ ] On `niwa apply` against a `github.com` source, no files outside
-  the resolved subpath are present on disk after materialization.
-- [ ] The drift check against `commits/{ref}` returns the cached oid
-  (matching the snapshot provenance) without invoking the tarball
-  endpoint.
-- [ ] When the SHA endpoint reports a different oid, niwa issues the
-  tarball request with `If-None-Match: <stored ETag>`; a 304 response
-  is treated as "no change" without re-extracting.
-- [ ] On a private GitHub repo, a 401 or 403 from the tarball or SHA
-  endpoint surfaces an error naming the underlying API status with a
-  remediation hint pointing at PAT scope documentation.
+- [ ] **AC-G1**. Given a `tarballFakeServer` source whose tarball
+  contains files at `<root>/.niwa/...` and `<root>/src/...`, after
+  apply against `owner/repo:.niwa`, no files from `src/` exist
+  anywhere on disk inside `<workspace>/.niwa/` or in any temp
+  directory under `$TMPDIR`.
+- [ ] **AC-G2**. Given a snapshot apply, the `tarballFakeServer`
+  receives the second apply's `commits/{ref}` request with
+  `Accept: application/vnd.github.sha`; the response body is the
+  cached oid; the second apply makes zero requests to
+  `/repos/{owner}/{repo}/tarball/{ref}`.
+- [ ] **AC-G3**. Given a `tarballFakeServer` configured to return
+  304 on a conditional GET with `If-None-Match: <oid>`, niwa issues
+  the conditional GET on the second apply when the SHA endpoint
+  reports a different oid. The 304 is treated as no-change: the
+  snapshot's mtime is unchanged and the snapshot directory is not
+  re-extracted.
+- [ ] **AC-G4**. Given `GH_TOKEN=test-token` in the niwa process
+  env, the `tarballFakeServer` records both the `commits/` request
+  and the `tarball/` request as carrying
+  `Authorization: Bearer test-token` (or the GitHub-canonical
+  equivalent).
+- [ ] **AC-G5**. Given `GH_TOKEN` unset and a public source, niwa
+  fetches successfully without an `Authorization` header.
+- [ ] **AC-G6**. Given a `tarballFakeServer` configured to return
+  401 on the tarball endpoint, niwa exits non-zero with stderr
+  containing the literal `401` and a substring naming PAT scope
+  (e.g., `PAT scope`).
+- [ ] **AC-G7**. Given a `tarballFakeServer` configured to return a
+  301 redirect from `/repos/oldorg/oldrepo/...` to
+  `/repos/neworg/newrepo/...`, niwa follows the redirect for the
+  immediate request and emits a one-time `note:`-prefixed notice
+  naming both `oldorg/oldrepo` and `neworg/newrepo`. A second apply
+  against the same registry entry (without registry update) emits no
+  duplicate notice.
 
 ### AC: Non-GitHub fallback (verifies R15)
 
-- [ ] On `niwa apply` against a non-GitHub URL (GitLab, Bitbucket,
-  Gitea, GHE, `file://`), niwa runs `git clone --depth=1` into a
-  temporary directory, copies the requested subpath into
-  `<workspace>/.niwa/`, and removes the temporary directory.
-- [ ] No `.git/` directory persists in `<workspace>/.niwa/` after the
-  fallback path completes.
+- [ ] **AC-F1**. Given a `localGitServer` `file://` source, after
+  apply, `<workspace>/.niwa/` contains the source's files (per the
+  resolved subpath) and no `.git/` directory.
+- [ ] **AC-F2**. Given an apply that successfully completes against
+  a non-GitHub source, the OS-level temp directory used for the
+  intermediate `git clone` is removed (verified via the helper that
+  records temp-dir lifetimes).
 
-### AC: Default branch and ref resolution (verifies R17-R19)
+### AC: Default branch and ref resolution (verifies R19-R21)
 
-- [ ] After `niwa apply` against a slug with no `@ref`, the latest
-  commit on the remote default branch is recorded in
-  `instance.json` under `config_source.resolved_commit`.
-- [ ] `niwa status` against a workspace with a ref-less slug shows
-  the source line with an explicit "(default branch)" annotation.
-- [ ] `niwa status` against a workspace with `@v1.0` shows the
-  pinned ref instead of "(default branch)".
-- [ ] When the network is unreachable on `niwa apply` against a
-  ref-less slug, apply continues with the cached snapshot and emits
-  a warning naming the source URL, the cached commit oid, and the
-  cached `fetched_at`. Apply exit code is 0.
+- [ ] **AC-R1**. Given a slug `owner/repo` (no `@ref`), after apply,
+  `instance.json` contains a `config_source.resolved_commit` value
+  equal to the `tarballFakeServer`'s response for the default-branch
+  HEAD.
+- [ ] **AC-R2**. `niwa status` against a workspace with a ref-less
+  slug shows the source line containing the literal substring
+  `(default branch)`.
+- [ ] **AC-R3**. `niwa status` against a workspace with `@v1.0`
+  shows the source line containing `v1.0` and not `(default branch)`.
+- [ ] **AC-R4**. Given a slug `owner/repo` and a
+  `tarballFakeServer` configured with `drop-next-request` on both
+  `commits/` and `tarball/` (simulating network unreachable), apply
+  exits with code 0, stderr contains a `warning:`-prefixed line
+  naming the source URL, the cached `resolved_commit`, and the
+  cached `fetched_at`.
 
-### AC: Registry and state schema (verifies R20-R22)
+### AC: Registry and state schema (verifies R22-R25)
 
-- [ ] A registry entry written by an older binary (no mirror fields)
-  loads successfully; the next registry mutation persists the
-  parsed mirror fields.
-- [ ] An `InstanceState` written under schema v2 loads successfully
-  on a v3-aware binary; the next `niwa apply` save writes a v3 file
-  with `config_source` populated.
-- [ ] An `InstanceState` with `schema_version` greater than the
-  highest supported version fails to load with a diagnostic naming
-  both versions; niwa does not attempt down-conversion.
+- [ ] **AC-X1**. Given a registry entry written by an older binary
+  (no mirror fields), the next `niwa apply` writes the registry file
+  with all mirror fields populated. The unrelated fields (`groups`,
+  other `[registry.*]` entries) are byte-identical to before.
+- [ ] **AC-X2**. Given a registry entry hand-edited so that
+  `source_url = "owner/repo:.niwa"` but `source_subpath = "wrong"`,
+  the next registry mutation rewrites `source_subpath = ".niwa"` and
+  stderr emits a warning naming the inconsistency. The opaque
+  `source_url` is preserved.
+- [ ] **AC-X3**. Given an `instance.json` with `schema_version: 2`
+  and no `config_source` block, `niwa apply` parses it, populates
+  `config_source` from the registry mirror plus the snapshot
+  provenance, and writes a v3 file on save.
+- [ ] **AC-X4**. Given an `instance.json` with `schema_version: 99`,
+  `niwa apply` exits non-zero with stderr naming both `99` and the
+  highest supported version. The state file is byte-identical to
+  its pre-load state.
 
-### AC: Migration from working tree to snapshot (verifies R23-R24)
+### AC: Migration from working tree to snapshot (verifies R26-R29)
 
-- [ ] `niwa apply` against a workspace whose registry source URL
-  changed AND whose `<workspace>/.niwa/` is a working tree exits
-  non-zero with a diagnostic naming both URLs and an inspection
-  command.
-- [ ] `niwa apply --force` against the same workspace replaces the
-  working tree with a snapshot atomically.
-- [ ] `niwa apply` against a workspace whose `<workspace>/.niwa/` is
-  already a snapshot does not require `--force` even when the
-  registry source URL changed.
+- [ ] **AC-Y1**. Given a workspace whose registry `source_url`
+  changed AND whose `<workspace>/.niwa/` has a `.git/` directory,
+  `niwa apply` (without `--force`) exits non-zero with stderr naming
+  both URLs, the discovered subpath in the new source, and the
+  literal `cd .niwa && git status`. The on-disk `<workspace>/.niwa/`
+  is byte-identical to its pre-apply state.
+- [ ] **AC-Y2**. Given the same setup as AC-Y1 plus the new source's
+  `[workspace].name` matches the registered name,
+  `niwa apply --force` succeeds. `<workspace>/.niwa/` is replaced
+  with a snapshot from the new source per AC-M1.
+- [ ] **AC-Y3**. Given the same setup as AC-Y1 plus the new source's
+  `[workspace].name` is "differentname" (mismatched),
+  `niwa apply --force` exits non-zero with stderr containing both the
+  registered name and `differentname` plus the literal `--rename`.
+- [ ] **AC-Y4**. Given a workspace whose registry `source_url` is
+  unchanged AND whose `<workspace>/.niwa/` has a `.git/` directory
+  (legacy working tree), `niwa apply` (without `--force`) succeeds.
+  After apply, `<workspace>/.niwa/` has no `.git/` directory and
+  contains a provenance marker. stderr contains a one-time
+  `note:`-prefixed line naming the conversion. A second apply against
+  the same workspace emits no duplicate notice.
+- [ ] **AC-Y5**. Given a registry change applied via
+  `niwa config set global <slug>`, the next `niwa apply` triggers
+  AC-Y1 detection identically to a registry change applied via
+  direct file edit.
 
-### AC: Replacement of `.git/`-dependent paths (verifies R25-R27)
+### AC: Replacement of `.git/`-dependent paths (verifies R30-R32)
 
-- [ ] `niwa reset <instance>` against a workspace with a snapshot
-  provenance marker treats the config as cloned and offers re-fetch
-  as the recovery path.
-- [ ] The plaintext-secrets public-repo guardrail enumerates remotes
-  from the provenance marker; the GitHub-public pattern match runs
-  against the marker tuple. The guardrail does not silently disable
-  on snapshot configs.
-- [ ] `niwa apply --allow-dirty` succeeds with a stderr deprecation
-  notice ("--allow-dirty is no longer meaningful under the snapshot
-  model and will be removed in a future release"). The notice is
-  printed once per process invocation.
+- [ ] **AC-Z1**. Given a workspace with a snapshot provenance
+  marker, `niwa reset <instance>` recognizes the config as cloned
+  (treats it as remote-sourced for recovery purposes), not as
+  user-authored.
+- [ ] **AC-Z2** (positive guardrail). Given a snapshot whose
+  provenance marker names `host=github.com`, `owner=<public-org>`,
+  AND a `workspace.toml` containing a plaintext value in
+  `[env.secrets]`, `niwa apply` exits non-zero with stderr
+  containing `public repo` and naming the offending key. The
+  guardrail does not invoke `git remote -v` against the snapshot.
+- [ ] **AC-Z3** (negative guardrail). Given a snapshot whose
+  provenance marker names a non-`github.com` host, the guardrail
+  does not fire on a workspace with plaintext secrets. apply
+  succeeds.
+- [ ] **AC-Z4**. `niwa apply --allow-dirty` against any workspace
+  succeeds with stderr containing `--allow-dirty is no longer
+  meaningful under the snapshot model and will be removed in v1.1`.
+- [ ] **AC-Z5**. A second `niwa apply --allow-dirty` invocation in
+  the same process does not print the deprecation notice; a fresh
+  process invocation does.
 
-### AC: Backwards compatibility (verifies R28-R29)
+### AC: Backwards compatibility (verifies R33-R34)
 
-- [ ] An existing workspace with `source_url = "org/dot-niwa"`
-  resolves and applies successfully on the v3-aware binary with no
-  user action other than triggering the migration flow if the
-  on-disk `.niwa/` is still a working tree (R23).
-- [ ] No upgrade-time prompt fires for users whose registries already
-  point at whole-repo standalone sources.
+- [ ] **AC-B1**. Given a registry from an older binary with
+  `source_url = "org/dot-niwa"` (no subpath, no mirror fields), the
+  first `niwa apply` on the v3-aware binary succeeds; the on-disk
+  `.niwa/` is converted per AC-Y4; the registry mirror fields are
+  written per AC-X1; the state schema is upgraded per AC-X3. No
+  user prompt fires.
+
+### AC: Documented limitations (regression guards)
+
+- [ ] **AC-L1**. Given a snapshot exists, when a file is modified
+  inside `<workspace>/.niwa/` and `niwa apply` runs against a
+  source whose oid changed, the modification is gone after apply
+  (verifies the documented "manual edits silently discarded on
+  refresh" behavior).
+- [ ] **AC-L2**. Given a source with a `.niwa/workspace.toml` AND a
+  root `workspace.toml` (ambiguous), then the maintainer removes the
+  root `workspace.toml`, the next `niwa apply` resolves to the
+  remaining marker and succeeds (verifies the documented workaround
+  for the slug repo-root sentinel limitation).
+- [ ] **AC-L3**. Given a source whose subpath contains a git
+  submodule pointer, after apply, the submodule subdirectory exists
+  but is empty (verifies the documented "submodules silently not
+  expanded" behavior).
+- [ ] **AC-L4**. Given a source whose subpath contains an LFS-
+  tracked file, after apply, the LFS-tracked file contains the LFS
+  pointer text rather than the real bytes (verifies the documented
+  "LFS pointers passed through" behavior).
 
 ## Out of Scope
 
@@ -477,69 +767,75 @@ follow-up release candidate, or unrelated work.
   exploration findings but not built.
 - **Multi-workspace shared content-addressed cache.** The v1 snapshot
   lives directly at `<workspace>/.niwa/` (no symlink to a shared
-  cache). The cache layer is a candidate for a v1.x follow-up when
-  multi-workspace dedup demand emerges.
+  cache). Candidate for a v1.x follow-up.
 - **Per-host adapters for GitLab, Bitbucket, Gitea, and GitHub
   Enterprise Server.** v1 ships GitHub-tarball-fast-path plus the
   git-clone fallback; per-host adapters are pure performance
   optimizations deferred to follow-ups.
-- **`vault_scope = "@source"` shorthand.** Real use case but a
-  workable manual answer exists. Defer to v1.1 when usage data
-  validates the right expansion scheme.
+- **`vault_scope = "@source"` shorthand.** Defer to v1.1.
 - **Provenance marker file format and on-disk location.** The PRD
-  commits to the contract (R11, R34) and leaves the file format,
+  commits to the contract (R11, R36) and leaves the file format,
   filename, and exact placement to the design phase.
-- **`instance.json` placement relative to the snapshot.** The state
-  file's location is a downstream design-doc concern. The PRD
-  contract is "state survives snapshot refresh."
+- **`instance.json` placement relative to the snapshot.** Downstream
+  design-doc concern. The PRD contract is "state survives snapshot
+  refresh."
 - **Read-only enforcement of the snapshot directory** (e.g., `chmod
   -R a-w`). The model is "manual edits don't persist after refresh";
-  hard-enforcement is an opt-in for a follow-up if the soft contract
-  proves insufficient.
-- **Dedicated `niwa registry migrate` command.** The migration UX
-  (R23-R24) leans on the existing `--force` pattern. A guided
-  command is a v1.x candidate if the current friction proves
-  problematic in real adoption.
+  hard-enforcement is a candidate for a follow-up release.
+- **Snapshot-edit warning on stale-mtime detection.** A future
+  enhancement that could emit a warning when files inside the
+  snapshot have mtimes newer than the marker's `fetched_at`. Adds
+  scope without obvious v1 win; deferred.
+- **Dedicated `niwa registry migrate` command.** R26-R29 lean on the
+  existing `--force` pattern. A guided command is a v1.x candidate.
 - **`niwa registry retarget` and `niwa registry refetch` commands.**
-  Mentioned in some failure-mode narratives during research; v1
-  remediation is "edit the registry by hand and run apply" for these
-  cases.
+  v1 remediation is "edit the registry by hand and run apply" for
+  these cases.
+- **`--strict-refresh` flag for CI/automation operators.** Story 6
+  documents the use case but the flag itself is deferred.
+- **`gh auth token` integration as a fallback to `GH_TOKEN`.** v1
+  uses `GH_TOKEN` env var only; `gh auth` integration is a
+  follow-up candidate.
+- **Performance benchmarks as gating CI checks.** Performance
+  expectations live in Known Limitations; v1 does not gate-block on
+  perf.
 
 ## Known Limitations
 
 - **Slug repo-root sentinel.** When discovery is ambiguous (more than
   one marker at the source repo root), there's no consumer-side way to
-  ask explicitly for "repo root" via the slug — `org/repo:` is rejected
-  as an empty subpath. The only resolution is for the brain-repo
-  maintainer to remove one of the markers. This is documented in the
-  guide. (Alternative sentinel syntax was considered and rejected: the
-  bare-slug form already runs discovery, so an explicit "repo root"
-  sentinel adds surface without a real use case.)
+  ask explicitly for "repo root" via the slug — `org/repo:` is
+  rejected as an empty subpath (R3a). The only resolution is for the
+  brain-repo maintainer to remove one of the markers.
 - **First-fetch bandwidth on the GitHub path.** The tarball endpoint
   delivers the entire repo's gzipped bytes even when only a small
   subpath persists. For brain repos with very large histories or
   binary assets, the first fetch may take noticeably longer than the
   resulting snapshot's size suggests. Subsequent applies are cheap
-  (40-byte SHA endpoint or 304 ETag). The fallback path has the same
-  characteristic via `git clone --depth=1`. Documented as expected
-  behavior.
+  (40-byte SHA endpoint or 304 ETag).
+- **Performance expectations (informal, not enforced).** A first-time
+  GitHub fetch is expected to complete in under 5 seconds for a
+  typical config-sized subpath (≤1 MB compressed) on a normal
+  broadband connection. A drift check via the SHA endpoint is
+  expected to complete in under 500 ms. These are not acceptance
+  criteria; v1 does not gate on performance regression.
 - **Manual edits inside the snapshot are silently discarded on
   refresh.** This is by design — the snapshot has no working-tree
   semantics — but is a behavior change for users who relied on
   `--allow-dirty` for local testing. The guide must call this out.
-- **GitHub Enterprise Server uses the fallback path.** GHE supports the
-  same tarball API shape, but v1 ships only `github.com` as
-  first-class (symmetric with the existing plaintext-secrets
-  guardrail's `v1 scope is strictly github.com`). GHE users get
-  correct snapshots via the fallback and can adopt the GHE adapter
-  when it ships in v1.x.
+- **GitHub Enterprise Server uses the fallback path.** GHE supports
+  the same tarball API shape, but v1 ships only `github.com` as
+  first-class. GHE users get correct snapshots via the fallback.
 - **Snapshot integrity check granularity.** v1 treats "provenance
   marker present and parseable" as integrity confirmation. Tampered
-  but-syntactically-valid snapshots are not detected. Content-hash
-  validation is a candidate for a follow-up if real abuse emerges.
+  but-syntactically-valid snapshots are not detected.
 - **Submodules and LFS in the source.** Tarball-based fetches do not
-  expand submodules or resolve LFS pointers. Workspace configs rarely
-  use either; the limitation is documented and not addressed in v1.
+  expand submodules or resolve LFS pointers. Workspace configs
+  rarely use either.
+- **CI / fail-on-stale gap.** v1 always continues with cached
+  snapshot when the network is unreachable (R21). CI operators who
+  need fail-on-stale behavior must wait for the deferred
+  `--strict-refresh` flag (Story 6).
 
 ## Decisions and Trade-offs
 
@@ -553,7 +849,8 @@ extends that with two new punctuation marks (`:` for "where in the repo",
 `@` for "which version") and reads correctly for users coming from
 Renovate's `org/repo:preset` convention. `?` is a glob in zsh and would
 silently break unquoted invocations; `:` and `@` carry no shell metachar
-hazard.
+hazard and survive `git config`-style URL parsing for the registry's
+stored form.
 
 ### Decision: re-resolve default branch on every apply (not pin at init)
 
@@ -562,25 +859,21 @@ each `niwa apply`; the resolved commit oid is recorded in state.
 **Alternatives**: pin the resolved branch at `niwa init` time and
 require explicit opt-in to HEAD-tracking. **Reasoning**: the dominant
 mental model for users typing `niwa init --from owner/repo` is the
-`git clone` model — track the default. Pinning at init time creates
-silent staleness when maintainers rename the default branch and forces
-users to learn refs as a first-class concept. The new tarball fetcher
+`git clone` model — track the default. The new tarball fetcher
 resolves `HEAD` server-side, so re-resolution is cheap (40-byte SHA
 endpoint).
 
 ### Decision: migration UX leans on `--force`, no new command
 
 **Decided**: `niwa apply` detects URL changes and refuses without
-`--force`; the error message is the migration guide. **Alternatives**:
-dedicated `niwa registry migrate` command with interactive
-confirmation. **Reasoning**: niwa's existing destructive-operation
-pattern (`destroy --force`, `reset --force`) is non-interactive and
-already familiar to users. Adding interactive prompts would be the
-first such pattern in the CLI and would split the discovery surface
-(the new command is invisible to users who edit the registry by hand).
-The migration friction this leaves is bounded; if real adoption shows
-the friction is intolerable, a `niwa registry migrate` command remains
-a straightforward follow-up.
+`--force`; the error message is the migration guide. Same-URL
+upgrades (R28) lazy-convert without `--force` because no user-edit
+loss is at stake. **Alternatives**: dedicated `niwa registry migrate`
+command with interactive confirmation. **Reasoning**: niwa's existing
+destructive-operation pattern (`destroy --force`, `reset --force`) is
+non-interactive and already familiar. Adding interactive prompts would
+be the first such pattern in the CLI and would split the discovery
+surface.
 
 ### Decision: GitHub-first-class + git-clone fallback (no per-host adapters in v1)
 
@@ -589,54 +882,75 @@ all other hosts (including GHE) use a temp-dir `git clone --depth=1`
 fallback. **Alternatives**: ship per-host adapters for GitLab,
 Bitbucket, Gitea, and GHE in v1. **Reasoning**: niwa already has a
 host-agnostic clone code path; the fallback covers every git-reachable
-host on day one. Each per-host adapter brings its own auth flow, URL
-parser, response-code handling, and rate-limit budget — multi-week
-investments per adapter that would significantly delay v1. The
-fallback path's main cost (full-repo first-fetch) is acceptable for
-niwa's expected payload sizes. Adapters become pure performance
-follow-ups.
+host on day one. Per-host adapters bring their own auth flows and URL
+parsers — multi-week investments that would significantly delay v1.
+Adapters become pure performance follow-ups.
 
 ### Decision: `content_dir` required when discovery resolves via `niwa.toml`
 
 **Decided**: when discovery resolves to repo root via the rank-3
 `niwa.toml` convention, `[workspace] content_dir` MUST be set
-explicitly; the value `"."` is a valid opt-in to "the whole brain repo
-is content". **Alternatives**: leave `content_dir` optional with the
-existing default of `"."` (silent). **Reasoning**: today's
-`content_dir = "."` default silently turns the entire config dir into
-the content root. In a brain repo with `niwa.toml` at root, that means
-niwa would silently pick up `docs/`, `src/`, top-level `CLAUDE.md`, and
-any directory named `repos/` — files written for human readers, not
-for niwa templating. Making `content_dir` required for this specific
-case forces brain-repo authors to make a conscious choice about which
-subdirectory is content. Existing standalone-`dot-niwa` users
-(rank 2 discovery) keep `content_dir` optional.
+explicitly; the value `"."` is a valid opt-in. **Alternatives**: leave
+`content_dir` optional with the existing default of `"."` (silent).
+**Reasoning**: today's `content_dir = "."` default silently turns the
+entire config dir into the content root. In a brain repo, that means
+niwa would silently pick up `docs/`, `src/`, top-level `CLAUDE.md`,
+and any `repos/` directory — files written for human readers.
+Existing standalone-`dot-niwa` users (rank 2 discovery) keep
+`content_dir` optional.
 
 ### Decision: `--allow-dirty` deprecated, not hard-removed
 
-**Decided**: `--allow-dirty` is silently accepted for one release with
-a stderr deprecation notice; hard-removed in v1.1. **Alternatives**:
-hard-remove immediately. **Reasoning**: `--allow-dirty` becomes
-meaningless under the snapshot model (no working tree to be dirty). But
-users may have it baked into scripts or aliases. A one-release
+**Decided**: silently accepted in v1 with stderr deprecation notice;
+hard-removed in v1.1. **Alternatives**: hard-remove immediately.
+**Reasoning**: users may have it baked into scripts. A one-release
 deprecation cycle gives them time to discover and update. The notice
 is printed once per process invocation to avoid noise.
 
 ### Decision: offline behavior on default-branch resolution failure
 
-**Decided**: when the default branch can't be re-resolved (network
-unreachable), apply continues with the cached snapshot and emits a
-loud `warning:`-prefixed notice naming the source URL, cached commit
-oid, and cached `fetched_at`. **Alternatives**: hard-error on
-network unreachable. **Reasoning**: the cached snapshot is on disk
-and still valid. Punishing users for ephemeral network loss when the
-existing snapshot satisfies the apply is the wrong pose — it matches
-the existing `SyncRepo` "fetch-failed → continue informationally"
-precedent. A `--strict-refresh` flag for users who want
-fail-on-stale (e.g., CI environments) is a follow-up candidate.
+**Decided**: continue with cached snapshot, emit `warning:`-prefixed
+notice. **Alternatives**: hard-error on network unreachable.
+**Reasoning**: the cached snapshot is on disk and still valid.
+Punishing users for ephemeral network loss when the existing snapshot
+satisfies the apply is the wrong pose — matches the existing
+`SyncRepo` "fetch-failed → continue informationally" precedent. CI
+operators wanting fail-on-stale wait for `--strict-refresh` (Story 6).
+
+### Decision: same-URL upgrade is lazy, no `--force`
+
+**Decided**: when `<workspace>/.niwa/` is a working tree but the
+registry source URL is unchanged, niwa lazy-converts without
+`--force` and emits a one-time notice. **Alternatives**: require
+`--force` for all working-tree-to-snapshot conversions, regardless
+of URL change. **Reasoning**: the `--force` gate exists to protect
+developer edits during an identity change. For same-URL upgrades the
+identity is preserved; the conversion is purely a materialization-
+mechanism upgrade with no semantic interpretation of pending edits.
+Forcing `--force` here punishes existing users for a niwa-internal
+refactor.
+
+### Decision: `GH_TOKEN` is the v1 GitHub auth source
+
+**Decided**: niwa reads `GH_TOKEN` env var for GitHub fetches; falls
+back to anonymous when unset. **Alternatives**: `gh auth token`
+shell-out, `~/.config/niwa/credentials.toml`, or a credential
+helper. **Reasoning**: ratifies the existing pattern used by
+`internal/github/client.go`. Adding integration with `gh` (or other
+sources) is a candidate follow-up; v1 keeps the surface narrow.
+
+### Decision: repo-rename behavior (follow once, warn once)
+
+**Decided**: niwa follows the GitHub 301 redirect for the immediate
+request and emits a one-time `DisclosedNotices` notice naming both
+paths. **Alternatives**: hard-error on rename, or silently keep
+following forever. **Reasoning**: the rename is real drift the user
+should see; following silently masks it from the registry. Failing
+hard punishes users for upstream changes they didn't cause.
 
 ## Open Questions
 
-(None remaining — all open questions surfaced during exploration and
-Phase 2 discovery were resolved during drafting per the
-research-first protocol. See the Decisions and Trade-offs section.)
+(None remaining — all open questions surfaced during exploration,
+Phase 2 discovery, and Phase 4 jury validation were resolved during
+drafting per the research-first protocol. See Decisions and
+Trade-offs.)

@@ -14,6 +14,107 @@ will be made by research-first protocol and recorded here.
 - Phase 1 (conversational scoping) is satisfied by the handoff artifact.
 - Visibility: Public (niwa CLAUDE.md). Upstream: none (no --upstream flag).
 
+## Phase 4 — jury revision decisions (research-first protocol, --auto)
+
+Jury verdict: 1 PASS (clarity, 9 ambiguities), 2 FAIL (completeness 11 issues,
+testability 10 untestable ACs + 10 coverage gaps + 7 fixture gaps). Applied all
+revisions in one pass; rationale per item below.
+
+### New requirements added
+- **Same-URL upgrade lazy conversion** (completeness #1): when `<workspace>/.niwa/`
+  is a legacy working tree but the registry source URL is unchanged, niwa
+  lazy-converts to a snapshot on next apply with a one-time notice and no
+  `--force`. Rationale: the URL-change `--force` gate protects developer edits
+  during a meaningful identity change; for same-URL upgrades the identity is
+  preserved, so the conversion is a no-op-from-the-user's-perspective.
+- **`niwa config set global` mechanism specified** (completeness #2): both the
+  CLI command and direct `~/.config/niwa/config.toml` edit are entry points for
+  URL change; both trigger R23/R24 detection. Rationale: Story 2 narrates the
+  CLI path but Phase 2 maintainer research's AC-9 covers the manual-edit path
+  too; both must be supported and behave consistently.
+- **Workspace-name-mismatch validation** (completeness #3): on URL change,
+  niwa refuses without `--rename` if the new source declares a different
+  `[workspace].name`. Rationale: prevents silently `--force`-ing a workspace
+  into the wrong project's config (named in maintainer Phase 2 AC-9.5).
+- **Canonical source / mirror reconciliation** (completeness #4): `source_url`
+  is canonical; hand-edited mismatched mirror fields trigger reconciliation +
+  stderr warning on next save. Rationale: registry file is human-editable;
+  the canonical-vs-derived rule must be explicit.
+- **GH_TOKEN auth source** (completeness #11): niwa uses `GH_TOKEN` env for
+  GitHub fetches with anonymous fallback. Rationale: ratifies the existing
+  pattern in `internal/github/client.go` (already uses `GH_TOKEN`); adding
+  `gh auth token` integration is a follow-up.
+- **Repo-rename behavior** (completeness #10): follow GitHub 301 once and emit
+  a one-time DisclosedNotices-style warning. Rationale: the rename is real
+  drift the user should see; following silently masks it; failing hard is too
+  brittle when the user did nothing wrong.
+
+### New user story added
+- **Story 5: CI/automation operator** (completeness #9): narrates the
+  fail-on-stale workflow currently deferred to a follow-up `--strict-refresh`
+  flag. Establishes the user perspective even though the flag itself is not
+  in v1 scope.
+
+### Clarity-ambiguity revisions
+- R10: tighten "no extras" — explicitly enumerate prohibited side-effect files
+  (no `.git/`, no `pax_global_header`, no tarball wrapper directory, no VCS
+  metadata outside `.git/`). Rationale: prevents implementer-A vs implementer-B
+  divergence on what counts as "the snapshot."
+- R12: spell out the atomic-rename sequence concretely (sibling-write, swap,
+  delete-old) and acknowledge platform best-effort fallback. Rationale: the
+  word "atomic" plus "rename" alone is POSIX-ambiguous.
+- R14: pin to Go's `archive/tar` (no system `tar`). Rationale: matches the
+  org-wide self-contained-no-system-deps invariant from CLAUDE.md and removes
+  GNU/BSD `tar(1)` flag-divergence risk.
+- R26: cite the existing `CheckGitHubPublicRemoteSecrets` function so the
+  contract is anchored in code; only the input source changes (marker tuple
+  vs `git remote -v`).
+- R27: pin deprecation timing to v1 / v1.1 (already in Decisions section).
+- R30: drop SHOULD-shaped performance budgets from Requirements; move
+  expectations to Known Limitations. Rationale: SHOULD-shaped acceptance is
+  neither testable nor binding; the v1 contract is correctness, not perf.
+- R33: enumerate cleanup paths explicitly (success, error, context cancel)
+  vs the SIGKILL exception.
+- R20/R29 lazy migration: anchor on "first command that loads the registry"
+  (eager) — re-resolves clarity-vs-functional inconsistency.
+- AC for R8: match R6/R7 specificity — diagnostic must name the resolved
+  source slug, the resolved subpath (root), the missing setting, and the
+  explicit-opt-in escape hatch.
+
+### New ACs for missing coverage
+- R3 strict parsing: 4 ACs covering the 4 rejection classes.
+- R8 explicit `"."` opt-in: positive AC.
+- R34 marker readability: AC opens marker with `cat`/jq, asserts each field
+  is present.
+- R10/R11 marker contents: AC enumerating required keys.
+- R20 lazy upgrade preserves data: regression-guard AC.
+- R26 positive guardrail behavior: paired positive case.
+- R27 deprecation across processes: cross-invocation AC.
+- Known limitation ACs: silent edit discard, slug repo-root workaround,
+  submodules/LFS, content_dir = "." opt-in.
+
+### New Test Strategy subsection
+Names `tarballFakeServer`, fault-injection seams, state-file factory, and
+legacy-working-tree fixture as in-scope test infrastructure deliverables.
+Rationale: addresses the testability jury's dominant gap.
+
+### Skipped revisions / accepted limitations
+- **Suggestion: cross-link `docs/prds/PRD-config-distribution.md`** — that PRD
+  doesn't exist; not adding a dangling reference.
+- **Suggestion: snapshot-edit warning on stale mtime detection** — interesting
+  follow-up but adds scope without obvious v1 win; documented as Out of Scope
+  alongside read-only enforcement.
+- **Suggestion: rename "rank N" terminology** — kept as-is; the rank
+  terminology is already established by Phase 2 research and the test
+  acceptance-coverage doc will use the same vocabulary.
+
+## Phase 4 — re-validation skipped
+- Decision: do NOT re-run jury after revisions. Rationale: the revisions
+  applied are direct text-level fixes the jury asked for; re-running the
+  jury would catch only minor wording polish at the cost of another round
+  of agent dispatch. The user-approval checkpoint (Phase 4.6) is the
+  appropriate next gate.
+
 ## Phase 3 — open-question resolutions (research-first protocol)
 
 Resolved during draft based on Phase 2 agent recommendations. Each cites the
