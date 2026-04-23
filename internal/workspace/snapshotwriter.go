@@ -192,14 +192,21 @@ func lazyConvertWorkingTree(ctx context.Context, configDir string, fetcher Fetch
 // `--from`) and `niwa config set global` (first-time personal overlay
 // clone) where no marker or working tree exists yet.
 //
-// The caller is responsible for ensuring configDir's parent exists;
-// the function creates configDir itself as part of the atomic swap.
-// If configDir already contains a snapshot, the swap replaces it.
+// sourceURL is the canonical user-facing string the caller wants in
+// the provenance marker (and that the registry will store). Pass the
+// user's original `--from` value or registry slug verbatim — Source
+// methods like String() don't round-trip for raw URL inputs (file://,
+// https://, git@). Empty sourceURL falls back to src.String() for
+// callers who only have a typed source (e.g. drift refresh after the
+// marker is already in sync).
 //
 // fetcher may be nil for non-GitHub sources (the fallback path only
 // needs `git`). GitHub sources require a non-nil fetcher.
-func MaterializeFromSource(ctx context.Context, src source.Source, configDir string, fetcher FetchClient, reporter *Reporter) error {
-	return materializeAndSwap(ctx, configDir, src, src.String(), fetcher, reporter)
+func MaterializeFromSource(ctx context.Context, src source.Source, sourceURL, configDir string, fetcher FetchClient, reporter *Reporter) error {
+	if sourceURL == "" {
+		sourceURL = src.String()
+	}
+	return materializeAndSwap(ctx, configDir, src, sourceURL, fetcher, reporter)
 }
 
 // materializeAndSwap stages a fresh snapshot at <configDir>.next/,
@@ -285,9 +292,42 @@ func materializeAndSwap(ctx context.Context, configDir string, src source.Source
 		return fmt.Errorf("EnsureConfigSnapshot: ensure parent: %w", err)
 	}
 
+	// Preserve instance.json across the swap. This file currently lives
+	// at <configDir>/instance.json but represents per-instance state,
+	// not config-source content. The atomic swap rotates the entire
+	// configDir, so without this carry-over the file would be lost on
+	// every refresh. Issue 5 of the workspace-config-sources plan
+	// relocates the file to <workspaceRoot>/.niwa-state/ and removes
+	// this carry-over; until then, keep it on the same atomic seam.
+	if err := preserveInstanceState(configDir, staging); err != nil {
+		_ = safeRemoveAll(staging)
+		return fmt.Errorf("EnsureConfigSnapshot: preserve instance state: %w", err)
+	}
+
 	if err := SwapSnapshotAtomic(configDir, staging); err != nil {
 		_ = safeRemoveAll(staging)
 		return fmt.Errorf("EnsureConfigSnapshot: %w", err)
+	}
+	return nil
+}
+
+// preserveInstanceState copies <configDir>/instance.json into staging
+// when it exists, so the atomic swap doesn't clobber per-instance
+// state. No-op when the file isn't present (fresh init, brand-new
+// workspace). See Issue 5 of the workspace-config-sources plan for
+// the planned relocation that retires this helper.
+func preserveInstanceState(configDir, staging string) error {
+	src := filepath.Join(configDir, StateFile)
+	data, err := os.ReadFile(src)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("read %s: %w", src, err)
+	}
+	dst := filepath.Join(staging, StateFile)
+	if err := os.WriteFile(dst, data, 0o644); err != nil {
+		return fmt.Errorf("write %s: %w", dst, err)
 	}
 	return nil
 }

@@ -67,7 +67,7 @@ func runConfigSetGlobal(cmd *cobra.Command, args []string) error {
 	fmt.Fprintf(cmd.OutOrStdout(), "Cloning global config from: %s\n", cloneURL)
 
 	fetcher := github.NewAPIClient(resolveGitHubToken())
-	if err := workspace.MaterializeFromSource(cmd.Context(), src, globalConfigDir, fetcher, workspace.NewReporter(os.Stderr)); err != nil {
+	if err := workspace.MaterializeFromSource(cmd.Context(), src, repo, globalConfigDir, fetcher, workspace.NewReporter(os.Stderr)); err != nil {
 		return fmt.Errorf("materializing global config repo: %w", err)
 	}
 

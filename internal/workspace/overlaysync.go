@@ -44,10 +44,12 @@ func EnsureOverlaySnapshot(ctx context.Context, urlSlug, dir string, fetcher Fet
 	default:
 		// Fresh materialization. Make sure the parent dir exists; the
 		// snapshot writer creates dir itself via the atomic swap.
+		// Pass urlSlug verbatim as the marker's source_url so the
+		// URL-change gate in apply matches what the registry stores.
 		if mkErr := os.MkdirAll(filepath.Dir(dir), 0o755); mkErr != nil {
 			return true, fmt.Errorf("overlay: ensure parent: %w", mkErr)
 		}
-		return true, MaterializeFromSource(ctx, src, dir, fetcher, reporter)
+		return true, MaterializeFromSource(ctx, src, urlSlug, dir, fetcher, reporter)
 	}
 }
 
