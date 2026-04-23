@@ -271,8 +271,22 @@ func (a *Applier) Create(ctx context.Context, cfg *config.WorkspaceConfig, confi
 func (a *Applier) Apply(ctx context.Context, cfg *config.WorkspaceConfig, configDir, instanceRoot string) error {
 	now := time.Now()
 
-	// Auto-pull config from origin if it's a git repo with a remote.
-	// Moved here from cli/apply.go so that the Reporter routes output.
+	// New-model snapshot path (PRD R10-R13, R28). When the config dir is
+	// already a snapshot (provenance marker present), refresh via the
+	// drift-check + tarball pipeline. When it's a legacy git working tree
+	// (.git/ present), perform R28 lazy conversion in place. Errors fall
+	// through to the legacy SyncConfigDir below as a safety net.
+	if a.GitHubClient != nil {
+		fetcher, ok := a.GitHubClient.(FetchClient)
+		if ok {
+			_ = EnsureConfigSnapshot(ctx, configDir, fetcher, a.Reporter)
+		}
+	}
+
+	// Legacy auto-pull from origin if it's a git repo with a remote.
+	// EnsureConfigSnapshot's lazy conversion (PRD R28) replaces this for
+	// snapshots; this call remains as the safety net for working trees
+	// the conversion couldn't handle (no GH_TOKEN, network down, etc.).
 	if syncErr := SyncConfigDir(configDir, a.Reporter, a.AllowDirty); syncErr != nil {
 		return syncErr
 	}
@@ -606,8 +620,15 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 	allWarnings = append(allWarnings, WarnUnknownRepos(cfg, known)...)
 
 	// Step 2a: Sync global config repo if registered and not skipped.
+	// EnsureConfigSnapshot runs first as the new-model entry point per
+	// PRD R10-R13, R28; SyncConfigDir remains as the legacy safety net.
 	if a.GlobalConfigDir != "" && !opts.skipGlobal {
 		a.Reporter.Status("syncing config...")
+		if a.GitHubClient != nil {
+			if fetcher, ok := a.GitHubClient.(FetchClient); ok {
+				_ = EnsureConfigSnapshot(ctx, a.GlobalConfigDir, fetcher, a.Reporter)
+			}
+		}
 		if syncErr := SyncConfigDir(a.GlobalConfigDir, a.Reporter, a.AllowDirty); syncErr != nil {
 			a.Reporter.Warn("could not sync config: %v", syncErr)
 			return nil, fmt.Errorf("syncing global config: %w", syncErr)
