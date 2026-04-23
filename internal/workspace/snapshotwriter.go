@@ -292,13 +292,16 @@ func materializeAndSwap(ctx context.Context, configDir string, src source.Source
 		return fmt.Errorf("EnsureConfigSnapshot: ensure parent: %w", err)
 	}
 
-	// Preserve instance.json across the swap. This file currently lives
-	// at <configDir>/instance.json but represents per-instance state,
-	// not config-source content. The atomic swap rotates the entire
-	// configDir, so without this carry-over the file would be lost on
-	// every refresh. Issue 5 of the workspace-config-sources plan
-	// relocates the file to <workspaceRoot>/.niwa-state/ and removes
-	// this carry-over; until then, keep it on the same atomic seam.
+	// Preserve instance.json across the swap. The atomic swap rotates
+	// the entire configDir, which would clobber niwa-managed per-instance
+	// state if it weren't copied into staging first. This is the
+	// intentional design (per the 2026-04-23 amendment to DESIGN
+	// Decision 2): state lives in .niwa/ alongside config-source content,
+	// and the snapshot writer carries it through the swap. Issue #74
+	// (needs-design) tracks the longer-term refactor where niwa pulls
+	// only files it knows about from upstream — at which point the
+	// state-vs-source distinction at this seam becomes structurally
+	// obvious — but v1 ships the simple carry-over.
 	if err := preserveInstanceState(configDir, staging); err != nil {
 		_ = safeRemoveAll(staging)
 		return fmt.Errorf("EnsureConfigSnapshot: preserve instance state: %w", err)
@@ -314,8 +317,10 @@ func materializeAndSwap(ctx context.Context, configDir string, src source.Source
 // preserveInstanceState copies <configDir>/instance.json into staging
 // when it exists, so the atomic swap doesn't clobber per-instance
 // state. No-op when the file isn't present (fresh init, brand-new
-// workspace). See Issue 5 of the workspace-config-sources plan for
-// the planned relocation that retires this helper.
+// workspace). The closed set of niwa-local state files this helper
+// carries currently has one member (StateFile). New niwa-local files
+// added in the future extend this list explicitly, not via a naming
+// pattern.
 func preserveInstanceState(configDir, staging string) error {
 	src := filepath.Join(configDir, StateFile)
 	data, err := os.ReadFile(src)

@@ -14,26 +14,29 @@ Active
 
 ## Amendments
 
-### 2026-04-23 — Manifest-driven fetch retool
+### 2026-04-23 — Drop instance.json relocation
 
-What changed: Issue 5's scope collapses from "schema v3 + relocate
-instance.json + dual-path lookup + registry mirror" to "schema v3 +
-registry mirror" (the relocation is no longer planned per the
-2026-04-23 PRD/Design amendment). A new Issue 4-followup adds the
-manifest-driven fetch retool: rewrite the snapshot writer + tarball
-extractor + git-clone fallback so they pull only files referenced
-from `workspace.toml`. Issue 8's Gherkin scenarios add manifest-
-filtering assertions to AC-G1 and AC-M1's revised wording.
+What changed: Issue 5's scope shrinks. The relocation work
+(`.niwa-state/` rename, dual-path lookup, lazy migration on first save)
+is no longer planned. Schema bump to v3 and registry mirror fields
+remain. PR #73's `preserveInstanceState` helper (which copies
+`instance.json` into the staging dir before the atomic swap) is the
+permanent solution.
 
-Why: see DESIGN amendment for the underlying rationale. In short, the
-user reframed `.niwa/` as a "managed assembly" rather than a
-directory mirror; the manifest-driven fetch is the structural change
-that realizes the reframing, and the directory split that motivated
-the original Issue 5 relocation drops out as a consequence.
+Why: the relocation was implementation-driven — its only purpose was
+to keep state safe across a wholesale snapshot swap. The simpler
+solution (assembly step copies state into staging before swap)
+achieves the same safety without splitting the user-visible workspace
+into two hidden directories. See PRD/DESIGN amendments for the full
+reasoning.
 
-Effect on critical path: Issue 4-followup blocks Issue 7. Issue 5's
-tasks shrink. Issue 8's task list grows by ~1 scenario. Mermaid
-diagram below reflects the updated dependencies.
+Effect on critical path: Issue 5's tasks shrink to docs cleanup and
+test additions. The Mermaid diagram below is unchanged from the
+original; only Issue 5's contents change.
+
+Issue #74 (`needs-design`) captures a longer-term improvement
+(convention-aware fetch — pull only files niwa knows about instead of
+the whole subpath). That work is out of scope for this branch.
 
 ## Scope Summary
 
@@ -42,9 +45,8 @@ outlines, all landing on a single PR (the same PR carrying the PRD and
 design). Single-pr mode per the user's "all in this same branch"
 instruction; no GitHub issues or milestone created.
 
-Per the 2026-04-23 amendment, a 10th issue (Issue 4-followup) is
-added inline below Issue 4 and a 11th (Issue 5-cleanup) replaces
-the original Issue 5's relocation tasks.
+Per the 2026-04-23 amendment, Issue 5 below has its scope reduced
+(relocation tasks removed; schema bump and registry mirror remain).
 
 ## Decomposition Strategy
 
@@ -76,7 +78,6 @@ graph TD
     I2[Issue 2: snapshot + provenance]
     I3[Issue 3: github fetch + tar]
     I4[Issue 4: snapshot writer + clone replacement]
-    I4F[Issue 4-followup: manifest-driven fetch retool]
     I5[Issue 5: state v3 + registry mirror - relocation dropped]
     I6[Issue 6: CLI updates + .git replacement]
     I7[Issue 7: final cleanup + push]
@@ -87,10 +88,8 @@ graph TD
     I1 --> I3
     I2 --> I4
     I3 --> I4
-    I4 --> I4F
     I4 --> I5
     I5 --> I6
-    I4F --> I7
     I6 --> I7
     I3 --> I8
     I8 --> I7
@@ -182,34 +181,6 @@ fallback for non-GitHub hosts.
 - The `Cloner.CloneWith` call site in `internal/cli/init.go` is replaced by a call to the new snapshot writer.
 - `go test ./internal/workspace/...` passes (existing tests adapted; new tests for fallback path added).
 
-### Issue 4-followup: Manifest-driven fetch retool
-
-**Added**: 2026-04-23, after Issue 4 shipped under the wholesale-pull
-model. The amendment to PRD R10b and DESIGN Decision 5 reframes the
-fetch contract; this issue retools the implementation to honor the
-new contract.
-
-**Complexity**: critical
-
-**Goal**: rewrite the snapshot writer + tarball extractor + git-clone
-fallback so they pull only files that the workspace config (per
-manifest contract in PRD R10b) references. Files present at the
-resolved subpath but unreferenced by `workspace.toml` (e.g.,
-`README.md`, `.github/`, `LICENSE`) MUST NOT appear in the snapshot.
-
-**Dependencies**: Issue 4 (modifies code Issue 4 produced)
-
-**Acceptance criteria**:
-- `internal/workspace/manifest.go` (new) defines `BuildManifest(cfg *config.WorkspaceConfig) []string`. The function enumerates path-bearing fields from a small package-level table and returns the union of (a) the workspace config filename, (b) explicit path references, (c) transitively-referenced paths (when a referenced template itself references another file).
-- The path-bearing fields table is defined as a Go slice/map in `manifest.go`, not as scattered string literals. Adding a new path-bearing field in a future workspace.toml schema means adding one entry to the table.
-- `internal/github/tar.go`'s `ExtractSubpath` accepts a filter callback (or accept-set parameter) so callers can constrain which entries get written to disk. The default behavior (used by overlay clones that don't have a manifest) preserves today's whole-subpath semantics.
-- `internal/workspace/snapshotwriter.go` performs the two-phase materialization for config-dir snapshots: (1) fetch tarball, buffer; (2) extract `workspace.toml` only into staging; (3) parse staging's workspace.toml; (4) compute manifest; (5) extract manifested files into staging; (6) assembly step copies `instance.json` if present; (7) write provenance marker; (8) atomic swap.
-- `internal/workspace/fallback.go` performs the equivalent two-phase logic for non-GitHub sources: (1) shallow clone to temp; (2) read workspace.toml from clone; (3) compute manifest; (4) copy manifested files to staging; (5) carry instance.json + write marker; (6) swap.
-- The carry-over logic currently in `preserveInstanceState` is renamed and documented as the assembly-contract enforcement step (not a band-aid). The closed-set list of niwa-local files is enumerated in a single named constant.
-- AC-G1 in its revised form is exercised by a unit or functional test: a tarball with `workspace.toml`, `README.md`, and `notes.txt` produces a snapshot containing only `workspace.toml` (plus marker, plus any niwa-local state).
-- AC-M1's revised wording is exercised: snapshot contains exactly the manifested files, marker, and niwa-local state. No README, no .github/, no LICENSE.
-- All existing functional tests continue to pass (none of them assert presence of unreferenced files inside `.niwa/`, so this should be a no-op for them).
-
 ### Issue 5: State schema v3 + registry mirror fields
 
 **Complexity**: testable
@@ -288,7 +259,7 @@ Issue 3 (which defines the GitHub client API the fake mirrors) is in.
 - `test/functional/tarball_fake_server.go` defines `tarballFakeServer` helper around `httptest.NewServer` with methods to configure responses, status codes, ETags, redirects, and inspect the request log.
 - `test/functional/state_factory.go` provides `WriteInstanceStateAtVersion(dir string, version int, body string) error` Gherkin-step backing.
 - `test/functional/steps_workspace_config_sources.go` adds steps for: configuring `tarballFakeServer` responses, asserting request counts, asserting marker contents, triggering URL-change scenarios, asserting deprecation notices.
-- `test/functional/features/workspace-config-sources.feature` covers `@critical` scenarios for: subpath fetch happy path, force-push survival (PRD #72 regression), ambiguous-discovery rejection, explicit-subpath bypass, v2-to-v3 state migration, URL-change `--force` gate, same-URL lazy conversion, **manifest filtering excludes unreferenced files** (per AC-G1 / AC-M1 revised: a tarball with `workspace.toml`, `README.md`, and `notes.txt` produces a snapshot containing only the referenced files plus marker plus state).
+- `test/functional/features/workspace-config-sources.feature` covers `@critical` scenarios for: subpath fetch happy path, force-push survival (PRD #72 regression), ambiguous-discovery rejection, explicit-subpath bypass, v2-to-v3 state migration, URL-change `--force` gate, same-URL lazy conversion.
 - `make test-functional` passes.
 
 ### Issue 9: Documentation

@@ -27,27 +27,34 @@ In Progress
 
 ## Amendments
 
-### 2026-04-23 — Manifest-driven fetch
+### 2026-04-23 — Instance state stays in `.niwa/`
 
-What changed: the fetch model moves from "pull the entire subpath wholesale"
-to "pull workspace.toml plus the files it references." Niwa's view of
-`<workspace>/.niwa/` becomes a *managed assembly* — every file present is
-there because niwa deliberately put it there, either because workspace.toml
-references it or because niwa itself wrote it.
+What changed: the original PRD's Out-of-Scope language deferred
+`instance.json` placement to design. Design Decision 2 chose to relocate
+state to a sibling `<workspace>/.niwa-state/` directory; that choice is
+reversed. State stays at `<workspace>/.niwa/instance.json` and is carried
+through the snapshot refresh by an assembly step that copies the file
+into staging immediately before the atomic swap.
 
-Why: the wholesale-pull model forced an artificial split between source
-content and niwa-local state (instance.json). The original PRD addressed
-this by relocating state to a sibling `.niwa-state/` directory. That
-solution was implementation-driven, not user-driven — the user-visible
-workspace got a second hidden subdirectory only because the implementation
-had no other way to keep state safe across snapshot swaps. Under the
-manifest-driven model, niwa knows exactly what's in `.niwa/` because niwa
-put each file there, so the assembly step can include both upstream content
-and niwa-local state without ambiguity. No directory split needed.
+Why: the relocation was implementation-driven — its only purpose was
+to keep state safe from being clobbered by the wholesale-replace
+snapshot swap. The simpler solution (copy state into staging before
+swap) achieves the same safety without splitting the user-visible
+layout into two hidden directories. PRs implementing Decision 2's
+relocation never landed; the simpler approach is what `preserveInstanceState`
+in PR #73 already does.
 
-Affected requirements: R4, R10, R14, R15, R37 (revised); R10b (new).
-Affected ACs: AC-G1, AC-M1 (revised wording).
-Out of Scope additions: state-file relocation (no longer planned).
+Out of Scope addition: state-file relocation (no longer planned).
+
+### Future direction (needs-design, issue #74)
+
+Issue #74 (`needs-design`) captures the longer-term improvement:
+move from today's "pull the entire resolved subpath wholesale" fetch
+to a convention-aware "pull only files niwa knows about" model. That
+work is deferred because (a) the relevant conventions aren't currently
+codified in one place, and (b) the migration story for workspaces that
+rely on wholesale-pull semantics needs design attention. v1 ships
+wholesale-pull; the new model is post-v1.
 
 ## Problem Statement
 
@@ -308,32 +315,19 @@ explicitly.
 
 **Snapshot materialization**
 
-- **R10.** niwa MUST materialize the workspace config as a managed
-  assembly at `<workspace>/.niwa/` containing exactly:
-  (a) the files niwa pulled from the source per the manifest contract
-  in R10b, with directory structure preserved relative to the resolved
-  subpath;
+- **R10.** niwa MUST materialize the workspace config as a pure file
+  tree at `<workspace>/.niwa/` containing exactly:
+  (a) every regular file present at the resolved subpath in the source
+  commit, with directory structure preserved;
   (b) one provenance marker file (location and format determined at
   design time, subject to R11 and R34);
   (c) niwa-local state files written by niwa itself (e.g.,
-  `instance.json`), enumerated in the design as a closed set.
+  `instance.json`), enumerated in the design as a closed set and
+  carried across snapshot refresh by an assembly step (per the
+  2026-04-23 amendment).
   No additional files MUST persist, including (but not limited to)
-  `.git/`, `pax_global_header`, tarball-wrapper directories, other
-  VCS metadata, or files present at the resolved subpath in the
-  source that the manifest does not list.
-- **R10b.** The fetch manifest MUST be derived from the resolved
-  workspace config, not from the source repo's directory listing. The
-  manifest MUST include:
-  (a) the workspace config file itself (`workspace.toml` or
-  `niwa.toml`, whichever discovery resolved to);
-  (b) every file path referenced from path-bearing fields of the
-  workspace config (hooks, content, env files, settings, materializer
-  inputs — the full enumeration is a design-doc concern);
-  (c) every file path referenced transitively via the same rules
-  (e.g., a referenced template that itself references another file).
-  Files present at the resolved subpath but not reachable via the
-  manifest MUST NOT be fetched and MUST NOT be written to the
-  snapshot. The manifest is recomputed on every refresh.
+  `.git/`, `pax_global_header`, tarball-wrapper directories, or other
+  VCS metadata.
 - **R11.** The provenance marker MUST record at minimum: the source URL
   as a single canonical string, the parsed source tuple
   (`host`, `owner`, `repo`, `subpath`, `ref`), the resolved commit
@@ -359,21 +353,15 @@ explicitly.
 
 - **R14.** When the source host is `github.com`, niwa MUST use the
   GitHub REST tarball endpoint with selective extraction filtered to
-  the manifest (R10b). niwa MUST stream-extract using Go's
+  the requested subpath. niwa MUST stream-extract using Go's
   `archive/tar` package without invoking a system `tar` binary. Files
-  not on the manifest MUST never be written to disk during extraction.
-  niwa MAY perform a two-pass fetch (first pass extracts only the
-  workspace config file to compute the manifest; second pass extracts
-  the manifested files) or a single-pass approach that buffers tarball
-  metadata to enumerate the manifest before writing — the design
-  chooses.
+  outside the subpath MUST never be written to disk during extraction.
 - **R15.** When the source host is anything other than `github.com`
   (including GitHub Enterprise Server, GitLab, Bitbucket, Gitea, and
   `file://` URLs), niwa MUST use a temp-directory `git clone --depth=1`
-  fallback followed by a copy of only the manifested files (R10b)
-  into the snapshot location. Files present in the temp clone but not
-  on the manifest MUST NOT be copied. The temporary clone MUST be
-  removed after copy per R33.
+  fallback followed by a copy of the requested subpath into the
+  snapshot location. The temporary clone MUST be removed after copy
+  per R33.
 - **R16.** Drift detection on the GitHub path MUST use the 40-byte
   `commits/{ref}` SHA endpoint with `Accept: application/vnd.github.sha`
   and `If-None-Match` ETag-conditional GETs against the tarball
@@ -543,12 +531,10 @@ without it apply against the team config alone.
 
 ### Non-functional requirements
 
-- **R37.** Files not on the manifest (R10b) MUST NOT be written to
-  disk during materialization on the GitHub path, even temporarily,
-  regardless of whether they're inside or outside the resolved subpath
+- **R37.** Files outside the resolved subpath MUST NOT be written to
+  disk during materialization on the GitHub path, even temporarily
   (verified via the no-side-effect-files invariant in R10 plus the
-  stream-extract requirement in R14). The corresponding fallback-path
-  invariant in R15 applies to file-by-file copy from the temp clone.
+  stream-extract requirement in R14).
 - **R38.** The provenance marker MUST be readable with no specialized
   tooling — a contributor inspecting `<workspace>/.niwa/` manually
   with `cat`, `jq`, or `toml` (depending on the chosen format) MUST
@@ -632,11 +618,9 @@ explicitly. The Test Strategy section above defines fixtures.
 ### AC: Snapshot materialization (verifies R10-R13)
 
 - [ ] **AC-M1**. After first `niwa apply` against a configured
-  source, `<workspace>/.niwa/` contains exactly the manifested files
-  (R10b), the provenance marker, and any niwa-local state files
-  enumerated in the design. Files present at the resolved subpath in
-  the source but not on the manifest (e.g., `README.md`, `.github/`,
-  `LICENSE`) are NOT present in the snapshot. `find
+  source, `<workspace>/.niwa/` contains the source subpath's regular
+  files and the provenance marker, and ONLY those (plus any niwa-
+  local state files carried by the assembly step). `find
   <workspace>/.niwa/ -name '.git*' -o -name 'pax_global_header'`
   returns no results. `git -C <workspace>/.niwa/ status` exits with a
   "not a git repository" status code.
@@ -673,13 +657,10 @@ explicitly. The Test Strategy section above defines fixtures.
 ### AC: GitHub tarball fetch and auth (verifies R14-R18)
 
 - [ ] **AC-G1**. Given a `tarballFakeServer` source whose tarball
-  contains a manifest-reachable `<root>/.niwa/workspace.toml` plus
-  unrelated files at `<root>/.niwa/README.md`,
-  `<root>/.niwa/notes.txt`, and `<root>/src/...`, after apply against
-  `owner/repo:.niwa`, none of `README.md`, `notes.txt`, or any
-  `src/` file exists inside `<workspace>/.niwa/` or in any temp
-  directory under `$TMPDIR`. Only manifested files (workspace.toml
-  and any paths it references) are present.
+  contains files at `<root>/.niwa/...` and `<root>/src/...`, after
+  apply against `owner/repo:.niwa`, no files from `src/` exist
+  anywhere on disk inside `<workspace>/.niwa/` or in any temp
+  directory under `$TMPDIR`.
 - [ ] **AC-G2**. Given a snapshot apply, the `tarballFakeServer`
   receives the second apply's `commits/{ref}` request with
   `Accept: application/vnd.github.sha`; the response body is the
@@ -906,16 +887,15 @@ follow-up release candidate, or unrelated work.
   filename, and exact placement to the design phase.
 - **`instance.json` placement relative to the snapshot.** The 2026-04-23
   amendment commits `instance.json` to live inside `<workspace>/.niwa/`
-  alongside the manifested files. The earlier proposal to relocate to a
+  alongside the source files. The earlier proposal to relocate to a
   sibling `.niwa-state/` directory is no longer planned. State survives
-  snapshot refresh because the assembly step writes both upstream
-  content and niwa-local state into staging before swap.
-- **Pulling repo files niwa doesn't recognize.** Files present at the
-  resolved subpath in the source repo that the manifest (R10b) doesn't
-  reach (e.g., upstream `README.md` next to `workspace.toml`) are
-  intentionally not pulled. Maintainers who want a file in the
-  snapshot must reference it from `workspace.toml` or store it under a
-  well-known name the design enumerates.
+  snapshot refresh because the assembly step copies it into staging
+  before the atomic swap.
+- **Convention-aware fetch (manifest-driven pull).** The model where
+  niwa pulls only files it knows about (workspace.toml + explicit
+  references + codified conventions) instead of the entire resolved
+  subpath is captured in a separate `needs-design` issue. v1 ships
+  wholesale-subpath pull.
 - **Read-only enforcement of the snapshot directory** (e.g., `chmod
   -R a-w`). The model is "manual edits don't persist after refresh";
   hard-enforcement is a candidate for a follow-up release.

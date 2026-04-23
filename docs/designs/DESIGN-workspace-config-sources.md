@@ -16,17 +16,17 @@ decision: |
   canonical five-tuple slug parser, leaf package consumed everywhere;
   (2) two-rename atomic snapshot swap on a sibling staging directory,
   with `instance.json` kept at `<workspace>/.niwa/instance.json` and
-  carried through the swap by the assembly step (per 2026-04-23
-  amendment; original spec relocated to `.niwa-state/`); (3) TOML
-  provenance marker at `<workspace>/.niwa/.niwa-snapshot.toml` inside
-  the snapshot dir; (4) `httptest.Server`-based `tarballFakeServer`
-  alongside `localGitServer`, `NIWA_TEST_FAULT` env-var seam backed by
+  carried through the swap by an assembly step that copies the file
+  into staging before the rename (per 2026-04-23 amendment; original
+  spec relocated to `.niwa-state/`); (3) TOML provenance marker at
+  `<workspace>/.niwa/.niwa-snapshot.toml` inside the snapshot dir;
+  (4) `httptest.Server`-based `tarballFakeServer` alongside
+  `localGitServer`, `NIWA_TEST_FAULT` env-var seam backed by
   `internal/testfault/`, and Gherkin step pair with Go state-file
   factory; (5) extension of `internal/github/APIClient` with
-  `HeadCommit` + `FetchTarball` methods and a manifest-driven
-  extractor (Go's `archive/tar`, no system `tar`) that pulls only
-  files reachable from `workspace.toml` per PRD R10b, with `BaseURL`
-  substitution as the test seam.
+  `HeadCommit` + `FetchTarball` methods and a package-local
+  `extractSubpath` (Go's `archive/tar`, no system `tar`), with
+  `BaseURL` substitution as the test seam.
 rationale: |
   Each decision applies the workspace-wide self-contained-no-system-deps
   invariant and prefers leaf packages to break import cycles. The slug
@@ -49,52 +49,47 @@ Accepted (2026-04-23 Amendment in effect)
 
 ## Amendments
 
-### 2026-04-23 — Manifest-driven fetch + state stays in `.niwa/`
+### 2026-04-23 — Instance state stays in `.niwa/`
 
 **What changed.** Decision 2's choice to relocate `instance.json` to a
-sibling `<workspace>/.niwa-state/` directory is reversed. The fetch model
-(referenced indirectly through Decision 5 and Phase 5) shifts from
-"selectively extract files under the resolved subpath" to "selectively
-extract files reachable via the workspace-config manifest."
+sibling `<workspace>/.niwa-state/` directory is reversed. State stays at
+`<workspace>/.niwa/instance.json` and is carried through the snapshot
+refresh by an assembly step that copies the file from the existing
+`.niwa/` into staging immediately before the atomic swap.
 
-**Why.** The relocation was implementation-driven: under wholesale-subpath
-fetch, `<workspace>/.niwa/` mirrors a directory in the source repo, so
-niwa-managed state inside it would get clobbered on every refresh. The
-relocation moved state out of the way of that clobber. The user pushback
-during implementation reframed the contract: `.niwa/` is a *managed
-assembly*, not a directory mirror — so the assembly step can include both
-upstream content and niwa-local state without ambiguity, and the
-clobber-avoidance directory split is no longer necessary. The
-manifest-driven fetch is the structural change that makes this
-reframing real: niwa knows exactly which files it pulled from upstream,
-because it asked for each one by name.
+**Why.** The relocation was implementation-driven — its only purpose was
+to keep state safe from being clobbered when the snapshot swap rotated
+`.niwa/` wholesale. The simpler solution (copy state into staging before
+swap) achieves the same safety without splitting the user-visible
+workspace layout into two hidden directories. The implementation in
+PR #73 already does this via a helper named `preserveInstanceState`;
+this amendment promotes that helper from "band-aid" to "intentional
+assembly step."
 
 **Affected sections.**
-- Decision 2: state stays at `<workspace>/.niwa/instance.json`. Atomic
-  swap preserves it via the assembly contract (described under
-  Solution Architecture below). Dual-path read and lazy migration
+- Decision 2's "Chosen" subsection updated in place: state stays at
+  `<workspace>/.niwa/instance.json`; dual-path read and lazy migration
   drop out — there's no relocation to migrate.
-- Decision 5: tarball fetch becomes manifest-driven. The extractor
-  filter changes from "files under subpath/" to "files on the
-  manifest." Two-pass approach (extract `workspace.toml` first,
-  parse, extract referenced files second) is the intended
-  implementation; the design records this as a non-binding default.
-- Solution Architecture: a new "Assembly contract" subsection
-  documents which inputs go into staging before the swap. The
-  implementation helper today named `preserveInstanceState` becomes
-  the intentional carrier of niwa-local state; the design enumerates
-  the closed set of niwa-local files and rejects pattern-based or
-  subdirectory-based alternatives.
-- Phase 5 (GitHub client) and Phase 6 (snapshot writer) both gain
-  manifest-driven sub-tasks. Phase 7 (state relocation) is gone.
-- Implementation Issues table: Issue 5 collapses to a docs/cleanup
-  task; a new Issue 4-followup adds the manifest-driven fetch
-  retool.
+- Phase 7 (originally "State schema v3 + `.niwa-state/` relocation")
+  loses the relocation tasks; only the schema bump and registry mirror
+  work remain.
+- Solution Architecture's Overview reflects state living inside
+  `.niwa/` and surviving the swap via the assembly step.
 
-**What didn't change.** All five Decisions' framing remains valid.
-The slug parser, atomic swap primitive, TOML provenance marker, test
-infrastructure architecture, and GitHub client API surface stay as
-specified — only their downstream usage shifts.
+**What didn't change.** The slug parser, atomic swap primitive, TOML
+provenance marker, test infrastructure architecture, GitHub client API
+surface, and tarball-extraction strategy all stay as originally
+specified.
+
+### Future direction (needs-design, issue #74)
+
+Issue #74 (`needs-design`) captures a longer-term improvement: move
+from today's "pull the entire resolved subpath wholesale" fetch to a
+convention-aware "pull only files niwa knows about" model. This is
+deferred because (a) the relevant conventions are scattered across
+materializers and the apply pipeline rather than codified, and
+(b) the migration story for workspaces relying on wholesale-pull
+needs design attention. v1 ships wholesale-pull.
 
 ## Context and Problem Statement
 
@@ -313,13 +308,12 @@ state writes share a filesystem.
 > **Amended 2026-04-23.** The original choice relocated `instance.json`
 > to `<workspace>/.niwa-state/`. User feedback during implementation
 > pushed back: the relocation was implementation-driven, not
-> user-driven — its only purpose was to keep state safe across a
-> wholesale-subpath snapshot swap. With the manifest-driven fetch model
-> (PRD R10b), the assembly step knows exactly which files belong to
-> upstream and which belong to niwa-local state, so it can carry both
-> through the swap without conflating them. The directory split was
-> therefore unnecessary. See Solution Architecture's "Assembly contract"
-> subsection for the operative rule.
+> user-driven — its only purpose was to keep state safe from being
+> clobbered by the wholesale snapshot swap. The simpler solution
+> (copy state into staging before swap) achieves the same safety
+> without splitting the user-visible workspace into two hidden
+> directories. See Solution Architecture's "Assembly step" subsection
+> for the operative algorithm.
 
 The swap sequence: stage at `<workspace>/.niwa.next/`, then
 `rename(.niwa, .niwa.prev)` → `rename(.niwa.next, .niwa)` → `fsync`
@@ -498,19 +492,6 @@ Tar extraction lives next to the client as a package-local free
 function:
 - `extractSubpath(r io.Reader, subpath string, dest string) error` — streams `archive/tar` over `compress/gzip`, applies a literal-prefix subpath filter (`<github-tarball-wrapper>/<subpath>/...`), writes regular files only (skips symlinks, directories, devices), validates path containment to prevent escape via crafted entries.
 
-> **Amended 2026-04-23.** Per PRD R10b, `extractSubpath` is no longer
-> the final filter — it's the tarball-traversal primitive that the
-> snapshot writer composes with manifest filtering. The writer needs
-> to (1) extract `workspace.toml` first, (2) parse it to compute the
-> manifest, (3) extract the manifested files. A streamed tarball
-> doesn't permit re-traversal, so the writer either buffers the
-> tarball to a temp file (one network fetch, two `archive/tar`
-> passes over the buffer) or fetches twice. Buffering is the
-> intended default — the implementer decides under what tarball-size
-> threshold it stops being a good tradeoff. Files present in the
-> tarball but absent from the manifest are never written to the
-> snapshot, regardless of which approach is taken.
-
 `GH_TOKEN` is read once at constructor and added as
 `Authorization: Bearer <token>` on every request. Redirects use
 `http.Client.CheckRedirect` to record the chain and follow both 301
@@ -582,46 +563,40 @@ synthesis:
 
 The workspace config-source pipeline becomes a small set of focused
 packages that compose end-to-end. The user-typed slug is parsed into
-a typed `Source`, the `Source` drives a manifest-driven fetch (PRD R10b)
-via the GitHub tarball API or git-clone fallback, the assembly step
-materializes the manifested files plus niwa-local state at a sibling
-staging path, a provenance marker is written into it, and a single
-atomic-swap primitive promotes it to `<workspace>/.niwa/`. The same
-pipeline serves all three clone sites.
+a typed `Source`, the `Source` drives a stream-extracted snapshot via
+the GitHub tarball API (or git-clone fallback), the snapshot
+materializes at a sibling staging path, the assembly step copies any
+niwa-local state files from the existing `.niwa/` into staging, a
+provenance marker is written into staging, and a single atomic-swap
+primitive promotes the assembled directory to `<workspace>/.niwa/`.
+The same pipeline serves all three clone sites.
 
-### Assembly contract (per 2026-04-23 amendment)
+### Assembly step (per 2026-04-23 amendment)
 
-The atomic swap rotates `<workspace>/.niwa/` wholesale. The assembly
-step produces the staging directory by composing two input categories
-into one output before the swap fires:
+The atomic swap rotates `<workspace>/.niwa/` wholesale. To keep
+niwa-local state safe across that rotation, the snapshot writer
+performs a small assembly step between extraction and swap:
 
-- **Upstream content** — files niwa pulled from the source repo per
-  the manifest (PRD R10b): `workspace.toml` itself plus every path
-  referenced from path-bearing fields, transitively. Files present in
-  the source repo but not on the manifest are intentionally not
-  fetched and intentionally not written to the snapshot. The
-  extractor enforces this on the GitHub path; the file-by-file copy
-  enforces it on the fallback path.
+1. Extract upstream content into staging (existing behavior — files
+   from the source's resolved subpath, security-filtered per the
+   tarball/clone-copy disciplines).
+2. For each file in the closed set of niwa-local state files
+   (currently just `instance.json`), if the file exists at
+   `<workspace>/.niwa/<file>`, copy it into staging at the same
+   relative path. The copy overwrites any same-named file that
+   happened to come from upstream.
+3. Write the provenance marker (`.niwa-snapshot.toml`) into staging.
+4. Atomic swap.
 
-- **Niwa-local state** — files niwa itself wrote on a previous
-  apply, currently a closed set of one: `instance.json`. The
-  assembly step copies this file (when it exists at
-  `<workspace>/.niwa/instance.json`) into staging at the same
-  relative path, immediately before the swap. New niwa-local files
-  added in future releases extend this enumeration explicitly; no
-  pattern-based or subdirectory-based rule is used (rejected
-  alternative: see Considered Options Decision 2).
+The closed set is enumerated explicitly in code, not derived from a
+naming pattern or a reserved subdirectory. New niwa-local files
+added in future releases extend the list with an explicit code
+change.
 
-The provenance marker (`.niwa-snapshot.toml`) is part of upstream
-content's namespace — it sits next to `workspace.toml` in the
-snapshot — but is written by the assembly step itself, not the
-extractor.
-
-After swap, `<workspace>/.niwa/` contains exactly: the manifested
-files, the provenance marker, and the niwa-local state files. Nothing
-else. `find <workspace>/.niwa/ -name '.git*'` returns no results;
-`find` against any source-repo file not on the manifest returns no
-results.
+After swap, `<workspace>/.niwa/` contains: the source's regular
+files (per R10), the provenance marker (R11), and the niwa-local
+state files (carried by step 2 above). `find <workspace>/.niwa/
+-name '.git*'` returns no results.
 
 ### Components
 
@@ -903,19 +878,9 @@ Extend `APIClient` with the two new methods. Add `tar.go` with
 `NewAPIClient`. `RenameRedirect` type for 301 detection. Calls
 `testfault.Maybe("fetch-tarball")` and `testfault.Maybe("extract-entry")`.
 
-> **Amended 2026-04-23.** `extractSubpath` becomes the tarball-
-> traversal primitive that the snapshot writer composes with manifest
-> filtering (per Decision 5 amendment). The function's signature
-> changes to accept a filter callback (or set of paths) so the
-> caller controls which entries get written to disk. The package
-> ships a default filter equivalent to today's "everything under
-> `<wrapper>/<subpath>/`" for backward compatibility with simple
-> callers and for the workspace-overlay-discovery flow that doesn't
-> need manifest filtering.
-
 Deliverables:
 - `internal/github/client.go` (additions + env var)
-- `internal/github/tar.go` (extractSubpath, with manifest-filter callback)
+- `internal/github/tar.go` (extractSubpath)
 - `internal/github/client_test.go` (with httptest)
 - `internal/github/tar_test.go` (with synthetic tarballs)
 
@@ -923,37 +888,17 @@ Deliverables:
 
 Rewrite `internal/workspace/configsync.go` and
 `internal/workspace/overlaysync.go` to compose source parser +
-fetcher + extract + provenance writer + atomic swap. The git-clone
-fallback path lives next to the github path. Replace the legacy
-working-tree code paths.
-
-> **Amended 2026-04-23.** The snapshot writer drives the manifest
-> contract end-to-end. New responsibilities:
-> 1. Fetch and buffer the tarball (or perform the shallow clone for
->    the fallback path).
-> 2. First pass: extract `workspace.toml` (or `niwa.toml` for the
->    rank-3 discovery case) into staging.
-> 3. Parse the config; enumerate path-bearing fields; build the
->    manifest set (transitively).
-> 4. Second pass: extract the manifested files into staging.
-> 5. Assembly step: copy `<configDir>/instance.json` into staging
->    when present (the closed-set niwa-local state carry-over per
->    Solution Architecture's Assembly Contract).
-> 6. Write provenance marker into staging.
-> 7. Atomic swap.
->
-> The path-bearing-fields enumeration is itself a small package-
-> level table (e.g., `[]string{"claude.hooks.*", "files.*.src",
-> "env.files.*"}`) so adding a new path-bearing field in the future
-> means extending the table, not rewriting the manifest builder.
+fetcher + extract + provenance writer + assembly step + atomic swap.
+The git-clone fallback path lives next to the github path. Replace
+the legacy working-tree code paths. The assembly step (per the
+2026-04-23 amendment to Solution Architecture) copies any niwa-local
+state files from the existing `.niwa/` into staging immediately
+before the swap so they survive the wholesale rotation.
 
 Deliverables:
-- `internal/workspace/configsync.go` (rewrite, manifest-driven)
-- `internal/workspace/overlaysync.go` (rewrite, manifest-driven)
-- `internal/workspace/fallback.go` (git-clone fallback, file-by-file
-  copy filtered to manifest)
-- `internal/workspace/manifest.go` (new — path-bearing fields table
-  + `BuildManifest(cfg) []string`)
+- `internal/workspace/configsync.go` (rewrite)
+- `internal/workspace/overlaysync.go` (rewrite)
+- `internal/workspace/fallback.go` (git-clone fallback for non-github)
 
 ### Phase 7: State schema v3
 
