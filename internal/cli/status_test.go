@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -353,5 +354,121 @@ func TestShowDetailView_VerboseEnvExampleSource(t *testing.T) {
 	}
 	if strings.Contains(output, "plaintext://.env.example") {
 		t.Errorf("must not display plaintext label for env_example source, got:\n%s", output)
+	}
+}
+
+// TestBuildMeshSummary_ChanneledWorkspace seeds tasks in assorted states,
+// writes a minimal channeled workspace.toml at the workspace root, and
+// asserts the rendered summary line counts match the fixtures.
+func TestBuildMeshSummary_ChanneledWorkspace(t *testing.T) {
+	wsRoot := t.TempDir()
+	instanceRoot := filepath.Join(wsRoot, "instance")
+	if err := os.MkdirAll(filepath.Join(instanceRoot, ".niwa", "tasks"), 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	// Channels opt-in: workspace.toml at wsRoot with [channels.mesh].
+	if err := os.MkdirAll(filepath.Join(wsRoot, ".niwa"), 0o700); err != nil {
+		t.Fatalf("mkdir ws .niwa: %v", err)
+	}
+	tomlData := "[workspace]\nname = \"test-ws\"\n\n[channels.mesh]\n"
+	if err := os.WriteFile(filepath.Join(wsRoot, ".niwa", "workspace.toml"), []byte(tomlData), 0o600); err != nil {
+		t.Fatalf("write workspace.toml: %v", err)
+	}
+
+	now := time.Now().UTC()
+	recent := now.Add(-2 * time.Hour)
+	old := now.Add(-48 * time.Hour)
+
+	// 2 queued, 1 running, 1 completed in last 24h, 1 abandoned in last
+	// 24h, 1 completed outside the 24h window (should NOT count).
+	fixtures := []struct {
+		id          string
+		state       string
+		transitions []struct{ To, At string }
+	}{
+		{id: "aaaaaaaa-1111-4111-8111-111111111111", state: "queued"},
+		{id: "bbbbbbbb-2222-4222-8222-222222222222", state: "queued"},
+		{id: "cccccccc-3333-4333-8333-333333333333", state: "running"},
+		{id: "dddddddd-4444-4444-8444-444444444444", state: "completed",
+			transitions: []struct{ To, At string }{
+				{To: "completed", At: recent.Format(time.RFC3339)},
+			}},
+		{id: "eeeeeeee-5555-4555-8555-555555555555", state: "abandoned",
+			transitions: []struct{ To, At string }{
+				{To: "abandoned", At: recent.Format(time.RFC3339)},
+			}},
+		{id: "ffffffff-6666-4666-8666-666666666666", state: "completed",
+			transitions: []struct{ To, At string }{
+				{To: "completed", At: old.Format(time.RFC3339)},
+			}},
+	}
+	for _, f := range fixtures {
+		dir := filepath.Join(instanceRoot, ".niwa", "tasks", f.id)
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatalf("mkdir task: %v", err)
+		}
+		state := map[string]any{
+			"v":       1,
+			"task_id": f.id,
+			"state":   f.state,
+			"state_transitions": append([]map[string]string{
+				{"from": "", "to": "queued", "at": now.Format(time.RFC3339)},
+			}, func() []map[string]string {
+				var out []map[string]string
+				for _, tr := range f.transitions {
+					out = append(out, map[string]string{"from": "queued", "to": tr.To, "at": tr.At})
+				}
+				return out
+			}()...),
+			"max_restarts":   3,
+			"delegator_role": "coordinator",
+			"target_role":    "web",
+			"worker":         map[string]any{"pid": 0, "start_time": 0, "role": "web"},
+			"updated_at":     now.Format(time.RFC3339),
+		}
+		data, err := json.Marshal(state)
+		if err != nil {
+			t.Fatalf("marshal state: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "state.json"), data, 0o600); err != nil {
+			t.Fatalf("write state.json: %v", err)
+		}
+	}
+
+	got := buildMeshSummary(instanceRoot)
+	want := "2 queued, 1 running, 1 completed (last 24h), 1 abandoned (last 24h)"
+	if got != want {
+		t.Errorf("buildMeshSummary = %q, want %q", got, want)
+	}
+}
+
+func TestBuildMeshSummary_NotChanneledReturnsEmpty(t *testing.T) {
+	wsRoot := t.TempDir()
+	instanceRoot := filepath.Join(wsRoot, "instance")
+	if err := os.MkdirAll(filepath.Join(instanceRoot, ".niwa", "tasks"), 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	// No workspace.toml → not channeled.
+	if got := buildMeshSummary(instanceRoot); got != "" {
+		t.Errorf("expected empty mesh summary when not channeled, got %q", got)
+	}
+}
+
+func TestBuildMeshSummary_ChanneledWithNoTasks(t *testing.T) {
+	wsRoot := t.TempDir()
+	instanceRoot := filepath.Join(wsRoot, "instance")
+	if err := os.MkdirAll(filepath.Join(instanceRoot, ".niwa"), 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(wsRoot, ".niwa"), 0o700); err != nil {
+		t.Fatalf("mkdir ws .niwa: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(wsRoot, ".niwa", "workspace.toml"), []byte("[workspace]\nname = \"test-ws\"\n\n[channels.mesh]\n"), 0o600); err != nil {
+		t.Fatalf("write workspace.toml: %v", err)
+	}
+	got := buildMeshSummary(instanceRoot)
+	want := "0 queued, 0 running, 0 completed (last 24h), 0 abandoned (last 24h)"
+	if got != want {
+		t.Errorf("buildMeshSummary empty = %q, want %q", got, want)
 	}
 }

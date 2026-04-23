@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -258,6 +259,19 @@ func showDetailView(cmd *cobra.Command, instanceRoot string) error {
 		}
 	}
 
+	// Mesh summary (cross-session-communication Issue #9). Printed
+	// only when the workspace has channels opted in, which we detect
+	// by combining two signals: (1) the instance has a `.niwa/` dir
+	// (always true for a valid instance, but still asserted
+	// defensively); (2) the workspace config parses with
+	// [channels.mesh] present. When either is missing we skip the
+	// summary entirely — AC says "Non-channeled workspace: no mesh
+	// line".
+	if meshLine := buildMeshSummary(instanceRoot); meshLine != "" {
+		fmt.Fprintln(out)
+		fmt.Fprintln(out, "Mesh: "+meshLine)
+	}
+
 	// Personal-overlay shadow summary. Omitted when the last apply
 	// recorded zero shadows so the default happy-path output stays
 	// clean. The `--audit-secrets` SHADOWED column is owned by
@@ -303,6 +317,112 @@ func shortToken(t string) string {
 		return t[:12] + "..."
 	}
 	return t
+}
+
+// buildMeshSummary returns the "Mesh: <queued> queued, <running> ..." line
+// for the detail view, or "" when the workspace is not channeled or the
+// `.niwa/tasks` directory does not exist. Counts are derived entirely
+// from state.json files to stay consistent with `niwa task list`; 24-hour
+// windows filter state_transitions for terminal (completed/abandoned)
+// transitions.
+//
+// Any read error on an individual task is treated as a skip (same as the
+// task-list path) so a single partial write doesn't break the summary
+// line. The empty return value is the signal used by the caller to
+// suppress the entire line.
+func buildMeshSummary(instanceRoot string) string {
+	if !isChanneledInstance(instanceRoot) {
+		return ""
+	}
+	tasksDir := filepath.Join(instanceRoot, ".niwa", "tasks")
+	entries, err := os.ReadDir(tasksDir)
+	if err != nil {
+		// Channels config present but no tasks dir yet: still print the
+		// summary with zero counts so operators see the mesh is live.
+		if os.IsNotExist(err) {
+			return meshSummaryLine(0, 0, 0, 0)
+		}
+		return ""
+	}
+
+	var queued, running, completed24h, abandoned24h int
+	cutoff := time.Now().Add(-24 * time.Hour)
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		taskDir := filepath.Join(tasksDir, e.Name())
+		data, err := os.ReadFile(filepath.Join(taskDir, "state.json"))
+		if err != nil {
+			continue
+		}
+		var st struct {
+			State            string `json:"state"`
+			StateTransitions []struct {
+				From string `json:"from"`
+				To   string `json:"to"`
+				At   string `json:"at"`
+			} `json:"state_transitions"`
+		}
+		if err := json.Unmarshal(data, &st); err != nil {
+			continue
+		}
+		switch st.State {
+		case "queued":
+			queued++
+		case "running":
+			running++
+		}
+		// Walk transitions for terminal entries in the last 24h. A task
+		// can only reach each terminal state once, so at most one
+		// transition per task contributes to each count.
+		for _, tr := range st.StateTransitions {
+			if tr.To != "completed" && tr.To != "abandoned" {
+				continue
+			}
+			t, err := time.Parse(time.RFC3339, tr.At)
+			if err != nil {
+				// Nanosecond-precision timestamps from transitions.log
+				// use RFC3339Nano which still parses via RFC3339 on Go's
+				// parser, so this branch only hits on malformed input.
+				continue
+			}
+			if t.Before(cutoff) {
+				continue
+			}
+			if tr.To == "completed" {
+				completed24h++
+			} else {
+				abandoned24h++
+			}
+		}
+	}
+	return meshSummaryLine(queued, running, completed24h, abandoned24h)
+}
+
+func meshSummaryLine(queued, running, completed24h, abandoned24h int) string {
+	return fmt.Sprintf("%d queued, %d running, %d completed (last 24h), %d abandoned (last 24h)",
+		queued, running, completed24h, abandoned24h)
+}
+
+// isChanneledInstance returns true when the instance has channels opted
+// in. The check combines two signals: (1) the instance has a `.niwa/`
+// directory (required for any valid instance), and (2) the workspace
+// config reachable from the instance root parses with [channels.mesh]
+// present.
+func isChanneledInstance(instanceRoot string) bool {
+	if _, err := os.Stat(filepath.Join(instanceRoot, ".niwa")); err != nil {
+		return false
+	}
+	configPath, _, err := config.Discover(instanceRoot)
+	if err != nil {
+		return false
+	}
+	result, err := config.Load(configPath)
+	if err != nil {
+		return false
+	}
+	return result.Config.Channels.IsEnabled()
 }
 
 // formatRelativeTime returns a human-readable relative time string.
