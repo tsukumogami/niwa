@@ -168,6 +168,10 @@ func runMeshWatch(cmd *cobra.Command, args []string) error {
 	defer cancel()
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
+	// Stop notifying sigCh as soon as runMeshWatch returns. This is
+	// placed BEFORE the defer that removes the PID file so any SIGTERM
+	// arriving post-event-loop-exit is ignored (not swallowed by a
+	// handler that has already been torn down).
 	defer signal.Stop(sigCh)
 	go func() {
 		select {
@@ -223,6 +227,7 @@ func runMeshWatch(cmd *cobra.Command, args []string) error {
 		logger:       logger,
 		exitCh:       exitCh,
 		wg:           &supervisorWG,
+		shutdownCtx:  ctx,
 	}
 
 	// Replay catch-up events through a channel so the central loop has a
@@ -246,6 +251,10 @@ func runMeshWatch(cmd *cobra.Command, args []string) error {
 
 // spawnContext bundles the stable fields every claim→spawn path needs.
 // Keeping them on one struct makes the central loop's call sites short.
+//
+// shutdownCtx is the daemon's root context. Supervisor goroutines use it
+// to drop exit events intentionally during shutdown rather than blocking
+// forever on a channel the central loop will never read again.
 type spawnContext struct {
 	instanceRoot string
 	niwaDir      string
@@ -253,6 +262,7 @@ type spawnContext struct {
 	logger       *log.Logger
 	exitCh       chan<- supervisorExit
 	wg           *sync.WaitGroup
+	shutdownCtx  context.Context
 }
 
 // runEventLoop owns the central `select`. It returns only when ctx is
@@ -323,10 +333,22 @@ func runEventLoop(
 func handleInboxEvent(evt inboxEvent, s spawnContext) {
 	taskDir := filepath.Join(s.instanceRoot, ".niwa", "tasks", evt.taskID)
 	if _, err := os.Stat(filepath.Join(taskDir, "state.json")); err != nil {
-		// Dangling inbox file — no task dir. Log and skip; this can
-		// happen if a message is dropped into the inbox without going
-		// through niwa_delegate.
+		// Dangling inbox file — no task dir. Move the envelope out of the
+		// queued inbox so fsnotify does not re-fire CREATE events for it
+		// on every daemon startup or sibling write. The file lands in
+		// `.niwa/roles/<role>/inbox/dangling/<task-id>.json` for operator
+		// inspection; leaving it in place keeps triggering the same
+		// "skip=dangling" code path indefinitely.
 		s.logger.Printf("inbox_event role=%s task=%s skip=dangling path=%s", evt.role, evt.taskID, evt.filePath)
+		danglingDir := filepath.Join(filepath.Dir(evt.filePath), "dangling")
+		if err := os.MkdirAll(danglingDir, 0o700); err != nil {
+			s.logger.Printf("inbox_event role=%s task=%s dangling_mkdir_err=%v", evt.role, evt.taskID, err)
+			return
+		}
+		danglingPath := filepath.Join(danglingDir, filepath.Base(evt.filePath))
+		if err := os.Rename(evt.filePath, danglingPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			s.logger.Printf("inbox_event role=%s task=%s dangling_rename_err=%v", evt.role, evt.taskID, err)
+		}
 		return
 	}
 
@@ -428,12 +450,26 @@ func spawnWorker(evt inboxEvent, taskDir string, s spawnContext) {
 
 	// Per-task stderr log. Worker stderr is a per-task concern; the
 	// daemon log captures daemon-level events only.
+	//
+	// IMPORTANT: exec.Cmd.Wait() does NOT close caller-supplied *os.File
+	// values. The supervisor goroutine below closes stderrFile after
+	// Wait returns; if cmd.Start fails we close it on the early-return
+	// path. Missing either path leaks one fd per spawn and will
+	// eventually exhaust the daemon's fd budget.
 	stderrPath := filepath.Join(taskDir, "stderr.log")
-	if stderrFile, err := os.OpenFile(stderrPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600); err == nil {
+	stderrFile, stderrErr := os.OpenFile(stderrPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if stderrErr == nil {
 		cmd.Stderr = stderrFile
+	} else {
+		s.logger.Printf("spawn_warn role=%s task=%s stderr_open_err=%v", evt.role, evt.taskID, stderrErr)
 	}
 
 	if err := cmd.Start(); err != nil {
+		// Close the stderr fd before returning — the supervisor goroutine
+		// that normally owns closing it is never started on this path.
+		if stderrFile != nil {
+			_ = stderrFile.Close()
+		}
 		s.logger.Printf("spawn_err role=%s task=%s err=%v", evt.role, evt.taskID, err)
 		// Transition task to abandoned with reason "spawn_failed". No
 		// retry at this phase — see function comment.
@@ -479,22 +515,35 @@ func spawnWorker(evt inboxEvent, taskDir string, s spawnContext) {
 
 	s.logger.Printf("spawn_ok role=%s task=%s pid=%d start_time=%d", evt.role, evt.taskID, pid, startTime)
 
-	// Supervisor goroutine: wait for exit, report back.
+	// Supervisor goroutine: wait for exit, close the stderr fd we
+	// allocated above, then report back to the central loop.
+	//
+	// The send is guarded by shutdownCtx rather than using a `default:`
+	// branch. A full exitCh during normal operation is back-pressure,
+	// not an error — blocking here pace-matches the central loop. Only
+	// when the daemon is shutting down (shutdownCtx.Done() has fired)
+	// do we intentionally drop the event: nothing reads exitCh at that
+	// point, and the transition will be re-derived by Issue 7's
+	// reconciliation on the next daemon start.
 	s.wg.Add(1)
-	go func(c *exec.Cmd, taskID string) {
+	go func(c *exec.Cmd, taskID string, stderrFile *os.File) {
 		defer s.wg.Done()
 		waitErr := c.Wait()
+		if stderrFile != nil {
+			_ = stderrFile.Close()
+		}
 		exitCode := 0
 		if c.ProcessState != nil {
 			exitCode = c.ProcessState.ExitCode()
 		}
 		select {
 		case s.exitCh <- supervisorExit{taskID: taskID, exitCode: exitCode, err: waitErr}:
-		default:
-			// exitCh is buffered; a full channel means shutdown is
-			// draining. Drop the event rather than block here.
+		case <-s.shutdownCtx.Done():
+			// Daemon is shutting down; the central loop has already
+			// returned and nothing will read exitCh. Drop the event
+			// intentionally — see function comment.
 		}
-	}(cmd, evt.taskID)
+	}(cmd, evt.taskID, stderrFile)
 }
 
 // handleSupervisorExit processes a worker exit. Issue 4 logs the event

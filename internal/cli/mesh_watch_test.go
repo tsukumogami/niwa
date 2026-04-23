@@ -484,6 +484,7 @@ func TestRunEventLoop_CatchupSpawnsWorker(t *testing.T) {
 		logger:       logger,
 		exitCh:       exitCh,
 		wg:           &wg,
+		shutdownCtx:  ctx,
 	}
 
 	loopDone := make(chan struct{})
@@ -571,6 +572,7 @@ func TestHandleInboxEvent_SkipsNonQueuedState(t *testing.T) {
 		logger:       log.New(io.Discard, "", 0),
 		exitCh:       exitCh,
 		wg:           &wg,
+		shutdownCtx:  context.Background(),
 	}
 
 	inboxPath := filepath.Join(f.rolesRoot, "web", "inbox", taskID+".json")
@@ -596,8 +598,9 @@ func TestHandleInboxEvent_SkipsNonQueuedState(t *testing.T) {
 }
 
 // TestHandleInboxEvent_DanglingEnvelope: a stray file whose task dir
-// does not exist must be logged and ignored, not renamed and not cause
-// a crash.
+// does not exist must be moved into inbox/dangling/ so fsnotify stops
+// re-firing CREATE events for it. The task dir must NOT be created and
+// the daemon must not crash.
 func TestHandleInboxEvent_DanglingEnvelope(t *testing.T) {
 	f := newDaemonTestFixture(t)
 	fakeTaskID := mcp.NewTaskID()
@@ -616,6 +619,7 @@ func TestHandleInboxEvent_DanglingEnvelope(t *testing.T) {
 		logger:       log.New(io.Discard, "", 0),
 		exitCh:       exitCh,
 		wg:           &wg,
+		shutdownCtx:  context.Background(),
 	}
 
 	handleInboxEvent(inboxEvent{
@@ -624,10 +628,14 @@ func TestHandleInboxEvent_DanglingEnvelope(t *testing.T) {
 		filePath: inboxPath,
 	}, spawnCtx)
 
-	// Original stray file still there (we did not rename it); task dir
-	// remains absent.
-	if _, err := os.Stat(inboxPath); err != nil {
-		t.Errorf("stray inbox removed unexpectedly: %v", err)
+	// Original stray file should have been moved out of the queued inbox
+	// so fsnotify does not keep re-firing CREATE events for it.
+	if _, err := os.Stat(inboxPath); !os.IsNotExist(err) {
+		t.Errorf("stray inbox still present at queued path: err=%v", err)
+	}
+	danglingPath := filepath.Join(f.rolesRoot, "web", "inbox", "dangling", fakeTaskID+".json")
+	if _, err := os.Stat(danglingPath); err != nil {
+		t.Errorf("stray inbox not moved to dangling/: %v", err)
 	}
 	taskDir := filepath.Join(f.tasksDir, fakeTaskID)
 	if _, err := os.Stat(taskDir); !os.IsNotExist(err) {
@@ -804,4 +812,297 @@ func ensureTestBinary(t *testing.T) string {
 		t.Fatalf("go build: %v\n%s", err, out)
 	}
 	return bin
+}
+
+// ---------------------------------------------------------------------
+// Regression tests for reviewer-flagged defects
+// ---------------------------------------------------------------------
+
+// countOpenFDs returns the number of entries under /proc/self/fd. It's
+// the cheapest way to assert we're not leaking file descriptors between
+// spawns without depending on lsof or platform-specific rusage.
+func countOpenFDs(t *testing.T) int {
+	t.Helper()
+	entries, err := os.ReadDir("/proc/self/fd")
+	if err != nil {
+		t.Skipf("/proc/self/fd unavailable (not Linux?): %v", err)
+	}
+	return len(entries)
+}
+
+// TestSpawnWorker_StderrFileClosedAfterExit (blocking finding B1):
+// spawnWorker must close the stderr *os.File it opens once the
+// supervisor's cmd.Wait returns. Prior to the fix each spawn leaked one
+// fd; the daemon eventually exhausted its fd budget and silently wedged
+// fsnotify, state.json writes, and flocks.
+//
+// Strategy: measure the process fd count, spawn several workers that
+// each exit immediately, wait for their supervisors to finish, and
+// assert the fd count has NOT grown by ~N. Some noise is tolerated
+// (GC-triggered file closes, test framework files), but a leak of one
+// fd per spawn is easily visible above the noise floor.
+func TestSpawnWorker_StderrFileClosedAfterExit(t *testing.T) {
+	const spawns = 20
+
+	f := newDaemonTestFixture(t)
+
+	// Seed N queued tasks.
+	taskIDs := make([]string, spawns)
+	for i := range taskIDs {
+		taskIDs[i] = f.seedQueuedTask(t, "web")
+	}
+
+	// Measure fd count just before the spawn storm.
+	before := countOpenFDs(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var wg sync.WaitGroup
+	exitCh := make(chan supervisorExit, spawns*2)
+	s := spawnContext{
+		instanceRoot: f.root,
+		niwaDir:      f.niwaDir,
+		spawnBin:     "/bin/true",
+		logger:       log.New(io.Discard, "", 0),
+		exitCh:       exitCh,
+		wg:           &wg,
+		shutdownCtx:  ctx,
+	}
+
+	for _, id := range taskIDs {
+		evt := inboxEvent{
+			role:     "web",
+			taskID:   id,
+			filePath: filepath.Join(f.rolesRoot, "web", "inbox", id+".json"),
+		}
+		handleInboxEvent(evt, s)
+	}
+
+	// Drain every supervisor — cmd.Wait must return before we measure fds.
+	wg.Wait()
+
+	// Drain exitCh so buffered supervisorExit{} payloads don't retain
+	// anything interesting (they don't, but be explicit).
+	for len(exitCh) > 0 {
+		<-exitCh
+	}
+
+	after := countOpenFDs(t)
+
+	// Allow a small slack for Go runtime/test-framework noise. If we
+	// were leaking one fd per spawn we'd see `after - before >= spawns`;
+	// the assertion fails well below that threshold.
+	if delta := after - before; delta > spawns/4 {
+		t.Fatalf("fd count grew by %d after %d spawns (before=%d after=%d) — stderr.log files are being leaked",
+			delta, spawns, before, after)
+	}
+}
+
+// TestSpawnWorker_StderrClosedOnStartFailure (blocking finding B1
+// early-return path): when cmd.Start fails, the stderr file we opened
+// must be closed before returning. Otherwise the spawn_failed path
+// leaks an fd for every rejected spawn.
+//
+// We drive this by pointing spawnBin at a non-executable file so
+// cmd.Start returns EACCES. The stderr file has already been opened at
+// that point, so a leak would show up in /proc/self/fd.
+func TestSpawnWorker_StderrClosedOnStartFailure(t *testing.T) {
+	f := newDaemonTestFixture(t)
+
+	// Create a non-executable file to use as the spawn target. cmd.Start
+	// will fail with EACCES / permission denied, exercising the early-
+	// return path in spawnWorker.
+	bogusBin := filepath.Join(t.TempDir(), "not-executable")
+	if err := os.WriteFile(bogusBin, []byte("#!/bin/sh\nexit 0\n"), 0o600); err != nil {
+		t.Fatalf("write bogus bin: %v", err)
+	}
+
+	const spawns = 20
+	taskIDs := make([]string, spawns)
+	for i := range taskIDs {
+		taskIDs[i] = f.seedQueuedTask(t, "web")
+	}
+
+	before := countOpenFDs(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var wg sync.WaitGroup
+	exitCh := make(chan supervisorExit, spawns*2)
+	s := spawnContext{
+		instanceRoot: f.root,
+		niwaDir:      f.niwaDir,
+		spawnBin:     bogusBin,
+		logger:       log.New(io.Discard, "", 0),
+		exitCh:       exitCh,
+		wg:           &wg,
+		shutdownCtx:  ctx,
+	}
+
+	for _, id := range taskIDs {
+		evt := inboxEvent{
+			role:     "web",
+			taskID:   id,
+			filePath: filepath.Join(f.rolesRoot, "web", "inbox", id+".json"),
+		}
+		handleInboxEvent(evt, s)
+	}
+
+	// cmd.Start failing means no supervisor goroutine was spawned, so
+	// there's nothing for wg.Wait to do — but call it anyway in case a
+	// future refactor starts one.
+	wg.Wait()
+
+	after := countOpenFDs(t)
+	if delta := after - before; delta > spawns/4 {
+		t.Fatalf("fd count grew by %d after %d failed spawns (before=%d after=%d) — stderr.log files leaked on start-failure path",
+			delta, spawns, before, after)
+	}
+}
+
+// TestSpawnWorker_ExitEventNotDroppedUnderBackPressure (blocking
+// finding B2): before the fix, the supervisor goroutine used a
+// non-blocking `select { case exitCh<-…: default: }` which silently
+// dropped exit events when the channel was full. Tasks then stayed in
+// `running` forever and Issue 5's retry pipeline never kicked in.
+//
+// This test saturates exitCh by using a buffer size of 1 and delaying
+// the central loop's drain, forcing the supervisor send to block.
+// After the loop starts draining, every supervised task's
+// unexpected_exit entry must eventually be recorded in transitions.log.
+func TestSpawnWorker_ExitEventNotDroppedUnderBackPressure(t *testing.T) {
+	const spawns = 10
+
+	f := newDaemonTestFixture(t)
+
+	// Seed N queued tasks.
+	taskIDs := make([]string, spawns)
+	for i := range taskIDs {
+		taskIDs[i] = f.seedQueuedTask(t, "web")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var wg sync.WaitGroup
+	// Deliberately tiny buffer so supervisors block on the send once
+	// the first event is parked, reproducing back-pressure.
+	exitCh := make(chan supervisorExit, 1)
+	s := spawnContext{
+		instanceRoot: f.root,
+		niwaDir:      f.niwaDir,
+		spawnBin:     "/bin/true",
+		logger:       log.New(io.Discard, "", 0),
+		exitCh:       exitCh,
+		wg:           &wg,
+		shutdownCtx:  ctx,
+	}
+
+	// Fire off spawns. Each /bin/true exits immediately; the supervisor
+	// goroutines then race to send on the size-1 exitCh. The fixed code
+	// blocks (pace-matches the central loop) instead of dropping.
+	for _, id := range taskIDs {
+		evt := inboxEvent{
+			role:     "web",
+			taskID:   id,
+			filePath: filepath.Join(f.rolesRoot, "web", "inbox", id+".json"),
+		}
+		handleInboxEvent(evt, s)
+	}
+
+	// Drain the exitCh through handleSupervisorExit — the same path the
+	// central loop takes. Record each exit so we can assert coverage.
+	seen := map[string]bool{}
+	drainDone := make(chan struct{})
+	go func() {
+		defer close(drainDone)
+		for ex := range exitCh {
+			handleSupervisorExit(ex, s)
+			seen[ex.taskID] = true
+			if len(seen) == spawns {
+				return
+			}
+		}
+	}()
+
+	// Wait for supervisors to finish sending (which requires us to drain).
+	wg.Wait()
+	// Once every supervisor has exited and every send has landed, close
+	// the channel so the drain goroutine returns cleanly if it hasn't
+	// already hit the count check above.
+	select {
+	case <-drainDone:
+		// drain completed via count check
+	case <-time.After(3 * time.Second):
+		close(exitCh)
+		<-drainDone
+	}
+
+	// Every task's exit must have been observed.
+	if len(seen) != spawns {
+		t.Fatalf("received exits for %d/%d tasks; some exit events were dropped under back-pressure: %v",
+			len(seen), spawns, seen)
+	}
+
+	// Every task's transitions.log must contain the unexpected_exit
+	// record written by handleSupervisorExit.
+	for _, id := range taskIDs {
+		if !logHasKind(t, f.tasksDir, id, "unexpected_exit") {
+			t.Errorf("task %s missing unexpected_exit in transitions.log (back-pressure drop?)", id)
+		}
+	}
+}
+
+// TestSpawnWorker_ExitEventDroppedAfterShutdown (blocking finding B2
+// contract, shutdown path): when shutdownCtx is already cancelled the
+// supervisor must NOT block forever trying to send on an exitCh nobody
+// reads. The central loop has returned by that point; intentionally
+// dropping the event is the correct choice.
+func TestSpawnWorker_ExitEventDroppedAfterShutdown(t *testing.T) {
+	f := newDaemonTestFixture(t)
+	taskID := f.seedQueuedTask(t, "web")
+
+	// Pre-cancel the shutdown context before spawning. The supervisor
+	// goroutine will see ctx.Done() immediately on the select and drop
+	// the event rather than blocking.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	var wg sync.WaitGroup
+	// Buffer of 0 makes the send outright block if the shutdownCtx guard
+	// is removed, which would cause wg.Wait() below to hang and the
+	// test to time out.
+	exitCh := make(chan supervisorExit)
+	s := spawnContext{
+		instanceRoot: f.root,
+		niwaDir:      f.niwaDir,
+		spawnBin:     "/bin/true",
+		logger:       log.New(io.Discard, "", 0),
+		exitCh:       exitCh,
+		wg:           &wg,
+		shutdownCtx:  ctx,
+	}
+
+	evt := inboxEvent{
+		role:     "web",
+		taskID:   taskID,
+		filePath: filepath.Join(f.rolesRoot, "web", "inbox", taskID+".json"),
+	}
+	handleInboxEvent(evt, s)
+
+	// The supervisor must return within a short window despite nobody
+	// reading exitCh, because shutdownCtx is already done.
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		// pass
+	case <-time.After(2 * time.Second):
+		t.Fatalf("supervisor did not return after shutdown — shutdownCtx guard missing?")
+	}
 }
