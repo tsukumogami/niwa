@@ -186,8 +186,11 @@ func TestInstallChannelInfrastructure_CreatesRoleLayout(t *testing.T) {
 
 	// writtenFiles should contain every installer-written file but NOT
 	// runtime artifacts like .niwa/tasks/<id>/ or role inbox files.
+	// workspace-context.md is tracked so destroy-time cleanup removes it
+	// alongside the other managed files.
+	ctxPath := filepath.Join(dir, workspaceContextFile)
 	mustHave := []string{
-		instanceMCP, instanceSkill, pidPath, logPath,
+		instanceMCP, instanceSkill, pidPath, logPath, ctxPath,
 	}
 	for _, p := range mustHave {
 		found := false
@@ -235,11 +238,11 @@ func checkSkillShape(t *testing.T, data []byte) {
 	}
 
 	// Combined frontmatter (name + description + allowed-tools) must be
-	// under Claude Code's 1536-char cap. The cap applies to the parsed
-	// values, not the raw YAML, but enforcing the raw byte length is a
-	// conservative upper bound.
-	if len(frontmatter) >= 1536 {
-		t.Errorf("frontmatter exceeds 1536-char cap: %d bytes", len(frontmatter))
+	// under Claude Code's skillFrontmatterCharLimit cap. The cap applies
+	// to the parsed values, not the raw YAML, but enforcing the raw byte
+	// length is a conservative upper bound.
+	if len(frontmatter) >= skillFrontmatterCharLimit {
+		t.Errorf("frontmatter exceeds %d-char cap: %d bytes", skillFrontmatterCharLimit, len(frontmatter))
 	}
 
 	// Body: six required section headings per PRD R10.
@@ -782,16 +785,5 @@ func TestWriteIdempotent_MatchingContentSkipsWrite(t *testing.T) {
 	after, _ := os.Stat(path)
 	if !before.ModTime().Equal(after.ModTime()) {
 		t.Errorf("mtime changed on byte-identical rewrite: %v -> %v", before.ModTime(), after.ModTime())
-	}
-}
-
-func TestHashBytes_StableAcrossCalls(t *testing.T) {
-	a := hashBytes([]byte("abc"))
-	b := hashBytes([]byte("abc"))
-	if a != b {
-		t.Errorf("hash not deterministic: %q != %q", a, b)
-	}
-	if a == hashBytes([]byte("abd")) {
-		t.Errorf("hash collided on different inputs")
 	}
 }

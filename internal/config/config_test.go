@@ -86,7 +86,6 @@ files = ["env/workspace.env"]
 vars = { LOG_LEVEL = "debug" }
 
 [channels.mesh]
-message_ttl = "24h"
 
 [channels.mesh.roles]
 coordinator = "niwa"
@@ -299,9 +298,6 @@ func TestParseFullConfig(t *testing.T) {
 	}
 	if !cfg.Channels.IsEnabled() {
 		t.Error("channels should be enabled when [channels.mesh] is configured")
-	}
-	if cfg.Channels.Mesh.MessageTTL != "24h" {
-		t.Errorf("channels.mesh.message_ttl = %q, want %q", cfg.Channels.Mesh.MessageTTL, "24h")
 	}
 	if cfg.Channels.Mesh.Roles["coordinator"] != "niwa" {
 		t.Errorf("channels.mesh.roles.coordinator = %q, want %q", cfg.Channels.Mesh.Roles["coordinator"], "niwa")

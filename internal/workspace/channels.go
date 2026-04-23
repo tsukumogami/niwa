@@ -2,8 +2,6 @@ package workspace
 
 import (
 	"bytes"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -73,6 +71,12 @@ var inboxSubdirs = []string{"in-progress", "cancelled", "expired", "read"}
 // to detect pre-1.0 .niwa/sessions/<uuid>/ subdirectories.
 var uuidV4RE = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$`)
 
+// skillFrontmatterCharLimit is Claude Code's combined frontmatter cap
+// (name + description + allowed-tools). buildSkillContent keeps its
+// frontmatter under this limit; channels_test.go asserts it as a raw-
+// byte upper bound.
+const skillFrontmatterCharLimit = 1536
+
 // InstallChannelInfrastructure provisions the per-role mesh filesystem
 // layout for a channeled workspace. It is a no-op when channels are not
 // enabled. When enabled it:
@@ -87,13 +91,15 @@ var uuidV4RE = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-
 //  4. Writes <instanceRoot>/.claude/.mcp.json and mirrors it into every
 //     cloned repo's .claude/.mcp.json with NIWA_INSTANCE_ROOT baked in.
 //  5. Installs the niwa-mesh SKILL.md at instance-root and per-repo
-//     .claude/skills/niwa-mesh/ with sha256-based idempotency — writes only
+//     .claude/skills/niwa-mesh/ with byte-compare idempotency — writes only
 //     when the on-disk bytes differ from the installer's output, emits a
 //     single-line stderr drift warning on overwrite.
 //  6. Writes the minimal ## Channels section into workspace-context.md.
 //
 // Every installer-written path is appended to *writtenFiles so that the
-// apply pipeline can track the file in InstanceState.ManagedFiles. Runtime
+// apply pipeline can track the file in InstanceState.ManagedFiles,
+// including workspace-context.md (the installer owns only the ## Channels
+// section but still tracks the file for destroy-time cleanup). Runtime
 // artifacts (.niwa/tasks/<id>/*, .niwa/roles/*/inbox/<id>.json) are NOT
 // tracked — the daemon and MCP handlers write those at runtime and manage
 // their own lifecycle.
@@ -246,6 +252,7 @@ func InstallChannelInfrastructure(cfg *config.WorkspaceConfig, instanceRoot stri
 	if err := writeChannelsSection(ctxPath, instanceRoot); err != nil {
 		return fmt.Errorf("writing channels section: %w", err)
 	}
+	*writtenFiles = append(*writtenFiles, ctxPath)
 
 	return nil
 }
@@ -317,86 +324,45 @@ func enumerateRoles(cfg *config.WorkspaceConfig, instanceRoot string) ([]roleEnt
 		}
 	}
 
-	// Enumerate topology-derived roles by walking the instance root's
-	// group directories. EnumerateRepos is available in this package and
-	// already handles hidden-directory skipping and name safety checks.
-	topologyNames, err := EnumerateRepos(instanceRoot)
-	if err != nil {
-		// A missing instance root is possible on a create path before
-		// clones have finished; treat it as zero repos so coordinator-
-		// only workspaces install cleanly.
-		if !errors.Is(err, os.ErrNotExist) {
-			return nil, fmt.Errorf("enumerating repos for role derivation: %w", err)
-		}
-	}
-
-	// For each topology-derived repo, find the group directory that owns
-	// it. We need the absolute on-disk path so that .mcp.json and
-	// SKILL.md can be mirrored per-repo. EnumerateRepos returns names
-	// only; re-walk the two-level structure to recover paths.
+	// Enumerate topology-derived roles in a single walk of the instance
+	// root. We need two things at once: the absolute on-disk path for
+	// each repo basename (for per-repo .mcp.json and SKILL.md mirroring)
+	// and the occurrence count (for collision detection per AC-R2). A
+	// missing instance root is possible on a create path before clones
+	// have finished; treat it as zero repos so coordinator-only
+	// workspaces install cleanly.
 	topologyPaths := map[string]string{}
-	if entries, err := os.ReadDir(instanceRoot); err == nil {
-		for _, entry := range entries {
-			name := entry.Name()
-			if !entry.IsDir() {
+	repoOccurrences := map[string]int{}
+	entries, err := os.ReadDir(instanceRoot)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("enumerating repos for role derivation: %w", err)
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		if !entry.IsDir() || isHiddenOrSkip(name) {
+			continue
+		}
+		groupDir := filepath.Join(instanceRoot, name)
+		repoEntries, rerr := os.ReadDir(groupDir)
+		if rerr != nil {
+			continue
+		}
+		for _, repo := range repoEntries {
+			repoName := repo.Name()
+			if !repo.IsDir() || isHiddenOrSkip(repoName) {
 				continue
 			}
-			if name == StateDir || name == ".claude" {
-				continue
-			}
-			if len(name) > 0 && name[0] == '.' {
-				continue
-			}
-			groupDir := filepath.Join(instanceRoot, name)
-			repoEntries, rerr := os.ReadDir(groupDir)
-			if rerr != nil {
-				continue
-			}
-			for _, repo := range repoEntries {
-				repoName := repo.Name()
-				if !repo.IsDir() {
-					continue
-				}
-				if len(repoName) > 0 && repoName[0] == '.' {
-					continue
-				}
-				// Last writer wins when the same basename appears in two
-				// groups. We detect the collision below by comparing the
-				// topology name list against topologyPaths cardinality.
-				topologyPaths[repoName] = filepath.Join(groupDir, repoName)
-			}
+			// Last writer wins when the same basename appears in two
+			// groups; the collision is detected via repoOccurrences below.
+			topologyPaths[repoName] = filepath.Join(groupDir, repoName)
+			repoOccurrences[repoName]++
 		}
 	}
 
 	// Collision detection: the PRD defines a collision as two
 	// topology-derived repos sharing a basename AND the user did NOT
 	// provide an explicit [channels.mesh.roles] entry that disambiguates.
-	// Count occurrences by walking the classified directory structure; a
-	// repeat basename without an explicit entry is a hard failure (AC-R2).
-	repoOccurrences := map[string]int{}
-	if entries, err := os.ReadDir(instanceRoot); err == nil {
-		for _, entry := range entries {
-			name := entry.Name()
-			if !entry.IsDir() {
-				continue
-			}
-			if name == StateDir || name == ".claude" || (len(name) > 0 && name[0] == '.') {
-				continue
-			}
-			groupDir := filepath.Join(instanceRoot, name)
-			repoEntries, rerr := os.ReadDir(groupDir)
-			if rerr != nil {
-				continue
-			}
-			for _, repo := range repoEntries {
-				rname := repo.Name()
-				if !repo.IsDir() || (len(rname) > 0 && rname[0] == '.') {
-					continue
-				}
-				repoOccurrences[rname]++
-			}
-		}
-	}
+	// A repeat basename without an explicit entry is a hard failure (AC-R2).
 	for repoName, count := range repoOccurrences {
 		if count <= 1 {
 			continue
@@ -426,7 +392,6 @@ func enumerateRoles(cfg *config.WorkspaceConfig, instanceRoot string) ([]roleEnt
 			)
 		}
 	}
-	_ = topologyNames // silences staticcheck when only paths are used below
 
 	// Build the final role set. Explicit entries override topology-
 	// derived names. A role present in explicit but not in topology is
@@ -536,7 +501,7 @@ func buildMCPContent(instanceRoot string) []byte {
 //
 // The frontmatter description is intentionally under ~800 chars so that
 // name + description + allowed-tools fit comfortably within Claude Code's
-// 1536-char combined frontmatter cap.
+// skillFrontmatterCharLimit combined frontmatter cap.
 func buildSkillContent() []byte {
 	var b bytes.Buffer
 	b.WriteString("---\n")
@@ -671,7 +636,7 @@ func writeChannelsSection(ctxPath, instanceRoot string) error {
 		} else {
 			out = trimmed + "\n\n" + newSection
 		}
-		return os.WriteFile(ctxPath, []byte(out), 0o644)
+		return os.WriteFile(ctxPath, []byte(out), 0o600)
 	}
 
 	// Find the end of the Channels section: the next line starting with
@@ -703,11 +668,11 @@ func writeChannelsSection(ctxPath, instanceRoot string) error {
 		trailing := content[end:]
 		out = strings.TrimRight(out, "\n") + "\n\n" + trailing
 	}
-	return os.WriteFile(ctxPath, []byte(out), 0o644)
+	return os.WriteFile(ctxPath, []byte(out), 0o600)
 }
 
 // writeIdempotent writes data to path with the given mode, using
-// sha256-based idempotency:
+// byte-compare idempotency:
 //
 //   - If the on-disk content matches data byte-for-byte, skip the write
 //     entirely (mtime stable, no spurious git churn).
@@ -774,6 +739,17 @@ func ensureEmptyFile(path string, mode os.FileMode) error {
 	return os.Chmod(path, mode)
 }
 
+// isHiddenOrSkip reports whether a directory basename should be skipped
+// during topology enumeration: reserved control directories (.niwa,
+// .claude) and any dotfile. Shared by enumerateRoles so the top-level
+// and second-level filters stay in sync.
+func isHiddenOrSkip(name string) bool {
+	if name == StateDir || name == ".claude" {
+		return true
+	}
+	return len(name) > 0 && name[0] == '.'
+}
+
 // mkdirAllMode is os.MkdirAll with a Chmod ladder so that every created
 // directory ends up at mode independent of umask. Existing directories
 // are left at their current mode — we only set mode on directories this
@@ -800,14 +776,6 @@ func mkdirAllMode(path string, mode os.FileMode) error {
 		return err
 	}
 	return os.Chmod(path, mode)
-}
-
-// hashBytes returns the hex-encoded sha256 of data. Exposed for tests
-// that want to verify the hash-matching invariant independently of
-// writeIdempotent's implementation.
-func hashBytes(data []byte) string {
-	sum := sha256.Sum256(data)
-	return hex.EncodeToString(sum[:])
 }
 
 // injectChannelHooks inserts SessionStart and UserPromptSubmit hook

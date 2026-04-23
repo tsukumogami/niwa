@@ -95,8 +95,7 @@ type ClaudeEnvConfig struct {
 // a bare [channels.mesh] section with no sub-keys enables the channel
 // infrastructure and roles are auto-derived from the workspace topology.
 type ChannelsMeshConfig struct {
-	Roles      map[string]string `toml:"roles,omitempty"` // optional: role → repo name
-	MessageTTL string            `toml:"message_ttl"`     // optional: default "24h"
+	Roles map[string]string `toml:"roles,omitempty"` // optional: role → repo name
 }
 
 // ChannelsConfig is the top-level [channels] table.
