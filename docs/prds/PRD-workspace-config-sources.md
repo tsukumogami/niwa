@@ -454,13 +454,53 @@ explicitly.
   upgrade triggers all lazy migrations (R23 registry, R24 state, R28
   on-disk conversion) automatically.
 
+**Workspace overlay discovery**
+
+The auto-discovered workspace overlay carries content that requires
+permissions beyond the team-config audience (typically: private orgs
+to clone, internal hooks, secrets metadata). Its purpose is access
+asymmetry — users with overlay access get the augmentation, users
+without it apply against the team config alone.
+
+- **R35.** When `niwa init` resolves a team config source (via either
+  explicit subpath or convention-based discovery from R5), niwa MUST
+  attempt to clone an auto-discovered workspace overlay using the
+  following slug-derivation rule:
+  - If the resolved team-config dir is the source repo root (whole-
+    repo case, including the file-resolves-to-parent case from R4):
+    overlay slug = `<host>/<source-org>/<source-repo>-overlay`.
+  - If the resolved team-config dir is a subdirectory of the source
+    repo: overlay slug = `<host>/<source-org>/<basename>-overlay`,
+    where `<basename>` is the last path segment of the resolved
+    subpath. For example, `org/brain:.niwa` resolves to overlay
+    `org/.niwa-overlay`; `org/brain:teams/research` resolves to
+    `org/research-overlay`.
+  - The overlay clone uses the SAME host as the source.
+  - The overlay clone is treated as a whole-repo source: niwa expects
+    `workspace-overlay.toml` at the overlay repo's root. (Subpath
+    sourcing for the overlay itself is deferred to v1.x; users who
+    need it can pass `--overlay <slug-with-subpath>` explicitly.)
+  - The overlay clone MUST silently skip on failure (matching today's
+    behavior) so users without overlay-repo access continue to apply
+    against the team config alone.
+  - The overlay snapshot inherits R13 (no `.git/`, atomic refresh,
+    provenance marker present) and R14/R15 (GitHub-tarball or git-
+    clone fallback based on host).
+- **R36.** `niwa status` detail view MUST display the resolved
+  workspace overlay slug on a line of its own when an overlay was
+  discovered and cloned successfully. When no overlay was discovered,
+  `--no-overlay` was passed at init, or the clone silently skipped
+  (R35), niwa MUST NOT print an overlay line. The overlay line MUST
+  be visually distinct from the team-config source line so users can
+  tell which augmentation is in effect.
+
 ### Non-functional requirements
 
-- **R35.** Files outside the resolved subpath MUST NOT be written to
+- **R37.** Files outside the resolved subpath MUST NOT be written to
   disk during materialization on the GitHub path, even temporarily
   (verified via the no-side-effect-files invariant in R10 plus the
   stream-extract requirement in R14).
-- **R36.** The provenance marker MUST be readable with no specialized
+- **R38.** The provenance marker MUST be readable with no specialized
   tooling — a contributor inspecting `<workspace>/.niwa/` manually
   with `cat`, `jq`, or `toml` (depending on the chosen format) MUST
   be able to identify origin, ref, and fetched-at without running
@@ -714,6 +754,39 @@ explicitly. The Test Strategy section above defines fixtures.
   the same process does not print the deprecation notice; a fresh
   process invocation does.
 
+### AC: Workspace overlay discovery (verifies R35-R36)
+
+- [ ] **AC-O1**. Given a team-config source `org/dot-niwa` (whole
+  repo, no subpath), `niwa init` attempts to clone the overlay slug
+  `org/dot-niwa-overlay`. (Today's literal behavior preserved.)
+- [ ] **AC-O2**. Given a team-config source `org/brain:.niwa` (subpath
+  `.niwa`), `niwa init` attempts to clone the overlay slug
+  `org/.niwa-overlay`.
+- [ ] **AC-O3**. Given a team-config source `org/brain:teams/research`
+  (multi-segment subpath), `niwa init` attempts to clone the overlay
+  slug `org/research-overlay` (last path segment only, not
+  `teams/research-overlay`).
+- [ ] **AC-O4**. Given a team-config source `org/dot-niwa:niwa.toml`
+  (subpath resolves to a file at repo root, R4 treats parent as
+  config dir), `niwa init` attempts to clone the overlay slug
+  `org/dot-niwa-overlay`. (Whole-repo behavior, since the resolved
+  config dir is the source repo root.)
+- [ ] **AC-O5**. Given the overlay slug derived above and the overlay
+  repo does not exist (or the user lacks access), the overlay clone
+  fails silently and `niwa apply` proceeds against the team config
+  alone with exit code 0.
+- [ ] **AC-O6**. Given a team-config source whose host is
+  `github.com`, the overlay clone uses the GitHub tarball path (R14).
+  Given a non-`github.com` source, the overlay clone uses the
+  git-clone fallback (R15).
+- [ ] **AC-O7**. After successful overlay clone, the overlay snapshot
+  contains no `.git/` directory and contains a provenance marker
+  (per R13).
+- [ ] **AC-O8**. `niwa status` detail view against a workspace with a
+  successfully-cloned overlay shows a dedicated overlay line naming
+  the resolved overlay slug. `niwa status` against a workspace where
+  the overlay clone silently skipped shows no overlay line.
+
 ### AC: Backwards compatibility (verifies R33-R34)
 
 - [ ] **AC-B1**. Given a registry from an older binary with
@@ -774,7 +847,7 @@ follow-up release candidate, or unrelated work.
   optimizations deferred to follow-ups.
 - **`vault_scope = "@source"` shorthand.** Defer to v1.1.
 - **Provenance marker file format and on-disk location.** The PRD
-  commits to the contract (R11, R36) and leaves the file format,
+  commits to the contract (R11, R38) and leaves the file format,
   filename, and exact placement to the design phase.
 - **`instance.json` placement relative to the snapshot.** Downstream
   design-doc concern. The PRD contract is "state survives snapshot
@@ -836,6 +909,17 @@ follow-up release candidate, or unrelated work.
   snapshot when the network is unreachable (R21). CI operators who
   need fail-on-stale behavior must wait for the deferred
   `--strict-refresh` flag (Story 6).
+- **Overlay slug changes during the standalone-to-brain-repo
+  migration.** Migrating a workspace from `org/dot-niwa` (whole-repo
+  source) to `org/brain:.niwa` (subpath source) implicitly changes
+  the auto-discovered overlay slug from `org/dot-niwa-overlay` to
+  `org/.niwa-overlay` per R35. The brain-repo maintainer must
+  arrange for the overlay repo to exist at the new slug (rename the
+  existing overlay repo, or publish a new one) before consumers
+  complete their migration; otherwise the overlay clone silently
+  skips and consumers lose the augmentation without warning. This is
+  a one-time coordination cost during the migration; subsequent
+  applies behave normally.
 
 ## Decisions and Trade-offs
 
@@ -938,6 +1022,35 @@ shell-out, `~/.config/niwa/credentials.toml`, or a credential
 helper. **Reasoning**: ratifies the existing pattern used by
 `internal/github/client.go`. Adding integration with `gh` (or other
 sources) is a candidate follow-up; v1 keeps the surface narrow.
+
+### Decision: workspace overlay discovery rule for subpath sources
+
+**Decided**: when the team config is sourced from a subpath of a
+brain repo, the auto-discovered workspace overlay slug is
+`<host>/<source-org>/<basename>-overlay`, where `<basename>` is the
+last path segment of the resolved subpath. For whole-repo sources
+the rule reduces to `<host>/<source-org>/<source-repo>-overlay`,
+preserving existing behavior. **Alternatives**: (a) sibling subpath
+in the same brain repo (e.g., `org/brain:.niwa-overlay`); (b)
+sibling repo with full-subpath inheritance (e.g.,
+`org/brain-overlay:.niwa`); (c) drop auto-discovery for subpath
+sources entirely. **Reasoning**: the overlay's purpose is *access
+asymmetry* — it carries content that requires permissions beyond the
+team-config audience (private orgs to clone, internal hooks, secrets
+metadata). Folding the overlay into the same brain repo
+(alternative a) destroys that asymmetry; users with brain-repo
+access automatically see the overlay, defeating the entire
+augmentation model. Mirroring the full subpath into a sibling repo
+(alternative b) creates parallel directory structures across two
+repos that have no semantic reason to mirror each other and
+inflates the overlay's identity with the host repo's name (a
+concept the overlay shouldn't have to know). Dropping auto-discovery
+(alternative c) is a regression in ergonomics. The basename rule
+keeps the access boundary intact, lets the overlay name reflect what
+the team config is *about* (rather than what its host repo happens
+to be called), and supports the natural case where one brain repo
+hosts multiple team configs (`teams/research`, `teams/platform`)
+each with its own access-restricted overlay.
 
 ### Decision: repo-rename behavior (follow once, warn once)
 
