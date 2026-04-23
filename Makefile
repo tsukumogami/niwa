@@ -1,4 +1,4 @@
-.PHONY: build test build-test build-worker-fake test-functional test-functional-critical test-functional-claude-integration test-install clean
+.PHONY: build test build-test build-worker-fake test-functional test-functional-critical test-functional-claude-integration test-functional-channels-e2e test-install clean
 
 # Build the niwa binary.
 build:
@@ -40,6 +40,17 @@ test-functional-critical: build-test
 # Run only scenarios tagged @claude-integration — requires claude CLI and ANTHROPIC_API_KEY.
 test-functional-claude-integration: build-test
 	NIWA_TEST_BINARY=$(CURDIR)/niwa-test NIWA_TEST_TAGS=@claude-integration go test -v ./test/functional/...
+	rm -rf .niwa-test
+
+# Run only scenarios tagged @channels-e2e — requires claude CLI and
+# ANTHROPIC_API_KEY. Covers MCP-config loadability and bootstrap-prompt
+# effectiveness via a real `claude -p` (no scripted worker fake). Skipped
+# cleanly when credentials are missing so CI never fails here.
+test-functional-channels-e2e: build-test
+	NIWA_TEST_BINARY=$(CURDIR)/niwa-test \
+	NIWA_TEST_WORKER_FAKE=$(CURDIR)/test/functional/worker_fake/worker-fake \
+	NIWA_TEST_TAGS=@channels-e2e \
+	go test -v ./test/functional/...
 	rm -rf .niwa-test
 
 # Run only install-path integration scenarios. Proves that `niwa shell-init`

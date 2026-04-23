@@ -12,6 +12,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/cucumber/godog"
 )
 
 // mesh_steps_test.go holds the step definitions introduced by Issue #10
@@ -892,6 +894,213 @@ func currentInstanceRoot(s *testState) string {
 	}
 	return ""
 }
+
+// ---------------------------------------------------------------------
+// @channels-e2e helpers (Issue #11): real `claude -p` scenarios covering
+// MCP-config loadability and bootstrap-prompt effectiveness. These steps
+// run only when `claude` is on PATH AND `ANTHROPIC_API_KEY` is set; the
+// Gherkin layer uses the existing `claudeIsAvailable` guard to skip
+// otherwise so CI never fails for missing credentials.
+// ---------------------------------------------------------------------
+
+// iEnsureNoFakeWorker removes any NIWA_WORKER_SPAWN_COMMAND / fake-worker
+// scenario env overrides that might be lingering, guaranteeing that a
+// subsequent `niwa create` / `niwa apply` spawns via the real PATH
+// resolution of `claude` rather than the scripted fake. This is the
+// complement of runWithFakeWorker and is required for the bootstrap-prompt
+// effectiveness scenario.
+func iEnsureNoFakeWorker(ctx context.Context) (context.Context, error) {
+	s := getState(ctx)
+	if s == nil {
+		return ctx, fmt.Errorf("no test state")
+	}
+	delete(s.envOverrides, "NIWA_WORKER_SPAWN_COMMAND")
+	delete(s.envOverrides, "NIWA_FAKE_SCENARIO")
+	delete(s.envOverrides, "NIWA_FAKE_TEST_BINARY")
+	return ctx, nil
+}
+
+// iRunClaudePFromInstanceRootPreservingCase runs `claude -p` exactly like
+// iRunClaudePFromInstanceRoot but keeps stdout case intact so anchored
+// markers such as "CHECKED:" survive verbatim into s.stdout. The existing
+// helper lowercases stdout for yes/no contains-matching; channels-e2e
+// needs the raw text.
+func iRunClaudePFromInstanceRootPreservingCase(ctx context.Context, instance string, prompt *godog.DocString) (context.Context, error) {
+	s := getState(ctx)
+	if s == nil {
+		return ctx, fmt.Errorf("no test state")
+	}
+	cwd := filepath.Join(s.workspaceRoot, instance)
+	return ctx, runClaudePPreservingCase(s, cwd, strings.TrimSpace(prompt.Content))
+}
+
+// runClaudePPreservingCase is the case-preserving twin of runClaudeP. It
+// LookPaths `claude`, runs with the sandboxed env plus ANTHROPIC_API_KEY,
+// and records raw stdout/stderr. Returns an error only for I/O failures;
+// a non-zero claude exit is captured in s.exitCode so scenarios can assert
+// on it separately.
+func runClaudePPreservingCase(s *testState, cwd, prompt string) error {
+	claudeBin, err := execLookPath("claude")
+	if err != nil {
+		// The claudeIsAvailable guard should have skipped the scenario
+		// before we got here; fall through to a hard error if not.
+		return fmt.Errorf("claude not on PATH: %w", err)
+	}
+	env := s.buildEnv()
+	if key := os.Getenv("ANTHROPIC_API_KEY"); key != "" {
+		env = append(env, "ANTHROPIC_API_KEY="+key)
+	}
+	cmd := exec.Command(claudeBin, "-p", prompt)
+	cmd.Dir = cwd
+	cmd.Env = env
+	var stdout, stderr strings.Builder
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	runErr := cmd.Run()
+	s.stdout = stdout.String()
+	s.stderr = stderr.String()
+	s.shellPwd = ""
+	if runErr != nil {
+		if exitErr, ok := runErr.(*exec.ExitError); ok {
+			s.exitCode = exitErr.ExitCode()
+			return nil
+		}
+		return fmt.Errorf("claude -p failed: %w\nstderr: %s", runErr, s.stderr)
+	}
+	s.exitCode = 0
+	return nil
+}
+
+// iDelegateTaskToRoleWithFinishInstruction writes a channeled-workspace
+// task envelope for the given role whose body instructs the worker to
+// call niwa_finish_task with the task's own ID. This is the scenario
+// driver for the bootstrap-prompt effectiveness test: the worker boots
+// with the fixed bootstrap prompt, calls niwa_check_messages, reads the
+// instruction, and must call niwa_finish_task(task_id, outcome=completed,
+// result={"ok":true}). The step bypasses niwa_delegate (no coordinator
+// session is needed); the daemon then claims the envelope via its
+// normal fsnotify path and spawns a real claude worker.
+func iDelegateTaskToRoleWithFinishInstruction(ctx context.Context, instance, role string) (context.Context, error) {
+	s := getState(ctx)
+	if s == nil {
+		return ctx, fmt.Errorf("no test state")
+	}
+	instRoot := filepath.Join(s.workspaceRoot, instance)
+	taskID := newTestUUIDv4()
+	taskDir := filepath.Join(instRoot, ".niwa", "tasks", taskID)
+	if err := os.MkdirAll(taskDir, 0o700); err != nil {
+		return ctx, fmt.Errorf("mkdir taskDir: %w", err)
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+
+	// Body is an instruction whose <ID> placeholder is substituted with
+	// the real task ID so the worker can round-trip it to niwa_finish_task
+	// without any guesswork. Single-sentence, no explanation, matches the
+	// issue-body literal.
+	instruction := fmt.Sprintf(
+		`Call niwa_finish_task with task_id=%s, outcome=completed, and result={"ok":true}. Do not explain.`,
+		taskID)
+	bodyMap := map[string]any{"instruction": instruction}
+	bodyBytes, _ := json.Marshal(bodyMap)
+
+	envelope := map[string]any{
+		"v":       1,
+		"id":      taskID,
+		"from":    map[string]any{"role": "coordinator", "pid": os.Getpid()},
+		"to":      map[string]any{"role": role},
+		"body":    json.RawMessage(bodyBytes),
+		"sent_at": now,
+	}
+	envBytes, _ := json.MarshalIndent(envelope, "", "  ")
+	if err := os.WriteFile(filepath.Join(taskDir, "envelope.json"), envBytes, 0o600); err != nil {
+		return ctx, err
+	}
+	state := map[string]any{
+		"v":                 1,
+		"task_id":           taskID,
+		"state":             "queued",
+		"state_transitions": []map[string]any{{"from": "", "to": "queued", "at": now}},
+		"restart_count":     0,
+		"max_restarts":      3,
+		"worker":            map[string]any{"pid": 0, "start_time": 0, "role": ""},
+		"delegator_role":    "coordinator",
+		"target_role":       role,
+		"updated_at":        now,
+	}
+	stBytes, _ := json.MarshalIndent(state, "", "  ")
+	if err := os.WriteFile(filepath.Join(taskDir, "state.json"), stBytes, 0o600); err != nil {
+		return ctx, err
+	}
+	for _, roleName := range []string{"coordinator", role} {
+		inboxDir := filepath.Join(instRoot, ".niwa", "roles", roleName, "inbox")
+		_ = os.MkdirAll(inboxDir, 0o700)
+	}
+
+	targetInbox := filepath.Join(instRoot, ".niwa", "roles", role, "inbox")
+	if err := os.MkdirAll(targetInbox, 0o700); err != nil {
+		return ctx, err
+	}
+	msg := map[string]any{
+		"v":       1,
+		"id":      taskID,
+		"type":    "task.delegate",
+		"from":    map[string]any{"role": "coordinator", "pid": os.Getpid()},
+		"to":      map[string]any{"role": role},
+		"task_id": taskID,
+		"sent_at": now,
+		"body":    json.RawMessage(bodyBytes),
+	}
+	msgBytes, _ := json.Marshal(msg)
+	tmpPath := filepath.Join(targetInbox, taskID+".json.tmp")
+	dstPath := filepath.Join(targetInbox, taskID+".json")
+	if err := os.WriteFile(tmpPath, msgBytes, 0o600); err != nil {
+		return ctx, err
+	}
+	if err := os.Rename(tmpPath, dstPath); err != nil {
+		return ctx, err
+	}
+	s.lastTaskID = taskID
+	return ctx, nil
+}
+
+// theTaskStateEventuallyBecomesWithin is a variant of
+// theTaskStateEventuallyBecomes that accepts a caller-specified deadline
+// in seconds. The real-claude bootstrap scenario polls for up to 120 s
+// because LLM startup + first tool call can reasonably take that long;
+// the 15 s default in theTaskStateEventuallyBecomes would flake.
+func theTaskStateEventuallyBecomesWithin(ctx context.Context, instance, expected string, seconds int) error {
+	s := getState(ctx)
+	if s == nil {
+		return fmt.Errorf("no test state")
+	}
+	if s.lastTaskID == "" {
+		return fmt.Errorf("no task ID in scenario state")
+	}
+	statePath := filepath.Join(s.workspaceRoot, instance, ".niwa", "tasks", s.lastTaskID, "state.json")
+	deadline := time.Now().Add(time.Duration(seconds) * time.Second)
+	var lastState string
+	for time.Now().Before(deadline) {
+		data, err := os.ReadFile(statePath)
+		if err == nil {
+			var st struct {
+				State string `json:"state"`
+			}
+			if json.Unmarshal(data, &st) == nil {
+				lastState = st.State
+				if st.State == expected {
+					return nil
+				}
+			}
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	return fmt.Errorf("task %s state=%q; expected %q within %ds",
+		s.lastTaskID, lastState, expected, seconds)
+}
+
+// execLookPath is a local indirection over exec.LookPath so test builds
+// can stub it if ever needed. Kept trivial for now.
+func execLookPath(name string) (string, error) { return exec.LookPath(name) }
 
 // newTestUUIDv4 returns a UUIDv4-shaped string using time+pid as entropy.
 // It matches the regex the taskstore uses for validation so the fake

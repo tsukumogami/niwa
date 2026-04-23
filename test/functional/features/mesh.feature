@@ -203,3 +203,50 @@ Feature: Cross-session mesh (Issue #10 harness)
     When I run "niwa create auth-neg-ws"
     Then the exit code is 0
     Then an unauthorized MCP call for instance "auth-neg-ws" receives NOT_TASK_PARTY
+
+  # ---------------------------------------------------------------------
+  # @channels-e2e (Issue #11): real `claude -p` scenarios. These cover
+  # niwa surface the deterministic fake worker cannot reach — namely
+  # (1) that Claude Code can load `.claude/.mcp.json`, launch
+  # `niwa mcp-serve`, and the first MCP tool call succeeds, and (2) that
+  # niwa's fixed bootstrap prompt drives a real LLM to call
+  # `niwa_check_messages` and then `niwa_finish_task` to completion.
+  #
+  # Prompts are deliberately anchored for deterministic matching:
+  # Scenario 1 looks for the literal marker "CHECKED:" on stdout;
+  # Scenario 2 asserts only on state.json (not LLM text) so wording
+  # drift in the model's output cannot flake the test.
+  #
+  # Both scenarios skip cleanly when `claude` is not on PATH or
+  # `ANTHROPIC_API_KEY` is unset (via claudeIsAvailable → godog.ErrPending).
+  # Neither is tagged @critical, so `make test-functional-critical` never
+  # invokes a real LLM.
+  # ---------------------------------------------------------------------
+
+  @channels-e2e
+  Scenario: MCP-config loadability — claude -p can load .claude/.mcp.json and call niwa_check_messages
+    Given a clean niwa environment
+    And claude is available
+    And a local git server is set up
+    And a channeled workspace "mcp-loadability" exists
+    When I run "niwa create mcp-loadability"
+    Then the exit code is 0
+    And the file ".claude/.mcp.json" exists in instance "mcp-loadability"
+    When I run claude -p preserving case from instance root "mcp-loadability" with prompt:
+      """
+      Use the niwa_check_messages tool to check your inbox and output exactly: CHECKED:<count>, where <count> is the number of messages. Do not explain.
+      """
+    Then the output contains "CHECKED:"
+
+  @channels-e2e
+  Scenario: Bootstrap-prompt effectiveness — daemon-spawned real claude drives task to completed
+    Given a clean niwa environment
+    And claude is available
+    And a local git server is set up
+    And a channeled workspace "bootstrap-e2e" exists
+    And the daemon uses the real claude worker spawn path
+    When I run "niwa create bootstrap-e2e"
+    Then the exit code is 0
+    And the file ".niwa/daemon.pid" exists in instance "bootstrap-e2e"
+    When I queue a niwa_finish_task instruction for role "coordinator" in instance "bootstrap-e2e"
+    Then the task state in instance "bootstrap-e2e" eventually becomes "completed" within 120 seconds

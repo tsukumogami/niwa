@@ -287,4 +287,10 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 	ctx.Step(`^I update the task body in instance "([^"]*)" to '([^']*)'$`, iUpdateTheTaskBody)
 	ctx.Step(`^an unauthorized MCP call for instance "([^"]*)" receives NOT_TASK_PARTY$`, iVerifyAuthorizationDenied)
 	ctx.Step(`^the output contains status "([^"]*)"$`, theOutputContainsStatus)
+
+	// --- @channels-e2e (Issue #11): real `claude -p` scenarios ---
+	ctx.Step(`^the daemon uses the real claude worker spawn path$`, iEnsureNoFakeWorker)
+	ctx.Step(`^I run claude -p preserving case from instance root "([^"]*)" with prompt:$`, iRunClaudePFromInstanceRootPreservingCase)
+	ctx.Step(`^I queue a niwa_finish_task instruction for role "([^"]*)" in instance "([^"]*)"$`, iDelegateTaskToRoleWithFinishInstruction)
+	ctx.Step(`^the task state in instance "([^"]*)" eventually becomes "([^"]*)" within (\d+) seconds$`, theTaskStateEventuallyBecomesWithin)
 }
