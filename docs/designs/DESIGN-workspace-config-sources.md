@@ -479,16 +479,494 @@ synthesis:
 
 ## Solution Architecture
 
-(Populated by Phase 4.)
+### Overview
+
+The workspace config-source pipeline becomes a small set of focused
+packages that compose end-to-end. The user-typed slug is parsed into
+a typed `Source`, the `Source` drives a stream-extracted snapshot via
+the GitHub tarball API (or git-clone fallback), the snapshot
+materializes at a sibling staging path, a provenance marker is
+written into it, and a single atomic-swap primitive promotes it to
+`<workspace>/.niwa/`. The same pipeline serves all three clone
+sites; the workspace's instance state lives in a sibling directory
+(`<workspace>/.niwa-state/`) that the swap leaves untouched.
+
+### Components
+
+The change set adds two new packages, extends one, refactors three
+clone-related files, and replaces two `.git/`-dependent code paths.
+
+**New packages:**
+
+| Package | Purpose |
+|---------|---------|
+| `internal/source/` | Canonical slug parser and source identity. Leaf package; imported by everyone. |
+| `internal/testfault/` | Test-only fault-injection seam. Production calls `testfault.Maybe(label)` at well-defined points; default behavior is a no-op unless `NIWA_TEST_FAULT` is set. |
+
+**Extended packages:**
+
+| Package | Additions |
+|---------|-----------|
+| `internal/github/` | `APIClient.HeadCommit` and `APIClient.FetchTarball` methods; `extractSubpath` free function in a new `tar.go` file; `BaseURL` reads `NIWA_GITHUB_API_URL` env var when present. |
+| `internal/workspace/` | New `snapshot.go` with `swapSnapshotAtomic(target, staging)`; new `provenance.go` with marker reader/writer; `state.go` learns v3 schema and dual-path lookup; `configsync.go` and `overlaysync.go` rewrite to compose source + fetcher + snapshot writer. |
+| `internal/config/` | `RegistryEntry` gains parsed mirror fields (`source_host`, `source_owner`, `source_repo`, `source_subpath`, `source_ref`); read path lazy-populates from `source_url` when missing. |
+| `internal/cli/` | `init`, `config_set`, `apply`, `status`, `reset` updated to use `internal/source` for parsing/display and to honor R3 strict parsing, R28 same-URL upgrade, R35 overlay derivation. |
+| `internal/guardrail/` | `CheckGitHubPublicRemoteSecrets` reads marker tuple instead of `git remote -v`. |
+
+**New test infrastructure:**
+
+| File | Purpose |
+|------|---------|
+| `test/functional/tarball_fake_server.go` | `httptest.Server`-wrapped helper alongside `localGitServer`. |
+| `test/functional/state_factory.go` | Go factory backing the `Given an instance state file at version <N>` Gherkin step. |
+| `test/functional/features/workspace-config-sources.feature` | New scenarios for all PRD acceptance criteria. |
+
+### Key Interfaces
+
+#### `internal/source.Source`
+
+```go
+type Source struct {
+    Host    string  // canonical host, e.g. "github.com"
+    Owner   string  // org or user, e.g. "tsukumogami"
+    Repo    string  // repo name, e.g. "niwa"
+    Subpath string  // empty string == discovery; otherwise a slash-separated path
+    Ref     string  // empty string == default branch; otherwise tag/branch/sha
+}
+
+func Parse(slug string) (Source, error)         // R3 strict parsing
+func (s Source) String() string                 // round-trip exact for whole-repo slugs
+func (s Source) CloneURL(protocol string) string
+func (s Source) TarballURL() string             // GitHub-only; empty for non-github hosts
+func (s Source) CommitsAPIURL(ref string) string
+func (s Source) OverlayDerivedSource() Source   // implements PRD R35 basename rule
+func (s Source) DisplayRef() string             // returns "(default branch)" when Ref == ""
+```
+
+#### `internal/testfault.Maybe`
+
+```go
+func Maybe(label string) error
+```
+
+Production code calls `Maybe("fetch-tarball")`, `Maybe("extract-entry")`,
+`Maybe("snapshot-swap")` at well-defined points. The function returns
+`nil` unless `NIWA_TEST_FAULT` env var matches a fault spec for the
+label (e.g., `NIWA_TEST_FAULT=truncate-after:1024@fetch-tarball`).
+Production builds incur a single env-var lookup per call (negligible
+overhead).
+
+#### `internal/github.APIClient` (additions)
+
+```go
+func (c *APIClient) HeadCommit(ctx context.Context, owner, repo, ref, etag string) (
+    oid string, newETag string, statusCode int, err error)
+
+func (c *APIClient) FetchTarball(ctx context.Context, owner, repo, ref, etag string) (
+    body io.ReadCloser, newETag string, statusCode int, redirect *RenameRedirect, err error)
+```
+
+`RenameRedirect` carries the old and new `(owner, repo)` pair when
+the API responds with a 301; nil otherwise.
+
+#### `internal/workspace.swapSnapshotAtomic`
+
+```go
+func swapSnapshotAtomic(target, staging string) error
+```
+
+Two-rename swap with idempotent preflight cleanup. Used by all three
+clone sites. Calls `testfault.Maybe("snapshot-swap")` at the start
+for fault-injection scenarios. Returns errors that name the step
+that failed (`preflight cleanup`, `rename to .prev`, `rename
+.next to canonical`, `cleanup .prev`).
+
+#### `internal/workspace` provenance marker
+
+```go
+type Provenance struct {
+    SourceURL       string
+    Host            string
+    Owner           string
+    Repo            string
+    Subpath         string
+    Ref             string
+    ResolvedCommit  string
+    FetchedAt       time.Time
+    FetchMechanism  string  // "github-tarball" or "git-clone-fallback"
+}
+
+func WriteProvenance(snapshotDir string, p Provenance) error  // writes .niwa-snapshot.toml
+func ReadProvenance(snapshotDir string) (Provenance, error)
+```
+
+#### `internal/workspace.InstanceState` (v3 additions)
+
+```go
+type ConfigSource struct {
+    URL            string    `json:"url"`
+    Host           string    `json:"host"`
+    Owner          string    `json:"owner"`
+    Repo           string    `json:"repo"`
+    Subpath        string    `json:"subpath"`
+    Ref            string    `json:"ref"`
+    ResolvedCommit string    `json:"resolved_commit"`
+    FetchedAt      time.Time `json:"fetched_at"`
+}
+
+type InstanceState struct {
+    SchemaVersion int           `json:"schema_version"` // bumps to 3
+    ConfigSource  *ConfigSource `json:"config_source,omitempty"` // populated lazily
+    // ... existing fields
+}
+```
+
+### Data flow
+
+```
+┌────────────────────────────────┐
+│ user types: niwa init --from   │
+│ org/brain:.niwa my-workspace   │
+└────────────┬───────────────────┘
+             │
+             ▼
+┌────────────────────────────────┐
+│ internal/source.Parse(slug)    │ ─────► R3 strict validation
+│   → Source{host,owner,repo,    │
+│            subpath,ref}        │
+└────────────┬───────────────────┘
+             │
+             ▼
+┌─────────────────────────────────────────────────────────┐
+│ Discovery (if Subpath == ""):                            │
+│   probe rank-1 .niwa/workspace.toml, rank-2 root        │
+│   workspace.toml, rank-3 root niwa.toml                 │
+│   → resolved Source with Subpath populated              │
+└────────────┬────────────────────────────────────────────┘
+             │
+             ▼
+┌─────────────────────────────────────────────────────────┐
+│ Fetch:                                                   │
+│   if Source.Host == "github.com":                        │
+│     APIClient.HeadCommit(...) → drift check              │
+│     APIClient.FetchTarball(...) → tarball stream         │
+│     extractSubpath(stream, subpath, .niwa.next/)        │
+│   else (fallback):                                       │
+│     git clone --depth=1 to $TMPDIR/...                   │
+│     copy subpath to .niwa.next/                          │
+│     rm -rf $TMPDIR/...                                   │
+│   testfault.Maybe("fetch-tarball") at start              │
+│   testfault.Maybe("extract-entry") per tar entry         │
+└────────────┬────────────────────────────────────────────┘
+             │
+             ▼
+┌────────────────────────────────┐
+│ WriteProvenance(.niwa.next/, p)│
+│   .niwa-snapshot.toml in dir   │
+└────────────┬───────────────────┘
+             │
+             ▼
+┌────────────────────────────────────────────────────────┐
+│ swapSnapshotAtomic(.niwa, .niwa.next):                 │
+│   preflight cleanup of stale .next/.prev/              │
+│   rename(.niwa, .niwa.prev)                            │
+│   rename(.niwa.next, .niwa)                            │
+│   testfault.Maybe("snapshot-swap")                     │
+│   fsync                                                │
+│   RemoveAll(.niwa.prev)                                │
+└────────────┬───────────────────────────────────────────┘
+             │
+             ▼
+┌────────────────────────────────┐
+│ State writer:                  │
+│  .niwa-state/instance.json v3  │
+│   .ConfigSource populated      │
+│   from provenance + Source     │
+└────────────────────────────────┘
+```
+
+The same pipeline runs for the personal overlay clone (target dir is
+`$XDG_CONFIG_HOME/niwa/global/`) and the workspace overlay clone
+(target dir is `$XDG_CONFIG_HOME/niwa/overlays/<dirname>/`), plus
+the auto-discovery via `Source.OverlayDerivedSource()` for the
+workspace overlay slug.
+
+### Integration details (resolved during Phase 4)
+
+- **`testfault.Maybe()` call sites**: at three points along the
+  fetch + extract + swap pipeline:
+  - `testfault.Maybe("fetch-tarball")` at the start of
+    `APIClient.FetchTarball` (before the HTTP request).
+  - `testfault.Maybe("extract-entry")` once per tar entry inside
+    `extractSubpath` (lets faults stop extraction after N entries).
+  - `testfault.Maybe("snapshot-swap")` at the start of
+    `swapSnapshotAtomic` (lets faults run between staging and swap).
+- **APIClient construction**: `internal/github.NewAPIClient` reads
+  `NIWA_GITHUB_API_URL` from env; defaults to `https://api.github.com`.
+  All production sites call `NewAPIClient()` (no constructor
+  argument); tests set the env var to point at the
+  `tarballFakeServer`.
+- **State migration ordering**: when `niwa apply` lazy-converts a
+  legacy working tree (PRD R28), the state-file relocation
+  (`.niwa/instance.json` → `.niwa-state/instance.json`) MUST run
+  BEFORE the snapshot swap so the state file exits the soon-to-be-
+  renamed directory first. The same ordering applies on first
+  `SaveState` post-upgrade.
 
 ## Implementation Approach
 
-(Populated by Phase 4.)
+The work decomposes into 11 phases, each small enough to be one
+commit (or one tight sequence of commits). Phases are mostly
+sequential because the lower layers are leaf packages that the
+higher layers depend on.
 
-## Security Considerations
+### Phase 1: `internal/source/` (slug parser)
 
-(Populated by Phase 5.)
+Build the leaf source package. Strict parsing per R3, round-trip
+exact for whole-repo slugs, methods for clone URL / tarball URL /
+commits API URL / overlay-derived source / display ref.
+
+Deliverables:
+- `internal/source/source.go` (Source struct + methods)
+- `internal/source/parse.go` (Parse function)
+- `internal/source/source_test.go` (table-driven tests covering R3 cases)
+
+### Phase 2: `internal/testfault/` (fault-injection seam)
+
+Build the test-fault package. Single exported `Maybe(label)`
+function reading `NIWA_TEST_FAULT` env var. Spec format:
+`spec1@label1,spec2@label2`.
+
+Deliverables:
+- `internal/testfault/testfault.go`
+- `internal/testfault/testfault_test.go`
+
+### Phase 3: `internal/workspace/snapshot.go` (atomic swap)
+
+Build the swap primitive. Idempotent preflight cleanup, two-rename
+sequence, fsync. Calls `testfault.Maybe("snapshot-swap")`. Pure
+function — no concept of provenance or fetch yet.
+
+Deliverables:
+- `internal/workspace/snapshot.go` (swapSnapshotAtomic)
+- `internal/workspace/snapshot_test.go` (covers happy path,
+  preflight cleanup of stale `.next/.prev/`, fault-injection mid-
+  swap)
+
+### Phase 4: `internal/workspace/provenance.go` (marker R/W)
+
+Build the provenance marker reader/writer. TOML format, fixed
+field set per R11. The reader returns a typed `Provenance` struct;
+the writer writes `.niwa-snapshot.toml` into a given directory.
+
+Deliverables:
+- `internal/workspace/provenance.go`
+- `internal/workspace/provenance_test.go` (round-trip, missing
+  fields, malformed file)
+
+### Phase 5: `internal/github/` extensions (HeadCommit, FetchTarball, extractSubpath)
+
+Extend `APIClient` with the two new methods. Add `tar.go` with
+`extractSubpath`. Wire `NIWA_GITHUB_API_URL` env var into
+`NewAPIClient`. `RenameRedirect` type for 301 detection. Calls
+`testfault.Maybe("fetch-tarball")` and `testfault.Maybe("extract-entry")`.
+
+Deliverables:
+- `internal/github/client.go` (additions + env var)
+- `internal/github/tar.go` (extractSubpath)
+- `internal/github/client_test.go` (with httptest)
+- `internal/github/tar_test.go` (with synthetic tarballs)
+
+### Phase 6: Snapshot writer and clone-primitive replacement
+
+Rewrite `internal/workspace/configsync.go` and
+`internal/workspace/overlaysync.go` to compose source parser +
+fetcher + extract + provenance writer + atomic swap. The git-clone
+fallback path lives next to the github path. Replace the legacy
+working-tree code paths.
+
+Deliverables:
+- `internal/workspace/configsync.go` (rewrite)
+- `internal/workspace/overlaysync.go` (rewrite)
+- `internal/workspace/fallback.go` (git-clone fallback for non-github)
+
+### Phase 7: State schema v3 + `.niwa-state/` relocation
+
+Bump `InstanceState.SchemaVersion` to 3. Add `ConfigSource` field.
+Rename `StateDir` constant from `.niwa` to `.niwa-state`; add
+`SnapshotDir = ".niwa"`. Add dual-path lookup in `LoadState`,
+`DiscoverInstance`, `EnumerateInstances`. Lazy migration on first
+`SaveState` with one-time `note:` notice.
+
+Deliverables:
+- `internal/workspace/state.go` (schema v3, dual-path lookup,
+  lazy migration)
+- `internal/workspace/state_test.go` (v2→v3 lazy migration,
+  forward-version rejection)
+
+### Phase 8: Registry mirror fields + lazy migration
+
+Add parsed mirror fields to `RegistryEntry`. Lazy-populate from
+`source_url` on read; persist on next save with stderr warning if
+mirror disagreed with canonical. Update writers in `niwa init` and
+`niwa config set global`.
+
+Deliverables:
+- `internal/config/registry.go` (mirror fields)
+- `internal/config/registry_test.go` (lazy upgrade, mirror reconciliation)
+
+### Phase 9: CLI updates (init, config_set, apply, status, reset)
+
+Wire the canonical source parser through the CLI surface. Implement
+R28 same-URL upgrade, R26-R27 URL-change `--force` gate with
+workspace-name validation. Display source line in `niwa status`
+detail view per R36. `--allow-dirty` deprecation notice per R32.
+Replace `isClonedConfig` and the plaintext-secrets guardrail to
+read the marker.
+
+Deliverables:
+- `internal/cli/init.go` (slug parser, R28 same-URL upgrade)
+- `internal/cli/config_set.go` (slug parser)
+- `internal/cli/apply.go` (URL-change detection, deprecation notice)
+- `internal/cli/status.go` (source line, overlay slug line per R36)
+- `internal/cli/reset.go` (`isClonedConfig` reads marker)
+- `internal/guardrail/githubpublic.go` (reads marker)
+
+### Phase 10: Test infrastructure (`tarballFakeServer`, state factory, scenarios)
+
+Build the test helpers and write Gherkin scenarios for every
+acceptance criterion. The `tarballFakeServer` lives next to
+`localGitServer`. State-file factory backs the new step.
+
+Deliverables:
+- `test/functional/tarball_fake_server.go`
+- `test/functional/state_factory.go`
+- `test/functional/steps_workspace_config_sources.go`
+- `test/functional/features/workspace-config-sources.feature`
+
+### Phase 11: Documentation
+
+Write the new guide and update the existing ones per the PRD's
+documentation outline.
+
+Deliverables:
+- `docs/guides/workspace-config-sources.md` (new)
+- `docs/guides/workspace-config-sources-acceptance-coverage.md` (new)
+- `docs/guides/functional-testing.md` (note about `tarballFakeServer`)
+- `docs/guides/vault-integration.md` (rewording of guardrail
+  reference per R31)
+- `README.md` (updated config-source description)
+- `CLAUDE.md` (link to new guide in Contributor Guides)
+
+### Implicit decisions surfaced and resolved
+
+A pass over the architecture and approach text surfaced four
+implicit choices that deserve explicit recognition. Each was
+resolved in `--auto` per the research-first protocol; the decisions
+file (`wip/design_workspace-config-sources_decisions.md`) records
+the reasoning.
+
+#### Decision 6: Snapshot write ordering
+
+**Chosen**: write source files first, then provenance marker, then
+swap. The swap promotes the staged directory only after the marker
+is fully written.
+
+**Alternatives**: write marker first then files (so a partial
+extraction has a marker pointing at incomplete content — wrong);
+write source files in parallel with marker (no benefit; complicates
+the failure model).
+
+#### Decision 7: Lazy state-file relocation timing
+
+**Chosen**: relocation triggers on first `SaveState` post-upgrade.
+Read path is dual-path until then.
+
+**Alternatives**: relocate eagerly on first `niwa apply` (touches
+disk for read-only workflows like `niwa status`); skip relocation
+until v1.1 (forces every command to support both paths
+indefinitely).
+
+#### Decision 8: testfault label vocabulary
+
+**Chosen**: free-form string labels matched by exact equality
+against the env-var spec. No predefined enum.
+
+**Alternatives**: predefined enum of fault points (forces design
+churn whenever a new fault point is added); regex match against
+labels (flexibility users won't need at the cost of test
+debuggability).
+
+#### Decision 9: snapshot-conversion notice format
+
+**Chosen**: one-line `note:` prefixed message naming the
+`<workspace>/.niwa/` path and the conversion. Recorded in
+`InstanceState.DisclosedNotices` so it doesn't repeat.
+
+**Alternatives**: multi-line explanation with link to
+documentation (verbose for a one-time event); silent conversion (no
+visibility into a state change).
 
 ## Consequences
 
-(Populated by Phase 4.)
+### Positive
+
+- **Issue #72 becomes structurally impossible.** No working tree
+  means no fast-forward, no merge state, no divergence to
+  reconcile. The failure mode that triggered the redesign is gone
+  by construction.
+- **Brain-repo subpath sourcing is first-class.** The same
+  pipeline serves `org/dot-niwa` and `org/brain:.niwa` with no
+  branching at the data-flow level — the only difference is what
+  bytes the fetcher pulls.
+- **One snapshot primitive serves all three clone sites.** The
+  team config, personal overlay, and workspace overlay all use
+  `swapSnapshotAtomic`. Any future correctness fix to the swap
+  benefits all three uniformly.
+- **One canonical source-identity type.** `Source` flows through
+  every consumer (init, config-set, fetcher, registry, state,
+  status, guardrail, reset). The "five places represent the same
+  concept differently" antipattern doesn't materialize.
+- **Test infrastructure is reusable.** `tarballFakeServer`,
+  `testfault`, and the state factory aren't one-off; they support
+  any future feature that touches the fetch path or schema.
+
+### Negative
+
+- **First-fetch bandwidth is the gzipped repo, not the subpath.**
+  GitHub's tarball API doesn't support subpath filtering on the
+  server side. For a 1 KB config in a 100 MB brain repo, the user
+  pays for the 100 MB download once.
+- **State-file dual-path adds read-side complexity for one
+  release.** `LoadState`, `DiscoverInstance`, and
+  `EnumerateInstances` each carry a fallback branch until v1.1
+  removes it.
+- **`--allow-dirty` deprecation surface lives for one release.**
+  The flag is silently accepted with a stderr notice; users with
+  scripts get one release to update before v1.1 hard-removes it.
+- **GHE users get the fallback path with no fast-path option.**
+  Per the PRD's v1 scope decision, GHE goes through git-clone
+  fallback even though the API shape is identical to github.com.
+- **Swap window is sub-microsecond, not zero.** The two-rename
+  sequence has a brief window where `<workspace>/.niwa/` doesn't
+  exist (between the rename to `.niwa.prev/` and the rename of
+  `.niwa.next/` into place). The PRD accepts this; it shows up in
+  R12's "from the perspective of concurrent readers" framing.
+
+### Mitigations
+
+- **First-fetch bandwidth**: subsequent applies use the 40-byte
+  SHA endpoint check. The high cost is amortized over many cheap
+  drift checks. Documented in the new guide as expected behavior.
+- **Dual-path complexity**: removal scheduled for v1.1; tracking
+  via PRD R32 follow-up. The fallback path is small (a single
+  `os.Stat` per lookup) and well-tested.
+- **`--allow-dirty` deprecation**: notice is printed once per
+  process invocation to avoid noise; v1.1 removal communicated in
+  release notes.
+- **GHE fallback**: per-host adapter for GHE is a v1.x candidate;
+  PRD Out of Scope already documents the deferral.
+- **Swap window**: no concurrent reader of niwa snapshots exists
+  outside niwa itself. niwa never reads `.niwa/` mid-swap. The
+  acceptance criterion (AC-M3) verifies that no partial state is
+  observable from the apply pipeline's reads.
