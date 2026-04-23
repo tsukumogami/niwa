@@ -36,3 +36,4 @@ init → create → apply workflow, add a `@critical` Gherkin scenario in
 - `docs/guides/functional-testing.md` — end-to-end test patterns and the `localGitServer` helper
 - `docs/guides/one-time-notices.md` — how to add informational messages that appear once per workspace instance
 - `docs/guides/vault-integration.md` — vault provider architecture and acceptance coverage
+- `docs/guides/workspace-config-sources.md` — config source resolution, snapshot model, and discovery conventions
