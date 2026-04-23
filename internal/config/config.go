@@ -276,6 +276,17 @@ func Parse(data []byte) (*ParseResult, error) {
 		return nil, err
 	}
 
+	// Reject NIWA_WORKER_SPAWN_COMMAND as a configured value anywhere in
+	// the TOML. The cross-session-communication design intentionally
+	// restricts this override to the process environment only: embedding
+	// it in workspace.toml would commit a literal spawn binary path into
+	// version control where it is easy to mishandle across machines and
+	// easy to hide a hostile override behind. Env-only keeps the override
+	// ephemeral and operator-visible.
+	if err := rejectWorkerSpawnCommandKey(md); err != nil {
+		return nil, err
+	}
+
 	var warnings []string
 
 	// Handle deprecated [content] alias. The canonical location is
@@ -473,6 +484,27 @@ func validateGlobalOverridePaths(prefix string, g GlobalOverride) error {
 	for _, src := range g.Env.Files {
 		if err := validateContentSource(fmt.Sprintf("%s.env.files", prefix), src); err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+// rejectWorkerSpawnCommandKey fails parsing when NIWA_WORKER_SPAWN_COMMAND
+// appears as a TOML key at any nesting depth. The env-only design for
+// this override is documented in the cross-session-communication PRD
+// (R51) and Decision 6 of the design doc.
+func rejectWorkerSpawnCommandKey(md toml.MetaData) error {
+	const forbidden = "NIWA_WORKER_SPAWN_COMMAND"
+	for _, key := range md.Keys() {
+		for _, segment := range key {
+			if segment == forbidden {
+				path := strings.Join(key, ".")
+				return fmt.Errorf(
+					"config key %q is not allowed at %s: set it as an "+
+						"environment variable on the process that invokes niwa",
+					forbidden, path,
+				)
+			}
 		}
 	}
 	return nil

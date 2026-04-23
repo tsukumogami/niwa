@@ -1,19 +1,32 @@
 package workspace
 
 import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/tsukumogami/niwa/internal/config"
 )
 
-// channelsMCPEntry is the template for .claude/.mcp.json. It registers the
-// niwa mcp-serve command with NIWA_INSTANCE_ROOT baked in so Claude Code
+// Role name format per PRD R6: lowercase alphanumeric start, up to 32
+// chars of lowercase alphanumerics and hyphens.
+var roleNameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,31}$`)
+
+// coordinatorRole is the reserved role name for the instance root session.
+const coordinatorRole = "coordinator"
+
+// channelsMCPTemplate is the template for .claude/.mcp.json. It registers
+// the niwa mcp-serve command with NIWA_INSTANCE_ROOT baked in so Claude Code
 // can start the MCP server without any user configuration.
-const channelsMCPEntry = `{
+const channelsMCPTemplate = `{
   "mcpServers": {
     "niwa": {
       "type": "stdio",
@@ -24,148 +37,711 @@ const channelsMCPEntry = `{
       }
     }
   }
-}`
+}
+`
 
 // channelsSectionHeader is the marker used to detect an already-present
-// ## Channels section in workspace-context.md. The check-then-append
-// logic looks for this exact string to avoid duplicates on re-apply.
+// ## Channels section in workspace-context.md.
 const channelsSectionHeader = "## Channels"
 
-// InstallChannelInfrastructure creates the session mesh filesystem artifacts
-// required for cross-session communication:
+// niwaMCPToolNames is the canonical list of the 11 niwa MCP tools. The
+// order is stable: it is emitted both in the SKILL.md allowed-tools block
+// and in the ## Channels section. Callers that change this list MUST
+// update the skill body's tool references and the PRD's R10 enumeration
+// in lockstep.
+var niwaMCPToolNames = []string{
+	"niwa_delegate",
+	"niwa_query_task",
+	"niwa_await_task",
+	"niwa_report_progress",
+	"niwa_finish_task",
+	"niwa_list_outbound_tasks",
+	"niwa_update_task",
+	"niwa_cancel_task",
+	"niwa_ask",
+	"niwa_send_message",
+	"niwa_check_messages",
+}
+
+// inboxSubdirs is the canonical set of per-role inbox subdirectories that
+// messages transition through: the top-level inbox (queued), plus
+// in-progress, cancelled, expired, and read. Every directory is created
+// with mode 0700 under the role's inbox/ root.
+var inboxSubdirs = []string{"in-progress", "cancelled", "expired", "read"}
+
+// uuidV4RE matches a UUIDv4 string anywhere. Used by the migration helper
+// to detect pre-1.0 .niwa/sessions/<uuid>/ subdirectories.
+var uuidV4RE = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$`)
+
+// InstallChannelInfrastructure provisions the per-role mesh filesystem
+// layout for a channeled workspace. It is a no-op when channels are not
+// enabled. When enabled it:
 //
-//   - <instanceRoot>/.niwa/sessions/ (mode 0700, idempotent)
-//   - <instanceRoot>/.niwa/sessions/sessions.json (mode 0600, only if absent)
-//   - <instanceRoot>/.claude/.mcp.json (mode 0600, always overwritten)
-//   - ## Channels section appended to workspace-context.md (idempotent)
+//  1. Runs the pre-1.0 migration helper: removes .niwa/sessions/<uuid>/
+//     directories and warns once to stderr; preserves sessions.json.
+//  2. Enumerates roles from workspace topology (coordinator + one per
+//     cloned repo) and [channels.mesh.roles] overrides; validates
+//     collision, reserved-name, and format constraints.
+//  3. Creates .niwa/roles/<role>/inbox/{in-progress,cancelled,expired,read}/
+//     for every role, plus .niwa/tasks/, .niwa/daemon.pid, .niwa/daemon.log.
+//  4. Writes <instanceRoot>/.claude/.mcp.json and mirrors it into every
+//     cloned repo's .claude/.mcp.json with NIWA_INSTANCE_ROOT baked in.
+//  5. Installs the niwa-mesh SKILL.md at instance-root and per-repo
+//     .claude/skills/niwa-mesh/ with sha256-based idempotency — writes only
+//     when the on-disk bytes differ from the installer's output, emits a
+//     single-line stderr drift warning on overwrite.
+//  6. Writes the minimal ## Channels section into workspace-context.md.
 //
-// Returns immediately without creating anything when cfg.Channels is not enabled.
-// writtenFiles is appended with the paths of any files written.
+// Every installer-written path is appended to *writtenFiles so that the
+// apply pipeline can track the file in InstanceState.ManagedFiles. Runtime
+// artifacts (.niwa/tasks/<id>/*, .niwa/roles/*/inbox/<id>.json) are NOT
+// tracked — the daemon and MCP handlers write those at runtime and manage
+// their own lifecycle.
+//
+// The signature is preserved from the prior implementation so the call
+// site in Applier.runPipeline (step 4.75) is unchanged.
 func InstallChannelInfrastructure(cfg *config.WorkspaceConfig, instanceRoot string, writtenFiles *[]string) error {
 	if !cfg.Channels.IsEnabled() {
 		return nil
 	}
 
-	// 1. Create .niwa/sessions/ with 0700.
-	sessionsDir := filepath.Join(instanceRoot, ".niwa", "sessions")
-	if err := os.MkdirAll(sessionsDir, 0o700); err != nil {
-		return fmt.Errorf("creating sessions directory: %w", err)
+	niwaDir := filepath.Join(instanceRoot, ".niwa")
+
+	// Step 1: Pre-1.0 migration helper. Runs before we enumerate roles so
+	// that a pre-1.0 workspace is cleaned even if enumeration would fail
+	// (e.g., an orphan repo directory survived a prior manual edit).
+	if err := migratePre1Layout(niwaDir); err != nil {
+		return fmt.Errorf("migrating pre-1.0 mesh layout: %w", err)
 	}
 
-	// 2. Create sessions.json only if absent (preserve existing session registrations).
-	// Always add to writtenFiles so cleanRemovedFiles does not delete it on re-apply.
-	sessionsJSONPath := filepath.Join(sessionsDir, "sessions.json")
-	if _, err := os.Stat(sessionsJSONPath); os.IsNotExist(err) {
-		if err := writeFileMode(sessionsJSONPath, []byte("{\"sessions\":[]}\n"), 0o600); err != nil {
-			return fmt.Errorf("creating sessions.json: %w", err)
+	// Step 2: Enumerate and validate roles.
+	roles, err := enumerateRoles(cfg, instanceRoot)
+	if err != nil {
+		return err
+	}
+
+	// Step 3: Directory scaffolding. Every directory gets mode 0700
+	// independent of umask; mkdirAllMode does the chmod ladder.
+	if err := mkdirAllMode(niwaDir, 0o700); err != nil {
+		return fmt.Errorf("creating .niwa dir: %w", err)
+	}
+	tasksDir := filepath.Join(niwaDir, "tasks")
+	if err := mkdirAllMode(tasksDir, 0o700); err != nil {
+		return fmt.Errorf("creating .niwa/tasks: %w", err)
+	}
+	rolesRoot := filepath.Join(niwaDir, "roles")
+	if err := mkdirAllMode(rolesRoot, 0o700); err != nil {
+		return fmt.Errorf("creating .niwa/roles: %w", err)
+	}
+
+	// Create per-role inbox trees. Role enumeration is stable-sorted by
+	// enumerateRoles; walking the sorted slice keeps directory creation
+	// order deterministic for easier test assertions.
+	for _, r := range roles {
+		inboxDir := filepath.Join(rolesRoot, r.name, "inbox")
+		if err := mkdirAllMode(inboxDir, 0o700); err != nil {
+			return fmt.Errorf("creating inbox for role %q: %w", r.name, err)
+		}
+		for _, sub := range inboxSubdirs {
+			p := filepath.Join(inboxDir, sub)
+			if err := mkdirAllMode(p, 0o700); err != nil {
+				return fmt.Errorf("creating %s for role %q: %w", sub, r.name, err)
+			}
 		}
 	}
-	*writtenFiles = append(*writtenFiles, sessionsJSONPath)
 
-	// 3. Write .claude/.mcp.json (always overwritten).
-	mcpDir := filepath.Join(instanceRoot, ".claude")
-	if err := os.MkdirAll(mcpDir, 0o755); err != nil {
-		return fmt.Errorf("creating .claude directory: %w", err)
+	// daemon.pid / daemon.log placeholders. daemon.pid is created empty;
+	// the daemon overwrites it atomically when it starts. daemon.log is
+	// created empty; the daemon opens it with O_APPEND. Both are tracked
+	// as ManagedFiles so niwa destroy cleans them up.
+	pidPath := filepath.Join(niwaDir, "daemon.pid")
+	if err := ensureEmptyFile(pidPath, 0o600); err != nil {
+		return fmt.Errorf("creating daemon.pid: %w", err)
 	}
-	mcpJSONPath := filepath.Join(mcpDir, ".mcp.json")
-	mcpContent, err := buildMCPJSON(instanceRoot)
-	if err != nil {
-		return fmt.Errorf("building .mcp.json: %w", err)
-	}
-	if err := writeFileMode(mcpJSONPath, mcpContent, 0o600); err != nil {
-		return fmt.Errorf("writing .mcp.json: %w", err)
-	}
-	*writtenFiles = append(*writtenFiles, mcpJSONPath)
+	*writtenFiles = append(*writtenFiles, pidPath)
 
-	// 4. Write hook scripts to .niwa/hooks/ so HooksMaterializer can copy
-	// them by file path. Scripts are small wrappers that invoke niwa commands.
-	hooksDir := filepath.Join(instanceRoot, ".niwa", "hooks")
-	if err := os.MkdirAll(hooksDir, 0o700); err != nil {
-		return fmt.Errorf("creating hooks directory: %w", err)
+	logPath := filepath.Join(niwaDir, "daemon.log")
+	if err := ensureEmptyFile(logPath, 0o600); err != nil {
+		return fmt.Errorf("creating daemon.log: %w", err)
 	}
-	sessionStartScript := filepath.Join(hooksDir, "mesh-session-start.sh")
-	if err := writeFileMode(sessionStartScript, []byte("#!/bin/sh\nniwa session register\n"), 0o755); err != nil {
+	*writtenFiles = append(*writtenFiles, logPath)
+
+	// Step 4: .mcp.json at instance root. Mirror into each role's repo
+	// dir (not coordinator — that lives at the instance root).
+	mcpContent := buildMCPContent(instanceRoot)
+	instanceMCPPath := filepath.Join(instanceRoot, ".claude", ".mcp.json")
+	if err := writeIdempotent(instanceMCPPath, mcpContent, 0o600, os.Stderr); err != nil {
+		return fmt.Errorf("writing instance .mcp.json: %w", err)
+	}
+	*writtenFiles = append(*writtenFiles, instanceMCPPath)
+
+	for _, r := range roles {
+		if r.name == coordinatorRole {
+			continue
+		}
+		if r.repoPath == "" {
+			// Explicit [channels.mesh.roles] entry without a resolved
+			// path (e.g., a virtual peer); skip the per-repo mirror.
+			continue
+		}
+		repoMCP := filepath.Join(r.repoPath, ".claude", ".mcp.json")
+		if err := writeIdempotent(repoMCP, mcpContent, 0o600, os.Stderr); err != nil {
+			return fmt.Errorf("writing %s: %w", repoMCP, err)
+		}
+		*writtenFiles = append(*writtenFiles, repoMCP)
+	}
+
+	// Step 5: niwa-mesh SKILL.md at instance-root and per-repo. Content
+	// is identical across paths (flat uniform skill, Decision 5).
+	skillContent := buildSkillContent()
+	instanceSkill := filepath.Join(instanceRoot, ".claude", "skills", "niwa-mesh", "SKILL.md")
+	if err := writeIdempotent(instanceSkill, skillContent, 0o600, os.Stderr); err != nil {
+		return fmt.Errorf("writing instance SKILL.md: %w", err)
+	}
+	*writtenFiles = append(*writtenFiles, instanceSkill)
+
+	for _, r := range roles {
+		if r.name == coordinatorRole {
+			continue
+		}
+		if r.repoPath == "" {
+			continue
+		}
+		repoSkill := filepath.Join(r.repoPath, ".claude", "skills", "niwa-mesh", "SKILL.md")
+		if err := writeIdempotent(repoSkill, skillContent, 0o600, os.Stderr); err != nil {
+			return fmt.Errorf("writing %s: %w", repoSkill, err)
+		}
+		*writtenFiles = append(*writtenFiles, repoSkill)
+	}
+
+	// Step 6: Hook scripts on disk. HooksMaterializer reads Scripts as
+	// file paths in Step 6.5 of runPipeline. injectChannelHooks (called
+	// in Step 0 of runPipeline) has already recorded these paths in
+	// cfg.Claude.Hooks; we just need the files to exist.
+	hooksDir := filepath.Join(niwaDir, "hooks")
+	if err := mkdirAllMode(hooksDir, 0o700); err != nil {
+		return fmt.Errorf("creating hooks dir: %w", err)
+	}
+	// Hook source scripts live under .niwa/ and therefore follow R48's
+	// file-mode rule (0600). HooksMaterializer (step 6.5) reads these
+	// bytes and writes them to .claude/hooks/<event>/ with mode 0755
+	// where Claude Code actually invokes them; the source files never
+	// need the execute bit themselves.
+	sessionStartPath := filepath.Join(hooksDir, "mesh-session-start.sh")
+	if err := writeIdempotent(sessionStartPath, []byte("#!/bin/sh\nniwa session register\n"), 0o600, os.Stderr); err != nil {
 		return fmt.Errorf("writing mesh-session-start.sh: %w", err)
 	}
-	*writtenFiles = append(*writtenFiles, sessionStartScript)
+	*writtenFiles = append(*writtenFiles, sessionStartPath)
 
-	userPromptScript := filepath.Join(hooksDir, "mesh-user-prompt-submit.sh")
-	if err := writeFileMode(userPromptScript, []byte("#!/bin/sh\nniwa session register --check-only\n"), 0o755); err != nil {
+	userPromptPath := filepath.Join(hooksDir, "mesh-user-prompt-submit.sh")
+	if err := writeIdempotent(userPromptPath, []byte("#!/bin/sh\nniwa session register --check-only\n"), 0o600, os.Stderr); err != nil {
 		return fmt.Errorf("writing mesh-user-prompt-submit.sh: %w", err)
 	}
-	*writtenFiles = append(*writtenFiles, userPromptScript)
+	*writtenFiles = append(*writtenFiles, userPromptPath)
 
-	// 5. Append ## Channels section to workspace-context.md (idempotent).
+	// Step 7: workspace-context.md ## Channels section. The coordinator
+	// is the only reader (workers read the task envelope, not this file)
+	// so Role is hardcoded. See Decision 5 / PRD R12.
 	ctxPath := filepath.Join(instanceRoot, workspaceContextFile)
-	if err := appendChannelsSection(ctxPath); err != nil {
-		return fmt.Errorf("appending channels section: %w", err)
+	if err := writeChannelsSection(ctxPath, instanceRoot); err != nil {
+		return fmt.Errorf("writing channels section: %w", err)
 	}
 
 	return nil
 }
 
-// buildMCPJSON returns the content for .claude/.mcp.json with instanceRoot
-// baked into NIWA_INSTANCE_ROOT.
-func buildMCPJSON(instanceRoot string) ([]byte, error) {
-	rootJSON, err := json.Marshal(instanceRoot)
-	if err != nil {
-		return nil, err
-	}
-	content := fmt.Sprintf(channelsMCPEntry, string(rootJSON))
-	return []byte(content + "\n"), nil
+// roleEntry pairs a validated role name with the cloned repo directory
+// that owns its inbox, or "" for coordinator (inbox lives at the instance
+// root).
+type roleEntry struct {
+	name     string
+	repoPath string
 }
 
-// appendChannelsSection appends the ## Channels section to the workspace
-// context file when it is not already present. No-op when the section header
-// already exists anywhere in the file.
-func appendChannelsSection(ctxPath string) error {
-	existing, err := os.ReadFile(ctxPath)
-	if err != nil && !os.IsNotExist(err) {
-		return err
+// enumerateRoles derives the complete set of roles for this workspace,
+// validates formatting and uniqueness, and returns the list sorted by
+// role name for deterministic downstream processing.
+//
+// The enumeration rules are:
+//
+//  1. coordinator is always present (reserved for the instance root).
+//  2. Every immediate subdirectory of every group directory under
+//     instanceRoot contributes a role whose name is the repo's directory
+//     basename (topology-derived). These are the cloned repos at the
+//     time channels are being installed.
+//  3. Explicit [channels.mesh.roles] entries override the topology for a
+//     given role name. The value is treated as either an absolute path
+//     (rare) or a workspace-relative repo directory (common).
+//
+// Validation rules:
+//
+//   - Role name must match ^[a-z0-9][a-z0-9-]{0,31}$ (PRD R6).
+//   - "coordinator" as an explicit [channels.mesh.roles] entry targeting
+//     anything other than the instance root is rejected (AC-R3).
+//   - Two topology-derived repos with the same basename collide and fail
+//     apply (AC-R2). Users resolve via explicit entries.
+func enumerateRoles(cfg *config.WorkspaceConfig, instanceRoot string) ([]roleEntry, error) {
+	// Collect explicit overrides first so collision checks below know to
+	// skip the topology path for any name the user pinned manually.
+	explicit := map[string]string{}
+	if cfg.Channels.Mesh != nil {
+		for k, v := range cfg.Channels.Mesh.Roles {
+			explicit[k] = v
+		}
 	}
 
-	if strings.Contains(string(existing), channelsSectionHeader) {
+	// Validate the coordinator override first: mapping "coordinator" to
+	// any non-empty path is a reserved-name error because coordinator is
+	// definitionally the instance root.
+	if v, ok := explicit[coordinatorRole]; ok {
+		if v != "" && v != "." {
+			return nil, fmt.Errorf(
+				"role %q is reserved for the instance root; "+
+					"remove the [channels.mesh.roles.%s] entry or leave its path empty",
+				coordinatorRole, coordinatorRole,
+			)
+		}
+	}
+
+	// Validate explicit names' formats up front so bad names surface with
+	// a specific configuration error instead of an opaque filesystem error.
+	for name := range explicit {
+		if name == coordinatorRole {
+			continue
+		}
+		if !roleNameRE.MatchString(name) {
+			return nil, fmt.Errorf(
+				"role name %q in [channels.mesh.roles] must match ^[a-z0-9][a-z0-9-]{0,31}$",
+				name,
+			)
+		}
+	}
+
+	// Enumerate topology-derived roles by walking the instance root's
+	// group directories. EnumerateRepos is available in this package and
+	// already handles hidden-directory skipping and name safety checks.
+	topologyNames, err := EnumerateRepos(instanceRoot)
+	if err != nil {
+		// A missing instance root is possible on a create path before
+		// clones have finished; treat it as zero repos so coordinator-
+		// only workspaces install cleanly.
+		if !errors.Is(err, os.ErrNotExist) {
+			return nil, fmt.Errorf("enumerating repos for role derivation: %w", err)
+		}
+	}
+
+	// For each topology-derived repo, find the group directory that owns
+	// it. We need the absolute on-disk path so that .mcp.json and
+	// SKILL.md can be mirrored per-repo. EnumerateRepos returns names
+	// only; re-walk the two-level structure to recover paths.
+	topologyPaths := map[string]string{}
+	if entries, err := os.ReadDir(instanceRoot); err == nil {
+		for _, entry := range entries {
+			name := entry.Name()
+			if !entry.IsDir() {
+				continue
+			}
+			if name == StateDir || name == ".claude" {
+				continue
+			}
+			if len(name) > 0 && name[0] == '.' {
+				continue
+			}
+			groupDir := filepath.Join(instanceRoot, name)
+			repoEntries, rerr := os.ReadDir(groupDir)
+			if rerr != nil {
+				continue
+			}
+			for _, repo := range repoEntries {
+				repoName := repo.Name()
+				if !repo.IsDir() {
+					continue
+				}
+				if len(repoName) > 0 && repoName[0] == '.' {
+					continue
+				}
+				// Last writer wins when the same basename appears in two
+				// groups. We detect the collision below by comparing the
+				// topology name list against topologyPaths cardinality.
+				topologyPaths[repoName] = filepath.Join(groupDir, repoName)
+			}
+		}
+	}
+
+	// Collision detection: the PRD defines a collision as two
+	// topology-derived repos sharing a basename AND the user did NOT
+	// provide an explicit [channels.mesh.roles] entry that disambiguates.
+	// Count occurrences by walking the classified directory structure; a
+	// repeat basename without an explicit entry is a hard failure (AC-R2).
+	repoOccurrences := map[string]int{}
+	if entries, err := os.ReadDir(instanceRoot); err == nil {
+		for _, entry := range entries {
+			name := entry.Name()
+			if !entry.IsDir() {
+				continue
+			}
+			if name == StateDir || name == ".claude" || (len(name) > 0 && name[0] == '.') {
+				continue
+			}
+			groupDir := filepath.Join(instanceRoot, name)
+			repoEntries, rerr := os.ReadDir(groupDir)
+			if rerr != nil {
+				continue
+			}
+			for _, repo := range repoEntries {
+				rname := repo.Name()
+				if !repo.IsDir() || (len(rname) > 0 && rname[0] == '.') {
+					continue
+				}
+				repoOccurrences[rname]++
+			}
+		}
+	}
+	for repoName, count := range repoOccurrences {
+		if count <= 1 {
+			continue
+		}
+		if _, pinned := explicit[repoName]; pinned {
+			continue
+		}
+		return nil, fmt.Errorf(
+			"role name %q is derived from multiple repo basenames; "+
+				"add an explicit [channels.mesh.roles] entry to disambiguate",
+			repoName,
+		)
+	}
+
+	// Validate topology names too so a repo whose basename isn't a valid
+	// role name fails loudly. We don't rewrite the basename silently.
+	for name := range topologyPaths {
+		if !roleNameRE.MatchString(name) {
+			if _, pinned := explicit[name]; pinned {
+				continue
+			}
+			return nil, fmt.Errorf(
+				"repo basename %q cannot be used as a role name; "+
+					"it must match ^[a-z0-9][a-z0-9-]{0,31}$. Add an "+
+					"explicit [channels.mesh.roles] entry to map it to a valid role name",
+				name,
+			)
+		}
+	}
+	_ = topologyNames // silences staticcheck when only paths are used below
+
+	// Build the final role set. Explicit entries override topology-
+	// derived names. A role present in explicit but not in topology is
+	// treated as a virtual peer (no repo dir to mirror to).
+	final := map[string]string{
+		coordinatorRole: "",
+	}
+	for name, path := range topologyPaths {
+		final[name] = path
+	}
+	for name, v := range explicit {
+		if name == coordinatorRole {
+			continue
+		}
+		// Resolve explicit value as workspace-relative path when it's
+		// non-empty and not already absolute.
+		resolved := ""
+		if v != "" {
+			if filepath.IsAbs(v) {
+				resolved = v
+			} else {
+				resolved = filepath.Join(instanceRoot, v)
+			}
+		} else if existing, ok := final[name]; ok {
+			// Bare explicit entry with empty value: keep the topology
+			// path if one exists; otherwise leave as a virtual peer.
+			resolved = existing
+		}
+		final[name] = resolved
+	}
+
+	result := make([]roleEntry, 0, len(final))
+	for name, path := range final {
+		result = append(result, roleEntry{name: name, repoPath: path})
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i].name < result[j].name })
+	return result, nil
+}
+
+// migratePre1Layout detects and removes pre-1.0 .niwa/sessions/<uuid>/
+// subdirectories when the new .niwa/roles/ layout is absent. It emits a
+// single stderr warning on the first observed upgrade; sessions.json is
+// preserved so the coordinator registry survives the schema break.
+//
+// The detection is conservative: the helper runs only when both
+// conditions hold (old uuid dirs present AND roles/ absent). A subsequent
+// apply on the new layout is a no-op because roles/ exists.
+func migratePre1Layout(niwaDir string) error {
+	sessionsDir := filepath.Join(niwaDir, "sessions")
+	rolesDir := filepath.Join(niwaDir, "roles")
+
+	// Short-circuit if new layout already exists.
+	if _, err := os.Stat(rolesDir); err == nil {
 		return nil
 	}
 
-	section := buildChannelsSection()
-
-	content := string(existing)
-	if len(content) > 0 && !strings.HasSuffix(content, "\n") {
-		content += "\n"
-	}
-	content += "\n" + section
-
-	return writeFileMode(ctxPath, []byte(content), 0o644)
-}
-
-// buildChannelsSection generates the ## Channels markdown section.
-func buildChannelsSection() string {
-	var sb strings.Builder
-	sb.WriteString("## Channels\n\n")
-	sb.WriteString("This workspace uses niwa cross-session communication. Sessions can exchange\n")
-	sb.WriteString("messages using the niwa MCP tools.\n\n")
-
-	sb.WriteString("Roles are auto-derived from the workspace topology: the coordinator session\n")
-	sb.WriteString("runs at the instance root, and each repo session uses its repo name as its role.\n\n")
-
-	sb.WriteString("### Tools\n\n")
-	sb.WriteString("- `niwa_check_messages` — check this session's inbox for new messages\n")
-	sb.WriteString("- `niwa_send_message` — send a typed message to another session by role\n")
-	sb.WriteString("- `niwa_ask` — send a question and block until the recipient replies (or timeout)\n")
-	sb.WriteString("- `niwa_wait` — block until a threshold number of messages matching type/from filters arrive\n")
-
-	return sb.String()
-}
-
-// writeFileMode writes data to path with the given mode bits, independent of umask.
-// It creates parent directories if needed, using a tmp-then-rename pattern for
-// atomic writes, then applies Chmod explicitly so the mode is not subject to umask.
-func writeFileMode(path string, data []byte, mode os.FileMode) error {
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	entries, err := os.ReadDir(sessionsDir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
 		return err
 	}
+
+	var uuidDirs []string
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		if uuidV4RE.MatchString(e.Name()) {
+			uuidDirs = append(uuidDirs, e.Name())
+		}
+	}
+	if len(uuidDirs) == 0 {
+		return nil
+	}
+
+	// One-shot warning. Content per Decision 7 step 2 of the design doc.
+	fmt.Fprintf(os.Stderr,
+		"niwa: upgrading mesh layout. Discarding %d session directories from the previous mesh version; "+
+			"any in-flight conversations are abandoned. Run 'niwa destroy && niwa create --channels' for a fresh start. "+
+			"See docs/guides/cross-session-communication.md for details.\n",
+		len(uuidDirs),
+	)
+
+	for _, name := range uuidDirs {
+		p := filepath.Join(sessionsDir, name)
+		if err := os.RemoveAll(p); err != nil {
+			return fmt.Errorf("removing pre-1.0 session dir %s: %w", p, err)
+		}
+	}
+	return nil
+}
+
+// buildMCPContent returns the instance-root-aware .mcp.json bytes. The
+// NIWA_INSTANCE_ROOT env entry is JSON-marshaled so instance paths with
+// spaces, quotes, or other special characters are preserved correctly.
+func buildMCPContent(instanceRoot string) []byte {
+	rootJSON, _ := json.Marshal(instanceRoot)
+	return []byte(fmt.Sprintf(channelsMCPTemplate, string(rootJSON)))
+}
+
+// buildSkillContent returns the canonical niwa-mesh SKILL.md content. The
+// six body sections required by PRD R10 are emitted in stable order with
+// substantive content per section; Decision 5 of the design doc is the
+// source of truth for what each section describes.
+//
+// The frontmatter description is intentionally under ~800 chars so that
+// name + description + allowed-tools fit comfortably within Claude Code's
+// 1536-char combined frontmatter cap.
+func buildSkillContent() []byte {
+	var b bytes.Buffer
+	b.WriteString("---\n")
+	b.WriteString("name: niwa-mesh\n")
+	b.WriteString("description: >-\n")
+	b.WriteString("  Delegate tasks across niwa workspace roles. Use when the user asks to\n")
+	b.WriteString("  dispatch work to another agent, check task status, receive progress,\n")
+	b.WriteString("  report completion, or exchange peer messages. Tasks are first-class\n")
+	b.WriteString("  objects with a queued/running/terminal lifecycle owned by the niwa\n")
+	b.WriteString("  daemon. This skill describes the default behavior for every\n")
+	b.WriteString("  participant: how to delegate synchronously vs asynchronously, how to\n")
+	b.WriteString("  report progress during long-running work, how to complete or abandon\n")
+	b.WriteString("  cleanly, which message vocabulary to use, how to ask peers for\n")
+	b.WriteString("  clarification, and common patterns such as fan-out/collect or\n")
+	b.WriteString("  worker-asks-coordinator. Invoke niwa MCP tools rather than writing\n")
+	b.WriteString("  directly to the filesystem; the tool surface enforces authorization\n")
+	b.WriteString("  and keeps the task state machine consistent across restarts.\n")
+	b.WriteString("allowed-tools:\n")
+	for _, name := range niwaMCPToolNames {
+		fmt.Fprintf(&b, "  - %s\n", name)
+	}
+	b.WriteString("---\n\n")
+
+	b.WriteString("# niwa-mesh\n\n")
+	b.WriteString("Behavioral defaults for agents participating in the niwa mesh.\n\n")
+
+	b.WriteString("## Delegation (sync vs async)\n\n")
+	b.WriteString("Use `niwa_delegate` to hand work to another role. Pass `mode=\"sync\"`\n")
+	b.WriteString("when you need the result inline and are willing to block until the\n")
+	b.WriteString("worker finishes, is abandoned, or is cancelled; the call returns a\n")
+	b.WriteString("`{status, ...}` envelope. Pass `mode=\"async\"` to return immediately\n")
+	b.WriteString("with a `{task_id}` you can later hand to `niwa_query_task` or\n")
+	b.WriteString("`niwa_await_task`. Prefer async when you plan to fan out to multiple\n")
+	b.WriteString("roles in parallel or when the caller can make progress while the\n")
+	b.WriteString("worker runs. The body you pass is the delegation payload; keep it\n")
+	b.WriteString("self-contained because the worker reads the body via\n")
+	b.WriteString("`niwa_check_messages` as its first action and does not have access to\n")
+	b.WriteString("your surrounding conversation.\n\n")
+
+	b.WriteString("## Reporting Progress\n\n")
+	b.WriteString("Call `niwa_report_progress` every 3-5 minutes of wall-clock work, or\n")
+	b.WriteString("every ~20 tool calls, whichever arrives sooner. The `summary` field is\n")
+	b.WriteString("truncated to 200 characters and appears in `niwa task list`; the\n")
+	b.WriteString("optional `body` carries structured detail (file paths touched, counts,\n")
+	b.WriteString("sub-task IDs) and flows to any delegator waiting on\n")
+	b.WriteString("`niwa_await_task`. Progress calls reset the stalled-progress watchdog,\n")
+	b.WriteString("so regular reporting prevents SIGTERM escalation during long runs.\n\n")
+
+	b.WriteString("## Completion Contract\n\n")
+	b.WriteString("Every worker MUST call `niwa_finish_task` before exiting. Use\n")
+	b.WriteString("`outcome=\"completed\"` with a `result` object when the task succeeded,\n")
+	b.WriteString("or `outcome=\"abandoned\"` with a `reason` string when you cannot make\n")
+	b.WriteString("further progress (missing preconditions, repeated tool failures,\n")
+	b.WriteString("policy refusal). Exiting the process without calling `niwa_finish_task`\n")
+	b.WriteString("is classified as an unexpected exit and consumes a retry slot; after\n")
+	b.WriteString("the cap is reached the daemon transitions the task to `abandoned`\n")
+	b.WriteString("with `reason: \"retry_cap_exceeded\"`. A second finish call on a\n")
+	b.WriteString("terminal task returns `TASK_ALREADY_TERMINAL`.\n\n")
+
+	b.WriteString("## Message Vocabulary\n\n")
+	b.WriteString("Message `type` values follow the format\n")
+	b.WriteString("`^[a-z][a-z0-9]*(\\.[a-z][a-z0-9]*)*$`. The daemon and MCP handlers\n")
+	b.WriteString("emit: `task.progress`, `task.completed`, `task.abandoned`,\n")
+	b.WriteString("`task.cancelled`. Agent-level peer exchanges use `question.ask`,\n")
+	b.WriteString("`question.answer`, and `status.update`. Define new domain-specific\n")
+	b.WriteString("types with a clear namespace prefix (`deploy.requested`,\n")
+	b.WriteString("`review.completed`) and stay within the format regex. Unknown types on\n")
+	b.WriteString("`niwa_send_message` return `BAD_TYPE`; unknown target roles return\n")
+	b.WriteString("`UNKNOWN_ROLE`.\n\n")
+
+	b.WriteString("## Peer Interaction\n\n")
+	b.WriteString("Use `niwa_ask` when you need a synchronous reply from a peer: the\n")
+	b.WriteString("call blocks until the peer responds or the timeout elapses (default\n")
+	b.WriteString("600 seconds). If the target role has no live session registered,\n")
+	b.WriteString("niwa creates a first-class ask task with `body.kind=\"ask\"` so the\n")
+	b.WriteString("daemon can spawn a worker to handle it. Use `niwa_send_message` for\n")
+	b.WriteString("one-way notifications where you do not need a reply. Inbox retrieval\n")
+	b.WriteString("is via `niwa_check_messages`, which returns unread messages and moves\n")
+	b.WriteString("them into `inbox/read/` atomically; expired messages are swept into\n")
+	b.WriteString("`inbox/expired/` first and never returned.\n\n")
+
+	b.WriteString("## Common Patterns\n\n")
+	b.WriteString("Coordinator fan-out: call `niwa_delegate(mode=\"async\")` once per\n")
+	b.WriteString("target role, collect the returned task IDs, then loop over them with\n")
+	b.WriteString("`niwa_await_task` to gather results in completion order. For mixed\n")
+	b.WriteString("workloads, use `niwa_list_outbound_tasks` to rediscover in-flight\n")
+	b.WriteString("work after a restart. Worker asks coordinator: inside a running task,\n")
+	b.WriteString("call `niwa_ask(to=\"coordinator\", body=...)` with a tight timeout\n")
+	b.WriteString("(60-120s) when you need clarification; fall back to\n")
+	b.WriteString("`niwa_finish_task(outcome=\"abandoned\", reason=\"blocked: <detail>\")`\n")
+	b.WriteString("if the ask times out. Cancel/update: while a task is still queued,\n")
+	b.WriteString("the delegator can call `niwa_update_task` (returns `updated` if the\n")
+	b.WriteString("task is still queued, `too_late` once it is running) or\n")
+	b.WriteString("`niwa_cancel_task` (atomic rename into `inbox/cancelled/`).\n")
+
+	return b.Bytes()
+}
+
+// writeChannelsSection writes the minimal `## Channels` section into the
+// workspace-context.md at ctxPath. If the file already has a ## Channels
+// section, it is replaced wholesale (so edits to the format propagate on
+// reapply without duplicate sections). If the file has no such section,
+// the new section is appended.
+func writeChannelsSection(ctxPath, instanceRoot string) error {
+	existing, err := os.ReadFile(ctxPath)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	content := string(existing)
+
+	// Build the canonical section.
+	var sb strings.Builder
+	sb.WriteString(channelsSectionHeader + "\n\n")
+	sb.WriteString("- Role: coordinator\n")
+	fmt.Fprintf(&sb, "- NIWA_INSTANCE_ROOT: %s\n", instanceRoot)
+	sb.WriteString("- Tools:\n")
+	for _, t := range niwaMCPToolNames {
+		fmt.Fprintf(&sb, "  - %s\n", t)
+	}
+	sb.WriteString("\nSee the `/niwa-mesh` skill for usage patterns.\n")
+	newSection := sb.String()
+
+	// Replace an existing section when present; otherwise append.
+	// The section is delimited by the next `## ` line at the same level
+	// or end of file.
+	idx := strings.Index(content, channelsSectionHeader)
+	if idx == -1 {
+		trimmed := strings.TrimRight(content, "\n")
+		var out string
+		if trimmed == "" {
+			out = newSection
+		} else {
+			out = trimmed + "\n\n" + newSection
+		}
+		return os.WriteFile(ctxPath, []byte(out), 0o644)
+	}
+
+	// Find the end of the Channels section: the next line starting with
+	// `## ` at or after idx+len(header), or EOF.
+	tailStart := idx + len(channelsSectionHeader)
+	end := len(content)
+	// Search line by line for the next heading.
+	rest := content[tailStart:]
+	for offset := 0; offset < len(rest); {
+		nl := strings.IndexByte(rest[offset:], '\n')
+		if nl == -1 {
+			break
+		}
+		lineStart := offset + nl + 1
+		if lineStart >= len(rest) {
+			break
+		}
+		// Check if the next line starts a new ## heading.
+		remaining := rest[lineStart:]
+		if strings.HasPrefix(remaining, "## ") || strings.HasPrefix(remaining, "# ") {
+			end = tailStart + lineStart
+			break
+		}
+		offset = lineStart
+	}
+	out := content[:idx] + newSection
+	if end < len(content) {
+		// Preserve following sections; ensure a blank line separates.
+		trailing := content[end:]
+		out = strings.TrimRight(out, "\n") + "\n\n" + trailing
+	}
+	return os.WriteFile(ctxPath, []byte(out), 0o644)
+}
+
+// writeIdempotent writes data to path with the given mode, using
+// sha256-based idempotency:
+//
+//   - If the on-disk content matches data byte-for-byte, skip the write
+//     entirely (mtime stable, no spurious git churn).
+//   - If the file exists and content differs, emit a single-line stderr
+//     drift warning identifying the path, then overwrite.
+//   - If the file does not exist, write it silently (first materialization
+//     is not a drift event).
+//
+// Parent directories are created with mode 0700. The file is chmoded
+// explicitly to the requested mode so that umask cannot widen the
+// permissions.
+func writeIdempotent(path string, data []byte, mode os.FileMode, driftOut *os.File) error {
+	dir := filepath.Dir(path)
+	if err := mkdirAllMode(dir, 0o700); err != nil {
+		return err
+	}
+
+	existing, err := os.ReadFile(path)
+	if err == nil {
+		if bytes.Equal(existing, data) {
+			// Ensure mode is correct even when content matches; a
+			// previous run under a broken umask could have left 0644.
+			// Chmod is a no-op on matching permissions.
+			return os.Chmod(path, mode)
+		}
+		// Drift: emit one warning line to driftOut.
+		if driftOut != nil {
+			fmt.Fprintf(driftOut, "niwa: drift detected in managed file %s; overwriting\n", path)
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+
+	// tmp-then-rename keeps readers from seeing a partially-written file.
 	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, data, mode); err != nil {
 		return err
@@ -177,18 +753,75 @@ func writeFileMode(path string, data []byte, mode os.FileMode) error {
 	return os.Rename(tmp, path)
 }
 
-// injectChannelHooks inserts SessionStart and UserPromptSubmit hook entries
-// into cfg.Claude.Hooks when the workspace has channel config. Hook entries
-// are prepended so they run before any user-defined hooks for the same event.
-// This mutates cfg in place and is called at the top of runPipeline before
-// any per-repo processing. HooksMaterializer reads Scripts as file paths and
-// copies them with os.ReadFile, so these must point to real files on disk.
+// ensureEmptyFile creates path as an empty file with mode when absent.
+// When present, the file is left untouched (so the daemon's PID file does
+// not get wiped on re-apply). mode is only applied when creating.
+func ensureEmptyFile(path string, mode os.FileMode) error {
+	dir := filepath.Dir(path)
+	if err := mkdirAllMode(dir, 0o700); err != nil {
+		return err
+	}
+	if _, err := os.Stat(path); err == nil {
+		return nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, mode)
+	if err != nil {
+		return err
+	}
+	_ = f.Close()
+	return os.Chmod(path, mode)
+}
+
+// mkdirAllMode is os.MkdirAll with a Chmod ladder so that every created
+// directory ends up at mode independent of umask. Existing directories
+// are left at their current mode — we only set mode on directories this
+// call actually creates.
+func mkdirAllMode(path string, mode os.FileMode) error {
+	// Fast path: already exists.
+	if fi, err := os.Stat(path); err == nil {
+		if !fi.IsDir() {
+			return fmt.Errorf("%s exists and is not a directory", path)
+		}
+		return nil
+	}
+	// Recursively create parent first.
+	parent := filepath.Dir(path)
+	if parent != path {
+		if err := mkdirAllMode(parent, mode); err != nil {
+			return err
+		}
+	}
+	if err := os.Mkdir(path, mode); err != nil {
+		if errors.Is(err, os.ErrExist) {
+			return nil
+		}
+		return err
+	}
+	return os.Chmod(path, mode)
+}
+
+// hashBytes returns the hex-encoded sha256 of data. Exposed for tests
+// that want to verify the hash-matching invariant independently of
+// writeIdempotent's implementation.
+func hashBytes(data []byte) string {
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
+}
+
+// injectChannelHooks inserts SessionStart and UserPromptSubmit hook
+// entries into cfg.Claude.Hooks when the workspace has channel config.
+// Hook entries are prepended so they run before any user-defined hooks
+// for the same event. This mutates cfg in place and is called at the top
+// of runPipeline before any per-repo processing.
 //
-// ORDERING CONTRACT: Call InstallChannelInfrastructure (step 4.75) before
-// HooksMaterializer runs (step 6.5). injectChannelHooks records paths to
-// scripts that don't yet exist on disk; InstallChannelInfrastructure writes
-// them. Calling injectChannelHooks without a subsequent InstallChannelInfrastructure
-// produces hook entries pointing to nonexistent files that fail at materialize time.
+// HooksMaterializer reads Scripts as file paths and copies them with
+// os.ReadFile, so these must point to real files on disk.
+// InstallChannelInfrastructure writes the scripts; the call order in
+// runPipeline (injectChannelHooks in Step 0 → InstallChannelInfrastructure
+// in Step 4.75 → HooksMaterializer in Step 6.5) guarantees the files
+// exist by the time the materializer tries to read them.
 func injectChannelHooks(cfg *config.WorkspaceConfig, instanceRoot string) {
 	if !cfg.Channels.IsEnabled() {
 		return
@@ -202,14 +835,8 @@ func injectChannelHooks(cfg *config.WorkspaceConfig, instanceRoot string) {
 	sessionStartScript := filepath.Join(hooksDir, "mesh-session-start.sh")
 	userPromptScript := filepath.Join(hooksDir, "mesh-user-prompt-submit.sh")
 
-	// SessionStart: register this session with the mesh.
-	sessionStartEntry := config.HookEntry{
-		Scripts: []string{sessionStartScript},
-	}
-	// UserPromptSubmit: check messages at each prompt.
-	userPromptEntry := config.HookEntry{
-		Scripts: []string{userPromptScript},
-	}
+	sessionStartEntry := config.HookEntry{Scripts: []string{sessionStartScript}}
+	userPromptEntry := config.HookEntry{Scripts: []string{userPromptScript}}
 
 	cfg.Claude.Hooks["session_start"] = prependHookEntry(cfg.Claude.Hooks["session_start"], sessionStartEntry)
 	cfg.Claude.Hooks["user_prompt_submit"] = prependHookEntry(cfg.Claude.Hooks["user_prompt_submit"], userPromptEntry)
