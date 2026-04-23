@@ -87,7 +87,20 @@ func TestServer_Initialize_ToolsList(t *testing.T) {
 		}
 	}
 
-	for _, want := range []string{"niwa_check_messages", "niwa_send_message", "niwa_ask", "niwa_wait"} {
+	wantTools := []string{
+		"niwa_check_messages",
+		"niwa_send_message",
+		"niwa_ask",
+		"niwa_delegate",
+		"niwa_query_task",
+		"niwa_await_task",
+		"niwa_report_progress",
+		"niwa_finish_task",
+		"niwa_list_outbound_tasks",
+		"niwa_update_task",
+		"niwa_cancel_task",
+	}
+	for _, want := range wantTools {
 		if !names[want] {
 			t.Errorf("tool %q not in tools/list response; got names: %v", want, names)
 		}

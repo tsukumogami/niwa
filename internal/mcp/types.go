@@ -149,9 +149,13 @@ type sendMessageArgs struct {
 }
 
 type askArgs struct {
-	To      string          `json:"to"`
-	Body    json.RawMessage `json:"body"`
-	Timeout int             `json:"timeout,omitempty"`
+	To             string          `json:"to"`
+	Body           json.RawMessage `json:"body"`
+	TimeoutSeconds int             `json:"timeout_seconds,omitempty"`
+	// Timeout is accepted as a back-compat alias; when both are set,
+	// TimeoutSeconds wins. Kept so existing callers of the earlier tool
+	// surface keep working while upstream updates.
+	Timeout int `json:"timeout,omitempty"`
 }
 
 type waitArgs struct {
