@@ -1,5 +1,5 @@
 ---
-status: Accepted
+status: Planned
 upstream: docs/prds/PRD-cross-session-communication.md
 problem: |
   Niwa must provision a workspace-scoped mesh that lets any agent dispatch
@@ -58,7 +58,7 @@ rationale: |
 
 ## Status
 
-Accepted
+Planned
 
 ## Context and Problem Statement
 
