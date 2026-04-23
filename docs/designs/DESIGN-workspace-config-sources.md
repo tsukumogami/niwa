@@ -907,6 +907,147 @@ debuggability).
 documentation (verbose for a one-time event); silent conversion (no
 visibility into a state change).
 
+## Security Considerations
+
+The fetch + extract pipeline is this design's primary security
+surface. The bytes streamed into `<workspace>/.niwa.next/` are
+arbitrary content from a remote git source; a hostile source slug or
+a man-in-the-middle attacker (defeating TLS) could deliver
+attacker-controlled content. The design's defenses concentrate in
+`internal/github/extractSubpath` and the snapshot swap primitive.
+
+### Tarball extraction defenses
+
+`extractSubpath` MUST enforce the following invariants on every entry
+streamed from the tarball reader, before writing any bytes to disk:
+
+1. **Positive type allowlist.** Only `tar.TypeReg` (regular file) and
+   `tar.TypeDir` (directory) are acted on. All other entry types —
+   `TypeSymlink`, `TypeLink` (hard link), `TypeChar`, `TypeBlock`,
+   `TypeFifo`, `TypeXGlobalHeader`, `TypeXHeader`, GNU extensions —
+   are skipped. This rules out symlink-and-write-through attacks
+   structurally.
+
+2. **Wrapper anchoring.** GitHub's tarball API wraps content in a
+   single root directory (`<owner>-<repo>-<sha>/`). The first entry
+   establishes the wrapper name; every subsequent entry's path must
+   begin with `<wrapper>/`. Entries that don't are rejected with a
+   hard error.
+
+3. **Subpath filter.** After the wrapper prefix is stripped, the
+   remaining path must begin with `<subpath>/` (or equal `<subpath>`
+   for a single-file subpath per R4). Entries outside the subpath are
+   skipped without writing.
+
+4. **Path-containment check.** The destination path is computed via
+   `filepath.Join(dest, relativePath)` then `filepath.Clean`-ed, then
+   verified to live under `dest` (string-prefix check anchored to
+   `dest + os.PathSeparator`). Entries that escape are rejected with a
+   hard error, not silently skipped.
+
+5. **Filename validation.** Entry paths must contain no NUL bytes, no
+   `..` path segments, no leading `/`, and no embedded path separators
+   beyond the expected `/`. Malformed names are rejected with a hard
+   error.
+
+6. **Decompression bomb defense.** The gzip reader is wrapped in an
+   `io.LimitReader` with a 500 MB decompressed ceiling (overridable
+   for legitimate large-subpath cases via a future env var). Per-entry
+   writes use `io.CopyN(dest, src, header.Size)` with a per-entry
+   ceiling derived from the same budget; cumulative bytes written are
+   tracked across the extraction. Exceeding the cap returns a clean
+   error.
+
+7. **Failure leaves no partial state.** Any error during extraction
+   leaves `.niwa.next/` orphaned at the staging path; the existing
+   `.niwa/` is untouched. The next refresh's preflight cleanup
+   removes the orphan.
+
+The git-clone fallback path applies the same discipline to its
+copy-out step: regular files only, path containment enforced, no
+symlink following.
+
+### Permissions and atomic swap
+
+- The snapshot directory and its contents use default modes (0755 for
+  directories, 0644 for files, with the user's umask applied). The
+  provenance marker is world-readable: it contains no secrets.
+- `instance.json` uses default 0644. The `config_source` block contains
+  source URL, tuple, commit oid, and fetched-at — equivalent in
+  sensitivity to `git remote -v` output.
+- The two-rename swap relies on the workspace owner having exclusive
+  write access to `<workspace>/`. niwa does not defend against a
+  hostile co-resident user with write access to the workspace parent
+  directory; that user already controls the workspace.
+- The preflight cleanup of stale `.niwa.next/` and `.niwa.prev/` uses
+  `os.Lstat`-aware removal so it cannot be tricked into deleting
+  through a planted symlink.
+
+### Credential handling
+
+- `GH_TOKEN` is read once at `APIClient` construction and attached as
+  `Authorization: Bearer <token>` on outbound requests. The token
+  value is never written to disk, never logged, and never included
+  in error messages or surfaced API types.
+- Authentication for the git-clone fallback is delegated to git's
+  existing credential resolver (SSH agent, `~/.netrc`, credential
+  helpers). niwa does not inject or override credentials on the
+  fallback path.
+
+### Trust model and supply chain
+
+- niwa fetches whatever the user's source slug names. There is no
+  signature verification and no commit-oid pinning by default. Users
+  who want pinning specify `@<sha>` in the slug. This matches the
+  trust model `git clone` provides.
+- Transport integrity comes from HTTPS to `api.github.com` and the
+  redirect target on `codeload.github.com`. A hostile GitHub backend
+  is out of scope.
+- The design introduces no new third-party dependencies. Tarball
+  extraction uses Go's stdlib (`archive/tar`, `compress/gzip`,
+  `net/http`); the provenance marker reuses the existing
+  BurntSushi/toml dependency.
+
+### `.git/`-replacement guardrail interactions
+
+- The plaintext-secrets public-repo guardrail (R31) reads the
+  provenance marker's `host`/`owner`/`repo` instead of
+  `git remote -v`. When the marker is missing, the guardrail does
+  not fire — there is no remote to warn about. An attacker with
+  workspace-write access who deletes the marker disables the
+  guardrail; this is acceptable in the threat model (workspace-write
+  is full ownership) and is by design.
+- `niwa reset` (R30) reads the marker to recover the source URL for
+  re-fetch. To protect against marker-tampering swap-attacks, the
+  reset flow displays the URL it is about to re-fetch from before
+  acting; users notice an unexpected URL.
+- Lazy state and registry migrations (R23, R24, R28) reject malformed
+  files cleanly: a malformed v3 state file leaves the on-disk file
+  byte-identical to its pre-load state (R25); a malformed registry
+  entry surfaces a parse error rather than being silently rewritten.
+
+### Configurable endpoints
+
+- `NIWA_GITHUB_API_URL` overrides the default `https://api.github.com`
+  base URL and is intended primarily for tests against
+  `tarballFakeServer`. Production use is supported for self-hosted
+  endpoints the user trusts.
+- `NIWA_TEST_FAULT` is a test-only seam. In production builds it
+  causes a single env-var lookup per `testfault.Maybe` call and has
+  no other effect.
+
+### Accepted limitations
+
+- **Snapshot integrity is presence-based**, not content-based. niwa
+  treats marker-present-and-parseable as integrity confirmation.
+  Tampered but syntactically-valid snapshots are not detected.
+  Future enhancements (commit-oid attestation, content-hash
+  verification recorded in `instance.json`) can land in follow-up
+  releases.
+- **`file://` sources bypass TLS** by definition. Users who choose
+  `file://` for the git-clone fallback path are trusting the local
+  filesystem; this is a deliberate choice, not a niwa weakness.
+
 ## Consequences
 
 ### Positive
