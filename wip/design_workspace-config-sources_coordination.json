@@ -4,45 +4,55 @@
     {
       "id": 1,
       "question": "What is the on-disk format and location of the snapshot provenance marker?",
-      "status": "pending",
+      "status": "complete",
       "complexity": "critical",
-      "scope_notes": "The marker carries source identity (URL, host, owner, repo, subpath, ref, resolved_commit, fetched_at, fetch_mechanism) and is read by 5 surfaces: niwa status (PRD R36), drift detection (R16), niwa reset's clone-or-local check (R30), the plaintext-secrets guardrail (R31), and the snapshot-corruption integrity heuristic (Known Limitation). Format and location are coupled (e.g., a hidden file inside the snapshot has different visibility than a sidecar outside). Decisions about format type (TOML/JSON/YAML/key=value), exact filename, and exact placement (snapshot-root, snapshot-hidden, sibling-outside) are tightly bound."
+      "chosen": "TOML at <workspace>/.niwa/.niwa-snapshot.toml (leading-dot, inside snapshot dir)",
+      "confidence": "high",
+      "report_file": "wip/research/design_workspace-config-sources_decision_1_report.md"
     },
     {
       "id": 2,
       "question": "How does niwa atomically swap the snapshot directory while preserving instance.json?",
-      "status": "pending",
+      "status": "complete",
       "complexity": "critical",
-      "scope_notes": "Two coupled sub-questions merged per Phase 1 guidance: (a) the rename sequence that satisfies PRD R12 'at no point is .niwa/ absent or partially populated' on Linux/macOS (POSIX rename(2) on non-empty directories has platform variance); (b) where instance.json lives once .niwa/ is the disposable snapshot the refresh path renames out from under (PRD Out of Scope explicitly defers; downstream design must commit). Coupled because the swap mechanism must explicitly preserve or relocate the state file."
+      "chosen": "Two-rename swap on sibling staging dir; instance.json relocated to <workspace>/.niwa-state/instance.json with dual-path fallback for legacy <workspace>/.niwa/instance.json (lazy migration on first SaveState, fallback removal scheduled v1.1)",
+      "confidence": "high",
+      "report_file": "wip/research/design_workspace-config-sources_decision_2_report.md"
     },
     {
       "id": 3,
       "question": "Where does the canonical slug parser live and what does its API surface look like?",
-      "status": "pending",
+      "status": "complete",
       "complexity": "standard",
-      "scope_notes": "PRD R1-R4 defines the slug grammar [host/]owner/repo[:subpath][@ref]. The parser is consumed by Cloner, the registry writer, the discovery probe, the overlay slug deriver (R35), niwa status (R36), and the plaintext-secrets guardrail. Today's ad-hoc parsing in clone.go:90 (ResolveCloneURL) and overlay.go:227 (parseOrgRepo) gets replaced. Question is package boundary (internal/source/, extending internal/workspace/, internal/config/) and API shape (typed Source struct with methods, free functions, a fluent builder)."
+      "chosen": "New leaf package internal/source/ exposing typed Source struct with Parse/String round-trippers and methods (CloneURL, TarballURL, CommitsAPIURL, OverlayDerivedSource, DisplayRef)",
+      "confidence": "high",
+      "report_file": "wip/research/design_workspace-config-sources_decision_3_report.md"
     },
     {
       "id": 4,
       "question": "What is the architecture of the test infrastructure (tarballFakeServer, fault-injection, state-file factory)?",
-      "status": "pending",
+      "status": "complete",
       "complexity": "critical",
-      "scope_notes": "PRD Test Strategy section commits to building these as in-scope deliverables. Three coupled sub-questions: (a) tarballFakeServer shape (standalone goroutine HTTP server vs httptest.Server-based helper vs extension of localGitServer); (b) fault-injection seam (env var like NIWA_TEST_FAULT=truncate-after:N, build tag, public test hook, dependency injection); (c) state-file factory step (Gherkin step that authors v1/v2/v3 InstanceState files for migration tests). Coupled because (b) needs hooks the production code exposes; the shape of (a) determines what (b) can intercept."
+      "chosen": "httptest.Server-based tarballFakeServer alongside localGitServer; single NIWA_TEST_FAULT env-var seam backed by a minimal internal/testfault/ package; Gherkin step pair (default + with-body docstring) backed by Go state-file factory",
+      "confidence": "high",
+      "report_file": "wip/research/design_workspace-config-sources_decision_4_report.md"
     },
     {
       "id": 5,
       "question": "How is the GitHub tarball fetch client implemented?",
-      "status": "pending",
+      "status": "complete",
       "complexity": "standard",
-      "scope_notes": "Per PRD R14 the fetch path uses GitHub REST tarball + Go's archive/tar (no system tar). Question is whether to extend internal/github/client.go (which currently uses http.DefaultClient for ListRepos), build a standalone client in a new package, or thin-wrapper the existing client. Includes auth wiring (R17 GH_TOKEN env), redirect handling (R18 repo rename + 5-minute codeload signed URL), and conditional-GET (R16 SHA endpoint + ETag). Standard tier because the choices are reversible refactors; no contested expert disagreement expected."
+      "chosen": "Extend internal/github/client.go: HeadCommit + FetchTarball methods on APIClient; tar extraction in internal/github/tar.go; GH_TOKEN read once at constructor; redirects via CheckRedirect with chain inspection for rename detection; BaseURL substitution as the test seam",
+      "confidence": "high",
+      "report_file": "wip/research/design_workspace-config-sources_decision_5_report.md"
     }
   ],
-  "cross_validation": "pending",
+  "cross_validation": "passed",
+  "cross_validation_notes": "No structural conflicts among the 5 chosen options. D1's inside-snapshot marker is swapped atomically with the rest of the snapshot under D2's two-rename. D2's sibling .niwa-state/ is independent of all other decisions. D3's leaf source package is consumed by but does not depend on D5 (D5 stays in github package). D4's tarballFakeServer integrates with D5 via APIClient's BaseURL constructor parameter. Two integration details deferred to Phase 4 architecture: (a) the production-code-side construction of APIClient — a NIWA_GITHUB_API_URL env var defaulting to https://api.github.com gives tests a clean override seam; (b) where exactly testfault.Maybe() calls land inside the github fetch + tar extraction path. Terminology nit: D5's 'GitHubFetcher' references the workspace-level snapshot writer that composes APIClient methods + tar extraction, not a separate type defined by D3 (D3's Source has no I/O methods).",
   "round": 0,
   "scaling_heuristic": {
     "decision_count": 5,
     "mode": "auto",
-    "verdict": "Proceed normally (1-5 in auto bucket)",
-    "merge_rationale": "Considered 7 candidate decisions during decomposition. Merged decisions on 'snapshot atomic swap' + 'instance.json placement' into Decision 2 because the swap mechanism must explicitly preserve or relocate the state file (the answer to one constrains the other). Merged decisions on 'tarballFakeServer shape' + 'fault-injection seam' + 'state-file factory step' into Decision 4 because they're all components of one coherent test-infrastructure choice. Dropped 'lazy migration triggering surface' as a standalone decision because PRD R23/R24/R28 already specify the trigger conditions; the remaining question is mechanical placement that fits inside Phase 4 architecture synthesis."
+    "verdict": "Proceed normally (1-5 in auto bucket)"
   }
 }
