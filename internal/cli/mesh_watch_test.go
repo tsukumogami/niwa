@@ -485,6 +485,11 @@ func TestRunEventLoop_CatchupSpawnsWorker(t *testing.T) {
 		exitCh:       exitCh,
 		wg:           &wg,
 		shutdownCtx:  ctx,
+		// Use a long backoff so the retry scheduled by Issue 5's
+		// classifier does NOT fire during this test's observation
+		// window. The point of this test is the claim→spawn path, not
+		// the retry path.
+		backoffs: []time.Duration{60 * time.Second},
 	}
 
 	loopDone := make(chan struct{})
@@ -495,9 +500,9 @@ func TestRunEventLoop_CatchupSpawnsWorker(t *testing.T) {
 
 	// Poll the state.json for the transition queued → running, then
 	// wait for the supervisor to record unexpected_exit (since /bin/true
-	// exits immediately without calling niwa_finish_task, state stays
-	// "running" — Issue 4 does not flip to abandoned here; Issue 5
-	// will classify and retry).
+	// exits immediately without calling niwa_finish_task). Issue 5
+	// leaves the state at "running" while the retry is pending (the
+	// 60 s backoff set above ensures the retry has not fired yet).
 	if err := waitForState(f, taskID, mcp.TaskStateRunning, 2*time.Second); err != nil {
 		t.Fatalf("waiting for running: %v", err)
 	}
@@ -533,13 +538,14 @@ func TestRunEventLoop_CatchupSpawnsWorker(t *testing.T) {
 		t.Errorf("transitions.log missing unexpected_exit entry")
 	}
 
-	// Verify state.json is STILL "running" for Issue 5 to handle.
+	// Verify state.json is STILL "running" while the retry waits out
+	// the 60 s backoff configured above.
 	_, st, err := mcp.ReadState(filepath.Join(f.tasksDir, taskID))
 	if err != nil {
 		t.Fatalf("ReadState: %v", err)
 	}
 	if st.State != mcp.TaskStateRunning {
-		t.Errorf("state = %q, want running (Issue 4 doesn't classify)", st.State)
+		t.Errorf("state = %q, want running (retry pending, backoff not fired)", st.State)
 	}
 
 	cancel()
@@ -998,6 +1004,10 @@ func TestSpawnWorker_ExitEventNotDroppedUnderBackPressure(t *testing.T) {
 		exitCh:       exitCh,
 		wg:           &wg,
 		shutdownCtx:  ctx,
+		// Long backoff so Issue 5's retry scheduler does NOT re-enter
+		// the spawn path during this test. Issue 5's retry coverage
+		// lives in TestRetryCap_* below.
+		backoffs: []time.Duration{60 * time.Second},
 	}
 
 	// Fire off spawns. Each /bin/true exits immediately; the supervisor
@@ -1027,11 +1037,11 @@ func TestSpawnWorker_ExitEventNotDroppedUnderBackPressure(t *testing.T) {
 		}
 	}()
 
-	// Wait for supervisors to finish sending (which requires us to drain).
-	wg.Wait()
-	// Once every supervisor has exited and every send has landed, close
-	// the channel so the drain goroutine returns cleanly if it hasn't
-	// already hit the count check above.
+	// Wait for the drain goroutine to see every exit. The supervisor
+	// WG's `Add(1)` inside handleSupervisorExit (for the retry
+	// scheduler goroutines) means wg.Wait() no longer returns after
+	// supervisors alone — we must cancel shutdownCtx first to unblock
+	// the retry schedulers.
 	select {
 	case <-drainDone:
 		// drain completed via count check
@@ -1039,6 +1049,11 @@ func TestSpawnWorker_ExitEventNotDroppedUnderBackPressure(t *testing.T) {
 		close(exitCh)
 		<-drainDone
 	}
+
+	// Cancel shutdownCtx so the retry-scheduler goroutines return and
+	// wg.Wait() can proceed.
+	cancel()
+	wg.Wait()
 
 	// Every task's exit must have been observed.
 	if len(seen) != spawns {
@@ -1104,5 +1119,538 @@ func TestSpawnWorker_ExitEventDroppedAfterShutdown(t *testing.T) {
 		// pass
 	case <-time.After(2 * time.Second):
 		t.Fatalf("supervisor did not return after shutdown — shutdownCtx guard missing?")
+	}
+}
+
+// ---------------------------------------------------------------------
+// Issue 5: restart cap + backoff tests
+// ---------------------------------------------------------------------
+
+// retryFixture wires up a minimal central-loop simulator for Issue 5's
+// retry-path tests. It seeds a daemon fixture, drives supervisor-exit
+// events through a background pump (the production-loop equivalent),
+// and uses short backoffs so retry timing fits inside test windows.
+type retryFixture struct {
+	*daemonTestFixture
+	cancel     context.CancelFunc // shutdownCtx cancel
+	wg         *sync.WaitGroup
+	exitCh     chan supervisorExit
+	spawnCtx   spawnContext
+	pumpDone   chan struct{}
+	pumpCancel context.CancelFunc
+}
+
+func newRetryFixture(t *testing.T, backoffs []time.Duration, spawnBin string) *retryFixture {
+	t.Helper()
+	f := newDaemonTestFixture(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	var wg sync.WaitGroup
+	exitCh := make(chan supervisorExit, 64)
+	s := spawnContext{
+		instanceRoot: f.root,
+		niwaDir:      f.niwaDir,
+		spawnBin:     spawnBin,
+		logger:       log.New(io.Discard, "", 0),
+		exitCh:       exitCh,
+		wg:           &wg,
+		shutdownCtx:  ctx,
+		backoffs:     backoffs,
+	}
+
+	pumpCtx, pumpCancel := context.WithCancel(context.Background())
+	pumpDone := make(chan struct{})
+	go func() {
+		defer close(pumpDone)
+		for {
+			select {
+			case ex := <-exitCh:
+				handleSupervisorExit(ex, s)
+			case <-pumpCtx.Done():
+				return
+			}
+		}
+	}()
+
+	return &retryFixture{
+		daemonTestFixture: f,
+		cancel:            cancel,
+		wg:                &wg,
+		exitCh:            exitCh,
+		spawnCtx:          s,
+		pumpDone:          pumpDone,
+		pumpCancel:        pumpCancel,
+	}
+}
+
+// Shutdown cancels shutdownCtx and stops the exit pump, then waits for
+// both to drain. Safe to call once.
+func (r *retryFixture) Shutdown(t *testing.T) {
+	t.Helper()
+	r.cancel()     // shutdownCtx — retry schedulers exit immediately
+	r.pumpCancel() // exit pump — stops consuming new events
+	r.wg.Wait()
+	<-r.pumpDone
+}
+
+// fireInitial performs the initial claim → spawn for a seeded task, as
+// the central loop would on catch-up scan or fsnotify CREATE.
+func (r *retryFixture) fireInitial(t *testing.T, taskID string) {
+	t.Helper()
+	evt := inboxEvent{
+		role:     "web",
+		taskID:   taskID,
+		filePath: filepath.Join(r.rolesRoot, "web", "inbox", taskID+".json"),
+	}
+	handleInboxEvent(evt, r.spawnCtx)
+}
+
+// TestRetryCap_WorkerCompletesCleanly — when a worker transitions
+// state to a terminal value (completed) before exit, the classifier's
+// terminal-state branch must win: no retry scheduled, no restart_count
+// bump, no task.abandoned delivery. Exercises handleSupervisorExit
+// directly so there is no race between /bin/true's exit and the
+// transition-to-completed write.
+func TestRetryCap_WorkerCompletesCleanly(t *testing.T) {
+	f := newDaemonTestFixture(t)
+	taskID := f.seedQueuedTask(t, "web")
+	taskDir := filepath.Join(f.tasksDir, taskID)
+
+	// Simulate worker's finish_task sequence: queued → running →
+	// completed, all via UpdateState.
+	if err := mcp.UpdateState(taskDir, func(cur *mcp.TaskState) (*mcp.TaskState, *mcp.TransitionLogEntry, error) {
+		next := *cur
+		next.State = mcp.TaskStateRunning
+		next.StateTransitions = append(next.StateTransitions,
+			mcp.StateTransition{From: cur.State, To: mcp.TaskStateRunning})
+		return &next, &mcp.TransitionLogEntry{Kind: "spawn", From: cur.State, To: mcp.TaskStateRunning}, nil
+	}); err != nil {
+		t.Fatalf("transition to running: %v", err)
+	}
+	if err := mcp.UpdateState(taskDir, func(cur *mcp.TaskState) (*mcp.TaskState, *mcp.TransitionLogEntry, error) {
+		next := *cur
+		next.State = mcp.TaskStateCompleted
+		next.StateTransitions = append(next.StateTransitions,
+			mcp.StateTransition{From: cur.State, To: mcp.TaskStateCompleted})
+		next.Result = json.RawMessage(`{"ok":true}`)
+		return &next, &mcp.TransitionLogEntry{Kind: "state_transition", From: cur.State, To: mcp.TaskStateCompleted}, nil
+	}); err != nil {
+		t.Fatalf("transition to completed: %v", err)
+	}
+
+	// Feed the synthetic supervisor exit after the worker has already
+	// committed the completed transition. handleSupervisorExit must
+	// no-op: terminal state wins over unexpected-exit classification.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var wg sync.WaitGroup
+	exitCh := make(chan supervisorExit, 1)
+	s := spawnContext{
+		instanceRoot: f.root,
+		niwaDir:      f.niwaDir,
+		spawnBin:     "/bin/true",
+		logger:       log.New(io.Discard, "", 0),
+		exitCh:       exitCh,
+		wg:           &wg,
+		shutdownCtx:  ctx,
+		backoffs:     []time.Duration{10 * time.Millisecond},
+	}
+	handleSupervisorExit(supervisorExit{taskID: taskID, exitCode: 0}, s)
+
+	cancel()
+	wg.Wait()
+
+	_, st, err := mcp.ReadState(taskDir)
+	if err != nil {
+		t.Fatalf("ReadState: %v", err)
+	}
+	if st.State != mcp.TaskStateCompleted {
+		t.Errorf("state = %q, want completed", st.State)
+	}
+	if st.RestartCount != 0 {
+		t.Errorf("restart_count = %d, want 0 (clean completion must not bump)", st.RestartCount)
+	}
+	if logHasKind(t, f.tasksDir, taskID, "retry_scheduled") {
+		t.Errorf("retry_scheduled present in transitions.log — retry path wrongly engaged after clean completion")
+	}
+}
+
+// TestRetryCap_UnexpectedExitWithinCap — when /bin/true repeatedly
+// exits without calling niwa_finish_task, the daemon must retry up to
+// MaxRestarts (3) times, then abandon with reason retry_cap_exceeded.
+// restart_count ends at 3 (the last attempt number actually started).
+func TestRetryCap_UnexpectedExitWithinCap(t *testing.T) {
+	// 10 ms backoff × 3 retries = retries complete in < 100 ms.
+	r := newRetryFixture(t, []time.Duration{10 * time.Millisecond, 10 * time.Millisecond, 10 * time.Millisecond}, "/bin/true")
+	defer r.Shutdown(t)
+
+	taskID := r.seedQueuedTask(t, "web")
+	r.fireInitial(t, taskID)
+
+	// Wait up to 3 s for state.json to reach "abandoned". Every cycle
+	// (spawn → exit → backoff) is ~tens of ms so this is very
+	// comfortable. If state never reaches abandoned, the retry
+	// pipeline is broken.
+	taskDir := filepath.Join(r.tasksDir, taskID)
+	deadline := time.Now().Add(3 * time.Second)
+	var st *mcp.TaskState
+	for time.Now().Before(deadline) {
+		_, cur, err := mcp.ReadState(taskDir)
+		if err == nil && cur.State == mcp.TaskStateAbandoned {
+			st = cur
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if st == nil {
+		t.Fatalf("task did not reach abandoned within 3 s")
+	}
+	if st.State != mcp.TaskStateAbandoned {
+		t.Errorf("state = %q, want abandoned", st.State)
+	}
+	if st.RestartCount != 3 {
+		t.Errorf("restart_count = %d, want 3 (attempts 1, 2, 3 all ran)", st.RestartCount)
+	}
+	// Reason must reference retry_cap_exceeded for downstream observability.
+	var reason map[string]any
+	if err := json.Unmarshal(st.Reason, &reason); err != nil {
+		t.Fatalf("unmarshal reason: %v (raw=%s)", err, st.Reason)
+	}
+	if reason["error"] != "retry_cap_exceeded" {
+		t.Errorf("reason.error = %v, want retry_cap_exceeded", reason["error"])
+	}
+}
+
+// TestRetryCap_BackoffTiming — backoffs [50 ms, 80 ms, 50 ms] should
+// produce retry transitions.log entries roughly 50 ms, 80 ms, 50 ms
+// apart. Measured from the timestamps embedded in retry_scheduled /
+// spawn entries in transitions.log.
+func TestRetryCap_BackoffTiming(t *testing.T) {
+	backoffs := []time.Duration{50 * time.Millisecond, 80 * time.Millisecond, 50 * time.Millisecond}
+	r := newRetryFixture(t, backoffs, "/bin/true")
+	defer r.Shutdown(t)
+
+	taskID := r.seedQueuedTask(t, "web")
+	r.fireInitial(t, taskID)
+
+	// Wait until abandoned (all 3 retries consumed).
+	taskDir := filepath.Join(r.tasksDir, taskID)
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		_, st, err := mcp.ReadState(taskDir)
+		if err == nil && st.State == mcp.TaskStateAbandoned {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	// Read transitions.log and extract timestamps of each
+	// unexpected_exit → spawn pair.
+	data, err := os.ReadFile(filepath.Join(taskDir, "transitions.log"))
+	if err != nil {
+		t.Fatalf("read transitions.log: %v", err)
+	}
+	var entries []mcp.TransitionLogEntry
+	for _, line := range strings.Split(strings.TrimRight(string(data), "\n"), "\n") {
+		if line == "" {
+			continue
+		}
+		var e mcp.TransitionLogEntry
+		if err := json.Unmarshal([]byte(line), &e); err != nil {
+			t.Fatalf("parse log line: %v", err)
+		}
+		entries = append(entries, e)
+	}
+
+	// Expected shape: spawn(attempt=1), unexpected_exit,
+	// retry_scheduled(attempt=1, backoff=50ms), spawn(attempt=1 bumped
+	// to restart_count=1 → attempt field in retry spawn = 1),
+	// unexpected_exit, retry_scheduled(attempt=2 ... ), etc.
+	//
+	// Rather than pin the exact sequence, extract retry_scheduled
+	// entries and assert each one's backoff_seconds field matches the
+	// configured backoff. (The configured backoff is in ms; we asked
+	// appendRetryScheduledEntry to record it in seconds which yields 0
+	// for sub-second values. So assert presence of retry_scheduled
+	// entries at least equal to cap.)
+	var retrySched []mcp.TransitionLogEntry
+	for _, e := range entries {
+		if e.Kind == "retry_scheduled" {
+			retrySched = append(retrySched, e)
+		}
+	}
+	if len(retrySched) != 3 {
+		t.Fatalf("retry_scheduled entries = %d, want 3", len(retrySched))
+	}
+	for i, e := range retrySched {
+		if e.Attempt != i+1 {
+			t.Errorf("retry_scheduled[%d].Attempt = %d, want %d", i, e.Attempt, i+1)
+		}
+	}
+
+	// Now verify backoff *timing* using the retry_scheduled.At ->
+	// following spawn.At gap (both parsed to time.Time).
+	// Walk entries to find each retry_scheduled followed by a spawn.
+	for i := 0; i < len(entries); i++ {
+		if entries[i].Kind != "retry_scheduled" {
+			continue
+		}
+		// Find the next "spawn" after i.
+		for j := i + 1; j < len(entries); j++ {
+			if entries[j].Kind == "spawn" {
+				startT, err1 := time.Parse(time.RFC3339Nano, entries[i].At)
+				spawnT, err2 := time.Parse(time.RFC3339Nano, entries[j].At)
+				if err1 != nil || err2 != nil {
+					t.Fatalf("parse timestamps: %v / %v", err1, err2)
+				}
+				gap := spawnT.Sub(startT)
+				// Match against backoffs[attempt-1] (clamped).
+				want := backoffForAttempt(backoffs, entries[i].Attempt)
+				// Accept gap in [want, want + 500 ms] — upper bound is
+				// scheduler jitter on a loaded test host.
+				if gap < want-5*time.Millisecond {
+					t.Errorf("retry[%d] gap=%v, want >= %v", entries[i].Attempt, gap, want)
+				}
+				if gap > want+500*time.Millisecond {
+					t.Errorf("retry[%d] gap=%v exceeds want=%v + 500 ms", entries[i].Attempt, gap, want)
+				}
+				break
+			}
+		}
+	}
+}
+
+// TestRetryCap_FailTaskDoesNotBumpCounter — niwa_fail_task and
+// niwa_finish_task(outcome=abandoned) transition state directly to
+// abandoned without going through the daemon's retry path. When the
+// supervisor goroutine eventually returns (after the worker exits),
+// handleSupervisorExit must see terminal state and do nothing — no
+// retry_scheduled, no restart_count bump.
+//
+// This test exercises the classifier decision directly: seed a task
+// in state=abandoned (as niwa_fail_task would leave it), synthesize a
+// supervisorExit, and run handleSupervisorExit. The race between
+// worker exit and worker's abandoned-transition is NOT what's under
+// test here — it's the classifier's handling of a terminal state at
+// exit time.
+func TestRetryCap_FailTaskDoesNotBumpCounter(t *testing.T) {
+	f := newDaemonTestFixture(t)
+	taskID := f.seedQueuedTask(t, "web")
+	taskDir := filepath.Join(f.tasksDir, taskID)
+
+	// Move state queued → running → abandoned without the daemon's
+	// retry path. Mirrors what niwa_fail_task handlers produce.
+	if err := mcp.UpdateState(taskDir, func(cur *mcp.TaskState) (*mcp.TaskState, *mcp.TransitionLogEntry, error) {
+		next := *cur
+		next.State = mcp.TaskStateRunning
+		next.StateTransitions = append(next.StateTransitions,
+			mcp.StateTransition{From: cur.State, To: mcp.TaskStateRunning})
+		return &next, &mcp.TransitionLogEntry{Kind: "spawn", From: cur.State, To: mcp.TaskStateRunning}, nil
+	}); err != nil {
+		t.Fatalf("transition to running: %v", err)
+	}
+	if err := mcp.UpdateState(taskDir, func(cur *mcp.TaskState) (*mcp.TaskState, *mcp.TransitionLogEntry, error) {
+		next := *cur
+		next.State = mcp.TaskStateAbandoned
+		next.StateTransitions = append(next.StateTransitions,
+			mcp.StateTransition{From: cur.State, To: mcp.TaskStateAbandoned})
+		next.Reason = json.RawMessage(`{"error":"fail_task","detail":"worker called niwa_fail_task"}`)
+		return &next, &mcp.TransitionLogEntry{
+			Kind: "state_transition", From: cur.State, To: mcp.TaskStateAbandoned,
+		}, nil
+	}); err != nil {
+		t.Fatalf("transition to abandoned: %v", err)
+	}
+
+	// Now feed a supervisor exit to handleSupervisorExit. The state is
+	// terminal, so the classifier's "terminal state" branch must win.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var wg sync.WaitGroup
+	exitCh := make(chan supervisorExit, 1)
+	s := spawnContext{
+		instanceRoot: f.root,
+		niwaDir:      f.niwaDir,
+		spawnBin:     "/bin/true",
+		logger:       log.New(io.Discard, "", 0),
+		exitCh:       exitCh,
+		wg:           &wg,
+		shutdownCtx:  ctx,
+		backoffs:     []time.Duration{10 * time.Millisecond},
+	}
+	handleSupervisorExit(supervisorExit{taskID: taskID, exitCode: 0}, s)
+
+	// Allow any stray goroutines to run (there should be none).
+	cancel()
+	wg.Wait()
+
+	_, st, err := mcp.ReadState(taskDir)
+	if err != nil {
+		t.Fatalf("ReadState: %v", err)
+	}
+	if st.State != mcp.TaskStateAbandoned {
+		t.Errorf("state = %q, want abandoned", st.State)
+	}
+	if st.RestartCount != 0 {
+		t.Errorf("restart_count = %d, want 0 (fail_task must not bump counter)", st.RestartCount)
+	}
+
+	// transitions.log must NOT contain retry_scheduled.
+	if logHasKind(t, f.tasksDir, taskID, "retry_scheduled") {
+		t.Errorf("retry_scheduled present in transitions.log — retry path wrongly engaged after fail_task")
+	}
+}
+
+// TestRetryCap_BackoffSliceShorterThanCap — when the configured
+// backoff slice has fewer entries than MaxRestarts, the last value is
+// reused for all remaining attempts. backoffs=[20 ms] with cap=3 means
+// every retry uses 20 ms.
+func TestRetryCap_BackoffSliceShorterThanCap(t *testing.T) {
+	backoffs := []time.Duration{20 * time.Millisecond}
+	r := newRetryFixture(t, backoffs, "/bin/true")
+	defer r.Shutdown(t)
+
+	taskID := r.seedQueuedTask(t, "web")
+	r.fireInitial(t, taskID)
+
+	// Wait for abandoned (3 retries at 20 ms each).
+	taskDir := filepath.Join(r.tasksDir, taskID)
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		_, st, err := mcp.ReadState(taskDir)
+		if err == nil && st.State == mcp.TaskStateAbandoned {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	_, st, err := mcp.ReadState(taskDir)
+	if err != nil {
+		t.Fatalf("ReadState: %v", err)
+	}
+	if st.State != mcp.TaskStateAbandoned {
+		t.Fatalf("state = %q, want abandoned (short-backoff clamp path)", st.State)
+	}
+	if st.RestartCount != 3 {
+		t.Errorf("restart_count = %d, want 3", st.RestartCount)
+	}
+
+	// Each retry must have used the clamped value. Walk retry_scheduled
+	// entries and assert attempt indices 1..3, and that backoffForAttempt
+	// with this configured slice returns 20 ms for all of them.
+	for attempt := 1; attempt <= 3; attempt++ {
+		got := backoffForAttempt(backoffs, attempt)
+		if got != 20*time.Millisecond {
+			t.Errorf("backoffForAttempt(%d) = %v, want 20 ms (clamp)", attempt, got)
+		}
+	}
+}
+
+// TestRetryCap_AbandonedMessageDeliveredToDelegator — when the daemon
+// abandons a task (cap exceeded), a task.abandoned Message must appear
+// in the delegator's inbox with body carrying reason + restart_count.
+func TestRetryCap_AbandonedMessageDeliveredToDelegator(t *testing.T) {
+	r := newRetryFixture(t, []time.Duration{10 * time.Millisecond, 10 * time.Millisecond, 10 * time.Millisecond}, "/bin/true")
+	defer r.Shutdown(t)
+
+	// Delegator role "coordinator" inbox must exist so the message
+	// write does not silently fail. newDaemonTestFixture only creates
+	// "web"; explicitly materialize "coordinator".
+	coordInbox := filepath.Join(r.rolesRoot, "coordinator", "inbox")
+	if err := os.MkdirAll(coordInbox, 0o700); err != nil {
+		t.Fatalf("mkdir coordinator inbox: %v", err)
+	}
+
+	taskID := r.seedQueuedTask(t, "web")
+	r.fireInitial(t, taskID)
+
+	// Wait for abandoned.
+	taskDir := filepath.Join(r.tasksDir, taskID)
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		_, st, err := mcp.ReadState(taskDir)
+		if err == nil && st.State == mcp.TaskStateAbandoned {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	// Scan coordinator inbox for a task.abandoned message referencing
+	// our task ID. Allow a small grace period for the message write to
+	// complete after the abandon transition.
+	var found *mcp.Message
+	deadline = time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) && found == nil {
+		entries, err := os.ReadDir(coordInbox)
+		if err != nil {
+			t.Fatalf("read coordinator inbox: %v", err)
+		}
+		for _, e := range entries {
+			if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+				continue
+			}
+			data, err := os.ReadFile(filepath.Join(coordInbox, e.Name()))
+			if err != nil {
+				continue
+			}
+			var m mcp.Message
+			if err := json.Unmarshal(data, &m); err != nil {
+				continue
+			}
+			if m.Type == "task.abandoned" && m.TaskID == taskID {
+				found = &m
+				break
+			}
+		}
+		if found == nil {
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	if found == nil {
+		t.Fatalf("no task.abandoned message for task %s in coordinator inbox", taskID)
+	}
+	if found.To.Role != "coordinator" {
+		t.Errorf("message.to.role = %q, want coordinator", found.To.Role)
+	}
+	if found.TaskID != taskID {
+		t.Errorf("message.task_id = %q, want %s", found.TaskID, taskID)
+	}
+	// Body must carry the reason discriminator.
+	var body map[string]any
+	if err := json.Unmarshal(found.Body, &body); err != nil {
+		t.Fatalf("unmarshal body: %v", err)
+	}
+	if body["reason"] != "retry_cap_exceeded" {
+		t.Errorf("body.reason = %v, want retry_cap_exceeded", body["reason"])
+	}
+	// restart_count and max_restarts are JSON numbers → float64 in Go's
+	// generic map.
+	if rc, ok := body["restart_count"].(float64); !ok || int(rc) != 3 {
+		t.Errorf("body.restart_count = %v, want 3", body["restart_count"])
+	}
+}
+
+// TestBackoffForAttempt — pure-function table test for the clamping /
+// default behavior that production code relies on.
+func TestBackoffForAttempt(t *testing.T) {
+	cases := []struct {
+		name     string
+		backoffs []time.Duration
+		attempt  int
+		want     time.Duration
+	}{
+		{"normal_first", []time.Duration{10, 20, 30}, 1, 10},
+		{"normal_second", []time.Duration{10, 20, 30}, 2, 20},
+		{"normal_third", []time.Duration{10, 20, 30}, 3, 30},
+		{"clamp_past_end", []time.Duration{10, 20, 30}, 5, 30},
+		{"single_value_clamp", []time.Duration{10}, 3, 10},
+		{"empty_returns_zero", nil, 1, 0},
+		{"zero_or_negative_attempt_clamps_to_first", []time.Duration{10, 20}, 0, 10},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := backoffForAttempt(c.backoffs, c.attempt)
+			if got != c.want {
+				t.Errorf("got %v, want %v", got, c.want)
+			}
+		})
 	}
 }

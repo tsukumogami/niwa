@@ -1,4 +1,5 @@
-// Package cli: mesh watch daemon (Phase 4a — central event loop + spawn).
+// Package cli: mesh watch daemon (Phase 4a + 4b — central event loop,
+// spawn, and restart cap).
 //
 // The daemon owns a single central goroutine that:
 //
@@ -11,12 +12,19 @@
 //     override) with a fixed argv + niwa-owned env overrides + CWD set
 //     to the role's repo dir (or instance root for coordinator),
 //   - starts a per-task supervisor goroutine that calls cmd.Wait() and
-//     reports back to the central loop via a taskEvent channel.
+//     reports back to the central loop via a taskEvent channel,
+//   - on unexpected worker exit, classifies against the restart cap
+//     (default 3 restarts / 4 total attempts) and either schedules a
+//     backoff-delayed retry or abandons the task with
+//     reason="retry_cap_exceeded" (Issue #5).
 //
 // Phase 4a scope (Issue #4): minimum daemon capable of claim → spawn →
-// exit-notice. Retry cap + backoff (Issue #5), stall watchdog (Issue #6),
-// reconciliation and adopted-orphan polling (Issue #7), and test-harness
-// pause hooks (Issue #8) build on this skeleton.
+// exit-notice.
+//
+// Phase 4b scope (Issue #5): restart cap with backoff + unexpected-exit
+// classification. Stall watchdog (Issue #6), reconciliation and
+// adopted-orphan polling (Issue #7), and test-harness pause hooks
+// (Issue #8) build on this skeleton.
 
 package cli
 
@@ -228,6 +236,7 @@ func runMeshWatch(cmd *cobra.Command, args []string) error {
 		exitCh:       exitCh,
 		wg:           &supervisorWG,
 		shutdownCtx:  ctx,
+		backoffs:     cfg.RetryBackoffs,
 	}
 
 	// Replay catch-up events through a channel so the central loop has a
@@ -255,6 +264,11 @@ func runMeshWatch(cmd *cobra.Command, args []string) error {
 // shutdownCtx is the daemon's root context. Supervisor goroutines use it
 // to drop exit events intentionally during shutdown rather than blocking
 // forever on a channel the central loop will never read again.
+//
+// backoffs is the retry-backoff slice (index = restart_count-1 on the
+// upcoming attempt). Consumed by the retry scheduler in handleSupervisorExit;
+// if the slice is shorter than the cap, the last value is reused for all
+// remaining attempts (documented in the plan's backoff edge-case notes).
 type spawnContext struct {
 	instanceRoot string
 	niwaDir      string
@@ -263,6 +277,7 @@ type spawnContext struct {
 	exitCh       chan<- supervisorExit
 	wg           *sync.WaitGroup
 	shutdownCtx  context.Context
+	backoffs     []time.Duration
 }
 
 // runEventLoop owns the central `select`. It returns only when ctx is
@@ -546,9 +561,25 @@ func spawnWorker(evt inboxEvent, taskDir string, s spawnContext) {
 	}(cmd, evt.taskID, stderrFile)
 }
 
-// handleSupervisorExit processes a worker exit. Issue 4 logs the event
-// and appends an `unexpected_exit` line to transitions.log when the
-// task state is still "running". Issue 5 will classify + retry.
+// handleSupervisorExit processes a worker exit. The supervisor's return
+// is classified against the authoritative state.json:
+//
+//   - Terminal state (completed/abandoned/cancelled): the worker called
+//     niwa_finish_task (or delegator cancelled) before exit. Log and
+//     return; the daemon has nothing to do.
+//
+//   - Still "running": this is an unexpected exit. Determine the next
+//     restart_count (cur.RestartCount + 1) and compare against the cap
+//     (cur.MaxRestarts). If over the cap, transition to abandoned with
+//     reason="retry_cap_exceeded" and deliver a task.abandoned message
+//     to the delegator. Otherwise, log a `retry_scheduled` entry and
+//     schedule retrySpawn via time.AfterFunc(backoff).
+//
+// restart_count is NOT bumped at this point; it is bumped when the
+// retry actually fires (inside retrySpawn). This preserves the
+// invariant that state.json.worker.restart_count reflects "attempts
+// started" rather than "attempts scheduled", which Issue 7's crash
+// reconciliation depends on.
 func handleSupervisorExit(ex supervisorExit, s spawnContext) {
 	taskDir := filepath.Join(s.instanceRoot, ".niwa", "tasks", ex.taskID)
 	_, st, err := mcp.ReadState(taskDir)
@@ -564,12 +595,86 @@ func handleSupervisorExit(ex supervisorExit, s spawnContext) {
 		return
 	}
 
-	// Still "running" and the process exited: this is an unexpected
-	// exit. Issue 4 logs it; Issue 5 will classify + retry.
+	// Unexpected exit: worker process returned while state was still
+	// "running". Classify against the restart cap.
 	code := ex.exitCode
+	nextAttempt := st.RestartCount + 1
+	restartCap := st.MaxRestarts
+	if restartCap <= 0 {
+		// Defensive: legacy state.json written before Issue 1 may not
+		// carry max_restarts. Use the PRD default.
+		restartCap = defaultMaxRestarts
+	}
+
+	// Envelope role is not stored on state.json directly (it's on
+	// envelope.from / envelope.to); we only need the delegator role for
+	// the abandoned message, which lives on state.json.DelegatorRole.
+	delegatorRole := st.DelegatorRole
+	workerRole := st.Worker.Role
+	if workerRole == "" {
+		// TargetRole is the task's target role, which is what the
+		// worker role was spawned as. Fall back if Worker.Role was
+		// never backfilled (extremely early failure).
+		workerRole = st.TargetRole
+	}
+
+	if nextAttempt > restartCap {
+		// Over the cap: abandon the task.
+		now := time.Now().UTC().Format(time.RFC3339Nano)
+		reasonJSON := fmt.Sprintf(`{"error":"retry_cap_exceeded","restart_count":%d,"max_restarts":%d}`, st.RestartCount, restartCap)
+		updErr := mcp.UpdateState(taskDir, func(cur *mcp.TaskState) (*mcp.TaskState, *mcp.TransitionLogEntry, error) {
+			if cur.State != mcp.TaskStateRunning {
+				// Another path (cancellation) raced us; abandon would be
+				// invalid from a non-running state.
+				return nil, nil, nil
+			}
+			next := *cur
+			next.State = mcp.TaskStateAbandoned
+			next.UpdatedAt = now
+			next.Reason = json.RawMessage(reasonJSON)
+			next.StateTransitions = append(next.StateTransitions,
+				mcp.StateTransition{From: mcp.TaskStateRunning, To: mcp.TaskStateAbandoned, At: now})
+			entry := &mcp.TransitionLogEntry{
+				Kind:      "unexpected_exit",
+				From:      mcp.TaskStateRunning,
+				To:        mcp.TaskStateAbandoned,
+				At:        now,
+				WorkerPID: cur.Worker.PID,
+				ExitCode:  &code,
+				Reason:    json.RawMessage(reasonJSON),
+				Attempt:   cur.RestartCount,
+				Actor: &mcp.TransitionActor{
+					Kind: "daemon",
+					PID:  os.Getpid(),
+				},
+			}
+			return &next, entry, nil
+		})
+		if updErr != nil {
+			s.logger.Printf("exit_event task=%s abandon_err=%v", ex.taskID, updErr)
+			return
+		}
+		s.logger.Printf("exit_event task=%s state=running exit_code=%d action=abandoned reason=retry_cap_exceeded restart_count=%d",
+			ex.taskID, ex.exitCode, st.RestartCount)
+
+		// Deliver task.abandoned to the delegator. Best-effort; a failed
+		// write here does not change state.json (which is authoritative).
+		if delegatorRole != "" {
+			deliverAbandonedMessage(s, delegatorRole, workerRole, ex.taskID, st.RestartCount, restartCap)
+		}
+		return
+	}
+
+	// Within the cap: schedule a retry. Log `retry_scheduled` but do
+	// NOT transition the state (task stays "running" — the supervisor
+	// goroutine has already exited, but the task is still logically
+	// in-flight awaiting the timer).
+	backoff := backoffForAttempt(s.backoffs, nextAttempt)
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	_ = mcp.UpdateState(taskDir, func(cur *mcp.TaskState) (*mcp.TaskState, *mcp.TransitionLogEntry, error) {
-		// No state change — Issue 4 leaves the task in "running".
+	updErr := mcp.UpdateState(taskDir, func(cur *mcp.TaskState) (*mcp.TaskState, *mcp.TransitionLogEntry, error) {
+		if cur.State != mcp.TaskStateRunning {
+			return nil, nil, nil
+		}
 		next := *cur
 		next.UpdatedAt = now
 		entry := &mcp.TransitionLogEntry{
@@ -577,6 +682,7 @@ func handleSupervisorExit(ex supervisorExit, s spawnContext) {
 			At:        now,
 			WorkerPID: cur.Worker.PID,
 			ExitCode:  &code,
+			Attempt:   cur.RestartCount,
 			Actor: &mcp.TransitionActor{
 				Kind: "daemon",
 				PID:  os.Getpid(),
@@ -584,7 +690,229 @@ func handleSupervisorExit(ex supervisorExit, s spawnContext) {
 		}
 		return &next, entry, nil
 	})
-	s.logger.Printf("exit_event task=%s state=%s exit_code=%d action=logged", ex.taskID, st.State, ex.exitCode)
+	if updErr != nil {
+		s.logger.Printf("exit_event task=%s log_unexpected_exit_err=%v", ex.taskID, updErr)
+		return
+	}
+	// Append a second transitions.log entry announcing the scheduled
+	// retry. Kept as its own entry so the audit trail clearly separates
+	// "what happened" (unexpected_exit) from "what we decided to do"
+	// (retry_scheduled).
+	_ = appendRetryScheduledEntry(taskDir, nextAttempt, backoff)
+
+	s.logger.Printf("exit_event task=%s state=running exit_code=%d action=retry_scheduled attempt=%d backoff=%s",
+		ex.taskID, ex.exitCode, nextAttempt, backoff)
+
+	// Schedule the retry. Use a goroutine with a select on both the
+	// timer and shutdownCtx so shutdown drains promptly instead of
+	// waiting out the full backoff. The supervisor WG is held for the
+	// lifetime of the scheduler goroutine so drainSupervisors covers it.
+	s.wg.Add(1)
+	go func(taskID, role string, delay time.Duration) {
+		defer s.wg.Done()
+		timer := time.NewTimer(delay)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+			retrySpawn(taskID, role, s)
+		case <-s.shutdownCtx.Done():
+			// Daemon tearing down; drop the retry. Issue 7's
+			// reconciliation will re-derive it on next startup.
+			s.logger.Printf("retry_skipped task=%s reason=shutdown", taskID)
+		}
+	}(ex.taskID, workerRole, backoff)
+}
+
+// defaultMaxRestarts matches PRD Configuration Defaults (3 restarts → 4
+// total attempts) and is applied when state.json.max_restarts is zero.
+// Zero would otherwise abandon on the first unexpected exit, which is
+// not what the defaults promise.
+const defaultMaxRestarts = 3
+
+// backoffForAttempt returns the retry delay for the given attempt number
+// (1-indexed: attempt=1 is the first retry after the initial spawn).
+// When the slice is shorter than the attempt, the last value is reused
+// for all remaining attempts — the documented clamp behavior for
+// NIWA_RETRY_BACKOFF_SECONDS. A completely empty slice falls back to
+// zero, meaning "retry immediately" (should never happen in practice
+// because loadDaemonConfig defaults to 30,60,90).
+func backoffForAttempt(backoffs []time.Duration, attempt int) time.Duration {
+	if len(backoffs) == 0 {
+		return 0
+	}
+	idx := attempt - 1
+	if idx < 0 {
+		idx = 0
+	}
+	if idx >= len(backoffs) {
+		idx = len(backoffs) - 1
+	}
+	return backoffs[idx]
+}
+
+// appendRetryScheduledEntry writes a "retry_scheduled" NDJSON line to
+// transitions.log without touching state.json. The daemon uses a direct
+// helper (not mcp.UpdateState) because the semantic is "audit-only": no
+// mutator, no tmp+rename cycle, and the entry is allowed to follow
+// another entry within the same critical section.
+//
+// Implementation: wraps mcp.UpdateState with a no-op mutator that emits
+// the entry. Returning (cur, entry, nil) from the mutator when state is
+// still running guarantees the append is sequenced after any prior
+// transition write by the flock discipline.
+func appendRetryScheduledEntry(taskDir string, attempt int, backoff time.Duration) error {
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	return mcp.UpdateState(taskDir, func(cur *mcp.TaskState) (*mcp.TaskState, *mcp.TransitionLogEntry, error) {
+		if cur.State != mcp.TaskStateRunning {
+			return nil, nil, nil
+		}
+		next := *cur
+		next.UpdatedAt = now
+		entry := &mcp.TransitionLogEntry{
+			Kind:    "retry_scheduled",
+			At:      now,
+			Attempt: attempt,
+			// Encode the backoff duration as a quick-to-parse reason
+			// payload. Reviewers and tests can decode this without a
+			// schema change.
+			Reason: json.RawMessage(fmt.Sprintf(`{"backoff_seconds":%d}`, int(backoff/time.Second))),
+			Actor: &mcp.TransitionActor{
+				Kind: "daemon",
+				PID:  os.Getpid(),
+			},
+		}
+		return &next, entry, nil
+	})
+}
+
+// deliverAbandonedMessage writes a task.abandoned Message to the
+// delegator's inbox when the daemon abandons a task after retry-cap
+// exhaustion. Best-effort: errors are logged but do not change
+// state.json, which remains authoritative.
+//
+// Mirrors the shape of Server.sendTaskMessage (internal/mcp/handlers_task.go)
+// so the delegator's niwa_check_messages / niwa_await_task path does not
+// need to distinguish worker-authored from daemon-authored terminal
+// messages.
+func deliverAbandonedMessage(s spawnContext, delegatorRole, workerRole, taskID string, restartCount, restartCap int) {
+	inboxDir := filepath.Join(s.instanceRoot, ".niwa", "roles", delegatorRole, "inbox")
+	if err := os.MkdirAll(inboxDir, 0o700); err != nil {
+		s.logger.Printf("abandon_msg task=%s mkdir_err=%v", taskID, err)
+		return
+	}
+	msgID := mcp.NewTaskID() // reuse UUIDv4 generator; task ID and message ID share the format
+	body := map[string]any{
+		"task_id":       taskID,
+		"reason":        "retry_cap_exceeded",
+		"restart_count": restartCount,
+		"max_restarts":  restartCap,
+	}
+	bodyBytes, err := json.Marshal(body)
+	if err != nil {
+		s.logger.Printf("abandon_msg task=%s marshal_err=%v", taskID, err)
+		return
+	}
+	msg := mcp.Message{
+		V:      1,
+		ID:     msgID,
+		Type:   "task.abandoned",
+		From:   mcp.MessageFrom{Role: workerRole, PID: os.Getpid()},
+		To:     mcp.MessageTo{Role: delegatorRole},
+		TaskID: taskID,
+		SentAt: time.Now().UTC().Format(time.RFC3339),
+		Body:   bodyBytes,
+	}
+	data, err := json.Marshal(msg)
+	if err != nil {
+		s.logger.Printf("abandon_msg task=%s marshal_msg_err=%v", taskID, err)
+		return
+	}
+	tmp := filepath.Join(inboxDir, msgID+".json.tmp")
+	dest := filepath.Join(inboxDir, msgID+".json")
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+		s.logger.Printf("abandon_msg task=%s write_err=%v", taskID, err)
+		return
+	}
+	if err := os.Rename(tmp, dest); err != nil {
+		_ = os.Remove(tmp)
+		s.logger.Printf("abandon_msg task=%s rename_err=%v", taskID, err)
+		return
+	}
+	s.logger.Printf("abandon_msg task=%s delegator=%s delivered=%s", taskID, delegatorRole, msgID)
+}
+
+// retrySpawn is the timer-fired entry point for a scheduled restart. It
+// re-validates the task is still in a retryable state, bumps
+// restart_count, refreshes worker.spawn_started_at, and re-enters the
+// spawn path with the same argv/env/CWD contract as the initial spawn.
+//
+// The envelope file remains at .niwa/roles/<role>/inbox/in-progress/<id>.json
+// across retries — we do NOT move it back to inbox/<id>.json and re-claim.
+// The claim is one-shot; every attempt thereafter reuses the same
+// in-progress envelope.
+//
+// If state is no longer "running" (e.g., delegator called
+// niwa_cancel_task in the backoff window, or the task was abandoned by
+// another code path), the retry is skipped silently. That's the correct
+// behavior: terminal state wins.
+func retrySpawn(taskID, role string, s spawnContext) {
+	taskDir := filepath.Join(s.instanceRoot, ".niwa", "tasks", taskID)
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+
+	var skip bool
+	var attemptNumber int
+	updErr := mcp.UpdateState(taskDir, func(cur *mcp.TaskState) (*mcp.TaskState, *mcp.TransitionLogEntry, error) {
+		if cur.State != mcp.TaskStateRunning {
+			// Task left the running state between schedule and fire
+			// (cancellation, or another mechanism abandoned it).
+			skip = true
+			return nil, nil, nil
+		}
+		next := *cur
+		next.RestartCount = cur.RestartCount + 1
+		attemptNumber = next.RestartCount
+		next.Worker = mcp.TaskWorker{
+			Role:           role,
+			SpawnStartedAt: now,
+			// PID + StartTime zeroed — the fresh cmd.Start below will
+			// backfill them. Crash reconciliation (Issue 7) reads
+			// (pid==0 && spawn_started_at!="") as "spawn in flight" and
+			// retries without double-counting.
+			PID:       0,
+			StartTime: 0,
+		}
+		next.UpdatedAt = now
+		entry := &mcp.TransitionLogEntry{
+			Kind:    "spawn",
+			At:      now,
+			Attempt: next.RestartCount,
+			Actor: &mcp.TransitionActor{
+				Kind: "daemon",
+				PID:  os.Getpid(),
+			},
+		}
+		return &next, entry, nil
+	})
+	if updErr != nil {
+		s.logger.Printf("retry task=%s update_state_err=%v", taskID, updErr)
+		return
+	}
+	if skip {
+		s.logger.Printf("retry task=%s skip=not_running", taskID)
+		return
+	}
+	s.logger.Printf("retry task=%s attempt=%d", taskID, attemptNumber)
+
+	// Re-enter the spawn path. inboxEvent.filePath is only consumed by
+	// handleInboxEvent for the claim+rename; spawnWorker itself uses
+	// only the role + taskID + taskDir, so we can fabricate an
+	// inboxEvent with the in-progress path for diagnostic purposes.
+	evt := inboxEvent{
+		role:     role,
+		taskID:   taskID,
+		filePath: filepath.Join(s.instanceRoot, ".niwa", "roles", role, "inbox", "in-progress", taskID+".json"),
+	}
+	spawnWorker(evt, taskDir, s)
 }
 
 // stateIsTerminal mirrors mcp's internal isTaskStateTerminal (unexported).
