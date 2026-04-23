@@ -254,14 +254,14 @@ recommendations, or examples shall appear in `workspace-context.md`.
 **R13** — A task shall be a first-class object with the following state
 machine:
 
-| From    | To         | Triggered By | Trigger Event                                    |
-|---------|------------|--------------|--------------------------------------------------|
-| (new)   | queued     | Delegator    | `niwa_delegate` call; envelope written to inbox  |
-| queued  | running    | Daemon       | Consumption rename; worker spawned               |
-| queued  | cancelled  | Delegator    | `niwa_cancel_task` call                          |
-| running | completed  | Worker       | `niwa_complete_task` call                        |
-| running | abandoned  | Worker       | `niwa_fail_task` call                            |
-| running | abandoned  | Daemon       | Unexpected exit after retry cap; or watchdog cap |
+| From    | To         | Triggered By | Trigger Event                                          |
+|---------|------------|--------------|--------------------------------------------------------|
+| (new)   | queued     | Delegator    | `niwa_delegate` call; envelope written to inbox        |
+| queued  | running    | Daemon       | Consumption rename; worker spawned                     |
+| queued  | cancelled  | Delegator    | `niwa_cancel_task` call                                |
+| running | completed  | Worker       | `niwa_finish_task(outcome="completed", result=...)`    |
+| running | abandoned  | Worker       | `niwa_finish_task(outcome="abandoned", reason=...)`    |
+| running | abandoned  | Daemon       | Unexpected exit after retry cap; or watchdog cap       |
 
 `running → cancelled` and `queued → completed/abandoned` are not valid
 transitions. Terminal states are `completed`, `abandoned`, and `cancelled`.
@@ -305,15 +305,15 @@ task. The rename is the point at which the task's state transitions from
 `queued` to `running`.
 
 **R17** — Completion shall be explicit. A task transitions to `completed`
-only when the worker calls `niwa_complete_task(task_id, result)`. Process
-exit — regardless of exit code — shall not complete a task. A worker that
-exits with code zero without calling `niwa_complete_task` shall be treated
-as an unexpected exit (R32).
+only when the worker calls `niwa_finish_task` with `outcome="completed"`.
+Process exit — regardless of exit code — shall not complete a task. A
+worker that exits with code zero without calling `niwa_finish_task` shall
+be treated as an unexpected exit (R34).
 
-**R18** — Explicit failure shall be available via
-`niwa_fail_task(task_id, reason)`. This transitions the task to `abandoned`
+**R18** — Explicit failure shall be available via `niwa_finish_task` with
+`outcome="abandoned"`. This transitions the task to `abandoned`
 immediately without consuming a restart slot, and writes a `task.abandoned`
-message to the delegator's inbox carrying the reason string.
+message to the delegator's inbox carrying the provided reason.
 
 ### Delegator Tools
 
@@ -325,7 +325,7 @@ and shall return `{status: "completed", result: <result>}` on completion,
 `{status: "abandoned", reason: <reason>, restart_count: <n>}` on
 abandonment, or `{status: "cancelled"}` on cancellation. Sync mode has no
 tool-level timeout; liveness is bounded by the stalled-progress watchdog
-(R33) and the restart policy (R32).
+(R36) and the restart policy (R34).
 
 **R20** — `niwa_query_task(task_id)` shall return without blocking a
 response containing: `state`, `state_transitions` (array of `{from, to, at}`
@@ -365,21 +365,34 @@ succeeds; inbox delivery may occur asynchronously within R22's 5-second
 bound. The cadence of progress reports is a skill-owned behavioral
 concern (R10), not a niwa requirement.
 
-**R24** — `niwa_complete_task(task_id, result)` shall be the sole valid
-completion signal for a task. `result` is a structured body (arbitrary
-JSON). Niwa shall transition the task to `completed` atomically, write a
-`task.completed` message containing the result to the delegator's inbox,
-and make the result visible to `niwa_query_task` and `niwa_await_task`.
-Calling `niwa_complete_task` a second time on an already-completed task
-shall return `{status: "already_complete", error_code:
-"TASK_ALREADY_TERMINAL"}` without modifying task state.
+**R24** — `niwa_finish_task(task_id, outcome, result?, reason?)` shall be
+the sole valid terminal-transition tool for a task. `outcome` is required
+and shall be `"completed"` or `"abandoned"`. When `outcome="completed"`,
+the caller shall provide `result` (arbitrary JSON body) and shall not
+provide `reason`; when `outcome="abandoned"`, the caller shall provide
+`reason` (arbitrary JSON body, typically a string or
+`{reason: string, detail?: string}`) and shall not provide `result`.
+A mismatched or missing payload field shall return
+`{status: "invalid", error_code: "BAD_PAYLOAD"}` without modifying task
+state.
 
-**R25** — `niwa_fail_task(task_id, reason)` shall transition a task to
-`abandoned` without triggering a restart attempt. Niwa shall write a
-`task.abandoned` message to the delegator's inbox including the reason.
-The restart counter shall not be incremented. Calling `niwa_fail_task` on
-a terminal-state task shall return `{status: "already_terminal",
-error_code: "TASK_ALREADY_TERMINAL"}`.
+On `outcome="completed"`: niwa shall transition the task to `completed`
+atomically, write a `task.completed` message containing the result to the
+delegator's inbox, and make the result visible to `niwa_query_task` and
+`niwa_await_task`.
+
+On `outcome="abandoned"`: niwa shall transition the task to `abandoned`
+atomically, write a `task.abandoned` message carrying the reason to the
+delegator's inbox, and shall not increment the restart counter. Explicit
+abandonment does not consume a restart slot.
+
+Calling `niwa_finish_task` on a task whose state is already terminal shall
+return `{status: "already_terminal", error_code: "TASK_ALREADY_TERMINAL",
+current_state: <state>}` without modifying task state.
+
+**R25** — *(Reserved. Earlier drafts defined a separate `niwa_fail_task`
+tool; it is merged into R24's `niwa_finish_task` with
+`outcome="abandoned"`.)*
 
 ### Queue Mutation Tools
 
@@ -420,8 +433,8 @@ role has no running worker and is not the coordinator, `niwa_ask` shall
 be treated as a first-class task: niwa creates a task envelope with
 `body.kind = "ask"`, spawns a worker via `claude -p` to consume it, and
 the worker's reply (via `niwa_send_message` with matching `reply_to`)
-completes the task. Ask-tasks participate in the restart policy (R32),
-the stalled-progress watchdog (R33), and `niwa task list`. The default
+completes the task. Ask-tasks participate in the restart policy (R34),
+the stalled-progress watchdog (R36), and `niwa task list`. The default
 `timeout_seconds` is 600 (10 minutes); when the timeout fires, the tool
 returns `{status: "timeout"}` without cancelling the underlying task.
 
@@ -576,9 +589,9 @@ verified after `niwa apply` on a process with umask set to `0000`.
 
 **R49** — Task claim shall be at-most-once: only one worker may ever
 consume a given task envelope, guaranteed by the atomic rename barrier
-(R16). Completion shall be at-most-once: calling `niwa_complete_task`
-on a task whose state is already terminal shall return an error
-without modifying state (R24).
+(R16). Terminal transitions shall be at-most-once: calling
+`niwa_finish_task` on a task whose state is already terminal shall
+return an error without modifying state (R24).
 
 **R50** — Structured error responses. All niwa MCP tools shall return
 structured error objects with the shape
@@ -587,7 +600,8 @@ where `status` is machine-readable, `error_code` is an enumerated
 named constant, `detail` is a human-readable string, and
 `current_state` is present when the error relates to task state. Named
 error codes used in this PRD: `NOT_TASK_OWNER`, `NOT_TASK_PARTY`,
-`TASK_ALREADY_TERMINAL`, `BAD_TYPE`, `UNKNOWN_ROLE`, `MESSAGE_TOO_LARGE`.
+`TASK_ALREADY_TERMINAL`, `BAD_PAYLOAD`, `BAD_TYPE`, `UNKNOWN_ROLE`,
+`MESSAGE_TOO_LARGE`.
 
 ### Test Harness
 
@@ -622,7 +636,7 @@ updating this PRD.
 | SIGTERM grace before SIGKILL | 5 seconds      | `NIWA_SIGTERM_GRACE_SECONDS`                             |
 | `niwa destroy` grace window  | 5 seconds      | `NIWA_DESTROY_GRACE_SECONDS`                             |
 | `niwa_ask` timeout           | 600 seconds    | `timeout_seconds` call argument                          |
-| `niwa_delegate` sync timeout | none           | Not configurable (bounded by R32/R34)                    |
+| `niwa_delegate` sync timeout | none           | Not configurable (bounded by R34/R36)                    |
 | Progress summary max length  | 200 chars      | Not configurable in v1                                   |
 | Message type max length      | 64 chars       | Not configurable in v1                                   |
 
@@ -730,16 +744,22 @@ live `claude -p` is not required to verify correctness.
   the task's `body` (verified by checking that argv is the fixed
   bootstrap string with only `<task-id>` substituted).
 - [ ] **AC-D6** After a scripted worker calls
-  `niwa_complete_task(task_id, {"ok": true})`, the task's `state.json`
-  reads `completed`, a `task.completed` message appears in the
-  coordinator's inbox carrying the result, and `niwa_query_task`
-  returns `state: "completed"` with that result.
-- [ ] **AC-D7** `niwa_delegate(mode="sync")` blocks the tool call
-  until the scripted worker calls `niwa_complete_task`, then returns
-  `{status: "completed", result: ...}`.
+  `niwa_finish_task(task_id, outcome="completed", result={"ok": true})`,
+  the task's `state.json` reads `completed`, a `task.completed` message
+  appears in the coordinator's inbox carrying the result, and
+  `niwa_query_task` returns `state: "completed"` with that result.
+- [ ] **AC-D7** `niwa_delegate(mode="sync")` blocks the tool call until
+  the scripted worker calls `niwa_finish_task` with `outcome="completed"`,
+  then returns `{status: "completed", result: ...}`.
 - [ ] **AC-D8** `niwa_delegate(mode="sync")` returns
   `{status: "abandoned", reason: ..., restart_count: n}` when the
-  scripted worker calls `niwa_fail_task` instead of completing.
+  scripted worker calls `niwa_finish_task` with `outcome="abandoned"`
+  instead of completing.
+- [ ] **AC-D8a** A scripted worker that calls
+  `niwa_finish_task(outcome="completed")` without a `result` field, or
+  `niwa_finish_task(outcome="abandoned")` without a `reason` field,
+  receives `{status: "invalid", error_code: "BAD_PAYLOAD"}` and the
+  task's state does not transition.
 - [ ] **AC-D9** `niwa_delegate(mode="sync")` returns
   `{status: "cancelled"}` when the delegator cancels before the daemon
   consumes the task (two-step: delegate async to get task_id, delay
@@ -818,11 +838,10 @@ live `claude -p` is not required to verify correctness.
 ### Lifecycle and Restart
 
 - [ ] **AC-L1** A scripted worker that exits with code 0 without
-  calling `niwa_complete_task` causes the daemon to spawn a
-  replacement worker; the task's `restart_count` in `state.json`
-  increments to 1.
+  calling `niwa_finish_task` causes the daemon to spawn a replacement
+  worker; the task's `restart_count` in `state.json` increments to 1.
 - [ ] **AC-L2** A scripted worker that exits with a non-zero code
-  without calling `niwa_complete_task` triggers a restart; behavior is
+  without calling `niwa_finish_task` triggers a restart; behavior is
   identical to AC-L1 regardless of exit code.
 - [ ] **AC-L3** After 3 restart attempts (4 total worker spawns) for a
   single task all exit without completion, the task transitions to
@@ -840,24 +859,26 @@ live `claude -p` is not required to verify correctness.
   (override), three successive restarts spawn their workers at ~1s,
   ~2s, and ~3s after the prior exit, measured from state.json
   transition timestamps.
-- [ ] **AC-L6** `niwa_fail_task(task_id, reason)` from a worker
-  transitions the task to `abandoned`, writes a `task.abandoned`
-  message carrying the provided reason to the delegator's inbox, and
-  does not increment `restart_count`. No replacement worker is spawned.
-- [ ] **AC-L7** `niwa_complete_task(task_id, result)` called a second
-  time on an already-completed task returns
-  `{status: "already_complete", error_code: "TASK_ALREADY_TERMINAL"}`
-  and does not modify `state.json`.
-- [ ] **AC-L8** `niwa_complete_task` called after a worker has
-  already written `state: "completed"` atomically (via
-  `niwa_complete_task` in a prior process, then that process crashed)
-  shall be treated identically to AC-L7 (state file is authoritative).
+- [ ] **AC-L6** `niwa_finish_task(task_id, outcome="abandoned", reason=...)`
+  from a worker transitions the task to `abandoned`, writes a
+  `task.abandoned` message carrying the provided reason to the
+  delegator's inbox, and does not increment `restart_count`. No
+  replacement worker is spawned.
+- [ ] **AC-L7** `niwa_finish_task(outcome="completed", result=...)`
+  called a second time on an already-completed task returns
+  `{status: "already_terminal", error_code: "TASK_ALREADY_TERMINAL",
+  current_state: "completed"}` and does not modify `state.json`.
+- [ ] **AC-L8** `niwa_finish_task` called after a worker has already
+  written `state: "completed"` atomically (via a prior
+  `niwa_finish_task` call in another process that then crashed) is
+  treated identically to AC-L7 — the state file is authoritative and
+  the second call is rejected regardless of its `outcome` argument.
 - [ ] **AC-L9** **Daemon crash with live worker**: After killing the
   daemon with SIGKILL (leaving a running worker's PID alive), starting
   a new daemon causes the new daemon to adopt the orphan: state.json
   gains an `adopted_at` field, the task remains in `running`, and when
-  the worker eventually calls `niwa_complete_task` the task transitions
-  to `completed` as usual.
+  the worker eventually calls `niwa_finish_task` with
+  `outcome="completed"` the task transitions to `completed` as usual.
 - [ ] **AC-L10** **Daemon crash with dead worker**: After killing
   both the daemon and the worker, starting a new daemon causes the
   task to be treated as an unexpected exit; the restart policy applies
@@ -1017,9 +1038,9 @@ None.
   instance directory with `rm -rf` leaves the daemon running until
   fsnotify detects the missing watched directory.
 - **Completion is a behavioral contract**: The skill instructs workers
-  to call `niwa_complete_task` before exiting. A worker that ignores
-  the skill and simply finishes its prompt will be treated as an
-  unexpected exit. The restart cap bounds the blast radius.
+  to call `niwa_finish_task` before exiting. A worker that ignores the
+  skill and simply finishes its prompt will be treated as an unexpected
+  exit. The restart cap bounds the blast radius.
 - **Role integrity is the only trust boundary**: Niwa verifies that
   authorization-gated tools are called by the task's delegator or
   executor by matching the caller's registered role. An agent that
@@ -1041,6 +1062,23 @@ None.
   cleanup via `rm` is the workaround.
 
 ## Decisions and Trade-offs
+
+**Two worker-side lifecycle tools, not three**
+
+Worker-side lifecycle is split on the structural boundary between
+non-terminal and terminal transitions: `niwa_report_progress` for
+non-terminal updates, `niwa_finish_task(outcome, ...)` for terminal
+transitions. An earlier draft had three tools (`niwa_report_progress`,
+`niwa_complete_task`, `niwa_fail_task`). The three-tool design was
+rejected because completion and abandonment are structurally symmetric
+(both terminal, both carry a body, both share the
+`TASK_ALREADY_TERMINAL` error path), so splitting them duplicated
+machinery without adding clarity at the call site. A single-tool design
+(`niwa_update_task_state(kind, ...)`) was also rejected: LLMs pick the
+right tool more reliably when each has an unambiguous name, and a single
+tool puts one more decision on the agent per call. The two-tool design
+splits where the structure actually differs and is the Anthropic-idiomatic
+middle ground.
 
 **Task as a first-class object over message-as-task convention**
 
