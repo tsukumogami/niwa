@@ -1,5 +1,5 @@
 ---
-status: Draft
+status: Accepted
 problem: |
   niwa today materializes git-hosted workspace configuration as a working
   tree at `<workspace>/.niwa/`, synced with `git pull --ff-only`, and
@@ -23,7 +23,7 @@ source_issue: 72
 
 ## Status
 
-Draft
+Accepted
 
 ## Problem Statement
 
@@ -948,9 +948,3 @@ following forever. **Reasoning**: the rename is real drift the user
 should see; following silently masks it from the registry. Failing
 hard punishes users for upstream changes they didn't cause.
 
-## Open Questions
-
-(None remaining — all open questions surfaced during exploration,
-Phase 2 discovery, and Phase 4 jury validation were resolved during
-drafting per the research-first protocol. See Decisions and
-Trade-offs.)
