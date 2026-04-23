@@ -67,7 +67,8 @@
       "confidence": "high"
     }
   ],
-  "cross_validation": "pending",
+  "cross_validation": "passed",
+  "cross_validation_notes": "D1 vs D3 conflict on worker auth resolved: adopted D3's NIWA_TASK_ID + state.json PPID/start-time check (mandatory on Linux, best-effort on macOS). D1's crypto token retired as redundant. D1's proposed NOT_TASK_EXECUTOR error code also retired — NOT_TASK_PARTY from PRD R50 is sufficient. All other cross-checks passed: D4 argv+env task-ID propagation consistent with D3's env-based identity; D6 scripted fake's MCP-client model consistent with D3's per-session stdio topology; D2 daemon writes to state.json consistent with D1's flock model; D5 skill artifact tracking consistent with D7's ManagedFiles discipline.",
   "round": 0,
   "assumptions": [
     "7 decisions — in the 6-7 scaling band. --auto proceeded with a single document.",
