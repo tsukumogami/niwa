@@ -1,5 +1,5 @@
 ---
-status: Draft
+status: Accepted
 problem: |
   Developers use niwa to manage multi-repo workspaces where work often needs to
   be delegated across repos from one coordinating Claude session. The existing
@@ -29,7 +29,7 @@ goals: |
 
 ## Status
 
-Draft
+Accepted
 
 ## Problem Statement
 
