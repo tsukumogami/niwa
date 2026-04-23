@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 )
 
 // Repo represents a GitHub repository with metadata used for classification.
@@ -31,11 +32,21 @@ type APIClient struct {
 
 // NewAPIClient creates a new GitHub API client. If token is empty, requests
 // are unauthenticated (limited to public repos).
+//
+// The base URL defaults to https://api.github.com but can be overridden
+// via the NIWA_GITHUB_API_URL environment variable. The override is
+// intended primarily for tests against tarballFakeServer; production use
+// is supported for self-hosted endpoints the user trusts (PRD R17,
+// security model).
 func NewAPIClient(token string) *APIClient {
+	baseURL := os.Getenv("NIWA_GITHUB_API_URL")
+	if baseURL == "" {
+		baseURL = "https://api.github.com"
+	}
 	return &APIClient{
 		HTTPClient: http.DefaultClient,
 		Token:      token,
-		BaseURL:    "https://api.github.com",
+		BaseURL:    baseURL,
 	}
 }
 
