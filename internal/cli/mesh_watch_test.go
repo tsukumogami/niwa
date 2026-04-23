@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"os"
@@ -494,7 +495,7 @@ func TestRunEventLoop_CatchupSpawnsWorker(t *testing.T) {
 
 	loopDone := make(chan struct{})
 	go func() {
-		runEventLoop(ctx, watcher, catchupCh, exitCh, spawnCtx)
+		runEventLoop(ctx, watcher, catchupCh, exitCh, spawnCtx, nil)
 		close(loopDone)
 	}()
 
@@ -2306,4 +2307,548 @@ func TestWatchdog_EventuallyRetriesViaIssue5Pipeline(t *testing.T) {
 	pumpCancel()
 	<-pumpDone
 	wg.Wait()
+}
+
+// ---------------------------------------------------------------------
+// Issue 7: reconciliation + orphan polling + flock orchestration
+// ---------------------------------------------------------------------
+
+// seedReconcileTask writes a minimal on-disk task in "running" state
+// directly via os.WriteFile (no UpdateState) — by the time
+// reconcileRunningTasks runs on a real crash-recovery path, the dying
+// daemon has left state.json in whatever partial form its last write
+// produced. These tests seed each classification case explicitly.
+func seedReconcileTask(t *testing.T, f *daemonTestFixture, worker mcp.TaskWorker) string {
+	t.Helper()
+	taskID := mcp.NewTaskID()
+	taskDir := filepath.Join(f.tasksDir, taskID)
+	if err := os.MkdirAll(taskDir, 0o700); err != nil {
+		t.Fatalf("mkdir task dir: %v", err)
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	env := mcp.TaskEnvelope{
+		V:      1,
+		ID:     taskID,
+		From:   mcp.TaskParty{Role: "coordinator", PID: os.Getpid()},
+		To:     mcp.TaskParty{Role: worker.Role},
+		Body:   json.RawMessage(`{"kind":"test"}`),
+		SentAt: now,
+	}
+	envBytes, _ := json.MarshalIndent(env, "", "  ")
+	if err := os.WriteFile(filepath.Join(taskDir, "envelope.json"), envBytes, 0o600); err != nil {
+		t.Fatalf("write envelope: %v", err)
+	}
+	st := &mcp.TaskState{
+		V:      1,
+		TaskID: taskID,
+		State:  mcp.TaskStateRunning,
+		StateTransitions: []mcp.StateTransition{
+			{From: "", To: mcp.TaskStateQueued, At: now},
+			{From: mcp.TaskStateQueued, To: mcp.TaskStateRunning, At: now},
+		},
+		MaxRestarts:   3,
+		DelegatorRole: "coordinator",
+		TargetRole:    worker.Role,
+		Worker:        worker,
+		UpdatedAt:     now,
+	}
+	stBytes, _ := json.MarshalIndent(st, "", "  ")
+	if err := os.WriteFile(filepath.Join(taskDir, "state.json"), stBytes, 0o600); err != nil {
+		t.Fatalf("write state: %v", err)
+	}
+	// Pre-create .lock so UpdateState can open it even before the first
+	// mutation lands.
+	if lf, err := os.Create(filepath.Join(taskDir, ".lock")); err == nil {
+		_ = lf.Close()
+	}
+	return taskID
+}
+
+// TestReconcile_SpawnNeverCompleted: state.json with pid=0 and
+// spawn_started_at set → reconciliation classifies as "fresh retry" and
+// respawnFreshRetry re-enters spawn without bumping restart_count.
+func TestReconcile_SpawnNeverCompleted(t *testing.T) {
+	f := newDaemonTestFixture(t)
+	taskID := seedReconcileTask(t, f, mcp.TaskWorker{
+		Role:           "web",
+		PID:            0,
+		SpawnStartedAt: time.Now().Add(-10 * time.Second).UTC().Format(time.RFC3339Nano),
+	})
+
+	result := reconcileRunningTasks(f.tasksDir, log.New(io.Discard, "", 0))
+
+	if len(result.freshRetries) != 1 || result.freshRetries[0] != taskID {
+		t.Fatalf("freshRetries = %v, want [%s]", result.freshRetries, taskID)
+	}
+	if len(result.orphans) != 0 || len(result.deadWorkers) != 0 {
+		t.Errorf("unexpected classifications: orphans=%v dead=%v", result.orphans, result.deadWorkers)
+	}
+
+	// transitions.log must carry the crash_recovery_fresh_retry entry.
+	if !logHasKind(t, f.tasksDir, taskID, "crash_recovery_fresh_retry") {
+		t.Errorf("transitions.log missing crash_recovery_fresh_retry entry")
+	}
+
+	// Drive respawnFreshRetry and assert restart_count stayed at 0.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var wg sync.WaitGroup
+	exitCh := make(chan supervisorExit, 1)
+	s := spawnContext{
+		instanceRoot: f.root,
+		niwaDir:      f.niwaDir,
+		spawnBin:     "/bin/true",
+		logger:       log.New(io.Discard, "", 0),
+		exitCh:       exitCh,
+		wg:           &wg,
+		shutdownCtx:  ctx,
+		backoffs:     []time.Duration{60 * time.Second},
+	}
+	respawnFreshRetry(taskID, s)
+
+	// Drain the supervisor exit; the /bin/true process exits immediately.
+	select {
+	case <-exitCh:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("supervisor never emitted exit for fresh retry")
+	}
+
+	_, st, err := mcp.ReadState(filepath.Join(f.tasksDir, taskID))
+	if err != nil {
+		t.Fatalf("ReadState: %v", err)
+	}
+	if st.RestartCount != 0 {
+		t.Errorf("restart_count = %d, want 0 (fresh retry must NOT bump counter)", st.RestartCount)
+	}
+
+	cancel()
+	wg.Wait()
+}
+
+// TestReconcile_LiveOrphan: state.json with a live PID → reconciliation
+// classifies as "live orphan", stamps worker.adopted_at, and returns
+// the task in result.orphans. The task stays in "running" state.
+func TestReconcile_LiveOrphan(t *testing.T) {
+	f := newDaemonTestFixture(t)
+
+	// Use a real live process as the orphan worker. /bin/sleep 30 lives
+	// long enough for reconciliation to classify it as alive; the test
+	// cleanup kills it.
+	orphan := startFakeWorker(t, []string{"/bin/sleep", "30"})
+	startTime, err := mcp.PIDStartTime(orphan.Process.Pid)
+	if err != nil {
+		t.Fatalf("PIDStartTime: %v", err)
+	}
+
+	taskID := seedReconcileTask(t, f, mcp.TaskWorker{
+		Role:      "web",
+		PID:       orphan.Process.Pid,
+		StartTime: startTime,
+	})
+
+	result := reconcileRunningTasks(f.tasksDir, log.New(io.Discard, "", 0))
+
+	if len(result.orphans) != 1 || result.orphans[0].taskID != taskID {
+		t.Fatalf("orphans = %+v, want one entry for %s", result.orphans, taskID)
+	}
+	if result.orphans[0].pid != orphan.Process.Pid {
+		t.Errorf("orphan.pid = %d, want %d", result.orphans[0].pid, orphan.Process.Pid)
+	}
+	if len(result.freshRetries) != 0 || len(result.deadWorkers) != 0 {
+		t.Errorf("unexpected classifications: fresh=%v dead=%v", result.freshRetries, result.deadWorkers)
+	}
+
+	// state.json must carry worker.adopted_at and transitions.log an
+	// "adoption" entry.
+	_, st, err := mcp.ReadState(filepath.Join(f.tasksDir, taskID))
+	if err != nil {
+		t.Fatalf("ReadState: %v", err)
+	}
+	if st.State != mcp.TaskStateRunning {
+		t.Errorf("state = %q, want running (adopt must not transition)", st.State)
+	}
+	if st.Worker.AdoptedAt == "" {
+		t.Errorf("worker.adopted_at not set")
+	}
+	if !logHasKind(t, f.tasksDir, taskID, "adoption") {
+		t.Errorf("transitions.log missing adoption entry")
+	}
+}
+
+// TestReconcile_DeadWorker: state.json with a non-live PID →
+// reconciliation classifies as "dead worker" (Issue 5 pipeline).
+func TestReconcile_DeadWorker(t *testing.T) {
+	f := newDaemonTestFixture(t)
+
+	// Use PID 999999 which is outside any plausible live PID on Linux.
+	// Start time of 0 bypasses the start-time cross-check; IsPIDAlive
+	// returns false from the signal-zero probe alone.
+	taskID := seedReconcileTask(t, f, mcp.TaskWorker{
+		Role:      "web",
+		PID:       999999,
+		StartTime: 123,
+	})
+
+	result := reconcileRunningTasks(f.tasksDir, log.New(io.Discard, "", 0))
+
+	if len(result.deadWorkers) != 1 || result.deadWorkers[0] != taskID {
+		t.Fatalf("deadWorkers = %v, want [%s]", result.deadWorkers, taskID)
+	}
+
+	// Pipe through handleSupervisorExit (as the daemon does) and assert
+	// Issue 5 classifier bumped the retry path.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var wg sync.WaitGroup
+	exitCh := make(chan supervisorExit, 1)
+	s := spawnContext{
+		instanceRoot: f.root,
+		niwaDir:      f.niwaDir,
+		spawnBin:     "/bin/true",
+		logger:       log.New(io.Discard, "", 0),
+		exitCh:       exitCh,
+		wg:           &wg,
+		shutdownCtx:  ctx,
+		backoffs:     []time.Duration{60 * time.Second},
+	}
+	handleSupervisorExit(supervisorExit{taskID: taskID, exitCode: -1}, s)
+
+	if !logHasKind(t, f.tasksDir, taskID, "unexpected_exit") {
+		t.Errorf("transitions.log missing unexpected_exit entry")
+	}
+	if !logHasKind(t, f.tasksDir, taskID, "retry_scheduled") {
+		t.Errorf("transitions.log missing retry_scheduled entry (Issue 5 pipeline)")
+	}
+
+	cancel()
+	wg.Wait()
+}
+
+// TestReconcile_StartTimeDivergence: PID is alive but start_time does
+// not match → reconciliation treats it as dead (PID reuse defense).
+func TestReconcile_StartTimeDivergence(t *testing.T) {
+	f := newDaemonTestFixture(t)
+
+	// Pick our own PID (definitely alive) but record a stale start_time.
+	// IsPIDAlive will compare the recorded start_time against /proc and
+	// return false on mismatch, which drives the dead-worker branch.
+	realStart, err := mcp.PIDStartTime(os.Getpid())
+	if err != nil {
+		t.Fatalf("PIDStartTime: %v", err)
+	}
+	taskID := seedReconcileTask(t, f, mcp.TaskWorker{
+		Role:      "web",
+		PID:       os.Getpid(),
+		StartTime: realStart + 999, // deliberately divergent
+	})
+
+	result := reconcileRunningTasks(f.tasksDir, log.New(io.Discard, "", 0))
+
+	if len(result.deadWorkers) != 1 || result.deadWorkers[0] != taskID {
+		t.Fatalf("deadWorkers = %v, want [%s] (PID reuse should map to dead)", result.deadWorkers, taskID)
+	}
+	if len(result.orphans) != 0 {
+		t.Errorf("orphans = %v, want empty (diverged start_time must not adopt)", result.orphans)
+	}
+}
+
+// TestOrphanPolling_WorkerCompletes: an adopted orphan whose task state
+// transitions to terminal (worker called niwa_finish_task) must be
+// dropped from the orphan list on the next poll.
+func TestOrphanPolling_WorkerCompletes(t *testing.T) {
+	f := newDaemonTestFixture(t)
+
+	worker := startFakeWorker(t, []string{"/bin/sleep", "30"})
+	startTime, err := mcp.PIDStartTime(worker.Process.Pid)
+	if err != nil {
+		t.Fatalf("PIDStartTime: %v", err)
+	}
+	taskID := seedReconcileTask(t, f, mcp.TaskWorker{
+		Role:      "web",
+		PID:       worker.Process.Pid,
+		StartTime: startTime,
+	})
+
+	orphans := []orphanEntry{{taskID: taskID, pid: worker.Process.Pid, startTime: startTime}}
+
+	// Simulate the worker's niwa_finish_task: transition state to
+	// completed. The process is still alive (we never killed the sleep),
+	// which is the exact condition the orphan poller must handle — it
+	// drops the task on terminal state regardless of liveness.
+	if err := mcp.UpdateState(filepath.Join(f.tasksDir, taskID), func(cur *mcp.TaskState) (*mcp.TaskState, *mcp.TransitionLogEntry, error) {
+		next := *cur
+		next.State = mcp.TaskStateCompleted
+		next.StateTransitions = append(next.StateTransitions,
+			mcp.StateTransition{From: mcp.TaskStateRunning, To: mcp.TaskStateCompleted})
+		next.Result = json.RawMessage(`{"ok":true}`)
+		return &next, &mcp.TransitionLogEntry{Kind: "state_transition", From: mcp.TaskStateRunning, To: mcp.TaskStateCompleted}, nil
+	}); err != nil {
+		t.Fatalf("transition to completed: %v", err)
+	}
+
+	s := spawnContext{
+		instanceRoot: f.root,
+		niwaDir:      f.niwaDir,
+		logger:       log.New(io.Discard, "", 0),
+		backoffs:     []time.Duration{60 * time.Second},
+	}
+	remaining := pollOrphans(orphans, s)
+	if len(remaining) != 0 {
+		t.Errorf("pollOrphans remaining = %v, want empty (terminal state must drop)", remaining)
+	}
+	// No retry path must have been engaged.
+	if logHasKind(t, f.tasksDir, taskID, "retry_scheduled") {
+		t.Errorf("retry_scheduled present after terminal-state drop — orphan poller wrongly treated terminal as unexpected")
+	}
+}
+
+// TestOrphanPolling_WorkerDies: killing an orphan's worker process
+// must cause the next poll to classify it as unexpected_exit (Issue 5
+// pipeline) and drop it from the orphan list.
+func TestOrphanPolling_WorkerDies(t *testing.T) {
+	f := newDaemonTestFixture(t)
+
+	// Start, record, and immediately kill the worker. IsPIDAlive will
+	// return false, and the orphan poller should reclassify.
+	worker := startFakeWorker(t, []string{"/bin/sleep", "30"})
+	startTime, err := mcp.PIDStartTime(worker.Process.Pid)
+	if err != nil {
+		t.Fatalf("PIDStartTime: %v", err)
+	}
+	taskID := seedReconcileTask(t, f, mcp.TaskWorker{
+		Role:      "web",
+		PID:       worker.Process.Pid,
+		StartTime: startTime,
+	})
+
+	// Kill the worker.
+	if err := syscall.Kill(-worker.Process.Pid, syscall.SIGKILL); err != nil {
+		t.Fatalf("kill worker: %v", err)
+	}
+	// Wait for the kernel to reap the PID so IsPIDAlive returns false.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if !mcp.IsPIDAlive(worker.Process.Pid, startTime) {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	// Drain the Wait so the ZOMBIE status does not leak past the test.
+	_, _ = worker.Process.Wait()
+
+	orphans := []orphanEntry{{taskID: taskID, pid: worker.Process.Pid, startTime: startTime}}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var wg sync.WaitGroup
+	exitCh := make(chan supervisorExit, 1)
+	s := spawnContext{
+		instanceRoot: f.root,
+		niwaDir:      f.niwaDir,
+		spawnBin:     "/bin/true",
+		logger:       log.New(io.Discard, "", 0),
+		exitCh:       exitCh,
+		wg:           &wg,
+		shutdownCtx:  ctx,
+		backoffs:     []time.Duration{60 * time.Second},
+	}
+
+	remaining := pollOrphans(orphans, s)
+	if len(remaining) != 0 {
+		t.Errorf("pollOrphans remaining = %v, want empty (dead worker must be dropped)", remaining)
+	}
+
+	// Issue 5 classifier must have recorded unexpected_exit and
+	// scheduled a retry.
+	if !logHasKind(t, f.tasksDir, taskID, "unexpected_exit") {
+		t.Errorf("transitions.log missing unexpected_exit entry after orphan death")
+	}
+	if !logHasKind(t, f.tasksDir, taskID, "retry_scheduled") {
+		t.Errorf("transitions.log missing retry_scheduled entry — dead orphan did not flow through Issue 5 pipeline")
+	}
+
+	cancel()
+	wg.Wait()
+}
+
+// TestConcurrentApply_SingleDaemon (scenario-21 / AC-C3): two daemon
+// processes started concurrently against the same instance — one
+// acquires the exclusive flock, the other logs "another daemon is
+// running" and exits 0. The surviving PID matches the winner.
+func TestConcurrentApply_SingleDaemon(t *testing.T) {
+	niwaBin := ensureTestBinary(t)
+
+	f := newDaemonTestFixture(t)
+
+	// Both daemons are pointed at the same instance root and share the
+	// override spawn command so neither needs `claude` on PATH.
+	baseEnv := append(os.Environ(), "NIWA_WORKER_SPAWN_COMMAND=/bin/true")
+
+	// First daemon: Setsid:true so it runs in its own session; this is
+	// the expected winner.
+	first := exec.Command(niwaBin, "mesh", "watch", "--instance-root="+f.root)
+	first.Env = baseEnv
+	first.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	if err := first.Start(); err != nil {
+		t.Fatalf("starting first daemon: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = first.Process.Signal(syscall.SIGTERM)
+		_, _ = first.Process.Wait()
+	})
+
+	// Wait for first daemon to publish daemon.pid so we know it has
+	// acquired the exclusive flock and is in the event loop.
+	pidPath := filepath.Join(f.niwaDir, "daemon.pid")
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(pidPath); err == nil {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	firstPID, _, err := readDaemonPIDFile(filepath.Join(f.niwaDir, "daemon.pid"))
+	if err != nil || firstPID == 0 {
+		t.Fatalf("first daemon did not publish daemon.pid: pid=%d err=%v", firstPID, err)
+	}
+
+	// Second daemon: capture combined output so we can assert the
+	// "another daemon is running" message when it exits.
+	second := exec.Command(niwaBin, "mesh", "watch", "--instance-root="+f.root)
+	second.Env = baseEnv
+	second.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	if err := second.Run(); err != nil {
+		t.Fatalf("second daemon exited non-zero: %v", err)
+	}
+	// Second daemon must NOT have overwritten daemon.pid. firstPID
+	// must still be the PID on disk.
+	afterPID, _, err := readDaemonPIDFile(filepath.Join(f.niwaDir, "daemon.pid"))
+	if err != nil {
+		t.Fatalf("re-reading daemon.pid: %v", err)
+	}
+	if afterPID != firstPID {
+		t.Errorf("daemon.pid pid changed after second daemon ran: before=%d after=%d", firstPID, afterPID)
+	}
+
+	// daemon.log must contain the "another daemon is running" message
+	// emitted by the losing daemon.
+	logData, err := os.ReadFile(filepath.Join(f.niwaDir, "daemon.log"))
+	if err != nil {
+		t.Fatalf("read daemon.log: %v", err)
+	}
+	if !strings.Contains(string(logData), "another daemon is running") {
+		t.Errorf("daemon.log missing 'another daemon is running' notice:\n%s", logData)
+	}
+}
+
+// readDaemonPIDFile is a minimal test helper that parses the daemon.pid
+// file format ("<pid>\n<start-time>\n"). Kept inline rather than
+// promoted to production because the production code already has
+// workspace.ReadPIDFile; copying the small parser here avoids a cross-
+// package dependency for tests.
+func readDaemonPIDFile(path string) (int, int64, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return 0, 0, err
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(lines) == 0 {
+		return 0, 0, nil
+	}
+	var pid int
+	if _, err := fmt.Sscanf(lines[0], "%d", &pid); err != nil {
+		return 0, 0, err
+	}
+	var st int64
+	if len(lines) >= 2 {
+		_, _ = fmt.Sscanf(lines[1], "%d", &st)
+	}
+	return pid, st, nil
+}
+
+// TestOrphanPolling_EmptyOrphansShortCircuits verifies that an empty
+// orphan slice passed to runEventLoop does not start a 2-second ticker
+// goroutine — we rely on this to avoid wakes in the zero-orphan case
+// (the common path on a healthy daemon).
+func TestOrphanPolling_EmptyOrphansShortCircuits(t *testing.T) {
+	defer setOrphanPollIntervalForTest(10 * time.Millisecond)()
+
+	f := newDaemonTestFixture(t)
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		t.Fatalf("fsnotify: %v", err)
+	}
+	defer watcher.Close()
+	if _, err := registerInboxWatches(watcher, f.rolesRoot, log.New(io.Discard, "", 0)); err != nil {
+		t.Fatalf("register watches: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var wg sync.WaitGroup
+	exitCh := make(chan supervisorExit, 1)
+	catchupCh := make(chan inboxEvent)
+	close(catchupCh)
+	s := spawnContext{
+		instanceRoot: f.root,
+		niwaDir:      f.niwaDir,
+		spawnBin:     "/bin/true",
+		logger:       log.New(io.Discard, "", 0),
+		exitCh:       exitCh,
+		wg:           &wg,
+		shutdownCtx:  ctx,
+		backoffs:     []time.Duration{60 * time.Second},
+	}
+
+	loopDone := make(chan struct{})
+	go func() {
+		runEventLoop(ctx, watcher, catchupCh, exitCh, s, nil)
+		close(loopDone)
+	}()
+
+	// Let the loop run briefly to prove it does not spin on a nil ticker.
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+
+	select {
+	case <-loopDone:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("loop did not exit after cancel")
+	}
+	wg.Wait()
+}
+
+// TestPollOrphans_TransientReadErrorKeepsEntry: if ReadState returns an
+// error (concurrent writer, torn read), the orphan entry must be kept
+// for the next poll cycle. Dropping on a transient error would silently
+// misclassify a live worker.
+func TestPollOrphans_TransientReadErrorKeepsEntry(t *testing.T) {
+	f := newDaemonTestFixture(t)
+
+	// Seed a task dir with state.json but REMOVE envelope.json so
+	// ReadState returns ErrCorruptedState (envelope read fails).
+	worker := startFakeWorker(t, []string{"/bin/sleep", "30"})
+	startTime, err := mcp.PIDStartTime(worker.Process.Pid)
+	if err != nil {
+		t.Fatalf("PIDStartTime: %v", err)
+	}
+	taskID := seedReconcileTask(t, f, mcp.TaskWorker{
+		Role:      "web",
+		PID:       worker.Process.Pid,
+		StartTime: startTime,
+	})
+	if err := os.Remove(filepath.Join(f.tasksDir, taskID, "envelope.json")); err != nil {
+		t.Fatalf("remove envelope: %v", err)
+	}
+
+	orphans := []orphanEntry{{taskID: taskID, pid: worker.Process.Pid, startTime: startTime}}
+	s := spawnContext{
+		instanceRoot: f.root,
+		niwaDir:      f.niwaDir,
+		logger:       log.New(io.Discard, "", 0),
+	}
+	remaining := pollOrphans(orphans, s)
+	if len(remaining) != 1 {
+		t.Errorf("pollOrphans remaining = %d, want 1 (transient read error must keep entry)", len(remaining))
+	}
 }

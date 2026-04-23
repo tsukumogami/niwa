@@ -195,21 +195,32 @@ func runMeshWatch(cmd *cobra.Command, args []string) error {
 	var supervisorWG sync.WaitGroup
 	exitCh := make(chan supervisorExit, 32)
 
-	// 4. Catch-up inbox scan. Run BEFORE the event loop so pre-existing
-	// envelopes that arrived while the daemon was down are queued through
-	// the same claim code path as fsnotify-driven events.
+	// Issue 7: reconciliation of pre-existing state.json entries. MUST
+	// run BEFORE the catch-up inbox scan and BEFORE the event loop so
+	// any adopted-live-orphan entries are in the orphan list before a
+	// fsnotify CREATE tries to claim a re-queued envelope, and so that
+	// crash-mid-spawn tasks get a fresh retry before the catch-up path
+	// tries to re-claim their in-progress envelope.
+	tasksDir := filepath.Join(niwaDir, "tasks")
+	reconcileResult := reconcileRunningTasks(tasksDir, logger)
+
+	// 4. Catch-up inbox scan. Run AFTER reconciliation so reconciliation
+	// can re-hydrate orphan workers before the catch-up claim path runs.
 	catchupEvents, err := scanExistingInboxes(rolesRoot, watchedRoles)
 	if err != nil {
 		logger.Printf("warning: catch-up scan failed: %v", err)
 	}
 
 	// 5. Acquire the daemon.pid.lock flock BEFORE writing the PID file.
-	// Issue 7 uses this sidecar file to gate concurrent `niwa apply`
-	// invocations; Issue 4 just establishes the file and holds it for
-	// our own write.
+	// Held for the daemon's lifetime. If the exclusive flock is already
+	// held by a sibling daemon, log and exit 0 (AC-C3 / scenario-21).
 	pidLockPath := filepath.Join(niwaDir, "daemon.pid.lock")
 	pidLockFile, err := acquireDaemonPIDLock(pidLockPath)
 	if err != nil {
+		if errors.Is(err, errDaemonAlreadyRunning) {
+			logger.Printf("another daemon is running; exiting")
+			return nil
+		}
 		return fmt.Errorf("acquiring daemon.pid.lock: %w", err)
 	}
 	defer func() {
@@ -249,8 +260,24 @@ func runMeshWatch(cmd *cobra.Command, args []string) error {
 	}
 	close(catchupCh)
 
-	logger.Printf("watch loop started")
-	runEventLoop(ctx, watcher, catchupCh, exitCh, spawnCtx)
+	// Issue 7: re-spawn any tasks whose state.json was written but whose
+	// cmd.Start never completed. These are the "spawn_never_completed"
+	// classifications from reconcileRunningTasks; the re-spawn happens
+	// here, after the event loop's supervisor plumbing is in scope.
+	for _, taskID := range reconcileResult.freshRetries {
+		respawnFreshRetry(taskID, spawnCtx)
+	}
+	// Issue 7: feed dead/PID-reuse classifications through Issue 5's
+	// unexpected-exit path. Done after spawnCtx is set up so the retry
+	// scheduler goroutines are owned by the same WaitGroup the central
+	// loop drains.
+	for _, taskID := range reconcileResult.deadWorkers {
+		handleSupervisorExit(supervisorExit{taskID: taskID, exitCode: -1}, spawnCtx)
+	}
+
+	logger.Printf("watch loop started orphans=%d fresh_retries=%d dead_workers=%d",
+		len(reconcileResult.orphans), len(reconcileResult.freshRetries), len(reconcileResult.deadWorkers))
+	runEventLoop(ctx, watcher, catchupCh, exitCh, spawnCtx, reconcileResult.orphans)
 
 	// Shutdown: stop accepting new events, let supervisors finish draining.
 	logger.Printf("shutting down, draining in-flight supervisors (up to 5s)")
@@ -292,15 +319,58 @@ type spawnContext struct {
 	sigTermGrace  time.Duration
 }
 
+// orphanEntry tracks a live-orphan worker adopted at startup (Issue 7).
+// The daemon did not parent the worker process, so there is no
+// supervisor goroutine and no cmd.Wait signal. Instead the central loop
+// polls each orphan every orphanPollInterval via the authoritative
+// IsPIDAlive(pid, start_time) check and synthesizes a supervisorExit
+// when the worker disappears or the recorded start_time diverges (PID
+// reuse defense).
+type orphanEntry struct {
+	taskID    string
+	pid       int
+	startTime int64
+}
+
+// orphanPollInterval is the cadence at which the central loop polls
+// adopted orphans for liveness. PRD spec is 2 s. Exposed as a var so
+// tests can compress it via setOrphanPollIntervalForTest; production
+// callers must not mutate it.
+var orphanPollInterval = 2 * time.Second
+
+// setOrphanPollIntervalForTest swaps orphanPollInterval for the duration
+// of a test and returns a restore function. Only intended for use from
+// *_test.go files.
+func setOrphanPollIntervalForTest(d time.Duration) func() {
+	prev := orphanPollInterval
+	orphanPollInterval = d
+	return func() { orphanPollInterval = prev }
+}
+
 // runEventLoop owns the central `select`. It returns only when ctx is
 // cancelled (signal) or fsnotify closes its events channel.
+//
+// orphans is the initial list of adopted live orphans produced by
+// reconcileRunningTasks. The event loop polls them every
+// orphanPollInterval via pollOrphans and prunes the list when a worker
+// transitions to a terminal state or dies; the polled hand-off to
+// Issue 5's retry classifier is the analogue of the supervisor goroutine
+// that the daemon never got a chance to start for these workers.
 func runEventLoop(
 	ctx context.Context,
 	watcher *fsnotify.Watcher,
 	catchupCh <-chan inboxEvent,
 	exitCh <-chan supervisorExit,
 	spawnCtx spawnContext,
+	orphans []orphanEntry,
 ) {
+	var orphanTickerC <-chan time.Time
+	if len(orphans) > 0 {
+		orphanTicker := time.NewTicker(orphanPollInterval)
+		defer orphanTicker.Stop()
+		orphanTickerC = orphanTicker.C
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -350,8 +420,79 @@ func runEventLoop(
 				continue
 			}
 			handleSupervisorExit(ex, spawnCtx)
+
+		case <-orphanTickerC:
+			// Poll every adopted orphan; prune terminal/dead entries and
+			// hand dead workers off to Issue 5's classifier via a
+			// synthetic supervisorExit.
+			orphans = pollOrphans(orphans, spawnCtx)
+			if len(orphans) == 0 {
+				// Stop waking on a stopped ticker.
+				orphanTickerC = nil
+			}
 		}
 	}
+}
+
+// pollOrphans is the per-tick worker for adopted-orphan liveness. It
+// reads each orphan's state.json (under the shared flock used by
+// mcp.ReadState) and classifies:
+//
+//   - state is terminal → worker finished (via niwa_finish_task) or
+//     was cancelled. Drop from list; no action.
+//   - IsPIDAlive true AND start_time matches → worker still running.
+//     Keep in list.
+//   - IsPIDAlive false, OR start_time differs (PID reuse) → hand off to
+//     the unexpected-exit classifier so Issue 5 can bump restart_count
+//     and schedule a retry or abandon. Drop from list.
+//
+// The returned slice contains the orphans still being tracked after
+// this tick. When empty, the caller should stop the orphan ticker.
+func pollOrphans(orphans []orphanEntry, s spawnContext) []orphanEntry {
+	if len(orphans) == 0 {
+		return orphans
+	}
+	kept := orphans[:0]
+	for _, o := range orphans {
+		taskDir := filepath.Join(s.instanceRoot, ".niwa", "tasks", o.taskID)
+		_, st, err := mcp.ReadState(taskDir)
+		if err != nil {
+			// Transient read failure (concurrent writer, disk pressure).
+			// Keep polling; do not misclassify on a flaky read.
+			kept = append(kept, o)
+			continue
+		}
+		if stateIsTerminal(st.State) {
+			s.logger.Printf("orphan_poll task=%s state=%s action=drop", o.taskID, st.State)
+			continue
+		}
+		// Non-terminal: check liveness against the recorded identity.
+		// If the stored worker.pid is zero for some reason (racy
+		// reconciliation / legacy state), use the orphan record — it's
+		// what we adopted.
+		pid := st.Worker.PID
+		if pid == 0 {
+			pid = o.pid
+		}
+		startTime := st.Worker.StartTime
+		if startTime == 0 {
+			startTime = o.startTime
+		}
+		if mcp.IsPIDAlive(pid, startTime) {
+			kept = append(kept, o)
+			continue
+		}
+		// Dead or PID reuse. Hand off to Issue 5's classifier via the
+		// same supervisorExit shape a real supervisor goroutine would
+		// emit. ExitCode is unavailable for orphans (we never had the
+		// child handle); use -1 as a sentinel distinct from 0 / 1.
+		s.logger.Printf("orphan_poll task=%s pid=%d action=unexpected_exit", o.taskID, pid)
+		handleSupervisorExit(supervisorExit{
+			taskID:   o.taskID,
+			exitCode: -1,
+		}, s)
+	}
+	return kept
 }
 
 // handleInboxEvent runs the claim → spawn flow for a single queued
@@ -1213,6 +1354,236 @@ func drainSupervisors(wg *sync.WaitGroup, timeout time.Duration, logger *log.Log
 }
 
 // ---------------------------------------------------------------------
+// Issue 7: startup reconciliation and adopted-orphan polling
+// ---------------------------------------------------------------------
+
+// reconcileResult summarizes the classification of pre-existing
+// state.json entries at daemon startup. The caller wires each bucket
+// into the appropriate follow-up path:
+//
+//   - orphans:       adopted live workers → handed to runEventLoop for
+//     2 s polling.
+//   - freshRetries:  crash-mid-spawn entries → respawnFreshRetry is
+//     called for each (no restart_count bump).
+//   - deadWorkers:   dead or PID-reuse entries → handleSupervisorExit
+//     is called with a synthetic supervisorExit so Issue
+//     5's classifier bumps restart_count and schedules a
+//     retry or abandon.
+type reconcileResult struct {
+	orphans      []orphanEntry
+	freshRetries []string // task IDs classified as spawn_never_completed
+	deadWorkers  []string // task IDs classified as dead / PID-reuse
+}
+
+// reconcileRunningTasks enumerates .niwa/tasks/*/state.json and
+// classifies every task with state == "running" into one of three
+// buckets. The classification is conservative: a state.json whose
+// worker fields are inconsistent is mapped to dead-worker
+// (unexpected-exit) rather than trusted; this matches the design's
+// "fail closed" posture.
+//
+// Classification rules (DESIGN Decision / Issue 7 plan):
+//
+//	Case A — spawn_never_completed:
+//	  worker.pid == 0 AND worker.spawn_started_at != ""
+//	  ⇒ state.json was written but cmd.Start never ran (or its
+//	    backfill never landed). Caller re-spawns without bumping
+//	    restart_count.
+//
+//	Case B — live orphan:
+//	  worker.pid > 0 AND IsPIDAlive(pid, start_time) == true
+//	  ⇒ worker is still running under a dead daemon. Stamp
+//	    worker.adopted_at, log "adoption", and enroll in the central
+//	    loop's orphan poller.
+//
+//	Case C — dead worker / PID reuse:
+//	  worker.pid > 0 AND IsPIDAlive == false (or start_time differs)
+//	  ⇒ classify as unexpected_exit; Issue 5 pipeline picks it up.
+//
+// Tasks in non-running states are skipped — nothing to reconcile.
+// Read errors are logged and the task is skipped; the catch-up inbox
+// scan can re-surface a queued envelope if one exists.
+func reconcileRunningTasks(tasksDir string, logger *log.Logger) reconcileResult {
+	var result reconcileResult
+
+	entries, err := os.ReadDir(tasksDir)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			logger.Printf("reconcile: read tasks dir err=%v", err)
+		}
+		return result
+	}
+
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		taskID := entry.Name()
+		taskDir := filepath.Join(tasksDir, taskID)
+
+		_, st, err := mcp.ReadState(taskDir)
+		if err != nil {
+			// Partially written or corrupted state.json. Log and skip;
+			// there is no safe classification for unreadable state.
+			logger.Printf("reconcile: task=%s read_state_err=%v action=skip", taskID, err)
+			continue
+		}
+		if st.State != mcp.TaskStateRunning {
+			continue
+		}
+
+		// Case A: spawn_never_completed.
+		if st.Worker.PID == 0 && st.Worker.SpawnStartedAt != "" {
+			logger.Printf("reconcile: task=%s classify=spawn_never_completed action=fresh_retry", taskID)
+			if err := appendCrashRecoveryEntry(taskDir, "crash_recovery_fresh_retry", st.Worker.Role); err != nil {
+				logger.Printf("reconcile: task=%s fresh_retry_log_err=%v", taskID, err)
+			}
+			result.freshRetries = append(result.freshRetries, taskID)
+			continue
+		}
+
+		// Cases B / C: worker.pid is set. Verify liveness.
+		if st.Worker.PID > 0 && mcp.IsPIDAlive(st.Worker.PID, st.Worker.StartTime) {
+			// Live orphan: stamp adopted_at and add to the orphan list.
+			if err := markAdopted(taskDir); err != nil {
+				logger.Printf("reconcile: task=%s adopt_err=%v action=treat_as_dead", taskID, err)
+				result.deadWorkers = append(result.deadWorkers, taskID)
+				continue
+			}
+			logger.Printf("reconcile: task=%s classify=live_orphan pid=%d action=adopt", taskID, st.Worker.PID)
+			result.orphans = append(result.orphans, orphanEntry{
+				taskID:    taskID,
+				pid:       st.Worker.PID,
+				startTime: st.Worker.StartTime,
+			})
+			continue
+		}
+
+		// Case C: dead worker (IsPIDAlive false) or start_time divergence
+		// (PID reuse). Either way: unexpected exit.
+		logger.Printf("reconcile: task=%s classify=dead_worker pid=%d action=unexpected_exit", taskID, st.Worker.PID)
+		result.deadWorkers = append(result.deadWorkers, taskID)
+	}
+
+	return result
+}
+
+// appendCrashRecoveryEntry writes a "crash_recovery_fresh_retry" NDJSON
+// entry to transitions.log for tasks classified as spawn_never_completed.
+// state.json is not mutated here — respawnFreshRetry will zero the
+// stale spawn_started_at and rewrite worker fields when the retry runs.
+func appendCrashRecoveryEntry(taskDir, kind, role string) error {
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	entry := &mcp.TransitionLogEntry{
+		Kind: kind,
+		At:   now,
+		Actor: &mcp.TransitionActor{
+			Kind: "daemon",
+			PID:  os.Getpid(),
+			Role: role,
+		},
+	}
+	// Use UpdateState with a no-op mutator so the append runs under the
+	// per-task exclusive flock, matching the write discipline every
+	// other transition entry uses.
+	return mcp.UpdateState(taskDir, func(cur *mcp.TaskState) (*mcp.TaskState, *mcp.TransitionLogEntry, error) {
+		if cur.State != mcp.TaskStateRunning {
+			return nil, nil, nil
+		}
+		next := *cur
+		return &next, entry, nil
+	})
+}
+
+// markAdopted stamps worker.adopted_at on a live-orphan task and
+// appends an "adoption" NDJSON entry to transitions.log. Runs under the
+// per-task exclusive flock (via UpdateState) so concurrent readers see
+// a consistent snapshot.
+func markAdopted(taskDir string) error {
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	return mcp.UpdateState(taskDir, func(cur *mcp.TaskState) (*mcp.TaskState, *mcp.TransitionLogEntry, error) {
+		if cur.State != mcp.TaskStateRunning {
+			return nil, nil, nil
+		}
+		next := *cur
+		next.Worker.AdoptedAt = now
+		next.UpdatedAt = now
+		entry := &mcp.TransitionLogEntry{
+			Kind:      "adoption",
+			At:        now,
+			WorkerPID: cur.Worker.PID,
+			Actor: &mcp.TransitionActor{
+				Kind: "daemon",
+				PID:  os.Getpid(),
+				Role: cur.Worker.Role,
+			},
+		}
+		return &next, entry, nil
+	})
+}
+
+// respawnFreshRetry re-enters the spawn path for a task whose previous
+// spawn crashed before cmd.Start could land (Case A in
+// reconcileRunningTasks). Unlike retrySpawn, this path does NOT bump
+// restart_count — the prior attempt never actually started.
+//
+// The stored worker.role is the authoritative target; fall back to
+// TargetRole when worker.role is empty (extremely early crash).
+func respawnFreshRetry(taskID string, s spawnContext) {
+	taskDir := filepath.Join(s.instanceRoot, ".niwa", "tasks", taskID)
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+
+	var role string
+	var skip bool
+	updErr := mcp.UpdateState(taskDir, func(cur *mcp.TaskState) (*mcp.TaskState, *mcp.TransitionLogEntry, error) {
+		if cur.State != mcp.TaskStateRunning {
+			skip = true
+			return nil, nil, nil
+		}
+		role = cur.Worker.Role
+		if role == "" {
+			role = cur.TargetRole
+		}
+		next := *cur
+		// Refresh the spawn marker: a new cmd.Start is about to run.
+		// restart_count is intentionally NOT bumped — the prior spawn
+		// never actually executed.
+		next.Worker.Role = role
+		next.Worker.PID = 0
+		next.Worker.StartTime = 0
+		next.Worker.SpawnStartedAt = now
+		next.UpdatedAt = now
+		entry := &mcp.TransitionLogEntry{
+			Kind:    "spawn",
+			At:      now,
+			Attempt: cur.RestartCount, // same attempt number; not a retry bump
+			Actor: &mcp.TransitionActor{
+				Kind: "daemon",
+				PID:  os.Getpid(),
+				Role: role,
+			},
+		}
+		return &next, entry, nil
+	})
+	if updErr != nil {
+		s.logger.Printf("fresh_retry task=%s update_state_err=%v", taskID, updErr)
+		return
+	}
+	if skip {
+		s.logger.Printf("fresh_retry task=%s skip=not_running", taskID)
+		return
+	}
+	s.logger.Printf("fresh_retry task=%s role=%s", taskID, role)
+
+	evt := inboxEvent{
+		role:     role,
+		taskID:   taskID,
+		filePath: filepath.Join(s.instanceRoot, ".niwa", "roles", role, "inbox", "in-progress", taskID+".json"),
+	}
+	spawnWorker(evt, taskDir, s)
+}
+
+// ---------------------------------------------------------------------
 // Startup helpers
 // ---------------------------------------------------------------------
 
@@ -1428,10 +1799,25 @@ func resolveRoleCWD(instanceRoot, role string) string {
 	return instanceRoot
 }
 
+// errDaemonAlreadyRunning is returned by acquireDaemonPIDLock when the
+// exclusive flock is already held. Issue 7: two daemons must not coexist
+// for the same instance; the loser exits cleanly with code 0 after
+// logging a one-line notice.
+var errDaemonAlreadyRunning = errors.New("another daemon is running")
+
 // acquireDaemonPIDLock opens .niwa/daemon.pid.lock and takes an
-// exclusive flock. Issue 7 uses the same sidecar for `niwa apply`
-// coordination; Issue 4 just establishes the file and holds it for the
-// daemon's own write.
+// exclusive non-blocking flock. The caller holds this flock for the
+// daemon's lifetime.
+//
+// Returns errDaemonAlreadyRunning when EWOULDBLOCK fires — another
+// daemon already holds the exclusive lock for this instance. The caller
+// treats that as a clean "another daemon wins" exit, not a startup
+// error. Any other error is propagated as-is (fatal).
+//
+// `niwa apply` reads daemon.pid under a shared lock on the same file
+// (see workspace.EnsureDaemonRunning); the exclusive-vs-shared pairing
+// is what enforces "concurrent niwa apply never spawns two daemons"
+// (AC-C3 / scenario-21).
 func acquireDaemonPIDLock(path string) (*os.File, error) {
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
@@ -1439,6 +1825,9 @@ func acquireDaemonPIDLock(path string) (*os.File, error) {
 	}
 	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		_ = f.Close()
+		if errors.Is(err, syscall.EWOULDBLOCK) {
+			return nil, errDaemonAlreadyRunning
+		}
 		return nil, fmt.Errorf("flock %s: %w", path, err)
 	}
 	return f, nil

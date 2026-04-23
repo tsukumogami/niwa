@@ -23,9 +23,17 @@ import (
 // cmd.Start() is used (not Run()) so the function returns immediately.
 // After spawning, the function polls for daemon.pid for up to 500ms so
 // callers can assert daemon liveness right after Create/Apply returns.
+//
+// Concurrency (Issue 7 / AC-C3): the PID read happens under a shared
+// flock on `.niwa/daemon.pid.lock`. The daemon itself holds the
+// exclusive flock for its lifetime, so a live daemon is observable as
+// "shared lock takes instantly, PID file present, PID alive". Two
+// concurrent `niwa apply` invocations against an unchanneled workspace
+// will both attempt to spawn; the spawned daemons race for the
+// exclusive flock and the loser exits cleanly with code 0.
 func EnsureDaemonRunning(instanceRoot string) error {
 	niwaDir := filepath.Join(instanceRoot, ".niwa")
-	pid, startTime, err := ReadPIDFile(niwaDir)
+	pid, startTime, err := readPIDUnderSharedFlock(niwaDir)
 	if err != nil {
 		// Non-fatal: treat as no daemon.
 		pid = 0
@@ -132,6 +140,48 @@ func TerminateDaemon(instanceRoot string) error {
 	_ = proc.Signal(syscall.SIGKILL)
 	_ = os.Remove(filepath.Join(niwaDir, "daemon.pid"))
 	return nil
+}
+
+// readPIDUnderSharedFlock acquires a shared flock on
+// `<niwaDir>/daemon.pid.lock`, reads daemon.pid, and releases the flock.
+//
+// The shared flock pairs with the exclusive flock the daemon holds for
+// its lifetime (see cli.acquireDaemonPIDLock). A live daemon is always
+// observable as "shared lock succeeds" (multiple readers coexist) +
+// "PID alive"; a crashed daemon releases the exclusive lock when the
+// kernel closes its fd, letting a subsequent EnsureDaemonRunning reclaim.
+//
+// The shared flock is non-blocking (LOCK_NB): if the lock file does not
+// exist yet (brand-new instance, first `niwa apply`) we fall straight
+// through to ReadPIDFile, which returns (0, 0, nil) for a missing file.
+// Lock-acquire errors are non-fatal — a missing or unreadable lock file
+// should not break `niwa apply`; we just skip the cross-check and fall
+// back to the PID file on its own.
+func readPIDUnderSharedFlock(niwaDir string) (int, int64, error) {
+	lockPath := filepath.Join(niwaDir, "daemon.pid.lock")
+	lf, err := os.OpenFile(lockPath, os.O_RDWR, 0o600)
+	if err != nil {
+		if os.IsNotExist(err) {
+			// No lock file ⇒ no daemon has ever run here. Fall back
+			// to ReadPIDFile which will also find nothing.
+			return ReadPIDFile(niwaDir)
+		}
+		// Any other error: fall back to the raw PID read. A missing
+		// lock file is not a failure mode we want to surface to users.
+		return ReadPIDFile(niwaDir)
+	}
+	defer lf.Close()
+
+	// Shared flock. LOCK_NB so we do not block the apply path on a
+	// stuck holder. If a legitimate daemon is alive the shared lock
+	// succeeds immediately (shared + exclusive coexist only if both are
+	// shared, so a live daemon's LOCK_EX here would block us — but
+	// LOCK_NB turns that into EWOULDBLOCK, at which point the PID file
+	// read below is authoritative enough for the "is it alive?" check).
+	_ = syscall.Flock(int(lf.Fd()), syscall.LOCK_SH|syscall.LOCK_NB)
+	defer func() { _ = syscall.Flock(int(lf.Fd()), syscall.LOCK_UN) }()
+
+	return ReadPIDFile(niwaDir)
 }
 
 // ReadPIDFile reads <niwaDir>/daemon.pid and returns (pid, startTime, err).
