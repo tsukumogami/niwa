@@ -1060,6 +1060,41 @@ None.
 - **Task directories accumulate**: Without v1 garbage collection, a
   long-lived workspace will see `.niwa/tasks/` grow unbounded. Manual
   cleanup via `rm` is the workaround.
+- **`acceptEdits` amplifies prompt-injection blast radius**: Workers are
+  spawned with `--permission-mode=acceptEdits` so background processes
+  don't block on permission prompts. A worker whose LLM is prompt-
+  injected via a malicious task body can therefore write to any file in
+  the role's repo directory without prompting — divergent from normal
+  Claude Code sessions where edits require confirmation. Users who need
+  per-edit confirmation should not enable channel delegation. This is a
+  data-plane risk reachable through the feature's intended interface
+  (delegation bodies), not a same-UID attacker scenario. Per-role
+  permission-mode overrides are deferred to v2.
+- **macOS worker authentication is strictly weaker than Linux**: The
+  design's worker-auth check walks PPID up one level and compares the
+  worker's start time against `state.json.worker.{pid, start_time}`. On
+  Linux this defeats naive same-UID PID spoofing. On macOS, `PIDStartTime`
+  returns a conservative alive/dead answer without a precise timestamp,
+  so the check degrades to PID-match-only. The PRD's "role integrity"
+  trust ceiling still holds, but macOS users face strictly weaker
+  same-UID process isolation than Linux users. Users requiring the
+  strongest local-process isolation should run niwa on Linux.
+- **`transitions.log` body retention**: Progress and result bodies are
+  appended to `.niwa/tasks/<id>/transitions.log` as part of the audit
+  trail. With no v1 garbage collection, this log accumulates all
+  delegation output indefinitely. The v1 mitigation is to log only the
+  truncated `summary` field from progress events (full bodies remain in
+  `state.json.last_progress.body`, which is overwritten per-event);
+  terminal bodies (result / reason) are also logged. Users handling
+  sensitive delegation content should manually clean completed task
+  directories or exclude `.niwa/` from backups. `niwa mesh gc` is v2.
+- **Channel delegation cross-pollinates shell env across roles**: The
+  daemon inherits the user's shell environment (including credentials
+  like `ANTHROPIC_API_KEY`, `AWS_*`, `GH_TOKEN`) and passes it through to
+  every worker regardless of role. A repo-scoped secret intended for one
+  role is therefore visible to workers in every other role. Per-role
+  env filtering is deferred to v2; for v1, treat all shell-exported
+  secrets as visible to every delegated worker.
 
 ## Decisions and Trade-offs
 

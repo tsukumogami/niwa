@@ -15,9 +15,43 @@ problem: |
   mesh wholesale while preserving the provisioning, activation, and hook-
   injection machinery that already works.
 decision: |
-  (To be filled after Phase 4.)
+  Messages route through per-role inboxes provisioned at apply time from the
+  workspace topology. Tasks are first-class per-directory state machines
+  under `.niwa/tasks/<task-id>/` with an authoritative `state.json`, an
+  append-only NDJSON `transitions.log`, and a dedicated `.lock` flock
+  target. A central-loop daemon (`niwa mesh watch`) claims queued envelopes
+  via atomic rename and spawns ephemeral `claude -p` workers supervised by
+  per-task goroutines; adopted orphans (surviving a daemon crash) are
+  polled centrally via `IsPIDAlive`. Per-session stdio MCP servers serve
+  eleven tools — task delegation, query, await, update, cancel, progress,
+  finish, plus peer messaging — with a uniform `authorizeTaskCall` helper
+  that verifies `NIWA_TASK_ID` env + role match + (Linux-mandatory) PPID
+  start-time match against state.json. A flat uniform `niwa-mesh` skill is
+  installed at both the instance root and each repo's `.claude/skills/`,
+  kept idempotent via sha256 ContentHash in `InstanceState.ManagedFiles`. A
+  literal-path `NIWA_WORKER_SPAWN_COMMAND` override plus integer-second
+  timing env vars and daemon pause hooks make every acceptance criterion
+  verifiable by a scripted MCP-client fake; two residual `@channels-e2e`
+  scenarios exercise real `claude -p` to prove MCP loadability and
+  bootstrap-prompt effectiveness.
 rationale: |
-  (To be filled after Phase 4.)
+  The seven decisions hang together because each roots in the same
+  filesystem-as-durable-state principle: state on disk, stateless daemon,
+  single-lock-per-task, atomic rename as the commit point. The
+  cross-validation between task storage and MCP topology decisions produced
+  the design's most consequential refinement — replacing an initially-
+  proposed per-task crypto token with the PPID + start-time check that
+  `state.json` already enables. The token added no protection beyond what
+  start-time freshness already rotates per spawn, with the same same-UID
+  trust ceiling; the PPID check reuses existing niwa primitives
+  (`IsPIDAlive`, `PIDStartTime`) and introduces no new file schema. The
+  test harness design is load-bearing for the whole design's
+  implementability: without `NIWA_WORKER_SPAWN_COMMAND` + timing overrides
+  + daemon pause hooks, most acceptance criteria would be probabilistic; with
+  them, they are deterministic in seconds. Migration is deliberately
+  simple: pre-1.0 posture means no user has an envelope-preservation
+  contract, so blind-rewrite with a one-line warning is the right amount
+  of care.
 ---
 
 # DESIGN: Cross-Session Communication
@@ -209,7 +243,7 @@ A task's on-disk layout is:
     "pid": 12345,
     "start_time": 8765432,
     "role": "web",
-    "spawned_at": "RFC3339",
+    "spawn_started_at": "RFC3339",
     "adopted_at": "RFC3339 | null"
   },
   "delegator_role": "coordinator",
@@ -332,7 +366,7 @@ The MCP server reads these once on startup into `Server.{instanceRoot, role, tas
 **Authorization helper `authorizeTaskCall(taskID, kind)`** reads `envelope.json` + `state.json` under shared flock:
 
 - **`kindDelegator`** (for `niwa_await_task`, `niwa_update_task`, `niwa_cancel_task`): require `envelope.from.role == s.role`. Else `NOT_TASK_OWNER`.
-- **`kindExecutor`** (for `niwa_finish_task`, `niwa_report_progress`): require `s.taskID == task_id` AND `state.json.worker_role == s.role`. Plus, as a **mandatory-on-Linux hardening step**, the MCP server walks PPID up one level to get the worker's PID, verifies its start time via `PIDStartTime` (`internal/mcp/liveness.go`), and requires a match with `state.json.worker_pid` and `state.json.worker_start_time`. On macOS where `PIDStartTime` is conservative, the check degrades to PID match only — weaker but within the PRD's trust ceiling. If state is terminal: `TASK_ALREADY_TERMINAL`.
+- **`kindExecutor`** (for `niwa_finish_task`, `niwa_report_progress`): require `s.taskID == task_id` AND `state.json.worker.role == s.role`. Plus, as a **mandatory-on-Linux hardening step**, the MCP server calls `PPIDChain(1)` to get the PID exactly one level up (its direct parent — the `claude -p` worker process by topological construction), verifies its start time via `PIDStartTime` (`internal/mcp/liveness.go`), and requires a match with `state.json.worker.pid` and `state.json.worker.start_time`. `PPIDChain(1)` is the committed depth — a future proxy layer between `claude -p` and `mcp-serve` would land on the wrong PID and the check would fail closed (not silently pass); the token-file fallback (see Alternatives) is the migration path if that ever occurs. On macOS where `PIDStartTime` is conservative, the check degrades to PID match only — strictly weaker than Linux and called out as a PRD Known Limitation. If state is terminal: `TASK_ALREADY_TERMINAL`.
 - **`kindParty`** (for `niwa_query_task`): accept if either delegator or executor check passes; else `NOT_TASK_PARTY`.
 - **Non-task-specific tools** (`niwa_delegate`, `niwa_ask`, `niwa_send_message`, `niwa_check_messages`, `niwa_list_outbound_tasks`): no per-task authorization. Caller's role from `s.role` is written as `envelope.from.role` on new envelopes. When `s.taskID` is non-empty (delegation from a running worker), `parent_task_id` auto-populates to `s.taskID` per R15.
 
@@ -500,7 +534,7 @@ Every other AC runs through the harness against the scripted fake, deterministic
 
 **Zero live-Claude coverage.** Rejected: would miss MCP-config-loadability and bootstrap-prompt-effectiveness regressions that niwa owns and the harness cannot exercise by construction.
 
-**Three-plus live-Claude scenarios (as in the obsolete prior proposal).** Rejected: the third scenario (`niwa_wait` content assertion) duplicates MCP-loadability coverage and adds LLM-content flake without covering a distinct niwa surface.
+**Three-plus live-Claude scenarios (as in the obsolete prior proposal).** Rejected: the third scenario (a multi-message content assertion from the prior proposal) duplicates MCP-loadability coverage and adds LLM-content flake without covering a distinct niwa surface.
 
 ### Decision 7: Provisioning Pipeline and Migration
 
@@ -590,16 +624,17 @@ niwa mesh watch (internal/cli/mesh_watch.go)
 
 niwa mcp-serve (internal/mcp/server.go, per-session stdio subprocess)
   ├─ Server struct reads env at startup: instanceRoot, role, taskID
-  ├─ message tools: niwa_send_message, niwa_check_messages, niwa_ask, niwa_wait
+  ├─ peer-message tools: niwa_send_message, niwa_check_messages, niwa_ask
   ├─ task delegator tools: niwa_delegate, niwa_query_task, niwa_await_task,
   │     niwa_list_outbound_tasks, niwa_update_task, niwa_cancel_task
   ├─ task worker tools: niwa_report_progress, niwa_finish_task
+  ├─ per-session fsnotify watcher on .niwa/roles/<own-role>/inbox/
+  │     (extends existing internal/mcp/watcher.go's notifyNewFile)
   ├─ authorizeTaskCall(taskID, kind) helper: shared flock on task .lock,
-  │     envelope.json + state.json reads, PPID+start_time check on Linux
-  └─ waiter maps (in-process):
-       waiters      map[msgID]chan toolResult        (niwa_ask)
-       typeWaiters  map[waitID]*typeWaiter            (niwa_wait)
-       awaitWaiters map[taskID]chan taskEvent         (niwa_await_task, sync niwa_delegate)
+  │     envelope.json + state.json reads, PPIDChain(1) + start_time check on Linux
+  └─ waiter maps (in-process, all values are size-1 buffered chans):
+       waiters      map[msgID]chan toolResult        (niwa_ask reply)
+       awaitWaiters map[taskID]chan taskEvent        (niwa_await_task, sync niwa_delegate)
 
 claude -p worker (spawned by daemon via exec.Command)
   ├─ argv: fixed bootstrap prompt with <task-id> substitution + R33 flags
@@ -644,11 +679,57 @@ type Server struct {
     taskID       string           // from NIWA_TASK_ID (empty for coordinators)
 
     waitersMu    sync.Mutex
-    waiters      map[string]chan toolResult  // keyed by reply_to msgID
-    typeWaiters  map[string]*typeWaiter       // keyed by wait-UUID
-    awaitWaiters map[string]chan taskEvent    // keyed by task ID
+    waiters      map[string]chan toolResult  // keyed by reply_to msgID; size-1 buffered
+    awaitWaiters map[string]chan taskEvent   // keyed by task_id; size-1 buffered
 }
 ```
+
+**Task ID generation.** Task IDs are UUIDv4 generated via `crypto/rand` (not `math/rand`) to prevent pre-computation by a same-UID attacker attempting to pre-seed a `.niwa/tasks/<id>/` directory. Verified by a unit test asserting generated IDs match the UUIDv4 regex and do not repeat across 10 000 samples.
+
+**`taskEvent` type** — the in-process message carried on waiter channels and between daemon goroutines:
+
+```go
+type taskEventKind int
+
+const (
+    evtCompleted taskEventKind = iota
+    evtAbandoned
+    evtCancelled
+    evtProgress    // non-terminal; used internally by awaitWaiter (ignored) but also by daemon supervisor → central loop
+    evtUnexpectedExit
+    evtAdopted
+)
+
+type taskEvent struct {
+    TaskID    string
+    Kind      taskEventKind
+    ExitCode  int              // valid when Kind == evtUnexpectedExit
+    Result    json.RawMessage  // valid when Kind == evtCompleted
+    Reason    json.RawMessage  // valid when Kind == evtAbandoned
+    At        time.Time
+}
+```
+
+The per-session MCP server's `awaitWaiters` dispatches `evtCompleted`, `evtAbandoned`, or `evtCancelled` to the waiter's channel on receipt of the matching inbox message. The daemon's central loop consumes all event kinds from per-task supervisors for state-transition decisions.
+
+**`TaskStore.UpdateState` — transactional state mutation.** A single helper exported from `internal/mcp/taskstore` encapsulates the flock → read → validate → mutate → tmp+rename → fsync-parent → append-log → unlock sequence so every caller (daemon, MCP tool handlers) applies the same discipline:
+
+```go
+// UpdateState atomically transitions a task's state. The mutator function
+// receives the current state and returns the new state plus a transition
+// log entry. All writes happen under per-task flock on .lock.
+//
+// Returns:
+//   - ErrStateMismatch: mutator's expected "from" state didn't match on-disk state
+//   - ErrAlreadyTerminal: task is already completed/abandoned/cancelled
+//   - ErrCorruptedState: state.json parse failed (fail-closed)
+//   - nil: state.json and transitions.log both written durably
+func UpdateState(taskDir string, mutator func(cur *TaskState) (*TaskState, *TransitionEntry, error)) error
+```
+
+`authorizeTaskCall` uses a read-only variant (`ReadState(taskDir string) (*TaskEnvelope, *TaskState, error)`) that acquires a shared flock. Both `UpdateState` and `ReadState` fail closed on torn / malformed JSON (return `ErrCorruptedState`, which callers surface as `NOT_TASK_PARTY` for auth path and as an internal error for admin paths).
+
+All flock acquisitions use a 30-second bounded timeout (`syscall.Flock` with a retry loop) to prevent indefinite deadlock against a hung holder. Timeout surfaces as `ErrLockTimeout`; callers treat it as retryable.
 
 **Task envelope** (`.niwa/tasks/<task-id>/envelope.json`, PRD R15 v=1):
 
@@ -902,28 +983,53 @@ Deliverables:
   - Revises `handleSendMessage` to drop delivery-status return; message is written via atomic rename and that's the success criterion.
   - `notifyNewFile` extension: inspects type; routes `task.completed/abandoned/cancelled` to `awaitWaiters[body.task_id]`; existing `reply_to` path for ask remains.
   - All task-lifecycle handlers call `authorizeTaskCall` at the top; all use the per-task `.lock` via `taskstore`.
-- `internal/mcp/server_test.go` — unit tests with in-process MCP client exercising each tool; scripted scenarios for cancel-vs-claim race using the new daemon pause hooks.
+- `internal/mcp/server_test.go` — unit tests with in-process MCP client exercising each tool handler directly (handler-level unit tests; full cancel-vs-claim race coverage requires the daemon's pause hooks and is deferred to Phase 4b+6).
 - `internal/mcp/handlers_task.go` (new file; handlers grouped here for readability).
 
-### Phase 4: Daemon rewrite
+### Phase 4a: Daemon core — spawn, wait, classify
 
-Replace `niwa mesh watch` behavior. The flock-guarded PID file + `Setsid` spawn + SIGTERM/SIGKILL shutdown pattern is retained from the existing daemon.
+Build the minimum daemon that can claim a queued envelope, spawn a worker, and observe its exit. No backoff, no watchdog, no orphan adoption yet.
 
 Deliverables:
-- `internal/cli/mesh_watch.go` rewrite:
-  - Central goroutine structure: fsnotify, 2s ticker, `taskEvent` channel.
-  - Reconciliation-on-startup pass (reads all `.niwa/tasks/*/state.json`).
-  - Catch-up inbox scan after fsnotify registration.
-  - Consumption-rename claim path under per-task lock.
-  - Per-task supervisor goroutine: `cmd.Wait()` + stall watchdog timer + SIGTERM/SIGKILL escalation.
-  - Adopted-orphan central polling via `IsPIDAlive`.
-  - Restart-cap enforcement with backoff (`time.AfterFunc`).
-  - Exit-event handling: classify as unexpected vs. daemon-signaled; bump `restart_count`; schedule retry or abandon.
-  - `NIWA_WORKER_SPAWN_COMMAND` honored in the `exec.Command` path.
-  - `NIWA_TEST_PAUSE_*` hooks at the consumption-rename boundary.
-  - All timing thresholds read once at startup from the `NIWA_*_SECONDS` env vars with defaults per the Configuration Defaults table in PRD.
-- `internal/cli/destroy.go` — unchanged in mechanism; uses `NIWA_DESTROY_GRACE_SECONDS`.
-- `internal/cli/mesh_watch_test.go` — unit tests for: reconciliation (alive PID → adopt; dead PID → unexpected exit); catch-up scan; restart-cap; stall watchdog; cancel-race (uses pause hooks).
+- `internal/cli/mesh_watch.go`: central goroutine structure with fsnotify on `.niwa/roles/*/inbox/`; `taskEvent` channel; catch-up inbox scan on startup; consumption-rename claim path under per-task `TaskStore.UpdateState`; spawn via `exec.Command` with fixed argv + env overrides (Decision 4); `exec.LookPath("claude")` resolved once at startup and logged at INFO; `claude` binary path is absolute for every subsequent spawn; per-task supervisor goroutine calling `cmd.Wait()` and reporting exit events.
+- `internal/cli/mesh_watch_test.go`: unit tests for: clean spawn-and-finish path; supervisor-reported unexpected exit; `exec.LookPath` resolution and logging.
+
+### Phase 4b: Restart cap + backoff + unexpected-exit classification
+
+Deliverables:
+- Restart-cap enforcement with linear backoff via `time.AfterFunc` using `NIWA_RETRY_BACKOFF_SECONDS` (comma-separated integers).
+- Exit-event classification: compare `state.json.state` to expected `"running"` at `cmd.Wait()` return; classify as unexpected if state.json is still `running`; bump `restart_count`; schedule retry or transition to `abandoned` with `reason: "retry_cap_exceeded"`.
+- Tests: flapping worker reaches retry cap; fast-completing worker doesn't trigger restart; `niwa_fail_task` from worker doesn't consume a restart slot.
+
+### Phase 4c: Stall watchdog + SIGTERM/SIGKILL escalation
+
+Deliverables:
+- Per-supervisor `time.Timer` reset on every detected `niwa_report_progress` (via 2 s poll of `state.json.last_progress.at`).
+- SIGTERM on stall; SIGKILL after `NIWA_SIGTERM_GRACE_SECONDS`.
+- Watchdog-triggered exits classified as unexpected (consume retry slot).
+- Defensive reap: if `state.json.state` is terminal but the worker process is still alive (worker hung after `niwa_finish_task`), the supervisor sends SIGTERM after a short grace (`NIWA_SIGTERM_GRACE_SECONDS` applies).
+- Tests with `NIWA_STALL_WATCHDOG_SECONDS=2`: stall triggers SIGTERM; SIGTERM-resistant worker gets SIGKILL after grace.
+
+### Phase 4d: Reconciliation + adopted-orphan polling
+
+Deliverables:
+- Startup reconciliation: list `.niwa/tasks/*/state.json`; for each `running` task, read `worker.pid` and `worker.start_time`; if `IsPIDAlive(pid, start_time) == true` add to adopted-orphan list and write `worker.adopted_at` under lock; if false, drive unexpected-exit classification.
+- Central loop 2 s ticker: per orphan, re-check `IsPIDAlive(pid, start_time)` (both PID existence AND start_time match; divergent start_time classified as unexpected exit to defend against PID-reuse).
+- `daemon.pid` + `daemon.pid.lock` flock (lock owned by the daemon; `niwa apply` acquires shared lock before reading the PID file to prevent racing two concurrent applies into two daemons).
+- Tests: daemon-kill-with-live-worker → new daemon adopts; daemon-kill-with-dead-worker → unexpected exit path applied; PID reuse with divergent start_time classified as dead.
+
+### Phase 4e: Test-harness hooks
+
+Deliverables:
+- `NIWA_WORKER_SPAWN_COMMAND` honored: when set to a literal path, the daemon substitutes it for the resolved `claude` path; argv, env, CWD unchanged.
+- `NIWA_TEST_PAUSE_BEFORE_CLAIM` / `NIWA_TEST_PAUSE_AFTER_CLAIM` hooks: when set, the daemon blocks at the named point until a filesystem marker file is removed, making race-window tests deterministic.
+- Tests: fake binary invocation; pause hooks assert consumption-rename is paused.
+
+### Phase 4 notes (shared across 4a–4e)
+
+- `internal/cli/destroy.go` receives its grace-window update once in Phase 4a (uses `NIWA_DESTROY_GRACE_SECONDS`); destroy sends SIGKILL to worker PGIDs FIRST (not grace then kill) to minimize the attack window for compromised workers during teardown, then SIGTERM→SIGKILL the daemon. This is a security hardening beyond the PRD's minimum (`SIGTERM → grace → SIGKILL` applies to the daemon).
+- All timing thresholds read from env at daemon startup with PRD-configured defaults; no hot-reload in v1.
+- Flock acquisition in the daemon uses a 30 s bounded timeout.
 
 ### Phase 5: CLI subcommand surface
 
@@ -993,7 +1099,14 @@ Deliverables:
 - **No in-flight task cancellation.** A delegator that wants to stop a running task waits for the worker to exit or the watchdog to fire. `niwa_cancel_task` only works for `queued` tasks. In-flight cancellation is v2.
 - **Delegator liveness bounds sync semantics.** `niwa_delegate(mode="sync")` and `niwa_await_task` only return if the coordinator's session is alive. Results accumulate in the inbox for asynchronous pickup via `niwa_check_messages` or `niwa_query_task` on the next session start, but sync behavior requires a live coordinator.
 - **Role integrity is the only trust boundary against same-UID processes.** An agent that overrides `NIWA_SESSION_ROLE` can act on tasks belonging to the spoofed role. Per-agent keys / cryptographic signing is out of scope.
-- **PPID-walk assumes claude → mcp-serve spawn topology.** If Claude Code ever pools MCP subprocesses or introduces a proxy layer, the PPID check silently stops working. Mitigated by: (a) Decision 3 retains the token-file alternative as a migration path with identical API; (b) functional tests via the scripted fake assert that PPID walking lands on a PID the daemon recorded.
+- **PPID-walk assumes claude → mcp-serve spawn topology.** If Claude Code ever introduces a helper layer between `claude -p` and `niwa mcp-serve`, the `PPIDChain(1)` check lands on the wrong PID and fails closed (auth rejects legitimate workers). This is the safe direction — the check does not silently pass — but real workers start failing `niwa_finish_task`. Mitigated by: (a) Decision 3 retains the token-file alternative as a migration path with identical API; (b) functional tests via the scripted fake assert that `PPIDChain(1)` lands on the PID the daemon recorded; regression will surface in CI before users are affected.
+- **`worker.pid == 0` race window on first tool call.** Between the daemon's consumption-rename (writes `state.json` with `worker.pid=0, spawn_started_at=now`) and the subsequent backfill after `cmd.Start()` (writes `worker.pid=<real>, worker.start_time=<real>`), a freshly-spawned worker's first task-authorized tool call will fail `authorizeTaskCall` with `NOT_TASK_PARTY`. The happy path (worker's first call is `niwa_check_messages`, which is not task-authorized) hides this window. Scripted workers calling `niwa_report_progress` or `niwa_finish_task` as their first action must retry on `NOT_TASK_PARTY` for a brief initial window (millisecond-scale under normal operation). The test harness's scripted fake implements retry-with-backoff on this error for up to 2 seconds before surfacing.
+- **Completion is a behavioral contract, not structurally verified.** A worker LLM that calls `niwa_finish_task(outcome="completed", result={"ok":true})` without actually performing the delegated work will mark the task complete and exit. Niwa has no way to detect this from the outside. The restart cap bounds the blast radius of a worker that fails in an obvious way (crash, timeout, early exit), but not of one that returns a plausible-looking false result. Documented as a PRD Known Limitation; a v2 heuristic ("reject finish_task if no progress event was emitted") is tracked but deferred.
+- **Single-worker-per-role sequential execution limits parallelism.** Two queued tasks for the same role run one after the other; the daemon does not parallelize within a role (this is the git-conflict-avoidance design choice). In workflows where one role has many independent quick tasks (e.g., "run 20 test-case generators in the `tests` repo"), the latency is sum-of-tasks rather than max. PRD Out of Scope.
+- **MCP server process count scales with session count.** Each Claude session — coordinator plus every running worker — runs its own stdio `niwa mcp-serve` subprocess with its own fsnotify watch, its own waiter map, its own JSON decoder. For a coordinator delegating to three parallel roles, the process count during peak work is ≥ 4 (1 coordinator claude + 1 coordinator mcp-serve + 3 worker claudes + 3 worker mcp-serves = ~8). Visible in `htop` but not a scaling concern at realistic session counts.
+- **Hand-rolled `/proc/<pid>/stat` parsing on Linux.** `PIDStartTime` and `PPIDChain` rely on parsing `/proc/<pid>/stat` fields 22 (starttime) and 4 (ppid). The Go stdlib does not wrap this. If future kernels change the `/proc/<pid>/stat` layout, the parsing needs updating. Existing code in `internal/mcp/liveness.go` already has this dependency; this design extends it but does not introduce it.
+- **Removed roles leave orphan inbox directories.** If a user removes a repo from `workspace.toml` and re-runs `niwa apply`, the now-unreferenced `.niwa/roles/<old-role>/inbox/` directory is not garbage-collected. Queued envelopes for the removed role survive but are never consumed. Manual cleanup (`rm -rf .niwa/roles/<old-role>/`) is the v1 workaround; GC is v2.
+- **Instance root must be on a local POSIX filesystem.** The atomic-rename + flock + parent-directory-fsync pattern assumes local filesystem semantics (ext4/xfs/btrfs/apfs/tmpfs all qualify; ext4's `data=ordered` default is the reference model). NFS, SMB, sshfs, and other network filesystems have varying atomic-rename and advisory-flock semantics and are unsupported in v1. Placing `.niwa/` on tmpfs is allowed but trades durability for the lifetime of the filesystem.
 
 ### Mitigations
 
@@ -1012,7 +1125,13 @@ Deliverables:
 
 ### Trust Model
 
-The design operates within the PRD's explicit trust boundary: **role integrity is the only trust boundary against same-UID processes**. Niwa relies on standard Unix filesystem permissions (0600 files, 0700 directories under `.niwa/`, independent of umask) to prevent cross-UID access. Processes running under the same UID as the user are trusted to cooperate; the mesh is not hardened against a malicious same-UID attacker. Per-agent cryptographic identity, message signing, and encryption are explicit Out of Scope items for v1.
+The design operates under two distinct trust boundaries, which must not be conflated:
+
+1. **Process-level (same-UID) trust.** Niwa relies on standard Unix filesystem permissions (0600 files, 0700 directories under `.niwa/`, independent of umask) to prevent cross-UID access. Processes running under the same UID as the user are trusted to cooperate; the mesh is not hardened against a malicious same-UID attacker. Per-agent cryptographic identity, message signing, and encryption are explicit Out of Scope items for v1. This is the PRD's stated "role integrity is the only trust boundary" ceiling, and it applies to `NIWA_SESSION_ROLE` spoofing, advisory flock bypass, and PID-based auth degradation on macOS.
+
+2. **Data-plane (task body) trust.** Task bodies are written by the delegating LLM and read by the executing LLM. Neither process is adversarial at the UID level, but the *content* flowing between them is untrusted input: a coordinator LLM can be prompt-injected by earlier user input; a delegator can emit a body that tries to hijack a worker's behavior. This is not a same-UID attacker problem — it is a data-plane attack through the feature's intended interface. The bootstrap-prompt-via-argv + body-via-inbox separation (Decision 4) and `--permission-mode=acceptEdits` (Decision 4) interact to define the blast radius of a prompt-injected worker.
+
+The distinction matters because the same sentence ("within PRD trust ceiling") has been mis-applied to both boundaries. Same-UID risks (role spoofing, flock bypass) are consciously accepted. Data-plane risks (prompt injection into a `acceptEdits`-enabled worker) are reachable by any user of the feature, not only by a malicious local-UID attacker, and are surfaced as explicit PRD Known Limitations rather than quietly accepted.
 
 ### Worker Authorization
 
@@ -1022,7 +1141,7 @@ Worker-initiated task-lifecycle tools (`niwa_finish_task`, `niwa_report_progress
 2. `NIWA_SESSION_ROLE` env matches `state.json.worker.role`.
 3. On Linux, a PPID walk from the MCP server up to its parent `claude -p` process produces a PID whose start time matches `state.json.worker.{pid, start_time}`. This check is mandatory on Linux and defeats naive role-spoofing attempts by same-UID processes that merely set env vars.
 
-On macOS, where `PIDStartTime` returns a conservative alive/dead answer without precise timestamp, the PPID check degrades to PID-match-only. This is weaker than the Linux path but within the PRD's trust ceiling. Users requiring strict worker-auth isolation should run niwa on Linux.
+On macOS, where `PIDStartTime` returns a conservative alive/dead answer without a precise timestamp, the PPID check degrades to PID-match-only. This is **strictly weaker** than the Linux path: a same-UID attacker can `exec` a fake `mcp-serve` whose direct parent PID happens to match a legitimately-spawned worker's PID and pass the check. **Surfaced as a PRD Known Limitation** ("macOS worker authentication is strictly weaker than Linux") rather than framed as equivalent security. Users requiring the strongest same-UID process isolation should run niwa on Linux.
 
 If Claude Code's MCP subprocess spawning topology ever changes (pooling, proxying), the PPID walk could silently stop working. Decision 3 retains a per-task crypto token (`NIWA_TASK_TOKEN` + `.niwa/tasks/<id>/worker.token`) as a drop-in migration path with identical API surface.
 
@@ -1030,15 +1149,15 @@ If Claude Code's MCP subprocess spawning topology ever changes (pooling, proxyin
 
 A process that sets `NIWA_SESSION_ROLE` can dispatch envelopes attributed to that role and can mutate (update, cancel, query) delegated tasks belonging to that role. The PPID-start-time check defeats worker-side spoofing on Linux but does not protect delegator-side tools. This is the acknowledged v1 trust ceiling.
 
-### Prompt Injection
+### Prompt Injection (Data-Plane Attacks)
 
-Task bodies are written by the delegating LLM and read by the executing LLM. The bootstrap prompt does **not** contain the body; the worker retrieves the body via its first `niwa_check_messages` tool call, isolating delegator-controlled content from niwa's control-plane instructions in argv. The niwa-mesh skill explicitly instructs workers to treat body content as untrusted input.
+Task bodies are written by the delegating LLM and read by the executing LLM. The bootstrap prompt does **not** contain the body; the worker retrieves the body via its first `niwa_check_messages` tool call, isolating delegator-controlled content from niwa's control-plane instructions in argv. The niwa-mesh skill explicitly instructs workers to treat body content as untrusted input, and the MCP server's `niwa_check_messages` response wraps retrieved bodies inside a stable outer envelope with a clear "untrusted content" boundary marker so the worker's LLM has a visual demarcation.
 
-Residual risks:
+These defenses are behavioral and structural at the argv/env layer. They do **not** prevent prompt-injection attacks that operate within the worker LLM's tool-call semantics. The residual risks flow through the feature's intended interface:
 
-- A malicious body can influence a worker LLM to call `niwa_finish_task` without performing the actual work. Completion is a behavioral contract, not a structural verification (PRD Known Limitation).
-- A malicious body can attempt to impersonate niwa messages or control-plane instructions; the final line of defense is Claude Code's rendering of tool-response content.
-- The worker runs with `--permission-mode=acceptEdits`, so a prompt-injected worker can write to files in the target repo without prompting. Users who require per-task confirmation should not enable channel delegation.
+- A malicious body can influence a worker LLM to call `niwa_finish_task(completed, result={fake})` without performing the actual work. Completion is a behavioral contract; niwa cannot detect false-completion structurally. Surfaced as a PRD Known Limitation ("Completion is a behavioral contract"). A v2 heuristic — reject `niwa_finish_task` on a task that emitted zero progress events — is tracked but out of scope.
+- A malicious body can attempt to impersonate niwa control-plane messages. The final line of defense is Claude Code's rendering of tool-response content and the MCP server's outer envelope wrapping on `niwa_check_messages`.
+- **`acceptEdits` amplifies every prompt-injection attack into a filesystem-write primitive.** A prompt-injected worker writes to files in the role's repo directory without prompting — divergent from normal Claude Code sessions where edits require confirmation. This is a real risk reachable through the feature's data plane (malicious delegation body), not a same-UID local-process attack. **Surfaced as a PRD Known Limitation** ("`acceptEdits` amplifies prompt-injection blast radius"). Per-role permission-mode overrides are v2; until then, users who cannot accept this blast radius should disable channel delegation entirely.
 
 ### File Mode Discipline
 
@@ -1049,18 +1168,24 @@ All writes under `.niwa/` use mode 0600 for files and 0700 for directories, appl
 
 Advisory `flock` can be bypassed by same-UID processes. The design accepts this within the trust ceiling; malformed concurrent reads fail closed as authorization errors rather than granting access.
 
-### NIWA_WORKER_SPAWN_COMMAND
+### Binary Resolution (Supply Chain)
 
-This environment variable accepts a literal path to a binary that substitutes for `claude` in the daemon's spawn. It is intentionally an env-var-only mechanism: it is **not** accepted from `workspace.toml`, so a poisoned config file cannot turn into arbitrary code execution at apply time. The trust boundary is "the user's own shell environment": code executed via this override runs at the user's UID with the same privileges the daemon already has. The daemon logs the resolved spawn binary path on startup at INFO level to aid user audit.
+The daemon spawns `claude -p` for every worker. The binary is resolved **once at daemon startup** via `exec.LookPath("claude")` (or whatever `NIWA_WORKER_SPAWN_COMMAND` points at, when set). The resolved absolute path, its owning UID, and its mode bits are logged at INFO to `.niwa/daemon.log` on startup, and the absolute path is reused verbatim for every subsequent spawn. The daemon does **not** re-resolve per-spawn; a `PATH` change during the daemon's lifetime has no effect on which binary runs.
+
+This matters because a naive per-spawn resolution would walk the user's current `PATH` on every spawn, which can be shifted by the same shell-init hooks that projects commonly install (`direnv`, `mise`, `asdf`, `./bin/` prepends). Without resolve-once, a repo's `.envrc` that prepends `./bin` to `PATH` would cause `claude` to resolve to a repo-local binary — and the daemon would then spawn that binary for workers of *every* role, not just the one whose `.envrc` was trusted. Resolve-once contains the blast radius of a poisoned `PATH` to the state of the daemon's own process env at startup.
+
+`NIWA_WORKER_SPAWN_COMMAND` overrides the default binary. It is **env-var only**: the config parser for `workspace.toml` rejects any key named `NIWA_WORKER_SPAWN_COMMAND` (at any nesting) with a parse error, so a malicious clone cannot turn a poisoned `workspace.toml` into arbitrary code execution at apply time. A unit test verifies this rejection; the test is a regression gate, not documentation-only. Code executed via the override runs at the user's UID with the same privileges the daemon already has — the trust boundary is "the user's own shell environment."
+
+**Operational guidance:** do not set `NIWA_WORKER_SPAWN_COMMAND` in shell profiles shared across repositories. The daemon's startup log line is the audit trail for what will actually run.
 
 ### Data Exposure
 
-`envelope.json`, `state.json`, `transitions.log`, `sessions.json`, and inbox files may contain sensitive LLM output (results, code, progress bodies). All are mode 0600 and readable only by the owning user. Two operational notes:
+`envelope.json`, `state.json`, `transitions.log`, `sessions.json`, and inbox files may contain sensitive LLM output (results, code, progress bodies). All are mode 0600 and readable only by the owning user. Concrete v1 defenses:
 
-- `transitions.log` is not garbage-collected in v1 (Known Limitation); tasks accumulate indefinitely. Users concerned about long-term retention should manually clean `.niwa/tasks/` or wait for the v2 `niwa mesh gc` command.
-- The daemon log (`.niwa/daemon.log`) records state transitions, spawn/exit events, and spawn-binary paths at INFO level; it does **not** log envelope or result bodies. Do not lower daemon log verbosity to DEBUG in shared environments without reviewing what is logged.
-
-Exclude `.niwa/` from backups that may be shared or archived to less-protected storage.
+- **`transitions.log` logs only the truncated progress `summary` field, not the full progress `body`.** The summary is already capped at 200 characters per R23; the full body stays in `state.json.last_progress.body`, which is overwritten per progress event (not accumulated). Terminal bodies (`result` for completed, `reason` for abandoned) are still logged, because they are needed for `niwa_query_task` after terminal transition. This mitigation does not eliminate body retention entirely — completed tasks still have their result in both `state.json` and `transitions.log` — but it bounds non-terminal accumulation to summary-only. See the corresponding PRD Known Limitation ("`transitions.log` body retention") for the v2 plan.
+- **The daemon log (`.niwa/daemon.log`) logs state transitions, spawn/exit events, spawn-binary resolution, and watchdog decisions at INFO level only.** Bodies, summaries, results, reasons, and message contents are **never** written to `daemon.log`. A DEBUG verbosity is not defined in v1. Implementation must include a regression test that greps `daemon.log` in a full run and asserts it contains no body/result/reason field content.
+- `transitions.log` is still not garbage-collected in v1; `.niwa/tasks/<id>/` directories accumulate. See the PRD Known Limitation.
+- Exclude `.niwa/` from backups that may be shared or archived to less-protected storage. Backup tools that honor `CACHEDIR.TAG` can be informed via a future sentinel file (out of v1 scope).
 
 ### Daemon Compromise
 
@@ -1074,6 +1199,28 @@ A compromised daemon can exfiltrate every envelope and result in the workspace, 
 ### Denial of Service
 
 No per-caller rate limits in v1. A buggy or hostile LLM can flood a target inbox, exhaust disk, or stall the daemon with rename churn. Mitigations are v2: rate limits, per-role queue caps, disk-space watermarks. For v1, the restart cap (3) and stalled-progress watchdog (15 min default) bound the blast radius of a single runaway worker.
+
+**fsnotify queue overflow.** Linux's per-watch `inotify` queue is bounded by `fs.inotify.max_queued_events` (default 16384). A same-UID process that bulk-creates files in `.niwa/roles/*/inbox/` can overflow the queue, triggering `IN_Q_OVERFLOW`. The daemon handles overflow by: (a) detecting the overflow event; (b) running the catch-up inbox scan to re-enumerate files; (c) processing any found envelopes through the normal claim path. The scan is the durable backstop that fsnotify depends on in the steady state; the design does not need a separate recovery path.
+
+### Containerized and Shared-UID Environments
+
+The design's trust model assumes a conventional single-user interactive Unix environment. The following deployment contexts weaken the `.niwa/` perimeter and are treated as out-of-scope for v1's security guarantees:
+
+- **Dev containers, CI runners, and shared build hosts** where multiple logical actors share a single UID. A niwa instance inside a container shares its UID with every other process in that container, collapsing the same-UID trust boundary to "every container process is trusted." Users running niwa inside such environments should treat the entire container as one logical user.
+- **User namespaces** (`CLONE_NEWUSER` / rootless containers) let unprivileged users create sub-UIDs; a process inside a user namespace may appear same-UID from outside while being isolated inside. Interaction with the mesh's filesystem trust is undefined.
+- **WSL2 interop.** Windows processes accessing `.niwa/` via WSL's `/mnt/c` path mapping may bypass Linux UID semantics. Niwa's guarantees apply only to Linux-native access paths.
+
+Users operating in these environments should either avoid channel delegation or treat every process sharing the niwa UID as trusted.
+
+### Defense-in-Depth Implementation Commitments
+
+These are not negotiable design choices — they are required implementation properties enforced by tests:
+
+- **`O_NOFOLLOW` on opens.** `state.json`, `envelope.json`, `.lock`, and inbox files are opened with `O_NOFOLLOW` (`syscall.O_NOFOLLOW` on Linux/macOS) to defeat same-UID symlink tampering. A regression test creates a symlink in place of `state.json` and asserts the authorizer fails closed.
+- **Strict schema validation on all reads.** Every `state.json` and `envelope.json` read validates `v == 1`, state value against the enumerated set, UUID-shaped IDs (via regex), and size bounds. Fail-closed on any anomaly returns `ErrCorruptedState` → auth-path callers surface `NOT_TASK_PARTY`; admin-path callers return an internal error. A regression test asserts a malformed JSON file in `.niwa/tasks/<id>/` does not panic the daemon or the MCP server.
+- **Path validation at every file-path construction.** Task IDs and message IDs are regex-validated against a UUIDv4 shape before being concatenated into any path, defeating fsnotify-event-based path-traversal attempts.
+- **`NIWA_WORKER_SPAWN_COMMAND` rejected from `workspace.toml`.** A regression test loads a `workspace.toml` containing a `NIWA_WORKER_SPAWN_COMMAND` key and asserts the parser errors. Documentation alone is not the defense.
+- **Worker-side permission to `destroy`.** `niwa destroy` sends SIGKILL directly to worker PGIDs before handling the daemon; the grace period applies only to the daemon (for clean state flush). This minimizes the attack window in which a compromised worker, under `acceptEdits`, can write exfiltration data during teardown. The PRD's `NIWA_DESTROY_GRACE_SECONDS` applies to the daemon phase, not to workers.
 
 ### Known Trust-Ceiling Items (v2 candidates)
 
