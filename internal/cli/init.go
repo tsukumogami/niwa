@@ -6,11 +6,22 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/tsukumogami/niwa/internal/config"
+	sourcepkg "github.com/tsukumogami/niwa/internal/source"
 	"github.com/tsukumogami/niwa/internal/workspace"
 )
+
+// looksLikeURL reports whether s is a full URL or SSH address that
+// should bypass slug-grammar validation. Used by the init command to
+// avoid running source.Parse on non-slug inputs (file://, https://,
+// git@host:path) which the existing ResolveCloneURL handles directly.
+func looksLikeURL(s string) bool {
+	return strings.Contains(s, "://") || strings.HasPrefix(s, "git@") ||
+		(strings.HasPrefix(s, "/") && strings.Count(s, "/") > 1)
+}
 
 func init() {
 	rootCmd.AddCommand(initCmd)
@@ -125,6 +136,16 @@ func runInit(cmd *cobra.Command, args []string) error {
 		}
 
 	case modeClone:
+		// Validate the slug shape early via the canonical parser
+		// (PRD R3 strict parsing). Skip when source looks like a full
+		// URL or SSH address — those go straight to ResolveCloneURL
+		// per today's behavior.
+		if !looksLikeURL(source) {
+			if _, parseErr := sourcepkg.Parse(source); parseErr != nil {
+				return fmt.Errorf("parsing --from slug: %w", parseErr)
+			}
+		}
+
 		cloneURL, err := workspace.ResolveCloneURL(source, globalCfg.CloneProtocol())
 		if err != nil {
 			return fmt.Errorf("resolving clone URL: %w", err)

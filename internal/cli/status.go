@@ -190,6 +190,20 @@ func showDetailView(cmd *cobra.Command, instanceRoot string) error {
 
 	fmt.Fprintf(out, "Instance: %s\n", status.Name)
 	fmt.Fprintf(out, "Config:   %s\n", status.ConfigName)
+	// PRD R20: display the resolved source slug + ref annotation when
+	// state.ConfigSource is populated (v3 and later state files).
+	if state.ConfigSource != nil && state.ConfigSource.URL != "" {
+		ref := state.ConfigSource.Ref
+		if ref == "" {
+			ref = "(default branch)"
+		}
+		oid := state.ConfigSource.ResolvedCommit
+		if len(oid) > 8 {
+			oid = oid[:8]
+		}
+		fmt.Fprintf(out, "Source:   %s @ %s [%s]\n",
+			state.ConfigSource.URL, ref, oid)
+	}
 	fmt.Fprintf(out, "Root:     %s\n", status.Root)
 	fmt.Fprintf(out, "Created:  %s\n", status.Created.Format("2006-01-02 15:04"))
 	fmt.Fprintf(out, "Applied:  %s\n", status.LastApplied.Format("2006-01-02 15:04"))
