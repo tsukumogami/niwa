@@ -1,9 +1,27 @@
 # TODO: workspace-config-sources remaining work
 
 PR #73 / branch `docs/workspace-config-sources`. Tracking the gap between
-PLAN-workspace-config-sources.md and what actually shipped in the 24 commits
-already on the branch. Items are ordered by the original critical path
-(Issue 4 → 5 → 6-tail → 8 → 7) — pick them off the top.
+PLAN-workspace-config-sources.md and what actually shipped on the branch.
+Items are ordered by the (amended 2026-04-23) critical path:
+Issue 4-followup → Issue 5 → Issue 6-tail → Issue 8 → Issue 7.
+
+## 2026-04-23 — PRD/DESIGN/PLAN amendment in effect
+
+User pushback during Issue 5 planning reframed the contract: `.niwa/` is a
+managed assembly, not a directory mirror. Concretely:
+- Niwa pulls only files referenced from `workspace.toml` (PRD R10b).
+- `instance.json` stays at `<workspace>/.niwa/instance.json` — no relocation
+  to `.niwa-state/` (Decision 2 reversed).
+- The carry-over of `instance.json` across the swap is now the intentional
+  "assembly contract" step, not a band-aid.
+
+What this means for remaining work:
+- Issue 4 shipped wholesale-pull semantics. **Issue 4-followup** (new) retools
+  the writer/extractor/fallback to manifest-driven.
+- Issue 5 shrinks to "schema v3 + registry mirror" — no relocation, no
+  dual-path lookup.
+- Issue 8 adds one Gherkin scenario asserting unreferenced files don't appear
+  in the snapshot.
 
 ---
 
@@ -56,51 +74,72 @@ called from the CLI for config dirs. ✅ `go test ./...` clean.
 
 ---
 
-## Issue 5 — instance.json relocation (PARTIAL)
+## Issue 4-followup — Manifest-driven fetch retool (NEW)
 
-**Plan said**: bump schema to v3, add `ConfigSource` block, *and* relocate
-`instance.json` from `<workspace>/.niwa/instance.json` to
-`<workspace>/.niwa-state/instance.json`. v2 files lazy-upgrade. Dual-path
-lookup during the transition. One-time `note:` on first relocation.
+**Why this issue exists**: Issue 4 shipped wholesale-subpath pull. The
+2026-04-23 amendment to PRD R10b says niwa MUST pull only files
+referenced from `workspace.toml`. This issue closes the gap.
+
+**Concrete work**:
+
+- [ ] New `internal/workspace/manifest.go`. Define a small package-level
+  table of path-bearing fields in the workspace.toml schema. Define
+  `BuildManifest(cfg) []string` that walks the table and returns the
+  union of (a) the workspace config filename, (b) explicit path
+  references, (c) transitively-referenced paths.
+- [ ] Modify the tarball extractor to accept a filter (an accept-set or
+  callback). Retain a default that mirrors today's "everything under
+  `<wrapper>/<subpath>/`" so the workspace-overlay-discovery path that
+  doesn't have a manifest keeps working.
+- [ ] Rewrite the snapshot writer's GitHub path to do two-phase
+  extraction: buffer the tarball, extract `workspace.toml` only, parse
+  it, compute manifest, extract manifested files. Discuss buffer-vs-
+  refetch tradeoffs in a code comment.
+- [ ] Rewrite the git-clone fallback equivalently: clone, read
+  `workspace.toml`, compute manifest, copy only manifested files into
+  staging.
+- [ ] Rename `preserveInstanceState` to something that signals "assembly
+  contract step" (e.g., `assembleNiwaLocalState`). Document the closed-
+  set niwa-local file list at the call site.
+- [ ] Add unit / functional test asserting AC-G1 revised: a tarball with
+  `workspace.toml`, `README.md`, and `notes.txt` produces a snapshot
+  containing only `workspace.toml` (plus marker, plus state).
+- [ ] Add unit / functional test asserting AC-M1 revised: snapshot
+  contains exactly the manifested files, marker, and niwa-local state.
+- [ ] Audit existing `*_test.go` to confirm none assert presence of
+  unreferenced files inside `.niwa/` — should be true today, but
+  verify.
+
+**Acceptance**: `find <workspace>/.niwa/ -type f` after apply against a
+multi-file source returns only manifested files + provenance marker +
+instance.json. `make test-functional` clean.
+
+---
+
+## Issue 5 — Schema v3 + registry mirror (COLLAPSED, mostly done)
+
+**Plan amended 2026-04-23**: the relocation work that originally
+dominated Issue 5 is gone. What remains is the schema bump and registry
+mirror, both of which already landed on the branch.
 
 **What landed**: schema bumped to 3, `ConfigSource` field added,
 `SaveState`/`LoadState` round-trip the new field. Forward-version
 rejection lands. Registry mirror fields landed with `PopulateMirror()`.
 
-**Why partial**: there is a literal `TODO(workspace-config-sources Issue 5)`
-comment in `internal/workspace/state.go:19` for the path relocation. The
-file still lives at `<workspace>/.niwa/instance.json`, which means the new
-snapshot path `<workspace>/.niwa/` and the state file collide — every
-`SwapSnapshotAtomic` call must currently preserve the state file across
-the rename, or the swap clobbers it. This is a latent bug waiting to
-trip on the first apply that swaps a snapshot in.
-
 **Concrete remaining work**:
 
-- [ ] Rename the constant in `internal/workspace/state.go:19` from
-  `.niwa` to `.niwa-state`; introduce `LegacyStateDir = ".niwa"` for
-  fallback reads.
-- [ ] Update `LoadState`, `DiscoverInstance`, `EnumerateInstances` to try
-  the new path first, fall back to the legacy path. Audit ~30 callers
-  (per the compaction summary) — most go through these three entry points,
-  but some `cmd/niwa/...` wiring may construct paths directly.
-- [ ] In `SaveState`: write to the new path; if the legacy file exists,
-  `os.Rename` it out of `.niwa/` and emit a one-time
-  `DisclosedNotices.Emit("state-relocated", ...)` `note:`.
-- [ ] Verify `SwapSnapshotAtomic` no longer needs to preserve
-  `instance.json` after relocation — and document the invariant in a
-  comment at the swap site.
-- [ ] Add `internal/workspace/state_test.go` cases: v2→v3 lazy migration
-  preserves unrelated fields (PRD AC-X1), forward-version rejection,
-  dual-path lookup with both files present (new wins), legacy-only
-  workspace upgrades on next save.
-- [ ] Verify all `*_test.go` callers of `SaveState`/`LoadState` are
-  unaffected (they use `t.TempDir()` so the path change is transparent,
-  but confirm).
+- [ ] Delete the `TODO(workspace-config-sources Issue 5)` comment in
+  `internal/workspace/state.go:19` — relocation is no longer planned.
+- [ ] Add `internal/workspace/state_test.go` cases: v2→v3 lazy
+  migration preserves unrelated fields (PRD AC-X1), forward-version
+  rejection.
+- [ ] Confirm the assembly-contract carry-over (renamed in Issue 4-
+  followup) is what handles the swap-collision concern; add a comment
+  at the swap site that explicitly references the assembly contract
+  rather than the (now-deleted) relocation plan.
 
-**Acceptance**: fresh workspaces have no `.niwa/instance.json`; existing
-v2 workspaces migrate on next save with a one-time notice; both formats
-load.
+**Acceptance**: schema test coverage in place; comment cleanup done;
+no relocation logic exists in the codebase.
 
 ---
 
