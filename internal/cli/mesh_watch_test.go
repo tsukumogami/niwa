@@ -2820,6 +2820,285 @@ func TestOrphanPolling_EmptyOrphansShortCircuits(t *testing.T) {
 // error (concurrent writer, torn read), the orphan entry must be kept
 // for the next poll cycle. Dropping on a transient error would silently
 // misclassify a live worker.
+// ---------------------------------------------------------------------
+// Test-harness pause hooks (Issue 8)
+// ---------------------------------------------------------------------
+
+// TestPauseHook_BeforeClaim: with NIWA_TEST_PAUSE_BEFORE_CLAIM=1, the
+// daemon creates .niwa/.test/paused_before_claim atomically and blocks
+// before the state transition + rename. Removing the marker releases
+// the claim flow.
+func TestPauseHook_BeforeClaim(t *testing.T) {
+	defer setTestPausePollIntervalForTest(10 * time.Millisecond)()
+
+	t.Setenv("NIWA_TEST_PAUSE_BEFORE_CLAIM", "1")
+	// Ensure after-claim hook is NOT set, so this test exercises the
+	// before-claim path only.
+	t.Setenv("NIWA_TEST_PAUSE_AFTER_CLAIM", "")
+
+	f := newDaemonTestFixture(t)
+	taskID := f.seedQueuedTask(t, "web")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var wg sync.WaitGroup
+	exitCh := make(chan supervisorExit, 4)
+	spawnCtx := spawnContext{
+		instanceRoot: f.root,
+		niwaDir:      f.niwaDir,
+		spawnBin:     "/bin/true",
+		logger:       log.New(io.Discard, "", 0),
+		exitCh:       exitCh,
+		wg:           &wg,
+		shutdownCtx:  ctx,
+		backoffs:     []time.Duration{60 * time.Second},
+	}
+
+	inboxPath := filepath.Join(f.rolesRoot, "web", "inbox", taskID+".json")
+	evt := inboxEvent{role: "web", taskID: taskID, filePath: inboxPath}
+
+	// Run handleInboxEvent in a goroutine; it will block on the pause.
+	done := make(chan struct{})
+	go func() {
+		handleInboxEvent(evt, spawnCtx)
+		close(done)
+	}()
+
+	markerPath := filepath.Join(f.niwaDir, ".test", "paused_before_claim")
+	if err := waitForFileExists(markerPath, time.Second); err != nil {
+		t.Fatalf("marker paused_before_claim not created within 1s: %v", err)
+	}
+
+	// Envelope must STILL be in inbox/<id>.json — claim has not
+	// happened yet.
+	if _, err := os.Stat(inboxPath); err != nil {
+		t.Errorf("envelope moved out of inbox/ before claim: %v", err)
+	}
+	inProgressPath := filepath.Join(f.rolesRoot, "web", "inbox", "in-progress", taskID+".json")
+	if _, err := os.Stat(inProgressPath); !os.IsNotExist(err) {
+		t.Errorf("envelope already in in-progress/ while pause active: err=%v", err)
+	}
+
+	// State must still be queued.
+	_, st, err := mcp.ReadState(filepath.Join(f.tasksDir, taskID))
+	if err != nil {
+		t.Fatalf("ReadState: %v", err)
+	}
+	if st.State != mcp.TaskStateQueued {
+		t.Errorf("state = %q, want queued while paused before claim", st.State)
+	}
+
+	// Release: remove the marker.
+	if err := os.Remove(markerPath); err != nil {
+		t.Fatalf("removing marker: %v", err)
+	}
+
+	// handleInboxEvent must now proceed and eventually complete.
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("handleInboxEvent did not return within 3s after marker removal")
+	}
+
+	// Envelope should have been renamed to in-progress/.
+	if _, err := os.Stat(inProgressPath); err != nil {
+		t.Errorf("envelope not in in-progress/ after release: %v", err)
+	}
+}
+
+// TestPauseHook_AfterClaim: with NIWA_TEST_PAUSE_AFTER_CLAIM=1, the
+// rename happens BEFORE the marker appears; the envelope is in
+// inbox/in-progress/ by the time the test observes the marker. This
+// is the race window in which niwa_cancel_task returns too_late.
+func TestPauseHook_AfterClaim(t *testing.T) {
+	defer setTestPausePollIntervalForTest(10 * time.Millisecond)()
+
+	t.Setenv("NIWA_TEST_PAUSE_BEFORE_CLAIM", "")
+	t.Setenv("NIWA_TEST_PAUSE_AFTER_CLAIM", "1")
+
+	f := newDaemonTestFixture(t)
+	taskID := f.seedQueuedTask(t, "web")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var wg sync.WaitGroup
+	exitCh := make(chan supervisorExit, 4)
+	spawnCtx := spawnContext{
+		instanceRoot: f.root,
+		niwaDir:      f.niwaDir,
+		spawnBin:     "/bin/true",
+		logger:       log.New(io.Discard, "", 0),
+		exitCh:       exitCh,
+		wg:           &wg,
+		shutdownCtx:  ctx,
+		backoffs:     []time.Duration{60 * time.Second},
+	}
+
+	inboxPath := filepath.Join(f.rolesRoot, "web", "inbox", taskID+".json")
+	inProgressPath := filepath.Join(f.rolesRoot, "web", "inbox", "in-progress", taskID+".json")
+	evt := inboxEvent{role: "web", taskID: taskID, filePath: inboxPath}
+
+	done := make(chan struct{})
+	go func() {
+		handleInboxEvent(evt, spawnCtx)
+		close(done)
+	}()
+
+	markerPath := filepath.Join(f.niwaDir, ".test", "paused_after_claim")
+	if err := waitForFileExists(markerPath, time.Second); err != nil {
+		t.Fatalf("marker paused_after_claim not created within 1s: %v", err)
+	}
+
+	// Claim already happened: envelope is in in-progress/, state is
+	// running, worker.pid is still zero (spawn hasn't started).
+	if _, err := os.Stat(inboxPath); !os.IsNotExist(err) {
+		t.Errorf("envelope still in inbox/ after claim (err=%v)", err)
+	}
+	if _, err := os.Stat(inProgressPath); err != nil {
+		t.Errorf("envelope not in in-progress/ after claim: %v", err)
+	}
+	_, st, err := mcp.ReadState(filepath.Join(f.tasksDir, taskID))
+	if err != nil {
+		t.Fatalf("ReadState: %v", err)
+	}
+	if st.State != mcp.TaskStateRunning {
+		t.Errorf("state = %q, want running after claim", st.State)
+	}
+	if st.Worker.PID != 0 {
+		t.Errorf("worker.pid = %d, want 0 (spawn paused)", st.Worker.PID)
+	}
+
+	// Release and wait for handleInboxEvent to return.
+	if err := os.Remove(markerPath); err != nil {
+		t.Fatalf("removing marker: %v", err)
+	}
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("handleInboxEvent did not return within 3s after marker removal")
+	}
+}
+
+// TestPauseHook_BothDisabled: with neither env var set, no marker
+// directory is ever created and the claim + spawn proceed normally.
+func TestPauseHook_BothDisabled(t *testing.T) {
+	t.Setenv("NIWA_TEST_PAUSE_BEFORE_CLAIM", "")
+	t.Setenv("NIWA_TEST_PAUSE_AFTER_CLAIM", "")
+
+	f := newDaemonTestFixture(t)
+	taskID := f.seedQueuedTask(t, "web")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var wg sync.WaitGroup
+	exitCh := make(chan supervisorExit, 4)
+	spawnCtx := spawnContext{
+		instanceRoot: f.root,
+		niwaDir:      f.niwaDir,
+		spawnBin:     "/bin/true",
+		logger:       log.New(io.Discard, "", 0),
+		exitCh:       exitCh,
+		wg:           &wg,
+		shutdownCtx:  ctx,
+		backoffs:     []time.Duration{60 * time.Second},
+	}
+
+	inboxPath := filepath.Join(f.rolesRoot, "web", "inbox", taskID+".json")
+	evt := inboxEvent{role: "web", taskID: taskID, filePath: inboxPath}
+
+	handleInboxEvent(evt, spawnCtx)
+
+	// No marker directory should ever have been created.
+	testDir := filepath.Join(f.niwaDir, ".test")
+	if _, err := os.Stat(testDir); !os.IsNotExist(err) {
+		t.Errorf(".niwa/.test/ created when pause hooks disabled (err=%v)", err)
+	}
+
+	// Wait for supervisor exit so we don't leak the goroutine.
+	select {
+	case <-exitCh:
+	case <-time.After(3 * time.Second):
+	}
+
+	// Claim + rename happened.
+	inProgressPath := filepath.Join(f.rolesRoot, "web", "inbox", "in-progress", taskID+".json")
+	if _, err := os.Stat(inProgressPath); err != nil {
+		t.Errorf("envelope not in in-progress/ after normal claim: %v", err)
+	}
+
+	cancel()
+	wg.Wait()
+}
+
+// TestPauseHook_ShutdownEscape: a pause hook that is waiting for marker
+// removal must release promptly when the daemon shutdown context is
+// cancelled. Otherwise SIGTERM would hang indefinitely on a test leak.
+func TestPauseHook_ShutdownEscape(t *testing.T) {
+	defer setTestPausePollIntervalForTest(10 * time.Millisecond)()
+
+	t.Setenv("NIWA_TEST_PAUSE_BEFORE_CLAIM", "1")
+	t.Setenv("NIWA_TEST_PAUSE_AFTER_CLAIM", "")
+
+	f := newDaemonTestFixture(t)
+	taskID := f.seedQueuedTask(t, "web")
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	var wg sync.WaitGroup
+	exitCh := make(chan supervisorExit, 4)
+	spawnCtx := spawnContext{
+		instanceRoot: f.root,
+		niwaDir:      f.niwaDir,
+		spawnBin:     "/bin/true",
+		logger:       log.New(io.Discard, "", 0),
+		exitCh:       exitCh,
+		wg:           &wg,
+		shutdownCtx:  ctx,
+		backoffs:     []time.Duration{60 * time.Second},
+	}
+
+	inboxPath := filepath.Join(f.rolesRoot, "web", "inbox", taskID+".json")
+	evt := inboxEvent{role: "web", taskID: taskID, filePath: inboxPath}
+
+	done := make(chan struct{})
+	go func() {
+		handleInboxEvent(evt, spawnCtx)
+		close(done)
+	}()
+
+	markerPath := filepath.Join(f.niwaDir, ".test", "paused_before_claim")
+	if err := waitForFileExists(markerPath, time.Second); err != nil {
+		t.Fatalf("marker not created within 1s: %v", err)
+	}
+
+	// Cancel the shutdown context — pause loop must exit promptly.
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handleInboxEvent did not return within 2s after shutdown context cancelled")
+	}
+}
+
+// waitForFileExists polls until path exists or timeout elapses.
+func waitForFileExists(path string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(path); err == nil {
+			return nil
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if _, err := os.Stat(path); err != nil {
+		return err
+	}
+	return nil
+}
+
 func TestPollOrphans_TransientReadErrorKeepsEntry(t *testing.T) {
 	f := newDaemonTestFixture(t)
 

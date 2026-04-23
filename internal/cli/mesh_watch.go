@@ -575,6 +575,83 @@ func runOrphanSupervisor(initial []orphanEntry, s spawnContext) {
 	}
 }
 
+// testPausePollInterval is the cadence at which waitForTestPauseRelease
+// polls for marker-file removal. Extracted as a var so tests can compress
+// it; production callers must not mutate it.
+var testPausePollInterval = 100 * time.Millisecond
+
+// setTestPausePollIntervalForTest swaps testPausePollInterval for the
+// duration of a test and returns a restore function. Only intended for
+// use from *_test.go files.
+func setTestPausePollIntervalForTest(d time.Duration) func() {
+	prev := testPausePollInterval
+	testPausePollInterval = d
+	return func() { testPausePollInterval = prev }
+}
+
+// maybePauseAtClaimHook is invoked at the consumption-rename boundary
+// before and after the claim rename. When the named env var is set to
+// "1", it atomically creates a marker file under .niwa/.test/ (tmp +
+// rename), then polls for the marker's removal before returning. A
+// shutdown context-cancellation breaks the wait so daemon shutdown is
+// never blocked by a stuck pause hook.
+//
+// When the env var is absent or != "1", the function is a zero-cost
+// no-op: no file ops, no log noise. The marker directory (.niwa/.test/)
+// is an untracked runtime artifact (not registered in
+// InstanceState.ManagedFiles).
+//
+// hookName is one of "before_claim" or "after_claim"; envVar is the
+// corresponding NIWA_TEST_PAUSE_* variable.
+func maybePauseAtClaimHook(evt inboxEvent, s spawnContext, envVar, hookName string) {
+	if os.Getenv(envVar) != "1" {
+		return
+	}
+	testDir := filepath.Join(s.instanceRoot, ".niwa", ".test")
+	if err := os.MkdirAll(testDir, 0o700); err != nil {
+		s.logger.Printf("pause_hook role=%s task=%s hook=%s mkdir_err=%v",
+			evt.role, evt.taskID, hookName, err)
+		return
+	}
+	markerPath := filepath.Join(testDir, "paused_"+hookName)
+	// Atomic write: tmp file in the same dir, then rename.
+	tmpPath := markerPath + ".tmp"
+	if err := os.WriteFile(tmpPath, []byte(evt.taskID), 0o600); err != nil {
+		s.logger.Printf("pause_hook role=%s task=%s hook=%s write_err=%v",
+			evt.role, evt.taskID, hookName, err)
+		return
+	}
+	if err := os.Rename(tmpPath, markerPath); err != nil {
+		_ = os.Remove(tmpPath)
+		s.logger.Printf("pause_hook role=%s task=%s hook=%s rename_err=%v",
+			evt.role, evt.taskID, hookName, err)
+		return
+	}
+	s.logger.Printf("pause_hook role=%s task=%s hook=%s action=paused",
+		evt.role, evt.taskID, hookName)
+
+	// Poll for removal. Break on shutdown so the daemon never hangs
+	// waiting for a marker that a test will never remove.
+	for {
+		if _, err := os.Stat(markerPath); os.IsNotExist(err) {
+			s.logger.Printf("pause_hook role=%s task=%s hook=%s action=released",
+				evt.role, evt.taskID, hookName)
+			return
+		}
+		if s.shutdownCtx != nil {
+			select {
+			case <-s.shutdownCtx.Done():
+				s.logger.Printf("pause_hook role=%s task=%s hook=%s action=shutdown_escape",
+					evt.role, evt.taskID, hookName)
+				return
+			case <-time.After(testPausePollInterval):
+			}
+		} else {
+			time.Sleep(testPausePollInterval)
+		}
+	}
+}
+
 // handleInboxEvent runs the claim → spawn flow for a single queued
 // envelope. Failures are logged and do NOT abort the loop — the daemon
 // must remain responsive to other inboxes.
@@ -599,6 +676,12 @@ func handleInboxEvent(evt inboxEvent, s spawnContext) {
 		}
 		return
 	}
+
+	// Test-harness pause hook (Issue 8): block before the claim so
+	// race-window tests (cancel-vs-claim, update-vs-claim) can observe
+	// the envelope in its pre-claim state. Env-gated; invisible to
+	// production when NIWA_TEST_PAUSE_BEFORE_CLAIM is unset.
+	maybePauseAtClaimHook(evt, s, "NIWA_TEST_PAUSE_BEFORE_CLAIM", "before_claim")
 
 	// Transition state queued → running under the per-task flock. If the
 	// state is already non-queued (claimed, cancelled) the mutator
@@ -656,6 +739,12 @@ func handleInboxEvent(evt inboxEvent, s spawnContext) {
 		return
 	}
 	s.logger.Printf("inbox_event role=%s task=%s claim=ok", evt.role, evt.taskID)
+
+	// Test-harness pause hook (Issue 8): block after the claim but
+	// before the spawn so tests can observe the envelope in the
+	// post-claim window (in-progress/ rename committed, worker.pid
+	// still zero, niwa_cancel_task returns too_late).
+	maybePauseAtClaimHook(evt, s, "NIWA_TEST_PAUSE_AFTER_CLAIM", "after_claim")
 
 	// Spawn the worker.
 	spawnWorker(evt, taskDir, s)

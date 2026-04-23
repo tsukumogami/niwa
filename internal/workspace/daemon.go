@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -97,11 +98,30 @@ func EnsureDaemonRunning(instanceRoot string) error {
 	return nil
 }
 
-// TerminateDaemon sends SIGTERM to the mesh watch daemon for instanceRoot,
-// polls IsPIDAlive for up to 5 seconds, then sends SIGKILL if still alive.
-// It removes daemon.pid once the daemon is confirmed dead or was never running.
+// TerminateDaemon drives the `niwa destroy` teardown sequence:
+//
+//  1. SIGKILL every running worker's process group (negative PID signal)
+//     FIRST, without any grace window. This bounds the attack surface of
+//     a compromised worker running with `--permission-mode=acceptEdits`
+//     — the daemon's grace period would otherwise give such a worker a
+//     5-second exfiltration window during teardown (Issue 8 / DESIGN
+//     Known Limitation: acceptEdits blast radius).
+//  2. SIGTERM the daemon process.
+//  3. Wait up to NIWA_DESTROY_GRACE_SECONDS (default 5 s) for a clean
+//     exit. The daemon keeps its grace period so in-flight state.json
+//     writes and transitions.log fsyncs can complete cleanly.
+//  4. SIGKILL the daemon if still alive.
+//  5. Remove daemon.pid.
 func TerminateDaemon(instanceRoot string) error {
 	niwaDir := filepath.Join(instanceRoot, ".niwa")
+
+	// Step 1: SIGKILL all running worker PGIDs BEFORE touching the
+	// daemon. This must run even when the daemon is already gone — a
+	// crashed daemon may leave orphan workers whose process groups are
+	// still live and whose acceptEdits permission is still in force.
+	killRunningWorkerPGIDs(niwaDir)
+
+	// Step 2+: shut down the daemon itself.
 	pid, startTime, err := ReadPIDFile(niwaDir)
 	if err != nil {
 		return fmt.Errorf("reading daemon pid: %w", err)
@@ -121,13 +141,14 @@ func TerminateDaemon(instanceRoot string) error {
 		return nil
 	}
 
-	// Send SIGTERM and poll for up to 5 seconds.
+	// Send SIGTERM and poll for up to NIWA_DESTROY_GRACE_SECONDS.
 	if err := proc.Signal(syscall.SIGTERM); err != nil {
 		_ = os.Remove(filepath.Join(niwaDir, "daemon.pid"))
 		return nil
 	}
 
-	deadline := time.Now().Add(5 * time.Second)
+	grace := destroyGraceFromEnv()
+	deadline := time.Now().Add(grace)
 	for time.Now().Before(deadline) {
 		time.Sleep(100 * time.Millisecond)
 		if !mcp.IsPIDAlive(pid, startTime) {
@@ -140,6 +161,62 @@ func TerminateDaemon(instanceRoot string) error {
 	_ = proc.Signal(syscall.SIGKILL)
 	_ = os.Remove(filepath.Join(niwaDir, "daemon.pid"))
 	return nil
+}
+
+// destroyGraceFromEnv returns the grace window between SIGTERM and
+// SIGKILL for the daemon. Controlled by NIWA_DESTROY_GRACE_SECONDS;
+// default 5 s. Invalid values fall back to the default silently — the
+// destroy path never refuses to proceed over a bad override.
+func destroyGraceFromEnv() time.Duration {
+	const def = 5 * time.Second
+	raw := os.Getenv("NIWA_DESTROY_GRACE_SECONDS")
+	if raw == "" {
+		return def
+	}
+	v, err := strconv.Atoi(raw)
+	if err != nil || v < 0 {
+		return def
+	}
+	return time.Duration(v) * time.Second
+}
+
+// killRunningWorkerPGIDs enumerates .niwa/tasks/*/state.json and sends
+// SIGKILL to the process group (negative PID) of every task whose state
+// is "running" and whose worker.pid > 0. This is the "worker SIGKILL
+// first" half of the destroy-phase hardening (Issue 8): workers get no
+// grace period so an `acceptEdits`-enabled worker cannot exfiltrate
+// during the daemon's SIGTERM → SIGKILL window.
+//
+// Errors are intentionally silent: this path runs during teardown and
+// must proceed opportunistically. A missing state.json, a worker that
+// has already exited, a PID that no longer belongs to that worker — all
+// of these are acceptable outcomes (the goal is "this PID is not
+// writing anymore", not "we observed a clean kill").
+func killRunningWorkerPGIDs(niwaDir string) {
+	tasksDir := filepath.Join(niwaDir, "tasks")
+	entries, err := os.ReadDir(tasksDir)
+	if err != nil {
+		return // no tasks dir = nothing to kill
+	}
+	for _, ent := range entries {
+		if !ent.IsDir() {
+			continue
+		}
+		taskDir := filepath.Join(tasksDir, ent.Name())
+		_, st, err := mcp.ReadState(taskDir)
+		if err != nil {
+			continue
+		}
+		if st.State != mcp.TaskStateRunning {
+			continue
+		}
+		if st.Worker.PID <= 0 {
+			continue
+		}
+		// Negative PID => signal the entire process group. Workers are
+		// spawned with Setsid=true so worker.pid is also the PGID.
+		_ = syscall.Kill(-st.Worker.PID, syscall.SIGKILL)
+	}
 }
 
 // readPIDBestEffort reads `<niwaDir>/daemon.pid` without holding any
