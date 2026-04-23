@@ -22,7 +22,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strings"
 	"time"
 )
 
@@ -265,7 +264,7 @@ func (s *Server) handleAwaitTask(args awaitTaskArgs) toolResult {
 	// kindDelegator already returns TASK_ALREADY_TERMINAL on terminal tasks;
 	// niwa_await_task should instead return the terminal result.
 	if errR != nil {
-		if errorCodeOf(errR) == "TASK_ALREADY_TERMINAL" {
+		if errorCode(errR) == "TASK_ALREADY_TERMINAL" {
 			// Re-read state.json to obtain the terminal payload.
 			taskDir := taskDirPath(s.instanceRoot, args.TaskID)
 			if _, stTerm, err := ReadState(taskDir); err == nil {
@@ -290,30 +289,18 @@ func (s *Server) handleAwaitTask(args awaitTaskArgs) toolResult {
 	case evt := <-ch:
 		return formatEventResult(evt, taskDir)
 	case <-time.After(time.Duration(timeout) * time.Second):
-		// Timeout returns the current (non-terminal) state snapshot so the
-		// caller can still observe the state machine; this mirrors
-		// niwa_query_task shape.
-		return textResult(formatQueryResult(st))
+		// On timeout return a shape that signals the timeout explicitly while
+		// preserving the current non-terminal state so callers can inspect
+		// progress without a second call. This mirrors handleAsk's timeout
+		// result shape for consistency.
+		currentState := st.State
+		if _, fresh, err := ReadState(taskDir); err == nil {
+			currentState = fresh.State
+		}
+		return textResult(fmt.Sprintf(
+			`{"status":"timeout","task_id":%q,"current_state":%q,"timeout_seconds":%d}`,
+			args.TaskID, currentState, timeout))
 	}
-}
-
-// errorCodeOf extracts the structured error_code from an errResultCode-shaped
-// toolResult pointer. Returns "" when absent.
-func errorCodeOf(r *toolResult) string {
-	if r == nil || !r.IsError || len(r.Content) == 0 {
-		return ""
-	}
-	text := r.Content[0].Text
-	const prefix = "error_code: "
-	idx := strings.Index(text, prefix)
-	if idx < 0 {
-		return ""
-	}
-	rest := text[idx+len(prefix):]
-	if nl := strings.Index(rest, "\n"); nl >= 0 {
-		rest = rest[:nl]
-	}
-	return rest
 }
 
 // --- niwa_report_progress ----------------------------------------------------
@@ -401,7 +388,7 @@ func (s *Server) handleFinishTask(args finishTaskArgs) toolResult {
 	_, _, errR := authorizeTaskCall(s.identity(), args.TaskID, kindExecutor)
 	if errR != nil {
 		// Second call on terminal state returns {status:"already_terminal"}.
-		if errorCodeOf(errR) == "TASK_ALREADY_TERMINAL" {
+		if errorCode(errR) == "TASK_ALREADY_TERMINAL" {
 			taskDir := taskDirPath(s.instanceRoot, args.TaskID)
 			if _, st, err := ReadState(taskDir); err == nil {
 				return textResult(fmt.Sprintf(
@@ -750,14 +737,19 @@ func formatEventResult(evt taskEvent, taskDir string) toolResult {
 	return textResult(string(b))
 }
 
-// mapStoreError converts taskstore errors to PRD R50 error codes. Callers
-// use this when forwarding a storage-layer failure to the tool caller.
+// mapStoreError converts taskstore errors to tool-result shapes. Only
+// ErrAlreadyTerminal has a matching PRD R50 code; ErrCorruptedState and
+// ErrLockTimeout are internal/transient conditions that never appear in the
+// R50 enumeration, so they map to plain errResult (no structured error_code)
+// rather than being mis-labeled as an authorization failure.
 func mapStoreError(err error) toolResult {
 	switch err {
 	case ErrAlreadyTerminal:
 		return errResultCode("TASK_ALREADY_TERMINAL", "task already terminal")
-	case ErrCorruptedState, ErrLockTimeout:
-		return errResultCode("NOT_TASK_PARTY", "not authorized for this task")
+	case ErrCorruptedState:
+		return errResult("taskstore: corrupted state.json (schema validation failed)")
+	case ErrLockTimeout:
+		return errResult("taskstore: lock acquisition timed out")
 	}
 	return errResult("taskstore: " + err.Error())
 }

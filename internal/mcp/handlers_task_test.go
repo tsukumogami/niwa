@@ -46,7 +46,7 @@ func newTestServer(t *testing.T, role string, roles ...string) *Server {
 		}
 		_ = os.MkdirAll(filepath.Join(root, ".niwa", "roles", r, "inbox"), 0o700)
 	}
-	return New("", "", role, "", root)
+	return New(role, root)
 }
 
 // readAllMessages returns every Message file in the given inbox sorted by
@@ -154,7 +154,7 @@ func TestHandleDelegate_UnknownRole(t *testing.T) {
 		To:   "nonexistent",
 		Body: json.RawMessage(`{"x":1}`),
 	})
-	if !res.IsError || errorCodeOfText(res.Content[0].Text) != "UNKNOWN_ROLE" {
+	if !res.IsError || errorCodeFromText(res.Content[0].Text) != "UNKNOWN_ROLE" {
 		t.Errorf("want UNKNOWN_ROLE, got %+v", res)
 	}
 }
@@ -167,7 +167,7 @@ func TestHandleDelegate_BadPayload(t *testing.T) {
 		Body: json.RawMessage(`{"x":1}`),
 		Mode: "invalid",
 	})
-	if !res.IsError || errorCodeOfText(res.Content[0].Text) != "BAD_PAYLOAD" {
+	if !res.IsError || errorCodeFromText(res.Content[0].Text) != "BAD_PAYLOAD" {
 		t.Errorf("want BAD_PAYLOAD, got %+v", res)
 	}
 }
@@ -197,7 +197,7 @@ func TestHandleQueryTask_NotTaskParty(t *testing.T) {
 	taskID := writeTaskFixture(t, s.instanceRoot, "coordinator", "web", TaskStateRunning)
 
 	res := s.handleQueryTask(queryTaskArgs{TaskID: taskID})
-	if !res.IsError || errorCodeOfText(res.Content[0].Text) != "NOT_TASK_PARTY" {
+	if !res.IsError || errorCodeFromText(res.Content[0].Text) != "NOT_TASK_PARTY" {
 		t.Errorf("want NOT_TASK_PARTY, got %+v", res)
 	}
 }
@@ -209,7 +209,7 @@ func TestHandleAwaitTask_NotDelegator(t *testing.T) {
 	taskID := writeTaskFixture(t, s.instanceRoot, "coordinator", "web", TaskStateRunning)
 
 	res := s.handleAwaitTask(awaitTaskArgs{TaskID: taskID, TimeoutSeconds: 1})
-	if !res.IsError || errorCodeOfText(res.Content[0].Text) != "NOT_TASK_OWNER" {
+	if !res.IsError || errorCodeFromText(res.Content[0].Text) != "NOT_TASK_OWNER" {
 		t.Errorf("want NOT_TASK_OWNER, got %+v", res)
 	}
 }
@@ -325,7 +325,7 @@ func TestHandleReportProgress_NotExecutor(t *testing.T) {
 	// s.taskID deliberately empty.
 
 	res := s.handleReportProgress(reportProgressArgs{TaskID: taskID, Summary: "x"})
-	if !res.IsError || errorCodeOfText(res.Content[0].Text) != "NOT_TASK_PARTY" {
+	if !res.IsError || errorCodeFromText(res.Content[0].Text) != "NOT_TASK_PARTY" {
 		t.Errorf("want NOT_TASK_PARTY, got %+v", res)
 	}
 }
@@ -391,7 +391,7 @@ func TestHandleFinishTask_BadPayload(t *testing.T) {
 	}
 	for _, c := range cases {
 		res := s.handleFinishTask(c.args)
-		if !res.IsError || errorCodeOfText(res.Content[0].Text) != "BAD_PAYLOAD" {
+		if !res.IsError || errorCodeFromText(res.Content[0].Text) != "BAD_PAYLOAD" {
 			t.Errorf("%s: want BAD_PAYLOAD, got %+v", c.name, res)
 		}
 	}
@@ -515,7 +515,7 @@ func TestHandleUpdateTask_NotDelegator(t *testing.T) {
 		TaskID: taskID,
 		Body:   json.RawMessage(`{"new":true}`),
 	})
-	if !res.IsError || errorCodeOfText(res.Content[0].Text) != "NOT_TASK_OWNER" {
+	if !res.IsError || errorCodeFromText(res.Content[0].Text) != "NOT_TASK_OWNER" {
 		t.Errorf("want NOT_TASK_OWNER, got %+v", res)
 	}
 }
@@ -581,7 +581,7 @@ func TestHandleCancelTask_NotDelegator(t *testing.T) {
 	taskID := writeTaskFixture(t, s.instanceRoot, "coordinator", "web", TaskStateQueued)
 
 	res := s.handleCancelTask(cancelTaskArgs{TaskID: taskID})
-	if !res.IsError || errorCodeOfText(res.Content[0].Text) != "NOT_TASK_OWNER" {
+	if !res.IsError || errorCodeFromText(res.Content[0].Text) != "NOT_TASK_OWNER" {
 		t.Errorf("want NOT_TASK_OWNER, got %+v", res)
 	}
 }
@@ -596,7 +596,7 @@ func TestHandleSendMessage_BadType(t *testing.T) {
 		Type: "BAD_TYPE!",
 		Body: json.RawMessage(`{}`),
 	})
-	if !res.IsError || errorCodeOfText(res.Content[0].Text) != "BAD_TYPE" {
+	if !res.IsError || errorCodeFromText(res.Content[0].Text) != "BAD_TYPE" {
 		t.Errorf("want BAD_TYPE, got %+v", res)
 	}
 }
@@ -611,7 +611,7 @@ func TestHandleSendMessage_UnknownRole(t *testing.T) {
 		Type: "ping.note",
 		Body: json.RawMessage(`{}`),
 	})
-	if !res.IsError || errorCodeOfText(res.Content[0].Text) != "UNKNOWN_ROLE" {
+	if !res.IsError || errorCodeFromText(res.Content[0].Text) != "UNKNOWN_ROLE" {
 		t.Errorf("want UNKNOWN_ROLE, got %+v", res)
 	}
 }
@@ -774,17 +774,183 @@ func TestNotifyNewFile_UnknownTaskIDIgnored(t *testing.T) {
 	s.notifyNewFile(path, msg.ID+".json")
 }
 
-// errorCodeOfText is the public-surface twin of errorCodeOf; needed because
-// the tests unpack toolResult.Content[0].Text directly.
-func errorCodeOfText(text string) string {
-	const prefix = "error_code: "
-	idx := strings.Index(text, prefix)
-	if idx < 0 {
-		return ""
+// TestHandleAsk_CreatesTaskAndAwaitsTerminalEvent asserts that niwa_ask
+// uniformly creates a first-class task (with body wrapped as
+// {"kind":"ask","body":<original>}) and the reply flows through the
+// task-terminal dispatch (awaitWaiters[task_id]) rather than the legacy
+// waiters[msgID] path. This is the fix for the ask/spawned-worker reply
+// routing mismatch: the ask-task's completion result is the reply.
+func TestHandleAsk_CreatesTaskAndAwaitsTerminalEvent(t *testing.T) {
+	s := newTestServer(t, "coordinator", "web")
+
+	// Run handleAsk in a goroutine; a separate goroutine injects a
+	// task.completed message into the coordinator's inbox with the answer
+	// as body.result, simulating what the worker would emit via
+	// niwa_finish_task.
+	type askOutcome struct {
+		res toolResult
 	}
-	rest := text[idx+len(prefix):]
-	if nl := strings.Index(rest, "\n"); nl >= 0 {
-		rest = rest[:nl]
+	done := make(chan askOutcome, 1)
+	go func() {
+		res := s.handleAsk(askArgs{
+			To:             "web",
+			Body:           json.RawMessage(`{"q":"what is 2+2?"}`),
+			TimeoutSeconds: 5,
+		})
+		done <- askOutcome{res: res}
+	}()
+
+	// Wait for the task envelope to appear in web's inbox, then grab its ID.
+	webInbox := filepath.Join(s.instanceRoot, ".niwa", "roles", "web", "inbox")
+	var taskID string
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && taskID == "" {
+		msgs := readAllMessages(t, webInbox)
+		for _, m := range msgs {
+			if m.Type == "task.delegate" {
+				// Verify body wrapper has kind=ask.
+				var wrap struct {
+					Kind string          `json:"kind"`
+					Body json.RawMessage `json:"body"`
+				}
+				if err := json.Unmarshal(m.Body, &wrap); err == nil && wrap.Kind == "ask" {
+					taskID = m.TaskID
+					if !strings.Contains(string(wrap.Body), `"q":"what is 2+2?"`) {
+						t.Errorf("body not wrapped correctly: %s", wrap.Body)
+					}
+					break
+				}
+			}
+		}
+		if taskID == "" {
+			time.Sleep(20 * time.Millisecond)
+		}
 	}
-	return rest
+	if taskID == "" {
+		t.Fatalf("niwa_ask did not create a task envelope")
+	}
+
+	// Inject task.completed into the coordinator's inbox; the ask handler
+	// should pick it up via notifyNewFile → awaitWaiters dispatch.
+	coordInbox := filepath.Join(s.instanceRoot, ".niwa", "roles", "coordinator", "inbox")
+	_ = os.MkdirAll(coordInbox, 0o700)
+	answer := Message{V: 1, ID: newUUID(), Type: "task.completed",
+		From:   MessageFrom{Role: "web"},
+		To:     MessageTo{Role: "coordinator"},
+		TaskID: taskID,
+		SentAt: time.Now().UTC().Format(time.RFC3339),
+		Body:   json.RawMessage(fmt.Sprintf(`{"task_id":%q,"result":{"answer":"4"}}`, taskID)),
+	}
+	if errTR := writeMessageAtomic(coordInbox, answer.ID, answer); errTR.IsError {
+		t.Fatalf("inject task.completed: %s", errTR.Content[0].Text)
+	}
+	// Seed state.json terminal so formatEventResult's re-read reports
+	// completed and surfaces the result.
+	stPath := filepath.Join(s.instanceRoot, ".niwa", "tasks", taskID, stateFileName)
+	data, _ := os.ReadFile(stPath)
+	var raw map[string]any
+	_ = json.Unmarshal(data, &raw)
+	raw["state"] = TaskStateCompleted
+	raw["result"] = map[string]any{"answer": "4"}
+	out, _ := json.MarshalIndent(raw, "", "  ")
+	_ = os.WriteFile(stPath, out, 0o600)
+
+	// Drive notifyNewFile as the watcher would.
+	s.notifyNewFile(filepath.Join(coordInbox, answer.ID+".json"), answer.ID+".json")
+
+	select {
+	case outcome := <-done:
+		if outcome.res.IsError {
+			t.Fatalf("niwa_ask errored: %s", outcome.res.Content[0].Text)
+		}
+		text := outcome.res.Content[0].Text
+		if !strings.Contains(text, `"status":"completed"`) {
+			t.Errorf("want completed result, got %s", text)
+		}
+		if !strings.Contains(text, `"answer":"4"`) {
+			t.Errorf("want answer payload, got %s", text)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("niwa_ask did not return after task.completed injection")
+	}
+}
+
+// TestHandleAsk_UnknownRole asserts niwa_ask rejects unregistered roles
+// with UNKNOWN_ROLE, preserving parity with niwa_send_message.
+func TestHandleAsk_UnknownRole(t *testing.T) {
+	s := newTestServer(t, "coordinator")
+	res := s.handleAsk(askArgs{
+		To:             "ghost",
+		Body:           json.RawMessage(`{"q":"?"}`),
+		TimeoutSeconds: 1,
+	})
+	if !res.IsError || errorCodeFromText(res.Content[0].Text) != "UNKNOWN_ROLE" {
+		t.Errorf("want UNKNOWN_ROLE, got %+v", res)
+	}
+}
+
+// TestHandleAsk_Timeout asserts niwa_ask returns a timeout-shaped JSON
+// payload (with task_id and timeout_seconds) when no terminal event arrives
+// within the timeout window.
+func TestHandleAsk_Timeout(t *testing.T) {
+	s := newTestServer(t, "coordinator", "web")
+	res := s.handleAsk(askArgs{
+		To:             "web",
+		Body:           json.RawMessage(`{"q":"?"}`),
+		TimeoutSeconds: 1,
+	})
+	if res.IsError {
+		t.Fatalf("ask timeout should not be an error-shaped result: %s", res.Content[0].Text)
+	}
+	text := res.Content[0].Text
+	if !strings.Contains(text, `"status":"timeout"`) {
+		t.Errorf("want timeout status, got %s", text)
+	}
+	if !strings.Contains(text, `"task_id":`) {
+		t.Errorf("timeout result missing task_id: %s", text)
+	}
+}
+
+// TestHandleAwaitTask_Timeout_ReturnsStructuredShape asserts niwa_await_task
+// returns {status:"timeout", task_id, current_state, timeout_seconds} rather
+// than a plain state snapshot when the timeout elapses, so callers can
+// distinguish "task still running" from "task reached a terminal state"
+// without parsing the state machine itself.
+func TestHandleAwaitTask_Timeout_ReturnsStructuredShape(t *testing.T) {
+	s := newTestServer(t, "coordinator", "web")
+	taskID := writeTaskFixture(t, s.instanceRoot, "coordinator", "web", TaskStateRunning)
+
+	res := s.handleAwaitTask(awaitTaskArgs{TaskID: taskID, TimeoutSeconds: 1})
+	if res.IsError {
+		t.Fatalf("await timeout should not be an error result: %s", res.Content[0].Text)
+	}
+	text := res.Content[0].Text
+	if !strings.Contains(text, `"status":"timeout"`) {
+		t.Errorf("want status=timeout, got %s", text)
+	}
+	if !strings.Contains(text, `"current_state":"running"`) {
+		t.Errorf("want current_state=running, got %s", text)
+	}
+	if !strings.Contains(text, `"timeout_seconds":1`) {
+		t.Errorf("want timeout_seconds=1, got %s", text)
+	}
+}
+
+// TestMapStoreError_CorruptedStateIsInternal asserts that
+// mapStoreError(ErrCorruptedState) does not return NOT_TASK_PARTY: a
+// corrupted state file is an internal integrity issue, not an authorization
+// failure, and falsely labeling it as one obscures the real problem.
+func TestMapStoreError_CorruptedStateIsInternal(t *testing.T) {
+	res := mapStoreError(ErrCorruptedState)
+	if !res.IsError {
+		t.Fatalf("want error result, got %+v", res)
+	}
+	if ec := errorCodeFromText(res.Content[0].Text); ec == "NOT_TASK_PARTY" {
+		t.Errorf("ErrCorruptedState must not map to NOT_TASK_PARTY (got %q)", ec)
+	}
+	// Also verify ErrLockTimeout no longer pretends to be an auth failure.
+	res = mapStoreError(ErrLockTimeout)
+	if ec := errorCodeFromText(res.Content[0].Text); ec == "NOT_TASK_PARTY" {
+		t.Errorf("ErrLockTimeout must not map to NOT_TASK_PARTY (got %q)", ec)
+	}
 }

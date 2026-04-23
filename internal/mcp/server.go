@@ -35,49 +35,22 @@ const protocolVersion = "2024-11-05"
 // between 1 and 64 characters, no ".." sequences.
 var fieldPattern = regexp.MustCompile(`^[a-zA-Z0-9._-]{1,64}$`)
 
-// typeWaiter accumulates messages matching a type/from filter set and signals
-// when the threshold count is reached.
-type typeWaiter struct {
-	types     map[string]bool
-	from      map[string]bool
-	threshold int
-	mu        sync.Mutex
-	msgs      []Message
-	signal    chan struct{} // buffered-1
-}
-
-// matches returns true if m satisfies the waiter's type and from filters.
-// An empty filter set means "any".
-func (tw *typeWaiter) matches(m Message) bool {
-	if len(tw.types) > 0 && !tw.types[m.Type] {
-		return false
-	}
-	if len(tw.from) > 0 && !tw.from[m.From.Role] {
-		return false
-	}
-	return true
-}
-
-// Server is a stdio MCP server. It reads from in, writes to out,
-// and watches inboxDir for new message files to push as channel notifications.
-// It also maintains reply-waiter and type-waiter maps for niwa_ask and niwa_wait.
+// Server is a stdio MCP server. It reads from in, writes to out, and watches
+// the caller's role inbox (`.niwa/roles/<role>/inbox/`) for new message files.
+// Per-msgID reply waiters route niwa_ask replies; awaitWaiters route
+// task-terminal messages to sync niwa_delegate and niwa_await_task callers.
 type Server struct {
-	inboxDir     string // this session's per-session inbox (legacy): <instance-root>/.niwa/sessions/<id>/inbox/
-	sessionsDir  string // <instance-root>/.niwa/sessions/
-	sessionRole  string
-	sessionID    string
 	instanceRoot string // <instance-root>
-
-	// role is the caller's session role (from NIWA_SESSION_ROLE). Identical
-	// to sessionRole today; separated here so future renames can proceed
-	// without touching every caller.
+	// role is the caller's session role (from NIWA_SESSION_ROLE). Used for
+	// authorization checks, inbox routing, and the roleInboxDir derivation.
 	role string
 	// taskID is the caller's NIWA_TASK_ID (empty for coordinators). Populated
 	// once at startup; read by handlers to authorize executor-kind calls and
 	// to auto-populate parent_task_id on nested niwa_delegate calls.
 	taskID string
 	// roleInboxDir is <instance-root>/.niwa/roles/<role>/inbox/. Empty when
-	// role is empty (legacy per-session-only setups).
+	// role or instanceRoot is empty (e.g. unit-test setups that construct a
+	// Server without a workspace layout).
 	roleInboxDir string
 
 	mu  sync.Mutex
@@ -90,34 +63,27 @@ type Server struct {
 
 	waitersMu    sync.Mutex
 	waiters      map[string]chan toolResult // msgID → reply channel
-	typeWaiters  map[string]*typeWaiter     // key → waiter
 	awaitWaiters map[string]chan taskEvent  // task_id → terminal-event channel (size-1 buffered)
 }
 
-// New constructs a Server. inboxDir is where this session receives messages;
-// sessionsDir is the parent where all sessions register (for routing sends);
-// instanceRoot is the workspace instance root (for TTL sweep).
-//
-// The Server additionally reads NIWA_TASK_ID from the environment so task-
-// lifecycle handlers can populate parent_task_id and perform executor-kind
-// authorization checks without plumbing a new parameter through every call
-// site. sessionRole doubles as the caller's role per Decision 3.
-func New(inboxDir, sessionsDir, sessionRole, sessionID, instanceRoot string) *Server {
+// New constructs a Server. role is the caller's session role (from
+// NIWA_SESSION_ROLE) and drives roleInboxDir. instanceRoot is the workspace
+// instance root; it anchors `.niwa/roles/`, `.niwa/tasks/`, and the daemon
+// state that MCP tools read. The Server additionally reads NIWA_TASK_ID from
+// the environment so task-lifecycle handlers can populate parent_task_id and
+// perform executor-kind authorization checks without plumbing a new parameter
+// through every call site.
+func New(role, instanceRoot string) *Server {
 	s := &Server{
-		inboxDir:     inboxDir,
-		sessionsDir:  sessionsDir,
-		sessionRole:  sessionRole,
-		sessionID:    sessionID,
 		instanceRoot: instanceRoot,
-		role:         sessionRole,
+		role:         role,
 		taskID:       os.Getenv("NIWA_TASK_ID"),
 		seenFiles:    make(map[string]struct{}),
 		waiters:      make(map[string]chan toolResult),
-		typeWaiters:  make(map[string]*typeWaiter),
 		awaitWaiters: make(map[string]chan taskEvent),
 	}
-	if instanceRoot != "" && sessionRole != "" {
-		s.roleInboxDir = filepath.Join(instanceRoot, ".niwa", "roles", sessionRole, "inbox")
+	if instanceRoot != "" && role != "" {
+		s.roleInboxDir = filepath.Join(instanceRoot, ".niwa", "roles", role, "inbox")
 	}
 	return s
 }
@@ -128,14 +94,9 @@ func New(inboxDir, sessionsDir, sessionRole, sessionID, instanceRoot string) *Se
 func (s *Server) Run(r io.Reader, w io.Writer) error {
 	s.enc = json.NewEncoder(w)
 
-	if s.inboxDir != "" {
-		go s.watchInbox()
-	}
 	if s.roleInboxDir != "" {
 		go s.watchRoleInbox()
 	}
-
-	s.startTTLSweep()
 
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 4<<20), 4<<20)
@@ -149,7 +110,7 @@ func (s *Server) Run(r io.Reader, w io.Writer) error {
 			continue
 		}
 		// Dispatch synchronously so responses are written before stdin closes.
-		// The watchInbox goroutine handles notifications independently.
+		// The watcher goroutine handles notifications independently.
 		s.dispatch(req)
 	}
 	return scanner.Err()
@@ -399,18 +360,16 @@ func (s *Server) callTool(p toolCallParams) toolResult {
 // handleCheckMessages reads all message files from the caller's role inbox
 // (`.niwa/roles/<role>/inbox/`), sweeps expired messages to inbox/expired/,
 // formats the remaining messages as markdown, and moves each returned file
-// to inbox/read/ via atomic rename. When roleInboxDir is unset it falls
-// back to the legacy per-session inbox so already-registered sessions keep
-// working while the roles layout rolls out.
+// to inbox/read/ via atomic rename.
 //
 // For delegated task bodies (type == "task.delegate"), each body is wrapped
 // in a stable outer envelope marker with `_niwa_task_body` and a `_niwa_note`
 // explaining that the payload is delegator-supplied untrusted content. This
 // is the data-plane prompt-injection defense required by Decision 3.
 func (s *Server) handleCheckMessages() toolResult {
-	dir := s.readInboxDir()
+	dir := s.roleInboxDir
 	if dir == "" {
-		return errResult("no inbox dir configured; is NIWA_SESSION_ROLE or NIWA_SESSION_ID set?")
+		return errResult("no inbox dir configured; is NIWA_SESSION_ROLE set?")
 	}
 
 	// Sweep expired messages first so the listing reflects only active ones.
@@ -490,16 +449,6 @@ func (s *Server) handleCheckMessages() toolResult {
 	}
 
 	return textResult(sb.String())
-}
-
-// readInboxDir returns the directory to enumerate for niwa_check_messages.
-// Prefers the role-based inbox (the new Issue-2 layout); falls back to the
-// legacy per-session inbox when the role inbox is absent.
-func (s *Server) readInboxDir() string {
-	if s.roleInboxDir != "" {
-		return s.roleInboxDir
-	}
-	return s.inboxDir
 }
 
 // sweepExpired atomic-renames every expired .json message in dir to
@@ -669,143 +618,63 @@ func (s *Server) isKnownRole(role string) bool {
 	return info.IsDir()
 }
 
-// handleAsk sends a question.ask message to the target role and blocks until
-// a reply arrives (matched by reply_to == msgID) or the timeout elapses.
-// The reply waiter is registered before sending so no reply can arrive
-// between send and registration. Default timeout is 600 s.
+// handleAsk creates a first-class task with body wrapped as
+// {"kind":"ask","body":<original>} and blocks on the task's terminal event.
+// The worker's niwa_finish_task result becomes the reply payload. Default
+// timeout is 600 s.
 //
-// When the target role has no running worker AND the target role is not
-// "coordinator", handleAsk creates a first-class task (body wraps as
-// {"kind":"ask","body":<original>}) and queues it to the target role's
-// inbox — the daemon will spawn a worker on demand. For simplicity (and to
-// match the wire contract), the returned status field is left as "timeout"
-// on timeout; a reply message with reply_to == msgID unblocks the wait
-// whether it came from an existing live worker or a freshly spawned one.
+// Unifying niwa_ask with the task-lifecycle model (instead of a parallel
+// reply-waiter path) removes the "is the target live?" branch the earlier
+// design needed and gives every ask-and-reply the same retry, cancellation,
+// and observability semantics as any other task. The task body's `kind: "ask"`
+// tag signals to worker bootstrap that this is a Q&A rather than a unit of
+// work.
 func (s *Server) handleAsk(args askArgs) toolResult {
-	if args.TimeoutSeconds <= 0 && args.Timeout > 0 {
-		args.TimeoutSeconds = args.Timeout
-	}
 	if args.TimeoutSeconds <= 0 {
 		args.TimeoutSeconds = 600
 	}
 	if args.To == "" {
 		return errResult("to is required")
 	}
-
-	// Reserve a message ID so we can register the waiter before the message
-	// is written. A reply arriving between write and registration would
-	// otherwise be dropped.
-	msgID := newUUID()
-	replyCh, cancel := s.registerWaiter(msgID)
-	defer cancel()
-
-	// When the target role has no registered live session AND it is not the
-	// coordinator, wrap the body in an ask task envelope so the daemon
-	// spawns a worker. Otherwise fall through to the direct-send path.
-	if args.To != coordinatorRole && !s.roleHasLiveSession(args.To) {
-		wrapped := map[string]json.RawMessage{
-			"kind": json.RawMessage(`"ask"`),
-			"body": args.Body,
-		}
-		wrappedBody, _ := json.Marshal(wrapped)
-		if _, errTR := s.createTaskEnvelope(args.To, wrappedBody, "", ""); errTR.IsError {
-			return errTR
-		}
-	} else {
-		if _, errTR := s.sendMessageWithID(msgID, sendMessageArgs{
-			To:   args.To,
-			Type: "question.ask",
-			Body: args.Body,
-		}); errTR.IsError {
-			return errTR
-		}
+	if len(args.Body) == 0 || string(args.Body) == "null" {
+		return errResult("body is required")
+	}
+	if !s.isKnownRole(args.To) {
+		return errResultCode("UNKNOWN_ROLE",
+			fmt.Sprintf("role %q is not registered under .niwa/roles/", args.To))
 	}
 
-	select {
-	case reply := <-replyCh:
-		return reply
-	case <-time.After(time.Duration(args.TimeoutSeconds) * time.Second):
-		return textResult(fmt.Sprintf(`{"status":"timeout","timeout_seconds":%d}`, args.TimeoutSeconds))
+	wrapped := map[string]json.RawMessage{
+		"kind": json.RawMessage(`"ask"`),
+		"body": args.Body,
 	}
-}
-
-// coordinatorRole is the reserved role name for the instance root session.
-// Kept local to mcp (not imported from workspace) to avoid a reverse
-// dependency; the value is stable per PRD R6.
-const coordinatorRole = "coordinator"
-
-// roleHasLiveSession reports whether a role currently has a registered live
-// session in .niwa/sessions/sessions.json. Used by handleAsk to decide
-// whether to spawn an on-demand worker via task envelope. Missing registry
-// or read errors fail closed (returns false → falls through to task spawn).
-func (s *Server) roleHasLiveSession(role string) bool {
-	if s.sessionsDir == "" {
-		return false
-	}
-	data, err := os.ReadFile(filepath.Join(s.sessionsDir, "sessions.json"))
+	wrappedBody, err := json.Marshal(wrapped)
 	if err != nil {
-		return false
-	}
-	var registry SessionRegistry
-	if err := json.Unmarshal(data, &registry); err != nil {
-		return false
-	}
-	for _, sess := range registry.Sessions {
-		if sess.Role == role && IsPIDAlive(sess.PID, sess.StartTime) {
-			return true
-		}
-	}
-	return false
-}
-
-// handleWait registers a typeWaiter and blocks until the threshold count of
-// matching messages arrives or the timeout elapses.
-func (s *Server) handleWait(args waitArgs) toolResult {
-	if args.Timeout <= 0 {
-		args.Timeout = 600
-	}
-	if args.Count <= 0 {
-		args.Count = 1
+		return errResult("cannot marshal ask body: " + err.Error())
 	}
 
-	tw := &typeWaiter{
-		types:     toSet(args.Types),
-		from:      toSet(args.From),
-		threshold: args.Count,
-		signal:    make(chan struct{}, 1),
+	taskID, errTR := s.createTaskEnvelope(args.To, wrappedBody, "", "")
+	if errTR.IsError {
+		return errTR
 	}
 
-	// Register FIRST, then scan. This prevents a race where a message arrives
-	// between the scan and registration.
-	key := newUUID()
-	s.waitersMu.Lock()
-	s.typeWaiters[key] = tw
-	s.waitersMu.Unlock()
-	cancel := func() {
-		s.waitersMu.Lock()
-		delete(s.typeWaiters, key)
-		s.waitersMu.Unlock()
-	}
+	// Register awaitWaiter BEFORE the race-guard state read so a task that
+	// completes between createTaskEnvelope and registration still wakes us.
+	ch, cancel := s.registerAwaitWaiter(taskID)
 	defer cancel()
 
-	s.scanExistingForWaiter(tw)
-
-	tw.mu.Lock()
-	if len(tw.msgs) >= tw.threshold {
-		msgs := append([]Message(nil), tw.msgs...)
-		tw.mu.Unlock()
-		return formatWaitResult(msgs)
+	// Race-guard: re-read state.json in case the task already completed.
+	taskDir := taskDirPath(s.instanceRoot, taskID)
+	if _, st, err := ReadState(taskDir); err == nil && isTaskStateTerminal(st.State) {
+		return formatTerminalResult(st)
 	}
-	tw.mu.Unlock()
 
 	select {
-	case <-tw.signal:
-		tw.mu.Lock()
-		msgs := append([]Message(nil), tw.msgs...)
-		tw.mu.Unlock()
-		return formatWaitResult(msgs)
-	case <-time.After(time.Duration(args.Timeout) * time.Second):
-		return errResultCode("WAIT_TIMEOUT", fmt.Sprintf("timeout after %ds", args.Timeout))
+	case evt := <-ch:
+		return formatEventResult(evt, taskDir)
+	case <-time.After(time.Duration(args.TimeoutSeconds) * time.Second):
+		return textResult(fmt.Sprintf(`{"status":"timeout","task_id":%q,"timeout_seconds":%d}`,
+			taskID, args.TimeoutSeconds))
 	}
 }
 
@@ -822,91 +691,6 @@ func (s *Server) registerWaiter(msgID string) (chan toolResult, func()) {
 		s.waitersMu.Unlock()
 	}
 	return ch, cancel
-}
-
-// scanExistingForWaiter reads existing inbox files and appends matching messages
-// to tw. The waiter is already registered before this is called, so notifyNewFile
-// may run concurrently — tw.mu guards all appends.
-func (s *Server) scanExistingForWaiter(tw *typeWaiter) {
-	if s.inboxDir == "" {
-		return
-	}
-	entries, err := os.ReadDir(s.inboxDir)
-	if err != nil {
-		return
-	}
-	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
-			continue
-		}
-		data, err := os.ReadFile(filepath.Join(s.inboxDir, e.Name()))
-		if err != nil {
-			continue
-		}
-		var m Message
-		if err := json.Unmarshal(data, &m); err != nil {
-			continue
-		}
-		if m.ExpiresAt != "" {
-			exp, err := time.Parse(time.RFC3339, m.ExpiresAt)
-			if err == nil && time.Now().After(exp) {
-				continue
-			}
-		}
-		if tw.matches(m) {
-			tw.mu.Lock()
-			tw.msgs = append(tw.msgs, m)
-			tw.mu.Unlock()
-		}
-		// Mark seen so pollInbox does not deliver the same file a second time
-		// via notifyNewFile, which would double-count it in tw.msgs.
-		s.markSeen(e.Name())
-	}
-}
-
-// formatWaitResult formats accumulated messages as a human-readable tool result.
-func formatWaitResult(msgs []Message) toolResult {
-	var sb strings.Builder
-	fmt.Fprintf(&sb, "%d message(s) received\n\n", len(msgs))
-	for i, m := range msgs {
-		fmt.Fprintf(&sb, "### Message %d — %s from %s\n", i+1, m.Type, m.From.Role)
-		fmt.Fprintf(&sb, "- **ID**: %s\n", m.ID)
-		fmt.Fprintf(&sb, "- **Sent**: %s\n", m.SentAt)
-		fmt.Fprintf(&sb, "\n**Body**:\n```json\n%s\n```\n\n", prettyJSON(m.Body))
-	}
-	return textResult(sb.String())
-}
-
-// toSet converts a string slice to a set map.
-func toSet(ss []string) map[string]bool {
-	if len(ss) == 0 {
-		return nil
-	}
-	m := make(map[string]bool, len(ss))
-	for _, s := range ss {
-		m[s] = true
-	}
-	return m
-}
-
-// pollInbox is called by watchInboxPolling as the fsnotify fallback.
-// It routes each unseen file through notifyNewFile so that reply-waiter and
-// type-waiter correlation works on platforms without fsnotify support.
-func (s *Server) pollInbox() {
-	entries, err := os.ReadDir(s.inboxDir)
-	if err != nil {
-		return
-	}
-	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
-			continue
-		}
-		if s.hasSeen(e.Name()) {
-			continue
-		}
-		path := filepath.Join(s.inboxDir, e.Name())
-		s.notifyNewFile(path, e.Name())
-	}
 }
 
 func (s *Server) markSeen(name string) {
@@ -942,54 +726,6 @@ func (s *Server) sendError(id any, code int, msg string) {
 	s.send(response{JSONRPC: "2.0", ID: id, Error: &rpcError{Code: code, Message: msg}})
 }
 
-// TTL sweep
-
-const defaultTTL = 24 * time.Hour
-
-func (s *Server) startTTLSweep() {
-	go func() {
-		s.sweepRead(defaultTTL)
-		ticker := time.NewTicker(time.Hour)
-		defer ticker.Stop()
-		for range ticker.C {
-			s.sweepRead(defaultTTL)
-		}
-	}()
-}
-
-func (s *Server) sweepRead(ttl time.Duration) {
-	if s.sessionsDir == "" {
-		return
-	}
-	entries, err := os.ReadDir(s.sessionsDir)
-	if err != nil {
-		return
-	}
-	cutoff := time.Now().Add(-ttl)
-	for _, e := range entries {
-		if !e.IsDir() {
-			continue
-		}
-		readDir := filepath.Join(s.sessionsDir, e.Name(), "inbox", "read")
-		files, err := os.ReadDir(readDir)
-		if err != nil {
-			continue
-		}
-		for _, f := range files {
-			if !strings.HasSuffix(f.Name(), ".json") {
-				continue
-			}
-			fi, err := f.Info()
-			if err != nil {
-				continue
-			}
-			if fi.ModTime().Before(cutoff) {
-				_ = os.Remove(filepath.Join(readDir, f.Name()))
-			}
-		}
-	}
-}
-
 // Helpers
 
 func textResult(text string) toolResult {
@@ -1005,6 +741,32 @@ func errResultCode(code, detail string) toolResult {
 		Type: "text",
 		Text: fmt.Sprintf("error_code: %s\ndetail: %s", code, detail),
 	}}}
+}
+
+// errorCode extracts the structured error_code from an errResultCode-shaped
+// toolResult pointer. Returns "" when absent. Shared by every handler and
+// test so the error-code extraction logic lives in exactly one place.
+func errorCode(r *toolResult) string {
+	if r == nil || !r.IsError || len(r.Content) == 0 {
+		return ""
+	}
+	return errorCodeFromText(r.Content[0].Text)
+}
+
+// errorCodeFromText is the string-level twin of errorCode; it accepts a raw
+// content-block text so callers that have already unpacked toolResult don't
+// need to reconstruct one.
+func errorCodeFromText(text string) string {
+	const prefix = "error_code: "
+	idx := strings.Index(text, prefix)
+	if idx < 0 {
+		return ""
+	}
+	rest := text[idx+len(prefix):]
+	if nl := strings.Index(rest, "\n"); nl >= 0 {
+		rest = rest[:nl]
+	}
+	return rest
 }
 
 func prettyJSON(raw json.RawMessage) string {

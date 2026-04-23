@@ -14,7 +14,7 @@ func TestServer_Initialize_ToolsList(t *testing.T) {
 	pr, pw := io.Pipe()
 	var outBuf strings.Builder
 
-	srv := New("", "", "coordinator", "test-session-id", "")
+	srv := New("coordinator", "")
 
 	done := make(chan error, 1)
 	go func() {

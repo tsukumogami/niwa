@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 )
@@ -51,25 +50,6 @@ func writeTaskFixture(t *testing.T, instanceRoot, delegatorRole, targetRole, sta
 		t.Fatal(err)
 	}
 	return taskID
-}
-
-// errorCode extracts the structured error_code from an errResultCode-shaped
-// toolResult. Returns "" when the result is not an error.
-func errorCode(r *toolResult) string {
-	if r == nil || !r.IsError || len(r.Content) == 0 {
-		return ""
-	}
-	text := r.Content[0].Text
-	const prefix = "error_code: "
-	idx := strings.Index(text, prefix)
-	if idx < 0 {
-		return ""
-	}
-	rest := text[idx+len(prefix):]
-	if nl := strings.Index(rest, "\n"); nl >= 0 {
-		rest = rest[:nl]
-	}
-	return rest
 }
 
 // TestAuthorizeTaskCall_Delegator_HappyPath — the delegator role matches envelope.from.

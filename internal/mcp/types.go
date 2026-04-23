@@ -93,12 +93,12 @@ type channelNotificationParams struct {
 
 // Domain types
 
-// Sessions directory layout under <instance-root>/.niwa/sessions/:
-//
-//	sessions.json              — SessionRegistry: all active sessions
-//	<session-uuid>/
-//	  inbox/                   — incoming message files (<msg-uuid>.json)
-//	    read/                  — consumed messages (moved here by notifyNewFile for reply-awaited messages, TTL sweep for others)
+// SessionEntry and SessionRegistry are the on-disk schema for the
+// coordinator-session registry at `.niwa/sessions/sessions.json`, maintained
+// by `niwa session register`. Workers are NOT registered; only coordinators
+// (PRD R39, R40). Message inboxes are keyed by role under `.niwa/roles/<role>/`,
+// not by session ID — so InboxDir's per-session usage is historical and no
+// longer read by the MCP server.
 type SessionEntry struct {
 	ID              string `json:"id"`
 	Role            string `json:"role"`
@@ -152,17 +152,6 @@ type askArgs struct {
 	To             string          `json:"to"`
 	Body           json.RawMessage `json:"body"`
 	TimeoutSeconds int             `json:"timeout_seconds,omitempty"`
-	// Timeout is accepted as a back-compat alias; when both are set,
-	// TimeoutSeconds wins. Kept so existing callers of the earlier tool
-	// surface keep working while upstream updates.
-	Timeout int `json:"timeout,omitempty"`
-}
-
-type waitArgs struct {
-	Types   []string `json:"types,omitempty"`
-	From    []string `json:"from,omitempty"`
-	Count   int      `json:"count,omitempty"`
-	Timeout int      `json:"timeout,omitempty"`
 }
 
 // Task domain types — Issue #1 task storage, types, and authorization.
