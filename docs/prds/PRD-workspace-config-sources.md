@@ -40,12 +40,12 @@ hit users from different directions:
 
 2. **No subpath sourcing forces a `dot-niwa` repo per workspace**. Many
    orgs already maintain a "brain" repo that carries `CLAUDE.md`,
-   planning docs, and Claude config (e.g., `tsukumogami/vision`,
-   `codespar/codespar-web`). The workspace config naturally belongs as a
-   subdirectory of the brain repo — but niwa today demands a whole
-   separate repo at the slug URL. Maintainers either duplicate brain-repo
-   content into a standalone `dot-niwa` (creating drift) or skip niwa
-   entirely.
+   planning docs, and Claude config alongside the org's primary content
+   (whether that's documentation, a flagship application, or a
+   monorepo). The workspace config naturally belongs as a subdirectory
+   of the brain repo — but niwa today demands a whole separate repo at
+   the slug URL. Maintainers either duplicate brain-repo content into a
+   standalone `dot-niwa` (creating drift) or skip niwa entirely.
 
 3. **The working-tree posture invites silent data loss**. Because
    `<workspace>/.niwa/` is a real git working tree, users edit files in
@@ -88,9 +88,9 @@ and remove the silent-edit-loss footgun.
 
 ### Story 1: First-time subpath adoption
 
-A developer at an org with a brain repo (e.g., `tsukumogami/vision`)
-creates a new workspace. They run
-`niwa init --from tsukumogami/vision:.niwa my-workspace`. niwa parses
+A developer at an org with a brain repo (referred to here as
+`org/brain-repo`) creates a new workspace. They run
+`niwa init --from org/brain-repo:.niwa my-workspace`. niwa parses
 the slug, fetches the `.niwa/` subpath of the brain repo's default
 branch as a snapshot, materializes it at `<cwd>/my-workspace/.niwa/`
 (a pure file tree, no `.git/`), and registers the workspace. Subsequent
@@ -100,12 +100,12 @@ they could.
 
 ### Story 2: Migrating from standalone `dot-niwa`
 
-A developer has an existing workspace pointing at
-`tsukumogami/dot-niwa`. The maintainer announces the config has moved
-into the brain repo at `tsukumogami/vision:.niwa`. The developer
-updates the registered source via either path:
+A developer has an existing workspace pointing at a standalone
+`org/dot-niwa` repo. The maintainer announces the config has moved
+into the brain repo at `org/brain-repo:.niwa`. The developer updates
+the registered source via either path:
 
-- CLI: `niwa config set global tsukumogami/vision`
+- CLI: `niwa config set global org/brain-repo`
 - Manual: edit `~/.config/niwa/config.toml` and change the
   `[registry.<name>] source_url` field
 
@@ -115,8 +115,8 @@ source URL changed, refuses to proceed, and prints:
 
 ```
 error: workspace config source changed
-  was:  tsukumogami/dot-niwa
-  now:  tsukumogami/vision (subpath: .niwa, discovered)
+  was:  org/dot-niwa
+  now:  org/brain-repo (subpath: .niwa, discovered)
   The current .niwa/ on disk is a working tree from the old source.
   Replacing it will discard any uncommitted edits.
 To proceed:
@@ -132,18 +132,18 @@ there's no working tree to commit into.
 
 ### Story 3: Brain-repo maintainer publishing
 
-A maintainer of `tsukumogami/vision` decides to host the workspace
-config inside the brain repo. They `git mv` the dot-niwa contents into
-`vision/.niwa/`, drop the standalone repo's housekeeping files, commit,
-and push. They post a one-line announcement: "the workspace config now
-lives at `tsukumogami/vision:.niwa` — run
-`niwa config set global tsukumogami/vision` to switch." Each consumer's
-switch is independent; the standalone `dot-niwa` repo can stay in place
-indefinitely for graceful overlap. No synchronized cutover.
+A maintainer of a brain repo decides to host the workspace config
+inside it. They `git mv` the standalone-`dot-niwa` contents into
+`<brain-repo>/.niwa/`, drop the standalone repo's housekeeping files,
+commit, and push. They post a one-line announcement: "the workspace
+config now lives at `org/brain-repo:.niwa` — run
+`niwa config set global org/brain-repo` to switch." Each consumer's
+switch is independent; the standalone `dot-niwa` repo can stay in
+place indefinitely for graceful overlap. No synchronized cutover.
 
 ### Story 4: Apply after brain-repo force-push
 
-A developer's workspace points at `tsukumogami/vision:.niwa`. The
+A developer's workspace points at `org/brain-repo:.niwa`. The
 brain-repo maintainer force-pushes the default branch to clean up
 history. The developer runs `niwa apply`. niwa fetches a fresh
 representation of the new default-branch tip, computes the new resolved
@@ -155,8 +155,8 @@ workflow before this redesign no longer exists.
 
 ### Story 5: Existing standalone-`dot-niwa` user upgrades
 
-A developer with an established workspace pointing at
-`tsukumogami/dot-niwa` upgrades to a v3-aware niwa binary. Their
+A developer with an established workspace pointing at a standalone
+`org/dot-niwa` repo upgrades to a v3-aware niwa binary. Their
 registry source URL is unchanged; their on-disk `<workspace>/.niwa/`
 is still a git working tree. They run `niwa apply` as usual. niwa
 detects the working-tree shape under an unchanged URL, lazy-converts
@@ -169,7 +169,7 @@ no longer persist across apply.` Subsequent applies behave like Story
 ### Story 6: CI / automation operator
 
 A CI pipeline runs `niwa apply` against a workspace pointing at
-`tsukumogami/vision:.niwa`. The pipeline runs after every push to a
+`org/brain-repo:.niwa`. The pipeline runs after every push to a
 related repo and must use the latest config or fail loudly. The
 operator notices that v1 niwa, when the network is unreachable
 mid-apply, falls back to the cached snapshot with a stderr warning
