@@ -167,17 +167,18 @@ func (c *APIClient) applyAuth(req *http.Request) {
 	}
 }
 
-// detectRename inspects the redirect chain for an api.github.com
-// /repos/{owner}/{repo}/... URL whose owner+repo differs from the
-// initial request's. Returns nil when no rename was detected.
+// detectRename inspects the redirect chain for a /repos/{owner}/{repo}/...
+// URL whose owner+repo differs from the initial request's. Returns nil
+// when no rename was detected.
+//
+// The path shape is the discriminator: codeload redirects use a
+// different path (e.g. /<owner>/<repo>/legacy.tar.gz/...) so they
+// never match this prefix. This makes the detector work both against
+// real api.github.com and against tarballFakeServer in tests, without
+// hard-coding the host.
 func detectRename(requestURL string, chain []*url.URL, origOwner, origRepo string) *RenameRedirect {
 	for _, u := range chain {
 		if u == nil {
-			continue
-		}
-		// We only care about API URLs; the codeload redirect is on a
-		// different host and is not a rename.
-		if !strings.Contains(u.Host, "api.github.com") {
 			continue
 		}
 		// Path shape: /repos/{owner}/{repo}/...
