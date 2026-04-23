@@ -78,32 +78,6 @@ func discoverViaPPIDWalk(homeDir, cwd string) string {
 	return ""
 }
 
-// readPPID reads the PPID of a process from /proc/<pid>/stat (Linux only).
-// Returns 0 on any error or on non-Linux platforms.
-func readPPID(pid int) int {
-	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
-	if err != nil {
-		return 0
-	}
-	s := string(data)
-	// /proc/<pid>/stat: "pid (comm) state ppid ..."
-	// Find the closing ')' of the comm field first because it may contain spaces.
-	idx := strings.LastIndex(s, ")")
-	if idx < 0 {
-		return 0
-	}
-	fields := strings.Fields(s[idx+1:])
-	// fields[0] = state, fields[1] = ppid (field 4 in the /proc spec, 1-indexed)
-	if len(fields) < 2 {
-		return 0
-	}
-	var ppid int
-	if _, err := fmt.Sscanf(fields[1], "%d", &ppid); err != nil {
-		return 0
-	}
-	return ppid
-}
-
 // readClaudeSessionFile parses the session file at path and returns the
 // session ID if the file is valid and its cwd matches the expected cwd.
 func readClaudeSessionFile(path, cwd string) string {

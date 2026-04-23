@@ -61,6 +61,73 @@ func pidStartTime(pid int) (int64, error) {
 	return v, nil
 }
 
+// PPIDChain returns up to n PPIDs walking upward from the current process.
+// The first element is os.Getppid(); the second (if n >= 2) is the PPID of
+// that PID read from /proc/<pid>/stat on Linux, and so on.
+//
+// Walking stops as soon as a PID ≤ 1 is reached (init/kthreadd). A PID in
+// the chain that does not exist surfaces as a structured error so callers
+// can distinguish "no parent present" from "read failed".
+//
+// On non-Linux platforms, only level 1 (os.Getppid) can be resolved; deeper
+// walks return an error. The DESIGN commits to PPIDChain(1) for the
+// authorization check — the claude → mcp-serve topology only requires one
+// level — so this limitation does not constrain Issue #1 use-cases.
+func PPIDChain(n int) ([]int, error) {
+	if n <= 0 {
+		return nil, fmt.Errorf("PPIDChain: n must be >= 1, got %d", n)
+	}
+	chain := make([]int, 0, n)
+
+	// Level 1: cross-platform via os.Getppid.
+	ppid := os.Getppid()
+	if ppid <= 1 {
+		return nil, fmt.Errorf("PPIDChain: no parent PID (got %d)", ppid)
+	}
+	chain = append(chain, ppid)
+
+	// Deeper levels: Linux /proc only.
+	for i := 1; i < n; i++ {
+		parent := readPPID(chain[i-1])
+		if parent == 0 {
+			return chain, fmt.Errorf(
+				"PPIDChain: cannot read /proc/%d/stat (level %d)", chain[i-1], i+1)
+		}
+		if parent <= 1 {
+			return chain, fmt.Errorf(
+				"PPIDChain: reached init at level %d", i+1)
+		}
+		chain = append(chain, parent)
+	}
+	return chain, nil
+}
+
+// readPPID (Linux) returns the PPID for a given PID from /proc/<pid>/stat,
+// or 0 on any read or parse error. Shared with session_discovery.go.
+func readPPID(pid int) int {
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	if err != nil {
+		return 0
+	}
+	s := string(data)
+	// /proc/<pid>/stat: "pid (comm) state ppid ..."
+	// Find the closing ')' of comm first; comm may contain spaces.
+	idx := strings.LastIndex(s, ")")
+	if idx < 0 {
+		return 0
+	}
+	fields := strings.Fields(s[idx+1:])
+	// fields[0] = state, fields[1] = ppid.
+	if len(fields) < 2 {
+		return 0
+	}
+	ppid, err := strconv.Atoi(fields[1])
+	if err != nil {
+		return 0
+	}
+	return ppid
+}
+
 // NewSessionID generates a random session UUID for use during registration.
 func NewSessionID() string { return newUUID() }
 
