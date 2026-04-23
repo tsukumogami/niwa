@@ -229,14 +229,16 @@ func runMeshWatch(cmd *cobra.Command, args []string) error {
 	// 7. Central event loop. Everything state-changing flows through
 	// this goroutine: fsnotify events, catch-up queue, per-task exits.
 	spawnCtx := spawnContext{
-		instanceRoot: instanceRoot,
-		niwaDir:      niwaDir,
-		spawnBin:     spawnInfo.Path,
-		logger:       logger,
-		exitCh:       exitCh,
-		wg:           &supervisorWG,
-		shutdownCtx:  ctx,
-		backoffs:     cfg.RetryBackoffs,
+		instanceRoot:  instanceRoot,
+		niwaDir:       niwaDir,
+		spawnBin:      spawnInfo.Path,
+		logger:        logger,
+		exitCh:        exitCh,
+		wg:            &supervisorWG,
+		shutdownCtx:   ctx,
+		backoffs:      cfg.RetryBackoffs,
+		stallWatchdog: cfg.StallWatchdog,
+		sigTermGrace:  cfg.SIGTermGrace,
 	}
 
 	// Replay catch-up events through a channel so the central loop has a
@@ -269,15 +271,25 @@ func runMeshWatch(cmd *cobra.Command, args []string) error {
 // upcoming attempt). Consumed by the retry scheduler in handleSupervisorExit;
 // if the slice is shorter than the cap, the last value is reused for all
 // remaining attempts (documented in the plan's backoff edge-case notes).
+//
+// stallWatchdog is the maximum silence (no last_progress.at advance) the
+// watchdog tolerates before sending SIGTERM to a running worker. Zero or
+// negative disables the watchdog (used by tests that focus on Issue 4/5
+// behavior). sigTermGrace is the grace period between SIGTERM and SIGKILL
+// and is reused for the defensive-reap timer (worker hung after calling
+// niwa_finish_task). Both flow to the per-supervisor watchdog goroutine
+// started inside spawnWorker.
 type spawnContext struct {
-	instanceRoot string
-	niwaDir      string
-	spawnBin     string
-	logger       *log.Logger
-	exitCh       chan<- supervisorExit
-	wg           *sync.WaitGroup
-	shutdownCtx  context.Context
-	backoffs     []time.Duration
+	instanceRoot  string
+	niwaDir       string
+	spawnBin      string
+	logger        *log.Logger
+	exitCh        chan<- supervisorExit
+	wg            *sync.WaitGroup
+	shutdownCtx   context.Context
+	backoffs      []time.Duration
+	stallWatchdog time.Duration
+	sigTermGrace  time.Duration
 }
 
 // runEventLoop owns the central `select`. It returns only when ctx is
@@ -530,8 +542,25 @@ func spawnWorker(evt inboxEvent, taskDir string, s spawnContext) {
 
 	s.logger.Printf("spawn_ok role=%s task=%s pid=%d start_time=%d", evt.role, evt.taskID, pid, startTime)
 
-	// Supervisor goroutine: wait for exit, close the stderr fd we
-	// allocated above, then report back to the central loop.
+	// waitDone closes when the supervisor goroutine observes cmd.Wait()
+	// return. The watchdog selects on it so a natural exit releases the
+	// watchdog without any polling, killing, or lock contention.
+	waitDone := make(chan struct{})
+
+	// Watchdog goroutine (Issue 6): polls state.json at 2 s and escalates
+	// with SIGTERM → SIGKILL when progress stalls or the worker hangs
+	// after calling niwa_finish_task. Disabled when stallWatchdog <= 0.
+	if s.stallWatchdog > 0 {
+		s.wg.Add(1)
+		go func(c *exec.Cmd, taskID, taskDir string) {
+			defer s.wg.Done()
+			runWatchdog(c, taskID, taskDir, waitDone, s)
+		}(cmd, evt.taskID, taskDir)
+	}
+
+	// Supervisor goroutine: wait for exit, signal watchdog teardown, close
+	// the stderr fd we allocated above, then report back to the central
+	// loop.
 	//
 	// The send is guarded by shutdownCtx rather than using a `default:`
 	// branch. A full exitCh during normal operation is back-pressure,
@@ -544,6 +573,10 @@ func spawnWorker(evt inboxEvent, taskDir string, s spawnContext) {
 	go func(c *exec.Cmd, taskID string, stderrFile *os.File) {
 		defer s.wg.Done()
 		waitErr := c.Wait()
+		// Signal the watchdog goroutine that cmd.Wait has returned. Both
+		// natural exits and watchdog-triggered kills end up here; the
+		// watchdog treats a closed waitDone as "process is gone, exit".
+		close(waitDone)
 		if stderrFile != nil {
 			_ = stderrFile.Close()
 		}
@@ -559,6 +592,226 @@ func spawnWorker(evt inboxEvent, taskDir string, s spawnContext) {
 			// intentionally — see function comment.
 		}
 	}(cmd, evt.taskID, stderrFile)
+}
+
+// runWatchdog enforces the per-supervisor stall watchdog (Issue 6). It
+// polls state.json every 2 s and triggers the SIGTERM → SIGKILL
+// escalation path when:
+//
+//  1. the task is still "running" and `last_progress.at` has not advanced
+//     within `stallWatchdog`, OR
+//  2. the task state is already terminal (completed/abandoned/cancelled)
+//     but the worker process is still alive after `sigTermGrace` (the
+//     defensive-reap path — worker hung after niwa_finish_task).
+//
+// In both cases escalateSignals sends SIGTERM to the worker's process
+// group, waits up to `sigTermGrace` for cmd.Wait to return, and SIGKILLs
+// on expiry. Both signal transitions append a `watchdog_signal` entry to
+// transitions.log with the signal name so the audit trail shows exactly
+// what the daemon did.
+//
+// The watchdog exits immediately when `waitDone` closes — that's the
+// supervisor's signal that cmd.Wait has returned (natural exit, or an
+// exit we already forced). No polling, no leaks.
+func runWatchdog(cmd *exec.Cmd, taskID, taskDir string, waitDone <-chan struct{}, s spawnContext) {
+	ticker := time.NewTicker(watchdogPollInterval)
+	defer ticker.Stop()
+
+	// stallTimer fires when no progress has been observed for
+	// stallWatchdog. Reset on every detected progress advance.
+	stallTimer := time.NewTimer(s.stallWatchdog)
+	defer stallTimer.Stop()
+
+	// Track the last observed progress timestamp and terminal-state
+	// discovery time so we can detect advances and enforce the
+	// defensive-reap grace window.
+	var (
+		lastProgressAt       string
+		terminalObservedAt   time.Time // zero when state is not yet terminal
+		defensiveReapTimer   *time.Timer
+		defensiveReapTimerC  <-chan time.Time
+		watchdogAlreadyFired bool
+	)
+
+	// Seed the baseline from the current state.json so a spawn that
+	// completes its startup before the watchdog ticks cannot be flagged
+	// as stalled on first poll.
+	if _, st, err := mcp.ReadState(taskDir); err == nil {
+		if st.LastProgress != nil {
+			lastProgressAt = st.LastProgress.At
+		}
+	}
+
+	for {
+		select {
+		case <-waitDone:
+			// Natural exit, or we already killed the worker and cmd.Wait
+			// returned. Either way, stop watching.
+			return
+		case <-s.shutdownCtx.Done():
+			// Daemon is shutting down; let destroy-phase code (Issue 8)
+			// drive the kill path. Stop watching.
+			return
+		case <-stallTimer.C:
+			if watchdogAlreadyFired {
+				continue
+			}
+			watchdogAlreadyFired = true
+			s.logger.Printf("watchdog task=%s trigger=stall escalating=SIGTERM", taskID)
+			escalateSignals(cmd, taskID, taskDir, waitDone, s, "stall")
+			// After escalateSignals returns, cmd.Wait may still be
+			// racing to report. Keep looping on waitDone.
+		case <-defensiveReapTimerC:
+			if watchdogAlreadyFired {
+				continue
+			}
+			watchdogAlreadyFired = true
+			s.logger.Printf("watchdog task=%s trigger=defensive_reap escalating=SIGTERM", taskID)
+			escalateSignals(cmd, taskID, taskDir, waitDone, s, "defensive_reap")
+		case <-ticker.C:
+			_, st, err := mcp.ReadState(taskDir)
+			if err != nil {
+				// State read failures are transient (concurrent writer,
+				// disk pressure). Keep polling; don't fire the watchdog
+				// on a transient error.
+				continue
+			}
+			// Progress-advance check: reset stallTimer when
+			// last_progress.at has moved forward.
+			curProgressAt := ""
+			if st.LastProgress != nil {
+				curProgressAt = st.LastProgress.At
+			}
+			if curProgressAt != "" && curProgressAt != lastProgressAt {
+				lastProgressAt = curProgressAt
+				resetTimer(stallTimer, s.stallWatchdog)
+			}
+			// Defensive-reap: state is terminal but the worker process
+			// is still alive. Start a grace timer on first observation;
+			// after it fires, escalate.
+			if stateIsTerminal(st.State) {
+				if terminalObservedAt.IsZero() {
+					terminalObservedAt = time.Now()
+					// Also stop the stallTimer — progress is no longer
+					// relevant once state is terminal.
+					if !stallTimer.Stop() {
+						select {
+						case <-stallTimer.C:
+						default:
+						}
+					}
+					// Start the defensive-reap grace timer.
+					defensiveReapTimer = time.NewTimer(s.sigTermGrace)
+					defensiveReapTimerC = defensiveReapTimer.C
+				}
+			}
+		}
+	}
+}
+
+// resetTimer stops timer, drains a pending fire, and resets it to d. The
+// dance handles the documented time.Timer quirk where a concurrent fire
+// can leave a value in the channel even after Stop returns false.
+func resetTimer(t *time.Timer, d time.Duration) {
+	if !t.Stop() {
+		select {
+		case <-t.C:
+		default:
+		}
+	}
+	t.Reset(d)
+}
+
+// escalateSignals runs the SIGTERM → grace → SIGKILL ladder. Two
+// transitions.log entries are appended: one when SIGTERM is sent, one
+// (only if the grace window expires) when SIGKILL is sent. The Signal
+// field carries the wire signal name.
+//
+// Sends to the process group (negative PID) because worker spawns use
+// Setsid:true — SIGTERM to the leader alone can miss child processes.
+func escalateSignals(cmd *exec.Cmd, taskID, taskDir string, waitDone <-chan struct{}, s spawnContext, trigger string) {
+	if cmd.Process == nil {
+		return
+	}
+	pid := cmd.Process.Pid
+	if pid <= 0 {
+		return
+	}
+
+	// Append SIGTERM entry to transitions.log. Non-fatal on error — we
+	// still want to try killing the worker even if the log write fails.
+	if err := appendWatchdogSignalEntry(taskDir, "SIGTERM", trigger); err != nil {
+		s.logger.Printf("watchdog task=%s log_sigterm_err=%v", taskID, err)
+	}
+
+	// SIGTERM to the process group. -pid signals the whole group
+	// created by Setsid:true.
+	if err := syscall.Kill(-pid, syscall.SIGTERM); err != nil {
+		s.logger.Printf("watchdog task=%s sigterm_err=%v", taskID, err)
+		// Fall through to grace window anyway — the process may have
+		// already exited between the check and the kill.
+	} else {
+		s.logger.Printf("watchdog task=%s sigterm=sent pgid=%d", taskID, pid)
+	}
+
+	// Wait up to sigTermGrace for the worker to exit. If cmd.Wait
+	// returns, the supervisor goroutine closes waitDone and we're done.
+	select {
+	case <-waitDone:
+		s.logger.Printf("watchdog task=%s exited_within_grace=true", taskID)
+		return
+	case <-time.After(s.sigTermGrace):
+	}
+
+	// Grace expired. Escalate to SIGKILL.
+	if err := appendWatchdogSignalEntry(taskDir, "SIGKILL", trigger); err != nil {
+		s.logger.Printf("watchdog task=%s log_sigkill_err=%v", taskID, err)
+	}
+	if err := syscall.Kill(-pid, syscall.SIGKILL); err != nil {
+		s.logger.Printf("watchdog task=%s sigkill_err=%v", taskID, err)
+	} else {
+		s.logger.Printf("watchdog task=%s sigkill=sent pgid=%d", taskID, pid)
+	}
+	// Don't block here waiting for cmd.Wait — the supervisor goroutine
+	// owns that and will signal waitDone when the kernel reaps the PID.
+}
+
+// appendWatchdogSignalEntry writes a `watchdog_signal` NDJSON entry to
+// transitions.log with the given signal name. state.json is not mutated;
+// the entry is audit-only.
+//
+// Uses mcp.AppendAuditEntry directly because mcp.UpdateState rejects
+// mutations on terminal state — and the defensive-reap path fires
+// precisely when state is already terminal. The audit-only API is
+// allowed to append on any state under the per-task flock.
+//
+// WorkerPID is best-effort: the watchdog grabs it from the most recent
+// state.json read. A missing PID is not a failure — the log entry is
+// still useful for the audit trail.
+func appendWatchdogSignalEntry(taskDir, signal, trigger string) error {
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+
+	// Best-effort read of the current worker PID for the audit entry.
+	// We don't require this to succeed — a stale or missing PID only
+	// degrades the log detail, not the correctness of the signal path.
+	workerPID := 0
+	if _, st, err := mcp.ReadState(taskDir); err == nil {
+		workerPID = st.Worker.PID
+	}
+
+	reasonPayload := fmt.Sprintf(`{"trigger":%q}`, trigger)
+	entry := &mcp.TransitionLogEntry{
+		Kind:      "watchdog_signal",
+		At:        now,
+		Signal:    signal,
+		WorkerPID: workerPID,
+		Reason:    json.RawMessage(reasonPayload),
+		Actor: &mcp.TransitionActor{
+			Kind: "daemon",
+			PID:  os.Getpid(),
+		},
+	}
+	return mcp.AppendAuditEntry(taskDir, entry)
 }
 
 // handleSupervisorExit processes a worker exit. The supervisor's return
@@ -728,6 +981,22 @@ func handleSupervisorExit(ex supervisorExit, s spawnContext) {
 // Zero would otherwise abandon on the first unexpected exit, which is
 // not what the defaults promise.
 const defaultMaxRestarts = 3
+
+// watchdogPollInterval is the cadence at which the per-supervisor
+// watchdog polls state.json for progress advances and terminal-state
+// transitions. PRD spec is 2 s (see Issue 6 plan). Exposed as a var so
+// tests can compress it to sub-second values via
+// setWatchdogPollIntervalForTest; production callers must not mutate it.
+var watchdogPollInterval = 2 * time.Second
+
+// setWatchdogPollIntervalForTest swaps watchdogPollInterval for the
+// duration of a test and returns a restore function. Only intended for
+// use from *_test.go files.
+func setWatchdogPollIntervalForTest(d time.Duration) func() {
+	prev := watchdogPollInterval
+	watchdogPollInterval = d
+	return func() { watchdogPollInterval = prev }
+}
 
 // backoffForAttempt returns the retry delay for the given attempt number
 // (1-indexed: attempt=1 is the first retry after the initial spawn).

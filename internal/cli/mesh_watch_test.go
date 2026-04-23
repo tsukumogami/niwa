@@ -1654,3 +1654,656 @@ func TestBackoffForAttempt(t *testing.T) {
 		})
 	}
 }
+
+// ---------------------------------------------------------------------
+// Issue 6: stalled-progress watchdog tests
+// ---------------------------------------------------------------------
+
+// seedRunningTask is a watchdog-specific variant of seedQueuedTask that
+// materializes a task directory already in the "running" state. The
+// watchdog is invoked on behalf of a live worker; there's no need to go
+// through the claim path.
+func (f *daemonTestFixture) seedRunningTask(t *testing.T, toRole string, workerPID int) string {
+	t.Helper()
+	taskID := mcp.NewTaskID()
+	taskDir := filepath.Join(f.tasksDir, taskID)
+	if err := os.MkdirAll(taskDir, 0o700); err != nil {
+		t.Fatalf("mkdir task dir: %v", err)
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+
+	// ReadState validates envelope.json on every read, so materialize a
+	// valid envelope alongside state.json. Without this the watchdog's
+	// ticker ReadState returns ErrCorruptedState on every poll and the
+	// terminal-state check never runs.
+	env := mcp.TaskEnvelope{
+		V:      1,
+		ID:     taskID,
+		From:   mcp.TaskParty{Role: "coordinator", PID: os.Getpid()},
+		To:     mcp.TaskParty{Role: toRole},
+		Body:   json.RawMessage(`{"kind":"test"}`),
+		SentAt: now,
+	}
+	envBytes, _ := json.MarshalIndent(env, "", "  ")
+	if err := os.WriteFile(filepath.Join(taskDir, "envelope.json"), envBytes, 0o600); err != nil {
+		t.Fatalf("write envelope: %v", err)
+	}
+
+	st := &mcp.TaskState{
+		V:      1,
+		TaskID: taskID,
+		State:  mcp.TaskStateRunning,
+		StateTransitions: []mcp.StateTransition{
+			{From: "", To: mcp.TaskStateQueued, At: now},
+			{From: mcp.TaskStateQueued, To: mcp.TaskStateRunning, At: now},
+		},
+		MaxRestarts:   3,
+		DelegatorRole: "coordinator",
+		TargetRole:    toRole,
+		Worker: mcp.TaskWorker{
+			PID:            workerPID,
+			Role:           toRole,
+			SpawnStartedAt: now,
+		},
+		UpdatedAt: now,
+	}
+	stBytes, _ := json.MarshalIndent(st, "", "  ")
+	if err := os.WriteFile(filepath.Join(taskDir, "state.json"), stBytes, 0o600); err != nil {
+		t.Fatalf("write state: %v", err)
+	}
+	// Touch the lock file so UpdateState can flock it.
+	lockPath := filepath.Join(taskDir, ".lock")
+	if f, err := os.Create(lockPath); err == nil {
+		_ = f.Close()
+	}
+	return taskID
+}
+
+// startFakeWorker launches a real subprocess suitable as a watchdog
+// target. Setsid:true mirrors the production spawn path so SIGTERM to
+// the process group behaves the same as for real workers. The caller is
+// responsible for killing the process on test teardown (via t.Cleanup).
+func startFakeWorker(t *testing.T, cmdline []string) *exec.Cmd {
+	t.Helper()
+	cmd := exec.Command(cmdline[0], cmdline[1:]...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("starting fake worker: %v", err)
+	}
+	t.Cleanup(func() {
+		if cmd.Process != nil {
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			_, _ = cmd.Process.Wait()
+		}
+	})
+	return cmd
+}
+
+// runWatchdogAsync is a test helper that drives runWatchdog in a
+// goroutine and returns a waitDone channel the caller closes when the
+// supervisor (i.e., cmd.Wait) returns. The returned done channel closes
+// when runWatchdog returns.
+func runWatchdogAsync(t *testing.T, cmd *exec.Cmd, taskID, taskDir string, s spawnContext) (waitDone chan struct{}, watchdogDone chan struct{}) {
+	t.Helper()
+	waitDone = make(chan struct{})
+	watchdogDone = make(chan struct{})
+	go func() {
+		defer close(watchdogDone)
+		runWatchdog(cmd, taskID, taskDir, waitDone, s)
+	}()
+	return
+}
+
+// countWatchdogSignals returns the number of watchdog_signal entries
+// with the given signal name in transitions.log.
+func countWatchdogSignals(t *testing.T, tasksDir, taskID, signal string) int {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(tasksDir, taskID, "transitions.log"))
+	if err != nil {
+		return 0
+	}
+	count := 0
+	for _, line := range strings.Split(strings.TrimRight(string(data), "\n"), "\n") {
+		if line == "" {
+			continue
+		}
+		var entry mcp.TransitionLogEntry
+		if err := json.Unmarshal([]byte(line), &entry); err != nil {
+			continue
+		}
+		if entry.Kind == "watchdog_signal" && entry.Signal == signal {
+			count++
+		}
+	}
+	return count
+}
+
+// TestWatchdog_ActiveProgressNoTrigger: a worker that updates
+// last_progress.at faster than the watchdog timeout must never trigger
+// SIGTERM. Uses a generous stall-watchdog : bump-interval ratio so the
+// test survives scheduler jitter on loaded CI hosts.
+func TestWatchdog_ActiveProgressNoTrigger(t *testing.T) {
+	defer setWatchdogPollIntervalForTest(50 * time.Millisecond)()
+
+	f := newDaemonTestFixture(t)
+	cmd := startFakeWorker(t, []string{"/bin/sleep", "10"})
+	taskID := f.seedRunningTask(t, "web", cmd.Process.Pid)
+	taskDir := filepath.Join(f.tasksDir, taskID)
+
+	// Seed an initial LastProgress so the watchdog's baseline is
+	// populated before the stall timer starts counting.
+	_ = mcp.UpdateState(taskDir, func(cur *mcp.TaskState) (*mcp.TaskState, *mcp.TransitionLogEntry, error) {
+		next := *cur
+		next.LastProgress = &mcp.TaskProgress{
+			Summary: "seed",
+			At:      time.Now().UTC().Format(time.RFC3339Nano),
+		}
+		return &next, nil, nil
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var wg sync.WaitGroup
+	s := spawnContext{
+		instanceRoot: f.root,
+		niwaDir:      f.niwaDir,
+		logger:       log.New(io.Discard, "", 0),
+		wg:           &wg,
+		shutdownCtx:  ctx,
+		// 800 ms stall window vs 100 ms bump cadence → 8x margin.
+		stallWatchdog: 800 * time.Millisecond,
+		sigTermGrace:  300 * time.Millisecond,
+	}
+
+	waitDone, watchdogDone := runWatchdogAsync(t, cmd, taskID, taskDir, s)
+
+	// Bump last_progress.at every 100 ms for 2 s — generous margin
+	// under the 800 ms stall window.
+	stopBump := make(chan struct{})
+	bumpDone := make(chan struct{})
+	go func() {
+		defer close(bumpDone)
+		ticker := time.NewTicker(100 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stopBump:
+				return
+			case <-ticker.C:
+				_ = mcp.UpdateState(taskDir, func(cur *mcp.TaskState) (*mcp.TaskState, *mcp.TransitionLogEntry, error) {
+					next := *cur
+					next.LastProgress = &mcp.TaskProgress{
+						Summary: "ping",
+						At:      time.Now().UTC().Format(time.RFC3339Nano),
+					}
+					return &next, nil, nil
+				})
+			}
+		}
+	}()
+
+	// Observe for 2 s. The stall window is 800 ms, so without resets we
+	// would see at least 2 SIGTERM entries.
+	time.Sleep(2 * time.Second)
+	close(stopBump)
+	<-bumpDone
+
+	// No watchdog_signal entries must have been written.
+	if n := countWatchdogSignals(t, f.tasksDir, taskID, "SIGTERM"); n != 0 {
+		t.Errorf("watchdog_signal SIGTERM count = %d, want 0 (progress kept advancing)", n)
+	}
+	if n := countWatchdogSignals(t, f.tasksDir, taskID, "SIGKILL"); n != 0 {
+		t.Errorf("watchdog_signal SIGKILL count = %d, want 0", n)
+	}
+
+	// Fake worker must still be alive — watchdog did not fire.
+	if cmd.ProcessState != nil {
+		t.Errorf("fake worker exited before we killed it: %v", cmd.ProcessState)
+	}
+
+	// Tear down: signal waitDone, expect watchdog to return.
+	close(waitDone)
+	select {
+	case <-watchdogDone:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("watchdog did not exit after waitDone closed")
+	}
+}
+
+// TestWatchdog_StallTriggersSigterm: with no progress updates, the
+// watchdog must send SIGTERM and record a watchdog_signal entry.
+func TestWatchdog_StallTriggersSigterm(t *testing.T) {
+	defer setWatchdogPollIntervalForTest(100 * time.Millisecond)()
+
+	f := newDaemonTestFixture(t)
+	cmd := startFakeWorker(t, []string{"/bin/sleep", "30"})
+	taskID := f.seedRunningTask(t, "web", cmd.Process.Pid)
+	taskDir := filepath.Join(f.tasksDir, taskID)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var wg sync.WaitGroup
+	s := spawnContext{
+		instanceRoot:  f.root,
+		niwaDir:       f.niwaDir,
+		logger:        log.New(io.Discard, "", 0),
+		wg:            &wg,
+		shutdownCtx:   ctx,
+		stallWatchdog: 300 * time.Millisecond,
+		sigTermGrace:  500 * time.Millisecond,
+	}
+
+	waitDone, watchdogDone := runWatchdogAsync(t, cmd, taskID, taskDir, s)
+
+	// Run a goroutine that waits on cmd.Wait and closes waitDone when
+	// the process has been reaped — mirrors the supervisor goroutine's
+	// contract. Otherwise the watchdog would block forever waiting for
+	// the process to exit after its SIGKILL.
+	go func() {
+		_ = cmd.Wait()
+		close(waitDone)
+	}()
+
+	// Wait up to 2 s for the SIGTERM entry to appear (stall = 300 ms).
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if countWatchdogSignals(t, f.tasksDir, taskID, "SIGTERM") > 0 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if n := countWatchdogSignals(t, f.tasksDir, taskID, "SIGTERM"); n == 0 {
+		t.Fatalf("no SIGTERM watchdog_signal entry after stall window expired")
+	}
+
+	// Wait for the process to exit (watchdog or supervisor kill).
+	select {
+	case <-waitDone:
+	case <-time.After(3 * time.Second):
+		t.Fatalf("fake worker did not exit after watchdog fired")
+	}
+
+	// Watchdog should return shortly after waitDone closes.
+	select {
+	case <-watchdogDone:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("watchdog did not exit after waitDone closed")
+	}
+}
+
+// TestWatchdog_SigkillAfterGrace: a worker that ignores SIGTERM must be
+// escalated to SIGKILL after sigTermGrace expires. transitions.log must
+// record both signals.
+func TestWatchdog_SigkillAfterGrace(t *testing.T) {
+	defer setWatchdogPollIntervalForTest(100 * time.Millisecond)()
+
+	f := newDaemonTestFixture(t)
+	// trap '' TERM ignores SIGTERM; sleep holds the process alive.
+	cmd := startFakeWorker(t, []string{"/bin/sh", "-c", "trap '' TERM; sleep 30"})
+	taskID := f.seedRunningTask(t, "web", cmd.Process.Pid)
+	taskDir := filepath.Join(f.tasksDir, taskID)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var wg sync.WaitGroup
+	s := spawnContext{
+		instanceRoot:  f.root,
+		niwaDir:       f.niwaDir,
+		logger:        log.New(io.Discard, "", 0),
+		wg:            &wg,
+		shutdownCtx:   ctx,
+		stallWatchdog: 200 * time.Millisecond,
+		sigTermGrace:  300 * time.Millisecond,
+	}
+
+	waitDone, watchdogDone := runWatchdogAsync(t, cmd, taskID, taskDir, s)
+	go func() {
+		_ = cmd.Wait()
+		close(waitDone)
+	}()
+
+	// Wait up to 3 s for both signals to be recorded.
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if countWatchdogSignals(t, f.tasksDir, taskID, "SIGKILL") > 0 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if n := countWatchdogSignals(t, f.tasksDir, taskID, "SIGTERM"); n == 0 {
+		t.Errorf("missing SIGTERM watchdog_signal (must precede SIGKILL)")
+	}
+	if n := countWatchdogSignals(t, f.tasksDir, taskID, "SIGKILL"); n == 0 {
+		t.Fatalf("missing SIGKILL watchdog_signal after grace expired")
+	}
+
+	// Process must eventually die.
+	select {
+	case <-waitDone:
+	case <-time.After(3 * time.Second):
+		t.Fatalf("SIGTERM-ignoring worker did not die even after SIGKILL")
+	}
+
+	select {
+	case <-watchdogDone:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("watchdog did not exit")
+	}
+}
+
+// TestWatchdog_DefensiveReapAfterFinish: a worker that transitions the
+// task to a terminal state but then fails to exit must be reaped after
+// sigTermGrace. The defensive-reap path must NOT bump restart_count —
+// Issue 5's classifier sees terminal state and returns without retry.
+func TestWatchdog_DefensiveReapAfterFinish(t *testing.T) {
+	defer setWatchdogPollIntervalForTest(100 * time.Millisecond)()
+
+	f := newDaemonTestFixture(t)
+	cmd := startFakeWorker(t, []string{"/bin/sleep", "30"})
+	taskID := f.seedRunningTask(t, "web", cmd.Process.Pid)
+	taskDir := filepath.Join(f.tasksDir, taskID)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var wg sync.WaitGroup
+	s := spawnContext{
+		instanceRoot: f.root,
+		niwaDir:      f.niwaDir,
+		logger:       log.New(io.Discard, "", 0),
+		wg:           &wg,
+		shutdownCtx:  ctx,
+		// Long stall watchdog so the stall path cannot fire first —
+		// we're exercising the defensive-reap branch.
+		stallWatchdog: 60 * time.Second,
+		sigTermGrace:  300 * time.Millisecond,
+	}
+
+	waitDone, watchdogDone := runWatchdogAsync(t, cmd, taskID, taskDir, s)
+	go func() {
+		_ = cmd.Wait()
+		close(waitDone)
+	}()
+
+	// Simulate the worker calling niwa_finish_task: transition state
+	// to "completed". The worker process stays alive (hung).
+	if err := mcp.UpdateState(taskDir, func(cur *mcp.TaskState) (*mcp.TaskState, *mcp.TransitionLogEntry, error) {
+		next := *cur
+		next.State = mcp.TaskStateCompleted
+		next.StateTransitions = append(next.StateTransitions,
+			mcp.StateTransition{From: mcp.TaskStateRunning, To: mcp.TaskStateCompleted})
+		next.Result = json.RawMessage(`{"ok":true}`)
+		return &next, &mcp.TransitionLogEntry{Kind: "state_transition", From: mcp.TaskStateRunning, To: mcp.TaskStateCompleted}, nil
+	}); err != nil {
+		t.Fatalf("transition to completed: %v", err)
+	}
+
+	// Wait for defensive reap to fire. Poll interval = 100 ms, grace =
+	// 300 ms → SIGTERM should land within ~500 ms. Give it 3 s of
+	// slack for scheduler noise.
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if countWatchdogSignals(t, f.tasksDir, taskID, "SIGTERM") > 0 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if n := countWatchdogSignals(t, f.tasksDir, taskID, "SIGTERM"); n == 0 {
+		t.Fatalf("defensive reap did not send SIGTERM")
+	}
+
+	// Wait for the process to die.
+	select {
+	case <-waitDone:
+	case <-time.After(3 * time.Second):
+		t.Fatalf("fake worker did not exit after defensive-reap SIGTERM")
+	}
+	<-watchdogDone
+
+	// restart_count must remain 0 — defensive-reap does NOT feed the
+	// retry path (Issue 5's classifier sees terminal state and returns
+	// without bumping).
+	_, st, err := mcp.ReadState(taskDir)
+	if err != nil {
+		t.Fatalf("ReadState: %v", err)
+	}
+	if st.RestartCount != 0 {
+		t.Errorf("restart_count = %d, want 0 (defensive reap must not count as retry)", st.RestartCount)
+	}
+	if st.State != mcp.TaskStateCompleted {
+		t.Errorf("state = %q, want completed (defensive reap must not change state)", st.State)
+	}
+}
+
+// TestWatchdog_NaturalExitNoSignal: when cmd.Wait returns on its own
+// (worker exited cleanly without the watchdog firing), no
+// watchdog_signal entries must appear. This protects against false
+// positives in the leak-detection path above.
+func TestWatchdog_NaturalExitNoSignal(t *testing.T) {
+	defer setWatchdogPollIntervalForTest(100 * time.Millisecond)()
+
+	f := newDaemonTestFixture(t)
+	// /bin/true exits immediately; we simulate the supervisor closing
+	// waitDone in response.
+	cmd := startFakeWorker(t, []string{"/bin/sleep", "0.2"})
+	taskID := f.seedRunningTask(t, "web", cmd.Process.Pid)
+	taskDir := filepath.Join(f.tasksDir, taskID)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var wg sync.WaitGroup
+	s := spawnContext{
+		instanceRoot:  f.root,
+		niwaDir:       f.niwaDir,
+		logger:        log.New(io.Discard, "", 0),
+		wg:            &wg,
+		shutdownCtx:   ctx,
+		stallWatchdog: 5 * time.Second,
+		sigTermGrace:  500 * time.Millisecond,
+	}
+
+	waitDone, watchdogDone := runWatchdogAsync(t, cmd, taskID, taskDir, s)
+	go func() {
+		_ = cmd.Wait()
+		close(waitDone)
+	}()
+
+	// Wait for the watchdog to exit after natural termination.
+	select {
+	case <-watchdogDone:
+	case <-time.After(3 * time.Second):
+		t.Fatalf("watchdog did not exit after natural worker exit")
+	}
+
+	if n := countWatchdogSignals(t, f.tasksDir, taskID, "SIGTERM"); n != 0 {
+		t.Errorf("unexpected SIGTERM watchdog_signal after natural exit: %d", n)
+	}
+	if n := countWatchdogSignals(t, f.tasksDir, taskID, "SIGKILL"); n != 0 {
+		t.Errorf("unexpected SIGKILL watchdog_signal after natural exit: %d", n)
+	}
+}
+
+// TestWatchdog_DisabledWhenStallZero: when stallWatchdog is zero or
+// negative, spawnWorker must not launch the watchdog goroutine. This
+// keeps unit tests (and any downstream callers that opt out) from
+// paying the 2 s ticker cost when they don't need it.
+func TestWatchdog_DisabledWhenStallZero(t *testing.T) {
+	f := newDaemonTestFixture(t)
+	taskID := f.seedQueuedTask(t, "web")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var wg sync.WaitGroup
+	exitCh := make(chan supervisorExit, 1)
+	s := spawnContext{
+		instanceRoot:  f.root,
+		niwaDir:       f.niwaDir,
+		spawnBin:      "/bin/true",
+		logger:        log.New(io.Discard, "", 0),
+		exitCh:        exitCh,
+		wg:            &wg,
+		shutdownCtx:   ctx,
+		backoffs:      []time.Duration{60 * time.Second},
+		stallWatchdog: 0, // disabled
+		sigTermGrace:  500 * time.Millisecond,
+	}
+
+	evt := inboxEvent{
+		role:     "web",
+		taskID:   taskID,
+		filePath: filepath.Join(f.rolesRoot, "web", "inbox", taskID+".json"),
+	}
+	handleInboxEvent(evt, s)
+
+	// Drain the exit event.
+	select {
+	case <-exitCh:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("supervisor exit never arrived")
+	}
+
+	// Wait for the supervisor goroutine to finish. If the watchdog had
+	// been launched it would have added another goroutine to wg.
+	cancel()
+	wg.Wait()
+
+	// No watchdog_signal entries may exist since the watchdog did not
+	// run.
+	if n := countWatchdogSignals(t, f.tasksDir, taskID, "SIGTERM"); n != 0 {
+		t.Errorf("unexpected SIGTERM watchdog_signal when watchdog disabled: %d", n)
+	}
+}
+
+// TestWatchdog_EventuallyRetriesViaIssue5Pipeline: a watchdog-triggered
+// kill must feed Issue 5's classifier (the kill happens while state is
+// still "running"), which schedules a retry. transitions.log must
+// contain a retry_scheduled entry after the watchdog_signal entry.
+//
+// Exercises the full supervisor + watchdog integration in spawnWorker.
+func TestWatchdog_EventuallyRetriesViaIssue5Pipeline(t *testing.T) {
+	defer setWatchdogPollIntervalForTest(100 * time.Millisecond)()
+
+	f := newDaemonTestFixture(t)
+	taskID := f.seedQueuedTask(t, "web")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var wg sync.WaitGroup
+	exitCh := make(chan supervisorExit, 4)
+
+	// spawnWorker enforces a fixed argv shape (-p prompt, --permission-
+	// mode, --mcp-config, --strict-mcp-config) that /bin/sleep cannot
+	// parse. Wrap sleep in a tiny shell script that ignores its args
+	// and keeps the worker alive long enough for the watchdog to fire.
+	script := filepath.Join(t.TempDir(), "sleeper.sh")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nsleep 30\n"), 0o755); err != nil {
+		t.Fatalf("writing sleeper: %v", err)
+	}
+
+	s := spawnContext{
+		instanceRoot: f.root,
+		niwaDir:      f.niwaDir,
+		spawnBin:     script,
+		logger:       log.New(io.Discard, "", 0),
+		exitCh:       exitCh,
+		wg:           &wg,
+		shutdownCtx:  ctx,
+		// 60 s backoff so the scheduled retry does NOT fire during the
+		// test — we're only verifying retry_scheduled appears.
+		backoffs:      []time.Duration{60 * time.Second},
+		stallWatchdog: 300 * time.Millisecond,
+		sigTermGrace:  500 * time.Millisecond,
+	}
+
+	evt := inboxEvent{
+		role:     "web",
+		taskID:   taskID,
+		filePath: filepath.Join(f.rolesRoot, "web", "inbox", taskID+".json"),
+	}
+
+	// Drain exitCh through handleSupervisorExit on a pump goroutine, as
+	// the central loop does in production.
+	pumpCtx, pumpCancel := context.WithCancel(context.Background())
+	pumpDone := make(chan struct{})
+	go func() {
+		defer close(pumpDone)
+		for {
+			select {
+			case ex := <-exitCh:
+				handleSupervisorExit(ex, s)
+			case <-pumpCtx.Done():
+				return
+			}
+		}
+	}()
+
+	handleInboxEvent(evt, s)
+
+	// Wait up to 3 s for both watchdog_signal and retry_scheduled to
+	// appear. The first retry_scheduled is the end-to-end proof that
+	// the watchdog-triggered kill flowed through Issue 5's pipeline.
+	taskDir := filepath.Join(f.tasksDir, taskID)
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if logHasKind(t, f.tasksDir, taskID, "retry_scheduled") &&
+			countWatchdogSignals(t, f.tasksDir, taskID, "SIGTERM") > 0 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if countWatchdogSignals(t, f.tasksDir, taskID, "SIGTERM") == 0 {
+		t.Errorf("watchdog_signal SIGTERM never recorded")
+	}
+	if !logHasKind(t, f.tasksDir, taskID, "retry_scheduled") {
+		t.Errorf("retry_scheduled never appeared — Issue 5 pipeline did not see the watchdog-triggered exit")
+	}
+
+	// Verify the retry_scheduled entry comes AFTER the watchdog_signal
+	// entry, which is the whole point of the integration.
+	data, err := os.ReadFile(filepath.Join(taskDir, "transitions.log"))
+	if err != nil {
+		t.Fatalf("read transitions.log: %v", err)
+	}
+	lines := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
+	var sigIdx, retryIdx int = -1, -1
+	for i, line := range lines {
+		var e mcp.TransitionLogEntry
+		if err := json.Unmarshal([]byte(line), &e); err != nil {
+			continue
+		}
+		if e.Kind == "watchdog_signal" && e.Signal == "SIGTERM" && sigIdx == -1 {
+			sigIdx = i
+		}
+		if e.Kind == "retry_scheduled" && retryIdx == -1 {
+			retryIdx = i
+		}
+	}
+	if sigIdx == -1 || retryIdx == -1 {
+		t.Fatalf("missing signal entry or retry entry; sigIdx=%d retryIdx=%d", sigIdx, retryIdx)
+	}
+	if retryIdx <= sigIdx {
+		t.Errorf("retry_scheduled (line %d) did not follow watchdog_signal (line %d)", retryIdx, sigIdx)
+	}
+
+	// State must still be "running" (retry pending, backoff hasn't
+	// fired). Defensive-reap did not kick in (state never went
+	// terminal). restart_count is not yet bumped (it bumps at retry
+	// fire time, which is deferred by the 60 s backoff above).
+	_, st, err := mcp.ReadState(taskDir)
+	if err != nil {
+		t.Fatalf("ReadState: %v", err)
+	}
+	if st.State != mcp.TaskStateRunning {
+		t.Errorf("state = %q, want running (retry pending)", st.State)
+	}
+
+	// Tear down in the same order the production daemon uses: drain the
+	// exit-event pump (analogue of runEventLoop returning) BEFORE calling
+	// wg.Wait. Otherwise handleSupervisorExit's wg.Add(1) can race
+	// wg.Wait if the pump is still processing when Wait starts.
+	cancel()
+	pumpCancel()
+	<-pumpDone
+	wg.Wait()
+}

@@ -313,6 +313,33 @@ func UpdateState(taskDir string, mutator Mutator) error {
 	return nil
 }
 
+// AppendAuditEntry appends an audit-only NDJSON entry to transitions.log
+// without touching state.json. Unlike UpdateState, this is permitted on
+// terminal state (completed/abandoned/cancelled) so the daemon can log
+// out-of-band events that happen after the worker has already committed
+// its final transition — specifically the defensive-reap path where the
+// watchdog sends SIGTERM/SIGKILL to a hung worker whose task state is
+// already terminal (Issue 6).
+//
+// The append still runs under the per-task exclusive flock so concurrent
+// writers cannot interleave partial lines. Callers must not use this
+// helper to reconstruct state-changing events: state.json is
+// authoritative and terminal state is immutable by design.
+func AppendAuditEntry(taskDir string, entry *TransitionLogEntry) error {
+	lf, err := OpenTaskLock(taskDir)
+	if err != nil {
+		return err
+	}
+	defer lf.Close()
+
+	if err := acquireFlock(lf, true); err != nil {
+		return err
+	}
+	defer func() { _ = releaseFlock(lf) }()
+
+	return appendTransitionLog(taskDir, entry)
+}
+
 // writeStateAtomic writes state.json.tmp, fsyncs it, renames to state.json,
 // and fsyncs the parent directory. Assumes the caller holds the exclusive
 // flock.
