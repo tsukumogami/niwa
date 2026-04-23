@@ -31,6 +31,12 @@ type testState struct {
 	envOverrides  map[string]string // per-scenario env var overrides (win over defaults)
 	gitServer     *localGitServer   // local bare-repo server for offline clone tests
 	repoURLs      map[string]string // name → file:// URL for repos created by localGitServer
+
+	// Mesh scenario state (Issue #10). These fields carry task + pause
+	// state between steps in a single scenario. They are zeroed per the
+	// scenario Before hook via the fresh testState allocation.
+	lastTaskID      string // ID of the most-recently created task envelope
+	pauseHookMarker string // base name of the active pause-hook marker file
 }
 
 func getState(ctx context.Context) *testState {
@@ -130,6 +136,21 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 			repoURLs:      make(map[string]string),
 		}
 		return setState(ctx, state), nil
+	})
+
+	// After hook: kill any niwa daemons this scenario left behind. Daemons
+	// are spawned with Setsid=true so they survive the test process exit
+	// and would hold flocks on daemon.pid.lock across scenarios, starving
+	// the next run. Walking the workspace root's children finds every
+	// daemon.pid the scenario wrote; the PID is SIGKILLed directly so no
+	// grace window applies.
+	ctx.After(func(ctx context.Context, sc *godog.Scenario, scenarioErr error) (context.Context, error) {
+		s := getState(ctx)
+		if s == nil {
+			return ctx, nil
+		}
+		killLeftoverDaemons(s.workspaceRoot)
+		return ctx, nil
 	})
 
 	// Environment
@@ -239,4 +260,31 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 	ctx.Step(`^I set up coordinator session for instance "([^"]*)"$`, iSetUpCoordinatorSessionForInstance)
 	ctx.Step(`^I set up worker session for instance "([^"]*)"$`, iSetUpWorkerSessionForInstance)
 	ctx.Step(`^I run claude -p from instance root "([^"]*)" with simulated worker reply and prompt:$`, iRunClaudePFromInstanceRootWithSimulatedWorkerReply)
+
+	// --- Mesh feature: functional-test harness (Issue #10) ---
+	ctx.Step(`^a channeled workspace "([^"]*)" exists$`, iSetUpChanneledWorkspace)
+	ctx.Step(`^the daemon runs with fake worker scenario "([^"]*)"$`, iRunFakeWorkerWithScenario)
+	ctx.Step(`^the daemon has small timing overrides$`, iSetDefaultTimingOverrides)
+	ctx.Step(`^the daemon pauses before claiming envelopes$`, iPauseDaemonBeforeClaim)
+	ctx.Step(`^the daemon pauses after claiming envelopes$`, iPauseDaemonAfterClaim)
+	ctx.Step(`^the pause marker "([^"]*)" eventually appears$`, iPauseMarkerEventuallyAppears)
+	ctx.Step(`^I release the daemon pause marker$`, iReleaseDaemonPauseMarker)
+	ctx.Step(`^I delegate a task to role "([^"]*)" in instance "([^"]*)" with body '([^']*)'$`, func(ctx context.Context, role, instance, body string) (context.Context, error) {
+		return iDelegateTaskToRole(ctx, instance, role, body)
+	})
+	ctx.Step(`^I cancel the task in instance "([^"]*)"$`, iCancelTheTask)
+	ctx.Step(`^the task state in instance "([^"]*)" eventually becomes "([^"]*)"$`, theTaskStateEventuallyBecomes)
+	ctx.Step(`^the task reason in instance "([^"]*)" contains "([^"]*)"$`, theTaskReasonContains)
+	ctx.Step(`^the task restart_count in instance "([^"]*)" equals (\d+)$`, theTaskRestartCountEquals)
+	ctx.Step(`^the task transitions log in instance "([^"]*)" contains "([^"]*)"$`, theTransitionsLogContains)
+	ctx.Step(`^the daemon log for instance "([^"]*)" does not contain "([^"]*)"$`, theDaemonLogDoesNotContain)
+	ctx.Step(`^the daemon log for instance "([^"]*)" does not contain any of "([^"]*)"$`, theDaemonLogDoesNotContainAnyOf)
+	ctx.Step(`^I SIGKILL the daemon for instance "([^"]*)"$`, iSIGKILLTheDaemon)
+	ctx.Step(`^I SIGKILL the worker for instance "([^"]*)"$`, iSIGKILLTheWorker)
+	ctx.Step(`^I restart the daemon for instance "([^"]*)"$`, iRestartTheDaemon)
+	ctx.Step(`^I run two concurrent applies for instance "([^"]*)"$`, iRunTwoConcurrentApplies)
+	ctx.Step(`^exactly one daemon is running for instance "([^"]*)"$`, exactlyOneDaemonIsRunning)
+	ctx.Step(`^I update the task body in instance "([^"]*)" to '([^']*)'$`, iUpdateTheTaskBody)
+	ctx.Step(`^an unauthorized MCP call for instance "([^"]*)" receives NOT_TASK_PARTY$`, iVerifyAuthorizationDenied)
+	ctx.Step(`^the output contains status "([^"]*)"$`, theOutputContainsStatus)
 }

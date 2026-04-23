@@ -929,6 +929,7 @@ func iWriteFileToRepoInInstance(ctx context.Context, content, relFilePath, group
 	}
 	return ctx, nil
 }
+
 // noNiwaTempFilesRemain scans the scenario's scoped TMPDIR for wrapper
 // leftovers. TMPDIR is set to s.tmpDir in buildEnv, so the wrapper's
 // `mktemp` creates files there; its `rm -f` should clean them up. Any

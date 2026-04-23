@@ -1,4 +1,4 @@
-.PHONY: build test build-test test-functional test-functional-critical test-functional-claude-integration test-install clean
+.PHONY: build test build-test build-worker-fake test-functional test-functional-critical test-functional-claude-integration test-install clean
 
 # Build the niwa binary.
 build:
@@ -9,18 +9,32 @@ test:
 
 # Build a test binary for functional tests. The separate target lets the
 # functional workflow build once and reuse the artifact across scenarios.
-build-test:
+# build-test also builds the scripted worker fake so mesh.feature scenarios
+# that use NIWA_WORKER_SPAWN_COMMAND have their binary ready.
+build-test: build-worker-fake
 	go build -o niwa-test ./cmd/niwa
+
+# Build the scripted worker fake used by mesh.feature scenarios. The fake
+# acts as an MCP client in place of `claude -p` so the daemon's spawn path
+# is exercised end-to-end without relying on a real LLM.
+build-worker-fake:
+	go build -o $(CURDIR)/test/functional/worker_fake/worker-fake ./test/functional/worker_fake
 
 # Run the full functional suite. NIWA_TEST_BINARY points at the prebuilt
 # binary; per-scenario sandboxes live under .niwa-test/ alongside it.
+# NIWA_TEST_WORKER_FAKE is picked up by the runWithFakeWorker step helper.
 test-functional: build-test
-	NIWA_TEST_BINARY=$(CURDIR)/niwa-test go test -v ./test/functional/...
+	NIWA_TEST_BINARY=$(CURDIR)/niwa-test \
+	NIWA_TEST_WORKER_FAKE=$(CURDIR)/test/functional/worker_fake/worker-fake \
+	go test -v ./test/functional/...
 	rm -rf .niwa-test
 
 # Run only scenarios tagged @critical — fast feedback for core flows.
 test-functional-critical: build-test
-	NIWA_TEST_BINARY=$(CURDIR)/niwa-test NIWA_TEST_TAGS=@critical go test -v ./test/functional/...
+	NIWA_TEST_BINARY=$(CURDIR)/niwa-test \
+	NIWA_TEST_WORKER_FAKE=$(CURDIR)/test/functional/worker_fake/worker-fake \
+	NIWA_TEST_TAGS=@critical \
+	go test -v ./test/functional/...
 	rm -rf .niwa-test
 
 # Run only scenarios tagged @claude-integration — requires claude CLI and ANTHROPIC_API_KEY.
