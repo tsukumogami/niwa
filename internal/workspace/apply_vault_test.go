@@ -1108,7 +1108,7 @@ visibility = "public"
 		t.Fatal(err)
 	}
 
-	cloneFn := func(_, dir string) (bool, error) {
+	cloneFn := func(_ context.Context, _, dir string) (bool, error) {
 		if err := os.MkdirAll(filepath.Join(dir, ".git"), 0o755); err != nil {
 			return false, err
 		}

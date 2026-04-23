@@ -74,6 +74,11 @@ func FetchRepo(ctx context.Context, repoDir string, r *Reporter) error {
 // PullRepo performs a fast-forward-only pull on the given branch and returns
 // the number of new commits that were pulled.
 // r receives all git output; pass a non-nil *Reporter.
+//
+// Scope note: this is the WORKSPACE-REPO sync path used by `kind: clone`
+// workspace repos (the user's actual code). Config-dir and overlay sync
+// went to the snapshot model in the workspace-config-sources redesign;
+// don't conflate the two.
 func PullRepo(ctx context.Context, repoDir, branch string, r *Reporter) (int, error) {
 	// Record current HEAD before pull.
 	out, err := exec.Command("git", "-C", repoDir, "rev-parse", "HEAD").Output()

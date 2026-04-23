@@ -25,8 +25,8 @@ type FetchClient interface {
 }
 
 // EnsureConfigSnapshot maintains the snapshot at configDir. It is the
-// new-model entry point that runs as a pre-step before apply's
-// existing SyncConfigDir / CloneOrSyncOverlay calls.
+// only sync strategy for config dirs in the workspace-config-sources
+// model — the legacy git-pull primitives have been retired.
 //
 // Three cases the function dispatches on:
 //
@@ -57,16 +57,14 @@ func EnsureConfigSnapshot(ctx context.Context, configDir string, fetcher FetchCl
 
 	switch {
 	case hasMarker:
-		// Case 1: snapshot. Drift-check + refresh.
-		if fetcher == nil {
-			return nil
-		}
+		// Case 1: snapshot. Drift-check + refresh. The inner function
+		// decides whether nil fetcher is acceptable based on whether
+		// the marker's source is GitHub (needs fetcher) or anything
+		// else (uses git-clone fallback).
 		return refreshSnapshot(ctx, configDir, fetcher, reporter)
 	case hasGit:
-		// Case 2: legacy working tree. R28 lazy conversion.
-		if fetcher == nil {
-			return nil
-		}
+		// Case 2: legacy working tree. R28 lazy conversion. Same
+		// fetcher-may-be-nil semantics as case 1.
 		return lazyConvertWorkingTree(ctx, configDir, fetcher, reporter)
 	default:
 		// Case 3: nothing to maintain.
@@ -104,9 +102,17 @@ func refreshSnapshot(ctx context.Context, configDir string, fetcher FetchClient,
 	}
 
 	if !src.IsGitHub() {
-		// Non-GitHub source: drift-check via git ls-remote, refresh via
-		// git-clone fallback.
-		return refreshSnapshotFallback(ctx, configDir, src, prov, reporter)
+		// Non-GitHub source: no per-host cheap drift check in v1, so we
+		// always re-materialize from a shallow clone. The old snapshot
+		// stays put if the clone fails.
+		return materializeAndSwap(ctx, configDir, src, prov.SourceURL, fetcher, reporter)
+	}
+
+	if fetcher == nil {
+		// GitHub source but no fetcher available (test fixture or
+		// network-unreachable apply). Keep the cached snapshot and
+		// don't error.
+		return nil
 	}
 
 	ref := src.Ref
@@ -151,21 +157,27 @@ func lazyConvertWorkingTree(ctx context.Context, configDir string, fetcher Fetch
 	src, err := parseRemoteURLToSource(originURL)
 	if err != nil {
 		// Couldn't parse the origin into a Source we know how to
-		// fetch. Leave the working tree alone; legacy SyncConfigDir
-		// will continue to handle it.
+		// fetch. Leave the working tree alone — there's no other sync
+		// path now; user can fix the remote and rerun apply.
 		return nil
 	}
 
-	if !src.IsGitHub() {
-		// Non-GitHub working trees stay on the legacy git pull path
-		// for now (per PRD scope: GitHub-first-class fast path; non-
-		// GitHub uses the fallback which is what SyncConfigDir already
-		// is for legacy working trees).
+	if !src.IsGitHub() && fetcher == nil {
+		// Non-GitHub source can run the fallback even without a fetcher,
+		// but if we have neither a GitHub source nor a fetcher there's
+		// nothing usable. Bail without converting.
+		return nil
+	}
+	if src.IsGitHub() && fetcher == nil {
+		// Need a fetch client for the GitHub path. Leave the working
+		// tree alone; user can rerun apply after wiring GH_TOKEN.
 		return nil
 	}
 
 	if err := materializeAndSwap(ctx, configDir, src, src.String(), fetcher, reporter); err != nil {
-		// Conversion failed; legacy SyncConfigDir runs as a safety net.
+		// Conversion failed; leave the working tree alone so the next
+		// apply can retry. No other safety net to fall through to now
+		// that SyncConfigDir is gone.
 		return nil
 	}
 
@@ -175,9 +187,29 @@ func lazyConvertWorkingTree(ctx context.Context, configDir string, fetcher Fetch
 	return nil
 }
 
+// MaterializeFromSource stages a fresh snapshot at configDir from src
+// and promotes it atomically. Used by init (first-time clone via
+// `--from`) and `niwa config set global` (first-time personal overlay
+// clone) where no marker or working tree exists yet.
+//
+// The caller is responsible for ensuring configDir's parent exists;
+// the function creates configDir itself as part of the atomic swap.
+// If configDir already contains a snapshot, the swap replaces it.
+//
+// fetcher may be nil for non-GitHub sources (the fallback path only
+// needs `git`). GitHub sources require a non-nil fetcher.
+func MaterializeFromSource(ctx context.Context, src source.Source, configDir string, fetcher FetchClient, reporter *Reporter) error {
+	return materializeAndSwap(ctx, configDir, src, src.String(), fetcher, reporter)
+}
+
 // materializeAndSwap stages a fresh snapshot at <configDir>.next/,
 // writes the provenance marker, and atomically swaps it into place.
-// Used by both the refresh and lazy-conversion paths.
+// Used by the refresh path, the lazy-conversion path, and the public
+// MaterializeFromSource entry point.
+//
+// Dispatches on src.IsGitHub(): GitHub sources use the tarball +
+// ExtractSubpath pipeline; everything else uses the git-clone
+// fallback in fallback.go.
 func materializeAndSwap(ctx context.Context, configDir string, src source.Source, sourceURL string, fetcher FetchClient, reporter *Reporter) error {
 	parent := filepath.Dir(configDir)
 	staging := configDir + ".next"
@@ -191,45 +223,39 @@ func materializeAndSwap(ctx context.Context, configDir string, src source.Source
 		return fmt.Errorf("EnsureConfigSnapshot: create staging: %w", err)
 	}
 
-	ref := src.Ref
-	if ref == "" {
-		ref = "HEAD"
-	}
+	var (
+		oid            string
+		mechanism      string
+		redirectNotice *github.RenameRedirect
+	)
 
-	body, _, status, redirect, err := fetcher.FetchTarball(ctx, src.Owner, src.Repo, ref, "")
-	if err != nil {
-		_ = safeRemoveAll(staging)
-		return fmt.Errorf("EnsureConfigSnapshot: fetch %s: %w", sourceURL, err)
-	}
-	if body != nil {
-		defer body.Close()
-	}
-	if status == 304 {
-		// Shouldn't happen on an etag-less request; treat as no-op.
-		_ = safeRemoveAll(staging)
-		return nil
-	}
-	if status != 200 {
-		_ = safeRemoveAll(staging)
-		return fmt.Errorf("EnsureConfigSnapshot: fetch %s returned %d", sourceURL, status)
-	}
-
-	if err := github.ExtractSubpath(body, src.Subpath, staging); err != nil {
-		_ = safeRemoveAll(staging)
-		return fmt.Errorf("EnsureConfigSnapshot: extract: %w", err)
-	}
-
-	// Resolve commit oid for the marker. Best effort: if the HeadCommit
-	// call fails we still want to swap with what we have.
-	oid := ""
-	if commitOID, _, _, headErr := fetcher.HeadCommit(ctx, src.Owner, src.Repo, ref, ""); headErr == nil {
-		oid = commitOID
+	if src.IsGitHub() {
+		if fetcher == nil {
+			_ = safeRemoveAll(staging)
+			return fmt.Errorf("EnsureConfigSnapshot: GitHub source %s requires a fetch client", sourceURL)
+		}
+		resolvedOID, redirect, err := materializeFromGitHub(ctx, src, sourceURL, staging, fetcher)
+		if err != nil {
+			_ = safeRemoveAll(staging)
+			return err
+		}
+		oid = resolvedOID
+		redirectNotice = redirect
+		mechanism = FetchMechanismGitHubTarball
+	} else {
+		resolvedOID, err := FetchSubpathViaGitClone(ctx, src, staging)
+		if err != nil {
+			_ = safeRemoveAll(staging)
+			return fmt.Errorf("EnsureConfigSnapshot: %w", err)
+		}
+		oid = resolvedOID
+		mechanism = FetchMechanismGitClone
 	}
 
 	// Surface rename redirect via reporter for one-time visibility.
-	if redirect != nil && reporter != nil {
+	if redirectNotice != nil && reporter != nil {
 		reporter.Log("note: source repo renamed from %s/%s to %s/%s; update your registry to avoid future redirects",
-			redirect.OldOwner, redirect.OldRepo, redirect.NewOwner, redirect.NewRepo)
+			redirectNotice.OldOwner, redirectNotice.OldRepo, redirectNotice.NewOwner, redirectNotice.NewRepo)
 	}
 
 	prov := Provenance{
@@ -241,12 +267,12 @@ func materializeAndSwap(ctx context.Context, configDir string, src source.Source
 		Ref:            src.Ref,
 		ResolvedCommit: oid,
 		FetchedAt:      time.Now().UTC(),
-		FetchMechanism: FetchMechanismGitHubTarball,
+		FetchMechanism: mechanism,
 	}
 	if oid == "" {
 		// Marker requires resolved_commit; substitute a placeholder so
 		// the write succeeds. Drift detection will refresh on the next
-		// apply when HeadCommit succeeds.
+		// apply when oid resolution succeeds.
 		prov.ResolvedCommit = "unknown"
 	}
 	if err := WriteProvenance(staging, prov); err != nil {
@@ -266,16 +292,45 @@ func materializeAndSwap(ctx context.Context, configDir string, src source.Source
 	return nil
 }
 
-// refreshSnapshotFallback handles the non-GitHub drift check and
-// re-fetch via git-clone-and-copy. Currently a placeholder that
-// no-ops; non-GitHub fallback is a v1.x candidate per PRD scope.
-func refreshSnapshotFallback(ctx context.Context, configDir string, src source.Source, prov Provenance, reporter *Reporter) error {
-	_ = ctx
-	_ = configDir
-	_ = src
-	_ = prov
-	_ = reporter
-	return nil
+// materializeFromGitHub handles the tarball fetch + extract portion
+// of materializeAndSwap for GitHub sources. Returns the resolved
+// commit oid (best-effort) and any rename-redirect observed.
+func materializeFromGitHub(ctx context.Context, src source.Source, sourceURL, staging string, fetcher FetchClient) (string, *github.RenameRedirect, error) {
+	ref := src.Ref
+	if ref == "" {
+		ref = "HEAD"
+	}
+
+	body, _, status, redirect, err := fetcher.FetchTarball(ctx, src.Owner, src.Repo, ref, "")
+	if err != nil {
+		return "", nil, fmt.Errorf("EnsureConfigSnapshot: fetch %s: %w", sourceURL, err)
+	}
+	if body != nil {
+		defer body.Close()
+	}
+	if status == 304 {
+		// Shouldn't happen on an etag-less request; treat as a no-op
+		// by leaving the staging dir empty. Caller will fail on empty
+		// WriteProvenance if it reaches that point, but the swap
+		// won't promote.
+		return "", nil, fmt.Errorf("EnsureConfigSnapshot: fetch %s returned 304 unexpectedly", sourceURL)
+	}
+	if status != 200 {
+		return "", nil, fmt.Errorf("EnsureConfigSnapshot: fetch %s returned %d", sourceURL, status)
+	}
+
+	if err := github.ExtractSubpath(body, src.Subpath, staging); err != nil {
+		return "", nil, fmt.Errorf("EnsureConfigSnapshot: extract: %w", err)
+	}
+
+	// Resolve commit oid for the marker. Best effort: if the HeadCommit
+	// call fails we still want to swap with what we have.
+	oid := ""
+	if commitOID, _, _, headErr := fetcher.HeadCommit(ctx, src.Owner, src.Repo, ref, ""); headErr == nil {
+		oid = commitOID
+	}
+
+	return oid, redirect, nil
 }
 
 func readGitOrigin(dir string) (string, error) {

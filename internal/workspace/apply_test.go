@@ -1210,7 +1210,7 @@ visibility = "public"
 	}
 
 	cloneCallCount := 0
-	cloneFn := func(url, dir string) (bool, error) {
+	cloneFn := func(_ context.Context, url, dir string) (bool, error) {
 		cloneCallCount++
 		return false, nil
 	}
@@ -1287,7 +1287,7 @@ visibility = "public"
 	}
 
 	// Stub: sync failure (firstTime=false).
-	cloneFn := func(url, dir string) (bool, error) {
+	cloneFn := func(_ context.Context, url, dir string) (bool, error) {
 		return false, fmt.Errorf("git pull failed: network error")
 	}
 	headFn := func(dir string) (string, error) {
@@ -1369,7 +1369,7 @@ visibility = "public"
 	}
 
 	// Stub: sync succeeds (wasCloneAttempt=false, nil error); copies overlay TOML.
-	cloneFn := func(url, dir string) (bool, error) {
+	cloneFn := func(_ context.Context, url, dir string) (bool, error) {
 		if err := os.MkdirAll(filepath.Join(dir, ".git"), 0o755); err != nil {
 			return false, err
 		}
@@ -1458,7 +1458,7 @@ visibility = "public"
 	// Stub: successful clone that points to our pre-created overlayDir.
 	// The actual overlay dir used by config.OverlayDir will be a tmpdir;
 	// we simulate success by copying workspace-overlay.toml into it.
-	cloneFn := func(url, dir string) (bool, error) {
+	cloneFn := func(_ context.Context, url, dir string) (bool, error) {
 		// Simulate successful first-time clone.
 		if err := os.MkdirAll(filepath.Join(dir, ".git"), 0o755); err != nil {
 			return true, err
@@ -1541,7 +1541,7 @@ visibility = "public"
 	}
 
 	// Stub: first-time clone failure.
-	cloneFn := func(url, dir string) (bool, error) {
+	cloneFn := func(_ context.Context, url, dir string) (bool, error) {
 		return true, fmt.Errorf("repository not found")
 	}
 	headFn := func(dir string) (string, error) {
@@ -1625,7 +1625,7 @@ visibility = "public"
 		t.Fatal(err)
 	}
 
-	cloneFn := func(url, dir string) (bool, error) {
+	cloneFn := func(_ context.Context, url, dir string) (bool, error) {
 		if err := os.MkdirAll(filepath.Join(dir, ".git"), 0o755); err != nil {
 			return false, err
 		}
@@ -1750,7 +1750,7 @@ visibility = "public"
 	}
 
 	const fakeHeadSHA = "abc123" // same as OverlayCommit, so no warn-on-advance
-	cloneFn := func(url, dir string) (bool, error) {
+	cloneFn := func(_ context.Context, url, dir string) (bool, error) {
 		// Simulate successful sync; copy workspace-overlay.toml into dir.
 		if err := os.MkdirAll(filepath.Join(dir, ".git"), 0o755); err != nil {
 			return false, err
@@ -1868,7 +1868,7 @@ OVERLAY_SECRET = "Secret resolved by overlay vault"
 		t.Fatal(err)
 	}
 
-	cloneFn := func(url, dir string) (bool, error) {
+	cloneFn := func(_ context.Context, url, dir string) (bool, error) {
 		if err := os.MkdirAll(filepath.Join(dir, ".git"), 0o755); err != nil {
 			return false, err
 		}
@@ -1958,7 +1958,7 @@ RECOMMENDED_KEY = "Should be present - resolved by overlay vault"
 		t.Fatal(err)
 	}
 
-	cloneFn := func(url, dir string) (bool, error) {
+	cloneFn := func(_ context.Context, url, dir string) (bool, error) {
 		if err := os.MkdirAll(filepath.Join(dir, ".git"), 0o755); err != nil {
 			return false, err
 		}
@@ -2157,7 +2157,7 @@ marketplaces = ["tsukumogami/shirabe"]
 		t.Fatal(err)
 	}
 
-	cloneFn := func(url, dir string) (bool, error) {
+	cloneFn := func(_ context.Context, url, dir string) (bool, error) {
 		if err := os.MkdirAll(filepath.Join(dir, ".git"), 0o755); err != nil {
 			return false, err
 		}
@@ -2272,7 +2272,7 @@ source = "claude/public.md"
 	}
 
 	// cloneFn simulates a git clone by copying the full overlay directory tree to dir.
-	cloneFn := func(url, dir string) (bool, error) {
+	cloneFn := func(_ context.Context, url, dir string) (bool, error) {
 		return false, copyDirTree(overlayDir, dir)
 	}
 
@@ -2441,7 +2441,7 @@ plugins = ["shirabe@shirabe"]
 			t.Fatal(err)
 		}
 
-		cloneFn := func(url, dir string) (bool, error) {
+		cloneFn := func(_ context.Context, url, dir string) (bool, error) {
 			if err := os.MkdirAll(filepath.Join(dir, ".git"), 0o755); err != nil {
 				return false, err
 			}

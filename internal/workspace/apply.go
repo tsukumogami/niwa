@@ -58,9 +58,14 @@ type Applier struct {
 	// Empty string disables convention discovery.
 	ConfigSourceURL string
 
-	// cloneOrSync is the function used to clone or sync the overlay repo.
-	// Defaults to CloneOrSyncOverlay. Overridable in tests.
-	cloneOrSync func(url, dir string) (bool, error)
+	// cloneOrSync materializes or refreshes the overlay snapshot at dir.
+	// Returns wasFreshClone=true when no marker/.git was present (fresh
+	// materialization), so callers can distinguish "overlay doesn't
+	// exist — silent skip" from "previously cloned overlay failed —
+	// hard error". Defaults to defaultCloneOrSync (which forwards to
+	// EnsureOverlaySnapshot wired to this Applier's fetcher + reporter).
+	// Overridable in tests.
+	cloneOrSync func(ctx context.Context, url, dir string) (bool, error)
 
 	// headSHA is the function used to read the HEAD commit SHA of a repo.
 	// Defaults to HeadSHA. Overridable in tests.
@@ -97,8 +102,11 @@ func NewApplier(gh github.Client) *Applier {
 		GitHubClient: gh,
 		Cloner:       &Cloner{},
 		Reporter:     NewReporter(os.Stderr),
-		cloneOrSync:  CloneOrSyncOverlay,
 		headSHA:      HeadSHA,
+	}
+	a.cloneOrSync = func(ctx context.Context, url, dir string) (bool, error) {
+		fetcher, _ := a.GitHubClient.(FetchClient)
+		return EnsureOverlaySnapshot(ctx, url, dir, fetcher, a.Reporter)
 	}
 	aw := &applierWriter{a: a}
 	a.Materializers = []Materializer{
@@ -271,24 +279,14 @@ func (a *Applier) Create(ctx context.Context, cfg *config.WorkspaceConfig, confi
 func (a *Applier) Apply(ctx context.Context, cfg *config.WorkspaceConfig, configDir, instanceRoot string) error {
 	now := time.Now()
 
-	// New-model snapshot path (PRD R10-R13, R28). When the config dir is
-	// already a snapshot (provenance marker present), refresh via the
-	// drift-check + tarball pipeline. When it's a legacy git working tree
-	// (.git/ present), perform R28 lazy conversion in place. Errors fall
-	// through to the legacy SyncConfigDir below as a safety net.
-	if a.GitHubClient != nil {
-		fetcher, ok := a.GitHubClient.(FetchClient)
-		if ok {
-			_ = EnsureConfigSnapshot(ctx, configDir, fetcher, a.Reporter)
-		}
-	}
-
-	// Legacy auto-pull from origin if it's a git repo with a remote.
-	// EnsureConfigSnapshot's lazy conversion (PRD R28) replaces this for
-	// snapshots; this call remains as the safety net for working trees
-	// the conversion couldn't handle (no GH_TOKEN, network down, etc.).
-	if syncErr := SyncConfigDir(configDir, a.Reporter, a.AllowDirty); syncErr != nil {
-		return syncErr
+	// Snapshot path (PRD R10-R13, R28). When the config dir holds a
+	// provenance marker, refresh via the drift-check + tarball pipeline
+	// (GitHub) or shallow-clone fallback (everything else). When it
+	// holds a legacy `.git/` working tree, perform R28 lazy conversion
+	// in place. When it holds neither, no-op.
+	fetcher, _ := a.GitHubClient.(FetchClient)
+	if err := EnsureConfigSnapshot(ctx, configDir, fetcher, a.Reporter); err != nil {
+		return err
 	}
 
 	// Ensure the instance root's .gitignore covers *.local*. Applier.
@@ -463,7 +461,7 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 			if dirErr != nil {
 				return nil, fmt.Errorf("resolving overlay directory: %w", dirErr)
 			}
-			_, syncErr := a.cloneOrSync(opts.overlayURL, dir)
+			_, syncErr := a.cloneOrSync(ctx, opts.overlayURL, dir)
 			if syncErr != nil {
 				// Any sync failure is a hard error when OverlayURL is registered.
 				return nil, fmt.Errorf("workspace overlay sync failed. Use --no-overlay to skip.")
@@ -486,7 +484,7 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 			if ok {
 				dir, dirErr := config.OverlayDir(conventionURL)
 				if dirErr == nil {
-					wasCloneAttempt, cloneErr := a.cloneOrSync(conventionURL, dir)
+					wasCloneAttempt, cloneErr := a.cloneOrSync(ctx, conventionURL, dir)
 					if cloneErr != nil {
 						if wasCloneAttempt {
 							// Fresh clone failed: overlay repo likely doesn't exist — skip silently.
@@ -619,17 +617,13 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 	known := KnownRepoNames(cfg, discoveredNames)
 	allWarnings = append(allWarnings, WarnUnknownRepos(cfg, known)...)
 
-	// Step 2a: Sync global config repo if registered and not skipped.
-	// EnsureConfigSnapshot runs first as the new-model entry point per
-	// PRD R10-R13, R28; SyncConfigDir remains as the legacy safety net.
+	// Step 2a: Sync global config (personal overlay) if registered and
+	// not skipped. Snapshot path (PRD R10-R13, R28) is the only sync
+	// strategy now — no legacy fallthrough.
 	if a.GlobalConfigDir != "" && !opts.skipGlobal {
 		a.Reporter.Status("syncing config...")
-		if a.GitHubClient != nil {
-			if fetcher, ok := a.GitHubClient.(FetchClient); ok {
-				_ = EnsureConfigSnapshot(ctx, a.GlobalConfigDir, fetcher, a.Reporter)
-			}
-		}
-		if syncErr := SyncConfigDir(a.GlobalConfigDir, a.Reporter, a.AllowDirty); syncErr != nil {
+		fetcher, _ := a.GitHubClient.(FetchClient)
+		if syncErr := EnsureConfigSnapshot(ctx, a.GlobalConfigDir, fetcher, a.Reporter); syncErr != nil {
 			a.Reporter.Warn("could not sync config: %v", syncErr)
 			return nil, fmt.Errorf("syncing global config: %w", syncErr)
 		}
