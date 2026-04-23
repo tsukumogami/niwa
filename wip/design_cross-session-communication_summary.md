@@ -31,7 +31,13 @@ default `niwa-mesh` skill into every agent at apply time.
   test harness + a small `@channels-e2e` set that exercises real `claude -p`
   workers.
 
+## Security Review (Phase 5)
+
+**Outcome:** Option 2 (document considerations).
+
+**Summary:** Design is secure within the PRD's trust ceiling; no structural changes required. 6 medium-severity observations, ~12 low, 0 high. Drafted Security Considerations section inserted verbatim into the design doc. Recommended implementation hardening: `O_NOFOLLOW` on sensitive file opens, strict schema validation on reconciliation reads, structured low-verbosity daemon logging that never emits bodies, UUIDv4 task IDs, env-var-only policy for `NIWA_WORKER_SPAWN_COMMAND`.
+
 ## Current Status
 
-**Phase:** 0 — Setup (PRD)
+**Phase:** 5 — Security (complete)
 **Last Updated:** 2026-04-22

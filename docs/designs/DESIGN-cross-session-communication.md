@@ -1010,4 +1010,75 @@ Deliverables:
 
 ## Security Considerations
 
-*(To be populated in Phase 5.)*
+### Trust Model
+
+The design operates within the PRD's explicit trust boundary: **role integrity is the only trust boundary against same-UID processes**. Niwa relies on standard Unix filesystem permissions (0600 files, 0700 directories under `.niwa/`, independent of umask) to prevent cross-UID access. Processes running under the same UID as the user are trusted to cooperate; the mesh is not hardened against a malicious same-UID attacker. Per-agent cryptographic identity, message signing, and encryption are explicit Out of Scope items for v1.
+
+### Worker Authorization
+
+Worker-initiated task-lifecycle tools (`niwa_finish_task`, `niwa_report_progress`) are authorized by a three-factor check performed by the MCP server under shared flock on `.niwa/tasks/<task-id>/.lock`:
+
+1. `NIWA_TASK_ID` env matches the caller's `task_id` argument.
+2. `NIWA_SESSION_ROLE` env matches `state.json.worker.role`.
+3. On Linux, a PPID walk from the MCP server up to its parent `claude -p` process produces a PID whose start time matches `state.json.worker.{pid, start_time}`. This check is mandatory on Linux and defeats naive role-spoofing attempts by same-UID processes that merely set env vars.
+
+On macOS, where `PIDStartTime` returns a conservative alive/dead answer without precise timestamp, the PPID check degrades to PID-match-only. This is weaker than the Linux path but within the PRD's trust ceiling. Users requiring strict worker-auth isolation should run niwa on Linux.
+
+If Claude Code's MCP subprocess spawning topology ever changes (pooling, proxying), the PPID walk could silently stop working. Decision 3 retains a per-task crypto token (`NIWA_TASK_TOKEN` + `.niwa/tasks/<id>/worker.token`) as a drop-in migration path with identical API surface.
+
+### Role Spoofing
+
+A process that sets `NIWA_SESSION_ROLE` can dispatch envelopes attributed to that role and can mutate (update, cancel, query) delegated tasks belonging to that role. The PPID-start-time check defeats worker-side spoofing on Linux but does not protect delegator-side tools. This is the acknowledged v1 trust ceiling.
+
+### Prompt Injection
+
+Task bodies are written by the delegating LLM and read by the executing LLM. The bootstrap prompt does **not** contain the body; the worker retrieves the body via its first `niwa_check_messages` tool call, isolating delegator-controlled content from niwa's control-plane instructions in argv. The niwa-mesh skill explicitly instructs workers to treat body content as untrusted input.
+
+Residual risks:
+
+- A malicious body can influence a worker LLM to call `niwa_finish_task` without performing the actual work. Completion is a behavioral contract, not a structural verification (PRD Known Limitation).
+- A malicious body can attempt to impersonate niwa messages or control-plane instructions; the final line of defense is Claude Code's rendering of tool-response content.
+- The worker runs with `--permission-mode=acceptEdits`, so a prompt-injected worker can write to files in the target repo without prompting. Users who require per-task confirmation should not enable channel delegation.
+
+### File Mode Discipline
+
+All writes under `.niwa/` use mode 0600 for files and 0700 for directories, applied via explicit `os.Chmod` after open/mkdir to override any umask. PRD AC-P14 verifies this with `umask 0000`. The implementation should additionally:
+
+- Use `O_NOFOLLOW` on opens of `state.json`, `envelope.json`, `.lock`, and inbox files to defeat same-UID symlink tampering.
+- Validate that the instance root resolves under the user's home directory (warn on non-home placement; sharing an instance directory under `/tmp` is unusual and worth surfacing).
+
+Advisory `flock` can be bypassed by same-UID processes. The design accepts this within the trust ceiling; malformed concurrent reads fail closed as authorization errors rather than granting access.
+
+### NIWA_WORKER_SPAWN_COMMAND
+
+This environment variable accepts a literal path to a binary that substitutes for `claude` in the daemon's spawn. It is intentionally an env-var-only mechanism: it is **not** accepted from `workspace.toml`, so a poisoned config file cannot turn into arbitrary code execution at apply time. The trust boundary is "the user's own shell environment": code executed via this override runs at the user's UID with the same privileges the daemon already has. The daemon logs the resolved spawn binary path on startup at INFO level to aid user audit.
+
+### Data Exposure
+
+`envelope.json`, `state.json`, `transitions.log`, `sessions.json`, and inbox files may contain sensitive LLM output (results, code, progress bodies). All are mode 0600 and readable only by the owning user. Two operational notes:
+
+- `transitions.log` is not garbage-collected in v1 (Known Limitation); tasks accumulate indefinitely. Users concerned about long-term retention should manually clean `.niwa/tasks/` or wait for the v2 `niwa mesh gc` command.
+- The daemon log (`.niwa/daemon.log`) records state transitions, spawn/exit events, and spawn-binary paths at INFO level; it does **not** log envelope or result bodies. Do not lower daemon log verbosity to DEBUG in shared environments without reviewing what is logged.
+
+Exclude `.niwa/` from backups that may be shared or archived to less-protected storage.
+
+### Daemon Compromise
+
+A compromised daemon can exfiltrate every envelope and result in the workspace, forge state transitions, and spawn workers with crafted arguments in any role's repo. Blast radius equals the user's full workspace-level authority. Defense-in-depth applied at implementation time:
+
+- Strict schema validation (`v=1`, enumerated state values, UUID-shaped IDs) on every `state.json`, `envelope.json`, and log read, failing closed on any anomaly. This hardens the reconciliation-on-startup path against poisoned instance roots.
+- Regex-validate task IDs and message IDs at every file-path construction point to defeat path-traversal through fsnotify event names.
+- Task IDs are UUIDv4 (or `crypto/rand`-derived) to prevent pre-computation by a same-UID attacker attempting to pre-seed a `.niwa/tasks/<id>/` directory.
+- Operational guidance: do not run `niwa apply` against instance roots of unknown provenance. If `.niwa/` was received from another machine (sync, tarball), `niwa destroy` and re-create.
+
+### Denial of Service
+
+No per-caller rate limits in v1. A buggy or hostile LLM can flood a target inbox, exhaust disk, or stall the daemon with rename churn. Mitigations are v2: rate limits, per-role queue caps, disk-space watermarks. For v1, the restart cap (3) and stalled-progress watchdog (15 min default) bound the blast radius of a single runaway worker.
+
+### Known Trust-Ceiling Items (v2 candidates)
+
+- Per-agent cryptographic identity, signed envelopes, message encryption.
+- In-flight task cancellation (currently only queued tasks can be cancelled).
+- `niwa mesh gc` for task directory retention.
+- Per-caller rate limiting on `niwa_delegate` / `niwa_send_message`.
+- Structural verification that `niwa_finish_task(completed)` is accompanied by genuine work (heuristic, e.g., presence of at least one `niwa_report_progress` event).
