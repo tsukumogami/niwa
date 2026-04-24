@@ -123,266 +123,186 @@ Key points:
 2. Register it in `initializeScenario` in `suite_test.go`
 3. Keep step functions short — delegate to helpers, not the other way around
 
-## Testing the session mesh
+## Testing the mesh
 
-Mesh scenarios test the cross-session communication feature: session registration,
-message routing, daemon lifecycle, and the blocking MCP tools (`niwa_ask`,
-`niwa_wait`). They live in `features/mesh.feature`.
+Mesh scenarios exercise the cross-session communication feature: task
+delegation, worker spawn, the 11-tool MCP surface, restart / watchdog
+behavior, and crash recovery. They live in `features/mesh.feature`.
 
-### Setting up the sessions directory
+The harness pairs a **literal-path spawn override** with a **scripted worker
+fake** so every acceptance criterion runs deterministically in seconds, with
+no live Claude involved. Two residual `@channels-e2e` scenarios cover what
+the harness can't reach: MCP-config loadability by Claude Code and
+bootstrap-prompt effectiveness.
 
-Mesh tests that don't go through `niwa create` need an isolated instance root with a
-pre-populated sessions directory. Use the built-in step:
+For the user-facing description of the mesh, see
+[cross-session-communication.md](cross-session-communication.md).
 
-```gherkin
-Given a clean niwa environment
-And NIWA_INSTANCE_ROOT is set to a temp directory
-```
+### The spawn-command override
 
-This creates a fresh directory under the scenario's `tmpDir`, sets `NIWA_INSTANCE_ROOT`
-in `envOverrides`, and initialises `meshState` in the scenario context. All subsequent
-mesh steps read the instance root from there.
-
-### Registering sessions
-
-`niwa session register` is the entry point for sessions joining the mesh. The step
-runs the binary with `NIWA_SESSION_ROLE` set, captures the printed `session_id=<uuid>`
-line, and stores the UUID in `meshState.sessionIDs[role]` for use in later assertions.
-
-```gherkin
-When I run "niwa session register" as role "coordinator"
-Then the exit code is 0
-And a sessions.json entry exists for role "coordinator"
-And the coordinator inbox directory exists
-```
-
-### Faking Claude session ID discovery
-
-`niwa session register` discovers the Claude session ID by reading
-`~/.claude/sessions/<pid>.json`. In tests, the sandboxed `$HOME` is an isolated
-directory (`s.homeDir`), so you can write a fixture file there without touching the
-real user state:
-
-```gherkin
-And a Claude session file exists for the parent process with session ID "test-claude-session-abc1" and matching cwd
-When I run "niwa session register" as role "coordinator"
-Then the sessions.json entry for role "coordinator" has claude_session_id "test-claude-session-abc1"
-```
-
-The step writes a JSON file at `<homeDir>/.claude/sessions/<test-pid>.json` with the
-given `sessionId` and either the real cwd (matching) or a dummy path (mismatched).
-The `niwa session register` subprocess reads its grandparent PID (the test process)
-and finds the file.
-
-To assert that discovery failed gracefully:
-
-```gherkin
-And the sessions.json entry for role "coordinator" has no claude_session_id
-And the error output contains "could not discover Claude session ID"
-```
-
-### Calling MCP tools
-
-The `callMCPTool` helper in `steps_test.go` starts `niwa mcp-serve` as a subprocess,
-runs an MCP initialize + tools/call exchange over stdin/stdout, and returns the JSON
-response. Per-scenario step functions wrap it with role-specific env vars:
+`NIWA_WORKER_SPAWN_COMMAND` is a literal path that substitutes for the
+resolved `claude` binary. The daemon composes argv, env, CWD, and
+process-group behavior identically whether it launches real `claude` or the
+override — so the scripted fake exercises the real spawn path.
 
 ```go
 // In a step function:
-out, err := callMCPTool(s, sessionID, sessionRole, "niwa_check_messages", "{}")
+os.Setenv("NIWA_WORKER_SPAWN_COMMAND", workerFakeBinary)
 ```
 
-The function sets `NIWA_INSTANCE_ROOT`, `NIWA_SESSION_ID`, `NIWA_SESSION_ROLE`, and
-`NIWA_INBOX_DIR` so the server knows which session it's serving.
+The override is env-only. `workspace.toml` parses with an explicit error if
+you try to set it there (regression-tested), so a poisoned clone can't turn
+it into arbitrary code execution at apply time.
 
-### Testing niwa_ask (blocking round-trip)
+### The scripted worker fake
 
-The `theCoordinatorAsksWorkerAndReplies` step exercises the full blocking path:
+The fake lives at `test/functional/worker_fake/` and compiles to a standalone
+binary. On launch it:
 
-1. Starts `niwa mcp-serve` for the coordinator in a subprocess
-2. Sends a `niwa_ask(to="worker", ...)` call
-3. In a goroutine, polls the worker inbox for the `question.ask` file
-4. Writes a `question.answer` reply to the coordinator inbox
-5. Asserts the `mcp-serve` output contains the answer body
+1. Reads `NIWA_INSTANCE_ROOT`, `NIWA_SESSION_ROLE`, and `NIWA_TASK_ID` from
+   env.
+2. Starts `niwa mcp-serve` as a stdio subprocess (mimicking `claude -p`).
+3. Executes the scenario named by `NIWA_FAKE_SCENARIO`.
+
+Each scenario drives real MCP tools (`niwa_check_messages`,
+`niwa_report_progress`, `niwa_finish_task`, ...) — it does not shortcut by
+writing to the filesystem. Authorization-path calls retry on
+`NOT_TASK_PARTY` for up to 2 seconds to cover the `worker.pid == 0` backfill
+window after spawn.
+
+Add a scenario by extending the `main.go` switch:
+
+```go
+switch os.Getenv("NIWA_FAKE_SCENARIO") {
+case "completes-normally":
+    reportProgress(mcp, taskID, "working")
+    finishTask(mcp, taskID, "completed", map[string]any{"ok": true})
+case "exits-without-finishing":
+    // Worker exits without calling niwa_finish_task — daemon classifies
+    // as unexpected exit, consumes a retry slot.
+    return
+...
+}
+```
+
+Use the step helper to wire a scenario:
 
 ```gherkin
-When the coordinator asks the worker a question and the worker replies
-Then the ask response contains the answer
+When the daemon spawns the worker fake with scenario "completes-normally"
+Then the task "<task-id>" reaches state "completed" within 5 seconds
 ```
 
-For the timeout path, use:
+`runWithFakeWorker(scenario)` sets `NIWA_WORKER_SPAWN_COMMAND` to the
+compiled fake path and `NIWA_FAKE_SCENARIO` to the selector.
+
+### Timing overrides
+
+The daemon reads integer-second env vars for every operational threshold, so
+tests can drive minutes-long paths in seconds.
+
+| Env var | Default | What it controls |
+|---------|---------|------------------|
+| `NIWA_RETRY_BACKOFF_SECONDS` | `30,60,90` | Comma-separated backoffs between restart attempts |
+| `NIWA_STALL_WATCHDOG_SECONDS` | `900` | Stalled-progress threshold (15 min) |
+| `NIWA_SIGTERM_GRACE_SECONDS` | `5` | Grace between SIGTERM and SIGKILL |
+| `NIWA_DESTROY_GRACE_SECONDS` | `5` | `niwa destroy` daemon-shutdown grace |
+
+Use the `setTimingOverrides` helper:
+
+```go
+setTimingOverrides(s, map[string]string{
+    "NIWA_RETRY_BACKOFF_SECONDS":   "1,2,3",
+    "NIWA_STALL_WATCHDOG_SECONDS":  "2",
+    "NIWA_SIGTERM_GRACE_SECONDS":   "1",
+})
+```
+
+With `NIWA_RETRY_BACKOFF_SECONDS=1,2,3`, the restart-cap scenario measures
+three restarts at roughly 1s, 2s, 3s from `state.json` transition timestamps
+— a full restart-cap + abandonment path completes in ~6 seconds instead of
+~3 minutes.
+
+### Daemon pause hooks
+
+Two env-gated hooks let tests interrupt the daemon at the consumption-rename
+boundary, making race-window acceptance criteria deterministic:
+
+| Env var | Pause point |
+|---------|-------------|
+| `NIWA_TEST_PAUSE_BEFORE_CLAIM=1` | Daemon sees envelope; blocks before the atomic rename into `inbox/in-progress/`. |
+| `NIWA_TEST_PAUSE_AFTER_CLAIM=1` | Daemon completes the rename but blocks before `exec.Command`. |
+
+When active, the daemon creates a marker file under `.niwa/.test/` (either
+`paused_before_claim` or `paused_after_claim`) and blocks until the marker is
+removed.
+
+Race-window example — `niwa_cancel_task` after the envelope is claimed:
 
 ```gherkin
-When the coordinator calls niwa_ask with timeout 2 seconds and no reply
-Then the output contains "ASK_TIMEOUT"
+Given NIWA_TEST_PAUSE_AFTER_CLAIM is set
+And the coordinator delegates a task to "web"
+When the daemon marker ".niwa/.test/paused_after_claim" appears within 1 second
+Then the envelope is in "inbox/in-progress/"
+When the coordinator calls niwa_cancel_task
+Then the response is '{"status":"too_late"}'
+When I remove the daemon marker ".niwa/.test/paused_after_claim"
+Then the daemon proceeds with the spawn
 ```
 
-### Testing niwa_wait (message accumulation)
+Use the `pauseDaemonAt(hook)` helper — it sets the env var, waits for the
+marker, and returns a release function that removes the marker when called:
 
-The `nMessagesPlacedInCoordinatorInbox` step writes N pre-formed message files
-directly to the inbox directory via atomic rename (bypassing MCP). The subsequent
-`niwa_wait` call reads them from the already-populated inbox:
-
-```gherkin
-When 2 "task.result" messages are placed in the coordinator inbox
-When the coordinator calls niwa_wait for "task.result" messages with count 2
-Then the output contains "task.result"
-And the output contains "2 message"
+```go
+release := pauseDaemonAt(s, "after_claim")
+// ... run assertions while the daemon is paused ...
+release()
 ```
 
-### Testing daemon lifecycle
+Symmetric structure covers the update and cancel-before-claim windows with
+`NIWA_TEST_PAUSE_BEFORE_CLAIM`.
 
-Daemon scenarios go through `niwa create` (which provisions infrastructure and spawns
-the daemon) and then check `daemon.pid`:
+### `@critical` budget
 
-```gherkin
-And the file ".niwa/daemon.pid" exists in instance "daemon-ws"
-```
+All `@critical` mesh scenarios must complete under `make test-functional-critical`
+in under 60 seconds total wall-clock, with each scenario under 10 seconds.
+Timing overrides are the budget's primary enforcement mechanism.
 
-To assert the daemon isn't respawned on a second apply:
+### Daemon-log hygiene
 
-```gherkin
-When I remember the daemon PID for instance "daemon2-ws"
-When I run "niwa apply daemon2-ws"
-And the daemon PID for instance "daemon2-ws" has not changed
-```
-
-To test self-exit on instance removal:
-
-```gherkin
-When I remove the sessions directory from instance "selfstop-ws"
-Then the daemon for instance "selfstop-ws" eventually stops
-```
-
-The assertion polls `daemon.pid` for up to 10 seconds, checking whether the daemon's
-PID is still alive.
-
-### Step reference (mesh)
-
-| Step | Function | Notes |
-|------|----------|-------|
-| `NIWA_INSTANCE_ROOT is set to a temp directory` | `niwaInstanceRootIsSetToATempDirectory` | Creates mesh-instance dir, sets env, initialises meshState |
-| `I run "niwa session register" as role "<role>"` | `iRunNiwaSessionRegisterAsRole` | Captures session UUID from output |
-| `a sessions.json entry exists for role "<role>"` | `aSessionsJSONEntryExistsForRole` | Checks for `"role":"<role>"` in sessions.json |
-| `the coordinator inbox directory exists` | (inline) | Delegates to `theInboxDirectoryExistsForRole("coordinator")` |
-| `a Claude session file exists for the parent process with session ID "<id>" and matching cwd` | `aClaudeSessionFileExistsForParentProcessWithMatchingCwd` | Writes `<homeDir>/.claude/sessions/<pid>.json` |
-| `a Claude session file exists for the parent process with session ID "<id>" and mismatched cwd` | `aClaudeSessionFileExistsForParentProcessWithMismatchedCwd` | Same, but with dummy cwd |
-| `the sessions.json entry for role "<role>" has claude_session_id "<id>"` | `theSessionsJSONEntryForRoleHasClaudeSessionID` | Checks sessions.json content |
-| `the sessions.json entry for role "<role>" has no claude_session_id` | `theSessionsJSONEntryForRoleHasNoClaudeSessionID` | Asserts absence of `claude_session_id` key |
-| `the worker session sends a "<type>" message to "<role>" with body "<body>"` | `theWorkerSessionSendsAMessageToWithBody` | Calls `niwa_send_message` via `callMCPTool` |
-| `the coordinator inbox contains <n> message` | `theCoordinatorInboxContainsNMessages` | Counts `.json` files in inbox, excluding subdirs |
-| `the coordinator session checks messages` | `theCoordinatorSessionChecksMessages` | Calls `niwa_check_messages` via `callMCPTool` |
-| `the coordinator asks the worker a question and the worker replies` | `theCoordinatorAsksWorkerAndReplies` | Full blocking round-trip |
-| `the ask response contains the answer` | `theAskResponseContainsAnswer` | Checks stored MCP output |
-| `the coordinator calls niwa_ask with timeout <n> seconds and no reply` | `theCoordinatorCallsAskWithTimeout` | Expects ASK_TIMEOUT |
-| `<n> "<type>" messages are placed in the coordinator inbox` | `nMessagesPlacedInCoordinatorInbox` | Writes files directly to inbox, atomic rename |
-| `the coordinator calls niwa_wait for "<type>" messages with count <n>` | `theCoordinatorCallsWait` | Calls `niwa_wait` via `callMCPTool` |
-| `the coordinator sends a message with invalid type "<type>"` | `coordinatorSendsWithInvalidType` | Expects `isError` in response |
-| `I remember the daemon PID for instance "<name>"` | `iRememberDaemonPIDForInstance` | Stores first line of daemon.pid in context |
-| `the daemon PID for instance "<name>" has not changed` | `theDaemonPIDForInstanceHasNotChanged` | Compares with stored PID |
-| `I remove the sessions directory from instance "<name>"` | `iRemoveSessionsDirFromInstance` | `os.RemoveAll` on `.niwa/sessions` |
-| `the daemon for instance "<name>" eventually stops` | `theDaemonForInstanceEventuallyStops` | Polls for up to 10 seconds |
+A regression test greps `.niwa/daemon.log` after a full scenario run and
+asserts no envelope bodies, result / reason payloads, or progress bodies
+appear in the log. Only IDs, roles, types, and 200-char summaries are
+permitted.
 
 ## Testing with headless Claude sessions
 
-Scenarios tagged `@channels-e2e` drive actual `claude -p` (headless Claude Code)
-invocations to prove the MCP tools are accessible from live sessions. They require:
+Scenarios tagged `@channels-e2e` drive actual `claude -p` invocations to
+cover the two surfaces the scripted fake can't reach: MCP-config
+loadability by Claude Code itself, and bootstrap-prompt effectiveness. They
+require:
 
 - `claude` on PATH
 - `ANTHROPIC_API_KEY` set
 
-Both are checked at the start of each scenario by the `claude is available` step,
-which returns `godog.ErrPending` (skip) if either is absent. This keeps `@critical`
-CI fast while allowing optional end-to-end validation.
+Both are checked at the start of each scenario by the `claude is available`
+step, which returns `godog.ErrPending` (skip) if either is absent. This
+keeps `@critical` CI fast while allowing optional end-to-end validation.
 
-Run channel integration scenarios with:
-
-```
-make test-functional NIWA_TEST_TAGS=channels-e2e
-```
-
-Or run all scenarios (critical + channels-e2e):
+Run with:
 
 ```
-make test-functional
+make test-functional NIWA_TEST_TAGS=@channels-e2e
 ```
 
-### Setting up sessions for headless coordinator tests
+Two scenarios ship in this tag:
 
-`@channels-e2e` scenarios use `niwa create --channels` to provision infrastructure
-(no `[channels.mesh]` config section needed). They then call session setup steps
-to register sessions and wire env vars before starting `claude -p`:
+- **MCP-config loadability.** `niwa create --channels`, then invoke real
+  `claude -p` from the instance root with an anchored prompt; assert the
+  session emits a numeric value returned by `niwa_check_messages`.
+- **Bootstrap-prompt effectiveness.** Queue a task envelope and let the
+  daemon spawn real `claude -p` (no `NIWA_WORKER_SPAWN_COMMAND`). Assert
+  `state.json.state == "completed"` within 120 seconds. The assertion is on
+  persisted state, not LLM text — tolerant of wording drift.
 
-```gherkin
-When I set up coordinator session for instance "myws"
-```
-
-This step runs `niwa session register --role coordinator` (subprocess), captures
-the session UUID, and sets `NIWA_INSTANCE_ROOT`, `NIWA_SESSION_ID`, and
-`NIWA_SESSION_ROLE` in the scenario's `envOverrides`. Subsequent `claude -p`
-invocations inherit these, so the MCP server knows which inbox to watch.
-
-The `session_start` hook fires when `claude -p` starts and re-registers the
-coordinator under a new UUID in sessions.json. The MCP server continues watching
-the pre-registration inbox (from `NIWA_SESSION_ID` in env). Pre-seeded messages
-and goroutine-written replies go directly to that inbox, so the server sees them.
-
-### Pre-seeding the coordinator inbox
-
-For `niwa_check_messages` and `niwa_wait` scenarios, write messages before
-starting `claude -p`:
-
-```gherkin
-When I set up coordinator session for instance "myws"
-And 2 "task.result" messages are placed in the coordinator inbox
-When I run claude -p from instance root "myws" with prompt:
-  """
-  Use niwa_wait with count=2 ...
-  """
-```
-
-`nMessagesPlacedInCoordinatorInbox` uses `meshState.sessionIDs["coordinator"]`
-(set by the session setup step) to locate the correct inbox.
-
-### Simulating a worker for niwa_ask tests
-
-For `niwa_ask` round-trips, register a worker session and use the combined step:
-
-```gherkin
-When I set up coordinator session for instance "myws"
-And I set up worker session for instance "myws"
-When I run claude -p from instance root "myws" with simulated worker reply and prompt:
-  """
-  Use niwa_ask to ask the worker "What is the answer?" ...
-  """
-```
-
-`iSetUpWorkerSessionForInstance` registers the worker role without changing
-`NIWA_SESSION_ROLE` in envOverrides (coordinator env stays set). The combined
-step launches `claude -p` for the coordinator and runs a goroutine that polls
-the worker inbox, finds the `question.ask`, and writes `{"answer":"42"}` to the
-coordinator inbox via atomic rename.
-
-### Assertion style for headless tests
-
-`runClaudeP` lowercases stdout before storing it. Assert with lowercase strings:
-
-```gherkin
-And the output contains "found:task.result"
-And the output contains "answer:42"
-And the output contains "collected:2"
-```
-
-Keep assertion strings short and distinctive to tolerate LLM rephrasing. Design
-prompts so the coordinator outputs a specific format ("output exactly: FOUND:<type>")
-to avoid false positives.
-
-### Step reference (headless Claude)
-
-| Step | Function | Notes |
-|------|----------|-------|
-| `claude is available` | `claudeIsAvailable` | Skips scenario if claude not on PATH or no ANTHROPIC_API_KEY |
-| `I set up coordinator session for instance "<name>"` | `iSetUpCoordinatorSessionForInstance` | Registers coordinator, sets NIWA_SESSION_ID in env |
-| `I set up worker session for instance "<name>"` | `iSetUpWorkerSessionForInstance` | Registers worker, stores UUID in meshState |
-| `I run claude -p from instance root "<name>" with prompt:` | `iRunClaudePFromInstanceRoot` | Runs headless Claude, lowercases stdout |
-| `I run claude -p from instance root "<name>" with simulated worker reply and prompt:` | `iRunClaudePFromInstanceRootWithSimulatedWorkerReply` | Coordinator claude -p + goroutine worker |
+Prompts are anchored for deterministic matching and documented in
+feature-file comments.

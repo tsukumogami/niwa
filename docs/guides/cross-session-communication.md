@@ -1,318 +1,434 @@
 # Cross-Session Communication
 
-niwa workspaces often run multiple Claude sessions at once — one per repo, one at
-the workspace root. By default those sessions have no way to exchange messages without
-the user acting as a relay. The session mesh removes that constraint: sessions can send
-typed messages to each other, ask questions and block for answers, and coordinate tasks
-without any user involvement.
+## Overview
 
-## When to use it
+The niwa mesh lets a coordinating Claude session delegate work to per-repo
+workers and collect results without the user acting as a relay. A coordinator
+delegates a task to a role; niwa launches an ephemeral `claude -p` worker in
+the target repo; the worker finishes, reports back, and exits. Tasks are
+first-class objects with an explicit lifecycle — completion is a tool call, not
+a process-exit side effect — and delegators can query, update, cancel, or
+block on any task they own.
 
-The session mesh is useful when:
+## Quickstart
 
-- A coordinator session needs to delegate work to per-repo workers and collect results
-- A worker needs to ask the coordinator a clarifying question before continuing
-- Two sessions are working on related changes and need to hand off information
-
-For simple one-off workflows where the user is present and can copy-paste, the session
-mesh adds more complexity than it's worth. It shines in long-running automated workflows
-where sessions run in parallel and need to synchronize.
-
-## Enabling the session mesh
-
-There are three ways to enable the mesh, ordered by commitment level:
-
-**Flag** — one-off, no config changes needed:
+Enable the mesh for an instance and delegate a task:
 
 ```bash
-niwa create my-instance --channels
-niwa apply --channels
+# Provision per-role inboxes, .mcp.json, the niwa-mesh skill, and start the
+# mesh watch daemon.
+niwa create my-workspace --channels
+cd my-workspace
+
+# Open a coordinator session.
+claude
 ```
 
-Use `--no-channels` to skip mesh provisioning even if the env var or config says
-otherwise.
+From the coordinator:
 
-**Env var** — persist the preference for yourself without touching shared config:
-
-```bash
-export NIWA_CHANNELS=1
+```
+niwa_delegate(
+  to="web",
+  body={"goal": "add a /health endpoint returning 200 OK"},
+  mode="sync"
+)
 ```
 
-Any subsequent `niwa create` or `niwa apply` will provision the mesh. Set this in your
-shell profile to make it permanent.
+The daemon sees a new envelope in `.niwa/roles/web/inbox/`, claims it, spawns
+`claude -p` in the `web` repo directory, and streams the worker's
+`niwa_report_progress` calls back to the coordinator's inbox as
+`task.progress` messages. When the worker calls `niwa_finish_task`, the tool
+call returns with the worker's result payload.
 
-**workspace.toml** — persist the preference for the whole team:
+Async mode returns the task ID immediately:
 
-```toml
-[channels.mesh]
+```
+{"task_id": "f1e2d3c4-..."}
 ```
 
-A bare `[channels.mesh]` section with no sub-keys is valid and provisions the full mesh.
-Roles are auto-derived from the workspace topology (see [Roles](#roles) below).
+Follow up with `niwa_query_task`, `niwa_await_task`, `niwa_update_task`, or
+`niwa_cancel_task`.
 
-The flag overrides the env var, which overrides the config. `--no-channels` suppresses
-provisioning regardless of env var or config.
+## Tool Reference
 
-### Roles
+The MCP server exposes eleven tools. Eight drive the task lifecycle; three
+handle peer messaging. Every authorization-gated call checks the caller's
+role and (for worker-only tools) the per-task `PPIDChain(1)` and
+`start_time`.
 
-Roles are the addresses sessions use to reach each other — `niwa_send_message(to="coordinator", ...)`.
+### niwa_delegate
 
-By default, roles are derived from the workspace topology:
+Creates a task and inserts it into the target role's inbox.
 
-- A session running at the instance root gets the role `coordinator`
-- A session running in `<instance-root>/myrepo/` gets the role `myrepo`
-
-This works without any configuration for typical layouts. If a repo's directory name
-doesn't make a useful role name, you can override it two ways:
-
-- At session start: pass `--role <name>` to the relevant command, or set
-  `NIWA_SESSION_ROLE=<name>` in the environment
-- In workspace.toml: add an explicit `[channels.mesh.roles]` map
-
-The explicit map takes precedence over auto-derivation:
-
-```toml
-[channels.mesh]
-
-[channels.mesh.roles]
-coordinator = ""          # "" means the instance root
-worker = "tools/worker"   # relative path from the instance root
+```
+niwa_delegate(
+  to="web",              // target role
+  body={...},            // task payload (JSON object)
+  mode="async",          // "async" (default) or "sync"
+  expires_at="..."       // optional RFC3339 deadline
+)
 ```
 
-Role names become the addresses used in MCP tool calls. They must match
-`^[a-zA-Z0-9._-]{1,64}$`.
+Async returns `{"task_id": "<uuid>"}`. Sync blocks until the task reaches a
+terminal state and returns the terminal payload.
 
-### Config reference
+### niwa_query_task
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `[channels.mesh]` | section | — | Presence enables the mesh. No sub-keys required; roles are auto-derived from directory names if `[channels.mesh.roles]` is omitted. |
-| `[channels.mesh.roles]` | map[string]string | — | Optional. Role name → repo path (relative to instance root; `""` for root). Overrides auto-derivation for any listed role. |
-| `message_ttl` | string | `"24h"` | How long consumed messages are kept in `inbox/read/` before the TTL sweep deletes them. Standard Go duration syntax. |
+Non-blocking snapshot of a task.
 
-Example with a custom TTL and explicit roles:
+```
+niwa_query_task(task_id="<uuid>")
+```
+
+Returns current state, full transitions history, restart count, last progress,
+and (for terminal tasks) `result` / `reason` / `cancellation_reason`. Callable
+by delegator or executor; non-parties receive `NOT_TASK_PARTY`.
+
+### niwa_await_task
+
+Blocks until the task reaches a terminal state.
+
+```
+niwa_await_task(task_id="<uuid>", timeout_seconds=600)
+```
+
+Default timeout is 600 seconds. Only the delegator may await; others receive
+`NOT_TASK_OWNER`. On timeout, returns a `{"status":"timeout", "current_state":...}`
+shape so the caller can re-await without losing progress context.
+
+### niwa_report_progress
+
+Worker-only. Records a non-terminal progress update.
+
+```
+niwa_report_progress(
+  task_id="<uuid>",
+  summary="extracted schema, generating migration",
+  body={...}             // optional structured detail
+)
+```
+
+`summary` truncates to 200 characters with an ellipsis marker. Only the
+summary is logged to `transitions.log`; the full body lives in
+`state.json.last_progress.body` and is overwritten per event.
+
+### niwa_finish_task
+
+Worker-only. Terminal transition.
+
+```
+niwa_finish_task(
+  task_id="<uuid>",
+  outcome="completed",   // or "abandoned"
+  result={...},          // required when outcome="completed"
+  reason={...}           // required when outcome="abandoned"
+)
+```
+
+`completed` and `abandoned` are mutually exclusive — supplying both fields or
+neither returns `BAD_PAYLOAD`. A second call on a terminal task returns
+`{"status":"already_terminal", "error_code":"TASK_ALREADY_TERMINAL", "current_state":...}`.
+
+### niwa_list_outbound_tasks
+
+Lists tasks delegated by the caller.
+
+```
+niwa_list_outbound_tasks(to="web", status="running")
+```
+
+Both filters are optional. Returns one row per task with `task_id`, `to_role`,
+`state`, `age_seconds`, and a 200-char single-line body summary.
+
+### niwa_update_task
+
+Rewrites a queued task's body.
+
+```
+niwa_update_task(task_id="<uuid>", body={...})
+```
+
+Returns `{"status":"updated"}` while the task is still `queued`. Once the
+daemon has claimed the envelope, returns `{"status":"too_late",
+"current_state":...}`. Non-delegators receive `NOT_TASK_OWNER`.
+
+### niwa_cancel_task
+
+Cancels a queued task.
+
+```
+niwa_cancel_task(task_id="<uuid>")
+```
+
+Atomic rename to `inbox/cancelled/<id>.json`. Returns `{"status":"cancelled"}`
+on success, `{"status":"too_late"}` once the daemon has claimed the envelope.
+Non-delegators receive `NOT_TASK_OWNER`.
+
+### niwa_ask
+
+Creates a first-class task with body wrapped as `{"kind":"ask", "body":...}`
+and blocks on the worker's `niwa_finish_task` result.
+
+```
+niwa_ask(
+  to="coordinator",
+  body={"question": "which auth scheme should web use?"},
+  timeout_seconds=600
+)
+```
+
+Unifies peer Q&A with the task-lifecycle model, so every ask-and-reply inherits
+retry, cancellation, and observability semantics.
+
+### niwa_send_message
+
+Routes a typed message to another role's inbox.
+
+```
+niwa_send_message(
+  to="backend",
+  type="task.result",
+  body={...},
+  reply_to="<msg-id>",       // optional
+  task_id="<uuid>",          // optional
+  expires_at="..."           // optional RFC3339
+)
+```
+
+`type` must match `^[a-z][a-z0-9]*(\.[a-z][a-z0-9]*)*$` (for example,
+`task.progress`, `question.ask`) and be 64 chars or fewer. Unknown roles
+return `UNKNOWN_ROLE`; malformed types return `BAD_TYPE`.
+
+### niwa_check_messages
+
+Reads unread messages from the caller's role inbox.
+
+```
+niwa_check_messages()
+```
+
+Returns messages formatted as markdown. Expired messages are swept to
+`inbox/expired/` before the read; returned files are moved to `inbox/read/` via
+atomic rename. Call at idle points and every ~10 tool calls while working.
+
+## Task Lifecycle
+
+Every task lives in `.niwa/tasks/<task-id>/` with three files: `state.json`
+(authoritative state), `transitions.log` (NDJSON audit trail), and `.lock`
+(flock target for atomic transitions).
+
+### State machine
+
+```
+            queued ────cancel──▶ cancelled  (terminal)
+              │
+           claim by daemon
+              │
+              ▼
+           running ──finish(completed)──▶ completed  (terminal)
+              │   ─finish(abandoned)───▶ abandoned   (terminal)
+              │
+           unexpected exit / stall
+              │
+    restart_count < cap? ──yes──▶ running
+              │
+             no
+              ▼
+          abandoned (terminal, reason="retry_cap_exceeded")
+```
+
+### Completion contract
+
+A task is `completed` only when the worker calls
+`niwa_finish_task(outcome="completed", result=...)`. A worker that exits — with
+any exit code — while `state.json.state == "running"` is classified as an
+unexpected exit. The daemon increments `restart_count` and schedules the next
+spawn after the configured backoff (default `30,60,90` seconds between
+attempts). After three restarts (four attempts total), the task transitions to
+`abandoned` with `reason="retry_cap_exceeded"`.
+
+### Stall watchdog
+
+Each running worker has a per-supervisor timer seeded to
+`NIWA_STALL_WATCHDOG_SECONDS` (default 900). Every `niwa_report_progress` call
+resets the timer. On expiry, the daemon sends SIGTERM, waits
+`NIWA_SIGTERM_GRACE_SECONDS` (default 5), then SIGKILL. The resulting exit
+consumes a retry slot.
+
+### Crash recovery
+
+On daemon startup, every task with `state == "running"` is classified against
+the worker PID:
+
+- **Live orphan** (PID alive, `start_time` matches): adopted; central loop
+  polls `IsPIDAlive` every 2 seconds.
+- **Dead worker** (PID gone, or PID alive but `start_time` diverges — PID
+  reuse): routed to the unexpected-exit path with retry.
+- **Spawn never completed** (pid == 0, `spawn_started_at` set): fresh retry
+  without bumping `restart_count`.
+
+## Worker Spawn Model
+
+Workers are ephemeral `claude -p` processes. The daemon owns spawn, not a
+persistent session registry.
+
+- **Resolution.** `exec.LookPath("claude")` runs once at daemon startup. The
+  absolute path, owning UID, and mode bits are logged to `.niwa/daemon.log` at
+  INFO. The daemon reuses that absolute path for every spawn — `PATH` changes
+  after startup have no effect.
+- **Argv.** Fixed shape: `-p "<bootstrap prompt with <task-id>>"
+  --permission-mode=acceptEdits --mcp-config=<instanceRoot>/.claude/.mcp.json
+  --strict-mcp-config`. The bootstrap prompt references the task ID; the task
+  body never appears in argv — the worker retrieves it via
+  `niwa_check_messages` on its first tool call.
+- **Env.** Daemon env pass-through plus last-wins niwa overrides:
+  `NIWA_INSTANCE_ROOT`, `NIWA_SESSION_ROLE`, `NIWA_TASK_ID`.
+- **CWD.** The target role's repo directory, or the instance root for the
+  `coordinator` role.
+- **Process group.** `Setsid: true` so the daemon can signal the worker's
+  entire process group during destroy.
+- **No session registration.** Workers are not recorded in `sessions.json`;
+  `niwa session list` shows coordinators only.
+- **Inbox addressing.** One inbox per role at
+  `.niwa/roles/<role>/inbox/{,in-progress,cancelled,expired,read}/`. Role
+  names must match `^[a-z0-9][a-z0-9-]{0,31}$`.
+
+## Override Mechanisms
+
+The mesh can be enabled per invocation, per user, or per workspace.
+
+| Mechanism | Scope | Priority | Example |
+|-----------|-------|----------|---------|
+| `--channels` / `--no-channels` flag | Per invocation | Highest | `niwa create --channels` |
+| `NIWA_CHANNELS=1` env var | Per user | Middle | `export NIWA_CHANNELS=1` |
+| `[channels.mesh]` in workspace.toml | Per workspace | Lowest | `[channels.mesh]` section |
+| Personal overlay skill | Per user | N/A (orthogonal) | `~/.claude/skills/niwa-mesh/SKILL.md` |
+
+`--no-channels` always wins. `--channels` wins over the env var, which wins
+over the config.
+
+### workspace.toml
 
 ```toml
 [channels.mesh]
 message_ttl = "48h"
 
 [channels.mesh.roles]
-coordinator = ""
-koto = "tools/koto"
-shirabe = "tools/shirabe"
+coordinator = ""                # "" = instance root
+web = "services/web"            # relative path from instance root
+backend = "services/backend"
 ```
 
-## What `niwa apply` provisions
+A bare `[channels.mesh]` section with no sub-keys is valid — roles are
+derived from the workspace topology (one role per cloned repo plus
+`coordinator` at the instance root). An explicit `[channels.mesh.roles]` map
+overrides the topology for any listed role.
 
-When `[channels.mesh]` is present, `niwa apply` (and `niwa create`) provisions the
-following at step 4.75 of the pipeline, before any per-repo materializers run:
+The parser **rejects** any `NIWA_WORKER_SPAWN_COMMAND` key in `workspace.toml`
+with a parse error. That override is env-only so a poisoned clone cannot turn
+it into arbitrary code execution at apply time.
 
-**Filesystem layout:**
+### Personal overlay
 
-```
-<instance-root>/
-├── .niwa/
-│   ├── sessions/
-│   │   └── sessions.json          # session registry (preserved on re-apply)
-│   ├── hooks/
-│   │   ├── mesh-session-start.sh  # runs niwa session register
-│   │   └── mesh-user-prompt-submit.sh  # runs niwa session register --check-only
-│   ├── daemon.pid                 # written by the daemon after it starts
-│   └── daemon.log                 # daemon stdout/stderr
-└── .claude/
-    └── .mcp.json                  # registers niwa mcp-serve with NIWA_INSTANCE_ROOT
-```
+A user can override the `niwa-mesh` skill at the personal scope by placing a
+skill at `~/.claude/skills/niwa-mesh/SKILL.md`. `niwa apply` does not touch
+this path; the personal-scope skill takes precedence in Claude Code's usual
+skill lookup.
 
-**workspace-context.md additions:**
+## Operational Guidance
 
-A `## Channels` section is appended that explains how roles are assigned (auto-derivation
-rules and any explicit overrides), lists the four MCP tool names, and gives behavioral
-instructions. This section is idempotent — re-applying won't duplicate it.
+### PATH resolution is frozen at daemon startup
 
-**Hook injection:**
+The daemon resolves `claude` once via `exec.LookPath` and reuses the absolute
+path for every spawn. A `PATH` change after startup has no effect; the daemon
+logs the resolved path, owning UID, and mode bits at startup — that log line
+is the audit trail for what will actually run.
 
-Two hooks are injected into every repo's Claude Code hooks via `HooksMaterializer`:
+Do not set `NIWA_WORKER_SPAWN_COMMAND` in shell profiles shared across
+repositories. That variable substitutes a literal binary path for `claude`; a
+leaked value in a profile silently replaces every worker's runtime. The intent
+is testing, not persistent reconfiguration. When you need it, set it only for
+the specific command that launches the daemon.
 
-- `SessionStart` → calls `niwa session register` (records PID and Claude session ID)
-- `UserPromptSubmit` → calls `niwa session register --check-only` (keeps the registry
-  up to date while the session is active)
+### macOS vs Linux worker authentication
 
-These hooks run before any user-defined hooks for the same events.
+On Linux, the executor check walks `PPIDChain(1)` (the MCP server's parent =
+the `claude -p` worker) and compares the worker's `start_time` against
+`state.json.worker.{pid, start_time}`. This defeats naive same-UID PID
+spoofing.
 
-**Daemon:**
+On macOS, `PIDStartTime` returns an alive/dead answer without a precise
+timestamp, so the check degrades to PID-match-only. The role-integrity trust
+ceiling still holds, but same-UID process isolation is strictly weaker. Users
+needing the strongest local isolation should run niwa on Linux.
 
-After writing all files, `niwa apply` checks whether a live daemon is already running
-(by reading `.niwa/daemon.pid` and verifying the PID). If not, it spawns `niwa mesh
-watch --instance-root=<path>` as a detached background process (`Setsid: true`). The
-daemon writes its PID file atomically — only after its fsnotify watch loop is
-established — so `niwa apply` never sees a half-started daemon as live.
+### Backup exclusion
 
-Running `niwa apply` multiple times is safe. If the daemon is already alive, nothing is
-spawned. If `sessions.json` already exists, it's left untouched.
+`.niwa/` contains live task envelopes, `state.json`, and the append-only
+`transitions.log` — which includes terminal result / reason bodies and
+progress summaries. Exclude `.niwa/` from shared or cloud backups if tasks
+carry content you don't want replicated.
 
-## The four MCP tools
+### Migration from pre-1.0 instances
 
-Sessions interact with the mesh via four tools exposed by `niwa mcp-serve`:
+The old mesh stored per-session inboxes under `.niwa/sessions/<uuid>/`. On the
+first `niwa apply` under the new model, if the installer sees any
+`.niwa/sessions/<uuid>/` directories and no `.niwa/roles/` layout, it:
 
-### niwa_check_messages
+1. Emits one stderr warning ("migrating pre-1.0 mesh layout; queued envelopes
+   will be discarded").
+2. Removes the old session directories.
+3. Preserves `sessions.json` so coordinator registration survives.
 
-Reads all message files from this session's inbox and returns them formatted as
-markdown. Call this at idle points or every ~10 tool calls while working.
+Pre-1.0 queued envelopes are not carried forward — the wire format changed.
 
-```
-niwa_check_messages()
-```
+### Destroy order
 
-Returns: formatted list of messages, or "No new messages."
+`niwa destroy` now signals workers first:
 
-### niwa_send_message
+1. List all `running` tasks, SIGKILL each worker's process group (negative PID
+   signal).
+2. SIGTERM the daemon, wait `NIWA_DESTROY_GRACE_SECONDS` (default 5), SIGKILL
+   if needed.
+3. Remove the instance directory.
 
-Sends a typed message to another session by role. The message is written to the
-recipient's inbox as a JSON file via atomic rename, so it survives crashes.
+Killing workers first minimizes the window during which an
+`acceptEdits`-enabled worker could still write to the filesystem while the
+instance is being torn down. If you use `rm -rf` on an instance directory, the
+daemon detects the missing watch path via fsnotify and exits on its own — but
+unclean, and workers may outlive the daemon by seconds.
 
-```
-niwa_send_message(
-  to="coordinator",
-  type="task.result",
-  body={"summary": "done", "files_changed": 3},
-  reply_to="<msg-id>",    # optional: ID of message being answered
-  task_id="<uuid>",       # optional: stable task identifier for correlation
-  expires_at="2026-04-21T18:00:00Z"  # optional: ISO 8601 expiry
-)
-```
+## Known Limitations
 
-`type` and `to` must match `^[a-zA-Z0-9._-]{1,64}$`. Common types: `question.ask`,
-`question.answer`, `task.delegate`, `task.result`.
+See the [PRD's Known Limitations section](../prds/PRD-cross-session-communication.md#known-limitations)
+for the full list. The ones that most affect operators:
 
-### niwa_ask
+- **`acceptEdits` blast radius.** Workers run with
+  `--permission-mode=acceptEdits` so background processes don't stall on
+  permission prompts. A prompt-injected worker can write anywhere in the
+  role's repo without confirming. Users who need per-edit confirmation should
+  not enable channel delegation. Per-role permission-mode overrides are
+  deferred.
+- **`transitions.log` body retention.** Progress summaries (200 chars) and
+  terminal result / reason bodies are appended to
+  `.niwa/tasks/<id>/transitions.log` as an audit trail. There's no v1 garbage
+  collection; the log accumulates indefinitely. Manually clean completed task
+  directories, or exclude `.niwa/` from backups, if bodies are sensitive.
+- **Env cross-pollination across roles.** The daemon inherits the user's
+  shell environment and passes it through to every worker regardless of role.
+  A secret intended for one role (for example, `AWS_*` credentials for
+  `backend`) is visible to workers in every other role. Per-role env filtering
+  is deferred — treat all shell-exported secrets as visible to every
+  delegated worker.
+- **macOS degradation.** As noted above, worker authentication falls back to
+  PID-match-only on macOS.
 
-Sends a question to another session and blocks until a reply arrives — or until the
-timeout expires. The calling session is blocked (the tool call stays open) for the
-duration, so you don't need polling loops.
+## Cross-references
 
-```
-niwa_ask(
-  to="coordinator",
-  body={"question": "Which approach should I use for the auth refactor?"},
-  timeout=300  # seconds; default 600
-)
-```
-
-Returns: the body of the reply message, or an error with code `ASK_TIMEOUT` if no
-reply arrives within the timeout.
-
-**How it works:** `niwa_ask` writes a `question.ask` message to the recipient's inbox,
-registers an internal reply channel keyed by the sent message ID, then blocks on that
-channel. When the recipient calls `niwa_send_message` with `reply_to=<msg-id>`, the
-server detects the matching reply, moves the file to `inbox/read/`, and unblocks the
-waiting call.
-
-If the recipient session's process is dead when the message arrives, the daemon resumes
-it via `claude --resume <session-id>`. If the session is alive but busy, messages queue
-in the inbox; `niwa_ask` will time out if the busy session doesn't respond within the
-timeout window. This is the accepted tradeoff — see [Busy session behavior](#busy-session-behavior).
-
-### niwa_wait
-
-Blocks until a threshold number of messages matching optional type and/or sender filters
-have arrived in the inbox. Useful for a coordinator collecting results from multiple
-workers.
-
-```
-niwa_wait(
-  types=["task.result"],    # empty = accept any type
-  from=["worker-a", "worker-b"],  # empty = accept from anyone
-  count=2,                  # wait for 2 matching messages; default 1
-  timeout=600               # seconds; default 600
-)
-```
-
-Returns: the accumulated messages once the count threshold is reached, or an error with
-code `WAIT_TIMEOUT`.
-
-## Daemon lifecycle
-
-The mesh watch daemon (`niwa mesh watch`) is a long-running background process. You
-don't normally interact with it directly.
-
-| Event | What happens |
-|-------|-------------|
-| `niwa apply` | Starts the daemon if not already alive; idempotent |
-| `niwa create` | Same as apply — starts the daemon after provisioning |
-| `niwa destroy` | Sends SIGTERM, waits up to 5 seconds, sends SIGKILL if needed, then removes the instance directory |
-| Machine restart | Daemon is gone; run `niwa apply` to restart it |
-| Daemon crash | Run `niwa apply` to restart; messages queued in inboxes are preserved |
-
-**After a reboot:** `niwa apply` is the recovery path. Run it from the instance
-directory to restart that instance's daemon, or from the workspace root to restart
-daemons for all instances at once.
-
-**If the daemon isn't running:** Sessions can still exchange messages. `niwa_ask` and
-`niwa_send_message` write to the filesystem regardless of daemon state. The only thing
-the daemon provides is autonomous wakeup of idle sessions. If a session is open, it
-will receive messages via the `UserPromptSubmit` hook; if it's closed, it won't be
-resumed until the daemon is back or the user opens it manually.
-
-## Session registration
-
-When a Claude session opens, the `SessionStart` hook runs `niwa session register`.
-This command:
-
-1. Creates a session UUID and inbox directory at `.niwa/sessions/<uuid>/inbox/`
-2. Discovers the Claude session ID (used by the daemon to resume idle sessions) by
-   checking `CLAUDE_SESSION_ID` env var, then reading `~/.claude/sessions/<ppid>.json`,
-   then scanning `~/.claude/projects/<base64url-cwd>/`
-3. Writes a `SessionEntry` to `sessions.json` with role, PID, start time, inbox path,
-   and Claude session ID
-
-### Graceful degradation when session ID discovery fails
-
-If none of the three discovery methods finds a Claude session ID, the field is left
-empty and a warning is logged. The session can still receive messages — other sessions
-can send to it and it will read them the next time it calls `niwa_check_messages` or
-when it opens manually. The only capability that's lost is the daemon's ability to
-resume it autonomously.
-
-## Busy session behavior
-
-If a target session's process is alive when a message arrives, the daemon takes no
-action — it only resumes dead sessions. Messages queue in the inbox. `niwa_ask` will
-time out if the busy session doesn't complete its current task and reply within the
-timeout window.
-
-For coordinator sessions that are actively in use (PID alive, user at the terminal),
-the `UserPromptSubmit` hook fires on each user message and keeps the session's
-registration current. The `## Channels` section in `workspace-context.md` instructs
-coordinators to call `niwa_wait` periodically to check for incoming messages.
-
-The `timeout` parameter on `niwa_ask` is configurable per call. For time-sensitive
-exchanges, use a shorter timeout and retry.
-
-## Removing an instance with mesh configured
-
-Use `niwa destroy` rather than `rm -rf` for instances with `[channels.mesh]` configured.
-`niwa destroy` stops the daemon cleanly before removing the directory. If you use
-`rm -rf`, the daemon detects the missing sessions directory via fsnotify and exits on its
-own, but this is an unclean termination.
-
-```bash
-# Correct
-niwa destroy my-instance
-
-# Incorrect for mesh instances — daemon will self-exit, but uncleanly
-rm -rf my-instance
-```
-
-## Security
-
-- All files under `.niwa/sessions/` are created with mode `0600` (files) and `0700`
-  (directories), independent of umask.
-- `ClaudeSessionID` values are validated against `^[a-zA-Z0-9_-]{8,128}$` before
-  being written to `sessions.json` or passed to `exec.Command`.
-- `type` and `to` fields in messages are validated against `^[a-zA-Z0-9._-]{1,64}$`.
-- `sessions.json` reads and writes are protected by an advisory lock at
-  `.niwa/.sessions.lock`.
-- Message bodies are never written to log output; only message IDs and types appear in
-  `daemon.log`.
-
-Message signing (HMAC-SHA256 with a per-instance shared key) is planned as a follow-on.
+- [PRD: Cross-Session Communication](../prds/PRD-cross-session-communication.md)
+  — problem statement, user stories, requirements, acceptance criteria.
+- [Design: Cross-Session Communication](../designs/current/DESIGN-cross-session-communication.md)
+  — rationale, rejected alternatives, sequence diagrams, security model.
+- [Functional Testing Guide](functional-testing.md) — end-to-end test patterns,
+  including the "Testing the mesh" section that covers
+  `NIWA_WORKER_SPAWN_COMMAND`, timing overrides, and daemon pause hooks.
