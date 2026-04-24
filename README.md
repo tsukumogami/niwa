@@ -120,6 +120,8 @@ repos, regenerates content files, and cleans up repos removed from the config.
 | `niwa reset [instance] [--force]` | Tear down and recreate an instance |
 | `niwa destroy [instance] [--force]` | Permanently remove an instance; when `[channels.mesh]` is configured, SIGKILLs running workers first, then stops the mesh watch daemon with a grace window |
 | `niwa mesh watch --instance-root <path>` | Run the mesh watch daemon (started automatically by `niwa apply` when `[channels.mesh]` is configured; not normally invoked directly) |
+| `niwa task list` | List tasks (filter by `--role`, `--state`, `--delegator`, `--since`) |
+| `niwa task show <task-id>` | Show envelope, state, and transitions for one task |
 | `niwa version` | Print version information |
 | `niwa --no-progress <command>` | Suppress the animated status line regardless of TTY state |
 
