@@ -1,65 +1,92 @@
 package workspace
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"testing"
 )
 
-func TestCloneOrSyncOverlay_MissingDirReturnsFirstTime(t *testing.T) {
+func TestEnsureOverlaySnapshot_FirstCloneReportsFresh(t *testing.T) {
 	tmp := t.TempDir()
-	dir := filepath.Join(tmp, "nonexistent")
+	remote := overlaysyncMakeBareRepo(t, filepath.Join(tmp, "remote"), "overlay.toml", `name = "demo"`)
+	dir := filepath.Join(tmp, "snapshot")
 
-	// Use a local path that doesn't exist as a repo URL — the clone will fail,
-	// but it should fail with firstTime=true.
-	firstTime, err := CloneOrSyncOverlay("/does/not/exist/as/a/repo", dir)
-	if !firstTime {
-		t.Errorf("expected firstTime=true for missing dir, got false")
+	wasFresh, err := EnsureOverlaySnapshot(context.Background(), remote, dir, nil, nil)
+	if err != nil {
+		t.Fatalf("EnsureOverlaySnapshot: %v", err)
 	}
-	if err == nil {
-		t.Error("expected error when cloning from invalid URL, got nil")
+	if !wasFresh {
+		t.Error("expected wasFreshClone=true on initial materialization")
+	}
+	if !provenanceMarkerExists(dir) {
+		t.Error("expected provenance marker after fresh materialization")
 	}
 }
 
-func TestCloneOrSyncOverlay_ExistingValidRepoReturnsNotFirstTime(t *testing.T) {
+func TestEnsureOverlaySnapshot_RefreshReportsNotFresh(t *testing.T) {
 	tmp := t.TempDir()
+	remote := overlaysyncMakeBareRepo(t, filepath.Join(tmp, "remote"), "overlay.toml", `name = "demo"`)
+	dir := filepath.Join(tmp, "snapshot")
 
-	// Create a minimal git repo to serve as the "remote".
-	remoteDir := filepath.Join(tmp, "remote")
-	if err := os.MkdirAll(remoteDir, 0o755); err != nil {
+	if _, err := EnsureOverlaySnapshot(context.Background(), remote, dir, nil, nil); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	wasFresh, err := EnsureOverlaySnapshot(context.Background(), remote, dir, nil, nil)
+	if err != nil {
+		t.Fatalf("EnsureOverlaySnapshot refresh: %v", err)
+	}
+	if wasFresh {
+		t.Error("expected wasFreshClone=false on subsequent refresh")
+	}
+}
+
+func TestEnsureOverlaySnapshot_BadURLReportsFreshClone(t *testing.T) {
+	tmp := t.TempDir()
+	dir := filepath.Join(tmp, "snapshot")
+
+	wasFresh, err := EnsureOverlaySnapshot(context.Background(), "/does/not/exist/as/a/repo", dir, nil, nil)
+	if err == nil {
+		t.Error("expected error for invalid URL, got nil")
+	}
+	if !wasFresh {
+		t.Error("expected wasFreshClone=true so caller knows to silently skip")
+	}
+}
+
+// overlaysyncMakeBareRepo creates a bare git repo at dir, populated
+// with a single commit containing filename:content. Returns the
+// file:// URL for the bare repo. Used by tests that need a real
+// remote without network access.
+func overlaysyncMakeBareRepo(t *testing.T, dir, filename, content string) string {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(dir), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	overlaysyncGitRunIn(t, remoteDir, "init", "--initial-branch=main")
-	overlaysyncGitRunIn(t, remoteDir, "config", "user.email", "test@test.com")
-	overlaysyncGitRunIn(t, remoteDir, "config", "user.name", "Test")
-	overlaysyncGitRunIn(t, remoteDir, "commit", "--allow-empty", "-m", "init")
+	overlaysyncGitRun(t, "", "init", "--bare", "--initial-branch=main", dir)
 
-	// Clone it.
-	cloneDir := filepath.Join(tmp, "clone")
-	firstTime, err := CloneOrSyncOverlay(remoteDir, cloneDir)
-	if err != nil {
-		t.Fatalf("initial clone failed: %v", err)
+	work := filepath.Join(filepath.Dir(dir), "work-"+filepath.Base(dir))
+	overlaysyncGitRun(t, "", "clone", dir, work)
+	if err := os.WriteFile(filepath.Join(work, filename), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
 	}
-	if !firstTime {
-		t.Error("expected firstTime=true on initial clone")
-	}
+	overlaysyncGitRun(t, work, "config", "user.email", "test@test.com")
+	overlaysyncGitRun(t, work, "config", "user.name", "Test")
+	overlaysyncGitRun(t, work, "add", filename)
+	overlaysyncGitRun(t, work, "commit", "-m", "init")
+	overlaysyncGitRun(t, work, "push", "origin", "main")
 
-	// Sync (pull) — should return firstTime=false.
-	firstTime2, err := CloneOrSyncOverlay(remoteDir, cloneDir)
-	if err != nil {
-		t.Fatalf("sync failed: %v", err)
-	}
-	if firstTime2 {
-		t.Error("expected firstTime=false on subsequent sync")
-	}
+	return "file://" + dir
 }
 
-// overlaysyncGitRunIn runs a git command inside dir, failing the test on error.
-func overlaysyncGitRunIn(t *testing.T, dir string, args ...string) {
+func overlaysyncGitRun(t *testing.T, dir string, args ...string) {
 	t.Helper()
-	fullArgs := append([]string{"-C", dir}, args...)
-	cmd := exec.Command("git", fullArgs...)
+	if dir != "" {
+		args = append([]string{"-C", dir}, args...)
+	}
+	cmd := exec.Command("git", args...)
 	cmd.Env = append(os.Environ(),
 		"GIT_CONFIG_GLOBAL=/dev/null",
 		"GIT_CONFIG_SYSTEM=/dev/null",

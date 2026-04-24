@@ -8,10 +8,14 @@ package guardrail
 import (
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
+
+	"github.com/BurntSushi/toml"
 
 	"github.com/tsukumogami/niwa/internal/config"
 )
@@ -62,16 +66,65 @@ func isGitHubPublicRemote(url string) bool {
 	return githubHTTPSRemote.MatchString(url) || githubSSHRemote.MatchString(url)
 }
 
-// EnumerateGitHubRemotes runs `git -C <dir> remote -v` and returns the sorted,
-// deduplicated list of unique URLs that match a public GitHub pattern.
-// `git remote -v` lists every remote twice (fetch + push); this function
-// collapses those duplicates before classifying.
+// EnumerateGitHubRemotes returns the sorted, deduplicated list of
+// public-GitHub clone URLs configured for the workspace at dir.
 //
-// The second return value is true iff the git subprocess succeeded AND
-// produced at least one parseable remote line. haveGit=false means the
-// directory is not a git tree or git is unavailable; callers should skip the
-// guardrail with a warning.
+// Per PRD R31, the new-model signal is the snapshot provenance marker
+// at <dir>/.niwa-snapshot.toml; when present, the marker's host +
+// owner/repo replaces the legacy `git remote -v` enumeration. When the
+// marker is absent, the function falls back to the legacy git path
+// for backward compatibility with workspaces that haven't migrated to
+// the snapshot model yet.
+//
+// The second return value is true iff a usable signal was found
+// (marker OR git output with at least one parseable remote). haveGit=false
+// means callers should skip the guardrail with a warning per
+// today's "no git remotes detected; public-repo guardrail skipped"
+// behavior.
 func EnumerateGitHubRemotes(dir string) (matches []string, haveGit bool) {
+	// New-model path: read the snapshot provenance marker.
+	if matches, ok := enumerateFromMarker(dir); ok {
+		return matches, true
+	}
+	// Legacy fallback: git remote -v.
+	return enumerateFromGitRemote(dir)
+}
+
+// enumerateFromMarker returns the public-GitHub URL synthesized from the
+// snapshot provenance marker, or (nil, false) if the marker is absent
+// or malformed.
+func enumerateFromMarker(dir string) ([]string, bool) {
+	data, err := os.ReadFile(filepath.Join(dir, ".niwa-snapshot.toml"))
+	if err != nil {
+		return nil, false
+	}
+	var marker struct {
+		Host  string `toml:"host"`
+		Owner string `toml:"owner"`
+		Repo  string `toml:"repo"`
+	}
+	if err := toml.Unmarshal(data, &marker); err != nil {
+		return nil, false
+	}
+	if marker.Owner == "" || marker.Repo == "" {
+		return nil, false
+	}
+	host := marker.Host
+	if host == "" {
+		host = "github.com"
+	}
+	if !strings.EqualFold(host, "github.com") {
+		// Marker present but non-GitHub host: the guardrail does not
+		// fire on non-github.com sources per PRD scope. Returning a
+		// non-nil empty slice signals haveGit=true so the caller doesn't
+		// emit the "no remotes detected" warning.
+		return []string{}, true
+	}
+	url := "https://github.com/" + marker.Owner + "/" + marker.Repo + ".git"
+	return []string{url}, true
+}
+
+func enumerateFromGitRemote(dir string) (matches []string, haveGit bool) {
 	cmd := exec.Command("git", "-C", dir, "remote", "-v")
 	// Silence git's own "fatal: not a git repository" stderr when dir
 	// is not a git tree. The guardrail emits its own single-line

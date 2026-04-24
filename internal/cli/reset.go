@@ -126,9 +126,21 @@ func runReset(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-// isClonedConfig checks whether the config directory is a cloned git
-// repository, indicating the config came from a remote source.
+// isClonedConfig reports whether the config directory was sourced
+// from a remote (vs. authored locally). Per PRD R30, the new-model
+// signal is the snapshot provenance marker; the legacy signal
+// (`.git/` presence) is preserved as a fallback for working trees
+// that haven't yet been lazy-converted to snapshots.
+//
+// When neither signal is present, treat as "user-authored" — same
+// behavior as today's no-`.git/` path. This keeps the local-only
+// workspace experience unchanged.
 func isClonedConfig(configDir string) bool {
+	// New-model signal: provenance marker.
+	if _, err := os.Stat(filepath.Join(configDir, ".niwa-snapshot.toml")); err == nil {
+		return true
+	}
+	// Legacy signal: .git/ directory.
 	gitDir := filepath.Join(configDir, ".git")
 	info, err := os.Stat(gitDir)
 	if err != nil {

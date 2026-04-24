@@ -81,6 +81,35 @@ special setup: create a `ConfigRepo("myws", ...)` and an
 `OverlayRepo("myws-overlay", ...)`, then run `niwa init --from <myws URL>`.
 `niwa init` will discover and clone the overlay automatically.
 
+### Testing the GitHub tarball + ETag path
+
+`localGitServer` covers any non-GitHub-specific behavior because it
+serves real `file://` git repos. For tests that need to exercise the
+GitHub-specific code paths (REST tarball endpoint, `If-None-Match`
+ETag drift checks, `Accept: application/vnd.github.sha` HEAD
+requests, 301 rename redirects), use `tarballFakeServer` instead.
+
+`tarballFakeServer` wraps `httptest.NewServer` to mimic the GitHub
+REST API endpoints `internal/github/fetch.go` consumes. Configure
+responses per `(owner, repo, ref)` tuple:
+
+```go
+srv := newTarballFakeServer()
+defer srv.Close()
+srv.SetTarball("org", "repo", "HEAD", map[string]string{
+    "wrap/":               "",
+    "wrap/workspace.toml": `name = "demo"`,
+})
+srv.SetCommit("org", "repo", "HEAD", "1234567890abcdef...")
+```
+
+Wire it into the niwa binary by setting `NIWA_GITHUB_API_URL` to the
+server's URL before the niwa subprocess starts. The fake records
+every request so tests can assert "the second apply made zero
+tarball requests" or "the If-None-Match header was sent." See
+`test/functional/tarball_fake_server.go` and the integration test
+in `tarball_fake_server_test.go` for the API.
+
 ## Anatomy of a @critical scenario
 
 ```gherkin

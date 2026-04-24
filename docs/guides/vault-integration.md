@@ -486,15 +486,16 @@ and stderr carries a `rotated <path>` line per affected file.
 
 ### What it does
 
-Before resolving, niwa enumerates every remote from `git remote -v`
-in the config repo and pattern-matches against GitHub HTTPS and SSH
-URL shapes. When any remote is a public GitHub URL and the team
-config has plaintext values in `*.secrets` tables, apply fails
-with an error naming the offending keys.
+Before resolving, niwa reads the config-source identity from the
+provenance marker (`.niwa/.niwa-snapshot.toml`) and pattern-matches
+the recorded `host`/`owner`/`repo` against the GitHub URL shape.
+When the marker says `host = "github.com"` and the team config has
+plaintext values in `*.secrets` tables, apply fails with an error
+naming the offending keys.
 
-The detection is URL-pattern-only — no authenticated API call, no
-latency cost. It fires whether the public remote is `origin`,
-`upstream`, or any other name.
+The detection is marker-read only — no authenticated API call, no
+latency cost. It works against the snapshot-model `.niwa/` directory;
+no `.git/` is required.
 
 ### What it doesn't do
 
@@ -502,11 +503,11 @@ latency cost. It fires whether the public remote is `origin`,
   self-hosted Gitea are in a deferred list.
 - Non-GitHub hosts (`github.mycorp.com`, `gitlab.com`,
   `bitbucket.org`) do NOT trigger the guardrail.
-- When `git remote -v` produces no output — either because the
-  config directory has no `.git` tree or because the repo has no
-  remotes configured — the guardrail emits a warning and proceeds.
-  It doesn't block apply on workspaces that aren't tracked in git
-  or aren't yet published.
+- When the provenance marker is missing — either because the config
+  directory was never sourced from a remote (local-only workspace)
+  or because the marker file was hand-deleted — the guardrail
+  emits a warning and proceeds. It doesn't block apply on
+  workspaces that aren't tracked.
 - The guardrail walks `*.secrets` tables only. Plaintext in
   `[env.vars]` is allowed; that's exactly why the vars/secrets
   split exists.

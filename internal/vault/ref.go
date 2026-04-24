@@ -36,17 +36,17 @@ const (
 // ParseRef parses a vault:// URI into a Ref using the given mode. The
 // accepted shape depends on mode:
 //
-//   ParseAnonymous:
-//     vault://key                               → Key="key"
-//     vault://folder/key                        → Path="/folder", Key="key"
-//     vault://folder/sub/key                    → Path="/folder/sub", Key="key"
-//     vault://key?required=false                → Key="key", Optional=true
+//	ParseAnonymous:
+//	  vault://key                               → Key="key"
+//	  vault://folder/key                        → Path="/folder", Key="key"
+//	  vault://folder/sub/key                    → Path="/folder/sub", Key="key"
+//	  vault://key?required=false                → Key="key", Optional=true
 //
-//   ParseNamed:
-//     vault://name/key                          → ProviderName="name", Key="key"
-//     vault://name/key?required=false           → …, Optional=true
-//     vault://key                               → error (named requires name/key)
-//     vault://name/folder/key                   → error (nested slashes rejected)
+//	ParseNamed:
+//	  vault://name/key                          → ProviderName="name", Key="key"
+//	  vault://name/key?required=false           → …, Optional=true
+//	  vault://key                               → error (named requires name/key)
+//	  vault://name/folder/key                   → error (nested slashes rejected)
 //
 // The only accepted query parameter is "required"; any other
 // parameter is rejected. required=true is accepted but is the default,

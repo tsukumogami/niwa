@@ -1,66 +1,170 @@
 package workspace
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"github.com/tsukumogami/niwa/internal/source"
 )
 
-// CloneOrSyncOverlay clones the overlay repo to dir when dir does not contain
-// a valid git repository (returning wasCloneAttempt=true). When a valid clone
-// already exists it pulls with --ff-only (returning wasCloneAttempt=false).
+// EnsureOverlaySnapshot maintains a snapshot at dir for the overlay
+// identified by urlSlug. wasFreshClone is true when we attempted a
+// first-time materialization (no marker, no .git/), so callers can
+// distinguish "overlay repo doesn't exist — silent skip" (wasFreshClone)
+// from "previously-cloned overlay failed to refresh — hard error"
+// (existing snapshot, fetch failed).
 //
-// wasCloneAttempt signals which error-handling path the caller should use:
-//   - true  → we attempted a fresh clone; callers treat failure as a silent skip
-//     because the overlay repo may simply not exist.
-//   - false → we attempted a pull on an existing clone; callers treat failure as
-//     a hard error because the overlay was previously accessible.
+// urlSlug accepts the same shapes as init's --from: org/repo,
+// host/owner/repo, full HTTPS URL, or SSH URL. Internally normalized
+// via source.Parse so the snapshot writer can dispatch on host.
 //
-// url may be an org/repo shorthand, a full HTTPS URL, or an SSH URL.
-func CloneOrSyncOverlay(url, dir string) (wasCloneAttempt bool, err error) {
-	cloneURL, resolveErr := ResolveCloneURL(url, "ssh")
-	if resolveErr != nil {
-		return true, fmt.Errorf("resolving overlay URL %q: %w", url, resolveErr)
+// fetcher may be nil for non-GitHub overlays (the fallback uses git).
+// GitHub overlays without a fetcher result in a no-op + nil — the
+// caller's existing-snapshot retains until a fetch client is wired.
+func EnsureOverlaySnapshot(ctx context.Context, urlSlug, dir string, fetcher FetchClient, reporter *Reporter) (wasFreshClone bool, err error) {
+	src, parseErr := parseOverlaySlug(urlSlug)
+	if parseErr != nil {
+		return true, fmt.Errorf("overlay: parse %q: %w", urlSlug, parseErr)
 	}
-	if !isValidGitDir(dir) {
-		// Clone fresh. Suppress git output: callers treat a clone failure as a
-		// silent skip (the overlay repo may not exist), so printing git's
-		// "Repository not found" error would alarm users needlessly.
+
+	hasMarker := provenanceMarkerExists(dir)
+	hasGit := dotGitExists(dir)
+
+	switch {
+	case hasMarker:
+		// Existing snapshot: refresh via the standard pipeline.
+		return false, EnsureConfigSnapshot(ctx, dir, fetcher, reporter)
+	case hasGit:
+		// Legacy working tree: R28 lazy conversion via the standard pipeline.
+		return false, EnsureConfigSnapshot(ctx, dir, fetcher, reporter)
+	default:
+		// Fresh materialization. Make sure the parent dir exists; the
+		// snapshot writer creates dir itself via the atomic swap.
+		// Pass urlSlug verbatim as the marker's source_url so the
+		// URL-change gate in apply matches what the registry stores.
 		if mkErr := os.MkdirAll(filepath.Dir(dir), 0o755); mkErr != nil {
-			return true, fmt.Errorf("creating overlay parent directory: %w", mkErr)
+			return true, fmt.Errorf("overlay: ensure parent: %w", mkErr)
 		}
-		cmd := exec.Command("git", "clone", cloneURL, dir)
-		if runErr := cmd.Run(); runErr != nil {
-			return true, fmt.Errorf("cloning overlay %s: %w", url, runErr)
-		}
-		return true, nil
+		return true, MaterializeFromSource(ctx, src, urlSlug, dir, fetcher, reporter)
 	}
-
-	// Pull existing clone. Suppress output: R22 requires that standard apply
-	// output not include the overlay's URL or repo name. The git fetch progress
-	// line ("From github.com:org/repo-overlay") would leak the overlay name.
-	// Sync errors surface via the returned error, not git's output.
-	if runErr := exec.Command("git", "-C", dir, "pull", "--ff-only").Run(); runErr != nil {
-		return false, fmt.Errorf("syncing overlay: %w", runErr)
-	}
-	return false, nil
 }
 
-// isValidGitDir returns true when dir contains a valid git repository: a .git
-// entry exists AND git rev-parse HEAD exits 0. The HEAD check matches the
-// "previously cloned" heuristic in R7/R19 — a .git directory from a partial
-// or corrupt clone is not treated as a valid prior clone.
-func isValidGitDir(dir string) bool {
-	if _, err := os.Stat(filepath.Join(dir, ".git")); err != nil {
-		return false
-	}
-	return exec.Command("git", "-C", dir, "rev-parse", "HEAD").Run() == nil
+// ParseSourceURL accepts the historical clone-input shapes (org/repo
+// shorthand, full HTTPS URL, SSH URL, file:// for local fakes) and
+// converts them into a source.Source. Used by init's --from path and
+// the overlay snapshot writer.
+func ParseSourceURL(slug string) (source.Source, error) {
+	return parseOverlaySlug(slug)
 }
 
-// HeadSHA returns the current HEAD commit SHA of the git repository at dir.
+// parseOverlaySlug is the implementation; ParseSourceURL is the
+// public alias that documents non-overlay callers.
+func parseOverlaySlug(slug string) (source.Source, error) {
+	slug = strings.TrimSpace(slug)
+	if slug == "" {
+		return source.Source{}, fmt.Errorf("empty slug")
+	}
+
+	// file:// raw URL: store verbatim in Host so the fallback path
+	// can clone it without trying to synthesize https://. Synthesize
+	// Owner/Repo from the trailing path components so the provenance
+	// marker carries a stable identity (the marker schema requires
+	// non-empty owner and repo).
+	if strings.HasPrefix(slug, "file://") {
+		owner, repo := splitLocalPath(strings.TrimPrefix(slug, "file://"))
+		return source.Source{Host: slug, Owner: owner, Repo: repo}, nil
+	}
+
+	// Bare local path with no scheme: same treatment as file://.
+	if strings.HasPrefix(slug, "/") && !strings.Contains(slug, ":") {
+		owner, repo := splitLocalPath(slug)
+		return source.Source{Host: "file://" + slug, Owner: owner, Repo: repo}, nil
+	}
+
+	// org/repo shorthand passes through to source.Parse directly.
+	if !strings.Contains(slug, "://") && !strings.HasPrefix(slug, "git@") {
+		return source.Parse(slug)
+	}
+
+	// SSH form: git@host:owner/repo[.git]
+	if strings.HasPrefix(slug, "git@") {
+		colon := strings.IndexByte(slug, ':')
+		if colon < 0 {
+			return source.Source{}, fmt.Errorf("malformed SSH URL %q", slug)
+		}
+		host := strings.TrimPrefix(slug[:colon], "git@")
+		ownerRepo := strings.TrimSuffix(slug[colon+1:], ".git")
+		parts := strings.SplitN(ownerRepo, "/", 2)
+		if len(parts) != 2 {
+			return source.Source{}, fmt.Errorf("malformed SSH path %q", ownerRepo)
+		}
+		s := source.Source{Owner: parts[0], Repo: parts[1]}
+		if host != "github.com" {
+			s.Host = host
+		}
+		return s, nil
+	}
+
+	// HTTPS / http / git:// form. Strip the scheme + host + .git
+	// suffix and feed the owner/repo (plus optional host) to source.Parse.
+	withoutScheme := slug
+	for _, scheme := range []string{"https://", "http://", "git://"} {
+		if strings.HasPrefix(withoutScheme, scheme) {
+			withoutScheme = strings.TrimPrefix(withoutScheme, scheme)
+			break
+		}
+	}
+	withoutScheme = strings.TrimSuffix(withoutScheme, ".git")
+	parts := strings.SplitN(withoutScheme, "/", 3)
+	if len(parts) < 3 {
+		return source.Source{}, fmt.Errorf("URL %q missing owner/repo", slug)
+	}
+	host, owner, repo := parts[0], parts[1], parts[2]
+	s := source.Source{Owner: owner, Repo: repo}
+	if host != "github.com" {
+		s.Host = host
+	}
+	return s, nil
+}
+
+// splitLocalPath returns synthetic (owner, repo) values for a local
+// filesystem path, used when the source is a bare URL or path with
+// no inherent owner/repo. The trailing path component (sans .git)
+// becomes the repo; its parent becomes the owner. Single-segment
+// paths get owner="local". Always returns non-empty values so the
+// provenance marker schema is satisfied.
+func splitLocalPath(p string) (owner, repo string) {
+	p = strings.TrimRight(p, "/")
+	repo = strings.TrimSuffix(filepath.Base(p), ".git")
+	if repo == "" || repo == "/" || repo == "." {
+		repo = "local"
+	}
+	parent := filepath.Base(filepath.Dir(p))
+	if parent == "" || parent == "/" || parent == "." {
+		owner = "local"
+	} else {
+		owner = parent
+	}
+	return owner, repo
+}
+
+// HeadSHA returns the current HEAD commit SHA recorded for the
+// snapshot at dir. Reads the provenance marker; falls back to
+// `git -C dir rev-parse HEAD` when the dir is still a legacy working
+// tree (covers the apply window between Issue 4 and the Issue 5 lazy
+// migration).
 func HeadSHA(dir string) (string, error) {
+	if provenanceMarkerExists(dir) {
+		prov, err := ReadProvenance(dir)
+		if err != nil {
+			return "", fmt.Errorf("reading provenance: %w", err)
+		}
+		return prov.ResolvedCommit, nil
+	}
 	out, err := exec.Command("git", "-C", dir, "rev-parse", "HEAD").Output()
 	if err != nil {
 		return "", fmt.Errorf("reading HEAD SHA: %w", err)

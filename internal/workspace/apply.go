@@ -64,9 +64,14 @@ type Applier struct {
 	// how to persist the setting.
 	ChannelsSynthesized bool
 
-	// cloneOrSync is the function used to clone or sync the overlay repo.
-	// Defaults to CloneOrSyncOverlay. Overridable in tests.
-	cloneOrSync func(url, dir string) (bool, error)
+	// cloneOrSync materializes or refreshes the overlay snapshot at dir.
+	// Returns wasFreshClone=true when no marker/.git was present (fresh
+	// materialization), so callers can distinguish "overlay doesn't
+	// exist — silent skip" from "previously cloned overlay failed —
+	// hard error". Defaults to defaultCloneOrSync (which forwards to
+	// EnsureOverlaySnapshot wired to this Applier's fetcher + reporter).
+	// Overridable in tests.
+	cloneOrSync func(ctx context.Context, url, dir string) (bool, error)
 
 	// headSHA is the function used to read the HEAD commit SHA of a repo.
 	// Defaults to HeadSHA. Overridable in tests.
@@ -103,8 +108,11 @@ func NewApplier(gh github.Client) *Applier {
 		GitHubClient: gh,
 		Cloner:       &Cloner{},
 		Reporter:     NewReporter(os.Stderr),
-		cloneOrSync:  CloneOrSyncOverlay,
 		headSHA:      HeadSHA,
+	}
+	a.cloneOrSync = func(ctx context.Context, url, dir string) (bool, error) {
+		fetcher, _ := a.GitHubClient.(FetchClient)
+		return EnsureOverlaySnapshot(ctx, url, dir, fetcher, a.Reporter)
 	}
 	aw := &applierWriter{a: a}
 	a.Materializers = []Materializer{
@@ -135,6 +143,12 @@ const noticeProviderShadow = "provider-shadow"
 // activated via --channels or NIWA_CHANNELS rather than a [channels.mesh] config
 // section. Hints the user how to persist the setting permanently.
 const noticeChannelsFromFlag = "channels-from-flag"
+
+// noticeConfigConverted is the one-time notice key for the PRD R28 lazy
+// conversion (legacy `.git/`-backed config dir converted to a snapshot).
+// After the first apply that performs the conversion, the notice is
+// recorded in DisclosedNotices and suppressed on subsequent runs.
+const noticeConfigConverted = "config-converted-to-snapshot"
 
 // cloneWorkers is the maximum number of repos cloned concurrently.
 const cloneWorkers = 8
@@ -291,10 +305,15 @@ func (a *Applier) Create(ctx context.Context, cfg *config.WorkspaceConfig, confi
 func (a *Applier) Apply(ctx context.Context, cfg *config.WorkspaceConfig, configDir, instanceRoot string) error {
 	now := time.Now()
 
-	// Auto-pull config from origin if it's a git repo with a remote.
-	// Moved here from cli/apply.go so that the Reporter routes output.
-	if syncErr := SyncConfigDir(configDir, a.Reporter, a.AllowDirty); syncErr != nil {
-		return syncErr
+	// Snapshot path (PRD R10-R13, R28). When the config dir holds a
+	// provenance marker, refresh via the drift-check + tarball pipeline
+	// (GitHub) or shallow-clone fallback (everything else). When it
+	// holds a legacy `.git/` working tree, perform R28 lazy conversion
+	// in place. When it holds neither, no-op.
+	fetcher, _ := a.GitHubClient.(FetchClient)
+	configConverted, err := EnsureConfigSnapshotWithStatus(ctx, configDir, fetcher, a.Reporter)
+	if err != nil {
+		return err
 	}
 
 	// Ensure the instance root's .gitignore covers *.local*. Applier.
@@ -346,6 +365,16 @@ func (a *Applier) Apply(ctx context.Context, cfg *config.WorkspaceConfig, config
 	})
 	if err != nil {
 		return err
+	}
+
+	// PRD R28: emit the lazy-conversion `note:` once per workspace.
+	// `configConverted` is true only when EnsureConfigSnapshot actually
+	// rotated a legacy `.git/` working tree into a snapshot during this
+	// apply. The DisclosedNotices check ensures subsequent applies don't
+	// re-emit; the append records the disclosure into the next save.
+	if configConverted && !sliceContains(wsDisclosedNotices, noticeConfigConverted) {
+		a.Reporter.Log("note: %s converted from working tree to snapshot. Manual edits inside this directory will no longer persist.", configDir)
+		result.disclosedNotices = append(result.disclosedNotices, noticeConfigConverted)
 	}
 
 	// Emit `rotated <path>` to stderr for every managed file whose
@@ -485,7 +514,7 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 			if dirErr != nil {
 				return nil, fmt.Errorf("resolving overlay directory: %w", dirErr)
 			}
-			_, syncErr := a.cloneOrSync(opts.overlayURL, dir)
+			_, syncErr := a.cloneOrSync(ctx, opts.overlayURL, dir)
 			if syncErr != nil {
 				// Any sync failure is a hard error when OverlayURL is registered.
 				return nil, fmt.Errorf("workspace overlay sync failed. Use --no-overlay to skip.")
@@ -508,7 +537,7 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 			if ok {
 				dir, dirErr := config.OverlayDir(conventionURL)
 				if dirErr == nil {
-					wasCloneAttempt, cloneErr := a.cloneOrSync(conventionURL, dir)
+					wasCloneAttempt, cloneErr := a.cloneOrSync(ctx, conventionURL, dir)
 					if cloneErr != nil {
 						if wasCloneAttempt {
 							// Fresh clone failed: overlay repo likely doesn't exist — skip silently.
@@ -641,12 +670,22 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 	known := KnownRepoNames(cfg, discoveredNames)
 	allWarnings = append(allWarnings, WarnUnknownRepos(cfg, known)...)
 
-	// Step 2a: Sync global config repo if registered and not skipped.
+	// Step 2a: Sync global config (personal overlay) if registered and
+	// not skipped. Snapshot path (PRD R10-R13, R28) is the only sync
+	// strategy now — no legacy fallthrough.
 	if a.GlobalConfigDir != "" && !opts.skipGlobal {
 		a.Reporter.Status("syncing config...")
-		if syncErr := SyncConfigDir(a.GlobalConfigDir, a.Reporter, a.AllowDirty); syncErr != nil {
+		fetcher, _ := a.GitHubClient.(FetchClient)
+		converted, syncErr := EnsureConfigSnapshotWithStatus(ctx, a.GlobalConfigDir, fetcher, a.Reporter)
+		if syncErr != nil {
 			a.Reporter.Warn("could not sync config: %v", syncErr)
 			return nil, fmt.Errorf("syncing global config: %w", syncErr)
+		}
+		// PRD R28: emit the global-config conversion notice once per
+		// workspace, gated on DisclosedNotices.
+		if converted && !sliceContains(opts.disclosedNotices, noticeConfigConverted) {
+			a.Reporter.Log("note: %s converted from working tree to snapshot. Manual edits inside this directory will no longer persist.", a.GlobalConfigDir)
+			newDisclosures = append(newDisclosures, noticeConfigConverted)
 		}
 	}
 
@@ -1226,6 +1265,17 @@ func sliceContains(s []string, elem string) bool {
 // annoyance rather than a data-loss scenario.
 func saveWorkspaceRootDisclosures(workspaceRoot string, existing *InstanceState, newNotices []string) {
 	if len(newNotices) == 0 {
+		return
+	}
+	// Guard against single-instance layouts where workspaceRoot ==
+	// filepath.Dir(instanceRoot) escapes the actual workspace (e.g.,
+	// instanceRoot=/tmp/myws → workspaceRoot=/tmp). In those layouts
+	// the per-instance state file IS the workspace root state file —
+	// disclosures get carried by the instance SaveState. We detect
+	// the layout by checking for the workspace.toml that init writes:
+	// multi-instance has it at workspaceRoot/.niwa/, single-instance
+	// does not.
+	if _, err := os.Stat(filepath.Join(workspaceRoot, StateDir, WorkspaceConfigFile)); err != nil {
 		return
 	}
 	s := existing
