@@ -106,3 +106,49 @@ func TestServer_Initialize_ToolsList(t *testing.T) {
 		}
 	}
 }
+
+// TestServer_Initialize_AdvertisesToolsCapability guards a regression where
+// the initialize response declared an empty tools capability that
+// encoding/json's omitempty stripped on the wire. Claude Code reads a
+// missing "tools" field as hasTools=false and never calls tools/list, so
+// the whole MCP surface becomes invisible. The response MUST contain a
+// non-empty "tools" object.
+func TestServer_Initialize_AdvertisesToolsCapability(t *testing.T) {
+	pr, pw := io.Pipe()
+	var outBuf strings.Builder
+	srv := New("coordinator", "")
+	done := make(chan error, 1)
+	go func() { done <- srv.Run(pr, &outBuf) }()
+
+	if err := json.NewEncoder(pw).Encode(request{JSONRPC: "2.0", ID: 1, Method: "initialize"}); err != nil {
+		t.Fatalf("encode initialize: %v", err)
+	}
+	pw.Close()
+	if err := <-done; err != nil {
+		t.Fatalf("server run: %v", err)
+	}
+
+	var resp map[string]any
+	sc := bufio.NewScanner(strings.NewReader(outBuf.String()))
+	if !sc.Scan() {
+		t.Fatalf("no initialize response; output: %q", outBuf.String())
+	}
+	if err := json.Unmarshal(sc.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal initialize: %v", err)
+	}
+	result, ok := resp["result"].(map[string]any)
+	if !ok {
+		t.Fatalf("result is not an object: %v", resp["result"])
+	}
+	caps, ok := result["capabilities"].(map[string]any)
+	if !ok {
+		t.Fatalf("capabilities is not an object: %v", result["capabilities"])
+	}
+	tools, ok := caps["tools"].(map[string]any)
+	if !ok {
+		t.Fatalf("capabilities.tools is missing or not an object; got %v (full capabilities: %v)", caps["tools"], caps)
+	}
+	if len(tools) == 0 {
+		t.Fatalf("capabilities.tools must be a non-empty object so json.omitempty cannot strip it; got %v", tools)
+	}
+}

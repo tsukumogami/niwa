@@ -126,7 +126,11 @@ func (s *Server) dispatch(req request) {
 				ProtocolVersion: protocolVersion,
 				Capabilities: capabilities{
 					Experimental: map[string]any{"claude/channel": map[string]any{}},
-					Tools:        map[string]any{},
+					// Populated map so encoding/json's omitempty doesn't drop
+					// the whole tools capability. Claude Code reads a missing
+					// "tools" field as hasTools=false and never calls
+					// tools/list, which is the failure mode fixed here.
+					Tools: map[string]any{"listChanged": false},
 				},
 				ServerInfo: serverInfo{Name: "niwa", Version: "0.1.0"},
 			},
@@ -405,6 +409,23 @@ func (s *Server) handleCheckMessages() toolResult {
 		s.markSeen(e.Name())
 	}
 
+	// Include the caller's own in-progress task envelope (daemon renamed it
+	// out of the top-level inbox during claim). The bootstrap prompt tells
+	// workers to retrieve the envelope via niwa_check_messages, which only
+	// works if we look past inbox/ into inbox/in-progress/ for the caller's
+	// NIWA_TASK_ID. Not moved to read/ after listing: the envelope stays in
+	// in-progress/ for the lifetime of the task, reflecting its claimed
+	// state in the filesystem.
+	if s.taskID != "" {
+		inProgress := filepath.Join(dir, "in-progress", s.taskID+".json")
+		if data, err := os.ReadFile(inProgress); err == nil {
+			var m Message
+			if json.Unmarshal(data, &m) == nil {
+				msgs = append(msgs, msgFile{name: "", msg: m})
+			}
+		}
+	}
+
 	if len(msgs) == 0 {
 		return textResult("No new messages.")
 	}
@@ -440,9 +461,14 @@ func (s *Server) handleCheckMessages() toolResult {
 	// Move returned files to inbox/read/ via atomic rename. Best-effort: a
 	// rename failure leaves the file in place, which at worst causes a
 	// duplicate delivery on the next check — preferred over silent loss.
+	// The in-progress task-envelope entry (name="") stays put; it reflects
+	// the task's claimed state until the worker finishes.
 	readDir := filepath.Join(dir, "read")
 	_ = os.MkdirAll(readDir, 0o700)
 	for _, mf := range msgs {
+		if mf.name == "" {
+			continue
+		}
 		src := filepath.Join(dir, mf.name)
 		dst := filepath.Join(readDir, mf.name)
 		_ = os.Rename(src, dst)

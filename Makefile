@@ -1,4 +1,4 @@
-.PHONY: build test build-test build-worker-fake test-functional test-functional-critical test-functional-claude-integration test-functional-channels-e2e test-install clean
+.PHONY: build test build-test build-worker-fake test-functional test-functional-critical test-functional-claude-integration test-functional-channels-e2e test-functional-channels-e2e-graph test-install clean
 
 # Build the niwa binary.
 build:
@@ -51,6 +51,19 @@ test-functional-channels-e2e: build-test
 	NIWA_TEST_WORKER_FAKE=$(CURDIR)/test/functional/worker_fake/worker-fake \
 	NIWA_TEST_TAGS=@channels-e2e \
 	go test -v ./test/functional/...
+	rm -rf .niwa-test
+
+# Run only the @channels-e2e-graph scenario — a real coordinator `claude -p`
+# delegating to two real worker `claude -p` processes (web + backend),
+# proving the full delegation graph works with live LLMs on both sides.
+# Requires claude CLI and ANTHROPIC_API_KEY. Skipped cleanly when absent.
+# The go test timeout is extended so the multi-minute LLM exchange has
+# headroom; the per-run claude deadline in the scenario itself is 600 s.
+test-functional-channels-e2e-graph: build-test
+	NIWA_TEST_BINARY=$(CURDIR)/niwa-test \
+	NIWA_TEST_WORKER_FAKE=$(CURDIR)/test/functional/worker_fake/worker-fake \
+	NIWA_TEST_TAGS=@channels-e2e-graph \
+	go test -v -timeout 30m ./test/functional/...
 	rm -rf .niwa-test
 
 # Run only install-path integration scenarios. Proves that `niwa shell-init`

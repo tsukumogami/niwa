@@ -84,6 +84,26 @@ type daemonConfig struct {
 // argv (AC-D5 / DESIGN Decision 4).
 const bootstrapPromptTemplate = "You are a worker for niwa task %s. Call niwa_check_messages to retrieve your task envelope."
 
+// niwaMCPAllowedToolNames is the flag-formatted list passed to claude's
+// --allowed-tools so workers can invoke the niwa MCP surface without a
+// per-tool approval prompt. The prefix "mcp__niwa__" matches how Claude
+// Code namespaces MCP tool names (server id "niwa" from .mcp.json). Must
+// stay in sync with internal/mcp/server.go's tools/list response and the
+// niwa-mesh skill's allowed-tools block.
+var niwaMCPAllowedToolNames = []string{
+	"mcp__niwa__niwa_delegate",
+	"mcp__niwa__niwa_query_task",
+	"mcp__niwa__niwa_await_task",
+	"mcp__niwa__niwa_report_progress",
+	"mcp__niwa__niwa_finish_task",
+	"mcp__niwa__niwa_list_outbound_tasks",
+	"mcp__niwa__niwa_update_task",
+	"mcp__niwa__niwa_cancel_task",
+	"mcp__niwa__niwa_ask",
+	"mcp__niwa__niwa_send_message",
+	"mcp__niwa__niwa_check_messages",
+}
+
 // spawnTargetInfo captures the resolved spawn binary metadata logged at
 // startup. The absolute path is reused verbatim for every subsequent
 // spawn in this daemon's lifetime (no re-resolution).
@@ -762,12 +782,21 @@ func spawnWorker(evt inboxEvent, taskDir string, s spawnContext) {
 	prompt := fmt.Sprintf(bootstrapPromptTemplate, evt.taskID)
 	mcpConfigPath := filepath.Join(s.instanceRoot, ".claude", ".mcp.json")
 
+	// --permission-mode=acceptEdits auto-approves file edits but does NOT
+	// auto-approve MCP tool calls; a worker running in headless `-p` mode
+	// therefore stalls on the first tool-call approval dialog and exits
+	// without making progress. --allowed-tools whitelists each niwa MCP
+	// tool by its mcp__<server>__<tool> name so the worker can call them
+	// without prompting. The list must stay in sync with the MCP server's
+	// tools/list response (internal/mcp/server.go) and the niwa-mesh skill
+	// allowed-tools block (internal/workspace/channels.go).
 	cmd := exec.Command(
 		s.spawnBin,
 		"-p", prompt,
 		"--permission-mode=acceptEdits",
 		"--mcp-config="+mcpConfigPath,
 		"--strict-mcp-config",
+		"--allowed-tools", strings.Join(niwaMCPAllowedToolNames, ","),
 	)
 
 	// Env: pass-through daemon's env, then niwa-owned last-wins

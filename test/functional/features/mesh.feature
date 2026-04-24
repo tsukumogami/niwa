@@ -250,3 +250,47 @@ Feature: Cross-session mesh (Issue #10 harness)
     And the file ".niwa/daemon.pid" exists in instance "bootstrap-e2e"
     When I queue a niwa_finish_task instruction for role "coordinator" in instance "bootstrap-e2e"
     Then the task state in instance "bootstrap-e2e" eventually becomes "completed" within 120 seconds
+
+  # ---------------------------------------------------------------------
+  # @channels-e2e-graph: full delegation graph with real LLMs on both
+  # sides of the exchange. A coordinator `claude -p` runs at the instance
+  # root, reads the niwa-mesh skill installed by `niwa create`, and is
+  # asked to achieve a goal that requires delegating work to two repo-
+  # scoped workers ("web" and "backend"). The daemon spawns each worker
+  # as a fresh `claude -p` process; the workers must read the task body
+  # the coordinator produced and create the marker file, then call
+  # niwa_finish_task. Assertions are on observable artifacts only — the
+  # marker files and .niwa/tasks/*/state.json — so wording drift in
+  # either LLM's free-text output cannot flake the test.
+  #
+  # This is the headline PRD use case: "open one claude at the workspace
+  # instance root, tell it 'do X in web and Y in backend, each in its
+  # own session', and niwa launches the workers if they don't exist yet."
+  #
+  # Skipped on CI when `claude` or ANTHROPIC_API_KEY is missing (via
+  # claudeIsAvailable → godog.ErrPending).
+  # ---------------------------------------------------------------------
+
+  @channels-e2e-graph
+  Scenario: Coordinator LLM delegates to web and backend workers and both complete
+    Given a clean niwa environment
+    And claude is available
+    And a local git server is set up
+    And a multi-repo channeled workspace "graph-e2e" with web and backend exists
+    And the daemon uses the real claude worker spawn path
+    When I run "niwa create graph-e2e"
+    Then the exit code is 0
+    And the file ".niwa/daemon.pid" exists in instance "graph-e2e"
+    When I run claude -p preserving case from instance root "graph-e2e" within 600 seconds with prompt:
+      """
+      This workspace has two sub-projects, apps/web and apps/backend, each of which needs a marker.txt file created inside the repo directory.
+
+      - apps/web/marker.txt must contain exactly the text: web
+      - apps/backend/marker.txt must contain exactly the text: backend
+
+      You have niwa tools available for delegating work to agents running in those repos. Use them to get both markers created, wait for the work to finish, and output exactly GRAPH_DONE when both are complete. Do not create the files yourself — delegate both tasks.
+      """
+    Then the output contains "GRAPH_DONE"
+    And the file "marker.txt" in repo "apps/web" of instance "graph-e2e" exactly matches "web"
+    And the file "marker.txt" in repo "apps/backend" of instance "graph-e2e" exactly matches "backend"
+    And exactly 2 tasks in instance "graph-e2e" are in state "completed"

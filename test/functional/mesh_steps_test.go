@@ -56,6 +56,60 @@ worker = ""
 	return ctx, nil
 }
 
+// iSetUpMultiRepoChanneledWorkspace creates two bare source repos named
+// "web" and "backend", then a config repo whose workspace.toml places both
+// under group "apps" and enables [channels.mesh] with topology-derived
+// roles. After apply the instance layout is:
+//
+//	<instance>/
+//	  apps/web/
+//	  apps/backend/
+//
+// Channel role derivation yields roles "coordinator" (instance root),
+// "web" (apps/web), and "backend" (apps/backend), matching the PRD
+// headline scenario of a coordinator delegating to repo-scoped roles.
+func iSetUpMultiRepoChanneledWorkspace(ctx context.Context, name string) (context.Context, error) {
+	s := getState(ctx)
+	if s == nil {
+		return ctx, fmt.Errorf("no test state")
+	}
+	for _, repo := range []string{"web", "backend"} {
+		url, err := s.gitServer.Repo(repo)
+		if err != nil {
+			return ctx, fmt.Errorf("creating source repo %q: %w", repo, err)
+		}
+		s.repoURLs[repo] = url
+	}
+	body := fmt.Sprintf(`[workspace]
+name = %q
+
+[channels.mesh]
+
+[groups.apps]
+
+[repos.web]
+url = %q
+group = "apps"
+
+[repos.backend]
+url = %q
+group = "apps"
+`, name, s.repoURLs["web"], s.repoURLs["backend"])
+	url, err := s.gitServer.ConfigRepo(name, body)
+	if err != nil {
+		return ctx, fmt.Errorf("creating config repo %q: %w", name, err)
+	}
+	s.repoURLs[name] = url
+	if err := runNiwa(s, s.workspaceRoot, "niwa init --from "+url); err != nil {
+		return ctx, err
+	}
+	if s.exitCode != 0 {
+		return ctx, fmt.Errorf("niwa init exit=%d\nstdout:\n%s\nstderr:\n%s",
+			s.exitCode, s.stdout, s.stderr)
+	}
+	return ctx, nil
+}
+
 // runWithFakeWorker sets the env overrides that make subsequent niwa
 // apply / niwa create spawn the scripted worker fake instead of `claude -p`.
 // The scenario name selects the fake's behavior; see worker_fake/main.go
@@ -1096,6 +1150,160 @@ func theTaskStateEventuallyBecomesWithin(ctx context.Context, instance, expected
 	}
 	return fmt.Errorf("task %s state=%q; expected %q within %ds",
 		s.lastTaskID, lastState, expected, seconds)
+}
+
+// iRunClaudePFromInstanceRootPreservingCaseWithin runs a real `claude -p`
+// from the instance root, with a per-run timeout in seconds. Full delegation
+// graphs involve worker LLM spawns behind the scenes and can legitimately
+// take several minutes; a timeout keeps a flaky or stuck session from
+// hanging the functional-test suite.
+func iRunClaudePFromInstanceRootPreservingCaseWithin(ctx context.Context, instance string, seconds int, prompt *godog.DocString) (context.Context, error) {
+	s := getState(ctx)
+	if s == nil {
+		return ctx, fmt.Errorf("no test state")
+	}
+	cwd := filepath.Join(s.workspaceRoot, instance)
+	timeoutCtx, cancel := context.WithTimeout(ctx, time.Duration(seconds)*time.Second)
+	defer cancel()
+	return ctx, runClaudePPreservingCaseCtx(timeoutCtx, s, cwd, strings.TrimSpace(prompt.Content))
+}
+
+// runClaudePPreservingCaseCtx is runClaudePPreservingCase with a cancellable
+// context so callers can bound how long a real-LLM session may run. It also
+// loads the instance's MCP config explicitly and selects acceptEdits
+// permissions — matching the daemon's worker-spawn flags so a coordinator
+// running under the test harness can call MCP tools without blocking on
+// interactive permission prompts. `claude -p` run without these flags hangs
+// silently the moment it tries its first tool call.
+func runClaudePPreservingCaseCtx(ctx context.Context, s *testState, cwd, prompt string) error {
+	claudeBin, err := execLookPath("claude")
+	if err != nil {
+		return fmt.Errorf("claude not on PATH: %w", err)
+	}
+	env := s.buildEnv()
+	if key := os.Getenv("ANTHROPIC_API_KEY"); key != "" {
+		env = append(env, "ANTHROPIC_API_KEY="+key)
+	}
+	// The MCP server (niwa mcp-serve) reads NIWA_SESSION_ROLE to pick the
+	// caller's role-scoped inbox and authorization identity. In a real
+	// install the session_start hook calls `niwa session register`, which
+	// relies on a niwa binary on PATH matching the workspace; the test's
+	// sandboxed PATH doesn't include one. We set the role explicitly here
+	// so the MCP child inherits it from the coordinator claude's env.
+	env = append(env, "NIWA_SESSION_ROLE=coordinator")
+	mcpConfigPath := filepath.Join(cwd, ".claude", ".mcp.json")
+	// Flags mirror the daemon's spawnWorker (see mesh_watch.go): acceptEdits
+	// + explicit mcp__niwa__* allow-list. Without the allow-list the
+	// coordinator blocks on the first MCP tool-approval prompt (headless
+	// `-p` mode cannot answer it). The list stays in sync manually with the
+	// MCP server's tools/list response.
+	allowed := []string{
+		"mcp__niwa__niwa_delegate",
+		"mcp__niwa__niwa_query_task",
+		"mcp__niwa__niwa_await_task",
+		"mcp__niwa__niwa_report_progress",
+		"mcp__niwa__niwa_finish_task",
+		"mcp__niwa__niwa_list_outbound_tasks",
+		"mcp__niwa__niwa_update_task",
+		"mcp__niwa__niwa_cancel_task",
+		"mcp__niwa__niwa_ask",
+		"mcp__niwa__niwa_send_message",
+		"mcp__niwa__niwa_check_messages",
+	}
+	cmd := exec.CommandContext(ctx, claudeBin,
+		"-p", prompt,
+		"--permission-mode=acceptEdits",
+		"--mcp-config="+mcpConfigPath,
+		"--strict-mcp-config",
+		"--allowed-tools", strings.Join(allowed, ","),
+	)
+	cmd.Dir = cwd
+	cmd.Env = env
+	var stdout, stderr strings.Builder
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	runErr := cmd.Run()
+	s.stdout = stdout.String()
+	s.stderr = stderr.String()
+	s.shellPwd = ""
+	if ctx.Err() == context.DeadlineExceeded {
+		return fmt.Errorf("claude -p exceeded deadline\nstdout:\n%s\nstderr:\n%s", s.stdout, s.stderr)
+	}
+	if runErr != nil {
+		if exitErr, ok := runErr.(*exec.ExitError); ok {
+			s.exitCode = exitErr.ExitCode()
+			return nil
+		}
+		return fmt.Errorf("claude -p failed: %w\nstderr: %s", runErr, s.stderr)
+	}
+	s.exitCode = 0
+	return nil
+}
+
+// theFileInRepoOfInstanceExactlyMatches asserts that the file at relPath
+// inside repo under instance contains exactly the given text (after trimming
+// surrounding whitespace). Used by the graph-delegation scenario to verify
+// the LLM-driven worker produced the expected marker content, not a
+// near-miss.
+func theFileInRepoOfInstanceExactlyMatches(ctx context.Context, relPath, repo, instance, expected string) error {
+	s := getState(ctx)
+	if s == nil {
+		return fmt.Errorf("no test state")
+	}
+	path := filepath.Join(s.workspaceRoot, instance, repo, relPath)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("reading %s: %w", path, err)
+	}
+	got := strings.TrimSpace(string(data))
+	if got != expected {
+		return fmt.Errorf("file %s: got %q, want %q", path, got, expected)
+	}
+	return nil
+}
+
+// allTasksInInstanceAreCompleted asserts that exactly n task directories
+// exist under .niwa/tasks/<uuid>/ in the given instance and every one has
+// state.json with state="completed". Used as the terminal check in the
+// graph-delegation scenario: if fewer than n tasks exist, the coordinator
+// didn't delegate both; if any remain in queued/running/abandoned, the
+// delegation graph didn't close cleanly.
+func allTasksInInstanceAreCompleted(ctx context.Context, n int, instance string) error {
+	s := getState(ctx)
+	if s == nil {
+		return fmt.Errorf("no test state")
+	}
+	tasksRoot := filepath.Join(s.workspaceRoot, instance, ".niwa", "tasks")
+	entries, err := os.ReadDir(tasksRoot)
+	if err != nil {
+		return fmt.Errorf("reading tasks dir %s: %w", tasksRoot, err)
+	}
+	var dirs []string
+	for _, e := range entries {
+		if e.IsDir() {
+			dirs = append(dirs, e.Name())
+		}
+	}
+	if len(dirs) != n {
+		return fmt.Errorf("tasks dir has %d subdirs, want %d: %v", len(dirs), n, dirs)
+	}
+	for _, name := range dirs {
+		statePath := filepath.Join(tasksRoot, name, "state.json")
+		data, err := os.ReadFile(statePath)
+		if err != nil {
+			return fmt.Errorf("reading %s: %w", statePath, err)
+		}
+		var st struct {
+			State string `json:"state"`
+		}
+		if err := json.Unmarshal(data, &st); err != nil {
+			return fmt.Errorf("parsing %s: %w", statePath, err)
+		}
+		if st.State != "completed" {
+			return fmt.Errorf("task %s state=%q, want %q", name, st.State, "completed")
+		}
+	}
+	return nil
 }
 
 // execLookPath is a local indirection over exec.LookPath so test builds

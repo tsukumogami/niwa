@@ -293,4 +293,12 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 	ctx.Step(`^I run claude -p preserving case from instance root "([^"]*)" with prompt:$`, iRunClaudePFromInstanceRootPreservingCase)
 	ctx.Step(`^I queue a niwa_finish_task instruction for role "([^"]*)" in instance "([^"]*)"$`, iDelegateTaskToRoleWithFinishInstruction)
 	ctx.Step(`^the task state in instance "([^"]*)" eventually becomes "([^"]*)" within (\d+) seconds$`, theTaskStateEventuallyBecomesWithin)
+
+	// --- @channels-e2e-graph: real coordinator -> real workers delegation graph ---
+	ctx.Step(`^a multi-repo channeled workspace "([^"]*)" with web and backend exists$`, iSetUpMultiRepoChanneledWorkspace)
+	ctx.Step(`^I run claude -p preserving case from instance root "([^"]*)" within (\d+) seconds with prompt:$`, iRunClaudePFromInstanceRootPreservingCaseWithin)
+	ctx.Step(`^the file "([^"]*)" in repo "([^"]*)" of instance "([^"]*)" exactly matches "([^"]*)"$`, theFileInRepoOfInstanceExactlyMatches)
+	ctx.Step(`^exactly (\d+) tasks in instance "([^"]*)" are in state "completed"$`, func(ctx context.Context, n int, instance string) error {
+		return allTasksInInstanceAreCompleted(ctx, n, instance)
+	})
 }

@@ -687,6 +687,52 @@ func TestHandleCheckMessages_WrapsDelegateBody(t *testing.T) {
 	}
 }
 
+// TestHandleCheckMessages_ReturnsInProgressTaskEnvelope asserts that when the
+// server has a non-empty taskID (i.e. the caller is a worker), check_messages
+// returns the task envelope from inbox/in-progress/<taskID>.json. The daemon
+// renames a claimed delegate message into in-progress before spawning the
+// worker, so the bootstrap prompt's instruction to "call niwa_check_messages
+// to retrieve your task envelope" would otherwise return "no new messages"
+// and the worker would run without ever seeing the delegator's body.
+func TestHandleCheckMessages_ReturnsInProgressTaskEnvelope(t *testing.T) {
+	s := newTestServer(t, "web")
+	taskID := newUUID()
+	s.taskID = taskID
+
+	inProgressDir := filepath.Join(s.instanceRoot, ".niwa", "roles", "web", "inbox", "in-progress")
+	if err := os.MkdirAll(inProgressDir, 0o700); err != nil {
+		t.Fatalf("mkdir in-progress: %v", err)
+	}
+
+	payload := `{"task":"build the thing"}`
+	msg := Message{V: 1, ID: taskID, Type: "task.delegate",
+		From: MessageFrom{Role: "coordinator"}, To: MessageTo{Role: "web"},
+		TaskID: taskID,
+		SentAt: time.Now().UTC().Format(time.RFC3339),
+		Body:   json.RawMessage(payload)}
+	data, _ := json.Marshal(msg)
+	if err := os.WriteFile(filepath.Join(inProgressDir, taskID+".json"), data, 0o600); err != nil {
+		t.Fatalf("seed in-progress envelope: %v", err)
+	}
+
+	res := s.handleCheckMessages()
+	if res.IsError {
+		t.Fatalf("check: %s", res.Content[0].Text)
+	}
+	if !strings.Contains(res.Content[0].Text, "build the thing") {
+		t.Errorf("expected task body in result, got: %s", res.Content[0].Text)
+	}
+	if !strings.Contains(res.Content[0].Text, "_niwa_task_body") {
+		t.Errorf("expected task.delegate wrapping in result, got: %s", res.Content[0].Text)
+	}
+
+	// The envelope must remain in in-progress/ — it reflects the claimed
+	// state, not a consumable message.
+	if _, err := os.Stat(filepath.Join(inProgressDir, taskID+".json")); err != nil {
+		t.Errorf("in-progress envelope removed after check_messages: %v", err)
+	}
+}
+
 // TestHandleCheckMessages_SweepsExpired asserts expired messages are moved
 // to inbox/expired/ before listing.
 func TestHandleCheckMessages_SweepsExpired(t *testing.T) {
