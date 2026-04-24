@@ -168,6 +168,13 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 	ctx.Step(`^the instance "([^"]*)" does not exist$`, theInstanceDoesNotExist)
 	ctx.Step(`^the repo "([^"]*)" exists in instance "([^"]*)"$`, theRepoExistsInInstance)
 
+	// workspace-config-sources scenarios (PRD #72 regression + R28 lazy convert)
+	ctx.Step(`^the config repo "([^"]*)" is force-pushed to:$`, func(ctx context.Context, name string, body *godog.DocString) (context.Context, error) {
+		return theConfigRepoIsForcePushedTo(ctx, name, body.Content)
+	})
+	ctx.Step(`^the provenance marker exists$`, theProvenanceMarkerExistsInWorkspaceRoot)
+	ctx.Step(`^the config dir is a git working tree from config repo "([^"]*)"$`, theConfigDirIsAGitWorkingTree)
+
 	// Assertions
 	ctx.Step(`^the exit code is (\d+)$`, theExitCodeIs)
 	ctx.Step(`^the exit code is not (\d+)$`, theExitCodeIsNot)

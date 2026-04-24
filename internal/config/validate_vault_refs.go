@@ -404,4 +404,3 @@ func extractProviderName(uri string) string {
 	// vault://key — anonymous provider.
 	return ""
 }
-

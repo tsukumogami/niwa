@@ -93,9 +93,9 @@ func TestIntegration_ResolveMultipleSecrets(t *testing.T) {
 
 	keys := []string{"NIWA_TEST_API_KEY", "NIWA_TEST_DB_PASSWORD", "NIWA_TEST_WEBHOOK_URL"}
 	expected := map[string]string{
-		"NIWA_TEST_API_KEY":      "test-api-key-value-12345",
-		"NIWA_TEST_DB_PASSWORD":  "test-db-password-67890",
-		"NIWA_TEST_WEBHOOK_URL":  "https://example.com/hook",
+		"NIWA_TEST_API_KEY":     "test-api-key-value-12345",
+		"NIWA_TEST_DB_PASSWORD": "test-db-password-67890",
+		"NIWA_TEST_WEBHOOK_URL": "https://example.com/hook",
 	}
 
 	for _, key := range keys {

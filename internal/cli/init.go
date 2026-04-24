@@ -6,11 +6,34 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/tsukumogami/niwa/internal/config"
+	"github.com/tsukumogami/niwa/internal/github"
+	sourcepkg "github.com/tsukumogami/niwa/internal/source"
 	"github.com/tsukumogami/niwa/internal/workspace"
 )
+
+// looksLikeURL reports whether s is a full URL or SSH address that
+// should bypass slug-grammar validation. Used by the init command to
+// avoid running source.Parse on non-slug inputs (file://, https://,
+// git@host:path) which the existing ResolveCloneURL handles directly.
+func looksLikeURL(s string) bool {
+	return strings.Contains(s, "://") || strings.HasPrefix(s, "git@") ||
+		(strings.HasPrefix(s, "/") && strings.Count(s, "/") > 1)
+}
+
+// parseInitSource normalizes the --from input into a source.Source.
+// Slug shapes (org/repo, host/owner/repo[:subpath][@ref]) feed
+// source.Parse. URL shapes (https://, git@, file://) reuse the
+// overlay parser since it already understands those forms.
+func parseInitSource(input string) (sourcepkg.Source, error) {
+	if !looksLikeURL(input) {
+		return sourcepkg.Parse(input)
+	}
+	return workspace.ParseSourceURL(input)
+}
 
 func init() {
 	rootCmd.AddCommand(initCmd)
@@ -125,6 +148,20 @@ func runInit(cmd *cobra.Command, args []string) error {
 		}
 
 	case modeClone:
+		// Validate the slug shape early via the canonical parser
+		// (PRD R3 strict parsing). Skip when source looks like a full
+		// URL or SSH address — those go through parseInitSource below.
+		if !looksLikeURL(source) {
+			if _, parseErr := sourcepkg.Parse(source); parseErr != nil {
+				return fmt.Errorf("parsing --from slug: %w", parseErr)
+			}
+		}
+
+		src, err := parseInitSource(source)
+		if err != nil {
+			return fmt.Errorf("parsing --from: %w", err)
+		}
+
 		cloneURL, err := workspace.ResolveCloneURL(source, globalCfg.CloneProtocol())
 		if err != nil {
 			return fmt.Errorf("resolving clone URL: %w", err)
@@ -133,10 +170,9 @@ func runInit(cmd *cobra.Command, args []string) error {
 		fmt.Fprintf(cmd.OutOrStdout(), "Initializing from: %s\n", cloneURL)
 
 		niwaDir := filepath.Join(cwd, workspace.StateDir)
-		cloner := &workspace.Cloner{}
-		_, err = cloner.CloneWith(cmd.Context(), cloneURL, niwaDir, workspace.CloneOptions{Depth: 1}, workspace.NewReporter(os.Stderr))
-		if err != nil {
-			return fmt.Errorf("cloning config repo: %w", err)
+		fetcher := github.NewAPIClient(resolveGitHubToken())
+		if err := workspace.MaterializeFromSource(cmd.Context(), src, source, niwaDir, fetcher, workspace.NewReporter(os.Stderr)); err != nil {
+			return fmt.Errorf("materializing config repo: %w", err)
 		}
 	}
 
@@ -278,6 +314,7 @@ func bootstrapCommandFor(kind string) string {
 // when no state flags were set so that no state file is written. Returns a
 // non-nil error when an explicit --overlay clone fails (hard error by design).
 func buildInitState(cmd *cobra.Command, mode initMode, source string) (*workspace.InstanceState, error) {
+	ctx := cmd.Context()
 	needsState := initSkipGlobal || initNoOverlay || initOverlay != "" || (mode == modeClone)
 	if !needsState {
 		return nil, nil
@@ -298,8 +335,9 @@ func buildInitState(cmd *cobra.Command, mode initMode, source string) (*workspac
 		if err != nil {
 			return nil, fmt.Errorf("could not determine overlay directory: %w", err)
 		}
-		_, cloneErr := workspace.CloneOrSyncOverlay(initOverlay, overlayDir)
-		if cloneErr != nil {
+		fetcher := github.NewAPIClient(resolveGitHubToken())
+		reporter := workspace.NewReporter(os.Stderr)
+		if _, cloneErr := workspace.EnsureOverlaySnapshot(ctx, initOverlay, overlayDir, fetcher, reporter); cloneErr != nil {
 			return nil, fmt.Errorf("overlay clone failed: %w", cloneErr)
 		}
 		sha, shaErr := workspace.HeadSHA(overlayDir)
@@ -316,13 +354,15 @@ func buildInitState(cmd *cobra.Command, mode initMode, source string) (*workspac
 			if ok {
 				overlayDir, dirErr := config.OverlayDir(conventionURL)
 				if dirErr == nil {
-					wasCloneAttempt, cloneErr := workspace.CloneOrSyncOverlay(conventionURL, overlayDir)
+					fetcher := github.NewAPIClient(resolveGitHubToken())
+					reporter := workspace.NewReporter(os.Stderr)
+					wasFreshClone, cloneErr := workspace.EnsureOverlaySnapshot(ctx, conventionURL, overlayDir, fetcher, reporter)
 					if cloneErr != nil {
 						// Any clone failure is silently skipped — the overlay repo may
-						// not exist or may be inaccessible. wasCloneAttempt=false errors
-						// (pull failure on an existing clone) are also non-fatal at init
-						// time since no state has been written yet.
-						_ = wasCloneAttempt
+						// not exist or may be inaccessible. wasFreshClone=false errors
+						// (refresh failure on an existing snapshot) are also non-fatal at
+						// init time since no state has been written yet.
+						_ = wasFreshClone
 					} else {
 						sha, shaErr := workspace.HeadSHA(overlayDir)
 						if shaErr != nil {

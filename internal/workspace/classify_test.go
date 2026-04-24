@@ -124,7 +124,7 @@ func TestClassifyMixedVisibilityAndRepos(t *testing.T) {
 	// "special" has internal visibility (not matched by visibility filter)
 	// but is explicitly listed in repos, so it should match.
 	groups := map[string]config.GroupConfig{
-		"main": {Visibility: "public", Repos: []string{"special"}},
+		"main":    {Visibility: "public", Repos: []string{"special"}},
 		"private": {Visibility: "private"},
 	}
 

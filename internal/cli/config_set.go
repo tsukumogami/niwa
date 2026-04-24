@@ -6,6 +6,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/tsukumogami/niwa/internal/config"
+	"github.com/tsukumogami/niwa/internal/github"
 	"github.com/tsukumogami/niwa/internal/workspace"
 )
 
@@ -42,6 +43,10 @@ func runConfigSetGlobal(cmd *cobra.Command, args []string) error {
 	}
 
 	repo := args[0]
+	src, err := workspace.ParseSourceURL(repo)
+	if err != nil {
+		return fmt.Errorf("parsing global config source %q: %w", repo, err)
+	}
 	cloneURL, err := workspace.ResolveCloneURL(repo, globalCfg.CloneProtocol())
 	if err != nil {
 		return fmt.Errorf("resolving clone URL: %w", err)
@@ -52,18 +57,18 @@ func runConfigSetGlobal(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("determining global config directory: %w", err)
 	}
 
-	// Remove existing clone if present so we can re-clone cleanly.
+	// Remove existing snapshot if present so we re-materialize cleanly.
 	if _, statErr := os.Stat(globalConfigDir); statErr == nil {
 		if err := os.RemoveAll(globalConfigDir); err != nil {
-			return fmt.Errorf("removing existing global config clone: %w", err)
+			return fmt.Errorf("removing existing global config snapshot: %w", err)
 		}
 	}
 
 	fmt.Fprintf(cmd.OutOrStdout(), "Cloning global config from: %s\n", cloneURL)
 
-	cloner := &workspace.Cloner{}
-	if _, err := cloner.Clone(cmd.Context(), cloneURL, globalConfigDir, workspace.NewReporter(os.Stderr)); err != nil {
-		return fmt.Errorf("cloning global config repo: %w", err)
+	fetcher := github.NewAPIClient(resolveGitHubToken())
+	if err := workspace.MaterializeFromSource(cmd.Context(), src, repo, globalConfigDir, fetcher, workspace.NewReporter(os.Stderr)); err != nil {
+		return fmt.Errorf("materializing global config repo: %w", err)
 	}
 
 	globalCfg.GlobalConfig = config.GlobalConfigSource{Repo: repo}

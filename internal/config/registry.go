@@ -29,10 +29,22 @@ type GlobalSettings struct {
 }
 
 // RegistryEntry records a workspace's source config file and root directory.
+//
+// The parsed-mirror fields (SourceHost, SourceOwner, SourceRepo,
+// SourceSubpath, SourceRef) carry the canonical source-tuple
+// representation per PRD R2. SourceURL remains the authoritative
+// opaque slug; the mirror fields are populated from it on read when
+// missing (PRD R23 lazy upgrade) and are reconciled to match
+// SourceURL on write when they disagree (PRD R22).
 type RegistryEntry struct {
-	Source    string `toml:"source"`
-	Root      string `toml:"root"`
-	SourceURL string `toml:"source_url,omitempty"`
+	Source        string `toml:"source"`
+	Root          string `toml:"root"`
+	SourceURL     string `toml:"source_url,omitempty"`
+	SourceHost    string `toml:"source_host,omitempty"`
+	SourceOwner   string `toml:"source_owner,omitempty"`
+	SourceRepo    string `toml:"source_repo,omitempty"`
+	SourceSubpath string `toml:"source_subpath,omitempty"`
+	SourceRef     string `toml:"source_ref,omitempty"`
 }
 
 // CloneProtocol returns the configured clone protocol, defaulting to "ssh".

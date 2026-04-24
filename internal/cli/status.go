@@ -190,6 +190,26 @@ func showDetailView(cmd *cobra.Command, instanceRoot string) error {
 
 	fmt.Fprintf(out, "Instance: %s\n", status.Name)
 	fmt.Fprintf(out, "Config:   %s\n", status.ConfigName)
+	// PRD R20: display the resolved source slug + ref annotation when
+	// state.ConfigSource is populated (v3 and later state files).
+	if state.ConfigSource != nil && state.ConfigSource.URL != "" {
+		ref := state.ConfigSource.Ref
+		if ref == "" {
+			ref = "(default branch)"
+		}
+		oid := state.ConfigSource.ResolvedCommit
+		if len(oid) > 8 {
+			oid = oid[:8]
+		}
+		fmt.Fprintf(out, "Source:   %s @ %s [%s]\n",
+			state.ConfigSource.URL, ref, oid)
+	}
+	// PRD R36: display the discovered overlay slug on its own line when
+	// an overlay was successfully cloned. NoOverlay or silent-skip cases
+	// leave state.OverlayURL empty, which suppresses the line.
+	if state.OverlayURL != "" {
+		fmt.Fprintf(out, "Overlay:  %s\n", state.OverlayURL)
+	}
 	fmt.Fprintf(out, "Root:     %s\n", status.Root)
 	fmt.Fprintf(out, "Created:  %s\n", status.Created.Format("2006-01-02 15:04"))
 	fmt.Fprintf(out, "Applied:  %s\n", status.LastApplied.Format("2006-01-02 15:04"))
