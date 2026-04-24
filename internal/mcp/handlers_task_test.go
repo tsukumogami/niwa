@@ -660,8 +660,9 @@ func TestHandleCheckMessages_WrapsDelegateBody(t *testing.T) {
 	if !strings.Contains(res.Content[0].Text, "_niwa_task_body") {
 		t.Errorf("expected wrapper marker in result, got: %s", res.Content[0].Text)
 	}
-	if !strings.Contains(res.Content[0].Text, "untrusted delegator-supplied content") {
-		t.Errorf("expected security note in result, got: %s", res.Content[0].Text)
+	if !strings.Contains(res.Content[0].Text, "delegator's task description") ||
+		!strings.Contains(res.Content[0].Text, "niwa_finish_task") {
+		t.Errorf("expected task-description note in result, got: %s", res.Content[0].Text)
 	}
 	// And a non-delegate type would NOT be wrapped: re-run with a plain
 	// message to assert the selectivity of the wrapper.

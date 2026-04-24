@@ -23,12 +23,16 @@ const coordinatorRole = "coordinator"
 
 // channelsMCPTemplate is the template for .claude/.mcp.json. It registers
 // the niwa mcp-serve command with NIWA_INSTANCE_ROOT baked in so Claude Code
-// can start the MCP server without any user configuration.
+// can start the MCP server without any user configuration. The command
+// field is the absolute path to the provisioning niwa binary (resolved via
+// os.Executable at apply time) so the MCP server always matches the version
+// that provisioned the instance; this avoids PATH ambiguity when multiple
+// niwa installs coexist on one machine.
 const channelsMCPTemplate = `{
   "mcpServers": {
     "niwa": {
       "type": "stdio",
-      "command": "niwa",
+      "command": %s,
       "args": ["mcp-serve"],
       "env": {
         "NIWA_INSTANCE_ROOT": %s
@@ -487,11 +491,22 @@ func migratePre1Layout(niwaDir string) error {
 }
 
 // buildMCPContent returns the instance-root-aware .mcp.json bytes. The
-// NIWA_INSTANCE_ROOT env entry is JSON-marshaled so instance paths with
-// spaces, quotes, or other special characters are preserved correctly.
+// command field resolves to the absolute path of the provisioning niwa
+// binary (os.Executable) so Claude Code's MCP subprocess launcher does
+// not depend on PATH. The NIWA_INSTANCE_ROOT env entry is JSON-marshaled
+// so instance paths with spaces, quotes, or other special characters are
+// preserved correctly.
 func buildMCPContent(instanceRoot string) []byte {
+	cmdPath, err := os.Executable()
+	if err != nil || cmdPath == "" {
+		// Fallback to PATH resolution if the process path is unavailable.
+		// This is the legacy behavior; it only fires when os.Executable
+		// fails outright (very rare on POSIX systems).
+		cmdPath = "niwa"
+	}
+	cmdJSON, _ := json.Marshal(cmdPath)
 	rootJSON, _ := json.Marshal(instanceRoot)
-	return []byte(fmt.Sprintf(channelsMCPTemplate, string(rootJSON)))
+	return []byte(fmt.Sprintf(channelsMCPTemplate, string(cmdJSON), string(rootJSON)))
 }
 
 // buildSkillContent returns the canonical niwa-mesh SKILL.md content. The

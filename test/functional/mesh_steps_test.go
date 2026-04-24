@@ -980,7 +980,7 @@ func runClaudePPreservingCase(s *testState, cwd, prompt string) error {
 // result={"ok":true}). The step bypasses niwa_delegate (no coordinator
 // session is needed); the daemon then claims the envelope via its
 // normal fsnotify path and spawns a real claude worker.
-func iDelegateTaskToRoleWithFinishInstruction(ctx context.Context, instance, role string) (context.Context, error) {
+func iDelegateTaskToRoleWithFinishInstruction(ctx context.Context, role, instance string) (context.Context, error) {
 	s := getState(ctx)
 	if s == nil {
 		return ctx, fmt.Errorf("no test state")
