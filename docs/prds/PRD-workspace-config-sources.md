@@ -1,5 +1,5 @@
 ---
-status: In Progress
+status: Done
 problem: |
   niwa today materializes git-hosted workspace configuration as a working
   tree at `<workspace>/.niwa/`, synced with `git pull --ff-only`, and
@@ -23,7 +23,7 @@ source_issue: 72
 
 ## Status
 
-In Progress
+Done
 
 ## Amendments
 

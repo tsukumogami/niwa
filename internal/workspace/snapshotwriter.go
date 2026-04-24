@@ -48,8 +48,18 @@ type FetchClient interface {
 // nothing for cases 1 and 2 and returns nil. This lets unit tests
 // that don't exercise the fetch path skip wiring a fake client.
 func EnsureConfigSnapshot(ctx context.Context, configDir string, fetcher FetchClient, reporter *Reporter) error {
+	_, err := EnsureConfigSnapshotWithStatus(ctx, configDir, fetcher, reporter)
+	return err
+}
+
+// EnsureConfigSnapshotWithStatus is the same as EnsureConfigSnapshot but
+// returns whether a legacy working-tree-to-snapshot conversion happened
+// during this call (PRD R28). Callers that emit the one-time conversion
+// notice consume the bool; legacy callers that don't care use the simpler
+// EnsureConfigSnapshot wrapper.
+func EnsureConfigSnapshotWithStatus(ctx context.Context, configDir string, fetcher FetchClient, reporter *Reporter) (converted bool, err error) {
 	if configDir == "" {
-		return errors.New("EnsureConfigSnapshot: configDir is empty")
+		return false, errors.New("EnsureConfigSnapshot: configDir is empty")
 	}
 
 	hasMarker := provenanceMarkerExists(configDir)
@@ -61,14 +71,14 @@ func EnsureConfigSnapshot(ctx context.Context, configDir string, fetcher FetchCl
 		// decides whether nil fetcher is acceptable based on whether
 		// the marker's source is GitHub (needs fetcher) or anything
 		// else (uses git-clone fallback).
-		return refreshSnapshot(ctx, configDir, fetcher, reporter)
+		return false, refreshSnapshot(ctx, configDir, fetcher, reporter)
 	case hasGit:
 		// Case 2: legacy working tree. R28 lazy conversion. Same
 		// fetcher-may-be-nil semantics as case 1.
 		return lazyConvertWorkingTree(ctx, configDir, fetcher, reporter)
 	default:
 		// Case 3: nothing to maintain.
-		return nil
+		return false, nil
 	}
 }
 
@@ -146,45 +156,52 @@ func refreshSnapshot(ctx context.Context, configDir string, fetcher FetchClient,
 // lazyConvertWorkingTree is the case-2 path: discover the source URL
 // from `git remote get-url origin`, fetch a fresh snapshot, and
 // atomically replace the working tree.
-func lazyConvertWorkingTree(ctx context.Context, configDir string, fetcher FetchClient, reporter *Reporter) error {
-	originURL, err := readGitOrigin(configDir)
-	if err != nil {
+//
+// Returns converted=true when the conversion actually happened. The
+// caller is responsible for emitting the PRD R28 one-time `note:`
+// (this function does not call reporter.Log directly because emission
+// must be gated on DisclosedNotices to fire once per workspace, not
+// once per apply).
+func lazyConvertWorkingTree(ctx context.Context, configDir string, fetcher FetchClient, reporter *Reporter) (converted bool, err error) {
+	originURL, originErr := readGitOrigin(configDir)
+	if originErr != nil {
 		// No origin remote means this is a local-only workspace that
 		// happens to be tracked in git. Don't attempt conversion.
-		return nil
+		return false, nil
 	}
 
-	src, err := parseRemoteURLToSource(originURL)
-	if err != nil {
+	src, parseErr := parseRemoteURLToSource(originURL)
+	if parseErr != nil {
 		// Couldn't parse the origin into a Source we know how to
 		// fetch. Leave the working tree alone — there's no other sync
 		// path now; user can fix the remote and rerun apply.
-		return nil
+		return false, nil
 	}
 
 	if !src.IsGitHub() && fetcher == nil {
 		// Non-GitHub source can run the fallback even without a fetcher,
 		// but if we have neither a GitHub source nor a fetcher there's
 		// nothing usable. Bail without converting.
-		return nil
+		return false, nil
 	}
 	if src.IsGitHub() && fetcher == nil {
 		// Need a fetch client for the GitHub path. Leave the working
 		// tree alone; user can rerun apply after wiring GH_TOKEN.
-		return nil
+		return false, nil
 	}
 
-	if err := materializeAndSwap(ctx, configDir, src, src.String(), fetcher, reporter); err != nil {
+	// Pass originURL verbatim as the marker's source_url so the
+	// URL-change gate matches what the registry stores. src.String()
+	// would re-render synthesized owner/repo (e.g. for file:// hosts)
+	// in a non-roundtripping form.
+	if swapErr := materializeAndSwap(ctx, configDir, src, originURL, fetcher, reporter); swapErr != nil {
 		// Conversion failed; leave the working tree alone so the next
 		// apply can retry. No other safety net to fall through to now
 		// that SyncConfigDir is gone.
-		return nil
+		return false, nil
 	}
 
-	if reporter != nil {
-		reporter.Log("note: %s converted from working tree to snapshot. Manual edits inside this directory will no longer persist.", configDir)
-	}
-	return nil
+	return true, nil
 }
 
 // MaterializeFromSource stages a fresh snapshot at configDir from src
@@ -394,6 +411,14 @@ func parseRemoteURLToSource(remote string) (source.Source, error) {
 	remote = strings.TrimSpace(remote)
 	if remote == "" {
 		return source.Source{}, errors.New("empty remote")
+	}
+
+	// file:// URL: defer to ParseSourceURL which understands the scheme
+	// and synthesizes Owner/Repo from the path. Used by lazy conversion
+	// of legacy working trees that were cloned from a local bare repo
+	// (test fixtures, intentional offline workflows).
+	if strings.HasPrefix(remote, "file://") {
+		return ParseSourceURL(remote)
 	}
 
 	// SSH form: git@host:owner/repo[.git]

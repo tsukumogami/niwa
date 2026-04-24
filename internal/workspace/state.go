@@ -15,14 +15,17 @@ import (
 )
 
 const (
-	// StateDir is the directory name used for instance state markers.
-	// TODO(workspace-config-sources Issue 5): rename to ".niwa-state" when
-	// the state file relocates out of the snapshot directory.
+	// StateDir is the directory name where instance state files live.
+	// Intentionally shares the value with SnapshotDir: per the
+	// 2026-04-23 amendment to DESIGN-workspace-config-sources Decision 2,
+	// niwa-local state lives alongside config-source content under
+	// .niwa/, and the snapshot writer's preserveInstanceState helper
+	// carries the state file across the atomic swap.
 	StateDir = ".niwa"
 
-	// SnapshotDir is the directory name where the workspace config snapshot
-	// is materialized at the workspace root. Today this collides with
-	// StateDir; Issue 5 separates them.
+	// SnapshotDir is the directory name where the workspace config
+	// snapshot is materialized at the workspace root. Shares the value
+	// with StateDir by design (see StateDir docs).
 	SnapshotDir = ".niwa"
 
 	// StateFile is the filename for instance state within StateDir.

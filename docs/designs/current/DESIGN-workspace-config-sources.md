@@ -1,6 +1,6 @@
 ---
 upstream: docs/prds/PRD-workspace-config-sources.md
-status: Accepted
+status: Current
 problem: |
   niwa's three clone primitives (team config, personal overlay, workspace
   overlay) all materialize git working trees and sync via `git pull

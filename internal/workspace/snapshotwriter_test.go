@@ -238,6 +238,87 @@ func TestEnsureConfigSnapshot_PreservesPreviousOnExtractionFailure(t *testing.T)
 	}
 }
 
+// TestEnsureConfigSnapshot_PreservesInstanceStateAcrossRefresh asserts
+// that instance.json survives a snapshot refresh. The snapshot writer's
+// preserveInstanceState helper is the implementation; this test locks
+// the contract in writing per the 2026-04-23 amendment to DESIGN
+// Decision 2 (state stays in .niwa/, carried through swap).
+func TestEnsureConfigSnapshot_PreservesInstanceStateAcrossRefresh(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), ".niwa")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mustWriteMarker(t, dir, Provenance{
+		SourceURL: "org/repo", Owner: "org", Repo: "repo",
+		ResolvedCommit: "old-oid", FetchedAt: time.Now(), FetchMechanism: "github-tarball",
+	})
+
+	// Plant a niwa-managed instance.json in the existing snapshot dir
+	// alongside the marker. After refresh, the file MUST still be there
+	// with byte-identical content.
+	instanceData := []byte(`{"schema_version":3,"instance_name":"test","root":"/x"}`)
+	if err := os.WriteFile(filepath.Join(dir, StateFile), instanceData, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Upstream refresh brings new content. Crucially, the upstream tarball
+	// does NOT contain instance.json — it's niwa-local state, not source
+	// content. preserveInstanceState carries it across the swap.
+	tarball := makeFakeTarball(t, map[string]string{
+		"wrap/":               "",
+		"wrap/workspace.toml": "name = updated",
+	})
+	fetcher := &fakeFetcher{tarball: tarball, commitOID: "new-oid"}
+
+	if err := EnsureConfigSnapshot(context.Background(), dir, fetcher, nil); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+
+	// Upstream content materialized at the new path.
+	if got, err := os.ReadFile(filepath.Join(dir, "workspace.toml")); err != nil {
+		t.Fatalf("workspace.toml missing after refresh: %v", err)
+	} else if string(got) != "name = updated" {
+		t.Errorf("upstream content not refreshed: got %q", got)
+	}
+
+	// instance.json survived.
+	gotState, err := os.ReadFile(filepath.Join(dir, StateFile))
+	if err != nil {
+		t.Fatalf("instance.json clobbered by snapshot swap: %v", err)
+	}
+	if !bytes.Equal(gotState, instanceData) {
+		t.Errorf("instance.json content changed across refresh\n  was:  %s\n  now:  %s", instanceData, gotState)
+	}
+}
+
+// TestEnsureConfigSnapshot_NoStateFileToPreserveIsBenign asserts that
+// the carry-over is a no-op when no instance.json exists yet (fresh init,
+// brand-new workspace).
+func TestEnsureConfigSnapshot_NoStateFileToPreserveIsBenign(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), ".niwa")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mustWriteMarker(t, dir, Provenance{
+		SourceURL: "org/repo", Owner: "org", Repo: "repo",
+		ResolvedCommit: "old-oid", FetchedAt: time.Now(), FetchMechanism: "github-tarball",
+	})
+	// No instance.json planted.
+
+	tarball := makeFakeTarball(t, map[string]string{
+		"wrap/":               "",
+		"wrap/workspace.toml": "name = updated",
+	})
+	fetcher := &fakeFetcher{tarball: tarball, commitOID: "new-oid"}
+	if err := EnsureConfigSnapshot(context.Background(), dir, fetcher, nil); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+	// No instance.json should appear after refresh — the carry-over is a no-op.
+	if _, err := os.Stat(filepath.Join(dir, StateFile)); err == nil {
+		t.Error("instance.json appeared spuriously after refresh against empty state")
+	}
+}
+
 func TestParseRemoteURLToSource(t *testing.T) {
 	cases := []struct {
 		name string

@@ -136,7 +136,15 @@ niwa init my-team --from my-org/workspace-config
 niwa apply
 ```
 
-The config repo is cloned as `.niwa/` (a git checkout), so it can be updated later.
+The config repo is materialized as `.niwa/` — a snapshot of the source content at
+a specific commit, not a git checkout. Each `niwa apply` checks for upstream
+changes and atomically refreshes the snapshot when they exist. Manual edits inside
+`.niwa/` don't survive a refresh, so make changes upstream and re-apply.
+
+The snapshot model means upstream history rewrites (force pushes) resolve cleanly
+on the next apply — the legacy git-pull workflow that backed earlier niwa versions
+couldn't recover from this. See `docs/guides/workspace-config-sources.md` for
+slug grammar, discovery rules, drift detection, and the provenance marker.
 
 Once registered, the name can be reused on the same machine to create additional
 workspace instances in different directories:
