@@ -398,7 +398,32 @@ instance is being torn down. If you use `rm -rf` on an instance directory, the
 daemon detects the missing watch path via fsnotify and exits on its own — but
 unclean, and workers may outlive the daemon by seconds.
 
-## Known Limitations
+### Log growth and rotation
+
+Three files under `.niwa/` grow append-only with no built-in rotation:
+
+| File | Per-event size | Driver |
+|------|----------------|--------|
+| `<instance>/.niwa/mcp-audit.log` | ~250 B per `tools/call` | every MCP tool invocation |
+| `<instance>/.niwa/tasks/<task>/transitions.log` | ~200 B per state change | task lifecycle events |
+| `<instance>/.niwa/tasks/<task>/stderr.log` | variable | worker stderr (depends on the worker's verbosity) |
+
+At low usage (one developer, dozens of tasks per day) growth is invisible. At
+sustained heavy use these files accumulate without bound. If you hit the
+disk-fill condition before automatic rotation lands as a separate feature,
+the supported workarounds are:
+
+1. **Destroy and recreate the instance** — `niwa workspace destroy && niwa create`.
+   This is the cleanest path because it also clears completed-task state.
+2. **Manually rotate `mcp-audit.log`** while the daemon is stopped. Stop the
+   daemon, move the file aside (`mv mcp-audit.log mcp-audit.log.1`), restart;
+   the next call recreates it.
+
+Per-task `transitions.log` and `stderr.log` are less interesting for live
+rotation since they're scoped to a single task; they go away when the task
+directory is reaped.
+
+
 
 See the [PRD's Known Limitations section](../prds/PRD-cross-session-communication.md#known-limitations)
 for the full list. The ones that most affect operators:
