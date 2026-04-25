@@ -56,6 +56,11 @@ func (s *Server) watchRoleInbox() {
 			time.Sleep(10 * time.Millisecond)
 			s.notifyNewFile(event.Name, name)
 		case _, ok := <-watcher.Errors:
+			// fsnotify error swallowed today: inotify queue overflow
+			// drops events silently, so a task.completed notification
+			// in the dropped batch leaves niwa_await_task hanging until
+			// its timeout. A periodic resync (rescan role inboxes every
+			// N seconds) is tracked as a separate follow-up.
 			if !ok {
 				return
 			}

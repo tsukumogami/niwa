@@ -398,6 +398,33 @@ instance is being torn down. If you use `rm -rf` on an instance directory, the
 daemon detects the missing watch path via fsnotify and exits on its own — but
 unclean, and workers may outlive the daemon by seconds.
 
+### Watcher overflow
+
+Both watchers in the system — the daemon's central inbox watcher and
+each MCP server's role-inbox watcher — use Linux `inotify` via the
+`fsnotify` library. The kernel's per-process inotify event queue is
+bounded (default 16384 events; see `/proc/sys/fs/inotify/max_queued_events`).
+If sustained filesystem activity exceeds the drain rate, the queue
+overflows and events are dropped silently.
+
+In a niwa workspace, a dropped `task.completed` notification is the
+most painful symptom: the worker writes the terminal envelope to the
+coordinator's role inbox, but the coordinator's MCP server never wakes,
+and `niwa_await_task` hangs to its timeout. At documented usage scales
+(a handful of roles, tens of tasks per day) overflow is unrealistic; at
+high-volume use it's a real failure mode.
+
+If you suspect a dropped event:
+
+1. Check `niwa task list` and look for tasks that show `state: completed`
+   on disk while a coordinator session is still waiting on them.
+2. Restart the daemon and the affected coordinator session. Both
+   watchers reload their state from disk on startup, so any envelope
+   that landed during the dropped window gets picked up on the rescan.
+
+A periodic resync inside the watchers is tracked as a separate
+follow-up.
+
 ### Long-running tasks and `niwa_await_task` timeouts
 
 `niwa_await_task` defaults to `timeout_seconds=600` (10 minutes). Real

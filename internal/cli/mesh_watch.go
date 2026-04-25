@@ -452,6 +452,11 @@ func runEventLoop(
 			if !ok {
 				return
 			}
+			// fsnotify error is logged but not used to trigger a resync;
+			// inotify queue overflow drops events silently and the daemon
+			// can miss a delegate envelope until the next CREATE for that
+			// inbox. A periodic resync (rescan inbox dirs every N seconds)
+			// is tracked as a separate follow-up.
 			spawnCtx.logger.Printf("fsnotify error: %v", err)
 
 		case ex, ok := <-exitCh:
