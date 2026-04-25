@@ -1262,6 +1262,155 @@ func theFileInRepoOfInstanceExactlyMatches(ctx context.Context, relPath, repo, i
 	return nil
 }
 
+// theCoordinatorEmittedDelegateCallsForRoles asserts the audit log shows
+// a successful niwa_delegate call from role=coordinator targeting each of
+// the named roles. "Targeting role X" is recorded only structurally — the
+// audit captures arg KEYS, not values, so role X is verified indirectly:
+// the call must have ok=true (delegate would fail with UNKNOWN_ROLE if
+// the role didn't exist) and the returned task must have target_role=X
+// in its state.json. This pair is what proves the coordinator delegated
+// to the named roles via niwa_delegate, not via some other path.
+func theCoordinatorEmittedDelegateCallsForRoles(ctx context.Context, instance string, roles string) error {
+	s := getState(ctx)
+	if s == nil {
+		return fmt.Errorf("no test state")
+	}
+	instRoot := filepath.Join(s.workspaceRoot, instance)
+	entries, err := mcpReadAuditLog(instRoot)
+	if err != nil {
+		return fmt.Errorf("read audit: %w", err)
+	}
+	delegates := filterAudit(entries, auditFilter{role: "coordinator", tool: "niwa_delegate", okOnly: true})
+
+	wantRoles := strings.Split(roles, ",")
+	for i, r := range wantRoles {
+		wantRoles[i] = strings.TrimSpace(r)
+	}
+	if len(delegates) < len(wantRoles) {
+		return fmt.Errorf("coordinator emitted %d successful niwa_delegate calls, want at least %d (one per target role %v)",
+			len(delegates), len(wantRoles), wantRoles)
+	}
+
+	// Cross-check against state.json target_role for each task created
+	// during this scenario. Every wanted role must show up at least once.
+	tasksDir := filepath.Join(instRoot, ".niwa", "tasks")
+	dirs, err := os.ReadDir(tasksDir)
+	if err != nil {
+		return fmt.Errorf("read tasks dir: %w", err)
+	}
+	gotRoles := make(map[string]int)
+	for _, d := range dirs {
+		if !d.IsDir() {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(tasksDir, d.Name(), "state.json"))
+		if err != nil {
+			continue
+		}
+		var st struct {
+			TargetRole    string `json:"target_role"`
+			DelegatorRole string `json:"delegator_role"`
+		}
+		if err := json.Unmarshal(data, &st); err != nil {
+			continue
+		}
+		if st.DelegatorRole == "coordinator" {
+			gotRoles[st.TargetRole]++
+		}
+	}
+	for _, want := range wantRoles {
+		if gotRoles[want] == 0 {
+			return fmt.Errorf("no coordinator-delegated task targets role %q (got distribution %v)",
+				want, gotRoles)
+		}
+	}
+	return nil
+}
+
+// roleEmittedFinishTaskCalls asserts that workers in the named role
+// emitted at least n successful niwa_finish_task calls. Pairs with the
+// delegate-call assertion: together they prove the full delegation graph
+// (coordinator → niwa_delegate → daemon-spawned worker → niwa_finish_task)
+// went through the niwa MCP path, not through some side channel.
+func roleEmittedFinishTaskCalls(ctx context.Context, role string, n int, instance string) error {
+	s := getState(ctx)
+	if s == nil {
+		return fmt.Errorf("no test state")
+	}
+	instRoot := filepath.Join(s.workspaceRoot, instance)
+	entries, err := mcpReadAuditLog(instRoot)
+	if err != nil {
+		return fmt.Errorf("read audit: %w", err)
+	}
+	finishes := filterAudit(entries, auditFilter{role: role, tool: "niwa_finish_task", okOnly: true})
+	if len(finishes) < n {
+		return fmt.Errorf("role %q emitted %d successful niwa_finish_task calls, want at least %d",
+			role, len(finishes), n)
+	}
+	return nil
+}
+
+// auditEntry mirrors mcp.AuditEntry for cross-package reading without
+// importing internal/mcp from the functional test (keeps the test
+// dependency graph shallow). The schema is owned by mcp; this is a
+// read-only mirror.
+type auditEntry struct {
+	V         int      `json:"v"`
+	At        string   `json:"at"`
+	Role      string   `json:"role,omitempty"`
+	TaskID    string   `json:"task_id,omitempty"`
+	Tool      string   `json:"tool"`
+	ArgKeys   []string `json:"arg_keys"`
+	OK        bool     `json:"ok"`
+	ErrorCode string   `json:"error_code,omitempty"`
+}
+
+type auditFilter struct {
+	role   string
+	tool   string
+	okOnly bool
+}
+
+func mcpReadAuditLog(instRoot string) ([]auditEntry, error) {
+	path := filepath.Join(instRoot, ".niwa", "mcp-audit.log")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var out []auditEntry
+	for _, line := range strings.Split(string(data), "\n") {
+		if line == "" {
+			continue
+		}
+		var e auditEntry
+		if err := json.Unmarshal([]byte(line), &e); err != nil {
+			continue
+		}
+		out = append(out, e)
+	}
+	return out, nil
+}
+
+func filterAudit(entries []auditEntry, f auditFilter) []auditEntry {
+	out := make([]auditEntry, 0, len(entries))
+	for _, e := range entries {
+		if f.role != "" && e.Role != f.role {
+			continue
+		}
+		if f.tool != "" && e.Tool != f.tool {
+			continue
+		}
+		if f.okOnly && !e.OK {
+			continue
+		}
+		out = append(out, e)
+	}
+	return out
+}
+
 // allTasksInInstanceAreCompleted asserts that exactly n task directories
 // exist under .niwa/tasks/<uuid>/ in the given instance and every one has
 // state.json with state="completed". Used as the terminal check in the

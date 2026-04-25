@@ -294,3 +294,9 @@ Feature: Cross-session mesh (Issue #10 harness)
     And the file "marker.txt" in repo "apps/web" of instance "graph-e2e" exactly matches "web"
     And the file "marker.txt" in repo "apps/backend" of instance "graph-e2e" exactly matches "backend"
     And exactly 2 tasks in instance "graph-e2e" are in state "completed"
+    # Audit-grounded checks: prove the coordinator and workers actually used the
+    # niwa MCP path, not a side channel (e.g., coordinator writing markers itself
+    # plus delegating empty tasks). See DESIGN-mcp-call-telemetry.md.
+    And the coordinator in instance "graph-e2e" emitted niwa_delegate calls to roles "web,backend"
+    And role "web" in instance "graph-e2e" emitted at least 1 successful niwa_finish_task call
+    And role "backend" in instance "graph-e2e" emitted at least 1 successful niwa_finish_task call

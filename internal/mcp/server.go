@@ -64,6 +64,23 @@ type Server struct {
 	waitersMu    sync.Mutex
 	waiters      map[string]chan toolResult // msgID → reply channel
 	awaitWaiters map[string]chan taskEvent  // task_id → terminal-event channel (size-1 buffered)
+
+	// audit emits one entry per tool call (see DESIGN-mcp-call-telemetry.md).
+	// Defaults to a file-backed appender at <instanceRoot>/.niwa/mcp-audit.log;
+	// tests substitute a recording sink via SetAuditSink. Always non-nil after
+	// New so dispatch can call Emit without a guard.
+	audit AuditSink
+}
+
+// SetAuditSink replaces the Server's audit sink. Tests use this to capture
+// emissions without touching the filesystem; production callers leave the
+// default file sink wired by New.
+func (s *Server) SetAuditSink(sink AuditSink) {
+	if sink == nil {
+		s.audit = nopAuditSink{}
+		return
+	}
+	s.audit = sink
 }
 
 // New constructs a Server. role is the caller's session role (from
@@ -81,6 +98,7 @@ func New(role, instanceRoot string) *Server {
 		seenFiles:    make(map[string]struct{}),
 		waiters:      make(map[string]chan toolResult),
 		awaitWaiters: make(map[string]chan taskEvent),
+		audit:        NewFileAuditSink(instanceRoot),
 	}
 	if instanceRoot != "" && role != "" {
 		s.roleInboxDir = filepath.Join(instanceRoot, ".niwa", "roles", role, "inbox")
@@ -145,7 +163,12 @@ func (s *Server) dispatch(req request) {
 			s.sendError(req.ID, -32600, "invalid params")
 			return
 		}
-		s.send(response{JSONRPC: "2.0", ID: req.ID, Result: s.callTool(p)})
+		res := s.callTool(p)
+		// Emit one audit entry per tool call. The error is intentionally
+		// discarded: a failing audit must never break the MCP path. See
+		// DESIGN-mcp-call-telemetry.md, "Failure isolation".
+		_ = s.audit.Emit(buildAuditEntry(s.role, s.taskID, p, res))
+		s.send(response{JSONRPC: "2.0", ID: req.ID, Result: res})
 	case "ping":
 		s.send(response{JSONRPC: "2.0", ID: req.ID, Result: map[string]any{}})
 	default:

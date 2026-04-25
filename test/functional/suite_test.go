@@ -308,4 +308,8 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 	ctx.Step(`^exactly (\d+) tasks in instance "([^"]*)" are in state "completed"$`, func(ctx context.Context, n int, instance string) error {
 		return allTasksInInstanceAreCompleted(ctx, n, instance)
 	})
+	ctx.Step(`^the coordinator in instance "([^"]*)" emitted niwa_delegate calls to roles "([^"]*)"$`, theCoordinatorEmittedDelegateCallsForRoles)
+	ctx.Step(`^role "([^"]*)" in instance "([^"]*)" emitted at least (\d+) successful niwa_finish_task calls?$`, func(ctx context.Context, role, instance string, n int) error {
+		return roleEmittedFinishTaskCalls(ctx, role, n, instance)
+	})
 }
