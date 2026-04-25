@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/cucumber/godog"
+	"github.com/tsukumogami/niwa/internal/mcp"
 )
 
 // mesh_steps_test.go holds the step definitions introduced by Issue #10
@@ -1276,11 +1277,12 @@ func theCoordinatorEmittedDelegateCallsForRoles(ctx context.Context, instance st
 		return fmt.Errorf("no test state")
 	}
 	instRoot := filepath.Join(s.workspaceRoot, instance)
-	entries, err := mcpReadAuditLog(instRoot)
+	entries, err := mcp.ReadAuditLog(instRoot)
 	if err != nil {
 		return fmt.Errorf("read audit: %w", err)
 	}
-	delegates := filterAudit(entries, auditFilter{role: "coordinator", tool: "niwa_delegate", okOnly: true})
+	ok := true
+	delegates := mcp.FilterAudit(entries, mcp.AuditFilter{Role: "coordinator", Tool: "niwa_delegate", OK: &ok})
 
 	wantRoles := strings.Split(roles, ",")
 	for i, r := range wantRoles {
@@ -1338,77 +1340,17 @@ func roleEmittedFinishTaskCalls(ctx context.Context, role string, n int, instanc
 		return fmt.Errorf("no test state")
 	}
 	instRoot := filepath.Join(s.workspaceRoot, instance)
-	entries, err := mcpReadAuditLog(instRoot)
+	entries, err := mcp.ReadAuditLog(instRoot)
 	if err != nil {
 		return fmt.Errorf("read audit: %w", err)
 	}
-	finishes := filterAudit(entries, auditFilter{role: role, tool: "niwa_finish_task", okOnly: true})
+	ok := true
+	finishes := mcp.FilterAudit(entries, mcp.AuditFilter{Role: role, Tool: "niwa_finish_task", OK: &ok})
 	if len(finishes) < n {
 		return fmt.Errorf("role %q emitted %d successful niwa_finish_task calls, want at least %d",
 			role, len(finishes), n)
 	}
 	return nil
-}
-
-// auditEntry mirrors mcp.AuditEntry for cross-package reading without
-// importing internal/mcp from the functional test (keeps the test
-// dependency graph shallow). The schema is owned by mcp; this is a
-// read-only mirror.
-type auditEntry struct {
-	V         int      `json:"v"`
-	At        string   `json:"at"`
-	Role      string   `json:"role,omitempty"`
-	TaskID    string   `json:"task_id,omitempty"`
-	Tool      string   `json:"tool"`
-	ArgKeys   []string `json:"arg_keys"`
-	OK        bool     `json:"ok"`
-	ErrorCode string   `json:"error_code,omitempty"`
-}
-
-type auditFilter struct {
-	role   string
-	tool   string
-	okOnly bool
-}
-
-func mcpReadAuditLog(instRoot string) ([]auditEntry, error) {
-	path := filepath.Join(instRoot, ".niwa", "mcp-audit.log")
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, err
-	}
-	var out []auditEntry
-	for _, line := range strings.Split(string(data), "\n") {
-		if line == "" {
-			continue
-		}
-		var e auditEntry
-		if err := json.Unmarshal([]byte(line), &e); err != nil {
-			continue
-		}
-		out = append(out, e)
-	}
-	return out, nil
-}
-
-func filterAudit(entries []auditEntry, f auditFilter) []auditEntry {
-	out := make([]auditEntry, 0, len(entries))
-	for _, e := range entries {
-		if f.role != "" && e.Role != f.role {
-			continue
-		}
-		if f.tool != "" && e.Tool != f.tool {
-			continue
-		}
-		if f.okOnly && !e.OK {
-			continue
-		}
-		out = append(out, e)
-	}
-	return out
 }
 
 // allTasksInInstanceAreCompleted asserts that exactly n task directories
