@@ -1,5 +1,5 @@
 ---
-status: Accepted
+status: Current
 problem: |
   Functional tests can't prove that an LLM-driven coordinator actually used niwa MCP
   tools to delegate work. Today's graph-e2e scenario asserts marker files exist and
@@ -28,7 +28,7 @@ rationale: |
 
 ## Status
 
-Accepted
+Current
 
 ## Context and Problem Statement
 
