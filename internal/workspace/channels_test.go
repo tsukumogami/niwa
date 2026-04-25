@@ -260,6 +260,19 @@ func checkSkillShape(t *testing.T, data []byte) {
 			t.Errorf("SKILL.md body missing section %q", h)
 		}
 	}
+
+	// Common Patterns must include explicit guidance for long-running
+	// tasks; the default 600s timeout silently truncates real coding
+	// tasks if the LLM doesn't override it.
+	for _, phrase := range []string{
+		"Long-running tasks",
+		"timeout_seconds",
+		"Re-await loop",
+	} {
+		if !strings.Contains(bodyStr, phrase) {
+			t.Errorf("SKILL.md Common Patterns missing long-running guidance phrase %q", phrase)
+		}
+	}
 }
 
 // TestInstallChannelInfrastructure_Idempotent covers AC-P10 and AC-P13:

@@ -398,6 +398,28 @@ instance is being torn down. If you use `rm -rf` on an instance directory, the
 daemon detects the missing watch path via fsnotify and exits on its own — but
 unclean, and workers may outlive the daemon by seconds.
 
+### Long-running tasks and `niwa_await_task` timeouts
+
+`niwa_await_task` defaults to `timeout_seconds=600` (10 minutes). Real
+coding tasks routinely run longer. When the default elapses, the call
+returns `{"status":"timeout"}` with the current task state, which an
+LLM coordinator may misread as failure if the prompt doesn't tell it
+what to do next.
+
+Two patterns keep long tasks coordinated:
+
+1. **Set an explicit timeout up front.** When you delegate work you
+   expect to take more than 10 minutes, follow up with
+   `niwa_await_task(task_id=<id>, timeout_seconds=<estimated_minutes * 60 + buffer>)`.
+   A 30-minute task wants `timeout_seconds=2400` (30 × 60 + 600s buffer).
+2. **Re-await on timeout.** If the call does return `status:"timeout"`,
+   re-call `niwa_await_task(task_id=<id>)` instead of giving up. The
+   worker is still progressing; the next call resumes the wait against
+   the same on-disk state.
+
+The same guidance is in the `niwa-mesh` skill's "Common Patterns"
+section so an LLM following the skill encounters it inline.
+
 ### Log growth and rotation
 
 Three files under `.niwa/` grow append-only with no built-in rotation:

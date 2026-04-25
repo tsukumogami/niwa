@@ -611,6 +611,13 @@ func buildSkillContent() []byte {
 	b.WriteString("the delegator can call `niwa_update_task` (returns `updated` if the\n")
 	b.WriteString("task is still queued, `too_late` once it is running) or\n")
 	b.WriteString("`niwa_cancel_task` (atomic rename into `inbox/cancelled/`).\n")
+	b.WriteString("Long-running tasks: `niwa_await_task` defaults to `timeout_seconds=600`\n")
+	b.WriteString("(10 minutes). For tasks expected to take longer, pass an explicit\n")
+	b.WriteString("`timeout_seconds` of `(estimated_minutes * 60 + buffer)` so the call\n")
+	b.WriteString("doesn't return `{\"status\":\"timeout\"}` while the worker is still\n")
+	b.WriteString("running. Re-await loop: on `status:\"timeout\"`, re-call\n")
+	b.WriteString("`niwa_await_task(task_id=...)` instead of giving up — the worker\n")
+	b.WriteString("is still progressing and the next call resumes the wait.\n")
 
 	return b.Bytes()
 }
