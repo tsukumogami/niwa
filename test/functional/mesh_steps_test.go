@@ -1196,27 +1196,16 @@ func runClaudePPreservingCaseCtx(ctx context.Context, s *testState, cwd, prompt 
 	// Flags mirror the daemon's spawnWorker (see mesh_watch.go): acceptEdits
 	// + explicit mcp__niwa__* allow-list. Without the allow-list the
 	// coordinator blocks on the first MCP tool-approval prompt (headless
-	// `-p` mode cannot answer it). The list stays in sync manually with the
-	// MCP server's tools/list response.
-	allowed := []string{
-		"mcp__niwa__niwa_delegate",
-		"mcp__niwa__niwa_query_task",
-		"mcp__niwa__niwa_await_task",
-		"mcp__niwa__niwa_report_progress",
-		"mcp__niwa__niwa_finish_task",
-		"mcp__niwa__niwa_list_outbound_tasks",
-		"mcp__niwa__niwa_update_task",
-		"mcp__niwa__niwa_cancel_task",
-		"mcp__niwa__niwa_ask",
-		"mcp__niwa__niwa_send_message",
-		"mcp__niwa__niwa_check_messages",
-	}
+	// `-p` mode cannot answer it). The canonical list lives in
+	// internal/mcp/allowed_tools.go; both spawnWorker and this launcher
+	// must reference it so a new MCP tool added in one place can't
+	// silently fail to be approved in the other.
 	cmd := exec.CommandContext(ctx, claudeBin,
 		"-p", prompt,
 		"--permission-mode=acceptEdits",
 		"--mcp-config="+mcpConfigPath,
 		"--strict-mcp-config",
-		"--allowed-tools", strings.Join(allowed, ","),
+		"--allowed-tools", strings.Join(mcp.ClaudeAllowedTools, ","),
 	)
 	cmd.Dir = cwd
 	cmd.Env = env

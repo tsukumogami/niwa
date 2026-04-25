@@ -84,25 +84,10 @@ type daemonConfig struct {
 // argv (AC-D5 / DESIGN Decision 4).
 const bootstrapPromptTemplate = "You are a worker for niwa task %s. Call niwa_check_messages to retrieve your task envelope."
 
-// niwaMCPAllowedToolNames is the flag-formatted list passed to claude's
-// --allowed-tools so workers can invoke the niwa MCP surface without a
-// per-tool approval prompt. The prefix "mcp__niwa__" matches how Claude
-// Code namespaces MCP tool names (server id "niwa" from .mcp.json). Must
-// stay in sync with internal/mcp/server.go's tools/list response and the
-// niwa-mesh skill's allowed-tools block.
-var niwaMCPAllowedToolNames = []string{
-	"mcp__niwa__niwa_delegate",
-	"mcp__niwa__niwa_query_task",
-	"mcp__niwa__niwa_await_task",
-	"mcp__niwa__niwa_report_progress",
-	"mcp__niwa__niwa_finish_task",
-	"mcp__niwa__niwa_list_outbound_tasks",
-	"mcp__niwa__niwa_update_task",
-	"mcp__niwa__niwa_cancel_task",
-	"mcp__niwa__niwa_ask",
-	"mcp__niwa__niwa_send_message",
-	"mcp__niwa__niwa_check_messages",
-}
+// The flag-formatted list passed to claude's --allowed-tools lives in
+// internal/mcp/allowed_tools.go (mcp.ClaudeAllowedTools) so the daemon and
+// the functional-test coordinator launcher reference the same source.
+// See spawnWorker below for usage.
 
 // spawnTargetInfo captures the resolved spawn binary metadata logged at
 // startup. The absolute path is reused verbatim for every subsequent
@@ -865,7 +850,7 @@ func spawnWorker(evt inboxEvent, taskDir string, s spawnContext) {
 		"--permission-mode=acceptEdits",
 		"--mcp-config="+mcpConfigPath,
 		"--strict-mcp-config",
-		"--allowed-tools", strings.Join(niwaMCPAllowedToolNames, ","),
+		"--allowed-tools", strings.Join(mcp.ClaudeAllowedTools, ","),
 	)
 
 	// Env: pass-through daemon's env, then niwa-owned last-wins
