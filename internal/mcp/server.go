@@ -66,21 +66,11 @@ type Server struct {
 	awaitWaiters map[string]chan taskEvent  // task_id → terminal-event channel (size-1 buffered)
 
 	// audit emits one entry per tool call (see DESIGN-mcp-call-telemetry.md).
-	// Defaults to a file-backed appender at <instanceRoot>/.niwa/mcp-audit.log;
-	// tests substitute a recording sink via SetAuditSink. Always non-nil after
-	// New so dispatch can call Emit without a guard.
-	audit AuditSink
-}
-
-// SetAuditSink replaces the Server's audit sink. Tests use this to capture
-// emissions without touching the filesystem; production callers leave the
-// default file sink wired by New.
-func (s *Server) SetAuditSink(sink AuditSink) {
-	if sink == nil {
-		s.audit = nopAuditSink{}
-		return
-	}
-	s.audit = sink
+	// Always a file-backed appender at <instanceRoot>/.niwa/mcp-audit.log;
+	// when instanceRoot is empty (handler-level unit tests) the sink's
+	// path is empty and Emit is a no-op. Always non-nil after New so
+	// dispatch can call Emit without a guard.
+	audit *fileAuditSink
 }
 
 // New constructs a Server. role is the caller's session role (from

@@ -205,14 +205,16 @@ func TestFileAuditSink_NoLeakageOfArgValues(t *testing.T) {
 
 func TestNewFileAuditSink_EmptyInstanceIsNop(t *testing.T) {
 	sink := NewFileAuditSink("")
-	// Must not panic, must not return an error, must not touch the
-	// filesystem. There's no observable to assert beyond "did not error";
-	// the absence of a panic and the nop type assertion below cover it.
-	if err := sink.Emit(AuditEntry{Tool: "x"}); err != nil {
-		t.Errorf("nop sink returned error: %v", err)
+	if sink == nil {
+		t.Fatal("NewFileAuditSink(\"\") returned nil")
 	}
-	if _, ok := sink.(nopAuditSink); !ok {
-		t.Errorf("expected nopAuditSink, got %T", sink)
+	if sink.path != "" {
+		t.Errorf("empty-instance sink has path %q, want \"\"", sink.path)
+	}
+	// Empty path is the no-op sentinel: Emit must succeed and must not
+	// touch the filesystem (no path to touch).
+	if err := sink.Emit(AuditEntry{Tool: "x"}); err != nil {
+		t.Errorf("empty-path sink Emit returned error: %v", err)
 	}
 }
 

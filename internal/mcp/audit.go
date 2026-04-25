@@ -36,26 +36,13 @@ type AuditEntry struct {
 	ErrorCode string   `json:"error_code,omitempty"`
 }
 
-// AuditSink writes one entry per tool call. Implementations must be safe
-// for concurrent use — multiple in-flight `tools/call` dispatches may emit
-// simultaneously when MCP gains per-handler goroutine fan-out (today the
-// dispatch loop is single-goroutine, but the contract is forward-looking).
-type AuditSink interface {
-	Emit(entry AuditEntry) error
-}
-
-// nopAuditSink discards entries. Used when the Server has no instance root
-// (unit-test setups that exercise individual handlers without provisioning
-// a workspace) so audit emission never tries to write outside the test's
-// tempdir.
-type nopAuditSink struct{}
-
-func (nopAuditSink) Emit(AuditEntry) error { return nil }
-
 // fileAuditSink appends NDJSON lines to a fixed path. Linux guarantees
 // O_APPEND writes smaller than PIPE_BUF (~4096 bytes) are atomic, so
 // concurrent writers from multiple processes never tear or interleave.
-// Audit entries are well under that limit.
+// Audit entries are well under that limit. A zero-value path is the
+// no-op sentinel: callers (and the unit-test setups that exercise
+// individual handlers without a workspace) get a sink whose Emit silently
+// returns without touching the filesystem.
 type fileAuditSink struct {
 	path string
 	mu   sync.Mutex
@@ -63,12 +50,13 @@ type fileAuditSink struct {
 
 // NewFileAuditSink returns a sink that appends NDJSON to
 // <instanceRoot>/.niwa/mcp-audit.log. When instanceRoot is empty, returns
-// a nop sink so callers don't have to special-case the no-workspace path.
-// The .niwa/ directory is expected to exist (provisioned by `niwa create`);
-// if it doesn't, Emit returns an error which dispatch swallows silently.
-func NewFileAuditSink(instanceRoot string) AuditSink {
+// a sink with an empty path; its Emit is a no-op so callers never have
+// to special-case the no-workspace path. The .niwa/ directory is expected
+// to exist (provisioned by `niwa create`); if it doesn't, Emit returns
+// an error which dispatch swallows silently.
+func NewFileAuditSink(instanceRoot string) *fileAuditSink {
 	if instanceRoot == "" {
-		return nopAuditSink{}
+		return &fileAuditSink{}
 	}
 	return &fileAuditSink{
 		path: filepath.Join(instanceRoot, ".niwa", auditLogFileName),
@@ -83,6 +71,9 @@ const auditLogFileName = "mcp-audit.log"
 // in-process emits so the file pointer can't race; cross-process safety
 // rests on O_APPEND atomicity.
 func (s *fileAuditSink) Emit(e AuditEntry) error {
+	if s.path == "" {
+		return nil
+	}
 	if e.V == 0 {
 		e.V = 1
 	}
