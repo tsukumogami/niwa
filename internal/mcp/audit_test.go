@@ -46,11 +46,11 @@ func TestExtractErrorCode(t *testing.T) {
 		want string
 	}{
 		{"ok result", mkRes(false, "anything"), ""},
-		{"error with colon prefix", mkRes(true, "NOT_TASK_PARTY: caller is not authorized"), "NOT_TASK_PARTY"},
-		{"error with bare code", mkRes(true, "UNKNOWN_ROLE"), "UNKNOWN_ROLE"},
-		{"error with multi-word code", mkRes(true, "TASK_ALREADY_TERMINAL: state=completed"), "TASK_ALREADY_TERMINAL"},
+		{"error with code prefix", mkRes(true, "error_code: NOT_TASK_PARTY\ndetail: caller is not authorized"), "NOT_TASK_PARTY"},
+		{"error with multi-word code", mkRes(true, "error_code: TASK_ALREADY_TERMINAL\ndetail: state=completed"), "TASK_ALREADY_TERMINAL"},
 		{"error without prefix", mkRes(true, "something went wrong"), "ERROR"},
 		{"empty content error", toolResult{IsError: true}, "ERROR"},
+		{"bare uppercase token (no error_code prefix)", mkRes(true, "UNKNOWN_ROLE"), "ERROR"},
 		{"single-letter not a code", mkRes(true, "A: not a code"), "ERROR"},
 	}
 	for _, tc := range cases {
@@ -58,6 +58,28 @@ func TestExtractErrorCode(t *testing.T) {
 			got := extractErrorCode(tc.res)
 			if got != tc.want {
 				t.Errorf("extractErrorCode(%+v) = %q, want %q", tc.res, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestBuildAuditEntry_RealErrorCodes pipes outputs from the production
+// errResultCode helper through buildAuditEntry and asserts the codes land
+// in AuditEntry.ErrorCode rather than the literal "ERROR". This is the
+// regression guard for the bug where extractErrorCode's earlier regex
+// (`^[A-Z]...`) could not match the lowercase `error_code: ` prefix that
+// errResultCode actually emits, so every audit row had ErrorCode="ERROR".
+func TestBuildAuditEntry_RealErrorCodes(t *testing.T) {
+	codes := []string{"NOT_TASK_PARTY", "UNKNOWN_ROLE", "BAD_TYPE", "TASK_ALREADY_TERMINAL", "TASK_NOT_FOUND", "INVALID_ARGS"}
+	for _, code := range codes {
+		t.Run(code, func(t *testing.T) {
+			res := errResultCode(code, "synthetic detail for "+code)
+			entry := buildAuditEntry("coordinator", "", toolCallParams{Name: "niwa_delegate"}, res)
+			if entry.OK {
+				t.Fatalf("OK = true on errResultCode result, want false")
+			}
+			if entry.ErrorCode != code {
+				t.Errorf("ErrorCode = %q, want %q (errResultCode shape no longer matches extractErrorCode)", entry.ErrorCode, code)
 			}
 		})
 	}

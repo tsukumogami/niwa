@@ -12,7 +12,6 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"sync"
 	"syscall"
@@ -142,18 +141,13 @@ func extractArgKeys(raw json.RawMessage) []string {
 	return keys
 }
 
-// errCodeRE matches a leading ALL_CAPS_WITH_UNDERSCORES identifier of at
-// least two characters, optionally followed by a colon. Niwa errors prefix
-// their text with stable codes (NOT_TASK_PARTY, UNKNOWN_ROLE, BAD_TYPE,
-// TASK_ALREADY_TERMINAL, TASK_NOT_FOUND, INVALID_ARGS, ...); capturing the
-// code keeps the machine-readable signal tests assert on without exposing
-// the full error text (which may include user-supplied content like role
-// names or task IDs).
-var errCodeRE = regexp.MustCompile(`^([A-Z][A-Z_]*[A-Z])(?::|$)`)
-
-// extractErrorCode returns the leading error code from a tool result, or
+// extractErrorCode returns the structured code from a tool result, or
 // empty when the result is not an error. Falls back to the literal
-// "ERROR" for IsError results that don't match the prefix shape.
+// "ERROR" for IsError results that don't carry the canonical
+// `error_code: <CODE>` prefix produced by errResultCode (server.go).
+// The single source of truth for the prefix grammar is errorCodeFromText;
+// this wrapper adds the IsError gating and ERROR fallback the audit
+// schema requires.
 func extractErrorCode(res toolResult) string {
 	if !res.IsError {
 		return ""
@@ -161,8 +155,8 @@ func extractErrorCode(res toolResult) string {
 	if len(res.Content) == 0 {
 		return "ERROR"
 	}
-	if m := errCodeRE.FindStringSubmatch(res.Content[0].Text); m != nil {
-		return m[1]
+	if code := errorCodeFromText(res.Content[0].Text); code != "" {
+		return code
 	}
 	return "ERROR"
 }
