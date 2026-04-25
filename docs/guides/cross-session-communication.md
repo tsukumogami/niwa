@@ -398,6 +398,34 @@ instance is being torn down. If you use `rm -rf` on an instance directory, the
 daemon detects the missing watch path via fsnotify and exits on its own — but
 unclean, and workers may outlive the daemon by seconds.
 
+### Coordinator restart
+
+Inside the MCP server, `niwa_await_task` waits via `awaitWaiters` —
+an in-memory map keyed by task_id, populated when the coordinator
+calls `niwa_await_task` and woken by the recipient watcher when a
+terminal envelope arrives in the coordinator's inbox. This map is
+intentionally not persisted: a coordinator session that crashes
+mid-await loses its wake-up channel.
+
+`state.json` on disk is the authoritative record. The worker's
+`niwa_finish_task` writes the terminal state correctly regardless of
+whether anyone is listening, so on coordinator crash and restart the
+recovery path is:
+
+1. From a new coordinator session, run `niwa task list` (or call
+   `niwa_query_task(task_id=<id>)` from the LLM coordinator) to read
+   the terminal state from disk.
+2. Optionally run `niwa_check_messages`. The daemon-spawned worker's
+   terminal-event message (`task.completed`, `task.abandoned`, or
+   `task.cancelled`) was written to the coordinator's role inbox at
+   completion time; any envelope that arrived before the crash is
+   still there to be surfaced.
+
+If you find yourself wanting `awaitWaiters` to survive coordinator
+crashes, the underlying issue is almost always an LLM coordinator
+that doesn't know to re-query. The skill text and operational
+guidance above tell it to do exactly that.
+
 ### Watcher overflow
 
 Both watchers in the system — the daemon's central inbox watcher and
