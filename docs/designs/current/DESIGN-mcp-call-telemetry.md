@@ -493,9 +493,21 @@ existing behaviour; slice 4 strengthens an existing scenario.
 | Audit emit failure breaking real work | `dispatch` ignores the emit error (`_ = s.audit.Emit(...)`). Observability degrades silently; tool calls always complete. |
 | Cross-instance contamination | File path is anchored at `instanceRoot`; instances have separate roots. Multi-tenant concerns are out of scope (single-user local CLI). |
 | Log readers reading partial lines on a crashed writer | NDJSON parse errors are skipped, not fatal. The audit reader logs and continues. Atomic append makes torn lines unreachable in practice (Linux PIPE_BUF), but the reader is defensive anyway. |
+| Same-uid worker forges audit lines via Edit/Write | Documented as honest-worker observability; not a security boundary. A prompt-injected worker running with `--permission-mode=acceptEdits` can write directly to `<instance>/.niwa/mcp-audit.log`. Hardening via worker `--add-dir <repo-dir>` to restrict reachable paths is a follow-up. |
 
 No new attack surface introduced. The audit log is local-only,
 instance-scoped, 0o600. No network egress, no external dependencies.
+
+### Trust model
+
+The audit log is trustworthy for honest workers; a prompt-injected
+worker can forge entries by direct file write. Concretely, the
+`graph-e2e` audit assertions (`theCoordinatorEmittedDelegateCallsForRoles`,
+`roleEmittedFinishTaskCalls`) detect the failure mode they were added
+to catch — accidental non-use of `niwa_*` tools, where the coordinator
+or workers reach state by some other path — but they do not detect
+deliberate forgery by an adversarial agent. Treat the audit log as a
+diagnostic surface for honest agents, not as a security boundary.
 
 ## Consequences
 
@@ -523,8 +535,10 @@ instance-scoped, 0o600. No network egress, no external dependencies.
 
 ### Mitigations
 
-- The `AuditSink` interface and `v=1` field together create the seam for
-  future change without rewriting call sites.
+- The `v=1` field on every entry creates the seam for future schema
+  change without rewriting call sites; if a second sink shape is needed
+  later, an interface can be re-introduced in the commit that adds the
+  second implementation rather than now.
 - The audit emit is wrapped in `_ = ...` so a degraded sink never breaks
   the MCP path; failures must be discovered by reading the file (or its
   absence), not by user-visible breakage.
