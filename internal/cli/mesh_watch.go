@@ -661,49 +661,33 @@ func maybePauseAtClaimHook(evt inboxEvent, s spawnContext, envVar, hookName stri
 // observed inbox file as a delegate envelope or leave it for the
 // recipient's MCP server.
 //
-// A file is "owned" by the daemon when it looks like a delegate envelope:
+// The daemon claims a file iff its body has `type == "task.delegate"`.
+// Everything else — task.completed, task.abandoned, task.cancelled, ask
+// replies, peer status updates, malformed JSON — is left in the role
+// inbox for the recipient's MCP server to consume. Touching peer files
+// from the daemon races the MCP watcher and drops awaitWaiter wakeups,
+// which is exactly the bug this predicate exists to prevent.
 //
-//   - Body `type` is "task.delegate" (the canonical case), or
-//   - Body `type` is unset/empty AND the filename matches the body's
-//     `task_id` field (legacy delegates pre-dating the explicit type),
-//   - Body `task_id` is empty (oldest legacy: filename was the only
-//     correlator).
+// The filenameTaskID argument is retained because handleInboxEvent uses
+// it downstream; this predicate doesn't need it for the type=delegate
+// case but the call site reads cleaner with one consistent signature.
 //
-// Anything else — task.completed, task.abandoned, task.cancelled, ask
-// replies, peer status updates — is ignored. Those messages live in role
-// inboxes for the recipient's MCP server to consume; touching them from
-// the daemon races the MCP watcher and drops wakeups.
-//
-// On read failure the file is treated as NOT owned (return false). A
+// On read or JSON-parse failure the file is treated as NOT owned. A
 // torn or unreadable file shouldn't get yanked into dangling/ where it
-// could confuse the operator and obscure the underlying I/O fault; the
-// MCP server's defensive read will skip it the same way and the file
-// stays in place for diagnosis.
-func daemonOwnsInboxFile(filePath, filenameTaskID string) bool {
+// could confuse the operator; the MCP server's defensive read will skip
+// it the same way and the file stays in place for diagnosis.
+func daemonOwnsInboxFile(filePath, _ string) bool {
 	data, err := os.ReadFile(filePath)
 	if err != nil {
 		return false
 	}
 	var peek struct {
-		Type   string `json:"type"`
-		TaskID string `json:"task_id"`
+		Type string `json:"type"`
 	}
 	if err := json.Unmarshal(data, &peek); err != nil {
-		// Malformed JSON: not the daemon's to clean up. Leave for ops.
 		return false
 	}
-	if peek.Type == "task.delegate" {
-		return true
-	}
-	if peek.Type == "" {
-		// Legacy: no type field. Filename-as-task-id convention applies.
-		// Accept when filename matches the body task_id (real delegate)
-		// or when task_id is missing entirely (oldest convention).
-		if peek.TaskID == "" || peek.TaskID == filenameTaskID {
-			return true
-		}
-	}
-	return false
+	return peek.Type == "task.delegate"
 }
 
 // handleInboxEvent runs the claim → spawn flow for a single queued
@@ -713,7 +697,7 @@ func daemonOwnsInboxFile(filePath, filenameTaskID string) bool {
 // Inbox files come in two shapes that the daemon must distinguish:
 //
 //  1. Delegate envelopes — filename is the task_id, body type is
-//     "task.delegate" (or empty for legacy). The daemon claims and spawns.
+//     "task.delegate". The daemon claims and spawns.
 //  2. Peer messages — filename is a fresh msg_id; body type is a terminal
 //     event (task.completed/abandoned/cancelled), an ask/answer, or any
 //     other peer-to-peer type. These belong to the recipient's MCP server,

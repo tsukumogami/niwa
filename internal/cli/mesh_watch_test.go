@@ -206,25 +206,11 @@ func TestDaemonOwnsInboxFile_DelegatesAndPeerMessages(t *testing.T) {
 			description: "peer ask must reach the recipient's MCP server intact",
 		},
 		{
-			name:        "legacy untyped envelope where filename matches task_id",
+			name:        "untyped envelope is NOT owned",
 			filenameID:  "task-2",
 			body:        `{"v":1,"id":"task-2","task_id":"task-2","body":{"x":1}}`,
-			wantDaemon:  true,
-			description: "pre-type-field delegates are still owned",
-		},
-		{
-			name:        "legacy untyped envelope where filename DOES NOT match task_id",
-			filenameID:  "msg-uuid-5",
-			body:        `{"v":1,"id":"msg-uuid-5","task_id":"the-real-task","body":{"x":1}}`,
 			wantDaemon:  false,
-			description: "filename/task_id mismatch with no type means it isn't a delegate",
-		},
-		{
-			name:        "legacy untyped, no task_id",
-			filenameID:  "task-3",
-			body:        `{"v":1,"id":"task-3","body":{"x":1}}`,
-			wantDaemon:  true,
-			description: "oldest convention: filename is the only correlator",
+			description: "the only on-the-wire delegate shape is type=task.delegate; bare envelopes belong to the recipient's MCP server",
 		},
 		{
 			name:        "malformed JSON is NOT owned",
@@ -758,7 +744,8 @@ func TestHandleInboxEvent_DanglingEnvelope(t *testing.T) {
 	fakeTaskID := mcp.NewTaskID()
 
 	inboxPath := filepath.Join(f.rolesRoot, "web", "inbox", fakeTaskID+".json")
-	if err := os.WriteFile(inboxPath, []byte(`{"id":"`+fakeTaskID+`"}`), 0o600); err != nil {
+	body := `{"v":1,"id":"` + fakeTaskID + `","type":"task.delegate","task_id":"` + fakeTaskID + `","body":{}}`
+	if err := os.WriteFile(inboxPath, []byte(body), 0o600); err != nil {
 		t.Fatalf("write stray inbox: %v", err)
 	}
 
