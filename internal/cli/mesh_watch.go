@@ -82,6 +82,14 @@ type daemonConfig struct {
 // bootstrapPromptTemplate is the fixed worker bootstrap prompt. The only
 // substitution is <task-id>; no part of the task body is ever placed in
 // argv (AC-D5 / DESIGN Decision 4).
+//
+// Contract: the prompt instructs the worker to call niwa_check_messages
+// to retrieve its task envelope. That call only returns the envelope
+// because internal/mcp/server.go::handleCheckMessages has a special-case
+// branch reading inbox/in-progress/<NIWA_TASK_ID>.json. Filename of the
+// in-progress envelope is `<task-id>.json`; the worker reads its own
+// NIWA_TASK_ID from env. If you change either side of this contract,
+// update both.
 const bootstrapPromptTemplate = "You are a worker for niwa task %s. Call niwa_check_messages to retrieve your task envelope."
 
 // The flag-formatted list passed to claude's --allowed-tools lives in

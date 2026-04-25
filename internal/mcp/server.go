@@ -423,12 +423,18 @@ func (s *Server) handleCheckMessages() toolResult {
 	}
 
 	// Include the caller's own in-progress task envelope (daemon renamed it
-	// out of the top-level inbox during claim). The bootstrap prompt tells
-	// workers to retrieve the envelope via niwa_check_messages, which only
-	// works if we look past inbox/ into inbox/in-progress/ for the caller's
-	// NIWA_TASK_ID. Not moved to read/ after listing: the envelope stays in
-	// in-progress/ for the lifetime of the task, reflecting its claimed
-	// state in the filesystem.
+	// out of the top-level inbox during claim). This block implements the
+	// bootstrap contract from internal/cli/mesh_watch.go::bootstrapPromptTemplate:
+	// the daemon-spawned worker is told to call niwa_check_messages to
+	// retrieve its envelope, and that call only returns it because we look
+	// past inbox/ into inbox/in-progress/ for the worker's NIWA_TASK_ID.
+	// Filename of the in-progress envelope is `<task-id>.json`; the worker
+	// reads its own NIWA_TASK_ID from env. If you change either side of
+	// this contract, update both.
+	//
+	// Not moved to read/ after listing: the envelope stays in in-progress/
+	// for the lifetime of the task, reflecting its claimed state in the
+	// filesystem.
 	if s.taskID != "" {
 		inProgress := filepath.Join(dir, "in-progress", s.taskID+".json")
 		if data, err := os.ReadFile(inProgress); err == nil {
