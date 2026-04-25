@@ -275,10 +275,8 @@ func TestFilterAudit(t *testing.T) {
 		{"by tool", AuditFilter{Tool: "niwa_delegate"}, 2},
 		{"by role", AuditFilter{Role: "coordinator"}, 3},
 		{"by tool and role", AuditFilter{Tool: "niwa_finish_task", Role: "web"}, 1},
-		{"by task_id", AuditFilter{TaskID: "t-2"}, 1},
 		{"only ok=true", AuditFilter{OK: &tru}, 4},
 		{"only ok=false", AuditFilter{OK: &fal}, 1},
-		{"by has-key", AuditFilter{HasKey: "outcome"}, 2},
 		{"no match", AuditFilter{Tool: "niwa_unknown"}, 0},
 	}
 	for _, tc := range cases {

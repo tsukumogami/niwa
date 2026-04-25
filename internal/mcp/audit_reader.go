@@ -63,11 +63,9 @@ func ReadAuditLog(instanceRoot string) ([]AuditEntry, error) {
 // OK is a *bool because both true and false are meaningful filters and
 // the zero value would otherwise mean "match only failures".
 type AuditFilter struct {
-	Role    string
-	TaskID  string
-	Tool    string
-	OK      *bool
-	HasKey  string // require this top-level argument key to be present
+	Role string
+	Tool string
+	OK   *bool
 }
 
 // FilterAudit returns the subset of entries matching every set field of f.
@@ -78,28 +76,13 @@ func FilterAudit(entries []AuditEntry, f AuditFilter) []AuditEntry {
 		if f.Role != "" && e.Role != f.Role {
 			continue
 		}
-		if f.TaskID != "" && e.TaskID != f.TaskID {
-			continue
-		}
 		if f.Tool != "" && e.Tool != f.Tool {
 			continue
 		}
 		if f.OK != nil && e.OK != *f.OK {
 			continue
 		}
-		if f.HasKey != "" && !contains(e.ArgKeys, f.HasKey) {
-			continue
-		}
 		out = append(out, e)
 	}
 	return out
-}
-
-func contains(s []string, x string) bool {
-	for _, v := range s {
-		if v == x {
-			return true
-		}
-	}
-	return false
 }
