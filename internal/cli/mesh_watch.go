@@ -672,15 +672,84 @@ func maybePauseAtClaimHook(evt inboxEvent, s spawnContext, envVar, hookName stri
 	}
 }
 
+// daemonOwnsInboxFile decides whether the daemon should treat a freshly
+// observed inbox file as a delegate envelope or leave it for the
+// recipient's MCP server.
+//
+// A file is "owned" by the daemon when it looks like a delegate envelope:
+//
+//   - Body `type` is "task.delegate" (the canonical case), or
+//   - Body `type` is unset/empty AND the filename matches the body's
+//     `task_id` field (legacy delegates pre-dating the explicit type),
+//   - Body `task_id` is empty (oldest legacy: filename was the only
+//     correlator).
+//
+// Anything else — task.completed, task.abandoned, task.cancelled, ask
+// replies, peer status updates — is ignored. Those messages live in role
+// inboxes for the recipient's MCP server to consume; touching them from
+// the daemon races the MCP watcher and drops wakeups.
+//
+// On read failure the file is treated as NOT owned (return false). A
+// torn or unreadable file shouldn't get yanked into dangling/ where it
+// could confuse the operator and obscure the underlying I/O fault; the
+// MCP server's defensive read will skip it the same way and the file
+// stays in place for diagnosis.
+func daemonOwnsInboxFile(filePath, filenameTaskID string) bool {
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		return false
+	}
+	var peek struct {
+		Type   string `json:"type"`
+		TaskID string `json:"task_id"`
+	}
+	if err := json.Unmarshal(data, &peek); err != nil {
+		// Malformed JSON: not the daemon's to clean up. Leave for ops.
+		return false
+	}
+	if peek.Type == "task.delegate" {
+		return true
+	}
+	if peek.Type == "" {
+		// Legacy: no type field. Filename-as-task-id convention applies.
+		// Accept when filename matches the body task_id (real delegate)
+		// or when task_id is missing entirely (oldest convention).
+		if peek.TaskID == "" || peek.TaskID == filenameTaskID {
+			return true
+		}
+	}
+	return false
+}
+
 // handleInboxEvent runs the claim → spawn flow for a single queued
 // envelope. Failures are logged and do NOT abort the loop — the daemon
 // must remain responsive to other inboxes.
+//
+// Inbox files come in two shapes that the daemon must distinguish:
+//
+//  1. Delegate envelopes — filename is the task_id, body type is
+//     "task.delegate" (or empty for legacy). The daemon claims and spawns.
+//  2. Peer messages — filename is a fresh msg_id; body type is a terminal
+//     event (task.completed/abandoned/cancelled), an ask/answer, or any
+//     other peer-to-peer type. These belong to the recipient's MCP server,
+//     not the daemon. Touching them races the MCP server's watcher and
+//     can drop terminal-event wakeups so niwa_await_task hangs until its
+//     own timeout.
+//
+// The daemon only touches files of shape (1). Anything else is left alone.
 func handleInboxEvent(evt inboxEvent, s spawnContext) {
+	if !daemonOwnsInboxFile(evt.filePath, evt.taskID) {
+		// Peer message routed through this role's inbox — recipient's MCP
+		// server handles it. Silently ignore (no log, no rename); logging
+		// every peer message would dwarf the useful daemon-event lines.
+		return
+	}
 	taskDir := filepath.Join(s.instanceRoot, ".niwa", "tasks", evt.taskID)
 	if _, err := os.Stat(filepath.Join(taskDir, "state.json")); err != nil {
-		// Dangling inbox file — no task dir. Move the envelope out of the
-		// queued inbox so fsnotify does not re-fire CREATE events for it
-		// on every daemon startup or sibling write. The file lands in
+		// Dangling delegate envelope — filename matches a task_id but no
+		// task dir. Move out of the queued inbox so fsnotify doesn't
+		// re-fire CREATE events for it on every daemon startup or sibling
+		// write. The file lands in
 		// `.niwa/roles/<role>/inbox/dangling/<task-id>.json` for operator
 		// inspection; leaving it in place keeps triggering the same
 		// "skip=dangling" code path indefinitely.

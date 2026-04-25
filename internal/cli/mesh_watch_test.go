@@ -147,6 +147,151 @@ func TestRoleFromInboxPath(t *testing.T) {
 	}
 }
 
+// TestDaemonOwnsInboxFile_DelegatesAndPeerMessages is the regression for
+// the inbox race that hung niwa_await_task: peer-message files (terminal
+// events, asks, status updates) were being renamed into dangling/ by the
+// daemon, racing the recipient's MCP server's watcher and dropping the
+// awaitWaiter wakeup. The daemon must claim only delegate envelopes and
+// leave everything else for the recipient's MCP server.
+func TestDaemonOwnsInboxFile_DelegatesAndPeerMessages(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, body string) string {
+		p := filepath.Join(dir, name+".json")
+		if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+
+	cases := []struct {
+		name        string
+		filenameID  string
+		body        string
+		wantDaemon  bool
+		description string
+	}{
+		{
+			name:        "task.delegate is owned",
+			filenameID:  "task-1",
+			body:        `{"v":1,"id":"task-1","type":"task.delegate","task_id":"task-1","body":{"x":1}}`,
+			wantDaemon:  true,
+			description: "the canonical delegate envelope",
+		},
+		{
+			name:        "task.completed is NOT owned",
+			filenameID:  "msg-uuid",
+			body:        `{"v":1,"id":"msg-uuid","type":"task.completed","task_id":"the-real-task","body":{"result":{}}}`,
+			wantDaemon:  false,
+			description: "this is the bug we fixed: terminal events were being yanked into dangling/",
+		},
+		{
+			name:        "task.abandoned is NOT owned",
+			filenameID:  "msg-uuid-2",
+			body:        `{"v":1,"id":"msg-uuid-2","type":"task.abandoned","task_id":"the-real-task","body":{"reason":"x"}}`,
+			wantDaemon:  false,
+			description: "abandoned terminal event must not be touched",
+		},
+		{
+			name:        "task.cancelled is NOT owned",
+			filenameID:  "msg-uuid-3",
+			body:        `{"v":1,"id":"msg-uuid-3","type":"task.cancelled","task_id":"the-real-task","body":{}}`,
+			wantDaemon:  false,
+			description: "cancelled terminal event must not be touched",
+		},
+		{
+			name:        "question.ask is NOT owned",
+			filenameID:  "msg-uuid-4",
+			body:        `{"v":1,"id":"msg-uuid-4","type":"question.ask","body":{"q":"?"}}`,
+			wantDaemon:  false,
+			description: "peer ask must reach the recipient's MCP server intact",
+		},
+		{
+			name:        "legacy untyped envelope where filename matches task_id",
+			filenameID:  "task-2",
+			body:        `{"v":1,"id":"task-2","task_id":"task-2","body":{"x":1}}`,
+			wantDaemon:  true,
+			description: "pre-type-field delegates are still owned",
+		},
+		{
+			name:        "legacy untyped envelope where filename DOES NOT match task_id",
+			filenameID:  "msg-uuid-5",
+			body:        `{"v":1,"id":"msg-uuid-5","task_id":"the-real-task","body":{"x":1}}`,
+			wantDaemon:  false,
+			description: "filename/task_id mismatch with no type means it isn't a delegate",
+		},
+		{
+			name:        "legacy untyped, no task_id",
+			filenameID:  "task-3",
+			body:        `{"v":1,"id":"task-3","body":{"x":1}}`,
+			wantDaemon:  true,
+			description: "oldest convention: filename is the only correlator",
+		},
+		{
+			name:        "malformed JSON is NOT owned",
+			filenameID:  "broken",
+			body:        `{not-json`,
+			wantDaemon:  false,
+			description: "torn or corrupt files stay put for diagnosis",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := write(tc.filenameID, tc.body)
+			got := daemonOwnsInboxFile(p, tc.filenameID)
+			if got != tc.wantDaemon {
+				t.Errorf("%s: daemonOwnsInboxFile = %v, want %v\n  body: %s",
+					tc.description, got, tc.wantDaemon, tc.body)
+			}
+		})
+	}
+}
+
+// TestHandleInboxEvent_LeavesPeerMessagesAlone is the integration-level
+// version of the regression: with a real handleInboxEvent call against a
+// terminal-event message, the file must remain at its original path so
+// the recipient's MCP watcher can read it.
+func TestHandleInboxEvent_LeavesPeerMessagesAlone(t *testing.T) {
+	root := t.TempDir()
+	inboxDir := filepath.Join(root, ".niwa", "roles", "coordinator", "inbox")
+	if err := os.MkdirAll(inboxDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	msgID := "msg-uuid-completed"
+	msgPath := filepath.Join(inboxDir, msgID+".json")
+	body := `{"v":1,"id":"` + msgID + `","type":"task.completed","task_id":"real-task-id","body":{"result":{}}}`
+	if err := os.WriteFile(msgPath, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	logBuf := &strings.Builder{}
+	s := spawnContext{
+		instanceRoot: root,
+		logger:       log.New(logBuf, "", 0),
+	}
+	handleInboxEvent(inboxEvent{
+		role:     "coordinator",
+		taskID:   msgID,
+		filePath: msgPath,
+	}, s)
+
+	// File must still exist at the original path. A racing MCP server
+	// reading it now would succeed.
+	if _, err := os.Stat(msgPath); err != nil {
+		t.Errorf("daemon yanked peer message: %v\n  log:\n%s", err, logBuf.String())
+	}
+	// dangling/ must not have a matching file.
+	dangling := filepath.Join(inboxDir, "dangling", msgID+".json")
+	if _, err := os.Stat(dangling); err == nil {
+		t.Errorf("daemon moved peer message to dangling/: %s\n  log:\n%s", dangling, logBuf.String())
+	}
+	// And no log line should mention this file (the daemon should have
+	// silently ignored it).
+	if strings.Contains(logBuf.String(), msgID) {
+		t.Errorf("daemon logged about a peer message it should ignore: %s", logBuf.String())
+	}
+}
+
 func TestResolveRoleCWD_Coordinator(t *testing.T) {
 	root := t.TempDir()
 	if got := resolveRoleCWD(root, "coordinator"); got != root {
