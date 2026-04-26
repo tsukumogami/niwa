@@ -15,6 +15,7 @@ import (
 
 	"github.com/cucumber/godog"
 	"github.com/tsukumogami/niwa/internal/mcp"
+	"github.com/tsukumogami/niwa/internal/workspace"
 )
 
 // mesh_steps_test.go holds the step definitions introduced by Issue #10
@@ -1192,14 +1193,20 @@ func runClaudePPreservingCaseCtx(ctx context.Context, s *testState, cwd, prompt 
 	// sandboxed PATH doesn't include one. We set the role explicitly here
 	// so the MCP child inherits it from the coordinator claude's env.
 	env = append(env, "NIWA_SESSION_ROLE=coordinator")
-	mcpConfigPath := filepath.Join(cwd, ".mcp.json")
-	// Flags mirror the daemon's spawnWorker (see mesh_watch.go): acceptEdits
-	// + explicit mcp__niwa__* allow-list. Without the allow-list the
-	// coordinator blocks on the first MCP tool-approval prompt (headless
-	// `-p` mode cannot answer it). The canonical list lives in
+	mcpConfigPath := workspace.InstanceMCPConfigPath(cwd)
+	// This launcher pins the MCP config explicitly via --mcp-config +
+	// --strict-mcp-config because the test sandbox cannot rely on
+	// cwd-rooted discovery (no host-installed claude config). Real
+	// human-launched coordinators DO rely on discovery and must NOT pass
+	// these flags — see internal/cli/mesh_watch.go::spawnWorker for the
+	// asymmetry between the worker and coordinator launch contracts.
+	//
+	// --permission-mode=acceptEdits + --allowed-tools mirrors the worker
+	// argv because in headless `-p` mode the coordinator can't answer
+	// approval prompts either. The canonical allowed-tools list lives in
 	// internal/mcp/allowed_tools.go; both spawnWorker and this launcher
-	// must reference it so a new MCP tool added in one place can't
-	// silently fail to be approved in the other.
+	// reference it so a new MCP tool added in one place can't silently
+	// fail to be approved in the other.
 	cmd := exec.CommandContext(ctx, claudeBin,
 		"-p", prompt,
 		"--permission-mode=acceptEdits",

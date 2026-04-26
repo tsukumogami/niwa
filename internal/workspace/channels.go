@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/tsukumogami/niwa/internal/config"
 )
@@ -20,6 +21,28 @@ var roleNameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,31}$`)
 
 // coordinatorRole is the reserved role name for the instance root session.
 const coordinatorRole = "coordinator"
+
+// instanceMCPConfigName is the basename of the project-scoped MCP config
+// file Claude Code's discovery loads at the cwd directory root. It lives
+// at the directory root, not under .claude/.
+const instanceMCPConfigName = ".mcp.json"
+
+// InstanceMCPConfigPath returns the absolute path to the niwa-managed
+// MCP config file at instanceRoot. Three callers must agree on this
+// path:
+//
+//   - the channels installer that writes the file (this package)
+//   - the daemon's worker spawn that hands the path to claude via
+//     --mcp-config (internal/cli/mesh_watch.go::spawnWorker)
+//   - the functional-test coordinator launcher that does the same
+//     (test/functional/mesh_steps_test.go)
+//
+// All three reference this helper so a future move (e.g., to
+// .niwa/.mcp.json, or per-repo files keyed differently) is a one-line
+// change. See issue #78 for the longer-term strategy review.
+func InstanceMCPConfigPath(instanceRoot string) string {
+	return filepath.Join(instanceRoot, instanceMCPConfigName)
+}
 
 // channelsMCPTemplate is the template for the instance-root `.mcp.json`.
 // It registers the niwa mcp-serve command with NIWA_INSTANCE_ROOT baked in
@@ -180,35 +203,20 @@ func InstallChannelInfrastructure(cfg *config.WorkspaceConfig, instanceRoot stri
 	}
 	*writtenFiles = append(*writtenFiles, logPath)
 
-	// Step 4: .mcp.json at the instance root. Claude Code's MCP discovery
-	// is per-cwd: it loads the project-scoped `.mcp.json` at the directory
-	// root of the cwd it was started in, and does NOT walk parent
-	// directories (https://code.claude.com/docs/en/mcp). The PRD's
-	// headline scenario is "open one Claude at the instance root and ask
-	// it to delegate," so the instance root is the only cwd niwa needs to
-	// cover for human-launched coordinator sessions. Sub-repo cwds are an
-	// out-of-spec entry point; users who want one can launch with
-	// `--mcp-config=<instance>/.mcp.json` explicitly.
-	//
-	// Avoiding per-repo files is a deliberate scope choice: a per-repo
-	// `.mcp.json` would either collide destructively with any project
-	// that ships its own (drift-warning + overwrite, then the change is
-	// hidden by `.git/info/exclude` so the user can't see what happened)
-	// or require merging niwa's entry into upstream's mcpServers — which
-	// puts machine-specific absolute paths into a tracked file. Neither
-	// is acceptable; see issue #78 for the trade-off matrix.
-	//
-	// The file is NOT placed under `.claude/` — Claude Code looks for
-	// `.mcp.json` directly at the directory root.
-	//
-	// Daemon-spawned workers receive the same path explicitly via
-	// `--mcp-config` + `--strict-mcp-config` (see
-	// internal/cli/mesh_watch.go::spawnWorker) and intentionally do NOT
-	// use discovery, which isolates them from any user-scoped MCP servers
-	// in `~/.claude.json`. The file we write here is the same one workers
-	// point at, so there is one source of truth on disk.
-	mcpContent := buildMCPContent(instanceRoot)
-	instanceMCPPath := filepath.Join(instanceRoot, ".mcp.json")
+	// Step 4: project-scoped MCP config at the instance root. Claude
+	// Code's discovery loads `<cwd>/.mcp.json` only, no parent walk-up,
+	// so the instance root is the cwd where the headline scenario "open
+	// Claude here and delegate" finds niwa tools. The file lives at the
+	// directory root, not under `.claude/`. Per-repo writes are
+	// deliberately omitted to avoid colliding with projects that ship
+	// their own `.mcp.json`; see issue #78. Workers don't depend on
+	// discovery — `mesh_watch.go::spawnWorker` passes `--mcp-config` to
+	// this same file with `--strict-mcp-config`.
+	mcpContent, err := buildMCPContent(instanceRoot)
+	if err != nil {
+		return fmt.Errorf("building .mcp.json content: %w", err)
+	}
+	instanceMCPPath := InstanceMCPConfigPath(instanceRoot)
 	if err := writeIdempotent(instanceMCPPath, mcpContent, 0o600, os.Stderr); err != nil {
 		return fmt.Errorf("writing instance .mcp.json: %w", err)
 	}
@@ -343,11 +351,11 @@ func enumerateRoles(cfg *config.WorkspaceConfig, instanceRoot string) ([]roleEnt
 
 	// Enumerate topology-derived roles in a single walk of the instance
 	// root. We need two things at once: the absolute on-disk path for
-	// each repo basename (for per-repo .mcp.json and SKILL.md mirroring)
-	// and the occurrence count (for collision detection per AC-R2). A
-	// missing instance root is possible on a create path before clones
-	// have finished; treat it as zero repos so coordinator-only
-	// workspaces install cleanly.
+	// each repo basename (for per-repo SKILL.md mirroring) and the
+	// occurrence count (for collision detection per AC-R2). A missing
+	// instance root is possible on a create path before clones have
+	// finished; treat it as zero repos so coordinator-only workspaces
+	// install cleanly.
 	topologyPaths := map[string]string{}
 	repoOccurrences := map[string]int{}
 	entries, err := os.ReadDir(instanceRoot)
@@ -369,8 +377,11 @@ func enumerateRoles(cfg *config.WorkspaceConfig, instanceRoot string) ([]roleEnt
 			if !repo.IsDir() || isHiddenOrSkip(repoName) {
 				continue
 			}
-			// Last writer wins when the same basename appears in two
-			// groups; the collision is detected via repoOccurrences below.
+			// When the same basename appears in two groups, the second
+			// iteration's path wins for topologyPaths. That ordering only
+			// matters in the explicit-override case below; without an
+			// override, the duplicate is detected via repoOccurrences and
+			// rejected as a hard error (AC-R2).
 			topologyPaths[repoName] = filepath.Join(groupDir, repoName)
 			repoOccurrences[repoName]++
 		}
@@ -503,23 +514,38 @@ func migratePre1Layout(niwaDir string) error {
 	return nil
 }
 
-// buildMCPContent returns the bytes for `<instance>/.mcp.json`. The
-// command field resolves to the absolute path of the provisioning niwa
-// binary (os.Executable) so Claude Code's MCP subprocess launcher does
-// not depend on PATH. The NIWA_INSTANCE_ROOT env entry is JSON-marshaled
-// so instance paths with spaces, quotes, or other special characters are
-// preserved correctly.
-func buildMCPContent(instanceRoot string) []byte {
+// buildMCPContent returns the bytes for `<instance>/.mcp.json`. It
+// errors when the niwa binary path or the instance root contain
+// invalid UTF-8 — extremely rare on Linux but reachable on
+// filesystems with mojibake-encoded paths. json.Marshal of a string
+// silently coerces invalid bytes to U+FFFD, so without this guard
+// the file would land on disk with a path Claude Code would later
+// fail to launch with a confusing "no such file" — checking up front
+// produces a clear apply-time error instead.
+//
+// The command field resolves to the absolute path of the provisioning
+// niwa binary (os.Executable) so Claude Code's MCP subprocess launcher
+// does not depend on PATH. The NIWA_INSTANCE_ROOT env entry is
+// JSON-marshaled so instance paths with spaces, quotes, or other
+// special characters are preserved correctly.
+func buildMCPContent(instanceRoot string) ([]byte, error) {
 	cmdPath, err := os.Executable()
 	if err != nil || cmdPath == "" {
-		// Fallback to PATH resolution if the process path is unavailable.
-		// This is the legacy behavior; it only fires when os.Executable
-		// fails outright (very rare on POSIX systems).
+		// Defensive default: fall back to PATH resolution when
+		// os.Executable() returns empty (very rare on POSIX). Workers
+		// spawned via this fallback rely on `niwa` being on PATH at
+		// claude-launch time. Prefer the absolute path when available.
 		cmdPath = "niwa"
+	}
+	if !utf8.ValidString(cmdPath) {
+		return nil, fmt.Errorf("niwa binary path is not valid UTF-8: %q", cmdPath)
+	}
+	if !utf8.ValidString(instanceRoot) {
+		return nil, fmt.Errorf("instance root is not valid UTF-8: %q", instanceRoot)
 	}
 	cmdJSON, _ := json.Marshal(cmdPath)
 	rootJSON, _ := json.Marshal(instanceRoot)
-	return []byte(fmt.Sprintf(channelsMCPTemplate, string(cmdJSON), string(rootJSON)))
+	return []byte(fmt.Sprintf(channelsMCPTemplate, string(cmdJSON), string(rootJSON))), nil
 }
 
 // buildSkillContent returns the canonical niwa-mesh SKILL.md content. The

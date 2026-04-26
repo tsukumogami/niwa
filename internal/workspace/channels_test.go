@@ -69,8 +69,8 @@ func TestInstallChannelInfrastructure_NoopWhenDisabled(t *testing.T) {
 // AC-R1, AC-P5, AC-P6, AC-P7, AC-P8, AC-P15: for every enumerated role
 // (coordinator + topology-derived), the full per-role inbox tree is
 // present, plus .niwa/tasks/, daemon.pid/log, an instance-root .mcp.json
-// (the single project-scoped file Claude Code's discovery reads via
-// directory-tree walk-up), SKILL.md mirrored per repo, and a ## Channels
+// (project-scoped file Claude Code reads from <cwd>/.mcp.json; per-cwd,
+// no parent walk-up), SKILL.md mirrored per repo, and a ## Channels
 // section in workspace-context.md with the four required items.
 func TestInstallChannelInfrastructure_CreatesRoleLayout(t *testing.T) {
 	dir := t.TempDir()
@@ -116,12 +116,9 @@ func TestInstallChannelInfrastructure_CreatesRoleLayout(t *testing.T) {
 		t.Errorf("daemon.log missing: %v", err)
 	}
 
-	// `.mcp.json` lives at the instance root only. Claude Code's MCP
-	// discovery is per-cwd (no parent walk-up); the PRD's headline
-	// scenario is "open one Claude at the instance root and ask it to
-	// delegate," so the instance root is the only cwd niwa needs to
-	// cover. The file is NOT under `.claude/` — Claude Code reads
-	// `.mcp.json` directly at the directory root.
+	// `.mcp.json` lives at the instance root only — at the directory
+	// root, not under `.claude/`. Rationale lives at the call site in
+	// channels.go.
 	instanceMCP := filepath.Join(dir, ".mcp.json")
 	data, err := os.ReadFile(instanceMCP)
 	if err != nil {
@@ -781,7 +778,10 @@ func TestInjectChannelHooks_PrependToExisting(t *testing.T) {
 
 func TestBuildMCPContent_InstanceRootEscaping(t *testing.T) {
 	instanceRoot := "/some/path/with spaces"
-	data := buildMCPContent(instanceRoot)
+	data, err := buildMCPContent(instanceRoot)
+	if err != nil {
+		t.Fatalf("buildMCPContent: %v", err)
+	}
 
 	var doc map[string]any
 	if err := json.Unmarshal(data, &doc); err != nil {
@@ -794,6 +794,18 @@ func TestBuildMCPContent_InstanceRootEscaping(t *testing.T) {
 	got := env["NIWA_INSTANCE_ROOT"].(string)
 	if got != instanceRoot {
 		t.Errorf("NIWA_INSTANCE_ROOT: got %q, want %q", got, instanceRoot)
+	}
+}
+
+// TestBuildMCPContent_RejectsInvalidUTF8 documents the contract that
+// invalid UTF-8 in the instance root surfaces as a build error rather
+// than producing malformed JSON. Reachable in production only on
+// filesystems with mojibake-encoded paths; covered here as a defense
+// against a regression that would silently ship a broken .mcp.json.
+func TestBuildMCPContent_RejectsInvalidUTF8(t *testing.T) {
+	bad := "/path/with/invalid\xff\xfeutf8"
+	if _, err := buildMCPContent(bad); err == nil {
+		t.Errorf("expected error for invalid UTF-8 in instance root, got nil")
 	}
 }
 
