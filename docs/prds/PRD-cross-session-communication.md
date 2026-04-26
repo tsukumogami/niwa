@@ -175,20 +175,21 @@ drift detection and `niwa destroy` work uniformly.
 after repository clones are complete and before per-repo materializers. It
 shall be invoked imperatively from `Applier.runPipeline`.
 
-**R4** — The channel installer shall write a project-scoped `.mcp.json`
-at the directory root of every directory a coordinator might launch
-Claude in: `<instanceRoot>/.mcp.json` and `<repoDir>/.mcp.json` for every
-cloned repo. Each file declares a `niwa` MCP server entry that invokes
-`niwa mcp-serve` with `NIWA_INSTANCE_ROOT` baked in. The file lives at
-the directory root (not under `.claude/`) because Claude Code's MCP
-discovery loads the project-scoped config from `<cwd>/.mcp.json` only —
-it does not walk parent directories to find one (per
-https://code.claude.com/docs/en/mcp). A user who launches Claude at the
-instance root reads `<instanceRoot>/.mcp.json`; a user who launches
-inside a cloned repo reads `<repoDir>/.mcp.json`. The per-repo file
-carries machine-specific absolute paths (the niwa binary path and
-`NIWA_INSTANCE_ROOT`); the installer shall add `.mcp.json` to each
-repo's `.git/info/exclude` so the file does not get committed upstream.
+**R4** — The channel installer shall write a project-scoped
+`<instanceRoot>/.mcp.json` declaring a `niwa` MCP server entry that
+invokes `niwa mcp-serve` with `NIWA_INSTANCE_ROOT` baked in. The file
+lives at the directory root (not under `.claude/`) because Claude
+Code's MCP discovery loads the project-scoped config from
+`<cwd>/.mcp.json` only — it does not walk parent directories (per
+https://code.claude.com/docs/en/mcp). The headline scenario "open one
+Claude at the instance root and ask it to delegate" is therefore
+covered. The installer shall NOT write per-repo `.mcp.json` files: a
+file at `<repoDir>/.mcp.json` would either collide destructively with
+any project that ships its own MCP config or require merging absolute
+machine-specific paths into a tracked file. Users who want to launch
+Claude in a sub-repo cwd (an out-of-spec entry point) can pass
+`--mcp-config=<instanceRoot>/.mcp.json` explicitly. See issue #78 for
+the longer-term strategy review.
 
 **R5** — The channel installer shall enumerate the full set of roles from
 `workspace.toml` (explicit `[channels.mesh.roles]` entries) and the cloned
@@ -670,11 +671,11 @@ live `claude -p` is not required to verify correctness.
 - [ ] **AC-P5** After apply on a channeled workspace, `.niwa/tasks/` exists,
   `.niwa/sessions/sessions.json` exists and is empty, and
   `.niwa/daemon.pid` contains the PID of a live process.
-- [ ] **AC-P6** `<instanceRoot>/.mcp.json` and `<repoDir>/.mcp.json`
-  both exist for every cloned repo, each containing a `niwa` entry
-  pointing to `niwa mcp-serve`, each at the directory root (not under
-  `.claude/`). Each cloned repo's `.git/info/exclude` lists `.mcp.json`
-  so the per-repo copy is hidden from `git status`.
+- [ ] **AC-P6** `<instanceRoot>/.mcp.json` exists at the instance root
+  (not under `.claude/`) and contains a `niwa` entry pointing to
+  `niwa mcp-serve`. No per-repo `.mcp.json` is written, at either
+  `<repoDir>/.mcp.json` or `<repoDir>/.claude/.mcp.json`, so niwa
+  cannot collide with a project that ships its own MCP config.
 - [ ] **AC-P7** `<instanceRoot>/.claude/skills/niwa-mesh/SKILL.md` exists
   after apply, and the same file exists at
   `<repoDir>/.claude/skills/niwa-mesh/SKILL.md` for every cloned repo.

@@ -205,20 +205,21 @@ Feature: Cross-session mesh (Issue #10 harness)
     Then an unauthorized MCP call for instance "auth-neg-ws" receives NOT_TASK_PARTY
 
   # MCP config layout regression: Claude Code's MCP discovery loads
-  # `<cwd>/.mcp.json` at the directory root and does not walk parents.
-  # The file therefore lives at the directory root of every cwd a
-  # coordinator might launch Claude in: the instance root and every
-  # cloned repo. The legacy `.claude/.mcp.json` path is never read by
-  # Claude Code's discovery and must not be written; if niwa writes
-  # there, the headline scenario (open Claude in the instance root,
-  # delegate work) silently lacks niwa MCP tools.
+  # `<cwd>/.mcp.json` at the directory root and does not walk parent
+  # directories. Niwa writes only `<instance>/.mcp.json` — the PRD's
+  # headline scenario opens Claude at the instance root, where that
+  # file is what discovery resolves. No per-repo files: writing
+  # `<repoDir>/.mcp.json` would collide destructively with any project
+  # that ships its own MCP config (see issue #78). The legacy
+  # `.claude/.mcp.json` path Claude Code never reads must not be
+  # written either.
   #
   # This scenario does not invoke claude — it asserts the on-disk
   # layout is correct. The bug it guards against shipped in v0.9.0
   # because every test that did invoke claude bypassed discovery via
   # `--mcp-config <path> --strict-mcp-config`.
   @critical
-  Scenario: MCP config layout — instance-root and per-repo files at directory roots
+  Scenario: MCP config layout — instance-root only, no per-repo files
     Given a clean niwa environment
     And a local git server is set up
     And a multi-repo channeled workspace "mcp-layout" with web and backend exists
@@ -226,9 +227,9 @@ Feature: Cross-session mesh (Issue #10 harness)
     Then the exit code is 0
     And the file ".mcp.json" exists in instance "mcp-layout"
     And the file ".claude/.mcp.json" does not exist in instance "mcp-layout"
-    And the file "apps/web/.mcp.json" exists in instance "mcp-layout"
+    And the file "apps/web/.mcp.json" does not exist in instance "mcp-layout"
     And the file "apps/web/.claude/.mcp.json" does not exist in instance "mcp-layout"
-    And the file "apps/backend/.mcp.json" exists in instance "mcp-layout"
+    And the file "apps/backend/.mcp.json" does not exist in instance "mcp-layout"
     And the file "apps/backend/.claude/.mcp.json" does not exist in instance "mcp-layout"
 
   # ---------------------------------------------------------------------

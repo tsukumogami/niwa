@@ -20,7 +20,11 @@ Enable the mesh for an instance and delegate a task:
 niwa create my-workspace --channels
 cd my-workspace
 
-# Open a coordinator session.
+# Open a coordinator session. Launch Claude from the instance root
+# (the workspace directory above); that is where niwa writes `.mcp.json`,
+# and Claude Code's MCP discovery loads `<cwd>/.mcp.json` only — it does
+# not walk parent directories. Sub-repo cwds work too if you pass the
+# config path explicitly: `claude --mcp-config=<instance>/.mcp.json`.
 claude
 ```
 

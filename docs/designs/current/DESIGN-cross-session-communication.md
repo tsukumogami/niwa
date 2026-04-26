@@ -598,12 +598,13 @@ niwa apply
        - migration helper (detect + remove old .niwa/sessions/<uuid>/)
        - create .niwa/roles/<role>/inbox/{in-progress,cancelled,expired,read}/
        - create .niwa/tasks/
-       - write `.mcp.json` at every directory a coordinator might
-         launch Claude in: <instanceRoot>/.mcp.json and
-         <repoDir>/.mcp.json for every cloned repo (Claude Code reads
-         <cwd>/.mcp.json and does not walk parents); append .mcp.json
-         to each repo's .git/info/exclude so the per-repo copy stays
-         out of upstream history
+       - write <instanceRoot>/.mcp.json (Claude Code reads <cwd>/.mcp.json
+         and does not walk parents; the instance root covers the PRD's
+         headline "open Claude at the instance root" scenario; sub-repo
+         cwd launches are out-of-spec and reachable with explicit
+         --mcp-config; per-repo .mcp.json files are intentionally not
+         written to avoid colliding with projects that ship their own
+         MCP config — see issue #78)
        - install niwa-mesh skill to <instanceRoot>/.claude/skills/niwa-mesh/
          and each <repoDir>/.claude/skills/niwa-mesh/ (sha256 idempotent)
        - write minimal ## Channels section to workspace-context.md
@@ -967,7 +968,7 @@ Deliverables:
   - Migration helper: detect + remove `.niwa/sessions/<uuid>/` directories; emit one-shot stderr warning; preserve `sessions.json`.
   - Create `.niwa/roles/<role>/inbox/{in-progress,cancelled,expired,read}/` for every role.
   - Create `.niwa/tasks/`, `.niwa/daemon.pid` placeholder (empty).
-  - Write `.mcp.json` at the directory root (not under `.claude/`) of every directory a coordinator might launch Claude in: `<instanceRoot>/.mcp.json` and `<repoDir>/.mcp.json` for every cloned repo. Claude Code's MCP discovery loads the project-scoped config from `<cwd>/.mcp.json` and does not walk parent directories. Append `.mcp.json` to each repo's `.git/info/exclude` so the per-repo copy (which carries absolute paths) does not get committed upstream.
+  - Write `<instanceRoot>/.mcp.json` at the directory root (not under `.claude/`). Claude Code's MCP discovery loads `<cwd>/.mcp.json` and does not walk parent directories. The PRD's headline scenario "open one Claude at the instance root and ask it to delegate" is covered. Per-repo `.mcp.json` files are intentionally not written: a file at `<repoDir>/.mcp.json` would either collide destructively with any project shipping its own MCP config or require merging absolute machine-specific paths into a tracked file. Sub-repo launches are an out-of-spec entry point reachable with explicit `--mcp-config`. See issue #78.
   - Write `niwa-mesh/SKILL.md` to instance-root and per-repo; sha256 hash check vs `InstanceState.ManagedFiles.ContentHash` for idempotency; drift warning on mismatch; overwrite.
   - Write minimal `## Channels` section to `workspace-context.md`.
   - Inject SessionStart + UserPromptSubmit hook entries into `cfg.Claude.Hooks` for the coordinator role only (workers do not use these hooks).
