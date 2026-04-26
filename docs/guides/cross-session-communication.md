@@ -398,9 +398,11 @@ Pre-1.0 queued envelopes are not carried forward — the wire format changed.
 
 Killing workers first minimizes the window during which an
 `acceptEdits`-enabled worker could still write to the filesystem while the
-instance is being torn down. If you use `rm -rf` on an instance directory, the
-daemon detects the missing watch path via fsnotify and exits on its own — but
-unclean, and workers may outlive the daemon by seconds.
+instance is being torn down. **Always use `niwa destroy` to tear down a
+channeled instance.** `rm -rf` of the instance directory does not signal
+the daemon — it keeps running, holding fsnotify watches against a now-
+missing path, and you'll need `pgrep -af "niwa.*mesh watch"` plus a manual
+`kill` to clean it up. Tracking proper teardown semantics is in issue #75.
 
 ### Coordinator restart
 

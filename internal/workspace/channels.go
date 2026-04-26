@@ -171,6 +171,28 @@ func InstallChannelInfrastructure(cfg *config.WorkspaceConfig, instanceRoot stri
 		return fmt.Errorf("creating .niwa/roles: %w", err)
 	}
 
+	// .niwa/sessions/sessions.json is the coordinator session registry
+	// (per PRD R39, R40 and AC-P5). Workers are not registered, only
+	// coordinators. Provision the directory and an empty registry file
+	// here so `niwa session list` finds a well-formed file from apply
+	// time, not a lazy-create on first `niwa session register`. Create
+	// only if absent — re-apply must NOT overwrite a populated registry
+	// (that would wipe live session entries).
+	sessionsDir := filepath.Join(niwaDir, "sessions")
+	if err := mkdirAllMode(sessionsDir, 0o700); err != nil {
+		return fmt.Errorf("creating .niwa/sessions: %w", err)
+	}
+	sessionsPath := filepath.Join(sessionsDir, "sessions.json")
+	if _, err := os.Stat(sessionsPath); err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("checking sessions.json: %w", err)
+		}
+		if err := os.WriteFile(sessionsPath, []byte("{\"sessions\":[]}\n"), 0o600); err != nil {
+			return fmt.Errorf("writing sessions.json: %w", err)
+		}
+	}
+	*writtenFiles = append(*writtenFiles, sessionsPath)
+
 	// Create per-role inbox trees. Role enumeration is stable-sorted by
 	// enumerateRoles; walking the sorted slice keeps directory creation
 	// order deterministic for easier test assertions.

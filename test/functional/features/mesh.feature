@@ -309,6 +309,20 @@ Feature: Cross-session mesh (Issue #10 harness)
     And the file ".niwa/roles/coordinator/inbox/in-progress" exists in instance "virtual-peer-ws"
     And the file ".niwa/roles/worker/inbox/expired" exists in instance "virtual-peer-ws"
 
+  # AC-P5: the channels installer must create .niwa/sessions/sessions.json
+  # at apply time so `niwa session list` and the coordinator-session
+  # registry probes find a well-formed file from the start, not a lazy-
+  # create on first `niwa session register`. The file is created only
+  # if absent — re-apply must not overwrite a populated registry.
+  @critical
+  Scenario: niwa create provisions .niwa/sessions/sessions.json (AC-P5)
+    Given a clean niwa environment
+    And a local git server is set up
+    And a single-repo channeled workspace "session-registry-ws" exists
+    When I run "niwa create session-registry-ws"
+    Then the exit code is 0
+    And the file ".niwa/sessions/sessions.json" exists in instance "session-registry-ws"
+
   # --no-channels disable round-trip: enable channels via the synthesized
   # path (--channels flag, no [channels.mesh] in config), then re-apply
   # with --no-channels. Asserts the instance-root .mcp.json and the
