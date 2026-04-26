@@ -29,6 +29,7 @@ go.work.sum
 # Built binaries
 /niwa
 /niwa-test
+/test/functional/worker_fake/worker-fake
 
 # Functional test sandbox (per-scenario scratch)
 /.niwa-test/

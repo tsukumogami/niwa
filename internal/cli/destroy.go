@@ -66,6 +66,11 @@ func runDestroy(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// Terminate the mesh watch daemon if it is running.
+	if err := workspace.TerminateDaemon(instanceDir); err != nil {
+		fmt.Fprintf(cmd.ErrOrStderr(), "warning: could not stop mesh daemon: %v\n", err)
+	}
+
 	if err := workspace.DestroyInstance(instanceDir); err != nil {
 		return err
 	}

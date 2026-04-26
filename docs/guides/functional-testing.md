@@ -151,3 +151,187 @@ Key points:
 1. Implement the function in `steps_test.go`
 2. Register it in `initializeScenario` in `suite_test.go`
 3. Keep step functions short — delegate to helpers, not the other way around
+
+## Testing the mesh
+
+Mesh scenarios exercise the cross-session communication feature: task
+delegation, worker spawn, the 11-tool MCP surface, restart / watchdog
+behavior, and crash recovery. They live in `features/mesh.feature`.
+
+The harness pairs a **literal-path spawn override** with a **scripted worker
+fake** so every acceptance criterion runs deterministically in seconds, with
+no live Claude involved. Two residual `@channels-e2e` scenarios cover what
+the harness can't reach: MCP-config loadability by Claude Code and
+bootstrap-prompt effectiveness.
+
+For the user-facing description of the mesh, see
+[cross-session-communication.md](cross-session-communication.md).
+
+### The spawn-command override
+
+`NIWA_WORKER_SPAWN_COMMAND` is a literal path that substitutes for the
+resolved `claude` binary. The daemon composes argv, env, CWD, and
+process-group behavior identically whether it launches real `claude` or the
+override — so the scripted fake exercises the real spawn path.
+
+```go
+// In a step function:
+os.Setenv("NIWA_WORKER_SPAWN_COMMAND", workerFakeBinary)
+```
+
+The override is env-only. `workspace.toml` parses with an explicit error if
+you try to set it there (regression-tested), so a poisoned clone can't turn
+it into arbitrary code execution at apply time.
+
+### The scripted worker fake
+
+The fake lives at `test/functional/worker_fake/` and compiles to a standalone
+binary. On launch it:
+
+1. Reads `NIWA_INSTANCE_ROOT`, `NIWA_SESSION_ROLE`, and `NIWA_TASK_ID` from
+   env.
+2. Starts `niwa mcp-serve` as a stdio subprocess (mimicking `claude -p`).
+3. Executes the scenario named by `NIWA_FAKE_SCENARIO`.
+
+Each scenario drives real MCP tools (`niwa_check_messages`,
+`niwa_report_progress`, `niwa_finish_task`, ...) — it does not shortcut by
+writing to the filesystem. Authorization-path calls retry on
+`NOT_TASK_PARTY` for up to 2 seconds to cover the `worker.pid == 0` backfill
+window after spawn.
+
+Add a scenario by extending the `main.go` switch:
+
+```go
+switch os.Getenv("NIWA_FAKE_SCENARIO") {
+case "completes-normally":
+    reportProgress(mcp, taskID, "working")
+    finishTask(mcp, taskID, "completed", map[string]any{"ok": true})
+case "exits-without-finishing":
+    // Worker exits without calling niwa_finish_task — daemon classifies
+    // as unexpected exit, consumes a retry slot.
+    return
+...
+}
+```
+
+Use the step helper to wire a scenario:
+
+```gherkin
+When the daemon spawns the worker fake with scenario "completes-normally"
+Then the task "<task-id>" reaches state "completed" within 5 seconds
+```
+
+`runWithFakeWorker(scenario)` sets `NIWA_WORKER_SPAWN_COMMAND` to the
+compiled fake path and `NIWA_FAKE_SCENARIO` to the selector.
+
+### Timing overrides
+
+The daemon reads integer-second env vars for every operational threshold, so
+tests can drive minutes-long paths in seconds.
+
+| Env var | Default | What it controls |
+|---------|---------|------------------|
+| `NIWA_RETRY_BACKOFF_SECONDS` | `30,60,90` | Comma-separated backoffs between restart attempts |
+| `NIWA_STALL_WATCHDOG_SECONDS` | `900` | Stalled-progress threshold (15 min) |
+| `NIWA_SIGTERM_GRACE_SECONDS` | `5` | Grace between SIGTERM and SIGKILL |
+| `NIWA_DESTROY_GRACE_SECONDS` | `5` | `niwa destroy` daemon-shutdown grace |
+
+Use the `setTimingOverrides` helper:
+
+```go
+setTimingOverrides(s, map[string]string{
+    "NIWA_RETRY_BACKOFF_SECONDS":   "1,2,3",
+    "NIWA_STALL_WATCHDOG_SECONDS":  "2",
+    "NIWA_SIGTERM_GRACE_SECONDS":   "1",
+})
+```
+
+With `NIWA_RETRY_BACKOFF_SECONDS=1,2,3`, the restart-cap scenario measures
+three restarts at roughly 1s, 2s, 3s from `state.json` transition timestamps
+— a full restart-cap + abandonment path completes in ~6 seconds instead of
+~3 minutes.
+
+### Daemon pause hooks
+
+Two env-gated hooks let tests interrupt the daemon at the consumption-rename
+boundary, making race-window acceptance criteria deterministic:
+
+| Env var | Pause point |
+|---------|-------------|
+| `NIWA_TEST_PAUSE_BEFORE_CLAIM=1` | Daemon sees envelope; blocks before the atomic rename into `inbox/in-progress/`. |
+| `NIWA_TEST_PAUSE_AFTER_CLAIM=1` | Daemon completes the rename but blocks before `exec.Command`. |
+
+When active, the daemon creates a marker file under `.niwa/.test/` (either
+`paused_before_claim` or `paused_after_claim`) and blocks until the marker is
+removed.
+
+Race-window example — `niwa_cancel_task` after the envelope is claimed:
+
+```gherkin
+Given NIWA_TEST_PAUSE_AFTER_CLAIM is set
+And the coordinator delegates a task to "web"
+When the daemon marker ".niwa/.test/paused_after_claim" appears within 1 second
+Then the envelope is in "inbox/in-progress/"
+When the coordinator calls niwa_cancel_task
+Then the response is '{"status":"too_late"}'
+When I remove the daemon marker ".niwa/.test/paused_after_claim"
+Then the daemon proceeds with the spawn
+```
+
+Use the `pauseDaemonAt(hook)` helper — it sets the env var, waits for the
+marker, and returns a release function that removes the marker when called:
+
+```go
+release := pauseDaemonAt(s, "after_claim")
+// ... run assertions while the daemon is paused ...
+release()
+```
+
+Symmetric structure covers the update and cancel-before-claim windows with
+`NIWA_TEST_PAUSE_BEFORE_CLAIM`.
+
+### `@critical` budget
+
+All `@critical` mesh scenarios must complete under `make test-functional-critical`
+in under 60 seconds total wall-clock, with each scenario under 10 seconds.
+Timing overrides are the budget's primary enforcement mechanism.
+
+### Daemon-log hygiene
+
+A regression test greps `.niwa/daemon.log` after a full scenario run and
+asserts no envelope bodies, result / reason payloads, or progress bodies
+appear in the log. Only IDs, roles, types, and 200-char summaries are
+permitted.
+
+## Testing with headless Claude sessions
+
+Scenarios tagged `@channels-e2e` drive actual `claude -p` invocations to
+cover the two surfaces the scripted fake can't reach: MCP-config
+loadability by Claude Code itself, and bootstrap-prompt effectiveness. They
+require:
+
+- `claude` on PATH
+- `ANTHROPIC_API_KEY` set
+
+Both are checked at the start of each scenario by the `claude is available`
+step, which returns `godog.ErrPending` (skip) if either is absent. This
+keeps `@critical` CI fast while allowing optional end-to-end validation.
+
+Run with:
+
+```
+make test-functional NIWA_TEST_TAGS=@channels-e2e
+```
+
+Two scenarios ship in this tag:
+
+- **MCP-config loadability.** `niwa create --channels`, then invoke real
+  `claude -p` from the instance root with an anchored prompt; assert the
+  session emits a numeric value returned by `niwa_check_messages`.
+- **Bootstrap-prompt effectiveness.** Queue a task envelope and let the
+  daemon spawn real `claude -p` (no `NIWA_WORKER_SPAWN_COMMAND`). Assert
+  `state.json.state == "completed"` within 120 seconds. The assertion is on
+  persisted state, not LLM text — tolerant of wording drift.
+
+Prompts are anchored for deterministic matching and documented in
+feature-file comments.

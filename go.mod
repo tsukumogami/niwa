@@ -5,6 +5,7 @@ go 1.25.3
 require (
 	github.com/BurntSushi/toml v1.6.0
 	github.com/cucumber/godog v0.15.1
+	github.com/fsnotify/fsnotify v1.9.0
 	github.com/spf13/cobra v1.10.2
 	golang.org/x/term v0.42.0
 )

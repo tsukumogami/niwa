@@ -31,6 +31,12 @@ type testState struct {
 	envOverrides  map[string]string // per-scenario env var overrides (win over defaults)
 	gitServer     *localGitServer   // local bare-repo server for offline clone tests
 	repoURLs      map[string]string // name → file:// URL for repos created by localGitServer
+
+	// Mesh scenario state (Issue #10). These fields carry task + pause
+	// state between steps in a single scenario. They are zeroed per the
+	// scenario Before hook via the fresh testState allocation.
+	lastTaskID      string // ID of the most-recently created task envelope
+	pauseHookMarker string // base name of the active pause-hook marker file
 }
 
 func getState(ctx context.Context) *testState {
@@ -132,6 +138,21 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 		return setState(ctx, state), nil
 	})
 
+	// After hook: kill any niwa daemons this scenario left behind. Daemons
+	// are spawned with Setsid=true so they survive the test process exit
+	// and would hold flocks on daemon.pid.lock across scenarios, starving
+	// the next run. Walking the workspace root's children finds every
+	// daemon.pid the scenario wrote; the PID is SIGKILLed directly so no
+	// grace window applies.
+	ctx.After(func(ctx context.Context, sc *godog.Scenario, scenarioErr error) (context.Context, error) {
+		s := getState(ctx)
+		if s == nil {
+			return ctx, nil
+		}
+		killLeftoverDaemons(s.workspaceRoot)
+		return ctx, nil
+	})
+
 	// Environment
 	ctx.Step(`^a clean niwa environment$`, aCleanNiwaEnvironment)
 	ctx.Step(`^a workspace "([^"]*)" exists$`, aWorkspaceExists)
@@ -168,6 +189,39 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 	ctx.Step(`^the instance "([^"]*)" does not exist$`, theInstanceDoesNotExist)
 	ctx.Step(`^the repo "([^"]*)" exists in instance "([^"]*)"$`, theRepoExistsInInstance)
 
+	// Mesh / session steps
+	ctx.Step(`^NIWA_INSTANCE_ROOT is set to a temp directory$`, niwaInstanceRootIsSetToATempDirectory)
+	ctx.Step(`^I run "niwa session register" as role "([^"]*)"$`, iRunNiwaSessionRegisterAsRole)
+	ctx.Step(`^I run "niwa session register" from repo directory "([^"]*)"$`, iRunNiwaSessionRegisterFromRepoDir)
+	ctx.Step(`^I run "niwa session register" from instance root$`, iRunNiwaSessionRegisterFromInstanceRoot)
+	ctx.Step(`^a sessions\.json entry exists for role "([^"]*)"$`, aSessionsJSONEntryExistsForRole)
+	ctx.Step(`^the coordinator inbox directory exists$`, func(ctx context.Context) (context.Context, error) {
+		return ctx, theInboxDirectoryExistsForRole(ctx, "coordinator")
+	})
+	ctx.Step(`^the worker session sends a "([^"]*)" message to "([^"]*)" with body "([^"]*)"$`, theWorkerSessionSendsAMessageToWithBody)
+	ctx.Step(`^the coordinator inbox contains (\d+) message$`, theCoordinatorInboxContainsNMessages)
+	ctx.Step(`^the coordinator session checks messages$`, theCoordinatorSessionChecksMessages)
+	ctx.Step(`^a Claude session file exists for the parent process with session ID "([^"]*)" and matching cwd$`, aClaudeSessionFileExistsForParentProcessWithMatchingCwd)
+	ctx.Step(`^a Claude session file exists for the parent process with session ID "([^"]*)" and mismatched cwd$`, aClaudeSessionFileExistsForParentProcessWithMismatchedCwd)
+	ctx.Step(`^the sessions\.json entry for role "([^"]*)" has claude_session_id "([^"]*)"$`, theSessionsJSONEntryForRoleHasClaudeSessionID)
+	ctx.Step(`^the sessions\.json entry for role "([^"]*)" has no claude_session_id$`, theSessionsJSONEntryForRoleHasNoClaudeSessionID)
+
+	// Mesh daemon steps
+	ctx.Step(`^I remember the daemon PID for instance "([^"]*)"$`, iRememberDaemonPIDForInstance)
+	ctx.Step(`^the daemon PID for instance "([^"]*)" has not changed$`, theDaemonPIDForInstanceHasNotChanged)
+	ctx.Step(`^I remove the sessions directory from instance "([^"]*)"$`, iRemoveSessionsDirFromInstance)
+	ctx.Step(`^the daemon for instance "([^"]*)" eventually stops$`, theDaemonForInstanceEventuallyStops)
+	ctx.Step(`^I set NIWA_INSTANCE_ROOT to instance "([^"]*)"$`, iSetNiwaInstanceRootToInstance)
+	ctx.Step(`^the daemon log for instance "([^"]*)" eventually contains "([^"]*)"$`, theDaemonLogForInstanceEventuallyContains)
+
+	// niwa_ask / niwa_wait steps
+	ctx.Step(`^the coordinator asks the worker a question and the worker replies$`, theCoordinatorAsksWorkerAndReplies)
+	ctx.Step(`^the ask response contains the answer$`, theAskResponseContainsAnswer)
+	ctx.Step(`^the coordinator calls niwa_ask with timeout (\d+) seconds and no reply$`, theCoordinatorCallsAskWithTimeout)
+	ctx.Step(`^(\d+) "([^"]*)" messages are placed in the coordinator inbox$`, nMessagesPlacedInCoordinatorInbox)
+	ctx.Step(`^the coordinator calls niwa_wait for "([^"]*)" messages with count (\d+)$`, theCoordinatorCallsWait)
+	ctx.Step(`^the coordinator sends a message with invalid type "([^"]*)"$`, coordinatorSendsWithInvalidType)
+
 	// workspace-config-sources scenarios (PRD #72 regression + R28 lazy convert)
 	ctx.Step(`^the config repo "([^"]*)" is force-pushed to:$`, func(ctx context.Context, name string, body *godog.DocString) (context.Context, error) {
 		return theConfigRepoIsForcePushedTo(ctx, name, body.Content)
@@ -200,6 +254,7 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 
 	// File assertions
 	ctx.Step(`^the file "([^"]*)" exists in instance "([^"]*)"$`, theFileExistsInInstance)
+	ctx.Step(`^the file "([^"]*)" does not exist in instance "([^"]*)"$`, theFileDoesNotExistInInstance)
 	ctx.Step(`^the file "([^"]*)" in instance "([^"]*)" contains "([^"]*)"$`, theFileInInstanceContains)
 	ctx.Step(`^the file "([^"]*)" in instance "([^"]*)" does not contain "([^"]*)"$`, theFileInInstanceDoesNotContain)
 
@@ -207,4 +262,54 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 	ctx.Step(`^claude is available$`, claudeIsAvailable)
 	ctx.Step(`^I run claude -p from instance root "([^"]*)" with prompt:$`, iRunClaudePFromInstanceRoot)
 	ctx.Step(`^I run claude -p from repo "([^"]*)" in instance "([^"]*)" with prompt:$`, iRunClaudePFromRepoInInstance)
+
+	// Headless coordination steps
+	ctx.Step(`^I set up coordinator session for instance "([^"]*)"$`, iSetUpCoordinatorSessionForInstance)
+	ctx.Step(`^I set up worker session for instance "([^"]*)"$`, iSetUpWorkerSessionForInstance)
+	ctx.Step(`^I run claude -p from instance root "([^"]*)" with simulated worker reply and prompt:$`, iRunClaudePFromInstanceRootWithSimulatedWorkerReply)
+
+	// --- Mesh feature: functional-test harness (Issue #10) ---
+	ctx.Step(`^a channeled workspace "([^"]*)" exists$`, iSetUpChanneledWorkspace)
+	ctx.Step(`^the daemon runs with fake worker scenario "([^"]*)"$`, iRunFakeWorkerWithScenario)
+	ctx.Step(`^the daemon has small timing overrides$`, iSetDefaultTimingOverrides)
+	ctx.Step(`^the daemon pauses before claiming envelopes$`, iPauseDaemonBeforeClaim)
+	ctx.Step(`^the daemon pauses after claiming envelopes$`, iPauseDaemonAfterClaim)
+	ctx.Step(`^the pause marker "([^"]*)" eventually appears$`, iPauseMarkerEventuallyAppears)
+	ctx.Step(`^I release the daemon pause marker$`, iReleaseDaemonPauseMarker)
+	ctx.Step(`^I delegate a task to role "([^"]*)" in instance "([^"]*)" with body '([^']*)'$`, func(ctx context.Context, role, instance, body string) (context.Context, error) {
+		return iDelegateTaskToRole(ctx, instance, role, body)
+	})
+	ctx.Step(`^I cancel the task in instance "([^"]*)"$`, iCancelTheTask)
+	ctx.Step(`^the task state in instance "([^"]*)" eventually becomes "([^"]*)"$`, theTaskStateEventuallyBecomes)
+	ctx.Step(`^the task reason in instance "([^"]*)" contains "([^"]*)"$`, theTaskReasonContains)
+	ctx.Step(`^the task restart_count in instance "([^"]*)" equals (\d+)$`, theTaskRestartCountEquals)
+	ctx.Step(`^the task transitions log in instance "([^"]*)" contains "([^"]*)"$`, theTransitionsLogContains)
+	ctx.Step(`^the daemon log for instance "([^"]*)" does not contain "([^"]*)"$`, theDaemonLogDoesNotContain)
+	ctx.Step(`^the daemon log for instance "([^"]*)" does not contain any of "([^"]*)"$`, theDaemonLogDoesNotContainAnyOf)
+	ctx.Step(`^I SIGKILL the daemon for instance "([^"]*)"$`, iSIGKILLTheDaemon)
+	ctx.Step(`^I SIGKILL the worker for instance "([^"]*)"$`, iSIGKILLTheWorker)
+	ctx.Step(`^I restart the daemon for instance "([^"]*)"$`, iRestartTheDaemon)
+	ctx.Step(`^I run two concurrent applies for instance "([^"]*)"$`, iRunTwoConcurrentApplies)
+	ctx.Step(`^exactly one daemon is running for instance "([^"]*)"$`, exactlyOneDaemonIsRunning)
+	ctx.Step(`^I update the task body in instance "([^"]*)" to '([^']*)'$`, iUpdateTheTaskBody)
+	ctx.Step(`^an unauthorized MCP call for instance "([^"]*)" receives NOT_TASK_PARTY$`, iVerifyAuthorizationDenied)
+	ctx.Step(`^the output contains status "([^"]*)"$`, theOutputContainsStatus)
+
+	// --- @channels-e2e (Issue #11): real `claude -p` scenarios ---
+	ctx.Step(`^the daemon uses the real claude worker spawn path$`, iEnsureNoFakeWorker)
+	ctx.Step(`^I run claude -p preserving case from instance root "([^"]*)" with prompt:$`, iRunClaudePFromInstanceRootPreservingCase)
+	ctx.Step(`^I queue a niwa_finish_task instruction for role "([^"]*)" in instance "([^"]*)"$`, iDelegateTaskToRoleWithFinishInstruction)
+	ctx.Step(`^the task state in instance "([^"]*)" eventually becomes "([^"]*)" within (\d+) seconds$`, theTaskStateEventuallyBecomesWithin)
+
+	// --- @channels-e2e-graph: real coordinator -> real workers delegation graph ---
+	ctx.Step(`^a multi-repo channeled workspace "([^"]*)" with web and backend exists$`, iSetUpMultiRepoChanneledWorkspace)
+	ctx.Step(`^I run claude -p preserving case from instance root "([^"]*)" within (\d+) seconds with prompt:$`, iRunClaudePFromInstanceRootPreservingCaseWithin)
+	ctx.Step(`^the file "([^"]*)" in repo "([^"]*)" of instance "([^"]*)" exactly matches "([^"]*)"$`, theFileInRepoOfInstanceExactlyMatches)
+	ctx.Step(`^exactly (\d+) tasks in instance "([^"]*)" are in state "completed"$`, func(ctx context.Context, n int, instance string) error {
+		return allTasksInInstanceAreCompleted(ctx, n, instance)
+	})
+	ctx.Step(`^the coordinator in instance "([^"]*)" emitted niwa_delegate calls to roles "([^"]*)"$`, theCoordinatorEmittedDelegateCallsForRoles)
+	ctx.Step(`^role "([^"]*)" in instance "([^"]*)" emitted at least (\d+) successful niwa_finish_task calls?$`, func(ctx context.Context, role, instance string, n int) error {
+		return roleEmittedFinishTaskCalls(ctx, role, n, instance)
+	})
 }

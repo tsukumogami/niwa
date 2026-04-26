@@ -91,6 +91,25 @@ type ClaudeEnvConfig struct {
 	Secrets EnvVarsTable `toml:"secrets,omitempty"`
 }
 
+// ChannelsMeshConfig holds the [channels.mesh] table. All fields are optional;
+// a bare [channels.mesh] section with no sub-keys enables the channel
+// infrastructure and roles are auto-derived from the workspace topology.
+type ChannelsMeshConfig struct {
+	Roles map[string]string `toml:"roles,omitempty"` // optional: role → repo name
+}
+
+// ChannelsConfig is the top-level [channels] table.
+type ChannelsConfig struct {
+	Mesh *ChannelsMeshConfig `toml:"mesh"`
+}
+
+// IsEnabled reports true when the [channels.mesh] section is present in the
+// config, regardless of whether any sub-keys are set. The Mesh field is nil
+// when the section is absent and non-nil (even if zero-value) when present.
+func (c ChannelsConfig) IsEnabled() bool {
+	return c.Mesh != nil
+}
+
 // WorkspaceConfig is the top-level configuration parsed from workspace.toml.
 type WorkspaceConfig struct {
 	Workspace WorkspaceMeta           `toml:"workspace"`
@@ -102,7 +121,7 @@ type WorkspaceConfig struct {
 	Env       EnvConfig               `toml:"env"`
 	Files     map[string]string       `toml:"files,omitempty"`
 	Instance  InstanceConfig          `toml:"instance,omitempty"`
-	Channels  map[string]any          `toml:"channels"` // placeholder
+	Channels  ChannelsConfig          `toml:"channels,omitempty"`
 	// Vault carries the optional [vault] block (anonymous [vault.provider]
 	// or named [vault.providers.<name>] shape, plus [vault].team_only).
 	// nil when the config declares no vault providers.
@@ -253,6 +272,17 @@ func Parse(data []byte) (*ParseResult, error) {
 	// any other validation runs, so the user sees this over a downstream
 	// "type mismatch" error.
 	if err := validateReservedEnvKeys(md); err != nil {
+		return nil, err
+	}
+
+	// Reject NIWA_WORKER_SPAWN_COMMAND as a configured value anywhere in
+	// the TOML. The cross-session-communication design intentionally
+	// restricts this override to the process environment only: embedding
+	// it in workspace.toml would commit a literal spawn binary path into
+	// version control where it is easy to mishandle across machines and
+	// easy to hide a hostile override behind. Env-only keeps the override
+	// ephemeral and operator-visible.
+	if err := rejectWorkerSpawnCommandKey(md); err != nil {
 		return nil, err
 	}
 
@@ -453,6 +483,27 @@ func validateGlobalOverridePaths(prefix string, g GlobalOverride) error {
 	for _, src := range g.Env.Files {
 		if err := validateContentSource(fmt.Sprintf("%s.env.files", prefix), src); err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+// rejectWorkerSpawnCommandKey fails parsing when NIWA_WORKER_SPAWN_COMMAND
+// appears as a TOML key at any nesting depth. The env-only design for
+// this override is documented in the cross-session-communication PRD
+// (R51) and Decision 6 of the design doc.
+func rejectWorkerSpawnCommandKey(md toml.MetaData) error {
+	const forbidden = "NIWA_WORKER_SPAWN_COMMAND"
+	for _, key := range md.Keys() {
+		for _, segment := range key {
+			if segment == forbidden {
+				path := strings.Join(key, ".")
+				return fmt.Errorf(
+					"config key %q is not allowed at %s: set it as an "+
+						"environment variable on the process that invokes niwa",
+					forbidden, path,
+				)
+			}
 		}
 	}
 	return nil
