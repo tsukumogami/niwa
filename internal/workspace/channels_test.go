@@ -776,6 +776,20 @@ func TestInjectChannelHooks_PrependToExisting(t *testing.T) {
 	}
 }
 
+// TestInstanceMCPConfigPath documents the path contract three call
+// sites depend on: the channels installer that writes the file, the
+// daemon's worker spawn that hands the path to claude via
+// --mcp-config, and the functional-test coordinator launcher. If this
+// constant changes (say to .niwa/.mcp.json), this is the test that
+// will fail first.
+func TestInstanceMCPConfigPath(t *testing.T) {
+	got := InstanceMCPConfigPath("/some/instance")
+	want := "/some/instance/.mcp.json"
+	if got != want {
+		t.Errorf("InstanceMCPConfigPath(%q) = %q, want %q", "/some/instance", got, want)
+	}
+}
+
 func TestBuildMCPContent_InstanceRootEscaping(t *testing.T) {
 	instanceRoot := "/some/path/with spaces"
 	data, err := buildMCPContent(instanceRoot)
