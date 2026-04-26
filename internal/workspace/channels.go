@@ -92,10 +92,14 @@ const skillFrontmatterCharLimit = 1536
 //     collision, reserved-name, and format constraints.
 //  3. Creates .niwa/roles/<role>/inbox/{in-progress,cancelled,expired,read}/
 //     for every role, plus .niwa/tasks/, .niwa/daemon.pid, .niwa/daemon.log.
-//  4. Writes <instanceRoot>/.mcp.json (the project-scoped MCP config that
-//     Claude Code's discovery reads at the directory root and walks up the
-//     tree to find from sub-repos). NIWA_INSTANCE_ROOT is baked into the
-//     env block so the MCP server resolves the right workspace.
+//  4. Writes the project-scoped MCP config (`.mcp.json`) at every
+//     directory a coordinator might launch Claude from: the instance
+//     root and every cloned repo's root. Claude Code reads `.mcp.json`
+//     at the cwd's directory root and does not walk parents, so all
+//     candidate cwds need a copy. The per-repo file is added to that
+//     repo's `.git/info/exclude` so its absolute paths don't get
+//     committed upstream. NIWA_INSTANCE_ROOT is baked into the env
+//     block so the MCP server resolves the right workspace.
 //  5. Installs the niwa-mesh SKILL.md at instance-root and per-repo
 //     .claude/skills/niwa-mesh/ with byte-compare idempotency — writes only
 //     when the on-disk bytes differ from the installer's output, emits a
@@ -178,31 +182,59 @@ func InstallChannelInfrastructure(cfg *config.WorkspaceConfig, instanceRoot stri
 	}
 	*writtenFiles = append(*writtenFiles, logPath)
 
-	// Step 4: .mcp.json at the instance root. Claude Code's MCP discovery
-	// reads `<cwd>/.mcp.json` (a project-scoped file at the directory root,
-	// not under `.claude/`) and walks the directory tree upward collecting
-	// configs (see Claude Code's src/services/mcp/config.ts). Writing the
-	// file at the instance root makes it visible to:
+	// Step 4: .mcp.json at every directory a coordinator might be launched
+	// from. Claude Code's MCP discovery is per-cwd: it loads the
+	// project-scoped `.mcp.json` at the directory root of the cwd it was
+	// started in, and does NOT walk parent directories
+	// (https://code.claude.com/docs/en/mcp). For users who open Claude at
+	// the instance root the file at <instance>/.mcp.json is what loads;
+	// for users who open Claude inside a cloned repo the file at
+	// <repoDir>/.mcp.json is what loads. Both must exist.
 	//
-	//   1. Human-launched coordinator sessions started at the instance root
-	//      — discovered directly.
-	//   2. Human-launched sessions started inside a sub-repo — discovered
-	//      via the upward walk to the instance root.
+	// The file is NOT placed under `.claude/` — Claude Code looks for
+	// `.mcp.json` directly at the directory root.
+	//
+	// `<repoDir>/.mcp.json` carries machine-specific content (absolute
+	// niwa binary path and absolute NIWA_INSTANCE_ROOT) and must not be
+	// committed upstream. Niwa appends `.mcp.json` to each repo's
+	// `.git/info/exclude` (a per-clone, never-tracked exclude file
+	// supported by git for exactly this purpose) so the entry is hidden
+	// from `git status` without modifying the tracked `.gitignore`.
 	//
 	// Daemon-spawned workers receive the path explicitly via `--mcp-config`
-	// + `--strict-mcp-config` (see internal/cli/mesh_watch.go::spawnWorker),
-	// so discovery doesn't matter for them — but they read the same file.
-	//
-	// Per-repo mirrors are intentionally not written: Claude's directory
-	// walk-up makes them redundant, and putting `.mcp.json` inside a tracked
-	// git repo would commit the local binary path and instance root into
-	// upstream history.
+	// + `--strict-mcp-config` (see internal/cli/mesh_watch.go::spawnWorker)
+	// and intentionally do NOT use discovery — that isolates them from
+	// any user-scoped MCP servers in `~/.claude.json`. The file we write
+	// here is the same one workers point at, so there is one source of
+	// truth on disk.
 	mcpContent := buildMCPContent(instanceRoot)
 	instanceMCPPath := filepath.Join(instanceRoot, ".mcp.json")
 	if err := writeIdempotent(instanceMCPPath, mcpContent, 0o600, os.Stderr); err != nil {
 		return fmt.Errorf("writing instance .mcp.json: %w", err)
 	}
 	*writtenFiles = append(*writtenFiles, instanceMCPPath)
+
+	for _, r := range roles {
+		if r.name == coordinatorRole {
+			continue
+		}
+		if r.repoPath == "" {
+			// Explicit [channels.mesh.roles] entry without a resolved
+			// path (e.g., a virtual peer); skip the per-repo mirror.
+			continue
+		}
+		repoMCP := filepath.Join(r.repoPath, ".mcp.json")
+		if err := writeIdempotent(repoMCP, mcpContent, 0o600, os.Stderr); err != nil {
+			return fmt.Errorf("writing %s: %w", repoMCP, err)
+		}
+		*writtenFiles = append(*writtenFiles, repoMCP)
+
+		if err := ensureGitInfoExclude(r.repoPath, ".mcp.json"); err != nil {
+			fmt.Fprintf(os.Stderr,
+				"warning: could not exclude .mcp.json from git in %s: %v\n",
+				r.repoPath, err)
+		}
+	}
 
 	// Step 5: niwa-mesh SKILL.md at instance-root and per-repo. Content
 	// is identical across paths (flat uniform skill, Decision 5).
@@ -762,6 +794,43 @@ func ensureEmptyFile(path string, mode os.FileMode) error {
 	}
 	_ = f.Close()
 	return os.Chmod(path, mode)
+}
+
+// ensureGitInfoExclude appends pattern as its own line to
+// <repoDir>/.git/info/exclude when the file exists and the pattern isn't
+// already present. The exclude file is per-clone and never tracked,
+// which is exactly what we want for machine-specific files (like the
+// per-repo `.mcp.json` carrying absolute paths).
+//
+// When `.git/info/` doesn't exist the function is a no-op and returns
+// nil — a niwa repo path that isn't a git clone (e.g., a manually
+// created directory) can't have its config hidden from git, but the
+// caller's main work (writing the .mcp.json) has already succeeded and
+// shouldn't fail because of this auxiliary step.
+func ensureGitInfoExclude(repoDir, pattern string) error {
+	excludePath := filepath.Join(repoDir, ".git", "info", "exclude")
+	infoDir := filepath.Dir(excludePath)
+	if _, err := os.Stat(infoDir); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	existing, err := os.ReadFile(excludePath)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	for _, line := range strings.Split(string(existing), "\n") {
+		if strings.TrimSpace(line) == pattern {
+			return nil
+		}
+	}
+	out := string(existing)
+	if len(out) > 0 && !strings.HasSuffix(out, "\n") {
+		out += "\n"
+	}
+	out += pattern + "\n"
+	return os.WriteFile(excludePath, []byte(out), 0o600)
 }
 
 // isHiddenOrSkip reports whether a directory basename should be skipped

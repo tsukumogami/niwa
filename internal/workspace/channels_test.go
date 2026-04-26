@@ -31,7 +31,10 @@ func channeledConfig() *config.WorkspaceConfig {
 func seedRepo(t *testing.T, instanceRoot, group, name string) string {
 	t.Helper()
 	repoDir := filepath.Join(instanceRoot, group, name)
-	if err := os.MkdirAll(filepath.Join(repoDir, ".git"), 0o755); err != nil {
+	// Real `git init` creates .git/info/ alongside .git/objects/, .git/refs/,
+	// etc. The channel installer's git-info-exclude write needs the info/
+	// dir to exist; mirror that here so the seed matches real git layout.
+	if err := os.MkdirAll(filepath.Join(repoDir, ".git", "info"), 0o755); err != nil {
 		t.Fatalf("seeding repo %s/%s: %v", group, name, err)
 	}
 	return repoDir
@@ -116,10 +119,11 @@ func TestInstallChannelInfrastructure_CreatesRoleLayout(t *testing.T) {
 		t.Errorf("daemon.log missing: %v", err)
 	}
 
-	// .mcp.json at instance root (NOT under .claude/). Claude Code's
-	// discovery reads `<cwd>/.mcp.json` at the directory root and walks
-	// up; placing it here makes it visible to coordinator sessions
-	// started either at the instance root or from any sub-repo.
+	// `.mcp.json` lives at every directory root a coordinator might
+	// launch Claude from. Claude Code's MCP discovery is per-cwd (no
+	// parent walk-up), so the instance root and every cloned repo root
+	// each need their own copy. The file is NOT under `.claude/` —
+	// Claude Code reads `.mcp.json` directly at the directory root.
 	instanceMCP := filepath.Join(dir, ".mcp.json")
 	data, err := os.ReadFile(instanceMCP)
 	if err != nil {
@@ -136,18 +140,44 @@ func TestInstallChannelInfrastructure_CreatesRoleLayout(t *testing.T) {
 		t.Errorf("instance .mcp.json is not valid JSON: %v", err)
 	}
 
-	// Per-repo `.mcp.json` mirrors are intentionally NOT written; the
-	// instance-root file covers sub-repos via Claude's directory walk-up
-	// (and a per-repo file at the repo root would commit the local
-	// binary path and instance root into upstream history).
+	// `.mcp.json` mirrored to every cloned repo at the repo root (NOT
+	// under `.claude/`). The legacy `.claude/.mcp.json` path must not
+	// be written.
 	for _, role := range []string{"web", "api"} {
 		legacyOld := filepath.Join(dir, "apps", role, ".claude", ".mcp.json")
 		if _, err := os.Stat(legacyOld); err == nil {
 			t.Errorf("legacy per-repo .claude/.mcp.json should not be written for %q", role)
 		}
 		repoRoot := filepath.Join(dir, "apps", role, ".mcp.json")
-		if _, err := os.Stat(repoRoot); err == nil {
-			t.Errorf("per-repo .mcp.json should not be written at repo root for %q", role)
+		repoData, err := os.ReadFile(repoRoot)
+		if err != nil {
+			t.Fatalf("repo %q .mcp.json not written at repo root: %v", role, err)
+		}
+		if !bytes.Equal(repoData, data) {
+			t.Errorf("repo %q .mcp.json content differs from instance copy", role)
+		}
+	}
+
+	// The per-repo `.mcp.json` carries absolute paths that must not be
+	// committed upstream. Niwa appends the entry to each repo's
+	// `.git/info/exclude` so it stays out of `git status`.
+	for _, role := range []string{"web", "api"} {
+		excludePath := filepath.Join(dir, "apps", role, ".git", "info", "exclude")
+		excludeBytes, err := os.ReadFile(excludePath)
+		if err != nil {
+			t.Errorf("repo %q .git/info/exclude unreadable: %v", role, err)
+			continue
+		}
+		found := false
+		for _, line := range strings.Split(string(excludeBytes), "\n") {
+			if strings.TrimSpace(line) == ".mcp.json" {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("repo %q .git/info/exclude does not list .mcp.json:\n%s",
+				role, excludeBytes)
 		}
 	}
 
@@ -442,10 +472,11 @@ func TestInstallChannelInfrastructure_DirAndFileModes(t *testing.T) {
 		t.Fatalf("walking .niwa/: %v", err)
 	}
 
-	// .mcp.json (instance root) and SKILL.md also must be 0600.
+	// .mcp.json (instance root + per-repo) and SKILL.md must all be 0600.
 	for _, p := range []string{
 		filepath.Join(dir, ".mcp.json"),
 		filepath.Join(dir, ".claude", "skills", "niwa-mesh", "SKILL.md"),
+		filepath.Join(dir, "apps", "web", ".mcp.json"),
 		filepath.Join(dir, "apps", "web", ".claude", "skills", "niwa-mesh", "SKILL.md"),
 	} {
 		fi, err := os.Stat(p)
@@ -809,4 +840,96 @@ func TestWriteIdempotent_MatchingContentSkipsWrite(t *testing.T) {
 	if !before.ModTime().Equal(after.ModTime()) {
 		t.Errorf("mtime changed on byte-identical rewrite: %v -> %v", before.ModTime(), after.ModTime())
 	}
+}
+
+func TestEnsureGitInfoExclude(t *testing.T) {
+	t.Run("appends pattern when info dir exists and pattern absent", func(t *testing.T) {
+		repo := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(repo, ".git", "info"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		// Pre-existing exclude content with one unrelated entry.
+		excludePath := filepath.Join(repo, ".git", "info", "exclude")
+		if err := os.WriteFile(excludePath, []byte("# git ls-files --others --exclude-from=.git/info/exclude\n*.swp\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := ensureGitInfoExclude(repo, ".mcp.json"); err != nil {
+			t.Fatalf("ensureGitInfoExclude: %v", err)
+		}
+		got, _ := os.ReadFile(excludePath)
+		if !strings.Contains(string(got), ".mcp.json") {
+			t.Errorf(".mcp.json not appended:\n%s", got)
+		}
+		if !strings.Contains(string(got), "*.swp") {
+			t.Errorf("existing pattern *.swp lost:\n%s", got)
+		}
+	})
+
+	t.Run("idempotent — second call does not duplicate the pattern", func(t *testing.T) {
+		repo := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(repo, ".git", "info"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		for i := 0; i < 3; i++ {
+			if err := ensureGitInfoExclude(repo, ".mcp.json"); err != nil {
+				t.Fatalf("call %d: %v", i, err)
+			}
+		}
+		got, _ := os.ReadFile(filepath.Join(repo, ".git", "info", "exclude"))
+		count := strings.Count(string(got), ".mcp.json")
+		if count != 1 {
+			t.Errorf("expected exactly 1 occurrence of .mcp.json, got %d in:\n%s", count, got)
+		}
+	})
+
+	t.Run("creates exclude file when missing but info dir exists", func(t *testing.T) {
+		repo := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(repo, ".git", "info"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := ensureGitInfoExclude(repo, ".mcp.json"); err != nil {
+			t.Fatalf("ensureGitInfoExclude: %v", err)
+		}
+		got, err := os.ReadFile(filepath.Join(repo, ".git", "info", "exclude"))
+		if err != nil {
+			t.Fatalf("exclude file not created: %v", err)
+		}
+		if strings.TrimSpace(string(got)) != ".mcp.json" {
+			t.Errorf("expected only .mcp.json, got: %q", got)
+		}
+	})
+
+	t.Run("no-op when .git/info/ does not exist", func(t *testing.T) {
+		repo := t.TempDir()
+		// Only create .git/, not .git/info/.
+		if err := os.MkdirAll(filepath.Join(repo, ".git"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := ensureGitInfoExclude(repo, ".mcp.json"); err != nil {
+			t.Errorf("expected no-op when .git/info/ missing, got error: %v", err)
+		}
+		// And no exclude file should be created.
+		if _, err := os.Stat(filepath.Join(repo, ".git", "info", "exclude")); err == nil {
+			t.Errorf("exclude file should not have been created when .git/info/ missing")
+		}
+	})
+
+	t.Run("treats existing entry with surrounding whitespace as already present", func(t *testing.T) {
+		repo := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(repo, ".git", "info"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		excludePath := filepath.Join(repo, ".git", "info", "exclude")
+		// Tab/space-padded entry — git's matching ignores surrounding whitespace.
+		if err := os.WriteFile(excludePath, []byte("  .mcp.json\t\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := ensureGitInfoExclude(repo, ".mcp.json"); err != nil {
+			t.Fatalf("ensureGitInfoExclude: %v", err)
+		}
+		got, _ := os.ReadFile(excludePath)
+		if strings.Count(string(got), ".mcp.json") != 1 {
+			t.Errorf("padded existing entry should be detected; got:\n%s", got)
+		}
+	})
 }

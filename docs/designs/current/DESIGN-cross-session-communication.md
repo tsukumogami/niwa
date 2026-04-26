@@ -598,9 +598,12 @@ niwa apply
        - migration helper (detect + remove old .niwa/sessions/<uuid>/)
        - create .niwa/roles/<role>/inbox/{in-progress,cancelled,expired,read}/
        - create .niwa/tasks/
-       - write <instanceRoot>/.mcp.json (no per-repo mirror; the
-         instance-root file is discovered from sub-repos via Claude
-         Code's directory-tree walk-up)
+       - write `.mcp.json` at every directory a coordinator might
+         launch Claude in: <instanceRoot>/.mcp.json and
+         <repoDir>/.mcp.json for every cloned repo (Claude Code reads
+         <cwd>/.mcp.json and does not walk parents); append .mcp.json
+         to each repo's .git/info/exclude so the per-repo copy stays
+         out of upstream history
        - install niwa-mesh skill to <instanceRoot>/.claude/skills/niwa-mesh/
          and each <repoDir>/.claude/skills/niwa-mesh/ (sha256 idempotent)
        - write minimal ## Channels section to workspace-context.md
@@ -964,7 +967,7 @@ Deliverables:
   - Migration helper: detect + remove `.niwa/sessions/<uuid>/` directories; emit one-shot stderr warning; preserve `sessions.json`.
   - Create `.niwa/roles/<role>/inbox/{in-progress,cancelled,expired,read}/` for every role.
   - Create `.niwa/tasks/`, `.niwa/daemon.pid` placeholder (empty).
-  - Write `<instanceRoot>/.mcp.json` at the directory root (not under `.claude/`) so Claude Code's MCP discovery resolves it from the instance root and from any sub-repo via upward walk; no per-repo mirror is needed or written.
+  - Write `.mcp.json` at the directory root (not under `.claude/`) of every directory a coordinator might launch Claude in: `<instanceRoot>/.mcp.json` and `<repoDir>/.mcp.json` for every cloned repo. Claude Code's MCP discovery loads the project-scoped config from `<cwd>/.mcp.json` and does not walk parent directories. Append `.mcp.json` to each repo's `.git/info/exclude` so the per-repo copy (which carries absolute paths) does not get committed upstream.
   - Write `niwa-mesh/SKILL.md` to instance-root and per-repo; sha256 hash check vs `InstanceState.ManagedFiles.ContentHash` for idempotency; drift warning on mismatch; overwrite.
   - Write minimal `## Channels` section to `workspace-context.md`.
   - Inject SessionStart + UserPromptSubmit hook entries into `cfg.Claude.Hooks` for the coordinator role only (workers do not use these hooks).
