@@ -277,7 +277,7 @@ persistent session registry.
   INFO. The daemon reuses that absolute path for every spawn — `PATH` changes
   after startup have no effect.
 - **Argv.** Fixed shape: `-p "<bootstrap prompt with <task-id>>"
-  --permission-mode=acceptEdits --mcp-config=<instanceRoot>/.claude/.mcp.json
+  --permission-mode=acceptEdits --mcp-config=<instanceRoot>/.mcp.json
   --strict-mcp-config`. The bootstrap prompt references the task ID; the task
   body never appears in argv — the worker retrieves it via
   `niwa_check_messages` on its first tool call.

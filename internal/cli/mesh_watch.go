@@ -831,7 +831,7 @@ func handleInboxEvent(evt inboxEvent, s spawnContext) {
 // pipeline intentionally does not cover this case.
 func spawnWorker(evt inboxEvent, taskDir string, s spawnContext) {
 	prompt := fmt.Sprintf(bootstrapPromptTemplate, evt.taskID)
-	mcpConfigPath := filepath.Join(s.instanceRoot, ".claude", ".mcp.json")
+	mcpConfigPath := filepath.Join(s.instanceRoot, ".mcp.json")
 
 	// --permission-mode=acceptEdits auto-approves file edits but does NOT
 	// auto-approve MCP tool calls; a worker running in headless `-p` mode

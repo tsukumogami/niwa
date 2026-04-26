@@ -175,11 +175,15 @@ drift detection and `niwa destroy` work uniformly.
 after repository clones are complete and before per-repo materializers. It
 shall be invoked imperatively from `Applier.runPipeline`.
 
-**R4** — The channel installer shall write `<instanceRoot>/.claude/.mcp.json`
+**R4** — The channel installer shall write `<instanceRoot>/.mcp.json`
 declaring a `niwa` MCP server entry that invokes `niwa mcp-serve` with
-`NIWA_INSTANCE_ROOT` baked in. The installer shall mirror the `.mcp.json`
-into each repository's `.claude/` directory so that Claude sessions opened
-inside a repo pick up the same MCP server.
+`NIWA_INSTANCE_ROOT` baked in. The file lives at the directory root (not
+under `.claude/`) so Claude Code's MCP discovery, which reads
+`<cwd>/.mcp.json` and walks the directory tree upward, finds it both when
+a session is launched at the instance root and when it is launched from
+any sub-repo. No per-repo mirror is written: the upward walk makes one
+copy sufficient, and a per-repo `.mcp.json` would commit the local binary
+path and instance root into upstream history.
 
 **R5** — The channel installer shall enumerate the full set of roles from
 `workspace.toml` (explicit `[channels.mesh.roles]` entries) and the cloned
@@ -481,7 +485,7 @@ bootstrap prompt shall not contain the task body.
   the instance root for the coordinator role);
 - `--permission-mode=acceptEdits` (so background workers do not block on
   permission prompts);
-- `--mcp-config=<instanceRoot>/.claude/.mcp.json --strict-mcp-config` (so
+- `--mcp-config=<instanceRoot>/.mcp.json --strict-mcp-config` (so
   the worker has deterministic MCP access regardless of user-level
   config).
 
@@ -661,9 +665,10 @@ live `claude -p` is not required to verify correctness.
 - [ ] **AC-P5** After apply on a channeled workspace, `.niwa/tasks/` exists,
   `.niwa/sessions/sessions.json` exists and is empty, and
   `.niwa/daemon.pid` contains the PID of a live process.
-- [ ] **AC-P6** `<instanceRoot>/.claude/.mcp.json` and
-  `<repoDir>/.claude/.mcp.json` both exist for every cloned repo, each
-  containing a `niwa` entry pointing to `niwa mcp-serve`.
+- [ ] **AC-P6** `<instanceRoot>/.mcp.json` exists and contains a `niwa`
+  entry pointing to `niwa mcp-serve`. No per-repo mirror is written —
+  Claude Code's directory-tree walk-up makes the instance-root file
+  visible from sub-repo cwds.
 - [ ] **AC-P7** `<instanceRoot>/.claude/skills/niwa-mesh/SKILL.md` exists
   after apply, and the same file exists at
   `<repoDir>/.claude/skills/niwa-mesh/SKILL.md` for every cloned repo.
@@ -737,7 +742,7 @@ live `claude -p` is not required to verify correctness.
   hook, not by wall-clock bound).
 - [ ] **AC-D4** The daemon spawns `claude -p` with working directory
   set to the role's repo directory, `--permission-mode=acceptEdits`,
-  `--mcp-config=<instanceRoot>/.claude/.mcp.json`, and
+  `--mcp-config=<instanceRoot>/.mcp.json`, and
   `--strict-mcp-config` (verified via the test spawn hook's captured
   argv and env).
 - [ ] **AC-D5** The spawn prompt argv does not contain any field from
@@ -1197,7 +1202,7 @@ ever existed; the daemon spawns one to consume it.
 
 A background worker cannot answer permission prompts, so `claude -p` is
 spawned with `--permission-mode=acceptEdits`. Workers use
-`--mcp-config=<instanceRoot>/.claude/.mcp.json --strict-mcp-config` to
+`--mcp-config=<instanceRoot>/.mcp.json --strict-mcp-config` to
 guarantee the niwa MCP server is present and no user-level MCP servers
 leak into the worker. Without these flags, workers hang on first write
 or see an indeterminate MCP tool set.

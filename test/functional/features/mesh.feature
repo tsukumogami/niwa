@@ -207,7 +207,7 @@ Feature: Cross-session mesh (Issue #10 harness)
   # ---------------------------------------------------------------------
   # @channels-e2e (Issue #11): real `claude -p` scenarios. These cover
   # niwa surface the deterministic fake worker cannot reach — namely
-  # (1) that Claude Code can load `.claude/.mcp.json`, launch
+  # (1) that Claude Code can load the instance-root `.mcp.json`, launch
   # `niwa mcp-serve`, and the first MCP tool call succeeds, and (2) that
   # niwa's fixed bootstrap prompt drives a real LLM to call
   # `niwa_check_messages` and then `niwa_finish_task` to completion.
@@ -224,14 +224,14 @@ Feature: Cross-session mesh (Issue #10 harness)
   # ---------------------------------------------------------------------
 
   @channels-e2e
-  Scenario: MCP-config loadability — claude -p can load .claude/.mcp.json and call niwa_check_messages
+  Scenario: MCP-config loadability — claude -p can load instance-root .mcp.json and call niwa_check_messages
     Given a clean niwa environment
     And claude is available
     And a local git server is set up
     And a channeled workspace "mcp-loadability" exists
     When I run "niwa create mcp-loadability"
     Then the exit code is 0
-    And the file ".claude/.mcp.json" exists in instance "mcp-loadability"
+    And the file ".mcp.json" exists in instance "mcp-loadability"
     When I run claude -p preserving case from instance root "mcp-loadability" with prompt:
       """
       Use the niwa_check_messages tool to check your inbox and output exactly: CHECKED:<count>, where <count> is the number of messages. Do not explain.

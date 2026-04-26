@@ -349,7 +349,7 @@ Key assumptions: Claude Code inherits env from the parent `claude -p` process in
 
 #### Chosen: Per-session stdio MCP server + filesystem coordination + env-var task identity + state.json authorization
 
-The MCP server remains a stdio subprocess spawned per Claude session by Claude Code from `.claude/.mcp.json`. Same for coordinators, peer sessions, and ephemeral workers. No per-instance daemon-hosted MCP server; no Unix-socket relay.
+The MCP server remains a stdio subprocess spawned per Claude session by Claude Code from `.mcp.json`. Same for coordinators, peer sessions, and ephemeral workers. No per-instance daemon-hosted MCP server; no Unix-socket relay.
 
 Coordination between MCP server instances and the daemon is filesystem-only. The daemon writes per-task state (Decision 1); MCP tool calls read it under shared flock. The existing fsnotify `notifyNewFile` pathway is extended to route `task.completed`, `task.abandoned`, `task.cancelled` messages to a new `awaitWaiters map[string]chan taskEvent` (keyed by `task_id`) for `niwa_await_task` and synchronous `niwa_delegate`.
 
@@ -384,7 +384,7 @@ The MCP server reads these once on startup into `Server.{instanceRoot, role, tas
 
 The daemon spawns `claude -p` for each queued task. The contract must pass the task ID to the worker (for inbox retrieval by the LLM and for auth by the MCP subprocess), fix argv so tests can assert on it, and accommodate the `NIWA_WORKER_SPAWN_COMMAND` override (R51) for scripted-fake testing.
 
-Key assumptions: MCP server runs per-worker as a stdio subprocess launched by Claude Code from `.claude/.mcp.json` (Decision 3 confirmed); `claude -p` tolerates R33's flags alongside `-p <prompt>`; Go's `exec.Cmd.Env` last-wins semantics for duplicate keys.
+Key assumptions: MCP server runs per-worker as a stdio subprocess launched by Claude Code from `.mcp.json` (Decision 3 confirmed); `claude -p` tolerates R33's flags alongside `-p <prompt>`; Go's `exec.Cmd.Env` last-wins semantics for duplicate keys.
 
 #### Chosen: Literal-path override + dual task-ID propagation (argv + env) + pass-through env with niwa-owned last-wins overrides
 
@@ -395,7 +395,7 @@ Key assumptions: MCP server runs per-worker as a stdio subprocess launched by Cl
 ```
 claude -p "You are a worker for niwa task <task-id>. Call niwa_check_messages to retrieve your task envelope."
         --permission-mode=acceptEdits
-        --mcp-config=<instanceRoot>/.claude/.mcp.json
+        --mcp-config=<instanceRoot>/.mcp.json
         --strict-mcp-config
 ```
 
@@ -549,7 +549,7 @@ A ~40-60 LOC migration helper runs at the top of the rewritten `InstallChannelIn
 1. **Detect old layout.** If `.niwa/sessions/` contains any `<uuid>/` subdirectory (old layout signature) and `.niwa/roles/` is absent (new layout signature): treat as pre-1.0 upgrade.
 2. **One-shot warning.** Log to stderr: `"niwa: upgrading mesh layout. Discarding N queued envelopes from the previous mesh version; any in-flight conversations are abandoned. Run 'niwa destroy && niwa create --channels' for a fresh start. See docs/guides/cross-session-communication.md for details."`
 3. **Cleanup.** Recursively remove `.niwa/sessions/<uuid>/` directories. Leave `.niwa/sessions/sessions.json` in place (coordinator registry survives; registered coordinators re-register on next SessionStart hook).
-4. **Provision the new layout.** Create `.niwa/roles/<role>/inbox/{in-progress,cancelled,expired,read}/` for every enumerated role; create `.niwa/tasks/`; write `.claude/.mcp.json` at instance and per-repo; install the `niwa-mesh` skill (Decision 5); write the minimal `## Channels` section; inject `SessionStart` + `UserPromptSubmit` hooks via the existing `HooksMaterializer` pipeline.
+4. **Provision the new layout.** Create `.niwa/roles/<role>/inbox/{in-progress,cancelled,expired,read}/` for every enumerated role; create `.niwa/tasks/`; write `.mcp.json` at instance and per-repo; install the `niwa-mesh` skill (Decision 5); write the minimal `## Channels` section; inject `SessionStart` + `UserPromptSubmit` hooks via the existing `HooksMaterializer` pipeline.
 5. **ManagedFiles discipline.** Every installer-written file goes into `InstanceState.ManagedFiles` so `niwa destroy` cleans up uniformly. Runtime artifacts (`.niwa/tasks/<id>/*`, `.niwa/roles/*/inbox/<id>.json`) are NOT tracked — they are created by the daemon and the MCP tool handlers.
 
 **Idempotency (AC-P10).** A second `niwa apply` on the new layout: installer computes ContentHash on skill files → matches → skip write; checks `.mcp.json` presence and content → matches → skip; role inboxes present → skip; `sessions.json` preserved; in-progress envelopes byte-identical; per-task state files untouched.
@@ -598,7 +598,9 @@ niwa apply
        - migration helper (detect + remove old .niwa/sessions/<uuid>/)
        - create .niwa/roles/<role>/inbox/{in-progress,cancelled,expired,read}/
        - create .niwa/tasks/
-       - write <instanceRoot>/.claude/.mcp.json and <repoDir>/.claude/.mcp.json
+       - write <instanceRoot>/.mcp.json (no per-repo mirror; the
+         instance-root file is discovered from sub-repos via Claude
+         Code's directory-tree walk-up)
        - install niwa-mesh skill to <instanceRoot>/.claude/skills/niwa-mesh/
          and each <repoDir>/.claude/skills/niwa-mesh/ (sha256 idempotent)
        - write minimal ## Channels section to workspace-context.md
@@ -962,7 +964,7 @@ Deliverables:
   - Migration helper: detect + remove `.niwa/sessions/<uuid>/` directories; emit one-shot stderr warning; preserve `sessions.json`.
   - Create `.niwa/roles/<role>/inbox/{in-progress,cancelled,expired,read}/` for every role.
   - Create `.niwa/tasks/`, `.niwa/daemon.pid` placeholder (empty).
-  - Write `<instanceRoot>/.claude/.mcp.json`; mirror into each `<repoDir>/.claude/.mcp.json`.
+  - Write `<instanceRoot>/.mcp.json` at the directory root (not under `.claude/`) so Claude Code's MCP discovery resolves it from the instance root and from any sub-repo via upward walk; no per-repo mirror is needed or written.
   - Write `niwa-mesh/SKILL.md` to instance-root and per-repo; sha256 hash check vs `InstanceState.ManagedFiles.ContentHash` for idempotency; drift warning on mismatch; overwrite.
   - Write minimal `## Channels` section to `workspace-context.md`.
   - Inject SessionStart + UserPromptSubmit hook entries into `cfg.Claude.Hooks` for the coordinator role only (workers do not use these hooks).

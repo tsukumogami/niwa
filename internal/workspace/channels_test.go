@@ -68,9 +68,10 @@ func TestInstallChannelInfrastructure_NoopWhenDisabled(t *testing.T) {
 // TestInstallChannelInfrastructure_CreatesRoleLayout checks AC-P1, AC-P2,
 // AC-R1, AC-P5, AC-P6, AC-P7, AC-P8, AC-P15: for every enumerated role
 // (coordinator + topology-derived), the full per-role inbox tree is
-// present, plus .niwa/tasks/, daemon.pid/log, .mcp.json mirrored per
-// repo, SKILL.md mirrored per repo, and a ## Channels section in
-// workspace-context.md with the four required items.
+// present, plus .niwa/tasks/, daemon.pid/log, an instance-root .mcp.json
+// (the single project-scoped file Claude Code's discovery reads via
+// directory-tree walk-up), SKILL.md mirrored per repo, and a ## Channels
+// section in workspace-context.md with the four required items.
 func TestInstallChannelInfrastructure_CreatesRoleLayout(t *testing.T) {
 	dir := t.TempDir()
 	seedRepo(t, dir, "apps", "web")
@@ -115,8 +116,11 @@ func TestInstallChannelInfrastructure_CreatesRoleLayout(t *testing.T) {
 		t.Errorf("daemon.log missing: %v", err)
 	}
 
-	// .mcp.json at instance root.
-	instanceMCP := filepath.Join(dir, ".claude", ".mcp.json")
+	// .mcp.json at instance root (NOT under .claude/). Claude Code's
+	// discovery reads `<cwd>/.mcp.json` at the directory root and walks
+	// up; placing it here makes it visible to coordinator sessions
+	// started either at the instance root or from any sub-repo.
+	instanceMCP := filepath.Join(dir, ".mcp.json")
 	data, err := os.ReadFile(instanceMCP)
 	if err != nil {
 		t.Fatalf("instance .mcp.json not written: %v", err)
@@ -132,11 +136,18 @@ func TestInstallChannelInfrastructure_CreatesRoleLayout(t *testing.T) {
 		t.Errorf("instance .mcp.json is not valid JSON: %v", err)
 	}
 
-	// .mcp.json mirrored to each repo.
+	// Per-repo `.mcp.json` mirrors are intentionally NOT written; the
+	// instance-root file covers sub-repos via Claude's directory walk-up
+	// (and a per-repo file at the repo root would commit the local
+	// binary path and instance root into upstream history).
 	for _, role := range []string{"web", "api"} {
-		p := filepath.Join(dir, "apps", role, ".claude", ".mcp.json")
-		if _, err := os.Stat(p); err != nil {
-			t.Errorf("repo .mcp.json for %q missing: %v", role, err)
+		legacyOld := filepath.Join(dir, "apps", role, ".claude", ".mcp.json")
+		if _, err := os.Stat(legacyOld); err == nil {
+			t.Errorf("legacy per-repo .claude/.mcp.json should not be written for %q", role)
+		}
+		repoRoot := filepath.Join(dir, "apps", role, ".mcp.json")
+		if _, err := os.Stat(repoRoot); err == nil {
+			t.Errorf("per-repo .mcp.json should not be written at repo root for %q", role)
 		}
 	}
 
@@ -290,7 +301,7 @@ func TestInstallChannelInfrastructure_Idempotent(t *testing.T) {
 	}
 
 	skillPath := filepath.Join(dir, ".claude", "skills", "niwa-mesh", "SKILL.md")
-	mcpPath := filepath.Join(dir, ".claude", ".mcp.json")
+	mcpPath := filepath.Join(dir, ".mcp.json")
 
 	firstSkill, _ := os.ReadFile(skillPath)
 	firstMCP, _ := os.ReadFile(mcpPath)
@@ -431,11 +442,10 @@ func TestInstallChannelInfrastructure_DirAndFileModes(t *testing.T) {
 		t.Fatalf("walking .niwa/: %v", err)
 	}
 
-	// .mcp.json and SKILL.md also must be 0600.
+	// .mcp.json (instance root) and SKILL.md also must be 0600.
 	for _, p := range []string{
-		filepath.Join(dir, ".claude", ".mcp.json"),
+		filepath.Join(dir, ".mcp.json"),
 		filepath.Join(dir, ".claude", "skills", "niwa-mesh", "SKILL.md"),
-		filepath.Join(dir, "apps", "web", ".claude", ".mcp.json"),
 		filepath.Join(dir, "apps", "web", ".claude", "skills", "niwa-mesh", "SKILL.md"),
 	} {
 		fi, err := os.Stat(p)

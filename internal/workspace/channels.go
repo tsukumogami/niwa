@@ -21,13 +21,13 @@ var roleNameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,31}$`)
 // coordinatorRole is the reserved role name for the instance root session.
 const coordinatorRole = "coordinator"
 
-// channelsMCPTemplate is the template for .claude/.mcp.json. It registers
-// the niwa mcp-serve command with NIWA_INSTANCE_ROOT baked in so Claude Code
-// can start the MCP server without any user configuration. The command
-// field is the absolute path to the provisioning niwa binary (resolved via
-// os.Executable at apply time) so the MCP server always matches the version
-// that provisioned the instance; this avoids PATH ambiguity when multiple
-// niwa installs coexist on one machine.
+// channelsMCPTemplate is the template for the instance-root `.mcp.json`.
+// It registers the niwa mcp-serve command with NIWA_INSTANCE_ROOT baked in
+// so Claude Code can start the MCP server without any user configuration.
+// The command field is the absolute path to the provisioning niwa binary
+// (resolved via os.Executable at apply time) so the MCP server always
+// matches the version that provisioned the instance; this avoids PATH
+// ambiguity when multiple niwa installs coexist on one machine.
 const channelsMCPTemplate = `{
   "mcpServers": {
     "niwa": {
@@ -92,8 +92,10 @@ const skillFrontmatterCharLimit = 1536
 //     collision, reserved-name, and format constraints.
 //  3. Creates .niwa/roles/<role>/inbox/{in-progress,cancelled,expired,read}/
 //     for every role, plus .niwa/tasks/, .niwa/daemon.pid, .niwa/daemon.log.
-//  4. Writes <instanceRoot>/.claude/.mcp.json and mirrors it into every
-//     cloned repo's .claude/.mcp.json with NIWA_INSTANCE_ROOT baked in.
+//  4. Writes <instanceRoot>/.mcp.json (the project-scoped MCP config that
+//     Claude Code's discovery reads at the directory root and walks up the
+//     tree to find from sub-repos). NIWA_INSTANCE_ROOT is baked into the
+//     env block so the MCP server resolves the right workspace.
 //  5. Installs the niwa-mesh SKILL.md at instance-root and per-repo
 //     .claude/skills/niwa-mesh/ with byte-compare idempotency — writes only
 //     when the on-disk bytes differ from the installer's output, emits a
@@ -176,30 +178,31 @@ func InstallChannelInfrastructure(cfg *config.WorkspaceConfig, instanceRoot stri
 	}
 	*writtenFiles = append(*writtenFiles, logPath)
 
-	// Step 4: .mcp.json at instance root. Mirror into each role's repo
-	// dir (not coordinator — that lives at the instance root).
+	// Step 4: .mcp.json at the instance root. Claude Code's MCP discovery
+	// reads `<cwd>/.mcp.json` (a project-scoped file at the directory root,
+	// not under `.claude/`) and walks the directory tree upward collecting
+	// configs (see Claude Code's src/services/mcp/config.ts). Writing the
+	// file at the instance root makes it visible to:
+	//
+	//   1. Human-launched coordinator sessions started at the instance root
+	//      — discovered directly.
+	//   2. Human-launched sessions started inside a sub-repo — discovered
+	//      via the upward walk to the instance root.
+	//
+	// Daemon-spawned workers receive the path explicitly via `--mcp-config`
+	// + `--strict-mcp-config` (see internal/cli/mesh_watch.go::spawnWorker),
+	// so discovery doesn't matter for them — but they read the same file.
+	//
+	// Per-repo mirrors are intentionally not written: Claude's directory
+	// walk-up makes them redundant, and putting `.mcp.json` inside a tracked
+	// git repo would commit the local binary path and instance root into
+	// upstream history.
 	mcpContent := buildMCPContent(instanceRoot)
-	instanceMCPPath := filepath.Join(instanceRoot, ".claude", ".mcp.json")
+	instanceMCPPath := filepath.Join(instanceRoot, ".mcp.json")
 	if err := writeIdempotent(instanceMCPPath, mcpContent, 0o600, os.Stderr); err != nil {
 		return fmt.Errorf("writing instance .mcp.json: %w", err)
 	}
 	*writtenFiles = append(*writtenFiles, instanceMCPPath)
-
-	for _, r := range roles {
-		if r.name == coordinatorRole {
-			continue
-		}
-		if r.repoPath == "" {
-			// Explicit [channels.mesh.roles] entry without a resolved
-			// path (e.g., a virtual peer); skip the per-repo mirror.
-			continue
-		}
-		repoMCP := filepath.Join(r.repoPath, ".claude", ".mcp.json")
-		if err := writeIdempotent(repoMCP, mcpContent, 0o600, os.Stderr); err != nil {
-			return fmt.Errorf("writing %s: %w", repoMCP, err)
-		}
-		*writtenFiles = append(*writtenFiles, repoMCP)
-	}
 
 	// Step 5: niwa-mesh SKILL.md at instance-root and per-repo. Content
 	// is identical across paths (flat uniform skill, Decision 5).
@@ -490,7 +493,7 @@ func migratePre1Layout(niwaDir string) error {
 	return nil
 }
 
-// buildMCPContent returns the instance-root-aware .mcp.json bytes. The
+// buildMCPContent returns the bytes for `<instance>/.mcp.json`. The
 // command field resolves to the absolute path of the provisioning niwa
 // binary (os.Executable) so Claude Code's MCP subprocess launcher does
 // not depend on PATH. The NIWA_INSTANCE_ROOT env entry is JSON-marshaled

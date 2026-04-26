@@ -1192,7 +1192,7 @@ func runClaudePPreservingCaseCtx(ctx context.Context, s *testState, cwd, prompt 
 	// sandboxed PATH doesn't include one. We set the role explicitly here
 	// so the MCP child inherits it from the coordinator claude's env.
 	env = append(env, "NIWA_SESSION_ROLE=coordinator")
-	mcpConfigPath := filepath.Join(cwd, ".claude", ".mcp.json")
+	mcpConfigPath := filepath.Join(cwd, ".mcp.json")
 	// Flags mirror the daemon's spawnWorker (see mesh_watch.go): acceptEdits
 	// + explicit mcp__niwa__* allow-list. Without the allow-list the
 	// coordinator blocks on the first MCP tool-approval prompt (headless
