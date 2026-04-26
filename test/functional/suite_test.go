@@ -303,6 +303,10 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 
 	// --- @channels-e2e-graph: real coordinator -> real workers delegation graph ---
 	ctx.Step(`^a multi-repo channeled workspace "([^"]*)" with web and backend exists$`, iSetUpMultiRepoChanneledWorkspace)
+	ctx.Step(`^a single-repo channeled workspace "([^"]*)" exists$`, iSetUpSingleRepoChanneledWorkspace)
+	ctx.Step(`^I plant a legacy session directory "([^"]*)" in instance "([^"]*)"$`, iPlantLegacySessionDir)
+	ctx.Step(`^I delete file "([^"]*)" in instance "([^"]*)"$`, iDeleteFileInInstance)
+	ctx.Step(`^I delete directory "([^"]*)" in instance "([^"]*)"$`, iDeleteDirectoryInInstance)
 	ctx.Step(`^I run claude -p preserving case from instance root "([^"]*)" within (\d+) seconds with prompt:$`, iRunClaudePFromInstanceRootPreservingCaseWithin)
 	ctx.Step(`^the file "([^"]*)" in repo "([^"]*)" of instance "([^"]*)" exactly matches "([^"]*)"$`, theFileInRepoOfInstanceExactlyMatches)
 	ctx.Step(`^exactly (\d+) tasks in instance "([^"]*)" are in state "completed"$`, func(ctx context.Context, n int, instance string) error {

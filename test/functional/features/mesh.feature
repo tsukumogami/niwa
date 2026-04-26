@@ -232,6 +232,103 @@ Feature: Cross-session mesh (Issue #10 harness)
     And the file "apps/backend/.mcp.json" does not exist in instance "mcp-layout"
     And the file "apps/backend/.claude/.mcp.json" does not exist in instance "mcp-layout"
 
+  # Single-repo channeled workspace: the simplest topology that engages
+  # per-repo role enumeration without exercising multi-repo collision
+  # logic. Asserts the instance-root .mcp.json is the sole MCP config
+  # written (the per-repo dir gets its niwa-mesh skill but no .mcp.json).
+  @critical
+  Scenario: single-repo channeled workspace provisions instance-root .mcp.json only
+    Given a clean niwa environment
+    And a local git server is set up
+    And a single-repo channeled workspace "single-repo-mcp" exists
+    When I run "niwa create single-repo-mcp"
+    Then the exit code is 0
+    And the file ".mcp.json" exists in instance "single-repo-mcp"
+    And the file "apps/app/.mcp.json" does not exist in instance "single-repo-mcp"
+    And the file "apps/app/.claude/.mcp.json" does not exist in instance "single-repo-mcp"
+    And the file "apps/app/.claude/skills/niwa-mesh/SKILL.md" exists in instance "single-repo-mcp"
+    And the file ".niwa/roles/coordinator/inbox" exists in instance "single-repo-mcp"
+    And the file ".niwa/roles/app/inbox" exists in instance "single-repo-mcp"
+
+  # Drift recovery: the channels installer's writeIdempotent path must
+  # restore a managed file after a user manually removes it. Without
+  # this, an operator who clears `.mcp.json` thinking they're "resetting"
+  # would silently lose the niwa MCP server and `niwa apply` would
+  # fix nothing on the next run.
+  @critical
+  Scenario: niwa apply restores manually-deleted instance .mcp.json
+    Given a clean niwa environment
+    And a local git server is set up
+    And a multi-repo channeled workspace "mcp-drift" with web and backend exists
+    When I run "niwa create mcp-drift"
+    Then the exit code is 0
+    And the file ".mcp.json" exists in instance "mcp-drift"
+    When I delete file ".mcp.json" in instance "mcp-drift"
+    And I run "niwa apply mcp-drift"
+    Then the exit code is 0
+    And the file ".mcp.json" exists in instance "mcp-drift"
+
+  # Pre-1.0 migration: the channel installer's migratePre1Layout helper
+  # must remove .niwa/sessions/<uuid>/ directories on the first apply
+  # under the new model. The legacy session dirs predate the role-based
+  # mesh and would otherwise bloat .niwa/ across upgrades.
+  @critical
+  Scenario: niwa apply --channels migrates a pre-1.0 .niwa/sessions/ layout
+    Given a clean niwa environment
+    And a local git server is set up
+    And a single-repo channeled workspace "mcp-migrate" exists
+    When I run "niwa create mcp-migrate"
+    Then the exit code is 0
+    # Plant a legacy session directory and rewind the new layout so the
+    # migration helper sees pre-1.0 state on the next apply (it short-
+    # circuits when .niwa/roles/ already exists).
+    When I delete directory ".niwa/roles" in instance "mcp-migrate"
+    And I plant a legacy session directory "11111111-2222-4333-8444-555555555555" in instance "mcp-migrate"
+    And I run "niwa apply mcp-migrate"
+    Then the exit code is 0
+    And the file ".niwa/sessions/11111111-2222-4333-8444-555555555555" does not exist in instance "mcp-migrate"
+    And the file ".niwa/roles/coordinator/inbox" exists in instance "mcp-migrate"
+
+  # Virtual-peer roles: a workspace with [channels.mesh.roles] entries
+  # whose values are empty strings creates inboxes for those roles
+  # without requiring a corresponding cloned repo. Useful for peers
+  # that exist outside the workspace topology (for example a host-side
+  # human or a separate process that participates as a niwa role).
+  # Asserts that the inbox tree is provisioned and no per-repo writes
+  # are attempted for paths that don't exist.
+  @critical
+  Scenario: virtual-peer roles via [channels.mesh.roles] provision inboxes only
+    Given a clean niwa environment
+    And a local git server is set up
+    And a channeled workspace "virtual-peer-ws" exists
+    When I run "niwa create virtual-peer-ws"
+    Then the exit code is 0
+    And the file ".mcp.json" exists in instance "virtual-peer-ws"
+    And the file ".niwa/roles/coordinator/inbox" exists in instance "virtual-peer-ws"
+    And the file ".niwa/roles/worker/inbox" exists in instance "virtual-peer-ws"
+    And the file ".niwa/roles/coordinator/inbox/in-progress" exists in instance "virtual-peer-ws"
+    And the file ".niwa/roles/worker/inbox/expired" exists in instance "virtual-peer-ws"
+
+  # --no-channels disable round-trip: enable channels via the synthesized
+  # path (--channels flag, no [channels.mesh] in config), then re-apply
+  # with --no-channels. Asserts the instance-root .mcp.json and the
+  # niwa-mesh skill are removed from ManagedFiles by cleanRemovedFiles.
+  # Runtime artifacts under .niwa/roles/ and .niwa/tasks/ are left in
+  # place — see issue #75 for the proper teardown design.
+  @critical
+  Scenario: niwa apply --no-channels removes the instance-root .mcp.json
+    Given a clean niwa environment
+    And a local git server is set up
+    And a single-repo channeled workspace "mcp-toggle" exists
+    When I run "niwa create mcp-toggle"
+    Then the exit code is 0
+    And the file ".mcp.json" exists in instance "mcp-toggle"
+    And the file ".claude/skills/niwa-mesh/SKILL.md" exists in instance "mcp-toggle"
+    When I run "niwa apply mcp-toggle --no-channels"
+    Then the exit code is 0
+    And the file ".mcp.json" does not exist in instance "mcp-toggle"
+    And the file ".claude/skills/niwa-mesh/SKILL.md" does not exist in instance "mcp-toggle"
+
   # ---------------------------------------------------------------------
   # @channels-e2e (Issue #11): real `claude -p` scenarios. These cover
   # niwa surface the deterministic fake worker cannot reach — namely

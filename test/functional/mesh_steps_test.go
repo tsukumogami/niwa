@@ -58,6 +58,105 @@ worker = ""
 	return ctx, nil
 }
 
+// iSetUpSingleRepoChanneledWorkspace creates one bare source repo named
+// "app" under group "apps" plus a config repo with [channels.mesh]. After
+// `niwa create` the instance layout is `<instance>/apps/app/`, and channel
+// role derivation yields "coordinator" (instance root) + "app". Use to
+// exercise the simplest topology that triggers per-repo role enumeration
+// without engaging multi-repo collision logic.
+func iSetUpSingleRepoChanneledWorkspace(ctx context.Context, name string) (context.Context, error) {
+	s := getState(ctx)
+	if s == nil {
+		return ctx, fmt.Errorf("no test state")
+	}
+	url, err := s.gitServer.Repo("app")
+	if err != nil {
+		return ctx, fmt.Errorf("creating source repo %q: %w", "app", err)
+	}
+	s.repoURLs["app"] = url
+
+	body := fmt.Sprintf(`[workspace]
+name = %q
+
+[channels.mesh]
+
+[groups.apps]
+
+[repos.app]
+url = %q
+group = "apps"
+`, name, url)
+	cfgURL, err := s.gitServer.ConfigRepo(name, body)
+	if err != nil {
+		return ctx, fmt.Errorf("creating config repo %q: %w", name, err)
+	}
+	s.repoURLs[name] = cfgURL
+	if err := runNiwa(s, s.workspaceRoot, "niwa init --from "+cfgURL); err != nil {
+		return ctx, err
+	}
+	if s.exitCode != 0 {
+		return ctx, fmt.Errorf("niwa init exit=%d\nstdout:\n%s\nstderr:\n%s",
+			s.exitCode, s.stdout, s.stderr)
+	}
+	return ctx, nil
+}
+
+// iDeleteFileInInstance removes a file at relPath under the named
+// instance. Errors when the file isn't there (drift-recovery scenarios
+// must start from a known-present state); use this to simulate manual
+// deletion of a managed file the next apply must restore.
+func iDeleteFileInInstance(ctx context.Context, relPath, instance string) (context.Context, error) {
+	s := getState(ctx)
+	if s == nil {
+		return ctx, fmt.Errorf("no test state")
+	}
+	path := filepath.Join(s.workspaceRoot, instance, relPath)
+	if _, err := os.Stat(path); err != nil {
+		return ctx, fmt.Errorf("cannot delete %q: %w", path, err)
+	}
+	if err := os.Remove(path); err != nil {
+		return ctx, fmt.Errorf("removing %s: %w", path, err)
+	}
+	return ctx, nil
+}
+
+// iDeleteDirectoryInInstance recursively removes a directory at relPath
+// under the named instance. Errors when the path isn't there; use to
+// simulate operator state-resets the next apply must reconcile.
+func iDeleteDirectoryInInstance(ctx context.Context, relPath, instance string) (context.Context, error) {
+	s := getState(ctx)
+	if s == nil {
+		return ctx, fmt.Errorf("no test state")
+	}
+	path := filepath.Join(s.workspaceRoot, instance, relPath)
+	if _, err := os.Stat(path); err != nil {
+		return ctx, fmt.Errorf("cannot delete %q: %w", path, err)
+	}
+	if err := os.RemoveAll(path); err != nil {
+		return ctx, fmt.Errorf("removing %s: %w", path, err)
+	}
+	return ctx, nil
+}
+
+// iPlantLegacySessionDir creates a `.niwa/sessions/<uuid>/` directory in
+// the named instance to simulate a pre-1.0 mesh layout. The next
+// `niwa apply --channels` is expected to detect and remove it.
+func iPlantLegacySessionDir(ctx context.Context, uuid, instance string) (context.Context, error) {
+	s := getState(ctx)
+	if s == nil {
+		return ctx, fmt.Errorf("no test state")
+	}
+	dir := filepath.Join(s.workspaceRoot, instance, ".niwa", "sessions", uuid)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return ctx, fmt.Errorf("planting legacy session dir: %w", err)
+	}
+	// Drop a marker file so we can later assert the directory was actually removed.
+	if err := os.WriteFile(filepath.Join(dir, "marker"), []byte("legacy"), 0o600); err != nil {
+		return ctx, fmt.Errorf("writing marker: %w", err)
+	}
+	return ctx, nil
+}
+
 // iSetUpMultiRepoChanneledWorkspace creates two bare source repos named
 // "web" and "backend", then a config repo whose workspace.toml places both
 // under group "apps" and enables [channels.mesh] with topology-derived
