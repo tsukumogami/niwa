@@ -47,6 +47,7 @@ import (
 	"github.com/fsnotify/fsnotify"
 	"github.com/spf13/cobra"
 	"github.com/tsukumogami/niwa/internal/mcp"
+	"github.com/tsukumogami/niwa/internal/workspace"
 )
 
 var meshWatchInstanceRoot string
@@ -831,7 +832,7 @@ func handleInboxEvent(evt inboxEvent, s spawnContext) {
 // pipeline intentionally does not cover this case.
 func spawnWorker(evt inboxEvent, taskDir string, s spawnContext) {
 	prompt := fmt.Sprintf(bootstrapPromptTemplate, evt.taskID)
-	mcpConfigPath := filepath.Join(s.instanceRoot, ".claude", ".mcp.json")
+	mcpConfigPath := workspace.InstanceMCPConfigPath(s.instanceRoot)
 
 	// --permission-mode=acceptEdits auto-approves file edits but does NOT
 	// auto-approve MCP tool calls; a worker running in headless `-p` mode
@@ -841,6 +842,14 @@ func spawnWorker(evt inboxEvent, taskDir string, s spawnContext) {
 	// without prompting. The list must stay in sync with the MCP server's
 	// tools/list response (internal/mcp/server.go) and the niwa-mesh skill
 	// allowed-tools block (internal/workspace/channels.go).
+	//
+	// --strict-mcp-config disables Claude Code's MCP discovery so the
+	// worker only sees the niwa server we point it at via --mcp-config —
+	// never a server the user has registered globally in ~/.claude.json.
+	// This isolation is intentional for workers; do NOT copy this flag
+	// onto a coordinator launcher (human-launched at the instance root)
+	// because coordinators rely on Claude Code discovering
+	// <instance>/.mcp.json automatically.
 	cmd := exec.Command(
 		s.spawnBin,
 		"-p", prompt,

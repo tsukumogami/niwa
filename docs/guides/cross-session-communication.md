@@ -20,7 +20,11 @@ Enable the mesh for an instance and delegate a task:
 niwa create my-workspace --channels
 cd my-workspace
 
-# Open a coordinator session.
+# Open a coordinator session. Launch Claude from the instance root
+# (the workspace directory above); that is where niwa writes `.mcp.json`,
+# and Claude Code's MCP discovery loads `<cwd>/.mcp.json` only — it does
+# not walk parent directories. Sub-repo cwds work too if you pass the
+# config path explicitly: `claude --mcp-config=<instance>/.mcp.json`.
 claude
 ```
 
@@ -277,7 +281,7 @@ persistent session registry.
   INFO. The daemon reuses that absolute path for every spawn — `PATH` changes
   after startup have no effect.
 - **Argv.** Fixed shape: `-p "<bootstrap prompt with <task-id>>"
-  --permission-mode=acceptEdits --mcp-config=<instanceRoot>/.claude/.mcp.json
+  --permission-mode=acceptEdits --mcp-config=<instanceRoot>/.mcp.json
   --strict-mcp-config`. The bootstrap prompt references the task ID; the task
   body never appears in argv — the worker retrieves it via
   `niwa_check_messages` on its first tool call.
@@ -394,9 +398,11 @@ Pre-1.0 queued envelopes are not carried forward — the wire format changed.
 
 Killing workers first minimizes the window during which an
 `acceptEdits`-enabled worker could still write to the filesystem while the
-instance is being torn down. If you use `rm -rf` on an instance directory, the
-daemon detects the missing watch path via fsnotify and exits on its own — but
-unclean, and workers may outlive the daemon by seconds.
+instance is being torn down. **Always use `niwa destroy` to tear down a
+channeled instance.** `rm -rf` of the instance directory does not signal
+the daemon — it keeps running, holding fsnotify watches against a now-
+missing path, and you'll need `pgrep -af "niwa.*mesh watch"` plus a manual
+`kill` to clean it up. Tracking proper teardown semantics is in issue #75.
 
 ### Coordinator restart
 

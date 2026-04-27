@@ -68,9 +68,10 @@ func TestInstallChannelInfrastructure_NoopWhenDisabled(t *testing.T) {
 // TestInstallChannelInfrastructure_CreatesRoleLayout checks AC-P1, AC-P2,
 // AC-R1, AC-P5, AC-P6, AC-P7, AC-P8, AC-P15: for every enumerated role
 // (coordinator + topology-derived), the full per-role inbox tree is
-// present, plus .niwa/tasks/, daemon.pid/log, .mcp.json mirrored per
-// repo, SKILL.md mirrored per repo, and a ## Channels section in
-// workspace-context.md with the four required items.
+// present, plus .niwa/tasks/, daemon.pid/log, an instance-root .mcp.json
+// (project-scoped file Claude Code reads from <cwd>/.mcp.json; per-cwd,
+// no parent walk-up), SKILL.md mirrored per repo, and a ## Channels
+// section in workspace-context.md with the four required items.
 func TestInstallChannelInfrastructure_CreatesRoleLayout(t *testing.T) {
 	dir := t.TempDir()
 	seedRepo(t, dir, "apps", "web")
@@ -115,8 +116,10 @@ func TestInstallChannelInfrastructure_CreatesRoleLayout(t *testing.T) {
 		t.Errorf("daemon.log missing: %v", err)
 	}
 
-	// .mcp.json at instance root.
-	instanceMCP := filepath.Join(dir, ".claude", ".mcp.json")
+	// `.mcp.json` lives at the instance root only — at the directory
+	// root, not under `.claude/`. Rationale lives at the call site in
+	// channels.go.
+	instanceMCP := filepath.Join(dir, ".mcp.json")
 	data, err := os.ReadFile(instanceMCP)
 	if err != nil {
 		t.Fatalf("instance .mcp.json not written: %v", err)
@@ -127,16 +130,32 @@ func TestInstallChannelInfrastructure_CreatesRoleLayout(t *testing.T) {
 	if !strings.Contains(string(data), dir) {
 		t.Errorf("instance .mcp.json missing instanceRoot %q: %s", dir, data)
 	}
+	if !strings.Contains(string(data), "NIWA_SESSION_ROLE") {
+		t.Errorf("instance .mcp.json missing NIWA_SESSION_ROLE: %s", data)
+	}
+	if !strings.Contains(string(data), `"coordinator"`) {
+		t.Errorf("instance .mcp.json NIWA_SESSION_ROLE must be coordinator: %s", data)
+	}
 	var mcpDoc map[string]any
 	if err := json.Unmarshal(data, &mcpDoc); err != nil {
 		t.Errorf("instance .mcp.json is not valid JSON: %v", err)
 	}
 
-	// .mcp.json mirrored to each repo.
+	// No per-repo `.mcp.json` is written, at either the legacy
+	// `.claude/.mcp.json` path (which Claude Code's discovery never
+	// reads) or the repo-root `.mcp.json` path (which would collide
+	// destructively with any project that ships its own MCP config).
+	// Sub-repo cwd launches are an out-of-spec entry point users can
+	// reach with `--mcp-config=<instance>/.mcp.json` explicitly. See
+	// issue #78 for the trade-off rationale.
 	for _, role := range []string{"web", "api"} {
-		p := filepath.Join(dir, "apps", role, ".claude", ".mcp.json")
-		if _, err := os.Stat(p); err != nil {
-			t.Errorf("repo .mcp.json for %q missing: %v", role, err)
+		legacyOld := filepath.Join(dir, "apps", role, ".claude", ".mcp.json")
+		if _, err := os.Stat(legacyOld); err == nil {
+			t.Errorf("legacy per-repo .claude/.mcp.json should not be written for %q", role)
+		}
+		repoRoot := filepath.Join(dir, "apps", role, ".mcp.json")
+		if _, err := os.Stat(repoRoot); err == nil {
+			t.Errorf("per-repo .mcp.json should not be written at repo root for %q", role)
 		}
 	}
 
@@ -290,7 +309,7 @@ func TestInstallChannelInfrastructure_Idempotent(t *testing.T) {
 	}
 
 	skillPath := filepath.Join(dir, ".claude", "skills", "niwa-mesh", "SKILL.md")
-	mcpPath := filepath.Join(dir, ".claude", ".mcp.json")
+	mcpPath := filepath.Join(dir, ".mcp.json")
 
 	firstSkill, _ := os.ReadFile(skillPath)
 	firstMCP, _ := os.ReadFile(mcpPath)
@@ -431,11 +450,10 @@ func TestInstallChannelInfrastructure_DirAndFileModes(t *testing.T) {
 		t.Fatalf("walking .niwa/: %v", err)
 	}
 
-	// .mcp.json and SKILL.md also must be 0600.
+	// .mcp.json (instance root) and SKILL.md must all be 0600.
 	for _, p := range []string{
-		filepath.Join(dir, ".claude", ".mcp.json"),
+		filepath.Join(dir, ".mcp.json"),
 		filepath.Join(dir, ".claude", "skills", "niwa-mesh", "SKILL.md"),
-		filepath.Join(dir, "apps", "web", ".claude", ".mcp.json"),
 		filepath.Join(dir, "apps", "web", ".claude", "skills", "niwa-mesh", "SKILL.md"),
 	} {
 		fi, err := os.Stat(p)
@@ -764,9 +782,26 @@ func TestInjectChannelHooks_PrependToExisting(t *testing.T) {
 	}
 }
 
+// TestInstanceMCPConfigPath documents the path contract three call
+// sites depend on: the channels installer that writes the file, the
+// daemon's worker spawn that hands the path to claude via
+// --mcp-config, and the functional-test coordinator launcher. If this
+// constant changes (say to .niwa/.mcp.json), this is the test that
+// will fail first.
+func TestInstanceMCPConfigPath(t *testing.T) {
+	got := InstanceMCPConfigPath("/some/instance")
+	want := "/some/instance/.mcp.json"
+	if got != want {
+		t.Errorf("InstanceMCPConfigPath(%q) = %q, want %q", "/some/instance", got, want)
+	}
+}
+
 func TestBuildMCPContent_InstanceRootEscaping(t *testing.T) {
 	instanceRoot := "/some/path/with spaces"
-	data := buildMCPContent(instanceRoot)
+	data, err := buildMCPContent(instanceRoot)
+	if err != nil {
+		t.Fatalf("buildMCPContent: %v", err)
+	}
 
 	var doc map[string]any
 	if err := json.Unmarshal(data, &doc); err != nil {
@@ -779,6 +814,18 @@ func TestBuildMCPContent_InstanceRootEscaping(t *testing.T) {
 	got := env["NIWA_INSTANCE_ROOT"].(string)
 	if got != instanceRoot {
 		t.Errorf("NIWA_INSTANCE_ROOT: got %q, want %q", got, instanceRoot)
+	}
+}
+
+// TestBuildMCPContent_RejectsInvalidUTF8 documents the contract that
+// invalid UTF-8 in the instance root surfaces as a build error rather
+// than producing malformed JSON. Reachable in production only on
+// filesystems with mojibake-encoded paths; covered here as a defense
+// against a regression that would silently ship a broken .mcp.json.
+func TestBuildMCPContent_RejectsInvalidUTF8(t *testing.T) {
+	bad := "/path/with/invalid\xff\xfeutf8"
+	if _, err := buildMCPContent(bad); err == nil {
+		t.Errorf("expected error for invalid UTF-8 in instance root, got nil")
 	}
 }
 
@@ -800,3 +847,4 @@ func TestWriteIdempotent_MatchingContentSkipsWrite(t *testing.T) {
 		t.Errorf("mtime changed on byte-identical rewrite: %v -> %v", before.ModTime(), after.ModTime())
 	}
 }
+

@@ -17,6 +17,7 @@ import (
 
 	"github.com/fsnotify/fsnotify"
 	"github.com/tsukumogami/niwa/internal/mcp"
+	"github.com/tsukumogami/niwa/internal/workspace"
 )
 
 // ---------------------------------------------------------------------
@@ -334,7 +335,7 @@ func TestParseDurationList(t *testing.T) {
 // the production argument-shape logic.
 func buildSpawnCommand(instanceRoot, role, taskID, spawnBin string) *exec.Cmd {
 	prompt := "You are a worker for niwa task " + taskID + ". Call niwa_check_messages to retrieve your task envelope."
-	mcpConfigPath := filepath.Join(instanceRoot, ".claude", ".mcp.json")
+	mcpConfigPath := workspace.InstanceMCPConfigPath(instanceRoot)
 	cmd := exec.Command(
 		spawnBin,
 		"-p", prompt,
@@ -376,7 +377,7 @@ func TestSpawnArgvShape_FixedShape(t *testing.T) {
 	if args[3] != "--permission-mode=acceptEdits" {
 		t.Errorf("argv[3] = %q, want --permission-mode=acceptEdits", args[3])
 	}
-	wantMCP := "--mcp-config=" + filepath.Join(root, ".claude", ".mcp.json")
+	wantMCP := "--mcp-config=" + workspace.InstanceMCPConfigPath(root)
 	if args[4] != wantMCP {
 		t.Errorf("argv[4] = %q, want %q", args[4], wantMCP)
 	}

@@ -175,11 +175,21 @@ drift detection and `niwa destroy` work uniformly.
 after repository clones are complete and before per-repo materializers. It
 shall be invoked imperatively from `Applier.runPipeline`.
 
-**R4** — The channel installer shall write `<instanceRoot>/.claude/.mcp.json`
-declaring a `niwa` MCP server entry that invokes `niwa mcp-serve` with
-`NIWA_INSTANCE_ROOT` baked in. The installer shall mirror the `.mcp.json`
-into each repository's `.claude/` directory so that Claude sessions opened
-inside a repo pick up the same MCP server.
+**R4** — The channel installer shall write a project-scoped
+`<instanceRoot>/.mcp.json` declaring a `niwa` MCP server entry that
+invokes `niwa mcp-serve` with `NIWA_INSTANCE_ROOT` baked in. The file
+lives at the directory root (not under `.claude/`) because Claude
+Code's MCP discovery loads the project-scoped config from
+`<cwd>/.mcp.json` only — it does not walk parent directories (per
+https://code.claude.com/docs/en/mcp). The headline scenario "open one
+Claude at the instance root and ask it to delegate" is therefore
+covered. The installer shall NOT write per-repo `.mcp.json` files: a
+file at `<repoDir>/.mcp.json` would either collide destructively with
+any project that ships its own MCP config or require merging absolute
+machine-specific paths into a tracked file. Users who want to launch
+Claude in a sub-repo cwd (an out-of-spec entry point) can pass
+`--mcp-config=<instanceRoot>/.mcp.json` explicitly. See issue #78 for
+the longer-term strategy review.
 
 **R5** — The channel installer shall enumerate the full set of roles from
 `workspace.toml` (explicit `[channels.mesh.roles]` entries) and the cloned
@@ -481,7 +491,7 @@ bootstrap prompt shall not contain the task body.
   the instance root for the coordinator role);
 - `--permission-mode=acceptEdits` (so background workers do not block on
   permission prompts);
-- `--mcp-config=<instanceRoot>/.claude/.mcp.json --strict-mcp-config` (so
+- `--mcp-config=<instanceRoot>/.mcp.json --strict-mcp-config` (so
   the worker has deterministic MCP access regardless of user-level
   config).
 
@@ -661,9 +671,11 @@ live `claude -p` is not required to verify correctness.
 - [ ] **AC-P5** After apply on a channeled workspace, `.niwa/tasks/` exists,
   `.niwa/sessions/sessions.json` exists and is empty, and
   `.niwa/daemon.pid` contains the PID of a live process.
-- [ ] **AC-P6** `<instanceRoot>/.claude/.mcp.json` and
-  `<repoDir>/.claude/.mcp.json` both exist for every cloned repo, each
-  containing a `niwa` entry pointing to `niwa mcp-serve`.
+- [ ] **AC-P6** `<instanceRoot>/.mcp.json` exists at the instance root
+  (not under `.claude/`) and contains a `niwa` entry pointing to
+  `niwa mcp-serve`. No per-repo `.mcp.json` is written, at either
+  `<repoDir>/.mcp.json` or `<repoDir>/.claude/.mcp.json`, so niwa
+  cannot collide with a project that ships its own MCP config.
 - [ ] **AC-P7** `<instanceRoot>/.claude/skills/niwa-mesh/SKILL.md` exists
   after apply, and the same file exists at
   `<repoDir>/.claude/skills/niwa-mesh/SKILL.md` for every cloned repo.
@@ -737,7 +749,7 @@ live `claude -p` is not required to verify correctness.
   hook, not by wall-clock bound).
 - [ ] **AC-D4** The daemon spawns `claude -p` with working directory
   set to the role's repo directory, `--permission-mode=acceptEdits`,
-  `--mcp-config=<instanceRoot>/.claude/.mcp.json`, and
+  `--mcp-config=<instanceRoot>/.mcp.json`, and
   `--strict-mcp-config` (verified via the test spawn hook's captured
   argv and env).
 - [ ] **AC-D5** The spawn prompt argv does not contain any field from
@@ -1197,7 +1209,7 @@ ever existed; the daemon spawns one to consume it.
 
 A background worker cannot answer permission prompts, so `claude -p` is
 spawned with `--permission-mode=acceptEdits`. Workers use
-`--mcp-config=<instanceRoot>/.claude/.mcp.json --strict-mcp-config` to
+`--mcp-config=<instanceRoot>/.mcp.json --strict-mcp-config` to
 guarantee the niwa MCP server is present and no user-level MCP servers
 leak into the worker. Without these flags, workers hang on first write
 or see an indeterminate MCP tool set.
