@@ -58,7 +58,8 @@ const channelsMCPTemplate = `{
       "command": %s,
       "args": ["mcp-serve"],
       "env": {
-        "NIWA_INSTANCE_ROOT": %s
+        "NIWA_INSTANCE_ROOT": %s,
+        "NIWA_SESSION_ROLE": "coordinator"
       }
     }
   }

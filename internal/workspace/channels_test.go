@@ -130,6 +130,12 @@ func TestInstallChannelInfrastructure_CreatesRoleLayout(t *testing.T) {
 	if !strings.Contains(string(data), dir) {
 		t.Errorf("instance .mcp.json missing instanceRoot %q: %s", dir, data)
 	}
+	if !strings.Contains(string(data), "NIWA_SESSION_ROLE") {
+		t.Errorf("instance .mcp.json missing NIWA_SESSION_ROLE: %s", data)
+	}
+	if !strings.Contains(string(data), `"coordinator"`) {
+		t.Errorf("instance .mcp.json NIWA_SESSION_ROLE must be coordinator: %s", data)
+	}
 	var mcpDoc map[string]any
 	if err := json.Unmarshal(data, &mcpDoc); err != nil {
 		t.Errorf("instance .mcp.json is not valid JSON: %v", err)
