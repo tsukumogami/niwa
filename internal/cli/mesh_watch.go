@@ -832,7 +832,42 @@ func handleInboxEvent(evt inboxEvent, s spawnContext) {
 // pipeline intentionally does not cover this case.
 func spawnWorker(evt inboxEvent, taskDir string, s spawnContext) {
 	prompt := fmt.Sprintf(bootstrapPromptTemplate, evt.taskID)
-	mcpConfigPath := workspace.InstanceMCPConfigPath(s.instanceRoot)
+
+	// Generate a per-spawn worker MCP config with the worker's actual role
+	// and task ID in the env block. Using the instance-root .mcp.json
+	// directly would cause Claude Code's env-block merge to override
+	// NIWA_SESSION_ROLE with "coordinator" (the value baked in for the
+	// coordinator path), so all workers would look in the coordinator inbox
+	// and find no task — producing retry_cap_exceeded on every delegation.
+	workerMCPContent, werr := workspace.WorkerMCPConfig(s.instanceRoot, evt.role, evt.taskID)
+	workerMCPPath := workspace.WorkerMCPConfigPath(s.instanceRoot, evt.taskID)
+	if werr == nil {
+		werr = os.WriteFile(workerMCPPath, workerMCPContent, 0o600)
+	}
+	if werr != nil {
+		s.logger.Printf("spawn_err role=%s task=%s worker_mcp_err=%v", evt.role, evt.taskID, werr)
+		_ = mcp.UpdateState(taskDir, func(cur *mcp.TaskState) (*mcp.TaskState, *mcp.TransitionLogEntry, error) {
+			if cur.State != mcp.TaskStateRunning {
+				return nil, nil, nil
+			}
+			now := time.Now().UTC().Format(time.RFC3339Nano)
+			next := *cur
+			next.State = mcp.TaskStateAbandoned
+			next.UpdatedAt = now
+			next.Reason = json.RawMessage(fmt.Sprintf(`{"error":"spawn_failed","detail":%q}`, werr.Error()))
+			next.StateTransitions = append(next.StateTransitions,
+				mcp.StateTransition{From: mcp.TaskStateRunning, To: mcp.TaskStateAbandoned, At: now})
+			entry := &mcp.TransitionLogEntry{
+				Kind: "spawn_failed",
+				From: mcp.TaskStateRunning,
+				To:   mcp.TaskStateAbandoned,
+				At:   now,
+				Actor: &mcp.TransitionActor{Kind: "daemon", PID: os.Getpid()},
+			}
+			return &next, entry, nil
+		})
+		return
+	}
 
 	// --permission-mode=acceptEdits auto-approves file edits but does NOT
 	// auto-approve MCP tool calls; a worker running in headless `-p` mode
@@ -854,7 +889,7 @@ func spawnWorker(evt inboxEvent, taskDir string, s spawnContext) {
 		s.spawnBin,
 		"-p", prompt,
 		"--permission-mode=acceptEdits",
-		"--mcp-config="+mcpConfigPath,
+		"--mcp-config="+workerMCPPath,
 		"--strict-mcp-config",
 		"--allowed-tools", strings.Join(mcp.ClaudeAllowedTools, ","),
 	)
