@@ -44,6 +44,46 @@ func InstanceMCPConfigPath(instanceRoot string) string {
 	return filepath.Join(instanceRoot, instanceMCPConfigName)
 }
 
+// WorkerMCPConfigPath returns the path where spawnWorker writes the per-spawn
+// worker MCP config. Lives inside the task directory so it is co-located with
+// envelope.json and state.json.
+func WorkerMCPConfigPath(instanceRoot, taskID string) string {
+	return filepath.Join(instanceRoot, ".niwa", "tasks", taskID, "worker.mcp.json")
+}
+
+// WorkerMCPConfig generates the JSON content for a per-spawn worker MCP
+// config. The generated file is passed to `claude -p` via --mcp-config so
+// that Claude Code's env-block processing delivers the correct
+// NIWA_SESSION_ROLE (the worker's actual role, not "coordinator") and
+// NIWA_TASK_ID to the niwa mcp-serve subprocess.
+//
+// Using a per-spawn config prevents the instance-root .mcp.json's hardcoded
+// NIWA_SESSION_ROLE=coordinator from overriding the worker's actual role when
+// Claude Code merges the env block on top of the inherited process environment.
+func WorkerMCPConfig(instanceRoot, role, taskID string) ([]byte, error) {
+	cmdPath, err := os.Executable()
+	if err != nil || cmdPath == "" {
+		cmdPath = "niwa"
+	}
+	if !utf8.ValidString(cmdPath) {
+		return nil, fmt.Errorf("niwa binary path is not valid UTF-8: %q", cmdPath)
+	}
+	if !utf8.ValidString(instanceRoot) {
+		return nil, fmt.Errorf("instance root is not valid UTF-8: %q", instanceRoot)
+	}
+	if !utf8.ValidString(role) {
+		return nil, fmt.Errorf("role is not valid UTF-8: %q", role)
+	}
+	if !utf8.ValidString(taskID) {
+		return nil, fmt.Errorf("task ID is not valid UTF-8: %q", taskID)
+	}
+	cmdJSON, _ := json.Marshal(cmdPath)
+	rootJSON, _ := json.Marshal(instanceRoot)
+	roleJSON, _ := json.Marshal(role)
+	taskIDJSON, _ := json.Marshal(taskID)
+	return []byte(fmt.Sprintf(workerMCPTemplate, string(cmdJSON), string(rootJSON), string(roleJSON), string(taskIDJSON))), nil
+}
+
 // channelsMCPTemplate is the template for the instance-root `.mcp.json`.
 // It registers the niwa mcp-serve command with NIWA_INSTANCE_ROOT baked in
 // so Claude Code can start the MCP server without any user configuration.
@@ -60,6 +100,30 @@ const channelsMCPTemplate = `{
       "env": {
         "NIWA_INSTANCE_ROOT": %s,
         "NIWA_SESSION_ROLE": "coordinator"
+      }
+    }
+  }
+}
+`
+
+// workerMCPTemplate is the per-spawn template for worker MCP config files.
+// Unlike channelsMCPTemplate (which hardcodes NIWA_SESSION_ROLE=coordinator
+// for the coordinator), this template takes the actual target role and task
+// ID as format arguments so each worker gets the right env block values.
+// Claude Code's env-block processing applies these on top of the spawned
+// process's inherited environment — having the correct values here ensures
+// the MCP subprocess always picks up the right role regardless of env
+// inheritance semantics.
+const workerMCPTemplate = `{
+  "mcpServers": {
+    "niwa": {
+      "type": "stdio",
+      "command": %s,
+      "args": ["mcp-serve"],
+      "env": {
+        "NIWA_INSTANCE_ROOT": %s,
+        "NIWA_SESSION_ROLE": %s,
+        "NIWA_TASK_ID": %s
       }
     }
   }

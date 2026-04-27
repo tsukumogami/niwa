@@ -390,6 +390,25 @@ Feature: Cross-session mesh (Issue #10 harness)
     When I queue a niwa_finish_task instruction for role "coordinator" in instance "bootstrap-e2e"
     Then the task state in instance "bootstrap-e2e" eventually becomes "completed" within 120 seconds
 
+  # Regression guard: workers dispatched to non-coordinator roles must
+  # receive NIWA_SESSION_ROLE=<their-role> in the MCP env block, not
+  # "coordinator". Before the per-spawn worker.mcp.json fix, Claude Code's
+  # env-block merge overrode NIWA_SESSION_ROLE to "coordinator" for every
+  # worker — they looked in the coordinator inbox, found no task, and
+  # exited without calling niwa_finish_task, producing retry_cap_exceeded.
+  @channels-e2e
+  Scenario: Worker with non-coordinator role receives correct role in MCP env block
+    Given a clean niwa environment
+    And claude is available
+    And a local git server is set up
+    And a channeled workspace "worker-role-e2e" exists
+    And the daemon uses the real claude worker spawn path
+    When I run "niwa create worker-role-e2e"
+    Then the exit code is 0
+    And the file ".niwa/daemon.pid" exists in instance "worker-role-e2e"
+    When I queue a niwa_finish_task instruction for role "worker" in instance "worker-role-e2e"
+    Then the task state in instance "worker-role-e2e" eventually becomes "completed" within 120 seconds
+
   # ---------------------------------------------------------------------
   # @channels-e2e-graph: full delegation graph with real LLMs on both
   # sides of the exchange. A coordinator `claude -p` runs at the instance

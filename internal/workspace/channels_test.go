@@ -829,6 +829,105 @@ func TestBuildMCPContent_RejectsInvalidUTF8(t *testing.T) {
 	}
 }
 
+// TestWorkerMCPConfigPath documents the path convention used by
+// spawnWorker (which writes the config) and the test harness (which
+// may need to read it). The file lives inside the task directory so
+// daemon and test can locate it with only instanceRoot + taskID.
+func TestWorkerMCPConfigPath(t *testing.T) {
+	got := WorkerMCPConfigPath("/inst", "abc-123")
+	want := "/inst/.niwa/tasks/abc-123/worker.mcp.json"
+	if got != want {
+		t.Errorf("WorkerMCPConfigPath = %q, want %q", got, want)
+	}
+}
+
+// TestWorkerMCPConfig_RoleAndTaskID verifies that WorkerMCPConfig bakes
+// the caller-supplied role and task ID into the env block, not the
+// coordinator role. This is the property that prevents Claude Code's
+// env-block merge from overriding NIWA_SESSION_ROLE=coordinator into
+// every worker.
+func TestWorkerMCPConfig_RoleAndTaskID(t *testing.T) {
+	instanceRoot := "/my/instance"
+	role := "web"
+	taskID := "task-42"
+
+	data, err := WorkerMCPConfig(instanceRoot, role, taskID)
+	if err != nil {
+		t.Fatalf("WorkerMCPConfig: %v", err)
+	}
+
+	var doc map[string]any
+	if err := json.Unmarshal(data, &doc); err != nil {
+		t.Fatalf("invalid JSON: %v\ncontent: %s", err, data)
+	}
+	servers := doc["mcpServers"].(map[string]any)
+	niwa := servers["niwa"].(map[string]any)
+	env := niwa["env"].(map[string]any)
+
+	if got := env["NIWA_INSTANCE_ROOT"].(string); got != instanceRoot {
+		t.Errorf("NIWA_INSTANCE_ROOT: got %q, want %q", got, instanceRoot)
+	}
+	if got := env["NIWA_SESSION_ROLE"].(string); got != role {
+		t.Errorf("NIWA_SESSION_ROLE: got %q, want %q (must not be hardcoded coordinator)", got, role)
+	}
+	if got := env["NIWA_TASK_ID"].(string); got != taskID {
+		t.Errorf("NIWA_TASK_ID: got %q, want %q", got, taskID)
+	}
+}
+
+// TestWorkerMCPConfig_CoordinatorRole verifies that the coordinator role
+// is also handled correctly — coordinator tasks spawned by the daemon
+// (e.g. niwa_ask replies) must get NIWA_SESSION_ROLE=coordinator, not
+// "worker" or any other default.
+func TestWorkerMCPConfig_CoordinatorRole(t *testing.T) {
+	data, err := WorkerMCPConfig("/inst", "coordinator", "t-99")
+	if err != nil {
+		t.Fatalf("WorkerMCPConfig: %v", err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(data, &doc); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+	env := doc["mcpServers"].(map[string]any)["niwa"].(map[string]any)["env"].(map[string]any)
+	if got := env["NIWA_SESSION_ROLE"].(string); got != "coordinator" {
+		t.Errorf("NIWA_SESSION_ROLE for coordinator spawn: got %q, want %q", got, "coordinator")
+	}
+}
+
+// TestWorkerMCPConfig_DistinctFromInstanceMCP confirms that a worker
+// config for a non-coordinator role differs from the instance-root
+// .mcp.json in exactly the NIWA_SESSION_ROLE and NIWA_TASK_ID fields.
+// This guards against a future refactor accidentally collapsing the two
+// templates back into one.
+func TestWorkerMCPConfig_DistinctFromInstanceMCP(t *testing.T) {
+	instanceRoot := "/inst"
+	workerData, err := WorkerMCPConfig(instanceRoot, "backend", "t-1")
+	if err != nil {
+		t.Fatalf("WorkerMCPConfig: %v", err)
+	}
+	coordData, err := buildMCPContent(instanceRoot)
+	if err != nil {
+		t.Fatalf("buildMCPContent: %v", err)
+	}
+
+	var workerDoc, coordDoc map[string]any
+	_ = json.Unmarshal(workerData, &workerDoc)
+	_ = json.Unmarshal(coordData, &coordDoc)
+
+	wEnv := workerDoc["mcpServers"].(map[string]any)["niwa"].(map[string]any)["env"].(map[string]any)
+	cEnv := coordDoc["mcpServers"].(map[string]any)["niwa"].(map[string]any)["env"].(map[string]any)
+
+	if wEnv["NIWA_SESSION_ROLE"] == cEnv["NIWA_SESSION_ROLE"] {
+		t.Errorf("worker and coordinator configs have the same NIWA_SESSION_ROLE=%q; worker must carry its actual role", wEnv["NIWA_SESSION_ROLE"])
+	}
+	if _, ok := wEnv["NIWA_TASK_ID"]; !ok {
+		t.Errorf("worker config is missing NIWA_TASK_ID")
+	}
+	if _, ok := cEnv["NIWA_TASK_ID"]; ok {
+		t.Errorf("coordinator config should not have NIWA_TASK_ID")
+	}
+}
+
 func TestWriteIdempotent_MatchingContentSkipsWrite(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "sub", "file.txt")
