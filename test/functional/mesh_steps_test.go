@@ -211,6 +211,78 @@ group = "apps"
 	return ctx, nil
 }
 
+// iSetUpChanneledWorkspaceWithPermissions creates a minimal config repo with
+// [channels.mesh] and a [claude.settings] block that sets the given
+// permissions value. Supported values match niwa's permissionsMapping:
+// "bypass" → bypassPermissions, "ask" → askPermissions.
+func iSetUpChanneledWorkspaceWithPermissions(ctx context.Context, name, permissions string) (context.Context, error) {
+	s := getState(ctx)
+	if s == nil {
+		return ctx, fmt.Errorf("no test state")
+	}
+	body := fmt.Sprintf(`[workspace]
+name = %q
+
+[channels.mesh]
+[channels.mesh.roles]
+coordinator = ""
+worker = ""
+
+[claude.settings]
+permissions = %q
+`, name, permissions)
+	url, err := s.gitServer.ConfigRepo(name, body)
+	if err != nil {
+		return ctx, fmt.Errorf("creating config repo %q: %w", name, err)
+	}
+	s.repoURLs[name] = url
+	if err := runNiwa(s, s.workspaceRoot, "niwa init --from "+url); err != nil {
+		return ctx, err
+	}
+	if s.exitCode != 0 {
+		return ctx, fmt.Errorf("niwa init exit=%d\nstdout:\n%s\nstderr:\n%s",
+			s.exitCode, s.stdout, s.stderr)
+	}
+	return ctx, nil
+}
+
+// theWorkerWasSpawnedWith asserts that .niwa/.test/worker_spawn_args.txt in
+// the named instance contains the given substring. Used with the "dump-args"
+// fake worker scenario to verify --permission-mode and --allowed-tools flags.
+func theWorkerWasSpawnedWith(ctx context.Context, instance, want string) error {
+	s := getState(ctx)
+	if s == nil {
+		return fmt.Errorf("no test state")
+	}
+	argsPath := filepath.Join(s.workspaceRoot, instance, ".niwa", ".test", "worker_spawn_args.txt")
+	data, err := os.ReadFile(argsPath)
+	if err != nil {
+		return fmt.Errorf("reading worker spawn args for instance %q: %w", instance, err)
+	}
+	if !strings.Contains(string(data), want) {
+		return fmt.Errorf("worker spawn args for instance %q do not contain %q:\n%s", instance, want, string(data))
+	}
+	return nil
+}
+
+// theWorkerWasNotSpawnedWith asserts that .niwa/.test/worker_spawn_args.txt in
+// the named instance does NOT contain the given substring.
+func theWorkerWasNotSpawnedWith(ctx context.Context, instance, unwanted string) error {
+	s := getState(ctx)
+	if s == nil {
+		return fmt.Errorf("no test state")
+	}
+	argsPath := filepath.Join(s.workspaceRoot, instance, ".niwa", ".test", "worker_spawn_args.txt")
+	data, err := os.ReadFile(argsPath)
+	if err != nil {
+		return fmt.Errorf("reading worker spawn args for instance %q: %w", instance, err)
+	}
+	if strings.Contains(string(data), unwanted) {
+		return fmt.Errorf("worker spawn args for instance %q contain unexpected %q:\n%s", instance, unwanted, string(data))
+	}
+	return nil
+}
+
 // runWithFakeWorker sets the env overrides that make subsequent niwa
 // apply / niwa create spawn the scripted worker fake instead of `claude -p`.
 // The scenario name selects the fake's behavior; see worker_fake/main.go

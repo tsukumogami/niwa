@@ -22,6 +22,7 @@
 //   - stall-forever            — check_messages, sleep forever
 //   - ignore-sigterm           — check_messages, block SIGTERM, sleep forever
 //   - reply-to-ask             — check_messages, send_message reply
+//   - dump-args                — write os.Args to .niwa/.test/worker_spawn_args.txt, then finish(completed)
 //
 // Authorization window: workers may call tools before the daemon backfills
 // state.json.worker.{pid, start_time} (the "worker.pid==0 backfill
@@ -128,6 +129,8 @@ func run() int {
 		return runIgnoreSIGTERM(ctx, client, taskID)
 	case "reply-to-ask":
 		return runReplyToAsk(ctx, client, role)
+	case "dump-args":
+		return runDumpArgs(ctx, client, taskID, instanceRoot)
 	default:
 		fmt.Fprintf(os.Stderr, "worker-fake: unknown scenario %q\n", scenario)
 		return 2
@@ -268,6 +271,20 @@ func runReplyToAsk(ctx context.Context, c *mcpClient, role string) int {
 		return 2
 	}
 	return 0
+}
+
+// runDumpArgs writes os.Args to .niwa/.test/worker_spawn_args.txt in the
+// instance root so the test harness can assert on --permission-mode and
+// --allowed-tools without running a real claude session. Written before
+// any MCP calls so the file is present even if the MCP flow errors. After
+// writing it drives the standard finish-completed flow.
+func runDumpArgs(ctx context.Context, c *mcpClient, taskID, instanceRoot string) int {
+	testDir := filepath.Join(instanceRoot, ".niwa", ".test")
+	if err := os.MkdirAll(testDir, 0o700); err == nil {
+		argsFile := filepath.Join(testDir, "worker_spawn_args.txt")
+		_ = os.WriteFile(argsFile, []byte(strings.Join(os.Args, "\n")), 0o600)
+	}
+	return runFinishCompleted(ctx, c, taskID)
 }
 
 // ---------------------------------------------------------------------

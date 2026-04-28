@@ -204,6 +204,43 @@ Feature: Cross-session mesh (Issue #10 harness)
     Then the exit code is 0
     Then an unauthorized MCP call for instance "auth-neg-ws" receives NOT_TASK_PARTY
 
+  # ---------------------------------------------------------------------
+  # Worker permission inheritance (DESIGN-worker-permissions).
+  # The daemon resolves --permission-mode at startup from settings.local.json
+  # and stores it in spawnContext. The dump-args fake writes os.Args to
+  # .niwa/.test/worker_spawn_args.txt so these scenarios can assert on the
+  # exact flags passed to the worker without invoking a real claude session.
+  # ---------------------------------------------------------------------
+
+  @critical
+  Scenario: worker inherits bypassPermissions when coordinator is bypass-configured
+    Given a clean niwa environment
+    And a local git server is set up
+    And a channeled workspace "bypass-perm-ws" with permissions "bypass" exists
+    And the daemon has small timing overrides
+    And the daemon runs with fake worker scenario "dump-args"
+    When I run "niwa create bypass-perm-ws"
+    Then the exit code is 0
+    When I delegate a task to role "worker" in instance "bypass-perm-ws" with body '{"kind":"perm-check"}'
+    Then the task state in instance "bypass-perm-ws" eventually becomes "completed"
+    And the worker in instance "bypass-perm-ws" was spawned with "--permission-mode=bypassPermissions"
+    And the worker in instance "bypass-perm-ws" was not spawned with "Bash(gh *)"
+
+  @critical
+  Scenario: worker receives curated Bash tools when coordinator has no bypass configured
+    Given a clean niwa environment
+    And a local git server is set up
+    And a channeled workspace "fallback-perm-ws" exists
+    And the daemon has small timing overrides
+    And the daemon runs with fake worker scenario "dump-args"
+    When I run "niwa create fallback-perm-ws"
+    Then the exit code is 0
+    When I delegate a task to role "worker" in instance "fallback-perm-ws" with body '{"kind":"perm-check"}'
+    Then the task state in instance "fallback-perm-ws" eventually becomes "completed"
+    And the worker in instance "fallback-perm-ws" was spawned with "--permission-mode=acceptEdits"
+    And the worker in instance "fallback-perm-ws" was spawned with "Bash(gh *)"
+    And the worker in instance "fallback-perm-ws" was spawned with "Bash(git *)"
+
   # MCP config layout regression: Claude Code's MCP discovery loads
   # `<cwd>/.mcp.json` at the directory root and does not walk parent
   # directories. Niwa writes only `<instance>/.mcp.json` — the PRD's

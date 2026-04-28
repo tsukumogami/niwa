@@ -270,6 +270,9 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 
 	// --- Mesh feature: functional-test harness (Issue #10) ---
 	ctx.Step(`^a channeled workspace "([^"]*)" exists$`, iSetUpChanneledWorkspace)
+	ctx.Step(`^a channeled workspace "([^"]*)" with permissions "([^"]*)" exists$`, iSetUpChanneledWorkspaceWithPermissions)
+	ctx.Step(`^the worker in instance "([^"]*)" was spawned with "([^"]*)"$`, theWorkerWasSpawnedWith)
+	ctx.Step(`^the worker in instance "([^"]*)" was not spawned with "([^"]*)"$`, theWorkerWasNotSpawnedWith)
 	ctx.Step(`^the daemon runs with fake worker scenario "([^"]*)"$`, iRunFakeWorkerWithScenario)
 	ctx.Step(`^the daemon has small timing overrides$`, iSetDefaultTimingOverrides)
 	ctx.Step(`^the daemon pauses before claiming envelopes$`, iPauseDaemonBeforeClaim)
