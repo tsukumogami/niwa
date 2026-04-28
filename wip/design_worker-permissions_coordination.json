@@ -1,0 +1,19 @@
+{
+  "topic": "worker-permissions",
+  "decisions": [
+    {
+      "id": 1,
+      "question": "What permission scope should worker sessions receive? Options span full bypass, inheriting the coordinator's configured mode, a curated tool-pattern preset, and per-delegation specification.",
+      "status": "pending",
+      "complexity": "critical"
+    },
+    {
+      "id": 2,
+      "question": "How should the chosen permission value be resolved and passed to workers at spawn time? Options include reading settings.local.json at daemon start, reading it at each spawn, passing via the task envelope, or hardcoding a preset in allowed_tools.go.",
+      "status": "pending",
+      "complexity": "standard"
+    }
+  ],
+  "cross_validation": "passed",
+  "round": 0
+}
