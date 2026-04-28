@@ -872,7 +872,7 @@ func spawnWorker(evt inboxEvent, taskDir string, s spawnContext) {
 	}
 
 	// --permission-mode is resolved once at daemon startup from the
-	// coordinator's settings.local.json (see spawnContext.workerPermMode).
+	// coordinator's settings.json (see spawnContext.workerPermMode).
 	// Bypass-configured coordinators produce bypass workers; all others use
 	// acceptEdits plus WorkerFallbackBashTools so common dev tools (gh, git,
 	// go, make) don't block on approval dialogs in headless -p mode.
