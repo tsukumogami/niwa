@@ -1,5 +1,5 @@
 ---
-status: Proposed
+status: Accepted
 problem: |
   Worker sessions spawned by niwa's mesh daemon use --permission-mode=acceptEdits,
   which auto-approves file writes but blocks shell tool calls. Workers run headless
@@ -26,7 +26,7 @@ rationale: |
 
 ## Status
 
-Proposed
+Accepted
 
 ## Context and problem statement
 
