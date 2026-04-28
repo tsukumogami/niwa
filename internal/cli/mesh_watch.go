@@ -262,16 +262,17 @@ func runMeshWatch(cmd *cobra.Command, args []string) error {
 	// 8. Central event loop. Everything state-changing flows through
 	// this goroutine: fsnotify events, catch-up queue, per-task exits.
 	spawnCtx := spawnContext{
-		instanceRoot:  instanceRoot,
-		niwaDir:       niwaDir,
-		spawnBin:      spawnInfo.Path,
-		logger:        logger,
-		exitCh:        exitCh,
-		wg:            &supervisorWG,
-		shutdownCtx:   ctx,
-		backoffs:      cfg.RetryBackoffs,
-		stallWatchdog: cfg.StallWatchdog,
-		sigTermGrace:  cfg.SIGTermGrace,
+		instanceRoot:   instanceRoot,
+		niwaDir:        niwaDir,
+		spawnBin:       spawnInfo.Path,
+		logger:         logger,
+		exitCh:         exitCh,
+		wg:             &supervisorWG,
+		shutdownCtx:    ctx,
+		backoffs:       cfg.RetryBackoffs,
+		stallWatchdog:  cfg.StallWatchdog,
+		sigTermGrace:   cfg.SIGTermGrace,
+		workerPermMode: workspace.WorkerPermissionMode(instanceRoot),
 	}
 
 	// Replay catch-up events through a channel so the central loop has a
@@ -357,16 +358,17 @@ func runMeshWatch(cmd *cobra.Command, args []string) error {
 // niwa_finish_task). Both flow to the per-supervisor watchdog goroutine
 // started inside spawnWorker.
 type spawnContext struct {
-	instanceRoot  string
-	niwaDir       string
-	spawnBin      string
-	logger        *log.Logger
-	exitCh        chan<- supervisorExit
-	wg            *sync.WaitGroup
-	shutdownCtx   context.Context
-	backoffs      []time.Duration
-	stallWatchdog time.Duration
-	sigTermGrace  time.Duration
+	instanceRoot   string
+	niwaDir        string
+	spawnBin       string
+	logger         *log.Logger
+	exitCh         chan<- supervisorExit
+	wg             *sync.WaitGroup
+	shutdownCtx    context.Context
+	backoffs       []time.Duration
+	stallWatchdog  time.Duration
+	sigTermGrace   time.Duration
+	workerPermMode string // "bypassPermissions" or "acceptEdits"; resolved once at startup
 }
 
 // orphanEntry tracks a live-orphan worker adopted at startup (Issue 7).
@@ -869,14 +871,15 @@ func spawnWorker(evt inboxEvent, taskDir string, s spawnContext) {
 		return
 	}
 
-	// --permission-mode=acceptEdits auto-approves file edits but does NOT
-	// auto-approve MCP tool calls; a worker running in headless `-p` mode
-	// therefore stalls on the first tool-call approval dialog and exits
-	// without making progress. --allowed-tools whitelists each niwa MCP
-	// tool by its mcp__<server>__<tool> name so the worker can call them
-	// without prompting. The list must stay in sync with the MCP server's
-	// tools/list response (internal/mcp/server.go) and the niwa-mesh skill
-	// allowed-tools block (internal/workspace/channels.go).
+	// --permission-mode is resolved once at daemon startup from the
+	// coordinator's settings.json (see spawnContext.workerPermMode).
+	// Bypass-configured coordinators produce bypass workers; all others use
+	// acceptEdits plus WorkerFallbackBashTools so common dev tools (gh, git,
+	// go, make) don't block on approval dialogs in headless -p mode.
+	// --allowed-tools whitelists each niwa MCP tool by its
+	// mcp__<server>__<tool> name; this list must stay in sync with the MCP
+	// server's tools/list response (internal/mcp/server.go) and the
+	// niwa-mesh skill allowed-tools block (internal/workspace/channels.go).
 	//
 	// --strict-mcp-config disables Claude Code's MCP discovery so the
 	// worker only sees the niwa server we point it at via --mcp-config —
@@ -885,13 +888,17 @@ func spawnWorker(evt inboxEvent, taskDir string, s spawnContext) {
 	// onto a coordinator launcher (human-launched at the instance root)
 	// because coordinators rely on Claude Code discovering
 	// <instance>/.mcp.json automatically.
+	tools := append([]string(nil), mcp.ClaudeAllowedTools...)
+	if s.workerPermMode != "bypassPermissions" {
+		tools = append(tools, mcp.WorkerFallbackBashTools...)
+	}
 	cmd := exec.Command(
 		s.spawnBin,
 		"-p", prompt,
-		"--permission-mode=acceptEdits",
+		"--permission-mode="+s.workerPermMode,
 		"--mcp-config="+workerMCPPath,
 		"--strict-mcp-config",
-		"--allowed-tools", strings.Join(mcp.ClaudeAllowedTools, ","),
+		"--allowed-tools", strings.Join(tools, ","),
 	)
 
 	// Env: pass-through daemon's env, then niwa-owned last-wins

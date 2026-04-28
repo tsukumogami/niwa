@@ -27,3 +27,17 @@ var ClaudeAllowedTools = []string{
 	"mcp__niwa__niwa_send_message",
 	"mcp__niwa__niwa_check_messages",
 }
+
+// WorkerFallbackBashTools are appended to ClaudeAllowedTools when spawning
+// workers that are not in bypassPermissions mode. These patterns grant
+// access to common dev tools without requiring full bypass. They are
+// usability defaults for headless workers, not security boundaries — the
+// patterns are broad (e.g. Bash(gh *) allows any gh subcommand). Users
+// who need tighter control should configure permissions = "bypass" explicitly.
+var WorkerFallbackBashTools = []string{
+	"Bash(gh *)",
+	"Bash(git *)",
+	"Bash(go test *)",
+	"Bash(go build *)",
+	"Bash(make *)",
+}
