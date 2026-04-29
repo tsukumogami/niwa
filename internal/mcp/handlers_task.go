@@ -22,6 +22,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -332,10 +333,13 @@ func (s *Server) handleAwaitTask(args awaitTaskArgs) toolResult {
 		return *errR
 	}
 
-	// Register waiter BEFORE the race-guard re-read so a terminal message
-	// arriving between the read and registration still wakes us.
-	ch, cancel := s.registerAwaitWaiter(args.TaskID)
-	defer cancel()
+	// Register both waiters BEFORE the catch-up scan so no message can slip
+	// between the scan and the blocking select.
+	ch, cancelAwait := s.registerAwaitWaiter(args.TaskID)
+	defer cancelAwait()
+
+	qCh, cancelQuestion := s.registerQuestionWaiter(s.role)
+	defer cancelQuestion()
 
 	// Race guard: re-read state.json; if terminal, return immediately.
 	taskDir := taskDirPath(s.instanceRoot, args.TaskID)
@@ -343,9 +347,20 @@ func (s *Server) handleAwaitTask(args awaitTaskArgs) toolResult {
 		return formatTerminalResult(fresh)
 	}
 
+	// Catch-up scan: surface any task.ask files that arrived before we
+	// registered questionWaiters. Does not filter by seenFiles — the watcher
+	// already owns hasSeen; we intentionally re-surface pre-existing files so
+	// coordinators that restart or re-wait after a question_pending do not miss
+	// pending questions.
+	if s.roleInboxDir != "" {
+		s.scanInboxForQuestions(qCh)
+	}
+
 	select {
 	case evt := <-ch:
 		return formatEventResult(evt, taskDir)
+	case qEvt := <-qCh:
+		return formatQuestionResult(qEvt)
 	case <-time.After(time.Duration(timeout) * time.Second):
 		// On timeout return a shape that signals the timeout explicitly while
 		// preserving the current non-terminal state so callers can inspect
@@ -369,6 +384,72 @@ func (s *Server) handleAwaitTask(args awaitTaskArgs) toolResult {
 		b, _ := json.Marshal(timeoutPayload)
 		return textResult(string(b))
 	}
+}
+
+// registerQuestionWaiter inserts a buffered channel into questionWaiters[role]
+// and returns the channel plus a cleanup func. Only one waiter per role is
+// supported; a concurrent registration for the same role replaces the previous
+// channel.
+func (s *Server) registerQuestionWaiter(role string) (chan questionEvent, func()) {
+	ch := make(chan questionEvent, 1)
+	s.waitersMu.Lock()
+	s.questionWaiters[role] = ch
+	s.waitersMu.Unlock()
+	return ch, func() {
+		s.waitersMu.Lock()
+		// Only delete if it's still our channel (concurrent re-wait replaces it).
+		if s.questionWaiters[role] == ch {
+			delete(s.questionWaiters, role)
+		}
+		s.waitersMu.Unlock()
+	}
+}
+
+// scanInboxForQuestions reads roleInboxDir and sends a non-blocking
+// questionEvent to ch for every file with type == "task.ask". Skips files that
+// cannot be read or parsed. Used as the catch-up scan in handleAwaitTask to
+// surface questions that arrived before the questionWaiter was registered.
+func (s *Server) scanInboxForQuestions(ch chan questionEvent) {
+	entries, err := os.ReadDir(s.roleInboxDir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(s.roleInboxDir, e.Name()))
+		if err != nil {
+			continue
+		}
+		var m Message
+		if err := json.Unmarshal(data, &m); err != nil || m.Type != "task.ask" {
+			continue
+		}
+		qEvt := buildQuestionEvent(m)
+		if qEvt.AskTaskID == "" {
+			continue
+		}
+		select {
+		case ch <- qEvt:
+		default:
+		}
+		return // send at most one catch-up question per scan
+	}
+}
+
+// formatQuestionResult serializes a question_pending response from a
+// questionEvent. The body already carries the _niwa_note wrapper written by
+// handleAsk, so it is surfaced verbatim.
+func formatQuestionResult(q questionEvent) toolResult {
+	out := map[string]any{
+		"status":      "question_pending",
+		"ask_task_id": q.AskTaskID,
+		"from_role":   q.FromRole,
+		"body":        json.RawMessage(q.Body),
+	}
+	b, _ := json.Marshal(out)
+	return textResult(string(b))
 }
 
 // --- niwa_report_progress ----------------------------------------------------
