@@ -1,5 +1,5 @@
 ---
-status: Planned
+status: Current
 problem: |
   When a worker calls niwa_ask(to='coordinator'), the daemon always spawns an ephemeral
   claude -p process to fabricate an answer, even when the coordinator is actively running
@@ -33,7 +33,7 @@ rationale: |
 
 ## Status
 
-Planned
+Current
 
 ## Context and Problem Statement
 
