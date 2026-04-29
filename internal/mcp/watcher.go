@@ -113,11 +113,41 @@ func (s *Server) notifyNewFile(path, name string) {
 		}
 	}
 
+	// task.ask dispatch: a worker question routed to a live coordinator.
+	// Dispatches to questionWaiters[to.role] with a non-blocking send.
+	// Files move to inbox/read/ only after a successful send; if the channel
+	// is full or no waiter is registered, the file stays in inbox for the
+	// catch-up scan inside handleAwaitTask to find on re-registration.
+	if m.Type == "task.ask" {
+		qEvt := buildQuestionEvent(m)
+		if qEvt.AskTaskID != "" {
+			s.waitersMu.Lock()
+			ch, ok := s.questionWaiters[m.To.Role]
+			s.waitersMu.Unlock()
+			if ok {
+				readDir := filepath.Join(filepath.Dir(path), "read")
+				_ = os.MkdirAll(readDir, 0o700)
+				select {
+				case ch <- qEvt:
+					_ = os.Rename(path, filepath.Join(readDir, name))
+					s.markSeen(name)
+				default:
+					// Channel full or no waiter; leave file in inbox.
+				}
+				return
+			}
+		}
+	}
+
 	// Task-terminal dispatch: task.completed / task.abandoned / task.cancelled
 	// messages wake an awaitWaiter keyed by body.task_id. This path runs
 	// BEFORE the reply_to dispatch so sync niwa_delegate / niwa_await_task /
 	// niwa_ask waiters unblock on terminal messages even when the underlying
 	// message happens to carry a reply_to.
+	//
+	// Deferred move-to-read: files move to inbox/read/ only after a successful
+	// channel send. A dropped send (channel full) leaves the file in inbox so
+	// the catch-up scan can surface it when the coordinator re-registers.
 	if kind, ok := taskTerminalKind(m.Type); ok {
 		taskID := extractTaskID(m)
 		if taskID != "" {
@@ -125,10 +155,6 @@ func (s *Server) notifyNewFile(path, name string) {
 			ch, ok := s.awaitWaiters[taskID]
 			s.waitersMu.Unlock()
 			if ok {
-				readDir := filepath.Join(filepath.Dir(path), "read")
-				_ = os.MkdirAll(readDir, 0o700)
-				_ = os.Rename(path, filepath.Join(readDir, name))
-				// Buffered-1 send; drop if a previous event already queued.
 				evt := taskEvent{TaskID: taskID, Kind: kind, At: time.Now()}
 				switch kind {
 				case EvtCompleted:
@@ -136,11 +162,15 @@ func (s *Server) notifyNewFile(path, name string) {
 				case EvtAbandoned:
 					evt.Reason = extractBodyField(m.Body, "reason")
 				}
+				readDir := filepath.Join(filepath.Dir(path), "read")
+				_ = os.MkdirAll(readDir, 0o700)
 				select {
 				case ch <- evt:
+					_ = os.Rename(path, filepath.Join(readDir, name))
+					s.markSeen(name)
 				default:
+					// Channel full; leave file in inbox.
 				}
-				s.markSeen(name)
 				return
 			}
 		}
@@ -173,6 +203,16 @@ func (s *Server) notifyNewFile(path, name string) {
 		Source:  "niwa",
 		Content: content,
 	})
+}
+
+// buildQuestionEvent constructs a questionEvent from a task.ask Message. The
+// AskTaskID is taken from the message's TaskID field (written by writeAskNotification).
+func buildQuestionEvent(m Message) questionEvent {
+	return questionEvent{
+		AskTaskID: m.TaskID,
+		FromRole:  m.From.Role,
+		Body:      m.Body,
+	}
 }
 
 // taskTerminalKind maps a message type to its TaskEventKind when the type

@@ -61,9 +61,10 @@ type Server struct {
 	seenMu    sync.Mutex
 	seenFiles map[string]struct{}
 
-	waitersMu    sync.Mutex
-	waiters      map[string]chan toolResult // msgID → reply channel
-	awaitWaiters map[string]chan taskEvent  // task_id → terminal-event channel (size-1 buffered)
+	waitersMu       sync.Mutex
+	waiters         map[string]chan toolResult   // msgID → reply channel
+	awaitWaiters    map[string]chan taskEvent    // task_id → terminal-event channel (size-1 buffered)
+	questionWaiters map[string]chan questionEvent // role → question-event channel (size-1 buffered)
 
 	// audit emits one entry per tool call (see DESIGN-mcp-call-telemetry.md).
 	// Always a file-backed appender at <instanceRoot>/.niwa/mcp-audit.log;
@@ -82,13 +83,14 @@ type Server struct {
 // through every call site.
 func New(role, instanceRoot string) *Server {
 	s := &Server{
-		instanceRoot: instanceRoot,
-		role:         role,
-		taskID:       os.Getenv("NIWA_TASK_ID"),
-		seenFiles:    make(map[string]struct{}),
-		waiters:      make(map[string]chan toolResult),
-		awaitWaiters: make(map[string]chan taskEvent),
-		audit:        NewFileAuditSink(instanceRoot),
+		instanceRoot:    instanceRoot,
+		role:            role,
+		taskID:          os.Getenv("NIWA_TASK_ID"),
+		seenFiles:       make(map[string]struct{}),
+		waiters:         make(map[string]chan toolResult),
+		awaitWaiters:    make(map[string]chan taskEvent),
+		questionWaiters: make(map[string]chan questionEvent),
+		audit:           NewFileAuditSink(instanceRoot),
 	}
 	if instanceRoot != "" && role != "" {
 		s.roleInboxDir = filepath.Join(instanceRoot, ".niwa", "roles", role, "inbox")
