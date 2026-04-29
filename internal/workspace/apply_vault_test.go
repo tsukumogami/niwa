@@ -1133,3 +1133,108 @@ visibility = "public"
 		t.Errorf("expected exactly 1 hit on universal-auth endpoint (proving overlay vault token injection ran), got %d", authHits)
 	}
 }
+
+// TestApplyCoordinatorReceivesVaultResolvedEnv confirms that after apply,
+// the coordinator (workspace root) settings.json receives the vault-resolved
+// plaintext for a claude.env promoted key — not the redacted "***" placeholder
+// that the former resolveEnvFromConfig code path produced. It also verifies
+// that settings.json is written with 0o600 permissions.
+func TestApplyCoordinatorReceivesVaultResolvedEnv(t *testing.T) {
+	withFakeVaultBackend(t)
+
+	const resolvedToken = "ghp_coordinator-vault-resolved-xxxxx"
+
+	configTOML := `
+[workspace]
+name = "coordinator-vault-ws"
+
+[[sources]]
+org = "testorg"
+
+[groups.default]
+repos = ["app"]
+
+[vault.provider]
+kind = "fake"
+
+[vault.provider.values]
+GH_TOKEN = "` + resolvedToken + `"
+
+[env.secrets]
+GH_TOKEN = "vault://GH_TOKEN"
+
+[claude.env]
+promote = ["GH_TOKEN"]
+`
+
+	tmpDir := t.TempDir()
+	niwaDir := filepath.Join(tmpDir, ".niwa")
+	if err := os.MkdirAll(niwaDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(niwaDir, "workspace.toml"), []byte(configTOML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := config.Load(filepath.Join(niwaDir, "workspace.toml"))
+	if err != nil {
+		t.Fatalf("loading workspace config: %v", err)
+	}
+	cfg := result.Config
+
+	mockClient := &mockGitHubClient{
+		repos: map[string][]github.Repo{
+			"testorg": {
+				{Name: "app", SSHURL: "git@github.com:testorg/app.git"},
+			},
+		},
+	}
+
+	workspaceRoot := tmpDir
+	instanceRoot := filepath.Join(workspaceRoot, "coordinator-vault-ws")
+
+	groupDir := filepath.Join(instanceRoot, "default")
+	if err := os.MkdirAll(filepath.Join(groupDir, "app", ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(groupDir, "app", ".gitignore"), []byte("*.local*\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	applier := NewApplier(mockClient)
+	applier.Cloner = &Cloner{}
+
+	if _, err := applier.Create(context.Background(), cfg, niwaDir, workspaceRoot, cfg.Workspace.Name); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	settingsPath := filepath.Join(instanceRoot, ".claude", "settings.json")
+	data, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatalf("reading coordinator settings.json: %v", err)
+	}
+	content := string(data)
+
+	// The resolved plaintext must reach the coordinator settings.json.
+	wantEntry := `"GH_TOKEN": "` + resolvedToken + `"`
+	if !strings.Contains(content, wantEntry) {
+		t.Errorf("coordinator settings.json missing %q\ngot:\n%s", wantEntry, content)
+	}
+	// The redacted placeholder must not appear.
+	if strings.Contains(content, "***") {
+		t.Errorf("coordinator settings.json must not contain redacted placeholder:\n%s", content)
+	}
+	// The raw vault:// URI must not appear.
+	if strings.Contains(content, "vault://GH_TOKEN") {
+		t.Errorf("coordinator settings.json must not contain unresolved vault URI:\n%s", content)
+	}
+
+	// settings.json containing vault plaintext must be written with 0o600.
+	info, err := os.Stat(settingsPath)
+	if err != nil {
+		t.Fatalf("stat coordinator settings.json: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Errorf("coordinator settings.json mode = %o, want 0o600", got)
+	}
+}
