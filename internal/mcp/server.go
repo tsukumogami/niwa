@@ -384,6 +384,7 @@ func (s *Server) callTool(p toolCallParams) toolResult {
 // explaining that the payload is delegator-supplied untrusted content. This
 // is the data-plane prompt-injection defense required by Decision 3.
 func (s *Server) handleCheckMessages() toolResult {
+	s.maybeRegisterCoordinator()
 	dir := s.roleInboxDir
 	if dir == "" {
 		return errResult("no inbox dir configured; is NIWA_SESSION_ROLE set?")

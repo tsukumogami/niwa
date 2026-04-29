@@ -256,6 +256,8 @@ func (s *Server) handleQueryTask(args queryTaskArgs) toolResult {
 // --- niwa_await_task ---------------------------------------------------------
 
 func (s *Server) handleAwaitTask(args awaitTaskArgs) toolResult {
+	s.maybeRegisterCoordinator()
+
 	timeout := args.TimeoutSeconds
 	if timeout <= 0 {
 		timeout = 600
