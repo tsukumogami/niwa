@@ -1001,3 +1001,90 @@ func TestMapStoreError_CorruptedStateIsInternal(t *testing.T) {
 		t.Errorf("ErrLockTimeout must not map to NOT_TASK_PARTY (got %q)", ec)
 	}
 }
+
+// TestHandleAwaitTask_Timeout_IncludesLastProgress verifies that a timeout
+// response includes last_progress when the task state carries a progress record.
+func TestHandleAwaitTask_Timeout_IncludesLastProgress(t *testing.T) {
+	s := newTestServer(t, "coordinator", "web")
+	taskID := writeTaskFixture(t, s.instanceRoot, "coordinator", "web", TaskStateRunning)
+
+	taskDir := taskDirPath(s.instanceRoot, taskID)
+	if err := UpdateState(taskDir, func(cur *TaskState) (*TaskState, *TransitionLogEntry, error) {
+		next := *cur
+		next.LastProgress = &TaskProgress{Summary: "halfway there", At: "2026-01-01T00:00:00Z"}
+		return &next, nil, nil
+	}); err != nil {
+		t.Fatalf("UpdateState: %v", err)
+	}
+
+	res := s.handleAwaitTask(awaitTaskArgs{TaskID: taskID, TimeoutSeconds: 1})
+	if res.IsError {
+		t.Fatalf("unexpected error: %s", res.Content[0].Text)
+	}
+	text := res.Content[0].Text
+	if !strings.Contains(text, `"last_progress"`) {
+		t.Errorf("want last_progress in timeout response, got %s", text)
+	}
+	if !strings.Contains(text, "halfway there") {
+		t.Errorf("want progress summary in timeout response, got %s", text)
+	}
+}
+
+// TestHandleAwaitTask_Timeout_OmitsLastProgressWhenNil verifies that a timeout
+// response excludes last_progress when the task has no progress record.
+func TestHandleAwaitTask_Timeout_OmitsLastProgressWhenNil(t *testing.T) {
+	s := newTestServer(t, "coordinator", "web")
+	taskID := writeTaskFixture(t, s.instanceRoot, "coordinator", "web", TaskStateRunning)
+
+	res := s.handleAwaitTask(awaitTaskArgs{TaskID: taskID, TimeoutSeconds: 1})
+	if res.IsError {
+		t.Fatalf("unexpected error: %s", res.Content[0].Text)
+	}
+	text := res.Content[0].Text
+	if strings.Contains(text, `"last_progress"`) {
+		t.Errorf("want no last_progress in timeout response when nil, got %s", text)
+	}
+}
+
+// TestFormatTerminalResult_IncludesLastProgressAndMaxRestarts verifies that
+// formatTerminalResult surfaces last_progress and max_restarts when set.
+func TestFormatTerminalResult_IncludesLastProgressAndMaxRestarts(t *testing.T) {
+	st := &TaskState{
+		TaskID:       "tid",
+		State:        TaskStateCompleted,
+		RestartCount: 2,
+		MaxRestarts:  3,
+		LastProgress: &TaskProgress{Summary: "final step", At: "2026-01-01T00:00:00Z"},
+		Result:       json.RawMessage(`{"ok":true}`),
+	}
+	res := formatTerminalResult(st)
+	text := res.Content[0].Text
+	if !strings.Contains(text, `"last_progress"`) {
+		t.Errorf("want last_progress in terminal result, got %s", text)
+	}
+	if !strings.Contains(text, `"max_restarts":3`) {
+		t.Errorf("want max_restarts:3 in terminal result, got %s", text)
+	}
+	if !strings.Contains(text, `"restart_count":2`) {
+		t.Errorf("want restart_count:2 in terminal result, got %s", text)
+	}
+}
+
+// TestFormatTerminalResult_OmitsProgressFieldsWhenAbsent verifies that
+// last_progress is absent when nil and max_restarts is absent when
+// restart_count == 0.
+func TestFormatTerminalResult_OmitsProgressFieldsWhenAbsent(t *testing.T) {
+	st := &TaskState{
+		TaskID:  "tid",
+		State:   TaskStateCompleted,
+		Result:  json.RawMessage(`{"ok":true}`),
+	}
+	res := formatTerminalResult(st)
+	text := res.Content[0].Text
+	if strings.Contains(text, `"last_progress"`) {
+		t.Errorf("want no last_progress when nil, got %s", text)
+	}
+	if strings.Contains(text, `"max_restarts"`) {
+		t.Errorf("want no max_restarts when restart_count==0, got %s", text)
+	}
+}

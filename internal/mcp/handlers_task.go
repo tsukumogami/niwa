@@ -704,11 +704,19 @@ func formatQueryResult(st *TaskState) string {
 
 // formatTerminalResult returns a {status, result|reason, restart_count} shape
 // for niwa_await_task / sync niwa_delegate when the task is already terminal.
+// max_restarts is included when restart_count > 0 so the coordinator can judge
+// severity. last_progress is included when non-nil.
 func formatTerminalResult(st *TaskState) toolResult {
 	payload := map[string]any{
 		"status":        st.State,
 		"task_id":       st.TaskID,
 		"restart_count": st.RestartCount,
+	}
+	if st.RestartCount > 0 {
+		payload["max_restarts"] = st.MaxRestarts
+	}
+	if st.LastProgress != nil {
+		payload["last_progress"] = st.LastProgress
 	}
 	switch st.State {
 	case TaskStateCompleted:
