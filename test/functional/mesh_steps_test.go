@@ -1,6 +1,7 @@
 package functional
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -1567,6 +1568,273 @@ func allTasksInInstanceAreCompleted(ctx context.Context, n int, instance string)
 // execLookPath is a local indirection over exec.LookPath so test builds
 // can stub it if ever needed. Kept trivial for now.
 func execLookPath(name string) (string, error) { return exec.LookPath(name) }
+
+// ---------------------------------------------------------------------
+// Live coordinator session registration and question-handling steps.
+// ---------------------------------------------------------------------
+
+// theCoordinatorSessionIsRegisteredInInstance writes a SessionEntry for
+// the coordinator role to sessions.json, using the current test process's
+// PID. This makes lookupLiveCoordinator return true so niwa_ask routes
+// questions directly to the coordinator's role inbox instead of spawning
+// an ephemeral worker.
+func theCoordinatorSessionIsRegisteredInInstance(ctx context.Context, instance string) (context.Context, error) {
+	s := getState(ctx)
+	if s == nil {
+		return ctx, fmt.Errorf("no test state")
+	}
+	instRoot := filepath.Join(s.workspaceRoot, instance)
+	sessionsDir := filepath.Join(instRoot, ".niwa", "sessions")
+	if err := os.MkdirAll(sessionsDir, 0o700); err != nil {
+		return ctx, fmt.Errorf("mkdir sessions: %w", err)
+	}
+	pid := os.Getpid()
+	start, _ := mcp.PIDStartTime(pid)
+	entry := mcp.SessionEntry{
+		ID:           newTestUUIDv4(),
+		Role:         "coordinator",
+		PID:          pid,
+		StartTime:    start,
+		InboxDir:     filepath.Join(instRoot, ".niwa", "roles", "coordinator", "inbox"),
+		RegisteredAt: time.Now().UTC().Format(time.RFC3339),
+	}
+	if err := mcp.WriteSessionEntry(sessionsDir, entry); err != nil && !strings.Contains(err.Error(), "already registered") {
+		return ctx, fmt.Errorf("write session entry: %w", err)
+	}
+	return ctx, nil
+}
+
+// theCoordinatorAnswersQuestionViaCheckMessages polls the coordinator's
+// role inbox for a task.ask file, then calls niwa_finish_task as coordinator
+// to answer it. This simulates a coordinator that polls niwa_check_messages
+// and answers questions by calling niwa_finish_task on the ask_task_id.
+func theCoordinatorAnswersQuestionViaCheckMessages(ctx context.Context, instance string) (context.Context, error) {
+	s := getState(ctx)
+	if s == nil {
+		return ctx, fmt.Errorf("no test state")
+	}
+	instRoot := filepath.Join(s.workspaceRoot, instance)
+	coordInbox := filepath.Join(instRoot, ".niwa", "roles", "coordinator", "inbox")
+
+	// Poll for a task.ask file in the coordinator inbox.
+	deadline := time.Now().Add(10 * time.Second)
+	var askTaskID string
+	for time.Now().Before(deadline) && askTaskID == "" {
+		entries, err := os.ReadDir(coordInbox)
+		if err != nil {
+			time.Sleep(50 * time.Millisecond)
+			continue
+		}
+		for _, e := range entries {
+			if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+				continue
+			}
+			data, _ := os.ReadFile(filepath.Join(coordInbox, e.Name()))
+			var msg struct {
+				Type   string `json:"type"`
+				TaskID string `json:"task_id"`
+			}
+			if json.Unmarshal(data, &msg) == nil && msg.Type == "task.ask" && msg.TaskID != "" {
+				askTaskID = msg.TaskID
+				break
+			}
+		}
+		if askTaskID == "" {
+			time.Sleep(50 * time.Millisecond)
+		}
+	}
+	if askTaskID == "" {
+		return ctx, fmt.Errorf("no task.ask message in coordinator inbox within 10s")
+	}
+
+	// Answer the question via niwa_finish_task.
+	argsJSON := `{"task_id":"` + askTaskID + `","outcome":"completed","result":{"answer":"test-answer"}}`
+	out, err := callMCPToolAsRole(s, instRoot, "coordinator", "", "niwa_finish_task", argsJSON)
+	if err != nil {
+		return ctx, fmt.Errorf("niwa_finish_task for ask %s: %w", askTaskID, err)
+	}
+	if strings.Contains(out, `"isError":true`) {
+		return ctx, fmt.Errorf("niwa_finish_task returned error: %s", out)
+	}
+	return ctx, nil
+}
+
+// coordinatorMCPSession holds a running niwa mcp-serve process connected
+// via pipes for interactive multi-call scenarios.
+type coordinatorMCPSession struct {
+	cmd    *exec.Cmd
+	stdin  *os.File // write end of the pipe
+	stdout *bufio.Scanner
+	id     int
+}
+
+// theCoordinatorBlocksAndHandlesQuestionsForInstance runs a coordinator MCP
+// session, calls niwa_await_task on the last delegated task, handles one
+// question_pending result (by answering via niwa_finish_task), then
+// re-calls niwa_await_task until the task terminates or the 20-second
+// deadline expires. This verifies the Issue 4 three-way select and the
+// coordinator re-wait loop end-to-end.
+func theCoordinatorBlocksAndHandlesQuestionsForInstance(ctx context.Context, instance string) (context.Context, error) {
+	s := getState(ctx)
+	if s == nil {
+		return ctx, fmt.Errorf("no test state")
+	}
+	if s.lastTaskID == "" {
+		return ctx, fmt.Errorf("no task ID in scenario state")
+	}
+	instRoot := filepath.Join(s.workspaceRoot, instance)
+	taskID := s.lastTaskID
+
+	// Build the environment for the coordinator MCP server.
+	env := s.buildEnv()
+	envMap := make(map[string]string)
+	for _, kv := range env {
+		if i := strings.IndexByte(kv, '='); i >= 0 {
+			envMap[kv[:i]] = kv[i+1:]
+		}
+	}
+	envMap["NIWA_INSTANCE_ROOT"] = instRoot
+	envMap["NIWA_SESSION_ROLE"] = "coordinator"
+	delete(envMap, "NIWA_TASK_ID")
+	delete(envMap, "NIWA_WORKER_SPAWN_COMMAND")
+	delete(envMap, "NIWA_FAKE_SCENARIO")
+	delete(envMap, "NIWA_FAKE_TEST_BINARY")
+	envSlice := make([]string, 0, len(envMap))
+	for k, v := range envMap {
+		envSlice = append(envSlice, k+"="+v)
+	}
+
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		return ctx, fmt.Errorf("pipe: %w", err)
+	}
+	cmd := exec.Command(s.binPath, "mcp-serve")
+	cmd.Env = envSlice
+	cmd.Stdin = pr
+	var stdoutPipe strings.Builder
+	outPR, outPW, err := os.Pipe()
+	if err != nil {
+		pw.Close()
+		pr.Close()
+		return ctx, fmt.Errorf("stdout pipe: %w", err)
+	}
+	_ = stdoutPipe
+	cmd.Stdout = outPW
+	cmd.Stderr = os.Stderr
+	if err := cmd.Start(); err != nil {
+		pw.Close()
+		pr.Close()
+		outPW.Close()
+		outPR.Close()
+		return ctx, fmt.Errorf("start mcp-serve: %w", err)
+	}
+	outPW.Close() // write end only needed by child
+
+	scanner := bufio.NewScanner(outPR)
+	scanner.Buffer(make([]byte, 1<<20), 1<<20)
+
+	// sendLine writes a JSON-RPC request.
+	sendLine := func(line string) error {
+		_, err := pw.Write([]byte(line + "\n"))
+		return err
+	}
+	// readID blocks until a response with the given numeric ID appears.
+	readID := func(id int) (string, error) {
+		for scanner.Scan() {
+			text := scanner.Text()
+			// Look for "id":<id> in the response.
+			marker := fmt.Sprintf(`"id":%d`, id)
+			if strings.Contains(text, marker) {
+				return text, nil
+			}
+		}
+		return "", fmt.Errorf("EOF before id=%d response", id)
+	}
+
+	cleanup := func() {
+		pw.Close()
+		cmd.Process.Kill()
+		cmd.Wait()
+		pr.Close()
+		outPR.Close()
+	}
+
+	// Handshake.
+	if err := sendLine(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test-coord","version":"0.1"}}}`); err != nil {
+		cleanup()
+		return ctx, err
+	}
+	if _, err := readID(1); err != nil {
+		cleanup()
+		return ctx, fmt.Errorf("initialize: %w", err)
+	}
+	if err := sendLine(`{"jsonrpc":"2.0","method":"notifications/initialized"}`); err != nil {
+		cleanup()
+		return ctx, err
+	}
+
+	// First niwa_await_task — may return question_pending or terminal.
+	awaitArgs := `{"task_id":"` + taskID + `","timeout_seconds":20}`
+	if err := sendLine(`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"niwa_await_task","arguments":` + awaitArgs + `}}`); err != nil {
+		cleanup()
+		return ctx, err
+	}
+	resp1, err := readID(2)
+	if err != nil {
+		cleanup()
+		return ctx, fmt.Errorf("await_task id=2: %w", err)
+	}
+
+	// If question_pending, extract ask_task_id, answer, re-await.
+	if strings.Contains(resp1, `question_pending`) {
+		// Extract ask_task_id by parsing the JSON-RPC response properly.
+		// The response structure is:
+		//   {"result":{"content":[{"type":"text","text":"{\"ask_task_id\":\"<uuid>\"}"}]}}
+		var jrpc struct {
+			Result struct {
+				Content []struct {
+					Text string `json:"text"`
+				} `json:"content"`
+			} `json:"result"`
+		}
+		var askTaskID string
+		if json.Unmarshal([]byte(resp1), &jrpc) == nil && len(jrpc.Result.Content) > 0 {
+			var payload struct {
+				AskTaskID string `json:"ask_task_id"`
+			}
+			_ = json.Unmarshal([]byte(jrpc.Result.Content[0].Text), &payload)
+			askTaskID = payload.AskTaskID
+		}
+		if askTaskID == "" {
+			cleanup()
+			return ctx, fmt.Errorf("question_pending but could not extract ask_task_id from: %s", resp1)
+		}
+
+		// Answer the question.
+		finishArgs := `{"task_id":"` + askTaskID + `","outcome":"completed","result":{"answer":"re-wait-answer"}}`
+		if err := sendLine(`{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"niwa_finish_task","arguments":` + finishArgs + `}}`); err != nil {
+			cleanup()
+			return ctx, err
+		}
+		if _, err := readID(3); err != nil {
+			cleanup()
+			return ctx, fmt.Errorf("finish_task(ask) id=3: %w", err)
+		}
+
+		// Re-await the original task.
+		if err := sendLine(`{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"niwa_await_task","arguments":` + awaitArgs + `}}`); err != nil {
+			cleanup()
+			return ctx, err
+		}
+		if _, err := readID(4); err != nil {
+			cleanup()
+			return ctx, fmt.Errorf("await_task id=4: %w", err)
+		}
+	}
+
+	cleanup()
+	return ctx, nil
+}
 
 // newTestUUIDv4 returns a UUIDv4-shaped string using time+pid as entropy.
 // It matches the regex the taskstore uses for validation so the fake
