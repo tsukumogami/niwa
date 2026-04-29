@@ -2823,6 +2823,15 @@ func TestOrphanPolling_WorkerDies(t *testing.T) {
 // acquires the exclusive flock, the other logs "another daemon is
 // running" and exits 0. The surviving PID matches the winner.
 func TestConcurrentApply_SingleDaemon(t *testing.T) {
+	// The daemon creates an fsnotify watcher at startup. Skip gracefully when
+	// inotify resources are exhausted (e.g. developer workstations running many
+	// GUI applications near the default max_user_instances=128 limit).
+	if w, err := fsnotify.NewWatcher(); err != nil {
+		t.Skipf("skipping: insufficient inotify resources for daemon test: %v", err)
+	} else {
+		w.Close()
+	}
+
 	niwaBin := ensureTestBinary(t)
 
 	f := newDaemonTestFixture(t)

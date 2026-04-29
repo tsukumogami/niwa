@@ -294,12 +294,22 @@ func (s *Server) handleAwaitTask(args awaitTaskArgs) toolResult {
 		// progress without a second call. This mirrors handleAsk's timeout
 		// result shape for consistency.
 		currentState := st.State
+		lastProgress := st.LastProgress
 		if _, fresh, err := ReadState(taskDir); err == nil {
 			currentState = fresh.State
+			lastProgress = fresh.LastProgress
 		}
-		return textResult(fmt.Sprintf(
-			`{"status":"timeout","task_id":%q,"current_state":%q,"timeout_seconds":%d}`,
-			args.TaskID, currentState, timeout))
+		timeoutPayload := map[string]any{
+			"status":          "timeout",
+			"task_id":         args.TaskID,
+			"current_state":   currentState,
+			"timeout_seconds": timeout,
+		}
+		if lastProgress != nil {
+			timeoutPayload["last_progress"] = lastProgress
+		}
+		b, _ := json.Marshal(timeoutPayload)
+		return textResult(string(b))
 	}
 }
 
@@ -694,11 +704,19 @@ func formatQueryResult(st *TaskState) string {
 
 // formatTerminalResult returns a {status, result|reason, restart_count} shape
 // for niwa_await_task / sync niwa_delegate when the task is already terminal.
+// max_restarts is included when restart_count > 0 so the coordinator can judge
+// severity. last_progress is included when non-nil.
 func formatTerminalResult(st *TaskState) toolResult {
 	payload := map[string]any{
 		"status":        st.State,
 		"task_id":       st.TaskID,
 		"restart_count": st.RestartCount,
+	}
+	if st.RestartCount > 0 {
+		payload["max_restarts"] = st.MaxRestarts
+	}
+	if st.LastProgress != nil {
+		payload["last_progress"] = st.LastProgress
 	}
 	switch st.State {
 	case TaskStateCompleted:
