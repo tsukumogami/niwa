@@ -35,9 +35,12 @@ order or in parallel; Issue 3 must come last.
 
 **Acceptance Criteria**:
 - [ ] Timeout response includes `last_progress` as a JSON object
-  (`{"summary":"...","at":"..."}`) when `TaskState.LastProgress` is non-nil
+  (`{"summary":"...","at":"..."}`) when `LastProgress` is non-nil
+- [ ] Uses `fresh.LastProgress` (the re-read state at ~L297) when available,
+  falls back to `st.LastProgress` — `st` is read before the `select` and may be
+  stale by the full timeout duration
 - [ ] Timeout response omits `last_progress` entirely (not null) when
-  `TaskState.LastProgress` is nil
+  `LastProgress` is nil in both `fresh` and `st`
 - [ ] Existing fields (`status`, `task_id`, `current_state`, `timeout_seconds`)
   are unchanged
 - [ ] `go test ./internal/mcp/...` passes
