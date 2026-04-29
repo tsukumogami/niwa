@@ -294,12 +294,22 @@ func (s *Server) handleAwaitTask(args awaitTaskArgs) toolResult {
 		// progress without a second call. This mirrors handleAsk's timeout
 		// result shape for consistency.
 		currentState := st.State
+		lastProgress := st.LastProgress
 		if _, fresh, err := ReadState(taskDir); err == nil {
 			currentState = fresh.State
+			lastProgress = fresh.LastProgress
 		}
-		return textResult(fmt.Sprintf(
-			`{"status":"timeout","task_id":%q,"current_state":%q,"timeout_seconds":%d}`,
-			args.TaskID, currentState, timeout))
+		timeoutPayload := map[string]any{
+			"status":          "timeout",
+			"task_id":         args.TaskID,
+			"current_state":   currentState,
+			"timeout_seconds": timeout,
+		}
+		if lastProgress != nil {
+			timeoutPayload["last_progress"] = lastProgress
+		}
+		b, _ := json.Marshal(timeoutPayload)
+		return textResult(string(b))
 	}
 }
 
