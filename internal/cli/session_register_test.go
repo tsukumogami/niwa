@@ -24,6 +24,7 @@ func TestDeriveRole(t *testing.T) {
 	})
 
 	t.Run("repo flag returns basename", func(t *testing.T) {
+		t.Setenv("NIWA_SESSION_ROLE", "")
 		got := deriveRole("", "tools/myapp", "/instance/root")
 		if got != "myapp" {
 			t.Errorf("expected 'myapp', got %q", got)
@@ -31,6 +32,7 @@ func TestDeriveRole(t *testing.T) {
 	})
 
 	t.Run("repo flag with trailing slash returns basename", func(t *testing.T) {
+		t.Setenv("NIWA_SESSION_ROLE", "")
 		got := deriveRole("", "tools/myapp/", "/instance/root")
 		if got != "myapp" {
 			t.Errorf("expected 'myapp', got %q", got)
@@ -38,6 +40,7 @@ func TestDeriveRole(t *testing.T) {
 	})
 
 	t.Run("pwd at instance root returns coordinator", func(t *testing.T) {
+		t.Setenv("NIWA_SESSION_ROLE", "")
 		dir := t.TempDir()
 		if err := os.Chdir(dir); err != nil {
 			t.Fatalf("chdir: %v", err)
@@ -49,6 +52,7 @@ func TestDeriveRole(t *testing.T) {
 	})
 
 	t.Run("pwd in repo subdirectory returns repo basename", func(t *testing.T) {
+		t.Setenv("NIWA_SESSION_ROLE", "")
 		root := t.TempDir()
 		repoDir := filepath.Join(root, "myrepo")
 		if err := os.MkdirAll(repoDir, 0o755); err != nil {
@@ -64,6 +68,7 @@ func TestDeriveRole(t *testing.T) {
 	})
 
 	t.Run("pwd in nested subdirectory returns top-level repo name", func(t *testing.T) {
+		t.Setenv("NIWA_SESSION_ROLE", "")
 		root := t.TempDir()
 		nestedDir := filepath.Join(root, "myrepo", "src", "pkg")
 		if err := os.MkdirAll(nestedDir, 0o755); err != nil {
@@ -81,6 +86,7 @@ func TestDeriveRole(t *testing.T) {
 	})
 
 	t.Run("pwd outside instance root returns coordinator", func(t *testing.T) {
+		t.Setenv("NIWA_SESSION_ROLE", "")
 		root := t.TempDir()
 		outsideDir := t.TempDir()
 		if err := os.Chdir(outsideDir); err != nil {
@@ -93,6 +99,7 @@ func TestDeriveRole(t *testing.T) {
 	})
 
 	t.Run("empty instance root returns coordinator as fallback", func(t *testing.T) {
+		t.Setenv("NIWA_SESSION_ROLE", "")
 		got := deriveRole("", "", "")
 		if got != "coordinator" {
 			t.Errorf("expected 'coordinator', got %q", got)
