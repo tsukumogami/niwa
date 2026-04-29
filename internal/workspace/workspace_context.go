@@ -198,20 +198,27 @@ func InstallWorkspaceRootSettings(cfg *config.WorkspaceConfig, configDir, instan
 		}
 	}
 
-	// Resolve env vars.
-	envResult := make(map[string]string)
-	if len(cfg.Claude.Env.Promote) > 0 || len(cfg.Claude.Env.Vars.Values) > 0 {
-		if len(cfg.Claude.Env.Promote) > 0 {
-			resolved, _ := resolveEnvFromConfig(cfg, configDir)
-			for _, key := range cfg.Claude.Env.Promote {
-				if val, ok := resolved[key]; ok {
-					envResult[key] = val
-				}
-			}
+	// Resolve env vars using the same pipeline as repo sessions so vault-resolved
+	// secrets are revealed correctly (not redacted to "***" by .String()).
+	wsEnvFile, _, _ := DiscoverEnvFiles(configDir)
+	relWsEnv := wsEnvFile
+	if relWsEnv != "" {
+		if r, err := filepath.Rel(configDir, relWsEnv); err == nil {
+			relWsEnv = r
 		}
-		for k, v := range cfg.Claude.Env.Vars.Values {
-			envResult[k] = v.String()
-		}
+	}
+	mctx := &MaterializeContext{
+		Config:    cfg,
+		Effective: effective,
+		RepoDir:   instanceRoot,
+		ConfigDir: configDir,
+		DiscoveredEnv: &DiscoveredEnv{
+			WorkspaceFile: relWsEnv,
+		},
+	}
+	envResult, _, err := resolveClaudeEnvVars(mctx)
+	if err != nil {
+		return nil, fmt.Errorf("resolving env vars for workspace root: %w", err)
 	}
 
 	includeGit := false
@@ -239,7 +246,7 @@ func InstallWorkspaceRootSettings(cfg *config.WorkspaceConfig, configDir, instan
 	claudeDir := filepath.Join(instanceRoot, ".claude")
 	os.MkdirAll(claudeDir, 0o755)
 	settingsPath := filepath.Join(claudeDir, "settings.json")
-	if err := os.WriteFile(settingsPath, data, 0o644); err != nil {
+	if err := os.WriteFile(settingsPath, data, secretFileMode); err != nil {
 		return nil, fmt.Errorf("writing workspace root settings: %w", err)
 	}
 
@@ -288,28 +295,6 @@ func InstallGlobalClaudeContent(globalConfigDir, instanceRoot string) ([]string,
 	}
 
 	return []string{destPath}, nil
-}
-
-// resolveEnvFromConfig resolves env vars from config files without a full
-// MaterializeContext.
-func resolveEnvFromConfig(cfg *config.WorkspaceConfig, configDir string) (map[string]string, error) {
-	vars := make(map[string]string)
-	for _, f := range cfg.Env.Files {
-		parsed, err := parseEnvFile(filepath.Join(configDir, f))
-		if err != nil {
-			continue
-		}
-		for k, v := range parsed {
-			vars[k] = v
-		}
-	}
-	for k, v := range cfg.Env.Vars.Values {
-		vars[k] = v.String()
-	}
-	for k, v := range cfg.Env.Secrets.Values {
-		vars[k] = v.String()
-	}
-	return vars, nil
 }
 
 // mapMarketplaceSourceWithIndex converts a niwa marketplace source string to the
