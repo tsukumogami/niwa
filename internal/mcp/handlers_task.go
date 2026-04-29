@@ -226,6 +226,62 @@ func (s *Server) createTaskEnvelope(to string, body json.RawMessage, expiresAt, 
 	return taskID, toolResult{}
 }
 
+// createAskTaskStore creates the task directory, envelope.json, and state.json
+// for an ask task without writing any inbox message. The caller is responsible
+// for writing the appropriate inbox notification (task.ask for live coordinator,
+// or using createTaskEnvelope which writes task.delegate for the spawn path).
+func (s *Server) createAskTaskStore(to string, body json.RawMessage, parentTaskID string) (string, toolResult) {
+	taskID := NewTaskID()
+	taskDir := taskDirPath(s.instanceRoot, taskID)
+	if err := os.MkdirAll(taskDir, 0o700); err != nil {
+		return "", errResult("cannot create task dir: " + err.Error())
+	}
+
+	now := time.Now().UTC().Format(time.RFC3339)
+	parent := parentTaskID
+	if parent == "" {
+		parent = s.taskID
+	}
+	env := TaskEnvelope{
+		V:            1,
+		ID:           taskID,
+		From:         TaskParty{Role: s.role, PID: os.Getpid()},
+		To:           TaskParty{Role: to},
+		Body:         body,
+		SentAt:       now,
+		ParentTaskID: parent,
+	}
+	envBytes, err := json.MarshalIndent(env, "", "  ")
+	if err != nil {
+		return "", errResult("cannot marshal envelope: " + err.Error())
+	}
+	if err := os.WriteFile(filepath.Join(taskDir, envelopeFileName), envBytes, 0o600); err != nil {
+		return "", errResult("cannot write envelope: " + err.Error())
+	}
+
+	st := &TaskState{
+		V:      1,
+		TaskID: taskID,
+		State:  TaskStateQueued,
+		StateTransitions: []StateTransition{
+			{From: "", To: TaskStateQueued, At: now},
+		},
+		MaxRestarts:   3,
+		DelegatorRole: s.role,
+		TargetRole:    to,
+		UpdatedAt:     now,
+	}
+	stBytes, err := json.MarshalIndent(st, "", "  ")
+	if err != nil {
+		return "", errResult("cannot marshal state.json: " + err.Error())
+	}
+	if err := os.WriteFile(filepath.Join(taskDir, stateFileName), stBytes, 0o600); err != nil {
+		return "", errResult("cannot write state.json: " + err.Error())
+	}
+
+	return taskID, toolResult{}
+}
+
 // registerAwaitWaiter allocates a size-1 buffered chan taskEvent under
 // waitersMu and returns (channel, cancel). cancel removes the entry.
 func (s *Server) registerAwaitWaiter(taskID string) (chan taskEvent, func()) {
@@ -371,6 +427,38 @@ func truncateSummary(s string, limit int) string {
 	return string(r[:limit]) + "…"
 }
 
+// authorizeFinishTask runs the two-tier authorization for niwa_finish_task.
+// Primary: kindExecutor (the task's assigned worker). Fallback: kindTarget
+// (the task's target role completing it directly — used by live coordinator
+// sessions answering task.ask questions without a NIWA_TASK_ID env var).
+func (s *Server) authorizeFinishTask(taskID string) *toolResult {
+	_, _, errR := authorizeTaskCall(s.identity(), taskID, kindExecutor)
+	if errR == nil {
+		return nil // authorized as executor
+	}
+	// Second call on terminal state: return the already_terminal payload rather
+	// than falling through to kindTarget (which would also reject terminal tasks).
+	if errorCode(errR) == "TASK_ALREADY_TERMINAL" {
+		taskDir := taskDirPath(s.instanceRoot, taskID)
+		if _, st, err := ReadState(taskDir); err == nil {
+			r := textResult(fmt.Sprintf(
+				`{"status":"already_terminal","error_code":"TASK_ALREADY_TERMINAL","current_state":%q}`,
+				st.State))
+			return &r
+		}
+		return errR
+	}
+	// Fallback: allow the task's target role to complete it directly.
+	// This supports live coordinator sessions answering task.ask questions
+	// without a daemon-spawned worker (and therefore no NIWA_TASK_ID env var).
+	if errorCode(errR) == "NOT_TASK_PARTY" {
+		if _, _, errR2 := authorizeTaskCall(s.identity(), taskID, kindTarget); errR2 == nil {
+			return nil // authorized as target
+		}
+	}
+	return errR
+}
+
 // --- niwa_finish_task --------------------------------------------------------
 
 func (s *Server) handleFinishTask(args finishTaskArgs) toolResult {
@@ -397,17 +485,7 @@ func (s *Server) handleFinishTask(args finishTaskArgs) toolResult {
 		}
 	}
 
-	_, _, errR := authorizeTaskCall(s.identity(), args.TaskID, kindExecutor)
-	if errR != nil {
-		// Second call on terminal state returns {status:"already_terminal"}.
-		if errorCode(errR) == "TASK_ALREADY_TERMINAL" {
-			taskDir := taskDirPath(s.instanceRoot, args.TaskID)
-			if _, st, err := ReadState(taskDir); err == nil {
-				return textResult(fmt.Sprintf(
-					`{"status":"already_terminal","error_code":"TASK_ALREADY_TERMINAL","current_state":%q}`,
-					st.State))
-			}
-		}
+	if errR := s.authorizeFinishTask(args.TaskID); errR != nil {
 		return *errR
 	}
 

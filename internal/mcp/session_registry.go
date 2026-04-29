@@ -49,6 +49,48 @@ func WriteSessionEntry(sessionsDir string, entry SessionEntry) error {
 	return os.Rename(tmp, registryPath)
 }
 
+// lookupLiveCoordinator reads sessions.json from instanceRoot and returns the
+// coordinator's role inbox directory if a live coordinator entry is found. The
+// returned inboxDir is computed from instanceRoot (not from the stored InboxDir
+// field, which may be stale). Stale entries (dead PID) are pruned atomically.
+// Returns ("", false) when no live coordinator is registered.
+func lookupLiveCoordinator(instanceRoot string) (inboxDir string, found bool) {
+	sessionsDir := filepath.Join(instanceRoot, ".niwa", "sessions")
+	registryPath := filepath.Join(sessionsDir, "sessions.json")
+
+	data, err := os.ReadFile(registryPath)
+	if err != nil {
+		return "", false
+	}
+	var registry SessionRegistry
+	if err := json.Unmarshal(data, &registry); err != nil {
+		return "", false
+	}
+
+	var kept []SessionEntry
+	for _, entry := range registry.Sessions {
+		if entry.Role == "coordinator" {
+			if IsPIDAlive(entry.PID, entry.StartTime) {
+				return filepath.Join(instanceRoot, ".niwa", "roles", "coordinator", "inbox"), true
+			}
+			// Prune stale coordinator entry.
+			continue
+		}
+		kept = append(kept, entry)
+	}
+
+	// Prune stale coordinator entries from sessions.json (best-effort).
+	pruned := SessionRegistry{Sessions: kept}
+	if prunedData, err := json.MarshalIndent(pruned, "", "  "); err == nil {
+		tmp := registryPath + ".tmp"
+		if err := os.WriteFile(tmp, prunedData, 0o600); err == nil {
+			_ = os.Rename(tmp, registryPath)
+		}
+	}
+
+	return "", false
+}
+
 // maybeRegisterCoordinator writes a SessionEntry to sessions.json as a
 // transparent side effect of the first niwa_await_task or niwa_check_messages
 // call when s.role == "coordinator". It is a no-op for non-coordinator roles
