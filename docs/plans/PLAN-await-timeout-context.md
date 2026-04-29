@@ -26,7 +26,7 @@ functions (`handleAwaitTask` timeout branch and `formatTerminalResult`). A third
 issue adds test coverage for both. Issues 1 and 2 can be implemented in either
 order or in parallel; Issue 3 must come last.
 
-## Issue outlines
+## Issue Outlines
 
 ### Issue 1: fix(mcp): convert timeout response to map-based builder and add last_progress
 
