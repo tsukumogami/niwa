@@ -1,0 +1,25 @@
+{
+  "topic": "niwa-ask-live-coordinator",
+  "decisions": [
+    {
+      "id": 1,
+      "question": "How should the daemon track that a coordinator session is active and eligible to receive questions — auto-registration on first MCP call, explicit pre-registration via CLI, or lazy registration on first await/check-messages call?",
+      "status": "complete",
+      "complexity": "standard",
+      "chosen": "Lazy registration on first niwa_await_task or niwa_check_messages call",
+      "confidence": "high",
+      "report_file": "wip/design_niwa-ask-live-coordinator_decision_1_report.md"
+    },
+    {
+      "id": 2,
+      "question": "How should a question's arrival interrupt a coordinator currently blocking on niwa_await_task — extend the existing awaitWaiters channel with a new question event kind, add a separate interrupt channel, or convert to polling?",
+      "status": "complete",
+      "complexity": "critical",
+      "chosen": "Separate questionWaiters channel per awaiting coordinator (role-keyed)",
+      "confidence": "high",
+      "report_file": "wip/design_niwa-ask-live-coordinator_decision_2_report.md"
+    }
+  ],
+  "cross_validation": "passed",
+  "round": 0
+}
