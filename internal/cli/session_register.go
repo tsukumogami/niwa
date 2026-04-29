@@ -17,10 +17,6 @@ var sessionRegisterRepo string
 var sessionRegisterRole string
 var sessionRegisterCheckOnly bool
 
-// errAlreadyRegistered is returned by writeSessionEntry when a live session
-// for the same role already exists.
-var errAlreadyRegistered = errors.New("already registered")
-
 func init() {
 	sessionCmd.AddCommand(sessionRegisterCmd)
 	sessionRegisterCmd.Flags().StringVar(&sessionRegisterRepo, "repo", "", "repo name (defaults to cwd-inferred repo)")
@@ -77,11 +73,15 @@ func runSessionRegister(cmd *cobra.Command, args []string) error {
 		ClaudeSessionID: claudeSessionID,
 	}
 
-	if err := writeSessionEntry(sessionsDir, entry); err != nil {
+	if err := mcp.WriteSessionEntry(sessionsDir, entry); err != nil {
 		// In --check-only mode a concurrent registration between our liveness
 		// check and the write means the goal is achieved; return success.
-		if sessionRegisterCheckOnly && errors.Is(err, errAlreadyRegistered) {
+		if sessionRegisterCheckOnly && errors.Is(err, mcp.ErrAlreadyRegistered) {
 			return nil
+		}
+		if errors.Is(err, mcp.ErrAlreadyRegistered) {
+			return fmt.Errorf("%w\n\nUse NIWA_SESSION_ROLE to override or run: niwa session unregister %s",
+				err, role)
 		}
 		return fmt.Errorf("cannot write session entry: %w", err)
 	}
@@ -154,36 +154,3 @@ func deriveRole(flagRole, repo, instanceRoot string) string {
 	return "coordinator"
 }
 
-func writeSessionEntry(sessionsDir string, entry mcp.SessionEntry) error {
-	registryPath := filepath.Join(sessionsDir, "sessions.json")
-
-	// Read existing registry or start fresh.
-	var registry mcp.SessionRegistry
-	if data, err := os.ReadFile(registryPath); err == nil {
-		_ = json.Unmarshal(data, &registry)
-	}
-
-	// Remove stale entry for same role (dead PID or PID mismatch).
-	var kept []mcp.SessionEntry
-	for _, s := range registry.Sessions {
-		if s.Role == entry.Role {
-			if mcp.IsPIDAlive(s.PID, s.StartTime) {
-				return fmt.Errorf("%w: role %q already registered by live session PID %d (registered %s); use NIWA_SESSION_ROLE to override or run: niwa session unregister %s",
-					errAlreadyRegistered, entry.Role, s.PID, s.RegisteredAt, entry.Role)
-			}
-			continue // prune stale entry
-		}
-		kept = append(kept, s)
-	}
-	registry.Sessions = append(kept, entry)
-
-	data, err := json.MarshalIndent(registry, "", "  ")
-	if err != nil {
-		return err
-	}
-	tmp := registryPath + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, registryPath)
-}

@@ -298,6 +298,11 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 	ctx.Step(`^an unauthorized MCP call for instance "([^"]*)" receives NOT_TASK_PARTY$`, iVerifyAuthorizationDenied)
 	ctx.Step(`^the output contains status "([^"]*)"$`, theOutputContainsStatus)
 
+	// --- live coordinator ask routing (Issue #86) ---
+	ctx.Step(`^the coordinator session is registered in instance "([^"]*)"$`, theCoordinatorSessionIsRegisteredInInstance)
+	ctx.Step(`^the coordinator answers the question for instance "([^"]*)" via check_messages$`, theCoordinatorAnswersQuestionViaCheckMessages)
+	ctx.Step(`^the coordinator blocks on niwa_await_task and handles questions for instance "([^"]*)"$`, theCoordinatorBlocksAndHandlesQuestionsForInstance)
+
 	// --- @channels-e2e (Issue #11): real `claude -p` scenarios ---
 	ctx.Step(`^the daemon uses the real claude worker spawn path$`, iEnsureNoFakeWorker)
 	ctx.Step(`^I run claude -p preserving case from instance root "([^"]*)" with prompt:$`, iRunClaudePFromInstanceRootPreservingCase)

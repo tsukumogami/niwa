@@ -330,6 +330,16 @@ type taskEvent struct {
 	At       time.Time
 }
 
+// questionEvent is carried over the questionWaiters channel when a task.ask
+// notification arrives in the coordinator's inbox. It is distinct from
+// taskEvent — questions are not task-state transitions and do not appear in
+// transitions.log or affect TaskEventKind.
+type questionEvent struct {
+	AskTaskID string
+	FromRole  string
+	Body      json.RawMessage // _niwa_note-wrapped question body from handleAsk
+}
+
 // TransitionLogEntry is an append-only NDJSON record written to
 // transitions.log. The v=1 schema matches DESIGN Decision 1.
 //

@@ -37,6 +37,10 @@ const (
 	kindExecutor
 	// kindParty — caller must be either delegator or executor.
 	kindParty
+	// kindTarget — caller must be the task's target role (envelope.to.role).
+	// Used by niwa_finish_task as a fallback so a live coordinator session
+	// (NIWA_TASK_ID empty) can answer task.ask questions directed at it.
+	kindTarget
 )
 
 // String returns a human-readable access kind for logging and tests.
@@ -48,6 +52,8 @@ func (k accessKind) String() string {
 		return "executor"
 	case kindParty:
 		return "party"
+	case kindTarget:
+		return "target"
 	}
 	return "unknown"
 }
@@ -126,6 +132,16 @@ func authorizeTaskCall(id authIdentity, taskID string, kind accessKind) (*TaskEn
 		}
 		// kindParty intentionally does NOT reject terminal state —
 		// niwa_query_task is valid after completion.
+	case kindTarget:
+		if isTaskStateTerminal(st.State) {
+			r := errResultCode("TASK_ALREADY_TERMINAL",
+				"task is in terminal state: "+st.State)
+			return nil, nil, &r
+		}
+		if id.Role == "" || id.Role != env.To.Role {
+			r := errResultCode("NOT_TASK_PARTY", "not authorized for this task")
+			return nil, nil, &r
+		}
 	}
 
 	return env, st, nil

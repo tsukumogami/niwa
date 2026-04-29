@@ -432,6 +432,88 @@ crashes, the underlying issue is almost always an LLM coordinator
 that doesn't know to re-query. The skill text and operational
 guidance above tell it to do exactly that.
 
+### Coordinator question handling
+
+Workers sometimes need clarification mid-task. A worker calls
+`niwa_ask(to="coordinator", body={"question": "..."})` and blocks until
+the coordinator responds. The coordinator receives the question through
+one of two paths depending on whether it is blocking or polling:
+
+**Blocking path** (`niwa_await_task`): When a live coordinator session is
+registered in `sessions.json`, niwa routes the question directly to the
+coordinator's inbox instead of spawning an ephemeral worker. If the
+coordinator is mid-`niwa_await_task`, the call returns immediately with:
+
+```json
+{
+  "status": "question_pending",
+  "ask_task_id": "<uuid>",
+  "from_role": "web",
+  "body": {
+    "_niwa_note": "This is a question from a worker. To answer, call niwa_finish_task...",
+    "question": { "question": "Which auth scheme should I use?" }
+  }
+}
+```
+
+**Polling path** (`niwa_check_messages`): A coordinator that calls
+`niwa_check_messages` instead of blocking on `niwa_await_task` receives
+the question as a `type == "task.ask"` message with the same body shape.
+
+In both cases, answering the question is the same: call
+`niwa_finish_task(task_id=<ask_task_id>, outcome="completed", result={...})`.
+Use `ask_task_id` — not the delegated task's ID — as the `task_id`.
+
+**Coordinator re-wait loop (worked example)**:
+
+1. Coordinator delegates a task to `web`:
+   ```
+   niwa_delegate(to="web", body={"goal": "add /health endpoint"}, mode="async")
+   // → {"task_id": "task-abc"}
+   ```
+
+2. Coordinator blocks waiting for completion:
+   ```
+   niwa_await_task(task_id="task-abc", timeout_seconds=600)
+   ```
+
+3. Mid-task, the web worker needs clarification:
+   ```
+   niwa_ask(to="coordinator", body={"question": "TCP or HTTP health check?"})
+   ```
+
+4. `niwa_await_task` returns to the coordinator:
+   ```json
+   {"status": "question_pending", "ask_task_id": "ask-xyz", "from_role": "web",
+    "body": {"question": {"question": "TCP or HTTP health check?"}}}
+   ```
+
+5. Coordinator answers:
+   ```
+   niwa_finish_task(task_id="ask-xyz", outcome="completed",
+                    result={"answer": "HTTP, return 200 OK"})
+   ```
+
+6. Coordinator re-waits on the original task:
+   ```
+   niwa_await_task(task_id="task-abc", timeout_seconds=600)
+   ```
+
+7. The worker's `niwa_ask` call unblocks with the answer. The worker
+   continues and eventually calls `niwa_finish_task(task_id="task-abc", ...)`.
+
+8. `niwa_await_task` returns with the terminal result.
+
+The re-wait loop pseudocode:
+
+```
+result = niwa_await_task(task_id=delegated_task_id)
+while result.status == "question_pending":
+    niwa_finish_task(task_id=result.ask_task_id, outcome="completed", result=...)
+    result = niwa_await_task(task_id=delegated_task_id)
+// result is now terminal: completed, abandoned, or timeout
+```
+
 ### Watcher overflow
 
 Both watchers in the system — the daemon's central inbox watcher and

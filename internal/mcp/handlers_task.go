@@ -22,6 +22,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -226,6 +227,62 @@ func (s *Server) createTaskEnvelope(to string, body json.RawMessage, expiresAt, 
 	return taskID, toolResult{}
 }
 
+// createAskTaskStore creates the task directory, envelope.json, and state.json
+// for an ask task without writing any inbox message. The caller is responsible
+// for writing the appropriate inbox notification (task.ask for live coordinator,
+// or using createTaskEnvelope which writes task.delegate for the spawn path).
+func (s *Server) createAskTaskStore(to string, body json.RawMessage, parentTaskID string) (string, toolResult) {
+	taskID := NewTaskID()
+	taskDir := taskDirPath(s.instanceRoot, taskID)
+	if err := os.MkdirAll(taskDir, 0o700); err != nil {
+		return "", errResult("cannot create task dir: " + err.Error())
+	}
+
+	now := time.Now().UTC().Format(time.RFC3339)
+	parent := parentTaskID
+	if parent == "" {
+		parent = s.taskID
+	}
+	env := TaskEnvelope{
+		V:            1,
+		ID:           taskID,
+		From:         TaskParty{Role: s.role, PID: os.Getpid()},
+		To:           TaskParty{Role: to},
+		Body:         body,
+		SentAt:       now,
+		ParentTaskID: parent,
+	}
+	envBytes, err := json.MarshalIndent(env, "", "  ")
+	if err != nil {
+		return "", errResult("cannot marshal envelope: " + err.Error())
+	}
+	if err := os.WriteFile(filepath.Join(taskDir, envelopeFileName), envBytes, 0o600); err != nil {
+		return "", errResult("cannot write envelope: " + err.Error())
+	}
+
+	st := &TaskState{
+		V:      1,
+		TaskID: taskID,
+		State:  TaskStateQueued,
+		StateTransitions: []StateTransition{
+			{From: "", To: TaskStateQueued, At: now},
+		},
+		MaxRestarts:   3,
+		DelegatorRole: s.role,
+		TargetRole:    to,
+		UpdatedAt:     now,
+	}
+	stBytes, err := json.MarshalIndent(st, "", "  ")
+	if err != nil {
+		return "", errResult("cannot marshal state.json: " + err.Error())
+	}
+	if err := os.WriteFile(filepath.Join(taskDir, stateFileName), stBytes, 0o600); err != nil {
+		return "", errResult("cannot write state.json: " + err.Error())
+	}
+
+	return taskID, toolResult{}
+}
+
 // registerAwaitWaiter allocates a size-1 buffered chan taskEvent under
 // waitersMu and returns (channel, cancel). cancel removes the entry.
 func (s *Server) registerAwaitWaiter(taskID string) (chan taskEvent, func()) {
@@ -256,6 +313,8 @@ func (s *Server) handleQueryTask(args queryTaskArgs) toolResult {
 // --- niwa_await_task ---------------------------------------------------------
 
 func (s *Server) handleAwaitTask(args awaitTaskArgs) toolResult {
+	s.maybeRegisterCoordinator()
+
 	timeout := args.TimeoutSeconds
 	if timeout <= 0 {
 		timeout = 600
@@ -274,10 +333,13 @@ func (s *Server) handleAwaitTask(args awaitTaskArgs) toolResult {
 		return *errR
 	}
 
-	// Register waiter BEFORE the race-guard re-read so a terminal message
-	// arriving between the read and registration still wakes us.
-	ch, cancel := s.registerAwaitWaiter(args.TaskID)
-	defer cancel()
+	// Register both waiters BEFORE the catch-up scan so no message can slip
+	// between the scan and the blocking select.
+	ch, cancelAwait := s.registerAwaitWaiter(args.TaskID)
+	defer cancelAwait()
+
+	qCh, cancelQuestion := s.registerQuestionWaiter(s.role)
+	defer cancelQuestion()
 
 	// Race guard: re-read state.json; if terminal, return immediately.
 	taskDir := taskDirPath(s.instanceRoot, args.TaskID)
@@ -285,9 +347,20 @@ func (s *Server) handleAwaitTask(args awaitTaskArgs) toolResult {
 		return formatTerminalResult(fresh)
 	}
 
+	// Catch-up scan: surface any task.ask files that arrived before we
+	// registered questionWaiters. Does not filter by seenFiles — the watcher
+	// already owns hasSeen; we intentionally re-surface pre-existing files so
+	// coordinators that restart or re-wait after a question_pending do not miss
+	// pending questions.
+	if s.roleInboxDir != "" {
+		s.scanInboxForQuestions(qCh)
+	}
+
 	select {
 	case evt := <-ch:
 		return formatEventResult(evt, taskDir)
+	case qEvt := <-qCh:
+		return formatQuestionResult(qEvt)
 	case <-time.After(time.Duration(timeout) * time.Second):
 		// On timeout return a shape that signals the timeout explicitly while
 		// preserving the current non-terminal state so callers can inspect
@@ -311,6 +384,72 @@ func (s *Server) handleAwaitTask(args awaitTaskArgs) toolResult {
 		b, _ := json.Marshal(timeoutPayload)
 		return textResult(string(b))
 	}
+}
+
+// registerQuestionWaiter inserts a buffered channel into questionWaiters[role]
+// and returns the channel plus a cleanup func. Only one waiter per role is
+// supported; a concurrent registration for the same role replaces the previous
+// channel.
+func (s *Server) registerQuestionWaiter(role string) (chan questionEvent, func()) {
+	ch := make(chan questionEvent, 1)
+	s.waitersMu.Lock()
+	s.questionWaiters[role] = ch
+	s.waitersMu.Unlock()
+	return ch, func() {
+		s.waitersMu.Lock()
+		// Only delete if it's still our channel (concurrent re-wait replaces it).
+		if s.questionWaiters[role] == ch {
+			delete(s.questionWaiters, role)
+		}
+		s.waitersMu.Unlock()
+	}
+}
+
+// scanInboxForQuestions reads roleInboxDir and sends a non-blocking
+// questionEvent to ch for every file with type == "task.ask". Skips files that
+// cannot be read or parsed. Used as the catch-up scan in handleAwaitTask to
+// surface questions that arrived before the questionWaiter was registered.
+func (s *Server) scanInboxForQuestions(ch chan questionEvent) {
+	entries, err := os.ReadDir(s.roleInboxDir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(s.roleInboxDir, e.Name()))
+		if err != nil {
+			continue
+		}
+		var m Message
+		if err := json.Unmarshal(data, &m); err != nil || m.Type != "task.ask" {
+			continue
+		}
+		qEvt := buildQuestionEvent(m)
+		if qEvt.AskTaskID == "" {
+			continue
+		}
+		select {
+		case ch <- qEvt:
+		default:
+		}
+		return // send at most one catch-up question per scan
+	}
+}
+
+// formatQuestionResult serializes a question_pending response from a
+// questionEvent. The body already carries the _niwa_note wrapper written by
+// handleAsk, so it is surfaced verbatim.
+func formatQuestionResult(q questionEvent) toolResult {
+	out := map[string]any{
+		"status":      "question_pending",
+		"ask_task_id": q.AskTaskID,
+		"from_role":   q.FromRole,
+		"body":        json.RawMessage(q.Body),
+	}
+	b, _ := json.Marshal(out)
+	return textResult(string(b))
 }
 
 // --- niwa_report_progress ----------------------------------------------------
@@ -369,6 +508,38 @@ func truncateSummary(s string, limit int) string {
 	return string(r[:limit]) + "…"
 }
 
+// authorizeFinishTask runs the two-tier authorization for niwa_finish_task.
+// Primary: kindExecutor (the task's assigned worker). Fallback: kindTarget
+// (the task's target role completing it directly — used by live coordinator
+// sessions answering task.ask questions without a NIWA_TASK_ID env var).
+func (s *Server) authorizeFinishTask(taskID string) *toolResult {
+	_, _, errR := authorizeTaskCall(s.identity(), taskID, kindExecutor)
+	if errR == nil {
+		return nil // authorized as executor
+	}
+	// Second call on terminal state: return the already_terminal payload rather
+	// than falling through to kindTarget (which would also reject terminal tasks).
+	if errorCode(errR) == "TASK_ALREADY_TERMINAL" {
+		taskDir := taskDirPath(s.instanceRoot, taskID)
+		if _, st, err := ReadState(taskDir); err == nil {
+			r := textResult(fmt.Sprintf(
+				`{"status":"already_terminal","error_code":"TASK_ALREADY_TERMINAL","current_state":%q}`,
+				st.State))
+			return &r
+		}
+		return errR
+	}
+	// Fallback: allow the task's target role to complete it directly.
+	// This supports live coordinator sessions answering task.ask questions
+	// without a daemon-spawned worker (and therefore no NIWA_TASK_ID env var).
+	if errorCode(errR) == "NOT_TASK_PARTY" {
+		if _, _, errR2 := authorizeTaskCall(s.identity(), taskID, kindTarget); errR2 == nil {
+			return nil // authorized as target
+		}
+	}
+	return errR
+}
+
 // --- niwa_finish_task --------------------------------------------------------
 
 func (s *Server) handleFinishTask(args finishTaskArgs) toolResult {
@@ -395,17 +566,7 @@ func (s *Server) handleFinishTask(args finishTaskArgs) toolResult {
 		}
 	}
 
-	_, _, errR := authorizeTaskCall(s.identity(), args.TaskID, kindExecutor)
-	if errR != nil {
-		// Second call on terminal state returns {status:"already_terminal"}.
-		if errorCode(errR) == "TASK_ALREADY_TERMINAL" {
-			taskDir := taskDirPath(s.instanceRoot, args.TaskID)
-			if _, st, err := ReadState(taskDir); err == nil {
-				return textResult(fmt.Sprintf(
-					`{"status":"already_terminal","error_code":"TASK_ALREADY_TERMINAL","current_state":%q}`,
-					st.State))
-			}
-		}
+	if errR := s.authorizeFinishTask(args.TaskID); errR != nil {
 		return *errR
 	}
 

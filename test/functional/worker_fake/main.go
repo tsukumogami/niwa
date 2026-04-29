@@ -23,6 +23,8 @@
 //   - ignore-sigterm           — check_messages, block SIGTERM, sleep forever
 //   - reply-to-ask             — check_messages, send_message reply
 //   - dump-args                — write os.Args to .niwa/.test/worker_spawn_args.txt, then finish(completed)
+//   - ask-and-finish           — check_messages, niwa_ask(coordinator), finish(completed) with answer
+//   - ask-roundtrip            — branches on role: worker calls niwa_ask; coordinator answers via finish_task
 //
 // Authorization window: workers may call tools before the daemon backfills
 // state.json.worker.{pid, start_time} (the "worker.pid==0 backfill
@@ -131,6 +133,10 @@ func run() int {
 		return runReplyToAsk(ctx, client, role)
 	case "dump-args":
 		return runDumpArgs(ctx, client, taskID, instanceRoot)
+	case "ask-and-finish":
+		return runAskAndFinish(ctx, client, taskID)
+	case "ask-roundtrip":
+		return runAskRoundtrip(ctx, client, taskID, role)
 	default:
 		fmt.Fprintf(os.Stderr, "worker-fake: unknown scenario %q\n", scenario)
 		return 2
@@ -271,6 +277,82 @@ func runReplyToAsk(ctx context.Context, c *mcpClient, role string) int {
 		return 2
 	}
 	return 0
+}
+
+// runAskAndFinish: check_messages → niwa_ask(to="coordinator") → finish(completed)
+// with the answer from the ask result embedded in the original task result.
+// Supports both the live-coordinator path (task.ask routed to coordinator inbox)
+// and the fallback spawn path (task.delegate creates an ephemeral coordinator worker).
+// Timeout is 30 s — generous enough for the test harness to answer before expiry.
+func runAskAndFinish(ctx context.Context, c *mcpClient, taskID string) int {
+	if _, err := callCheckMessagesTR(ctx, c); err != nil {
+		fmt.Fprintf(os.Stderr, "worker-fake(ask-and-finish): check_messages: %v\n", err)
+		return 2
+	}
+
+	// Ask the coordinator a test question.
+	askResult, err := callToolWithAuthRetry(ctx, c, "niwa_ask", map[string]any{
+		"to":              "coordinator",
+		"body":            map[string]any{"question": "test question from worker"},
+		"timeout_seconds": 30,
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "worker-fake(ask-and-finish): niwa_ask: %v\n", err)
+		return 2
+	}
+
+	// Extract the answer from the ask result (body.result if present, else raw).
+	var askPayload struct {
+		Status string          `json:"status"`
+		Result json.RawMessage `json:"result"`
+	}
+	_ = json.Unmarshal(extractFirstContentText(askResult), &askPayload)
+	answer := askPayload.Result
+	if len(answer) == 0 {
+		answer = json.RawMessage(`{"answer":"received"}`)
+	}
+
+	if _, err := callToolWithAuthRetry(ctx, c, "niwa_finish_task", map[string]any{
+		"task_id": taskID,
+		"outcome": "completed",
+		"result":  answer,
+	}); err != nil {
+		fmt.Fprintf(os.Stderr, "worker-fake(ask-and-finish): finish_task: %v\n", err)
+		return 2
+	}
+	return 0
+}
+
+// runAskRoundtrip dispatches on NIWA_SESSION_ROLE:
+//   - "worker":      reads task body, calls niwa_ask to coordinator, finishes with answer.
+//   - "coordinator": reads the ask task body, answers via niwa_finish_task.
+//
+// This supports Scenario 3 (fallback to spawn): the daemon spawns the same
+// binary for both the worker and the ephemeral coordinator worker, and the
+// NIWA_SESSION_ROLE env distinguishes which side each fake is playing.
+func runAskRoundtrip(ctx context.Context, c *mcpClient, taskID, role string) int {
+	switch role {
+	case "coordinator":
+		// Coordinator side: read the ask task body and answer it.
+		return runReplyToAsk(ctx, c, role)
+	default:
+		// Worker side: ask the coordinator and finish with the answer.
+		return runAskAndFinish(ctx, c, taskID)
+	}
+}
+
+// extractFirstContentText unwraps the first content block's text from a raw
+// MCP toolResult, returning nil if missing.
+func extractFirstContentText(raw json.RawMessage) json.RawMessage {
+	var tr struct {
+		Content []struct {
+			Text string `json:"text"`
+		} `json:"content"`
+	}
+	if err := json.Unmarshal(raw, &tr); err != nil || len(tr.Content) == 0 {
+		return nil
+	}
+	return json.RawMessage(tr.Content[0].Text)
 }
 
 // runDumpArgs writes os.Args to .niwa/.test/worker_spawn_args.txt in the

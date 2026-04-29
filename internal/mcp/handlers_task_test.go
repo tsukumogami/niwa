@@ -1088,3 +1088,226 @@ func TestFormatTerminalResult_OmitsProgressFieldsWhenAbsent(t *testing.T) {
 		t.Errorf("want no max_restarts when restart_count==0, got %s", text)
 	}
 }
+
+// --- Issue 4 three-way select tests ------------------------------------------
+
+// delegateTaskForCoordinator creates a task from coordinator to "web" and
+// returns the task ID.
+func delegateTaskForCoordinator(t *testing.T, s *Server) string {
+	t.Helper()
+	res := s.handleDelegate(delegateArgs{
+		To:   "web",
+		Body: json.RawMessage(`{"instructions":"do work"}`),
+		Mode: "async",
+	})
+	if res.IsError {
+		t.Fatalf("handleDelegate: %s", res.Content[0].Text)
+	}
+	var out struct {
+		TaskID string `json:"task_id"`
+	}
+	if err := json.Unmarshal([]byte(res.Content[0].Text), &out); err != nil {
+		t.Fatalf("parse delegate result: %v", err)
+	}
+	return out.TaskID
+}
+
+// TestHandleAwaitTask_QuestionFiresBeforeTerminal verifies that when a
+// task.ask notification arrives in the catch-up scan before the delegated task
+// completes, handleAwaitTask returns status:"question_pending" and does not
+// consume the terminalCh.
+func TestHandleAwaitTask_QuestionFiresBeforeTerminal(t *testing.T) {
+	s := newTestServer(t, "coordinator", "web")
+	delegatedTaskID := delegateTaskForCoordinator(t, s)
+
+	// Write a task.ask into roleInboxDir BEFORE calling handleAwaitTask so the
+	// catch-up scan delivers it immediately (no watcher needed in the test).
+	askTaskID := NewTaskID()
+	_, _ = writeTaskAskFile(t, s.roleInboxDir, "web", "coordinator", askTaskID)
+
+	done := make(chan toolResult, 1)
+	go func() {
+		done <- s.handleAwaitTask(awaitTaskArgs{TaskID: delegatedTaskID, TimeoutSeconds: 5})
+	}()
+
+	var res toolResult
+	select {
+	case res = <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handleAwaitTask did not return within 2s")
+	}
+
+	if res.IsError {
+		t.Fatalf("unexpected error: %s", res.Content[0].Text)
+	}
+	var out struct {
+		Status    string `json:"status"`
+		AskTaskID string `json:"ask_task_id"`
+		FromRole  string `json:"from_role"`
+	}
+	if err := json.Unmarshal([]byte(res.Content[0].Text), &out); err != nil {
+		t.Fatalf("parse result: %v", err)
+	}
+	if out.Status != "question_pending" {
+		t.Errorf("status = %q, want question_pending", out.Status)
+	}
+	if out.AskTaskID != askTaskID {
+		t.Errorf("ask_task_id = %q, want %q", out.AskTaskID, askTaskID)
+	}
+	if out.FromRole != "web" {
+		t.Errorf("from_role = %q, want web", out.FromRole)
+	}
+}
+
+// TestHandleAwaitTask_TerminalFiresBeforeQuestion verifies that when the
+// delegated task completes before any question arrives, handleAwaitTask returns
+// the terminal result and deregisters questionWaiters.
+func TestHandleAwaitTask_TerminalFiresBeforeQuestion(t *testing.T) {
+	s := newTestServer(t, "coordinator", "web")
+	delegatedTaskID := delegateTaskForCoordinator(t, s)
+
+	// No task.ask file seeded — the catch-up scan finds nothing.
+	done := make(chan toolResult, 1)
+	go func() {
+		done <- s.handleAwaitTask(awaitTaskArgs{TaskID: delegatedTaskID, TimeoutSeconds: 5})
+	}()
+
+	// Wait until questionWaiters is registered, then inject a task.completed.
+	coordInbox := filepath.Join(s.instanceRoot, ".niwa", "roles", "coordinator", "inbox")
+	_ = os.MkdirAll(coordInbox, 0o700)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		s.waitersMu.Lock()
+		_, registered := s.awaitWaiters[delegatedTaskID]
+		s.waitersMu.Unlock()
+		if registered {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	// Seed state.json as completed so formatEventResult reads the correct state.
+	taskDir := taskDirPath(s.instanceRoot, delegatedTaskID)
+	stPath := filepath.Join(taskDir, stateFileName)
+	rawState, _ := os.ReadFile(stPath)
+	var raw map[string]any
+	_ = json.Unmarshal(rawState, &raw)
+	raw["state"] = TaskStateCompleted
+	raw["result"] = map[string]any{"ok": true}
+	out, _ := json.MarshalIndent(raw, "", "  ")
+	_ = os.WriteFile(stPath, out, 0o600)
+
+	// Inject task.completed and drive notifyNewFile.
+	msg := Message{
+		V:      1,
+		ID:     newUUID(),
+		Type:   "task.completed",
+		TaskID: delegatedTaskID,
+		From:   MessageFrom{Role: "web"},
+		To:     MessageTo{Role: "coordinator"},
+		SentAt: time.Now().UTC().Format(time.RFC3339),
+		Body:   json.RawMessage(fmt.Sprintf(`{"task_id":%q,"result":{"ok":true}}`, delegatedTaskID)),
+	}
+	if errTR := writeMessageAtomic(coordInbox, msg.ID, msg); errTR.IsError {
+		t.Fatalf("inject task.completed: %s", errTR.Content[0].Text)
+	}
+	s.notifyNewFile(filepath.Join(coordInbox, msg.ID+".json"), msg.ID+".json")
+
+	var res toolResult
+	select {
+	case res = <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handleAwaitTask did not return within 2s after terminal event")
+	}
+
+	if res.IsError {
+		t.Fatalf("unexpected error: %s", res.Content[0].Text)
+	}
+	var outcome struct {
+		Status string `json:"status"`
+	}
+	_ = json.Unmarshal([]byte(res.Content[0].Text), &outcome)
+	if outcome.Status != "completed" {
+		t.Errorf("status = %q, want completed; full response: %s", outcome.Status, res.Content[0].Text)
+	}
+
+	// questionWaiters must be deregistered after return.
+	s.waitersMu.Lock()
+	_, stillRegistered := s.questionWaiters["coordinator"]
+	s.waitersMu.Unlock()
+	if stillRegistered {
+		t.Error("questionWaiters[coordinator] still registered after handleAwaitTask returned")
+	}
+}
+
+// TestHandleAwaitTask_CatchupScanFindsPreExistingQuestion verifies that the
+// catch-up scan surfaces a task.ask file that was written before handleAwaitTask
+// registered questionWaiters, without needing the file-watcher to fire.
+func TestHandleAwaitTask_CatchupScanFindsPreExistingQuestion(t *testing.T) {
+	s := newTestServer(t, "coordinator", "web")
+	delegatedTaskID := delegateTaskForCoordinator(t, s)
+
+	askTaskID := NewTaskID()
+	// Write the task.ask to the coordinator's roleInboxDir before calling
+	// handleAwaitTask — this is the race window the catch-up scan covers.
+	_, _ = writeTaskAskFile(t, s.roleInboxDir, "web", "coordinator", askTaskID)
+
+	res := make(chan toolResult, 1)
+	go func() {
+		res <- s.handleAwaitTask(awaitTaskArgs{TaskID: delegatedTaskID, TimeoutSeconds: 5})
+	}()
+
+	var result toolResult
+	select {
+	case result = <-res:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handleAwaitTask did not return from catch-up scan within 2s")
+	}
+
+	var out struct {
+		Status    string `json:"status"`
+		AskTaskID string `json:"ask_task_id"`
+	}
+	_ = json.Unmarshal([]byte(result.Content[0].Text), &out)
+	if out.Status != "question_pending" {
+		t.Errorf("status = %q, want question_pending; full response: %s", out.Status, result.Content[0].Text)
+	}
+	if out.AskTaskID != askTaskID {
+		t.Errorf("ask_task_id = %q, want %q", out.AskTaskID, askTaskID)
+	}
+}
+
+// TestHandleAwaitTask_TimeoutDeregistersWaiters verifies that when neither the
+// terminal nor the question channel delivers within the timeout, handleAwaitTask
+// returns a timeout response and deregisters both awaitWaiters and
+// questionWaiters.
+func TestHandleAwaitTask_TimeoutDeregistersWaiters(t *testing.T) {
+	s := newTestServer(t, "coordinator", "web")
+	delegatedTaskID := delegateTaskForCoordinator(t, s)
+
+	res := s.handleAwaitTask(awaitTaskArgs{TaskID: delegatedTaskID, TimeoutSeconds: 1})
+
+	if res.IsError {
+		t.Fatalf("unexpected error: %s", res.Content[0].Text)
+	}
+	var out struct {
+		Status string `json:"status"`
+	}
+	_ = json.Unmarshal([]byte(res.Content[0].Text), &out)
+	if out.Status != "timeout" {
+		t.Errorf("status = %q, want timeout", out.Status)
+	}
+
+	s.waitersMu.Lock()
+	_, awaitStillRegistered := s.awaitWaiters[delegatedTaskID]
+	_, questionStillRegistered := s.questionWaiters["coordinator"]
+	s.waitersMu.Unlock()
+
+	if awaitStillRegistered {
+		t.Error("awaitWaiters[taskID] still registered after timeout")
+	}
+	if questionStillRegistered {
+		t.Error("questionWaiters[coordinator] still registered after timeout")
+	}
+}
