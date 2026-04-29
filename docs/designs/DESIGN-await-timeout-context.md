@@ -1,5 +1,5 @@
 ---
-status: Proposed
+status: Accepted
 problem: |
   When niwa_await_task times out, the response contains only status, task_id,
   current_state, and timeout_seconds. The worker's last reported progress summary is
@@ -28,7 +28,7 @@ rationale: |
 
 ## Status
 
-Proposed
+Accepted
 
 ## Context and problem statement
 
