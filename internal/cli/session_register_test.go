@@ -7,6 +7,11 @@ import (
 )
 
 func TestDeriveRole(t *testing.T) {
+	origDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(origDir) })
 	t.Run("flag role is highest priority", func(t *testing.T) {
 		t.Setenv("NIWA_SESSION_ROLE", "env-role")
 		got := deriveRole("flag-role", "some/repo", "/instance/root")
