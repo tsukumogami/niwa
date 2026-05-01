@@ -521,8 +521,9 @@ func TestSettingsMaterializerHooksOnly(t *testing.T) {
 	if hookCmd["type"] != "command" {
 		t.Errorf("type = %v, want %q", hookCmd["type"], "command")
 	}
-	if hookCmd["command"] != ".claude/hooks/pre_tool_use/gate.local.sh" {
-		t.Errorf("command = %v, want %q", hookCmd["command"], ".claude/hooks/pre_tool_use/gate.local.sh")
+	wantCmd := filepath.Join(repoDir, ".claude", "hooks", "pre_tool_use", "gate.local.sh")
+	if hookCmd["command"] != wantCmd {
+		t.Errorf("command = %v, want %q", hookCmd["command"], wantCmd)
 	}
 }
 
@@ -577,8 +578,8 @@ func TestSettingsMaterializerSettingsAndHooks(t *testing.T) {
 		event   string
 		command string
 	}{
-		{"PreToolUse", ".claude/hooks/pre_tool_use/gate.local.sh"},
-		{"Stop", ".claude/hooks/stop/stop.local.sh"},
+		{"PreToolUse", filepath.Join(repoDir, ".claude", "hooks", "pre_tool_use", "gate.local.sh")},
+		{"Stop", filepath.Join(repoDir, ".claude", "hooks", "stop", "stop.local.sh")},
 	} {
 		entries, ok := hooksDoc[tc.event].([]any)
 		if !ok {
