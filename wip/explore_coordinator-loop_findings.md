@@ -14,7 +14,7 @@ A coordinator delegation workflow failed on a long-running shirabe task (explore
 
 - **Progress reporting is documented but injected as "guidance," not a contract** (progress-reporting lead): The niwa-mesh skill says "every 3–5 minutes or ~20 tool calls." PRD R23 calls it "skill-owned behavioral concern." But the user's position: skills shouldn't know how they're invoked — requiring shirabe to call `niwa_report_progress` breaks its abstraction. The fix belongs in niwa's delegation path, not in individual skills.
 
-- **Restart = fresh spawn, not resume** (restart-resume lead): niwa currently restarts with `claude -p` (fresh process, fixed bootstrap prompt). Workers retrieve their task body via `niwa_check_messages`. The application's wip/ file checkpointing (shirabe) compensated for context loss, but the user position is that niwa should instead `claude --resume <session_id>` with a reminder injected — preserving full context and fixing the root cause in-flight.
+- **Restart = fresh spawn, not resume** (restart-resume lead): niwa currently restarts with `claude -p` (fresh process, fixed bootstrap prompt). Workers retrieve their task body via `niwa_check_messages` and begin from scratch — all in-session context is lost. In the bug report, the final session happened to complete quickly because shirabe had written `wip/` files to disk during the killed sessions, which that session found and skipped re-running. This was an accidental property of shirabe's implementation, not a niwa design or guarantee. A niwa worker in any other application has no such safety net: stall kill followed by fresh spawn means full context loss, and if the same work takes 15 minutes on the next attempt, it gets killed again until `max_restarts` is exhausted.
 
 - **niwa_ask loopback is a documented fallback with bad UX** (ask-loopback lead): When `handleAsk` finds no live session for the target role, it spawns an ephemeral worker whose result routes back to the delegator. This is in `DESIGN-niwa-ask-live-coordinator.md` as intentional, but there's no typed error and callers can't distinguish "no live session" from a normal response. The 0.9.4 fix (PR #93) addressed worker→coordinator direction; coordinator→worker post-task may still fall through to this path.
 
@@ -48,7 +48,9 @@ The user's key concern is abstraction integrity: skills shouldn't carry operatio
 
 ## Accumulated Understanding
 
-**What's expected:** Stall kills at 15 minutes with no report_progress calls are correct behavior. Restart/resume via wip/ files worked correctly (application-level, not a niwa concern). The decision protocol not being enforced is by design.
+**What's expected (no fixes needed):** Stall kills at 15 minutes with no report_progress calls are correct watchdog behavior. The decision protocol not being enforced is by design — niwa has no mechanism to intercept agent decisions.
+
+**What looked correct but isn't a niwa design:** The bug report's final session completing quickly was because shirabe happened to write checkpoint files across restarts. niwa played no role in that recovery — fresh-spawn restart means full context loss for any worker that doesn't implement its own checkpointing. This is not a property niwa can promise or rely on.
 
 **What should change in niwa (three items):**
 
