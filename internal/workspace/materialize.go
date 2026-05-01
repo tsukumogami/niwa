@@ -477,13 +477,14 @@ func (s *SettingsMaterializer) Materialize(ctx *MaterializeContext) ([]string, e
 	}
 
 	doc, err := buildSettingsDoc(BuildSettingsConfig{
-		Settings:        settings,
-		InstalledHooks:  hooks,
-		ResolvedEnvVars: resolvedEnv,
-		Plugins:         plugins,
-		Marketplaces:    marketplaces,
-		RepoIndex:       ctx.RepoIndex,
-		BaseDir:         ctx.RepoDir,
+		Settings:         settings,
+		InstalledHooks:   hooks,
+		ResolvedEnvVars:  resolvedEnv,
+		Plugins:          plugins,
+		Marketplaces:     marketplaces,
+		RepoIndex:        ctx.RepoIndex,
+		BaseDir:          ctx.RepoDir,
+		UseAbsolutePaths: true,
 	})
 	if err != nil {
 		return nil, err
