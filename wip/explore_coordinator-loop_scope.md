@@ -30,6 +30,17 @@ Specific data points from the report: session files were 1.0–1.3 MB for killed
 - General coordinator orchestration patterns
 - Enforcement of decision protocols at the application level
 
+## Round 2 Research Leads
+
+7. **How does shirabe configure its stop hooks, and can a niwa stop hook coexist?**
+   Shirabe is known to use Claude Code stop hooks for its own purposes. We need to understand what stop hooks shirabe installs, how Claude Code allows multiple hooks to be configured (array vs. single entry, last-writer-wins vs. merged), and whether niwa adding its own stop hook would conflict with or override shirabe's hooks.
+
+8. **What does `claude --resume` do technically, and how would a reminder be injected on resume after a stall kill?**
+   On stall kill, we want to resume the killed session rather than spawn fresh. What exactly does `--resume` preserve? Can content be appended or injected into a resumed session (e.g., as an initial user message or system prompt)? Should the injected content ask the agent to call `niwa_report_progress` immediately before resuming work?
+
+9. **Does niwa capture the worker's Claude Code session ID, and is it available when the watchdog fires?**
+   The resume-with-reminder approach requires knowing the session ID of the killed process. Does the daemon record or have access to the session ID of a spawned worker? Is it stored in task state? If not, how would niwa retrieve it at restart time?
+
 ## Research Leads
 
 1. **What is the stall watchdog threshold and is it configurable?**
