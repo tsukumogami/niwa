@@ -56,8 +56,10 @@ The user's key concern is abstraction integrity: skills shouldn't carry operatio
 
 1. **Delegation instructions** (Failure 1): Inject deterministic, authoritative progress reporting instructions into every delegation — likely in the bootstrap prompt or task envelope body that workers receive via `niwa_check_messages`. Not guidance; a contract the agent reads before starting work.
 
-2. **Stall restart path** (Failure 1): When the watchdog fires, resume the killed session (`claude --resume <session_id>`) with a reminder injected rather than spawning a fresh process. Session state (context, file writes) is preserved; the agent gets a pointed correction.
+2. **Stop hook for automatic progress reporting** (Failure 1): Configure a Claude Code stop hook in the worker's workspace that fires at every turn boundary. The hook can call `niwa_report_progress` automatically — no agent awareness required, no skill-level changes needed. This resets the watchdog at natural pause points without relying on the agent to remember.
 
-3. **niwa_ask error handling** (Failure 2): When `handleAsk` finds no live session for the target role, return a typed error (`{status: "no_live_session", role: "..."}`) instead of falling through to the ephemeral-spawn path. Callers should be able to distinguish this case.
+3. **Stall restart path** (Failure 1): When the watchdog fires, resume the killed session (`claude --resume <session_id>`) with a reminder injected rather than spawning a fresh process. Session state (context, file writes) is preserved; the agent gets a pointed correction.
 
-**Possible secondary gap in niwa:** Per-task stall timeout override (symmetrical with per-task `MaxRestarts`). Low priority relative to the above three — the resume-with-reminder approach may make this unnecessary.
+4. **niwa_ask error handling** (Failure 2): When `handleAsk` finds no live session for the target role, return a typed error (`{status: "no_live_session", role: "..."}`) instead of falling through to the ephemeral-spawn path. Callers should be able to distinguish this case.
+
+**Possible secondary gap in niwa:** Per-task stall timeout override (symmetrical with per-task `MaxRestarts`). Low priority — the stop hook + resume-with-reminder layered approach may make this unnecessary.
