@@ -985,6 +985,9 @@ func TestHandleAsk_Timeout(t *testing.T) {
 	if st.State != TaskStateAbandoned {
 		t.Errorf("ask task state = %q after timeout, want %q", st.State, TaskStateAbandoned)
 	}
+	if st.RestartCount != 0 {
+		t.Errorf("ask task restart_count = %d after timeout, want 0 (daemon must not restart ask tasks)", st.RestartCount)
+	}
 }
 
 // TestHandleAsk_NoLiveSession_TasksDirectoryEmpty verifies that calling niwa_ask

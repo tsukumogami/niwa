@@ -236,8 +236,7 @@ func (s *Server) createTaskEnvelope(to string, body json.RawMessage, expiresAt, 
 
 // createAskTaskStore creates the task directory, envelope.json, and state.json
 // for an ask task without writing any inbox message. The caller is responsible
-// for writing the appropriate inbox notification (task.ask for live coordinator,
-// or using createTaskEnvelope which writes task.delegate for the spawn path).
+// for writing a task.ask notification to the coordinator's inbox.
 func (s *Server) createAskTaskStore(to string, body json.RawMessage, parentTaskID string) (string, toolResult) {
 	taskID := NewTaskID()
 	taskDir := taskDirPath(s.instanceRoot, taskID)

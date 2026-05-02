@@ -41,6 +41,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -100,6 +101,16 @@ const bootstrapPromptTemplate = "You are a worker for niwa task %s. Call niwa_ch
 // by the stall watchdog. It explains what happened and instructs the worker not
 // to re-fetch its envelope (which is already in the conversation history).
 const stallReminderText = "You were stopped by the stall watchdog. The workspace stop hook resets the watchdog automatically at every turn boundary — you do not need to call niwa_report_progress manually. Do not call niwa_check_messages again — your task envelope is already in your conversation history. Continue your work from where you left off."
+
+// defaultMaxResumes is the fallback resume cap applied when state.json carries
+// MaxResumes <= 0. Two attempts is enough to recover from a transient stall
+// without masking a persistent crash loop.
+const defaultMaxResumes = 2
+
+// sessionIDRe validates Claude session IDs before passing them to --resume.
+// Pattern matches mcp.sessionIDRegex; kept local to avoid widening the mcp
+// package's exported API for a single cli-layer call site.
+var sessionIDRe = regexp.MustCompile(`^[a-zA-Z0-9_-]{8,128}$`)
 
 // The flag-formatted list passed to claude's --allowed-tools lives in
 // internal/mcp/allowed_tools.go (mcp.ClaudeAllowedTools) so the daemon and
@@ -1597,8 +1608,13 @@ func retrySpawn(taskID, role string, s spawnContext) {
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 
 	// Pre-read state outside the lock to get ClaudeSessionID for Guard 4's
-	// file integrity check. There is no concurrent writer at this point
-	// (the worker process just exited), so the pre-read is safe.
+	// file integrity check. Disk I/O must not run while the state file flock
+	// is held, so the check is split: read sessionID here, then pass the
+	// result into the UpdateState mutator below.
+	//
+	// Invariant: retrySpawn is only called from handleSupervisorExit, which
+	// fires after the worker process has exited. The session JSONL file cannot
+	// be rewritten between this pre-read and the UpdateState mutator.
 	var fileIntegrityOK bool
 	if _, preSt, preErr := mcp.ReadState(taskDir); preErr == nil && preSt.Worker.ClaudeSessionID != "" {
 		roleCWD := resolveRoleCWD(s.instanceRoot, role)
@@ -1624,7 +1640,7 @@ func retrySpawn(taskID, role string, s spawnContext) {
 
 		effectiveMaxResumes := cur.MaxResumes
 		if effectiveMaxResumes <= 0 {
-			effectiveMaxResumes = 2
+			effectiveMaxResumes = defaultMaxResumes
 		}
 
 		// Determine resume eligibility via Guards 2–5.
@@ -1635,7 +1651,7 @@ func retrySpawn(taskID, role string, s spawnContext) {
 			doResume = false
 		} else if !fileIntegrityOK { // Guard 4
 			doResume = false
-		} else if !mcp.ValidateSessionID(capturedSessionID) { // Guard 5
+		} else if !sessionIDRe.MatchString(capturedSessionID) { // Guard 5
 			doResume = false
 		}
 

@@ -667,19 +667,18 @@ func (s *Server) isKnownRole(role string) bool {
 	return info.IsDir()
 }
 
-// handleAsk routes a worker question to the appropriate destination and blocks
-// until an answer arrives. Default timeout is 600 s.
+// handleAsk routes a worker question to the coordinator and blocks until an
+// answer arrives. Default timeout is 600 s.
 //
 // When a live coordinator session is registered in sessions.json, handleAsk
-// writes a task.ask notification to the coordinator's role inbox so that the
-// coordinator can receive the question via niwa_check_messages or be interrupted
-// from niwa_await_task (Issue 3/4). The coordinator answers by calling
+// creates an ask task and writes a task.ask notification to the coordinator's
+// role inbox. The coordinator receives the question via niwa_check_messages or
+// is interrupted from niwa_await_task. It answers by calling
 // niwa_finish_task(task_id=<ask_task_id>), which delivers task.completed to the
 // worker's inbox and unblocks this call.
 //
-// When no live coordinator is registered, handleAsk falls back to the existing
-// ephemeral spawn path: it writes a task.delegate to the coordinator's inbox,
-// which the mesh watch daemon claims and uses to spawn an ephemeral worker.
+// When no live coordinator is registered, handleAsk returns a no_live_session
+// JSON response immediately without creating any task directory.
 func (s *Server) handleAsk(args askArgs) toolResult {
 	if args.TimeoutSeconds <= 0 {
 		args.TimeoutSeconds = 600
@@ -721,11 +720,12 @@ func (s *Server) handleAsk(args askArgs) toolResult {
 	} else {
 		// No live coordinator: return typed no_live_session response immediately,
 		// before creating any task directory.
-		return textResult(fmt.Sprintf(
-			`{"status":"no_live_session","role":%s,"message":%s}`,
-			string(mustMarshalString(args.To)),
-			string(mustMarshalString(fmt.Sprintf("No live session found for role '%s'. The role may have completed its task or not yet started.", args.To))),
-		))
+		payload, _ := json.Marshal(map[string]any{
+			"status":  "no_live_session",
+			"role":    args.To,
+			"message": fmt.Sprintf("No live session found for role '%s'. The role may have completed its task or not yet started.", args.To),
+		})
+		return textResult(string(payload))
 	}
 
 	// Register awaitWaiter BEFORE the race-guard state read so a task that
@@ -764,8 +764,12 @@ func (s *Server) handleAsk(args askArgs) toolResult {
 			}
 			return &next, entry, nil
 		})
-		return textResult(fmt.Sprintf(`{"status":"timeout","task_id":%q,"timeout_seconds":%d}`,
-			taskID, args.TimeoutSeconds))
+		timeoutPayload, _ := json.Marshal(map[string]any{
+				"status":          "timeout",
+				"task_id":         taskID,
+				"timeout_seconds": args.TimeoutSeconds,
+			})
+			return textResult(string(timeoutPayload))
 	}
 }
 
