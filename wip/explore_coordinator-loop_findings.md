@@ -1,5 +1,7 @@
 # Exploration Findings: coordinator-loop
 
+## Decision: Crystallize
+
 ## Core Question
 
 A coordinator delegation workflow failed on a long-running shirabe task (explore+PRD+design) on niwa 0.9.4. Three distinct failure modes appeared: stall watchdog kills before in-flight `niwa_ask` calls could fire, `niwa_ask` to a completed role looping back to the sender, and the decision protocol in the delegation body having no enforcement mechanism. We need to classify which behaviors are expected under current design, which are bugs, and what changes (if any) should be made.
