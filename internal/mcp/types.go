@@ -363,7 +363,7 @@ type TransitionLogEntry struct {
 	ExitCode  *int             `json:"exit_code,omitempty"`
 	Signal    string           `json:"signal,omitempty"`
 	Attempt   int              `json:"attempt,omitempty"`
-	Resume    bool             `json:"resume,omitempty"`
+	Resume    bool             `json:"resume,omitempty"` // true when retrySpawn resumed an existing session (set by daemon)
 	Result    json.RawMessage  `json:"result,omitempty"`
 	Reason    json.RawMessage  `json:"reason,omitempty"`
 	Actor     *TransitionActor `json:"actor,omitempty"`

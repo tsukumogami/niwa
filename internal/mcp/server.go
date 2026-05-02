@@ -895,15 +895,15 @@ func prettyJSON(raw json.RawMessage) string {
 }
 
 // registerSessionID reads CLAUDE_SESSION_ID from the environment and writes
-// it to the worker's state.json before any tool call is processed. Called
-// at the start of Run() so the session ID is available to the daemon's
-// retrySpawn resume path (Issue 3).
+// it to the worker's state.json before any tool call is processed. The daemon
+// reads Worker.ClaudeSessionID when deciding whether to resume a killed worker
+// with claude --resume or start a fresh spawn.
 //
 // Registration is best-effort: errors are silently swallowed because startup
 // must never fail due to a missing or unwritable state.json (e.g. during
 // integration tests that run the server without a full workspace on disk).
 // A missing or invalid CLAUDE_SESSION_ID is not an error — the field simply
-// stays empty and resume falls back to fresh spawn.
+// stays empty and the daemon falls back to a fresh spawn.
 func (s *Server) registerSessionID() {
 	if s.taskID == "" {
 		return
