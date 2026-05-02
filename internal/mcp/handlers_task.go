@@ -274,7 +274,7 @@ func (s *Server) createAskTaskStore(to string, body json.RawMessage, parentTaskI
 		StateTransitions: []StateTransition{
 			{From: "", To: TaskStateQueued, At: now},
 		},
-		MaxRestarts:   3,
+		MaxRestarts:   0, // ask tasks are never daemon-spawned; no retries
 		DelegatorRole: s.role,
 		TargetRole:    to,
 		UpdatedAt:     now,

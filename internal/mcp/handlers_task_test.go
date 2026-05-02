@@ -828,45 +828,41 @@ func TestNotifyNewFile_UnknownTaskIDIgnored(t *testing.T) {
 // waiters[msgID] path. This is the fix for the ask/spawned-worker reply
 // routing mismatch: the ask-task's completion result is the reply.
 func TestHandleAsk_CreatesTaskAndAwaitsTerminalEvent(t *testing.T) {
-	s := newTestServer(t, "coordinator", "web")
+	// web worker asks coordinator; coordinator is registered as a live session.
+	s := newTestServer(t, "web", "coordinator")
+	root := s.instanceRoot
 
-	// Run handleAsk in a goroutine; a separate goroutine injects a
-	// task.completed message into the coordinator's inbox with the answer
-	// as body.result, simulating what the worker would emit via
-	// niwa_finish_task.
-	type askOutcome struct {
-		res toolResult
-	}
-	done := make(chan askOutcome, 1)
+	// Register a live coordinator session so handleAsk uses the direct path.
+	pid := os.Getpid()
+	start, _ := PIDStartTime(pid)
+	writeSessionsJSON(t, root, []SessionEntry{{
+		ID:           "coord-session",
+		Role:         "coordinator",
+		PID:          pid,
+		StartTime:    start,
+		InboxDir:     filepath.Join(root, ".niwa", "roles", "coordinator", "inbox"),
+		RegisteredAt: time.Now().UTC().Format(time.RFC3339),
+	}})
+
+	done := make(chan toolResult, 1)
 	go func() {
-		res := s.handleAsk(askArgs{
-			To:             "web",
+		done <- s.handleAsk(askArgs{
+			To:             "coordinator",
 			Body:           json.RawMessage(`{"q":"what is 2+2?"}`),
 			TimeoutSeconds: 5,
 		})
-		done <- askOutcome{res: res}
 	}()
 
-	// Wait for the task envelope to appear in web's inbox, then grab its ID.
-	webInbox := filepath.Join(s.instanceRoot, ".niwa", "roles", "web", "inbox")
+	// Wait for the task.ask notification in coordinator's inbox.
+	coordInbox := filepath.Join(root, ".niwa", "roles", "coordinator", "inbox")
 	var taskID string
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) && taskID == "" {
-		msgs := readAllMessages(t, webInbox)
+		msgs := readAllMessages(t, coordInbox)
 		for _, m := range msgs {
-			if m.Type == "task.delegate" {
-				// Verify body wrapper has kind=ask.
-				var wrap struct {
-					Kind string          `json:"kind"`
-					Body json.RawMessage `json:"body"`
-				}
-				if err := json.Unmarshal(m.Body, &wrap); err == nil && wrap.Kind == "ask" {
-					taskID = m.TaskID
-					if !strings.Contains(string(wrap.Body), `"q":"what is 2+2?"`) {
-						t.Errorf("body not wrapped correctly: %s", wrap.Body)
-					}
-					break
-				}
+			if m.Type == "task.ask" {
+				taskID = m.TaskID
+				break
 			}
 		}
 		if taskID == "" {
@@ -874,16 +870,14 @@ func TestHandleAsk_CreatesTaskAndAwaitsTerminalEvent(t *testing.T) {
 		}
 	}
 	if taskID == "" {
-		t.Fatalf("niwa_ask did not create a task envelope")
+		t.Fatalf("niwa_ask did not write task.ask notification to coordinator inbox")
 	}
 
 	// Inject task.completed into the coordinator's inbox; the ask handler
 	// should pick it up via notifyNewFile → awaitWaiters dispatch.
-	coordInbox := filepath.Join(s.instanceRoot, ".niwa", "roles", "coordinator", "inbox")
-	_ = os.MkdirAll(coordInbox, 0o700)
 	answer := Message{V: 1, ID: newUUID(), Type: "task.completed",
-		From:   MessageFrom{Role: "web"},
-		To:     MessageTo{Role: "coordinator"},
+		From:   MessageFrom{Role: "coordinator"},
+		To:     MessageTo{Role: "web"},
 		TaskID: taskID,
 		SentAt: time.Now().UTC().Format(time.RFC3339),
 		Body:   json.RawMessage(fmt.Sprintf(`{"task_id":%q,"result":{"answer":"4"}}`, taskID)),
@@ -893,7 +887,7 @@ func TestHandleAsk_CreatesTaskAndAwaitsTerminalEvent(t *testing.T) {
 	}
 	// Seed state.json terminal so formatEventResult's re-read reports
 	// completed and surfaces the result.
-	stPath := filepath.Join(s.instanceRoot, ".niwa", "tasks", taskID, stateFileName)
+	stPath := filepath.Join(root, ".niwa", "tasks", taskID, stateFileName)
 	data, _ := os.ReadFile(stPath)
 	var raw map[string]any
 	_ = json.Unmarshal(data, &raw)
@@ -906,11 +900,11 @@ func TestHandleAsk_CreatesTaskAndAwaitsTerminalEvent(t *testing.T) {
 	s.notifyNewFile(filepath.Join(coordInbox, answer.ID+".json"), answer.ID+".json")
 
 	select {
-	case outcome := <-done:
-		if outcome.res.IsError {
-			t.Fatalf("niwa_ask errored: %s", outcome.res.Content[0].Text)
+	case res := <-done:
+		if res.IsError {
+			t.Fatalf("niwa_ask errored: %s", res.Content[0].Text)
 		}
-		text := outcome.res.Content[0].Text
+		text := res.Content[0].Text
 		if !strings.Contains(text, `"status":"completed"`) {
 			t.Errorf("want completed result, got %s", text)
 		}
@@ -938,11 +932,23 @@ func TestHandleAsk_UnknownRole(t *testing.T) {
 
 // TestHandleAsk_Timeout asserts niwa_ask returns a timeout-shaped JSON
 // payload (with task_id and timeout_seconds) when no terminal event arrives
-// within the timeout window.
+// within the timeout window, and that the ask task is transitioned to abandoned.
 func TestHandleAsk_Timeout(t *testing.T) {
-	s := newTestServer(t, "coordinator", "web")
+	s := newTestServer(t, "web", "coordinator")
+	root := s.instanceRoot
+
+	// Register a live coordinator so handleAsk creates an ask task.
+	pid := os.Getpid()
+	start, _ := PIDStartTime(pid)
+	writeSessionsJSON(t, root, []SessionEntry{{
+		ID: "coord-timeout", Role: "coordinator",
+		PID: pid, StartTime: start,
+		InboxDir:     filepath.Join(root, ".niwa", "roles", "coordinator", "inbox"),
+		RegisteredAt: time.Now().UTC().Format(time.RFC3339),
+	}})
+
 	res := s.handleAsk(askArgs{
-		To:             "web",
+		To:             "coordinator",
 		Body:           json.RawMessage(`{"q":"?"}`),
 		TimeoutSeconds: 1,
 	})
@@ -956,6 +962,123 @@ func TestHandleAsk_Timeout(t *testing.T) {
 	if !strings.Contains(text, `"task_id":`) {
 		t.Errorf("timeout result missing task_id: %s", text)
 	}
+
+	// Ask task must be transitioned to abandoned (not left in queued state).
+	tasksDir := filepath.Join(root, ".niwa", "tasks")
+	entries, err := os.ReadDir(tasksDir)
+	if err != nil {
+		t.Fatalf("read tasks dir: %v", err)
+	}
+	var taskIDs []string
+	for _, e := range entries {
+		if e.IsDir() {
+			taskIDs = append(taskIDs, e.Name())
+		}
+	}
+	if len(taskIDs) != 1 {
+		t.Fatalf("expected 1 task directory, found %d", len(taskIDs))
+	}
+	_, st, err := ReadState(filepath.Join(tasksDir, taskIDs[0]))
+	if err != nil {
+		t.Fatalf("ReadState: %v", err)
+	}
+	if st.State != TaskStateAbandoned {
+		t.Errorf("ask task state = %q after timeout, want %q", st.State, TaskStateAbandoned)
+	}
+}
+
+// TestHandleAsk_NoLiveSession_TasksDirectoryEmpty verifies that calling niwa_ask
+// with no live session returns no_live_session and writes no task directory.
+func TestHandleAsk_NoLiveSession_TasksDirectoryEmpty(t *testing.T) {
+	s := newTestServer(t, "web", "coordinator")
+	root := s.instanceRoot
+	// No sessions.json — no live coordinator.
+
+	res := s.handleAsk(askArgs{
+		To:             "coordinator",
+		Body:           json.RawMessage(`{"q":"hello"}`),
+		TimeoutSeconds: 5,
+	})
+	if res.IsError {
+		t.Fatalf("expected non-error result, got: %s", res.Content[0].Text)
+	}
+	text := res.Content[0].Text
+	if !strings.Contains(text, `"status":"no_live_session"`) {
+		t.Errorf("want no_live_session status, got %s", text)
+	}
+	if !strings.Contains(text, `"role":"coordinator"`) {
+		t.Errorf("want role=coordinator in response, got %s", text)
+	}
+
+	// Tasks directory must contain zero subdirectory entries.
+	tasksDir := filepath.Join(root, ".niwa", "tasks")
+	entries, _ := os.ReadDir(tasksDir)
+	var subdirs []string
+	for _, e := range entries {
+		if e.IsDir() {
+			subdirs = append(subdirs, e.Name())
+		}
+	}
+	if len(subdirs) != 0 {
+		t.Errorf("expected zero task subdirectories, found %v", subdirs)
+	}
+}
+
+// TestHandleAsk_AskTask_MaxRestartsZero verifies that ask tasks created on
+// the live-session path have max_restarts=0 in state.json.
+func TestHandleAsk_AskTask_MaxRestartsZero(t *testing.T) {
+	s := newTestServer(t, "web", "coordinator")
+	root := s.instanceRoot
+
+	// Register a live coordinator.
+	pid := os.Getpid()
+	start, _ := PIDStartTime(pid)
+	writeSessionsJSON(t, root, []SessionEntry{{
+		ID: "coord-maxr0", Role: "coordinator",
+		PID: pid, StartTime: start,
+		InboxDir:     filepath.Join(root, ".niwa", "roles", "coordinator", "inbox"),
+		RegisteredAt: time.Now().UTC().Format(time.RFC3339),
+	}})
+
+	// Run handleAsk in a goroutine; we only care about the created task state.
+	done := make(chan toolResult, 1)
+	go func() {
+		done <- s.handleAsk(askArgs{
+			To:             "coordinator",
+			Body:           json.RawMessage(`{"q":"maxrestarts?"}`),
+			TimeoutSeconds: 2,
+		})
+	}()
+
+	// Wait for the task directory to appear.
+	tasksDir := filepath.Join(root, ".niwa", "tasks")
+	var taskIDs []string
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		entries, _ := os.ReadDir(tasksDir)
+		for _, e := range entries {
+			if e.IsDir() {
+				taskIDs = append(taskIDs, e.Name())
+			}
+		}
+		if len(taskIDs) > 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if len(taskIDs) == 0 {
+		t.Fatalf("ask task directory not created within deadline")
+	}
+
+	_, st, err := ReadState(filepath.Join(tasksDir, taskIDs[0]))
+	if err != nil {
+		t.Fatalf("ReadState: %v", err)
+	}
+	if st.MaxRestarts != 0 {
+		t.Errorf("ask task max_restarts = %d, want 0", st.MaxRestarts)
+	}
+
+	<-done
 }
 
 // TestHandleAwaitTask_Timeout_ReturnsStructuredShape asserts niwa_await_task

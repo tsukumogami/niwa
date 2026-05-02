@@ -719,12 +719,13 @@ func (s *Server) handleAsk(args askArgs) toolResult {
 			return errResult("cannot write task.ask notification: " + err.Error())
 		}
 	} else {
-		// Ephemeral spawn path: createTaskEnvelope writes task.delegate to the
-		// coordinator's inbox; the daemon claims it and spawns an ephemeral worker.
-		taskID, errTR = s.createTaskEnvelope(args.To, wrappedBody, "", "")
-		if errTR.IsError {
-			return errTR
-		}
+		// No live coordinator: return typed no_live_session response immediately,
+		// before creating any task directory.
+		return textResult(fmt.Sprintf(
+			`{"status":"no_live_session","role":%s,"message":%s}`,
+			string(mustMarshalString(args.To)),
+			string(mustMarshalString(fmt.Sprintf("No live session found for role '%s'. The role may have completed its task or not yet started.", args.To))),
+		))
 	}
 
 	// Register awaitWaiter BEFORE the race-guard state read so a task that
@@ -742,6 +743,27 @@ func (s *Server) handleAsk(args askArgs) toolResult {
 	case evt := <-ch:
 		return formatEventResult(evt, taskDir)
 	case <-time.After(time.Duration(args.TimeoutSeconds) * time.Second):
+		// Transition the ask task to abandoned so it doesn't linger in queued state.
+		now := time.Now().UTC().Format(time.RFC3339)
+		_ = UpdateState(taskDir, func(cur *TaskState) (*TaskState, *TransitionLogEntry, error) {
+			if cur.State != TaskStateQueued {
+				return nil, nil, nil
+			}
+			next := *cur
+			next.State = TaskStateAbandoned
+			next.UpdatedAt = now
+			next.Reason = json.RawMessage(`{"error":"ask_timeout"}`)
+			next.StateTransitions = append(next.StateTransitions,
+				StateTransition{From: TaskStateQueued, To: TaskStateAbandoned, At: now})
+			entry := &TransitionLogEntry{
+				Kind:  "abandoned",
+				From:  TaskStateQueued,
+				To:    TaskStateAbandoned,
+				At:    now,
+				Actor: &TransitionActor{Kind: "worker", PID: os.Getpid(), Role: s.role},
+			}
+			return &next, entry, nil
+		})
 		return textResult(fmt.Sprintf(`{"status":"timeout","task_id":%q,"timeout_seconds":%d}`,
 			taskID, args.TimeoutSeconds))
 	}
