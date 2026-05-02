@@ -103,6 +103,7 @@ func New(role, instanceRoot string) *Server {
 // notifications when new messages arrive.
 func (s *Server) Run(r io.Reader, w io.Writer) error {
 	s.enc = json.NewEncoder(w)
+	s.registerSessionID()
 
 	if s.roleInboxDir != "" {
 		go s.watchRoleInbox()
@@ -891,4 +892,30 @@ func prettyJSON(raw json.RawMessage) string {
 		return string(raw)
 	}
 	return string(b)
+}
+
+// registerSessionID reads CLAUDE_SESSION_ID from the environment and writes
+// it to the worker's state.json before any tool call is processed. Called
+// at the start of Run() so the session ID is available to the daemon's
+// retrySpawn resume path (Issue 3).
+//
+// Registration is best-effort: errors are silently swallowed because startup
+// must never fail due to a missing or unwritable state.json (e.g. during
+// integration tests that run the server without a full workspace on disk).
+// A missing or invalid CLAUDE_SESSION_ID is not an error — the field simply
+// stays empty and resume falls back to fresh spawn.
+func (s *Server) registerSessionID() {
+	if s.taskID == "" {
+		return
+	}
+	sid := os.Getenv("CLAUDE_SESSION_ID")
+	if sid == "" || !sessionIDRegex.MatchString(sid) {
+		return
+	}
+	taskDir := taskDirPath(s.instanceRoot, s.taskID)
+	_ = UpdateState(taskDir, func(cur *TaskState) (*TaskState, *TransitionLogEntry, error) {
+		next := *cur
+		next.Worker.ClaudeSessionID = sid
+		return &next, nil, nil
+	})
 }
