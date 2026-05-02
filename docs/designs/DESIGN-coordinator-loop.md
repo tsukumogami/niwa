@@ -159,9 +159,7 @@ watchdog and misleads the agent. Silent exit is the correct behavior on failure.
 When the watchdog kills a worker, niwa currently schedules a fresh spawn. The desired
 behavior is to resume the killed session (`claude --resume <session_id> -p
 "<reminder>"`) when the session is recoverable, preserving full conversation context
-and injecting a targeted correction. This requires three sub-decisions: how the
-session ID is captured before any stall kill can occur, how the watchdog uses it,
-and how the infinite-resume loop is bounded.
+and injecting a targeted correction.
 
 `claude --resume <session_id> -p "<message>"` is confirmed to work in print mode —
 the bug report that prompted this design used exactly this invocation. Session files
@@ -170,16 +168,33 @@ final line; SIGKILL may leave a partial last line but `--resume` is tolerant of 
 truncated trailing entry as long as preceding lines parse as valid JSON. niwa already
 has `DiscoverClaudeSessionID()` in `session_discovery.go` for coordinator sessions;
 workers are explicitly not registered (PRD R39/R40), so `TaskWorker` has no session
-ID field and no MCP tool provides one.
+ID field today.
 
-#### Chosen: Option A — New MCP Tool `niwa_register_worker_session`
+The core question is how the daemon learns the worker's session ID before any stall
+kill can occur. The session ID does not exist until after `spawnWorker` starts the
+`claude` process — it cannot be injected into the bootstrap prompt. The agent (the
+LLM) has no inherent knowledge of its own session ID and cannot reliably pass it to a
+tool without a mechanism to discover it. Any solution that requires the agent to
+supply the session ID reintroduces agent dependency.
 
-The worker calls `niwa_register_worker_session` once during bootstrap, before
-starting real work, passing its Claude Code session ID. The daemon stores it in a new
-`TaskState.Worker.ClaudeSessionID` field. This tool follows the same authorization
-(`kindExecutor`) and storage (`UpdateState`) discipline as all existing worker-side
-tools, and extends the bootstrap contract that already mandates `niwa_check_messages`
-as the first call.
+#### Chosen: Option A — Implicit Side-Effect Registration in `handleCheckMessages`
+
+When the MCP server handles the worker's first `niwa_check_messages` call, it reads
+`$CLAUDE_SESSION_ID` from its own process environment and writes it to
+`TaskState.Worker.ClaudeSessionID` via `UpdateState`. No new tool is required. The
+bootstrap prompt is unchanged.
+
+This works because the MCP server runs as a child process of Claude Code (launched via
+stdio from the worker's `--mcp-config`). Claude Code sets `$CLAUDE_SESSION_ID` in its
+own environment; the MCP server inherits it. The server-side read is reliable and
+requires no agent cooperation. The pattern mirrors `maybeRegisterCoordinator`, which
+already performs implicit session registration as a side effect of the coordinator's
+first `niwa_check_messages` or `niwa_await_task` call — no explicit registration step
+or bootstrap prompt change was needed there, and none is needed here.
+
+If `$CLAUDE_SESSION_ID` is absent (Claude Code version skew), the field stays empty
+and the daemon falls back to fresh spawn on stall kill — the existing behavior.
+Registration failure is silent; the worker continues normally in degraded mode.
 
 When the watchdog fires and schedules a retry via `retrySpawn`, the path checks
 `Worker.ClaudeSessionID`. If present and `Worker.ResumeCount < MaxResumes`, the
@@ -205,41 +220,35 @@ attempts continue after the task's outer retry budget is spent.
 
 The reminder message injected on resume:
 
-> You were stopped by the stall watchdog because niwa_report_progress was not called
-> within the required interval. The workspace stop hook handles watchdog resets
+> You were stopped by the stall watchdog. The workspace stop hook resets the watchdog
 > automatically at every turn boundary — you do not need to call niwa_report_progress
-> manually for heartbeating. Call niwa_report_progress now if you want to record a
-> meaningful status message, then continue your work.
+> manually. Continue your work from where you left off.
 
-The bootstrap prompt changes from:
+The bootstrap prompt is unchanged:
 
 > You are a worker for niwa task %s. Call niwa_check_messages to retrieve your task
 > envelope.
 
-To:
-
-> You are a worker for niwa task %s. Call niwa_register_worker_session with your task
-> ID and your Claude session ID first, then call niwa_check_messages to retrieve your
-> task envelope. The workspace stop hook resets the stall watchdog automatically —
-> you do not need to call niwa_report_progress manually.
-
-The worker discovers its session ID from `$CLAUDE_SESSION_ID` (set by Claude Code in
-the worker's environment) or via `DiscoverClaudeSessionID`'s PPID-walk and
-project-scan tiers if the env var is absent. If all three tiers fail, the worker logs
-a warning and continues without calling `niwa_register_worker_session` — degraded mode
-where resume capability is absent but the task otherwise runs normally, falling back to
-fresh spawn on stall kill. `$CLAUDE_SESSION_ID` availability in worker environments
-is the expected common case; the fallback tiers exist to handle version skew.
+On resume, the agent already has its full conversation history including the original
+task envelope. The `-p` reminder is a nudge only, not a re-bootstrapping.
 
 #### Alternatives Considered
 
-**Option B — Extend `niwa_report_progress` to accept optional session ID on first call**:
+**Option B — New explicit MCP tool `niwa_register_worker_session`**: Add a dedicated
+tool the agent calls during bootstrap, passing its session ID as a parameter. Rejected
+because the agent cannot reliably supply the session ID without agent-side discovery
+logic. `$CLAUDE_SESSION_ID` is available in the MCP server's environment but not
+automatically in the agent's conversation context — the agent would need to use a
+shell tool to read it, adding a fragile agent-dependent step. The implicit side-effect
+approach (Option A) achieves the same result without any agent involvement.
+
+**Option C — Extend `niwa_report_progress` to accept optional session ID on first call**:
 Rejected because it couples a correctness-critical registration event to a
 best-effort behavioral call. Workers that never call `niwa_report_progress` before
 the first watchdog firing — exactly the failure mode resume is designed to recover
 from — would have no session ID registered.
 
-**Option C — Post-mortem discovery from `~/.claude/projects/`**: After the watchdog
+**Option D — Post-mortem discovery from `~/.claude/projects/`**: After the watchdog
 kills the worker, scan by mtime for the most recent session file. Rejected for three
 reasons: the worker's CWD is computed at spawn time but not persisted in `TaskState`,
 requiring a re-derivation that could fail; mtime scanning is racy when other Claude
@@ -313,7 +322,7 @@ required. If a worker's turn somehow takes longer than 15 minutes (a single tool
 blocking for the full stall window), the watchdog fires as before.
 
 On a stall kill, the daemon checks `TaskState.Worker.ClaudeSessionID`, populated
-earlier when the worker called `niwa_register_worker_session` during bootstrap. If
+as a side effect of the worker's first `niwa_check_messages` call. If
 present and the session's `.jsonl` file passes a lightweight integrity check (exists,
 non-empty, last complete line is valid JSON), the daemon invokes
 `claude --resume <session_id> -p "<reminder>"` instead of the standard
@@ -341,13 +350,12 @@ skills or applications running inside the worker session. The `niwa_ask` fix is
 orthogonal but closes the remaining confusing behavior that surfaced in the same bug
 report.
 
-The key trade-off accepted is the new bootstrap requirement: workers must call
-`niwa_register_worker_session` before starting real work, or they won't benefit from
-the resume path. Workers that crash or are killed before the first bootstrap tool call
-fall back to fresh spawn — the existing behavior. This is an acceptable gap because
-the stop hook already makes stall kills rare, and crash recovery doesn't benefit from
-session resumption (the session context itself may be inconsistent after an unexpected
-crash).
+The key trade-off accepted is that session ID registration depends on
+`$CLAUDE_SESSION_ID` being present in the MCP server's environment. Workers spawned
+by Claude Code versions that don't set this variable run in degraded mode: the stop
+hook still prevents stall kills, but a stall kill that does occur triggers a fresh
+spawn rather than a resume. This is acceptable because the stop hook makes stall kills
+rare, and the fallback is the existing behavior rather than a regression.
 
 ## Solution Architecture
 
@@ -358,10 +366,9 @@ crash).
 | `niwa mesh report-progress` | New CLI subcommand | `internal/cli/mesh.go` |
 | Stop hook script | New workspace-level hook | `.niwa/hooks/stop/report-progress.sh` |
 | `workspace.toml` hook registration | New `[hooks] stop` entry | workspace template |
-| `niwa_register_worker_session` | New MCP tool | `internal/mcp/` (handler, server, types) |
+| `handleCheckMessages` | Register `$CLAUDE_SESSION_ID` as side effect of first call | `internal/mcp/handlers_task.go` |
 | `TaskWorker` | Add `ClaudeSessionID`, `ResumeCount` | `internal/mcp/types.go` |
 | `TaskState` | Add `MaxResumes` | `internal/mcp/types.go` |
-| `bootstrapPromptTemplate` | Updated to include registration call | `internal/cli/mesh_watch.go` |
 | `retrySpawn` / `spawnWorker` | Resume-vs-fresh-spawn branch | `internal/cli/mesh_watch.go` |
 | `handleAsk` | Replace ephemeral-spawn fallback with `no_live_session` return | `internal/mcp/handlers_task.go` |
 | `transitions.log` | Add `resume: true` boolean to spawn entries | `internal/mcp/types.go` |
@@ -393,15 +400,15 @@ Worker turn takes > 900s (single blocking tool call)
       → Worker.ResumeCount = 0, RestartCount++
 ```
 
-### Data Flow: Bootstrap Session Registration
+### Data Flow: Bootstrap and Session Registration
 
 ```
-Worker spawns
-  → Reads bootstrap prompt: "Call niwa_register_worker_session first, then niwa_check_messages"
-  → Worker discovers session ID from $CLAUDE_SESSION_ID (or DiscoverClaudeSessionID)
-  → Calls niwa_register_worker_session(task_id, session_id)
-  → Handler: validates session_id against sessionIDRegex, UpdateState writes Worker.ClaudeSessionID
-  → Worker calls niwa_check_messages → retrieves task envelope → begins real work
+Worker spawns (bootstrap prompt unchanged: "Call niwa_check_messages")
+  → Worker calls niwa_check_messages
+  → handleCheckMessages: reads $CLAUDE_SESSION_ID from MCP server env (inherited from Claude Code parent)
+  → If present: UpdateState writes Worker.ClaudeSessionID = session_id
+  → If absent: registration skipped silently; worker runs in degraded mode (no resume on stall kill)
+  → Handler returns task envelope → worker begins real work
 ```
 
 ### Schema Changes
@@ -436,12 +443,11 @@ Zero values produce correct fallback behavior: no session ID → fresh spawn; `M
 4. Update hook materialization in `materialize.go` if needed (append path).
 5. Tests: unit test for the CLI subcommand (ownership check, UpdateState call, terminal no-op); integration test that a spawned worker with the hook configured resets the watchdog at turn boundaries.
 
-### Phase 2 — Session ID Capture (schema change, new MCP tool)
+### Phase 2 — Session ID Capture (schema change, side-effect registration)
 
 1. Add `ClaudeSessionID` and `ResumeCount` to `TaskWorker`; add `MaxResumes` to `TaskState` with default-2 logic in `createTaskEnvelope`.
-2. Implement `niwa_register_worker_session` handler, register in `server.go`, add to allowed-tools list for workers.
-3. Update `bootstrapPromptTemplate` in `mesh_watch.go`.
-4. Tests: tool handler (valid/invalid session ID, idempotent re-registration); bootstrap prompt includes registration call.
+2. In `handleCheckMessages`: read `$CLAUDE_SESSION_ID` from the MCP server's environment; if present and `Worker.ClaudeSessionID` is empty, call `UpdateState` to write it. No-op on subsequent calls (already populated).
+3. Tests: first `niwa_check_messages` call with `$CLAUDE_SESSION_ID` set → `Worker.ClaudeSessionID` populated; subsequent calls → no-op; `$CLAUDE_SESSION_ID` absent → field stays empty, no error.
 
 ### Phase 3 — Resume Path (watchdog change)
 
@@ -472,10 +478,12 @@ The subcommand does not expose any capability beyond resetting a timestamp in a 
 the same process already has write access to. The risk of privilege escalation via
 this path is negligible.
 
-**Session ID validation**: `niwa_register_worker_session` validates the `session_id`
-parameter against `sessionIDRegex` before storing it. An invalid session ID (too
-long, wrong format, path traversal attempt) returns `BAD_PAYLOAD` without touching
-`state.json`.
+**Session ID validation**: `handleCheckMessages` reads `$CLAUDE_SESSION_ID` from the
+server's own environment and validates it against `sessionIDRegex` before storing it.
+A value that fails validation (wrong format, path traversal attempt) is discarded
+silently — the worker continues in degraded mode rather than failing. The regex
+(`^[a-zA-Z0-9_-]{8,128}$`) blocks any non-alphanumeric characters, preventing path
+traversal in the subsequent session file integrity check and `--resume` invocation.
 
 **Session file integrity check**: The check reads only a bounded suffix of the
 `.jsonl` file (last 4 KB). It does not execute or eval the content. A maliciously
