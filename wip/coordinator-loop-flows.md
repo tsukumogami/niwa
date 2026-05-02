@@ -146,10 +146,11 @@ status note above.
    → schedules retrySpawn after backoff (default 30s for attempt 1)
 
 6. BACKOFF TIMER fires → retrySpawn(taskID, role, s):
+   → captures cur.Worker.ClaudeSessionID = "<session-id>" before overwriting Worker
    → UpdateState:
-       - RestartCount++ = 1
        - Worker.SpawnStartedAt = now
        - Worker.PID = 0, Worker.StartTime = 0  [zeroed; fresh cmd.Start below backfills]
+       (RestartCount NOT incremented — this is a resume, not a fresh spawn)
    → checks Worker.ClaudeSessionID: "<session-id>" present
    → checks Worker.ResumeCount (0) < MaxResumes (2) → resume eligible
    → session file integrity check: ~/.claude/projects/<base64url-cwd>/<session-id>.jsonl
@@ -158,8 +159,11 @@ status note above.
        cmd = "claude --resume <session-id> -p '<reminder>' --permission-mode=... --mcp-config=..."
        reminder: "You were stopped by the stall watchdog. The workspace stop hook resets
                   the watchdog automatically at every turn boundary — you do not need to
-                  call niwa_report_progress manually. Continue your work from where you left off."
-   → Worker.ResumeCount++ = 1 (RestartCount stays 1)
+                  call niwa_report_progress manually. Do not call niwa_check_messages
+                  again — your task envelope is already in your conversation history.
+                  Continue your work from where you left off."
+   → Worker.ResumeCount++ = 1 (RestartCount stays 0)
+   → next.Worker.ClaudeSessionID = captured "<session-id>" (preserved for next resume)
    → backfills Worker.PID, Worker.StartTime after cmd.Start
    → restarts supervisor + watchdog goroutines
 
@@ -190,38 +194,48 @@ MaxRestarts → task abandoned.
 **Note:** ClaudeSessionID / ResumeCount / MaxResumes are designed but not yet
 implemented. Fresh-spawn retry on unexpected exit IS implemented today.
 
+**RestartCount rule (authoritative):** `RestartCount` increments only on fresh-spawn
+transitions, not on resume attempts. `ResumeCount` counts resume attempts within the
+current fresh-spawn cycle and resets to 0 each time a fresh spawn occurs. The
+`MaxRestarts` budget is consumed only by fresh spawns; `MaxResumes` caps resume
+attempts per fresh-spawn cycle.
+
 ```
-Stall kill #1 (Flow 2 steps 3–6):
-  RestartCount=1, ResumeCount=1 → claude --resume <session-id> -p "<reminder>"
+Initial state: RestartCount=0, ResumeCount=0, ClaudeSessionID="<session-id>"
 
-Stall kill #2: worker stalls again
-  → retrySpawn: RestartCount=2 would be next
-    But: RestartCount was 1 from prior cycle, now:
-    retrySpawn bumps RestartCount → 2
-    ResumeCount=1 < MaxResumes(2) → resume eligible
+Stall kill #1 (handleSupervisorExit: nextAttempt=0+1=1 <= MaxRestarts=3 → schedule retry):
+  retrySpawn: ClaudeSessionID present, ResumeCount(0) < MaxResumes(2) → resume
   → claude --resume <session-id> -p "<reminder>"
-  → Worker.ResumeCount++ = 2
+  → Worker.ResumeCount++ = 1  (RestartCount stays 0)
 
-Stall kill #3: worker stalls again
-  → retrySpawn: RestartCount++ = 3
-    ResumeCount=2 >= MaxResumes(2) → resume cap exhausted
+Stall kill #2 (handleSupervisorExit: nextAttempt=0+1=1 <= 3 → schedule retry):
+  retrySpawn: ClaudeSessionID present, ResumeCount(1) < MaxResumes(2) → resume
+  → claude --resume <session-id> -p "<reminder>"
+  → Worker.ResumeCount++ = 2  (RestartCount stays 0)
+
+Stall kill #3 (handleSupervisorExit: nextAttempt=0+1=1 <= 3 → schedule retry):
+  retrySpawn: ResumeCount(2) >= MaxResumes(2) → resume cap exhausted
   → fresh spawn path:
-      - Worker.ClaudeSessionID = ""  [zeroed]
-      - Worker.ResumeCount = 0       [reset]
-      - claude -p "<bootstrap>"  (new session, no prior context)
-  → Worker.ResumeCount does NOT increment on fresh spawn
+      Worker.ClaudeSessionID = ""  [zeroed]
+      Worker.ResumeCount = 0       [reset]
+      RestartCount++ = 1           [only fresh spawns increment this]
+      → claude -p "<bootstrap>"  (new session, no prior context)
+  MCP server at startup: registers new ClaudeSessionID for the new session
 
-  [OPEN QUESTION: Does fresh spawn after resume exhaustion still increment RestartCount,
-   or does ResartCount only track fresh-spawn cycles? The design says "ResumeCount
-   resets to 0 and RestartCount increments" on fresh spawn after cap, suggesting
-   RestartCount=3 here consumes one of the MaxRestarts budget.]
+Stall kill #4 (handleSupervisorExit: nextAttempt=1+1=2 <= 3 → schedule retry):
+  retrySpawn: new ClaudeSessionID present, ResumeCount(0) < MaxResumes(2) → resume
+  → cycle repeats: up to 2 resumes (RestartCount stays 1)
 
-Stall kill #4 (or unexpected exit on attempt 3):
-  → retrySpawn: nextAttempt = RestartCount + 1 = 4 > MaxRestarts (3)
-  → over cap → abandon:
-      UpdateState: running → abandoned [Reason: {error:"retry_cap_exceeded",
-                                         restart_count:3, max_restarts:3}]
-      deliverAbandonedMessage → .niwa/roles/coordinator/inbox/<msg-id>.json
+Stall kill #6 (after 2 more resumes):
+  retrySpawn: resume cap exhausted again → fresh spawn → RestartCount++ = 2
+
+Stall kill #9 (after 2 more resumes):
+  retrySpawn: fresh spawn → RestartCount++ = 3
+
+Stall kill #10 (handleSupervisorExit: nextAttempt=3+1=4 > MaxRestarts=3 → abandon):
+  UpdateState: running → abandoned [Reason: {error:"retry_cap_exceeded",
+                                     restart_count:3, max_restarts:3}]
+  deliverAbandonedMessage → .niwa/roles/coordinator/inbox/<msg-id>.json
 
 COORDINATOR's niwa_await_task unblocks:
   → awaitWaiter receives EvtAbandoned
@@ -231,17 +245,6 @@ COORDINATOR's niwa_await_task unblocks:
 ```
 
 **State changes:** `running → abandoned`
-
-**Open question:** The design is ambiguous about how RestartCount interacts with the
-resume sub-cycle. The description says "ResumeCount resets to 0 and RestartCount
-increments" when falling back to fresh spawn after resume exhaustion — but retrySpawn
-already bumps RestartCount on every call (whether resume or fresh). If resume attempts
-and fresh-spawn attempts all increment RestartCount, MaxRestarts = 3 is consumed by
-3 total spawn events regardless of whether they were resumes or fresh. This may be
-the intent (budget covers all restart events), but it needs clarification. The alternative
-reading is that RestartCount only increments on fresh spawns and MaxResumes caps are
-per-fresh-spawn-cycle — which is how the design summary describes it but the implementation
-would need an extra condition in retrySpawn to skip the RestartCount bump on resume.
 
 ---
 
@@ -463,3 +466,163 @@ only the most-recently-registered coordinator waiter receives the question notif
 Questions destined for a coordinator with no waiter stay in the inbox file until the
 next `niwa_await_task` call triggers a catch-up scan. This may be fine in practice
 but is worth documenting explicitly.
+
+---
+
+## Flow A: Daemon restart mid-task
+
+**Scenario:** The niwa daemon process (`niwa mesh watch`) is killed or crashes while
+a worker task is running. The daemon is restarted. What happens to the in-progress task?
+
+```
+Initial state: Task is running. Worker process is alive (PID=<worker-pid>).
+state.json: {state: "running", worker: {pid: <worker-pid>, ...}}
+
+1. DAEMON process exits (SIGTERM from OS, crash, or user restart).
+   Worker process is NOT killed — it is detached (Setsid: true) and continues running.
+   The supervisor goroutine and watchdog goroutine die with the daemon.
+
+2. DAEMON restarts: `niwa mesh watch`
+   → reads workspace config, re-registers fsnotify watchers on all role inboxes
+   → does NOT re-scan existing in-progress tasks by default
+     [CURRENT: daemon restart does not adopt orphan workers. The watchdog and
+      supervisor goroutines are not recreated for workers already running.]
+
+3. WORKER continues running independently (no daemon supervision).
+   - The stop hook still fires at every turn boundary (it's a Claude Code workspace
+     hook, not daemon-dependent). report-progress.sh updates last_progress.at in
+     state.json — the write succeeds because it goes directly to the filesystem.
+   - The worker can still call niwa_finish_task (the MCP server is a separate process
+     started by Claude Code, not by the daemon).
+
+4a. WORKER calls niwa_finish_task before daemon re-adopts:
+    → UpdateState: running → completed
+    → delivers task.completed to coordinator inbox
+    → COORDINATOR's niwa_await_task unblocks normally (Flow 1 steps 8–9)
+    → state.json has terminal state; no further daemon action needed
+
+4b. WORKER process exits (crash or natural exit) before daemon re-adopts:
+    → No supervisor goroutine is watching → no retry is scheduled
+    → Task remains in "running" state in state.json indefinitely
+    → Coordinator's niwa_await_task blocks until its timeout
+    → [GAP: The daemon currently has no mechanism to scan state.json files on
+       restart and re-adopt orphan workers. This is a known gap — not addressed
+       by DESIGN-coordinator-loop.md. A future design would need a startup sweep
+       that: finds tasks in "running" state, checks whether the worker PID is
+       still alive, and either re-attaches a supervisor goroutine or schedules
+       retrySpawn for dead workers.]
+
+5. If daemon restarts and coordinator calls niwa_await_task:
+   → maybeRegisterCoordinator re-registers the coordinator session (new PID)
+   → awaitWaiter registered for the task
+   → if state is already terminal (4a): race-guard read returns immediately
+   → if state is still running (4b): blocks until timeout, then returns {status: "timeout"}
+```
+
+**What the coordinator sees:** If the worker completes normally (4a), the coordinator's
+`niwa_await_task` returns completed as usual. If the worker dies while the daemon is
+down (4b), the coordinator eventually gets `{status: "timeout"}` on the next
+`niwa_await_task` call.
+
+**Gap:** Daemon restart does not restart the watchdog for orphan workers. A worker
+that is alive but stalled while the daemon is down will not be killed and retried;
+it will run until it naturally exits or calls `niwa_finish_task`.
+
+---
+
+## Flow B: niwa_cancel_task on a live worker
+
+**Scenario:** The coordinator calls `niwa_cancel_task` to cancel a task while the
+worker process is actively running.
+
+```
+1. COORDINATOR calls niwa_cancel_task(task_id="<id>")
+   → handleCancelTask: authorizeTaskCall (coordinator must hold delegator token)
+   → ReadState: state == running
+   → UpdateState: running → cancelled
+   → delivers task.cancelled msg → .niwa/roles/worker-role/inbox/<msg-id>.json
+   → returns {status: "cancelled"}
+
+2. [CURRENT BEHAVIOR — GAP] The daemon is NOT notified of the cancellation directly.
+   The worker process continues running. The daemon's watchdog continues polling
+   last_progress.at. The stop hook continues firing.
+
+3. WORKER's MCP server: fsnotify watcher on worker-role inbox fires on task.cancelled
+   → the MCP server delivers the message as a result of the worker's next
+     niwa_check_messages or niwa_await_task call
+   → the worker receives {type: "task.cancelled", ...} and is expected to stop
+   → this is advisory: a worker that ignores the message continues running
+
+4. SUPERVISOR goroutine: eventually cmd.Wait() returns when the worker exits
+   → exitCh ← supervisorExit{taskID, exitCode}
+   → handleSupervisorExit: ReadState → state == cancelled (terminal)
+   → logs "action=none" (terminal state; no retry)
+   → watchdog exits when waitDone closes
+
+5. [GAP] If the worker ignores the cancellation message and keeps running:
+   → The task state is "cancelled" in state.json
+   → The coordinator receives {status: "cancelled"} from niwa_cancel_task
+   → But the worker process is still alive, consuming resources
+   → The daemon's watchdog will NOT kill it — handleSupervisorExit on watchdog
+     signal checks state, sees cancelled, takes no action
+   → [DESIGN-coordinator-loop.md does not address this gap. A future fix would
+      have handleCancelTask signal the daemon to send SIGTERM to the worker PID
+      immediately, rather than waiting for the worker to self-terminate.]
+```
+
+**What the coordinator sees:** `niwa_cancel_task` returns `{status: "cancelled"}`
+immediately. The coordinator can proceed. The worker may still be running if it ignores
+or hasn't yet received the cancellation message.
+
+**Gap:** `niwa_cancel_task` does not kill the worker process. It only updates state and
+delivers a message. A non-cooperative worker continues running until the watchdog
+triggers a stall kill — which, after cancellation, checks state and does nothing.
+Workers that don't poll their inbox after cancellation run until they exit naturally.
+
+---
+
+## Flow C: spawnWorker spawn failure
+
+**Scenario:** `spawnWorker` is called (fresh spawn or resume) but `cmd.Start()` fails
+— the `claude` binary is not found, is not executable, or the OS rejects the exec.
+
+```
+1. DAEMON: retrySpawn calls spawnWorker(...)
+   → exec.Command("claude", ...) builds the command
+   → cmd.Start() returns error (ENOENT, EACCES, etc.)
+
+2. [CURRENT BEHAVIOR — GAP] spawnWorker returns the error to retrySpawn.
+   retrySpawn currently does not handle spawn failure explicitly.
+
+3. The task remains in "running" state in state.json.
+   No supervisor goroutine is started (cmd.Start failed).
+   No watchdog goroutine is started.
+   No retry is scheduled.
+
+4. [GAP] The coordinator's niwa_await_task blocks until its timeout.
+   It eventually returns {status: "timeout"}.
+   The coordinator has no signal that the spawn itself failed — it looks the same
+   as a task that is running slowly.
+
+5. [GAP] The task directory remains with state "running" indefinitely.
+   If the daemon is restarted, it does not re-scan for this orphan (same gap as Flow A).
+
+Expected behavior (not yet implemented):
+   → spawnWorker returns error → retrySpawn detects spawn failure
+   → logs "spawn_failed" to transitions.log
+   → if spawn is the initial spawn (RestartCount == 0): task should be abandoned
+     immediately with reason {error: "spawn_failed"}
+   → if spawn is a retry: treat the same as an unexpected exit — schedule another
+     retrySpawn or abandon if RestartCount >= MaxRestarts
+   → deliver task.abandoned to coordinator inbox
+   → coordinator's niwa_await_task unblocks with {status: "abandoned",
+     reason: {error: "spawn_failed"}}
+```
+
+**What the coordinator currently sees:** `niwa_await_task` blocks until timeout, then
+returns `{status: "timeout"}`. There is no way to distinguish a spawn failure from a
+slow start or a blocked worker.
+
+**Gap:** `spawnWorker` failure does not deliver an `abandoned` message. The coordinator
+is left blocking. This gap is not addressed by DESIGN-coordinator-loop.md and should
+be tracked as a separate issue.
