@@ -504,8 +504,8 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 	//   1. NoOverlay=true  → skip entirely; overlayDir stays empty.
 	//   2. OverlayURL set  → sync existing clone; hard error on sync failure.
 	//   3. Neither         → attempt convention discovery from ConfigSourceURL.
-	var pipelineOverlayURL string    // non-empty when convention discovery sets OverlayURL
-	var pipelineOverlayCommit string // non-empty when convention discovery sets OverlayCommit
+	var pipelineOverlayURL string    // non-empty when overlay sync or discovery records the current URL
+	var pipelineOverlayCommit string // non-empty when overlay sync or discovery records the HEAD SHA
 	if !opts.noOverlay {
 		switch {
 		case opts.overlayURL != "":
@@ -521,13 +521,15 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 			}
 			// Sync succeeded. Check whether the overlay has advanced.
 			sha, shaErr := a.headSHA(dir)
-			if shaErr == nil && opts.existingState != nil && opts.existingState.OverlayCommit != "" {
-				if sha != opts.existingState.OverlayCommit {
+			if shaErr == nil {
+				if opts.existingState != nil && opts.existingState.OverlayCommit != "" && sha != opts.existingState.OverlayCommit {
 					a.Reporter.DeferWarn("workspace overlay has new commits since last apply (was %s, now %s)",
 						opts.existingState.OverlayCommit[:min(7, len(opts.existingState.OverlayCommit))],
 						sha[:min(7, len(sha))],
 					)
 				}
+				pipelineOverlayURL = opts.overlayURL
+				pipelineOverlayCommit = sha
 			}
 			overlayDir = dir
 
