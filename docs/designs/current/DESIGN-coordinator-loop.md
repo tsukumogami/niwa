@@ -1,5 +1,5 @@
 ---
-status: Planned
+status: Current
 problem: |
   When a coordinator delegates a long-running task via niwa_delegate, the stall
   watchdog kills the worker at 15-minute intervals because nothing calls
@@ -33,7 +33,7 @@ rationale: |
 
 ## Status
 
-Planned
+Current
 
 ## Context and Problem Statement
 
