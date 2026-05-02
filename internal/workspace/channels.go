@@ -357,6 +357,24 @@ func InstallChannelInfrastructure(cfg *config.WorkspaceConfig, instanceRoot stri
 	}
 	*writtenFiles = append(*writtenFiles, userPromptPath)
 
+	// Stop hook: reset the stall watchdog at every turn boundary. The absolute
+	// binary path is resolved at apply time so the hook works even when niwa
+	// is not on PATH inside Claude Code's hook execution environment.
+	niwaBin, exErr := os.Executable()
+	if exErr != nil || niwaBin == "" {
+		niwaBin = "niwa"
+	}
+	stopHooksDir := filepath.Join(hooksDir, "stop")
+	if err := mkdirAllMode(stopHooksDir, 0o700); err != nil {
+		return fmt.Errorf("creating hooks/stop dir: %w", err)
+	}
+	stopScriptPath := filepath.Join(stopHooksDir, "report-progress.sh")
+	stopScriptContent := []byte("#!/bin/sh\n" + niwaBin + " mesh report-progress\n")
+	if err := writeIdempotent(stopScriptPath, stopScriptContent, 0o600, os.Stderr); err != nil {
+		return fmt.Errorf("writing report-progress.sh: %w", err)
+	}
+	*writtenFiles = append(*writtenFiles, stopScriptPath)
+
 	// Step 7: workspace-context.md ## Channels section. The coordinator
 	// is the only reader (workers read the task envelope, not this file)
 	// so Role is hardcoded. See Decision 5 / PRD R12.
@@ -967,12 +985,15 @@ func injectChannelHooks(cfg *config.WorkspaceConfig, instanceRoot string) {
 	hooksDir := filepath.Join(instanceRoot, ".niwa", "hooks")
 	sessionStartScript := filepath.Join(hooksDir, "mesh-session-start.sh")
 	userPromptScript := filepath.Join(hooksDir, "mesh-user-prompt-submit.sh")
+	stopScript := filepath.Join(hooksDir, "stop", "report-progress.sh")
 
 	sessionStartEntry := config.HookEntry{Scripts: []string{sessionStartScript}}
 	userPromptEntry := config.HookEntry{Scripts: []string{userPromptScript}}
+	stopEntry := config.HookEntry{Scripts: []string{stopScript}}
 
 	cfg.Claude.Hooks["session_start"] = prependHookEntry(cfg.Claude.Hooks["session_start"], sessionStartEntry)
 	cfg.Claude.Hooks["user_prompt_submit"] = prependHookEntry(cfg.Claude.Hooks["user_prompt_submit"], userPromptEntry)
+	cfg.Claude.Hooks["stop"] = prependHookEntry(cfg.Claude.Hooks["stop"], stopEntry)
 }
 
 // prependHookEntry returns a new slice with entry prepended before existing.
