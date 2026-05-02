@@ -1,0 +1,25 @@
+{
+  "topic": "coordinator-loop",
+  "decisions": [
+    {
+      "id": 1,
+      "question": "How should the stop hook call niwa_report_progress — by directly updating task state via a CLI subcommand (fully automated, zero agent awareness), or by injecting a reminder message that the agent reads and acts on (simpler, but agent-dependent)?",
+      "status": "pending",
+      "complexity": "standard"
+    },
+    {
+      "id": 2,
+      "question": "How does niwa capture the worker's Claude Code session ID for resume-with-reminder recovery — via a new MCP tool called during bootstrap, by extending niwa_report_progress to accept the session ID on first call, or via post-mortem filesystem discovery — and how does the watchdog use that ID to resume rather than fresh-spawn?",
+      "status": "pending",
+      "complexity": "critical"
+    },
+    {
+      "id": 3,
+      "question": "What error response should niwa_ask return when the target role has no live session — a new status value, an existing vocabulary term, or an error object — and what information should it include so callers can take corrective action?",
+      "status": "pending",
+      "complexity": "standard"
+    }
+  ],
+  "cross_validation": "pending",
+  "round": 0
+}
