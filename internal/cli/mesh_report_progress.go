@@ -29,6 +29,9 @@ func runMeshReportProgress(_ *cobra.Command, _ []string) error {
 	}
 
 	role := os.Getenv("NIWA_SESSION_ROLE")
+	if role == "" {
+		return fmt.Errorf("NIWA_SESSION_ROLE is not set")
+	}
 	instanceRoot := os.Getenv("NIWA_INSTANCE_ROOT")
 	if instanceRoot == "" {
 		return fmt.Errorf("NIWA_INSTANCE_ROOT is not set")
@@ -40,6 +43,10 @@ func runMeshReportProgress(_ *cobra.Command, _ []string) error {
 		if cur.TaskID != taskID {
 			return nil, nil, fmt.Errorf("task_id mismatch: state has %q, env has %q", cur.TaskID, taskID)
 		}
+		// Worker.Role is the role the daemon assigned to this worker process, set
+		// when it transitions to running. It is the authoritative ownership field
+		// (TargetRole is the intended role before spawn, which may differ if the
+		// daemon reassigns; Worker.Role is what actually ran).
 		if cur.Worker.Role != role {
 			return nil, nil, fmt.Errorf("worker.role mismatch: state has %q, env has %q", cur.Worker.Role, role)
 		}
