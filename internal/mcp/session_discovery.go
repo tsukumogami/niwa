@@ -16,6 +16,13 @@ import (
 // sessions.json or exec.Command.
 var sessionIDRegex = regexp.MustCompile(`^[a-zA-Z0-9_-]{8,128}$`)
 
+// ValidateSessionID reports whether id is a syntactically valid Claude session
+// ID. Callers outside the mcp package (e.g. the spawn path in cli) use this to
+// apply the same guard without importing the unexported regex.
+func ValidateSessionID(id string) bool {
+	return sessionIDRegex.MatchString(id)
+}
+
 // DiscoverClaudeSessionID tries three tiers to find the Claude session ID:
 //
 //  1. CLAUDE_SESSION_ID env var (validated, returned immediately if valid;
