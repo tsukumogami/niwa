@@ -76,38 +76,31 @@ should not know how they are invoked.
   the next catches it.
 - **Backward compatibility**: Existing sessions, tools, and coordinators continue to
   work without modification.
-
-## Decisions Already Made
-
-Settled during exploration — treated as constraints here, not open questions:
-
-- Skill-level progress reporting rejected: requiring individual skills to call
-  `niwa_report_progress` breaks abstraction.
-- Resume over fresh spawn: on stall kill, resume the killed session with an injected
-  reminder rather than spawning fresh.
-- Stop hook as primary mechanism: a Claude Code stop hook fires at every turn
-  boundary, providing automatic heartbeating with no agent awareness.
-- Decision protocol enforcement out of scope: the delegation body's
-  `decision_protocol` field has no enforcement mechanism by design.
+- **Enforcement scope**: The `decision_protocol` field in `niwa_delegate` task bodies
+  has no enforcement mechanism and is out of scope for this design. The fix must not
+  depend on the delegated agent following any particular protocol.
 
 ## Considered Options
 
-### Decision 1: Stop Hook Automation Level
+### Decision 1: Progress Heartbeating Mechanism
 
-The stall watchdog resets only when `last_progress.at` in `state.json` advances.
-The fix is a Claude Code stop hook that fires at every turn boundary. The design
-question is how the hook actually resets the watchdog: by directly updating the task
-state via a CLI subcommand (no agent involvement), or by injecting a reminder string
-that the agent reads and is expected to act on.
+The stall watchdog fires when `last_progress.at` in `state.json` has not advanced for
+900 seconds. The core question is who is responsible for advancing it. Three
+approaches were evaluated: modify each skill or application to call
+`niwa_report_progress` at regular intervals; install a workspace-level Claude Code
+stop hook that calls a CLI subcommand to reset the timestamp automatically; or install
+a stop hook that injects a reminder message instructing the agent to call the tool.
 
-Key implementation facts: `NIWA_TASK_ID`, `NIWA_INSTANCE_ROOT`, and
-`NIWA_SESSION_ROLE` are set unconditionally at worker spawn time
-(`mesh_watch.go:907–909`) and inherited by all child processes including hook
-scripts. The `mcp.UpdateState` function in `taskstore.go` enforces flock +
-atomic-rename + fsync, making concurrent writes from the hook script safe alongside
-the MCP server and the watchdog goroutine. The watchdog reads `last_progress.at`
-under a shared flock every two seconds and resets its stall timer when the value
-advances — so any writer going through `UpdateState` is immediately visible.
+Key implementation facts for the hook approaches: `NIWA_TASK_ID`, `NIWA_INSTANCE_ROOT`,
+and `NIWA_SESSION_ROLE` are set unconditionally at worker spawn time
+(`mesh_watch.go:907–909`) and inherited by all child processes including hook scripts.
+The `mcp.UpdateState` function in `taskstore.go` enforces flock + atomic-rename +
+fsync, making concurrent writes from the hook script safe alongside the MCP server and
+the watchdog goroutine. The watchdog reads `last_progress.at` under a shared flock
+every two seconds and resets its stall timer when the value advances — so any writer
+going through `UpdateState` is immediately visible. Claude Code's hook merge semantics
+concatenate hooks at every config layer, so a workspace-level hook coexists with any
+application-level hooks (e.g., shirabe's) without conflict.
 
 #### Chosen: Option A — Fully Automated via New CLI Subcommand
 
@@ -136,15 +129,27 @@ no conflict or override risk.
 
 #### Alternatives Considered
 
-**Option B — Reminder injection**: Hook outputs a reminder string; Claude Code
-injects it as a user message; the agent is expected to call `niwa_report_progress`.
-Rejected because it violates abstraction integrity — agent compliance cannot be
-guaranteed by construction, and an agent focused on long-running tool calls may defer
-or ignore the reminder.
+**Option B — Skill-level or application-level `niwa_report_progress` calls**: Require
+each skill or application running inside a delegated worker to call
+`niwa_report_progress` at regular intervals, either via a modified bootstrap prompt
+instructing the agent to do so, or by modifying individual skills to include the call.
+Rejected because it breaks abstraction integrity — skills should not need to know
+whether they are running inside a niwa-delegated session or invoked directly. Any
+skill that doesn't include the call, including every existing skill and any future
+third-party skill, still triggers stall kills. An agent that ignores the instruction
+also triggers stall kills. The mechanism must work for any worker without any
+cooperation from the running application.
 
-**Option C — Hybrid (automated with fallback reminder)**: Attempts the CLI call and
+**Option C — Reminder injection via stop hook**: Hook outputs a reminder string; Claude
+Code injects it as a user message; the agent is expected to call `niwa_report_progress`
+in its next turn. Rejected for the same fundamental reason as Option B — agent
+compliance cannot be guaranteed, and an agent focused on a long-running tool call may
+defer or ignore the reminder. The reminder injection approach reintroduces an
+agent-dependency that Option A eliminates.
+
+**Option D — Hybrid (automated with fallback reminder)**: Attempts the CLI call and
 falls back to a reminder on failure. Rejected because the fallback reintroduces the
-agent dependency Option A eliminates. On real failure, a reminder does not help the
+agent dependency Options B and C carry. On real failure, a reminder does not help the
 watchdog and misleads the agent. Silent exit is the correct behavior on failure.
 
 ---
