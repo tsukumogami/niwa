@@ -35,6 +35,12 @@ const progressSummaryLimit = 200
 // niwa_list_outbound_tasks; matches CLI niwa task list for parity.
 const bodySummaryLimit = 200
 
+// defaultMaxResumes is written to state.json when a new delegate task is
+// created. It caps how many session-resume attempts the daemon makes before
+// falling back to a fresh spawn. Ask tasks are exempt (they never spawn a
+// restartable worker process).
+const defaultMaxResumes = 2
+
 // delegateArgs — niwa_delegate input.
 type delegateArgs struct {
 	To        string          `json:"to"`
@@ -192,6 +198,7 @@ func (s *Server) createTaskEnvelope(to string, body json.RawMessage, expiresAt, 
 			{From: "", To: TaskStateQueued, At: now},
 		},
 		MaxRestarts:   3,
+		MaxResumes:    defaultMaxResumes,
 		DelegatorRole: s.role,
 		TargetRole:    to,
 		UpdatedAt:     now,
@@ -229,8 +236,7 @@ func (s *Server) createTaskEnvelope(to string, body json.RawMessage, expiresAt, 
 
 // createAskTaskStore creates the task directory, envelope.json, and state.json
 // for an ask task without writing any inbox message. The caller is responsible
-// for writing the appropriate inbox notification (task.ask for live coordinator,
-// or using createTaskEnvelope which writes task.delegate for the spawn path).
+// for writing a task.ask notification to the coordinator's inbox.
 func (s *Server) createAskTaskStore(to string, body json.RawMessage, parentTaskID string) (string, toolResult) {
 	taskID := NewTaskID()
 	taskDir := taskDirPath(s.instanceRoot, taskID)
@@ -267,7 +273,7 @@ func (s *Server) createAskTaskStore(to string, body json.RawMessage, parentTaskI
 		StateTransitions: []StateTransition{
 			{From: "", To: TaskStateQueued, At: now},
 		},
-		MaxRestarts:   3,
+		MaxRestarts:   0, // ask tasks are never daemon-spawned; no retries
 		DelegatorRole: s.role,
 		TargetRole:    to,
 		UpdatedAt:     now,

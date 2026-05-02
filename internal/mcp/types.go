@@ -241,6 +241,10 @@ type TaskWorker struct {
 	Role           string `json:"role"`
 	SpawnStartedAt string `json:"spawn_started_at,omitempty"`
 	AdoptedAt      string `json:"adopted_at,omitempty"`
+	// ClaudeSessionID is the Claude Code session ID for the running worker.
+	// Must not appear in diagnostic exports or sanitized log output.
+	ClaudeSessionID string `json:"claude_session_id,omitempty"`
+	ResumeCount     int    `json:"resume_count,omitempty"`
 }
 
 // TaskProgress is the most recent progress event summary. The progress `body`
@@ -265,6 +269,7 @@ type TaskState struct {
 	StateTransitions   []StateTransition `json:"state_transitions"`
 	RestartCount       int               `json:"restart_count"`
 	MaxRestarts        int               `json:"max_restarts"`
+	MaxResumes         int               `json:"max_resumes,omitempty"`
 	LastProgress       *TaskProgress     `json:"last_progress,omitempty"`
 	Worker             TaskWorker        `json:"worker"`
 	DelegatorRole      string            `json:"delegator_role"`
@@ -358,6 +363,7 @@ type TransitionLogEntry struct {
 	ExitCode  *int             `json:"exit_code,omitempty"`
 	Signal    string           `json:"signal,omitempty"`
 	Attempt   int              `json:"attempt,omitempty"`
+	Resume    bool             `json:"resume,omitempty"` // true when retrySpawn resumed an existing session (set by daemon)
 	Result    json.RawMessage  `json:"result,omitempty"`
 	Reason    json.RawMessage  `json:"reason,omitempty"`
 	Actor     *TransitionActor `json:"actor,omitempty"`

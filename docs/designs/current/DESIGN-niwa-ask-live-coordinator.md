@@ -111,6 +111,15 @@ questions — routing to spawn in that case is the correct fallback. Lazy regist
 registration to an intentional coordinator action rather than to protocol negotiation, and it's
 immune to hook failures because it runs inside the MCP server using the already-correct `s.role`.
 
+> **Note (niwa 0.9.4 — DESIGN-coordinator-loop.md Decision 2, Proposed):** The
+> same registration pattern is extended to worker sessions. The MCP server reads
+> `$CLAUDE_SESSION_ID` from its environment at startup (before any tool call) and
+> writes it to `TaskState.Worker.ClaudeSessionID` when `s.taskID != ""`. This is
+> earlier than the first `niwa_check_messages` call and targets a different field
+> (`TaskWorker.ClaudeSessionID` rather than `SessionEntry`), but follows the same
+> principle: registration as a transparent side effect of the server's own startup,
+> with no explicit tool or bootstrap change required.
+
 #### Alternatives Considered
 
 **Auto-register on first MCP call**: Register when any MCP method is received (`initialize`,
@@ -205,6 +214,14 @@ When a worker calls `niwa_ask(to='coordinator')`, `handleAsk` reads `sessions.js
 notification to the coordinator's inbox and continues with normal ask-task creation (the ask task
 is what the worker blocks on). If no coordinator is registered or the PID is dead, it falls back
 to the existing ephemeral spawn path unchanged.
+
+> **Note (niwa 0.9.4 — DESIGN-coordinator-loop.md Decision 3, Proposed):** The
+> ephemeral-spawn fallback is removed in that design. `handleAsk` now returns
+> `{status: "no_live_session", role: "...", message: "..."}` immediately when no
+> live coordinator is found, before creating any task store entry. This change
+> must not ship before Phase 2 of DESIGN-coordinator-loop.md (server-startup
+> session registration) is deployed, to avoid a regression window where
+> coordinator asks fail before the coordinator's session has been registered.
 
 On the coordinator side, questions surface through two paths. If the coordinator is actively
 polling (`niwa_check_messages`), the `task.ask` notification appears in the inbox like any other

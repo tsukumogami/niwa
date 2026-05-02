@@ -149,10 +149,10 @@ func TestHandleAsk_LiveCoordinator_WritesTaskAsk(t *testing.T) {
 	<-done // drain goroutine after timeout
 }
 
-// TestHandleAsk_DeadCoordinator_FallsBackToSpawn verifies that handleAsk falls
-// back to writing a task.delegate when the registered coordinator PID is dead,
-// and that the stale entry is pruned from sessions.json.
-func TestHandleAsk_DeadCoordinator_FallsBackToSpawn(t *testing.T) {
+// TestHandleAsk_DeadCoordinator_ReturnsNoLiveSession verifies that handleAsk
+// returns no_live_session immediately (without writing any task directory) when
+// the registered coordinator PID is dead, and that the stale entry is pruned.
+func TestHandleAsk_DeadCoordinator_ReturnsNoLiveSession(t *testing.T) {
 	s := newTestServer(t, "frontend", "coordinator")
 	root := s.instanceRoot
 
@@ -166,41 +166,34 @@ func TestHandleAsk_DeadCoordinator_FallsBackToSpawn(t *testing.T) {
 		RegisteredAt: time.Now().UTC().Format(time.RFC3339),
 	}})
 
-	coordInbox := filepath.Join(root, ".niwa", "roles", "coordinator", "inbox")
-	done := make(chan toolResult, 1)
-	go func() {
-		done <- s.handleAsk(askArgs{
-			To:             "coordinator",
-			Body:           json.RawMessage(`{"text":"hello"}`),
-			TimeoutSeconds: 2,
-		})
-	}()
+	res := s.handleAsk(askArgs{
+		To:             "coordinator",
+		Body:           json.RawMessage(`{"text":"hello"}`),
+		TimeoutSeconds: 2,
+	})
 
-	deadline := time.Now().Add(500 * time.Millisecond)
-	var files []string
-	for time.Now().Before(deadline) {
-		files = listInboxFiles(t, coordInbox)
-		if len(files) > 0 {
-			break
+	if res.IsError {
+		t.Fatalf("expected non-error result, got error: %s", res.Content[0].Text)
+	}
+	text := res.Content[0].Text
+	if !strings.Contains(text, `"status":"no_live_session"`) {
+		t.Errorf("want no_live_session status, got %s", text)
+	}
+	if !strings.Contains(text, `"role":"coordinator"`) {
+		t.Errorf("want role=coordinator in response, got %s", text)
+	}
+
+	// No task directory must have been created.
+	tasksDir := filepath.Join(root, ".niwa", "tasks")
+	entries, _ := os.ReadDir(tasksDir)
+	var subdirs []string
+	for _, e := range entries {
+		if e.IsDir() {
+			subdirs = append(subdirs, e.Name())
 		}
-		time.Sleep(10 * time.Millisecond)
 	}
-
-	if len(files) == 0 {
-		t.Fatal("expected task.delegate in coordinator inbox, found none")
-	}
-
-	// Verify the file is task.delegate, not task.ask.
-	data, err := os.ReadFile(filepath.Join(coordInbox, files[0]))
-	if err != nil {
-		t.Fatalf("read inbox file: %v", err)
-	}
-	var msg Message
-	if err := json.Unmarshal(data, &msg); err != nil {
-		t.Fatalf("unmarshal inbox file: %v", err)
-	}
-	if msg.Type != "task.delegate" {
-		t.Errorf("expected task.delegate, got %q", msg.Type)
+	if len(subdirs) != 0 {
+		t.Errorf("expected zero task subdirectories, found %v", subdirs)
 	}
 
 	// Verify the stale entry was pruned.
@@ -218,52 +211,40 @@ func TestHandleAsk_DeadCoordinator_FallsBackToSpawn(t *testing.T) {
 			t.Error("stale coordinator entry not pruned from sessions.json")
 		}
 	}
-
-	<-done
 }
 
-// TestHandleAsk_NoSessions_FallsBackToSpawn verifies that handleAsk falls back
-// to the ephemeral spawn path when sessions.json does not exist.
-func TestHandleAsk_NoSessions_FallsBackToSpawn(t *testing.T) {
+// TestHandleAsk_NoSessions_ReturnsNoLiveSession verifies that handleAsk returns
+// no_live_session immediately (without writing any task directory) when
+// sessions.json does not exist.
+func TestHandleAsk_NoSessions_ReturnsNoLiveSession(t *testing.T) {
 	s := newTestServer(t, "frontend", "coordinator")
 	root := s.instanceRoot
 
 	// No sessions.json created.
-	coordInbox := filepath.Join(root, ".niwa", "roles", "coordinator", "inbox")
-	done := make(chan toolResult, 1)
-	go func() {
-		done <- s.handleAsk(askArgs{
-			To:             "coordinator",
-			Body:           json.RawMessage(`{"text":"hello"}`),
-			TimeoutSeconds: 2,
-		})
-	}()
+	res := s.handleAsk(askArgs{
+		To:             "coordinator",
+		Body:           json.RawMessage(`{"text":"hello"}`),
+		TimeoutSeconds: 2,
+	})
 
-	deadline := time.Now().Add(500 * time.Millisecond)
-	var files []string
-	for time.Now().Before(deadline) {
-		files = listInboxFiles(t, coordInbox)
-		if len(files) > 0 {
-			break
+	if res.IsError {
+		t.Fatalf("expected non-error result, got error: %s", res.Content[0].Text)
+	}
+	text := res.Content[0].Text
+	if !strings.Contains(text, `"status":"no_live_session"`) {
+		t.Errorf("want no_live_session status, got %s", text)
+	}
+
+	// No task directory must have been created.
+	tasksDir := filepath.Join(root, ".niwa", "tasks")
+	entries, _ := os.ReadDir(tasksDir)
+	var subdirs []string
+	for _, e := range entries {
+		if e.IsDir() {
+			subdirs = append(subdirs, e.Name())
 		}
-		time.Sleep(10 * time.Millisecond)
 	}
-
-	if len(files) == 0 {
-		t.Fatal("expected task.delegate in coordinator inbox, found none")
+	if len(subdirs) != 0 {
+		t.Errorf("expected zero task subdirectories, found %v", subdirs)
 	}
-
-	data, err := os.ReadFile(filepath.Join(coordInbox, files[0]))
-	if err != nil {
-		t.Fatalf("read inbox file: %v", err)
-	}
-	var msg Message
-	if err := json.Unmarshal(data, &msg); err != nil {
-		t.Fatalf("unmarshal inbox file: %v", err)
-	}
-	if msg.Type != "task.delegate" {
-		t.Errorf("expected task.delegate, got %q", msg.Type)
-	}
-
-	<-done
 }

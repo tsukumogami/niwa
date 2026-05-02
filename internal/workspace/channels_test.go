@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"testing"
@@ -212,14 +213,7 @@ func TestInstallChannelInfrastructure_CreatesRoleLayout(t *testing.T) {
 		instanceMCP, instanceSkill, pidPath, logPath, ctxPath,
 	}
 	for _, p := range mustHave {
-		found := false
-		for _, w := range written {
-			if w == p {
-				found = true
-				break
-			}
-		}
-		if !found {
+		if !slices.Contains(written, p) {
 			t.Errorf("writtenFiles missing %q; got %v", p, written)
 		}
 	}
@@ -925,6 +919,60 @@ func TestWorkerMCPConfig_DistinctFromInstanceMCP(t *testing.T) {
 	}
 	if _, ok := cEnv["NIWA_TASK_ID"]; ok {
 		t.Errorf("coordinator config should not have NIWA_TASK_ID")
+	}
+}
+
+func TestInjectChannelHooks_InjectsStopHook(t *testing.T) {
+	dir := t.TempDir()
+	cfg := channeledConfig()
+	injectChannelHooks(cfg, dir)
+
+	entries, ok := cfg.Claude.Hooks["stop"]
+	if !ok || len(entries) == 0 {
+		t.Fatal("stop hook not injected")
+	}
+	scripts := entries[0].Scripts
+	if len(scripts) == 0 {
+		t.Fatal("stop hook entry has no scripts")
+	}
+	if !filepath.IsAbs(scripts[0]) {
+		t.Errorf("stop hook script must be an absolute path: %q", scripts[0])
+	}
+	wantSuffix := filepath.Join("stop", "report-progress.sh")
+	if !strings.HasSuffix(scripts[0], wantSuffix) {
+		t.Errorf("stop hook script = %q, want suffix %q", scripts[0], wantSuffix)
+	}
+}
+
+func TestInstallChannelInfrastructure_StopHookScript(t *testing.T) {
+	dir := t.TempDir()
+	cfg := channeledConfig()
+	var written []string
+	if err := InstallChannelInfrastructure(cfg, dir, &written); err != nil {
+		t.Fatalf("InstallChannelInfrastructure: %v", err)
+	}
+
+	scriptPath := filepath.Join(dir, ".niwa", "hooks", "stop", "report-progress.sh")
+	content, err := os.ReadFile(scriptPath)
+	if err != nil {
+		t.Fatalf("reading report-progress.sh: %v", err)
+	}
+	contentStr := string(content)
+	if !strings.Contains(contentStr, "mesh report-progress") {
+		t.Errorf("script missing 'mesh report-progress': %q", contentStr)
+	}
+	if strings.Contains(contentStr, "--task-id") {
+		t.Errorf("script must not contain --task-id flag: %q", contentStr)
+	}
+	// Script must reference an absolute binary path (from os.Executable) or
+	// fall back to "niwa" — either way the token "report-progress" must follow
+	// a space without any flag injection.
+	if !strings.Contains(contentStr, "#!/bin/sh") {
+		t.Errorf("script missing shebang: %q", contentStr)
+	}
+
+	if !slices.Contains(written, scriptPath) {
+		t.Errorf("report-progress.sh not in writtenFiles: %v", written)
 	}
 }
 

@@ -103,6 +103,7 @@ func New(role, instanceRoot string) *Server {
 // notifications when new messages arrive.
 func (s *Server) Run(r io.Reader, w io.Writer) error {
 	s.enc = json.NewEncoder(w)
+	s.registerSessionID()
 
 	if s.roleInboxDir != "" {
 		go s.watchRoleInbox()
@@ -666,19 +667,18 @@ func (s *Server) isKnownRole(role string) bool {
 	return info.IsDir()
 }
 
-// handleAsk routes a worker question to the appropriate destination and blocks
-// until an answer arrives. Default timeout is 600 s.
+// handleAsk routes a worker question to the coordinator and blocks until an
+// answer arrives. Default timeout is 600 s.
 //
 // When a live coordinator session is registered in sessions.json, handleAsk
-// writes a task.ask notification to the coordinator's role inbox so that the
-// coordinator can receive the question via niwa_check_messages or be interrupted
-// from niwa_await_task (Issue 3/4). The coordinator answers by calling
+// creates an ask task and writes a task.ask notification to the coordinator's
+// role inbox. The coordinator receives the question via niwa_check_messages or
+// is interrupted from niwa_await_task. It answers by calling
 // niwa_finish_task(task_id=<ask_task_id>), which delivers task.completed to the
 // worker's inbox and unblocks this call.
 //
-// When no live coordinator is registered, handleAsk falls back to the existing
-// ephemeral spawn path: it writes a task.delegate to the coordinator's inbox,
-// which the mesh watch daemon claims and uses to spawn an ephemeral worker.
+// When no live coordinator is registered, handleAsk returns a no_live_session
+// JSON response immediately without creating any task directory.
 func (s *Server) handleAsk(args askArgs) toolResult {
 	if args.TimeoutSeconds <= 0 {
 		args.TimeoutSeconds = 600
@@ -718,12 +718,14 @@ func (s *Server) handleAsk(args askArgs) toolResult {
 			return errResult("cannot write task.ask notification: " + err.Error())
 		}
 	} else {
-		// Ephemeral spawn path: createTaskEnvelope writes task.delegate to the
-		// coordinator's inbox; the daemon claims it and spawns an ephemeral worker.
-		taskID, errTR = s.createTaskEnvelope(args.To, wrappedBody, "", "")
-		if errTR.IsError {
-			return errTR
-		}
+		// No live coordinator: return typed no_live_session response immediately,
+		// before creating any task directory.
+		payload, _ := json.Marshal(map[string]any{
+			"status":  "no_live_session",
+			"role":    args.To,
+			"message": fmt.Sprintf("No live session found for role '%s'. The role may have completed its task or not yet started.", args.To),
+		})
+		return textResult(string(payload))
 	}
 
 	// Register awaitWaiter BEFORE the race-guard state read so a task that
@@ -741,8 +743,33 @@ func (s *Server) handleAsk(args askArgs) toolResult {
 	case evt := <-ch:
 		return formatEventResult(evt, taskDir)
 	case <-time.After(time.Duration(args.TimeoutSeconds) * time.Second):
-		return textResult(fmt.Sprintf(`{"status":"timeout","task_id":%q,"timeout_seconds":%d}`,
-			taskID, args.TimeoutSeconds))
+		// Transition the ask task to abandoned so it doesn't linger in queued state.
+		now := time.Now().UTC().Format(time.RFC3339)
+		_ = UpdateState(taskDir, func(cur *TaskState) (*TaskState, *TransitionLogEntry, error) {
+			if cur.State != TaskStateQueued {
+				return nil, nil, nil
+			}
+			next := *cur
+			next.State = TaskStateAbandoned
+			next.UpdatedAt = now
+			next.Reason = json.RawMessage(`{"error":"ask_timeout"}`)
+			next.StateTransitions = append(next.StateTransitions,
+				StateTransition{From: TaskStateQueued, To: TaskStateAbandoned, At: now})
+			entry := &TransitionLogEntry{
+				Kind:  "abandoned",
+				From:  TaskStateQueued,
+				To:    TaskStateAbandoned,
+				At:    now,
+				Actor: &TransitionActor{Kind: "worker", PID: os.Getpid(), Role: s.role},
+			}
+			return &next, entry, nil
+		})
+		timeoutPayload, _ := json.Marshal(map[string]any{
+				"status":          "timeout",
+				"task_id":         taskID,
+				"timeout_seconds": args.TimeoutSeconds,
+			})
+			return textResult(string(timeoutPayload))
 	}
 }
 
@@ -891,4 +918,30 @@ func prettyJSON(raw json.RawMessage) string {
 		return string(raw)
 	}
 	return string(b)
+}
+
+// registerSessionID reads CLAUDE_SESSION_ID from the environment and writes
+// it to the worker's state.json before any tool call is processed. The daemon
+// reads Worker.ClaudeSessionID when deciding whether to resume a killed worker
+// with claude --resume or start a fresh spawn.
+//
+// Registration is best-effort: errors are silently swallowed because startup
+// must never fail due to a missing or unwritable state.json (e.g. during
+// integration tests that run the server without a full workspace on disk).
+// A missing or invalid CLAUDE_SESSION_ID is not an error — the field simply
+// stays empty and the daemon falls back to a fresh spawn.
+func (s *Server) registerSessionID() {
+	if s.taskID == "" {
+		return
+	}
+	sid := os.Getenv("CLAUDE_SESSION_ID")
+	if sid == "" || !sessionIDRegex.MatchString(sid) {
+		return
+	}
+	taskDir := taskDirPath(s.instanceRoot, s.taskID)
+	_ = UpdateState(taskDir, func(cur *TaskState) (*TaskState, *TransitionLogEntry, error) {
+		next := *cur
+		next.Worker.ClaudeSessionID = sid
+		return &next, nil, nil
+	})
 }

@@ -310,6 +310,13 @@ per-spawn (spawnWorker)
     )
 ```
 
+> **Note (niwa 0.9.4 — DESIGN-coordinator-loop.md Phase 3, Proposed):**
+> `spawnWorker` gains a `resumeMode` parameter. On the resume branch the first
+> positional arguments change from `"-p", prompt` to
+> `"--resume", session_id, "-p", reminder`. The `--permission-mode` and
+> `--allowed-tools` values are identical across both branches — resume semantics
+> do not change permission scope.
+
 ## Implementation approach
 
 ### Phase 1: Workspace helper and fallback tool list

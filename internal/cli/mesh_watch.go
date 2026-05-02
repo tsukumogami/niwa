@@ -29,15 +29,19 @@
 package cli
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -93,6 +97,21 @@ type daemonConfig struct {
 // update both.
 const bootstrapPromptTemplate = "You are a worker for niwa task %s. Call niwa_check_messages to retrieve your task envelope."
 
+// stallReminderText is injected via -p when resuming a worker that was killed
+// by the stall watchdog. It explains what happened and instructs the worker not
+// to re-fetch its envelope (which is already in the conversation history).
+const stallReminderText = "You were stopped by the stall watchdog. The workspace stop hook resets the watchdog automatically at every turn boundary — you do not need to call niwa_report_progress manually. Do not call niwa_check_messages again — your task envelope is already in your conversation history. Continue your work from where you left off."
+
+// defaultMaxResumes is the fallback resume cap applied when state.json carries
+// MaxResumes <= 0. Two attempts is enough to recover from a transient stall
+// without masking a persistent crash loop.
+const defaultMaxResumes = 2
+
+// sessionIDRe validates Claude session IDs before passing them to --resume.
+// Pattern matches mcp.sessionIDRegex; kept local to avoid widening the mcp
+// package's exported API for a single cli-layer call site.
+var sessionIDRe = regexp.MustCompile(`^[a-zA-Z0-9_-]{8,128}$`)
+
 // The flag-formatted list passed to claude's --allowed-tools lives in
 // internal/mcp/allowed_tools.go (mcp.ClaudeAllowedTools) so the daemon and
 // the functional-test coordinator launcher reference the same source.
@@ -112,9 +131,10 @@ type spawnTargetInfo struct {
 // event site (catch-up scan, fsnotify) funnels through the same claim
 // code path.
 type inboxEvent struct {
-	role     string
-	taskID   string
-	filePath string // absolute path to .niwa/roles/<role>/inbox/<id>.json
+	role            string
+	taskID          string
+	filePath        string // absolute path to .niwa/roles/<role>/inbox/<id>.json
+	resumeSessionID string // non-empty: use --resume <id> instead of -p <bootstrap>
 }
 
 // supervisorExit is sent by a per-task supervisor goroutine when
@@ -358,17 +378,18 @@ func runMeshWatch(cmd *cobra.Command, args []string) error {
 // niwa_finish_task). Both flow to the per-supervisor watchdog goroutine
 // started inside spawnWorker.
 type spawnContext struct {
-	instanceRoot   string
-	niwaDir        string
-	spawnBin       string
-	logger         *log.Logger
-	exitCh         chan<- supervisorExit
-	wg             *sync.WaitGroup
-	shutdownCtx    context.Context
-	backoffs       []time.Duration
-	stallWatchdog  time.Duration
-	sigTermGrace   time.Duration
-	workerPermMode string // "bypassPermissions" or "acceptEdits"; resolved once at startup
+	instanceRoot    string
+	niwaDir         string
+	spawnBin        string
+	logger          *log.Logger
+	exitCh          chan<- supervisorExit
+	wg              *sync.WaitGroup
+	shutdownCtx     context.Context
+	backoffs        []time.Duration
+	stallWatchdog   time.Duration
+	sigTermGrace    time.Duration
+	workerPermMode  string // "bypassPermissions" or "acceptEdits"; resolved once at startup
+	claudeHomeDir   string // overrides os.UserHomeDir() for Guard 4 session file lookup; tests only
 }
 
 // orphanEntry tracks a live-orphan worker adopted at startup (Issue 7).
@@ -833,8 +854,6 @@ func handleInboxEvent(evt inboxEvent, s spawnContext) {
 // problem (bad binary, permission denied, etc.) and Issue 5's retry
 // pipeline intentionally does not cover this case.
 func spawnWorker(evt inboxEvent, taskDir string, s spawnContext) {
-	prompt := fmt.Sprintf(bootstrapPromptTemplate, evt.taskID)
-
 	// Generate a per-spawn worker MCP config with the worker's actual role
 	// and task ID in the env block. Using the instance-root .mcp.json
 	// directly would cause Claude Code's env-block merge to override
@@ -892,14 +911,28 @@ func spawnWorker(evt inboxEvent, taskDir string, s spawnContext) {
 	if s.workerPermMode != "bypassPermissions" {
 		tools = append(tools, mcp.WorkerFallbackBashTools...)
 	}
-	cmd := exec.Command(
-		s.spawnBin,
-		"-p", prompt,
-		"--permission-mode="+s.workerPermMode,
-		"--mcp-config="+workerMCPPath,
-		"--strict-mcp-config",
-		"--allowed-tools", strings.Join(tools, ","),
-	)
+	var cmd *exec.Cmd
+	if evt.resumeSessionID != "" {
+		cmd = exec.Command(
+			s.spawnBin,
+			"--resume", evt.resumeSessionID,
+			"-p", stallReminderText,
+			"--permission-mode="+s.workerPermMode,
+			"--mcp-config="+workerMCPPath,
+			"--strict-mcp-config",
+			"--allowed-tools", strings.Join(tools, ","),
+		)
+	} else {
+		prompt := fmt.Sprintf(bootstrapPromptTemplate, evt.taskID)
+		cmd = exec.Command(
+			s.spawnBin,
+			"-p", prompt,
+			"--permission-mode="+s.workerPermMode,
+			"--mcp-config="+workerMCPPath,
+			"--strict-mcp-config",
+			"--allowed-tools", strings.Join(tools, ","),
+		)
+	}
 
 	// Env: pass-through daemon's env, then niwa-owned last-wins
 	// overrides. Go's exec.Cmd.Env uses "last wins" on duplicate keys.
@@ -1552,55 +1585,117 @@ func deliverAbandonedMessage(s spawnContext, delegatorRole, workerRole, taskID s
 }
 
 // retrySpawn is the timer-fired entry point for a scheduled restart. It
-// re-validates the task is still in a retryable state, bumps
-// restart_count, refreshes worker.spawn_started_at, and re-enters the
-// spawn path with the same argv/env/CWD contract as the initial spawn.
+// re-validates the task is still in a retryable state and applies the
+// five-guard resume decision (Guard 1 is already resolved in
+// handleSupervisorExit before retrySpawn is ever scheduled).
+//
+// Guards 2–5 run inside the UpdateState mutator in strict order:
+//
+//	Guard 2 (MaxResumes cap):     ResumeCount >= effectiveMaxResumes → fresh spawn
+//	Guard 3 (session ID present): ClaudeSessionID == ""             → fresh spawn
+//	Guard 4 (file integrity):     .jsonl missing/empty/no JSON line  → fresh spawn
+//	Guard 5 (sessionIDRegex):     ID fails ^[a-zA-Z0-9_-]{8,128}$   → fresh spawn
+//
+// When all guards pass, the resume path increments ResumeCount, preserves
+// ClaudeSessionID, and sets Resume=true on the transitions.log entry.
+// Fresh spawn increments RestartCount, resets ResumeCount to 0, and clears
+// ClaudeSessionID.
 //
 // The envelope file remains at .niwa/roles/<role>/inbox/in-progress/<id>.json
-// across retries — we do NOT move it back to inbox/<id>.json and re-claim.
-// The claim is one-shot; every attempt thereafter reuses the same
-// in-progress envelope.
-//
-// If state is no longer "running" (e.g., delegator called
-// niwa_cancel_task in the backoff window, or the task was abandoned by
-// another code path), the retry is skipped silently. That's the correct
-// behavior: terminal state wins.
+// across retries — the claim is one-shot.
 func retrySpawn(taskID, role string, s spawnContext) {
 	taskDir := filepath.Join(s.instanceRoot, ".niwa", "tasks", taskID)
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 
+	// Pre-read state outside the lock to get ClaudeSessionID for Guard 4's
+	// file integrity check. Disk I/O must not run while the state file flock
+	// is held, so the check is split: read sessionID here, then pass the
+	// result into the UpdateState mutator below.
+	//
+	// Invariant: retrySpawn is only called from handleSupervisorExit, which
+	// fires after the worker process has exited. The session JSONL file cannot
+	// be rewritten between this pre-read and the UpdateState mutator.
+	var fileIntegrityOK bool
+	if _, preSt, preErr := mcp.ReadState(taskDir); preErr == nil && preSt.Worker.ClaudeSessionID != "" {
+		roleCWD := resolveRoleCWD(s.instanceRoot, role)
+		homeDir := s.claudeHomeDir
+		if homeDir == "" {
+			homeDir, _ = os.UserHomeDir()
+		}
+		fileIntegrityOK = checkSessionFileIntegrity(homeDir, roleCWD, preSt.Worker.ClaudeSessionID)
+	}
+
 	var skip bool
 	var attemptNumber int
+	var resumeSessionID string
 	updErr := mcp.UpdateState(taskDir, func(cur *mcp.TaskState) (*mcp.TaskState, *mcp.TransitionLogEntry, error) {
 		if cur.State != mcp.TaskStateRunning {
-			// Task left the running state between schedule and fire
-			// (cancellation, or another mechanism abandoned it).
+			// Task left running state between schedule and fire.
 			skip = true
 			return nil, nil, nil
 		}
+
+		// Capture ClaudeSessionID before ANY mutation of next.Worker.
+		capturedSessionID := cur.Worker.ClaudeSessionID
+
+		effectiveMaxResumes := cur.MaxResumes
+		if effectiveMaxResumes <= 0 {
+			effectiveMaxResumes = defaultMaxResumes
+		}
+
+		// Determine resume eligibility via Guards 2–5.
+		doResume := true
+		if cur.Worker.ResumeCount >= effectiveMaxResumes { // Guard 2
+			doResume = false
+		} else if capturedSessionID == "" { // Guard 3
+			doResume = false
+		} else if !fileIntegrityOK { // Guard 4
+			doResume = false
+		} else if !sessionIDRe.MatchString(capturedSessionID) { // Guard 5
+			doResume = false
+		}
+
 		next := *cur
-		next.RestartCount = cur.RestartCount + 1
-		attemptNumber = next.RestartCount
-		next.Worker = mcp.TaskWorker{
-			Role:           role,
-			SpawnStartedAt: now,
-			// PID + StartTime zeroed — the fresh cmd.Start below will
-			// backfill them. Crash reconciliation (Issue 7) reads
-			// (pid==0 && spawn_started_at!="") as "spawn in flight" and
-			// retries without double-counting.
-			PID:       0,
-			StartTime: 0,
-		}
 		next.UpdatedAt = now
-		entry := &mcp.TransitionLogEntry{
-			Kind:    "spawn",
-			At:      now,
-			Attempt: next.RestartCount,
-			Actor: &mcp.TransitionActor{
-				Kind: "daemon",
-				PID:  os.Getpid(),
-			},
+
+		var entry *mcp.TransitionLogEntry
+		if doResume {
+			// Resume path: increment ResumeCount, preserve ClaudeSessionID.
+			next.Worker.ResumeCount = cur.Worker.ResumeCount + 1
+			next.Worker.SpawnStartedAt = now
+			next.Worker.PID = 0
+			next.Worker.StartTime = 0
+			// ClaudeSessionID is preserved (not cleared).
+			resumeSessionID = capturedSessionID
+			entry = &mcp.TransitionLogEntry{
+				Kind:   "spawn",
+				At:     now,
+				Attempt: cur.RestartCount,
+				Resume: true,
+				Actor:  &mcp.TransitionActor{Kind: "daemon", PID: os.Getpid()},
+			}
+			attemptNumber = cur.RestartCount
+		} else {
+			// Fresh spawn path: increment RestartCount, reset ResumeCount.
+			next.RestartCount = cur.RestartCount + 1
+			next.Worker = mcp.TaskWorker{
+				Role:           role,
+				SpawnStartedAt: now,
+				// PID + StartTime zeroed; backfilled after cmd.Start.
+				PID:       0,
+				StartTime: 0,
+			}
+			// ResumeCount and ClaudeSessionID cleared (zeroed) by the
+			// Worker struct replacement above.
+			entry = &mcp.TransitionLogEntry{
+				Kind:    "spawn",
+				At:      now,
+				Attempt: next.RestartCount,
+				Actor:   &mcp.TransitionActor{Kind: "daemon", PID: os.Getpid()},
+			}
+			attemptNumber = next.RestartCount
 		}
+
 		return &next, entry, nil
 	})
 	if updErr != nil {
@@ -1611,18 +1706,61 @@ func retrySpawn(taskID, role string, s spawnContext) {
 		s.logger.Printf("retry task=%s skip=not_running", taskID)
 		return
 	}
-	s.logger.Printf("retry task=%s attempt=%d", taskID, attemptNumber)
+	if resumeSessionID != "" {
+		s.logger.Printf("retry task=%s attempt=%d mode=resume", taskID, attemptNumber)
+	} else {
+		s.logger.Printf("retry task=%s attempt=%d mode=fresh", taskID, attemptNumber)
+	}
 
-	// Re-enter the spawn path. inboxEvent.filePath is only consumed by
-	// handleInboxEvent for the claim+rename; spawnWorker itself uses
-	// only the role + taskID + taskDir, so we can fabricate an
-	// inboxEvent with the in-progress path for diagnostic purposes.
+	// Re-enter the spawn path.
 	evt := inboxEvent{
-		role:     role,
-		taskID:   taskID,
-		filePath: filepath.Join(s.instanceRoot, ".niwa", "roles", role, "inbox", "in-progress", taskID+".json"),
+		role:            role,
+		taskID:          taskID,
+		filePath:        filepath.Join(s.instanceRoot, ".niwa", "roles", role, "inbox", "in-progress", taskID+".json"),
+		resumeSessionID: resumeSessionID,
 	}
 	spawnWorker(evt, taskDir, s)
+}
+
+// checkSessionFileIntegrity reports whether the Claude session JSONL file for
+// sessionID is usable for --resume: it must exist, be non-empty, and contain
+// at least one complete JSON line in its last 4 KB.
+func checkSessionFileIntegrity(homeDir, roleCWD, sessionID string) bool {
+	encoded := base64.URLEncoding.WithPadding(base64.NoPadding).EncodeToString([]byte(roleCWD))
+	path := filepath.Join(homeDir, ".claude", "projects", encoded, sessionID+".jsonl")
+
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+
+	info, err := f.Stat()
+	if err != nil || info.Size() == 0 {
+		return false
+	}
+
+	// Read last 4 KB to check for a complete JSON line.
+	const tailSize = 4096
+	seekTo := info.Size() - tailSize
+	if seekTo < 0 {
+		seekTo = 0
+	}
+	if _, err := f.Seek(seekTo, io.SeekStart); err != nil {
+		return false
+	}
+	buf, err := io.ReadAll(f)
+	if err != nil {
+		return false
+	}
+
+	for _, line := range bytes.Split(buf, []byte("\n")) {
+		line = bytes.TrimSpace(line)
+		if len(line) > 0 && json.Valid(line) {
+			return true
+		}
+	}
+	return false
 }
 
 // stateIsTerminal mirrors mcp's internal isTaskStateTerminal (unexported).
