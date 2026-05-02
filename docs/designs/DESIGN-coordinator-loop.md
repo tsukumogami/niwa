@@ -625,3 +625,5 @@ constraint so it is not added to diagnostic exports later.
 - `DESIGN-cross-session-communication.md` — foundational mesh architecture
 - `DESIGN-niwa-ask-live-coordinator.md` — live coordinator session routing (0.9.4)
 - `DESIGN-worker-permissions.md` — worker spawn configuration
+- `DESIGN-workspace-config.md` — workspace.toml hooks schema that Phase 1 implements against
+- `DESIGN-config-distribution.md` — hook materializer and merge semantics that Phase 1 depends on

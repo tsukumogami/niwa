@@ -200,6 +200,14 @@ The apply pipeline gains a materializer loop after content installation. Three m
 
 The `[claude]` namespace makes tool-specific config explicit, leaving room for future tools. Auto-discovery mirrors the existing content pattern and reduces boilerplate -- a minimal workspace.toml with just `[claude.settings]` and the right directory structure gets full hooks and env distribution. The materializer interface keeps the pipeline clean and each distribution type independently testable.
 
+> **Note (niwa 0.9.4 — DESIGN-coordinator-loop.md Phase 1, Proposed):**
+> `DESIGN-coordinator-loop.md` depends on the hook merge semantics defined here.
+> It installs a workspace-level `[claude.hooks] stop` entry — a `report-progress.sh`
+> script generated at apply time — that resets the stall watchdog at every turn
+> boundary. The `HooksMaterializer` concatenation behavior (workspace hooks
+> appended, per-repo hooks extended) ensures this coexists with any
+> application-level stop hooks without replacement or conflict.
+
 ## Solution Architecture
 
 ### Pipeline integration

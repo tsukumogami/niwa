@@ -100,6 +100,17 @@ restarts — including adopting orphaned workers whose daemon died. All
 without becoming a single point of failure: the inbox and task directories
 are the durable state; the daemon is stateless and can restart.
 
+> **Note (niwa 0.9.4 — DESIGN-coordinator-loop.md, Proposed):** Three changes
+> extend this subsystem. (1) A workspace-level stop hook calls
+> `niwa mesh report-progress` at every Claude Code turn boundary, resetting
+> `last_progress.at` automatically without agent involvement — stall kills during
+> normal operation become rare rather than routine. (2) On a watchdog kill, the
+> daemon can resume the killed session with `claude --resume <session_id> -p
+> "<reminder>"` rather than always spawning fresh, preserving in-session context
+> across recovery. (3) `TaskWorker` gains `ClaudeSessionID` and `ResumeCount`
+> fields; `TaskState` gains `MaxResumes`. Workers remain ephemeral and unregistered
+> in `sessions.json`; `ClaudeSessionID` is a recovery mechanism, not a registration.
+
 **Developer ergonomics: skill installation and testing.** The tool API is
 narrow by design. Message vocabulary, progress cadence, and coordination
 patterns live in a `niwa-mesh` skill that niwa installs into every agent's
@@ -870,6 +881,13 @@ Coordinator's MCP server:
   → notifyNewFile fires for the answer message; waiter matches via reply_to
   → handleAsk returns the answer body
 ```
+
+> **Note (niwa 0.9.4 — DESIGN-coordinator-loop.md Decision 3, Proposed):** The
+> ephemeral-spawn path described above is superseded. When `handleAsk` finds no
+> live session for the target role, it now returns
+> `{status: "no_live_session", role: "...", message: "..."}` immediately, before
+> creating any task store entry. The spawn path in this section no longer applies
+> for that case.
 
 **Cancel vs claim race (AC-Q10):**
 

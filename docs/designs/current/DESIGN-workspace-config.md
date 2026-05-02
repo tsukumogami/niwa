@@ -259,6 +259,15 @@ permissions = "ask"
 
 Secrets stay in `.env` files, never in TOML. niwa generates `settings.local.json` and `.local.env` per repo during `niwa apply`. The schema is defined here; generation logic is implemented when the hooks and env features land.
 
+> **Note (niwa 0.9.4 — DESIGN-coordinator-loop.md Phase 1, Proposed):** The
+> `[hooks] stop` entry is given a concrete implementation in that design: a
+> `report-progress.sh` script generated at `workspace apply` time, using the
+> absolute path to the niwa binary resolved from the host environment (not a
+> PATH-dependent `niwa` name). It calls `niwa mesh report-progress --task-id
+> $NIWA_TASK_ID` at every Claude Code turn boundary, resetting the stall
+> watchdog automatically. Hook merge semantics concatenate this hook with any
+> application-level stop hooks — no conflict or override occurs.
+
 #### Alternatives considered
 
 **Unified `[claude]` section**: Hooks, settings, and env grouped under one key. Rejected because it mixes concerns (file references, key-value pairs, enums) and the `[claude]` namespace risks collision with Claude Code's own config.
