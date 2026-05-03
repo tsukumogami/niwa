@@ -1682,6 +1682,127 @@ visibility = "public"
 	}
 }
 
+// TestApplyOverlaySHAMismatchUpdatesState verifies that after apply detects a SHA
+// mismatch and warns, the new SHA is persisted so a second apply does not repeat
+// the warning. Scenario 18b.
+func TestApplyOverlaySHAMismatchUpdatesState(t *testing.T) {
+	overlayTOML := `
+[[sources]]
+org = "overlayorg"
+repos = ["extra-repo"]
+`
+	overlayDir := setupOverlayDir(t, overlayTOML)
+
+	configTOML := `
+[workspace]
+name = "test-ws"
+
+[[sources]]
+org = "testorg"
+
+[groups.all]
+visibility = "public"
+`
+	niwaDir, instanceRoot := setupTestWorkspace(t, configTOML, nil, []struct{ group, name string }{
+		{"all", "repo1"},
+		{"all", "extra-repo"},
+	})
+
+	result, err := config.Load(filepath.Join(niwaDir, "workspace.toml"))
+	if err != nil {
+		t.Fatalf("loading config: %v", err)
+	}
+	cfg := result.Config
+
+	mockClient := &mockGitHubClient{
+		repos: map[string][]github.Repo{
+			"testorg": {
+				{Name: "repo1", Visibility: "public", SSHURL: "git@github.com:testorg/repo1.git"},
+			},
+			"overlayorg": {
+				{Name: "extra-repo", Visibility: "public", SSHURL: "git@github.com:overlayorg/extra-repo.git"},
+			},
+		},
+	}
+
+	initialState := &InstanceState{
+		SchemaVersion:  SchemaVersion,
+		InstanceName:   "test-ws",
+		InstanceNumber: 1,
+		Root:           instanceRoot,
+		OverlayURL:     "testorg/test-ws-overlay",
+		OverlayCommit:  "abc123",
+	}
+	if err := SaveState(instanceRoot, initialState); err != nil {
+		t.Fatal(err)
+	}
+
+	cloneFn := func(_ context.Context, url, dir string) (bool, error) {
+		if err := os.MkdirAll(filepath.Join(dir, ".git"), 0o755); err != nil {
+			return false, err
+		}
+		data, err := os.ReadFile(filepath.Join(overlayDir, "workspace-overlay.toml"))
+		if err != nil {
+			return false, err
+		}
+		return false, os.WriteFile(filepath.Join(dir, "workspace-overlay.toml"), data, 0o644)
+	}
+	headFn := func(dir string) (string, error) {
+		return "def456newsha", nil
+	}
+
+	applier := NewApplier(mockClient)
+	applier.Cloner = &Cloner{}
+	applier.cloneOrSync = cloneFn
+	applier.headSHA = headFn
+
+	if err := applier.Apply(context.Background(), cfg, niwaDir, instanceRoot); err != nil {
+		t.Fatalf("first apply failed: %v", err)
+	}
+
+	saved, loadErr := LoadState(instanceRoot)
+	if loadErr != nil {
+		t.Fatalf("loading state after first apply: %v", loadErr)
+	}
+	if saved.OverlayCommit != "def456newsha" {
+		t.Errorf("state OverlayCommit after first apply: got %q, want %q", saved.OverlayCommit, "def456newsha")
+	}
+
+	// Second apply must not warn again because the state now reflects the current SHA.
+	r, w, pipeErr := os.Pipe()
+	if pipeErr != nil {
+		t.Fatalf("creating pipe: %v", pipeErr)
+	}
+	oldStderr := os.Stderr
+	os.Stderr = w
+
+	if err := applier.Apply(context.Background(), cfg, niwaDir, instanceRoot); err != nil {
+		os.Stderr = oldStderr
+		w.Close()
+		t.Fatalf("second apply failed: %v", err)
+	}
+
+	os.Stderr = oldStderr
+	w.Close()
+	var stderrBuf strings.Builder
+	buf := make([]byte, 4096)
+	for {
+		n, readErr := r.Read(buf)
+		if n > 0 {
+			stderrBuf.Write(buf[:n])
+		}
+		if readErr != nil {
+			break
+		}
+	}
+	r.Close()
+
+	const warnSubstr = "workspace overlay has new commits since last apply"
+	if strings.Contains(stderrBuf.String(), warnSubstr) {
+		t.Errorf("second apply should not warn about SHA mismatch; got stderr: %s", stderrBuf.String())
+	}
+}
+
 // TestApplyOverlayWithValidOverlay verifies that when an overlay is active, overlay
 // repos/groups/content appear in the pipeline output. Scenario 19.
 //
