@@ -104,14 +104,16 @@ session ID from a prior worker, the new worker resumes that session. If not, the
 first worker in the session starts a fresh Claude session.
 
 **R3.** `niwa_list_sessions` is a new MCP tool that returns all sessions for the
-current workspace instance, including their ID, repo, purpose, status, creation time,
-and — for orphaned sessions — a stale coordinator marker.
+current workspace instance. Each entry includes: session ID, repo, purpose, status
+(one of `active`, `pending_merge`, `ended`, `abandoned`), creation time, and — for
+sessions whose coordinator process is no longer running — a stale indicator showing
+the previous coordinator's process ID.
 
 **R4.** `niwa_end_session` is a new MCP tool that accepts a `session_id` and an optional
-`force` flag (default false). Without `force`, it blocks on sessions with commits not
-pushed to any remote and returns `{status: "blocked_by_unpushed_work"}` without
-removing the worktree. With `force: true`, it removes the worktree regardless and
-returns `{status: "abandoned"}`.
+`force` flag (default false). Without `force`, it blocks on sessions where the
+session worktree contains commits not reachable from any remote-tracking branch, and
+returns `{status: "blocked_by_unpushed_work"}` without removing the worktree. With
+`force: true`, it removes the worktree regardless and returns `{status: "abandoned"}`.
 
 **R5.** A session with all commits pushed can be ended cleanly via `niwa_end_session`
 without `force`. The worktree is removed and the session transitions to `ended`.
@@ -128,9 +130,11 @@ and its worktree are preserved in `pending_merge` state.
 **R8.** When a `pending_merge` session is ready to close (PR merged or explicitly
 closed), the coordinator transitions it to `ended` via `niwa_end_session`.
 
-**R9.** When a coordinator process that owned sessions is no longer running,
-`niwa_list_sessions` surfaces those sessions with a stale marker. Orphaned sessions
-are not cleaned up automatically; the new coordinator decides what to do with them.
+**R9.** A session is considered orphaned when the coordinator process that created it
+is no longer running (verified by PID check) and the session remains in `active` or
+`pending_merge` state. `niwa_list_sessions` surfaces orphaned sessions with a stale
+indicator. Orphaned sessions are not cleaned up automatically; the new coordinator
+decides what to do with them.
 
 ### Session continuity
 
@@ -176,6 +180,14 @@ showing ID, repo, purpose, status, and creation time.
 `niwa_ask`. The session model does not break the existing coordinator routing
 mechanism.
 
+### Identifiers and input constraints
+
+**R20.** Session IDs are unique within a workspace. No two sessions in the same
+workspace share the same ID.
+
+**R21.** Purpose strings are limited to 256 UTF-8 characters. Requests with a
+longer purpose string are rejected with an error before the session is created.
+
 ## Acceptance Criteria
 
 ### Session creation
@@ -190,16 +202,22 @@ mechanism.
 
 ### Session continuity
 
-- [ ] A coordinator delegates task A in a session; task A completes and the session
-      records a Claude session ID.
-- [ ] A coordinator delegates task B in the same session; task B's worker receives the
-      Claude conversation history from task A and can reference what task A discussed
-      without being told explicitly.
-- [ ] A coordinator delegates task A and task B in two different sessions for the same
-      repo; task B's worker has no knowledge of task A's conversation.
-- [ ] If the session JSONL is missing or corrupted at the time of task B's spawn,
-      task B starts a fresh Claude session without crashing. Session state records a
-      warning.
+- [ ] A coordinator delegates task A in a session; when task A's worker exits, the
+      session records the Claude session ID used by that worker.
+- [ ] A coordinator delegates task B in the same session; task B's worker is spawned
+      with `--resume <session_claude_id>`, where `session_claude_id` is the value
+      recorded after task A. The Claude session ID for task B matches the recorded
+      value.
+- [ ] A coordinator delegates task A in session S1 and task B in session S2 for the
+      same repo; task B's worker is spawned without `--resume` (or with a different
+      session ID than task A's). The two sessions do not share a Claude conversation.
+- [ ] Two sessions for the same repo are simultaneously active. Each receives a
+      separate delegation. Each worker operates in its own worktree directory and
+      the task state entries for the two delegations are distinct with no shared
+      fields.
+- [ ] The session JSONL file is deleted before task B's delegation. Task B's worker
+      is spawned without `--resume`, exits without error, and session state records
+      a `corrupted_session` warning entry.
 
 ### Session cleanup
 
@@ -222,11 +240,13 @@ mechanism.
 
 ### Crash recovery
 
-- [ ] A coordinator starts with orphaned sessions from a previous crashed coordinator.
-      `niwa_list_sessions` returns the orphaned sessions with a stale marker. The
-      worktrees are still present.
-- [ ] Orphaned sessions are not removed by the daemon without explicit user or
-      coordinator action.
+- [ ] A coordinator process is killed while a session is `active`. A new coordinator
+      process starts and calls `niwa_list_sessions`. The response includes the
+      session from the previous coordinator with a stale indicator showing the
+      previous PID. The session worktree is still present on disk.
+- [ ] After the crashed coordinator's session appears as stale, no daemon process
+      removes the worktree or transitions the session to `ended` or `abandoned`
+      without an explicit call to `niwa_end_session`.
 
 ### Non-mesh CLI
 
@@ -240,9 +260,17 @@ mechanism.
 
 ### Cross-instance routing
 
-- [ ] A worker in a session worktree calls `niwa_ask` to reach the coordinator. The
-      coordinator receives the question and can respond. The response reaches the
-      worker.
+- [ ] A worker in a session worktree calls `niwa_ask`. The coordinator receives a
+      `task.ask` notification in its inbox. The coordinator answers via
+      `niwa_finish_task`. The worker's `niwa_ask` call returns the coordinator's
+      answer as its result.
+
+### Input validation
+
+- [ ] `niwa_create_session` with a purpose string longer than 256 characters returns
+      an error and does not create a session or worktree.
+- [ ] `niwa_list_sessions` returns distinct IDs for any two sessions in the same
+      workspace, including sessions created in rapid succession.
 
 ## Out of Scope
 
