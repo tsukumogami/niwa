@@ -31,3 +31,29 @@
   existing task state at call time. Simpler and always current; avoids stale data from
   pre-materialization. Design the transitions.log query path to avoid exposing redacted
   progress body fields.
+
+## Round 2 (PRD Phase 2 research)
+
+- **No implicit sessions on untagged niwa_delegate**: `niwa_delegate` without a `session_id`
+  continues to spawn a fresh Claude session, exactly as today. Backward compatible; sessions
+  are opt-in. Creating implicit anonymous sessions would silently change existing coordinator
+  behavior and make it hard to distinguish session-aware from legacy delegations.
+
+- **Shared sessions registry via symlink from worktree daemons**: Workers in session worktrees
+  need to reach the coordinator via `niwa_ask`. The mechanism is a shared `.niwa/sessions/sessions.json`
+  readable by all worktree daemon instances. Implementation detail (symlink vs. explicit path
+  resolution) deferred to design doc. PRD requires the routing to work.
+
+- **Populate SessionEntry.ClaudeSessionID at coordinator registration**: The field already
+  exists in types.go but is never written. Filling it at `maybeRegisterCoordinator` time
+  enables crash recovery — a new coordinator can find orphaned sessions and optionally resume
+  from the prior coordinator's session. Low-cost, high-value for resilience.
+
+- **No auto-pruning of orphaned sessions**: When a coordinator crashes, the daemon surfaces
+  orphaned sessions (dead PID) via `niwa_list_sessions` but does not clean them up automatically.
+  Orphaned sessions may contain unpushed work; auto-pruning risks data loss. User or new
+  coordinator explicitly decides to reclaim or abandon.
+
+- **niwa apply does not update session worktrees**: `niwa apply` continues to operate on the
+  main clone only. Session worktrees are managed by session lifecycle (create/end), not by apply.
+  Mixing apply semantics with session management would make worktree state harder to reason about.
