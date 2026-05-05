@@ -61,14 +61,15 @@ func WriteSessionLifecycleState(sessionsDir string, state SessionLifecycleState)
 }
 
 // ReadSessionLifecycleState reads the session lifecycle state for sessionID
-// from <mainInstanceRoot>/.niwa/sessions/<sessionID>.json.
+// from <sessionsDir>/<sessionID>.json. sessionsDir is typically
+// <instanceRoot>/.niwa/sessions/ — callers construct it to match
+// WriteSessionLifecycleState's first parameter.
 // The sessionID is validated against ^[0-9a-f]{8}$ before any path is
 // constructed, preventing path traversal from caller-supplied values.
-func ReadSessionLifecycleState(mainInstanceRoot, sessionID string) (SessionLifecycleState, error) {
+func ReadSessionLifecycleState(sessionsDir, sessionID string) (SessionLifecycleState, error) {
 	if !sessionIDRe.MatchString(sessionID) {
 		return SessionLifecycleState{}, fmt.Errorf("invalid session ID %q: must be 8 lowercase hex characters", sessionID)
 	}
-	sessionsDir := filepath.Join(mainInstanceRoot, ".niwa", "sessions")
 	path := filepath.Join(sessionsDir, sessionID+".json")
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -116,7 +117,8 @@ func ListSessionLifecycleStates(sessionsDir string) ([]SessionLifecycleState, er
 
 // newSessionLifecycleID generates a random 8-character lowercase hex session
 // ID and verifies no existing state file has the same ID. Retries up to 5
-// times on collision. Returns an error if all attempts fail.
+// times on collision (birthday probability ~1e-9 at 20 sessions; retry is a
+// defensive check, not an expected code path).
 func newSessionLifecycleID(sessionsDir string) (string, error) {
 	for range 5 {
 		var b [4]byte

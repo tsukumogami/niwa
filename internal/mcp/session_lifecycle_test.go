@@ -99,7 +99,7 @@ func TestReadSessionLifecycleState_Integration(t *testing.T) {
 		t.Fatalf("write: %v", err)
 	}
 
-	got, err := ReadSessionLifecycleState(root, "deadbeef")
+	got, err := ReadSessionLifecycleState(sessionsDir, "deadbeef")
 	if err != nil {
 		t.Fatalf("ReadSessionLifecycleState: %v", err)
 	}
@@ -112,7 +112,7 @@ func TestReadSessionLifecycleState_Integration(t *testing.T) {
 }
 
 func TestReadSessionLifecycleState_InvalidID(t *testing.T) {
-	root := t.TempDir()
+	dir := t.TempDir()
 	cases := []string{
 		"../etc/passwd",
 		"../../secret",
@@ -123,7 +123,7 @@ func TestReadSessionLifecycleState_InvalidID(t *testing.T) {
 		"",
 	}
 	for _, id := range cases {
-		_, err := ReadSessionLifecycleState(root, id)
+		_, err := ReadSessionLifecycleState(dir, id)
 		if err == nil {
 			t.Errorf("ReadSessionLifecycleState(%q) want error, got nil", id)
 		}
