@@ -1,5 +1,5 @@
 ---
-status: Accepted
+status: Planned
 upstream: docs/prds/PRD-mesh-session-lifecycle.md
 problem: |
   Niwa's task model spawns a fresh Claude process per delegation with no shared
@@ -30,7 +30,7 @@ rationale: |
 
 ## Status
 
-Accepted
+Planned
 
 ## Context and Problem Statement
 
