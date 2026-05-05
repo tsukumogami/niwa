@@ -1,11 +1,13 @@
 // Package mcp implements a stdio MCP server for niwa's session mesh.
 //
-// The server exposes 11 tools in two families:
+// The server exposes 14 tools in three families:
 //
 //   - Peer messaging: niwa_check_messages, niwa_send_message, niwa_ask.
 //   - Task lifecycle: niwa_delegate, niwa_query_task, niwa_await_task,
 //     niwa_report_progress, niwa_finish_task, niwa_list_outbound_tasks,
 //     niwa_update_task, niwa_cancel_task (see handlers_task.go).
+//   - Session lifecycle: niwa_create_session, niwa_destroy_session,
+//     niwa_list_sessions (see handlers_session.go).
 //
 // It declares the claude/channel experimental capability; when a message
 // file lands in the inbox directory the server sends a
@@ -367,6 +369,7 @@ func (s *Server) toolsList() toolsListResult {
 				Type: "object",
 				Properties: map[string]schemaProp{
 					"session_id": {Type: "string", Description: "Session ID to destroy (8 lowercase hex chars)"},
+					"force":      {Type: "boolean", Description: "Delete session branch even if unmerged (default false — unmerged branch is preserved)"},
 				},
 				Required: []string{"session_id"},
 			},

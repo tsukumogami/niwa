@@ -247,10 +247,9 @@ func formatWorkspaceNotFoundError(name string, globalCfg *config.GlobalConfig) e
 	return fmt.Errorf("workspace %q not found. Registered workspaces: %s", name, strings.Join(names, ", "))
 }
 
-// resolveSessionWorktree navigates to the worktree of a named session. The
-// repo argument is currently unused for path resolution (the worktree path
-// is stored in the session state file) but is shown in the diagnostic output
-// for clarity and reserved for future multi-repo disambiguation.
+// resolveSessionWorktree navigates to the worktree of a named session.
+// The repo argument must match the session's repo to prevent navigating
+// to the wrong worktree when the caller passes an incorrect repo name.
 func resolveSessionWorktree(cmd *cobra.Command, repo, sessionID string) error {
 	instanceRoot, err := resolveInstanceRoot()
 	if err != nil {
@@ -260,6 +259,9 @@ func resolveSessionWorktree(cmd *cobra.Command, repo, sessionID string) error {
 	state, err := mcp.ReadSessionLifecycleState(sessionsDir, sessionID)
 	if err != nil {
 		return fmt.Errorf("session %q not found: %w", sessionID, err)
+	}
+	if state.Repo != repo {
+		return fmt.Errorf("session %q belongs to repo %q, not %q", sessionID, state.Repo, repo)
 	}
 	if state.WorktreePath == "" {
 		return fmt.Errorf("session %q has no worktree path", sessionID)
