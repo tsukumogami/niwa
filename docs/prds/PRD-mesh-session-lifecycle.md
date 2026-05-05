@@ -13,7 +13,7 @@ goals: |
   Coordinators can group related task delegations into a named session that preserves
   Claude context from one task to the next. Each session is anchored to its own git
   worktree, keeping the main clone permanently on main. A coordinator can create,
-  query, and end sessions safely, with guards preventing accidental loss of unpushed
+  query, and destroy sessions safely, with guards preventing accidental loss of unpushed
   work. Non-mesh developers can use the same session model via a CLI command to get
   an always-clean main clone without a coordinator.
 ---
@@ -65,14 +65,14 @@ their own lifecycle.
    between sessions: a session can address its parent or any of its direct children,
    and no other sessions.
 
-5. Coordinators can end sessions safely. Niwa prevents cleanup of sessions with
+5. Coordinators can destroy sessions safely. Niwa prevents cleanup of sessions with
    unpushed commits or active children, and gives the coordinator explicit control
    over when to cascade teardown through a subtree.
 
 6. Users can inspect the session tree, navigate to any session's worktree, and prune
    subtrees safely from the CLI.
 
-7. Non-mesh developers can use `niwa session start` to create an isolated worktree
+7. Non-mesh developers can use `niwa session create` to provision an isolated worktree
    for their work without needing a coordinator.
 
 ## Folder Layout
@@ -187,9 +187,9 @@ context.
 status**, so that after my own context window resets I can re-orient and continue
 managing ongoing work without losing track of what's in progress.
 
-**As a coordinator, I want to end a session that has unpushed commits to fail safely**,
-so that I cannot accidentally delete a worktree containing work that hasn't reached
-the remote yet.
+**As a coordinator, I want to destroy a session that has unpushed commits to fail
+safely**, so that I cannot accidentally delete a worktree containing work that hasn't
+reached the remote yet.
 
 **As a coordinator, I want to run two separate feature sessions for the same repo
 concurrently**, so that each feature's agent works in isolation with its own context
@@ -203,18 +203,18 @@ without me having to track routing manually.
 answer**, so that I can surface decisions upward without the top-level coordinator
 needing to orchestrate every exchange.
 
-**As a coordinator, I want to end a session that has active child sessions to be
-blocked**, so that I cannot accidentally orphan in-progress work by cleaning up
-a parent before its children are done.
+**As a coordinator, I want to destroy a session that has active child sessions to be
+blocked**, so that I cannot accidentally orphan in-progress work by destroying a
+parent before its children are done.
 
 **As a user, I want to view the full session tree for a workspace**, so that I can
 see what work is in flight, how sessions relate to each other, and which ones are
 stale or blocked.
 
-**As a user, I want to force-end a session subtree in one command**, so that I can
-clean up abandoned or completed work without having to end each child individually.
+**As a user, I want to force-destroy a session subtree in one command**, so that I can
+clean up abandoned or completed work without having to destroy each child individually.
 
-**As a developer using niwa without a coordinator, I want to start a session for a
+**As a developer using niwa without a coordinator, I want to create a session for a
 repo from the CLI**, so that my main clone stays on `main` while I work on a feature
 in a clean, isolated worktree.
 
@@ -258,7 +258,7 @@ longer running — a stale indicator showing the previous process ID. An optiona
 (the session itself and all its descendants). If the sessions registry file is missing
 or corrupted, returns an empty list.
 
-**R4.** `niwa_end_session` is a new MCP tool that accepts a `session_id` and an optional
+**R4.** `niwa_destroy_session` is a new MCP tool that accepts a `session_id` and an optional
 `force` flag (default false). Without `force`, it blocks when either (a) the session
 worktree contains commits not reachable from any remote-tracking branch, returning
 `{status: "blocked_by_unpushed_work"}`, or (b) the session has any active descendants,
@@ -266,7 +266,7 @@ returning `{status: "blocked_by_active_children", descendants: [<all active desc
 session IDs>]}`. Neither condition removes the worktree.
 
 **R5.** A session with all commits pushed and no active descendants can be ended
-cleanly via `niwa_end_session` without `force`. The worktree is removed and the
+cleanly via `niwa_destroy_session` without `force`. The worktree is removed and the
 session transitions to `ended`. With `force: true`, niwa terminates all descendant
 sessions bottom-up (deepest leaves first, each subject to the same worktree removal
 as a force-end on that individual session). Each descendant's final state is
@@ -321,7 +321,7 @@ only.
 
 ### Non-mesh session management
 
-**R16.** `niwa session start <repo> [--purpose <text>] [--parent <session-id>]`
+**R16.** `niwa session create <repo> [--purpose <text>] [--parent <session-id>]`
 creates a session worktree at `<instance>/.niwa/worktrees/<repo>-<session-id>/`,
 starts the per-worktree daemon, prints the session ID and absolute worktree path
 to stdout, and navigates the shell to the session worktree root using the same
@@ -330,9 +330,9 @@ mechanism as `niwa go` (the shell function installed by `niwa setup`). Without
 With `--parent`, the specified session becomes the parent, provided it exists and is
 `active`.
 
-**R17.** `niwa session end <session-id> [--force]` ends the session with the given
-session ID. Without `--force`, exits non-zero and prints a warning when the session
-worktree contains commits not reachable from any remote-tracking branch; with
+**R17.** `niwa session destroy <session-id> [--force]` destroys the session with the
+given session ID. Without `--force`, exits non-zero and prints a warning when the
+session worktree contains commits not reachable from any remote-tracking branch; with
 `--force`, removes the worktree and exits zero.
 
 **R18.** `niwa session list [--repo <repo>] [--status <status>]` lists all sessions
@@ -347,7 +347,7 @@ repo's main clone. With `<session-id>`, the shell navigates to the session workt
 for that repo and session. Uses the same shell function integration as `niwa go`. If
 the session ID is not found for that repo, the command exits non-zero.
 
-**R27.** Tab completion for `niwa session end` includes all active sessions in the
+**R27.** Tab completion for `niwa session destroy` includes all active sessions in the
 current workspace, showing session ID and repo name. Completion narrows on session
 ID prefix or repo name prefix. Tab completion for `niwa go <repo> <TAB>` shows all
 active session IDs for the given repo; when no sessions exist for that repo, the
@@ -360,7 +360,7 @@ a session ID, shows the full workspace session tree. With a session ID, shows th
 subtree rooted at that session. Leaf sessions with no children are distinguishable
 from non-leaf sessions in the output.
 
-**R31.** `niwa session end <session-id>` where the session is a non-leaf prints the
+**R31.** `niwa session destroy <session-id>` where the session is a non-leaf prints the
 full subtree of active descendants alongside the unpushed-work warning (if applicable)
 before blocking. `--force` on a non-leaf session cascades termination bottom-up
 through the subtree, printing each terminated session as it completes.
@@ -395,7 +395,7 @@ longer purpose string are rejected with an error before the session is created.
 `a3f7c2d1`). They are the canonical identifier for a session across all surfaces:
 MCP tool responses, CLI output, and the filesystem path. Coordinators receive the
 generated ID in the `niwa_create_session` response; CLI users see IDs in `niwa
-session list` output and in the path printed by `niwa session start`.
+session list` output and in the path printed by `niwa session create`.
 
 **R23.** The git worktree directory for a session is named `<repo>-<session-id>`
 (e.g., `myrepo-a3f7c2d1`) and placed at
@@ -461,22 +461,22 @@ error message.
 
 ### Session cleanup
 
-- [ ] `niwa_end_session(id)` on a session with commits not pushed to any remote
+- [ ] `niwa_destroy_session(id)` on a session with commits not pushed to any remote
       returns `{status: "blocked_by_unpushed_work"}` and leaves the worktree intact.
-- [ ] `niwa_end_session(id)` on a session with at least one active descendant returns
+- [ ] `niwa_destroy_session(id)` on a session with at least one active descendant returns
       `{status: "blocked_by_active_children"}` and lists all active descendant session
       IDs. The worktree is not removed.
-- [ ] `niwa_end_session(id)` on a session with both active children and unpushed
+- [ ] `niwa_destroy_session(id)` on a session with both active children and unpushed
       commits returns `blocked_by_active_children` (children take precedence).
-- [ ] `niwa_end_session(id, force=true)` on a session with two active children
+- [ ] `niwa_destroy_session(id, force=true)` on a session with two active children
       terminates both children before removing the target. After the call, neither
       child worktree exists on disk. The target worktree is also removed.
-- [ ] `niwa_end_session(id, force=true)` on a session with a grandchild terminates
+- [ ] `niwa_destroy_session(id, force=true)` on a session with a grandchild terminates
       the grandchild first, then the child, then the target — in that order.
       `niwa_list_sessions` reflects each removal as it occurs.
-- [ ] `niwa_end_session(id)` on a session where all commits are pushed and there
+- [ ] `niwa_destroy_session(id)` on a session where all commits are pushed and there
       are no active descendants removes the worktree and returns `{status: "ended"}`.
-- [ ] After any `niwa_end_session`, the main clone remains on `main` with no
+- [ ] After any `niwa_destroy_session`, the main clone remains on `main` with no
       modifications.
 
 ### Session tree routing
@@ -503,9 +503,9 @@ error message.
       the top level.
 - [ ] `niwa session tree <tsuku-foo-id>` shows only tsuku-foo and koto-bar; sessions
       outside this subtree are not shown.
-- [ ] `niwa session end <parent-session-id>` when the parent has an active child
+- [ ] `niwa session destroy <parent-session-id>` when the parent has an active child
       prints the active descendant session IDs before blocking and exits non-zero.
-- [ ] `niwa session end --force <parent-session-id>` when the parent has one active
+- [ ] `niwa session destroy --force <parent-session-id>` when the parent has one active
       child terminates the child first, then removes the parent's worktree, and
       prints both terminated sessions to stdout.
 
@@ -528,7 +528,7 @@ error message.
       previous PID. The session worktree is still present on disk.
 - [ ] After the crashed coordinator's session appears as stale, no daemon process
       removes the worktree or transitions the session to `ended` or `abandoned`
-      without an explicit call to `niwa_end_session`.
+      without an explicit call to `niwa_destroy_session`.
 - [ ] A host is rebooted while a session is `active`. After reboot, a coordinator
       calls `niwa_delegate` with that session's ID. The per-worktree daemon is
       restarted automatically, the worker is spawned with `--resume` using the
@@ -537,7 +537,7 @@ error message.
 
 ### Folder layout
 
-- [ ] After `niwa session start myrepo`, the session worktree exists at
+- [ ] After `niwa session create myrepo`, the session worktree exists at
       `<instance>/.niwa/worktrees/myrepo-<session-id>/`.
 - [ ] `niwa apply` run at the workspace root after session creation does not touch
       the session worktree directory. The worktree directory does not appear in
@@ -547,11 +547,11 @@ error message.
 
 ### Tab completion
 
-- [ ] Tab-completing `niwa session end <TAB>` shows all active sessions in the
+- [ ] Tab-completing `niwa session destroy <TAB>` shows all active sessions in the
       current workspace, each formatted as `<session-id>  <repo>`.
-- [ ] After entering a session ID prefix in `niwa session end`, completion narrows
+- [ ] After entering a session ID prefix in `niwa session destroy`, completion narrows
       to sessions whose ID starts with the typed characters.
-- [ ] After entering a repo name prefix in `niwa session end`, completion narrows
+- [ ] After entering a repo name prefix in `niwa session destroy`, completion narrows
       to sessions whose repo name starts with the typed characters.
 - [ ] Tab-completing `niwa go myrepo <TAB>` shows all active session IDs for
       `myrepo`. Repos with no active sessions do not produce a second-argument
@@ -562,30 +562,30 @@ error message.
 
 ### Naming and identification
 
-- [ ] `niwa session start myrepo` prints a line containing the generated 8-hex-char
+- [ ] `niwa session create myrepo` prints a line containing the generated 8-hex-char
       session ID and the absolute worktree path before navigating to the worktree.
       The session ID in the printed path (`myrepo-<session-id>/`) matches the
       printed session ID byte-for-byte, and both match the ID returned by the next
       `niwa session list` call.
 - [ ] `niwa session list` shows the session ID, repo name, and purpose in each row.
-- [ ] `niwa session end a3f7c2d1` (exact session ID) ends the correct session and
+- [ ] `niwa session destroy a3f7c2d1` (exact session ID) ends the correct session and
       exits zero.
-- [ ] `niwa session end notexist` where no session with ID `notexist` exists exits
+- [ ] `niwa session destroy notexist` where no session with ID `notexist` exists exits
       non-zero with a clear error message and no session is affected.
 
 ### Non-mesh CLI
 
-- [ ] `niwa session start <repo>` from a workspace root creates a worktree at
+- [ ] `niwa session create <repo>` from a workspace root creates a worktree at
       `<instance>/.niwa/worktrees/<repo>-<session-id>/` and prints the session ID
       and absolute path to stdout.
 - [ ] `niwa session list` shows all sessions in the current workspace. `niwa session
       list --repo <repo>` shows only sessions for that repo. `niwa session list
       --status active` shows only active sessions.
-- [ ] `niwa session end` on a session with unpushed work exits non-zero and prints
+- [ ] `niwa session destroy` on a session with unpushed work exits non-zero and prints
       a warning; the worktree is not removed.
-- [ ] `niwa session end --force` on a session with unpushed work removes the worktree
+- [ ] `niwa session destroy --force` on a session with unpushed work removes the worktree
       and exits zero.
-- [ ] `niwa session start myrepo` navigates the shell to the new session worktree
+- [ ] `niwa session create myrepo` navigates the shell to the new session worktree
       root after creating it (via the shell function installed by `niwa setup`).
 - [ ] `niwa go myrepo <session-id>` navigates the shell to the session worktree
       root for that repo and session.
@@ -701,7 +701,7 @@ PR) was explored during design. Removed because: the `active → pending_merge` 
 requires PR-tracking infrastructure not present in niwa; the reverse transition
 (`pending_merge → active` when a PR is closed without merge) has no implementation
 path; and zero acceptance criteria were written for it. Sessions with pushed work
-are ended via `niwa_end_session`; PR tracking is deferred.
+are destroyed via `niwa_destroy_session`; PR tracking is deferred.
 
 **Defer `niwa session ask` to a follow-on.** The original CLI command would block
 the shell until a running session's active worker responded. Removed because: blocking
