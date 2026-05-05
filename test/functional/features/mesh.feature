@@ -524,7 +524,7 @@ Feature: Cross-session mesh (Issue #10 harness)
     When I run "niwa create mesh-list-ws"
     Then the exit code is 0
     And I set NIWA_INSTANCE_ROOT to instance "mesh-list-ws"
-    When I run "niwa session register" from repo directory "app"
+    When I run "niwa session register"
     Then the exit code is 0
     When I run "niwa mesh list"
     Then the exit code is 0
