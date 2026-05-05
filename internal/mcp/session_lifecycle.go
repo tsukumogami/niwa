@@ -132,11 +132,6 @@ func newSessionLifecycleID(sessionsDir string) (string, error) {
 	return "", fmt.Errorf("failed to generate unique session ID after 5 attempts")
 }
 
-// SessionsDir returns the sessions directory path for a given instance root.
-func SessionsDir(instanceRoot string) string {
-	return filepath.Join(instanceRoot, ".niwa", "sessions")
-}
-
 // SessionLifecycleStatus constants for SessionLifecycleState.Status.
 const (
 	SessionStatusActive    = "active"

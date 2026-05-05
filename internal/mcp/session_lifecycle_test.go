@@ -38,12 +38,6 @@ func TestWriteReadRoundTrip(t *testing.T) {
 		t.Errorf("file perm = %o, want 0600", info.Mode().Perm())
 	}
 
-	got, err := ReadSessionLifecycleState("/"+dir, "ab12cd34")
-	// ReadSessionLifecycleState prepends /.niwa/sessions — use workaround:
-	// write a state file and read directly from sessionID.
-	_ = got
-	_ = err
-
 	// Read directly to verify round-trip.
 	data, err := os.ReadFile(path)
 	if err != nil {
