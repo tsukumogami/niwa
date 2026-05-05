@@ -8,21 +8,22 @@ problem: |
   any target that lacks a role directory on disk.
 decision: |
   Introduce git worktree-based sessions under <instance>/.niwa/worktrees/, each
-  with its own per-worktree daemon and per-session JSON state file. Task delegation
-  to a session writes directly to the worktree daemon's inbox (resolved from the
-  state file). Cross-session ask routing bypasses isKnownRole via a new
-  handleAskVirtual pre-check. The shell wrapper gains a session arm for CWD
-  navigation. Three new MCP tools (niwa_create_session, niwa_destroy_session,
-  niwa_list_sessions) and updates to the injected niwa-mesh skill complete the
-  coordinator API.
+  on its own session branch, with its own per-worktree daemon and per-session JSON
+  state file. Task delegation to a session writes directly to the worktree daemon's
+  inbox (resolved from the state file). The handleAsk "coordinator" bug (wrong
+  instanceRoot in session worktrees) is fixed via a mainInstanceRoot field on the
+  server struct. The shell wrapper gains a session arm with a shared cd helper.
+  Three new MCP tools and updates to the injected niwa-mesh skill complete the
+  coordinator API. Parent/child ask routing is deferred to a follow-on.
 rationale: |
   Per-session JSON files (one file per session, atomic temp+rename writes) match
   the PRD's file layout, require no inter-daemon locking, and leave the existing
   coordinator process registry (sessions.json) completely untouched. Direct inbox
   writes for delegate routing reuse the established lookupLiveCoordinator pattern
-  with no new coordination layer. The isKnownRole pre-check preserves full backward
-  compatibility for role-name targets while enabling virtual routing targets with
-  correct error codes and liveness validation.
+  with no new coordination layer. Removing children[] and the Stale and PRUrl
+  fields eliminates unreliable advisory state with no current readers. Deferring
+  parent/child ask routing removes a large, underspecified feature with no V1
+  use case from the critical path.
 ---
 
 # DESIGN: Mesh Session Lifecycle
@@ -146,30 +147,28 @@ child session IDs) have no role directory, so gate 1 fires `UNKNOWN_ROLE` before
 routing logic runs. Gate 2, if reached, reads the wrong registry in session worktrees
 (`s.instanceRoot` points to the worktree, not the main instance).
 
-Key assumptions:
-- Session state files record `parent_session_id`, `children[]`, `status`,
-  `creator_pid`, and `creator_start_time`.
+Key assumptions (V1 coordinator-fix scope):
 - `NIWA_MAIN_INSTANCE_ROOT` is propagated to session-worktree daemons at spawn,
   separate from `NIWA_INSTANCE_ROOT` (the worktree path).
-- `NIWA_SESSION_ID` is available to the MCP server at worker spawn.
+- The MCP server reads `NIWA_MAIN_INSTANCE_ROOT` at startup into `s.mainInstanceRoot`.
+- Non-session workers have `s.mainInstanceRoot == ""`, which disables the guard.
 
-**Cross-validation note:** D2 initially listed `inbox_path` as a required session
-state field. Cross-validation with D3 resolved this: inbox path is derived at runtime
-from `WorktreePath + "/.niwa/roles/" + Repo + "/inbox/"`, both of which are stored in
-the session state. No additional field is needed.
+#### Chosen: Option A — Registry pre-check before `isKnownRole` (V1 scope: coordinator fix only)
 
-#### Chosen: Option A — Registry pre-check before `isKnownRole`
+V1 implements only the `"coordinator"` case. `handleAsk` gains a guard at the top:
+if `args.To == "coordinator"` and `s.mainInstanceRoot != ""` (i.e., the server is
+running inside a session worktree), it uses `s.mainInstanceRoot` instead of
+`s.instanceRoot` for the coordinator lookup. This fixes the B3a/B3b bug identified
+in the panel review. All other values fall through to `isKnownRole` unchanged.
 
-A new `handleAskVirtual` function is inserted at the top of `handleAsk`. When
-`args.To` matches a known virtual target pattern (`"parent"`, `"coordinator"`, or a
-string matching the 8-hex session-ID format listed in the calling session's
-`children[]`), it resolves the inbox path directly from session state files and
-returns. All other values fall through to the existing `isKnownRole` gate unchanged.
+The MCP server struct gains one new field: `mainInstanceRoot string`. It is
+zero-valued for non-session workers, which preserves existing behavior.
+`NIWA_MAIN_INSTANCE_ROOT` propagates this value to the per-worktree daemon at spawn.
 
-The MCP server struct gains two new fields: `sessionID string` and
-`mainInstanceRoot string`. Both are zero-valued for non-session workers, which disables
-virtual routing. `"coordinator"` from a session worktree now uses `mainInstanceRoot`
-instead of `s.instanceRoot`, fixing the B3a/B3b panel-review bug as a side effect.
+**Deferred to follow-on:** `"parent"` routing (child session asks its creating
+session's daemon) and direct child session-ID routing. These require a concrete V1
+use case, session tree state to be stable, and `s.sessionID` on the server struct.
+They are not exercised by any V1 coordinator workflow.
 
 #### Alternatives Considered
 
@@ -185,8 +184,8 @@ tree without diverging from reality.
 contexts with no changes to `handleAsk`. Rejected because both handlers need the same
 shared logic (task creation, await registration, timeout loop). The branching point
 moves one level up (function dispatch) instead of one level in (top of `handleAsk`),
-at the cost of duplicating everything else. Option A's `handleAsk → handleAskVirtual`
-factoring is strictly better.
+at the cost of duplicating everything else. Option A's inline guard approach is
+strictly less code than a parallel handler.
 
 ---
 
@@ -208,10 +207,9 @@ session owner (coordinator daemon) is the sole writer for a session file. PRD R1
 requires the per-worktree daemon to write `ClaudeConversationID` after the first
 worker completes. These writes are temporally non-overlapping: the coordinator writes
 on create; the per-worktree daemon writes `ClaudeConversationID` exactly once after
-first task completion; the coordinator writes terminal state on destroy. Atomic
-temp+rename is sufficient — no concurrent writes to the same file occur in the normal
-path. Readers treat the `Stale` field on disk as a hint and always call `IsPIDAlive`
-for an authoritative liveness check.
+the first task reaches the `running` state; the coordinator writes terminal state on
+destroy. Atomic temp+rename is sufficient — no concurrent writes to the same file
+occur in the normal path.
 
 #### Chosen: Option A — Per-session JSON files
 
@@ -226,22 +224,24 @@ and calls `IsPIDAlive` for a live stale check. Corrupt files are logged and skip
 
 ```go
 type SessionLifecycleState struct {
-    V                    int      `json:"v"`
-    SessionID            string   `json:"session_id"`
-    ParentSessionID      string   `json:"parent_session_id,omitempty"`
-    Children             []string `json:"children,omitempty"`
-    Repo                 string   `json:"repo"`
-    Purpose              string   `json:"purpose"`
-    Status               string   `json:"status"`
-    CreationTime         string   `json:"creation_time"`
-    WorktreePath         string   `json:"worktree_path"`
-    ClaudeConversationID string   `json:"claude_conversation_id,omitempty"`
-    CreatorPID           int      `json:"creator_pid"`
-    CreatorStartTime     int64    `json:"creator_start_time"`
-    Stale                bool     `json:"stale,omitempty"`
-    PRUrl                string   `json:"pr_url,omitempty"`
+    V                    int    `json:"v"`
+    SessionID            string `json:"session_id"`
+    ParentSessionID      string `json:"parent_session_id,omitempty"`
+    Repo                 string `json:"repo"`
+    Purpose              string `json:"purpose"`
+    Status               string `json:"status"`
+    CreationTime         string `json:"creation_time"`
+    WorktreePath         string `json:"worktree_path"`
+    ClaudeConversationID string `json:"claude_conversation_id,omitempty"`
+    CreatorPID           int    `json:"creator_pid"`
+    CreatorStartTime     int64  `json:"creator_start_time"`
 }
 ```
+
+Fields removed vs. earlier drafts: `Children []string` (advisory, incomplete on crashes
+and concurrent creates; tree reconstruction uses `parent_session_id` only), `Stale bool`
+(readers always call `IsPIDAlive`; a stored hint with no authoritative value adds noise),
+`PRUrl string` (reserved for follow-on; no writer or reader in V1).
 
 Terminal state files are retained after worktree deletion to enable post-mortem
 inspection and clean coordinator-restart recovery.
@@ -296,36 +296,40 @@ overhead.
 ## Decision Outcome
 
 The four decisions compose into a single coherent architecture: worktree-isolated
-sessions with file-based lifecycle state, direct-inbox task delivery, virtual target
-routing bypassing the role-directory gate, and selective shell wrapper extension for
-CWD navigation.
+sessions on dedicated branches, file-based lifecycle state, direct-inbox task
+delivery, a targeted `handleAsk` fix for the coordinator routing bug, and selective
+shell wrapper extension with a shared cd helper.
 
 **How they connect:**
 
-Session creation (`niwa_create_session`) writes a `SessionLifecycleState` file (D3)
-containing the worktree path, repo, parent session ID, and creator PID. It starts the
-per-worktree daemon via `EnsureDaemonRunning`, passing `NIWA_MAIN_INSTANCE_ROOT` and
-`NIWA_SESSION_ID` as environment variables so the daemon's MCP server has the fields
-required by D2.
+Session creation (`niwa_create_session`) creates a git worktree on a new
+`session/<session-id>` branch, scaffolds the daemon's directory layout, and writes a
+`SessionLifecycleState` file (D3) containing the worktree path, repo, parent session
+ID, and creator PID. It starts the per-worktree daemon via `EnsureDaemonRunning`,
+passing `NIWA_MAIN_INSTANCE_ROOT` as an environment variable so the daemon's MCP
+server can fix the `handleAsk` coordinator routing (D2).
 
 Task delegation (`niwa_delegate(session_id=X)`) reads the session state file to
 resolve the worktree path (D3) and writes the task envelope directly to the worktree
 daemon's inbox (D1). The per-worktree daemon picks it up via its existing fsnotify
-watch with no new coordination logic.
+watch with no new coordination logic. `handleDelegate` checks `session.Status ==
+"active"` before any filesystem operation and returns `SESSION_INACTIVE` otherwise.
 
-Cross-session messaging (`niwa_ask("parent")`, `niwa_ask("<session-id>")`) is handled
-by `handleAskVirtual` (D2), which resolves inbox paths from session state files rather
-than role directories. The inbox path is derived from `WorktreePath` + `Repo` (D3
-fields), eliminating the need for a stored `inbox_path` field.
+The `handleAsk("coordinator")` bug fix (D2) ensures that workers running inside
+session worktrees reach the main instance coordinator correctly. All other
+`niwa_ask` targets in V1 continue to use role-directory routing.
 
 Shell navigation (`niwa session create`) is handled by extending the wrapper's match
-pattern (D4). The Go binary writes the worktree path to `NIWA_RESPONSE_FILE` exactly
-as `niwa create` and `niwa go` do today.
+pattern (D4). A shared `__niwa_cd_wrap` shell helper deduplicates the temp-file
+protocol across `create`, `go`, and `session create`.
+
+**Deferred:** `niwa_ask("parent")` and `niwa_ask("<session-id>")` routing — no V1
+use case. `niwa session tree` — deferred to follow-on. `children[]`, `Stale`, and
+`PRUrl` fields — removed from schema.
 
 **Backward compatibility:** every path without a `session_id` argument is unchanged.
-`isKnownRole` and `lookupLiveCoordinator` are not modified. `sessions.json` (the
-coordinator process registry) is completely isolated from the new session lifecycle
-code.
+`isKnownRole` and `lookupLiveCoordinator` are not modified. `sessions.json` is
+completely isolated from the new session lifecycle code.
 
 ## Solution Architecture
 
@@ -354,31 +358,40 @@ writes; sessions communicate upward and downward via virtual-target ask routing.
 - `handleAsk` extension: `handleAskVirtual` pre-check for virtual targets
 
 **MCP server struct** (`internal/mcp/server.go`):
-- New fields: `sessionID string`, `mainInstanceRoot string`
-- Both are zero-valued for non-session workers, disabling virtual routing
+- New field: `mainInstanceRoot string`
+- Zero-valued for non-session workers (disables the coordinator routing fix)
+- Read from `NIWA_MAIN_INSTANCE_ROOT` env var at server startup
 
 **Per-worktree daemon** (`internal/workspace/daemon.go`):
 - `EnsureDaemonRunning` gains a new `extraEnv []string` parameter:
   `func EnsureDaemonRunning(instanceRoot string, extraEnv []string) error`
-- `niwa_create_session` calls it with
-  `["NIWA_MAIN_INSTANCE_ROOT=<main>", "NIWA_SESSION_ID=<sid>"]`
-- The daemon bakes these into every worker spawn (alongside the existing
-  `NIWA_INSTANCE_ROOT` and `NIWA_SESSION_ROLE` env vars in `WorkerMCPConfig`),
-  so workers inside the session worktree inherit `NIWA_MAIN_INSTANCE_ROOT`
-- Writes `ClaudeConversationID` to the session state file after the first worker
-  completes (one-time write, atomic)
+- `niwa_create_session` calls it with `["NIWA_MAIN_INSTANCE_ROOT=<main>"]`
+- The daemon bakes `NIWA_MAIN_INSTANCE_ROOT` into every worker spawn via
+  `WorkerMCPConfig`, so workers inside the session worktree read it at startup
+- All existing `EnsureDaemonRunning` call sites pass `nil` (no behavior change)
+- **`ClaudeConversationID` capture:** when the first task transitions to `running`,
+  `state.json.Worker.ClaudeSessionID` contains the Claude Code session ID written by
+  `registerSessionID()` in the worker's MCP server at startup. The daemon checks this
+  field in the `running` transition handler; if the session lifecycle state file has
+  no `claude_conversation_id` set, it writes the value atomically (temp+rename). This
+  is a one-time write; subsequent tasks reuse the captured ID via `--resume`.
 
 **Shell wrapper** (`internal/cli/shell_init.go`):
-- `shellWrapperTemplate` gains a `session)` arm that dispatches on `$2`
+- A shared `__niwa_cd_wrap` shell helper is extracted into the template to
+  deduplicate the temp-file/cd protocol used by `create`, `go`, and `session create`
+- `shellWrapperTemplate` gains a `session)` arm dispatching on `$2`; `session create`
+  calls `__niwa_cd_wrap`; all other session subcommands fall through to `command niwa`
 - `niwa session create` handler calls `writeLandingPath(worktreePath)` and
-  `hintShellInit(cmd)` exactly as `niwa create` and `niwa go` do
+  `hintShellInit(cmd)` identically to `niwa create` and `niwa go`
 
 **CLI commands** (`internal/cli/session.go`):
 - `niwa session create <repo> <purpose>` — new command
 - `niwa session destroy <session-id>` — new command
 - `niwa session list [--repo <repo>] [--status <status>]` — new command
-- `niwa session tree` — new command
-- Existing `niwa session list` (coordinator process view) renamed to `niwa mesh list`
+- Existing `niwa session list` (coordinator process view) renamed to `niwa mesh list`;
+  the old `niwa session list` prints a deprecation warning and delegates to `niwa mesh
+  list` for one release to give existing scripts a migration path
+- `niwa session tree` — deferred to follow-on
 
 **Injected niwa-mesh skill** (`internal/workspace/channels.go`):
 - `niwaMCPToolNames` gains three entries: `niwa_create_session`,
@@ -397,14 +410,15 @@ writes; sessions communicate upward and downward via virtual-target ask routing.
 
 **Session state file** at `<instance>/.niwa/sessions/<session-id>.json`:
 ```
-SessionID, ParentSessionID, Children[], Repo, Purpose, Status, CreationTime,
-WorktreePath, ClaudeConversationID, CreatorPID, CreatorStartTime, Stale, PRUrl
+SessionID, ParentSessionID, Repo, Purpose, Status, CreationTime,
+WorktreePath, ClaudeConversationID, CreatorPID, CreatorStartTime
 ```
-Writers: coordinator daemon (lifecycle state fields); per-worktree daemon
-(`ClaudeConversationID` only, written once). Both use atomic temp+rename.
+Writers: coordinator daemon (all fields except `ClaudeConversationID`); per-worktree
+daemon (`ClaudeConversationID` only, written exactly once on first task `running`
+transition). Both use atomic temp+rename.
 
-Note: `CreatorPID` and `CreatorStartTime` are used for `IsPIDAlive` liveness checks.
-There is no stored `InboxPath` field; the inbox path is always derived at runtime.
+`CreatorPID` and `CreatorStartTime` are used for `IsPIDAlive` liveness checks. There
+is no stored `InboxPath` or `Stale` field; both are computed at runtime.
 
 **Inbox path derivation** (D2 → D3 integration):
 ```
@@ -416,7 +430,6 @@ that `WorktreePath` is a subpath of `mainInstanceRoot` (see Security Considerati
 
 **Environment variables propagated at daemon spawn:**
 - `NIWA_MAIN_INSTANCE_ROOT` — main instance root for session-worktree daemons
-- `NIWA_SESSION_ID` — calling session's ID for the MCP server
 
 **TaskState extension** (for `handleCancelTask`/`handleUpdateTask`):
 - New field `SessionID string` — present for session-routed tasks; used to reconstruct
@@ -427,47 +440,67 @@ that `WorktreePath` is a subpath of `mainInstanceRoot` (see Security Considerati
 **Task delegation to a session:**
 ```
 coordinator calls niwa_delegate(to="<role>", session_id="<sid>")
-  → handleDelegate reads <mainInstanceRoot>/.niwa/sessions/<sid>.json
-  → derives worktreePath, validates role at <worktreePath>/.niwa/roles/<role>/
+  → ReadSessionLifecycleState validates sid matches ^[0-9a-f]{8}$
+  → reads <mainInstanceRoot>/.niwa/sessions/<sid>.json
+  → if session.Status != "active" → returns SESSION_INACTIVE
+  → validates WorktreePath is subpath of mainInstanceRoot
+  → validates role at <worktreePath>/.niwa/roles/<role>/
   → writes task envelope to <worktreePath>/.niwa/roles/<role>/inbox/<taskID>.json
   → per-worktree daemon's fsnotify fires → daemon claims envelope → spawns worker
   → worker reads task via niwa_check_messages
 ```
 
-**Virtual ask routing (child → parent):**
+**handleAsk coordinator routing fix (V1):**
 ```
-session worker calls niwa_ask(to="parent", ...)
-  → handleAsk sees "parent" → calls handleAskVirtual
-  → reads caller's session state → gets parentSessionID
-  → reads parent session state → derives parent inbox path
-  → calls IsPIDAlive(parent.CreatorPID) → returns STALE_PARENT if dead
-  → writes ask notification to parent inbox
-  → parent daemon's fsnotify fires → parent coordinator receives message
+session worker calls niwa_ask(to="coordinator", ...)
+  → handleAsk: if args.To == "coordinator" and s.mainInstanceRoot != ""
+      → uses s.mainInstanceRoot for lookupLiveCoordinator (not s.instanceRoot)
+  → all other targets fall through to isKnownRole as today
 ```
 
 **Session creation:**
 ```
 coordinator calls niwa_create_session(repo="<role-name>", purpose="<purpose>")
-  → validates repo is a known role in mainInstanceRoot/.niwa/roles/<repo>/
-    (prevents invalid worktrees; fails early before any filesystem writes)
-  → generates 8-hex session ID, collision-checks against existing state files
-  → git worktree add <worktreePath> <branch>
+  → validates repo exists at mainInstanceRoot/.niwa/roles/<repo>/
+    (fails early before any filesystem side effects)
+  → generates 8-hex session ID; checks for collision with existing .json files;
+    retries on collision
+  → git worktree add <worktreePath> -b session/<session-id>
+    (branches from the repo's default branch, not the main clone's current branch;
+     branch is owned by this session and deleted on destroy if no PR exists)
   → scaffolds <worktreePath>/.niwa/roles/<repo>/inbox/{in-progress,cancelled,expired,read}/
     and <worktreePath>/.niwa/tasks/, .niwa/daemon.pid, .niwa/daemon.log
-    (a subset of InstallChannelInfrastructure; the worktree does not need mcp.json
-    or workspace-context.md -- it inherits those from the main instance on worker launch)
-  → writes <sid>.json with status="active", worktree_path, repo, creator_pid,
-    creator_start_time, creation_time, purpose, parent_session_id (if child)
-  → EnsureDaemonRunning(worktreePath, ["NIWA_MAIN_INSTANCE_ROOT=<main>", "NIWA_SESSION_ID=<sid>"])
-  → updates parent session's <sid>.json children[] (if this is a child session)
+  → writes <sid>.json with status="active", repo, worktree_path, purpose,
+    parent_session_id (if child session), creator_pid, creator_start_time,
+    creation_time
+  → on any failure after git worktree add: git worktree remove --force <worktreePath>
+    before returning the error; prevents orphaned worktrees with no state file
+  → EnsureDaemonRunning(worktreePath, ["NIWA_MAIN_INSTANCE_ROOT=<main>"])
   → returns session ID and worktree path
 ```
 
-**`repo` parameter contract:** the `repo` argument to `niwa_create_session` is a role
-name — the same identifier used in `.niwa/roles/<repo>/` — not a directory basename
-or git remote URL. When `[channels.mesh.roles]` overrides map a repo to a different
-role name, callers must pass the role name (the mapped value), not the repo directory
-name. The handler validates the role exists before creating the worktree.
+**`repo` parameter contract:** the `repo` argument is a role name — the same
+identifier used in `.niwa/roles/<repo>/` — not a directory basename or git remote
+URL. When `[channels.mesh.roles]` overrides map a repo to a different role name,
+callers must pass the role name (the mapped value).
+
+**Session destroy:**
+```
+coordinator calls niwa_destroy_session(session_id="<sid>")
+  → reads <mainInstanceRoot>/.niwa/sessions/<sid>.json
+  → if session.Status in {ended, abandoned}:
+      returns current terminal state with success (idempotent)
+  → if any task in <mainInstanceRoot>/.niwa/tasks/ has this session's worktree
+    in its inbox (status=running): force-kills the worker PGID, writes the task
+    state as abandoned with reason "session_destroyed"
+  → writes <sid>.json with status="ended"
+  → TerminateDaemon(worktreePath) — sends SIGKILL to remaining workers, SIGTERM to daemon
+  → git worktree remove --force <worktreePath>
+  → if branch session/<session-id> has no PR and is fully merged: git branch -d session/<session-id>
+  → worktree directory is gone; state file is retained for post-mortem inspection
+  → if WorktreePath is already gone (orphaned session): skip worktree remove silently;
+    write terminal state and return success
+```
 
 ## Implementation Approach
 
@@ -486,17 +519,24 @@ This phase has no external dependencies and can be reviewed in isolation.
 
 Deliverables:
 - `EnsureDaemonRunning` signature extension: `func EnsureDaemonRunning(instanceRoot string, extraEnv []string) error`
-  — extra env vars forwarded to daemon process and baked into worker spawns via
-  `WorkerMCPConfig`; all existing callers pass `nil` (no behavior change)
+  — extra env vars forwarded to daemon process and baked into `WorkerMCPConfig`;
+  all existing call sites pass `nil` (verify with `grep -r EnsureDaemonRunning`)
 - Worktree `.niwa/` scaffold helper — creates `roles/<repo>/inbox/` subdirs and
-  `tasks/`, `daemon.pid`, `daemon.log` inside the worktree (lighter than full
-  `InstallChannelInfrastructure`; no `mcp.json`, no `workspace-context.md`)
-- `niwa_create_session` MCP handler — role validation, worktree creation, scaffold,
-  session state write, daemon start with extra env vars, parent `children[]` update
-- `niwa_destroy_session` MCP handler — terminal state write, daemon stop, worktree
-  removal
-- Functional test: create session → verify state file, daemon running, worktree and
-  scaffold directories exist
+  `tasks/`, `daemon.pid`, `daemon.log` (lighter than full `InstallChannelInfrastructure`;
+  no `mcp.json`, no `workspace-context.md`)
+- `niwa_create_session` MCP handler — role validation, branch creation from default
+  branch, worktree creation, scaffold, state file write, rollback via
+  `git worktree remove --force` on any post-worktree failure, daemon start with
+  `NIWA_MAIN_INSTANCE_ROOT`
+- `niwa_destroy_session` MCP handler — idempotent on terminal state; force-kills
+  running workers (task → abandoned + "session_destroyed"), writes "ended" state,
+  terminates daemon, removes worktree (silently ignores ENOENT), deletes session
+  branch if unmerged and no PR
+- `ClaudeConversationID` capture in per-worktree daemon: on first task `running`
+  transition, reads `state.json.Worker.ClaudeSessionID`; if session state file lacks
+  `claude_conversation_id`, writes it atomically
+- Functional tests: create → verify state file, session branch, daemon running,
+  scaffold dirs; destroy → idempotent, orphaned worktree silently handled
 
 Depends on Phase 1 (session state functions).
 
@@ -511,36 +551,41 @@ Deliverables:
 
 Depends on Phase 1 (state read), Phase 2 (daemon running before delegate is called).
 
-### Phase 4: Virtual ask routing (`handleAskVirtual`)
+### Phase 4: `handleAsk` coordinator routing fix
 
 Deliverables:
-- `sessionID` and `mainInstanceRoot` fields added to MCP server struct
-- `handleAskVirtual` function — resolves inbox for `"parent"`, `"coordinator"`, child
-  session IDs
-- `handleAsk` pre-check dispatch
-- Unit tests for each virtual target, including stale parent, ended child, ROUTING_DENIED
-- Fix for B3a/B3b (coordinator lookup from session worktree)
+- `mainInstanceRoot string` field added to MCP server struct; read from
+  `NIWA_MAIN_INSTANCE_ROOT` at server startup
+- `handleAsk` guard: `if args.To == "coordinator" && s.mainInstanceRoot != ""` →
+  use `s.mainInstanceRoot` for `lookupLiveCoordinator`
+- Unit tests: coordinator ask from session worktree routes to main instance;
+  coordinator ask from non-session context unchanged
 
-Depends on Phase 1 (session state read), Phase 2 (env vars propagated to server).
+Depends on Phase 2 (env var propagated to daemon → workers).
 
 ### Phase 5: CLI commands, shell wrapper, and skill update
 
 Deliverables:
-- `niwa session create`, `niwa session destroy`, `niwa session list`, `niwa session tree`
-  cobra commands in `internal/cli/session.go`
+- `niwa session create`, `niwa session destroy`, `niwa session list` cobra commands
+  in `internal/cli/session.go`
 - `niwa session list` (coordinator process view) renamed to `niwa mesh list` in
-  `internal/cli/mesh.go`
-- Shell wrapper `session)` arm in `shellWrapperTemplate`
+  `internal/cli/mesh.go`; old `niwa session list` kept as a deprecated alias for one
+  release (prints deprecation warning to stderr, delegates to `niwa mesh list`)
+- Functional tests that currently reference `niwa session list` updated to
+  `niwa mesh list` (audit: `test/functional/features/mesh.feature`,
+  `docs/guides/cross-session-communication.md`)
+- `__niwa_cd_wrap` shared shell helper extracted in `shellWrapperTemplate`;
+  `create`, `go`, and `session create` all call it
 - `niwa go` second-argument resolution for session worktree paths
 - `niwa_list_sessions` MCP handler wired to `ListSessionLifecycleStates`
-- `niwaMCPToolNames` in `internal/workspace/channels.go` extended with
-  `niwa_create_session`, `niwa_destroy_session`, `niwa_list_sessions`
-- `buildSkillContent()` updated: new Session Management section; Delegation and
-  Peer Interaction sections updated to document `session_id` arg and virtual targets
+- `niwaMCPToolNames` extended with `niwa_create_session`, `niwa_destroy_session`,
+  `niwa_list_sessions`
+- `buildSkillContent()` updated: new Session Management section; Delegation section
+  updated for `session_id` arg
 - `channels_test.go` frontmatter byte-count assertion updated for new tool names
 - Functional tests: `niwa session create` navigates shell, `niwa go <repo> <sid>` navigates
 
-Depends on Phases 1–4 (all backend logic must be in place before CLI wires it up).
+Depends on Phases 1–4.
 
 ## Security Considerations
 
@@ -599,48 +644,41 @@ niwa daemon.
 ### Positive
 
 - Persistent Claude context across tasks within a session. The daemon resumes the same
-  JSONL file for every worker in a session, satisfying the core motivation.
-- Main clone branch isolation. Session work happens on dedicated worktrees and
+  JSONL file for every worker in a session via `--resume <ClaudeConversationID>`.
+- Main clone branch isolation. Session work happens on dedicated `session/<id>`
   branches; the main clone is never left on a feature branch by a session.
-- Tree-structured session communication. Parent-child routing enables hierarchical
-  agent workflows where child sessions report back to their creating session.
+- File-based state survives reboots. Coordinator restarts, daemon crashes, and host
+  reboots do not lose session state. Terminal-state files enable post-mortem inspection.
 - Backward compatibility is complete. Every existing call site — `niwa_delegate`
   without `session_id`, `niwa_ask(to="coordinator")`, `niwa apply`, `EnumerateRepos`
   — is unchanged.
-- File-based state survives reboots. Coordinator restarts, daemon crashes, and host
-  reboots do not lose session state. Terminal-state files enable post-mortem inspection
-  without requiring a live process.
 - `sessions.json` is untouched. The coordinator process registry, its stale-pruning
   semantics, and `lookupLiveCoordinator` are not modified.
+- `handleAsk("coordinator")` bug from session worktrees (B3a/B3b) is fixed as a
+  natural consequence of the `mainInstanceRoot` field.
 
 ### Negative
 
 - `niwa_list_sessions` reads N files per call. At typical session counts (< 20) this
   is negligible, but the implementation must not assume a fixed upper bound.
-- `handleAsk` has two routing branches, increasing cognitive load for contributors
-  unfamiliar with the session tree model.
-- `ClaudeConversationID` is written by the per-worktree daemon and coordinator at
-  different times; readers of the session state file must be aware that the field may
-  be absent immediately after session creation.
-- The `children[]` list in a parent's session file may be incomplete if the coordinator
-  crashed mid-create. Readers must treat `parent_session_id` as the authoritative
-  binding and reconstruct the tree bottom-up.
-- The shell wrapper template grows by one nested `case` arm with duplicated temp-file
-  logic. A third cd-eligible subcommand would warrant refactoring to a shared shell
-  function.
+- `handleAsk` gains a guard at the top of the function, adding a small amount of
+  complexity for the coordinator routing fix.
+- `ClaudeConversationID` is written by the per-worktree daemon after the first task
+  reaches `running`; it is absent in the session state file immediately after
+  creation.
+- `niwa session list` rename to `niwa mesh list` is a breaking change. Mitigated by a
+  one-release deprecation alias.
+- Parent/child ask routing is deferred; coordinators cannot have session workers ask
+  upward until a follow-on ships.
 
 ### Mitigations
 
-- **N-file reads:** `ListSessionLifecycleStates` skips corrupt files individually.
-  If session count grows, a cached index can be added without changing the file format.
-- **`handleAsk` complexity:** `handleAskVirtual` is a bounded, independently testable
-  function. The `sessionID == ""` fast-path (no virtual routing) is clearly documented
-  in the struct fields and the function guard.
-- **`ClaudeConversationID` timing:** `niwa_list_sessions` output marks the field as
-  optional. Callers that need it should check for emptiness.
-- **Incomplete `children[]`:** documented as a known trade-off in the reader contract.
-  `niwa session tree` reconstructs the tree from `parent_session_id` fields, not from
-  `children[]`.
-- **Shell wrapper duplication:** deferred to a future refactor when a third cd-eligible
-  subcommand is introduced. The current duplication is two identical blocks, which is
-  within the acceptable threshold for copy-paste at this scale.
+- **N-file reads:** `ListSessionLifecycleStates` skips corrupt files individually. A
+  cached index can be added without changing the file format if session count grows.
+- **`handleAsk` guard:** the guard is a single `if` at the top of `handleAsk` with no
+  new code paths for non-session workers. Cognitive load is minimal.
+- **`ClaudeConversationID` timing:** `niwa_list_sessions` marks the field optional.
+  Callers that need it check for emptiness.
+- **Rename deprecation:** the old `niwa session list` emits a deprecation warning to
+  stderr and delegates to `niwa mesh list`, giving existing scripts one release to
+  migrate.
