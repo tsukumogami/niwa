@@ -406,6 +406,10 @@ performing any action.
 
 ## Out of Scope
 
+- **Worker-to-worker and sub-coordinator routing**: direct `niwa_ask` routing between
+  sessions, or from a child session back to the session that created it. Deferred;
+  requires parent-session tracking and `(role, session_id)` addressing in `niwa_ask`.
+  See Open Questions.
 - **Session handoff between coordinators**: transferring ownership of a session to a
   new coordinator. Deferred; requires coordinator identity design.
 - **Session → PR lifecycle tracking**: exposing `pr_url` in session state or surfacing
@@ -473,7 +477,29 @@ from session worktrees.
 
 ## Open Questions
 
-None. All scope coverage notes from the PRD scope document were resolved during Phase 2
-research. Remaining implementation details (shared sessions registry mechanism, daemon
-startup ordering, worktree path conventions) are design-level decisions for the
-downstream design document.
+### Session addressing and worker-to-worker routing
+
+The session model structurally enables workers to discover other sessions via the
+shared `sessions.json` registry, but provides no addressing mechanism to route
+to a specific session. Today `niwa_ask` routes exclusively to the `"coordinator"`
+role — a stable singleton. In the session model every non-coordinator role becomes a
+`(repo, session_id)` pair with no stable name.
+
+This creates a gap when sessions delegate to other sessions: if a tsuku session
+creates a koto session and koto needs to route a question back to tsuku, it cannot.
+`niwa_ask(to="coordinator")` would reach the top-level coordinator, not tsuku.
+There is no `"parent"` target, no `(role, session_id)` addressing in `niwa_ask`,
+and no `parent_session_id` field on sessions.
+
+Resolving this requires:
+1. A `parent_session_id` field recorded on child sessions at creation time.
+2. A new routing target in `niwa_ask` — `"parent"` or explicit `(role, session_id)`
+   addressing — so the child can reach its creating session without knowing the
+   session ID in advance.
+3. The MCP server resolving `"parent"` by reading `parent_session_id` from the
+   current session's state file.
+
+This is deferred. V1 preserves the current hub-and-spoke model: all `niwa_ask`
+calls route to the top-level coordinator, which remains the stable anchor. Worker-
+to-worker and sub-coordinator-to-parent routing are explicitly out of scope until
+the session addressing model is designed.
