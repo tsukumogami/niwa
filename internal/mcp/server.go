@@ -72,6 +72,12 @@ type Server struct {
 	// path is empty and Emit is a no-op. Always non-nil after New so
 	// dispatch can call Emit without a guard.
 	audit *fileAuditSink
+
+	// daemonStarter and daemonStopper are injected by mcp_serve.go to avoid
+	// a circular import with the workspace package. Nil in unit tests that
+	// don't exercise niwa_create_session or niwa_destroy_session.
+	daemonStarter func(instanceRoot string, extraEnv []string) error
+	daemonStopper func(instanceRoot string) error
 }
 
 // New constructs a Server. role is the caller's session role (from
@@ -96,6 +102,18 @@ func New(role, instanceRoot string) *Server {
 		s.roleInboxDir = filepath.Join(instanceRoot, ".niwa", "roles", role, "inbox")
 	}
 	return s
+}
+
+// SetDaemonFuncs injects the workspace-layer daemon start/stop functions.
+// Must be called before Run when niwa_create_session or niwa_destroy_session
+// are expected to work. Skipped in unit tests that don't exercise session
+// lifecycle handlers.
+func (s *Server) SetDaemonFuncs(
+	starter func(instanceRoot string, extraEnv []string) error,
+	stopper func(instanceRoot string) error,
+) {
+	s.daemonStarter = starter
+	s.daemonStopper = stopper
 }
 
 // Run starts the server. It reads newline-delimited JSON-RPC from r, writes
@@ -305,6 +323,30 @@ func (s *Server) toolsList() toolsListResult {
 				Required: []string{"task_id"},
 			},
 		},
+		{
+			Name:        "niwa_create_session",
+			Description: "Create a new git-worktree session for a repo role. Returns {session_id, worktree_path}.",
+			InputSchema: inputSchema{
+				Type: "object",
+				Properties: map[string]schemaProp{
+					"repo":              {Type: "string", Description: "Role/repo name (must exist in .niwa/roles/)"},
+					"purpose":           {Type: "string", Description: "Human-readable description of the session goal"},
+					"parent_session_id": {Type: "string", Description: "Optional parent session ID"},
+				},
+				Required: []string{"repo", "purpose"},
+			},
+		},
+		{
+			Name:        "niwa_destroy_session",
+			Description: "Destroy a session: kill workers, write status=ended, remove worktree and branch.",
+			InputSchema: inputSchema{
+				Type: "object",
+				Properties: map[string]schemaProp{
+					"session_id": {Type: "string", Description: "Session ID to destroy (8 lowercase hex chars)"},
+				},
+				Required: []string{"session_id"},
+			},
+		},
 	}}
 }
 
@@ -372,6 +414,18 @@ func (s *Server) callTool(p toolCallParams) toolResult {
 			return errResult("invalid arguments: " + err.Error())
 		}
 		return s.handleCancelTask(args)
+	case "niwa_create_session":
+		var args createSessionArgs
+		if err := json.Unmarshal(p.Arguments, &args); err != nil {
+			return errResult("invalid arguments: " + err.Error())
+		}
+		return s.handleCreateSession(args)
+	case "niwa_destroy_session":
+		var args destroySessionArgs
+		if err := json.Unmarshal(p.Arguments, &args); err != nil {
+			return errResult("invalid arguments: " + err.Error())
+		}
+		return s.handleDestroySession(args)
 	default:
 		return errResult("unknown tool: " + p.Name)
 	}

@@ -1315,6 +1315,15 @@ func handleSupervisorExit(ex supervisorExit, s spawnContext) {
 		return
 	}
 
+	// Capture the Claude conversation ID into the session lifecycle state on
+	// the first task exit that carries a ClaudeSessionID. This is the
+	// per-session daemon's one-time write: NIWA_MAIN_INSTANCE_ROOT and
+	// NIWA_SESSION_ID must both be set (injected at daemon spawn for session
+	// workers; absent for main-instance daemons).
+	if st.Worker.ClaudeSessionID != "" {
+		captureConversationID(s.instanceRoot, st.Worker.ClaudeSessionID, s.logger)
+	}
+
 	// Terminal state → worker called niwa_finish_task (or delegator
 	// cancelled) before exit. Nothing for the daemon to do.
 	if stateIsTerminal(st.State) {
@@ -1526,6 +1535,35 @@ func appendRetryScheduledEntry(taskDir string, attempt int, backoff time.Duratio
 		}
 		return &next, entry, nil
 	})
+}
+
+// captureConversationID writes claudeSessionID into the session lifecycle state
+// file as ClaudeConversationID when this daemon is a per-session worker. It is
+// a one-time write: if the field is already set the function returns immediately.
+//
+// Requires NIWA_MAIN_INSTANCE_ROOT and NIWA_SESSION_ID in the daemon's env
+// (injected by EnsureDaemonRunning extraEnv at session creation time). If
+// either env var is absent the function is a no-op — this daemon is a
+// main-instance daemon, not a session worker.
+func captureConversationID(instanceRoot, claudeSessionID string, logger *log.Logger) {
+	mainRoot := os.Getenv("NIWA_MAIN_INSTANCE_ROOT")
+	sessionID := os.Getenv("NIWA_SESSION_ID")
+	if mainRoot == "" || sessionID == "" {
+		return
+	}
+	sessionsDir := filepath.Join(mainRoot, ".niwa", "sessions")
+	st, err := mcp.ReadSessionLifecycleState(sessionsDir, sessionID)
+	if err != nil {
+		logger.Printf("capture_conversation_id session=%s read_err=%v", sessionID, err)
+		return
+	}
+	if st.ClaudeConversationID != "" {
+		return // already set; one-time write
+	}
+	st.ClaudeConversationID = claudeSessionID
+	if err := mcp.WriteSessionLifecycleState(sessionsDir, st); err != nil {
+		logger.Printf("capture_conversation_id session=%s write_err=%v", sessionID, err)
+	}
 }
 
 // deliverAbandonedMessage writes a task.abandoned Message to the

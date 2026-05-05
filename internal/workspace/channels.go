@@ -60,6 +60,11 @@ func WorkerMCPConfigPath(instanceRoot, taskID string) string {
 // Using a per-spawn config prevents the instance-root .mcp.json's hardcoded
 // NIWA_SESSION_ROLE=coordinator from overriding the worker's actual role when
 // Claude Code merges the env block on top of the inherited process environment.
+//
+// When NIWA_MAIN_INSTANCE_ROOT or NIWA_SESSION_ID are present in the daemon's
+// environment (set via EnsureDaemonRunning extraEnv for session workers), they
+// are baked into the env block so the MCP server subprocess receives them
+// explicitly regardless of Claude Code's env-inheritance semantics.
 func WorkerMCPConfig(instanceRoot, role, taskID string) ([]byte, error) {
 	cmdPath, err := os.Executable()
 	if err != nil || cmdPath == "" {
@@ -77,11 +82,34 @@ func WorkerMCPConfig(instanceRoot, role, taskID string) ([]byte, error) {
 	if !utf8.ValidString(taskID) {
 		return nil, fmt.Errorf("task ID is not valid UTF-8: %q", taskID)
 	}
+
+	// Build the env block. Always include the three required fields; conditionally
+	// include session context vars when this daemon is a per-session worker.
+	type envEntry struct{ k, v string }
+	envEntries := []envEntry{
+		{"NIWA_INSTANCE_ROOT", instanceRoot},
+		{"NIWA_SESSION_ROLE", role},
+		{"NIWA_TASK_ID", taskID},
+	}
+	if v := os.Getenv("NIWA_MAIN_INSTANCE_ROOT"); v != "" {
+		envEntries = append(envEntries, envEntry{"NIWA_MAIN_INSTANCE_ROOT", v})
+	}
+	if v := os.Getenv("NIWA_SESSION_ID"); v != "" {
+		envEntries = append(envEntries, envEntry{"NIWA_SESSION_ID", v})
+	}
+
+	var envBuf strings.Builder
+	for i, e := range envEntries {
+		kJSON, _ := json.Marshal(e.k)
+		vJSON, _ := json.Marshal(e.v)
+		if i > 0 {
+			envBuf.WriteString(",\n        ")
+		}
+		fmt.Fprintf(&envBuf, "%s: %s", string(kJSON), string(vJSON))
+	}
+
 	cmdJSON, _ := json.Marshal(cmdPath)
-	rootJSON, _ := json.Marshal(instanceRoot)
-	roleJSON, _ := json.Marshal(role)
-	taskIDJSON, _ := json.Marshal(taskID)
-	return []byte(fmt.Sprintf(workerMCPTemplate, string(cmdJSON), string(rootJSON), string(roleJSON), string(taskIDJSON))), nil
+	return []byte(fmt.Sprintf(workerMCPDynTemplate, string(cmdJSON), envBuf.String())), nil
 }
 
 // channelsMCPTemplate is the template for the instance-root `.mcp.json`.
@@ -106,24 +134,19 @@ const channelsMCPTemplate = `{
 }
 `
 
-// workerMCPTemplate is the per-spawn template for worker MCP config files.
-// Unlike channelsMCPTemplate (which hardcodes NIWA_SESSION_ROLE=coordinator
-// for the coordinator), this template takes the actual target role and task
-// ID as format arguments so each worker gets the right env block values.
-// Claude Code's env-block processing applies these on top of the spawned
-// process's inherited environment — having the correct values here ensures
-// the MCP subprocess always picks up the right role regardless of env
-// inheritance semantics.
-const workerMCPTemplate = `{
+// workerMCPDynTemplate is the per-spawn template for worker MCP config files.
+// Unlike channelsMCPTemplate (which hardcodes NIWA_SESSION_ROLE=coordinator),
+// this template takes the command and a pre-built env block as format args.
+// WorkerMCPConfig builds the env block dynamically, including optional session
+// context vars (NIWA_MAIN_INSTANCE_ROOT, NIWA_SESSION_ID) when set.
+const workerMCPDynTemplate = `{
   "mcpServers": {
     "niwa": {
       "type": "stdio",
       "command": %s,
       "args": ["mcp-serve"],
       "env": {
-        "NIWA_INSTANCE_ROOT": %s,
-        "NIWA_SESSION_ROLE": %s,
-        "NIWA_TASK_ID": %s
+        %s
       }
     }
   }
