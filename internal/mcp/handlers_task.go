@@ -263,7 +263,14 @@ func (s *Server) resolveCreationInboxDir(sessionID, role string) (string, toolRe
 	if session.Status != SessionStatusActive {
 		return "", errResultCode("SESSION_INACTIVE", fmt.Sprintf("session %q status is %q, want active", sessionID, session.Status))
 	}
-	rel, relErr := filepath.Rel(s.instanceRoot, session.WorktreePath)
+	// Guard worktree against the main instance root (the coordinator's root, not
+	// a session worktree root). Fall back to instanceRoot when mainInstanceRoot is
+	// unset (non-session servers where instanceRoot IS the main instance root).
+	guardRoot := s.mainInstanceRoot
+	if guardRoot == "" {
+		guardRoot = s.instanceRoot
+	}
+	rel, relErr := filepath.Rel(guardRoot, session.WorktreePath)
 	if relErr != nil || strings.HasPrefix(rel, "..") {
 		return "", errResultCode("INVALID_WORKTREE_PATH", fmt.Sprintf("session worktree path %q is outside instance root", session.WorktreePath))
 	}
@@ -825,11 +832,11 @@ func (s *Server) handleUpdateTask(args updateTaskArgs) toolResult {
 	// Rewrite the queued inbox file. If ENOENT (already consumed), surface
 	// a too_late response — the race between the lock read above and the
 	// rename here is the one the spec explicitly calls out.
-	var authStSessionID string
+	var sessionID string
 	if authSt != nil {
-		authStSessionID = authSt.SessionID
+		sessionID = authSt.SessionID
 	}
-	inboxDir, inboxErrTR := s.resolveInboxDir(authStSessionID, env.To.Role)
+	inboxDir, inboxErrTR := s.resolveInboxDir(sessionID, env.To.Role)
 	if inboxErrTR.IsError {
 		return inboxErrTR
 	}
