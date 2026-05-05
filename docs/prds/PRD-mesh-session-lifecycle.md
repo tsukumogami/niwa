@@ -328,7 +328,11 @@ to stdout, and navigates the shell to the session worktree root using the same
 mechanism as `niwa go` (the shell function installed by `niwa setup`). Without
 `--parent`, `parent_session_id` is recorded as null; the session is a root session.
 With `--parent`, the specified session becomes the parent, provided it exists and is
-`active`.
+`active`. If the shell function is not installed, the command prints the session ID
+and worktree path and exits zero without changing the working directory. The shell
+wrapper template must be updated to intercept the `session` subcommand alongside
+the existing `create` and `go` interceptions; this update ships via the niwa tsuku
+recipe and requires no manual user action.
 
 **R17.** `niwa session destroy <session-id> [--force]` destroys the session with the
 given session ID. Without `--force`, exits non-zero and prints a warning when the
@@ -339,7 +343,9 @@ session worktree contains commits not reachable from any remote-tracking branch;
 for the current workspace instance. Each row shows: session ID, repo, purpose
 (truncated to 60 characters), status, creation time, and a `[stale]` marker when
 the owning coordinator PID is no longer alive. `--repo` filters to sessions for
-that repo; `--status` filters to a specific lifecycle state.
+that repo; `--status` filters to a specific lifecycle state. The existing `niwa
+session list` command (coordinator process registry: ROLE/PID/STATUS/LAST-SEEN) is
+renamed to `niwa mesh list` as part of this feature; see Decisions.
 
 **R26.** `niwa go <repo> [<session-id>]` extends the existing `niwa go <repo>`
 command. Without `<session-id>`, behavior is unchanged: the shell navigates to the
@@ -709,6 +715,15 @@ a CLI process on an asynchronous worker event requires a timeout design, crash
 recovery, and a defined "equivalent" response path—none of which are specified.
 The feature is additive and can be designed and implemented independently.
 
+**Rename `niwa session list` (coordinator view) to `niwa mesh list`.** The existing
+`niwa session list` displays coordinator process state (role, PID, status, last-seen,
+pending tasks). The new `niwa session list` (R18) displays worktree-based session
+lifecycle state — a completely different schema and concept. Keeping both under the
+same name would require the command to detect which model the user wants, which is
+unworkable. The coordinator process view is renamed to `niwa mesh list` because it
+describes the state of the mesh process layer, not the session layer. All existing
+callers of `niwa session list` in scripts or documentation must be updated.
+
 **Exact session IDs only in V1 CLI (`<session-id>`, not `<session-ref>`).**
 Fuzzy matching by purpose prefix or repo-name shorthand was considered for CLI
 ergonomics. Removed because: fuzzy resolution changes behavior as sessions are
@@ -720,8 +735,18 @@ already receive exact IDs from `niwa_create_session`; CLI users can copy from
 
 ## Open Questions
 
-None at this time. The session tree model (Session Tree Model section) resolves the
-routing identity question raised during design: parent-child bindings established at
-creation time define the communication graph, `"parent"` is the upward routing target,
-and direct child session IDs are the downward routing targets. Remaining open items
-(skip-level routing, session handoff, PR lifecycle) are captured in Out of Scope.
+**`isKnownRole` extension for virtual routing targets (design doc).** The existing
+`handleAsk` gate validates `args.To` against role directories on disk before any
+routing logic runs. Virtual targets (`"parent"`, direct child `<session-id>`) have
+no role directory, so they return `UNKNOWN_ROLE` before routing code is reached. The
+design doc must define how the gate is extended to recognize tree-routing targets —
+whether by a pre-check against the session registry, a sentinel prefix, or a
+structural change to the authorization model.
+
+**`niwa_delegate` → per-worktree daemon routing mechanism (design doc).** The PRD
+specifies that `niwa_delegate(session_id=X)` routes work into the session's
+per-worktree daemon. The mechanism — how the call is directed to that daemon's inbox
+rather than the main instance daemon's inbox — is an implementation concern deferred
+to the design doc. The design doc must define the inbox discovery path, any changes
+to the task envelope format, and how the coordinator's MCP server resolves a session
+ID to a worktree daemon endpoint.
