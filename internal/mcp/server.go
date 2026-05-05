@@ -41,6 +41,9 @@ var fieldPattern = regexp.MustCompile(`^[a-zA-Z0-9._-]{1,64}$`)
 // task-terminal messages to sync niwa_delegate and niwa_await_task callers.
 type Server struct {
 	instanceRoot string // <instance-root>
+	// mainInstanceRoot is set when the server runs inside a session worktree
+	// (NIWA_MAIN_INSTANCE_ROOT env var). Zero value for non-session workers.
+	mainInstanceRoot string
 	// role is the caller's session role (from NIWA_SESSION_ROLE). Used for
 	// authorization checks, inbox routing, and the roleInboxDir derivation.
 	role string
@@ -89,9 +92,10 @@ type Server struct {
 // through every call site.
 func New(role, instanceRoot string) *Server {
 	s := &Server{
-		instanceRoot:    instanceRoot,
-		role:            role,
-		taskID:          os.Getenv("NIWA_TASK_ID"),
+		instanceRoot:     instanceRoot,
+		mainInstanceRoot: os.Getenv("NIWA_MAIN_INSTANCE_ROOT"),
+		role:             role,
+		taskID:           os.Getenv("NIWA_TASK_ID"),
 		seenFiles:       make(map[string]struct{}),
 		waiters:         make(map[string]chan toolResult),
 		awaitWaiters:    make(map[string]chan taskEvent),
@@ -757,7 +761,11 @@ func (s *Server) handleAsk(args askArgs) toolResult {
 		return errResult("cannot marshal ask body: " + err.Error())
 	}
 
-	coordinatorInbox, liveCoord := lookupLiveCoordinator(s.instanceRoot)
+	askRoot := s.instanceRoot
+	if args.To == "coordinator" && s.mainInstanceRoot != "" {
+		askRoot = s.mainInstanceRoot
+	}
+	coordinatorInbox, liveCoord := lookupLiveCoordinator(askRoot)
 	var taskID string
 	var errTR toolResult
 	if liveCoord {

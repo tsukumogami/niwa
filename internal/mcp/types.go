@@ -278,6 +278,7 @@ type TaskState struct {
 	Reason             json.RawMessage   `json:"reason,omitempty"`
 	CancellationReason json.RawMessage   `json:"cancellation_reason,omitempty"`
 	UpdatedAt          string            `json:"updated_at"`
+	SessionID          string            `json:"session_id,omitempty"`
 }
 
 // TaskEventKind discriminates in-process task events carried on daemon and
