@@ -164,31 +164,11 @@ func (s *Server) handleDelegate(args delegateArgs) toolResult {
 // worktree's inbox instead of the main instance inbox; the session_id is
 // stored in state.json so cancel/update can reconstruct the same path.
 func (s *Server) createTaskEnvelope(to string, body json.RawMessage, expiresAt, parentTaskID, sessionID string) (string, toolResult) {
-	// Resolve the inbox directory: worktree when session-targeted, main otherwise.
-	inboxDir, inboxErrTR := s.resolveInboxDir(sessionID, to)
+	// Resolve and validate the inbox directory in one read; session-targeted tasks
+	// require an active session, a safe worktree path, and the role to exist there.
+	inboxDir, inboxErrTR := s.resolveCreationInboxDir(sessionID, to)
 	if inboxErrTR.IsError {
 		return "", inboxErrTR
-	}
-
-	// When session-targeted, validate the role exists inside the worktree.
-	if sessionID != "" {
-		sessionsDir := filepath.Join(s.instanceRoot, ".niwa", "sessions")
-		session, err := ReadSessionLifecycleState(sessionsDir, sessionID)
-		if err != nil {
-			return "", errResultCode("SESSION_NOT_FOUND", fmt.Sprintf("session %q not found: %v", sessionID, err))
-		}
-		if session.Status != SessionStatusActive {
-			return "", errResultCode("SESSION_INACTIVE", fmt.Sprintf("session %q status is %q, want active", sessionID, session.Status))
-		}
-		// Path-traversal guard: worktree must be a subpath of instanceRoot.
-		rel, relErr := filepath.Rel(s.instanceRoot, session.WorktreePath)
-		if relErr != nil || strings.HasPrefix(rel, "..") {
-			return "", errResultCode("INVALID_WORKTREE_PATH", fmt.Sprintf("session worktree path %q is outside instance root", session.WorktreePath))
-		}
-		roleDir := filepath.Join(session.WorktreePath, ".niwa", "roles", to)
-		if _, statErr := os.Stat(roleDir); errors.Is(statErr, os.ErrNotExist) {
-			return "", errResultCode("UNKNOWN_ROLE", fmt.Sprintf("role %q not found at %s", to, roleDir))
-		}
 	}
 
 	taskID := NewTaskID()
@@ -267,10 +247,39 @@ func (s *Server) createTaskEnvelope(to string, body json.RawMessage, expiresAt, 
 	return taskID, toolResult{}
 }
 
-// resolveInboxDir returns the inbox directory for a given role. When sessionID
-// is non-empty, it reads the session state file to find the worktree path and
-// returns the worktree-local inbox. When sessionID is empty, it returns the
-// main instance inbox.
+// resolveCreationInboxDir validates the session (active, path-safe, role present)
+// and returns the inbox dir for a new task delegation. Reads session state once.
+// Returns SESSION_NOT_FOUND, SESSION_INACTIVE, INVALID_WORKTREE_PATH, or
+// UNKNOWN_ROLE on invalid inputs.
+func (s *Server) resolveCreationInboxDir(sessionID, role string) (string, toolResult) {
+	if sessionID == "" {
+		return filepath.Join(s.instanceRoot, ".niwa", "roles", role, "inbox"), toolResult{}
+	}
+	sessionsDir := filepath.Join(s.instanceRoot, ".niwa", "sessions")
+	session, err := ReadSessionLifecycleState(sessionsDir, sessionID)
+	if err != nil {
+		return "", errResultCode("SESSION_NOT_FOUND", fmt.Sprintf("session %q not found: %v", sessionID, err))
+	}
+	if session.Status != SessionStatusActive {
+		return "", errResultCode("SESSION_INACTIVE", fmt.Sprintf("session %q status is %q, want active", sessionID, session.Status))
+	}
+	rel, relErr := filepath.Rel(s.instanceRoot, session.WorktreePath)
+	if relErr != nil || strings.HasPrefix(rel, "..") {
+		return "", errResultCode("INVALID_WORKTREE_PATH", fmt.Sprintf("session worktree path %q is outside instance root", session.WorktreePath))
+	}
+	roleDir := filepath.Join(session.WorktreePath, ".niwa", "roles", role)
+	if _, statErr := os.Stat(roleDir); errors.Is(statErr, os.ErrNotExist) {
+		return "", errResultCode("UNKNOWN_ROLE", fmt.Sprintf("role %q not found at %s", role, roleDir))
+	}
+	return filepath.Join(session.WorktreePath, ".niwa", "roles", role, "inbox"), toolResult{}
+}
+
+// resolveInboxDir returns the inbox path for cancel/update operations on an
+// existing task. It reads the session state file for the worktree path but does
+// NOT validate session status — a task may be cancelled or updated after its
+// session ends. If the session's worktree has been cleaned up, the subsequent
+// rename or write will return an OS error, which is the expected best-effort
+// outcome for post-session operations.
 func (s *Server) resolveInboxDir(sessionID, role string) (string, toolResult) {
 	if sessionID != "" {
 		sessionsDir := filepath.Join(s.instanceRoot, ".niwa", "sessions")
@@ -849,19 +858,19 @@ func (s *Server) handleUpdateTask(args updateTaskArgs) toolResult {
 // --- niwa_cancel_task --------------------------------------------------------
 
 func (s *Server) handleCancelTask(args cancelTaskArgs) toolResult {
-	env, cancelAuthSt, errR := authorizeTaskCall(s.identity(), args.TaskID, kindDelegator)
+	env, authSt, errR := authorizeTaskCall(s.identity(), args.TaskID, kindDelegator)
 	if errR != nil {
 		return *errR
 	}
 
-	var cancelSessionID string
-	if cancelAuthSt != nil {
-		cancelSessionID = cancelAuthSt.SessionID
+	var sessionID string
+	if authSt != nil {
+		sessionID = authSt.SessionID
 	}
 	taskDir := taskDirPath(s.instanceRoot, args.TaskID)
-	inboxDir, cancelInboxErrTR := s.resolveInboxDir(cancelSessionID, env.To.Role)
-	if cancelInboxErrTR.IsError {
-		return cancelInboxErrTR
+	inboxDir, inboxErrTR := s.resolveInboxDir(sessionID, env.To.Role)
+	if inboxErrTR.IsError {
+		return inboxErrTR
 	}
 	src := filepath.Join(inboxDir, args.TaskID+".json")
 	cancelledDir := filepath.Join(inboxDir, "cancelled")
