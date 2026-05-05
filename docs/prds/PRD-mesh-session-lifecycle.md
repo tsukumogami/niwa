@@ -1,5 +1,5 @@
 ---
-status: Draft
+status: Done
 problem: |
   Coordinators running multi-step workflows—delegating design, then planning, then
   implementation to the same repo agent—lose Claude context between each delegation
@@ -22,7 +22,7 @@ goals: |
 
 ## Status
 
-Draft
+Done
 
 ## Problem Statement
 
