@@ -67,6 +67,54 @@ their own lifecycle.
 5. Non-mesh developers can use `niwa session start` to create an isolated worktree
    for their work without needing a coordinator.
 
+## Folder Layout
+
+Session worktrees live inside the main instance's `.niwa/` metadata directory,
+isolating them from the workspace-root enumeration that `niwa apply` and
+`EnumerateInstances` use to discover niwa instances. The main clone stays on
+`main` at its existing path; nothing moves.
+
+```
+<workspace>/
+  <instance-name>/                        # niwa instance root
+    .niwa/
+      instance.json                       # instance state (existing)
+      sessions/
+        sessions.json                     # coordinator registry (existing)
+        <session-id>.json                 # per-session lifecycle state (new)
+      worktrees/                          # session worktrees (new)
+        <repo>-<session-id>/              # git worktree = session instance root
+          .git                            # file pointer to main clone's objects
+          .niwa/                          # session's own niwa instance (new)
+            instance.json                 # includes session_worktree marker
+            daemon.pid
+            roles/
+              <repo-role>/
+                inbox/
+            tasks/
+          <working tree files>            # feature branch checkout
+    repos/
+      <repo-name>/                        # main clone, always on main
+        .git/                             # full git directory
+        <source files>
+```
+
+Placement rationale:
+
+- `<instance>/.niwa/worktrees/` is inside the instance directory, not at the
+  workspace root. `EnumerateInstances` scans only immediate subdirectories of
+  the workspace root for `.niwa/instance.json`; session worktrees nested three
+  levels inside an instance's `.niwa/` are never discovered as standalone
+  instances.
+- The two-level `EnumerateRepos` scan (`instanceRoot` → groups → repos) does
+  not reach `<instanceRoot>/.niwa/worktrees/<repo>-<session-id>/`, which is
+  three levels from `instanceRoot`. Session worktrees are invisible to `niwa
+  apply`, `niwa go -r` completion, and repo status enumeration without any
+  additional code changes.
+- Per-session lifecycle state lives alongside `sessions.json` under
+  `<instance>/.niwa/sessions/`, keeping all coordinator-visible session data
+  under a single directory.
+
 ## User Stories
 
 **As a coordinator, I want to create a named session for a repo before delegating
@@ -163,16 +211,34 @@ only.
 
 ### Non-mesh session management
 
-**R16.** `niwa session start <repo>` CLI command creates a worktree for the given
-repo, starts the per-worktree daemon, and prints the worktree path. It accepts an
-optional `--purpose` flag.
+**R16.** `niwa session start <repo> [--purpose <text>]` creates a session worktree
+at `<instance>/.niwa/worktrees/<repo>-<session-id>/`, starts the per-worktree
+daemon, prints the session ID and absolute worktree path to stdout, and leaves the
+caller's working directory unchanged.
 
-**R17.** `niwa session end [<session-id>]` CLI command ends a session with the same
-safety guard as `niwa_end_session`. Without `--force`, it prints a warning and exits
-non-zero if there are unpushed commits.
+**R17.** `niwa session end <session-ref> [--force]` ends the session matched by
+`<session-ref>` (session ID, purpose prefix, or unambiguous repo name per R25).
+When the reference matches multiple sessions the command lists them and exits
+non-zero without ending any session. Without `--force`, exits non-zero and prints a
+warning when the session worktree contains commits not reachable from any
+remote-tracking branch; with `--force`, removes the worktree and exits zero.
 
-**R18.** `niwa session list` CLI command lists all sessions for the current workspace,
-showing ID, repo, purpose, status, and creation time.
+**R18.** `niwa session list [--repo <repo>] [--status <status>]` lists all sessions
+for the current workspace instance. Each row shows: session ID, repo, purpose
+(truncated to 60 characters), status, creation time, and a `[stale]` marker when
+the owning coordinator PID is no longer alive. `--repo` filters to sessions for
+that repo; `--status` filters to a specific lifecycle state.
+
+**R26.** `niwa session go <session-ref>` navigates the shell to the session worktree
+root. It uses the same integration mechanism as `niwa go` (the shell function
+installed by `niwa setup`), so it changes the shell's working directory. When
+`<session-ref>` matches multiple sessions the command prints a disambiguation list
+and exits non-zero.
+
+**R27.** Tab completion for `niwa session go`, `niwa session end`, and all CLI
+commands that accept a `<session-ref>` includes all active and pending-merge sessions
+in the current workspace, showing session ID, repo name, and purpose prefix.
+Completion narrows on repo name, session ID prefix, or purpose prefix.
 
 ### Cross-instance routing
 
@@ -180,13 +246,35 @@ showing ID, repo, purpose, status, and creation time.
 `niwa_ask`. The session model does not break the existing coordinator routing
 mechanism.
 
-### Identifiers and input constraints
+### Naming and identification
 
 **R20.** Session IDs are unique within a workspace. No two sessions in the same
 workspace share the same ID.
 
 **R21.** Purpose strings are limited to 256 UTF-8 characters. Requests with a
 longer purpose string are rejected with an error before the session is created.
+
+**R22.** Session IDs are generated by niwa as 8 lowercase hex characters (e.g.,
+`a3f7c2d1`). They are the canonical identifier for a session across all surfaces:
+MCP tool responses, CLI output, and the filesystem path. Coordinators receive the
+generated ID in the `niwa_create_session` response; CLI users see IDs in `niwa
+session list` output and in the path printed by `niwa session start`.
+
+**R23.** The git worktree directory for a session is named `<repo>-<session-id>`
+(e.g., `myrepo-a3f7c2d1`) and placed at
+`<instance>/.niwa/worktrees/<repo>-<session-id>/`. The name encodes the source repo
+without requiring a registry lookup.
+
+**R24.** The purpose string is the sole human-readable label for a session at the
+MCP level. Coordinators identify sessions by `session_id`; the purpose is advisory
+context. Niwa does not expose a separate "session name" concept at the MCP layer.
+
+**R25.** CLI commands accept a `<session-ref>` that resolves as follows, tried in
+order: exact session ID match, then single session whose purpose begins with the
+given string, then — when exactly one session exists for the given repo in the
+current workspace — the repo name alone. When a `<session-ref>` matches multiple
+sessions the command prints the matching sessions and exits non-zero without
+performing any action.
 
 ## Acceptance Criteria
 
@@ -248,15 +336,47 @@ longer purpose string are rejected with an error before the session is created.
       removes the worktree or transitions the session to `ended` or `abandoned`
       without an explicit call to `niwa_end_session`.
 
+### Folder layout
+
+- [ ] After `niwa session start myrepo`, the session worktree exists at
+      `<instance>/.niwa/worktrees/myrepo-<session-id>/`.
+- [ ] `niwa apply` run at the workspace root after session creation does not touch
+      the session worktree directory. The worktree directory does not appear in
+      apply's progress output.
+- [ ] `niwa go -r` tab completion does not include the session worktree as a
+      candidate repo destination.
+
+### Naming and identification
+
+- [ ] `niwa session start myrepo` prints a line containing the generated 8-hex-char
+      session ID and the absolute worktree path.
+- [ ] `niwa session list` shows the session ID, repo name, and purpose in each row.
+- [ ] `niwa session end a3f7c2d1` (exact session ID) ends the correct session.
+- [ ] `niwa session end "feature"` where exactly one session has a purpose beginning
+      with "feature" ends that session.
+- [ ] `niwa session end myrepo` where exactly one session exists for myrepo ends that
+      session without requiring the session ID.
+- [ ] `niwa session end myrepo` where two sessions exist for myrepo prints both
+      sessions and exits non-zero without ending either.
+
 ### Non-mesh CLI
 
-- [ ] `niwa session start <repo>` from a workspace root creates a worktree and
-      prints the worktree path to stdout.
-- [ ] `niwa session list` shows all active sessions in the current workspace.
+- [ ] `niwa session start <repo>` from a workspace root creates a worktree at
+      `<instance>/.niwa/worktrees/<repo>-<session-id>/` and prints the session ID
+      and absolute path to stdout.
+- [ ] `niwa session list` shows all sessions in the current workspace. `niwa session
+      list --repo <repo>` shows only sessions for that repo. `niwa session list
+      --status active` shows only active sessions.
 - [ ] `niwa session end` on a session with unpushed work exits non-zero and prints
       a warning; the worktree is not removed.
 - [ ] `niwa session end --force` on a session with unpushed work removes the worktree
       and exits zero.
+- [ ] `niwa session go <session-id>` changes the shell's working directory to the
+      session worktree root (via the shell function installed by `niwa setup`).
+- [ ] `niwa session go myrepo` where exactly one session exists for myrepo navigates
+      to that session's worktree without requiring the session ID.
+- [ ] `niwa session go myrepo` where two sessions exist for myrepo prints both
+      sessions and exits non-zero without changing the working directory.
 
 ### Cross-instance routing
 
