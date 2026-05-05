@@ -22,6 +22,11 @@ type createSessionArgs struct {
 // destroySessionArgs holds parameters for niwa_destroy_session.
 type destroySessionArgs struct {
 	SessionID string `json:"session_id"`
+	// Force, when true, deletes the session branch with git branch -D even if
+	// the branch has unmerged commits. When false (default), git branch -d is
+	// used: the branch is deleted only if already merged; unmerged branches are
+	// silently left in place so unfinished work is not discarded.
+	Force bool `json:"force"`
 }
 
 // scaffoldWorktreeNiwa creates the minimal .niwa layout for a per-session
@@ -171,16 +176,18 @@ func (s *Server) handleCreateSession(args createSessionArgs) toolResult {
 		"NIWA_MAIN_INSTANCE_ROOT=" + s.instanceRoot,
 		"NIWA_SESSION_ID=" + sessionID,
 	}
-	if err := s.daemonStarter(worktreePath, extraEnv); err != nil {
-		// Non-fatal: session state is written; coordinator can retry daemon start.
-		// Log the error but still return success.
-		_ = err
-	}
-
-	result, _ := json.Marshal(map[string]string{
+	resp := map[string]string{
 		"session_id":    sessionID,
 		"worktree_path": worktreePath,
-	})
+	}
+	if err := s.daemonStarter(worktreePath, extraEnv); err != nil {
+		// Non-fatal: session state is written; coordinator can retry daemon start.
+		// Include a warning so the coordinator knows the daemon did not start.
+		fmt.Fprintf(os.Stderr, "niwa_create_session: daemon failed to start at %s: %v\n", worktreePath, err)
+		resp["daemon_warning"] = "daemon failed to start: " + err.Error()
+	}
+
+	result, _ := json.Marshal(resp)
 	return textResult(string(result))
 }
 
@@ -210,7 +217,7 @@ func (s *Server) handleDestroySession(args destroySessionArgs) toolResult {
 	worktreePath := state.WorktreePath
 
 	// Force-kill workers whose tasks are still running.
-	killSessionWorkers(worktreePath, args.SessionID, sessionsDir)
+	killSessionWorkers(s.instanceRoot, worktreePath, args.SessionID)
 
 	// Write terminal state.
 	state.Status = SessionStatusEnded
@@ -227,31 +234,50 @@ func (s *Server) handleDestroySession(args destroySessionArgs) toolResult {
 	// Remove the worktree directory.
 	if repoErr == nil && worktreePath != "" {
 		_ = exec.Command("git", "-C", repoPath, "worktree", "remove", "--force", worktreePath).Run()
-		// Try to delete the branch (best-effort; ignore if already deleted or merged).
-		_ = exec.Command("git", "-C", repoPath, "branch", "-D", "session/"+args.SessionID).Run()
+		// Delete the session branch. With Force=false (default), use git branch -d
+		// which only succeeds when the branch is already merged; unmerged branches
+		// are left in place so unfinished work is not discarded. With Force=true,
+		// git branch -D removes the branch regardless of merge status.
+		branchArg := "-d"
+		if args.Force {
+			branchArg = "-D"
+		}
+		_ = exec.Command("git", "-C", repoPath, "branch", branchArg, "session/"+args.SessionID).Run()
 	}
 
 	data, _ := json.Marshal(state)
 	return textResult(string(data))
 }
 
-// killSessionWorkers scans the worktree's task directory and sends SIGKILL to
-// any running worker process groups. It also writes each running task's state
-// to abandoned with reason "session_destroyed". Best-effort: errors are ignored.
-func killSessionWorkers(worktreePath, sessionID, sessionsDir string) {
-	tasksDir := filepath.Join(worktreePath, ".niwa", "tasks")
+// killSessionWorkers scans the main instance's task directory for running tasks
+// whose envelope is present in the session worktree's inbox, sends SIGKILL to
+// their worker process groups, and writes each affected task's state to abandoned
+// with reason "session_destroyed". Best-effort: errors are ignored.
+//
+// Task store directories are rooted in the main instance
+// (<mainInstanceRoot>/.niwa/tasks/); only the inbox files live in the worktree.
+// A task belongs to this session if its in-progress envelope is present at
+// <worktreePath>/.niwa/roles/<role>/inbox/in-progress/<taskID>.json.
+func killSessionWorkers(mainInstanceRoot, worktreePath, sessionID string) {
+	tasksDir := filepath.Join(mainInstanceRoot, ".niwa", "tasks")
 	entries, err := os.ReadDir(tasksDir)
 	if err != nil {
 		return
 	}
+	rolesDir := filepath.Join(worktreePath, ".niwa", "roles")
 	now := nowRFC3339Nano()
 	for _, e := range entries {
 		if !e.IsDir() {
 			continue
 		}
-		taskDir := filepath.Join(tasksDir, e.Name())
+		taskID := e.Name()
+		taskDir := filepath.Join(tasksDir, taskID)
 		_, st, err := ReadState(taskDir)
 		if err != nil || st.State != TaskStateRunning {
+			continue
+		}
+		// Check whether this task's envelope is in this session's worktree inbox.
+		if !taskInWorktreeInbox(rolesDir, taskID) {
 			continue
 		}
 		if st.Worker.PID > 0 {
@@ -278,6 +304,25 @@ func killSessionWorkers(worktreePath, sessionID, sessionsDir string) {
 			return &next, entry, nil
 		})
 	}
+}
+
+// taskInWorktreeInbox reports whether taskID has an in-progress envelope under
+// any role's inbox inside rolesDir.
+func taskInWorktreeInbox(rolesDir, taskID string) bool {
+	roles, err := os.ReadDir(rolesDir)
+	if err != nil {
+		return false
+	}
+	for _, role := range roles {
+		if !role.IsDir() {
+			continue
+		}
+		p := filepath.Join(rolesDir, role.Name(), "inbox", "in-progress", taskID+".json")
+		if _, err := os.Stat(p); err == nil {
+			return true
+		}
+	}
+	return false
 }
 
 // jsonStr returns a JSON-encoded string literal for s.

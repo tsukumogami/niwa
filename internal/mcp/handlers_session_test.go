@@ -385,8 +385,9 @@ func TestHandleDestroySession_Integration(t *testing.T) {
 	_ = json.Unmarshal([]byte(createResult.Content[0].Text), &resp)
 	sessionID := resp["session_id"]
 
-	// Destroy the session.
-	destroyResult := s.handleDestroySession(destroySessionArgs{SessionID: sessionID})
+	// Destroy the session with Force=true so the branch is deleted even though
+	// it has no merged commits (session branch starts from an empty commit).
+	destroyResult := s.handleDestroySession(destroySessionArgs{SessionID: sessionID, Force: true})
 	if destroyResult.IsError {
 		t.Fatalf("destroy: %v", destroyResult.Content)
 	}
@@ -404,7 +405,7 @@ func TestHandleDestroySession_Integration(t *testing.T) {
 	}
 
 	// Destroy again (idempotency check).
-	destroyResult2 := s.handleDestroySession(destroySessionArgs{SessionID: sessionID})
+	destroyResult2 := s.handleDestroySession(destroySessionArgs{SessionID: sessionID, Force: true})
 	if destroyResult2.IsError {
 		t.Fatalf("second destroy unexpectedly errored: %v", destroyResult2.Content)
 	}

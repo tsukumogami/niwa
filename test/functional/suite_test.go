@@ -37,6 +37,11 @@ type testState struct {
 	// scenario Before hook via the fresh testState allocation.
 	lastTaskID      string // ID of the most-recently created task envelope
 	pauseHookMarker string // base name of the active pause-hook marker file
+
+	// Session scenario state (Issue #97). Carry session lifecycle state
+	// between steps in a single scenario.
+	lastSessionID          string // ID returned by niwa_create_session
+	lastSessionWorktreePath string // worktree path returned by niwa_create_session
 }
 
 func getState(ctx context.Context) *testState {
@@ -320,6 +325,14 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 	ctx.Step(`^I run claude -p preserving case from instance root "([^"]*)" with prompt:$`, iRunClaudePFromInstanceRootPreservingCase)
 	ctx.Step(`^I queue a niwa_finish_task instruction for role "([^"]*)" in instance "([^"]*)"$`, iDelegateTaskToRoleWithFinishInstruction)
 	ctx.Step(`^the task state in instance "([^"]*)" eventually becomes "([^"]*)" within (\d+) seconds$`, theTaskStateEventuallyBecomesWithin)
+
+	// --- Session lifecycle steps (Issue #97) ---
+	ctx.Step(`^I call niwa_create_session for repo "([^"]*)" with purpose "([^"]*)" in instance "([^"]*)"$`, iCallCreateSession)
+	ctx.Step(`^I call niwa_destroy_session in instance "([^"]*)"$`, iCallDestroySession)
+	ctx.Step(`^the session is active in instance "([^"]*)"$`, theSessionIsActiveInInstance)
+	ctx.Step(`^the session is ended in instance "([^"]*)"$`, theSessionIsEndedInInstance)
+	ctx.Step(`^the session worktree exists in instance "([^"]*)"$`, theSessionWorktreeExistsInInstance)
+	ctx.Step(`^the session scaffold directory "([^"]*)" exists in the worktree$`, theSessionScaffoldDirExistsInWorktree)
 
 	// --- @channels-e2e-graph: real coordinator -> real workers delegation graph ---
 	ctx.Step(`^a multi-repo channeled workspace "([^"]*)" with web and backend exists$`, iSetUpMultiRepoChanneledWorkspace)

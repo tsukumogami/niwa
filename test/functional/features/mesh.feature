@@ -447,6 +447,42 @@ Feature: Cross-session mesh (Issue #10 harness)
     Then the task state in instance "worker-role-e2e" eventually becomes "completed" within 120 seconds
 
   # ---------------------------------------------------------------------
+  # Session lifecycle: niwa_create_session and niwa_destroy_session (AC-S2a,
+  # AC-S2b). These scenarios exercise the MCP tools directly via
+  # callMCPToolAsRole so no real LLM or daemon worker is needed.
+  # ---------------------------------------------------------------------
+
+  @critical
+  Scenario: niwa_create_session provisions worktree and session state (AC-S2a)
+    Given a clean niwa environment
+    And a local git server is set up
+    And a single-repo channeled workspace "session-create-ws" exists
+    When I run "niwa create session-create-ws"
+    Then the exit code is 0
+    When I call niwa_create_session for repo "app" with purpose "integration test" in instance "session-create-ws"
+    Then the session is active in instance "session-create-ws"
+    And the session worktree exists in instance "session-create-ws"
+    And the session scaffold directory ".niwa/tasks" exists in the worktree
+    And the session scaffold directory ".niwa/roles/app/inbox" exists in the worktree
+    And the session scaffold directory ".niwa/roles/app/inbox/in-progress" exists in the worktree
+    When I call niwa_destroy_session in instance "session-create-ws"
+    Then the session is ended in instance "session-create-ws"
+
+  @critical
+  Scenario: niwa_destroy_session is idempotent (AC-S2b)
+    Given a clean niwa environment
+    And a local git server is set up
+    And a single-repo channeled workspace "session-destroy-ws" exists
+    When I run "niwa create session-destroy-ws"
+    Then the exit code is 0
+    When I call niwa_create_session for repo "app" with purpose "idempotency test" in instance "session-destroy-ws"
+    Then the session is active in instance "session-destroy-ws"
+    When I call niwa_destroy_session in instance "session-destroy-ws"
+    Then the session is ended in instance "session-destroy-ws"
+    When I call niwa_destroy_session in instance "session-destroy-ws"
+    Then the session is ended in instance "session-destroy-ws"
+
+  # ---------------------------------------------------------------------
   # @channels-e2e-graph: full delegation graph with real LLMs on both
   # sides of the exchange. A coordinator `claude -p` runs at the instance
   # root, reads the niwa-mesh skill installed by `niwa create`, and is
