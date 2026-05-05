@@ -120,6 +120,25 @@ func (s *Server) SetDaemonFuncs(
 	s.daemonStopper = stopper
 }
 
+// CreateSessionDirect is the CLI-callable entry point for session creation.
+// It delegates to handleCreateSession so CLI commands and MCP clients share
+// the same implementation.
+func (s *Server) CreateSessionDirect(repo, purpose, parentSessionID string) toolResult {
+	return s.handleCreateSession(createSessionArgs{
+		Repo:            repo,
+		Purpose:         purpose,
+		ParentSessionID: parentSessionID,
+	})
+}
+
+// DestroySessionDirect is the CLI-callable entry point for session teardown.
+func (s *Server) DestroySessionDirect(sessionID string, force bool) toolResult {
+	return s.handleDestroySession(destroySessionArgs{
+		SessionID: sessionID,
+		Force:     force,
+	})
+}
+
 // Run starts the server. It reads newline-delimited JSON-RPC from r, writes
 // responses to w, and launches an inbox watcher goroutine that sends push
 // notifications when new messages arrive.
@@ -351,6 +370,17 @@ func (s *Server) toolsList() toolsListResult {
 				Required: []string{"session_id"},
 			},
 		},
+		{
+			Name:        "niwa_list_sessions",
+			Description: "List per-session lifecycle states. Optionally filter by repo and/or status (active, ended, abandoned).",
+			InputSchema: inputSchema{
+				Type: "object",
+				Properties: map[string]schemaProp{
+					"repo":   {Type: "string", Description: "Filter by repo name"},
+					"status": {Type: "string", Description: "Filter by status: active, ended, or abandoned"},
+				},
+			},
+		},
 	}}
 }
 
@@ -430,6 +460,12 @@ func (s *Server) callTool(p toolCallParams) toolResult {
 			return errResult("invalid arguments: " + err.Error())
 		}
 		return s.handleDestroySession(args)
+	case "niwa_list_sessions":
+		var args listSessionsArgs
+		if err := json.Unmarshal(p.Arguments, &args); err != nil {
+			return errResult("invalid arguments: " + err.Error())
+		}
+		return s.handleListSessions(args)
 	default:
 		return errResult("unknown tool: " + p.Name)
 	}

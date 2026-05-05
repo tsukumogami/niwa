@@ -483,6 +483,70 @@ Feature: Cross-session mesh (Issue #10 harness)
     Then the session is ended in instance "session-destroy-ws"
 
   # ---------------------------------------------------------------------
+  # Session CLI: niwa session create/destroy, niwa mesh list, niwa go
+  # <repo> <session-id> (AC-S5a, AC-S5b, AC-S5c)
+  # ---------------------------------------------------------------------
+
+  @critical
+  Scenario: niwa session create writes response file for shell navigation (AC-S5a)
+    Given a clean niwa environment
+    And a local git server is set up
+    And a single-repo channeled workspace "cli-create-ws" exists
+    When I run "niwa create cli-create-ws"
+    Then the exit code is 0
+    And I set NIWA_INSTANCE_ROOT to instance "cli-create-ws"
+    And I set env "NIWA_RESPONSE_FILE" to a temp path
+    When I run "niwa session create app integration-test-purpose"
+    Then the exit code is 0
+    And the response file contains a path under instance "cli-create-ws" worktrees directory
+    And a session lifecycle state file exists for repo "app" with status "active" in instance "cli-create-ws"
+
+  @critical
+  Scenario: niwa go with session-id navigates to worktree (AC-S5b)
+    Given a clean niwa environment
+    And a local git server is set up
+    And a single-repo channeled workspace "cli-go-ws" exists
+    When I run "niwa create cli-go-ws"
+    Then the exit code is 0
+    And I set NIWA_INSTANCE_ROOT to instance "cli-go-ws"
+    When I call niwa_create_session for repo "app" with purpose "go-nav test" in instance "cli-go-ws"
+    Then the session is active in instance "cli-go-ws"
+    And I set env "NIWA_RESPONSE_FILE" to a temp path
+    When I run "niwa go app" with last session id
+    Then the exit code is 0
+    And the response file contains the last session worktree path in instance "cli-go-ws"
+
+  @critical
+  Scenario: niwa mesh list shows coordinator sessions (AC-S5c)
+    Given a clean niwa environment
+    And a local git server is set up
+    And a single-repo channeled workspace "mesh-list-ws" exists
+    When I run "niwa create mesh-list-ws"
+    Then the exit code is 0
+    And I set NIWA_INSTANCE_ROOT to instance "mesh-list-ws"
+    When I run "niwa session register" from repo directory "app"
+    Then the exit code is 0
+    When I run "niwa mesh list"
+    Then the exit code is 0
+    And the output contains "ROLE"
+    And the output contains "coordinator"
+
+  @critical
+  Scenario: niwa session list --status filters lifecycle sessions (AC-S5d)
+    Given a clean niwa environment
+    And a local git server is set up
+    And a single-repo channeled workspace "session-ls-ws" exists
+    When I run "niwa create session-ls-ws"
+    Then the exit code is 0
+    And I set NIWA_INSTANCE_ROOT to instance "session-ls-ws"
+    When I call niwa_create_session for repo "app" with purpose "list-filter test" in instance "session-ls-ws"
+    Then the session is active in instance "session-ls-ws"
+    When I run "niwa session list --status active"
+    Then the exit code is 0
+    And the output contains "active"
+    And the output contains "app"
+
+  # ---------------------------------------------------------------------
   # @channels-e2e-graph: full delegation graph with real LLMs on both
   # sides of the exchange. A coordinator `claude -p` runs at the instance
   # root, reads the niwa-mesh skill installed by `niwa create`, and is

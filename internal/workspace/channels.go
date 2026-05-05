@@ -157,7 +157,7 @@ const workerMCPDynTemplate = `{
 // ## Channels section in workspace-context.md.
 const channelsSectionHeader = "## Channels"
 
-// niwaMCPToolNames is the canonical list of the 11 niwa MCP tools. The
+// niwaMCPToolNames is the canonical list of the 14 niwa MCP tools. The
 // order is stable: it is emitted both in the SKILL.md allowed-tools block
 // and in the ## Channels section. Callers that change this list MUST
 // update the skill body's tool references and the PRD's R10 enumeration
@@ -174,6 +174,9 @@ var niwaMCPToolNames = []string{
 	"niwa_ask",
 	"niwa_send_message",
 	"niwa_check_messages",
+	"niwa_create_session",
+	"niwa_destroy_session",
+	"niwa_list_sessions",
 }
 
 // inboxSubdirs is the canonical set of per-role inbox subdirectories that
@@ -721,7 +724,11 @@ func buildSkillContent() []byte {
 	b.WriteString("worker runs. The body you pass is the delegation payload; keep it\n")
 	b.WriteString("self-contained because the worker reads the body via\n")
 	b.WriteString("`niwa_check_messages` as its first action and does not have access to\n")
-	b.WriteString("your surrounding conversation.\n\n")
+	b.WriteString("your surrounding conversation. To route a task into a specific\n")
+	b.WriteString("session worktree (rather than the role's shared inbox), pass the\n")
+	b.WriteString("optional `session_id` parameter (8 lowercase hex chars) returned by\n")
+	b.WriteString("`niwa_create_session`. Tasks routed to an inactive or unknown session\n")
+	b.WriteString("return SESSION_INACTIVE or SESSION_NOT_FOUND immediately.\n\n")
 
 	b.WriteString("## Reporting Progress\n\n")
 	b.WriteString("Call `niwa_report_progress` every 3-5 minutes of wall-clock work, or\n")
@@ -801,7 +808,24 @@ func buildSkillContent() []byte {
 	b.WriteString("  result = niwa_await_task(task_id=...)\n")
 	b.WriteString("  while result.status == \"question_pending\":\n")
 	b.WriteString("    niwa_finish_task(task_id=result.ask_task_id, outcome=\"completed\", result=...)\n")
-	b.WriteString("    result = niwa_await_task(task_id=<same task_id>)\n")
+	b.WriteString("    result = niwa_await_task(task_id=<same task_id>)\n\n")
+
+	b.WriteString("## Session Management\n\n")
+	b.WriteString("Sessions give a role a persistent git worktree so multiple delegated\n")
+	b.WriteString("tasks can share context across completions. Use\n")
+	b.WriteString("`niwa_create_session(repo, purpose)` to create a worktree and start\n")
+	b.WriteString("its daemon; the call returns `{session_id, worktree_path}`. Pass\n")
+	b.WriteString("the returned `session_id` to subsequent `niwa_delegate` calls via the\n")
+	b.WriteString("optional `session_id` parameter — those tasks are routed into the\n")
+	b.WriteString("session worktree's inbox rather than the shared role inbox, so the\n")
+	b.WriteString("worker sees them in the same directory and retains conversational\n")
+	b.WriteString("context between tasks. Use `niwa_list_sessions` to rediscover active\n")
+	b.WriteString("sessions after a restart (filter by `repo` or `status`). When the\n")
+	b.WriteString("session's work is done, call `niwa_destroy_session(session_id)` to\n")
+	b.WriteString("kill any running workers, mark the session ended, stop the daemon,\n")
+	b.WriteString("and remove the worktree. Pass `force=true` to also delete an\n")
+	b.WriteString("unmerged session branch; without it the branch is preserved so\n")
+	b.WriteString("unfinished work is not discarded silently.\n")
 
 	return b.Bytes()
 }

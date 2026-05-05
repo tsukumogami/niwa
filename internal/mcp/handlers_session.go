@@ -12,6 +12,43 @@ import (
 	"time"
 )
 
+// listSessionsArgs holds optional filter parameters for niwa_list_sessions.
+type listSessionsArgs struct {
+	Repo   string `json:"repo,omitempty"`
+	Status string `json:"status,omitempty"`
+}
+
+// handleListSessions implements niwa_list_sessions.
+//
+// It reads all per-session lifecycle state files, applies optional repo and
+// status filters, and returns a JSON array of matching SessionLifecycleState
+// objects. An empty array (not null) is returned when no sessions match.
+func (s *Server) handleListSessions(args listSessionsArgs) toolResult {
+	sessionsDir := filepath.Join(s.instanceRoot, ".niwa", "sessions")
+	all, err := ListSessionLifecycleStates(sessionsDir)
+	if err != nil {
+		return errResult("listing sessions: " + err.Error())
+	}
+	var filtered []SessionLifecycleState
+	for _, st := range all {
+		if args.Repo != "" && st.Repo != args.Repo {
+			continue
+		}
+		if args.Status != "" && st.Status != args.Status {
+			continue
+		}
+		filtered = append(filtered, st)
+	}
+	if filtered == nil {
+		filtered = []SessionLifecycleState{}
+	}
+	data, err := json.Marshal(filtered)
+	if err != nil {
+		return errResult("marshaling sessions: " + err.Error())
+	}
+	return textResult(string(data))
+}
+
 // createSessionArgs holds parameters for niwa_create_session.
 type createSessionArgs struct {
 	Repo            string `json:"repo"`

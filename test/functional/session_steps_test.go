@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 
 	"github.com/tsukumogami/niwa/internal/mcp"
 )
@@ -201,4 +202,96 @@ func splitLines(s string) []string {
 		lines = append(lines, s[start:])
 	}
 	return lines
+}
+
+// iRunNiwaGoWithLastSessionID runs "niwa go <repo> <session-id>" using the
+// session ID stored by a preceding create step.
+func iRunNiwaGoWithLastSessionID(ctx context.Context, repo string) (context.Context, error) {
+	s := getState(ctx)
+	if s == nil {
+		return ctx, fmt.Errorf("no test state")
+	}
+	if s.lastSessionID == "" {
+		return ctx, fmt.Errorf("no session_id stored; call a create session step first")
+	}
+	return ctx, runNiwa(s, s.homeDir, "niwa go "+repo+" "+s.lastSessionID)
+}
+
+// theResponseFileContainsLastSessionWorktreePath verifies that the response
+// file contains the worktree path stored by a preceding create step.
+func theResponseFileContainsLastSessionWorktreePath(ctx context.Context, instance string) error {
+	s := getState(ctx)
+	if s == nil {
+		return fmt.Errorf("no test state")
+	}
+	if s.lastSessionWorktreePath == "" {
+		return fmt.Errorf("no session worktree path stored; call a create session step first")
+	}
+	path, ok := s.envOverrides["NIWA_RESPONSE_FILE"]
+	if !ok {
+		return fmt.Errorf("NIWA_RESPONSE_FILE not set in this scenario")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("reading response file %s: %w", path, err)
+	}
+	want := s.lastSessionWorktreePath + "\n"
+	got := string(data)
+	if got != want {
+		return fmt.Errorf("response file content mismatch:\n  want: %q\n  got:  %q", want, got)
+	}
+	return nil
+}
+
+// theResponseFileContainsPathUnderWorktreesDir verifies that the response
+// file written by niwa session create contains a path under the instance's
+// .niwa/worktrees/ directory. Used by AC-S5a where the session ID is not
+// known ahead of time (CLI creates and returns it at runtime).
+func theResponseFileContainsPathUnderWorktreesDir(ctx context.Context, instance string) error {
+	s := getState(ctx)
+	if s == nil {
+		return fmt.Errorf("no test state")
+	}
+	path, ok := s.envOverrides["NIWA_RESPONSE_FILE"]
+	if !ok {
+		return fmt.Errorf("NIWA_RESPONSE_FILE not set in this scenario")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("reading response file %s: %w", path, err)
+	}
+	got := strings.TrimRight(string(data), "\n")
+	instRoot := filepath.Join(s.workspaceRoot, instance)
+	worktreesDir := filepath.Join(instRoot, ".niwa", "worktrees")
+	if !strings.HasPrefix(got, worktreesDir) {
+		return fmt.Errorf("response file path %q is not under worktrees dir %q", got, worktreesDir)
+	}
+	if fi, err := os.Stat(got); err != nil {
+		return fmt.Errorf("response file path %q does not exist: %w", got, err)
+	} else if !fi.IsDir() {
+		return fmt.Errorf("response file path %q is not a directory", got)
+	}
+	return nil
+}
+
+// aSessionLifecycleStateExistsForRepo verifies that at least one session
+// state file exists for the named repo with the expected status.
+func aSessionLifecycleStateExistsForRepo(ctx context.Context, repo, status, instance string) error {
+	s := getState(ctx)
+	if s == nil {
+		return fmt.Errorf("no test state")
+	}
+	instRoot := filepath.Join(s.workspaceRoot, instance)
+	sessionsDir := filepath.Join(instRoot, ".niwa", "sessions")
+	all, err := mcp.ListSessionLifecycleStates(sessionsDir)
+	if err != nil {
+		return fmt.Errorf("listing session states: %w", err)
+	}
+	for _, st := range all {
+		if st.Repo == repo && st.Status == status {
+			return nil
+		}
+	}
+	return fmt.Errorf("no session with repo=%q status=%q found in %s; got %d sessions",
+		repo, status, sessionsDir, len(all))
 }

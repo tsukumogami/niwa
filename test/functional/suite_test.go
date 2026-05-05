@@ -330,9 +330,15 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 	ctx.Step(`^I call niwa_create_session for repo "([^"]*)" with purpose "([^"]*)" in instance "([^"]*)"$`, iCallCreateSession)
 	ctx.Step(`^I call niwa_destroy_session in instance "([^"]*)"$`, iCallDestroySession)
 	ctx.Step(`^the session is active in instance "([^"]*)"$`, theSessionIsActiveInInstance)
+	ctx.Step(`^the last session is active in instance "([^"]*)"$`, theSessionIsActiveInInstance)
 	ctx.Step(`^the session is ended in instance "([^"]*)"$`, theSessionIsEndedInInstance)
 	ctx.Step(`^the session worktree exists in instance "([^"]*)"$`, theSessionWorktreeExistsInInstance)
 	ctx.Step(`^the session scaffold directory "([^"]*)" exists in the worktree$`, theSessionScaffoldDirExistsInWorktree)
+	// --- Session CLI steps (Issue #5) ---
+	ctx.Step(`^the response file contains the last session worktree path in instance "([^"]*)"$`, theResponseFileContainsLastSessionWorktreePath)
+	ctx.Step(`^the response file contains a path under instance "([^"]*)" worktrees directory$`, theResponseFileContainsPathUnderWorktreesDir)
+	ctx.Step(`^a session lifecycle state file exists for repo "([^"]*)" with status "([^"]*)" in instance "([^"]*)"$`, aSessionLifecycleStateExistsForRepo)
+	ctx.Step(`^I run "niwa go ([^"]*)" with last session id$`, iRunNiwaGoWithLastSessionID)
 
 	// --- @channels-e2e-graph: real coordinator -> real workers delegation graph ---
 	ctx.Step(`^a multi-repo channeled workspace "([^"]*)" with web and backend exists$`, iSetUpMultiRepoChanneledWorkspace)

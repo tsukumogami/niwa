@@ -36,19 +36,33 @@ Add this to your shell profile:
 
 const shellWrapperTemplate = `export _NIWA_SHELL_INIT=1
 
+__niwa_cd_wrap() {
+    local __niwa_tmp __niwa_dir __niwa_rc
+    __niwa_tmp=$(mktemp) || { command niwa "$@"; return $?; }
+    NIWA_RESPONSE_FILE="$__niwa_tmp" command niwa "$@"
+    __niwa_rc=$?
+    __niwa_dir=$(cat "$__niwa_tmp" 2>/dev/null)
+    rm -f "$__niwa_tmp"
+    if [ $__niwa_rc -eq 0 ] && [ -n "$__niwa_dir" ] && [ -d "$__niwa_dir" ]; then
+        builtin cd "$__niwa_dir" || return
+    fi
+    return $__niwa_rc
+}
+
 niwa() {
     case "$1" in
         create|go|init)
-            local __niwa_tmp __niwa_dir __niwa_rc
-            __niwa_tmp=$(mktemp) || { command niwa "$@"; return $?; }
-            NIWA_RESPONSE_FILE="$__niwa_tmp" command niwa "$@"
-            __niwa_rc=$?
-            __niwa_dir=$(cat "$__niwa_tmp" 2>/dev/null)
-            rm -f "$__niwa_tmp"
-            if [ $__niwa_rc -eq 0 ] && [ -n "$__niwa_dir" ] && [ -d "$__niwa_dir" ]; then
-                builtin cd "$__niwa_dir" || return
-            fi
-            return $__niwa_rc
+            __niwa_cd_wrap "$@"
+            ;;
+        session)
+            case "$2" in
+                create)
+                    __niwa_cd_wrap "$@"
+                    ;;
+                *)
+                    command niwa "$@"
+                    ;;
+            esac
             ;;
         *)
             command niwa "$@"
