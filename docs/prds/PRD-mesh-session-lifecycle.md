@@ -60,11 +60,19 @@ their own lifecycle.
 3. The main clone of every repo in a workspace always stays on `main`. All active
    work happens in session-specific worktrees.
 
-4. Coordinators can end sessions safely. Niwa prevents cleanup of sessions with
-   unpushed commits and gives the coordinator explicit control over when to discard
-   work.
+4. Sessions form a tree rooted at the coordinator. The parent-child relationship is
+   established at creation time and defines the only valid communication channel
+   between sessions: a session can address its parent or any of its direct children,
+   and no other sessions.
 
-5. Non-mesh developers can use `niwa session start` to create an isolated worktree
+5. Coordinators can end sessions safely. Niwa prevents cleanup of sessions with
+   unpushed commits or active children, and gives the coordinator explicit control
+   over when to cascade teardown through a subtree.
+
+6. Users can inspect the session tree, navigate to any session's worktree, query a
+   session's agent directly, and prune subtrees safely from the CLI.
+
+7. Non-mesh developers can use `niwa session start` to create an isolated worktree
    for their work without needing a coordinator.
 
 ## Folder Layout
@@ -115,6 +123,61 @@ Placement rationale:
   `<instance>/.niwa/sessions/`, keeping all coordinator-visible session data
   under a single directory.
 
+## Session Tree Model
+
+Sessions form a tree. Understanding the tree is prerequisite to understanding
+session lifecycle, routing, and cleanup.
+
+### Structure
+
+Every session has exactly one parent, established at creation time and never
+changed. The parent is the session that called `niwa_create_session`; if the
+call comes from outside any session (the top-level coordinator or a CLI user),
+the session is a root session with no parent. Root sessions are direct children
+of the workspace.
+
+```
+workspace
+└── coordinator (root session, no parent)
+    ├── tsuku-a3f7c2d1  (child of coordinator)
+    │   └── koto-b7e91f04  (grandchild; child of tsuku-a3f7c2d1)
+    └── shirabe-c2d45a88  (child of coordinator)
+```
+
+### Communication
+
+A session may only communicate with its direct parent or its direct children.
+There is no routing between siblings, cousins, or arbitrary sessions. This
+keeps the communication graph identical to the tree structure and makes session
+ownership unambiguous: a session is responsible for everything it creates.
+
+Two routing targets are valid in `niwa_ask`:
+- `"parent"` — routes to the calling session's direct parent.
+- `<session-id>` — routes to a named direct child of the calling session.
+- `"coordinator"` — preserved as a shortcut to the root session from any
+  depth, for backward compatibility and for cases where a deeply nested session
+  needs to reach the top without knowing the full chain.
+
+Routing to any other target is rejected.
+
+### Lifecycle dependencies
+
+A session cannot be ended cleanly while it has active or pending-merge
+descendants. Ending a non-leaf session requires either ending all descendants
+first (bottom-up), or using `--force`, which cascades termination through the
+subtree deepest-first before removing the target.
+
+An orphaned session (its creating coordinator process has died) surfaces with a
+stale marker. The subtree beneath it is preserved unchanged; no automatic
+cleanup occurs.
+
+### Inspection
+
+The session tree is the primary view for understanding workspace state. Users
+can view the tree, navigate to any session's worktree, and query a session's
+agent directly from the CLI without entering its worktree or interrupting its
+work.
+
 ## User Stories
 
 **As a coordinator, I want to create a named session for a repo before delegating
@@ -134,6 +197,29 @@ the remote yet.
 concurrently**, so that each feature's agent works in isolation with its own context
 and worktree, and neither interferes with the other.
 
+**As a coordinator, I want sessions I create to automatically become my children in
+the session tree**, so that the communication graph matches the delegation structure
+without me having to track routing manually.
+
+**As a session agent, I want to ask my parent session a question and receive an
+answer**, so that I can surface decisions upward without the top-level coordinator
+needing to orchestrate every exchange.
+
+**As a coordinator, I want to end a session that has active child sessions to be
+blocked**, so that I cannot accidentally orphan in-progress work by cleaning up
+a parent before its children are done.
+
+**As a user, I want to view the full session tree for a workspace**, so that I can
+see what work is in flight, how sessions relate to each other, and which ones are
+stale or blocked.
+
+**As a user, I want to ask a running session's agent a question from the CLI**,
+so that I can inspect progress or give direction without navigating to the
+session's worktree or interrupting its active task.
+
+**As a user, I want to force-end a session subtree in one command**, so that I can
+clean up abandoned or completed work without having to end each child individually.
+
 **As a developer using niwa without a coordinator, I want to start a session for a
 repo from the CLI**, so that my main clone stays on `main` while I work on a feature
 in a clean, isolated worktree.
@@ -144,12 +230,15 @@ in a clean, isolated worktree.
 
 **R1.** `niwa_create_session` is a new MCP tool that accepts a repo identifier and a
 purpose string. It creates a new session, provisions a git worktree for the session,
-starts a per-worktree daemon, and returns a `session_id`. The `session_id` is niwa's
-internal session handle (see R22); it is distinct from the Claude conversation ID
-used by `--resume`. No Claude process is started at session creation time, so no
-Claude conversation ID exists yet. The coordinator uses `session_id` to route
-subsequent `niwa_delegate` calls into this session; niwa manages the Claude
-conversation ID internally and the coordinator never handles it directly.
+starts a per-worktree daemon, and returns a `session_id`. The calling session becomes
+the parent of the new session; the parent-child binding is recorded at creation time
+and never changes. When called from outside any session (e.g., the top-level
+coordinator), `parent_session_id` is null and the new session is a root session.
+The `session_id` is niwa's internal session handle (see R22); it is distinct from
+the Claude conversation ID used by `--resume`. No Claude process is started at
+session creation time. The coordinator uses `session_id` to route subsequent
+`niwa_delegate` calls into this session; niwa manages the Claude conversation ID
+internally and the coordinator never handles it directly.
 
 **R2.** `niwa_delegate` accepts an optional `session_id` parameter. When provided, the
 worker is spawned within the session's worktree. If the session has a recorded Claude
@@ -157,19 +246,25 @@ session ID from a prior worker, the new worker resumes that session. If not, the
 first worker in the session starts a fresh Claude session.
 
 **R3.** `niwa_list_sessions` is a new MCP tool that returns all sessions for the
-current workspace instance. Each entry includes: session ID, repo, purpose, status
-(one of `active`, `pending_merge`, `ended`, `abandoned`), creation time, and — for
-sessions whose coordinator process is no longer running — a stale indicator showing
-the previous coordinator's process ID.
+current workspace instance. Each entry includes: session ID, parent session ID (null
+for root sessions), direct child session IDs, repo, purpose, status (one of
+`active`, `pending_merge`, `ended`, `abandoned`), creation time, and — for sessions
+whose creating process is no longer running — a stale indicator showing the previous
+process ID.
 
 **R4.** `niwa_end_session` is a new MCP tool that accepts a `session_id` and an optional
-`force` flag (default false). Without `force`, it blocks on sessions where the
-session worktree contains commits not reachable from any remote-tracking branch, and
-returns `{status: "blocked_by_unpushed_work"}` without removing the worktree. With
-`force: true`, it removes the worktree regardless and returns `{status: "abandoned"}`.
+`force` flag (default false). Without `force`, it blocks when either (a) the session
+worktree contains commits not reachable from any remote-tracking branch, returning
+`{status: "blocked_by_unpushed_work"}`, or (b) the session has any active or
+pending-merge descendants, returning `{status: "blocked_by_active_children",
+children: [<immediate child session IDs>]}`. Neither condition removes the worktree.
 
-**R5.** A session with all commits pushed can be ended cleanly via `niwa_end_session`
-without `force`. The worktree is removed and the session transitions to `ended`.
+**R5.** A session with all commits pushed and no active descendants can be ended
+cleanly via `niwa_end_session` without `force`. The worktree is removed and the
+session transitions to `ended`. With `force: true`, niwa terminates all descendant
+sessions bottom-up (deepest leaves first, each subject to the same worktree removal
+as a force-end on that individual session), then removes the target session's
+worktree and returns `{status: "abandoned"}`.
 
 ### Session lifecycle
 
@@ -247,16 +342,54 @@ installed by `niwa setup`), so it changes the shell's working directory. When
 `<session-ref>` matches multiple sessions the command prints a disambiguation list
 and exits non-zero.
 
-**R27.** Tab completion for `niwa session go`, `niwa session end`, and all CLI
-commands that accept a `<session-ref>` includes all active and pending-merge sessions
-in the current workspace, showing session ID, repo name, and purpose prefix.
-Completion narrows on repo name, session ID prefix, or purpose prefix.
+**R27.** Tab completion for `niwa session go`, `niwa session end`, `niwa session ask`,
+and all CLI commands that accept a `<session-ref>` includes all active and
+pending-merge sessions in the current workspace, showing session ID, repo name, and
+purpose prefix. Completion narrows on repo name, session ID prefix, or purpose prefix.
+
+**R29.** `niwa session tree [<session-ref>]` prints the session tree as an indented
+hierarchy. Each line shows: session ID, repo, purpose (truncated to 50 characters),
+status, and a `[stale]` marker when the creating process is no longer alive. Without
+a session-ref, shows the full workspace session tree. With a session-ref, shows the
+subtree rooted at that session. Leaf sessions with no children are distinguishable
+from non-leaf sessions in the output.
+
+**R30.** `niwa session ask <session-ref> "<question>"` routes a question from the
+user to the specified session's active worker and waits for the response. The session
+need not be idle; the question is delivered as an inbox message and the command
+blocks until the worker responds via `niwa_finish_task` or equivalent. The response
+is printed to stdout. If the session has no active worker the command exits non-zero
+with a message indicating the session is idle.
+
+**R31.** `niwa session end` with a session-ref that resolves to a non-leaf session
+prints the full subtree of active and pending-merge descendants alongside the
+unpushed-work warning (if applicable) before blocking. `--force` on a non-leaf
+session cascades termination bottom-up through the subtree, printing each terminated
+session as it completes.
+
+### Session tree operations (mesh)
+
+**R28.** `niwa_get_session_tree` is a new MCP tool that returns the session tree for
+the current workspace, rooted at the workspace. Each node includes: session ID,
+parent session ID, direct child session IDs, repo, purpose, status, and creation
+time. An optional `root_session_id` parameter returns only the subtree rooted at
+that session.
 
 ### Cross-instance routing
 
-**R19.** Workers running in session worktrees can reach the live coordinator via
-`niwa_ask`. The session model does not break the existing coordinator routing
-mechanism.
+**R19.** Session-worktree workers route messages via the session tree. `niwa_ask`
+accepts three valid targets:
+
+- `"parent"` — routes to the calling session's direct parent, resolved by reading
+  `parent_session_id` from the calling session's state file.
+- `<session-id>` — routes to a named session that is a direct child of the calling
+  session. Routing to a session that is not a direct child returns an error.
+- `"coordinator"` — routes to the root coordinator session regardless of tree depth,
+  preserved for backward compatibility and for cases where deep traversal is not
+  needed.
+
+Any other routing target is rejected. The parent-child binding established at
+`niwa_create_session` is the sole source of truth for routing authorization.
 
 ### Naming and identification
 
@@ -319,16 +452,69 @@ performing any action.
       is spawned without `--resume`, exits without error, and session state records
       a `corrupted_session` warning entry.
 
+### Session tree structure
+
+- [ ] `niwa_create_session` called from within session S records S's ID as
+      `parent_session_id` in the new session's state. `niwa_list_sessions` returns
+      the new session with `parent_session_id` equal to S's ID.
+- [ ] `niwa_create_session` called from the top-level coordinator (outside any
+      session) records `parent_session_id` as null. The new session appears as a
+      root session in `niwa_list_sessions`.
+- [ ] `niwa_get_session_tree` returns a tree where coordinator is the root and
+      child sessions appear nested under their parent. Two siblings created by the
+      same parent appear at the same depth with no parent-child relationship between
+      them.
+- [ ] `niwa session tree` prints the same tree structure as an indented hierarchy,
+      showing session ID, repo, purpose, and status per line.
+
 ### Session cleanup
 
 - [ ] `niwa_end_session(id)` on a session with commits not pushed to any remote
       returns `{status: "blocked_by_unpushed_work"}` and leaves the worktree intact.
-- [ ] `niwa_end_session(id, force=true)` on a session with unpushed commits removes
-      the worktree and returns `{status: "abandoned"}`.
-- [ ] `niwa_end_session(id)` on a session where all commits are pushed removes the
-      worktree and returns `{status: "ended"}`.
+- [ ] `niwa_end_session(id)` on a session with at least one active child returns
+      `{status: "blocked_by_active_children"}` and lists the immediate child session
+      IDs. The worktree is not removed.
+- [ ] `niwa_end_session(id)` on a session with both active children and unpushed
+      commits returns `blocked_by_active_children` (children take precedence).
+- [ ] `niwa_end_session(id, force=true)` on a session with two active children
+      terminates both children before removing the target. After the call, neither
+      child worktree exists on disk. The target worktree is also removed.
+- [ ] `niwa_end_session(id)` on a session where all commits are pushed and there
+      are no active descendants removes the worktree and returns `{status: "ended"}`.
 - [ ] After any `niwa_end_session`, the main clone remains on `main` with no
       modifications.
+
+### Session tree routing
+
+- [ ] Worker in session S1 (direct child of coordinator) calls
+      `niwa_ask(to="parent")`. The coordinator receives the ask notification in
+      its inbox and answers via `niwa_finish_task`. S1's worker receives the answer.
+- [ ] Worker in session S2 (child of S1, grandchild of coordinator) calls
+      `niwa_ask(to="parent")`. S1's active worker receives the ask. S2 does not
+      receive any notification to the coordinator directly.
+- [ ] Worker in session S1 calls `niwa_ask(to=<S2-session-id>)` where S2 is a
+      direct child of S1. S2's worker receives the ask.
+- [ ] Worker in session S1 calls `niwa_ask(to=<session-id>)` where that session is
+      a sibling of S1 (not a parent or child). The call returns an error; no message
+      is delivered.
+- [ ] Worker in session S2 (grandchild of coordinator) calls
+      `niwa_ask(to="coordinator")`. The coordinator receives the ask. S1 (the
+      intermediate parent) receives no notification.
+
+### Session tree inspection (CLI)
+
+- [ ] `niwa session tree` with a three-session tree (coordinator → tsuku-foo →
+      koto-bar) prints koto-bar indented under tsuku-foo, which is indented under
+      coordinator.
+- [ ] `niwa session tree <tsuku-foo-id>` shows only tsuku-foo and koto-bar; the
+      coordinator is not shown.
+- [ ] `niwa session ask <session-ref> "<question>"` delivers the question to the
+      named session's active worker and prints the worker's response to stdout.
+- [ ] `niwa session end <parent-session-ref>` when the parent has an active child
+      prints the child session IDs before blocking and exits non-zero.
+- [ ] `niwa session end --force <parent-session-ref>` when the parent has one active
+      child terminates the child first, then removes the parent's worktree, and
+      prints both terminated sessions to stdout.
 
 ### Backward compatibility
 
@@ -406,10 +592,9 @@ performing any action.
 
 ## Out of Scope
 
-- **Worker-to-worker and sub-coordinator routing**: direct `niwa_ask` routing between
-  sessions, or from a child session back to the session that created it. Deferred;
-  requires parent-session tracking and `(role, session_id)` addressing in `niwa_ask`.
-  See Open Questions.
+- **Non-adjacent session routing**: `niwa_ask` between sessions that are not in a
+  direct parent-child relationship (siblings, cousins, skip-level). Sessions may
+  only address their direct parent or direct children.
 - **Session handoff between coordinators**: transferring ownership of a session to a
   new coordinator. Deferred; requires coordinator identity design.
 - **Session → PR lifecycle tracking**: exposing `pr_url` in session state or surfacing
@@ -475,31 +660,20 @@ Mixing apply semantics with session lifecycle management was rejected because it
 worktree state harder to reason about and would require apply to distinguish main clones
 from session worktrees.
 
+**Tree model for session relationships, not a flat registry.** Sessions form a parent-
+child tree rather than a flat list with arbitrary routing. Alternative: allow any session
+to message any other session (full mesh). Rejected because a full mesh gives no clear
+ownership or cleanup ordering, makes routing authorization ambiguous, and produces
+workspace states where sessions can become tangled without a clear path to untangle
+them. The tree model gives every session exactly one owner (its parent), a clear cleanup
+order (leaves before parents), and a bounded communication graph (parent and direct
+children only). The coordinator shortcut (`"coordinator"` routing target) is preserved
+for backward compatibility and for cases where deep traversal is not useful.
+
 ## Open Questions
 
-### Session addressing and worker-to-worker routing
-
-The session model structurally enables workers to discover other sessions via the
-shared `sessions.json` registry, but provides no addressing mechanism to route
-to a specific session. Today `niwa_ask` routes exclusively to the `"coordinator"`
-role — a stable singleton. In the session model every non-coordinator role becomes a
-`(repo, session_id)` pair with no stable name.
-
-This creates a gap when sessions delegate to other sessions: if a tsuku session
-creates a koto session and koto needs to route a question back to tsuku, it cannot.
-`niwa_ask(to="coordinator")` would reach the top-level coordinator, not tsuku.
-There is no `"parent"` target, no `(role, session_id)` addressing in `niwa_ask`,
-and no `parent_session_id` field on sessions.
-
-Resolving this requires:
-1. A `parent_session_id` field recorded on child sessions at creation time.
-2. A new routing target in `niwa_ask` — `"parent"` or explicit `(role, session_id)`
-   addressing — so the child can reach its creating session without knowing the
-   session ID in advance.
-3. The MCP server resolving `"parent"` by reading `parent_session_id` from the
-   current session's state file.
-
-This is deferred. V1 preserves the current hub-and-spoke model: all `niwa_ask`
-calls route to the top-level coordinator, which remains the stable anchor. Worker-
-to-worker and sub-coordinator-to-parent routing are explicitly out of scope until
-the session addressing model is designed.
+None at this time. The session tree model (Session Tree Model section) resolves the
+routing identity question raised during design: parent-child bindings established at
+creation time define the communication graph, `"parent"` is the upward routing target,
+and direct child session IDs are the downward routing targets. Remaining open items
+(skip-level routing, session handoff, PR lifecycle) are captured in Out of Scope.
