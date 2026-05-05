@@ -1321,7 +1321,7 @@ func handleSupervisorExit(ex supervisorExit, s spawnContext) {
 	// NIWA_SESSION_ID must both be set (injected at daemon spawn for session
 	// workers; absent for main-instance daemons).
 	if st.Worker.ClaudeSessionID != "" {
-		captureConversationID(s.instanceRoot, st.Worker.ClaudeSessionID, s.logger)
+		captureConversationID(st.Worker.ClaudeSessionID, s.logger)
 	}
 
 	// Terminal state → worker called niwa_finish_task (or delegator
@@ -1545,7 +1545,7 @@ func appendRetryScheduledEntry(taskDir string, attempt int, backoff time.Duratio
 // (injected by EnsureDaemonRunning extraEnv at session creation time). If
 // either env var is absent the function is a no-op — this daemon is a
 // main-instance daemon, not a session worker.
-func captureConversationID(instanceRoot, claudeSessionID string, logger *log.Logger) {
+func captureConversationID(claudeSessionID string, logger *log.Logger) {
 	mainRoot := os.Getenv("NIWA_MAIN_INSTANCE_ROOT")
 	sessionID := os.Getenv("NIWA_SESSION_ID")
 	if mainRoot == "" || sessionID == "" {
