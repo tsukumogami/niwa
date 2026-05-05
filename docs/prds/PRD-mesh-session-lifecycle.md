@@ -242,9 +242,12 @@ handles it directly.
 **R2.** `niwa_delegate` accepts an optional `session_id` parameter. When provided, the
 worker is spawned within the session's worktree. If the session has a recorded Claude
 session ID from a prior worker, the new worker resumes that session. If not, the
-first worker in the session starts a fresh Claude session. Error codes:
-`SESSION_NOT_FOUND` when the provided `session_id` does not exist in the workspace;
-`SESSION_INACTIVE` when the session exists but is in `ended` or `abandoned` state.
+first worker in the session starts a fresh Claude session. If the session's
+per-worktree daemon is not running (e.g., after a host reboot), niwa restarts it
+before spawning the worker; the session state and recorded Claude conversation ID are
+preserved. Error codes: `SESSION_NOT_FOUND` when the provided `session_id` does not
+exist in the workspace; `SESSION_INACTIVE` when the session exists but is in `ended`
+or `abandoned` state.
 
 **R3.** `niwa_list_sessions` is a new MCP tool that returns all sessions for the
 current workspace instance. Each entry includes: session ID, parent session ID (null
@@ -526,6 +529,11 @@ error message.
 - [ ] After the crashed coordinator's session appears as stale, no daemon process
       removes the worktree or transitions the session to `ended` or `abandoned`
       without an explicit call to `niwa_end_session`.
+- [ ] A host is rebooted while a session is `active`. After reboot, a coordinator
+      calls `niwa_delegate` with that session's ID. The per-worktree daemon is
+      restarted automatically, the worker is spawned with `--resume` using the
+      Claude conversation ID recorded before the reboot, and the delegation
+      succeeds without any manual intervention.
 
 ### Folder layout
 
