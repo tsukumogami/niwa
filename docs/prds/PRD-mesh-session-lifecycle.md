@@ -321,9 +321,10 @@ only.
 **R16.** `niwa session start <repo> [--purpose <text>] [--parent <session-id>]`
 creates a session worktree at `<instance>/.niwa/worktrees/<repo>-<session-id>/`,
 starts the per-worktree daemon, prints the session ID and absolute worktree path
-to stdout, and leaves the caller's working directory unchanged. Without `--parent`,
-`parent_session_id` is recorded as null; the session is a root session. With
-`--parent`, the specified session becomes the parent, provided it exists and is
+to stdout, and navigates the shell to the session worktree root using the same
+mechanism as `niwa go` (the shell function installed by `niwa setup`). Without
+`--parent`, `parent_session_id` is recorded as null; the session is a root session.
+With `--parent`, the specified session becomes the parent, provided it exists and is
 `active`.
 
 **R17.** `niwa session end <session-id> [--force]` ends the session with the given
@@ -337,14 +338,17 @@ for the current workspace instance. Each row shows: session ID, repo, purpose
 the owning coordinator PID is no longer alive. `--repo` filters to sessions for
 that repo; `--status` filters to a specific lifecycle state.
 
-**R26.** `niwa session go <session-id>` navigates the shell to the session worktree
-root. It uses the same integration mechanism as `niwa go` (the shell function
-installed by `niwa setup`), so it changes the shell's working directory. The session
-ID must be an exact match; if not found, the command exits non-zero.
+**R26.** `niwa go <repo> [<session-id>]` extends the existing `niwa go <repo>`
+command. Without `<session-id>`, behavior is unchanged: the shell navigates to the
+repo's main clone. With `<session-id>`, the shell navigates to the session worktree
+for that repo and session. Uses the same shell function integration as `niwa go`. If
+the session ID is not found for that repo, the command exits non-zero.
 
-**R27.** Tab completion for `niwa session go` and `niwa session end` includes all
-active sessions in the current workspace, showing session ID and repo name.
-Completion narrows on session ID prefix or repo name prefix.
+**R27.** Tab completion for `niwa session end` includes all active sessions in the
+current workspace, showing session ID and repo name. Completion narrows on session
+ID prefix or repo name prefix. Tab completion for `niwa go <repo> <TAB>` shows all
+active session IDs for the given repo; when no sessions exist for that repo, the
+second argument does not appear as a completion candidate.
 
 **R29.** `niwa session tree [<session-id>]` prints the session tree as an indented
 hierarchy. Each line shows: session ID, repo, purpose (truncated to 60 characters),
@@ -535,20 +539,26 @@ error message.
 
 ### Tab completion
 
-- [ ] Tab-completing `niwa session go <TAB>` shows all active sessions in the
+- [ ] Tab-completing `niwa session end <TAB>` shows all active sessions in the
       current workspace, each formatted as `<session-id>  <repo>`.
-- [ ] Tab-completing `niwa session end <TAB>` shows the same list.
-- [ ] After entering a session ID prefix, completion narrows to sessions whose ID
-      starts with the typed characters.
-- [ ] After entering a repo name prefix, completion narrows to sessions whose repo
-      name starts with the typed characters.
+- [ ] After entering a session ID prefix in `niwa session end`, completion narrows
+      to sessions whose ID starts with the typed characters.
+- [ ] After entering a repo name prefix in `niwa session end`, completion narrows
+      to sessions whose repo name starts with the typed characters.
+- [ ] Tab-completing `niwa go myrepo <TAB>` shows all active session IDs for
+      `myrepo`. Repos with no active sessions do not produce a second-argument
+      completion candidate.
+- [ ] `niwa go myrepo` (no session ID) with tab completion on the first argument
+      behaves identically to the existing `niwa go` completion: it shows all repos
+      in the workspace, not session IDs.
 
 ### Naming and identification
 
 - [ ] `niwa session start myrepo` prints a line containing the generated 8-hex-char
-      session ID and the absolute worktree path. The session ID in the printed path
-      (`myrepo-<session-id>/`) matches the printed session ID byte-for-byte, and
-      both match the ID returned by the next `niwa session list` call.
+      session ID and the absolute worktree path before navigating to the worktree.
+      The session ID in the printed path (`myrepo-<session-id>/`) matches the
+      printed session ID byte-for-byte, and both match the ID returned by the next
+      `niwa session list` call.
 - [ ] `niwa session list` shows the session ID, repo name, and purpose in each row.
 - [ ] `niwa session end a3f7c2d1` (exact session ID) ends the correct session and
       exits zero.
@@ -567,10 +577,14 @@ error message.
       a warning; the worktree is not removed.
 - [ ] `niwa session end --force` on a session with unpushed work removes the worktree
       and exits zero.
-- [ ] `niwa session go <session-id>` changes the shell's working directory to the
-      session worktree root (via the shell function installed by `niwa setup`).
-- [ ] `niwa session go notexist` where no session with that ID exists exits non-zero
-      without changing the working directory.
+- [ ] `niwa session start myrepo` navigates the shell to the new session worktree
+      root after creating it (via the shell function installed by `niwa setup`).
+- [ ] `niwa go myrepo <session-id>` navigates the shell to the session worktree
+      root for that repo and session.
+- [ ] `niwa go myrepo notexist` where no session with that ID exists for myrepo
+      exits non-zero without changing the working directory.
+- [ ] `niwa go myrepo` (no session ID) navigates to the main clone, unchanged
+      from existing behavior.
 
 ### Cross-instance routing
 
