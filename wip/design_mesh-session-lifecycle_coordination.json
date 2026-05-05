@@ -1,0 +1,46 @@
+{
+  "topic": "mesh-session-lifecycle",
+  "decisions": [
+    {
+      "id": 1,
+      "question": "How does niwa_delegate(session_id=X) route the task envelope to the per-worktree daemon's inbox rather than the main instance daemon's inbox?",
+      "status": "complete",
+      "complexity": "critical",
+      "chosen": "Option A: Direct Inbox Write",
+      "confidence": "high",
+      "report_file": "wip/design_mesh-session-lifecycle_decision_1_report.md"
+    },
+    {
+      "id": 2,
+      "question": "How does niwa_ask support virtual routing targets ('parent', direct child session-id) given that isKnownRole validates against role directories on disk and virtual targets have no directory?",
+      "status": "complete",
+      "complexity": "critical",
+      "chosen": "Option A: Registry pre-check before isKnownRole",
+      "confidence": "high",
+      "report_file": "wip/design_mesh-session-lifecycle_decision_2_report.md",
+      "key_assumptions": [
+        "Session state files must include parent_session_id, children[], status, coordinator_pid, coordinator_start_time, inbox_path",
+        "NIWA_MAIN_INSTANCE_ROOT env var propagated to session-worktree daemons at spawn",
+        "NIWA_SESSION_ID env var available to MCP server at worker spawn"
+      ]
+    },
+    {
+      "id": 3,
+      "question": "What is the session lifecycle state schema — file layout, data model, and writer/reader contract for session creation, update, and destruction?",
+      "status": "pending",
+      "complexity": "standard"
+    },
+    {
+      "id": 4,
+      "question": "How does the shell wrapper extension support niwa session create CWD navigation and niwa go <repo> <session-id>, given the current wrapper only intercepts $1 in (create|go)?",
+      "status": "complete",
+      "complexity": "standard",
+      "chosen": "Option A: Intercept session at $1, dispatch $2",
+      "confidence": "high",
+      "report_file": "wip/design_mesh-session-lifecycle_decision_4_report.md",
+      "note": "niwa go <repo> <session-id> needs no wrapper change — go already intercepts at $1"
+    }
+  ],
+  "cross_validation": "passed",
+  "round": 0
+}
