@@ -144,7 +144,12 @@ in a clean, isolated worktree.
 
 **R1.** `niwa_create_session` is a new MCP tool that accepts a repo identifier and a
 purpose string. It creates a new session, provisions a git worktree for the session,
-starts a per-worktree daemon, and returns a `session_id`.
+starts a per-worktree daemon, and returns a `session_id`. The `session_id` is niwa's
+internal session handle (see R22); it is distinct from the Claude conversation ID
+used by `--resume`. No Claude process is started at session creation time, so no
+Claude conversation ID exists yet. The coordinator uses `session_id` to route
+subsequent `niwa_delegate` calls into this session; niwa manages the Claude
+conversation ID internally and the coordinator never handles it directly.
 
 **R2.** `niwa_delegate` accepts an optional `session_id` parameter. When provided, the
 worker is spawned within the session's worktree. If the session has a recorded Claude
@@ -189,8 +194,15 @@ decides what to do with them.
 **R10.** Within a session, each worker spawned via `niwa_delegate` resumes the Claude
 conversation history from the previous worker in the same session.
 
-**R11.** The Claude session ID from the first worker in a session is captured and
-stored in session state. All subsequent workers in that session resume from it.
+**R11.** The Claude conversation ID is captured automatically by the first worker that
+runs in a session. When Claude Code spawns, it sets `CLAUDE_SESSION_ID` in its
+environment; the worker's MCP server reads this value at startup and writes it to
+`state.json`. After the first worker finishes, the daemon reads the captured value
+and writes it to the session's state file. All subsequent `niwa_delegate` calls
+within the same session spawn the worker with `claude --resume <claude-conversation-id>`,
+using this stored value. The coordinator never handles the Claude conversation ID
+directly; niwa manages it as an internal implementation detail of session
+continuity.
 
 **R12.** If the session's Claude conversation history is missing or corrupted, niwa
 falls back to spawning a fresh worker (matching current behavior) and records a
