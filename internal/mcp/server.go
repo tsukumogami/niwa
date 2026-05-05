@@ -258,6 +258,7 @@ func (s *Server) toolsList() toolsListResult {
 					"body":       {Type: "object", Description: "Task payload"},
 					"mode":       {Type: "string", Description: "\"async\" (default) or \"sync\""},
 					"expires_at": {Type: "string", Description: "Optional RFC3339 expiry deadline"},
+					"session_id": {Type: "string", Description: "Route task into a specific session worktree (8 lowercase hex chars from niwa_create_session)"},
 				},
 				Required: []string{"to", "body"},
 			},
