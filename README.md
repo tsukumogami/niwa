@@ -114,9 +114,10 @@ repos, regenerates content files, and cleans up repos removed from the config.
 |---------|-------------|
 | `niwa init [name]` | With `[name]`: create `./<name>/` and scaffold a config inside it. Without `[name]`: scaffold in the current directory |
 | `niwa init <name> --from <org/repo>` | Create `./<name>/` and clone a shared workspace config from GitHub into it; `<name>` overrides the cloned `[workspace] name` everywhere niwa surfaces it |
-| `niwa init <name> --rebind` | Re-target an already-registered workspace name to this directory; the previous directory at the old root is left intact |
 | `niwa init <name> --from <org/repo> --overlay <repo>` | Use `<repo>` as the overlay instead of auto-discovering one (`--overlay` and `--no-overlay` are mutually exclusive) |
 | `niwa init <name> --from <org/repo> --no-overlay` | Skip overlay discovery entirely |
+
+When `<name>` is already registered to a different directory, `niwa init` refuses by default. Pass `--rebind` to retarget the registry entry to the new directory; the previous directory at the old root is left intact.
 | `niwa create [--name <name>]` | Create a new workspace instance; on a TTY, shows a live status line ("cloning <repo>...") while each repo is processed |
 | `niwa apply [--instance <name>]` | Apply config to all instances (from root) or one (from instance); on a TTY, shows a live status line ("cloning <repo>...", "syncing <repo>...") while each repo is processed |
 | `niwa status [instance]` | Show workspace health: repos, drift, last applied |
@@ -153,18 +154,20 @@ couldn't recover from this. See `docs/guides/workspace-config-sources.md` for
 slug grammar, discovery rules, drift detection, and the provenance marker.
 
 Once registered, the same source URL can be re-cloned in a different
-directory by re-running `niwa init` with the registered name:
+directory. Because the registry already maps `my-team` to its previous
+directory, niwa refuses a plain `niwa init my-team` and points you at
+either `--rebind` (retarget the registry to the new directory) or the
+global config TOML (remove the entry manually). The escape hatch is the
+`--rebind` flag:
 
 ```bash
 cd ~/other-dir
-niwa init my-team --rebind   # re-targets the registry to the new directory
+niwa init my-team --rebind
 niwa apply
 ```
 
-The `--rebind` flag is required because the registry already maps `my-team`
-to its previous directory; without the flag, niwa errors and points you at
-either `--rebind` or the global config TOML so you can reconcile manually.
-The previous directory is left untouched.
+The previous directory at the old root is left untouched; only the
+registry's pointer moves.
 
 ### Overlay discovery
 

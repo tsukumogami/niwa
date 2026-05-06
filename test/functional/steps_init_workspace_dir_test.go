@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"github.com/BurntSushi/toml"
 )
@@ -139,18 +138,6 @@ func theRegistryHasWorkspaceRootedAt(ctx context.Context, name, wantRoot string)
 	return nil
 }
 
-// theStdoutContains asserts the captured stdout from the most recent
-// niwa invocation contains the literal substring.
-func theStdoutContains(ctx context.Context, want string) error {
-	s := getState(ctx)
-	if s == nil {
-		return fmt.Errorf("no test state")
-	}
-	if !strings.Contains(s.stdout, want) {
-		return fmt.Errorf("stdout does not contain %q\nstdout: %s", want, s.stdout)
-	}
-	return nil
-}
 
 // iRunFromInstance runs `niwa <command>` with cwd set to the instance
 // directory `<workspaceRoot>/<workspace>/<instance>`, where the
@@ -167,12 +154,6 @@ func iRunFromInstance(ctx context.Context, command, instance, workspace string) 
 	return ctx, runNiwa(s, cwd, command)
 }
 
-// theRegistryEntryRootIsUnchanged is the negative of theRegistryHasWorkspaceRootedAt:
-// asserts the registry's `<name>` entry still points at the path it was
-// pre-registered to (used to verify rebind-rejection scenarios).
-func theRegistryEntryRootIsUnchanged(ctx context.Context, name, wantRoot string) error {
-	return theRegistryHasWorkspaceRootedAt(ctx, name, wantRoot)
-}
 
 // niwaGoFromOutsideLandsIn runs `niwa go <name>` from a directory other
 // than the workspace, with a temp NIWA_RESPONSE_FILE set so the
@@ -227,19 +208,3 @@ func niwaGoFromOutsideLandsIn(ctx context.Context, name, expectedSubpath string)
 	return nil
 }
 
-// theStderrContainsAll asserts every supplied substring appears in the
-// captured stderr from the most recent niwa invocation. Used for
-// composite assertions like "error mentions both --rebind and the
-// global config TOML path."
-func theStderrContainsAll(ctx context.Context, a, b string) error {
-	s := getState(ctx)
-	if s == nil {
-		return fmt.Errorf("no test state")
-	}
-	for _, want := range []string{a, b} {
-		if !strings.Contains(s.stderr, want) {
-			return fmt.Errorf("stderr does not contain %q\nstderr: %s", want, s.stderr)
-		}
-	}
-	return nil
-}

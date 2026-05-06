@@ -25,7 +25,7 @@ Feature: niwa init creates the workspace directory
     Then the exit code is 0
     When I run "niwa status" from instance "my-team" of workspace "my-team"
     Then the exit code is 0
-    And the stdout contains "my-team"
+    And the output contains "my-team"
 
   Scenario: niwa init refuses when the target directory already exists
     Given a clean niwa environment
@@ -38,7 +38,7 @@ Feature: niwa init creates the workspace directory
     And I pre-create directory "my-team"
     When I run niwa init "my-team" from config repo "upstream-cfg"
     Then the exit code is not 0
-    And the stderr contains "already exists (directory)"
+    And the error output contains "already exists (directory)"
 
   Scenario: niwa init refuses a registry collision without --rebind
     Given a clean niwa environment
@@ -51,7 +51,8 @@ Feature: niwa init creates the workspace directory
     And the registry already has workspace "my-team" rooted at "elsewhere"
     When I run niwa init "my-team" from config repo "upstream-cfg"
     Then the exit code is not 0
-    And the stderr contains "--rebind" and "config.toml"
+    And the error output contains "--rebind"
+    And the error output contains "config.toml"
     And the registry entry "my-team" still points at "elsewhere"
 
   Scenario: niwa init --rebind retargets the registry to the new directory
