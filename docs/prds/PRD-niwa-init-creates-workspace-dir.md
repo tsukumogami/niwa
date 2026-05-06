@@ -107,6 +107,32 @@ interpretation required.
 
 ## Requirements
 
+### Preflight Order
+
+When `niwa init <name>` is invoked with a positional name, niwa MUST run
+preflight checks in this fixed order before any filesystem writes:
+
+1. **Name validation (R7)** — reject malformed names, `.`, `..`, empty.
+2. **Target-exists pre-flight (R5)** — reject if `<cwd>/<name>` exists at
+   any path type, EXCEPT when sub-case routing (R6) applies.
+3. **Sub-case routing for niwa-aware paths (R6)** — when `<cwd>/<name>`
+   contains `.niwa/` or `.niwa/workspace.toml`, surface the more specific
+   error.
+4. **Niwa-state validation** — existing `CheckInitConflicts` checks
+   (orphan `.niwa/` in cwd, nested-instance walk-up) on the target dir;
+   most cases will not fire because the target dir does not exist yet.
+5. **Registry rebind detection (R8)** — if the name is already
+   registered to a different `Root`, queue the rebind warning to emit
+   after success.
+
+When two checks could fire on the same input, the earlier check in this
+list wins. Notably: R5 (target exists) takes precedence over R8
+(registry rebind); when `<cwd>/<name>` exists and `<name>` is also
+already registered, the user gets the target-exists error and no rebind
+happens. R6 takes precedence over R5; when `<cwd>/<name>` is itself a
+niwa workspace, the `ErrWorkspaceExists` error wins over the generic
+`ErrTargetDirExists`.
+
 ### Functional Requirements
 
 **R1**: When `niwa init <name>` is invoked with an explicit positional
@@ -118,53 +144,82 @@ args, with or without `--from`), niwa MUST initialize the workspace in
 the current working directory. Behavior is unchanged from today.
 
 **R3**: When `niwa init <name> --from <src>` is invoked, the explicit
-`<name>` MUST be the effective workspace name everywhere niwa surfaces
-a name: `niwa status`, `niwa apply`, the global registry, the success
-message, and any other CLI output. The cloned `[workspace] name` field
-in `.niwa/workspace.toml` MUST NOT be modified on disk; the override
-MUST be persisted in instance state and consulted by downstream readers.
+`<name>` MUST be the effective workspace name on every niwa-interpreted
+surface: `niwa status` workspace identity field, `niwa apply` workspace-
+name banner and summary line, the global registry entry's key, the init
+success message, and any future read-back command that prints an
+interpreted workspace name. The cloned `[workspace] name` field in
+`.niwa/workspace.toml` MUST NOT be modified on disk; the override MUST
+be persisted in `InstanceState` (`.niwa/state.json`) and consulted by
+downstream readers. Commands that print the raw `.niwa/workspace.toml`
+content verbatim (e.g., a debug `cat`-equivalent) are exempt and continue
+to show the on-disk value.
 
 **R4**: When the cloned `--from` config's `[workspace] name` differs from
-the explicit positional `<name>`, niwa MUST emit a one-time stderr note
-on init success indicating the override
-(e.g., "note: workspace name `<name>` overrides `<config-name>` from
-cloned config").
+the explicit positional `<name>`, niwa MUST emit a per-invocation stderr
+note as part of init success indicating the override. Note format:
+`"note: workspace name <name> overrides <config-name> from cloned
+config."` "Per-invocation" means: emitted by the init invocation that
+performs the override; NOT emitted by subsequent `niwa status`,
+`niwa apply`, or any other command. The note is not persisted to any
+state file and does not use the niwa one-time-notices machinery.
 
 **R5**: When `niwa init <name>` is invoked and `<cwd>/<name>` already
-exists at any path type (file, directory, symlink, other), niwa MUST
-reject the operation with a `InitConflictError` before any filesystem
-writes. The error MUST identify the conflicting absolute path and the
-path type (file / directory / symlink), and MUST suggest a single
-remediation option. No subdirectory of `<cwd>/<name>` may be created.
+exists at any path type (regular file, directory, symlink), niwa MUST
+reject the operation with an `InitConflictError` wrapping a new sentinel
+`ErrTargetDirExists`, BEFORE any filesystem writes. The error's `Detail`
+MUST be `"<absolute-path> already exists (<qualifier>)"` where
+`<qualifier>` is one of `file`, `directory`, or `symlink` (determined via
+`os.Lstat`, so symlinks are not followed). The error's `Suggestion` MUST
+be `"Pick a different name or remove the path and retry."` No file or
+directory may be created at or below `<cwd>/<name>` when this error
+fires. Path types other than file/directory/symlink (FIFO, socket,
+device, etc.) are out of scope and have undefined-but-must-still-error
+behavior.
 
 **R6**: When `<cwd>/<name>` already exists AND contains a niwa workspace
-(`.niwa/workspace.toml` is present at `<cwd>/<name>/.niwa/workspace.toml`),
-niwa MUST surface the existing `ErrWorkspaceExists` error with the
-"Use `niwa apply` to update" suggestion, instead of the generic target-
-exists error. When `<cwd>/<name>/.niwa/` exists without a
-`workspace.toml`, niwa MUST surface the existing `ErrNiwaDirectoryExists`
-error with the "Remove the `.niwa` directory" suggestion.
+(`<cwd>/<name>/.niwa/workspace.toml` exists), niwa MUST surface the
+existing `ErrWorkspaceExists` error with its existing
+`"Use niwa apply to update the existing workspace"` suggestion, INSTEAD
+OF the generic `ErrTargetDirExists`. When
+`<cwd>/<name>/.niwa/` exists at any path type AND
+`<cwd>/<name>/.niwa/workspace.toml` does not exist (regardless of any
+other contents inside `.niwa/`), niwa MUST surface the existing
+`ErrNiwaDirectoryExists` error with its
+`"Remove the <abs path>/.niwa directory and retry"` suggestion. This
+sub-case routing takes precedence over R5; the existence of
+`workspace.toml` is the sole discriminator between R6's two branches.
 
 **R7**: The positional `<name>` MUST be validated against the existing
 `^[a-zA-Z0-9._-]+$` regex (the same regex that governs `[workspace] name`
 in `internal/config/config.go`). The literals `.` and `..` MUST be
 rejected explicitly (they pass the regex but are path-traversal
-sentinels). Empty string MUST be rejected. Validation MUST run before
-any filesystem write, and the error MUST quote the offending input.
+sentinels). The empty string MUST be rejected. Validation MUST run
+before any filesystem write. All name-validation errors MUST quote the
+offending input verbatim and MUST include a human-readable description
+of the allowed character set (e.g., "alphanumerics, dots, underscores,
+hyphens"); the regex itself is not required in the message.
 
 **R8**: When the positional `<name>` matches an existing global registry
 entry whose `Root` differs from the new target path, init MUST succeed
-and MUST emit a stderr warning indicating the registry entry's `Root`
-has been rebound from the previous location. (This preserves the
-documented `cd ~/other-dir && niwa init my-team` pattern.)
+and MUST emit a stderr warning naming both the previous `Root` and the
+new `Root`. The previous directory at the old `Root` MUST be left intact
+(this PRD does not delete or modify the old workspace). This preserves
+the documented `cd ~/other-dir && niwa init my-team` pattern.
 
-**R9**: On init success in any mode (named, scaffold, clone), the success
-message MUST include the absolute path of the workspace root.
+**R9**: On init success in every mode (no-args scaffold, named scaffold,
+clone), niwa MUST print to stdout a success message that includes the
+absolute path on disk where this invocation wrote
+`.niwa/workspace.toml`. The path is the resolved absolute path
+(symlinks in the cwd ancestry followed via `filepath.EvalSymlinks` or
+equivalent). Format: `"Workspace <name> initialized at <abs-path>."` for
+named modes, `"Workspace initialized at <abs-path>."` for the no-args
+scaffold mode.
 
-**R10**: `niwa go <name>` MUST land in `<cwd>/<name>/` after a successful
-`niwa init <name>` invocation. (This follows automatically from R1 + the
-existing registry-driven `niwa go` resolution; called out as a
-requirement to make the cross-command consistency testable.)
+**R10**: `niwa go <name>` MUST land in the workspace directory created
+by `niwa init <name>` (i.e., `<cwd>/<name>/`), regardless of which
+directory `niwa go` is invoked from. This is regression coverage for
+the registry-write side of init, not a new `niwa go` feature.
 
 ### Non-Functional Requirements
 
@@ -205,49 +260,72 @@ flow end-to-end (creates the directory, registers the name, supports
 ### Name override
 
 - [ ] AC-5: After `niwa init my-name --from org/upstream` where the
-  upstream config declares `[workspace] name = "upstream"`, `niwa status`
-  shows `my-name`, not `upstream`.
-- [ ] AC-6: After AC-5, `niwa apply` references `my-name` in its output,
-  not `upstream`.
-- [ ] AC-7: After AC-5, the on-disk file `<cwd>/my-name/.niwa/workspace.toml`
-  retains its upstream `[workspace] name = "upstream"` (the cloned file
-  is not modified).
+  upstream config declares `[workspace] name = "upstream"`, the
+  `Workspace:` line of `niwa status` output reads `my-name`. No line of
+  status output prints `upstream` as the workspace name.
+- [ ] AC-6: After AC-5, the workspace-name banner and summary line of
+  `niwa apply` stdout output read `my-name`. No line of apply output
+  prints `upstream` as the workspace name.
+- [ ] AC-7: After AC-5, the on-disk file
+  `<cwd>/my-name/.niwa/workspace.toml` retains its upstream
+  `[workspace] name = "upstream"` (the cloned file is not modified).
 - [ ] AC-8: When AC-5's command runs, niwa emits a stderr note
-  identifying that `my-name` overrides `upstream`.
+  containing both literal tokens `my-name` and `upstream`, formatted per
+  R4.
+- [ ] AC-8b: When `niwa init my-name --from org/upstream` runs and the
+  upstream config also declares `[workspace] name = "my-name"` (names
+  match), niwa does NOT emit the override note. Stderr is silent on the
+  override topic.
+- [ ] AC-8c: After AC-5, subsequent invocations of `niwa status`,
+  `niwa apply`, and `niwa go` from inside the workspace do NOT re-emit
+  the override note on stderr.
+- [ ] AC-8d: After AC-5, the global registry's entry key for the
+  workspace is `my-name`. (`niwa list` or registry-file inspection
+  shows `my-name`, not `upstream`.)
 
 ### Conflict handling
 
 - [ ] AC-9: When `<cwd>/my-ws` is a regular file, `niwa init my-ws`
-  exits non-zero with an `InitConflictError`. The error message
-  includes the absolute path and the qualifier "file". No directory is
-  created at `<cwd>/my-ws`.
+  exits non-zero, the error wraps the new `ErrTargetDirExists` sentinel,
+  the message includes the absolute path and the qualifier `file`, and
+  no file or directory is created at or below `<cwd>/my-ws`.
 - [ ] AC-10: When `<cwd>/my-ws` is an unrelated directory (no `.niwa/`
-  inside), `niwa init my-ws` exits non-zero with an `InitConflictError`.
-  The error message includes the absolute path and the qualifier
-  "directory".
-- [ ] AC-11: When `<cwd>/my-ws` is a symlink (to anywhere),
-  `niwa init my-ws` exits non-zero. The error qualifier is "symlink".
+  inside), `niwa init my-ws` exits non-zero, the error wraps
+  `ErrTargetDirExists`, the message includes the absolute path and the
+  qualifier `directory`, and `<cwd>/my-ws/.niwa/` does NOT exist after
+  the failed init.
+- [ ] AC-11: When `<cwd>/my-ws` is a symlink (regardless of whether the
+  target exists, resolves to a file, or resolves to a directory),
+  `niwa init my-ws` exits non-zero, the error wraps `ErrTargetDirExists`,
+  the qualifier is `symlink`, and `<cwd>/my-ws/.niwa/` does NOT exist
+  after the failed init.
 - [ ] AC-12: When `<cwd>/my-ws/.niwa/workspace.toml` exists,
   `niwa init my-ws` exits non-zero with the existing `ErrWorkspaceExists`
-  message ("Use `niwa apply` to update the existing workspace").
+  error (suggestion contains `"Use niwa apply"`). The error MUST NOT be
+  `ErrTargetDirExists`.
 - [ ] AC-13: When `<cwd>/my-ws/.niwa/` exists without `workspace.toml`,
   `niwa init my-ws` exits non-zero with the existing
-  `ErrNiwaDirectoryExists` message ("Remove the `.niwa` directory and
-  retry").
+  `ErrNiwaDirectoryExists` error (suggestion contains `"Remove"` and the
+  `.niwa` path). The error MUST NOT be `ErrTargetDirExists`.
 
 ### Name validation
 
-- [ ] AC-14: `niwa init "foo bar"` (any value containing spaces) exits
-  non-zero before any filesystem write, with an error quoting the
-  offending input and citing the allowed character set.
-- [ ] AC-15: `niwa init "foo/bar"` exits non-zero before any filesystem
-  write. (Same regex rejection.)
-- [ ] AC-16: `niwa init ..` exits non-zero before any filesystem write,
-  even though `..` matches the regex. The error mentions `..` and
-  reserves explanation.
-- [ ] AC-17: `niwa init .` exits non-zero before any filesystem write
-  (same as AC-16).
-- [ ] AC-18: `niwa init ""` exits non-zero before any filesystem write.
+All name-validation ACs assert the same invariant: niwa exits non-zero,
+no file or directory is created at `<cwd>/<the-input>`, and the error
+message quotes the offending input verbatim and includes a human-
+readable description of the allowed character set.
+
+- [ ] AC-14: `niwa init "foo bar"` (whitespace) fails per the invariant.
+- [ ] AC-15: `niwa init "foo/bar"` (path separator) fails per the
+  invariant.
+- [ ] AC-16: `niwa init ..` fails per the invariant. The error mentions
+  the literal `..` and explains it is rejected as a path-traversal
+  sentinel (not allowed even though it matches the regex).
+- [ ] AC-17: `niwa init .` fails per the invariant. The error mentions
+  the literal `.` and explains it is rejected as a path-traversal
+  sentinel.
+- [ ] AC-18: `niwa init ""` (empty string) fails per the invariant; the
+  error explicitly states the name cannot be empty.
 
 ### Registry rebind
 
@@ -255,9 +333,16 @@ flow end-to-end (creates the directory, registers the name, supports
   `Root = /path/A`, running `niwa init my-team` from `/path/B` (where
   `/path/B/my-team` does not exist) succeeds, creates
   `/path/B/my-team/.niwa/`, and updates the registry's `Root` to
-  `/path/B/my-team`.
-- [ ] AC-20: AC-19 also emits a stderr warning indicating the rebind
-  (mentions both the previous `Root` and the new `Root`).
+  `/path/B/my-team`. The previous directory at `/path/A` is left intact;
+  no files at or below `/path/A` are removed or modified.
+- [ ] AC-20: AC-19 also emits a stderr warning containing both the
+  literal previous `Root` (`/path/A`) and the new `Root`
+  (`/path/B/my-team`).
+- [ ] AC-20b: Given the same registry entry for `my-team` with
+  `Root = /path/A`, running `niwa init my-team` from `/path/B` when
+  `/path/B/my-team` ALREADY exists (any path type) fails with the
+  target-exists error per AC-9/AC-10/AC-11 (R5 takes precedence over
+  R8). No rebind happens; the registry's `Root` remains `/path/A`.
 
 ### Go integration
 
@@ -267,21 +352,32 @@ flow end-to-end (creates the directory, registers the name, supports
 
 ### Documentation
 
-- [ ] AC-22: `niwa init --help` output explicitly states that a positional
-  `<name>` causes niwa to create `<cwd>/<name>/`. The output also states
-  that the positional name overrides the cloned `[workspace] name`.
-- [ ] AC-23: README quickstart no longer contains a `mkdir + cd` step
-  before `niwa init`.
-- [ ] AC-24: README "shared workspace configs" section, registry-replay
-  example, and commands table row for `niwa init [name]` reflect the new
-  behavior.
-- [ ] AC-25: At least one `@critical`-tagged Gherkin scenario exercises
-  the new `niwa init <name>` flow end-to-end.
+- [ ] AC-22: `niwa init --help` output contains text describing the
+  directory-creation behavior (a literal phrase containing "creates" and
+  `<name>`) AND text describing the name-override behavior (a literal
+  phrase containing "overrides" or equivalent semantic, plus reference
+  to the cloned config).
+- [ ] AC-23: A grep of `README.md` for the literal sequence
+  `mkdir` followed by any niwa-init command on the next line returns
+  zero matches. (No `mkdir + cd + niwa init` example survives.)
+- [ ] AC-24: The README sections enumerated in R12 (quickstart, "shared
+  workspace configs," registry-replay example, commands table row for
+  `niwa init [name]`) each show a `niwa init <name>` invocation without
+  a preceding `mkdir`/`cd` step.
+- [ ] AC-25: At least one `@critical`-tagged Gherkin scenario in
+  `test/functional/features/` exercises the new `niwa init <name>`
+  flow end-to-end: invokes `niwa init <name> --from <fixture>`,
+  asserts `<name>/.niwa/workspace.toml` exists, asserts the registry
+  has `<name>` with the new Root, and asserts `niwa go <name>` lands
+  in the new directory.
 
 ### Success messaging
 
-- [ ] AC-26: On a successful init in any mode, the success message
-  includes the absolute path of the workspace root.
+- [ ] AC-26: On a successful init in every mode (named scaffold, named
+  clone, no-args scaffold, no-args clone), niwa prints a success message
+  to stdout matching R9's format. The path printed is the resolved
+  absolute path of the workspace root (symlinks in cwd ancestry are
+  followed; on macOS, `/var/...` resolves to `/private/var/...`).
 
 ## Out of Scope
 
@@ -384,15 +480,23 @@ non-fatal-but-surprising state changes.
 No `--in-place` or `--here` flag is added for users on the old flow.
 Niwa is pre-1.0 and adding a flag for an old pattern entrenches it.
 The combination of (a) clear error when the target exists, (b) absolute-
-path success message that exposes unintended nesting, and (c) updated
-README + help text is judged sufficient for migration. The user-
+path success message (R9) that exposes unintended nesting, and (c)
+updated README + help text is judged sufficient for migration. The user-
 visible failure mode for the old pattern when names *don't* collide
 (e.g., `mkdir my-workspace && cd my-workspace && niwa init my-project`)
 is a successfully nested workspace at `my-workspace/my-project/`,
 visible in the success message; the user can re-init from the parent
-once they recognize the nesting. A muscle-memory heuristic
-(`filepath.Base(cwd) == name`) was considered and rejected as scope
-creep with false-positive risk.
+once they recognize the nesting.
+
+A muscle-memory heuristic (warning when `filepath.Base(cwd) == name`)
+was considered to catch the silent-nesting case and rejected. Phase 2
+research argued the false-positive rate is near-zero because nobody
+intentionally names a directory the same as the workspace they're about
+to put inside it. That argument is conceded; the rejection rests on a
+different point: an informational note about pre-existing user behavior
+runs counter to the clean-break stance this PRD takes elsewhere. The
+absolute-path success message gives users the same diagnostic signal
+without baking old-flow patterns into the new error vocabulary.
 
 ### `niwa create` extension: deferred
 
