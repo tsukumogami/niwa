@@ -1,5 +1,5 @@
 ---
-status: Draft
+status: Accepted
 problem: |
   Users initializing a niwa workspace from a remote config must currently
   pre-create the target directory and `cd` into it before running niwa init,
@@ -21,7 +21,7 @@ goals: |
 
 ## Status
 
-Draft
+Accepted
 
 ## Problem Statement
 
@@ -86,10 +86,13 @@ predictably named.
 I spin up a new one with a single `niwa init <name> --from <src>`
 command, without context-switching directories first.
 
-**US-4**: As an existing user with a registered workspace, I run
-`cd ~/projects && niwa init my-team` to re-clone the registered config
-into `~/projects/my-team/`. Niwa warns me on stderr that the registry
-entry's root path is being rebound from its previous location.
+**US-4**: As an existing user who deliberately wants to rebind a
+registered workspace to a new location, I run
+`cd ~/projects && niwa init my-team --rebind` to re-clone the
+registered config into `~/projects/my-team/` and update the registry
+entry's root path. Without `--rebind`, niwa errors and tells me where
+the existing entry lives, plus how to either remove it or rebind
+explicitly.
 
 **US-5**: As a user passing `niwa init my-name --from org/upstream`,
 when I subsequently run `niwa status` and `niwa apply`, I see the name
@@ -121,17 +124,19 @@ preflight checks in this fixed order before any filesystem writes:
 4. **Niwa-state validation** — existing `CheckInitConflicts` checks
    (orphan `.niwa/` in cwd, nested-instance walk-up) on the target dir;
    most cases will not fire because the target dir does not exist yet.
-5. **Registry rebind detection (R8)** — if the name is already
-   registered to a different `Root`, queue the rebind warning to emit
+5. **Registry collision detection (R8)** — if the name is already
+   registered to a different `Root` and `--rebind` was not given,
+   reject with `ErrRegistryNameInUse` before any filesystem writes. If
+   `--rebind` was given, queue the rebind confirmation warning to emit
    after success.
 
 When two checks could fire on the same input, the earlier check in this
 list wins. Notably: R5 (target exists) takes precedence over R8
-(registry rebind); when `<cwd>/<name>` exists and `<name>` is also
-already registered, the user gets the target-exists error and no rebind
-happens. R6 takes precedence over R5; when `<cwd>/<name>` is itself a
-niwa workspace, the `ErrWorkspaceExists` error wins over the generic
-`ErrTargetDirExists`.
+(registry collision), with or without `--rebind`; when `<cwd>/<name>`
+exists and `<name>` is also already registered, the user gets the
+target-exists error and no rebind happens. R6 takes precedence over R5;
+when `<cwd>/<name>` is itself a niwa workspace, the `ErrWorkspaceExists`
+error wins over the generic `ErrTargetDirExists`.
 
 ### Functional Requirements
 
@@ -201,11 +206,27 @@ of the allowed character set (e.g., "alphanumerics, dots, underscores,
 hyphens"); the regex itself is not required in the message.
 
 **R8**: When the positional `<name>` matches an existing global registry
-entry whose `Root` differs from the new target path, init MUST succeed
-and MUST emit a stderr warning naming both the previous `Root` and the
-new `Root`. The previous directory at the old `Root` MUST be left intact
-(this PRD does not delete or modify the old workspace). This preserves
-the documented `cd ~/other-dir && niwa init my-team` pattern.
+entry whose `Root` differs from the new target path, niwa MUST behave as
+follows:
+
+- **Without `--rebind`:** reject the operation before any filesystem
+  writes with an `InitConflictError` wrapping a new sentinel
+  `ErrRegistryNameInUse`. The error's `Detail` MUST surface the
+  existing `Root` path verbatim so the user can identify what is
+  registered. The error's `Suggestion` MUST instruct the user how to
+  proceed: pass `--rebind` to update the registry to the new path, or
+  edit the global config TOML at `$XDG_CONFIG_HOME/niwa/config.toml`
+  (default `~/.config/niwa/config.toml`) to remove the
+  `[registry.<name>]` section. The suggestion MUST reference the
+  config path verbatim.
+- **With `--rebind`:** proceed with init, update the registry's `Root`
+  to the new target path, and emit a stderr confirmation warning
+  naming both the previous `Root` and the new `Root`.
+
+In all cases, the previous directory at the old `Root` MUST be left
+intact; this PRD does not delete or modify the old workspace. The
+`--rebind` flag is a boolean, long-form only, with no short alias,
+matching the existing flag style on `niwa init`.
 
 **R9**: On init success in every mode (no-args scaffold, named scaffold,
 clone), niwa MUST print to stdout a success message that includes the
@@ -225,9 +246,12 @@ the registry-write side of init, not a new `niwa go` feature.
 
 **R11**: The `Long:` help text on `initCmd` MUST describe the new
 behavior explicitly: that a positional `<name>` causes niwa to create
-`<cwd>/<name>/`, and that the explicit name overrides the cloned
-`[workspace] name`. The three modes (no name, name only, name + `--from`)
-MUST remain documented.
+`<cwd>/<name>/`, that the explicit name overrides the cloned
+`[workspace] name`, and that `--rebind` is required to retarget an
+already-registered name to a new directory. The three modes (no name,
+name only, name + `--from`) MUST remain documented. The `--rebind`
+flag MUST have its own short help string referencing the registry
+collision case it unblocks.
 
 **R12**: The project README MUST be updated so that all `niwa init`
 examples reflect the new behavior. The quickstart MUST drop the
@@ -327,22 +351,32 @@ readable description of the allowed character set.
 - [ ] AC-18: `niwa init ""` (empty string) fails per the invariant; the
   error explicitly states the name cannot be empty.
 
-### Registry rebind
+### Registry collision and rebind
 
 - [ ] AC-19: Given a global registry entry for `my-team` with
-  `Root = /path/A`, running `niwa init my-team` from `/path/B` (where
-  `/path/B/my-team` does not exist) succeeds, creates
+  `Root = /path/A`, running `niwa init my-team` from `/path/B` (no
+  `--rebind`, where `/path/B/my-team` does not exist) exits non-zero,
+  the error wraps the new `ErrRegistryNameInUse` sentinel, the
+  `Detail` includes the literal previous `Root` (`/path/A`), and the
+  `Suggestion` mentions both `--rebind` and the literal global config
+  path (`$XDG_CONFIG_HOME/niwa/config.toml` or
+  `~/.config/niwa/config.toml`). No file or directory is created at or
+  below `/path/B/my-team`. The registry entry's `Root` remains
+  `/path/A`.
+- [ ] AC-19a: Given the same starting state, running
+  `niwa init my-team --rebind` from `/path/B` succeeds, creates
   `/path/B/my-team/.niwa/`, and updates the registry's `Root` to
-  `/path/B/my-team`. The previous directory at `/path/A` is left intact;
-  no files at or below `/path/A` are removed or modified.
-- [ ] AC-20: AC-19 also emits a stderr warning containing both the
+  `/path/B/my-team`. The previous directory at `/path/A` is left
+  intact; no files at or below `/path/A` are removed or modified.
+- [ ] AC-20: AC-19a also emits a stderr warning containing both the
   literal previous `Root` (`/path/A`) and the new `Root`
   (`/path/B/my-team`).
 - [ ] AC-20b: Given the same registry entry for `my-team` with
-  `Root = /path/A`, running `niwa init my-team` from `/path/B` when
-  `/path/B/my-team` ALREADY exists (any path type) fails with the
-  target-exists error per AC-9/AC-10/AC-11 (R5 takes precedence over
-  R8). No rebind happens; the registry's `Root` remains `/path/A`.
+  `Root = /path/A`, running `niwa init my-team` from `/path/B` (with
+  or without `--rebind`) when `/path/B/my-team` ALREADY exists (any
+  path type) fails with the target-exists error per AC-9/AC-10/AC-11
+  (R5 takes precedence over R8 in both branches). No rebind happens;
+  the registry's `Root` remains `/path/A`.
 
 ### Go integration
 
@@ -464,16 +498,39 @@ because it would create a third name-validation regime alongside the
 toml regex and the registry sanitizer; reusing the toml regex keeps the
 project to one rule.
 
-### Registry rebind: warn, don't error
+### Registry collision: error by default, opt-in via `--rebind`
 
 When the explicit `<name>` matches an existing registry entry whose
-`Root` points elsewhere, init succeeds and emits a stderr warning rather
-than erroring. This preserves the README-documented
-`cd ~/other-dir && niwa init my-team` pattern as a single command.
-Considered alternatives: silent rebind (rejected, surprising) or
-hard-error requiring an explicit `--rebind` flag (rejected, breaks
-documented usage). The warning is the niwa-idiomatic choice for
-non-fatal-but-surprising state changes.
+`Root` points elsewhere, init errors with `ErrRegistryNameInUse` and
+accepts an explicit `--rebind` flag to opt into the rebind. The error
+surfaces the existing `Root` path and the global config TOML path so
+the user can either retarget explicitly or remove the entry.
+
+An earlier draft of this PRD specified "warn, don't error" to preserve
+the documented `cd ~/other-dir && niwa init my-team` re-init pattern as
+a single command. Security review surfaced a CWD-poisoning attack: an
+attacker who knows a user's registered workspace name can lure the user
+to run `niwa init <name>` from an attacker-controlled directory,
+silently rebinding the registry so subsequent `niwa go <name>` lands in
+the attacker's location. The stderr warning was judged insufficient
+mitigation given the silent-success default.
+
+The `--rebind` flag closes the attack at the cost of one extra word for
+the legitimate rebind case. That case is rare (workspace move to a new
+disk or directory), benefits from explicit confirmation anyway, and
+produces a clearer audit trail. Considered alternatives:
+
+- **Reuse the existing `--force`.** Rejected. `--force` elsewhere on
+  niwa skips uncommitted-changes checks; conflating it with
+  registry-rebind muddies the meaning at every call site.
+- **Hard-error with no flag, require manual TOML edit.** Rejected.
+  Forces every legitimate rebind through a hand edit of the global
+  config; high friction for a real use case.
+- **Silent rebind (the original draft).** Rejected per the security
+  finding above.
+
+The `--rebind` flag is boolean and long-form-only, matching the
+existing `--skip-global` / `--no-overlay` style on `niwa init`.
 
 ### Backward compatibility: clean break, no flag
 
