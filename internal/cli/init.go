@@ -66,15 +66,16 @@ Three modes:
     No registry entry is created.
 
   niwa init <name>
-    Create <cwd>/<name>/ and initialize the workspace inside it. If the
-    name is registered in the global registry with a source URL, clone
-    from that source (same as --from); otherwise scaffold locally and
-    register the workspace as local-only. The explicit <name> overrides
-    whatever the cloned [workspace] name declares, and that explicit
-    name is what every niwa command surfaces from this point on.
+    Creates <cwd>/<name>/ and initializes the workspace inside it. If
+    the name is registered in the global registry with a source URL,
+    clone from that source (same as --from); otherwise scaffold locally
+    and register the workspace as local-only. The explicit <name>
+    overrides whatever the cloned [workspace] name declares, and that
+    explicit name is what every niwa command surfaces from this point
+    on.
 
   niwa init <name> --from <org/repo>
-    Create <cwd>/<name>/ and shallow-clone the config repo into its
+    Creates <cwd>/<name>/ and shallow-clones the config repo into its
     .niwa/ subdirectory. The explicit <name> overrides the cloned
     [workspace] name; the on-disk workspace.toml is not modified.
 

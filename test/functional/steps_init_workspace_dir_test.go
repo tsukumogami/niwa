@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/tsukumogami/niwa/internal/config"
+	"github.com/BurntSushi/toml"
 )
 
 // Step definitions for the niwa-init-creates-workspace-dir feature.
@@ -105,7 +105,9 @@ func theWorkspaceRootHasWorkspaceTOML(ctx context.Context, name string) error {
 
 // theRegistryHasWorkspaceRootedAt asserts that the global registry has
 // an entry for `<name>` whose `root` matches `<wantRoot>` (relative
-// paths anchor under workspaceRoot).
+// paths anchor under workspaceRoot). Reads the registry TOML directly
+// to avoid mutating process-global env (XDG_CONFIG_HOME) in a way that
+// would break parallel test execution.
 func theRegistryHasWorkspaceRootedAt(ctx context.Context, name, wantRoot string) error {
 	s := getState(ctx)
 	if s == nil {
@@ -114,26 +116,55 @@ func theRegistryHasWorkspaceRootedAt(ctx context.Context, name, wantRoot string)
 	if !filepath.IsAbs(wantRoot) {
 		wantRoot = filepath.Join(s.workspaceRoot, wantRoot)
 	}
-	// Load via the public API so this matches what production reads.
-	t := s.envOverrides
-	prev := os.Getenv("XDG_CONFIG_HOME")
-	defer os.Setenv("XDG_CONFIG_HOME", prev)
-	if err := os.Setenv("XDG_CONFIG_HOME", filepath.Join(s.homeDir, ".config")); err != nil {
-		return fmt.Errorf("setting XDG_CONFIG_HOME: %w", err)
-	}
-	_ = t
-	globalCfg, err := config.LoadGlobalConfig()
+	cfgPath := filepath.Join(s.homeDir, ".config", "niwa", "config.toml")
+	body, err := os.ReadFile(cfgPath)
 	if err != nil {
-		return fmt.Errorf("loading global config: %w", err)
+		return fmt.Errorf("reading registry %s: %w", cfgPath, err)
 	}
-	entry := globalCfg.LookupWorkspace(name)
-	if entry == nil {
-		return fmt.Errorf("registry has no entry for %q", name)
+	var doc struct {
+		Registry map[string]struct {
+			Root string `toml:"root"`
+		} `toml:"registry"`
+	}
+	if _, err := toml.Decode(string(body), &doc); err != nil {
+		return fmt.Errorf("decoding registry: %w", err)
+	}
+	entry, ok := doc.Registry[name]
+	if !ok {
+		return fmt.Errorf("registry has no entry for %q (config.toml: %s)", name, cfgPath)
 	}
 	if entry.Root != wantRoot {
 		return fmt.Errorf("registry %q root: got %q, want %q", name, entry.Root, wantRoot)
 	}
 	return nil
+}
+
+// theStdoutContains asserts the captured stdout from the most recent
+// niwa invocation contains the literal substring.
+func theStdoutContains(ctx context.Context, want string) error {
+	s := getState(ctx)
+	if s == nil {
+		return fmt.Errorf("no test state")
+	}
+	if !strings.Contains(s.stdout, want) {
+		return fmt.Errorf("stdout does not contain %q\nstdout: %s", want, s.stdout)
+	}
+	return nil
+}
+
+// iRunFromInstance runs `niwa <command>` with cwd set to the instance
+// directory `<workspaceRoot>/<workspace>/<instance>`, where the
+// `<workspace>` directory is the user-given name from `niwa init <name>`
+// (which the rewire creates as `<workspaceRoot>/<name>/`). Used for
+// `niwa status` assertions after `niwa create` has materialized an
+// instance under the workspace root.
+func iRunFromInstance(ctx context.Context, command, instance, workspace string) (context.Context, error) {
+	s := getState(ctx)
+	if s == nil {
+		return ctx, fmt.Errorf("no test state")
+	}
+	cwd := filepath.Join(s.workspaceRoot, workspace, instance)
+	return ctx, runNiwa(s, cwd, command)
 }
 
 // theRegistryEntryRootIsUnchanged is the negative of theRegistryHasWorkspaceRootedAt:

@@ -194,6 +194,8 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 	ctx.Step(`^the registry entry "([^"]*)" still points at "([^"]*)"$`, theRegistryEntryRootIsUnchanged)
 	ctx.Step(`^niwa go "([^"]*)" from outside lands in "([^"]*)"$`, niwaGoFromOutsideLandsIn)
 	ctx.Step(`^the stderr contains "([^"]*)" and "([^"]*)"$`, theStderrContainsAll)
+	ctx.Step(`^the stdout contains "([^"]*)"$`, theStdoutContains)
+	ctx.Step(`^I run "([^"]*)" from instance "([^"]*)" of workspace "([^"]*)"$`, iRunFromInstance)
 	ctx.Step(`^the instance "([^"]*)" exists$`, theInstanceExists)
 	ctx.Step(`^the instance "([^"]*)" does not exist$`, theInstanceDoesNotExist)
 	ctx.Step(`^the repo "([^"]*)" exists in instance "([^"]*)"$`, theRepoExistsInInstance)

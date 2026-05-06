@@ -8,7 +8,7 @@ Feature: niwa init creates the workspace directory
   PRD: docs/prds/PRD-niwa-init-creates-workspace-dir.md
 
   @critical
-  Scenario: niwa init <name> --from <fixture> creates the workspace directory and registers the override
+  Scenario: niwa init <name> --from <fixture> creates the workspace directory and the override propagates through status
     Given a clean niwa environment
     And a local git server is set up
     And a config repo "upstream-cfg" exists with body:
@@ -21,6 +21,11 @@ Feature: niwa init creates the workspace directory
     And the workspace root "my-team" has a workspace.toml
     And the registry has workspace "my-team" rooted at "my-team"
     And niwa go "my-team" from outside lands in "my-team"
+    When I run "niwa create my-team"
+    Then the exit code is 0
+    When I run "niwa status" from instance "my-team" of workspace "my-team"
+    Then the exit code is 0
+    And the stdout contains "my-team"
 
   Scenario: niwa init refuses when the target directory already exists
     Given a clean niwa environment
