@@ -75,23 +75,31 @@ const (
 // SaveState; nil for state files written by older binaries until they
 // next save.
 type InstanceState struct {
-	SchemaVersion    int                  `json:"schema_version"`
-	ConfigName       *string              `json:"config_name"`
-	InstanceName     string               `json:"instance_name"`
-	InstanceNumber   int                  `json:"instance_number"`
-	Root             string               `json:"root"`
-	Detached         bool                 `json:"detached,omitempty"`
-	SkipGlobal       bool                 `json:"skip_global,omitempty"`
-	OverlayURL       string               `json:"overlay_url,omitempty"`
-	NoOverlay        bool                 `json:"no_overlay,omitempty"`
-	OverlayCommit    string               `json:"overlay_commit,omitempty"`
-	Created          time.Time            `json:"created"`
-	LastApplied      time.Time            `json:"last_applied"`
-	ManagedFiles     []ManagedFile        `json:"managed_files"`
-	Repos            map[string]RepoState `json:"repos"`
-	Shadows          []Shadow             `json:"shadows,omitempty"`
-	DisclosedNotices []string             `json:"disclosed_notices,omitempty"`
-	ConfigSource     *ConfigSource        `json:"config_source,omitempty"`
+	SchemaVersion  int     `json:"schema_version"`
+	ConfigName     *string `json:"config_name"`
+	InstanceName   string  `json:"instance_name"`
+	InstanceNumber int     `json:"instance_number"`
+	Root           string  `json:"root"`
+	Detached       bool    `json:"detached,omitempty"`
+	SkipGlobal     bool    `json:"skip_global,omitempty"`
+	OverlayURL     string  `json:"overlay_url,omitempty"`
+	NoOverlay      bool    `json:"no_overlay,omitempty"`
+	OverlayCommit  string  `json:"overlay_commit,omitempty"`
+	// ConfigNameOverride records an explicit workspace name supplied to
+	// `niwa init <name>` when it differs from (or stands in for) the
+	// cloned config's `[workspace] name`. Apply.Create / Apply.Apply
+	// resolve the effective name via EffectiveConfigName so downstream
+	// readers (status, apply output, registry) all surface the same
+	// value. Empty when no override is in play; omitempty keeps the
+	// field invisible to old binaries reading new state files.
+	ConfigNameOverride string               `json:"config_name_override,omitempty"`
+	Created            time.Time            `json:"created"`
+	LastApplied        time.Time            `json:"last_applied"`
+	ManagedFiles       []ManagedFile        `json:"managed_files"`
+	Repos              map[string]RepoState `json:"repos"`
+	Shadows            []Shadow             `json:"shadows,omitempty"`
+	DisclosedNotices   []string             `json:"disclosed_notices,omitempty"`
+	ConfigSource       *ConfigSource        `json:"config_source,omitempty"`
 }
 
 // ConfigSource records the resolved source identity for a workspace's

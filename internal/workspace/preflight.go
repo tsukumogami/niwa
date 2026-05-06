@@ -17,6 +17,19 @@ var (
 
 	// ErrNiwaDirectoryExists indicates a .niwa/ directory exists without a workspace.toml.
 	ErrNiwaDirectoryExists = errors.New(".niwa directory exists without workspace config")
+
+	// ErrTargetDirExists indicates the target path supplied to `niwa init <name>`
+	// already exists as a regular file, directory, or symlink. Distinct from
+	// ErrWorkspaceExists / ErrNiwaDirectoryExists, which fire when the target is
+	// itself a niwa-aware path. Wrapped in InitConflictError by the init caller.
+	ErrTargetDirExists = errors.New("target path already exists")
+
+	// ErrRegistryNameInUse indicates the positional name supplied to `niwa init <name>`
+	// is already registered in the global config to a different Root, and the user
+	// did not pass --rebind. Wrapped in InitConflictError by the init caller; the
+	// suggestion text directs the user to either retry with --rebind or remove the
+	// existing entry from the global config TOML.
+	ErrRegistryNameInUse = errors.New("workspace name already registered")
 )
 
 // InitConflictError wraps a sentinel error with contextual detail and a user-facing suggestion.

@@ -120,8 +120,13 @@ func executeInit(t *testing.T, args ...string) error {
 	t.Helper()
 	cmd := initCmd
 	cmd.SetArgs(args)
-	// Reset the --from flag before each test.
+	// Reset flags before each test so package-level state doesn't leak
+	// between cases. Tests that exercise a flag must include it in args.
 	initFrom = ""
+	initSkipGlobal = false
+	initOverlay = ""
+	initNoOverlay = false
+	initRebind = false
 	if err := cmd.ParseFlags(args); err != nil {
 		return err
 	}
@@ -188,8 +193,8 @@ func TestRunInit_NamedMode(t *testing.T) {
 		t.Fatalf("init failed: %v", err)
 	}
 
-	// Verify workspace.toml was created with the given name.
-	configPath := filepath.Join(dir, workspace.StateDir, workspace.WorkspaceConfigFile)
+	// Named mode now creates <cwd>/my-project/.niwa/workspace.toml.
+	configPath := filepath.Join(dir, "my-project", workspace.StateDir, workspace.WorkspaceConfigFile)
 	result, err := config.Load(configPath)
 	if err != nil {
 		t.Fatalf("workspace.toml doesn't parse: %v", err)
@@ -198,7 +203,6 @@ func TestRunInit_NamedMode(t *testing.T) {
 		t.Errorf("expected name %q, got %q", "my-project", result.Config.Workspace.Name)
 	}
 
-	// Verify registry was updated.
 	globalCfg, err := config.LoadGlobalConfig()
 	if err != nil {
 		t.Fatalf("loading global config: %v", err)
@@ -206,6 +210,10 @@ func TestRunInit_NamedMode(t *testing.T) {
 	entry := globalCfg.LookupWorkspace("my-project")
 	if entry == nil {
 		t.Fatal("expected registry entry for my-project")
+	}
+	wantRoot := filepath.Join(dir, "my-project")
+	if entry.Root != wantRoot {
+		t.Errorf("expected registry Root %q, got %q", wantRoot, entry.Root)
 	}
 }
 
@@ -396,7 +404,7 @@ func TestRunInit_NoOverlayWritesState(t *testing.T) {
 
 	// Remove the existing .niwa dir so we can reinit — or just call buildInitState directly.
 	// Since executeInit will fail (workspace.toml already exists), call buildInitState directly.
-	state, err := buildInitState(initCmd, modeScaffold, "")
+	state, err := buildInitState(initCmd, modeScaffold, "", "")
 	if err != nil {
 		t.Fatalf("buildInitState returned unexpected error: %v", err)
 	}
@@ -510,7 +518,7 @@ func TestBuildInitState_OverlaySuccessWritesBothFields(t *testing.T) {
 		initSkipGlobal = false
 	})
 
-	state, err := buildInitState(initCmd, modeScaffold, "")
+	state, err := buildInitState(initCmd, modeScaffold, "", "")
 	if err != nil {
 		t.Fatalf("buildInitState returned unexpected error: %v", err)
 	}
@@ -550,7 +558,7 @@ func TestBuildInitState_ConventionDiscoverySilentSkipNoURL(t *testing.T) {
 	// will fail to clone since no such repo exists locally, returning firstTime=true.
 	source := "acme/dot-niwa"
 
-	state, err := buildInitState(initCmd, modeClone, source)
+	state, err := buildInitState(initCmd, modeClone, source, "")
 	if err != nil {
 		t.Fatalf("buildInitState returned unexpected error: %v", err)
 	}
@@ -609,7 +617,7 @@ func TestBuildInitState_ConventionDiscoverySuccessWritesBothFields(t *testing.T)
 
 	source := "acme/dot-niwa"
 
-	state, err := buildInitState(initCmd, modeClone, source)
+	state, err := buildInitState(initCmd, modeClone, source, "")
 	if err != nil {
 		t.Fatalf("buildInitState returned unexpected error: %v", err)
 	}

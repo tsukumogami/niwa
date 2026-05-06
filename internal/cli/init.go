@@ -41,6 +41,7 @@ func init() {
 	initCmd.Flags().BoolVar(&initSkipGlobal, "skip-global", false, "disable global config overlay for this instance")
 	initCmd.Flags().StringVar(&initOverlay, "overlay", "", "overlay repo (org/repo or URL) to clone and associate with this workspace")
 	initCmd.Flags().BoolVar(&initNoOverlay, "no-overlay", false, "disable overlay discovery and association for this workspace")
+	initCmd.Flags().BoolVar(&initRebind, "rebind", false, "rebind a registered workspace name to this directory (use only when intentionally moving a workspace)")
 	initCmd.ValidArgsFunction = completeWorkspaceNames
 }
 
@@ -49,27 +50,44 @@ var (
 	initSkipGlobal bool
 	initOverlay    string
 	initNoOverlay  bool
+	initRebind     bool
 )
 
 var initCmd = &cobra.Command{
 	Use:   "init [name]",
 	Short: "Initialize a new workspace",
-	Long: `Initialize a new niwa workspace in the current directory.
+	Long: `Initialize a new niwa workspace.
 
 Three modes:
 
   niwa init
-    Scaffold a minimal .niwa/workspace.toml with commented examples.
-    The workspace name defaults to "workspace". No registry entry is created.
+    Scaffold a minimal .niwa/workspace.toml with commented examples in
+    the current directory. The workspace name defaults to "workspace".
+    No registry entry is created.
 
   niwa init <name>
-    If the name is registered in the global registry with a source URL,
-    clone from that source (same as --from). Otherwise scaffold locally
-    and register the workspace as local-only.
+    Creates <cwd>/<name>/ and initializes the workspace inside it. If
+    the name is registered in the global registry with a source URL,
+    clone from that source (same as --from); otherwise scaffold locally
+    and register the workspace as local-only. The explicit <name>
+    overrides whatever the cloned [workspace] name declares, and that
+    explicit name is what every niwa command surfaces from this point
+    on.
 
   niwa init <name> --from <org/repo>
-    Shallow-clone the config repo as .niwa/ and register the name-to-source
-    mapping in the global registry.`,
+    Creates <cwd>/<name>/ and shallow-clones the config repo into its
+    .niwa/ subdirectory. The explicit <name> overrides the cloned
+    [workspace] name; the on-disk workspace.toml is not modified.
+
+When a positional <name> already exists in the global registry pointing
+to a different directory, init refuses by default. Pass --rebind to
+retarget the entry to the new directory (the previous directory at the
+old root is left intact).
+
+When the niwa shell wrapper is sourced, a successful "niwa init <name>"
+also leaves your shell inside the new workspace directory — the same
+mechanism "niwa go" and "niwa create" use. Without the wrapper, read
+the path from the success message and cd manually.`,
 	Args: cobra.MaximumNArgs(1),
 	RunE: runInit,
 }
@@ -120,8 +138,43 @@ func runInit(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("getting working directory: %w", err)
 	}
 
-	// Pre-flight: check for conflicts before any writes.
-	if err := workspace.CheckInitConflicts(cwd); err != nil {
+	globalCfg, err := config.LoadGlobalConfig()
+	if err != nil {
+		return fmt.Errorf("loading global config: %w", err)
+	}
+
+	// Preflight order (per PRD R5/R6/R7/R8):
+	//   1. Name validation (R7) — gated on the user supplying a positional
+	//      arg, NOT on the resolved name being non-empty. `niwa init ""`
+	//      MUST be rejected by R7 / AC-18; without this gate the empty
+	//      string would silently fall through to modeScaffold.
+	//   2. Target-exists pre-gate via os.Lstat with R6 sub-case routing
+	//   3. CheckInitConflicts (niwa-state walk-up + nested instance)
+	//   4. Registry-collision check (R8), gated by --rebind
+	if len(args) >= 1 {
+		if err := workspace.ValidateInitName(args[0]); err != nil {
+			return err
+		}
+	}
+
+	mode, name, source := resolveInitMode(args, initFrom, globalCfg)
+
+	workspaceRoot := cwd
+	if name != "" {
+		workspaceRoot = filepath.Join(cwd, name)
+	}
+
+	if name != "" {
+		if err := preflightTargetExists(workspaceRoot); err != nil {
+			var conflict *workspace.InitConflictError
+			if errors.As(err, &conflict) {
+				return fmt.Errorf("%s\n  %s", conflict.Detail, conflict.Suggestion)
+			}
+			return err
+		}
+	}
+
+	if err := workspace.CheckInitConflicts(workspaceRoot); err != nil {
 		var conflict *workspace.InitConflictError
 		if errors.As(err, &conflict) {
 			return fmt.Errorf("%s\n  %s", conflict.Detail, conflict.Suggestion)
@@ -129,21 +182,42 @@ func runInit(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	globalCfg, err := config.LoadGlobalConfig()
-	if err != nil {
-		return fmt.Errorf("loading global config: %w", err)
+	var rebindFromRoot string
+	if name != "" {
+		absWorkspaceRoot, absErr := filepath.Abs(workspaceRoot)
+		if absErr != nil {
+			return fmt.Errorf("resolving workspace root: %w", absErr)
+		}
+		if entry := globalCfg.LookupWorkspace(name); entry != nil && entry.Root != absWorkspaceRoot {
+			if !initRebind {
+				conflict := &workspace.InitConflictError{
+					Err:        workspace.ErrRegistryNameInUse,
+					Detail:     fmt.Sprintf("workspace name %q is already registered (root: %s)", name, entry.Root),
+					Suggestion: registryCollisionSuggestion(name),
+				}
+				return fmt.Errorf("%s\n  %s", conflict.Detail, conflict.Suggestion)
+			}
+			rebindFromRoot = entry.Root
+		}
 	}
 
-	mode, name, source := resolveInitMode(args, initFrom, globalCfg)
+	// Create the workspace directory (named modes only). os.Mkdir, NOT
+	// MkdirAll — closes the symlink-TOCTOU window between the Lstat
+	// pre-gate and creation per Security Considerations §3.
+	if name != "" {
+		if err := os.Mkdir(workspaceRoot, 0o755); err != nil {
+			return fmt.Errorf("creating workspace directory: %w", err)
+		}
+	}
 
 	switch mode {
 	case modeScaffold:
-		if err := workspace.Scaffold(cwd, ""); err != nil {
+		if err := workspace.Scaffold(workspaceRoot, ""); err != nil {
 			return fmt.Errorf("scaffolding workspace: %w", err)
 		}
 
 	case modeNamed:
-		if err := workspace.Scaffold(cwd, name); err != nil {
+		if err := workspace.Scaffold(workspaceRoot, name); err != nil {
 			return fmt.Errorf("scaffolding workspace: %w", err)
 		}
 
@@ -169,7 +243,7 @@ func runInit(cmd *cobra.Command, args []string) error {
 
 		fmt.Fprintf(cmd.OutOrStdout(), "Initializing from: %s\n", cloneURL)
 
-		niwaDir := filepath.Join(cwd, workspace.StateDir)
+		niwaDir := filepath.Join(workspaceRoot, workspace.StateDir)
 		fetcher := github.NewAPIClient(resolveGitHubToken())
 		if err := workspace.MaterializeFromSource(cmd.Context(), src, source, niwaDir, fetcher, workspace.NewReporter(os.Stderr)); err != nil {
 			return fmt.Errorf("materializing config repo: %w", err)
@@ -177,7 +251,7 @@ func runInit(cmd *cobra.Command, args []string) error {
 	}
 
 	// Post-flight: verify workspace.toml exists and parses.
-	configPath := filepath.Join(cwd, workspace.StateDir, workspace.WorkspaceConfigFile)
+	configPath := filepath.Join(workspaceRoot, workspace.StateDir, workspace.WorkspaceConfigFile)
 	result, err := config.Load(configPath)
 	if err != nil {
 		return fmt.Errorf("post-flight verification failed: %w", err)
@@ -196,7 +270,7 @@ func runInit(cmd *cobra.Command, args []string) error {
 
 	// Register in global registry (skip for detached/no-args mode).
 	if mode != modeScaffold {
-		absRoot, err := filepath.Abs(cwd)
+		absRoot, err := filepath.Abs(workspaceRoot)
 		if err != nil {
 			return fmt.Errorf("resolving workspace root: %w", err)
 		}
@@ -225,19 +299,154 @@ func runInit(cmd *cobra.Command, args []string) error {
 	}
 
 	// Build the instance state to persist. Always write when any state flag is
-	// set; a missing state file is fine (apply will create it later).
-	state, stateErr := buildInitState(cmd, mode, source)
+	// set, when a positional name is given (so the override propagates to
+	// apply), or in clone mode; a missing state file is fine otherwise.
+	state, stateErr := buildInitState(cmd, mode, source, name)
 	if stateErr != nil {
 		return stateErr
 	}
 	if state != nil {
-		if saveErr := workspace.SaveState(cwd, state); saveErr != nil {
+		if saveErr := workspace.SaveState(workspaceRoot, state); saveErr != nil {
 			fmt.Fprintf(os.Stderr, "warning: could not write instance state: %v\n", saveErr)
 		}
 	}
 
-	printSuccess(cmd, mode, name, result.Config.Workspace.Name)
+	// Rebind confirmation warning (after success). Prominent on stderr
+	// per Security Considerations §6 — `--rebind` opens a registry-write
+	// path, and an automated agent passing it programmatically still
+	// leaves an audit trail.
+	if rebindFromRoot != "" {
+		absRoot, _ := filepath.Abs(workspaceRoot)
+		if absRoot == "" {
+			absRoot = workspaceRoot
+		}
+		errStream := cmd.ErrOrStderr()
+		fmt.Fprintf(errStream, "WARNING: registry entry %q rebound from %s to %s\n", name, rebindFromRoot, absRoot)
+		fmt.Fprintln(errStream, "")
+	}
+
+	// Override note (R4): per-invocation stderr note when the explicit
+	// positional name differs from the cloned config's [workspace] name.
+	// AC-8b: suppressed when the names match.
+	if name != "" && result.Config.Workspace.Name != "" && result.Config.Workspace.Name != name {
+		fmt.Fprintf(cmd.ErrOrStderr(), "note: workspace name %q overrides %q from cloned config.\n", name, result.Config.Workspace.Name)
+	}
+
+	// R9 / AC-26: success message includes the resolved absolute path of
+	// the workspace root. Symlinks in cwd ancestry are followed via
+	// EvalSymlinks; on macOS this resolves /var/... to /private/var/...
+	absForMsg, evalErr := filepath.EvalSymlinks(workspaceRoot)
+	if evalErr != nil {
+		absForMsg, _ = filepath.Abs(workspaceRoot)
+		if absForMsg == "" {
+			absForMsg = workspaceRoot
+		}
+	}
+
+	printSuccess(cmd, mode, name, result.Config.Workspace.Name, absForMsg)
+
+	// PRD R10a: when a positional name was given AND the shell wrapper
+	// is sourced (NIWA_RESPONSE_FILE captured at process start), write
+	// the resolved workspace root so the wrapper cd's the caller into
+	// the new directory. No-args modes (modeScaffold without a name,
+	// or `--from`-only) do NOT write — the user is already in the
+	// workspace dir and a write would change wrapper behavior on the
+	// unchanged code path. Failures earlier in runInit have already
+	// returned, so the file stays empty when init didn't succeed.
+	if name != "" {
+		if err := writeLandingPath(absForMsg); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+// preflightTargetExists implements the R5 + R6 caller-side existence
+// check on the to-be-created `<cwd>/<name>` directory. R6 takes
+// precedence over R5: when the existing path is itself a niwa workspace
+// or contains an orphan .niwa/, surface the more specific
+// ErrWorkspaceExists / ErrNiwaDirectoryExists error so the existing
+// remediation hints stay correct. Otherwise the generic
+// ErrTargetDirExists fires with a path-type qualifier from os.Lstat.
+//
+// Returns nil when the path does not exist (the happy path). Returns a
+// non-nil error wrapping the appropriate sentinel via InitConflictError
+// when the path exists.
+func preflightTargetExists(targetDir string) error {
+	info, statErr := os.Lstat(targetDir)
+	if statErr != nil {
+		if errors.Is(statErr, os.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("checking target path: %w", statErr)
+	}
+
+	absTarget, absErr := filepath.Abs(targetDir)
+	if absErr != nil {
+		absTarget = targetDir
+	}
+
+	// AC-11: symlinks always surface ErrTargetDirExists with qualifier
+	// "symlink", regardless of whether the link target resolves to a
+	// niwa workspace, an orphan .niwa/, or anything else. R6 sub-case
+	// routing therefore runs only for non-symlink paths.
+	if info.Mode()&os.ModeSymlink == 0 {
+		niwaDir := filepath.Join(targetDir, workspace.StateDir)
+		workspaceCfg := filepath.Join(niwaDir, workspace.WorkspaceConfigFile)
+		if _, err := os.Stat(workspaceCfg); err == nil {
+			return &workspace.InitConflictError{
+				Err:        workspace.ErrWorkspaceExists,
+				Detail:     fmt.Sprintf("found %s", filepath.Join(workspace.StateDir, workspace.WorkspaceConfigFile)),
+				Suggestion: "Use niwa apply to update the existing workspace",
+			}
+		}
+		if dirInfo, err := os.Stat(niwaDir); err == nil && dirInfo.IsDir() {
+			absNiwa := filepath.Join(absTarget, workspace.StateDir)
+			return &workspace.InitConflictError{
+				Err:        workspace.ErrNiwaDirectoryExists,
+				Detail:     fmt.Sprintf("found %s directory without %s", workspace.StateDir, workspace.WorkspaceConfigFile),
+				Suggestion: fmt.Sprintf("Remove the %s directory and retry", absNiwa),
+			}
+		}
+	}
+
+	return &workspace.InitConflictError{
+		Err:        workspace.ErrTargetDirExists,
+		Detail:     fmt.Sprintf("%s already exists (%s)", absTarget, pathTypeQualifier(info)),
+		Suggestion: "Pick a different name or remove the path and retry.",
+	}
+}
+
+// pathTypeQualifier returns the human-readable path type for an
+// os.Lstat result: "file", "directory", or "symlink". Other modes
+// (FIFO, socket, device) return "unknown" — out of scope per PRD R5.
+// Symlinks are detected without being followed.
+func pathTypeQualifier(info os.FileInfo) string {
+	mode := info.Mode()
+	switch {
+	case mode&os.ModeSymlink != 0:
+		return "symlink"
+	case mode.IsDir():
+		return "directory"
+	case mode.IsRegular():
+		return "file"
+	default:
+		return "unknown"
+	}
+}
+
+// registryCollisionSuggestion builds the suggestion text for the
+// ErrRegistryNameInUse error. Resolves the global config TOML path at
+// call time via config.GlobalConfigPath() so the message reflects the
+// user's actual XDG_CONFIG_HOME; falls back to the literal default
+// when XDG resolution fails so the error itself never blocks on path
+// resolution.
+func registryCollisionSuggestion(name string) string {
+	cfgPath, err := config.GlobalConfigPath()
+	if err != nil || cfgPath == "" {
+		cfgPath = "~/.config/niwa/config.toml"
+	}
+	return fmt.Sprintf("Pass --rebind to retarget the entry to this directory, or remove the [registry.%s] section from %s and retry.", name, cfgPath)
 }
 
 // emitVaultBootstrapPointer writes a stderr note when the parsed
@@ -310,19 +519,22 @@ func bootstrapCommandFor(kind string) string {
 }
 
 // buildInitState constructs an InstanceState for the flags that require
-// pre-apply state (--skip-global, --no-overlay, --overlay). Returns (nil, nil)
-// when no state flags were set so that no state file is written. Returns a
-// non-nil error when an explicit --overlay clone fails (hard error by design).
-func buildInitState(cmd *cobra.Command, mode initMode, source string) (*workspace.InstanceState, error) {
+// pre-apply state (--skip-global, --no-overlay, --overlay) and for the
+// init-time name override that a positional `niwa init <name>` records.
+// Returns (nil, nil) when no state needs to be written. Returns a
+// non-nil error when an explicit --overlay clone fails (hard error by
+// design).
+func buildInitState(cmd *cobra.Command, mode initMode, source, name string) (*workspace.InstanceState, error) {
 	ctx := cmd.Context()
-	needsState := initSkipGlobal || initNoOverlay || initOverlay != "" || (mode == modeClone)
+	needsState := initSkipGlobal || initNoOverlay || initOverlay != "" || (mode == modeClone) || name != ""
 	if !needsState {
 		return nil, nil
 	}
 
 	state := &workspace.InstanceState{
-		SchemaVersion: workspace.SchemaVersion,
-		SkipGlobal:    initSkipGlobal,
+		SchemaVersion:      workspace.SchemaVersion,
+		SkipGlobal:         initSkipGlobal,
+		ConfigNameOverride: name,
 	}
 
 	switch {
@@ -379,25 +591,38 @@ func buildInitState(cmd *cobra.Command, mode initMode, source string) (*workspac
 	return state, nil
 }
 
-// printSuccess outputs a success message with next steps.
-func printSuccess(cmd *cobra.Command, mode initMode, name, resolvedName string) {
+// printSuccess outputs a success message with next steps. The
+// effective name surfaced in the message prefers the explicit
+// positional name (when given) over the cloned config's
+// [workspace] name, matching the override semantics that downstream
+// niwa commands use. The resolved absolute path is included per
+// PRD R9 / AC-26.
+func printSuccess(cmd *cobra.Command, mode initMode, name, resolvedName, absPath string) {
 	w := cmd.OutOrStdout()
+	displayName := name
+	if displayName == "" {
+		displayName = resolvedName
+	}
 
 	switch mode {
 	case modeScaffold:
-		fmt.Fprintln(w, "Workspace initialized.")
+		if displayName != "" {
+			fmt.Fprintf(w, "Workspace %q initialized at %s.\n", displayName, absPath)
+		} else {
+			fmt.Fprintf(w, "Workspace initialized at %s.\n", absPath)
+		}
 		fmt.Fprintln(w, "")
 		fmt.Fprintln(w, "Next steps:")
 		fmt.Fprintln(w, "  1. Edit .niwa/workspace.toml to configure sources and groups")
 		fmt.Fprintln(w, "  2. Run niwa apply to set up the workspace")
 	case modeNamed:
-		fmt.Fprintf(w, "Workspace %q initialized.\n", resolvedName)
+		fmt.Fprintf(w, "Workspace %q initialized at %s.\n", displayName, absPath)
 		fmt.Fprintln(w, "")
 		fmt.Fprintln(w, "Next steps:")
 		fmt.Fprintln(w, "  1. Edit .niwa/workspace.toml to configure sources and groups")
 		fmt.Fprintln(w, "  2. Run niwa apply to set up the workspace")
 	case modeClone:
-		fmt.Fprintf(w, "Workspace %q initialized from remote config.\n", resolvedName)
+		fmt.Fprintf(w, "Workspace %q initialized at %s from remote config.\n", displayName, absPath)
 		fmt.Fprintln(w, "")
 		fmt.Fprintln(w, "Next steps:")
 		fmt.Fprintln(w, "  1. Run niwa apply to set up the workspace")

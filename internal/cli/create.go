@@ -119,7 +119,12 @@ func runCreate(cmd *cobra.Command, args []string) error {
 
 	workspaceRoot := filepath.Dir(configDir)
 
-	configName := cfg.Workspace.Name
+	// Resolve the override-aware workspace name (falls back to
+	// cfg.Workspace.Name when no `niwa init <name>` override is set).
+	configName, err := resolveEffectiveWorkspaceName(workspaceRoot, cfg)
+	if err != nil {
+		return err
+	}
 
 	instanceName, err := computeInstanceName(configName, createName, workspaceRoot)
 	if err != nil {
