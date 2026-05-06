@@ -1,0 +1,37 @@
+{
+  "topic": "machine-identity-vault-sync",
+  "decisions": [
+    {
+      "id": 1,
+      "question": "Where does credential-sync hook into apply.go's flow, and at what point does it fetch from the personal vault?",
+      "status": "complete",
+      "complexity": "standard",
+      "report_file": "wip/design_machine-identity-vault-sync_decision_1_report.md"
+    },
+    {
+      "id": 2,
+      "question": "How is the personal vault provider opened and authenticated for credential-sync, given R9 forbids self-auth via the credential pool?",
+      "status": "complete",
+      "complexity": "standard",
+      "report_file": "wip/design_machine-identity-vault-sync_decision_2_report.md"
+    },
+    {
+      "id": 3,
+      "question": "What state.json schema enables offline `niwa status --audit-auth` (R11)?",
+      "status": "complete",
+      "complexity": "standard",
+      "report_file": "wip/design_machine-identity-vault-sync_decision_3_report.md"
+    },
+    {
+      "id": 4,
+      "question": "Where do parse-time validations (R2 unknown-provider, R9 chicken-and-egg) live in the config-loading and apply-setup flow?",
+      "status": "complete",
+      "complexity": "standard",
+      "report_file": "wip/design_machine-identity-vault-sync_decision_4_report.md"
+    }
+  ],
+  "cross_validation": "complete",
+  "round": 1,
+  "execution_mode": "auto",
+  "execution_note": "All decisions made inline per --auto decision-protocol given the PRD is highly prescriptive and decision spaces are narrow. Reports captured in this design doc's Considered Options section."
+}
