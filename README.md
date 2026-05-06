@@ -41,8 +41,11 @@ niwa init my-project
 
 This creates `./my-project/` and writes `./my-project/.niwa/workspace.toml`
 with a commented template you can edit. The directory name matches the
-positional name; you don't need to pre-create it. Run `niwa init` with no
-positional name to scaffold in the current directory instead.
+positional name; you don't need to pre-create it. With the niwa shell
+wrapper sourced (the installer wires this up by default), your shell is
+also `cd`'d into the new directory after init returns — a single command
+leaves you inside the workspace ready to keep working. Run `niwa init`
+with no positional name to scaffold in the current directory instead.
 
 ### 3. Configure
 

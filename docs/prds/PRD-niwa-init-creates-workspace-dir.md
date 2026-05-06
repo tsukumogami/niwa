@@ -74,8 +74,10 @@ about the name they chose.
 
 **US-1**: As a first-time niwa user following the README quickstart, I
 run `niwa init my-project --from org/recipe` from my home directory and
-land with a workspace at `~/my-project/`, without remembering to mkdir or
-cd first.
+my shell ends up inside `~/my-project/` — the new workspace root —
+without remembering to mkdir or cd first. (The auto-cd requires the
+niwa shell wrapper to be sourced; users without the wrapper read the
+new directory from the success message and cd manually.)
 
 **US-2**: As a developer setting up a shared workspace from my team's
 config, I run `niwa init my-team --from my-org/workspace-config` from
@@ -242,6 +244,28 @@ by `niwa init <name>` (i.e., `<cwd>/<name>/`), regardless of which
 directory `niwa go` is invoked from. This is regression coverage for
 the registry-write side of init, not a new `niwa go` feature.
 
+**R10a**: When `niwa init <name>` is invoked with a positional name AND
+the shell wrapper is sourced (`NIWA_RESPONSE_FILE` is set in the
+environment at process start), niwa MUST write the resolved absolute
+path of the new workspace root to that file using the existing
+`writeLandingPath` helper. The wrapper then `cd`s the user into the
+new directory after init returns, completing the no-mkdir-no-cd UX
+promise: a single `niwa init <name>` command leaves the caller inside
+`<cwd>/<name>/`. The path written is the same one printed by R9's
+success message (resolved via `filepath.EvalSymlinks`).
+
+When `niwa init` is invoked WITHOUT a positional name (no-args
+scaffold or `--from`-only modes), niwa MUST NOT write a landing path:
+the user is already in the workspace's directory, and writing one
+would change the wrapper's behavior for the unchanged code path.
+When the shell wrapper is not sourced (`NIWA_RESPONSE_FILE` is unset),
+`writeLandingPath` is a no-op and the user reads the new directory
+from the success message per R9.
+
+When init fails (any error after `os.Mkdir` or before, regardless of
+mode), niwa MUST NOT write a landing path. The wrapper's contract is
+that a written path indicates success.
+
 ### Non-Functional Requirements
 
 **R11**: The `Long:` help text on `initCmd` MUST describe the new
@@ -383,6 +407,24 @@ readable description of the allowed character set.
 - [ ] AC-21: After `niwa init my-ws --from org/recipe` from `/some/dir`,
   running `niwa go my-ws` from any directory lands the user at
   `/some/dir/my-ws`.
+
+### Shell-wrapper landing on named init
+
+- [ ] AC-21a: When `niwa init my-ws` runs with `NIWA_RESPONSE_FILE` set
+  to a temp path (i.e., the shell wrapper is sourced), the file
+  receives the resolved absolute path of `<cwd>/my-ws` followed by a
+  trailing newline. The wrapper then cd's the caller into that
+  directory, so the user ends up inside the workspace root after a
+  single `niwa init` command.
+- [ ] AC-21b: When `niwa init` runs without a positional name (no-args
+  scaffold OR `--from`-only mode), no path is written to
+  `NIWA_RESPONSE_FILE` even when the wrapper is sourced. The user is
+  already in the workspace dir; a write would change the wrapper's
+  observable behavior for the unchanged code path.
+- [ ] AC-21c: When `niwa init my-ws` fails for any reason (name
+  validation, target exists, registry collision, mkdir error, post-
+  flight load), no path is written to `NIWA_RESPONSE_FILE`. The
+  wrapper sees the file empty and stays in the original cwd.
 
 ### Documentation
 

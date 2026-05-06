@@ -82,7 +82,12 @@ Three modes:
 When a positional <name> already exists in the global registry pointing
 to a different directory, init refuses by default. Pass --rebind to
 retarget the entry to the new directory (the previous directory at the
-old root is left intact).`,
+old root is left intact).
+
+When the niwa shell wrapper is sourced, a successful "niwa init <name>"
+also leaves your shell inside the new workspace directory — the same
+mechanism "niwa go" and "niwa create" use. Without the wrapper, read
+the path from the success message and cd manually.`,
 	Args: cobra.MaximumNArgs(1),
 	RunE: runInit,
 }
@@ -339,6 +344,20 @@ func runInit(cmd *cobra.Command, args []string) error {
 	}
 
 	printSuccess(cmd, mode, name, result.Config.Workspace.Name, absForMsg)
+
+	// PRD R10a: when a positional name was given AND the shell wrapper
+	// is sourced (NIWA_RESPONSE_FILE captured at process start), write
+	// the resolved workspace root so the wrapper cd's the caller into
+	// the new directory. No-args modes (modeScaffold without a name,
+	// or `--from`-only) do NOT write — the user is already in the
+	// workspace dir and a write would change wrapper behavior on the
+	// unchanged code path. Failures earlier in runInit have already
+	// returned, so the file stays empty when init didn't succeed.
+	if name != "" {
+		if err := writeLandingPath(absForMsg); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 

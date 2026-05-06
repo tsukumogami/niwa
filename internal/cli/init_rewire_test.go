@@ -468,6 +468,99 @@ func TestRunInit_OverrideNote_NotEmittedWhenNamesMatch(t *testing.T) {
 	}
 }
 
+// AC-21a: when the shell wrapper is sourced (NIWA_RESPONSE_FILE set),
+// `niwa init <name>` writes the resolved workspace root so the wrapper
+// cd's the caller into the new directory.
+func TestRunInit_WritesLandingPath_ForNamedMode(t *testing.T) {
+	dir := chdirAndXDG(t)
+
+	// Place the response file under TMPDIR (validateResponseFilePath rule).
+	respFile, err := os.CreateTemp(t.TempDir(), "niwa-resp-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	respFile.Close()
+	t.Setenv("TMPDIR", filepath.Dir(respFile.Name()))
+	t.Setenv("NIWA_RESPONSE_FILE", respFile.Name())
+	withResponseFile(t, respFile.Name())
+
+	if err := executeInit(t, "my-ws"); err != nil {
+		t.Fatalf("init failed: %v", err)
+	}
+	body, err := os.ReadFile(respFile.Name())
+	if err != nil {
+		t.Fatalf("reading response file: %v", err)
+	}
+	got := strings.TrimSuffix(string(body), "\n")
+	resolved, _ := filepath.EvalSymlinks(filepath.Join(dir, "my-ws"))
+	if resolved == "" {
+		resolved = filepath.Join(dir, "my-ws")
+	}
+	if got != resolved {
+		t.Errorf("response file: got %q, want %q", got, resolved)
+	}
+}
+
+// AC-21b: no-args modes do NOT write a landing path even when the
+// wrapper is sourced. The user is already in the workspace dir; a
+// write would change observable wrapper behavior on the unchanged
+// code path.
+func TestRunInit_DoesNotWriteLandingPath_ForNoArgsMode(t *testing.T) {
+	chdirAndXDG(t)
+
+	respFile, err := os.CreateTemp(t.TempDir(), "niwa-resp-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	respFile.Close()
+	t.Setenv("TMPDIR", filepath.Dir(respFile.Name()))
+	t.Setenv("NIWA_RESPONSE_FILE", respFile.Name())
+	withResponseFile(t, respFile.Name())
+
+	if err := executeInit(t); err != nil {
+		t.Fatalf("init failed: %v", err)
+	}
+	info, err := os.Stat(respFile.Name())
+	if err != nil {
+		t.Fatalf("stat response file: %v", err)
+	}
+	if info.Size() != 0 {
+		body, _ := os.ReadFile(respFile.Name())
+		t.Errorf("response file should be empty for no-args init; got %q", body)
+	}
+}
+
+// AC-21c: failures (target exists, name validation, etc.) leave the
+// response file empty. The wrapper sees nothing to cd into and stays
+// in the original cwd.
+func TestRunInit_DoesNotWriteLandingPath_OnFailure(t *testing.T) {
+	dir := chdirAndXDG(t)
+	if err := os.Mkdir(filepath.Join(dir, "my-ws"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	respFile, err := os.CreateTemp(t.TempDir(), "niwa-resp-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	respFile.Close()
+	t.Setenv("TMPDIR", filepath.Dir(respFile.Name()))
+	t.Setenv("NIWA_RESPONSE_FILE", respFile.Name())
+	withResponseFile(t, respFile.Name())
+
+	if err := executeInit(t, "my-ws"); err == nil {
+		t.Fatal("expected target-exists error; got nil")
+	}
+	info, err := os.Stat(respFile.Name())
+	if err != nil {
+		t.Fatalf("stat response file: %v", err)
+	}
+	if info.Size() != 0 {
+		body, _ := os.ReadFile(respFile.Name())
+		t.Errorf("response file should be empty on init failure; got %q", body)
+	}
+}
+
 // pathTypeQualifier helper unit test. Symlink case verified via the
 // Lstat-driven AC tests above; keep this focused on directory and file.
 func TestPathTypeQualifier(t *testing.T) {

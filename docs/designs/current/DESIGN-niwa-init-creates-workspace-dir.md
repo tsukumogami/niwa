@@ -366,6 +366,16 @@ The chosen design implements the PRD as follows:
    absolute workspace root path resolved via `filepath.EvalSymlinks`
    (matching how niwa elsewhere handles macOS `/var/...` →
    `/private/var/...`).
+8. **Shell-wrapper landing.** When a positional name is given AND the
+   shell wrapper sourced `NIWA_RESPONSE_FILE` into the environment,
+   `runInit` calls the existing `writeLandingPath` helper with the
+   same resolved absolute path the success message prints (PRD R10a).
+   The wrapper then `cd`s the caller into the new workspace root
+   after init returns. Same protocol `niwa create` and `niwa go`
+   already use; init's only addition is calling the helper at the end
+   of the success path. No-args modes do not write a landing path
+   (the user is already in the workspace dir); failure paths return
+   before the call so the file stays empty.
 
 ## Solution Architecture
 
