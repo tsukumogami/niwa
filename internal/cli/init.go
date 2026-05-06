@@ -137,18 +137,21 @@ func runInit(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("loading global config: %w", err)
 	}
 
-	mode, name, source := resolveInitMode(args, initFrom, globalCfg)
-
 	// Preflight order (per PRD R5/R6/R7/R8):
-	//   1. Name validation (R7)
+	//   1. Name validation (R7) — gated on the user supplying a positional
+	//      arg, NOT on the resolved name being non-empty. `niwa init ""`
+	//      MUST be rejected by R7 / AC-18; without this gate the empty
+	//      string would silently fall through to modeScaffold.
 	//   2. Target-exists pre-gate via os.Lstat with R6 sub-case routing
 	//   3. CheckInitConflicts (niwa-state walk-up + nested instance)
 	//   4. Registry-collision check (R8), gated by --rebind
-	if name != "" {
-		if err := workspace.ValidateInitName(name); err != nil {
+	if len(args) >= 1 {
+		if err := workspace.ValidateInitName(args[0]); err != nil {
 			return err
 		}
 	}
+
+	mode, name, source := resolveInitMode(args, initFrom, globalCfg)
 
 	workspaceRoot := cwd
 	if name != "" {
@@ -363,22 +366,27 @@ func preflightTargetExists(targetDir string) error {
 		absTarget = targetDir
 	}
 
-	// R6 sub-case routing: prefer the more specific niwa-aware errors.
-	niwaDir := filepath.Join(targetDir, workspace.StateDir)
-	workspaceCfg := filepath.Join(niwaDir, workspace.WorkspaceConfigFile)
-	if _, err := os.Stat(workspaceCfg); err == nil {
-		return &workspace.InitConflictError{
-			Err:        workspace.ErrWorkspaceExists,
-			Detail:     fmt.Sprintf("found %s", filepath.Join(workspace.StateDir, workspace.WorkspaceConfigFile)),
-			Suggestion: "Use niwa apply to update the existing workspace",
+	// AC-11: symlinks always surface ErrTargetDirExists with qualifier
+	// "symlink", regardless of whether the link target resolves to a
+	// niwa workspace, an orphan .niwa/, or anything else. R6 sub-case
+	// routing therefore runs only for non-symlink paths.
+	if info.Mode()&os.ModeSymlink == 0 {
+		niwaDir := filepath.Join(targetDir, workspace.StateDir)
+		workspaceCfg := filepath.Join(niwaDir, workspace.WorkspaceConfigFile)
+		if _, err := os.Stat(workspaceCfg); err == nil {
+			return &workspace.InitConflictError{
+				Err:        workspace.ErrWorkspaceExists,
+				Detail:     fmt.Sprintf("found %s", filepath.Join(workspace.StateDir, workspace.WorkspaceConfigFile)),
+				Suggestion: "Use niwa apply to update the existing workspace",
+			}
 		}
-	}
-	if dirInfo, err := os.Stat(niwaDir); err == nil && dirInfo.IsDir() {
-		absNiwa := filepath.Join(absTarget, workspace.StateDir)
-		return &workspace.InitConflictError{
-			Err:        workspace.ErrNiwaDirectoryExists,
-			Detail:     fmt.Sprintf("found %s directory without %s", workspace.StateDir, workspace.WorkspaceConfigFile),
-			Suggestion: fmt.Sprintf("Remove the %s directory and retry", absNiwa),
+		if dirInfo, err := os.Stat(niwaDir); err == nil && dirInfo.IsDir() {
+			absNiwa := filepath.Join(absTarget, workspace.StateDir)
+			return &workspace.InitConflictError{
+				Err:        workspace.ErrNiwaDirectoryExists,
+				Detail:     fmt.Sprintf("found %s directory without %s", workspace.StateDir, workspace.WorkspaceConfigFile),
+				Suggestion: fmt.Sprintf("Remove the %s directory and retry", absNiwa),
+			}
 		}
 	}
 

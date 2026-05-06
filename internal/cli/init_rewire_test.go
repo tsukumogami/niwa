@@ -195,10 +195,53 @@ func TestRunInit_NameValidation(t *testing.T) {
 	}
 }
 
-// AC-18: Empty name is treated as no-args (cobra MaximumNArgs(1) accepts 0 or 1).
-// We separately exercise ValidateInitName("") at the workspace package level;
-// here we confirm `niwa init ""` is rejected by cobra/argument handling rather
-// than by ValidateInitName, since args[0] = "" is unusual but possible via tests.
+// AC-18: `niwa init ""` MUST fail with the empty-name validation error.
+// The runInit gate fires on len(args) >= 1 specifically so an explicit
+// empty positional doesn't fall through to no-args mode.
+func TestRunInit_NameValidation_EmptyArg(t *testing.T) {
+	dir := chdirAndXDG(t)
+	err := executeInit(t, "")
+	if err == nil {
+		t.Fatal("expected validation error for empty name; got nil")
+	}
+	if !strings.Contains(err.Error(), "empty") {
+		t.Errorf("error %q does not state name cannot be empty", err.Error())
+	}
+	// No workspace.toml created at cwd.
+	if _, statErr := os.Stat(filepath.Join(dir, workspace.StateDir, workspace.WorkspaceConfigFile)); !errors.Is(statErr, os.ErrNotExist) {
+		t.Errorf("workspace created in cwd despite validation failure")
+	}
+}
+
+// AC-11 reinforcement: a symlink whose target itself is a niwa workspace
+// must still surface ErrTargetDirExists with qualifier "symlink", not the
+// more specific ErrWorkspaceExists. R6 sub-case routing runs only for
+// non-symlink paths.
+func TestRunInit_Named_SymlinkToNiwaWorkspace_StillSymlinkError(t *testing.T) {
+	dir := chdirAndXDG(t)
+	// Build a real niwa workspace at <dir>/real, then symlink <dir>/my-ws -> real.
+	real := filepath.Join(dir, "real")
+	realNiwa := filepath.Join(real, workspace.StateDir)
+	if err := os.MkdirAll(realNiwa, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(realNiwa, workspace.WorkspaceConfigFile), []byte("[workspace]\nname=\"real\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(real, filepath.Join(dir, "my-ws")); err != nil {
+		t.Fatal(err)
+	}
+	err := executeInit(t, "my-ws")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "already exists (symlink)") {
+		t.Errorf("error %q missing 'symlink' qualifier (AC-11)", err.Error())
+	}
+	if strings.Contains(err.Error(), "Use niwa apply") {
+		t.Errorf("error %q routed to ErrWorkspaceExists; should be ErrTargetDirExists for symlink", err.Error())
+	}
+}
 
 // AC-19: Registry collision without --rebind → ErrRegistryNameInUse with the
 // existing Root in Detail and both --rebind + global config path in Suggestion.
