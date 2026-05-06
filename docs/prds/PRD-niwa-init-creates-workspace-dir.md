@@ -1,5 +1,5 @@
 ---
-status: Accepted
+status: Done
 problem: |
   Users initializing a niwa workspace from a remote config must currently
   pre-create the target directory and `cd` into it before running niwa init,
@@ -21,7 +21,7 @@ goals: |
 
 ## Status
 
-Accepted
+Done
 
 ## Problem Statement
 
