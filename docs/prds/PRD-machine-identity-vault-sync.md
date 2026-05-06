@@ -1,5 +1,5 @@
 ---
-status: Draft
+status: Accepted
 problem: |
   Developers using niwa across multiple Infisical organizations must
   hand-create and maintain `~/.config/niwa/provider-auth.toml` on every
@@ -25,7 +25,7 @@ goals: |
 
 ## Status
 
-Draft
+Accepted
 
 ## Glossary
 
