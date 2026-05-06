@@ -11,8 +11,13 @@ import (
 	"github.com/BurntSushi/toml"
 )
 
-// validName matches names that contain only alphanumerics, dots, hyphens, and underscores.
-var validName = regexp.MustCompile(`^[a-zA-Z0-9._-]+$`)
+// NamePattern matches names that contain only alphanumerics, dots,
+// hyphens, and underscores. Used to validate the [workspace] name,
+// group names, and repo override names parsed from workspace.toml.
+// Exported so adjacent packages (workspace, cli) can apply the same
+// rule to user-supplied names at other entry points (e.g.,
+// `niwa init <name>`) without copy-pasting the pattern.
+var NamePattern = regexp.MustCompile(`^[a-zA-Z0-9._-]+$`)
 
 // ClaudeConfig is the workspace-level Claude configuration under [claude].
 // It carries every Claude-related field: the common subset used at override
@@ -348,7 +353,7 @@ func validate(cfg *WorkspaceConfig) error {
 		return fmt.Errorf("workspace.name is required")
 	}
 
-	if !validName.MatchString(cfg.Workspace.Name) {
+	if !NamePattern.MatchString(cfg.Workspace.Name) {
 		return fmt.Errorf("workspace.name %q: must match [a-zA-Z0-9._-]+", cfg.Workspace.Name)
 	}
 
@@ -359,13 +364,13 @@ func validate(cfg *WorkspaceConfig) error {
 	}
 
 	for name := range cfg.Groups {
-		if !validName.MatchString(name) {
+		if !NamePattern.MatchString(name) {
 			return fmt.Errorf("group name %q: must match [a-zA-Z0-9._-]+", name)
 		}
 	}
 
 	for name, override := range cfg.Repos {
-		if !validName.MatchString(name) {
+		if !NamePattern.MatchString(name) {
 			return fmt.Errorf("repo override name %q: must match [a-zA-Z0-9._-]+", name)
 		}
 		// Explicit repos: group requires url (url without group is a valid

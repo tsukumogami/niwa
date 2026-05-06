@@ -4,12 +4,9 @@ package workspace
 
 import (
 	"fmt"
-	"regexp"
-)
 
-// initNamePattern matches the same character set the workspace.toml
-// `[workspace] name` field uses (see internal/config/config.go).
-var initNamePattern = regexp.MustCompile(`^[a-zA-Z0-9._-]+$`)
+	"github.com/tsukumogami/niwa/internal/config"
+)
 
 // ValidateInitName checks a positional name supplied to `niwa init <name>`.
 //
@@ -33,7 +30,7 @@ func ValidateInitName(name string) error {
 	case ".niwa":
 		return fmt.Errorf("workspace name %q conflicts with niwa's state directory marker (allowed: alphanumerics, dots, underscores, hyphens)", name)
 	}
-	if !initNamePattern.MatchString(name) {
+	if !config.NamePattern.MatchString(name) {
 		return fmt.Errorf("workspace name %q contains characters outside the allowed set (alphanumerics, dots, underscores, hyphens)", name)
 	}
 	return nil
