@@ -30,6 +30,12 @@ func (s *localGitServer) Repo(name string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("git init --bare %q: %w\n%s", repoPath, err, out)
 	}
+	// Pin default branch to "main" so clones get "main" regardless of the
+	// system git init.defaultBranch setting (which defaults to "master" on
+	// older git versions used by some CI runners).
+	if out, err = exec.Command("git", "-C", repoPath, "symbolic-ref", "HEAD", "refs/heads/main").CombinedOutput(); err != nil {
+		return "", fmt.Errorf("setting default branch for %q: %w\n%s", repoPath, err, out)
+	}
 	return "file://" + repoPath, nil
 }
 
@@ -41,6 +47,9 @@ func (s *localGitServer) createRepoWithFile(name, filename, content string) (str
 	out, err := exec.Command("git", "init", "--bare", repoPath).CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("git init --bare %q: %w\n%s", repoPath, err, out)
+	}
+	if out, err = exec.Command("git", "-C", repoPath, "symbolic-ref", "HEAD", "refs/heads/main").CombinedOutput(); err != nil {
+		return "", fmt.Errorf("setting default branch for %q: %w\n%s", repoPath, err, out)
 	}
 	fileURL := "file://" + repoPath
 
@@ -88,6 +97,13 @@ func (s *localGitServer) createRepoWithFile(name, filename, content string) (str
 	}
 
 	return fileURL, nil
+}
+
+// SourceRepo creates a bare repo named <name>.git with an initial commit
+// (a .gitkeep placeholder) and returns its file:// URL. Unlike Repo, it
+// produces a non-empty HEAD so git worktree add -b works without --orphan.
+func (s *localGitServer) SourceRepo(name string) (string, error) {
+	return s.createRepoWithFile(name, ".gitkeep", "")
 }
 
 // ConfigRepo creates a bare repo named <name>.git, commits workspace.toml

@@ -70,7 +70,7 @@ func iSetUpSingleRepoChanneledWorkspace(ctx context.Context, name string) (conte
 	if s == nil {
 		return ctx, fmt.Errorf("no test state")
 	}
-	url, err := s.gitServer.Repo("app")
+	url, err := s.gitServer.SourceRepo("app")
 	if err != nil {
 		return ctx, fmt.Errorf("creating source repo %q: %w", "app", err)
 	}

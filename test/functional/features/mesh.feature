@@ -667,7 +667,7 @@ Feature: Cross-session mesh (Issue #10 harness)
   # -----------------------------------------------------------------------
   # Session continuity: the worktree daemon captures CLAUDE_SESSION_ID from
   # the first worker and writes it to the session state file. A second
-  # delegation to the same session should use --resume (currently unimplemented).
+  # delegation to the same session uses --resume so the conversation continues.
   # -----------------------------------------------------------------------
 
   @session-daemon
@@ -687,8 +687,8 @@ Feature: Cross-session mesh (Issue #10 harness)
     Then the task state in instance "session-capture-ws" eventually becomes "completed" within 60 seconds
     And the session claude_conversation_id equals "test-claude-id-abc123" in instance "session-capture-ws"
 
-  @session-daemon @known-gap
-  Scenario: Second delegation to same session uses --resume (AC-R11b — currently unimplemented)
+  @session-daemon
+  Scenario: Second delegation to same session uses --resume (AC-R11b)
     Given a clean niwa environment
     And a local git server is set up
     And a single-repo channeled workspace "session-resume-ws" exists
@@ -703,9 +703,6 @@ Feature: Cross-session mesh (Issue #10 harness)
     When I delegate a task to session role "app" in instance "session-resume-ws"
     Then the task state in instance "session-resume-ws" eventually becomes "completed" within 60 seconds
     And the session claude_conversation_id equals "test-resume-id-xyz789" in instance "session-resume-ws"
-    # Second delegation: the worker should be spawned with --resume. This currently FAILS
-    # because mesh_watch.go's spawnWorker does not read ClaudeConversationID from the
-    # session state file for fresh delegations. The @known-gap tag documents this gap.
     When I delegate a task to session role "app" in instance "session-resume-ws"
     Then the task state in instance "session-resume-ws" eventually becomes "completed" within 60 seconds
     And the worker in session was spawned with "--resume"
