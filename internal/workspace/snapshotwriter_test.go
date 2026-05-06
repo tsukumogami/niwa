@@ -353,7 +353,7 @@ func TestRefreshSnapshot_PermanentErrorBypassesRetry(t *testing.T) {
 
 func TestRefreshSnapshot_TransientStatusCodes(t *testing.T) {
 	withFastDriftBackoff(t)
-	for _, status := range []int{502, 503, 504} {
+	for _, status := range []int{429, 502, 503, 504} {
 		t.Run(fmt.Sprintf("status_%d", status), func(t *testing.T) {
 			dir := filepath.Join(t.TempDir(), ".niwa")
 			if err := os.Mkdir(dir, 0o755); err != nil {

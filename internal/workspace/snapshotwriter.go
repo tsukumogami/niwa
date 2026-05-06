@@ -161,15 +161,17 @@ func refreshSnapshot(ctx context.Context, configDir string, fetcher FetchClient,
 
 // isTransientDriftError classifies a HeadCommit error as transient
 // (worth retrying) or permanent. Transient covers transport failures
-// (status == 0) and the GitHub 5xx subset known to recover quickly.
-// Other non-2xx responses (401/403/404/500/etc.) are treated as
-// permanent and surface to the caller on the first attempt.
+// (status == 0), the GitHub 5xx subset known to recover quickly, and
+// 429 rate-limit responses (which clear after the documented backoff
+// window and show up in normal use under burst conditions). Other
+// non-2xx responses (401/403/404/500/etc.) are treated as permanent
+// and surface to the caller on the first attempt.
 func isTransientDriftError(err error, status int) bool {
 	if err == nil {
 		return false
 	}
 	switch status {
-	case 0, 502, 503, 504:
+	case 0, 429, 502, 503, 504:
 		return true
 	}
 	return false
@@ -194,8 +196,8 @@ func headCommitWithRetry(ctx context.Context, fetcher FetchClient, src source.So
 			return oid, status, err
 		}
 		if reporter != nil {
-			reporter.Status(fmt.Sprintf("retrying drift check for %s/%s (attempt %d of %d)…",
-				src.Owner, src.Repo, i+2, attempts))
+			reporter.Status(fmt.Sprintf("retrying drift check for %s/%s (retry %d of %d)...",
+				src.Owner, src.Repo, i+1, attempts-1))
 		}
 		select {
 		case <-time.After(driftCheckBackoff[i]):
