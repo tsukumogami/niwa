@@ -1,5 +1,5 @@
 ---
-status: Proposed
+status: Accepted
 upstream: docs/prds/PRD-niwa-init-creates-workspace-dir.md
 problem: |
   niwa init initializes the workspace in cwd, requiring users to mkdir+cd
@@ -16,10 +16,14 @@ decision: |
   is given, after running upfront name validation and a caller-side
   `os.Lstat` existence check on `<cwd>/<name>` that emits a new
   `ErrTargetDirExists` sentinel via the existing `InitConflictError`
-  shape. `Apply.Create` and downstream readers consult init state via the
-  existing `LoadState(workspaceRoot)` path and prefer the override over
-  `cfg.Workspace.Name` when populated. The cloned `.niwa/workspace.toml`
-  is never modified on disk.
+  shape. Add a `--rebind` boolean flag to `niwa init`; when the
+  positional `<name>` collides with an existing registry entry pointing
+  to a different `Root`, niwa errors with a new `ErrRegistryNameInUse`
+  sentinel unless `--rebind` was given. Both `Applier.Create` (first-
+  time instance creation, apply.go:262) and `Applier.Apply` (subsequent
+  apply, apply.go:407) consult init state via `LoadState(workspaceRoot)`
+  and prefer the override over `cfg.Workspace.Name` when populated.
+  The cloned `.niwa/workspace.toml` is never modified on disk.
 rationale: |
   Reusing `InstanceState` for the override matches the existing pattern
   for init-time choices (`SkipGlobal`, `NoOverlay`, `OverlayURL`) — the
@@ -37,7 +41,7 @@ rationale: |
 
 ## Status
 
-Proposed
+Accepted
 
 ## Context and Problem Statement
 
@@ -59,12 +63,15 @@ The implementation touches three concrete code surfaces:
 3. **`internal/workspace/state.go`** — `InstanceState` schema v3. Today
    the struct has `ConfigName *string` (the cloned `[workspace] name`)
    and `InstanceName string` (the per-instance directory name), both
-   populated by `Apply.Create` from `cfg.Workspace.Name` (apply.go:407-411).
+   populated from `cfg.Workspace.Name` in two distinct places on
+   `*Applier`: `Applier.Create` (apply.go:262, first-time instance
+   creation) and `Applier.Apply` (apply.go:407, subsequent applies).
 
 The architectural challenge is to thread an override value from
-`niwa init`'s argument parsing through to `Apply.Create`'s instance
-state without (a) modifying the cloned config on disk, (b) bumping the
-state schema version, or (c) growing the `CheckInitConflicts` signature.
+`niwa init`'s argument parsing through to both `Applier.Create` and
+`Applier.Apply`'s instance-state writes, without (a) modifying the
+cloned config on disk, (b) bumping the state schema version, or (c)
+growing the `CheckInitConflicts` signature.
 The PRD's preflight ordering and error sub-case routing constraints
 also need a code-shape that keeps name validation, target-exists
 detection, and existing niwa-state checks composable in the order
@@ -117,13 +124,13 @@ or code changes elsewhere.
 **Option 1B: Add an optional `ConfigNameOverride string` field to
 `InstanceState`.** Init persists the override to
 `<workspaceRoot>/.niwa/instance.json` alongside the existing init-time
-fields (`SkipGlobal`, `NoOverlay`, `OverlayURL`). `Apply.Create` and
+fields (`SkipGlobal`, `NoOverlay`, `OverlayURL`). `Applier.Create` and
 other readers consult init state and prefer the override over
 `cfg.Workspace.Name` when set. **(Chosen.)**
 
 - Pros: matches the existing `SkipGlobal`/`NoOverlay`/`OverlayURL`
   pattern exactly; the cloned toml is never modified; reuses the
-  established `LoadState(workspaceRoot)` plumbing in `Apply.Create`;
+  established `LoadState(workspaceRoot)` plumbing in `Applier.Create`;
   optional field needs no schema-version bump.
 - Cons: introduces a divergence between the toml's on-disk name and the
   effective name surfaced by interpretive commands (acknowledged in PRD
@@ -245,7 +252,7 @@ thread through all calls.
 ### Decision 5: Effective-name resolver
 
 **Option 5A: Each downstream reader checks the override inline.**
-`Apply.Create` reads `initState.ConfigNameOverride`; status formatter
+`Applier.Create` reads `initState.ConfigNameOverride`; status formatter
 does the same; etc.
 
 - Pros: no new abstraction; the override is right at the surface where
@@ -257,7 +264,7 @@ does the same; etc.
 **Option 5B: Add a small helper, e.g.
 `workspace.EffectiveConfigName(state *InstanceState, cfg
 *config.WorkspaceConfig) string`, that encapsulates "use override if
-set, else cfg.Workspace.Name".** Called by `Apply.Create` (when
+set, else cfg.Workspace.Name".** Called by `Applier.Create` (when
 constructing the post-apply state from cfg) and `niwa status`
 formatting. **(Chosen.)**
 
@@ -275,6 +282,42 @@ The PRD pins the exact text in R5: `"Pick a different name or remove
 the path and retry."` No design-level choice remains; this is recorded
 to acknowledge the constraint flowed from PRD to implementation.
 
+### Decision 7: Registry collision handling — `--rebind` flag
+
+The PRD's R8 specifies error-by-default with `--rebind` opt-in for the
+case where the positional `<name>` collides with an existing registry
+entry pointing elsewhere. Three implementation shapes were considered:
+
+**Option 7A: New `ErrRegistryNameInUse` sentinel + `--rebind` flag on
+`init`.** **(Chosen.)** A boolean flag parsed in `init.go`, an existing-
+entry lookup via `globalCfg.LookupWorkspace(name)`, and a new sentinel
+that wraps into `InitConflictError` for consistent error rendering. The
+error's `Suggestion` contains both remediation paths verbatim: the
+flag and the global config TOML path (`$XDG_CONFIG_HOME/niwa/config.toml`,
+default `~/.config/niwa/config.toml`).
+
+- Pros: matches the existing `InitConflictError` rendering pattern;
+  scoped sentinel name makes the error grep-friendly; flag style
+  matches existing `--skip-global` / `--no-overlay` long-form-only
+  convention on `init`.
+- Cons: a fourth sentinel in `preflight.go` for a non-filesystem
+  condition (the others all describe filesystem state).
+
+**Option 7B: Reuse the existing `--force` flag from other commands.**
+Rejected per the PRD. `--force` on `reset`/`destroy`/`apply` skips
+uncommitted-changes checks, a different semantic; conflating muddies
+both call sites.
+
+**Option 7C: Add a new `niwa forget <name>` subcommand and require
+users to run it before re-init.** Rejected as scope creep for this
+PRD. A dedicated unregister command may be worth filing separately,
+but blocking this PRD on it forces a two-step workflow for a
+straightforward rebind. The TOML-edit path in the error suggestion
+covers the without-`niwa-forget` case adequately.
+
+**Chosen: Option 7A.** New sentinel, new flag, error rendering through
+the existing path.
+
 ## Decision Outcome
 
 The chosen design implements the PRD as follows:
@@ -282,33 +325,43 @@ The chosen design implements the PRD as follows:
 1. **State surface.** `InstanceState` gains
    `ConfigNameOverride string` with `json:"config_name_override,omitempty"`.
    Schema version stays at v3; the field is purely additive.
-2. **Init control flow.** `runInit` validates the positional `<name>`,
-   computes `targetDir = filepath.Join(cwd, name)` when given, runs
-   the new caller-side existence check, calls
-   `CheckInitConflicts(targetDir)` for niwa-state sub-case routing,
-   creates the target directory with `os.MkdirAll`, dispatches to the
-   mode-specific scaffold/clone using `targetDir` as the workspace root,
-   detects registry rebind and queues a stderr warning, populates
+2. **Init control flow.** `runInit` parses the new `--rebind` flag,
+   validates the positional `<name>`, computes
+   `targetDir = filepath.Join(cwd, name)` when given, runs the new
+   caller-side existence check, calls `CheckInitConflicts(targetDir)`
+   for niwa-state sub-case routing, runs the registry-collision check
+   (errors with `ErrRegistryNameInUse` when the name is registered
+   elsewhere and `--rebind` was not given), creates the target
+   directory with `os.Mkdir`, dispatches to the mode-specific
+   scaffold/clone using `targetDir` as the workspace root, queues a
+   stderr confirmation warning when `--rebind` was given, populates
    `ConfigNameOverride` in the init state when applicable, persists
    state via `SaveState(targetDir, state)`, and prints a success
    message that includes the absolute path.
 3. **Preflight ordering.** Validation → existence check → niwa-state
-   sub-case routing (workspace exists, orphan `.niwa/`) → nested-instance
-   walk-up → registry rebind detection. The order is documented in
-   `runInit` as a code comment and asserted by unit tests.
+   sub-case routing (workspace exists, orphan `.niwa/`) → nested-
+   instance walk-up → registry collision check. The order is
+   documented in `runInit` as a code comment and asserted by unit
+   tests. R5 (target exists) takes precedence over R8 (registry
+   collision) regardless of `--rebind`.
 4. **Effective-name resolution.** A helper
    `workspace.EffectiveConfigName(state, cfg)` returns
    `state.ConfigNameOverride` if non-empty, else `cfg.Workspace.Name`.
-   `Apply.Create` uses it when constructing post-apply state.
+   `Applier.Create` uses it when constructing post-apply state.
    `niwa status` formatting uses it. Other readers can adopt as needed.
 5. **Override note.** When the override is being set and differs from
    the cloned config's `[workspace] name`, init emits the per-invocation
    stderr note specified in PRD R4. The note is not persisted to state.
-6. **Error implementation.** New sentinel `ErrTargetDirExists` in
-   `preflight.go`. The caller wraps it in `InitConflictError{Detail,
-   Suggestion}` per the existing pattern. Detail includes the absolute
-   path and a path-type qualifier (`file`/`directory`/`symlink`) from
-   `os.Lstat`.
+6. **Error implementation.** New sentinels `ErrTargetDirExists` and
+   `ErrRegistryNameInUse` in `preflight.go`. The caller wraps each in
+   `InitConflictError{Detail, Suggestion}` per the existing pattern.
+   For `ErrTargetDirExists`, `Detail` includes the absolute path and a
+   path-type qualifier (`file`/`directory`/`symlink`) from `os.Lstat`.
+   For `ErrRegistryNameInUse`, `Detail` includes the existing `Root`
+   path verbatim, and `Suggestion` includes both remediation paths:
+   the `--rebind` flag and the global config TOML path resolved at
+   call time (so the message reflects the user's actual
+   `$XDG_CONFIG_HOME` rather than a hardcoded default).
 7. **Success message.** `printSuccess` is reworked to include the
    absolute workspace root path resolved via `filepath.EvalSymlinks`
    (matching how niwa elsewhere handles macOS `/var/...` →
@@ -327,6 +380,10 @@ The chosen design implements the PRD as follows:
     set per PRD R7. Exported so future entry points that ingest
     workspace names (RPC, MCP, etc.) reuse the same rules.
 - **`internal/cli/init.go`** — primary control flow change.
+  - Modified: `initCmd` definition gains a `--rebind` boolean flag
+    (long-form only, default `false`) wired to a new local variable
+    consumed by `runInit`. Help text describes the registry-collision
+    case it unblocks.
   - Modified: `runInit` reorganized to validate via
     `workspace.ValidateInitName(name)` before any filesystem touch,
     compute `workspaceRoot`, enforce preflight order, and thread
@@ -334,17 +391,31 @@ The chosen design implements the PRD as follows:
     uses `os.Mkdir(workspaceRoot, 0o755)` (NOT `os.MkdirAll`) to fail
     on raced symlinks; the parent of `workspaceRoot` is `cwd` and is
     guaranteed to exist.
+  - New: registry-collision check between niwa-state validation and
+    the directory-creation step. Looks up the name in the loaded
+    `GlobalConfig`; if an entry exists with `Root != workspaceRoot`
+    and `--rebind` was not given, returns
+    `InitConflictError{Err: ErrRegistryNameInUse, Detail, Suggestion}`.
+    The suggestion text is built at call time from
+    `config.GlobalConfigPath()` (defined in
+    `internal/config/registry.go:129`, returns `(string, error)`) so
+    it reflects the user's actual `$XDG_CONFIG_HOME`. If
+    `GlobalConfigPath` returns an error (XDG resolution failure),
+    the suggestion falls back to the literal string
+    `~/.config/niwa/config.toml` rather than failing the whole init
+    error path.
   - Modified: `printSuccess` now takes the workspace root path and
     includes it in the printed line. `runInit` resolves the path
     via `filepath.EvalSymlinks` before passing.
   - Modified: `buildInitState` accepts the optional override and
     populates `ConfigNameOverride` when set.
-  - New: rebind-warning rendering — when registry rebind is detected,
-    emit a `WARNING:`-prefixed stderr line, both `Root` paths, and a
-    trailing blank line for visual separation (per Security
-    Considerations §6).
-- **`internal/workspace/preflight.go`** — new sentinel.
+  - New: rebind-confirmation rendering — when `--rebind` was given
+    and a registry entry was rewritten, emit a `WARNING:`-prefixed
+    stderr line, both `Root` paths, and a trailing blank line for
+    visual separation (per Security Considerations §6).
+- **`internal/workspace/preflight.go`** — new sentinels.
   - New: `ErrTargetDirExists = errors.New("target path already exists")`.
+  - New: `ErrRegistryNameInUse = errors.New("workspace name already registered")`.
   - Existing `CheckInitConflicts` is unchanged.
 - **`internal/workspace/state.go`** — schema-additive change.
   - New field: `ConfigNameOverride string \`json:"config_name_override,omitempty"\``.
@@ -357,13 +428,33 @@ The chosen design implements the PRD as follows:
   returns the override on success, an error on validation failure.
   When the override is empty, returns `cfg.Workspace.Name` (no
   validation — already validated by config load).
-- **`internal/workspace/apply.go`** — call-site updates.
-  - In `Apply.Create` (around line 407-411), replace
-    `configName := cfg.Workspace.Name` with
-    `configName, err := EffectiveConfigName(initState, cfg)` (with
-    error propagation up). The init state is already loaded at line
-    231; the override flows naturally through, and the re-validation
-    closes the persistence-boundary tampering vector.
+- **`internal/workspace/apply.go`** — call-site updates at TWO sites
+  in TWO different methods on `*Applier`. (Earlier drafts of this
+  design referred to a single "Apply.Create" call site at line 407;
+  that line is actually inside `Applier.Apply`, the subsequent-apply
+  path. Both sites need updating.)
+  - **Site 1: `Applier.Create` (around lines 258-276), first-time
+    instance creation.** Replace `configName := cfg.Workspace.Name`
+    (line 262) with `configName, err := EffectiveConfigName(initState,
+    cfg)` (with error propagation). `initState` here is the workspace-
+    root init state already loaded earlier in `Create` (around line
+    231); the override flows through naturally, and the re-validation
+    closes the persistence-boundary tampering vector. The
+    `instanceNumberFromName` call at line 258 MUST receive the same
+    effective `configName` (not raw `cfg.Workspace.Name`); the
+    function does string comparison/prefix-parsing against
+    `instanceName`, so passing the raw value when the override is in
+    play makes the function return 0 for what should be instance 1.
+  - **Site 2: `Applier.Apply` (around lines 407-425), subsequent
+    apply on an existing instance.** Replace
+    `configName := cfg.Workspace.Name` with the same
+    `EffectiveConfigName(initState, cfg)` call. `Applier.Apply` does
+    not load init state today; the implementation needs to load it
+    from `filepath.Dir(instanceRoot)` (the workspace root, since
+    instances are nested under workspaces). Without this update,
+    subsequent applies overwrite `ConfigName` in instance state with
+    the raw cfg value, and the override silently disappears on the
+    first `niwa apply` run after init.
 - **`internal/workspace/status.go`** — call-site update.
   - Status reads from instance state directly (state.ConfigName is
     already populated by Apply with the effective name); minimal
@@ -387,11 +478,17 @@ runInit
    |--- workspace.CheckInitConflicts(targetDir) -> nil (target dir doesn't
    |                                                    exist; nested-instance
    |                                                    check walks parent)
-   |--- os.MkdirAll(targetDir, 0o755)
+   |--- registry collision check:
+   |       globalCfg.LookupWorkspace("my-name")?
+   |         entry exists AND entry.Root != targetDir:
+   |           --rebind set => proceed, queue confirmation warning
+   |           --rebind unset => return ErrRegistryNameInUse with
+   |                             suggestion naming both --rebind and
+   |                             config.GlobalConfigPath()
+   |--- os.Mkdir(targetDir, 0o755)
    |--- workspace.MaterializeFromSource(ctx, src,
    |       source, targetDir+"/.niwa", fetcher, reporter)
-   |--- detect rebind: globalCfg.LookupWorkspace("my-name")?
-   |       Root != targetDir => emit stderr warning
+   |--- if rebind queued: emit stderr warning naming both Root paths
    |--- buildInitState(..., overrideName="my-name") ->
    |       state.ConfigNameOverride = "my-name"
    |--- SaveState(targetDir, state)
@@ -401,15 +498,33 @@ runInit
    |--- printSuccess(stdout, mode, "my-name", absPath(targetDir))
 
 
-niwa apply  (later)
+niwa apply  (first time)
         |
         v
-Apply.Create
-   |--- LoadState(workspaceRoot) -> initState (with ConfigNameOverride="my-name")
-   |--- configName := EffectiveConfigName(initState, cfg)
-   |       = initState.ConfigNameOverride = "my-name"
-   |--- InstanceState{ ConfigName: &configName,
-   |                  InstanceName: configName, ... }
+Applier.Create  (apply.go:~258-278)
+   |--- LoadState(workspaceRoot) -> initState
+   |       (initState.ConfigNameOverride == "my-name")
+   |--- configName, _ := EffectiveConfigName(initState, cfg)
+   |       = "my-name" (override wins)
+   |--- instanceNumber := instanceNumberFromName(configName, instanceName)
+   |       (uses effective name, not raw cfg.Workspace.Name)
+   |--- state := InstanceState{ ConfigName: &configName,
+   |                            InstanceName: configName, ... }
+   |--- SaveState(instanceRoot, state)
+   |       writes <instanceRoot>/.niwa/instance.json
+   |       — different file from the workspace-root one above
+
+
+niwa apply  (subsequent)
+        |
+        v
+Applier.Apply  (apply.go:~407-425)
+   |--- workspaceRoot := filepath.Dir(instanceRoot)
+   |--- LoadState(workspaceRoot) -> initState
+   |       (still has ConfigNameOverride = "my-name")
+   |--- configName, _ := EffectiveConfigName(initState, cfg)
+   |       = "my-name"
+   |--- state := InstanceState{ ConfigName: &configName, ... }
    |--- SaveState(instanceRoot, state)
 
 
@@ -417,14 +532,40 @@ niwa status (later)
         |
         v
 formatStatus
-   |--- LoadState(instanceRoot) -> ConfigName == "my-name" (already
-   |                              propagated by Apply)
+   |--- LoadState(instanceRoot) -> ConfigName == "my-name"
+   |       (Applier.Create / Applier.Apply already propagated it)
    |--- displays "my-name"
 ```
 
 ### Schema (in instance.json)
 
-Before:
+**Important file-path distinction.** The same `InstanceState` struct
+is serialized to two different files at two different roots:
+
+- `<workspaceRoot>/.niwa/instance.json` — the **init-state file**,
+  written by `runInit` (init.go line 234: `SaveState(cwd, state)`
+  where `cwd` is the workspace root). Carries init-time fields:
+  `SkipGlobal`, `OverlayURL`, `DisclosedNotices`, and now
+  `ConfigNameOverride`. `ConfigName`, `InstanceName`, and apply-time
+  fields are typically empty here.
+- `<instanceRoot>/.niwa/instance.json` — the **instance-state file**,
+  written by `Applier.Create` and `Applier.Apply` (apply.go lines
+  278 and 425: `SaveState(instanceRoot, state)`). Carries the
+  effective `ConfigName`, `InstanceName`, `InstanceNumber`,
+  `ManagedFiles`, etc.
+
+Same struct, same filename, different directories. Both files are
+loaded via `LoadState(<dir>)` which resolves to
+`<dir>/.niwa/instance.json`. The override propagates as follows:
+init writes `ConfigNameOverride` into the workspace-root file;
+`Applier.Create` reads the workspace-root file, resolves the effective
+name via `EffectiveConfigName`, and writes the resolved name as
+`ConfigName` into the instance-root file. Subsequent `Applier.Apply`
+runs read the workspace-root file again to keep the resolution
+consistent across applies.
+
+Today (post-apply instance-state file under instance dir, no
+override path exists):
 ```json
 {
   "schema_version": 3,
@@ -434,7 +575,8 @@ Before:
 }
 ```
 
-After (init-state file at workspace root, before any apply):
+After this PRD, post-init / pre-apply (init-state file at workspace
+root, written by `runInit`):
 ```json
 {
   "schema_version": 3,
@@ -444,7 +586,8 @@ After (init-state file at workspace root, before any apply):
 }
 ```
 
-After apply (instance-state file under instance dir):
+After this PRD, post-apply (instance-state file under instance dir,
+written by `Applier.Create`):
 ```json
 {
   "schema_version": 3,
@@ -477,6 +620,16 @@ Error: found .niwa directory without workspace.toml
   Remove the /home/dan/foo/.niwa directory and retry
 ```
 
+For the new registry-collision case, the rendered error makes both
+remediation paths explicit:
+
+```
+Error: workspace name 'my-team' is already registered (root: /old/path)
+  Pass --rebind to retarget the entry to this directory, or remove
+  the [registry.my-team] section from /home/dan/.config/niwa/config.toml
+  and retry.
+```
+
 ## Implementation Approach
 
 The work splits cleanly into five steps that can land as one PR or be
@@ -500,6 +653,8 @@ schema bump.
 Step 4.
 
 **Step 4: init.go control flow.** Reorganize `runInit` to:
+- Add the `--rebind` boolean flag to `initCmd` and thread its value
+  into `runInit`.
 - Call `workspace.ValidateInitName(name)` before any filesystem touch
   when a positional name is given.
 - Compute `workspaceRoot` (= `targetDir = filepath.Join(cwd, name)`
@@ -508,13 +663,20 @@ Step 4.
   given (returns `ErrTargetDirExists` for any pre-existing path,
   routes to `ErrWorkspaceExists`/`ErrNiwaDirectoryExists` per R6).
 - Call `CheckInitConflicts(workspaceRoot)`.
+- Run the registry-collision check: load the global config, look up
+  the name, compare `entry.Root` against `workspaceRoot`. If they
+  differ and `--rebind` was not given, return `ErrRegistryNameInUse`
+  with the suggestion text built from `config.GlobalConfigPath()`.
+  R5 takes precedence over this check (target-exists wins) regardless
+  of `--rebind`.
 - `os.Mkdir(workspaceRoot, 0o755)` when name given (NOT `MkdirAll`;
   parent is cwd, guaranteed to exist; `Mkdir` fails on raced symlinks).
-- Detect registry rebind; queue prominent stderr warning (`WARNING:`
-  prefix, both `Root` paths, trailing blank line) per Security §6.
 - Pass `workspaceRoot` (not `cwd`) into all downstream calls
   (`Scaffold`, `MaterializeFromSource`, `SaveState`).
 - Populate `state.ConfigNameOverride` in `buildInitState`.
+- When `--rebind` was given and a rebind actually happened, emit the
+  prominent stderr confirmation (`WARNING:` prefix, both `Root`
+  paths, trailing blank line) per Security §6.
 - Emit the override note when applicable (per R4).
 - Update `printSuccess` to include `absPath(workspaceRoot)` resolved
   through `filepath.EvalSymlinks`.
@@ -522,15 +684,31 @@ Step 4.
 **Step 5: effective-name helper and call-site updates.** Add
 `workspace.EffectiveConfigName` in a new file. The helper
 re-validates `ConfigNameOverride` via `ValidateInitName` when present
-(defense in depth per Security §4). Update
-`Apply.Create` to use it when constructing post-apply state (apply.go
-~line 407-411), propagating any validation error. Audit other
-readers of `cfg.Workspace.Name` for places where the effective name
-should be used; in practice the v1 audit shows `Apply.Create` is the
-load-bearing surface — once it writes the override into the
-instance-level state file's `ConfigName` and `InstanceName`,
-downstream readers that consult the instance state (status,
-completion, etc.) get the right value automatically.
+(defense in depth per Security §4). Update **both** apply.go call
+sites:
+
+- `Applier.Create` (apply.go:~258-278): replace
+  `configName := cfg.Workspace.Name` (line 262) with the helper call,
+  and pass the resulting `configName` to `instanceNumberFromName`
+  (line 258) instead of `cfg.Workspace.Name`. `Applier.Create`
+  already loads init state from the workspace root earlier in the
+  function (around line 231), so `initState` is in scope.
+- `Applier.Apply` (apply.go:~407-425): replace
+  `configName := cfg.Workspace.Name` (line 407) with the helper
+  call. `Applier.Apply` does not load init state today; add a
+  `LoadState(filepath.Dir(instanceRoot))` call at the top of the
+  effective-name resolution block. Tolerate
+  `state.ErrStateNotFound` here (an existing instance with a
+  missing workspace-root init file falls back to
+  `cfg.Workspace.Name`); other errors propagate.
+
+Both call sites propagate any validation error from the helper.
+Once both sites write the resolved name into the instance-state
+file's `ConfigName` and `InstanceName`, downstream readers that
+consult instance state (status, completion, etc.) get the right
+value automatically. No other audit-required surfaces are expected;
+v1 audit shows the two apply.go sites as the only writers of
+`ConfigName` to instance state.
 
 **Step 6: documentation and tests.** Update `init.go` `Long:` help
 text. Update README quickstart, "shared workspace configs" section,
@@ -562,15 +740,25 @@ race or by code inspection in the test.
     `workspace.toml` routes to `ErrNiwaDirectoryExists`.
   - `validateInitName` rejects `"foo bar"`, `"foo/bar"`, `..`, `.`,
     `""` with quoted-input errors.
-  - Registry rebind detected: warning emitted, success path proceeds,
-    registry `Root` updated, old directory untouched.
+  - Registry collision without `--rebind`: errors with
+    `ErrRegistryNameInUse`, no filesystem writes, registry unchanged,
+    suggestion text contains both `--rebind` and the resolved global
+    config path.
+  - Registry collision with `--rebind`: success path proceeds,
+    registry `Root` updated, prominent stderr warning emitted, old
+    directory untouched.
+  - `--rebind` passed when no collision exists: succeeds normally
+    (flag is a no-op when there is nothing to rebind); no warning
+    emitted.
+  - R5 precedence over R8: target-exists wins over registry collision
+    even when `--rebind` is given.
   - Override note emitted when explicit name differs from cloned name.
   - Override note NOT emitted when names match.
 - `internal/workspace/state_test.go`: `ConfigNameOverride` round-trips
   through SaveState/LoadState; `omitempty` keeps it out of zero-value
   marshals; old state files (no override field) load with empty value.
-- `internal/workspace/preflight_test.go`: `ErrTargetDirExists` is
-  exposed and wraps via `InitConflictError`.
+- `internal/workspace/preflight_test.go`: `ErrTargetDirExists` and
+  `ErrRegistryNameInUse` are exposed and wrap via `InitConflictError`.
 - New `internal/workspace/effective_name_test.go`: helper returns
   override when set, falls back to cfg name when not, handles nil
   state.
@@ -583,6 +771,14 @@ race or by code inspection in the test.
   `my-ws` with `Root = <cwd>/my-ws`, `niwa go my-ws` from outside
   lands in `<cwd>/my-ws`, and `niwa status` shows `my-ws`.
 - Add a scenario covering target-dir-exists rejection.
+- Add a scenario covering registry-collision rejection without
+  `--rebind` (asserts `ErrRegistryNameInUse`, error mentions both
+  `--rebind` and the global config path, no filesystem writes, registry
+  unchanged).
+- Add a scenario covering successful rebind with `--rebind` (asserts
+  the registry `Root` is updated, the old directory at the previous
+  `Root` is untouched, and `niwa go <name>` from outside lands in the
+  new location).
 - Existing scenarios calling `niwa init from config repo "<name>"`
   may need step-implementation updates if they pre-create the target
   directory; spot-audit during implementation.
@@ -640,7 +836,7 @@ documented for each case.
    `niwa apply`. Since the override flows into `InstanceState.InstanceName`
    and is used as a path segment downstream, a poisoned value could
    cause directory traversal at apply time. **Mitigation:**
-   `Apply.Create` re-validates the override against the same
+   `Applier.Create` re-validates the override against the same
    regex+blacklist used by init (`workspace.ValidateInitName`, exported
    from the workspace package for shared use). On validation failure,
    apply errors out rather than using the value. This costs a single
@@ -653,29 +849,25 @@ documented for each case.
    reuses the same rules. The validation must be applied on the
    post-decode string at every entry point.
 
-### Documented as accepted trade-offs
+6. **Registry rebind requires explicit `--rebind` flag.** Without
+   affirmative consent, a user lured to run
+   `niwa init <known-name>` from an attacker-controlled cwd would
+   silently rebind the registry so subsequent `niwa go <name>`
+   landed in the attacker's location. **Mitigation applied:** the
+   collision is detected before any filesystem write and surfaced
+   as `ErrRegistryNameInUse` (PRD R8). The error names the existing
+   `Root` so the user can verify what is registered, and the
+   suggestion offers two remediations: pass `--rebind` to retarget
+   the entry explicitly, or remove the entry by editing the global
+   config TOML at the path resolved at call time. Users who
+   genuinely intend to rebind add one word to their command; users
+   tricked into running from an attacker cwd see a clear refusal
+   instead of a silent hijack. The rebind path itself still emits a
+   prominent `WARNING:`-prefixed stderr confirmation naming both
+   `Root` paths, so an automated agent passing `--rebind`
+   programmatically still leaves an audit trail.
 
-6. **Registry rebind without consent gate.** PRD R8 specifies
-   "warn, don't error" for the case where a positional `<name>` is
-   already registered to a different `Root`. The security review
-   surfaced a CWD-poisoning attack: an attacker convinces a user to
-   run `niwa init <known-name>` from an attacker-controlled directory
-   (e.g., a freshly-extracted tarball), silently rebinding the
-   registry so subsequent `niwa go <name>` lands in the attacker's
-   location. The PRD's UX position is to preserve the documented
-   `cd ~/other-dir && niwa init my-team` re-init pattern as a single
-   command; requiring a `--rebind` flag or interactive Y/N would
-   break that. **Mitigation applied:** the rebind warning is rendered
-   prominently — prefixed with `WARNING:` on its own stderr line,
-   followed by both the previous and new `Root` paths, followed by
-   a blank line for visual separation. Users who pipe stderr to
-   `/dev/null` or who don't read the message remain at risk; this is
-   accepted per the PRD's UX trade-off. **Threat model:** the attack
-   requires the attacker to know the user's registered workspace name
-   AND lure the user to a specific cwd, raising the cost; users
-   handling sensitive workspaces should pause before running
-   `niwa init <existing-name>` from a directory they don't fully
-   trust.
+### Documented as accepted trade-offs
 
 7. **`EvalSymlinks` resolution in the success message.** PRD R9
    specifies `filepath.EvalSymlinks` for the success message path
