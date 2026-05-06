@@ -1,5 +1,5 @@
 ---
-status: Proposed
+status: Planned
 upstream: docs/prds/PRD-machine-identity-vault-sync.md
 problem: |
   niwa's apply pipeline reads machine-identity credentials from a
@@ -44,7 +44,7 @@ rationale: |
 
 ## Status
 
-Proposed
+Planned
 
 ## Context and Problem Statement
 
