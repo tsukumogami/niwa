@@ -83,6 +83,7 @@ func TestHandleDelegate_AsyncHappyPath(t *testing.T) {
 	s.taskID = "" // coordinator has no task_id
 
 	body := json.RawMessage(`{"instructions":"build feature X"}`)
+	// ReadOnly:true bypasses the SESSION_REQUIRED guard; this test is not about session routing.
 	res := s.handleDelegate(delegateArgs{To: "web", Body: body, Mode: "async", ReadOnly: true})
 	if res.IsError {
 		t.Fatalf("handleDelegate: %s", res.Content[0].Text)
@@ -125,6 +126,7 @@ func TestHandleDelegate_ParentTaskIDPropagates(t *testing.T) {
 	parentID := NewTaskID()
 	s.taskID = parentID
 
+	// ReadOnly:true bypasses the SESSION_REQUIRED guard; this test is not about session routing.
 	res := s.handleDelegate(delegateArgs{
 		To:       "reviewer",
 		Body:     json.RawMessage(`{"q":"ready?"}`),

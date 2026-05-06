@@ -49,9 +49,8 @@ type delegateArgs struct {
 	Mode      string          `json:"mode,omitempty"`
 	ExpiresAt string          `json:"expires_at,omitempty"`
 	SessionID string          `json:"session_id,omitempty"`
-	// ReadOnly opts out of the SESSION_REQUIRED check for tasks that make no
-	// git changes. When true and session_id is absent, the task routes to the
-	// main clone daemon as before. session_id takes precedence when both are set.
+	// ReadOnly opts out of SESSION_REQUIRED for tasks that make no git changes;
+	// the task routes to the main clone daemon. session_id takes precedence when both are set.
 	ReadOnly bool `json:"read_only,omitempty"`
 }
 
