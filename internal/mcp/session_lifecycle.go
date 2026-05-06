@@ -39,6 +39,10 @@ type SessionLifecycleState struct {
 	ClaudeConversationID string `json:"claude_conversation_id,omitempty"`
 	CreatorPID           int    `json:"creator_pid"`
 	CreatorStartTime     int64  `json:"creator_start_time"`
+	// BranchWarning is set in the destroy response when git branch -d fails
+	// (unmerged commits remain). Never written to disk; only present in the
+	// MCP/CLI response for that call.
+	BranchWarning string `json:"branch_warning,omitempty"`
 }
 
 // WriteSessionLifecycleState atomically persists state to

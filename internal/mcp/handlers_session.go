@@ -279,7 +279,13 @@ func (s *Server) handleDestroySession(args destroySessionArgs) toolResult {
 		if args.Force {
 			branchArg = "-D"
 		}
-		_ = exec.Command("git", "-C", repoPath, "branch", branchArg, "session/"+args.SessionID).Run()
+		branchName := "session/" + args.SessionID
+		if err := exec.Command("git", "-C", repoPath, "branch", branchArg, branchName).Run(); err != nil && !args.Force {
+			state.BranchWarning = fmt.Sprintf(
+				"branch %s was not deleted (unmerged commits remain); review and delete manually: git -C %s branch -D %s",
+				branchName, repoPath, branchName,
+			)
+		}
 	}
 
 	data, _ := json.Marshal(state)

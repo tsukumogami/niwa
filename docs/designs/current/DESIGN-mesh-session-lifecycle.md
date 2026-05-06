@@ -76,8 +76,10 @@ parent cannot be built on top of the role-directory model without extending it.
   `EnumerateInstances` (workspace-root scan) and `EnumerateRepos` (two-level scan).
   Placement under `<instance>/.niwa/worktrees/` satisfies this without touching
   enumeration logic.
-- **Backward compatibility is non-negotiable:** `niwa_delegate` without `session_id`,
-  `niwa apply`, and existing `niwa_ask(to="coordinator")` must behave identically.
+- **Backward compatibility for apply and ask:** `niwa apply` and existing
+  `niwa_ask(to="coordinator")` must behave identically. `niwa_delegate` without
+  `session_id` is deliberately changed: it now returns `SESSION_REQUIRED` (see PRD
+  R13). Read-only tasks opt out via `read_only: true`.
 - **Coordinator never handles Claude conversation IDs:** session continuity (JSONL
   path, `--resume` flag) is managed entirely by the daemon and MCP layer.
 - **Reuse existing daemon lifecycle:** `EnsureDaemonRunning` in `internal/workspace/`
@@ -327,9 +329,13 @@ protocol across `create`, `go`, and `session create`.
 use case. `niwa session tree` — deferred to follow-on. `children[]`, `Stale`, and
 `PRUrl` fields — removed from schema.
 
-**Backward compatibility:** every path without a `session_id` argument is unchanged.
-`isKnownRole` and `lookupLiveCoordinator` are not modified. `sessions.json` is
-completely isolated from the new session lifecycle code.
+**Delegation isolation:** `niwa_delegate` called without a `session_id` returns
+`SESSION_REQUIRED`; coordinators must provision a session first. A `read_only: true`
+flag on `niwa_delegate` opts out for tasks that make no git changes, routing them to
+the main clone daemon as before. All other paths without a `session_id` argument
+(`niwa_ask`, `niwa_apply`, etc.) are unchanged. `isKnownRole` and
+`lookupLiveCoordinator` are not modified. `sessions.json` is completely isolated from
+the new session lifecycle code.
 
 ## Solution Architecture
 

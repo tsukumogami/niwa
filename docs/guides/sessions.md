@@ -101,8 +101,12 @@ branch from the repo. The branch is left in git history so you can review,
 merge, or cherry-pick the work before discarding it.
 
 Default destroy behavior uses `git branch -d`, which only removes the branch if
-it's already merged into the current branch. Unmerged branches are silently left
-in place.
+it's already merged into the current branch. If the branch has unmerged commits,
+niwa leaves it in place and warns you:
+
+- **CLI**: the warning is printed to stderr before the "session: destroyed" line.
+- **MCP**: the `branch_warning` field is included in the returned
+  `SessionLifecycleState` JSON alongside the regular state fields.
 
 To remove the branch regardless of merge status, pass `--force` (CLI) or
 `force: true` (MCP tool):
@@ -229,7 +233,9 @@ proceed with caution.
 ```
 
 Returns the final `SessionLifecycleState`. Idempotent on already-terminal
-sessions.
+sessions. If `force` is `false` and the session branch has unmerged commits, the
+response also includes `"branch_warning"` with a message and the manual deletion
+command.
 
 ### `niwa_list_sessions`
 

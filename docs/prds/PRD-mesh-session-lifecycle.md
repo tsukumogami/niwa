@@ -306,14 +306,17 @@ continuity.
 falls back to spawning a fresh worker (matching current behavior) and records a
 warning in session state.
 
-### Backward compatibility
+### Delegation isolation
 
-**R13.** `niwa_delegate` called without a `session_id` behaves exactly as today:
-each task gets a fresh Claude session. No existing coordinator workflows are
-affected.
+**R13.** `niwa_delegate` called without a `session_id` returns `SESSION_REQUIRED`.
+Coordinators must provision a session via `niwa_create_session` before delegating
+any work. A `read_only: true` flag in `niwa_delegate` opts out of this requirement
+for tasks that make no git changes; these route to the main instance daemon as
+before with no worktree created.
 
-**R14.** Workspaces without any sessions configured continue to work without change.
-`niwa apply` behavior for the main clone is unchanged.
+**R14.** `niwa apply` behavior for the main clone is unchanged. Workspaces without
+any sessions configured continue to work without change for apply, `niwa go`, and
+all commands other than `niwa_delegate`.
 
 **R15.** `niwa apply` does not modify session worktrees. Session worktrees are managed
 exclusively by session lifecycle (create and end). Apply operates on the main clone
@@ -517,9 +520,13 @@ error message.
 
 ### Backward compatibility
 
-- [ ] `niwa_delegate` called without `session_id`: the spawned worker has no
-      `--resume` flag and its working directory is the main clone root, not any
-      session worktree directory.
+- [ ] `niwa_delegate` called without `session_id` and without `read_only: true`:
+      the call returns `SESSION_REQUIRED` with an error message directing the
+      coordinator to call `niwa_create_session` first. No worker is spawned and
+      no task state is written.
+- [ ] `niwa_delegate` called without `session_id` and with `read_only: true`:
+      the spawned worker has no `--resume` flag and its working directory is the
+      main clone root, not any session worktree directory.
 - [ ] A workspace with no sessions configured: `niwa apply` exits zero and its
       output contains no session-related messages.
 - [ ] `niwa apply` on a workspace with active sessions: apply's output contains
@@ -677,10 +684,16 @@ via CLI). Non-mesh commands are already layout-compatible with worktrees; non-me
 have the same dirty-workspace problem. Restricting to mesh-only would require revisiting
 scope and design for non-mesh later. The first implementation target is mesh.
 
-**No implicit sessions on untagged niwa_delegate.** A delegation without a `session_id`
-continues to behave exactly as today. This preserves backward compatibility and makes
-the session model strictly opt-in. Implicit sessions were rejected because they would
-silently change the behavior of all existing coordinator prompts.
+**Mandatory sessions for niwa_delegate.** A delegation without a `session_id` returns
+`SESSION_REQUIRED`. The original opt-in design cited backward compatibility, but niwa
+has no production users and the opt-in model directly contradicts Goal 3 (main clone
+always stays on main): any untagged delegation that checks out a feature branch leaves
+the main clone dirty and prevents `niwa apply` from syncing. Implicit auto-created
+sessions were considered and rejected — they defeat the session model's primary value
+(multi-task conversation continuity via `--resume`), have no clean purpose string or
+auto-destroy path, and conflate ephemeral task isolation with persistent session
+continuity. The correct design makes session provisioning explicit. Read-only tasks
+(no git changes) opt out via `read_only: true` on `niwa_delegate`.
 
 **No auto-pruning of orphaned sessions.** When a coordinator crashes, orphaned sessions
 surface in `niwa_list_sessions` with a stale marker but are not cleaned up automatically.

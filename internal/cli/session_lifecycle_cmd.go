@@ -97,6 +97,14 @@ func runSessionDestroy(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("%s", result.Content[0].Text)
 	}
 
+	var resp struct {
+		BranchWarn string `json:"branch_warning,omitempty"`
+	}
+	_ = json.Unmarshal([]byte(result.Content[0].Text), &resp)
+	if resp.BranchWarn != "" {
+		fmt.Fprintln(cmd.ErrOrStderr(), "warning:", resp.BranchWarn)
+	}
+
 	fmt.Fprintf(cmd.ErrOrStderr(), "session: destroyed %s\n", sessionID)
 	fmt.Fprintln(cmd.OutOrStdout(), result.Content[0].Text)
 	return nil
