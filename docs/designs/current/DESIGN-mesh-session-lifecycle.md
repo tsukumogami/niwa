@@ -122,7 +122,7 @@ per-worktree daemon picks it up via its existing fsnotify watch. The `session_id
 recorded in `TaskState` so `handleCancelTask` and `handleUpdateTask` can reconstruct
 the correct inbox path without additional coordination.
 
-The `session_id == ""` path is byte-for-byte identical to the current behavior.
+The `session_id == ""` path with `read_only: true` routes to the main clone daemon as before. The `session_id == ""` path without `read_only` returns `SESSION_REQUIRED`.
 
 #### Alternatives Considered
 
@@ -655,9 +655,9 @@ niwa daemon.
   branches; the main clone is never left on a feature branch by a session.
 - File-based state survives reboots. Coordinator restarts, daemon crashes, and host
   reboots do not lose session state. Terminal-state files enable post-mortem inspection.
-- Backward compatibility is complete. Every existing call site — `niwa_delegate`
-  without `session_id`, `niwa_ask(to="coordinator")`, `niwa apply`, `EnumerateRepos`
-  — is unchanged.
+- Backward compatibility for read-only delegation. `niwa_delegate` with `read_only: true`
+  and no `session_id` routes to the main clone daemon as before. Every other existing
+  call site — `niwa_ask(to="coordinator")`, `niwa apply`, `EnumerateRepos` — is unchanged.
 - `sessions.json` is untouched. The coordinator process registry, its stale-pruning
   semantics, and `lookupLiveCoordinator` are not modified.
 - `handleAsk("coordinator")` bug from session worktrees (B3a/B3b) is fixed as a

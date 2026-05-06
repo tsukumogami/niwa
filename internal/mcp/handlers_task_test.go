@@ -83,7 +83,7 @@ func TestHandleDelegate_AsyncHappyPath(t *testing.T) {
 	s.taskID = "" // coordinator has no task_id
 
 	body := json.RawMessage(`{"instructions":"build feature X"}`)
-	res := s.handleDelegate(delegateArgs{To: "web", Body: body, Mode: "async"})
+	res := s.handleDelegate(delegateArgs{To: "web", Body: body, Mode: "async", ReadOnly: true})
 	if res.IsError {
 		t.Fatalf("handleDelegate: %s", res.Content[0].Text)
 	}
@@ -126,9 +126,10 @@ func TestHandleDelegate_ParentTaskIDPropagates(t *testing.T) {
 	s.taskID = parentID
 
 	res := s.handleDelegate(delegateArgs{
-		To:   "reviewer",
-		Body: json.RawMessage(`{"q":"ready?"}`),
-		Mode: "async",
+		To:       "reviewer",
+		Body:     json.RawMessage(`{"q":"ready?"}`),
+		Mode:     "async",
+		ReadOnly: true,
 	})
 	if res.IsError {
 		t.Fatalf("handleDelegate: %s", res.Content[0].Text)
@@ -147,15 +148,63 @@ func TestHandleDelegate_ParentTaskIDPropagates(t *testing.T) {
 }
 
 // TestHandleDelegate_UnknownRole asserts UNKNOWN_ROLE when target role is not
-// registered under .niwa/roles/.
+// registered under .niwa/roles/. read_only:true is set so the call clears the
+// SESSION_REQUIRED guard and reaches role validation.
 func TestHandleDelegate_UnknownRole(t *testing.T) {
 	s := newTestServer(t, "coordinator")
 	res := s.handleDelegate(delegateArgs{
-		To:   "nonexistent",
-		Body: json.RawMessage(`{"x":1}`),
+		To:       "nonexistent",
+		Body:     json.RawMessage(`{"x":1}`),
+		ReadOnly: true,
 	})
 	if !res.IsError || errorCodeFromText(res.Content[0].Text) != "UNKNOWN_ROLE" {
 		t.Errorf("want UNKNOWN_ROLE, got %+v", res)
+	}
+}
+
+// TestHandleDelegate_SessionRequired asserts SESSION_REQUIRED when session_id
+// is absent and read_only is false.
+func TestHandleDelegate_SessionRequired(t *testing.T) {
+	s := newTestServer(t, "coordinator", "web")
+	res := s.handleDelegate(delegateArgs{
+		To:   "web",
+		Body: json.RawMessage(`{"x":1}`),
+	})
+	if !res.IsError || errorCodeFromText(res.Content[0].Text) != "SESSION_REQUIRED" {
+		t.Errorf("want SESSION_REQUIRED, got %+v", res)
+	}
+}
+
+// TestHandleDelegate_ReadOnly_BypassesSessionRequired asserts that read_only:true
+// with no session_id routes to the main clone without SESSION_REQUIRED.
+func TestHandleDelegate_ReadOnly_BypassesSessionRequired(t *testing.T) {
+	s := newTestServer(t, "coordinator", "web")
+	res := s.handleDelegate(delegateArgs{
+		To:       "web",
+		Body:     json.RawMessage(`{"x":1}`),
+		ReadOnly: true,
+	})
+	if res.IsError {
+		t.Fatalf("read_only:true should not return SESSION_REQUIRED; got %s", res.Content[0].Text)
+	}
+}
+
+// TestHandleDelegate_SessionID_BypassesSessionRequired asserts that a non-empty
+// session_id does not trigger SESSION_REQUIRED (SESSION_NOT_FOUND is expected
+// since no state file exists in the test environment).
+func TestHandleDelegate_SessionID_BypassesSessionRequired(t *testing.T) {
+	s := newTestServer(t, "coordinator", "web")
+	res := s.handleDelegate(delegateArgs{
+		To:        "web",
+		Body:      json.RawMessage(`{"x":1}`),
+		SessionID: "abcdef12",
+	})
+	if res.IsError && errorCodeFromText(res.Content[0].Text) == "SESSION_REQUIRED" {
+		t.Error("session_id present should bypass SESSION_REQUIRED, but got SESSION_REQUIRED")
+	}
+	// Without a real session state file the handler returns SESSION_NOT_FOUND.
+	if !res.IsError || errorCodeFromText(res.Content[0].Text) != "SESSION_NOT_FOUND" {
+		t.Errorf("want SESSION_NOT_FOUND (no state file), got %+v", res)
 	}
 }
 
@@ -1222,9 +1271,10 @@ func TestFormatTerminalResult_OmitsProgressFieldsWhenAbsent(t *testing.T) {
 func delegateTaskForCoordinator(t *testing.T, s *Server) string {
 	t.Helper()
 	res := s.handleDelegate(delegateArgs{
-		To:   "web",
-		Body: json.RawMessage(`{"instructions":"do work"}`),
-		Mode: "async",
+		To:       "web",
+		Body:     json.RawMessage(`{"instructions":"do work"}`),
+		Mode:     "async",
+		ReadOnly: true,
 	})
 	if res.IsError {
 		t.Fatalf("handleDelegate: %s", res.Content[0].Text)
@@ -1575,14 +1625,15 @@ func TestHandleDelegate_SessionInactive(t *testing.T) {
 	}
 }
 
-// TestHandleDelegate_NoSession_Unchanged asserts session_id=="" leaves the
-// delegate path identical to the pre-session behavior (regression test).
+// TestHandleDelegate_NoSession_Unchanged asserts that read_only:true with no
+// session_id routes to the main clone daemon as before (regression test).
 func TestHandleDelegate_NoSession_Unchanged(t *testing.T) {
 	s := newTestServer(t, "coordinator", "web")
 	res := s.handleDelegate(delegateArgs{
-		To:   "web",
-		Body: json.RawMessage(`{"q":"hello"}`),
-		Mode: "async",
+		To:       "web",
+		Body:     json.RawMessage(`{"q":"hello"}`),
+		Mode:     "async",
+		ReadOnly: true,
 	})
 	if res.IsError {
 		t.Fatalf("unexpected error: %s", res.Content[0].Text)

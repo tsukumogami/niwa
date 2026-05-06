@@ -49,6 +49,10 @@ type delegateArgs struct {
 	Mode      string          `json:"mode,omitempty"`
 	ExpiresAt string          `json:"expires_at,omitempty"`
 	SessionID string          `json:"session_id,omitempty"`
+	// ReadOnly opts out of the SESSION_REQUIRED check for tasks that make no
+	// git changes. When true and session_id is absent, the task routes to the
+	// main clone daemon as before. session_id takes precedence when both are set.
+	ReadOnly bool `json:"read_only,omitempty"`
 }
 
 type queryTaskArgs struct {
@@ -118,6 +122,11 @@ func (s *Server) handleDelegate(args delegateArgs) toolResult {
 	if args.Mode != "async" && args.Mode != "sync" {
 		return errResultCode("BAD_PAYLOAD",
 			fmt.Sprintf("mode must be \"async\" or \"sync\"; got %q", args.Mode))
+	}
+	if args.SessionID == "" && !args.ReadOnly {
+		return errResultCode("SESSION_REQUIRED",
+			"niwa_delegate requires a session_id; provision one with niwa_create_session, "+
+				"or set read_only:true for tasks that make no git changes")
 	}
 	if !s.isKnownRole(args.To) {
 		return errResultCode("UNKNOWN_ROLE",
