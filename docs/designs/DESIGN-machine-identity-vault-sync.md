@@ -446,8 +446,9 @@ parsed today (the parse lives at `apply.go:713-726`). For a
 vault-sourced credential to authenticate the overlay's
 `[vault.provider]`, the credential-sync provider must be open
 before that injection. Therefore the global-override parse moves
-earlier in the pipeline (Step 0.4 below), ahead of the workspace
-overlay sync at 0.5. This is a behavior-preserving reorder — the
+earlier in the pipeline (Step 0.4 below), ahead of the workspace-
+overlay sync at Step 0.5 and the workspace-overlay parse at
+Step 0.6. This is a behavior-preserving reorder — the
 parse only depends on `a.GlobalConfigDir` and `opts.skipGlobal`,
 both available at the top of the pipeline — but it is a real
 refactor with its own test surface.
@@ -549,13 +550,16 @@ Apply pipeline (chronological; `<NEW>` marks new or reordered steps):
    Else:
     c. CredentialPool = NewPool(file, nil)  (vault loader disabled)
 
-0.5 Workspace overlay sync + parse                (existing)
+0.5 Workspace overlay sync                        (existing)
+    └─> chooses, syncs, and resolves the overlay clone path; sets
+        overlayDir.
+
+0.6 Parse and merge the overlay config            (existing)
     └─> if overlayDir != "":
          injectProviderTokens(ctx, pool, overlay.Vault)  (existing
-         site at apply.go:592, signature changed to take pool)
+         site, signature changed to take pool)
          └─> pool.Lookup may now reach into the vault loader
-
-0.6 Build overlay vault bundle                    (existing)
+         └─> followed by overlay vault-bundle build and merge into cfg.
 
 1.  Parse globalOverride continues to feed downstream uses
     (CheckVaultScopeAmbiguity, etc.)               (existing)
