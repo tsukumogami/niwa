@@ -116,3 +116,5 @@ to `niwa create`. None of these need more research.
 ## Decisions This Round
 
 See `wip/explore_niwa-init-creates-workspace-dir_decisions.md`.
+
+## Decision: Crystallize
