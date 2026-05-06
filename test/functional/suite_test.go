@@ -340,6 +340,21 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 	ctx.Step(`^a session lifecycle state file exists for repo "([^"]*)" with status "([^"]*)" in instance "([^"]*)"$`, aSessionLifecycleStateExistsForRepo)
 	ctx.Step(`^I run "niwa go ([^"]*)" with last session id$`, iRunNiwaGoWithLastSessionID)
 
+	// --- Session daemon + routing steps ---
+	ctx.Step(`^I delegate a task to session role "([^"]*)" in instance "([^"]*)"$`, iDelegateTaskToSessionRole)
+	ctx.Step(`^I try to delegate a task to session role "([^"]*)" in instance "([^"]*)"$`, iTryToDelegateTaskToSessionRole)
+	ctx.Step(`^I delegate a task to session role "([^"]*)" with session id "([^"]*)" in instance "([^"]*)" expecting an error$`, iDelegateTaskToSessionRoleExpectingError)
+	ctx.Step(`^the last MCP response contains code "([^"]*)"$`, theLastMCPResponseContainsCode)
+	ctx.Step(`^the session claude_conversation_id is set in instance "([^"]*)"$`, theSessionClaudeConversationIDIsSet)
+	ctx.Step(`^the session claude_conversation_id equals "([^"]*)" in instance "([^"]*)"$`, theSessionClaudeConversationIDEquals)
+	ctx.Step(`^the worker in session was spawned with "([^"]*)"$`, theWorkerInSessionWasSpawnedWith)
+	ctx.Step(`^the worker in session was not spawned with "([^"]*)"$`, theWorkerInSessionWasNotSpawnedWith)
+	ctx.Step(`^the main clone of "([^"]*)" in instance "([^"]*)" is on branch "([^"]*)"$`, theMainCloneIsOnBranch)
+	ctx.Step(`^the session branch exists in repo "([^"]*)" of instance "([^"]*)"$`, theSessionBranchExistsInRepo)
+	ctx.Step(`^the session branch does not exist in repo "([^"]*)" of instance "([^"]*)"$`, theSessionBranchDoesNotExistInRepo)
+	ctx.Step(`^the session worktree directory does not exist$`, theSessionWorktreeDirectoryDoesNotExist)
+	ctx.Step(`^I set the fake Claude session ID to "([^"]*)"$`, iSetFakeClaudeSessionID)
+
 	// --- @channels-e2e-graph: real coordinator -> real workers delegation graph ---
 	ctx.Step(`^a multi-repo channeled workspace "([^"]*)" with web and backend exists$`, iSetUpMultiRepoChanneledWorkspace)
 	ctx.Step(`^a single-repo channeled workspace "([^"]*)" exists$`, iSetUpSingleRepoChanneledWorkspace)

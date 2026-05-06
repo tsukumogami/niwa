@@ -88,9 +88,12 @@ type cancelTaskArgs struct {
 }
 
 // identity returns the caller's authIdentity derived from Server fields.
+// InstanceRoot is the task-store root (not the session worktree) so
+// authorizeTaskCall reads state.json from the correct location for both
+// main-instance and session-worker callers.
 func (s *Server) identity() authIdentity {
 	return authIdentity{
-		InstanceRoot: s.instanceRoot,
+		InstanceRoot: s.taskStoreRoot(),
 		Role:         s.role,
 		TaskID:       s.taskID,
 	}
@@ -141,7 +144,7 @@ func (s *Server) handleDelegate(args delegateArgs) toolResult {
 	defer cancel()
 	// Race-guard: re-read state.json in case the task already completed
 	// before the waiter was registered.
-	taskDir := taskDirPath(s.instanceRoot, taskID)
+	taskDir := taskDirPath(s.taskStoreRoot(), taskID)
 	if _, st, err := ReadState(taskDir); err == nil && isTaskStateTerminal(st.State) {
 		return formatTerminalResult(st)
 	}
@@ -172,7 +175,7 @@ func (s *Server) createTaskEnvelope(to string, body json.RawMessage, expiresAt, 
 	}
 
 	taskID := NewTaskID()
-	taskDir := taskDirPath(s.instanceRoot, taskID)
+	taskDir := taskDirPath(s.taskStoreRoot(), taskID)
 	if err := os.MkdirAll(taskDir, 0o700); err != nil {
 		return "", errResult("cannot create task dir: " + err.Error())
 	}
@@ -304,7 +307,7 @@ func (s *Server) resolveInboxDir(sessionID, role string) (string, toolResult) {
 // for writing a task.ask notification to the coordinator's inbox.
 func (s *Server) createAskTaskStore(to string, body json.RawMessage, parentTaskID string) (string, toolResult) {
 	taskID := NewTaskID()
-	taskDir := taskDirPath(s.instanceRoot, taskID)
+	taskDir := taskDirPath(s.taskStoreRoot(), taskID)
 	if err := os.MkdirAll(taskDir, 0o700); err != nil {
 		return "", errResult("cannot create task dir: " + err.Error())
 	}
@@ -396,7 +399,7 @@ func (s *Server) handleAwaitTask(args awaitTaskArgs) toolResult {
 	if errR != nil {
 		if errorCode(errR) == "TASK_ALREADY_TERMINAL" {
 			// Re-read state.json to obtain the terminal payload.
-			taskDir := taskDirPath(s.instanceRoot, args.TaskID)
+			taskDir := taskDirPath(s.taskStoreRoot(), args.TaskID)
 			if _, stTerm, err := ReadState(taskDir); err == nil {
 				return formatTerminalResult(stTerm)
 			}
@@ -413,7 +416,7 @@ func (s *Server) handleAwaitTask(args awaitTaskArgs) toolResult {
 	defer cancelQuestion()
 
 	// Race guard: re-read state.json; if terminal, return immediately.
-	taskDir := taskDirPath(s.instanceRoot, args.TaskID)
+	taskDir := taskDirPath(s.taskStoreRoot(), args.TaskID)
 	if _, fresh, err := ReadState(taskDir); err == nil && isTaskStateTerminal(fresh.State) {
 		return formatTerminalResult(fresh)
 	}
@@ -537,7 +540,7 @@ func (s *Server) handleReportProgress(args reportProgressArgs) toolResult {
 	summary := truncateSummary(args.Summary, progressSummaryLimit)
 	now := time.Now().UTC().Format(time.RFC3339)
 
-	taskDir := taskDirPath(s.instanceRoot, args.TaskID)
+	taskDir := taskDirPath(s.taskStoreRoot(), args.TaskID)
 	var delegatorRole string
 	if err := UpdateState(taskDir, func(cur *TaskState) (*TaskState, *TransitionLogEntry, error) {
 		next := *cur
@@ -591,7 +594,7 @@ func (s *Server) authorizeFinishTask(taskID string) *toolResult {
 	// Second call on terminal state: return the already_terminal payload rather
 	// than falling through to kindTarget (which would also reject terminal tasks).
 	if errorCode(errR) == "TASK_ALREADY_TERMINAL" {
-		taskDir := taskDirPath(s.instanceRoot, taskID)
+		taskDir := taskDirPath(s.taskStoreRoot(), taskID)
 		if _, st, err := ReadState(taskDir); err == nil {
 			r := textResult(fmt.Sprintf(
 				`{"status":"already_terminal","error_code":"TASK_ALREADY_TERMINAL","current_state":%q}`,
@@ -642,7 +645,7 @@ func (s *Server) handleFinishTask(args finishTaskArgs) toolResult {
 	}
 
 	now := time.Now().UTC().Format(time.RFC3339)
-	taskDir := taskDirPath(s.instanceRoot, args.TaskID)
+	taskDir := taskDirPath(s.taskStoreRoot(), args.TaskID)
 	var delegatorRole string
 	if err := UpdateState(taskDir, func(cur *TaskState) (*TaskState, *TransitionLogEntry, error) {
 		next := *cur
@@ -700,7 +703,7 @@ func (s *Server) handleListOutboundTasks(args listOutboundArgs) toolResult {
 	if s.instanceRoot == "" {
 		return errResult("NIWA_INSTANCE_ROOT not set")
 	}
-	tasksDir := filepath.Join(s.instanceRoot, ".niwa", "tasks")
+	tasksDir := filepath.Join(s.taskStoreRoot(), ".niwa", "tasks")
 	entries, err := os.ReadDir(tasksDir)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -788,7 +791,7 @@ func (s *Server) handleUpdateTask(args updateTaskArgs) toolResult {
 		return *errR
 	}
 
-	taskDir := taskDirPath(s.instanceRoot, args.TaskID)
+	taskDir := taskDirPath(s.taskStoreRoot(), args.TaskID)
 
 	// Under exclusive lock via UpdateState: reject if state != queued, else
 	// rewrite envelope.body and the queued inbox file.
@@ -874,7 +877,7 @@ func (s *Server) handleCancelTask(args cancelTaskArgs) toolResult {
 	if authSt != nil {
 		sessionID = authSt.SessionID
 	}
-	taskDir := taskDirPath(s.instanceRoot, args.TaskID)
+	taskDir := taskDirPath(s.taskStoreRoot(), args.TaskID)
 	inboxDir, inboxErrTR := s.resolveInboxDir(sessionID, env.To.Role)
 	if inboxErrTR.IsError {
 		return inboxErrTR
@@ -1023,7 +1026,7 @@ func mapStoreError(err error) toolResult {
 // swallowed so state.json remains authoritative and a transient inbox write
 // failure does not poison the handler's success path.
 func (s *Server) sendTaskMessage(toRole, msgType, taskID string, body any) {
-	inboxDir := filepath.Join(s.instanceRoot, ".niwa", "roles", toRole, "inbox")
+	inboxDir := filepath.Join(s.taskStoreRoot(), ".niwa", "roles", toRole, "inbox")
 	if err := os.MkdirAll(inboxDir, 0o700); err != nil {
 		return
 	}

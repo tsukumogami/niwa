@@ -595,3 +595,305 @@ Feature: Cross-session mesh (Issue #10 harness)
     And the coordinator in instance "graph-e2e" emitted niwa_delegate calls to roles "web,backend"
     And role "web" in instance "graph-e2e" emitted at least 1 successful niwa_finish_task call
     And role "backend" in instance "graph-e2e" emitted at least 1 successful niwa_finish_task call
+
+  # -----------------------------------------------------------------------
+  # Session-targeted task routing: tasks with session_id are routed to the
+  # session's worktree daemon, not the main instance daemon.
+  # -----------------------------------------------------------------------
+
+  @session-daemon
+  Scenario: Task delegated to session routes to worktree daemon and completes (AC-S3a)
+    Given a clean niwa environment
+    And a local git server is set up
+    And a single-repo channeled workspace "session-route-ws" exists
+    And the daemon has small timing overrides
+    And the daemon runs with fake worker scenario "finish-completed"
+    When I run "niwa create session-route-ws"
+    Then the exit code is 0
+    And I set NIWA_INSTANCE_ROOT to instance "session-route-ws"
+    When I call niwa_create_session for repo "app" with purpose "routing test" in instance "session-route-ws"
+    Then the session is active in instance "session-route-ws"
+    And the session worktree exists in instance "session-route-ws"
+    When I delegate a task to session role "app" in instance "session-route-ws"
+    Then the task state in instance "session-route-ws" eventually becomes "completed" within 60 seconds
+
+  @session-daemon
+  Scenario: Two parallel sessions for same repo route tasks independently (AC-S3b)
+    Given a clean niwa environment
+    And a local git server is set up
+    And a single-repo channeled workspace "session-parallel-ws" exists
+    And the daemon has small timing overrides
+    And the daemon runs with fake worker scenario "finish-completed"
+    When I run "niwa create session-parallel-ws"
+    Then the exit code is 0
+    And I set NIWA_INSTANCE_ROOT to instance "session-parallel-ws"
+    When I call niwa_create_session for repo "app" with purpose "session A" in instance "session-parallel-ws"
+    Then the session is active in instance "session-parallel-ws"
+    And the session worktree exists in instance "session-parallel-ws"
+    When I delegate a task to session role "app" in instance "session-parallel-ws"
+    Then the task state in instance "session-parallel-ws" eventually becomes "completed" within 60 seconds
+    When I call niwa_create_session for repo "app" with purpose "session B" in instance "session-parallel-ws"
+    Then the session is active in instance "session-parallel-ws"
+    And the session worktree exists in instance "session-parallel-ws"
+    When I delegate a task to session role "app" in instance "session-parallel-ws"
+    Then the task state in instance "session-parallel-ws" eventually becomes "completed" within 60 seconds
+
+  @session-daemon
+  Scenario: niwa_delegate with non-existent session_id returns SESSION_NOT_FOUND (AC-S3c)
+    Given a clean niwa environment
+    And a local git server is set up
+    And a single-repo channeled workspace "session-notfound-ws" exists
+    When I run "niwa create session-notfound-ws"
+    Then the exit code is 0
+    And I set NIWA_INSTANCE_ROOT to instance "session-notfound-ws"
+    When I delegate a task to session role "app" with session id "deadbeef" in instance "session-notfound-ws" expecting an error
+    Then the last MCP response contains code "SESSION_NOT_FOUND"
+
+  @session-daemon
+  Scenario: niwa_delegate to an ended session returns SESSION_INACTIVE (AC-S3d)
+    Given a clean niwa environment
+    And a local git server is set up
+    And a single-repo channeled workspace "session-inactive-ws" exists
+    When I run "niwa create session-inactive-ws"
+    Then the exit code is 0
+    And I set NIWA_INSTANCE_ROOT to instance "session-inactive-ws"
+    When I call niwa_create_session for repo "app" with purpose "will be ended" in instance "session-inactive-ws"
+    Then the session is active in instance "session-inactive-ws"
+    When I call niwa_destroy_session in instance "session-inactive-ws"
+    Then the session is ended in instance "session-inactive-ws"
+    When I try to delegate a task to session role "app" in instance "session-inactive-ws"
+    Then the last MCP response contains code "SESSION_INACTIVE"
+
+  # -----------------------------------------------------------------------
+  # Session continuity: the worktree daemon captures CLAUDE_SESSION_ID from
+  # the first worker and writes it to the session state file. A second
+  # delegation to the same session should use --resume (currently unimplemented).
+  # -----------------------------------------------------------------------
+
+  @session-daemon
+  Scenario: ClaudeConversationID captured from first worker exit (AC-R11a)
+    Given a clean niwa environment
+    And a local git server is set up
+    And a single-repo channeled workspace "session-capture-ws" exists
+    And the daemon has small timing overrides
+    And I set the fake Claude session ID to "test-claude-id-abc123"
+    And the daemon runs with fake worker scenario "capture-id-and-dump-args"
+    When I run "niwa create session-capture-ws"
+    Then the exit code is 0
+    And I set NIWA_INSTANCE_ROOT to instance "session-capture-ws"
+    When I call niwa_create_session for repo "app" with purpose "capture test" in instance "session-capture-ws"
+    Then the session is active in instance "session-capture-ws"
+    When I delegate a task to session role "app" in instance "session-capture-ws"
+    Then the task state in instance "session-capture-ws" eventually becomes "completed" within 60 seconds
+    And the session claude_conversation_id equals "test-claude-id-abc123" in instance "session-capture-ws"
+
+  @session-daemon @known-gap
+  Scenario: Second delegation to same session uses --resume (AC-R11b — currently unimplemented)
+    Given a clean niwa environment
+    And a local git server is set up
+    And a single-repo channeled workspace "session-resume-ws" exists
+    And the daemon has small timing overrides
+    And I set the fake Claude session ID to "test-resume-id-xyz789"
+    And the daemon runs with fake worker scenario "capture-id-and-dump-args"
+    When I run "niwa create session-resume-ws"
+    Then the exit code is 0
+    And I set NIWA_INSTANCE_ROOT to instance "session-resume-ws"
+    When I call niwa_create_session for repo "app" with purpose "resume test" in instance "session-resume-ws"
+    Then the session is active in instance "session-resume-ws"
+    When I delegate a task to session role "app" in instance "session-resume-ws"
+    Then the task state in instance "session-resume-ws" eventually becomes "completed" within 60 seconds
+    And the session claude_conversation_id equals "test-resume-id-xyz789" in instance "session-resume-ws"
+    # Second delegation: the worker should be spawned with --resume. This currently FAILS
+    # because mesh_watch.go's spawnWorker does not read ClaudeConversationID from the
+    # session state file for fresh delegations. The @known-gap tag documents this gap.
+    When I delegate a task to session role "app" in instance "session-resume-ws"
+    Then the task state in instance "session-resume-ws" eventually becomes "completed" within 60 seconds
+    And the worker in session was spawned with "--resume"
+
+  @session-daemon
+  Scenario: niwa_destroy_session abandons in-progress task (AC-S2c)
+    Given a clean niwa environment
+    And a local git server is set up
+    And a single-repo channeled workspace "session-kill-ws" exists
+    And the daemon has small timing overrides
+    And the daemon runs with fake worker scenario "stall-forever"
+    When I run "niwa create session-kill-ws"
+    Then the exit code is 0
+    And I set NIWA_INSTANCE_ROOT to instance "session-kill-ws"
+    When I call niwa_create_session for repo "app" with purpose "kill test" in instance "session-kill-ws"
+    Then the session is active in instance "session-kill-ws"
+    When I delegate a task to session role "app" in instance "session-kill-ws"
+    And the task state in instance "session-kill-ws" eventually becomes "running" within 30 seconds
+    When I call niwa_destroy_session in instance "session-kill-ws"
+    Then the session is ended in instance "session-kill-ws"
+    And the task state in instance "session-kill-ws" eventually becomes "abandoned" within 15 seconds
+    And the task reason in instance "session-kill-ws" contains "session_destroyed"
+
+  # -----------------------------------------------------------------------
+  # Git and filesystem: session worktrees are git worktrees; the main clone
+  # must stay on main throughout the session lifecycle.
+  # -----------------------------------------------------------------------
+
+  @session-git
+  Scenario: Main clone remains on main branch after session create (AC-S2d)
+    Given a clean niwa environment
+    And a local git server is set up
+    And a single-repo channeled workspace "session-main-ws" exists
+    When I run "niwa create session-main-ws"
+    Then the exit code is 0
+    And I set NIWA_INSTANCE_ROOT to instance "session-main-ws"
+    When I call niwa_create_session for repo "app" with purpose "git isolation test" in instance "session-main-ws"
+    Then the session is active in instance "session-main-ws"
+    And the main clone of "app" in instance "session-main-ws" is on branch "main"
+
+  @session-git
+  Scenario: Session branch created in repo at session create time (AC-S2e)
+    Given a clean niwa environment
+    And a local git server is set up
+    And a single-repo channeled workspace "session-branch-ws" exists
+    When I run "niwa create session-branch-ws"
+    Then the exit code is 0
+    And I set NIWA_INSTANCE_ROOT to instance "session-branch-ws"
+    When I call niwa_create_session for repo "app" with purpose "branch test" in instance "session-branch-ws"
+    Then the session is active in instance "session-branch-ws"
+    And the session branch exists in repo "app" of instance "session-branch-ws"
+
+  @session-git
+  Scenario: Worktree directory removed after session destroy (AC-S2h)
+    Given a clean niwa environment
+    And a local git server is set up
+    And a single-repo channeled workspace "session-rm-ws" exists
+    When I run "niwa create session-rm-ws"
+    Then the exit code is 0
+    And I set NIWA_INSTANCE_ROOT to instance "session-rm-ws"
+    When I call niwa_create_session for repo "app" with purpose "remove test" in instance "session-rm-ws"
+    Then the session is active in instance "session-rm-ws"
+    And the session worktree exists in instance "session-rm-ws"
+    When I call niwa_destroy_session in instance "session-rm-ws"
+    Then the session is ended in instance "session-rm-ws"
+    And the session worktree directory does not exist
+
+  @session-git
+  Scenario: Main clone stays on main after session destroy (AC-S2d-post-destroy)
+    Given a clean niwa environment
+    And a local git server is set up
+    And a single-repo channeled workspace "session-main-post-ws" exists
+    When I run "niwa create session-main-post-ws"
+    Then the exit code is 0
+    And I set NIWA_INSTANCE_ROOT to instance "session-main-post-ws"
+    When I call niwa_create_session for repo "app" with purpose "main branch preservation" in instance "session-main-post-ws"
+    Then the session is active in instance "session-main-post-ws"
+    When I call niwa_destroy_session in instance "session-main-post-ws"
+    Then the session is ended in instance "session-main-post-ws"
+    And the main clone of "app" in instance "session-main-post-ws" is on branch "main"
+
+  @session-git
+  Scenario: niwa apply does not touch session worktrees (AC-S15a)
+    Given a clean niwa environment
+    And a local git server is set up
+    And a single-repo channeled workspace "session-apply-ws" exists
+    When I run "niwa create session-apply-ws"
+    Then the exit code is 0
+    And I set NIWA_INSTANCE_ROOT to instance "session-apply-ws"
+    When I call niwa_create_session for repo "app" with purpose "apply isolation" in instance "session-apply-ws"
+    Then the session is active in instance "session-apply-ws"
+    And the session worktree exists in instance "session-apply-ws"
+    When I run "niwa apply session-apply-ws"
+    Then the exit code is 0
+    And the session worktree exists in instance "session-apply-ws"
+    And the output does not contain ".niwa/worktrees"
+
+  # -----------------------------------------------------------------------
+  # Input validation: error codes for invalid inputs to session tools.
+  # -----------------------------------------------------------------------
+
+  @session-error
+  Scenario: niwa_create_session with unknown repo returns UNKNOWN_ROLE (AC-R1-err)
+    Given a clean niwa environment
+    And a local git server is set up
+    And a single-repo channeled workspace "session-badrepo-ws" exists
+    When I run "niwa create session-badrepo-ws"
+    Then the exit code is 0
+    And I set NIWA_INSTANCE_ROOT to instance "session-badrepo-ws"
+    When I run "niwa session create nonexistent-repo test-purpose"
+    Then the exit code is not 0
+    And the error output contains "UNKNOWN_ROLE"
+
+  @session-error
+  Scenario: niwa_destroy_session with unknown session_id returns SESSION_NOT_FOUND (AC-R4-err)
+    Given a clean niwa environment
+    And a local git server is set up
+    And a single-repo channeled workspace "session-badsid-ws" exists
+    When I run "niwa create session-badsid-ws"
+    Then the exit code is 0
+    And I set NIWA_INSTANCE_ROOT to instance "session-badsid-ws"
+    When I run "niwa session destroy deadbeef"
+    Then the exit code is not 0
+    And the error output contains "SESSION_NOT_FOUND"
+
+  # -----------------------------------------------------------------------
+  # Cross-instance ask routing: niwa_ask(to="coordinator") from a session
+  # worktree worker must reach the main instance coordinator, not the
+  # worktree's coordinator (which doesn't exist).
+  # -----------------------------------------------------------------------
+
+  @session-daemon
+  Scenario: Worker in session worktree routes niwa_ask to main coordinator (AC-S4a)
+    Given a clean niwa environment
+    And a local git server is set up
+    And a single-repo channeled workspace "session-ask-ws" exists
+    And the daemon has small timing overrides
+    And the daemon runs with fake worker scenario "ask-and-finish"
+    When I run "niwa create session-ask-ws"
+    Then the exit code is 0
+    And I set NIWA_INSTANCE_ROOT to instance "session-ask-ws"
+    And the coordinator session is registered in instance "session-ask-ws"
+    When I call niwa_create_session for repo "app" with purpose "ask routing test" in instance "session-ask-ws"
+    Then the session is active in instance "session-ask-ws"
+    When I delegate a task to session role "app" in instance "session-ask-ws"
+    And the coordinator blocks on niwa_await_task and handles questions for instance "session-ask-ws"
+    Then the task state in instance "session-ask-ws" eventually becomes "completed" within 60 seconds
+
+  # -----------------------------------------------------------------------
+  # @session-e2e: real claude -p scenarios for session lifecycle.
+  # Skipped when claude or ANTHROPIC_API_KEY is not available.
+  # The @known-gap scenario documents the missing --resume implementation.
+  # -----------------------------------------------------------------------
+
+  @session-e2e
+  Scenario: Real coordinator creates session and delegates task to session worktree (AC-R2-e2e)
+    Given a clean niwa environment
+    And claude is available
+    And a local git server is set up
+    And a single-repo channeled workspace "session-e2e-ws" exists
+    And the daemon uses the real claude worker spawn path
+    When I run "niwa create session-e2e-ws"
+    Then the exit code is 0
+    And the file ".niwa/daemon.pid" exists in instance "session-e2e-ws"
+    When I run claude -p preserving case from instance root "session-e2e-ws" within 300 seconds with prompt:
+      """
+      Use niwa_create_session to create a session for the "app" repo with purpose "e2e test". Then use niwa_delegate with the returned session_id to delegate a task to "app" with body {"action":"create_marker","path":"marker.txt","content":"session_e2e"}. Wait for the task to complete with niwa_await_task. Then output exactly: SESSION_E2E_DONE
+      """
+    Then the output contains "SESSION_E2E_DONE"
+    And exactly 1 tasks in instance "session-e2e-ws" are in state "completed"
+
+  @session-e2e @known-gap
+  Scenario: Second task in same session resumes Claude conversation (AC-R10-e2e — --resume not yet implemented)
+    Given a clean niwa environment
+    And claude is available
+    And a local git server is set up
+    And a single-repo channeled workspace "session-continuity-ws" exists
+    And the daemon uses the real claude worker spawn path
+    When I run "niwa create session-continuity-ws"
+    Then the exit code is 0
+    And the file ".niwa/daemon.pid" exists in instance "session-continuity-ws"
+    When I run claude -p preserving case from instance root "session-continuity-ws" within 600 seconds with prompt:
+      """
+      Your goal is to test session continuity.
+
+      Step 1: Use niwa_create_session to create a session for "app" with purpose "continuity test".
+      Step 2: Use niwa_delegate with session_id to send task A to "app" with body {"action":"write_secret","secret":"HELLO_FROM_TASK_A"}. Wait for completion.
+      Step 3: Use niwa_delegate with the SAME session_id to send task B to "app" with body {"action":"recall_secret"}. Wait for completion.
+      Step 4: If task B's result contains "HELLO_FROM_TASK_A", output CONTINUITY_OK. Otherwise output CONTINUITY_FAIL.
+      """
+    Then the output contains "CONTINUITY_OK"

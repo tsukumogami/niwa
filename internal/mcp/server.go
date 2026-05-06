@@ -110,6 +110,17 @@ func New(role, instanceRoot string) *Server {
 	return s
 }
 
+// taskStoreRoot returns the root directory for task state. For session workers
+// (NIWA_MAIN_INSTANCE_ROOT set), tasks always live in the main instance so
+// state reads and writes route there. For non-session processes the task store
+// is the local instance root.
+func (s *Server) taskStoreRoot() string {
+	if s.mainInstanceRoot != "" {
+		return s.mainInstanceRoot
+	}
+	return s.instanceRoot
+}
+
 // SetDaemonFuncs injects the workspace-layer daemon start/stop functions.
 // Must be called before Run when niwa_create_session or niwa_destroy_session
 // are expected to work. Skipped in unit tests that don't exercise session
@@ -1040,7 +1051,7 @@ func (s *Server) registerSessionID() {
 	if sid == "" || !sessionIDRegex.MatchString(sid) {
 		return
 	}
-	taskDir := taskDirPath(s.instanceRoot, s.taskID)
+	taskDir := taskDirPath(s.taskStoreRoot(), s.taskID)
 	_ = UpdateState(taskDir, func(cur *TaskState) (*TaskState, *TransitionLogEntry, error) {
 		next := *cur
 		next.Worker.ClaudeSessionID = sid

@@ -281,8 +281,15 @@ func runMeshWatch(cmd *cobra.Command, args []string) error {
 
 	// 8. Central event loop. Everything state-changing flows through
 	// this goroutine: fsnotify events, catch-up queue, per-task exits.
+	// For session daemons (NIWA_MAIN_INSTANCE_ROOT set) task state always lives
+	// in the main instance. Fall back to instanceRoot for main-instance daemons.
+	taskStoreRoot := instanceRoot
+	if mainRoot := os.Getenv("NIWA_MAIN_INSTANCE_ROOT"); mainRoot != "" {
+		taskStoreRoot = mainRoot
+	}
 	spawnCtx := spawnContext{
 		instanceRoot:   instanceRoot,
+		taskStoreRoot:  taskStoreRoot,
 		niwaDir:        niwaDir,
 		spawnBin:       spawnInfo.Path,
 		logger:         logger,
@@ -379,6 +386,11 @@ func runMeshWatch(cmd *cobra.Command, args []string) error {
 // started inside spawnWorker.
 type spawnContext struct {
 	instanceRoot    string
+	// taskStoreRoot is the directory root for task state files. For session
+	// daemons (NIWA_MAIN_INSTANCE_ROOT set) tasks always live in the main
+	// instance; for main-instance daemons it equals instanceRoot.
+	// Zero value: falls back to instanceRoot via taskStoreRootDir().
+	taskStoreRoot   string
 	niwaDir         string
 	spawnBin        string
 	logger          *log.Logger
@@ -390,6 +402,17 @@ type spawnContext struct {
 	sigTermGrace    time.Duration
 	workerPermMode  string // "bypassPermissions" or "acceptEdits"; resolved once at startup
 	claudeHomeDir   string // overrides os.UserHomeDir() for Guard 4 session file lookup; tests only
+}
+
+// taskStoreRootDir returns the effective task store root. When taskStoreRoot is
+// set (session daemon: NIWA_MAIN_INSTANCE_ROOT was injected at spawn) that path
+// is returned; otherwise the daemon's own instanceRoot is used (non-session
+// daemon or unit test that builds spawnContext without the field).
+func (s spawnContext) taskStoreRootDir() string {
+	if s.taskStoreRoot != "" {
+		return s.taskStoreRoot
+	}
+	return s.instanceRoot
 }
 
 // orphanEntry tracks a live-orphan worker adopted at startup (Issue 7).
@@ -516,7 +539,7 @@ func pollOrphans(orphans []orphanEntry, s spawnContext) (remaining []orphanEntry
 	}
 	remaining = orphans[:0]
 	for _, o := range orphans {
-		taskDir := filepath.Join(s.instanceRoot, ".niwa", "tasks", o.taskID)
+		taskDir := filepath.Join(s.taskStoreRootDir(), ".niwa", "tasks", o.taskID)
 		_, st, err := mcp.ReadState(taskDir)
 		if err != nil {
 			// Transient read failure (concurrent writer, disk pressure).
@@ -750,7 +773,7 @@ func handleInboxEvent(evt inboxEvent, s spawnContext) {
 		// every peer message would dwarf the useful daemon-event lines.
 		return
 	}
-	taskDir := filepath.Join(s.instanceRoot, ".niwa", "tasks", evt.taskID)
+	taskDir := filepath.Join(s.taskStoreRootDir(), ".niwa", "tasks", evt.taskID)
 	if _, err := os.Stat(filepath.Join(taskDir, "state.json")); err != nil {
 		// Dangling delegate envelope — filename matches a task_id but no
 		// task dir. Move out of the queued inbox so fsnotify doesn't
@@ -861,7 +884,11 @@ func spawnWorker(evt inboxEvent, taskDir string, s spawnContext) {
 	// coordinator path), so all workers would look in the coordinator inbox
 	// and find no task — producing retry_cap_exceeded on every delegation.
 	workerMCPContent, werr := workspace.WorkerMCPConfig(s.instanceRoot, evt.role, evt.taskID)
-	workerMCPPath := workspace.WorkerMCPConfigPath(s.instanceRoot, evt.taskID)
+	// worker.mcp.json lives next to state.json in the task store directory.
+	// For session daemons taskStoreRootDir() is the main instance root, not
+	// the worktree (where instanceRoot points). WorkerMCPConfig content still
+	// uses s.instanceRoot so NIWA_INSTANCE_ROOT in the worker is the worktree.
+	workerMCPPath := workspace.WorkerMCPConfigPath(s.taskStoreRootDir(), evt.taskID)
 	if werr == nil {
 		werr = os.WriteFile(workerMCPPath, workerMCPContent, 0o600)
 	}
@@ -1308,7 +1335,7 @@ func appendWatchdogSignalEntry(taskDir, signal, trigger string) error {
 // started" rather than "attempts scheduled", which Issue 7's crash
 // reconciliation depends on.
 func handleSupervisorExit(ex supervisorExit, s spawnContext) {
-	taskDir := filepath.Join(s.instanceRoot, ".niwa", "tasks", ex.taskID)
+	taskDir := filepath.Join(s.taskStoreRootDir(), ".niwa", "tasks", ex.taskID)
 	_, st, err := mcp.ReadState(taskDir)
 	if err != nil {
 		s.logger.Printf("exit_event task=%s read_state_err=%v", ex.taskID, err)
@@ -1576,7 +1603,7 @@ func captureConversationID(claudeSessionID string, logger *log.Logger) {
 // need to distinguish worker-authored from daemon-authored terminal
 // messages.
 func deliverAbandonedMessage(s spawnContext, delegatorRole, workerRole, taskID string, restartCount, restartCap int) {
-	inboxDir := filepath.Join(s.instanceRoot, ".niwa", "roles", delegatorRole, "inbox")
+	inboxDir := filepath.Join(s.taskStoreRootDir(), ".niwa", "roles", delegatorRole, "inbox")
 	if err := os.MkdirAll(inboxDir, 0o700); err != nil {
 		s.logger.Printf("abandon_msg task=%s mkdir_err=%v", taskID, err)
 		return
@@ -1642,7 +1669,7 @@ func deliverAbandonedMessage(s spawnContext, delegatorRole, workerRole, taskID s
 // The envelope file remains at .niwa/roles/<role>/inbox/in-progress/<id>.json
 // across retries — the claim is one-shot.
 func retrySpawn(taskID, role string, s spawnContext) {
-	taskDir := filepath.Join(s.instanceRoot, ".niwa", "tasks", taskID)
+	taskDir := filepath.Join(s.taskStoreRootDir(), ".niwa", "tasks", taskID)
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 
 	// Pre-read state outside the lock to get ClaudeSessionID for Guard 4's
@@ -2006,7 +2033,7 @@ func markAdopted(taskDir string) error {
 // The stored worker.role is the authoritative target; fall back to
 // TargetRole when worker.role is empty (extremely early crash).
 func respawnFreshRetry(taskID string, s spawnContext) {
-	taskDir := filepath.Join(s.instanceRoot, ".niwa", "tasks", taskID)
+	taskDir := filepath.Join(s.taskStoreRootDir(), ".niwa", "tasks", taskID)
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 
 	var role string
