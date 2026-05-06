@@ -852,6 +852,90 @@ Feature: Cross-session mesh (Issue #10 harness)
     Then the task state in instance "session-ask-ws" eventually becomes "completed" within 60 seconds
 
   # -----------------------------------------------------------------------
+  # Delegation isolation (SESSION_REQUIRED / read_only contract)
+  # These five @critical scenarios verify the delegation guard introduced in
+  # the mesh session lifecycle design: niwa_delegate requires a session_id,
+  # read_only:true opts out for tasks that make no git changes, and session_id
+  # takes precedence when both are provided.
+  # -----------------------------------------------------------------------
+
+  @critical
+  Scenario: niwa_delegate without session_id returns SESSION_REQUIRED
+    Given a clean niwa environment
+    And a local git server is set up
+    And a single-repo channeled workspace "session-required-ws" exists
+    When I run "niwa create session-required-ws"
+    Then the exit code is 0
+    And I set NIWA_INSTANCE_ROOT to instance "session-required-ws"
+    When I try to delegate a task to role "app" without session_id in instance "session-required-ws"
+    Then the last MCP response contains code "SESSION_REQUIRED"
+    And no task files exist in instance "session-required-ws"
+
+  @critical
+  Scenario: niwa_delegate with read_only:true and no session_id routes to main clone
+    Given a clean niwa environment
+    And a local git server is set up
+    And a single-repo channeled workspace "readonly-delegate-ws" exists
+    And the daemon has small timing overrides
+    And the daemon runs with fake worker scenario "finish-completed"
+    When I run "niwa create readonly-delegate-ws"
+    Then the exit code is 0
+    And I set NIWA_INSTANCE_ROOT to instance "readonly-delegate-ws"
+    When I delegate a read_only task to role "app" in instance "readonly-delegate-ws"
+    Then the task state in instance "readonly-delegate-ws" eventually becomes "completed" within 30 seconds
+    And the file ".niwa/worktrees" does not exist in instance "readonly-delegate-ws"
+
+  @critical
+  Scenario: niwa_delegate with session_id routes to session worktree daemon (regression)
+    Given a clean niwa environment
+    And a local git server is set up
+    And a single-repo channeled workspace "session-route-ws" exists
+    And the daemon has small timing overrides
+    And the daemon runs with fake worker scenario "finish-completed"
+    When I run "niwa create session-route-ws"
+    Then the exit code is 0
+    And I set NIWA_INSTANCE_ROOT to instance "session-route-ws"
+    When I call niwa_create_session for repo "app" with purpose "regression test" in instance "session-route-ws"
+    Then the session is active in instance "session-route-ws"
+    And the session worktree exists in instance "session-route-ws"
+    When I delegate a task to session role "app" in instance "session-route-ws"
+    Then the task state in instance "session-route-ws" eventually becomes "completed" within 60 seconds
+
+  @critical
+  Scenario: niwa_delegate with both session_id and read_only:true routes to session worktree
+    Given a clean niwa environment
+    And a local git server is set up
+    And a single-repo channeled workspace "session-precedence-ws" exists
+    And the daemon has small timing overrides
+    And the daemon runs with fake worker scenario "finish-completed"
+    When I run "niwa create session-precedence-ws"
+    Then the exit code is 0
+    And I set NIWA_INSTANCE_ROOT to instance "session-precedence-ws"
+    When I call niwa_create_session for repo "app" with purpose "precedence test" in instance "session-precedence-ws"
+    Then the session is active in instance "session-precedence-ws"
+    When I delegate a task to session role "app" with read_only true in instance "session-precedence-ws"
+    Then the task state in instance "session-precedence-ws" eventually becomes "completed" within 60 seconds
+
+  @critical
+  Scenario: Coordinator golden path: create session, delegate with session_id, work completes, session destroyed
+    Given a clean niwa environment
+    And a local git server is set up
+    And a single-repo channeled workspace "golden-path-ws" exists
+    And the daemon has small timing overrides
+    And the daemon runs with fake worker scenario "finish-completed"
+    When I run "niwa create golden-path-ws"
+    Then the exit code is 0
+    And I set NIWA_INSTANCE_ROOT to instance "golden-path-ws"
+    When I call niwa_create_session for repo "app" with purpose "golden path test" in instance "golden-path-ws"
+    Then the session is active in instance "golden-path-ws"
+    And the session worktree exists in instance "golden-path-ws"
+    When I delegate a task to session role "app" in instance "golden-path-ws"
+    Then the task state in instance "golden-path-ws" eventually becomes "completed" within 60 seconds
+    When I call niwa_destroy_session in instance "golden-path-ws"
+    Then the session is ended in instance "golden-path-ws"
+    And the session worktree directory does not exist
+
+  # -----------------------------------------------------------------------
   # @session-e2e: real claude -p scenarios for session lifecycle.
   # Skipped when claude or ANTHROPIC_API_KEY is not available.
   # The @known-gap scenario documents the missing --resume implementation.

@@ -430,6 +430,124 @@ func theLastMCPResponseContainsCode(ctx context.Context, code string) error {
 	return nil
 }
 
+// iDelegateTaskToRoleWithoutSessionID calls niwa_delegate with no session_id
+// and no read_only flag, storing the raw MCP response in s.stdout without
+// failing. Use this to assert SESSION_REQUIRED or other error responses.
+func iDelegateTaskToRoleWithoutSessionID(ctx context.Context, role, instance string) (context.Context, error) {
+	s := getState(ctx)
+	if s == nil {
+		return ctx, fmt.Errorf("no test state")
+	}
+	instRoot := filepath.Join(s.workspaceRoot, instance)
+	args := fmt.Sprintf(`{"to":%q,"body":{"action":"test"},"mode":"async"}`, role)
+	out, err := callMCPToolAsRole(s, instRoot, "coordinator", "", "niwa_delegate", args)
+	if err != nil {
+		return ctx, fmt.Errorf("callMCPToolAsRole: %w", err)
+	}
+	s.stdout = out
+	return ctx, nil
+}
+
+// iDelegateReadOnlyTaskToRole calls niwa_delegate with read_only:true and no
+// session_id, routing the task to the main clone daemon. Stores the returned
+// task_id in s.lastTaskID.
+func iDelegateReadOnlyTaskToRole(ctx context.Context, role, instance string) (context.Context, error) {
+	s := getState(ctx)
+	if s == nil {
+		return ctx, fmt.Errorf("no test state")
+	}
+	instRoot := filepath.Join(s.workspaceRoot, instance)
+	args := fmt.Sprintf(`{"to":%q,"body":{"action":"test"},"mode":"async","read_only":true}`, role)
+	out, err := callMCPToolAsRole(s, instRoot, "coordinator", "", "niwa_delegate", args)
+	if err != nil {
+		return ctx, fmt.Errorf("callMCPToolAsRole: %w", err)
+	}
+	if isErrorResult(out) {
+		return ctx, fmt.Errorf("read_only delegate returned error: %s", out)
+	}
+	payload, err := extractMCPContentText(out)
+	if err != nil {
+		return ctx, fmt.Errorf("extracting task_id from read_only delegate: %w", err)
+	}
+	var resp struct {
+		TaskID string `json:"task_id"`
+	}
+	if err := json.Unmarshal([]byte(payload), &resp); err != nil {
+		return ctx, fmt.Errorf("parsing read_only delegate response %q: %w", payload, err)
+	}
+	if resp.TaskID == "" {
+		return ctx, fmt.Errorf("read_only delegate returned empty task_id; payload: %s", payload)
+	}
+	s.lastTaskID = resp.TaskID
+	return ctx, nil
+}
+
+// iDelegateTaskToSessionRoleWithReadOnly calls niwa_delegate with both
+// session_id=s.lastSessionID and read_only:true. session_id takes precedence
+// so the task routes to the session worktree daemon. Stores task_id in s.lastTaskID.
+func iDelegateTaskToSessionRoleWithReadOnly(ctx context.Context, role, instance string) (context.Context, error) {
+	s := getState(ctx)
+	if s == nil {
+		return ctx, fmt.Errorf("no test state")
+	}
+	if s.lastSessionID == "" {
+		return ctx, fmt.Errorf("no session_id stored; call niwa_create_session first")
+	}
+	instRoot := filepath.Join(s.workspaceRoot, instance)
+	args := fmt.Sprintf(`{"to":%q,"session_id":%q,"body":{"action":"test"},"mode":"async","read_only":true}`, role, s.lastSessionID)
+	out, err := callMCPToolAsRole(s, instRoot, "coordinator", "", "niwa_delegate", args)
+	if err != nil {
+		return ctx, fmt.Errorf("callMCPToolAsRole: %w", err)
+	}
+	if isErrorResult(out) {
+		return ctx, fmt.Errorf("delegate with session_id+read_only returned error: %s", out)
+	}
+	payload, err := extractMCPContentText(out)
+	if err != nil {
+		return ctx, fmt.Errorf("extracting task_id: %w", err)
+	}
+	var resp struct {
+		TaskID string `json:"task_id"`
+	}
+	if err := json.Unmarshal([]byte(payload), &resp); err != nil {
+		return ctx, fmt.Errorf("parsing delegate response %q: %w", payload, err)
+	}
+	if resp.TaskID == "" {
+		return ctx, fmt.Errorf("delegate returned empty task_id; payload: %s", payload)
+	}
+	s.lastTaskID = resp.TaskID
+	return ctx, nil
+}
+
+// noTaskFilesExistInInstance checks that .niwa/tasks/ in the given instance
+// contains no .json files (i.e. no task was created).
+func noTaskFilesExistInInstance(ctx context.Context, instance string) error {
+	s := getState(ctx)
+	if s == nil {
+		return fmt.Errorf("no test state")
+	}
+	tasksDir := filepath.Join(s.workspaceRoot, instance, ".niwa", "tasks")
+	entries, err := os.ReadDir(tasksDir)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("reading tasks dir %s: %w", tasksDir, err)
+	}
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		subEntries, _ := os.ReadDir(filepath.Join(tasksDir, e.Name()))
+		for _, se := range subEntries {
+			if strings.HasSuffix(se.Name(), ".json") {
+				return fmt.Errorf("unexpected task file %s/%s in tasks dir", e.Name(), se.Name())
+			}
+		}
+	}
+	return nil
+}
+
 // theSessionClaudeConversationIDIsSet asserts that the session state file for
 // s.lastSessionID in instance has a non-empty ClaudeConversationID.
 func theSessionClaudeConversationIDIsSet(ctx context.Context, instance string) error {
