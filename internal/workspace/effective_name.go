@@ -27,6 +27,14 @@ import (
 // When the override is empty (or state is nil), the cloned config's
 // [workspace] name is returned without re-validation; that field has
 // already been validated at config.Load time.
+//
+// IMPORTANT for callers: passing state == nil silently disables override
+// resolution and falls back to cfg.Workspace.Name. Any caller that wants
+// the override to take effect MUST load the workspace-root state first
+// via LoadState(workspaceRoot) and pass the result. The cli package's
+// init / apply / create / reset commands all follow this pattern; new
+// commands that consume cfg.Workspace.Name MUST do the same or the
+// override silently disappears.
 func EffectiveConfigName(state *InstanceState, cfg *config.WorkspaceConfig) (string, error) {
 	if state != nil && state.ConfigNameOverride != "" {
 		if err := ValidateInitName(state.ConfigNameOverride); err != nil {

@@ -429,16 +429,18 @@ func (a *Applier) Apply(ctx context.Context, cfg *config.WorkspaceConfig, config
 	if err != nil {
 		return fmt.Errorf("resolving effective workspace name: %w", err)
 	}
-	// InstanceName must also use the effective name; otherwise a
-	// subsequent Apply rewrites InstanceName from the override back to
-	// the cloned config's [workspace] name, and `niwa status` then
-	// prints the upstream name on the Instance: line. AC-5 forbids any
-	// status line from surfacing the upstream name when an override is
-	// in play.
+	// InstanceName comes from the on-disk instance directory, not from
+	// configName or cfg.Workspace.Name. For numbered ("my-name-2") and
+	// custom-suffix ("my-name-hotfix") instances, the suffix is part of
+	// the instance identity; rewriting to either name string silently
+	// corrupts that suffix. filepath.Base(instanceRoot) mirrors the
+	// authority used by Create (where the instance directory is created
+	// from the caller-supplied instanceName parameter) and keeps the
+	// state file's InstanceName field aligned with the directory.
 	state := &InstanceState{
 		SchemaVersion:  SchemaVersion,
 		ConfigName:     &configName,
-		InstanceName:   configName,
+		InstanceName:   filepath.Base(instanceRoot),
 		InstanceNumber: existingState.InstanceNumber,
 		Root:           instanceRoot,
 		Created:        existingState.Created,

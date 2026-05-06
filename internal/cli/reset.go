@@ -110,16 +110,15 @@ func runReset(cmd *cobra.Command, args []string) error {
 	gh := github.NewAPIClient(token)
 
 	applier := workspace.NewApplier(gh)
-	wsRootState, _ := workspace.LoadState(workspaceRoot)
-	configName, err := workspace.EffectiveConfigName(wsRootState, cfg)
+	registryName, err := resolveEffectiveWorkspaceName(workspaceRoot, cfg)
 	if err != nil {
-		return fmt.Errorf("resolving effective workspace name: %w", err)
+		return err
 	}
 	if globalCfg, gErr := config.LoadGlobalConfig(); gErr == nil {
 		if gDir, gErr := config.GlobalConfigDir(); gErr == nil {
 			applier.GlobalConfigDir = gDir
 		}
-		if entry := globalCfg.LookupWorkspace(configName); entry != nil {
+		if entry := globalCfg.LookupWorkspace(registryName); entry != nil {
 			applier.ConfigSourceURL = entry.SourceURL
 		}
 	}

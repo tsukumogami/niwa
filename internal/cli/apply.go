@@ -132,16 +132,12 @@ func runApply(cmd *cobra.Command, args []string) error {
 	// --channels or NIWA_CHANNELS activates channels without a config section.
 	cfg, applier.ChannelsSynthesized = resolveChannelsActivation(cmd, cfg, applyChannels, applyNoChannels)
 
-	// Resolve the effective workspace name for registry operations. The
-	// configDir is `<workspaceRoot>/.niwa`, so its parent is the
-	// workspace root where `niwa init <name>` persisted any
-	// ConfigNameOverride. Falls back to cfg.Workspace.Name when no
-	// override is in play (the helper handles nil state).
-	workspaceRoot := filepath.Dir(configDir)
-	wsRootState, _ := workspace.LoadState(workspaceRoot)
-	effectiveName, nameErr := workspace.EffectiveConfigName(wsRootState, cfg)
+	// Resolve the effective workspace name for registry operations.
+	// configDir is `<workspaceRoot>/.niwa`, so its parent is where
+	// `niwa init <name>` persisted any ConfigNameOverride.
+	effectiveName, nameErr := resolveEffectiveWorkspaceName(filepath.Dir(configDir), cfg)
 	if nameErr != nil {
-		return fmt.Errorf("resolving effective workspace name: %w", nameErr)
+		return nameErr
 	}
 
 	// Wire global config and ConfigSourceURL from the registry if available.

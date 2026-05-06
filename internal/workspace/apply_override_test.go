@@ -230,10 +230,81 @@ visibility = "public"
 		}
 		t.Errorf("post-apply ConfigName: got %q, want %q (Apply must re-read override)", got, "my-name")
 	}
-	// AC-5: InstanceName must also surface the override; otherwise
-	// `niwa status`'s Instance: line prints the upstream name on every
-	// subsequent apply.
+	// AC-5: InstanceName must surface the override on the base instance;
+	// `niwa status`'s Instance: line must not print the upstream name.
 	if state.InstanceName != "my-name" {
 		t.Errorf("post-apply InstanceName: got %q, want %q (AC-5: status must not surface upstream name)", state.InstanceName, "my-name")
+	}
+}
+
+// TestApply_PreservesNumberedInstanceName: regression test for a bug a
+// reviewer caught — when Applier.Apply writes the new InstanceState, the
+// InstanceName field must preserve the existing instance directory's name
+// for numbered (`my-name-2`) and custom-suffix (`my-name-hotfix`)
+// instances. Rewriting it to either cfg.Workspace.Name or the effective
+// configName silently corrupts the suffix.
+func TestApply_PreservesNumberedInstanceName(t *testing.T) {
+	tmpDir := t.TempDir()
+	niwaDir := filepath.Join(tmpDir, ".niwa")
+	if err := os.MkdirAll(niwaDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configTOML := `
+[workspace]
+name = "upstream"
+
+[[sources]]
+org = "testorg"
+
+[groups.all]
+visibility = "public"
+`
+	if err := os.WriteFile(filepath.Join(niwaDir, "workspace.toml"), []byte(configTOML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveState(tmpDir, &InstanceState{
+		SchemaVersion:      SchemaVersion,
+		ConfigNameOverride: "my-name",
+	}); err != nil {
+		t.Fatalf("SaveState init: %v", err)
+	}
+	result, err := config.Load(filepath.Join(niwaDir, "workspace.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := result.Config
+	applier := NewApplier(&mockGitHubClient{
+		repos: map[string][]github.Repo{
+			"testorg": {{Name: "repo1", Visibility: "public", SSHURL: "git@github.com:testorg/repo1.git"}},
+		},
+	})
+	applier.Cloner = &Cloner{}
+
+	// Create a numbered instance by passing instanceName = "my-name-2".
+	if err := os.MkdirAll(filepath.Join(tmpDir, "my-name-2", "all", "repo1", ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	instanceRoot, err := applier.Create(context.Background(), cfg, niwaDir, tmpDir, "my-name-2")
+	if err != nil {
+		t.Fatalf("Create my-name-2: %v", err)
+	}
+
+	// Apply on the numbered instance must preserve the suffix.
+	if err := applier.Apply(context.Background(), cfg, niwaDir, instanceRoot); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	state, err := LoadState(instanceRoot)
+	if err != nil {
+		t.Fatalf("LoadState: %v", err)
+	}
+	if state.InstanceName != "my-name-2" {
+		t.Errorf("post-apply InstanceName: got %q, want %q (numbered suffix corrupted)", state.InstanceName, "my-name-2")
+	}
+	if state.ConfigName == nil || *state.ConfigName != "my-name" {
+		got := "<nil>"
+		if state.ConfigName != nil {
+			got = *state.ConfigName
+		}
+		t.Errorf("post-apply ConfigName: got %q, want %q", got, "my-name")
 	}
 }
