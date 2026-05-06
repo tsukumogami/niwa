@@ -412,8 +412,8 @@ infisical  880b1733-b62e-74a7-d949-779988773333  none                —
 |--------|---------|
 | `KIND` | Backend kind (e.g., `infisical`) |
 | `PROJECT-UUID` | The `(kind, project)` identifier niwa needed credentials for |
-| `SOURCE` | Where the credential came from in the last apply: `local-file`, `vault:<name>` (provider name; empty string for anonymous), `cli-session`, or `none` |
-| `FALLBACK` | The non-active source that ALSO had an entry, if any. `vault:<name>` when the local file won; otherwise `—` |
+| `SOURCE` | Where the credential came from in the last apply: `local-file`, `vault:<name>` (provider name), `cli-session`, or `none`. When the credential-sync provider is the anonymous `[global.vault.provider]`, the column renders `vault:(anonymous)`. niwa MUST NOT emit a bare trailing colon (`vault:`) — `(anonymous)` is the literal placeholder. |
+| `FALLBACK` | The non-active source that ALSO had an entry, if any. `vault:<name>` (or `vault:(anonymous)`) when the local file won; otherwise `—` |
 
 When the same `(kind, project)` has entries in both layers, the
 SOURCE column shows the layer that won (local-file) and FALLBACK
@@ -429,6 +429,24 @@ Exit codes:
 A future `--check-vault` flag (online verification of vault entries)
 is explicitly deferred to v1.1; see Out of Scope.
 
+**Persistence contract.** The audit data is persisted as a new
+field on `InstanceState` in `state.json`. The on-disk schema bumps
+from version 3 to version 4. The new field is keyed by
+`"<kind>/<project>"` and carries `{source, fallback}` strings
+only — both fields are categorical identifiers, never credential
+bytes. Concretely, the JSON schema for one row is:
+
+```json
+{
+  "source":   "local-file" | "vault:<name>" | "vault:(anonymous)" | "cli-session" | "none",
+  "fallback": "vault:<name>" | "vault:(anonymous)" | ""
+}
+```
+
+The map is repopulated atomically on every successful apply; failed
+applies leave the previous map intact (existing state-save semantics).
+The schema bump is forward-only — see Known Limitations.
+
 **R12 — Apply-time stderr signal for vault-sourced credentials.**
 
 On every apply that uses at least one vault-sourced credential, niwa
@@ -438,6 +456,11 @@ sourced from the vault. Shape:
 ```
 auth: <kind>/<project-uuid> source=vault:<name>
 ```
+
+When the credential-sync provider is the anonymous
+`[global.vault.provider]`, `<name>` renders as `(anonymous)` —
+the same convention as R11's audit column. niwa MUST NOT emit a
+bare trailing colon.
 
 Two `(kind, project)` pairs that happen to share a vault provider
 name produce two lines, not one. The grouping is per pair.
@@ -679,6 +702,74 @@ redaction logic.
       between apply invocations). Verified by counting vault export
       calls in a controlled test.
 
+### Pool semantics, vocabulary, and remaining requirement coverage
+
+- [ ] **AC-32** (R3): The credential pool's matching for
+      vault-sourced entries follows the same `(kind, project)` rule
+      as for local-file entries. Verified by populating the personal
+      vault with an entry whose `(kind, project)` matches the
+      workspace's `[vault.provider]`, leaving the local file empty,
+      and asserting that apply authenticates against the vault-sourced
+      credential. Verified independently of AC-1/AC-2 by matching on
+      the project UUID rather than the provider name.
+- [ ] **AC-33** (R5): No diagnostic, audit column header, stderr
+      line, or doc string introduced by this feature contains the
+      words "shadow" or "override" in the machine-identity-vault-sync
+      surfaces. Verified by a regex grep test in CI over the new
+      source files plus the user guide.
+- [ ] **AC-34** (R10): A user with
+      `[global.machine_identities] from = "X"` where `X` is the name
+      of a `[vault.providers.X]` block declared in the team config
+      (`workspace.toml` or an overlay) but NOT in the personal
+      overlay sees parse-time error exit non-zero. The diagnostic
+      MUST reference the personal-vs-team distinction per R10 ("not
+      declared in your personal overlay"). No vault call is
+      attempted.
+- [ ] **AC-35** (R14): The plaintext-secrets guardrail's behavior is
+      byte-identical with and without `[global.machine_identities]`
+      in a public personal overlay. Verified by snapshotting
+      guardrail output for a representative public-overlay scenario
+      before and after this feature lands.
+- [ ] **AC-36** (R18): Error chains from R13.4 / R13.5 / R13.7 do
+      not contain credential body bytes — only the path
+      `/niwa/provider-auth/<kind>/<project>` and the missing field
+      name (or schema version string). Verified by a unit test that
+      asserts each error message rendered against a body containing
+      sentinel byte sequences (e.g., `client_secret = "TESTCANARY"`)
+      does not contain the sentinel.
+- [ ] **AC-37** (R6 lazy verification): A workspace that does not
+      reference a given `(kind, project)` pair in any vault registry
+      MUST NOT trigger a `vault.Provider.Resolve` call for that
+      pair. Verified by configuring a fake vault that records every
+      `Resolve` invocation and asserting absence for un-referenced
+      pairs.
+- [ ] **AC-38** (R7 canonical path): The credential-body fetch path
+      uses the unmodified `<project-uuid>` segment exactly as it
+      appears in the workspace's `[vault.provider]` `project` field
+      (no case-folding, no normalization). Verified by configuring a
+      project UUID in mixed case and asserting the vault key path
+      preserves the original case in the `Resolve` ref.
+
+### Anonymous-provider rendering
+
+- [ ] **AC-39**: When the credential-sync provider is the anonymous
+      `[global.vault.provider]`, `niwa status --audit-auth` renders
+      the SOURCE column as `vault:(anonymous)`, the FALLBACK column
+      uses the same form when applicable, and the R12 stderr line
+      uses `source=vault:(anonymous)`. niwa MUST NOT emit a bare
+      `vault:` token (trailing colon with empty name).
+
+### Test plan notes (non-AC)
+
+- The "local wins on conflict" verification (AC-6a / AC-6b) requires
+  an Infisical-backend test double that returns distinct,
+  identifiable responses per credential — for example, an HTTP-level
+  fake that echoes a header derived from the supplied
+  `client_id`/`client_secret`. Without a distinguishing oracle,
+  AC-6b reduces to "the audit table records what the implementation
+  wrote," which is self-confirming. The test plan that ships with
+  Phase D MUST include such a fixture.
+
 ## Out of Scope
 
 - **Replacing or shadowing team-declared vault providers.** This is
@@ -745,6 +836,16 @@ This section MUST be empty before the PRD transitions to Accepted.
   CLI (`infisical secrets set`) or the dashboard. The user guide
   bundled with the implementation will document the recommended
   workflow.
+- **`state.json` schema bump is forward-only.** This feature bumps
+  the on-disk state schema from v3 to v4. A niwa binary that
+  predates this feature cannot read a v4 state file (the existing
+  forward-version check at `internal/workspace/state.go:246`
+  rejects it). Pinning a niwa version below the feature's release
+  after a single post-feature apply requires regenerating state
+  by re-running `niwa apply` with the older binary, which in turn
+  rewrites the file at v3. This is the same one-way property the
+  v2→v3 bump shipped with; it is called out here so users
+  understand the upgrade is not transparent.
 
 ## Decisions and Trade-offs
 
