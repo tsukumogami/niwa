@@ -741,7 +741,7 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 	// The personal-overlay globalOverride was parsed earlier at Step
 	// 0.3 so opt-in features (e.g., [global.machine_identities]) are
 	// detectable before the workspace-overlay's injectProviderTokens
-	// runs at line 592.
+	// runs at Step 0.6.
 	//
 	// cfg remains the original for per-instance reads; effectiveCfg
 	// carries the merge.
