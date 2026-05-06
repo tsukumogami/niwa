@@ -232,6 +232,7 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 	// Assertions
 	ctx.Step(`^the exit code is (\d+)$`, theExitCodeIs)
 	ctx.Step(`^the exit code is not (\d+)$`, theExitCodeIsNot)
+	ctx.Step(`^I append "([^"]*)" to file "([^"]*)" in instance "([^"]*)"$`, iAppendToFileInInstance)
 	ctx.Step(`^the output contains "([^"]*)"$`, theOutputContains)
 	ctx.Step(`^the output does not contain "([^"]*)"$`, theOutputDoesNotContain)
 	ctx.Step(`^the output equals "([^"]*)"$`, theOutputEquals)
