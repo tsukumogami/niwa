@@ -175,13 +175,13 @@ type cloneResult struct {
 
 // pipelineOpts configures shared pipeline behavior for Create vs Apply.
 type pipelineOpts struct {
-	existingState    *InstanceState
-	skipGlobal       bool
-	overlayURL       string   // from InstanceState.OverlayURL (empty = no overlay URL in state)
-	noOverlay        bool     // from InstanceState.NoOverlay
-	configSourceURL  string   // original source URL for convention overlay discovery
-	disclosedNotices []string // workspace-root-level notices already shown to the user
-	channelsSynthesized bool // true when channels were synthesized by --channels or NIWA_CHANNELS
+	existingState       *InstanceState
+	skipGlobal          bool
+	overlayURL          string   // from InstanceState.OverlayURL (empty = no overlay URL in state)
+	noOverlay           bool     // from InstanceState.NoOverlay
+	configSourceURL     string   // original source URL for convention overlay discovery
+	disclosedNotices    []string // workspace-root-level notices already shown to the user
+	channelsSynthesized bool     // true when channels were synthesized by --channels or NIWA_CHANNELS
 }
 
 // pipelineResult holds the outputs of the shared pipeline.
@@ -230,6 +230,17 @@ func (a *Applier) Create(ctx context.Context, cfg *config.WorkspaceConfig, confi
 	// discovery and without depending on workspace repos being cloned.
 	initState, _ := LoadState(workspaceRoot)
 
+	// Resolve the effective workspace name early. Doing this before
+	// runPipeline gives two benefits: a tampered ConfigNameOverride
+	// (defense in depth per Security §4) fails immediately rather than
+	// after a long clone attempt, and the same value can flow into
+	// instanceNumberFromName below without being recomputed.
+	configName, err := EffectiveConfigName(initState, cfg)
+	if err != nil {
+		_ = os.RemoveAll(instanceRoot)
+		return "", fmt.Errorf("resolving effective workspace name: %w", err)
+	}
+
 	var initOverlayURL string
 	var initNoOverlay bool
 	var initSkipGlobal bool
@@ -242,12 +253,12 @@ func (a *Applier) Create(ctx context.Context, cfg *config.WorkspaceConfig, confi
 	}
 
 	result, err := a.runPipeline(ctx, cfg, configDir, instanceRoot, now, &pipelineOpts{
-		existingState:    nil,
-		overlayURL:       initOverlayURL,
-		noOverlay:        initNoOverlay,
-		skipGlobal:       initSkipGlobal,
-		configSourceURL:  a.ConfigSourceURL,
-		disclosedNotices: initDisclosedNotices,
+		existingState:       nil,
+		overlayURL:          initOverlayURL,
+		noOverlay:           initNoOverlay,
+		skipGlobal:          initSkipGlobal,
+		configSourceURL:     a.ConfigSourceURL,
+		disclosedNotices:    initDisclosedNotices,
 		channelsSynthesized: a.ChannelsSynthesized,
 	})
 	if err != nil {
@@ -255,11 +266,16 @@ func (a *Applier) Create(ctx context.Context, cfg *config.WorkspaceConfig, confi
 		return "", err
 	}
 
-	instanceNumber := instanceNumberFromName(cfg.Workspace.Name, instanceName)
+	// Use the effective configName (resolved earlier above) for the
+	// instance-number derivation so `niwa init my-name --from upstream`
+	// correctly resolves the first instance to InstanceNumber=1 (not 0).
+	// instanceNumberFromName does string comparison against instanceName;
+	// passing the raw upstream name when an override is in play would
+	// fail the equality check.
+	instanceNumber := instanceNumberFromName(configName, instanceName)
 
 	saveWorkspaceRootDisclosures(workspaceRoot, initState, result.disclosedNotices)
 
-	configName := cfg.Workspace.Name
 	state := &InstanceState{
 		SchemaVersion:  SchemaVersion,
 		ConfigName:     &configName,
@@ -355,12 +371,12 @@ func (a *Applier) Apply(ctx context.Context, cfg *config.WorkspaceConfig, config
 	}
 
 	result, err := a.runPipeline(ctx, cfg, configDir, instanceRoot, now, &pipelineOpts{
-		existingState:    existingState,
-		skipGlobal:       existingState.SkipGlobal,
-		overlayURL:       existingState.OverlayURL,
-		noOverlay:        existingState.NoOverlay,
-		configSourceURL:  a.ConfigSourceURL,
-		disclosedNotices: wsDisclosedNotices,
+		existingState:       existingState,
+		skipGlobal:          existingState.SkipGlobal,
+		overlayURL:          existingState.OverlayURL,
+		noOverlay:           existingState.NoOverlay,
+		configSourceURL:     a.ConfigSourceURL,
+		disclosedNotices:    wsDisclosedNotices,
 		channelsSynthesized: a.ChannelsSynthesized,
 	})
 	if err != nil {
@@ -404,7 +420,15 @@ func (a *Applier) Apply(ctx context.Context, cfg *config.WorkspaceConfig, config
 
 	saveWorkspaceRootDisclosures(workspaceRoot, wsRootState, result.disclosedNotices)
 
-	configName := cfg.Workspace.Name
+	// Resolve the effective workspace name from the workspace-root init
+	// state on every apply so a user-given override (set by
+	// `niwa init <name>`) keeps surfacing through `niwa status` and
+	// `niwa apply` output. wsRootState was loaded earlier; re-using it
+	// avoids a second LoadState call.
+	configName, err := EffectiveConfigName(wsRootState, cfg)
+	if err != nil {
+		return fmt.Errorf("resolving effective workspace name: %w", err)
+	}
 	state := &InstanceState{
 		SchemaVersion:  SchemaVersion,
 		ConfigName:     &configName,
