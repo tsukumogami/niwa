@@ -16,6 +16,16 @@ import (
 	"github.com/tsukumogami/niwa/internal/source"
 )
 
+// driftCheckBackoff is the wait schedule used by headCommitWithRetry.
+// Its length determines the number of retries (e.g., len()==3 means
+// up to 3 retries on top of the initial attempt for 4 attempts total).
+// Tests override this slice to skip real waits.
+var driftCheckBackoff = []time.Duration{
+	500 * time.Millisecond,
+	1 * time.Second,
+	2 * time.Second,
+}
+
 // FetchClient is the interface EnsureConfigSnapshot consumes for
 // GitHub fetches. Production wires this to *github.APIClient; tests
 // substitute a fake.
@@ -125,11 +135,7 @@ func refreshSnapshot(ctx context.Context, configDir string, fetcher FetchClient,
 		return nil
 	}
 
-	ref := src.Ref
-	if ref == "" {
-		ref = "HEAD"
-	}
-	oid, _, status, err := fetcher.HeadCommit(ctx, src.Owner, src.Repo, ref, "")
+	oid, status, err := headCommitWithRetry(ctx, fetcher, src, reporter)
 	if err != nil {
 		// Network error or similar: per PRD R21, continue with cached
 		// snapshot and warn.
@@ -151,6 +157,53 @@ func refreshSnapshot(ctx context.Context, configDir string, fetcher FetchClient,
 
 	// Drift detected: fetch fresh, materialize, swap.
 	return materializeAndSwap(ctx, configDir, src, prov.SourceURL, fetcher, reporter)
+}
+
+// isTransientDriftError classifies a HeadCommit error as transient
+// (worth retrying) or permanent. Transient covers transport failures
+// (status == 0) and the GitHub 5xx subset known to recover quickly.
+// Other non-2xx responses (401/403/404/500/etc.) are treated as
+// permanent and surface to the caller on the first attempt.
+func isTransientDriftError(err error, status int) bool {
+	if err == nil {
+		return false
+	}
+	switch status {
+	case 0, 502, 503, 504:
+		return true
+	}
+	return false
+}
+
+// headCommitWithRetry wraps fetcher.HeadCommit with a short retry loop
+// over driftCheckBackoff. Permanent failures and successes return on
+// the first attempt; transient failures retry up to len(driftCheckBackoff)
+// times, emitting a replaceable Reporter.Status note between attempts so
+// the user sees why apply is briefly stalled. The final error returned
+// matches the most recent attempt and feeds the existing warn-and-cache
+// fallback unchanged.
+func headCommitWithRetry(ctx context.Context, fetcher FetchClient, src source.Source, reporter *Reporter) (oid string, status int, err error) {
+	ref := src.Ref
+	if ref == "" {
+		ref = "HEAD"
+	}
+	attempts := len(driftCheckBackoff) + 1
+	for i := 0; i < attempts; i++ {
+		oid, _, status, err = fetcher.HeadCommit(ctx, src.Owner, src.Repo, ref, "")
+		if !isTransientDriftError(err, status) || i == attempts-1 {
+			return oid, status, err
+		}
+		if reporter != nil {
+			reporter.Status(fmt.Sprintf("retrying drift check for %s/%s (attempt %d of %d)…",
+				src.Owner, src.Repo, i+2, attempts))
+		}
+		select {
+		case <-time.After(driftCheckBackoff[i]):
+		case <-ctx.Done():
+			return oid, status, ctx.Err()
+		}
+	}
+	return oid, status, err
 }
 
 // lazyConvertWorkingTree is the case-2 path: discover the source URL
