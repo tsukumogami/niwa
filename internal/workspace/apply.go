@@ -497,6 +497,34 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		authEntries = entries
 	}
 
+	// Step 0.3: parse the personal-overlay global config override early
+	// (when present). The parse is hoisted ahead of the workspace-overlay
+	// sync block so opt-in features declared in [global.*] — notably
+	// [global.machine_identities] (machine-identity-vault-sync) — are
+	// detectable before injectProviderTokens runs against the
+	// workspace-overlay vault registry at line 592. The parse depends
+	// only on a.GlobalConfigDir (Applier field) and opts.skipGlobal
+	// (pipelineOpts), both available from the start of runPipeline; the
+	// move introduces no new dependencies. Consumers downstream
+	// (CheckVaultScopeAmbiguity, the team/personal injectProviderTokens
+	// calls, BuildBundle for the personal-overlay registry,
+	// DetectShadows, ResolveGlobalOverride, MergeGlobalOverride) read
+	// globalOverride unchanged.
+	var globalOverride *config.GlobalConfigOverride
+	if a.GlobalConfigDir != "" && !opts.skipGlobal {
+		overridePath := filepath.Join(a.GlobalConfigDir, GlobalConfigOverrideFile)
+		data, readErr := os.ReadFile(overridePath)
+		if readErr == nil {
+			parsed, parseErr := config.ParseGlobalConfigOverride(data)
+			if parseErr != nil {
+				return nil, fmt.Errorf("parsing global config override: %w", parseErr)
+			}
+			globalOverride = parsed
+		} else if !os.IsNotExist(readErr) {
+			return nil, fmt.Errorf("reading global config override: %w", readErr)
+		}
+	}
+
 	// Step 0.5: overlay sync and merge — determine and sync the workspace overlay.
 	// This must run BEFORE discoverAllRepos so that the merged config (base +
 	// overlay) feeds into discovery — overlay sources can then contribute repos.
@@ -691,14 +719,18 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		}
 	}
 
-	// Steps 3a–3c: Parse the global config override, then run the
-	// vault resolver stage against BOTH team (ws) and personal
-	// (overlay) layers before the merge. The resolver must run
-	// before merge so that each layer's provider bundle is built
-	// from its own [vault] block only (file-local scoping, D-6 in
-	// the vault-integration design). Resolving post-merge would
-	// flatten provider declarations and make R12 collision
-	// detection impossible.
+	// Steps 3a–3c: Run the vault resolver stage against BOTH team (ws)
+	// and personal (overlay) layers before the merge. The resolver
+	// must run before merge so that each layer's provider bundle is
+	// built from its own [vault] block only (file-local scoping, D-6
+	// in the vault-integration design). Resolving post-merge would
+	// flatten provider declarations and make R12 collision detection
+	// impossible.
+	//
+	// The personal-overlay globalOverride was parsed earlier at Step
+	// 0.3 so opt-in features (e.g., [global.machine_identities]) are
+	// detectable before the workspace-overlay's injectProviderTokens
+	// runs at line 592.
 	//
 	// cfg remains the original for per-instance reads; effectiveCfg
 	// carries the merge.
@@ -709,21 +741,6 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 	// resolved values automatically.
 	redactor := secret.NewRedactor()
 	ctx = secret.WithRedactor(ctx, redactor)
-
-	var globalOverride *config.GlobalConfigOverride
-	if a.GlobalConfigDir != "" && !opts.skipGlobal {
-		overridePath := filepath.Join(a.GlobalConfigDir, GlobalConfigOverrideFile)
-		data, readErr := os.ReadFile(overridePath)
-		if readErr == nil {
-			parsed, parseErr := config.ParseGlobalConfigOverride(data)
-			if parseErr != nil {
-				return nil, fmt.Errorf("parsing global config override: %w", parseErr)
-			}
-			globalOverride = parsed
-		} else if !os.IsNotExist(readErr) {
-			return nil, fmt.Errorf("reading global config override: %w", readErr)
-		}
-	}
 
 	// R5 enforcement: a workspace with more than one [[sources]] block
 	// AND an active personal overlay must declare [workspace].vault_scope
