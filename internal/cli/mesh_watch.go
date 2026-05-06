@@ -134,7 +134,14 @@ type inboxEvent struct {
 	role            string
 	taskID          string
 	filePath        string // absolute path to .niwa/roles/<role>/inbox/<id>.json
-	resumeSessionID string // non-empty: use --resume <id> instead of -p <bootstrap>
+	resumeSessionID string // non-empty: use --resume <id> instead of -p <prompt>
+	// resumeIsNewTask distinguishes cross-task session resumes (fresh delegation
+	// to an existing session) from stall-recovery retries of the same task.
+	// When true, spawnWorker uses bootstrapPromptTemplate so the worker calls
+	// niwa_check_messages for the new envelope. When false (retry), it uses
+	// stallReminderText, which instructs Claude not to call niwa_check_messages
+	// again.
+	resumeIsNewTask bool
 }
 
 // supervisorExit is sent by a per-task supervisor goroutine when
@@ -858,6 +865,28 @@ func handleInboxEvent(evt inboxEvent, s spawnContext) {
 	}
 	s.logger.Printf("inbox_event role=%s task=%s claim=ok", evt.role, evt.taskID)
 
+	// If this task was delegated to a specific session, check whether the
+	// session has a previously captured ClaudeConversationID. When present,
+	// set resumeSessionID so spawnWorker uses --resume <id>. This lets the
+	// worker continue Claude's conversation from the previous task in the
+	// same session without re-introducing itself from scratch.
+	//
+	// Guard: sessionIDRe must match the captured ID (same regex used by the
+	// retry path). No file-integrity guard here — the ID was already validated
+	// when it was captured from the first worker's exit; if --resume fails
+	// because the JSONL is missing, Claude Code falls back to a fresh session.
+	if _, claimedSt, stErr := mcp.ReadState(taskDir); stErr == nil && claimedSt.SessionID != "" {
+		sessionsDir := filepath.Join(s.taskStoreRootDir(), ".niwa", "sessions")
+		if sessSt, lookupErr := mcp.ReadSessionLifecycleState(sessionsDir, claimedSt.SessionID); lookupErr == nil {
+			convID := sessSt.ClaudeConversationID
+			if convID != "" && sessionIDRe.MatchString(convID) {
+				s.logger.Printf("inbox_event role=%s task=%s session_resume=%s", evt.role, evt.taskID, convID)
+				evt.resumeSessionID = convID
+				evt.resumeIsNewTask = true
+			}
+		}
+	}
+
 	// Test-harness pause hook (Issue 8): block after the claim but
 	// before the spawn so tests can observe the envelope in the
 	// post-claim window (in-progress/ rename committed, worker.pid
@@ -940,10 +969,20 @@ func spawnWorker(evt inboxEvent, taskDir string, s spawnContext) {
 	}
 	var cmd *exec.Cmd
 	if evt.resumeSessionID != "" {
+		// Cross-task session resume: new task in an existing session.
+		// Use bootstrapPromptTemplate so the worker calls niwa_check_messages
+		// for the new envelope.
+		//
+		// Stall-recovery retries (resumeIsNewTask == false) keep stallReminderText:
+		// those resume the *same* task and must not re-read the envelope.
+		resumePrompt := stallReminderText
+		if evt.resumeIsNewTask {
+			resumePrompt = fmt.Sprintf(bootstrapPromptTemplate, evt.taskID)
+		}
 		cmd = exec.Command(
 			s.spawnBin,
 			"--resume", evt.resumeSessionID,
-			"-p", stallReminderText,
+			"-p", resumePrompt,
 			"--permission-mode="+s.workerPermMode,
 			"--mcp-config="+workerMCPPath,
 			"--strict-mcp-config",
