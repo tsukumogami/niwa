@@ -513,13 +513,28 @@ Apply pipeline (chronological; `<NEW>` marks new or reordered steps):
 0.1 Parse base WorkspaceConfig                    (existing)
 0.2 LoadProviderAuth(~/.config/niwa/provider-auth.toml)  (existing,
     moved from current line 491-498 to keep ordering with steps below)
-0.3 Parse GlobalConfigOverride                    <NEW position> (existing
-    parse, currently at apply.go:713-726). Moved up because the
-    workspace-overlay token injection at the existing 592 call site
-    needs to know whether [global.machine_identities] is opted in.
-    ParseGlobalConfigOverride runs R2 internally. The parse only
-    depends on a.GlobalConfigDir and opts.skipGlobal, both
-    available at apply pipeline entry, so the move is safe.
+0.3 Refresh personal-overlay snapshot, then parse GlobalConfigOverride
+                                                  <NEW position>
+    a. EnsureConfigSnapshotWithStatus           (existing Step 2a, hoisted)
+       └─> swaps the global-config dir on upstream drift; emits
+       └─> "syncing config..." Status (TTY-only no-op on non-TTY)
+       └─> and the optional R28 conversion notice via Reporter.Log.
+    b. read + ParseGlobalConfigOverride          (existing parse, hoisted)
+       └─> runs R2 internally.
+
+    The sync (a) and parse (b) are hoisted together as a single
+    phase, in their original sync-then-parse order. Hoisting only
+    the parse without the sync would change the parsed value for
+    users whose global config tracks a remote (drift would be
+    picked up one apply later than today). Both steps' inputs
+    (a.GlobalConfigDir, opts.skipGlobal, a.GitHubClient, a.Reporter,
+    opts.disclosedNotices) are Applier or pipelineOpts fields
+    available at pipeline entry, so the move is mechanically safe.
+
+    Why hoisted: workspace-overlay token injection at Step 0.6
+    needs to know whether [global.machine_identities] is opted in,
+    which means the parsed globalOverride must be available before
+    Step 0.5 runs.
 0.4 If [global.machine_identities] opted in:      <NEW>
     a. validateCredentialSyncBootstrap(file, allVaultSpecs, syncSpec)  (R9)
        — needs the resolved vault specs from workspace + overlay +
@@ -790,9 +805,26 @@ if niwaConfigDir, err := NiwaConfigDir(); err == nil {
     authEntries = entries
 }
 
-// Step 0.3: parse globalOverride (MOVED UP from current line 713-726)
+// Step 0.3: refresh personal-overlay snapshot, then parse niwa.toml.
+// Both halves (formerly Step 2a sync at apply.go:706, parse at
+// apply.go:713-726) are hoisted together to preserve the original
+// sync-then-parse ordering — without the sync hoist, drift on a
+// GitHub-tracked global config would be picked up one apply later.
 var globalOverride *config.GlobalConfigOverride
 if a.GlobalConfigDir != "" && !opts.skipGlobal {
+    // Step 0.3a: sync the personal overlay snapshot.
+    a.Reporter.Status("syncing config...")
+    fetcher, _ := a.GitHubClient.(FetchClient)
+    converted, syncErr := EnsureConfigSnapshotWithStatus(ctx, a.GlobalConfigDir, fetcher, a.Reporter)
+    if syncErr != nil {
+        a.Reporter.Warn("could not sync config: %v", syncErr)
+        return nil, fmt.Errorf("syncing global config: %w", syncErr)
+    }
+    if converted && !sliceContains(opts.disclosedNotices, noticeConfigConverted) {
+        a.Reporter.Log("note: %s converted from working tree to snapshot. ...", a.GlobalConfigDir)
+        newDisclosures = append(newDisclosures, noticeConfigConverted)
+    }
+    // Step 0.3b: parse the (possibly just-refreshed) niwa.toml.
     overridePath := filepath.Join(a.GlobalConfigDir, GlobalConfigOverrideFile)
     data, readErr := os.ReadFile(overridePath)
     if readErr == nil {
