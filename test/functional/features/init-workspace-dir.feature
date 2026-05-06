@@ -55,6 +55,20 @@ Feature: niwa init creates the workspace directory
     And the error output contains "config.toml"
     And the registry entry "my-team" still points at "elsewhere"
 
+  @critical
+  Scenario: niwa init <name> with sourced wrapper lands the caller in the new workspace
+    Given a clean niwa environment
+    And a local git server is set up
+    And a config repo "upstream-cfg" exists with body:
+      """
+      [workspace]
+      name = "upstream"
+      """
+    When I source the bash wrapper and run niwa init "my-team" from config repo "upstream-cfg"
+    Then the exit code is 0
+    And the workspace root "my-team" has a workspace.toml
+    And the wrapped shell ended in workspace "my-team"
+
   Scenario: niwa init --rebind retargets the registry to the new directory
     Given a clean niwa environment
     And a local git server is set up

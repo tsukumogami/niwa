@@ -20,7 +20,7 @@ func TestShellInitBash_ValidSyntax(t *testing.T) {
 	for _, want := range []string{
 		"_NIWA_SHELL_INIT=1",
 		"niwa()",
-		"create|go)",
+		"create|go|init)",
 		"command niwa",
 		"mktemp",
 		`NIWA_RESPONSE_FILE="$__niwa_tmp"`,
@@ -45,7 +45,7 @@ func TestShellInitZsh_ValidSyntax(t *testing.T) {
 	for _, want := range []string{
 		"_NIWA_SHELL_INIT=1",
 		"niwa()",
-		"create|go)",
+		"create|go|init)",
 		"command niwa",
 		"mktemp",
 		`NIWA_RESPONSE_FILE="$__niwa_tmp"`,

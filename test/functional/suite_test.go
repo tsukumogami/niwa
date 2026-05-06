@@ -187,6 +187,7 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 	ctx.Step(`^I run niwa init from config repo "([^"]*)" with overlay "([^"]*)"$`, iRunNiwaInitFromConfigRepoWithOverlay)
 	ctx.Step(`^I run niwa init "([^"]*)" from config repo "([^"]*)"$`, iRunNiwaInitNamedFromConfigRepo)
 	ctx.Step(`^I run niwa init "([^"]*)" from config repo "([^"]*)" with --rebind$`, iRunNiwaInitNamedFromConfigRepoWithRebind)
+	ctx.Step(`^I source the bash wrapper and run niwa init "([^"]*)" from config repo "([^"]*)"$`, iSourceWrapperAndRunNiwaInitNamed)
 	ctx.Step(`^I pre-create directory "([^"]*)"$`, iPreCreateDirectory)
 	ctx.Step(`^the registry already has workspace "([^"]*)" rooted at "([^"]*)"$`, iRegisterWorkspaceAt)
 	ctx.Step(`^the workspace root "([^"]*)" has a workspace\.toml$`, theWorkspaceRootHasWorkspaceTOML)

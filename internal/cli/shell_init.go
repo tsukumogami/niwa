@@ -38,7 +38,7 @@ const shellWrapperTemplate = `export _NIWA_SHELL_INIT=1
 
 niwa() {
     case "$1" in
-        create|go)
+        create|go|init)
             local __niwa_tmp __niwa_dir __niwa_rc
             __niwa_tmp=$(mktemp) || { command niwa "$@"; return $?; }
             NIWA_RESPONSE_FILE="$__niwa_tmp" command niwa "$@"

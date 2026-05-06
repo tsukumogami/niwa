@@ -32,6 +32,27 @@ func iRunNiwaInitNamedFromConfigRepo(ctx context.Context, name, repo string) (co
 	return ctx, runNiwa(s, s.workspaceRoot, fmt.Sprintf("niwa init %s --from %s", name, url))
 }
 
+// iSourceWrapperAndRunNiwaInitNamed runs the same `niwa init <name>
+// --from <url>` flow as iRunNiwaInitNamedFromConfigRepo, but inside a
+// wrapped bash subshell so the wrapper's NIWA_RESPONSE_FILE protocol
+// is exercised end-to-end. This is the only way to verify that
+// `builtin cd` fires in the caller's shell after `niwa init <name>`
+// returns (PRD R10a / AC-21a). Unit tests can assert that
+// writeLandingPath was invoked; only this scenario can assert the
+// shell actually changed directory.
+func iSourceWrapperAndRunNiwaInitNamed(ctx context.Context, name, repo string) (context.Context, error) {
+	s := getState(ctx)
+	if s == nil {
+		return ctx, fmt.Errorf("no test state")
+	}
+	url, ok := s.repoURLs[repo]
+	if !ok {
+		return ctx, fmt.Errorf("no URL stored for config repo %q", repo)
+	}
+	command := fmt.Sprintf("niwa init %s --from %s", name, url)
+	return ctx, runWrappedShell(s, s.workspaceRoot, command)
+}
+
 // iRunNiwaInitNamedFromConfigRepoWithRebind runs `niwa init <name>
 // --from <url> --rebind` from the workspace sandbox.
 func iRunNiwaInitNamedFromConfigRepoWithRebind(ctx context.Context, name, repo string) (context.Context, error) {
