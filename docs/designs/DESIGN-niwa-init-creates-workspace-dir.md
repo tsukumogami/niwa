@@ -318,17 +318,31 @@ The chosen design implements the PRD as follows:
 
 ### Components
 
+- **`internal/workspace/validate.go` (new file)** — shared input
+  validation.
+  - New: `ValidateInitName(name string) error` (exported). Applies
+    `^[a-zA-Z0-9._-]+$`, rejects literals `.`, `..`, `.niwa`, and
+    empty string. The returned error quotes the offending input and
+    includes a human-readable description of the allowed character
+    set per PRD R7. Exported so future entry points that ingest
+    workspace names (RPC, MCP, etc.) reuse the same rules.
 - **`internal/cli/init.go`** — primary control flow change.
-  - New: `validateInitName(name string) error` returning a typed
-    validation error that quotes the offending input.
-  - Modified: `runInit` reorganized to compute `workspaceRoot`,
-    enforce preflight order, and thread `workspaceRoot` into existing
-    calls.
+  - Modified: `runInit` reorganized to validate via
+    `workspace.ValidateInitName(name)` before any filesystem touch,
+    compute `workspaceRoot`, enforce preflight order, and thread
+    `workspaceRoot` into existing calls. Final-component creation
+    uses `os.Mkdir(workspaceRoot, 0o755)` (NOT `os.MkdirAll`) to fail
+    on raced symlinks; the parent of `workspaceRoot` is `cwd` and is
+    guaranteed to exist.
   - Modified: `printSuccess` now takes the workspace root path and
     includes it in the printed line. `runInit` resolves the path
     via `filepath.EvalSymlinks` before passing.
   - Modified: `buildInitState` accepts the optional override and
     populates `ConfigNameOverride` when set.
+  - New: rebind-warning rendering — when registry rebind is detected,
+    emit a `WARNING:`-prefixed stderr line, both `Root` paths, and a
+    trailing blank line for visual separation (per Security
+    Considerations §6).
 - **`internal/workspace/preflight.go`** — new sentinel.
   - New: `ErrTargetDirExists = errors.New("target path already exists")`.
   - Existing `CheckInitConflicts` is unchanged.
@@ -336,21 +350,25 @@ The chosen design implements the PRD as follows:
   - New field: `ConfigNameOverride string \`json:"config_name_override,omitempty"\``.
   - Schema version unchanged at v3.
 - **`internal/workspace/effective_name.go` (new file)** —
-  `EffectiveConfigName(state *InstanceState, cfg *config.WorkspaceConfig) string`
-  helper. Returns `state.ConfigNameOverride` if non-empty, else
-  `cfg.Workspace.Name`. State may be nil (returns cfg.Workspace.Name).
+  `EffectiveConfigName(state *InstanceState, cfg *config.WorkspaceConfig) (string, error)`
+  helper. When `state.ConfigNameOverride` is non-empty, the helper
+  re-validates it via `ValidateInitName` (defense in depth against
+  persistence-boundary tampering, per Security Considerations §4) and
+  returns the override on success, an error on validation failure.
+  When the override is empty, returns `cfg.Workspace.Name` (no
+  validation — already validated by config load).
 - **`internal/workspace/apply.go`** — call-site updates.
   - In `Apply.Create` (around line 407-411), replace
     `configName := cfg.Workspace.Name` with
-    `configName := EffectiveConfigName(initState, cfg)` and
-    `InstanceName: configName`. The init state is already loaded at
-    line 231; the override flows naturally.
+    `configName, err := EffectiveConfigName(initState, cfg)` (with
+    error propagation up). The init state is already loaded at line
+    231; the override flows naturally through, and the re-validation
+    closes the persistence-boundary tampering vector.
 - **`internal/workspace/status.go`** — call-site update.
-  - At line 69-70, after reading `state.ConfigName`, also consult the
-    override path via `EffectiveConfigName` if `cfg` is in scope
-    (status reads from instance state directly today, so the override
-    propagates through `Apply.Create`'s state write — minimal change
-    expected).
+  - Status reads from instance state directly (state.ConfigName is
+    already populated by Apply with the effective name); minimal
+    change expected. If status ever loads `cfg` and reads
+    `cfg.Workspace.Name`, it should switch to `EffectiveConfigName`.
 - **README.md, internal/cli/init.go (Long help)** — documentation
   updates per PRD R11/R12.
 - **`test/functional/features/`** — new `@critical` Gherkin scenario
@@ -467,45 +485,63 @@ coupled (init.go calls into preflight which references the new
 sentinel, which is consumed by tests that depend on the state schema
 change).
 
-**Step 1: state schema (additive).** Add `ConfigNameOverride` to
+**Step 1: shared validation.** Add `internal/workspace/validate.go`
+with the exported `ValidateInitName` function. Unit tests cover the
+regex, the `.` / `..` / `.niwa` / empty rejections, and error message
+shape (quoting + allowed-set description).
+
+**Step 2: state schema (additive).** Add `ConfigNameOverride` to
 `InstanceState`. Update existing state-file unit tests to confirm the
 field marshals/unmarshals correctly with `omitempty` semantics. No
 schema bump.
 
-**Step 2: preflight sentinel.** Add `ErrTargetDirExists` to
+**Step 3: preflight sentinel.** Add `ErrTargetDirExists` to
 `preflight.go`. No behavioral change yet; the sentinel is consumed in
-Step 3.
+Step 4.
 
-**Step 3: init.go control flow.** Reorganize `runInit` to:
-- Add `validateInitName` and apply it before any filesystem touch.
-- Compute `workspaceRoot` (= `targetDir` when name given, else cwd).
-- Run the new existence check on `workspaceRoot` when name given.
+**Step 4: init.go control flow.** Reorganize `runInit` to:
+- Call `workspace.ValidateInitName(name)` before any filesystem touch
+  when a positional name is given.
+- Compute `workspaceRoot` (= `targetDir = filepath.Join(cwd, name)`
+  when name given, else cwd).
+- Run the new caller-side existence check on `workspaceRoot` when name
+  given (returns `ErrTargetDirExists` for any pre-existing path,
+  routes to `ErrWorkspaceExists`/`ErrNiwaDirectoryExists` per R6).
 - Call `CheckInitConflicts(workspaceRoot)`.
-- `os.MkdirAll(workspaceRoot)` when name given (and target didn't exist).
-- Detect registry rebind; queue stderr warning.
-- Pass `workspaceRoot` (not `cwd`) into all downstream calls.
+- `os.Mkdir(workspaceRoot, 0o755)` when name given (NOT `MkdirAll`;
+  parent is cwd, guaranteed to exist; `Mkdir` fails on raced symlinks).
+- Detect registry rebind; queue prominent stderr warning (`WARNING:`
+  prefix, both `Root` paths, trailing blank line) per Security §6.
+- Pass `workspaceRoot` (not `cwd`) into all downstream calls
+  (`Scaffold`, `MaterializeFromSource`, `SaveState`).
 - Populate `state.ConfigNameOverride` in `buildInitState`.
 - Emit the override note when applicable (per R4).
 - Update `printSuccess` to include `absPath(workspaceRoot)` resolved
   through `filepath.EvalSymlinks`.
 
-**Step 4: effective-name helper and call-site updates.** Add
-`workspace.EffectiveConfigName` in a new file. Update
+**Step 5: effective-name helper and call-site updates.** Add
+`workspace.EffectiveConfigName` in a new file. The helper
+re-validates `ConfigNameOverride` via `ValidateInitName` when present
+(defense in depth per Security §4). Update
 `Apply.Create` to use it when constructing post-apply state (apply.go
-~line 407-411). Audit other readers of `cfg.Workspace.Name` for places
-where the effective name should be used; in practice the v1 audit
-shows `Apply.Create` is the load-bearing surface — once it writes the
-override into the instance-level state file's `ConfigName` and
-`InstanceName`, downstream readers that consult the instance state
-(status, completion, etc.) get the right value automatically.
+~line 407-411), propagating any validation error. Audit other
+readers of `cfg.Workspace.Name` for places where the effective name
+should be used; in practice the v1 audit shows `Apply.Create` is the
+load-bearing surface — once it writes the override into the
+instance-level state file's `ConfigName` and `InstanceName`,
+downstream readers that consult the instance state (status,
+completion, etc.) get the right value automatically.
 
-**Step 5: documentation and tests.** Update `init.go` `Long:` help
+**Step 6: documentation and tests.** Update `init.go` `Long:` help
 text. Update README quickstart, "shared workspace configs" section,
 registry-replay example, and commands-table row per PRD R12. Add
-unit tests for `validateInitName`, the new existence-check path,
-`EffectiveConfigName`, and the override-note conditions. Add the
-`@critical` Gherkin scenario covering end-to-end init → status →
-go for `niwa init <name> --from <fixture>`.
+unit tests for the new existence-check path, `EffectiveConfigName`
+(including the persistence-boundary re-validation case), and the
+override-note conditions. Add the `@critical` Gherkin scenario
+covering end-to-end init → status → go for
+`niwa init <name> --from <fixture>`. Add a unit test confirming
+`os.Mkdir` (not `MkdirAll`) is the call site by exercising a symlink
+race or by code inspection in the test.
 
 ### Test Plan Outline
 
@@ -553,49 +589,147 @@ go for `niwa init <name> --from <fixture>`.
 
 ## Security Considerations
 
-The change introduces three new vectors worth scrutiny:
+A Phase 5 security review identified the threats below. The design
+applies mitigations inline where they're cheap and preserves the
+PRD's explicit UX choices where they conflict, with the trade-off
+documented for each case.
+
+### Addressed by implementation
 
 1. **Path manipulation via `<name>`.** The positional name flows into
    `filepath.Join(cwd, name)` and is used as a directory name. Without
    validation, names containing `/`, `..`, or absolute paths would
-   redirect the workspace creation outside cwd. The PRD pins
-   validation (R7) to the existing `^[a-zA-Z0-9._-]+$` regex with
-   explicit `.` / `..` rejection and empty-string rejection, applied
-   before any filesystem write. This forecloses traversal and absolute-
-   path injection at the input layer.
+   redirect the workspace creation outside cwd. PRD R7 pins
+   validation to `^[a-zA-Z0-9._-]+$` with explicit `.` / `..` rejection
+   and empty-string rejection, applied upfront. Because the regex is
+   ASCII-positive-allowlist, it inherently excludes all control
+   characters, all Unicode bidi/RTL/LTR override characters, newlines,
+   tabs, and NUL bytes — terminal-escape injection at this layer is
+   foreclosed.
 
-2. **Symlink and TOCTOU on the existence check.** The pre-flight uses
-   `os.Lstat` (not `os.Stat`) so symlinks are not followed; a malicious
-   symlink at `<cwd>/<name>` can't trick the check into thinking the
-   target doesn't exist. There is a TOCTOU window between `os.Lstat`
-   returning `ErrNotExist` and the subsequent `os.MkdirAll` (a third
-   party could race a malicious file or symlink into the target before
-   `MkdirAll`). Mitigation: `os.MkdirAll` succeeds when the target
-   already exists as a directory and the content goes inside it; for a
-   raced regular file or symlink, `os.MkdirAll` would fail with a
-   meaningful error (file exists or path component is not a directory),
-   which short-circuits the rest of init. The race window is narrow
-   and the failure mode is loud, so no further mitigation (e.g.,
-   atomic-create-via-mkdir-then-stat) is warranted in v1.
+2. **`.niwa` blacklist.** The regex permits `.niwa` (the literal
+   directory name niwa itself uses for state). A workspace named
+   `.niwa` would create `<cwd>/.niwa/.niwa/workspace.toml`, where the
+   outer `.niwa` is exactly the marker `CheckInitConflicts` walks up
+   looking for. Subsequent niwa commands run from the parent
+   directory would walk into a confused state. **Mitigation:**
+   `validateInitName` rejects the literal string `.niwa` explicitly,
+   alongside `.` and `..`. Other "semantically dangerous"
+   leading-dot names (`.git`, `.ssh`) are NOT blacklisted; they're
+   user-domain choices and PRD-deferred regex tightening would be
+   the right place for any broader policy.
 
-3. **Stderr message content.** The override note (R4) and the rebind
-   warning (R8) include user-supplied values (`<name>`, registry
-   `Root` paths). niwa already prints user-supplied paths to stderr
-   in many places (`internal/cli/go.go:128, 132, 219` etc.); the new
-   messages follow the same convention. There is no shell-execution
-   surface where these strings would be re-interpreted; the risk is
-   limited to terminal-escape injection if a user-controlled name
-   reached stderr. Validation in R7 rejects control characters (the
-   regex excludes them), closing this vector.
+3. **Symlink TOCTOU between Lstat and directory creation.** The
+   pre-flight uses `os.Lstat` (not `os.Stat`) so symlinks at
+   `<cwd>/<name>` are detected without following. There is a window
+   between `os.Lstat` returning `ErrNotExist` and the subsequent
+   directory creation in which an attacker could race a symlink into
+   the gap. If `os.MkdirAll` were used (as drafted), a raced
+   symlink-to-attacker-controlled-directory would silently succeed —
+   the clone would land in the attacker's location. **Mitigation:**
+   the implementation uses `os.Mkdir(targetDir, 0o755)` for the final
+   component (parent components, if any, are guaranteed to exist —
+   `targetDir`'s parent is `cwd`). `os.Mkdir` fails if the target
+   exists at all, including as a symlink, closing the symlink-race
+   variant.
+
+4. **`ConfigNameOverride` re-validation at apply time.**
+   `ConfigNameOverride` is plain text in `<workspaceRoot>/.niwa/instance.json`.
+   A persistence-boundary attacker (any process with write access to
+   that file) could rewrite the override between `niwa init` and
+   `niwa apply`. Since the override flows into `InstanceState.InstanceName`
+   and is used as a path segment downstream, a poisoned value could
+   cause directory traversal at apply time. **Mitigation:**
+   `Apply.Create` re-validates the override against the same
+   regex+blacklist used by init (`workspace.ValidateInitName`, exported
+   from the workspace package for shared use). On validation failure,
+   apply errors out rather than using the value. This costs a single
+   regex check on each apply and closes the persistence-boundary
+   attack.
+
+5. **Shared validation entry point.** `ValidateInitName` is exported
+   from `internal/workspace` so that any future entry point that
+   ingests a workspace name (RPC, remote trigger, MCP tool call, etc.)
+   reuses the same rules. The validation must be applied on the
+   post-decode string at every entry point.
+
+### Documented as accepted trade-offs
+
+6. **Registry rebind without consent gate.** PRD R8 specifies
+   "warn, don't error" for the case where a positional `<name>` is
+   already registered to a different `Root`. The security review
+   surfaced a CWD-poisoning attack: an attacker convinces a user to
+   run `niwa init <known-name>` from an attacker-controlled directory
+   (e.g., a freshly-extracted tarball), silently rebinding the
+   registry so subsequent `niwa go <name>` lands in the attacker's
+   location. The PRD's UX position is to preserve the documented
+   `cd ~/other-dir && niwa init my-team` re-init pattern as a single
+   command; requiring a `--rebind` flag or interactive Y/N would
+   break that. **Mitigation applied:** the rebind warning is rendered
+   prominently — prefixed with `WARNING:` on its own stderr line,
+   followed by both the previous and new `Root` paths, followed by
+   a blank line for visual separation. Users who pipe stderr to
+   `/dev/null` or who don't read the message remain at risk; this is
+   accepted per the PRD's UX trade-off. **Threat model:** the attack
+   requires the attacker to know the user's registered workspace name
+   AND lure the user to a specific cwd, raising the cost; users
+   handling sensitive workspaces should pause before running
+   `niwa init <existing-name>` from a directory they don't fully
+   trust.
+
+7. **`EvalSymlinks` resolution in the success message.** PRD R9
+   specifies `filepath.EvalSymlinks` for the success message path
+   (matching macOS `/var/...` → `/private/var/...` handling
+   elsewhere). If `<cwd>` contains a symlink in its ancestry, the
+   resolved path printed on stdout could disclose attacker-influenced
+   path segments. The threat is information disclosure / social
+   engineering, not privilege escalation. **Trade-off accepted per
+   PRD R9.** Users in security-sensitive contexts who need an
+   un-resolved path can derive it from the registered `Root` via
+   `niwa go <name> --pwd` or equivalent (no design change here).
+
+8. **Path disclosure in errors.** Error messages and the rebind
+   warning include absolute paths, which contain the username (e.g.,
+   `/home/<user>/...`). This is a pre-existing niwa convention
+   (`internal/cli/go.go:128, 132, 219` and most other CLI errors).
+   Operators in regulated CI environments who paste niwa errors into
+   external systems should be aware. **Out of scope to change** for
+   this PRD; documented for transparency.
+
+### Out of scope, documented for completeness
+
+9. **Concurrent `niwa init <name>`.** Two concurrent invocations
+   from the same cwd would both pass `os.Lstat`; the first
+   `os.Mkdir` wins, the second errors. After the winning init's
+   `os.Mkdir`, downstream operations (clone, state write, registry
+   update) are not protected by a process-level lock. The window for
+   a second invocation to interfere is small and the failure modes
+   (clone errors, state-file write conflicts) are visible. niwa does
+   not have a cross-process locking story for `init` today; adding
+   one is **out of scope** for this PRD. Users running automated
+   pipelines should serialize init invocations or accept the small
+   risk of partial materialization.
+
+10. **Symlink in cwd's ancestry.** If the user's `cwd` itself
+    contains an attacker-controlled symlink in its ancestry,
+    `filepath.Join(cwd, name)` lands in the attacker's location.
+    This is **pre-existing user-domain behavior** (the user chose
+    their cwd). The design does not attempt to detect this case;
+    documented as a non-goal.
+
+11. **Clean-break old-pattern footgun.** A user running
+    `mkdir foo && cd foo && niwa init foo` produces a silently-nested
+    `foo/foo/` workspace. PRD Known Limitations accepts this; the
+    success-message absolute path (R9) makes it visible.
+
+### Out of scope: untouched surfaces
 
 The change does not touch authentication, network surfaces, secret
-material, or privilege-escalation pathways. The override field in
-state is plain text; it does not store credentials. State files
-already live at `~/.niwa/.../instance.json` with the same permissions
-they have today.
-
-A jury-style security review may surface additional considerations;
-the design includes a Phase 5 security agent run before the PR opens.
+material, vault providers, or privilege-escalation pathways. State
+files live at `<workspaceRoot>/.niwa/instance.json` with `0o644`
+permissions (file) inside a `0o755` workspace directory — same
+permissions as today. The `ConfigNameOverride` field stores plain
+text; it does not contain credentials, tokens, or secret material.
 
 ## Consequences
 
