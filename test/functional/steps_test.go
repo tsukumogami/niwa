@@ -664,6 +664,28 @@ func theFileInHomeContains(ctx context.Context, name, want string) error {
 	return nil
 }
 
+// iAppendToFileInInstance appends a line to a file relative to an instance
+// root. Used to inject sentinel markers into workspace-context.md so
+// @claude-integration scenarios can verify rules-file loading by asking about
+// content that demonstrably exists nowhere else (not in cwd, not in training
+// data).
+func iAppendToFileInInstance(ctx context.Context, content, relPath, instance string) (context.Context, error) {
+	s := getState(ctx)
+	if s == nil {
+		return ctx, fmt.Errorf("no test state")
+	}
+	full := filepath.Join(s.workspaceRoot, instance, relPath)
+	f, err := os.OpenFile(full, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		return ctx, fmt.Errorf("opening %s: %w", full, err)
+	}
+	defer f.Close()
+	if _, err := fmt.Fprintln(f, content); err != nil {
+		return ctx, fmt.Errorf("writing to %s: %w", full, err)
+	}
+	return ctx, nil
+}
+
 func theOutputContains(ctx context.Context, text string) error {
 	s := getState(ctx)
 	if !strings.Contains(s.stdout, text) {
