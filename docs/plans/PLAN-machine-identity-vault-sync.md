@@ -41,7 +41,7 @@ create a bootstrap cycle.
 
 ## Issue Outlines
 
-### I1 — refactor(workspace): reorder globalOverride parse ahead of overlay sync
+### Issue 1: refactor(workspace): reorder globalOverride parse ahead of overlay sync
 
 **Complexity:** testable
 
@@ -63,9 +63,9 @@ at `apply.go:592`.
 - Reorder is its own commit with a focused diff.
 - No new files, no public API changes.
 
-**Dependencies:** None.
+**Dependencies**: None.
 
-### I2 — feat(workspace): introduce CredentialPool with file-only path and audit log
+### Issue 2: feat(workspace): introduce CredentialPool with file-only path and audit log
 
 **Complexity:** testable
 
@@ -92,9 +92,9 @@ behavior.
 - I1's snapshot test stays byte-identical (PRD AC-28, AC-29).
 - No `secret.reveal.UnsafeReveal` use in this issue.
 
-**Dependencies:** I1.
+**Dependencies**: <<ISSUE:1>>.
 
-### I3 — feat(workspace): persist credential-source records in state.json (v3→v4)
+### Issue 3: feat(workspace): persist credential-source records in state.json (v3→v4)
 
 **Complexity:** testable
 
@@ -122,9 +122,9 @@ state-save time.
   audit log.
 - No new files under `~/.config/niwa/` (PRD AC-30).
 
-**Dependencies:** I2.
+**Dependencies**: <<ISSUE:2>>.
 
-### I4 — feat(cli): add niwa status --audit-auth offline audit command
+### Issue 4: feat(cli): add niwa status --audit-auth offline audit command
 
 **Complexity:** testable
 
@@ -151,9 +151,9 @@ SOURCE=`none`.
   every SOURCE/FALLBACK combination, sort stability, and
   non-zero-exit on `none`.
 
-**Dependencies:** I3.
+**Dependencies**: <<ISSUE:3>>.
 
-### I5 — feat(config): machine_identities opt-in parser with R2 validation
+### Issue 5: feat(config): machine_identities opt-in parser with R2 validation
 
 **Complexity:** testable
 
@@ -177,9 +177,9 @@ SOURCE=`none`.
   team-config provider name but not a personal-overlay one (R10
   diagnostic via R2's "not declared in this file" path).
 
-**Dependencies:** None.
+**Dependencies**: None.
 
-### I6 — feat(workspace): credential-sync provider lifecycle and R9 bootstrap check
+### Issue 6: feat(workspace): credential-sync provider lifecycle and R9 bootstrap check
 
 **Complexity:** critical
 
@@ -212,9 +212,9 @@ enforcement.
   `bundle.CloseAll()` runs cleanly via existing defer.
 - PRD AC-25, AC-26, AC-27 covered.
 
-**Dependencies:** I5, I2.
+**Dependencies**: <<ISSUE:5>>, <<ISSUE:2>>.
 
-### I7 — feat(workspace): lazy vault credential loader with body parsing
+### Issue 7: feat(workspace): lazy vault credential loader with body parsing
 
 **Complexity:** critical
 
@@ -249,9 +249,9 @@ documented justification.
 - PRD AC-31: second apply re-fetches.
 - PRD AC-37: un-referenced pairs trigger zero `Resolve` calls.
 
-**Dependencies:** I6.
+**Dependencies**: <<ISSUE:6>>.
 
-### I8 — feat(workspace): R13 failure-mode error wiring for vault credentials
+### Issue 8: feat(workspace): R13 failure-mode error wiring for vault credentials
 
 **Complexity:** testable
 
@@ -276,9 +276,9 @@ rows.
 - Audit log records SOURCE=`none` for unresolvable pairs (PRD AC-11).
 - Functional Gherkin scenarios (`@critical`) cover R13.1 and R13.2.
 
-**Dependencies:** I7.
+**Dependencies**: <<ISSUE:7>>.
 
-### I9 — feat(workspace): R12 apply-time stderr emission for credential sources
+### Issue 9: feat(workspace): R12 apply-time stderr emission for credential sources
 
 **Complexity:** testable
 
@@ -307,9 +307,9 @@ rows.
 - Functional Gherkin scenario asserts a representative two-pair
   apply produces exactly two `auth:` lines.
 
-**Dependencies:** I7.
+**Dependencies**: <<ISSUE:7>>.
 
-### I10 — docs(guides): machine-identity-vault-sync user guide
+### Issue 10: docs(guides): machine-identity-vault-sync user guide
 
 **Complexity:** simple
 
@@ -334,7 +334,7 @@ bootstrap, rotation, and common errors. List the guide in
 - No emojis, no AI-attribution, no AI tells (per
   `.claude/helpers/writing-style.md`).
 
-**Dependencies:** I9.
+**Dependencies**: <<ISSUE:9>>.
 
 ## Dependency Graph
 
