@@ -51,16 +51,19 @@ Proposed
 Today's apply pipeline (`internal/workspace/apply.go`) authenticates
 vault providers in two coupled steps:
 
-1. **`LoadProviderAuth(niwaConfigDir)`** at apply.go:492 reads
+1. **`LoadProviderAuth(niwaConfigDir)`** at apply.go:493 reads
    `~/.config/niwa/provider-auth.toml` once, returning a
-   `[]ProviderAuthEntry` slice.
+   `[]ProviderAuthEntry` slice. The call is gated by an
+   `if niwaConfigDir, err := NiwaConfigDir(); err == nil {` block at
+   apply.go:492.
 2. **`injectProviderTokens(ctx, entries, registry)`** at apply.go:592,
    742, and 746 walks each `VaultRegistry` (workspace overlay, team
    config, personal-overlay-global). For each provider spec, it
    calls `MatchProviderAuth(spec, entries)` (providerauth.go:102) to
    find a matching entry by `(kind, project)`, authenticates against
-   the backend if matched, and injects the resulting token into
-   `ProviderConfig["token"]`.
+   the backend if matched, and mutates the spec's config in place,
+   setting `ProviderConfig["token"]`. The injection lives in
+   `internal/workspace/providerauth.go:132`.
 
 The injection mechanism stops at the local file. There's no
 secondary lookup against the personal-overlay's vault provider, even
@@ -86,17 +89,36 @@ System boundaries the design must respect:
 
 - **Existing matching code** (`MatchProviderAuth`,
   `injectProviderTokens`) is correct and should not be rewritten.
-- **`vault.Registry.Build`** (the existing pipeline that opens vault
-  providers from a `VaultRegistry`) is the canonical way to
-  instantiate a `vault.Provider`. Reusing it keeps backend
-  authentication uniform.
-- **`vault.Provider.Resolve(ctx, ref)`** is single-key only. There
-  is no list/scan API. This forces the design to either know which
-  keys to ask for (we do — from the resolved registries) or to
-  publish a manifest convention (rejected; see Considered Options).
+- **`vault.Registry.Build`**
+  (`internal/vault/registry.go:90`) is the canonical factory. Its
+  signature is `Build(ctx, []ProviderSpec) (*Bundle, error)` — it
+  takes a slice of specs, returns a `*Bundle`, and opens each
+  provider via the registered `factory.Open(ctx, spec.Config)`.
+  `factory.Open` does NOT accept auth entries; token injection
+  happens **before** `Build` is called by mutating
+  `spec.Config["token"]` via `injectProviderTokens` (see flow
+  above). To open a single provider, the design calls `Build` with
+  a one-element slice and retrieves the result via `bundle.Get(name)`.
+- **`vault.Provider.Resolve(ctx, ref)`**
+  (`internal/vault/provider.go:54`) is single-key only and returns
+  `(secret.Value, VersionToken, error)`. There is no list/scan API.
+  The interface defines two sentinel errors —
+  `vault.ErrKeyNotFound` and `vault.ErrProviderUnreachable` — that
+  the design relies on to discriminate "key absent" (R13.3) from
+  "vault unreachable" (R13.1).
+- **`secret.Value`** (`internal/secret/value.go:67`) is a struct
+  that intentionally does not expose its plaintext bytes. Plaintext
+  access is gated through `internal/secret/reveal.UnsafeReveal`,
+  which carries an explicit warning ("DO NOT import this package
+  from new code without explicit review"). This design adds a new
+  legitimate caller for credential-pool body parsing; the
+  justification and reviewer guidance are spelled out in
+  `parseProviderAuthBody` below.
 - **`state.json`** is the existing per-workspace persistence file
-  (`internal/state/state.go`). Adding a top-level field is the
-  established way to add per-apply records.
+  (`internal/workspace/state.go`). The schema-version constant is
+  `SchemaVersion` (currently `3`); the persisted struct is
+  `InstanceState`. Adding a top-level field is the established way
+  to add per-apply records (see how `ConfigSource` arrived in v3).
 
 ## Decision Drivers
 
@@ -151,28 +173,39 @@ layer is loaded eagerly (small file, parse it once). The vault layer
 is a lazy loader: it holds a reference to an opened
 `vault.Provider`, the conventional path prefix
 (`/niwa/provider-auth/<kind>/`), and a `version` validator. Lookups
-go through the pool's `Lookup(kind, project) (*PoolEntry, error)`
+go through the pool's
+`Lookup(ctx, kind, project) (*ProviderAuthEntry, AuditRecord, error)`
 method, which returns:
 
-- The local-file entry if present (always wins per R4)
+- The local-file entry if present (always wins per R4), with the
+  audit record's `Fallback` set when the vault also had an entry.
 - Otherwise, lazily fetches from the vault, parses the TOML body,
-  validates the `version` field (R8), and returns the result
-- Otherwise, returns `nil` (no entry — fall through to CLI session)
+  validates the `version` field (R8), and returns the result.
+- Otherwise, returns `nil` for the entry plus an audit record
+  whose `Source` is tentatively `cli-session` (the caller may
+  upgrade to `none` if backend authentication ultimately fails).
 
-A second method `LookupAll(kind, project)` returns BOTH layers'
-entries (used by audit so we can record fallbacks):
+`Lookup` returns the winning entry plus an `AuditRecord` that
+captures both layers' presence (the audit record's `Fallback`
+field is set when the file wins but the vault also had an entry).
+This collapses what could have been two separate methods
+("which entry wins" and "what was in the other layer") into a
+single call that walks the layers once.
 
 ```go
-type PoolEntry struct {
-    Source      Source           // local-file | vault | none
-    ProviderName string          // for vault source: provider name (empty for anonymous)
-    Entry       ProviderAuthEntry
+type AuditRecord struct {
+    Kind     string
+    Project  string
+    Source   Source  // local-file | vault | cli-session | none
+    Provider string  // for vault source: provider name (empty for anonymous)
+    Fallback string  // "vault:<name>" when local overrides vault; "" otherwise
 }
 ```
 
-`injectProviderTokens` is updated to take the pool, call
-`LookupAll`, persist both layers' presence into the audit record
-(see Decision 3), and authenticate using the winning entry.
+`injectProviderTokens` is updated to take the pool, call `Lookup`
+once per spec, persist the returned `AuditRecord` into the pool's
+audit log (see Decision 3), and authenticate using the winning
+entry.
 
 **Rationale**: Option A keeps the matching/auth flow inside one
 place (`injectProviderTokens` plus the pool's lazy logic) and avoids
@@ -230,18 +263,31 @@ In code, the open looks like:
 ```go
 spec, err := pickCredentialSyncSpec(globalOverride, machineIds)
 if err != nil { return err }
-// R9 check: spec's (kind, project) MUST NOT appear in pool's keys
+// R9 check: spec's (kind, project) MUST NOT appear in the credential pool's keys.
 if poolHasKey(file, spec.Kind, spec.Config["project"]) {
     return chickenAndEggError(spec)
 }
-// Open via existing factory; auth via CLI session (no pool entry by R9)
-prov, err := vault.OpenSingle(ctx, spec, /*authEntries=*/nil)
+// Open via existing factory. We deliberately do NOT call
+// injectProviderTokens for this spec — the token-injection
+// mechanism is what would re-introduce the R9 cycle. Skipping it
+// means spec.Config["token"] stays unset, and the backend's
+// factory.Open falls through to its CLI-session auth path
+// (Infisical: the universal-auth login uses the active
+// `infisical login` session). This is the structural enforcement
+// of R9: there is no path by which the credential-sync provider
+// can authenticate from the credential pool.
+bundle, err := vault.DefaultRegistry.Build(ctx, []vault.ProviderSpec{spec})
 if err != nil { return err }
-defer prov.Close()
+defer bundle.CloseAll()
+prov, err := bundle.Get(spec.Name)
+if err != nil { return err }
 ```
 
-The `authEntries` argument is intentionally `nil` — passing the pool
-would re-introduce the cycle R9 forbids.
+`Registry.Build` returns `*vault.Bundle` rather than a bare
+`vault.Provider`; the credential-sync provider's lifetime is owned
+by this single-element bundle, and `defer bundle.CloseAll()` is
+sufficient. There is no `vault.OpenSingle` helper to author —
+`Build` with a one-element slice is the existing API.
 
 **Rationale**: Option A is appealing for code reuse but couples the
 two `Bundle` lifecycles. Option C scatters credential-sync logic
@@ -255,22 +301,29 @@ R11 requires `niwa status --audit-auth` to work fully offline. The
 audit reads from persisted state. Three options for *where and how*
 to persist:
 
-- **Option A — New top-level `auth_sources` map in
-  `state.json`** keyed by `"<kind>/<project>"`, value is `{source,
-  fallback}`.
+The persisted struct is `InstanceState` in
+`internal/workspace/state.go`, with the schema version held by the
+`SchemaVersion` field (`schema_version` JSON tag). The current
+constant is `SchemaVersion = 3` (`internal/workspace/state.go:43`).
+
+- **Option A — New top-level `auth_sources` field on
+  `InstanceState`** keyed by `"<kind>/<project>"`, value is
+  `{source, fallback}`.
 - **Option B — Annotate existing per-provider state** records with
   a `source` field. State is already tracked per provider in
-  `state.json`; this would extend that.
+  `InstanceState`; this would extend that.
 - **Option C — Separate `auth_state.json` file** alongside
   `state.json`.
 
 #### Chosen: Option A — `auth_sources` map in `state.json`
 
-Add a top-level field:
+Add a top-level `auth_sources` field on `InstanceState`. The
+JSON key is `auth_sources`; the schema-version field (already
+present) bumps to `4`:
 
 ```json
 {
-  "version": 4,
+  "schema_version": 4,
   ...
   "auth_sources": {
     "infisical/550e8400-...": {
@@ -294,8 +347,8 @@ Add a top-level field:
 ```
 
 The map is repopulated atomically on every successful apply
-invocation: `apply.go` collects `(kind, project) -> PoolEntry`
-records as `injectProviderTokens` runs and writes the map at
+invocation: `apply.go` collects `(kind, project) -> AuditRecord`
+entries as `injectProviderTokens` runs and writes the map at
 state-save time. Failed applies leave the previous map intact (the
 on-disk state isn't written when apply errors before state save).
 
@@ -306,20 +359,30 @@ and risks breaking on `state.json` migrations. Option C creates a
 new on-disk surface, which violates R17.
 
 State-version bump: this design adds `auth_sources` at the top
-level. We bump `state.json` schema version (`v3` -> `v4`) and write
-a one-line migration that initializes `auth_sources` to an empty map
-when reading a v3 file. The empty map renders an empty
-`--audit-auth` table on the first read after upgrade; the next apply
-populates it.
+level of `InstanceState`. The `SchemaVersion` constant in
+`internal/workspace/state.go` bumps from `3` to `4`. The migration
+shim in `LoadState` initializes `AuthSources` to an empty map when
+reading a v3 file; the empty map renders an empty `--audit-auth`
+table on the first read after upgrade, and the next apply
+populates it. The migration is forward-only — a niwa binary that
+predates this feature reading a v4 state file fails the existing
+forward-version check (`internal/workspace/state.go:246`,
+`schema_version > SchemaVersion`). This is the same downgrade
+behavior as the v2→v3 bump; it is called out as a Known
+Limitation in the PRD so users understand pinning a niwa version
+post-feature is one-way.
 
 ### Decision 4: Validation timing and placement
 
 R2 (unknown-provider name) and R9 (chicken-and-egg) must surface
 before any vault call. Two placements considered:
 
-- **Option A — Extend `validate_vault_refs.go`** (the existing
-  config-parse-time validator that checks `vault://` URI references)
-  with new rules for `[global.machine_identities]`.
+- **Option A — Extend `ParseGlobalConfigOverride`** in
+  `internal/config/config.go:450` so the R2 check runs alongside
+  the existing single-file validations (`validateGlobalOverridePaths`,
+  `cfg.Global.Vault.Validate`) that already run there. The
+  diagnostic wording mirrors the precedent at
+  `validate_vault_refs.go:285-293`.
 - **Option B — Add a new pre-fetch validation pass** in `apply.go`
   that runs after the global overlay is loaded but before the
   credential-sync provider is opened.
@@ -328,9 +391,19 @@ before any vault call. Two placements considered:
 
 R2 (unknown provider name) is a **purely config-local** check: does
 the named provider exist in the same file's `[global.vault.*]`
-declarations? This is exactly the shape `validate_vault_refs.go`
-handles for `vault://` URIs. Add the check there, mirroring the
-existing diagnostic at validate_vault_refs.go:285-293.
+declarations? `validate_vault_refs.go` is the obvious-looking home,
+but that file's existing entry points operate on
+`*WorkspaceConfig` and reach the validator only as part of
+`ValidateWorkspace`. R2's input is a `GlobalConfigOverride`, parsed
+by `ParseGlobalConfigOverride` in `internal/config/config.go:450`.
+Add the check there, immediately after
+`cfg.Global.Vault.Validate("global overlay")` (line 458), so any
+syntactically-parseable global override either has a valid
+`[global.machine_identities]` block or fails before
+`ParseGlobalConfigOverride` returns. The diagnostic wording mirrors
+the precedent at `validate_vault_refs.go:285-293`. (We could also
+re-export the existing diagnostic helper for shared wording; both
+files emit very similar error text.)
 
 R9 (chicken-and-egg) is a **cross-source** check that needs the
 local credential file plus the resolved set of vault provider specs
@@ -364,75 +437,150 @@ narrowest natural home.
 
 ## Decision Outcome
 
-The four decisions compose into a small additive feature gated on
-`[global.machine_identities]`:
+The four decisions compose into an additive feature gated on
+`[global.machine_identities]`. There is one cross-cutting refactor
+the original framing missed and that this revision now calls out
+explicitly: the workspace-overlay layer's `injectProviderTokens`
+call at `apply.go:592` runs **before** the global override is
+parsed today (the parse lives at `apply.go:713-726`). For a
+vault-sourced credential to authenticate the overlay's
+`[vault.provider]`, the credential-sync provider must be open
+before that injection. Therefore the global-override parse moves
+earlier in the pipeline (Step 0.4 below), ahead of the workspace
+overlay sync at 0.5. This is a behavior-preserving reorder — the
+parse only depends on `a.GlobalConfigDir` and `opts.skipGlobal`,
+both available at the top of the pipeline — but it is a real
+refactor with its own test surface.
 
-1. **Config parser (`internal/config/validate_vault_refs.go`)**
-   gains R2: when `[global.machine_identities]` is present in the
-   personal overlay, validate `from` against declared
-   `[global.vault.*]` provider names.
+The components changed:
+
+1. **Config parser (`internal/config/config.go:450`,
+   `ParseGlobalConfigOverride`)** gains R2: when
+   `[global.machine_identities]` is present, validate `from`
+   against declared `[global.vault.*]` provider names. The check
+   sits next to the existing `cfg.Global.Vault.Validate(...)`
+   call so any parsed override either has a valid
+   `[global.machine_identities]` block or returns an error
+   before the override leaves `ParseGlobalConfigOverride`.
 2. **Apply (`internal/workspace/apply.go`)** gains:
+   - The global-override parse moves earlier in the pipeline
+     (new Step 0.4) so opt-in detection can happen before the
+     overlay's `injectProviderTokens` at the existing line 592.
    - A pre-fetch R9 check
      (`validateCredentialSyncBootstrap`).
    - A credential-sync provider open
-     (`openCredentialSyncProvider`) gated on opt-in.
+     (`openCredentialSyncProvider`) gated on opt-in. Internally
+     uses `vault.DefaultRegistry.Build(ctx, []ProviderSpec{spec})`
+     and `bundle.Get(spec.Name)`; deliberately skips
+     `injectProviderTokens` for this single spec so authentication
+     falls through to CLI session — the structural R9 enforcement.
    - A `CredentialPool` constructed from the file (existing) plus
      the opened provider (new).
    - `injectProviderTokens` updated to take the pool and record
-     audit info.
-   - Per-pair stderr emission via the existing `Reporter`.
-3. **State (`internal/state/state.go`)** gains an `auth_sources`
-   map and a `v3 -> v4` migration.
+     audit info. The existing call sites at `apply.go:592, 742,
+     746` keep their ordering relative to the overlay/team/global
+     vault registries.
+   - Per-pair stderr emission via the existing
+     `internal/workspace/reporter.go` `Reporter`.
+3. **State (`internal/workspace/state.go`)** gains an
+   `AuthSources` field on `InstanceState` and a `v3 -> v4` schema
+   bump. The migration shim in `LoadState` initializes the field
+   to an empty map for v3 files.
 4. **Status (`internal/cli/status.go`)** gains a `--audit-auth`
-   flag that reads `auth_sources` from `state.json` and renders the
+   flag that reads `AuthSources` from `state.json` and renders the
    text-table format from PRD R11.
 5. **Infisical backend (`internal/vault/infisical/`)**: no changes.
    The credential-sync provider uses the same `Resolve(ctx, ref)`
-   API workspace env-resolution already uses.
+   API workspace env-resolution already uses, and relies on the
+   existing `vault.ErrKeyNotFound` and `vault.ErrProviderUnreachable`
+   sentinel errors to discriminate "key absent" (R13.3) from "vault
+   unreachable" (R13.1).
 
 Single-org and non-opting-in users see byte-identical behavior. The
-CredentialPool constructor returns a file-only pool (with a nil
-vault loader) when `[global.machine_identities]` is absent.
+`CredentialPool` constructor returns a file-only pool (with a nil
+vault loader) when `[global.machine_identities]` is absent. The
+global-override parse reorder is invisible to non-opting-in users
+because the parsed value is consumed downstream identically; only
+the position changes.
 
 ## Solution Architecture
 
 ### Overview
 
 ```
-Apply pipeline (chronological):
+Apply pipeline (chronological; `<NEW>` marks new or reordered steps):
 
-1. Load workspace + overlay + global override configs
-   └─> validate_vault_refs.go runs R2 if [global.machine_identities] present
-
-2. LoadProviderAuth(~/.config/niwa/provider-auth.toml)  (unchanged)
-
-3. Compute resolved vault specs (workspace + overlay + personal-global)
-
-4. If [global.machine_identities] opted in:
-   a. validateCredentialSyncBootstrap(file, allVaultSpecs, syncSpec)  (R9)
-   b. openCredentialSyncProvider(ctx, overlay, machineIds)
-      └─> uses vault.Registry.Build with single spec, nil authEntries
-                                                              (CLI session only)
-   c. CredentialPool = NewPool(file, syncProvider, "/niwa/provider-auth/")
-
+0.1 Parse base WorkspaceConfig                    (existing)
+0.2 LoadProviderAuth(~/.config/niwa/provider-auth.toml)  (existing,
+    moved from current line 491-498 to keep ordering with steps below)
+0.3 Parse GlobalConfigOverride                    <NEW position> (existing
+    parse, currently at apply.go:713-726). Moved up because the
+    workspace-overlay token injection at the existing 592 call site
+    needs to know whether [global.machine_identities] is opted in.
+    ParseGlobalConfigOverride runs R2 internally. The parse only
+    depends on a.GlobalConfigDir and opts.skipGlobal, both
+    available at apply pipeline entry, so the move is safe.
+0.4 If [global.machine_identities] opted in:      <NEW>
+    a. validateCredentialSyncBootstrap(file, allVaultSpecs, syncSpec)  (R9)
+       — needs the resolved vault specs from workspace + overlay +
+       global override. Workspace specs are available; overlay specs
+       require the overlay parse (step 0.6) — see "Lazy R9
+       evaluation" below for the resolution.
+    b. openCredentialSyncProvider(ctx, globalOverride, machineIds)
+       └─> Build(ctx, []ProviderSpec{spec}); bundle.Get(spec.Name)
+       └─> Skips injectProviderTokens for this spec; CLI-session auth
+                                                  (structural R9 enforcement)
+    c. CredentialPool = NewPool(file, vaultLoader)
    Else:
-      CredentialPool = NewPool(file, nil)  (vault loader disabled)
+    c. CredentialPool = NewPool(file, nil)  (vault loader disabled)
 
-5. For each layer (overlay, team, global):
-   injectProviderTokens(ctx, pool, layer.Vault)
-     └─> per spec: pool.LookupAll(kind, project)
-         └─> file lookup (eager, cached)
-         └─> vault lookup (lazy: Resolve once per (kind, project))
-         └─> records audit entry into pool.AuditLog
-         └─> authenticates with winning entry
-         └─> emits stderr per R12
+0.5 Workspace overlay sync + parse                (existing)
+    └─> if overlayDir != "":
+         injectProviderTokens(ctx, pool, overlay.Vault)  (existing
+         site at apply.go:592, signature changed to take pool)
+         └─> pool.Lookup may now reach into the vault loader
 
-6. State save: state.AuthSources = pool.AuditLog.AsMap()
-   state.json gets {auth_sources: {...}}
+0.6 Build overlay vault bundle                    (existing)
 
-7. niwa status --audit-auth (separate command, separate process):
-   reads state.json, renders text table, sets exit code per R11.
+1.  Parse globalOverride continues to feed downstream uses
+    (CheckVaultScopeAmbiguity, etc.)               (existing)
+
+2.  injectProviderTokens(ctx, pool, cfg.Vault)     (existing site
+    at apply.go:742, signature changed to take pool)
+    injectProviderTokens(ctx, pool, globalOverride.Global.Vault)
+                                                   (existing site at 746)
+
+3.  BuildBundle(team, personal-overlay)            (existing)
+
+4.  Resolve workspace + overlay env, materialize files  (existing)
+
+5.  State save: state.AuthSources = pool.AuditLog.AsMap()  <NEW>
+    InstanceState bumps to schema_version 4.
+
+6.  niwa status --audit-auth (separate command, separate process):
+    reads state.json, renders text table, sets exit code per R11.
 ```
+
+**Lazy R9 evaluation.** R9 requires that the credential-sync
+provider's `(kind, project)` does not appear in the credential pool
+or in any other vault registry's specs. The full set of
+"any other vault registry" specs is only available after the
+workspace overlay parse (step 0.5). Two-stage resolution:
+
+- **Pre-overlay (step 0.4a)**: validate against the local file
+  entries plus the global override's own vault specs. Catches the
+  most common chicken-and-egg cases (overlap between the
+  credential-sync provider and the local file or other personal
+  overlay providers).
+- **Post-overlay (step 0.5)**: re-validate against the overlay's
+  vault specs once they are parsed. If the credential-sync
+  provider's `(kind, project)` overlaps an overlay-declared spec,
+  fail with the same R9 diagnostic. The credential-sync provider
+  has been opened by this point but no `Resolve` call has run, so
+  the provider can be `Close`'d cleanly.
+
+Pre-overlay catches the typical mistake; post-overlay closes the
+hole. Both produce the PRD R9 wording.
 
 ### Type definitions
 
@@ -449,12 +597,6 @@ const (
     SourceCLISession Source = "cli-session"
     SourceNone      Source = "none"
 )
-
-type PoolEntry struct {
-    Source       Source
-    ProviderName string  // for SourceVault: empty for anonymous, name for named
-    Entry        ProviderAuthEntry
-}
 
 type AuditRecord struct {
     Kind      string
@@ -495,25 +637,41 @@ func (p *CredentialPool) AuditLog() []AuditRecord
 
 ```
 Lookup(ctx, kind, project):
-    fileEntry = MatchProviderAuth_file(kind, project)
+    fileEntry = matchFileEntry(fileEntries, kind, project)
+        // matchFileEntry synthesizes a vault.ProviderSpec for
+        // (kind, project) and reuses MatchProviderAuth from
+        // internal/workspace/providerauth.go:102 to keep the
+        // matching rule single-sourced.
     vaultEntry, vaultErr = nil, nil
     if vaultLoader != nil:
         if cached, ok := cache[key]; ok:
             vaultEntry, vaultErr = cached.Entry, cached.Err
         else:
-            ref = Ref{Path: PathPrefix + kind, Key: project}
-            secret, _, err = vaultLoader.Provider.Resolve(ctx, ref)
-            if isKeyNotFound(err):
-                cache[key] = {nil, nil}
+            ref = vault.Ref{Path: PathPrefix + kind, Key: project}
+            sv, _, err = vaultLoader.Provider.Resolve(ctx, ref)
+            switch {
+            case errors.Is(err, vault.ErrKeyNotFound):
+                cache[key] = {nil, nil}  // silent fallthrough per R13.3
                 vaultEntry = nil
-            elif err != nil:
+            case errors.Is(err, vault.ErrProviderUnreachable):
                 cache[key] = {nil, err}
-                return nil, _, wrapVaultUnreachable(err)  // R13.1
-            else:
-                vaultEntry, parseErr = parseProviderAuthBody(secret.PlainText)
+                return nil, _, wrapVaultUnreachable(err)  // R13.1 / R13.2
+            case err != nil:
+                cache[key] = {nil, err}
+                return nil, _, err  // unexpected backend error
+            default:
+                // Plaintext access for parsing the credential body
+                // is gated through internal/secret/reveal.UnsafeReveal.
+                // This is a deliberate new caller (see Security
+                // Considerations §"New surfaces") justified because
+                // the body is a structured envelope niwa itself
+                // wrote into the vault, not a user-payload secret.
+                bodyBytes := reveal.UnsafeReveal(sv)
+                vaultEntry, parseErr = parseProviderAuthBody(kind, project, bodyBytes)
                 cache[key] = {vaultEntry, parseErr}
                 if parseErr != nil:
                     return nil, _, parseErr  // R13.4 / R13.5 / R13.7
+            }
 
     rec = AuditRecord{Kind: kind, Project: project}
     if fileEntry != nil:
@@ -542,31 +700,39 @@ type providerAuthBody struct {
     APIURL       string `toml:"api_url"`
 }
 
-func parseProviderAuthBody(raw []byte) (*ProviderAuthEntry, error) {
+// parseProviderAuthBody parses a vault-fetched credential body.
+// kind and project are passed in by the caller — they are the
+// (kind, project) pair the lookup was for — rather than re-derived
+// from the vault key path, because the path was constructed from
+// these inputs in the first place.
+func parseProviderAuthBody(kind, project string, raw []byte) (*ProviderAuthEntry, error) {
+    if len(raw) > maxProviderAuthBodyBytes {  // 8 KiB cap; see Security §"New surfaces"
+        return nil, oversizedBodyError(len(raw))
+    }
     var body providerAuthBody
     if err := toml.Unmarshal(raw, &body); err != nil {
-        return nil, malformedBodyError(err)  // R13.4
+        return nil, malformedBodyError(kind, project, err)  // R13.4
     }
     version := body.Version
     if version == "" {
         version = "1"  // R8 backward-compat default
     }
     if version != "1" {
-        return nil, unsupportedVersionError(version)  // R13.7
+        return nil, unsupportedVersionError(kind, project, version)  // R13.7
     }
     if body.ClientID == "" {
-        return nil, missingFieldError("client_id")  // R13.5
+        return nil, missingFieldError(kind, project, "client_id")  // R13.5
     }
     if body.ClientSecret == "" {
-        return nil, missingFieldError("client_secret")  // R13.5
+        return nil, missingFieldError(kind, project, "client_secret")  // R13.5
     }
     return &ProviderAuthEntry{
-        Kind: "infisical",
+        Kind: kind,
         Config: map[string]any{
-            "project":       /* extracted from path or passed in */,
+            "project":       project,
             "client_id":     body.ClientID,
             "client_secret": body.ClientSecret,
-            "api_url":       body.APIURL,
+            "api_url":       body.APIURL,  // empty string when omitted; backend uses default
         },
     }, nil
 }
@@ -574,39 +740,107 @@ func parseProviderAuthBody(raw []byte) (*ProviderAuthEntry, error) {
 
 ### Apply.go integration
 
-The five-line patch to `apply.go` around the existing
-`LoadProviderAuth` + `injectProviderTokens` calls:
+The change is **not a five-line patch.** Realistic surface area in
+`internal/workspace/apply.go`:
+
+- ~10 lines: move the existing `globalOverride` parse from its
+  current site (`apply.go:713-726`) up to a new Step 0.3 ahead of
+  the workspace-overlay sync block (current `apply.go:509`). The
+  parse only depends on `a.GlobalConfigDir` and `opts.skipGlobal`,
+  both available immediately, so the move is mechanical — but
+  every downstream reader of `globalOverride` (currently 8 sites,
+  including `CheckVaultScopeAmbiguity` and the existing
+  `injectProviderTokens` calls at 742/746) must keep working. The
+  reorder is its own commit in Phase A.
+- ~30 lines: opt-in detection, R9 validation, credential-sync
+  provider open, `CredentialPool` construction, defer-close
+  bookkeeping. New code, lives at the new Step 0.4 position.
+- ~10 lines: signature change for `injectProviderTokens` at the
+  three existing call sites (`apply.go:592, 742, 746`). The
+  function signature changes from `(ctx, []ProviderAuthEntry,
+  *VaultRegistry)` to `(ctx, *CredentialPool, *VaultRegistry)`.
+  The change is contained within `internal/workspace/`; the
+  function is unexported.
+- ~3 lines: state persistence at the end of the pipeline
+  (`state.AuthSources = pool.AuditLog().AsMap()`).
+- Plus a new file `internal/workspace/credentialpool.go`
+  (~150-200 lines including the lookup algorithm,
+  `parseProviderAuthBody`, `vaultCredLoader`, audit-record
+  collection, and helpers).
+- Plus migration shim and field on `InstanceState` in
+  `internal/workspace/state.go` (~15 lines).
+- Plus the R2 check in `internal/config/config.go`
+  `ParseGlobalConfigOverride` (~20 lines).
+- Plus the `niwa status --audit-auth` flag handling in
+  `internal/cli/status.go` (~40 lines).
+
+Total: roughly 250-350 net new lines of production code spread
+across 4 files, plus tests. The "5-line patch" framing in the
+prior revision was misleading; this patch is medium-sized.
+
+The integration sketch (showing the new Step 0.4 plus the changed
+call sites):
 
 ```go
-// existing
-authEntries, err := LoadProviderAuth(niwaConfigDir)
-if err != nil { return err }
-
-// NEW: build pool, with optional vault loader
-var loader *vaultCredLoader
-if mi := globalOverride.Global.MachineIdentities; mi != nil {
-    if err := validateCredentialSyncBootstrap(authEntries, allVaultSpecs, mi.SyncSpec); err != nil {
-        return err  // R9
-    }
-    syncProvider, syncSpec, err := openCredentialSyncProvider(ctx, globalOverride.Global, mi)
+// Step 0.2 (existing, unchanged location)
+var authEntries []ProviderAuthEntry
+if niwaConfigDir, err := NiwaConfigDir(); err == nil {
+    entries, err := LoadProviderAuth(niwaConfigDir)
     if err != nil { return err }
-    defer syncProvider.Close()
+    authEntries = entries
+}
+
+// Step 0.3: parse globalOverride (MOVED UP from current line 713-726)
+var globalOverride *config.GlobalConfigOverride
+if a.GlobalConfigDir != "" && !opts.skipGlobal {
+    overridePath := filepath.Join(a.GlobalConfigDir, GlobalConfigOverrideFile)
+    data, readErr := os.ReadFile(overridePath)
+    if readErr == nil {
+        parsed, parseErr := config.ParseGlobalConfigOverride(data)
+        if parseErr != nil {
+            return nil, fmt.Errorf("parsing global config override: %w", parseErr)
+        }
+        globalOverride = parsed
+    } else if !os.IsNotExist(readErr) {
+        return nil, fmt.Errorf("reading global config override: %w", readErr)
+    }
+}
+
+// Step 0.4: build credential pool, with optional vault loader (NEW)
+var loader *vaultCredLoader
+var syncBundle *vault.Bundle
+if globalOverride != nil && globalOverride.Global.MachineIdentities != nil {
+    mi := globalOverride.Global.MachineIdentities
+    syncSpec, err := pickCredentialSyncSpec(globalOverride.Global, mi)
+    if err != nil { return err }
+    if err := validateCredentialSyncBootstrapPreOverlay(authEntries, globalOverride.Global.Vault, syncSpec); err != nil {
+        return err  // R9 — first stage; second stage runs after overlay parse
+    }
+    syncBundle, err = vault.DefaultRegistry.Build(ctx, []vault.ProviderSpec{syncSpec})
+    if err != nil { return err }
+    defer syncBundle.CloseAll()
+    prov, err := syncBundle.Get(syncSpec.Name)
+    if err != nil { return err }
     loader = &vaultCredLoader{
-        Provider:     syncProvider,
+        Provider:     prov,
         ProviderName: syncSpec.Name,
         PathPrefix:   "/niwa/provider-auth/",
     }
 }
 pool := NewCredentialPool(authEntries, loader)
 
-// existing injectProviderTokens calls, updated signature
-if err := injectProviderTokens(ctx, pool, overlay.Vault); err != nil { return err }
-// ...
-if err := injectProviderTokens(ctx, pool, cfg.Vault); err != nil { return err }
-if err := injectProviderTokens(ctx, pool, globalOverride.Global.Vault); err != nil { return err }
+// Step 0.5 (existing): workspace overlay sync + parse + token injection.
+//   Existing call site at apply.go:592, signature changed:
+//     injectProviderTokens(ctx, pool, overlay.Vault)
+//   After overlay parse, run the second R9 stage:
+//     validateCredentialSyncBootstrapPostOverlay(pool, overlay.Vault, syncSpec)
 
-// NEW: persist audit log
-state.AuthSources = pool.AuditLog().AsMap()
+// Existing call sites at apply.go:742 and 746, signature changed:
+//   injectProviderTokens(ctx, pool, cfg.Vault)
+//   injectProviderTokens(ctx, pool, globalOverride.Global.Vault)
+
+// State save (existing site, NEW field):
+//   state.AuthSources = pool.AuditLog().AsMap()
 ```
 
 ### Config parsing additions
@@ -625,53 +859,77 @@ type MachineIdentitiesConfig struct {
 }
 ```
 
-`internal/config/validate_vault_refs.go` (R2 check):
+`internal/config/config.go` (R2 check, called from
+`ParseGlobalConfigOverride` immediately after
+`cfg.Global.Vault.Validate("global overlay")`):
 
 ```go
-func validateMachineIdentities(file string, ov GlobalOverride) error {
+func validateMachineIdentities(prefix string, ov GlobalOverride) error {
     if ov.MachineIdentities == nil {
         return nil
     }
     if ov.Vault == nil {
-        return errors.New(`[global.machine_identities] is enabled but no vault provider is declared. ...`)
+        return fmt.Errorf("%s: [machine_identities] is enabled but no vault provider is declared. Add [vault.provider] (anonymous) or [vault.providers.<name>] and set from = \"<name>\".", prefix)
     }
     if ov.MachineIdentities.From == "" {
         if ov.Vault.Provider == nil {
-            return errors.New(`[global.machine_identities] is enabled but no anonymous [global.vault.provider] declared. Set "from" or declare an anonymous provider.`)
+            return fmt.Errorf("%s: [machine_identities] is enabled and from is unset but no anonymous [vault.provider] is declared. Either set from or declare an anonymous provider.", prefix)
         }
         return nil  // anonymous default
     }
     if _, ok := ov.Vault.Providers[ov.MachineIdentities.From]; !ok {
-        return fmt.Errorf(`[global.machine_identities] from = %q references unknown vault provider. Declared providers in this file: [%s]`,
-            ov.MachineIdentities.From, knownNames(ov.Vault.Providers))
+        return fmt.Errorf("%s: [machine_identities] from = %q references unknown vault provider. Declared providers in this file: [%s].",
+            prefix, ov.MachineIdentities.From, knownNames(ov.Vault.Providers))
     }
     return nil
 }
 ```
 
-### State.json schema (v3 -> v4)
-
-`internal/state/state.go`:
+Wired into `ParseGlobalConfigOverride` like:
 
 ```go
-type State struct {
-    Version      int                            `json:"version"`
-    // ... existing fields
-    AuthSources  map[string]AuthSourceRecord    `json:"auth_sources,omitempty"`  // NEW v4
+if err := cfg.Global.Vault.Validate("global overlay"); err != nil {
+    return nil, err
+}
+if err := validateMachineIdentities("global overlay", cfg.Global); err != nil {
+    return nil, err  // R2
+}
+```
+
+### State schema (v3 -> v4)
+
+`internal/workspace/state.go` — bump `SchemaVersion` from `3` to
+`4` and extend `InstanceState`:
+
+```go
+const SchemaVersion = 4  // was 3; v4 adds InstanceState.AuthSources
+
+type InstanceState struct {
+    SchemaVersion    int                            `json:"schema_version"`
+    // ... all existing fields unchanged
+    AuthSources      map[string]AuthSourceRecord    `json:"auth_sources,omitempty"`  // NEW v4
 }
 
+// AuthSourceRecord carries one row of the audit table that
+// `niwa status --audit-auth` renders. Both fields are categorical
+// strings (R24 / PRD R18): they identify *where* a credential came
+// from, never the credential bytes themselves.
 type AuthSourceRecord struct {
     Source   string `json:"source"`              // local-file | vault:<name> | cli-session | none
     Fallback string `json:"fallback,omitempty"`  // vault:<name> when local overrides vault
 }
-
-func migrateV3ToV4(s *State) {
-    if s.AuthSources == nil {
-        s.AuthSources = map[string]AuthSourceRecord{}
-    }
-    s.Version = 4
-}
 ```
+
+The migration shim in `LoadState` initializes `AuthSources` to an
+empty map for v3 files and rewrites them as v4 on the next
+`SaveState`. v1 and v2 files continue to flow through the existing
+v1→v2→v3 migration shims and arrive at v4 the same way.
+
+The forward-version check at
+`internal/workspace/state.go:246` (`schema_version > SchemaVersion`)
+prevents a pre-feature niwa from reading a v4 file. This is the
+existing downgrade-safety mechanism and is the same behavior the
+v2→v3 bump shipped with.
 
 ### `niwa status --audit-auth` rendering
 
@@ -723,11 +981,23 @@ when `Source == SourceCLISession` or `(Source == SourceLocalFile && Fallback == 
 
 Phased to keep PRs reviewable:
 
-**Phase A — Pool + file-only path (no behavior change).**
-1. Add `CredentialPool` type with file-only constructor.
-2. Refactor `injectProviderTokens` to take a pool instead of a slice.
-3. Audit log infrastructure (collect records, no persistence yet).
-4. Tests: existing behavior unchanged for all current users.
+**Phase A — Pool + file-only path + globalOverride parse reorder.**
+The phase intentionally bundles the parse reorder with the
+no-behavior-change refactor so the reorder lands behind the
+existing tests; later phases assume `globalOverride` is available
+at the start of the pipeline.
+1. Move `globalOverride` parse from `apply.go:713-726` to before
+   the workspace-overlay sync block. Verify every downstream
+   reader (8 sites today) still works against the same parsed
+   value. This is the riskiest part of Phase A and warrants
+   its own focused review.
+2. Add `CredentialPool` type with file-only constructor.
+3. Refactor `injectProviderTokens` to take a pool instead of a
+   slice. Three call sites updated.
+4. Audit log infrastructure (collect records, no persistence yet).
+5. Tests: existing apply behavior is byte-identical for all
+   current users. Snapshot test of stderr/stdout/exit code on a
+   representative apply scenario before and after the phase.
 
 **Phase B — State persistence + `--audit-auth`.**
 1. Add `AuthSources` field, v3->v4 migration, save during apply.
@@ -937,10 +1207,31 @@ the existing model).
   must be updated; this is a breaking change in the internal API.
   Mitigation: the change lives entirely within
   `internal/workspace/`, no public Go API affected.
+- **Apply pipeline reorder.** Phase A moves the `globalOverride`
+  parse from its current position (`apply.go:713-726`) to ahead of
+  the workspace-overlay sync. Eight downstream readers depend on
+  the parsed value; the move is mechanical (no new dependencies)
+  but it is a real refactor with its own test surface. Mitigation:
+  Phase A bundles the reorder with the no-behavior-change pool
+  refactor, and the phase's acceptance bar is "byte-identical
+  apply output for all current users" (snapshot tests on a
+  representative scenario).
 - **`state.json` schema bump** (v3 -> v4). Old niwa versions
-  reading a v4 state file will fail (unknown version). Mitigation:
-  this is normal niwa upgrade behavior, and the migration is
-  forward-only (upgraded niwa reads v3 fine).
+  reading a v4 state file will fail at the existing forward-version
+  check at `internal/workspace/state.go:246`. Mitigation: this is
+  normal niwa upgrade behavior — the same one-way property held
+  for the v2→v3 bump — but the PRD now lists it explicitly under
+  Known Limitations so users know that pinning a niwa version
+  post-feature is one-way.
+- **A new caller of `secret.reveal.UnsafeReveal`.** The package
+  warns "DO NOT import this package from new code without explicit
+  review." The credential-pool body parsing is a deliberate new
+  caller; the justification (the body is a structured envelope
+  niwa itself wrote into the vault, never user-payload secret
+  data) is documented in code at the call site and in this design.
+  A future allow-list linter will need to permit
+  `internal/workspace/credentialpool.go` alongside the existing
+  materializer/provider callers.
 - **An additional ~200ms per used-and-vault-sourced
   `(kind, project)` pair per apply**, dominated by the Infisical
   export call. Acceptable per PRD R16; documented as a Known
@@ -957,8 +1248,10 @@ the existing model).
 | Risk | Mitigation |
 |------|-----------|
 | Internal API churn (pool refactor) | Phase A is a no-behavior-change refactor that lands first |
-| state.json migration breaks downgrade | Forward-only migration; consistent with niwa policy |
+| Apply pipeline reorder (globalOverride parse) | Bundled into Phase A; acceptance bar is byte-identical snapshot of stderr/stdout/exit code; reorder gets its own commit for review |
+| state.json migration breaks downgrade | Forward-only migration; consistent with niwa policy; called out in PRD Known Limitations |
 | Latency cost on multi-org workspaces | PRD R16 budget is informative; revisit only if user feedback demands |
-| TOML parser DoS via malicious vault body | Body-size cap at fetch; existing parser limits |
+| TOML parser DoS via malicious vault body | 8 KiB body-size cap at fetch; existing parser limits |
 | Process-memory credential lingering | Per-apply lifetime; documented in code comment |
-| Bug in R9 check creates auth cycle | Small table-tested function; opening test asserts CLI-session auth only |
+| Bug in R9 check creates auth cycle | Two-stage validation (pre-overlay + post-overlay); small table-tested function; opening test asserts CLI-session auth only and that `injectProviderTokens` is NOT called for the credential-sync provider's spec |
+| New `UnsafeReveal` caller | Justification documented at call site and in design; future allow-list linter must permit `internal/workspace/credentialpool.go` |
