@@ -65,6 +65,9 @@ func (f *fakeFetcher) HeadCommit(ctx context.Context, owner, repo, ref, etag str
 
 // withFastDriftBackoff zeroes driftCheckBackoff for the duration of t so
 // retry tests don't sleep for the production schedule (~3.5s total).
+// Mutates a package global; tests using this helper must not run in
+// parallel with each other or with anything else that calls
+// headCommitWithRetry.
 func withFastDriftBackoff(t *testing.T) {
 	t.Helper()
 	orig := driftCheckBackoff
@@ -227,6 +230,11 @@ func TestEnsureConfigSnapshot_NetworkErrorPreservesCachedSnapshot(t *testing.T) 
 	fetcher := &fakeFetcher{headErr: errors.New("network unreachable")}
 	if err := EnsureConfigSnapshot(context.Background(), dir, fetcher, nil); err != nil {
 		t.Errorf("network error should not propagate: %v", err)
+	}
+	// Transport-level errors are transient: retry up to len(driftCheckBackoff)
+	// times before the warn-and-cache fallback fires.
+	if want := len(driftCheckBackoff) + 1; fetcher.headCalls != want {
+		t.Errorf("headCalls = %d, want %d (1 initial + %d retries)", fetcher.headCalls, want, len(driftCheckBackoff))
 	}
 	// Cached snapshot still intact.
 	got, _ := os.ReadFile(filepath.Join(dir, "workspace.toml"))

@@ -183,7 +183,8 @@ func isTransientDriftError(err error, status int) bool {
 // times, emitting a replaceable Reporter.Status note between attempts so
 // the user sees why apply is briefly stalled. The final error returned
 // matches the most recent attempt and feeds the existing warn-and-cache
-// fallback unchanged.
+// fallback unchanged. An empty src.Ref is treated as "HEAD", matching
+// the GitHub API default.
 func headCommitWithRetry(ctx context.Context, fetcher FetchClient, src source.Source, reporter *Reporter) (oid string, status int, err error) {
 	ref := src.Ref
 	if ref == "" {
