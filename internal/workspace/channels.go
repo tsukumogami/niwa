@@ -728,8 +728,9 @@ func buildSkillContent() []byte {
 	b.WriteString("(8 lowercase hex chars returned by `niwa_create_session`); without one\n")
 	b.WriteString("the call returns SESSION_REQUIRED. Exception: set `read_only: true` for\n")
 	b.WriteString("tasks that make no git changes — these route to the main clone daemon\n")
-	b.WriteString("without a session. Tasks routed to an inactive or unknown session\n")
-	b.WriteString("return SESSION_INACTIVE or SESSION_NOT_FOUND immediately.\n\n")
+	b.WriteString("without a session. When both `session_id` and `read_only: true` are\n")
+	b.WriteString("provided, `session_id` takes precedence. Tasks routed to an inactive\n")
+	b.WriteString("or unknown session return SESSION_INACTIVE or SESSION_NOT_FOUND.\n\n")
 
 	b.WriteString("## Reporting Progress\n\n")
 	b.WriteString("Call `niwa_report_progress` every 3-5 minutes of wall-clock work, or\n")
