@@ -37,6 +37,22 @@ Feature: OOTB shell completion via install paths
     And the "zsh" shell-init output contains "#compdef"
     And the "zsh" shell-init output contains "__complete"
 
+  # --- shell-init install command ---
+  #
+  # Users who installed via tsuku (or any path that doesn't run install.sh)
+  # are expected to run `niwa shell-init install` themselves. On default macOS
+  # zsh — only ~/.zshrc, no .bashrc or .zshenv — the install command must wire
+  # the source line into .zshrc. Sourcing from .zshrc (interactive, after
+  # compinit) is what cobra-generated zsh completion (compdef) requires.
+
+  @critical
+  Scenario: shell-init install on default macOS zsh layout updates .zshrc
+    Given a clean niwa environment
+    And I set env "SHELL" to "/bin/zsh"
+    When I run "niwa shell-init install"
+    Then the exit code is 0
+    And the file ".zshrc" in HOME contains "$HOME/.niwa/env"
+
   # --- End-to-end install.sh chain ---
   #
   # Simulates the runtime state install.sh produces: ~/.niwa/bin/niwa on PATH,

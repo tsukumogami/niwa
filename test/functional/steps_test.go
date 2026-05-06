@@ -648,6 +648,22 @@ func iAppendToFileInInstance(ctx context.Context, content, relPath, instance str
 	return ctx, nil
 }
 
+// theFileInHomeContains asserts that the named file in the sandbox HOME exists
+// and contains the given substring. Used to verify shell-init install lands the
+// source line in the expected rc file.
+func theFileInHomeContains(ctx context.Context, name, want string) error {
+	s := getState(ctx)
+	path := filepath.Join(s.homeDir, name)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("reading %s: %w", path, err)
+	}
+	if !strings.Contains(string(data), want) {
+		return fmt.Errorf("expected %s to contain %q, got:\n%s", name, want, string(data))
+	}
+	return nil
+}
+
 func theOutputContains(ctx context.Context, text string) error {
 	s := getState(ctx)
 	if !strings.Contains(s.stdout, text) {
