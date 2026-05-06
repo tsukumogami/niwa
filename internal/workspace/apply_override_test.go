@@ -230,4 +230,10 @@ visibility = "public"
 		}
 		t.Errorf("post-apply ConfigName: got %q, want %q (Apply must re-read override)", got, "my-name")
 	}
+	// AC-5: InstanceName must also surface the override; otherwise
+	// `niwa status`'s Instance: line prints the upstream name on every
+	// subsequent apply.
+	if state.InstanceName != "my-name" {
+		t.Errorf("post-apply InstanceName: got %q, want %q (AC-5: status must not surface upstream name)", state.InstanceName, "my-name")
+	}
 }

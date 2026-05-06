@@ -429,10 +429,16 @@ func (a *Applier) Apply(ctx context.Context, cfg *config.WorkspaceConfig, config
 	if err != nil {
 		return fmt.Errorf("resolving effective workspace name: %w", err)
 	}
+	// InstanceName must also use the effective name; otherwise a
+	// subsequent Apply rewrites InstanceName from the override back to
+	// the cloned config's [workspace] name, and `niwa status` then
+	// prints the upstream name on the Instance: line. AC-5 forbids any
+	// status line from surfacing the upstream name when an override is
+	// in play.
 	state := &InstanceState{
 		SchemaVersion:  SchemaVersion,
 		ConfigName:     &configName,
-		InstanceName:   cfg.Workspace.Name,
+		InstanceName:   configName,
 		InstanceNumber: existingState.InstanceNumber,
 		Root:           instanceRoot,
 		Created:        existingState.Created,
