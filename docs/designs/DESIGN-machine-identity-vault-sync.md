@@ -584,14 +584,14 @@ Apply pipeline (chronological; `<NEW>` marks new or reordered steps):
 provider's `(kind, project)` does not appear in the credential pool
 or in any other vault registry's specs. The full set of
 "any other vault registry" specs is only available after the
-workspace overlay parse (step 0.5). Two-stage resolution:
+workspace overlay parse (Step 0.6). Two-stage resolution:
 
-- **Pre-overlay (step 0.4a)**: validate against the local file
+- **Pre-overlay (Step 0.4a)**: validate against the local file
   entries plus the global override's own vault specs. Catches the
   most common chicken-and-egg cases (overlap between the
   credential-sync provider and the local file or other personal
   overlay providers).
-- **Post-overlay (step 0.5)**: re-validate against the overlay's
+- **Post-overlay (Step 0.6)**: re-validate against the overlay's
   vault specs once they are parsed. If the credential-sync
   provider's `(kind, project)` overlaps an overlay-declared spec,
   fail with the same R9 diagnostic. The credential-sync provider
@@ -865,13 +865,14 @@ if globalOverride != nil && globalOverride.Global.MachineIdentities != nil {
 }
 pool := NewCredentialPool(authEntries, loader)
 
-// Step 0.5 (existing): workspace overlay sync + parse + token injection.
-//   Existing call site at apply.go:592, signature changed:
+// Step 0.5 (existing): workspace overlay sync.
+// Step 0.6 (existing): workspace overlay parse + token injection.
+//   Existing call site for overlay-layer injection, signature changed:
 //     injectProviderTokens(ctx, pool, overlay.Vault)
 //   After overlay parse, run the second R9 stage:
 //     validateCredentialSyncBootstrapPostOverlay(pool, overlay.Vault, syncSpec)
 
-// Existing call sites at apply.go:742 and 746, signature changed:
+// Existing call sites for the team and personal vault registries, signature changed:
 //   injectProviderTokens(ctx, pool, cfg.Vault)
 //   injectProviderTokens(ctx, pool, globalOverride.Global.Vault)
 
