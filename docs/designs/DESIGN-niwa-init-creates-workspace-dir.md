@@ -1,5 +1,5 @@
 ---
-status: Accepted
+status: Planned
 upstream: docs/prds/PRD-niwa-init-creates-workspace-dir.md
 problem: |
   niwa init initializes the workspace in cwd, requiring users to mkdir+cd
@@ -41,7 +41,7 @@ rationale: |
 
 ## Status
 
-Accepted
+Planned
 
 ## Context and Problem Statement
 
