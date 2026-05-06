@@ -516,10 +516,17 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 	// a.Reporter, opts.disclosedNotices) are Applier or pipelineOpts
 	// fields available from the start of runPipeline.
 	//
-	// Downstream consumers of globalOverride (CheckVaultScopeAmbiguity,
-	// the team/personal injectProviderTokens calls, BuildBundle for the
-	// personal-overlay registry, DetectShadows, ResolveGlobalOverride,
-	// MergeGlobalOverride) read it unchanged.
+	// Downstream consumers of globalOverride read it unchanged:
+	//   - CheckVaultScopeAmbiguity (Step 3a region)
+	//   - injectProviderTokens against globalOverride.Global.Vault
+	//     (the personal-overlay leg; the team-config leg reads
+	//     cfg.Vault and is not a globalOverride consumer)
+	//   - resolve.BuildBundle for the personal-overlay vault registry
+	//   - DetectShadows
+	//   - resolve.ResolveGlobalOverride (vault resolver) and the
+	//     workspace.ResolveGlobalOverride helper (per-workspace
+	//     overlay flatten); both run on the resolved value
+	//   - MergeGlobalOverride
 	var globalOverride *config.GlobalConfigOverride
 	if a.GlobalConfigDir != "" && !opts.skipGlobal {
 		// Step 0.3a: sync the personal overlay snapshot (PRD R10-R13, R28).
@@ -727,8 +734,10 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 	allWarnings = append(allWarnings, WarnUnknownRepos(cfg, known)...)
 
 	// (Step 2a — sync of the personal-overlay snapshot — moved to Step
-	// 0.3a so it precedes both the workspace-overlay sync at Step 0.5
-	// and the niwa.toml parse that consumes the refreshed snapshot.)
+	// 0.3a, alongside the niwa.toml parse at Step 0.3b. The hoist
+	// preserves the original sync-then-parse pairing while making
+	// globalOverride available before the workspace-overlay sync at
+	// Step 0.5 and the workspace-overlay token injection at Step 0.6.)
 
 	// Steps 3a–3c: Run the vault resolver stage against BOTH team (ws)
 	// and personal (overlay) layers before the merge. The resolver
