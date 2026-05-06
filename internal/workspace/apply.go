@@ -497,21 +497,47 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		authEntries = entries
 	}
 
-	// Step 0.3: parse the personal-overlay global config override early
-	// (when present). The parse is hoisted ahead of the workspace-overlay
-	// sync block so opt-in features declared in [global.*] — notably
-	// [global.machine_identities] (machine-identity-vault-sync) — are
-	// detectable before injectProviderTokens runs against the
-	// workspace-overlay vault registry at line 592. The parse depends
-	// only on a.GlobalConfigDir (Applier field) and opts.skipGlobal
-	// (pipelineOpts), both available from the start of runPipeline; the
-	// move introduces no new dependencies. Consumers downstream
-	// (CheckVaultScopeAmbiguity, the team/personal injectProviderTokens
-	// calls, BuildBundle for the personal-overlay registry,
-	// DetectShadows, ResolveGlobalOverride, MergeGlobalOverride) read
-	// globalOverride unchanged.
+	// Step 0.3: refresh the personal-overlay snapshot and parse niwa.toml.
+	//
+	// The snapshot refresh (formerly Step 2a) and the niwa.toml parse
+	// (formerly between the redactor setup and the resolver stage) run
+	// here as a single phase, in their original sync-then-parse order.
+	// They are hoisted together so opt-in features declared in
+	// [global.*] — notably [global.machine_identities]
+	// (machine-identity-vault-sync) — are detectable before
+	// injectProviderTokens runs against the workspace-overlay vault
+	// registry. The sync-then-parse pairing is preserved verbatim:
+	// EnsureConfigSnapshotWithStatus may swap the directory contents on
+	// upstream drift, and the parse must observe the post-refresh
+	// niwa.toml to keep AC-28 byte-identicality for users whose global
+	// config tracks a remote.
+	//
+	// All inputs (a.GlobalConfigDir, opts.skipGlobal, a.GitHubClient,
+	// a.Reporter, opts.disclosedNotices) are Applier or pipelineOpts
+	// fields available from the start of runPipeline.
+	//
+	// Downstream consumers of globalOverride (CheckVaultScopeAmbiguity,
+	// the team/personal injectProviderTokens calls, BuildBundle for the
+	// personal-overlay registry, DetectShadows, ResolveGlobalOverride,
+	// MergeGlobalOverride) read it unchanged.
 	var globalOverride *config.GlobalConfigOverride
 	if a.GlobalConfigDir != "" && !opts.skipGlobal {
+		// Step 0.3a: sync the personal overlay snapshot (PRD R10-R13, R28).
+		a.Reporter.Status("syncing config...")
+		fetcher, _ := a.GitHubClient.(FetchClient)
+		converted, syncErr := EnsureConfigSnapshotWithStatus(ctx, a.GlobalConfigDir, fetcher, a.Reporter)
+		if syncErr != nil {
+			a.Reporter.Warn("could not sync config: %v", syncErr)
+			return nil, fmt.Errorf("syncing global config: %w", syncErr)
+		}
+		// PRD R28: emit the global-config conversion notice once per
+		// workspace, gated on DisclosedNotices.
+		if converted && !sliceContains(opts.disclosedNotices, noticeConfigConverted) {
+			a.Reporter.Log("note: %s converted from working tree to snapshot. Manual edits inside this directory will no longer persist.", a.GlobalConfigDir)
+			newDisclosures = append(newDisclosures, noticeConfigConverted)
+		}
+
+		// Step 0.3b: parse the (possibly just-refreshed) niwa.toml.
 		overridePath := filepath.Join(a.GlobalConfigDir, GlobalConfigOverrideFile)
 		data, readErr := os.ReadFile(overridePath)
 		if readErr == nil {
@@ -700,24 +726,9 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 	known := KnownRepoNames(cfg, discoveredNames)
 	allWarnings = append(allWarnings, WarnUnknownRepos(cfg, known)...)
 
-	// Step 2a: Sync global config (personal overlay) if registered and
-	// not skipped. Snapshot path (PRD R10-R13, R28) is the only sync
-	// strategy now — no legacy fallthrough.
-	if a.GlobalConfigDir != "" && !opts.skipGlobal {
-		a.Reporter.Status("syncing config...")
-		fetcher, _ := a.GitHubClient.(FetchClient)
-		converted, syncErr := EnsureConfigSnapshotWithStatus(ctx, a.GlobalConfigDir, fetcher, a.Reporter)
-		if syncErr != nil {
-			a.Reporter.Warn("could not sync config: %v", syncErr)
-			return nil, fmt.Errorf("syncing global config: %w", syncErr)
-		}
-		// PRD R28: emit the global-config conversion notice once per
-		// workspace, gated on DisclosedNotices.
-		if converted && !sliceContains(opts.disclosedNotices, noticeConfigConverted) {
-			a.Reporter.Log("note: %s converted from working tree to snapshot. Manual edits inside this directory will no longer persist.", a.GlobalConfigDir)
-			newDisclosures = append(newDisclosures, noticeConfigConverted)
-		}
-	}
+	// (Step 2a — sync of the personal-overlay snapshot — moved to Step
+	// 0.3a so it precedes both the workspace-overlay sync at Step 0.5
+	// and the niwa.toml parse that consumes the refreshed snapshot.)
 
 	// Steps 3a–3c: Run the vault resolver stage against BOTH team (ws)
 	// and personal (overlay) layers before the merge. The resolver
