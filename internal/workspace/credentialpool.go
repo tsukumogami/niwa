@@ -2,9 +2,121 @@ package workspace
 
 import (
 	"context"
+	"errors"
+	"fmt"
 
+	"github.com/BurntSushi/toml"
+	"github.com/tsukumogami/niwa/internal/secret/reveal"
 	"github.com/tsukumogami/niwa/internal/vault"
 )
+
+// CredentialSyncPathPrefix is the conventional namespace under which
+// niwa stores credential bodies in the personal vault: keys live at
+// CredentialSyncPathPrefix + "<kind>/<project>". Wired into
+// vaultCredLoader.PathPrefix at apply time. Exported so tests can
+// reference it without re-deriving the convention.
+const CredentialSyncPathPrefix = "/niwa/provider-auth/"
+
+// maxProviderAuthBodyBytes caps the byte length of a vault-fetched
+// credential body before TOML unmarshal. The realistic body is
+// ~200 bytes (a small TOML document with version, client_id,
+// client_secret, optional api_url); the cap is generous (8 KiB)
+// while still protecting against TOML-parser DoS via deeply-nested
+// or pathologically-large bodies (DESIGN Security § "New surfaces").
+const maxProviderAuthBodyBytes = 8 * 1024
+
+// providerAuthBody is the wire shape of a credential body stored in
+// the personal vault under CredentialSyncPathPrefix + "<kind>/<project>".
+// PRD R7 schema: top-level version field plus the Infisical
+// machine-identity fields. Future backends use parallel paths with
+// their own body shapes; for I7's scope only Infisical is read.
+type providerAuthBody struct {
+	Version      string `toml:"version"`
+	ClientID     string `toml:"client_id"`
+	ClientSecret string `toml:"client_secret"`
+	APIURL       string `toml:"api_url"`
+}
+
+// parseProviderAuthBody parses a vault-fetched credential body and
+// returns a ProviderAuthEntry suitable for authentication. kind and
+// project are passed in by the caller (they are the inputs that
+// produced the vault key path) and propagated into the returned
+// entry's Config.
+//
+// Errors carry the vault key path and the offending field name only
+// — never the body bytes or any field value (PRD R18; AC-36
+// sentinel-canary test enforces this).
+func parseProviderAuthBody(kind, project string, raw []byte) (*ProviderAuthEntry, error) {
+	if len(raw) > maxProviderAuthBodyBytes {
+		return nil, fmt.Errorf(
+			"vault-sourced provider-auth body at /niwa/provider-auth/%s/%s exceeds %d bytes (%d) and will not be parsed",
+			kind, project, maxProviderAuthBodyBytes, len(raw),
+		)
+	}
+	var body providerAuthBody
+	if err := toml.Unmarshal(raw, &body); err != nil {
+		// Wrap the TOML parser's error WITHOUT including the body
+		// bytes — toml.Unmarshal errors are content-free (offset
+		// only), but we still scrub by surfacing only kind+project.
+		return nil, fmt.Errorf(
+			"vault-sourced provider-auth body at /niwa/provider-auth/%s/%s is malformed: %w",
+			kind, project, sanitizeTOMLError(err),
+		)
+	}
+	version := body.Version
+	if version == "" {
+		// PRD R8 backward-compat default: a body without a version
+		// field is treated as version "1".
+		version = "1"
+	}
+	if version != "1" {
+		return nil, fmt.Errorf(
+			"provider-auth body at /niwa/provider-auth/%s/%s has unsupported schema version %q; this niwa version supports v1. Upgrade niwa or update the vault entry.",
+			kind, project, version,
+		)
+	}
+	if body.ClientID == "" {
+		return nil, fmt.Errorf(
+			"vault-sourced provider-auth body at /niwa/provider-auth/%s/%s is missing required field %q",
+			kind, project, "client_id",
+		)
+	}
+	if body.ClientSecret == "" {
+		return nil, fmt.Errorf(
+			"vault-sourced provider-auth body at /niwa/provider-auth/%s/%s is missing required field %q",
+			kind, project, "client_secret",
+		)
+	}
+	cfg := map[string]any{
+		"project":       project,
+		"client_id":     body.ClientID,
+		"client_secret": body.ClientSecret,
+	}
+	if body.APIURL != "" {
+		cfg["api_url"] = body.APIURL
+	}
+	return &ProviderAuthEntry{
+		Kind:   kind,
+		Config: cfg,
+	}, nil
+}
+
+// sanitizeTOMLError returns a TOML parser error wrapped to ensure no
+// body content escapes into the returned message. The BurntSushi/toml
+// package's errors today reference position metadata only, but a
+// future version that quoted offending tokens would be a leak. This
+// helper short-circuits that risk.
+func sanitizeTOMLError(err error) error {
+	if err == nil {
+		return nil
+	}
+	// Today's TOML errors are position-only. We deliberately do NOT
+	// pass through arbitrary error text — instead, we surface a
+	// short fixed message to be safe under any future toml-package
+	// upgrade. The vault key path in the wrapping error is enough
+	// for a user to locate the malformed body.
+	return errors.New("TOML parse error")
+}
 
 // Source classifies the authentication-source decision the
 // credential pool recorded for one (kind, project) Lookup. The name
@@ -83,19 +195,19 @@ type CredentialPool struct {
 }
 
 // vaultCredLoader is the credential-pool's connection to the personal-
-// overlay vault provider. I2 declares the placeholder; I7 fleshes it
-// out with Provider, ProviderName, and PathPrefix fields plus the
-// lazy-fetch implementation in Lookup. The type stays unexported
-// because only the workspace package constructs it: I7's
-// openCredentialSyncProvider helper (also in this package) will
-// build instances directly via struct literal, then pass them to
-// NewCredentialPool. No other package should construct or compare
-// vaultCredLoader values.
+// overlay credential-sync vault provider. The pool consults the
+// loader lazily — only when a file lookup misses for a given
+// (kind, project), and only once per pair per apply (memoized via
+// CredentialPool.cache).
+//
+// PathPrefix carries the conventional namespace under which niwa
+// stores credential bodies in the personal vault. For Infisical
+// today: "/niwa/provider-auth/" — the per-pair key path is then
+// PathPrefix + kind + "/" + project (PRD R7 schema convention).
 type vaultCredLoader struct {
-	// Fields are intentionally absent in I2 — the type exists only so
-	// CredentialPool.vaultLoader has a stable type and so I7 can fill
-	// in the implementation without touching NewCredentialPool's
-	// exported signature.
+	Provider     vault.Provider
+	ProviderName string // "" for anonymous; AC-39 rendering handled by renderVaultProvider.
+	PathPrefix   string
 }
 
 // vaultLookupResult is the per-(kind, project) memoization entry for
@@ -122,8 +234,8 @@ func NewCredentialPool(file []ProviderAuthEntry, loader *vaultCredLoader) *Crede
 // Lookup returns the winning credential entry for (kind, project)
 // plus the AuditRecord that the pool appended for this decision.
 //
-// Invariants every Lookup implementation MUST preserve (these
-// stay true through I7's restructure and I8's source-upgrade work):
+// Invariants every Lookup implementation MUST preserve (PRD R4
+// precedence):
 //
 //  1. Exactly one AuditRecord is appended to p.audit per Lookup call.
 //  2. AuditRecords are appended in call order; AuditLog returns them
@@ -141,36 +253,114 @@ func NewCredentialPool(file []ProviderAuthEntry, loader *vaultCredLoader) *Crede
 //  6. AuditRecord.Provider is the vault provider name (or "" for
 //     anonymous) when Source == SourceVault; "" otherwise.
 //
-// In I2 (file-only path), the algorithm is:
+// Algorithm:
+//   - Compute the file entry via matchFileEntry.
+//   - If a vault loader is wired, compute the vault entry via the
+//     lazy-fetch path (memoized per-pair in p.cache so repeat
+//     Lookups for the same pair don't double-fetch within one
+//     apply — AC-31).
+//   - Decide:
+//     - File hit: SourceLocalFile, set Fallback when vault also had
+//       an entry.
+//     - File miss + vault hit: SourceVault.
+//     - File miss + vault miss: SourceCLISession (tentative; I8 may
+//       upgrade to SourceNone).
 //
-//  - Search the file layer via MatchProviderAuth (single source of
-//    truth for matching rules).
-//  - If matched, record SourceLocalFile and return the entry.
-//  - Otherwise, record SourceCLISession — backends may fall through
-//    to their CLI session for the (kind, project).
-//
-// I7 restructure note: the file-first short-circuit means the vault
-// layer is never consulted in I2. DESIGN's full algorithm computes
-// BOTH file and vault entries before deciding which wins, then
-// records the loser as Fallback. I7 will replace the short-circuit
-// with a compute-both join, preserving the invariants above.
-//
-// The error return is reserved for I7's vault-fetch errors; I2
-// always returns nil for the error.
+// Errors from the vault path (provider unreachable, body parse
+// failure, body validation failure) are returned to the caller for
+// classification by I8's R13 wiring; AC-39 anonymous-vault rendering
+// is single-sourced through renderVaultProvider.
 func (p *CredentialPool) Lookup(ctx context.Context, kind, project string) (*ProviderAuthEntry, AuditRecord, error) {
 	rec := AuditRecord{Kind: kind, Project: project}
-	if entry := matchFileEntry(p.fileEntries, kind, project); entry != nil {
-		rec.Source = SourceLocalFile
-		// I7: replaces this branch with a Fallback-aware version
-		// that consults the vault loader before deciding.
-		p.audit = append(p.audit, rec)
-		return entry, rec, nil
+	fileEntry := matchFileEntry(p.fileEntries, kind, project)
+
+	var vaultEntry *ProviderAuthEntry
+	if p.vaultLoader != nil {
+		entry, err := p.lookupVault(ctx, kind, project)
+		if err != nil {
+			// Surface vault-side errors to the caller. I8 will
+			// classify them per PRD R13; the audit record is NOT
+			// appended for an errored lookup because the apply will
+			// abort and SaveState is never reached on error paths.
+			return nil, rec, err
+		}
+		vaultEntry = entry
 	}
-	// I7 restructures this entire function (see doc comment above).
-	// In I2 (loader nil), we fall through to the cli-session record.
-	rec.Source = SourceCLISession
-	p.audit = append(p.audit, rec)
-	return nil, rec, nil
+
+	switch {
+	case fileEntry != nil:
+		rec.Source = SourceLocalFile
+		if vaultEntry != nil {
+			// AC-39: anonymous-aware rendering via renderVaultProvider.
+			rec.Fallback = renderVaultProvider(p.vaultLoader.ProviderName)
+		}
+		p.audit = append(p.audit, rec)
+		return fileEntry, rec, nil
+	case vaultEntry != nil:
+		rec.Source = SourceVault
+		rec.Provider = p.vaultLoader.ProviderName
+		p.audit = append(p.audit, rec)
+		return vaultEntry, rec, nil
+	default:
+		rec.Source = SourceCLISession
+		p.audit = append(p.audit, rec)
+		return nil, rec, nil
+	}
+}
+
+// lookupVault fetches the credential body for (kind, project) from
+// the loader's vault provider and parses it into a
+// ProviderAuthEntry. Memoized per-pair in p.cache so repeat Lookups
+// for the same pair within one apply hit the cache, not the network
+// (PRD R6 lazy fetch + AC-31 re-fetch-each-apply since the cache
+// belongs to the per-apply CredentialPool).
+//
+// Returns (nil, nil) on ErrKeyNotFound (silent fallthrough; PRD
+// R13.3). Returns the parsed entry on success. Returns a wrapped
+// error for ErrProviderUnreachable (R13.1/R13.2) and for body
+// parse / validation failures (R13.4 / R13.5 / R13.7).
+func (p *CredentialPool) lookupVault(ctx context.Context, kind, project string) (*ProviderAuthEntry, error) {
+	key := kind + "/" + project
+	if cached, ok := p.cache[key]; ok {
+		return cached.Entry, cached.Err
+	}
+
+	ref := vault.Ref{
+		Path: p.vaultLoader.PathPrefix + kind,
+		Key:  project,
+	}
+	sv, _, err := p.vaultLoader.Provider.Resolve(ctx, ref)
+	if err != nil {
+		if errors.Is(err, vault.ErrKeyNotFound) {
+			// PRD R13.3: silent fallthrough. Cache the absence so
+			// repeat Lookups for the same pair don't re-query.
+			p.cache[key] = vaultLookupResult{}
+			return nil, nil
+		}
+		// Wrap network/auth errors so I8 can match them via
+		// errors.Is at the apply-error classification site (R13.1/R13.2).
+		wrapped := fmt.Errorf("fetching credential body for %s/%s from vault: %w", kind, project, err)
+		p.cache[key] = vaultLookupResult{Err: wrapped}
+		return nil, wrapped
+	}
+
+	// Plaintext access for parsing the credential body. This is a
+	// deliberate new caller of secret.reveal.UnsafeReveal — the
+	// package's own doc warns "DO NOT import this package from new
+	// code without explicit review." The justification: the body is
+	// a structured TOML envelope niwa itself wrote into the vault,
+	// not user-payload secret data. The bytes flow only into
+	// parseProviderAuthBody, which extracts the credential fields
+	// into a ProviderAuthEntry (which then flows through the existing
+	// secret-handling pipeline alongside file-sourced entries). The
+	// raw bytes are never logged, never written to argv, never
+	// surfaced in error messages (parseProviderAuthBody's errors
+	// reference the vault path and field name only, never the
+	// content — verified by the AC-36 sentinel-canary test).
+	bodyBytes := reveal.UnsafeReveal(sv)
+	entry, parseErr := parseProviderAuthBody(kind, project, bodyBytes)
+	p.cache[key] = vaultLookupResult{Entry: entry, Err: parseErr}
+	return entry, parseErr
 }
 
 // AuditTrail is the named slice type the pool returns from AuditLog.

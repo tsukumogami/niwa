@@ -506,19 +506,22 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		authEntries = entries
 	}
 
-	// Build the credential pool for this apply invocation. In I2 the
-	// pool's only layer is the local file (loader is nil); I7 will
-	// pass a non-nil vaultCredLoader after the credential-sync
-	// provider opens at Step 0.4. Lookups append AuditRecord values
-	// the pool's AuditLog accumulates for state-save (I3) and R12
-	// stderr emission (I9).
-	credentialPool := NewCredentialPool(authEntries, nil)
-
 	// I6 captures the syncSpec produced by Step 0.4 so the post-
 	// overlay R9 check (Step 0.5/0.6) can re-run validation with the
 	// workspace overlay's vault specs in scope. nil when machine-
 	// identity-vault-sync is not opted in.
 	var credentialSyncSpec *vault.ProviderSpec
+	// I7 captures the credential-sync provider opened at Step 0.4 so
+	// the credential pool's lazy vault loader can fetch from it on
+	// file-miss Lookups. nil when machine-identity-vault-sync is not
+	// opted in.
+	var credentialSyncLoader *vaultCredLoader
+
+	// credentialPool is constructed AFTER Step 0.4 so the loader can
+	// be wired in when opt-in is detected. Declared here as a
+	// forward-reference so apply.go's reads stay textually adjacent
+	// to the pre-Step-0.3 authEntries load.
+	var credentialPool *CredentialPool
 
 	// Step 0.3: refresh the personal-overlay snapshot and parse niwa.toml.
 	//
@@ -611,13 +614,25 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		if err := validateCredentialSyncBootstrapPreOverlay(authEntries, globalOverride.Global.Vault, syncSpec); err != nil {
 			return nil, err
 		}
-		syncBundle, _, err := openCredentialSyncProvider(ctx, syncSpec)
+		syncBundle, syncProvider, err := openCredentialSyncProvider(ctx, syncSpec)
 		if err != nil {
 			return nil, err
 		}
 		defer syncBundle.CloseAll()
 		credentialSyncSpec = &syncSpec
+		credentialSyncLoader = &vaultCredLoader{
+			Provider:     syncProvider,
+			ProviderName: syncSpec.Name,
+			PathPrefix:   CredentialSyncPathPrefix,
+		}
 	}
+
+	// Now that the (optional) loader is built, construct the
+	// credential pool. With opt-in: pool joins file + lazy vault
+	// (I7). Without opt-in: file-only pool (I2 behavior). Lookups
+	// append AuditRecord values the pool's AuditLog accumulates for
+	// state-save (I3) and R12 stderr emission (I9).
+	credentialPool = NewCredentialPool(authEntries, credentialSyncLoader)
 
 	// Step 0.5: overlay sync and merge — determine and sync the workspace overlay.
 	// This must run BEFORE discoverAllRepos so that the merged config (base +
