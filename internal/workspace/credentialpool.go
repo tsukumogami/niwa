@@ -6,20 +6,35 @@ import (
 	"github.com/tsukumogami/niwa/internal/vault"
 )
 
-// Source identifies which layer of the credential pool supplied a
-// particular machine-identity entry.
+// Source classifies the authentication-source decision the
+// credential pool recorded for one (kind, project) Lookup. The name
+// reads as "which source authenticated this provider"; the four
+// values cover both the case where a credential entry was supplied
+// by a pool layer (local-file, vault) and the case where no entry
+// was found and the apply will fall through to a backend's
+// CLI-session credentials (cli-session) or ultimately fail to
+// authenticate (none).
+//
+// Important: cli-session and none are NOT pool layers — they
+// describe what happened when no pool entry was supplied. Code
+// that means "the credential came from the pool's vault layer"
+// must check `rec.Source == SourceVault` specifically; checking
+// `rec.Source != SourceLocalFile` would over-include cli-session
+// and none.
 //
 //   - SourceLocalFile  — entry came from ~/.config/niwa/provider-auth.toml.
 //   - SourceVault      — entry came from the personal-overlay vault loader
 //                        (machine-identity-vault-sync; wired in by I7).
-//   - SourceCLISession — no entry was found in the pool; the backend will
-//                        fall through to its CLI-session credentials
+//   - SourceCLISession — no pool entry was found; the backend will fall
+//                        through to its CLI-session credentials
 //                        (e.g., `infisical login`). Recorded as a
 //                        tentative classification while the pool is
-//                        constructing the audit; downstream phases (I8)
-//                        may upgrade to SourceNone if backend auth
+//                        building the audit log; I8 may upgrade the
+//                        record to SourceNone if backend auth
 //                        ultimately fails.
 //   - SourceNone       — no source produced a usable credential.
+//                        Set by I8 after a failed auth call; never
+//                        produced by Lookup directly.
 type Source string
 
 const (
@@ -52,17 +67,30 @@ type AuditRecord struct {
 // so Lookup is a thin façade over MatchProviderAuth that records
 // audit decisions. I7 will plug in the vaultLoader and exercise the
 // lazy-fetch path; the public surface stays the same.
+//
+// Concurrency: CredentialPool is NOT goroutine-safe. Lookup mutates
+// the audit slice on every call; concurrent Lookup calls would race
+// on the append. The current production caller (injectProviderTokens
+// in apply.go) is sequential — three call sites run one after the
+// other, each iterating its registry's specs serially — so no
+// synchronization is needed. A future fan-out across providers must
+// either serialize Lookup calls or wrap them in a mutex.
 type CredentialPool struct {
 	fileEntries []ProviderAuthEntry
 	vaultLoader *vaultCredLoader            // nil in I2 (and whenever opt-in is off).
-	audit       []AuditRecord                // appended during Lookup calls.
+	audit       []AuditRecord                // appended during Lookup calls; not goroutine-safe.
 	cache       map[string]vaultLookupResult // populated by I7's vault-fetch path; unused in I2.
 }
 
 // vaultCredLoader is the credential-pool's connection to the personal-
 // overlay vault provider. I2 declares the placeholder; I7 fleshes it
-// out with Provider/ProviderName/PathPrefix fields and the lazy-
-// fetch implementation in Lookup.
+// out with Provider, ProviderName, and PathPrefix fields plus the
+// lazy-fetch implementation in Lookup. The type stays unexported
+// because only the workspace package constructs it: I7's
+// openCredentialSyncProvider helper (also in this package) will
+// build instances directly via struct literal, then pass them to
+// NewCredentialPool. No other package should construct or compare
+// vaultCredLoader values.
 type vaultCredLoader struct {
 	// Fields are intentionally absent in I2 — the type exists only so
 	// CredentialPool.vaultLoader has a stable type and so I7 can fill
@@ -93,24 +121,39 @@ func NewCredentialPool(file []ProviderAuthEntry, loader *vaultCredLoader) *Crede
 
 // Lookup returns the winning credential entry for (kind, project)
 // plus the AuditRecord that the pool appended for this decision.
+//
+// Invariants every Lookup implementation MUST preserve (these
+// stay true through I7's restructure and I8's source-upgrade work):
+//
+//  1. Exactly one AuditRecord is appended to p.audit per Lookup call.
+//  2. AuditRecords are appended in call order; AuditLog returns them
+//     in the same order.
+//  3. The returned AuditRecord is a copy of what was appended
+//     (callers may compare or render but should not assume mutating
+//     the returned value mutates the log entry).
+//  4. AuditRecord.Fallback is set to "vault:<provider-name>" if and
+//     only if both layers had an entry for the same (kind, project)
+//     and the file layer won; otherwise Fallback is empty.
+//  5. AuditRecord.Source is exactly one of SourceLocalFile,
+//     SourceVault, or SourceCLISession when produced by Lookup.
+//     SourceNone is reserved for I8's post-failure upgrade and is
+//     NEVER produced here.
+//  6. AuditRecord.Provider is the vault provider name (or "" for
+//     anonymous) when Source == SourceVault; "" otherwise.
+//
 // In I2 (file-only path), the algorithm is:
 //
-//  1. Search the file layer via MatchProviderAuth (single source of
-//     truth for matching rules).
-//  2. If matched, record SourceLocalFile and return the entry.
-//  3. Otherwise, record a tentative SourceCLISession — backends may
-//     fall through to their CLI session for the (kind, project).
+//  - Search the file layer via MatchProviderAuth (single source of
+//    truth for matching rules).
+//  - If matched, record SourceLocalFile and return the entry.
+//  - Otherwise, record SourceCLISession — backends may fall through
+//    to their CLI session for the (kind, project).
 //
-// I7 restructure note: the file-first short-circuit above means
-// the vault layer is never consulted in I2. DESIGN's full algorithm
-// computes BOTH the file entry AND the vault entry first, then
-// decides which wins (file > vault) and records the loser as
-// AuditRecord.Fallback. I7 will need to flip this Lookup body to
-// the compute-both shape (not just paste a vault-fetch branch in
-// front of the file-hit return). Mechanically: replace the
-// short-circuit returns with a join over fileEntry + vaultEntry,
-// set rec.Fallback when both are populated, append the audit
-// record once, and return.
+// I7 restructure note: the file-first short-circuit means the vault
+// layer is never consulted in I2. DESIGN's full algorithm computes
+// BOTH file and vault entries before deciding which wins, then
+// records the loser as Fallback. I7 will replace the short-circuit
+// with a compute-both join, preserving the invariants above.
 //
 // The error return is reserved for I7's vault-fetch errors; I2
 // always returns nil for the error.
