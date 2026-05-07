@@ -383,6 +383,49 @@ func TestPool_AC37_NoResolveForUnreferencedPair(t *testing.T) {
 	}
 }
 
+// TestPool_R9_SelfLookupGuard locks the dynamic R9 enforcement
+// in lookupVault. injectProviderTokens iterates the personal
+// overlay's vault registry, which contains the credential-sync
+// spec ITSELF; for that spec it asks the pool to look up
+// credentials. Without the loader's SelfKind/SelfProject guard,
+// the pool would Resolve the credential-sync provider for its
+// own credentials — the chicken-and-egg cycle R9 forbids.
+//
+// This test wires SelfKind/SelfProject to a known pair, asks
+// for that pair, and confirms (a) the guard fires (no Resolve
+// call), (b) the audit record is SourceCLISession (apply
+// continues; the credential-sync provider was opened via CLI
+// session in I6, so falling through to that path is correct).
+func TestPool_R9_SelfLookupGuard(t *testing.T) {
+	stub, loader := newStubLoader(t, "personal", map[string]stubResponse{
+		"/niwa/provider-auth/infisical/uuid-self": {body: validBody("cid-self", "csec-self")},
+	})
+	loader.SelfKind = "infisical"
+	loader.SelfProject = "uuid-self"
+	pool := NewCredentialPool(nil, loader)
+
+	_, rec, err := pool.Lookup(context.Background(), "infisical", "uuid-self")
+	if err != nil {
+		t.Fatalf("self-lookup must NOT error, got: %v", err)
+	}
+	if rec.Source != SourceCLISession {
+		t.Errorf("self-lookup rec.Source = %q, want %q", rec.Source, SourceCLISession)
+	}
+	if len(stub.calls) != 0 {
+		t.Errorf("self-lookup must NOT issue a Resolve call (R9 cycle); got %d calls", len(stub.calls))
+	}
+
+	// Sanity: a different (kind, project) is still resolvable.
+	stub.response["/niwa/provider-auth/infisical/uuid-other"] = stubResponse{body: validBody("cid-o", "csec-o")}
+	_, _, err = pool.Lookup(context.Background(), "infisical", "uuid-other")
+	if err != nil {
+		t.Fatalf("non-self lookup must succeed, got: %v", err)
+	}
+	if len(stub.calls) != 1 {
+		t.Errorf("non-self lookup should Resolve once; got %d calls", len(stub.calls))
+	}
+}
+
 // TestPool_AC31_CacheWithinApply confirms PRD R6 + AC-31: within
 // one apply (one CredentialPool), repeat Lookups for the same
 // pair hit the cache (no re-fetch). A separate CredentialPool

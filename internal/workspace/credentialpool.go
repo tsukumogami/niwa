@@ -204,10 +204,23 @@ type CredentialPool struct {
 // stores credential bodies in the personal vault. For Infisical
 // today: "/niwa/provider-auth/" — the per-pair key path is then
 // PathPrefix + kind + "/" + project (PRD R7 schema convention).
+//
+// SelfKind and SelfProject identify the credential-sync provider
+// itself: when injectProviderTokens iterates the global overlay's
+// vault registry it WILL ask the pool to look up credentials for
+// that provider's own (kind, project). Resolving against the
+// credential-sync provider for its own credentials would be the
+// PRD R9 chicken-and-egg cycle the static validators forbid; the
+// pool's lookupVault refuses self-queries to enforce R9 dynamically
+// alongside the parse-time validateCredentialSyncBootstrap{Pre,Post}Overlay
+// gates. SelfKind/SelfProject are populated at apply.go's Step 0.4
+// from the credential-sync ProviderSpec.
 type vaultCredLoader struct {
 	Provider     vault.Provider
 	ProviderName string // "" for anonymous; AC-39 rendering handled by renderVaultProvider.
 	PathPrefix   string
+	SelfKind     string // (kind, project) of the credential-sync provider itself.
+	SelfProject  string
 }
 
 // vaultLookupResult is the per-(kind, project) memoization entry for
@@ -320,6 +333,21 @@ func (p *CredentialPool) Lookup(ctx context.Context, kind, project string) (*Pro
 // error for ErrProviderUnreachable (R13.1/R13.2) and for body
 // parse / validation failures (R13.4 / R13.5 / R13.7).
 func (p *CredentialPool) lookupVault(ctx context.Context, kind, project string) (*ProviderAuthEntry, error) {
+	// PRD R9 dynamic enforcement: refuse to resolve the
+	// credential-sync provider's own (kind, project). injectProviderTokens
+	// iterates the global overlay's vault registry — which contains the
+	// credential-sync spec itself — so without this guard a Resolve call
+	// against the credential-sync provider for its own credentials
+	// would happen and feed an authenticateEntry chain that re-injects
+	// a token into the very spec used to fetch it. The static R9 check
+	// (validateCredentialSyncBootstrapPreOverlay) skips the syncSpec
+	// slot from its scan, so this guard is the matching dynamic check.
+	// Refusing the self-lookup behaves like ErrKeyNotFound: the audit
+	// records SourceCLISession (the actual auth path the I6 open used)
+	// and apply continues.
+	if p.vaultLoader.SelfKind != "" && kind == p.vaultLoader.SelfKind && project == p.vaultLoader.SelfProject {
+		return nil, nil
+	}
 	key := kind + "/" + project
 	if cached, ok := p.cache[key]; ok {
 		return cached.Entry, cached.Err

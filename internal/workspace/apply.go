@@ -620,10 +620,19 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		}
 		defer syncBundle.CloseAll()
 		credentialSyncSpec = &syncSpec
+		// SelfKind/SelfProject populate the loader's R9 dynamic guard
+		// against self-lookup. injectProviderTokens later iterates
+		// globalOverride.Global.Vault, which contains this spec; without
+		// the guard, lookupVault would Resolve the credential-sync
+		// provider for its own (kind, project) and feed it back via
+		// authenticateEntry — the chicken-and-egg cycle.
+		syncProject, _ := syncSpec.Config["project"].(string)
 		credentialSyncLoader = &vaultCredLoader{
 			Provider:     syncProvider,
 			ProviderName: syncSpec.Name,
 			PathPrefix:   CredentialSyncPathPrefix,
+			SelfKind:     syncSpec.Kind,
+			SelfProject:  syncProject,
 		}
 	}
 
