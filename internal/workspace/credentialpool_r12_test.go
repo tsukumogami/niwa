@@ -34,14 +34,15 @@ func TestEmitR12Lines_VaultRow(t *testing.T) {
 	}
 	trail.EmitR12Lines(rep)
 	got := buf.String()
-	want := "auth: infisical/uuid-A source=vault:personal\n"
+	want := "auth: infisical/uuid-A source=vault:personal-overlay(personal)\n"
 	if got != want {
 		t.Errorf("output = %q, want %q", got, want)
 	}
 }
 
 // TestEmitR12Lines_AnonymousVaultRow covers AC-39: anonymous
-// renders as vault:(anonymous), never bare vault:.
+// renders as vault:personal-overlay (no name suffix), never bare
+// vault: with a trailing colon.
 func TestEmitR12Lines_AnonymousVaultRow(t *testing.T) {
 	rep, buf := captureReporter()
 	trail := AuditTrail{
@@ -49,7 +50,7 @@ func TestEmitR12Lines_AnonymousVaultRow(t *testing.T) {
 	}
 	trail.EmitR12Lines(rep)
 	got := buf.String()
-	if !strings.Contains(got, "source=vault:(anonymous)") {
+	if !strings.Contains(got, "source=vault:personal-overlay\n") {
 		t.Errorf("anonymous render missing. Got: %q", got)
 	}
 	if strings.Contains(got, "source=vault:\n") || strings.Contains(got, "source=vault: ") {
@@ -62,11 +63,11 @@ func TestEmitR12Lines_AnonymousVaultRow(t *testing.T) {
 func TestEmitR12Lines_FileWithFallback(t *testing.T) {
 	rep, buf := captureReporter()
 	trail := AuditTrail{
-		{Kind: "infisical", Project: "uuid-A", Source: SourceLocalFile, Fallback: "vault:personal"},
+		{Kind: "infisical", Project: "uuid-A", Source: SourceLocalFile, Fallback: "vault:personal-overlay(personal)"},
 	}
 	trail.EmitR12Lines(rep)
 	got := buf.String()
-	want := "auth: infisical/uuid-A source=local-file fallback=vault:personal\n"
+	want := "auth: infisical/uuid-A source=local-file fallback=vault:personal-overlay(personal)\n"
 	if got != want {
 		t.Errorf("output = %q, want %q", got, want)
 	}
@@ -146,8 +147,8 @@ func TestEmitR12Lines_LastWriteWins(t *testing.T) {
 	}
 	trail.EmitR12Lines(rep)
 	got := buf.String()
-	if !strings.Contains(got, "source=vault:personal") {
-		t.Errorf("last-write-wins violation; expected vault:personal. Got: %q", got)
+	if !strings.Contains(got, "source=vault:personal-overlay(personal)") {
+		t.Errorf("last-write-wins violation; expected vault:personal-overlay(personal). Got: %q", got)
 	}
 	if strings.Contains(got, "source=cli-session") {
 		t.Errorf("earlier cli-session record leaked into emit. Got: %q", got)
@@ -172,7 +173,7 @@ func TestEmitR12Lines_MixedTrail(t *testing.T) {
 	rep, buf := captureReporter()
 	trail := AuditTrail{
 		{Kind: "infisical", Project: "uuid-vault", Source: SourceVault, Provider: "personal"},
-		{Kind: "infisical", Project: "uuid-fallback", Source: SourceLocalFile, Fallback: "vault:personal"},
+		{Kind: "infisical", Project: "uuid-fallback", Source: SourceLocalFile, Fallback: "vault:personal-overlay(personal)"},
 		{Kind: "infisical", Project: "uuid-pure", Source: SourceLocalFile, Fallback: ""},
 		{Kind: "infisical", Project: "uuid-cli", Source: SourceCLISession},
 	}
@@ -182,10 +183,10 @@ func TestEmitR12Lines_MixedTrail(t *testing.T) {
 	if lineCount != 2 {
 		t.Errorf("expected 2 lines, got %d: %q", lineCount, got)
 	}
-	if !strings.Contains(got, "auth: infisical/uuid-vault source=vault:personal") {
+	if !strings.Contains(got, "auth: infisical/uuid-vault source=vault:personal-overlay(personal)") {
 		t.Errorf("vault row missing. Got: %q", got)
 	}
-	if !strings.Contains(got, "auth: infisical/uuid-fallback source=local-file fallback=vault:personal") {
+	if !strings.Contains(got, "auth: infisical/uuid-fallback source=local-file fallback=vault:personal-overlay(personal)") {
 		t.Errorf("fallback row missing. Got: %q", got)
 	}
 	if strings.Contains(got, "uuid-pure") {

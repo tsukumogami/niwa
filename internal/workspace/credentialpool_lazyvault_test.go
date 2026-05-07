@@ -125,14 +125,14 @@ func TestPool_FileWinsWithVaultFallback(t *testing.T) {
 	if rec.Source != SourceLocalFile {
 		t.Errorf("rec.Source = %q, want %q", rec.Source, SourceLocalFile)
 	}
-	if rec.Fallback != "vault:personal" {
-		t.Errorf("rec.Fallback = %q, want %q", rec.Fallback, "vault:personal")
+	if rec.Fallback != "vault:personal-overlay(personal)" {
+		t.Errorf("rec.Fallback = %q, want %q", rec.Fallback, "vault:personal-overlay(personal)")
 	}
 }
 
 // TestPool_FileWinsWithAnonymousVaultFallback locks AC-39 for
 // the anonymous-vault case: the Fallback string renders as
-// "vault:(anonymous)", never bare "vault:".
+// "vault:personal-overlay", never bare "vault:".
 func TestPool_FileWinsWithAnonymousVaultFallback(t *testing.T) {
 	file := []ProviderAuthEntry{
 		{
@@ -153,8 +153,8 @@ func TestPool_FileWinsWithAnonymousVaultFallback(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if rec.Fallback != "vault:(anonymous)" {
-		t.Errorf("rec.Fallback = %q, want vault:(anonymous)", rec.Fallback)
+	if rec.Fallback != "vault:personal-overlay" {
+		t.Errorf("rec.Fallback = %q, want vault:personal-overlay", rec.Fallback)
 	}
 }
 

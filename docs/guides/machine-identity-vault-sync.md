@@ -168,10 +168,10 @@ niwa status --audit-auth
 Sample output:
 
 ```
-KIND       PROJECT-UUID                          SOURCE              FALLBACK
-infisical  550e8400-e29b-41d4-a716-446655440000  local-file          vault:personal
-infisical  660f9511-f40c-52e5-b827-557766551111  vault:personal      —
-infisical  770a0622-a51d-63f6-c938-668877662222  cli-session         —
+KIND       PROJECT-UUID                          SOURCE                     FALLBACK
+infisical  550e8400-e29b-41d4-a716-446655440000  local-file                 vault:personal-overlay
+infisical  660f9511-f40c-52e5-b827-557766551111  vault:personal-overlay     —
+infisical  770a0622-a51d-63f6-c938-668877662222  cli-session                —
 ```
 
 Column meaning:
@@ -180,8 +180,10 @@ Column meaning:
 - `PROJECT-UUID` — the Infisical project the credential was for.
 - `SOURCE` — where the credential came from in the last apply:
   - `local-file` — `~/.config/niwa/provider-auth.toml`.
-  - `vault:<name>` — your personal vault. Anonymous renders as
-    `vault:(anonymous)`.
+  - `vault:personal-overlay` — your personal-overlay vault. The
+    "personal-overlay" label always names the source; if you ever
+    have multiple credential-sync providers, niwa appends the name
+    in parentheses (e.g., `vault:personal-overlay(work)`).
   - `cli-session` — niwa fell through to the backend's active
     session (e.g., `infisical login`).
   - `none` — no source produced a usable credential.
@@ -201,14 +203,14 @@ When at least one `(kind, project)` was sourced from the vault on
 this apply, niwa emits one stderr line per pair:
 
 ```
-auth: infisical/550e8400-... source=vault:personal
+auth: infisical/550e8400-... source=vault:personal-overlay
 ```
 
 When the local file overrode a vault entry, you also see a
 fallback line:
 
 ```
-auth: infisical/660f9511-... source=local-file fallback=vault:personal
+auth: infisical/660f9511-... source=local-file fallback=vault:personal-overlay
 ```
 
 The lines fire BEFORE backend authentication runs, so even an

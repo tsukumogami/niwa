@@ -210,8 +210,8 @@ func TestAuditTrail_AsMap_AllSources(t *testing.T) {
 		want AuthSourceRecord
 	}{
 		{"infisical/uuid-A", AuthSourceRecord{Source: "local-file"}},
-		{"infisical/uuid-B", AuthSourceRecord{Source: "vault:personal"}},
-		{"infisical/uuid-C", AuthSourceRecord{Source: "vault:(anonymous)"}}, // AC-39
+		{"infisical/uuid-B", AuthSourceRecord{Source: "vault:personal-overlay(personal)"}},
+		{"infisical/uuid-C", AuthSourceRecord{Source: "vault:personal-overlay"}}, // AC-39
 		{"infisical/uuid-D", AuthSourceRecord{Source: "cli-session"}},
 		{"infisical/uuid-E", AuthSourceRecord{Source: "none"}},
 	}
@@ -240,7 +240,7 @@ func TestAuditTrail_AsMap_FallbackPropagated(t *testing.T) {
 			Kind:     "infisical",
 			Project:  "uuid-X",
 			Source:   SourceLocalFile,
-			Fallback: "vault:personal",
+			Fallback: "vault:personal-overlay(personal)",
 		},
 	}
 	got := trail.AsMap()
@@ -251,8 +251,8 @@ func TestAuditTrail_AsMap_FallbackPropagated(t *testing.T) {
 	if rec.Source != "local-file" {
 		t.Errorf("Source = %q, want %q", rec.Source, "local-file")
 	}
-	if rec.Fallback != "vault:personal" {
-		t.Errorf("Fallback = %q, want %q", rec.Fallback, "vault:personal")
+	if rec.Fallback != "vault:personal-overlay(personal)" {
+		t.Errorf("Fallback = %q, want %q", rec.Fallback, "vault:personal-overlay(personal)")
 	}
 }
 
