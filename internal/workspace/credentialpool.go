@@ -49,7 +49,7 @@ type providerAuthBody struct {
 func parseProviderAuthBody(kind, project string, raw []byte) (*ProviderAuthEntry, error) {
 	if len(raw) > maxProviderAuthBodyBytes {
 		return nil, fmt.Errorf(
-			"vault-sourced provider-auth body at /niwa/provider-auth/%s/%s exceeds %d bytes (%d) and will not be parsed",
+			"vault-sourced provider-auth body at "+CredentialSyncPathPrefix+"%s/%s exceeds %d bytes (%d) and will not be parsed",
 			kind, project, maxProviderAuthBodyBytes, len(raw),
 		)
 	}
@@ -59,7 +59,7 @@ func parseProviderAuthBody(kind, project string, raw []byte) (*ProviderAuthEntry
 		// bytes — toml.Unmarshal errors are content-free (offset
 		// only), but we still scrub by surfacing only kind+project.
 		return nil, fmt.Errorf(
-			"vault-sourced provider-auth body at /niwa/provider-auth/%s/%s is malformed: %w",
+			"vault-sourced provider-auth body at "+CredentialSyncPathPrefix+"%s/%s is malformed: %w",
 			kind, project, sanitizeTOMLError(err),
 		)
 	}
@@ -71,19 +71,19 @@ func parseProviderAuthBody(kind, project string, raw []byte) (*ProviderAuthEntry
 	}
 	if version != "1" {
 		return nil, fmt.Errorf(
-			"provider-auth body at /niwa/provider-auth/%s/%s has unsupported schema version %q; this niwa version supports v1. Upgrade niwa or update the vault entry.",
+			"provider-auth body at "+CredentialSyncPathPrefix+"%s/%s has unsupported schema version %q; this niwa version supports v1. Upgrade niwa or update the vault entry.",
 			kind, project, version,
 		)
 	}
 	if body.ClientID == "" {
 		return nil, fmt.Errorf(
-			"vault-sourced provider-auth body at /niwa/provider-auth/%s/%s is missing required field %q",
+			"vault-sourced provider-auth body at "+CredentialSyncPathPrefix+"%s/%s is missing required field %q",
 			kind, project, "client_id",
 		)
 	}
 	if body.ClientSecret == "" {
 		return nil, fmt.Errorf(
-			"vault-sourced provider-auth body at /niwa/provider-auth/%s/%s is missing required field %q",
+			"vault-sourced provider-auth body at "+CredentialSyncPathPrefix+"%s/%s is missing required field %q",
 			kind, project, "client_secret",
 		)
 	}
@@ -328,10 +328,19 @@ func (p *CredentialPool) Lookup(ctx context.Context, kind, project string) (*Pro
 // (PRD R6 lazy fetch + AC-31 re-fetch-each-apply since the cache
 // belongs to the per-apply CredentialPool).
 //
-// Returns (nil, nil) on ErrKeyNotFound (silent fallthrough; PRD
-// R13.3). Returns the parsed entry on success. Returns a wrapped
-// error for ErrProviderUnreachable (R13.1/R13.2) and for body
-// parse / validation failures (R13.4 / R13.5 / R13.7).
+// Return cases:
+//   - (nil, nil) when the requested (kind, project) IS the
+//     credential-sync provider's own (R9 dynamic self-lookup
+//     guard; refuses to fire a Resolve call against the
+//     credential-sync provider for its own credentials).
+//   - (nil, nil) on ErrKeyNotFound (silent fallthrough; PRD R13.3).
+//   - (entry, nil) on a successful fetch + parse.
+//   - (nil, wrapped) on ErrProviderUnreachable (PRD R13.1/R13.2);
+//     the wrap uses %w so I8's errors.Is dispatch matches the
+//     vault sentinel — DO NOT change %w to %v in this path.
+//   - (nil, parseErr) on body parse / validation failures
+//     (PRD R13.4 / R13.5 / R13.7); the parseErr never contains
+//     body bytes (PRD R18 / AC-36).
 func (p *CredentialPool) lookupVault(ctx context.Context, kind, project string) (*ProviderAuthEntry, error) {
 	// PRD R9 dynamic enforcement: refuse to resolve the
 	// credential-sync provider's own (kind, project). injectProviderTokens
