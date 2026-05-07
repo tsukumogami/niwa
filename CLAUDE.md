@@ -34,6 +34,7 @@ init → create → apply workflow, add a `@critical` Gherkin scenario in
 ## Contributor Guides
 
 - `docs/guides/functional-testing.md` — end-to-end test patterns and the `localGitServer` helper
+- `docs/guides/machine-identity-vault-sync.md` — opting into machine-identity sync from your personal vault, vault key schema, audit surfaces
 - `docs/guides/one-time-notices.md` — how to add informational messages that appear once per workspace instance
 - `docs/guides/vault-integration.md` — vault provider architecture and acceptance coverage
 - `docs/guides/workspace-config-sources.md` — config source resolution, snapshot model, and discovery conventions
