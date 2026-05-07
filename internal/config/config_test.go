@@ -761,6 +761,10 @@ project = "uuid-anon"
 // is the same code path with a name that exists in a team config
 // but not in the personal overlay — this test simulates that by
 // declaring only "team" and pointing from at "missing".
+//
+// AC-34 specifically requires the diagnostic to reference the
+// personal-vs-team distinction per R10 ("not declared in your
+// personal overlay"); this test asserts on that phrasing.
 func TestParseGlobalConfigOverrideMachineIdentitiesUnknownNamedProvider(t *testing.T) {
 	input := `
 [global.vault.providers.team]
@@ -775,14 +779,22 @@ from = "missing"
 		t.Fatal("expected R2 error for unknown named provider, got nil")
 	}
 	msg := err.Error()
-	if !strings.Contains(msg, "references unknown vault provider") {
-		t.Errorf("error %q should contain 'references unknown vault provider'", msg)
-	}
+	// AC-3: name the missing provider.
 	if !strings.Contains(msg, `"missing"`) {
 		t.Errorf("error %q should name the missing provider", msg)
 	}
+	// AC-3: list the declared providers from this file.
 	if !strings.Contains(msg, "[team]") {
 		t.Errorf("error %q should list the declared providers, got [team]", msg)
+	}
+	// AC-34 (R10): the diagnostic MUST reference the personal-vs-team
+	// distinction so users understand the feature only honors providers
+	// declared in their personal overlay.
+	if !strings.Contains(msg, "personal overlay") {
+		t.Errorf("AC-34: error %q should reference 'personal overlay'", msg)
+	}
+	if !strings.Contains(msg, "not declared in your personal overlay") {
+		t.Errorf("AC-34: error %q should use the literal phrase 'not declared in your personal overlay'", msg)
 	}
 }
 

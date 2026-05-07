@@ -530,9 +530,19 @@ func validateMachineIdentities(prefix string, ov GlobalOverride) error {
 	known := ov.Vault.KnownProviderNames()
 	if ov.MachineIdentities.From != "" {
 		if !known[ov.MachineIdentities.From] {
+			// PRD AC-34 / R10: the diagnostic MUST reference the
+			// personal-vs-team distinction. machine-identity-vault-sync
+			// only honors providers declared in the personal overlay
+			// itself; pointing `from` at a name that exists only in a
+			// team config would silently route around R10. The phrase
+			// "not declared in your personal overlay" makes the file-
+			// boundary explicit so users can act on the diagnostic.
 			return fmt.Errorf(
-				"%s: [machine_identities] from = %q references unknown vault provider. Declared providers in this file: [%s].",
-				prefix, ov.MachineIdentities.From, strings.Join(declaredNamedProviders(known), ", "),
+				"%s: [machine_identities] from = %q is not declared in your personal overlay. "+
+					"machine-identity-vault-sync only uses personal-overlay vault providers. "+
+					"Either add [vault.providers.%s] to your personal overlay or change `from` "+
+					"to a declared name. Declared providers in this file: [%s].",
+				prefix, ov.MachineIdentities.From, ov.MachineIdentities.From, strings.Join(declaredNamedProviders(known), ", "),
 			)
 		}
 		return nil
