@@ -514,6 +514,12 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 	// stderr emission (I9).
 	credentialPool := NewCredentialPool(authEntries, nil)
 
+	// I6 captures the syncSpec produced by Step 0.4 so the post-
+	// overlay R9 check (Step 0.5/0.6) can re-run validation with the
+	// workspace overlay's vault specs in scope. nil when machine-
+	// identity-vault-sync is not opted in.
+	var credentialSyncSpec *vault.ProviderSpec
+
 	// Step 0.3: refresh the personal-overlay snapshot and parse niwa.toml.
 	//
 	// The snapshot refresh (formerly Step 2a) and the niwa.toml parse
@@ -573,6 +579,44 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		} else if !os.IsNotExist(readErr) {
 			return nil, fmt.Errorf("reading global config override: %w", readErr)
 		}
+	}
+
+	// Step 0.4: open the personal-overlay credential-sync vault
+	// provider (machine-identity-vault-sync, PRD R9) when the user
+	// has opted in via [global.machine_identities] in their personal
+	// overlay. Two-stage R9 enforcement:
+	//
+	//  - Pre-overlay (here): scan the local file plus the global
+	//    override's own vault specs for a (kind, project) collision
+	//    with the credential-sync provider. Failing fast here saves
+	//    one provider Open + Close on the conflict path.
+	//  - Post-overlay (Step 0.6 region): re-run the check against
+	//    the workspace overlay's vault specs once they are parsed.
+	//
+	// The bundle's lifetime is scoped to this apply via
+	// `defer syncBundle.CloseAll()`. I7 will swap the file-only
+	// `NewCredentialPool(authEntries, nil)` constructor above for
+	// one that wraps the opened provider in a vaultCredLoader; for
+	// I6 the opened provider is held but not yet consulted by the
+	// pool (so opt-in users see no behavior change beyond the R9
+	// validation gate).
+	if globalOverride != nil && globalOverride.Global.MachineIdentities != nil {
+		mi := globalOverride.Global.MachineIdentities
+		syncSpec, err := pickCredentialSyncSpec(globalOverride.Global, mi)
+		if err != nil {
+			return nil, err
+		}
+		// Pre-overlay R9 BEFORE Build so a conflict short-circuits
+		// without opening the provider.
+		if err := validateCredentialSyncBootstrapPreOverlay(authEntries, globalOverride.Global.Vault, syncSpec); err != nil {
+			return nil, err
+		}
+		syncBundle, _, _, err := openCredentialSyncProvider(ctx, globalOverride.Global, mi)
+		if err != nil {
+			return nil, err
+		}
+		defer syncBundle.CloseAll()
+		credentialSyncSpec = &syncSpec
 	}
 
 	// Step 0.5: overlay sync and merge — determine and sync the workspace overlay.
@@ -661,6 +705,18 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 				return nil, fmt.Errorf("workspace overlay is missing workspace-overlay.toml")
 			}
 			return nil, fmt.Errorf("parsing workspace overlay: %w", parseErr)
+		}
+
+		// PRD R9 stage 2: post-overlay credential-sync chicken-and-egg
+		// check. Stage 1 (Step 0.4) couldn't see the workspace overlay's
+		// vault specs because the overlay wasn't parsed yet. Now that
+		// it is, re-run the check against overlay.Vault. The deferred
+		// syncBundle.CloseAll() from Step 0.4 fires cleanly on this
+		// error path; no Resolve has run on the credential-sync provider.
+		if credentialSyncSpec != nil {
+			if err := validateCredentialSyncBootstrapPostOverlay(overlay.Vault, *credentialSyncSpec); err != nil {
+				return nil, err
+			}
 		}
 
 		// Inject machine-identity tokens into the overlay's [vault.provider]
