@@ -37,3 +37,14 @@
   Why: rework introduces three substantial new behaviors (contextual mode selection, picker UX, wrapper cd-out-of-deleted-dir) that span three existing PRD surfaces with no canonical home. (L6.)
 - Design doc artifact: `DESIGN-niwa-destroy.md` (new), with amendments to existing design docs cross-linking it.
   Why: same coherence argument as the new PRD.
+
+## Round 1 (settled by --auto decision protocol)
+
+| ID | Artifact | Tier | Status | Question |
+|---|---|---|---|---|
+| reset-scope | wip/explore_niwa-destroy-rework_findings.md | 2 | confirmed | Should this rework also apply to `niwa reset`? |
+| single-instance-picker | wip/explore_niwa-destroy-rework_findings.md | 2 | confirmed | When workspace has exactly one instance, skip the picker or always show? |
+| confirmation-token | wip/explore_niwa-destroy-rework_findings.md | 2 | confirmed | What does the typed-confirmation prompt ask the user to type? |
+| prd-r2-cleanup | wip/explore_niwa-destroy-rework_findings.md | 2 | confirmed | Retire PRD-shell-integration R2 in this PR? |
+| workspace-wipe-order | wip/explore_niwa-destroy-rework_findings.md | 2 | confirmed | Workspace-wipe destroy-instance ordering: sequential or concurrent? |
+| inside-instance-no-prompt | wip/explore_niwa-destroy-rework_findings.md | 2 | confirmed | Confirmation prompt when destroying from inside an instance? |

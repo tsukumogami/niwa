@@ -37,12 +37,129 @@ What's the safest, least-surprising UX for the workspace-self-destroy path?
 - **Workspace-wipe order.** Sequential (clean output, 5s × N grace) vs concurrent (fast, output races). PRD-cross-session-communication R38 doesn't constrain this. Recommend sequential, deterministic order in the design doc.
 - **Typed-confirmation vs landing-path timing.** The typed prompt MUST happen before any `writeLandingPath` call so a user who hits ESC isn't `cd`-ed away from a workspace they didn't actually destroy. (L6 Open Q #3.) Easy to encode in the design doc; flag for crystallize.
 
+### Resolved (auto-mode decisions, Round 1)
+
+<!-- decision:start id="reset-scope" status="confirmed" -->
+### Decision: Reset scope
+
+**Question:** Should this rework also apply to `niwa reset`, or stay focused on destroy?
+
+**Evidence:** User's original task framing was "Rework `niwa destroy`" with no mention of reset. Reset is structurally a different verb (destroy-then-recreate from config) — its workspace-wipe semantic doesn't apply. Reset shares all four destroy helpers (`ResolveInstanceTarget`, `ValidateInstanceDir`, `CheckUncommittedChanges`, `DestroyInstance`) per L3 findings. The rework was already constrained to additive sibling helpers (no in-place edits) precisely to keep reset working unchanged.
+
+**Choice:** Destroy only.
+
+**Alternatives considered:**
+- Destroy + reset together: doubles surface, doubles tests, doubles PRD scope. The user's explicit framing didn't ask for this.
+
+**Assumptions:**
+- Reset's existing UX (name-or-cwd resolution) remains acceptable to users.
+- A future "reset rework" follow-up is feasible if needed; helpers stay shared.
+
+**Consequences:** Reset will not get the picker UX. Destroy and reset diverge on contextual semantics. The shared helpers stay untouched, so reset's behavior is preserved by construction.
+
+**Reversibility:** medium — extending to reset later means another PR but no new architecture.
+<!-- decision:end -->
+
+<!-- decision:start id="single-instance-picker" status="confirmed" -->
+### Decision: Single-instance picker behavior
+
+**Question:** When the workspace has exactly one instance, does `niwa destroy` (no arg, at root) skip the picker and destroy directly, or always show the picker?
+
+**Evidence:** L4 findings establish niwa's house style as flag-driven and non-interactive when the action is unambiguous. The picker exists to disambiguate — when there's nothing to disambiguate, a picker is ceremony. The dirty-repo gate still fires per existing rules.
+
+**Choice:** Skip-and-go. With exactly one instance, destroy that instance directly (still subject to the existing dirty-repo `--force` gate).
+
+**Alternatives considered:**
+- Always-show picker: forces an explicit pick step even when there's only one option. Adds friction without adding safety.
+
+**Assumptions:**
+- The dirty-repo gate is sufficient safety for the single-instance case (consistent with today).
+
+**Consequences:** Single-instance workspace UX matches today's "no arg → destroy enclosing" feel; user types `niwa destroy` once and the only instance is removed.
+<!-- decision:end -->
+
+<!-- decision:start id="confirmation-token" status="confirmed" -->
+### Decision: Typed-confirmation token
+
+**Question:** When workspace-self-destroy detects unpushed work, what does the user type to confirm — the workspace name, or a fixed string like `DESTROY`?
+
+**Evidence:** Industry convention (GitHub repository deletion, Heroku app deletion, Stripe account deletion) all use the resource name. Niwa already has `EffectiveConfigName` / `resolveEffectiveWorkspaceName` to derive the override-aware name (per L4 findings on `effective_name.go`). A fixed token like `DESTROY` would train muscle memory and defeat the safety guard.
+
+**Choice:** Workspace name (override-aware via `EffectiveConfigName`).
+
+**Alternatives considered:**
+- Fixed string `DESTROY`: easy to type, easy to muscle-memory through. Defeats the purpose.
+- `y/N` prompt: standard but doesn't carry the "I really mean THIS workspace" signal.
+
+**Assumptions:**
+- Workspace names are short enough to type once. Names are reasonable identifiers (no special chars that defeat shell quoting).
+
+**Consequences:** The prompt resolves the effective workspace name and demands an exact match. Mismatch → abort with "confirmation did not match; aborting" and exit non-zero.
+<!-- decision:end -->
+
+<!-- decision:start id="prd-r2-cleanup" status="confirmed" -->
+### Decision: PRD-shell-integration R2 cleanup
+
+**Question:** Should this PR retire PRD-shell-integration R2's stale "stdout protocol" wording while we're amending the PRD anyway?
+
+**Evidence:** L6 findings confirm R2 has been obsolete since the NIWA_RESPONSE_FILE protocol replaced it (DESIGN-shell-navigation-protocol). Cleanup is independent of destroy semantics. Bundling unrelated cleanup with a feature PR makes review harder.
+
+**Choice:** Out of scope. Leave R2 alone in this PR; flag for a follow-up doc cleanup.
+
+**Alternatives considered:**
+- Bundle the R2 cleanup: tempting because we're already touching the PRD, but adds review surface unrelated to destroy.
+
+**Assumptions:**
+- A doc-only cleanup PR is feasible later.
+
+**Consequences:** PRD-shell-integration retains an obsolete R2 line until a separate cleanup PR. Destroy's R1 amendment will note "see also R2 (deprecated)" so the inconsistency is at least called out.
+<!-- decision:end -->
+
+<!-- decision:start id="workspace-wipe-order" status="confirmed" -->
+### Decision: Workspace-wipe destroy-instance ordering
+
+**Question:** When `niwa destroy --force` from the workspace root wipes N instances, do we destroy them sequentially or concurrently?
+
+**Evidence:** PRD-cross-session-communication R38 doesn't constrain order. L6 raised this as an open. Each instance's `TerminateDaemon` call has up to 5s grace (`NIWA_DESTROY_GRACE_SECONDS`). For realistic N (≤5), sequential is bounded at ~25s worst case, which is acceptable at a confirmation prompt. Concurrent execution introduces output races (instances log progress to stderr in interleaved fragments) and complicates error handling.
+
+**Choice:** Sequential, deterministic order (alphabetical by instance name).
+
+**Alternatives considered:**
+- Concurrent with bounded worker pool: faster but interleaves output and complicates error reporting. Realistic gain (~1.5x) doesn't justify the UX cost.
+
+**Assumptions:**
+- Realistic workspaces have ≤5 instances, so 5s × N is tolerable.
+- Users prefer clean, predictable output to faster wall-clock time at this rare prompt.
+
+**Consequences:** The output for `niwa destroy --force` (workspace wipe) is a clean per-instance progress narration. Total time scales linearly with N but is bounded in practice.
+<!-- decision:end -->
+
+<!-- decision:start id="inside-instance-no-prompt" status="confirmed" -->
+### Decision: Confirmation prompt when destroying from inside an instance
+
+**Question:** When the user runs `niwa destroy` (no arg) from inside an instance, do we add a confirmation prompt or preserve today's silent behavior?
+
+**Evidence:** Today's destroy is silent (no prompt). L4 findings establish niwa's principle of minimum surprise: the user typed the destructive command from inside the target — they meant it. Adding a prompt here while preserving silence elsewhere is inconsistent. The existing dirty-repo gate (with `--force` bypass) still fires.
+
+**Choice:** No new prompt. Preserve today's silent destroy from inside an instance, gated only by the existing dirty-repo check.
+
+**Alternatives considered:**
+- Add a `y/N` prompt for symmetry with the workspace-self-destroy case: feels redundant (instance-from-inside is a single explicit action) and changes today's well-understood UX.
+
+**Assumptions:**
+- The existing dirty-repo gate is sufficient safety for instance destruction.
+- Users running `niwa destroy` from inside an instance are intentional.
+
+**Consequences:** Two new prompts (picker, typed-confirmation) appear only in the new branches; the today-equivalent path stays silent.
+<!-- decision:end -->
+
 ### Open Questions
 
-- Should the rework also apply to `niwa reset`? (Highest-leverage open question.)
-- Should single-instance picker behavior be skip-and-go or always-show?
-- What does the typed-confirmation prompt ask the user to type — the workspace name (override-aware via `EffectiveConfigName`), or a fixed string like `DESTROY`?
-- Should the rework retire PRD-shell-integration R2's stale "stdout protocol" wording while we're amending the PRD anyway, or keep that scope-creep out?
+None blocking. All Round 1 open questions resolved above; remaining design-doc-level details (e.g., how the picker renders the Description column for each instance) are best settled in the design doc.
+
+## Decision: Crystallize
+
+Round 1 produced sufficient evidence and resolved all open questions via the lightweight decision protocol. Proceeding to artifact-type selection.
 
 ## Accumulated Understanding
 
