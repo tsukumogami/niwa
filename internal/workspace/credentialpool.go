@@ -196,8 +196,14 @@ func (p *CredentialPool) AuditLog() AuditTrail {
 // trail (e.g., the same provider declared in both team and personal
 // vault registries), the LAST record wins. This matches the apply
 // pipeline's "later layer overrides earlier layer" semantics — the
-// personal-overlay injectProviderTokens runs after the team's, so
-// its decision is the user's actual final state for that pair.
+// three injectProviderTokens callsites in apply.go (overlay layer at
+// the existing line ~647, team layer at ~777, personal-global layer
+// at ~781) run in that order, so the personal-overlay decision
+// lands as the user's actual final state for that pair. The
+// last-write-wins behavior pairs with Lookup's append-order
+// invariant (see Lookup invariant #2) — together they guarantee
+// AsMap's output reflects the apply's final decisions even if the
+// apply pipeline reorders its three callsites.
 func (a AuditTrail) AsMap() map[string]AuthSourceRecord {
 	if len(a) == 0 {
 		return nil
@@ -231,10 +237,7 @@ func renderSource(rec AuditRecord) string {
 	case SourceLocalFile:
 		return "local-file"
 	case SourceVault:
-		if rec.Provider == "" {
-			return "vault:(anonymous)"
-		}
-		return "vault:" + rec.Provider
+		return renderVaultProvider(rec.Provider)
 	case SourceCLISession:
 		return "cli-session"
 	case SourceNone:
@@ -242,6 +245,24 @@ func renderSource(rec AuditRecord) string {
 	default:
 		return ""
 	}
+}
+
+// renderVaultProvider formats a vault provider name for the audit
+// surfaces. Anonymous providers (Provider == "") render as
+// "vault:(anonymous)" per PRD AC-39; named providers render as
+// "vault:<name>". Never produces a bare "vault:" with a trailing
+// colon and empty name.
+//
+// I7 will call this helper when populating AuditRecord.Fallback —
+// the pool sets Fallback to renderVaultProvider(loader.ProviderName)
+// when the file layer wins and the vault layer also had an entry —
+// so the AC-39 anonymous-rendering rule applies symmetrically to
+// the SOURCE and FALLBACK columns.
+func renderVaultProvider(name string) string {
+	if name == "" {
+		return "vault:(anonymous)"
+	}
+	return "vault:" + name
 }
 
 // matchFileEntry synthesizes a vault.ProviderSpec for (kind, project)
