@@ -913,6 +913,15 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		)
 	}
 
+	// PRD R12 / AC-13 / AC-14 / AC-15: emit one apply-time stderr
+	// "auth:" line per (kind, project) pair sourced from the vault,
+	// plus one fallback line per pair where local-file overrides
+	// vault. cli-session and pure-local-file rows are silent. The
+	// emit happens AFTER the R13.1 warning so users see the
+	// unreachable warning first, then the per-pair audit lines for
+	// pairs that did resolve.
+	credentialPool.AuditLog().EmitR12Lines(a.Reporter)
+
 	// Build provider bundles from each layer independently. Bundle
 	// lifetime is scoped to this apply: defer CloseAll so providers
 	// shut down cleanly even on error paths (R29 no-disk-cache).

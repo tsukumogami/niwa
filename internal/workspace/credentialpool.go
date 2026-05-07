@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 
 	"github.com/BurntSushi/toml"
 	"github.com/tsukumogami/niwa/internal/secret/reveal"
@@ -525,6 +526,67 @@ type AuditTrail []AuditRecord
 // (R12).
 func (p *CredentialPool) AuditLog() AuditTrail {
 	return p.audit
+}
+
+// EmitR12Lines walks the AuditTrail and emits one apply-time stderr
+// line per credential-source decision worth logging, per PRD R12 +
+// AC-13 / AC-14 / AC-15. The emit rules:
+//
+//   - Source == SourceVault → "auth: <kind>/<project> source=vault:<name>"
+//     (anonymous renders as vault:(anonymous), AC-39).
+//   - Source == SourceLocalFile && Fallback != "" →
+//     "auth: <kind>/<project> source=local-file fallback=<fallback>"
+//     (the user has a per-machine override active over a vault entry).
+//   - Source == SourceLocalFile && Fallback == "" → no line (no
+//     vault-sync activity to surface).
+//   - Source == SourceCLISession → no line (the apply silently fell
+//     through to the backend's CLI session; no per-pair signal
+//     needed).
+//   - Source == SourceNone → no line (apply will fail at the backend
+//     auth call, which already produces its own diagnostic).
+//
+// When the same (kind, project) appears multiple times in the trail
+// (e.g., the same provider declared in both team and personal vault
+// registries), the LAST record wins — matching AsMap's last-write-wins
+// rule. Lines are emitted in deterministic KIND, PROJECT order so
+// snapshot tests stay stable.
+//
+// Reporter is the apply pipeline's stderr surface. Lines flow through
+// Reporter.Log so they share spinner-handling, TTY-detection, and
+// any future redaction wrappers with the rest of the apply output.
+func (a AuditTrail) EmitR12Lines(reporter *Reporter) {
+	if reporter == nil || len(a) == 0 {
+		return
+	}
+	// Last-write-wins per (kind, project).
+	type key struct{ kind, project string }
+	final := make(map[key]AuditRecord, len(a))
+	for _, rec := range a {
+		final[key{rec.Kind, rec.Project}] = rec
+	}
+	// Stable emit order: KIND ascending, then PROJECT ascending.
+	rows := make([]AuditRecord, 0, len(final))
+	for _, rec := range final {
+		rows = append(rows, rec)
+	}
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].Kind != rows[j].Kind {
+			return rows[i].Kind < rows[j].Kind
+		}
+		return rows[i].Project < rows[j].Project
+	})
+	for _, rec := range rows {
+		switch rec.Source {
+		case SourceVault:
+			reporter.Log("auth: %s/%s source=%s",
+				rec.Kind, rec.Project, renderVaultProvider(rec.Provider))
+		case SourceLocalFile:
+			if rec.Fallback != "" {
+				reporter.Log("auth: %s/%s source=local-file fallback=%s",
+					rec.Kind, rec.Project, rec.Fallback)
+			}
+		}
+	}
 }
 
 // AsMap projects the AuditTrail into the InstanceState.AuthSources
