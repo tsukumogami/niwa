@@ -38,7 +38,7 @@ func TestPickCredentialSyncSpec_Anonymous(t *testing.T) {
 	g := config.GlobalOverride{
 		Vault: &config.VaultRegistry{
 			Provider: &config.VaultProviderConfig{
-				Kind:   "fake",
+				Kind:   "infisical",
 				Config: map[string]any{"project": "uuid-anon"},
 			},
 		},
@@ -52,11 +52,50 @@ func TestPickCredentialSyncSpec_Anonymous(t *testing.T) {
 	if spec.Name != "" {
 		t.Errorf("Name = %q, want empty", spec.Name)
 	}
-	if spec.Kind != "fake" {
-		t.Errorf("Kind = %q, want fake", spec.Kind)
+	if spec.Kind != "infisical" {
+		t.Errorf("Kind = %q, want infisical", spec.Kind)
 	}
 	if got, _ := spec.Config["project"].(string); got != "uuid-anon" {
 		t.Errorf("Config[project] = %q, want uuid-anon", got)
+	}
+}
+
+// TestPickCredentialSyncSpec_DoesNotMutateInput confirms the
+// "router, not parser" contract: pickCredentialSyncSpec MUST NOT
+// write back to the GlobalOverride's vault provider Config map.
+// A regression here would mean an opt-in apply silently mutates
+// the user's parsed config in memory — a hidden side effect that
+// would break the v3-snapshot-then-reload pattern.
+func TestPickCredentialSyncSpec_DoesNotMutateInput(t *testing.T) {
+	originalConfig := map[string]any{"project": "uuid-personal"}
+	g := config.GlobalOverride{
+		Vault: &config.VaultRegistry{
+			Providers: map[string]config.VaultProviderConfig{
+				"personal": {
+					Kind:   "infisical",
+					Config: originalConfig,
+				},
+			},
+		},
+	}
+	mi := &config.MachineIdentitiesConfig{From: "personal"}
+
+	spec, err := pickCredentialSyncSpec(g, mi)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// Returned spec.Config should carry "name" → "personal" (the
+	// vault factory expects it).
+	if got, _ := spec.Config["name"].(string); got != "personal" {
+		t.Errorf("spec.Config[name] = %q, want %q", got, "personal")
+	}
+	// Original config map should NOT have gained a "name" entry.
+	if _, has := originalConfig["name"]; has {
+		t.Errorf("pickCredentialSyncSpec must not mutate the input Config; got name=%v", originalConfig["name"])
+	}
+	// And the original map should still have just one key (project).
+	if len(originalConfig) != 1 {
+		t.Errorf("input Config map size = %d, want 1 (was mutated)", len(originalConfig))
 	}
 }
 
@@ -67,7 +106,7 @@ func TestPickCredentialSyncSpec_Named(t *testing.T) {
 		Vault: &config.VaultRegistry{
 			Providers: map[string]config.VaultProviderConfig{
 				"personal": {
-					Kind:   "fake",
+					Kind:   "infisical",
 					Config: map[string]any{"project": "uuid-personal"},
 				},
 			},
@@ -90,7 +129,7 @@ func TestPickCredentialSyncSpec_Named(t *testing.T) {
 func TestValidateCredentialSyncBootstrapPreOverlay_FileConflict(t *testing.T) {
 	file := []ProviderAuthEntry{
 		{
-			Kind: "fake",
+			Kind: "infisical",
 			Config: map[string]any{
 				"project":       "uuid-X",
 				"client_id":     "cid",
@@ -100,7 +139,7 @@ func TestValidateCredentialSyncBootstrapPreOverlay_FileConflict(t *testing.T) {
 	}
 	syncSpec := vault.ProviderSpec{
 		Name:   "personal",
-		Kind:   "fake",
+		Kind:   "infisical",
 		Config: vault.ProviderConfig{"project": "uuid-X"},
 	}
 
@@ -109,7 +148,7 @@ func TestValidateCredentialSyncBootstrapPreOverlay_FileConflict(t *testing.T) {
 		t.Fatal("expected R9 error for file/syncSpec collision, got nil")
 	}
 	msg := err.Error()
-	for _, want := range []string{"chicken-and-egg", "kind=`fake`", "uuid-X", "Personal vault provider"} {
+	for _, want := range []string{"chicken-and-egg", "kind=`infisical`", "uuid-X", "Personal vault provider"} {
 		if !strings.Contains(msg, want) {
 			t.Errorf("error message missing %q. Got: %v", want, err)
 		}
@@ -137,17 +176,17 @@ func TestChickenAndEggError_InfisicalHint(t *testing.T) {
 func TestValidateCredentialSyncBootstrapPreOverlay_GlobalVaultConflict(t *testing.T) {
 	syncSpec := vault.ProviderSpec{
 		Name:   "personal",
-		Kind:   "fake",
+		Kind:   "infisical",
 		Config: vault.ProviderConfig{"project": "uuid-X"},
 	}
 	globalVault := &config.VaultRegistry{
 		Providers: map[string]config.VaultProviderConfig{
 			"personal": {
-				Kind:   "fake",
+				Kind:   "infisical",
 				Config: map[string]any{"project": "uuid-X"},
 			},
 			"sibling": {
-				Kind:   "fake",
+				Kind:   "infisical",
 				Config: map[string]any{"project": "uuid-X"}, // collides!
 			},
 		},
@@ -169,13 +208,13 @@ func TestValidateCredentialSyncBootstrapPreOverlay_GlobalVaultConflict(t *testin
 func TestValidateCredentialSyncBootstrapPreOverlay_SyncSpecSelfMatchAllowed(t *testing.T) {
 	syncSpec := vault.ProviderSpec{
 		Name:   "personal",
-		Kind:   "fake",
+		Kind:   "infisical",
 		Config: vault.ProviderConfig{"project": "uuid-personal"},
 	}
 	globalVault := &config.VaultRegistry{
 		Providers: map[string]config.VaultProviderConfig{
 			"personal": {
-				Kind:   "fake",
+				Kind:   "infisical",
 				Config: map[string]any{"project": "uuid-personal"},
 			},
 		},
@@ -194,12 +233,12 @@ func TestValidateCredentialSyncBootstrapPreOverlay_SyncSpecSelfMatchAllowed(t *t
 func TestValidateCredentialSyncBootstrapPreOverlay_AnonymousSelfAllowed(t *testing.T) {
 	syncSpec := vault.ProviderSpec{
 		Name:   "",
-		Kind:   "fake",
+		Kind:   "infisical",
 		Config: vault.ProviderConfig{"project": "uuid-anon"},
 	}
 	globalVault := &config.VaultRegistry{
 		Provider: &config.VaultProviderConfig{
-			Kind:   "fake",
+			Kind:   "infisical",
 			Config: map[string]any{"project": "uuid-anon"},
 		},
 	}
@@ -217,12 +256,12 @@ func TestValidateCredentialSyncBootstrapPreOverlay_AnonymousSelfAllowed(t *testi
 func TestValidateCredentialSyncBootstrapPostOverlay_OverlayConflict(t *testing.T) {
 	syncSpec := vault.ProviderSpec{
 		Name:   "personal",
-		Kind:   "fake",
+		Kind:   "infisical",
 		Config: vault.ProviderConfig{"project": "uuid-X"},
 	}
 	overlay := &config.VaultRegistry{
 		Provider: &config.VaultProviderConfig{
-			Kind:   "fake",
+			Kind:   "infisical",
 			Config: map[string]any{"project": "uuid-X"},
 		},
 	}
@@ -243,7 +282,7 @@ func TestValidateCredentialSyncBootstrapPostOverlay_OverlayConflict(t *testing.T
 func TestValidateCredentialSyncBootstrapPostOverlay_NilIsNoOp(t *testing.T) {
 	syncSpec := vault.ProviderSpec{
 		Name:   "personal",
-		Kind:   "fake",
+		Kind:   "infisical",
 		Config: vault.ProviderConfig{"project": "uuid-X"},
 	}
 	if err := validateCredentialSyncBootstrapPostOverlay(nil, syncSpec); err != nil {
@@ -256,12 +295,12 @@ func TestValidateCredentialSyncBootstrapPostOverlay_NilIsNoOp(t *testing.T) {
 func TestValidateCredentialSyncBootstrap_AC27(t *testing.T) {
 	syncSpec := vault.ProviderSpec{
 		Name:   "personal",
-		Kind:   "fake",
+		Kind:   "infisical",
 		Config: vault.ProviderConfig{"project": "uuid-personal"},
 	}
 	file := []ProviderAuthEntry{
 		{
-			Kind: "fake",
+			Kind: "infisical",
 			Config: map[string]any{
 				"project":       "uuid-team", // different project
 				"client_id":     "cid",
@@ -272,14 +311,14 @@ func TestValidateCredentialSyncBootstrap_AC27(t *testing.T) {
 	globalVault := &config.VaultRegistry{
 		Providers: map[string]config.VaultProviderConfig{
 			"personal": {
-				Kind:   "fake",
+				Kind:   "infisical",
 				Config: map[string]any{"project": "uuid-personal"},
 			},
 		},
 	}
 	overlay := &config.VaultRegistry{
 		Provider: &config.VaultProviderConfig{
-			Kind:   "fake",
+			Kind:   "infisical",
 			Config: map[string]any{"project": "uuid-team"}, // different from syncSpec
 		},
 	}
@@ -305,6 +344,11 @@ func TestValidateCredentialSyncBootstrap_AC27(t *testing.T) {
 // being added inside openCredentialSyncProvider.
 func TestOpenCredentialSyncProvider_DoesNotInjectToken(t *testing.T) {
 	ensureFakeRegistered(t)
+	// This test uses the "fake" backend kind because real Infisical
+	// would require network access. The structural R9 invariant
+	// (no token injection) is kind-agnostic — what matters is that
+	// openCredentialSyncProvider does not write Config["token"]
+	// before handing back the provider.
 	g := config.GlobalOverride{
 		Vault: &config.VaultRegistry{
 			Provider: &config.VaultProviderConfig{

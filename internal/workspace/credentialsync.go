@@ -45,9 +45,14 @@ func pickCredentialSyncSpec(g config.GlobalOverride, mi *config.MachineIdentitie
 	if !ok {
 		return vault.ProviderSpec{}, fmt.Errorf("internal error: pickCredentialSyncSpec named provider %q missing from [global.vault.providers] (R2 should have caught this at parse time)", mi.From)
 	}
-	cfg := vault.ProviderConfig(p.Config)
-	if cfg == nil {
-		cfg = vault.ProviderConfig{}
+	// Build a fresh Config map so we never mutate the shared one
+	// hanging off GlobalOverride.Global.Vault.Providers[mi.From].
+	// Setting cfg["name"] on the shared map would be a hidden side
+	// effect — pickCredentialSyncSpec is documented as a router, so
+	// it must not write back to the inputs.
+	cfg := make(vault.ProviderConfig, len(p.Config)+1)
+	for k, v := range p.Config {
+		cfg[k] = v
 	}
 	if _, has := cfg["name"]; !has {
 		cfg["name"] = mi.From
@@ -92,17 +97,33 @@ func openCredentialSyncProvider(ctx context.Context, syncSpec vault.ProviderSpec
 }
 
 // vaultProviderConfigMatchesKindProject returns true when the given
-// VaultProviderConfig has the same Kind and "project" Config value as
-// the syncSpec. Single-sourced so the pre-overlay and post-overlay
-// validators (and any future stage that needs the same predicate)
-// agree on what "(kind, project) collision" means.
+// VaultProviderConfig collides with the syncSpec under R9's
+// (kind, project) identity rule. The rule is gated on kind to match
+// MatchProviderAuth (providerauth.go:102): only kinds that identify
+// providers by project participate in the project-comparison check.
+//
+// Today's only such kind is "infisical". Future backends that
+// identify providers by some other key shape (e.g., a sops keyfile
+// path) must extend this switch alongside MatchProviderAuth — the
+// two helpers walk in lockstep and any divergence would let a
+// chicken-and-egg cycle slip past R9.
 func vaultProviderConfigMatchesKindProject(p config.VaultProviderConfig, syncSpec vault.ProviderSpec) bool {
 	if p.Kind != syncSpec.Kind {
 		return false
 	}
-	syncProject, _ := syncSpec.Config["project"].(string)
-	pProject, _ := p.Config["project"].(string)
-	return pProject == syncProject
+	switch p.Kind {
+	case "infisical":
+		syncProject, _ := syncSpec.Config["project"].(string)
+		pProject, _ := p.Config["project"].(string)
+		return syncProject != "" && pProject == syncProject
+	default:
+		// Unknown kinds: refuse to assume a matching key shape. The
+		// alternative (blindly comparing Config["project"]) would
+		// false-positive on backends that don't use "project" at all
+		// or that store an unrelated value at that key. Future
+		// backends MUST extend this switch.
+		return false
+	}
 }
 
 // validateCredentialSyncBootstrapPreOverlay runs the first stage of
