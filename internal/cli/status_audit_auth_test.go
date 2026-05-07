@@ -3,7 +3,6 @@ package cli
 import (
 	"bytes"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -265,17 +264,11 @@ func runAuditAuthInDir(t *testing.T, dir string) (string, error) {
 	return buf.String(), auditErr
 }
 
-// TestRunAuditAuth_NoNetworkCalls is a defensive shape check that
-// runAuditAuth does not import net/http or any other network
-// package transitively. The check is structural: status_audit_auth.go
-// imports list. We don't have a transitive-import test here, but the
-// happy-path test runs without any network configuration, which
-// confirms by construction.
-func TestRunAuditAuth_NoNetworkCalls(t *testing.T) {
-	// No-op assertion: the happy-path tests above already prove that
-	// runAuditAuth completes without a network call (no test fixtures
-	// set up any network deps; calling it on a tempdir succeeds).
-	// This test exists to make the AC-12 contract explicit in the
-	// suite naming.
-	_ = filepath.Separator // suppress unused-import warning
-}
+// (PRD AC-12, "no network calls", is enforced structurally rather
+// than by a runtime test: runAuditAuth's only imports are stdlib
+// (fmt, io, sort, strings), spf13/cobra, and internal/workspace.
+// Workspace's LoadState reads the state JSON file directly via
+// os.ReadFile and json.Unmarshal — no HTTP, no DNS, no provider
+// invocation. A future maintainer adding a network call to this
+// path would need to import a network package, which is visible
+// in code review.)

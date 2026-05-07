@@ -65,6 +65,14 @@ func runAuditAuth(cmd *cobra.Command, cwd string) error {
 // halves and produces an alphabetically-stable slice for rendering.
 // Sort order: KIND ascending, then PROJECT-UUID ascending. Empty
 // AuthSources produces an empty slice (no rows printed).
+//
+// Key-split assumption: vault provider Kind values must not contain
+// "/" — the credential pool's AuditTrail.AsMap encodes keys as
+// rec.Kind + "/" + rec.Project, and strings.Cut here splits at the
+// FIRST "/". Today's only registered Kind is "infisical"; future
+// backends should follow the same constraint. If a Kind ever needs
+// to contain "/", switch to LastIndex-based splitting and update
+// AsMap symmetrically.
 func buildAuditAuthRows(authSources map[string]workspace.AuthSourceRecord) []auditAuthRow {
 	if len(authSources) == 0 {
 		return nil
@@ -89,10 +97,9 @@ func buildAuditAuthRows(authSources map[string]workspace.AuthSourceRecord) []aud
 }
 
 // printAuditAuthTable writes the four-column text table to w.
-// Column widths follow PRD R11's example table: KIND padded to 10
-// chars, PROJECT-UUID padded to 38 chars (matches a UUID's full
-// length plus two trailing spaces), SOURCE padded to 20 chars,
-// FALLBACK trailing. Empty Fallback renders as the em-dash ("—").
+// Empty Fallback renders as the em-dash ("—"). Column widths match
+// PRD R11's example header byte-for-byte; see the constant block
+// inside the function for the exact derivation.
 //
 // The header row is always printed, even when there are zero
 // content rows, so a user running --audit-auth on a fresh workspace
