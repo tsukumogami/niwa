@@ -481,7 +481,7 @@ func ParseGlobalConfigOverride(data []byte) (*GlobalConfigOverride, error) {
 	// PRD R1/R2: validate machine-identity opt-in only against the
 	// top-level [global] block. Per-workspace [workspaces.<name>]
 	// blocks do not opt into machine-identity sync.
-	if err := validateMachineIdentities("global overlay", cfg.Global); err != nil {
+	if err := validatePersonalOverlayMachineIdentities(cfg.Global); err != nil {
 		return nil, err
 	}
 	for name, ws := range cfg.Workspaces {
@@ -514,16 +514,22 @@ func validateGlobalOverridePaths(prefix string, g GlobalOverride) error {
 	return nil
 }
 
-// validateMachineIdentities runs the PRD R2 parse-time check on a
-// personal-overlay GlobalOverride. The check is a no-op when
-// [machine_identities] is absent. When present, the From field must
-// either match a declared named provider in the same Vault registry
-// or be empty (and an anonymous [vault.provider] must be declared in
-// the same registry).
+// validatePersonalOverlayMachineIdentities runs the PRD R2 parse-time
+// check on the personal overlay's top-level [global] block. The
+// check is a no-op when [machine_identities] is absent. When
+// present, the From field must either match a declared named
+// provider in the same Vault registry or be empty (and an anonymous
+// [vault.provider] must be declared in the same registry).
 //
-// prefix is the file label used in diagnostic messages (e.g.,
-// "global overlay") to mirror the precedent set by Vault.Validate.
-func validateMachineIdentities(prefix string, ov GlobalOverride) error {
+// PRD R1 makes the opt-in a top-level concept — only the personal
+// overlay's [global.machine_identities] block opts in. Per-workspace
+// [workspaces.<name>.machine_identities] blocks are not honored
+// (R10) and this helper is intentionally NOT called from the
+// workspaces loop. The diagnostic body refers to "personal overlay"
+// as required by AC-34 / R10, so the helper is hard-bound to the
+// personal-overlay file role; it is not parameterised over the
+// file label and must not be called for any other GlobalOverride.
+func validatePersonalOverlayMachineIdentities(ov GlobalOverride) error {
 	if ov.MachineIdentities == nil {
 		return nil
 	}
@@ -538,11 +544,11 @@ func validateMachineIdentities(prefix string, ov GlobalOverride) error {
 			// "not declared in your personal overlay" makes the file-
 			// boundary explicit so users can act on the diagnostic.
 			return fmt.Errorf(
-				"%s: [global.machine_identities] from = %q is not declared in your personal overlay. "+
+				"global overlay: [global.machine_identities] from = %q is not declared in your personal overlay. "+
 					"machine-identity-vault-sync only uses personal-overlay vault providers. "+
 					"Either add [global.vault.providers.%s] to your personal overlay or change `from` "+
 					"to a declared name. Declared providers in this file: [%s].",
-				prefix, ov.MachineIdentities.From, ov.MachineIdentities.From, strings.Join(declaredNamedProviders(known), ", "),
+				ov.MachineIdentities.From, ov.MachineIdentities.From, strings.Join(declaredNamedProviders(known), ", "),
 			)
 		}
 		return nil
@@ -550,8 +556,7 @@ func validateMachineIdentities(prefix string, ov GlobalOverride) error {
 	// from is empty/unset: require an anonymous [global.vault.provider].
 	if !known[""] {
 		return fmt.Errorf(
-			"%s: [global.machine_identities] is enabled but no vault provider is declared. Either add [global.vault.provider] (anonymous) or [global.vault.providers.<name>] and set from = \"<name>\".",
-			prefix,
+			"global overlay: [global.machine_identities] is enabled but no vault provider is declared. Either add [global.vault.provider] (anonymous) or [global.vault.providers.<name>] and set from = \"<name>\".",
 		)
 	}
 	return nil

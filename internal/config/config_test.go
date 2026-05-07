@@ -754,18 +754,22 @@ project = "uuid-anon"
 	}
 }
 
-// TestParseGlobalConfigOverrideMachineIdentitiesUnknownNamedProvider
-// covers PRD AC-3 and AC-34: a from = "<name>" that doesn't match
-// any declared [global.vault.providers.*] returns a parse-time error
-// naming the missing provider and listing what IS declared. AC-34
-// is the same code path with a name that exists in a team config
-// but not in the personal overlay — this test simulates that by
-// declaring only "team" and pointing from at "missing".
+// TestParseGlobalConfigOverrideMachineIdentitiesUnknownNamedProviderAC3AC34
+// covers PRD AC-3 and AC-34 in a single test because they exercise the
+// same parser code path:
+//   - AC-3: a from = "<name>" that doesn't match any declared
+//     [global.vault.providers.*] returns a parse-time error naming
+//     the missing provider and listing what IS declared.
+//   - AC-34 (R10): the same code path applies when "<name>" exists
+//     in a team config but not in the personal overlay (the parser
+//     only sees the personal overlay's declared set). AC-34 also
+//     mandates the diagnostic reference the personal-vs-team
+//     distinction with the literal phrase "not declared in your
+//     personal overlay".
 //
-// AC-34 specifically requires the diagnostic to reference the
-// personal-vs-team distinction per R10 ("not declared in your
-// personal overlay"); this test asserts on that phrasing.
-func TestParseGlobalConfigOverrideMachineIdentitiesUnknownNamedProvider(t *testing.T) {
+// The test asserts both AC-3 substrings (provider name, declared
+// list) and AC-34 substrings (personal-overlay phrasing).
+func TestParseGlobalConfigOverrideMachineIdentitiesUnknownNamedProviderAC3AC34(t *testing.T) {
 	input := `
 [global.vault.providers.team]
 kind = "infisical"
