@@ -315,7 +315,11 @@ func TestOpenCredentialSyncProvider_DoesNotInjectToken(t *testing.T) {
 	}
 	mi := &config.MachineIdentitiesConfig{From: ""}
 
-	bundle, prov, spec, err := openCredentialSyncProvider(context.Background(), g, mi)
+	syncSpec, err := pickCredentialSyncSpec(g, mi)
+	if err != nil {
+		t.Fatalf("pickCredentialSyncSpec returned error: %v", err)
+	}
+	bundle, prov, err := openCredentialSyncProvider(context.Background(), syncSpec)
 	if err != nil {
 		t.Fatalf("openCredentialSyncProvider returned error: %v", err)
 	}
@@ -327,7 +331,7 @@ func TestOpenCredentialSyncProvider_DoesNotInjectToken(t *testing.T) {
 	if prov == nil {
 		t.Fatal("provider is nil")
 	}
-	if _, ok := spec.Config["token"]; ok {
-		t.Errorf("spec.Config[token] must NOT be set by openCredentialSyncProvider — that would re-introduce the R9 cycle")
+	if _, ok := syncSpec.Config["token"]; ok {
+		t.Errorf("syncSpec.Config[token] must NOT be set by openCredentialSyncProvider — that would re-introduce the R9 cycle")
 	}
 }

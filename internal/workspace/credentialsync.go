@@ -62,8 +62,9 @@ func pickCredentialSyncSpec(g config.GlobalOverride, mi *config.MachineIdentitie
 
 // openCredentialSyncProvider opens the personal-overlay credential-
 // sync vault provider via the standard registry pipeline and returns
-// the bundle (so the caller can defer Bundle.CloseAll), the opened
-// provider, and the spec used to open it.
+// the bundle (so the caller can defer Bundle.CloseAll) plus the
+// opened provider. The caller passes the syncSpec it already
+// resolved via pickCredentialSyncSpec so we don't compute it twice.
 //
 // Critical security boundary (PRD R9): this function deliberately
 // does NOT call injectProviderTokens against the spec. The credential
@@ -75,23 +76,33 @@ func pickCredentialSyncSpec(g config.GlobalOverride, mi *config.MachineIdentitie
 // session). This is the structural enforcement; the explicit
 // validateCredentialSyncBootstrap{Pre,Post}Overlay calls are belt
 // alongside.
-func openCredentialSyncProvider(ctx context.Context, g config.GlobalOverride, mi *config.MachineIdentitiesConfig) (*vault.Bundle, vault.Provider, vault.ProviderSpec, error) {
-	spec, err := pickCredentialSyncSpec(g, mi)
+func openCredentialSyncProvider(ctx context.Context, syncSpec vault.ProviderSpec) (*vault.Bundle, vault.Provider, error) {
+	bundle, err := vault.DefaultRegistry.Build(ctx, []vault.ProviderSpec{syncSpec})
 	if err != nil {
-		return nil, nil, vault.ProviderSpec{}, err
+		return nil, nil, fmt.Errorf("opening credential-sync vault provider: %w", err)
 	}
-	bundle, err := vault.DefaultRegistry.Build(ctx, []vault.ProviderSpec{spec})
-	if err != nil {
-		return nil, nil, spec, fmt.Errorf("opening credential-sync vault provider: %w", err)
-	}
-	prov, err := bundle.Get(spec.Name)
+	prov, err := bundle.Get(syncSpec.Name)
 	if err != nil {
 		// Build succeeded but Get failed — close the bundle to
 		// release the just-opened provider, then surface the error.
 		_ = bundle.CloseAll()
-		return nil, nil, spec, fmt.Errorf("retrieving credential-sync vault provider from bundle: %w", err)
+		return nil, nil, fmt.Errorf("retrieving credential-sync vault provider from bundle: %w", err)
 	}
-	return bundle, prov, spec, nil
+	return bundle, prov, nil
+}
+
+// vaultProviderConfigMatchesKindProject returns true when the given
+// VaultProviderConfig has the same Kind and "project" Config value as
+// the syncSpec. Single-sourced so the pre-overlay and post-overlay
+// validators (and any future stage that needs the same predicate)
+// agree on what "(kind, project) collision" means.
+func vaultProviderConfigMatchesKindProject(p config.VaultProviderConfig, syncSpec vault.ProviderSpec) bool {
+	if p.Kind != syncSpec.Kind {
+		return false
+	}
+	syncProject, _ := syncSpec.Config["project"].(string)
+	pProject, _ := p.Config["project"].(string)
+	return pProject == syncProject
 }
 
 // validateCredentialSyncBootstrapPreOverlay runs the first stage of
@@ -109,24 +120,24 @@ func openCredentialSyncProvider(ctx context.Context, g config.GlobalOverride, mi
 // This stage's input set: the file entries plus globalVault's specs.
 func validateCredentialSyncBootstrapPreOverlay(file []ProviderAuthEntry, globalVault *config.VaultRegistry, syncSpec vault.ProviderSpec) error {
 	syncProject, _ := syncSpec.Config["project"].(string)
-	// Stage 1a: scan the local credential file.
+	// Stage 1a: scan the local credential file. ProviderAuthEntry's
+	// Config carries the same "project" key shape as a vault spec,
+	// so we can build a synthetic VaultProviderConfig and reuse the
+	// shared predicate.
 	for _, entry := range file {
-		if entry.Kind != syncSpec.Kind {
-			continue
-		}
-		entryProject, _ := entry.Config["project"].(string)
-		if entryProject == syncProject {
+		synthetic := config.VaultProviderConfig{Kind: entry.Kind, Config: entry.Config}
+		if vaultProviderConfigMatchesKindProject(synthetic, syncSpec) {
 			return chickenAndEggError(syncSpec.Kind, syncProject)
 		}
 	}
 	// Stage 1b: scan the global override's own vault specs, but
 	// SKIP the syncSpec itself (it's necessarily declared there).
 	if globalVault != nil {
-		if globalVault.Provider != nil && syncSpec.Name == "" {
-			// The anonymous syncSpec IS Provider — skip.
-		} else if globalVault.Provider != nil {
-			project, _ := globalVault.Provider.Config["project"].(string)
-			if globalVault.Provider.Kind == syncSpec.Kind && project == syncProject {
+		// Anonymous syncSpec self-match: globalVault.Provider IS the
+		// syncSpec when syncSpec.Name == "", so skip the anonymous
+		// slot in that case.
+		if globalVault.Provider != nil && syncSpec.Name != "" {
+			if vaultProviderConfigMatchesKindProject(*globalVault.Provider, syncSpec) {
 				return chickenAndEggError(syncSpec.Kind, syncProject)
 			}
 		}
@@ -134,8 +145,7 @@ func validateCredentialSyncBootstrapPreOverlay(file []ProviderAuthEntry, globalV
 			if name == syncSpec.Name {
 				continue // the named syncSpec itself
 			}
-			project, _ := p.Config["project"].(string)
-			if p.Kind == syncSpec.Kind && project == syncProject {
+			if vaultProviderConfigMatchesKindProject(p, syncSpec) {
 				return chickenAndEggError(syncSpec.Kind, syncProject)
 			}
 		}
@@ -160,14 +170,12 @@ func validateCredentialSyncBootstrapPostOverlay(overlayVault *config.VaultRegist
 	}
 	syncProject, _ := syncSpec.Config["project"].(string)
 	if overlayVault.Provider != nil {
-		project, _ := overlayVault.Provider.Config["project"].(string)
-		if overlayVault.Provider.Kind == syncSpec.Kind && project == syncProject {
+		if vaultProviderConfigMatchesKindProject(*overlayVault.Provider, syncSpec) {
 			return chickenAndEggError(syncSpec.Kind, syncProject)
 		}
 	}
 	for _, p := range overlayVault.Providers {
-		project, _ := p.Config["project"].(string)
-		if p.Kind == syncSpec.Kind && project == syncProject {
+		if vaultProviderConfigMatchesKindProject(p, syncSpec) {
 			return chickenAndEggError(syncSpec.Kind, syncProject)
 		}
 	}

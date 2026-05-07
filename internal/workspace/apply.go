@@ -611,7 +611,7 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		if err := validateCredentialSyncBootstrapPreOverlay(authEntries, globalOverride.Global.Vault, syncSpec); err != nil {
 			return nil, err
 		}
-		syncBundle, _, _, err := openCredentialSyncProvider(ctx, globalOverride.Global, mi)
+		syncBundle, _, err := openCredentialSyncProvider(ctx, syncSpec)
 		if err != nil {
 			return nil, err
 		}
