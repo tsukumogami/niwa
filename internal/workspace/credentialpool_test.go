@@ -180,3 +180,107 @@ func TestCredentialPool_AuditLogPreservesOrder(t *testing.T) {
 		}
 	}
 }
+
+// TestAuditTrail_AsMap_Empty confirms AsMap returns nil for an
+// empty trail. Avoids serializing an empty `auth_sources: {}` into
+// state.json (omitempty handles it on the JSON side, but this also
+// preserves the "no entries" state across the type boundary).
+func TestAuditTrail_AsMap_Empty(t *testing.T) {
+	var trail AuditTrail
+	if got := trail.AsMap(); got != nil {
+		t.Errorf("AsMap() on empty trail = %+v, want nil", got)
+	}
+}
+
+// TestAuditTrail_AsMap_AllSources confirms each Source value renders
+// to the categorical string state.json expects. AC-39 covers the
+// anonymous-vault case explicitly.
+func TestAuditTrail_AsMap_AllSources(t *testing.T) {
+	trail := AuditTrail{
+		{Kind: "infisical", Project: "uuid-A", Source: SourceLocalFile},
+		{Kind: "infisical", Project: "uuid-B", Source: SourceVault, Provider: "personal"},
+		{Kind: "infisical", Project: "uuid-C", Source: SourceVault, Provider: ""}, // anonymous
+		{Kind: "infisical", Project: "uuid-D", Source: SourceCLISession},
+		{Kind: "infisical", Project: "uuid-E", Source: SourceNone},
+	}
+	got := trail.AsMap()
+
+	cases := []struct {
+		key  string
+		want AuthSourceRecord
+	}{
+		{"infisical/uuid-A", AuthSourceRecord{Source: "local-file"}},
+		{"infisical/uuid-B", AuthSourceRecord{Source: "vault:personal"}},
+		{"infisical/uuid-C", AuthSourceRecord{Source: "vault:(anonymous)"}}, // AC-39
+		{"infisical/uuid-D", AuthSourceRecord{Source: "cli-session"}},
+		{"infisical/uuid-E", AuthSourceRecord{Source: "none"}},
+	}
+	if len(got) != len(cases) {
+		t.Errorf("map size = %d, want %d", len(got), len(cases))
+	}
+	for _, c := range cases {
+		rec, ok := got[c.key]
+		if !ok {
+			t.Errorf("AsMap missing key %q", c.key)
+			continue
+		}
+		if rec != c.want {
+			t.Errorf("AsMap[%q] = %+v, want %+v", c.key, rec, c.want)
+		}
+	}
+}
+
+// TestAuditTrail_AsMap_FallbackPropagated confirms Fallback flows
+// through verbatim. The pool sets Fallback to "vault:<name>" when
+// the file layer wins and the vault also had an entry; AsMap copies
+// it without translation.
+func TestAuditTrail_AsMap_FallbackPropagated(t *testing.T) {
+	trail := AuditTrail{
+		{
+			Kind:     "infisical",
+			Project:  "uuid-X",
+			Source:   SourceLocalFile,
+			Fallback: "vault:personal",
+		},
+	}
+	got := trail.AsMap()
+	rec, ok := got["infisical/uuid-X"]
+	if !ok {
+		t.Fatal("AsMap missing key infisical/uuid-X")
+	}
+	if rec.Source != "local-file" {
+		t.Errorf("Source = %q, want %q", rec.Source, "local-file")
+	}
+	if rec.Fallback != "vault:personal" {
+		t.Errorf("Fallback = %q, want %q", rec.Fallback, "vault:personal")
+	}
+}
+
+// TestAuditTrail_AsMap_LastWriteWins confirms that when the same
+// (kind, project) appears multiple times in the trail (e.g., a
+// provider declared in both team and personal vault registries),
+// the LAST record wins. This matches apply.go's "later layer
+// overrides earlier layer" semantics so the user's actual final
+// state for that pair lands in the audit.
+func TestAuditTrail_AsMap_LastWriteWins(t *testing.T) {
+	trail := AuditTrail{
+		{Kind: "infisical", Project: "dup", Source: SourceCLISession},
+		{Kind: "infisical", Project: "dup", Source: SourceLocalFile},
+	}
+	got := trail.AsMap()
+	if rec := got["infisical/dup"]; rec.Source != "local-file" {
+		t.Errorf("LastWriteWins: AsMap[infisical/dup].Source = %q, want %q", rec.Source, "local-file")
+	}
+}
+
+// Test_renderSource_UnknownReturnsEmpty confirms the defensive
+// default branch — an AuditRecord with an unrecognised Source
+// renders to "" rather than a junk string. (Lookup never produces
+// such a record; this guards against a future Source enum addition
+// that forgets to update renderSource.)
+func Test_renderSource_UnknownReturnsEmpty(t *testing.T) {
+	rec := AuditRecord{Source: Source("garbage")}
+	if got := renderSource(rec); got != "" {
+		t.Errorf("renderSource(unknown) = %q, want empty string", got)
+	}
+}

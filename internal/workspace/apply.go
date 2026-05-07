@@ -194,7 +194,14 @@ type pipelineResult struct {
 	// detected during this apply invocation. Empty when no overlay
 	// is active or no keys overlapped. Persisted into
 	// InstanceState.Shadows by Create/Apply.
-	shadows          []Shadow
+	shadows []Shadow
+	// authSources carries the credential-source audit decisions the
+	// CredentialPool recorded across all injectProviderTokens calls
+	// during this apply (machine-identity-vault-sync I3). Persisted
+	// into InstanceState.AuthSources by Create/Apply so `niwa status
+	// --audit-auth` can render fully offline. nil/empty when no
+	// vault providers were referenced (e.g., single-org setups).
+	authSources      map[string]AuthSourceRecord
 	overlayURL       string   // set when convention discovery succeeds; empty otherwise
 	overlayCommit    string   // HEAD SHA when overlayURL was set; empty otherwise
 	disclosedNotices []string // one-time notices emitted during this run
@@ -273,6 +280,7 @@ func (a *Applier) Create(ctx context.Context, cfg *config.WorkspaceConfig, confi
 		Shadows:        result.shadows,
 		OverlayURL:     result.overlayURL,
 		OverlayCommit:  result.overlayCommit,
+		AuthSources:    result.authSources,
 	}
 
 	if err := SaveState(instanceRoot, state); err != nil {
@@ -420,6 +428,7 @@ func (a *Applier) Apply(ctx context.Context, cfg *config.WorkspaceConfig, config
 		ManagedFiles:   result.managedFiles,
 		Repos:          result.repoStates,
 		Shadows:        result.shadows,
+		AuthSources:    result.authSources,
 	}
 
 	if err := SaveState(instanceRoot, state); err != nil {
@@ -1217,6 +1226,7 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		managedFiles:     managedFiles,
 		warnings:         allWarnings,
 		shadows:          pipelineShadows,
+		authSources:      credentialPool.AuditLog().AsMap(),
 		overlayURL:       pipelineOverlayURL,
 		overlayCommit:    pipelineOverlayCommit,
 		disclosedNotices: newDisclosures,

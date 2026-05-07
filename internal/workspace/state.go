@@ -38,9 +38,16 @@ const (
 	// SchemaVersion is the current schema version for instance state files.
 	// v2 adds ManagedFile.SourceFingerprint and ManagedFile.Sources.
 	// v3 adds InstanceState.ConfigSource (the source-identity tuple
-	// recorded at last apply). v1 and v2 files load through migration
-	// shims in LoadState and are rewritten on the next SaveState.
-	SchemaVersion = 3
+	// recorded at last apply).
+	// v4 adds InstanceState.AuthSources, the credential-source audit
+	// map persisted at apply time so `niwa status --audit-auth` can
+	// render fully offline (machine-identity-vault-sync PRD R11).
+	// v1, v2, and v3 files load through migration shims in LoadState
+	// and are rewritten on the next SaveState. The v3→v4 migration is
+	// a no-op at the JSON level (auth_sources is omitempty), so v3
+	// files unmarshal cleanly with AuthSources == nil and a save
+	// rewrites them as v4.
+	SchemaVersion = 4
 )
 
 // SourceKind enumerates the provenance categories recognised by
@@ -74,24 +81,51 @@ const (
 // mirror plus the snapshot provenance marker on the first v3-aware
 // SaveState; nil for state files written by older binaries until they
 // next save.
+//
+// AuthSources arrives in schema v4: a map keyed by "<kind>/<project>"
+// of the credential-source decisions the credential pool recorded at
+// the last apply. Read by `niwa status --audit-auth` (offline) per
+// machine-identity-vault-sync PRD R11. Both fields on the value are
+// categorical strings (never credential bytes) per PRD R18.
 type InstanceState struct {
-	SchemaVersion    int                  `json:"schema_version"`
-	ConfigName       *string              `json:"config_name"`
-	InstanceName     string               `json:"instance_name"`
-	InstanceNumber   int                  `json:"instance_number"`
-	Root             string               `json:"root"`
-	Detached         bool                 `json:"detached,omitempty"`
-	SkipGlobal       bool                 `json:"skip_global,omitempty"`
-	OverlayURL       string               `json:"overlay_url,omitempty"`
-	NoOverlay        bool                 `json:"no_overlay,omitempty"`
-	OverlayCommit    string               `json:"overlay_commit,omitempty"`
-	Created          time.Time            `json:"created"`
-	LastApplied      time.Time            `json:"last_applied"`
-	ManagedFiles     []ManagedFile        `json:"managed_files"`
-	Repos            map[string]RepoState `json:"repos"`
-	Shadows          []Shadow             `json:"shadows,omitempty"`
-	DisclosedNotices []string             `json:"disclosed_notices,omitempty"`
-	ConfigSource     *ConfigSource        `json:"config_source,omitempty"`
+	SchemaVersion    int                          `json:"schema_version"`
+	ConfigName       *string                      `json:"config_name"`
+	InstanceName     string                       `json:"instance_name"`
+	InstanceNumber   int                          `json:"instance_number"`
+	Root             string                       `json:"root"`
+	Detached         bool                         `json:"detached,omitempty"`
+	SkipGlobal       bool                         `json:"skip_global,omitempty"`
+	OverlayURL       string                       `json:"overlay_url,omitempty"`
+	NoOverlay        bool                         `json:"no_overlay,omitempty"`
+	OverlayCommit    string                       `json:"overlay_commit,omitempty"`
+	Created          time.Time                    `json:"created"`
+	LastApplied      time.Time                    `json:"last_applied"`
+	ManagedFiles     []ManagedFile                `json:"managed_files"`
+	Repos            map[string]RepoState         `json:"repos"`
+	Shadows          []Shadow                     `json:"shadows,omitempty"`
+	DisclosedNotices []string                     `json:"disclosed_notices,omitempty"`
+	ConfigSource     *ConfigSource                `json:"config_source,omitempty"`
+	AuthSources      map[string]AuthSourceRecord  `json:"auth_sources,omitempty"`
+}
+
+// AuthSourceRecord is one row of the credential-source audit map
+// persisted in InstanceState.AuthSources at apply time. Both fields
+// are categorical strings — never credential bytes (PRD R18).
+//
+//   - Source: where the credential came from in the last apply.
+//     One of "local-file", "vault:<name>" (or "vault:(anonymous)"
+//     for the anonymous credential-sync provider per AC-39),
+//     "cli-session", or "none".
+//   - Fallback: the non-active source that ALSO had an entry, if
+//     any. "vault:<name>" when the local file won and the vault
+//     also had an entry; otherwise empty.
+//
+// `niwa status --audit-auth` reads this map (and only this map) to
+// render its four-column table, so the apply-time write is the
+// single source of truth for the audit surface.
+type AuthSourceRecord struct {
+	Source   string `json:"source"`
+	Fallback string `json:"fallback,omitempty"`
 }
 
 // ConfigSource records the resolved source identity for a workspace's

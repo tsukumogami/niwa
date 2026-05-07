@@ -173,12 +173,75 @@ func (p *CredentialPool) Lookup(ctx context.Context, kind, project string) (*Pro
 	return nil, rec, nil
 }
 
-// AuditLog returns the slice of AuditRecord values the pool collected
-// during this apply invocation, in Lookup-call order. I3 will read
-// the slice (and likely add an AsMap helper alongside) for state
-// persistence; I9 will read it to emit per-pair stderr lines (R12).
-func (p *CredentialPool) AuditLog() []AuditRecord {
+// AuditTrail is the named slice type the pool returns from AuditLog.
+// It carries the per-Lookup AuditRecord values plus an AsMap method
+// that projects the slice into the InstanceState.AuthSources shape
+// state.json persists. The named type lets I3/I4/I9 share a single
+// rendering helper for the "<source>" / "<fallback>" strings.
+type AuditTrail []AuditRecord
+
+// AuditLog returns the AuditTrail the pool collected during this
+// apply invocation, in Lookup-call order. I3 reads it (via AsMap)
+// for state persistence; I9 reads it to emit per-pair stderr lines
+// (R12).
+func (p *CredentialPool) AuditLog() AuditTrail {
 	return p.audit
+}
+
+// AsMap projects the AuditTrail into the InstanceState.AuthSources
+// shape: a map keyed by "<kind>/<project>" with categorical-string
+// values for Source and Fallback (PRD R11 / Decision 3).
+//
+// When the same (kind, project) pair appears multiple times in the
+// trail (e.g., the same provider declared in both team and personal
+// vault registries), the LAST record wins. This matches the apply
+// pipeline's "later layer overrides earlier layer" semantics — the
+// personal-overlay injectProviderTokens runs after the team's, so
+// its decision is the user's actual final state for that pair.
+func (a AuditTrail) AsMap() map[string]AuthSourceRecord {
+	if len(a) == 0 {
+		return nil
+	}
+	out := make(map[string]AuthSourceRecord, len(a))
+	for _, rec := range a {
+		key := rec.Kind + "/" + rec.Project
+		out[key] = AuthSourceRecord{
+			Source:   renderSource(rec),
+			Fallback: rec.Fallback,
+		}
+	}
+	return out
+}
+
+// renderSource translates an AuditRecord into the categorical-string
+// form state.json (and, later, R12 stderr / `niwa status
+// --audit-auth`) consume. The mapping:
+//
+//   - SourceLocalFile   → "local-file"
+//   - SourceVault       → "vault:<provider-name>"  (or "vault:(anonymous)" when Provider == "")
+//   - SourceCLISession  → "cli-session"
+//   - SourceNone        → "none"
+//   - any other Source  → "" (defensive; never produced by Lookup)
+//
+// Single-sourcing this rule means I9's R12 stderr emitter and I4's
+// audit-auth renderer can call the same helper instead of
+// re-implementing the vault-name/anonymous edge case (AC-39).
+func renderSource(rec AuditRecord) string {
+	switch rec.Source {
+	case SourceLocalFile:
+		return "local-file"
+	case SourceVault:
+		if rec.Provider == "" {
+			return "vault:(anonymous)"
+		}
+		return "vault:" + rec.Provider
+	case SourceCLISession:
+		return "cli-session"
+	case SourceNone:
+		return "none"
+	default:
+		return ""
+	}
 }
 
 // matchFileEntry synthesizes a vault.ProviderSpec for (kind, project)
