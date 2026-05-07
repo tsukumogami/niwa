@@ -6,13 +6,8 @@ making you maintain `~/.config/niwa/provider-auth.toml` on every
 laptop. Edit one place; every machine picks up the new value on its
 next `niwa apply`.
 
-This guide is the user-facing companion to [PRD][prd] and
-[DESIGN][design]; the contracts in those documents are the source
-of truth, but you can use this guide to opt in, set up the vault
-schema, and read audit output without cracking either open.
-
-[prd]: ../prds/PRD-machine-identity-vault-sync.md
-[design]: ../designs/DESIGN-machine-identity-vault-sync.md
+This guide walks you through opting in, setting up the vault
+schema, and reading audit output.
 
 ## When to use this
 
@@ -158,10 +153,10 @@ niwa apply
 The personal vault provider itself authenticates via the active
 `infisical login` session — niwa never tries to use a
 machine-identity credential to authenticate the vault that supplies
-machine-identity credentials. Verifying this constraint is the job
-of niwa's chicken-and-egg check (PRD R9), which fires at parse
-time if you accidentally point your personal vault at a
-`(kind, project)` that the credential pool would otherwise supply.
+machine-identity credentials. niwa enforces this with a
+chicken-and-egg check that fires at parse time if you accidentally
+point your personal vault at a `(kind, project)` that the
+credential pool would otherwise supply.
 
 ## The `niwa status --audit-auth` command
 
@@ -285,8 +280,8 @@ TOML document and verify it via `infisical secrets get`.
 
 ### `vault-sourced provider-auth body at /niwa/provider-auth/.../... is missing required field "client_id"` (or "client_secret")
 
-The body parses but lacks one of the required fields. PRD R7's
-schema needs both.
+The body parses but lacks one of the required fields. Both
+`client_id` and `client_secret` are required.
 
 Fix: re-set the body with both fields populated.
 
