@@ -134,38 +134,6 @@ func TestPool_R13_FileMissUnreachableRecordsCLISession(t *testing.T) {
 	}
 }
 
-// TestPool_R13_MarkAuthFailedUpgradesToNone covers the apply-
-// orchestrator-callable upgrade path: when a SourceCLISession
-// audit row was produced (vault unreachable, no file fallback,
-// awaiting CLI-session result) and the backend's universal-auth
-// later confirms the CLI session also failed, MarkAuthFailed
-// upgrades the row to SourceNone for `niwa status --audit-auth`
-// to surface (PRD AC-11).
-func TestPool_R13_MarkAuthFailedUpgradesToNone(t *testing.T) {
-	pool := NewCredentialPool(nil, nil)
-	ctx := context.Background()
-	_, _, _ = pool.Lookup(ctx, "infisical", "uuid-X") // produces SourceCLISession
-	pool.MarkAuthFailed("infisical", "uuid-X")
-
-	log := pool.AuditLog()
-	if len(log) != 1 {
-		t.Fatalf("expected 1 audit row, got %d", len(log))
-	}
-	if log[0].Source != SourceNone {
-		t.Errorf("after MarkAuthFailed, audit row Source = %q, want %q", log[0].Source, SourceNone)
-	}
-}
-
-// TestPool_R13_MarkAuthFailedNoOpWhenNoMatch confirms
-// MarkAuthFailed silently ignores pairs that have no matching
-// SourceCLISession audit row.
-func TestPool_R13_MarkAuthFailedNoOpWhenNoMatch(t *testing.T) {
-	pool := NewCredentialPool(nil, nil)
-	pool.MarkAuthFailed("infisical", "uuid-not-in-audit")
-	if len(pool.AuditLog()) != 0 {
-		t.Errorf("MarkAuthFailed should not append audit rows; got %d", len(pool.AuditLog()))
-	}
-}
 
 // TestPool_HasFileFallback exercises the fallback-detection helper
 // used by injectProviderTokens to soften vault-unreachable errors.
@@ -193,19 +161,19 @@ func TestPool_HasFileFallback(t *testing.T) {
 	}
 }
 
-// TestInjectProviderTokens_SoftensVaultUnreachable covers the
-// apply-time soft path (PRD R13.1 / AC-16): when the pool returns
-// vaultUnreachableError, injectProviderTokens does NOT bail. It
-// records the observation on the pool, leaves the spec's
-// Config["token"] unset (so the backend's later universal-auth
-// will fall through to its CLI session), and continues iterating.
+// TestPool_R13_UnreachableObservationRecordedOnLookup confirms
+// the contract injectProviderTokens depends on for its soft path:
+// a Lookup that returns vaultUnreachableError records the
+// observation on the pool's VaultUnreachableObservations list AND
+// preserves errors.Is(vault.ErrProviderUnreachable). Without this,
+// injectProviderTokens couldn't detect the recoverable case.
 //
-// The test uses a registry whose anonymous provider's project is
-// uuid-Y, where the vault is unreachable. There is no file layer.
-// The expected outcome: injectProviderTokens returns nil, the
-// spec's Config has no "token" key, and the pool's
-// VaultUnreachableObservations contains one entry.
-func TestInjectProviderTokens_SoftensVaultUnreachable(t *testing.T) {
+// (Note: this test deliberately does NOT call injectProviderTokens
+// itself. The end-to-end soft-path coverage lives in
+// TestPool_R13_FileWinsOnUnreachableWithFallback +
+// TestPool_R13_FileMissUnreachableRecordsCLISession; this one
+// locks the pool-level contract those tests build on.)
+func TestPool_R13_UnreachableObservationRecordedOnLookup(t *testing.T) {
 	stub := &stubVaultProvider{
 		name: "personal",
 		kind: "infisical",

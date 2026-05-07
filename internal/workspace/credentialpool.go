@@ -492,30 +492,6 @@ func (p *CredentialPool) VaultUnreachableObservations() []vaultUnreachableError 
 	return p.vaultUnreachable
 }
 
-// MarkAuthFailed upgrades the audit record for (kind, project)
-// from SourceCLISession to SourceNone, signalling that no source
-// produced a usable credential during this apply (PRD R11 row's
-// "none" value, AC-11 exit-code semantics). Only the most recent
-// matching record is upgraded; earlier records for the same pair
-// (e.g., from a different apply layer) are left as-is. A no-op
-// when no SourceCLISession record matches.
-//
-// Called by the apply orchestrator on the post-failure path: when
-// a vault was unreachable AND no file fallback covered the pair
-// AND the backend's universal-auth (CLI session) also failed,
-// neither the local file nor the vault nor the CLI session
-// produced a credential — the pair is genuinely "none". This
-// makes `niwa status --audit-auth` exit non-zero (PRD AC-11)
-// after such an apply.
-func (p *CredentialPool) MarkAuthFailed(kind, project string) {
-	for i := len(p.audit) - 1; i >= 0; i-- {
-		if p.audit[i].Kind == kind && p.audit[i].Project == project && p.audit[i].Source == SourceCLISession {
-			p.audit[i].Source = SourceNone
-			return
-		}
-	}
-}
-
 // HasFileFallback reports whether the pool's file layer can
 // satisfy a vault provider's (kind, project) — i.e., whether a
 // provider-auth.toml entry exists for that pair. Exposed as a
