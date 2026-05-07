@@ -315,20 +315,35 @@ func (p *CredentialPool) Lookup(ctx context.Context, kind, project string) (*Pro
 	if p.vaultLoader != nil {
 		entry, err := p.lookupVault(ctx, kind, project)
 		if err != nil {
-			// PRD R13.1: a vault-unreachable error during this apply
-			// is non-fatal at the lookup level — the file layer (or
-			// the backend's CLI session) may still cover this pair.
-			// We record a tentative SourceCLISession audit row so
-			// downstream surfaces (state.json, --audit-auth, R12
-			// stderr) still see the pair, and surface the typed
-			// error to the caller so injectProviderTokens can
-			// soften it. Other vault errors (R13.4/5/6/7) propagate
-			// hard with no audit row — apply will abort, SaveState
-			// is never reached.
+			// PRD R13.1: a vault-unreachable error is recoverable
+			// when the file layer covers this pair (PRD AC-7 + AC-16:
+			// row shows local-file, apply exits 0, single aggregated
+			// warning emitted apply-side). When the file does NOT
+			// cover the pair, surface the typed error so
+			// injectProviderTokens can soften (continue iterating)
+			// and the apply falls through to the backend's CLI
+			// session per R13.1/R13.2.
+			//
+			// Other vault errors (R13.4/5/6/7) propagate hard with
+			// no audit row — apply will abort, SaveState is never
+			// reached.
 			var vue *vaultUnreachableError
 			if errors.As(err, &vue) {
+				if fileEntry != nil {
+					// File wins; the vault-unreachable observation
+					// has already been recorded on the pool by
+					// lookupVault. Do NOT set rec.Fallback here:
+					// PRD R11's FALLBACK semantics describe a vault
+					// entry the user successfully fetched but
+					// chose to override locally. An UNREACHABLE
+					// vault has no entry to be a fallback for.
+					rec.Source = SourceLocalFile
+					p.audit = append(p.audit, rec)
+					return fileEntry, rec, nil
+				}
 				rec.Source = SourceCLISession
 				p.audit = append(p.audit, rec)
+				return nil, rec, err
 			}
 			return nil, rec, err
 		}
@@ -477,10 +492,38 @@ func (p *CredentialPool) VaultUnreachableObservations() []vaultUnreachableError 
 	return p.vaultUnreachable
 }
 
+// MarkAuthFailed upgrades the audit record for (kind, project)
+// from SourceCLISession to SourceNone, signalling that no source
+// produced a usable credential during this apply (PRD R11 row's
+// "none" value, AC-11 exit-code semantics). Only the most recent
+// matching record is upgraded; earlier records for the same pair
+// (e.g., from a different apply layer) are left as-is. A no-op
+// when no SourceCLISession record matches.
+//
+// Called by the apply orchestrator on the post-failure path: when
+// a vault was unreachable AND no file fallback covered the pair
+// AND the backend's universal-auth (CLI session) also failed,
+// neither the local file nor the vault nor the CLI session
+// produced a credential — the pair is genuinely "none". This
+// makes `niwa status --audit-auth` exit non-zero (PRD AC-11)
+// after such an apply.
+func (p *CredentialPool) MarkAuthFailed(kind, project string) {
+	for i := len(p.audit) - 1; i >= 0; i-- {
+		if p.audit[i].Kind == kind && p.audit[i].Project == project && p.audit[i].Source == SourceCLISession {
+			p.audit[i].Source = SourceNone
+			return
+		}
+	}
+}
+
 // HasFileFallback reports whether the pool's file layer can
 // satisfy a vault provider's (kind, project) — i.e., whether a
-// provider-auth.toml entry exists for that pair. injectProviderTokens
-// uses it to soften vault-unreachable errors per PRD R13.1.
+// provider-auth.toml entry exists for that pair. Exposed as a
+// stable API for callers that need to inspect fallback coverage
+// without running a full Lookup. Today's only direct caller is
+// integration-test code; injectProviderTokens itself relies on
+// the pool's compute-both algorithm to prefer the file entry on
+// vault-unreachable, so it doesn't query HasFileFallback directly.
 //
 // Note: a "file fallback" answers only the local-file question.
 // The backend's own CLI-session fallback (PRD R13.1's "or a

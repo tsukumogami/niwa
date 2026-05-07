@@ -56,12 +56,19 @@ func TestPool_R13_VaultUnreachableObservationsDeduplicated(t *testing.T) {
 	}
 }
 
-// TestPool_R13_AuditRecordedOnUnreachableWithFile covers the
-// soft path: when the vault is unreachable but the file layer
-// has an entry, the pool's Lookup still appends an audit record
-// (so I3/I4/I9 see the row) but surfaces the error so
-// injectProviderTokens can soften it.
-func TestPool_R13_AuditRecordedOnUnreachableWithFile(t *testing.T) {
+// TestPool_R13_FileWinsOnUnreachableWithFallback covers PRD AC-7
+// + AC-16: when the vault is unreachable BUT the file layer
+// covers the pair, Lookup must prefer the file entry — the apply
+// continues normally with the local-file credential, the audit
+// row reflects local-file (no Fallback because the vault entry
+// was never fetched), and the unreachable observation is still
+// recorded on the pool for the apply-side aggregated warning.
+//
+// Earlier wiring incorrectly returned the unreachable error
+// before checking the file layer, which would have failed
+// AC-7's row-classification rule and AC-16's "exit 0 when every
+// pair has a fallback" requirement.
+func TestPool_R13_FileWinsOnUnreachableWithFallback(t *testing.T) {
 	file := []ProviderAuthEntry{
 		{
 			Kind: "infisical",
@@ -77,27 +84,86 @@ func TestPool_R13_AuditRecordedOnUnreachableWithFile(t *testing.T) {
 	})
 	pool := NewCredentialPool(file, loader)
 
+	entry, rec, err := pool.Lookup(context.Background(), "infisical", "uuid-X")
+	if err != nil {
+		t.Fatalf("expected nil error when file covers the pair, got: %v", err)
+	}
+	if entry == nil {
+		t.Fatal("expected the file entry to be returned")
+	}
+	if got, _ := entry.Config["client_id"].(string); got != "cid" {
+		t.Errorf("client_id = %q, want cid (file entry)", got)
+	}
+	if rec.Source != SourceLocalFile {
+		t.Errorf("rec.Source = %q, want %q", rec.Source, SourceLocalFile)
+	}
+	// No Fallback: the vault entry was never fetched.
+	if rec.Fallback != "" {
+		t.Errorf("rec.Fallback = %q, want empty (vault was unreachable; no entry to be a fallback)", rec.Fallback)
+	}
+	// The unreachable observation MUST still be recorded so the
+	// apply-side aggregated warning fires (PRD R13.1).
+	if len(pool.VaultUnreachableObservations()) != 1 {
+		t.Errorf("expected 1 unreachable observation even on file-wins path, got %d", len(pool.VaultUnreachableObservations()))
+	}
+}
+
+// TestPool_R13_FileMissUnreachableRecordsCLISession covers PRD
+// R13.1's no-file-fallback case: when the vault is unreachable
+// AND no file entry covers the pair, Lookup records a tentative
+// SourceCLISession row and surfaces the error so
+// injectProviderTokens can soften (continue iterating without
+// injecting a token, letting the backend's CLI session take
+// over).
+func TestPool_R13_FileMissUnreachableRecordsCLISession(t *testing.T) {
+	_, loader := newStubLoader(t, "personal", map[string]stubResponse{
+		"/niwa/provider-auth/infisical/uuid-X": {err: vault.ErrProviderUnreachable},
+	})
+	pool := NewCredentialPool(nil, loader)
+
 	_, rec, err := pool.Lookup(context.Background(), "infisical", "uuid-X")
 	if err == nil {
-		t.Fatal("expected vault-unreachable error to surface")
+		t.Fatal("expected vault-unreachable error to surface (no file fallback)")
 	}
+	if rec.Source != SourceCLISession {
+		t.Errorf("rec.Source = %q, want %q", rec.Source, SourceCLISession)
+	}
+	log := pool.AuditLog()
+	if len(log) != 1 || log[0].Source != SourceCLISession {
+		t.Errorf("expected one SourceCLISession audit row, got %+v", log)
+	}
+}
 
-	// The audit log MUST contain a tentative row (SourceCLISession)
-	// — downstream surfaces (I9 stderr / I4 status) need it. The
-	// returned `rec` may differ slightly from the appended one, so
-	// inspect the pool's audit log directly.
+// TestPool_R13_MarkAuthFailedUpgradesToNone covers the apply-
+// orchestrator-callable upgrade path: when a SourceCLISession
+// audit row was produced (vault unreachable, no file fallback,
+// awaiting CLI-session result) and the backend's universal-auth
+// later confirms the CLI session also failed, MarkAuthFailed
+// upgrades the row to SourceNone for `niwa status --audit-auth`
+// to surface (PRD AC-11).
+func TestPool_R13_MarkAuthFailedUpgradesToNone(t *testing.T) {
+	pool := NewCredentialPool(nil, nil)
+	ctx := context.Background()
+	_, _, _ = pool.Lookup(ctx, "infisical", "uuid-X") // produces SourceCLISession
+	pool.MarkAuthFailed("infisical", "uuid-X")
+
 	log := pool.AuditLog()
 	if len(log) != 1 {
 		t.Fatalf("expected 1 audit row, got %d", len(log))
 	}
-	if log[0].Source != SourceCLISession {
-		t.Errorf("audit row Source = %q, want %q (tentative on unreachable)", log[0].Source, SourceCLISession)
+	if log[0].Source != SourceNone {
+		t.Errorf("after MarkAuthFailed, audit row Source = %q, want %q", log[0].Source, SourceNone)
 	}
-	// Sanity: rec returned on the error path also reflects
-	// SourceCLISession so I9's downstream consumers don't see a
-	// zero-valued record.
-	if rec.Source != SourceCLISession {
-		t.Errorf("returned rec.Source = %q, want %q", rec.Source, SourceCLISession)
+}
+
+// TestPool_R13_MarkAuthFailedNoOpWhenNoMatch confirms
+// MarkAuthFailed silently ignores pairs that have no matching
+// SourceCLISession audit row.
+func TestPool_R13_MarkAuthFailedNoOpWhenNoMatch(t *testing.T) {
+	pool := NewCredentialPool(nil, nil)
+	pool.MarkAuthFailed("infisical", "uuid-not-in-audit")
+	if len(pool.AuditLog()) != 0 {
+		t.Errorf("MarkAuthFailed should not append audit rows; got %d", len(pool.AuditLog()))
 	}
 }
 

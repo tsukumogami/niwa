@@ -883,17 +883,33 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		}
 	}
 
-	// PRD R13.1: emit one aggregated warning per apply naming the
-	// unreachable personal-vault providers seen across all three
-	// injectProviderTokens calls. Empty observation list → no
-	// warning. The warning fires BEFORE BuildBundle runs so even
+	// PRD R13.1 / AC-16: emit ONE aggregated warning per unique
+	// vault provider seen unreachable during this apply, regardless
+	// of how many (kind, project) pairs against that provider went
+	// silent. PRD wording: "personal vault provider <name>
+	// unreachable; falling back to local-file and cli-session
+	// credentials." — name is the bare provider identifier (no
+	// `vault:` prefix, but with anonymous-rendering when ProviderName
+	// is "").
+	//
+	// The warning fires AFTER all three injectProviderTokens calls
+	// and BEFORE the team / personal-overlay BuildBundle so even
 	// an R13.2 path (no fallback → BuildBundle's universal-auth
 	// failure → apply exits non-zero) still produces the warning
 	// per AC-17.
+	emittedProviders := map[string]struct{}{}
 	for _, vue := range credentialPool.VaultUnreachableObservations() {
+		if _, seen := emittedProviders[vue.ProviderName]; seen {
+			continue
+		}
+		emittedProviders[vue.ProviderName] = struct{}{}
+		nameForWarning := vue.ProviderName
+		if nameForWarning == "" {
+			nameForWarning = "(anonymous)"
+		}
 		a.Reporter.Warn(
 			"personal vault provider %s unreachable; falling back to local-file and cli-session credentials.",
-			renderVaultProvider(vue.ProviderName),
+			nameForWarning,
 		)
 	}
 

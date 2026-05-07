@@ -150,12 +150,14 @@ func injectProviderTokens(ctx context.Context, pool *CredentialPool, vr *config.
 			if !isSoftenable(err) {
 				return err
 			}
-			// Soft path (PRD R13.1): vault unreachable. Record was
-			// already buffered on the pool by lookupVault; continue
-			// without injecting a token. The backend's later
-			// universal-auth call will fall through to its CLI
-			// session (R13.1 success) or fail (R13.2 — backend
-			// error propagates).
+			// Soft path (PRD R13.1): vault unreachable. The pool's
+			// Lookup already preferred the file fallback when one
+			// existed (returning entry != nil and err == nil), so
+			// reaching this branch means no file fallback covers
+			// this pair either. Continue iterating without injecting
+			// a token; the backend's later universal-auth call
+			// will fall through to its CLI session (R13.1 success)
+			// or fail (R13.2 — backend error propagates).
 		} else if entry != nil {
 			token, authErr := authenticateEntry(ctx, entry)
 			if authErr != nil {
