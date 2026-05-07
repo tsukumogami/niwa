@@ -11,17 +11,24 @@ import (
 	"github.com/tsukumogami/niwa/internal/vault/fake"
 )
 
-// registerFakeOnce makes sure the fake backend is registered in
-// DefaultRegistry before any test that opens a "fake" provider.
-// Idempotent across packages and across tests within this file.
-var registerFakeOnce sync.Once
+// registerFakeMu protects the per-test register/unregister cycle
+// against concurrent test executions, but the bigger reason for the
+// register-then-unregister pattern is that other tests in this
+// package (e.g., sources_test.go) also call DefaultRegistry.Register
+// and expect it to succeed — so this test must not leak the fake
+// registration past its own scope.
+var registerFakeMu sync.Mutex
 
 func ensureFakeRegistered(t *testing.T) {
 	t.Helper()
-	registerFakeOnce.Do(func() {
-		// Register may return an error if a previous test already
-		// registered it; ignore in that case.
-		_ = vault.DefaultRegistry.Register(fake.NewFactory())
+	registerFakeMu.Lock()
+	if err := vault.DefaultRegistry.Register(fake.NewFactory()); err != nil {
+		registerFakeMu.Unlock()
+		t.Fatalf("register fake backend: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = vault.DefaultRegistry.Unregister("fake")
+		registerFakeMu.Unlock()
 	})
 }
 
