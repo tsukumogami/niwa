@@ -538,19 +538,19 @@ func validateMachineIdentities(prefix string, ov GlobalOverride) error {
 			// "not declared in your personal overlay" makes the file-
 			// boundary explicit so users can act on the diagnostic.
 			return fmt.Errorf(
-				"%s: [machine_identities] from = %q is not declared in your personal overlay. "+
+				"%s: [global.machine_identities] from = %q is not declared in your personal overlay. "+
 					"machine-identity-vault-sync only uses personal-overlay vault providers. "+
-					"Either add [vault.providers.%s] to your personal overlay or change `from` "+
+					"Either add [global.vault.providers.%s] to your personal overlay or change `from` "+
 					"to a declared name. Declared providers in this file: [%s].",
 				prefix, ov.MachineIdentities.From, ov.MachineIdentities.From, strings.Join(declaredNamedProviders(known), ", "),
 			)
 		}
 		return nil
 	}
-	// from is empty/unset: require an anonymous [vault.provider].
+	// from is empty/unset: require an anonymous [global.vault.provider].
 	if !known[""] {
 		return fmt.Errorf(
-			"%s: [machine_identities] is enabled but no vault provider is declared. Either add [vault.provider] (anonymous) or [vault.providers.<name>] and set from = \"<name>\".",
+			"%s: [global.machine_identities] is enabled but no vault provider is declared. Either add [global.vault.provider] (anonymous) or [global.vault.providers.<name>] and set from = \"<name>\".",
 			prefix,
 		)
 	}
