@@ -101,8 +101,16 @@ func NewCredentialPool(file []ProviderAuthEntry, loader *vaultCredLoader) *Crede
 //  3. Otherwise, record a tentative SourceCLISession — backends may
 //     fall through to their CLI session for the (kind, project).
 //
-// I7 will extend this with the vault-fetch branches between steps
-// 1 and 3, plus error-bearing returns for fetch/parse failures.
+// I7 restructure note: the file-first short-circuit above means
+// the vault layer is never consulted in I2. DESIGN's full algorithm
+// computes BOTH the file entry AND the vault entry first, then
+// decides which wins (file > vault) and records the loser as
+// AuditRecord.Fallback. I7 will need to flip this Lookup body to
+// the compute-both shape (not just paste a vault-fetch branch in
+// front of the file-hit return). Mechanically: replace the
+// short-circuit returns with a join over fileEntry + vaultEntry,
+// set rec.Fallback when both are populated, append the audit
+// record once, and return.
 //
 // The error return is reserved for I7's vault-fetch errors; I2
 // always returns nil for the error.
@@ -110,13 +118,13 @@ func (p *CredentialPool) Lookup(ctx context.Context, kind, project string) (*Pro
 	rec := AuditRecord{Kind: kind, Project: project}
 	if entry := matchFileEntry(p.fileEntries, kind, project); entry != nil {
 		rec.Source = SourceLocalFile
-		// I7: when the vault layer also has an entry for this pair,
-		// rec.Fallback = "vault:" + p.vaultLoader.ProviderName.
+		// I7: replaces this branch with a Fallback-aware version
+		// that consults the vault loader before deciding.
 		p.audit = append(p.audit, rec)
 		return entry, rec, nil
 	}
-	// I7: vault-loader branches insert here. In I2 (loader nil), we
-	// fall straight through to the cli-session record.
+	// I7 restructures this entire function (see doc comment above).
+	// In I2 (loader nil), we fall through to the cli-session record.
 	rec.Source = SourceCLISession
 	p.audit = append(p.audit, rec)
 	return nil, rec, nil
