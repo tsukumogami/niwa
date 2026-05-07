@@ -564,8 +564,8 @@ func validatePersonalOverlayMachineIdentities(ov GlobalOverride) error {
 
 // declaredNamedProviders returns the named (non-anonymous) provider
 // names from a KnownProviderNames map, sorted. Used to build the
-// diagnostic list in validateMachineIdentities so test assertions are
-// stable across map iteration order.
+// diagnostic list in validatePersonalOverlayMachineIdentities so test
+// assertions are stable across map iteration order.
 func declaredNamedProviders(known map[string]bool) []string {
 	names := make([]string, 0, len(known))
 	for name := range known {
