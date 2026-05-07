@@ -182,8 +182,18 @@ func TestRunAuditAuth_ExitNonZeroOnNoneSource(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected non-nil error when a row has Source=none")
 	}
-	if !strings.Contains(err.Error(), "none") {
+	msg := err.Error()
+	if !strings.Contains(msg, "none") {
 		t.Errorf("error message should mention 'none'. Got: %v", err)
+	}
+	// AC remediation hint: error should point users at the actual
+	// fix (populate provider-auth.toml or vault entry, then re-run
+	// apply) rather than just "run niwa apply".
+	if !strings.Contains(msg, "provider-auth.toml") {
+		t.Errorf("error message should mention provider-auth.toml as a fix path. Got: %v", err)
+	}
+	if !strings.Contains(msg, "personal vault") {
+		t.Errorf("error message should mention personal vault as a fix path. Got: %v", err)
 	}
 }
 

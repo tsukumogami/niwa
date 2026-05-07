@@ -64,8 +64,8 @@ Flags:
                     KIND / PROJECT-UUID / SOURCE / FALLBACK table and
                     exits non-zero when any (kind, project) pair has
                     source=none. Fully offline — reads state.json and
-                    never makes a vault or network call. A future
-                    --check-vault-auth flag for live verification is
+                    never makes a vault or network call. A live-verification
+                    flag (re-fetch every vault entry to detect drift) is
                     deferred to v1.1.
   --check-vault     Re-resolve every vault:// reference by invoking the
                     configured providers and compare the resulting source

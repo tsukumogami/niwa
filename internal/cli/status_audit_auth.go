@@ -50,7 +50,12 @@ func runAuditAuth(cmd *cobra.Command, cwd string) error {
 	// flags the broken state.
 	for _, row := range rows {
 		if row.Source == "none" {
-			return fmt.Errorf("at least one credential resolved to source=none; run `niwa apply` to rebuild credentials")
+			return fmt.Errorf(
+				"at least one credential resolved to source=none in the last apply " +
+					"(no entry in ~/.config/niwa/provider-auth.toml, no entry in the " +
+					"personal vault, and no usable CLI session). Populate the missing " +
+					"credential then re-run `niwa apply`.",
+			)
 		}
 	}
 	return nil
@@ -93,8 +98,15 @@ func buildAuditAuthRows(authSources map[string]workspace.AuthSourceRecord) []aud
 // content rows, so a user running --audit-auth on a fresh workspace
 // sees a recognizable empty table rather than blank output.
 func printAuditAuthTable(w io.Writer, rows []auditAuthRow) {
+	// Column widths match PRD R11's example header
+	// `KIND       PROJECT-UUID                          SOURCE              FALLBACK`
+	// byte-for-byte: KIND padded to 11 chars (allowing two trailing spaces
+	// after the longest kind in current use, "infisical"); PROJECT-UUID
+	// padded to 38 chars (a UUID's 36 chars plus two trailing spaces);
+	// SOURCE padded to 20 chars (longest known value is
+	// "vault:(anonymous)" at 17 chars plus three trailing spaces).
 	const (
-		kindWidth    = 10
+		kindWidth    = 11
 		projectWidth = 38
 		sourceWidth  = 20
 	)
