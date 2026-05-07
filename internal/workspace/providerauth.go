@@ -2,6 +2,7 @@ package workspace
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -122,28 +123,49 @@ func MatchProviderAuth(spec vault.ProviderSpec, entries []ProviderAuthEntry) *Pr
 }
 
 // injectProviderTokens iterates the provider specs derived from a
-// VaultRegistry and, for each spec that matches a credential entry,
-// authenticates and injects the resulting token into the provider's
-// config map. The token flows through to Factory.Open via the
-// existing ProviderConfig["token"] mechanism.
+// VaultRegistry and, for each spec whose (kind, project) matches a
+// credential entry the pool can supply, authenticates and injects
+// the resulting token into the provider's config map. The token
+// flows through to Factory.Open via the existing
+// ProviderConfig["token"] mechanism.
 //
-// Modifies vr's provider configs in place. A nil vr or empty entries
-// slice is a no-op.
-func injectProviderTokens(ctx context.Context, entries []ProviderAuthEntry, vr *config.VaultRegistry) error {
-	if vr == nil || len(entries) == 0 {
+// The pool argument owns both the eager local-file layer and the
+// optional lazy vault layer (added in I7). Each spec's lookup also
+// appends an AuditRecord to the pool, so downstream phases can read
+// pool.AuditLog() to render audit surfaces (state save, R12 stderr,
+// `niwa status --audit-auth`).
+//
+// Modifies vr's provider configs in place. A nil vr or nil pool is
+// a no-op.
+func injectProviderTokens(ctx context.Context, pool *CredentialPool, vr *config.VaultRegistry) error {
+	if vr == nil || pool == nil {
 		return nil
 	}
 
 	// Handle anonymous singular provider.
 	if vr.Provider != nil {
-		spec := vault.ProviderSpec{
-			Kind:   vr.Provider.Kind,
-			Config: vault.ProviderConfig(vr.Provider.Config),
-		}
-		if match := MatchProviderAuth(spec, entries); match != nil {
-			token, err := authenticateEntry(ctx, match)
-			if err != nil {
+		project, _ := vr.Provider.Config["project"].(string)
+		entry, _, err := pool.Lookup(ctx, vr.Provider.Kind, project)
+		if err != nil {
+			if !isSoftenable(err) {
 				return err
+			}
+			// Soft path (PRD R13.1): vault unreachable. The pool's
+			// Lookup already preferred the file fallback when one
+			// existed (returning entry != nil and err == nil), so
+			// reaching this branch means no file fallback covers
+			// this pair either. Continue iterating without injecting
+			// a token; the backend's later universal-auth call
+			// will fall through to its CLI session (R13.1 success)
+			// or fail (R13.2 — backend error propagates).
+		} else if entry != nil {
+			token, authErr := authenticateEntry(ctx, entry)
+			if authErr != nil {
+				// PRD R13.6: wrap with the (kind, project) context
+				// so users can identify which credential failed
+				// (AC-22).
+				return fmt.Errorf("authenticating credential for vault provider (kind=%q, project=%q) via %s: %w",
+					vr.Provider.Kind, project, sourceLabel(entry), authErr)
 			}
 			if vr.Provider.Config == nil {
 				vr.Provider.Config = map[string]any{}
@@ -154,19 +176,20 @@ func injectProviderTokens(ctx context.Context, entries []ProviderAuthEntry, vr *
 
 	// Handle named providers.
 	for name, p := range vr.Providers {
-		cfg := vault.ProviderConfig(p.Config)
-		if cfg == nil {
-			cfg = vault.ProviderConfig{}
-		}
-		spec := vault.ProviderSpec{
-			Name:   name,
-			Kind:   p.Kind,
-			Config: cfg,
-		}
-		if match := MatchProviderAuth(spec, entries); match != nil {
-			token, err := authenticateEntry(ctx, match)
-			if err != nil {
+		project, _ := p.Config["project"].(string)
+		entry, _, err := pool.Lookup(ctx, p.Kind, project)
+		if err != nil {
+			if !isSoftenable(err) {
 				return err
+			}
+			// Soft path: same rationale as the anonymous branch above.
+			continue
+		}
+		if entry != nil {
+			token, authErr := authenticateEntry(ctx, entry)
+			if authErr != nil {
+				return fmt.Errorf("authenticating credential for vault provider %q (kind=%q, project=%q) via %s: %w",
+					name, p.Kind, project, sourceLabel(entry), authErr)
 			}
 			if p.Config == nil {
 				p.Config = map[string]any{}
@@ -177,6 +200,29 @@ func injectProviderTokens(ctx context.Context, entries []ProviderAuthEntry, vr *
 	}
 
 	return nil
+}
+
+// isSoftenable reports whether a Lookup error is a recoverable
+// vault-unreachable case (PRD R13.1: continue iterating; the
+// aggregated warning fires once apply-side after all three
+// injectProviderTokens calls). Other vault errors (R13.4 / R13.5 /
+// R13.7 — body parse / missing field / unsupported version) stay
+// hard.
+func isSoftenable(err error) bool {
+	var vue *vaultUnreachableError
+	return errors.As(err, &vue)
+}
+
+// sourceLabel renders a short categorical label for a credential
+// entry's origin, used in R13.6 wrap text. Today there's only one
+// shape (file-or-vault entry produced by the pool); the helper
+// exists so I9's stderr emitter and any future category share the
+// same vocabulary if more origins appear.
+func sourceLabel(entry *ProviderAuthEntry) string {
+	if entry == nil {
+		return "unknown source"
+	}
+	return "machine-identity entry"
 }
 
 // authenticateEntry dispatches authentication to the appropriate

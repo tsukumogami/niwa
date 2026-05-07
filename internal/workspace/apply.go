@@ -194,7 +194,14 @@ type pipelineResult struct {
 	// detected during this apply invocation. Empty when no overlay
 	// is active or no keys overlapped. Persisted into
 	// InstanceState.Shadows by Create/Apply.
-	shadows          []Shadow
+	shadows []Shadow
+	// authSources carries the credential-source audit decisions the
+	// CredentialPool recorded across all injectProviderTokens calls
+	// during this apply (machine-identity-vault-sync I3). Persisted
+	// into InstanceState.AuthSources by Create/Apply so `niwa status
+	// --audit-auth` can render fully offline. nil/empty when no
+	// vault providers were referenced (e.g., single-org setups).
+	authSources      map[string]AuthSourceRecord
 	overlayURL       string   // set when convention discovery succeeds; empty otherwise
 	overlayCommit    string   // HEAD SHA when overlayURL was set; empty otherwise
 	disclosedNotices []string // one-time notices emitted during this run
@@ -289,6 +296,7 @@ func (a *Applier) Create(ctx context.Context, cfg *config.WorkspaceConfig, confi
 		Shadows:        result.shadows,
 		OverlayURL:     result.overlayURL,
 		OverlayCommit:  result.overlayCommit,
+		AuthSources:    result.authSources,
 	}
 
 	if err := SaveState(instanceRoot, state); err != nil {
@@ -452,6 +460,7 @@ func (a *Applier) Apply(ctx context.Context, cfg *config.WorkspaceConfig, config
 		ManagedFiles:   result.managedFiles,
 		Repos:          result.repoStates,
 		Shadows:        result.shadows,
+		AuthSources:    result.authSources,
 	}
 
 	if err := SaveState(instanceRoot, state); err != nil {
@@ -528,6 +537,140 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		}
 		authEntries = entries
 	}
+
+	// I6 captures the syncSpec produced by Step 0.4 so the post-
+	// overlay R9 check (Step 0.5/0.6) can re-run validation with the
+	// workspace overlay's vault specs in scope. nil when the personal
+	// overlay declares no anonymous [global.vault.provider] (and
+	// therefore credential sync is inactive for this apply).
+	var credentialSyncSpec *vault.ProviderSpec
+	// I7 captures the credential-sync provider opened at Step 0.4 so
+	// the credential pool's lazy vault loader can fetch from it on
+	// file-miss Lookups. nil when credential sync is inactive.
+	var credentialSyncLoader *vaultCredLoader
+
+	// credentialPool is constructed AFTER Step 0.4 so the loader can
+	// be wired in when credential sync is active. Declared here as a
+	// forward-reference so apply.go's reads stay textually adjacent
+	// to the pre-Step-0.3 authEntries load.
+	var credentialPool *CredentialPool
+
+	// Step 0.3: refresh the personal-overlay snapshot and parse niwa.toml.
+	//
+	// The snapshot refresh (formerly Step 2a) and the niwa.toml parse
+	// (formerly between the redactor setup and the resolver stage) run
+	// here as a single phase, in their original sync-then-parse order.
+	// They are hoisted together so personal-overlay [global.vault.*]
+	// declarations — which act as the implicit machine-identity
+	// credential-sync source — are detectable before
+	// injectProviderTokens runs against the workspace-overlay vault
+	// registry. The sync-then-parse pairing is preserved verbatim:
+	// EnsureConfigSnapshotWithStatus may swap the directory contents on
+	// upstream drift, and the parse must observe the post-refresh
+	// niwa.toml to keep AC-28 byte-identicality for users whose global
+	// config tracks a remote.
+	//
+	// All inputs (a.GlobalConfigDir, opts.skipGlobal, a.GitHubClient,
+	// a.Reporter, opts.disclosedNotices) are Applier or pipelineOpts
+	// fields available from the start of runPipeline.
+	//
+	// Downstream consumers of globalOverride read it unchanged:
+	//   - CheckVaultScopeAmbiguity (Step 3a region)
+	//   - injectProviderTokens against globalOverride.Global.Vault
+	//     (the personal-overlay leg; the team-config leg reads
+	//     cfg.Vault and is not a globalOverride consumer)
+	//   - resolve.BuildBundle for the personal-overlay vault registry
+	//   - DetectShadows
+	//   - resolve.ResolveGlobalOverride (vault resolver) and the
+	//     workspace.ResolveGlobalOverride helper (per-workspace
+	//     overlay flatten); both run on the resolved value
+	//   - MergeGlobalOverride
+	var globalOverride *config.GlobalConfigOverride
+	if a.GlobalConfigDir != "" && !opts.skipGlobal {
+		// Step 0.3a: sync the personal overlay snapshot (PRD R10-R13, R28).
+		a.Reporter.Status("syncing config...")
+		fetcher, _ := a.GitHubClient.(FetchClient)
+		converted, syncErr := EnsureConfigSnapshotWithStatus(ctx, a.GlobalConfigDir, fetcher, a.Reporter)
+		if syncErr != nil {
+			a.Reporter.Warn("could not sync config: %v", syncErr)
+			return nil, fmt.Errorf("syncing global config: %w", syncErr)
+		}
+		// PRD R28: emit the global-config conversion notice once per
+		// workspace, gated on DisclosedNotices.
+		if converted && !sliceContains(opts.disclosedNotices, noticeConfigConverted) {
+			a.Reporter.Log("note: %s converted from working tree to snapshot. Manual edits inside this directory will no longer persist.", a.GlobalConfigDir)
+			newDisclosures = append(newDisclosures, noticeConfigConverted)
+		}
+
+		// Step 0.3b: parse the (possibly just-refreshed) niwa.toml.
+		overridePath := filepath.Join(a.GlobalConfigDir, GlobalConfigOverrideFile)
+		data, readErr := os.ReadFile(overridePath)
+		if readErr == nil {
+			parsed, parseErr := config.ParseGlobalConfigOverride(data)
+			if parseErr != nil {
+				return nil, fmt.Errorf("parsing global config override: %w", parseErr)
+			}
+			globalOverride = parsed
+		} else if !os.IsNotExist(readErr) {
+			return nil, fmt.Errorf("reading global config override: %w", readErr)
+		}
+	}
+
+	// Step 0.4: open the personal-overlay credential-sync vault
+	// provider (machine-identity-vault-sync, PRD R9) when the personal
+	// overlay declares an anonymous [global.vault.provider]. That
+	// declaration is itself the opt-in: any anonymous personal-overlay
+	// vault provider serves both URI-resolution AND credential-sync.
+	// Named providers under [global.vault.providers.<name>] stay
+	// URI-resolution-only and never become the credential-sync source.
+	//
+	// Two-stage R9 enforcement:
+	//
+	//  - Pre-overlay (here): scan the local file plus the global
+	//    override's own vault specs for a (kind, project) collision
+	//    with the credential-sync provider. Failing fast here saves
+	//    one provider Open + Close on the conflict path.
+	//  - Post-overlay (Step 0.6 region): re-run the check against
+	//    the workspace overlay's vault specs once they are parsed.
+	//
+	// The bundle's lifetime is scoped to this apply via
+	// `defer syncBundle.CloseAll()`.
+	if globalOverride != nil {
+		if syncSpec := pickCredentialSyncSpec(globalOverride.Global); syncSpec != nil {
+			// Pre-overlay R9 BEFORE Build so a conflict short-circuits
+			// without opening the provider.
+			if err := validateCredentialSyncBootstrapPreOverlay(authEntries, globalOverride.Global.Vault, *syncSpec); err != nil {
+				return nil, err
+			}
+			syncBundle, syncProvider, err := openCredentialSyncProvider(ctx, *syncSpec)
+			if err != nil {
+				return nil, err
+			}
+			defer syncBundle.CloseAll()
+			credentialSyncSpec = syncSpec
+			// SelfKind/SelfProject populate the loader's R9 dynamic guard
+			// against self-lookup. injectProviderTokens later iterates
+			// globalOverride.Global.Vault, which contains this spec; without
+			// the guard, lookupVault would Resolve the credential-sync
+			// provider for its own (kind, project) and feed it back via
+			// authenticateEntry — the chicken-and-egg cycle.
+			syncProject, _ := syncSpec.Config["project"].(string)
+			credentialSyncLoader = &vaultCredLoader{
+				Provider:     syncProvider,
+				ProviderName: syncSpec.Name,
+				PathPrefix:   CredentialSyncPathPrefix,
+				SelfKind:     syncSpec.Kind,
+				SelfProject:  syncProject,
+			}
+		}
+	}
+
+	// Now that the (optional) loader is built, construct the
+	// credential pool. With credential sync active: pool joins file
+	// + lazy vault (I7). Without it: file-only pool (I2 behavior).
+	// Lookups append AuditRecord values the pool's AuditLog
+	// accumulates for state-save (I3) and R12 stderr emission (I9).
+	credentialPool = NewCredentialPool(authEntries, credentialSyncLoader)
 
 	// Step 0.5: overlay sync and merge — determine and sync the workspace overlay.
 	// This must run BEFORE discoverAllRepos so that the merged config (base +
@@ -617,11 +760,23 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 			return nil, fmt.Errorf("parsing workspace overlay: %w", parseErr)
 		}
 
+		// PRD R9 stage 2: post-overlay credential-sync chicken-and-egg
+		// check. Stage 1 (Step 0.4) couldn't see the workspace overlay's
+		// vault specs because the overlay wasn't parsed yet. Now that
+		// it is, re-run the check against overlay.Vault. The deferred
+		// syncBundle.CloseAll() from Step 0.4 fires cleanly on this
+		// error path; no Resolve has run on the credential-sync provider.
+		if credentialSyncSpec != nil {
+			if err := validateCredentialSyncBootstrapPostOverlay(overlay.Vault, *credentialSyncSpec); err != nil {
+				return nil, err
+			}
+		}
+
 		// Inject machine-identity tokens into the overlay's [vault.provider]
 		// before building its bundle. Without this, multi-org users whose
 		// secrets live in the workspace overlay fall through to the CLI
 		// session for that provider.
-		if err := injectProviderTokens(ctx, authEntries, overlay.Vault); err != nil {
+		if err := injectProviderTokens(ctx, credentialPool, overlay.Vault); err != nil {
 			return nil, err
 		}
 
@@ -704,33 +859,24 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 	known := KnownRepoNames(cfg, discoveredNames)
 	allWarnings = append(allWarnings, WarnUnknownRepos(cfg, known)...)
 
-	// Step 2a: Sync global config (personal overlay) if registered and
-	// not skipped. Snapshot path (PRD R10-R13, R28) is the only sync
-	// strategy now — no legacy fallthrough.
-	if a.GlobalConfigDir != "" && !opts.skipGlobal {
-		a.Reporter.Status("syncing config...")
-		fetcher, _ := a.GitHubClient.(FetchClient)
-		converted, syncErr := EnsureConfigSnapshotWithStatus(ctx, a.GlobalConfigDir, fetcher, a.Reporter)
-		if syncErr != nil {
-			a.Reporter.Warn("could not sync config: %v", syncErr)
-			return nil, fmt.Errorf("syncing global config: %w", syncErr)
-		}
-		// PRD R28: emit the global-config conversion notice once per
-		// workspace, gated on DisclosedNotices.
-		if converted && !sliceContains(opts.disclosedNotices, noticeConfigConverted) {
-			a.Reporter.Log("note: %s converted from working tree to snapshot. Manual edits inside this directory will no longer persist.", a.GlobalConfigDir)
-			newDisclosures = append(newDisclosures, noticeConfigConverted)
-		}
-	}
+	// (Step 2a — sync of the personal-overlay snapshot — moved to Step
+	// 0.3a, alongside the niwa.toml parse at Step 0.3b. The hoist
+	// preserves the original sync-then-parse pairing while making
+	// globalOverride available before the workspace-overlay sync at
+	// Step 0.5 and the workspace-overlay token injection at Step 0.6.)
 
-	// Steps 3a–3c: Parse the global config override, then run the
-	// vault resolver stage against BOTH team (ws) and personal
-	// (overlay) layers before the merge. The resolver must run
-	// before merge so that each layer's provider bundle is built
-	// from its own [vault] block only (file-local scoping, D-6 in
-	// the vault-integration design). Resolving post-merge would
-	// flatten provider declarations and make R12 collision
-	// detection impossible.
+	// Steps 3a–3c: Run the vault resolver stage against BOTH team (ws)
+	// and personal (overlay) layers before the merge. The resolver
+	// must run before merge so that each layer's provider bundle is
+	// built from its own [vault] block only (file-local scoping, D-6
+	// in the vault-integration design). Resolving post-merge would
+	// flatten provider declarations and make R12 collision detection
+	// impossible.
+	//
+	// The personal-overlay globalOverride was parsed earlier at Step
+	// 0.3 so personal-overlay [global.vault.provider] declarations are
+	// detectable before the workspace-overlay's injectProviderTokens
+	// runs at Step 0.6.
 	//
 	// cfg remains the original for per-instance reads; effectiveCfg
 	// carries the merge.
@@ -741,21 +887,6 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 	// resolved values automatically.
 	redactor := secret.NewRedactor()
 	ctx = secret.WithRedactor(ctx, redactor)
-
-	var globalOverride *config.GlobalConfigOverride
-	if a.GlobalConfigDir != "" && !opts.skipGlobal {
-		overridePath := filepath.Join(a.GlobalConfigDir, GlobalConfigOverrideFile)
-		data, readErr := os.ReadFile(overridePath)
-		if readErr == nil {
-			parsed, parseErr := config.ParseGlobalConfigOverride(data)
-			if parseErr != nil {
-				return nil, fmt.Errorf("parsing global config override: %w", parseErr)
-			}
-			globalOverride = parsed
-		} else if !os.IsNotExist(readErr) {
-			return nil, fmt.Errorf("reading global config override: %w", readErr)
-		}
-	}
 
 	// R5 enforcement: a workspace with more than one [[sources]] block
 	// AND an active personal overlay must declare [workspace].vault_scope
@@ -768,18 +899,57 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 	}
 
 	// Multi-org auth: inject machine-identity tokens into the team config
-	// and personal global overlay vault registries. authEntries was loaded
-	// at the top of runPipeline so the overlay layer (Step 0.6) could see it.
-	if len(authEntries) > 0 {
-		if err := injectProviderTokens(ctx, authEntries, cfg.Vault); err != nil {
+	// and personal global overlay vault registries via the credential
+	// pool. The pool was constructed at the top of runPipeline so the
+	// overlay layer (Step 0.6) could see it; per-Lookup AuditRecord
+	// values land in the pool's audit log for downstream consumers.
+	if err := injectProviderTokens(ctx, credentialPool, cfg.Vault); err != nil {
+		return nil, err
+	}
+	if globalOverride != nil {
+		if err := injectProviderTokens(ctx, credentialPool, globalOverride.Global.Vault); err != nil {
 			return nil, err
 		}
-		if globalOverride != nil {
-			if err := injectProviderTokens(ctx, authEntries, globalOverride.Global.Vault); err != nil {
-				return nil, err
-			}
-		}
 	}
+
+	// PRD R13.1 / AC-16: emit ONE aggregated warning per unique
+	// vault provider seen unreachable during this apply, regardless
+	// of how many (kind, project) pairs against that provider went
+	// silent. PRD wording: "personal vault provider <name>
+	// unreachable; falling back to local-file and cli-session
+	// credentials." — name is the bare provider identifier (no
+	// `vault:` prefix, but with anonymous-rendering when ProviderName
+	// is "").
+	//
+	// The warning fires AFTER all three injectProviderTokens calls
+	// and BEFORE the team / personal-overlay BuildBundle so even
+	// an R13.2 path (no fallback → BuildBundle's universal-auth
+	// failure → apply exits non-zero) still produces the warning
+	// per AC-17.
+	emittedProviders := map[string]struct{}{}
+	for _, vue := range credentialPool.VaultUnreachableObservations() {
+		if _, seen := emittedProviders[vue.ProviderName]; seen {
+			continue
+		}
+		emittedProviders[vue.ProviderName] = struct{}{}
+		nameForWarning := vue.ProviderName
+		if nameForWarning == "" {
+			nameForWarning = "(anonymous)"
+		}
+		a.Reporter.Warn(
+			"personal vault provider %s unreachable; falling back to local-file and cli-session credentials.",
+			nameForWarning,
+		)
+	}
+
+	// PRD R12 / AC-13 / AC-14 / AC-15: emit one apply-time stderr
+	// "auth:" line per (kind, project) pair sourced from the vault,
+	// plus one fallback line per pair where local-file overrides
+	// vault. cli-session and pure-local-file rows are silent. The
+	// emit happens AFTER the R13.1 warning so users see the
+	// unreachable warning first, then the per-pair audit lines for
+	// pairs that did resolve.
+	credentialPool.AuditLog().EmitR12Lines(a.Reporter)
 
 	// Build provider bundles from each layer independently. Bundle
 	// lifetime is scoped to this apply: defer CloseAll so providers
@@ -1204,6 +1374,7 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		managedFiles:     managedFiles,
 		warnings:         allWarnings,
 		shadows:          pipelineShadows,
+		authSources:      credentialPool.AuditLog().AsMap(),
 		overlayURL:       pipelineOverlayURL,
 		overlayCommit:    pipelineOverlayCommit,
 		disclosedNotices: newDisclosures,

@@ -686,6 +686,57 @@ files = ["../secrets.env"]
 	}
 }
 
+// TestParseGlobalConfigOverrideAnonymousVaultParses confirms that an
+// anonymous [global.vault.provider] in the personal overlay parses
+// without error and is captured on cfg.Global.Vault. With the Alt 2
+// implicit-opt-in model, declaring this provider is the user's
+// signal to enable credential sync — no separate opt-in block is
+// needed.
+func TestParseGlobalConfigOverrideAnonymousVaultParses(t *testing.T) {
+	input := `
+[global.vault.provider]
+kind = "infisical"
+project = "uuid-anon"
+`
+	cfg, err := ParseGlobalConfigOverride([]byte(input))
+	if err != nil {
+		t.Fatalf("expected no error for anonymous provider, got %v", err)
+	}
+	if cfg.Global.Vault == nil || cfg.Global.Vault.Provider == nil {
+		t.Fatal("expected anonymous [global.vault.provider] to be captured")
+	}
+	if got := cfg.Global.Vault.Provider.Kind; got != "infisical" {
+		t.Errorf("Vault.Provider.Kind = %q, want %q", got, "infisical")
+	}
+}
+
+// TestParseGlobalConfigOverrideNamedOnlyVaultParses confirms that a
+// personal overlay with only named providers (no anonymous
+// [global.vault.provider]) parses without error. Named providers
+// participate in vault:// URI resolution but never serve as the
+// credential-sync source — the apply-time pickCredentialSyncSpec
+// router returns nil for these inputs.
+func TestParseGlobalConfigOverrideNamedOnlyVaultParses(t *testing.T) {
+	input := `
+[global.vault.providers.team]
+kind = "infisical"
+project = "uuid-team"
+`
+	cfg, err := ParseGlobalConfigOverride([]byte(input))
+	if err != nil {
+		t.Fatalf("expected no error for named-only providers, got %v", err)
+	}
+	if cfg.Global.Vault == nil {
+		t.Fatal("expected [global.vault.providers.*] to be captured")
+	}
+	if cfg.Global.Vault.Provider != nil {
+		t.Errorf("anonymous Provider should be nil when only named providers are declared")
+	}
+	if _, ok := cfg.Global.Vault.Providers["team"]; !ok {
+		t.Errorf("named provider 'team' missing from registry")
+	}
+}
+
 // TestParseRejectsContentAtRepoOverride is the Issue 1 proof that the type
 // split enforces workspace-scoped-only content at the type level: the TOML
 // decoder surfaces [repos.<name>.claude.content] as an unknown-config-field

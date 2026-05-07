@@ -1025,3 +1025,155 @@ func TestSourceKindEnvExample(t *testing.T) {
 		t.Errorf("SourceKindEnvExample must not equal SourceKindVault (%q)", SourceKindVault)
 	}
 }
+
+// TestSaveAndLoadStateAuthSources confirms that an InstanceState
+// with a non-nil AuthSources map round-trips through SaveState +
+// LoadState at schema v4. PRD R11 / I3 acceptance.
+func TestSaveAndLoadStateAuthSources(t *testing.T) {
+	dir := t.TempDir()
+	configName := "ws"
+	state := &InstanceState{
+		SchemaVersion:  SchemaVersion,
+		ConfigName:     &configName,
+		InstanceName:   "ws",
+		InstanceNumber: 1,
+		Root:           dir,
+		Created:        time.Now(),
+		LastApplied:    time.Now(),
+		AuthSources: map[string]AuthSourceRecord{
+			"infisical/uuid-prod": {
+				Source:   "vault:personal",
+				Fallback: "",
+			},
+			"infisical/uuid-team": {
+				Source:   "local-file",
+				Fallback: "vault:personal",
+			},
+			"infisical/uuid-anon": {
+				Source:   "vault:(anonymous)",
+				Fallback: "",
+			},
+			"infisical/uuid-cli": {
+				Source:   "cli-session",
+				Fallback: "",
+			},
+			"infisical/uuid-none": {
+				Source:   "none",
+				Fallback: "",
+			},
+		},
+	}
+	if err := SaveState(dir, state); err != nil {
+		t.Fatalf("SaveState: %v", err)
+	}
+	loaded, err := LoadState(dir)
+	if err != nil {
+		t.Fatalf("LoadState: %v", err)
+	}
+	if loaded.SchemaVersion != 4 {
+		t.Errorf("SchemaVersion = %d, want 4", loaded.SchemaVersion)
+	}
+	if len(loaded.AuthSources) != len(state.AuthSources) {
+		t.Errorf("AuthSources size = %d, want %d", len(loaded.AuthSources), len(state.AuthSources))
+	}
+	for k, want := range state.AuthSources {
+		got, ok := loaded.AuthSources[k]
+		if !ok {
+			t.Errorf("AuthSources[%q] missing after load", k)
+			continue
+		}
+		if got != want {
+			t.Errorf("AuthSources[%q] = %+v, want %+v", k, got, want)
+		}
+	}
+}
+
+// TestSaveStateOmitsAuthSourcesWhenEmpty confirms the omitempty JSON
+// tag on AuthSources keeps the JSON clean when no credential
+// decisions were recorded (single-org / single-default-org users).
+// Together with the SchemaVersion bump this is the v3→v4 forward
+// guarantee: a v4 state file written by a non-opting-in user looks
+// identical to a v3 file aside from `schema_version: 4`.
+func TestSaveStateOmitsAuthSourcesWhenEmpty(t *testing.T) {
+	dir := t.TempDir()
+	configName := "ws"
+	state := &InstanceState{
+		SchemaVersion:  SchemaVersion,
+		ConfigName:     &configName,
+		InstanceName:   "ws",
+		InstanceNumber: 1,
+		Root:           dir,
+		Created:        time.Now(),
+		LastApplied:    time.Now(),
+		// No AuthSources set.
+	}
+	if err := SaveState(dir, state); err != nil {
+		t.Fatalf("SaveState: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, StateDir, StateFile))
+	if err != nil {
+		t.Fatalf("reading state file: %v", err)
+	}
+	if containsKey(string(data), "auth_sources") {
+		t.Error("auth_sources must be omitted from JSON when nil/empty")
+	}
+}
+
+// TestLoadStateV3WithoutAuthSources confirms the v3→v4 migration:
+// a state file written by a v3-aware binary lacks the auth_sources
+// key entirely, and a v4-aware LoadState handles that cleanly
+// (AuthSources is nil; no error). The next SaveState rewrites the
+// file at schema_version 4 (still without auth_sources because
+// AuthSources stays nil until the next apply populates it).
+func TestLoadStateV3WithoutAuthSources(t *testing.T) {
+	dir := t.TempDir()
+	niwaDir := filepath.Join(dir, ".niwa")
+	if err := os.MkdirAll(niwaDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	// Hand-craft a v3 state file (schema_version=3, no auth_sources).
+	v3JSON := `{
+  "schema_version": 3,
+  "config_name": "ws",
+  "instance_name": "ws",
+  "instance_number": 1,
+  "root": "` + dir + `",
+  "created": "2026-01-01T00:00:00Z",
+  "last_applied": "2026-01-01T00:00:00Z",
+  "managed_files": [],
+  "repos": {}
+}`
+	if err := os.WriteFile(filepath.Join(niwaDir, StateFile), []byte(v3JSON), 0o600); err != nil {
+		t.Fatalf("writing v3 state: %v", err)
+	}
+	loaded, err := LoadState(dir)
+	if err != nil {
+		t.Fatalf("LoadState v3 file: %v", err)
+	}
+	if loaded.AuthSources != nil {
+		t.Errorf("AuthSources should be nil after loading a v3 file, got %+v", loaded.AuthSources)
+	}
+	// LoadState does NOT bump schema_version on read — the loaded
+	// struct still carries SchemaVersion == 3 (matching the on-disk
+	// file). The apply pipeline always constructs a fresh
+	// InstanceState literal with SchemaVersion: SchemaVersion (the
+	// current constant), so the next SaveState writes at v4. Mirror
+	// that here.
+	if loaded.SchemaVersion != 3 {
+		t.Errorf("loaded.SchemaVersion = %d, want 3 (LoadState should not auto-bump)", loaded.SchemaVersion)
+	}
+	loaded.SchemaVersion = SchemaVersion
+	if err := SaveState(dir, loaded); err != nil {
+		t.Fatalf("SaveState (v3→v4 rewrite): %v", err)
+	}
+	reloaded, err := LoadState(dir)
+	if err != nil {
+		t.Fatalf("LoadState after rewrite: %v", err)
+	}
+	if reloaded.SchemaVersion != 4 {
+		t.Errorf("SchemaVersion after rewrite = %d, want 4", reloaded.SchemaVersion)
+	}
+	if reloaded.AuthSources != nil {
+		t.Errorf("AuthSources after rewrite should still be nil, got %+v", reloaded.AuthSources)
+	}
+}

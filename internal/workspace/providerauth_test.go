@@ -243,7 +243,7 @@ func TestInjectProviderTokens_EndToEnd(t *testing.T) {
 		},
 	}
 
-	if err := injectProviderTokens(ctx, entries, vr); err != nil {
+	if err := injectProviderTokens(ctx, NewCredentialPool(entries, nil), vr); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -293,7 +293,7 @@ func TestInjectProviderTokens_NamedProvider(t *testing.T) {
 		},
 	}
 
-	if err := injectProviderTokens(ctx, entries, vr); err != nil {
+	if err := injectProviderTokens(ctx, NewCredentialPool(entries, nil), vr); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -317,7 +317,7 @@ func TestInjectProviderTokens_NilRegistry(t *testing.T) {
 		{Kind: "infisical", Config: map[string]any{"project": "p"}},
 	}
 	// Should be a no-op, not a panic.
-	if err := injectProviderTokens(ctx, entries, nil); err != nil {
+	if err := injectProviderTokens(ctx, NewCredentialPool(entries, nil), nil); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }

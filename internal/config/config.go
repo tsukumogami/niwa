@@ -433,7 +433,10 @@ func validateContentSource(field, source string) error {
 // Vault is the personal-overlay counterpart to WorkspaceConfig.Vault and
 // accepts the same anonymous-or-named shapes. A personal overlay may
 // declare its own providers for a workspace; the resolver (Issue 4)
-// stacks team and personal bundles per-source-org.
+// stacks team and personal bundles per-source-org. When the personal
+// overlay declares an anonymous [global.vault.provider], that provider
+// also serves as the machine-identity credential-sync source — no
+// additional opt-in block is required (machine-identity-vault-sync).
 type GlobalOverride struct {
 	Claude *ClaudeOverride   `toml:"claude,omitempty"`
 	Env    EnvConfig         `toml:"env,omitempty"`
