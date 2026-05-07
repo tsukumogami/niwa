@@ -915,6 +915,7 @@ Feature: Cross-session mesh (Issue #10 harness)
     Then the session is active in instance "session-precedence-ws"
     When I delegate a task to session role "app" with read_only true in instance "session-precedence-ws"
     Then the task state in instance "session-precedence-ws" eventually becomes "completed" within 60 seconds
+    And the task was routed through the last session id in instance "session-precedence-ws"
 
   @critical
   Scenario: Coordinator golden path: create session, delegate with session_id, work completes, session destroyed

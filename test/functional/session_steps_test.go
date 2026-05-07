@@ -548,6 +548,41 @@ func noTaskFilesExistInInstance(ctx context.Context, instance string) error {
 	return nil
 }
 
+// theTaskWasRoutedThroughLastSessionID verifies that the task recorded in
+// s.lastTaskID has session_id == s.lastSessionID in its state.json. This
+// confirms that session_id routing was used (not main-clone routing), since
+// createTaskEnvelope writes the session_id field only when session routing is
+// active.
+func theTaskWasRoutedThroughLastSessionID(ctx context.Context, instance string) error {
+	s := getState(ctx)
+	if s == nil {
+		return fmt.Errorf("no test state")
+	}
+	if s.lastTaskID == "" {
+		return fmt.Errorf("no task_id stored; delegate a task first")
+	}
+	if s.lastSessionID == "" {
+		return fmt.Errorf("no session_id stored; call niwa_create_session first")
+	}
+	instRoot := filepath.Join(s.workspaceRoot, instance)
+	stateFile := filepath.Join(instRoot, ".niwa", "tasks", s.lastTaskID, "state.json")
+	data, err := os.ReadFile(stateFile)
+	if err != nil {
+		return fmt.Errorf("reading state.json for task %s: %w", s.lastTaskID, err)
+	}
+	var st struct {
+		SessionID string `json:"session_id"`
+	}
+	if err := json.Unmarshal(data, &st); err != nil {
+		return fmt.Errorf("parsing state.json: %w", err)
+	}
+	if st.SessionID != s.lastSessionID {
+		return fmt.Errorf("task %s was not routed through session %q: state.json has session_id=%q",
+			s.lastTaskID, s.lastSessionID, st.SessionID)
+	}
+	return nil
+}
+
 // theSessionClaudeConversationIDIsSet asserts that the session state file for
 // s.lastSessionID in instance has a non-empty ClaudeConversationID.
 func theSessionClaudeConversationIDIsSet(ctx context.Context, instance string) error {

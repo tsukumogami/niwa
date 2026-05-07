@@ -350,6 +350,7 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 	ctx.Step(`^I delegate a read_only task to role "([^"]*)" in instance "([^"]*)"$`, iDelegateReadOnlyTaskToRole)
 	ctx.Step(`^I delegate a task to session role "([^"]*)" with read_only true in instance "([^"]*)"$`, iDelegateTaskToSessionRoleWithReadOnly)
 	ctx.Step(`^no task files exist in instance "([^"]*)"$`, noTaskFilesExistInInstance)
+	ctx.Step(`^the task was routed through the last session id in instance "([^"]*)"$`, theTaskWasRoutedThroughLastSessionID)
 	ctx.Step(`^the session claude_conversation_id is set in instance "([^"]*)"$`, theSessionClaudeConversationIDIsSet)
 	ctx.Step(`^the session claude_conversation_id equals "([^"]*)" in instance "([^"]*)"$`, theSessionClaudeConversationIDEquals)
 	ctx.Step(`^the worker in session was spawned with "([^"]*)"$`, theWorkerInSessionWasSpawnedWith)
