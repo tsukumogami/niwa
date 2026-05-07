@@ -75,6 +75,9 @@ func runSessionCreate(cmd *cobra.Command, args []string) error {
 	}
 	fmt.Fprintf(cmd.ErrOrStderr(), "session: created %s at %s\n", resp.SessionID, resp.WorktreePath)
 
+	if err := validateLandingPath(resp.WorktreePath); err != nil {
+		return err
+	}
 	if err := writeLandingPath(resp.WorktreePath); err != nil {
 		return err
 	}
@@ -100,13 +103,14 @@ func runSessionDestroy(cmd *cobra.Command, args []string) error {
 	var resp struct {
 		BranchWarn string `json:"branch_warning,omitempty"`
 	}
-	_ = json.Unmarshal([]byte(result.Content[0].Text), &resp)
+	if err := json.Unmarshal([]byte(result.Content[0].Text), &resp); err != nil {
+		return fmt.Errorf("parsing destroy response: %w", err)
+	}
 	if resp.BranchWarn != "" {
 		fmt.Fprintln(cmd.ErrOrStderr(), "warning:", resp.BranchWarn)
 	}
 
 	fmt.Fprintf(cmd.ErrOrStderr(), "session: destroyed %s\n", sessionID)
-	fmt.Fprintln(cmd.OutOrStdout(), result.Content[0].Text)
 	return nil
 }
 

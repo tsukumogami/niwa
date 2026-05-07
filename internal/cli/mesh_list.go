@@ -61,6 +61,10 @@ func runMeshList(cmd *cobra.Command, args []string) error {
 }
 
 func writeMeshListTable(out io.Writer, instanceRoot string, sessions []mcp.SessionEntry) {
+	if len(sessions) == 0 {
+		fmt.Fprintln(out, "no coordinator sessions registered")
+		return
+	}
 	fmt.Fprintf(out, "  %-16s %-8s %-10s %-14s %s\n",
 		"ROLE", "PID", "STATUS", "LAST-SEEN", "PENDING")
 	for _, s := range sessions {

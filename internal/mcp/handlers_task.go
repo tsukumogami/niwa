@@ -1033,6 +1033,14 @@ func mapStoreError(err error) toolResult {
 // task.completed, task.abandoned) to a role's inbox. Best-effort: errors are
 // swallowed so state.json remains authoritative and a transient inbox write
 // failure does not poison the handler's success path.
+//
+// Inbox path: always rooted at taskStoreRoot() (which is mainInstanceRoot for
+// session workers, instanceRoot otherwise). This means progress/completion
+// messages reach the coordinator's main-instance inbox. This is correct for
+// the current topology where coordinators always run in the main instance.
+// If a coordinator were ever to run inside a session worktree (session-within-
+// session), the delegating session ID would need to be read from state.json and
+// used to resolve the correct worktree inbox instead.
 func (s *Server) sendTaskMessage(toRole, msgType, taskID string, body any) {
 	inboxDir := filepath.Join(s.taskStoreRoot(), ".niwa", "roles", toRole, "inbox")
 	if err := os.MkdirAll(inboxDir, 0o700); err != nil {

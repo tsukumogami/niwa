@@ -270,6 +270,9 @@ func resolveSessionWorktree(cmd *cobra.Command, repo, sessionID string) error {
 		return fmt.Errorf("session %q worktree %s does not exist", sessionID, state.WorktreePath)
 	}
 	fmt.Fprintf(cmd.ErrOrStderr(), "go: session %s (%s) at %s\n", sessionID, repo, state.WorktreePath)
+	if err := validateLandingPath(state.WorktreePath); err != nil {
+		return err
+	}
 	if err := writeLandingPath(state.WorktreePath); err != nil {
 		return err
 	}

@@ -247,7 +247,11 @@ func (s *Server) handleDestroySession(args destroySessionArgs) toolResult {
 
 	// Idempotent: already terminal.
 	if state.Status == SessionStatusEnded || state.Status == SessionStatusAbandoned {
-		data, _ := json.Marshal(state)
+		resp := struct {
+			SessionID string `json:"session_id"`
+			Status    string `json:"status"`
+		}{SessionID: state.SessionID, Status: state.Status}
+		data, _ := json.Marshal(resp)
 		return textResult(string(data))
 	}
 
@@ -288,7 +292,19 @@ func (s *Server) handleDestroySession(args destroySessionArgs) toolResult {
 		}
 	}
 
-	data, _ := json.Marshal(state)
+	// Use a dedicated response struct so BranchWarning (which has json:"-" on
+	// the disk type) can appear in the wire response without risk of accidental
+	// persistence via WriteSessionLifecycleState.
+	resp := struct {
+		SessionID     string `json:"session_id"`
+		Status        string `json:"status"`
+		BranchWarning string `json:"branch_warning,omitempty"`
+	}{
+		SessionID:     state.SessionID,
+		Status:        state.Status,
+		BranchWarning: state.BranchWarning,
+	}
+	data, _ := json.Marshal(resp)
 	return textResult(string(data))
 }
 

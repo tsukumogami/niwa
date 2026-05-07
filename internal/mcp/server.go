@@ -272,6 +272,7 @@ func (s *Server) toolsList() toolsListResult {
 					"mode":       {Type: "string", Description: "\"async\" (default) or \"sync\""},
 					"expires_at": {Type: "string", Description: "Optional RFC3339 expiry deadline"},
 					"session_id": {Type: "string", Description: "Route task into a specific session worktree (8 lowercase hex chars from niwa_create_session)"},
+					"read_only":  {Type: "boolean", Description: "When true and session_id is absent, bypass the SESSION_REQUIRED guard and route to the main clone. Use for tasks that read but do not commit (e.g. run tests, query status)."},
 				},
 				Required: []string{"to", "body"},
 			},

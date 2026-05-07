@@ -41,8 +41,9 @@ type SessionLifecycleState struct {
 	CreatorStartTime     int64  `json:"creator_start_time"`
 	// BranchWarning is set in the destroy response when git branch -d fails
 	// (unmerged commits remain). Never written to disk; only present in the
-	// MCP/CLI response for that call.
-	BranchWarning string `json:"branch_warning,omitempty"`
+	// MCP/CLI response for that call. The json tag is intentionally omitted
+	// so serialization cannot accidentally persist this field.
+	BranchWarning string `json:"-"`
 }
 
 // WriteSessionLifecycleState atomically persists state to
@@ -120,9 +121,14 @@ func ListSessionLifecycleStates(sessionsDir string) ([]SessionLifecycleState, er
 }
 
 // newSessionLifecycleID generates a random 8-character lowercase hex session
-// ID and verifies no existing state file has the same ID. Retries up to 5
-// times on collision (birthday probability ~1e-9 at 20 sessions; retry is a
-// defensive check, not an expected code path).
+// ID and atomically reserves its state file with O_CREATE|O_EXCL. Retries up
+// to 5 times on collision (birthday probability ~1e-9 at 20 sessions).
+//
+// Using O_EXCL rather than os.Stat eliminates the TOCTOU window between
+// checking for an existing ID and claiming it: the OS makes the check-and-create
+// atomic, so two concurrent callers sharing the same sessionsDir cannot reserve
+// the same ID. WriteSessionLifecycleState later overwrites the placeholder via
+// rename.
 func newSessionLifecycleID(sessionsDir string) (string, error) {
 	for range 5 {
 		var b [4]byte
@@ -131,9 +137,15 @@ func newSessionLifecycleID(sessionsDir string) (string, error) {
 		}
 		id := fmt.Sprintf("%08x", b)
 		path := filepath.Join(sessionsDir, id+".json")
-		if _, err := os.Stat(path); os.IsNotExist(err) {
+		f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+		if err == nil {
+			_ = f.Close()
 			return id, nil
 		}
+		if !os.IsExist(err) {
+			return "", fmt.Errorf("reserving session ID: %w", err)
+		}
+		// ID collision: retry with a fresh random value.
 	}
 	return "", fmt.Errorf("failed to generate unique session ID after 5 attempts")
 }
