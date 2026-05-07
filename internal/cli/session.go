@@ -1,16 +1,11 @@
 package cli
 
 import (
-	"encoding/json"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
-	"sort"
-	"time"
 
 	"github.com/spf13/cobra"
-	"github.com/tsukumogami/niwa/internal/mcp"
 )
 
 func init() {
@@ -24,83 +19,45 @@ var sessionCmd = &cobra.Command{
 	Long: `Manage sessions in the workspace mesh.
 
 Subcommands:
-  register    Register this session with the workspace mesh
-  unregister  Remove this session from the workspace mesh
-  list        List all registered sessions`,
+  create    Create a new git-worktree session for a repo
+  destroy   Destroy a session and remove its worktree
+  list      List sessions (use --repo or --status to filter lifecycle sessions;
+            without flags delegates to 'niwa mesh list')`,
 }
 
-// sessionListCmd renders the coordinator session registry. Workers
-// intentionally do not register themselves (PRD R39, R40); the registry
-// is scoped to coordinator roles so this listing is necessarily
-// coordinator-only. The view shows liveness per entry so a stale PID
-// (crashed coordinator that could not unregister cleanly) is visible
-// to the operator.
+// sessionListCmd is the gateway for listing sessions. Without flags it
+// delegates to 'niwa mesh list' (coordinator registry view) with a
+// deprecation notice. With --repo or --status it shows lifecycle session
+// states via niwa_list_sessions logic.
 var sessionListCmd = &cobra.Command{
 	Use:   "list",
-	Short: "List coordinator sessions registered in this workspace",
-	Long: `List coordinator sessions registered in this workspace.
+	Short: "List sessions (lifecycle view with --repo/--status; else deprecated coordinator alias)",
+	Long: `List sessions in the workspace.
 
-Only coordinator-role sessions appear in the registry — workers are
-not registered (mesh messages route through per-role inboxes under
-.niwa/roles/<role>/inbox/, not per-session). Columns:
+Without flags, this command is a deprecated alias for 'niwa mesh list' and
+shows the coordinator process registry. Use 'niwa mesh list' instead.
 
-  ROLE    PID    STATUS (alive/dead)    LAST-SEEN    PENDING
-
-PENDING counts JSON envelopes directly in the coordinator's role
-inbox directory (not in the in-progress/cancelled/expired subdirs).`,
+With --repo or --status, shows lifecycle session states (worktree sessions
+created via niwa_create_session / niwa session create).`,
 	RunE: runSessionList,
 }
 
-func runSessionList(cmd *cobra.Command, args []string) error {
-	instanceRoot, err := resolveInstanceRoot()
-	if err != nil {
-		return err
-	}
+var (
+	sessionListRepo   string
+	sessionListStatus string
+)
 
-	registryPath := filepath.Join(instanceRoot, ".niwa", "sessions", "sessions.json")
-	data, err := os.ReadFile(registryPath)
-	if err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("reading sessions.json: %w", err)
-	}
-
-	var registry mcp.SessionRegistry
-	if len(data) > 0 {
-		if err := json.Unmarshal(data, &registry); err != nil {
-			return fmt.Errorf("parsing sessions.json: %w", err)
-		}
-	}
-
-	// Sort by role for a stable, human-scannable layout.
-	sort.SliceStable(registry.Sessions, func(i, j int) bool {
-		return registry.Sessions[i].Role < registry.Sessions[j].Role
-	})
-
-	writeSessionListTable(cmd.OutOrStdout(), instanceRoot, registry.Sessions)
-	return nil
+func init() {
+	sessionListCmd.Flags().StringVar(&sessionListRepo, "repo", "", "Filter by repo name")
+	sessionListCmd.Flags().StringVar(&sessionListStatus, "status", "", "Filter by status: active, ended, abandoned")
 }
 
-// writeSessionListTable renders the registered-session table. Headers
-// always print — even on empty registries — so scripted consumers get
-// a predictable first line and interactive users see the expected
-// columns.
-func writeSessionListTable(out io.Writer, instanceRoot string, sessions []mcp.SessionEntry) {
-	fmt.Fprintf(out, "  %-16s %-8s %-10s %-14s %s\n",
-		"ROLE", "PID", "STATUS", "LAST-SEEN", "PENDING")
-	for _, s := range sessions {
-		status := "dead"
-		if mcp.IsPIDAlive(s.PID, s.StartTime) {
-			status = "alive"
-		}
-		lastSeen := "-"
-		if s.RegisteredAt != "" {
-			if t, err := time.Parse(time.RFC3339, s.RegisteredAt); err == nil {
-				lastSeen = formatRelativeTime(t)
-			}
-		}
-		pending := countPendingInbox(instanceRoot, s.Role)
-		fmt.Fprintf(out, "  %-16s %-8d %-10s %-14s %d\n",
-			s.Role, s.PID, status, lastSeen, pending)
+func runSessionList(cmd *cobra.Command, args []string) error {
+	if sessionListRepo == "" && sessionListStatus == "" {
+		fmt.Fprintln(cmd.ErrOrStderr(), "warning: 'niwa session list' without flags is deprecated; use 'niwa mesh list' to list coordinator sessions")
+		return runMeshList(cmd, args)
 	}
+	return runSessionLifecycleList(cmd, sessionListRepo, sessionListStatus)
 }
 
 // countPendingInbox counts JSON envelopes directly under

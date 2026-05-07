@@ -36,19 +36,33 @@ Add this to your shell profile:
 
 const shellWrapperTemplate = `export _NIWA_SHELL_INIT=1
 
+__niwa_cd_wrap() {
+    local __niwa_tmp __niwa_dir __niwa_rc
+    __niwa_tmp=$(mktemp) || { command niwa "$@"; return $?; }
+    NIWA_RESPONSE_FILE="$__niwa_tmp" command niwa "$@"
+    __niwa_rc=$?
+    __niwa_dir=$(cat "$__niwa_tmp" 2>/dev/null)
+    rm -f "$__niwa_tmp"
+    if [ $__niwa_rc -eq 0 ] && [ -n "$__niwa_dir" ] && [ -d "$__niwa_dir" ]; then
+        builtin cd "$__niwa_dir" || return
+    fi
+    return $__niwa_rc
+}
+
 niwa() {
     case "$1" in
-        create|go)
-            local __niwa_tmp __niwa_dir __niwa_rc
-            __niwa_tmp=$(mktemp) || { command niwa "$@"; return $?; }
-            NIWA_RESPONSE_FILE="$__niwa_tmp" command niwa "$@"
-            __niwa_rc=$?
-            __niwa_dir=$(cat "$__niwa_tmp" 2>/dev/null)
-            rm -f "$__niwa_tmp"
-            if [ $__niwa_rc -eq 0 ] && [ -n "$__niwa_dir" ] && [ -d "$__niwa_dir" ]; then
-                builtin cd "$__niwa_dir" || return
-            fi
-            return $__niwa_rc
+        create|go|init)
+            __niwa_cd_wrap "$@"
+            ;;
+        session)
+            case "$2" in
+                create)
+                    __niwa_cd_wrap "$@"
+                    ;;
+                *)
+                    command niwa "$@"
+                    ;;
+            esac
             ;;
         *)
             command niwa "$@"
@@ -137,15 +151,25 @@ export PATH="$HOME/.niwa/bin:$PATH"
 func shellRCFiles() []string {
 	home := os.Getenv("HOME")
 	var files []string
-	bashrc := filepath.Join(home, ".bashrc")
-	if _, err := os.Stat(bashrc); err == nil {
-		files = append(files, bashrc)
-	}
-	zshenv := filepath.Join(home, ".zshenv")
-	if _, err := os.Stat(zshenv); err == nil {
-		files = append(files, zshenv)
+	for _, name := range []string{".bashrc", ".zshenv", ".zshrc"} {
+		path := filepath.Join(home, name)
+		if _, err := os.Stat(path); err == nil {
+			files = append(files, path)
+		}
 	}
 	return files
+}
+
+// chooseDefaultRCFile picks an rc file to create when shellRCFiles finds none.
+// Prefers .zshrc when $SHELL ends in zsh (default macOS), .bashrc otherwise.
+// .zshrc is preferred over .zshenv because zsh sources it interactively, after
+// compinit, which the cobra-generated zsh completion (compdef) requires.
+func chooseDefaultRCFile() string {
+	home := os.Getenv("HOME")
+	if strings.HasSuffix(os.Getenv("SHELL"), "zsh") {
+		return filepath.Join(home, ".zshrc")
+	}
+	return filepath.Join(home, ".bashrc")
 }
 
 func addSourceLine(rcFile, sourceLine string) (bool, error) {
@@ -188,6 +212,17 @@ func runShellInitInstall(cmd *cobra.Command, args []string) error {
 
 	sourceLine := `. "$HOME/.niwa/env"`
 	rcFiles := shellRCFiles()
+	if len(rcFiles) == 0 {
+		// Default macOS zsh has only .zshrc, which install.sh's predecessor
+		// behavior didn't account for. Create a sensible default so the install
+		// command never silently no-ops on the rc-file step.
+		rc := chooseDefaultRCFile()
+		if err := os.WriteFile(rc, nil, 0o644); err != nil {
+			return fmt.Errorf("creating rc file %s: %w", rc, err)
+		}
+		fmt.Fprintf(cmd.ErrOrStderr(), "Created %s\n", rc)
+		rcFiles = []string{rc}
+	}
 	for _, rc := range rcFiles {
 		added, err := addSourceLine(rc, sourceLine)
 		if err != nil {

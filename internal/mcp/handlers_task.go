@@ -10,14 +10,15 @@
 //     flock + atomic-rename + fsync discipline from Decision 1 is applied
 //     uniformly.
 //
-//   - Returns errors as textResult with a PRD R50 error_code prefix. The six
+//   - Returns errors as textResult with a PRD R50 error_code prefix. The eight
 //     legal codes are NOT_TASK_OWNER, NOT_TASK_PARTY, TASK_ALREADY_TERMINAL,
-//     BAD_PAYLOAD, BAD_TYPE, UNKNOWN_ROLE. No new codes are introduced.
+//     BAD_PAYLOAD, BAD_TYPE, UNKNOWN_ROLE, SESSION_NOT_FOUND, SESSION_INACTIVE.
 
 package mcp
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -47,6 +48,10 @@ type delegateArgs struct {
 	Body      json.RawMessage `json:"body"`
 	Mode      string          `json:"mode,omitempty"`
 	ExpiresAt string          `json:"expires_at,omitempty"`
+	SessionID string          `json:"session_id,omitempty"`
+	// ReadOnly opts out of SESSION_REQUIRED for tasks that make no git changes;
+	// the task routes to the main clone daemon. session_id takes precedence when both are set.
+	ReadOnly bool `json:"read_only,omitempty"`
 }
 
 type queryTaskArgs struct {
@@ -86,9 +91,12 @@ type cancelTaskArgs struct {
 }
 
 // identity returns the caller's authIdentity derived from Server fields.
+// InstanceRoot is the task-store root (not the session worktree) so
+// authorizeTaskCall reads state.json from the correct location for both
+// main-instance and session-worker callers.
 func (s *Server) identity() authIdentity {
 	return authIdentity{
-		InstanceRoot: s.instanceRoot,
+		InstanceRoot: s.taskStoreRoot(),
 		Role:         s.role,
 		TaskID:       s.taskID,
 	}
@@ -114,6 +122,11 @@ func (s *Server) handleDelegate(args delegateArgs) toolResult {
 		return errResultCode("BAD_PAYLOAD",
 			fmt.Sprintf("mode must be \"async\" or \"sync\"; got %q", args.Mode))
 	}
+	if args.SessionID == "" && !args.ReadOnly {
+		return errResultCode("SESSION_REQUIRED",
+			"niwa_delegate requires a session_id; provision one with niwa_create_session, "+
+				"or set read_only:true for tasks that make no git changes")
+	}
 	if !s.isKnownRole(args.To) {
 		return errResultCode("UNKNOWN_ROLE",
 			fmt.Sprintf("role %q is not registered under .niwa/roles/", args.To))
@@ -125,7 +138,7 @@ func (s *Server) handleDelegate(args delegateArgs) toolResult {
 		return errResult("NIWA_SESSION_ROLE not set")
 	}
 
-	taskID, errTR := s.createTaskEnvelope(args.To, args.Body, args.ExpiresAt, "")
+	taskID, errTR := s.createTaskEnvelope(args.To, args.Body, args.ExpiresAt, "", args.SessionID)
 	if errTR.IsError {
 		return errTR
 	}
@@ -139,7 +152,7 @@ func (s *Server) handleDelegate(args delegateArgs) toolResult {
 	defer cancel()
 	// Race-guard: re-read state.json in case the task already completed
 	// before the waiter was registered.
-	taskDir := taskDirPath(s.instanceRoot, taskID)
+	taskDir := taskDirPath(s.taskStoreRoot(), taskID)
 	if _, st, err := ReadState(taskDir); err == nil && isTaskStateTerminal(st.State) {
 		return formatTerminalResult(st)
 	}
@@ -157,9 +170,20 @@ func (s *Server) handleDelegate(args delegateArgs) toolResult {
 //
 // parentTaskID, when non-empty, overrides s.taskID (used by niwa_ask to
 // force a top-level task even when the caller is itself a worker).
-func (s *Server) createTaskEnvelope(to string, body json.RawMessage, expiresAt, parentTaskID string) (string, toolResult) {
+//
+// sessionID, when non-empty, causes the inbox write to target the session
+// worktree's inbox instead of the main instance inbox; the session_id is
+// stored in state.json so cancel/update can reconstruct the same path.
+func (s *Server) createTaskEnvelope(to string, body json.RawMessage, expiresAt, parentTaskID, sessionID string) (string, toolResult) {
+	// Resolve and validate the inbox directory in one read; session-targeted tasks
+	// require an active session, a safe worktree path, and the role to exist there.
+	inboxDir, inboxErrTR := s.resolveCreationInboxDir(sessionID, to)
+	if inboxErrTR.IsError {
+		return "", inboxErrTR
+	}
+
 	taskID := NewTaskID()
-	taskDir := taskDirPath(s.instanceRoot, taskID)
+	taskDir := taskDirPath(s.taskStoreRoot(), taskID)
 	if err := os.MkdirAll(taskDir, 0o700); err != nil {
 		return "", errResult("cannot create task dir: " + err.Error())
 	}
@@ -202,6 +226,7 @@ func (s *Server) createTaskEnvelope(to string, body json.RawMessage, expiresAt, 
 		DelegatorRole: s.role,
 		TargetRole:    to,
 		UpdatedAt:     now,
+		SessionID:     sessionID,
 	}
 	stBytes, err := json.MarshalIndent(st, "", "  ")
 	if err != nil {
@@ -214,7 +239,6 @@ func (s *Server) createTaskEnvelope(to string, body json.RawMessage, expiresAt, 
 	// Insert into target role's inbox via atomic rename. We write a
 	// task.delegate Message wrapper so the inbox format stays homogeneous
 	// across peer messages and delegations.
-	inboxDir := filepath.Join(s.instanceRoot, ".niwa", "roles", to, "inbox")
 	if err := os.MkdirAll(inboxDir, 0o700); err != nil {
 		return "", errResultCode("INBOX_UNWRITABLE", "cannot create inbox: "+err.Error())
 	}
@@ -234,12 +258,64 @@ func (s *Server) createTaskEnvelope(to string, body json.RawMessage, expiresAt, 
 	return taskID, toolResult{}
 }
 
+// resolveCreationInboxDir validates the session (active, path-safe, role present)
+// and returns the inbox dir for a new task delegation. Reads session state once.
+// Returns SESSION_NOT_FOUND, SESSION_INACTIVE, INVALID_WORKTREE_PATH, or
+// UNKNOWN_ROLE on invalid inputs.
+func (s *Server) resolveCreationInboxDir(sessionID, role string) (string, toolResult) {
+	if sessionID == "" {
+		return filepath.Join(s.instanceRoot, ".niwa", "roles", role, "inbox"), toolResult{}
+	}
+	sessionsDir := filepath.Join(s.instanceRoot, ".niwa", "sessions")
+	session, err := ReadSessionLifecycleState(sessionsDir, sessionID)
+	if err != nil {
+		return "", errResultCode("SESSION_NOT_FOUND", fmt.Sprintf("session %q not found: %v", sessionID, err))
+	}
+	if session.Status != SessionStatusActive {
+		return "", errResultCode("SESSION_INACTIVE", fmt.Sprintf("session %q status is %q, want active", sessionID, session.Status))
+	}
+	// Guard worktree against the main instance root (the coordinator's root, not
+	// a session worktree root). Fall back to instanceRoot when mainInstanceRoot is
+	// unset (non-session servers where instanceRoot IS the main instance root).
+	guardRoot := s.mainInstanceRoot
+	if guardRoot == "" {
+		guardRoot = s.instanceRoot
+	}
+	rel, relErr := filepath.Rel(guardRoot, session.WorktreePath)
+	if relErr != nil || strings.HasPrefix(rel, "..") {
+		return "", errResultCode("INVALID_WORKTREE_PATH", fmt.Sprintf("session worktree path %q is outside instance root", session.WorktreePath))
+	}
+	roleDir := filepath.Join(session.WorktreePath, ".niwa", "roles", role)
+	if _, statErr := os.Stat(roleDir); errors.Is(statErr, os.ErrNotExist) {
+		return "", errResultCode("UNKNOWN_ROLE", fmt.Sprintf("role %q not found at %s", role, roleDir))
+	}
+	return filepath.Join(session.WorktreePath, ".niwa", "roles", role, "inbox"), toolResult{}
+}
+
+// resolveInboxDir returns the inbox path for cancel/update operations on an
+// existing task. It reads the session state file for the worktree path but does
+// NOT validate session status — a task may be cancelled or updated after its
+// session ends. If the session's worktree has been cleaned up, the subsequent
+// rename or write will return an OS error, which is the expected best-effort
+// outcome for post-session operations.
+func (s *Server) resolveInboxDir(sessionID, role string) (string, toolResult) {
+	if sessionID != "" {
+		sessionsDir := filepath.Join(s.instanceRoot, ".niwa", "sessions")
+		session, err := ReadSessionLifecycleState(sessionsDir, sessionID)
+		if err != nil {
+			return "", errResultCode("SESSION_NOT_FOUND", fmt.Sprintf("session %q not found: %v", sessionID, err))
+		}
+		return filepath.Join(session.WorktreePath, ".niwa", "roles", role, "inbox"), toolResult{}
+	}
+	return filepath.Join(s.instanceRoot, ".niwa", "roles", role, "inbox"), toolResult{}
+}
+
 // createAskTaskStore creates the task directory, envelope.json, and state.json
 // for an ask task without writing any inbox message. The caller is responsible
 // for writing a task.ask notification to the coordinator's inbox.
 func (s *Server) createAskTaskStore(to string, body json.RawMessage, parentTaskID string) (string, toolResult) {
 	taskID := NewTaskID()
-	taskDir := taskDirPath(s.instanceRoot, taskID)
+	taskDir := taskDirPath(s.taskStoreRoot(), taskID)
 	if err := os.MkdirAll(taskDir, 0o700); err != nil {
 		return "", errResult("cannot create task dir: " + err.Error())
 	}
@@ -331,7 +407,7 @@ func (s *Server) handleAwaitTask(args awaitTaskArgs) toolResult {
 	if errR != nil {
 		if errorCode(errR) == "TASK_ALREADY_TERMINAL" {
 			// Re-read state.json to obtain the terminal payload.
-			taskDir := taskDirPath(s.instanceRoot, args.TaskID)
+			taskDir := taskDirPath(s.taskStoreRoot(), args.TaskID)
 			if _, stTerm, err := ReadState(taskDir); err == nil {
 				return formatTerminalResult(stTerm)
 			}
@@ -348,7 +424,7 @@ func (s *Server) handleAwaitTask(args awaitTaskArgs) toolResult {
 	defer cancelQuestion()
 
 	// Race guard: re-read state.json; if terminal, return immediately.
-	taskDir := taskDirPath(s.instanceRoot, args.TaskID)
+	taskDir := taskDirPath(s.taskStoreRoot(), args.TaskID)
 	if _, fresh, err := ReadState(taskDir); err == nil && isTaskStateTerminal(fresh.State) {
 		return formatTerminalResult(fresh)
 	}
@@ -472,7 +548,7 @@ func (s *Server) handleReportProgress(args reportProgressArgs) toolResult {
 	summary := truncateSummary(args.Summary, progressSummaryLimit)
 	now := time.Now().UTC().Format(time.RFC3339)
 
-	taskDir := taskDirPath(s.instanceRoot, args.TaskID)
+	taskDir := taskDirPath(s.taskStoreRoot(), args.TaskID)
 	var delegatorRole string
 	if err := UpdateState(taskDir, func(cur *TaskState) (*TaskState, *TransitionLogEntry, error) {
 		next := *cur
@@ -526,7 +602,7 @@ func (s *Server) authorizeFinishTask(taskID string) *toolResult {
 	// Second call on terminal state: return the already_terminal payload rather
 	// than falling through to kindTarget (which would also reject terminal tasks).
 	if errorCode(errR) == "TASK_ALREADY_TERMINAL" {
-		taskDir := taskDirPath(s.instanceRoot, taskID)
+		taskDir := taskDirPath(s.taskStoreRoot(), taskID)
 		if _, st, err := ReadState(taskDir); err == nil {
 			r := textResult(fmt.Sprintf(
 				`{"status":"already_terminal","error_code":"TASK_ALREADY_TERMINAL","current_state":%q}`,
@@ -577,7 +653,7 @@ func (s *Server) handleFinishTask(args finishTaskArgs) toolResult {
 	}
 
 	now := time.Now().UTC().Format(time.RFC3339)
-	taskDir := taskDirPath(s.instanceRoot, args.TaskID)
+	taskDir := taskDirPath(s.taskStoreRoot(), args.TaskID)
 	var delegatorRole string
 	if err := UpdateState(taskDir, func(cur *TaskState) (*TaskState, *TransitionLogEntry, error) {
 		next := *cur
@@ -635,7 +711,7 @@ func (s *Server) handleListOutboundTasks(args listOutboundArgs) toolResult {
 	if s.instanceRoot == "" {
 		return errResult("NIWA_INSTANCE_ROOT not set")
 	}
-	tasksDir := filepath.Join(s.instanceRoot, ".niwa", "tasks")
+	tasksDir := filepath.Join(s.taskStoreRoot(), ".niwa", "tasks")
 	entries, err := os.ReadDir(tasksDir)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -718,12 +794,12 @@ func (s *Server) handleUpdateTask(args updateTaskArgs) toolResult {
 	if len(args.Body) == 0 || string(args.Body) == "null" {
 		return errResultCode("BAD_PAYLOAD", "body is required")
 	}
-	env, _, errR := authorizeTaskCall(s.identity(), args.TaskID, kindDelegator)
+	env, authSt, errR := authorizeTaskCall(s.identity(), args.TaskID, kindDelegator)
 	if errR != nil {
 		return *errR
 	}
 
-	taskDir := taskDirPath(s.instanceRoot, args.TaskID)
+	taskDir := taskDirPath(s.taskStoreRoot(), args.TaskID)
 
 	// Under exclusive lock via UpdateState: reject if state != queued, else
 	// rewrite envelope.body and the queued inbox file.
@@ -767,7 +843,14 @@ func (s *Server) handleUpdateTask(args updateTaskArgs) toolResult {
 	// Rewrite the queued inbox file. If ENOENT (already consumed), surface
 	// a too_late response — the race between the lock read above and the
 	// rename here is the one the spec explicitly calls out.
-	inboxDir := filepath.Join(s.instanceRoot, ".niwa", "roles", env.To.Role, "inbox")
+	var sessionID string
+	if authSt != nil {
+		sessionID = authSt.SessionID
+	}
+	inboxDir, inboxErrTR := s.resolveInboxDir(sessionID, env.To.Role)
+	if inboxErrTR.IsError {
+		return inboxErrTR
+	}
 	inboxPath := filepath.Join(inboxDir, args.TaskID+".json")
 	if _, err := os.Stat(inboxPath); err != nil {
 		if os.IsNotExist(err) {
@@ -793,13 +876,20 @@ func (s *Server) handleUpdateTask(args updateTaskArgs) toolResult {
 // --- niwa_cancel_task --------------------------------------------------------
 
 func (s *Server) handleCancelTask(args cancelTaskArgs) toolResult {
-	env, _, errR := authorizeTaskCall(s.identity(), args.TaskID, kindDelegator)
+	env, authSt, errR := authorizeTaskCall(s.identity(), args.TaskID, kindDelegator)
 	if errR != nil {
 		return *errR
 	}
 
-	taskDir := taskDirPath(s.instanceRoot, args.TaskID)
-	inboxDir := filepath.Join(s.instanceRoot, ".niwa", "roles", env.To.Role, "inbox")
+	var sessionID string
+	if authSt != nil {
+		sessionID = authSt.SessionID
+	}
+	taskDir := taskDirPath(s.taskStoreRoot(), args.TaskID)
+	inboxDir, inboxErrTR := s.resolveInboxDir(sessionID, env.To.Role)
+	if inboxErrTR.IsError {
+		return inboxErrTR
+	}
 	src := filepath.Join(inboxDir, args.TaskID+".json")
 	cancelledDir := filepath.Join(inboxDir, "cancelled")
 	if err := os.MkdirAll(cancelledDir, 0o700); err != nil {
@@ -943,8 +1033,16 @@ func mapStoreError(err error) toolResult {
 // task.completed, task.abandoned) to a role's inbox. Best-effort: errors are
 // swallowed so state.json remains authoritative and a transient inbox write
 // failure does not poison the handler's success path.
+//
+// Inbox path: always rooted at taskStoreRoot() (which is mainInstanceRoot for
+// session workers, instanceRoot otherwise). This means progress/completion
+// messages reach the coordinator's main-instance inbox. This is correct for
+// the current topology where coordinators always run in the main instance.
+// If a coordinator were ever to run inside a session worktree (session-within-
+// session), the delegating session ID would need to be read from state.json and
+// used to resolve the correct worktree inbox instead.
 func (s *Server) sendTaskMessage(toRole, msgType, taskID string, body any) {
-	inboxDir := filepath.Join(s.instanceRoot, ".niwa", "roles", toRole, "inbox")
+	inboxDir := filepath.Join(s.taskStoreRoot(), ".niwa", "roles", toRole, "inbox")
 	if err := os.MkdirAll(inboxDir, 0o700); err != nil {
 		return
 	}

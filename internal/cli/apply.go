@@ -132,6 +132,14 @@ func runApply(cmd *cobra.Command, args []string) error {
 	// --channels or NIWA_CHANNELS activates channels without a config section.
 	cfg, applier.ChannelsSynthesized = resolveChannelsActivation(cmd, cfg, applyChannels, applyNoChannels)
 
+	// Resolve the effective workspace name for registry operations.
+	// configDir is `<workspaceRoot>/.niwa`, so its parent is where
+	// `niwa init <name>` persisted any ConfigNameOverride.
+	effectiveName, nameErr := resolveEffectiveWorkspaceName(filepath.Dir(configDir), cfg)
+	if nameErr != nil {
+		return nameErr
+	}
+
 	// Wire global config and ConfigSourceURL from the registry if available.
 	if globalCfg, gErr := config.LoadGlobalConfig(); gErr == nil {
 		// Always set GlobalConfigDir when the path resolves. SyncConfigDir
@@ -145,7 +153,7 @@ func runApply(cmd *cobra.Command, args []string) error {
 		// ConfigSourceURL is the original GitHub URL stored at init time.
 		// It enables convention overlay discovery when OverlayURL is not yet
 		// in InstanceState (i.e., overlay was never discovered for this instance).
-		if entry := globalCfg.LookupWorkspace(cfg.Workspace.Name); entry != nil {
+		if entry := globalCfg.LookupWorkspace(effectiveName); entry != nil {
 			applier.ConfigSourceURL = entry.SourceURL
 		}
 	}
@@ -162,8 +170,12 @@ func runApply(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Update the global registry after all instances complete.
-	if regErr := updateRegistry(configPath, configDir, cfg.Workspace.Name); regErr != nil {
+	// Update the global registry after all instances complete. Use the
+	// effective name (override-aware) so a user-given `niwa init <name>`
+	// keeps the registry entry under that key — without this, every
+	// apply would create a duplicate entry under the cloned config's
+	// [workspace] name (PRD AC-8d).
+	if regErr := updateRegistry(configPath, configDir, effectiveName); regErr != nil {
 		fmt.Fprintf(os.Stderr, "warning: %v\n", regErr)
 	}
 

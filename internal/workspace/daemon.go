@@ -32,7 +32,7 @@ import (
 // spawned daemons race for the exclusive flock on daemon.pid.lock
 // (acquired by the daemon itself at startup — see cli.acquireDaemonPIDLock)
 // and the loser exits cleanly with code 0.
-func EnsureDaemonRunning(instanceRoot string) error {
+func EnsureDaemonRunning(instanceRoot string, extraEnv []string) error {
 	niwaDir := filepath.Join(instanceRoot, ".niwa")
 	pid, startTime, err := readPIDBestEffort(niwaDir)
 	if err != nil {
@@ -71,6 +71,9 @@ func EnsureDaemonRunning(instanceRoot string) error {
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	if len(extraEnv) > 0 {
+		cmd.Env = append(os.Environ(), extraEnv...)
+	}
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("starting mesh daemon: %w", err)
 	}

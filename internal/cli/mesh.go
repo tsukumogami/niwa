@@ -12,5 +12,6 @@ var meshCmd = &cobra.Command{
 	Long: `Manage the workspace session mesh.
 
 Subcommands:
-  watch   Run the mesh watch daemon that claims queued tasks and spawns workers`,
+  watch   Run the mesh watch daemon that claims queued tasks and spawns workers
+  list    List coordinator sessions registered in this workspace`,
 }

@@ -52,15 +52,23 @@ Feature: workspace imports via .claude/rules
     Then the exit code is 0
     And the instance "niwatest-xq7749" exists
     And the repo "tools/myapp" exists in instance "niwatest-xq7749"
+    # Inject a sentinel into workspace-context.md so the prompt can ask about a
+    # token that exists only in loaded rules content — not in cwd path or in
+    # the model's training data. The earlier prompt asked about the workspace
+    # name, which is also in cwd, so the model could answer "yes" without any
+    # rules being loaded. The sentinel disambiguates.
+    When I append "WSCTX-SENTINEL-9af3-2b8e-7d1c" to file "workspace-context.md" in instance "niwatest-xq7749"
     When I run claude -p from instance root "niwatest-xq7749" with prompt:
       """
-      Do not read any files. Using only your current context, do you know about
-      a workspace named niwatest-xq7749? Answer yes or no only.
+      Do not read any files. Using only the context you already have loaded
+      (system prompt, CLAUDE.md, rules files), does your context contain the
+      literal token "WSCTX-SENTINEL-9af3-2b8e-7d1c"? Answer yes or no only.
       """
     Then the output contains "yes"
     When I run claude -p from repo "tools/myapp" in instance "niwatest-xq7749" with prompt:
       """
-      Do not read any files. Using only your current context, do you know about
-      a workspace named niwatest-xq7749? Answer yes or no only.
+      Do not read any files. Using only the context you already have loaded
+      (system prompt, CLAUDE.md, rules files), does your context contain the
+      literal token "WSCTX-SENTINEL-9af3-2b8e-7d1c"? Answer yes or no only.
       """
     Then the output does not contain "yes"

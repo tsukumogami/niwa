@@ -6,6 +6,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/tsukumogami/niwa/internal/mcp"
+	"github.com/tsukumogami/niwa/internal/workspace"
 )
 
 func init() {
@@ -28,5 +29,6 @@ func runMCPServe(cmd *cobra.Command, args []string) error {
 	}
 
 	srv := mcp.New(sessionRole, instanceRoot)
+	srv.SetDaemonFuncs(workspace.EnsureDaemonRunning, workspace.TerminateDaemon)
 	return srv.Run(os.Stdin, os.Stdout)
 }

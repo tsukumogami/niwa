@@ -103,17 +103,22 @@ func runReset(cmd *cobra.Command, args []string) error {
 
 	// Re-create using the same instance name. cfg.Workspace.Name is the
 	// config name from workspace.toml (never mutated); state.InstanceName
-	// is the directory name being recreated (e.g. "myws-2").
+	// is the directory name being recreated (e.g. "myws-2"). When the
+	// workspace was initialized with `niwa init <name>`, the registry
+	// entry lives under the override name, not cfg.Workspace.Name.
 	token := resolveGitHubToken()
 	gh := github.NewAPIClient(token)
 
 	applier := workspace.NewApplier(gh)
-	configName := cfg.Workspace.Name
+	registryName, err := resolveEffectiveWorkspaceName(workspaceRoot, cfg)
+	if err != nil {
+		return err
+	}
 	if globalCfg, gErr := config.LoadGlobalConfig(); gErr == nil {
 		if gDir, gErr := config.GlobalConfigDir(); gErr == nil {
 			applier.GlobalConfigDir = gDir
 		}
-		if entry := globalCfg.LookupWorkspace(configName); entry != nil {
+		if entry := globalCfg.LookupWorkspace(registryName); entry != nil {
 			applier.ConfigSourceURL = entry.SourceURL
 		}
 	}

@@ -20,7 +20,7 @@ func TestShellInitBash_ValidSyntax(t *testing.T) {
 	for _, want := range []string{
 		"_NIWA_SHELL_INIT=1",
 		"niwa()",
-		"create|go)",
+		"create|go|init)",
 		"command niwa",
 		"mktemp",
 		`NIWA_RESPONSE_FILE="$__niwa_tmp"`,
@@ -45,7 +45,7 @@ func TestShellInitZsh_ValidSyntax(t *testing.T) {
 	for _, want := range []string{
 		"_NIWA_SHELL_INIT=1",
 		"niwa()",
-		"create|go)",
+		"create|go|init)",
 		"command niwa",
 		"mktemp",
 		`NIWA_RESPONSE_FILE="$__niwa_tmp"`,
@@ -217,6 +217,88 @@ func TestShellInitInstall_AddsSourceLine(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "Added source line to") {
 		t.Error("expected 'Added source line' message in stderr")
+	}
+}
+
+func TestShellInitInstall_AddsSourceLineToZshrc(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+
+	// Default macOS zsh layout: only .zshrc exists.
+	zshrc := filepath.Join(tmpDir, ".zshrc")
+	if err := os.WriteFile(zshrc, []byte("# existing config\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := shellInitInstallCmd
+	var stderr bytes.Buffer
+	cmd.SetErr(&stderr)
+
+	if err := cmd.RunE(cmd, nil); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	data, err := os.ReadFile(zshrc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), `. "$HOME/.niwa/env"`) {
+		t.Error("source line not added to .zshrc")
+	}
+	if !strings.Contains(stderr.String(), "Added source line to") {
+		t.Error("expected 'Added source line' message in stderr")
+	}
+}
+
+func TestShellInitInstall_CreatesZshrcWhenNoRcFiles_ZshShell(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	t.Setenv("SHELL", "/bin/zsh")
+
+	cmd := shellInitInstallCmd
+	var stderr bytes.Buffer
+	cmd.SetErr(&stderr)
+
+	if err := cmd.RunE(cmd, nil); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	zshrc := filepath.Join(tmpDir, ".zshrc")
+	data, err := os.ReadFile(zshrc)
+	if err != nil {
+		t.Fatalf(".zshrc not created: %v", err)
+	}
+	if !strings.Contains(string(data), `. "$HOME/.niwa/env"`) {
+		t.Error("source line not present in created .zshrc")
+	}
+	if !strings.Contains(stderr.String(), "Created "+zshrc) {
+		t.Errorf("expected 'Created %s' in stderr; got: %s", zshrc, stderr.String())
+	}
+}
+
+func TestShellInitInstall_CreatesBashrcWhenNoRcFiles_BashShell(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	t.Setenv("SHELL", "/bin/bash")
+
+	cmd := shellInitInstallCmd
+	var stderr bytes.Buffer
+	cmd.SetErr(&stderr)
+
+	if err := cmd.RunE(cmd, nil); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	bashrc := filepath.Join(tmpDir, ".bashrc")
+	data, err := os.ReadFile(bashrc)
+	if err != nil {
+		t.Fatalf(".bashrc not created: %v", err)
+	}
+	if !strings.Contains(string(data), `. "$HOME/.niwa/env"`) {
+		t.Error("source line not present in created .bashrc")
+	}
+	if !strings.Contains(stderr.String(), "Created "+bashrc) {
+		t.Errorf("expected 'Created %s' in stderr; got: %s", bashrc, stderr.String())
 	}
 }
 

@@ -112,7 +112,7 @@ func (v *VaultRegistry) Validate(fileLabel string) error {
 				fileLabel,
 			)
 		}
-		if !validName.MatchString(name) {
+		if !NamePattern.MatchString(name) {
 			return fmt.Errorf(
 				"%s [vault.providers.%s]: name must match [a-zA-Z0-9._-]+",
 				fileLabel, name,

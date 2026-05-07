@@ -36,11 +36,16 @@ current workspace and registered workspaces.
 ### 2. Create a workspace
 
 ```bash
-mkdir my-workspace && cd my-workspace
 niwa init my-project
 ```
 
-This creates `.niwa/workspace.toml` with a commented template you can edit.
+This creates `./my-project/` and writes `./my-project/.niwa/workspace.toml`
+with a commented template you can edit. The directory name matches the
+positional name; you don't need to pre-create it. With the niwa shell
+wrapper sourced (the installer wires this up by default), your shell is
+also `cd`'d into the new directory after init returns — a single command
+leaves you inside the workspace ready to keep working. Run `niwa init`
+with no positional name to scaffold in the current directory instead.
 
 ### 3. Configure
 
@@ -110,10 +115,12 @@ repos, regenerates content files, and cleans up repos removed from the config.
 
 | Command | Description |
 |---------|-------------|
-| `niwa init [name]` | Create a new workspace with a scaffolded config |
-| `niwa init <name> --from <org/repo>` | Clone a shared workspace config from GitHub |
+| `niwa init [name]` | With `[name]`: create `./<name>/` and scaffold a config inside it. Without `[name]`: scaffold in the current directory |
+| `niwa init <name> --from <org/repo>` | Create `./<name>/` and clone a shared workspace config from GitHub into it; `<name>` overrides the cloned `[workspace] name` everywhere niwa surfaces it |
 | `niwa init <name> --from <org/repo> --overlay <repo>` | Use `<repo>` as the overlay instead of auto-discovering one (`--overlay` and `--no-overlay` are mutually exclusive) |
 | `niwa init <name> --from <org/repo> --no-overlay` | Skip overlay discovery entirely |
+
+When `<name>` is already registered to a different directory, `niwa init` refuses by default. Pass `--rebind` to retarget the registry entry to the new directory; the previous directory at the old root is left intact.
 | `niwa create [--name <name>]` | Create a new workspace instance; on a TTY, shows a live status line ("cloning <repo>...") while each repo is processed |
 | `niwa apply [--instance <name>]` | Apply config to all instances (from root) or one (from instance); on a TTY, shows a live status line ("cloning <repo>...", "syncing <repo>...") while each repo is processed |
 | `niwa status [instance]` | Show workspace health: repos, drift, last applied |
@@ -149,14 +156,21 @@ on the next apply — the legacy git-pull workflow that backed earlier niwa vers
 couldn't recover from this. See `docs/guides/workspace-config-sources.md` for
 slug grammar, discovery rules, drift detection, and the provenance marker.
 
-Once registered, the name can be reused on the same machine to create additional
-workspace instances in different directories:
+Once registered, the same source URL can be re-cloned in a different
+directory. Because the registry already maps `my-team` to its previous
+directory, niwa refuses a plain `niwa init my-team` and points you at
+either `--rebind` (retarget the registry to the new directory) or the
+global config TOML (remove the entry manually). The escape hatch is the
+`--rebind` flag:
 
 ```bash
 cd ~/other-dir
-niwa init my-team    # uses the registered source from the first --from
+niwa init my-team --rebind
 niwa apply
 ```
+
+The previous directory at the old root is left untouched; only the
+registry's pointer moves.
 
 ### Overlay discovery
 

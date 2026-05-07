@@ -4,13 +4,19 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/tsukumogami/niwa/internal/config"
+	"github.com/tsukumogami/niwa/internal/mcp"
 	"github.com/tsukumogami/niwa/internal/workspace"
 )
+
+// sessionIDGoRE matches the 8-character lowercase hex session ID format used
+// as the second positional argument to `niwa go <repo> <session-id>`.
+var sessionIDGoRE = regexp.MustCompile(`^[0-9a-f]{8}$`)
 
 func init() {
 	rootCmd.AddCommand(goCmd)
@@ -27,9 +33,9 @@ var (
 )
 
 var goCmd = &cobra.Command{
-	Use:   "go [target]",
-	Short: "Navigate to a workspace or repo",
-	Long: `Navigate to a workspace root or repo directory.
+	Use:   "go [target] [session-id]",
+	Short: "Navigate to a workspace, repo, or session worktree",
+	Long: `Navigate to a workspace root, repo directory, or session worktree.
 
 Without arguments, navigates to the current workspace root.
 
@@ -38,22 +44,34 @@ With a single argument, uses context-aware resolution:
   - Falls back to workspace name lookup via global registry
   - Use -w to force workspace lookup, -r for explicit repo targeting
 
+With two arguments where the second matches ^[0-9a-f]{8}$, navigates to
+the session worktree for that session ID.
+
 Examples:
-  niwa go                    # workspace root from cwd
-  niwa go tsuku              # repo "tsuku" in current instance, or workspace "tsuku"
-  niwa go -w codespar        # workspace "codespar" via registry
-  niwa go -r niwa            # repo "niwa" in current instance
-  niwa go -w codespar -r api # repo "api" in workspace "codespar"`,
-	Args: cobra.MaximumNArgs(1),
+  niwa go                       # workspace root from cwd
+  niwa go tsuku                 # repo "tsuku" in current instance, or workspace "tsuku"
+  niwa go -w codespar           # workspace "codespar" via registry
+  niwa go -r niwa               # repo "niwa" in current instance
+  niwa go -w codespar -r api    # repo "api" in workspace "codespar"
+  niwa go niwa ab12cd34         # session worktree for session ab12cd34`,
+	Args: cobra.MaximumNArgs(2),
 	RunE: runGo,
 }
 
 func runGo(cmd *cobra.Command, args []string) error {
-	if len(args) == 1 && goWorkspace != "" {
+	if len(args) >= 1 && goWorkspace != "" {
 		return fmt.Errorf("cannot combine positional argument with -w flag; use one or the other")
 	}
-	if len(args) == 1 && goRepo != "" {
+	if len(args) >= 1 && goRepo != "" {
 		return fmt.Errorf("cannot combine positional argument with -r flag; use one or the other")
+	}
+
+	// Two-arg form: niwa go <repo> <session-id>
+	if len(args) == 2 {
+		if !sessionIDGoRE.MatchString(args[1]) {
+			return fmt.Errorf("second argument %q is not a valid session ID (must be 8 lowercase hex chars)", args[1])
+		}
+		return resolveSessionWorktree(cmd, args[0], args[1])
 	}
 
 	var targetPath string
@@ -227,6 +245,39 @@ func formatWorkspaceNotFoundError(name string, globalCfg *config.GlobalConfig) e
 		return fmt.Errorf("workspace %q not found (no workspaces registered)", name)
 	}
 	return fmt.Errorf("workspace %q not found. Registered workspaces: %s", name, strings.Join(names, ", "))
+}
+
+// resolveSessionWorktree navigates to the worktree of a named session.
+// The repo argument must match the session's repo to prevent navigating
+// to the wrong worktree when the caller passes an incorrect repo name.
+func resolveSessionWorktree(cmd *cobra.Command, repo, sessionID string) error {
+	instanceRoot, err := resolveInstanceRoot()
+	if err != nil {
+		return err
+	}
+	sessionsDir := filepath.Join(instanceRoot, ".niwa", "sessions")
+	state, err := mcp.ReadSessionLifecycleState(sessionsDir, sessionID)
+	if err != nil {
+		return fmt.Errorf("session %q not found: %w", sessionID, err)
+	}
+	if state.Repo != repo {
+		return fmt.Errorf("session %q belongs to repo %q, not %q", sessionID, state.Repo, repo)
+	}
+	if state.WorktreePath == "" {
+		return fmt.Errorf("session %q has no worktree path", sessionID)
+	}
+	if _, statErr := os.Stat(state.WorktreePath); os.IsNotExist(statErr) {
+		return fmt.Errorf("session %q worktree %s does not exist", sessionID, state.WorktreePath)
+	}
+	fmt.Fprintf(cmd.ErrOrStderr(), "go: session %s (%s) at %s\n", sessionID, repo, state.WorktreePath)
+	if err := validateLandingPath(state.WorktreePath); err != nil {
+		return err
+	}
+	if err := writeLandingPath(state.WorktreePath); err != nil {
+		return err
+	}
+	hintShellInit(cmd)
+	return nil
 }
 
 func formatTargetNotFoundError(target string, inInstance bool, globalCfg *config.GlobalConfig) error {

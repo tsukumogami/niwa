@@ -6,6 +6,7 @@ import (
 	"compress/gzip"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -24,14 +25,54 @@ type fakeFetcher struct {
 	headErr   error
 	fetchErr  error
 	headCalls int
+
+	// Scripted per-call responses. When any of these slices is non-empty,
+	// the index headCalls (before increment) selects the response. Falling
+	// off the end of a slice falls back to the singleton fields above.
+	headErrs     []error
+	headStatuses []int
+	headOIDs     []string
 }
 
 func (f *fakeFetcher) HeadCommit(ctx context.Context, owner, repo, ref, etag string) (string, string, int, error) {
+	idx := f.headCalls
 	f.headCalls++
+	if idx < len(f.headErrs) || idx < len(f.headStatuses) || idx < len(f.headOIDs) {
+		var (
+			err    error
+			status = 200
+			oid    = f.commitOID
+		)
+		if idx < len(f.headErrs) {
+			err = f.headErrs[idx]
+		}
+		if idx < len(f.headStatuses) {
+			status = f.headStatuses[idx]
+		}
+		if idx < len(f.headOIDs) {
+			oid = f.headOIDs[idx]
+		}
+		if err != nil {
+			return "", "", status, err
+		}
+		return oid, "", status, nil
+	}
 	if f.headErr != nil {
 		return "", "", 0, f.headErr
 	}
 	return f.commitOID, "", 200, nil
+}
+
+// withFastDriftBackoff zeroes driftCheckBackoff for the duration of t so
+// retry tests don't sleep for the production schedule (~3.5s total).
+// Mutates a package global; tests using this helper must not run in
+// parallel with each other or with anything else that calls
+// headCommitWithRetry.
+func withFastDriftBackoff(t *testing.T) {
+	t.Helper()
+	orig := driftCheckBackoff
+	driftCheckBackoff = []time.Duration{0, 0, 0}
+	t.Cleanup(func() { driftCheckBackoff = orig })
 }
 
 func (f *fakeFetcher) FetchTarball(ctx context.Context, owner, repo, ref, etag string) (io.ReadCloser, string, int, *github.RenameRedirect, error) {
@@ -173,6 +214,7 @@ func TestEnsureConfigSnapshot_NoDriftJustUpdatesFetchedAt(t *testing.T) {
 }
 
 func TestEnsureConfigSnapshot_NetworkErrorPreservesCachedSnapshot(t *testing.T) {
+	withFastDriftBackoff(t)
 	dir := filepath.Join(t.TempDir(), ".niwa")
 	if err := os.Mkdir(dir, 0o755); err != nil {
 		t.Fatal(err)
@@ -189,10 +231,159 @@ func TestEnsureConfigSnapshot_NetworkErrorPreservesCachedSnapshot(t *testing.T) 
 	if err := EnsureConfigSnapshot(context.Background(), dir, fetcher, nil); err != nil {
 		t.Errorf("network error should not propagate: %v", err)
 	}
+	// Transport-level errors are transient: retry up to len(driftCheckBackoff)
+	// times before the warn-and-cache fallback fires.
+	if want := len(driftCheckBackoff) + 1; fetcher.headCalls != want {
+		t.Errorf("headCalls = %d, want %d (1 initial + %d retries)", fetcher.headCalls, want, len(driftCheckBackoff))
+	}
 	// Cached snapshot still intact.
 	got, _ := os.ReadFile(filepath.Join(dir, "workspace.toml"))
 	if string(got) != "cached" {
 		t.Errorf("cached snapshot lost: %q", got)
+	}
+}
+
+func TestRefreshSnapshot_RetrySucceedsOnAttempt2(t *testing.T) {
+	withFastDriftBackoff(t)
+	dir := filepath.Join(t.TempDir(), ".niwa")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	earlier := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	mustWriteMarker(t, dir, Provenance{
+		SourceURL: "org/repo", Owner: "org", Repo: "repo",
+		ResolvedCommit: "abc", FetchedAt: earlier, FetchMechanism: "github-tarball",
+	})
+
+	// First HeadCommit returns transient 503; second succeeds with the
+	// same oid (no drift).
+	fetcher := &fakeFetcher{
+		headErrs:     []error{errors.New("github: HeadCommit returned 503"), nil},
+		headStatuses: []int{503, 200},
+		headOIDs:     []string{"", "abc"},
+	}
+
+	var buf bytes.Buffer
+	reporter := NewReporterWithTTY(&buf, false)
+	if err := EnsureConfigSnapshot(context.Background(), dir, fetcher, reporter); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+
+	if fetcher.headCalls != 2 {
+		t.Errorf("headCalls = %d, want 2", fetcher.headCalls)
+	}
+	if strings.Contains(buf.String(), "warning:") {
+		t.Errorf("warning emitted on successful retry:\n%s", buf.String())
+	}
+	// Successful drift-check updates FetchedAt.
+	prov, err := ReadProvenance(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if prov.FetchedAt.Equal(earlier) {
+		t.Error("FetchedAt should be updated after successful retry")
+	}
+}
+
+func TestRefreshSnapshot_AllRetriesFailEmitOneWarning(t *testing.T) {
+	withFastDriftBackoff(t)
+	dir := filepath.Join(t.TempDir(), ".niwa")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mustWriteMarker(t, dir, Provenance{
+		SourceURL: "org/repo", Owner: "org", Repo: "repo",
+		ResolvedCommit: "cached-oid", FetchedAt: time.Now(), FetchMechanism: "github-tarball",
+	})
+	if err := os.WriteFile(filepath.Join(dir, "workspace.toml"), []byte("cached"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	headErr := errors.New("github: HeadCommit returned 503")
+	fetcher := &fakeFetcher{
+		headErrs:     []error{headErr, headErr, headErr, headErr},
+		headStatuses: []int{503, 503, 503, 503},
+	}
+
+	var buf bytes.Buffer
+	reporter := NewReporterWithTTY(&buf, false)
+	if err := EnsureConfigSnapshot(context.Background(), dir, fetcher, reporter); err != nil {
+		t.Errorf("transient errors should not propagate: %v", err)
+	}
+
+	if fetcher.headCalls != 4 {
+		t.Errorf("headCalls = %d, want 4 (1 initial + 3 retries)", fetcher.headCalls)
+	}
+	warnCount := strings.Count(buf.String(), "warning: ")
+	if warnCount != 1 {
+		t.Errorf("warning lines = %d, want 1\noutput:\n%s", warnCount, buf.String())
+	}
+	if !strings.Contains(buf.String(), "could not refresh config snapshot for org/repo") {
+		t.Errorf("warning text changed:\n%s", buf.String())
+	}
+	// Cached snapshot preserved.
+	got, _ := os.ReadFile(filepath.Join(dir, "workspace.toml"))
+	if string(got) != "cached" {
+		t.Errorf("cached snapshot lost: %q", got)
+	}
+}
+
+func TestRefreshSnapshot_PermanentErrorBypassesRetry(t *testing.T) {
+	withFastDriftBackoff(t)
+	dir := filepath.Join(t.TempDir(), ".niwa")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mustWriteMarker(t, dir, Provenance{
+		SourceURL: "org/repo", Owner: "org", Repo: "repo",
+		ResolvedCommit: "cached-oid", FetchedAt: time.Now(), FetchMechanism: "github-tarball",
+	})
+
+	fetcher := &fakeFetcher{
+		headErrs:     []error{errors.New("github: HeadCommit returned 401")},
+		headStatuses: []int{401},
+	}
+
+	var buf bytes.Buffer
+	reporter := NewReporterWithTTY(&buf, false)
+	if err := EnsureConfigSnapshot(context.Background(), dir, fetcher, reporter); err != nil {
+		t.Errorf("permanent error should not propagate: %v", err)
+	}
+
+	if fetcher.headCalls != 1 {
+		t.Errorf("headCalls = %d, want 1 (no retry on 401)", fetcher.headCalls)
+	}
+	warnCount := strings.Count(buf.String(), "warning: ")
+	if warnCount != 1 {
+		t.Errorf("warning lines = %d, want 1\noutput:\n%s", warnCount, buf.String())
+	}
+}
+
+func TestRefreshSnapshot_TransientStatusCodes(t *testing.T) {
+	withFastDriftBackoff(t)
+	for _, status := range []int{429, 502, 503, 504} {
+		t.Run(fmt.Sprintf("status_%d", status), func(t *testing.T) {
+			dir := filepath.Join(t.TempDir(), ".niwa")
+			if err := os.Mkdir(dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			mustWriteMarker(t, dir, Provenance{
+				SourceURL: "org/repo", Owner: "org", Repo: "repo",
+				ResolvedCommit: "abc", FetchedAt: time.Now(), FetchMechanism: "github-tarball",
+			})
+
+			fetcher := &fakeFetcher{
+				headErrs:     []error{fmt.Errorf("github: HeadCommit returned %d", status), nil},
+				headStatuses: []int{status, 200},
+				headOIDs:     []string{"", "abc"},
+			}
+			if err := EnsureConfigSnapshot(context.Background(), dir, fetcher, nil); err != nil {
+				t.Fatalf("refresh: %v", err)
+			}
+			if fetcher.headCalls != 2 {
+				t.Errorf("status %d: headCalls = %d, want 2", status, fetcher.headCalls)
+			}
+		})
 	}
 }
 

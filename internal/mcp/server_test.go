@@ -99,6 +99,9 @@ func TestServer_Initialize_ToolsList(t *testing.T) {
 		"niwa_list_outbound_tasks",
 		"niwa_update_task",
 		"niwa_cancel_task",
+		"niwa_create_session",
+		"niwa_destroy_session",
+		"niwa_list_sessions",
 	}
 	for _, want := range wantTools {
 		if !names[want] {

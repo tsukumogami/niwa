@@ -37,7 +37,7 @@ func seedSessionRegistry(t *testing.T, entries []mcp.SessionEntry) string {
 	return root
 }
 
-func TestSessionList_EmptyRegistryShowsHeaderOnly(t *testing.T) {
+func TestSessionList_EmptyRegistryShowsNoSessionsMessage(t *testing.T) {
 	root := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(root, ".niwa"), 0o700); err != nil {
 		t.Fatalf("mkdir: %v", err)
@@ -55,10 +55,8 @@ func TestSessionList_EmptyRegistryShowsHeaderOnly(t *testing.T) {
 		t.Fatalf("runSessionList: %v", err)
 	}
 	out := buf.String()
-	for _, col := range []string{"ROLE", "PID", "STATUS", "LAST-SEEN", "PENDING"} {
-		if !strings.Contains(out, col) {
-			t.Errorf("header missing column %q in %q", col, out)
-		}
+	if !strings.Contains(out, "no coordinator sessions registered") {
+		t.Errorf("expected empty-registry message in output, got %q", out)
 	}
 }
 

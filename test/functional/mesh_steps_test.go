@@ -70,7 +70,7 @@ func iSetUpSingleRepoChanneledWorkspace(ctx context.Context, name string) (conte
 	if s == nil {
 		return ctx, fmt.Errorf("no test state")
 	}
-	url, err := s.gitServer.Repo("app")
+	url, err := s.gitServer.SourceRepo("app")
 	if err != nil {
 		return ctx, fmt.Errorf("creating source repo %q: %w", "app", err)
 	}
@@ -1050,32 +1050,32 @@ func theOutputContainsStatus(ctx context.Context, expected string) error {
 // hold flocks on daemon.pid.lock and corrupt the next scenario's
 // fresh-sandbox assumptions.
 func killLeftoverDaemons(workspaceRoot string) {
-	entries, err := os.ReadDir(workspaceRoot)
-	if err != nil {
-		return
-	}
-	for _, e := range entries {
-		if !e.IsDir() {
-			continue
+	// Walk the entire workspace tree to find all daemon.pid files, including
+	// those in session worktrees (<instance>/.niwa/worktrees/<name>/.niwa/).
+	filepath.Walk(workspaceRoot, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info == nil || info.IsDir() {
+			return nil
 		}
-		niwa := filepath.Join(workspaceRoot, e.Name(), ".niwa")
-		pidPath := filepath.Join(niwa, "daemon.pid")
-		data, err := os.ReadFile(pidPath)
+		if filepath.Base(path) != "daemon.pid" {
+			return nil
+		}
+		data, err := os.ReadFile(path)
 		if err != nil {
-			continue
+			return nil
 		}
 		lines := strings.SplitN(strings.TrimSpace(string(data)), "\n", 2)
 		if len(lines) == 0 {
-			continue
+			return nil
 		}
 		pid, err := strconv.Atoi(strings.TrimSpace(lines[0]))
 		if err != nil || pid <= 0 {
-			continue
+			return nil
 		}
+		niwaDir := filepath.Dir(path)
 		// Kill any worker PGIDs first so stray workers running with
 		// acceptEdits don't have a grace window to exfiltrate. Then
 		// SIGKILL the daemon.
-		tasksDir := filepath.Join(niwa, "tasks")
+		tasksDir := filepath.Join(niwaDir, "tasks")
 		if taskEntries, err := os.ReadDir(tasksDir); err == nil {
 			for _, te := range taskEntries {
 				if !te.IsDir() {
@@ -1097,7 +1097,8 @@ func killLeftoverDaemons(workspaceRoot string) {
 			}
 		}
 		_ = syscall.Kill(pid, syscall.SIGKILL)
-	}
+		return nil
+	})
 }
 
 // currentInstanceRoot resolves the active instance root for a test. The
