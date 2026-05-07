@@ -686,165 +686,54 @@ files = ["../secrets.env"]
 	}
 }
 
-// TestParseGlobalConfigOverrideMachineIdentitiesAbsent confirms that
-// when [global.machine_identities] is absent, the feature stays
-// disabled (MachineIdentities is nil) and no validation error is
-// returned. Regression guard for PRD AC-28 / AC-29 (no behavior
-// change for non-opting-in users).
-func TestParseGlobalConfigOverrideMachineIdentitiesAbsent(t *testing.T) {
-	input := `
-[global.vault.providers.team]
-kind = "infisical"
-project = "abc"
-`
-	cfg, err := ParseGlobalConfigOverride([]byte(input))
-	if err != nil {
-		t.Fatalf("expected no error with absent machine_identities, got %v", err)
-	}
-	if cfg.Global.MachineIdentities != nil {
-		t.Errorf("MachineIdentities should be nil when block is absent, got %+v", cfg.Global.MachineIdentities)
-	}
-}
-
-// TestParseGlobalConfigOverrideMachineIdentitiesNamedProviderOK is
-// the PRD AC-1 happy path: a named provider declared in the same
-// file with a matching from = "<name>".
-func TestParseGlobalConfigOverrideMachineIdentitiesNamedProviderOK(t *testing.T) {
-	input := `
-[global.vault.providers.prod]
-kind = "infisical"
-project = "uuid-prod"
-
-[global.machine_identities]
-from = "prod"
-`
-	cfg, err := ParseGlobalConfigOverride([]byte(input))
-	if err != nil {
-		t.Fatalf("expected no error for AC-1 named-provider opt-in, got %v", err)
-	}
-	if cfg.Global.MachineIdentities == nil {
-		t.Fatal("MachineIdentities should be non-nil when block is present")
-	}
-	if got := cfg.Global.MachineIdentities.From; got != "prod" {
-		t.Errorf("MachineIdentities.From = %q, want %q", got, "prod")
-	}
-}
-
-// TestParseGlobalConfigOverrideMachineIdentitiesAnonymousProviderOK
-// is the PRD AC-2 happy path: an anonymous [global.vault.provider]
-// declared in the same file with [global.machine_identities] (no
-// from field).
-func TestParseGlobalConfigOverrideMachineIdentitiesAnonymousProviderOK(t *testing.T) {
+// TestParseGlobalConfigOverrideAnonymousVaultParses confirms that an
+// anonymous [global.vault.provider] in the personal overlay parses
+// without error and is captured on cfg.Global.Vault. With the Alt 2
+// implicit-opt-in model, declaring this provider is the user's
+// signal to enable credential sync — no separate opt-in block is
+// needed.
+func TestParseGlobalConfigOverrideAnonymousVaultParses(t *testing.T) {
 	input := `
 [global.vault.provider]
 kind = "infisical"
 project = "uuid-anon"
-
-[global.machine_identities]
 `
 	cfg, err := ParseGlobalConfigOverride([]byte(input))
 	if err != nil {
-		t.Fatalf("expected no error for AC-2 anonymous-provider opt-in, got %v", err)
+		t.Fatalf("expected no error for anonymous provider, got %v", err)
 	}
-	if cfg.Global.MachineIdentities == nil {
-		t.Fatal("MachineIdentities should be non-nil when block is present (even with no `from`)")
+	if cfg.Global.Vault == nil || cfg.Global.Vault.Provider == nil {
+		t.Fatal("expected anonymous [global.vault.provider] to be captured")
 	}
-	if got := cfg.Global.MachineIdentities.From; got != "" {
-		t.Errorf("MachineIdentities.From = %q, want empty string", got)
+	if got := cfg.Global.Vault.Provider.Kind; got != "infisical" {
+		t.Errorf("Vault.Provider.Kind = %q, want %q", got, "infisical")
 	}
 }
 
-// TestParseGlobalConfigOverrideMachineIdentitiesUnknownNamedProviderAC3AC34
-// covers PRD AC-3 and AC-34 in a single test because they exercise the
-// same parser code path:
-//   - AC-3: a from = "<name>" that doesn't match any declared
-//     [global.vault.providers.*] returns a parse-time error naming
-//     the missing provider and listing what IS declared.
-//   - AC-34 (R10): the same code path applies when "<name>" exists
-//     in a team config but not in the personal overlay (the parser
-//     only sees the personal overlay's declared set). AC-34 also
-//     mandates the diagnostic reference the personal-vs-team
-//     distinction with the literal phrase "not declared in your
-//     personal overlay".
-//
-// The test asserts both AC-3 substrings (provider name, declared
-// list) and AC-34 substrings (personal-overlay phrasing).
-func TestParseGlobalConfigOverrideMachineIdentitiesUnknownNamedProviderAC3AC34(t *testing.T) {
+// TestParseGlobalConfigOverrideNamedOnlyVaultParses confirms that a
+// personal overlay with only named providers (no anonymous
+// [global.vault.provider]) parses without error. Named providers
+// participate in vault:// URI resolution but never serve as the
+// credential-sync source — the apply-time pickCredentialSyncSpec
+// router returns nil for these inputs.
+func TestParseGlobalConfigOverrideNamedOnlyVaultParses(t *testing.T) {
 	input := `
 [global.vault.providers.team]
 kind = "infisical"
 project = "uuid-team"
-
-[global.machine_identities]
-from = "missing"
 `
-	_, err := ParseGlobalConfigOverride([]byte(input))
-	if err == nil {
-		t.Fatal("expected R2 error for unknown named provider, got nil")
+	cfg, err := ParseGlobalConfigOverride([]byte(input))
+	if err != nil {
+		t.Fatalf("expected no error for named-only providers, got %v", err)
 	}
-	msg := err.Error()
-	// AC-3: name the missing provider.
-	if !strings.Contains(msg, `"missing"`) {
-		t.Errorf("error %q should name the missing provider", msg)
+	if cfg.Global.Vault == nil {
+		t.Fatal("expected [global.vault.providers.*] to be captured")
 	}
-	// AC-3: list the declared providers from this file.
-	if !strings.Contains(msg, "[team]") {
-		t.Errorf("error %q should list the declared providers, got [team]", msg)
+	if cfg.Global.Vault.Provider != nil {
+		t.Errorf("anonymous Provider should be nil when only named providers are declared")
 	}
-	// AC-34 (R10): the diagnostic MUST reference the personal-vs-team
-	// distinction so users understand the feature only honors providers
-	// declared in their personal overlay.
-	if !strings.Contains(msg, "personal overlay") {
-		t.Errorf("AC-34: error %q should reference 'personal overlay'", msg)
-	}
-	if !strings.Contains(msg, "not declared in your personal overlay") {
-		t.Errorf("AC-34: error %q should use the literal phrase 'not declared in your personal overlay'", msg)
-	}
-}
-
-// TestParseGlobalConfigOverrideMachineIdentitiesNoAnonymousProvider
-// covers PRD AC-4 and AC-5: when from is unset (or explicitly empty)
-// and only named providers are declared (no anonymous
-// [global.vault.provider]), parse-time fails with the no-anonymous
-// diagnostic.
-func TestParseGlobalConfigOverrideMachineIdentitiesNoAnonymousProvider(t *testing.T) {
-	cases := []struct {
-		name  string
-		input string
-	}{
-		{
-			name: "AC-4 from absent",
-			input: `
-[global.vault.providers.team]
-kind = "infisical"
-project = "uuid-team"
-
-[global.machine_identities]
-`,
-		},
-		{
-			name: "AC-5 from explicit empty",
-			input: `
-[global.vault.providers.team]
-kind = "infisical"
-project = "uuid-team"
-
-[global.machine_identities]
-from = ""
-`,
-		},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			_, err := ParseGlobalConfigOverride([]byte(tc.input))
-			if err == nil {
-				t.Fatal("expected R2 error for missing anonymous provider, got nil")
-			}
-			msg := err.Error()
-			if !strings.Contains(msg, "no vault provider is declared") {
-				t.Errorf("error %q should contain 'no vault provider is declared'", msg)
-			}
-		})
+	if _, ok := cfg.Global.Vault.Providers["team"]; !ok {
+		t.Errorf("named provider 'team' missing from registry")
 	}
 }
 

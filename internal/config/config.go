@@ -6,7 +6,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"sort"
 	"strings"
 
 	"github.com/BurntSushi/toml"
@@ -434,31 +433,15 @@ func validateContentSource(field, source string) error {
 // Vault is the personal-overlay counterpart to WorkspaceConfig.Vault and
 // accepts the same anonymous-or-named shapes. A personal overlay may
 // declare its own providers for a workspace; the resolver (Issue 4)
-// stacks team and personal bundles per-source-org.
-// MachineIdentitiesConfig is the [global.machine_identities] block in the
-// personal overlay's niwa.toml. Presence of the block opts the user into
-// machine-identity vault sync (PRD R1). The optional From field selects
-// which declared vault provider supplies credentials:
-//
-//   - From == "" (absent or explicitly empty): use the anonymous
-//     [global.vault.provider]. Parse-time error (R2) if no anonymous
-//     provider is declared in the same file.
-//   - From == "<name>": use [global.vault.providers.<name>] from the
-//     same file. Parse-time error (R2) if the name isn't declared.
-//
-// Only the top-level [global.machine_identities] block opts in; per-
-// workspace overrides under [workspaces.<name>.machine_identities] are
-// not honored (PRD R1, R10).
-type MachineIdentitiesConfig struct {
-	From string `toml:"from"`
-}
-
+// stacks team and personal bundles per-source-org. When the personal
+// overlay declares an anonymous [global.vault.provider], that provider
+// also serves as the machine-identity credential-sync source — no
+// additional opt-in block is required (machine-identity-vault-sync).
 type GlobalOverride struct {
-	Claude            *ClaudeOverride          `toml:"claude,omitempty"`
-	Env               EnvConfig                `toml:"env,omitempty"`
-	Files             map[string]string        `toml:"files,omitempty"`
-	Vault             *VaultRegistry           `toml:"vault,omitempty"`
-	MachineIdentities *MachineIdentitiesConfig `toml:"machine_identities,omitempty"`
+	Claude *ClaudeOverride   `toml:"claude,omitempty"`
+	Env    EnvConfig         `toml:"env,omitempty"`
+	Files  map[string]string `toml:"files,omitempty"`
+	Vault  *VaultRegistry    `toml:"vault,omitempty"`
 }
 
 // GlobalConfigOverride is the top-level structure parsed from the global
@@ -481,12 +464,6 @@ func ParseGlobalConfigOverride(data []byte) (*GlobalConfigOverride, error) {
 		return nil, err
 	}
 	if err := cfg.Global.Vault.Validate("global overlay"); err != nil {
-		return nil, err
-	}
-	// PRD R1/R2: validate machine-identity opt-in only against the
-	// top-level [global] block. Per-workspace [workspaces.<name>]
-	// blocks do not opt into machine-identity sync.
-	if err := validatePersonalOverlayMachineIdentities(cfg.Global); err != nil {
 		return nil, err
 	}
 	for name, ws := range cfg.Workspaces {
@@ -517,70 +494,6 @@ func validateGlobalOverridePaths(prefix string, g GlobalOverride) error {
 		}
 	}
 	return nil
-}
-
-// validatePersonalOverlayMachineIdentities runs the PRD R2 parse-time
-// check on the personal overlay's top-level [global] block. The
-// check is a no-op when [machine_identities] is absent. When
-// present, the From field must either match a declared named
-// provider in the same Vault registry or be empty (and an anonymous
-// [vault.provider] must be declared in the same registry).
-//
-// PRD R1 makes the opt-in a top-level concept — only the personal
-// overlay's [global.machine_identities] block opts in. Per-workspace
-// [workspaces.<name>.machine_identities] blocks are not honored
-// (R10) and this helper is intentionally NOT called from the
-// workspaces loop. The diagnostic body refers to "personal overlay"
-// as required by AC-34 / R10, so the helper is hard-bound to the
-// personal-overlay file role; it is not parameterised over the
-// file label and must not be called for any other GlobalOverride.
-func validatePersonalOverlayMachineIdentities(ov GlobalOverride) error {
-	if ov.MachineIdentities == nil {
-		return nil
-	}
-	known := ov.Vault.KnownProviderNames()
-	if ov.MachineIdentities.From != "" {
-		if !known[ov.MachineIdentities.From] {
-			// PRD AC-34 / R10: the diagnostic MUST reference the
-			// personal-vs-team distinction. machine-identity-vault-sync
-			// only honors providers declared in the personal overlay
-			// itself; pointing `from` at a name that exists only in a
-			// team config would silently route around R10. The phrase
-			// "not declared in your personal overlay" makes the file-
-			// boundary explicit so users can act on the diagnostic.
-			return fmt.Errorf(
-				"global overlay: [global.machine_identities] from = %q is not declared in your personal overlay. "+
-					"machine-identity-vault-sync only uses personal-overlay vault providers. "+
-					"Either add [global.vault.providers.%s] to your personal overlay or change `from` "+
-					"to a declared name. Declared providers in this file: [%s].",
-				ov.MachineIdentities.From, ov.MachineIdentities.From, strings.Join(declaredNamedProviders(known), ", "),
-			)
-		}
-		return nil
-	}
-	// from is empty/unset: require an anonymous [global.vault.provider].
-	if !known[""] {
-		return fmt.Errorf(
-			"global overlay: [global.machine_identities] is enabled but no vault provider is declared. Either add [global.vault.provider] (anonymous) or [global.vault.providers.<name>] and set from = \"<name>\".",
-		)
-	}
-	return nil
-}
-
-// declaredNamedProviders returns the named (non-anonymous) provider
-// names from a KnownProviderNames map, sorted. Used to build the
-// diagnostic list in validatePersonalOverlayMachineIdentities so test
-// assertions are stable across map iteration order.
-func declaredNamedProviders(known map[string]bool) []string {
-	names := make([]string, 0, len(known))
-	for name := range known {
-		if name == "" {
-			continue
-		}
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	return names
 }
 
 // rejectWorkerSpawnCommandKey fails parsing when NIWA_WORKER_SPAWN_COMMAND

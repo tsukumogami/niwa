@@ -9,60 +9,35 @@ import (
 )
 
 // pickCredentialSyncSpec returns the ProviderSpec for the credential-
-// sync vault provider declared in the personal overlay. The spec is
-// synthesized from the [global.vault.*] declaration the user has
-// already authored — this function is a router, not a parser.
+// sync vault provider declared in the personal overlay, or nil when
+// the overlay declares no anonymous [global.vault.provider]. The spec
+// is synthesized from the [global.vault.provider] declaration the user
+// has already authored — this function is a router, not a parser.
 //
-// Resolution rule (PRD R1, R2):
-//   - mi.From == "":   use the anonymous [global.vault.provider].
-//                      Spec.Name == "".
-//   - mi.From == "n":  use [global.vault.providers.n]. Spec.Name == "n".
+// Resolution rule:
+//   - g.Vault == nil OR g.Vault.Provider == nil → returns nil. The
+//     overlay either declares no vault at all, or declares only named
+//     providers (used for URI resolution but not for credential-sync
+//     bootstrap).
+//   - g.Vault.Provider != nil → the anonymous provider is the
+//     credential-sync source. Spec.Name == "".
 //
-// R2 (unknown-provider name) is enforced at parse time by
-// internal/config.validatePersonalOverlayMachineIdentities, so when
-// mi.From != "" the named provider is guaranteed to exist. The
-// defensive errors below cover paths where the GlobalOverride has
-// been mutated post-parse (which shouldn't happen in production).
-func pickCredentialSyncSpec(g config.GlobalOverride, mi *config.MachineIdentitiesConfig) (vault.ProviderSpec, error) {
-	if mi == nil {
-		return vault.ProviderSpec{}, fmt.Errorf("internal error: pickCredentialSyncSpec called with nil MachineIdentitiesConfig")
+// Named providers under [global.vault.providers.<name>] participate in
+// vault:// URI resolution but never serve as the credential-sync
+// source. Treating an anonymous provider as the implicit opt-in keeps
+// the personal-overlay shape simple: declaring the provider once is
+// the user's intent to both resolve URIs from it AND bootstrap
+// credentials from it.
+func pickCredentialSyncSpec(g config.GlobalOverride) *vault.ProviderSpec {
+	if g.Vault == nil || g.Vault.Provider == nil {
+		return nil
 	}
-	if g.Vault == nil {
-		return vault.ProviderSpec{}, fmt.Errorf("internal error: pickCredentialSyncSpec called with nil Vault registry")
-	}
-	if mi.From == "" {
-		if g.Vault.Provider == nil {
-			return vault.ProviderSpec{}, fmt.Errorf("internal error: pickCredentialSyncSpec called with anonymous from but no [global.vault.provider]")
-		}
-		return vault.ProviderSpec{
-			Name:   "",
-			Kind:   g.Vault.Provider.Kind,
-			Config: vault.ProviderConfig(g.Vault.Provider.Config),
-			Source: "global overlay",
-		}, nil
-	}
-	p, ok := g.Vault.Providers[mi.From]
-	if !ok {
-		return vault.ProviderSpec{}, fmt.Errorf("internal error: pickCredentialSyncSpec named provider %q missing from [global.vault.providers] (R2 should have caught this at parse time)", mi.From)
-	}
-	// Build a fresh Config map so we never mutate the shared one
-	// hanging off GlobalOverride.Global.Vault.Providers[mi.From].
-	// Setting cfg["name"] on the shared map would be a hidden side
-	// effect — pickCredentialSyncSpec is documented as a router, so
-	// it must not write back to the inputs.
-	cfg := make(vault.ProviderConfig, len(p.Config)+1)
-	for k, v := range p.Config {
-		cfg[k] = v
-	}
-	if _, has := cfg["name"]; !has {
-		cfg["name"] = mi.From
-	}
-	return vault.ProviderSpec{
-		Name:   mi.From,
-		Kind:   p.Kind,
-		Config: cfg,
+	return &vault.ProviderSpec{
+		Name:   "",
+		Kind:   g.Vault.Provider.Kind,
+		Config: vault.ProviderConfig(g.Vault.Provider.Config),
 		Source: "global overlay",
-	}, nil
+	}
 }
 
 // openCredentialSyncProvider opens the personal-overlay credential-

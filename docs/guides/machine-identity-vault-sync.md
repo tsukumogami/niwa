@@ -6,12 +6,12 @@ making you maintain `~/.config/niwa/provider-auth.toml` on every
 laptop. Edit one place; every machine picks up the new value on its
 next `niwa apply`.
 
-This guide walks you through opting in, setting up the vault
-schema, and reading audit output.
+This guide walks you through enabling credential sync, setting up
+the vault schema, and reading audit output.
 
 ## When to use this
 
-Opt in when you check at least one of these boxes:
+Enable credential sync when you check at least one of these boxes:
 
 - You work across two or more Infisical orgs and have to
   hand-create `provider-auth.toml` entries on every machine.
@@ -43,40 +43,28 @@ per-machine override layer:
 `niwa status --audit-auth` shows you which source authenticated
 each provider in the last apply. See the audit-auth section below.
 
-## Opt-in syntax
+## Enabling credential sync
 
-In your **personal overlay**'s `niwa.toml`, add a top-level
-`[global.machine_identities]` block:
-
-```toml
-# Anonymous form: use the [global.vault.provider] declared
-# elsewhere in this file.
-[global.machine_identities]
-
-# OR: named form, pointing at a [global.vault.providers.<name>]
-# block declared in this file.
-[global.machine_identities]
-from = "personal"
-```
-
-Either form opts in. Only the top-level `[global.machine_identities]`
-counts — per-workspace `[workspaces.<name>.machine_identities]`
-blocks are silently ignored.
-
-You also need a vault declaration (one or the other, matching
-your `from` choice):
+In your **personal overlay**'s `niwa.toml`, declare an anonymous
+`[global.vault.provider]` block. That declaration is itself the
+opt-in — no separate machine-identity opt-in block is needed:
 
 ```toml
-# Anonymous (paired with [global.machine_identities] no `from`).
 [global.vault.provider]
 kind = "infisical"
 project = "your-personal-org-uuid"
-
-# OR named (paired with from = "personal" above).
-[global.vault.providers.personal]
-kind = "infisical"
-project = "your-personal-org-uuid"
 ```
+
+Any anonymous personal-overlay vault provider serves both
+roles: it resolves `vault://` URIs declared elsewhere in the
+config AND supplies the machine-identity credentials niwa
+needs to authenticate against other vault providers.
+
+Named providers under `[global.vault.providers.<name>]`
+participate in `vault://` URI resolution but do NOT serve as
+the credential-sync source. If you want named providers for
+URI resolution AND credential sync, add a separate anonymous
+`[global.vault.provider]` block alongside them.
 
 ## Vault key schema
 
@@ -154,9 +142,10 @@ The personal vault provider itself authenticates via the active
 `infisical login` session — niwa never tries to use a
 machine-identity credential to authenticate the vault that supplies
 machine-identity credentials. niwa enforces this with a
-chicken-and-egg check that fires at parse time if you accidentally
-point your personal vault at a `(kind, project)` that the
-credential pool would otherwise supply.
+chicken-and-egg check at apply time: if the personal vault's
+`(kind, project)` collides with any local credential file entry or
+any other vault provider declared in your overlays, the apply
+aborts before opening the provider.
 
 ## The `niwa status --audit-auth` command
 
@@ -240,23 +229,6 @@ the next `niwa apply` on every machine fetches fresh.
 
 ## Common errors
 
-### `[global.machine_identities] from = "X" is not declared in your personal overlay.`
-
-Your `from` value points at a vault provider that doesn't exist in
-the same `niwa.toml` file. niwa scans only the personal overlay
-for declared providers — a `[vault.providers.X]` block in the team
-config doesn't count.
-
-Fix: either add `[global.vault.providers.X]` to your personal
-overlay or change `from` to a name that's already declared there.
-
-### `[global.machine_identities] is enabled but no vault provider is declared.`
-
-The opt-in block is present but no `[global.vault.*]` declaration
-backs it. Either add `[global.vault.provider]` (anonymous) or
-declare a named `[global.vault.providers.<name>]` and set
-`from = "<name>"`.
-
 ### `Personal vault provider (kind=..., project=...) cannot be bootstrapped by an entry in the local credential pool — this would create a chicken-and-egg cycle.`
 
 You're trying to authenticate the personal vault using a credential
@@ -311,12 +283,13 @@ layer covers them.
 ## Public-overlay safety
 
 The plaintext-secrets guardrail still walks `*.secrets` tables in
-your committed config files. Opting into machine-identity sync
-from a public personal-overlay repo does NOT expose secret values:
-your credential bodies live in the vault, not in any TOML file you
+your committed config files. Enabling machine-identity sync from a
+public personal-overlay repo does NOT expose secret values: your
+credential bodies live in the vault, not in any TOML file you
 commit. The only thing your `niwa.toml` reveals is the topology
-(which provider name and which project UUID), both of which are
-already discoverable from the file regardless of opt-in.
+(the provider kind and the project UUID of your personal vault),
+which is the same information any committed `[global.vault.*]`
+declaration already exposes regardless of credential sync.
 
 ## What this feature does not do
 

@@ -540,17 +540,17 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 
 	// I6 captures the syncSpec produced by Step 0.4 so the post-
 	// overlay R9 check (Step 0.5/0.6) can re-run validation with the
-	// workspace overlay's vault specs in scope. nil when machine-
-	// identity-vault-sync is not opted in.
+	// workspace overlay's vault specs in scope. nil when the personal
+	// overlay declares no anonymous [global.vault.provider] (and
+	// therefore credential sync is inactive for this apply).
 	var credentialSyncSpec *vault.ProviderSpec
 	// I7 captures the credential-sync provider opened at Step 0.4 so
 	// the credential pool's lazy vault loader can fetch from it on
-	// file-miss Lookups. nil when machine-identity-vault-sync is not
-	// opted in.
+	// file-miss Lookups. nil when credential sync is inactive.
 	var credentialSyncLoader *vaultCredLoader
 
 	// credentialPool is constructed AFTER Step 0.4 so the loader can
-	// be wired in when opt-in is detected. Declared here as a
+	// be wired in when credential sync is active. Declared here as a
 	// forward-reference so apply.go's reads stay textually adjacent
 	// to the pre-Step-0.3 authEntries load.
 	var credentialPool *CredentialPool
@@ -560,9 +560,9 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 	// The snapshot refresh (formerly Step 2a) and the niwa.toml parse
 	// (formerly between the redactor setup and the resolver stage) run
 	// here as a single phase, in their original sync-then-parse order.
-	// They are hoisted together so opt-in features declared in
-	// [global.*] — notably [global.machine_identities]
-	// (machine-identity-vault-sync) — are detectable before
+	// They are hoisted together so personal-overlay [global.vault.*]
+	// declarations — which act as the implicit machine-identity
+	// credential-sync source — are detectable before
 	// injectProviderTokens runs against the workspace-overlay vault
 	// registry. The sync-then-parse pairing is preserved verbatim:
 	// EnsureConfigSnapshotWithStatus may swap the directory contents on
@@ -617,9 +617,14 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 	}
 
 	// Step 0.4: open the personal-overlay credential-sync vault
-	// provider (machine-identity-vault-sync, PRD R9) when the user
-	// has opted in via [global.machine_identities] in their personal
-	// overlay. Two-stage R9 enforcement:
+	// provider (machine-identity-vault-sync, PRD R9) when the personal
+	// overlay declares an anonymous [global.vault.provider]. That
+	// declaration is itself the opt-in: any anonymous personal-overlay
+	// vault provider serves both URI-resolution AND credential-sync.
+	// Named providers under [global.vault.providers.<name>] stay
+	// URI-resolution-only and never become the credential-sync source.
+	//
+	// Two-stage R9 enforcement:
 	//
 	//  - Pre-overlay (here): scan the local file plus the global
 	//    override's own vault specs for a (kind, project) collision
@@ -629,50 +634,42 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 	//    the workspace overlay's vault specs once they are parsed.
 	//
 	// The bundle's lifetime is scoped to this apply via
-	// `defer syncBundle.CloseAll()`. I7 will swap the file-only
-	// `NewCredentialPool(authEntries, nil)` constructor above for
-	// one that wraps the opened provider in a vaultCredLoader; for
-	// I6 the opened provider is held but not yet consulted by the
-	// pool (so opt-in users see no behavior change beyond the R9
-	// validation gate).
-	if globalOverride != nil && globalOverride.Global.MachineIdentities != nil {
-		mi := globalOverride.Global.MachineIdentities
-		syncSpec, err := pickCredentialSyncSpec(globalOverride.Global, mi)
-		if err != nil {
-			return nil, err
-		}
-		// Pre-overlay R9 BEFORE Build so a conflict short-circuits
-		// without opening the provider.
-		if err := validateCredentialSyncBootstrapPreOverlay(authEntries, globalOverride.Global.Vault, syncSpec); err != nil {
-			return nil, err
-		}
-		syncBundle, syncProvider, err := openCredentialSyncProvider(ctx, syncSpec)
-		if err != nil {
-			return nil, err
-		}
-		defer syncBundle.CloseAll()
-		credentialSyncSpec = &syncSpec
-		// SelfKind/SelfProject populate the loader's R9 dynamic guard
-		// against self-lookup. injectProviderTokens later iterates
-		// globalOverride.Global.Vault, which contains this spec; without
-		// the guard, lookupVault would Resolve the credential-sync
-		// provider for its own (kind, project) and feed it back via
-		// authenticateEntry — the chicken-and-egg cycle.
-		syncProject, _ := syncSpec.Config["project"].(string)
-		credentialSyncLoader = &vaultCredLoader{
-			Provider:     syncProvider,
-			ProviderName: syncSpec.Name,
-			PathPrefix:   CredentialSyncPathPrefix,
-			SelfKind:     syncSpec.Kind,
-			SelfProject:  syncProject,
+	// `defer syncBundle.CloseAll()`.
+	if globalOverride != nil {
+		if syncSpec := pickCredentialSyncSpec(globalOverride.Global); syncSpec != nil {
+			// Pre-overlay R9 BEFORE Build so a conflict short-circuits
+			// without opening the provider.
+			if err := validateCredentialSyncBootstrapPreOverlay(authEntries, globalOverride.Global.Vault, *syncSpec); err != nil {
+				return nil, err
+			}
+			syncBundle, syncProvider, err := openCredentialSyncProvider(ctx, *syncSpec)
+			if err != nil {
+				return nil, err
+			}
+			defer syncBundle.CloseAll()
+			credentialSyncSpec = syncSpec
+			// SelfKind/SelfProject populate the loader's R9 dynamic guard
+			// against self-lookup. injectProviderTokens later iterates
+			// globalOverride.Global.Vault, which contains this spec; without
+			// the guard, lookupVault would Resolve the credential-sync
+			// provider for its own (kind, project) and feed it back via
+			// authenticateEntry — the chicken-and-egg cycle.
+			syncProject, _ := syncSpec.Config["project"].(string)
+			credentialSyncLoader = &vaultCredLoader{
+				Provider:     syncProvider,
+				ProviderName: syncSpec.Name,
+				PathPrefix:   CredentialSyncPathPrefix,
+				SelfKind:     syncSpec.Kind,
+				SelfProject:  syncProject,
+			}
 		}
 	}
 
 	// Now that the (optional) loader is built, construct the
-	// credential pool. With opt-in: pool joins file + lazy vault
-	// (I7). Without opt-in: file-only pool (I2 behavior). Lookups
-	// append AuditRecord values the pool's AuditLog accumulates for
-	// state-save (I3) and R12 stderr emission (I9).
+	// credential pool. With credential sync active: pool joins file
+	// + lazy vault (I7). Without it: file-only pool (I2 behavior).
+	// Lookups append AuditRecord values the pool's AuditLog
+	// accumulates for state-save (I3) and R12 stderr emission (I9).
 	credentialPool = NewCredentialPool(authEntries, credentialSyncLoader)
 
 	// Step 0.5: overlay sync and merge — determine and sync the workspace overlay.
@@ -877,7 +874,7 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 	// impossible.
 	//
 	// The personal-overlay globalOverride was parsed earlier at Step
-	// 0.3 so opt-in features (e.g., [global.machine_identities]) are
+	// 0.3 so personal-overlay [global.vault.provider] declarations are
 	// detectable before the workspace-overlay's injectProviderTokens
 	// runs at Step 0.6.
 	//

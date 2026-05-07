@@ -32,9 +32,12 @@ func ensureFakeRegistered(t *testing.T) {
 	})
 }
 
-// TestPickCredentialSyncSpec_Anonymous selects the
-// [global.vault.provider] (anonymous) when From == "".
-func TestPickCredentialSyncSpec_Anonymous(t *testing.T) {
+// TestPickCredentialSyncSpec_AnonymousImplicitOptIn confirms that an
+// anonymous [global.vault.provider] in the personal overlay is
+// implicitly the credential-sync source: pickCredentialSyncSpec
+// returns a non-nil spec with Name == "" and Kind/Config copied from
+// the declaration.
+func TestPickCredentialSyncSpec_AnonymousImplicitOptIn(t *testing.T) {
 	g := config.GlobalOverride{
 		Vault: &config.VaultRegistry{
 			Provider: &config.VaultProviderConfig{
@@ -43,11 +46,10 @@ func TestPickCredentialSyncSpec_Anonymous(t *testing.T) {
 			},
 		},
 	}
-	mi := &config.MachineIdentitiesConfig{From: ""}
 
-	spec, err := pickCredentialSyncSpec(g, mi)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	spec := pickCredentialSyncSpec(g)
+	if spec == nil {
+		t.Fatal("expected non-nil spec for anonymous provider")
 	}
 	if spec.Name != "" {
 		t.Errorf("Name = %q, want empty", spec.Name)
@@ -60,48 +62,23 @@ func TestPickCredentialSyncSpec_Anonymous(t *testing.T) {
 	}
 }
 
-// TestPickCredentialSyncSpec_DoesNotMutateInput confirms the
-// "router, not parser" contract: pickCredentialSyncSpec MUST NOT
-// write back to the GlobalOverride's vault provider Config map.
-// A regression here would mean an opt-in apply silently mutates
-// the user's parsed config in memory — a hidden side effect that
-// would break the v3-snapshot-then-reload pattern.
-func TestPickCredentialSyncSpec_DoesNotMutateInput(t *testing.T) {
-	originalConfig := map[string]any{"project": "uuid-personal"}
-	g := config.GlobalOverride{
-		Vault: &config.VaultRegistry{
-			Providers: map[string]config.VaultProviderConfig{
-				"personal": {
-					Kind:   "infisical",
-					Config: originalConfig,
-				},
-			},
-		},
-	}
-	mi := &config.MachineIdentitiesConfig{From: "personal"}
-
-	spec, err := pickCredentialSyncSpec(g, mi)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	// Returned spec.Config should carry "name" → "personal" (the
-	// vault factory expects it).
-	if got, _ := spec.Config["name"].(string); got != "personal" {
-		t.Errorf("spec.Config[name] = %q, want %q", got, "personal")
-	}
-	// Original config map should NOT have gained a "name" entry.
-	if _, has := originalConfig["name"]; has {
-		t.Errorf("pickCredentialSyncSpec must not mutate the input Config; got name=%v", originalConfig["name"])
-	}
-	// And the original map should still have just one key (project).
-	if len(originalConfig) != 1 {
-		t.Errorf("input Config map size = %d, want 1 (was mutated)", len(originalConfig))
+// TestPickCredentialSyncSpec_NoVaultReturnsNil confirms that the
+// router returns nil when the personal overlay declares no [vault]
+// at all. Apply-time gating (apply.go Step 0.4) MUST treat nil as
+// "feature disabled" and skip provider open + R9 validation.
+func TestPickCredentialSyncSpec_NoVaultReturnsNil(t *testing.T) {
+	g := config.GlobalOverride{}
+	if spec := pickCredentialSyncSpec(g); spec != nil {
+		t.Errorf("expected nil spec when Vault is unset, got %+v", spec)
 	}
 }
 
-// TestPickCredentialSyncSpec_Named selects [global.vault.providers.<n>]
-// when From is non-empty.
-func TestPickCredentialSyncSpec_Named(t *testing.T) {
+// TestPickCredentialSyncSpec_NamedOnlyReturnsNil confirms that named
+// providers under [global.vault.providers.<name>] do NOT implicitly
+// opt into credential sync. Only the anonymous [global.vault.provider]
+// is treated as the credential-sync source; named providers stay
+// URI-resolution-only.
+func TestPickCredentialSyncSpec_NamedOnlyReturnsNil(t *testing.T) {
 	g := config.GlobalOverride{
 		Vault: &config.VaultRegistry{
 			Providers: map[string]config.VaultProviderConfig{
@@ -112,14 +89,8 @@ func TestPickCredentialSyncSpec_Named(t *testing.T) {
 			},
 		},
 	}
-	mi := &config.MachineIdentitiesConfig{From: "personal"}
-
-	spec, err := pickCredentialSyncSpec(g, mi)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if spec.Name != "personal" {
-		t.Errorf("Name = %q, want personal", spec.Name)
+	if spec := pickCredentialSyncSpec(g); spec != nil {
+		t.Errorf("named-only providers must NOT trigger credential sync; got %+v", spec)
 	}
 }
 
@@ -357,13 +328,12 @@ func TestOpenCredentialSyncProvider_DoesNotInjectToken(t *testing.T) {
 			},
 		},
 	}
-	mi := &config.MachineIdentitiesConfig{From: ""}
 
-	syncSpec, err := pickCredentialSyncSpec(g, mi)
-	if err != nil {
-		t.Fatalf("pickCredentialSyncSpec returned error: %v", err)
+	syncSpec := pickCredentialSyncSpec(g)
+	if syncSpec == nil {
+		t.Fatal("pickCredentialSyncSpec returned nil for an anonymous provider")
 	}
-	bundle, prov, err := openCredentialSyncProvider(context.Background(), syncSpec)
+	bundle, prov, err := openCredentialSyncProvider(context.Background(), *syncSpec)
 	if err != nil {
 		t.Fatalf("openCredentialSyncProvider returned error: %v", err)
 	}
