@@ -497,6 +497,14 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		authEntries = entries
 	}
 
+	// Build the credential pool for this apply invocation. In I2 the
+	// pool's only layer is the local file (loader is nil); I7 will
+	// pass a non-nil vaultCredLoader after the credential-sync
+	// provider opens at Step 0.4. Lookups append AuditRecord values
+	// the pool's AuditLog accumulates for state-save (I3) and R12
+	// stderr emission (I9).
+	credentialPool := NewCredentialPool(authEntries, nil)
+
 	// Step 0.3: refresh the personal-overlay snapshot and parse niwa.toml.
 	//
 	// The snapshot refresh (formerly Step 2a) and the niwa.toml parse
@@ -650,7 +658,7 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		// before building its bundle. Without this, multi-org users whose
 		// secrets live in the workspace overlay fall through to the CLI
 		// session for that provider.
-		if err := injectProviderTokens(ctx, authEntries, overlay.Vault); err != nil {
+		if err := injectProviderTokens(ctx, credentialPool, overlay.Vault); err != nil {
 			return nil, err
 		}
 
@@ -773,16 +781,16 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 	}
 
 	// Multi-org auth: inject machine-identity tokens into the team config
-	// and personal global overlay vault registries. authEntries was loaded
-	// at the top of runPipeline so the overlay layer (Step 0.6) could see it.
-	if len(authEntries) > 0 {
-		if err := injectProviderTokens(ctx, authEntries, cfg.Vault); err != nil {
+	// and personal global overlay vault registries via the credential
+	// pool. The pool was constructed at the top of runPipeline so the
+	// overlay layer (Step 0.6) could see it; per-Lookup AuditRecord
+	// values land in the pool's audit log for downstream consumers.
+	if err := injectProviderTokens(ctx, credentialPool, cfg.Vault); err != nil {
+		return nil, err
+	}
+	if globalOverride != nil {
+		if err := injectProviderTokens(ctx, credentialPool, globalOverride.Global.Vault); err != nil {
 			return nil, err
-		}
-		if globalOverride != nil {
-			if err := injectProviderTokens(ctx, authEntries, globalOverride.Global.Vault); err != nil {
-				return nil, err
-			}
 		}
 	}
 

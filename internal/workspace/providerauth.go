@@ -122,28 +122,36 @@ func MatchProviderAuth(spec vault.ProviderSpec, entries []ProviderAuthEntry) *Pr
 }
 
 // injectProviderTokens iterates the provider specs derived from a
-// VaultRegistry and, for each spec that matches a credential entry,
-// authenticates and injects the resulting token into the provider's
-// config map. The token flows through to Factory.Open via the
-// existing ProviderConfig["token"] mechanism.
+// VaultRegistry and, for each spec whose (kind, project) matches a
+// credential entry the pool can supply, authenticates and injects
+// the resulting token into the provider's config map. The token
+// flows through to Factory.Open via the existing
+// ProviderConfig["token"] mechanism.
 //
-// Modifies vr's provider configs in place. A nil vr or empty entries
-// slice is a no-op.
-func injectProviderTokens(ctx context.Context, entries []ProviderAuthEntry, vr *config.VaultRegistry) error {
-	if vr == nil || len(entries) == 0 {
+// The pool argument owns both the eager local-file layer and the
+// optional lazy vault layer (added in I7). Each spec's lookup also
+// appends an AuditRecord to the pool, so downstream phases can read
+// pool.AuditLog() to render audit surfaces (state save, R12 stderr,
+// `niwa status --audit-auth`).
+//
+// Modifies vr's provider configs in place. A nil vr or nil pool is
+// a no-op.
+func injectProviderTokens(ctx context.Context, pool *CredentialPool, vr *config.VaultRegistry) error {
+	if vr == nil || pool == nil {
 		return nil
 	}
 
 	// Handle anonymous singular provider.
 	if vr.Provider != nil {
-		spec := vault.ProviderSpec{
-			Kind:   vr.Provider.Kind,
-			Config: vault.ProviderConfig(vr.Provider.Config),
+		project, _ := vr.Provider.Config["project"].(string)
+		entry, _, err := pool.Lookup(ctx, vr.Provider.Kind, project)
+		if err != nil {
+			return err
 		}
-		if match := MatchProviderAuth(spec, entries); match != nil {
-			token, err := authenticateEntry(ctx, match)
-			if err != nil {
-				return err
+		if entry != nil {
+			token, authErr := authenticateEntry(ctx, entry)
+			if authErr != nil {
+				return authErr
 			}
 			if vr.Provider.Config == nil {
 				vr.Provider.Config = map[string]any{}
@@ -154,19 +162,15 @@ func injectProviderTokens(ctx context.Context, entries []ProviderAuthEntry, vr *
 
 	// Handle named providers.
 	for name, p := range vr.Providers {
-		cfg := vault.ProviderConfig(p.Config)
-		if cfg == nil {
-			cfg = vault.ProviderConfig{}
+		project, _ := p.Config["project"].(string)
+		entry, _, err := pool.Lookup(ctx, p.Kind, project)
+		if err != nil {
+			return err
 		}
-		spec := vault.ProviderSpec{
-			Name:   name,
-			Kind:   p.Kind,
-			Config: cfg,
-		}
-		if match := MatchProviderAuth(spec, entries); match != nil {
-			token, err := authenticateEntry(ctx, match)
-			if err != nil {
-				return err
+		if entry != nil {
+			token, authErr := authenticateEntry(ctx, entry)
+			if authErr != nil {
+				return authErr
 			}
 			if p.Config == nil {
 				p.Config = map[string]any{}
