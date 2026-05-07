@@ -601,8 +601,8 @@ Feature: Cross-session mesh (Issue #10 harness)
   # session's worktree daemon, not the main instance daemon.
   # -----------------------------------------------------------------------
 
-  @session-daemon
-  Scenario: Task delegated to session routes to worktree daemon and completes (AC-S3a)
+  @session-daemon @critical
+  Scenario: niwa_delegate with session_id routes to session worktree daemon (regression)
     Given a clean niwa environment
     And a local git server is set up
     And a single-repo channeled workspace "session-route-ws" exists
@@ -616,6 +616,7 @@ Feature: Cross-session mesh (Issue #10 harness)
     And the session worktree exists in instance "session-route-ws"
     When I delegate a task to session role "app" in instance "session-route-ws"
     Then the task state in instance "session-route-ws" eventually becomes "completed" within 60 seconds
+    And the task was routed through the last session id in instance "session-route-ws"
 
   @session-daemon
   Scenario: Two parallel sessions for same repo route tasks independently (AC-S3b)
@@ -853,10 +854,11 @@ Feature: Cross-session mesh (Issue #10 harness)
 
   # -----------------------------------------------------------------------
   # Delegation isolation (SESSION_REQUIRED / read_only contract)
-  # These five @critical scenarios verify the delegation guard introduced in
+  # These four @critical scenarios verify the delegation guard introduced in
   # the mesh session lifecycle design: niwa_delegate requires a session_id,
   # read_only:true opts out for tasks that make no git changes, and session_id
-  # takes precedence when both are provided.
+  # takes precedence when both are provided. The session_id routing regression
+  # guard lives above in the @session-daemon @critical scenario.
   # -----------------------------------------------------------------------
 
   @critical
@@ -884,22 +886,6 @@ Feature: Cross-session mesh (Issue #10 harness)
     When I delegate a read_only task to role "app" in instance "readonly-delegate-ws"
     Then the task state in instance "readonly-delegate-ws" eventually becomes "completed" within 30 seconds
     And the file ".niwa/worktrees" does not exist in instance "readonly-delegate-ws"
-
-  @critical
-  Scenario: niwa_delegate with session_id routes to session worktree daemon (regression)
-    Given a clean niwa environment
-    And a local git server is set up
-    And a single-repo channeled workspace "session-route-ws" exists
-    And the daemon has small timing overrides
-    And the daemon runs with fake worker scenario "finish-completed"
-    When I run "niwa create session-route-ws"
-    Then the exit code is 0
-    And I set NIWA_INSTANCE_ROOT to instance "session-route-ws"
-    When I call niwa_create_session for repo "app" with purpose "regression test" in instance "session-route-ws"
-    Then the session is active in instance "session-route-ws"
-    And the session worktree exists in instance "session-route-ws"
-    When I delegate a task to session role "app" in instance "session-route-ws"
-    Then the task state in instance "session-route-ws" eventually becomes "completed" within 60 seconds
 
   @critical
   Scenario: niwa_delegate with both session_id and read_only:true routes to session worktree

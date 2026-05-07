@@ -549,10 +549,14 @@ func noTaskFilesExistInInstance(ctx context.Context, instance string) error {
 }
 
 // theTaskWasRoutedThroughLastSessionID verifies that the task recorded in
-// s.lastTaskID has session_id == s.lastSessionID in its state.json. This
-// confirms that session_id routing was used (not main-clone routing), since
-// createTaskEnvelope writes the session_id field only when session routing is
-// active.
+// s.lastTaskID has session_id == s.lastSessionID in its state.json.
+//
+// Task state always lives in the main instance root
+// (<instanceRoot>/.niwa/tasks/<taskID>/state.json) regardless of which daemon
+// processed the task — both main-clone routing and session-worktree routing
+// write state there. The session_id field is written by createTaskEnvelope
+// only when session routing is active, so its presence (and value) proves
+// which routing path was taken, not just that the task completed.
 func theTaskWasRoutedThroughLastSessionID(ctx context.Context, instance string) error {
 	s := getState(ctx)
 	if s == nil {
