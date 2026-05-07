@@ -60,6 +60,11 @@ func WorkerMCPConfigPath(instanceRoot, taskID string) string {
 // Using a per-spawn config prevents the instance-root .mcp.json's hardcoded
 // NIWA_SESSION_ROLE=coordinator from overriding the worker's actual role when
 // Claude Code merges the env block on top of the inherited process environment.
+//
+// When NIWA_MAIN_INSTANCE_ROOT or NIWA_SESSION_ID are present in the daemon's
+// environment (set via EnsureDaemonRunning extraEnv for session workers), they
+// are baked into the env block so the MCP server subprocess receives them
+// explicitly regardless of Claude Code's env-inheritance semantics.
 func WorkerMCPConfig(instanceRoot, role, taskID string) ([]byte, error) {
 	cmdPath, err := os.Executable()
 	if err != nil || cmdPath == "" {
@@ -77,11 +82,34 @@ func WorkerMCPConfig(instanceRoot, role, taskID string) ([]byte, error) {
 	if !utf8.ValidString(taskID) {
 		return nil, fmt.Errorf("task ID is not valid UTF-8: %q", taskID)
 	}
+
+	// Build the env block. Always include the three required fields; conditionally
+	// include session context vars when this daemon is a per-session worker.
+	type envEntry struct{ k, v string }
+	envEntries := []envEntry{
+		{"NIWA_INSTANCE_ROOT", instanceRoot},
+		{"NIWA_SESSION_ROLE", role},
+		{"NIWA_TASK_ID", taskID},
+	}
+	if v := os.Getenv("NIWA_MAIN_INSTANCE_ROOT"); v != "" {
+		envEntries = append(envEntries, envEntry{"NIWA_MAIN_INSTANCE_ROOT", v})
+	}
+	if v := os.Getenv("NIWA_SESSION_ID"); v != "" {
+		envEntries = append(envEntries, envEntry{"NIWA_SESSION_ID", v})
+	}
+
+	var envBuf strings.Builder
+	for i, e := range envEntries {
+		kJSON, _ := json.Marshal(e.k)
+		vJSON, _ := json.Marshal(e.v)
+		if i > 0 {
+			envBuf.WriteString(",\n        ")
+		}
+		fmt.Fprintf(&envBuf, "%s: %s", string(kJSON), string(vJSON))
+	}
+
 	cmdJSON, _ := json.Marshal(cmdPath)
-	rootJSON, _ := json.Marshal(instanceRoot)
-	roleJSON, _ := json.Marshal(role)
-	taskIDJSON, _ := json.Marshal(taskID)
-	return []byte(fmt.Sprintf(workerMCPTemplate, string(cmdJSON), string(rootJSON), string(roleJSON), string(taskIDJSON))), nil
+	return []byte(fmt.Sprintf(workerMCPDynTemplate, string(cmdJSON), envBuf.String())), nil
 }
 
 // channelsMCPTemplate is the template for the instance-root `.mcp.json`.
@@ -106,24 +134,19 @@ const channelsMCPTemplate = `{
 }
 `
 
-// workerMCPTemplate is the per-spawn template for worker MCP config files.
-// Unlike channelsMCPTemplate (which hardcodes NIWA_SESSION_ROLE=coordinator
-// for the coordinator), this template takes the actual target role and task
-// ID as format arguments so each worker gets the right env block values.
-// Claude Code's env-block processing applies these on top of the spawned
-// process's inherited environment — having the correct values here ensures
-// the MCP subprocess always picks up the right role regardless of env
-// inheritance semantics.
-const workerMCPTemplate = `{
+// workerMCPDynTemplate is the per-spawn template for worker MCP config files.
+// Unlike channelsMCPTemplate (which hardcodes NIWA_SESSION_ROLE=coordinator),
+// this template takes the command and a pre-built env block as format args.
+// WorkerMCPConfig builds the env block dynamically, including optional session
+// context vars (NIWA_MAIN_INSTANCE_ROOT, NIWA_SESSION_ID) when set.
+const workerMCPDynTemplate = `{
   "mcpServers": {
     "niwa": {
       "type": "stdio",
       "command": %s,
       "args": ["mcp-serve"],
       "env": {
-        "NIWA_INSTANCE_ROOT": %s,
-        "NIWA_SESSION_ROLE": %s,
-        "NIWA_TASK_ID": %s
+        %s
       }
     }
   }
@@ -134,7 +157,7 @@ const workerMCPTemplate = `{
 // ## Channels section in workspace-context.md.
 const channelsSectionHeader = "## Channels"
 
-// niwaMCPToolNames is the canonical list of the 11 niwa MCP tools. The
+// niwaMCPToolNames is the canonical list of the 14 niwa MCP tools. The
 // order is stable: it is emitted both in the SKILL.md allowed-tools block
 // and in the ## Channels section. Callers that change this list MUST
 // update the skill body's tool references and the PRD's R10 enumeration
@@ -151,6 +174,9 @@ var niwaMCPToolNames = []string{
 	"niwa_ask",
 	"niwa_send_message",
 	"niwa_check_messages",
+	"niwa_create_session",
+	"niwa_destroy_session",
+	"niwa_list_sessions",
 }
 
 // inboxSubdirs is the canonical set of per-role inbox subdirectories that
@@ -698,7 +724,13 @@ func buildSkillContent() []byte {
 	b.WriteString("worker runs. The body you pass is the delegation payload; keep it\n")
 	b.WriteString("self-contained because the worker reads the body via\n")
 	b.WriteString("`niwa_check_messages` as its first action and does not have access to\n")
-	b.WriteString("your surrounding conversation.\n\n")
+	b.WriteString("your surrounding conversation. `niwa_delegate` requires a `session_id`\n")
+	b.WriteString("(8 lowercase hex chars returned by `niwa_create_session`); without one\n")
+	b.WriteString("the call returns SESSION_REQUIRED. Exception: set `read_only: true` for\n")
+	b.WriteString("tasks that make no git changes — these route to the main clone daemon\n")
+	b.WriteString("without a session. When both `session_id` and `read_only: true` are\n")
+	b.WriteString("provided, `session_id` takes precedence. Tasks routed to an inactive\n")
+	b.WriteString("or unknown session return SESSION_INACTIVE or SESSION_NOT_FOUND.\n\n")
 
 	b.WriteString("## Reporting Progress\n\n")
 	b.WriteString("Call `niwa_report_progress` every 3-5 minutes of wall-clock work, or\n")
@@ -778,7 +810,24 @@ func buildSkillContent() []byte {
 	b.WriteString("  result = niwa_await_task(task_id=...)\n")
 	b.WriteString("  while result.status == \"question_pending\":\n")
 	b.WriteString("    niwa_finish_task(task_id=result.ask_task_id, outcome=\"completed\", result=...)\n")
-	b.WriteString("    result = niwa_await_task(task_id=<same task_id>)\n")
+	b.WriteString("    result = niwa_await_task(task_id=<same task_id>)\n\n")
+
+	b.WriteString("## Session Management\n\n")
+	b.WriteString("Sessions give a role a persistent git worktree so multiple delegated\n")
+	b.WriteString("tasks can share context across completions. Use\n")
+	b.WriteString("`niwa_create_session(repo, purpose)` to create a worktree and start\n")
+	b.WriteString("its daemon; the call returns `{session_id, worktree_path}`. Pass\n")
+	b.WriteString("the returned `session_id` to `niwa_delegate` (required; see Delegation\n")
+	b.WriteString("above) — tasks route into the session worktree's inbox rather than the\n")
+	b.WriteString("shared role inbox, so the worker sees them in the same directory and\n")
+	b.WriteString("retains conversational context between tasks. Use `niwa_list_sessions`\n")
+	b.WriteString("to rediscover active sessions after a restart (filter by `repo` or\n")
+	b.WriteString("`status`). When the\n")
+	b.WriteString("session's work is done, call `niwa_destroy_session(session_id)` to\n")
+	b.WriteString("kill any running workers, mark the session ended, stop the daemon,\n")
+	b.WriteString("and remove the worktree. Pass `force=true` to also delete an\n")
+	b.WriteString("unmerged session branch; without it the branch is preserved so\n")
+	b.WriteString("unfinished work is not discarded silently.\n")
 
 	return b.Bytes()
 }

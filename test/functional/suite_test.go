@@ -37,6 +37,11 @@ type testState struct {
 	// scenario Before hook via the fresh testState allocation.
 	lastTaskID      string // ID of the most-recently created task envelope
 	pauseHookMarker string // base name of the active pause-hook marker file
+
+	// Session scenario state (Issue #97). Carry session lifecycle state
+	// between steps in a single scenario.
+	lastSessionID          string // ID returned by niwa_create_session
+	lastSessionWorktreePath string // worktree path returned by niwa_create_session
 }
 
 func getState(ctx context.Context) *testState {
@@ -320,6 +325,41 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 	ctx.Step(`^I run claude -p preserving case from instance root "([^"]*)" with prompt:$`, iRunClaudePFromInstanceRootPreservingCase)
 	ctx.Step(`^I queue a niwa_finish_task instruction for role "([^"]*)" in instance "([^"]*)"$`, iDelegateTaskToRoleWithFinishInstruction)
 	ctx.Step(`^the task state in instance "([^"]*)" eventually becomes "([^"]*)" within (\d+) seconds$`, theTaskStateEventuallyBecomesWithin)
+
+	// --- Session lifecycle steps (Issue #97) ---
+	ctx.Step(`^I call niwa_create_session for repo "([^"]*)" with purpose "([^"]*)" in instance "([^"]*)"$`, iCallCreateSession)
+	ctx.Step(`^I call niwa_destroy_session in instance "([^"]*)"$`, iCallDestroySession)
+	ctx.Step(`^the session is active in instance "([^"]*)"$`, theSessionIsActiveInInstance)
+	ctx.Step(`^the last session is active in instance "([^"]*)"$`, theSessionIsActiveInInstance)
+	ctx.Step(`^the session is ended in instance "([^"]*)"$`, theSessionIsEndedInInstance)
+	ctx.Step(`^the session worktree exists in instance "([^"]*)"$`, theSessionWorktreeExistsInInstance)
+	ctx.Step(`^the session scaffold directory "([^"]*)" exists in the worktree$`, theSessionScaffoldDirExistsInWorktree)
+	// --- Session CLI steps (Issue #5) ---
+	ctx.Step(`^the response file contains the last session worktree path in instance "([^"]*)"$`, theResponseFileContainsLastSessionWorktreePath)
+	ctx.Step(`^the response file contains a path under instance "([^"]*)" worktrees directory$`, theResponseFileContainsPathUnderWorktreesDir)
+	ctx.Step(`^a session lifecycle state file exists for repo "([^"]*)" with status "([^"]*)" in instance "([^"]*)"$`, aSessionLifecycleStateExistsForRepo)
+	ctx.Step(`^I run "niwa go ([^"]*)" with last session id$`, iRunNiwaGoWithLastSessionID)
+
+	// --- Session daemon + routing steps ---
+	ctx.Step(`^I delegate a task to session role "([^"]*)" in instance "([^"]*)"$`, iDelegateTaskToSessionRole)
+	ctx.Step(`^I try to delegate a task to session role "([^"]*)" in instance "([^"]*)"$`, iTryToDelegateTaskToSessionRole)
+	ctx.Step(`^I delegate a task to session role "([^"]*)" with session id "([^"]*)" in instance "([^"]*)" expecting an error$`, iDelegateTaskToSessionRoleExpectingError)
+	ctx.Step(`^the last MCP response contains code "([^"]*)"$`, theLastMCPResponseContainsCode)
+	// Delegation isolation contract (SESSION_REQUIRED / read_only)
+	ctx.Step(`^I try to delegate a task to role "([^"]*)" without session_id in instance "([^"]*)"$`, iDelegateTaskToRoleWithoutSessionID)
+	ctx.Step(`^I delegate a read_only task to role "([^"]*)" in instance "([^"]*)"$`, iDelegateReadOnlyTaskToRole)
+	ctx.Step(`^I delegate a task to session role "([^"]*)" with read_only true in instance "([^"]*)"$`, iDelegateTaskToSessionRoleWithReadOnly)
+	ctx.Step(`^no task files exist in instance "([^"]*)"$`, noTaskFilesExistInInstance)
+	ctx.Step(`^the task was routed through the last session id in instance "([^"]*)"$`, theTaskWasRoutedThroughLastSessionID)
+	ctx.Step(`^the session claude_conversation_id is set in instance "([^"]*)"$`, theSessionClaudeConversationIDIsSet)
+	ctx.Step(`^the session claude_conversation_id equals "([^"]*)" in instance "([^"]*)"$`, theSessionClaudeConversationIDEquals)
+	ctx.Step(`^the worker in session was spawned with "([^"]*)"$`, theWorkerInSessionWasSpawnedWith)
+	ctx.Step(`^the worker in session was not spawned with "([^"]*)"$`, theWorkerInSessionWasNotSpawnedWith)
+	ctx.Step(`^the main clone of "([^"]*)" in instance "([^"]*)" is on branch "([^"]*)"$`, theMainCloneIsOnBranch)
+	ctx.Step(`^the session branch exists in repo "([^"]*)" of instance "([^"]*)"$`, theSessionBranchExistsInRepo)
+	ctx.Step(`^the session branch does not exist in repo "([^"]*)" of instance "([^"]*)"$`, theSessionBranchDoesNotExistInRepo)
+	ctx.Step(`^the session worktree directory does not exist$`, theSessionWorktreeDirectoryDoesNotExist)
+	ctx.Step(`^I set the fake Claude session ID to "([^"]*)"$`, iSetFakeClaudeSessionID)
 
 	// --- @channels-e2e-graph: real coordinator -> real workers delegation graph ---
 	ctx.Step(`^a multi-repo channeled workspace "([^"]*)" with web and backend exists$`, iSetUpMultiRepoChanneledWorkspace)

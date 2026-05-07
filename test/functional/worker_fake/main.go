@@ -25,6 +25,7 @@
 //   - dump-args                — write os.Args to .niwa/.test/worker_spawn_args.txt, then finish(completed)
 //   - ask-and-finish           — check_messages, niwa_ask(coordinator), finish(completed) with answer
 //   - ask-roundtrip            — branches on role: worker calls niwa_ask; coordinator answers via finish_task
+//   - capture-id-and-dump-args — sets CLAUDE_SESSION_ID from NIWA_FAKE_CLAUDE_SESSION_ID, writes os.Args to .niwa/.test/worker_spawn_args.txt, then finish(completed)
 //
 // Authorization window: workers may call tools before the daemon backfills
 // state.json.worker.{pid, start_time} (the "worker.pid==0 backfill
@@ -99,6 +100,14 @@ func run() int {
 	// the MCP server so a quick SIGTERM still loses the race to ignore.
 	if scenario == "ignore-sigterm" {
 		signal.Ignore(syscall.SIGTERM)
+	}
+
+	// capture-id-and-dump-args starts its own MCP client with an extended
+	// environment, so it is dispatched before the shared client is created.
+	if scenario == "capture-id-and-dump-args" {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		return runCaptureIDAndDumpArgs(ctx, niwaBin, instanceRoot, role, taskID)
 	}
 
 	client, err := startMCPClient(niwaBin, instanceRoot, role, taskID)
@@ -369,6 +378,38 @@ func runDumpArgs(ctx context.Context, c *mcpClient, taskID, instanceRoot string)
 	return runFinishCompleted(ctx, c, taskID)
 }
 
+// runCaptureIDAndDumpArgs sets CLAUDE_SESSION_ID from NIWA_FAKE_CLAUDE_SESSION_ID
+// (if non-empty), starts a fresh MCP client with that extra env, writes os.Args
+// to .niwa/.test/worker_spawn_args.txt, then drives the standard finish-completed
+// flow. The fresh client is necessary so the MCP server subprocess inherits the
+// CLAUDE_SESSION_ID env var.
+func runCaptureIDAndDumpArgs(ctx context.Context, niwaBin, instanceRoot, role, taskID string) int {
+	var extra []string
+	if id := os.Getenv("NIWA_FAKE_CLAUDE_SESSION_ID"); id != "" {
+		extra = append(extra, "CLAUDE_SESSION_ID="+id)
+	}
+
+	client, err := startMCPClientWithExtra(niwaBin, instanceRoot, role, taskID, extra)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "worker-fake: starting mcp-serve: %v\n", err)
+		return 2
+	}
+	defer client.Close()
+
+	if err := client.Initialize(ctx); err != nil {
+		fmt.Fprintf(os.Stderr, "worker-fake: mcp initialize failed: %v\n", err)
+		return 2
+	}
+
+	testDir := filepath.Join(instanceRoot, ".niwa", ".test")
+	if err := os.MkdirAll(testDir, 0o700); err == nil {
+		argsFile := filepath.Join(testDir, "worker_spawn_args.txt")
+		_ = os.WriteFile(argsFile, []byte(strings.Join(os.Args, "\n")), 0o600)
+	}
+
+	return runFinishCompleted(ctx, client, taskID)
+}
+
 // ---------------------------------------------------------------------
 // MCP client (stdio JSON-RPC) over a niwa mcp-serve subprocess.
 // ---------------------------------------------------------------------
@@ -385,10 +426,12 @@ type mcpClient struct {
 	id int
 }
 
-// startMCPClient launches niwaBin mcp-serve with the given env. The child
-// inherits NIWA_* env vars from the process environment (copied into
-// cmd.Env) so authorizeTaskCall can read them.
-func startMCPClient(niwaBin, instanceRoot, role, taskID string) (*mcpClient, error) {
+// startMCPClientWithExtra launches niwaBin mcp-serve with the standard NIWA_*
+// env vars plus any additional entries supplied in extraEnv. Each entry in
+// extraEnv must be a "KEY=VALUE" string and is applied via appendOrReplace so
+// it can override an earlier value. The child inherits the full process
+// environment so authorizeTaskCall can read the NIWA_* vars set by the daemon.
+func startMCPClientWithExtra(niwaBin, instanceRoot, role, taskID string, extraEnv []string) (*mcpClient, error) {
 	cmd := exec.Command(niwaBin, "mcp-serve")
 	// Pass through the full environment but ensure NIWA_INSTANCE_ROOT,
 	// NIWA_SESSION_ROLE, NIWA_TASK_ID are set as the daemon specified them.
@@ -397,6 +440,13 @@ func startMCPClient(niwaBin, instanceRoot, role, taskID string) (*mcpClient, err
 	env = appendOrReplace(env, "NIWA_SESSION_ROLE", role)
 	if taskID != "" {
 		env = appendOrReplace(env, "NIWA_TASK_ID", taskID)
+	}
+	for _, kv := range extraEnv {
+		eq := strings.Index(kv, "=")
+		if eq < 0 {
+			continue
+		}
+		env = appendOrReplace(env, kv[:eq], kv[eq+1:])
 	}
 	cmd.Env = env
 
@@ -420,6 +470,12 @@ func startMCPClient(niwaBin, instanceRoot, role, taskID string) (*mcpClient, err
 		stdout: bufio.NewReaderSize(stdout, 1<<20),
 		id:     0,
 	}, nil
+}
+
+// startMCPClient launches niwaBin mcp-serve with the standard NIWA_* env vars.
+// It is a convenience wrapper around startMCPClientWithExtra with no extra env.
+func startMCPClient(niwaBin, instanceRoot, role, taskID string) (*mcpClient, error) {
+	return startMCPClientWithExtra(niwaBin, instanceRoot, role, taskID, nil)
 }
 
 // Close signals the MCP server to exit (by closing stdin) and waits briefly

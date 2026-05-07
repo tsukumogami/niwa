@@ -1,11 +1,13 @@
 // Package mcp implements a stdio MCP server for niwa's session mesh.
 //
-// The server exposes 11 tools in two families:
+// The server exposes 14 tools in three families:
 //
 //   - Peer messaging: niwa_check_messages, niwa_send_message, niwa_ask.
 //   - Task lifecycle: niwa_delegate, niwa_query_task, niwa_await_task,
 //     niwa_report_progress, niwa_finish_task, niwa_list_outbound_tasks,
 //     niwa_update_task, niwa_cancel_task (see handlers_task.go).
+//   - Session lifecycle: niwa_create_session, niwa_destroy_session,
+//     niwa_list_sessions (see handlers_session.go).
 //
 // It declares the claude/channel experimental capability; when a message
 // file lands in the inbox directory the server sends a
@@ -41,6 +43,9 @@ var fieldPattern = regexp.MustCompile(`^[a-zA-Z0-9._-]{1,64}$`)
 // task-terminal messages to sync niwa_delegate and niwa_await_task callers.
 type Server struct {
 	instanceRoot string // <instance-root>
+	// mainInstanceRoot is set when the server runs inside a session worktree
+	// (NIWA_MAIN_INSTANCE_ROOT env var). Zero value for non-session workers.
+	mainInstanceRoot string
 	// role is the caller's session role (from NIWA_SESSION_ROLE). Used for
 	// authorization checks, inbox routing, and the roleInboxDir derivation.
 	role string
@@ -72,6 +77,12 @@ type Server struct {
 	// path is empty and Emit is a no-op. Always non-nil after New so
 	// dispatch can call Emit without a guard.
 	audit *fileAuditSink
+
+	// daemonStarter and daemonStopper are injected by mcp_serve.go to avoid
+	// a circular import with the workspace package. Nil in unit tests that
+	// don't exercise niwa_create_session or niwa_destroy_session.
+	daemonStarter func(instanceRoot string, extraEnv []string) error
+	daemonStopper func(instanceRoot string) error
 }
 
 // New constructs a Server. role is the caller's session role (from
@@ -83,9 +94,10 @@ type Server struct {
 // through every call site.
 func New(role, instanceRoot string) *Server {
 	s := &Server{
-		instanceRoot:    instanceRoot,
-		role:            role,
-		taskID:          os.Getenv("NIWA_TASK_ID"),
+		instanceRoot:     instanceRoot,
+		mainInstanceRoot: os.Getenv("NIWA_MAIN_INSTANCE_ROOT"),
+		role:             role,
+		taskID:           os.Getenv("NIWA_TASK_ID"),
 		seenFiles:       make(map[string]struct{}),
 		waiters:         make(map[string]chan toolResult),
 		awaitWaiters:    make(map[string]chan taskEvent),
@@ -96,6 +108,48 @@ func New(role, instanceRoot string) *Server {
 		s.roleInboxDir = filepath.Join(instanceRoot, ".niwa", "roles", role, "inbox")
 	}
 	return s
+}
+
+// taskStoreRoot returns the root directory for task state. For session workers
+// (NIWA_MAIN_INSTANCE_ROOT set), tasks always live in the main instance so
+// state reads and writes route there. For non-session processes the task store
+// is the local instance root.
+func (s *Server) taskStoreRoot() string {
+	if s.mainInstanceRoot != "" {
+		return s.mainInstanceRoot
+	}
+	return s.instanceRoot
+}
+
+// SetDaemonFuncs injects the workspace-layer daemon start/stop functions.
+// Must be called before Run when niwa_create_session or niwa_destroy_session
+// are expected to work. Skipped in unit tests that don't exercise session
+// lifecycle handlers.
+func (s *Server) SetDaemonFuncs(
+	starter func(instanceRoot string, extraEnv []string) error,
+	stopper func(instanceRoot string) error,
+) {
+	s.daemonStarter = starter
+	s.daemonStopper = stopper
+}
+
+// CreateSessionDirect is the CLI-callable entry point for session creation.
+// It delegates to handleCreateSession so CLI commands and MCP clients share
+// the same implementation.
+func (s *Server) CreateSessionDirect(repo, purpose, parentSessionID string) toolResult {
+	return s.handleCreateSession(createSessionArgs{
+		Repo:            repo,
+		Purpose:         purpose,
+		ParentSessionID: parentSessionID,
+	})
+}
+
+// DestroySessionDirect is the CLI-callable entry point for session teardown.
+func (s *Server) DestroySessionDirect(sessionID string, force bool) toolResult {
+	return s.handleDestroySession(destroySessionArgs{
+		SessionID: sessionID,
+		Force:     force,
+	})
 }
 
 // Run starts the server. It reads newline-delimited JSON-RPC from r, writes
@@ -217,6 +271,8 @@ func (s *Server) toolsList() toolsListResult {
 					"body":       {Type: "object", Description: "Task payload"},
 					"mode":       {Type: "string", Description: "\"async\" (default) or \"sync\""},
 					"expires_at": {Type: "string", Description: "Optional RFC3339 expiry deadline"},
+					"session_id": {Type: "string", Description: "Route task into a specific session worktree (8 lowercase hex chars from niwa_create_session)"},
+					"read_only":  {Type: "boolean", Description: "When true and session_id is absent, bypass the SESSION_REQUIRED guard and route to the main clone. Use for tasks that read but do not commit (e.g. run tests, query status)."},
 				},
 				Required: []string{"to", "body"},
 			},
@@ -305,6 +361,42 @@ func (s *Server) toolsList() toolsListResult {
 				Required: []string{"task_id"},
 			},
 		},
+		{
+			Name:        "niwa_create_session",
+			Description: "Create a new git-worktree session for a repo role. Returns {session_id, worktree_path}.",
+			InputSchema: inputSchema{
+				Type: "object",
+				Properties: map[string]schemaProp{
+					"repo":              {Type: "string", Description: "Role/repo name (must exist in .niwa/roles/)"},
+					"purpose":           {Type: "string", Description: "Human-readable description of the session goal"},
+					"parent_session_id": {Type: "string", Description: "Optional parent session ID"},
+				},
+				Required: []string{"repo", "purpose"},
+			},
+		},
+		{
+			Name:        "niwa_destroy_session",
+			Description: "Destroy a session: kill workers, write status=ended, remove worktree and branch.",
+			InputSchema: inputSchema{
+				Type: "object",
+				Properties: map[string]schemaProp{
+					"session_id": {Type: "string", Description: "Session ID to destroy (8 lowercase hex chars)"},
+					"force":      {Type: "boolean", Description: "Delete session branch even if unmerged (default false — unmerged branch is preserved)"},
+				},
+				Required: []string{"session_id"},
+			},
+		},
+		{
+			Name:        "niwa_list_sessions",
+			Description: "List per-session lifecycle states. Optionally filter by repo and/or status (active, ended, abandoned).",
+			InputSchema: inputSchema{
+				Type: "object",
+				Properties: map[string]schemaProp{
+					"repo":   {Type: "string", Description: "Filter by repo name"},
+					"status": {Type: "string", Description: "Filter by status: active, ended, or abandoned"},
+				},
+			},
+		},
 	}}
 }
 
@@ -372,6 +464,24 @@ func (s *Server) callTool(p toolCallParams) toolResult {
 			return errResult("invalid arguments: " + err.Error())
 		}
 		return s.handleCancelTask(args)
+	case "niwa_create_session":
+		var args createSessionArgs
+		if err := json.Unmarshal(p.Arguments, &args); err != nil {
+			return errResult("invalid arguments: " + err.Error())
+		}
+		return s.handleCreateSession(args)
+	case "niwa_destroy_session":
+		var args destroySessionArgs
+		if err := json.Unmarshal(p.Arguments, &args); err != nil {
+			return errResult("invalid arguments: " + err.Error())
+		}
+		return s.handleDestroySession(args)
+	case "niwa_list_sessions":
+		var args listSessionsArgs
+		if err := json.Unmarshal(p.Arguments, &args); err != nil {
+			return errResult("invalid arguments: " + err.Error())
+		}
+		return s.handleListSessions(args)
 	default:
 		return errResult("unknown tool: " + p.Name)
 	}
@@ -703,7 +813,11 @@ func (s *Server) handleAsk(args askArgs) toolResult {
 		return errResult("cannot marshal ask body: " + err.Error())
 	}
 
-	coordinatorInbox, liveCoord := lookupLiveCoordinator(s.instanceRoot)
+	askRoot := s.instanceRoot
+	if args.To == "coordinator" && s.mainInstanceRoot != "" {
+		askRoot = s.mainInstanceRoot
+	}
+	coordinatorInbox, liveCoord := lookupLiveCoordinator(askRoot)
 	var taskID string
 	var errTR toolResult
 	if liveCoord {
@@ -938,7 +1052,7 @@ func (s *Server) registerSessionID() {
 	if sid == "" || !sessionIDRegex.MatchString(sid) {
 		return
 	}
-	taskDir := taskDirPath(s.instanceRoot, s.taskID)
+	taskDir := taskDirPath(s.taskStoreRoot(), s.taskID)
 	_ = UpdateState(taskDir, func(cur *TaskState) (*TaskState, *TransitionLogEntry, error) {
 		next := *cur
 		next.Worker.ClaudeSessionID = sid

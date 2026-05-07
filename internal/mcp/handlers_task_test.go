@@ -83,7 +83,8 @@ func TestHandleDelegate_AsyncHappyPath(t *testing.T) {
 	s.taskID = "" // coordinator has no task_id
 
 	body := json.RawMessage(`{"instructions":"build feature X"}`)
-	res := s.handleDelegate(delegateArgs{To: "web", Body: body, Mode: "async"})
+	// ReadOnly:true bypasses the SESSION_REQUIRED guard; this test is not about session routing.
+	res := s.handleDelegate(delegateArgs{To: "web", Body: body, Mode: "async", ReadOnly: true})
 	if res.IsError {
 		t.Fatalf("handleDelegate: %s", res.Content[0].Text)
 	}
@@ -125,10 +126,12 @@ func TestHandleDelegate_ParentTaskIDPropagates(t *testing.T) {
 	parentID := NewTaskID()
 	s.taskID = parentID
 
+	// ReadOnly:true bypasses the SESSION_REQUIRED guard; this test is not about session routing.
 	res := s.handleDelegate(delegateArgs{
-		To:   "reviewer",
-		Body: json.RawMessage(`{"q":"ready?"}`),
-		Mode: "async",
+		To:       "reviewer",
+		Body:     json.RawMessage(`{"q":"ready?"}`),
+		Mode:     "async",
+		ReadOnly: true,
 	})
 	if res.IsError {
 		t.Fatalf("handleDelegate: %s", res.Content[0].Text)
@@ -147,15 +150,63 @@ func TestHandleDelegate_ParentTaskIDPropagates(t *testing.T) {
 }
 
 // TestHandleDelegate_UnknownRole asserts UNKNOWN_ROLE when target role is not
-// registered under .niwa/roles/.
+// registered under .niwa/roles/. read_only:true is set so the call clears the
+// SESSION_REQUIRED guard and reaches role validation.
 func TestHandleDelegate_UnknownRole(t *testing.T) {
 	s := newTestServer(t, "coordinator")
 	res := s.handleDelegate(delegateArgs{
-		To:   "nonexistent",
-		Body: json.RawMessage(`{"x":1}`),
+		To:       "nonexistent",
+		Body:     json.RawMessage(`{"x":1}`),
+		ReadOnly: true,
 	})
 	if !res.IsError || errorCodeFromText(res.Content[0].Text) != "UNKNOWN_ROLE" {
 		t.Errorf("want UNKNOWN_ROLE, got %+v", res)
+	}
+}
+
+// TestHandleDelegate_SessionRequired asserts SESSION_REQUIRED when session_id
+// is absent and read_only is false.
+func TestHandleDelegate_SessionRequired(t *testing.T) {
+	s := newTestServer(t, "coordinator", "web")
+	res := s.handleDelegate(delegateArgs{
+		To:   "web",
+		Body: json.RawMessage(`{"x":1}`),
+	})
+	if !res.IsError || errorCodeFromText(res.Content[0].Text) != "SESSION_REQUIRED" {
+		t.Errorf("want SESSION_REQUIRED, got %+v", res)
+	}
+}
+
+// TestHandleDelegate_ReadOnly_BypassesSessionRequired asserts that read_only:true
+// with no session_id routes to the main clone without SESSION_REQUIRED.
+func TestHandleDelegate_ReadOnly_BypassesSessionRequired(t *testing.T) {
+	s := newTestServer(t, "coordinator", "web")
+	res := s.handleDelegate(delegateArgs{
+		To:       "web",
+		Body:     json.RawMessage(`{"x":1}`),
+		ReadOnly: true,
+	})
+	if res.IsError {
+		t.Fatalf("read_only:true should not return SESSION_REQUIRED; got %s", res.Content[0].Text)
+	}
+}
+
+// TestHandleDelegate_SessionID_BypassesSessionRequired asserts that a non-empty
+// session_id does not trigger SESSION_REQUIRED (SESSION_NOT_FOUND is expected
+// since no state file exists in the test environment).
+func TestHandleDelegate_SessionID_BypassesSessionRequired(t *testing.T) {
+	s := newTestServer(t, "coordinator", "web")
+	res := s.handleDelegate(delegateArgs{
+		To:        "web",
+		Body:      json.RawMessage(`{"x":1}`),
+		SessionID: "abcdef12",
+	})
+	if res.IsError && errorCodeFromText(res.Content[0].Text) == "SESSION_REQUIRED" {
+		t.Error("session_id present should bypass SESSION_REQUIRED, but got SESSION_REQUIRED")
+	}
+	// Without a real session state file the handler returns SESSION_NOT_FOUND.
+	if !res.IsError || errorCodeFromText(res.Content[0].Text) != "SESSION_NOT_FOUND" {
+		t.Errorf("want SESSION_NOT_FOUND (no state file), got %+v", res)
 	}
 }
 
@@ -1222,9 +1273,10 @@ func TestFormatTerminalResult_OmitsProgressFieldsWhenAbsent(t *testing.T) {
 func delegateTaskForCoordinator(t *testing.T, s *Server) string {
 	t.Helper()
 	res := s.handleDelegate(delegateArgs{
-		To:   "web",
-		Body: json.RawMessage(`{"instructions":"do work"}`),
-		Mode: "async",
+		To:       "web",
+		Body:     json.RawMessage(`{"instructions":"do work"}`),
+		Mode:     "async",
+		ReadOnly: true,
 	})
 	if res.IsError {
 		t.Fatalf("handleDelegate: %s", res.Content[0].Text)
@@ -1435,5 +1487,274 @@ func TestHandleAwaitTask_TimeoutDeregistersWaiters(t *testing.T) {
 	}
 	if questionStillRegistered {
 		t.Error("questionWaiters[coordinator] still registered after timeout")
+	}
+}
+
+// --- Session-targeted task routing tests (Issue 3) ---------------------------
+
+// writeActiveSession creates a session state file in sessionsDir with
+// status="active" and the given worktreePath.
+func writeActiveSession(t *testing.T, sessionsDir, sessionID, repo, worktreePath string) {
+	t.Helper()
+	if err := os.MkdirAll(sessionsDir, 0o700); err != nil {
+		t.Fatalf("mkdir sessionsDir: %v", err)
+	}
+	state := SessionLifecycleState{
+		V:            1,
+		SessionID:    sessionID,
+		Repo:         repo,
+		Status:       SessionStatusActive,
+		WorktreePath: worktreePath,
+	}
+	if err := WriteSessionLifecycleState(sessionsDir, state); err != nil {
+		t.Fatalf("WriteSessionLifecycleState: %v", err)
+	}
+}
+
+// TestHandleDelegate_SessionRouted asserts that when session_id is set and the
+// session is active, the task envelope is written to the worktree inbox.
+func TestHandleDelegate_SessionRouted(t *testing.T) {
+	s := newTestServer(t, "coordinator", "app")
+	// Worktree must be a subpath of instanceRoot (as it is in production under
+	// <instanceRoot>/.niwa/worktrees/).
+	worktree := filepath.Join(s.instanceRoot, ".niwa", "worktrees", "app-ab12cd34")
+	if err := os.MkdirAll(worktree, 0o700); err != nil {
+		t.Fatalf("mkdir worktree: %v", err)
+	}
+
+	// Provision the session state.
+	sessionsDir := filepath.Join(s.instanceRoot, ".niwa", "sessions")
+	sessionID := "ab12cd34"
+	writeActiveSession(t, sessionsDir, sessionID, "app", worktree)
+
+	// Scaffold the worktree role inbox so validation passes.
+	worktreeInbox := filepath.Join(worktree, ".niwa", "roles", "app", "inbox")
+	if err := os.MkdirAll(worktreeInbox, 0o700); err != nil {
+		t.Fatalf("mkdir worktree inbox: %v", err)
+	}
+
+	res := s.handleDelegate(delegateArgs{
+		To:        "app",
+		Body:      json.RawMessage(`{"instructions":"do work"}`),
+		Mode:      "async",
+		SessionID: sessionID,
+	})
+	if res.IsError {
+		t.Fatalf("handleDelegate: %s", res.Content[0].Text)
+	}
+
+	var out struct {
+		TaskID string `json:"task_id"`
+	}
+	if err := json.Unmarshal([]byte(res.Content[0].Text), &out); err != nil {
+		t.Fatalf("parse result: %v", err)
+	}
+
+	// Inbox file must be in the worktree, not the main instance.
+	worktreeMsgs := readAllMessages(t, worktreeInbox)
+	if len(worktreeMsgs) != 1 || worktreeMsgs[0].TaskID != out.TaskID {
+		t.Errorf("worktree inbox: got %+v", worktreeMsgs)
+	}
+	mainInbox := filepath.Join(s.instanceRoot, ".niwa", "roles", "app", "inbox")
+	mainMsgs := readAllMessages(t, mainInbox)
+	if len(mainMsgs) != 0 {
+		t.Errorf("main inbox must be empty for session-routed task; got %d messages", len(mainMsgs))
+	}
+
+	// state.json must record the session_id.
+	taskDir := taskDirPath(s.instanceRoot, out.TaskID)
+	_, st, err := ReadState(taskDir)
+	if err != nil {
+		t.Fatalf("ReadState: %v", err)
+	}
+	if st.SessionID != sessionID {
+		t.Errorf("state.json session_id = %q, want %q", st.SessionID, sessionID)
+	}
+}
+
+// TestHandleDelegate_SessionNotFound asserts SESSION_NOT_FOUND when the
+// session_id references a non-existent session.
+func TestHandleDelegate_SessionNotFound(t *testing.T) {
+	s := newTestServer(t, "coordinator", "app")
+	// Sessions dir exists but session file does not.
+	sessionsDir := filepath.Join(s.instanceRoot, ".niwa", "sessions")
+	if err := os.MkdirAll(sessionsDir, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	res := s.handleDelegate(delegateArgs{
+		To:        "app",
+		Body:      json.RawMessage(`{"x":1}`),
+		SessionID: "ab12cd34",
+	})
+	if !res.IsError {
+		t.Fatal("expected error for missing session")
+	}
+	if code := errorCodeFromText(res.Content[0].Text); code != "SESSION_NOT_FOUND" {
+		t.Errorf("error_code = %q, want SESSION_NOT_FOUND", code)
+	}
+}
+
+// TestHandleDelegate_SessionInactive asserts SESSION_INACTIVE when the session
+// is not in active status.
+func TestHandleDelegate_SessionInactive(t *testing.T) {
+	s := newTestServer(t, "coordinator", "app")
+	worktree := t.TempDir()
+	sessionsDir := filepath.Join(s.instanceRoot, ".niwa", "sessions")
+	if err := os.MkdirAll(sessionsDir, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	state := SessionLifecycleState{
+		V:            1,
+		SessionID:    "ab12cd34",
+		Repo:         "app",
+		Status:       SessionStatusEnded,
+		WorktreePath: worktree,
+	}
+	if err := WriteSessionLifecycleState(sessionsDir, state); err != nil {
+		t.Fatalf("write state: %v", err)
+	}
+
+	res := s.handleDelegate(delegateArgs{
+		To:        "app",
+		Body:      json.RawMessage(`{"x":1}`),
+		SessionID: "ab12cd34",
+	})
+	if !res.IsError {
+		t.Fatal("expected error for inactive session")
+	}
+	if code := errorCodeFromText(res.Content[0].Text); code != "SESSION_INACTIVE" {
+		t.Errorf("error_code = %q, want SESSION_INACTIVE", code)
+	}
+}
+
+// TestHandleDelegate_NoSession_Unchanged asserts that read_only:true with no
+// session_id routes to the main clone daemon as before (regression test).
+func TestHandleDelegate_NoSession_Unchanged(t *testing.T) {
+	s := newTestServer(t, "coordinator", "web")
+	res := s.handleDelegate(delegateArgs{
+		To:       "web",
+		Body:     json.RawMessage(`{"q":"hello"}`),
+		Mode:     "async",
+		ReadOnly: true,
+	})
+	if res.IsError {
+		t.Fatalf("unexpected error: %s", res.Content[0].Text)
+	}
+	var out struct {
+		TaskID string `json:"task_id"`
+	}
+	_ = json.Unmarshal([]byte(res.Content[0].Text), &out)
+	mainInbox := filepath.Join(s.instanceRoot, ".niwa", "roles", "web", "inbox")
+	msgs := readAllMessages(t, mainInbox)
+	if len(msgs) != 1 || msgs[0].TaskID != out.TaskID {
+		t.Errorf("main inbox = %+v; want 1 message with task_id %q", msgs, out.TaskID)
+	}
+	_, st, err := ReadState(taskDirPath(s.instanceRoot, out.TaskID))
+	if err != nil {
+		t.Fatalf("ReadState: %v", err)
+	}
+	if st.SessionID != "" {
+		t.Errorf("session_id = %q, want empty for non-session delegate", st.SessionID)
+	}
+}
+
+// TestHandleCancelTask_SessionRouted asserts that cancelling a session-routed
+// task moves the envelope from the worktree inbox, not the main inbox.
+func TestHandleCancelTask_SessionRouted(t *testing.T) {
+	s := newTestServer(t, "coordinator", "app")
+	worktree := filepath.Join(s.instanceRoot, ".niwa", "worktrees", "app-ab12cd34")
+	if err := os.MkdirAll(worktree, 0o700); err != nil {
+		t.Fatalf("mkdir worktree: %v", err)
+	}
+	sessionsDir := filepath.Join(s.instanceRoot, ".niwa", "sessions")
+	sessionID := "ab12cd34"
+	writeActiveSession(t, sessionsDir, sessionID, "app", worktree)
+
+	// Scaffold worktree inbox.
+	worktreeInbox := filepath.Join(worktree, ".niwa", "roles", "app", "inbox")
+	if err := os.MkdirAll(worktreeInbox, 0o700); err != nil {
+		t.Fatalf("mkdir worktree inbox: %v", err)
+	}
+
+	// Delegate to create a session-targeted task.
+	delegateRes := s.handleDelegate(delegateArgs{
+		To:        "app",
+		Body:      json.RawMessage(`{"x":1}`),
+		SessionID: sessionID,
+	})
+	if delegateRes.IsError {
+		t.Fatalf("delegate: %s", delegateRes.Content[0].Text)
+	}
+	var out struct {
+		TaskID string `json:"task_id"`
+	}
+	_ = json.Unmarshal([]byte(delegateRes.Content[0].Text), &out)
+
+	// Cancel must succeed.
+	cancelRes := s.handleCancelTask(cancelTaskArgs{TaskID: out.TaskID})
+	if cancelRes.IsError {
+		t.Fatalf("cancel: %s", cancelRes.Content[0].Text)
+	}
+
+	// Envelope must be in worktree cancelled dir.
+	cancelledPath := filepath.Join(worktreeInbox, "cancelled", out.TaskID+".json")
+	if _, err := os.Stat(cancelledPath); err != nil {
+		t.Errorf("cancelled envelope not found at %s: %v", cancelledPath, err)
+	}
+}
+
+// TestHandleUpdateTask_SessionRouted asserts that updating a session-routed
+// task rewrites the envelope in the worktree inbox.
+func TestHandleUpdateTask_SessionRouted(t *testing.T) {
+	s := newTestServer(t, "coordinator", "app")
+	worktree := filepath.Join(s.instanceRoot, ".niwa", "worktrees", "app-ab12cd34")
+	if err := os.MkdirAll(worktree, 0o700); err != nil {
+		t.Fatalf("mkdir worktree: %v", err)
+	}
+	sessionsDir := filepath.Join(s.instanceRoot, ".niwa", "sessions")
+	sessionID := "ab12cd34"
+	writeActiveSession(t, sessionsDir, sessionID, "app", worktree)
+
+	worktreeInbox := filepath.Join(worktree, ".niwa", "roles", "app", "inbox")
+	if err := os.MkdirAll(worktreeInbox, 0o700); err != nil {
+		t.Fatalf("mkdir worktree inbox: %v", err)
+	}
+
+	// Delegate session-targeted task.
+	delegateRes := s.handleDelegate(delegateArgs{
+		To:        "app",
+		Body:      json.RawMessage(`{"step":1}`),
+		SessionID: sessionID,
+	})
+	if delegateRes.IsError {
+		t.Fatalf("delegate: %s", delegateRes.Content[0].Text)
+	}
+	var out struct {
+		TaskID string `json:"task_id"`
+	}
+	_ = json.Unmarshal([]byte(delegateRes.Content[0].Text), &out)
+
+	// Update the task body.
+	updateRes := s.handleUpdateTask(updateTaskArgs{
+		TaskID: out.TaskID,
+		Body:   json.RawMessage(`{"step":2}`),
+	})
+	if updateRes.IsError {
+		t.Fatalf("update: %s", updateRes.Content[0].Text)
+	}
+
+	// Inbox file at worktree must have the updated body.
+	msgs := readAllMessages(t, worktreeInbox)
+	if len(msgs) != 1 {
+		t.Fatalf("worktree inbox: got %d messages, want 1", len(msgs))
+	}
+	var body struct {
+		Step int `json:"step"`
+	}
+	if err := json.Unmarshal(msgs[0].Body, &body); err != nil {
+		t.Fatalf("parse body: %v", err)
+	}
+	if body.Step != 2 {
+		t.Errorf("body.step = %d, want 2", body.Step)
 	}
 }

@@ -248,3 +248,118 @@ func TestHandleAsk_NoSessions_ReturnsNoLiveSession(t *testing.T) {
 		t.Errorf("expected zero task subdirectories, found %v", subdirs)
 	}
 }
+
+// --- handleAsk coordinator routing fix tests (Issue 4) -----------------------
+
+// TestHandleAsk_SessionWorktreeRoutesToMainInstance asserts that when
+// mainInstanceRoot is set, a coordinator ask inside a session worktree reads
+// sessions.json from the main instance root rather than the worktree root.
+func TestHandleAsk_SessionWorktreeRoutesToMainInstance(t *testing.T) {
+	// mainRoot is where the coordinator's sessions.json lives.
+	mainRoot := t.TempDir()
+	// worktreeRoot simulates the session worktree (no sessions.json there).
+	worktreeRoot := t.TempDir()
+
+	// Set up roles in both roots so isKnownRole passes.
+	if err := os.MkdirAll(filepath.Join(worktreeRoot, ".niwa", "roles", "coordinator", "inbox"), 0o700); err != nil {
+		t.Fatalf("mkdir worktree coordinator inbox: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(worktreeRoot, ".niwa", "tasks"), 0o700); err != nil {
+		t.Fatalf("mkdir worktree tasks: %v", err)
+	}
+	// Coordinator inbox in main root for the ask notification write.
+	if err := os.MkdirAll(filepath.Join(mainRoot, ".niwa", "roles", "coordinator", "inbox"), 0o700); err != nil {
+		t.Fatalf("mkdir main coordinator inbox: %v", err)
+	}
+
+	// Register a live coordinator in the main root's sessions.json.
+	pid := os.Getpid()
+	start, _ := PIDStartTime(pid)
+	writeSessionsJSON(t, mainRoot, []SessionEntry{{
+		ID:           "coord-session",
+		Role:         "coordinator",
+		PID:          pid,
+		StartTime:    start,
+		RegisteredAt: time.Now().UTC().Format(time.RFC3339),
+	}})
+
+	// Build a server simulating a worker inside a session worktree.
+	s := &Server{
+		instanceRoot:     worktreeRoot,
+		mainInstanceRoot: mainRoot,
+		role:             "frontend",
+		seenFiles:        make(map[string]struct{}),
+		waiters:          make(map[string]chan toolResult),
+		awaitWaiters:     make(map[string]chan taskEvent),
+		questionWaiters:  make(map[string]chan questionEvent),
+		audit:            NewFileAuditSink(""),
+	}
+	s.roleInboxDir = filepath.Join(worktreeRoot, ".niwa", "roles", "frontend", "inbox")
+
+	res := s.handleAsk(askArgs{
+		To:             "coordinator",
+		Body:           json.RawMessage(`{"question":"ready?"}`),
+		TimeoutSeconds: 1,
+	})
+	// We expect a timeout (not no_live_session) because the coordinator was found.
+	// The response will be timeout or completed — never no_live_session.
+	if res.IsError {
+		t.Fatalf("handleAsk error: %s", res.Content[0].Text)
+	}
+	var payload map[string]any
+	_ = json.Unmarshal([]byte(res.Content[0].Text), &payload)
+	if status, _ := payload["status"].(string); status == "no_live_session" {
+		t.Error("handleAsk returned no_live_session; expected coordinator to be found via mainInstanceRoot")
+	}
+
+	// Verify the ask notification landed in the main root's coordinator inbox.
+	mainCoordInbox := filepath.Join(mainRoot, ".niwa", "roles", "coordinator", "inbox")
+	files := listInboxFiles(t, mainCoordInbox)
+	if len(files) == 0 {
+		t.Error("no ask notification written to main coordinator inbox")
+	}
+}
+
+// TestHandleAsk_NonSessionNoMainInstanceRoot asserts that when mainInstanceRoot
+// is empty (non-session worker), the coordinator lookup uses instanceRoot as before.
+func TestHandleAsk_NonSessionNoMainInstanceRoot(t *testing.T) {
+	s := newTestServer(t, "frontend", "coordinator")
+	// No sessions.json in s.instanceRoot → no_live_session expected.
+	res := s.handleAsk(askArgs{
+		To:             "coordinator",
+		Body:           json.RawMessage(`{"question":"ready?"}`),
+		TimeoutSeconds: 1,
+	})
+	if res.IsError {
+		t.Fatalf("handleAsk error: %s", res.Content[0].Text)
+	}
+	var payload map[string]any
+	_ = json.Unmarshal([]byte(res.Content[0].Text), &payload)
+	if status, _ := payload["status"].(string); status != "no_live_session" {
+		t.Errorf("status = %q, want no_live_session (no coordinator registered)", status)
+	}
+}
+
+// TestHandleAsk_NonCoordinatorTargetUnaffectedByMainInstanceRoot asserts that
+// for non-coordinator targets, mainInstanceRoot does not change isKnownRole
+// behavior.
+func TestHandleAsk_NonCoordinatorTargetUnaffectedByMainInstanceRoot(t *testing.T) {
+	s := newTestServer(t, "frontend", "backend")
+	s.mainInstanceRoot = t.TempDir() // non-empty but irrelevant for non-coordinator
+
+	res := s.handleAsk(askArgs{
+		To:             "backend",
+		Body:           json.RawMessage(`{"question":"go?"}`),
+		TimeoutSeconds: 1,
+	})
+	// backend has no live session, so expect no_live_session — not UNKNOWN_ROLE,
+	// because the role IS registered, just no coordinator session.
+	if res.IsError {
+		t.Fatalf("handleAsk error: %s", res.Content[0].Text)
+	}
+	var payload map[string]any
+	_ = json.Unmarshal([]byte(res.Content[0].Text), &payload)
+	if status, _ := payload["status"].(string); status != "no_live_session" {
+		t.Errorf("status = %q, want no_live_session", status)
+	}
+}
