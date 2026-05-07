@@ -257,10 +257,15 @@ func statePath(dir string) string {
 
 // LoadState reads an InstanceState from the .niwa/instance.json file in dir.
 //
-// v1 and v2 state files load via an in-memory migration shim: new
-// fields are JSON-omitempty so older files unmarshal cleanly. LoadState
-// does NOT bump the schema version on read — the caller's next
-// SaveState rewrites the file at the current SchemaVersion.
+// v1, v2, and v3 state files load via an implicit no-op migration:
+// every new field added by a later schema version carries a JSON
+// omitempty tag, so older files unmarshal cleanly with the new
+// fields zero-valued (nil maps, nil pointers, empty slices). The
+// pattern is centralised in the SchemaVersion constant block at
+// the top of this file — see that comment for the per-version
+// contract. LoadState does NOT bump the schema version on read —
+// the caller's next SaveState rewrites the file at the current
+// SchemaVersion.
 //
 // Forward-version state files (schema_version > SchemaVersion) are
 // rejected per PRD R25. The on-disk file is byte-identical to its
