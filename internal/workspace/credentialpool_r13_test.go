@@ -13,7 +13,7 @@ import (
 // the (kind, project) + provider name for R13.1's aggregated warning.
 func TestPool_R13_VaultUnreachableTypedErrorRecovery(t *testing.T) {
 	_, loader := newStubLoader(t, "personal", map[string]stubResponse{
-		"/niwa/provider-auth/infisical/uuid-X": {err: vault.ErrProviderUnreachable},
+		"/niwa/provider-auth/infisical/p-uuid-X": {err: vault.ErrProviderUnreachable},
 	})
 	pool := NewCredentialPool(nil, loader)
 
@@ -40,8 +40,8 @@ func TestPool_R13_VaultUnreachableTypedErrorRecovery(t *testing.T) {
 // produce one observation, not many.
 func TestPool_R13_VaultUnreachableObservationsDeduplicated(t *testing.T) {
 	_, loader := newStubLoader(t, "personal", map[string]stubResponse{
-		"/niwa/provider-auth/infisical/uuid-X": {err: vault.ErrProviderUnreachable},
-		"/niwa/provider-auth/infisical/uuid-Y": {err: vault.ErrProviderUnreachable},
+		"/niwa/provider-auth/infisical/p-uuid-X": {err: vault.ErrProviderUnreachable},
+		"/niwa/provider-auth/infisical/p-uuid-Y": {err: vault.ErrProviderUnreachable},
 	})
 	pool := NewCredentialPool(nil, loader)
 	ctx := context.Background()
@@ -80,7 +80,7 @@ func TestPool_R13_FileWinsOnUnreachableWithFallback(t *testing.T) {
 		},
 	}
 	_, loader := newStubLoader(t, "personal", map[string]stubResponse{
-		"/niwa/provider-auth/infisical/uuid-X": {err: vault.ErrProviderUnreachable},
+		"/niwa/provider-auth/infisical/p-uuid-X": {err: vault.ErrProviderUnreachable},
 	})
 	pool := NewCredentialPool(file, loader)
 
@@ -117,7 +117,7 @@ func TestPool_R13_FileWinsOnUnreachableWithFallback(t *testing.T) {
 // over).
 func TestPool_R13_FileMissUnreachableRecordsCLISession(t *testing.T) {
 	_, loader := newStubLoader(t, "personal", map[string]stubResponse{
-		"/niwa/provider-auth/infisical/uuid-X": {err: vault.ErrProviderUnreachable},
+		"/niwa/provider-auth/infisical/p-uuid-X": {err: vault.ErrProviderUnreachable},
 	})
 	pool := NewCredentialPool(nil, loader)
 
@@ -178,7 +178,7 @@ func TestPool_R13_UnreachableObservationRecordedOnLookup(t *testing.T) {
 		name: "personal",
 		kind: "infisical",
 		response: map[string]stubResponse{
-			"/niwa/provider-auth/infisical/uuid-Y": {err: vault.ErrProviderUnreachable},
+			"/niwa/provider-auth/infisical/p-uuid-Y": {err: vault.ErrProviderUnreachable},
 		},
 	}
 	loader := &vaultCredLoader{

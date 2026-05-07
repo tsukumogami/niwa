@@ -64,10 +64,13 @@ func validBody(clientID, clientSecret string) string {
 }
 
 // TestPool_VaultHitOnFileMiss covers PRD AC-1 / AC-2: file misses,
-// vault has the entry, Source is vault.
+// vault has the entry, Source is vault. The vault key is prefixed
+// with "p-" because Infisical rejects secret keys whose first
+// character is a digit; the pool prepends "p-" to the project UUID
+// before fetching.
 func TestPool_VaultHitOnFileMiss(t *testing.T) {
 	_, loader := newStubLoader(t, "personal", map[string]stubResponse{
-		"/niwa/provider-auth/infisical/uuid-X": {body: validBody("cid-vault", "csec-vault")},
+		"/niwa/provider-auth/infisical/p-uuid-X": {body: validBody("cid-vault", "csec-vault")},
 	})
 	pool := NewCredentialPool(nil, loader)
 
@@ -108,7 +111,7 @@ func TestPool_FileWinsWithVaultFallback(t *testing.T) {
 		},
 	}
 	_, loader := newStubLoader(t, "personal", map[string]stubResponse{
-		"/niwa/provider-auth/infisical/uuid-X": {body: validBody("cid-vault", "csec-vault")},
+		"/niwa/provider-auth/infisical/p-uuid-X": {body: validBody("cid-vault", "csec-vault")},
 	})
 	pool := NewCredentialPool(file, loader)
 
@@ -142,7 +145,7 @@ func TestPool_FileWinsWithAnonymousVaultFallback(t *testing.T) {
 		},
 	}
 	_, loader := newStubLoader(t, "", map[string]stubResponse{
-		"/niwa/provider-auth/infisical/uuid-Y": {body: validBody("cid-vault", "csec-vault")},
+		"/niwa/provider-auth/infisical/p-uuid-Y": {body: validBody("cid-vault", "csec-vault")},
 	})
 	pool := NewCredentialPool(file, loader)
 
@@ -189,7 +192,7 @@ func TestPool_VaultKeyNotFoundIsSilent(t *testing.T) {
 // further; I7's contract is just to wrap-and-return.
 func TestPool_VaultUnreachablePropagates(t *testing.T) {
 	_, loader := newStubLoader(t, "personal", map[string]stubResponse{
-		"/niwa/provider-auth/infisical/uuid-Z": {err: vault.ErrProviderUnreachable},
+		"/niwa/provider-auth/infisical/p-uuid-Z": {err: vault.ErrProviderUnreachable},
 	})
 	pool := NewCredentialPool(nil, loader)
 
@@ -354,8 +357,8 @@ func TestPool_AC36_BodyBytesNeverInError(t *testing.T) {
 // Resolve calls.
 func TestPool_AC37_NoResolveForUnreferencedPair(t *testing.T) {
 	stub, loader := newStubLoader(t, "personal", map[string]stubResponse{
-		"/niwa/provider-auth/infisical/uuid-A": {body: validBody("cid-A", "csec-A")},
-		"/niwa/provider-auth/infisical/uuid-B": {body: validBody("cid-B", "csec-B")},
+		"/niwa/provider-auth/infisical/p-uuid-A": {body: validBody("cid-A", "csec-A")},
+		"/niwa/provider-auth/infisical/p-uuid-B": {body: validBody("cid-B", "csec-B")},
 	})
 	pool := NewCredentialPool(nil, loader)
 	ctx := context.Background()
@@ -366,14 +369,15 @@ func TestPool_AC37_NoResolveForUnreferencedPair(t *testing.T) {
 	// uuid-B was never referenced — no Resolve call should have
 	// happened for it.
 	for _, ref := range stub.calls {
-		if ref.Path == "/niwa/provider-auth/infisical" && ref.Key == "uuid-B" {
+		if ref.Path == "/niwa/provider-auth/infisical" && ref.Key == "p-uuid-B" {
 			t.Errorf("AC-37 violated: uuid-B was Resolved without being referenced")
 		}
 	}
-	// Sanity: uuid-A WAS resolved.
+	// Sanity: uuid-A WAS resolved (key prefixed with "p-" per
+	// credentialSyncProjectKeyPrefix).
 	foundA := false
 	for _, ref := range stub.calls {
-		if ref.Path == "/niwa/provider-auth/infisical" && ref.Key == "uuid-A" {
+		if ref.Path == "/niwa/provider-auth/infisical" && ref.Key == "p-uuid-A" {
 			foundA = true
 			break
 		}
@@ -398,7 +402,7 @@ func TestPool_AC37_NoResolveForUnreferencedPair(t *testing.T) {
 // session in I6, so falling through to that path is correct).
 func TestPool_R9_SelfLookupGuard(t *testing.T) {
 	stub, loader := newStubLoader(t, "personal", map[string]stubResponse{
-		"/niwa/provider-auth/infisical/uuid-self": {body: validBody("cid-self", "csec-self")},
+		"/niwa/provider-auth/infisical/p-uuid-self": {body: validBody("cid-self", "csec-self")},
 	})
 	loader.SelfKind = "infisical"
 	loader.SelfProject = "uuid-self"
@@ -416,7 +420,7 @@ func TestPool_R9_SelfLookupGuard(t *testing.T) {
 	}
 
 	// Sanity: a different (kind, project) is still resolvable.
-	stub.response["/niwa/provider-auth/infisical/uuid-other"] = stubResponse{body: validBody("cid-o", "csec-o")}
+	stub.response["/niwa/provider-auth/infisical/p-uuid-other"] = stubResponse{body: validBody("cid-o", "csec-o")}
 	_, _, err = pool.Lookup(context.Background(), "infisical", "uuid-other")
 	if err != nil {
 		t.Fatalf("non-self lookup must succeed, got: %v", err)
@@ -433,7 +437,7 @@ func TestPool_R9_SelfLookupGuard(t *testing.T) {
 // the cache lives on the pool.
 func TestPool_AC31_CacheWithinApply(t *testing.T) {
 	stub, loader := newStubLoader(t, "personal", map[string]stubResponse{
-		"/niwa/provider-auth/infisical/uuid-X": {body: validBody("cid", "csec")},
+		"/niwa/provider-auth/infisical/p-uuid-X": {body: validBody("cid", "csec")},
 	})
 	pool := NewCredentialPool(nil, loader)
 	ctx := context.Background()
@@ -454,5 +458,52 @@ func TestPool_AC31_CacheWithinApply(t *testing.T) {
 	_, _, _ = pool2.Lookup(ctx, "infisical", "uuid-X")
 	if len(stub.calls) != 2 {
 		t.Errorf("fresh pool should re-fetch; got %d total Resolve calls", len(stub.calls))
+	}
+}
+
+// TestPool_PPrefixOnVaultKey locks the "p-" key prefix invariant:
+// the lookup uses Path = "/niwa/provider-auth/<kind>" and
+// Key = "p-<project>" regardless of the project's leading character.
+// Infisical (and likely other backends) reject secret keys whose
+// first character is a digit; UUIDs that happen to start with a
+// digit (~37.5% of UUIDv4 values) would otherwise fail at the
+// backend. The "p-" prefix sidesteps that validation while keeping
+// the path shape clean for human inspection.
+func TestPool_PPrefixOnVaultKey(t *testing.T) {
+	cases := []struct {
+		name    string
+		project string
+	}{
+		{"digit-leading", "9abc1234-def5-6789-abcd-ef0123456789"},
+		{"letter-leading", "abcdef12-3456-7890-abcd-ef0123456789"},
+		{"already-p-prefixed", "p-confusing"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			expectedKey := "p-" + tc.project
+			expectedPathKey := "/niwa/provider-auth/infisical/" + expectedKey
+			stub, loader := newStubLoader(t, "personal", map[string]stubResponse{
+				expectedPathKey: {body: validBody("cid", "csec")},
+			})
+			pool := NewCredentialPool(nil, loader)
+
+			entry, _, err := pool.Lookup(context.Background(), "infisical", tc.project)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if entry == nil {
+				t.Fatalf("expected entry for project %q (vault key %q)", tc.project, expectedKey)
+			}
+			if len(stub.calls) != 1 {
+				t.Fatalf("expected 1 Resolve call, got %d", len(stub.calls))
+			}
+			got := stub.calls[0]
+			if got.Path != "/niwa/provider-auth/infisical" {
+				t.Errorf("Path = %q, want /niwa/provider-auth/infisical", got.Path)
+			}
+			if got.Key != expectedKey {
+				t.Errorf("Key = %q, want %q (the project UUID with the p- prefix)", got.Key, expectedKey)
+			}
+		})
 	}
 }

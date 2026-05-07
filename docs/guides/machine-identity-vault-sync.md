@@ -72,12 +72,21 @@ niwa reads each credential body from a single key in your personal
 Infisical project. The path convention is:
 
 ```
-/niwa/provider-auth/infisical/<project-uuid>
+Path: /niwa/provider-auth/infisical
+Key:  p-<project-uuid>
 ```
 
 Where `<project-uuid>` is the Infisical project ID for the OTHER
 org niwa needs to authenticate against (the one whose
 `provider-auth.toml` entry you're replacing).
+
+The `p-` key prefix is required. Infisical (and likely other
+backends) reject secret keys whose first character is a digit;
+roughly 37.5% of UUIDv4 values fall into that bucket. Prefixing
+the key — not the path — sidesteps the validation while keeping
+paths readable in the vault UI. niwa always prepends `p-` to the
+project UUID before fetching, so you must store credentials under
+the prefixed key.
 
 The body is a small TOML document with these fields:
 
@@ -111,14 +120,14 @@ EOF
 
 infisical secrets set \
   --path "/niwa/provider-auth/infisical" \
-  "550e8400-e29b-41d4-a716-446655440000=$(cat /tmp/team-a-cred.toml)"
+  "p-550e8400-e29b-41d4-a716-446655440000=$(cat /tmp/team-a-cred.toml)"
 
 rm /tmp/team-a-cred.toml
 ```
 
 (The exact CLI invocation depends on your Infisical version. The
 key is the path/key pair: path `/niwa/provider-auth/infisical/`,
-key `<project-uuid>`, value the TOML body.)
+key `p-<project-uuid>`, value the TOML body.)
 
 Repeat for each org's machine identity.
 
@@ -221,7 +230,7 @@ apply`.
 # On your laptop, after rotating the machine identity in Infisical:
 infisical secrets set \
   --path "/niwa/provider-auth/infisical" \
-  "<project-uuid>=$(cat new-cred.toml)"
+  "p-<project-uuid>=$(cat new-cred.toml)"
 ```
 
 niwa never caches machine-identity credentials between applies, so
@@ -241,7 +250,7 @@ Fix: authenticate the personal vault via the CLI session
 personal vault's identity, and no other vault provider in your
 overlay shares that identity.
 
-### `vault-sourced provider-auth body at /niwa/provider-auth/.../... is malformed: TOML parse error`
+### `vault-sourced provider-auth body at /niwa/provider-auth/<kind>/p-<project> is malformed: TOML parse error`
 
 The credential body fetched from the vault isn't valid TOML.
 Common causes: pasting a JSON body, leaving a stray comma, or
@@ -250,14 +259,14 @@ running an Infisical CLI version that re-encodes the value.
 Fix: re-set the body via `infisical secrets set` with a known-good
 TOML document and verify it via `infisical secrets get`.
 
-### `vault-sourced provider-auth body at /niwa/provider-auth/.../... is missing required field "client_id"` (or "client_secret")
+### `vault-sourced provider-auth body at /niwa/provider-auth/<kind>/p-<project> is missing required field "client_id"` (or "client_secret")
 
 The body parses but lacks one of the required fields. Both
 `client_id` and `client_secret` are required.
 
 Fix: re-set the body with both fields populated.
 
-### `provider-auth body at /niwa/provider-auth/.../... has unsupported schema version "X"`
+### `provider-auth body at /niwa/provider-auth/<kind>/p-<project> has unsupported schema version "X"`
 
 The body's `version` field is something niwa doesn't recognize
 (today, only `"1"` is supported). Either upgrade niwa or update

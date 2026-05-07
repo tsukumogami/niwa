@@ -12,11 +12,26 @@ import (
 )
 
 // CredentialSyncPathPrefix is the conventional namespace under which
-// niwa stores credential bodies in the personal vault: keys live at
-// CredentialSyncPathPrefix + "<kind>/<project>". Wired into
-// vaultCredLoader.PathPrefix at apply time. Exported so tests can
-// reference it without re-deriving the convention.
+// niwa stores credential bodies in the personal vault: each kind
+// gets one folder at CredentialSyncPathPrefix + "<kind>", and the
+// per-project credential body lives at the key "p-<project>" inside
+// that folder. Wired into vaultCredLoader.PathPrefix at apply time.
+// Exported so tests can reference it without re-deriving the
+// convention.
+//
+// The "p-" key prefix exists because Infisical (and likely other
+// backends) reject secret keys whose first character is a digit;
+// roughly 37.5% of UUIDv4 values fall into that bucket. Prefixing the
+// KEY (not the path) sidesteps the validation while keeping the path
+// shape clean for human inspection in the vault UI.
 const CredentialSyncPathPrefix = "/niwa/provider-auth/"
+
+// credentialSyncProjectKeyPrefix is prepended to the project UUID to
+// form the vault secret key. Exported indirectly via the rendered
+// path strings so error messages and documentation can show users
+// the exact key they need to set, e.g.,
+// "/niwa/provider-auth/infisical/p-<uuid>".
+const credentialSyncProjectKeyPrefix = "p-"
 
 // maxProviderAuthBodyBytes caps the byte length of a vault-fetched
 // credential body before TOML unmarshal. The realistic body is
@@ -48,20 +63,25 @@ type providerAuthBody struct {
 // — never the body bytes or any field value (PRD R18; AC-36
 // sentinel-canary test enforces this).
 func parseProviderAuthBody(kind, project string, raw []byte) (*ProviderAuthEntry, error) {
+	// keyedPath renders the user-visible path/key combination for
+	// diagnostic strings: ".../<kind>/p-<project>". Users look this
+	// path up directly in their vault UI, so the rendered prefix
+	// MUST match the actual lookup key (see lookupVault).
+	keyedPath := CredentialSyncPathPrefix + kind + "/" + credentialSyncProjectKeyPrefix + project
 	if len(raw) > maxProviderAuthBodyBytes {
 		return nil, fmt.Errorf(
-			"vault-sourced provider-auth body at "+CredentialSyncPathPrefix+"%s/%s exceeds %d bytes (%d) and will not be parsed",
-			kind, project, maxProviderAuthBodyBytes, len(raw),
+			"vault-sourced provider-auth body at %s exceeds %d bytes (%d) and will not be parsed",
+			keyedPath, maxProviderAuthBodyBytes, len(raw),
 		)
 	}
 	var body providerAuthBody
 	if err := toml.Unmarshal(raw, &body); err != nil {
 		// Wrap the TOML parser's error WITHOUT including the body
 		// bytes — toml.Unmarshal errors are content-free (offset
-		// only), but we still scrub by surfacing only kind+project.
+		// only), but we still scrub by surfacing only the path.
 		return nil, fmt.Errorf(
-			"vault-sourced provider-auth body at "+CredentialSyncPathPrefix+"%s/%s is malformed: %w",
-			kind, project, sanitizeTOMLError(err),
+			"vault-sourced provider-auth body at %s is malformed: %w",
+			keyedPath, sanitizeTOMLError(err),
 		)
 	}
 	version := body.Version
@@ -72,20 +92,20 @@ func parseProviderAuthBody(kind, project string, raw []byte) (*ProviderAuthEntry
 	}
 	if version != "1" {
 		return nil, fmt.Errorf(
-			"provider-auth body at "+CredentialSyncPathPrefix+"%s/%s has unsupported schema version %q; this niwa version supports v1. Upgrade niwa or update the vault entry.",
-			kind, project, version,
+			"provider-auth body at %s has unsupported schema version %q; this niwa version supports v1. Upgrade niwa or update the vault entry.",
+			keyedPath, version,
 		)
 	}
 	if body.ClientID == "" {
 		return nil, fmt.Errorf(
-			"vault-sourced provider-auth body at "+CredentialSyncPathPrefix+"%s/%s is missing required field %q",
-			kind, project, "client_id",
+			"vault-sourced provider-auth body at %s is missing required field %q",
+			keyedPath, "client_id",
 		)
 	}
 	if body.ClientSecret == "" {
 		return nil, fmt.Errorf(
-			"vault-sourced provider-auth body at "+CredentialSyncPathPrefix+"%s/%s is missing required field %q",
-			kind, project, "client_secret",
+			"vault-sourced provider-auth body at %s is missing required field %q",
+			keyedPath, "client_secret",
 		)
 	}
 	cfg := map[string]any{
@@ -413,9 +433,16 @@ func (p *CredentialPool) lookupVault(ctx context.Context, kind, project string) 
 		return cached.Entry, cached.Err
 	}
 
+	// Infisical and likely other backends reject secret keys whose
+	// first character is a digit (~37.5% of UUIDv4 values), so the
+	// project UUID is prepended with "p-" before being used as the
+	// vault Key. The Path is unchanged. User-facing diagnostics in
+	// parseProviderAuthBody render the same prefixed key so the
+	// path the user sees in an error message matches what they need
+	// to set in their vault.
 	ref := vault.Ref{
 		Path: p.vaultLoader.PathPrefix + kind,
-		Key:  project,
+		Key:  credentialSyncProjectKeyPrefix + project,
 	}
 	sv, _, err := p.vaultLoader.Provider.Resolve(ctx, ref)
 	if err != nil {
