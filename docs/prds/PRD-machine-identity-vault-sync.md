@@ -463,13 +463,14 @@ infisical  880b1733-b62e-74a7-d949-779988773333  none                —
 |--------|---------|
 | `KIND` | Backend kind (e.g., `infisical`) |
 | `PROJECT-UUID` | The `(kind, project)` identifier niwa needed credentials for |
-| `SOURCE` | Where the credential came from in the last apply: `local-file`, `vault:<name>` (provider name), `cli-session`, or `none`. When the credential-sync provider is the anonymous `[global.vault.provider]`, the column renders `vault:(anonymous)`. niwa MUST NOT emit a bare trailing colon (`vault:`) — `(anonymous)` is the literal placeholder. |
-| `FALLBACK` | The non-active source that ALSO had an entry, if any. `vault:<name>` (or `vault:(anonymous)`) when the local file won; otherwise `—` |
+| `SOURCE` | Where the credential came from in the last apply: `local-file`, `vault:personal-overlay` (anonymous credential-sync source), `vault:personal-overlay(<name>)` (named credential-sync source — reserved for a future extension), `cli-session`, or `none`. niwa MUST NOT emit a bare `vault:` with a trailing colon. |
+| `FALLBACK` | The non-active source that ALSO had an entry, if any. `vault:personal-overlay` (with the optional `(<name>)` disambiguator) when the local file won; otherwise `—` |
 
 When the same `(kind, project)` has entries in both layers, the
 SOURCE column shows the layer that won (local-file) and FALLBACK
-shows the layer that lost (vault:<name>). When only one layer has
-an entry, FALLBACK is `—`.
+shows the layer that lost (`vault:personal-overlay`, optionally
+suffixed with `(<name>)`). When only one layer has an entry,
+FALLBACK is `—`.
 
 Exit codes:
 
@@ -489,8 +490,8 @@ bytes. Concretely, the JSON schema for one row is:
 
 ```json
 {
-  "source":   "local-file" | "vault:<name>" | "vault:(anonymous)" | "cli-session" | "none",
-  "fallback": "vault:<name>" | "vault:(anonymous)" | ""
+  "source":   "local-file" | "vault:personal-overlay" | "vault:personal-overlay(<name>)" | "cli-session" | "none",
+  "fallback": "vault:personal-overlay" | "vault:personal-overlay(<name>)" | ""
 }
 ```
 
@@ -505,13 +506,14 @@ MUST emit one stderr line per **unique `(kind, project)` pair**
 sourced from the vault. Shape:
 
 ```
-auth: <kind>/<project-uuid> source=vault:<name>
+auth: <kind>/<project-uuid> source=vault:personal-overlay
 ```
 
-When the credential-sync provider is the anonymous
-`[global.vault.provider]`, `<name>` renders as `(anonymous)` —
-the same convention as R11's audit column. niwa MUST NOT emit a
-bare trailing colon.
+When the credential-sync provider has a name (a future extension —
+under v1, only the anonymous `[global.vault.provider]` may serve
+as the credential-sync source), the line renders as
+`source=vault:personal-overlay(<name>)`. niwa MUST NOT emit a bare
+`vault:` with a trailing colon.
 
 Two `(kind, project)` pairs that happen to share a vault provider
 name produce two lines, not one. The grouping is per pair.
@@ -646,7 +648,7 @@ redaction logic.
       declared in their personal overlay sees credential sync
       activate: machine-identity entries are fetched from that
       provider during apply, and `niwa status --audit-auth` renders
-      the SOURCE column as `vault:(anonymous)` for any
+      the SOURCE column as `vault:personal-overlay` for any
       `(kind, project)` pair the vault covered. Verified by
       `internal/config/...` parser tests and
       `internal/workspace/credentialpool_*_test.go`.
@@ -823,14 +825,18 @@ redaction logic.
       vault `Resolve` ref carries `p-<MixedCaseUUID>` preserving the
       original case.
 
-### Anonymous-provider rendering
+### Credential-sync source rendering
 
-- [ ] **AC-39**: When the credential-sync provider is the anonymous
-      `[global.vault.provider]`, `niwa status --audit-auth` renders
-      the SOURCE column as `vault:(anonymous)`, the FALLBACK column
-      uses the same form when applicable, and the R12 stderr line
-      uses `source=vault:(anonymous)`. niwa MUST NOT emit a bare
-      `vault:` token (trailing colon with empty name).
+- [ ] **AC-39**: The credential-sync source label has two parts: a
+      fixed `vault:personal-overlay` prefix that names where every
+      credential-sync source lives, and an optional `(<name>)`
+      disambiguator for named providers (reserved for a future
+      extension; under v1, only the anonymous `[global.vault.provider]`
+      may serve as the credential-sync source, so the `(<name>)`
+      suffix is never emitted in practice). Both `niwa status
+      --audit-auth` (SOURCE and FALLBACK columns) and the R12 stderr
+      line use this rendering. niwa MUST NOT emit a bare `vault:`
+      token with a trailing colon.
 
 ### `p-` key prefix (R7 amendment)
 

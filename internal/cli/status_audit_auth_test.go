@@ -28,7 +28,7 @@ func TestBuildAuditAuthRows_Empty(t *testing.T) {
 // map key splits correctly into Kind and Project columns.
 func TestBuildAuditAuthRows_KeySplit(t *testing.T) {
 	src := map[string]workspace.AuthSourceRecord{
-		"infisical/uuid-A": {Source: "vault:personal"},
+		"infisical/uuid-A": {Source: "vault:personal-overlay(personal)"},
 	}
 	rows := buildAuditAuthRows(src)
 	if len(rows) != 1 {
@@ -40,8 +40,8 @@ func TestBuildAuditAuthRows_KeySplit(t *testing.T) {
 	if rows[0].Project != "uuid-A" {
 		t.Errorf("Project = %q, want %q", rows[0].Project, "uuid-A")
 	}
-	if rows[0].Source != "vault:personal" {
-		t.Errorf("Source = %q, want %q", rows[0].Source, "vault:personal")
+	if rows[0].Source != "vault:personal-overlay(personal)" {
+		t.Errorf("Source = %q, want %q", rows[0].Source, "vault:personal-overlay(personal)")
 	}
 }
 
@@ -50,9 +50,9 @@ func TestBuildAuditAuthRows_KeySplit(t *testing.T) {
 func TestBuildAuditAuthRows_SortedByKindThenProject(t *testing.T) {
 	src := map[string]workspace.AuthSourceRecord{
 		"infisical/uuid-z":  {Source: "local-file"},
-		"infisical/uuid-a":  {Source: "vault:personal"},
+		"infisical/uuid-a":  {Source: "vault:personal-overlay(personal)"},
 		"sops/whatever":     {Source: "cli-session"},
-		"infisical/uuid-m":  {Source: "vault:(anonymous)"},
+		"infisical/uuid-m":  {Source: "vault:personal-overlay"},
 	}
 	rows := buildAuditAuthRows(src)
 	if len(rows) != 4 {
@@ -79,8 +79,8 @@ func TestBuildAuditAuthRows_SortedByKindThenProject(t *testing.T) {
 func TestPrintAuditAuthTable_HeaderAndColumns(t *testing.T) {
 	var buf bytes.Buffer
 	rows := []auditAuthRow{
-		{Kind: "infisical", Project: "uuid-A", Source: "local-file", Fallback: "vault:personal"},
-		{Kind: "infisical", Project: "uuid-B", Source: "vault:personal", Fallback: ""},
+		{Kind: "infisical", Project: "uuid-A", Source: "local-file", Fallback: "vault:personal-overlay(personal)"},
+		{Kind: "infisical", Project: "uuid-B", Source: "vault:personal-overlay(personal)", Fallback: ""},
 	}
 	printAuditAuthTable(&buf, rows)
 	out := buf.String()
@@ -90,7 +90,7 @@ func TestPrintAuditAuthTable_HeaderAndColumns(t *testing.T) {
 			t.Errorf("header missing column %q. Output:\n%s", want, out)
 		}
 	}
-	for _, want := range []string{"infisical", "uuid-A", "uuid-B", "local-file", "vault:personal"} {
+	for _, want := range []string{"infisical", "uuid-A", "uuid-B", "local-file", "vault:personal-overlay(personal)"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("table missing %q. Output:\n%s", want, out)
 		}
@@ -102,7 +102,7 @@ func TestPrintAuditAuthTable_HeaderAndColumns(t *testing.T) {
 func TestPrintAuditAuthTable_EmDashWhenFallbackEmpty(t *testing.T) {
 	var buf bytes.Buffer
 	rows := []auditAuthRow{
-		{Kind: "infisical", Project: "uuid-A", Source: "vault:personal", Fallback: ""},
+		{Kind: "infisical", Project: "uuid-A", Source: "vault:personal-overlay(personal)", Fallback: ""},
 	}
 	printAuditAuthTable(&buf, rows)
 	out := buf.String()
@@ -113,19 +113,19 @@ func TestPrintAuditAuthTable_EmDashWhenFallbackEmpty(t *testing.T) {
 
 // TestPrintAuditAuthTable_AnonymousVaultRender confirms AC-39:
 // the anonymous credential-sync provider renders as
-// "vault:(anonymous)" in both SOURCE and FALLBACK columns.
+// "vault:personal-overlay" in both SOURCE and FALLBACK columns.
 // The pool's renderVaultProvider helper produces these strings;
 // I4 just outputs them verbatim.
 func TestPrintAuditAuthTable_AnonymousVaultRender(t *testing.T) {
 	var buf bytes.Buffer
 	rows := []auditAuthRow{
-		{Kind: "infisical", Project: "uuid-A", Source: "vault:(anonymous)"},
-		{Kind: "infisical", Project: "uuid-B", Source: "local-file", Fallback: "vault:(anonymous)"},
+		{Kind: "infisical", Project: "uuid-A", Source: "vault:personal-overlay"},
+		{Kind: "infisical", Project: "uuid-B", Source: "local-file", Fallback: "vault:personal-overlay"},
 	}
 	printAuditAuthTable(&buf, rows)
 	out := buf.String()
-	if strings.Count(out, "vault:(anonymous)") != 2 {
-		t.Errorf("expected 'vault:(anonymous)' to appear in both rows. Output:\n%s", out)
+	if strings.Count(out, "vault:personal-overlay") != 2 {
+		t.Errorf("expected 'vault:personal-overlay' to appear in both rows. Output:\n%s", out)
 	}
 	if strings.Contains(out, "vault: ") || strings.Contains(out, "vault:\n") {
 		t.Errorf("output must not contain bare 'vault:'. Output:\n%s", out)
@@ -155,15 +155,15 @@ func TestPrintAuditAuthTable_HeaderEvenWhenEmpty(t *testing.T) {
 // audit, and confirms exit code 0 plus the rendered table.
 func TestRunAuditAuth_HappyPath(t *testing.T) {
 	dir := writeInstanceForAuditTest(t, map[string]workspace.AuthSourceRecord{
-		"infisical/uuid-A": {Source: "vault:personal"},
-		"infisical/uuid-B": {Source: "local-file", Fallback: "vault:personal"},
+		"infisical/uuid-A": {Source: "vault:personal-overlay(personal)"},
+		"infisical/uuid-B": {Source: "local-file", Fallback: "vault:personal-overlay(personal)"},
 	})
 
 	out, err := runAuditAuthInDir(t, dir)
 	if err != nil {
 		t.Fatalf("runAuditAuth returned error: %v", err)
 	}
-	if !strings.Contains(out, "infisical") || !strings.Contains(out, "vault:personal") {
+	if !strings.Contains(out, "infisical") || !strings.Contains(out, "vault:personal-overlay(personal)") {
 		t.Errorf("expected table output. Got:\n%s", out)
 	}
 }
@@ -173,7 +173,7 @@ func TestRunAuditAuth_HappyPath(t *testing.T) {
 // non-zero).
 func TestRunAuditAuth_ExitNonZeroOnNoneSource(t *testing.T) {
 	dir := writeInstanceForAuditTest(t, map[string]workspace.AuthSourceRecord{
-		"infisical/uuid-A": {Source: "vault:personal"},
+		"infisical/uuid-A": {Source: "vault:personal-overlay(personal)"},
 		"infisical/uuid-B": {Source: "none"},
 	})
 

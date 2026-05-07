@@ -121,11 +121,13 @@ type InstanceState struct {
 // are categorical strings — never credential bytes (PRD R18).
 //
 //   - Source: where the credential came from in the last apply.
-//     One of "local-file", "vault:<name>" (or "vault:(anonymous)"
-//     for the anonymous credential-sync provider per AC-39),
+//     One of "local-file", "vault:personal-overlay" (or
+//     "vault:personal-overlay(<name>)" when the credential-sync
+//     provider has a name; see PRD AC-39 / renderVaultProvider),
 //     "cli-session", or "none".
 //   - Fallback: the non-active source that ALSO had an entry, if
-//     any. "vault:<name>" when the local file won and the vault
+//     any. "vault:personal-overlay" (with the same name-disambiguator
+//     suffix when applicable) when the local file won and the vault
 //     also had an entry; otherwise empty.
 //
 // `niwa status --audit-auth` reads this map (and only this map) to

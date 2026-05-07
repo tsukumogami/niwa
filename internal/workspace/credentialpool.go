@@ -559,8 +559,9 @@ func (p *CredentialPool) AuditLog() AuditTrail {
 // line per credential-source decision worth logging, per PRD R12 +
 // AC-13 / AC-14 / AC-15. The emit rules:
 //
-//   - Source == SourceVault → "auth: <kind>/<project> source=vault:<name>"
-//     (anonymous renders as vault:(anonymous), AC-39).
+//   - Source == SourceVault → "auth: <kind>/<project> source=vault:personal-overlay"
+//     (or "vault:personal-overlay(<name>)" when the provider has a
+//     name; see renderVaultProvider for the rendering rule).
 //   - Source == SourceLocalFile && Fallback != "" →
 //     "auth: <kind>/<project> source=local-file fallback=<fallback>"
 //     (the user has a per-machine override active over a vault entry).
@@ -652,7 +653,7 @@ func (a AuditTrail) AsMap() map[string]AuthSourceRecord {
 // --audit-auth`) consume. The mapping:
 //
 //   - SourceLocalFile   → "local-file"
-//   - SourceVault       → "vault:<provider-name>"  (or "vault:(anonymous)" when Provider == "")
+//   - SourceVault       → "vault:personal-overlay"  (anonymous form; or "vault:personal-overlay(<name>)" when named)
 //   - SourceCLISession  → "cli-session"
 //   - SourceNone        → "none"
 //   - any other Source  → "" (defensive; never produced by Lookup)
@@ -676,21 +677,35 @@ func renderSource(rec AuditRecord) string {
 }
 
 // renderVaultProvider formats a vault provider name for the audit
-// surfaces. Anonymous providers (Provider == "") render as
-// "vault:(anonymous)" per PRD AC-39; named providers render as
-// "vault:<name>". Never produces a bare "vault:" with a trailing
-// colon and empty name.
+// surfaces (R11 audit table SOURCE/FALLBACK columns and R12 stderr
+// emission).
 //
-// I7 will call this helper when populating AuditRecord.Fallback —
-// the pool sets Fallback to renderVaultProvider(loader.ProviderName)
-// when the file layer wins and the vault layer also had an entry —
-// so the AC-39 anonymous-rendering rule applies symmetrically to
-// the SOURCE and FALLBACK columns.
+// The label has two parts: a fixed source identifier
+// ("personal-overlay") that names where credential-sync sources live,
+// and an optional disambiguator (the provider's name, when set) for
+// users who eventually configure multiple credential-sync providers
+// in the same overlay.
+//
+// Renderings:
+//   - Anonymous personal-overlay vault (the only credential-sync
+//     shape Alt 2 currently allows): "vault:personal-overlay".
+//   - Named personal-overlay vault (reserved for a future extension
+//     where named providers may serve as credential-sync sources):
+//     "vault:personal-overlay(<name>)".
+//
+// The source label is consistent regardless of name because, under
+// the Alt 2 design, every credential-sync source lives in the
+// personal overlay — that's the consent property of declaring
+// `[global.vault.provider]`. Names disambiguate among siblings; they
+// never identify a different origin.
+//
+// Never emits a bare "vault:" with a trailing colon.
 func renderVaultProvider(name string) string {
+	const sourceLabel = "vault:personal-overlay"
 	if name == "" {
-		return "vault:(anonymous)"
+		return sourceLabel
 	}
-	return "vault:" + name
+	return sourceLabel + "(" + name + ")"
 }
 
 // matchFileEntry synthesizes a vault.ProviderSpec for (kind, project)

@@ -14,8 +14,9 @@ import (
 // Kind and Project are split from the state.AuthSources map key
 // "<kind>/<project>"; Source and Fallback come straight from the
 // AuthSourceRecord (already pre-rendered by the credential pool's
-// renderSource / renderVaultProvider helpers, including the AC-39
-// "vault:(anonymous)" form).
+// renderSource / renderVaultProvider helpers; vault sources render
+// as "vault:personal-overlay" or "vault:personal-overlay(<name>)",
+// see PRD AC-39).
 type auditAuthRow struct {
 	Kind     string
 	Project  string
@@ -106,16 +107,20 @@ func buildAuditAuthRows(authSources map[string]workspace.AuthSourceRecord) []aud
 // sees a recognizable empty table rather than blank output.
 func printAuditAuthTable(w io.Writer, rows []auditAuthRow) {
 	// Column widths match PRD R11's example header
-	// `KIND       PROJECT-UUID                          SOURCE              FALLBACK`
+	// `KIND       PROJECT-UUID                          SOURCE                     FALLBACK`
 	// byte-for-byte: KIND padded to 11 chars (allowing two trailing spaces
 	// after the longest kind in current use, "infisical"); PROJECT-UUID
 	// padded to 38 chars (a UUID's 36 chars plus two trailing spaces);
-	// SOURCE padded to 20 chars (longest known value is
-	// "vault:(anonymous)" at 17 chars plus three trailing spaces).
+	// SOURCE padded to 25 chars (longest known value today is
+	// "vault:personal-overlay" at 22 chars plus three trailing spaces).
+	// Future named credential-sync sources render as
+	// "vault:personal-overlay(<name>)" and may exceed this width; the
+	// renderer absorbs the overflow without truncating, at the cost of
+	// FALLBACK shifting right on those rows.
 	const (
 		kindWidth    = 11
 		projectWidth = 38
-		sourceWidth  = 20
+		sourceWidth  = 25
 	)
 	fmt.Fprintf(w, "%-*s%-*s%-*s%s\n",
 		kindWidth, "KIND",

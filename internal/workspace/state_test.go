@@ -1042,15 +1042,15 @@ func TestSaveAndLoadStateAuthSources(t *testing.T) {
 		LastApplied:    time.Now(),
 		AuthSources: map[string]AuthSourceRecord{
 			"infisical/uuid-prod": {
-				Source:   "vault:personal",
+				Source:   "vault:personal-overlay(personal)",
 				Fallback: "",
 			},
 			"infisical/uuid-team": {
 				Source:   "local-file",
-				Fallback: "vault:personal",
+				Fallback: "vault:personal-overlay(personal)",
 			},
 			"infisical/uuid-anon": {
-				Source:   "vault:(anonymous)",
+				Source:   "vault:personal-overlay",
 				Fallback: "",
 			},
 			"infisical/uuid-cli": {
