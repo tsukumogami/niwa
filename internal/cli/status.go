@@ -19,6 +19,10 @@ func init() {
 	statusCmd.Flags().BoolVar(&statusAuditSecrets, "audit-secrets", false,
 		"classify every *.secrets table value (vault-ref/plaintext/empty/resolved); "+
 			"exits non-zero when plaintext values are found and a vault is configured")
+	statusCmd.Flags().BoolVar(&statusAuditAuth, "audit-auth", false,
+		"render the credential-source audit table for the most recent apply "+
+			"(reads state.json offline; never makes a vault or network call); "+
+			"exits non-zero when any (kind, project) pair has source=none")
 	statusCmd.Flags().BoolVar(&statusCheckVault, "check-vault", false,
 		"re-resolve every vault:// reference (invokes providers) and report rotations "+
 			"without materializing files")
@@ -29,6 +33,7 @@ func init() {
 
 var (
 	statusAuditSecrets bool
+	statusAuditAuth    bool
 	statusCheckVault   bool
 	statusVerbose      bool
 )
@@ -54,6 +59,14 @@ Flags:
                     KEY / CLASSIFICATION / TABLE / SHADOWED table and
                     exits non-zero when any plaintext values are found
                     and a vault is configured.
+  --audit-auth      Render the credential-source audit table from the
+                    most recent apply (machine-identity-vault-sync). Prints a
+                    KIND / PROJECT-UUID / SOURCE / FALLBACK table and
+                    exits non-zero when any (kind, project) pair has
+                    source=none. Fully offline — reads state.json and
+                    never makes a vault or network call. A future
+                    --check-vault-auth flag for live verification is
+                    deferred to v1.1.
   --check-vault     Re-resolve every vault:// reference by invoking the
                     configured providers and compare the resulting source
                     fingerprints against the stored state. Does NOT
@@ -71,6 +84,9 @@ func runStatus(cmd *cobra.Command, args []string) error {
 
 	if statusAuditSecrets {
 		return runAuditSecrets(cmd, cwd)
+	}
+	if statusAuditAuth {
+		return runAuditAuth(cmd, cwd)
 	}
 	if statusCheckVault {
 		return runCheckVault(cmd, cwd)
