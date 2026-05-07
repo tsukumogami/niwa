@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/BurntSushi/toml"
@@ -429,11 +430,30 @@ func validateContentSource(field, source string) error {
 // accepts the same anonymous-or-named shapes. A personal overlay may
 // declare its own providers for a workspace; the resolver (Issue 4)
 // stacks team and personal bundles per-source-org.
+// MachineIdentitiesConfig is the [global.machine_identities] block in the
+// personal overlay's niwa.toml. Presence of the block opts the user into
+// machine-identity vault sync (PRD R1). The optional From field selects
+// which declared vault provider supplies credentials:
+//
+//   - From == "" (absent or explicitly empty): use the anonymous
+//     [global.vault.provider]. Parse-time error (R2) if no anonymous
+//     provider is declared in the same file.
+//   - From == "<name>": use [global.vault.providers.<name>] from the
+//     same file. Parse-time error (R2) if the name isn't declared.
+//
+// Only the top-level [global.machine_identities] block opts in; per-
+// workspace overrides under [workspaces.<name>.machine_identities] are
+// not honored (PRD R1, R10).
+type MachineIdentitiesConfig struct {
+	From string `toml:"from"`
+}
+
 type GlobalOverride struct {
-	Claude *ClaudeOverride   `toml:"claude,omitempty"`
-	Env    EnvConfig         `toml:"env,omitempty"`
-	Files  map[string]string `toml:"files,omitempty"`
-	Vault  *VaultRegistry    `toml:"vault,omitempty"`
+	Claude            *ClaudeOverride          `toml:"claude,omitempty"`
+	Env               EnvConfig                `toml:"env,omitempty"`
+	Files             map[string]string        `toml:"files,omitempty"`
+	Vault             *VaultRegistry           `toml:"vault,omitempty"`
+	MachineIdentities *MachineIdentitiesConfig `toml:"machine_identities,omitempty"`
 }
 
 // GlobalConfigOverride is the top-level structure parsed from the global
@@ -456,6 +476,12 @@ func ParseGlobalConfigOverride(data []byte) (*GlobalConfigOverride, error) {
 		return nil, err
 	}
 	if err := cfg.Global.Vault.Validate("global overlay"); err != nil {
+		return nil, err
+	}
+	// PRD R1/R2: validate machine-identity opt-in only against the
+	// top-level [global] block. Per-workspace [workspaces.<name>]
+	// blocks do not opt into machine-identity sync.
+	if err := validateMachineIdentities("global overlay", cfg.Global); err != nil {
 		return nil, err
 	}
 	for name, ws := range cfg.Workspaces {
@@ -486,6 +512,55 @@ func validateGlobalOverridePaths(prefix string, g GlobalOverride) error {
 		}
 	}
 	return nil
+}
+
+// validateMachineIdentities runs the PRD R2 parse-time check on a
+// personal-overlay GlobalOverride. The check is a no-op when
+// [machine_identities] is absent. When present, the From field must
+// either match a declared named provider in the same Vault registry
+// or be empty (and an anonymous [vault.provider] must be declared in
+// the same registry).
+//
+// prefix is the file label used in diagnostic messages (e.g.,
+// "global overlay") to mirror the precedent set by Vault.Validate.
+func validateMachineIdentities(prefix string, ov GlobalOverride) error {
+	if ov.MachineIdentities == nil {
+		return nil
+	}
+	known := ov.Vault.KnownProviderNames()
+	if ov.MachineIdentities.From != "" {
+		if !known[ov.MachineIdentities.From] {
+			return fmt.Errorf(
+				"%s: [machine_identities] from = %q references unknown vault provider. Declared providers in this file: [%s].",
+				prefix, ov.MachineIdentities.From, strings.Join(declaredNamedProviders(known), ", "),
+			)
+		}
+		return nil
+	}
+	// from is empty/unset: require an anonymous [vault.provider].
+	if !known[""] {
+		return fmt.Errorf(
+			"%s: [machine_identities] is enabled but no vault provider is declared. Either add [vault.provider] (anonymous) or [vault.providers.<name>] and set from = \"<name>\".",
+			prefix,
+		)
+	}
+	return nil
+}
+
+// declaredNamedProviders returns the named (non-anonymous) provider
+// names from a KnownProviderNames map, sorted. Used to build the
+// diagnostic list in validateMachineIdentities so test assertions are
+// stable across map iteration order.
+func declaredNamedProviders(known map[string]bool) []string {
+	names := make([]string, 0, len(known))
+	for name := range known {
+		if name == "" {
+			continue
+		}
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }
 
 // rejectWorkerSpawnCommandKey fails parsing when NIWA_WORKER_SPAWN_COMMAND

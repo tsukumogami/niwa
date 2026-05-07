@@ -686,6 +686,152 @@ files = ["../secrets.env"]
 	}
 }
 
+// TestParseGlobalConfigOverrideMachineIdentitiesAbsent confirms that
+// when [global.machine_identities] is absent, the feature stays
+// disabled (MachineIdentities is nil) and no validation error is
+// returned. Regression guard for PRD AC-28 / AC-29 (no behavior
+// change for non-opting-in users).
+func TestParseGlobalConfigOverrideMachineIdentitiesAbsent(t *testing.T) {
+	input := `
+[global.vault.providers.team]
+kind = "infisical"
+project = "abc"
+`
+	cfg, err := ParseGlobalConfigOverride([]byte(input))
+	if err != nil {
+		t.Fatalf("expected no error with absent machine_identities, got %v", err)
+	}
+	if cfg.Global.MachineIdentities != nil {
+		t.Errorf("MachineIdentities should be nil when block is absent, got %+v", cfg.Global.MachineIdentities)
+	}
+}
+
+// TestParseGlobalConfigOverrideMachineIdentitiesNamedProviderOK is
+// the PRD AC-1 happy path: a named provider declared in the same
+// file with a matching from = "<name>".
+func TestParseGlobalConfigOverrideMachineIdentitiesNamedProviderOK(t *testing.T) {
+	input := `
+[global.vault.providers.prod]
+kind = "infisical"
+project = "uuid-prod"
+
+[global.machine_identities]
+from = "prod"
+`
+	cfg, err := ParseGlobalConfigOverride([]byte(input))
+	if err != nil {
+		t.Fatalf("expected no error for AC-1 named-provider opt-in, got %v", err)
+	}
+	if cfg.Global.MachineIdentities == nil {
+		t.Fatal("MachineIdentities should be non-nil when block is present")
+	}
+	if got := cfg.Global.MachineIdentities.From; got != "prod" {
+		t.Errorf("MachineIdentities.From = %q, want %q", got, "prod")
+	}
+}
+
+// TestParseGlobalConfigOverrideMachineIdentitiesAnonymousProviderOK
+// is the PRD AC-2 happy path: an anonymous [global.vault.provider]
+// declared in the same file with [global.machine_identities] (no
+// from field).
+func TestParseGlobalConfigOverrideMachineIdentitiesAnonymousProviderOK(t *testing.T) {
+	input := `
+[global.vault.provider]
+kind = "infisical"
+project = "uuid-anon"
+
+[global.machine_identities]
+`
+	cfg, err := ParseGlobalConfigOverride([]byte(input))
+	if err != nil {
+		t.Fatalf("expected no error for AC-2 anonymous-provider opt-in, got %v", err)
+	}
+	if cfg.Global.MachineIdentities == nil {
+		t.Fatal("MachineIdentities should be non-nil when block is present (even with no `from`)")
+	}
+	if got := cfg.Global.MachineIdentities.From; got != "" {
+		t.Errorf("MachineIdentities.From = %q, want empty string", got)
+	}
+}
+
+// TestParseGlobalConfigOverrideMachineIdentitiesUnknownNamedProvider
+// covers PRD AC-3 and AC-34: a from = "<name>" that doesn't match
+// any declared [global.vault.providers.*] returns a parse-time error
+// naming the missing provider and listing what IS declared. AC-34
+// is the same code path with a name that exists in a team config
+// but not in the personal overlay — this test simulates that by
+// declaring only "team" and pointing from at "missing".
+func TestParseGlobalConfigOverrideMachineIdentitiesUnknownNamedProvider(t *testing.T) {
+	input := `
+[global.vault.providers.team]
+kind = "infisical"
+project = "uuid-team"
+
+[global.machine_identities]
+from = "missing"
+`
+	_, err := ParseGlobalConfigOverride([]byte(input))
+	if err == nil {
+		t.Fatal("expected R2 error for unknown named provider, got nil")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "references unknown vault provider") {
+		t.Errorf("error %q should contain 'references unknown vault provider'", msg)
+	}
+	if !strings.Contains(msg, `"missing"`) {
+		t.Errorf("error %q should name the missing provider", msg)
+	}
+	if !strings.Contains(msg, "[team]") {
+		t.Errorf("error %q should list the declared providers, got [team]", msg)
+	}
+}
+
+// TestParseGlobalConfigOverrideMachineIdentitiesNoAnonymousProvider
+// covers PRD AC-4 and AC-5: when from is unset (or explicitly empty)
+// and only named providers are declared (no anonymous
+// [global.vault.provider]), parse-time fails with the no-anonymous
+// diagnostic.
+func TestParseGlobalConfigOverrideMachineIdentitiesNoAnonymousProvider(t *testing.T) {
+	cases := []struct {
+		name  string
+		input string
+	}{
+		{
+			name: "AC-4 from absent",
+			input: `
+[global.vault.providers.team]
+kind = "infisical"
+project = "uuid-team"
+
+[global.machine_identities]
+`,
+		},
+		{
+			name: "AC-5 from explicit empty",
+			input: `
+[global.vault.providers.team]
+kind = "infisical"
+project = "uuid-team"
+
+[global.machine_identities]
+from = ""
+`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := ParseGlobalConfigOverride([]byte(tc.input))
+			if err == nil {
+				t.Fatal("expected R2 error for missing anonymous provider, got nil")
+			}
+			msg := err.Error()
+			if !strings.Contains(msg, "no vault provider is declared") {
+				t.Errorf("error %q should contain 'no vault provider is declared'", msg)
+			}
+		})
+	}
+}
+
 // TestParseRejectsContentAtRepoOverride is the Issue 1 proof that the type
 // split enforces workspace-scoped-only content at the type level: the TOML
 // decoder surfaces [repos.<name>.claude.content] as an unknown-config-field
