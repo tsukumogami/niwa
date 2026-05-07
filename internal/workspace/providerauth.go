@@ -2,6 +2,7 @@ package workspace
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -146,12 +147,23 @@ func injectProviderTokens(ctx context.Context, pool *CredentialPool, vr *config.
 		project, _ := vr.Provider.Config["project"].(string)
 		entry, _, err := pool.Lookup(ctx, vr.Provider.Kind, project)
 		if err != nil {
-			return err
-		}
-		if entry != nil {
+			if !isSoftenable(err) {
+				return err
+			}
+			// Soft path (PRD R13.1): vault unreachable. Record was
+			// already buffered on the pool by lookupVault; continue
+			// without injecting a token. The backend's later
+			// universal-auth call will fall through to its CLI
+			// session (R13.1 success) or fail (R13.2 — backend
+			// error propagates).
+		} else if entry != nil {
 			token, authErr := authenticateEntry(ctx, entry)
 			if authErr != nil {
-				return authErr
+				// PRD R13.6: wrap with the (kind, project) context
+				// so users can identify which credential failed
+				// (AC-22).
+				return fmt.Errorf("authenticating credential for vault provider (kind=%q, project=%q) via %s: %w",
+					vr.Provider.Kind, project, sourceLabel(entry), authErr)
 			}
 			if vr.Provider.Config == nil {
 				vr.Provider.Config = map[string]any{}
@@ -165,12 +177,17 @@ func injectProviderTokens(ctx context.Context, pool *CredentialPool, vr *config.
 		project, _ := p.Config["project"].(string)
 		entry, _, err := pool.Lookup(ctx, p.Kind, project)
 		if err != nil {
-			return err
+			if !isSoftenable(err) {
+				return err
+			}
+			// Soft path: same rationale as the anonymous branch above.
+			continue
 		}
 		if entry != nil {
 			token, authErr := authenticateEntry(ctx, entry)
 			if authErr != nil {
-				return authErr
+				return fmt.Errorf("authenticating credential for vault provider %q (kind=%q, project=%q) via %s: %w",
+					name, p.Kind, project, sourceLabel(entry), authErr)
 			}
 			if p.Config == nil {
 				p.Config = map[string]any{}
@@ -181,6 +198,29 @@ func injectProviderTokens(ctx context.Context, pool *CredentialPool, vr *config.
 	}
 
 	return nil
+}
+
+// isSoftenable reports whether a Lookup error is a recoverable
+// vault-unreachable case (PRD R13.1: continue iterating; the
+// aggregated warning fires once apply-side after all three
+// injectProviderTokens calls). Other vault errors (R13.4 / R13.5 /
+// R13.7 — body parse / missing field / unsupported version) stay
+// hard.
+func isSoftenable(err error) bool {
+	var vue *vaultUnreachableError
+	return errors.As(err, &vue)
+}
+
+// sourceLabel renders a short categorical label for a credential
+// entry's origin, used in R13.6 wrap text. Today there's only one
+// shape (file-or-vault entry produced by the pool); the helper
+// exists so I9's stderr emitter and any future category share the
+// same vocabulary if more origins appear.
+func sourceLabel(entry *ProviderAuthEntry) string {
+	if entry == nil {
+		return "unknown source"
+	}
+	return "machine-identity entry"
 }
 
 // authenticateEntry dispatches authentication to the appropriate

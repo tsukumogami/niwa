@@ -883,6 +883,20 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		}
 	}
 
+	// PRD R13.1: emit one aggregated warning per apply naming the
+	// unreachable personal-vault providers seen across all three
+	// injectProviderTokens calls. Empty observation list → no
+	// warning. The warning fires BEFORE BuildBundle runs so even
+	// an R13.2 path (no fallback → BuildBundle's universal-auth
+	// failure → apply exits non-zero) still produces the warning
+	// per AC-17.
+	for _, vue := range credentialPool.VaultUnreachableObservations() {
+		a.Reporter.Warn(
+			"personal vault provider %s unreachable; falling back to local-file and cli-session credentials.",
+			renderVaultProvider(vue.ProviderName),
+		)
+	}
+
 	// Build provider bundles from each layer independently. Bundle
 	// lifetime is scoped to this apply: defer CloseAll so providers
 	// shut down cleanly even on error paths (R29 no-disk-cache).

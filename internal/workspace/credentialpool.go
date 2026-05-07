@@ -174,6 +174,23 @@ type AuditRecord struct {
 	Fallback string // "vault:<name>" when local file overrode a vault entry; "" otherwise.
 }
 
+// vaultUnreachableError is the typed error lookupVault returns when
+// the personal vault provider can't be reached
+// (vault.ErrProviderUnreachable). Apply-time wiring uses errors.As
+// to recover the (kind, project) pair plus the vault provider name
+// for PRD R13.1's aggregated warning text. Unwrap returns the
+// fmt.Errorf wrap so errors.Is(err, vault.ErrProviderUnreachable)
+// keeps matching for any downstream consumer.
+type vaultUnreachableError struct {
+	Kind         string
+	Project      string
+	ProviderName string // "" for anonymous; render via renderVaultProvider.
+	err          error  // the fmt.Errorf %w-wrap; Unwrap returns it.
+}
+
+func (e *vaultUnreachableError) Error() string { return e.err.Error() }
+func (e *vaultUnreachableError) Unwrap() error { return e.err }
+
 // CredentialPool joins the (eager) local-file credential layer with
 // an (optional, lazy) vault loader. In I2 the loader is never wired,
 // so Lookup is a thin façade over MatchProviderAuth that records
@@ -192,6 +209,13 @@ type CredentialPool struct {
 	vaultLoader *vaultCredLoader            // nil in I2 (and whenever opt-in is off).
 	audit       []AuditRecord                // appended during Lookup calls; not goroutine-safe.
 	cache       map[string]vaultLookupResult // populated by I7's vault-fetch path; unused in I2.
+	// vaultUnreachable accumulates one observation per distinct
+	// (kind, project, providerName) triple seen across all
+	// injectProviderTokens calls in this apply. apply.go's
+	// post-injection R13.1 warning emitter walks the slice once
+	// and emits one stderr line per observation. Deduplicated on
+	// append.
+	vaultUnreachable []vaultUnreachableError
 }
 
 // vaultCredLoader is the credential-pool's connection to the personal-
@@ -291,10 +315,21 @@ func (p *CredentialPool) Lookup(ctx context.Context, kind, project string) (*Pro
 	if p.vaultLoader != nil {
 		entry, err := p.lookupVault(ctx, kind, project)
 		if err != nil {
-			// Surface vault-side errors to the caller. I8 will
-			// classify them per PRD R13; the audit record is NOT
-			// appended for an errored lookup because the apply will
-			// abort and SaveState is never reached on error paths.
+			// PRD R13.1: a vault-unreachable error during this apply
+			// is non-fatal at the lookup level — the file layer (or
+			// the backend's CLI session) may still cover this pair.
+			// We record a tentative SourceCLISession audit row so
+			// downstream surfaces (state.json, --audit-auth, R12
+			// stderr) still see the pair, and surface the typed
+			// error to the caller so injectProviderTokens can
+			// soften it. Other vault errors (R13.4/5/6/7) propagate
+			// hard with no audit row — apply will abort, SaveState
+			// is never reached.
+			var vue *vaultUnreachableError
+			if errors.As(err, &vue) {
+				rec.Source = SourceCLISession
+				p.audit = append(p.audit, rec)
+			}
 			return nil, rec, err
 		}
 		vaultEntry = entry
@@ -374,9 +409,25 @@ func (p *CredentialPool) lookupVault(ctx context.Context, kind, project string) 
 			p.cache[key] = vaultLookupResult{}
 			return nil, nil
 		}
-		// Wrap network/auth errors so I8 can match them via
-		// errors.Is at the apply-error classification site (R13.1/R13.2).
+		// Wrap network/auth errors so apply-error classification
+		// (errors.Is) keeps matching the vault sentinel.
 		wrapped := fmt.Errorf("fetching credential body for %s/%s from vault: %w", kind, project, err)
+		// PRD R13.1/R13.2: when the underlying error is
+		// vault.ErrProviderUnreachable, surface a typed value the
+		// apply orchestrator can errors.As to recover the
+		// (kind, project) + provider-name tuple for the aggregated
+		// warning. Other vault errors stay as the bare wrap.
+		if errors.Is(err, vault.ErrProviderUnreachable) {
+			vue := &vaultUnreachableError{
+				Kind:         kind,
+				Project:      project,
+				ProviderName: p.vaultLoader.ProviderName,
+				err:          wrapped,
+			}
+			p.recordVaultUnreachable(vue)
+			p.cache[key] = vaultLookupResult{Err: vue}
+			return nil, vue
+		}
 		p.cache[key] = vaultLookupResult{Err: wrapped}
 		return nil, wrapped
 	}
@@ -398,6 +449,48 @@ func (p *CredentialPool) lookupVault(ctx context.Context, kind, project string) 
 	entry, parseErr := parseProviderAuthBody(kind, project, bodyBytes)
 	p.cache[key] = vaultLookupResult{Entry: entry, Err: parseErr}
 	return entry, parseErr
+}
+
+// recordVaultUnreachable appends one observation to the pool's
+// vault-unreachable buffer, deduplicated on
+// (Kind, Project, ProviderName). Repeat observations for the same
+// triple are merged so the aggregated PRD R13.1 warning never
+// names the same provider twice for the same pair.
+func (p *CredentialPool) recordVaultUnreachable(e *vaultUnreachableError) {
+	if e == nil {
+		return
+	}
+	for _, existing := range p.vaultUnreachable {
+		if existing.Kind == e.Kind && existing.Project == e.Project && existing.ProviderName == e.ProviderName {
+			return
+		}
+	}
+	p.vaultUnreachable = append(p.vaultUnreachable, *e)
+}
+
+// VaultUnreachableObservations returns the deduplicated typed
+// vault-unreachable observations the pool recorded during this
+// apply, in append order. Apply-time wiring walks the slice once
+// after the third injectProviderTokens call to emit the aggregated
+// PRD R13.1 warning.
+func (p *CredentialPool) VaultUnreachableObservations() []vaultUnreachableError {
+	return p.vaultUnreachable
+}
+
+// HasFileFallback reports whether the pool's file layer can
+// satisfy a vault provider's (kind, project) — i.e., whether a
+// provider-auth.toml entry exists for that pair. injectProviderTokens
+// uses it to soften vault-unreachable errors per PRD R13.1.
+//
+// Note: a "file fallback" answers only the local-file question.
+// The backend's own CLI-session fallback (PRD R13.1's "or a
+// working CLI session") is implicit: when no file fallback exists
+// and no token is injected, the backend's later universal-auth
+// call falls through to its CLI session and either succeeds (R13.1)
+// or fails (R13.2 — apply exits non-zero from the backend's own
+// error path).
+func (p *CredentialPool) HasFileFallback(kind, project string) bool {
+	return matchFileEntry(p.fileEntries, kind, project) != nil
 }
 
 // AuditTrail is the named slice type the pool returns from AuditLog.
