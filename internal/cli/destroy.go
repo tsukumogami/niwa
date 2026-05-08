@@ -106,17 +106,24 @@ func runDestroyInstance(cmd *cobra.Command, instanceDir, landingPath string, for
 	}
 
 	if !force {
-		dirty, err := workspace.CheckUncommittedChanges(instanceDir)
+		scan, err := workspace.ScanInstance(instanceDir)
 		if err != nil {
-			return fmt.Errorf("checking for uncommitted changes: %w", err)
+			return fmt.Errorf("scanning instance for unpushed work: %w", err)
 		}
-		if len(dirty) > 0 {
-			sort.Strings(dirty)
-			fmt.Fprintf(cmd.ErrOrStderr(), "Repos with uncommitted changes:\n")
-			for _, name := range dirty {
-				fmt.Fprintf(cmd.ErrOrStderr(), "  %s\n", name)
+		if scan.HasLoss() {
+			workspace.FormatScans([]workspace.InstanceScan{scan}, cmd.ErrOrStderr(), scan.InstanceName)
+
+			if !IsStdinTTY() {
+				return fmt.Errorf("instance has unpushed work and stdin is not a terminal; aborting (resolve unpushed work, or use --force to destroy without confirmation)")
 			}
-			return fmt.Errorf("instance has uncommitted changes in %d repo(s); use --force to override", len(dirty))
+
+			matched, err := ReadConfirmation("> ", scan.InstanceName, os.Stdin, cmd.ErrOrStderr())
+			if err != nil {
+				return fmt.Errorf("confirmation aborted: %w", err)
+			}
+			if !matched {
+				return fmt.Errorf("confirmation did not match instance name; aborting")
+			}
 		}
 	}
 
