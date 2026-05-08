@@ -1,5 +1,5 @@
 ---
-status: Planned
+status: Current
 problem: |
   `niwa destroy` today accepts an instance name from any cwd and refuses to
   destroy the workspace itself. This makes the command ergonomically blunt —
@@ -44,7 +44,7 @@ rationale: |
 
 ## Status
 
-Planned
+Current
 
 ## Context and Problem Statement
 
