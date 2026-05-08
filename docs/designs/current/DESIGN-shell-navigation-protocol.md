@@ -29,11 +29,22 @@ Current
 
 ## Context and Problem Statement
 
-`niwa create` and `niwa go` are "cd-eligible" commands: after they run, the
-shell should change directory to the workspace or repo they operated on. Because
-a subprocess (the niwa binary) cannot change its parent shell's working
-directory directly, this requires a protocol between the binary and the shell
-wrapper.
+`niwa create`, `niwa destroy`, `niwa go`, `niwa init`, and `niwa session create`
+are "cd-eligible" commands: after they run, the shell should change directory
+to the workspace, repo, or safe-ancestor they operated on. (Note: this list
+has grown past the original scope of this document — `init <name>`,
+`session create`, and `destroy` were added in subsequent designs:
+`DESIGN-niwa-init-creates-workspace-dir.md`,
+`DESIGN-mesh-session-lifecycle.md`, and `DESIGN-niwa-destroy.md` respectively.)
+Because a subprocess (the niwa binary) cannot change its parent shell's
+working directory directly, this requires a protocol between the binary and
+the shell wrapper.
+
+For `destroy` specifically, the cd target is *inverse* in spirit: rather than
+landing in a directory the user named, the wrapper lands in a safe ancestor
+of a directory the command removed. The protocol mechanism is the same; only
+the source of the path differs. See `DESIGN-niwa-destroy.md` for the routing
+matrix.
 
 The current protocol: the shell wrapper captures all of niwa's stdout via `$()`
 and treats the entire output as a directory path to `cd` into. This works when
@@ -94,12 +105,14 @@ variable and, on success, writes only the landing path to that file. The
 wrapper reads the file after the command exits, calls `cd`, and removes the
 file. Stdout and stderr flow unmodified to the terminal throughout.
 
-The wrapper structure:
+The wrapper structure (illustrative; the implementation has since grown to
+include `init`, `session create`, and `destroy` — see `internal/cli/shell_init.go`
+for the source of truth):
 
 ```sh
 niwa() {
     case "$1" in
-        create|go)
+        create|destroy|go|init)
             local __niwa_tmp __niwa_dir __niwa_rc
             __niwa_tmp=$(mktemp) || { command niwa "$@"; return; }
             NIWA_RESPONSE_FILE="$__niwa_tmp" command niwa "$@"
@@ -173,7 +186,8 @@ control characters varies across POSIX implementations.
 
 The shell wrapper and niwa binary communicate the landing path through a temp
 file whose path is passed via the `NIWA_RESPONSE_FILE` environment variable.
-Before running a cd-eligible command (`create`, `go`), the wrapper calls
+Before running a cd-eligible command (`create`, `destroy`, `go`, `init`,
+`session create`), the wrapper calls
 `mktemp`, exports the path in `NIWA_RESPONSE_FILE`, runs the binary, reads the
 temp file, removes it, and calls `cd` if the file contains a valid directory.
 Stdout and stderr from the binary and all its subprocesses flow unmodified to

@@ -106,9 +106,19 @@ shell code being evaluated, for auditing or manual setup.
 ### Functional Requirements
 
 **R1 (Shell function wrapper)**: When shell integration is active, a `niwa()`
-shell function intercepts cd-eligible subcommands (`create`, `go`), captures the
-binary's stdout (a directory path), and calls `cd` to that path. All other
-subcommands pass through to the binary unchanged.
+shell function intercepts cd-eligible subcommands (`create`, `destroy`, `go`,
+`init`, `session create`), exchanges a landing-path payload via the
+`NIWA_RESPONSE_FILE` protocol (see DESIGN-shell-navigation-protocol.md), and
+calls `cd` to that path. All other subcommands pass through to the binary
+unchanged.
+
+For `destroy`, the protocol is *inverse* in spirit: the wrapper writes a safe
+ancestor path (the workspace root, or the workspace parent when the workspace
+itself is being deleted) so the user's shell is dropped out of any directory
+the command removed. When destroy targets a non-enclosing instance (e.g.,
+`niwa destroy <name>` from the workspace root), the binary writes nothing and
+the wrapper leaves cwd unchanged. See PRD-niwa-destroy.md (when written) and
+DESIGN-niwa-destroy.md for the destroy-specific routing matrix.
 
 **R2 (Stdout protocol)**: cd-eligible commands print a single absolute directory
 path to stdout on success. Human-readable output (progress, confirmations, errors)
@@ -186,7 +196,8 @@ repo lookup fails, the error suggests `niwa status` to list available repos.
 
 **R11 (Runtime hint)**: When a cd-eligible command runs and `_NIWA_SHELL_INIT` is
 unset, niwa prints a hint to stderr suggesting `niwa shell-init install`. The hint
-fires only on cd-eligible commands, not every invocation.
+fires only on cd-eligible commands (`create`, `destroy`, `go`, `init`,
+`session create`), not every invocation.
 
 **R12 (Completions)**: Shell completions are bundled in the `niwa shell-init`
 output. A single eval line provides both the wrapper function and completions.
@@ -304,7 +315,10 @@ binary. Missing or old binaries degrade gracefully to PATH-only.
   go command cover repo navigation.
 - **apply navigation**: `niwa apply` is non-destructive (updates in place), so
   the user's cwd stays valid. No cd behavior needed, unlike resettsuku which
-  destroyed and recreated the workspace.
+  destroyed and recreated the workspace. Note that `niwa destroy` *is* a
+  cd-eligible command (see R1) — it writes a safe-ancestor landing path when
+  it removes the user's enclosing directory. Apply remains the deliberate
+  no-cd counterpart.
 - **Changes to niwa's core commands** beyond stdout/stderr protocol changes for
   create and the new go command.
 
@@ -337,7 +351,10 @@ install.sh users with control for everyone.
 
 **D3: apply has no navigation behavior.** Unlike resettsuku (which deleted and
 recreated), niwa apply updates in place. The user's cwd stays valid, so post-apply
-cd is unnecessary. This is a deliberate departure from the predecessor.
+cd is unnecessary. This is a deliberate departure from the predecessor. Destroy,
+by contrast, *does* have navigation behavior — it removes the user's enclosing
+directory in some cases and writes a safe-ancestor landing path so the wrapper
+can `cd` the user out. See DESIGN-niwa-destroy.md.
 
 **D4: -r failure leaves the instance in place.** Creating the instance is a
 successful operation. Failing to resolve `-r` is a navigation error, not a
