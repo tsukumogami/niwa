@@ -478,19 +478,26 @@ func ScanInstancesParallel(workspaceRoot string, instanceDirs []string, workers 
 // workspaceName is shown in the closing prompt line; pass the
 // EffectiveConfigName-derived string from the caller.
 func FormatScans(scans []InstanceScan, w io.Writer, workspaceName string) {
-	any := false
+	losing := 0
 	for _, s := range scans {
 		if s.HasLoss() {
-			any = true
-			break
+			losing++
 		}
 	}
-	if !any {
-		fmt.Fprintln(w, "No unpushed work detected across instances.")
+	if losing == 0 {
+		if len(scans) == 1 {
+			fmt.Fprintln(w, "No unpushed work detected.")
+		} else {
+			fmt.Fprintln(w, "No unpushed work detected across instances.")
+		}
 		return
 	}
 
-	fmt.Fprintln(w, "The following instances have unpushed work:")
+	if losing == 1 {
+		fmt.Fprintln(w, "The following instance has unpushed work:")
+	} else {
+		fmt.Fprintln(w, "The following instances have unpushed work:")
+	}
 	fmt.Fprintln(w)
 	for _, s := range scans {
 		if !s.HasLoss() {
