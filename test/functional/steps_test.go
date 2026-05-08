@@ -745,6 +745,90 @@ func theResponseFileContainsWorkspace(ctx context.Context, workspace string) err
 	return nil
 }
 
+// theInstanceOfWorkspaceExists asserts that an instance directory created by
+// aWorkspaceInstanceExistsWithRepos is present on disk at
+// <workspaceRoot>/<workspaceName>/<instanceName>/.
+//
+// Distinct from theInstanceExists, which uses the flatter
+// <workspaceRoot>/<name>/ layout produced by `niwa init` + `niwa create`
+// fixtures in critical-path.feature. The destroy.feature scenarios use
+// the nested layout, so they need this variant.
+func theInstanceOfWorkspaceExists(ctx context.Context, instance, workspace string) error {
+	s := getState(ctx)
+	dir := filepath.Join(s.workspaceRoot, workspace, instance)
+	info, err := os.Stat(dir)
+	if err != nil {
+		return fmt.Errorf("instance %q of workspace %q does not exist at %s: %w", instance, workspace, dir, err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("expected %s to be a directory", dir)
+	}
+	return nil
+}
+
+func theInstanceOfWorkspaceDoesNotExist(ctx context.Context, instance, workspace string) error {
+	s := getState(ctx)
+	dir := filepath.Join(s.workspaceRoot, workspace, instance)
+	if _, err := os.Stat(dir); err == nil {
+		return fmt.Errorf("instance directory %q exists but should not", dir)
+	}
+	return nil
+}
+
+// theResponseFileContainsWorkspaceParent asserts the response file content
+// equals the absolute path to the parent of the named workspace (with a
+// trailing newline). Used for destroy scenarios where the workspace itself
+// is removed and the user lands one level up.
+func theResponseFileContainsWorkspaceParent(ctx context.Context, workspace string) error {
+	s := getState(ctx)
+	path, ok := s.envOverrides["NIWA_RESPONSE_FILE"]
+	if !ok {
+		return fmt.Errorf("NIWA_RESPONSE_FILE not set in this scenario")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("reading response file %s: %w", path, err)
+	}
+	want := filepath.Dir(filepath.Join(s.workspaceRoot, workspace)) + "\n"
+	if string(data) != want {
+		return fmt.Errorf("response file content mismatch:\n  want: %q\n  got:  %q", want, string(data))
+	}
+	return nil
+}
+
+// theWorkspaceDirDoesNotExist asserts the named workspace's on-disk directory
+// has been removed.
+func theWorkspaceDirDoesNotExist(ctx context.Context, workspace string) error {
+	s := getState(ctx)
+	dir := filepath.Join(s.workspaceRoot, workspace)
+	if _, err := os.Stat(dir); err == nil {
+		return fmt.Errorf("expected workspace dir %s to be removed, but it still exists", dir)
+	}
+	return nil
+}
+
+// theResponseFileIsEmpty asserts NIWA_RESPONSE_FILE was set in the
+// scenario and the file is present but empty (no landing path written).
+// This is the correct assertion when a scenario sets the response file
+// path via iSetEnvToTempPath (which creates an empty file) and the
+// command is expected to NOT write a landing path. The wrapper's
+// `[ -n "$dir" ]` guard then correctly skips the cd.
+func theResponseFileIsEmpty(ctx context.Context) error {
+	s := getState(ctx)
+	path, ok := s.envOverrides["NIWA_RESPONSE_FILE"]
+	if !ok {
+		return fmt.Errorf("NIWA_RESPONSE_FILE not set in this scenario")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("reading response file %s: %w", path, err)
+	}
+	if len(data) != 0 {
+		return fmt.Errorf("expected response file %s to be empty, got: %q", path, string(data))
+	}
+	return nil
+}
+
 func theResponseFileDoesNotExist(ctx context.Context) error {
 	s := getState(ctx)
 	path, ok := s.envOverrides["NIWA_RESPONSE_FILE"]
