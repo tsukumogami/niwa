@@ -51,7 +51,7 @@ __niwa_cd_wrap() {
 
 niwa() {
     case "$1" in
-        create|go|init)
+        create|destroy|go|init)
             __niwa_cd_wrap "$@"
             ;;
         session)
