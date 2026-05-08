@@ -161,7 +161,15 @@ Skipped for v0.1: `--json` flag (struct is already serializable), color output, 
 
 ### Decision 4: Reset and destroy
 
-Both are destructive operations on instance directories.
+Both are destructive operations on instance directories. Note: this decision
+captures the *original* shared resolution model. `niwa destroy` has since
+been reworked into a contextual command per
+DESIGN-niwa-destroy.md (Status: Planned). Reset retains the original model
+described below; destroy's new shape (cwd-aware mode dispatch, picker UX,
+workspace-wipe under `--force`) is documented in its own design doc and
+shares only the underlying helpers (`ValidateInstanceDir`,
+`CheckUncommittedChanges`, `DestroyInstance`, plus `ResolveInstanceTarget`
+which reset still uses).
 
 #### Chosen: RemoveAll with shared CheckUncommittedChanges safety gate
 
@@ -177,7 +185,13 @@ Both commands accept an optional instance name. If no name is given, they detect
 - State file must parse successfully (prevents acting on corrupt state)
 - Target must not be the workspace root (`.niwa/workspace.toml` present = root, not instance)
 
-**`niwa destroy [instance]`**: resolve target, validate, check uncommitted changes (unless `--force`), `os.RemoveAll(instanceDir)`.
+**`niwa destroy [instance]`** (original v0.1 model; superseded by
+DESIGN-niwa-destroy.md): resolve target, validate, check uncommitted
+changes (unless `--force`), `os.RemoveAll(instanceDir)`. The reworked
+destroy adds cwd-context-driven mode selection, an interactive picker
+when run with no name from the workspace root, a `--force` workspace-
+wipe path, and shell-wrapper landing-path emission via
+`NIWA_RESPONSE_FILE`.
 
 **`niwa reset [instance]`**: same resolution and safety check, capture config source, destroy, then re-run create + apply pipeline.
 
@@ -185,7 +199,9 @@ Both commands accept an optional instance name. If no name is given, they detect
 
 Reset of local-only workspaces (no remote source) errors with a clear message since destroying the instance would lose the config.
 
-`DestroyInstance` validates `.niwa/instance.json` exists and `.niwa/workspace.toml` does NOT exist before calling `RemoveAll` (safety against deleting arbitrary directories or workspace roots).
+`DestroyInstance` validates `.niwa/instance.json` exists and `.niwa/workspace.toml` does NOT exist before calling `RemoveAll` (safety against deleting arbitrary directories or workspace roots). The reworked destroy's
+workspace-wipe path uses a separate sibling helper (`DestroyWorkspace`)
+that does not loosen this validator.
 
 #### Alternatives considered
 

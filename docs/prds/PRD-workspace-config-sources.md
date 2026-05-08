@@ -999,9 +999,13 @@ upgrades (R28) lazy-convert without `--force` because no user-edit
 loss is at stake. **Alternatives**: dedicated `niwa registry migrate`
 command with interactive confirmation. **Reasoning**: niwa's existing
 destructive-operation pattern (`destroy --force`, `reset --force`) is
-non-interactive and already familiar. Adding interactive prompts would
-be the first such pattern in the CLI and would split the discovery
-surface.
+predominantly non-interactive and familiar. The reworked
+`niwa destroy --force` (see DESIGN-niwa-destroy.md) does add a typed-
+confirmation prompt when it detects unpushed work in a workspace-wide
+wipe, but that prompt fires only as a guardrail against irreversible
+multi-instance loss; the per-instance and clean-workspace cases stay
+non-interactive. Adding interactive prompts to apply would be friction
+in the common case and would split the discovery surface.
 
 ### Decision: GitHub-first-class + git-clone fallback (no per-host adapters in v1)
 

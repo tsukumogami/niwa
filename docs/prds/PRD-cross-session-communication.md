@@ -539,6 +539,15 @@ destroy-grace window, send SIGKILL if the daemon has not exited, then
 remove the instance directory. The daemon is stateless across restarts;
 all durable state is on disk in `.niwa/tasks/` and `.niwa/roles/`.
 
+When destroy targets multiple instances (the workspace-wide
+`niwa destroy --force` path described in DESIGN-niwa-destroy.md), the
+daemon-shutdown sequence above shall be applied to each instance's
+daemon independently, in alphabetical order by instance name. No
+instance directory shall be removed until that instance's daemon has
+exited (or the SIGKILL path has completed). The total wall-clock cost
+scales linearly with the number of instances, bounded at
+`NIWA_DESTROY_GRACE_SECONDS × N` plus per-instance cleanup.
+
 ### Coordinator Registration
 
 **R39** — Coordinator sessions are long-lived interactive sessions
@@ -695,6 +704,13 @@ live `claude -p` is not required to verify correctness.
   daemon, waiting up to the destroy-grace window, and SIGKILLing if
   needed. With `NIWA_DESTROY_GRACE_SECONDS=1` and a daemon that ignores
   SIGTERM, destroy completes within ~2 seconds (grace + cleanup).
+- [ ] **AC-P11b** Running `niwa destroy --force` from the workspace root
+  with N instances applies the AC-P11 daemon-shutdown sequence to each
+  instance in alphabetical order, then removes each instance directory,
+  then removes the workspace directory itself. With
+  `NIWA_DESTROY_GRACE_SECONDS=1` and N=3 daemons that ignore SIGTERM,
+  the workspace-wipe completes within ~6 seconds (3 × grace + cleanup).
+  No instance directory is removed before its daemon has exited.
 - [ ] **AC-P12** After apply with a pre-existing
   `~/.claude/skills/niwa-mesh/SKILL.md` whose contents differ from the
   installer's output: the personal-scope file is not modified or removed,

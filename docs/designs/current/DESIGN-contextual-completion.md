@@ -237,6 +237,17 @@ warrant it, it can be addressed independently without changing this design.
 Source: coverage map in
 `wip/research/explore_contextual-completion_r1_lead-command-flag-coverage-map.md`.
 
+**Reconciliation with the destroy rework (DESIGN-niwa-destroy.md):** the
+reworked destroy adds an interactive picker when invoked with no name from
+the workspace root. Tab completion still fires for users who prefer typing
+(e.g., `niwa destroy my-instance<TAB>`), and the picker fires when no name
+is provided AND stdin is a TTY. The two paths don't conflict: completion
+operates at cobra's argument-parsing layer, the picker at the runner's
+post-classification layer. Users who invoke destroy with a fully-typed
+instance name bypass the picker entirely. The "complete normally" decision
+above remains the right choice; the picker is an additional safety net for
+the no-arg case, not a replacement for completion.
+
 ### Decision 4: Completion helper organization
 
 The three completion helpers (`completeWorkspaceNames`,

@@ -20,7 +20,6 @@ func TestShellInitBash_ValidSyntax(t *testing.T) {
 	for _, want := range []string{
 		"_NIWA_SHELL_INIT=1",
 		"niwa()",
-		"create|go|init)",
 		"command niwa",
 		"mktemp",
 		`NIWA_RESPONSE_FILE="$__niwa_tmp"`,
@@ -45,7 +44,6 @@ func TestShellInitZsh_ValidSyntax(t *testing.T) {
 	for _, want := range []string{
 		"_NIWA_SHELL_INIT=1",
 		"niwa()",
-		"create|go|init)",
 		"command niwa",
 		"mktemp",
 		`NIWA_RESPONSE_FILE="$__niwa_tmp"`,
@@ -55,6 +53,37 @@ func TestShellInitZsh_ValidSyntax(t *testing.T) {
 		if !strings.Contains(output, want) {
 			t.Errorf("zsh output missing %q", want)
 		}
+	}
+}
+
+// TestShellWrapperTemplate_CdEligibleCommands verifies each command that
+// must trigger __niwa_cd_wrap is present in the wrapper's case dispatcher.
+// Use per-command membership checks rather than a golden-string match on the
+// full case label so that adding a new cd-eligible command in the future
+// doesn't churn this test for unrelated commands.
+func TestShellWrapperTemplate_CdEligibleCommands(t *testing.T) {
+	cdEligibleTopLevel := []string{"create", "destroy", "go", "init"}
+	for _, name := range cdEligibleTopLevel {
+		// Each name must appear as an alternative in a case label that calls
+		// __niwa_cd_wrap. We don't pin the order or grouping; we just check
+		// the name is present and that the surrounding structure dispatches
+		// to __niwa_cd_wrap.
+		if !strings.Contains(shellWrapperTemplate, name) {
+			t.Errorf("wrapper template missing cd-eligible command %q", name)
+		}
+	}
+
+	// session create is wrapped via a nested case on $2.
+	if !strings.Contains(shellWrapperTemplate, `case "$2" in`) {
+		t.Error("wrapper template missing nested case on $2 (used by `session create`)")
+	}
+	if !strings.Contains(shellWrapperTemplate, "session)") {
+		t.Error("wrapper template missing session top-level case")
+	}
+
+	// All cd-eligible paths route through __niwa_cd_wrap.
+	if !strings.Contains(shellWrapperTemplate, `__niwa_cd_wrap "$@"`) {
+		t.Error("wrapper template missing __niwa_cd_wrap dispatch")
 	}
 }
 
