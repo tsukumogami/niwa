@@ -19,26 +19,31 @@ problem: |
   niwa-mesh skill text.
 decision: |
   Replace four filesystem-side-channel mechanisms with explicit API
-  contracts. (1) Pass an explicit settings/config flag to `claude -p`
-  in `spawnWorker` so workers find workspace plugins programmatically;
-  remove per-repo skill writes so the niwa-mesh skill stops landing in
-  PRs. (2) Make `dangling` a real `state.json` transition: the daemon
-  writes `abandoned` with `reason="taskstore_lost"`, so every read API
+  contracts. (1) Commit to "workers inherit the full workspace
+  `.claude/` tree" as the spawn-time contract — settings, skills,
+  hooks, marketplaces, and CLAUDE.local.md — by passing an explicit
+  config-root injection (`CLAUDE_CONFIG_DIR` or equivalent) to
+  `claude -p` in `spawnWorker`, with the originating repo's
+  `.claude/` reachable for session workers; remove per-repo skill
+  writes so the niwa-mesh skill stops landing in PRs. (2) Make
+  `dangling` a real `state.json` transition: the daemon writes
+  `abandoned` with `reason="taskstore_lost"`, so every read API
   surfaces a structurally consistent answer; the `inbox/dangling/`
-  subdir stays as forensic-only. (3) Place `required_skills` inside the
-  task body as a workspace convention; gate at queue time with a new
-  `MISSING_SKILLS` error code that returns `{missing, available}`
-  before allocating a task ID. (4) Add a `roleRoot(role)` helper that
-  redirects coordinator-targeted role checks and inbox writes to
-  `mainInstanceRoot`, so `niwa_ask` and `niwa_send_message` reach the
-  live coordinator from session workers; auto-register coordinator
-  from the four handlers a fan-out coordinator actually exercises.
-  Plus: typed daemon-spawn timeout for synchronous failure surfacing
-  (#110), a computed `daemon` sub-object on `niwa_list_sessions`
-  (#111), a new `niwa_redelegate` primitive that reads the source
-  envelope server-side and stamps `redelegated_from` (#114), and a
-  rewrite of the niwa-mesh skill so the documented contract matches
-  the runtime.
+  subdir stays as forensic-only. (3) Place `required_skills` inside
+  the task body as a workspace convention; gate at queue time with a
+  new `MISSING_SKILLS` error code that catches typos and drift on
+  top of the Decision 1 inheritance contract. (4) Add a
+  `roleRoot(role)` helper that redirects coordinator-targeted role
+  checks and inbox writes to `mainInstanceRoot`, so `niwa_ask` and
+  `niwa_send_message` reach the live coordinator from session
+  workers; auto-register coordinator from the four handlers a
+  fan-out coordinator actually exercises. Plus: typed daemon-spawn
+  timeout for synchronous failure surfacing (#110), a computed
+  `daemon` sub-object on `niwa_list_sessions` (#111), a new
+  `niwa_redelegate` primitive that reads the source envelope
+  server-side and stamps `redelegated_from` (#114), and a rewrite
+  of the niwa-mesh skill so the documented contract matches the
+  runtime.
 rationale: |
   Every chosen option is the smallest change that lifts state niwa
   already has on disk into the API contract that callers can rely on.
@@ -221,7 +226,7 @@ not reopened in design:
 
 ## Considered Options
 
-### Decision 1: Worker discovery channel for plugins and the niwa-mesh skill
+### Decision 1: Worker Claude-config inheritance contract
 
 **Issues:** #108 (workers see no workspace plugins), #97 (skill file
 committed by delegated agents into consumer repo PRs).
@@ -234,37 +239,77 @@ plugins to session workers. The niwa-mesh skill is delivered by
 copying its content into every non-coordinator repo's working tree
 (`channels.go:347-359`), where worker agents `git add` it.
 
+**The contract this decision commits to.** niwa repos are crafted
+with workspace-authored Claude customizations: `CLAUDE.local.md`,
+hooks under `.claude/hooks/`, plugins and skills under `.claude/`,
+and `settings.json` (which carries `enabledPlugins`,
+`extraKnownMarketplaces`, and other Claude Code config). A worker
+spawned by `niwa_delegate` must inherit the **full set** of these
+workspace customizations as its baseline — not just plugins, not
+just `settings.json`. The only customizations niwa intentionally
+scopes away are MCP server inheritance from `~/.claude.json`
+(already enforced by the existing `--strict-mcp-config`); user-level
+customizations under `~/.claude/` are out of scope for the worker
+context.
+
 Key assumptions:
-- Claude Code supports at least one of `--settings <path>`,
-  `--add-dir <path>`, `--plugin <alias>@<marketplace>`, or
-  `CLAUDE_CONFIG_DIR=<path>`. The exact spelling is empirically
-  determined during implementation.
-- Claude Code's skill discovery looks under `<configDir>/skills/`
-  when `<configDir>` is supplied via flag or env.
+- Claude Code supports at least one mechanism that lets the spawner
+  point Claude at a config root other than the user's home — and
+  that mechanism surfaces the whole `<root>/.claude/` tree
+  (settings, skills, hooks, marketplaces, CLAUDE.local.md), not
+  just one file. Candidates surfaced in research: `CLAUDE_CONFIG_DIR`
+  env, `--add-dir <path>`, or `--config-dir`-style flags.
+- For session workers the relevant "config root" is layered: the
+  workspace root (`<mainInstanceRoot>`) for workspace-wide config,
+  and the originating repo (`<group>/<repo>` under the workspace)
+  for repo-level overrides. Today
+  `SettingsMaterializer` already writes `<repoDir>/.claude/settings.local.json`
+  with the same plugin set; what's missing is making sure the
+  worker actually reaches it from a worktree CWD that lives under
+  `.niwa/worktrees/`.
 - Squash-merge is the workspace's PR strategy, so historical
   `.claude/skills/niwa-mesh/SKILL.md` files in feature branches
   don't survive merge.
 
-#### Chosen: Programmatic injection at spawn (argv flag, env fallback) plus removal of per-repo skill writes
+#### Chosen: Programmatic injection of the full workspace `.claude/` tree at spawn
 
 `spawnWorker` (`internal/cli/mesh_watch.go:982-1009`) gains an
-explicit Claude Code configuration flag pointing at the workspace
-`.claude/` directory. The exact flag/env is whichever Claude Code
-honors — preferring an argv flag (`--settings`, `--add-dir`, or
-similar) for the same visibility and stability the existing
-`--mcp-config`/`--strict-mcp-config` flags already have, with
-`CLAUDE_CONFIG_DIR=<workspaceRoot>/.claude` as a runtime fallback
-at the same code site if argv flags don't carry the right semantics.
+explicit Claude Code config-root injection that exposes the entire
+workspace `.claude/` tree to the worker — not just the
+`settings.json` file. Concretely, the implementation prefers a
+directory-rooted mechanism (`CLAUDE_CONFIG_DIR=<workspaceRoot>/.claude`
+env, or whichever argv flag Claude Code honors for "treat this as
+the Claude config root") so workers see settings, skills,
+`hooks/`, marketplaces, and `CLAUDE.local.md` together. A
+file-scoped `--settings <path>` is acceptable only as a fallback
+if no directory-rooted mechanism exists, and only when paired with
+explicit secondary delivery for skills, hooks, and CLAUDE.local.md
+(at which point the design should reconsider whether the fallback
+is good enough — see Consequences).
 
-The workspace root used is `s.mainInstanceRoot` when set (per-session
-daemon spawns) or `s.instanceRoot` (main-instance daemon spawns).
+For session workers, the originating repo's `.claude/` (under
+`<workspaceRoot>/<group>/<repo>/.claude/`) must also be reachable.
+Two complementary mechanisms:
+
+- The session worktree's CWD (`<workspaceRoot>/.niwa/worktrees/<repo>-<id>/`)
+  walks up to `<workspaceRoot>/.claude/`, picking up workspace-wide
+  config via Claude Code's standard discovery.
+- The implementation passes the originating repo path (already
+  known from `evt.role` resolution at `mesh_watch.go:1012`) as a
+  secondary `--add-dir`-equivalent when the worker spawn is for a
+  session role, so the repo's `.claude/settings.local.json` and
+  any per-repo `CLAUDE.md`/`CLAUDE.local.md` are reachable too.
+
+The workspace root used is `s.mainInstanceRoot` when set
+(per-session daemon spawns) or `s.instanceRoot` (main-instance
+daemon spawns).
 
 `InstallChannelInfrastructure` (`internal/workspace/channels.go:347-359`)
 no longer writes `<repoPath>/.claude/skills/niwa-mesh/SKILL.md` for
 non-coordinator roles. The instance-root copy at
 `<instanceRoot>/.claude/skills/niwa-mesh/SKILL.md` (line 341)
-remains; workers find it via the same configuration channel that
-delivers the plugin set.
+remains; workers find it through the same config-root injection
+that delivers everything else.
 
 Defense in depth: `internal/workspace/gitignore.go` is extended to
 add `.claude/skills/niwa-mesh/` to each consumer repo's `.gitignore`
@@ -274,9 +319,13 @@ regressions that re-introduce the per-repo write.
 **Rationale.** Every existing pain point in the spawn pipeline
 traces back to the side-channel pattern: plugins drop because
 filesystem walk-up is unreliable, the niwa-mesh skill leaks because
-it is delivered via working-tree files. `--strict-mcp-config` exists
-specifically because the team already learned the lesson for MCP
-servers. Continuing the filesystem pattern would extend the same
+it is delivered via working-tree files, hooks and CLAUDE.local.md
+are silently absent because nothing puts them on the worker's
+discovery path. Treating "full workspace `.claude/` inheritance" as
+the explicit contract — and `--strict-mcp-config` as the explicit
+exception for MCP server scoping — gives niwa one rule to
+implement, test, and document, rather than a per-feature
+patchwork. Continuing the filesystem pattern would extend the same
 fragility instead of fixing the architecture; programmatic injection
 brings plugin handling up to the same level of explicitness MCP
 config already has.
@@ -403,10 +452,34 @@ convention is "body is opaque to niwa, body carries
 workspace-specific fields"; the alternative is a top-level field on
 `delegateArgs`.
 
+**Relationship to Decision 1's inheritance contract.** Once Decision
+1 commits workers to inheriting the full workspace `.claude/` tree,
+`required_skills` becomes a defense-in-depth declarative check, not
+the primary mechanism for ensuring skills are present. The gate
+catches three remaining failure modes the inheritance contract
+alone doesn't cover:
+
+1. Typos in skill names in the body (`/shirabe:prd` vs.
+   `/shirabe:rpd`) — the gate fails fast at queue time instead of
+   the worker failing mid-task.
+2. Coordinators that explicitly require a skill they personally
+   know is needed but the workspace happens not to have installed
+   yet — the structured `MISSING_SKILLS` response tells the
+   coordinator what to install or which target to retarget.
+3. Redelegations to a different workspace or session whose plugin
+   set diverges from the original — `niwa_redelegate` re-runs the
+   gate against the new target's manifest.
+
+The gate's value drops from "load-bearing prerequisite for
+delegation" to "declarative assertion that catches drift." That
+still matters; it just means the placement debate is now about
+where to put a body-level intent assertion, not where to put a
+runtime requirement.
+
 Key assumptions:
-- The manifest source-of-truth comes from Decision 1's argv-flag
-  target: the workspace's `<workspaceRoot>/.claude/` plugin set.
-  The gate reads from there.
+- The manifest the gate reads is the same workspace `.claude/` tree
+  Decision 1's config-root injection delivers to workers. The gate
+  is consistent with what the worker will actually see.
 - `niwa_redelegate` (#114) reads the source envelope server-side
   from `<taskStoreRoot>/.niwa/tasks/<id>/envelope.json`, so any
   body field naturally propagates through redelegation.
@@ -769,11 +842,39 @@ handleCreateSession
      -> claude -p
           --mcp-config=...           (existing)
           --strict-mcp-config        (existing)
-          --settings=<workspaceRoot>/.claude/settings.json   (NEW)
-          [or CLAUDE_CONFIG_DIR=<workspaceRoot>/.claude in env]
-        => Claude Code resolves enabledPlugins, finds skills/niwa-mesh/
-           via the workspace .claude/, no per-repo files needed
+          (config-root injection — exact spelling per Phase 3 verification)
+          CLAUDE_CONFIG_DIR=<workspaceRoot>/.claude   (NEW: env or
+                                                       equivalent argv)
+          (session workers also): repo-config root for
+          <workspaceRoot>/<group>/<repo>/.claude/    (NEW: --add-dir
+                                                       or equivalent)
+        => Claude Code surfaces the FULL workspace .claude/ tree:
+           settings, enabledPlugins, extraKnownMarketplaces,
+           skills/niwa-mesh/, hooks/, CLAUDE.local.md.
+           For session workers, the originating repo's .claude/ also
+           layers on top so per-repo CLAUDE.md and settings.local.json
+           are reachable. No per-repo working-tree files needed.
 ```
+
+**What workers inherit (post-fix):**
+
+The contract is "the full workspace `.claude/` tree, plus the
+originating repo's `.claude/` for session workers, minus the
+already-scoped MCP server inheritance from `~/.claude.json`."
+Concretely:
+
+- Workspace settings (`<workspaceRoot>/.claude/settings.json`),
+  including `enabledPlugins` and `extraKnownMarketplaces`.
+- Workspace skills (`<workspaceRoot>/.claude/skills/`), including
+  `niwa-mesh/SKILL.md`.
+- Workspace hooks (`<workspaceRoot>/.claude/hooks/`).
+- Workspace `CLAUDE.local.md` (workspace-wide instructions).
+- For session workers: the originating repo's `.claude/`
+  (per-repo skills, hooks, settings.local.json) and any
+  `CLAUDE.md` or `CLAUDE.local.md` at the repo root.
+- NOT inherited: MCP servers from `~/.claude.json` (already
+  scoped away by `--strict-mcp-config`); user-level `~/.claude/`
+  customizations (out of scope for the worker context).
 
 **Worker asks coordinator (post-fix):**
 
@@ -849,23 +950,34 @@ Deliverables:
 
 Independent of Phase 1; can ship in parallel.
 
-### Phase 3: Worker plugin and skill discovery
+### Phase 3: Worker Claude-config inheritance
 
 **Closes #108. Resolves #97 by elimination.**
 
 Deliverables:
-- `spawnWorker` adds Claude Code configuration flag/env to
-  `claude -p` argv. Empirical verification of which flag
-  Claude Code honors lands during this phase.
+- `spawnWorker` adds Claude Code config-root injection
+  (`CLAUDE_CONFIG_DIR` env or equivalent argv flag) so the worker
+  sees the full workspace `.claude/` tree: settings, skills,
+  hooks, marketplaces, CLAUDE.local.md.
+- For session workers: secondary injection that exposes the
+  originating repo's `.claude/` so per-repo `CLAUDE.md` /
+  `CLAUDE.local.md` and `settings.local.json` layer correctly.
+- Empirical verification of which flag/env Claude Code honors
+  lands during this phase. If the only working mechanism is
+  file-scoped (`--settings <one-file>`), the design escalates
+  back to discussion before shipping — the inheritance contract
+  requires a directory-rooted mechanism.
 - `InstallChannelInfrastructure` removes the per-repo skill
   write loop. Instance-root copy stays.
 - `internal/workspace/gitignore.go` extended to add
   `.claude/skills/niwa-mesh/` to consumer repos' `.gitignore`.
 - Functional test: a worker spawned by `niwa_delegate` can
-  invoke a workspace-level skill (e.g. `/shirabe:prd`).
+  invoke a workspace-level skill (e.g. `/shirabe:prd`), reads
+  `CLAUDE.local.md`, and a workspace hook fires inside the
+  worker session.
 
-Phase 3 unblocks Phase 5's `required_skills` gate (because the
-gate needs a manifest source-of-truth that this phase establishes).
+Phase 3 unblocks Phase 5's `required_skills` gate (the gate needs
+a manifest consistent with what the worker actually inherits).
 
 ### Phase 4: Task lifecycle truthfulness
 
@@ -1042,12 +1154,14 @@ without values, preserving the existing no-values invariant).
 ### Negative
 
 - Decision 1 carries an empirical assumption about Claude Code
-  flag/env support. If neither argv nor env honors the workspace
-  `.claude/` redirect, the design needs to fall back to a
-  filesystem mirror in `scaffoldWorktreeNiwa` for the session
-  case and accept that main-instance workers need a separate fix
-  (likely involving plugin-store population in the worker's
-  user-level config).
+  flag/env support. The full-inheritance contract requires a
+  directory-rooted mechanism (so settings, skills, hooks, and
+  CLAUDE.local.md all layer together). If Claude Code only
+  exposes a file-scoped mechanism (`--settings <one-file>`), the
+  design needs to escalate before shipping — partial inheritance
+  is worse than the side-channel pattern because callers would
+  reasonably assume "everything under workspace `.claude/`
+  reaches workers."
 - Daemon now writes `state.json` transitions, expanding the
   daemon's surface. Today only the MCP server transitions state.
   The shared taskstore writer must enforce the same flock
@@ -1068,11 +1182,12 @@ without values, preserving the existing no-values invariant).
 
 ### Mitigations
 
-- For the Claude Code flag/env assumption: the implementation
-  experiments with `--settings` first, falls back to
-  `CLAUDE_CONFIG_DIR` env at the same code site, and treats the
-  filesystem-mirror path as an explicit Phase 3 follow-up issue
-  if both fail.
+- For the Claude Code flag/env assumption: Phase 3 starts with
+  empirical verification of `CLAUDE_CONFIG_DIR` and any
+  directory-rooted argv flag. If only file-scoped mechanisms
+  exist, Phase 3 stops and the design returns to discussion —
+  the contract is "full workspace `.claude/` inheritance," and
+  shipping anything narrower would silently violate it.
 - For the daemon-writes-state.json risk: reuse the existing
   `taskstore.go` flock'd writer rather than introducing a
   parallel writer; cover the new write path with the existing
