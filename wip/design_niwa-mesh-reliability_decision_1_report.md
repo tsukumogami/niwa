@@ -1,5 +1,27 @@
 # Decision 1: Worker discovery channel
 
+> **Note: superseded by empirical verification.**
+>
+> This report's structural conclusion (programmatic injection over
+> filesystem side-channel) is correct. The specific mechanism it
+> recommends — "argv flag with `CLAUDE_CONFIG_DIR` as runtime
+> fallback" — was a hypothesis based on research-time uncertainty
+> about which Claude Code knobs exist.
+>
+> Direct experiment (results in
+> `wip/design_niwa-mesh-reliability_claude_config_experiments.md` and
+> summarized in the design doc's Verification Notes) settled the
+> mechanism: pass
+> `--add-dir <workspaceRoot> --add-dir <repoPath> --setting-sources user,project,local`
+> on every `claude -p` spawn. `CLAUDE_CONFIG_DIR` was not the right
+> primitive (it controls user-level config, not project context).
+>
+> The design's Decision 1 also reframed the contract: not just
+> "plugin propagation" but "the worker baseline matches a user's
+> `claude` in the repo." Read the design doc as the authoritative
+> source. This report is preserved for the option analysis it
+> contains, not for the implementation specifics.
+
 ## Question
 
 How should worker sessions discover the workspace's Claude Code plugin set
