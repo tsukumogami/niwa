@@ -18,18 +18,34 @@ type listSessionsArgs struct {
 	Status string `json:"status,omitempty"`
 }
 
+// sessionListEntry is the wire shape returned by niwa_list_sessions: it
+// embeds the persisted SessionLifecycleState and adds a computed daemon
+// sub-object reflecting the per-worktree daemon's runtime liveness. The
+// daemon field is computed at API call time, never persisted, so the
+// SessionLifecycleState file's Status field stays single-writer (owned by
+// the lifecycle code path that creates and destroys sessions).
+//
+// Issue 3 / #111: Status alone could not answer "is this session usable?"
+// because a crashed daemon leaves Status=active. The daemon sub-object
+// closes that gap by surfacing the PID file probe directly.
+type sessionListEntry struct {
+	SessionLifecycleState
+	Daemon DaemonHealth `json:"daemon"`
+}
+
 // handleListSessions implements niwa_list_sessions.
 //
 // It reads all per-session lifecycle state files, applies optional repo and
-// status filters, and returns a JSON array of matching SessionLifecycleState
-// objects. An empty array (not null) is returned when no sessions match.
+// status filters, and returns a JSON array of sessionListEntry objects (each
+// embedding SessionLifecycleState plus a computed daemon sub-object). An
+// empty array (not null) is returned when no sessions match.
 func (s *Server) handleListSessions(args listSessionsArgs) toolResult {
 	sessionsDir := filepath.Join(s.instanceRoot, ".niwa", "sessions")
 	all, err := ListSessionLifecycleStates(sessionsDir)
 	if err != nil {
 		return errResult("listing sessions: " + err.Error())
 	}
-	var filtered []SessionLifecycleState
+	filtered := make([]sessionListEntry, 0, len(all))
 	for _, st := range all {
 		if args.Repo != "" && st.Repo != args.Repo {
 			continue
@@ -37,10 +53,10 @@ func (s *Server) handleListSessions(args listSessionsArgs) toolResult {
 		if args.Status != "" && st.Status != args.Status {
 			continue
 		}
-		filtered = append(filtered, st)
-	}
-	if filtered == nil {
-		filtered = []SessionLifecycleState{}
+		filtered = append(filtered, sessionListEntry{
+			SessionLifecycleState: st,
+			Daemon:                daemonHealthFor(st.WorktreePath),
+		})
 	}
 	data, err := json.Marshal(filtered)
 	if err != nil {
