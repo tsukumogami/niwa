@@ -51,3 +51,29 @@ Feature: niwa session attach + detach (Issue #117)
     # Cleanup
     When I call niwa_destroy_session in instance "attach-detach-noop"
     Then the session is ended in instance "attach-detach-noop"
+
+  # ---------------------------------------------------------------------
+  # SESSION_ATTACHED gate on niwa_destroy_session when a live attach lock
+  # is held (PRD R13 / AC23). Maps to the CUJ where the operator has
+  # stepped into a session and the coordinator must back off, not destroy.
+  # ---------------------------------------------------------------------
+
+  @critical
+  Scenario: niwa_destroy_session returns SESSION_ATTACHED when a live attach lock exists
+    Given a clean niwa environment
+    And a local git server is set up
+    And a single-repo channeled workspace "destroy-gate" exists
+    When I run "niwa create destroy-gate"
+    Then the exit code is 0
+    When I call niwa_create_session for repo "app" with purpose "destroy-gate-fixture" in instance "destroy-gate"
+    Then the last session is active in instance "destroy-gate"
+    # Simulate a human attached to the session by seeding an attach.state
+    # sentinel that points at the live test process. The destroy MCP tool
+    # must refuse with the SESSION_ATTACHED error per PRD R13.
+    When I seed a live attach sentinel for the last session in instance "destroy-gate"
+    When I call niwa_destroy_session without force in instance "destroy-gate"
+    Then the last MCP response contains code "SESSION_ATTACHED"
+    And the last MCP response contains code "niwa session detach"
+    # Force destroy bypasses the gate and proceeds with teardown per PRD AC24.
+    When I call niwa_destroy_session in instance "destroy-gate"
+    Then the session is ended in instance "destroy-gate"

@@ -336,6 +336,8 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 	ctx.Step(`^I call niwa_destroy_session in instance "([^"]*)"$`, iCallDestroySession)
 	ctx.Step(`^I run niwa session detach for the last session in instance "([^"]*)"$`, iRunSessionDetachForLastSessionInInstance)
 	ctx.Step(`^I run "([^"]*)" from channeled instance "([^"]*)"$`, iRunFromChanneledInstance)
+	ctx.Step(`^I seed a live attach sentinel for the last session in instance "([^"]*)"$`, iSeedLiveAttachSentinelForLastSession)
+	ctx.Step(`^I call niwa_destroy_session without force in instance "([^"]*)"$`, iCallDestroySessionWithoutForce)
 	ctx.Step(`^the session is active in instance "([^"]*)"$`, theSessionIsActiveInInstance)
 	ctx.Step(`^the last session is active in instance "([^"]*)"$`, theSessionIsActiveInInstance)
 	ctx.Step(`^the session is ended in instance "([^"]*)"$`, theSessionIsEndedInInstance)

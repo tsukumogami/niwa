@@ -142,6 +142,275 @@ remain in scope for the design.
    attach state in the listing, so that I can avoid running mesh
    delegations that would queue indefinitely.
 
+## Critical User Journeys
+
+The user stories say what the operator wants. These CUJs show *what
+they actually do* — including the discovery moves, the in-the-moment
+thinking, and the failure paths. A common thread runs through every
+journey: the coordinator is a router, and attach is the human's tool
+for bypassing the router when they need a direct conversation with a
+specific delegated agent. Without attach, every operator-to-agent
+exchange goes through the coordinator and loses fidelity. With
+attach, the human can step into the actual conversation thread.
+
+### CUJ-1: Pre-merge review across delegated PRs in multiple repos
+
+**Context.** The operator asked the coordinator to implement a
+feature from a roadmap. The coordinator delegated to three sessions
+across three repos and reports back: "Done — PRs are #422 (payments),
+#118 (sdk), and #91 (docs). Each was implemented by its own
+delegated agent in the corresponding session."
+
+**Goal.** "Before I approve any of these, I want to ask each of the
+delegated agents real review questions about THEIR PR — not have
+those questions paraphrased by the coordinator and re-prompted to
+the agent. I want the equivalent of a code review with the actual
+author."
+
+**Walkthrough.**
+1. Operator runs `niwa session list --status active` and spots the
+   three session IDs the coordinator named, with `AVAILABILITY=available`
+   (the agents are between tasks).
+2. Opens a new terminal pane, runs `niwa session attach payments-feat-m4k1`.
+   The attach lands at the end of the last conversation turn between
+   the coordinator and the agent — the agent's last message is its
+   "PR ready for review" announcement.
+3. Pastes review notes inline: "Why `customerCharge` not
+   `chargeRequest` like our `RefundRequest`/`VoidRequest` pattern?"
+   The agent explains it picked `Charge` to match the Stripe adapter
+   naming. The operator accepts the rationale and moves on.
+4. Asks the next question: "What happens if `amount` is zero?" The
+   agent says Stripe rejects it. Operator pushes back: "Reject
+   earlier with `ErrInvalidAmount` from `payments/errors.go`." Agent
+   commits the fix, pushes the fixup, reports the SHA inline.
+5. Types `/exit`. Repeats for the SDK and docs sessions in turn,
+   each from a separate terminal pane.
+6. Returns to the coordinator pane: "Reviewed all three. payments
+   pushed two fixups, sdk is clean, docs needs a header rename
+   tracked as a follow-up. Approve and merge."
+
+**Success.** Review converges in three short attach sessions instead
+of three multi-round coordinator-mediated exchanges per PR. The
+operator interacted with the agent that wrote each PR; nuance and
+intent were preserved.
+
+**What goes wrong.** One of the sessions has been compacted since
+the PR was published. The operator notices the agent's recall of
+its choices feels reconstructed, not lived. They read the actual
+commits via `git log -p` to verify the reasoning, using the agent's
+narrative as a map.
+
+### CUJ-2: Unblock a stuck delegated agent without telephone-game
+
+**Context.** The operator is mid-conversation with the coordinator
+on a refactor. The coordinator reports: "Session `auth-rewrite-9q2x`
+has been spinning on the import path for `pkg/auth/jwt` — the agent
+isn't finding the existing helpers in `internal/authz`. It's about
+to start writing them from scratch."
+
+**Goal.** "Get the missing context to that delegated agent now,
+without playing telephone through the coordinator. Coordinator will
+paraphrase, the agent will guess at intent, and we'll burn another
+round trip while the wrong solution gets written."
+
+**Walkthrough.**
+1. Operator opens a new terminal pane. Runs `niwa session attach
+   auth-rewrite-9q2x`. Lands at the end of the last conversation
+   turn — sees the agent listing what it can't find.
+2. Types directly: "Look in `internal/authz/policy.go`. The helpers
+   you need are `IssueJWT` and `VerifyJWT`. Don't reimplement them
+   — import `internal/authz` and call those. While you're at it,
+   `internal/authz/keys.go` has the rotation helpers if you need
+   them for refresh tokens."
+3. Watches the agent acknowledge, run `grep` to confirm, then
+   continue with the right import. Types `/exit`.
+4. Back in the coordinator pane: "I gave `auth-rewrite-9q2x` the
+   missing import context directly. It's unblocked. Continue."
+
+**Success.** The delegated agent gets unstuck in 90 seconds instead
+of three coordinator round trips. Intent is preserved because the
+operator typed the context themselves. The session's transcript
+records exactly what the operator said.
+
+**What goes wrong.** The operator forgets to tell the coordinator
+they intervened. Next time the coordinator delegates a similar task
+to the same session, it doesn't know the agent now has the
+`internal/authz` context primed. Mitigation: develop the habit of
+narrating attach interventions back to the coordinator on detach.
+
+### CUJ-3: Override a coordinator's in-flight decision
+
+**Context.** The coordinator just announced: "I've delegated the
+package layout decision to `auth-refactor-7k2m`. The agent is
+deciding between a nested `pkg/auth/{jwt,session,oauth}` layout and
+a flat `pkg/auth_jwt`, `pkg/auth_session`. I'll report back in a
+few minutes." Two seconds later, the operator realizes the team
+standardized on the flat layout in the billing repo last quarter
+— the agent doesn't have that context.
+
+**Goal.** "Get the directive to the delegated agent now, before it
+spends 4 minutes weighing options and picks the wrong one. I don't
+want to wait for the coordinator round trip — that wastes the
+agent's tool calls and adds latency."
+
+**Walkthrough.**
+1. Operator opens a new terminal. Pulls the session ID from the
+   coordinator's last message. Runs `niwa session attach
+   auth-refactor-7k2m`. Transcript scrolls in — agent is mid-
+   evaluation, listing pros and cons.
+2. Types: "Stop the comparison. Use the flat layout —
+   `pkg/auth_jwt`, `pkg/auth_session`, `pkg/auth_oauth`. We
+   standardized on that in the billing repo last October. Proceed."
+3. Watches the agent acknowledge and switch direction. Types
+   `/exit`.
+4. Returns to the coordinator: "I redirected `auth-refactor-7k2m`
+   to use the flat layout. Adjust the other two sessions' plans
+   accordingly."
+
+**Success.** The wrong layout never gets generated. The operator
+saved the round-trip latency and the coordinator's plan stays
+coherent.
+
+**What goes wrong.** The agent had already started writing files
+for the nested layout before the operator attached. The operator
+re-attaches after detach to ask "show me `git status` — did you
+remove the nested directories?" — and either confirms the rollback
+or directs it.
+
+### CUJ-4: Inject tribal knowledge the coordinator never had
+
+**Context.** Coordinator delegated a database migration task to
+session `db-migrate-x9p3`. The agent is generating a migration that
+adds an index on `users.email`. The operator knows — from a
+postmortem two years ago that nobody documented — that this exact
+index caused a 40-minute lock on production because the table is
+80M rows. The coordinator doesn't know this. The operator's
+CLAUDE.md doesn't mention it. The agent is about to ship a
+migration that will page someone at 3am.
+
+**Goal.** "Hand the delegated agent the missing context, have it
+persist for the rest of the session, without writing a doc, updating
+CLAUDE.md, or routing the warning through the coordinator who would
+paraphrase it."
+
+**Walkthrough.**
+1. Operator runs `niwa session attach db-migrate-x9p3`. Lands at
+   the end of the last turn — the agent just proposed
+   `CREATE INDEX idx_users_email ON users(email)`.
+2. Types: "Stop. Before you ship any index migration on `users`:
+   this table is 80M rows on prod, MySQL 5.7, and standard
+   `CREATE INDEX` takes a write lock for ~40 minutes. We learned
+   this the hard way in 2024. Use `pt-online-schema-change` or
+   split it into a shadow column + backfill + swap. Apply this
+   rule to any other large-table migration in this session, not
+   just this one."
+3. Agent acknowledges and regenerates with `pt-online-schema-change`.
+   Operator skims the diff inline, confirms it's correct, types
+   `/exit`.
+4. Back in the coordinator: "I gave `db-migrate-x9p3` the prod-
+   locking context for large-table indexes. Relay the same context
+   to the other migration sessions."
+
+**Success.** The migration is safe before it ever surfaces in a PR.
+The agent retains the knowledge for the rest of the session, so
+subsequent delegated tasks ("add an index on `users.created_at`")
+inherit the same caution.
+
+**What goes wrong.** The operator forgets to relay the context to
+the coordinator. The next session repeats the mistake. Mitigation:
+the worktree-state warning loop on detach is a good prompt to
+narrate back; the doc guide includes "always summarize back to the
+coordinator" as recommended hygiene.
+
+### CUJ-5: Morning triage of an overnight delegation fan-out
+
+**Context.** Yesterday at 6pm the operator asked the coordinator to
+"spike three migration strategies in parallel — one per branch —
+and report back." Coordinator spawned `spike-pgvector`,
+`spike-typesense`, and `spike-meilisearch`. The operator closed the
+laptop. It's now 8am the next day. `niwa session list --status
+active` shows all three with `AVAILABILITY=available`, each with
+hours of transcript.
+
+**Goal.** "I have a 9am meeting where I need to pick one. I don't
+want to read three multi-hour transcripts. I want to attach to
+each, ask 'one paragraph: what was the bottom line?', and rank
+them."
+
+**Walkthrough.**
+1. `niwa session list --status active` — confirms all three are
+   `available` (no active workers), sorted by attach state then
+   creation time. Notes the AVAILABILITY column shows all three
+   as free; no stale sentinels to worry about.
+2. `niwa session attach spike-pgvector`. Asks: "One paragraph: did
+   it work, what was the bottleneck, what would the production
+   migration look like?" Agent answers from its own context — p99
+   recall latency was the killer. Detach.
+3. `niwa session attach spike-typesense`. Same prompt verbatim.
+   Agent reports cleaner integration but licensing friction.
+   Detach.
+4. `niwa session attach spike-meilisearch`. Same prompt. Agent
+   flags a corrupted index it never recovered from — the spike is
+   half-done. Operator asks a follow-up: "If I gave you another
+   hour, could you finish?" Agent says yes, lists what it needs.
+   Detach.
+5. Returns to the coordinator: "Kill the meilisearch spike, archive
+   typesense, keep pgvector and have it draft the migration plan."
+
+**Success.** In ~15 minutes the operator has a decision-ready
+summary from three sessions, written by the agents that lived
+through the work, not reconstructed from logs.
+
+**What goes wrong.** One of the sessions has compacted overnight.
+The agent's "bottom line" summary feels paraphrased, not lived.
+The AVAILABILITY column shows nothing about compaction state — the
+operator must scroll the transcript to verify they're getting the
+agent's original reasoning, not a summary of a summary.
+
+### CUJ-6: Forensic peek at an abandoned session
+
+**Context.** Coordinator reports overnight results: "Two sessions
+shipped PRs successfully. The third, `payments-refactor-3p4q`,
+abandoned its task — it logged that it hit a contradiction in the
+requirements and stopped. I haven't destroyed it yet."
+
+**Goal.** "Before I either restart the work or accept the
+abandonment, I want to read what the agent saw. The coordinator's
+summary won't tell me which specific requirement contradicted which.
+I need to see the agent's reasoning at the moment it stopped."
+
+**Walkthrough.**
+1. `niwa session list --status active` — confirms
+   `payments-refactor-3p4q` is still `AVAILABILITY=available` and
+   the worktree exists. Good; nothing's been destroyed yet.
+2. `niwa session attach payments-refactor-3p4q`. Scrolls the
+   transcript to the last assistant turn. The agent had been asked
+   to implement a 3-tier discount calculation; mid-task it found
+   that the requirements doc specified both "discounts compound
+   multiplicatively" and "the maximum total discount is 30%". The
+   agent computed an example showing the two rules disagree at
+   ~30% and chose to abandon rather than guess.
+3. Operator agrees this was the right call. Asks: "Which sample
+   inputs did you run through both rules to find the contradiction?"
+   Agent walks through. Operator captures the test cases into
+   `docs/decisions/discount-contradiction.md` for the next
+   delegation.
+4. Detach. Tells the coordinator: "The abandon was correct. I've
+   captured the contradiction in a decision doc. Destroy
+   `payments-refactor-3p4q` and re-delegate once the requirements
+   are reconciled."
+
+**Success.** The operator preserved the agent's reasoning before
+the session was destroyed. The decision doc means the next
+delegation won't repeat the discovery.
+
+**What goes wrong.** The session's transcript has been compacted
+since the abandon, and the agent's reasoning at the moment of
+abandonment is now a summary, not the original chain. The operator
+must reconstruct from commit messages or the daemon log. This
+informs a v2 nudge: a "transcript snapshot at terminal-state"
+feature would prevent the loss.
+
 ## Timing and Limits
 
 A single source of truth for cadence and timing constants used throughout

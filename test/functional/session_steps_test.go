@@ -786,6 +786,57 @@ func runGitInDir(dir string, args ...string) (string, error) {
 	return string(out), err
 }
 
+// iSeedLiveAttachSentinelForLastSession writes a <worktree>/.niwa/attach.state
+// JSON file that points at the test process's own PID + start_time. Used by
+// the @critical session_attach feature scenarios (Issue #117) to make a
+// session look "attached" without actually invoking `niwa session attach`
+// (which would require a real claude binary).
+func iSeedLiveAttachSentinelForLastSession(ctx context.Context, instance string) (context.Context, error) {
+	s := getState(ctx)
+	if s == nil {
+		return ctx, fmt.Errorf("no test state")
+	}
+	if s.lastSessionWorktreePath == "" {
+		return ctx, fmt.Errorf("no worktree path stored; call niwa_create_session first")
+	}
+	myPID := os.Getpid()
+	myStart, _ := mcp.PIDStartTime(myPID)
+	state := mcp.AttachState{
+		V:              1,
+		OwnerPID:       myPID,
+		OwnerStartTime: myStart,
+		StartedAt:      "2026-05-10T14:32:11Z",
+		LockPath:       ".niwa/attach.lock",
+	}
+	if err := mcp.WriteAttachState(s.lastSessionWorktreePath, state); err != nil {
+		return ctx, fmt.Errorf("writing attach state: %w", err)
+	}
+	return ctx, nil
+}
+
+// iCallDestroySessionWithoutForce calls niwa_destroy_session with force=false
+// and stores the raw MCP response in s.stdout. Unlike iCallDestroySession,
+// this does NOT fail on an error result -- callers assert against the error
+// code via `the last MCP response contains code "..."`. Used to test the
+// SESSION_ATTACHED gate per PRD R13/AC23.
+func iCallDestroySessionWithoutForce(ctx context.Context, instance string) (context.Context, error) {
+	s := getState(ctx)
+	if s == nil {
+		return ctx, fmt.Errorf("no test state")
+	}
+	if s.lastSessionID == "" {
+		return ctx, fmt.Errorf("no session_id stored; call niwa_create_session first")
+	}
+	instRoot := filepath.Join(s.workspaceRoot, instance)
+	args := fmt.Sprintf(`{"session_id":%q,"force":false}`, s.lastSessionID)
+	out, err := callMCPToolAsRole(s, instRoot, "coordinator", "", "niwa_destroy_session", args)
+	if err != nil {
+		return ctx, fmt.Errorf("callMCPToolAsRole niwa_destroy_session: %w", err)
+	}
+	s.stdout = out
+	return ctx, nil
+}
+
 // iRunSessionDetachForLastSessionInInstance runs `niwa session detach <id>`
 // against the most recently created session, executed from the given
 // instance root. Used by the @critical session_attach feature scenarios
