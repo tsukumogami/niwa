@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -271,5 +272,51 @@ func TestNewSessionLifecycleState(t *testing.T) {
 	}
 	if s.CreatorPID == 0 {
 		t.Error("CreatorPID must be set")
+	}
+}
+
+func TestSessionLifecycleStateAttachAbsentWhenNil(t *testing.T) {
+	state := SessionLifecycleState{
+		V:            1,
+		SessionID:    "abcd1234",
+		Repo:         "niwa",
+		Status:       SessionStatusActive,
+		WorktreePath: "/tmp/wt",
+		// Attach left nil deliberately.
+	}
+	data, err := json.Marshal(state)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if strings.Contains(string(data), `"attach"`) {
+		t.Errorf("attach key present when nil: %s", data)
+	}
+	if strings.Contains(string(data), "null") {
+		t.Errorf("null appeared in JSON unexpectedly: %s", data)
+	}
+}
+
+func TestSessionLifecycleStateAttachPresentWhenSet(t *testing.T) {
+	state := SessionLifecycleState{
+		V:            1,
+		SessionID:    "abcd1234",
+		Repo:         "niwa",
+		Status:       SessionStatusActive,
+		WorktreePath: "/tmp/wt",
+		Attach: &AttachState{
+			V: 1, OwnerPID: 12345, OwnerStartTime: 999,
+			StartedAt: "2026-05-10T14:32:11Z",
+			LockPath:  ".niwa/attach.lock",
+		},
+	}
+	data, err := json.Marshal(state)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !strings.Contains(string(data), `"attach"`) {
+		t.Errorf("attach key missing: %s", data)
+	}
+	if !strings.Contains(string(data), `"owner_pid":12345`) {
+		t.Errorf("owner_pid not in output: %s", data)
 	}
 }

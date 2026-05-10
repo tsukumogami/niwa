@@ -44,6 +44,14 @@ type SessionLifecycleState struct {
 	// MCP/CLI response for that call. The json tag is intentionally omitted
 	// so serialization cannot accidentally persist this field.
 	BranchWarning string `json:"-"`
+
+	// Attach is a computed projection of the worktree's attach.state sentinel
+	// (read at projection time, NOT persisted into <sid>.json). Set by
+	// handlers that project lifecycle state into a response (niwa_list_sessions,
+	// niwa session list); nil when no live attach lock is held. omitempty
+	// produces an absent JSON key (not "null") when nil, matching the
+	// "absent, not null" contract documented in the PRD.
+	Attach *AttachState `json:"attach,omitempty"`
 }
 
 // WriteSessionLifecycleState atomically persists state to
