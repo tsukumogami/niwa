@@ -1022,6 +1022,32 @@ func errResultCode(code, detail string) toolResult {
 	}}}
 }
 
+// errResultCodeBody returns a structured-error toolResult whose content block
+// is a JSON object with at minimum an "error_code" field plus whatever fields
+// the caller provides via body. Unlike errResultCode (which is two-line
+// prose), this shape carries arbitrary JSON payloads — needed for codes like
+// MISSING_SKILLS that return {missing: [...], available: [...]}.
+//
+// The returned text is valid JSON beginning with `{`. The errorCodeFromText
+// parser detects both shapes and extracts error_code from either. body must
+// marshal to a JSON object; if it contains an "error_code" key it is
+// overwritten by code so the field is canonical.
+func errResultCodeBody(code string, body map[string]any) toolResult {
+	if body == nil {
+		body = map[string]any{}
+	}
+	body["error_code"] = code
+	data, err := json.Marshal(body)
+	if err != nil {
+		// Fall back to plain-text shape so callers always get an errResult.
+		return errResultCode(code, fmt.Sprintf("internal: cannot marshal error body: %v", err))
+	}
+	return toolResult{IsError: true, Content: []contentBlock{{
+		Type: "text",
+		Text: string(data),
+	}}}
+}
+
 // errorCode extracts the structured error_code from an errResultCode-shaped
 // toolResult pointer. Returns "" when absent. Shared by every handler and
 // test so the error-code extraction logic lives in exactly one place.
@@ -1034,8 +1060,23 @@ func errorCode(r *toolResult) string {
 
 // errorCodeFromText is the string-level twin of errorCode; it accepts a raw
 // content-block text so callers that have already unpacked toolResult don't
-// need to reconstruct one.
+// need to reconstruct one. Handles both shapes:
+//   - The legacy "error_code: <CODE>\ndetail: <msg>" produced by errResultCode.
+//   - The structured JSON `{"error_code":"<CODE>", ...}` produced by
+//     errResultCodeBody.
+// Returns "" when neither shape matches.
 func errorCodeFromText(text string) string {
+	trimmed := strings.TrimSpace(text)
+	if strings.HasPrefix(trimmed, "{") {
+		var obj struct {
+			ErrorCode string `json:"error_code"`
+		}
+		if err := json.Unmarshal([]byte(trimmed), &obj); err == nil && obj.ErrorCode != "" {
+			return obj.ErrorCode
+		}
+		// Fall through to prefix scan for messages that happen to start with
+		// `{` but aren't structured-error JSON.
+	}
 	const prefix = "error_code: "
 	idx := strings.Index(text, prefix)
 	if idx < 0 {
