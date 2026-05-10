@@ -140,6 +140,103 @@ func TestRequiredSkills_TaskStoreRootRedirect(t *testing.T) {
 	}
 }
 
+// TestRequiredSkills_VersionPinMatch asserts that a `<ns>@<version>` form
+// matches when the installed plugin's version equals the pin, and rejects
+// when it does not. Reads the version from
+// `<userHomeDir>/.claude/plugins/installed_plugins.json`.
+func TestRequiredSkills_VersionPinMatch(t *testing.T) {
+	root := t.TempDir()
+	homeDir := t.TempDir()
+	if err := writeSettingsWithPlugins(root, "shirabe@shirabe"); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeInstalledPluginRegistry(homeDir, map[string]string{
+		"shirabe@shirabe": "0.5.2",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	s := &Server{instanceRoot: root, userHomeDir: homeDir}
+
+	// Matching pin: success.
+	body := json.RawMessage(`{"required_skills":["shirabe@0.5.2:plan"]}`)
+	if res := s.checkRequiredSkills(body); res.IsError {
+		t.Errorf("matching version pin should succeed; got error: %s", res.Content[0].Text)
+	}
+
+	// Mismatching pin: rejected.
+	body = json.RawMessage(`{"required_skills":["shirabe@0.5.1:plan"]}`)
+	res := s.checkRequiredSkills(body)
+	if !res.IsError {
+		t.Fatalf("mismatching version pin should fail")
+	}
+	if errorCode(&res) != "MISSING_SKILLS" {
+		t.Errorf("error_code = %q, want MISSING_SKILLS", errorCode(&res))
+	}
+	var resp map[string]any
+	_ = json.Unmarshal([]byte(res.Content[0].Text), &resp)
+	missing, _ := resp["missing"].([]any)
+	if len(missing) != 1 || missing[0] != "shirabe@0.5.1:plan" {
+		t.Errorf("missing = %v, want [shirabe@0.5.1:plan]", resp["missing"])
+	}
+}
+
+// TestRequiredSkills_UserLevelPluginsHonored asserts that a plugin enabled
+// only at user-level `~/.claude/settings.json` (not in the project's
+// `.claude/settings.json`) satisfies a required skill, demonstrating the
+// project + user merge.
+func TestRequiredSkills_UserLevelPluginsHonored(t *testing.T) {
+	root := t.TempDir()
+	homeDir := t.TempDir()
+
+	// Project-level: empty enabledPlugins.
+	if err := writeSettingsWithPlugins(root); err != nil {
+		t.Fatal(err)
+	}
+	// User-level: shirabe@shirabe enabled.
+	if err := writeUserSettings(homeDir, "shirabe@shirabe"); err != nil {
+		t.Fatal(err)
+	}
+	s := &Server{instanceRoot: root, userHomeDir: homeDir}
+
+	body := json.RawMessage(`{"required_skills":["shirabe:plan"]}`)
+	if res := s.checkRequiredSkills(body); res.IsError {
+		t.Errorf("user-level plugin should satisfy required_skills; got: %s", res.Content[0].Text)
+	}
+}
+
+// TestRequiredSkills_ProjectOverridesUserDisable asserts that a plugin
+// enabled at user-level but disabled at project-level (`enabledPlugins`
+// entry set to false) is treated as not enabled — the project's "no"
+// wins over the user's "yes" on key conflict, mirroring Claude Code's
+// project-takes-precedence convention.
+func TestRequiredSkills_ProjectOverridesUserDisable(t *testing.T) {
+	root := t.TempDir()
+	homeDir := t.TempDir()
+
+	if err := writeUserSettings(homeDir, "shirabe@shirabe"); err != nil {
+		t.Fatal(err)
+	}
+	// Project-level: shirabe@shirabe explicitly disabled.
+	projectDir := filepath.Join(root, ".claude")
+	if err := os.MkdirAll(projectDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	disableJSON := `{"enabledPlugins":{"shirabe@shirabe":false}}`
+	if err := os.WriteFile(filepath.Join(projectDir, "settings.json"), []byte(disableJSON), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	s := &Server{instanceRoot: root, userHomeDir: homeDir}
+	body := json.RawMessage(`{"required_skills":["shirabe:plan"]}`)
+	res := s.checkRequiredSkills(body)
+	if !res.IsError {
+		t.Fatalf("project-level disable should override user-level enable")
+	}
+	if errorCode(&res) != "MISSING_SKILLS" {
+		t.Errorf("error_code = %q, want MISSING_SKILLS", errorCode(&res))
+	}
+}
+
 // --- helpers --------------------------------------------------------------
 
 func writePlainSkill(root, name string) error {
@@ -149,6 +246,41 @@ func writePlainSkill(root, name string) error {
 	}
 	return os.WriteFile(filepath.Join(dir, "SKILL.md"),
 		[]byte("# "+name+"\n"), 0o600)
+}
+
+// writeUserSettings writes <homeDir>/.claude/settings.json with the given
+// plugin keys enabled. Mirrors writeSettingsWithPlugins but at the
+// user-level path the production code reads.
+func writeUserSettings(homeDir string, plugins ...string) error {
+	dir := filepath.Join(homeDir, ".claude")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	enabled := map[string]bool{}
+	for _, p := range plugins {
+		enabled[p] = true
+	}
+	doc := map[string]any{"enabledPlugins": enabled}
+	data, _ := json.Marshal(doc)
+	return os.WriteFile(filepath.Join(dir, "settings.json"), data, 0o600)
+}
+
+// writeInstalledPluginRegistry writes a minimal installed_plugins.json at
+// <homeDir>/.claude/plugins/installed_plugins.json with one entry per key
+// of the form `{"plugins": {"<key>": [{"version": "<v>"}]}}`. Used to
+// drive the version-pin path in checkRequiredSkills tests.
+func writeInstalledPluginRegistry(homeDir string, keyVersions map[string]string) error {
+	dir := filepath.Join(homeDir, ".claude", "plugins")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	plugins := map[string][]map[string]string{}
+	for key, ver := range keyVersions {
+		plugins[key] = []map[string]string{{"version": ver}}
+	}
+	doc := map[string]any{"version": 2, "plugins": plugins}
+	data, _ := json.Marshal(doc)
+	return os.WriteFile(filepath.Join(dir, "installed_plugins.json"), data, 0o600)
 }
 
 func writeSettingsWithPlugins(root string, plugins ...string) error {

@@ -61,6 +61,12 @@ type Server struct {
 	// session registry, instead of the main-instance role inbox where
 	// taskStoreRoot() would otherwise land it.
 	sessionID string
+	// userHomeDir is the home directory used to read user-level Claude
+	// settings (~/.claude/settings.json) and the installed-plugins registry
+	// (~/.claude/plugins/installed_plugins.json). Populated from
+	// os.UserHomeDir() at construction; tests inject a tempdir via direct
+	// field assignment to keep required_skills checks hermetic.
+	userHomeDir string
 	// roleInboxDir is <instance-root>/.niwa/roles/<role>/inbox/. Empty when
 	// role or instanceRoot is empty (e.g. unit-test setups that construct a
 	// Server without a workspace layout).
@@ -101,12 +107,14 @@ type Server struct {
 // perform executor-kind authorization checks without plumbing a new parameter
 // through every call site.
 func New(role, instanceRoot string) *Server {
+	homeDir, _ := os.UserHomeDir()
 	s := &Server{
 		instanceRoot:     instanceRoot,
 		mainInstanceRoot: os.Getenv("NIWA_MAIN_INSTANCE_ROOT"),
 		role:             role,
 		taskID:           os.Getenv("NIWA_TASK_ID"),
 		sessionID:        os.Getenv("NIWA_SESSION_ID"),
+		userHomeDir:      homeDir,
 		seenFiles:       make(map[string]struct{}),
 		waiters:         make(map[string]chan toolResult),
 		awaitWaiters:    make(map[string]chan taskEvent),
