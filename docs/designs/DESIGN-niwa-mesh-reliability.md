@@ -913,12 +913,43 @@ niwa_redelegate(
 )
 ```
 
-Authorization: `kindDelegator` on `source_task_id`. Source state
-must be in `{abandoned, cancelled, completed}`; redelegate from
-`queued` or `running` returns a structured error (cancel first).
-The new envelope's `from` is the caller's role/PID; `redelegated_from`
-points to the source. The same `required_skills` gate runs against
+Authorization: `kindDelegator` on `source_task_id`. Any source
+state is permitted — `queued`, `running`, `completed`, `abandoned`,
+or `cancelled`. The new envelope's `from` is the caller's role/PID;
+`redelegated_from` points to the source. The source task's state is
+unchanged by the call (an active source keeps running; a terminal
+source stays terminal). The same `required_skills` gate runs against
 the merged body.
+
+The response always carries `source_state_at_fork` so the caller
+can distinguish recovery flows (source was terminal) from active
+forks (source was queued or running):
+
+```json
+{
+  "task_id": "<new-task-id>",
+  "redelegated_from": "<source-task-id>",
+  "source_state_at_fork": "running"
+}
+```
+
+When `source_state_at_fork` is `queued` or `running`, the caller has
+forked active work — both the source and the new task may run to
+completion in parallel. This is permitted (the same fan-out shape is
+already available via N parallel `niwa_delegate` calls), but the
+caller is expected to read the field and decide whether parallel
+execution is safe for the body in question. Bodies with non-idempotent
+external side effects (creating PRs, modifying shared state) need
+explicit caller intent before forking.
+
+The two corner cases:
+- **`SOURCE_BODY_LOST`** — returned when source envelope.json is
+  missing entirely (the rare `taskstore_lost` recreate-stub case).
+  The caller can either re-supply the body via `body_overrides` or
+  give up.
+- **Source has terminated by the time the new task starts** — fine.
+  The redelegated task is independent; it doesn't depend on the
+  source's state at any point after the fork.
 
 **New error code — `MISSING_SKILLS`:**
 
@@ -1171,12 +1202,23 @@ Deliverables:
   `handleDelegate` and `handleRedelegate`. The manifest read at
   gate time enumerates `<workspaceRoot>/.claude/skills/` and
   resolves enabledPlugins from the workspace settings.
-- Functional test: redelegate from `abandoned` source produces a
-  new task with the source's body verbatim; redelegate from a
-  `taskstore_lost` source where envelope.json survived works;
-  redelegate where envelope.json is also missing returns
-  `SOURCE_BODY_LOST`. The `required_skills` gate fires for a
-  typo and returns the correct `{missing, available}` shape.
+- Functional tests:
+  1. Redelegate from `abandoned` source produces a new task with
+     the source's body verbatim; the response carries
+     `source_state_at_fork: "abandoned"`.
+  2. Redelegate from a `taskstore_lost` source where envelope.json
+     survived works.
+  3. Redelegate where envelope.json is also missing returns
+     `SOURCE_BODY_LOST`.
+  4. Redelegate from a `running` source produces a new independent
+     task, the source continues to run, and the response carries
+     `source_state_at_fork: "running"`. Both tasks reach terminal
+     states independently.
+  5. Redelegate from a `queued` source produces a new task; both
+     are claimable by their target sessions independently;
+     response carries `source_state_at_fork: "queued"`.
+  6. The `required_skills` gate fires for a typo and returns the
+     correct `{missing, available}` shape.
 
 Depends on Phase 3 (manifest source-of-truth) and Phase 4
 (`abandoned` source state for redelegate from dangling tasks).
