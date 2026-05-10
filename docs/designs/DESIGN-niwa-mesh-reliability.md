@@ -29,8 +29,8 @@ decision: |
   worker is a main-instance or session worker. The flag set is
   empirically verified (see Verification Notes) and idempotent for
   main-instance workers. The per-repo niwa-mesh SKILL.md writes
-  become unnecessary and are removed; defense-in-depth `.gitignore`
-  entries close historical leaks. (2) Dangling tasks are converted
+  become unnecessary and are removed at the source.
+  (2) Dangling tasks are converted
   from a filesystem-only quarantine to a real `state.json`
   transition: the daemon writes `abandoned` with
   `reason="taskstore_lost"`, so every read API surfaces a
@@ -41,8 +41,11 @@ decision: |
   inheritance contract. (4) A `roleRoot(role)` helper redirects
   coordinator-targeted role checks and inbox writes to
   `mainInstanceRoot`, so `niwa_ask` and `niwa_send_message` reach the
-  live coordinator from session workers; auto-register coordinator
-  from the four handlers a fan-out coordinator actually exercises.
+  live coordinator from session workers; expand coordinator
+  auto-registration to the two new handlers a fan-out coordinator
+  actually exercises (`niwa_delegate` and `niwa_query_task`,
+  alongside the existing `niwa_check_messages` and
+  `niwa_await_task` triggers).
   Plus mechanical follow-ons: typed daemon-spawn timeout (#110), a
   computed `daemon` sub-object on `niwa_list_sessions` (#111), a new
   `niwa_redelegate` primitive that reads the source envelope
@@ -373,12 +376,34 @@ not both.
 `spawnWorker` (`internal/cli/mesh_watch.go:908-1016`) appends three
 new argv items to its `claude -p` invocation, in this order:
 
-1. `--add-dir <workspaceRoot>` (`s.mainInstanceRoot` if non-empty,
-   else `s.instanceRoot`).
-2. `--add-dir <repoPath>` (the role's repo working directory,
-   computed via existing `resolveRoleCWD` logic at
-   `mesh_watch.go:2315-2342`).
+1. `--add-dir <workspaceRoot>` — the workspace root that holds
+   `<workspaceRoot>/.claude/`.
+2. `--add-dir <repoPath>` — the role's repo working directory under
+   the workspace's main instance, where the role's
+   `.claude/settings.local.json` and other workspace-managed config
+   lives.
 3. `--setting-sources user,project,local`.
+
+**Computing `<workspaceRoot>` and `<repoPath>` (naming caveat).** The
+MCP server (`internal/mcp.Server`) calls the workspace root
+`s.mainInstanceRoot`. The daemon's `spawnContext` calls the same
+root `s.taskStoreRoot` and exposes it via `s.taskStoreRootDir()`;
+there is no `mainInstanceRoot` field on `spawnContext`. Inside
+`spawnWorker` (which runs in the daemon), the implementation uses
+`s.taskStoreRootDir()` as `<workspaceRoot>` for both spawn types.
+For `<repoPath>`, the implementation uses
+`resolveRoleCWD(s.taskStoreRootDir(), evt.role)` — note this is
+deliberately different from `cmd.Dir`, which stays as
+`resolveRoleCWD(s.instanceRoot, evt.role)`:
+
+- For **main-instance daemons** the two are equivalent
+  (`s.taskStoreRoot == s.instanceRoot`).
+- For **session daemons** they diverge: `cmd.Dir` is the worktree
+  under `.niwa/worktrees/` (so git operations land there), while
+  `--add-dir <repoPath>` points at the workspace's actual repo
+  checkout where the source-of-truth `.claude/` tree lives. The
+  worktree's `.claude/` is not tracked by git and is empty; using
+  the worktree path here would defeat the inheritance contract.
 
 Both spawn paths use the same flag set. For main-instance workers
 (CWD = `<repoPath>`), the flags are idempotent at the live-repo CWD
@@ -392,11 +417,6 @@ no longer writes `<repoPath>/.claude/skills/niwa-mesh/SKILL.md` for
 non-coordinator roles. The instance-root copy at
 `<instanceRoot>/.claude/skills/niwa-mesh/SKILL.md` (line 341)
 remains; workers find it through `--add-dir <workspaceRoot>`.
-
-Defense in depth: `internal/workspace/gitignore.go` is extended to
-add `.claude/skills/niwa-mesh/` to each consumer repo's `.gitignore`
-on apply, protecting against any historical commits and any future
-regressions that re-introduce the per-repo write.
 
 **Rationale.** The flag set is the smallest empirically verified
 mechanism that satisfies the contract. It uses documented Claude
@@ -480,15 +500,28 @@ not adding a sixth state). The envelope still moves to
 `inbox/dangling/` as a forensic side-effect, but the rename is now
 bookkeeping, not the primary signal.
 
-Two sub-cases:
+Two sub-cases, each with a different writer:
 
 - **state.json missing entirely (taskstore_lost).** The daemon
-  recreates a minimal stub (only state.json, with
-  `state=abandoned`, `reason=taskstore_lost`, transition log
-  seeded `unknown -> abandoned`). envelope.json stays missing.
+  bootstraps a minimal stub via a new helper
+  `mcp.WriteAbandonedTaskStub(taskDir, reason)`: takes the per-task
+  flock, creates the task directory if needed, writes state.json
+  with `state=abandoned`, `reason="taskstore_lost"`, and a seeded
+  transition log (`unknown -> abandoned`). envelope.json stays
+  missing — `formatQueryResult` reads only state.json fields, so
+  query / list / await / cancel / update all work without a
+  fabricated envelope. `niwa_redelegate` from this source returns
+  `SOURCE_BODY_LOST` and asks the caller to provide the body via
+  `body_overrides`.
 - **state.json present at `state=queued` but inbox file is somehow
   in dangling/ (rare, hand-seeded).** The daemon transitions
-  `queued -> abandoned` with the same reason annotation.
+  `queued -> abandoned` via the existing `mcp.UpdateState` flock'd
+  writer with the same reason annotation. `UpdateState` reads
+  state.json first under the per-task flock, validates the
+  transition, and persists.
+
+Both helpers share the flock path; only the read-modify-write vs.
+bootstrap-write logic differs.
 
 `niwa_query_task`, `niwa_list_outbound_tasks`, `niwa_await_task`,
 `niwa_cancel_task`, and `niwa_update_task` then all surface
@@ -548,27 +581,28 @@ workspace-specific fields"; the alternative is a top-level field on
 **Relationship to Decision 1's inheritance contract.** Once
 Decision 1 commits workers to the baseline inheritance contract,
 the value of `required_skills` shifts. Workers WILL have the
-workspace plugin set as their baseline (Decision 1 guarantees it).
-The gate's remaining utility is:
+workspace plugin set as their baseline (Decision 1 guarantees it),
+so the gate is no longer load-bearing for runtime correctness. The
+remaining concrete utility is **catching typos in skill names at
+queue time** (`/shirabe:prd` vs. `/shirabe:rpd`) — the failure
+surfaces synchronously at delegation rather than the worker
+discovering it mid-task and abandoning. That alone justifies the
+gate's small implementation cost.
 
-1. Catching typos in skill names in the body
-   (`/shirabe:prd` vs. `/shirabe:rpd`) — fail fast at queue time
-   instead of mid-task.
-2. Coordinator declaring intent — "this body uses /shirabe:prd" —
-   so audit logs and future tooling can read the requirement.
-3. Detecting drift in cross-workspace redelegations — if a coordinator
-   redelegates to a different session whose workspace happens not to
-   have the plugin, the gate fails fast.
-4. Preparing for the "future per-spawn customization" path — a
-   future iteration could read `body.required_skills` to dynamically
-   pass additional `--plugin-dir` flags at spawn time, layering
-   per-task skills on top of the baseline.
+The body-convention placement also serves the future per-spawn
+customization path described in the Future Path section: a later
+iteration can read `body.required_skills` to translate missing
+entries into additional `--plugin-dir` arguments at spawn time,
+making the gate actively remediating rather than purely
+declarative. Keeping the field inside `body` (vs. promoting it to
+a top-level argument) preserves the freedom to evolve in that
+direction without breaking the wire schema.
 
 The gate's role drops from "load-bearing prerequisite for delegation"
 (its original framing under #113's narrative) to "declarative
-assertion that catches drift and prepares for dynamic loading." The
-placement debate is now about where to put a body-level intent
-assertion, not where to put a runtime requirement.
+typo-catcher and forward-compat anchor." The placement debate is
+now about where to put a body-level intent assertion, not where to
+put a runtime requirement.
 
 Key assumptions:
 - The manifest the gate reads is the same workspace `.claude/`
@@ -597,6 +631,13 @@ unchanged. `handleDelegate` adds a peek between the existing
 
 The same gate runs inside `handleRedelegate`, before
 `createTaskEnvelope`, against the merged body.
+
+The gate fires on every delegation regardless of the `read_only`
+parameter. For `read_only=true` calls (which route to the main
+clone instead of a session), the manifest is the workspace's
+`.claude/` tree under the main instance — the same one the
+session-routed gate consults. The check is uniform across both
+routing paths.
 
 **Rationale.** Body is opaque to niwa today and that's load-bearing:
 every workspace-specific knob lives inside it, and niwa's MCP
@@ -680,19 +721,22 @@ else `s.instanceRoot`. Three call sites switch to it:
 keeps mirroring the worker's actual responsibilities (one role:
 the worker's repo).
 
-Auto-registration of coordinator extends to the four handlers a
-fan-out coordinator actually exercises:
+Auto-registration of coordinator extends to two new handlers:
 
-- `handleDelegate` (highest priority — the canonical fan-out call).
-- `handleQueryTask` (the canonical poll call).
-- `handleSendMessage` (initiating peer messaging).
-- `handleListOutboundTasks` (alternative poll pattern).
+- `handleDelegate` (the canonical fan-out call — covers
+  registration on the first delegate any coordinator makes).
+- `handleQueryTask` (the canonical poll call — covers
+  fan-out-then-poll patterns where the coordinator never calls
+  `niwa_check_messages` or `niwa_await_task`).
 
-`maybeRegisterCoordinator` is idempotent and cheap (short-circuits
-on `s.role != "coordinator"` and writes only when no live entry
-exists), so the cost of being generous with trigger sites is
-negligible. The existing `handleCheckMessages` and `handleAwaitTask`
-triggers stay.
+The existing `handleCheckMessages` and `handleAwaitTask` triggers
+stay. Together with the two new sites, any coordinator that does
+anything beyond reading is covered: a coordinator that delegates
+auto-registers via `handleDelegate`; a coordinator that only polls
+(any of `niwa_query_task`, `niwa_check_messages`,
+`niwa_await_task`) auto-registers via the corresponding handler.
+`maybeRegisterCoordinator` is idempotent and cheap, so the four
+total trigger sites are exhaustive without being redundant.
 
 **Rationale.** The decisive evidence is that
 `sendMessageWithID` both calls `isKnownRole(args.To)` AND computes
@@ -861,12 +905,6 @@ What is NOT inherited (and is intentionally scoped):
     "Worker asks coordinator" pattern to reflect the new
     routing path.
 
-- `internal/workspace/gitignore.go`
-  - Extend the apply-time gitignore enforcement to add
-    `.claude/skills/niwa-mesh/` to each consumer repo's
-    `.gitignore`, defending against any historical commits and
-    future regressions.
-
 - `internal/mcp/server.go`
   - New `roleRoot(role string) string` helper on `Server`.
   - `isKnownRole` (≈768-778): consult `roleRoot(role)` instead
@@ -889,9 +927,11 @@ What is NOT inherited (and is intentionally scoped):
     `required_skills` gate, and re-enters `createTaskEnvelope`
     with `from` reset to caller. Adds `redelegated_from` to the
     new envelope.
-  - `maybeRegisterCoordinator` calls added to: `handleDelegate`,
-    `handleQueryTask`, `handleSendMessage`,
-    `handleListOutboundTasks` (entry point).
+  - `maybeRegisterCoordinator` calls added to: `handleDelegate`
+    and `handleQueryTask` (entry point). The existing
+    `handleCheckMessages` and `handleAwaitTask` triggers are
+    unchanged. Together the four sites cover every non-read-only
+    coordinator interaction.
 
 - `internal/mcp/handlers_session.go`
   - `handleCreateSession` (≈146-228): handle
@@ -1145,8 +1185,9 @@ Deliverables:
 - New `roleRoot(role string) string` helper on `Server`.
 - `isKnownRole`, `sendMessageWithID` inbox path, `handleAsk`
   `askRoot` switched to use `roleRoot`.
-- `maybeRegisterCoordinator` called from `handleDelegate`,
-  `handleQueryTask`, `handleSendMessage`, `handleListOutboundTasks`.
+- `maybeRegisterCoordinator` called from `handleDelegate` and
+  `handleQueryTask` (existing `handleCheckMessages` and
+  `handleAwaitTask` triggers stay).
 - Functional test: a worker session can `niwa_ask(to="coordinator")`
   and reach a live coordinator via the existing `task.ask` flow.
   Same for `niwa_send_message`.
@@ -1166,10 +1207,25 @@ Deliverables:
   the 500 ms timeout.
 - `handleCreateSession` rolls back worktree, branch, state on
   that error class; returns `errResult`.
-- `handleListSessions` enriches each row with the computed
-  `daemon: {alive, pid, started_at}` sub-object via
+- `handleListSessions` returns a wrapper response struct that
+  embeds the persisted `SessionLifecycleState` plus the computed
+  `daemon: {alive, pid, started_at}` sub-object — does NOT add a
+  transient field on `SessionLifecycleState` itself, so the
+  single-writer invariant on the persisted lifecycle file is
+  preserved. Probe via `<worktreePath>/.niwa/daemon.pid` +
   `mcp.IsPIDAlive`.
 - `docs/guides/sessions.md` updated with both surfaces.
+- Functional tests covering #110's three named sub-cases:
+  (a) inotify limit exhaustion — daemon spawns but exits before
+      writing daemon.pid; the 500 ms timeout returns
+      `ErrDaemonSpawnTimeout` and the session is rolled back.
+  (b) target binary missing or non-executable —
+      `EnsureDaemonRunning` returns the existing pre-spawn error
+      from `cmd.Start()`; the session is rolled back the same
+      way.
+  (c) daemon-internal PID file write failure — manifests as the
+      timeout path because daemon.pid never appears; rollback
+      via the same code path as (a).
 
 Independent of Phase 1; can ship in parallel.
 
@@ -1181,25 +1237,40 @@ Deliverables:
 - `spawnWorker` (`internal/cli/mesh_watch.go:982-1009`) appends
   the three argv items in the order specified in Solution
   Architecture: `--add-dir <workspaceRoot>`,
-  `--add-dir <repoPath>`, `--setting-sources user,project,local`.
+  `--add-dir <repoPath>`, `--setting-sources user,project,local`,
+  with `<workspaceRoot>` = `s.taskStoreRootDir()` and `<repoPath>`
+  = `resolveRoleCWD(s.taskStoreRootDir(), evt.role)`.
 - `InstallChannelInfrastructure` removes the per-repo skill write
   loop. Instance-root copy stays.
-- `internal/workspace/gitignore.go` extended to add
-  `.claude/skills/niwa-mesh/` to consumer repos' `.gitignore` on
-  apply.
 - Functional tests:
-  1. A main-instance worker spawned by `niwa_delegate` sees
-     identical workspace plugins, niwa-mesh skill, and
-     CLAUDE.md chain as a user running `claude` in the repo.
-  2. A session worker spawned by `niwa_create_session` +
-     `niwa_delegate` sees the same config as the main-instance
-     worker (symmetry test).
-  3. Workspace-defined hooks (e.g., `PreToolUse`) fire inside
-     the worker session.
-  4. The niwa-mesh skill is invocable from the worker (e.g., the
-     worker can call into mesh tooling described in
-     `niwa-mesh/SKILL.md`).
-  5. After `niwa apply`, no consumer repo working tree contains
+  1. **Named-skill availability checklist** (replaces numeric
+     count parity as the acceptance gate). From a session worker
+     spawned by `niwa_create_session` + `niwa_delegate`, each of
+     the following must be invocable:
+     - `niwa-mesh` (the workspace plain skill).
+     - One representative `shirabe:*` skill (e.g.
+       `shirabe:plan`).
+     - One representative `tsukumogami:*` skill (e.g.
+       `tsukumogami:work-on`).
+     - The workspace's user-level skill set (`superpowers:*`,
+       etc.) reachable via inherited HOME.
+     A main-instance worker passes the same checklist by
+     construction (CWD discovery already works there); the
+     symmetry test in (2) verifies that.
+  2. **Symmetry test.** A main-instance worker and a session
+     worker, given the same delegation body, produce equivalent
+     skill-list output when prompted to introspect — the named
+     skills above MUST be visible in both. Numeric count parity
+     is informational, not an acceptance gate; if a residual
+     count gap remains (e.g., the 9-vs-11 shirabe gap surfaced
+     during design verification), Phase 3 documents the cause
+     and ships, provided every named skill above resolves in
+     both contexts.
+  3. **Hook propagation test.** A workspace-defined hook (e.g.,
+     `PreToolUse Bash` in `<workspaceRoot>/.claude/settings.json`)
+     fires inside the worker session.
+  4. **Skill-leak regression test.** After `niwa apply`, no
+     consumer repo working tree contains
      `.claude/skills/niwa-mesh/SKILL.md`.
 
 Phase 3 unblocks Phase 5's `required_skills` gate (the gate's
@@ -1268,8 +1339,6 @@ Deliverables:
 - `docs/guides/sessions.md` update for the new `daemon`
   sub-object, `taskstore_lost` recovery, and the worker config
   inheritance contract.
-- Diff-vs-fixture CI check for `buildSkillContent` output to
-  catch future drift.
 
 Depends on Phases 1–5 landing so the skill text reflects the
 merged runtime.
@@ -1281,13 +1350,17 @@ Phase 1 ──┐
 Phase 2 ──┤
 Phase 3 ──┼─► Phase 5 ──┐
 Phase 4 ──┘              ├─► Phase 6
-                Phase 4 ─┘
+Phase 3 ──────────────── ┤
+Phase 4 ──────────────── ┘
 ```
 
 Phases 1, 2, and 4 are independent of everything else and can ship
 in parallel. Phase 3 unblocks Phase 5. Phase 4 unblocks Phase 5
-only for the dangling-source redelegate case. Phase 6 lands last
-so the skill text reflects the merged runtime.
+only for the dangling-source redelegate case. Phase 6 lands last so
+the skill text reflects the merged runtime — it depends on Phase 3
+(skill text describes worker config inheritance) and Phase 4 (skill
+text describes `taskstore_lost` recovery), in addition to the
+implicit dependency on Phases 1, 2, 5.
 
 ## Security Considerations
 
@@ -1426,9 +1499,10 @@ without values, preserving the existing no-values invariant).
   worker shows shirabe skill count of 9 vs 11 from the live repo
   CWD. The functional contract (niwa-mesh visible, plugins
   loadable) holds in both cases; the count discrepancy does not
-  affect any plugin's availability. The gap is documented as an
-  open item in Verification Notes for implementation-time
-  follow-up.
+  affect any plugin's availability. Phase 3's named-skill
+  availability checklist replaces numeric count parity as the
+  acceptance gate, so this gap doesn't block shipping; the
+  count is informational from that point forward.
 - Daemon now writes `state.json` transitions, expanding the
   daemon's surface. Today only the MCP server transitions state.
   The shared taskstore writer must enforce the same flock
@@ -1437,9 +1511,10 @@ without values, preserving the existing no-values invariant).
   (`extractArgKeys` only captures top-level wire keys). Failed
   gates are still logged via `error_code: MISSING_SKILLS`;
   successful assertions are not directly grep-able from arg_keys.
-- Adding `maybeRegisterCoordinator` to four handlers means a
-  coordinator that has never intentionally registered now does
-  so on its first `niwa_delegate` call. This is the desired
+- Adding `maybeRegisterCoordinator` to two new handlers
+  (`handleDelegate` and `handleQueryTask`) means a coordinator
+  that has never intentionally registered now does so on its
+  first `niwa_delegate` call. This is the desired
   behavior, but it changes the registration timing.
 - One role (`coordinator`) is now special in code rather than on
   disk. Reviewers grepping for `.niwa/roles/coordinator` in the
@@ -1448,20 +1523,31 @@ without values, preserving the existing no-values invariant).
 
 ### Mitigations
 
-- For the 9-vs-11 shirabe count gap: implementation Phase 3 must
-  investigate the source (likely `<repoPath>/.claude/shirabe-extensions/`
-  resolution under multi-`--add-dir`) and either produce full count
-  parity or document the residual gap with concrete justification.
-  If full parity requires a different flag combination, the design
-  flexes — the contract is "same baseline behavior", not "same
-  flag set". Phase 3 acceptance includes a symmetry test that
-  compares main-instance and session-worker outputs at delegation
-  time.
-- For the daemon-writes-state.json risk: reuse the existing
-  `taskstore.go` flock'd writer rather than introducing a
-  parallel writer; cover the new write path with the existing
-  `mesh_watch_test.go` fixture pattern
-  (`TestHandleInboxEvent_DanglingEnvelope` at line 743).
+- For the 9-vs-11 shirabe count gap: Phase 3's acceptance gate is
+  the named-skill availability checklist (niwa-mesh, a
+  representative `shirabe:*`, a representative `tsukumogami:*`,
+  user-level skills) plus the symmetry test, not numeric count
+  parity. If every named skill resolves in both contexts, Phase 3
+  ships and the count diff is recorded as an informational
+  observation in the test output. Implementation may investigate
+  the cause if cheap (suspected: `<repoPath>/.claude/shirabe-extensions/`
+  resolution under multi-`--add-dir`) but has no obligation to.
+- For the daemon-writes-state.json risk: the present-state.json
+  sub-case (state.json exists at `state=queued`, daemon transitions
+  to `abandoned`) uses the existing `mcp.UpdateState` flock'd
+  writer. The missing-state.json sub-case (`taskstore_lost` —
+  state.json gone entirely) cannot use `UpdateState` because that
+  helper's first step is `readStateLocked`, which fails when the
+  file is missing. Add a sibling helper, e.g.
+  `mcp.WriteAbandonedTaskStub(taskDir, reason)`, that takes the
+  same per-task flock, creates the task directory if needed, and
+  writes the bootstrap `state.json` with `state=abandoned`,
+  `reason="taskstore_lost"`, and a seeded transition log (`unknown
+  -> abandoned`). Both helpers share the flock path; only the
+  read-modify-write vs. bootstrap-write logic differs. Cover both
+  paths with the existing `mesh_watch_test.go` fixture pattern
+  (`TestHandleInboxEvent_DanglingEnvelope` at line 743) plus a new
+  test case for the bootstrap path.
 - For audit-log fidelity loss: keep `error_code: MISSING_SKILLS`
   on the failed-gate path. If post-hoc auditability of asserted
   preconditions becomes a real operator question, extend
@@ -1559,9 +1645,10 @@ invocation; flags shown are passed in addition to
    I matches the no-flags baseline B exactly).
 4. **A 2-skill shirabe count gap** exists between worktree-with-flags
    (9) and live-repo (11). The functional contract holds in both
-   cases (niwa-mesh visible, plugins loadable); the count
-   discrepancy is documented as an open implementation-phase
-   investigation.
+   cases (niwa-mesh visible, plugins loadable). Phase 3's
+   acceptance gate is the named-skill availability checklist plus
+   the symmetry test, not numeric count parity, so this gap is
+   informational and doesn't block shipping.
 5. **The niwa repo's `.claude/` is not git-tracked.** A fresh
    `git worktree add` creates a worktree with no `.claude/`; the
    workspace and repo `.claude/` trees must reach the worker via
