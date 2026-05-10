@@ -59,7 +59,7 @@ func runSessionCreate(cmd *cobra.Command, args []string) error {
 
 	result := srv.CreateSessionDirect(repo, purpose, "")
 	if result.IsError {
-		return fmt.Errorf("%s", result.Content[0].Text)
+		return renderMCPError(result.Content[0].Text)
 	}
 
 	var resp struct {
@@ -100,7 +100,7 @@ func runSessionDestroy(cmd *cobra.Command, args []string) error {
 
 	result := srv.DestroySessionDirect(sessionID, sessionDestroyForce)
 	if result.IsError {
-		return fmt.Errorf("%s", result.Content[0].Text)
+		return renderMCPError(result.Content[0].Text)
 	}
 
 	var resp struct {
