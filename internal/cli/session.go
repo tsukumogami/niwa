@@ -55,7 +55,9 @@ AVAILABILITY=stale appear under neither filter; run without filters to
 see them.
 
 For the coordinator process registry view, use 'niwa mesh list' directly.`,
-	RunE: runSessionList,
+	RunE:          runSessionList,
+	SilenceErrors: true,
+	SilenceUsage:  true,
 }
 
 var (
