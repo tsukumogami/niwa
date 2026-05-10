@@ -255,7 +255,9 @@ func runTaskShow(cmd *cobra.Command, args []string) error {
 	}
 	taskDir := filepath.Join(tasksDir, taskID)
 	if _, err := os.Stat(taskDir); err != nil {
-		fmt.Fprintf(cmd.ErrOrStderr(), "task not found: %s\n", taskID)
+		// Issue 10: stop double-printing. The returned error already
+		// prints once via Execute(); the explicit stderr write was
+		// duplicate output for this specific path.
 		return fmt.Errorf("task not found: %s", taskID)
 	}
 

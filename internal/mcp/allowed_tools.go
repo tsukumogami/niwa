@@ -16,6 +16,7 @@ package mcp
 // matches .mcp.json). Callers join with commas.
 var ClaudeAllowedTools = []string{
 	"mcp__niwa__niwa_delegate",
+	"mcp__niwa__niwa_redelegate",
 	"mcp__niwa__niwa_query_task",
 	"mcp__niwa__niwa_await_task",
 	"mcp__niwa__niwa_report_progress",
@@ -26,6 +27,8 @@ var ClaudeAllowedTools = []string{
 	"mcp__niwa__niwa_ask",
 	"mcp__niwa__niwa_send_message",
 	"mcp__niwa__niwa_check_messages",
+	"mcp__niwa__niwa_create_session",
+	"mcp__niwa__niwa_destroy_session",
 }
 
 // WorkerFallbackBashTools are appended to ClaudeAllowedTools when spawning

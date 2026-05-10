@@ -184,6 +184,25 @@ func ReadState(taskDir string) (*TaskEnvelope, *TaskState, error) {
 	return env, st, nil
 }
 
+// ReadStateOnly reads `<taskDir>/state.json` under a shared flock without
+// also reading envelope.json. Used by callers that need only the lifecycle
+// state (e.g. niwa_redelegate detects a missing envelope to surface
+// SOURCE_BODY_LOST; Issue 5's taskstore_lost recovery never recreates the
+// envelope, so anyone reading those tasks must tolerate its absence). When
+// the envelope and state.json are both expected, prefer ReadState.
+func ReadStateOnly(taskDir string) (*TaskState, error) {
+	lf, err := OpenTaskLock(taskDir)
+	if err != nil {
+		return nil, err
+	}
+	defer lf.Close()
+	if err := acquireFlock(lf, false); err != nil {
+		return nil, err
+	}
+	defer func() { _ = releaseFlock(lf) }()
+	return readStateLocked(taskDir)
+}
+
 // readEnvelope reads `<taskDir>/envelope.json` under the caller's flock.
 // The O_NOFOLLOW open flag protects against a symlink attacker targeting a
 // different file via the known pathname (see DESIGN Threat Model).
@@ -309,6 +328,73 @@ func UpdateState(taskDir string, mutator Mutator) error {
 			// and transitions.log. state.json is authoritative by design.
 			return err
 		}
+	}
+	return nil
+}
+
+// WriteAbandonedTaskStub creates a minimal terminal-state record for a task
+// whose state.json is missing entirely. This is the bootstrap path for the
+// taskstore_lost case from Issue 5 / #112: when the daemon's watch loop
+// classifies an inbox envelope as dangling (state.json absent), it calls
+// this helper to land a real state.json with state=abandoned plus a typed
+// reason, so every read API surfaces a consistent terminal state instead of
+// the legacy `{too_late, queued}` contradiction.
+//
+// The function takes the per-task flock for the same reason UpdateState
+// does: state.json must not be observed in a partially-written form, and
+// concurrent operator action against the same task ID must serialize. The
+// task directory and any necessary parents are created on demand because
+// the dominant taskstore_lost reproducer is a wiped .niwa/tasks/<id>/
+// directory.
+//
+// envelope.json is intentionally NOT recreated — the original delegate
+// envelope is gone, and fabricating one would carry no meaningful
+// `from`/`body` content. niwa_query_task and niwa_list_outbound_tasks read
+// only state.json fields, so they work without an envelope. niwa_redelegate
+// detects the missing envelope and returns SOURCE_BODY_LOST so the caller
+// can re-supply the body via body_overrides.
+//
+// reason is a typed slug (e.g. "taskstore_lost") that the read APIs surface
+// alongside `state="abandoned"`.
+func WriteAbandonedTaskStub(taskDir, reason string) error {
+	if err := os.MkdirAll(taskDir, 0o700); err != nil {
+		return fmt.Errorf("create task dir: %w", err)
+	}
+	lf, err := OpenTaskLock(taskDir)
+	if err != nil {
+		return fmt.Errorf("open task lock: %w", err)
+	}
+	defer lf.Close()
+	if err := acquireFlock(lf, true); err != nil {
+		return fmt.Errorf("acquire task lock: %w", err)
+	}
+	defer func() { _ = releaseFlock(lf) }()
+
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	reasonJSON, _ := json.Marshal(reason)
+	st := &TaskState{
+		V:           1,
+		TaskID:      filepath.Base(taskDir),
+		State:       TaskStateAbandoned,
+		Reason:      reasonJSON,
+		MaxRestarts: 3,
+		MaxResumes:  2,
+		StateTransitions: []StateTransition{
+			{From: "", To: TaskStateAbandoned, At: now},
+		},
+	}
+	if err := writeStateAtomic(taskDir, st); err != nil {
+		return fmt.Errorf("write stub state.json: %w", err)
+	}
+	if err := appendTransitionLog(taskDir, &TransitionLogEntry{
+		V:      1,
+		At:     now,
+		Kind:   "state_transition",
+		From:   "",
+		To:     TaskStateAbandoned,
+		Reason: reasonJSON,
+	}); err != nil {
+		return fmt.Errorf("append transitions.log: %w", err)
 	}
 	return nil
 }

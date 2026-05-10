@@ -968,6 +968,140 @@ func iVerifyAuthorizationDenied(ctx context.Context, instance string) error {
 	return nil
 }
 
+// callMCPToolAsSessionWorker runs `niwa mcp-serve` once with the env block
+// a real session worker would receive: NIWA_INSTANCE_ROOT pointing at the
+// session worktree, NIWA_MAIN_INSTANCE_ROOT at the workspace root, and
+// NIWA_SESSION_ID set. This is the harness-side equivalent of being inside
+// a session daemon's spawned worker, useful for asserting cross-process
+// routing behavior without depending on the worker fake's scenario script.
+//
+// `role` is the worker's role (NIWA_SESSION_ROLE). `taskID` may be empty
+// for tools that don't require a NIWA_TASK_ID (e.g. niwa_check_messages
+// when no in-progress envelope is expected); pass the actual task id for
+// authorization-gated tools (niwa_finish_task, niwa_report_progress, etc.).
+//
+// Returns raw mcp-serve stdout for regex-style assertions, mirroring
+// callMCPToolAsRole.
+func callMCPToolAsSessionWorker(s *testState, mainInstanceRoot, worktreePath, role, sessionID, taskID, toolName, argsJSON string) (string, error) {
+	input := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"0.0.1"}}}` + "\n" +
+		`{"jsonrpc":"2.0","method":"notifications/initialized"}` + "\n" +
+		`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"` + toolName + `","arguments":` + argsJSON + `}}` + "\n"
+
+	env := s.buildEnv()
+	envMap := make(map[string]string)
+	for _, kv := range env {
+		if i := strings.IndexByte(kv, '='); i >= 0 {
+			envMap[kv[:i]] = kv[i+1:]
+		}
+	}
+	envMap["NIWA_INSTANCE_ROOT"] = worktreePath
+	envMap["NIWA_MAIN_INSTANCE_ROOT"] = mainInstanceRoot
+	envMap["NIWA_SESSION_ID"] = sessionID
+	envMap["NIWA_SESSION_ROLE"] = role
+	if taskID != "" {
+		envMap["NIWA_TASK_ID"] = taskID
+	} else {
+		delete(envMap, "NIWA_TASK_ID")
+	}
+
+	delete(envMap, "NIWA_WORKER_SPAWN_COMMAND")
+	delete(envMap, "NIWA_FAKE_SCENARIO")
+	delete(envMap, "NIWA_FAKE_TEST_BINARY")
+
+	envSlice := make([]string, 0, len(envMap))
+	for k, v := range envMap {
+		envSlice = append(envSlice, k+"="+v)
+	}
+
+	cmd := exec.Command(s.binPath, "mcp-serve")
+	cmd.Env = envSlice
+	cmd.Stdin = strings.NewReader(input)
+	var stdout, stderr strings.Builder
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		if _, ok := err.(*exec.ExitError); !ok {
+			return "", fmt.Errorf("mcp-serve failed: %w\nstderr: %s", err, stderr.String())
+		}
+	}
+	return stdout.String(), nil
+}
+
+// iCallCheckMessagesAsSessionWorker exercises niwa_check_messages from the
+// session worker's perspective: NIWA_INSTANCE_ROOT pointed at the worktree,
+// NIWA_MAIN_INSTANCE_ROOT at the workspace root, NIWA_SESSION_ID set. Stores
+// the raw mcp-serve stdout in s.lastOutput so subsequent assertion steps can
+// inspect it via the existing "the last MCP response..." vocabulary.
+//
+// Reads s.lastSessionID, s.lastSessionWorktreePath, and s.lastTaskID from
+// state — the prior steps `I call niwa_create_session ...` and
+// `I delegate a task to session role ...` populate these.
+func iCallCheckMessagesAsSessionWorker(ctx context.Context, role, instance string) (context.Context, error) {
+	s := getState(ctx)
+	if s == nil {
+		return ctx, fmt.Errorf("no test state")
+	}
+	if s.lastSessionID == "" {
+		return ctx, fmt.Errorf("no session_id stored; call niwa_create_session first")
+	}
+	if s.lastSessionWorktreePath == "" {
+		return ctx, fmt.Errorf("no worktree_path stored; call niwa_create_session first")
+	}
+	mainInstanceRoot := filepath.Join(s.workspaceRoot, instance)
+	out, err := callMCPToolAsSessionWorker(s, mainInstanceRoot, s.lastSessionWorktreePath,
+		role, s.lastSessionID, s.lastTaskID, "niwa_check_messages", "{}")
+	if err != nil {
+		return ctx, fmt.Errorf("callMCPToolAsSessionWorker niwa_check_messages: %w", err)
+	}
+	s.stdout = out
+	return ctx, nil
+}
+
+// theWorktreeInboxForRoleContainsMessageType polls the role inbox under the
+// session worktree (not the main instance) for a message file with the given
+// `type` field. This is the discriminating assertion for cross-process ask
+// answer routing: when handleFinishTask correctly resolves the asker's
+// session worktree, the answer message lands here; when it falls back to
+// the main-instance inbox, this assertion fails.
+//
+// `role` is the worker's role (e.g. "app"). `msgType` is the JSON `type`
+// field (e.g. "task.completed", "task.delegate"). Polls up to 10 s with
+// 50 ms intervals so the assertion tolerates the daemon's claim and
+// rename pipeline.
+func theWorktreeInboxForRoleContainsMessageType(ctx context.Context, role, msgType string) error {
+	s := getState(ctx)
+	if s == nil {
+		return fmt.Errorf("no test state")
+	}
+	if s.lastSessionWorktreePath == "" {
+		return fmt.Errorf("no worktree_path stored; call niwa_create_session first")
+	}
+	inboxDir := filepath.Join(s.lastSessionWorktreePath, ".niwa", "roles", role, "inbox")
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		entries, err := os.ReadDir(inboxDir)
+		if err == nil {
+			for _, e := range entries {
+				if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+					continue
+				}
+				data, readErr := os.ReadFile(filepath.Join(inboxDir, e.Name()))
+				if readErr != nil {
+					continue
+				}
+				var msg struct {
+					Type string `json:"type"`
+				}
+				if json.Unmarshal(data, &msg) == nil && msg.Type == msgType {
+					return nil
+				}
+			}
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	return fmt.Errorf("worktree inbox %s did not receive a %q message within 10s", inboxDir, msgType)
+}
+
 // callMCPToolAsRole runs `niwa mcp-serve` once with the given NIWA_* envs
 // and pipes a tools/call request for the named tool. Returns the raw
 // stdout (JSON-RPC responses) for regex-style assertions. Used by mesh

@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -336,6 +337,192 @@ func TestHandleCreateSession_Integration(t *testing.T) {
 	}
 	if !strings.Contains(worktreeOutput, worktreePath) {
 		t.Errorf("worktree %q not listed; got:\n%s", worktreePath, worktreeOutput)
+	}
+}
+
+// TestHandleListSessions_DaemonSubObject verifies Issue 3: each row carries
+// a `daemon: {alive, pid, started_at}` sub-object computed at API call time
+// from <worktreePath>/.niwa/daemon.pid + IsPIDAlive — without modifying the
+// persisted SessionLifecycleState file (the lifecycle Status field stays
+// single-writer).
+func TestHandleListSessions_DaemonSubObject(t *testing.T) {
+	root := t.TempDir()
+	sessionsDir := filepath.Join(root, ".niwa", "sessions")
+	if err := os.MkdirAll(sessionsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	// Two worktrees: one with a live daemon (this test process), one with no
+	// daemon (no daemon.pid file at all).
+	liveWT := filepath.Join(root, "wt-live")
+	deadWT := filepath.Join(root, "wt-dead")
+	for _, wt := range []string{liveWT, deadWT} {
+		if err := os.MkdirAll(filepath.Join(wt, ".niwa"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Write a daemon.pid pointing at this test process. PIDStartTime returns
+	// the recorded /proc start time so IsPIDAlive's cross-check passes.
+	pid := os.Getpid()
+	startTime, _ := PIDStartTime(pid)
+	pidContent := []byte(fmt.Sprintf("%d\n%d\n", pid, startTime))
+	if err := os.WriteFile(filepath.Join(liveWT, ".niwa", "daemon.pid"), pidContent, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Persist two SessionLifecycleState rows. SessionID must be 8 lowercase
+	// hex characters per the lifecycle validator.
+	for _, st := range []SessionLifecycleState{
+		NewSessionLifecycleState("aabbccdd", "myrepo", "live test", "", liveWT),
+		NewSessionLifecycleState("11223344", "myrepo", "dead test", "", deadWT),
+	} {
+		if err := WriteSessionLifecycleState(sessionsDir, st); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	s := &Server{instanceRoot: root, role: "coordinator"}
+	res := s.handleListSessions(listSessionsArgs{})
+	if res.IsError {
+		t.Fatalf("handleListSessions error: %v", res.Content)
+	}
+	var rows []sessionListEntry
+	if err := json.Unmarshal([]byte(res.Content[0].Text), &rows); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("rows = %d, want 2", len(rows))
+	}
+
+	for _, r := range rows {
+		switch r.SessionID {
+		case "aabbccdd":
+			if !r.Daemon.Alive {
+				t.Errorf("live session: Daemon.Alive=false, want true")
+			}
+			if r.Daemon.PID != pid {
+				t.Errorf("live session: Daemon.PID=%d, want %d", r.Daemon.PID, pid)
+			}
+			if r.Daemon.StartedAt == "" {
+				t.Errorf("live session: Daemon.StartedAt is empty")
+			}
+			if r.Status != SessionStatusActive {
+				t.Errorf("live session: Status=%q, want active (single-writer preserved)", r.Status)
+			}
+		case "11223344":
+			if r.Daemon.Alive {
+				t.Errorf("dead session: Daemon.Alive=true, want false")
+			}
+			if r.Daemon.PID != 0 {
+				t.Errorf("dead session: Daemon.PID=%d, want 0", r.Daemon.PID)
+			}
+			if r.Status != SessionStatusActive {
+				t.Errorf("dead session: Status=%q, want active (Status doesn't mutate on daemon death)", r.Status)
+			}
+		default:
+			t.Errorf("unexpected session_id %q", r.SessionID)
+		}
+	}
+
+	// Persisted state file must NOT have gained a daemon field — the embedded
+	// SessionLifecycleState shape on disk is unchanged by Issue 3.
+	persistedPath := filepath.Join(sessionsDir, "aabbccdd.json")
+	persistedRaw, _ := os.ReadFile(persistedPath)
+	if strings.Contains(string(persistedRaw), `"daemon":`) {
+		t.Errorf("persisted state file gained a 'daemon' field; Issue 3 must keep daemon computed-only:\n%s", persistedRaw)
+	}
+}
+
+// TestHandleListSessions_EmptyResult verifies an empty filter result returns
+// an empty array (not null), matching the legacy behavior preserved in the
+// Issue 3 wrapping refactor.
+func TestHandleListSessions_EmptyResult(t *testing.T) {
+	root := t.TempDir()
+	sessionsDir := filepath.Join(root, ".niwa", "sessions")
+	if err := os.MkdirAll(sessionsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	s := &Server{instanceRoot: root, role: "coordinator"}
+	res := s.handleListSessions(listSessionsArgs{Repo: "nonexistent"})
+	if res.IsError {
+		t.Fatalf("handleListSessions error: %v", res.Content)
+	}
+	if strings.TrimSpace(res.Content[0].Text) != "[]" {
+		t.Errorf("empty result: got %q, want []", res.Content[0].Text)
+	}
+}
+
+// TestHandleCreateSession_DaemonSpawnTimeoutRollsBack verifies the Issue 2
+// contract: when the daemonStarter returns mcp.ErrDaemonSpawnTimeout, the
+// handler must roll back the worktree, the session-state file, and the
+// branch, and return an errResult with code DAEMON_SPAWN_TIMEOUT — not a
+// soft daemon_warning. Mirrors the inotify-exhaustion failure mode in #110.
+func TestHandleCreateSession_DaemonSpawnTimeoutRollsBack(t *testing.T) {
+	if _, err := runCmd("git", "--version"); err != nil {
+		t.Skip("git not available")
+	}
+
+	root := t.TempDir()
+	repoPath := filepath.Join(root, "group", "myrepo")
+	if err := os.MkdirAll(repoPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, cmd := range [][]string{
+		{"git", "-C", repoPath, "init", "-b", "main"},
+		{"git", "-C", repoPath, "-c", "user.email=test@test.com", "-c", "user.name=Test", "commit", "--allow-empty", "-m", "init"},
+	} {
+		if _, err := runCmd(cmd[0], cmd[1:]...); err != nil {
+			t.Fatalf("git setup: %v", err)
+		}
+	}
+	if err := os.MkdirAll(filepath.Join(root, ".niwa", "roles", "myrepo"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	sessionsDir := filepath.Join(root, ".niwa", "sessions")
+	if err := os.MkdirAll(sessionsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	s := &Server{
+		instanceRoot: root,
+		role:         "coordinator",
+		daemonStarter: func(instanceRoot string, extraEnv []string) error {
+			return ErrDaemonSpawnTimeout
+		},
+	}
+
+	result := s.handleCreateSession(createSessionArgs{
+		Repo:    "myrepo",
+		Purpose: "spawn timeout rollback test",
+	})
+	if !result.IsError {
+		t.Fatalf("expected errResult on spawn timeout; got success: %v", result.Content)
+	}
+	if !strings.Contains(result.Content[0].Text, "DAEMON_SPAWN_TIMEOUT") {
+		t.Errorf("expected error to carry DAEMON_SPAWN_TIMEOUT code; got: %s", result.Content[0].Text)
+	}
+	if !strings.Contains(result.Content[0].Text, "rolled back") {
+		t.Errorf("expected error message to mention rollback; got: %s", result.Content[0].Text)
+	}
+
+	// Worktree must not exist on disk (rollback removed it).
+	entries, _ := os.ReadDir(filepath.Join(root, ".niwa", "worktrees"))
+	if len(entries) != 0 {
+		t.Errorf("worktree directory should be empty after rollback; got entries: %v", entries)
+	}
+
+	// No session state file should remain.
+	sessionEntries, _ := os.ReadDir(sessionsDir)
+	for _, e := range sessionEntries {
+		if strings.HasSuffix(e.Name(), ".json") {
+			t.Errorf("session state file %s should have been removed on rollback", e.Name())
+		}
+	}
+
+	// Branch must not survive (best-effort delete).
+	branchOutput, _ := runCmd("git", "-C", repoPath, "branch")
+	if strings.Contains(branchOutput, "session/") {
+		t.Errorf("session branch should be deleted after rollback; got:\n%s", branchOutput)
 	}
 }
 

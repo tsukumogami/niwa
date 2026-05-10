@@ -1,6 +1,7 @@
 package workspace
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -12,6 +13,18 @@ import (
 
 	"github.com/tsukumogami/niwa/internal/mcp"
 )
+
+// ErrDaemonSpawnTimeout is returned by EnsureDaemonRunning when the spawned
+// daemon does not write its PID file within the readiness window. The daemon
+// writes daemon.pid atomically only after fsnotify watcher registration
+// succeeds, so the absence of the PID file within the window means the watch
+// loop never reached steady state — typically caused by inotify exhaustion,
+// fsnotify init failure, or the daemon process crashing before reaching the
+// PID-write step. Callers that own session lifecycle (e.g. handleCreateSession)
+// should treat this as a hard failure and roll back any partial state.
+// Callers that can tolerate a delayed daemon (e.g. apply) may log it as a
+// deferred warning.
+var ErrDaemonSpawnTimeout = errors.New("daemon did not become ready within timeout")
 
 // EnsureDaemonRunning spawns the mesh watch daemon for instanceRoot if one is
 // not already alive. It uses os.Executable() to locate the daemon binary so
@@ -95,10 +108,12 @@ func EnsureDaemonRunning(instanceRoot string, extraEnv []string) error {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	// Timed out — daemon may have failed to start (e.g. missing fsnotify
-	// support). Return nil so Create/Apply still succeed; the missing PID
-	// file is the observable failure signal.
-	return nil
+	// Timed out — the daemon process started but never reached steady state.
+	// Most common cause is inotify exhaustion (the daemon's fsnotify init
+	// fails before it can write its PID file). Return ErrDaemonSpawnTimeout
+	// so session-lifecycle callers can roll back; tolerant callers can
+	// `errors.Is(err, ErrDaemonSpawnTimeout)` and downgrade to a warning.
+	return ErrDaemonSpawnTimeout
 }
 
 // TerminateDaemon drives the `niwa destroy` teardown sequence:

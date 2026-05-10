@@ -253,21 +253,22 @@ func TestHandleAsk_NoSessions_ReturnsNoLiveSession(t *testing.T) {
 
 // TestHandleAsk_SessionWorktreeRoutesToMainInstance asserts that when
 // mainInstanceRoot is set, a coordinator ask inside a session worktree reads
-// sessions.json from the main instance root rather than the worktree root.
+// sessions.json from the main instance root rather than the worktree root,
+// and isKnownRole resolves the coordinator role against the main instance
+// even though the worktree never carries a coordinator/ directory. This is
+// the Issue 1 contract: roleRoot redirects coordinator targets to the main
+// instance for both the role-existence check and the inbox write.
 func TestHandleAsk_SessionWorktreeRoutesToMainInstance(t *testing.T) {
 	// mainRoot is where the coordinator's sessions.json lives.
 	mainRoot := t.TempDir()
-	// worktreeRoot simulates the session worktree (no sessions.json there).
+	// worktreeRoot simulates the session worktree. NO coordinator/ directory
+	// exists here, mirroring scaffoldWorktreeNiwa's actual layout.
 	worktreeRoot := t.TempDir()
-
-	// Set up roles in both roots so isKnownRole passes.
-	if err := os.MkdirAll(filepath.Join(worktreeRoot, ".niwa", "roles", "coordinator", "inbox"), 0o700); err != nil {
-		t.Fatalf("mkdir worktree coordinator inbox: %v", err)
-	}
 	if err := os.MkdirAll(filepath.Join(worktreeRoot, ".niwa", "tasks"), 0o700); err != nil {
 		t.Fatalf("mkdir worktree tasks: %v", err)
 	}
-	// Coordinator inbox in main root for the ask notification write.
+	// Coordinator role + inbox in main root only — workers reach it via
+	// roleRoot's mainInstanceRoot redirect for "coordinator".
 	if err := os.MkdirAll(filepath.Join(mainRoot, ".niwa", "roles", "coordinator", "inbox"), 0o700); err != nil {
 		t.Fatalf("mkdir main coordinator inbox: %v", err)
 	}
@@ -320,6 +321,51 @@ func TestHandleAsk_SessionWorktreeRoutesToMainInstance(t *testing.T) {
 	}
 }
 
+// TestSendMessage_SessionWorktreeRoutesToMainInstance asserts the Issue 1
+// roleRoot redirect for niwa_send_message: a session worker sending a message
+// to the coordinator role writes the message into the main instance's
+// coordinator inbox, not into a non-existent worktree-side inbox.
+func TestSendMessage_SessionWorktreeRoutesToMainInstance(t *testing.T) {
+	mainRoot := t.TempDir()
+	worktreeRoot := t.TempDir()
+	// No worktree-side coordinator dir — that's the Issue 1 contract.
+	if err := os.MkdirAll(filepath.Join(mainRoot, ".niwa", "roles", "coordinator", "inbox"), 0o700); err != nil {
+		t.Fatalf("mkdir main coordinator inbox: %v", err)
+	}
+
+	s := &Server{
+		instanceRoot:     worktreeRoot,
+		mainInstanceRoot: mainRoot,
+		role:             "frontend",
+		seenFiles:        make(map[string]struct{}),
+		waiters:          make(map[string]chan toolResult),
+		awaitWaiters:     make(map[string]chan taskEvent),
+		questionWaiters:  make(map[string]chan questionEvent),
+		audit:            NewFileAuditSink(""),
+	}
+
+	_, errR := s.sendMessage(sendMessageArgs{
+		To:   "coordinator",
+		Type: "status.update",
+		Body: json.RawMessage(`{"note":"hello"}`),
+	})
+	if errR.IsError {
+		t.Fatalf("sendMessage error: %s", errR.Content[0].Text)
+	}
+
+	mainCoordInbox := filepath.Join(mainRoot, ".niwa", "roles", "coordinator", "inbox")
+	files := listInboxFiles(t, mainCoordInbox)
+	if len(files) != 1 {
+		t.Errorf("main coordinator inbox: got %d files, want 1", len(files))
+	}
+
+	// And the worktree-side coordinator inbox must NOT have been created.
+	worktreeCoordInbox := filepath.Join(worktreeRoot, ".niwa", "roles", "coordinator")
+	if _, err := os.Stat(worktreeCoordInbox); err == nil {
+		t.Errorf("unexpected worktree-side coordinator dir at %s — roleRoot must not write there", worktreeCoordInbox)
+	}
+}
+
 // TestHandleAsk_NonSessionNoMainInstanceRoot asserts that when mainInstanceRoot
 // is empty (non-session worker), the coordinator lookup uses instanceRoot as before.
 func TestHandleAsk_NonSessionNoMainInstanceRoot(t *testing.T) {
@@ -337,6 +383,220 @@ func TestHandleAsk_NonSessionNoMainInstanceRoot(t *testing.T) {
 	_ = json.Unmarshal([]byte(res.Content[0].Text), &payload)
 	if status, _ := payload["status"].(string); status != "no_live_session" {
 		t.Errorf("status = %q, want no_live_session (no coordinator registered)", status)
+	}
+}
+
+// TestHandleFinishTask_AsksAnswerRoutesToSessionWorktreeInbox asserts the
+// structural fix for cross-process ask wakeup. Before this fix, when a
+// coordinator answered an ask task whose asker lived in a session worktree,
+// sendTaskMessage would write task.completed to
+// <coordinatorTaskStoreRoot>/.niwa/roles/<askerRole>/inbox/ — i.e. the main
+// instance — while the asker's fsnotify watcher was rooted at
+// <worktree>/.niwa/roles/<askerRole>/inbox/. The mismatch meant the
+// in-memory awaitWaiter never fired and the asker had to time out.
+//
+// The fix: createAskTaskStore stamps state.SessionID with the asker's
+// NIWA_SESSION_ID, and handleFinishTask routes via sendTaskMessageInSession
+// when that field is set. This test seeds an ask task with state.SessionID
+// pointed at a registered session lifecycle entry, calls handleFinishTask,
+// and asserts the answer message landed in the worktree inbox (not the
+// main-instance inbox).
+//
+// AC-S4a in test/functional/features/mesh.feature is the integration-level
+// guard. This unit test isolates the routing decision so a regression
+// surfaces immediately without spinning up a session daemon.
+func TestHandleFinishTask_AsksAnswerRoutesToSessionWorktreeInbox(t *testing.T) {
+	mainRoot := t.TempDir()
+	worktreeRoot := filepath.Join(mainRoot, ".niwa", "worktrees", "app-deadbeef")
+	if err := os.MkdirAll(filepath.Join(worktreeRoot, ".niwa", "roles", "frontend", "inbox"), 0o700); err != nil {
+		t.Fatalf("mkdir worktree role inbox: %v", err)
+	}
+	// The main-instance role inbox exists too (channels create it for both
+	// the worktree and the main instance). The test asserts the answer does
+	// NOT land here even though the path is reachable.
+	if err := os.MkdirAll(filepath.Join(mainRoot, ".niwa", "roles", "frontend", "inbox"), 0o700); err != nil {
+		t.Fatalf("mkdir main role inbox: %v", err)
+	}
+
+	// Register a session lifecycle entry pointing at the worktree.
+	sessionsDir := filepath.Join(mainRoot, ".niwa", "sessions")
+	if err := os.MkdirAll(sessionsDir, 0o700); err != nil {
+		t.Fatalf("mkdir sessions dir: %v", err)
+	}
+	sessionID := "deadbeef"
+	sessionState := SessionLifecycleState{
+		V:            1,
+		SessionID:    sessionID,
+		Repo:         "app",
+		Status:       SessionStatusActive,
+		WorktreePath: worktreeRoot,
+		CreationTime: time.Now().UTC().Format(time.RFC3339),
+	}
+	if err := WriteSessionLifecycleState(sessionsDir, sessionState); err != nil {
+		t.Fatalf("write session state: %v", err)
+	}
+
+	// Seed an ask task in main-instance tasks dir with state.SessionID set
+	// to the asker's session. createAskTaskStore would do this in production;
+	// the test writes it directly to keep the test isolated from handleAsk.
+	taskID := NewTaskID()
+	taskDir := taskDirPath(mainRoot, taskID)
+	if err := os.MkdirAll(taskDir, 0o700); err != nil {
+		t.Fatalf("mkdir task dir: %v", err)
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	env := TaskEnvelope{
+		V:      1,
+		ID:     taskID,
+		From:   TaskParty{Role: "frontend", PID: os.Getpid()},
+		To:     TaskParty{Role: "coordinator"},
+		Body:   json.RawMessage(`{"question":"go?"}`),
+		SentAt: now,
+	}
+	envBytes, _ := json.MarshalIndent(env, "", "  ")
+	if err := os.WriteFile(filepath.Join(taskDir, envelopeFileName), envBytes, 0o600); err != nil {
+		t.Fatalf("write envelope: %v", err)
+	}
+	st := &TaskState{
+		V:      1,
+		TaskID: taskID,
+		State:  TaskStateQueued,
+		StateTransitions: []StateTransition{
+			{From: "", To: TaskStateQueued, At: now},
+		},
+		DelegatorRole: "frontend",
+		TargetRole:    "coordinator",
+		SessionID:     sessionID,
+		UpdatedAt:     now,
+	}
+	stBytes, _ := json.MarshalIndent(st, "", "  ")
+	if err := os.WriteFile(filepath.Join(taskDir, stateFileName), stBytes, 0o600); err != nil {
+		t.Fatalf("write state: %v", err)
+	}
+
+	// Simulate the coordinator finishing the ask task. The coordinator runs
+	// at the main instance: instanceRoot = mainRoot, mainInstanceRoot = "".
+	coordinator := &Server{
+		instanceRoot:    mainRoot,
+		role:            "coordinator",
+		seenFiles:       make(map[string]struct{}),
+		waiters:         make(map[string]chan toolResult),
+		awaitWaiters:    make(map[string]chan taskEvent),
+		questionWaiters: make(map[string]chan questionEvent),
+		audit:           NewFileAuditSink(""),
+	}
+
+	res := coordinator.handleFinishTask(finishTaskArgs{
+		TaskID:  taskID,
+		Outcome: TaskStateCompleted,
+		Result:  json.RawMessage(`{"answer":"go"}`),
+	})
+	if res.IsError {
+		t.Fatalf("handleFinishTask returned error: %s", res.Content[0].Text)
+	}
+
+	// The answer must land in the WORKTREE inbox, not the main-instance inbox.
+	worktreeInbox := filepath.Join(worktreeRoot, ".niwa", "roles", "frontend", "inbox")
+	mainInbox := filepath.Join(mainRoot, ".niwa", "roles", "frontend", "inbox")
+
+	worktreeFiles := listInboxFiles(t, worktreeInbox)
+	mainFiles := listInboxFiles(t, mainInbox)
+
+	if len(worktreeFiles) != 1 {
+		t.Errorf("worktree inbox: got %d files, want 1 — structural routing did not deliver", len(worktreeFiles))
+	}
+	if len(mainFiles) != 0 {
+		t.Errorf("main-instance inbox: got %d files, want 0 — answer leaked to the wrong inbox", len(mainFiles))
+	}
+
+	// Verify the message body shape — task.completed with the asker's task id.
+	if len(worktreeFiles) > 0 {
+		data, err := os.ReadFile(filepath.Join(worktreeInbox, worktreeFiles[0]))
+		if err != nil {
+			t.Fatalf("read worktree message: %v", err)
+		}
+		var msg struct {
+			Type   string `json:"type"`
+			TaskID string `json:"task_id"`
+		}
+		if err := json.Unmarshal(data, &msg); err != nil {
+			t.Fatalf("unmarshal message: %v", err)
+		}
+		if msg.Type != "task.completed" {
+			t.Errorf("message type = %q, want task.completed", msg.Type)
+		}
+		if msg.TaskID != taskID {
+			t.Errorf("message task_id = %q, want %q", msg.TaskID, taskID)
+		}
+	}
+}
+
+// TestHandleFinishTask_NonSessionAskRoutesToMainInstanceInbox asserts the
+// fallback path: when state.SessionID is empty (asker is not in a session),
+// the answer routes via sendTaskMessage to taskStoreRoot()/.niwa/roles/...
+// — i.e. the main-instance inbox — preserving the pre-fix behavior for
+// non-session askers.
+func TestHandleFinishTask_NonSessionAskRoutesToMainInstanceInbox(t *testing.T) {
+	mainRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(mainRoot, ".niwa", "roles", "operator", "inbox"), 0o700); err != nil {
+		t.Fatalf("mkdir operator inbox: %v", err)
+	}
+
+	taskID := NewTaskID()
+	taskDir := taskDirPath(mainRoot, taskID)
+	if err := os.MkdirAll(taskDir, 0o700); err != nil {
+		t.Fatalf("mkdir task dir: %v", err)
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	env := TaskEnvelope{
+		V:    1,
+		ID:   taskID,
+		From: TaskParty{Role: "operator", PID: os.Getpid()},
+		To:   TaskParty{Role: "coordinator"},
+		Body: json.RawMessage(`{"question":"go?"}`),
+	}
+	envBytes, _ := json.MarshalIndent(env, "", "  ")
+	if err := os.WriteFile(filepath.Join(taskDir, envelopeFileName), envBytes, 0o600); err != nil {
+		t.Fatalf("write envelope: %v", err)
+	}
+	st := &TaskState{
+		V:                1,
+		TaskID:           taskID,
+		State:            TaskStateQueued,
+		StateTransitions: []StateTransition{{From: "", To: TaskStateQueued, At: now}},
+		DelegatorRole:    "operator",
+		TargetRole:       "coordinator",
+		// SessionID intentionally empty — non-session asker.
+		UpdatedAt: now,
+	}
+	stBytes, _ := json.MarshalIndent(st, "", "  ")
+	if err := os.WriteFile(filepath.Join(taskDir, stateFileName), stBytes, 0o600); err != nil {
+		t.Fatalf("write state: %v", err)
+	}
+
+	coordinator := &Server{
+		instanceRoot:    mainRoot,
+		role:            "coordinator",
+		seenFiles:       make(map[string]struct{}),
+		waiters:         make(map[string]chan toolResult),
+		awaitWaiters:    make(map[string]chan taskEvent),
+		questionWaiters: make(map[string]chan questionEvent),
+		audit:           NewFileAuditSink(""),
+	}
+
+	res := coordinator.handleFinishTask(finishTaskArgs{
+		TaskID:  taskID,
+		Outcome: TaskStateCompleted,
+		Result:  json.RawMessage(`{"answer":"go"}`),
+	})
+	if res.IsError {
+		t.Fatalf("handleFinishTask returned error: %s", res.Content[0].Text)
+	}
+
+	mainInbox := filepath.Join(mainRoot, ".niwa", "roles", "operator", "inbox")
+	files := listInboxFiles(t, mainInbox)
+	if len(files) != 1 {
+		t.Errorf("main-instance inbox: got %d files, want 1 — non-session routing broke", len(files))
 	}
 }
 

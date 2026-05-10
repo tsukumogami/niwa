@@ -55,11 +55,11 @@ func runSessionCreate(cmd *cobra.Command, args []string) error {
 	purpose := args[1]
 
 	srv := mcp.New("coordinator", instanceRoot)
-	srv.SetDaemonFuncs(workspace.EnsureDaemonRunning, workspace.TerminateDaemon)
+	srv.SetDaemonFuncs(makeDaemonStarter(), workspace.TerminateDaemon)
 
 	result := srv.CreateSessionDirect(repo, purpose, "")
 	if result.IsError {
-		return fmt.Errorf("%s", result.Content[0].Text)
+		return renderMCPError(result.Content[0].Text)
 	}
 
 	var resp struct {
@@ -73,7 +73,10 @@ func runSessionCreate(cmd *cobra.Command, args []string) error {
 	if resp.DaemonWarn != "" {
 		fmt.Fprintln(cmd.ErrOrStderr(), "warning:", resp.DaemonWarn)
 	}
-	fmt.Fprintf(cmd.ErrOrStderr(), "session: created %s at %s\n", resp.SessionID, resp.WorktreePath)
+	// Issue 10: success summary on stdout so callers can pipe it.
+	// Landing-path delivery uses NIWA_RESPONSE_FILE separately; the
+	// shell wrapper's stdout-cd target is unaffected.
+	fmt.Fprintf(cmd.OutOrStdout(), "session: created %s at %s\n", resp.SessionID, resp.WorktreePath)
 
 	if err := validateLandingPath(resp.WorktreePath); err != nil {
 		return err
@@ -93,11 +96,11 @@ func runSessionDestroy(cmd *cobra.Command, args []string) error {
 	sessionID := args[0]
 
 	srv := mcp.New("coordinator", instanceRoot)
-	srv.SetDaemonFuncs(workspace.EnsureDaemonRunning, workspace.TerminateDaemon)
+	srv.SetDaemonFuncs(makeDaemonStarter(), workspace.TerminateDaemon)
 
 	result := srv.DestroySessionDirect(sessionID, sessionDestroyForce)
 	if result.IsError {
-		return fmt.Errorf("%s", result.Content[0].Text)
+		return renderMCPError(result.Content[0].Text)
 	}
 
 	var resp struct {
@@ -110,7 +113,8 @@ func runSessionDestroy(cmd *cobra.Command, args []string) error {
 		fmt.Fprintln(cmd.ErrOrStderr(), "warning:", resp.BranchWarn)
 	}
 
-	fmt.Fprintf(cmd.ErrOrStderr(), "session: destroyed %s\n", sessionID)
+	// Issue 10: destroy success on stdout, matching create.
+	fmt.Fprintf(cmd.OutOrStdout(), "session: destroyed %s\n", sessionID)
 	return nil
 }
 
@@ -128,7 +132,7 @@ func runSessionLifecycleList(cmd *cobra.Command, repo, status string) error {
 		return fmt.Errorf("listing sessions: %w", err)
 	}
 
-	var filtered []mcp.SessionLifecycleState
+	var filtered []sessionListRow
 	for _, st := range all {
 		if repo != "" && st.Repo != repo {
 			continue
@@ -136,19 +140,56 @@ func runSessionLifecycleList(cmd *cobra.Command, repo, status string) error {
 		if status != "" && st.Status != status {
 			continue
 		}
-		filtered = append(filtered, st)
+		filtered = append(filtered, sessionListRow{
+			SessionLifecycleState: st,
+			Daemon:                mcp.DaemonHealthFor(st.WorktreePath),
+		})
 	}
 	sort.SliceStable(filtered, func(i, j int) bool {
 		return filtered[i].SessionID < filtered[j].SessionID
 	})
 
-	writeSessionLifecycleTable(cmd.OutOrStdout(), filtered)
+	if sessionListJSON {
+		// JSON mode: emit a fresh array (not null) when empty.
+		out := cmd.OutOrStdout()
+		if filtered == nil {
+			fmt.Fprintln(out, "[]")
+			return nil
+		}
+		data, err := json.MarshalIndent(filtered, "", "  ")
+		if err != nil {
+			return fmt.Errorf("marshal sessions: %w", err)
+		}
+		_, _ = out.Write(data)
+		fmt.Fprintln(out)
+		return nil
+	}
+
+	writeSessionLifecycleTable(cmd.OutOrStdout(), filtered, sessionListVerbose)
+	if len(filtered) == 0 {
+		fmt.Fprintln(cmd.OutOrStdout(), "(no sessions match the current filter)")
+	}
 	return nil
 }
 
-func writeSessionLifecycleTable(out interface{ Write([]byte) (int, error) }, sessions []mcp.SessionLifecycleState) {
-	fmt.Fprintf(out, "  %-8s %-12s %-10s %-20s %s\n",
-		"ID", "REPO", "STATUS", "CREATED", "PURPOSE")
+// sessionListRow is the wire shape returned by `niwa session list --json`
+// and the source of the table-mode output: it embeds the persisted
+// SessionLifecycleState plus the computed daemon sub-object Issue 3
+// surfaces on niwa_list_sessions. The `daemon` field is computed at
+// command time, never persisted.
+type sessionListRow struct {
+	mcp.SessionLifecycleState
+	Daemon mcp.DaemonHealth `json:"daemon"`
+}
+
+func writeSessionLifecycleTable(out interface{ Write([]byte) (int, error) }, sessions []sessionListRow, verbose bool) {
+	if verbose {
+		fmt.Fprintf(out, "  %-8s %-12s %-10s %-7s %-8s %-20s %-20s %s\n",
+			"ID", "REPO", "STATUS", "DAEMON", "PID", "STARTED-AT", "CREATED", "PURPOSE")
+	} else {
+		fmt.Fprintf(out, "  %-8s %-12s %-10s %-7s %-20s %s\n",
+			"ID", "REPO", "STATUS", "DAEMON", "CREATED", "PURPOSE")
+	}
 	for _, s := range sessions {
 		created := "-"
 		if s.CreationTime != "" {
@@ -160,8 +201,25 @@ func writeSessionLifecycleTable(out interface{ Write([]byte) (int, error) }, ses
 		if len(purpose) > 40 {
 			purpose = purpose[:37] + "..."
 		}
-		fmt.Fprintf(out, "  %-8s %-12s %-10s %-20s %s\n",
-			s.SessionID, s.Repo, s.Status, created, purpose)
+		daemonState := "dead"
+		if s.Daemon.Alive {
+			daemonState = "alive"
+		}
+		if verbose {
+			pidStr := "-"
+			if s.Daemon.PID > 0 {
+				pidStr = fmt.Sprintf("%d", s.Daemon.PID)
+			}
+			startedAt := s.Daemon.StartedAt
+			if startedAt == "" {
+				startedAt = "-"
+			}
+			fmt.Fprintf(out, "  %-8s %-12s %-10s %-7s %-8s %-20s %-20s %s\n",
+				s.SessionID, s.Repo, s.Status, daemonState, pidStr, startedAt, created, purpose)
+		} else {
+			fmt.Fprintf(out, "  %-8s %-12s %-10s %-7s %-20s %s\n",
+				s.SessionID, s.Repo, s.Status, daemonState, created, purpose)
+		}
 	}
 }
 

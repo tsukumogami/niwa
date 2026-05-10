@@ -29,6 +29,6 @@ func runMCPServe(cmd *cobra.Command, args []string) error {
 	}
 
 	srv := mcp.New(sessionRole, instanceRoot)
-	srv.SetDaemonFuncs(workspace.EnsureDaemonRunning, workspace.TerminateDaemon)
+	srv.SetDaemonFuncs(makeDaemonStarter(), workspace.TerminateDaemon)
 	return srv.Run(os.Stdin, os.Stdout)
 }

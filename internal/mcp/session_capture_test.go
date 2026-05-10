@@ -123,7 +123,7 @@ func TestRegisterSessionID_OverwritesExisting(t *testing.T) {
 func TestCreateTaskEnvelope_MaxResumes(t *testing.T) {
 	s := newTestServer(t, "coordinator", "web")
 
-	taskID, result := s.createTaskEnvelope("web", json.RawMessage(`{}`), "", "", "")
+	taskID, result := s.createTaskEnvelope("web", json.RawMessage(`{}`), "", "", "", "")
 	if result.IsError {
 		t.Fatalf("createTaskEnvelope error: %v", result.Content)
 	}

@@ -736,10 +736,13 @@ func TestHandleInboxEvent_SkipsNonQueuedState(t *testing.T) {
 	}
 }
 
-// TestHandleInboxEvent_DanglingEnvelope: a stray file whose task dir
-// does not exist must be moved into inbox/dangling/ so fsnotify stops
-// re-firing CREATE events for it. The task dir must NOT be created and
-// the daemon must not crash.
+// TestHandleInboxEvent_DanglingEnvelope verifies Issue 5 / #112: when an
+// inbox envelope references a task ID whose state.json is missing, the
+// daemon writes a stub state.json with state=abandoned and reason
+// "taskstore_lost", then moves the envelope to inbox/<role>/dangling/ for
+// forensic preservation. niwa_query_task and niwa_list_outbound_tasks then
+// return the consistent terminal state instead of the legacy
+// {too_late, queued} contradiction.
 func TestHandleInboxEvent_DanglingEnvelope(t *testing.T) {
 	f := newDaemonTestFixture(t)
 	fakeTaskID := mcp.NewTaskID()
@@ -768,8 +771,9 @@ func TestHandleInboxEvent_DanglingEnvelope(t *testing.T) {
 		filePath: inboxPath,
 	}, spawnCtx)
 
-	// Original stray file should have been moved out of the queued inbox
-	// so fsnotify does not keep re-firing CREATE events for it.
+	// Original stray file moved out of the queued inbox (forensic
+	// preservation); fsnotify does not keep re-firing CREATE events
+	// because dangling/ is not watched.
 	if _, err := os.Stat(inboxPath); !os.IsNotExist(err) {
 		t.Errorf("stray inbox still present at queued path: err=%v", err)
 	}
@@ -777,9 +781,24 @@ func TestHandleInboxEvent_DanglingEnvelope(t *testing.T) {
 	if _, err := os.Stat(danglingPath); err != nil {
 		t.Errorf("stray inbox not moved to dangling/: %v", err)
 	}
+
+	// Issue 5: a stub state.json now exists with state=abandoned and
+	// reason="taskstore_lost". Read it to confirm.
 	taskDir := filepath.Join(f.tasksDir, fakeTaskID)
-	if _, err := os.Stat(taskDir); !os.IsNotExist(err) {
-		t.Errorf("task dir created for dangling envelope: %v", err)
+	if _, err := os.Stat(taskDir); err != nil {
+		t.Fatalf("task dir not created for taskstore_lost recovery: %v", err)
+	}
+	st, err := mcp.ReadStateOnly(taskDir)
+	if err != nil {
+		t.Fatalf("ReadStateOnly: %v", err)
+	}
+	if st.State != mcp.TaskStateAbandoned {
+		t.Errorf("state = %q, want abandoned", st.State)
+	}
+	var reasonStr string
+	_ = json.Unmarshal(st.Reason, &reasonStr)
+	if reasonStr != "taskstore_lost" {
+		t.Errorf("reason = %q, want taskstore_lost", reasonStr)
 	}
 }
 

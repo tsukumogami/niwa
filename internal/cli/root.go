@@ -28,6 +28,16 @@ var rootCmd = &cobra.Command{
 It clones repositories into a structured workspace directory, generates
 CLAUDE.md files at each level of the hierarchy, and keeps everything
 in sync when configuration changes.`,
+	// Issue 10 / cobra UX cleanup: SilenceErrors and SilenceUsage suppress
+	// cobra's auto-printing of errors and the usage banner on every
+	// RunE failure. These settings inherit to children (cobra walks the
+	// parent chain), so individual commands no longer need to set them.
+	// Execute() below prints the error exactly once on stderr — the
+	// single source of truth for error output. Commands that *do* want
+	// the usage banner on user-input errors can set SilenceUsage:false
+	// on themselves.
+	SilenceErrors: true,
+	SilenceUsage:  true,
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 		// NIWA_RESPONSE_FILE is the shell-wrapper/CLI protocol channel for
 		// landing-path delivery. Capture its value into a package-level cache

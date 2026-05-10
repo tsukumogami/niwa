@@ -160,7 +160,10 @@ func TestInstallChannelInfrastructure_CreatesRoleLayout(t *testing.T) {
 		}
 	}
 
-	// SKILL.md at instance root and per repo.
+	// SKILL.md at instance root only. Issue 4 / Issue #97 removes the
+	// per-repo writes — workers reach the workspace-root copy via the
+	// `--add-dir <workspaceRoot>` flag passed by spawnWorker rather than
+	// via filesystem-resident copies that leak into PRs.
 	instanceSkill := filepath.Join(dir, ".claude", "skills", "niwa-mesh", "SKILL.md")
 	skill, err := os.ReadFile(instanceSkill)
 	if err != nil {
@@ -168,15 +171,11 @@ func TestInstallChannelInfrastructure_CreatesRoleLayout(t *testing.T) {
 	}
 	checkSkillShape(t, skill)
 
+	// Per-repo SKILL.md must NOT exist (regression guard for #97).
 	for _, role := range []string{"web", "api"} {
 		p := filepath.Join(dir, "apps", role, ".claude", "skills", "niwa-mesh", "SKILL.md")
-		data, err := os.ReadFile(p)
-		if err != nil {
-			t.Errorf("repo SKILL.md for %q missing: %v", role, err)
-			continue
-		}
-		if !bytes.Equal(data, skill) {
-			t.Errorf("repo SKILL.md for %q differs from instance copy (flat uniform skill)", role)
+		if _, err := os.Stat(p); err == nil {
+			t.Errorf("per-repo SKILL.md at %s must not be created (#97 regression)", p)
 		}
 	}
 
@@ -276,14 +275,43 @@ func checkSkillShape(t *testing.T, data []byte) {
 
 	// Common Patterns must include explicit guidance for long-running
 	// tasks; the default 600s timeout silently truncates real coding
-	// tasks if the LLM doesn't override it.
+	// tasks if the LLM doesn't override it. Issue 8 rewrote the skill;
+	// the phrasing changed but the guidance content is preserved.
 	for _, phrase := range []string{
 		"Long-running tasks",
 		"timeout_seconds",
-		"Re-await loop",
+		`re-call ` + "`niwa_await_task",
 	} {
 		if !strings.Contains(bodyStr, phrase) {
 			t.Errorf("SKILL.md Common Patterns missing long-running guidance phrase %q", phrase)
+		}
+	}
+
+	// Issue 8 / mesh-reliability: the rewritten skill must surface the
+	// new contracts the runtime now enforces, and must NOT mention the
+	// dead vocabulary it removed.
+	for _, phrase := range []string{
+		"task.delegate",
+		"task.ask",
+		"required_skills",
+		"MISSING_SKILLS",
+		"taskstore_lost",
+		"niwa_redelegate",
+		"DAEMON_SPAWN_TIMEOUT",
+		"daemon",
+		"no_live_session",
+	} {
+		if !strings.Contains(bodyStr, phrase) {
+			t.Errorf("SKILL.md missing post-rewrite phrase %q", phrase)
+		}
+	}
+	for _, dead := range []string{
+		"question.ask",
+		"question.answer",
+		"status.update",
+	} {
+		if strings.Contains(bodyStr, dead) {
+			t.Errorf("SKILL.md must not mention dead message type %q (Issue 8 removed it)", dead)
 		}
 	}
 }
@@ -444,11 +472,12 @@ func TestInstallChannelInfrastructure_DirAndFileModes(t *testing.T) {
 		t.Fatalf("walking .niwa/: %v", err)
 	}
 
-	// .mcp.json (instance root) and SKILL.md must all be 0600.
+	// .mcp.json (instance root) and SKILL.md must be 0600. Per-repo
+	// SKILL.md no longer exists (Issue 4 / #97); workers reach the
+	// instance-root copy via the spawn-time --add-dir flag.
 	for _, p := range []string{
 		filepath.Join(dir, ".mcp.json"),
 		filepath.Join(dir, ".claude", "skills", "niwa-mesh", "SKILL.md"),
-		filepath.Join(dir, "apps", "web", ".claude", "skills", "niwa-mesh", "SKILL.md"),
 	} {
 		fi, err := os.Stat(p)
 		if err != nil {
@@ -458,6 +487,10 @@ func TestInstallChannelInfrastructure_DirAndFileModes(t *testing.T) {
 		if fi.Mode().Perm() != 0o600 {
 			t.Errorf("%s mode = %o, want 0600", p, fi.Mode().Perm())
 		}
+	}
+	// Per-repo SKILL.md must not be created.
+	if _, err := os.Stat(filepath.Join(dir, "apps", "web", ".claude", "skills", "niwa-mesh", "SKILL.md")); err == nil {
+		t.Errorf("per-repo SKILL.md was created — regression against #97")
 	}
 }
 

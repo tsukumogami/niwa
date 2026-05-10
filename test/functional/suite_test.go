@@ -350,6 +350,9 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 	ctx.Step(`^I try to delegate a task to session role "([^"]*)" in instance "([^"]*)"$`, iTryToDelegateTaskToSessionRole)
 	ctx.Step(`^I delegate a task to session role "([^"]*)" with session id "([^"]*)" in instance "([^"]*)" expecting an error$`, iDelegateTaskToSessionRoleExpectingError)
 	ctx.Step(`^the last MCP response contains code "([^"]*)"$`, theLastMCPResponseContainsCode)
+	// Worktree-aware MCP calls (test goroutine acts as a session worker).
+	ctx.Step(`^I call niwa_check_messages as session worker for role "([^"]*)" in instance "([^"]*)"$`, iCallCheckMessagesAsSessionWorker)
+	ctx.Step(`^the worktree inbox for role "([^"]*)" contains a "([^"]*)" message$`, theWorktreeInboxForRoleContainsMessageType)
 	// Delegation isolation contract (SESSION_REQUIRED / read_only)
 	ctx.Step(`^I try to delegate a task to role "([^"]*)" without session_id in instance "([^"]*)"$`, iDelegateTaskToRoleWithoutSessionID)
 	ctx.Step(`^I delegate a read_only task to role "([^"]*)" in instance "([^"]*)"$`, iDelegateReadOnlyTaskToRole)

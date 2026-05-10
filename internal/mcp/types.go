@@ -212,15 +212,16 @@ type TaskParty struct {
 // to `.niwa/tasks/<id>/envelope.json`, only `body` is mutable — and only via
 // niwa_update_task while the task is still queued.
 type TaskEnvelope struct {
-	V            int             `json:"v"`
-	ID           string          `json:"id"`
-	From         TaskParty       `json:"from"`
-	To           TaskParty       `json:"to"`
-	Body         json.RawMessage `json:"body"`
-	SentAt       string          `json:"sent_at"`
-	ParentTaskID string          `json:"parent_task_id,omitempty"`
-	DeadlineAt   string          `json:"deadline_at,omitempty"`
-	ExpiresAt    string          `json:"expires_at,omitempty"`
+	V               int             `json:"v"`
+	ID              string          `json:"id"`
+	From            TaskParty       `json:"from"`
+	To              TaskParty       `json:"to"`
+	Body            json.RawMessage `json:"body"`
+	SentAt          string          `json:"sent_at"`
+	ParentTaskID    string          `json:"parent_task_id,omitempty"`
+	DeadlineAt      string          `json:"deadline_at,omitempty"`
+	ExpiresAt       string          `json:"expires_at,omitempty"`
+	RedelegatedFrom string          `json:"redelegated_from,omitempty"` // Issue 7 / #114: source task ID for redelegate audit chain.
 }
 
 // StateTransition is a single entry in TaskState.StateTransitions. Duplicated

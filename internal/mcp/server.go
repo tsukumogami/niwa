@@ -20,6 +20,7 @@ package mcp
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -53,6 +54,19 @@ type Server struct {
 	// once at startup; read by handlers to authorize executor-kind calls and
 	// to auto-populate parent_task_id on nested niwa_delegate calls.
 	taskID string
+	// sessionID is the caller's NIWA_SESSION_ID (empty for non-session
+	// processes — coordinators, virtual peers, and the cli mcp surface).
+	// createAskTaskStore stamps this onto state.json so handleFinishTask
+	// can route the answer back to the asker's worktree inbox via the
+	// session registry, instead of the main-instance role inbox where
+	// taskStoreRoot() would otherwise land it.
+	sessionID string
+	// userHomeDir is the home directory used to read user-level Claude
+	// settings (~/.claude/settings.json) and the installed-plugins registry
+	// (~/.claude/plugins/installed_plugins.json). Populated from
+	// os.UserHomeDir() at construction; tests inject a tempdir via direct
+	// field assignment to keep required_skills checks hermetic.
+	userHomeDir string
 	// roleInboxDir is <instance-root>/.niwa/roles/<role>/inbox/. Empty when
 	// role or instanceRoot is empty (e.g. unit-test setups that construct a
 	// Server without a workspace layout).
@@ -93,11 +107,14 @@ type Server struct {
 // perform executor-kind authorization checks without plumbing a new parameter
 // through every call site.
 func New(role, instanceRoot string) *Server {
+	homeDir, _ := os.UserHomeDir()
 	s := &Server{
 		instanceRoot:     instanceRoot,
 		mainInstanceRoot: os.Getenv("NIWA_MAIN_INSTANCE_ROOT"),
 		role:             role,
 		taskID:           os.Getenv("NIWA_TASK_ID"),
+		sessionID:        os.Getenv("NIWA_SESSION_ID"),
+		userHomeDir:      homeDir,
 		seenFiles:       make(map[string]struct{}),
 		waiters:         make(map[string]chan toolResult),
 		awaitWaiters:    make(map[string]chan taskEvent),
@@ -116,6 +133,30 @@ func New(role, instanceRoot string) *Server {
 // is the local instance root.
 func (s *Server) taskStoreRoot() string {
 	if s.mainInstanceRoot != "" {
+		return s.mainInstanceRoot
+	}
+	return s.instanceRoot
+}
+
+// ErrDaemonSpawnTimeout signals that the per-session daemon starter
+// (workspace.EnsureDaemonRunning) timed out waiting for the daemon's PID
+// file to appear. The MCP layer treats this as a hard failure for
+// niwa_create_session: the worktree, branch, and session-state file are
+// rolled back so the caller never sees a session that lacks a watching
+// daemon. The CLI wiring (internal/cli/mcp_serve.go and
+// internal/cli/session_lifecycle_cmd.go) translates
+// workspace.ErrDaemonSpawnTimeout into this sentinel so the mcp package
+// doesn't need to import workspace (which already imports mcp).
+var ErrDaemonSpawnTimeout = errors.New("daemon did not become ready within timeout")
+
+// roleRoot returns the instance root that owns the given role's inbox and
+// sessions registry. The coordinator role always lives in the main instance:
+// session workers (NIWA_MAIN_INSTANCE_ROOT set) reach the live coordinator at
+// the main instance, not at their own worktree. Other roles live at the local
+// instance root. Mirrors handleAsk's existing askRoot redirect at the same
+// site so isKnownRole and sendMessageWithID share the same routing rule.
+func (s *Server) roleRoot(role string) string {
+	if role == "coordinator" && s.mainInstanceRoot != "" {
 		return s.mainInstanceRoot
 	}
 	return s.instanceRoot
@@ -150,6 +191,17 @@ func (s *Server) DestroySessionDirect(sessionID string, force bool) toolResult {
 		SessionID: sessionID,
 		Force:     force,
 	})
+}
+
+// RedelegateDirect is the CLI-callable entry point for niwa_redelegate.
+// Accepts the same JSON shape as the MCP tool so the CLI command can
+// build a request map without duplicating the redelegateArgs struct fields.
+func (s *Server) RedelegateDirect(reqJSON []byte) toolResult {
+	var args redelegateArgs
+	if err := json.Unmarshal(reqJSON, &args); err != nil {
+		return errResult("invalid arguments: " + err.Error())
+	}
+	return s.handleRedelegate(args)
 }
 
 // Run starts the server. It reads newline-delimited JSON-RPC from r, writes
@@ -275,6 +327,23 @@ func (s *Server) toolsList() toolsListResult {
 					"read_only":  {Type: "boolean", Description: "When true and session_id is absent, bypass the SESSION_REQUIRED guard and route to the main clone. Use for tasks that read but do not commit (e.g. run tests, query status)."},
 				},
 				Required: []string{"to", "body"},
+			},
+		},
+		{
+			Name:        "niwa_redelegate",
+			Description: "Re-fire a previously-delegated task body without rewriting it. Source state may be any of queued/running/completed/abandoned/cancelled; the source's state is unchanged. The new task carries `redelegated_from: <source_task_id>` for the audit chain. Response includes `source_state_at_fork` so callers can distinguish recovery flows (terminal source) from active forks (queued/running source).",
+			InputSchema: inputSchema{
+				Type: "object",
+				Properties: map[string]schemaProp{
+					"source_task_id": {Type: "string", Description: "Task ID to re-fire"},
+					"to":             {Type: "string", Description: "Override target role; defaults to source.to.role"},
+					"session_id":     {Type: "string", Description: "Override session (8 lowercase hex chars); defaults to source.session_id"},
+					"read_only":      {Type: "boolean", Description: "Override routing; defaults to source.read_only"},
+					"body_overrides": {Type: "object", Description: "Shallow-merge into source.body (top-level keys only)"},
+					"mode":           {Type: "string", Description: "\"async\" (default) or \"sync\""},
+					"expires_at":     {Type: "string", Description: "Optional RFC3339 expiry deadline; not propagated from source"},
+				},
+				Required: []string{"source_task_id"},
 			},
 		},
 		{
@@ -422,6 +491,12 @@ func (s *Server) callTool(p toolCallParams) toolResult {
 			return errResult("invalid arguments: " + err.Error())
 		}
 		return s.handleDelegate(args)
+	case "niwa_redelegate":
+		var args redelegateArgs
+		if err := json.Unmarshal(p.Arguments, &args); err != nil {
+			return errResult("invalid arguments: " + err.Error())
+		}
+		return s.handleRedelegate(args)
 	case "niwa_query_task":
 		var args queryTaskArgs
 		if err := json.Unmarshal(p.Arguments, &args); err != nil {
@@ -716,7 +791,7 @@ func (s *Server) sendMessageWithID(msgID string, args sendMessageArgs) (string, 
 			fmt.Sprintf("role %q is not registered under .niwa/roles/", args.To))
 	}
 
-	inboxDir := filepath.Join(s.instanceRoot, ".niwa", "roles", args.To, "inbox")
+	inboxDir := filepath.Join(s.roleRoot(args.To), ".niwa", "roles", args.To, "inbox")
 	if err := os.MkdirAll(inboxDir, 0o700); err != nil {
 		return "", errResultCode("INBOX_UNWRITABLE", "cannot create inbox: "+err.Error())
 	}
@@ -762,14 +837,18 @@ func writeMessageAtomic(inboxDir, msgID string, msg Message) toolResult {
 	return toolResult{}
 }
 
-// isKnownRole reports whether .niwa/roles/<role>/ exists under the instance
-// root. Role enumeration is authoritative per the Issue-2 layout; a missing
+// isKnownRole reports whether .niwa/roles/<role>/ exists under the role's
+// owning instance root. For most roles the owning root is the local instance.
+// For the coordinator role on a session worker the owning root is the main
+// instance — the worktree never carries a coordinator/ directory because the
+// worker is not the coordinator. Role enumeration is authoritative; a missing
 // directory means the role is not registered.
 func (s *Server) isKnownRole(role string) bool {
-	if s.instanceRoot == "" {
+	root := s.roleRoot(role)
+	if root == "" {
 		return false
 	}
-	roleDir := filepath.Join(s.instanceRoot, ".niwa", "roles", role)
+	roleDir := filepath.Join(root, ".niwa", "roles", role)
 	info, err := os.Stat(roleDir)
 	if err != nil {
 		return false
@@ -813,10 +892,7 @@ func (s *Server) handleAsk(args askArgs) toolResult {
 		return errResult("cannot marshal ask body: " + err.Error())
 	}
 
-	askRoot := s.instanceRoot
-	if args.To == "coordinator" && s.mainInstanceRoot != "" {
-		askRoot = s.mainInstanceRoot
-	}
+	askRoot := s.roleRoot(args.To)
 	coordinatorInbox, liveCoord := lookupLiveCoordinator(askRoot)
 	var taskID string
 	var errTR toolResult
@@ -848,11 +924,20 @@ func (s *Server) handleAsk(args askArgs) toolResult {
 	defer cancel()
 
 	// Race-guard: re-read state.json in case the task already completed.
-	taskDir := taskDirPath(s.instanceRoot, taskID)
+	// taskStoreRoot() (not instanceRoot) — for session workers the ask task
+	// lives in mainInstance/.niwa/tasks/, where createAskTaskStore wrote it.
+	taskDir := taskDirPath(s.taskStoreRoot(), taskID)
 	if _, st, err := ReadState(taskDir); err == nil && isTaskStateTerminal(st.State) {
 		return formatTerminalResult(st)
 	}
 
+	// Cross-process wakeup is handled at the routing layer: handleFinishTask
+	// stamps state.SessionID via createAskTaskStore (set to the asker's
+	// NIWA_SESSION_ID), and the coordinator's finish path then calls
+	// sendTaskMessageInSession to deliver task.completed into the asker's
+	// worktree role inbox — where this server's fsnotify watcher is rooted —
+	// so the in-memory awaitWaiter fires normally. No polling fallback
+	// required.
 	select {
 	case evt := <-ch:
 		return formatEventResult(evt, taskDir)
@@ -879,11 +964,11 @@ func (s *Server) handleAsk(args askArgs) toolResult {
 			return &next, entry, nil
 		})
 		timeoutPayload, _ := json.Marshal(map[string]any{
-				"status":          "timeout",
-				"task_id":         taskID,
-				"timeout_seconds": args.TimeoutSeconds,
-			})
-			return textResult(string(timeoutPayload))
+			"status":          "timeout",
+			"task_id":         taskID,
+			"timeout_seconds": args.TimeoutSeconds,
+		})
+		return textResult(string(timeoutPayload))
 	}
 }
 
@@ -996,6 +1081,32 @@ func errResultCode(code, detail string) toolResult {
 	}}}
 }
 
+// errResultCodeBody returns a structured-error toolResult whose content block
+// is a JSON object with at minimum an "error_code" field plus whatever fields
+// the caller provides via body. Unlike errResultCode (which is two-line
+// prose), this shape carries arbitrary JSON payloads — needed for codes like
+// MISSING_SKILLS that return {missing: [...], available: [...]}.
+//
+// The returned text is valid JSON beginning with `{`. The errorCodeFromText
+// parser detects both shapes and extracts error_code from either. body must
+// marshal to a JSON object; if it contains an "error_code" key it is
+// overwritten by code so the field is canonical.
+func errResultCodeBody(code string, body map[string]any) toolResult {
+	if body == nil {
+		body = map[string]any{}
+	}
+	body["error_code"] = code
+	data, err := json.Marshal(body)
+	if err != nil {
+		// Fall back to plain-text shape so callers always get an errResult.
+		return errResultCode(code, fmt.Sprintf("internal: cannot marshal error body: %v", err))
+	}
+	return toolResult{IsError: true, Content: []contentBlock{{
+		Type: "text",
+		Text: string(data),
+	}}}
+}
+
 // errorCode extracts the structured error_code from an errResultCode-shaped
 // toolResult pointer. Returns "" when absent. Shared by every handler and
 // test so the error-code extraction logic lives in exactly one place.
@@ -1008,8 +1119,23 @@ func errorCode(r *toolResult) string {
 
 // errorCodeFromText is the string-level twin of errorCode; it accepts a raw
 // content-block text so callers that have already unpacked toolResult don't
-// need to reconstruct one.
+// need to reconstruct one. Handles both shapes:
+//   - The legacy "error_code: <CODE>\ndetail: <msg>" produced by errResultCode.
+//   - The structured JSON `{"error_code":"<CODE>", ...}` produced by
+//     errResultCodeBody.
+// Returns "" when neither shape matches.
 func errorCodeFromText(text string) string {
+	trimmed := strings.TrimSpace(text)
+	if strings.HasPrefix(trimmed, "{") {
+		var obj struct {
+			ErrorCode string `json:"error_code"`
+		}
+		if err := json.Unmarshal([]byte(trimmed), &obj); err == nil && obj.ErrorCode != "" {
+			return obj.ErrorCode
+		}
+		// Fall through to prefix scan for messages that happen to start with
+		// `{` but aren't structured-error JSON.
+	}
 	const prefix = "error_code: "
 	idx := strings.Index(text, prefix)
 	if idx < 0 {

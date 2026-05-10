@@ -218,10 +218,23 @@ Coordinators interact with sessions through three MCP tools.
 }
 ```
 
-Returns `{ "session_id": "ab12cd34", "worktree_path": "/path/to/worktree" }`.
-If the daemon fails to start, the response also includes `"daemon_warning"` but
-the session state is still written — the coordinator can retry daemon startup or
-proceed with caution.
+Returns `{ "session_id": "ab12cd34", "worktree_path": "/path/to/worktree" }`
+on success.
+
+If the daemon's spawn pre-flight fails (mkdir, log open, `cmd.Start()`),
+the response includes a soft `"daemon_warning"` and the session state is
+still written — the coordinator can retry daemon startup or proceed
+with caution.
+
+If the daemon process starts but never reaches steady state (typically
+inotify exhaustion: the daemon writes its PID file only after fsnotify
+watcher registration succeeds, and it never gets there), the call
+returns an `errResult` with structured error code `DAEMON_SPAWN_TIMEOUT`
+after a 500 ms wait. The worktree, branch, and session-state file are
+rolled back automatically — the operator does not need to clean up. The
+recovery action is to inspect `<worktree-path>/.niwa/daemon.log` for
+the spawn trace, raise the inotify limit if relevant, and re-call
+`niwa_create_session`.
 
 ### `niwa_destroy_session`
 
@@ -246,8 +259,60 @@ command.
 }
 ```
 
-Returns a JSON array of `SessionLifecycleState` objects. Returns an empty array
-(not null) when no sessions match.
+Returns a JSON array of session entries. Each entry embeds the persisted
+`SessionLifecycleState` plus a computed `daemon` sub-object reflecting
+the per-worktree daemon's runtime liveness:
+
+```json
+{
+  "session_id": "ab12cd34",
+  "status": "active",
+  "daemon": {
+    "alive": true,
+    "pid": 12345,
+    "started_at": "2026-05-09T10:00:00Z"
+  },
+  "...": "..."
+}
+```
+
+The `status` field stays the lifecycle marker (`active`/`ended`/`abandoned`),
+written only by `niwa_create_session` and `niwa_destroy_session`.
+`daemon.alive` is the orthogonal runtime probe — a session whose
+daemon was killed mid-life reports `daemon.alive=false` while
+`status=active`. Callers should check `daemon.alive` before queuing new
+work into a session.
+
+Empty filter result returns an empty array (not null).
+
+### `niwa_redelegate`
+
+```json
+{
+  "source_task_id": "abc123",
+  "to": "web",                   // optional override
+  "session_id": "ab12cd34",      // optional override
+  "read_only": false,            // optional override
+  "body_overrides": { ... },     // optional shallow merge
+  "mode": "async",
+  "expires_at": "2026-05-09T..."  // optional
+}
+```
+
+Re-fires a previously-delegated task body without rewriting it. Source
+state may be any of queued/running/completed/abandoned/cancelled — the
+source's state is unchanged, so active sources keep running while the
+new task runs independently.
+
+Returns `{task_id, redelegated_from, source_state_at_fork}` so callers
+can distinguish recovery flows (terminal source) from active forks
+(queued/running source). Authorization is `kindDelegator` on
+`source_task_id`.
+
+When the source's `envelope.json` is missing (the rare `taskstore_lost`
+recreate-stub case described under [Task store loss](#task-store-loss)
+below), the call returns `SOURCE_BODY_LOST` and the caller must supply
+the body via `body_overrides`.
 
 ### `niwa_delegate` with `session_id`
 
@@ -283,6 +348,52 @@ alive.
 If destroy itself fails (for example, the worktree path is gone but the state
 file references it), use `--force`. Force destroy uses `git branch -D` and
 proceeds past filesystem errors rather than stopping on the first one.
+
+## Task store loss
+
+The mesh stores per-task state under `<workspace>/.niwa/tasks/<id>/`. If
+that directory is wiped while inbox envelopes still reference its task
+IDs (manual cleanup, partial workspace destroy, fresh checkout that
+gitignored the task store), the daemon classifies the orphaned envelope
+as `taskstore_lost` and transitions the task to `state="abandoned"` with
+`reason="taskstore_lost"`.
+
+Read APIs surface this consistently — `niwa_query_task`,
+`niwa_list_outbound_tasks`, and `niwa_await_task` all return the
+abandoned terminal state. `niwa_cancel_task` and `niwa_update_task`
+return `TASK_ALREADY_TERMINAL` rather than the legacy
+`{too_late, queued}` contradiction earlier versions produced.
+
+The recovery primitive is `niwa_redelegate(source_task_id=<id>)`. When
+`envelope.json` is intact, the original body is reused verbatim. When
+`envelope.json` is also missing (the worst case), redelegate returns
+`SOURCE_BODY_LOST` and the caller supplies the body explicitly via
+`body_overrides`.
+
+## Worker config inheritance
+
+Workers spawned by `niwa_delegate` inherit the workspace's full
+`.claude/` tree — settings, plugins, skills, hooks, marketplaces, and
+`CLAUDE.local.md` — equivalent to a user running `claude` directly in
+the role's repo. The originating repo's `.claude/` layers on top for
+session workers. The single carve-out is MCP server inheritance from
+`~/.claude.json`, which is scoped away by `--strict-mcp-config`.
+
+This contract is delivered via three argv flags `niwa` appends to every
+`claude -p` spawn:
+
+```
+--add-dir <workspaceRoot>
+--add-dir <repoPath>
+--setting-sources user,project,local
+```
+
+Coordinators that mandate a workspace skill in delegation bodies
+(e.g., body that says "use /shirabe:plan") can rely on it being
+available. Declare the dependency via `body.required_skills: ["shirabe:plan"]`
+to catch typos at queue time — the MCP server returns `MISSING_SKILLS`
+synchronously with `{missing, available}` if any required entry is
+absent.
 
 ## Parallel sessions for the same repo
 
