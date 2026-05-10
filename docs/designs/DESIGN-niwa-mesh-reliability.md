@@ -331,6 +331,43 @@ provides — visible in `claude --help` — are documented argv flags:
 `--bare` mode description names these as the "explicit context"
 channel.
 
+**These flags are not interchangeable.** Claude Code loads skills
+via two distinct mechanisms, and the worker contract requires both
+to be fed:
+
+- **Plugin skills.** A plugin is referenced by an alias (e.g.
+  `shirabe@shirabe`) inside `enabledPlugins` in `settings.json`.
+  Claude Code resolves the alias against the user-level plugin
+  store (`~/.claude.json`) and any marketplaces declared in
+  `extraKnownMarketplaces`, fetches the plugin's content, and
+  exposes its skills under the alias's namespace (`shirabe:plan`,
+  `shirabe:design`, etc.). `--settings <file>` and
+  `--setting-sources` feed this path — they tell Claude which
+  settings layers and marketplaces to consult for plugin
+  resolution.
+
+- **Plain skills.** A plain skill is a `SKILL.md` file under
+  `<project>/.claude/skills/<name>/`. Claude Code discovers it
+  by scanning the `.claude/skills/` directory of project roots,
+  where project roots come from CWD walk-up plus any explicitly
+  added directories. niwa-mesh is delivered this way: it lives at
+  `<workspaceRoot>/.claude/skills/niwa-mesh/SKILL.md` with no
+  plugin manifest. `--add-dir <dir>` feeds this path — it puts
+  `<dir>` in scope as a project root for plain-skill (and
+  CLAUDE.md) discovery.
+
+The empirical confirmation is in Experiment F (Verification Notes):
+`--settings <ws-settings>` alone surfaces the workspace's
+plugin-resolved skills (10 shirabe + 47 tsukumogami) but leaves
+niwa-mesh invisible because the workspace's `.claude/skills/`
+directory was never scanned. The verified flag set
+(`--add-dir <ws> <repo> --setting-sources user,project,local`)
+covers both load paths: `--add-dir` for plain skills and CLAUDE.md,
+`--setting-sources user,project,local` for the layered settings
+that drive plugin resolution. Choosing only one flag would silently
+ship a worker that has either plugin skills or plain skills but
+not both.
+
 #### Chosen: Pass `--add-dir <workspaceRoot> --add-dir <repoPath> --setting-sources user,project,local` to every `claude -p` spawn
 
 `spawnWorker` (`internal/cli/mesh_watch.go:908-1016`) appends three
