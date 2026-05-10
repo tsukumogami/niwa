@@ -139,6 +139,15 @@ func (s *Server) handleDelegate(args delegateArgs) toolResult {
 		return errResult("NIWA_SESSION_ROLE not set")
 	}
 
+	// Issue 6 / #113: required_skills body convention. Coordinators may
+	// declare which skills the task body needs by setting
+	// body.required_skills. Workers spawned by Issue 4 inherit the
+	// workspace's full .claude/ tree, so the gate's primary load-bearing
+	// utility is catching typos at queue time rather than mid-task.
+	if errTR := s.checkRequiredSkills(args.Body); errTR.IsError {
+		return errTR
+	}
+
 	taskID, errTR := s.createTaskEnvelope(args.To, args.Body, args.ExpiresAt, "", args.SessionID)
 	if errTR.IsError {
 		return errTR
