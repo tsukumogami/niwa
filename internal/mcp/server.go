@@ -121,6 +121,19 @@ func (s *Server) taskStoreRoot() string {
 	return s.instanceRoot
 }
 
+// roleRoot returns the instance root that owns the given role's inbox and
+// sessions registry. The coordinator role always lives in the main instance:
+// session workers (NIWA_MAIN_INSTANCE_ROOT set) reach the live coordinator at
+// the main instance, not at their own worktree. Other roles live at the local
+// instance root. Mirrors handleAsk's existing askRoot redirect at the same
+// site so isKnownRole and sendMessageWithID share the same routing rule.
+func (s *Server) roleRoot(role string) string {
+	if role == "coordinator" && s.mainInstanceRoot != "" {
+		return s.mainInstanceRoot
+	}
+	return s.instanceRoot
+}
+
 // SetDaemonFuncs injects the workspace-layer daemon start/stop functions.
 // Must be called before Run when niwa_create_session or niwa_destroy_session
 // are expected to work. Skipped in unit tests that don't exercise session
@@ -716,7 +729,7 @@ func (s *Server) sendMessageWithID(msgID string, args sendMessageArgs) (string, 
 			fmt.Sprintf("role %q is not registered under .niwa/roles/", args.To))
 	}
 
-	inboxDir := filepath.Join(s.instanceRoot, ".niwa", "roles", args.To, "inbox")
+	inboxDir := filepath.Join(s.roleRoot(args.To), ".niwa", "roles", args.To, "inbox")
 	if err := os.MkdirAll(inboxDir, 0o700); err != nil {
 		return "", errResultCode("INBOX_UNWRITABLE", "cannot create inbox: "+err.Error())
 	}
@@ -762,14 +775,18 @@ func writeMessageAtomic(inboxDir, msgID string, msg Message) toolResult {
 	return toolResult{}
 }
 
-// isKnownRole reports whether .niwa/roles/<role>/ exists under the instance
-// root. Role enumeration is authoritative per the Issue-2 layout; a missing
+// isKnownRole reports whether .niwa/roles/<role>/ exists under the role's
+// owning instance root. For most roles the owning root is the local instance.
+// For the coordinator role on a session worker the owning root is the main
+// instance — the worktree never carries a coordinator/ directory because the
+// worker is not the coordinator. Role enumeration is authoritative; a missing
 // directory means the role is not registered.
 func (s *Server) isKnownRole(role string) bool {
-	if s.instanceRoot == "" {
+	root := s.roleRoot(role)
+	if root == "" {
 		return false
 	}
-	roleDir := filepath.Join(s.instanceRoot, ".niwa", "roles", role)
+	roleDir := filepath.Join(root, ".niwa", "roles", role)
 	info, err := os.Stat(roleDir)
 	if err != nil {
 		return false
@@ -813,10 +830,7 @@ func (s *Server) handleAsk(args askArgs) toolResult {
 		return errResult("cannot marshal ask body: " + err.Error())
 	}
 
-	askRoot := s.instanceRoot
-	if args.To == "coordinator" && s.mainInstanceRoot != "" {
-		askRoot = s.mainInstanceRoot
-	}
+	askRoot := s.roleRoot(args.To)
 	coordinatorInbox, liveCoord := lookupLiveCoordinator(askRoot)
 	var taskID string
 	var errTR toolResult

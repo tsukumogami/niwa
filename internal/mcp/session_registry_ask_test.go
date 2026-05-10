@@ -253,21 +253,22 @@ func TestHandleAsk_NoSessions_ReturnsNoLiveSession(t *testing.T) {
 
 // TestHandleAsk_SessionWorktreeRoutesToMainInstance asserts that when
 // mainInstanceRoot is set, a coordinator ask inside a session worktree reads
-// sessions.json from the main instance root rather than the worktree root.
+// sessions.json from the main instance root rather than the worktree root,
+// and isKnownRole resolves the coordinator role against the main instance
+// even though the worktree never carries a coordinator/ directory. This is
+// the Issue 1 contract: roleRoot redirects coordinator targets to the main
+// instance for both the role-existence check and the inbox write.
 func TestHandleAsk_SessionWorktreeRoutesToMainInstance(t *testing.T) {
 	// mainRoot is where the coordinator's sessions.json lives.
 	mainRoot := t.TempDir()
-	// worktreeRoot simulates the session worktree (no sessions.json there).
+	// worktreeRoot simulates the session worktree. NO coordinator/ directory
+	// exists here, mirroring scaffoldWorktreeNiwa's actual layout.
 	worktreeRoot := t.TempDir()
-
-	// Set up roles in both roots so isKnownRole passes.
-	if err := os.MkdirAll(filepath.Join(worktreeRoot, ".niwa", "roles", "coordinator", "inbox"), 0o700); err != nil {
-		t.Fatalf("mkdir worktree coordinator inbox: %v", err)
-	}
 	if err := os.MkdirAll(filepath.Join(worktreeRoot, ".niwa", "tasks"), 0o700); err != nil {
 		t.Fatalf("mkdir worktree tasks: %v", err)
 	}
-	// Coordinator inbox in main root for the ask notification write.
+	// Coordinator role + inbox in main root only — workers reach it via
+	// roleRoot's mainInstanceRoot redirect for "coordinator".
 	if err := os.MkdirAll(filepath.Join(mainRoot, ".niwa", "roles", "coordinator", "inbox"), 0o700); err != nil {
 		t.Fatalf("mkdir main coordinator inbox: %v", err)
 	}
@@ -317,6 +318,51 @@ func TestHandleAsk_SessionWorktreeRoutesToMainInstance(t *testing.T) {
 	files := listInboxFiles(t, mainCoordInbox)
 	if len(files) == 0 {
 		t.Error("no ask notification written to main coordinator inbox")
+	}
+}
+
+// TestSendMessage_SessionWorktreeRoutesToMainInstance asserts the Issue 1
+// roleRoot redirect for niwa_send_message: a session worker sending a message
+// to the coordinator role writes the message into the main instance's
+// coordinator inbox, not into a non-existent worktree-side inbox.
+func TestSendMessage_SessionWorktreeRoutesToMainInstance(t *testing.T) {
+	mainRoot := t.TempDir()
+	worktreeRoot := t.TempDir()
+	// No worktree-side coordinator dir — that's the Issue 1 contract.
+	if err := os.MkdirAll(filepath.Join(mainRoot, ".niwa", "roles", "coordinator", "inbox"), 0o700); err != nil {
+		t.Fatalf("mkdir main coordinator inbox: %v", err)
+	}
+
+	s := &Server{
+		instanceRoot:     worktreeRoot,
+		mainInstanceRoot: mainRoot,
+		role:             "frontend",
+		seenFiles:        make(map[string]struct{}),
+		waiters:          make(map[string]chan toolResult),
+		awaitWaiters:     make(map[string]chan taskEvent),
+		questionWaiters:  make(map[string]chan questionEvent),
+		audit:            NewFileAuditSink(""),
+	}
+
+	_, errR := s.sendMessage(sendMessageArgs{
+		To:   "coordinator",
+		Type: "status.update",
+		Body: json.RawMessage(`{"note":"hello"}`),
+	})
+	if errR.IsError {
+		t.Fatalf("sendMessage error: %s", errR.Content[0].Text)
+	}
+
+	mainCoordInbox := filepath.Join(mainRoot, ".niwa", "roles", "coordinator", "inbox")
+	files := listInboxFiles(t, mainCoordInbox)
+	if len(files) != 1 {
+		t.Errorf("main coordinator inbox: got %d files, want 1", len(files))
+	}
+
+	// And the worktree-side coordinator inbox must NOT have been created.
+	worktreeCoordInbox := filepath.Join(worktreeRoot, ".niwa", "roles", "coordinator")
+	if _, err := os.Stat(worktreeCoordInbox); err == nil {
+		t.Errorf("unexpected worktree-side coordinator dir at %s — roleRoot must not write there", worktreeCoordInbox)
 	}
 }
 

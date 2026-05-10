@@ -109,6 +109,7 @@ func (s *Server) identity() authIdentity {
 // awaitWaiter and blocks until the worker transitions the task to a
 // terminal state.
 func (s *Server) handleDelegate(args delegateArgs) toolResult {
+	s.maybeRegisterCoordinator()
 	if args.To == "" {
 		return errResult("to is required")
 	}
@@ -385,6 +386,7 @@ func (s *Server) registerAwaitWaiter(taskID string) (chan taskEvent, func()) {
 // plus terminal-only fields. kindParty accepts both delegator and executor;
 // non-parties receive NOT_TASK_PARTY. Non-blocking.
 func (s *Server) handleQueryTask(args queryTaskArgs) toolResult {
+	s.maybeRegisterCoordinator()
 	_, st, errR := authorizeTaskCall(s.identity(), args.TaskID, kindParty)
 	if errR != nil {
 		return *errR
