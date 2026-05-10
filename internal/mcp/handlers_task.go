@@ -888,6 +888,15 @@ func (s *Server) handleCancelTask(args cancelTaskArgs) toolResult {
 		sessionID = authSt.SessionID
 	}
 	taskDir := taskDirPath(s.taskStoreRoot(), args.TaskID)
+
+	// Issue 5 / #112: the {too_late, queued} contradiction is closed
+	// structurally by the daemon transitioning state.json to abandoned
+	// before the dangling/ rename happens. Once state.json is terminal,
+	// authorizeTaskCall (above) returns TASK_ALREADY_TERMINAL and we never
+	// reach the rename — so no contradictory status is returned. No new
+	// early-state guard is needed; the existing auth-layer terminal-state
+	// short-circuit is the right answer for taskstore_lost recovery too.
+
 	inboxDir, inboxErrTR := s.resolveInboxDir(sessionID, env.To.Role)
 	if inboxErrTR.IsError {
 		return inboxErrTR
@@ -900,7 +909,11 @@ func (s *Server) handleCancelTask(args cancelTaskArgs) toolResult {
 	dst := filepath.Join(cancelledDir, args.TaskID+".json")
 	if err := os.Rename(src, dst); err != nil {
 		if os.IsNotExist(err) {
-			// Daemon already claimed the envelope. Return current state.
+			// Daemon already claimed the envelope (or the file was already
+			// moved between the early-state guard and the rename — a
+			// genuine race). Return current state via the legacy too_late
+			// shape so callers that depend on it for the claim-race path
+			// keep working.
 			if _, st, err := ReadState(taskDir); err == nil {
 				return textResult(fmt.Sprintf(
 					`{"status":"too_late","current_state":%q}`, st.State))

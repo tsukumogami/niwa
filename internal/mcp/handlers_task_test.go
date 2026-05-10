@@ -626,6 +626,31 @@ func TestHandleCancelTask_TooLate(t *testing.T) {
 	}
 }
 
+// TestHandleCancelTask_AlreadyAbandoned verifies Issue 5 / #112: when
+// state.json already shows a terminal state (e.g. taskstore_lost
+// transitioned the task to abandoned), handleCancelTask returns the
+// existing TASK_ALREADY_TERMINAL error code rather than the legacy
+// {too_late, queued} contradiction. The fix is structural: state.json
+// transitions to abandoned before the dangling/ rename, so by the time
+// cancel runs, authorizeTaskCall's terminal-state guard catches it.
+func TestHandleCancelTask_AlreadyAbandoned(t *testing.T) {
+	s := newTestServer(t, "coordinator", "web")
+	taskID := writeTaskFixture(t, s.instanceRoot, "coordinator", "web", TaskStateAbandoned)
+
+	res := s.handleCancelTask(cancelTaskArgs{TaskID: taskID})
+	if !res.IsError {
+		t.Fatalf("expected errResult, got success: %s", res.Content[0].Text)
+	}
+	if errorCode(&res) != "TASK_ALREADY_TERMINAL" {
+		t.Errorf("error code = %q, want TASK_ALREADY_TERMINAL; body: %s",
+			errorCode(&res), res.Content[0].Text)
+	}
+	if strings.Contains(res.Content[0].Text, "too_late") {
+		t.Errorf("must not return too_late for already-terminal state; got %s",
+			res.Content[0].Text)
+	}
+}
+
 // TestHandleCancelTask_NotDelegator asserts NOT_TASK_OWNER for non-delegators.
 func TestHandleCancelTask_NotDelegator(t *testing.T) {
 	s := newTestServer(t, "web", "web")

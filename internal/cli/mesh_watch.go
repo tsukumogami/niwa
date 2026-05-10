@@ -782,14 +782,18 @@ func handleInboxEvent(evt inboxEvent, s spawnContext) {
 	}
 	taskDir := filepath.Join(s.taskStoreRootDir(), ".niwa", "tasks", evt.taskID)
 	if _, err := os.Stat(filepath.Join(taskDir, "state.json")); err != nil {
-		// Dangling delegate envelope — filename matches a task_id but no
-		// task dir. Move out of the queued inbox so fsnotify doesn't
-		// re-fire CREATE events for it on every daemon startup or sibling
-		// write. The file lands in
-		// `.niwa/roles/<role>/inbox/dangling/<task-id>.json` for operator
-		// inspection; leaving it in place keeps triggering the same
-		// "skip=dangling" code path indefinitely.
-		s.logger.Printf("inbox_event role=%s task=%s skip=dangling path=%s", evt.role, evt.taskID, evt.filePath)
+		// taskstore_lost: an inbox envelope references a task ID whose
+		// state.json is missing (or whose task dir is gone entirely). Issue
+		// 5 / #112 transitions this case from a silent filesystem
+		// quarantine into a real terminal state so every read API surfaces
+		// it consistently. The daemon writes a stub state.json with
+		// state=abandoned + reason="taskstore_lost", then moves the
+		// envelope to inbox/<role>/dangling/<task-id>.json as forensic
+		// preservation. Recovery is via niwa_redelegate.
+		s.logger.Printf("inbox_event role=%s task=%s taskstore_lost path=%s", evt.role, evt.taskID, evt.filePath)
+		if err := mcp.WriteAbandonedTaskStub(taskDir, "taskstore_lost"); err != nil {
+			s.logger.Printf("inbox_event role=%s task=%s taskstore_lost_stub_err=%v", evt.role, evt.taskID, err)
+		}
 		danglingDir := filepath.Join(filepath.Dir(evt.filePath), "dangling")
 		if err := os.MkdirAll(danglingDir, 0o700); err != nil {
 			s.logger.Printf("inbox_event role=%s task=%s dangling_mkdir_err=%v", evt.role, evt.taskID, err)
