@@ -160,7 +160,10 @@ func TestInstallChannelInfrastructure_CreatesRoleLayout(t *testing.T) {
 		}
 	}
 
-	// SKILL.md at instance root and per repo.
+	// SKILL.md at instance root only. Issue 4 / Issue #97 removes the
+	// per-repo writes — workers reach the workspace-root copy via the
+	// `--add-dir <workspaceRoot>` flag passed by spawnWorker rather than
+	// via filesystem-resident copies that leak into PRs.
 	instanceSkill := filepath.Join(dir, ".claude", "skills", "niwa-mesh", "SKILL.md")
 	skill, err := os.ReadFile(instanceSkill)
 	if err != nil {
@@ -168,15 +171,11 @@ func TestInstallChannelInfrastructure_CreatesRoleLayout(t *testing.T) {
 	}
 	checkSkillShape(t, skill)
 
+	// Per-repo SKILL.md must NOT exist (regression guard for #97).
 	for _, role := range []string{"web", "api"} {
 		p := filepath.Join(dir, "apps", role, ".claude", "skills", "niwa-mesh", "SKILL.md")
-		data, err := os.ReadFile(p)
-		if err != nil {
-			t.Errorf("repo SKILL.md for %q missing: %v", role, err)
-			continue
-		}
-		if !bytes.Equal(data, skill) {
-			t.Errorf("repo SKILL.md for %q differs from instance copy (flat uniform skill)", role)
+		if _, err := os.Stat(p); err == nil {
+			t.Errorf("per-repo SKILL.md at %s must not be created (#97 regression)", p)
 		}
 	}
 
@@ -444,11 +443,12 @@ func TestInstallChannelInfrastructure_DirAndFileModes(t *testing.T) {
 		t.Fatalf("walking .niwa/: %v", err)
 	}
 
-	// .mcp.json (instance root) and SKILL.md must all be 0600.
+	// .mcp.json (instance root) and SKILL.md must be 0600. Per-repo
+	// SKILL.md no longer exists (Issue 4 / #97); workers reach the
+	// instance-root copy via the spawn-time --add-dir flag.
 	for _, p := range []string{
 		filepath.Join(dir, ".mcp.json"),
 		filepath.Join(dir, ".claude", "skills", "niwa-mesh", "SKILL.md"),
-		filepath.Join(dir, "apps", "web", ".claude", "skills", "niwa-mesh", "SKILL.md"),
 	} {
 		fi, err := os.Stat(p)
 		if err != nil {
@@ -458,6 +458,10 @@ func TestInstallChannelInfrastructure_DirAndFileModes(t *testing.T) {
 		if fi.Mode().Perm() != 0o600 {
 			t.Errorf("%s mode = %o, want 0600", p, fi.Mode().Perm())
 		}
+	}
+	// Per-repo SKILL.md must not be created.
+	if _, err := os.Stat(filepath.Join(dir, "apps", "web", ".claude", "skills", "niwa-mesh", "SKILL.md")); err == nil {
+		t.Errorf("per-repo SKILL.md was created — regression against #97")
 	}
 }
 

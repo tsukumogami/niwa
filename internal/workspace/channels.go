@@ -335,28 +335,20 @@ func InstallChannelInfrastructure(cfg *config.WorkspaceConfig, instanceRoot stri
 	}
 	*writtenFiles = append(*writtenFiles, instanceMCPPath)
 
-	// Step 5: niwa-mesh SKILL.md at instance-root and per-repo. Content
-	// is identical across paths (flat uniform skill, Decision 5).
+	// Step 5: niwa-mesh SKILL.md at instance-root only. Workers reach this
+	// copy via the Claude Code argv flags (`--add-dir <workspaceRoot>`)
+	// passed by spawnWorker — see internal/cli/mesh_watch.go's
+	// claudeConfigArgs helper. The previous behaviour wrote a per-repo
+	// copy of the skill into every non-coordinator role's working tree,
+	// which leaked into PRs whenever a worker ran `git add`. Issue 4 /
+	// Issue #97 removes the per-repo writes; the workspace-root copy is
+	// the single canonical delivery path.
 	skillContent := buildSkillContent()
 	instanceSkill := filepath.Join(instanceRoot, ".claude", "skills", "niwa-mesh", "SKILL.md")
 	if err := writeIdempotent(instanceSkill, skillContent, 0o600, os.Stderr); err != nil {
 		return fmt.Errorf("writing instance SKILL.md: %w", err)
 	}
 	*writtenFiles = append(*writtenFiles, instanceSkill)
-
-	for _, r := range roles {
-		if r.name == coordinatorRole {
-			continue
-		}
-		if r.repoPath == "" {
-			continue
-		}
-		repoSkill := filepath.Join(r.repoPath, ".claude", "skills", "niwa-mesh", "SKILL.md")
-		if err := writeIdempotent(repoSkill, skillContent, 0o600, os.Stderr); err != nil {
-			return fmt.Errorf("writing %s: %w", repoSkill, err)
-		}
-		*writtenFiles = append(*writtenFiles, repoSkill)
-	}
 
 	// Step 6: Hook scripts on disk. HooksMaterializer reads Scripts as
 	// file paths in Step 6.5 of runPipeline. injectChannelHooks (called
