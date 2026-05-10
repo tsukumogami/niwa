@@ -856,6 +856,30 @@ Feature: Cross-session mesh (Issue #10 harness)
     And the coordinator blocks on niwa_await_task and handles questions for instance "session-ask-ws"
     Then the task state in instance "session-ask-ws" eventually becomes "completed" within 60 seconds
 
+  # Worktree-aware harness demonstrator: the test process simulates a session
+  # worker by calling mcp-serve directly with NIWA_INSTANCE_ROOT pointed at
+  # the worktree, NIWA_MAIN_INSTANCE_ROOT at the workspace root, and
+  # NIWA_SESSION_ID set. niwa_check_messages from that perspective must
+  # return the in-progress envelope the daemon claimed, proving the role
+  # inbox routing works under the session worktree config without depending
+  # on the worker fake's scenario script.
+  @session-daemon
+  Scenario: Test goroutine acting as session worker reads in-progress envelope (worktree-aware harness)
+    Given a clean niwa environment
+    And a local git server is set up
+    And a single-repo channeled workspace "session-mcp-ws" exists
+    And the daemon has small timing overrides
+    And the daemon runs with fake worker scenario "stall-forever"
+    When I run "niwa create session-mcp-ws"
+    Then the exit code is 0
+    And I set NIWA_INSTANCE_ROOT to instance "session-mcp-ws"
+    When I call niwa_create_session for repo "app" with purpose "harness demo" in instance "session-mcp-ws"
+    Then the session is active in instance "session-mcp-ws"
+    When I delegate a task to session role "app" in instance "session-mcp-ws"
+    Then the task state in instance "session-mcp-ws" eventually becomes "running" within 30 seconds
+    When I call niwa_check_messages as session worker for role "app" in instance "session-mcp-ws"
+    Then the output contains "task.delegate"
+
   # -----------------------------------------------------------------------
   # Delegation isolation (SESSION_REQUIRED / read_only contract)
   # These four @critical scenarios verify the delegation guard introduced in
