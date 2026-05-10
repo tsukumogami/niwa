@@ -5,24 +5,29 @@ import (
 	"context"
 	"errors"
 	"os/exec"
+	"strings"
 	"testing"
 )
 
 func TestSuperviseClaudeBinNotFound(t *testing.T) {
-	// Use an obviously missing binary name to force LookPath to fail.
+	// Override PATH to a guaranteed-empty directory so exec.LookPath cannot
+	// resolve `claude` to anything. Without this guard the test would invoke
+	// the real claude binary on machines where it is installed -- the test
+	// dev environment frequently has claude installed and a real invocation
+	// authenticates against the user's account, leaks subprocesses, and
+	// retains 200+ MB RSS.
+	emptyDir := t.TempDir()
+	t.Setenv("PATH", emptyDir)
 	_, err := Supervise(context.Background(), SuperviseOptions{
-		ClaudeBin: "",
-		ConvID:    "11111111-2222-3333-4444-555555555555",
+		ClaudeBin: "", // empty triggers exec.LookPath
+		ConvID:    "00000000-0000-0000-0000-000000000000",
 		WorkerCWD: t.TempDir(),
 	})
-	// LookPath may succeed if a real `claude` is installed on the test
-	// machine -- this test only asserts the LookPath path when no binary
-	// can be found. Skip when the test machine has claude installed.
 	if err == nil {
-		t.Skip("test machine has claude installed; skipping not-found path")
+		t.Fatalf("expected claude-not-found error, got nil")
 	}
-	if err.Error() == "" {
-		t.Errorf("error should have a message")
+	if !strings.Contains(err.Error(), "claude binary not found") {
+		t.Errorf("error message missing 'claude binary not found': %v", err)
 	}
 }
 

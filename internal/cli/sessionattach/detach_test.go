@@ -45,7 +45,7 @@ func setupSession(t *testing.T) (instanceRoot, sessionID, worktreePath string) {
 func TestDetachNoSentinelIsNoOp(t *testing.T) {
 	root, sid, _ := setupSession(t)
 	var stderr bytes.Buffer
-	err := Run(context.Background(), DetachOptions{
+	err := DetachRun(context.Background(), DetachOptions{
 		InstanceRoot: root,
 		SessionID:    sid,
 		Stderr:       &stderr,
@@ -67,7 +67,7 @@ func TestDetachStaleSentinelAutoReaps(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("seed sentinel: %v", err)
 	}
-	if err := Run(context.Background(), DetachOptions{
+	if err := DetachRun(context.Background(), DetachOptions{
 		InstanceRoot: root, SessionID: sid,
 	}); err != nil {
 		t.Errorf("stale-detach: unexpected err %v", err)
@@ -88,7 +88,7 @@ func TestDetachLiveHolderWithoutForceFailsCode3(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("seed sentinel: %v", err)
 	}
-	err := Run(context.Background(), DetachOptions{
+	err := DetachRun(context.Background(), DetachOptions{
 		InstanceRoot: root, SessionID: sid, Force: false,
 	})
 	if err == nil {
@@ -135,7 +135,7 @@ func TestDetachLiveHolderForceKillsAndReturns4(t *testing.T) {
 		t.Fatalf("seed sentinel: %v", err)
 	}
 	var stderr bytes.Buffer
-	err := Run(context.Background(), DetachOptions{
+	err := DetachRun(context.Background(), DetachOptions{
 		InstanceRoot: root, SessionID: sid,
 		Force:        true,
 		GraceSeconds: 1, // tight grace for test speed
@@ -163,7 +163,7 @@ func TestDetachSessionNotFound(t *testing.T) {
 	root := t.TempDir()
 	sessionsDir := filepath.Join(root, ".niwa", "sessions")
 	_ = os.MkdirAll(sessionsDir, 0o700)
-	err := Run(context.Background(), DetachOptions{
+	err := DetachRun(context.Background(), DetachOptions{
 		InstanceRoot: root, SessionID: "deadbeef",
 	})
 	var ece *ExitCodeError

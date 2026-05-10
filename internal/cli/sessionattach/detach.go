@@ -37,7 +37,7 @@ type ExitCodeError struct {
 
 func (e *ExitCodeError) Error() string { return e.Msg }
 
-// Run executes the niwa session detach <id> [--force] command.
+// DetachRun executes the niwa session detach <id> [--force] command.
 //
 //   - When no sentinel exists: returns nil (idempotent; nothing to break).
 //   - When the holder PID is dead: removes the sentinel and returns nil.
@@ -48,7 +48,7 @@ func (e *ExitCodeError) Error() string { return e.Msg }
 //     waits the grace period, SIGKILLs if needed, removes the sentinel,
 //     emits the warning line per PRD R9, and returns *ExitCodeError with
 //     Code=4 (signals "killed live holder" per Exit Code Mapping).
-func Run(ctx context.Context, opts DetachOptions) error {
+func DetachRun(ctx context.Context, opts DetachOptions) error {
 	stderr := stderrOrDefault(opts.Stderr)
 
 	worktreePath, err := worktreePathForSession(opts.InstanceRoot, opts.SessionID)
