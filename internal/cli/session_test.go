@@ -37,9 +37,13 @@ func seedSessionRegistry(t *testing.T, entries []mcp.SessionEntry) string {
 	return root
 }
 
-func TestSessionList_EmptyRegistryShowsNoSessionsMessage(t *testing.T) {
+func TestSessionList_FlaglessShowsLifecycleView(t *testing.T) {
+	// PLAN issue 10 removed the flagless deprecation alias to `niwa mesh
+	// list`. Flagless `niwa session list` now shows the lifecycle view
+	// directly. With no sessions on disk this is just the table header
+	// (no deprecation warning, no fall-through to mesh list).
 	root := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(root, ".niwa"), 0o700); err != nil {
+	if err := os.MkdirAll(filepath.Join(root, ".niwa", "sessions"), 0o700); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
 	if err := os.WriteFile(filepath.Join(root, ".niwa", "instance.json"), []byte("{}"), 0o600); err != nil {
@@ -47,60 +51,59 @@ func TestSessionList_EmptyRegistryShowsNoSessionsMessage(t *testing.T) {
 	}
 	t.Setenv("NIWA_INSTANCE_ROOT", root)
 
-	buf := &bytes.Buffer{}
-	sessionListCmd.SetOut(buf)
-	defer sessionListCmd.SetOut(os.Stdout)
+	resetSessionListFlags(t)
+	defer resetSessionListFlags(t)
+
+	stdoutBuf := &bytes.Buffer{}
+	stderrBuf := &bytes.Buffer{}
+	sessionListCmd.SetOut(stdoutBuf)
+	sessionListCmd.SetErr(stderrBuf)
+	defer func() {
+		sessionListCmd.SetOut(os.Stdout)
+		sessionListCmd.SetErr(os.Stderr)
+	}()
 
 	if err := runSessionList(sessionListCmd, nil); err != nil {
 		t.Fatalf("runSessionList: %v", err)
 	}
-	out := buf.String()
-	if !strings.Contains(out, "no coordinator sessions registered") {
-		t.Errorf("expected empty-registry message in output, got %q", out)
+	stdout := stdoutBuf.String()
+	stderr := stderrBuf.String()
+	// Lifecycle view is the new default: column header SESSION_ID is
+	// present in stdout.
+	if !strings.Contains(stdout, "SESSION_ID") {
+		t.Errorf("expected lifecycle view header SESSION_ID in stdout, got %q", stdout)
+	}
+	// Coordinator-registry markers (ROLE / PID columns from mesh list)
+	// must NOT appear -- the alias is gone.
+	if strings.Contains(stdout, "ROLE") || strings.Contains(stdout, "PENDING") {
+		t.Errorf("flagless lifecycle view leaked mesh-list columns: %q", stdout)
+	}
+	// No deprecation warning on stderr.
+	if strings.Contains(stderr, "deprecated") {
+		t.Errorf("deprecation warning still present after PLAN issue 10: %q", stderr)
 	}
 }
 
-func TestSessionList_CoordinatorOnlyView(t *testing.T) {
-	// Seed two coordinator entries (role names pulled from team topology).
-	// Workers never appear in sessions.json by design (AC-O1, AC-O2): the
-	// register handler only writes coordinator-role sessions, so
-	// `session list` reads whatever the registry contains, which is
-	// guaranteed coordinator-only upstream. This test locks in that
-	// list renders the registry verbatim with liveness + pending count
-	// columns — no worker-specific filtering required here.
+func TestMeshList_StillWorksDirectly(t *testing.T) {
+	// PLAN issue 10 removed the deprecated `niwa session list` -> `niwa
+	// mesh list` alias, but `niwa mesh list` itself is unchanged. This
+	// test seeds a coordinator registry and asserts the direct
+	// invocation still renders.
 	now := time.Now().UTC().Format(time.RFC3339)
 	root := seedSessionRegistry(t, []mcp.SessionEntry{
 		{ID: "id-coord", Role: "coordinator", PID: 99999, RegisteredAt: now},
-		{ID: "id-second", Role: "frontend", PID: 99998, RegisteredAt: now},
 	})
-	// Seed a pending message for coordinator to exercise the pending
-	// count column.
-	inboxDir := filepath.Join(root, ".niwa", "roles", "coordinator", "inbox")
-	if err := os.MkdirAll(inboxDir, 0o700); err != nil {
-		t.Fatalf("mkdir inbox: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(inboxDir, "msg.json"), []byte("{}"), 0o600); err != nil {
-		t.Fatalf("write msg: %v", err)
-	}
 	t.Setenv("NIWA_INSTANCE_ROOT", root)
 
 	buf := &bytes.Buffer{}
-	sessionListCmd.SetOut(buf)
-	defer sessionListCmd.SetOut(os.Stdout)
-
-	if err := runSessionList(sessionListCmd, nil); err != nil {
-		t.Fatalf("runSessionList: %v", err)
+	meshListCmd.SetOut(buf)
+	defer meshListCmd.SetOut(os.Stdout)
+	if err := runMeshList(meshListCmd, nil); err != nil {
+		t.Fatalf("runMeshList: %v", err)
 	}
 	out := buf.String()
 	if !strings.Contains(out, "coordinator") {
-		t.Errorf("expected coordinator row in %q", out)
-	}
-	if !strings.Contains(out, "frontend") {
-		t.Errorf("expected frontend row in %q", out)
-	}
-	// PID 99999 very likely does not exist → status should render as dead.
-	if !strings.Contains(out, "dead") {
-		t.Errorf("expected 'dead' status for stale PID in %q", out)
+		t.Errorf("expected coordinator row in mesh list output, got %q", out)
 	}
 }
 
