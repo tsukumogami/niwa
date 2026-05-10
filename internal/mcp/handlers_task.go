@@ -381,7 +381,12 @@ func (s *Server) createAskTaskStore(to string, body json.RawMessage, parentTaskI
 		MaxRestarts:   0, // ask tasks are never daemon-spawned; no retries
 		DelegatorRole: s.role,
 		TargetRole:    to,
-		UpdatedAt:     now,
+		// SessionID stamps the asker's session so handleFinishTask can route
+		// the answer (task.completed) back to the asker's worktree inbox
+		// instead of taskStoreRoot()/.niwa/roles/<role>/inbox/. Empty for
+		// non-session askers, which keeps the existing main-instance routing.
+		SessionID: s.sessionID,
+		UpdatedAt: now,
 	}
 	stBytes, err := json.MarshalIndent(st, "", "  ")
 	if err != nil {
@@ -684,7 +689,7 @@ func (s *Server) handleFinishTask(args finishTaskArgs) toolResult {
 
 	now := time.Now().UTC().Format(time.RFC3339)
 	taskDir := taskDirPath(s.taskStoreRoot(), args.TaskID)
-	var delegatorRole string
+	var delegatorRole, delegatorSessionID string
 	if err := UpdateState(taskDir, func(cur *TaskState) (*TaskState, *TransitionLogEntry, error) {
 		next := *cur
 		next.State = args.Outcome
@@ -697,6 +702,12 @@ func (s *Server) handleFinishTask(args finishTaskArgs) toolResult {
 			next.Reason = args.Reason
 		}
 		delegatorRole = cur.DelegatorRole
+		// SessionID on the ask task points at the asker's worktree. handleAsk
+		// stamps it via createAskTaskStore so the answer message reaches the
+		// asker's fsnotify watcher rather than the main-instance role inbox.
+		// Empty for non-session askers, in which case the existing
+		// taskStoreRoot()-rooted routing applies.
+		delegatorSessionID = cur.SessionID
 		entry := &TransitionLogEntry{
 			Kind:   "state_transition",
 			From:   cur.State,
@@ -719,7 +730,11 @@ func (s *Server) handleFinishTask(args finishTaskArgs) toolResult {
 		body = map[string]any{"task_id": args.TaskID, "reason": args.Reason}
 	}
 	if delegatorRole != "" {
-		s.sendTaskMessage(delegatorRole, msgType, args.TaskID, body)
+		if delegatorSessionID != "" {
+			s.sendTaskMessageInSession(delegatorSessionID, delegatorRole, msgType, args.TaskID, body)
+		} else {
+			s.sendTaskMessage(delegatorRole, msgType, args.TaskID, body)
+		}
 	}
 
 	return textResult(fmt.Sprintf(`{"status":%q,"task_id":%q}`, args.Outcome, args.TaskID))
@@ -1079,13 +1094,38 @@ func mapStoreError(err error) toolResult {
 //
 // Inbox path: always rooted at taskStoreRoot() (which is mainInstanceRoot for
 // session workers, instanceRoot otherwise). This means progress/completion
-// messages reach the coordinator's main-instance inbox. This is correct for
+// messages reach the coordinator's main-instance inbox, which is correct for
 // the current topology where coordinators always run in the main instance.
-// If a coordinator were ever to run inside a session worktree (session-within-
-// session), the delegating session ID would need to be read from state.json and
-// used to resolve the correct worktree inbox instead.
+// When a delegator lives in a session worktree (e.g. an ask answer routed
+// back to a session worker), use sendTaskMessageInSession instead so the
+// message lands in the worktree inbox the worker's fsnotify watcher polls.
 func (s *Server) sendTaskMessage(toRole, msgType, taskID string, body any) {
 	inboxDir := filepath.Join(s.taskStoreRoot(), ".niwa", "roles", toRole, "inbox")
+	s.writeTaskMessage(inboxDir, toRole, msgType, taskID, body)
+}
+
+// sendTaskMessageInSession delivers a task-lifecycle message to a role
+// inside a specific session worktree, resolved via the session registry at
+// taskStoreRoot()/.niwa/sessions/<sessionID>.json. Used by handleFinishTask
+// to answer an ask whose state.SessionID is set, so task.completed lands in
+// the asker's worktree inbox where its fsnotify watcher will see it. Falls
+// back to sendTaskMessage on registry-lookup failure so the wakeup at least
+// reaches the main-instance inbox rather than being lost.
+func (s *Server) sendTaskMessageInSession(sessionID, toRole, msgType, taskID string, body any) {
+	sessionsDir := filepath.Join(s.taskStoreRoot(), ".niwa", "sessions")
+	session, err := ReadSessionLifecycleState(sessionsDir, sessionID)
+	if err != nil {
+		s.sendTaskMessage(toRole, msgType, taskID, body)
+		return
+	}
+	inboxDir := filepath.Join(session.WorktreePath, ".niwa", "roles", toRole, "inbox")
+	s.writeTaskMessage(inboxDir, toRole, msgType, taskID, body)
+}
+
+// writeTaskMessage is the shared message-write tail for sendTaskMessage and
+// sendTaskMessageInSession. Best-effort by design — errors are intentionally
+// swallowed so state.json remains the source of truth.
+func (s *Server) writeTaskMessage(inboxDir, toRole, msgType, taskID string, body any) {
 	if err := os.MkdirAll(inboxDir, 0o700); err != nil {
 		return
 	}

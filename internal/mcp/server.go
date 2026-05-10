@@ -54,6 +54,13 @@ type Server struct {
 	// once at startup; read by handlers to authorize executor-kind calls and
 	// to auto-populate parent_task_id on nested niwa_delegate calls.
 	taskID string
+	// sessionID is the caller's NIWA_SESSION_ID (empty for non-session
+	// processes — coordinators, virtual peers, and the cli mcp surface).
+	// createAskTaskStore stamps this onto state.json so handleFinishTask
+	// can route the answer back to the asker's worktree inbox via the
+	// session registry, instead of the main-instance role inbox where
+	// taskStoreRoot() would otherwise land it.
+	sessionID string
 	// roleInboxDir is <instance-root>/.niwa/roles/<role>/inbox/. Empty when
 	// role or instanceRoot is empty (e.g. unit-test setups that construct a
 	// Server without a workspace layout).
@@ -99,6 +106,7 @@ func New(role, instanceRoot string) *Server {
 		mainInstanceRoot: os.Getenv("NIWA_MAIN_INSTANCE_ROOT"),
 		role:             role,
 		taskID:           os.Getenv("NIWA_TASK_ID"),
+		sessionID:        os.Getenv("NIWA_SESSION_ID"),
 		seenFiles:       make(map[string]struct{}),
 		waiters:         make(map[string]chan toolResult),
 		awaitWaiters:    make(map[string]chan taskEvent),
@@ -915,58 +923,44 @@ func (s *Server) handleAsk(args askArgs) toolResult {
 		return formatTerminalResult(st)
 	}
 
-	// Cross-process wakeup polling. The coordinator answering this ask runs
-	// in a different process: it writes task.completed to the worker role's
-	// inbox at <coordTaskStoreRoot>/.niwa/roles/<workerRole>/inbox/. For a
-	// session worker that path resolves to <mainInstance>/.niwa/roles/...,
-	// while the worker's fsnotify watcher is rooted at the worktree's
-	// roles dir — so the in-memory awaitWaiter never fires. Polling
-	// state.json directly closes that gap. Same-process asks remain
-	// instant via the ch path; pollTicker only has to fire once before the
-	// state read returns terminal in the cross-process case.
-	pollTicker := time.NewTicker(100 * time.Millisecond)
-	defer pollTicker.Stop()
-
-	deadline := time.NewTimer(time.Duration(args.TimeoutSeconds) * time.Second)
-	defer deadline.Stop()
-
-	for {
-		select {
-		case evt := <-ch:
-			return formatEventResult(evt, taskDir)
-		case <-pollTicker.C:
-			if _, st, err := ReadState(taskDir); err == nil && isTaskStateTerminal(st.State) {
-				return formatTerminalResult(st)
+	// Cross-process wakeup is handled at the routing layer: handleFinishTask
+	// stamps state.SessionID via createAskTaskStore (set to the asker's
+	// NIWA_SESSION_ID), and the coordinator's finish path then calls
+	// sendTaskMessageInSession to deliver task.completed into the asker's
+	// worktree role inbox — where this server's fsnotify watcher is rooted —
+	// so the in-memory awaitWaiter fires normally. No polling fallback
+	// required.
+	select {
+	case evt := <-ch:
+		return formatEventResult(evt, taskDir)
+	case <-time.After(time.Duration(args.TimeoutSeconds) * time.Second):
+		// Transition the ask task to abandoned so it doesn't linger in queued state.
+		now := time.Now().UTC().Format(time.RFC3339)
+		_ = UpdateState(taskDir, func(cur *TaskState) (*TaskState, *TransitionLogEntry, error) {
+			if cur.State != TaskStateQueued {
+				return nil, nil, nil
 			}
-		case <-deadline.C:
-			// Transition the ask task to abandoned so it doesn't linger in queued state.
-			now := time.Now().UTC().Format(time.RFC3339)
-			_ = UpdateState(taskDir, func(cur *TaskState) (*TaskState, *TransitionLogEntry, error) {
-				if cur.State != TaskStateQueued {
-					return nil, nil, nil
-				}
-				next := *cur
-				next.State = TaskStateAbandoned
-				next.UpdatedAt = now
-				next.Reason = json.RawMessage(`{"error":"ask_timeout"}`)
-				next.StateTransitions = append(next.StateTransitions,
-					StateTransition{From: TaskStateQueued, To: TaskStateAbandoned, At: now})
-				entry := &TransitionLogEntry{
-					Kind:  "abandoned",
-					From:  TaskStateQueued,
-					To:    TaskStateAbandoned,
-					At:    now,
-					Actor: &TransitionActor{Kind: "worker", PID: os.Getpid(), Role: s.role},
-				}
-				return &next, entry, nil
-			})
-			timeoutPayload, _ := json.Marshal(map[string]any{
-				"status":          "timeout",
-				"task_id":         taskID,
-				"timeout_seconds": args.TimeoutSeconds,
-			})
-			return textResult(string(timeoutPayload))
-		}
+			next := *cur
+			next.State = TaskStateAbandoned
+			next.UpdatedAt = now
+			next.Reason = json.RawMessage(`{"error":"ask_timeout"}`)
+			next.StateTransitions = append(next.StateTransitions,
+				StateTransition{From: TaskStateQueued, To: TaskStateAbandoned, At: now})
+			entry := &TransitionLogEntry{
+				Kind:  "abandoned",
+				From:  TaskStateQueued,
+				To:    TaskStateAbandoned,
+				At:    now,
+				Actor: &TransitionActor{Kind: "worker", PID: os.Getpid(), Role: s.role},
+			}
+			return &next, entry, nil
+		})
+		timeoutPayload, _ := json.Marshal(map[string]any{
+			"status":          "timeout",
+			"task_id":         taskID,
+			"timeout_seconds": args.TimeoutSeconds,
+		})
+		return textResult(string(timeoutPayload))
 	}
 }
 
