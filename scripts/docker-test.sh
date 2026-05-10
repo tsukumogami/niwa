@@ -26,7 +26,8 @@ exec docker run --rm \
 	-v "${CACHE_DIR}/gocache":/root/.cache/go-build:rw \
 	-v "${CACHE_DIR}/gomodcache":/go/pkg/mod:rw \
 	-w /work \
-	-e GOFLAGS="-mod=mod" \
+	-e GOFLAGS="-mod=mod -buildvcs=false" \
 	-e CGO_ENABLED=0 \
+	-e GOTOOLCHAIN=local \
 	golang:1.25-bookworm \
-	go test "$@"
+	bash -c 'git config --global --add safe.directory /work && go test "$@"' --  "$@"
