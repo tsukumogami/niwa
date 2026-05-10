@@ -177,6 +177,17 @@ func (s *Server) DestroySessionDirect(sessionID string, force bool) toolResult {
 	})
 }
 
+// RedelegateDirect is the CLI-callable entry point for niwa_redelegate.
+// Accepts the same JSON shape as the MCP tool so the CLI command can
+// build a request map without duplicating the redelegateArgs struct fields.
+func (s *Server) RedelegateDirect(reqJSON []byte) toolResult {
+	var args redelegateArgs
+	if err := json.Unmarshal(reqJSON, &args); err != nil {
+		return errResult("invalid arguments: " + err.Error())
+	}
+	return s.handleRedelegate(args)
+}
+
 // Run starts the server. It reads newline-delimited JSON-RPC from r, writes
 // responses to w, and launches an inbox watcher goroutine that sends push
 // notifications when new messages arrive.
