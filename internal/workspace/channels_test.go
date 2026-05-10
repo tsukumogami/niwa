@@ -275,14 +275,43 @@ func checkSkillShape(t *testing.T, data []byte) {
 
 	// Common Patterns must include explicit guidance for long-running
 	// tasks; the default 600s timeout silently truncates real coding
-	// tasks if the LLM doesn't override it.
+	// tasks if the LLM doesn't override it. Issue 8 rewrote the skill;
+	// the phrasing changed but the guidance content is preserved.
 	for _, phrase := range []string{
 		"Long-running tasks",
 		"timeout_seconds",
-		"Re-await loop",
+		`re-call ` + "`niwa_await_task",
 	} {
 		if !strings.Contains(bodyStr, phrase) {
 			t.Errorf("SKILL.md Common Patterns missing long-running guidance phrase %q", phrase)
+		}
+	}
+
+	// Issue 8 / mesh-reliability: the rewritten skill must surface the
+	// new contracts the runtime now enforces, and must NOT mention the
+	// dead vocabulary it removed.
+	for _, phrase := range []string{
+		"task.delegate",
+		"task.ask",
+		"required_skills",
+		"MISSING_SKILLS",
+		"taskstore_lost",
+		"niwa_redelegate",
+		"DAEMON_SPAWN_TIMEOUT",
+		"daemon",
+		"no_live_session",
+	} {
+		if !strings.Contains(bodyStr, phrase) {
+			t.Errorf("SKILL.md missing post-rewrite phrase %q", phrase)
+		}
+	}
+	for _, dead := range []string{
+		"question.ask",
+		"question.answer",
+		"status.update",
+	} {
+		if strings.Contains(bodyStr, dead) {
+			t.Errorf("SKILL.md must not mention dead message type %q (Issue 8 removed it)", dead)
 		}
 	}
 }
