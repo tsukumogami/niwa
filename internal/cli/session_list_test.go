@@ -204,6 +204,8 @@ func resetSessionListFlags(t *testing.T) {
 	t.Helper()
 	sessionListRepo = ""
 	sessionListStatus = ""
+	sessionListAttached = false
+	sessionListAvailable = false
 	sessionListJSON = false
 	sessionListVerbose = false
 }
