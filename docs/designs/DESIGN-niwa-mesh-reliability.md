@@ -1,5 +1,5 @@
 ---
-status: Accepted
+status: Planned
 problem: |
   Nine open issues filed since #92 describe a coherent set of failures in
   the niwa mesh subsystem (multi-agent coordination): coordinator routing
@@ -81,7 +81,7 @@ rationale: |
 
 ## Status
 
-Proposed
+Planned
 
 ## Context and Problem Statement
 
