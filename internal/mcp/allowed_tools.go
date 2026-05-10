@@ -27,6 +27,8 @@ var ClaudeAllowedTools = []string{
 	"mcp__niwa__niwa_ask",
 	"mcp__niwa__niwa_send_message",
 	"mcp__niwa__niwa_check_messages",
+	"mcp__niwa__niwa_create_session",
+	"mcp__niwa__niwa_destroy_session",
 }
 
 // WorkerFallbackBashTools are appended to ClaudeAllowedTools when spawning
