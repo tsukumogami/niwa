@@ -4,7 +4,7 @@ status: Draft
 execution_mode: single-pr
 upstream: docs/designs/current/DESIGN-niwa-mesh-reliability.md
 milestone: "niwa mesh reliability"
-issue_count: 8
+issue_count: 13
 ---
 
 # PLAN: niwa mesh reliability
@@ -36,21 +36,20 @@ naturally to atomic issues (1-2 issues per phase based on whether
 the deliverables share a tight code path or address distinct
 user-facing surfaces).
 
-## Pending Additions (UX expansion)
+## UX expansion (finalized after research)
 
-The user explicitly scoped the implementation to cover the **full
-surface** UX (CLI commands, MCP tools, first-time setup flow), not
-just the MCP/agent surface this plan currently captures.
-Implementation will begin with a multi-agent UX research pass over
-the existing CLI surface (`niwa session list/destroy/go`,
-`niwa task list/show/cancel`, `niwa mesh list`, `niwa apply`,
-`niwa init`) and the runtime error rendering paths. Findings will
-be appended to this PLAN doc as additional Issue Outlines (likely
-3-5 more issues for CLI polish, error-message review, and
-first-run flow) before any implementation issue past Issue 1
-begins, so the final plan reflects the actual scope. The eight
-issues below are the runtime/MCP/docs spine; the UX additions will
-be numbered Issue 9, 10, ... when surfaced.
+The user scoped this implementation to the full UX surface (CLI +
+MCP + setup flow). A multi-agent UX research pass produced 51 raw
+findings across 5 reports under `wip/work-on/ux/`. Decision D1
+(`wip/work-on/decisions/D1_ux_scope_pruning.md`) pruned that to 5
+new in-scope issues that close load-bearing gaps for the mesh
+redesign, plus AC fold-ins on existing issues. The remaining ~38
+findings will be filed as follow-on issues at PR finalization
+time, labeled for follow-on milestones (first-run polish, CLI
+ergonomics, MCP convention pass, docs polish, safety pass).
+
+The new issues are numbered 9-13 below. Issue 6's dependency
+expanded to include Issue 9 (structured error wire format).
 
 ## Issue Outlines
 
@@ -287,6 +286,171 @@ back into lockstep with the runtime that issues 1-7 deliver.
 
 **Dependencies**: Issues 1, 2, 3, 4, 5, 6, 7.
 
+### Issue 9: feat(mcp): structured error wire format with body
+
+**Goal**: Replace the current `errResultCode(code, msg)` text-only
+error response with a structured shape that carries a JSON body, so
+errors like `MISSING_SKILLS` can return `{missing, available}`
+arrays without hand-formatting prose. All existing call sites stay
+working — the change is to add a body-capable variant alongside the
+text-only one.
+
+**Acceptance Criteria**:
+- New helper `errResultCodeBody(code string, body any)` in
+  `internal/mcp/server.go` (or sibling) that emits a JSON content
+  block with shape `{"error_code": "<CODE>", "<body fields>"...}`.
+- The existing `errResultCode(code, msg)` continues to work for
+  prose errors; new code uses `errResultCodeBody` when carrying
+  structured payload.
+- The wire format is documented in `internal/mcp/audit.go`'s error
+  parsing helper so structured bodies are extractable for audit.
+- `MISSING_SKILLS` (Issue 6), `SOURCE_BODY_LOST` (Issue 7), and any
+  future structured error use the new helper.
+- Unit tests verify both text and structured shapes parse cleanly.
+- Audit log captures the error code in `error_code` and the
+  structured body fields don't leak into `arg_keys` (no sensitive
+  data exposure).
+
+**Closes**: enables the design's `MISSING_SKILLS` body shape that
+was inexpressible under the current wire format. No issue closure
+on its own; load-bearing for Issue 6.
+
+**Dependencies**: None.
+
+### Issue 10: fix(cli): silence cobra duplicate-error printing
+
+**Goal**: Fix a cross-cutting CLI bug where errors print 2-3 times
+(cobra prints, then `root.go:53-58` prints again, plus per-handler
+stderr writes) and the usage banner dumps on every application
+error.
+
+**Acceptance Criteria**:
+- Set `SilenceUsage: true` on every `RunE` command (currently only
+  `mesh report-progress` does).
+- Either remove the trailing `fmt.Fprintln(os.Stderr, err)` in
+  `root.go:53-58` OR set `SilenceErrors: true` globally and keep
+  the trailing print as the single source — pick one and document.
+- Remove the redundant `fmt.Fprintf(cmd.ErrOrStderr(), "task not
+  found: …")` at `task.go:258` (the returned error already prints).
+- Align stdout/stderr discipline: `session create` and
+  `session destroy` write success summaries to stdout (currently
+  stderr at `session_lifecycle_cmd.go:76, 113`).
+- Add a regression test capturing both stdout and stderr for at
+  least one error path per command group.
+- `niwa task list --since 5m` with no results prints a
+  "no tasks found" line on empty (matching the empty-state pattern
+  in `mesh_list.go:64-66`).
+
+**Closes**: cross-cutting CLI UX bug. Production-grade quality bar
+requires errors print once. No specific issue from #92-#114 closure
+but explicitly required by the user's full-surface UX scope.
+
+**Dependencies**: None.
+
+### Issue 11: feat(cli): render structured MCP error codes with recovery hints
+
+**Goal**: When CLI commands invoke the MCP layer
+(`session create`, `session destroy`, the new `task redelegate`),
+parse the structured error code prefix, look up a per-code recovery
+hint, and print message + hint together. Stops users from staring
+at opaque `error_code: DAEMON_SPAWN_TIMEOUT` blobs.
+
+**Acceptance Criteria**:
+- New helper in `internal/cli/` that parses the `error_code: <CODE>`
+  prefix produced by `errResultCode` and `errResultCodeBody`
+  (mirrors `mcp/audit.go:138`'s logic).
+- Per-code recovery hints rendered after the message:
+  - `DAEMON_SPAWN_TIMEOUT` → "Check `<worktree>/.niwa/daemon.log`
+    for the spawn trace. The session was rolled back."
+  - `MISSING_SKILLS` → "The target session is missing required
+    skills: <names>. Install them or pick a different
+    `--session-id`. Run `niwa session list --json` to find
+    candidates."
+  - `SOURCE_BODY_LOST` → "The source task's envelope.json is
+    gone. Re-supply the body via `--body-overrides @body.json`."
+  - `UNKNOWN_ROLE` → "Run `niwa apply` to register roles, or
+    check `<workspace>/.niwa/roles/`."
+  - `SESSION_NOT_FOUND` → "Run `niwa session list` to see active
+    sessions."
+  - `TASK_ALREADY_TERMINAL` → "Use `niwa task show <id>` to see
+    the final state, or `niwa task redelegate <id>` to re-fire."
+- Unknown error codes pass through unchanged so future codes
+  don't break the renderer.
+- Used by `session create`, `session destroy`, and the new
+  `task redelegate` (Issue 12).
+- Unit tests cover known and unknown codes plus the structured
+  body case.
+
+**Closes**: production-grade error rendering for the CLI surface.
+
+**Dependencies**: Issue 9 (structured wire format makes the
+parsing helper cleaner; without it the helper would have to
+reverse-engineer prose).
+
+### Issue 12: feat(cli): add niwa task redelegate as CLI mirror of niwa_redelegate
+
+**Goal**: Provide a CLI mirror of `niwa_redelegate` so operators
+who find an abandoned task in `niwa task list` can recover it
+without launching a Claude session.
+
+**Acceptance Criteria**:
+- New `niwa task redelegate <source-task-id>` subcommand wired in
+  `internal/cli/task.go` alongside `task list` / `task show`.
+- Flag set mirrors the MCP tool: `--to <role>`,
+  `--session-id <id>`, `--read-only`,
+  `--mode {async,sync}` (default `async`),
+  `--expires-at <RFC3339>`, `--body-overrides {<json> | @<path>}`.
+- On success, print `task_id`, `redelegated_from`, and
+  `source_state_at_fork` (one per line for humans;
+  `--json` for scripts via Issue 13's pattern).
+- Renders `SOURCE_BODY_LOST` and `MISSING_SKILLS` errors with
+  actionable hints (Issue 11's helper).
+- Accepts a short-prefix task ID (matches what `task list`
+  shows) for ergonomics. Ambiguous prefix → list matches and
+  exit non-zero.
+- Functional test covering: terminal source recovery, active
+  source fork, `SOURCE_BODY_LOST` recovery via
+  `--body-overrides`.
+
+**Closes**: load-bearing UX gap — the design names `niwa_redelegate`
+as the canonical recovery primitive but has no CLI mirror today.
+
+**Dependencies**: Issue 7 (the `niwa_redelegate` MCP tool must
+exist before the CLI can invoke it).
+
+### Issue 13: feat(cli): add --json output and daemon column to niwa session list
+
+**Goal**: Surface the design's new `daemon` sub-object on the CLI
+side (a `DAEMON` column in the table view, plus the full
+sub-object in JSON output), and add `--json` output so structured
+fields like `daemon`, `redelegated_from`, and
+`source_state_at_fork` aren't only reachable from the MCP side.
+
+**Acceptance Criteria**:
+- `niwa session list` accepts `--json`. JSON shape mirrors the MCP
+  `niwa_list_sessions` payload, including the new `daemon`
+  sub-object from Issue 3.
+- Default (table) output gains a `DAEMON` column rendering
+  `alive`/`dead` (matching `mesh_list.go:71-74`'s vocabulary), so
+  the two list views read consistently.
+- `--verbose` exposes `pid` and `started_at` columns in table
+  mode.
+- Empty-state ("no sessions match filter") prints a clear line
+  matching `mesh_list.go:64-66`.
+- Functional tests: `--json` shape parses correctly for empty,
+  single, and multi-row cases; daemon column renders alive vs
+  dead correctly.
+- Help text updates: document `--json`, `--verbose`, the daemon
+  column, and the `NIWA_INSTANCE_ROOT` env var (the latter
+  closes the cli/help drift surfaced by the CLI report).
+
+**Closes**: CLI surface for the design's `daemon` sub-object.
+Load-bearing for operators who run `niwa session list` and
+expect to know whether a session is usable.
+
+**Dependencies**: Issue 3 (the `daemon` sub-object structure must
+be defined on the MCP side first).
+
 ## Dependency Graph
 
 ```mermaid
@@ -299,10 +463,19 @@ graph TD
     I6["Issue 6: required_skills gate"]
     I7["Issue 7: niwa_redelegate primitive"]
     I8["Issue 8: skill text + sessions guide"]
+    I9["Issue 9: structured error wire format"]
+    I10["Issue 10: cobra silence + stdout/stderr discipline"]
+    I11["Issue 11: CLI structured error rendering"]
+    I12["Issue 12: niwa task redelegate CLI"]
+    I13["Issue 13: niwa session list --json + daemon column"]
 
     I4 --> I6
+    I9 --> I6
     I4 --> I7
     I5 --> I7
+    I9 --> I11
+    I7 --> I12
+    I3 --> I13
     I1 --> I8
     I2 --> I8
     I3 --> I8
@@ -310,6 +483,11 @@ graph TD
     I5 --> I8
     I6 --> I8
     I7 --> I8
+    I9 --> I8
+    I10 --> I8
+    I11 --> I8
+    I12 --> I8
+    I13 --> I8
 
     classDef done fill:#90EE90
     classDef ready fill:#87CEEB
@@ -321,8 +499,8 @@ graph TD
     classDef tracksDesign fill:#E6E6FA
     classDef tracksPlan fill:#F5DEB3
 
-    class I1,I2,I3,I4,I5 ready
-    class I6,I7,I8 blocked
+    class I1,I2,I3,I4,I5,I9,I10 ready
+    class I6,I7,I8,I11,I12,I13 blocked
 ```
 
 **Legend**: Blue = ready (no dependencies), Yellow = blocked
@@ -352,18 +530,45 @@ critical path.
 
 ### Recommended commit order
 
-1. Issue 1 (coordinator routing repair)
-2. Issue 2 (typed daemon-spawn timeout)
-3. Issue 3 (daemon liveness sub-object)
-4. Issue 4 (worker Claude config inheritance) — the core
-   architectural shift
-5. Issue 5 (taskstore_lost transition) — independent of 1-4
-6. Issue 6 (required_skills gate) — after 4
-7. Issue 7 (niwa_redelegate) — after 4 + 5
-8. Issue 8 (skill text + sessions guide) — last, after all
-   runtime issues
+Runtime cluster (5 mutually independent + 1 each unlock for blocked tail):
 
-UX research findings (per the user's full-surface scope) will be
-folded in as additional issues numbered Issue 9, 10, ... and
-slotted into the appropriate position in this sequence based on
-their dependencies.
+1. Issue 1 (coordinator routing repair) — independent
+2. Issue 2 (typed daemon-spawn timeout) — independent
+3. Issue 3 (daemon liveness sub-object) — independent
+4. Issue 4 (worker Claude config inheritance) — independent;
+   unblocks 6, 7
+5. Issue 5 (taskstore_lost transition) — independent; unblocks 7
+6. Issue 9 (structured error wire format) — independent;
+   unblocks 6, 11
+7. Issue 10 (cobra silence + stdout/stderr discipline) —
+   independent
+
+Dependent tail:
+
+8. Issue 6 (required_skills gate) — after 4 + 9
+9. Issue 7 (niwa_redelegate primitive) — after 4 + 5
+10. Issue 11 (CLI structured error rendering) — after 9
+11. Issue 12 (niwa task redelegate CLI) — after 7
+12. Issue 13 (niwa session list --json + daemon column) — after 3
+
+Documentation tail:
+
+13. Issue 8 (skill text + sessions guide) — last, after every
+    runtime/CLI issue lands so the docs describe truthful behavior
+
+### Time-budget contingency
+
+If implementation runs out of time before reaching Issue 8, the
+fallback priority is:
+
+1. Land Issues 1-7 (the original runtime spine) plus Issue 9
+   (which Issue 6 depends on). These close every issue from #92
+   to #114.
+2. Land Issues 10, 11 (cross-cutting CLI fixes) — production-grade
+   quality bar.
+3. Land Issue 8 (docs rewrite) — required for skill text to match
+   runtime.
+4. Land Issues 12, 13 (CLI surface for new MCP features) — if
+   time remains. These are user-visible polish; the CLI without
+   them works, just with the operator path being "launch Claude".
+5. Defer follow-on issues (~38 raw findings) per Decision D1.
