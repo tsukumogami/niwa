@@ -218,8 +218,22 @@ func (s *Server) handleCreateSession(args createSessionArgs) toolResult {
 		"worktree_path": worktreePath,
 	}
 	if err := s.daemonStarter(worktreePath, extraEnv); err != nil {
-		// Non-fatal: session state is written; coordinator can retry daemon start.
-		// Include a warning so the coordinator knows the daemon did not start.
+		// Spawn timeout is hard: the worker cannot delegate work to a session
+		// whose daemon never reached steady state. Roll back the worktree,
+		// the session-state file, and the branch (best-effort branch delete
+		// — git worktree remove --force already orphans it; the branch is a
+		// scaffolding artifact that should not survive a failed create).
+		// Other errors are non-fatal: the session state is written and the
+		// coordinator can retry daemon start.
+		if errors.Is(err, ErrDaemonSpawnTimeout) {
+			cleanupWorktree()
+			_ = os.Remove(filepath.Join(sessionsDir, sessionID+".json"))
+			_ = exec.Command("git", "-C", repoPath, "branch", "-D", branchName).Run()
+			fmt.Fprintf(os.Stderr, "niwa_create_session: daemon spawn timeout at %s; rolled back\n", worktreePath)
+			return errResultCode("DAEMON_SPAWN_TIMEOUT",
+				fmt.Sprintf("daemon for session %s did not become ready within timeout; check %s/.niwa/daemon.log for the spawn trace. The session was rolled back.",
+					sessionID, worktreePath))
+		}
 		fmt.Fprintf(os.Stderr, "niwa_create_session: daemon failed to start at %s: %v\n", worktreePath, err)
 		resp["daemon_warning"] = "daemon failed to start: " + err.Error()
 	}

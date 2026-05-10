@@ -339,6 +339,80 @@ func TestHandleCreateSession_Integration(t *testing.T) {
 	}
 }
 
+// TestHandleCreateSession_DaemonSpawnTimeoutRollsBack verifies the Issue 2
+// contract: when the daemonStarter returns mcp.ErrDaemonSpawnTimeout, the
+// handler must roll back the worktree, the session-state file, and the
+// branch, and return an errResult with code DAEMON_SPAWN_TIMEOUT — not a
+// soft daemon_warning. Mirrors the inotify-exhaustion failure mode in #110.
+func TestHandleCreateSession_DaemonSpawnTimeoutRollsBack(t *testing.T) {
+	if _, err := runCmd("git", "--version"); err != nil {
+		t.Skip("git not available")
+	}
+
+	root := t.TempDir()
+	repoPath := filepath.Join(root, "group", "myrepo")
+	if err := os.MkdirAll(repoPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, cmd := range [][]string{
+		{"git", "-C", repoPath, "init", "-b", "main"},
+		{"git", "-C", repoPath, "-c", "user.email=test@test.com", "-c", "user.name=Test", "commit", "--allow-empty", "-m", "init"},
+	} {
+		if _, err := runCmd(cmd[0], cmd[1:]...); err != nil {
+			t.Fatalf("git setup: %v", err)
+		}
+	}
+	if err := os.MkdirAll(filepath.Join(root, ".niwa", "roles", "myrepo"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	sessionsDir := filepath.Join(root, ".niwa", "sessions")
+	if err := os.MkdirAll(sessionsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	s := &Server{
+		instanceRoot: root,
+		role:         "coordinator",
+		daemonStarter: func(instanceRoot string, extraEnv []string) error {
+			return ErrDaemonSpawnTimeout
+		},
+	}
+
+	result := s.handleCreateSession(createSessionArgs{
+		Repo:    "myrepo",
+		Purpose: "spawn timeout rollback test",
+	})
+	if !result.IsError {
+		t.Fatalf("expected errResult on spawn timeout; got success: %v", result.Content)
+	}
+	if !strings.Contains(result.Content[0].Text, "DAEMON_SPAWN_TIMEOUT") {
+		t.Errorf("expected error to carry DAEMON_SPAWN_TIMEOUT code; got: %s", result.Content[0].Text)
+	}
+	if !strings.Contains(result.Content[0].Text, "rolled back") {
+		t.Errorf("expected error message to mention rollback; got: %s", result.Content[0].Text)
+	}
+
+	// Worktree must not exist on disk (rollback removed it).
+	entries, _ := os.ReadDir(filepath.Join(root, ".niwa", "worktrees"))
+	if len(entries) != 0 {
+		t.Errorf("worktree directory should be empty after rollback; got entries: %v", entries)
+	}
+
+	// No session state file should remain.
+	sessionEntries, _ := os.ReadDir(sessionsDir)
+	for _, e := range sessionEntries {
+		if strings.HasSuffix(e.Name(), ".json") {
+			t.Errorf("session state file %s should have been removed on rollback", e.Name())
+		}
+	}
+
+	// Branch must not survive (best-effort delete).
+	branchOutput, _ := runCmd("git", "-C", repoPath, "branch")
+	if strings.Contains(branchOutput, "session/") {
+		t.Errorf("session branch should be deleted after rollback; got:\n%s", branchOutput)
+	}
+}
+
 // TestHandleDestroySession_Integration creates a real session via handleCreateSession
 // then destroys it, verifying idempotency and state transitions.
 func TestHandleDestroySession_Integration(t *testing.T) {

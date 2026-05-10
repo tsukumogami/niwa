@@ -55,7 +55,7 @@ func runSessionCreate(cmd *cobra.Command, args []string) error {
 	purpose := args[1]
 
 	srv := mcp.New("coordinator", instanceRoot)
-	srv.SetDaemonFuncs(workspace.EnsureDaemonRunning, workspace.TerminateDaemon)
+	srv.SetDaemonFuncs(makeDaemonStarter(), workspace.TerminateDaemon)
 
 	result := srv.CreateSessionDirect(repo, purpose, "")
 	if result.IsError {
@@ -93,7 +93,7 @@ func runSessionDestroy(cmd *cobra.Command, args []string) error {
 	sessionID := args[0]
 
 	srv := mcp.New("coordinator", instanceRoot)
-	srv.SetDaemonFuncs(workspace.EnsureDaemonRunning, workspace.TerminateDaemon)
+	srv.SetDaemonFuncs(makeDaemonStarter(), workspace.TerminateDaemon)
 
 	result := srv.DestroySessionDirect(sessionID, sessionDestroyForce)
 	if result.IsError {

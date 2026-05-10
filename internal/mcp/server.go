@@ -20,6 +20,7 @@ package mcp
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -120,6 +121,17 @@ func (s *Server) taskStoreRoot() string {
 	}
 	return s.instanceRoot
 }
+
+// ErrDaemonSpawnTimeout signals that the per-session daemon starter
+// (workspace.EnsureDaemonRunning) timed out waiting for the daemon's PID
+// file to appear. The MCP layer treats this as a hard failure for
+// niwa_create_session: the worktree, branch, and session-state file are
+// rolled back so the caller never sees a session that lacks a watching
+// daemon. The CLI wiring (internal/cli/mcp_serve.go and
+// internal/cli/session_lifecycle_cmd.go) translates
+// workspace.ErrDaemonSpawnTimeout into this sentinel so the mcp package
+// doesn't need to import workspace (which already imports mcp).
+var ErrDaemonSpawnTimeout = errors.New("daemon did not become ready within timeout")
 
 // roleRoot returns the instance root that owns the given role's inbox and
 // sessions registry. The coordinator role always lives in the main instance:
