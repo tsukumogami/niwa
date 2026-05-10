@@ -338,7 +338,7 @@ func TestTaskList_BodySummaryTruncatesAndCollapsesLines(t *testing.T) {
 	}
 }
 
-func TestTaskShow_NonExistentIDFailsWithStderrMessage(t *testing.T) {
+func TestTaskShow_NonExistentIDReturnsError(t *testing.T) {
 	resetTaskListFlags()
 	root := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(root, ".niwa", "tasks"), 0o700); err != nil {
@@ -360,8 +360,14 @@ func TestTaskShow_NonExistentIDFailsWithStderrMessage(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected runTaskShow to return an error for non-existent ID")
 	}
-	if !strings.Contains(stderr.String(), "task not found: does-not-exist") {
-		t.Errorf("expected stderr to contain 'task not found: does-not-exist', got %q", stderr.String())
+	// Issue 10 cleanup: the handler no longer double-prints — the
+	// returned error becomes the single source of truth printed by
+	// Execute(). Stderr must NOT contain a duplicate copy of the message.
+	if strings.Contains(stderr.String(), "task not found:") {
+		t.Errorf("handler must not write to stderr; the returned error is the single source. got stderr: %q", stderr.String())
+	}
+	if !strings.Contains(err.Error(), "task not found: does-not-exist") {
+		t.Errorf("error should describe the missing task; got %q", err.Error())
 	}
 }
 

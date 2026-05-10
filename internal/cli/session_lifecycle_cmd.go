@@ -73,7 +73,10 @@ func runSessionCreate(cmd *cobra.Command, args []string) error {
 	if resp.DaemonWarn != "" {
 		fmt.Fprintln(cmd.ErrOrStderr(), "warning:", resp.DaemonWarn)
 	}
-	fmt.Fprintf(cmd.ErrOrStderr(), "session: created %s at %s\n", resp.SessionID, resp.WorktreePath)
+	// Issue 10: success summary on stdout so callers can pipe it.
+	// Landing-path delivery uses NIWA_RESPONSE_FILE separately; the
+	// shell wrapper's stdout-cd target is unaffected.
+	fmt.Fprintf(cmd.OutOrStdout(), "session: created %s at %s\n", resp.SessionID, resp.WorktreePath)
 
 	if err := validateLandingPath(resp.WorktreePath); err != nil {
 		return err
@@ -110,7 +113,8 @@ func runSessionDestroy(cmd *cobra.Command, args []string) error {
 		fmt.Fprintln(cmd.ErrOrStderr(), "warning:", resp.BranchWarn)
 	}
 
-	fmt.Fprintf(cmd.ErrOrStderr(), "session: destroyed %s\n", sessionID)
+	// Issue 10: destroy success on stdout, matching create.
+	fmt.Fprintf(cmd.OutOrStdout(), "session: destroyed %s\n", sessionID)
 	return nil
 }
 
