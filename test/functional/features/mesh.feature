@@ -272,7 +272,10 @@ Feature: Cross-session mesh (Issue #10 harness)
   # Single-repo channeled workspace: the simplest topology that engages
   # per-repo role enumeration without exercising multi-repo collision
   # logic. Asserts the instance-root .mcp.json is the sole MCP config
-  # written (the per-repo dir gets its niwa-mesh skill but no .mcp.json).
+  # written and that the niwa-mesh skill lives only at instance-root —
+  # never inside consumer repo working trees, which would leak into
+  # commits (issue #97). Workers reach the instance-root copy via the
+  # `--add-dir <workspaceRoot>` argv flags spawnWorker passes.
   @critical
   Scenario: single-repo channeled workspace provisions instance-root .mcp.json only
     Given a clean niwa environment
@@ -283,7 +286,8 @@ Feature: Cross-session mesh (Issue #10 harness)
     And the file ".mcp.json" exists in instance "single-repo-mcp"
     And the file "apps/app/.mcp.json" does not exist in instance "single-repo-mcp"
     And the file "apps/app/.claude/.mcp.json" does not exist in instance "single-repo-mcp"
-    And the file "apps/app/.claude/skills/niwa-mesh/SKILL.md" exists in instance "single-repo-mcp"
+    And the file ".claude/skills/niwa-mesh/SKILL.md" exists in instance "single-repo-mcp"
+    And the file "apps/app/.claude/skills/niwa-mesh/SKILL.md" does not exist in instance "single-repo-mcp"
     And the file ".niwa/roles/coordinator/inbox" exists in instance "single-repo-mcp"
     And the file ".niwa/roles/app/inbox" exists in instance "single-repo-mcp"
 
