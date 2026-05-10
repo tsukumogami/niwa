@@ -54,6 +54,21 @@ type delegateArgs struct {
 	ReadOnly bool `json:"read_only,omitempty"`
 }
 
+// redelegateArgs — niwa_redelegate input. The new task inherits the
+// source's body verbatim unless BodyOverrides is provided (shallow merge
+// at top level), and reuses the source's To/SessionID/ReadOnly unless
+// overridden. From and SentAt regenerate from the caller; RedelegatedFrom
+// chains to the source.
+type redelegateArgs struct {
+	SourceTaskID  string                     `json:"source_task_id"`
+	To            string                     `json:"to,omitempty"`
+	SessionID     string                     `json:"session_id,omitempty"`
+	ReadOnly      *bool                      `json:"read_only,omitempty"`
+	BodyOverrides map[string]json.RawMessage `json:"body_overrides,omitempty"`
+	Mode          string                     `json:"mode,omitempty"`
+	ExpiresAt     string                     `json:"expires_at,omitempty"`
+}
+
 type queryTaskArgs struct {
 	TaskID string `json:"task_id"`
 }
@@ -148,7 +163,7 @@ func (s *Server) handleDelegate(args delegateArgs) toolResult {
 		return errTR
 	}
 
-	taskID, errTR := s.createTaskEnvelope(args.To, args.Body, args.ExpiresAt, "", args.SessionID)
+	taskID, errTR := s.createTaskEnvelope(args.To, args.Body, args.ExpiresAt, "", args.SessionID, "")
 	if errTR.IsError {
 		return errTR
 	}
@@ -184,7 +199,10 @@ func (s *Server) handleDelegate(args delegateArgs) toolResult {
 // sessionID, when non-empty, causes the inbox write to target the session
 // worktree's inbox instead of the main instance inbox; the session_id is
 // stored in state.json so cancel/update can reconstruct the same path.
-func (s *Server) createTaskEnvelope(to string, body json.RawMessage, expiresAt, parentTaskID, sessionID string) (string, toolResult) {
+//
+// redelegatedFrom, when non-empty, stamps the new envelope with the source
+// task ID for the audit chain (Issue 7 / #114). Empty for fresh delegations.
+func (s *Server) createTaskEnvelope(to string, body json.RawMessage, expiresAt, parentTaskID, sessionID, redelegatedFrom string) (string, toolResult) {
 	// Resolve and validate the inbox directory in one read; session-targeted tasks
 	// require an active session, a safe worktree path, and the role to exist there.
 	inboxDir, inboxErrTR := s.resolveCreationInboxDir(sessionID, to)
@@ -204,14 +222,15 @@ func (s *Server) createTaskEnvelope(to string, body json.RawMessage, expiresAt, 
 		parent = s.taskID
 	}
 	env := TaskEnvelope{
-		V:            1,
-		ID:           taskID,
-		From:         TaskParty{Role: s.role, PID: os.Getpid()},
-		To:           TaskParty{Role: to},
-		Body:         body,
-		SentAt:       now,
-		ParentTaskID: parent,
-		ExpiresAt:    expiresAt,
+		V:               1,
+		ID:              taskID,
+		From:            TaskParty{Role: s.role, PID: os.Getpid()},
+		To:              TaskParty{Role: to},
+		Body:            body,
+		SentAt:          now,
+		ParentTaskID:    parent,
+		ExpiresAt:       expiresAt,
+		RedelegatedFrom: redelegatedFrom,
 	}
 	envBytes, err := json.MarshalIndent(env, "", "  ")
 	if err != nil {

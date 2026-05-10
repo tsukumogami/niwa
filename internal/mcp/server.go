@@ -303,6 +303,23 @@ func (s *Server) toolsList() toolsListResult {
 			},
 		},
 		{
+			Name:        "niwa_redelegate",
+			Description: "Re-fire a previously-delegated task body without rewriting it. Source state may be any of queued/running/completed/abandoned/cancelled; the source's state is unchanged. The new task carries `redelegated_from: <source_task_id>` for the audit chain. Response includes `source_state_at_fork` so callers can distinguish recovery flows (terminal source) from active forks (queued/running source).",
+			InputSchema: inputSchema{
+				Type: "object",
+				Properties: map[string]schemaProp{
+					"source_task_id": {Type: "string", Description: "Task ID to re-fire"},
+					"to":             {Type: "string", Description: "Override target role; defaults to source.to.role"},
+					"session_id":     {Type: "string", Description: "Override session (8 lowercase hex chars); defaults to source.session_id"},
+					"read_only":      {Type: "boolean", Description: "Override routing; defaults to source.read_only"},
+					"body_overrides": {Type: "object", Description: "Shallow-merge into source.body (top-level keys only)"},
+					"mode":           {Type: "string", Description: "\"async\" (default) or \"sync\""},
+					"expires_at":     {Type: "string", Description: "Optional RFC3339 expiry deadline; not propagated from source"},
+				},
+				Required: []string{"source_task_id"},
+			},
+		},
+		{
 			Name:        "niwa_query_task",
 			Description: "Return state + transitions + progress for a task. Non-blocking.",
 			InputSchema: inputSchema{
@@ -447,6 +464,12 @@ func (s *Server) callTool(p toolCallParams) toolResult {
 			return errResult("invalid arguments: " + err.Error())
 		}
 		return s.handleDelegate(args)
+	case "niwa_redelegate":
+		var args redelegateArgs
+		if err := json.Unmarshal(p.Arguments, &args); err != nil {
+			return errResult("invalid arguments: " + err.Error())
+		}
+		return s.handleRedelegate(args)
 	case "niwa_query_task":
 		var args queryTaskArgs
 		if err := json.Unmarshal(p.Arguments, &args); err != nil {

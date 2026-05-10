@@ -16,6 +16,7 @@ package mcp
 // matches .mcp.json). Callers join with commas.
 var ClaudeAllowedTools = []string{
 	"mcp__niwa__niwa_delegate",
+	"mcp__niwa__niwa_redelegate",
 	"mcp__niwa__niwa_query_task",
 	"mcp__niwa__niwa_await_task",
 	"mcp__niwa__niwa_report_progress",
