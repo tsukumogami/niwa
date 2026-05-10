@@ -24,11 +24,16 @@ type DaemonHealth struct {
 	StartedAt string `json:"started_at"`
 }
 
-// daemonHealthFor reads <worktreePath>/.niwa/daemon.pid and returns the
+// DaemonHealthFor reads <worktreePath>/.niwa/daemon.pid and returns the
 // computed DaemonHealth. A missing or empty PID file (the placeholder
 // scaffoldWorktreeNiwa creates before the daemon writes its real PID)
 // produces {Alive=false, PID=0, StartedAt=""}, matching what callers see
-// for sessions whose daemon never reached steady state.
+// for sessions whose daemon never reached steady state. Exported for
+// CLI consumers (e.g. `niwa session list`'s daemon column).
+func DaemonHealthFor(worktreePath string) DaemonHealth {
+	return daemonHealthFor(worktreePath)
+}
+
 func daemonHealthFor(worktreePath string) DaemonHealth {
 	pid, startTime, err := readDaemonPIDFile(filepath.Join(worktreePath, ".niwa"))
 	if err != nil || pid == 0 {

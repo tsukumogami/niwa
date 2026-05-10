@@ -43,17 +43,23 @@ created via niwa_create_session / niwa session create).`,
 }
 
 var (
-	sessionListRepo   string
-	sessionListStatus string
+	sessionListRepo    string
+	sessionListStatus  string
+	sessionListJSON    bool
+	sessionListVerbose bool
 )
 
 func init() {
 	sessionListCmd.Flags().StringVar(&sessionListRepo, "repo", "", "Filter by repo name")
 	sessionListCmd.Flags().StringVar(&sessionListStatus, "status", "", "Filter by status: active, ended, abandoned")
+	sessionListCmd.Flags().BoolVar(&sessionListJSON, "json", false, "Output JSON (one object per session, including the daemon sub-object) instead of a table")
+	sessionListCmd.Flags().BoolVar(&sessionListVerbose, "verbose", false, "Include PID and STARTED_AT columns in the table view")
 }
 
 func runSessionList(cmd *cobra.Command, args []string) error {
-	if sessionListRepo == "" && sessionListStatus == "" {
+	// --json or --verbose imply lifecycle view (the new richer surface),
+	// so don't fall through to the deprecated mesh-list alias.
+	if sessionListRepo == "" && sessionListStatus == "" && !sessionListJSON && !sessionListVerbose {
 		fmt.Fprintln(cmd.ErrOrStderr(), "warning: 'niwa session list' without flags is deprecated; use 'niwa mesh list' to list coordinator sessions")
 		return runMeshList(cmd, args)
 	}
