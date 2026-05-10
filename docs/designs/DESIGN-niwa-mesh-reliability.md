@@ -962,6 +962,17 @@ Each session entry gains a `daemon` sub-object:
 `status` keeps its lifecycle-marker meaning. `daemon.alive` is
 the runtime health probe.
 
+The field set is intentionally minimal — it answers "is this
+session usable?" without requiring new daemon-side instrumentation.
+Issue #111 also requested `last_claim_at`, `last_progress_at`, and
+`watcher_count` for fleet-level observability of mesh activity and
+resource utilization. Those fields require either a new daemon-side
+heartbeat write path or fragile log parsing, and the "no new
+daemon heartbeat" decision was settled during exploration. The
+deferred scope is captured in #116 (`needs-prd`) so future
+development starts from a requirements definition rather than
+extending this design.
+
 **`task.ask` / `task.delegate` vocabulary, documented:**
 
 The skill's Message Vocabulary section is rewritten to list:
