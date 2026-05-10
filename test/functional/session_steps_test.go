@@ -785,3 +785,36 @@ func runGitInDir(dir string, args ...string) (string, error) {
 	out, err := cmd.CombinedOutput()
 	return string(out), err
 }
+
+// iRunSessionDetachForLastSessionInInstance runs `niwa session detach <id>`
+// against the most recently created session, executed from the given
+// instance root. Used by the @critical session_attach feature scenarios
+// (Issue #117) to verify the detach binary is wired in and behaves as a
+// no-op when no attach.state sentinel exists.
+func iRunSessionDetachForLastSessionInInstance(ctx context.Context, instance string) (context.Context, error) {
+	s := getState(ctx)
+	if s == nil {
+		return ctx, fmt.Errorf("no test state")
+	}
+	if s.lastSessionID == "" {
+		return ctx, fmt.Errorf("no session_id stored; call niwa_create_session first")
+	}
+	cwd := filepath.Join(s.workspaceRoot, instance)
+	cmd := fmt.Sprintf("niwa session detach %s", s.lastSessionID)
+	return ctx, runNiwa(s, cwd, cmd)
+}
+
+// iRunFromChanneledInstance runs a niwa command with cwd =
+// <workspaceRoot>/<instance>. The single-repo channeled workspace fixture
+// places the instance directly under workspaceRoot (no extra workspace-
+// name folder), unlike the registered-workspace fixture used by
+// iRunFromInstance. The session_attach.feature scenarios need this layout
+// so the niwa binary resolves the instance root via its walk-up logic.
+func iRunFromChanneledInstance(ctx context.Context, command, instance string) (context.Context, error) {
+	s := getState(ctx)
+	if s == nil {
+		return ctx, fmt.Errorf("no test state")
+	}
+	cwd := filepath.Join(s.workspaceRoot, instance)
+	return ctx, runNiwa(s, cwd, command)
+}

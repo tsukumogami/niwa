@@ -164,19 +164,38 @@ niwa session destroy ab12cd34
 niwa session destroy ab12cd34 --force
 ```
 
-### `niwa session list [--repo <name>] [--status active|ended|abandoned]`
+### `niwa session list [--repo <name>] [--status …] [--attached|--available]`
 
-Lists lifecycle sessions with optional filters. Without flags, this command
-falls back to `niwa mesh list` (a deprecated alias) and prints a warning; use
-`niwa mesh list` directly for that view.
+Lists per-session lifecycle states with their attach availability.
 
 ```bash
+niwa session list
 niwa session list --status active
 niwa session list --repo niwa
-niwa session list --repo niwa --status active
+niwa session list --attached
+niwa session list --available
 ```
 
-Output columns: ID, REPO, STATUS, CREATED, PURPOSE.
+Output columns: SESSION_ID, REPO, STATUS, AVAILABILITY, CREATED, PURPOSE.
+
+The AVAILABILITY column has three values:
+
+| Value | Meaning |
+|-------|---------|
+| `available` | No attach lock held. Free for `niwa session attach`. |
+| `attached`  | A `niwa session attach` process holds the lock. The mesh queue is paused for this session. |
+| `stale`     | A sentinel exists but the holder PID is dead. The lock is no longer effective; the next read reaps the sentinel. |
+
+Sort order: attached sessions first (descending by attach start time),
+then by status (active before terminal), then by creation time descending.
+This surfaces "is anyone in there?" at the top of the table.
+
+Filters AND-combine. `--attached` and `--available` are mutually
+exclusive. Sessions with `AVAILABILITY=stale` appear under neither filter
+— run without filters to see them.
+
+For the coordinator process registry view (alive/dead daemons, pending
+inbox counts), use `niwa mesh list` directly.
 
 ### `niwa mesh list`
 
@@ -203,6 +222,304 @@ niwa go niwa ab12cd34
 The repo argument must match the session's repo. niwa rejects the navigation if
 it doesn't, so a typo in the session ID doesn't silently land you in the wrong
 directory.
+
+## Human-in-the-Loop: Attaching to a Session
+
+`niwa session attach <session-id>` lets an operator step into a mesh
+session, resume Claude Code with the worker's full transcript history,
+work interactively, and detach cleanly with the session returning to
+normal mesh operation. This is the missing primitive for recovering
+from edge cases where a worker has drifted off-task: instead of
+destroying the session and losing all accumulated context, you take
+the conversation over and redirect.
+
+The attach command:
+
+1. Validates the session is `active` and a transcript is loadable.
+2. Acquires an exclusive flock on `<worktree>/.niwa/attach.lock`.
+3. Terminates the per-worktree daemon so the mesh stops claiming
+   envelopes for this session.
+4. Writes a sentinel at `<worktree>/.niwa/attach.state` so the lock
+   state is visible to `niwa session list` and `niwa_list_sessions`.
+5. Spawns `claude --resume <conv_id>` with stdio inherited from your
+   terminal and its working directory set to the worker's CWD.
+6. On Claude Code exit, removes the sentinel, respawns the daemon,
+   prints any worktree-state warnings, and propagates Claude's exit
+   code (capped at 125).
+
+### Attach
+
+```bash
+niwa session list                        # find the session you want to enter
+niwa session attach <session-id>         # acquire lock, launch claude --resume
+# [interactive Claude Code TUI; type /exit when done]
+```
+
+While you are attached:
+
+- The per-worktree daemon is not running. Coordinator delegations to
+  this session via `niwa_delegate` queue silently in the inbox.
+- The mesh queue is invisible from inside the attached Claude Code
+  session — that's intentional, to prevent dual-control surprises.
+- Other operators see `AVAILABILITY=attached` with your PID in
+  `niwa session list`.
+
+Pass `--force` to SIGTERM a running worker before acquiring the lock
+(default behaviour without `--force` is to wait for the worker to
+finish naturally, polling every 1s and printing a status line every
+5s). On the host this means: `niwa session attach <id> --force`.
+
+### Detach
+
+Normal release happens automatically when Claude Code exits — there's
+no command to run. The explicit `niwa session detach` exists only as
+an operator escape hatch for stale locks (SSH disconnect, terminal
+crash, host reboot).
+
+```bash
+niwa session detach <session-id>            # auto-recover dead-holder lock
+niwa session detach <session-id> --force    # break a live attach lock
+```
+
+`niwa session detach <id>` (no flag) succeeds silently when the
+holder PID is dead and exits with code 3 if the holder is alive (with
+a message pointing at `--force`).
+
+`niwa session detach <id> --force` SIGTERMs the holder, waits
+`NIWA_DESTROY_GRACE_SECONDS` (default 5 seconds), SIGKILLs if needed,
+and exits with code 4 to signal that a live holder was killed (so
+scripts can distinguish "reaped a stale lock" from "killed an active
+session"). A warning line is printed to stderr.
+
+### Discovering an Attached Session
+
+`niwa session list` shows the AVAILABILITY column for every session.
+The attached row is sorted to the top:
+
+```text
+$ niwa session list --status active
+  SESSION_ID   REPO         STATUS     AVAILABILITY CREATED              PURPOSE
+  ef56gh78     niwa         active     attached     30s ago              pair-debug edge case
+  0c446995     niwa         active     available    2m ago               long-running learning log
+```
+
+To filter to only attached sessions, pass `--attached`. To filter to
+only sessions free for attach, pass `--available`. They are mutually
+exclusive.
+
+For programmatic inspection, `niwa_list_sessions` (MCP) returns the
+same data with an `attach` sub-object on each row:
+
+```json
+{
+  "session_id": "ef56gh78",
+  "status": "active",
+  "attach": {
+    "v": 1,
+    "owner_pid": 12345,
+    "owner_start_time": 9876543210,
+    "started_at": "2026-05-10T14:32:11Z",
+    "lock_path": ".niwa/attach.lock"
+  },
+  ...
+}
+```
+
+The `attach` key is **absent** (not `null`) when no lock is held.
+
+### Force Detach
+
+Use `niwa session detach <id> --force` when:
+
+- Your SSH session disconnected mid-attach and the niwa-attach
+  process is still alive but unreachable.
+- A teammate's terminal crashed and you need the session unlocked so
+  the mesh can resume.
+- You see `AVAILABILITY=attached` for a process that was clearly not
+  cleanly exited (e.g. `pid=` in the listing matches no live process
+  on your machine).
+
+The command warns loudly to stderr before sending SIGTERM so it's
+clear the operation is destructive. If `niwa session list` shows
+`AVAILABILITY=stale`, `--force` is not needed — `niwa session detach <id>`
+without flags reaps the dead-holder sentinel automatically.
+
+### Destroy Interaction
+
+`niwa session destroy <id>` against an attached session refuses
+unless you pass `--force`. The MCP error code is `SESSION_ATTACHED`;
+the message references the recovery command:
+
+```text
+$ niwa session destroy ef56gh78
+niwa: error: session ef56gh78 is currently attached (pid=12345, started=...).
+Run `niwa session detach ef56gh78 --force` to release the attach lock first,
+or pass force=true to destroy regardless
+```
+
+### Failure Modes
+
+When `niwa session attach <id>` cannot launch Claude Code, it emits
+one of three niwa-shaped error messages so you know exactly what to
+fix. (Three case strings reproduced verbatim from PRD R4.)
+
+**Case A — no captured conversation id:**
+
+```text
+niwa: error: session <id> has no captured claude conversation id
+(the worker may have crashed before MCP server startup; inspect with
+`niwa session show <id>` or remove with `niwa session destroy <id>`).
+```
+
+This means the session was created but the first worker crashed
+before the MCP server could capture `$CLAUDE_SESSION_ID`. There's no
+transcript to resume; create a fresh session.
+
+**Case B — transcript file missing:**
+
+```text
+niwa: error: claude transcript missing for session <id>
+(expected: ~/.claude/projects/<encoded>/<conv_id>.jsonl). Claude may
+have purged the transcript or the worktree was moved. Start a fresh
+session with `niwa session create` or remove with `niwa session
+destroy <id>`.
+```
+
+This means niwa captured the conversation id but Claude Code's
+transcript file is gone. Most often: a `claude project purge` ran, or
+the worktree was relocated. Create a fresh session.
+
+**Case C — transcript file empty:**
+
+```text
+niwa: error: claude transcript is empty for session <id>
+(path: ~/.claude/projects/<encoded>/<conv_id>.jsonl). The transcript
+was started but no records were written. Start a fresh session with
+`niwa session create`.
+```
+
+A zero-byte transcript means Claude Code opened the file but never
+wrote a record (e.g. crashed during initialisation). Create a fresh
+session.
+
+### Scenario Walkthroughs
+
+These scenarios show the exact terminal output for the seven cases
+the PRD's acceptance criteria cover. They are the operator's
+reference for what `niwa session attach` and `niwa session detach`
+look like in practice.
+
+#### 1. Happy path: stuck worker → attach → redirect → exit
+
+```text
+$ niwa session list
+  SESSION_ID   REPO         STATUS     AVAILABILITY CREATED              PURPOSE
+  ef56gh78     niwa         active     available    14m ago              implement attach feature
+
+$ niwa session attach ef56gh78
+session: attached ef56gh78 at /home/op/work/niwa-1/.niwa/worktrees/niwa-ef56gh78
+[claude --resume <conv_id> takes over the terminal]
+[user types instructions, claude responds, user types /exit]
+session: detached ef56gh78
+$ echo $?
+0
+```
+
+#### 2. Pair-debug: attach to running session, wait for worker
+
+```text
+$ niwa session attach ef56gh78
+niwa: waiting for worker on task <task_id>...
+niwa: waiting for worker on task <task_id>...
+session: attached ef56gh78 at /home/op/work/niwa-1/.niwa/worktrees/niwa-ef56gh78
+[claude takes over]
+```
+
+A status line prints every 5 seconds while the worker is alive.
+
+#### 3. Force-on-running-worker
+
+```text
+$ niwa session attach ef56gh78 --force
+warning: --force: terminating worker on task <task_id> pid=12345
+session: attached ef56gh78 at /home/op/work/niwa-1/.niwa/worktrees/niwa-ef56gh78
+[claude takes over]
+```
+
+#### 4. Hand-fix-and-hand-back: uncommitted edits on detach
+
+```text
+[inside claude, you edit a file but don't commit, then /exit]
+warning: worktree has uncommitted changes
+   M README.md
+session: detached ef56gh78
+$ echo $?
+0
+```
+
+The next mesh worker spawned in this session inherits the dirty
+tree. Detach does not stash, prompt, or abort.
+
+#### 5. Terminal crash recovery
+
+```text
+[your SSH session disconnects mid-attach]
+[from another terminal:]
+$ niwa session list --status active
+  SESSION_ID   REPO         STATUS     AVAILABILITY CREATED              PURPOSE
+  ef56gh78     niwa         active     stale        25m ago              implement attach feature
+
+$ niwa session detach ef56gh78
+$ niwa session list --status active
+  SESSION_ID   REPO         STATUS     AVAILABILITY CREATED              PURPOSE
+  ef56gh78     niwa         active     available    25m ago              implement attach feature
+```
+
+(Stale-lock listing reaps the sentinel as a side-effect; the explicit
+detach also works and is what to use when the listing reports `stale`
+and you want to be sure.)
+
+#### 6. Force-detach a live holder
+
+```text
+$ niwa session detach ef56gh78
+niwa: error: session ef56gh78 is currently attached (pid=12345, started=2026-05-10T14:32:11Z).
+Run `niwa session detach ef56gh78 --force` to break the lock.
+$ echo $?
+3
+
+$ niwa session detach ef56gh78 --force
+warning: detaching live attach holder pid=12345 started=2026-05-10T14:32:11Z
+$ echo $?
+4
+```
+
+Exit code 4 specifically signals "killed live holder" so scripts can
+distinguish it from the silent stale-lock cleanup case (exit 0).
+
+#### 7. Pre-attach validation: ended session
+
+```text
+$ niwa session attach ef56gh78
+niwa: error: session ef56gh78 has status ended; attach requires status active.
+(For ended sessions, the worktree was removed on destroy; create a new session instead.)
+$ echo $?
+1
+```
+
+`abandoned` sessions get a similar message (no writer for that state
+exists today; the AC is a regression guard).
+
+### Exit Codes
+
+| Code | Meaning |
+|------|---------|
+| 0    | Clean exit (Claude Code returned 0 with no warnings). |
+| 1    | Pre-flight validation failure (status not active, transcript missing/empty, no conv_id). |
+| 2    | Usage error (e.g. `niwa session detach` with no session id). |
+| 3    | Lock contention (attach lock held by a live process). |
+| 4    | `niwa session detach --force` killed a live holder. |
+| 1-125 | Propagated from Claude Code (codes ≥ 126 are clamped to 125 to avoid shell-reserved codes). |
 
 ## MCP tools (coordinator use)
 
