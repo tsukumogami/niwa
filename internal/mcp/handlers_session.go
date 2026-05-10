@@ -13,9 +13,14 @@ import (
 )
 
 // listSessionsArgs holds optional filter parameters for niwa_list_sessions.
+//
+// `attached` and `available` are mutually exclusive. When neither is set,
+// rows of any availability are returned (subject to repo/status filters).
 type listSessionsArgs struct {
-	Repo   string `json:"repo,omitempty"`
-	Status string `json:"status,omitempty"`
+	Repo      string `json:"repo,omitempty"`
+	Status    string `json:"status,omitempty"`
+	Attached  bool   `json:"attached,omitempty"`
+	Available bool   `json:"available,omitempty"`
 }
 
 // sessionListEntry is the wire shape returned by niwa_list_sessions: it
@@ -35,11 +40,20 @@ type sessionListEntry struct {
 
 // handleListSessions implements niwa_list_sessions.
 //
-// It reads all per-session lifecycle state files, applies optional repo and
-// status filters, and returns a JSON array of sessionListEntry objects (each
-// embedding SessionLifecycleState plus a computed daemon sub-object). An
-// empty array (not null) is returned when no sessions match.
+// It reads all per-session lifecycle state files, applies optional repo,
+// status, attached, and available filters, projects each row's attach
+// sentinel into the embedded SessionLifecycleState.Attach pointer field,
+// and returns a JSON array of sessionListEntry objects (each embedding
+// SessionLifecycleState plus a computed daemon sub-object).
+//
+// An empty array (not null) is returned when no sessions match. The attach
+// sub-object is omitted from the JSON (not null) when no live lock is held
+// -- the omitempty tag on SessionLifecycleState.Attach plus a nil pointer
+// produces an absent key (PRD R12 absent-vs-null contract).
 func (s *Server) handleListSessions(args listSessionsArgs) toolResult {
+	if args.Attached && args.Available {
+		return errResult("attached and available are mutually exclusive")
+	}
 	sessionsDir := filepath.Join(s.instanceRoot, ".niwa", "sessions")
 	all, err := ListSessionLifecycleStates(sessionsDir)
 	if err != nil {
@@ -52,6 +66,18 @@ func (s *Server) handleListSessions(args listSessionsArgs) toolResult {
 		}
 		if args.Status != "" && st.Status != args.Status {
 			continue
+		}
+		// Project the attach sentinel; reapStale=true so reading the list
+		// also opportunistically cleans dead-holder sentinels.
+		attachState, attachAvail, _ := ReadAttachState(st.WorktreePath, true)
+		if args.Attached && attachAvail != AttachAttached {
+			continue
+		}
+		if args.Available && attachAvail != AttachAvailable {
+			continue
+		}
+		if attachAvail == AttachAttached {
+			st.Attach = attachState
 		}
 		filtered = append(filtered, sessionListEntry{
 			SessionLifecycleState: st,
@@ -286,6 +312,19 @@ func (s *Server) handleDestroySession(args destroySessionArgs) toolResult {
 	}
 
 	worktreePath := state.WorktreePath
+
+	// Reject when an attach lock is held by a live process and force is not
+	// set. The structured error code SESSION_ATTACHED is what coordinators
+	// pattern-match on; the message text references the recovery command and
+	// the holder PID per PRD R13.
+	if attachState, attachAvail, _ := ReadAttachState(worktreePath, false); attachAvail == AttachAttached && !args.Force {
+		return errResultCode("SESSION_ATTACHED", fmt.Sprintf(
+			"session %s is currently attached (pid=%d, started=%s); "+
+				"run `niwa session detach %s --force` to release the attach lock first, "+
+				"or pass force=true to destroy regardless",
+			state.SessionID, attachState.OwnerPID, attachState.StartedAt, state.SessionID,
+		))
+	}
 
 	// Force-kill workers whose tasks are still running.
 	killSessionWorkers(s.instanceRoot, worktreePath, args.SessionID)
