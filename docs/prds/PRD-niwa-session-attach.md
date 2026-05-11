@@ -1,5 +1,5 @@
 ---
-status: In Progress
+status: Done
 source_issue: 117
 problem: |
   When a worker agent in a niwa mesh session hits an interesting edge case —
@@ -26,7 +26,7 @@ goals: |
 
 ## Status
 
-In Progress
+Done
 
 ## Glossary
 

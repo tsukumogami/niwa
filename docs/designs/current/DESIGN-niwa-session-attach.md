@@ -1,5 +1,5 @@
 ---
-status: Planned
+status: Current
 upstream: docs/prds/PRD-niwa-session-attach.md
 problem: |
   Niwa's mesh has a single recovery primitive when a worker drifts off-task:
