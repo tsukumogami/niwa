@@ -8,7 +8,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/tsukumogami/niwa/internal/mcp"
 )
@@ -151,9 +150,10 @@ func TestAttachRunLockHeldByLiveProcess(t *testing.T) {
 	st, _ := mcp.ReadSessionLifecycleState(sessionsDir, sid)
 	myPID := os.Getpid()
 	myStart, _ := mcp.PIDStartTime(myPID)
+	rfc3339 := "2026-05-10T14:32:11Z" // pinned so the substring assertion is exact
 	if err := mcp.WriteAttachState(st.WorktreePath, mcp.AttachState{
 		V: 1, OwnerPID: myPID, OwnerStartTime: myStart,
-		StartedAt: time.Now().UTC().Format(time.RFC3339),
+		StartedAt: rfc3339,
 		LockPath:  ".niwa/attach.lock",
 	}); err != nil {
 		t.Fatalf("seed sentinel: %v", err)
@@ -174,11 +174,20 @@ func TestAttachRunLockHeldByLiveProcess(t *testing.T) {
 	if !errors.As(err, &ece) || ece.Code != 3 {
 		t.Fatalf("want ExitCodeError code 3, got %v", err)
 	}
-	if !strings.Contains(ece.Msg, "is already attached") {
-		t.Errorf("missing 'already attached': %q", ece.Msg)
+	// PRD AC10 requires the error message to contain the three substrings:
+	// the holder PID, the start timestamp in RFC3339, and the recovery
+	// command verbatim. Asserting all three here so a regression that drops
+	// any of them fails CI.
+	wantSubstrs := []string{
+		"is already attached",
+		"pid=" + itoa(myPID),
+		"started=" + rfc3339,
+		"`niwa session detach " + sid + " --force`",
 	}
-	if !strings.Contains(ece.Msg, "pid="+itoa(myPID)) {
-		t.Errorf("missing pid: %q", ece.Msg)
+	for _, s := range wantSubstrs {
+		if !strings.Contains(ece.Msg, s) {
+			t.Errorf("missing %q in lock-held error: %q", s, ece.Msg)
+		}
 	}
 }
 

@@ -155,12 +155,19 @@ func runSessionLifecycleList(cmd *cobra.Command, repo, status string, onlyAttach
 		if status != "" && st.Status != status {
 			continue
 		}
-		_, avail, _ := mcp.ReadAttachState(st.WorktreePath, true /* reap dead-holder sentinels */)
+		attachState, avail, _ := mcp.ReadAttachState(st.WorktreePath, true /* reap dead-holder sentinels */)
 		if onlyAttached && avail != mcp.AttachAttached {
 			continue
 		}
 		if onlyAvailable && avail != mcp.AttachAvailable {
 			continue
+		}
+		// Project the live attach state onto the embedded
+		// SessionLifecycleState so the CLI JSON wire shape matches what
+		// niwa_list_sessions emits: same struct, same `attach` key
+		// shape, absent when no live lock is held.
+		if avail == mcp.AttachAttached && attachState != nil {
+			st.Attach = attachState
 		}
 		rows = append(rows, lifecycleRow{
 			state:  st,
@@ -173,14 +180,18 @@ func runSessionLifecycleList(cmd *cobra.Command, repo, status string, onlyAttach
 	})
 
 	if sessionListJSON {
-		// JSON mode: emit a fresh array (not null) when empty.
+		// JSON mode: emit a fresh array (not null) when empty. The wire
+		// shape matches niwa_list_sessions for the `attach` key (full
+		// AttachState struct from the embedded SessionLifecycleState,
+		// absent when no live lock). The `daemon` and `availability`
+		// keys are CLI-specific projections.
 		out := cmd.OutOrStdout()
 		jsonRows := make([]sessionListJSONRow, 0, len(rows))
 		for _, r := range rows {
 			jsonRows = append(jsonRows, sessionListJSONRow{
 				SessionLifecycleState: r.state,
 				Daemon:                r.daemon,
-				Attach:                attachJSON{Availability: availabilityForTable(r.avail)},
+				Availability:          availabilityForTable(r.avail),
 			})
 		}
 		if len(jsonRows) == 0 {
@@ -265,17 +276,18 @@ type lifecycleRow struct {
 }
 
 // sessionListJSONRow is the wire shape returned by
-// `niwa session list --json`. It embeds the persisted lifecycle state and
-// the two computed sub-objects (daemon, attach) so callers consuming JSON
-// see exactly the same projections the table view renders.
+// `niwa session list --json`. The `attach` key (via the embedded
+// SessionLifecycleState.Attach pointer field) matches what
+// niwa_list_sessions emits exactly: the full AttachState struct when a
+// live lock is held, absent otherwise. The `daemon` sub-object comes
+// from PR #115 (also computed, not persisted). The `availability` key
+// is a CLI-side projection that lets callers distinguish `stale`
+// (sentinel present but reaped) from `available` (no sentinel) without
+// having to walk PIDs themselves.
 type sessionListJSONRow struct {
 	mcp.SessionLifecycleState
-	Daemon mcp.DaemonHealth `json:"daemon"`
-	Attach attachJSON       `json:"attach"`
-}
-
-type attachJSON struct {
-	Availability string `json:"availability"`
+	Daemon       mcp.DaemonHealth `json:"daemon"`
+	Availability string           `json:"availability"`
 }
 
 func writeSessionLifecycleTable(out interface{ Write([]byte) (int, error) }, rows []lifecycleRow, verbose bool) {

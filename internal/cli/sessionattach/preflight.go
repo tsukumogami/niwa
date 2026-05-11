@@ -74,8 +74,8 @@ func (e *PreflightError) Error() string {
 		return fmt.Sprintf(
 			"niwa: error: session %s has no captured claude conversation id "+
 				"(the worker may have crashed before MCP server startup; inspect with "+
-				"`niwa session show %s` or remove with `niwa session destroy %s`).",
-			e.SessionID, e.SessionID, e.SessionID,
+				"`niwa session list --status active` or remove with `niwa session destroy %s`).",
+			e.SessionID, e.SessionID,
 		)
 	case CaseB:
 		return fmt.Sprintf(

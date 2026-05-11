@@ -475,7 +475,7 @@ each exiting code 1:
   in the lifecycle state file is empty.
   Error: `niwa: error: session <id> has no captured claude
   conversation id (the worker may have crashed before MCP server
-  startup; inspect with \`niwa session show <id>\` or remove with
+  startup; inspect with \`niwa session list --status active\` or remove with
   \`niwa session destroy <id>\`).`
 
 - **Case B (transcript file missing):** the deterministic transcript

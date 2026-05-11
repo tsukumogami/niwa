@@ -368,7 +368,7 @@ fix. (Three case strings reproduced verbatim from PRD R4.)
 ```text
 niwa: error: session <id> has no captured claude conversation id
 (the worker may have crashed before MCP server startup; inspect with
-`niwa session show <id>` or remove with `niwa session destroy <id>`).
+`niwa session list --status active` or remove with `niwa session destroy <id>`).
 ```
 
 This means the session was created but the first worker crashed

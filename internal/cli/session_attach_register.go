@@ -41,9 +41,13 @@ session. Use 'niwa session detach <id> --force' to break a stale lock.
 
 Exit codes: 0 (clean exit), 1 (validation), 2 (usage), 3 (lock held),
 or the propagated claude exit code (capped at 125).`,
-	Args:          cobra.ExactArgs(1),
+	// We don't use cobra.ExactArgs because its default error exits 1 with a
+	// generic message. RunE validates arg count itself and returns an
+	// *sessionattach.ExitCodeError with Code=2 plus the PRD-mandated usage
+	// string when no session_id is supplied.
+	Args:          cobra.MaximumNArgs(1),
 	RunE:          runSessionAttach,
-	SilenceErrors: true, // we print niwa-shaped error messages ourselves
+	SilenceErrors: true,
 	SilenceUsage:  true,
 }
 
@@ -62,13 +66,22 @@ fails with exit 3 if the holder is alive.
 With --force: SIGTERMs the holder, waits NIWA_DESTROY_GRACE_SECONDS
 (default 5s), SIGKILLs if needed, then releases the lock. Exits with
 code 4 to signal that a live holder was killed.`,
-	Args:          cobra.ExactArgs(1),
+	// Same reasoning as sessionAttachCmd: RunE handles missing-arg with the
+	// PRD R10 usage string and exit code 2.
+	Args:          cobra.MaximumNArgs(1),
 	RunE:          runSessionDetach,
 	SilenceErrors: true,
 	SilenceUsage:  true,
 }
 
 func runSessionAttach(cmd *cobra.Command, args []string) error {
+	if len(args) == 0 {
+		return &sessionattach.ExitCodeError{
+			Code: 2,
+			Msg: "niwa: usage: niwa session attach <session_id> [--force]. " +
+				"Run `niwa session list --status active` to discover available sessions.",
+		}
+	}
 	instanceRoot, err := resolveInstanceRoot()
 	if err != nil {
 		return err
@@ -84,6 +97,14 @@ func runSessionAttach(cmd *cobra.Command, args []string) error {
 }
 
 func runSessionDetach(cmd *cobra.Command, args []string) error {
+	if len(args) == 0 {
+		return &sessionattach.ExitCodeError{
+			Code: 2,
+			Msg: "niwa: usage: niwa session detach <session_id> [--force]. " +
+				"Normal attach release happens automatically when claude code exits; " +
+				"this command exists to break stale locks.",
+		}
+	}
 	instanceRoot, err := resolveInstanceRoot()
 	if err != nil {
 		return err

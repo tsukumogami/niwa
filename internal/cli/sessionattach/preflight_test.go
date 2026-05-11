@@ -55,7 +55,7 @@ func TestPreflightCaseAEmptyConvID(t *testing.T) {
 	msg := pe.Error()
 	wantSubstrs := []string{
 		"niwa: error: session abcd1234 has no captured claude conversation id",
-		"`niwa session show abcd1234`",
+		"`niwa session list --status active`",
 		"`niwa session destroy abcd1234`",
 	}
 	for _, s := range wantSubstrs {

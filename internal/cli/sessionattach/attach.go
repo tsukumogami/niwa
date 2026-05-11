@@ -153,6 +153,23 @@ func AttachRun(ctx context.Context, opts Options) error {
 		fmt.Fprintf(stderr, "warning: terminating per-worktree daemon: %v\n", err)
 	}
 
+	// Cleanup defer registered AFTER the daemon is torn down and BEFORE
+	// WriteAttachState so any error between here and the supervise call
+	// still respawns the daemon. Without this ordering, a sentinel-write
+	// failure would leave the daemon dead until the next niwa apply.
+	ensureFn := opts.EnsureDaemonRunningFn
+	if ensureFn == nil {
+		ensureFn = workspace.EnsureDaemonRunning
+	}
+	defer func() {
+		_ = mcp.RemoveAttachState(state.WorktreePath)
+		if err := ensureFn(state.WorktreePath, nil); err != nil {
+			fmt.Fprintf(stderr, "warning: respawning per-worktree daemon: %v\n", err)
+		}
+		Warnings(state.WorktreePath, opts.SessionID, stderr)
+		fmt.Fprintf(stderr, "session: detached %s\n", opts.SessionID)
+	}()
+
 	// Step 6: write attach sentinel.
 	myPID := os.Getpid()
 	myStart, _ := mcp.PIDStartTime(myPID)
@@ -166,21 +183,6 @@ func AttachRun(ctx context.Context, opts Options) error {
 	}); err != nil {
 		return &ExitCodeError{Code: 1, Msg: fmt.Sprintf("niwa: error: writing attach state: %v", err)}
 	}
-
-	ensureFn := opts.EnsureDaemonRunningFn
-	if ensureFn == nil {
-		ensureFn = workspace.EnsureDaemonRunning
-	}
-	// Cleanup defer: runs on every exit path from this point. Removes
-	// sentinel, respawns daemon, emits worktree warnings.
-	defer func() {
-		_ = mcp.RemoveAttachState(state.WorktreePath)
-		if err := ensureFn(state.WorktreePath, nil); err != nil {
-			fmt.Fprintf(stderr, "warning: respawning per-worktree daemon: %v\n", err)
-		}
-		Warnings(state.WorktreePath, opts.SessionID, stderr)
-		fmt.Fprintf(stderr, "session: detached %s\n", opts.SessionID)
-	}()
 
 	fmt.Fprintf(stderr, "session: attached %s at %s\n", opts.SessionID, state.WorktreePath)
 
