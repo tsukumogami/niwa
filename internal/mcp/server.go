@@ -456,13 +456,18 @@ func (s *Server) toolsList() toolsListResult {
 			},
 		},
 		{
-			Name:        "niwa_list_sessions",
-			Description: "List per-session lifecycle states. Optionally filter by repo and/or status (active, ended, abandoned).",
+			Name: "niwa_list_sessions",
+			Description: "List per-session lifecycle states. Each row may include an `attach` sub-object " +
+				"projected from <worktree>/.niwa/attach.state when a niwa session attach lock is held. " +
+				"Optional filters: repo, status (active/ended/abandoned), attached (only locked sessions), " +
+				"available (only sessions with no live lock). attached and available are mutually exclusive.",
 			InputSchema: inputSchema{
 				Type: "object",
 				Properties: map[string]schemaProp{
-					"repo":   {Type: "string", Description: "Filter by repo name"},
-					"status": {Type: "string", Description: "Filter by status: active, ended, or abandoned"},
+					"repo":      {Type: "string", Description: "Filter by repo name"},
+					"status":    {Type: "string", Description: "Filter by status: active, ended, or abandoned"},
+					"attached":  {Type: "boolean", Description: "Show only sessions currently held by an attach lock"},
+					"available": {Type: "boolean", Description: "Show only sessions with no attach lock held"},
 				},
 			},
 		},

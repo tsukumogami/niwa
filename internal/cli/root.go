@@ -1,11 +1,13 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"os"
 
 	"github.com/spf13/cobra"
 	"github.com/tsukumogami/niwa/internal/buildinfo"
+	"github.com/tsukumogami/niwa/internal/cli/sessionattach"
 )
 
 var (
@@ -60,8 +62,22 @@ func init() {
 }
 
 // Execute runs the root command.
+//
+// Most errors propagate through cobra's default handling: print to stderr
+// and exit 1. Commands that need a specific exit code (currently
+// `niwa session attach` and `niwa session detach`) return a
+// *sessionattach.ExitCodeError; we type-assert here, print the message if
+// present, and use the Code field for os.Exit. This lets scripts wrap the
+// commands and read exit codes per the PRD's Exit Code Mapping table.
 func Execute() {
 	if err := rootCmd.Execute(); err != nil {
+		var ece *sessionattach.ExitCodeError
+		if errors.As(err, &ece) {
+			if ece.Msg != "" {
+				fmt.Fprintln(os.Stderr, ece.Msg)
+			}
+			os.Exit(ece.Code)
+		}
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
