@@ -178,6 +178,107 @@ func TestSessionList_VerboseColumns(t *testing.T) {
 	}
 }
 
+// TestSessionList_JSONAttachShapeMatchesMCP verifies the wire-shape
+// contract introduced by the blocker-3 fix: when a live attach lock is
+// held, --json emits a top-level `attach` sub-object with the same
+// shape niwa_list_sessions returns (v, owner_pid, owner_start_time,
+// started_at, lock_path). When no lock is held, the `attach` key is
+// absent (per PRD R12's "absent, not null" contract). A separate
+// CLI-only `availability` string is always present so JSON consumers
+// can distinguish `stale` from `available` without walking PIDs.
+func TestSessionList_JSONAttachShapeMatchesMCP(t *testing.T) {
+	// Seed one session with a live attach.state sentinel and one without.
+	root := seedSessionList(t, true)
+	t.Setenv("NIWA_INSTANCE_ROOT", root)
+
+	// Seed the live attach sentinel on the live-daemon session worktree.
+	liveWT := filepath.Join(root, "wt-live")
+	myPID := os.Getpid()
+	myStart, _ := mcp.PIDStartTime(myPID)
+	if err := mcp.WriteAttachState(liveWT, mcp.AttachState{
+		V:              1,
+		OwnerPID:       myPID,
+		OwnerStartTime: myStart,
+		StartedAt:      "2026-05-10T14:32:11Z",
+		LockPath:       ".niwa/attach.lock",
+	}); err != nil {
+		t.Fatalf("seed attach sentinel: %v", err)
+	}
+
+	resetSessionListFlags(t)
+	t.Cleanup(func() { resetSessionListFlags(t) })
+	sessionListJSON = true
+	sessionListStatus = "active"
+
+	stdout := &bytes.Buffer{}
+	sessionListCmd.SetOut(stdout)
+	defer sessionListCmd.SetOut(os.Stdout)
+	if err := runSessionList(sessionListCmd, nil); err != nil {
+		t.Fatalf("runSessionList: %v", err)
+	}
+
+	var rows []map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &rows); err != nil {
+		t.Fatalf("output is not valid JSON: %v\n%s", err, stdout.String())
+	}
+	if len(rows) != 2 {
+		t.Fatalf("rows = %d, want 2", len(rows))
+	}
+
+	// Find the attached row (the one we seeded the sentinel on).
+	var attachedRow, freeRow map[string]any
+	for _, r := range rows {
+		avail, _ := r["availability"].(string)
+		switch avail {
+		case "attached":
+			attachedRow = r
+		case "available":
+			freeRow = r
+		}
+	}
+	if attachedRow == nil {
+		t.Fatalf("no row marked availability=attached:\n%s", stdout.String())
+	}
+	if freeRow == nil {
+		t.Fatalf("no row marked availability=available:\n%s", stdout.String())
+	}
+
+	// Attached row: the `attach` key must be a full sub-object with the
+	// MCP shape, NOT a CLI-narrower `{availability: ...}` shape.
+	attach, ok := attachedRow["attach"].(map[string]any)
+	if !ok {
+		t.Fatalf("attached row missing `attach` sub-object: %v", attachedRow)
+	}
+	for _, k := range []string{"v", "owner_pid", "owner_start_time", "started_at", "lock_path"} {
+		if _, found := attach[k]; !found {
+			t.Errorf("attach sub-object missing %q key: %v", k, attach)
+		}
+	}
+	// Specifically verify the operator-facing fields parse to expected types.
+	if pid, ok := attach["owner_pid"].(float64); !ok || int(pid) != myPID {
+		t.Errorf("attach.owner_pid = %v, want %d", attach["owner_pid"], myPID)
+	}
+	if started, ok := attach["started_at"].(string); !ok || started != "2026-05-10T14:32:11Z" {
+		t.Errorf("attach.started_at = %q, want %q", attach["started_at"], "2026-05-10T14:32:11Z")
+	}
+	// Cross-check: this row's old `attach.availability` nested key must NOT
+	// be present (it was the wire-divergent shape the fix removed).
+	if _, found := attach["availability"]; found {
+		t.Errorf("attach sub-object should NOT carry an embedded `availability` key: %v", attach)
+	}
+
+	// Free row: the `attach` key must be absent (not null, not present).
+	// Compare the marshaled bytes since map[string]any treats absent and
+	// null identically once parsed.
+	freeBytes, _ := json.Marshal(freeRow)
+	if strings.Contains(string(freeBytes), `"attach"`) {
+		t.Errorf("free row has `attach` key when no lock is held: %s", freeBytes)
+	}
+	if !strings.Contains(string(freeBytes), `"availability":"available"`) {
+		t.Errorf("free row missing availability=available: %s", freeBytes)
+	}
+}
+
 // TestSessionList_EmptyResultMessage verifies the table view emits a
 // "no sessions match" line when the filter yields no rows.
 func TestSessionList_EmptyResultMessage(t *testing.T) {
