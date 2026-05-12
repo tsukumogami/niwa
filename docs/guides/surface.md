@@ -82,13 +82,13 @@ The surface reads two keys from `workspace.toml`:
 
 ```toml
 [changes]
-gc_interval_hours = 24    # how often the GC sweep runs (1-168)
+gc_interval_hours = 6     # how often the GC sweep runs (1-168)
 gc_abandon_days   = 14    # age at which an unreviewed change is cleaned (1-365)
 ```
 
 Out-of-range values cause `niwa surface serve` to exit 1 with a
 configuration error before the listener accepts requests. Defaults are
-`24` and `14`.
+`6` and `14`.
 
 ## Lifecycle
 

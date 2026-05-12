@@ -64,10 +64,10 @@ const (
 	// renders sit well under NFR2's 200 ms budget so the cap is generous.
 	surfaceShutdownGrace = 5 * time.Second
 
-	// GC defaults match the operator-guide's documented defaults. F5
-	// hardcodes them; the workspace.toml `[changes]` integration arrives
-	// with a later PLAN issue and is out of scope here.
-	surfaceGCDefaultIntervalHours = 24
+	// GC defaults match the PRD R9 spec. F5 hardcodes them; the
+	// workspace.toml `[changes]` integration arrives with a later PLAN
+	// issue and is out of scope here.
+	surfaceGCDefaultIntervalHours = 6
 	surfaceGCDefaultAbandonDays   = 14
 )
 
