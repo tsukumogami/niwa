@@ -42,8 +42,15 @@ func TestNew_EphemeralPortWhenZero(t *testing.T) {
 	}
 }
 
-func TestNew_StubRoutesReturn501(t *testing.T) {
-	srv, ln, _, err := New(context.Background(), Config{Port: 0})
+// TestNew_RoutesWired confirms New() registers the three F5 GET routes
+// with real handlers (not 501 stubs). The exhaustive behavioural
+// coverage of each route lives in handlers_test.go; this test only
+// checks that the wiring exists.
+func TestNew_RoutesWired(t *testing.T) {
+	srv, ln, _, err := New(context.Background(), Config{
+		InstanceRoot: t.TempDir(),
+		Port:         0,
+	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -53,15 +60,30 @@ func TestNew_StubRoutesReturn501(t *testing.T) {
 	ts := httptest.NewServer(srv.Handler)
 	defer ts.Close()
 
-	for _, path := range []string{"/", "/changes/", "/changes/abc"} {
-		t.Run(path, func(t *testing.T) {
-			resp, err := http.Get(ts.URL + path)
+	// Disable redirect following so we can observe the 302 from GET /.
+	client := &http.Client{
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+
+	for _, tc := range []struct {
+		path string
+		want int
+	}{
+		{"/", http.StatusFound},                                          // 302 to /changes/
+		{"/changes/", http.StatusOK},                                     // empty index renders 200
+		{"/changes/not-a-uuid", http.StatusNotFound},                     // bogus id → 404
+		{"/changes/00000000-0000-4000-8000-000000000000", http.StatusNotFound}, // valid UUIDv4, no on-disk change → 404
+	} {
+		t.Run(tc.path, func(t *testing.T) {
+			resp, err := client.Get(ts.URL + tc.path)
 			if err != nil {
-				t.Fatalf("GET %s: %v", path, err)
+				t.Fatalf("GET %s: %v", tc.path, err)
 			}
 			defer resp.Body.Close()
-			if resp.StatusCode != http.StatusNotImplemented {
-				t.Errorf("status = %d, want 501 (F5 stub)", resp.StatusCode)
+			if resp.StatusCode != tc.want {
+				t.Errorf("GET %s: status = %d, want %d", tc.path, resp.StatusCode, tc.want)
 			}
 		})
 	}

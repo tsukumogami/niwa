@@ -4,10 +4,10 @@
 // internal/mcp with the templates from internal/web/render, and is
 // wired into the niwa lifecycle by the `niwa surface serve` CLI command.
 //
-// At F5 this package ships the boot scaffold (server.go, auth.go). The
-// concrete request handlers and the GC sweep land in later issues —
-// route registrations here stub out responses with 501 so callers can
-// verify the wiring end-to-end without depending on the handler bodies.
+// Issue #6 shipped the boot scaffold (server.go, auth.go); issue #8
+// replaced the 501 stubs with the real handlers (see handlers.go) so
+// the three GET routes now compose the changestore reads and
+// dual-target event emitter end-to-end.
 //
 // Security boundaries: the Bearer-token middleware is compiled and
 // available but applied to zero routes at F5; F10's mutation API
@@ -22,17 +22,23 @@ import (
 	"net"
 	"net/http"
 	"strconv"
+
+	"github.com/tsukumogami/niwa/internal/mcp"
 )
 
 // Config carries the listener-construction inputs. InstanceRoot is the
 // absolute path to the niwa instance whose .niwa/changes/ directory the
 // server serves. Port=0 binds an ephemeral port. ListenAddr defaults to
 // 127.0.0.1; callers do not override this in production — the field is
-// present so tests can bind to 127.0.0.1:0 explicitly.
+// present so tests can bind to 127.0.0.1:0 explicitly. AuditSink is the
+// destination for review_surface_opened and change_engaged events; a
+// nil sink elides audit emission (the per-change transitions.log writes
+// still run via AppendChangeEvent).
 type Config struct {
 	InstanceRoot string
 	Port         int
 	ListenAddr   string
+	AuditSink    mcp.AuditSink
 }
 
 // GCStop is the function returned by New for the GC ticker shutdown. At
@@ -47,10 +53,9 @@ type GCStop func()
 // bound listener (so the caller can read its address), the GC stop
 // function (placeholder at F5), and any error.
 //
-// Routing: three GET routes are wired but stubbed with 501 Not
-// Implemented. Issue #8 replaces the stubs with real handlers; this
-// issue ships only the scaffold so #6 and the surface CLI command (#10)
-// can land independently of the handler bodies.
+// Routing: the three GET routes are wired through Handlers.RegisterRoutes
+// from handlers.go (issue #8). The Bearer-auth middleware wraps zero
+// routes at F5; F10's mutation API composes on the same contract.
 func New(ctx context.Context, cfg Config) (*http.Server, net.Listener, GCStop, error) {
 	addr := cfg.ListenAddr
 	if addr == "" {
@@ -64,11 +69,8 @@ func New(ctx context.Context, cfg Config) (*http.Server, net.Listener, GCStop, e
 	}
 
 	mux := http.NewServeMux()
-	// Go 1.22+ method+path patterns. F5 stubs every route with 501; the
-	// real handlers ship in issue #8 with the changestore composed in.
-	mux.HandleFunc("GET /{$}", notImplemented)
-	mux.HandleFunc("GET /changes/{$}", notImplemented)
-	mux.HandleFunc("GET /changes/{id}", notImplemented)
+	h := &Handlers{InstanceRoot: cfg.InstanceRoot, Sink: cfg.AuditSink}
+	h.RegisterRoutes(mux)
 
 	// Middleware order: CORS strip outermost so a cross-origin request
 	// fails before any handler logic runs. The Bearer-auth middleware is
@@ -80,11 +82,6 @@ func New(ctx context.Context, cfg Config) (*http.Server, net.Listener, GCStop, e
 	stop := GCStop(func() {})
 	_ = ctx // reserved for future integration with the GC ticker
 	return srv, ln, stop, nil
-}
-
-// notImplemented stubs a 501 response. Replaced wholesale by issue #8.
-func notImplemented(w http.ResponseWriter, r *http.Request) {
-	http.Error(w, "not implemented", http.StatusNotImplemented)
 }
 
 // corsStrip rejects requests with a non-empty Origin header and emits
