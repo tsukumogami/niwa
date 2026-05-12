@@ -471,6 +471,45 @@ func (s *Server) toolsList() toolsListResult {
 				},
 			},
 		},
+		{
+			Name: "niwa_create_change",
+			Description: "Capture a session's current diff as a reviewable change. Snapshots " +
+				"git -C <worktree> diff <base>..<head> to .niwa/changes/<id>/diff.patch (4 MiB " +
+				"cap with truncate trailer), reserves a UUIDv4 change ID, writes state.json, and " +
+				"emits change_ready. Idempotent on (session_id, head_ref): a re-issue for the same " +
+				"tuple returns the existing change_id with state=\"not_modified\" and emits no event.",
+			InputSchema: inputSchema{
+				Type: "object",
+				Properties: map[string]schemaProp{
+					"session_id":    {Type: "string", Description: "Session ID (8 lowercase hex chars)"},
+					"base_ref_hint": {Type: "string", Description: "Optional base ref override; bypasses the auto-discovery chain (origin/HEAD → origin/main → origin/master → main → master)"},
+					"metadata":      {Type: "object", Description: "Optional opaque metadata (stored on state.json, never echoed to audit)"},
+				},
+				Required: []string{"session_id"},
+			},
+		},
+		{
+			Name:        "niwa_list_changes",
+			Description: "List changes filtered by state and/or session_id (AND-composed when both set). Order: most recently updated first.",
+			InputSchema: inputSchema{
+				Type: "object",
+				Properties: map[string]schemaProp{
+					"state":      {Type: "string", Description: "Filter by state (pending, in-review, verdict-cast, cleaned)"},
+					"session_id": {Type: "string", Description: "Filter to changes originating from this session (8 lowercase hex chars)"},
+				},
+			},
+		},
+		{
+			Name:        "niwa_query_change",
+			Description: "Return the full ChangeState plus the last 20 transitions for a change. Returns not_found when the change is absent or in cleaned state.",
+			InputSchema: inputSchema{
+				Type: "object",
+				Properties: map[string]schemaProp{
+					"change_id": {Type: "string", Description: "Change ID (UUIDv4)"},
+				},
+				Required: []string{"change_id"},
+			},
+		},
 	}}
 }
 
@@ -562,6 +601,24 @@ func (s *Server) callTool(p toolCallParams) toolResult {
 			return errResult("invalid arguments: " + err.Error())
 		}
 		return s.handleListSessions(args)
+	case "niwa_create_change":
+		var args createChangeArgs
+		if err := json.Unmarshal(p.Arguments, &args); err != nil {
+			return errResult("invalid arguments: " + err.Error())
+		}
+		return s.handleCreateChange(args)
+	case "niwa_list_changes":
+		var args listChangesArgs
+		if err := json.Unmarshal(p.Arguments, &args); err != nil {
+			return errResult("invalid arguments: " + err.Error())
+		}
+		return s.handleListChanges(args)
+	case "niwa_query_change":
+		var args queryChangeArgs
+		if err := json.Unmarshal(p.Arguments, &args); err != nil {
+			return errResult("invalid arguments: " + err.Error())
+		}
+		return s.handleQueryChange(args)
 	default:
 		return errResult("unknown tool: " + p.Name)
 	}
