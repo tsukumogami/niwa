@@ -183,7 +183,7 @@ is delegated to #4 → unlock). The `ReserveChangeID` helper composes
 **Acceptance Criteria:**
 - New file `internal/mcp/changestore.go` exports:
   - `ChangeState` struct with JSON tags matching PRD R1 verbatim
-    (`v`, `id`, `state`, `originating_sessions`, `originating_tasks`,
+    (`v`, `id`, `state`, `originating_session`, `originating_tasks`,
     `created_at`, `updated_at`, `base_ref`, `head_ref`, `branch`,
     `worktree_path`, `diff_path`, `verdict`, `metadata`).
   - `Verdict` typed-empty struct (serialises as `null` when the field

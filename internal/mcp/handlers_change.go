@@ -33,7 +33,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"slices"
 	"sort"
 	"strings"
 	"syscall"
@@ -53,8 +52,7 @@ type createChangeArgs struct {
 
 // listChangesArgs is the input shape for niwa_list_changes. Both filters
 // are optional; when both are set they AND-compose. session_id matches a
-// change whose originating_sessions contains the value (an originating
-// session, not the only one).
+// change whose originating_session field equals the value.
 type listChangesArgs struct {
 	State     string `json:"state,omitempty"`
 	SessionID string `json:"session_id,omitempty"`
@@ -204,19 +202,19 @@ func (s *Server) handleCreateChange(args createChangeArgs) toolResult {
 		originatingTasks = []string{s.taskID}
 	}
 	state := ChangeState{
-		V:                   1,
-		ID:                  changeID,
-		State:               ChangeStatePending,
-		OriginatingSessions: []string{args.SessionID},
-		OriginatingTasks:    originatingTasks,
-		CreatedAt:           now,
-		UpdatedAt:           now,
-		BaseRef:             baseRef,
-		HeadRef:             headRef,
-		Branch:              currentBranch(worktree),
-		WorktreePath:        worktree,
-		DiffPath:            diffPatchFileName,
-		Metadata:            metadata,
+		V:                  1,
+		ID:                 changeID,
+		State:              ChangeStatePending,
+		OriginatingSession: args.SessionID,
+		OriginatingTasks:   originatingTasks,
+		CreatedAt:          now,
+		UpdatedAt:          now,
+		BaseRef:            baseRef,
+		HeadRef:            headRef,
+		Branch:             currentBranch(worktree),
+		WorktreePath:       worktree,
+		DiffPath:           diffPatchFileName,
+		Metadata:           metadata,
 	}
 	if err := WriteInitial(root, state); err != nil {
 		return errResult("write state.json: " + err.Error())
@@ -237,11 +235,11 @@ func (s *Server) handleCreateChange(args createChangeArgs) toolResult {
 		Kind:     ChangeEventReady,
 		ChangeID: changeID,
 		Payload: map[string]any{
-			"change_id":            changeID,
-			"url":                  url,
-			"originating_sessions": []string{args.SessionID},
-			"base_ref":             baseRef,
-			"head_ref":             headRef,
+			"change_id":           changeID,
+			"url":                 url,
+			"originating_session": args.SessionID,
+			"base_ref":            baseRef,
+			"head_ref":            headRef,
 		},
 	})
 
@@ -349,7 +347,7 @@ func findExistingChange(root, sessionID, headRef string) (*ChangeState, error) {
 		if st.HeadRef != headRef {
 			continue
 		}
-		if !slices.Contains(st.OriginatingSessions, sessionID) {
+		if st.OriginatingSession != sessionID {
 			continue
 		}
 		return st, nil
@@ -382,7 +380,7 @@ func scanChanges(root, stateFilter, sessionFilter string) ([]ChangeState, error)
 		if stateFilter != "" && st.State != stateFilter {
 			continue
 		}
-		if sessionFilter != "" && !slices.Contains(st.OriginatingSessions, sessionFilter) {
+		if sessionFilter != "" && st.OriginatingSession != sessionFilter {
 			continue
 		}
 		out = append(out, *st)

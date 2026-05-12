@@ -52,19 +52,19 @@ func seedChangeWithUpdatedAt(t *testing.T, root, state string, updatedAt time.Ti
 	}
 	stamp := updatedAt.UTC().Format(time.RFC3339Nano)
 	cs := mcp.ChangeState{
-		V:                   1,
-		ID:                  id,
-		State:               state,
-		OriginatingSessions: []string{"abcdef01"},
-		OriginatingTasks:    []string{},
-		CreatedAt:           stamp,
-		UpdatedAt:           stamp,
-		BaseRef:             "base-sha",
-		HeadRef:             "head-sha",
-		Branch:              "feature/x",
-		WorktreePath:        "/tmp/worktree",
-		DiffPath:            "diff.patch",
-		Metadata:            map[string]any{},
+		V:                  1,
+		ID:                 id,
+		State:              state,
+		OriginatingSession: "abcdef01",
+		OriginatingTasks:   []string{},
+		CreatedAt:          stamp,
+		UpdatedAt:          stamp,
+		BaseRef:            "base-sha",
+		HeadRef:            "head-sha",
+		Branch:             "feature/x",
+		WorktreePath:       "/tmp/worktree",
+		DiffPath:           "diff.patch",
+		Metadata:           map[string]any{},
 	}
 	if err := mcp.WriteInitial(root, cs); err != nil {
 		t.Fatalf("WriteInitial: %v", err)

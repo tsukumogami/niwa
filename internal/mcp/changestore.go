@@ -40,18 +40,18 @@ import (
 // Metadata map is reserved for structured fields the change creator owns
 // (e.g. originating-task summary keys, never bodies).
 type ChangeState struct {
-	V                   int            `json:"v"`
-	ID                  string         `json:"id"`
-	State               string         `json:"state"`
-	OriginatingSessions []string       `json:"originating_sessions"`
-	OriginatingTasks    []string       `json:"originating_tasks"`
-	CreatedAt           string         `json:"created_at"`
-	UpdatedAt           string         `json:"updated_at"`
-	BaseRef             string         `json:"base_ref"`
-	HeadRef             string         `json:"head_ref"`
-	Branch              string         `json:"branch"`
-	WorktreePath        string         `json:"worktree_path"`
-	DiffPath            string         `json:"diff_path"`
+	V                  int      `json:"v"`
+	ID                 string   `json:"id"`
+	State              string   `json:"state"`
+	OriginatingSession string   `json:"originating_session"`
+	OriginatingTasks   []string `json:"originating_tasks"`
+	CreatedAt          string   `json:"created_at"`
+	UpdatedAt          string   `json:"updated_at"`
+	BaseRef            string   `json:"base_ref"`
+	HeadRef            string   `json:"head_ref"`
+	Branch             string   `json:"branch"`
+	WorktreePath       string   `json:"worktree_path"`
+	DiffPath           string   `json:"diff_path"`
 	// Verdict is a typed nil at F5 (always serializes as `null`); F10
 	// populates fields on the same pointer. Using a pointer-to-struct
 	// instead of `any` lets the compiler check the verdict shape when
@@ -373,4 +373,3 @@ func writeChangeStateAtomic(dir string, st *ChangeState) error {
 	}
 	return nil
 }
-

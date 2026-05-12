@@ -777,11 +777,11 @@ match field names 1:1 with JSON tags:
 ```go
 // internal/mcp/changestore.go
 type ChangeState struct {
-    V                   int            `json:"v"`
-    ID                  string         `json:"id"`
-    State               string         `json:"state"`
-    OriginatingSessions []string       `json:"originating_sessions"`
-    OriginatingTasks    []string       `json:"originating_tasks"`
+    V                  int      `json:"v"`
+    ID                 string   `json:"id"`
+    State              string   `json:"state"`
+    OriginatingSession string   `json:"originating_session"`
+    OriginatingTasks   []string `json:"originating_tasks"`
     CreatedAt           string         `json:"created_at"`
     UpdatedAt           string         `json:"updated_at"`
     BaseRef             string         `json:"base_ref"`
@@ -828,7 +828,7 @@ handleCreateChange(args)
 ├── AppendChangeEvent(instanceRoot, audit, ChangeEvent{
 │       Kind: "change_ready",
 │       ChangeID: <id>,
-│       Payload: { change_id, url, originating_sessions, base_ref, head_ref }
+│       Payload: { change_id, url, originating_session, base_ref, head_ref }
 │   })
 └── return { change_id, state: "pending", url, base_ref, head_ref }
 ```

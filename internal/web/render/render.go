@@ -20,14 +20,14 @@ import (
 // is rendered through html/template's auto-escape, so callers may pass
 // arbitrary user-supplied strings without manual escaping.
 type ChangeData struct {
-	ID                  string
-	State               string
-	OriginatingSessions []string
-	BaseRef             string
-	HeadRef             string
-	Branch              string
-	CreatedAt           string
-	UpdatedAt           string
+	ID                 string
+	State              string
+	OriginatingSession string
+	BaseRef            string
+	HeadRef            string
+	Branch             string
+	CreatedAt          string
+	UpdatedAt          string
 	// Diff is the unified-diff body. It is wrapped in <pre> so leading
 	// whitespace is preserved; HTML-active characters (`<`, `>`, `&`,
 	// `"`) are escaped by html/template, which is the NFR4 invariant.

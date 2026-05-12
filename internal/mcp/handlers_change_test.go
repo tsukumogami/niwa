@@ -245,8 +245,8 @@ func TestHandleCreateChange_HappyPath(t *testing.T) {
 	if st.State != ChangeStatePending {
 		t.Errorf("state.State = %q, want pending", st.State)
 	}
-	if len(st.OriginatingSessions) != 1 || st.OriginatingSessions[0] != sid {
-		t.Errorf("originating_sessions = %v, want [%q]", st.OriginatingSessions, sid)
+	if st.OriginatingSession != sid {
+		t.Errorf("originating_session = %q, want %q", st.OriginatingSession, sid)
 	}
 }
 

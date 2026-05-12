@@ -9,7 +9,7 @@
 <h1>Change <code>{{.ID}}</code><span class="badge {{.State}}">{{.State}}</span></h1>
 <section class="meta">
 <dl>
-<dt>Originating sessions</dt><dd>{{if .OriginatingSessions}}{{range $i, $s := .OriginatingSessions}}{{if $i}}, {{end}}<code>{{$s}}</code>{{end}}{{else}}<span class="empty">none</span>{{end}}</dd>
+<dt>Originating session</dt><dd>{{if .OriginatingSession}}<code>{{.OriginatingSession}}</code>{{else}}<span class="empty">none</span>{{end}}</dd>
 <dt>Base &rarr; head</dt><dd><code>{{.BaseRef}}</code> &rarr; <code>{{.HeadRef}}</code></dd>
 <dt>Branch</dt><dd><code>{{.Branch}}</code></dd>
 <dt>Created</dt><dd>{{.CreatedAt}}</dd>

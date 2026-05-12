@@ -20,19 +20,19 @@ func reserveAndWriteInitial(t *testing.T, root string) (string, string) {
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	st := ChangeState{
-		V:                   1,
-		ID:                  id,
-		State:               ChangeStatePending,
-		OriginatingSessions: []string{"sess0001"},
-		OriginatingTasks:    []string{},
-		CreatedAt:           now,
-		UpdatedAt:           now,
-		BaseRef:             "main",
-		HeadRef:             "feature/x",
-		Branch:              "feature/x",
-		WorktreePath:        "/tmp/worktree",
-		DiffPath:            "diff.patch",
-		Metadata:            map[string]any{},
+		V:                  1,
+		ID:                 id,
+		State:              ChangeStatePending,
+		OriginatingSession: "sess0001",
+		OriginatingTasks:   []string{},
+		CreatedAt:          now,
+		UpdatedAt:          now,
+		BaseRef:            "main",
+		HeadRef:            "feature/x",
+		Branch:             "feature/x",
+		WorktreePath:       "/tmp/worktree",
+		DiffPath:           "diff.patch",
+		Metadata:           map[string]any{},
 	}
 	if err := WriteInitial(root, st); err != nil {
 		t.Fatalf("WriteInitial: %v", err)
@@ -99,7 +99,7 @@ func TestRead_UnknownStateRejected(t *testing.T) {
   "v": 1,
   "id": "` + id + `",
   "state": "totally-bogus",
-  "originating_sessions": [],
+  "originating_session": "",
   "originating_tasks": [],
   "created_at": "2026-05-12T00:00:00Z",
   "updated_at": "2026-05-12T00:00:00Z",
@@ -127,7 +127,7 @@ func TestRead_WrongSchemaVersionRejected(t *testing.T) {
   "v": 99,
   "id": "` + id + `",
   "state": "pending",
-  "originating_sessions": [],
+  "originating_session": "",
   "originating_tasks": [],
   "created_at": "2026-05-12T00:00:00Z",
   "updated_at": "2026-05-12T00:00:00Z",
@@ -310,14 +310,14 @@ func TestWriteInitial_RejectsInvalidState(t *testing.T) {
 		t.Fatalf("ReserveChangeID: %v", err)
 	}
 	st := ChangeState{
-		V:                   1,
-		ID:                  id,
-		State:               "completely-made-up",
-		OriginatingSessions: []string{},
-		OriginatingTasks:    []string{},
-		CreatedAt:           "2026-05-12T00:00:00Z",
-		UpdatedAt:           "2026-05-12T00:00:00Z",
-		Metadata:            map[string]any{},
+		V:                  1,
+		ID:                 id,
+		State:              "completely-made-up",
+		OriginatingSession: "",
+		OriginatingTasks:   []string{},
+		CreatedAt:          "2026-05-12T00:00:00Z",
+		UpdatedAt:          "2026-05-12T00:00:00Z",
+		Metadata:           map[string]any{},
 	}
 	err = WriteInitial(root, st)
 	if !errors.Is(err, ErrCorruptedState) {

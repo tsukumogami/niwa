@@ -182,15 +182,15 @@ func (h *Handlers) handleChange(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_ = render.RenderChange(w, render.ChangeData{
-		ID:                  st.ID,
-		State:               st.State,
-		OriginatingSessions: st.OriginatingSessions,
-		BaseRef:             st.BaseRef,
-		HeadRef:             st.HeadRef,
-		Branch:              st.Branch,
-		CreatedAt:           st.CreatedAt,
-		UpdatedAt:           st.UpdatedAt,
-		Diff:                string(diffBytes),
+		ID:                 st.ID,
+		State:              st.State,
+		OriginatingSession: st.OriginatingSession,
+		BaseRef:            st.BaseRef,
+		HeadRef:            st.HeadRef,
+		Branch:             st.Branch,
+		CreatedAt:          st.CreatedAt,
+		UpdatedAt:          st.UpdatedAt,
+		Diff:               string(diffBytes),
 	})
 }
 
