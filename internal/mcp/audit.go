@@ -1,10 +1,13 @@
 // audit.go provides per-MCP-call audit observability. The dispatch loop
 // emits one entry per `tools/call` to a sink whose default implementation
-// appends NDJSON lines to <instance-root>/.niwa/mcp-audit.log. The schema
-// (v=1, see DESIGN-mcp-call-telemetry.md) deliberately captures argument
-// *keys* but never *values* — LLM-supplied tool arguments routinely contain
-// prompt injections, secrets, or PII, and leaking that into a logfile would
-// re-create the exfiltration risks the rest of the design works to prevent.
+// appends NDJSON lines to <instance-root>/.niwa/mcp-audit.log. The v=2
+// schema (see DESIGN-niwa-change-primitive.md) deliberately captures
+// argument *keys* but never *values* — LLM-supplied tool arguments
+// routinely contain prompt injections, secrets, or PII, and leaking that
+// into a logfile would re-create the exfiltration risks the rest of the
+// design works to prevent. v=1 records on disk continue to parse cleanly;
+// the reader's effectiveKind helper recovers the implicit "tool_call"
+// classification from pre-F5 records.
 package mcp
 
 import (
@@ -18,23 +21,45 @@ import (
 	"time"
 )
 
-// AuditEntry is the v=1 schema for an MCP tool-call audit record. One
-// entry is emitted per `tools/call` request reaching dispatch; entries are
-// appended to .niwa/mcp-audit.log in emission order.
+// AuditEntry is the v=2 schema for an MCP audit record. One entry per
+// `tools/call` request reaching dispatch is appended to .niwa/mcp-audit.log
+// in emission order. F5 extends the schema with three optional fields
+// (Kind, Event, Payload) so the same log can carry change-lifecycle events
+// alongside tool-call entries; v=1 records on disk continue to parse
+// cleanly (the new fields are all `omitempty`).
 //
-// The entry is intentionally minimal: it answers "which session called
-// which tool with which named arguments and did it succeed?" without
-// revealing the argument values or the response body.
+// Privacy: the schema deliberately captures argument *keys* but never
+// *values*. The Payload field is intended for structured event data the
+// emitter owns (e.g. {change_id, reason}), not LLM-supplied tool
+// arguments. A 2 KB budget enforced by fileAuditSink.Emit prevents an
+// over-payload from bloating the log; oversized entries are rewritten
+// with Payload={} and error_code="payload_too_large" on disk.
 type AuditEntry struct {
 	V         int      `json:"v"`
 	At        string   `json:"at"`
 	Role      string   `json:"role,omitempty"`
 	TaskID    string   `json:"task_id,omitempty"`
-	Tool      string   `json:"tool"`
-	ArgKeys   []string `json:"arg_keys"`
+	Tool      string   `json:"tool,omitempty"`
+	ArgKeys   []string `json:"arg_keys,omitempty"`
 	OK        bool     `json:"ok"`
 	ErrorCode string   `json:"error_code,omitempty"`
+	Kind      string   `json:"kind,omitempty"`
+	Event     string   `json:"event,omitempty"`
+	// Payload is serialised without omitempty so the budget-downgrade path
+	// can write a literal `"payload":{}` sentinel. An empty map with
+	// `omitempty` would be elided by encoding/json's zero-length-map rule,
+	// hiding the fact that the payload was dropped. Callers who do not
+	// emit an event payload (tool_call entries) leave this nil, which
+	// serialises as `"payload":null`.
+	Payload map[string]any `json:"payload"`
 }
+
+// auditPayloadBudget caps a single serialised audit line. NDJSON lines
+// over this size are rewritten with an empty Payload and the
+// "payload_too_large" error code so the log stays scannable and no
+// single event can blow out tail-following tools. The 2 KiB ceiling
+// sits well below the Linux PIPE_BUF 4096-byte atomicity guarantee.
+const auditPayloadBudget = 2048
 
 // fileAuditSink appends NDJSON lines to a fixed path. Linux guarantees
 // O_APPEND writes smaller than PIPE_BUF (~4096 bytes) are atomic, so
@@ -70,22 +95,34 @@ const auditLogFileName = "mcp-audit.log"
 // degraded sink never breaks a real tool call. The mutex serializes
 // in-process emits so the file pointer can't race; cross-process safety
 // rests on O_APPEND atomicity.
+//
+// The 2 KB payload budget: the caller's AuditEntry value is taken by
+// value, so any mutation here (autofilling V/At, dropping an oversize
+// Payload) stays local to this method — the caller's record is never
+// modified. If the marshalled line exceeds auditPayloadBudget, Emit
+// rewrites the entry with Payload set to an empty map and ErrorCode set
+// to "payload_too_large", re-marshals, and writes the smaller buffer.
 func (s *fileAuditSink) Emit(e AuditEntry) error {
 	if s.path == "" {
 		return nil
 	}
 	if e.V == 0 {
-		e.V = 1
+		e.V = 2
 	}
 	if e.At == "" {
 		e.At = time.Now().UTC().Format(time.RFC3339Nano)
 	}
-	if e.ArgKeys == nil {
-		e.ArgKeys = []string{}
-	}
 	data, err := json.Marshal(e)
 	if err != nil {
 		return err
+	}
+	if len(data) > auditPayloadBudget {
+		e.Payload = map[string]any{}
+		e.ErrorCode = "payload_too_large"
+		data, err = json.Marshal(e)
+		if err != nil {
+			return err
+		}
 	}
 	data = append(data, '\n')
 
@@ -155,12 +192,16 @@ func extractErrorCode(res toolResult) string {
 // buildAuditEntry composes one entry from the dispatch context. role and
 // taskID come from the Server (set at startup from NIWA_SESSION_ROLE /
 // NIWA_TASK_ID); p is the request params; res is the handler result.
+// Always carries Kind="tool_call" so the v=2 schema's effectiveKind
+// inference is unambiguous for fresh writers; readers handle v=1 records
+// (no Kind set) via the fallback in effectiveKind.
 func buildAuditEntry(role, taskID string, p toolCallParams, res toolResult) AuditEntry {
 	return AuditEntry{
-		V:         1,
+		V:         2,
 		At:        time.Now().UTC().Format(time.RFC3339Nano),
 		Role:      role,
 		TaskID:    taskID,
+		Kind:      "tool_call",
 		Tool:      p.Name,
 		ArgKeys:   extractArgKeys(p.Arguments),
 		OK:        !res.IsError,

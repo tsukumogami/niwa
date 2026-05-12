@@ -68,6 +68,21 @@ type AuditFilter struct {
 	OK   *bool
 }
 
+// effectiveKind returns the entry's Kind when set, otherwise infers the
+// v=1 fallback: tool_call records (the original audit shape) had a Tool
+// but no explicit Kind, so any entry with a non-empty Tool is treated as
+// a tool_call. Returns the empty string only for entries that have
+// neither Kind nor Tool set.
+func (e *AuditEntry) effectiveKind() string {
+	if e.Kind != "" {
+		return e.Kind
+	}
+	if e.Tool != "" {
+		return "tool_call"
+	}
+	return ""
+}
+
 // FilterAudit returns the subset of entries matching every set field of f.
 // Pure function; does not mutate the input slice.
 func FilterAudit(entries []AuditEntry, f AuditFilter) []AuditEntry {
