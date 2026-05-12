@@ -1,0 +1,18 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>niwa changes</title>
+<style>{{.CSS}}</style>
+</head>
+<body>
+<h1>Changes</h1>
+{{if .Changes}}
+<ul class="changes">
+{{range .Changes}}<li{{if eq .State "cleaned"}} class="cleaned"{{end}}><a href="/changes/{{.ID}}"><code>{{.ID}}</code></a><span class="badge {{.State}}">{{.State}}</span> &mdash; updated {{.UpdatedAt}}</li>
+{{end}}</ul>
+{{else}}
+<p class="empty">No changes yet.</p>
+{{end}}
+</body>
+</html>
