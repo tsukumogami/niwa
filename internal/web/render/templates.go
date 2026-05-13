@@ -18,12 +18,14 @@ var templateFS embed.FS
 //go:embed styles.css
 var stylesCSS string
 
-// changeTmpl and indexTmpl are parsed once at package init. A parse
-// failure panics at process start so a misshapen template is a deploy-
-// time error, not a request-time error.
+// Templates are parsed once at package init. A parse failure panics at
+// process start so a misshapen template is a deploy-time error, not a
+// request-time error.
 var (
-	changeTmpl = template.Must(template.ParseFS(templateFS, "templates/change.tmpl"))
-	indexTmpl  = template.Must(template.ParseFS(templateFS, "templates/index.tmpl"))
+	workspacesTmpl = template.Must(template.ParseFS(templateFS, "templates/workspaces.tmpl"))
+	workspaceTmpl  = template.Must(template.ParseFS(templateFS, "templates/workspace.tmpl"))
+	indexTmpl      = template.Must(template.ParseFS(templateFS, "templates/index.tmpl"))
+	changeTmpl     = template.Must(template.ParseFS(templateFS, "templates/change.tmpl"))
 )
 
 // CSS exposes the embedded stylesheet so callers can serve it directly

@@ -1,153 +1,194 @@
-# niwa surface
+# `niwa surface serve` — the machine-level change-review HTTP listener
 
-The `niwa surface` listener renders the agent's in-flight changes as
-plain HTML pages on `127.0.0.1`. A coordinator agent creates a change
-via `niwa_create_change` after handing work off; the operator opens
-the URL in a browser to review the diff before the agent moves on.
-
-The surface is per-instance: one HTTP listener serves every session in
-the instance. This is a separate process from the per-session MCP
-daemon — they share the same `.niwa/` directory but run independently.
+`niwa surface serve` aggregates every change produced by every niwa
+instance you've registered in the user-level config and exposes them
+through a single browser-readable HTTP endpoint on 127.0.0.1. One
+process per machine, federated across every workspace.
 
 ## Process topology
 
-Two kinds of process talk to `.niwa/`:
+niwa runs two long-lived processes per machine for the F5 collab
+surface:
 
-- **Per-session daemon** (`niwa mcp-serve`): one per session, started
-  when the session is created, owns the MCP loop for that session's
-  worker agent. Lives at the worktree root.
-- **Per-instance surface** (`niwa surface serve`): one per instance,
-  started by the operator, owns the `127.0.0.1:<port>` HTTP listener
-  that renders changes. Lives at the instance root.
+| Process | Scope | What it does |
+|---------|-------|--------------|
+| `niwa mesh watch` (one per niwa instance) | Per-instance daemon | Claims queued task envelopes from the per-role inboxes and spawns worker processes per task. Existed before F5. |
+| `niwa mcp-serve` (per session) | Per-session | Hosts the MCP server inside a session worktree. Writes `.niwa/changes/<id>/` directly when agents call `niwa_create_change`. |
+| `niwa surface serve` (one per user) | **Machine-level** — single process across the user's whole niwa fleet | Reads `~/.config/niwa/config.toml`, enumerates every registered workspace and every niwa instance under it, and serves a federated HTTP index at 127.0.0.1:&lt;port&gt;. |
 
-The two processes don't call each other. The MCP daemon writes
-`.niwa/changes/<id>/state.json` and emits `change_ready` to the audit
-log; the surface reads those state files on each request. State on
-disk is the only contract.
-
-```
-.niwa/
-  changes/<id>/state.json      <- written by mcp-serve, read by surface
-  changes/<id>/diff.patch
-  changes/<id>/transitions.log
-  surface.lock                 <- written by surface
-  surface.token                <- written by surface, read on each auth check
-  surface.port                 <- written by surface, read by mcp-serve for URL
-  mcp-audit.log                <- written by mcp-serve and surface
-```
+There is **no** Telegram bridge in F5. The `change_ready` event lands
+in each instance's `mcp-audit.log`; a future bridge spec will decide
+how that reaches a notification channel.
 
 ## Quick start
 
-Start the listener from the instance root:
-
-```
-$ niwa surface serve
-niwa surface listening on http://127.0.0.1:54321
-token stored at /path/to/instance/.niwa/surface.token (read-only, mode 0600)
+```sh
+# In any terminal, on your machine
+niwa surface serve
 ```
 
-The listener prints the URL to stderr and stays in the foreground. Open
-the URL in a browser to see the index of changes. A change page lives
-at `/changes/<change-id>`. Send SIGINT or SIGTERM to shut down.
-
-`niwa_create_change` returns a URL embedded with the live port. If the
-surface isn't running when the agent creates the change, the URL
-contains the literal `<port>` placeholder; once the surface boots, the
-next call to `niwa_query_change` returns the resolved URL.
-
-## Auth model
-
-The listener reads `.niwa/surface.token` on every request and admits
-only `Authorization: Bearer <token>` headers that match. The token
-file is created mode `0600` on first boot. Tokens passed in cookies or
-query parameters are rejected — the auth surface is the request header
-only, so a token can't leak through a referrer or a third-party iframe.
-
-At F5 the auth middleware is wired but applied to zero routes (every
-F5 route is a GET read). It's there so the F10 mutation API can compose
-on the same contract without inventing a new one.
-
-To rotate the token:
+The command boots with no arguments. It reads the registry,
+discovers every instance, and prints the URL:
 
 ```
-$ niwa surface serve --rotate-token
+niwa surface listening on http://127.0.0.1:48329
+token stored at /home/you/.config/niwa/surface.token (read-only, mode 0600)
+serving 7 instance(s) across 2 workspace(s)
 ```
 
-The flag regenerates `.niwa/surface.token` on boot. Any browser tab
-holding the old token must reload to pick up the new one.
+Open the URL in your browser. The index lists every registered
+workspace; drilling in shows the instances under that workspace, and
+each instance shows its current set of pending and in-review changes.
+
+## URL structure
+
+```
+http://127.0.0.1:<port>/                                            → 302 /workspaces/
+http://127.0.0.1:<port>/workspaces/                                 → top-level workspace index
+http://127.0.0.1:<port>/workspaces/<workspace>/                     → instances within the workspace
+http://127.0.0.1:<port>/workspaces/<workspace>/<instance>/changes/  → changes within the instance
+http://127.0.0.1:<port>/workspaces/<workspace>/<instance>/changes/<change-id>   → per-change page
+```
+
+The `#comment-<id>` URL fragment is reserved for F6+ (line-anchored
+comments) — F5 leaves it inert but locks the shape so future
+deep-links stay stable.
+
+Workspace identifiers come from the registry key
+(e.g. `tsuku`, `cs`). Instance identifiers are the directory name
+under the workspace root (e.g. `tsuku-4`); the workspace root itself
+appears as the `_root` instance.
+
+## Authentication
+
+A `surface.token` is generated on first boot at
+`~/.config/niwa/surface.token` (mode `0o600`, UUIDv4 from
+`crypto/rand`). The token gates **mutation endpoints** — F5 has none
+yet, but F10's verdict-cast endpoint will require it. Read-only
+endpoints (the workspace, instance, and change views) require no
+authentication because anything on the same machine that can
+`curl 127.0.0.1` can already read `.niwa/changes/<id>/` directly.
+
+The token **contents** never appear in any log or on stderr. Only
+the file path is printed at boot.
+
+To rotate the token (e.g. after suspected compromise):
+
+```sh
+# Stop the running surface (Ctrl-C)
+niwa surface serve --rotate-token
+```
+
+The new token is generated and written; any client holding the old
+token receives 401 on its next mutation request and must refresh
+from `~/.config/niwa/surface.token`.
+
+CORS: cross-origin requests are rejected before any handler runs.
 
 ## Configuration
 
-The surface reads two keys from `workspace.toml`:
+The surface reads no per-workspace configuration today — the GC
+defaults are compiled into the binary:
 
-```toml
-[changes]
-gc_interval_hours = 6     # how often the GC sweep runs (1-168)
-gc_abandon_days   = 14    # age at which an unreviewed change is cleaned (1-365)
-```
+| Setting | Default | Range | Source |
+|---------|---------|-------|--------|
+| GC interval | 6 hours | 1–168 | Compiled-in |
+| Abandonment threshold | 14 days | 1–365 | Compiled-in |
 
-Out-of-range values cause `niwa surface serve` to exit 1 with a
-configuration error before the listener accepts requests. Defaults are
-`6` and `14`.
+A future PLAN issue will wire these to a `workspace.toml` `[changes]`
+section. Until then, restart `niwa surface serve` to change either
+value via source modification.
 
 ## Lifecycle
 
 On boot:
 
-1. Acquire `.niwa/surface.lock`. If the lock holder is dead, reap it
-   and retry once.
-2. Ensure `.niwa/surface.token` exists (regenerate on
-   `--rotate-token`).
-3. Bind `127.0.0.1:<port>` (ephemeral by default; `--port N` overrides).
-4. Write the bound port to `.niwa/surface.port` atomically.
-5. Print the URL and token-file path to stderr.
-6. Run the GC sweep once, then start the listener.
+1. Read `~/.config/niwa/config.toml` and enumerate every registered
+   workspace.
+2. For each workspace, discover every niwa instance — the workspace
+   root itself plus any first-level sub-directory containing a
+   `.niwa/` marker.
+3. Acquire `~/.config/niwa/surface.lock` (PID file, mode `0o600`).
+   If the lock exists with a dead PID, the surface reaps it and
+   retries once. If the lock holder is alive, the boot exits 1 with
+   `surface.lock held by PID <N>`.
+4. Generate `~/.config/niwa/surface.token` if absent (or if
+   `--rotate-token` is set).
+5. Bind 127.0.0.1 on a kernel-assigned ephemeral port (override with
+   `--port N`). Write the actual port to `~/.config/niwa/surface.port`
+   atomically.
+6. Print the URL and token path to stderr.
+7. Run one synchronous GC sweep across every discovered instance,
+   then start the 6-hour ticker.
+8. Serve HTTP requests until SIGINT or SIGTERM.
 
-On shutdown:
+On shutdown (5-second grace):
 
-- Catch SIGINT/SIGTERM.
-- `http.Server.Shutdown` with a 5-second deadline.
-- Remove `.niwa/surface.lock` and `.niwa/surface.port`.
-- Leave `.niwa/surface.token` in place so a restart doesn't invalidate
-  open browser tabs.
+- `http.Server.Shutdown(ctx)` drains in-flight requests.
+- `~/.config/niwa/surface.lock` and `~/.config/niwa/surface.port`
+  are removed.
+- `~/.config/niwa/surface.token` persists so a restart is a no-op
+  for any browser tab holding the current token.
 
-The token contents are never printed to stderr or the audit log. Only
-the path to the token file is shown.
+Discovery happens **at boot only**. If you register a new workspace
+or add an instance directory while the surface is running, restart
+the surface to pick it up.
+
+## Agent-side review (no surface required)
+
+Agents inside the niwa mesh can read each other's changes via the
+MCP tools — `niwa surface serve` is for *Dan's browser*, not for
+agents:
+
+| MCP tool | Purpose |
+|----------|---------|
+| `niwa_create_change(session_id)` | Register a reviewable change |
+| `niwa_list_changes` | List changes in the calling agent's instance |
+| `niwa_query_change(change_id)` | Read the full change state + recent transitions |
+
+These tools work whether or not `niwa surface serve` is running, and
+they read directly from `.niwa/changes/<id>/state.json` and
+`transitions.log`. Cross-instance agent visibility is **not** in F5
+scope — each MCP server serves its own instance only.
 
 ## Troubleshooting
 
-### Stale lock
+**Surface won't start: "surface.lock held by PID …"**
+Another `niwa surface serve` is running on this machine. Either stop
+it (`kill <PID>`) or use the live one. Niwa enforces one surface per
+user.
 
-If `niwa surface serve` reports `lock held by PID 12345`, the previous
-process likely crashed without cleaning up. Check whether PID 12345 is
-alive:
+**Surface won't start: "surface.lock held by PID …" but no process is alive**
+Stale lock from a crash. Niwa attempts a single reap-and-retry; if
+the lock contents looked alive at first read but the process exited
+during the retry, run again — the second attempt will reap the now-
+truly-stale lock. If the issue persists, remove the file:
+`rm ~/.config/niwa/surface.lock`.
 
-```
-$ ps -p 12345
-```
+**`--port N` exits 1 with "bind: address already in use"**
+Another process holds port N. Pick a different port or rely on the
+kernel-assigned ephemeral default.
 
-If the PID is gone, the surface reaps the stale lock on its next boot
-attempt — try the command again. If the PID belongs to a live niwa
-process, that's the legitimate holder; only one surface per instance.
+**Index page is empty after creating a change**
+The change was created in an instance that the surface didn't see at
+boot. Check that the workspace is in `~/.config/niwa/config.toml`'s
+`[registry]` section, and that the instance directory exists with a
+`.niwa/` subdirectory. Restart the surface — discovery is boot-only.
 
-### Port collision
+**URLs in agent output contain `<port>` placeholder**
+The surface wasn't running when the agent emitted the URL. The
+change ID itself is the durable anchor; once the surface boots, the
+URL resolves verbatim because the URL composition reads the live
+port file on every emit.
 
-`--port N` binds a specific port. If something else owns it, the
-listener fails with `bind 127.0.0.1:N: address already in use`. Pick a
-different port or omit the flag to let the kernel pick an ephemeral
-one.
+**URLs in agent output contain `<workspace>` or `<instance>` placeholder**
+The agent's niwa instance is not under any registered workspace.
+Run `niwa init <name>` in the workspace root and apply, then
+restart any open sessions so the next URL composition picks up the
+registry change.
 
-### Missing `.niwa/surface.port`
-
-The agent returns a URL with `<port>` instead of a real number when
-`.niwa/surface.port` doesn't exist. That just means the listener isn't
-running. Start it, then re-query the change via `niwa_query_change` to
-get a resolved URL.
-
-### Where the audit log goes
-
-Both `niwa surface serve` and `niwa mcp-serve` append to the same
-`.niwa/mcp-audit.log`. The schema is v=2 NDJSON; the `kind` field
-distinguishes `tool_call` entries (from MCP dispatch) from `event`
-entries (change-lifecycle hooks). `tail -f` works fine for live
-inspection.
+**`niwa surface serve` exits 1 with `invalid gc_interval_hours`**
+A future config-file integration will allow `gc_interval_hours` and
+`gc_abandon_days` to be overridden; until then the compiled-in
+defaults (6 hours, 14 days) are the only supported values and this
+error indicates a buggy build. File an issue.

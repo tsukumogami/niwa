@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tsukumogami/niwa/internal/config"
 	"github.com/tsukumogami/niwa/internal/mcp"
 )
 
@@ -79,14 +80,35 @@ func seedChange(t *testing.T, root, state string, diff []byte) string {
 	return id
 }
 
+// testWorkspace and testInstance are the synthetic identifiers used by
+// these tests' fixture. Real callers consume identifiers from the
+// global registry; the tests just need stable strings to slot into
+// URLs.
+const (
+	testWorkspace = "ws"
+	testInstance  = "inst"
+)
+
+// testChangesPrefix is the per-instance URL prefix tests use to build
+// per-change URLs. Centralising it keeps the URL contract change
+// (hierarchical /workspaces/<ws>/<inst>/changes/) in one place.
+const testChangesPrefix = "/workspaces/" + testWorkspace + "/" + testInstance + "/changes/"
+
 // newTestServer wires the F5 surface onto an httptest.Server backed by
-// a fresh temp instance root. Returns the test server, the sink the
-// handlers were configured with, and the instance root path.
+// a fresh temp instance root. The test configures one instance under
+// (testWorkspace, testInstance) → root, and a SinkFor factory that
+// returns the shared recording sink so tests can count emitted events.
+// Returns the test server, the recording sink, and the instance root.
 func newTestServer(t *testing.T) (*httptest.Server, *recordingSink, string) {
 	t.Helper()
 	root := t.TempDir()
 	sink := &recordingSink{}
-	h := &Handlers{InstanceRoot: root, Sink: sink}
+	h := &Handlers{
+		Instances: []config.WorkspaceInstance{
+			{Workspace: testWorkspace, Instance: testInstance, Root: root},
+		},
+		SinkFor: func(string) mcp.AuditSink { return sink },
+	}
 	mux := http.NewServeMux()
 	h.RegisterRoutes(mux)
 	ts := httptest.NewServer(mux)
@@ -94,9 +116,9 @@ func newTestServer(t *testing.T) (*httptest.Server, *recordingSink, string) {
 	return ts, sink, root
 }
 
-// TestGetRootRedirectsToChanges covers PRD R6 step 1: GET / → 302
-// /changes/. CheckRedirect short-circuits so we can inspect the 302.
-func TestGetRootRedirectsToChanges(t *testing.T) {
+// TestGetRootRedirectsToWorkspaces covers PRD R6 step 1: GET / → 302
+// /workspaces/. CheckRedirect short-circuits so we can inspect the 302.
+func TestGetRootRedirectsToWorkspaces(t *testing.T) {
 	ts, _, _ := newTestServer(t)
 	client := &http.Client{
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
@@ -111,8 +133,8 @@ func TestGetRootRedirectsToChanges(t *testing.T) {
 	if resp.StatusCode != http.StatusFound {
 		t.Fatalf("status = %d, want 302", resp.StatusCode)
 	}
-	if loc := resp.Header.Get("Location"); loc != "/changes/" {
-		t.Errorf("Location = %q, want /changes/", loc)
+	if loc := resp.Header.Get("Location"); loc != "/workspaces/" {
+		t.Errorf("Location = %q, want /workspaces/", loc)
 	}
 }
 
@@ -128,7 +150,7 @@ func TestGetChangeHappyPath(t *testing.T) {
 	diff := []byte("diff --git a/x b/x\n--- a/x\nbody-marker-hello-world\n")
 	id := seedChange(t, root, mcp.ChangeStatePending, diff)
 
-	resp, err := http.Get(ts.URL + "/changes/" + id)
+	resp, err := http.Get(ts.URL + testChangesPrefix + id)
 	if err != nil {
 		t.Fatalf("GET: %v", err)
 	}
@@ -151,7 +173,7 @@ func TestGetChangeFirstHitAdvancesPendingToInReview(t *testing.T) {
 	ts, _, root := newTestServer(t)
 	id := seedChange(t, root, mcp.ChangeStatePending, []byte("diff body"))
 
-	resp, err := http.Get(ts.URL + "/changes/" + id)
+	resp, err := http.Get(ts.URL + testChangesPrefix + id)
 	if err != nil {
 		t.Fatalf("GET: %v", err)
 	}
@@ -175,7 +197,7 @@ func TestGetChangeSecondHitIsNoOp(t *testing.T) {
 	id := seedChange(t, root, mcp.ChangeStatePending, []byte("diff body"))
 
 	// First hit → advances pending → in-review.
-	resp, err := http.Get(ts.URL + "/changes/" + id)
+	resp, err := http.Get(ts.URL + testChangesPrefix + id)
 	if err != nil {
 		t.Fatalf("first GET: %v", err)
 	}
@@ -195,7 +217,7 @@ func TestGetChangeSecondHitIsNoOp(t *testing.T) {
 	time.Sleep(2 * time.Millisecond)
 
 	// Second hit → no-op.
-	resp, err = http.Get(ts.URL + "/changes/" + id)
+	resp, err = http.Get(ts.URL + testChangesPrefix + id)
 	if err != nil {
 		t.Fatalf("second GET: %v", err)
 	}
@@ -222,7 +244,7 @@ func TestGetChangeEmitsChangeEngagedPerHit(t *testing.T) {
 	id := seedChange(t, root, mcp.ChangeStatePending, []byte("diff body"))
 
 	for i := range 2 {
-		resp, err := http.Get(ts.URL + "/changes/" + id)
+		resp, err := http.Get(ts.URL + testChangesPrefix + id)
 		if err != nil {
 			t.Fatalf("GET %d: %v", i, err)
 		}
@@ -238,7 +260,7 @@ func TestGetChangeEmitsChangeEngagedPerHit(t *testing.T) {
 // one review_surface_opened audit event.
 func TestGetIndexEmitsReviewSurfaceOpened(t *testing.T) {
 	ts, sink, _ := newTestServer(t)
-	resp, err := http.Get(ts.URL + "/changes/")
+	resp, err := http.Get(ts.URL + "/workspaces/" + testWorkspace + "/" + testInstance + "/changes/")
 	if err != nil {
 		t.Fatalf("GET: %v", err)
 	}
@@ -262,7 +284,7 @@ func TestGetIndexCleanedAfterNonCleaned(t *testing.T) {
 	time.Sleep(time.Millisecond)
 	inReviewID := seedChange(t, root, mcp.ChangeStateInReview, []byte("r"))
 
-	resp, err := http.Get(ts.URL + "/changes/")
+	resp, err := http.Get(ts.URL + "/workspaces/" + testWorkspace + "/" + testInstance + "/changes/")
 	if err != nil {
 		t.Fatalf("GET: %v", err)
 	}
@@ -295,13 +317,13 @@ func TestGetChange404OnMalformedID(t *testing.T) {
 		"00000000000040008000000000000000",     // missing dashes
 		"../etc/passwd",
 	} {
-		resp, err := http.Get(ts.URL + "/changes/" + bogus)
+		resp, err := http.Get(ts.URL + "/workspaces/" + testWorkspace + "/" + testInstance + "/changes/" + bogus)
 		if err != nil {
 			t.Fatalf("GET %s: %v", bogus, err)
 		}
 		resp.Body.Close()
 		if resp.StatusCode != http.StatusNotFound {
-			t.Errorf("GET /changes/%s status = %d, want 404", bogus, resp.StatusCode)
+			t.Errorf("GET %s%s status = %d, want 404", testChangesPrefix, bogus, resp.StatusCode)
 		}
 	}
 }
@@ -310,7 +332,7 @@ func TestGetChange404OnMalformedID(t *testing.T) {
 // on-disk match returns 404.
 func TestGetChange404OnUnknownID(t *testing.T) {
 	ts, _, _ := newTestServer(t)
-	resp, err := http.Get(ts.URL + "/changes/11111111-2222-4333-8444-555555555555")
+	resp, err := http.Get(ts.URL + testChangesPrefix + "11111111-2222-4333-8444-555555555555")
 	if err != nil {
 		t.Fatalf("GET: %v", err)
 	}
@@ -337,7 +359,7 @@ func TestGetChange50kBDiffUnder50ms(t *testing.T) {
 	id := seedChange(t, root, mcp.ChangeStatePending, []byte(buf.String()))
 
 	start := time.Now()
-	resp, err := http.Get(ts.URL + "/changes/" + id)
+	resp, err := http.Get(ts.URL + testChangesPrefix + id)
 	if err != nil {
 		t.Fatalf("GET: %v", err)
 	}
@@ -368,7 +390,7 @@ func TestGetChangeConcurrentFirstHits(t *testing.T) {
 	var wg sync.WaitGroup
 	for range 5 {
 		wg.Go(func() {
-			resp, err := http.Get(ts.URL + "/changes/" + id)
+			resp, err := http.Get(ts.URL + testChangesPrefix + id)
 			if err != nil {
 				t.Errorf("GET: %v", err)
 				return

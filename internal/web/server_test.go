@@ -11,7 +11,7 @@ import (
 )
 
 func TestNew_BindsToLoopback(t *testing.T) {
-	srv, ln, _, err := New(context.Background(), Config{Port: 0})
+	srv, ln, err := New(context.Background(), Config{Port: 0})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -28,7 +28,7 @@ func TestNew_BindsToLoopback(t *testing.T) {
 }
 
 func TestNew_EphemeralPortWhenZero(t *testing.T) {
-	_, ln, _, err := New(context.Background(), Config{Port: 0})
+	_, ln, err := New(context.Background(), Config{Port: 0})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -42,14 +42,16 @@ func TestNew_EphemeralPortWhenZero(t *testing.T) {
 	}
 }
 
-// TestNew_RoutesWired confirms New() registers the three F5 GET routes
-// with real handlers (not 501 stubs). The exhaustive behavioural
+// TestNew_RoutesWired confirms New() registers the hierarchical F5 GET
+// routes with real handlers (not 501 stubs). The exhaustive behavioural
 // coverage of each route lives in handlers_test.go; this test only
 // checks that the wiring exists.
 func TestNew_RoutesWired(t *testing.T) {
-	srv, ln, _, err := New(context.Background(), Config{
-		InstanceRoot: t.TempDir(),
-		Port:         0,
+	srv, ln, err := New(context.Background(), Config{
+		Port: 0,
+		// Empty instance list — the surface still boots and serves the
+		// workspaces-index / 404 paths; per-instance route coverage
+		// lives in handlers_test.go where the fixture is richer.
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -71,10 +73,11 @@ func TestNew_RoutesWired(t *testing.T) {
 		path string
 		want int
 	}{
-		{"/", http.StatusFound},                                          // 302 to /changes/
-		{"/changes/", http.StatusOK},                                     // empty index renders 200
-		{"/changes/not-a-uuid", http.StatusNotFound},                     // bogus id → 404
-		{"/changes/00000000-0000-4000-8000-000000000000", http.StatusNotFound}, // valid UUIDv4, no on-disk change → 404
+		{"/", http.StatusFound},                                                  // 302 to /workspaces/
+		{"/workspaces/", http.StatusOK},                                          // empty workspaces index renders 200
+		{"/workspaces/missing/", http.StatusNotFound},                            // unknown workspace → 404
+		{"/workspaces/missing/inst/changes/", http.StatusNotFound},               // unknown instance → 404
+		{"/workspaces/missing/inst/changes/not-a-uuid", http.StatusNotFound},     // bogus id (also unknown instance) → 404
 	} {
 		t.Run(tc.path, func(t *testing.T) {
 			resp, err := client.Get(ts.URL + tc.path)
@@ -90,7 +93,7 @@ func TestNew_RoutesWired(t *testing.T) {
 }
 
 func TestCORSStrip_RejectsCrossOrigin(t *testing.T) {
-	srv, ln, _, err := New(context.Background(), Config{Port: 0})
+	srv, ln, err := New(context.Background(), Config{Port: 0})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -100,7 +103,7 @@ func TestCORSStrip_RejectsCrossOrigin(t *testing.T) {
 	ts := httptest.NewServer(srv.Handler)
 	defer ts.Close()
 
-	req, err := http.NewRequest("GET", ts.URL+"/changes/", nil)
+	req, err := http.NewRequest("GET", ts.URL+"/workspaces/", nil)
 	if err != nil {
 		t.Fatalf("NewRequest: %v", err)
 	}
@@ -116,7 +119,7 @@ func TestCORSStrip_RejectsCrossOrigin(t *testing.T) {
 }
 
 func TestNoCORSHeadersInResponses(t *testing.T) {
-	srv, ln, _, err := New(context.Background(), Config{Port: 0})
+	srv, ln, err := New(context.Background(), Config{Port: 0})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -126,7 +129,7 @@ func TestNoCORSHeadersInResponses(t *testing.T) {
 	ts := httptest.NewServer(srv.Handler)
 	defer ts.Close()
 
-	resp, err := http.Get(ts.URL + "/changes/")
+	resp, err := http.Get(ts.URL + "/workspaces/")
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}

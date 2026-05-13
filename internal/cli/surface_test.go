@@ -16,17 +16,27 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// surfaceDirName is the conventional name of the niwa state directory
+// inside the test fixture's root. The surface command was originally
+// per-instance (lock/token/port lived under `<instance>/.niwa/`); after
+// the F5 reshape it is machine-level and the lock/token/port live under
+// the niwa config directory. These tests piggyback on the old layout by
+// pointing surfaceServeMachine's configDir at `<root>/.niwa/` — same
+// on-disk shape, the helper invocations need not learn machine-level
+// paths to exercise the lifecycle.
+const surfaceDirName = ".niwa"
+
 // newSurfaceTestInstance builds a tmp instance root with .niwa/ in
 // place. Returns the absolute instance root path. .niwa/instance.json is
-// not strictly required for surfaceServeInstance (it takes instanceRoot
+// not strictly required for surfaceServeMachine (it takes instanceRoot
 // directly) but tests that need resolveInstanceRoot also pick it up.
 func newSurfaceTestInstance(t *testing.T) string {
 	t.Helper()
 	root := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(root, niwaDirName), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(root, surfaceDirName), 0o755); err != nil {
 		t.Fatalf("mkdir .niwa: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(root, niwaDirName, "instance.json"),
+	if err := os.WriteFile(filepath.Join(root, surfaceDirName, "instance.json"),
 		[]byte(`{"v":1}`), 0o600); err != nil {
 		t.Fatalf("write instance.json: %v", err)
 	}
@@ -53,7 +63,7 @@ func reapedDeadPID(t *testing.T) int {
 // holding the current PID.
 func TestAcquireSurfaceLock_FreshSucceeds(t *testing.T) {
 	root := newSurfaceTestInstance(t)
-	lockPath := filepath.Join(root, niwaDirName, surfaceLockFileName)
+	lockPath := filepath.Join(root, surfaceDirName, surfaceLockFileName)
 
 	if err := acquireSurfaceLock(lockPath); err != nil {
 		t.Fatalf("acquireSurfaceLock: %v", err)
@@ -77,7 +87,7 @@ func TestAcquireSurfaceLock_FreshSucceeds(t *testing.T) {
 // reap fired, not a silent acceptance of the stale file.
 func TestAcquireSurfaceLock_StaleReap(t *testing.T) {
 	root := newSurfaceTestInstance(t)
-	lockPath := filepath.Join(root, niwaDirName, surfaceLockFileName)
+	lockPath := filepath.Join(root, surfaceDirName, surfaceLockFileName)
 	deadPID := reapedDeadPID(t)
 	if err := os.WriteFile(lockPath, []byte(strconv.Itoa(deadPID)+"\n"), 0o600); err != nil {
 		t.Fatalf("seed stale lock: %v", err)
@@ -103,7 +113,7 @@ func TestAcquireSurfaceLock_StaleReap(t *testing.T) {
 // operator guide.
 func TestAcquireSurfaceLock_LiveExitsWithMessage(t *testing.T) {
 	root := newSurfaceTestInstance(t)
-	lockPath := filepath.Join(root, niwaDirName, surfaceLockFileName)
+	lockPath := filepath.Join(root, surfaceDirName, surfaceLockFileName)
 	livePID := os.Getpid()
 	if err := os.WriteFile(lockPath, []byte(strconv.Itoa(livePID)+"\n"), 0o600); err != nil {
 		t.Fatalf("seed live lock: %v", err)
@@ -127,7 +137,7 @@ func TestAcquireSurfaceLock_LiveExitsWithMessage(t *testing.T) {
 // would brick the surface until the operator manually deletes the file.
 func TestAcquireSurfaceLock_CorruptReap(t *testing.T) {
 	root := newSurfaceTestInstance(t)
-	lockPath := filepath.Join(root, niwaDirName, surfaceLockFileName)
+	lockPath := filepath.Join(root, surfaceDirName, surfaceLockFileName)
 	if err := os.WriteFile(lockPath, []byte("not-a-pid\n"), 0o600); err != nil {
 		t.Fatalf("seed corrupt lock: %v", err)
 	}
@@ -142,7 +152,7 @@ func TestAcquireSurfaceLock_CorruptReap(t *testing.T) {
 // the expected path with mode 0o600.
 func TestEnsureSurfaceToken_GeneratesOnAbsent(t *testing.T) {
 	root := newSurfaceTestInstance(t)
-	niwaDir := filepath.Join(root, niwaDirName)
+	niwaDir := filepath.Join(root, surfaceDirName)
 
 	path, err := ensureSurfaceToken(niwaDir, false)
 	if err != nil {
@@ -170,7 +180,7 @@ func TestEnsureSurfaceToken_GeneratesOnAbsent(t *testing.T) {
 // guarantees no surreptitious rewrite.
 func TestEnsureSurfaceToken_PreservesExisting(t *testing.T) {
 	root := newSurfaceTestInstance(t)
-	niwaDir := filepath.Join(root, niwaDirName)
+	niwaDir := filepath.Join(root, surfaceDirName)
 	tokenPath := filepath.Join(niwaDir, surfaceTokenFileName)
 	original := []byte("preserved-token-bytes\n")
 	if err := os.WriteFile(tokenPath, original, 0o600); err != nil {
@@ -195,7 +205,7 @@ func TestEnsureSurfaceToken_PreservesExisting(t *testing.T) {
 // preserve branch would fail here.
 func TestEnsureSurfaceToken_RotateRewrites(t *testing.T) {
 	root := newSurfaceTestInstance(t)
-	niwaDir := filepath.Join(root, niwaDirName)
+	niwaDir := filepath.Join(root, surfaceDirName)
 	tokenPath := filepath.Join(niwaDir, surfaceTokenFileName)
 	original := []byte("old-token\n")
 	if err := os.WriteFile(tokenPath, original, 0o600); err != nil {
@@ -224,7 +234,7 @@ func TestEnsureSurfaceToken_RotateRewrites(t *testing.T) {
 // niwa_query_change so a torn write would surface as a malformed URL.
 func TestWriteSurfacePort_Atomic(t *testing.T) {
 	root := newSurfaceTestInstance(t)
-	portPath := filepath.Join(root, niwaDirName, surfacePortFileName)
+	portPath := filepath.Join(root, surfaceDirName, surfacePortFileName)
 
 	if err := writeSurfacePort(portPath, 54321); err != nil {
 		t.Fatalf("writeSurfacePort: %v", err)
@@ -243,7 +253,7 @@ func TestWriteSurfacePort_Atomic(t *testing.T) {
 	}
 }
 
-// runSurfaceServeFor runs surfaceServeInstance in a goroutine with a
+// runSurfaceServeFor runs surfaceServeMachine in a goroutine with a
 // cancellable context, waits for surface.port to appear (signalling
 // boot completed), then returns a cancel function the caller invokes to
 // drive shutdown. The third return is the stderr buffer so callers can
@@ -260,11 +270,11 @@ func runSurfaceServeFor(t *testing.T, root string, port int, rotateToken bool) (
 
 	exit := make(chan error, 1)
 	go func() {
-		exit <- surfaceServeInstance(cmd, root, port, rotateToken)
+		exit <- surfaceServeMachine(cmd, filepath.Join(root, surfaceDirName), nil, port, rotateToken)
 	}()
 
 	// Wait for surface.port to appear — that's our boot-complete signal.
-	portPath := filepath.Join(root, niwaDirName, surfacePortFileName)
+	portPath := filepath.Join(root, surfaceDirName, surfacePortFileName)
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
 		if _, err := os.Stat(portPath); err == nil {
@@ -272,7 +282,7 @@ func runSurfaceServeFor(t *testing.T, root string, port int, rotateToken bool) (
 		}
 		select {
 		case err := <-exit:
-			t.Fatalf("surfaceServeInstance exited during boot: %v", err)
+			t.Fatalf("surfaceServeMachine exited during boot: %v", err)
 		case <-time.After(25 * time.Millisecond):
 		}
 	}
@@ -295,7 +305,7 @@ func TestSurfaceServe_BootWritesPort(t *testing.T) {
 	cancel, _, done := runSurfaceServeFor(t, root, 0, false)
 	defer cancel()
 
-	portPath := filepath.Join(root, niwaDirName, surfacePortFileName)
+	portPath := filepath.Join(root, surfaceDirName, surfacePortFileName)
 	data, err := os.ReadFile(portPath)
 	if err != nil {
 		t.Fatalf("read surface.port: %v", err)
@@ -312,7 +322,7 @@ func TestSurfaceServe_BootWritesPort(t *testing.T) {
 	select {
 	case <-done:
 	case <-time.After(surfaceShutdownGrace + 2*time.Second):
-		t.Fatalf("surfaceServeInstance did not exit within shutdown grace")
+		t.Fatalf("surfaceServeMachine did not exit within shutdown grace")
 	}
 }
 
@@ -328,7 +338,7 @@ func TestSurfaceServe_ShutdownCleansLockAndPortKeepsToken(t *testing.T) {
 	cancel, _, done := runSurfaceServeFor(t, root, 0, false)
 	defer cancel()
 
-	niwaDir := filepath.Join(root, niwaDirName)
+	niwaDir := filepath.Join(root, surfaceDirName)
 	if _, err := os.Stat(filepath.Join(niwaDir, surfaceLockFileName)); err != nil {
 		t.Fatalf("surface.lock missing before shutdown: %v", err)
 	}
@@ -342,10 +352,10 @@ func TestSurfaceServe_ShutdownCleansLockAndPortKeepsToken(t *testing.T) {
 	select {
 	case err := <-done:
 		if err != nil {
-			t.Errorf("surfaceServeInstance returned error on shutdown: %v", err)
+			t.Errorf("surfaceServeMachine returned error on shutdown: %v", err)
 		}
 	case <-time.After(surfaceShutdownGrace + 2*time.Second):
-		t.Fatalf("surfaceServeInstance did not exit within shutdown grace (%v)", time.Since(start))
+		t.Fatalf("surfaceServeMachine did not exit within shutdown grace (%v)", time.Since(start))
 	}
 	if elapsed := time.Since(start); elapsed > surfaceShutdownGrace+1*time.Second {
 		t.Errorf("shutdown took %v, want <= %v", elapsed, surfaceShutdownGrace+1*time.Second)
@@ -377,7 +387,7 @@ func TestSurfaceServe_BannerWithoutTokenContents(t *testing.T) {
 	cancel, stderr, done := runSurfaceServeFor(t, root, 0, false)
 	defer cancel()
 
-	tokenPath := filepath.Join(root, niwaDirName, surfaceTokenFileName)
+	tokenPath := filepath.Join(root, surfaceDirName, surfaceTokenFileName)
 	tokenBytes, err := os.ReadFile(tokenPath)
 	if err != nil {
 		t.Fatalf("read token: %v", err)
@@ -405,10 +415,10 @@ func TestSurfaceServe_BannerWithoutTokenContents(t *testing.T) {
 // TestSurfaceServe_RotateTokenFlag covers --rotate-token end-to-end:
 // the boot regenerates the on-disk token even when one already exists.
 // Separates from the unit-level TestEnsureSurfaceToken_RotateRewrites
-// by exercising the flag through surfaceServeInstance's full path.
+// by exercising the flag through surfaceServeMachine's full path.
 func TestSurfaceServe_RotateTokenFlag(t *testing.T) {
 	root := newSurfaceTestInstance(t)
-	tokenPath := filepath.Join(root, niwaDirName, surfaceTokenFileName)
+	tokenPath := filepath.Join(root, surfaceDirName, surfaceTokenFileName)
 	original := []byte("pre-rotation-sentinel\n")
 	if err := os.WriteFile(tokenPath, original, 0o600); err != nil {
 		t.Fatalf("seed token: %v", err)
@@ -431,12 +441,12 @@ func TestSurfaceServe_RotateTokenFlag(t *testing.T) {
 
 // TestSurfaceServe_LivePIDExitsBeforeBind asserts the live-holder path
 // short-circuits the boot before any port is bound. A second
-// surfaceServeInstance call against the same instance, after the first
+// surfaceServeMachine call against the same instance, after the first
 // has acquired the lock, returns the "held by" error without producing
 // surface.port.
 func TestSurfaceServe_LivePIDExitsBeforeBind(t *testing.T) {
 	root := newSurfaceTestInstance(t)
-	lockPath := filepath.Join(root, niwaDirName, surfaceLockFileName)
+	lockPath := filepath.Join(root, surfaceDirName, surfaceLockFileName)
 	// Seed the lock with our own PID (guaranteed alive).
 	if err := os.WriteFile(lockPath, []byte(strconv.Itoa(os.Getpid())+"\n"), 0o600); err != nil {
 		t.Fatalf("seed lock: %v", err)
@@ -447,7 +457,7 @@ func TestSurfaceServe_LivePIDExitsBeforeBind(t *testing.T) {
 	cmd.SetErr(&bytes.Buffer{})
 	cmd.SetOut(&bytes.Buffer{})
 
-	err := surfaceServeInstance(cmd, root, 0, false)
+	err := surfaceServeMachine(cmd, filepath.Join(root, surfaceDirName), nil, 0, false)
 	if err == nil {
 		t.Fatalf("expected live-lock error, got nil")
 	}
@@ -455,7 +465,7 @@ func TestSurfaceServe_LivePIDExitsBeforeBind(t *testing.T) {
 		t.Errorf("error %q missing 'held by' phrasing", err.Error())
 	}
 	// surface.port must not have been written.
-	if _, statErr := os.Stat(filepath.Join(root, niwaDirName, surfacePortFileName)); !errors.Is(statErr, os.ErrNotExist) {
+	if _, statErr := os.Stat(filepath.Join(root, surfaceDirName, surfacePortFileName)); !errors.Is(statErr, os.ErrNotExist) {
 		t.Errorf("surface.port created despite live-lock exit: %v", statErr)
 	}
 }
@@ -483,7 +493,7 @@ func TestSurfaceServe_FixedPort(t *testing.T) {
 	cancel, _, done := runSurfaceServeFor(t, root, requestedPort, false)
 	defer cancel()
 
-	data, err := os.ReadFile(filepath.Join(root, niwaDirName, surfacePortFileName))
+	data, err := os.ReadFile(filepath.Join(root, surfaceDirName, surfacePortFileName))
 	if err != nil {
 		t.Fatalf("read surface.port: %v", err)
 	}

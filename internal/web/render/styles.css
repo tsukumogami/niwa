@@ -100,3 +100,52 @@ ul.changes a:hover {
   color: #888;
   font-style: italic;
 }
+
+.breadcrumbs {
+  font-size: 0.85rem;
+  color: #666;
+  margin-bottom: 1rem;
+}
+
+.breadcrumbs a {
+  color: #084298;
+  text-decoration: none;
+}
+
+.breadcrumbs a:hover {
+  text-decoration: underline;
+}
+
+ul.workspaces, ul.instances {
+  list-style: none;
+  padding: 0;
+}
+
+ul.workspaces li, ul.instances li {
+  padding: 0.5rem 0;
+  border-bottom: 1px solid #eee;
+}
+
+ul.workspaces a, ul.instances a {
+  color: #084298;
+  text-decoration: none;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+ul.workspaces a:hover, ul.instances a:hover {
+  text-decoration: underline;
+}
+
+ul.workspaces .count {
+  margin-left: 0.75rem;
+  color: #888;
+  font-size: 0.85rem;
+}
+
+ul.instances .path {
+  display: block;
+  color: #888;
+  font-size: 0.8rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  margin-top: 0.15rem;
+}

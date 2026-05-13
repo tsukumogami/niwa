@@ -139,8 +139,8 @@ func TestRenderIndex_EmptyShowsNoChangesYet(t *testing.T) {
 	if err := RenderIndex(&buf, IndexData{}); err != nil {
 		t.Fatalf("RenderIndex: %v", err)
 	}
-	if !strings.Contains(buf.String(), "No changes yet") {
-		t.Errorf("empty index missing 'No changes yet' copy:\n%s", buf.String())
+	if !strings.Contains(buf.String(), "No changes in review yet") {
+		t.Errorf("empty index missing 'No changes in review yet' copy:\n%s", buf.String())
 	}
 }
 

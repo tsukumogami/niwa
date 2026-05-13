@@ -85,6 +85,54 @@ rationale: |
 
 Planned
 
+## Amendments
+
+### A1: Reshape from per-instance to machine-scope `niwa surface serve`
+
+The original design split F5 into a per-session `niwa mcp-serve` and a
+per-instance `niwa surface serve`. Operator feedback during
+implementation flagged that with 3–10 active niwa instances per
+machine the per-instance shape produces 3–10 separate HTTP listeners
+on 3–10 separate ephemeral ports — a fleet-scale ergonomic gap that
+forecloses agent-to-agent visibility across instances.
+
+The amendment: `niwa surface serve` is now **one process per machine**.
+At boot it reads the user's global config (`~/.config/niwa/config.toml`
+honoring `XDG_CONFIG_HOME`), enumerates every workspace in the
+`[registry]` section, and discovers every niwa instance (the workspace
+root itself + any first-level sub-directory containing a `.niwa/`)
+under each workspace. The listener federates across all of them; the
+GC sweep iterates each in turn.
+
+The shifts:
+
+| Concern | Original | Amended |
+|---------|----------|---------|
+| Process scope | Per niwa instance | One per machine |
+| Workspace discovery | None — each instance owned its listener | Reads `~/.config/niwa/config.toml` `[registry]` |
+| URL contract | `http://127.0.0.1:<port>/changes/<id>#comment-<id>` | `http://127.0.0.1:<port>/workspaces/<workspace>/<instance>/changes/<id>#comment-<id>` |
+| Lock file | `<instance>/.niwa/surface.lock` | `~/.config/niwa/surface.lock` |
+| Token file | `<instance>/.niwa/surface.token` | `~/.config/niwa/surface.token` |
+| Port file | `<instance>/.niwa/surface.port` | `~/.config/niwa/surface.port` |
+| GC scope | One instance | Federated across every discovered instance, each with its own audit sink so cleanup events still co-locate with the change data |
+| Audit log placement | Per-instance | Unchanged — each instance still owns its own `<instance>/.niwa/mcp-audit.log`. Only the listener and lifecycle moved up; the data plane stays where it was. |
+
+The `originating_sessions: [<sid>]` plural field is also amended to
+the singular `originating_session: <sid>`. Each session-branch is
+owned by a single agent; the plural shape was YAGNI under that
+ownership model.
+
+The Telegram bridge — Decision D1 in the PRD — remains fully
+deferred. F5 no longer claims any Telegram delivery; the
+`change_ready` event lands in the per-instance `mcp-audit.log` and a
+separate spec (yet to be filed) decides how it reaches a notification
+channel.
+
+All other shapes locked by the PRD (the schemas, the four-event
+taxonomy, the MCP tool I/O shapes, the auth contract, the base-ref
+precedence, the GC abandonment thresholds, the diff-snapshot
+strategy) are unchanged.
+
 ## Context and Problem Statement
 
 niwa's collab surface roadmap (F5–F15) encodes every downstream feature

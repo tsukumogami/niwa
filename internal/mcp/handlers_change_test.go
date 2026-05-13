@@ -11,6 +11,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/tsukumogami/niwa/internal/config"
 )
 
 // runGit runs `git args...` inside dir. Fails the test on non-zero exit
@@ -156,8 +158,40 @@ func setupChangeSession(t *testing.T, root, sid, worktree string) {
 // newChangeTestServer returns a Server pre-wired to root with a working
 // file-backed audit sink (so tests can assert audit-log lines). The
 // minimal field set covers everything handlers_change.go touches.
-func newChangeTestServer(root string) *Server {
+//
+// URL composition: the machine-level surface.port lives under
+// surfaceConfigDirFn(). The test stubs that function variable to a
+// per-test sub-directory of `root` so writes to "the port file" land
+// somewhere the test can observe AND the function indirection makes
+// it safe to alter from concurrent tests via t.Cleanup. The same
+// helper stubs the workspace-instance resolver so URLs in test output
+// carry stable workspace+instance placeholders rather than depending
+// on the developer's real ~/.config/niwa/config.toml.
+func newChangeTestServer(t testing.TB, root string) *Server {
+	t.Helper()
 	_ = os.MkdirAll(filepath.Join(root, ".niwa"), 0o700)
+
+	// Per-test surface config dir keeps surface.port writes isolated.
+	surfaceDir := filepath.Join(root, ".niwa", "surface-test-cfg")
+	_ = os.MkdirAll(surfaceDir, 0o700)
+	origDirFn := surfaceConfigDirFn
+	origLoadFn := loadGlobalConfigFn
+	origResolveFn := resolveWorkspaceInstanceFn
+	surfaceConfigDirFn = func() (string, error) { return surfaceDir, nil }
+	loadGlobalConfigFn = func() (*config.GlobalConfig, error) {
+		return &config.GlobalConfig{}, nil
+	}
+	resolveWorkspaceInstanceFn = func(_ *config.GlobalConfig, _ string) (string, string, error) {
+		// Default fallback: unregistered. Tests that want a registered
+		// identity rebind this function themselves.
+		return "", "", config.ErrInstanceNotUnderWorkspace
+	}
+	t.Cleanup(func() {
+		surfaceConfigDirFn = origDirFn
+		loadGlobalConfigFn = origLoadFn
+		resolveWorkspaceInstanceFn = origResolveFn
+	})
+
 	return &Server{
 		instanceRoot: root,
 		audit:        NewFileAuditSink(root),
@@ -200,7 +234,7 @@ func TestHandleCreateChange_HappyPath(t *testing.T) {
 	wt, baseSHA, headSHA := setupRemoteFixture(t, root, "base\n", "base\nhead\n", "main", "feature")
 	sid := "deadbeef"
 	setupChangeSession(t, root, sid, wt)
-	s := newChangeTestServer(root)
+	s := newChangeTestServer(t, root)
 
 	res := s.handleCreateChange(createChangeArgs{SessionID: sid})
 	resp := parseCreateResp(t, res)
@@ -258,7 +292,7 @@ func TestHandleListChanges_HappyPath(t *testing.T) {
 	wt, _, _ := setupRemoteFixture(t, root, "base\n", "base\nhead\n", "main", "feature")
 	sid := "deadbeef"
 	setupChangeSession(t, root, sid, wt)
-	s := newChangeTestServer(root)
+	s := newChangeTestServer(t, root)
 
 	res1 := s.handleCreateChange(createChangeArgs{SessionID: sid})
 	resp1 := parseCreateResp(t, res1)
@@ -326,7 +360,7 @@ func TestHandleQueryChange_HappyPath(t *testing.T) {
 	wt, _, _ := setupRemoteFixture(t, root, "base\n", "base\nhead\n", "main", "feature")
 	sid := "deadbeef"
 	setupChangeSession(t, root, sid, wt)
-	s := newChangeTestServer(root)
+	s := newChangeTestServer(t, root)
 
 	createRes := s.handleCreateChange(createChangeArgs{SessionID: sid})
 	createResp := parseCreateResp(t, createRes)
@@ -360,7 +394,7 @@ func TestHandleQueryChange_HappyPath(t *testing.T) {
 // not_found before any filesystem access (security: traversal payloads
 // like "../foo" never reach os.Open).
 func TestHandleQueryChange_NotFound_BadID(t *testing.T) {
-	s := newChangeTestServer(t.TempDir())
+	s := newChangeTestServer(t, t.TempDir())
 	res := s.handleQueryChange(queryChangeArgs{ChangeID: "../foo"})
 	if !res.IsError {
 		t.Fatalf("expected error, got: %s", res.Content[0].Text)
@@ -378,7 +412,7 @@ func TestHandleQueryChange_NotFound_Cleaned(t *testing.T) {
 	wt, _, _ := setupRemoteFixture(t, root, "base\n", "base\nhead\n", "main", "feature")
 	sid := "deadbeef"
 	setupChangeSession(t, root, sid, wt)
-	s := newChangeTestServer(root)
+	s := newChangeTestServer(t, root)
 	createResp := parseCreateResp(t, s.handleCreateChange(createChangeArgs{SessionID: sid}))
 
 	// Flip the change to cleaned state.
@@ -408,7 +442,7 @@ func TestHandleCreateChange_Idempotent(t *testing.T) {
 	wt, _, _ := setupRemoteFixture(t, root, "base\n", "base\nhead\n", "main", "feature")
 	sid := "deadbeef"
 	setupChangeSession(t, root, sid, wt)
-	s := newChangeTestServer(root)
+	s := newChangeTestServer(t, root)
 
 	resp1 := parseCreateResp(t, s.handleCreateChange(createChangeArgs{SessionID: sid}))
 	resp2 := parseCreateResp(t, s.handleCreateChange(createChangeArgs{SessionID: sid}))
@@ -439,7 +473,7 @@ func TestHandleCreateChange_Race(t *testing.T) {
 	wt, _, _ := setupRemoteFixture(t, root, "base\n", "base\nhead\n", "main", "feature")
 	sid := "deadbeef"
 	setupChangeSession(t, root, sid, wt)
-	s := newChangeTestServer(root)
+	s := newChangeTestServer(t, root)
 
 	const N = 4
 	type result struct {
@@ -509,7 +543,7 @@ func TestHandleCreateChange_Race(t *testing.T) {
 // TestHandleCreateChange_InvalidSessionID: bad session_id maps to
 // invalid_session_id before any filesystem access.
 func TestHandleCreateChange_InvalidSessionID(t *testing.T) {
-	s := newChangeTestServer(t.TempDir())
+	s := newChangeTestServer(t, t.TempDir())
 	cases := []string{"", "../foo", "DEADBEEF", "deadbee", "deadbeef1"}
 	for _, sid := range cases {
 		res := s.handleCreateChange(createChangeArgs{SessionID: sid})
@@ -526,7 +560,7 @@ func TestHandleCreateChange_InvalidSessionID(t *testing.T) {
 // TestHandleCreateChange_SessionNotFound: a well-formed session_id with
 // no on-disk record produces session_not_found.
 func TestHandleCreateChange_SessionNotFound(t *testing.T) {
-	s := newChangeTestServer(t.TempDir())
+	s := newChangeTestServer(t, t.TempDir())
 	res := s.handleCreateChange(createChangeArgs{SessionID: "deadbeef"})
 	if !res.IsError {
 		t.Fatalf("expected error, got: %s", res.Content[0].Text)
@@ -542,7 +576,7 @@ func TestHandleCreateChange_WorktreeMissing(t *testing.T) {
 	root := t.TempDir()
 	sid := "deadbeef"
 	setupChangeSession(t, root, sid, "/nonexistent/worktree/path")
-	s := newChangeTestServer(root)
+	s := newChangeTestServer(t, root)
 	res := s.handleCreateChange(createChangeArgs{SessionID: sid})
 	if !res.IsError {
 		t.Fatalf("expected error, got: %s", res.Content[0].Text)
@@ -560,7 +594,7 @@ func TestHandleCreateChange_BaseRefHintUnresolved(t *testing.T) {
 	wt, _, _ := setupRemoteFixture(t, root, "base\n", "base\nhead\n", "main", "feature")
 	sid := "deadbeef"
 	setupChangeSession(t, root, sid, wt)
-	s := newChangeTestServer(root)
+	s := newChangeTestServer(t, root)
 
 	res := s.handleCreateChange(createChangeArgs{
 		SessionID:   sid,
@@ -583,7 +617,7 @@ func TestHandleCreateChange_BaseRef_OriginHEAD(t *testing.T) {
 	wt, baseSHA, _ := setupRemoteFixture(t, root, "base\n", "base\nhead\n", "main", "feature")
 	sid := "deadbeef"
 	setupChangeSession(t, root, sid, wt)
-	s := newChangeTestServer(root)
+	s := newChangeTestServer(t, root)
 
 	resp := parseCreateResp(t, s.handleCreateChange(createChangeArgs{SessionID: sid}))
 	if resp.BaseRef != baseSHA {
@@ -599,7 +633,7 @@ func TestHandleCreateChange_BaseRef_OriginMain(t *testing.T) {
 	runGit(t, wt, "symbolic-ref", "--delete", "refs/remotes/origin/HEAD")
 	sid := "deadbeef"
 	setupChangeSession(t, root, sid, wt)
-	s := newChangeTestServer(root)
+	s := newChangeTestServer(t, root)
 
 	resp := parseCreateResp(t, s.handleCreateChange(createChangeArgs{SessionID: sid}))
 	if resp.BaseRef != baseSHA {
@@ -615,7 +649,7 @@ func TestHandleCreateChange_BaseRef_OriginMaster(t *testing.T) {
 	runGit(t, wt, "symbolic-ref", "--delete", "refs/remotes/origin/HEAD")
 	sid := "deadbeef"
 	setupChangeSession(t, root, sid, wt)
-	s := newChangeTestServer(root)
+	s := newChangeTestServer(t, root)
 
 	resp := parseCreateResp(t, s.handleCreateChange(createChangeArgs{SessionID: sid}))
 	if resp.BaseRef != baseSHA {
@@ -630,7 +664,7 @@ func TestHandleCreateChange_BaseRef_Main(t *testing.T) {
 	wt, baseSHA, _ := setupLocalFixture(t, root, "base\n", "base\nhead\n", "main", "feature")
 	sid := "deadbeef"
 	setupChangeSession(t, root, sid, wt)
-	s := newChangeTestServer(root)
+	s := newChangeTestServer(t, root)
 
 	resp := parseCreateResp(t, s.handleCreateChange(createChangeArgs{SessionID: sid}))
 	if resp.BaseRef != baseSHA {
@@ -645,7 +679,7 @@ func TestHandleCreateChange_BaseRef_Master(t *testing.T) {
 	wt, baseSHA, _ := setupLocalFixture(t, root, "base\n", "base\nhead\n", "master", "feature")
 	sid := "deadbeef"
 	setupChangeSession(t, root, sid, wt)
-	s := newChangeTestServer(root)
+	s := newChangeTestServer(t, root)
 
 	resp := parseCreateResp(t, s.handleCreateChange(createChangeArgs{SessionID: sid}))
 	if resp.BaseRef != baseSHA {
@@ -661,7 +695,7 @@ func TestHandleCreateChange_BaseRef_Unresolved(t *testing.T) {
 	wt, _, _ := setupLocalFixture(t, root, "base\n", "base\n", "trunk", "")
 	sid := "deadbeef"
 	setupChangeSession(t, root, sid, wt)
-	s := newChangeTestServer(root)
+	s := newChangeTestServer(t, root)
 
 	res := s.handleCreateChange(createChangeArgs{SessionID: sid})
 	if !res.IsError {
@@ -705,7 +739,7 @@ func TestHandleCreateChange_DiffTruncation(t *testing.T) {
 	runGit(t, wt, "commit", "-qm", "head")
 	sid := "deadbeef"
 	setupChangeSession(t, root, sid, wt)
-	s := newChangeTestServer(root)
+	s := newChangeTestServer(t, root)
 
 	resp := parseCreateResp(t, s.handleCreateChange(createChangeArgs{SessionID: sid}))
 	diffPath := filepath.Join(root, ".niwa", "changes", resp.ChangeID, "diff.patch")
@@ -736,7 +770,7 @@ func TestHandleCreateChange_EmptyDiff(t *testing.T) {
 	}
 	sid := "deadbeef"
 	setupChangeSession(t, root, sid, wt)
-	s := newChangeTestServer(root)
+	s := newChangeTestServer(t, root)
 
 	resp := parseCreateResp(t, s.handleCreateChange(createChangeArgs{SessionID: sid}))
 	if resp.State != ChangeStatePending {
@@ -770,7 +804,7 @@ func TestHandleCreateChange_PayloadTooLargeDowngrade(t *testing.T) {
 	wt, _, _ := setupRemoteFixture(t, root, "base\n", "base\nhead\n", "main", "feature")
 	sid := "deadbeef"
 	setupChangeSession(t, root, sid, wt)
-	s := newChangeTestServer(root)
+	s := newChangeTestServer(t, root)
 
 	// Land a regular change first so we have a change directory to
 	// append into.
@@ -835,7 +869,7 @@ func TestHandleCreateChange_URLPlaceholderSubstitution(t *testing.T) {
 	wt, _, _ := setupRemoteFixture(t, root, "base\n", "base\nhead\n", "main", "feature")
 	sid := "deadbeef"
 	setupChangeSession(t, root, sid, wt)
-	s := newChangeTestServer(root)
+	s := newChangeTestServer(t, root)
 
 	resp := parseCreateResp(t, s.handleCreateChange(createChangeArgs{SessionID: sid}))
 	if !strings.Contains(resp.URL, "<port>") {
@@ -844,13 +878,16 @@ func TestHandleCreateChange_URLPlaceholderSubstitution(t *testing.T) {
 
 	// Write surface.port and verify the next URL composition picks it
 	// up. We bypass handleCreateChange here (the same change is now
-	// idempotent), but the list handler builds URLs the same way.
-	portFile := filepath.Join(root, ".niwa", surfacePortFileName)
+	// idempotent), but the list handler builds URLs the same way. The
+	// machine-level surface.port path comes from surfaceConfigDirFn,
+	// which newChangeTestServer stubs to a per-test sub-directory.
+	surfaceDir, _ := surfaceConfigDirFn()
+	portFile := filepath.Join(surfaceDir, surfacePortFileName)
 	if err := os.WriteFile(portFile, []byte("8765"), 0o600); err != nil {
 		t.Fatalf("write surface.port: %v", err)
 	}
 	listRes := s.handleListChanges(listChangesArgs{})
-	if !strings.Contains(listRes.Content[0].Text, ":8765/changes/") {
+	if !strings.Contains(listRes.Content[0].Text, ":8765/workspaces/") {
 		t.Errorf("list URL did not pick up port 8765: %s", listRes.Content[0].Text)
 	}
 }

@@ -92,7 +92,7 @@ func seedChangeWithUpdatedAt(t *testing.T, root, state string, updatedAt time.Ti
 // return the verbatim PRD R9 error and no goroutine spawns.
 func TestRunRejectsInvalidIntervalHours(t *testing.T) {
 	for _, hours := range []int{0, -1, 169, 10_000} {
-		stop, err := Run(context.Background(), t.TempDir(), nil,
+		stop, err := Run(context.Background(), []Target{{InstanceRoot: t.TempDir()}},
 			Config{IntervalHours: hours, AbandonDays: 14})
 		if stop != nil {
 			t.Errorf("hours=%d: stop = non-nil, want nil", hours)
@@ -113,7 +113,7 @@ func TestRunRejectsInvalidIntervalHours(t *testing.T) {
 // documented error and no goroutine spawns.
 func TestRunRejectsInvalidAbandonDays(t *testing.T) {
 	for _, days := range []int{0, -1, 366, 10_000} {
-		stop, err := Run(context.Background(), t.TempDir(), nil,
+		stop, err := Run(context.Background(), []Target{{InstanceRoot: t.TempDir()}},
 			Config{IntervalHours: 6, AbandonDays: days})
 		if stop != nil {
 			t.Errorf("days=%d: stop = non-nil, want nil", days)
@@ -294,7 +294,7 @@ func TestRunPerformsOnBootSweepSynchronously(t *testing.T) {
 		now.Add(-30*24*time.Hour),
 		[]byte("old diff"))
 
-	stop, err := Run(context.Background(), root, sink, cfg)
+	stop, err := Run(context.Background(), []Target{{InstanceRoot: root, Sink: sink}}, cfg)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -319,7 +319,7 @@ func TestTickerExitsWithin100msOfCtxDone(t *testing.T) {
 	sink := &recordingSink{}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	stop, err := Run(ctx, root, sink,
+	stop, err := Run(ctx, []Target{{InstanceRoot: root, Sink: sink}},
 		Config{IntervalHours: 1, AbandonDays: 14})
 	if err != nil {
 		t.Fatalf("Run: %v", err)
@@ -439,7 +439,7 @@ func TestSweepEmitsTransitionEntry(t *testing.T) {
 // or panic. The sync.Once inside Run guards the cancel/wait pair.
 func TestStopIsIdempotent(t *testing.T) {
 	root := t.TempDir()
-	stop, err := Run(context.Background(), root, nil,
+	stop, err := Run(context.Background(), []Target{{InstanceRoot: root}},
 		Config{IntervalHours: 1, AbandonDays: 14})
 	if err != nil {
 		t.Fatalf("Run: %v", err)

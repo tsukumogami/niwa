@@ -37,6 +37,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/tsukumogami/niwa/internal/config"
 )
 
 // createChangeArgs holds parameters for niwa_create_change (PRD R3).
@@ -81,10 +83,25 @@ const diffTruncateTrailer = "--- diff truncated at 4 MiB; full diff available vi
 // re-rooting of `.niwa/changes/` does not invalidate references.
 const diffPatchFileName = "diff.patch"
 
-// surfacePortFileName is the per-instance file written by `niwa surface
-// serve` carrying the bound port (PRD R10). Absent → surface not
-// running; URL composition falls back to the `<port>` placeholder.
+// surfacePortFileName is the machine-level file written by `niwa
+// surface serve` carrying the bound port (PRD R10). Lives under the
+// XDG_CONFIG_HOME/niwa directory (resolved via config.SurfaceConfigDir);
+// the same file is read by composeChangeURL so agent-emitted URLs and
+// the listener bind to the same port. Absent → surface not running;
+// URL composition falls back to the `<port>` placeholder.
 const surfacePortFileName = "surface.port"
+
+// surfaceConfigDirFn, loadGlobalConfigFn, and resolveWorkspaceInstanceFn
+// indirect through function variables so unit tests can stub the
+// machine-level config layer without touching $HOME or
+// $XDG_CONFIG_HOME. The default implementations defer to the config
+// package; tests that exercise URL composition rebind these via
+// t.Cleanup.
+var (
+	surfaceConfigDirFn         = config.SurfaceConfigDir
+	loadGlobalConfigFn         = config.LoadGlobalConfig
+	resolveWorkspaceInstanceFn = config.ResolveWorkspaceInstance
+)
 
 // sessionCreateLockPrefix is the filename prefix for the per-session
 // create lock under `.niwa/changes/`. The trailing `<sid>.create.lock`
@@ -479,20 +496,64 @@ func captureDiff(worktree, base, head string) ([]byte, error) {
 	return out, nil
 }
 
-// composeChangeURL reads `.niwa/surface.port` and renders the change URL.
-// When the port file is absent or empty (surface not running), the URL
-// substitutes the literal `<port>` placeholder per PRD R3 — the caller
-// retains a durable URL even when the surface boots later, because the
-// change ID is the durable anchor.
+// composeChangeURL renders the machine-level change URL for an
+// instance root + change ID. The shape is:
+//
+//	http://127.0.0.1:<port>/workspaces/<workspace>/<instance>/changes/<change-id>
+//
+// where <port> is read from the machine-level surface.port file (see
+// config.SurfaceConfigDir) and <workspace>/<instance> are resolved from
+// the global config's [registry] section via config.ResolveWorkspaceInstance.
+//
+// Fallbacks:
+//
+//   - Port file absent or empty (surface not running): the URL contains
+//     the literal `<port>` placeholder. The change ID is the durable
+//     anchor; once the surface boots, the URL resolves verbatim.
+//   - Instance root not under any registered workspace: the URL contains
+//     the literal `<workspace>` and `<instance>` placeholders. Operators
+//     can register the workspace via `niwa init <name>` to make the
+//     change reachable; the change ID itself remains valid.
 func composeChangeURL(root, changeID string) string {
-	portFile := filepath.Join(root, ".niwa", surfacePortFileName)
-	port := "<port>"
-	if data, err := os.ReadFile(portFile); err == nil {
-		if trimmed := strings.TrimSpace(string(data)); trimmed != "" {
-			port = trimmed
-		}
+	port := readSurfacePort()
+	workspace, instance := resolveURLIdentity(root)
+	return fmt.Sprintf("http://127.0.0.1:%s/workspaces/%s/%s/changes/%s",
+		port, workspace, instance, changeID)
+}
+
+// readSurfacePort returns the bound port from the machine-level
+// surface.port file, or the placeholder when the file is absent/empty.
+func readSurfacePort() string {
+	dir, err := surfaceConfigDirFn()
+	if err != nil {
+		return "<port>"
 	}
-	return fmt.Sprintf("http://127.0.0.1:%s/changes/%s", port, changeID)
+	data, err := os.ReadFile(filepath.Join(dir, surfacePortFileName))
+	if err != nil {
+		return "<port>"
+	}
+	if trimmed := strings.TrimSpace(string(data)); trimmed != "" {
+		return trimmed
+	}
+	return "<port>"
+}
+
+// resolveURLIdentity returns the (workspace, instance) URL segments for
+// an instance root. Falls back to the literal `<workspace>` / `<instance>`
+// placeholders when the global config cannot be loaded or when the
+// instance root is not under any registered workspace. The placeholders
+// are URL-syntactic — they pass through net/url parsing unchanged and
+// surface as obvious operator hints in agent output.
+func resolveURLIdentity(root string) (workspace, instance string) {
+	g, err := loadGlobalConfigFn()
+	if err != nil || g == nil {
+		return "<workspace>", "<instance>"
+	}
+	ws, inst, err := resolveWorkspaceInstanceFn(g, root)
+	if err != nil {
+		return "<workspace>", "<instance>"
+	}
+	return ws, inst
 }
 
 // readRecentTransitions reads the last n NDJSON lines from the change's

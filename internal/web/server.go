@@ -1,13 +1,18 @@
-// Package web hosts the per-instance HTTP listener that renders niwa
+// Package web hosts the machine-level HTTP listener that renders niwa
 // changes for browser-based review. The listener binds 127.0.0.1 only
-// (NFR4: no network exposure), composes the changestore reads from
-// internal/mcp with the templates from internal/web/render, and is
-// wired into the niwa lifecycle by the `niwa surface serve` CLI command.
+// (NFR4: no network exposure) and aggregates across every niwa instance
+// discovered under each workspace registered in the user's global
+// config. Routing is hierarchical:
 //
-// Issue #6 shipped the boot scaffold (server.go, auth.go); issue #8
-// replaced the 501 stubs with the real handlers (see handlers.go) so
-// the three GET routes now compose the changestore reads and
-// dual-target event emitter end-to-end.
+//	/                                                       → 302 /workspaces/
+//	/workspaces/                                            → index of every workspace
+//	/workspaces/<workspace>/                                → instances under that workspace
+//	/workspaces/<workspace>/<instance>/changes/             → changes in that instance
+//	/workspaces/<workspace>/<instance>/changes/<change-id>  → per-change render
+//
+// The composeChangeURL path in internal/mcp reads the same registry +
+// machine-level surface.port file to produce a URL with the same shape
+// so agent-emitted URLs resolve against this listener verbatim.
 //
 // Security boundaries: the Bearer-token middleware is compiled and
 // available but applied to zero routes at F5; F10's mutation API
@@ -23,40 +28,35 @@ import (
 	"net/http"
 	"strconv"
 
+	"github.com/tsukumogami/niwa/internal/config"
 	"github.com/tsukumogami/niwa/internal/mcp"
 )
 
-// Config carries the listener-construction inputs. InstanceRoot is the
-// absolute path to the niwa instance whose .niwa/changes/ directory the
-// server serves. Port=0 binds an ephemeral port. ListenAddr defaults to
-// 127.0.0.1; callers do not override this in production — the field is
-// present so tests can bind to 127.0.0.1:0 explicitly. AuditSink is the
-// destination for review_surface_opened and change_engaged events; a
-// nil sink elides audit emission (the per-change transitions.log writes
-// still run via AppendChangeEvent).
+// Config carries the listener-construction inputs. Instances enumerates
+// every (workspace, instance, root) endpoint the server serves; the
+// list comes from config.EnumerateInstances at boot. Port=0 binds an
+// ephemeral port. ListenAddr defaults to 127.0.0.1; callers do not
+// override this in production — the field is present so tests can bind
+// to 127.0.0.1:0 explicitly. SinkFor is a per-instance audit-sink
+// factory; when nil, NewFileAuditSink is used. The factory hook lets
+// tests inject a recording sink without touching the real audit path.
 type Config struct {
-	InstanceRoot string
-	Port         int
-	ListenAddr   string
-	AuditSink    mcp.AuditSink
+	Instances  []config.WorkspaceInstance
+	Port       int
+	ListenAddr string
+	SinkFor    func(instanceRoot string) mcp.AuditSink
 }
 
-// GCStop is the function returned by New for the GC ticker shutdown. At
-// F5 the placeholder returned by New does nothing; issue #9's gc.Run
-// integration replaces it with the real ticker-stop closure.
-type GCStop func()
-
-// New constructs the per-instance HTTP server. The listener is bound
+// New constructs the machine-level HTTP server. The listener is bound
 // inside New so the caller learns the actual port (matters when
 // cfg.Port == 0). The caller is responsible for serving on the bound
 // listener via srv.Serve(ln) — New returns the configured server, the
-// bound listener (so the caller can read its address), the GC stop
-// function (placeholder at F5), and any error.
+// bound listener (so the caller can read its address), and any error.
 //
-// Routing: the three GET routes are wired through Handlers.RegisterRoutes
-// from handlers.go (issue #8). The Bearer-auth middleware wraps zero
-// routes at F5; F10's mutation API composes on the same contract.
-func New(ctx context.Context, cfg Config) (*http.Server, net.Listener, GCStop, error) {
+// Routing: routes are wired through Handlers.RegisterRoutes from
+// handlers.go. The Bearer-auth middleware wraps zero routes at F5;
+// F10's mutation API composes on the same contract.
+func New(_ context.Context, cfg Config) (*http.Server, net.Listener, error) {
 	addr := cfg.ListenAddr
 	if addr == "" {
 		addr = "127.0.0.1"
@@ -65,11 +65,21 @@ func New(ctx context.Context, cfg Config) (*http.Server, net.Listener, GCStop, e
 
 	ln, err := net.Listen("tcp", listenSpec)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("bind %s: %w", listenSpec, err)
+		return nil, nil, fmt.Errorf("bind %s: %w", listenSpec, err)
+	}
+
+	sinkFor := cfg.SinkFor
+	if sinkFor == nil {
+		sinkFor = func(root string) mcp.AuditSink {
+			return mcp.NewFileAuditSink(root)
+		}
 	}
 
 	mux := http.NewServeMux()
-	h := &Handlers{InstanceRoot: cfg.InstanceRoot, Sink: cfg.AuditSink}
+	h := &Handlers{
+		Instances: cfg.Instances,
+		SinkFor:   sinkFor,
+	}
 	h.RegisterRoutes(mux)
 
 	// Middleware order: CORS strip outermost so a cross-origin request
@@ -79,9 +89,7 @@ func New(ctx context.Context, cfg Config) (*http.Server, net.Listener, GCStop, e
 	handler := corsStrip(mux)
 
 	srv := &http.Server{Handler: handler}
-	stop := GCStop(func() {})
-	_ = ctx // reserved for future integration with the GC ticker
-	return srv, ln, stop, nil
+	return srv, ln, nil
 }
 
 // corsStrip rejects requests with a non-empty Origin header and emits

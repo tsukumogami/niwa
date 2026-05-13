@@ -1,21 +1,34 @@
-// surface.go wires the `niwa surface serve` command — the per-instance
-// HTTP listener for browser-based change review (PRD F5 / R10). The
-// command owns four pieces of substrate:
+// surface.go wires the `niwa surface serve` command — the machine-level
+// HTTP listener for browser-based change review (PRD F5 / R10). One
+// process per user, federating across every niwa instance discovered
+// under each workspace in ~/.config/niwa/config.toml's [registry].
 //
-//  1. `.niwa/surface.lock` — PID file gating single-listener-per-instance.
+// The command owns four pieces of substrate, all at machine scope under
+// the niwa config directory (XDG_CONFIG_HOME/niwa or ~/.config/niwa):
+//
+//  1. `surface.lock` — PID file gating single-listener-per-machine.
 //     O_CREATE|O_EXCL on first try; on EEXIST the lock contents (the
 //     prior PID) are checked via mcp.IsProcessAlive. A dead holder is
 //     reaped and the boot retries once; a live holder makes the boot
 //     exit 1 with the R10 message.
-//  2. `.niwa/surface.token` — UUIDv4, mode 0o600. Absent → generated.
+//  2. `surface.token` — UUIDv4, mode 0o600. Absent → generated.
 //     Present and `--rotate-token` → regenerated. Present and no flag →
 //     left intact so restarts don't invalidate open browser tabs.
-//  3. `.niwa/surface.port` — the actual bound port. Written via
-//     tmp+rename so a concurrent `niwa_query_change` URL-compose pass
-//     never sees a partial file. Removed on shutdown.
-//  4. The HTTP listener itself, composed via internal/web.New. The same
-//     mcp.AuditSink is shared with internal/web/gc.Run so both the
-//     handler hits and the GC sweep land in one audit log.
+//  3. `surface.port` — the actual bound port. Written via tmp+rename so
+//     a concurrent niwa_query_change URL-compose pass never sees a
+//     partial file. Removed on shutdown.
+//  4. The HTTP listener itself, composed via internal/web.New. A per-
+//     instance mcp.AuditSink is constructed for each discovered niwa
+//     instance and threaded into internal/web/gc.Run so cleanup events
+//     land in the originating instance's mcp-audit.log — the audit
+//     substrate stays per-instance even though the surface is unified.
+//
+// Discovery is boot-time only: instances are enumerated from the global
+// registry plus a directory scan of each workspace root. Restart is
+// required when a new instance is added or a workspace's [registry]
+// entry changes. F5 deliberately scopes hot-reload out — the surface is
+// a long-running daemon, and discovery races would surface as missing
+// or phantom changes in the index.
 //
 // Shutdown discipline: signal.NotifyContext(SIGINT, SIGTERM) drives a
 // 5-second http.Server.Shutdown. surface.lock and surface.port are
@@ -39,6 +52,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/tsukumogami/niwa/internal/config"
 	"github.com/tsukumogami/niwa/internal/mcp"
 	"github.com/tsukumogami/niwa/internal/web"
 	"github.com/tsukumogami/niwa/internal/web/gc"
@@ -57,7 +71,6 @@ const (
 	surfaceLockFileName  = "surface.lock"
 	surfaceTokenFileName = "surface.token"
 	surfacePortFileName  = "surface.port"
-	niwaDirName          = ".niwa"
 
 	// surfaceShutdownGrace caps http.Server.Shutdown per D4. Matches
 	// mcp-serve's existing 5-second window; in-flight `GET /changes/<id>`
@@ -78,46 +91,66 @@ func init() {
 	surfaceServeCmd.Flags().IntVar(&surfaceServePort, "port", 0,
 		"TCP port to bind on 127.0.0.1 (0 = kernel-assigned ephemeral)")
 	surfaceServeCmd.Flags().BoolVar(&surfaceServeRotateToken, "rotate-token", false,
-		"regenerate .niwa/surface.token even if it already exists; open browser tabs must reload")
+		"regenerate surface.token even if it already exists; open browser tabs must reload")
 }
 
 var surfaceCmd = &cobra.Command{
 	Use:   "surface",
-	Short: "Manage the per-instance HTTP review surface",
-	Long: `Manage the per-instance HTTP review surface.
+	Short: "Manage the machine-level HTTP review surface",
+	Long: `Manage the machine-level HTTP review surface.
 
 Subcommands:
-  serve    Run the listener that renders changes on 127.0.0.1`,
+  serve    Run the listener that aggregates changes across every registered workspace`,
 }
 
 var surfaceServeCmd = &cobra.Command{
 	Use:   "serve",
-	Short: "Run the per-instance change-review HTTP listener",
-	Long: `Run the per-instance change-review HTTP listener on 127.0.0.1.
+	Short: "Run the change-review HTTP listener for every registered workspace",
+	Long: `Run the change-review HTTP listener on 127.0.0.1, aggregating across every
+registered workspace.
 
-Boot order matches PRD R10: acquire .niwa/surface.lock with a stale-PID
-reap retry, ensure .niwa/surface.token (regenerate with --rotate-token),
-bind 127.0.0.1 (ephemeral or --port N), write .niwa/surface.port atomically,
-print the URL and token-file path to stderr, run the GC sweep once,
-then serve until SIGINT/SIGTERM triggers a 5-second http.Server.Shutdown.
-The token contents are never printed — only the path to the token file.`,
+Boot order matches PRD R10: load the global config, enumerate every niwa
+instance under each registered workspace, acquire surface.lock with a
+stale-PID reap retry, ensure surface.token (regenerate with --rotate-token),
+bind 127.0.0.1 (ephemeral or --port N), write surface.port atomically,
+print the URL and token-file path to stderr, run the GC sweep once
+across every instance, then serve until SIGINT/SIGTERM triggers a
+5-second http.Server.Shutdown. The token contents are never printed —
+only the path to the token file.`,
 	RunE: runSurfaceServe,
 }
 
 func runSurfaceServe(cmd *cobra.Command, _ []string) error {
-	instanceRoot, err := resolveInstanceRoot()
+	g, err := config.LoadGlobalConfig()
 	if err != nil {
-		return err
+		return fmt.Errorf("load global config: %w", err)
 	}
-	return surfaceServeInstance(cmd, instanceRoot, surfaceServePort, surfaceServeRotateToken)
+	instances, err := config.EnumerateInstances(g)
+	if err != nil {
+		return fmt.Errorf("enumerate instances: %w", err)
+	}
+	dir, err := config.SurfaceConfigDir()
+	if err != nil {
+		return fmt.Errorf("resolve surface config dir: %w", err)
+	}
+	return surfaceServeMachine(cmd, dir, instances, surfaceServePort, surfaceServeRotateToken)
 }
 
-// surfaceServeInstance is the testable boot core. It takes an explicit
-// instanceRoot and flag values so the test harness can drive it without
-// a real workspace on $PWD or environment setup. The real CLI entry
-// (runSurfaceServe) resolves these from env/cwd and then delegates.
-func surfaceServeInstance(cmd *cobra.Command, instanceRoot string, port int, rotateToken bool) (retErr error) {
-	niwaDir := filepath.Join(instanceRoot, niwaDirName)
+// surfaceServeMachine is the testable boot core. It takes an explicit
+// configDir (where surface.lock/token/port live) and the discovered
+// instance list so tests can drive it without a real ~/.config/niwa
+// layout. The real CLI entry (runSurfaceServe) reads these from the
+// global config and then delegates.
+func surfaceServeMachine(
+	cmd *cobra.Command,
+	configDir string,
+	instances []config.WorkspaceInstance,
+	port int,
+	rotateToken bool,
+) (retErr error) {
+	if err := os.MkdirAll(configDir, 0o700); err != nil {
+		return fmt.Errorf("create surface config dir: %w", err)
+	}
 
 	// Signal handling wraps cmd.Context so tests can drive shutdown by
 	// cancelling the cmd's context — equivalent to SIGTERM arriving.
@@ -125,24 +158,22 @@ func surfaceServeInstance(cmd *cobra.Command, instanceRoot string, port int, rot
 	defer stopSignals()
 
 	// Step 1: acquire surface.lock (single retry on stale PID).
-	lockPath := filepath.Join(niwaDir, surfaceLockFileName)
+	lockPath := filepath.Join(configDir, surfaceLockFileName)
 	if err := acquireSurfaceLock(lockPath); err != nil {
 		return err
 	}
 	defer func() { _ = os.Remove(lockPath) }()
 
 	// Step 2: ensure surface.token (UUIDv4, 0o600).
-	tokenPath, err := ensureSurfaceToken(niwaDir, rotateToken)
+	tokenPath, err := ensureSurfaceToken(configDir, rotateToken)
 	if err != nil {
 		return fmt.Errorf("ensure surface.token: %w", err)
 	}
 
-	// Step 3: bind 127.0.0.1 listener and write the actual port atomically.
-	sink := mcp.NewFileAuditSink(instanceRoot)
-	srv, ln, _, err := web.New(ctx, web.Config{
-		InstanceRoot: instanceRoot,
-		Port:         port,
-		AuditSink:    sink,
+	// Step 3: bind 127.0.0.1 listener.
+	srv, ln, err := web.New(ctx, web.Config{
+		Port:      port,
+		Instances: instances,
 	})
 	if err != nil {
 		return fmt.Errorf("surface listener: %w", err)
@@ -152,7 +183,7 @@ func surfaceServeInstance(cmd *cobra.Command, instanceRoot string, port int, rot
 		_ = ln.Close()
 		return err
 	}
-	portPath := filepath.Join(niwaDir, surfacePortFileName)
+	portPath := filepath.Join(configDir, surfacePortFileName)
 	if err := writeSurfacePort(portPath, actualPort); err != nil {
 		_ = ln.Close()
 		return fmt.Errorf("write surface.port: %w", err)
@@ -165,11 +196,22 @@ func surfaceServeInstance(cmd *cobra.Command, instanceRoot string, port int, rot
 		"niwa surface listening on http://127.0.0.1:%d\n", actualPort)
 	fmt.Fprintf(cmd.ErrOrStderr(),
 		"token stored at %s (read-only, mode 0600)\n", tokenPath)
+	fmt.Fprintf(cmd.ErrOrStderr(),
+		"serving %d instance(s) across %d workspace(s)\n",
+		len(instances), countWorkspaces(instances))
 
-	// Step 5: synchronous on-boot GC sweep, then ticker goroutine.
-	// gc.Run validates the config bounds before running anything, so a
-	// misconfigured interval surfaces here before the listener starts.
-	gcStop, err := gc.Run(ctx, instanceRoot, sink, gc.Config{
+	// Step 5: synchronous on-boot GC sweep across every instance, then a
+	// shared ticker goroutine. A per-instance sink lets cleanup events
+	// land in the originating instance's mcp-audit.log so audit history
+	// stays cohabited with the change data.
+	targets := make([]gc.Target, len(instances))
+	for i, inst := range instances {
+		targets[i] = gc.Target{
+			InstanceRoot: inst.Root,
+			Sink:         mcp.NewFileAuditSink(inst.Root),
+		}
+	}
+	gcStop, err := gc.Run(ctx, targets, gc.Config{
 		IntervalHours: surfaceGCDefaultIntervalHours,
 		AbandonDays:   surfaceGCDefaultAbandonDays,
 	})
@@ -201,7 +243,18 @@ func surfaceServeInstance(cmd *cobra.Command, instanceRoot string, port int, rot
 	}
 }
 
-// acquireSurfaceLock writes .niwa/surface.lock with the current PID via
+// countWorkspaces returns the number of distinct workspace identifiers
+// in the instance list. The serving-summary banner uses this so the
+// operator can sanity-check that the registry was read as expected.
+func countWorkspaces(instances []config.WorkspaceInstance) int {
+	seen := make(map[string]struct{}, len(instances))
+	for _, inst := range instances {
+		seen[inst.Workspace] = struct{}{}
+	}
+	return len(seen)
+}
+
+// acquireSurfaceLock writes surface.lock with the current PID via
 // O_CREATE|O_EXCL. If the lock already exists, the holder's liveness is
 // checked: a dead PID (or a corrupt file) is reaped and the create
 // retries once; a live PID makes the function return the documented
@@ -261,12 +314,12 @@ func tryCreateSurfaceLock(lockPath string) error {
 	return nil
 }
 
-// ensureSurfaceToken writes a fresh UUIDv4 to .niwa/surface.token if the
-// file is absent OR rotate is true. The write is atomic (tmp+rename) so
-// a concurrent reader never sees a half-written token. Returns the
+// ensureSurfaceToken writes a fresh UUIDv4 to surface.token if the file
+// is absent OR rotate is true. The write is atomic (tmp+rename) so a
+// concurrent reader never sees a half-written token. Returns the
 // absolute token path for the boot banner.
-func ensureSurfaceToken(niwaDir string, rotate bool) (string, error) {
-	path := filepath.Join(niwaDir, surfaceTokenFileName)
+func ensureSurfaceToken(configDir string, rotate bool) (string, error) {
+	path := filepath.Join(configDir, surfaceTokenFileName)
 	if rotate {
 		if err := writeSurfaceToken(path); err != nil {
 			return "", err
@@ -296,7 +349,7 @@ func writeSurfaceToken(path string) error {
 	return nil
 }
 
-// writeSurfacePort writes the bound port to .niwa/surface.port atomically.
+// writeSurfacePort writes the bound port to surface.port atomically.
 // The mcp-serve side composes change-review URLs by reading this file,
 // so a partial write would surface as a malformed URL in agent output.
 // tmp+rename guarantees readers see either the prior bytes or the new

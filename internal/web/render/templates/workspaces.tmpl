@@ -1,0 +1,20 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>niwa surface — workspaces</title>
+<style>{{.CSS}}</style>
+</head>
+<body>
+<h1>Workspaces</h1>
+{{if .Workspaces}}
+<ul class="workspaces">
+{{range .Workspaces}}
+<li><a href="/workspaces/{{.Name}}/"><code>{{.Name}}</code></a> <span class="count">{{.InstanceCount}} instance{{if ne .InstanceCount 1}}s{{end}}</span></li>
+{{end}}
+</ul>
+{{else}}
+<p class="empty">No workspaces registered. Run <code>niwa init &lt;name&gt;</code> to add one to <code>~/.config/niwa/config.toml</code>.</p>
+{{end}}
+</body>
+</html>

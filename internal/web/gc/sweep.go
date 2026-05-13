@@ -55,9 +55,18 @@ const (
 // `state.json` and `transitions.log` are preserved for forensics.
 const diffPatchFileName = "diff.patch"
 
-// Run validates cfg, performs the synchronous on-boot sweep, and spawns
-// the ticker goroutine. Returns a stop function that cancels the
-// ticker and blocks until the goroutine exits.
+// Target is one (instanceRoot, sink) pair the sweep visits. The
+// machine-scope surface aggregates several of these — one per
+// discovered niwa instance under each registered workspace.
+type Target struct {
+	InstanceRoot string
+	Sink         mcp.AuditSink
+}
+
+// Run validates cfg, performs one synchronous on-boot sweep across every
+// supplied target, and spawns a single ticker goroutine that iterates
+// the same target list each tick. Returns a stop function that cancels
+// the ticker and blocks until the goroutine exits.
 //
 // The caller may also cancel ctx to drive shutdown; the goroutine
 // observes ctx.Done() and exits without the caller ever calling stop.
@@ -66,8 +75,10 @@ const diffPatchFileName = "diff.patch"
 //
 // Returning an error elides the goroutine entirely: a misconfigured
 // gc_interval_hours causes `niwa surface serve` to exit 1 at boot per
-// PRD R9 before the listener accepts requests.
-func Run(ctx context.Context, instanceRoot string, sink mcp.AuditSink, cfg Config) (func(), error) {
+// PRD R9 before the listener accepts requests. An empty target list is
+// not an error — the sweep is a no-op, the ticker still runs in case
+// instances appear later (next-restart pickup, not hot-reload).
+func Run(ctx context.Context, targets []Target, cfg Config) (func(), error) {
 	if cfg.IntervalHours < 1 || cfg.IntervalHours > 168 {
 		return nil, errors.New(errInvalidIntervalHours)
 	}
@@ -75,7 +86,7 @@ func Run(ctx context.Context, instanceRoot string, sink mcp.AuditSink, cfg Confi
 		return nil, errors.New(errInvalidAbandonDays)
 	}
 
-	sweepOnce(time.Now(), instanceRoot, sink, cfg)
+	sweepAll(time.Now(), targets, cfg)
 
 	// Internal cancellation: stop() short-circuits the goroutine
 	// exit even when the caller's ctx is still live. ctx.Done()
@@ -92,7 +103,7 @@ func Run(ctx context.Context, instanceRoot string, sink mcp.AuditSink, cfg Confi
 			case <-runCtx.Done():
 				return
 			case t := <-ticker.C:
-				sweepOnce(t, instanceRoot, sink, cfg)
+				sweepAll(t, targets, cfg)
 			}
 		}
 	}()
@@ -105,6 +116,16 @@ func Run(ctx context.Context, instanceRoot string, sink mcp.AuditSink, cfg Confi
 		})
 	}
 	return stop, nil
+}
+
+// sweepAll runs sweepOnce against every target. Errors in one target
+// do not affect the others — sweepOnce already swallows per-change
+// errors, and sweepAll inherits the same isolation discipline at the
+// per-instance boundary.
+func sweepAll(now time.Time, targets []Target, cfg Config) {
+	for _, t := range targets {
+		sweepOnce(now, t.InstanceRoot, t.Sink, cfg)
+	}
 }
 
 // sweepOnce iterates `.niwa/changes/` and reclaims abandoned pending
