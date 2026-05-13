@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/tsukumogami/niwa/internal/mcp"
 	"github.com/tsukumogami/niwa/internal/workspace"
 )
 
@@ -321,5 +323,148 @@ func TestCompleteGoTarget_NoArgs_EmptyWhenNothingMatches(t *testing.T) {
 	}
 	if len(out) != 0 {
 		t.Errorf("expected empty, got %v", out)
+	}
+}
+
+// writeSessionState writes a minimal SessionLifecycleState JSON file under
+// <instanceRoot>/.niwa/sessions/<id>.json so completeSessionIDs can pick
+// it up. The schema mirrors what mcp.WriteSessionLifecycleState produces,
+// but we write directly to bypass the regexp guard on session ID format
+// (the test IDs are all valid 8-hex anyway).
+func writeSessionState(t *testing.T, instanceRoot, id string) {
+	t.Helper()
+	sessionsDir := filepath.Join(instanceRoot, ".niwa", "sessions")
+	if err := os.MkdirAll(sessionsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	state := mcp.SessionLifecycleState{
+		V:         1,
+		SessionID: id,
+		Repo:      "test-repo",
+		Status:    "active",
+	}
+	data, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sessionsDir, id+".json"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCompleteSessionIDs_EnumeratesSessions(t *testing.T) {
+	sandboxHome(t)
+	wsRoot := t.TempDir()
+	workspaceSkeleton(t, wsRoot, "myws")
+	instanceRoot := makeInstance(t, wsRoot, "myws", 1, nil)
+	writeSessionState(t, instanceRoot, "aabbccdd")
+	writeSessionState(t, instanceRoot, "11223344")
+
+	t.Chdir(instanceRoot)
+
+	out, directive := completeSessionIDs(&cobra.Command{}, nil, "")
+	if directive != cobra.ShellCompDirectiveNoFileComp {
+		t.Errorf("directive = %v, want NoFileComp", directive)
+	}
+	want := []string{"11223344", "aabbccdd"}
+	if !slices.Equal(out, want) {
+		t.Errorf("got %v, want %v", out, want)
+	}
+}
+
+func TestCompleteSessionIDs_PrefixFilter(t *testing.T) {
+	sandboxHome(t)
+	wsRoot := t.TempDir()
+	workspaceSkeleton(t, wsRoot, "myws")
+	instanceRoot := makeInstance(t, wsRoot, "myws", 1, nil)
+	writeSessionState(t, instanceRoot, "aabbccdd")
+	writeSessionState(t, instanceRoot, "11223344")
+	writeSessionState(t, instanceRoot, "aaaaaaaa")
+
+	t.Chdir(instanceRoot)
+
+	out, _ := completeSessionIDs(&cobra.Command{}, nil, "aa")
+	want := []string{"aaaaaaaa", "aabbccdd"}
+	if !slices.Equal(out, want) {
+		t.Errorf("got %v, want %v", out, want)
+	}
+}
+
+func TestCompleteSessionIDs_HonorsNiwaInstanceRoot(t *testing.T) {
+	// Operators (and the test suite itself) set NIWA_INSTANCE_ROOT to point
+	// at an instance without chdir-ing into it. The runtime path
+	// (resolveInstanceRoot) honors that env var; the completer must match
+	// so tab completion works wherever the runtime command works.
+	sandboxHome(t)
+	wsRoot := t.TempDir()
+	workspaceSkeleton(t, wsRoot, "myws")
+	instanceRoot := makeInstance(t, wsRoot, "myws", 1, nil)
+	writeSessionState(t, instanceRoot, "deadbeef")
+
+	// cwd is outside the instance; only the env var connects us.
+	t.Chdir(t.TempDir())
+	t.Setenv("NIWA_INSTANCE_ROOT", instanceRoot)
+
+	out, _ := completeSessionIDs(&cobra.Command{}, nil, "")
+	want := []string{"deadbeef"}
+	if !slices.Equal(out, want) {
+		t.Errorf("got %v, want %v (NIWA_INSTANCE_ROOT not honored?)", out, want)
+	}
+}
+
+func TestCompleteSessionIDs_OutsideInstance(t *testing.T) {
+	sandboxHome(t)
+	t.Chdir(t.TempDir())
+
+	out, directive := completeSessionIDs(&cobra.Command{}, nil, "")
+	if directive != cobra.ShellCompDirectiveNoFileComp {
+		t.Errorf("directive = %v, want NoFileComp", directive)
+	}
+	if len(out) != 0 {
+		t.Errorf("expected empty (no instance), got %v", out)
+	}
+}
+
+func TestCompleteSessionIDs_SkipsAtPosition2(t *testing.T) {
+	// At positions >0 we suppress completion: completeSessionIDs is wired
+	// onto session destroy/attach/detach, each of which takes a single
+	// session-id positional. If cobra ever asks for completions past that
+	// first position, we must not surface a second round of session IDs.
+	out, directive := completeSessionIDs(&cobra.Command{}, []string{"already-supplied"}, "")
+	if directive != cobra.ShellCompDirectiveNoFileComp {
+		t.Errorf("directive = %v, want NoFileComp", directive)
+	}
+	if len(out) != 0 {
+		t.Errorf("expected empty at position >0, got %v", out)
+	}
+}
+
+func TestCompleteSessionCreateArgs_FirstArgIsRepo(t *testing.T) {
+	sandboxHome(t)
+	wsRoot := t.TempDir()
+	workspaceSkeleton(t, wsRoot, "myws")
+	instanceRoot := makeInstance(t, wsRoot, "myws", 1, map[string][]string{
+		"group": {"alpha", "beta"},
+	})
+	t.Chdir(instanceRoot)
+
+	out, directive := completeSessionCreateArgs(&cobra.Command{}, nil, "")
+	if directive != cobra.ShellCompDirectiveNoFileComp {
+		t.Errorf("directive = %v, want NoFileComp", directive)
+	}
+	want := []string{"alpha", "beta"}
+	if !slices.Equal(out, want) {
+		t.Errorf("got %v, want %v", out, want)
+	}
+}
+
+func TestCompleteSessionCreateArgs_SecondArgSuppressed(t *testing.T) {
+	// <purpose> is freeform; the completer must not offer filename completion.
+	out, directive := completeSessionCreateArgs(&cobra.Command{}, []string{"alpha"}, "")
+	if directive != cobra.ShellCompDirectiveNoFileComp {
+		t.Errorf("directive = %v, want NoFileComp", directive)
+	}
+	if len(out) != 0 {
+		t.Errorf("expected empty at position 2 (purpose), got %v", out)
 	}
 }
