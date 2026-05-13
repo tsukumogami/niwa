@@ -2935,3 +2935,70 @@ visibility = "public"
 		t.Errorf("Apply did not write *.local* to .gitignore, got:\n%s", string(data))
 	}
 }
+
+// TestOverlayRepoFlowsThroughDiscoveryAndClassify is the regression guard for
+// issue #137: previously, the overlay repo (e.g. `test-ws-overlay`) was
+// unconditionally filtered out of the discovered repo list between
+// discoverAllRepos and Classify, so it could never be a workspace component
+// regardless of how the user declared their groups. With the filter gone,
+// an org auto-scan that picks up `<workspace>-overlay` produces a repo entry
+// that flows through Classify like any other repo and ends up in whichever
+// group matches its visibility.
+//
+// This test pins the seam where the filter used to live (discoverAllRepos →
+// Classify) rather than driving runPipeline end-to-end. A filter
+// re-introduced inside runPipeline between those two calls would not fail
+// this test directly, but the load-bearing claim — that no filter sits
+// between discovery and classification — is what we are guarding against.
+func TestOverlayRepoFlowsThroughDiscoveryAndClassify(t *testing.T) {
+	mockClient := &mockGitHubClient{
+		repos: map[string][]github.Repo{
+			"testorg": {
+				{Name: "repo1", Visibility: "private", SSHURL: "git@github.com:testorg/repo1.git"},
+				{Name: "test-ws-overlay", Visibility: "private", SSHURL: "git@github.com:testorg/test-ws-overlay.git"},
+			},
+		},
+	}
+
+	applier := NewApplier(mockClient)
+	discovered, err := applier.discoverAllRepos(context.Background(), []config.SourceConfig{
+		{Org: "testorg"},
+	})
+	if err != nil {
+		t.Fatalf("discoverAllRepos: %v", err)
+	}
+
+	// Both repos must appear in the discovered list — no filter strips the overlay.
+	names := make(map[string]bool, len(discovered))
+	for _, r := range discovered {
+		names[r.Name] = true
+	}
+	if !names["test-ws-overlay"] {
+		t.Errorf("overlay repo missing from discovery: got %v", names)
+	}
+	if !names["repo1"] {
+		t.Errorf("regular repo missing from discovery: got %v", names)
+	}
+
+	// Both must classify into the private group.
+	groups := map[string]config.GroupConfig{
+		"private": {Visibility: "private"},
+	}
+	classified, warnings, err := Classify(discovered, groups)
+	if err != nil {
+		t.Fatalf("Classify: %v", err)
+	}
+	if len(warnings) != 0 {
+		t.Errorf("unexpected classify warnings: %v", warnings)
+	}
+	classifiedNames := make(map[string]string, len(classified))
+	for _, c := range classified {
+		classifiedNames[c.Repo.Name] = c.Group
+	}
+	if classifiedNames["test-ws-overlay"] != "private" {
+		t.Errorf("overlay repo not classified into private group: got %v", classifiedNames)
+	}
+	if classifiedNames["repo1"] != "private" {
+		t.Errorf("regular repo not classified into private group: got %v", classifiedNames)
+	}
+}
