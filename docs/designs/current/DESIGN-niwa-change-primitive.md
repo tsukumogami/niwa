@@ -1163,6 +1163,41 @@ escalated review).
   design, and `audit_reader.go`'s `effectiveKind()` is the
   reference implementation.
 
+### Considered and deferred — URL composition reads global config per call
+
+`composeChangeURL` in `internal/mcp/handlers_change.go` resolves the
+workspace+instance identity for the calling instance root by reading
+`~/.config/niwa/config.toml` and running the registry traversal on
+every `niwa_create_change` / `niwa_list_changes` URL emit. Same for
+the surface port read from `~/.config/niwa/surface.port`.
+
+For F5 the call frequency is low (a handful of changes per session
+per day at the reference-fleet load), so per-call disk reads are not
+a bottleneck. The (workspace, instance) tuple is also deterministic
+from the instance root and the registry — caching it at MCP server
+startup is sound.
+
+We considered caching at `Server.New(role, instanceRoot)` time and
+threading the cached identity through to URL composition. Rejected
+because:
+
+1. It adds a coupling between two layers (the MCP server now needs
+   to know about the global config at startup, not just at call
+   time), and the configuration could change while the server is
+   running (operator runs `niwa init` between calls).
+2. The MCP server's startup path is already substantial; adding
+   "load global config + resolve identity" to it makes the
+   per-instance startup heavier for a perf benefit that doesn't
+   exist yet.
+
+If profiling shows the per-call read becomes hot (unlikely below
+~100 changes/sec, three to four orders of magnitude above F5's
+observed load), the cache can be added behind the same function-
+indirection variables (`surfaceConfigDirFn`, `loadGlobalConfigFn`,
+`resolveWorkspaceInstanceFn`) the tests already use, with cache
+invalidation on a registry-file mtime check. Noted here so future-
+us doesn't relitigate the decision.
+
 ### Mitigations
 
 - The README / surface guide explicitly documents the two-process
