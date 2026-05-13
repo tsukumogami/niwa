@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/tsukumogami/niwa/internal/cli/sessionattach"
 	"github.com/tsukumogami/niwa/internal/mcp"
 	"github.com/tsukumogami/niwa/internal/workspace"
 )
@@ -26,8 +27,13 @@ Scaffolds a git worktree under .niwa/worktrees/<repo>-<session-id>/,
 writes the session lifecycle state, and starts the per-worktree daemon.
 
 On success the shell wrapper navigates to the new worktree directory.`,
-	Args: cobra.ExactArgs(2),
-	RunE: runSessionCreate,
+	// We don't use cobra.ExactArgs because its default error exits 1 with a
+	// generic "accepts 2 arg(s), received 0" message. RunE validates arg count
+	// itself and returns an *sessionattach.ExitCodeError with Code=2 plus a
+	// usage string naming <repo> and <purpose>.
+	Args:              cobra.MaximumNArgs(2),
+	ValidArgsFunction: completeSessionCreateArgs,
+	RunE:              runSessionCreate,
 }
 
 var sessionDestroyCmd = &cobra.Command{
@@ -36,8 +42,28 @@ var sessionDestroyCmd = &cobra.Command{
 	Long: `Destroy a session: kill running workers, mark the session ended,
 stop the per-worktree daemon, remove the worktree, and delete the session
 branch (only if already merged; use --force to delete regardless).`,
-	Args: cobra.ExactArgs(1),
-	RunE: runSessionDestroy,
+	// Same reasoning as sessionCreateCmd: RunE handles missing-arg with a
+	// usage string and exit code 2 via *sessionattach.ExitCodeError.
+	Args:              cobra.MaximumNArgs(1),
+	ValidArgsFunction: completeSessionIDs,
+	RunE:              runSessionDestroy,
+}
+
+// completeSessionCreateArgs returns repo completions for the first
+// positional argument and suppresses filename completion for the second
+// (<purpose> is freeform text).
+//
+// The switch shape is intentional: each case represents a positional slot,
+// so adding a future positional means adding a case rather than rewriting
+// the dispatcher. The single-arg completers in this file use a plain
+// `if len(args) > 0` guard instead because they only have one slot.
+func completeSessionCreateArgs(cmd *cobra.Command, args []string, toComplete string) ([]cobra.Completion, cobra.ShellCompDirective) {
+	switch len(args) {
+	case 0:
+		return completeRepoNames(cmd, args, toComplete)
+	default:
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
 }
 
 var sessionDestroyForce bool
@@ -47,6 +73,13 @@ func init() {
 }
 
 func runSessionCreate(cmd *cobra.Command, args []string) error {
+	if len(args) != 2 {
+		return &sessionattach.ExitCodeError{
+			Code: 2,
+			Msg: "niwa: usage: niwa session create <repo> <purpose>. " +
+				"Run `niwa session create --help` for details.",
+		}
+	}
 	instanceRoot, err := resolveInstanceRoot()
 	if err != nil {
 		return err
@@ -89,6 +122,13 @@ func runSessionCreate(cmd *cobra.Command, args []string) error {
 }
 
 func runSessionDestroy(cmd *cobra.Command, args []string) error {
+	if len(args) != 1 {
+		return &sessionattach.ExitCodeError{
+			Code: 2,
+			Msg: "niwa: usage: niwa session destroy <session-id> [--force]. " +
+				"Run `niwa session list` to discover existing sessions.",
+		}
+	}
 	instanceRoot, err := resolveInstanceRoot()
 	if err != nil {
 		return err

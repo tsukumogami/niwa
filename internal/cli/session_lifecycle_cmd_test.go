@@ -2,12 +2,14 @@ package cli
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/tsukumogami/niwa/internal/cli/sessionattach"
 	"github.com/tsukumogami/niwa/internal/mcp"
 )
 
@@ -261,6 +263,105 @@ func TestSessionList_AttachedAndAvailableMutuallyExclusive(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "mutually exclusive") {
 		t.Errorf("error message = %q, want substring 'mutually exclusive'", err.Error())
+	}
+}
+
+// TestRunSessionCreate_NoArgsReturnsUsageError verifies issue #135 behavior:
+// invoking `niwa session create` with no args must return
+// *sessionattach.ExitCodeError with Code=2 and a usage string that names the
+// expected positional arguments and points at --help. Cobra's default
+// ExactArgs error ("accepts 2 arg(s), received 0") exits 1 with a generic
+// message; this guard ensures we don't regress to that behavior.
+func TestRunSessionCreate_NoArgsReturnsUsageError(t *testing.T) {
+	err := runSessionCreate(sessionCreateCmd, nil)
+	if err == nil {
+		t.Fatalf("want ExitCodeError, got nil")
+	}
+	var ece *sessionattach.ExitCodeError
+	if !errors.As(err, &ece) {
+		t.Fatalf("err is not *ExitCodeError: %T", err)
+	}
+	if ece.Code != 2 {
+		t.Errorf("Code = %d, want 2 (usage error)", ece.Code)
+	}
+	wantSubstrs := []string{
+		"niwa: usage",
+		"niwa session create",
+		"<repo>",
+		"<purpose>",
+		"niwa session create --help",
+	}
+	for _, s := range wantSubstrs {
+		if !strings.Contains(ece.Msg, s) {
+			t.Errorf("missing %q in usage message: %q", s, ece.Msg)
+		}
+	}
+}
+
+// TestRunSessionCreate_OneArgReturnsUsageError covers the partial-args case:
+// only <repo> supplied. The behavior should match the no-args case.
+func TestRunSessionCreate_OneArgReturnsUsageError(t *testing.T) {
+	err := runSessionCreate(sessionCreateCmd, []string{"some-repo"})
+	if err == nil {
+		t.Fatalf("want ExitCodeError, got nil")
+	}
+	var ece *sessionattach.ExitCodeError
+	if !errors.As(err, &ece) {
+		t.Fatalf("err is not *ExitCodeError: %T", err)
+	}
+	if ece.Code != 2 {
+		t.Errorf("Code = %d, want 2", ece.Code)
+	}
+}
+
+// TestRunSessionDestroy_NoArgsReturnsUsageError verifies issue #135 behavior
+// for destroy: usage error names <session-id> and points at
+// `niwa session list` (not --status active, since destroy operates on any
+// status).
+func TestRunSessionDestroy_NoArgsReturnsUsageError(t *testing.T) {
+	err := runSessionDestroy(sessionDestroyCmd, nil)
+	if err == nil {
+		t.Fatalf("want ExitCodeError, got nil")
+	}
+	var ece *sessionattach.ExitCodeError
+	if !errors.As(err, &ece) {
+		t.Fatalf("err is not *ExitCodeError: %T", err)
+	}
+	if ece.Code != 2 {
+		t.Errorf("Code = %d, want 2 (usage error)", ece.Code)
+	}
+	wantSubstrs := []string{
+		"niwa: usage",
+		"niwa session destroy",
+		"<session-id>",
+		"[--force]",
+		"niwa session list",
+	}
+	for _, s := range wantSubstrs {
+		if !strings.Contains(ece.Msg, s) {
+			t.Errorf("missing %q in usage message: %q", s, ece.Msg)
+		}
+	}
+}
+
+// TestSessionCommands_HaveCompletion verifies that the four session
+// positional-arg subcommands all expose a ValidArgsFunction. This is a
+// regression guard: removing the wiring should fail this test, since
+// dropping completion is what issue #135 fixed.
+func TestSessionCommands_HaveCompletion(t *testing.T) {
+	cmds := []struct {
+		name string
+		fn   any
+	}{
+		{"session create", sessionCreateCmd.ValidArgsFunction},
+		{"session destroy", sessionDestroyCmd.ValidArgsFunction},
+		{"session attach", sessionAttachCmd.ValidArgsFunction},
+		{"session detach", sessionDetachCmd.ValidArgsFunction},
+	}
+	for _, c := range cmds {
+		if c.fn == nil {
+			t.Errorf("%s: ValidArgsFunction is nil, want a completion function", c.name)
+		}
 	}
 }
 

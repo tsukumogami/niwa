@@ -9,6 +9,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/tsukumogami/niwa/internal/config"
+	"github.com/tsukumogami/niwa/internal/mcp"
 	"github.com/tsukumogami/niwa/internal/workspace"
 )
 
@@ -77,6 +78,41 @@ func completeRepoNames(cmd *cobra.Command, args []string, toComplete string) ([]
 		return nil, cobra.ShellCompDirectiveNoFileComp
 	}
 	return filterPrefix(names, toComplete), cobra.ShellCompDirectiveNoFileComp
+}
+
+// completeSessionIDs is the completion closure for positions that accept a
+// session ID: the positional arg of `niwa session destroy`,
+// `niwa session attach`, and `niwa session detach`. It enumerates session
+// lifecycle state files under <instanceRoot>/.niwa/sessions/ via
+// mcp.ListSessionLifecycleStates.
+//
+// Instance resolution matches the runtime path used by the same commands
+// (resolveInstanceRoot): NIWA_INSTANCE_ROOT wins if set, otherwise we walk
+// up from cwd. Diverging here would create a discoverability trap where
+// tab completion returns empty even though the command itself runs fine.
+//
+// Errors are swallowed to match the convention used by the other
+// completers in this file: a transient failure should not surface a
+// completion banner.
+func completeSessionIDs(cmd *cobra.Command, args []string, toComplete string) ([]cobra.Completion, cobra.ShellCompDirective) {
+	if len(args) > 0 {
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
+	instanceRoot, err := resolveInstanceRoot()
+	if err != nil {
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
+	sessionsDir := filepath.Join(instanceRoot, ".niwa", "sessions")
+	states, err := mcp.ListSessionLifecycleStates(sessionsDir)
+	if err != nil || len(states) == 0 {
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
+	ids := make([]string, 0, len(states))
+	for _, s := range states {
+		ids = append(ids, s.SessionID)
+	}
+	sort.Strings(ids)
+	return filterPrefix(ids, toComplete), cobra.ShellCompDirectiveNoFileComp
 }
 
 // completeGoTarget is the specialized closure for `niwa go [target]`. It

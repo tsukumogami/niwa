@@ -45,10 +45,11 @@ or the propagated claude exit code (capped at 125).`,
 	// generic message. RunE validates arg count itself and returns an
 	// *sessionattach.ExitCodeError with Code=2 plus the PRD-mandated usage
 	// string when no session_id is supplied.
-	Args:          cobra.MaximumNArgs(1),
-	RunE:          runSessionAttach,
-	SilenceErrors: true,
-	SilenceUsage:  true,
+	Args:              cobra.MaximumNArgs(1),
+	ValidArgsFunction: completeSessionIDs,
+	RunE:              runSessionAttach,
+	SilenceErrors:     true,
+	SilenceUsage:      true,
 }
 
 var sessionDetachCmd = &cobra.Command{
@@ -68,10 +69,11 @@ With --force: SIGTERMs the holder, waits NIWA_DESTROY_GRACE_SECONDS
 code 4 to signal that a live holder was killed.`,
 	// Same reasoning as sessionAttachCmd: RunE handles missing-arg with the
 	// PRD R10 usage string and exit code 2.
-	Args:          cobra.MaximumNArgs(1),
-	RunE:          runSessionDetach,
-	SilenceErrors: true,
-	SilenceUsage:  true,
+	Args:              cobra.MaximumNArgs(1),
+	ValidArgsFunction: completeSessionIDs,
+	RunE:              runSessionDetach,
+	SilenceErrors:     true,
+	SilenceUsage:      true,
 }
 
 func runSessionAttach(cmd *cobra.Command, args []string) error {
