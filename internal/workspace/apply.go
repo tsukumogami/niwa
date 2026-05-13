@@ -734,13 +734,6 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		}
 	}
 
-	// Determine the active overlay URL for repo filtering below.
-	// Either branch 2 (opts.overlayURL) or branch 3 (pipelineOverlayURL) may have set it.
-	activeOverlayURL := opts.overlayURL
-	if activeOverlayURL == "" {
-		activeOverlayURL = pipelineOverlayURL
-	}
-
 	// Step 0.6: Parse and merge the overlay config when overlayDir is set.
 	// The merged config replaces cfg for all subsequent pipeline steps, including
 	// discoverAllRepos, so overlay sources contribute repos to discovery.
@@ -817,24 +810,17 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 	}
 
 	// Step 1: Discover repos from all sources (base + overlay after merge).
+	// An overlay repo (e.g. <workspace>-overlay) picked up by org auto-scan
+	// is treated as a normal workspace repo here. Do not re-introduce a
+	// filter at this step — issue #137 deliberately removed one because it
+	// conflated two distinct concerns: the canonical overlay config (read
+	// from OverlayDir(overlayURL) in Step 0.6) and the workspace working
+	// copy (a regular cloned repo under the instance root). A working copy
+	// never affects apply until it is pushed and re-synced into the XDG
+	// snapshot.
 	allRepos, err := a.discoverAllRepos(ctx, cfg.Sources)
 	if err != nil {
 		return nil, err
-	}
-
-	// Filter the overlay repo itself out of allRepos. When the overlay repo lives
-	// in the same org as the workspace source, the org-level auto-scan picks it up
-	// as a regular workspace repo. Leaving it in causes spurious output like
-	// "skipped fake-dot-niwa-overlay (dirty working tree)" — R22 requires zero
-	// output referencing the overlay in standard apply mode.
-	if overlayRepoName, ok := config.OverlayRepoName(activeOverlayURL); ok {
-		filtered := allRepos[:0]
-		for _, r := range allRepos {
-			if r.Name != overlayRepoName {
-				filtered = append(filtered, r)
-			}
-		}
-		allRepos = filtered
 	}
 
 	// Step 2: Classify repos into groups.
