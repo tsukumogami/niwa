@@ -167,47 +167,107 @@ func TestSweepBoundary(t *testing.T) {
 	}
 }
 
-// TestSweepNeverTouchesInReviewOrVerdictCast confirms changes in
-// in-review or verdict-cast states are preserved regardless of
-// UpdatedAt age. PRD R9: "Only changes in pending are swept."
-func TestSweepNeverTouchesInReviewOrVerdictCast(t *testing.T) {
+// TestSweepReapsStaleInReview confirms that an in-review change older
+// than AbandonDays is swept to cleaned, with diff.patch removed and a
+// change_cleaned event emitted. This is the safety net for the F5/F10
+// gap: in-review has no verdict-cast exit until F10 ships, so the
+// sweep treats stale in-review as the same kind of abandonment as
+// stale pending. PRD R9 originally said "only pending is swept"; that
+// rationale assumed F10's verdict-cast was imminent.
+func TestSweepReapsStaleInReview(t *testing.T) {
 	root := t.TempDir()
 	sink := &recordingSink{}
 	cfg := Config{IntervalHours: 6, AbandonDays: 14}
 
 	now := time.Now().UTC()
 	veryOld := now.Add(-365 * 24 * time.Hour)
-
-	inReviewID := seedChangeWithUpdatedAt(t, root,
+	id := seedChangeWithUpdatedAt(t, root,
 		mcp.ChangeStateInReview, veryOld, []byte("ir"))
-	verdictID := seedChangeWithUpdatedAt(t, root,
+
+	sweepOnce(now, root, sink, cfg)
+
+	got, err := mcp.Read(root, id)
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if got.State != mcp.ChangeStateCleaned {
+		t.Errorf("state = %q, want cleaned", got.State)
+	}
+	dir, _ := mcp.ChangeDir(root, id)
+	if _, err := os.Stat(filepath.Join(dir, "diff.patch")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("diff.patch not removed: %v", err)
+	}
+	if got := sink.byEvent(mcp.ChangeEventCleaned); len(got) != 1 {
+		t.Errorf("change_cleaned event count = %d, want 1", len(got))
+	}
+}
+
+// TestSweepNeverTouchesVerdictCast confirms changes in verdict-cast
+// state are preserved regardless of UpdatedAt age — once a human has
+// attested via F10's verdict cast, the change must persist through to
+// whatever F10's lifecycle continues into.
+func TestSweepNeverTouchesVerdictCast(t *testing.T) {
+	root := t.TempDir()
+	sink := &recordingSink{}
+	cfg := Config{IntervalHours: 6, AbandonDays: 14}
+
+	now := time.Now().UTC()
+	veryOld := now.Add(-365 * 24 * time.Hour)
+	id := seedChangeWithUpdatedAt(t, root,
 		mcp.ChangeStateVerdictCast, veryOld, []byte("vc"))
 
 	sweepOnce(now, root, sink, cfg)
 
-	ir, err := mcp.Read(root, inReviewID)
+	got, err := mcp.Read(root, id)
 	if err != nil {
-		t.Fatalf("Read in-review: %v", err)
+		t.Fatalf("Read: %v", err)
 	}
-	if ir.State != mcp.ChangeStateInReview {
-		t.Errorf("in-review state = %q, want in-review", ir.State)
+	if got.State != mcp.ChangeStateVerdictCast {
+		t.Errorf("state = %q, want verdict-cast", got.State)
 	}
-	vc, err := mcp.Read(root, verdictID)
-	if err != nil {
-		t.Fatalf("Read verdict-cast: %v", err)
-	}
-	if vc.State != mcp.ChangeStateVerdictCast {
-		t.Errorf("verdict-cast state = %q, want verdict-cast", vc.State)
-	}
-	// Neither change's diff.patch should be missing.
-	for _, id := range []string{inReviewID, verdictID} {
-		dir, _ := mcp.ChangeDir(root, id)
-		if _, err := os.Stat(filepath.Join(dir, "diff.patch")); err != nil {
-			t.Errorf("diff.patch removed for %s: %v", id, err)
-		}
+	dir, _ := mcp.ChangeDir(root, id)
+	if _, err := os.Stat(filepath.Join(dir, "diff.patch")); err != nil {
+		t.Errorf("diff.patch removed: %v", err)
 	}
 	if got := sink.byEvent(mcp.ChangeEventCleaned); len(got) != 0 {
-		t.Errorf("change_cleaned event emitted for non-pending change: %+v", got)
+		t.Errorf("change_cleaned event emitted for verdict-cast change: %+v", got)
+	}
+}
+
+// TestSweepReclaimsLeakedDiffOnCleanedChange covers issue #10's
+// idempotency gap: if a prior sweep crashed between sweepChange's
+// state mutation (step 1) and its diff.patch removal (step 2), the
+// next on-boot sweep encounters a cleaned change with a leaked diff.
+// The reclaimer must drop the diff without re-emitting events.
+func TestSweepReclaimsLeakedDiffOnCleanedChange(t *testing.T) {
+	root := t.TempDir()
+	sink := &recordingSink{}
+	cfg := Config{IntervalHours: 6, AbandonDays: 14}
+
+	now := time.Now().UTC()
+	// Seed a change directly in cleaned state with diff.patch still on
+	// disk — simulating the post-crash mid-sweep layout.
+	id := seedChangeWithUpdatedAt(t, root,
+		mcp.ChangeStateCleaned, now, []byte("leaked diff"))
+
+	sweepOnce(now, root, sink, cfg)
+
+	dir, _ := mcp.ChangeDir(root, id)
+	if _, err := os.Stat(filepath.Join(dir, "diff.patch")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("leaked diff.patch not reclaimed: %v", err)
+	}
+	// No event re-emit: the original sweep may have emitted, may not
+	// have, and the reclaimer can't tell. Idempotency is silent.
+	if got := sink.byEvent(mcp.ChangeEventCleaned); len(got) != 0 {
+		t.Errorf("reclaim emitted spurious change_cleaned event: %+v", got)
+	}
+	// state.json must still say cleaned.
+	st, err := mcp.Read(root, id)
+	if err != nil {
+		t.Fatalf("Read after reclaim: %v", err)
+	}
+	if st.State != mcp.ChangeStateCleaned {
+		t.Errorf("state = %q after reclaim, want cleaned", st.State)
 	}
 }
 

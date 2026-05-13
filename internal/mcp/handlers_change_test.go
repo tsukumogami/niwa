@@ -892,6 +892,119 @@ func TestHandleCreateChange_URLPlaceholderSubstitution(t *testing.T) {
 	}
 }
 
+// TestHandleCancelChange_AuthorizedBySession confirms a worker holding
+// the originating session_id can cancel a pending change it created.
+// The pipeline: create the change as session "deadbeef", then attach
+// the same session to a fresh Server (simulating a worker re-entering
+// or asking from the same session), and call handleCancelChange. Post-
+// state must be cleaned with diff.patch removed and a change_cleaned
+// event in transitions.log carrying the supplied reason.
+func TestHandleCancelChange_AuthorizedBySession(t *testing.T) {
+	root := t.TempDir()
+	wt, _, _ := setupRemoteFixture(t, root, "base\n", "base\nhead\n", "main", "feature")
+	sid := "deadbeef"
+	setupChangeSession(t, root, sid, wt)
+	s := newChangeTestServer(t, root)
+
+	resp := parseCreateResp(t, s.handleCreateChange(createChangeArgs{SessionID: sid}))
+
+	// Re-stamp the server with the session identity so the authz check
+	// in handleCancelChange has a non-empty s.sessionID to match.
+	s.sessionID = sid
+
+	cancelRes := s.handleCancelChange(cancelChangeArgs{
+		ChangeID: resp.ChangeID,
+		Reason:   "worker_decided_not_to_ship",
+	})
+	if cancelRes.IsError {
+		t.Fatalf("handleCancelChange unexpected error: %s", cancelRes.Content[0].Text)
+	}
+	got, err := Read(root, resp.ChangeID)
+	if err != nil {
+		t.Fatalf("Read after cancel: %v", err)
+	}
+	if got.State != ChangeStateCleaned {
+		t.Errorf("state = %q, want cleaned", got.State)
+	}
+	dir, _ := ChangeDir(root, resp.ChangeID)
+	if _, err := os.Stat(filepath.Join(dir, diffPatchFileName)); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("diff.patch not removed: %v", err)
+	}
+	transitions := readTransitionsLog(t, root, resp.ChangeID)
+	if !strings.Contains(transitions, "change_cleaned") {
+		t.Errorf("transitions.log missing change_cleaned: %s", transitions)
+	}
+	if !strings.Contains(transitions, "worker_decided_not_to_ship") {
+		t.Errorf("transitions.log missing reason payload: %s", transitions)
+	}
+}
+
+// TestHandleCancelChange_UnauthorizedSession confirms a server without
+// the originating session_id (or originating task_id) cannot cancel
+// the change. The handler returns the "forbidden" error code and the
+// change state remains unchanged.
+func TestHandleCancelChange_UnauthorizedSession(t *testing.T) {
+	root := t.TempDir()
+	wt, _, _ := setupRemoteFixture(t, root, "base\n", "base\nhead\n", "main", "feature")
+	sid := "deadbeef"
+	setupChangeSession(t, root, sid, wt)
+	s := newChangeTestServer(t, root)
+
+	resp := parseCreateResp(t, s.handleCreateChange(createChangeArgs{SessionID: sid}))
+
+	// Leave s.sessionID and s.taskID empty: simulating a coordinator
+	// attempting direct cancellation (rejected — coordinators must go
+	// through the auto-cascade from task abandonment or session
+	// destruction).
+	cancelRes := s.handleCancelChange(cancelChangeArgs{ChangeID: resp.ChangeID})
+	if !cancelRes.IsError {
+		t.Fatalf("expected unauthorized cancel to error, got: %s", cancelRes.Content[0].Text)
+	}
+	if !strings.Contains(cancelRes.Content[0].Text, "forbidden") {
+		t.Errorf("error text missing 'forbidden': %s", cancelRes.Content[0].Text)
+	}
+	// State unchanged.
+	got, err := Read(root, resp.ChangeID)
+	if err != nil {
+		t.Fatalf("Read after rejected cancel: %v", err)
+	}
+	if got.State != ChangeStatePending {
+		t.Errorf("state = %q after rejected cancel, want pending", got.State)
+	}
+}
+
+// TestCancelChangesForSession confirms the session-destruction
+// auto-cascade reaps every non-cleaned change originating from the
+// destroyed session. Changes from a different session are left alone.
+func TestCancelChangesForSession(t *testing.T) {
+	root := t.TempDir()
+	wt, _, _ := setupRemoteFixture(t, root, "base\n", "base\nhead\n", "main", "feature")
+	sidA := "deadbeef"
+	sidB := "cafef00d"
+	setupChangeSession(t, root, sidA, wt)
+	setupChangeSession(t, root, sidB, wt)
+	s := newChangeTestServer(t, root)
+
+	respA := parseCreateResp(t, s.handleCreateChange(createChangeArgs{SessionID: sidA}))
+	// Advance HEAD with another commit so sidB's create gets its own
+	// (session_id, head_ref) tuple and a distinct change.
+	writeTestFile(t, filepath.Join(wt, "content.txt"), "base\nhead\nmore\n")
+	runGit(t, wt, "add", "content.txt")
+	runGit(t, wt, "commit", "-qm", "more")
+	respB := parseCreateResp(t, s.handleCreateChange(createChangeArgs{SessionID: sidB}))
+
+	CancelChangesForSession(root, sidA, "destroy_cascade", s.audit)
+
+	gotA, _ := Read(root, respA.ChangeID)
+	if gotA == nil || gotA.State != ChangeStateCleaned {
+		t.Errorf("session A change not cleaned: %+v", gotA)
+	}
+	gotB, _ := Read(root, respB.ChangeID)
+	if gotB == nil || gotB.State != ChangeStatePending {
+		t.Errorf("session B change disturbed by A's cascade: %+v", gotB)
+	}
+}
+
 // readTransitionsLog is a small test helper that returns the full
 // transitions.log content for a change, failing the test on read error.
 func readTransitionsLog(t *testing.T, root, changeID string) string {

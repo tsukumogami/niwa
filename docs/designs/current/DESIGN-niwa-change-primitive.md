@@ -1163,6 +1163,48 @@ escalated review).
   design, and `audit_reader.go`'s `effectiveKind()` is the
   reference implementation.
 
+### A5: Sweep also reaps stale in-review changes, plus a 4th MCP tool for explicit cancellation
+
+The original design had GC reap only `pending` changes past the
+abandonment threshold, on the rationale that an in-review change had
+a reviewer attached and F10's verdict-cast was the imminent exit
+transition. A post-implementation reachability audit surfaced that
+between F5 ship and F10 ship `in-review` has *no* exit transition at
+all — any HTTP GET on a change advances `pending → in-review` under
+the per-change flock, and a stale Telegram bookmark, search-bot
+crawl, or accidental click parks the change in `in-review`
+permanently.
+
+Two amendments to close the gap:
+
+1. **Sweep eligibility broadens.** `sweepOnce` now considers both
+   `pending` and `in-review` changes past `AbandonDays`. `verdict-cast`
+   stays out of scope (human attestation must persist through F10's
+   continuation, whatever it is). Cleaned changes are still skipped
+   structurally, plus a new idempotency pass reclaims any
+   `diff.patch` leaked by a daemon that crashed between
+   `sweepChange`'s state mutation and its file removal — the on-boot
+   sweep is now re-entrant.
+
+2. **`niwa_cancel_change` MCP tool ships.** Workers retract a change
+   they created in error, and the niwa runtime auto-cancels changes
+   on two cascade hooks: task abandonment
+   (`handleFinishTask(outcome="abandoned")` reaps every change in
+   `OriginatingTasks`) and session destruction
+   (`handleDestroySession` reaps every change in
+   `OriginatingSession`). Authorization on the verb requires the
+   calling session_id (from `NIWA_SESSION_ID` env) to equal
+   `OriginatingSession` OR the calling task_id (from `NIWA_TASK_ID`
+   env) to appear in `OriginatingTasks`. Coordinators without either
+   env stamped are rejected — they should route cancellation through
+   the auto-cascade, not call the verb directly.
+
+The `niwa-mesh` skill's `allowed-tools` block grows to 18 entries
+(the original 14 + the three F5 verbs from the original ship + the
+new `niwa_cancel_change`). Workers operating under the skill can now
+reach every F5 verb directly — fixing a shipped-but-unreachable gap
+where the skill omitted the F5 tools entirely.
+
 ### Considered and deferred — URL composition reads global config per call
 
 `composeChangeURL` in `internal/mcp/handlers_change.go` resolves the

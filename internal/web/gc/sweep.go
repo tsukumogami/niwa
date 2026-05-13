@@ -128,10 +128,30 @@ func sweepAll(now time.Time, targets []Target, cfg Config) {
 	}
 }
 
-// sweepOnce iterates `.niwa/changes/` and reclaims abandoned pending
-// changes. Skips non-pending entries up-front; non-pending changes are
-// never auto-cleaned per PRD R9 (an in-review change has a reviewer
-// attached, and verdict-cast is F10's terminal state).
+// sweepOnce iterates `.niwa/changes/` and reclaims abandoned changes,
+// plus reaps any leaked artefacts on already-cleaned changes from a
+// prior crashed sweep.
+//
+// The sweep visits two categories of change:
+//
+//   - Pending changes older than AbandonDays — the original PRD R9
+//     scope. A pending change has nobody attached to it; if AbandonDays
+//     have passed without any HTTP hit advancing it to in-review, it is
+//     abandoned and reclaimed.
+//   - In-review changes older than AbandonDays — added because between
+//     F5 ship and F10 ship the in-review state has no exit transition.
+//     Any HTTP GET on a change flips pending → in-review under the per-
+//     change flock, so stale bookmarks, search-bot crawls, or
+//     accidental clicks can permanently park a change in in-review. The
+//     same AbandonDays threshold applies: once F10 ships and a verdict
+//     can advance the state, this branch becomes a safety net rather
+//     than a primary path. PRD R9's original rationale ("an in-review
+//     change has a reviewer attached") assumed F10 was imminent; until
+//     then, in-review is otherwise immortal.
+//   - Cleaned changes whose diff.patch is still on disk — defence
+//     against a daemon that crashed between sweepChange's state
+//     mutation (step 1) and its diff.patch removal (step 2). The
+//     reclaim is idempotent.
 //
 // Per-entry errors are logged and the sweep continues — a single
 // corrupt change directory must not poison the rest of the workspace's
@@ -160,7 +180,21 @@ func sweepOnce(now time.Time, instanceRoot string, sink mcp.AuditSink, cfg Confi
 			// genuinely corrupt directories.
 			continue
 		}
-		if st.State != mcp.ChangeStatePending {
+		// Cleaned-change janitor: a prior sweep crashed between the
+		// state mutation and the diff.patch removal. Probe and reclaim;
+		// no event re-emit (the original event may or may not have
+		// landed, and we can't distinguish without parsing the audit
+		// log).
+		if st.State == mcp.ChangeStateCleaned {
+			reclaimCleanedDiff(instanceRoot, id)
+			continue
+		}
+		// Pending and in-review are eligible for the AbandonDays sweep.
+		// verdict-cast (F10) is intentionally not swept here — once F10
+		// adds it, a verdict-cast change has a human attestation and
+		// must persist through to whatever F10's lifecycle continues
+		// into.
+		if st.State != mcp.ChangeStatePending && st.State != mcp.ChangeStateInReview {
 			continue
 		}
 		updated, perr := time.Parse(time.RFC3339Nano, st.UpdatedAt)
@@ -178,6 +212,25 @@ func sweepOnce(now time.Time, instanceRoot string, sink mcp.AuditSink, cfg Confi
 	}
 }
 
+// reclaimCleanedDiff probes for and removes a diff.patch leak on a
+// change that is already in the `cleaned` state. Used by the on-boot
+// sweep's idempotency pass so that a daemon that crashed between
+// sweepChange's state mutation and its diff.patch removal eventually
+// reclaims the disk on a later boot. No event emit; the audit
+// substrate already has the original change_cleaned (if step 1
+// succeeded) or never will (if step 1 was the failure point), and
+// either way the file removal is the only reclaimable side-effect.
+func reclaimCleanedDiff(instanceRoot, id string) {
+	dir, derr := mcp.ChangeDir(instanceRoot, id)
+	if derr != nil {
+		return
+	}
+	path := filepath.Join(dir, diffPatchFileName)
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		log.Printf("gc sweep: reclaim cleaned diff %s: %v", id, err)
+	}
+}
+
 // sweepChange applies the cleaning to one change. Order per PRD R9:
 //
 //  1. UpdateChangeState mutator: pending → cleaned. Idempotent under
@@ -192,7 +245,12 @@ func sweepOnce(now time.Time, instanceRoot string, sink mcp.AuditSink, cfg Confi
 func sweepChange(instanceRoot, id string, abandonDays int, sink mcp.AuditSink) error {
 	updateErr := mcp.UpdateChangeState(instanceRoot, id,
 		func(cur *mcp.ChangeState) (*mcp.ChangeState, error) {
-			if cur.State != mcp.ChangeStatePending {
+			// Allow both pending and in-review: F10 has not yet added a
+			// verdict-cast exit for in-review, and a stale in-review past
+			// AbandonDays is the same kind of abandonment as a stale
+			// pending. See sweepOnce's doc comment for the full
+			// rationale.
+			if cur.State != mcp.ChangeStatePending && cur.State != mcp.ChangeStateInReview {
 				return nil, nil
 			}
 			next := *cur

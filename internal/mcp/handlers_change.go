@@ -67,6 +67,18 @@ type queryChangeArgs struct {
 	ChangeID string `json:"change_id"`
 }
 
+// cancelChangeArgs is the input shape for niwa_cancel_change. Operator-
+// or worker-initiated transition of a pending or in-review change to
+// `cleaned`, skipping the AbandonDays wait. Authorization: the calling
+// session must appear in the change's OriginatingSession OR the calling
+// task must appear in OriginatingTasks. The reason field is recorded in
+// the change_cleaned event payload so the audit trail distinguishes
+// operator cancellation from GC abandonment.
+type cancelChangeArgs struct {
+	ChangeID string `json:"change_id"`
+	Reason   string `json:"reason,omitempty"`
+}
+
 // diffSizeCap matches PRD R7 verbatim: 4 MiB byte boundary on captured
 // diffs. Bytes past this offset are dropped and replaced with the
 // truncate trailer. The renderer treats the trailer as plain text inside
@@ -334,6 +346,193 @@ func (s *Server) handleQueryChange(args queryChangeArgs) toolResult {
 	}
 	data, _ := json.Marshal(resp)
 	return textResult(string(data))
+}
+
+// handleCancelChange implements the niwa_cancel_change MCP tool. The
+// pipeline:
+//
+//  1. Validate change_id (UUIDv4); 404-equivalent on malformed.
+//  2. Read state; not_found on missing or already-cleaned.
+//  3. Authorize: the calling session_id (from NIWA_SESSION_ID env) must
+//     equal OriginatingSession OR the calling task_id (from
+//     NIWA_TASK_ID env) must appear in OriginatingTasks. Workers
+//     operate under their session's identity; tasks operate under
+//     their task ID. A coordinator without either env set is rejected
+//     — coordinator-driven cancellation should go through the
+//     auto-cascade from handleFinishTask(abandoned) /
+//     destroySessionWorktree, not a direct verb.
+//  4. UpdateChangeState mutator: pending|in-review → cleaned.
+//  5. Remove diff.patch.
+//  6. Emit change_cleaned with reason from the caller (defaulting to
+//     "cancelled").
+//
+// The verb is asymmetric vs niwa_cancel_task (which only operates on
+// queued tasks) and niwa_destroy_session (which is forced/idempotent).
+// Cancellation here is one-way and final — a re-create on the same
+// (session_id, head_ref) tuple produces a new UUIDv4 with a new URL.
+func (s *Server) handleCancelChange(args cancelChangeArgs) toolResult {
+	root := s.taskStoreRoot()
+	if root == "" {
+		return errResult("niwa_cancel_change: instance root not configured")
+	}
+	if !uuidV4Regex.MatchString(args.ChangeID) {
+		return errResultCode("not_found",
+			fmt.Sprintf("change %q is malformed", args.ChangeID))
+	}
+	st, err := Read(root, args.ChangeID)
+	if err != nil {
+		return errResultCode("not_found", err.Error())
+	}
+	if st.State == ChangeStateCleaned {
+		return errResultCode("not_found",
+			fmt.Sprintf("change %s is already cleaned", args.ChangeID))
+	}
+	authorized := false
+	if s.sessionID != "" && st.OriginatingSession == s.sessionID {
+		authorized = true
+	}
+	if !authorized && s.taskID != "" {
+		for _, t := range st.OriginatingTasks {
+			if t == s.taskID {
+				authorized = true
+				break
+			}
+		}
+	}
+	if !authorized {
+		return errResultCode("forbidden",
+			fmt.Sprintf("session/task does not own change %s", args.ChangeID))
+	}
+	reason := args.Reason
+	if reason == "" {
+		reason = "cancelled"
+	}
+	if err := cancelChange(root, args.ChangeID, reason, s.audit); err != nil {
+		return errResult("cancel change: " + err.Error())
+	}
+	resp := map[string]any{
+		"change_id": args.ChangeID,
+		"state":     ChangeStateCleaned,
+		"reason":    reason,
+	}
+	data, _ := json.Marshal(resp)
+	return textResult(string(data))
+}
+
+// cancelChange is the cancellation primitive shared by
+// handleCancelChange (operator/worker-initiated) and the auto-cascade
+// hooks (task abandonment, session destruction). It applies the same
+// pending|in-review → cleaned transition as the GC sweep, removes
+// diff.patch, and emits change_cleaned with the caller-supplied reason
+// so the audit substrate distinguishes operator cancellation from
+// abandonment-after-N-days.
+//
+// Idempotent: a change already in cleaned state is a no-op, returning
+// nil. Errors are returned only for genuine filesystem or audit
+// failures; the change_cleaned event emit is best-effort per the same
+// PRD R4 / DESIGN D5 discipline as the rest of F5.
+func cancelChange(root, changeID, reason string, sink AuditSink) error {
+	var transitioned bool
+	updateErr := UpdateChangeState(root, changeID,
+		func(cur *ChangeState) (*ChangeState, error) {
+			if cur.State != ChangeStatePending && cur.State != ChangeStateInReview {
+				return nil, nil
+			}
+			next := *cur
+			next.State = ChangeStateCleaned
+			transitioned = true
+			return &next, nil
+		})
+	if updateErr != nil {
+		return fmt.Errorf("update state: %w", updateErr)
+	}
+	if !transitioned {
+		return nil
+	}
+	dir, derr := ChangeDir(root, changeID)
+	if derr != nil {
+		return fmt.Errorf("resolve change dir: %w", derr)
+	}
+	diffPath := filepath.Join(dir, diffPatchFileName)
+	if err := os.Remove(diffPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("remove diff.patch: %w", err)
+	}
+	_ = AppendChangeEvent(root, sink, ChangeEvent{
+		Kind:     ChangeEventCleaned,
+		ChangeID: changeID,
+		Payload: map[string]any{
+			"change_id": changeID,
+			"reason":    reason,
+		},
+	})
+	return nil
+}
+
+// CancelChangesForSession cancels every non-cleaned change whose
+// OriginatingSession matches sid. Used by the session-destruction
+// path so abandoning a session also reaps the changes it produced;
+// otherwise the worktree disappears but the changes referencing it
+// linger until GC's AbandonDays elapses.
+//
+// Errors on individual changes are logged but do not abort the
+// cascade — the caller's goal is "clean up everything attributable to
+// this session," and one stuck change must not prevent the rest from
+// being reclaimed.
+func CancelChangesForSession(root, sid, reason string, sink AuditSink) {
+	changesDir := ChangesDir(root)
+	entries, err := os.ReadDir(changesDir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		if !e.IsDir() || !uuidV4Regex.MatchString(e.Name()) {
+			continue
+		}
+		st, rerr := Read(root, e.Name())
+		if rerr != nil || st.State == ChangeStateCleaned {
+			continue
+		}
+		if st.OriginatingSession != sid {
+			continue
+		}
+		_ = cancelChange(root, e.Name(), reason, sink)
+	}
+}
+
+// CancelChangesForTask cancels every non-cleaned change whose
+// OriginatingTasks list contains tid. Used by the task-abandonment
+// path: when a delegation ends with outcome=abandoned, any change the
+// worker created before crashing is reaped so it does not sit pending
+// for AbandonDays.
+//
+// Errors on individual changes are logged but do not abort the
+// cascade.
+func CancelChangesForTask(root, tid, reason string, sink AuditSink) {
+	changesDir := ChangesDir(root)
+	entries, err := os.ReadDir(changesDir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		if !e.IsDir() || !uuidV4Regex.MatchString(e.Name()) {
+			continue
+		}
+		st, rerr := Read(root, e.Name())
+		if rerr != nil || st.State == ChangeStateCleaned {
+			continue
+		}
+		found := false
+		for _, t := range st.OriginatingTasks {
+			if t == tid {
+				found = true
+				break
+			}
+		}
+		if !found {
+			continue
+		}
+		_ = cancelChange(root, e.Name(), reason, sink)
+	}
 }
 
 // findExistingChange scans `.niwa/changes/` for a non-cleaned change
