@@ -251,6 +251,18 @@ func (a *Applier) Create(ctx context.Context, cfg *config.WorkspaceConfig, confi
 	// discovery and without depending on workspace repos being cloned.
 	initState, _ := LoadState(workspaceRoot)
 
+	// Refresh the team config snapshot (PRD R10-R13). This was
+	// previously only done by Apply(); doing it here too means
+	// `niwa create` picks up upstream maintainer changes AND emits
+	// the rank-2 deprecation notice for users upgrading from a
+	// pre-discovery niwa release.
+	fetcher, _ := a.GitHubClient.(FetchClient)
+	configConverted, teamConfigRank, err := EnsureConfigSnapshotWithStatus(ctx, configDir, config.TeamConfigMarkerSet(), fetcher, a.Reporter)
+	if err != nil {
+		_ = os.RemoveAll(instanceRoot)
+		return "", fmt.Errorf("refreshing team config: %w", err)
+	}
+
 	// Resolve the effective workspace name early. Doing this before
 	// runPipeline gives two benefits: a tampered ConfigNameOverride
 	// (defense in depth per Security §4) fails immediately rather than
@@ -285,6 +297,27 @@ func (a *Applier) Create(ctx context.Context, cfg *config.WorkspaceConfig, confi
 	if err != nil {
 		_ = os.RemoveAll(instanceRoot)
 		return "", err
+	}
+
+	// PRD R28: emit the lazy-conversion `note:` once per workspace.
+	if configConverted && !sliceContains(initDisclosedNotices, noticeConfigConverted) {
+		a.Reporter.Log("note: %s converted from working tree to snapshot. Manual edits inside this directory will no longer persist.", configDir)
+		result.disclosedNotices = append(result.disclosedNotices, noticeConfigConverted)
+	}
+
+	// PRD R10: emit the rank-2 deprecation notice for the team config
+	// once per workspace when the source resolves to the legacy
+	// whole-repo layout, and trigger the niwa plugin auto-install.
+	if teamConfigRank == 2 && !sliceContains(initDisclosedNotices, NoticeIDRank2TeamConfig) {
+		identifier := a.ConfigSourceURL
+		if identifier == "" {
+			identifier = configDir
+		}
+		EmitRank2Notice(NoticeIDRank2TeamConfig, identifier, a.Reporter)
+		result.disclosedNotices = append(result.disclosedNotices, NoticeIDRank2TeamConfig)
+		if a.InstallNiwaPlugin != nil {
+			a.InstallNiwaPlugin(nil, a.Reporter, a.SkipPluginInstall)
+		}
 	}
 
 	// Use the effective configName (resolved earlier above) for the
