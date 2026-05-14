@@ -1,0 +1,12 @@
+{
+  "name": "niwa",
+  "version": "0.1.0",
+  "description": "niwa-managed Claude Code skills, auto-installed by niwa when needed",
+  "skills": [
+    {
+      "name": "migrate-config",
+      "path": "skills/migrate-config/SKILL.md",
+      "description": "Help migrate a workspace config source from the deprecated rank-2 (whole-repo) layout to the rank-1 layout (.niwa/workspace.toml under a subpath)."
+    }
+  ]
+}

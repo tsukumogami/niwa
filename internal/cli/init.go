@@ -11,6 +11,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/tsukumogami/niwa/internal/config"
 	"github.com/tsukumogami/niwa/internal/github"
+	"github.com/tsukumogami/niwa/internal/plugin"
 	sourcepkg "github.com/tsukumogami/niwa/internal/source"
 	"github.com/tsukumogami/niwa/internal/workspace"
 )
@@ -42,15 +43,17 @@ func init() {
 	initCmd.Flags().StringVar(&initOverlay, "overlay", "", "overlay repo (org/repo or URL) to clone and associate with this workspace")
 	initCmd.Flags().BoolVar(&initNoOverlay, "no-overlay", false, "disable overlay discovery and association for this workspace")
 	initCmd.Flags().BoolVar(&initRebind, "rebind", false, "rebind a registered workspace name to this directory (use only when intentionally moving a workspace)")
+	initCmd.Flags().BoolVar(&initNoInstallPlugins, "no-install-plugins", false, "skip auto-installing the embedded niwa Claude Code plugin (otherwise installed once when a rank-2 source is detected)")
 	initCmd.ValidArgsFunction = completeWorkspaceNames
 }
 
 var (
-	initFrom       string
-	initSkipGlobal bool
-	initOverlay    string
-	initNoOverlay  bool
-	initRebind     bool
+	initFrom             string
+	initSkipGlobal       bool
+	initOverlay          string
+	initNoOverlay        bool
+	initRebind           bool
+	initNoInstallPlugins bool
 )
 
 var initCmd = &cobra.Command{
@@ -204,10 +207,22 @@ func runInit(cmd *cobra.Command, args []string) error {
 	// Create the workspace directory (named modes only). os.Mkdir, NOT
 	// MkdirAll — closes the symlink-TOCTOU window between the Lstat
 	// pre-gate and creation per Security Considerations §3.
+	//
+	// PRD R5: if the workspace directory did not exist before init and
+	// init fails before scaffolding completes, the directory must be
+	// removed. The deferred cleanup below clears workspaceCreated on
+	// success so it only fires on the error path.
+	var workspaceCreated bool
 	if name != "" {
 		if err := os.Mkdir(workspaceRoot, 0o755); err != nil {
 			return fmt.Errorf("creating workspace directory: %w", err)
 		}
+		workspaceCreated = true
+		defer func() {
+			if workspaceCreated {
+				_ = os.RemoveAll(workspaceRoot)
+			}
+		}()
 	}
 
 	switch mode {
@@ -245,8 +260,26 @@ func runInit(cmd *cobra.Command, args []string) error {
 
 		niwaDir := filepath.Join(workspaceRoot, workspace.StateDir)
 		fetcher := github.NewAPIClient(resolveGitHubToken())
-		if err := workspace.MaterializeFromSource(cmd.Context(), src, source, niwaDir, fetcher, workspace.NewReporter(os.Stderr)); err != nil {
+		reporter := workspace.NewReporter(os.Stderr)
+		teamConfigRank, err := workspace.MaterializeFromSource(cmd.Context(), src, source, niwaDir, config.TeamConfigMarkerSet(), fetcher, reporter)
+		if err != nil {
 			return fmt.Errorf("materializing config repo: %w", err)
+		}
+		// PRD R10: emit the rank-2 deprecation notice for the team
+		// config when the source resolves to the legacy whole-repo
+		// layout. State is nil here because the workspace's
+		// InstanceState is created later in scaffoldInstance — the
+		// disclosed-notices guard fires on subsequent applies (apply
+		// captures team-config rank and gates on workspace-root state).
+		if teamConfigRank == 2 {
+			workspace.EmitRank2Notice(workspace.NoticeIDRank2TeamConfig, source, reporter)
+			// PRD R16-R20: install the embedded niwa Claude Code plugin
+			// so /niwa:migrate-config is available next time the user
+			// invokes Claude Code. SkipInstall ORs the per-invocation
+			// --no-install-plugins flag with the persistent
+			// auto_install_plugins = false global-config setting (PRD R19).
+			skipInstall := initNoInstallPlugins || globalCfg.SkipPluginInstall()
+			plugin.Install(nil, reporter, plugin.InstallOpts{SkipInstall: skipInstall})
 		}
 	}
 
@@ -358,6 +391,8 @@ func runInit(cmd *cobra.Command, args []string) error {
 			return err
 		}
 	}
+	// Success — disarm the workspace-dir cleanup defer.
+	workspaceCreated = false
 	return nil
 }
 
@@ -549,8 +584,12 @@ func buildInitState(cmd *cobra.Command, mode initMode, source, name string) (*wo
 		}
 		fetcher := github.NewAPIClient(resolveGitHubToken())
 		reporter := workspace.NewReporter(os.Stderr)
-		if _, cloneErr := workspace.EnsureOverlaySnapshot(ctx, initOverlay, overlayDir, fetcher, reporter); cloneErr != nil {
+		_, overlayRank, cloneErr := workspace.EnsureOverlaySnapshot(ctx, initOverlay, overlayDir, fetcher, reporter)
+		if cloneErr != nil {
 			return nil, fmt.Errorf("overlay clone failed: %w", cloneErr)
+		}
+		if overlayRank == 2 {
+			workspace.EmitRank2Notice(workspace.NoticeIDRank2Overlay, initOverlay, reporter)
 		}
 		sha, shaErr := workspace.HeadSHA(overlayDir)
 		if shaErr != nil {
@@ -568,14 +607,17 @@ func buildInitState(cmd *cobra.Command, mode initMode, source, name string) (*wo
 				if dirErr == nil {
 					fetcher := github.NewAPIClient(resolveGitHubToken())
 					reporter := workspace.NewReporter(os.Stderr)
-					wasFreshClone, cloneErr := workspace.EnsureOverlaySnapshot(ctx, conventionURL, overlayDir, fetcher, reporter)
+					_, overlayRank, cloneErr := workspace.EnsureOverlaySnapshot(ctx, conventionURL, overlayDir, fetcher, reporter)
 					if cloneErr != nil {
 						// Any clone failure is silently skipped — the overlay repo may
-						// not exist or may be inaccessible. wasFreshClone=false errors
-						// (refresh failure on an existing snapshot) are also non-fatal at
-						// init time since no state has been written yet.
-						_ = wasFreshClone
+						// not exist or may be inaccessible. Refresh failures on existing
+						// snapshots are also non-fatal at init time since no state has
+						// been written yet.
+						_ = cloneErr
 					} else {
+						if overlayRank == 2 {
+							workspace.EmitRank2Notice(workspace.NoticeIDRank2Overlay, conventionURL, reporter)
+						}
 						sha, shaErr := workspace.HeadSHA(overlayDir)
 						if shaErr != nil {
 							fmt.Fprintf(os.Stderr, "warning: could not read overlay HEAD: %v\n", shaErr)

@@ -67,7 +67,13 @@ func runConfigSetGlobal(cmd *cobra.Command, args []string) error {
 	fmt.Fprintf(cmd.OutOrStdout(), "Cloning global config from: %s\n", cloneURL)
 
 	fetcher := github.NewAPIClient(resolveGitHubToken())
-	if err := workspace.MaterializeFromSource(cmd.Context(), src, repo, globalConfigDir, fetcher, workspace.NewReporter(os.Stderr)); err != nil {
+	// The personal global config overlay has its own file convention
+	// (niwa.toml at repo root, read by apply via GlobalConfigOverrideFile).
+	// It is NOT the workspace-derived overlay covered by
+	// PRD-config-source-discovery's rank-1/rank-2 model — pass an
+	// empty MarkerSet so the whole repo is cloned verbatim, matching
+	// the pre-PR-#139 behaviour.
+	if _, err := workspace.MaterializeFromSource(cmd.Context(), src, repo, globalConfigDir, config.MarkerSet{}, fetcher, workspace.NewReporter(os.Stderr)); err != nil {
 		return fmt.Errorf("materializing global config repo: %w", err)
 	}
 

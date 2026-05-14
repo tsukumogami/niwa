@@ -64,6 +64,20 @@ type Applier struct {
 	// how to persist the setting.
 	ChannelsSynthesized bool
 
+	// SkipPluginInstall mirrors --no-install-plugins (and the
+	// auto_install_plugins = false global config). When true, the
+	// plugin installer emits the skip-notice instead of materializing
+	// the embedded plugin. The CLI wires this from flag + global config.
+	SkipPluginInstall bool
+
+	// InstallNiwaPlugin is the test seam for the niwa plugin
+	// auto-installer. Production wires this to plugin.Install via
+	// NewApplier; tests override to capture install-or-skip behavior
+	// without writing to the user's home directory. When nil, the
+	// installer is a no-op — useful for unit tests that don't
+	// exercise rank-2 + plugin-install at the same time.
+	InstallNiwaPlugin func(state *InstanceState, reporter *Reporter, skipInstall bool)
+
 	// cloneOrSync materializes or refreshes the overlay snapshot at dir.
 	// Returns wasFreshClone=true when no marker/.git was present (fresh
 	// materialization), so callers can distinguish "overlay doesn't
@@ -71,7 +85,7 @@ type Applier struct {
 	// hard error". Defaults to defaultCloneOrSync (which forwards to
 	// EnsureOverlaySnapshot wired to this Applier's fetcher + reporter).
 	// Overridable in tests.
-	cloneOrSync func(ctx context.Context, url, dir string) (bool, error)
+	cloneOrSync func(ctx context.Context, url, dir string) (wasFreshClone bool, rank int, err error)
 
 	// headSHA is the function used to read the HEAD commit SHA of a repo.
 	// Defaults to HeadSHA. Overridable in tests.
@@ -110,7 +124,7 @@ func NewApplier(gh github.Client) *Applier {
 		Reporter:     NewReporter(os.Stderr),
 		headSHA:      HeadSHA,
 	}
-	a.cloneOrSync = func(ctx context.Context, url, dir string) (bool, error) {
+	a.cloneOrSync = func(ctx context.Context, url, dir string) (bool, int, error) {
 		fetcher, _ := a.GitHubClient.(FetchClient)
 		return EnsureOverlaySnapshot(ctx, url, dir, fetcher, a.Reporter)
 	}
@@ -335,7 +349,7 @@ func (a *Applier) Apply(ctx context.Context, cfg *config.WorkspaceConfig, config
 	// holds a legacy `.git/` working tree, perform R28 lazy conversion
 	// in place. When it holds neither, no-op.
 	fetcher, _ := a.GitHubClient.(FetchClient)
-	configConverted, err := EnsureConfigSnapshotWithStatus(ctx, configDir, fetcher, a.Reporter)
+	configConverted, teamConfigRank, err := EnsureConfigSnapshotWithStatus(ctx, configDir, config.TeamConfigMarkerSet(), fetcher, a.Reporter)
 	if err != nil {
 		return err
 	}
@@ -399,6 +413,25 @@ func (a *Applier) Apply(ctx context.Context, cfg *config.WorkspaceConfig, config
 	if configConverted && !sliceContains(wsDisclosedNotices, noticeConfigConverted) {
 		a.Reporter.Log("note: %s converted from working tree to snapshot. Manual edits inside this directory will no longer persist.", configDir)
 		result.disclosedNotices = append(result.disclosedNotices, noticeConfigConverted)
+	}
+
+	// PRD R10: emit the rank-2 deprecation notice for the team config
+	// once per workspace when the source resolves to the legacy
+	// whole-repo layout.
+	if teamConfigRank == 2 && !sliceContains(wsDisclosedNotices, NoticeIDRank2TeamConfig) {
+		identifier := a.ConfigSourceURL
+		if identifier == "" {
+			identifier = configDir
+		}
+		EmitRank2Notice(NoticeIDRank2TeamConfig, identifier, a.Reporter)
+		result.disclosedNotices = append(result.disclosedNotices, NoticeIDRank2TeamConfig)
+		// PRD R16-R20: install the embedded niwa plugin so
+		// /niwa:migrate-config is available. The installer emits its
+		// own notice (installed/up-to-date or skipped); the rank-2
+		// notice above is independent.
+		if a.InstallNiwaPlugin != nil {
+			a.InstallNiwaPlugin(nil, a.Reporter, a.SkipPluginInstall)
+		}
 	}
 
 	// Emit `rotated <path>` to stderr for every managed file whose
@@ -587,10 +620,23 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 	//   - MergeGlobalOverride
 	var globalOverride *config.GlobalConfigOverride
 	if a.GlobalConfigDir != "" && !opts.skipGlobal {
-		// Step 0.3a: sync the personal overlay snapshot (PRD R10-R13, R28).
+		// Step 0.3a: sync the personal global config overlay snapshot.
+		// This is the user's [global_config] repo (e.g. dangazineu/dot-niwa),
+		// registered via `niwa config set global` — applied across ALL
+		// workspaces on the machine. It is NOT the workspace's
+		// auto-discovered overlay (<owner>/<repo>-overlay) that
+		// PRD-config-source-discovery's rank-1/rank-2 model covers.
+		//
+		// The personal global config has its own file convention — see
+		// GlobalConfigOverrideFile = "niwa.toml" below — that pre-dates
+		// the workspace-config-sources discovery model. Pass an empty
+		// MarkerSet to skip probing and clone the entire repo verbatim,
+		// matching the pre-PR-#139 behaviour. Migrating this path into
+		// the rank-1/rank-2 model is tracked separately; this PR is
+		// scoped to the workspace overlay.
 		a.Reporter.Status("syncing config...")
 		fetcher, _ := a.GitHubClient.(FetchClient)
-		converted, syncErr := EnsureConfigSnapshotWithStatus(ctx, a.GlobalConfigDir, fetcher, a.Reporter)
+		converted, _, syncErr := EnsureConfigSnapshotWithStatus(ctx, a.GlobalConfigDir, config.MarkerSet{}, fetcher, a.Reporter)
 		if syncErr != nil {
 			a.Reporter.Warn("could not sync config: %v", syncErr)
 			return nil, fmt.Errorf("syncing global config: %w", syncErr)
@@ -689,7 +735,7 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 			if dirErr != nil {
 				return nil, fmt.Errorf("resolving overlay directory: %w", dirErr)
 			}
-			_, syncErr := a.cloneOrSync(ctx, opts.overlayURL, dir)
+			_, overlayRank, syncErr := a.cloneOrSync(ctx, opts.overlayURL, dir)
 			if syncErr != nil {
 				// Any sync failure is a hard error when OverlayURL is registered.
 				return nil, fmt.Errorf("workspace overlay sync failed. Use --no-overlay to skip.")
@@ -707,6 +753,17 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 				pipelineOverlayCommit = sha
 			}
 			overlayDir = dir
+			// PRD R10: emit the one-time rank-2 deprecation notice
+			// when the overlay snapshot resolves to the legacy
+			// whole-repo layout. Gated on DisclosedNotices so the
+			// notice fires once per workspace.
+			if overlayRank == 2 && !sliceContains(opts.disclosedNotices, NoticeIDRank2Overlay) {
+				EmitRank2Notice(NoticeIDRank2Overlay, opts.overlayURL, a.Reporter)
+				newDisclosures = append(newDisclosures, NoticeIDRank2Overlay)
+				if a.InstallNiwaPlugin != nil {
+					a.InstallNiwaPlugin(nil, a.Reporter, a.SkipPluginInstall)
+				}
+			}
 
 		case opts.configSourceURL != "":
 			// Branch 3: Convention discovery from ConfigSourceURL.
@@ -714,7 +771,7 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 			if ok {
 				dir, dirErr := config.OverlayDir(conventionURL)
 				if dirErr == nil {
-					wasCloneAttempt, cloneErr := a.cloneOrSync(ctx, conventionURL, dir)
+					wasCloneAttempt, overlayRank, cloneErr := a.cloneOrSync(ctx, conventionURL, dir)
 					if cloneErr != nil {
 						if wasCloneAttempt {
 							// Fresh clone failed: overlay repo likely doesn't exist — skip silently.
@@ -729,6 +786,13 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 					pipelineOverlayURL = conventionURL
 					pipelineOverlayCommit = sha
 					overlayDir = dir
+					if overlayRank == 2 && !sliceContains(opts.disclosedNotices, NoticeIDRank2Overlay) {
+						EmitRank2Notice(NoticeIDRank2Overlay, conventionURL, a.Reporter)
+						newDisclosures = append(newDisclosures, NoticeIDRank2Overlay)
+						if a.InstallNiwaPlugin != nil {
+							a.InstallNiwaPlugin(nil, a.Reporter, a.SkipPluginInstall)
+						}
+					}
 				}
 			}
 		}

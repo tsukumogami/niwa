@@ -388,4 +388,7 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 	ctx.Step(`^role "([^"]*)" in instance "([^"]*)" emitted at least (\d+) successful niwa_finish_task calls?$`, func(ctx context.Context, role, instance string, n int) error {
 		return roleEmittedFinishTaskCalls(ctx, role, n, instance)
 	})
+
+	// --- @critical: rank-2 deprecation + plugin auto-install ---
+	registerRank2Steps(ctx)
 }

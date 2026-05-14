@@ -64,12 +64,19 @@ func theConfigRepoIsForcePushedTo(ctx context.Context, name string, body string)
 		}
 	}
 
-	if err := os.WriteFile(filepath.Join(work, "workspace.toml"), []byte(body), 0o644); err != nil {
-		return ctx, fmt.Errorf("writing rewritten workspace.toml: %w", err)
+	// Force-push uses the rank-1 layout (.niwa/workspace.toml) to
+	// match the canonical ConfigRepo helper. The original ConfigRepo
+	// also writes to .niwa/workspace.toml since Issue 5/7 ship.
+	niwaDir := filepath.Join(work, ".niwa")
+	if err := os.MkdirAll(niwaDir, 0o755); err != nil {
+		return ctx, fmt.Errorf("creating .niwa dir: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(niwaDir, "workspace.toml"), []byte(body), 0o644); err != nil {
+		return ctx, fmt.Errorf("writing rewritten .niwa/workspace.toml: %w", err)
 	}
 
 	for _, args := range [][]string{
-		{"-C", work, "add", "workspace.toml"},
+		{"-C", work, "add", ".niwa/workspace.toml"},
 		{"-C", work, "commit", "-m", "force-pushed history"},
 		{"-C", work, "push", "--force", "file://" + bareDir, "main"},
 	} {

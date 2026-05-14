@@ -64,7 +64,11 @@ func (s *localGitServer) createRepoWithFile(name, filename, content string) (str
 		return "", fmt.Errorf("git clone %q: %w\n%s", fileURL, err, out)
 	}
 
-	if err = os.WriteFile(filepath.Join(workDir, filename), []byte(content), 0o644); err != nil {
+	targetPath := filepath.Join(workDir, filename)
+	if err = os.MkdirAll(filepath.Dir(targetPath), 0o755); err != nil {
+		return "", fmt.Errorf("creating parent dir for %s: %w", filename, err)
+	}
+	if err = os.WriteFile(targetPath, []byte(content), 0o644); err != nil {
 		return "", fmt.Errorf("writing %s: %w", filename, err)
 	}
 
@@ -106,14 +110,32 @@ func (s *localGitServer) SourceRepo(name string) (string, error) {
 	return s.createRepoWithFile(name, ".gitkeep", "")
 }
 
-// ConfigRepo creates a bare repo named <name>.git, commits workspace.toml
-// with the given TOML body, and returns its file:// URL.
+// ConfigRepo creates a bare repo named <name>.git, commits
+// .niwa/workspace.toml with the given TOML body (the rank-1 layout
+// per PRD R3), and returns its file:// URL. This is the canonical
+// fixture for tests that don't specifically exercise rank-2
+// deprecation behavior.
 func (s *localGitServer) ConfigRepo(name, toml string) (string, error) {
+	return s.createRepoWithFile(name, ".niwa/workspace.toml", toml)
+}
+
+// ConfigRepoRank2 creates a bare repo with workspace.toml at the
+// source repo root (the rank-2 layout), exercising the deprecation
+// notice path. Use ConfigRepo for any test that doesn't specifically
+// target rank-2 behavior.
+func (s *localGitServer) ConfigRepoRank2(name, toml string) (string, error) {
 	return s.createRepoWithFile(name, "workspace.toml", toml)
 }
 
 // OverlayRepo creates a bare repo named <name>.git, commits
-// workspace-overlay.toml with the given TOML body, and returns its file:// URL.
+// .niwa/workspace-overlay.toml with the given TOML body (the
+// rank-1 overlay layout), and returns its file:// URL.
 func (s *localGitServer) OverlayRepo(name, toml string) (string, error) {
+	return s.createRepoWithFile(name, ".niwa/workspace-overlay.toml", toml)
+}
+
+// OverlayRepoRank2 creates a bare overlay repo with workspace-overlay.toml
+// at the root (rank-2). Use OverlayRepo for non-deprecation tests.
+func (s *localGitServer) OverlayRepoRank2(name, toml string) (string, error) {
 	return s.createRepoWithFile(name, "workspace-overlay.toml", toml)
 }

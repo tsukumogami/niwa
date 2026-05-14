@@ -214,6 +214,10 @@ func TestSource_CommitsAPIURL(t *testing.T) {
 	}
 }
 
+// TestSource_OverlayDerivedSource verifies PRD R10: the overlay
+// slug is always <owner>/<repo>-overlay regardless of the source's
+// subpath. The pre-R10 behavior (subpath cases used the last
+// subpath segment) is intentionally retired.
 func TestSource_OverlayDerivedSource(t *testing.T) {
 	cases := []struct {
 		name string
@@ -226,24 +230,24 @@ func TestSource_OverlayDerivedSource(t *testing.T) {
 			want: Source{Owner: "org", Repo: "dot-niwa-overlay"},
 		},
 		{
-			name: "subpath source uses last segment + -overlay",
+			name: "subpath source still uses source repo (R10) — not subpath segment",
 			in:   Source{Owner: "org", Repo: "brain", Subpath: ".niwa"},
-			want: Source{Owner: "org", Repo: ".niwa-overlay"},
+			want: Source{Owner: "org", Repo: "brain-overlay"},
 		},
 		{
-			name: "multi-segment subpath uses last segment only",
+			name: "multi-segment subpath still uses source repo (R10)",
 			in:   Source{Owner: "org", Repo: "brain", Subpath: "teams/research"},
-			want: Source{Owner: "org", Repo: "research-overlay"},
+			want: Source{Owner: "org", Repo: "brain-overlay"},
 		},
 		{
 			name: "ref is inherited",
 			in:   Source{Owner: "org", Repo: "brain", Subpath: ".niwa", Ref: "v1"},
-			want: Source{Owner: "org", Repo: ".niwa-overlay", Ref: "v1"},
+			want: Source{Owner: "org", Repo: "brain-overlay", Ref: "v1"},
 		},
 		{
 			name: "host is inherited",
 			in:   Source{Host: "gitlab.com", Owner: "org", Repo: "brain", Subpath: ".niwa"},
-			want: Source{Host: "gitlab.com", Owner: "org", Repo: ".niwa-overlay"},
+			want: Source{Host: "gitlab.com", Owner: "org", Repo: "brain-overlay"},
 		},
 	}
 	for _, tc := range cases {

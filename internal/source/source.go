@@ -116,26 +116,18 @@ func (s Source) CommitsAPIURL(ref string) string {
 		s.Owner, s.Repo, url.PathEscape(ref))
 }
 
-// OverlayDerivedSource implements PRD R35: the auto-discovered
-// workspace overlay slug for this source. The overlay sits in the
-// same org as the source; its repo name is the basename of the
-// resolved config dir plus "-overlay" (whole-repo cases use the
-// source repo name; subpath cases use the subpath's last segment).
-// The overlay's own subpath is empty (the overlay is treated as a
-// whole-repo source per PRD R35); its ref inherits from the source
-// (matching the team config's tracking).
+// OverlayDerivedSource implements PRD R10: the auto-discovered
+// workspace overlay slug for this source is always
+// `<owner>/<repo>-overlay`, regardless of whether the team config
+// itself lives at the repo root (rank-2) or under a subpath (rank-1
+// or explicit). The overlay's subpath is empty so its own probe
+// pass resolves rank against the overlay marker set; its ref
+// inherits from the source (matching the team config's tracking).
 func (s Source) OverlayDerivedSource() Source {
-	overlayRepo := s.Repo + "-overlay"
-	if s.Subpath != "" {
-		base := lastPathSegment(s.Subpath)
-		if base != "" {
-			overlayRepo = base + "-overlay"
-		}
-	}
 	return Source{
 		Host:  s.Host,
 		Owner: s.Owner,
-		Repo:  overlayRepo,
+		Repo:  s.Repo + "-overlay",
 		Ref:   s.Ref,
 	}
 }
@@ -157,13 +149,3 @@ func (s Source) IsGitHub() bool {
 	return s.Host == "" || s.Host == DefaultHost
 }
 
-func lastPathSegment(p string) string {
-	p = strings.Trim(p, "/")
-	if p == "" {
-		return ""
-	}
-	if i := strings.LastIndexByte(p, '/'); i >= 0 {
-		return p[i+1:]
-	}
-	return p
-}

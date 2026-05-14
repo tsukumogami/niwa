@@ -29,6 +29,8 @@ func init() {
 	applyCmd.Flags().BoolVar(&applyNoChannels, "no-channels", false, "disable channel infrastructure for this invocation (overrides --channels and NIWA_CHANNELS)")
 	applyCmd.Flags().BoolVar(&applyForce, "force", false,
 		"force apply through a detected URL change against a legacy working tree (PRD R26-R27).")
+	applyCmd.Flags().BoolVar(&applyNoInstallPlugins, "no-install-plugins", false,
+		"skip auto-installing the embedded niwa Claude Code plugin (otherwise installed once when a rank-2 source is detected).")
 	applyCmd.ValidArgsFunction = completeWorkspaceNames
 	_ = applyCmd.RegisterFlagCompletionFunc("instance", completeInstanceNames)
 }
@@ -42,6 +44,7 @@ var (
 	applyChannels              bool
 	applyNoChannels            bool
 	applyForce                 bool
+	applyNoInstallPlugins      bool
 )
 
 var applyCmd = &cobra.Command{
@@ -119,6 +122,17 @@ func runApply(cmd *cobra.Command, args []string) error {
 	applier.Reporter = workspace.NewReporterWithTTY(os.Stderr, !noProgress && term.IsTerminal(int(os.Stderr.Fd())))
 	applier.NoPull = applyNoPull
 	applier.AllowDirty = applyAllowDirty
+	// Wire the auto-installer + opt-outs. SkipPluginInstall ORs the
+	// per-invocation --no-install-plugins flag with the persistent
+	// auto_install_plugins = false global-config setting (PRD R19).
+	// The global config load failure here is non-fatal — the per-flag
+	// fallback ships the user-visible behavior either way.
+	skipFromGlobal := false
+	if globalCfg, gErr := config.LoadGlobalConfig(); gErr == nil {
+		skipFromGlobal = globalCfg.SkipPluginInstall()
+	}
+	applier.SkipPluginInstall = applyNoInstallPlugins || skipFromGlobal
+	applier.InstallNiwaPlugin = installNiwaPluginAdapter
 	if applyAllowDirty {
 		// PRD R32: --allow-dirty is meaningless under the snapshot
 		// model and slated for removal in v1.1. Print the deprecation

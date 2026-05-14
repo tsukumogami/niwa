@@ -2,6 +2,7 @@ package github
 
 import (
 	"archive/tar"
+	"bytes"
 	"compress/gzip"
 	"errors"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/tsukumogami/niwa/internal/config"
 	"github.com/tsukumogami/niwa/internal/testfault"
 )
 
@@ -20,6 +22,22 @@ import (
 // gzipped tarball that would expand past this is rejected before any
 // further bytes are written.
 const MaxDecompressedBytes int64 = 500 * 1024 * 1024
+
+// commonCaseInitialBufferSize pre-allocates the probe-and-extract
+// buffer for the common case (a config-bearing subpath that
+// decompresses to a few MB). Larger inputs grow the buffer
+// geometrically up to the MaxDecompressedBytes cap. Pre-allocation
+// reduces doubling overhead for the typical workload.
+const commonCaseInitialBufferSize = 1 << 20 // 1 MB
+
+// maxDecompressedBytesTestHook lets tests exercise the Level B
+// cap-firing path with a small fixture instead of generating a real
+// 500 MB-decompressed tarball. Production code MUST leave this nil; in
+// that case ProbeAndExtractSubpath uses MaxDecompressedBytes verbatim.
+// Tests set the hook to point at a smaller int64 to make the
+// cap-exceeded diagnostic fire on a tractable input. The seam stays
+// unexported so callers can't bypass the production cap.
+var maxDecompressedBytesTestHook *int64
 
 // ExtractSubpath streams a gzipped GitHub tarball, filters entries to
 // those under <wrapper>/<subpath>/ (or just <wrapper>/<subpath> for a
@@ -51,8 +69,6 @@ func ExtractSubpath(r io.Reader, subpath, dest string) error {
 	if dest == "" {
 		return errors.New("extractSubpath: dest is empty")
 	}
-	subpath = strings.TrimPrefix(subpath, "/")
-	subpath = strings.TrimSuffix(subpath, "/")
 
 	bytesBudget := MaxDecompressedBytes
 	if truncate := testfault.TruncateAfter("fetch-tarball"); truncate >= 0 {
@@ -67,6 +83,22 @@ func ExtractSubpath(r io.Reader, subpath, dest string) error {
 	defer gz.Close()
 
 	tr := tar.NewReader(gz)
+	return extractFromTarReader(tr, subpath, dest, bytesBudget)
+}
+
+// extractFromTarReader is the shared tar-walking loop used by both
+// ExtractSubpath (which feeds it a gzip-backed reader) and
+// ProbeAndExtractSubpath's pass-2 (which feeds it a bytes.NewReader
+// wrapped in tar.NewReader from a pre-buffered decompressed stream).
+//
+// Walking the loop directly against a tar.Reader lets the caller choose
+// the stream source while keeping all seven security defenses on a
+// single code path. The bytesBudget argument is the remaining
+// decompressed-byte budget for cumulative writes.
+func extractFromTarReader(tr *tar.Reader, subpath, dest string, bytesBudget int64) error {
+	subpath = strings.TrimPrefix(subpath, "/")
+	subpath = strings.TrimSuffix(subpath, "/")
+
 	var wrapper string
 	var written int64
 
@@ -88,7 +120,7 @@ func ExtractSubpath(r io.Reader, subpath, dest string) error {
 		}
 
 		// Defense 1: positive type allowlist.
-		if hdr.Typeflag != tar.TypeReg && hdr.Typeflag != tar.TypeDir {
+		if !isAllowedEntryType(hdr.Typeflag) {
 			continue
 		}
 
@@ -179,6 +211,204 @@ func ExtractSubpath(r io.Reader, subpath, dest string) error {
 	}
 
 	return nil
+}
+
+// ProbeAndExtractSubpath buffers the decompressed tarball, scans tar
+// headers to record which markers exist at the source-root level,
+// calls decider to resolve the rank, then re-iterates the buffered
+// bytes to extract entries under the resolved subpath into dest.
+//
+// All seven security defenses from ExtractSubpath's documentation
+// apply on BOTH passes (probe and extract): the type allowlist
+// (defense 1), wrapper anchoring (defense 2), subpath filter
+// (defense 3), path-containment check (defense 4), filename
+// validation (defense 5), decompression-bomb defense (defense 6),
+// and atomic failure (defense 7). The probe pass shares the type-
+// allowlist check (isAllowedEntryType) with the extract pass so a
+// future contributor relaxing one cannot silently desynchronize
+// the two — the symlink-marker regression test guards this
+// invariant.
+//
+// Three caps run in series, all sharing the MaxDecompressedBytes
+// budget unless the test-only maxDecompressedBytesTestHook
+// overrides it: Level A wraps the compressed input (unchanged from
+// ExtractSubpath's existing LimitReader on r); Level B wraps the
+// decompressed output during buffer fill (NEW in this entry point);
+// Level C runs inside the pass-2 extract via the cumulative-bytes
+// check in extractFromTarReader. If any of the three fires, the
+// function returns the existing cap-exceeded diagnostic before any
+// disk write completes.
+//
+// The function returns (resolvedSubpath, rank, notice, err). rank is
+// 1 when the decider chose rank-1 (notice == nil), 2 when the decider
+// chose rank-2 (notice != nil), and 0 on error. On any error path the
+// function returns before pass-2 begins, leaving dest untouched
+// (defense 7 — atomic failure: dest remains byte-identical to its
+// pre-call state when err != nil).
+func ProbeAndExtractSubpath(
+	r io.Reader,
+	markers config.MarkerSet,
+	decider func(found, markers config.MarkerSet) (string, *config.DeprecationNotice, error),
+	dest string,
+) (resolvedSubpath string, rank int, notice *config.DeprecationNotice, err error) {
+	if dest == "" {
+		return "", 0, nil, errors.New("probeAndExtractSubpath: dest is empty")
+	}
+	if decider == nil {
+		return "", 0, nil, errors.New("probeAndExtractSubpath: decider is nil")
+	}
+
+	bytesBudget := MaxDecompressedBytes
+	if maxDecompressedBytesTestHook != nil {
+		// Test-only override; see maxDecompressedBytesTestHook docs.
+		bytesBudget = *maxDecompressedBytesTestHook
+	}
+	if truncate := testfault.TruncateAfter("fetch-tarball"); truncate >= 0 {
+		// Honor the test-only stream cap when present (Level A
+		// fault-injection seam, same as ExtractSubpath).
+		r = &cappedReader{src: r, remaining: truncate}
+	}
+
+	// Level A: cap on the compressed input. Unchanged from
+	// ExtractSubpath's existing defense — keeps pathological compression
+	// ratios from blowing past the budget before gzip even starts.
+	gz, gzErr := gzip.NewReader(io.LimitReader(r, bytesBudget+1))
+	if gzErr != nil {
+		return "", 0, nil, fmt.Errorf("probeAndExtractSubpath: gzip reader: %w", gzErr)
+	}
+	defer gz.Close()
+
+	// Level B (NEW): cap on the decompressed output during buffer
+	// fill. Bounds in-memory growth regardless of how well-formed the
+	// gzip stream is. Pre-allocate for the common config-bearing case
+	// (~1 MB); the buffer grows geometrically beyond that up to the
+	// cap.
+	buf := bytes.NewBuffer(make([]byte, 0, commonCaseInitialBufferSize))
+	if _, fillErr := io.Copy(buf, io.LimitReader(gz, bytesBudget+1)); fillErr != nil {
+		return "", 0, nil, fmt.Errorf("probeAndExtractSubpath: read tarball: %w", fillErr)
+	}
+	if int64(buf.Len()) > bytesBudget {
+		return "", 0, nil, fmt.Errorf("probeAndExtractSubpath: tarball exceeds decompression-bomb cap (%d bytes)",
+			bytesBudget)
+	}
+
+	// Pass 1: probe. Header-only scan; no disk writes.
+	probeReader := tar.NewReader(bytes.NewReader(buf.Bytes()))
+	found, probeErr := ProbeMarkers(probeReader, markers)
+	if probeErr != nil {
+		return "", 0, nil, fmt.Errorf("probeAndExtractSubpath: probe: %w", probeErr)
+	}
+
+	// Resolve rank via the injected decider.
+	resolvedSubpath, notice, err = decider(found, markers)
+	if err != nil {
+		return "", 0, nil, err
+	}
+
+	// Derive rank from the decider's return values. rank-1 wins when
+	// no notice is emitted; rank-2 emits a notice. Anything else means
+	// the decider returned an error path we already handled above.
+	if notice != nil {
+		rank = 2
+	} else {
+		rank = 1
+	}
+
+	// Pass 2: extract. Fresh tar.Reader over the same buffered bytes.
+	// extractFromTarReader's cumulative-bytes check (Level C) runs
+	// unchanged.
+	extractReader := tar.NewReader(bytes.NewReader(buf.Bytes()))
+	if err := extractFromTarReader(extractReader, resolvedSubpath, dest, bytesBudget); err != nil {
+		return "", 0, nil, err
+	}
+
+	return resolvedSubpath, rank, notice, nil
+}
+
+// ProbeMarkers walks the tar reader's headers and records
+// which markers from the requested MarkerSet were observed at the
+// source-root level. It writes nothing to disk and applies the same
+// wrapper-anchoring, filename-validation, and type-allowlist checks
+// the extract pass uses, so a marker entry that the extractor would
+// reject (e.g., a symlink with the right name) does NOT get reported
+// as "found."
+//
+// PRD R6 (empty `.niwa/` does NOT count as rank-1): only `tar.TypeReg`
+// entries can satisfy a marker. A `tar.TypeDir` entry whose name
+// equals `markers.Rank1Dir` is allowed through the type-allowlist
+// (defense 1) and wrapper-anchoring (defense 2), but never matches
+// the rank-1 marker because the matching predicate below explicitly
+// skips non-`TypeReg` entries before comparing names. This is the
+// source-of-truth for the PRD R6 / AC-D8 rule at the probe layer.
+//
+// The returned MarkerSet has its Rank1Dir/Rank1File/Rank2Path fields
+// set only for markers actually observed at the source root after
+// wrapper-strip. Empty fields mean "not observed."
+func ProbeMarkers(tr *tar.Reader, markers config.MarkerSet) (config.MarkerSet, error) {
+	var found config.MarkerSet
+	var wrapper string
+
+	rank1Path := ""
+	if markers.Rank1Dir != "" && markers.Rank1File != "" {
+		rank1Path = markers.Rank1Dir + "/" + markers.Rank1File
+	}
+
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return config.MarkerSet{}, fmt.Errorf("ProbeMarkers: tar reader: %w", err)
+		}
+
+		// Same defenses as the extract pass — see extractFromTarReader.
+		if err := validateEntryName(hdr.Name); err != nil {
+			return config.MarkerSet{}, fmt.Errorf("ProbeMarkers: %w", err)
+		}
+		if !isAllowedEntryType(hdr.Typeflag) {
+			continue
+		}
+		if wrapper == "" {
+			parts := strings.SplitN(strings.TrimSuffix(hdr.Name, "/"), "/", 2)
+			if parts[0] == "" {
+				return config.MarkerSet{}, fmt.Errorf("ProbeMarkers: first tar entry %q has empty wrapper", hdr.Name)
+			}
+			wrapper = parts[0]
+		}
+		if !strings.HasPrefix(hdr.Name, wrapper+"/") && hdr.Name != wrapper && hdr.Name != wrapper+"/" {
+			return config.MarkerSet{}, fmt.Errorf("ProbeMarkers: entry %q does not begin with wrapper %q", hdr.Name, wrapper)
+		}
+		rel := strings.TrimPrefix(hdr.Name, wrapper+"/")
+
+		// Only file (TypeReg) entries can satisfy a marker. Directories
+		// don't carry the marker content even if their name matches —
+		// this is the "empty .niwa/ is not rank-1" rule from PRD R6
+		// expressed at the probe layer.
+		if hdr.Typeflag != tar.TypeReg {
+			continue
+		}
+
+		if rank1Path != "" && rel == rank1Path {
+			found.Rank1Dir = markers.Rank1Dir
+			found.Rank1File = markers.Rank1File
+		}
+		if markers.Rank2Path != "" && rel == markers.Rank2Path {
+			found.Rank2Path = markers.Rank2Path
+		}
+	}
+
+	return found, nil
+}
+
+// isAllowedEntryType reports whether the tar header's type flag is on
+// the positive allowlist (defense 1). Factored so the probe pass and
+// the extract pass cannot drift in their type acceptance — divergence
+// here would silently allow a marker (e.g., a symlinked
+// workspace.toml) to be detected by the probe even though the extract
+// pass would skip it.
+func isAllowedEntryType(typeflag byte) bool {
+	return typeflag == tar.TypeReg || typeflag == tar.TypeDir
 }
 
 // validateEntryName enforces filename safety rules: no NUL, no `..`

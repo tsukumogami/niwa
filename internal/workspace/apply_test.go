@@ -1210,9 +1210,9 @@ visibility = "public"
 	}
 
 	cloneCallCount := 0
-	cloneFn := func(_ context.Context, url, dir string) (bool, error) {
+	cloneFn := func(_ context.Context, url, dir string) (bool, int, error) {
 		cloneCallCount++
-		return false, nil
+		return false, 0, nil
 	}
 	headFn := func(dir string) (string, error) {
 		return "abc123", nil
@@ -1287,8 +1287,8 @@ visibility = "public"
 	}
 
 	// Stub: sync failure (firstTime=false).
-	cloneFn := func(_ context.Context, url, dir string) (bool, error) {
-		return false, fmt.Errorf("git pull failed: network error")
+	cloneFn := func(_ context.Context, url, dir string) (bool, int, error) {
+		return false, 0, fmt.Errorf("git pull failed: network error")
 	}
 	headFn := func(dir string) (string, error) {
 		return "", fmt.Errorf("no HEAD")
@@ -1369,15 +1369,15 @@ visibility = "public"
 	}
 
 	// Stub: sync succeeds (wasCloneAttempt=false, nil error); copies overlay TOML.
-	cloneFn := func(_ context.Context, url, dir string) (bool, error) {
+	cloneFn := func(_ context.Context, url, dir string) (bool, int, error) {
 		if err := os.MkdirAll(filepath.Join(dir, ".git"), 0o755); err != nil {
-			return false, err
+			return false, 0, err
 		}
 		data, err := os.ReadFile(filepath.Join(overlayDir, "workspace-overlay.toml"))
 		if err != nil {
-			return false, err
+			return false, 0, err
 		}
-		return false, os.WriteFile(filepath.Join(dir, "workspace-overlay.toml"), data, 0o644)
+		return false, 0, os.WriteFile(filepath.Join(dir, "workspace-overlay.toml"), data, 0o644)
 	}
 	headFn := func(dir string) (string, error) { return "deadbeef", nil }
 
@@ -1458,17 +1458,17 @@ visibility = "public"
 	// Stub: successful clone that points to our pre-created overlayDir.
 	// The actual overlay dir used by config.OverlayDir will be a tmpdir;
 	// we simulate success by copying workspace-overlay.toml into it.
-	cloneFn := func(_ context.Context, url, dir string) (bool, error) {
+	cloneFn := func(_ context.Context, url, dir string) (bool, int, error) {
 		// Simulate successful first-time clone.
 		if err := os.MkdirAll(filepath.Join(dir, ".git"), 0o755); err != nil {
-			return true, err
+			return true, 0, err
 		}
 		// Copy workspace-overlay.toml from our pre-made overlayDir.
 		data, err := os.ReadFile(filepath.Join(overlayDir, "workspace-overlay.toml"))
 		if err != nil {
-			return true, err
+			return true, 0, err
 		}
-		return true, os.WriteFile(filepath.Join(dir, "workspace-overlay.toml"), data, 0o644)
+		return true, 0, os.WriteFile(filepath.Join(dir, "workspace-overlay.toml"), data, 0o644)
 	}
 	headFn := func(dir string) (string, error) {
 		return fakeHeadSHA, nil
@@ -1541,8 +1541,8 @@ visibility = "public"
 	}
 
 	// Stub: first-time clone failure.
-	cloneFn := func(_ context.Context, url, dir string) (bool, error) {
-		return true, fmt.Errorf("repository not found")
+	cloneFn := func(_ context.Context, url, dir string) (bool, int, error) {
+		return true, 0, fmt.Errorf("repository not found")
 	}
 	headFn := func(dir string) (string, error) {
 		return "", fmt.Errorf("no HEAD")
@@ -1625,15 +1625,15 @@ visibility = "public"
 		t.Fatal(err)
 	}
 
-	cloneFn := func(_ context.Context, url, dir string) (bool, error) {
+	cloneFn := func(_ context.Context, url, dir string) (bool, int, error) {
 		if err := os.MkdirAll(filepath.Join(dir, ".git"), 0o755); err != nil {
-			return false, err
+			return false, 0, err
 		}
 		data, err := os.ReadFile(filepath.Join(overlayDir, "workspace-overlay.toml"))
 		if err != nil {
-			return false, err
+			return false, 0, err
 		}
-		return false, os.WriteFile(filepath.Join(dir, "workspace-overlay.toml"), data, 0o644)
+		return false, 0, os.WriteFile(filepath.Join(dir, "workspace-overlay.toml"), data, 0o644)
 	}
 	// headSHA returns a different SHA than OverlayCommit to trigger the warning.
 	headFn := func(dir string) (string, error) {
@@ -1737,15 +1737,15 @@ visibility = "public"
 		t.Fatal(err)
 	}
 
-	cloneFn := func(_ context.Context, url, dir string) (bool, error) {
+	cloneFn := func(_ context.Context, url, dir string) (bool, int, error) {
 		if err := os.MkdirAll(filepath.Join(dir, ".git"), 0o755); err != nil {
-			return false, err
+			return false, 0, err
 		}
 		data, err := os.ReadFile(filepath.Join(overlayDir, "workspace-overlay.toml"))
 		if err != nil {
-			return false, err
+			return false, 0, err
 		}
-		return false, os.WriteFile(filepath.Join(dir, "workspace-overlay.toml"), data, 0o644)
+		return false, 0, os.WriteFile(filepath.Join(dir, "workspace-overlay.toml"), data, 0o644)
 	}
 	headFn := func(dir string) (string, error) {
 		return "def456newsha", nil
@@ -1871,16 +1871,16 @@ visibility = "public"
 	}
 
 	const fakeHeadSHA = "abc123" // same as OverlayCommit, so no warn-on-advance
-	cloneFn := func(_ context.Context, url, dir string) (bool, error) {
+	cloneFn := func(_ context.Context, url, dir string) (bool, int, error) {
 		// Simulate successful sync; copy workspace-overlay.toml into dir.
 		if err := os.MkdirAll(filepath.Join(dir, ".git"), 0o755); err != nil {
-			return false, err
+			return false, 0, err
 		}
 		data, err := os.ReadFile(filepath.Join(overlayDir, "workspace-overlay.toml"))
 		if err != nil {
-			return false, err
+			return false, 0, err
 		}
-		return false, os.WriteFile(filepath.Join(dir, "workspace-overlay.toml"), data, 0o644)
+		return false, 0, os.WriteFile(filepath.Join(dir, "workspace-overlay.toml"), data, 0o644)
 	}
 	headFn := func(dir string) (string, error) {
 		return fakeHeadSHA, nil
@@ -1989,15 +1989,15 @@ OVERLAY_SECRET = "Secret resolved by overlay vault"
 		t.Fatal(err)
 	}
 
-	cloneFn := func(_ context.Context, url, dir string) (bool, error) {
+	cloneFn := func(_ context.Context, url, dir string) (bool, int, error) {
 		if err := os.MkdirAll(filepath.Join(dir, ".git"), 0o755); err != nil {
-			return false, err
+			return false, 0, err
 		}
 		data, err := os.ReadFile(filepath.Join(overlayDir, "workspace-overlay.toml"))
 		if err != nil {
-			return false, err
+			return false, 0, err
 		}
-		return false, os.WriteFile(filepath.Join(dir, "workspace-overlay.toml"), data, 0o644)
+		return false, 0, os.WriteFile(filepath.Join(dir, "workspace-overlay.toml"), data, 0o644)
 	}
 
 	applier := NewApplier(mockClient)
@@ -2079,15 +2079,15 @@ RECOMMENDED_KEY = "Should be present - resolved by overlay vault"
 		t.Fatal(err)
 	}
 
-	cloneFn := func(_ context.Context, url, dir string) (bool, error) {
+	cloneFn := func(_ context.Context, url, dir string) (bool, int, error) {
 		if err := os.MkdirAll(filepath.Join(dir, ".git"), 0o755); err != nil {
-			return false, err
+			return false, 0, err
 		}
 		data, err := os.ReadFile(filepath.Join(overlayDir, "workspace-overlay.toml"))
 		if err != nil {
-			return false, err
+			return false, 0, err
 		}
-		return false, os.WriteFile(filepath.Join(dir, "workspace-overlay.toml"), data, 0o644)
+		return false, 0, os.WriteFile(filepath.Join(dir, "workspace-overlay.toml"), data, 0o644)
 	}
 
 	applier := NewApplier(mockClient)
@@ -2278,15 +2278,15 @@ marketplaces = ["tsukumogami/shirabe"]
 		t.Fatal(err)
 	}
 
-	cloneFn := func(_ context.Context, url, dir string) (bool, error) {
+	cloneFn := func(_ context.Context, url, dir string) (bool, int, error) {
 		if err := os.MkdirAll(filepath.Join(dir, ".git"), 0o755); err != nil {
-			return false, err
+			return false, 0, err
 		}
 		data, err := os.ReadFile(filepath.Join(overlayDir, "workspace-overlay.toml"))
 		if err != nil {
-			return false, err
+			return false, 0, err
 		}
-		return false, os.WriteFile(filepath.Join(dir, "workspace-overlay.toml"), data, 0o644)
+		return false, 0, os.WriteFile(filepath.Join(dir, "workspace-overlay.toml"), data, 0o644)
 	}
 
 	applier := NewApplier(mockClient)
@@ -2393,8 +2393,8 @@ source = "claude/public.md"
 	}
 
 	// cloneFn simulates a git clone by copying the full overlay directory tree to dir.
-	cloneFn := func(_ context.Context, url, dir string) (bool, error) {
-		return false, copyDirTree(overlayDir, dir)
+	cloneFn := func(_ context.Context, url, dir string) (bool, int, error) {
+		return false, 0, copyDirTree(overlayDir, dir)
 	}
 
 	// ---- Sub-test: no overlay ----
@@ -2562,15 +2562,15 @@ plugins = ["shirabe@shirabe"]
 			t.Fatal(err)
 		}
 
-		cloneFn := func(_ context.Context, url, dir string) (bool, error) {
+		cloneFn := func(_ context.Context, url, dir string) (bool, int, error) {
 			if err := os.MkdirAll(filepath.Join(dir, ".git"), 0o755); err != nil {
-				return false, err
+				return false, 0, err
 			}
 			data, err := os.ReadFile(filepath.Join(overlayDir, "workspace-overlay.toml"))
 			if err != nil {
-				return false, err
+				return false, 0, err
 			}
-			return false, os.WriteFile(filepath.Join(dir, "workspace-overlay.toml"), data, 0o644)
+			return false, 0, os.WriteFile(filepath.Join(dir, "workspace-overlay.toml"), data, 0o644)
 		}
 
 		applier := NewApplier(mockClient)
