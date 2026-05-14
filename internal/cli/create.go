@@ -19,14 +19,16 @@ func init() {
 	createCmd.Flags().StringVarP(&createRepo, "repo", "r", "", "land in this repo after creation")
 	createCmd.Flags().BoolVar(&createChannels, "channels", false, "enable channel infrastructure for this invocation (overrides NIWA_CHANNELS)")
 	createCmd.Flags().BoolVar(&createNoChannels, "no-channels", false, "disable channel infrastructure for this invocation (overrides --channels and NIWA_CHANNELS)")
+	createCmd.Flags().BoolVar(&createNoInstallPlugins, "no-install-plugins", false, "skip auto-installing the embedded niwa Claude Code plugin (otherwise installed once when a rank-2 source is detected)")
 	createCmd.ValidArgsFunction = completeWorkspaceNames
 }
 
 var (
-	createName       string
-	createRepo       string
-	createChannels   bool
-	createNoChannels bool
+	createName             string
+	createRepo             string
+	createChannels         bool
+	createNoChannels       bool
+	createNoInstallPlugins bool
 )
 
 var createCmd = &cobra.Command{
@@ -142,6 +144,11 @@ func runCreate(cmd *cobra.Command, args []string) error {
 
 	applier := workspace.NewApplier(gh)
 	applier.Reporter = workspace.NewReporterWithTTY(os.Stderr, !noProgress && term.IsTerminal(int(os.Stderr.Fd())))
+	// Wire the plugin auto-installer so the rank-2 overlay notice
+	// fired inside runPipeline can trigger `/niwa:migrate-config`
+	// install. Without this seam the install is a silent no-op even
+	// when the rank-2 notice surfaces.
+	configurePluginAutoInstall(applier, createNoInstallPlugins)
 
 	// Wire up the global config overlay so vault resolution and personal-wins
 	// merging work during create. ConfigSourceURL is a fallback for overlay
