@@ -245,8 +245,19 @@ func runInit(cmd *cobra.Command, args []string) error {
 
 		niwaDir := filepath.Join(workspaceRoot, workspace.StateDir)
 		fetcher := github.NewAPIClient(resolveGitHubToken())
-		if _, err := workspace.MaterializeFromSource(cmd.Context(), src, source, niwaDir, config.TeamConfigMarkerSet(), fetcher, workspace.NewReporter(os.Stderr)); err != nil {
+		reporter := workspace.NewReporter(os.Stderr)
+		teamConfigRank, err := workspace.MaterializeFromSource(cmd.Context(), src, source, niwaDir, config.TeamConfigMarkerSet(), fetcher, reporter)
+		if err != nil {
 			return fmt.Errorf("materializing config repo: %w", err)
+		}
+		// PRD R10: emit the rank-2 deprecation notice for the team
+		// config when the source resolves to the legacy whole-repo
+		// layout. State is nil here because the workspace's
+		// InstanceState is created later in scaffoldInstance — the
+		// disclosed-notices guard fires on subsequent applies (apply
+		// captures team-config rank and gates on workspace-root state).
+		if teamConfigRank == 2 {
+			workspace.EmitRank2Notice(nil, workspace.NoticeIDRank2TeamConfig, source, reporter)
 		}
 	}
 
@@ -549,8 +560,12 @@ func buildInitState(cmd *cobra.Command, mode initMode, source, name string) (*wo
 		}
 		fetcher := github.NewAPIClient(resolveGitHubToken())
 		reporter := workspace.NewReporter(os.Stderr)
-		if _, cloneErr := workspace.EnsureOverlaySnapshot(ctx, initOverlay, overlayDir, fetcher, reporter); cloneErr != nil {
+		_, overlayRank, cloneErr := workspace.EnsureOverlaySnapshot(ctx, initOverlay, overlayDir, fetcher, reporter)
+		if cloneErr != nil {
 			return nil, fmt.Errorf("overlay clone failed: %w", cloneErr)
+		}
+		if overlayRank == 2 {
+			workspace.EmitRank2Notice(nil, workspace.NoticeIDRank2Overlay, initOverlay, reporter)
 		}
 		sha, shaErr := workspace.HeadSHA(overlayDir)
 		if shaErr != nil {
@@ -568,13 +583,17 @@ func buildInitState(cmd *cobra.Command, mode initMode, source, name string) (*wo
 				if dirErr == nil {
 					fetcher := github.NewAPIClient(resolveGitHubToken())
 					reporter := workspace.NewReporter(os.Stderr)
-					if _, cloneErr := workspace.EnsureOverlaySnapshot(ctx, conventionURL, overlayDir, fetcher, reporter); cloneErr != nil {
+					_, overlayRank, cloneErr := workspace.EnsureOverlaySnapshot(ctx, conventionURL, overlayDir, fetcher, reporter)
+					if cloneErr != nil {
 						// Any clone failure is silently skipped — the overlay repo may
 						// not exist or may be inaccessible. Refresh failures on existing
 						// snapshots are also non-fatal at init time since no state has
 						// been written yet.
 						_ = cloneErr
 					} else {
+						if overlayRank == 2 {
+							workspace.EmitRank2Notice(nil, workspace.NoticeIDRank2Overlay, conventionURL, reporter)
+						}
 						sha, shaErr := workspace.HeadSHA(overlayDir)
 						if shaErr != nil {
 							fmt.Fprintf(os.Stderr, "warning: could not read overlay HEAD: %v\n", shaErr)

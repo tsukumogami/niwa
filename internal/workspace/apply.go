@@ -71,7 +71,7 @@ type Applier struct {
 	// hard error". Defaults to defaultCloneOrSync (which forwards to
 	// EnsureOverlaySnapshot wired to this Applier's fetcher + reporter).
 	// Overridable in tests.
-	cloneOrSync func(ctx context.Context, url, dir string) (bool, error)
+	cloneOrSync func(ctx context.Context, url, dir string) (wasFreshClone bool, rank int, err error)
 
 	// headSHA is the function used to read the HEAD commit SHA of a repo.
 	// Defaults to HeadSHA. Overridable in tests.
@@ -110,7 +110,7 @@ func NewApplier(gh github.Client) *Applier {
 		Reporter:     NewReporter(os.Stderr),
 		headSHA:      HeadSHA,
 	}
-	a.cloneOrSync = func(ctx context.Context, url, dir string) (bool, error) {
+	a.cloneOrSync = func(ctx context.Context, url, dir string) (bool, int, error) {
 		fetcher, _ := a.GitHubClient.(FetchClient)
 		return EnsureOverlaySnapshot(ctx, url, dir, fetcher, a.Reporter)
 	}
@@ -335,7 +335,7 @@ func (a *Applier) Apply(ctx context.Context, cfg *config.WorkspaceConfig, config
 	// holds a legacy `.git/` working tree, perform R28 lazy conversion
 	// in place. When it holds neither, no-op.
 	fetcher, _ := a.GitHubClient.(FetchClient)
-	configConverted, _, err := EnsureConfigSnapshotWithStatus(ctx, configDir, config.TeamConfigMarkerSet(), fetcher, a.Reporter)
+	configConverted, teamConfigRank, err := EnsureConfigSnapshotWithStatus(ctx, configDir, config.TeamConfigMarkerSet(), fetcher, a.Reporter)
 	if err != nil {
 		return err
 	}
@@ -399,6 +399,18 @@ func (a *Applier) Apply(ctx context.Context, cfg *config.WorkspaceConfig, config
 	if configConverted && !sliceContains(wsDisclosedNotices, noticeConfigConverted) {
 		a.Reporter.Log("note: %s converted from working tree to snapshot. Manual edits inside this directory will no longer persist.", configDir)
 		result.disclosedNotices = append(result.disclosedNotices, noticeConfigConverted)
+	}
+
+	// PRD R10: emit the rank-2 deprecation notice for the team config
+	// once per workspace when the source resolves to the legacy
+	// whole-repo layout.
+	if teamConfigRank == 2 && !sliceContains(wsDisclosedNotices, NoticeIDRank2TeamConfig) {
+		identifier := a.ConfigSourceURL
+		if identifier == "" {
+			identifier = configDir
+		}
+		EmitRank2Notice(nil, NoticeIDRank2TeamConfig, identifier, a.Reporter)
+		result.disclosedNotices = append(result.disclosedNotices, NoticeIDRank2TeamConfig)
 	}
 
 	// Emit `rotated <path>` to stderr for every managed file whose
@@ -590,7 +602,7 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		// Step 0.3a: sync the personal overlay snapshot (PRD R10-R13, R28).
 		a.Reporter.Status("syncing config...")
 		fetcher, _ := a.GitHubClient.(FetchClient)
-		converted, _, syncErr := EnsureConfigSnapshotWithStatus(ctx, a.GlobalConfigDir, config.OverlayMarkerSet(), fetcher, a.Reporter)
+		converted, personalOverlayRank, syncErr := EnsureConfigSnapshotWithStatus(ctx, a.GlobalConfigDir, config.OverlayMarkerSet(), fetcher, a.Reporter)
 		if syncErr != nil {
 			a.Reporter.Warn("could not sync config: %v", syncErr)
 			return nil, fmt.Errorf("syncing global config: %w", syncErr)
@@ -600,6 +612,14 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		if converted && !sliceContains(opts.disclosedNotices, noticeConfigConverted) {
 			a.Reporter.Log("note: %s converted from working tree to snapshot. Manual edits inside this directory will no longer persist.", a.GlobalConfigDir)
 			newDisclosures = append(newDisclosures, noticeConfigConverted)
+		}
+		// PRD R10: emit the rank-2 deprecation notice for the personal
+		// overlay snapshot when it resolves to the legacy whole-repo
+		// layout. Gated on DisclosedNotices for once-per-workspace
+		// semantics.
+		if personalOverlayRank == 2 && !sliceContains(opts.disclosedNotices, NoticeIDRank2Overlay) {
+			EmitRank2Notice(nil, NoticeIDRank2Overlay, a.GlobalConfigDir, a.Reporter)
+			newDisclosures = append(newDisclosures, NoticeIDRank2Overlay)
 		}
 
 		// Step 0.3b: parse the (possibly just-refreshed) niwa.toml.
@@ -689,7 +709,7 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 			if dirErr != nil {
 				return nil, fmt.Errorf("resolving overlay directory: %w", dirErr)
 			}
-			_, syncErr := a.cloneOrSync(ctx, opts.overlayURL, dir)
+			_, overlayRank, syncErr := a.cloneOrSync(ctx, opts.overlayURL, dir)
 			if syncErr != nil {
 				// Any sync failure is a hard error when OverlayURL is registered.
 				return nil, fmt.Errorf("workspace overlay sync failed. Use --no-overlay to skip.")
@@ -707,6 +727,14 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 				pipelineOverlayCommit = sha
 			}
 			overlayDir = dir
+			// PRD R10: emit the one-time rank-2 deprecation notice
+			// when the overlay snapshot resolves to the legacy
+			// whole-repo layout. Gated on DisclosedNotices so the
+			// notice fires once per workspace.
+			if overlayRank == 2 && !sliceContains(opts.disclosedNotices, NoticeIDRank2Overlay) {
+				EmitRank2Notice(nil, NoticeIDRank2Overlay, opts.overlayURL, a.Reporter)
+				newDisclosures = append(newDisclosures, NoticeIDRank2Overlay)
+			}
 
 		case opts.configSourceURL != "":
 			// Branch 3: Convention discovery from ConfigSourceURL.
@@ -714,7 +742,7 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 			if ok {
 				dir, dirErr := config.OverlayDir(conventionURL)
 				if dirErr == nil {
-					wasCloneAttempt, cloneErr := a.cloneOrSync(ctx, conventionURL, dir)
+					wasCloneAttempt, overlayRank, cloneErr := a.cloneOrSync(ctx, conventionURL, dir)
 					if cloneErr != nil {
 						if wasCloneAttempt {
 							// Fresh clone failed: overlay repo likely doesn't exist — skip silently.
@@ -729,6 +757,10 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 					pipelineOverlayURL = conventionURL
 					pipelineOverlayCommit = sha
 					overlayDir = dir
+					if overlayRank == 2 && !sliceContains(opts.disclosedNotices, NoticeIDRank2Overlay) {
+						EmitRank2Notice(nil, NoticeIDRank2Overlay, conventionURL, a.Reporter)
+						newDisclosures = append(newDisclosures, NoticeIDRank2Overlay)
+					}
 				}
 			}
 		}

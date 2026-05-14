@@ -26,10 +26,10 @@ import (
 // fetcher may be nil for non-GitHub overlays (the fallback uses git).
 // GitHub overlays without a fetcher result in a no-op + nil — the
 // caller's existing-snapshot retains until a fetch client is wired.
-func EnsureOverlaySnapshot(ctx context.Context, urlSlug, dir string, fetcher FetchClient, reporter *Reporter) (wasFreshClone bool, err error) {
+func EnsureOverlaySnapshot(ctx context.Context, urlSlug, dir string, fetcher FetchClient, reporter *Reporter) (wasFreshClone bool, rank int, err error) {
 	src, parseErr := parseOverlaySlug(urlSlug)
 	if parseErr != nil {
-		return true, fmt.Errorf("overlay: parse %q: %w", urlSlug, parseErr)
+		return true, 0, fmt.Errorf("overlay: parse %q: %w", urlSlug, parseErr)
 	}
 
 	markers := config.OverlayMarkerSet()
@@ -37,8 +37,8 @@ func EnsureOverlaySnapshot(ctx context.Context, urlSlug, dir string, fetcher Fet
 	if provenanceMarkerExists(dir) || dotGitExists(dir) {
 		// Existing snapshot or legacy working tree: refresh / R28 lazy
 		// conversion via the standard pipeline.
-		_, _, refreshErr := EnsureConfigSnapshotWithStatus(ctx, dir, markers, fetcher, reporter)
-		return false, refreshErr
+		_, refreshRank, refreshErr := EnsureConfigSnapshotWithStatus(ctx, dir, markers, fetcher, reporter)
+		return false, refreshRank, refreshErr
 	}
 
 	// Fresh materialization. Make sure the parent dir exists; the
@@ -46,10 +46,10 @@ func EnsureOverlaySnapshot(ctx context.Context, urlSlug, dir string, fetcher Fet
 	// Pass urlSlug verbatim as the marker's source_url so the
 	// URL-change gate in apply matches what the registry stores.
 	if mkErr := os.MkdirAll(filepath.Dir(dir), 0o755); mkErr != nil {
-		return true, fmt.Errorf("overlay: ensure parent: %w", mkErr)
+		return true, 0, fmt.Errorf("overlay: ensure parent: %w", mkErr)
 	}
-	_, materializeErr := MaterializeFromSource(ctx, src, urlSlug, dir, markers, fetcher, reporter)
-	return true, materializeErr
+	freshRank, materializeErr := MaterializeFromSource(ctx, src, urlSlug, dir, markers, fetcher, reporter)
+	return true, freshRank, materializeErr
 }
 
 // ParseSourceURL accepts the historical clone-input shapes (org/repo

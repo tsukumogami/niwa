@@ -1108,15 +1108,15 @@ visibility = "public"
 		t.Fatal(err)
 	}
 
-	cloneFn := func(_ context.Context, _, dir string) (bool, error) {
+	cloneFn := func(_ context.Context, _, dir string) (bool, int, error) {
 		if err := os.MkdirAll(filepath.Join(dir, ".git"), 0o755); err != nil {
-			return false, err
+			return false, 0, err
 		}
 		data, err := os.ReadFile(filepath.Join(overlayDir, "workspace-overlay.toml"))
 		if err != nil {
-			return false, err
+			return false, 0, err
 		}
-		return false, os.WriteFile(filepath.Join(dir, "workspace-overlay.toml"), data, 0o644)
+		return false, 0, os.WriteFile(filepath.Join(dir, "workspace-overlay.toml"), data, 0o644)
 	}
 	headFn := func(_ string) (string, error) { return "abc123", nil }
 

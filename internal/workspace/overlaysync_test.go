@@ -13,7 +13,7 @@ func TestEnsureOverlaySnapshot_FirstCloneReportsFresh(t *testing.T) {
 	remote := overlaysyncMakeBareRepo(t, filepath.Join(tmp, "remote"), "workspace-overlay.toml", `name = "demo"`)
 	dir := filepath.Join(tmp, "snapshot")
 
-	wasFresh, err := EnsureOverlaySnapshot(context.Background(), remote, dir, nil, nil)
+	wasFresh, _, err := EnsureOverlaySnapshot(context.Background(), remote, dir, nil, nil)
 	if err != nil {
 		t.Fatalf("EnsureOverlaySnapshot: %v", err)
 	}
@@ -30,11 +30,11 @@ func TestEnsureOverlaySnapshot_RefreshReportsNotFresh(t *testing.T) {
 	remote := overlaysyncMakeBareRepo(t, filepath.Join(tmp, "remote"), "workspace-overlay.toml", `name = "demo"`)
 	dir := filepath.Join(tmp, "snapshot")
 
-	if _, err := EnsureOverlaySnapshot(context.Background(), remote, dir, nil, nil); err != nil {
+	if _, _, err := EnsureOverlaySnapshot(context.Background(), remote, dir, nil, nil); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 
-	wasFresh, err := EnsureOverlaySnapshot(context.Background(), remote, dir, nil, nil)
+	wasFresh, _, err := EnsureOverlaySnapshot(context.Background(), remote, dir, nil, nil)
 	if err != nil {
 		t.Fatalf("EnsureOverlaySnapshot refresh: %v", err)
 	}
@@ -47,7 +47,7 @@ func TestEnsureOverlaySnapshot_BadURLReportsFreshClone(t *testing.T) {
 	tmp := t.TempDir()
 	dir := filepath.Join(tmp, "snapshot")
 
-	wasFresh, err := EnsureOverlaySnapshot(context.Background(), "/does/not/exist/as/a/repo", dir, nil, nil)
+	wasFresh, _, err := EnsureOverlaySnapshot(context.Background(), "/does/not/exist/as/a/repo", dir, nil, nil)
 	if err == nil {
 		t.Error("expected error for invalid URL, got nil")
 	}
