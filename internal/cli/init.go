@@ -568,13 +568,12 @@ func buildInitState(cmd *cobra.Command, mode initMode, source, name string) (*wo
 				if dirErr == nil {
 					fetcher := github.NewAPIClient(resolveGitHubToken())
 					reporter := workspace.NewReporter(os.Stderr)
-					wasFreshClone, cloneErr := workspace.EnsureOverlaySnapshot(ctx, conventionURL, overlayDir, fetcher, reporter)
-					if cloneErr != nil {
+					if _, cloneErr := workspace.EnsureOverlaySnapshot(ctx, conventionURL, overlayDir, fetcher, reporter); cloneErr != nil {
 						// Any clone failure is silently skipped — the overlay repo may
-						// not exist or may be inaccessible. wasFreshClone=false errors
-						// (refresh failure on an existing snapshot) are also non-fatal at
-						// init time since no state has been written yet.
-						_ = wasFreshClone
+						// not exist or may be inaccessible. Refresh failures on existing
+						// snapshots are also non-fatal at init time since no state has
+						// been written yet.
+						_ = cloneErr
 					} else {
 						sha, shaErr := workspace.HeadSHA(overlayDir)
 						if shaErr != nil {

@@ -32,30 +32,24 @@ func EnsureOverlaySnapshot(ctx context.Context, urlSlug, dir string, fetcher Fet
 		return true, fmt.Errorf("overlay: parse %q: %w", urlSlug, parseErr)
 	}
 
-	hasMarker := provenanceMarkerExists(dir)
-	hasGit := dotGitExists(dir)
 	markers := config.OverlayMarkerSet()
 
-	switch {
-	case hasMarker:
-		// Existing snapshot: refresh via the standard pipeline.
+	if provenanceMarkerExists(dir) || dotGitExists(dir) {
+		// Existing snapshot or legacy working tree: refresh / R28 lazy
+		// conversion via the standard pipeline.
 		_, _, refreshErr := EnsureConfigSnapshotWithStatus(ctx, dir, markers, fetcher, reporter)
 		return false, refreshErr
-	case hasGit:
-		// Legacy working tree: R28 lazy conversion via the standard pipeline.
-		_, _, refreshErr := EnsureConfigSnapshotWithStatus(ctx, dir, markers, fetcher, reporter)
-		return false, refreshErr
-	default:
-		// Fresh materialization. Make sure the parent dir exists; the
-		// snapshot writer creates dir itself via the atomic swap.
-		// Pass urlSlug verbatim as the marker's source_url so the
-		// URL-change gate in apply matches what the registry stores.
-		if mkErr := os.MkdirAll(filepath.Dir(dir), 0o755); mkErr != nil {
-			return true, fmt.Errorf("overlay: ensure parent: %w", mkErr)
-		}
-		_, materializeErr := MaterializeFromSource(ctx, src, urlSlug, dir, markers, fetcher, reporter)
-		return true, materializeErr
 	}
+
+	// Fresh materialization. Make sure the parent dir exists; the
+	// snapshot writer creates dir itself via the atomic swap.
+	// Pass urlSlug verbatim as the marker's source_url so the
+	// URL-change gate in apply matches what the registry stores.
+	if mkErr := os.MkdirAll(filepath.Dir(dir), 0o755); mkErr != nil {
+		return true, fmt.Errorf("overlay: ensure parent: %w", mkErr)
+	}
+	_, materializeErr := MaterializeFromSource(ctx, src, urlSlug, dir, markers, fetcher, reporter)
+	return true, materializeErr
 }
 
 // ParseSourceURL accepts the historical clone-input shapes (org/repo

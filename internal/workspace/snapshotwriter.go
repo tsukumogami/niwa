@@ -141,6 +141,10 @@ func refreshSnapshot(ctx context.Context, configDir string, markers config.Marke
 		Ref:     prov.Ref,
 	}
 
+	// The provenance marker schema has no explicit rank field. Subpath
+	// presence is the canonical signal: rank-1 materialization records
+	// ".niwa" (resolved subpath), rank-2 records "". Future additions
+	// of a rank field would supersede this derivation.
 	priorRank := 1
 	if prov.Subpath == "" {
 		priorRank = 2
@@ -315,24 +319,29 @@ func MaterializeFromSource(ctx context.Context, src source.Source, sourceURL, co
 // Used by the refresh path, the lazy-conversion path, and the public
 // MaterializeFromSource entry point.
 //
-// Dispatches on src.IsGitHub(): GitHub sources use the tarball +
-// ExtractSubpath / ProbeAndExtractSubpath pipeline; everything else
-// uses the git-clone fallback in fallback.go.
+// Four entry conditions, two dispatch axes (host x subpath):
 //
-// markers selects the marker set the probe pass uses when src.Subpath
-// is empty (discovery mode). Pass config.TeamConfigMarkerSet() for
-// the workspace's team config; config.OverlayMarkerSet() for the
-// auto-discovered overlay. When src.Subpath is non-empty, the probe
-// is skipped and the explicit subpath flows through verbatim (PRD
-// R4 explicit-subpath bypass).
+//  1. GitHub + empty src.Subpath: tarball fetch, probe headers
+//     against markers, then extract resolved subpath. rank reflects
+//     probe result (1 or 2).
+//  2. GitHub + explicit src.Subpath: tarball fetch, extract verbatim
+//     under src.Subpath. rank=1 by convention (explicit subpaths
+//     never trigger rank-2 deprecation notice).
+//  3. Non-GitHub + empty src.Subpath: shallow clone, probe filesystem
+//     against markers, then copy resolved subpath. rank reflects
+//     probe result (1 or 2).
+//  4. Non-GitHub + explicit src.Subpath: shallow clone, copy
+//     src.Subpath verbatim. rank=1 by convention.
 //
-// Returns rank int: 1 when the resolved snapshot uses rank-1 layout,
-// 2 when it uses rank-2 (deprecated whole-repo) layout. The caller
-// emits the rank-2 deprecation notice via the workspace disclosure
-// helper (Issue 5). 0 on error or pre-rank-discovery paths (e.g.
-// refresh of a workspace whose provenance recorded a non-empty
-// explicit subpath — caller may interpret it as "rank already
-// resolved").
+// markers selects the marker set the probe pass uses (cases 1 and
+// 3). Pass config.TeamConfigMarkerSet() for the workspace's team
+// config; config.OverlayMarkerSet() for the auto-discovered overlay.
+// Ignored in cases 2 and 4.
+//
+// Returns rank int: 1 for rank-1 layout, 2 for rank-2 (deprecated
+// whole-repo) layout. The caller emits the rank-2 deprecation
+// notice via the workspace disclosure helper (Issue 5). 0 only on
+// error.
 func materializeAndSwap(ctx context.Context, configDir string, src source.Source, sourceURL string, markers config.MarkerSet, fetcher FetchClient, reporter *Reporter) (rank int, err error) {
 	parent := filepath.Dir(configDir)
 	staging := configDir + ".next"
@@ -350,7 +359,7 @@ func materializeAndSwap(ctx context.Context, configDir string, src source.Source
 		oid             string
 		mechanism       string
 		redirectNotice  *github.RenameRedirect
-		resolvedSubpath = src.Subpath
+		resolvedSubpath string
 	)
 
 	if src.IsGitHub() {
@@ -366,16 +375,8 @@ func materializeAndSwap(ctx context.Context, configDir string, src source.Source
 		oid = resolvedOID
 		redirectNotice = redirect
 		mechanism = FetchMechanismGitHubTarball
-		if src.Subpath == "" {
-			resolvedSubpath = probedSubpath
-			rank = probedRank
-		} else {
-			// Explicit-subpath bypass: rank is determined by the
-			// caller-supplied subpath. Convention: non-empty subpath
-			// is treated as rank-1-equivalent for notice purposes
-			// (no rank-2 notice fires for explicit subpaths).
-			rank = 1
-		}
+		resolvedSubpath = probedSubpath
+		rank = probedRank
 	} else {
 		resolvedOID, probedSubpath, probedRank, fbErr := materializeFromFallback(ctx, src, staging, markers)
 		if fbErr != nil {
@@ -384,12 +385,8 @@ func materializeAndSwap(ctx context.Context, configDir string, src source.Source
 		}
 		oid = resolvedOID
 		mechanism = FetchMechanismGitClone
-		if src.Subpath == "" {
-			resolvedSubpath = probedSubpath
-			rank = probedRank
-		} else {
-			rank = 1
-		}
+		resolvedSubpath = probedSubpath
+		rank = probedRank
 	}
 
 	// Surface rename redirect via reporter for one-time visibility.
@@ -475,13 +472,13 @@ func preserveInstanceState(configDir, staging string) error {
 // the function runs the probe pipeline (ProbeAndExtractSubpath) to
 // resolve rank-1 vs rank-2 layout against the supplied marker set.
 // When src.Subpath is non-empty the explicit-subpath bypass uses
-// ExtractSubpath directly (probedSubpath returns src.Subpath verbatim
-// and rank is reported as 0 — the caller substitutes a non-zero rank
-// based on the explicit-subpath bypass policy).
+// ExtractSubpath directly and returns the input subpath verbatim
+// with rank=1 (explicit subpaths never fire the rank-2 deprecation
+// notice — see materializeAndSwap doc case 2).
 //
 // Returns the resolved commit oid (best-effort), any rename-redirect
 // observed, the resolved subpath (relative to repo root), and the
-// rank reported by the probe.
+// resulting rank.
 func materializeFromGitHub(ctx context.Context, src source.Source, sourceURL, staging string, markers config.MarkerSet, fetcher FetchClient) (string, *github.RenameRedirect, string, int, error) {
 	ref := src.Ref
 	if ref == "" {
