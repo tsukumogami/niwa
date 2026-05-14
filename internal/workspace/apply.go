@@ -335,7 +335,7 @@ func (a *Applier) Apply(ctx context.Context, cfg *config.WorkspaceConfig, config
 	// holds a legacy `.git/` working tree, perform R28 lazy conversion
 	// in place. When it holds neither, no-op.
 	fetcher, _ := a.GitHubClient.(FetchClient)
-	configConverted, err := EnsureConfigSnapshotWithStatus(ctx, configDir, fetcher, a.Reporter)
+	configConverted, _, err := EnsureConfigSnapshotWithStatus(ctx, configDir, config.TeamConfigMarkerSet(), fetcher, a.Reporter)
 	if err != nil {
 		return err
 	}
@@ -590,7 +590,7 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		// Step 0.3a: sync the personal overlay snapshot (PRD R10-R13, R28).
 		a.Reporter.Status("syncing config...")
 		fetcher, _ := a.GitHubClient.(FetchClient)
-		converted, syncErr := EnsureConfigSnapshotWithStatus(ctx, a.GlobalConfigDir, fetcher, a.Reporter)
+		converted, _, syncErr := EnsureConfigSnapshotWithStatus(ctx, a.GlobalConfigDir, config.OverlayMarkerSet(), fetcher, a.Reporter)
 		if syncErr != nil {
 			a.Reporter.Warn("could not sync config: %v", syncErr)
 			return nil, fmt.Errorf("syncing global config: %w", syncErr)

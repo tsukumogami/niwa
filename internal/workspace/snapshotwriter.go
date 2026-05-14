@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/tsukumogami/niwa/internal/config"
 	"github.com/tsukumogami/niwa/internal/github"
 	"github.com/tsukumogami/niwa/internal/source"
 )
@@ -58,18 +59,26 @@ type FetchClient interface {
 // nothing for cases 1 and 2 and returns nil. This lets unit tests
 // that don't exercise the fetch path skip wiring a fake client.
 func EnsureConfigSnapshot(ctx context.Context, configDir string, fetcher FetchClient, reporter *Reporter) error {
-	_, err := EnsureConfigSnapshotWithStatus(ctx, configDir, fetcher, reporter)
+	_, _, err := EnsureConfigSnapshotWithStatus(ctx, configDir, config.TeamConfigMarkerSet(), fetcher, reporter)
 	return err
 }
 
 // EnsureConfigSnapshotWithStatus is the same as EnsureConfigSnapshot but
 // returns whether a legacy working-tree-to-snapshot conversion happened
-// during this call (PRD R28). Callers that emit the one-time conversion
-// notice consume the bool; legacy callers that don't care use the simpler
-// EnsureConfigSnapshot wrapper.
-func EnsureConfigSnapshotWithStatus(ctx context.Context, configDir string, fetcher FetchClient, reporter *Reporter) (converted bool, err error) {
+// during this call (PRD R28) and which rank the snapshot now uses
+// (1 = rank-1 layout, 2 = deprecated rank-2 layout, 0 = no rank
+// resolution performed e.g. refresh or no source). Callers emit the
+// one-time conversion notice (converted) and the rank-2 deprecation
+// notice (rank == 2) from the returned values; simpler callers use
+// the EnsureConfigSnapshot wrapper.
+//
+// markers tells the probe pipeline which marker set identifies the
+// rank-1 location and the rank-2 root file when src.Subpath is empty.
+// Pass config.TeamConfigMarkerSet() for the workspace's team config,
+// config.OverlayMarkerSet() for the auto-discovered overlay.
+func EnsureConfigSnapshotWithStatus(ctx context.Context, configDir string, markers config.MarkerSet, fetcher FetchClient, reporter *Reporter) (converted bool, rank int, err error) {
 	if configDir == "" {
-		return false, errors.New("EnsureConfigSnapshot: configDir is empty")
+		return false, 0, errors.New("EnsureConfigSnapshot: configDir is empty")
 	}
 
 	hasMarker := provenanceMarkerExists(configDir)
@@ -81,14 +90,15 @@ func EnsureConfigSnapshotWithStatus(ctx context.Context, configDir string, fetch
 		// decides whether nil fetcher is acceptable based on whether
 		// the marker's source is GitHub (needs fetcher) or anything
 		// else (uses git-clone fallback).
-		return false, refreshSnapshot(ctx, configDir, fetcher, reporter)
+		refreshRank, refreshErr := refreshSnapshot(ctx, configDir, markers, fetcher, reporter)
+		return false, refreshRank, refreshErr
 	case hasGit:
 		// Case 2: legacy working tree. R28 lazy conversion. Same
 		// fetcher-may-be-nil semantics as case 1.
-		return lazyConvertWorkingTree(ctx, configDir, fetcher, reporter)
+		return lazyConvertWorkingTree(ctx, configDir, markers, fetcher, reporter)
 	default:
 		// Case 3: nothing to maintain.
-		return false, nil
+		return false, 0, nil
 	}
 }
 
@@ -107,10 +117,20 @@ func dotGitExists(dir string) bool {
 
 // refreshSnapshot is the case-1 path: read marker, drift-check via
 // HeadCommit, and re-fetch if changed.
-func refreshSnapshot(ctx context.Context, configDir string, fetcher FetchClient, reporter *Reporter) error {
+//
+// Refresh does NOT re-probe: the previously-resolved subpath flows
+// verbatim into src.Subpath, so materializeAndSwap takes the
+// explicit-subpath bypass. If the source repo's layout changes (e.g.,
+// maintainer migrates from rank-2 to rank-1), the user must use
+// `niwa apply --force` (Issue 7) to re-discover.
+//
+// Returns the rank reflected by the refreshed snapshot (derived from
+// the provenance subpath: empty → 2, non-empty → 1) so callers can
+// emit the one-time deprecation notice.
+func refreshSnapshot(ctx context.Context, configDir string, markers config.MarkerSet, fetcher FetchClient, reporter *Reporter) (int, error) {
 	prov, err := ReadProvenance(configDir)
 	if err != nil {
-		return fmt.Errorf("EnsureConfigSnapshot: %w", err)
+		return 0, fmt.Errorf("EnsureConfigSnapshot: %w", err)
 	}
 
 	src := source.Source{
@@ -121,18 +141,24 @@ func refreshSnapshot(ctx context.Context, configDir string, fetcher FetchClient,
 		Ref:     prov.Ref,
 	}
 
+	priorRank := 1
+	if prov.Subpath == "" {
+		priorRank = 2
+	}
+
 	if !src.IsGitHub() {
 		// Non-GitHub source: no per-host cheap drift check in v1, so we
 		// always re-materialize from a shallow clone. The old snapshot
 		// stays put if the clone fails.
-		return materializeAndSwap(ctx, configDir, src, prov.SourceURL, fetcher, reporter)
+		_, err := materializeAndSwap(ctx, configDir, src, prov.SourceURL, markers, fetcher, reporter)
+		return priorRank, err
 	}
 
 	if fetcher == nil {
 		// GitHub source but no fetcher available (test fixture or
 		// network-unreachable apply). Keep the cached snapshot and
 		// don't error.
-		return nil
+		return priorRank, nil
 	}
 
 	oid, status, err := headCommitWithRetry(ctx, fetcher, src, reporter)
@@ -143,20 +169,21 @@ func refreshSnapshot(ctx context.Context, configDir string, fetcher FetchClient,
 			reporter.Warn("could not refresh config snapshot for %s: %v; using cached snapshot fetched at %s",
 				prov.SourceURL, err, prov.FetchedAt.Format(time.RFC3339))
 		}
-		return nil
+		return priorRank, nil
 	}
 	if status == 304 || (oid != "" && oid == prov.ResolvedCommit) {
 		// No drift. Update fetched_at so the marker reflects the
 		// successful drift check.
 		prov.FetchedAt = time.Now().UTC()
 		if writeErr := WriteProvenance(configDir, prov); writeErr != nil {
-			return fmt.Errorf("EnsureConfigSnapshot: refresh marker: %w", writeErr)
+			return 0, fmt.Errorf("EnsureConfigSnapshot: refresh marker: %w", writeErr)
 		}
-		return nil
+		return priorRank, nil
 	}
 
 	// Drift detected: fetch fresh, materialize, swap.
-	return materializeAndSwap(ctx, configDir, src, prov.SourceURL, fetcher, reporter)
+	_, err = materializeAndSwap(ctx, configDir, src, prov.SourceURL, markers, fetcher, reporter)
+	return priorRank, err
 }
 
 // isTransientDriftError classifies a HeadCommit error as transient
@@ -218,12 +245,12 @@ func headCommitWithRetry(ctx context.Context, fetcher FetchClient, src source.So
 // (this function does not call reporter.Log directly because emission
 // must be gated on DisclosedNotices to fire once per workspace, not
 // once per apply).
-func lazyConvertWorkingTree(ctx context.Context, configDir string, fetcher FetchClient, reporter *Reporter) (converted bool, err error) {
+func lazyConvertWorkingTree(ctx context.Context, configDir string, markers config.MarkerSet, fetcher FetchClient, reporter *Reporter) (converted bool, rank int, err error) {
 	originURL, originErr := readGitOrigin(configDir)
 	if originErr != nil {
 		// No origin remote means this is a local-only workspace that
 		// happens to be tracked in git. Don't attempt conversion.
-		return false, nil
+		return false, 0, nil
 	}
 
 	src, parseErr := parseRemoteURLToSource(originURL)
@@ -231,33 +258,34 @@ func lazyConvertWorkingTree(ctx context.Context, configDir string, fetcher Fetch
 		// Couldn't parse the origin into a Source we know how to
 		// fetch. Leave the working tree alone — there's no other sync
 		// path now; user can fix the remote and rerun apply.
-		return false, nil
+		return false, 0, nil
 	}
 
 	if !src.IsGitHub() && fetcher == nil {
 		// Non-GitHub source can run the fallback even without a fetcher,
 		// but if we have neither a GitHub source nor a fetcher there's
 		// nothing usable. Bail without converting.
-		return false, nil
+		return false, 0, nil
 	}
 	if src.IsGitHub() && fetcher == nil {
 		// Need a fetch client for the GitHub path. Leave the working
 		// tree alone; user can rerun apply after wiring GH_TOKEN.
-		return false, nil
+		return false, 0, nil
 	}
 
 	// Pass originURL verbatim as the marker's source_url so the
 	// URL-change gate matches what the registry stores. src.String()
 	// would re-render synthesized owner/repo (e.g. for file:// hosts)
 	// in a non-roundtripping form.
-	if swapErr := materializeAndSwap(ctx, configDir, src, originURL, fetcher, reporter); swapErr != nil {
+	resolvedRank, swapErr := materializeAndSwap(ctx, configDir, src, originURL, markers, fetcher, reporter)
+	if swapErr != nil {
 		// Conversion failed; leave the working tree alone so the next
 		// apply can retry. No other safety net to fall through to now
 		// that SyncConfigDir is gone.
-		return false, nil
+		return false, 0, nil
 	}
 
-	return true, nil
+	return true, resolvedRank, nil
 }
 
 // MaterializeFromSource stages a fresh snapshot at configDir from src
@@ -275,11 +303,11 @@ func lazyConvertWorkingTree(ctx context.Context, configDir string, fetcher Fetch
 //
 // fetcher may be nil for non-GitHub sources (the fallback path only
 // needs `git`). GitHub sources require a non-nil fetcher.
-func MaterializeFromSource(ctx context.Context, src source.Source, sourceURL, configDir string, fetcher FetchClient, reporter *Reporter) error {
+func MaterializeFromSource(ctx context.Context, src source.Source, sourceURL, configDir string, markers config.MarkerSet, fetcher FetchClient, reporter *Reporter) (rank int, err error) {
 	if sourceURL == "" {
 		sourceURL = src.String()
 	}
-	return materializeAndSwap(ctx, configDir, src, sourceURL, fetcher, reporter)
+	return materializeAndSwap(ctx, configDir, src, sourceURL, markers, fetcher, reporter)
 }
 
 // materializeAndSwap stages a fresh snapshot at <configDir>.next/,
@@ -288,48 +316,80 @@ func MaterializeFromSource(ctx context.Context, src source.Source, sourceURL, co
 // MaterializeFromSource entry point.
 //
 // Dispatches on src.IsGitHub(): GitHub sources use the tarball +
-// ExtractSubpath pipeline; everything else uses the git-clone
-// fallback in fallback.go.
-func materializeAndSwap(ctx context.Context, configDir string, src source.Source, sourceURL string, fetcher FetchClient, reporter *Reporter) error {
+// ExtractSubpath / ProbeAndExtractSubpath pipeline; everything else
+// uses the git-clone fallback in fallback.go.
+//
+// markers selects the marker set the probe pass uses when src.Subpath
+// is empty (discovery mode). Pass config.TeamConfigMarkerSet() for
+// the workspace's team config; config.OverlayMarkerSet() for the
+// auto-discovered overlay. When src.Subpath is non-empty, the probe
+// is skipped and the explicit subpath flows through verbatim (PRD
+// R4 explicit-subpath bypass).
+//
+// Returns rank int: 1 when the resolved snapshot uses rank-1 layout,
+// 2 when it uses rank-2 (deprecated whole-repo) layout. The caller
+// emits the rank-2 deprecation notice via the workspace disclosure
+// helper (Issue 5). 0 on error or pre-rank-discovery paths (e.g.
+// refresh of a workspace whose provenance recorded a non-empty
+// explicit subpath — caller may interpret it as "rank already
+// resolved").
+func materializeAndSwap(ctx context.Context, configDir string, src source.Source, sourceURL string, markers config.MarkerSet, fetcher FetchClient, reporter *Reporter) (rank int, err error) {
 	parent := filepath.Dir(configDir)
 	staging := configDir + ".next"
 
 	// Idempotent cleanup of stale staging.
 	if err := safeRemoveAll(staging); err != nil {
-		return fmt.Errorf("EnsureConfigSnapshot: preflight cleanup: %w", err)
+		return 0, fmt.Errorf("EnsureConfigSnapshot: preflight cleanup: %w", err)
 	}
 
 	if err := os.MkdirAll(staging, 0o755); err != nil {
-		return fmt.Errorf("EnsureConfigSnapshot: create staging: %w", err)
+		return 0, fmt.Errorf("EnsureConfigSnapshot: create staging: %w", err)
 	}
 
 	var (
-		oid            string
-		mechanism      string
-		redirectNotice *github.RenameRedirect
+		oid             string
+		mechanism       string
+		redirectNotice  *github.RenameRedirect
+		resolvedSubpath = src.Subpath
 	)
 
 	if src.IsGitHub() {
 		if fetcher == nil {
 			_ = safeRemoveAll(staging)
-			return fmt.Errorf("EnsureConfigSnapshot: GitHub source %s requires a fetch client", sourceURL)
+			return 0, fmt.Errorf("EnsureConfigSnapshot: GitHub source %s requires a fetch client", sourceURL)
 		}
-		resolvedOID, redirect, err := materializeFromGitHub(ctx, src, sourceURL, staging, fetcher)
-		if err != nil {
+		resolvedOID, redirect, probedSubpath, probedRank, ghErr := materializeFromGitHub(ctx, src, sourceURL, staging, markers, fetcher)
+		if ghErr != nil {
 			_ = safeRemoveAll(staging)
-			return err
+			return 0, ghErr
 		}
 		oid = resolvedOID
 		redirectNotice = redirect
 		mechanism = FetchMechanismGitHubTarball
+		if src.Subpath == "" {
+			resolvedSubpath = probedSubpath
+			rank = probedRank
+		} else {
+			// Explicit-subpath bypass: rank is determined by the
+			// caller-supplied subpath. Convention: non-empty subpath
+			// is treated as rank-1-equivalent for notice purposes
+			// (no rank-2 notice fires for explicit subpaths).
+			rank = 1
+		}
 	} else {
-		resolvedOID, err := FetchSubpathViaGitClone(ctx, src, staging)
-		if err != nil {
+		resolvedOID, probedSubpath, probedRank, fbErr := materializeFromFallback(ctx, src, staging, markers)
+		if fbErr != nil {
 			_ = safeRemoveAll(staging)
-			return fmt.Errorf("EnsureConfigSnapshot: %w", err)
+			return 0, fmt.Errorf("EnsureConfigSnapshot: %w", fbErr)
 		}
 		oid = resolvedOID
 		mechanism = FetchMechanismGitClone
+		if src.Subpath == "" {
+			resolvedSubpath = probedSubpath
+			rank = probedRank
+		} else {
+			rank = 1
+		}
 	}
 
 	// Surface rename redirect via reporter for one-time visibility.
@@ -343,7 +403,7 @@ func materializeAndSwap(ctx context.Context, configDir string, src source.Source
 		Host:           src.Host,
 		Owner:          src.Owner,
 		Repo:           src.Repo,
-		Subpath:        src.Subpath,
+		Subpath:        resolvedSubpath,
 		Ref:            src.Ref,
 		ResolvedCommit: oid,
 		FetchedAt:      time.Now().UTC(),
@@ -357,12 +417,12 @@ func materializeAndSwap(ctx context.Context, configDir string, src source.Source
 	}
 	if err := WriteProvenance(staging, prov); err != nil {
 		_ = safeRemoveAll(staging)
-		return fmt.Errorf("EnsureConfigSnapshot: write marker: %w", err)
+		return rank, fmt.Errorf("EnsureConfigSnapshot: write marker: %w", err)
 	}
 
 	// Make sure the parent dir exists for the swap.
 	if err := os.MkdirAll(parent, 0o755); err != nil {
-		return fmt.Errorf("EnsureConfigSnapshot: ensure parent: %w", err)
+		return rank, fmt.Errorf("EnsureConfigSnapshot: ensure parent: %w", err)
 	}
 
 	// Preserve instance.json across the swap. The atomic swap rotates
@@ -377,14 +437,14 @@ func materializeAndSwap(ctx context.Context, configDir string, src source.Source
 	// obvious — but v1 ships the simple carry-over.
 	if err := preserveInstanceState(configDir, staging); err != nil {
 		_ = safeRemoveAll(staging)
-		return fmt.Errorf("EnsureConfigSnapshot: preserve instance state: %w", err)
+		return rank, fmt.Errorf("EnsureConfigSnapshot: preserve instance state: %w", err)
 	}
 
 	if err := SwapSnapshotAtomic(configDir, staging); err != nil {
 		_ = safeRemoveAll(staging)
-		return fmt.Errorf("EnsureConfigSnapshot: %w", err)
+		return rank, fmt.Errorf("EnsureConfigSnapshot: %w", err)
 	}
-	return nil
+	return rank, nil
 }
 
 // preserveInstanceState copies <configDir>/instance.json into staging
@@ -411,9 +471,18 @@ func preserveInstanceState(configDir, staging string) error {
 }
 
 // materializeFromGitHub handles the tarball fetch + extract portion
-// of materializeAndSwap for GitHub sources. Returns the resolved
-// commit oid (best-effort) and any rename-redirect observed.
-func materializeFromGitHub(ctx context.Context, src source.Source, sourceURL, staging string, fetcher FetchClient) (string, *github.RenameRedirect, error) {
+// of materializeAndSwap for GitHub sources. When src.Subpath is empty
+// the function runs the probe pipeline (ProbeAndExtractSubpath) to
+// resolve rank-1 vs rank-2 layout against the supplied marker set.
+// When src.Subpath is non-empty the explicit-subpath bypass uses
+// ExtractSubpath directly (probedSubpath returns src.Subpath verbatim
+// and rank is reported as 0 — the caller substitutes a non-zero rank
+// based on the explicit-subpath bypass policy).
+//
+// Returns the resolved commit oid (best-effort), any rename-redirect
+// observed, the resolved subpath (relative to repo root), and the
+// rank reported by the probe.
+func materializeFromGitHub(ctx context.Context, src source.Source, sourceURL, staging string, markers config.MarkerSet, fetcher FetchClient) (string, *github.RenameRedirect, string, int, error) {
 	ref := src.Ref
 	if ref == "" {
 		ref = "HEAD"
@@ -421,7 +490,7 @@ func materializeFromGitHub(ctx context.Context, src source.Source, sourceURL, st
 
 	body, _, status, redirect, err := fetcher.FetchTarball(ctx, src.Owner, src.Repo, ref, "")
 	if err != nil {
-		return "", nil, fmt.Errorf("EnsureConfigSnapshot: fetch %s: %w", sourceURL, err)
+		return "", nil, "", 0, fmt.Errorf("EnsureConfigSnapshot: fetch %s: %w", sourceURL, err)
 	}
 	if body != nil {
 		defer body.Close()
@@ -431,14 +500,31 @@ func materializeFromGitHub(ctx context.Context, src source.Source, sourceURL, st
 		// by leaving the staging dir empty. Caller will fail on empty
 		// WriteProvenance if it reaches that point, but the swap
 		// won't promote.
-		return "", nil, fmt.Errorf("EnsureConfigSnapshot: fetch %s returned 304 unexpectedly", sourceURL)
+		return "", nil, "", 0, fmt.Errorf("EnsureConfigSnapshot: fetch %s returned 304 unexpectedly", sourceURL)
 	}
 	if status != 200 {
-		return "", nil, fmt.Errorf("EnsureConfigSnapshot: fetch %s returned %d", sourceURL, status)
+		return "", nil, "", 0, fmt.Errorf("EnsureConfigSnapshot: fetch %s returned %d", sourceURL, status)
 	}
 
-	if err := github.ExtractSubpath(body, src.Subpath, staging); err != nil {
-		return "", nil, fmt.Errorf("EnsureConfigSnapshot: extract: %w", err)
+	var (
+		resolvedSubpath string
+		rank            int
+	)
+	if src.Subpath == "" {
+		// Discovery mode: probe the tarball, decide rank, then extract.
+		sp, r, _, probeErr := github.ProbeAndExtractSubpath(body, markers, config.RankDecider, staging)
+		if probeErr != nil {
+			return "", nil, "", 0, fmt.Errorf("EnsureConfigSnapshot: probe: %w", probeErr)
+		}
+		resolvedSubpath = sp
+		rank = r
+	} else {
+		// Explicit-subpath bypass: skip probe, extract verbatim.
+		if err := github.ExtractSubpath(body, src.Subpath, staging); err != nil {
+			return "", nil, "", 0, fmt.Errorf("EnsureConfigSnapshot: extract: %w", err)
+		}
+		resolvedSubpath = src.Subpath
+		rank = 1
 	}
 
 	// Resolve commit oid for the marker. Best effort: if the HeadCommit
@@ -448,7 +534,27 @@ func materializeFromGitHub(ctx context.Context, src source.Source, sourceURL, st
 		oid = commitOID
 	}
 
-	return oid, redirect, nil
+	return oid, redirect, resolvedSubpath, rank, nil
+}
+
+// materializeFromFallback handles the non-GitHub branch. When
+// src.Subpath is empty it runs ProbeAndFetchSubpath (probe-aware
+// clone + selective copy). When non-empty it calls
+// FetchSubpathViaGitClone verbatim. Returns oid, resolved subpath,
+// rank.
+func materializeFromFallback(ctx context.Context, src source.Source, staging string, markers config.MarkerSet) (string, string, int, error) {
+	if src.Subpath == "" {
+		sp, rank, _, oid, err := ProbeAndFetchSubpath(ctx, src, markers, config.RankDecider, staging)
+		if err != nil {
+			return "", "", 0, err
+		}
+		return oid, sp, rank, nil
+	}
+	oid, err := FetchSubpathViaGitClone(ctx, src, staging)
+	if err != nil {
+		return "", "", 0, err
+	}
+	return oid, src.Subpath, 1, nil
 }
 
 func readGitOrigin(dir string) (string, error) {

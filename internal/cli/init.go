@@ -245,7 +245,7 @@ func runInit(cmd *cobra.Command, args []string) error {
 
 		niwaDir := filepath.Join(workspaceRoot, workspace.StateDir)
 		fetcher := github.NewAPIClient(resolveGitHubToken())
-		if err := workspace.MaterializeFromSource(cmd.Context(), src, source, niwaDir, fetcher, workspace.NewReporter(os.Stderr)); err != nil {
+		if _, err := workspace.MaterializeFromSource(cmd.Context(), src, source, niwaDir, config.TeamConfigMarkerSet(), fetcher, workspace.NewReporter(os.Stderr)); err != nil {
 			return fmt.Errorf("materializing config repo: %w", err)
 		}
 	}

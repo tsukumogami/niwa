@@ -10,7 +10,7 @@ import (
 
 func TestEnsureOverlaySnapshot_FirstCloneReportsFresh(t *testing.T) {
 	tmp := t.TempDir()
-	remote := overlaysyncMakeBareRepo(t, filepath.Join(tmp, "remote"), "overlay.toml", `name = "demo"`)
+	remote := overlaysyncMakeBareRepo(t, filepath.Join(tmp, "remote"), "workspace-overlay.toml", `name = "demo"`)
 	dir := filepath.Join(tmp, "snapshot")
 
 	wasFresh, err := EnsureOverlaySnapshot(context.Background(), remote, dir, nil, nil)
@@ -27,7 +27,7 @@ func TestEnsureOverlaySnapshot_FirstCloneReportsFresh(t *testing.T) {
 
 func TestEnsureOverlaySnapshot_RefreshReportsNotFresh(t *testing.T) {
 	tmp := t.TempDir()
-	remote := overlaysyncMakeBareRepo(t, filepath.Join(tmp, "remote"), "overlay.toml", `name = "demo"`)
+	remote := overlaysyncMakeBareRepo(t, filepath.Join(tmp, "remote"), "workspace-overlay.toml", `name = "demo"`)
 	dir := filepath.Join(tmp, "snapshot")
 
 	if _, err := EnsureOverlaySnapshot(context.Background(), remote, dir, nil, nil); err != nil {
