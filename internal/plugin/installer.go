@@ -39,8 +39,9 @@ type InstallOpts struct {
 
 // manualInstallCommand is the copy-paste command the skip-notice
 // surfaces so users who opted out (or hit a filesystem error) can
-// install the plugin manually.
-const manualInstallCommand = "niwa --install-plugins"
+// install the plugin manually. The string must match a real,
+// shipping CLI subcommand — see internal/cli/plugins.go.
+const manualInstallCommand = "niwa plugins install"
 
 // Install ensures the embedded niwa plugin is materialized at the
 // install path (~/.claude/plugins/marketplaces/niwa/). The function
@@ -79,7 +80,7 @@ func Install(state *workspace.InstanceState, reporter *workspace.Reporter, opts 
 	}
 
 	if opts.SkipInstall {
-		workspace.EmitPluginNotice(state, workspace.NoticeIDPluginSkipped, manualInstallCommand, reporter)
+		workspace.EmitPluginNotice(workspace.NoticeIDPluginSkipped, manualInstallCommand, reporter)
 		return Skipped, nil
 	}
 
@@ -87,7 +88,7 @@ func Install(state *workspace.InstanceState, reporter *workspace.Reporter, opts 
 	// compare to the embedded version.
 	if onDisk, statErr := readInstalledManifest(embedded.Path); statErr == nil {
 		if onDisk.Version == embedded.Version {
-			workspace.EmitPluginNotice(state, workspace.NoticeIDPluginInstalled, manualInstallCommand, reporter)
+			workspace.EmitPluginNotice(workspace.NoticeIDPluginInstalled, manualInstallCommand, reporter)
 			return UpToDate, nil
 		}
 	}
@@ -96,11 +97,11 @@ func Install(state *workspace.InstanceState, reporter *workspace.Reporter, opts 
 	if err := stageAndRename(embedded.Path); err != nil {
 		// Fall back to skip-notice (which carries the manual-install
 		// command) so the user sees a corrective hint.
-		workspace.EmitPluginNotice(state, workspace.NoticeIDPluginSkipped, manualInstallCommand, reporter)
+		workspace.EmitPluginNotice(workspace.NoticeIDPluginSkipped, manualInstallCommand, reporter)
 		return Failed, nil
 	}
 
-	workspace.EmitPluginNotice(state, workspace.NoticeIDPluginInstalled, manualInstallCommand, reporter)
+	workspace.EmitPluginNotice(workspace.NoticeIDPluginInstalled, manualInstallCommand, reporter)
 	return Installed, nil
 }
 

@@ -207,10 +207,22 @@ func runInit(cmd *cobra.Command, args []string) error {
 	// Create the workspace directory (named modes only). os.Mkdir, NOT
 	// MkdirAll — closes the symlink-TOCTOU window between the Lstat
 	// pre-gate and creation per Security Considerations §3.
+	//
+	// PRD R5: if the workspace directory did not exist before init and
+	// init fails before scaffolding completes, the directory must be
+	// removed. The deferred cleanup below clears workspaceCreated on
+	// success so it only fires on the error path.
+	var workspaceCreated bool
 	if name != "" {
 		if err := os.Mkdir(workspaceRoot, 0o755); err != nil {
 			return fmt.Errorf("creating workspace directory: %w", err)
 		}
+		workspaceCreated = true
+		defer func() {
+			if workspaceCreated {
+				_ = os.RemoveAll(workspaceRoot)
+			}
+		}()
 	}
 
 	switch mode {
@@ -260,12 +272,14 @@ func runInit(cmd *cobra.Command, args []string) error {
 		// disclosed-notices guard fires on subsequent applies (apply
 		// captures team-config rank and gates on workspace-root state).
 		if teamConfigRank == 2 {
-			workspace.EmitRank2Notice(nil, workspace.NoticeIDRank2TeamConfig, source, reporter)
+			workspace.EmitRank2Notice(workspace.NoticeIDRank2TeamConfig, source, reporter)
 			// PRD R16-R20: install the embedded niwa Claude Code plugin
 			// so /niwa:migrate-config is available next time the user
-			// invokes Claude Code. SkipInstall honors --no-install-plugins
-			// and (if a global config is loaded) auto_install_plugins=false.
-			plugin.Install(nil, reporter, plugin.InstallOpts{SkipInstall: initNoInstallPlugins})
+			// invokes Claude Code. SkipInstall ORs the per-invocation
+			// --no-install-plugins flag with the persistent
+			// auto_install_plugins = false global-config setting (PRD R19).
+			skipInstall := initNoInstallPlugins || globalCfg.SkipPluginInstall()
+			plugin.Install(nil, reporter, plugin.InstallOpts{SkipInstall: skipInstall})
 		}
 	}
 
@@ -377,6 +391,8 @@ func runInit(cmd *cobra.Command, args []string) error {
 			return err
 		}
 	}
+	// Success — disarm the workspace-dir cleanup defer.
+	workspaceCreated = false
 	return nil
 }
 
@@ -573,7 +589,7 @@ func buildInitState(cmd *cobra.Command, mode initMode, source, name string) (*wo
 			return nil, fmt.Errorf("overlay clone failed: %w", cloneErr)
 		}
 		if overlayRank == 2 {
-			workspace.EmitRank2Notice(nil, workspace.NoticeIDRank2Overlay, initOverlay, reporter)
+			workspace.EmitRank2Notice(workspace.NoticeIDRank2Overlay, initOverlay, reporter)
 		}
 		sha, shaErr := workspace.HeadSHA(overlayDir)
 		if shaErr != nil {
@@ -600,7 +616,7 @@ func buildInitState(cmd *cobra.Command, mode initMode, source, name string) (*wo
 						_ = cloneErr
 					} else {
 						if overlayRank == 2 {
-							workspace.EmitRank2Notice(nil, workspace.NoticeIDRank2Overlay, conventionURL, reporter)
+							workspace.EmitRank2Notice(workspace.NoticeIDRank2Overlay, conventionURL, reporter)
 						}
 						sha, shaErr := workspace.HeadSHA(overlayDir)
 						if shaErr != nil {

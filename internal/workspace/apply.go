@@ -423,7 +423,7 @@ func (a *Applier) Apply(ctx context.Context, cfg *config.WorkspaceConfig, config
 		if identifier == "" {
 			identifier = configDir
 		}
-		EmitRank2Notice(nil, NoticeIDRank2TeamConfig, identifier, a.Reporter)
+		EmitRank2Notice(NoticeIDRank2TeamConfig, identifier, a.Reporter)
 		result.disclosedNotices = append(result.disclosedNotices, NoticeIDRank2TeamConfig)
 		// PRD R16-R20: install the embedded niwa plugin so
 		// /niwa:migrate-config is available. The installer emits its
@@ -639,7 +639,7 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		// layout. Gated on DisclosedNotices for once-per-workspace
 		// semantics.
 		if personalOverlayRank == 2 && !sliceContains(opts.disclosedNotices, NoticeIDRank2Overlay) {
-			EmitRank2Notice(nil, NoticeIDRank2Overlay, a.GlobalConfigDir, a.Reporter)
+			EmitRank2Notice(NoticeIDRank2Overlay, a.GlobalConfigDir, a.Reporter)
 			newDisclosures = append(newDisclosures, NoticeIDRank2Overlay)
 			if a.InstallNiwaPlugin != nil {
 				a.InstallNiwaPlugin(nil, a.Reporter, a.SkipPluginInstall)
@@ -756,7 +756,7 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 			// whole-repo layout. Gated on DisclosedNotices so the
 			// notice fires once per workspace.
 			if overlayRank == 2 && !sliceContains(opts.disclosedNotices, NoticeIDRank2Overlay) {
-				EmitRank2Notice(nil, NoticeIDRank2Overlay, opts.overlayURL, a.Reporter)
+				EmitRank2Notice(NoticeIDRank2Overlay, opts.overlayURL, a.Reporter)
 				newDisclosures = append(newDisclosures, NoticeIDRank2Overlay)
 				if a.InstallNiwaPlugin != nil {
 					a.InstallNiwaPlugin(nil, a.Reporter, a.SkipPluginInstall)
@@ -785,7 +785,7 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 					pipelineOverlayCommit = sha
 					overlayDir = dir
 					if overlayRank == 2 && !sliceContains(opts.disclosedNotices, NoticeIDRank2Overlay) {
-						EmitRank2Notice(nil, NoticeIDRank2Overlay, conventionURL, a.Reporter)
+						EmitRank2Notice(NoticeIDRank2Overlay, conventionURL, a.Reporter)
 						newDisclosures = append(newDisclosures, NoticeIDRank2Overlay)
 						if a.InstallNiwaPlugin != nil {
 							a.InstallNiwaPlugin(nil, a.Reporter, a.SkipPluginInstall)

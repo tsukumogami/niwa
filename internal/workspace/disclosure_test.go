@@ -6,12 +6,11 @@ import (
 	"testing"
 )
 
-func TestEmitRank2Notice_FirstCallLogsAndRecords(t *testing.T) {
+func TestEmitRank2Notice_LogsAllRequiredSubstrings(t *testing.T) {
 	var buf bytes.Buffer
 	reporter := NewReporter(&buf)
-	state := &InstanceState{}
 
-	EmitRank2Notice(state, NoticeIDRank2TeamConfig, "org/legacy", reporter)
+	EmitRank2Notice(NoticeIDRank2TeamConfig, "org/legacy", reporter)
 
 	out := buf.String()
 	for _, want := range []string{"note:", "deprecated", "org/legacy", "/niwa:migrate-config"} {
@@ -19,107 +18,36 @@ func TestEmitRank2Notice_FirstCallLogsAndRecords(t *testing.T) {
 			t.Errorf("emitted message %q missing substring %q", out, want)
 		}
 	}
-
-	if len(state.DisclosedNotices) != 1 || state.DisclosedNotices[0] != NoticeIDRank2TeamConfig {
-		t.Errorf("DisclosedNotices = %v, want [%q]", state.DisclosedNotices, NoticeIDRank2TeamConfig)
-	}
-}
-
-func TestEmitRank2Notice_SecondCallIsNoOp(t *testing.T) {
-	var buf bytes.Buffer
-	reporter := NewReporter(&buf)
-	state := &InstanceState{DisclosedNotices: []string{NoticeIDRank2TeamConfig}}
-
-	EmitRank2Notice(state, NoticeIDRank2TeamConfig, "org/legacy", reporter)
-
-	if buf.Len() != 0 {
-		t.Errorf("idempotent call should emit nothing, got %q", buf.String())
-	}
-	if len(state.DisclosedNotices) != 1 {
-		t.Errorf("DisclosedNotices grew on idempotent call: %v", state.DisclosedNotices)
-	}
-}
-
-func TestEmitRank2Notice_DifferentNoticeIDsAreIndependent(t *testing.T) {
-	var buf bytes.Buffer
-	reporter := NewReporter(&buf)
-	state := &InstanceState{DisclosedNotices: []string{NoticeIDRank2TeamConfig}}
-
-	// Overlay notice should still fire — different ID.
-	EmitRank2Notice(state, NoticeIDRank2Overlay, "org/dotfiles", reporter)
-
-	if !strings.Contains(buf.String(), "org/dotfiles") {
-		t.Error("overlay notice should fire when only team-config notice was previously recorded")
-	}
-	if len(state.DisclosedNotices) != 2 {
-		t.Errorf("DisclosedNotices = %v, want both team-config and overlay", state.DisclosedNotices)
-	}
-}
-
-func TestEmitRank2Notice_NilStateStillLogs(t *testing.T) {
-	var buf bytes.Buffer
-	reporter := NewReporter(&buf)
-
-	// nil state: notice fires (idempotence guard skipped), no panic.
-	EmitRank2Notice(nil, NoticeIDRank2TeamConfig, "org/legacy", reporter)
-
-	if !strings.Contains(buf.String(), "org/legacy") {
-		t.Error("nil-state call should still log the notice")
-	}
 }
 
 func TestEmitRank2Notice_NilReporterIsNoOp(t *testing.T) {
-	state := &InstanceState{}
-
-	// No panic, no state mutation.
-	EmitRank2Notice(state, NoticeIDRank2TeamConfig, "org/legacy", nil)
-
-	if len(state.DisclosedNotices) != 0 {
-		t.Errorf("nil-reporter call should not mutate state: %v", state.DisclosedNotices)
-	}
+	// No panic, no output to a missing reporter.
+	EmitRank2Notice(NoticeIDRank2TeamConfig, "org/legacy", nil)
 }
 
-func TestEmitPluginNotice_InstalledLogsOnce(t *testing.T) {
+func TestEmitPluginNotice_InstalledLogsExpectedText(t *testing.T) {
 	var buf bytes.Buffer
 	reporter := NewReporter(&buf)
-	state := &InstanceState{}
 
-	EmitPluginNotice(state, NoticeIDPluginInstalled, "niwa --install-plugins", reporter)
+	EmitPluginNotice(NoticeIDPluginInstalled, "niwa plugins install", reporter)
 
 	if !strings.Contains(buf.String(), "installed at") {
 		t.Errorf("installed notice missing install confirmation text: %q", buf.String())
-	}
-	if len(state.DisclosedNotices) != 1 || state.DisclosedNotices[0] != NoticeIDPluginInstalled {
-		t.Errorf("DisclosedNotices = %v, want [%q]", state.DisclosedNotices, NoticeIDPluginInstalled)
 	}
 }
 
 func TestEmitPluginNotice_SkippedIncludesManualCmd(t *testing.T) {
 	var buf bytes.Buffer
 	reporter := NewReporter(&buf)
-	state := &InstanceState{}
 
-	EmitPluginNotice(state, NoticeIDPluginSkipped, "niwa --install-plugins", reporter)
+	EmitPluginNotice(NoticeIDPluginSkipped, "niwa plugins install", reporter)
 
-	if !strings.Contains(buf.String(), "niwa --install-plugins") {
+	if !strings.Contains(buf.String(), "niwa plugins install") {
 		t.Errorf("skipped notice missing manual cmd: %q", buf.String())
-	}
-	if len(state.DisclosedNotices) != 1 || state.DisclosedNotices[0] != NoticeIDPluginSkipped {
-		t.Errorf("DisclosedNotices = %v, want [%q]", state.DisclosedNotices, NoticeIDPluginSkipped)
 	}
 }
 
-func TestEmitPluginNotice_Idempotent(t *testing.T) {
-	var buf bytes.Buffer
-	reporter := NewReporter(&buf)
-	state := &InstanceState{DisclosedNotices: []string{NoticeIDPluginInstalled}}
-
-	EmitPluginNotice(state, NoticeIDPluginInstalled, "niwa --install-plugins", reporter)
-
-	if buf.Len() != 0 {
-		t.Errorf("idempotent call should not log: %q", buf.String())
-	}
-	if len(state.DisclosedNotices) != 1 {
-		t.Errorf("DisclosedNotices grew on idempotent call: %v", state.DisclosedNotices)
-	}
+func TestEmitPluginNotice_NilReporterIsNoOp(t *testing.T) {
+	// No panic when reporter is missing.
+	EmitPluginNotice(NoticeIDPluginInstalled, "niwa plugins install", nil)
 }

@@ -122,10 +122,16 @@ func runApply(cmd *cobra.Command, args []string) error {
 	applier.Reporter = workspace.NewReporterWithTTY(os.Stderr, !noProgress && term.IsTerminal(int(os.Stderr.Fd())))
 	applier.NoPull = applyNoPull
 	applier.AllowDirty = applyAllowDirty
-	// Wire the auto-installer + opt-outs. SkipPluginInstall honors
-	// --no-install-plugins, with the global-config check applied later
-	// once the GlobalConfig is loaded (runPipeline path).
-	applier.SkipPluginInstall = applyNoInstallPlugins
+	// Wire the auto-installer + opt-outs. SkipPluginInstall ORs the
+	// per-invocation --no-install-plugins flag with the persistent
+	// auto_install_plugins = false global-config setting (PRD R19).
+	// The global config load failure here is non-fatal — the per-flag
+	// fallback ships the user-visible behavior either way.
+	skipFromGlobal := false
+	if globalCfg, gErr := config.LoadGlobalConfig(); gErr == nil {
+		skipFromGlobal = globalCfg.SkipPluginInstall()
+	}
+	applier.SkipPluginInstall = applyNoInstallPlugins || skipFromGlobal
 	applier.InstallNiwaPlugin = installNiwaPluginAdapter
 	if applyAllowDirty {
 		// PRD R32: --allow-dirty is meaningless under the snapshot

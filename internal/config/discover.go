@@ -121,8 +121,13 @@ type AmbiguousMarkersError struct {
 }
 
 func (e *AmbiguousMarkersError) Error() string {
-	return fmt.Sprintf("ambiguous niwa config: found both %s/%s and %s at source root",
-		e.Markers.Rank1Dir, e.Markers.Rank1File, e.Markers.Rank2Path)
+	// PRD R28: include the source-resolution escape-hatch substrings
+	// (`--from` and `:`) so users can self-recover by pinning an
+	// explicit subpath.
+	return fmt.Sprintf("ambiguous niwa config: found both %s/%s and %s at source root. "+
+		"To resolve, either remove one marker from the source, or pin an explicit subpath via "+
+		"`--from <owner>/<repo>:<subpath>` (e.g. `--from owner/repo:%s`).",
+		e.Markers.Rank1Dir, e.Markers.Rank1File, e.Markers.Rank2Path, e.Markers.Rank1Dir)
 }
 
 // NoMarkerError is returned by RankDecider when neither rank-1 nor rank-2
@@ -134,7 +139,12 @@ type NoMarkerError struct {
 }
 
 func (e *NoMarkerError) Error() string {
-	return fmt.Sprintf("no niwa config found: probed %s/%s and %s at source root",
+	// PRD R28: include the source-resolution escape-hatch substrings
+	// (`--from` and `:`) so users can self-recover by pinning an
+	// explicit subpath against an alternate location.
+	return fmt.Sprintf("no niwa config found: probed %s/%s and %s at source root. "+
+		"If the config lives elsewhere in the repo, pin an explicit subpath via "+
+		"`--from <owner>/<repo>:<subpath>`.",
 		e.Markers.Rank1Dir, e.Markers.Rank1File, e.Markers.Rank2Path)
 }
 

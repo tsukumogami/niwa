@@ -249,3 +249,39 @@ func TestSourceInspect_SchemaVersionPinned(t *testing.T) {
 		t.Errorf("schema_version: 1 not present in JSON output:\n%s", out)
 	}
 }
+
+// TestSourceInspect_GzipBombRejected verifies that probeFromTarball
+// rejects a gzip bomb (a tiny compressed payload that decompresses
+// to more than MaxDecompressedBytes). The DESIGN requires the same
+// three-level decompression caps the production extract path
+// applies, since `niwa source inspect` is a remote-touching command.
+func TestSourceInspect_GzipBombRejected(t *testing.T) {
+	// Build a gzip stream whose decompressed size exceeds the cap.
+	// io.LimitReader on the gzip output rejects after the cap is hit.
+	var raw bytes.Buffer
+	gz := gzip.NewWriter(&raw)
+	// Write zeros up to slightly past the cap. Zeros compress extremely
+	// well so the compressed payload stays under a few KB.
+	chunk := make([]byte, 1<<20) // 1 MiB of zeros
+	target := int(github.MaxDecompressedBytes) + 1024
+	written := 0
+	for written < target {
+		if _, err := gz.Write(chunk); err != nil {
+			t.Fatal(err)
+		}
+		written += len(chunk)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// runInspect feeds the bomb through the full source-inspect path.
+	// The command should return an error (and exit non-zero), not OOM.
+	out, _, err := runInspect(t, raw.Bytes(), "org/repo", "--json")
+	if err == nil {
+		t.Fatalf("expected gzip bomb to be rejected; got nil error\noutput:\n%s", out)
+	}
+	if !strings.Contains(err.Error(), "decompression bomb") && !strings.Contains(err.Error(), "exceeds") {
+		t.Errorf("error does not mention bomb defense: %v", err)
+	}
+}

@@ -201,18 +201,34 @@ func runSourceInspect(cmd *cobra.Command, args []string) error {
 }
 
 // probeFromTarball gunzips body and runs github.ProbeMarkers on the
-// resulting tar reader. It buffers the decompressed stream so the
-// caller doesn't need to manage an extraction destination.
+// resulting tar reader. It mirrors the three-level decompression
+// caps that ProbeAndExtractSubpath applies — Level A on the
+// compressed input, Level B on the decompressed stream, and a hard
+// overflow check after the copy — so a crafted gzip bomb against
+// `niwa source inspect` cannot OOM the process.
 func probeFromTarball(body io.Reader, markers config.MarkerSet) (config.MarkerSet, error) {
-	gz, err := gzip.NewReader(body)
+	// Level A: bound the compressed input that the gzip reader will
+	// touch. MaxDecompressedBytes is a generous upper bound on the
+	// compressed size in practice (gzip rarely expands).
+	limitedBody := io.LimitReader(body, github.MaxDecompressedBytes+1)
+	gz, err := gzip.NewReader(limitedBody)
 	if err != nil {
 		return config.MarkerSet{}, fmt.Errorf("gunzip: %w", err)
 	}
 	defer gz.Close()
+
+	// Level B: bound the decompressed bytes we are willing to buffer.
+	// +1 lets us detect overflow without ambiguity.
+	limitedGz := io.LimitReader(gz, github.MaxDecompressedBytes+1)
 	var buf bytes.Buffer
-	if _, err := io.Copy(&buf, gz); err != nil {
+	n, err := io.Copy(&buf, limitedGz)
+	if err != nil {
 		return config.MarkerSet{}, fmt.Errorf("reading tar stream: %w", err)
 	}
+	if n > github.MaxDecompressedBytes {
+		return config.MarkerSet{}, fmt.Errorf("decompressed stream exceeds %d-byte cap (possible decompression bomb)", github.MaxDecompressedBytes)
+	}
+
 	tr := tar.NewReader(bytes.NewReader(buf.Bytes()))
 	return github.ProbeMarkers(tr, markers)
 }

@@ -23,22 +23,17 @@ const NoticeIDPluginInstalled = "plugin-installed:niwa"
 // reporter line includes a manual-install command the user can run.
 const NoticeIDPluginSkipped = "plugin-install-skipped:niwa"
 
-// EmitPluginNotice emits a once-per-workspace notice about the
-// embedded niwa plugin: either that it was installed/up-to-date or
-// that the install was skipped. When the install is skipped (or
-// failed) the manualCmd argument is interpolated into the reporter
-// line so the user has a copy-paste command to install the plugin
-// manually. The function mirrors EmitRank2Notice's contract:
+// EmitPluginNotice emits a notice about the embedded niwa plugin:
+// either that it was installed/up-to-date or that the install was
+// skipped. When the install is skipped (or failed) the manualCmd
+// argument is interpolated into the reporter line so the user has
+// a copy-paste command to install the plugin manually.
 //
-//   - reporter == nil: no-op
-//   - noticeDisclosed(state, id): no-op (idempotence guard)
-//   - state == nil: log fires, no DisclosedNotices bookkeeping
-//   - first call: log + state.DisclosedNotices append
-func EmitPluginNotice(state *InstanceState, id, manualCmd string, reporter *Reporter) {
+// Callers own the once-per-workspace dedup contract (same shape as
+// EmitRank2Notice). reporter may be nil; in that case the function
+// is a no-op.
+func EmitPluginNotice(id, manualCmd string, reporter *Reporter) {
 	if reporter == nil {
-		return
-	}
-	if noticeDisclosed(state, id) {
 		return
 	}
 	switch id {
@@ -47,40 +42,25 @@ func EmitPluginNotice(state *InstanceState, id, manualCmd string, reporter *Repo
 	case NoticeIDPluginSkipped:
 		reporter.Log("note: niwa Claude Code plugin install skipped. To install manually, run: %s", manualCmd)
 	}
-	if state != nil {
-		state.DisclosedNotices = append(state.DisclosedNotices, id)
-	}
 }
 
-// EmitRank2Notice emits the one-time PRD R10 rank-2 deprecation
-// notice for the given source identifier. The notice tells the user
-// the source still uses the deprecated whole-repo layout and points
+// EmitRank2Notice emits the PRD R10 rank-2 deprecation notice for
+// the given source identifier. The notice tells the user the
+// source still uses the deprecated whole-repo layout and points
 // them at the /niwa:migrate-config skill for assistance.
 //
-// Idempotent: when state already contains id in DisclosedNotices the
-// function returns without logging or mutating state. On first call
-// it both writes to reporter (a `note:` line on stderr) and appends
-// id to state.DisclosedNotices so the next apply suppresses the
-// repeat.
+// Callers own the once-per-workspace dedup contract: they check
+// InstanceState.DisclosedNotices before invoking, and append the
+// id to the next-saved state after this call returns. The id
+// argument is what the caller will record in DisclosedNotices —
+// EmitRank2Notice does not touch state itself.
 //
-// state may be nil (e.g. fresh init before InstanceState is loaded);
-// in that case the notice is always emitted but no DisclosedNotices
-// bookkeeping happens — callers that need idempotence across runs
-// must thread state through.
-//
-// reporter may be nil for callers that don't have one yet; in that
-// case the function is a no-op (no log, no state mutation), which
-// preserves the contract that EmitRank2Notice never panics on
-// partially-wired call sites.
-func EmitRank2Notice(state *InstanceState, id, identifier string, reporter *Reporter) {
+// reporter may be nil for callers that don't have one wired yet;
+// in that case the function is a no-op.
+func EmitRank2Notice(id, identifier string, reporter *Reporter) {
 	if reporter == nil {
 		return
 	}
-	if noticeDisclosed(state, id) {
-		return
-	}
 	reporter.Log("note: source %s uses the deprecated rank-2 layout (workspace.toml at repo root). Run /niwa:migrate-config to migrate the source to the rank-1 layout (.niwa/workspace.toml).", identifier)
-	if state != nil {
-		state.DisclosedNotices = append(state.DisclosedNotices, id)
-	}
+	_ = id // surfaced for symmetry with EmitPluginNotice; recorded by caller.
 }

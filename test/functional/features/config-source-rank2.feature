@@ -41,4 +41,4 @@ Feature: Rank-2 deprecation notice and niwa plugin auto-install
     When I run niwa init from config repo "legacy-optout" with --no-install-plugins
     Then the exit code is 0
     And the stderr contains "deprecated rank-2 layout"
-    And the stderr contains "niwa --install-plugins"
+    And the stderr contains "niwa plugins install"

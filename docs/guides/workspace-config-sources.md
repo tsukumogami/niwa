@@ -466,7 +466,7 @@ install command:
 
 ```
 note: niwa Claude Code plugin install skipped. To install manually,
-run: niwa --install-plugins
+run: niwa plugins install
 ```
 
 ### Failure handling

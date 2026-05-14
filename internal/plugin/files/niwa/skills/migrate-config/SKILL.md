@@ -37,6 +37,8 @@ There are two paths the user may want:
 
 5. If the user chooses path (b):
    - Confirm the new repository's slug
+   - **Warn the user about the overlay rename**: niwa's auto-discovered overlay slug derives from the team-config source repo name. If the workspace's existing overlay was `<old-repo>-overlay`, the new source repo's overlay will be `<new-repo>-overlay`. The user (or their org) must either create the new overlay repository (renaming or migrating content from the old one) or accept losing the auto-discovered overlay entirely. Both options should be presented.
+   - **Coordinate with the source repository maintainer**: if the new source repo is shared with other niwa users, get the maintainer's buy-in before the user redirects their workspace there. The source repo's intended use as a niwa config carrier is not obvious from its file tree alone.
    - Run `niwa source inspect <new-slug> --json` via Bash to verify the new repo carries the rank-1 layout cleanly
    - Edit `~/.config/niwa/config.toml` via the Edit tool to rewrite the `source_url` for the workspace
    - Print the follow-up command: `niwa apply --force <workspace-name>` so the workspace switches to the new source
