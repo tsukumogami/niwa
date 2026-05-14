@@ -1,5 +1,5 @@
 ---
-status: Draft
+status: Accepted
 problem: |
   niwa today cannot be adopted in a single-repo workspace. When a developer
   runs `niwa init --from owner/repo` against a general-purpose repo that
@@ -27,7 +27,7 @@ upstream: docs/prds/PRD-workspace-config-sources.md
 
 ## Status
 
-Draft
+Accepted
 
 ## Problem Statement
 
@@ -960,16 +960,6 @@ The following are excluded from this release's scope.
   <slug>` flag (already provided by upstream R35) on a per-init
   basis; this PRD does not add new auto-discovery for the
   multi-team-per-repo case.
-
-## Open Questions
-
-None. The three policy questions the upstream PRD left implicit
-(probe mechanism, migration policy, rank-3 keep/drop) are resolved
-in the Decisions and Trade-offs section below, alongside the
-overlay-slug-derivation override. The choice of upstream-PRD
-reconciliation style (status change vs amendment block) per R25 is
-left to the maintainer accepting this PRD but is not an open
-*requirements* question.
 
 ## Known Limitations
 

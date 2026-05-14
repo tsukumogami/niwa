@@ -1,5 +1,5 @@
 ---
-status: Done
+status: In Progress
 problem: |
   niwa today materializes git-hosted workspace configuration as a working
   tree at `<workspace>/.niwa/`, synced with `git pull --ff-only`, and
@@ -23,9 +23,49 @@ source_issue: 72
 
 ## Status
 
-Done
+In Progress
 
 ## Amendments
+
+### 2026-05-14 — Status reverted to In Progress; gaps tracked by PRD-config-source-discovery
+
+What changed: this PRD's status flips from Done back to In Progress.
+Verification against the source at acceptance time of
+[PRD-config-source-discovery](PRD-config-source-discovery.md)
+established that two contracts in this PRD were specified but never
+implemented:
+
+1. **R5 / R6 / R7 / R8 (convention-based subpath discovery)** is
+   unbuilt. The materializer at
+   `internal/workspace/snapshotwriter.go:440` calls
+   `github.ExtractSubpath(body, src.Subpath, staging)` directly when
+   `src.Subpath == ""`; no probe pass inspects the source for marker
+   files at the documented ranks. The matching backwards-compat
+   guarantee R33 ("existing standalone `dot-niwa` continues to work
+   via rank-2 discovery") is therefore also unbuilt, even though the
+   user-visible behaviour today (whole-repo extraction) happens to
+   coincide with what R33 would produce.
+2. **R35 (overlay slug derivation for subpath sources)** is also
+   overridden. The case-split — whole-repo sources derive the
+   overlay slug from the repo name, subpath sources derive it from
+   the subpath's last segment — is replaced with an unconditional
+   repo-name rule in
+   [PRD-config-source-discovery](PRD-config-source-discovery.md) R10.
+
+Why: discovery's user-visible value (single-repo and brain-repo
+adoption) cannot be realised without the probe pass landing. The
+overlay rule revision keeps overlay naming stable as discovery
+resolves the subpath. Both gaps are tracked end-to-end by the new
+PRD, which carries its own user stories, requirements (R1-R26),
+and acceptance criteria.
+
+Out of Scope addition: none — the new PRD's Out of Scope inherits
+this one's exclusions and adds the consolidation/skill items.
+
+What still ships from this PRD: R1-R4 (slug grammar), R9-R34 minus
+the gaps above, plus R36 (`niwa status` overlay line). The Done
+status is restored once the tracked work in
+PRD-config-source-discovery ships and the gaps above are closed.
 
 ### 2026-04-23 — Instance state stays in `.niwa/`
 
