@@ -11,12 +11,15 @@ problem: |
 goals: |
   Close the R5 implementation gap so that `niwa init --from owner/repo`
   against a general-purpose repo "just works" by probing for marker files
-  in a fixed precedence order, resolves the three policy questions the
-  upstream PRD left open (probe mechanism, migration tooling, rank-3
-  `niwa.toml` keep-or-drop), and ships a `niwa migrate-source` command
-  that makes the brain-repo migration painless without forcing it.
-  Existing standalone `dot-niwa` workflows keep applying without any user
-  action.
+  in a fixed precedence order; keep the overlay slug derivation
+  predictable by anchoring it to the source repo name regardless of
+  subpath; resolve the three policy questions the upstream PRD left
+  open (probe mechanism, migration policy, rank-3 `niwa.toml`
+  keep-or-drop); ship a Claude-driven migration skill that walks the
+  user through moving from the legacy whole-repo shape to the new
+  `.niwa/` shape; and keep both shapes working in this release with a
+  one-time deprecation notice on the legacy path so existing
+  workspaces never break on upgrade.
 upstream: docs/prds/PRD-workspace-config-sources.md
 ---
 
@@ -47,8 +50,8 @@ the code today:
   `src.Subpath == ""`, this is the "extract everything" path.
 - `internal/github/tar.go:117` short-circuits the subpath filter when
   subpath is empty.
-- No code path probes the source for `.niwa/workspace.toml`,
-  `workspace.toml`, or `niwa.toml` before deciding what to extract.
+- No code path probes the source for `.niwa/workspace.toml` or
+  `workspace.toml` before deciding what to extract.
 
 The user-visible consequence: a developer with a single general-purpose
 repo (the entire workspace is one repo) cannot adopt niwa without
@@ -58,15 +61,29 @@ exact friction niwa is supposed to remove — or (b) typing
 syntax. The "brain repo" pattern — a workspace whose strategic content
 and niwa config live in one repo — is blocked for the same reason.
 
+A second concern in the upstream PRD's R35 — that the auto-discovered
+overlay slug changes shape based on whether the source has an explicit
+subpath (`org/brain:.niwa` → `org/.niwa-overlay`) versus a whole-repo
+source (`org/dot-niwa` → `org/dot-niwa-overlay`) — interacts badly
+with discovery, because once discovery resolves `org/brain` to subpath
+`.niwa`, the overlay slug silently moves to `org/.niwa-overlay`. This
+PRD overrides R35 to anchor the overlay slug to the source repo name
+in every case.
+
 Three policy questions the upstream PRD left implicit are resolved by
 this PRD (see Decisions and Trade-offs below):
 
 1. **Probe mechanism**: single fetch + in-stream scan, not a separate
    API call.
-2. **Migration tooling**: a `niwa migrate-source` command ships
-   together with discovery so consolidation has a painless on-ramp.
-3. **Rank-3 `niwa.toml` discovery**: removed in v1.x; only rank-1 and
-   rank-2 markers remain.
+2. **Migration policy**: both formats work in this release; the legacy
+   path emits a one-time deprecation notice; migration itself is
+   handled by an interactive Claude skill rather than a niwa CLI
+   command. Hard removal of the legacy path is deferred to a
+   follow-up release.
+3. **Rank-3 `niwa.toml` discovery**: removed in this release; only
+   rank-1 (`.niwa/workspace.toml`) and rank-2 (root `workspace.toml`)
+   remain. Rank-2 is the deprecation target; rank-1 is the future
+   default.
 
 ## Goals
 
@@ -77,16 +94,25 @@ this PRD (see Decisions and Trade-offs below):
   config sits at a subdirectory of an existing brain repo is the
   default, well-trodden path; the user never has to think about
   subpath syntax unless they want to override discovery.
-- **Preserve standalone `dot-niwa` workflows.** Existing
-  `--from org/dot-niwa` users keep applying after upgrade with no
-  registry edits, no `--force` flag, no error messages they have to
-  decode. They resolve via rank-2 discovery (root `workspace.toml`).
-- **Ship gentle migration tooling.** `niwa migrate-source <name>`
-  rewrites a registry entry to point at a new source slug after a
-  maintainer has moved config from a standalone repo into a brain
-  repo's `.niwa/`. The binary itself never refuses to load the legacy
-  shape; consolidation happens organically because the new path is
-  painless, not because the old path was deprecated.
+- **Keep overlay slug derivation predictable.** The auto-discovered
+  overlay slug follows the source **repo name** in every case:
+  `--from dangazineu/foo` derives `dangazineu/foo-overlay` whether
+  `foo` carries config at root (rank-2) or under `.niwa/` (rank-1),
+  and whether the subpath was explicit, discovered, or empty. The
+  subpath does not participate in overlay naming. This overrides
+  upstream PRD R35's case-split.
+- **Both formats keep working in this release.** Existing
+  `--from org/dot-niwa` users (rank-2, the legacy whole-repo shape)
+  keep applying after upgrade with no registry edits and no `--force`
+  flag. A one-time deprecation notice fires per workspace so they
+  know there's a future migration ahead, but nothing breaks today.
+- **Migration is a Claude skill, not a niwa command.** A shirabe skill
+  walks the user through moving a workspace from the legacy
+  whole-repo shape to the new `.niwa/` shape — inspecting the
+  registry, suggesting the new slug, editing the registry entry, and
+  pointing at the next `niwa apply --force`. The skill is the
+  documented path; manual edit of the registry file is always
+  available as the fallback.
 - **Make discovery errors actionable.** When a source contains
   multiple markers at the source root, or none of them, the error
   message names every accepted path and the explicit-subpath escape
@@ -96,16 +122,23 @@ this PRD (see Decisions and Trade-offs below):
 
 ### Story 1: Single-repo workspace adoption
 
-A developer has one repo, `acme/widget`, that contains both their
+A developer has one repo, `dangazineu/foo`, that contains both their
 project code and `.niwa/workspace.toml` declaring the workspace
-config. They run `niwa init --from acme/widget my-workspace`. niwa
+config. They run `niwa init --from dangazineu/foo my-workspace`. niwa
 probes the source, finds `.niwa/workspace.toml`, resolves the subpath
 to `.niwa/`, fetches only that subpath into the workspace snapshot
-at `<my-workspace>/.niwa/`, and registers the workspace. A subsequent
-`niwa apply` clones `acme/widget` as a workspace component. The
-developer's working copy of `acme/widget` ends up under
-`<my-workspace>/acme/widget/`; the snapshot of the config remains the
-source of truth.
+at `<my-workspace>/.niwa/`, and registers the workspace.
+
+niwa also attempts to clone the auto-discovered overlay at
+`dangazineu/foo-overlay` (repo-name plus `-overlay`); if that repo
+doesn't exist or the user lacks access, the overlay silently skips
+and the workspace applies against the team config alone (preserving
+upstream R35's silent-skip behaviour).
+
+A subsequent `niwa apply` clones `dangazineu/foo` as a workspace
+component. The developer's working copy ends up under
+`<my-workspace>/dangazineu/foo/`; the snapshot of the config remains
+the source of truth.
 
 ### Story 2: Brain-repo composition
 
@@ -116,38 +149,21 @@ three other components (`acme/web`, `acme/api`, `acme/infra`). A
 developer runs `niwa init --from acme/vision my-workspace`. Discovery
 resolves the subpath to `.niwa/`, the snapshot materializes only the
 config files, and `niwa apply` clones all four workspace repos —
-including `acme/vision` itself — under the instance root. The brain
-repo flows through `discoverAllRepos` and `Classify` like any other
-workspace repo (per the precedent established in PR #138). The user
-never has to write a special config entry to say "the brain repo is
-both my config source and a workspace component."
+including `acme/vision` itself — under the instance root.
 
-### Story 3: Maintainer publishes config from brain repo
+niwa auto-discovers the workspace overlay at `acme/vision-overlay`,
+NOT `acme/.niwa-overlay`. The overlay slug is derived from the
+source repo, not the subpath, so the maintainer's mental model —
+"the overlay sits next to its source repo, named after it" — holds
+regardless of whether the team config lives at root, under `.niwa/`,
+or behind an explicit subpath.
 
-A maintainer of `acme/vision` decides to host the workspace config
-inside the brain repo. They `git mv` the standalone-`dot-niwa`
-contents into `acme/vision/.niwa/`, commit, and push. They post a
-one-line announcement: "the workspace config now lives in the brain
-repo — run `niwa migrate-source <your-workspace-name>` to switch."
-Each consumer's switch is independent; the standalone `dot-niwa` repo
-keeps working for anyone who hasn't migrated yet, so there's no
-synchronized cutover.
+The brain repo flows through `discoverAllRepos` and `Classify` like
+any other workspace repo (per the precedent established in PR #138).
+The user never has to write a special config entry to say "the brain
+repo is both my config source and a workspace component."
 
-### Story 4: Consumer runs `niwa migrate-source`
-
-A developer running the maintainer's announcement from Story 3 types
-`niwa migrate-source my-workspace --to acme/vision`. The command
-updates the registry entry's source slug from `acme/dot-niwa` to
-`acme/vision`, prints a one-line confirmation, and prompts the user
-to run `niwa apply --force` (the existing `--force` gate from
-upstream R26 still applies because the registered source URL
-changed). The developer runs `niwa apply --force`. niwa detects the
-URL change, refuses without `--force` had it been absent, and with
-`--force` atomically replaces the snapshot from the new source's
-`.niwa/` per the upstream PRD's R27. From this point forward, the
-developer's workspace is on the new pattern.
-
-### Story 5: Existing standalone `dot-niwa` user upgrades
+### Story 3: Existing standalone `dot-niwa` user upgrades
 
 A developer with an established workspace pointing at
 `org/dot-niwa` (whose entire content is the workspace config)
@@ -155,7 +171,74 @@ upgrades to a niwa binary that ships this PRD. They take no action.
 The next `niwa apply` succeeds: discovery probes the source, finds
 root `workspace.toml` (rank-2 marker), resolves the subpath to `""`
 (whole-repo), and the materialization path matches what it did
-before. No `--force` flag, no destroy/re-init ritual.
+before. The auto-discovered overlay slug remains
+`org/dot-niwa-overlay` (unchanged from today). No `--force` flag,
+no destroy/re-init ritual.
+
+stderr also contains a one-time deprecation notice telling them the
+whole-repo (rank-2) shape is on the way out and pointing at the
+migration skill:
+
+```
+note: workspace 'my-workspace' is using the deprecated whole-repo
+      config source layout (root workspace.toml). Future releases
+      will require config under .niwa/workspace.toml. To migrate
+      this workspace, run: /shirabe:niwa-migrate-config my-workspace
+      in Claude Code.
+```
+
+The notice fires once per workspace and is suppressed on subsequent
+applies via the existing `DisclosedNotices` mechanism. The
+workspace continues to apply normally between now and whenever the
+developer chooses to migrate.
+
+### Story 4: Migration via the Claude skill
+
+The developer from Story 3 decides to migrate. They open Claude Code
+and run `/shirabe:niwa-migrate-config my-workspace`. The skill:
+
+1. Reads the registry entry for `my-workspace` from
+   `~/.config/niwa/config.toml` and shows the current `source_url`
+   (e.g., `org/dot-niwa`).
+2. Probes the registered source by inspecting its root layout (via
+   the same fetch path niwa uses) and reports what it found:
+   "Source `org/dot-niwa` has root `workspace.toml` (rank 2, the
+   deprecated shape). Two migration paths:
+   (a) Move the config in `org/dot-niwa` into `.niwa/` —
+       `git mv -k * .niwa/` then commit & push — and keep the same
+       registry slug. Discovery will resolve via rank 1 on next apply.
+       The overlay slug stays `org/dot-niwa-overlay`.
+   (b) Move the config into a different repo that has `.niwa/` at
+       root (e.g., a brain repo like `org/vision`), and update the
+       registry slug to point at the new repo. The overlay slug
+       will change to `org/vision-overlay` (per R10) — the maintainer
+       of the new repo must arrange for the overlay repo at the new
+       slug before consumers complete the migration."
+3. Asks the user which path they want. If (a), the skill tells the
+   user the registry edit is not needed (the slug stays the same
+   after the repo is restructured) and prints a checklist.
+   If (b), the skill edits the registry entry's `source_url` to the
+   new slug provided by the user and warns about the overlay slug
+   change.
+4. Tells the user to run `niwa apply --force <name>` to materialise
+   the new snapshot.
+
+The skill is read-mostly: it never pushes to git, never runs apply,
+never deletes the on-disk snapshot. It writes only to the registry
+file when path (b) is chosen.
+
+### Story 5: Maintainer publishes config from brain repo
+
+A maintainer of `acme/vision` decides to host the workspace config
+inside the brain repo. They `git mv` the standalone-`dot-niwa`
+contents into `acme/vision/.niwa/`, commit, and push. They also
+create `acme/vision-overlay` (the new overlay repo, per R10) by
+renaming or forking the existing `acme/dot-niwa-overlay`. They post
+a one-line announcement: "the workspace config now lives in the
+brain repo — run `/shirabe:niwa-migrate-config <your-workspace-name>`
+in Claude Code to switch." Each consumer's switch is independent;
+the standalone `dot-niwa` repo keeps working for anyone who hasn't
+migrated yet, so there's no synchronized cutover.
 
 ### Story 6: Discovery ambiguity diagnostic
 
@@ -211,8 +294,9 @@ The team has two recovery paths, both documented in the
 `docs/guides/workspace-config-sources.md` migration section:
 (a) `git mv niwa.toml .niwa/workspace.toml` in `acme/legacy`,
 commit, push, and re-run `niwa apply`; or (b) keep the file at
-root, rename it to `workspace.toml`, commit, push. Either path
-resolves discovery and the next `niwa apply` succeeds. No
+root, rename it to `workspace.toml`, commit, push (lands on the
+deprecated rank-2 path but still works in this release). Either
+path resolves discovery and the next `niwa apply` succeeds. No
 upgrade-time pre-flight or proactive warning fires — the error
 surfaces on first apply only.
 
@@ -286,109 +370,155 @@ surfaces on first apply only.
   discovery resolves successfully; the temp clone is removed after
   the snapshot is promoted (per upstream R15).
 
-**Migration tooling: `niwa migrate-source`**
+**Overlay slug derivation**
 
-- **R10.** niwa MUST ship a `niwa migrate-source <name> [--to <slug>]
-  [--yes]` command. `<name>` is the workspace instance name as
-  registered in `~/.config/niwa/config.toml` (matching the value
-  shown by `niwa status`). The command's job is to rewrite that
-  registry entry's `source_url` field; it MUST NOT run apply, MUST
-  NOT delete the on-disk `<workspace>/.niwa/`, MUST NOT trigger any
-  fetch or write to the snapshot's staging area, and MUST NOT touch
-  the source repo (no remote writes; remote reads only when probing
-  for an inferred slug).
-- **R11.** When `--to <slug>` is provided, niwa MUST validate the
-  destination slug grammatically against the upstream PRD's R1-R3
-  parser rules and reject malformed input at parse time with the
-  upstream R3 diagnostic. niwa MUST NOT validate that the
-  destination resolves to a valid workspace config at this stage —
-  discovery resolution is deferred to the next `niwa apply`.
-- **R12.** When `--to` is omitted, niwa MUST probe the **current**
-  source (from the registry entry being migrated) for rank-1 and
-  rank-2 markers using the same single-fetch mechanism as R7/R8/R9.
-  The inferred new slug is `<owner/repo>:.niwa` when rank 1 matches
-  and `<owner/repo>` (no subpath) when rank 2 matches.
-  - If discovery against the current source produces an R3
-    ambiguity, `niwa migrate-source` without `--to` MUST exit
-    non-zero with the same R3 ambiguity diagnostic.
-  - If discovery produces an R4 no-marker outcome,
-    `niwa migrate-source` without `--to` MUST exit non-zero with
-    the same R4 diagnostic.
-  - If the source is network-unreachable, `niwa migrate-source`
-    without `--to` MUST exit non-zero with a "could not probe
-    source" message naming the source URL. niwa MUST NOT fall
-    back to a cached snapshot for this probe.
-- **R13.** When `--to` is omitted and discovery resolves
-  unambiguously, behaviour depends on TTY and `--yes`:
-  - **Interactive (stdin is a TTY) and `--yes` absent**: niwa MUST
-    print a confirmation prompt of the form
-    `Migrate <name> from <old-slug> to <new-slug>? [y/N]: ` to
-    stdout and accept `y` or `yes` (case-insensitive) on stdin as
-    confirmation. Any other input (including empty / `n` / EOF)
-    MUST abort with exit code 0 and the message "aborted" to
-    stderr; the registry MUST NOT be modified.
-  - **Non-interactive (stdin is not a TTY) and `--yes` absent**:
-    niwa MUST print the inferred slug to stdout and exit non-zero
-    with a message instructing the user to re-run with `--yes`
-    or `--to <slug>`. The registry MUST NOT be modified.
-  - **`--yes` present (any TTY state)**: niwa MUST apply the
-    inferred rewrite immediately and exit zero. `--yes` only
-    auto-confirms the unambiguous case; ambiguous (R3) and
-    no-marker (R4) outcomes MUST still fail per R12 regardless
-    of `--yes`.
-- **R14.** When `--to <slug>` exactly matches the workspace's
-  current `source_url`, `niwa migrate-source` MUST exit zero
-  with a single-line "already on this slug" message to stderr and
-  MUST NOT modify the registry file.
-- **R15.** On the next `niwa apply` after a registry source-URL
-  change made by `niwa migrate-source` (or by hand-edit per the
-  upstream PRD R29), apply-time behaviour MUST be identical to the
-  upstream PRD's R26/R27 (refuse without `--force`; atomically
-  replace the snapshot with `--force`). This PRD adds no new
-  apply-time gates.
-- **R16.** After `niwa migrate-source` rewrites the registry, niwa
-  MUST print to stderr a one-line pointer containing the literal
-  substring `niwa apply --force`, instructing the user how to
-  realise the change.
-- **R17.** `niwa migrate-source` MUST expose stable exit codes
-  documented in the `--help` output: 0 on success (including the
-  no-op R14 case), 1 on registry not found / workspace name not
-  registered, 2 on probe failure when `--to` is omitted (covering
-  R12's three failure modes), 3 on slug-parse failure when `--to`
-  is provided (R11), and 130 on user abort (R13 interactive
-  "no" answer). The exact mapping of probe-failure subcategories
-  to exit codes is left to the design phase but MUST keep code 2
-  as the family for "probe failed."
+- **R10.** The auto-discovered workspace overlay slug MUST be
+  derived as `<host>/<source-org>/<source-repo>-overlay` in every
+  case, regardless of how the source's subpath was resolved
+  (explicit slug, discovered, or empty). The subpath MUST NOT
+  participate in overlay slug derivation. This overrides upstream
+  PRD R35's case-split between whole-repo and subpath sources.
+  Worked examples:
+  - `--from dangazineu/foo` (rank-1 discovery resolves
+    `Subpath = ".niwa"`) → overlay slug = `dangazineu/foo-overlay`.
+  - `--from dangazineu/foo:.niwa` (explicit subpath) → overlay
+    slug = `dangazineu/foo-overlay`.
+  - `--from acme/dot-niwa` (rank-2 legacy whole-repo) → overlay
+    slug = `acme/dot-niwa-overlay`. (Unchanged from today.)
+  - `--from acme/vision:teams/research` (multi-segment explicit
+    subpath) → overlay slug = `acme/vision-overlay`, NOT
+    `acme/research-overlay` (which would be upstream R35's output).
+- **R11.** Existing behaviour from upstream PRD R35 around overlay
+  fetch (same fetch-mechanism selection per host: GitHub tarball
+  for `github.com`, git-clone fallback elsewhere) and silent
+  skip on failure (so users without overlay access continue to
+  apply against the team config alone) MUST remain unchanged.
+  Only the slug derivation rule changes per R10.
+- **R12.** The overlay snapshot MUST itself be subpath-aware in the
+  same way as the team config: discovery (R1) runs against the
+  overlay repo's root, accepting `.niwa/workspace-overlay.toml`
+  (rank 1) or root `workspace-overlay.toml` (rank 2). The same
+  rank-2 deprecation notice (R14) fires for an overlay resolved
+  via rank-2, scoped to the workspace's overlay (one notice per
+  workspace per command-type). This is a tightening of upstream
+  PRD R35's "overlay clone is treated as a whole-repo source"
+  decision, deferred to v1.x in the upstream PRD's parenthetical.
+
+**Coexistence and deprecation of the legacy rank-2 shape**
+
+- **R13.** Both rank-1 (`.niwa/workspace.toml`) and rank-2 (root
+  `workspace.toml`) MUST resolve successfully in this release.
+  Existing registry entries with `source_url = "org/dot-niwa"`
+  (no subpath) continue to apply via rank-2 discovery with no user
+  action required. The same dual acceptance applies to overlay
+  config (rank-1 `.niwa/workspace-overlay.toml` and rank-2 root
+  `workspace-overlay.toml`).
+- **R14.** When discovery resolves a workspace's team config OR
+  overlay via rank 2, niwa MUST emit a one-time `note:`-prefixed
+  deprecation notice to stderr on `niwa apply` and `niwa init`.
+  The notice MUST:
+  - name the workspace by its registered name (apply context) or
+    by the source slug (init context);
+  - identify which artifact is on the deprecated path (team
+    config, overlay, or both) and the rank-2 path using the
+    literal substring `deprecated`;
+  - point the user at the migration skill using the literal
+    substring `/shirabe:niwa-migrate-config`;
+  - fire at most once per workspace per artifact per command-type
+    via the existing `DisclosedNotices` mechanism (the same
+    mechanism upstream R18, R28, R32 already use).
+- **R15.** Hard removal of rank-2 discovery is OUT of this release's
+  scope. A follow-up release MUST remove rank-2 once all known
+  workspaces have migrated; this PRD does not schedule that
+  conversation but its Out of Scope section names the future
+  removal as deferred work.
+
+**Migration tooling: shirabe skill**
+
+- **R16.** A migration skill MUST ship as part of this work,
+  invocable as `/shirabe:niwa-migrate-config <workspace-name>` in
+  Claude Code. The exact plugin/repo location for the skill source
+  is left to the design phase but MUST satisfy the user-facing
+  invocation path above. The skill's behaviour is specified by
+  R17-R20.
+- **R17.** The skill MUST read the registry entry for the named
+  workspace from the user's niwa config (default
+  `~/.config/niwa/config.toml`, honouring any niwa override env
+  vars the design phase identifies) and present the current
+  `source_url` to the user. If the workspace is not registered,
+  the skill MUST exit with a clear error naming the workspace.
+- **R18.** The skill MUST probe the workspace's current team-config
+  source AND its auto-discovered overlay (per R10) via the same
+  fetch path niwa uses (R7-R9) — reusing niwa's Go code where
+  practical, otherwise making the same shape of request — and
+  report which marker(s) it found at each source root. The skill
+  MUST NOT call into a separate Contents API endpoint; this PRD's
+  single-fetch contract (R7) applies to the skill's probes as
+  well.
+- **R19.** Based on the probe results, the skill MUST present the
+  user with two clearly-labelled migration paths and surface any
+  overlay implications:
+  - **(a) In-place repo restructure**: the user moves the config
+    contents inside the source repo from root into `.niwa/`,
+    commits, and pushes. The same move can be applied to the
+    overlay repo. The registry slug stays the same; the overlay
+    slug stays the same (per R10). The skill MUST present the
+    exact `git mv` (or equivalent) commands and tell the user to
+    push before continuing.
+  - **(b) Slug swap**: the user changes which repo the workspace
+    points at (e.g., from a standalone `org/dot-niwa` to a brain
+    repo `org/vision`). The skill MUST accept the new slug from
+    the user, validate the slug grammar per upstream R1-R3,
+    confirm with the user, warn explicitly that the overlay slug
+    will change from `<old-repo>-overlay` to `<new-repo>-overlay`
+    (per R10) and that the maintainer must arrange the new
+    overlay repo before consumers complete migration, and rewrite
+    the registry entry's `source_url`.
+- **R20.** The skill MUST be read-mostly: it MUST NOT push to git,
+  MUST NOT run `niwa apply`, MUST NOT delete or modify the on-disk
+  `<workspace>/.niwa/` snapshot, and MUST NOT touch the source
+  repo's git history. The only side effect (for path (b)) is the
+  registry-file edit. After the skill completes any successful
+  migration, it MUST tell the user to run
+  `niwa apply --force <workspace-name>` as the next step.
 
 **Backwards compatibility**
 
-- **R18.** Existing registry entries with
-  `source_url = "org/dot-niwa"` (no subpath, written by older
-  binaries) MUST continue to resolve via rank-2 discovery (root
-  `workspace.toml`) without user action. No upgrade-time prompt
-  MUST fire for these users (preserves upstream PRD R33).
-- **R19.** No existing user MUST be required to take any action
+- **R21.** No existing user MUST be required to take any action
   after upgrading to a niwa binary that ships this PRD (preserves
   upstream PRD R34). The first `niwa apply` after upgrade triggers
   discovery transparently and succeeds for any source that
-  matches a rank-1 or rank-2 marker.
+  matches a rank-1 or rank-2 marker. The rank-2 deprecation notice
+  (R14) is informational only and never blocks apply.
+- **R22.** All existing acceptance criteria from
+  `docs/prds/PRD-workspace-config-sources.md` related to discovery
+  (AC-D1 through AC-D9) and backwards compatibility
+  (AC-B1) MUST remain pass after this PRD ships, with three
+  exceptions: ACs that reference rank-3 (root `niwa.toml`)
+  discovery are superseded by R23 below; AC-D3 and AC-D4 are
+  amended to match the diagnostic substring contract specified in
+  R24 (a tightening, not a contradiction); upstream AC-O2 and
+  AC-O3 (the upstream PRD's overlay slug derivation cases for
+  subpath sources) are superseded by R10 — the new behaviour is
+  verified by AC-V1 through AC-V4 below.
 
 **Rank-3 (`niwa.toml`) discovery removal**
 
-- **R20.** Rank-3 discovery (root `niwa.toml` with explicit
+- **R23.** Rank-3 discovery (root `niwa.toml` with explicit
   `content_dir`) specified by the upstream PRD's R5+R8 MUST be
-  removed in this PRD's scope. Brain repos relying on a root
+  removed in this release. Brain repos relying on a root
   `niwa.toml` MUST migrate to either `.niwa/workspace.toml`
-  (rank 1) or root `workspace.toml` (rank 2). Existing registries
-  whose source resolved only via the removed rank-3 marker MUST
-  surface the R4 "no niwa config found" diagnostic on the next
-  `niwa apply`; no upgrade-time prompt or pre-flight is added.
-  Migration guidance for this case MUST appear in
+  (rank 1) or root `workspace.toml` (rank 2, the deprecated path
+  still accepted for now). Existing registries whose source
+  resolved only via the removed rank-3 marker MUST surface the
+  R4 "no niwa config found" diagnostic on the next `niwa apply`;
+  no upgrade-time prompt or pre-flight is added. Migration
+  guidance for this case MUST appear in
   `docs/guides/workspace-config-sources.md`.
 
 **Diagnostic clarity**
 
-- **R21.** Every discovery error message (R3 ambiguity, R4 no
+- **R24.** Every discovery error message (R3 ambiguity, R4 no
   marker, R5 partial-snapshot avoidance) MUST contain three pieces
   of information, each as a separately-grep-able substring:
   - the source slug (the user's `--from` value);
@@ -403,35 +533,43 @@ surfaces on first apply only.
 
 **Upstream PRD reconciliation**
 
-- **R22.** When this PRD is Accepted, the upstream PRD
+- **R25.** When this PRD is Accepted, the upstream PRD
   `docs/prds/PRD-workspace-config-sources.md` MUST be amended to
   reflect that R5+R6+R7+R8 and R33 from that PRD are tracked by
-  this PRD as outstanding implementation work. Either: (a) the
-  upstream PRD's status changes to "In Progress" with this PRD
-  cited as the tracking artifact in a new amendment block, or
-  (b) the upstream PRD adds an amendment block (dated, like the
-  existing 2026-04-23 entry) acknowledging the gap and naming
-  this PRD as the closing work. The choice between (a) and (b)
-  is left to the maintainer accepting this PRD, but one of the
-  two MUST happen at acceptance time.
+  this PRD as outstanding implementation work, AND that R35's
+  overlay slug derivation rule is overridden by this PRD's R10.
+  Either: (a) the upstream PRD's status changes to "In Progress"
+  with this PRD cited as the tracking artifact in a new amendment
+  block, or (b) the upstream PRD adds an amendment block (dated,
+  like the existing 2026-04-23 entry) acknowledging both gaps and
+  naming this PRD as the closing work. The choice between (a) and
+  (b) is left to the maintainer accepting this PRD, but one of
+  the two MUST happen at acceptance time.
 
 **Documentation**
 
-- **R23.** `docs/guides/workspace-config-sources.md` MUST be
+- **R26.** `docs/guides/workspace-config-sources.md` MUST be
   updated to include:
   - A section with the exact heading anchor `#single-repo-workspace`
     walking through Story 1 end-to-end, including the on-disk
-    layout sketch and the `niwa init --from owner/repo` command
-    without explicit subpath.
+    layout sketch, the `niwa init --from owner/repo` command
+    without explicit subpath, and the overlay slug
+    `dangazineu/foo-overlay` derivation.
   - A section with the exact heading anchor `#brain-repo` walking
     through Story 2 end-to-end, including the `discoverAllRepos`
     / `Classify` behaviour for the brain repo as a workspace
     component (cross-referencing the upstream PRD's overlay
-    precedent and PR #138).
-  - A section with the exact heading anchor `#niwa-migrate-source`
-    documenting the command synopsis, `--to` and `--yes` flag
-    semantics, exit codes (per R17), and a Story-3 + Story-4
-    walk-through of a brain-repo maintainer's publishing flow.
+    precedent and PR #138), AND the overlay slug
+    `acme/vision-overlay` derivation (not `acme/.niwa-overlay`).
+  - A section with the exact heading anchor `#overlay-slug-rule`
+    explaining R10's unconditional repo-name-based derivation,
+    with the four worked examples from R10.
+  - A section with the exact heading anchor `#rank-2-deprecation`
+    explaining the one-time notice (R14), the two migration paths
+    handled by the skill (R19), and the deferred hard-removal
+    timeline. The section body MUST contain the literal substrings
+    `deprecated`, `/shirabe:niwa-migrate-config`, and `rank 2`
+    (or `rank-2`).
   - A section with the exact heading anchor `#rank-3-removal`
     explaining the removed root `niwa.toml` path. The section
     body MUST contain the literal substrings `niwa.toml`,
@@ -442,21 +580,24 @@ surfaces on first apply only.
 
 Each AC is binary pass/fail. ACs that depend on a fixture name it
 explicitly. The upstream PRD's Test Strategy section defines the
-`tarballFakeServer` and the legacy-working-tree fixture.
+`tarballFakeServer`. Fixture A serves `acme/dot-niwa` (root
+`workspace.toml` only, the legacy rank-2 shape). Fixture B serves
+`acme/vision` (`.niwa/workspace.toml` only, the rank-1 shape).
 
 ### AC: Convention-based subpath discovery (verifies R1-R6)
 
-- [ ] **AC-D1**. Given a `tarballFakeServer` source containing only
-  `.niwa/workspace.toml`, `niwa init <name> --from owner/repo`
+- [ ] **AC-D1**. Given fixture B (`acme/vision` with only
+  `.niwa/workspace.toml`), `niwa init <name> --from acme/vision`
   resolves `source_subpath = ".niwa"` in the registry. The on-disk
   `<workspace>/.niwa/` after init contains the files from the
   source's `.niwa/` directory and no files from outside it.
-- [ ] **AC-D2**. Given a `tarballFakeServer` source containing only
-  a root `workspace.toml` (the standalone-`dot-niwa` shape),
-  `niwa init <name> --from owner/repo` resolves
-  `source_subpath = ""` in the registry. The on-disk
+- [ ] **AC-D2**. Given fixture A (`acme/dot-niwa` with only a root
+  `workspace.toml`), `niwa init <name> --from acme/dot-niwa`
+  resolves `source_subpath = ""` in the registry. The on-disk
   `<workspace>/.niwa/` contains the source's whole tree (minus
-  excluded entries per upstream PRD R10).
+  excluded entries per upstream PRD R10). Init succeeds. (R13
+  coexistence is verified end-to-end by this AC together with
+  AC-N1.)
 - [ ] **AC-D3a**. Given an explicit slug
   `--from owner/repo:custom/path` where the source has
   `.niwa/workspace.toml` AND `workspace.toml` at root AND
@@ -504,21 +645,12 @@ explicitly. The upstream PRD's Test Strategy section defines the
   to rank 2: `source_subpath = ""`, the whole-repo materializes,
   no ambiguity error fires. This verifies that empty `.niwa/` is
   not treated as a rank-1 match (R6).
-- [ ] **AC-D9**. Given an explicit slug
-  `--from owner/repo:custom/path` where the source contains a
-  root `workspace.toml` AND a `.niwa/workspace.toml` AND
-  `custom/path/workspace.toml`, the resolved subpath is
-  `custom/path`. Same as AC-D3a, asserted separately to verify
-  R2's "MUST bypass discovery entirely" wording.
 
-### AC: Single-call probe mechanism (verifies R7-R9, R16)
+### AC: Single-call probe mechanism (verifies R7-R9)
 
-- [ ] **AC-P1**. Given a `tarballFakeServer` source with
-  `.niwa/workspace.toml`, the server records exactly **one**
+- [ ] **AC-P1**. Given fixture B, the server records exactly **one**
   tarball request and **zero** Contents API (`/contents/`)
-  requests during init. (Verifies R7 — no separate probe call —
-  and serves as the testable AC for the implicit "no observable
-  added latency" promise.)
+  requests during init. (Verifies R7: no separate probe call.)
 - [ ] **AC-P2**. Given a `tarballFakeServer` source whose tarball
   is 200 MB compressed but whose `.niwa/` directory is 50 KB, the
   init succeeds and the resulting `<workspace>/.niwa/` directory
@@ -543,128 +675,139 @@ explicitly. The upstream PRD's Test Strategy section defines the
   `<workspace>/.niwa/` contains the files from the source's
   `.niwa/` directory and no files from outside it.
 
-### AC: Migration tooling — `niwa migrate-source` (verifies R10-R17)
+### AC: Overlay slug derivation (verifies R10-R12)
 
-These ACs use two `tarballFakeServer` fixtures unless noted:
-fixture A serves `acme/dot-niwa` (the legacy standalone shape:
-root `workspace.toml`), fixture B serves `acme/vision` (with
-`.niwa/workspace.toml` at root).
+- [ ] **AC-V1** (rank-1 discovery). Given fixture B serving
+  `acme/vision` with only `.niwa/workspace.toml`, plus a second
+  fixture serving `acme/vision-overlay` (the new auto-discovered
+  overlay slug per R10) with `.niwa/workspace-overlay.toml`,
+  `niwa init <name> --from acme/vision` succeeds. The provenance
+  marker for the overlay snapshot records
+  `source_url = "acme/vision-overlay"` (NOT `acme/.niwa-overlay`,
+  which would be upstream R35's output).
+- [ ] **AC-V2** (explicit subpath). Given fixture B and the
+  overlay fixture from AC-V1, `niwa init <name> --from
+  acme/vision:.niwa` resolves the same overlay slug
+  `acme/vision-overlay`. The overlay snapshot is byte-identical
+  in content to AC-V1's overlay snapshot.
+- [ ] **AC-V3** (rank-2 legacy). Given fixture A serving
+  `acme/dot-niwa` with only a root `workspace.toml`, plus a
+  fixture serving `acme/dot-niwa-overlay` with a root
+  `workspace-overlay.toml`, `niwa init <name> --from
+  acme/dot-niwa` succeeds. The overlay snapshot's provenance
+  marker records `source_url = "acme/dot-niwa-overlay"`
+  (unchanged from today's behaviour).
+- [ ] **AC-V4** (overlay absent silently skips). Given fixture B
+  but no overlay fixture (the would-be `acme/vision-overlay` does
+  not exist or returns 404), `niwa init <name> --from acme/vision`
+  succeeds with no overlay snapshot materialized. stderr does NOT
+  contain an error about the missing overlay. (Preserves upstream
+  R35's silent-skip-on-failure behaviour per R11.)
+- [ ] **AC-V5** (multi-segment explicit subpath). Given a
+  `tarballFakeServer` source with content under
+  `teams/research/workspace.toml` and the user runs
+  `niwa init <name> --from acme/vision:teams/research`, the
+  auto-discovered overlay slug is `acme/vision-overlay`, NOT
+  `acme/research-overlay`. (Verifies R10's "subpath does not
+  participate" contract against upstream R35.)
+- [ ] **AC-V6** (overlay rank-1 / rank-2 discovery). Given an
+  overlay fixture serving `acme/vision-overlay` with only
+  `.niwa/workspace-overlay.toml`, the overlay snapshot resolves
+  via overlay-rank-1; subpath in the provenance marker is
+  `.niwa`. Given a second run against an overlay fixture serving
+  only a root `workspace-overlay.toml`, the snapshot resolves via
+  overlay-rank-2 and stderr contains the rank-2 deprecation
+  notice (per R14) scoped to the overlay.
 
-- [ ] **AC-M1**. Given a workspace registered with
-  `source_url = "acme/dot-niwa"`, running
-  `niwa migrate-source my-workspace --to acme/vision` succeeds
-  (exit 0). After the command, the registry file contains
-  `source_url = "acme/vision"` for `my-workspace`. The on-disk
-  `<my-workspace>/.niwa/` is byte-identical to its pre-command
-  state.
-- [ ] **AC-M2**. After AC-M1's `niwa migrate-source` returns,
-  stderr contains the literal substring `niwa apply --force`,
-  pointing the user at the next step (R16).
-- [ ] **AC-M3**. With the AC-M1 preconditions plus fixture B
-  serving `acme/vision` with `.niwa/workspace.toml`, running
-  `niwa apply my-workspace --force` after `niwa migrate-source`
-  succeeds. The post-apply `<my-workspace>/.niwa/` is a fresh
-  snapshot from `acme/vision`'s `.niwa/` subdirectory; the
-  provenance marker records `source_url = "acme/vision"` and
-  `subpath = ".niwa"`. `niwa status` for `my-workspace` shows the
-  new slug and subpath.
-- [ ] **AC-M4**. Given the AC-M1 preconditions, running
-  `niwa migrate-source my-workspace --to acme/dot-niwa` (the slug
-  matching the workspace's current source) exits 0 with stderr
-  containing the literal substring `already on this slug`. The
-  registry file's `source_url` for `my-workspace` is byte-identical
-  to its pre-command state (R14).
-- [ ] **AC-M5**. `niwa migrate-source nonexistent-workspace --to
-  acme/vision` exits non-zero with exit code 1 and stderr
-  containing the literal `nonexistent-workspace` and the literal
-  `not found`.
-- [ ] **AC-M6** (R12 inferred slug, unambiguous). Given a workspace
-  registered with `source_url = "acme/dot-niwa"` and fixture A
-  serving `acme/dot-niwa` with only a root `workspace.toml`,
-  running `niwa migrate-source my-workspace --yes` (no `--to`)
-  succeeds. The probe finds rank-2; the inferred new slug is
-  `acme/dot-niwa` (unchanged); registry remains byte-identical
-  (the no-op behaviour from R14 applies). Stderr contains
-  `already on this slug`.
-- [ ] **AC-M7** (R12 inferred slug, rank-1 found). Given a
-  workspace registered with `source_url = "acme/vision"` (no
-  explicit subpath) and fixture B serving `acme/vision` with
-  `.niwa/workspace.toml`, running
-  `niwa migrate-source my-workspace --yes` succeeds. The inferred
-  slug is `acme/vision:.niwa` (rank-1 match); the registry's
-  `source_url` is rewritten to `acme/vision:.niwa`; stderr
-  contains the literal `niwa apply --force` pointer.
-- [ ] **AC-M8** (R12 ambiguous current source). Given a workspace
-  registered with `source_url = "acme/messy"` and a fixture
-  serving `acme/messy` with BOTH `.niwa/workspace.toml` AND root
-  `workspace.toml`, running `niwa migrate-source my-workspace`
-  (no `--to`, with or without `--yes`) exits non-zero with the
-  R3 ambiguity diagnostic content (per AC-D5). The registry is
-  byte-identical.
-- [ ] **AC-M9** (R12 no-marker current source). Given a workspace
-  registered with `source_url = "acme/empty"` and a fixture
-  serving `acme/empty` with neither marker, running
-  `niwa migrate-source my-workspace --yes` exits non-zero with
-  the R4 no-marker diagnostic content (per AC-D6). The registry
-  is byte-identical.
-- [ ] **AC-M10** (R12 network-unreachable probe). Given the
-  fixture configured to refuse connections (network simulating
-  unreachable), running
-  `niwa migrate-source my-workspace --yes` exits non-zero with
-  exit code 2 and stderr containing the literal `could not probe
-  source` plus the source slug. The registry is byte-identical.
-  niwa MUST NOT fall back to a cached snapshot for this probe.
-- [ ] **AC-M11** (R13 non-interactive without `--yes`). Given the
-  AC-M7 preconditions (rank-1 match available) plus stdin
-  attached to a non-TTY (`/dev/null` or pipe), running
-  `niwa migrate-source my-workspace` (no `--to`, no `--yes`)
-  exits non-zero with stderr containing the inferred slug
-  `acme/vision:.niwa` and a literal `--yes` instruction. The
-  registry is byte-identical.
-- [ ] **AC-M12** (R13 interactive confirm). Given AC-M7
-  preconditions plus stdin attached to a pseudo-TTY scripted to
-  send `y\n`, running `niwa migrate-source my-workspace` succeeds
-  (exit 0), the registry is rewritten to `acme/vision:.niwa`,
-  stdout contains the literal `[y/N]` (proving the prompt fired).
-- [ ] **AC-M13** (R13 interactive abort). Given the same setup as
-  AC-M12 but the pseudo-TTY sends `\n` (empty line or `n`),
-  niwa exits 130 (per R17), the registry is byte-identical to its
-  pre-command state, and stderr contains the literal `aborted`.
-- [ ] **AC-M14** (R11 slug parse). `niwa migrate-source
-  my-workspace --to "owner/repo:"` (empty subpath) exits 3 with
-  the upstream R3a parse-time diagnostic. The registry is
-  byte-identical.
-- [ ] **AC-M15** (R10 no apply, no source-repo write). After any
-  `niwa migrate-source` invocation, the fixture's request counter
-  shows zero requests OR (for `--to`-provided invocations where
-  no probe happens) zero requests; the staging directory
-  `<workspace>/.niwa.next/` does not exist; the on-disk
-  `<workspace>/.niwa/` is byte-identical to its pre-command
-  state. This asserts that R10's "MUST NOT trigger an apply"
-  and "MUST NOT touch the source repo" contracts hold across
-  all `niwa migrate-source` invocations.
-- [ ] **AC-M16** (R15 negative apply gate). Given the AC-M3
-  preconditions but the user runs bare `niwa apply my-workspace`
-  (no `--force`) between `migrate-source` and the `--force`
-  retry, `niwa apply` exits non-zero with the upstream R26
-  source-URL-changed diagnostic. After this aborted apply, the
-  registry source URL is still `acme/vision` (the migrate-source
-  change), the on-disk `<my-workspace>/.niwa/` is byte-identical
-  to its pre-bare-apply state.
-- [ ] **AC-M17** (R10 migrate-source against legacy working
-  tree). Given a workspace registered with
-  `source_url = "acme/dot-niwa"` whose on-disk
-  `<my-workspace>/.niwa/` has a `.git/` directory (the legacy
-  working-tree shape from upstream R28), running
-  `niwa migrate-source my-workspace --to acme/vision` succeeds
-  and the on-disk `<my-workspace>/.niwa/` (including `.git/`) is
-  byte-identical to its pre-command state. The subsequent
-  `niwa apply --force` per AC-M3 performs both the URL change
-  swap AND the upstream-R28 lazy conversion in one pass; after
-  it returns, `<my-workspace>/.niwa/.git/` does not exist and
-  the provenance marker shows the new source.
+### AC: Rank-2 deprecation notice (verifies R13-R15)
 
-### AC: Backwards compatibility (verifies R18-R19)
+- [ ] **AC-N1** (init context, team config). Given fixture A and a
+  fresh workspace, `niwa init <name> --from acme/dot-niwa`
+  succeeds (exit 0) AND stderr contains a single line with the
+  literal substring `deprecated`, the source slug
+  `acme/dot-niwa`, and the literal substring
+  `/shirabe:niwa-migrate-config`. The notice fires before init
+  returns; the workspace is registered normally.
+- [ ] **AC-N2** (apply context, first time). Given a workspace
+  registered with `source_url = "acme/dot-niwa"` and the first
+  `niwa apply <name>` after upgrade, apply succeeds (exit 0) AND
+  stderr contains a single line with the literal substrings
+  `deprecated`, the workspace name `<name>`, and
+  `/shirabe:niwa-migrate-config`.
+- [ ] **AC-N3** (apply context, second time). With AC-N2's
+  preconditions plus the first apply having already emitted the
+  notice, the second `niwa apply <name>` succeeds (exit 0) and
+  stderr does NOT contain the literal `deprecated` substring.
+  (Verifies one-time-per-workspace via `DisclosedNotices`.)
+- [ ] **AC-N4** (rank-1 path silent). Given fixture B and
+  `niwa init <name> --from acme/vision`, init succeeds (exit 0)
+  and stderr does NOT contain the literal `deprecated` substring.
+  Rank-1 is the non-deprecated path; no notice fires.
+- [ ] **AC-N5** (both paths apply). Given two registered
+  workspaces, one on fixture A (rank 2) and one on fixture B
+  (rank 1), `niwa apply --all` applies both successfully (exit 0).
+  stderr contains exactly one `deprecated` notice (for the rank-2
+  workspace) and no notice for the rank-1 workspace.
+- [ ] **AC-N6** (overlay rank-2 notice). Given a workspace whose
+  team config is on rank-1 (fixture B) but whose overlay
+  (`acme/vision-overlay`) serves only a root
+  `workspace-overlay.toml` (rank-2 overlay), the first
+  `niwa apply <name>` after upgrade emits a `deprecated` notice
+  scoped to the overlay (the notice MUST identify the overlay
+  artifact, not the team config).
+
+### AC: Migration skill (verifies R16-R20)
+
+- [ ] **AC-S1** (skill exists with documented invocation). The
+  skill is installable / available such that running
+  `/shirabe:niwa-migrate-config <workspace-name>` in a Claude
+  Code session loads the skill and produces the expected initial
+  output (reads the registry, prints the current `source_url`).
+  The skill's source location and packaging are design-phase
+  decisions; the AC verifies the user-facing invocation.
+- [ ] **AC-S2** (unregistered workspace). The skill invoked with
+  a workspace name that is not present in the registry produces
+  a clear error naming the workspace and exits without modifying
+  any file on disk.
+- [ ] **AC-S3** (rank-2 source detected, in-place path). Given a
+  workspace registered with `source_url = "acme/dot-niwa"` whose
+  source (fixture A) has only a root `workspace.toml`, the skill
+  reports rank-2 detection, offers paths (a) and (b), and when
+  the user picks (a) (in-place restructure), prints the exact
+  `git mv` commands and the next-step pointer (literal substring
+  `niwa apply --force`) without modifying the registry. The
+  skill output also notes that the overlay slug
+  (`acme/dot-niwa-overlay`) is unchanged on path (a).
+- [ ] **AC-S4** (rank-2 source detected, slug-swap path). Given
+  the same preconditions as AC-S3 but the user picks (b) and
+  provides a new slug `acme/vision`, the skill validates the
+  slug grammatically, confirms with the user, prints an
+  overlay-change warning containing the literal substrings
+  `acme/dot-niwa-overlay` (old) and `acme/vision-overlay` (new),
+  then rewrites the registry entry's `source_url` to
+  `acme/vision`. After the skill returns, the registry file's
+  `source_url` for the workspace is `acme/vision`; all other
+  registry fields are byte-identical to their pre-skill state.
+- [ ] **AC-S5** (rank-1 source detected, no migration needed).
+  Given a workspace registered with
+  `source_url = "acme/vision"` whose source (fixture B) has
+  `.niwa/workspace.toml`, the skill reports rank-1 detection
+  and tells the user no migration is needed (the workspace is
+  already on the new path). The registry is byte-identical
+  after the skill returns.
+- [ ] **AC-S6** (skill is read-mostly). Across all AC-S2 through
+  AC-S5 runs, the skill MUST NOT have invoked `git push`, MUST
+  NOT have invoked `niwa apply`, MUST NOT have created or
+  removed any file under `<workspace>/.niwa/`, and MUST NOT
+  have written anywhere other than the registry file (and only
+  in AC-S4's case). Verified via test instrumentation of the
+  skill's tool calls or via filesystem before/after diffs.
+- [ ] **AC-S7** (malformed slug in path (b)). Given AC-S4's
+  preconditions but the user provides a malformed slug like
+  `acme/repo:` (empty subpath after colon), the skill rejects
+  with a clear error and does NOT modify the registry.
+
+### AC: Backwards compatibility (verifies R21-R22)
 
 - [ ] **AC-B1a** (legacy working tree, no URL change). Given a
   registry entry from an older binary with
@@ -676,20 +819,29 @@ root `workspace.toml`), fixture B serves `acme/vision` (with
   file `<workspace>/.niwa/.niwa-snapshot.toml` (or the marker
   filename selected at design time) exists with
   `fetch_mechanism = github-tarball`, and the registry mirror
-  fields are populated per upstream R23.
+  fields are populated per upstream R23. stderr contains the
+  rank-2 deprecation notice per AC-N2 in addition to the
+  one-time working-tree-conversion notice per upstream R28.
 - [ ] **AC-B1b** (registry-only upgrade). Given a registry entry
   from an older binary with `source_url = "org/dot-niwa"` AND an
   on-disk `<workspace>/.niwa/` that is already a snapshot (no
   `.git/`, provenance marker present), the first `niwa apply`
   succeeds without any one-time conversion notice. The registry
   mirror fields are populated per upstream R23 on first save.
+  stderr still contains the rank-2 deprecation notice per AC-N2.
 - [ ] **AC-B2**. Given the AC-B1a preconditions plus an additional
   workspace registered with the new slug shape
   `source_url = "acme/vision:.niwa"`, both workspaces apply
   successfully in the same `niwa apply --all` invocation. Neither
-  triggers a prompt or `--force` requirement.
+  triggers a prompt or `--force` requirement; only the rank-2
+  workspace produces a deprecation notice.
+- [ ] **AC-B3** (overlay slug continuity for legacy). Given a
+  pre-PRD workspace whose overlay was at `org/dot-niwa-overlay`
+  (the upstream R35 whole-repo case), the first `niwa apply`
+  after upgrade continues to derive `org/dot-niwa-overlay` per
+  R10. No re-fetch of a different overlay slug is attempted.
 
-### AC: Rank-3 removal (verifies R20)
+### AC: Rank-3 removal (verifies R23)
 
 - [ ] **AC-R1**. Given a `tarballFakeServer` source containing
   only a root `niwa.toml` (no `.niwa/workspace.toml`, no root
@@ -710,7 +862,7 @@ root `workspace.toml`), fixture B serves `acme/vision` (with
   command after upgrade — `niwa apply` — produces the error;
   no earlier command emits a rank-3-removal warning).
 
-### AC: Diagnostic clarity (verifies R21)
+### AC: Diagnostic clarity (verifies R24)
 
 - [ ] **AC-X1**. The R3 ambiguity error message (verified
   end-to-end by AC-D5) MUST contain three independently
@@ -727,7 +879,7 @@ root `workspace.toml`), fixture B serves `acme/vision` (with
   `:` (the explicit-subpath hint). The substrings may appear
   on the same or different lines.
 
-### AC: Upstream PRD reconciliation (verifies R22)
+### AC: Upstream PRD reconciliation (verifies R25)
 
 - [ ] **AC-U1**. After this PRD is Accepted,
   `docs/prds/PRD-workspace-config-sources.md` either (a) carries
@@ -736,31 +888,48 @@ root `workspace.toml`), fixture B serves `acme/vision` (with
   (b) contains an amendment block under the existing
   `## Amendments` section, dated with the acceptance date,
   containing the literal substring `PRD-config-source-discovery`
-  (this PRD's filename). One of the two MUST be true.
+  (this PRD's filename). One of the two MUST be true. The chosen
+  artifact MUST also name R35 as overridden by this PRD's R10.
 
-### AC: Documentation (verifies R23)
+### AC: Documentation (verifies R26)
 
 - [ ] **AC-G1**. `docs/guides/workspace-config-sources.md`
   contains a heading with the exact anchor
   `#single-repo-workspace`. The section body contains the
   literal substring `niwa init --from owner/repo` (without
-  explicit subpath) and a fenced code block showing an on-disk
+  explicit subpath), a fenced code block showing an on-disk
   layout that includes `.niwa/` and at least one workspace
-  component subdirectory.
+  component subdirectory, and the literal substring
+  `dangazineu/foo-overlay` (the worked-example overlay slug).
 - [ ] **AC-G2**. The same guide contains a heading with the
   exact anchor `#brain-repo`. The section body contains the
-  literal substrings `discoverAllRepos`, `Classify`, and a
-  reference to PR #138 (literal substring `#138`).
+  literal substrings `discoverAllRepos`, `Classify`, a reference
+  to PR #138 (literal substring `#138`), and the literal
+  substring `acme/vision-overlay` (the worked-example overlay
+  slug — explicitly NOT `acme/.niwa-overlay`).
 - [ ] **AC-G3**. The same guide contains a heading with the
-  exact anchor `#niwa-migrate-source`. The section body
-  contains the literal substrings `--to`, `--yes`, and at
-  least one exit-code line referencing each of codes 0, 1, 2,
-  3, and 130.
+  exact anchor `#overlay-slug-rule`. The section body contains
+  the literal substring `repo-name`, and at least three of the
+  four worked examples from R10 (each as a fenced or inline
+  code block).
+- [ ] **AC-G4**. The same guide contains a heading with the
+  exact anchor `#rank-2-deprecation`. The section body contains
+  the literal substrings `deprecated`,
+  `/shirabe:niwa-migrate-config`, and `rank 2` (or `rank-2`).
 
 ## Out of Scope
 
-The following are excluded from this PRD's v1 commitment.
+The following are excluded from this release's scope.
 
+- **Hard removal of rank-2 (`org/dot-niwa` whole-repo) discovery.**
+  Deferred to a follow-up release once all workspaces have
+  migrated. The user's stated intent is to migrate manually using
+  the skill; the follow-up release will set the cutoff once that
+  migration completes.
+- **A niwa CLI command for migration.** Replaced by the shirabe
+  skill (R16-R20). Users who want non-interactive automation can
+  still edit the registry file directly; the skill is the
+  Claude-driven walkthrough for the common case.
 - **Re-specification of subpath fetch mechanics.** The upstream PRD
   R14 (GitHub tarball + selective extraction) and R15 (git-clone
   fallback) are inputs to this PRD, not outputs. This PRD does not
@@ -768,7 +937,7 @@ The following are excluded from this PRD's v1 commitment.
   streaming.
 - **Sparse-checkout for the non-GitHub fallback path.** Identified
   as a future optimization for very large monorepos; the existing
-  shallow clone is sufficient for v1.
+  shallow clone is sufficient.
 - **Per-host adapters (GitLab, Bitbucket, GitHub Enterprise Server,
   Gitea).** The host-agnostic fallback path covers them on day one.
 - **Schema changes to `workspace.toml` or other config files.** This
@@ -776,30 +945,31 @@ The following are excluded from this PRD's v1 commitment.
   contains.
 - **Recipe schema or action-system changes in `tsuku`.**
 - **Vault provider, telemetry, or session lifecycle changes.**
-- **Hard deprecation of the standalone `dot-niwa` pattern.**
-  Coexistence is the v1 stance per R18/R19. A future PRD may revisit
-  if data shows consolidation has stalled, but this PRD does not
-  schedule that conversation.
-- **Forced migration tooling.** `niwa migrate-source` is opt-in;
-  niwa never offers to migrate a user's registry on its own.
-- **`niwa.toml` rank-3 discovery.** Removed in v1.x per R20. A
-  future PRD could re-introduce a single-file root manifest if a
-  concrete user need surfaces, but this PRD does not specify one.
+- **`niwa.toml` rank-3 discovery.** Removed per R23. A future PRD
+  could re-introduce a single-file root manifest if a concrete
+  user need surfaces, but this PRD does not specify one.
 - **A `--strict-refresh` flag for CI operators.** Mentioned in the
   upstream PRD (Story 6) as a deferred follow-up; remains deferred.
-- **Auto-detection of new overlay slugs after `migrate-source`.**
-  `niwa migrate-source` does not detect, warn about, or remediate
-  the overlay-slug change that comes with the brain-repo migration
-  (per the Known Limitations entry below).
+- **Multi-team brain-repo overlay separation.** Upstream PRD R35
+  envisioned a brain repo hosting multiple team configs
+  (`teams/research`, `teams/platform`) each with its own
+  access-restricted overlay, by deriving overlay slugs from the
+  subpath's last segment. R10 overrides that with a single
+  per-repo overlay rule. A team that needs per-subdirectory
+  overlay isolation can fall back to an explicit `--overlay
+  <slug>` flag (already provided by upstream R35) on a per-init
+  basis; this PRD does not add new auto-discovery for the
+  multi-team-per-repo case.
 
 ## Open Questions
 
 None. The three policy questions the upstream PRD left implicit
-(probe mechanism, migration tooling, rank-3 keep/drop) are resolved
-in the Decisions and Trade-offs section below. The choice of
-upstream-PRD reconciliation style (status change vs amendment
-block) per R22 is left to the maintainer accepting this PRD but is
-not an open *requirements* question.
+(probe mechanism, migration policy, rank-3 keep/drop) are resolved
+in the Decisions and Trade-offs section below, alongside the
+overlay-slug-derivation override. The choice of upstream-PRD
+reconciliation style (status change vs amendment block) per R25 is
+left to the maintainer accepting this PRD but is not an open
+*requirements* question.
 
 ## Known Limitations
 
@@ -825,28 +995,39 @@ not an open *requirements* question.
   existing 500 MB cap from `internal/github/tar.go`. For brain
   repos that approach the cap, the probe pass adds the same
   bounded cost as a full extraction.
-- **Migration tooling is opt-in.** Users who don't run
-  `niwa migrate-source` stay on the old slug indefinitely. The
-  binary never proactively migrates anyone. Maintainers who want
-  to drive consolidation must do so through communication, not
-  through niwa-internal pressure.
+- **Rank-2 path is still live.** Users running this release on a
+  rank-2 source see a deprecation notice but apply still succeeds.
+  Anyone reading the codebase will see two parallel discovery
+  branches and may wonder why both exist. The Decisions section
+  and the `#rank-2-deprecation` guide section both explain that
+  rank-2 is scheduled for removal in a follow-up release once
+  migration completes.
 - **`niwa.toml` rank-3 removal is a behaviour change.** Any
   existing user relying on a root `niwa.toml` discovery will see
   the R4 "no niwa config found" diagnostic on first apply after
   upgrade. The diagnostic's "no rank-3 marker mentioned" omission
-  is intentional (R21) and is a small breaking change; mitigation
+  is intentional (R24) and is a small breaking change; mitigation
   is documentation (AC-R2) plus the explicit-subpath escape hatch
   (which still works for any path the user knows about).
-- **Overlay slug changes during consolidation (inherited).**
-  Migrating a workspace from `org/dot-niwa` to `org/brain:.niwa`
-  implicitly changes the auto-discovered overlay slug from
-  `org/dot-niwa-overlay` to `org/.niwa-overlay` per upstream R35.
-  Maintainers must arrange for the overlay repo at the new slug
-  before consumers complete their migration, otherwise the overlay
-  clone silently skips and consumers lose the augmentation. The
-  `niwa migrate-source` command does NOT detect or warn about this
-  in v1; it is a documentation responsibility (Story 3 in the
-  guide section per AC-G3 must call this out).
+- **Migration skill requires Claude Code.** Users without access
+  to Claude Code cannot run `/shirabe:niwa-migrate-config`. The
+  fallback for those users is manual registry edit + manual
+  source-repo restructure; the guide section
+  `#rank-2-deprecation` documents the manual steps the skill
+  performs so users can follow them by hand.
+- **Overlay slug changes during slug-swap migration.** Migrating
+  a workspace from `org/dot-niwa` to `org/brain` (slug-swap path)
+  changes the auto-discovered overlay slug from
+  `org/dot-niwa-overlay` to `org/brain-overlay` per R10. This is
+  more predictable than upstream R35's behaviour (which would
+  have produced `org/.niwa-overlay` after discovery) but the
+  maintainer of the new repo MUST still arrange for an overlay
+  repo at the new slug before consumers complete migration,
+  otherwise the overlay clone silently skips and consumers lose
+  the augmentation. The migration skill (R19 path (b)) MUST
+  warn about this. For the in-place restructure path (R19 (a))
+  the overlay slug does NOT change; this is the gentler
+  migration shape.
 
 ## Decisions and Trade-offs
 
@@ -869,24 +1050,69 @@ The bandwidth cost of fetching the whole tarball is the same
 either way and is already documented as a Known Limitation in the
 upstream PRD.
 
-### Decision: ship `niwa migrate-source` together with discovery (R10)
+### Decision: overlay slug is derived from repo name only (R10)
 
-**Decided**: this PRD ships discovery and the migration command
-together. **Alternatives**: ship discovery first; observe whether
-consolidation friction is real; ship migration tooling only if so.
-**Reasoning**: discovery without migration tooling forces users to
-hand-edit their registry to move off the legacy `dot-niwa` pattern,
-which is exactly the kind of friction the consolidation-friendly
-pose is supposed to remove. Shipping them together gives the brain-
-repo maintainer a clean message ("run this one command, then
-`niwa apply --force`") and prevents a two-release UX gap during
-which users see the new pattern documented but cannot adopt it
-without manual registry surgery.
+**Decided**: the auto-discovered overlay slug is always
+`<host>/<source-org>/<source-repo>-overlay`. The subpath is
+ignored. **Alternatives**: (a) upstream PRD R35's case-split,
+where whole-repo sources derive from the repo name and subpath
+sources derive from the subpath's last segment — so
+`org/brain:.niwa` would auto-discover `org/.niwa-overlay`;
+(b) make overlay slug fully user-controlled and never
+auto-derive. **Reasoning**: R35's case-split makes overlay
+naming dependent on a *discovery* decision (the subpath) rather
+than a *user* decision (the repo). Once discovery is implemented
+(this PRD's R5 closure), the same `--from acme/vision` produces
+different overlay slugs depending on whether the source has
+`.niwa/` or root-level config — invisible to the user, brittle
+to refactor against. Anchoring overlay derivation to the repo
+name makes it predictable: the overlay sits next to its source
+repo, named after it, full stop. The trade-off is the
+multi-team-in-one-brain-repo case (R35's worked example,
+`org/brain:teams/research` → `org/research-overlay`) loses its
+auto-discovery; teams who want that pattern fall back to
+explicit `--overlay <slug>`. That case is hypothetical at the
+moment; the predictability win for the common case is
+concrete.
 
-### Decision: drop rank-3 (`niwa.toml`) discovery (R20)
+### Decision: migration is a shirabe skill, not a niwa command
+
+**Decided**: a Claude Code-invocable shirabe skill
+(`/shirabe:niwa-migrate-config <workspace>`) handles the migration
+walkthrough. niwa itself ships no migration CLI command.
+**Alternatives**: (a) a `niwa migrate-source` CLI command;
+(b) no tooling, registry edited by hand. **Reasoning**: the user
+running this PRD is the only known niwa user; a CLI command is
+over-engineered for a one-shot manual migration. A skill captures
+the procedure as executable documentation that can probe the
+source, suggest the right slug, edit the registry, and warn about
+overlay-slug consequences (R19), while keeping the logic out of
+niwa's binary surface. Manual registry edit remains available for
+users without Claude Code (a Known Limitation rather than a
+blocker).
+
+### Decision: coexistence + deprecation notice (R13, R14)
+
+**Decided**: both rank-1 and rank-2 discovery resolve in this
+release. Rank-2 fires a one-time deprecation notice per workspace
+per artifact per command-type via `DisclosedNotices`. Hard removal
+of rank-2 is deferred to a follow-up release. **Alternatives**:
+(a) hard-remove rank-2 now and require migration before upgrade;
+(b) ship rank-2 support silently with no deprecation signal.
+**Reasoning**: hard removal would break the user's existing
+workspaces on upgrade, violating the upstream PRD's R34 ("no user
+must be required to take action after upgrading"). Silent
+coexistence would hide the fact that the path is going away, and
+the user would have no clear signal that the migration skill
+applies to them. The middle ground — both work, with a clear
+one-time notice — preserves backwards compatibility, gives the
+user agency over migration timing, and creates a forcing function
+for the follow-up removal.
+
+### Decision: drop rank-3 (`niwa.toml`) discovery (R23)
 
 **Decided**: rank-3 discovery from the upstream PRD R5 is removed
-in this PRD's scope. **Alternatives**: keep rank-3 plus the upstream
+in this release. **Alternatives**: keep rank-3 plus the upstream
 R8 explicit-`content_dir` requirement. **Reasoning**: rank-3 was
 designed for the case where a brain repo wants to host its workspace
 config at the repo root via `niwa.toml` instead of a subdir. No
@@ -899,24 +1125,7 @@ matrix, and aligns the convention with established ecosystem
 practice (`.github/`, `.vscode/`, `.editorconfig` — all subdir
 patterns).
 
-### Decision: coexistence by default, no hard deprecation
-
-**Decided**: standalone `org/dot-niwa` registries continue to work
-indefinitely via rank-2 discovery (R18/R19). niwa never proactively
-migrates anyone. **Alternatives**: (a) add a deprecation warning
-that fires once per apply when a legacy registry is detected;
-(b) schedule a v2 release that hard-removes rank-2 fallback and
-forces migration. **Reasoning**: the cost of legacy support is one
-extra marker check during discovery; the benefit is that no existing
-user is ever broken by upgrading. The user's exploration input
-("consolidate everyone onto the new pattern") is best served by
-making the new pattern painless to adopt (R10 migration tooling)
-rather than by deprecating the old pattern. Consolidation that
-happens organically because the new path is better leaves a smaller
-support tail than consolidation that happens under deprecation
-pressure.
-
-### Decision: explicit-subpath slug bypasses discovery (R2, AC-D3a/D9)
+### Decision: explicit-subpath slug bypasses discovery (R2, AC-D3a)
 
 **Decided**: an explicit subpath in the slug
 (`--from owner/repo:custom/path`) bypasses discovery entirely;
@@ -943,21 +1152,6 @@ contract. Debugging is supported via verbose flags printing what
 was probed and what was found; the on-disk state itself stays
 clean.
 
-### Decision: `niwa migrate-source` is registry-only (R10)
-
-**Decided**: the command rewrites the registered source slug and
-nothing else. It does not run apply, does not delete the snapshot,
-does not touch the source repo (except to probe when `--to` is
-omitted; that probe is read-only). **Alternatives**: a "full
-migration" command that rewrites the registry, runs `apply
---force`, and deletes the legacy snapshot in one shot.
-**Reasoning**: separating concerns matches the existing niwa
-pattern (config-set vs apply). Users who want a one-shot can pipe
-the commands; users who want to inspect the registry change before
-applying retain that ability. The error surface stays clean:
-registry errors surface from `migrate-source`, snapshot errors
-surface from `apply`.
-
 ### Decision: empty `.niwa/` is not a rank-1 match (R6)
 
 **Decided**: a `.niwa/` directory at the source root that does
@@ -974,64 +1168,49 @@ directory in PR #1, then add `.niwa/workspace.toml` in PR #2,
 without breaking discovery for anyone using the source between
 those two PRs.
 
-### Decision: `--to` slug is grammar-validated only, not resolution-validated (R11)
+### Decision: overlay is also subpath-aware (R12)
 
-**Decided**: when `--to <slug>` is passed,
-`niwa migrate-source` validates that the slug parses per the
-upstream R1-R3 parser rules and rejects malformed slugs at parse
-time, but does NOT validate that the destination resolves to a
-real workspace config. The next `niwa apply --force` is where
-discovery resolution happens. **Alternatives**: probe the
-destination during `migrate-source` and refuse if it doesn't
-resolve. **Reasoning**: probing the destination doubles the
-network cost of the command and creates a second class of
-failures the user has to interpret (parse vs resolution).
-Separating "is the slug well-formed?" from "does the destination
-contain valid config?" matches the existing niwa pattern (parse
-errors are immediate; resolution errors surface at apply time).
-Users running `migrate-source` in a CI script that will run
-`apply --force` immediately afterwards see the resolution error
-in the same job; users running it by hand and inspecting the
-registry before applying retain that ability.
+**Decided**: the auto-discovered overlay snapshot uses the same
+rank-1 / rank-2 discovery as the team config, accepting
+`.niwa/workspace-overlay.toml` (rank 1) or root
+`workspace-overlay.toml` (rank 2). **Alternatives**: keep the
+upstream R35 decision that "the overlay clone is treated as a
+whole-repo source," deferring subpath-aware overlays to a future
+release. **Reasoning**: if the team-config layout is moving to
+`.niwa/workspace.toml`, the overlay should follow the same
+convention so users have one mental model, not two. The
+maintainer of `acme/vision-overlay` who restructures
+`workspace-overlay.toml` into `.niwa/workspace-overlay.toml`
+shouldn't have to wait for a separate release to land the
+overlay-side discovery. Cost: a second rank-2 deprecation path
+(scoped to the overlay) and AC-V6 to verify it. Benefit:
+symmetry across the two artifacts.
 
-### Decision: `niwa migrate-source --to <current-slug>` is a no-op (R14)
+### Decision: skill is read-mostly (R20)
 
-**Decided**: when `--to <slug>` matches the workspace's current
-`source_url`, the command exits 0 with a "already on this slug"
-message and does not modify the registry. **Alternatives**: refuse
-with an error; rewrite silently (no-op but no message).
-**Reasoning**: an idempotent no-op with a visible confirmation
-fits the existing niwa pattern (running the same `config set`
-twice doesn't error). The visible message tells the user the
-state matches expectations; the zero exit code keeps automation
-clean (CI scripts that ensure-the-slug-is-X don't need to filter
-errors).
-
-### Decision: TTY-and-`--yes` interaction (R13)
-
-**Decided**: when `--to` is omitted and discovery resolves
-unambiguously, three behaviours are possible based on stdin
-state and `--yes` presence:
-- TTY + no `--yes` → prompt and accept `y`/`yes` for confirmation
-- non-TTY + no `--yes` → print suggestion and exit non-zero with
-  a "re-run with `--yes`" instruction
-- any TTY + `--yes` → apply immediately
-
-**Alternatives**: (a) always prompt regardless of TTY; (b) always
-apply when discovery is unambiguous; (c) require `--yes` explicitly
-in every non-TTY context with no inferred behaviour.
-**Reasoning**: the three-way split matches the conventional Unix
-contract for "destructive but recoverable" commands. Pure
-non-interactive automation must opt in explicitly (`--yes`);
-interactive users get a familiar prompt; non-interactive users
-who forgot `--yes` get a helpful "here's what I would have done,
-re-run with `--yes`" message rather than either a silent apply
-(surprising) or a hard refuse (unhelpful).
+**Decided**: the migration skill only writes to the registry file
+(and only in path (b), the slug-swap case). It never pushes git,
+never runs apply, never modifies the on-disk snapshot. The user
+runs `git push` and `niwa apply --force` themselves.
+**Alternatives**: a "full migration" skill that restructures the
+source repo via `git mv` + commit + push, then runs
+`niwa apply --force` in one shot. **Reasoning**: the source repo
+is the user's primary artifact; the skill running `git push`
+against it without the user's hands on the wheel is the wrong
+level of automation for an irreversible operation. Separating
+"prepare the registry" from "commit and push" from "materialize
+the new snapshot" gives the user three discrete checkpoints to
+inspect state and abort if something looks wrong.
 
 ## Next Steps
 
 After this PRD is Accepted:
 
 - `/design` against this PRD to produce the technical design for
-  the discovery code path and the `niwa migrate-source` command.
-- Apply the upstream PRD reconciliation chosen per R22 / AC-U1.
+  the discovery code path, the overlay-derivation override, and
+  the shirabe migration skill.
+- Apply the upstream PRD reconciliation chosen per R25 / AC-U1.
+- Schedule a follow-up release that hard-removes rank-2 discovery
+  once the user confirms all their workspaces have migrated. That
+  follow-up is out of this PRD's scope (Out of Scope) but should
+  be the natural next milestone after this one ships.
