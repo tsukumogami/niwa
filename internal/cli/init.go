@@ -11,6 +11,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/tsukumogami/niwa/internal/config"
 	"github.com/tsukumogami/niwa/internal/github"
+	"github.com/tsukumogami/niwa/internal/plugin"
 	sourcepkg "github.com/tsukumogami/niwa/internal/source"
 	"github.com/tsukumogami/niwa/internal/workspace"
 )
@@ -42,15 +43,17 @@ func init() {
 	initCmd.Flags().StringVar(&initOverlay, "overlay", "", "overlay repo (org/repo or URL) to clone and associate with this workspace")
 	initCmd.Flags().BoolVar(&initNoOverlay, "no-overlay", false, "disable overlay discovery and association for this workspace")
 	initCmd.Flags().BoolVar(&initRebind, "rebind", false, "rebind a registered workspace name to this directory (use only when intentionally moving a workspace)")
+	initCmd.Flags().BoolVar(&initNoInstallPlugins, "no-install-plugins", false, "skip auto-installing the embedded niwa Claude Code plugin (otherwise installed once when a rank-2 source is detected)")
 	initCmd.ValidArgsFunction = completeWorkspaceNames
 }
 
 var (
-	initFrom       string
-	initSkipGlobal bool
-	initOverlay    string
-	initNoOverlay  bool
-	initRebind     bool
+	initFrom             string
+	initSkipGlobal       bool
+	initOverlay          string
+	initNoOverlay        bool
+	initRebind           bool
+	initNoInstallPlugins bool
 )
 
 var initCmd = &cobra.Command{
@@ -258,6 +261,11 @@ func runInit(cmd *cobra.Command, args []string) error {
 		// captures team-config rank and gates on workspace-root state).
 		if teamConfigRank == 2 {
 			workspace.EmitRank2Notice(nil, workspace.NoticeIDRank2TeamConfig, source, reporter)
+			// PRD R16-R20: install the embedded niwa Claude Code plugin
+			// so /niwa:migrate-config is available next time the user
+			// invokes Claude Code. SkipInstall honors --no-install-plugins
+			// and (if a global config is loaded) auto_install_plugins=false.
+			plugin.Install(nil, reporter, plugin.InstallOpts{SkipInstall: initNoInstallPlugins})
 		}
 	}
 

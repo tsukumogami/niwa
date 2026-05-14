@@ -78,3 +78,48 @@ func TestEmitRank2Notice_NilReporterIsNoOp(t *testing.T) {
 		t.Errorf("nil-reporter call should not mutate state: %v", state.DisclosedNotices)
 	}
 }
+
+func TestEmitPluginNotice_InstalledLogsOnce(t *testing.T) {
+	var buf bytes.Buffer
+	reporter := NewReporter(&buf)
+	state := &InstanceState{}
+
+	EmitPluginNotice(state, NoticeIDPluginInstalled, "niwa --install-plugins", reporter)
+
+	if !strings.Contains(buf.String(), "installed at") {
+		t.Errorf("installed notice missing install confirmation text: %q", buf.String())
+	}
+	if len(state.DisclosedNotices) != 1 || state.DisclosedNotices[0] != NoticeIDPluginInstalled {
+		t.Errorf("DisclosedNotices = %v, want [%q]", state.DisclosedNotices, NoticeIDPluginInstalled)
+	}
+}
+
+func TestEmitPluginNotice_SkippedIncludesManualCmd(t *testing.T) {
+	var buf bytes.Buffer
+	reporter := NewReporter(&buf)
+	state := &InstanceState{}
+
+	EmitPluginNotice(state, NoticeIDPluginSkipped, "niwa --install-plugins", reporter)
+
+	if !strings.Contains(buf.String(), "niwa --install-plugins") {
+		t.Errorf("skipped notice missing manual cmd: %q", buf.String())
+	}
+	if len(state.DisclosedNotices) != 1 || state.DisclosedNotices[0] != NoticeIDPluginSkipped {
+		t.Errorf("DisclosedNotices = %v, want [%q]", state.DisclosedNotices, NoticeIDPluginSkipped)
+	}
+}
+
+func TestEmitPluginNotice_Idempotent(t *testing.T) {
+	var buf bytes.Buffer
+	reporter := NewReporter(&buf)
+	state := &InstanceState{DisclosedNotices: []string{NoticeIDPluginInstalled}}
+
+	EmitPluginNotice(state, NoticeIDPluginInstalled, "niwa --install-plugins", reporter)
+
+	if buf.Len() != 0 {
+		t.Errorf("idempotent call should not log: %q", buf.String())
+	}
+	if len(state.DisclosedNotices) != 1 {
+		t.Errorf("DisclosedNotices grew on idempotent call: %v", state.DisclosedNotices)
+	}
+}

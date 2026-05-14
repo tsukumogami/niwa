@@ -25,7 +25,20 @@ type GlobalConfigSource struct {
 
 // GlobalSettings holds global niwa settings.
 type GlobalSettings struct {
-	CloneProtocol string `toml:"clone_protocol,omitempty"`
+	CloneProtocol      string `toml:"clone_protocol,omitempty"`
+	AutoInstallPlugins *bool  `toml:"auto_install_plugins,omitempty"`
+}
+
+// SkipPluginInstall reports whether the user has explicitly opted
+// out of niwa's auto-install of bundled Claude Code plugins by
+// setting `auto_install_plugins = false` in ~/.config/niwa/config.toml.
+// Returns false when the field is unset (default behavior is to
+// install) or set to true.
+func (g *GlobalConfig) SkipPluginInstall() bool {
+	if g == nil || g.Global.AutoInstallPlugins == nil {
+		return false
+	}
+	return !*g.Global.AutoInstallPlugins
 }
 
 // RegistryEntry records a workspace's source config file and root directory.

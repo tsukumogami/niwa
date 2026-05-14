@@ -64,6 +64,20 @@ type Applier struct {
 	// how to persist the setting.
 	ChannelsSynthesized bool
 
+	// SkipPluginInstall mirrors --no-install-plugins (and the
+	// auto_install_plugins = false global config). When true, the
+	// plugin installer emits the skip-notice instead of materializing
+	// the embedded plugin. The CLI wires this from flag + global config.
+	SkipPluginInstall bool
+
+	// InstallNiwaPlugin is the test seam for the niwa plugin
+	// auto-installer. Production wires this to plugin.Install via
+	// NewApplier; tests override to capture install-or-skip behavior
+	// without writing to the user's home directory. When nil, the
+	// installer is a no-op — useful for unit tests that don't
+	// exercise rank-2 + plugin-install at the same time.
+	InstallNiwaPlugin func(state *InstanceState, reporter *Reporter, skipInstall bool)
+
 	// cloneOrSync materializes or refreshes the overlay snapshot at dir.
 	// Returns wasFreshClone=true when no marker/.git was present (fresh
 	// materialization), so callers can distinguish "overlay doesn't
@@ -411,6 +425,13 @@ func (a *Applier) Apply(ctx context.Context, cfg *config.WorkspaceConfig, config
 		}
 		EmitRank2Notice(nil, NoticeIDRank2TeamConfig, identifier, a.Reporter)
 		result.disclosedNotices = append(result.disclosedNotices, NoticeIDRank2TeamConfig)
+		// PRD R16-R20: install the embedded niwa plugin so
+		// /niwa:migrate-config is available. The installer emits its
+		// own notice (installed/up-to-date or skipped); the rank-2
+		// notice above is independent.
+		if a.InstallNiwaPlugin != nil {
+			a.InstallNiwaPlugin(nil, a.Reporter, a.SkipPluginInstall)
+		}
 	}
 
 	// Emit `rotated <path>` to stderr for every managed file whose
@@ -620,6 +641,9 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		if personalOverlayRank == 2 && !sliceContains(opts.disclosedNotices, NoticeIDRank2Overlay) {
 			EmitRank2Notice(nil, NoticeIDRank2Overlay, a.GlobalConfigDir, a.Reporter)
 			newDisclosures = append(newDisclosures, NoticeIDRank2Overlay)
+			if a.InstallNiwaPlugin != nil {
+				a.InstallNiwaPlugin(nil, a.Reporter, a.SkipPluginInstall)
+			}
 		}
 
 		// Step 0.3b: parse the (possibly just-refreshed) niwa.toml.
@@ -734,6 +758,9 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 			if overlayRank == 2 && !sliceContains(opts.disclosedNotices, NoticeIDRank2Overlay) {
 				EmitRank2Notice(nil, NoticeIDRank2Overlay, opts.overlayURL, a.Reporter)
 				newDisclosures = append(newDisclosures, NoticeIDRank2Overlay)
+				if a.InstallNiwaPlugin != nil {
+					a.InstallNiwaPlugin(nil, a.Reporter, a.SkipPluginInstall)
+				}
 			}
 
 		case opts.configSourceURL != "":
@@ -760,6 +787,9 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 					if overlayRank == 2 && !sliceContains(opts.disclosedNotices, NoticeIDRank2Overlay) {
 						EmitRank2Notice(nil, NoticeIDRank2Overlay, conventionURL, a.Reporter)
 						newDisclosures = append(newDisclosures, NoticeIDRank2Overlay)
+						if a.InstallNiwaPlugin != nil {
+							a.InstallNiwaPlugin(nil, a.Reporter, a.SkipPluginInstall)
+						}
 					}
 				}
 			}
