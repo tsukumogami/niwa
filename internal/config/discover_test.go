@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -209,22 +210,9 @@ func TestRankDecider_BothRanks_Ambiguous(t *testing.T) {
 	// The error must name both marker paths so the diagnostic the
 	// caller renders can satisfy PRD AC-X1.
 	msg := err.Error()
-	if !contains(msg, ".niwa") || !contains(msg, "workspace.toml") {
+	if !strings.Contains(msg, ".niwa") || !strings.Contains(msg, "workspace.toml") {
 		t.Errorf("ambiguity error must name both markers; got: %s", msg)
 	}
-}
-
-func contains(haystack, needle string) bool {
-	return len(haystack) >= len(needle) && indexOf(haystack, needle) >= 0
-}
-
-func indexOf(haystack, needle string) int {
-	for i := 0; i+len(needle) <= len(haystack); i++ {
-		if haystack[i:i+len(needle)] == needle {
-			return i
-		}
-	}
-	return -1
 }
 
 func TestRankDecider_NoMarkers(t *testing.T) {
