@@ -1,5 +1,5 @@
 ---
-status: Accepted
+status: In Progress
 problem: |
   niwa today cannot be adopted in a single-repo workspace. When a developer
   runs `niwa init --from owner/repo` against a general-purpose repo that
@@ -27,7 +27,7 @@ upstream: docs/prds/PRD-workspace-config-sources.md
 
 ## Status
 
-Accepted
+In Progress
 
 ## Problem Statement
 
