@@ -181,7 +181,10 @@ func TestRankDecider_Rank2Only_Accepted(t *testing.T) {
 	}
 }
 
-func TestRankDecider_BothRanks_Rank1Wins(t *testing.T) {
+func TestRankDecider_BothRanks_Ambiguous(t *testing.T) {
+	// PRD R3 / AC-D5: a source with BOTH `.niwa/workspace.toml` AND a root
+	// `workspace.toml` is ambiguous. The user must remove one marker (in
+	// the source repo) or pass an explicit subpath via the slug.
 	markers := TeamConfigMarkerSet()
 	found := MarkerSet{
 		Rank1Dir:  ".niwa",
@@ -190,15 +193,38 @@ func TestRankDecider_BothRanks_Rank1Wins(t *testing.T) {
 	}
 
 	subpath, notice, err := RankDecider(found, markers)
-	if err != nil {
-		t.Fatalf("rank-1 + rank-2 must resolve to rank-1 wins, got error: %v", err)
+	if err == nil {
+		t.Fatal("both-ranks-present must return an ambiguity error")
 	}
-	if subpath != ".niwa" {
-		t.Errorf("subpath = %q, want %q", subpath, ".niwa")
+	if !IsAmbiguousMarkers(err) {
+		t.Errorf("expected *AmbiguousMarkersError, got %T: %v", err, err)
+	}
+	if subpath != "" {
+		t.Errorf("subpath = %q on error, want empty", subpath)
 	}
 	if notice != nil {
-		t.Errorf("rank-1-wins must not emit a deprecation notice, got %+v", notice)
+		t.Errorf("notice = %+v on error, want nil", notice)
 	}
+
+	// The error must name both marker paths so the diagnostic the
+	// caller renders can satisfy PRD AC-X1.
+	msg := err.Error()
+	if !contains(msg, ".niwa") || !contains(msg, "workspace.toml") {
+		t.Errorf("ambiguity error must name both markers; got: %s", msg)
+	}
+}
+
+func contains(haystack, needle string) bool {
+	return len(haystack) >= len(needle) && indexOf(haystack, needle) >= 0
+}
+
+func indexOf(haystack, needle string) int {
+	for i := 0; i+len(needle) <= len(haystack); i++ {
+		if haystack[i:i+len(needle)] == needle {
+			return i
+		}
+	}
+	return -1
 }
 
 func TestRankDecider_NoMarkers(t *testing.T) {

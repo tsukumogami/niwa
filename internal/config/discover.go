@@ -149,13 +149,13 @@ var rankTwoAcceptedTestHook *bool
 // RankDecider resolves the probe's findings to a resolved subpath and an
 // optional deprecation notice. It implements PRD R3 / R4 / R13:
 //
-//   - rank-1 found: returns (Rank1Dir, nil, nil).
-//   - rank-2 found AND rank-2 still accepted: returns ("", &DeprecationNotice{...}, nil).
-//   - both ranks found: rank-1 wins (per PRD R13, the v1 contract treats
-//     this as "rank-1 wins" rather than ambiguity — the ambiguity error
-//     remains defined for forward-compat with future genuinely-conflicting
-//     marker pairs).
-//   - neither rank found: NoMarkerError.
+//   - both ranks found at the same source root: AmbiguousMarkersError
+//     (PRD R3 / AC-D5). The user must remove one marker or pass an
+//     explicit subpath via the slug.
+//   - rank-1 found (alone): returns (Rank1Dir, nil, nil).
+//   - rank-2 found (alone) AND rank-2 still accepted: returns
+//     ("", &DeprecationNotice{...}, nil).
+//   - neither rank found: NoMarkerError (PRD R4).
 //   - only rank-2 found AND rank-2 acceptance turned off: NoMarkerError
 //     (forward-compat for the deprecated-branch removal in
 //     PRD-config-source-discovery R15).
@@ -163,6 +163,12 @@ var rankTwoAcceptedTestHook *bool
 // RankDecider is pure: it performs no I/O, reads no globals other than the
 // test hook above, and modifies no state.
 func RankDecider(found, markers MarkerSet) (subpath string, notice *DeprecationNotice, err error) {
+	// PRD R3 / AC-D5: both markers at the same source root are
+	// unconditionally ambiguous; the user must disambiguate.
+	if found.HasRank1() && found.HasRank2() {
+		return "", nil, &AmbiguousMarkersError{Found: found, Markers: markers}
+	}
+
 	if found.HasRank1() {
 		return markers.Rank1Dir, nil, nil
 	}
@@ -177,7 +183,7 @@ func RankDecider(found, markers MarkerSet) (subpath string, notice *DeprecationN
 	if accepted && found.HasRank2() {
 		return "", &DeprecationNotice{Rank: 2, Markers: markers}, nil
 	}
-	// END rank-2 deprecated branch
+	// END rank-2 deprecated branch — PRD-config-source-discovery R15
 
 	return "", nil, &NoMarkerError{Markers: markers}
 }
