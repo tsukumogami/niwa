@@ -1,5 +1,5 @@
 ---
-status: In Progress
+status: Done
 problem: |
   niwa today materializes git-hosted workspace configuration as a working
   tree at `<workspace>/.niwa/`, synced with `git pull --ff-only`, and
@@ -23,9 +23,20 @@ source_issue: 72
 
 ## Status
 
-In Progress
+Done
 
 ## Amendments
+
+### 2026-05-14 — Status restored to Done; gaps closed by PRD-config-source-discovery
+
+The two gaps tracked by the 2026-05-14 amendment below — R5/R6/R7/R8
+convention-based subpath discovery and the R35 overlay-slug
+case-split — have shipped in PR #139 (commits 399ccab..9e7c7c0).
+R5/R6/R7/R8 are now satisfied by the probe pipeline in
+`internal/github/tar.go` and `internal/workspace/fallback.go`;
+R35's case-split is replaced with the unconditional repo-name rule
+in `Source.OverlayDerivedSource()` per
+[PRD-config-source-discovery](PRD-config-source-discovery.md) R10.
 
 ### 2026-05-14 — Status reverted to In Progress; gaps tracked by PRD-config-source-discovery
 

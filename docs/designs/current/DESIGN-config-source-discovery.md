@@ -1,5 +1,5 @@
 ---
-status: Planned
+status: Current
 upstream: docs/prds/PRD-config-source-discovery.md
 problem: |
   niwa's snapshot materializer extracts the whole tarball whenever the
@@ -40,7 +40,7 @@ rationale: |
 
 ## Status
 
-Planned
+Current
 
 ## Context and Problem Statement
 
