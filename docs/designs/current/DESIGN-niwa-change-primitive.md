@@ -1,5 +1,5 @@
 ---
-status: Planned
+status: Current
 problem: |
   The F5 PRD locks every shape downstream features encode against — the
   ChangeState v=1 schema, the audit log v=2 bump, the four-event
@@ -82,7 +82,7 @@ rationale: |
 
 ## Status
 
-Planned
+Current
 
 ## Amendments
 
