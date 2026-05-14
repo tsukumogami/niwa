@@ -294,7 +294,7 @@ func ProbeAndExtractSubpath(
 
 	// Pass 1: probe. Header-only scan; no disk writes.
 	probeReader := tar.NewReader(bytes.NewReader(buf.Bytes()))
-	found, probeErr := probeMarkersFromHeaders(probeReader, markers)
+	found, probeErr := ProbeMarkers(probeReader, markers)
 	if probeErr != nil {
 		return "", 0, nil, fmt.Errorf("probeAndExtractSubpath: probe: %w", probeErr)
 	}
@@ -325,7 +325,7 @@ func ProbeAndExtractSubpath(
 	return resolvedSubpath, rank, notice, nil
 }
 
-// probeMarkersFromHeaders walks the tar reader's headers and records
+// ProbeMarkers walks the tar reader's headers and records
 // which markers from the requested MarkerSet were observed at the
 // source-root level. It writes nothing to disk and applies the same
 // wrapper-anchoring, filename-validation, and type-allowlist checks
@@ -344,7 +344,7 @@ func ProbeAndExtractSubpath(
 // The returned MarkerSet has its Rank1Dir/Rank1File/Rank2Path fields
 // set only for markers actually observed at the source root after
 // wrapper-strip. Empty fields mean "not observed."
-func probeMarkersFromHeaders(tr *tar.Reader, markers config.MarkerSet) (config.MarkerSet, error) {
+func ProbeMarkers(tr *tar.Reader, markers config.MarkerSet) (config.MarkerSet, error) {
 	var found config.MarkerSet
 	var wrapper string
 
@@ -359,12 +359,12 @@ func probeMarkersFromHeaders(tr *tar.Reader, markers config.MarkerSet) (config.M
 			break
 		}
 		if err != nil {
-			return config.MarkerSet{}, fmt.Errorf("probeMarkersFromHeaders: tar reader: %w", err)
+			return config.MarkerSet{}, fmt.Errorf("ProbeMarkers: tar reader: %w", err)
 		}
 
 		// Same defenses as the extract pass — see extractFromTarReader.
 		if err := validateEntryName(hdr.Name); err != nil {
-			return config.MarkerSet{}, fmt.Errorf("probeMarkersFromHeaders: %w", err)
+			return config.MarkerSet{}, fmt.Errorf("ProbeMarkers: %w", err)
 		}
 		if !isAllowedEntryType(hdr.Typeflag) {
 			continue
@@ -372,12 +372,12 @@ func probeMarkersFromHeaders(tr *tar.Reader, markers config.MarkerSet) (config.M
 		if wrapper == "" {
 			parts := strings.SplitN(strings.TrimSuffix(hdr.Name, "/"), "/", 2)
 			if parts[0] == "" {
-				return config.MarkerSet{}, fmt.Errorf("probeMarkersFromHeaders: first tar entry %q has empty wrapper", hdr.Name)
+				return config.MarkerSet{}, fmt.Errorf("ProbeMarkers: first tar entry %q has empty wrapper", hdr.Name)
 			}
 			wrapper = parts[0]
 		}
 		if !strings.HasPrefix(hdr.Name, wrapper+"/") && hdr.Name != wrapper && hdr.Name != wrapper+"/" {
-			return config.MarkerSet{}, fmt.Errorf("probeMarkersFromHeaders: entry %q does not begin with wrapper %q", hdr.Name, wrapper)
+			return config.MarkerSet{}, fmt.Errorf("ProbeMarkers: entry %q does not begin with wrapper %q", hdr.Name, wrapper)
 		}
 		rel := strings.TrimPrefix(hdr.Name, wrapper+"/")
 
