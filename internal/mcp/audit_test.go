@@ -116,8 +116,8 @@ func TestFileAuditSink_AppendAndRead(t *testing.T) {
 			got[i].ErrorCode != want.ErrorCode {
 			t.Errorf("entry %d mismatch: got %+v, want %+v", i, got[i], want)
 		}
-		if got[i].V != 1 {
-			t.Errorf("entry %d V = %d, want 1 (autofilled)", i, got[i].V)
+		if got[i].V != 2 {
+			t.Errorf("entry %d V = %d, want 2 (autofilled)", i, got[i].V)
 		}
 		if got[i].At == "" {
 			t.Errorf("entry %d At is empty (autofill failed)", i)

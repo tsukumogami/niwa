@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"os"
 	"strconv"
@@ -32,6 +33,49 @@ func IsPIDAlive(pid int, startTime int64) bool {
 		return true
 	}
 	return recorded == startTime
+}
+
+// processSignal is the test seam for IsProcessAlive. Production callers
+// route through os.FindProcess + proc.Signal(0); tests override this
+// variable to inject EPERM or other errors without needing a root-owned
+// process. The seam is package-private so external callers cannot
+// reach it; tests share the package and patch the variable directly.
+var processSignal = func(pid int) error {
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return err
+	}
+	return proc.Signal(syscall.Signal(0))
+}
+
+// IsProcessAlive reports whether a process with the given PID is alive,
+// using only a PID (no start-time gate). Implements the D12 fail-closed
+// Signal(0) protocol used by .niwa/surface.lock stale-lock reaping:
+//
+//   - nil error: process exists and we have permission to signal it → alive.
+//   - os.ErrProcessDone or syscall.ESRCH: process is gone → dead.
+//   - syscall.EPERM (different UID) or any unknown error → fail-closed,
+//     report alive so a UID-mismatch race never reaps a live holder.
+//
+// Unlike IsPIDAlive, which combines PID with a start-time check for
+// recycle-safe daemon PID files, this helper assumes the caller holds a
+// short-lived lock where PID recycling is statistically improbable
+// (surface.lock is acquired at boot and released on shutdown).
+func IsProcessAlive(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	err := processSignal(pid)
+	if err == nil {
+		return true
+	}
+	if errors.Is(err, os.ErrProcessDone) || errors.Is(err, syscall.ESRCH) {
+		return false
+	}
+	// syscall.EPERM (different UID, can't signal) and any unknown error
+	// path fail closed: assume alive so the reaper never races a live
+	// holder out of its lock.
+	return true
 }
 
 // pidStartTime reads the process start time (jiffies since boot) from

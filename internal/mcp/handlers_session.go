@@ -329,6 +329,15 @@ func (s *Server) handleDestroySession(args destroySessionArgs) toolResult {
 	// Force-kill workers whose tasks are still running.
 	killSessionWorkers(s.instanceRoot, worktreePath, args.SessionID)
 
+	// Auto-cascade change cleanup. F5 changes record OriginatingSession;
+	// destroying the session removes the worktree those changes
+	// reference, so without this cascade the changes would linger
+	// pointing at a worktree_path that no longer exists. Cleanup happens
+	// before the terminal-state write so a crash between the two leaves
+	// the session in a consistent in-progress state for a retry.
+	CancelChangesForSession(s.taskStoreRoot(), args.SessionID,
+		"originating_session_destroyed", s.audit)
+
 	// Write terminal state.
 	state.Status = SessionStatusEnded
 	if err := WriteSessionLifecycleState(sessionsDir, state); err != nil {

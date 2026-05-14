@@ -157,11 +157,18 @@ const workerMCPDynTemplate = `{
 // ## Channels section in workspace-context.md.
 const channelsSectionHeader = "## Channels"
 
-// niwaMCPToolNames is the canonical list of the 14 niwa MCP tools. The
+// niwaMCPToolNames is the canonical list of the 17 niwa MCP tools. The
 // order is stable: it is emitted both in the SKILL.md allowed-tools block
 // and in the ## Channels section. Callers that change this list MUST
 // update the skill body's tool references and the PRD's R10 enumeration
 // in lockstep.
+//
+// Families:
+//   - Task lifecycle (8): delegate, query, await, report_progress, finish,
+//     list_outbound, update, cancel
+//   - Peer messaging (3): ask, send_message, check_messages
+//   - Session lifecycle (3): create, destroy, list
+//   - Change lifecycle (4): create_change, list_changes, query_change, cancel_change
 var niwaMCPToolNames = []string{
 	"niwa_delegate",
 	"niwa_query_task",
@@ -177,6 +184,9 @@ var niwaMCPToolNames = []string{
 	"niwa_create_session",
 	"niwa_destroy_session",
 	"niwa_list_sessions",
+	"niwa_create_change",
+	"niwa_list_changes",
+	"niwa_query_change",
 }
 
 // inboxSubdirs is the canonical set of per-role inbox subdirectories that
@@ -695,10 +705,9 @@ func buildSkillContent() []byte {
 	b.WriteString("name: niwa-mesh\n")
 	b.WriteString("description: >-\n")
 	b.WriteString("  Delegate tasks across niwa workspace roles. Use when dispatching\n")
-	b.WriteString("  work to another agent, querying or awaiting task state, reporting\n")
-	b.WriteString("  progress, completing or abandoning tasks, exchanging peer\n")
-	b.WriteString("  messages, recovering abandoned tasks via redelegate, or managing\n")
-	b.WriteString("  session worktrees.\n")
+	b.WriteString("  work, querying or awaiting task state, exchanging peer messages,\n")
+	b.WriteString("  managing session worktrees, or capturing a worker's output as a\n")
+	b.WriteString("  reviewable change.\n")
 	b.WriteString("allowed-tools:\n")
 	for _, name := range niwaMCPToolNames {
 		fmt.Fprintf(&b, "  - %s\n", name)
@@ -882,7 +891,43 @@ func buildSkillContent() []byte {
 	b.WriteString("mark the session ended, stop the daemon, and remove the worktree.\n")
 	b.WriteString("Pass `force=true` to also delete an unmerged session branch;\n")
 	b.WriteString("without it the branch is preserved so unfinished work is not\n")
-	b.WriteString("discarded silently.\n")
+	b.WriteString("discarded silently.\n\n")
+
+	b.WriteString("## Change Lifecycle\n\n")
+	b.WriteString("A `change` is a niwa-tracked reviewable code unit — a snapshot of a\n")
+	b.WriteString("session-worktree's commit range plus metadata, addressable via the\n")
+	b.WriteString("machine-level `niwa surface serve` HTTP listener. Changes live at\n")
+	b.WriteString("`.niwa/changes/<uuidv4>/` per niwa instance; the data substrate is\n")
+	b.WriteString("orthogonal to tasks and sessions and uses its own state machine\n")
+	b.WriteString("(`pending` → `in-review` → `verdict-cast` → `cleaned`).\n\n")
+	b.WriteString("**Worker pattern.** A worker that has produced commits on its\n")
+	b.WriteString("session branch and judges the work review-worthy calls\n")
+	b.WriteString("`niwa_create_change(session_id)` before `niwa_finish_task`. The call\n")
+	b.WriteString("returns `{change_id, state: \"pending\", url, base_ref, head_ref}`;\n")
+	b.WriteString("the worker includes those fields in its `niwa_finish_task` result so\n")
+	b.WriteString("the delegating coordinator can surface them. Idempotency is keyed\n")
+	b.WriteString("by `(session_id, head_ref)`: re-calling on the same session at the\n")
+	b.WriteString("same HEAD returns the existing change with `state: \"not_modified\"`\n")
+	b.WriteString("and emits no second `change_ready` event.\n\n")
+	b.WriteString("**Coordinator pattern.** A coordinator awaiting a worker's task\n")
+	b.WriteString("receives `change_id` and `url` in the result. The coordinator embeds\n")
+	b.WriteString("those in its response to the human operator so the operator can\n")
+	b.WriteString("drill in via the machine-level surface at\n")
+	b.WriteString("`http://127.0.0.1:<port>/workspaces/<workspace>/<instance>/changes/<id>`.\n")
+	b.WriteString("Placeholders (`<port>`, `<workspace>`, `<instance>`) appear when the\n")
+	b.WriteString("surface is not running or the instance is not registered in\n")
+	b.WriteString("`~/.config/niwa/config.toml`.\n\n")
+	b.WriteString("**Reviewer pattern.** An agent inspecting another agent's work\n")
+	b.WriteString("calls `niwa_list_changes` (filter by state or session_id) to find\n")
+	b.WriteString("candidates, then `niwa_query_change(change_id)` to read the full\n")
+	b.WriteString("state plus the most recent transitions. The diff body lives at\n")
+	b.WriteString("`.niwa/changes/<change_id>/diff.patch` and is readable directly —\n")
+	b.WriteString("the surface daemon is not required for agent-side review.\n\n")
+	b.WriteString("Cancelling a change a worker created by mistake: call\n")
+	b.WriteString("`niwa_cancel_change(change_id)`. Authorization requires the calling\n")
+	b.WriteString("task or session to be in the change's originating set. Abandoning a\n")
+	b.WriteString("task that produced a change auto-cancels the change as part of the\n")
+	b.WriteString("task's terminal transition.\n")
 
 	return b.Bytes()
 }

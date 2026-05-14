@@ -132,30 +132,19 @@ func ListSessionLifecycleStates(sessionsDir string) ([]SessionLifecycleState, er
 // ID and atomically reserves its state file with O_CREATE|O_EXCL. Retries up
 // to 5 times on collision (birthday probability ~1e-9 at 20 sessions).
 //
-// Using O_EXCL rather than os.Stat eliminates the TOCTOU window between
-// checking for an existing ID and claiming it: the OS makes the check-and-create
-// atomic, so two concurrent callers sharing the same sessionsDir cannot reserve
-// the same ID. WriteSessionLifecycleState later overwrites the placeholder via
-// rename.
+// Thin wrapper over ReserveID (atomicid.go) — the generic helper holds the
+// retry loop and the O_EXCL placeholder reservation. WriteSessionLifecycleState
+// later overwrites the placeholder via rename.
 func newSessionLifecycleID(sessionsDir string) (string, error) {
-	for range 5 {
-		var b [4]byte
-		if _, err := rand.Read(b[:]); err != nil {
-			return "", fmt.Errorf("generating session ID: %w", err)
-		}
-		id := fmt.Sprintf("%08x", b)
-		path := filepath.Join(sessionsDir, id+".json")
-		f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
-		if err == nil {
-			_ = f.Close()
-			return id, nil
-		}
-		if !os.IsExist(err) {
-			return "", fmt.Errorf("reserving session ID: %w", err)
-		}
-		// ID collision: retry with a fresh random value.
+	return ReserveID(sessionsDir, generateSessionID, func(id string) string { return id + ".json" })
+}
+
+func generateSessionID() (string, error) {
+	var b [4]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", err
 	}
-	return "", fmt.Errorf("failed to generate unique session ID after 5 attempts")
+	return fmt.Sprintf("%08x", b), nil
 }
 
 // SessionLifecycleStatus constants for SessionLifecycleState.Status.

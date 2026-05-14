@@ -722,6 +722,18 @@ func (s *Server) handleFinishTask(args finishTaskArgs) toolResult {
 		return mapStoreError(err)
 	}
 
+	// Auto-cascade change cleanup on abandonment. If the worker created
+	// changes (F5) before crashing, those changes would otherwise sit
+	// pending for AbandonDays before the GC sweep claimed them. The
+	// task-abandonment signal is a precise enough operator intent ("the
+	// work is dead") to reap the associated changes synchronously.
+	// Cleanup is a no-op when the task created no changes — the scan is
+	// cheap, the writes are guarded by the per-change flock.
+	if args.Outcome == TaskStateAbandoned {
+		CancelChangesForTask(s.taskStoreRoot(), args.TaskID,
+			"originating_task_abandoned", s.audit)
+	}
+
 	// Deliver a task.completed / task.abandoned message to the delegator.
 	msgType := "task.completed"
 	body := map[string]any{"task_id": args.TaskID, "result": args.Result}

@@ -1,13 +1,15 @@
 // Package mcp implements a stdio MCP server for niwa's session mesh.
 //
-// The server exposes 14 tools in three families:
+// The server exposes 18 tools in four families:
 //
 //   - Peer messaging: niwa_check_messages, niwa_send_message, niwa_ask.
 //   - Task lifecycle: niwa_delegate, niwa_query_task, niwa_await_task,
 //     niwa_report_progress, niwa_finish_task, niwa_list_outbound_tasks,
-//     niwa_update_task, niwa_cancel_task (see handlers_task.go).
+//     niwa_update_task, niwa_cancel_task, niwa_redelegate (see handlers_task.go).
 //   - Session lifecycle: niwa_create_session, niwa_destroy_session,
 //     niwa_list_sessions (see handlers_session.go).
+//   - Change lifecycle (F5): niwa_create_change, niwa_list_changes,
+//     niwa_query_change, niwa_cancel_change (see handlers_change.go).
 //
 // It declares the claude/channel experimental capability; when a message
 // file lands in the inbox directory the server sends a
@@ -81,8 +83,8 @@ type Server struct {
 	seenFiles map[string]struct{}
 
 	waitersMu       sync.Mutex
-	waiters         map[string]chan toolResult   // msgID → reply channel
-	awaitWaiters    map[string]chan taskEvent    // task_id → terminal-event channel (size-1 buffered)
+	waiters         map[string]chan toolResult    // msgID → reply channel
+	awaitWaiters    map[string]chan taskEvent     // task_id → terminal-event channel (size-1 buffered)
 	questionWaiters map[string]chan questionEvent // role → question-event channel (size-1 buffered)
 
 	// audit emits one entry per tool call (see DESIGN-mcp-call-telemetry.md).
@@ -115,11 +117,11 @@ func New(role, instanceRoot string) *Server {
 		taskID:           os.Getenv("NIWA_TASK_ID"),
 		sessionID:        os.Getenv("NIWA_SESSION_ID"),
 		userHomeDir:      homeDir,
-		seenFiles:       make(map[string]struct{}),
-		waiters:         make(map[string]chan toolResult),
-		awaitWaiters:    make(map[string]chan taskEvent),
-		questionWaiters: make(map[string]chan questionEvent),
-		audit:           NewFileAuditSink(instanceRoot),
+		seenFiles:        make(map[string]struct{}),
+		waiters:          make(map[string]chan toolResult),
+		awaitWaiters:     make(map[string]chan taskEvent),
+		questionWaiters:  make(map[string]chan questionEvent),
+		audit:            NewFileAuditSink(instanceRoot),
 	}
 	if instanceRoot != "" && role != "" {
 		s.roleInboxDir = filepath.Join(instanceRoot, ".niwa", "roles", role, "inbox")
@@ -471,6 +473,57 @@ func (s *Server) toolsList() toolsListResult {
 				},
 			},
 		},
+		{
+			Name: "niwa_create_change",
+			Description: "Capture a session's current diff as a reviewable change. Snapshots " +
+				"git -C <worktree> diff <base>..<head> to .niwa/changes/<id>/diff.patch (4 MiB " +
+				"cap with truncate trailer), reserves a UUIDv4 change ID, writes state.json, and " +
+				"emits change_ready. Idempotent on (session_id, head_ref): a re-issue for the same " +
+				"tuple returns the existing change_id with state=\"not_modified\" and emits no event.",
+			InputSchema: inputSchema{
+				Type: "object",
+				Properties: map[string]schemaProp{
+					"session_id":    {Type: "string", Description: "Session ID (8 lowercase hex chars)"},
+					"base_ref_hint": {Type: "string", Description: "Optional base ref override; bypasses the auto-discovery chain (origin/HEAD → origin/main → origin/master → main → master)"},
+					"metadata":      {Type: "object", Description: "Optional opaque metadata (stored on state.json, never echoed to audit)"},
+				},
+				Required: []string{"session_id"},
+			},
+		},
+		{
+			Name:        "niwa_list_changes",
+			Description: "List changes filtered by state and/or session_id (AND-composed when both set). Order: most recently updated first.",
+			InputSchema: inputSchema{
+				Type: "object",
+				Properties: map[string]schemaProp{
+					"state":      {Type: "string", Description: "Filter by state (pending, in-review, verdict-cast, cleaned)"},
+					"session_id": {Type: "string", Description: "Filter to changes originating from this session (8 lowercase hex chars)"},
+				},
+			},
+		},
+		{
+			Name:        "niwa_query_change",
+			Description: "Return the full ChangeState plus the last 20 transitions for a change. Returns not_found when the change is absent or in cleaned state.",
+			InputSchema: inputSchema{
+				Type: "object",
+				Properties: map[string]schemaProp{
+					"change_id": {Type: "string", Description: "Change ID (UUIDv4)"},
+				},
+				Required: []string{"change_id"},
+			},
+		},
+		{
+			Name:        "niwa_cancel_change",
+			Description: "Transition a pending or in-review change to cleaned, removing diff.patch and emitting change_cleaned. Authorization requires the calling session to be the change's originating_session OR the calling task to appear in originating_tasks. Final and one-way; re-creating on the same (session_id, head_ref) produces a new UUIDv4.",
+			InputSchema: inputSchema{
+				Type: "object",
+				Properties: map[string]schemaProp{
+					"change_id": {Type: "string", Description: "Change ID (UUIDv4)"},
+					"reason":    {Type: "string", Description: "Free-form reason recorded in the change_cleaned event payload (defaults to \"cancelled\")"},
+				},
+				Required: []string{"change_id"},
+			},
+		},
 	}}
 }
 
@@ -562,6 +615,30 @@ func (s *Server) callTool(p toolCallParams) toolResult {
 			return errResult("invalid arguments: " + err.Error())
 		}
 		return s.handleListSessions(args)
+	case "niwa_create_change":
+		var args createChangeArgs
+		if err := json.Unmarshal(p.Arguments, &args); err != nil {
+			return errResult("invalid arguments: " + err.Error())
+		}
+		return s.handleCreateChange(args)
+	case "niwa_list_changes":
+		var args listChangesArgs
+		if err := json.Unmarshal(p.Arguments, &args); err != nil {
+			return errResult("invalid arguments: " + err.Error())
+		}
+		return s.handleListChanges(args)
+	case "niwa_query_change":
+		var args queryChangeArgs
+		if err := json.Unmarshal(p.Arguments, &args); err != nil {
+			return errResult("invalid arguments: " + err.Error())
+		}
+		return s.handleQueryChange(args)
+	case "niwa_cancel_change":
+		var args cancelChangeArgs
+		if err := json.Unmarshal(p.Arguments, &args); err != nil {
+			return errResult("invalid arguments: " + err.Error())
+		}
+		return s.handleCancelChange(args)
 	default:
 		return errResult("unknown tool: " + p.Name)
 	}
@@ -1128,6 +1205,7 @@ func errorCode(r *toolResult) string {
 //   - The legacy "error_code: <CODE>\ndetail: <msg>" produced by errResultCode.
 //   - The structured JSON `{"error_code":"<CODE>", ...}` produced by
 //     errResultCodeBody.
+//
 // Returns "" when neither shape matches.
 func errorCodeFromText(text string) string {
 	trimmed := strings.TrimSpace(text)
