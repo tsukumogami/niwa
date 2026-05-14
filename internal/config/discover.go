@@ -86,14 +86,17 @@ type DeprecationNotice struct {
 	Markers MarkerSet
 }
 
+// OverlayConfigFile is the workspace overlay config filename.
+const OverlayConfigFile = "workspace-overlay.toml"
+
 // TeamConfigMarkerSet returns the marker set used to probe the team config
 // source (the workspace's `--from` slug). Rank-1 is `.niwa/workspace.toml`;
 // rank-2 is root `workspace.toml`.
 func TeamConfigMarkerSet() MarkerSet {
 	return MarkerSet{
-		Rank1Dir:  ".niwa",
-		Rank1File: "workspace.toml",
-		Rank2Path: "workspace.toml",
+		Rank1Dir:  ConfigDir,
+		Rank1File: ConfigFile,
+		Rank2Path: ConfigFile,
 	}
 }
 
@@ -102,9 +105,9 @@ func TeamConfigMarkerSet() MarkerSet {
 // rank-2 is root `workspace-overlay.toml`.
 func OverlayMarkerSet() MarkerSet {
 	return MarkerSet{
-		Rank1Dir:  ".niwa",
-		Rank1File: "workspace-overlay.toml",
-		Rank2Path: "workspace-overlay.toml",
+		Rank1Dir:  ConfigDir,
+		Rank1File: OverlayConfigFile,
+		Rank2Path: OverlayConfigFile,
 	}
 }
 
