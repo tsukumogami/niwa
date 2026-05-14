@@ -8,7 +8,6 @@ import (
 	"testing"
 
 	"github.com/tsukumogami/niwa/internal/config"
-	"github.com/tsukumogami/niwa/internal/source"
 )
 
 func TestFetchSubpathViaGitClone_WholeRepo(t *testing.T) {
@@ -171,9 +170,6 @@ func TestSplitLocalPath(t *testing.T) {
 		})
 	}
 }
-
-// Compile-time check that source.Source satisfies the fallback contract.
-var _ = source.Source{}
 
 // ----- ProbeAndFetchSubpath + probeAndResolveCloneRoot (Issue 3) -----
 
@@ -348,7 +344,7 @@ func TestProbeAndFetchSubpath_NoMarkerError(t *testing.T) {
 	}
 }
 
-func TestProbeAndResolveCloneRoot_EmptyNiwaDirectory(t *testing.T) {
+func TestProbeAndResolveCloneRoot_EmptyNiwaDirectory_FallsThroughToRank2(t *testing.T) {
 	// PRD R6: a .niwa/ directory at source root that does NOT contain
 	// workspace.toml MUST NOT count as rank-1. With a root workspace.toml
 	// also present, discovery falls through to rank-2.

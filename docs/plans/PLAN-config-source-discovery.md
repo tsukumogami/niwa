@@ -134,12 +134,12 @@ Add a `probeAndResolveCloneRoot` helper to `internal/workspace/fallback.go` and 
 - [ ] When `src.Subpath` is non-empty (explicit-subpath mode per PRD R4), the probe is skipped and the explicit subpath flows through verbatim.
 - [ ] Subpath-awareness matches the GitHub path: rank-1 wins → `markers.Rank1Dir`; rank-2 only → `""` plus non-nil notice; both present → rank-1 wins; neither → no-marker error; ambiguity rules from Issue 1 propagate.
 - [ ] Failure cases return before `cloneAndCopy` runs; existing `defer os.RemoveAll(tmp)` removes the temp clone.
-- [ ] `EnsureOverlaySnapshot` in `internal/workspace/overlaysync.go` runs the same probe pipeline parameterised by `OverlayMarkerSet()`.
-- [ ] Probe runs only in the fresh-materialization branch; the marker-refresh and legacy-working-tree branches call `EnsureConfigSnapshot` unchanged.
-- [ ] Silent-skip-on-failure contract from upstream R35 / PRD R11 wraps probe + extract: missing overlay returns `(wasFreshClone=true, err=nil)` without stderr noise.
-- [ ] Resolved overlay rank surfaces back to the caller for Decision 3 notice emission.
-- [ ] `fallback_test.go` and `overlaysync_test.go` cover AC-V1..AC-V6 via `localGitServer`.
+- [ ] `fallback_test.go` covers the probe primitives (rank-1, rank-2, both-ranks ambiguity, no-marker, empty-`.niwa/`, symlink-marker regression, overlay markers) via `localGitServer`.
 - [ ] All existing tests continue to pass.
+
+#### Out of scope (moved to Issue 4)
+
+`EnsureOverlaySnapshot` overlay-probe wiring and the AC-V1..AC-V6 end-to-end coverage are deferred to Issue 4. Rationale: `EnsureOverlaySnapshot` routes through `MaterializeFromSource`, whose signature change to accept a `markers config.MarkerSet` parameter is part of Issue 4's scope. Issue 3 ships the probe primitives that Issue 4 then wires through the snapshot writer + overlay caller. The deferred ACs ("EnsureOverlaySnapshot runs the same probe pipeline parameterised by `OverlayMarkerSet()`", "Probe runs only in the fresh-materialization branch", "silent-skip-on-failure contract wraps probe+extract", "Resolved overlay rank surfaces back to the caller", and AC-V1..AC-V6 coverage in `overlaysync_test.go`) are tracked under Issue 4.
 
 #### Dependencies
 
@@ -169,6 +169,11 @@ Wire the new probe-and-extract pipeline into `materializeAndSwap`, bubble the re
 - [ ] After a successful init via discovery, `ReadProvenance` returns `.niwa` for rank-1 sources and `""` for rank-2 sources.
 - [ ] End-to-end PRD ACs via `tarballFakeServer` and `localGitServer`: AC-D1 (rank-1 only), AC-D2 (rank-2 only), AC-D5 (ambiguity + R5 byte-identity), AC-D6 (no marker + R5 byte-identity), AC-D7 (network 500 + R5 byte-identity), AC-D8 (empty `.niwa/` + root `workspace.toml`).
 - [ ] When `materializeAndSwap` is called with `OverlayMarkerSet()`, the probe uses overlay marker filenames.
+- [ ] `EnsureOverlaySnapshot` in `internal/workspace/overlaysync.go` runs the same probe pipeline parameterised by `OverlayMarkerSet()` (moved from Issue 3).
+- [ ] Probe runs only in the fresh-materialization branch of `EnsureOverlaySnapshot`; the marker-refresh and legacy-working-tree branches call `EnsureConfigSnapshot` unchanged.
+- [ ] Silent-skip-on-failure contract from upstream R35 / PRD R11 wraps probe + extract on the overlay path: missing overlay returns `(wasFreshClone=true, err=nil)` without stderr noise.
+- [ ] Resolved overlay rank surfaces back to the caller for Decision 3 notice emission.
+- [ ] `overlaysync_test.go` covers AC-V1..AC-V6 via `localGitServer` (moved from Issue 3).
 - [ ] On every probe-error path, `safeRemoveAll(staging)` runs and `SwapSnapshotAtomic` is never called.
 - [ ] Provenance marker is only written into `staging` after probe success.
 - [ ] Existing `EnsureConfigSnapshot` callers continue to compile and pass.
@@ -178,7 +183,7 @@ Wire the new probe-and-extract pipeline into `materializeAndSwap`, bubble the re
 #### Dependencies
 
 Blocked by Issue 2 (`ProbeAndExtractSubpath`).
-Blocked by Issue 3 (`probeAndResolveCloneRoot`).
+Blocked by Issue 3 (`probeAndResolveCloneRoot` + `ProbeAndFetchSubpath` primitives that this issue wires into `MaterializeFromSource` and `EnsureOverlaySnapshot`).
 
 ---
 

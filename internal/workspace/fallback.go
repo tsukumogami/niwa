@@ -15,28 +15,54 @@ import (
 	"github.com/tsukumogami/niwa/internal/testfault"
 )
 
-// FetchSubpathViaGitClone implements the non-GitHub branch of
-// EnsureConfigSnapshot: shallow-clone src into a temp dir, resolve
+// FetchSubpathViaGitClone implements the explicit-subpath branch of
+// the non-GitHub fallback: shallow-clone src into a temp dir, resolve
 // the HEAD commit oid, and copy <cloneDir>/<src.Subpath> into
 // stagingDir. Returns the resolved oid so the caller can write it
 // into the provenance marker.
+//
+// Use ProbeAndFetchSubpath instead for discovery mode (when
+// src.Subpath is empty and the caller wants the probe to resolve
+// it). The snapshot writer in Issue 4 dispatches between the two
+// entry points based on src.Subpath; FetchSubpathViaGitClone runs
+// only when the slug carried an explicit subpath. Both entry points
+// share the same shallowCloneToTemp + copyFromCloneRoot helpers and
+// the same security discipline.
 //
 // stagingDir must exist and be empty. The caller is responsible for
 // writing the provenance marker into stagingDir and calling
 // SwapSnapshotAtomic to promote it.
 //
-// Security discipline mirrors internal/github.ExtractSubpath:
+// Security discipline mirrors internal/github.ExtractSubpath's seven
+// defenses. The non-GitHub path inherits them via copyFromCloneRoot:
 //
-//   - positive type allowlist — regular files and directories only;
+//  1. Positive type allowlist — regular files and directories only;
 //     symlinks, FIFOs, devices, and other non-regular entries are
-//     silently skipped (lstat-based so the walk never follows a link).
-//   - filename validation — reject any component containing NUL,
-//     backslash, or "..".
-//   - path containment — computed dest paths must stay inside
-//     stagingDir (defense against crafted names that survive
-//     validation but resolve outside the tree after Clean).
-//   - subpath filter — only entries under <cloneDir>/<src.Subpath>/
+//     silently skipped (lstat-based so the walk never follows a
+//     link).
+//  2. Wrapper anchoring — n/a here because the clone is rooted at
+//     the temp dir; the analogous defense is that the source tree
+//     is bounded by what `git clone` produced, no entries outside
+//     the temp dir exist to confuse a relative walk.
+//  3. Subpath filter — only entries under <cloneDir>/<src.Subpath>/
 //     are copied, matching PRD R4's whole-repo and subpath cases.
+//  4. Path-containment check (fallbackSafeJoin) — computed dest
+//     paths must stay inside stagingDir (defense against crafted
+//     names that survive validation but resolve outside the tree
+//     after Clean).
+//  5. Filename validation (validateRelName) — reject any component
+//     containing NUL, backslash, or "..".
+//  6. Decompression-bomb defense — per-file 500 MB cap via
+//     io.LimitReader in copyRegularFile. The cap matches the
+//     tarball extractor's cumulative cap so the fallback has
+//     equivalent resource-exhaustion bounds.
+//  7. Atomic failure — failure leaves no partial state at
+//     stagingDir's canonical path (the caller stages into a fresh
+//     dir and SwapSnapshotAtomic promotes it only on success).
+//
+// Plus a fallback-specific policy: the clone's own `.git` directory
+// is hard-coded skipped so the snapshot stays clean regardless of
+// the clone implementation.
 //
 // `testfault.Maybe("fetch-fallback")` hook at entry for parity with
 // the GitHub path's fault-injection seams.
@@ -204,10 +230,29 @@ func copyFromCloneRoot(tmp, subpath, stagingDir, cloneURL string) error {
 // deprecation notice for rank-2 (callers route it through the
 // workspace disclosure helper), and the HEAD oid.
 //
-// All seven security defenses from copyFromCloneRoot apply unchanged
-// on pass-2. Empty `.niwa/` at the source root does NOT count as
-// rank-1 — probeAndResolveCloneRoot's os.Stat against the rank-1
-// FILE path (not the directory) encodes PRD R6 at this layer.
+// Note: src.Subpath is intentionally ignored — this entry point
+// always runs the probe and lets the decider resolve the subpath.
+// Callers with a slug that carries an explicit subpath should route
+// through FetchSubpathViaGitClone instead. The snapshot writer in
+// Issue 4 dispatches between the two based on src.Subpath.
+//
+// All seven security defenses documented on FetchSubpathViaGitClone
+// (type allowlist, wrapper-bound walk, subpath filter, path
+// containment, filename validation, per-file 500 MB cap, atomic
+// failure) apply unchanged on pass-2 (the copyFromCloneRoot step).
+// The probe step itself adds:
+//
+//   - Type-allowlist parity with extract — probeAndResolveCloneRoot
+//     uses os.Lstat with Mode().IsRegular() to reject any non-
+//     regular file (symlinks, FIFOs, devices) at the marker paths,
+//     matching the symmetric guard on the GitHub side. The
+//     TestProbeAndResolveCloneRoot_SymlinkMarkerIsNotRank1 test is
+//     the runtime regression check.
+//   - PRD R6 / AC-D8 (empty `.niwa/` is NOT rank-1) — the probe
+//     stats the rank-1 FILE path (<Rank1Dir>/<Rank1File>), not the
+//     directory, so a `.niwa/` that exists but contains no
+//     workspace.toml leaves HasRank1 false and discovery falls
+//     through to rank-2 (or returns no-marker per PRD R4).
 //
 // On any error path the function returns before the copy begins,
 // leaving stagingDir untouched (PRD R5 atomic-failure invariant).
@@ -258,17 +303,31 @@ func ProbeAndFetchSubpath(
 
 // probeAndResolveCloneRoot inspects the top level of a shallow clone
 // directory for the rank-1 and rank-2 markers from `markers`,
-// populates a `found` MarkerSet from the os.Stat results, and calls
+// populates a `found` MarkerSet from the os.Lstat results, and calls
 // decider to resolve the rank.
 //
 // The probe checks `<cloneDir>/<Rank1Dir>/<Rank1File>` (rank-1) and
-// `<cloneDir>/<Rank2Path>` (rank-2) — both as files, not directories.
+// `<cloneDir>/<Rank2Path>` (rank-2) — both as regular files, not
+// directories.
+//
 // PRD R6 / AC-D8 (empty `.niwa/` does NOT count as rank-1) is encoded
-// naturally: if the directory exists but the marker file inside does
-// not, the rank-1 stat returns ErrNotExist and HasRank1 stays false.
+// naturally in two ways at this layer:
+//   - If `.niwa/` does not exist at all, the rank-1 stat returns
+//     ErrNotExist and HasRank1 stays false.
+//   - If `.niwa/` exists as a directory but does NOT contain
+//     workspace.toml, the rank-1 stat against the FILE path
+//     (<cloneDir>/.niwa/workspace.toml) still returns ErrNotExist,
+//     so HasRank1 again stays false. Discovery then falls through:
+//     if rank-2 is also absent, RankDecider returns NoMarkerError
+//     (PRD R4); if rank-2 IS present (root workspace.toml), rank-2
+//     wins. The test
+//     TestProbeAndResolveCloneRoot_EmptyNiwaDirectory exercises the
+//     fall-through-to-rank-2 path explicitly.
+//
 // Non-regular file types (symlinks, FIFOs, etc.) at the marker paths
 // are rejected via the Mode().IsRegular() check, matching the type-
-// allowlist discipline from the GitHub path.
+// allowlist discipline from the GitHub path
+// (TestProbeAndResolveCloneRoot_SymlinkMarkerIsNotRank1).
 //
 // Returns the decider's verdict ((subpath, notice, err)). Callers
 // derive rank from the notice (nil → rank-1, non-nil → rank-2).
