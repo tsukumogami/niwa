@@ -30,6 +30,15 @@ const MaxDecompressedBytes int64 = 500 * 1024 * 1024
 // reduces doubling overhead for the typical workload.
 const commonCaseInitialBufferSize = 1 << 20 // 1 MB
 
+// maxDecompressedBytesTestHook lets tests exercise the Level B
+// cap-firing path with a small fixture instead of generating a real
+// 500 MB-decompressed tarball. Production code MUST leave this nil; in
+// that case ProbeAndExtractSubpath uses MaxDecompressedBytes verbatim.
+// Tests set the hook to point at a smaller int64 to make the
+// cap-exceeded diagnostic fire on a tractable input. The seam stays
+// unexported so callers can't bypass the production cap.
+var maxDecompressedBytesTestHook *int64
+
 // ExtractSubpath streams a gzipped GitHub tarball, filters entries to
 // those under <wrapper>/<subpath>/ (or just <wrapper>/<subpath> for a
 // single-file subpath per PRD R4), and writes them under dest with
@@ -235,6 +244,9 @@ func ProbeAndExtractSubpath(
 	}
 
 	bytesBudget := MaxDecompressedBytes
+	if maxDecompressedBytesTestHook != nil {
+		bytesBudget = *maxDecompressedBytesTestHook
+	}
 	if truncate := testfault.TruncateAfter("fetch-tarball"); truncate >= 0 {
 		// Honor the test-only stream cap when present (Level A
 		// fault-injection seam, same as ExtractSubpath).
@@ -261,7 +273,7 @@ func ProbeAndExtractSubpath(
 	}
 	if int64(buf.Len()) > bytesBudget {
 		return "", 0, nil, fmt.Errorf("probeAndExtractSubpath: tarball exceeds decompression-bomb cap (%d bytes)",
-			MaxDecompressedBytes)
+			bytesBudget)
 	}
 
 	// Pass 1: probe. Header-only scan; no disk writes.

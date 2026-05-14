@@ -542,6 +542,48 @@ func TestProbeAndExtract_DecompressionBombDefense(t *testing.T) {
 	// but is impractical for a unit-test pass.
 }
 
+func TestProbeAndExtract_LevelBCapFires(t *testing.T) {
+	// Directly exercise the Level B cap (decompressed-output
+	// LimitReader during buffer fill) by shrinking the cap via the
+	// test-only hook and feeding a tarball whose decompressed size
+	// exceeds the shrunk cap. Asserts the cap-exceeded diagnostic
+	// substring so the assertion is about Level B specifically rather
+	// than some other failure mode.
+	prev := maxDecompressedBytesTestHook
+	small := int64(512) // 512-byte cap; the fixture below decompresses well past this.
+	maxDecompressedBytesTestHook = &small
+	t.Cleanup(func() { maxDecompressedBytesTestHook = prev })
+
+	// Build a tarball whose decompressed size is comfortably over the
+	// 512-byte cap. The body content is incompressible-ish (random-
+	// looking) so the gzip layer can't shrink it under the cap.
+	body := strings.Repeat("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!", 32) // 2048 bytes
+	tarball := buildTarball(t, map[string]string{
+		"wrap/":               "",
+		"wrap/workspace.toml": body,
+	})
+
+	dest := t.TempDir()
+	subpath, rank, notice, err := ProbeAndExtractSubpath(
+		bytes.NewReader(tarball), teamConfigMarkers(), config.RankDecider, dest)
+	if err == nil {
+		t.Fatal("expected Level B cap-exceeded error, got nil")
+	}
+	if !strings.Contains(err.Error(), "decompression-bomb") {
+		t.Errorf("error must mention decompression-bomb cap; got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "512") {
+		t.Errorf("error must name the shrunk cap (512 bytes); got: %v", err)
+	}
+	if subpath != "" || rank != 0 || notice != nil {
+		t.Errorf("on error want (\"\", 0, nil); got (%q, %d, %+v)", subpath, rank, notice)
+	}
+	dirents, _ := os.ReadDir(dest)
+	if len(dirents) != 0 {
+		t.Errorf("dest must be empty on Level B cap firing; got %d entries", len(dirents))
+	}
+}
+
 func TestProbeAndExtract_SymlinkMarkerIsNotRank1(t *testing.T) {
 	// Regression guard: a tar entry with TypeSymlink whose name matches
 	// the rank-1 marker MUST NOT be detected as rank-1 by the probe.
