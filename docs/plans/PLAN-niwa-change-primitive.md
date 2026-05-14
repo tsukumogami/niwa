@@ -630,7 +630,7 @@ godog patterns from `mesh.feature` and `session_attach.feature`.
 - `test/functional/features/review-surface.feature` ships with
   `@critical` tag on the feature header and the three scenarios from
   the design "Phase 6":
-  - Agent creates a change; Dan opens browser; sees diff.
+  - Agent creates a change; the operator opens the browser; sees diff.
   - Agent creates a change; listener not running; URL contains
     `<port>` placeholder; once listener starts, the URL resolves to
     a real port.
@@ -708,12 +708,13 @@ it.
 - No untracked or modified files outside the documented set
   (DESIGN/PRD already on the branch; PLAN, new code, new docs,
   new tests).
-- A PR-description draft is committed to
-  `wip/PR-niwa-change-primitive.md` mapping each PRD acceptance-
-  criteria row (the table in PRD §"Acceptance criteria") to the
-  issue that closed it, plus a "Test plan" section listing the
-  manual verification scenarios (boot the surface, create a change,
-  open the URL, see the diff).
+- A PR-description draft is prepared locally (off-branch, not
+  committed) mapping each PRD acceptance-criteria row (the table in
+  the PRD's "Acceptance criteria" section) to the issue that closed
+  it, plus a "Test plan" section listing the manual verification
+  scenarios (boot the surface, create a change, open the URL, see
+  the diff). The coordinator pastes this into the PR body via
+  `gh pr edit` after the final integration commit lands.
 - The DESIGN doc's `status:` field is already `Planned` (set by the
   prior design task); no change needed here unless follow-up
   introspection reveals a misalignment.

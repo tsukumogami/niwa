@@ -1,6 +1,5 @@
 ---
 status: Planned
-upstream: wip/PRD-niwa-change-primitive.md
 problem: |
   The F5 PRD locks every shape downstream features encode against — the
   ChangeState v=1 schema, the audit log v=2 bump, the four-event
@@ -135,12 +134,15 @@ strategy) are unchanged.
 
 ## Context and Problem Statement
 
-niwa's collab surface roadmap (F5–F15) encodes every downstream feature
-against a `change` object that does not exist yet, and a web surface
-category niwa has never shipped. The F5 PRD (`wip/PRD-niwa-change-
-primitive.md`) commits verbatim to the ChangeState v=1 schema, the
-audit log v=2 bump, four event payloads, three MCP tool I/O shapes,
-the `/changes/<id>#comment-<id>` URL contract, the per-instance Bearer
+niwa's collab surface roadmap (F5–F15 in the niwa collab-surface
+milestone ladder; F5 is this change-as-reviewable primitive, F6 is
+comments, F10 is the verdict gate, F18 is the notification bridge,
+and so on) encodes every downstream feature against a `change` object
+that does not exist yet, and a web surface category niwa has never
+shipped. The F5 milestone locks verbatim contracts that downstream
+features compose against: the ChangeState v=1 schema, the audit log
+v=2 bump, four event payloads, three MCP tool I/O shapes, the
+`/changes/<id>#comment-<id>` URL contract, the per-instance Bearer
 auth contract, the base-ref discovery precedence, and the
 abandonment GC behavior. With the WHAT locked, this design picks the
 HOW: which Go packages own which responsibility, how the two
@@ -1049,7 +1051,7 @@ parallelize.
   helper.
 - **`test/functional/features/review-surface.feature`** —
   `@critical` Gherkin scenarios:
-  - Agent creates a change; Dan opens browser; sees diff.
+  - Agent creates a change; the operator opens the browser; sees diff.
   - Agent creates a change; HTTP listener not running; URL composes
     with `<port>` placeholder; once listener starts, URL resolves.
   - GC moves abandoned change to `cleaned`; web index reflects new
@@ -1273,9 +1275,6 @@ ambiguity.
 
 ## References
 
-- PRD: `wip/PRD-niwa-change-primitive.md` (the locked F5 contract)
-- Exploration synthesis: `wip/explore_f5_findings.md` (substrate
-  facts and cross-cutting reality check)
 - Adjacent prior art:
   - `internal/mcp/session_lifecycle.go:131-158` —
     `newSessionLifecycleID` (atomic ID protocol generalized in D8)

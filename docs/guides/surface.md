@@ -137,8 +137,8 @@ the surface to pick it up.
 ## Agent-side review (no surface required)
 
 Agents inside the niwa mesh can read each other's changes via the
-MCP tools — `niwa surface serve` is for *Dan's browser*, not for
-agents:
+MCP tools — `niwa surface serve` is for *the operator's browser*,
+not for agents:
 
 | MCP tool | Purpose |
 |----------|---------|
