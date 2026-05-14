@@ -420,11 +420,14 @@ disclose the deprecation once each.
 
 ### Rank-3 removal {#rank-3-removal}
 
-A previous niwa iteration recognized a third layout: `niwa.toml`
-at the source repo root acting as a workspace config (rank 3).
-That layout has been removed. niwa never probes for `niwa.toml`;
-sources that ship only `niwa.toml` resolve as no-marker (PRD R4)
-and fail with a clear error.
+A previous niwa iteration recognized a third **workspace config**
+layout: a `niwa.toml` file at the source repo root acting as a
+workspace config (rank 3, with an explicit `[workspace] content_dir`
+declaration to mark where workspace content lived inside the repo).
+That layout has been removed. niwa never probes for `niwa.toml` as
+a workspace-config marker; sources that ship only `niwa.toml` in
+this shape resolve as no-marker (PRD R4) and fail with a clear
+error.
 
 Existing workspaces seeded from rank-3 sources need their source
 repos migrated to either rank 1 (`.niwa/workspace.toml`) or rank 2
@@ -432,6 +435,17 @@ repos migrated to either rank 1 (`.niwa/workspace.toml`) or rank 2
 NOT handle rank-3 → rank-1 transitions automatically — the rank-3
 schema diverged enough from the current `workspace.toml` shape
 that manual review is required.
+
+> **Note**: rank-3 removal applies only to the **per-workspace
+> source** layout. It does NOT affect the **personal global config
+> overlay** — the `niwa.toml`-shaped repository a user registers
+> via `niwa config set global` (or `[global_config]` in
+> `~/.config/niwa/config.toml`) that applies across all niwa
+> workspaces on the machine. The personal global config overlay
+> keeps its existing file convention (`niwa.toml` at repo root with
+> `[global]` and `[global.vault.*]` sections); niwa clones the
+> entire repo verbatim and reads the file. The rank-1/rank-2
+> discovery model documented above is for **workspace** sources only.
 
 ## niwa plugin install {#niwa-plugin-install}
 

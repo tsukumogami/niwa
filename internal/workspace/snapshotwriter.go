@@ -507,7 +507,27 @@ func materializeFromGitHub(ctx context.Context, src source.Source, sourceURL, st
 		resolvedSubpath string
 		rank            int
 	)
-	if src.Subpath == "" {
+	switch {
+	case src.Subpath != "":
+		// Explicit-subpath bypass: skip probe, extract verbatim.
+		if err := github.ExtractSubpath(body, src.Subpath, staging); err != nil {
+			return "", nil, "", 0, fmt.Errorf("EnsureConfigSnapshot: extract: %w", err)
+		}
+		resolvedSubpath = src.Subpath
+		rank = 1
+	case !markers.HasRank1() && !markers.HasRank2():
+		// No-probe whole-repo mode: an empty MarkerSet signals that the
+		// caller wants the legacy behaviour where the entire source repo
+		// is extracted verbatim. Used by the personal global config
+		// overlay path (the user's [global_config] repo, which has its
+		// own file convention — `niwa.toml` — outside this PRD's
+		// discovery model).
+		if err := github.ExtractSubpath(body, "", staging); err != nil {
+			return "", nil, "", 0, fmt.Errorf("EnsureConfigSnapshot: extract: %w", err)
+		}
+		resolvedSubpath = ""
+		rank = 0
+	default:
 		// Discovery mode: probe the tarball, decide rank, then extract.
 		sp, r, _, probeErr := github.ProbeAndExtractSubpath(body, markers, config.RankDecider, staging)
 		if probeErr != nil {
@@ -515,13 +535,6 @@ func materializeFromGitHub(ctx context.Context, src source.Source, sourceURL, st
 		}
 		resolvedSubpath = sp
 		rank = r
-	} else {
-		// Explicit-subpath bypass: skip probe, extract verbatim.
-		if err := github.ExtractSubpath(body, src.Subpath, staging); err != nil {
-			return "", nil, "", 0, fmt.Errorf("EnsureConfigSnapshot: extract: %w", err)
-		}
-		resolvedSubpath = src.Subpath
-		rank = 1
 	}
 
 	// Resolve commit oid for the marker. Best effort: if the HeadCommit
@@ -534,24 +547,43 @@ func materializeFromGitHub(ctx context.Context, src source.Source, sourceURL, st
 	return oid, redirect, resolvedSubpath, rank, nil
 }
 
-// materializeFromFallback handles the non-GitHub branch. When
-// src.Subpath is empty it runs ProbeAndFetchSubpath (probe-aware
-// clone + selective copy). When non-empty it calls
-// FetchSubpathViaGitClone verbatim. Returns oid, resolved subpath,
-// rank.
+// materializeFromFallback handles the non-GitHub branch. Three
+// modes, mirroring materializeFromGitHub:
+//
+//   - explicit src.Subpath: skip probe, FetchSubpathViaGitClone
+//     verbatim
+//   - empty src.Subpath + empty markers: no-probe whole-repo clone
+//     (legacy behaviour, used by the personal global config overlay
+//     path that has its own niwa.toml file convention)
+//   - empty src.Subpath + non-empty markers: ProbeAndFetchSubpath
+//     (probe-aware clone + selective copy)
+//
+// Returns oid, resolved subpath, rank.
 func materializeFromFallback(ctx context.Context, src source.Source, staging string, markers config.MarkerSet) (string, string, int, error) {
-	if src.Subpath == "" {
+	switch {
+	case src.Subpath != "":
+		oid, err := FetchSubpathViaGitClone(ctx, src, staging)
+		if err != nil {
+			return "", "", 0, err
+		}
+		return oid, src.Subpath, 1, nil
+	case !markers.HasRank1() && !markers.HasRank2():
+		// No-probe whole-repo: an empty MarkerSet means the caller
+		// wants the entire source repo cloned verbatim. Synthesize an
+		// explicit subpath of "" via FetchSubpathViaGitClone — same as
+		// the pre-probe-pipeline behaviour.
+		oid, err := FetchSubpathViaGitClone(ctx, src, staging)
+		if err != nil {
+			return "", "", 0, err
+		}
+		return oid, "", 0, nil
+	default:
 		sp, rank, _, oid, err := ProbeAndFetchSubpath(ctx, src, markers, config.RankDecider, staging)
 		if err != nil {
 			return "", "", 0, err
 		}
 		return oid, sp, rank, nil
 	}
-	oid, err := FetchSubpathViaGitClone(ctx, src, staging)
-	if err != nil {
-		return "", "", 0, err
-	}
-	return oid, src.Subpath, 1, nil
 }
 
 func readGitOrigin(dir string) (string, error) {

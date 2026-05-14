@@ -352,6 +352,61 @@ func TestMaterializeFromSource_Overlay_TeamConfigMarkerDoesNotSatisfyOverlay(t *
 	}
 }
 
+// TestMaterializeFromSource_EmptyMarkerSet_WholeRepoExtraction verifies
+// the no-probe path used by the personal global config overlay (the
+// user's [global_config] repo, which has its own niwa.toml file
+// convention outside the rank-1/rank-2 model). Passing config.MarkerSet{}
+// must skip the probe and extract the entire source repo verbatim,
+// matching the pre-PR-#139 behaviour.
+func TestMaterializeFromSource_EmptyMarkerSet_WholeRepoExtraction(t *testing.T) {
+	// Build a tarball with a non-niwa file shape — none of the
+	// rank-1/rank-2 markers are present. With a probe-enabled
+	// marker set this would return NoMarkerError; with empty
+	// markers it must succeed.
+	tarball := makeFakeTarball(t, map[string]string{
+		"wrap/":           "",
+		"wrap/niwa.toml":  "[global]\nauto_install_plugins = false",
+		"wrap/CLAUDE.md":  "personal global config overlay",
+		"wrap/hooks/":     "",
+		"wrap/hooks/x.sh": "#!/bin/sh\n",
+	})
+	fetcher := &fakeFetcher{tarball: tarball, commitOID: "abc"}
+
+	dir := filepath.Join(t.TempDir(), "personal-global")
+	src := source.Source{Owner: "user", Repo: "dot-niwa"}
+	rank, err := MaterializeFromSource(context.Background(), src, "user/dot-niwa", dir, config.MarkerSet{}, fetcher, nil)
+	if err != nil {
+		t.Fatalf("MaterializeFromSource: %v", err)
+	}
+	if rank != 0 {
+		t.Errorf("rank = %d, want 0 (no probe ran)", rank)
+	}
+
+	// Verify the whole repo landed at the snapshot root.
+	got, err := os.ReadFile(filepath.Join(dir, "niwa.toml"))
+	if err != nil {
+		t.Fatalf("read niwa.toml: %v", err)
+	}
+	if string(got) != "[global]\nauto_install_plugins = false" {
+		t.Errorf("niwa.toml content = %q, want personal global config", got)
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, "CLAUDE.md")); statErr != nil {
+		t.Errorf("CLAUDE.md missing — whole-repo extraction did not land all files: %v", statErr)
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, "hooks", "x.sh")); statErr != nil {
+		t.Errorf("hooks/x.sh missing — subdirectory not extracted: %v", statErr)
+	}
+
+	// Provenance subpath is empty (whole-repo extraction).
+	prov, err := ReadProvenance(dir)
+	if err != nil {
+		t.Fatalf("read provenance: %v", err)
+	}
+	if prov.Subpath != "" {
+		t.Errorf("provenance subpath = %q, want empty (whole-repo)", prov.Subpath)
+	}
+}
+
 // AC-V6: Overlay sources with explicit subpaths skip the probe and
 // flow verbatim, same as team-config sources.
 func TestMaterializeFromSource_Overlay_ExplicitSubpathBypassesProbe(t *testing.T) {

@@ -620,10 +620,23 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 	//   - MergeGlobalOverride
 	var globalOverride *config.GlobalConfigOverride
 	if a.GlobalConfigDir != "" && !opts.skipGlobal {
-		// Step 0.3a: sync the personal overlay snapshot (PRD R10-R13, R28).
+		// Step 0.3a: sync the personal global config overlay snapshot.
+		// This is the user's [global_config] repo (e.g. dangazineu/dot-niwa),
+		// registered via `niwa config set global` — applied across ALL
+		// workspaces on the machine. It is NOT the workspace's
+		// auto-discovered overlay (<owner>/<repo>-overlay) that
+		// PRD-config-source-discovery's rank-1/rank-2 model covers.
+		//
+		// The personal global config has its own file convention — see
+		// GlobalConfigOverrideFile = "niwa.toml" below — that pre-dates
+		// the workspace-config-sources discovery model. Pass an empty
+		// MarkerSet to skip probing and clone the entire repo verbatim,
+		// matching the pre-PR-#139 behaviour. Migrating this path into
+		// the rank-1/rank-2 model is tracked separately; this PR is
+		// scoped to the workspace overlay.
 		a.Reporter.Status("syncing config...")
 		fetcher, _ := a.GitHubClient.(FetchClient)
-		converted, personalOverlayRank, syncErr := EnsureConfigSnapshotWithStatus(ctx, a.GlobalConfigDir, config.OverlayMarkerSet(), fetcher, a.Reporter)
+		converted, _, syncErr := EnsureConfigSnapshotWithStatus(ctx, a.GlobalConfigDir, config.MarkerSet{}, fetcher, a.Reporter)
 		if syncErr != nil {
 			a.Reporter.Warn("could not sync config: %v", syncErr)
 			return nil, fmt.Errorf("syncing global config: %w", syncErr)
@@ -633,17 +646,6 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		if converted && !sliceContains(opts.disclosedNotices, noticeConfigConverted) {
 			a.Reporter.Log("note: %s converted from working tree to snapshot. Manual edits inside this directory will no longer persist.", a.GlobalConfigDir)
 			newDisclosures = append(newDisclosures, noticeConfigConverted)
-		}
-		// PRD R10: emit the rank-2 deprecation notice for the personal
-		// overlay snapshot when it resolves to the legacy whole-repo
-		// layout. Gated on DisclosedNotices for once-per-workspace
-		// semantics.
-		if personalOverlayRank == 2 && !sliceContains(opts.disclosedNotices, NoticeIDRank2Overlay) {
-			EmitRank2Notice(NoticeIDRank2Overlay, a.GlobalConfigDir, a.Reporter)
-			newDisclosures = append(newDisclosures, NoticeIDRank2Overlay)
-			if a.InstallNiwaPlugin != nil {
-				a.InstallNiwaPlugin(nil, a.Reporter, a.SkipPluginInstall)
-			}
 		}
 
 		// Step 0.3b: parse the (possibly just-refreshed) niwa.toml.
