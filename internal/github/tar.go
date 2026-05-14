@@ -218,18 +218,33 @@ func extractFromTarReader(tr *tar.Reader, subpath, dest string, bytesBudget int6
 // calls decider to resolve the rank, then re-iterates the buffered
 // bytes to extract entries under the resolved subpath into dest.
 //
-// Three caps run in series and all share the MaxDecompressedBytes
-// budget: Level A wraps the compressed input (unchanged from the
-// pre-existing defense at the LimitReader on r); Level B wraps the
-// decompressed output during buffer fill; Level C runs inside the
-// pass-2 extract via the cumulative-bytes check in extractFromTarReader.
-// If any of the three fires, the function returns the existing
-// cap-exceeded diagnostic before any disk write completes.
+// All seven security defenses from ExtractSubpath's documentation
+// apply on BOTH passes (probe and extract): the type allowlist
+// (defense 1), wrapper anchoring (defense 2), subpath filter
+// (defense 3), path-containment check (defense 4), filename
+// validation (defense 5), decompression-bomb defense (defense 6),
+// and atomic failure (defense 7). The probe pass shares the type-
+// allowlist check (isAllowedEntryType) with the extract pass so a
+// future contributor relaxing one cannot silently desynchronize
+// the two — the symlink-marker regression test guards this
+// invariant.
+//
+// Three caps run in series, all sharing the MaxDecompressedBytes
+// budget unless the test-only maxDecompressedBytesTestHook
+// overrides it: Level A wraps the compressed input (unchanged from
+// ExtractSubpath's existing LimitReader on r); Level B wraps the
+// decompressed output during buffer fill (NEW in this entry point);
+// Level C runs inside the pass-2 extract via the cumulative-bytes
+// check in extractFromTarReader. If any of the three fires, the
+// function returns the existing cap-exceeded diagnostic before any
+// disk write completes.
 //
 // The function returns (resolvedSubpath, rank, notice, err). rank is
 // 1 when the decider chose rank-1 (notice == nil), 2 when the decider
 // chose rank-2 (notice != nil), and 0 on error. On any error path the
-// function returns before pass-2 begins, leaving dest untouched.
+// function returns before pass-2 begins, leaving dest untouched
+// (defense 7 — atomic failure: dest remains byte-identical to its
+// pre-call state when err != nil).
 func ProbeAndExtractSubpath(
 	r io.Reader,
 	markers config.MarkerSet,
@@ -245,6 +260,7 @@ func ProbeAndExtractSubpath(
 
 	bytesBudget := MaxDecompressedBytes
 	if maxDecompressedBytesTestHook != nil {
+		// Test-only override; see maxDecompressedBytesTestHook docs.
 		bytesBudget = *maxDecompressedBytesTestHook
 	}
 	if truncate := testfault.TruncateAfter("fetch-tarball"); truncate >= 0 {
@@ -316,6 +332,14 @@ func ProbeAndExtractSubpath(
 // the extract pass uses, so a marker entry that the extractor would
 // reject (e.g., a symlink with the right name) does NOT get reported
 // as "found."
+//
+// PRD R6 (empty `.niwa/` does NOT count as rank-1): only `tar.TypeReg`
+// entries can satisfy a marker. A `tar.TypeDir` entry whose name
+// equals `markers.Rank1Dir` is allowed through the type-allowlist
+// (defense 1) and wrapper-anchoring (defense 2), but never matches
+// the rank-1 marker because the matching predicate below explicitly
+// skips non-`TypeReg` entries before comparing names. This is the
+// source-of-truth for the PRD R6 / AC-D8 rule at the probe layer.
 //
 // The returned MarkerSet has its Rank1Dir/Rank1File/Rank2Path fields
 // set only for markers actually observed at the source root after
