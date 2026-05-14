@@ -300,3 +300,180 @@ in summary:
 `GH_TOKEN` is read once at `APIClient` construction and attached as
 `Authorization: Bearer <token>` on outbound requests. The token
 never appears in error messages, log lines, or surfaced API types.
+
+## Source layouts (rank-1, rank-2, rank-3) {#source-layouts}
+
+niwa probes each remote source for one of two recognized layouts.
+The first marker found at the source root resolves rank; ambiguity
+(both markers present) and absence (neither marker present) are
+both errors.
+
+### Single-repo workspace {#single-repo-workspace}
+
+Story 1: you want to drive your day-to-day repository as a niwa
+workspace without standing up a separate `dot-niwa` repository.
+Drop `.niwa/workspace.toml` (plus any niwa-managed components like
+`CLAUDE.md`, `hooks/`, `mcp/`) into the repo and point `niwa init`
+at it:
+
+```bash
+niwa init --from owner/repo
+```
+
+niwa probes the source, finds the rank-1 marker at the source
+root, and materializes only the `.niwa/` subtree into the
+workspace's snapshot directory. The rest of the repo (your
+application code, README, src/, etc.) is never fetched — the
+selective extraction means even a multi-gigabyte general-purpose
+repo costs the same to clone as a tiny `dot-niwa` repo.
+
+On-disk shape at the source repo:
+
+```
+owner/repo/
+├── .niwa/
+│   ├── workspace.toml
+│   ├── CLAUDE.md
+│   ├── hooks/
+│   │   └── post-apply.sh
+│   └── mcp/
+│       └── filesystem.json
+├── src/                  # not fetched
+├── tests/                # not fetched
+└── README.md             # not fetched
+```
+
+The auto-discovered personal overlay (PRD R10) follows the slug
+naming convention `<owner>/<repo>-overlay` regardless of where the
+team config lived in the source. For a workspace seeded from
+`dangazineu/foo`, niwa probes for `dangazineu/foo-overlay`.
+
+### Brain repo {#brain-repo}
+
+Story 2: you maintain a "brain" repository like `acme/vision` that
+holds the org's product strategy alongside a niwa workspace. The
+brain repo is also the workspace's source — niwa's `discoverAllRepos`
+pass treats `acme/vision` as both the config source AND a repo that
+the workspace's `Classify` step pulls into the local checkout for
+day-to-day editing. The cross-reference in PR #138 covers the
+discovery refactor.
+
+The overlay slug for a brain repo follows the same R10 rule:
+`acme/vision` derives `acme/vision-overlay`, NOT `acme/.niwa-overlay`.
+
+### Overlay slug rule {#overlay-slug-rule}
+
+PRD R10 makes the overlay slug derivation unconditional: for any
+team config source with `Owner=<owner>` and `Repo=<repo-name>`, the
+auto-discovered overlay is `<owner>/<repo-name>-overlay`. The
+team config's subpath has no effect on the overlay's repo-name.
+
+Worked examples:
+
+```
+dangazineu/dot-niwa            → dangazineu/dot-niwa-overlay
+acme/vision                    → acme/vision-overlay
+acme/brain (with subpath .niwa) → acme/brain-overlay
+github.com/foo/bar             → foo/bar-overlay
+```
+
+This is a deliberate change from the previous behavior, which
+derived the overlay's repo-name from the team config's subpath
+(e.g., `acme/brain:.niwa` → `acme/.niwa-overlay`). Workspaces that
+relied on the old derivation see a one-time URL-change gate the
+next time they apply; the rename to the new convention is the
+remediation.
+
+### Rank-2 deprecation {#rank-2-deprecation}
+
+The rank 2 layout — `workspace.toml` at the source repo root with
+no `.niwa/` subdirectory — is deprecated but still accepted for
+backwards compatibility. niwa emits a one-time `note:` (PRD R14)
+the first time a workspace's team config or overlay resolves to
+rank 2:
+
+```
+note: source acme/dot-niwa uses the deprecated rank-2 layout
+(workspace.toml at repo root). Run /niwa:migrate-config to migrate
+the source to the rank-1 layout (.niwa/workspace.toml).
+```
+
+The notice is recorded into `InstanceState.DisclosedNotices`, so
+subsequent applies on the same workspace stay silent.
+
+The `/niwa:migrate-config` skill (auto-installed; see
+[niwa plugin install](#niwa-plugin-install) below) walks the user
+through two migration paths (PRD R23):
+
+1. **In-place restructure**: the source-repo maintainer adds
+   `.niwa/`, moves `workspace.toml` into it, and pushes. The
+   workspace user runs `niwa apply --force <workspace>` to
+   re-discover.
+2. **Slug swap**: the workspace user points the registry at a
+   different repo that already carries the rank-1 layout. niwa
+   rewrites `source_url` in `~/.config/niwa/config.toml`; the user
+   runs `niwa apply --force <workspace>`.
+
+The hard removal of rank-2 acceptance is deferred to a future
+release — until then, rank-2 workspaces continue to work but
+disclose the deprecation once each.
+
+### Rank-3 removal {#rank-3-removal}
+
+A previous niwa iteration recognized a third layout: `niwa.toml`
+at the source repo root acting as a workspace config (rank 3).
+That layout has been removed. niwa never probes for `niwa.toml`;
+sources that ship only `niwa.toml` resolve as no-marker (PRD R4)
+and fail with a clear error.
+
+Existing workspaces seeded from rank-3 sources need their source
+repos migrated to either rank 1 (`.niwa/workspace.toml`) or rank 2
+(`workspace.toml` at root). The /niwa:migrate-config skill does
+NOT handle rank-3 → rank-1 transitions automatically — the rank-3
+schema diverged enough from the current `workspace.toml` shape
+that manual review is required.
+
+## niwa plugin install {#niwa-plugin-install}
+
+When niwa detects a rank-2 source (team config OR overlay), it
+auto-installs an embedded Claude Code plugin to make the
+`/niwa:migrate-config` skill available the next time the user
+invokes Claude Code. The plugin lives at
+`~/.claude/plugins/marketplaces/niwa/` and is fully self-contained
+in the niwa binary via `//go:embed` — no network fetch happens at
+install time (PRD R17).
+
+The install is silent in the success path: niwa emits a single
+disclosure note alongside the rank-2 deprecation notice (PRD R18),
+records the install in `InstanceState.DisclosedNotices`, and
+suppresses the note on subsequent applies. Idempotent re-runs that
+find an up-to-date plugin on disk return `(UpToDate, nil)` without
+mutating the filesystem.
+
+### Opting out
+
+Two opt-out paths (PRD R19) are honored:
+
+- **Persistent**: set `auto_install_plugins = false` in
+  `~/.config/niwa/config.toml`'s `[global]` section. The flag
+  applies to every `niwa init` and `niwa apply` invocation.
+- **Per-invocation**: pass `--no-install-plugins` to
+  `niwa init` or `niwa apply`. Overrides the persistent setting
+  for the current command only.
+
+Either opt-out causes niwa to emit a skip-notice with the manual
+install command:
+
+```
+note: niwa Claude Code plugin install skipped. To install manually,
+run: niwa --install-plugins
+```
+
+### Failure handling
+
+A user-environment failure (read-only `$HOME`, permission denied,
+mid-rename filesystem error) is treated the same as an opt-out
+(PRD R20): niwa emits the skip-notice with the manual install
+command and continues — `niwa apply` does not exit non-zero
+because the plugin install couldn't run. The `<install-path>.next/`
+staging directory is cleaned up so the next apply can retry.
