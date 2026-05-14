@@ -7,16 +7,16 @@ process per machine, federated across every workspace.
 
 ## Process topology
 
-niwa runs two long-lived processes per machine for the F5 collab
+niwa runs two long-lived processes per machine for the collab
 surface:
 
 | Process | Scope | What it does |
 |---------|-------|--------------|
-| `niwa mesh watch` (one per niwa instance) | Per-instance daemon | Claims queued task envelopes from the per-role inboxes and spawns worker processes per task. Existed before F5. |
+| `niwa mesh watch` (one per niwa instance) | Per-instance daemon | Claims queued task envelopes from the per-role inboxes and spawns worker processes per task. Pre-existing infrastructure. |
 | `niwa mcp-serve` (per session) | Per-session | Hosts the MCP server inside a session worktree. Writes `.niwa/changes/<id>/` directly when agents call `niwa_create_change`. |
 | `niwa surface serve` (one per user) | **Machine-level** — single process across the user's whole niwa fleet | Reads `~/.config/niwa/config.toml`, enumerates every registered workspace and every niwa instance under it, and serves a federated HTTP index at 127.0.0.1:&lt;port&gt;. |
 
-There is **no** Telegram bridge in F5. The `change_ready` event lands
+There is **no** Telegram bridge in this feature. The `change_ready` event lands
 in each instance's `mcp-audit.log`; a future bridge spec will decide
 how that reaches a notification channel.
 
@@ -50,8 +50,8 @@ http://127.0.0.1:<port>/workspaces/<workspace>/<instance>/changes/  → changes 
 http://127.0.0.1:<port>/workspaces/<workspace>/<instance>/changes/<change-id>   → per-change page
 ```
 
-The `#comment-<id>` URL fragment is reserved for F6+ (line-anchored
-comments) — F5 leaves it inert but locks the shape so future
+The `#comment-<id>` URL fragment is reserved for future line-anchored
+comments — this feature leaves it inert but locks the shape so future
 deep-links stay stable.
 
 Workspace identifiers come from the registry key
@@ -63,8 +63,8 @@ appears as the `_root` instance.
 
 A `surface.token` is generated on first boot at
 `~/.config/niwa/surface.token` (mode `0o600`, UUIDv4 from
-`crypto/rand`). The token gates **mutation endpoints** — F5 has none
-yet, but F10's verdict-cast endpoint will require it. Read-only
+`crypto/rand`). The token gates **mutation endpoints** — this feature
+ships none yet, but a future verdict-cast endpoint will require it. Read-only
 endpoints (the workspace, instance, and change views) require no
 authentication because anything on the same machine that can
 `curl 127.0.0.1` can already read `.niwa/changes/<id>/` directly.
@@ -148,7 +148,7 @@ not for agents:
 
 These tools work whether or not `niwa surface serve` is running, and
 they read directly from `.niwa/changes/<id>/state.json` and
-`transitions.log`. Cross-instance agent visibility is **not** in F5
+`transitions.log`. Cross-instance agent visibility is **not** in this feature's
 scope — each MCP server serves its own instance only.
 
 ## Troubleshooting

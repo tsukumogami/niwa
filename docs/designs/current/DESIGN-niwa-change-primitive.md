@@ -1,7 +1,7 @@
 ---
 status: Current
 problem: |
-  The F5 PRD locks every shape downstream features encode against — the
+  The the PRD locks every shape downstream features encode against — the
   ChangeState v=1 schema, the audit log v=2 bump, the four-event
   taxonomy, the MCP tool I/O, the URL contract, the auth contract, the
   GC behavior. What it does NOT pick is how to lay those decisions onto
@@ -13,10 +13,10 @@ problem: |
   ref + head ref + a real diff into the test sandbox without network
   access. Getting the wiring wrong leaks lifecycle responsibilities
   across packages (signal handlers in `internal/web/`, GC tickers in
-  the MCP server) and forecloses the clean separation F10's verdict
+  the MCP server) and forecloses the clean separation the future verdict-cast
   endpoint will need.
 decision: |
-  Two processes own the F5 substrate, communicating only through the
+  Two processes own the this substrate, communicating only through the
   filesystem. (1) The per-session `niwa mcp-serve` process registers
   the three new MCP tools in `internal/mcp/handlers_change.go` and
   writes to `.niwa/changes/<id>/` directly — it does NOT host the HTTP
@@ -69,7 +69,7 @@ rationale: |
   should re-derive. The `internal/web/render/` split is the only web
   subpackage that earns its keep — the listener and the GC sweep
   live in `internal/web/` directly because each is a single file's
-  worth of code at F5, and over-decomposing greenfield packages
+  worth of code at this stage, and over-decomposing greenfield packages
   obscures the call graph for first-time readers. `html/template` is
   chosen over hand-rolled string formatting because diff bodies
   contain `<script>` tags from real changes and the template engine's
@@ -78,7 +78,7 @@ rationale: |
   site.
 ---
 
-# DESIGN: niwa Change-as-Reviewable Primitive and Basic Web Render (F5)
+# DESIGN: niwa Change-as-Reviewable Primitive and Basic Web Render
 
 ## Status
 
@@ -88,7 +88,7 @@ Current
 
 ### A1: Reshape from per-instance to machine-scope `niwa surface serve`
 
-The original design split F5 into a per-session `niwa mcp-serve` and a
+The original design split this feature into a per-session `niwa mcp-serve` and a
 per-instance `niwa surface serve`. Operator feedback during
 implementation flagged that with 3–10 active niwa instances per
 machine the per-instance shape produces 3–10 separate HTTP listeners
@@ -122,7 +122,7 @@ owned by a single agent; the plural shape was YAGNI under that
 ownership model.
 
 The Telegram bridge — Decision D1 in the PRD — remains fully
-deferred. F5 no longer claims any Telegram delivery; the
+deferred. this feature no longer claims any Telegram delivery; the
 `change_ready` event lands in the per-instance `mcp-audit.log` and a
 separate spec (yet to be filed) decides how it reaches a notification
 channel.
@@ -134,12 +134,10 @@ strategy) are unchanged.
 
 ## Context and Problem Statement
 
-niwa's collab surface roadmap (F5–F15 in the niwa collab-surface
-milestone ladder; F5 is this change-as-reviewable primitive, F6 is
-comments, F10 is the verdict gate, F18 is the notification bridge,
-and so on) encodes every downstream feature against a `change` object
-that does not exist yet, and a web surface category niwa has never
-shipped. The F5 milestone locks verbatim contracts that downstream
+niwa's collab-surface direction encodes every downstream feature
+against a `change` object that does not exist yet, and a web surface
+category niwa has never shipped. This change-as-reviewable primitive
+locks verbatim contracts that downstream
 features compose against: the ChangeState v=1 schema, the audit log
 v=2 bump, four event payloads, three MCP tool I/O shapes, the
 `/changes/<id>#comment-<id>` URL contract, the per-instance Bearer
@@ -179,7 +177,7 @@ inventing the patterns.
   design hoists / extends them instead.
 - **Sub-package boundaries earn their keep.** niwa has 12
   `internal/` packages today. Adding a half-dozen subpackages under
-  `internal/web/` for F5's 600-ish lines of new code would obscure the
+  `internal/web/` for this feature's 600-ish lines of new code would obscure the
   call graph more than it clarifies separation.
 - **`html/template` automatic contextual escaping is load-bearing.**
   Diff bodies contain `git diff` output that may include `<script>`
@@ -242,20 +240,20 @@ internal/web/
 │   └── templates.go  # //go:embed templates/*.tmpl, parse once at init
 ├── gc/
 │   └── sweep.go      # GC loop, on-boot sweep, ticker, abandoned-detection
-└── auth.go           # Bearer-token middleware (no-op for F5 reads; locked for F10)
+└── auth.go           # Bearer-token middleware (no-op for reads now; locked for future mutation endpoints)
 ```
 
 **Why:** `internal/web/render/` earns separation because templates
-and the embedded CSS are a self-contained surface F11/F12/F13 will
+and the embedded CSS are a self-contained surface future surfaces will
 swap or extend independently of the listener. `internal/web/gc/`
 earns separation because the GC sweep has its own goroutine
 lifecycle, its own ticker, and its own boot-time scan distinct from
 serving HTTP. The listener boot and the three handlers live in
 `internal/web/server.go` and `internal/web/handlers.go` directly
-because each is single-file-sized at F5 and over-decomposing would
+because each is single-file-sized  at this stage and over-decomposing would
 obscure the call graph for first-time readers. Auth middleware lives
-in `internal/web/auth.go` even though F5 has no mutation endpoints,
-because F10 will compose verdict-cast mutations on the same
+in `internal/web/auth.go` even though this feature has no mutation endpoints,
+because a future verdict-cast feature will compose verdict-cast mutations on the same
 middleware and the contract is locked here.
 
 **Alternative considered:** Flat `internal/web/web.go` single-file
@@ -277,12 +275,12 @@ how does the command tree compose?
 - `--rotate-token` (bool, default false).
 
 The parent `surface` noun is reserved for future subcommands
-(`niwa surface status`, `niwa surface stop` if F11/F13 needs them);
-F5 ships only `serve`.
+(`niwa surface status`, `niwa surface stop` if future surfaces needs them);
+this PR ships only `serve`.
 
 **Why:** Mirrors the existing session/mesh CLI pattern so operators
 learning niwa today see one consistent shape. The two-level command
-tree leaves room for F10+ subcommands without renaming. Boot proceeds
+tree leaves room for post-verdict-cast subcommands without renaming. Boot proceeds
 through the steps the PRD R10 enumerates (acquire lock → ensure
 token → bind port → write `surface.port` → log → run GC once →
 start serving + GC ticker → wait for SIGTERM).
@@ -338,7 +336,7 @@ live, what does it take as arguments, and what does it lock?
 **Chosen:** New file `internal/mcp/changelog.go` exports:
 
 ```go
-// ChangeEvent is the F5 event taxonomy (R5).
+// ChangeEvent is the the change-lifecycle event taxonomy (R5).
 type ChangeEvent struct {
     Kind     string         // "change_ready" | "review_surface_opened" | "change_engaged" | "change_cleaned"
     ChangeID string         // empty for review_surface_opened
@@ -377,7 +375,7 @@ package-level function avoids passing the whole server around.
 
 ### D6: Audit log v=2 reader backward compatibility
 
-**Question:** Records emitted before F5 ships use v=1 (no `kind`, no
+**Question:** Records emitted before this PR ships use v=1 (no `kind`, no
 `payload`). The v=2 reader on the reference fleet must keep parsing
 them.
 
@@ -615,7 +613,7 @@ procfs availability and adds a code path the existing
 
 **Note on existing helper:** `internal/mcp/liveness.go` already
 exports `IsPIDAlive(pid, startTime int64)` which combines a PID +
-start-time check used by the daemon. F5's `surface.lock` only stores
+start-time check used by the daemon. this feature's `surface.lock` only stores
 the PID (no start time); rather than expand the lock format, the
 surface uses a lighter `IsProcessAlive(pid int)` helper added to
 `internal/mcp/liveness.go` that omits the start-time gate. The daemon
@@ -664,7 +662,7 @@ fixtures support this offline?
 // baseContent as content.txt, the second amends headContent into the
 // same file. The returned file:// URL clones to a worktree whose
 // `git diff origin/main..HEAD` produces a non-empty unified diff. The
-// helper is used by F5's review-surface.feature scenarios.
+// helper is used by this feature's review-surface.feature scenarios.
 func (s *localGitServer) SourceRepoWithDiff(name, baseContent, headContent string) (string, error)
 ```
 
@@ -677,7 +675,7 @@ real worktree.
 
 **Why:** The `localGitServer` helper is already the offline-test
 substrate niwa uses for every functional test that needs a git repo;
-extending it with one focused method covers the F5 walking-skeleton
+extending it with one focused method covers the walking-skeleton
 without adding a parallel fixture path. Hand-constructing
 `state.json` + `diff.patch` for unit tests avoids the cost of
 spawning git for tests that only exercise HTTP rendering — the
@@ -688,7 +686,7 @@ git there would let the diff format drift.
 
 ## Decision Outcome
 
-The F5 implementation lands as:
+The implementation lands as:
 
 1. **Two processes**: per-session `niwa mcp-serve` writes to
    `.niwa/changes/<id>/` and emits `change_ready` into
@@ -792,7 +790,7 @@ internal/
 └── web/
     ├── server.go               # listener boot, routing, lifecycle
     ├── handlers.go             # GET /, GET /changes/, GET /changes/<id>
-    ├── auth.go                 # Bearer middleware (F5: no-op for reads)
+    ├── auth.go                 # Bearer middleware (no-op for reads; locked for future mutation endpoints)
     ├── render/
     │   ├── render.go           # RenderChange / RenderIndex
     │   ├── templates.go        # //go:embed templates/*.tmpl
@@ -839,11 +837,11 @@ type ChangeState struct {
     Branch              string         `json:"branch"`
     WorktreePath        string         `json:"worktree_path"`
     DiffPath            string         `json:"diff_path"`
-    Verdict             *Verdict       `json:"verdict"` // always nil at F5
+    Verdict             *Verdict       `json:"verdict"` // always nil today
     Metadata            map[string]any `json:"metadata"`
 }
 
-type Verdict struct{} // reserved; F10 populates fields
+type Verdict struct{} // reserved; the future verdict-cast populates fields
 
 const (
     ChangeStatePending     = "pending"
@@ -853,9 +851,10 @@ const (
 )
 ```
 
-`Verdict` is a typed nil at F5 (always serialized as `null`); F10
-adds fields. Using a pointer-to-struct instead of `any` lets the
-compiler check the verdict shape when F10 lands.
+`Verdict` is a typed nil today (always serialized as `null`); a
+future verdict-cast feature will add fields. Using a pointer-to-struct
+instead of `any` lets the compiler check the verdict shape when the
+future verdict-cast lands.
 
 ### Key code paths
 
@@ -937,7 +936,7 @@ The change state machine encoded in `changestore.UpdateState`:
 ```
                   HTTP GET /changes/<id>
                           ▼
-       ┌───────────┐    ┌─────────────┐    F10 verdict cast
+       ┌───────────┐    ┌─────────────┐    future verdict cast
        │  pending  │──▶ │  in-review  │ ─────────────────────▶ verdict-cast
        └───────────┘    └─────────────┘                              │
              │                                                       │
@@ -945,7 +944,7 @@ The change state machine encoded in `changestore.UpdateState`:
              │ (≥ gc_abandon_days)                                   │
              ▼                                                       │
        ┌───────────┐                                                 │
-       │  cleaned  │  ◀───── (F5 never sweeps in-review/verdict-cast) ┘
+       │  cleaned  │  ◀───── (this feature never sweeps verdict-cast) ┘
        └───────────┘
 ```
 
@@ -958,7 +957,7 @@ the state write is the only deduped operation.
 ### Cross-cutting interfaces
 
 **The `appendEventLog` contract (D5).** Every code path that needs
-to emit an F5 event calls `mcp.AppendChangeEvent`. The function
+to emit an the change-lifecycle event calls `mcp.AppendChangeEvent`. The function
 hides the dual-target fan-out: a per-change `transitions.log` line
 under the per-change flock, plus an audit-log v=2 line under the
 sink's mutex. Errors are returned (callers ignore them).
@@ -1027,8 +1026,8 @@ parallelize.
   `/changes/<id>`. Each handler reads state, mutates if needed
   (`pending → in-review` on the per-change endpoint), emits the
   matching event, renders the template.
-- **`internal/web/auth.go`** — Bearer middleware. F5 wires it but
-  applies it to zero routes; F10 will compose by tagging mutation
+- **`internal/web/auth.go`** — Bearer middleware. this PR wires it but
+  applies it to zero routes; a future verdict-cast feature will compose by tagging mutation
   routes.
 - **`internal/web/render/`** — templates, embedded CSS, render
   functions.
@@ -1087,21 +1086,21 @@ implementation-level mechanisms that satisfy it.
 | Stale `surface.lock` lets two listeners bind concurrently | PID liveness check via `Signal(0)` with `EPERM` fail-closed (D12); the second listener also fails on the `net.Listen` bind with `EADDRINUSE` as a backstop | `surface.go`, `liveness.go` |
 | Token leak via logs / stderr | First-boot stderr message includes only the path to `.niwa/surface.token` and never the token contents (PRD R10 step 4) | `surface.go` |
 | Token leak via filesystem readable by non-owner | File modes `0o600` enforced at every write; directory `0o700` | `surface.go`, `changestore.go` |
-| Prompt-injection in `metadata` field reaching audit log | `metadata` is opaque to F5 — never read into payload, never logged. PRD R1 commits this | `handlers_change.go` |
+| Prompt-injection in `metadata` field reaching audit log | `metadata` is opaque to this feature — never read into payload, never logged. PRD R1 commits this | `handlers_change.go` |
 | Bearer-auth token in URLs | Auth contract is header-only (`Authorization: Bearer ...`); query params and cookies explicitly rejected (PRD R6) | `auth.go` |
 | Diff content path traversal (a change `id` like `../foo`) | UUIDv4 regex validation on every read in `changestore.Read` (mirrors `taskstore.ReadState` validation discipline); `filepath.Join` of validated `id` only | `changestore.go` |
 
 ### Defense-in-depth boundary
 
-The F5 security boundary is per-host. Any process on the same UID
+The security boundary is per-host. Any process on the same UID
 that can `curl 127.0.0.1:<port>` can also `cat
-.niwa/changes/<id>/state.json`; the token gates mutations (F10+
+.niwa/changes/<id>/state.json`; the token gates mutations (post-verdict-cast
 endpoints), not reads. Cross-host access is structurally impossible
 because the listener never binds a non-loopback interface.
 
 ### What this design does NOT defend against
 
-- **Compromised same-UID process.** F5 has no mitigation for an
+- **Compromised same-UID process.** this feature has no mitigation for an
   attacker who has already executed code as the niwa user. The
   whole substrate is read/writable to that attacker; no protocol
   hardening here changes that.
@@ -1129,7 +1128,7 @@ escalated review).
 
 - **Clean per-instance vs. per-session separation.** The two
   processes share only filesystem state; restarts of one do not
-  perturb the other. F10's verdict-cast endpoint will compose
+  perturb the other. the future verdict-cast-cast endpoint will compose
   cleanly on this boundary.
 - **Audit log v=2 is additive.** Existing v=1 records continue to
   parse; new event records use the same atomicity model. No data
@@ -1150,11 +1149,11 @@ escalated review).
 - **Two processes to run.** Operators must remember to start
   `niwa surface serve` after `niwa create` / `niwa apply`. The CLI
   guide must call this out clearly. A future enhancement (e.g.
-  `niwa apply --start-surface`) can fold the boot, but F5 keeps the
+  `niwa apply --start-surface`) can fold the boot, but this feature keeps the
   scope minimal.
 - **No dynamic config reload.** `gc_interval_hours` and
   `gc_abandon_days` are read at boot; changing them requires
-  restarting `niwa surface serve`. Acceptable for F5 (these change
+  restarting `niwa surface serve`. Acceptable for now (these change
   rarely); future work can add `niwa surface reload` if needed.
 - **Audit-log v=2 readers in the wild.** Any tool that currently
   parses `mcp-audit.log` directly (none on the reference fleet but
@@ -1169,9 +1168,9 @@ escalated review).
 
 The original design had GC reap only `pending` changes past the
 abandonment threshold, on the rationale that an in-review change had
-a reviewer attached and F10's verdict-cast was the imminent exit
+a reviewer attached and the future verdict-cast-cast was the imminent exit
 transition. A post-implementation reachability audit surfaced that
-between F5 ship and F10 ship `in-review` has *no* exit transition at
+between this feature ship and the future verdict-cast feature ship `in-review` has *no* exit transition at
 all — any HTTP GET on a change advances `pending → in-review` under
 the per-change flock, and a stale Telegram bookmark, search-bot
 crawl, or accidental click parks the change in `in-review`
@@ -1181,7 +1180,7 @@ Two amendments to close the gap:
 
 1. **Sweep eligibility broadens.** `sweepOnce` now considers both
    `pending` and `in-review` changes past `AbandonDays`. `verdict-cast`
-   stays out of scope (human attestation must persist through F10's
+   stays out of scope (human attestation must persist through the future verdict-cast feature's
    continuation, whatever it is). Cleaned changes are still skipped
    structurally, plus a new idempotency pass reclaims any
    `diff.patch` leaked by a daemon that crashed between
@@ -1202,10 +1201,10 @@ Two amendments to close the gap:
    the auto-cascade, not call the verb directly.
 
 The `niwa-mesh` skill's `allowed-tools` block grows to 18 entries
-(the original 14 + the three F5 verbs from the original ship + the
+(the original 14 + the three change-primitive verbs from the original ship + the
 new `niwa_cancel_change`). Workers operating under the skill can now
-reach every F5 verb directly — fixing a shipped-but-unreachable gap
-where the skill omitted the F5 tools entirely.
+reach every change-primitive verb directly — fixing a shipped-but-unreachable gap
+where the skill omitted the change-primitive tools entirely.
 
 ### Considered and deferred — URL composition reads global config per call
 
@@ -1215,7 +1214,7 @@ workspace+instance identity for the calling instance root by reading
 every `niwa_create_change` / `niwa_list_changes` URL emit. Same for
 the surface port read from `~/.config/niwa/surface.port`.
 
-For F5 the call frequency is low (a handful of changes per session
+For this feature the call frequency is low (a handful of changes per session
 per day at the reference-fleet load), so per-call disk reads are not
 a bottleneck. The (workspace, instance) tuple is also deterministic
 from the instance root and the registry — caching it at MCP server
@@ -1235,8 +1234,9 @@ because:
    exist yet.
 
 If profiling shows the per-call read becomes hot (unlikely below
-~100 changes/sec, three to four orders of magnitude above F5's
-observed load), the cache can be added behind the same function-
+~100 changes/sec, three to four orders of magnitude above this
+feature's observed load), the cache can be added behind the same
+function-
 indirection variables (`surfaceConfigDirFn`, `loadGlobalConfigFn`,
 `resolveWorkspaceInstanceFn`) the tests already use, with cache
 invalidation on a registry-file mtime check. Noted here so future-
@@ -1259,15 +1259,15 @@ deferral target so the PLAN phase has zero remaining design
 ambiguity.
 
 - **Telegram bridge wiring.** Deferred to the niwa↔coding-tools
-  notification bridge spec (PRD D1). F5 emits `change_ready` correctly
+  notification bridge spec (PRD D1). this feature emits `change_ready` correctly
   into the audit substrate; the bridge picks the transport.
-- **Multi-instance event aggregation.** F5 emits per-instance; bridge
+- **Multi-instance event aggregation.** this feature emits per-instance; bridge
   spec owns cross-instance fan-out (PRD Open Item 2).
 - **Comments primitive, verdict cast, line anchoring, threading,
   mentions, CLI/TUI surfaces, polished web UX, koto linkage, hosted
-  tier.** All deferred to F6–F16 per PRD's deferral table.
+  tier.** All deferred to the corresponding future milestones per PRD's deferral table.
 - **`niwa surface stop` / `niwa surface status`.** Reserved as
-  subcommands of the `surface` noun; F5 ships only `serve`. Future
+  subcommands of the `surface` noun; this PR ships only `serve`. Future
   PRDs may add them as operational ergonomics emerge.
 - **`audit_reader` migration helper** for downstream consumers if
   any surface. Filed at PLAN time as a follow-up issue (no consumer

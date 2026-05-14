@@ -168,7 +168,7 @@ const channelsSectionHeader = "## Channels"
 //     list_outbound, update, cancel
 //   - Peer messaging (3): ask, send_message, check_messages
 //   - Session lifecycle (3): create, destroy, list
-//   - Change lifecycle (3, F5): create_change, list_changes, query_change
+//   - Change lifecycle (4): create_change, list_changes, query_change, cancel_change
 var niwaMCPToolNames = []string{
 	"niwa_delegate",
 	"niwa_query_task",
