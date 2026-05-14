@@ -405,7 +405,7 @@ func EmitRank2Notice(state *InstanceState, id, identifier string, reporter *Repo
         "note: %s is using the deprecated whole-repo config layout "+
             "(root workspace.toml). Future releases will require config under "+
             ".niwa/workspace.toml. To migrate, run: "+
-            "/shirabe:niwa-migrate-config %s in Claude Code.",
+            "/niwa:migrate-config %s in Claude Code.",
         identifier, identifier,
     )
     reporter.Log(msg)
@@ -417,7 +417,7 @@ Emission happens *after* snapshot promotion succeeds (after the
 atomic swap), so a fetch failure between the probe and the swap
 never leaves a deprecation notice for a snapshot that never
 landed. The notice's literal-substring requirements
-(`deprecated`, identifier, `/shirabe:niwa-migrate-config` per
+(`deprecated`, identifier, `/niwa:migrate-config` per
 PRD R14 and AC-N1 / AC-N2) live in one function — one place to
 change, one place to test.
 
@@ -449,9 +449,9 @@ substring requirements have a single source of truth.
 
 ### Decision 4: niwa CLI entry point for the migration skill
 
-**Context.** The shirabe migration skill needs to probe a slug
-without re-implementing the tarball-stream-and-scan in
-TypeScript/JavaScript (PRD R18). Path (b) of the migration
+**Context.** The niwa-owned migration plugin's skill needs to
+probe a slug without re-implementing the tarball-stream-and-scan
+in TypeScript/JavaScript (PRD R22). Path (b) of the migration
 (slug-swap) probes an *unregistered* destination slug, so the
 entry point must accept arbitrary slugs, not just workspace
 names. The probe must be read-only (no fetch beyond what
@@ -516,6 +516,103 @@ consumer (the user) might want.
   count, creates drift risk between binaries, offers no benefit
   over a subcommand of the existing binary.
 
+### Decision 5: Migration plugin distribution and install lifecycle
+
+**Context.** PRD R16-R20 introduces a niwa-owned Claude Code
+plugin (`niwa`) hosting the migration skill (`/niwa:migrate-config`).
+niwa needs to (a) ship the plugin somewhere users can get it,
+(b) install it onto the user's machine without breaking the
+"no user action required" guarantee (PRD R25), and (c) honour
+opt-out for users who don't want niwa writing under
+`~/.claude/`. Four sub-decisions composed via parallel decision
+runs and recorded individually in
+`wip/design_config-source-discovery_plugin-decision_{1,2,3,4}_report.md`:
+
+**Sub-decision 5.1 — Distribution: embed in niwa binary via Go's `embed`.**
+Plugin source tree (manifest + skill markdown) is bundled into
+the niwa binary at build time via `embed.FS`. Auto-install
+extracts to `~/.claude/plugins/marketplaces/niwa/`.
+**Alternatives**: download from GitHub releases on demand;
+print install instructions only; hybrid (download first, embed
+fallback). **Reasoning**: payload is small (well under 200 KB
+of text); version coherence with the niwa binary is a hard
+requirement (the skill calls specific CLI shapes like
+`niwa source inspect --json`); offline tolerance is mandatory.
+Network options add 3+ failure modes (network, checksum,
+extract) on a payload too small to benefit; print-only loses
+the auto-install UX; hybrid pays both costs for the
+version-drift risk the constraints forbid.
+
+**Sub-decision 5.2 — Trigger: on first rank-2 detection, with on-disk idempotency gate.**
+The install rides the same `if rank == 2` branch as the R14
+deprecation notice but uses an independent gate: `os.Stat` on
+the plugin path + a `manifest.json` version check. If the
+manifest is absent or older than the embedded version, extract
+atomically (stage to `<install-path>.next/`, rename into place).
+If current, no-op. **Alternatives**: install on every apply
+unconditionally; install only on an explicit subcommand;
+install on rank-2 AND self-heal every apply. **Reasoning**:
+"installed automatically if the workspace needs migration"
+maps to (chosen). Always-install surprises rank-1 users.
+Explicit-only loses the auto UX. Self-heal-every-apply
+reduces to either always-install or the chosen design.
+The gate is independent from `DisclosedNotices` because
+install scope is installation-wide and the notice scope is
+per-workspace-per-artifact — sharing one ID would either
+fire the install N times or under-emit the notice.
+
+**Sub-decision 5.3 — Consent: silent install with audited disclosure + opt-out toggle + per-invocation flag.**
+No interactive prompt anywhere. Install success emits a
+one-time `plugin-installed:niwa` notice via `DisclosedNotices`
+(same scope-per-workspace-per-command-type as the R14
+deprecation notice). Opt-out has two levels:
+`auto_install_plugins = false` in `~/.config/niwa/config.toml`
+(persistent), and `--no-install-plugins` on init/apply
+(per-invocation). Opted-out runs emit
+`plugin-install-skipped:niwa` with the manual install command.
+Install failures (read-only `$HOME`, locked-down container)
+are warn-and-continue — apply still succeeds.
+**Alternatives**: prompt with default-yes and `--yes` skip;
+silent install without disclosure; refuse-and-print. **Reasoning**:
+PRD R25 forbids a blocking prompt on first apply post-upgrade.
+The R25-compatible variant of prompt-with-skip (only-prompt-on-TTY)
+re-invents the opt-out toggle. Silent-without-disclosure is
+unauditable. Refuse-and-print loses the auto UX and is
+preserved as the opt-out path. Two-level opt-out matches
+niwa's existing flag style.
+
+**Sub-decision 5.4 — Naming: plugin `niwa`, skill `/niwa:migrate-config`.**
+Bare-project-name plugin matches the sole sibling-plugin
+precedent (`shirabe`), accommodates future niwa-owned skills
+(`/niwa:doctor`, `/niwa:explain`) without renaming, keeps the
+invocation string at 21 characters. **Alternatives**:
+`niwa-tools` / `niwa-migration` plugin names; `/niwa:migrate`
+bare-verb skill. **Reasoning**: `niwa-tools` addresses a
+binary-collision concern that doesn't exist in practice;
+`niwa-migration` locks the plugin into one-skill scope;
+`/niwa:migrate` introduces ambiguity (migrate-vault,
+migrate-snapshot, migrate-overlay are defensible future skills).
+
+#### Composite chosen
+
+The four sub-decisions compose into a coherent lifecycle:
+embedded plugin (5.1) extracts at first rank-2 hit (5.2)
+without prompting (5.3) under the `niwa` namespace (5.4). The
+deprecation notice text already references
+`/niwa:migrate-config` per the PRD; a separate `plugin-installed:niwa`
+disclosure on the install action makes the side effect visible.
+The install path `~/.claude/plugins/marketplaces/niwa/` is
+chosen to match the directory structure already in use by the
+shirabe plugin on this user's system.
+
+#### Alternatives Considered
+
+The "no plugin at all, niwa CLI command instead" alternative
+was already evaluated and rejected in the prior round of this
+PRD (and replaced via the user's explicit redirect to a
+plugin-shaped migration tool). The four sub-decisions above
+each have their own alternatives documented inline.
+
 ## Decision Outcome
 
 The four decisions compose into a single coherent pipeline.
@@ -561,14 +658,32 @@ function returns `<owner>/<repo>-overlay` regardless of subpath.
 The overlay snapshot is then materialized using the same Step
 1-5 pipeline, parameterized by overlay marker filenames.
 
-**Step 7 — Migration skill surface** (Decision 4): the shirabe
-skill shells out to `niwa source inspect <slug> --json` to probe
-a registered workspace's source or a candidate destination slug.
-The same probe code (factored as `ProbeMarkers` from
-`ProbeAndExtractSubpath`) runs in read-only mode — no extraction,
-no notice emission, no registry mutation. The skill parses the
-JSON, presents migration paths to the user, and edits the
-registry on the user's confirmation.
+**Step 7 — Migration skill surface** (Decision 4): the niwa
+plugin's skill shells out to `niwa source inspect <slug> --json`
+to probe a registered workspace's source or a candidate
+destination slug. The same probe code (factored as `ProbeMarkers`
+from `ProbeAndExtractSubpath`) runs in read-only mode — no
+extraction, no notice emission, no registry mutation. The skill
+parses the JSON, presents migration paths to the user, and edits
+the registry on the user's confirmation.
+
+**Step 8 — Plugin install lifecycle** (Decision 5): in the same
+apply that promotes the rank-2 snapshot (Step 4), niwa runs the
+plugin install pipeline: `os.Stat` the install path; if the
+on-disk `manifest.json` is absent or older than the embedded
+plugin's version, extract the embedded plugin to
+`<install-path>.next/` and rename into place; if current, no-op.
+On install success the `disclosure.go` helper emits a one-time
+`plugin-installed:niwa` notice via `DisclosedNotices`, scoped
+per-workspace per-command-type. Opt-out via
+`auto_install_plugins = false` or `--no-install-plugins`
+short-circuits to a `plugin-install-skipped:niwa` disclosure
+instead, with the manual install command printed in the notice
+text. Install failures (read-only `$HOME`, etc.) warn-and-continue:
+niwa logs the failure with the manual install command but
+apply still returns 0. The install runs after Step 5's
+deprecation notice; the two disclosures (`rank2-deprecation:*`
+and `plugin-installed:niwa`) are independent in DisclosedNotices.
 
 ## Solution Architecture
 
@@ -644,6 +759,47 @@ internal/cli/source_inspect.go                    (NEW file)
                                                   # parses slug via internal/source.Parse
                                                   # fetches + ProbeMarkers (no extract, no notice)
                                                   # emits JSON or human text per --json
+
+plugins/niwa/                                     (NEW source tree, embedded via embed.FS)
+  manifest.json                                   # {"name":"niwa","version":"X.Y.Z", ...}
+  skills/migrate-config/SKILL.md                  # /niwa:migrate-config <workspace-name>
+  (additional resources as needed)
+
+internal/plugin/                                  (NEW package)
+  embed.go
+    //go:embed plugins/niwa
+    var pluginFS embed.FS                         # Decision 5.1: ship via Go's embed
+    type InstalledPlugin struct{ Name, Version, Path string }
+    Embedded() InstalledPlugin                    # read embedded manifest version
+  installer.go
+    Install(state *InstanceState, reporter *Reporter, opts InstallOpts) (Action, error)
+                                                  # Decision 5.2/5.3:
+                                                  #   os.Stat ~/.claude/plugins/marketplaces/niwa/
+                                                  #   compare embedded vs on-disk version
+                                                  #   atomic stage+rename if newer/missing
+                                                  #   emits NoticeIDPluginInstalled / Skipped via state
+    type Action int                               # Installed | UpToDate | Skipped | Failed
+    type InstallOpts struct{ SkipInstall bool }   # --no-install-plugins or config.auto_install_plugins=false
+
+internal/workspace/disclosure.go                  (existing; extended for plugin notices)
+  const NoticeIDPluginInstalled = "plugin-installed:niwa"
+  const NoticeIDPluginSkipped   = "plugin-install-skipped:niwa"
+  EmitPluginNotice(state *InstanceState, id, manualCmd, reporter)
+                                                  # persists notice ID, mirrors EmitRank2Notice shape
+
+internal/config/config.go                         (existing; new global setting)
+  type GlobalConfig struct {
+      ...
+      AutoInstallPlugins *bool                    # Decision 5.3: nil/true = install; false = skip
+  }
+                                                  # parses auto_install_plugins from ~/.config/niwa/config.toml
+
+internal/cli/init.go, internal/cli/apply.go       (existing; flag wiring)
+  --no-install-plugins                            # Decision 5.3: per-invocation opt-out flag
+  after EmitRank2Notice(...) for team or overlay:
+    plugin.Install(state, reporter, plugin.InstallOpts{
+        SkipInstall: skipFlag || globalCfg.SkipPluginInstall(),
+    })
 ```
 
 ### Key Interfaces
@@ -799,11 +955,11 @@ exit status without parsing JSON.
             └─────────────────────────────────┘
 
 
-                    /shirabe:niwa-migrate-config <workspace>
+                    /niwa:migrate-config <workspace>
                               │
                               ▼
             ┌─────────────────────────────────┐
-            │ shirabe skill (Claude Code)     │
+            │ niwa plugin skill (Claude Code) │
             │   Read ~/.config/niwa/config.toml: get source_url
             │   Bash: niwa source inspect <source_url> --json
             │                                 │
@@ -918,12 +1074,13 @@ Deliverables:
 - `internal/cli/init.go` and `internal/workspace/apply.go` updates
 - End-to-end AC-N1 through AC-N6 and AC-V1 through AC-V6 coverage
 
-### Phase 6: `niwa source inspect` CLI + migration skill
+### Phase 6: `niwa source inspect` CLI + migration skill source
 
 Add the new subcommand. Implement `ProbeMarkers` as a factored
 version of `ProbeAndExtractSubpath`'s pass-1 (shared by the
 production path and the inspect command). Author the
-`/shirabe:niwa-migrate-config` skill markdown.
+`/niwa:migrate-config` skill markdown under the embedded plugin
+source tree.
 
 Deliverables:
 - `internal/cli/source_inspect.go` (NEW) +
@@ -931,16 +1088,62 @@ Deliverables:
 - Refactor in `internal/github/tar.go` to expose `ProbeMarkers` as
   a standalone function (`ProbeAndExtractSubpath` then becomes
   `ProbeMarkers` + decider + `ExtractSubpath`)
-- Skill source file location: TBD by the shirabe maintainer;
-  exposed as `/shirabe:niwa-migrate-config <workspace-name>`
-- `docs/guides/workspace-config-sources.md` updates per PRD R26 /
-  AC-G1 through AC-G4
+- Plugin source tree at `plugins/niwa/`:
+  - `plugins/niwa/manifest.json` (name, version, skill index)
+  - `plugins/niwa/skills/migrate-config/SKILL.md` (the skill
+    body; shells out to `niwa source inspect`, reads/edits
+    `~/.config/niwa/config.toml`, presents migration paths)
+
+### Phase 7: Plugin embedding and install lifecycle
+
+Implement the install pipeline that ships the embedded plugin
+to `~/.claude/plugins/marketplaces/niwa/` on first rank-2
+detection, with idempotency, opt-out, and warn-and-continue
+failure handling.
+
+Deliverables:
+- `internal/plugin/embed.go`: `//go:embed plugins/niwa` directive
+  + `Embedded() InstalledPlugin` reader of the embedded manifest.
+- `internal/plugin/installer.go`: `Install(state, reporter, opts)`
+  implementing the `os.Stat` + manifest-version idempotency gate,
+  the atomic stage-and-rename extraction, and the
+  `EmitPluginNotice` calls for installed / skipped / failed cases.
+- `internal/plugin/installer_test.go`: unit tests covering
+  fresh-install, idempotent no-op, opt-out, manual-delete
+  self-heal, write-failure warn-and-continue, and the
+  notice-emission discipline (one notice per outcome).
+- `internal/workspace/disclosure.go`: extend with
+  `NoticeIDPluginInstalled` + `NoticeIDPluginSkipped` constants
+  and a small `EmitPluginNotice` helper mirroring
+  `EmitRank2Notice`.
+- `internal/config/config.go`: add `AutoInstallPlugins *bool`
+  field to `GlobalConfig`; parse it from
+  `~/.config/niwa/config.toml`; helper
+  `(*GlobalConfig).SkipPluginInstall() bool` returns `true` iff
+  the field is explicitly `false`.
+- `internal/cli/init.go` and `internal/workspace/apply.go`
+  (apply wiring): add the `--no-install-plugins` flag; after
+  `EmitRank2Notice(...)` for either artifact, call
+  `plugin.Install(state, reporter, plugin.InstallOpts{
+    SkipInstall: flag || globalCfg.SkipPluginInstall(),
+  })` and let the installer emit the right disclosure.
+- End-to-end coverage for AC-I1 through AC-I8.
+
+### Phase 8: Documentation
+
+`docs/guides/workspace-config-sources.md` updates per PRD R30 /
+AC-G1 through AC-G5, including the new `#niwa-plugin-install`
+section.
 
 The phases are independently committable. Phase 1 has no live
 callers, so it can land before the rest. Phase 6's CLI command
 depends on Phase 2's refactor (factoring `ProbeMarkers` out of
 `ProbeAndExtractSubpath`); the refactor itself is a no-op for
-the production code path.
+the production code path. Phase 7 depends on Phase 6's plugin
+source tree being in place (the `//go:embed plugins/niwa`
+directive requires the tree to exist at build time). Phase 7
+also depends on Phase 5's `disclosure.go` for the notice helper
+shape it extends.
 
 ## Security Considerations
 
@@ -1039,7 +1242,7 @@ information leaks beyond what extract already exposes.
 
 **Threat: `niwa source inspect` exposes private-repo metadata to
 untrusted callers.** The command is a CLI invoked by the user (or
-the shirabe skill, which the user invokes). Auth is the user's
+the niwa-plugin skill, which the user invokes). Auth is the user's
 existing `GH_TOKEN`; the command makes the same authenticated
 request the materializer would make. No new auth path, no token
 exposure. The JSON output names the slug the user already typed —
@@ -1059,12 +1262,67 @@ a snapshot that never landed. Verified by AC-N3 (one-time-per-
 workspace via `DisclosedNotices` — promotion's success controls
 the one and only emit per workspace).
 
-**Outcome:** the design preserves all seven security defenses
-unchanged and introduces no new attack surface. The probe pass is
-a header-only scan over the same bytes extraction already
-processes; the new CLI command is a read-only diagnostic with the
-same auth posture as existing commands; the deprecation notice
-emission is ordered after promotion to avoid stranded notices.
+**Threat: plugin install writes outside the niwa-managed
+filesystem.** The install pipeline writes under
+`~/.claude/plugins/marketplaces/niwa/`, which is the user's
+Claude Code config tree — outside niwa's usual scope of
+`~/.config/niwa/` and `~/.local/share/niwa/`. The threats:
+(1) a path traversal in the install path could escape into
+unrelated `~/.claude/` contents; (2) extracting an attacker-
+controlled tar/zip could write outside the install directory.
+Mitigations: (1) the install path is computed by niwa, not
+user input — it's a fixed string `~/.claude/plugins/marketplaces/niwa/`
+with `filepath.Join` against `os.UserHomeDir()`; no user-supplied
+fragment composes into it; (2) the embedded plugin source is
+shipped inside the niwa binary via `embed.FS`, which is not an
+archive format (it's a read-only Go filesystem) — extraction is
+a recursive `fs.WalkDir` + `os.WriteFile` loop with all paths
+constructed via `filepath.Join` from the embedded tree's relative
+paths; no attacker-controlled archive bytes enter the pipeline.
+The atomic stage-and-rename uses a sibling directory
+`niwa.next/` and `os.Rename`; rename is atomic on the same
+filesystem (which `~/.claude/plugins/` always is for a given
+user).
+
+**Threat: silent install bypasses user consent.** Per Decision
+5.3, the install fires without an interactive prompt. The
+mitigations are (1) the install action is recorded in the
+per-workspace `DisclosedNotices` as `plugin-installed:niwa`,
+so the user has an audit trail; (2) the opt-out path
+(`auto_install_plugins = false` or `--no-install-plugins`)
+exists for users who don't want the install; (3) the action is
+reversible — the user can `rm -rf ~/.claude/plugins/marketplaces/niwa/`
+and add the opt-out toggle to prevent future installs. Users
+who run niwa for the first time after this PRD lands AND who
+have a rank-2 workspace AND who don't opt out WILL see a new
+directory under `~/.claude/`. The deprecation notice (R14) and
+the install disclosure (R18) together surface this to the
+user; the guide section `#niwa-plugin-install` documents it
+ahead of time.
+
+**Threat: plugin's skill executes untrusted code.** The skill is
+markdown shipped inside the niwa binary; it contains tool-call
+instructions for Claude Code, not executable code in any
+traditional sense. Claude Code interprets the markdown and runs
+tool calls (Bash, Read, Edit) with the user's permission model.
+The skill itself MUST be reviewed during code review like any
+other niwa source; its tool calls are auditable. The skill's
+read-mostly contract (PRD R24) is a documentation guarantee, not
+a sandbox; if a future skill revision added destructive tool
+calls, that would be caught in code review just like any other
+niwa change.
+
+**Outcome:** the design preserves all seven existing tarball-
+extraction security defenses unchanged, introduces no new
+network attack surface (the embedded-plugin install path makes
+no network calls), and confines new filesystem writes to a
+fixed, niwa-computed path under `~/.claude/plugins/`. The probe
+pass is a header-only scan over the same bytes extraction
+already processes; `niwa source inspect` is a read-only
+diagnostic with the same auth posture as existing commands;
+the deprecation notice and the plugin-install notice are both
+ordered after snapshot promotion to avoid stranded notices on
+failed applies.
 
 ## Consequences
 
@@ -1082,10 +1340,15 @@ emission is ordered after promotion to avoid stranded notices.
   BEGIN/END markers in `internal/config/discover.go`, removes one
   branch and two `MarkerSet` fields, and is done. No downstream
   call sites change.
-- **Migration skill reuses niwa's probe.** The shirabe skill
-  shells out to `niwa source inspect --json` instead of
-  re-implementing the tarball-stream-and-scan in a non-Go runtime.
-  One source of truth for the probe logic.
+- **Migration skill reuses niwa's probe.** The niwa plugin's
+  skill shells out to `niwa source inspect --json` instead of
+  re-implementing the tarball-stream-and-scan in a non-Go
+  runtime. One source of truth for the probe logic.
+- **Migration tool is auto-installed exactly when needed.**
+  Users on rank-2 get the plugin extracted on their first apply
+  post-upgrade with no extra command. Users on rank-1 never see
+  the plugin install fire. The deprecation notice and the
+  install disclosure together make the side effect visible.
 - **`niwa source inspect` is independently useful.** Future
   diagnostic tools, scripts, or even ad-hoc human invocation
   benefit from a read-only probe surface that wasn't there before.
@@ -1121,13 +1384,27 @@ emission is ordered after promotion to avoid stranded notices.
   Migrating from `acme/dot-niwa` to `acme/brain` changes the
   auto-discovered overlay from `acme/dot-niwa-overlay` to
   `acme/brain-overlay`. The migration skill warns the user (per
-  PRD R19 path-b), but the maintainer of the new overlay repo
+  PRD R23 path-b), but the maintainer of the new overlay repo
   must arrange for the overlay repo to exist at the new slug
   before consumers migrate, or those consumers silently lose the
   overlay augmentation.
 - **Probe-pass adds a header-iteration cost.** Linear in tar
   entry count, free of disk I/O. The
   `Probe-pass scan cost` Known Limitation in the PRD covers this.
+- **niwa now writes to `~/.claude/plugins/`.** The auto-install
+  pipeline creates a directory under the user's Claude Code
+  config tree without prompting. This is a scope expansion: niwa
+  previously confined writes to `~/.config/niwa/`,
+  `~/.local/share/niwa/`, and the workspace dir. The
+  `auto_install_plugins = false` toggle and the
+  `--no-install-plugins` flag provide opt-out; the
+  `plugin-installed:niwa` disclosure provides an audit trail; the
+  guide section `#niwa-plugin-install` documents the behaviour
+  ahead of time.
+- **Binary size grows by the plugin's payload.** The embedded
+  plugin source (text-only manifest + skill markdown) adds well
+  under 200 KB to the niwa binary. Not material at the current
+  binary size.
 
 ### Mitigations
 

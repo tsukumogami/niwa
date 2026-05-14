@@ -15,10 +15,11 @@ goals: |
   predictable by anchoring it to the source repo name regardless of
   subpath; resolve the three policy questions the upstream PRD left
   open (probe mechanism, migration policy, rank-3 `niwa.toml`
-  keep-or-drop); ship a Claude-driven migration skill that walks the
-  user through moving from the legacy whole-repo shape to the new
-  `.niwa/` shape; and keep both shapes working in this release with a
-  one-time deprecation notice on the legacy path so existing
+  keep-or-drop); ship a niwa-owned Claude Code plugin (auto-installed
+  by niwa itself when a workspace is detected to need migration) that
+  walks the user through moving from the legacy whole-repo shape to
+  the new `.niwa/` shape; and keep both shapes working in this release
+  with a one-time deprecation notice on the legacy path so existing
   workspaces never break on upgrade.
 upstream: docs/prds/PRD-workspace-config-sources.md
 ---
@@ -77,9 +78,10 @@ this PRD (see Decisions and Trade-offs below):
    API call.
 2. **Migration policy**: both formats work in this release; the legacy
    path emits a one-time deprecation notice; migration itself is
-   handled by an interactive Claude skill rather than a niwa CLI
-   command. Hard removal of the legacy path is deferred to a
-   follow-up release.
+   handled by a niwa-owned Claude Code plugin auto-installed by niwa
+   when rank-2 is detected. The plugin embeds in the niwa binary
+   via Go's `embed` package and extracts on first rank-2 hit. Hard
+   removal of the legacy path is deferred to a follow-up release.
 3. **Rank-3 `niwa.toml` discovery**: removed in this release; only
    rank-1 (`.niwa/workspace.toml`) and rank-2 (root `workspace.toml`)
    remain. Rank-2 is the deprecation target; rank-1 is the future
@@ -106,13 +108,20 @@ this PRD (see Decisions and Trade-offs below):
   keep applying after upgrade with no registry edits and no `--force`
   flag. A one-time deprecation notice fires per workspace so they
   know there's a future migration ahead, but nothing breaks today.
-- **Migration is a Claude skill, not a niwa command.** A shirabe skill
-  walks the user through moving a workspace from the legacy
-  whole-repo shape to the new `.niwa/` shape — inspecting the
-  registry, suggesting the new slug, editing the registry entry, and
-  pointing at the next `niwa apply --force`. The skill is the
-  documented path; manual edit of the registry file is always
-  available as the fallback.
+- **Migration is a niwa-owned plugin, not a niwa command.** A Claude
+  Code plugin shipped inside the niwa binary (embedded via Go's
+  `embed` package) is auto-installed by niwa to
+  `~/.claude/plugins/marketplaces/niwa/` when rank-2 is detected.
+  The plugin's skill — invoked as `/niwa:migrate-config <workspace>`
+  in Claude Code — walks the user through moving a workspace from
+  the legacy whole-repo shape to the new `.niwa/` shape: inspecting
+  the registry, suggesting the new slug, editing the registry
+  entry, and pointing at the next `niwa apply --force`. The plugin
+  install is silent (audited via a one-time `DisclosedNotices`
+  entry); users can opt out via `auto_install_plugins = false` in
+  global config or `--no-install-plugins` per invocation. Manual
+  edit of the registry file remains available as the fallback for
+  users without Claude Code.
 - **Make discovery errors actionable.** When a source contains
   multiple markers at the source root, or none of them, the error
   message names every accepted path and the explicit-subpath escape
@@ -182,9 +191,9 @@ migration skill:
 ```
 note: workspace 'my-workspace' is using the deprecated whole-repo
       config source layout (root workspace.toml). Future releases
-      will require config under .niwa/workspace.toml. To migrate
-      this workspace, run: /shirabe:niwa-migrate-config my-workspace
-      in Claude Code.
+      will require config under .niwa/workspace.toml. The migration
+      tool is available at /niwa:migrate-config — invoke it in
+      Claude Code when ready.
 ```
 
 The notice fires once per workspace and is suppressed on subsequent
@@ -192,10 +201,24 @@ applies via the existing `DisclosedNotices` mechanism. The
 workspace continues to apply normally between now and whenever the
 developer chooses to migrate.
 
-### Story 4: Migration via the Claude skill
+In the same apply, niwa also extracts its embedded migration plugin
+to `~/.claude/plugins/marketplaces/niwa/` (if not already present)
+and emits a separate one-time `plugin-installed:niwa` disclosure so
+the install action is on record. The plugin install is silent — no
+interactive prompt blocks apply. The developer can opt out of
+future auto-installs via `auto_install_plugins = false` in
+`~/.config/niwa/config.toml` or by passing `--no-install-plugins`
+to any niwa command; opting out replaces the install with a
+`plugin-install-skipped:niwa` notice that documents the manual
+install path.
 
-The developer from Story 3 decides to migrate. They open Claude Code
-and run `/shirabe:niwa-migrate-config my-workspace`. The skill:
+### Story 4: Migration via the auto-installed niwa plugin
+
+The developer from Story 3 decides to migrate. Because niwa already
+auto-extracted the migration plugin during the apply that emitted
+the deprecation notice, the developer can open Claude Code and
+immediately run `/niwa:migrate-config my-workspace`. No separate
+install step. The skill:
 
 1. Reads the registry entry for `my-workspace` from
    `~/.config/niwa/config.toml` and shows the current `source_url`
@@ -235,7 +258,7 @@ contents into `acme/vision/.niwa/`, commit, and push. They also
 create `acme/vision-overlay` (the new overlay repo, per R10) by
 renaming or forking the existing `acme/dot-niwa-overlay`. They post
 a one-line announcement: "the workspace config now lives in the
-brain repo — run `/shirabe:niwa-migrate-config <your-workspace-name>`
+brain repo — run `/niwa:migrate-config <your-workspace-name>`
 in Claude Code to switch." Each consumer's switch is independent;
 the standalone `dot-niwa` repo keeps working for anyone who hasn't
 migrated yet, so there's no synchronized cutover.
@@ -423,7 +446,7 @@ surfaces on first apply only.
     config, overlay, or both) and the rank-2 path using the
     literal substring `deprecated`;
   - point the user at the migration skill using the literal
-    substring `/shirabe:niwa-migrate-config`;
+    substring `/niwa:migrate-config`;
   - fire at most once per workspace per artifact per command-type
     via the existing `DisclosedNotices` mechanism (the same
     mechanism upstream R18, R28, R32 already use).
@@ -433,29 +456,75 @@ surfaces on first apply only.
   conversation but its Out of Scope section names the future
   removal as deferred work.
 
-**Migration tooling: shirabe skill**
+**Migration tooling: niwa-owned Claude Code plugin**
 
-- **R16.** A migration skill MUST ship as part of this work,
-  invocable as `/shirabe:niwa-migrate-config <workspace-name>` in
-  Claude Code. The exact plugin/repo location for the skill source
-  is left to the design phase but MUST satisfy the user-facing
-  invocation path above. The skill's behaviour is specified by
-  R17-R20.
-- **R17.** The skill MUST read the registry entry for the named
-  workspace from the user's niwa config (default
-  `~/.config/niwa/config.toml`, honouring any niwa override env
-  vars the design phase identifies) and present the current
-  `source_url` to the user. If the workspace is not registered,
-  the skill MUST exit with a clear error naming the workspace.
-- **R18.** The skill MUST probe the workspace's current team-config
-  source AND its auto-discovered overlay (per R10) via the same
-  fetch path niwa uses (R7-R9) — reusing niwa's Go code where
-  practical, otherwise making the same shape of request — and
-  report which marker(s) it found at each source root. The skill
-  MUST NOT call into a separate Contents API endpoint; this PRD's
-  single-fetch contract (R7) applies to the skill's probes as
-  well.
-- **R19.** Based on the probe results, the skill MUST present the
+- **R16.** niwa MUST ship a Claude Code plugin embedded in the niwa
+  binary via Go's `embed` package. The plugin's source tree
+  (manifest, skill markdown) lives in the niwa repo under a path
+  determined at design time; at build time, `embed.FS` includes the
+  tree in the binary. The plugin's identifier is `niwa`; its
+  user-facing skill is invoked as `/niwa:migrate-config
+  <workspace-name>` in Claude Code.
+- **R17.** When niwa's `RankDecider` returns `rank == 2` for either
+  the team config or the overlay during `niwa init` or `niwa
+  apply`, niwa MUST auto-install the embedded plugin to
+  `~/.claude/plugins/marketplaces/niwa/` after snapshot promotion
+  succeeds. The install MUST be gated by an on-disk idempotency
+  check: niwa MUST `os.Stat` the plugin's install path and read a
+  manifest file (e.g., `manifest.json`) to compare the embedded
+  plugin version against the on-disk version; if absent or older,
+  niwa extracts the embedded files atomically (stage to a sibling
+  dir, rename into place); if current, niwa is a no-op. The
+  install MUST be installation-wide (one install per niwa
+  installation), independent of the per-workspace per-artifact
+  `DisclosedNotices` scope the rank-2 deprecation notice uses
+  (R14).
+- **R18.** The install MUST be silent: niwa MUST NOT prompt the
+  user before extracting, and MUST NOT read from stdin. When the
+  install succeeds (including the no-op case), niwa MUST emit a
+  one-time `plugin-installed:niwa` notice via the existing
+  `DisclosedNotices` mechanism, scoped per workspace per
+  command-type, recording the plugin name and install path. The
+  notice text MUST contain the literal substrings
+  `plugin-installed`, the plugin identifier `niwa`, and the
+  install path.
+- **R19.** niwa MUST honor opt-out at two levels:
+  - **Global setting**: `auto_install_plugins = false` in
+    `~/.config/niwa/config.toml` (analogous to the existing
+    `clone_protocol` setting). When false, niwa MUST skip the
+    install AND emit a one-time `plugin-install-skipped:niwa`
+    notice naming the plugin and a manual-install command the
+    user can run to install it manually.
+  - **Per-invocation flag**: `--no-install-plugins` on `niwa init`
+    and `niwa apply`. When passed, niwa MUST behave identically
+    to the global opt-out for that invocation only. The flag's
+    setting MUST NOT persist into the global config.
+  Both opt-outs MUST be no-ops if the plugin is already present
+  on disk at the current version (idempotency from R17 wins over
+  opt-out).
+- **R20.** Install failures (read-only `$HOME`, locked-down
+  container, `~/.claude/` not writable, atomic-rename failure)
+  MUST be warn-and-continue: niwa MUST log a `warning:`-prefixed
+  message to stderr naming the failure cause AND the manual
+  install command, but MUST NOT abort the init/apply. The rank-2
+  deprecation notice (R14) still fires regardless of install
+  success or failure.
+- **R21.** The migration skill exposed by the plugin (invocation
+  path `/niwa:migrate-config <workspace-name>` per R16) MUST read
+  the registry entry for the named workspace from the user's niwa
+  config (default `~/.config/niwa/config.toml`, honouring any niwa
+  override env vars the design phase identifies) and present the
+  current `source_url` to the user. If the workspace is not
+  registered, the skill MUST exit with a clear error naming the
+  workspace.
+- **R22.** The skill MUST probe the workspace's current team-config
+  source AND its auto-discovered overlay (per R10) by shelling out
+  to `niwa source inspect <slug> --json` (the user-facing CLI
+  surface). The skill MUST NOT re-implement the probe pipeline in
+  JavaScript/TypeScript or any non-Go runtime; the single-fetch
+  contract (R7) applies to the skill's probes as well, and reusing
+  niwa's CLI is the only way the skill can guarantee that.
+- **R23.** Based on the probe results, the skill MUST present the
   user with two clearly-labelled migration paths and surface any
   overlay implications:
   - **(a) In-place repo restructure**: the user moves the config
@@ -474,7 +543,7 @@ surfaces on first apply only.
     (per R10) and that the maintainer must arrange the new
     overlay repo before consumers complete migration, and rewrite
     the registry entry's `source_url`.
-- **R20.** The skill MUST be read-mostly: it MUST NOT push to git,
+- **R24.** The skill MUST be read-mostly: it MUST NOT push to git,
   MUST NOT run `niwa apply`, MUST NOT delete or modify the on-disk
   `<workspace>/.niwa/` snapshot, and MUST NOT touch the source
   repo's git history. The only side effect (for path (b)) is the
@@ -484,27 +553,28 @@ surfaces on first apply only.
 
 **Backwards compatibility**
 
-- **R21.** No existing user MUST be required to take any action
+- **R25.** No existing user MUST be required to take any action
   after upgrading to a niwa binary that ships this PRD (preserves
   upstream PRD R34). The first `niwa apply` after upgrade triggers
   discovery transparently and succeeds for any source that
   matches a rank-1 or rank-2 marker. The rank-2 deprecation notice
-  (R14) is informational only and never blocks apply.
-- **R22.** All existing acceptance criteria from
+  (R14) and the auto-install action (R17-R20) are informational
+  only and never block apply.
+- **R26.** All existing acceptance criteria from
   `docs/prds/PRD-workspace-config-sources.md` related to discovery
   (AC-D1 through AC-D9) and backwards compatibility
   (AC-B1) MUST remain pass after this PRD ships, with three
   exceptions: ACs that reference rank-3 (root `niwa.toml`)
-  discovery are superseded by R23 below; AC-D3 and AC-D4 are
+  discovery are superseded by R27 below; AC-D3 and AC-D4 are
   amended to match the diagnostic substring contract specified in
-  R24 (a tightening, not a contradiction); upstream AC-O2 and
+  R28 (a tightening, not a contradiction); upstream AC-O2 and
   AC-O3 (the upstream PRD's overlay slug derivation cases for
   subpath sources) are superseded by R10 — the new behaviour is
   verified by AC-V1 through AC-V4 below.
 
 **Rank-3 (`niwa.toml`) discovery removal**
 
-- **R23.** Rank-3 discovery (root `niwa.toml` with explicit
+- **R27.** Rank-3 discovery (root `niwa.toml` with explicit
   `content_dir`) specified by the upstream PRD's R5+R8 MUST be
   removed in this release. Brain repos relying on a root
   `niwa.toml` MUST migrate to either `.niwa/workspace.toml`
@@ -518,7 +588,7 @@ surfaces on first apply only.
 
 **Diagnostic clarity**
 
-- **R24.** Every discovery error message (R3 ambiguity, R4 no
+- **R28.** Every discovery error message (R3 ambiguity, R4 no
   marker, R5 partial-snapshot avoidance) MUST contain three pieces
   of information, each as a separately-grep-able substring:
   - the source slug (the user's `--from` value);
@@ -533,7 +603,7 @@ surfaces on first apply only.
 
 **Upstream PRD reconciliation**
 
-- **R25.** When this PRD is Accepted, the upstream PRD
+- **R29.** When this PRD is Accepted, the upstream PRD
   `docs/prds/PRD-workspace-config-sources.md` MUST be amended to
   reflect that R5+R6+R7+R8 and R33 from that PRD are tracked by
   this PRD as outstanding implementation work, AND that R35's
@@ -548,7 +618,7 @@ surfaces on first apply only.
 
 **Documentation**
 
-- **R26.** `docs/guides/workspace-config-sources.md` MUST be
+- **R30.** `docs/guides/workspace-config-sources.md` MUST be
   updated to include:
   - A section with the exact heading anchor `#single-repo-workspace`
     walking through Story 1 end-to-end, including the on-disk
@@ -566,15 +636,22 @@ surfaces on first apply only.
     with the four worked examples from R10.
   - A section with the exact heading anchor `#rank-2-deprecation`
     explaining the one-time notice (R14), the two migration paths
-    handled by the skill (R19), and the deferred hard-removal
+    handled by the skill (R23), and the deferred hard-removal
     timeline. The section body MUST contain the literal substrings
-    `deprecated`, `/shirabe:niwa-migrate-config`, and `rank 2`
+    `deprecated`, `/niwa:migrate-config`, and `rank 2`
     (or `rank-2`).
   - A section with the exact heading anchor `#rank-3-removal`
     explaining the removed root `niwa.toml` path. The section
     body MUST contain the literal substrings `niwa.toml`,
     `rank 3` (or `rank-3`), and `.niwa/workspace.toml` (the
     primary migration target).
+  - A section with the exact heading anchor `#niwa-plugin-install`
+    explaining the auto-install behaviour (R17), the silent
+    install with disclosure (R18), the opt-out paths (R19), and
+    the failure handling (R20). The section body MUST contain
+    the literal substrings `auto_install_plugins`,
+    `--no-install-plugins`, `~/.claude/plugins/marketplaces/niwa/`,
+    and the manual install command niwa prints when opted out.
 
 ## Acceptance Criteria
 
@@ -726,14 +803,14 @@ explicitly. The upstream PRD's Test Strategy section defines the
   succeeds (exit 0) AND stderr contains a single line with the
   literal substring `deprecated`, the source slug
   `acme/dot-niwa`, and the literal substring
-  `/shirabe:niwa-migrate-config`. The notice fires before init
+  `/niwa:migrate-config`. The notice fires before init
   returns; the workspace is registered normally.
 - [ ] **AC-N2** (apply context, first time). Given a workspace
   registered with `source_url = "acme/dot-niwa"` and the first
   `niwa apply <name>` after upgrade, apply succeeds (exit 0) AND
   stderr contains a single line with the literal substrings
   `deprecated`, the workspace name `<name>`, and
-  `/shirabe:niwa-migrate-config`.
+  `/niwa:migrate-config`.
 - [ ] **AC-N3** (apply context, second time). With AC-N2's
   preconditions plus the first apply having already emitted the
   notice, the second `niwa apply <name>` succeeds (exit 0) and
@@ -756,11 +833,70 @@ explicitly. The upstream PRD's Test Strategy section defines the
   scoped to the overlay (the notice MUST identify the overlay
   artifact, not the team config).
 
-### AC: Migration skill (verifies R16-R20)
+### AC: Plugin install (verifies R16-R20)
+
+- [ ] **AC-I1** (binary embed). The compiled `niwa` binary
+  contains the plugin's source tree (manifest + skill markdown)
+  embedded via Go's `embed` package. A test using `embed.FS`
+  reflection (or a check on the binary's read-only data segment)
+  asserts the plugin manifest's `name` field equals `niwa`. No
+  network fetch happens during the install path.
+- [ ] **AC-I2** (auto-install on first rank-2 detection). Given
+  fixture A and a fresh workspace, `niwa init <name> --from
+  acme/dot-niwa` succeeds (exit 0). After init returns, the
+  directory `~/.claude/plugins/marketplaces/niwa/` exists and
+  contains the plugin manifest plus at least the skill file
+  defining `/niwa:migrate-config`. stderr contains the
+  `plugin-installed:niwa` disclosure with the install path.
+- [ ] **AC-I3** (idempotency on second invocation). With AC-I2's
+  preconditions plus the plugin already present at the current
+  version, the second `niwa init` (or `niwa apply` against a
+  rank-2 source) is a filesystem no-op for the plugin directory
+  — file modification times in the plugin tree are unchanged
+  from before the second invocation. stderr does NOT contain a
+  duplicate `plugin-installed:niwa` disclosure.
+- [ ] **AC-I4** (idempotency self-heals after manual delete).
+  Given AC-I2's preconditions plus the user has manually removed
+  `~/.claude/plugins/marketplaces/niwa/` between two niwa
+  invocations, the next rank-2 detection re-extracts the plugin
+  to the same path. A new `plugin-installed:niwa` disclosure
+  fires for the workspace if not previously disclosed; existing
+  workspace disclosures stay suppressed.
+- [ ] **AC-I5** (opt-out via global config). Given
+  `auto_install_plugins = false` in `~/.config/niwa/config.toml`
+  and a fresh workspace on fixture A, `niwa init` succeeds
+  (exit 0) and the plugin directory is NOT created. stderr
+  contains a `plugin-install-skipped:niwa` disclosure that names
+  the plugin and includes a manual install command (the exact
+  command shape is determined at design time but MUST be a
+  copy-pasteable shell invocation).
+- [ ] **AC-I6** (opt-out via per-invocation flag). Given no
+  global config opt-out and a fresh workspace on fixture A,
+  `niwa init <name> --from acme/dot-niwa --no-install-plugins`
+  succeeds (exit 0) and the plugin directory is NOT created.
+  stderr contains the same `plugin-install-skipped:niwa`
+  disclosure as AC-I5. The global config file is unchanged
+  (the flag does not persist).
+- [ ] **AC-I7** (install failure warn-and-continue). Given
+  `~/.claude/` is a read-only directory (chmod 0o555) and a
+  fresh workspace on fixture A, `niwa init` succeeds (exit 0).
+  stderr contains a `warning:`-prefixed message naming the
+  failure cause and a manual install command. The rank-2
+  deprecation notice (AC-N1) STILL fires. No plugin directory
+  is created.
+- [ ] **AC-I8** (no-op when rank is 1). Given fixture B
+  (rank-1) and a fresh workspace, `niwa init <name> --from
+  acme/vision` succeeds (exit 0). The plugin directory is NOT
+  created on this invocation (unless it already exists from a
+  prior rank-2 install — in which case it remains unchanged).
+  stderr does NOT contain a `plugin-installed:niwa` disclosure
+  for this workspace.
+
+### AC: Migration skill (verifies R21-R24)
 
 - [ ] **AC-S1** (skill exists with documented invocation). The
   skill is installable / available such that running
-  `/shirabe:niwa-migrate-config <workspace-name>` in a Claude
+  `/niwa:migrate-config <workspace-name>` in a Claude
   Code session loads the skill and produces the expected initial
   output (reads the registry, prints the current `source_url`).
   The skill's source location and packaging are design-phase
@@ -807,7 +943,7 @@ explicitly. The upstream PRD's Test Strategy section defines the
   `acme/repo:` (empty subpath after colon), the skill rejects
   with a clear error and does NOT modify the registry.
 
-### AC: Backwards compatibility (verifies R21-R22)
+### AC: Backwards compatibility (verifies R25-R26)
 
 - [ ] **AC-B1a** (legacy working tree, no URL change). Given a
   registry entry from an older binary with
@@ -841,7 +977,7 @@ explicitly. The upstream PRD's Test Strategy section defines the
   after upgrade continues to derive `org/dot-niwa-overlay` per
   R10. No re-fetch of a different overlay slug is attempted.
 
-### AC: Rank-3 removal (verifies R23)
+### AC: Rank-3 removal (verifies R27)
 
 - [ ] **AC-R1**. Given a `tarballFakeServer` source containing
   only a root `niwa.toml` (no `.niwa/workspace.toml`, no root
@@ -862,7 +998,7 @@ explicitly. The upstream PRD's Test Strategy section defines the
   command after upgrade — `niwa apply` — produces the error;
   no earlier command emits a rank-3-removal warning).
 
-### AC: Diagnostic clarity (verifies R24)
+### AC: Diagnostic clarity (verifies R28)
 
 - [ ] **AC-X1**. The R3 ambiguity error message (verified
   end-to-end by AC-D5) MUST contain three independently
@@ -879,7 +1015,7 @@ explicitly. The upstream PRD's Test Strategy section defines the
   `:` (the explicit-subpath hint). The substrings may appear
   on the same or different lines.
 
-### AC: Upstream PRD reconciliation (verifies R25)
+### AC: Upstream PRD reconciliation (verifies R29)
 
 - [ ] **AC-U1**. After this PRD is Accepted,
   `docs/prds/PRD-workspace-config-sources.md` either (a) carries
@@ -891,7 +1027,7 @@ explicitly. The upstream PRD's Test Strategy section defines the
   (this PRD's filename). One of the two MUST be true. The chosen
   artifact MUST also name R35 as overridden by this PRD's R10.
 
-### AC: Documentation (verifies R26)
+### AC: Documentation (verifies R30)
 
 - [ ] **AC-G1**. `docs/guides/workspace-config-sources.md`
   contains a heading with the exact anchor
@@ -915,7 +1051,12 @@ explicitly. The upstream PRD's Test Strategy section defines the
 - [ ] **AC-G4**. The same guide contains a heading with the
   exact anchor `#rank-2-deprecation`. The section body contains
   the literal substrings `deprecated`,
-  `/shirabe:niwa-migrate-config`, and `rank 2` (or `rank-2`).
+  `/niwa:migrate-config`, and `rank 2` (or `rank-2`).
+- [ ] **AC-G5**. The same guide contains a heading with the
+  exact anchor `#niwa-plugin-install`. The section body contains
+  the literal substrings `auto_install_plugins`,
+  `--no-install-plugins`, `~/.claude/plugins/marketplaces/niwa/`,
+  and the manual install command niwa prints when opted out.
 
 ## Out of Scope
 
@@ -927,7 +1068,7 @@ The following are excluded from this release's scope.
   the skill; the follow-up release will set the cutoff once that
   migration completes.
 - **A niwa CLI command for migration.** Replaced by the shirabe
-  skill (R16-R20). Users who want non-interactive automation can
+  plugin (R16-R24). Users who want non-interactive automation can
   still edit the registry file directly; the skill is the
   Claude-driven walkthrough for the common case.
 - **Re-specification of subpath fetch mechanics.** The upstream PRD
@@ -1000,11 +1141,22 @@ The following are excluded from this release's scope.
   is documentation (AC-R2) plus the explicit-subpath escape hatch
   (which still works for any path the user knows about).
 - **Migration skill requires Claude Code.** Users without access
-  to Claude Code cannot run `/shirabe:niwa-migrate-config`. The
-  fallback for those users is manual registry edit + manual
-  source-repo restructure; the guide section
-  `#rank-2-deprecation` documents the manual steps the skill
-  performs so users can follow them by hand.
+  to Claude Code cannot run `/niwa:migrate-config`, and the
+  auto-install action (R17) is a no-op for them — niwa still
+  extracts the plugin to `~/.claude/plugins/marketplaces/niwa/`,
+  but the directory is unused. The fallback for those users is
+  manual registry edit + manual source-repo restructure; the
+  guide section `#rank-2-deprecation` documents the manual
+  steps the skill performs so users can follow them by hand.
+- **Plugin install writes to `~/.claude/plugins/marketplaces/niwa/`
+  without prompting.** Per R18 the install is silent; the user
+  has no per-invocation chance to refuse. Opt-out via
+  `auto_install_plugins = false` or `--no-install-plugins` is
+  documented in the deprecation notice and the guide. Users
+  upgrading from a niwa version that didn't ship the plugin
+  will see the first directory creation on their first rank-2
+  apply post-upgrade — surprising but reversible (the user can
+  `rm -rf` the directory and add the opt-out toggle).
 - **Overlay slug changes during slug-swap migration.** Migrating
   a workspace from `org/dot-niwa` to `org/brain` (slug-swap path)
   changes the auto-discovered overlay slug from
@@ -1014,8 +1166,8 @@ The following are excluded from this release's scope.
   maintainer of the new repo MUST still arrange for an overlay
   repo at the new slug before consumers complete migration,
   otherwise the overlay clone silently skips and consumers lose
-  the augmentation. The migration skill (R19 path (b)) MUST
-  warn about this. For the in-place restructure path (R19 (a))
+  the augmentation. The migration skill (R23 path (b)) MUST
+  warn about this. For the in-place restructure path (R23 (a))
   the overlay slug does NOT change; this is the gentler
   migration shape.
 
@@ -1065,21 +1217,89 @@ explicit `--overlay <slug>`. That case is hypothetical at the
 moment; the predictability win for the common case is
 concrete.
 
-### Decision: migration is a shirabe skill, not a niwa command
+### Decision: migration is a niwa-owned Claude Code plugin (R16, R21)
 
-**Decided**: a Claude Code-invocable shirabe skill
-(`/shirabe:niwa-migrate-config <workspace>`) handles the migration
-walkthrough. niwa itself ships no migration CLI command.
+**Decided**: niwa ships its own Claude Code plugin (identifier
+`niwa`, skill `/niwa:migrate-config`) instead of relying on the
+shirabe workflow plugin or shipping a `niwa migrate-source` CLI.
 **Alternatives**: (a) a `niwa migrate-source` CLI command;
-(b) no tooling, registry edited by hand. **Reasoning**: the user
-running this PRD is the only known niwa user; a CLI command is
-over-engineered for a one-shot manual migration. A skill captures
-the procedure as executable documentation that can probe the
-source, suggest the right slug, edit the registry, and warn about
-overlay-slug consequences (R19), while keeping the logic out of
-niwa's binary surface. Manual registry edit remains available for
-users without Claude Code (a Known Limitation rather than a
-blocker).
+(b) host the migration skill in shirabe; (c) no tooling, registry
+edited by hand. **Reasoning**: a CLI command is over-engineered
+for a one-shot manual migration; shirabe is a generic workflow
+plugin whose owners shouldn't carry niwa-specific skills; a
+niwa-owned plugin captures the procedure as executable
+documentation, ships with the niwa binary, and lets future
+niwa-adjacent skills (`/niwa:doctor`, `/niwa:explain`) co-locate
+under the same namespace. The plugin walks the user through
+probing the source, suggesting the right slug, editing the
+registry, and warning about overlay-slug consequences (R23).
+Manual registry edit remains the fallback for users without
+Claude Code (Known Limitation rather than blocker).
+
+### Decision: plugin distribution via Go's `embed` (R16)
+
+**Decided**: the plugin's source tree is embedded in the niwa
+binary via Go's `embed` package and extracted on first rank-2
+detection. **Alternatives**: (a) download the plugin from
+GitHub releases on demand; (b) print install instructions and
+require the user to run them; (c) hybrid (download first, fall
+back to embedded). **Reasoning**: the plugin payload is small
+(text-only, well under 200 KB); version coherence with the niwa
+binary is a hard requirement (the skill calls specific niwa CLI
+shapes like `niwa source inspect --json`); offline tolerance is
+mandatory. Embed is the only option satisfying all three with
+one failure mode (disk write) and zero release-pipeline changes.
+Network-fetch options add 3+ failure modes (network, checksum,
+extract) on a payload too small to benefit from them. The
+hybrid pays both costs in exchange for the version-drift
+behaviour the constraints forbid.
+
+### Decision: auto-install trigger on first rank-2 detection (R17)
+
+**Decided**: niwa extracts the plugin on first rank-2 detection
+in `niwa init` or `niwa apply`, co-located with the R14
+deprecation-notice emission but using an independent
+on-disk idempotency gate (`os.Stat` on the plugin path + a
+`manifest.json` version check). **Alternatives**: (a) install on
+every niwa apply unconditionally; (b) install only on an
+explicit `niwa install-migration-plugin` subcommand; (c) install
+on rank-2 detection AND self-heal on every apply. **Reasoning**:
+the user's stated requirement is "installed automatically by niwa
+if the workspace is identified to need migration" — that
+phrasing maps to (chosen), not always-install. Always-install
+would surprise rank-1-only users with a plugin under
+`~/.claude/plugins/` for no observable reason. Explicit-command
+install loses the auto-install UX entirely. (c) reduces under
+analysis to either always-install or the chosen option. The
+on-disk gate is independent from `DisclosedNotices` because the
+install scope is installation-wide and the notice scope is
+per-workspace-per-artifact; sharing one ID for both would either
+fire the install N times or under-emit the notice.
+
+### Decision: silent install with audited disclosure + opt-out (R18, R19, R20)
+
+**Decided**: niwa installs the plugin silently — no interactive
+prompt, no stdin read — and emits a one-time
+`plugin-installed:niwa` notice via the existing
+`DisclosedNotices` mechanism. Opt-out is two-level:
+`auto_install_plugins = false` in global config (persistent) and
+`--no-install-plugins` per invocation. **Alternatives**:
+(a) prompt the user with default-yes and a `--yes` skip flag;
+(b) silent install with no audit notice; (c) refuse to install
+and print the manual command. **Reasoning**: PRD R25 forbids a
+blocking prompt on first apply after upgrade (the prompt would
+hang in non-TTY contexts or abort apply). The R25-compatible
+variant of (a) — skip-prompt-on-non-TTY — restricts the prompt
+to interactive humans only and re-invents the opt-out toggle.
+(b) is unauditable: no record of the install in instance state.
+(c) defeats the user-stated auto-install goal; the chosen
+design preserves it as the opt-out path. The two-level opt-out
+matches niwa's existing `--skip-global` / `--no-progress` flag
+style: a declarative toggle for steady-state preference plus a
+per-invocation override. Install failures (R20) are
+warn-and-continue: niwa logs the cause and the manual command,
+but apply still succeeds — same posture as the deprecation
+notice itself.
 
 ### Decision: coexistence + deprecation notice (R13, R14)
 
@@ -1099,7 +1319,7 @@ one-time notice — preserves backwards compatibility, gives the
 user agency over migration timing, and creates a forcing function
 for the follow-up removal.
 
-### Decision: drop rank-3 (`niwa.toml`) discovery (R23)
+### Decision: drop rank-3 (`niwa.toml`) discovery (R27)
 
 **Decided**: rank-3 discovery from the upstream PRD R5 is removed
 in this release. **Alternatives**: keep rank-3 plus the upstream
@@ -1176,7 +1396,7 @@ overlay-side discovery. Cost: a second rank-2 deprecation path
 (scoped to the overlay) and AC-V6 to verify it. Benefit:
 symmetry across the two artifacts.
 
-### Decision: skill is read-mostly (R20)
+### Decision: skill is read-mostly (R24)
 
 **Decided**: the migration skill only writes to the registry file
 (and only in path (b), the slug-swap case). It never pushes git,
@@ -1197,9 +1417,9 @@ inspect state and abort if something looks wrong.
 After this PRD is Accepted:
 
 - `/design` against this PRD to produce the technical design for
-  the discovery code path, the overlay-derivation override, and
-  the shirabe migration skill.
-- Apply the upstream PRD reconciliation chosen per R25 / AC-U1.
+  the discovery code path, the overlay-derivation override, the
+  niwa plugin install lifecycle, and the migration skill.
+- Apply the upstream PRD reconciliation chosen per R29 / AC-U1.
 - Schedule a follow-up release that hard-removes rank-2 discovery
   once the user confirms all their workspaces have migrated. That
   follow-up is out of this PRD's scope (Out of Scope) but should
