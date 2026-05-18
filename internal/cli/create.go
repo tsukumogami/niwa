@@ -20,15 +20,22 @@ func init() {
 	createCmd.Flags().BoolVar(&createChannels, "channels", false, "enable channel infrastructure for this invocation (overrides NIWA_CHANNELS)")
 	createCmd.Flags().BoolVar(&createNoChannels, "no-channels", false, "disable channel infrastructure for this invocation (overrides --channels and NIWA_CHANNELS)")
 	createCmd.Flags().BoolVar(&createNoInstallPlugins, "no-install-plugins", false, "skip auto-installing the embedded niwa Claude Code plugin (otherwise installed once when a rank-2 source is detected)")
+	createCmd.Flags().BoolVar(&createAllowMissingSecrets, "allow-missing-secrets", false,
+		"downgrade unresolved vault:// references to empty strings with stderr warnings. "+
+			"Does NOT override *.required misses. One-shot -- re-evaluated each invocation.")
+	createCmd.Flags().BoolVar(&createAllowPlaintextSecrets, "allow-plaintext-secrets", false,
+		"bypass the public-repo plaintext-secrets guardrail. Strictly one-shot -- no state persistence.")
 	createCmd.ValidArgsFunction = completeWorkspaceNames
 }
 
 var (
-	createName             string
-	createRepo             string
-	createChannels         bool
-	createNoChannels       bool
-	createNoInstallPlugins bool
+	createName                  string
+	createRepo                  string
+	createChannels              bool
+	createNoChannels            bool
+	createNoInstallPlugins      bool
+	createAllowMissingSecrets   bool
+	createAllowPlaintextSecrets bool
 )
 
 var createCmd = &cobra.Command{
@@ -149,6 +156,8 @@ func runCreate(cmd *cobra.Command, args []string) error {
 	// install. Without this seam the install is a silent no-op even
 	// when the rank-2 notice surfaces.
 	configurePluginAutoInstall(applier, createNoInstallPlugins)
+	applier.AllowMissingSecrets = createAllowMissingSecrets
+	applier.AllowPlaintextSecrets = createAllowPlaintextSecrets
 
 	// Wire up the global config overlay so vault resolution and personal-wins
 	// merging work during create. ConfigSourceURL is a fallback for overlay

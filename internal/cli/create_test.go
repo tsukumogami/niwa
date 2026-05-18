@@ -225,3 +225,58 @@ func TestFindRepoDir_SkipsDotDirs(t *testing.T) {
 		t.Errorf("expected 'not found' in error, got: %v", err)
 	}
 }
+
+// TestCreateCmd_HasAllowMissingSecretsFlag mirrors the apply-side check.
+// The flag plumbs into workspace.Applier.AllowMissingSecrets, which the
+// Applier honors uniformly for both Create and Apply (it routes through
+// the same runPipeline).
+func TestCreateCmd_HasAllowMissingSecretsFlag(t *testing.T) {
+	flag := createCmd.Flags().Lookup("allow-missing-secrets")
+	if flag == nil {
+		t.Fatal("expected --allow-missing-secrets flag to be registered")
+	}
+	if flag.DefValue != "false" {
+		t.Errorf("expected default false, got %q", flag.DefValue)
+	}
+}
+
+// TestCreateCmd_HasAllowPlaintextSecretsFlag mirrors the apply-side check.
+// The error message emitted by the public-remote materializer guardrail
+// recommends this flag; this test pins it so the suggestion stays
+// actionable from create.
+func TestCreateCmd_HasAllowPlaintextSecretsFlag(t *testing.T) {
+	flag := createCmd.Flags().Lookup("allow-plaintext-secrets")
+	if flag == nil {
+		t.Fatal("expected --allow-plaintext-secrets flag to be registered")
+	}
+	if flag.DefValue != "false" {
+		t.Errorf("expected default false, got %q", flag.DefValue)
+	}
+}
+
+// TestCreateCmd_AllowFlagsThreadToApplier mirrors the apply-side check
+// that the parsed flags populate package-level vars runCreate copies
+// onto the Applier struct. The pipeline integration that the Applier
+// then honors these fields is already covered by the workspace and
+// guardrail tests.
+func TestCreateCmd_AllowFlagsThreadToApplier(t *testing.T) {
+	savedMissing := createAllowMissingSecrets
+	savedPlain := createAllowPlaintextSecrets
+	t.Cleanup(func() {
+		createAllowMissingSecrets = savedMissing
+		createAllowPlaintextSecrets = savedPlain
+	})
+
+	createAllowMissingSecrets = false
+	createAllowPlaintextSecrets = false
+
+	if err := createCmd.ParseFlags([]string{"--allow-missing-secrets", "--allow-plaintext-secrets"}); err != nil {
+		t.Fatalf("ParseFlags: %v", err)
+	}
+	if !createAllowMissingSecrets {
+		t.Error("expected createAllowMissingSecrets to be true after --allow-missing-secrets")
+	}
+	if !createAllowPlaintextSecrets {
+		t.Error("expected createAllowPlaintextSecrets to be true after --allow-plaintext-secrets")
+	}
+}
