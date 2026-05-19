@@ -1,5 +1,5 @@
 ---
-status: Accepted
+status: Planned
 problem: |
   `niwa init <name> --from <org/repo>` fails when the remote exists but
   has no `.niwa/workspace.toml` — the materialize step returns
@@ -50,7 +50,7 @@ rationale: |
 
 ## Status
 
-Accepted
+Planned
 
 ## Context and Problem Statement
 
