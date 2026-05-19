@@ -534,10 +534,29 @@ type ScaffoldOptions struct {
 // existing callers stay on Scaffold.
 func ScaffoldFromSource(dir string, opts ScaffoldOptions) error
 
-// RunBootstrap orchestrates the bootstrap path: shallow-fetch the
-// source into workspaceRoot, create the bootstrap branch, write the
-// scaffold, stage, commit. Idempotent on partial failure (cleans up
-// .git/ if init fails; leaves clean state if commit succeeded).
+// RunBootstrap orchestrates the bootstrap path: validate source host,
+// shallow-fetch into workspaceRoot, create the bootstrap branch, write
+// the scaffold, stage, commit.
+//
+// Cleanup contract: callers MUST keep the workspace-dir cleanup defer
+// armed until RunBootstrap returns successfully (i.e. set
+// `workspaceCreated = false` AFTER the call, not before). On any error
+// path inside RunBootstrap, the caller's defer reclaims the
+// half-written workspace directory; RunBootstrap itself does not
+// attempt internal cleanup. This keeps the rollback contract symmetric
+// with today's modeClone flow at init.go:264.
+//
+// Host validation: RunBootstrap inspects the source host BEFORE any
+// git invocation. Non-GitHub sources are refused with a clear "v1
+// supports GitHub sources only" error and no git command runs. This
+// closes the remote-helper vector for hostile `--from` URLs even if a
+// future git release weakens `protocol.allow` defaults.
+//
+// Git identity: the commit invocation is plain `git commit -m "..."`
+// with no `--author` flag and no override of GIT_AUTHOR_* /
+// GIT_COMMITTER_* environment variables. The bootstrap commit
+// reflects the user's normal git identity from user.name /
+// user.email, producing a truthful audit trail.
 //
 // cloneURL is the resolved HTTPS/SSH URL; sourceSlug is the original
 // --from argument (used for visibility lookup and registry source URL).
@@ -590,6 +609,8 @@ runInit
   ▼ classifier matches NoMarkerError + initBootstrap is true
   │
 workspace.RunBootstrap(ctx, workspaceRoot, cloneURL, sourceSlug, ...)
+  ├─ validate source host: GitHub → continue; non-GitHub → refuse with
+  │     "v1 supports GitHub sources only" (no git command runs)
   ├─ git -C <workspaceRoot> init
   ├─ git -C <workspaceRoot> remote add origin <cloneURL>
   ├─ git -C <workspaceRoot> fetch --depth 1 origin HEAD
@@ -602,6 +623,8 @@ workspace.RunBootstrap(ctx, workspaceRoot, cloneURL, sourceSlug, ...)
   │     └─ writes .niwa/claude/.gitkeep
   ├─ git -C <workspaceRoot> add .niwa/
   ├─ git -C <workspaceRoot> commit -m "Initial niwa workspace config"
+  │     (no --author, no GIT_AUTHOR_*/GIT_COMMITTER_* override —
+  │      uses the user's normal git identity)
   └─ return success
   │
   ▼ fall through to existing post-flight (init.go:288)
@@ -617,11 +640,16 @@ Shell wrapper drops user inside /home/user/workspaces/commuter
 on branch niwa-bootstrap with a clean working tree.
 ```
 
-The `os.Mkdir`-cleanup defer at `init.go:221-225` must be disarmed
-explicitly before the bootstrap call returns success. Today's success
-path disarms it at `init.go:395`; the bootstrap path needs equivalent
-disarming. Setting `workspaceCreated = false` before invoking
-`RunBootstrap` is the simplest pattern.
+The `os.Mkdir`-cleanup defer at `init.go:221-225` is disarmed
+explicitly only AFTER `RunBootstrap` returns successfully — not
+before. This keeps the cleanup contract symmetric with the existing
+modeClone flow: any partial-failure path inside `RunBootstrap`
+(fetch fails, checkout fails, scaffold write fails, commit fails)
+falls back to the caller's deferred `os.RemoveAll(workspaceRoot)`,
+leaving the user with a clean cwd. Once `RunBootstrap` returns
+success, `workspaceCreated = false` flips and the existing post-flight
++ registry-write + state-save flow runs against the in-place
+workspace.
 
 ## Implementation Approach
 
@@ -699,19 +727,24 @@ Wire everything into a working flow.
 
 Deliverables:
 - New `internal/workspace/bootstrap.go`. Implements `RunBootstrap`
-  per the Data Flow diagram: `git init` → `remote add` → `fetch --depth 1`
-  → `checkout -b niwa-bootstrap` → visibility lookup → scaffold →
-  stage → commit.
+  per the Data Flow diagram. **Host check runs first** (before any git
+  invocation): GitHub → proceed; non-GitHub → refuse immediately with
+  "v1 supports GitHub sources only; file a follow-up if you need
+  <host>." Then `git init` → `remote add` → `fetch --depth 1` →
+  `checkout -b niwa-bootstrap` → visibility lookup → scaffold → stage
+  → `git commit -m "..."` (no `--author`, no `GIT_AUTHOR_*` override
+  — the commit reflects the user's normal git identity).
 - `internal/cli/init.go`: replace the Phase 2 stub with the real
-  `workspace.RunBootstrap` call. Disarm `workspaceCreated` before
-  invoking; on bootstrap failure, the cleanup defer fires normally.
+  `workspace.RunBootstrap` call. The `workspaceCreated` defer stays
+  armed during the call; disarm only AFTER `RunBootstrap` returns
+  successfully (post-flight verification, registry write, and state
+  save all run between the disarm and the function return). On
+  bootstrap failure, the existing deferred `os.RemoveAll(workspaceRoot)`
+  fires and the user is back to a clean cwd.
 - Success-message block on stderr in WARNING style (matches the
   `--rebind` precedent's prominence): workspace path, bootstrap branch
   name, "next steps" (review with `git show HEAD`, push with
   `git push -u origin niwa-bootstrap`, then `niwa apply`).
-- Bootstrap path checks the source host: GitHub → proceed; non-GitHub
-  → refuse with "v1 supports GitHub sources only; file a follow-up if
-  you need <host>" message.
 - `@critical` Gherkin scenario covering the full
   `niwa init <name> --from <empty-github-remote> --bootstrap` flow
   using the `localGitServer` test helper. Verify: workspace.toml on
@@ -719,6 +752,81 @@ Deliverables:
   wrapper landing-path written, success message format.
 - Documentation update in `docs/guides/` or `README.md` describing the
   bootstrap flow and the `--bootstrap` flag.
+
+## Security Considerations
+
+A dedicated security review (full report at
+`wip/research/design_init-bootstrap-empty-source_phase5_security.md`)
+evaluated this design against external-artifact handling, permission
+scope, supply-chain trust, data exposure, confirmation-UX integrity,
+command injection, branch/path race conditions, and source-host
+validation ordering. Outcome: document considerations (no design
+changes required).
+
+### Dimensions evaluated
+
+- **Remote-helper / URL-handler exploitation via `--from`**. Mitigated
+  by running the v1 GitHub-host check BEFORE any `git init` / `git
+  remote add` / `git fetch` invocation (specified in Solution
+  Architecture and Implementation Approach Phase 4). Modern git
+  defaults reject `ext::` / `transport::` remotes via
+  `protocol.allow`, but the explicit host check closes the vector
+  defensively regardless of git's local configuration.
+- **Command injection in git invocations**. Not applicable. All git
+  calls go through `exec.CommandContext` with arguments as separate
+  elements (matching the existing pattern at `internal/workspace/clone.go:63`).
+  No shell, no interpolation. The fixed branch name (`niwa-bootstrap`)
+  and commit message (`"Initial niwa workspace config"`) are
+  niwa-controlled, not user-derived.
+- **Scaffold content influenced by remote data**. Not applicable. The
+  scaffold inputs are `Name` (validated by `workspace.ValidateInitName`),
+  `Org` (validated by `source.Parse`), and `Visibility` (the GitHub
+  `private` bool normalized to the literal strings `"public"` or
+  `"private"` via the same path `ListRepos` already uses). No
+  remote-controlled string reaches the TOML template.
+- **Git hooks from the cloned remote**. Not applicable. `git fetch`
+  into a freshly `git init`-ed directory does not transfer hooks. The
+  scaffolded `workspace.toml` does not pre-wire any `[claude.hooks]`,
+  `[claude.env.secrets]`, or `[claude.plugins]` entries — first
+  `niwa apply` runs nothing the user hasn't subsequently configured.
+- **Partial-failure on-disk state**. Mitigated by keeping the
+  workspace-dir cleanup defer at `init.go:221-225` armed during the
+  `RunBootstrap` call. `workspaceCreated = false` flips only after
+  `RunBootstrap` returns success — any partial-failure path inside
+  the orchestrator (fetch, checkout, scaffold write, commit) falls
+  back to the caller's deferred `os.RemoveAll(workspaceRoot)`. The
+  user sees a clean cwd after a failed bootstrap.
+- **Git author / committer integrity**. Mitigated by invoking
+  `git commit -m "..."` plainly — no `--author` flag, no
+  `GIT_AUTHOR_*` / `GIT_COMMITTER_*` environment override. The
+  bootstrap commit reflects the user's normal `user.name` /
+  `user.email`, producing a truthful audit trail.
+- **Confused-deputy via piped stdin**. Not applicable. The TTY-gated
+  prompt uses `cli.ReadConfirmation` only when `IsStdinTTY()` returns
+  true. A script piping `yes` into `niwa init` hits the non-TTY
+  refusal-with-hint branch, not the prompt. `--bootstrap` is the
+  explicit-intent gate.
+- **Classifier ordering attack**. Not applicable. The seam at
+  `init.go:265` orders most-specific first (AmbiguousMarkers →
+  NoMarker → 401/403 → 404). A remote that flips between
+  classifications between probes cannot help an attacker — niwa
+  scaffolds the user-chosen directory and commits to a local-only
+  branch the user must manually push.
+- **Token handling**. No change. `GetRepo` uses the existing
+  `resolveGitHubToken()` path; the token is sent only to the
+  configured GitHub API host and never written to disk.
+- **Branch-name collision (`niwa-bootstrap` already exists upstream)**.
+  Operational edge case, not a security concern. `git checkout -b`
+  fails and bootstrap aborts; the cleanup defer fires.
+
+### Residual risk
+
+- The `NIWA_GITHUB_API_URL` override (existing behavior in
+  `internal/github/client.go:41-50`) directs the visibility lookup to
+  a non-default host along with the user's bearer token. This is not
+  introduced by this design, but the bootstrap path is one more
+  caller that inherits it. A future hardening item is to warn at niwa
+  startup when the override is set.
 
 ## Consequences
 
