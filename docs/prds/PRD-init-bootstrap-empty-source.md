@@ -1,5 +1,5 @@
 ---
-status: Draft
+status: Accepted
 problem: |
   A user adopting a freshly-created GitHub repository as a niwa-managed
   workspace today must run three separate commands (`niwa init`, `niwa
@@ -21,7 +21,7 @@ goals: |
 
 ## Status
 
-Draft
+Accepted
 
 ## Glossary
 
@@ -42,6 +42,7 @@ Terms used in this PRD with their precise meaning in niwa:
 | **Scaffold** | The act of writing a freshly-authored `.niwa/workspace.toml` (and `.niwa/claude/.gitkeep`) on disk. |
 | **Bootstrap branch** | The branch `niwa-bootstrap/<sid>` created inside the session worktree to hold the scaffolded commit. |
 | **Channels (mesh)** | The `[channels.mesh]` feature that enables session worktrees and role inboxes; required for the bootstrap path. |
+| **Daemon** | The per-instance or per-worktree long-lived process niwa spawns to deliver tasks. `niwa create` starts the instance daemon; `niwa session create` starts the per-worktree daemon. |
 | **Landing-path file** | The file niwa writes via `writeLandingPath()` whose contents tell the shell wrapper which directory to `cd` to. |
 
 ## Problem Statement
@@ -181,8 +182,10 @@ preconditions specific to bootstrap shall be introduced.
   points at `niwa session create <repo> bootstrap` for retry.
 
 Daemon shutdown during create-fail rollback follows the same contract
-as `niwa destroy --instance`: 5 s graceful shutdown via SIGTERM, then
-SIGKILL. Daemon-shutdown timeouts do not block the rollback.
+as `niwa destroy --instance`: 5 seconds of graceful shutdown via
+SIGTERM (timer starts when SIGTERM is sent), then SIGKILL. Daemon
+shutdown timeouts do not block the rollback — the instance directory
+is removed even if SIGKILL was required.
 
 **R8.** When `niwa init <name> --from <slug> --bootstrap` is invoked
 against an existing target, niwa shall refuse with bootstrap-specific
@@ -238,7 +241,7 @@ exclusion) runs upstream of R13 and rejects `--bootstrap` +
 |-----|------------|----------------|----------|
 | Yes | set | unset | Proceed without prompting. |
 | Yes | unset | set | Fail-fast with NoMarker text + decline reason. |
-| Yes | unset | unset | Prompt: `Remote has no .niwa/workspace.toml. Scaffold a minimal config and stage it on a niwa-bootstrap branch? [Y/n] `. Proceed only on Y. Exit 0 on N. |
+| Yes | unset | unset | Prompt: `Remote has no .niwa/workspace.toml. Scaffold a minimal config and stage it on a niwa-bootstrap branch? [Y/n] `. Proceed on `y`, `Y`, or bare Enter (the `[Y/n]` capitalization signals Yes is the default). Decline on `n` or `N`. Any other input re-prompts. Exit 0 on decline. |
 | No | set | unset | Proceed without prompting. |
 | No | unset | set | Fail-fast with NoMarker text + decline reason. |
 | No | unset | unset | Fail-fast: `remote has no .niwa/workspace.toml and stdin is not a terminal; re-run with --bootstrap to scaffold`. |
@@ -289,9 +292,12 @@ shall:
 
 **R19.** On full success, niwa shall write the success block to
 stderr matching the exact format in [Appendix B: Success Block
-Format](#appendix-b-success-block-format). The success block shall be
+Format](#appendix-b-success-block-format). The block shall be
 preceded by one blank stderr line and followed by one blank stderr
-line. Lines shall appear in the order specified in Appendix B.
+line. Lines shall appear in the order specified in Appendix B. The
+exact format including all padding, indentation, and column alignment
+is defined by the literal block in Appendix B — implementers match
+the block byte-for-byte after substituting the `<placeholder>` tokens.
 
 **R20.** The shell-wrapper landing-path mechanism (existing helper
 `workspace/landing.go::writeLandingPath`) shall be invoked with the
@@ -538,10 +544,16 @@ Each AC names the fixture(s) required.
   Detail contains `workspace name \`<name>\` is already registered`;
   Suggestion contains `niwa destroy <name>`.
 
-- [ ] **Conflict sub-case 3 (non-niwa file at target)**: `touch
+- [ ] **Conflict sub-case 3a (non-niwa file at target)**: `touch
   <cwd>/bar`, then run `niwa init bar --from owner/foo --bootstrap`
   → exit 1; stderr Detail contains `<absPath> already exists (file)`;
   Suggestion contains `Pick a different`.
+- [ ] **Conflict sub-case 3b (non-niwa directory at target)**:
+  `mkdir <cwd>/bar` (no `.niwa/` inside), then run bootstrap → exit
+  1; stderr Detail contains `<absPath> already exists (directory)`.
+- [ ] **Conflict sub-case 3c (symlink at target)**: `ln -s
+  /tmp/somewhere <cwd>/bar`, then run bootstrap → exit 1; stderr
+  Detail contains `<absPath> already exists (symlink)`.
 
 ### Rollback (R7)
 
@@ -599,6 +611,19 @@ Each AC names the fixture(s) required.
   scaffold contains `[groups.public]`; stderr contains the exact R17
   note with `<cause>` = `network error`; bootstrap exits 0.
 
+- [ ] **Visibility-lookup soft-fail (auth)**
+  (`tarballFakeServer` returns 401 on the `/repos/owner/foo`
+  metadata endpoint only — the tarball fetch path returns 200): the
+  bootstrap continues; scaffold contains `[groups.public]`; stderr
+  contains the exact R17 note with `<cause>` = `authentication`;
+  bootstrap exits 0.
+
+- [ ] **Visibility-lookup soft-fail (not found)**
+  (`tarballFakeServer` returns 404 on the `/repos/owner/foo`
+  metadata endpoint only): scaffold contains `[groups.public]`;
+  stderr contains the exact R17 note with `<cause>` = `not found`;
+  bootstrap exits 0.
+
 ### Test-seam and invariant assertions
 
 - [ ] **Host-check ordering at exec layer**: unit test with the
@@ -633,6 +658,25 @@ Each AC names the fixture(s) required.
 - [ ] **No-push assertion**: end-to-end test asserts that the
   injectable exec invoker's record contains no `git push`
   invocation across the happy path (R24).
+
+- [ ] **No-secret-on-disk assertion (N5)**: after a happy-path
+  bootstrap with `GH_TOKEN=test-fixture-token-DEADBEEF`, recursively
+  grep `<cwd>/<name>/` for the literal token value. Assert zero
+  matches (token must not appear in scaffolded workspace.toml,
+  instance state, registry entry, session state, or any other
+  written artifact).
+
+- [ ] **Init-step rollback prefix**: a forced failure during the
+  init step writes a stderr error line beginning with the literal
+  prefix `bootstrap step=init:`. The `<cwd>/<name>/` directory does
+  not exist on disk afterward.
+
+- [ ] **Argv-injection guard (R22)**: unit test passes the slug
+  literal `owner/foo;rm -rf /tmp/x` to bootstrap's slug-parse path.
+  Either the slug fails `source.Parse`'s grammar check (rejected as
+  malformed) OR if it parses, the value reaches `exec.CommandContext`
+  as a single argv element (asserted via the injectable invoker)
+  with no shell metacharacter expansion.
 
 - [ ] **Allow-list scoping**: `tarballFakeServer` configured with
   three repos in the source org (`foo`, `bar`, `baz`); bootstrap
@@ -845,11 +889,11 @@ Branch:                       niwa-bootstrap/<sid>
 Next steps:
   1. Inspect the scaffold:        git show HEAD
   2. Push the bootstrap branch:   git push -u origin niwa-bootstrap/<sid>
-  3. Merge to the default branch, then run `niwa apply` to refresh.
+  3. Merge to the default branch, then run `niwa apply` for drift checking.
 ```
 
-Lines must appear in the order shown. The `Workspace bootstrapped
-at:`, `Instance:`, `Worktree:`, and `Branch:` lines use column-aligned
-values (the alignment column is byte position 30, padding with spaces).
-The "Next steps" block uses two-space indentation and the numbered
-prefix shown.
+Lines appear in the order shown. The literal block above is the
+byte-equality contract — the spacing between label and value, the
+indentation under "Next steps:", and the colon-then-space pattern
+are all part of the spec. Tests assert the stderr block matches this
+exact body after substituting `<placeholder>` tokens at runtime.
