@@ -818,9 +818,12 @@ Deliverables:
   `*NoMarkerError`-without-`--bootstrap` arm and the 404 arm gain the
   "retry with --bootstrap" hint that was deferred in Phase 1.
 - Success-message block on stderr in WARNING style (matches the
-  `--rebind` precedent's prominence): workspace path, bootstrap branch
-  name, "next steps" (review with `git show HEAD`, push with
-  `git push -u origin niwa-bootstrap`, then `niwa apply`).
+  `--rebind` precedent's prominence): bootstrap branch name, a
+  `Worktree:` line with the absolute filesystem path the user `cd`s
+  into to inspect (same directory as the workspace root in the W1
+  in-place model — the label reflects what the user does next, not
+  the on-disk layout), "next steps" (review with `git show HEAD`,
+  push with `git push -u origin niwa-bootstrap`, then `niwa apply`).
 - `@critical` Gherkin scenario covering the full
   `niwa init <name> --from <empty-github-remote> --bootstrap` flow
   using the `localGitServer` test helper. Verify: workspace.toml on
