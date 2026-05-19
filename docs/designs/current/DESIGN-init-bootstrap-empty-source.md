@@ -393,6 +393,41 @@ name)` stays unchanged for `modeScaffold` / `modeNamed` callers. A new
   information (slug duplicates parent repo URL) or transient noise
   (timestamp loses meaning the moment the file outlives the bootstrap).
 
+### Decision 5: Implementation choices (implicit)
+
+The following are smaller choices baked into Solution Architecture and
+Implementation Approach below. Each had at least one viable alternative;
+documenting them here so future readers see they were made deliberately.
+
+- **Branch name fixed as `niwa-bootstrap`.** *Alternative:* configurable
+  via `--bootstrap-branch <name>` flag. *Chosen because* zero-config is
+  the v1 priority; a flag is an easy follow-up if user feedback wants it.
+- **Shallow clone via `git init` + `git fetch --depth 1`, not `git clone --depth 1`.**
+  *Alternative:* clone into a temp dir then move. *Chosen because* the
+  workspace root already exists (created by `os.Mkdir` at `init.go:217`)
+  and `git clone` refuses non-empty targets; `git init` + `fetch` works
+  in-place without a cross-filesystem move that might fail.
+- **`.niwa/claude/.gitkeep` always written by `ScaffoldFromSource`.**
+  *Alternative:* opt-in via the `IncludeGitkeep` field in
+  `ScaffoldOptions`. *Chosen* the field exists so unit tests can suppress
+  the file, but production bootstrap always sets it true.
+- **Pre-commit message fixed as `"Initial niwa workspace config"`.**
+  *Alternative:* configurable via flag. *Chosen because* the user can
+  always `git commit --amend` if they want different wording; a
+  flag adds surface area for a once-in-project-lifetime concern.
+- **Bootstrap path is GitHub-only in v1.** *Alternative:* support
+  `git@host:org/repo` and `file://` source URLs from day one.
+  *Chosen because* the typed-error refactor (Decision 3) is
+  GitHub-specific; non-GitHub transports stay on the existing raw
+  `git clone` stderr path. Bootstrap dispatch checks the source host
+  and refuses non-GitHub with a clear error pointing at "v1 supports
+  GitHub sources only."
+- **Audit-trail success message goes to stderr in WARNING style.**
+  *Alternative:* a quiet stdout `note:` like the vault-bootstrap
+  pointer. *Chosen because* bootstrap mutates local git state (creates
+  a branch, writes a commit), which is more side-effecting than a
+  pure config nudge — matches the `--rebind` precedent's prominence.
+
 ## Decision Outcome
 
 The four decisions compose into one coherent flow:
@@ -425,6 +460,334 @@ without `--bootstrap` keeps today's text plus a `--bootstrap` hint;
 GitHub 401/403 surfaces the `GH_TOKEN` scope guidance as
 Detail+Suggestion; GitHub 404 surfaces the zero-commit guidance.
 Everything else falls through to today's generic wrap.
+
+## Solution Architecture
+
+### Overview
+
+The bootstrap path is a sibling of today's `modeClone` flow inside
+`runInit`. It activates when the user passes `--bootstrap` (or accepts
+the TTY prompt) and `MaterializeFromSource` returns
+`*config.NoMarkerError`. Instead of failing, niwa scaffolds a minimal
+config, commits it on a feature branch in the workspace root, and
+hands the workspace off to the user via the existing landing-path
+shell-wrapper mechanism. The cloned tree IS the workspace root; no
+separate worktree exists.
+
+### Components
+
+```
+internal/cli/
+  init.go                  -- new --bootstrap / --no-bootstrap flags;
+                              classifier seam at line 265;
+                              bootstrap dispatch into workspace.RunBootstrap.
+internal/github/
+  fetch.go                 -- typed *StatusError replaces string status errors.
+  client.go                -- new (*APIClient).GetRepo(ctx, owner, repo).
+internal/workspace/
+  scaffold.go              -- new ScaffoldOptions struct;
+                              new ScaffoldFromSource(dir, opts) sibling of Scaffold;
+                              shared template helpers for the schema-link footer
+                              and commented [claude.content.workspace] hint.
+  bootstrap.go             -- new file. Orchestrates clone + branch + scaffold
+                              + commit. Exposes workspace.RunBootstrap.
+internal/workspace/
+  preflight.go             -- unchanged in v1 (workspace-level sentinels
+                              deferred to follow-up per Decision 3).
+```
+
+### Key Interfaces
+
+**`internal/github`**
+
+```go
+// StatusError carries the HTTP status code from a GitHub API call so
+// callers can classify failures via errors.As without parsing the
+// message text. The Error() string preserves today's wording for
+// callers that print the wrapped error verbatim.
+type StatusError struct {
+    StatusCode int
+    Message    string  // human-readable summary
+    URL        string  // request URL (optional, for diagnostics)
+}
+
+func (e *StatusError) Error() string { ... }
+
+// GetRepo fetches single-repo metadata. Bootstrap uses it to read the
+// 'private' bool for visibility classification. Returns the existing
+// *Repo struct so visibility normalization reuses the ListRepos path.
+func (c *APIClient) GetRepo(ctx context.Context, owner, repo string) (*Repo, error)
+```
+
+**`internal/workspace`**
+
+```go
+type ScaffoldOptions struct {
+    Name           string  // workspace name; positional arg or derived from repo slug
+    Org            string  // source org from --from slug; required
+    Visibility     string  // "public" | "private" | "" (lookup failed → empty)
+    IncludeGitkeep bool    // production always true; unit tests may suppress
+}
+
+// ScaffoldFromSource writes .niwa/workspace.toml + .niwa/claude/ (with
+// optional .gitkeep) into dir. Sibling of Scaffold(dir, name); the
+// existing callers stay on Scaffold.
+func ScaffoldFromSource(dir string, opts ScaffoldOptions) error
+
+// RunBootstrap orchestrates the bootstrap path: shallow-fetch the
+// source into workspaceRoot, create the bootstrap branch, write the
+// scaffold, stage, commit. Idempotent on partial failure (cleans up
+// .git/ if init fails; leaves clean state if commit succeeded).
+//
+// cloneURL is the resolved HTTPS/SSH URL; sourceSlug is the original
+// --from argument (used for visibility lookup and registry source URL).
+func RunBootstrap(ctx context.Context, workspaceRoot, cloneURL, sourceSlug string,
+                  opts BootstrapOptions, fetcher github.FetchClient,
+                  reporter *Reporter) error
+```
+
+**`internal/cli/init.go` classifier seam (replacing the bare wrap at
+line 266):**
+
+```go
+materializeErr := workspace.MaterializeFromSource(...)
+if materializeErr != nil {
+    var ambErr *config.AmbiguousMarkersError
+    var noMarkerErr *config.NoMarkerError
+    var statusErr *github.StatusError
+    switch {
+    case errors.As(materializeErr, &ambErr):
+        // today's text, formatted as InitConflictError
+    case errors.As(materializeErr, &noMarkerErr):
+        if initBootstrap {
+            // Disarm the workspace-dir cleanup defer and dispatch:
+            workspaceCreated = false
+            return workspace.RunBootstrap(ctx, workspaceRoot, cloneURL, source, ...)
+        }
+        // emit existing text + "--bootstrap" hint
+    case errors.As(materializeErr, &statusErr) && (statusErr.StatusCode == 401 || statusErr.StatusCode == 403):
+        // case-C message: GH_TOKEN scope guidance
+    case errors.As(materializeErr, &statusErr) && statusErr.StatusCode == 404:
+        // case-D message: "verify slug; private needs GH_TOKEN; zero-commit push README"
+    default:
+        return fmt.Errorf("materializing config repo: %w", materializeErr)
+    }
+}
+```
+
+### Data Flow
+
+```
+niwa init commuter --from dangazineu/commuter --bootstrap
+  │
+  ▼
+runInit
+  ├─ resolveInitMode → modeClone
+  ├─ os.Mkdir(<cwd>/commuter)                    [today: init.go:217]
+  ├─ workspace.MaterializeFromSource              [today: init.go:264]
+  │     └─ returns *config.NoMarkerError           [config/discover.go:201]
+  │
+  ▼ classifier matches NoMarkerError + initBootstrap is true
+  │
+workspace.RunBootstrap(ctx, workspaceRoot, cloneURL, sourceSlug, ...)
+  ├─ git -C <workspaceRoot> init
+  ├─ git -C <workspaceRoot> remote add origin <cloneURL>
+  ├─ git -C <workspaceRoot> fetch --depth 1 origin HEAD
+  ├─ git -C <workspaceRoot> checkout -b niwa-bootstrap FETCH_HEAD
+  ├─ visibility ← github.GetRepo(org, repo)  (soft-fail → "")
+  ├─ if visibility lookup failed → emit stderr `note:` line
+  ├─ workspace.ScaffoldFromSource(<workspaceRoot>, ScaffoldOptions{
+  │     Name, Org, Visibility, IncludeGitkeep: true})
+  │     ├─ writes .niwa/workspace.toml
+  │     └─ writes .niwa/claude/.gitkeep
+  ├─ git -C <workspaceRoot> add .niwa/
+  ├─ git -C <workspaceRoot> commit -m "Initial niwa workspace config"
+  └─ return success
+  │
+  ▼ fall through to existing post-flight (init.go:288)
+  │
+  ├─ config.Load(.niwa/workspace.toml) → succeeds
+  ├─ emitVaultBootstrapPointer(...)               [no-op: no vault declared]
+  ├─ globalCfg.SetRegistryEntry(name, entry)      [today: init.go:328]
+  ├─ workspace.SaveState(workspaceRoot, state)    [today: init.go:342]
+  ├─ printSuccess(...) + bootstrap WARNING block on stderr
+  └─ writeLandingPath(workspaceRoot)              [today: init.go:390]
+
+Shell wrapper drops user inside /home/user/workspaces/commuter
+on branch niwa-bootstrap with a clean working tree.
+```
+
+The `os.Mkdir`-cleanup defer at `init.go:221-225` must be disarmed
+explicitly before the bootstrap call returns success. Today's success
+path disarms it at `init.go:395`; the bootstrap path needs equivalent
+disarming. Setting `workspaceCreated = false` before invoking
+`RunBootstrap` is the simplest pattern.
+
+## Implementation Approach
+
+Four phases, each a self-contained PR with tests and CI green before
+the next phase starts.
+
+### Phase 1: Error classification foundation
+
+Build the typed-error infrastructure that both bootstrap and adjacent
+failure-mode handling need.
+
+Deliverables:
+- `internal/github/fetch.go`: introduce `*github.StatusError` type; the
+  four error-construction sites (lines 69, 72, 145, 149) return the
+  typed value. `Error()` preserves today's text.
+- Update the four test fakes in
+  `internal/workspace/snapshotwriter_test.go` to construct
+  `&StatusError{StatusCode: ...}`.
+- `internal/cli/init.go`: replace the bare `"materializing config repo: %w"`
+  wrap with the `errors.As` classifier described in Key Interfaces.
+  Wire `*AmbiguousMarkersError` → existing text; `*NoMarkerError` →
+  existing text plus a hint pointing at `--bootstrap` (the flag itself
+  ships in Phase 2 — the hint is forward-looking); 401/403 → GH_TOKEN
+  scope message; 404 → zero-commit / typo / private message.
+- Unit tests for the classifier covering each typed-error case.
+- `@critical` Gherkin scenarios in `test/functional/features/` for the
+  401, 403, and 404 user-visible messages.
+
+### Phase 2: Flag surface + prompt UX
+
+Add the `--bootstrap` / `--no-bootstrap` flag pair with TTY-gated
+prompt and non-TTY refusal. Dispatch stubs to a "not yet implemented"
+error so the flag surface is testable before the orchestrator lands.
+
+Deliverables:
+- `internal/cli/init.go`: declare `--bootstrap` and `--no-bootstrap`
+  flags. Mutual-exclusion check (matches `--overlay` / `--no-overlay`
+  at `init.go:135-137`).
+- TTY-gated prompt: when `*NoMarkerError` fires, the user is in a TTY,
+  and neither flag is set, prompt `[Y/n]` using
+  `cli.ReadConfirmation`. Yes → proceed as if `--bootstrap` was set
+  (stub error in this phase). No → existing fail-loud path.
+- Non-TTY without flag: fail fast with hint pointing at `--bootstrap`,
+  matching destroy.go's `IsStdinTTY()` refusal pattern.
+- Unit tests for flag wiring, mutual exclusion, prompt-yes/no, non-TTY
+  refusal.
+- The bootstrap dispatch is a stub returning
+  `errors.New("bootstrap not implemented yet")` — full integration in
+  Phase 4.
+
+### Phase 3: Scaffold derivation
+
+Build the scaffold + visibility-lookup machinery independent of the
+bootstrap orchestrator.
+
+Deliverables:
+- `internal/github/client.go`: new `(*APIClient).GetRepo(ctx, owner, repo)`
+  method returning the existing `*Repo` struct.
+- `internal/workspace/scaffold.go`: new `ScaffoldOptions` struct; new
+  `ScaffoldFromSource(dir, opts)` function. Implements the literal
+  TOML body from Decision 4, including `.niwa/claude/.gitkeep`.
+- Shared helper for the schema doc-link footer reused between
+  `Scaffold` and `ScaffoldFromSource` (small extraction).
+- Soft-fail behavior for visibility lookup: any error → empty
+  `Visibility`, scaffold emits `[groups.public]`, stderr `note:` line
+  explains the fallback.
+- Unit tests for: scaffold body matches expected TOML; visibility
+  lookup feeds into the right `[groups.<vis>]` line;
+  visibility-lookup failure emits the expected note and falls back to
+  `[groups.public]`; `.gitkeep` is written.
+
+### Phase 4: Bootstrap orchestration + end-to-end
+
+Wire everything into a working flow.
+
+Deliverables:
+- New `internal/workspace/bootstrap.go`. Implements `RunBootstrap`
+  per the Data Flow diagram: `git init` → `remote add` → `fetch --depth 1`
+  → `checkout -b niwa-bootstrap` → visibility lookup → scaffold →
+  stage → commit.
+- `internal/cli/init.go`: replace the Phase 2 stub with the real
+  `workspace.RunBootstrap` call. Disarm `workspaceCreated` before
+  invoking; on bootstrap failure, the cleanup defer fires normally.
+- Success-message block on stderr in WARNING style (matches the
+  `--rebind` precedent's prominence): workspace path, bootstrap branch
+  name, "next steps" (review with `git show HEAD`, push with
+  `git push -u origin niwa-bootstrap`, then `niwa apply`).
+- Bootstrap path checks the source host: GitHub → proceed; non-GitHub
+  → refuse with "v1 supports GitHub sources only; file a follow-up if
+  you need <host>" message.
+- `@critical` Gherkin scenario covering the full
+  `niwa init <name> --from <empty-github-remote> --bootstrap` flow
+  using the `localGitServer` test helper. Verify: workspace.toml on
+  disk, branch created, commit landed, registry entry written, shell
+  wrapper landing-path written, success message format.
+- Documentation update in `docs/guides/` or `README.md` describing the
+  bootstrap flow and the `--bootstrap` flag.
+
+## Consequences
+
+### Positive
+
+- **Single-command bootstrap** of a niwa-managed workspace from a
+  freshly-created GitHub repo. The chicken-and-egg friction the user
+  identified is removed.
+- **Better error messages across the materialize surface.** 401/403,
+  404, ambiguous, and no-marker all get case-specific Detail +
+  Suggestion remediation pointers via the same classifier seam.
+- **Typed-error infrastructure** in `internal/github` makes future
+  classification work (malformed config sentinel, non-GitHub transport
+  classification) small follow-up PRs rather than refactors.
+- **No regression to existing init paths.** `modeScaffold` and
+  `modeNamed` are untouched. The classifier replaces only the generic
+  error wrap, with the generic case preserved as fall-through.
+- **Coherent with niwa's CLI idioms.** `--bootstrap` / `--no-bootstrap`
+  matches four existing flag pairs; TTY gating reuses `IsStdinTTY()`;
+  the success-WARNING matches the `--rebind` audit-trail style;
+  stderr `note:` for visibility-lookup soft-fail matches the
+  vault-bootstrap pointer pattern.
+
+### Negative
+
+- **v1 does not handle truly empty (zero-commit) remotes** that 404
+  upstream of the probe. The user must push at least one commit before
+  retrying. Decision 2 commits to a clear remediation message but
+  defers the disambiguation API call to v2.
+- **In-place worktree model** means the cloned tree, bootstrap branch,
+  and workspace root all share `<cwd>/<name>/`. There is no
+  "throwaway worktree to inspect before promoting" — if the user
+  decides the scaffold is wrong, the recovery is `rm -rf <cwd>/<name>/`
+  plus a registry-prune step.
+- **New API surface widens the maintenance area.** Three additions:
+  `*github.StatusError`, `(*github.APIClient).GetRepo`, and
+  `workspace.ScaffoldFromSource` + `workspace.RunBootstrap`. Each is
+  small but adds to the contract the package owes.
+- **The bootstrap path performs a real `git fetch`** rather than
+  reusing the tarball probe — slightly slower for large remotes (the
+  user pays this cost once per bootstrap). Mitigated by `--depth 1`.
+- **The original "use the worktree setup in niwa" framing was rejected
+  for structural reasons** (post-flight + apply discovery require
+  `<workspaceRoot>/.niwa/workspace.toml` to exist in the main checkout).
+  Documented in Decision 1's Alternatives.
+
+### Mitigations
+
+- **Zero-commit case:** Decision 2's 404 message names the
+  remediation explicitly ("push at least one commit and retry with
+  --bootstrap"). v2 can revisit if real users report this is common
+  enough to warrant the extra `repos/get` API call.
+- **In-place recovery:** Documented in release notes and the
+  `--bootstrap` flag's `--help` text — recovery is git-native
+  (`rm -rf` + manual or future `niwa registry prune`). Reaffirms the
+  user-statement that bootstrap is a one-shot setup action, not a
+  workflow that runs repeatedly.
+- **Maintenance surface:** The new types and methods have minimal,
+  intentional shape. `StatusError` carries three fields; `GetRepo`
+  reuses the existing `*Repo` type; `ScaffoldFromSource` and
+  `RunBootstrap` have narrow, well-documented contracts. Functional
+  test coverage at `test/functional/` enforces user-visible
+  behavior.
+- **Fetch latency:** `--depth 1` keeps the fetch O(latest commit) and
+  not O(history). For the user's scenario (brand-new repo, README
+  only), the fetch is effectively zero-bytes-over-the-wire.
+- **Worktree-framing divergence:** Decision 1's note section makes the
+  rationale explicit. The W2+R3+C1 alternative is documented for
+  reviewers who might prefer the separated-worktree pattern.
 
 ## References
 
