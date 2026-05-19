@@ -124,10 +124,10 @@ not reopened:
 
 ## Considered Options
 
-Four interrelated decisions were evaluated. Full reports live in
-`wip/design_init-bootstrap-empty-source_decision_*.md`; this section
-summarizes each so a future reader understands the alternatives that
-were weighed.
+Four interrelated decisions were evaluated, each through the
+structured decision skill (research → alternatives → adversarial
+validation → synthesis). This section summarizes each decision so a
+future reader understands the alternatives that were weighed.
 
 ### Decision 1: Bootstrap end-to-end UX model
 
@@ -558,10 +558,14 @@ func ScaffoldFromSource(dir string, opts ScaffoldOptions) error
 // reflects the user's normal git identity from user.name /
 // user.email, producing a truthful audit trail.
 //
-// cloneURL is the resolved HTTPS/SSH URL; sourceSlug is the original
-// --from argument (used for visibility lookup and registry source URL).
-func RunBootstrap(ctx context.Context, workspaceRoot, cloneURL, sourceSlug string,
-                  opts BootstrapOptions, fetcher github.FetchClient,
+// src carries the parsed source (host, org, repo, original slug);
+// the resolved clone URL is derived inside RunBootstrap via
+// workspace.ResolveCloneURL. Passing the parsed source rather than
+// (cloneURL, slug) separately keeps a single source of truth.
+// workspaceName is the positional arg (or default) that populates the
+// scaffold's [workspace] name.
+func RunBootstrap(ctx context.Context, workspaceRoot, workspaceName string,
+                  src source.Source, fetcher github.FetchClient,
                   reporter *Reporter) error
 ```
 
@@ -608,9 +612,10 @@ runInit
   │
   ▼ classifier matches NoMarkerError + initBootstrap is true
   │
-workspace.RunBootstrap(ctx, workspaceRoot, cloneURL, sourceSlug, ...)
-  ├─ validate source host: GitHub → continue; non-GitHub → refuse with
+workspace.RunBootstrap(ctx, workspaceRoot, workspaceName, src, ...)
+  ├─ validate src.Host == github.com → continue; non-GitHub → refuse with
   │     "v1 supports GitHub sources only" (no git command runs)
+  ├─ resolve cloneURL via workspace.ResolveCloneURL(src, …)
   ├─ git -C <workspaceRoot> init
   ├─ git -C <workspaceRoot> remote add origin <cloneURL>
   ├─ git -C <workspaceRoot> fetch --depth 1 origin HEAD
@@ -646,10 +651,20 @@ before. This keeps the cleanup contract symmetric with the existing
 modeClone flow: any partial-failure path inside `RunBootstrap`
 (fetch fails, checkout fails, scaffold write fails, commit fails)
 falls back to the caller's deferred `os.RemoveAll(workspaceRoot)`,
-leaving the user with a clean cwd. Once `RunBootstrap` returns
-success, `workspaceCreated = false` flips and the existing post-flight
-+ registry-write + state-save flow runs against the in-place
-workspace.
+leaving the user with a clean cwd.
+
+Once `RunBootstrap` returns success, control falls through to the
+**unchanged** post-flight block already present in `runInit`:
+`config.Load(.niwa/workspace.toml)` (verifies the scaffold is
+parseable), `emitVaultBootstrapPointer` (no-op for the bootstrap path
+since the scaffold declares no vault), `globalCfg.SetRegistryEntry`
+(writes the registry entry exactly as the clone path does),
+`workspace.SaveState` (writes `.niwa/instance.json`), `printSuccess`
+(plus the bootstrap WARNING block on stderr), `writeLandingPath` (so
+the shell wrapper cd's the user into the workspace). `RunBootstrap`
+does not duplicate any of this — its single responsibility is
+producing a parseable `.niwa/workspace.toml` on a committed branch in
+the workspace root.
 
 ## Implementation Approach
 
@@ -665,15 +680,23 @@ Deliverables:
 - `internal/github/fetch.go`: introduce `*github.StatusError` type; the
   four error-construction sites (lines 69, 72, 145, 149) return the
   typed value. `Error()` preserves today's text.
+- `internal/workspace/snapshotwriter.go`: update the downstream wrap at
+  `materializeFromGitHub` (around line 503) from a `fmt.Errorf("...returned %d", code)`
+  string format to a `%w`-style wrap that preserves the underlying
+  `*StatusError` for `errors.As` discovery in the cli classifier. This
+  is the fifth error-construction site and is essential for the
+  classifier to reach the production 404 path.
 - Update the four test fakes in
   `internal/workspace/snapshotwriter_test.go` to construct
   `&StatusError{StatusCode: ...}`.
 - `internal/cli/init.go`: replace the bare `"materializing config repo: %w"`
   wrap with the `errors.As` classifier described in Key Interfaces.
   Wire `*AmbiguousMarkersError` → existing text; `*NoMarkerError` →
-  existing text plus a hint pointing at `--bootstrap` (the flag itself
-  ships in Phase 2 — the hint is forward-looking); 401/403 → GH_TOKEN
-  scope message; 404 → zero-commit / typo / private message.
+  existing text (the `--bootstrap` hint is added in Phase 2 alongside
+  the flag itself, to avoid pointing users at a flag that doesn't
+  exist yet); 401/403 → GH_TOKEN scope message; 404 → zero-commit /
+  typo / private message (without the `--bootstrap` retry hint until
+  Phase 2 lands).
 - Unit tests for the classifier covering each typed-error case.
 - `@critical` Gherkin scenarios in `test/functional/features/` for the
   401, 403, and 404 user-visible messages.
@@ -707,7 +730,10 @@ bootstrap orchestrator.
 
 Deliverables:
 - `internal/github/client.go`: new `(*APIClient).GetRepo(ctx, owner, repo)`
-  method returning the existing `*Repo` struct.
+  method returning the existing `*Repo` struct. Extract the
+  `private bool → Visibility string` normalization that `ListRepos`
+  performs inline today into a small unexported helper so `GetRepo`
+  and `ListRepos` produce visibility values consistently.
 - `internal/workspace/scaffold.go`: new `ScaffoldOptions` struct; new
   `ScaffoldFromSource(dir, opts)` function. Implements the literal
   TOML body from Decision 4, including `.niwa/claude/.gitkeep`.
@@ -741,6 +767,9 @@ Deliverables:
   save all run between the disarm and the function return). On
   bootstrap failure, the existing deferred `os.RemoveAll(workspaceRoot)`
   fires and the user is back to a clean cwd.
+- Phase 2's `--bootstrap`-aware error messages land here too: the
+  `*NoMarkerError`-without-`--bootstrap` arm and the 404 arm gain the
+  "retry with --bootstrap" hint that was deferred in Phase 1.
 - Success-message block on stderr in WARNING style (matches the
   `--rebind` precedent's prominence): workspace path, bootstrap branch
   name, "next steps" (review with `git show HEAD`, push with
@@ -755,13 +784,11 @@ Deliverables:
 
 ## Security Considerations
 
-A dedicated security review (full report at
-`wip/research/design_init-bootstrap-empty-source_phase5_security.md`)
-evaluated this design against external-artifact handling, permission
-scope, supply-chain trust, data exposure, confirmation-UX integrity,
-command injection, branch/path race conditions, and source-host
-validation ordering. Outcome: document considerations (no design
-changes required).
+A dedicated security review evaluated this design against
+external-artifact handling, permission scope, supply-chain trust,
+data exposure, confirmation-UX integrity, command injection,
+branch/path race conditions, and source-host validation ordering.
+Outcome: document considerations (no design changes required).
 
 ### Dimensions evaluated
 
@@ -899,13 +926,39 @@ changes required).
 
 ## References
 
-- Exploration scope: `wip/explore_init-bootstrap-empty-source_scope.md`
-- Exploration findings: `wip/explore_init-bootstrap-empty-source_findings.md`
-- Exploration decisions: `wip/explore_init-bootstrap-empty-source_decisions.md`
-- Lead research files:
-  - `wip/research/explore_init-bootstrap-empty-source_r1_lead-failure-mode.md`
-  - `wip/research/explore_init-bootstrap-empty-source_r1_lead-minimal-scaffold.md`
-  - `wip/research/explore_init-bootstrap-empty-source_r1_lead-worktree-integration.md`
-  - `wip/research/explore_init-bootstrap-empty-source_r1_lead-cli-surface.md`
-  - `wip/research/explore_init-bootstrap-empty-source_r1_lead-other-failures.md`
-  - `wip/research/explore_init-bootstrap-empty-source_r1_lead-confirmation-ux.md`
+### Code paths this design touches
+
+- `internal/cli/init.go` — `runInit`, the classifier seam at line 265,
+  the workspace-dir cleanup defer at lines 221–225, the
+  `printSuccess` block at line 642, and the landing-path mechanism at
+  lines 389–393.
+- `internal/cli/prompt.go` — `IsStdinTTY()` and `ReadConfirmation` for
+  the TTY-gated bootstrap prompt.
+- `internal/github/fetch.go` — the four status-error construction
+  sites being typed in Phase 1.
+- `internal/github/client.go` — the `*APIClient` receiving the new
+  `GetRepo` method.
+- `internal/workspace/snapshotwriter.go` — `MaterializeFromSource` and
+  the materialize swap flow that surfaces `*config.NoMarkerError`.
+- `internal/config/discover.go` — `NoMarkerError`,
+  `AmbiguousMarkersError`, and their `Is...` predicates.
+- `internal/workspace/scaffold.go` — receiving the new
+  `ScaffoldFromSource` sibling.
+- `internal/workspace/clone.go` — established pattern for
+  `exec.CommandContext("git", ...)` invocations.
+- `docs/guides/workspace-config-sources.md` — the schema doc the
+  scaffold links to.
+- `test/functional/features/` — where the new `@critical` Gherkin
+  scenarios land.
+
+### Process
+
+This design was produced by `/shirabe:explore` (six parallel research
+agents across failure modes, scaffold contents, worktree integration,
+CLI surface, adjacent failures, and confirmation UX) followed by
+`/shirabe:design` (four decision agents — UX model, zero-commit
+handling, adjacent failure-mode scope, scaffold derivation — plus a
+security review). Intermediate research artifacts staged on this
+branch are cleaned before merge per the workspace's documented
+hygiene rule; the design doc above is the durable record of every
+choice made.
