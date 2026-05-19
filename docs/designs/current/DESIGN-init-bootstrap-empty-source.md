@@ -1,5 +1,5 @@
 ---
-status: Planned
+status: Current
 upstream: docs/prds/PRD-init-bootstrap-empty-source.md
 problem: |
   `niwa init <name> --from <slug> --bootstrap` is now an Accepted PRD,
@@ -57,7 +57,7 @@ rationale: |
 
 ## Status
 
-Planned
+Current
 
 ## Context and Problem Statement
 
