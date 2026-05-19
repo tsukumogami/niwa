@@ -39,6 +39,6 @@
       "report_file": "wip/design_init-bootstrap-empty-source_decision_4_report.md"
     }
   ],
-  "cross_validation": "pending",
+  "cross_validation": "passed",
   "round": 1
 }
