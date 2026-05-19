@@ -1,0 +1,73 @@
+---
+complexity: testable
+complexity_rationale: |
+  Composes the upstream pieces from <<ISSUE:1>>, <<ISSUE:2>>, and <<ISSUE:3>>
+  into the real `workspace.RunBootstrap` body plus the session-state
+  `BranchName` extension and the `mcp.CreateSession` factoring. The new
+  code is mostly orchestration -- arming/disarming defers, sequencing
+  Applier.Create + CreateSession + scaffold + commit -- and every step
+  is observable through the injected `GitInvoker` recorder built in
+  <<ISSUE:3>>. Each R7 stepwise-rollback case (init-fail, create-fail,
+  session-fail, commit-fail) is a forced-error table test asserting
+  the on-disk end-state. R18/R22/R24 invariants are argv/env assertions
+  on the recorder. R19 success-block emission is a byte-equality test
+  against the PRD Appendix B literal. Branch-name back-compat is a
+  unit test reading a pre-schema state JSON. No new infrastructure --
+  just composition of existing seams plus a single back-compat helper.
+---
+
+## Goal
+
+Land the full `workspace.RunBootstrap` orchestrator and the session-state `BranchName` extension so the end-to-end `niwa init --from owner/repo --bootstrap` chain composes scaffold + create + session-create + commit while preserving every PRD security invariant at the argv layer.
+
+## Context
+
+This issue replaces <<ISSUE:2>>'s `errors.New("bootstrap step=create: not implemented yet")` stub with the real chain. The orchestrator wiring is the load-bearing piece for R7's stepwise-rollback contract (each step preserves the right on-disk state when the next step fails), for R18 (no `--author`, no `GIT_*` env override on the commit), for R22 (every git call through the injected invoker as separate argv elements), and for R24 (no `git push` anywhere). The session-state extension adds `BranchName` so R5's `niwa-bootstrap/<sid>` prefix persists into `SessionLifecycleState` while remaining back-compat with state files that pre-date the schema.
+
+Design: `docs/designs/DESIGN-init-bootstrap-empty-source.md` (Phase 4 around line 1136; Solution Architecture for `RunBootstrap`; Cleanup defers and SIGKILL atomicity sections).
+
+## Acceptance Criteria
+
+- [ ] **Session state extension**: `internal/mcp/session_lifecycle.go` adds `BranchName string` to `SessionLifecycleState` with `json:"branch_name,omitempty"`. A new method `EffectiveBranchName() string` returns `BranchName` when non-empty, else `"session/" + SessionID`. `NewSessionLifecycleState` signature is extended to accept `branchName string` and store it on the struct.
+- [ ] **Back-compat fallback**: a session state JSON file written before this schema change (no `branch_name` field) is still readable by the new code. `EffectiveBranchName()` returns `"session/<sid>"` for that case. A unit test asserts this by unmarshalling a fixture JSON that omits the field.
+- [ ] **`CreateSession` factoring**: `internal/mcp/handlers_session.go` factors today's `handleCreateSession` body into a new exported `CreateSession(ctx context.Context, params CreateSessionParams) (sid, worktreePath string, err error)`. The existing MCP handler becomes a thin wrapper that constructs `CreateSessionParams` from the incoming MCP args with `BranchPrefix: ""` (empty preserves today's `session/<sid>` behavior for the MCP handler and every other existing caller). The internal session-create rollback at `handlers_session.go:270-278` stays inside `CreateSession`.
+- [ ] **`CreateSessionParams`** carries: `Repo`, `Purpose`, `BranchPrefix string` (empty -> `"session/"`; non-empty -> `<prefix><sid>`), and the `GitInvoker` interface from <<ISSUE:3>>. The factored entry point routes its `git worktree add` and `git branch -D` calls through the injected `GitInvoker` so the recorder built in <<ISSUE:3>> observes them too (R22).
+- [ ] Every reader that previously called `"session/" + sid` now reads via `state.EffectiveBranchName()`. Specifically: the destroy path at `internal/mcp/handlers_session.go:364` and the push-hint warning at `internal/cli/sessionattach/worktree_warnings.go:81`. Greps for the literal `"session/" + ` in those files return zero matches after this change.
+- [ ] **`runInit` changes Issue 4 makes** in `internal/cli/init.go`: between the classifier returning NoMarker+bootstrap and the call to `workspace.RunBootstrap`, `runInit` invokes `workspace.ScaffoldFromSource(workspaceRoot, opts)` -- the FIRST of the two scaffold writes. The `ScaffoldOptions` struct (`Name`, `SourceOrg`, `BootstrapRepo`, `Private`, `IncludeGitkeep: true`) is constructed once here. `Private` derives from `(*github.APIClient).GetRepo(ctx, owner, repo).Private` with R17 soft-fail to `false` on lookup error. On the `ScaffoldFromSource` call returning nil, `runInit` sets `workspaceCreated = false` (the R7 create-step disarm). Only THEN does it call `workspace.RunBootstrap(ctx, BootstrapParams{..., ScaffoldOpts: opts, ...})`, threading the same `opts` so the second scaffold write inside `RunBootstrap` uses identical options.
+- [ ] **Full `RunBootstrap` body** in `internal/workspace/bootstrap.go`. The function executes in this exact sequence:
+  1. Re-verify `params.Src.IsGitHub()` (defense-in-depth -- `runInit` already checked, but if a future caller bypasses `runInit` and constructs `BootstrapParams` directly, the re-check catches it). The check uses `Source.IsGitHub()`, NOT a literal-byte `Host == "github.com"` comparison (the canonical slug form leaves `Host` empty).
+  2. Resolve `cloneURL` via `workspace.ResolveCloneURL(src, ...)` so the host check and the fetch URL come from the same source of truth.
+  3. **NOTE: RunBootstrap does NOT do its own workspace-root scaffold write.** That call already happened in `runInit` before `RunBootstrap` was invoked. The on-disk `<workspaceRoot>/.niwa/workspace.toml` is the precondition `RunBootstrap` relies on.
+  4. Call `Applier.Create` to provision the instance. `Applier.Create` READS `<workspaceRoot>/.niwa/workspace.toml` (the file `runInit` wrote) -- that read is how `[channels.mesh]` reaches the create pipeline. Arm the `instanceCreated` defer immediately before the call (R7 create-step rollback target).
+  5. Call `mcp.CreateSession(ctx, CreateSessionParams{Repo: ..., Purpose: "bootstrap", BranchPrefix: "niwa-bootstrap/", GitInvoker: params.GitInvoker})`. `CreateSession`'s internal rollback covers worktree + branch + state JSON on any failure that happens inside `CreateSession`.
+  6. **Arm the `sessionCreated` defer** immediately after `CreateSession` returns nil. On any error between this point and a successful commit, the defer calls a destroy-session helper equivalent to `niwa session destroy --force <sid>` so the worktree, branch, and session state JSON are all removed.
+  7. Call the SECOND `ScaffoldFromSource(worktreePath, params.ScaffoldOpts)` -- writes `<worktreePath>/.niwa/workspace.toml` + `<worktreePath>/.niwa/claude/.gitkeep` INSIDE the session worktree using the SAME `ScaffoldOptions` that `runInit` passed to its workspace-root call. Output is byte-identical to `<workspaceRoot>/.niwa/workspace.toml`.
+  8. Invoke `GitInvoker`-mediated `git -C <worktreePath> add .niwa/` followed by `git -C <worktreePath> commit -m "Initial niwa workspace config"`.
+  9. **R18 invariants at the argv/env layer**: the commit invocation passes NO `--author` flag and sets NO `GIT_AUTHOR_NAME` / `GIT_AUTHOR_EMAIL` / `GIT_AUTHOR_DATE` / `GIT_COMMITTER_NAME` / `GIT_COMMITTER_EMAIL` / `GIT_COMMITTER_DATE` environment variables on the subprocess.
+  10. Disarm the `sessionCreated` defer on commit success.
+  11. Return nil. `runInit` then emits R19 + R20.
+- [ ] **Caller-side cleanup defer**: `runInit` flips `workspaceCreated = false` IMMEDIATELY after the runInit-level `workspace.ScaffoldFromSource(workspaceRoot, opts)` call returns nil -- NOT after `RunBootstrap` returns nil. This matches the design's "Cleanup defers -- who owns what" section: the init-step defer that reclaims `<cwd>/<name>/` cannot fire after the scaffold is written, because that would violate R7's create-step and session-step preservation rules (failures after scaffold must leave the workspace dir AND the scaffolded `workspace.toml` inside it intact). An implementer who disarms "after `RunBootstrap` returns" would delete the user's workspace on a create-step failure, violating R7. This change is what makes R7 create-step preservation work end-to-end.
+- [ ] **Byte-identical scaffold writes**: a unit test under `internal/workspace/bootstrap_test.go` runs `RunBootstrap` happy-path end-to-end (using the `GitInvoker` recorder + an `Applier` with stubbed clone) and asserts `os.ReadFile(<workspaceRoot>/.niwa/workspace.toml)` and `os.ReadFile(<worktreePath>/.niwa/workspace.toml)` produce byte-identical content. Same for `.niwa/claude/.gitkeep`. This is the structural verification that the two scaffold writes use the SAME `ScaffoldOptions`.
+- [ ] **R19 success-block emission**: on `RunBootstrap` returning nil, `runInit` writes the PRD Appendix B body to stderr byte-for-byte. The block is preceded by exactly one blank stderr line and followed by exactly one blank stderr line. Lines appear in the exact order from Appendix B (the four labelled lines first, then the blank, then `Next steps:`, then the three numbered steps).
+- [ ] **R20 landing-path file**: `writeLandingPath(worktreePath)` is invoked LAST on the bootstrap success path with the absolute worktree path (so the shell wrapper cd's into the worktree, not the workspace root and not the instance root).
+- [ ] **R24 no-push**: a unit test using the injectable `GitInvoker` recorder asserts that no `git push` invocation appears anywhere across the happy-path orchestrator run. The recorder captures argv for every git call; the test scans for `args[0] == "push"` and asserts zero matches.
+- [ ] Replace <<ISSUE:2>>'s stub `errors.New("bootstrap step=create: not implemented yet")` in `internal/cli/init.go` with a real `workspace.RunBootstrap(ctx, BootstrapParams{...})` call. The call site constructs `stdGitInvoker{}` and passes it through `BootstrapParams.GitInvoker`.
+- [ ] **R7 stepwise rollback** unit tests using the injectable `GitInvoker`, each forcing a single step to fail and asserting both the on-disk end-state and the `bootstrap step=<phase>:` stderr prefix:
+  - **init-step fail** (forced before the workspace-root `ScaffoldFromSource` call -- e.g. preflight or `parseInitSource` error): `<cwd>/<name>/` does not exist on disk; no registry entry under `~/.niwa/registry/`; process exits with code `1`; stderr error message carries the `bootstrap step=init:` prefix. The `workspaceCreated` defer is STILL ARMED at this point (the scaffold call has not happened yet), so it fires and reclaims the directory.
+  - **create-step fail** (`Applier.Create` returns error): the workspace-root scaffold write has ALREADY succeeded by this point, so `<cwd>/<name>/.niwa/workspace.toml` exists and remains on disk after rollback. The `workspaceCreated` defer is ALREADY DISARMED (set to `false` immediately after the workspace-root scaffold returned nil), so it does NOT fire. The `instanceCreated` defer DOES fire and removes `<instanceName>/`. End state: `<cwd>/<name>/.niwa/workspace.toml` exists; no `<instanceName>/` directory under it; registry entry exists; exit code `1`; stderr carries `bootstrap step=create:` prefix. This AC is the load-bearing verification that the disarm-after-scaffold ordering is correct.
+  - **session-step fail** (`CreateSession` returns error): instance directory exists; `<cwd>/<name>/.niwa/workspace.toml` still on disk; no worktree directory under `<instanceRoot>/.niwa/worktrees/`; exit code `1`; stderr carries `bootstrap step=session-create:` prefix.
+  - **commit-step fail** (`CreateSession` returned nil but `git commit` returns error): instance and workspace dirs preserved (`<cwd>/<name>/.niwa/workspace.toml` still on disk); the worktree directory has been REMOVED by the `sessionCreated` defer; the session state JSON has been REMOVED; the branch has been REMOVED. Note: the worktree-side `<worktreePath>/.niwa/workspace.toml` is removed along with the worktree, but the workspace-root copy is untouched.
+- [ ] **Host-check ordering at the exec layer**: a unit test using the `GitInvoker` recorder runs `RunBootstrap` with a non-GitHub `src` (e.g., `src.Host = "gitlab.com"`) and asserts the recorder records ZERO git invocations. This proves R21 (host check before any git subprocess) at the structural level, not via prose.
+- [ ] **No-author / no-GIT_AUTHOR_* argv guard**: the `GitInvoker` recorder captures the `*exec.Cmd` passed to the commit invocation. The test asserts (a) `cmd.Args` contains no `--author` element, and (b) `cmd.Env` contains no entry matching the regex `^GIT_(AUTHOR|COMMITTER)_(NAME|EMAIL|DATE)=`. This is the structural enforcement point for R18.
+- [ ] User-visible state after this issue: the end-to-end happy path works (`niwa init my-project --from owner/my-project --bootstrap` produces a workspace with a scaffolded config, an instance, a `niwa-bootstrap/<sid>` branch with an initial commit, the R19 success block on stderr, and the landing-path file pointing at the worktree). Adjacent failure modes (host check, create fail, session fail, commit fail) route correctly through R7's stepwise rollback. Rollback at each step preserves the right on-disk state.
+
+## Dependencies
+
+Blocked by:
+- <<ISSUE:1>>: the classifier seam, `*github.StatusError`, and the `ExitCode` field on `*workspace.InitConflictError`.
+- <<ISSUE:2>>: the flag surface, R13 prompt UX, R9 host check in `runInit`, and the stub-dispatch site that this issue replaces with the real `RunBootstrap` call.
+- <<ISSUE:3>>: the `GitInvoker` interface, `stdGitInvoker` concrete implementation, the test-recorder helper, and `ScaffoldFromSource` (used by `RunBootstrap` step 6).
+
+## Downstream Dependencies
+
+<<ISSUE:5>> ships the full `@critical` Gherkin scenario matrix exercising every PRD AC end-to-end (happy path with positional name, happy path without positional name, R8 sub-cases, scaffold byte-equality, channels-on, visibility soft-fail variants, host-check ordering, no-push, no-secret-on-disk, branch-name persistence, branch-name back-compat, R6 parity, landing-path file, success-block byte-equality, R2 regression, and the rest of the AC matrix). This issue lands the orchestrator that those Gherkin scenarios assert on; without it, the Gherkin matrix has nothing to drive.

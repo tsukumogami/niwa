@@ -196,12 +196,26 @@ are viable.
 **Chosen: A1.**
 
 A1 puts the orchestrator next to the primitives it composes
-(`Applier.Create`, `ScaffoldFromSource`, `RunBootstrap`) and away
-from cli-layer concerns (flag parsing, stdin TTY detection, exit
-codes). It mirrors the existing layering where `internal/cli/apply.go`
-is a thin shim over `Applier.Apply`. Unit tests for the orchestrator
-do not need cobra; they construct an `Applier` and a `GitInvoker`
-recorder and exercise `RunBootstrap` directly.
+(`Applier.Create`, `ScaffoldFromSource`) and away from cli-layer
+concerns (flag parsing, stdin TTY detection, exit codes). It mirrors
+the existing layering where `internal/cli/apply.go` is a thin shim
+over `Applier.Apply`. Unit tests for the orchestrator do not need
+cobra; they construct an `Applier` and a `GitInvoker` recorder and
+exercise `RunBootstrap` directly.
+
+`ScaffoldFromSource` is itself called from TWO sites and the
+boundary matters for R7. Call site one lives in `runInit` (cli
+layer) and writes `<workspaceRoot>/.niwa/workspace.toml` BEFORE
+`RunBootstrap` is invoked — this is the copy that `Applier.Create`
+reads inside `RunBootstrap`. Call site two lives inside
+`RunBootstrap` itself and writes `<worktreePath>/.niwa/workspace.toml`
+AFTER `CreateSession` returns — this is the copy that gets
+committed on `niwa-bootstrap/<sid>` and travels with the pushed
+bootstrap repo. Both call sites pass the SAME `ScaffoldOptions`, so
+the two files are byte-identical (verified by a unit test in the
+Implementation plan's Issue 4). The split exists because the two
+files serve different consumers: local `Applier.Create` vs. future
+`niwa init --from <slug>` materialize.
 
 A2 was rejected because `runInit` is already long, the bootstrap
 flow has structurally different cleanup requirements (instance-dir
@@ -429,62 +443,80 @@ The four design decisions compose end-to-end. Happy path for
    with the right code (R23: 1 for step failure, 2 for flag, 3 for
    host, 4 for NoMarker fail-fast).
 
-4. `runInit` calls `workspace.RunBootstrap(ctx, BootstrapParams{
-       WorkspaceRoot, WorkspaceName, Src, Fetcher, GitInvoker,
-       Reporter})`.
+4. `runInit` writes the FIRST scaffold copy to
+   `<workspaceRoot>/.niwa/workspace.toml` plus
+   `<workspaceRoot>/.niwa/claude/.gitkeep` (R3, R14, R15) by calling
+   `ScaffoldFromSource(workspaceRoot, opts)` (the new helper from
+   Decision D in `internal/workspace/scaffold.go`). Visibility for
+   `[groups.<vis>]` derives exclusively from `Repo.Private` (bool)
+   returned by the new `(*github.APIClient).GetRepo`. Lookup failure
+   soft-fails to `[groups.public]` plus the R17 stderr note. On this
+   call returning nil, `runInit` sets `workspaceCreated = false`
+   (the R7 disarm-after-scaffold rule — see Cleanup defers section).
 
-5. `RunBootstrap` writes the scaffold (`ScaffoldFromSource` per
-   Decision D — the new helper in `internal/workspace/scaffold.go`)
-   into `<workspaceRoot>/.niwa/workspace.toml` plus
-   `<workspaceRoot>/.niwa/claude/.gitkeep` (R3, R14, R15). Visibility
-   for `[groups.<vis>]` derives exclusively from `Repo.Private`
-   (bool) returned by the new `(*github.APIClient).GetRepo`. Lookup
-   failure soft-fails to `[groups.public]` plus the R17 stderr note.
+5. `runInit` calls `workspace.RunBootstrap(ctx, BootstrapParams{
+       WorkspaceRoot, WorkspaceName, Src, Fetcher, GitInvoker,
+       Reporter})`. Note that `opts` is also threaded into params so
+   the second scaffold call inside `RunBootstrap` uses the SAME
+   options — producing byte-identical content at the worktree path.
 
 6. `RunBootstrap` invokes the create step by calling
    `Applier.Create(ctx, cfg, configDir, workspaceRoot, instanceName)`
    exactly as `niwa create` does (R6 parity). `instanceName` is
    computed via niwa's existing name-derivation rule for `niwa
-   create`. Create's pipeline clones the bootstrap repo (R4
-   allow-list enforced by the scaffold's `[[sources]]
-   repos = [...]`), writes instance state, and — because
-   `[channels.mesh]` is active by default per R3/C1 — runs
-   `InstallChannelInfrastructure` so `<instanceRoot>/.niwa/roles/<repo>/`
-   exists. R26 confirms `niwa apply` is not called.
+   create`. Create's pipeline READS the on-disk
+   `<workspaceRoot>/.niwa/workspace.toml` (the file `runInit` wrote
+   in step 4 — that's why the runInit-owned first write must
+   precede `RunBootstrap`) and clones the bootstrap repo (R4
+   allow-list enforced by the scaffold's `[[sources]] repos = [...]`),
+   writes instance state, and — because `[channels.mesh]` is active
+   by default per R3/C1 — runs `InstallChannelInfrastructure` so
+   `<instanceRoot>/.niwa/roles/<repo>/` exists. R26 confirms
+   `niwa apply` is not called.
 
 7. On create-step failure, `RunBootstrap`'s instance-dir defer (armed
    immediately before calling `Applier.Create`, disarmed after
    success) runs `niwa destroy --instance` semantics (or the
    equivalent direct call to `workspace.DestroyInstance` — see
    Solution Architecture for the exact entry point). Workspace
-   directory, `<cwd>/<name>/.niwa/workspace.toml`, and the registry
-   entry stay intact for `niwa create` retry. Stderr emits the R7
-   create-fail rollback note from the Notices table.
+   directory, `<cwd>/<name>/.niwa/workspace.toml` (from step 4), and
+   the registry entry stay intact for `niwa create` retry. Stderr
+   emits the R7 create-fail rollback note from the Notices table.
 
 8. `RunBootstrap` calls the factored
    `mcp.CreateSession(ctx, CreateSessionParams{
        InstanceRoot, Repo, Purpose: "bootstrap",
-       BranchName: "niwa-bootstrap/" + sid,
+       BranchPrefix: "niwa-bootstrap/",
        GitInvoker, ...})`. This is the same code path as `niwa
-   session create`, with the branch name overridden via the new
+   session create`, with the branch prefix overridden via the new
    parameter (rather than the hardcoded `session/<sid>` at
    `handlers_session.go:227`). Session-create's existing rollback at
    `handlers_session.go:270-278` covers worktree, state JSON, and
    branch cleanup on its own failures.
 
-9. Inside the worktree, `RunBootstrap` runs (via `GitInvoker`)
-   `git add .niwa/` and `git commit -m "Initial niwa workspace
-   config"` (R18: no `--author`, no `GIT_*_(NAME|EMAIL|DATE)` env
-   override). The commit lands on `niwa-bootstrap/<sid>`. R24
-   confirms no `git push`.
+9. `RunBootstrap` writes the SECOND scaffold copy to
+   `<worktreePath>/.niwa/workspace.toml` plus
+   `<worktreePath>/.niwa/claude/.gitkeep` by calling
+   `ScaffoldFromSource(worktreePath, opts)` with the SAME options
+   passed to the step-4 call. The two files are byte-identical
+   (verified by a unit test in Issue 4). The `sessionCreated` defer
+   is armed immediately after `CreateSession` returns nil; any
+   failure between that point and a successful commit triggers the
+   defer to tear down the worktree, branch, and session state JSON.
 
-10. `RunBootstrap` writes the worktree path to the landing-path file
-    via `writeLandingPath` (R20).
+10. Inside the worktree, `RunBootstrap` runs (via `GitInvoker`)
+    `git add .niwa/` and `git commit -m "Initial niwa workspace
+    config"` (R18: no `--author`, no `GIT_*_(NAME|EMAIL|DATE)` env
+    override). The commit lands on `niwa-bootstrap/<sid>` with the
+    two-file scaffold as its tree. R24 confirms no `git push`. On
+    commit success `RunBootstrap` disarms `sessionCreated`.
 
-11. `runInit` emits the R19 success block to stderr (Appendix B
-    format) and returns. `workspaceCreated` is set to `false` on the
-    `RunBootstrap` success path so the outer defer doesn't reclaim
-    the directory.
+11. `runInit` writes the worktree path to the landing-path file via
+    `writeLandingPath` (R20) and emits the R19 success block to
+    stderr (Appendix B format), then returns. `workspaceCreated` is
+    ALREADY `false` at this point (it was disarmed in step 4), so a
+    post-RunBootstrap error from R19/R20 emission would not reclaim
+    the workspace directory.
 
 12. Exit code 0.
 
@@ -530,8 +562,12 @@ internal/workspace/
                                 stepwise rollback (R7);
                                 R9/R21 host check before any git invocation;
                                 R18 git identity (no --author override);
-                                R20 landing-path write;
-                                R19 success-block emission.
+                                SECOND ScaffoldFromSource call at worktreePath
+                                after CreateSession (the first call lives in
+                                runInit, before RunBootstrap is invoked).
+                                R19 success-block emission and R20 landing-path
+                                write happen in runInit AFTER RunBootstrap
+                                returns nil.
   scaffold.go                -- new ScaffoldOptions struct;
                                 new ScaffoldFromSource(dir, opts) sibling of
                                 today's Scaffold(dir, name);
@@ -624,14 +660,26 @@ func ScaffoldFromSource(dir string, opts ScaffoldOptions) error
 // BootstrapParams bundles the inputs RunBootstrap needs to chain
 // init's tail through create through session-create.
 //
-// Visibility is read inside RunBootstrap via a GitHub GetRepo lookup
-// (using Fetcher); soft-fail to public per R17 is handled internally
-// so callers don't need to pre-fetch.
+// ScaffoldOpts is the SAME options struct the caller passed to its
+// own ScaffoldFromSource(workspaceRoot, ...) call before invoking
+// RunBootstrap. RunBootstrap uses it for its own second-scaffold
+// write at worktreePath after CreateSession returns. Threading the
+// same struct (rather than re-deriving) is what guarantees the two
+// on-disk scaffold copies are byte-identical.
+//
+// The caller is responsible for the visibility lookup (R16) and the
+// R17 soft-fail note. Fetcher remains in the struct because the
+// host re-check inside RunBootstrap may use it for future-extension
+// purposes, but visibility resolution itself is done caller-side
+// before the workspace-root scaffold write.
 type BootstrapParams struct {
     WorkspaceRoot string         // <cwd>/<name>/ absolute
     WorkspaceName string         // positional or R2-derived
     Src           source.Source  // parsed --from slug
-    Fetcher       FetchClient    // for visibility lookup
+    ScaffoldOpts  ScaffoldOptions // SAME opts caller used for the
+                                  // workspace-root scaffold write;
+                                  // reused for the worktree write
+    Fetcher       FetchClient    // R17 host re-check
     GitInvoker    GitInvoker     // R22 test seam (interface)
     Reporter      *Reporter
 }
@@ -653,44 +701,82 @@ func (stdGitInvoker) CommandContext(ctx context.Context, args ...string) *exec.C
 
 // RunBootstrap orchestrates the bootstrap chain.
 //
+// Precondition: the caller (runInit) has already invoked
+// ScaffoldFromSource(workspaceRoot, opts) and the
+// <workspaceRoot>/.niwa/workspace.toml file is on disk before
+// RunBootstrap is called. RunBootstrap does NOT perform its own
+// workspace-root scaffold write — it relies on the caller's first
+// write and reads that file via Applier.Create. The SECOND
+// scaffold write happens inside RunBootstrap (step 5 below) at
+// worktreePath after CreateSession returns; both writes pass the
+// SAME ScaffoldOptions, so the two files are byte-identical.
+//
+// Cleanup-defer contract (load-bearing for R7):
+//
+//   The caller's workspaceCreated defer (which reclaims
+//   <cwd>/<name>/ on init-step failure) MUST be disarmed by the
+//   caller AFTER the caller's own ScaffoldFromSource(workspaceRoot,
+//   opts) call succeeds — NOT after RunBootstrap returns nil. This
+//   separation is load-bearing for R7 create-step preservation: if
+//   Applier.Create (called inside RunBootstrap) fails, the on-disk
+//   workspace.toml at <workspaceRoot>/.niwa/workspace.toml MUST
+//   survive so the user can run `niwa create` to retry. An
+//   implementer who disarms workspaceCreated "after RunBootstrap
+//   returns nil" would delete the scaffolded workspace on a
+//   create-step failure, violating R7.
+//
 // Step ordering and cleanup contract:
 //
 //   1. Host check: src.IsGitHub() must return true (handles both the
 //      canonical empty-Host slug form and explicit "github.com").
-//      Failure → R9 error string returned. Caller (runInit) is
-//      responsible for the workspace-dir defer that reclaims
-//      <cwd>/<name>/. Recorder observes zero git invocations on this
-//      path.
+//      Failure → R9 error string returned. The caller's
+//      workspaceCreated defer (still armed at this point only if
+//      the caller has not yet invoked its own ScaffoldFromSource —
+//      see Precondition above) is responsible for reclaiming
+//      <cwd>/<name>/. Recorder observes zero git invocations on
+//      this path.
 //
-//   2. Scaffold write: ScaffoldFromSource writes .niwa/workspace.toml
-//      and .niwa/claude/.gitkeep into WorkspaceRoot. Failure → caller's
-//      defer reclaims the directory.
-//
-//   3. Create step: Applier.Create(...) is invoked. Before the call,
-//      RunBootstrap arms its instanceCreated defer; the defer
-//      removes <workspaceRoot>/<instanceName>/ on any error returned
-//      from this step. Workspace directory is preserved (R7
+//   2. Create step: Applier.Create(...) is invoked. The function
+//      reads <workspaceRoot>/.niwa/workspace.toml — the file the
+//      caller wrote before invoking RunBootstrap — so the
+//      [channels.mesh] block in that file reaches the create
+//      pipeline and InstallChannelInfrastructure runs. Before the
+//      Applier.Create call, RunBootstrap arms its instanceCreated
+//      defer; the defer removes <workspaceRoot>/<instanceName>/ on
+//      any error returned from this step. Workspace directory and
+//      <workspaceRoot>/.niwa/workspace.toml are preserved (R7
 //      create-step contract). Stderr emits the R7 create-fail note.
 //
-//   4. Session step: the factored mcp.CreateSession entry point is
-//      called with BranchName = "niwa-bootstrap/<sid>" where sid is
-//      generated by the session machinery's existing ReserveID
-//      helper. CreateSession's own internal rollback covers worktree
-//      and branch artifacts on failure (R7 session-step contract).
-//      Stderr emits the R7 session-fail note.
+//   3. Session step: the factored mcp.CreateSession entry point is
+//      called with BranchPrefix = "niwa-bootstrap/" — CreateSession
+//      generates sid then writes the branch as
+//      "niwa-bootstrap/" + sid. CreateSession's own internal
+//      rollback covers worktree and branch artifacts on failure
+//      (R7 session-step contract). Stderr emits the R7 session-fail
+//      note.
 //
-//   5. Commit step: git add .niwa/ + git commit -m
+//   4. sessionCreated defer armed: immediately after CreateSession
+//      returns nil. Cleanup target for any error between this point
+//      and a successful commit.
+//
+//   5. Second scaffold write: ScaffoldFromSource(worktreePath, opts)
+//      with the SAME opts passed to the caller's first call —
+//      writes <worktreePath>/.niwa/workspace.toml plus
+//      <worktreePath>/.niwa/claude/.gitkeep inside the bootstrap
+//      worktree. Output is byte-identical to the workspace-root
+//      copy (verified by a unit test that compares the two files).
+//
+//   6. Commit step: git add .niwa/ + git commit -m
 //      "Initial niwa workspace config" inside the worktree. R18: no
 //      --author flag, no GIT_AUTHOR_*/GIT_COMMITTER_* env override.
 //      All git calls go through GitInvoker.
 //
-//   6. Landing-path write: writeLandingPath(worktreePath) (R20).
+//   7. Disarm sessionCreated defer on commit success.
 //
-//   7. Success-block emission: stderr block per Appendix B (R19).
-//
-// On success the function returns nil. Caller (runInit) disarms its
-// workspaceCreated defer only AFTER this returns nil — this preserves
-// today's symmetry where defer cleanup races nothing.
+// On success the function returns nil. The caller emits R19 + R20
+// after RunBootstrap returns. The caller's workspaceCreated defer
+// is ALREADY disarmed (per the precondition above), so a
+// post-RunBootstrap error would not reclaim the workspace dir.
 func RunBootstrap(ctx context.Context, p BootstrapParams) error
 ```
 
@@ -818,22 +904,35 @@ runInit (internal/cli/init.go)
   │     │     "Detail\n  Suggestion" pattern; return exit-mapped error
   │     │
   │     ├─ initConflict == nil && err == nil (NoMarker + bootstrap)
-  │     │     → fall through to RunBootstrap
+  │     │     → fall through to first scaffold write
   │     │
   │     └─ err != nil (fall-through) → generic wrap, exit 1
   │
+  ├─ FIRST SCAFFOLD WRITE (runInit-owned, before RunBootstrap):
+  │     opts := ScaffoldOptions{Name, SourceOrg, BootstrapRepo,
+  │                             Private, IncludeGitkeep: true}
+  │     ScaffoldFromSource(workspaceRoot, opts)
+  │       ├─ visibility := GetRepo(ctx, owner, repo).Private (R16 bool-only)
+  │       │     └─ on error → soft-fail to Private:false, emit R17 note
+  │       ├─ write <workspaceRoot>/.niwa/workspace.toml (Appendix A)
+  │       └─ write <workspaceRoot>/.niwa/claude/.gitkeep (R15)
+  │     This copy is the one Applier.Create will READ inside
+  │     RunBootstrap (so [channels.mesh] reaches the create pipeline).
+  │
+  ├─ DISARM workspaceCreated defer (R7 create-step preservation —
+  │     once the scaffold is on disk, create-step or session-step
+  │     failures must leave <workspaceRoot>/ intact).
+  │
   ▼
 workspace.RunBootstrap(ctx, BootstrapParams{...})
+  │   NOTE: RunBootstrap does NOT write a scaffold at workspaceRoot.
+  │   That write already happened in runInit (above). RunBootstrap
+  │   reuses the on-disk scaffold via Applier.Create, then writes a
+  │   SECOND copy at worktreePath after CreateSession returns.
   │
-  ├─ host re-check (defense-in-depth; identical to runInit's check)
-  │
-  ├─ ScaffoldFromSource(workspaceRoot, ScaffoldOptions{
-  │     Name, SourceOrg, BootstrapRepo, Private, IncludeGitkeep: true})
-  │     ├─ visibility := GetRepo(ctx, owner, repo).Private (R16 bool-only)
-  │     │     │
-  │     │     └─ on error → soft-fail to Private:false, emit R17 note
-  │     ├─ write .niwa/workspace.toml (Appendix A byte-for-byte)
-  │     └─ write .niwa/claude/.gitkeep (R15)
+  ├─ host re-check (defense-in-depth; identical to runInit's check —
+  │     catches future callers that bypass runInit and construct
+  │     BootstrapParams directly)
   │
   ├─ instanceName := deriveInstanceName(workspaceName)
   │     (matches niwa create's existing default)
@@ -842,6 +941,9 @@ workspace.RunBootstrap(ctx, BootstrapParams{...})
   │
   ├─ Applier.Create(ctx, cfg, configDir, workspaceRoot, instanceName)
   │     │   (R6: same call shape as niwa create)
+  │     ├─ READS <workspaceRoot>/.niwa/workspace.toml (the scaffold
+  │     │   runInit wrote above) — that file is what drives the
+  │     │   create pipeline
   │     ├─ runPipeline clones [[sources]] (R4: allow-list scoped to
   │     │   bootstrap repo)
   │     ├─ writes <instanceRoot>/.niwa/instance.json
@@ -853,24 +955,59 @@ workspace.RunBootstrap(ctx, BootstrapParams{...})
   │
   ├─ sid, worktreePath, err := mcp.CreateSession(ctx, CreateSessionParams{
   │     InstanceRoot, Repo, Purpose: "bootstrap",
-  │     BranchName: "", GitInvoker})
-  │     │   (BranchName empty here — let CreateSession generate sid
-  │     │    first, then we'll compute the branch name and pass it.
-  │     │    See Solution Architecture note below on the two-phase
-  │     │    sid handshake.)
+  │     BranchPrefix: "niwa-bootstrap/", GitInvoker})
+  │     (CreateSession generates sid then writes
+  │      branch = "niwa-bootstrap/" + sid; see two-phase sid handshake
+  │      below.)
+  │
+  ├─ arm sessionCreated defer (cleanup target for any failure between
+  │     CreateSession returning success and the commit succeeding —
+  │     scaffold write inside worktree, git add, git commit.)
+  │
+  ├─ SECOND SCAFFOLD WRITE (worktree-owned, after CreateSession):
+  │     ScaffoldFromSource(worktreePath, opts)
+  │       ├─ Called with the SAME ScaffoldOptions as the runInit call
+  │       │   above — produces byte-identical content.
+  │       ├─ write <worktreePath>/.niwa/workspace.toml (Appendix A)
+  │       └─ write <worktreePath>/.niwa/claude/.gitkeep (R15)
+  │     This copy gets COMMITTED on niwa-bootstrap/<sid> so future
+  │     `niwa init --from <slug>` against the pushed bootstrap repo
+  │     materializes the same workspace.toml.
   │
   ├─ Inside the worktree, via GitInvoker:
   │     ├─ git -C worktreePath add .niwa/
   │     └─ git -C worktreePath commit -m "Initial niwa workspace config"
   │         (R18: no --author, no GIT_*_(NAME|EMAIL|DATE) env)
   │
-  ├─ writeLandingPath(worktreePath)  (R20)
+  ├─ disarm sessionCreated defer (commit succeeded)
   │
-  └─ emit success block to stderr (R19, Appendix B)
+  └─ return nil
   │
   ▼
-runInit: workspaceCreated = false; return nil → exit 0
+runInit:
+  ├─ writeLandingPath(worktreePath)  (R20)
+  ├─ emit success block to stderr (R19, Appendix B)
+  └─ return nil → exit 0
 ```
+
+#### Two-phase scaffold writes: same opts, two locations
+
+`ScaffoldFromSource` is called TWICE with identical `ScaffoldOptions`,
+producing byte-identical output at two filesystem locations:
+
+| Call site | Filesystem path | Consumer |
+|-----------|-----------------|----------|
+| `runInit` (before `RunBootstrap`) | `<workspaceRoot>/.niwa/workspace.toml` | `Applier.Create`'s local pipeline (reads `[channels.mesh]`, installs channels infrastructure). Stays on disk after bootstrap as the workspace's primary config. |
+| `RunBootstrap` (after `CreateSession`) | `<worktreePath>/.niwa/workspace.toml` | The commit on `niwa-bootstrap/<sid>`. This is the file future users materialize from when they run `niwa init --from <slug>` against the (pushed) bootstrap repo. |
+
+These are the same logical artifact — the user's `workspace.toml` —
+but live in different filesystem locations because they serve
+different consumers. The byte-equality contract is verifiable: a
+unit test in Issue 4 compares the two files after a happy-path
+bootstrap and asserts they match exactly. Issue 5's Gherkin matrix
+asserts the same byte-equality at the committed-tree level (the
+`niwa-bootstrap/<sid>` HEAD tree's `.niwa/workspace.toml` matches
+`<workspaceRoot>/.niwa/workspace.toml` byte-for-byte).
 
 #### Two-phase sid handshake for R5
 
@@ -895,31 +1032,43 @@ the sid generation boundary.
 
 ### Cleanup defers — who owns what
 
-Three layers participate in R7's stepwise rollback. None of them
+Four layers participate in R7's stepwise rollback. None of them
 overlaps with another's territory:
 
 1. **`runInit` (init step):** existing `workspaceCreated` defer at
    `init.go:215-226`. Reclaims `<cwd>/<name>/` on any error during
-   the init-step proper — that is, before `ScaffoldFromSource`
-   succeeds. **The defer is disarmed immediately after
-   `ScaffoldFromSource` returns nil**, NOT after `RunBootstrap`
-   returns nil. This is load-bearing for R7's create-step and
-   session-step preservation rules: once the scaffold is written,
-   create-step or session-step failures must leave the workspace
-   dir intact, so the init-step defer cannot reclaim it. An
-   implementer who disarms the defer "after `RunBootstrap` returns"
-   would delete the user's workspace on a create-step failure,
-   violating R7.
+   the init-step proper — that is, before the runInit-owned
+   `ScaffoldFromSource(workspaceRoot, opts)` call succeeds. **The
+   defer is disarmed immediately after that first `ScaffoldFromSource`
+   call returns nil**, NOT after `RunBootstrap` returns nil. This
+   ordering is load-bearing for R7's create-step and session-step
+   preservation rules: once the scaffold is written at
+   `<workspaceRoot>/.niwa/workspace.toml`, create-step or
+   session-step failures must leave the workspace dir (and the
+   scaffolded `workspace.toml` inside it) intact, so the init-step
+   defer cannot reclaim it. An implementer who disarms the defer
+   "after `RunBootstrap` returns" would delete the user's workspace
+   on a create-step failure, violating R7.
+
+   Concretely, in code order, `runInit`:
+   - arms `workspaceCreated = true` after `os.Mkdir(workspaceRoot)`
+     (existing behavior at `init.go:215-226`);
+   - validates flags + preflight + classifier;
+   - calls `ScaffoldFromSource(workspaceRoot, opts)` — the FIRST of
+     the two scaffold writes;
+   - on that call returning nil, sets `workspaceCreated = false`;
+   - then calls `workspace.RunBootstrap(ctx, params)`.
 
 2. **`RunBootstrap` (create step):** new `instanceCreated` defer
    armed immediately before the `Applier.Create` call. On any error
    returned from `Applier.Create`, the defer calls
    `workspace.DestroyInstance(workspaceRoot, instanceName)` or the
    equivalent `--instance` semantics of `niwa destroy`. The
-   workspace dir and registry entry are preserved per R7 create-step
-   contract. Daemon shutdown follows R7's 5-second SIGTERM grace +
-   SIGKILL ladder; shutdown timeout does not block instance
-   removal.
+   workspace dir, the on-disk `<workspaceRoot>/.niwa/workspace.toml`
+   (from the runInit-owned first write), and the registry entry are
+   preserved per R7 create-step contract. Daemon shutdown follows
+   R7's 5-second SIGTERM grace + SIGKILL ladder; shutdown timeout
+   does not block instance removal.
 
 3. **`CreateSession` (session step) — INTERNAL rollback:** existing
    rollback at `handlers_session.go:270-278`. Removes worktree,
@@ -933,13 +1082,13 @@ overlaps with another's territory:
    defer armed immediately after `CreateSession` returns success and
    disarmed only when the bootstrap commit succeeds. On any error
    between `CreateSession` returning and the commit succeeding
-   (e.g., scaffold write fails inside the worktree, `git add` fails,
-   `git commit` fails), the defer calls a helper equivalent to
-   `niwa session destroy --force <sid>` so the worktree, branch, and
-   session state JSON are removed before `RunBootstrap` returns. The
-   R7 session-step contract treats this as a session-step failure
-   (instance preserved, error message points at `niwa session create
-   <repo> bootstrap` for retry).
+   (e.g., the SECOND scaffold write at `<worktreePath>/.niwa/` fails,
+   `git add` fails, `git commit` fails), the defer calls a helper
+   equivalent to `niwa session destroy --force <sid>` so the
+   worktree, branch, and session state JSON are removed before
+   `RunBootstrap` returns. The R7 session-step contract treats this
+   as a session-step failure (instance preserved, error message
+   points at `niwa session create <repo> bootstrap` for retry).
 
 R7 session-step contract end-state: instance stays intact; the R19
 success block is NOT emitted; stderr emits the R7 session-fail note.
@@ -1154,13 +1303,23 @@ Deliverables:
   path at `handlers_session.go:364` and any other consumers) reads
   via `state.EffectiveBranchName()`.
 - `internal/workspace/bootstrap.go`: full `RunBootstrap` body per
-  the Data Flow section. Owns instance-dir defer (R7 create-step).
-  Calls `Applier.Create` and `mcp.CreateSession` (with `BranchPrefix:
-  "niwa-bootstrap/"`). Inside the worktree, runs add + commit via
-  `GitInvoker` (R18 invariants checked at the argv layer).
-- `internal/cli/init.go`: replace the Phase 2 stub with the real
+  the Data Flow section. Owns instance-dir defer (R7 create-step)
+  and `sessionCreated` defer (R7 session-step cleanup target after
+  `CreateSession` returns). Calls `Applier.Create` (which READS the
+  workspace-root scaffold that `runInit` already wrote), then
+  `mcp.CreateSession` (with `BranchPrefix: "niwa-bootstrap/"`), then
+  the SECOND `ScaffoldFromSource(worktreePath, opts)` call with the
+  same `ScaffoldOptions` `runInit` used (producing byte-identical
+  content at the worktree path). Inside the worktree, runs add +
+  commit via `GitInvoker` (R18 invariants checked at the argv layer).
+- `internal/cli/init.go`: between the classifier and `RunBootstrap`,
+  call the FIRST `ScaffoldFromSource(workspaceRoot, opts)` and, on
+  nil-return, disarm `workspaceCreated` (R7 create-step
+  preservation). Then replace the Phase 2 stub with the real
   `workspace.RunBootstrap` call. Construct `stdGitInvoker{}` and
-  pass it.
+  pass it through `BootstrapParams.GitInvoker`. Thread `opts` into
+  `BootstrapParams` so the second scaffold call inside
+  `RunBootstrap` uses the SAME options.
 - R19 success-block emission (Appendix B byte-for-byte; preceded and
   followed by one blank stderr line; lines in the exact order).
 - R20 landing-path file write via the existing
