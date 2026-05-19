@@ -31,6 +31,7 @@ type testState struct {
 	envOverrides  map[string]string // per-scenario env var overrides (win over defaults)
 	gitServer     *localGitServer   // local bare-repo server for offline clone tests
 	repoURLs      map[string]string // name → file:// URL for repos created by localGitServer
+	githubFake    *tarballFakeServer // GitHub API fake (per-scenario; spawned lazily)
 
 	// Mesh scenario state (Issue #10). These fields carry task + pause
 	// state between steps in a single scenario. They are zeroed per the
@@ -155,6 +156,10 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 			return ctx, nil
 		}
 		killLeftoverDaemons(s.workspaceRoot)
+		if s.githubFake != nil {
+			s.githubFake.Close()
+			s.githubFake = nil
+		}
 		return ctx, nil
 	})
 
@@ -392,4 +397,19 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 
 	// --- @critical: rank-2 deprecation + plugin auto-install ---
 	registerRank2Steps(ctx)
+
+	// --- Init-bootstrap harness extensions (Issue 5) ---
+	// GitHub tarball fake — spun up lazily per scenario; backed by the
+	// existing tarballFakeServer used by unit tests. Wire it into the
+	// niwa binary via NIWA_GITHUB_API_URL.
+	ctx.Step(`^a GitHub fake is configured$`, aGitHubFakeIsConfigured)
+	ctx.Step(`^the GitHub fake serves "([^"]*)" at ref "([^"]*)" with a workspace marker$`, theGitHubFakeServesAtRefWithWorkspaceMarker)
+	ctx.Step(`^the GitHub fake serves "([^"]*)" at ref "([^"]*)" empty$`, theGitHubFakeServesAtRefEmpty)
+	ctx.Step(`^the GitHub fake returns HTTP (\d+) for "([^"]*)" at ref "([^"]*)"$`, theGitHubFakeReturnsStatusForAtRef)
+	ctx.Step(`^the GitHub fake returns HTTP (\d+) for "([^"]*)" repo metadata$`, theGitHubFakeReturnsStatusForRepoMetadata)
+	ctx.Step(`^the GitHub fake serves "([^"]*)" repo metadata with body:$`, theGitHubFakeServesRepoMetadataWithBody)
+
+	// TTY simulation: drive niwa init under util-linux `script -q` so
+	// stdin is a real pty. The supplied input is fed line-by-line.
+	ctx.Step(`^I run "([^"]*)" under a pty with input "([^"]*)"$`, iRunUnderPTYWithInput)
 }
