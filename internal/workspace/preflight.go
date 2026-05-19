@@ -33,10 +33,17 @@ var (
 )
 
 // InitConflictError wraps a sentinel error with contextual detail and a user-facing suggestion.
+//
+// ExitCode carries the PRD R23 exit-code semantics used by the init
+// command's classifier seam. Existing CheckInitConflicts construction
+// sites leave the field zero-valued; the classifier helper in the cli
+// package populates it per arm (1=step failure, 2=flag-validation,
+// 3=host-validation, 4=NoMarker-without-bootstrap).
 type InitConflictError struct {
 	Err        error
 	Detail     string
 	Suggestion string
+	ExitCode   int
 }
 
 // Error returns a human-readable message combining the sentinel, detail, and suggestion.

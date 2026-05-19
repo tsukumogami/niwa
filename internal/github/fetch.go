@@ -65,11 +65,18 @@ func (c *APIClient) HeadCommit(ctx context.Context, owner, repo, ref, etag strin
 		return "", newETag, resp.StatusCode, nil
 	}
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-		return "", newETag, resp.StatusCode,
-			fmt.Errorf("github: HeadCommit returned %d (verify GH_TOKEN scopes; fine-grained PATs need Contents: read, classic PATs need repo scope)", resp.StatusCode)
+		return "", newETag, resp.StatusCode, &StatusError{
+			StatusCode: resp.StatusCode,
+			URL:        requestURL,
+			Message:    fmt.Sprintf("github: HeadCommit returned %d (verify GH_TOKEN scopes; fine-grained PATs need Contents: read, classic PATs need repo scope)", resp.StatusCode),
+		}
 	}
 	if resp.StatusCode != http.StatusOK {
-		return "", newETag, resp.StatusCode, fmt.Errorf("github: HeadCommit returned %d", resp.StatusCode)
+		return "", newETag, resp.StatusCode, &StatusError{
+			StatusCode: resp.StatusCode,
+			URL:        requestURL,
+			Message:    fmt.Sprintf("github: HeadCommit returned %d", resp.StatusCode),
+		}
 	}
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 64))
@@ -141,12 +148,19 @@ func (c *APIClient) FetchTarball(ctx context.Context, owner, repo, ref, etag str
 	}
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
 		resp.Body.Close()
-		return nil, newETag, resp.StatusCode, nil,
-			fmt.Errorf("github: FetchTarball returned %d (verify GH_TOKEN scopes; fine-grained PATs need Contents: read, classic PATs need repo scope)", resp.StatusCode)
+		return nil, newETag, resp.StatusCode, nil, &StatusError{
+			StatusCode: resp.StatusCode,
+			URL:        requestURL,
+			Message:    fmt.Sprintf("github: FetchTarball returned %d (verify GH_TOKEN scopes; fine-grained PATs need Contents: read, classic PATs need repo scope)", resp.StatusCode),
+		}
 	}
 	if resp.StatusCode != http.StatusOK {
 		resp.Body.Close()
-		return nil, newETag, resp.StatusCode, nil, fmt.Errorf("github: FetchTarball returned %d", resp.StatusCode)
+		return nil, newETag, resp.StatusCode, nil, &StatusError{
+			StatusCode: resp.StatusCode,
+			URL:        requestURL,
+			Message:    fmt.Sprintf("github: FetchTarball returned %d", resp.StatusCode),
+		}
 	}
 
 	// Detect repo rename by inspecting the redirect chain for any URL
