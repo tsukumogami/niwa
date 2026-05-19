@@ -1,0 +1,42 @@
+[
+  {
+    "issue_id": "1",
+    "title": "feat(github): typed StatusError + fifth-wrap fix + classifier helper",
+    "complexity": "testable",
+    "file": "wip/plan_init-bootstrap-empty-source_issue_1_body.md",
+    "status": "PASS",
+    "dependencies": []
+  },
+  {
+    "issue_id": "2",
+    "title": "feat(init): --bootstrap flag surface + TTY prompt + classifier dispatch",
+    "complexity": "testable",
+    "file": "wip/plan_init-bootstrap-empty-source_issue_2_body.md",
+    "status": "PASS",
+    "dependencies": ["1"]
+  },
+  {
+    "issue_id": "3",
+    "title": "feat(workspace): ScaffoldFromSource + GetRepo + GitInvoker seam",
+    "complexity": "testable",
+    "file": "wip/plan_init-bootstrap-empty-source_issue_3_body.md",
+    "status": "PASS",
+    "dependencies": ["1"]
+  },
+  {
+    "issue_id": "4",
+    "title": "feat(workspace): RunBootstrap orchestrator + session BranchPrefix",
+    "complexity": "testable",
+    "file": "wip/plan_init-bootstrap-empty-source_issue_4_body.md",
+    "status": "PASS",
+    "dependencies": ["1", "2", "3"]
+  },
+  {
+    "issue_id": "5",
+    "title": "test+docs: end-to-end Gherkin matrix + docs/guides",
+    "complexity": "testable",
+    "file": "wip/plan_init-bootstrap-empty-source_issue_5_body.md",
+    "status": "PASS",
+    "dependencies": ["4"]
+  }
+]
