@@ -734,6 +734,14 @@ Deliverables:
   `private bool → Visibility string` normalization that `ListRepos`
   performs inline today into a small unexported helper so `GetRepo`
   and `ListRepos` produce visibility values consistently.
+  **Invariant (load-bearing for security):** the scaffold's
+  `Visibility` MUST be derived from `Repo.Private` (bool), not from
+  `Repo.Visibility` (string). A malicious GitHub API host (e.g. via
+  `NIWA_GITHUB_API_URL`) could send a `"visibility"` string with TOML
+  metacharacters; only the bool-to-enum path produces guaranteed-safe
+  values. `ScaffoldFromSource`'s docstring must call this out so the
+  invariant survives future refactors of the visibility-derivation
+  helper.
 - `internal/workspace/scaffold.go`: new `ScaffoldOptions` struct; new
   `ScaffoldFromSource(dir, opts)` function. Implements the literal
   TOML body from Decision 4, including `.niwa/claude/.gitkeep`.
@@ -756,7 +764,13 @@ Deliverables:
   per the Data Flow diagram. **Host check runs first** (before any git
   invocation): GitHub → proceed; non-GitHub → refuse immediately with
   "v1 supports GitHub sources only; file a follow-up if you need
-  <host>." Then `git init` → `remote add` → `fetch --depth 1` →
+  <host>." **Invariant:** the host check inspects `src.Host` from the
+  parsed `source.Source`; the URL eventually passed to `git fetch`
+  comes from `workspace.ResolveCloneURL(src, …)`. Both must agree on
+  the literal byte-match for `"github.com"`. Today they do; a future
+  refactor of `ResolveCloneURL` must preserve this coupling or the
+  host check stops protecting the remote-helper vector.
+  Then `git init` → `remote add` → `fetch --depth 1` →
   `checkout -b niwa-bootstrap` → visibility lookup → scaffold → stage
   → `git commit -m "..."` (no `--author`, no `GIT_AUTHOR_*` override
   — the commit reflects the user's normal git identity).
@@ -848,12 +862,16 @@ Outcome: document considerations (no design changes required).
 
 ### Residual risk
 
-- The `NIWA_GITHUB_API_URL` override (existing behavior in
-  `internal/github/client.go:41-50`) directs the visibility lookup to
-  a non-default host along with the user's bearer token. This is not
-  introduced by this design, but the bootstrap path is one more
-  caller that inherits it. A future hardening item is to warn at niwa
-  startup when the override is set.
+- The bootstrap path inherits niwa's standard env-var trust model for
+  shelling out to git and reaching GitHub. The relevant overrides are
+  `NIWA_GITHUB_API_URL` (redirects API traffic, existing behavior in
+  `internal/github/client.go:41-50`), plus the standard git
+  environment surface — `GIT_SSH_COMMAND`, `GIT_CONFIG_*`, `HOME`,
+  `PATH`, and similar — which apply to every `exec.CommandContext("git", …)`
+  invocation. None of these are introduced by this design, but the
+  bootstrap path is one more caller that inherits them. A future
+  hardening item is to surface these at niwa startup or in the
+  bootstrap success message when they deviate from defaults.
 
 ## Consequences
 
