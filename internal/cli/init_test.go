@@ -127,6 +127,8 @@ func executeInit(t *testing.T, args ...string) error {
 	initOverlay = ""
 	initNoOverlay = false
 	initRebind = false
+	initBootstrap = false
+	initNoBootstrap = false
 	if err := cmd.ParseFlags(args); err != nil {
 		return err
 	}

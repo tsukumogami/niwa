@@ -136,6 +136,24 @@ func iRun(ctx context.Context, command string) (context.Context, error) {
 	return ctx, runNiwa(s, s.homeDir, command)
 }
 
+// iRunFromWorkspaceRoot runs the command from s.workspaceRoot (the
+// sandboxed /tmp/niwa-test-workspaces directory) so init's
+// CheckInitConflicts cwd walk does not find an ancestor niwa instance
+// outside the sandbox. {repo:<name>} placeholders are substituted
+// against repoURLs the same way aConfigRepoExistsWithBody substitutes
+// them in TOML bodies. Used by the init-bootstrap failure scenarios
+// where the niwa init must reach the materialize step.
+func iRunFromWorkspaceRoot(ctx context.Context, command string) (context.Context, error) {
+	s := getState(ctx)
+	if s == nil {
+		return ctx, fmt.Errorf("no test state")
+	}
+	for repoName, repoURL := range s.repoURLs {
+		command = strings.ReplaceAll(command, "{repo:"+repoName+"}", repoURL)
+	}
+	return ctx, runNiwa(s, s.workspaceRoot, command)
+}
+
 func iRunFromWorkspace(ctx context.Context, command, workspace string) (context.Context, error) {
 	s := getState(ctx)
 	if s == nil {

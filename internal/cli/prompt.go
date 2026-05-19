@@ -18,7 +18,12 @@ import (
 // gate interactive surfaces (the picker, typed-confirmation prompts)
 // so they don't try to render or read user input from a pipe or
 // CI environment.
-func IsStdinTTY() bool {
+//
+// Exposed as a variable so tests can stub the result without touching
+// real stdin. Default implementation reads term.IsTerminal at call
+// time; do not capture at init() time because a test may rebind
+// os.Stdin between init and the first call.
+var IsStdinTTY = func() bool {
 	return term.IsTerminal(int(os.Stdin.Fd()))
 }
 

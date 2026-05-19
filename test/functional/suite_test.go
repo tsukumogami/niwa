@@ -172,6 +172,7 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 	// Commands
 	ctx.Step(`^I run "([^"]*)"$`, iRun)
 	ctx.Step(`^I run "([^"]*)" from workspace "([^"]*)"$`, iRunFromWorkspace)
+	ctx.Step(`^I run "([^"]*)" from workspace root$`, iRunFromWorkspaceRoot)
 	ctx.Step(`^I source the bash wrapper and run "([^"]*)" from workspace "([^"]*)"$`, iSourceWrapperAndRunFromWorkspace)
 	ctx.Step(`^I source the bash wrapper and run "([^"]*)"$`, iSourceWrapperAndRun)
 	ctx.Step(`^I source the noisy bash wrapper and run "([^"]*)" from workspace "([^"]*)"$`, iSourceNoisyWrapperAndRunFromWorkspace)
