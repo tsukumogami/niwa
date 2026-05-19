@@ -898,11 +898,18 @@ the sid generation boundary.
 Three layers participate in R7's stepwise rollback. None of them
 overlaps with another's territory:
 
-1. **`runInit` (init step / pre-bootstrap):** existing
-   `workspaceCreated` defer at `init.go:215-226`. Reclaims
-   `<cwd>/<name>/` on any error before `RunBootstrap` returns
-   success. Disarmed on the `RunBootstrap` success path (set to
-   `false` after the call returns nil).
+1. **`runInit` (init step):** existing `workspaceCreated` defer at
+   `init.go:215-226`. Reclaims `<cwd>/<name>/` on any error during
+   the init-step proper — that is, before `ScaffoldFromSource`
+   succeeds. **The defer is disarmed immediately after
+   `ScaffoldFromSource` returns nil**, NOT after `RunBootstrap`
+   returns nil. This is load-bearing for R7's create-step and
+   session-step preservation rules: once the scaffold is written,
+   create-step or session-step failures must leave the workspace
+   dir intact, so the init-step defer cannot reclaim it. An
+   implementer who disarms the defer "after `RunBootstrap` returns"
+   would delete the user's workspace on a create-step failure,
+   violating R7.
 
 2. **`RunBootstrap` (create step):** new `instanceCreated` defer
    armed immediately before the `Applier.Create` call. On any error
@@ -936,6 +943,36 @@ overlaps with another's territory:
 
 R7 session-step contract end-state: instance stays intact; the R19
 success block is NOT emitted; stderr emits the R7 session-fail note.
+
+### Channels → roles/<repo>/ → CreateSession chain (closing the loop)
+
+The session-create preflight gate at `handlers_session.go:200-203`
+requires `<instanceRoot>/.niwa/roles/<repo>/` to exist. The bootstrap
+chain produces this directory automatically:
+
+1. The scaffolded `workspace.toml` declares `[channels.mesh]` (per
+   PRD C1 / R3 — Appendix A in the PRD).
+2. `RunBootstrap` calls `Applier.Create`, which calls `runPipeline`
+   (existing code in `internal/cli/apply.go`).
+3. `runPipeline` evaluates `cfg.Channels.IsEnabled()` and, because
+   the scaffolded config declares the mesh block, calls
+   `InstallChannelInfrastructure` from `internal/workspace/channels.go`.
+4. `InstallChannelInfrastructure` creates
+   `<instanceRoot>/.niwa/roles/<repo>/` for each repo discovered by
+   the pipeline. For the bootstrap repo (which is in the
+   `[[sources]]` allow-list per PRD S2), this means the bootstrap
+   repo's role directory exists by the time `Applier.Create`
+   returns.
+5. `RunBootstrap` then calls `CreateSession`, whose preflight finds
+   the role directory and passes the gate.
+
+This chain is the structural reason PRD C1 mandates channels-on by
+default in the scaffold. Removing `[channels.mesh]` from the scaffold
+(or running `--bootstrap` against a future scaffold that omits it)
+would break this gate and surface as `UNKNOWN_ROLE` from
+`CreateSession`. Test coverage: the PRD's "Happy path with positional
+name" AC verifies `<instanceRoot>/.niwa/roles/my-project/` exists
+after bootstrap, which exercises this chain end-to-end.
 
 ### SIGKILL atomicity (operator concern)
 
