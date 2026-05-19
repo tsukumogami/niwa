@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // scaffoldTemplate is the commented workspace.toml template.
@@ -113,6 +114,134 @@ func Scaffold(dir, name string) error {
 	contentDir := filepath.Join(niwaDir, "claude")
 	if err := os.MkdirAll(contentDir, 0o755); err != nil {
 		return fmt.Errorf("creating content directory: %w", err)
+	}
+
+	return nil
+}
+
+// scaffoldFromSourceTemplate is the bootstrap-scaffold body per PRD
+// Appendix A. Five placeholders are substituted by ScaffoldFromSource:
+// <workspace-name>, <source-org>, <bootstrap-repo>, <vis-key>,
+// <vis-value>. Section ordering, blank lines, and comments are part of
+// the byte-equality contract — DO NOT reformat this string.
+//
+// The trailing schema-doc-link comment is identical to the one Scaffold
+// emits via schemaDocLinkFooter (extracted helper). Keeping a copy here
+// rather than splicing the helper into the template keeps the literal
+// readable for diffing against the PRD.
+const scaffoldFromSourceTemplate = `[workspace]
+name = "<workspace-name>"
+content_dir = "claude"
+
+[[sources]]
+org = "<source-org>"
+repos = ["<bootstrap-repo>"]
+
+[groups.<vis-key>]
+visibility = "<vis-value>"
+
+# Bootstrap enabled mesh channels. Remove this block (and the [channels.mesh] line below) to disable.
+[channels.mesh]
+
+# CLAUDE.md content hierarchy: drop a workspace.md in .niwa/claude/ to populate.
+# [claude.content.workspace]
+# source = "workspace.md"
+
+# See https://github.com/tsukumogami/niwa/blob/main/docs/guides/workspace-config-sources.md
+# for the full schema (claude.*, env.*, vault.*, files, instance).
+`
+
+// schemaDocLinkFooter returns the schema doc-link comment lines reused
+// by Scaffold and ScaffoldFromSource. Kept as a function rather than a
+// const so future variants (e.g., per-version doc-link URLs) can be
+// switched at a single site.
+func schemaDocLinkFooter() string {
+	return "# See https://github.com/tsukumogami/niwa/blob/main/docs/guides/workspace-config-sources.md\n" +
+		"# for the full schema (claude.*, env.*, vault.*, files, instance).\n"
+}
+
+// ScaffoldOptions controls ScaffoldFromSource's output. Fields:
+//
+//   - Name           — workspace name (positional arg or slug repo basename).
+//   - Org            — source org from the --from slug owner segment.
+//   - Repo           — bootstrap repo name from the --from slug repo segment.
+//   - Private        — visibility-from-bool input. NEVER plumbed from any
+//     string field. See ScaffoldFromSource's docstring for the load-bearing
+//     R16 invariant.
+//   - IncludeGitkeep — when true, ScaffoldFromSource writes an empty
+//     .niwa/claude/.gitkeep so the otherwise-empty content directory is
+//     trackable by git (R15). Production callers always set true; some
+//     tests suppress to assert the file is genuinely zero-byte.
+type ScaffoldOptions struct {
+	Name           string
+	Org            string
+	Repo           string
+	Private        bool
+	IncludeGitkeep bool
+}
+
+// ScaffoldFromSource writes a bootstrap workspace.toml under dir/.niwa/
+// matching PRD Appendix A byte-for-byte after placeholder substitution.
+// It is a sibling of Scaffold(dir, name): the existing Scaffold and its
+// callers are unchanged.
+//
+// LOAD-BEARING R16 INVARIANT — visibility is derived from opts.Private
+// (a bool). This function does NOT read or accept any string-typed
+// visibility field. A future refactor that wants to switch to a
+// string-derived visibility would have to change ScaffoldOptions.Private
+// from `bool` to `string` — a visible diff in this file — because today
+// no caller can pass a string here.
+//
+// This guards against TOML-metacharacter injection from a malicious
+// GitHub API response (PRD security model): even if the API returns
+// `"visibility": "]\n[evil"`, ScaffoldFromSource only consults the
+// parallel `private` bool, which has no metacharacter representation.
+func ScaffoldFromSource(dir string, opts ScaffoldOptions) error {
+	if opts.Name == "" {
+		return fmt.Errorf("ScaffoldFromSource: opts.Name is required")
+	}
+	if opts.Org == "" {
+		return fmt.Errorf("ScaffoldFromSource: opts.Org is required")
+	}
+	if opts.Repo == "" {
+		return fmt.Errorf("ScaffoldFromSource: opts.Repo is required")
+	}
+
+	niwaDir := filepath.Join(dir, StateDir)
+	if err := os.MkdirAll(niwaDir, 0o755); err != nil {
+		return fmt.Errorf("creating %s directory: %w", StateDir, err)
+	}
+
+	visKey, visValue := "public", "public"
+	if opts.Private {
+		visKey, visValue = "private", "private"
+	}
+
+	body := strings.NewReplacer(
+		"<workspace-name>", opts.Name,
+		"<source-org>", opts.Org,
+		"<bootstrap-repo>", opts.Repo,
+		"<vis-key>", visKey,
+		"<vis-value>", visValue,
+	).Replace(scaffoldFromSourceTemplate)
+
+	configPath := filepath.Join(niwaDir, WorkspaceConfigFile)
+	if err := os.WriteFile(configPath, []byte(body), 0o644); err != nil {
+		return fmt.Errorf("writing %s: %w", WorkspaceConfigFile, err)
+	}
+
+	contentDir := filepath.Join(niwaDir, "claude")
+	if err := os.MkdirAll(contentDir, 0o755); err != nil {
+		return fmt.Errorf("creating content directory: %w", err)
+	}
+
+	if opts.IncludeGitkeep {
+		gitkeep := filepath.Join(contentDir, ".gitkeep")
+		// Zero-byte file — explicit empty slice so future maintainers
+		// don't accidentally append a newline.
+		if err := os.WriteFile(gitkeep, []byte{}, 0o644); err != nil {
+			return fmt.Errorf("writing .gitkeep: %w", err)
+		}
 	}
 
 	return nil

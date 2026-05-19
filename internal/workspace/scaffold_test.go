@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/BurntSushi/toml"
+	"github.com/tsukumogami/niwa/internal/github"
 )
 
 func stripTOMLComments(s string) string {
@@ -129,5 +130,254 @@ func TestScaffold_ValidTOMLWhenStripped(t *testing.T) {
 	}
 	if wsMap["content_dir"] != "claude" {
 		t.Errorf("expected content_dir = \"claude\", got %v", wsMap["content_dir"])
+	}
+}
+
+// appendixAGolden returns the PRD Appendix A body after placeholder
+// substitution. It is duplicated here (not imported from scaffold.go)
+// so the test catches accidental edits to scaffoldFromSourceTemplate —
+// if you regenerate the golden, regenerate the PRD too.
+func appendixAGolden(name, org, repo, visKey, visValue string) string {
+	return strings.NewReplacer(
+		"<workspace-name>", name,
+		"<source-org>", org,
+		"<bootstrap-repo>", repo,
+		"<vis-key>", visKey,
+		"<vis-value>", visValue,
+	).Replace(`[workspace]
+name = "<workspace-name>"
+content_dir = "claude"
+
+[[sources]]
+org = "<source-org>"
+repos = ["<bootstrap-repo>"]
+
+[groups.<vis-key>]
+visibility = "<vis-value>"
+
+# Bootstrap enabled mesh channels. Remove this block (and the [channels.mesh] line below) to disable.
+[channels.mesh]
+
+# CLAUDE.md content hierarchy: drop a workspace.md in .niwa/claude/ to populate.
+# [claude.content.workspace]
+# source = "workspace.md"
+
+# See https://github.com/tsukumogami/niwa/blob/main/docs/guides/workspace-config-sources.md
+# for the full schema (claude.*, env.*, vault.*, files, instance).
+`)
+}
+
+func TestScaffoldFromSource_AppendixA_Public(t *testing.T) {
+	dir := t.TempDir()
+	opts := ScaffoldOptions{
+		Name:           "my-workspace",
+		Org:            "owner",
+		Repo:           "bootstrap-repo",
+		Private:        false,
+		IncludeGitkeep: true,
+	}
+	if err := ScaffoldFromSource(dir, opts); err != nil {
+		t.Fatalf("ScaffoldFromSource: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(dir, StateDir, WorkspaceConfigFile))
+	if err != nil {
+		t.Fatalf("read workspace.toml: %v", err)
+	}
+	want := appendixAGolden("my-workspace", "owner", "bootstrap-repo", "public", "public")
+	if string(got) != want {
+		t.Errorf("scaffold body mismatch:\n--- want ---\n%s\n--- got ---\n%s", want, string(got))
+	}
+}
+
+func TestScaffoldFromSource_AppendixA_Private(t *testing.T) {
+	dir := t.TempDir()
+	opts := ScaffoldOptions{
+		Name:           "my-private-ws",
+		Org:            "owner",
+		Repo:           "secret-repo",
+		Private:        true,
+		IncludeGitkeep: true,
+	}
+	if err := ScaffoldFromSource(dir, opts); err != nil {
+		t.Fatalf("ScaffoldFromSource: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(dir, StateDir, WorkspaceConfigFile))
+	if err != nil {
+		t.Fatalf("read workspace.toml: %v", err)
+	}
+	want := appendixAGolden("my-private-ws", "owner", "secret-repo", "private", "private")
+	if string(got) != want {
+		t.Errorf("scaffold body mismatch:\n--- want ---\n%s\n--- got ---\n%s", want, string(got))
+	}
+}
+
+func TestScaffoldFromSource_Gitkeep_Empty(t *testing.T) {
+	dir := t.TempDir()
+	opts := ScaffoldOptions{
+		Name: "ws", Org: "owner", Repo: "repo",
+		IncludeGitkeep: true,
+	}
+	if err := ScaffoldFromSource(dir, opts); err != nil {
+		t.Fatalf("ScaffoldFromSource: %v", err)
+	}
+	gitkeep := filepath.Join(dir, StateDir, "claude", ".gitkeep")
+	info, err := os.Stat(gitkeep)
+	if err != nil {
+		t.Fatalf("expected .gitkeep present: %v", err)
+	}
+	if info.Size() != 0 {
+		t.Errorf(".gitkeep size = %d, want 0 bytes (R15 contract)", info.Size())
+	}
+	// Defensive: ReadFile and confirm zero bytes.
+	data, err := os.ReadFile(gitkeep)
+	if err != nil {
+		t.Fatalf("read .gitkeep: %v", err)
+	}
+	if len(data) != 0 {
+		t.Errorf(".gitkeep contents non-empty: %q", data)
+	}
+}
+
+func TestScaffoldFromSource_NoGitkeep(t *testing.T) {
+	dir := t.TempDir()
+	opts := ScaffoldOptions{
+		Name: "ws", Org: "owner", Repo: "repo",
+		IncludeGitkeep: false,
+	}
+	if err := ScaffoldFromSource(dir, opts); err != nil {
+		t.Fatalf("ScaffoldFromSource: %v", err)
+	}
+	gitkeep := filepath.Join(dir, StateDir, "claude", ".gitkeep")
+	if _, err := os.Stat(gitkeep); !os.IsNotExist(err) {
+		t.Errorf("expected .gitkeep absent (IncludeGitkeep=false), got err=%v", err)
+	}
+}
+
+// TestScaffoldFromSource_R16_VisibilityFromBool is the load-bearing
+// adversarial fixture. It constructs a *github.Repo whose Private bool
+// and Visibility string DISAGREE (deliberately mismatched), then derives
+// ScaffoldOptions.Private from r.Private only. The assertion is that
+// the scaffold visibility tracks the bool (not the string), proving
+// that no code path reads Visibility into the scaffold body.
+func TestScaffoldFromSource_R16_VisibilityFromBool(t *testing.T) {
+	// Mismatched fixture: Private=true but Visibility="public".
+	// If a future refactor accidentally plumbed Visibility, the
+	// scaffold would emit `[groups.public]` and this test would fail.
+	r := &github.Repo{
+		Name:       "repo",
+		Private:    true,
+		Visibility: "public",
+	}
+	dir := t.TempDir()
+	opts := ScaffoldOptions{
+		Name:           "ws",
+		Org:            "owner",
+		Repo:           "repo",
+		Private:        r.Private, // <- ONLY field consulted (R16)
+		IncludeGitkeep: true,
+	}
+	if err := ScaffoldFromSource(dir, opts); err != nil {
+		t.Fatalf("ScaffoldFromSource: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, StateDir, WorkspaceConfigFile))
+	if err != nil {
+		t.Fatalf("read workspace.toml: %v", err)
+	}
+	if !strings.Contains(string(data), `[groups.private]`) {
+		t.Errorf("expected [groups.private] (Private=true wins over Visibility=public), got:\n%s", data)
+	}
+	if !strings.Contains(string(data), `visibility = "private"`) {
+		t.Errorf(`expected visibility = "private", got:\n%s`, data)
+	}
+	if strings.Contains(string(data), `[groups.public]`) {
+		t.Errorf("scaffold contains [groups.public] — Visibility string leaked into output:\n%s", data)
+	}
+}
+
+// TestScaffoldFromSource_R16_NoVisibilityInjection asserts that a
+// TOML-metacharacter-shaped Visibility string from the API cannot reach
+// the scaffold body. The Repo carries a malicious-looking Visibility
+// value; ScaffoldOptions takes only Private (bool); the scaffold body
+// contains neither the injection literal nor anything resembling it.
+func TestScaffoldFromSource_R16_NoVisibilityInjection(t *testing.T) {
+	injected := "]\n[evil.section]\nbypass = true # "
+	r := &github.Repo{
+		Name:       "repo",
+		Private:    false,
+		Visibility: injected,
+	}
+	dir := t.TempDir()
+	opts := ScaffoldOptions{
+		Name:           "ws",
+		Org:            "owner",
+		Repo:           "repo",
+		Private:        r.Private,
+		IncludeGitkeep: true,
+	}
+	if err := ScaffoldFromSource(dir, opts); err != nil {
+		t.Fatalf("ScaffoldFromSource: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, StateDir, WorkspaceConfigFile))
+	if err != nil {
+		t.Fatalf("read workspace.toml: %v", err)
+	}
+	body := string(data)
+	if !strings.Contains(body, `[groups.public]`) {
+		t.Errorf("expected [groups.public] from Private=false, got:\n%s", body)
+	}
+	if strings.Contains(body, "evil") {
+		t.Errorf("scaffold contains injected 'evil' substring:\n%s", body)
+	}
+	if strings.Contains(body, "bypass") {
+		t.Errorf("scaffold contains injected 'bypass' substring:\n%s", body)
+	}
+}
+
+// TestScaffoldFromSource_NoSecretOnDisk asserts PRD N5 — secrets that
+// happen to be in the process environment (GH_TOKEN, etc.) MUST NOT
+// appear in the scaffolded bytes. ScaffoldFromSource never reads env,
+// so this is a regression guard against a future refactor that does.
+func TestScaffoldFromSource_NoSecretOnDisk(t *testing.T) {
+	const token = "test-fixture-token-DEADBEEF"
+	t.Setenv("GH_TOKEN", token)
+	t.Setenv("GITHUB_TOKEN", token)
+
+	dir := t.TempDir()
+	opts := ScaffoldOptions{
+		Name: "ws", Org: "owner", Repo: "repo",
+		Private:        true,
+		IncludeGitkeep: true,
+	}
+	if err := ScaffoldFromSource(dir, opts); err != nil {
+		t.Fatalf("ScaffoldFromSource: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, StateDir, WorkspaceConfigFile))
+	if err != nil {
+		t.Fatalf("read workspace.toml: %v", err)
+	}
+	if strings.Contains(string(data), token) {
+		t.Errorf("scaffold leaked GH_TOKEN literal onto disk:\n%s", data)
+	}
+	// Defensive: also check the .gitkeep is genuinely empty (no
+	// token-bearing default text).
+	gk, err := os.ReadFile(filepath.Join(dir, StateDir, "claude", ".gitkeep"))
+	if err != nil {
+		t.Fatalf("read .gitkeep: %v", err)
+	}
+	if len(gk) != 0 {
+		t.Errorf(".gitkeep has unexpected contents: %q", gk)
+	}
+}
+
+func TestScaffoldFromSource_RequiresFields(t *testing.T) {
+	dir := t.TempDir()
+	if err := ScaffoldFromSource(dir, ScaffoldOptions{Org: "o", Repo: "r"}); err == nil {
+		t.Error("expected error for empty Name")
+	}
+	if err := ScaffoldFromSource(dir, ScaffoldOptions{Name: "n", Repo: "r"}); err == nil {
+		t.Error("expected error for empty Org")
+	}
+	if err := ScaffoldFromSource(dir, ScaffoldOptions{Name: "n", Org: "o"}); err == nil {
+		t.Error("expected error for empty Repo")
 	}
 }
