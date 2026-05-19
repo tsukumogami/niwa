@@ -1,5 +1,5 @@
 ---
-status: Proposed
+status: Accepted
 upstream: docs/prds/PRD-init-bootstrap-empty-source.md
 problem: |
   `niwa init <name> --from <slug> --bootstrap` is now an Accepted PRD,
@@ -57,7 +57,7 @@ rationale: |
 
 ## Status
 
-Proposed
+Accepted
 
 ## Context and Problem Statement
 
@@ -1336,11 +1336,14 @@ adapter to keep `CreateSession` itself package-private?).
   `mcp.CreateSession`, `mcp.CreateSessionParams`, and the
   `BranchName` field on `SessionLifecycleState`. Each addition
   widens the contract niwa owes.
-- **MCP handler factoring crosses package boundaries.**
-  `internal/workspace/bootstrap.go` will import `internal/mcp`, which
-  is a new dependency direction. Today the mcp package depends on
-  workspace (via `SessionLifecycleState`'s use of workspace types
-  indirectly); the new import adds a workspace→mcp edge.
+- **MCP handler factoring widens an existing import edge.**
+  `internal/workspace/bootstrap.go` will import `internal/mcp` to
+  reuse `CreateSession`. This is not a brand-new import direction —
+  `internal/workspace/daemon.go` already imports `internal/mcp` —
+  but it widens the surface workspace consumes from mcp. The
+  alternative (a workspace-side interface satisfied by an mcp
+  adapter) would invert the direction but adds an indirection layer
+  the orchestrator doesn't otherwise need.
 - **Two-phase sid handshake adds atomicity reasoning to the session
   layer.** The factoring must preserve every defer/cleanup
   invariant the current `handleCreateSession` body relies on. A
