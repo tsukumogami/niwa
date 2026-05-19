@@ -1,23 +1,56 @@
 ---
-status: Proposed
+status: Accepted
 problem: |
   `niwa init <name> --from <org/repo>` fails when the remote exists but
   has no `.niwa/workspace.toml` — the materialize step returns
-  `*config.NoMarkerError` and `runInit` wraps it as "materializing config
-  repo: ...". This creates a chicken-and-egg friction when a user wants
-  to adopt a freshly-created GitHub repo as a niwa-managed workspace:
-  they must clone the repo outside the workspace, hand-author
-  `.niwa/workspace.toml`, push, and only then run `niwa init` for real.
-  The design must specify how a bootstrap fallback plugs into the
-  existing init flow without regressing the failure paths for malformed
-  configs, auth errors, 404s, or rank-2 layouts.
+  `*config.NoMarkerError` and `runInit` wraps it as "materializing
+  config repo: ...". This creates a chicken-and-egg friction when a
+  user wants to adopt a freshly-created GitHub repo as a niwa-managed
+  workspace: they must clone the repo outside the workspace,
+  hand-author `.niwa/workspace.toml`, push, and only then run
+  `niwa init` for real. The design must specify how a bootstrap
+  fallback plugs into the existing init flow without regressing the
+  failure paths for malformed configs, auth errors, 404s, or rank-2
+  layouts.
+decision: |
+  Add a `--bootstrap` / `--no-bootstrap` flag pair to `niwa init`
+  that, when paired with `--from <empty-remote>`, dispatches to a new
+  `workspace.RunBootstrap` orchestrator on `*config.NoMarkerError`.
+  `RunBootstrap` validates the source host (GitHub-only in v1)
+  BEFORE any git invocation, shallow-fetches into the workspace root
+  in place (the cloned tree IS the workspace root — no separate
+  worktree), writes a minimal-ideal `.niwa/workspace.toml` (sources
+  and groups derived from the `--from` slug and a new
+  `(*github.APIClient).GetRepo` visibility lookup, with
+  `.niwa/claude/.gitkeep` so the content directory pushes cleanly),
+  pre-commits on a `niwa-bootstrap` branch, and falls through to the
+  existing post-flight + registry-write + state-save block. Adjacent
+  failure modes (401/403, 404, ambiguous markers) get case-specific
+  hints via a typed `*github.StatusError` and an `errors.As`
+  classifier at the `runInit` seam.
+rationale: |
+  The `--bootstrap` flag (not auto-fallback on `NoMarkerError`) is
+  required because GitHub returns 404 indistinguishably for empty,
+  missing, and private-without-credentials remotes — silent fallback
+  would scaffold over typos. In-place worktree (not a separated
+  `.niwa/worktrees/` location) wins because every separated-worktree
+  alternative forces reworks of post-flight verification, apply
+  discovery via `config.Discover`, and registry shape, for no
+  offsetting user value. The minimal scaffold drops today's
+  redundant `default_branch = "main"` line and derives
+  `[[sources]].org` from the slug plus `[groups.<vis>]` from a single
+  GitHub API call, producing a workspace.toml that `niwa apply`
+  succeeds on without user edits. Adjacent failure-mode work is
+  scoped to the typed-error infrastructure Decision 2 already
+  requires, deferring workspace-level sentinels and non-GitHub
+  transport classification to follow-up PRs.
 ---
 
 # DESIGN: init bootstrap from empty source
 
 ## Status
 
-Proposed
+Accepted
 
 ## Context and Problem Statement
 
