@@ -36,6 +36,13 @@ type SessionLifecycleState struct {
 	Status               string `json:"status"`
 	CreationTime         string `json:"creation_time"`
 	WorktreePath         string `json:"worktree_path"`
+	// BranchName is the git branch name backing this session's worktree.
+	// Added in v1.1 of the schema. Pre-v1.1 state files omit this field;
+	// readers must call EffectiveBranchName() (NOT read BranchName directly)
+	// to get the historic `session/<sid>` default when the field is empty.
+	// Recording the branch on disk is load-bearing for the bootstrap path,
+	// which uses a `niwa-bootstrap/` prefix instead of `session/`.
+	BranchName           string `json:"branch_name,omitempty"`
 	ClaudeConversationID string `json:"claude_conversation_id,omitempty"`
 	CreatorPID           int    `json:"creator_pid"`
 	CreatorStartTime     int64  `json:"creator_start_time"`
@@ -156,19 +163,38 @@ const (
 
 // NewSessionLifecycleState creates a SessionLifecycleState with V=1 and
 // CreationTime set to now (UTC, RFC3339).
-func NewSessionLifecycleState(sessionID, repo, purpose, parentSessionID, worktreePath string) SessionLifecycleState {
+//
+// branchName records the git branch backing the worktree. Pass an empty
+// string for the historic `session/<sid>` default; pass a fully-qualified
+// branch name (e.g., `niwa-bootstrap/<sid>`) when the caller uses a
+// non-default prefix. EffectiveBranchName() reads this field with the
+// empty-string fallback for pre-v1.1 state files on disk.
+func NewSessionLifecycleState(sessionID, repo, purpose, parentSessionID, worktreePath, branchName string) SessionLifecycleState {
 	pid := os.Getpid()
 	startTime, _ := PIDStartTime(pid)
 	return SessionLifecycleState{
-		V:               1,
-		SessionID:       sessionID,
-		ParentSessionID: parentSessionID,
-		Repo:            repo,
-		Purpose:         purpose,
-		Status:          SessionStatusActive,
-		CreationTime:    time.Now().UTC().Format(time.RFC3339),
-		WorktreePath:    worktreePath,
-		CreatorPID:      pid,
+		V:                1,
+		SessionID:        sessionID,
+		ParentSessionID:  parentSessionID,
+		Repo:             repo,
+		Purpose:          purpose,
+		Status:           SessionStatusActive,
+		CreationTime:     time.Now().UTC().Format(time.RFC3339),
+		WorktreePath:     worktreePath,
+		BranchName:       branchName,
+		CreatorPID:       pid,
 		CreatorStartTime: startTime,
 	}
+}
+
+// EffectiveBranchName returns the recorded BranchName when non-empty,
+// else the historic `session/<sid>` default. Provides back-compat for
+// pre-v1.1 state files written before the BranchName field existed:
+// destroy and warning paths that consult this method continue to
+// resolve to the correct branch on legacy state without a migration.
+func (s SessionLifecycleState) EffectiveBranchName() string {
+	if s.BranchName != "" {
+		return s.BranchName
+	}
+	return "session/" + s.SessionID
 }

@@ -12,18 +12,25 @@ import (
 // section to w for each kind found. Mirrors the existing branch_warning
 // precedent on niwa_destroy_session: warn loudly to stderr; never auto-clean.
 //
+// branchName is the fully-qualified branch backing this session, resolved
+// via SessionLifecycleState.EffectiveBranchName() at the caller. Pre-v1.1
+// sessions resolve to `session/<sessionID>`; bootstrap-created sessions
+// resolve to `niwa-bootstrap/<sessionID>`. Passing the branch through
+// (rather than reconstructing from sessionID) preserves the upstream-tracking
+// query semantics regardless of which prefix was used.
+//
 // Three kinds are detected, each with its own warning section:
 //   - uncommitted changes: any line in `git status --porcelain` that does NOT
 //     start with "??" (those are untracked).
 //   - untracked files: lines starting with "??".
-//   - unpushed commits on session/<sessionID>: ahead-count > 0 from
-//     `git for-each-ref --format='%(upstream:track)' refs/heads/session/<id>`.
+//   - unpushed commits on the branch: ahead-count > 0 from
+//     `git for-each-ref --format='%(upstream:track)' refs/heads/<branchName>`.
 //
 // Failures inspecting any of the three kinds are reported as a single
 // trailing warning ("warning: could not inspect worktree state: ...") rather
 // than aborting -- the natural-detach release path must always reach the
 // daemon respawn step regardless.
-func Warnings(worktreePath, sessionID string, w io.Writer) {
+func Warnings(worktreePath, branchName string, w io.Writer) {
 	uncommitted, untracked, statusErr := classifyStatus(worktreePath)
 	if statusErr != nil {
 		fmt.Fprintf(w, "warning: could not inspect worktree status: %v\n", statusErr)
@@ -40,13 +47,13 @@ func Warnings(worktreePath, sessionID string, w io.Writer) {
 			fmt.Fprintln(w, "  "+line)
 		}
 	}
-	ahead, aheadErr := unpushedCount(worktreePath, sessionID)
+	ahead, aheadErr := unpushedCount(worktreePath, branchName)
 	if aheadErr != nil {
 		fmt.Fprintf(w, "warning: could not inspect session branch state: %v\n", aheadErr)
 	}
 	if ahead > 0 {
-		fmt.Fprintf(w, "warning: worktree has unpushed commits on session/%s\n", sessionID)
-		fmt.Fprintf(w, "  ahead by %d commit(s); push with `git push -u origin session/%s`\n", ahead, sessionID)
+		fmt.Fprintf(w, "warning: worktree has unpushed commits on %s\n", branchName)
+		fmt.Fprintf(w, "  ahead by %d commit(s); push with `git push -u origin %s`\n", ahead, branchName)
 	}
 }
 
@@ -71,14 +78,13 @@ func classifyStatus(worktreePath string) (uncommitted, untracked []string, err e
 	return uncommitted, untracked, nil
 }
 
-// unpushedCount returns the ahead-count of the session branch versus its
+// unpushedCount returns the ahead-count of the named branch versus its
 // upstream. Returns 0 when the branch has no upstream configured (a
 // legitimately not-yet-pushed branch is reported by counting its commits
 // instead -- but for the natural-detach UX, we only warn when there's an
 // upstream divergence, since branches without upstream are routine and
 // would generate noise).
-func unpushedCount(worktreePath, sessionID string) (int, error) {
-	branch := "session/" + sessionID
+func unpushedCount(worktreePath, branch string) (int, error) {
 	// %(upstream:track) prints e.g. "[ahead 3]" or "[gone]" or empty.
 	cmd := exec.Command("git", "-C", worktreePath, "for-each-ref",
 		"--format=%(upstream:track)", "refs/heads/"+branch)

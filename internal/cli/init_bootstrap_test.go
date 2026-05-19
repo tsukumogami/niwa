@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/spf13/cobra"
 	"github.com/tsukumogami/niwa/internal/config"
 	"github.com/tsukumogami/niwa/internal/source"
 	"github.com/tsukumogami/niwa/internal/workspace"
@@ -68,7 +69,7 @@ func stubBootstrap(t *testing.T) *bool {
 	t.Helper()
 	called := false
 	prev := runBootstrap
-	runBootstrap = func(ctx context.Context, root string, src source.Source) error {
+	runBootstrap = func(ctx context.Context, cmd *cobra.Command, workspaceRoot, workspaceName string, src source.Source, sourceURL string, disarm func()) error {
 		called = true
 		return errors.New("bootstrap step=create: not implemented yet")
 	}

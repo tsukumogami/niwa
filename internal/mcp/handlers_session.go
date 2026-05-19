@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,6 +12,44 @@ import (
 	"syscall"
 	"time"
 )
+
+// GitInvoker is the test-injection seam for the session-create pipeline's
+// git subprocess calls. It is the structural equivalent of
+// workspace.GitInvoker — using a local interface here avoids an import
+// cycle (workspace already imports mcp via daemon.go) while letting
+// production callers pass workspace.StdGitInvoker() directly. Go's
+// structural typing makes the cross-package interface assignment
+// compile without an explicit adapter.
+type GitInvoker interface {
+	CommandContext(ctx context.Context, args ...string) *exec.Cmd
+}
+
+// CreateSessionParams collects the inputs to the factored CreateSession
+// function. The struct is what the MCP handler builds for the
+// `session/<sid>` default and what RunBootstrap builds for the
+// `niwa-bootstrap/<sid>` prefix.
+//
+// BranchPrefix carries the load-bearing decision for R5 (branch name in
+// session state). Empty means "session/" (back-compat for every existing
+// caller of the MCP handler); a non-empty value (e.g., "niwa-bootstrap/")
+// prepends to the generated session ID. The resulting branch name is
+// persisted into SessionLifecycleState.BranchName so destroy and the
+// push-hint warning resolve to the right ref.
+//
+// GitInvoker is the seam Issue 4 demands (R22): the worktree-add and
+// branch-delete subprocess calls flow through this interface so unit
+// tests can record argv and inject failures without forking real git.
+// DaemonStarter mirrors the *Server.daemonStarter hook so the factored
+// function does not need a *Server receiver.
+type CreateSessionParams struct {
+	InstanceRoot    string
+	Repo            string
+	Purpose         string
+	ParentSessionID string
+	BranchPrefix    string
+	GitInvoker      GitInvoker
+	DaemonStarter   func(worktreePath string, extraEnv []string) error
+}
 
 // listSessionsArgs holds optional filter parameters for niwa_list_sessions.
 //
@@ -179,109 +218,194 @@ func findRepoInWorkspace(instanceRoot, repoName string) (string, error) {
 	return "", fmt.Errorf("repo %q not found in workspace %s", repoName, instanceRoot)
 }
 
-// handleCreateSession implements niwa_create_session.
+// ErrSessionDaemonSpawnTimeout wraps ErrDaemonSpawnTimeout so callers of
+// CreateSession can distinguish the daemon-startup failure from generic
+// errors. The exported sentinel preserves the structured error code the
+// MCP layer surfaces via errResultCode.
+var ErrSessionDaemonSpawnTimeout = ErrDaemonSpawnTimeout
+
+// ErrSessionUnknownRole is returned by CreateSession when the role
+// directory under <instanceRoot>/.niwa/roles/<repo> does not exist.
+// Callers map this to the UNKNOWN_ROLE structured error code.
+var ErrSessionUnknownRole = errors.New("unknown role")
+
+// CreateSession is the factored body of handleCreateSession: it validates
+// the role, generates a session ID, creates a git worktree on a new
+// branch, scaffolds the .niwa layout, writes the session state file,
+// and starts the per-worktree daemon. On any failure after the worktree
+// is created the worktree is removed before returning.
 //
-// It validates the role, generates a session ID, creates a git worktree
-// on a new branch, scaffolds the .niwa layout, writes the session state file,
-// and starts the per-worktree daemon. On any failure after the worktree is
-// created, the worktree is removed before returning.
-func (s *Server) handleCreateSession(args createSessionArgs) toolResult {
-	if args.Repo == "" {
-		return errResultCode("BAD_PAYLOAD", "repo is required")
+// The factoring lets workspace.RunBootstrap reuse the exact same body
+// without going through the MCP handler envelope. params.BranchPrefix
+// controls the branch name: empty == historic `session/<sid>`,
+// non-empty == `<prefix><sid>` (e.g., `niwa-bootstrap/<sid>` for the
+// bootstrap orchestrator). The chosen branch name is persisted into
+// SessionLifecycleState.BranchName via NewSessionLifecycleState so
+// destroy and warning paths resolve correctly.
+//
+// All git invocations route through params.GitInvoker (R22) so unit
+// tests can record argv and inject faults without a real git binary.
+// Returns (sessionID, worktreePath, branchName, error). A non-nil
+// error may have a non-empty branchName when the caller needs to clean
+// up after CreateSession partially succeeded (e.g., daemon-spawn
+// timeout after the branch was created).
+func CreateSession(ctx context.Context, params CreateSessionParams) (sessionID, worktreePath, branchName string, err error) {
+	if params.Repo == "" {
+		return "", "", "", errors.New("repo is required")
 	}
-	if args.Purpose == "" {
-		return errResultCode("BAD_PAYLOAD", "purpose is required")
+	if params.Purpose == "" {
+		return "", "", "", errors.New("purpose is required")
 	}
-	if s.daemonStarter == nil {
-		return errResult("niwa_create_session: daemon starter not configured (internal error)")
+	if params.DaemonStarter == nil {
+		return "", "", "", errors.New("daemon starter not configured")
+	}
+	if params.GitInvoker == nil {
+		return "", "", "", errors.New("git invoker not configured")
 	}
 
 	// Validate role directory exists.
-	roleDir := filepath.Join(s.instanceRoot, ".niwa", "roles", args.Repo)
-	if _, err := os.Stat(roleDir); errors.Is(err, os.ErrNotExist) {
-		return errResultCode("UNKNOWN_ROLE", fmt.Sprintf("role %q not found at %s", args.Repo, roleDir))
+	roleDir := filepath.Join(params.InstanceRoot, ".niwa", "roles", params.Repo)
+	if _, statErr := os.Stat(roleDir); errors.Is(statErr, os.ErrNotExist) {
+		return "", "", "", fmt.Errorf("%w: role %q not found at %s", ErrSessionUnknownRole, params.Repo, roleDir)
 	}
 
 	// Generate a session ID.
-	sessionsDir := filepath.Join(s.instanceRoot, ".niwa", "sessions")
-	if err := os.MkdirAll(sessionsDir, 0o700); err != nil {
-		return errResult("creating sessions dir: " + err.Error())
+	sessionsDir := filepath.Join(params.InstanceRoot, ".niwa", "sessions")
+	if mkErr := os.MkdirAll(sessionsDir, 0o700); mkErr != nil {
+		return "", "", "", fmt.Errorf("creating sessions dir: %w", mkErr)
 	}
-	sessionID, err := newSessionLifecycleID(sessionsDir)
-	if err != nil {
-		return errResult("generating session ID: " + err.Error())
+	sid, idErr := newSessionLifecycleID(sessionsDir)
+	if idErr != nil {
+		return "", "", "", fmt.Errorf("generating session ID: %w", idErr)
 	}
 
 	// Find the actual git repo on disk.
-	repoPath, err := findRepoInWorkspace(s.instanceRoot, args.Repo)
-	if err != nil {
-		return errResultCode("UNKNOWN_ROLE", err.Error())
+	repoPath, repoErr := findRepoInWorkspace(params.InstanceRoot, params.Repo)
+	if repoErr != nil {
+		return "", "", "", fmt.Errorf("%w: %v", ErrSessionUnknownRole, repoErr)
 	}
 
-	// Worktree is placed under <instanceRoot>/.niwa/worktrees/<repo>-<session-id>/.
-	worktreesDir := filepath.Join(s.instanceRoot, ".niwa", "worktrees")
-	if err := os.MkdirAll(worktreesDir, 0o700); err != nil {
-		return errResult("creating worktrees dir: " + err.Error())
+	// Worktree under <instanceRoot>/.niwa/worktrees/<repo>-<sid>/.
+	worktreesDir := filepath.Join(params.InstanceRoot, ".niwa", "worktrees")
+	if mkErr := os.MkdirAll(worktreesDir, 0o700); mkErr != nil {
+		return "", "", "", fmt.Errorf("creating worktrees dir: %w", mkErr)
 	}
-	worktreePath := filepath.Join(worktreesDir, args.Repo+"-"+sessionID)
-	branchName := "session/" + sessionID
+	wtPath := filepath.Join(worktreesDir, params.Repo+"-"+sid)
+	prefix := params.BranchPrefix
+	if prefix == "" {
+		prefix = "session/"
+	}
+	branch := prefix + sid
 
-	// Create the worktree on a new branch.
-	out, err := exec.Command("git", "-C", repoPath, "worktree", "add", worktreePath, "-b", branchName).CombinedOutput()
-	if err != nil {
-		return errResult(fmt.Sprintf("git worktree add: %v\n%s", err, out))
+	// Create the worktree on a new branch via the injected invoker.
+	addCmd := params.GitInvoker.CommandContext(ctx, "-C", repoPath, "worktree", "add", wtPath, "-b", branch)
+	out, addErr := addCmd.CombinedOutput()
+	if addErr != nil {
+		return "", "", "", fmt.Errorf("git worktree add: %w\n%s", addErr, out)
 	}
 
 	// From here, any failure must clean up the worktree.
 	cleanupWorktree := func() {
-		_ = exec.Command("git", "-C", repoPath, "worktree", "remove", "--force", worktreePath).Run()
+		removeCmd := params.GitInvoker.CommandContext(ctx, "-C", repoPath, "worktree", "remove", "--force", wtPath)
+		_ = removeCmd.Run()
 	}
 
 	// Scaffold the .niwa layout in the worktree.
-	if err := scaffoldWorktreeNiwa(worktreePath, args.Repo); err != nil {
+	if scaffoldErr := scaffoldWorktreeNiwa(wtPath, params.Repo); scaffoldErr != nil {
 		cleanupWorktree()
-		return errResult("scaffold: " + err.Error())
+		return "", "", branch, fmt.Errorf("scaffold: %w", scaffoldErr)
 	}
 
-	// Write the session state file.
-	state := NewSessionLifecycleState(sessionID, args.Repo, args.Purpose, args.ParentSessionID, worktreePath)
-	if err := WriteSessionLifecycleState(sessionsDir, state); err != nil {
+	// Write the session state file. The branch name is persisted so
+	// destroy and the push-hint warning resolve to the right ref —
+	// load-bearing for R5 (branch name in session state).
+	state := NewSessionLifecycleState(sid, params.Repo, params.Purpose, params.ParentSessionID, wtPath, branch)
+	if writeErr := WriteSessionLifecycleState(sessionsDir, state); writeErr != nil {
 		cleanupWorktree()
-		return errResult("writing session state: " + err.Error())
+		return "", "", branch, fmt.Errorf("writing session state: %w", writeErr)
 	}
 
-	// Start the per-worktree daemon with NIWA_MAIN_INSTANCE_ROOT and NIWA_SESSION_ID.
+	// Start the per-worktree daemon.
 	extraEnv := []string{
-		"NIWA_MAIN_INSTANCE_ROOT=" + s.instanceRoot,
-		"NIWA_SESSION_ID=" + sessionID,
+		"NIWA_MAIN_INSTANCE_ROOT=" + params.InstanceRoot,
+		"NIWA_SESSION_ID=" + sid,
 	}
-	resp := map[string]string{
-		"session_id":    sessionID,
-		"worktree_path": worktreePath,
-	}
-	if err := s.daemonStarter(worktreePath, extraEnv); err != nil {
-		// Spawn timeout is hard: the worker cannot delegate work to a session
-		// whose daemon never reached steady state. Roll back the worktree,
-		// the session-state file, and the branch (best-effort branch delete
-		// — git worktree remove --force already orphans it; the branch is a
-		// scaffolding artifact that should not survive a failed create).
-		// Other errors are non-fatal: the session state is written and the
-		// coordinator can retry daemon start.
-		if errors.Is(err, ErrDaemonSpawnTimeout) {
+	if dErr := params.DaemonStarter(wtPath, extraEnv); dErr != nil {
+		if errors.Is(dErr, ErrDaemonSpawnTimeout) {
 			cleanupWorktree()
-			_ = os.Remove(filepath.Join(sessionsDir, sessionID+".json"))
-			_ = exec.Command("git", "-C", repoPath, "branch", "-D", branchName).Run()
-			fmt.Fprintf(os.Stderr, "niwa_create_session: daemon spawn timeout at %s; rolled back\n", worktreePath)
+			_ = os.Remove(filepath.Join(sessionsDir, sid+".json"))
+			delCmd := params.GitInvoker.CommandContext(ctx, "-C", repoPath, "branch", "-D", branch)
+			_ = delCmd.Run()
+			return "", "", branch, fmt.Errorf("%w: daemon for session %s did not become ready; check %s/.niwa/daemon.log",
+				ErrSessionDaemonSpawnTimeout, sid, wtPath)
+		}
+		// Non-fatal: the session state is written; coordinator can retry.
+		return sid, wtPath, branch, fmt.Errorf("daemon failed to start: %w", dErr)
+	}
+	return sid, wtPath, branch, nil
+}
+
+// handleCreateSession implements niwa_create_session as a thin wrapper
+// around CreateSession. BranchPrefix is left empty so the historic
+// `session/<sid>` branch name is preserved for every existing caller.
+func (s *Server) handleCreateSession(args createSessionArgs) toolResult {
+	if s.daemonStarter == nil {
+		return errResult("niwa_create_session: daemon starter not configured (internal error)")
+	}
+	sid, wtPath, _, err := CreateSession(context.Background(), CreateSessionParams{
+		InstanceRoot:    s.instanceRoot,
+		Repo:            args.Repo,
+		Purpose:         args.Purpose,
+		ParentSessionID: args.ParentSessionID,
+		BranchPrefix:    "",
+		GitInvoker:      stdGitInvokerMCP{},
+		DaemonStarter:   s.daemonStarter,
+	})
+	resp := map[string]string{}
+	if sid != "" {
+		resp["session_id"] = sid
+	}
+	if wtPath != "" {
+		resp["worktree_path"] = wtPath
+	}
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrSessionDaemonSpawnTimeout):
+			fmt.Fprintf(os.Stderr, "niwa_create_session: daemon spawn timeout at %s; rolled back\n", wtPath)
 			return errResultCode("DAEMON_SPAWN_TIMEOUT",
 				fmt.Sprintf("daemon for session %s did not become ready within timeout; check %s/.niwa/daemon.log for the spawn trace. The session was rolled back.",
-					sessionID, worktreePath))
+					sid, wtPath))
+		case errors.Is(err, ErrSessionUnknownRole):
+			return errResultCode("UNKNOWN_ROLE", err.Error())
 		}
-		fmt.Fprintf(os.Stderr, "niwa_create_session: daemon failed to start at %s: %v\n", worktreePath, err)
-		resp["daemon_warning"] = "daemon failed to start: " + err.Error()
+		// Bad-payload arms (empty repo/purpose) propagate as-is.
+		if args.Repo == "" {
+			return errResultCode("BAD_PAYLOAD", "repo is required")
+		}
+		if args.Purpose == "" {
+			return errResultCode("BAD_PAYLOAD", "purpose is required")
+		}
+		// Daemon non-fatal: session state written, response carries a warning.
+		if sid != "" {
+			fmt.Fprintf(os.Stderr, "niwa_create_session: daemon failed to start at %s: %v\n", wtPath, err)
+			resp["daemon_warning"] = err.Error()
+			result, _ := json.Marshal(resp)
+			return textResult(string(result))
+		}
+		return errResult(err.Error())
 	}
-
 	result, _ := json.Marshal(resp)
 	return textResult(string(result))
+}
+
+// stdGitInvokerMCP is the production GitInvoker for handleCreateSession.
+// Sibling of workspace.StdGitInvoker() — duplicated locally rather than
+// imported to keep the mcp→workspace import direction unsullied.
+type stdGitInvokerMCP struct{}
+
+// CommandContext delegates to exec.CommandContext(ctx, "git", args...).
+func (stdGitInvokerMCP) CommandContext(ctx context.Context, args ...string) *exec.Cmd {
+	return exec.CommandContext(ctx, "git", args...)
 }
 
 // handleDestroySession implements niwa_destroy_session.
@@ -361,7 +485,12 @@ func (s *Server) handleDestroySession(args destroySessionArgs) toolResult {
 		if args.Force {
 			branchArg = "-D"
 		}
-		branchName := "session/" + args.SessionID
+		// Resolve the branch name from session state so bootstrap-created
+		// sessions (branch prefix `niwa-bootstrap/`) and historic
+		// `session/<sid>` sessions both delete the correct ref.
+		// EffectiveBranchName falls back to `session/<sid>` for pre-v1.1
+		// state files that pre-date the BranchName field.
+		branchName := state.EffectiveBranchName()
 		if err := exec.Command("git", "-C", repoPath, "branch", branchArg, branchName).Run(); err != nil && !args.Force {
 			state.BranchWarning = fmt.Sprintf(
 				"branch %s was not deleted (unmerged commits remain); review and delete manually: git -C %s branch -D %s",

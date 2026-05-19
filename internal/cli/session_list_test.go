@@ -50,8 +50,8 @@ func seedSessionList(t *testing.T, includeLiveDaemon bool) string {
 	}
 
 	for _, st := range []mcp.SessionLifecycleState{
-		mcp.NewSessionLifecycleState("aabbccdd", "myrepo", "live test", "", liveWT),
-		mcp.NewSessionLifecycleState("11223344", "myrepo", "dead test", "", deadWT),
+		mcp.NewSessionLifecycleState("aabbccdd", "myrepo", "live test", "", liveWT, ""),
+		mcp.NewSessionLifecycleState("11223344", "myrepo", "dead test", "", deadWT, ""),
 	} {
 		if err := mcp.WriteSessionLifecycleState(sessionsDir, st); err != nil {
 			t.Fatal(err)

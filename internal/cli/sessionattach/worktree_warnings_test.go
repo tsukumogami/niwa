@@ -40,7 +40,7 @@ func mustGit(t *testing.T, dir string, args ...string) {
 func TestWarningsCleanWorktreeSilent(t *testing.T) {
 	wt, sid := initWorktreeRepo(t)
 	var buf bytes.Buffer
-	Warnings(wt, sid, &buf)
+	Warnings(wt, "session/"+sid, &buf)
 	if buf.Len() != 0 {
 		t.Errorf("expected no warnings on clean worktree, got: %q", buf.String())
 	}
@@ -52,7 +52,7 @@ func TestWarningsUncommittedChanges(t *testing.T) {
 		t.Fatalf("modify README: %v", err)
 	}
 	var buf bytes.Buffer
-	Warnings(wt, sid, &buf)
+	Warnings(wt, "session/"+sid, &buf)
 	out := buf.String()
 	if !strings.Contains(out, "warning: worktree has uncommitted changes") {
 		t.Errorf("missing uncommitted warning: %q", out)
@@ -68,7 +68,7 @@ func TestWarningsUntrackedOnly(t *testing.T) {
 		t.Fatalf("write untracked: %v", err)
 	}
 	var buf bytes.Buffer
-	Warnings(wt, sid, &buf)
+	Warnings(wt, "session/"+sid, &buf)
 	out := buf.String()
 	if !strings.Contains(out, "warning: worktree has untracked files") {
 		t.Errorf("missing untracked warning: %q", out)
@@ -87,7 +87,7 @@ func TestWarningsBothChangesAndUntracked(t *testing.T) {
 		t.Fatalf("write untracked: %v", err)
 	}
 	var buf bytes.Buffer
-	Warnings(wt, sid, &buf)
+	Warnings(wt, "session/"+sid, &buf)
 	out := buf.String()
 	if !strings.Contains(out, "warning: worktree has uncommitted changes") {
 		t.Errorf("missing uncommitted warning: %q", out)
@@ -114,7 +114,7 @@ func TestWarningsUnpushedCommitsOnSessionBranch(t *testing.T) {
 	mustGit(t, wt, "commit", "-q", "-m", "follow-up")
 
 	var buf bytes.Buffer
-	Warnings(wt, sid, &buf)
+	Warnings(wt, "session/"+sid, &buf)
 	out := buf.String()
 	if !strings.Contains(out, "warning: worktree has unpushed commits on session/"+sid) {
 		t.Errorf("missing unpushed warning: %q", out)
@@ -135,7 +135,7 @@ func TestWarningsBranchWithoutUpstreamSilent(t *testing.T) {
 	mustGit(t, wt, "add", "follow.txt")
 	mustGit(t, wt, "commit", "-q", "-m", "follow")
 	var buf bytes.Buffer
-	Warnings(wt, sid, &buf)
+	Warnings(wt, "session/"+sid, &buf)
 	if strings.Contains(buf.String(), "unpushed commits") {
 		t.Errorf("unexpected unpushed warning for branch with no upstream: %q", buf.String())
 	}

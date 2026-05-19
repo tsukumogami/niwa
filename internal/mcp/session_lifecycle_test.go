@@ -257,7 +257,7 @@ func TestNewSessionLifecycleID_CollisionRetry(t *testing.T) {
 }
 
 func TestNewSessionLifecycleState(t *testing.T) {
-	s := NewSessionLifecycleState("ab12cd34", "repo", "do stuff", "", "/tmp/wt")
+	s := NewSessionLifecycleState("ab12cd34", "repo", "do stuff", "", "/tmp/wt", "")
 	if s.V != 1 {
 		t.Errorf("V = %d, want 1", s.V)
 	}
@@ -272,6 +272,55 @@ func TestNewSessionLifecycleState(t *testing.T) {
 	}
 	if s.CreatorPID == 0 {
 		t.Error("CreatorPID must be set")
+	}
+}
+
+// TestEffectiveBranchName_BackCompat covers reading a state file from
+// disk that was written before the BranchName field existed. The empty
+// branch_name field must fall back to the historic `session/<sid>`
+// default. A wrong implementation that returns an empty string passes
+// no-panic/no-error checks but breaks downstream `git branch -D <empty>`
+// callers — this test catches that regression.
+func TestEffectiveBranchName_BackCompat(t *testing.T) {
+	dir := t.TempDir()
+	// Synthesize a v1.0 JSON file (no branch_name key) by hand to ensure
+	// the deserializer leaves BranchName empty rather than reading any
+	// alternate key.
+	body := `{
+  "v": 1,
+  "session_id": "deadbeef",
+  "repo": "myrepo",
+  "purpose": "legacy",
+  "status": "active",
+  "creation_time": "2026-01-01T00:00:00Z",
+  "worktree_path": "/tmp/wt",
+  "creator_pid": 12345,
+  "creator_start_time": 9876543
+}`
+	path := filepath.Join(dir, "deadbeef.json")
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	state, err := ReadSessionLifecycleState(dir, "deadbeef")
+	if err != nil {
+		t.Fatalf("ReadSessionLifecycleState: %v", err)
+	}
+	if state.BranchName != "" {
+		t.Fatalf("BranchName on legacy file = %q, want empty", state.BranchName)
+	}
+	if got, want := state.EffectiveBranchName(), "session/deadbeef"; got != want {
+		t.Errorf("EffectiveBranchName() = %q, want %q", got, want)
+	}
+}
+
+// TestEffectiveBranchName_NonEmpty asserts that an explicitly recorded
+// branch name (the bootstrap path's `niwa-bootstrap/<sid>` shape) wins
+// over the historic fallback.
+func TestEffectiveBranchName_NonEmpty(t *testing.T) {
+	s := SessionLifecycleState{SessionID: "ab12cd34", BranchName: "niwa-bootstrap/ab12cd34"}
+	if got, want := s.EffectiveBranchName(), "niwa-bootstrap/ab12cd34"; got != want {
+		t.Errorf("EffectiveBranchName() = %q, want %q", got, want)
 	}
 }
 

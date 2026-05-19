@@ -14,6 +14,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/tsukumogami/niwa/internal/config"
 	"github.com/tsukumogami/niwa/internal/github"
+	"github.com/tsukumogami/niwa/internal/mcp"
 	"github.com/tsukumogami/niwa/internal/plugin"
 	sourcepkg "github.com/tsukumogami/niwa/internal/source"
 	"github.com/tsukumogami/niwa/internal/workspace"
@@ -68,12 +69,135 @@ var (
 // hitting the network. Production defaults to workspace.MaterializeFromSource.
 var materializeFromSource = workspace.MaterializeFromSource
 
-// runBootstrap is the entry point Issue 4 will populate with the real
-// scaffold+commit+push orchestrator. Issue 2 stubs it as an
-// init-step failure so the existing workspaceCreated defer reclaims
-// the directory per R7.
-var runBootstrap = func(ctx context.Context, root string, src sourcepkg.Source) error {
-	return errors.New("bootstrap step=create: not implemented yet")
+// runBootstrap is the package-level seam that runInit invokes when the
+// NoMarker classifier resolves to "proceed with bootstrap" (either
+// --bootstrap was set or the TTY user typed Y). Issue 4 wires this to
+// the real two-phase scaffold + RunBootstrap orchestrator. Tests
+// override the seam to inject deterministic outcomes (success block
+// fixtures, rollback fault injection) without standing up a working
+// Applier or GitHub client.
+//
+// The function is responsible for:
+//   - looking up source-repo visibility via GetRepo (R17 soft-fail);
+//   - writing the FIRST ScaffoldFromSource at <workspaceRoot>/.niwa/;
+//   - signaling the caller to disarm the workspaceCreated defer
+//     IMMEDIATELY after the scaffold returns nil (load-bearing for R7);
+//   - invoking workspace.RunBootstrap with the SAME ScaffoldOptions so
+//     the worktree's second scaffold copy is byte-identical;
+//   - emitting the R19 success block on stderr and the R20 landing path
+//     to NIWA_RESPONSE_FILE.
+//
+// The disarm signal is wired via a `disarm func()` closure parameter
+// rather than returning a bool: runInit's defer body needs the close-
+// over `workspaceCreated` to flip in place, which would be brittle to
+// re-derive from a return value across error paths.
+var runBootstrap = defaultRunBootstrap
+
+func defaultRunBootstrap(ctx context.Context, cmd *cobra.Command, workspaceRoot, workspaceName string, src sourcepkg.Source, source string, disarm func()) error {
+	// Step 1: visibility lookup via GetRepo. R17 soft-fail to Private=false
+	// on any error; emit the cause-classified note to stderr and keep going.
+	private := false
+	gh := github.NewAPIClient(resolveGitHubToken())
+	repo, repoErr := gh.GetRepo(ctx, src.Owner, src.Repo)
+	switch {
+	case repoErr != nil:
+		cause := github.ClassifyVisibilityCause(repoErr)
+		fmt.Fprintf(cmd.ErrOrStderr(),
+			"note: could not determine remote visibility (%s); defaulting to [groups.public]. Edit .niwa/workspace.toml to change.\n",
+			cause)
+	case repo != nil:
+		private = repo.Private
+	}
+
+	opts := workspace.ScaffoldOptions{
+		Name:           workspaceName,
+		Org:            src.Owner,
+		Repo:           src.Repo,
+		Private:        private,
+		IncludeGitkeep: true,
+	}
+
+	// Step 2: FIRST scaffold write — at the workspace root. This is the
+	// file Applier.Create (inside RunBootstrap) will read for the
+	// [channels.mesh] block that drives role-dir creation.
+	if scErr := workspace.ScaffoldFromSource(workspaceRoot, opts); scErr != nil {
+		return fmt.Errorf("bootstrap step=create: %w", scErr)
+	}
+
+	// Step 3: LOAD-BEARING — disarm the workspaceCreated defer NOW, before
+	// invoking RunBootstrap. Once the scaffold lives at
+	// <workspaceRoot>/.niwa/workspace.toml, create-step and session-step
+	// failures must leave the workspace dir intact per R7. Disarming after
+	// RunBootstrap returns would delete the user's workspace on a
+	// create-step failure.
+	disarm()
+
+	// Step 4: build the applier and wire seam closures for RunBootstrap.
+	applier := workspace.NewApplier(gh)
+	applier.Reporter = workspace.NewReporter(cmd.ErrOrStderr())
+	applier.ConfigSourceURL = source
+	if globalCfg, gErr := config.LoadGlobalConfig(); gErr == nil {
+		if gDir, dErr := config.GlobalConfigDir(); dErr == nil {
+			applier.GlobalConfigDir = gDir
+		}
+		_ = globalCfg
+	}
+
+	createWrapper := func(ctx context.Context, wsRoot, instName string) (string, error) {
+		configDir := filepath.Join(wsRoot, workspace.StateDir)
+		configPath := filepath.Join(configDir, workspace.WorkspaceConfigFile)
+		result, loadErr := config.Load(configPath)
+		if loadErr != nil {
+			return "", loadErr
+		}
+		return applier.Create(ctx, result.Config, configDir, wsRoot, instName)
+	}
+
+	createSessionWrapper := func(ctx context.Context, instanceRoot, repoName, purpose, branchPrefix string, gitInvoker workspace.GitInvoker) (string, string, string, error) {
+		return mcp.CreateSession(ctx, mcp.CreateSessionParams{
+			InstanceRoot:  instanceRoot,
+			Repo:          repoName,
+			Purpose:       purpose,
+			BranchPrefix:  branchPrefix,
+			GitInvoker:    gitInvoker,
+			DaemonStarter: workspace.EnsureDaemonRunning,
+		})
+	}
+
+	result, runErr := workspace.RunBootstrap(ctx, workspace.BootstrapParams{
+		WorkspaceRoot:  workspaceRoot,
+		WorkspaceName:  workspaceName,
+		InstanceName:   workspaceName,
+		Src:            src,
+		GitInvoker:     workspace.StdGitInvoker(),
+		Reporter:       applier.Reporter,
+		ScaffoldOpts:   opts,
+		ApplierCreate:  createWrapper,
+		CreateSession:  createSessionWrapper,
+		DestroySession: workspace.DefaultDestroySession,
+	})
+	if runErr != nil {
+		return runErr
+	}
+
+	// R19 success block (Appendix B byte-equality contract). Preceded
+	// and followed by exactly one blank stderr line.
+	absWs, _ := filepath.Abs(workspaceRoot)
+	errOut := cmd.ErrOrStderr()
+	fmt.Fprintln(errOut, "")
+	fmt.Fprintf(errOut, "Workspace bootstrapped at:    %s\n", absWs)
+	fmt.Fprintf(errOut, "Instance:                     %s\n", result.InstancePath)
+	fmt.Fprintf(errOut, "Worktree:                     %s\n", result.WorktreePath)
+	fmt.Fprintf(errOut, "Branch:                       %s\n", result.BranchName)
+	fmt.Fprintln(errOut, "")
+	fmt.Fprintln(errOut, "Next steps:")
+	fmt.Fprintln(errOut, "  1. Inspect the scaffold:        git show HEAD")
+	fmt.Fprintf(errOut, "  2. Push the bootstrap branch:   git push -u origin %s\n", result.BranchName)
+	fmt.Fprintln(errOut, "  3. Merge to the default branch, then run `niwa apply` for drift checking.")
+	fmt.Fprintln(errOut, "")
+
+	// R20: landing path is the worktree, not the workspace root.
+	return writeLandingPath(result.WorktreePath)
 }
 
 // handleNoMarkerR13 implements the PRD R13 Flag Interactions table
@@ -486,9 +610,9 @@ func runInit(cmd *cobra.Command, args []string) error {
 					workspaceCreated = false
 					return nil
 				}
-				// proceed == true → fall through to the bootstrap stub
-				// below as if --bootstrap had been set originally.
-				return runBootstrap(cmd.Context(), workspaceRoot, src)
+				// proceed == true → fall through to the bootstrap
+				// orchestrator below as if --bootstrap had been set originally.
+				return runBootstrap(cmd.Context(), cmd, workspaceRoot, name, src, source, func() { workspaceCreated = false })
 			}
 
 			// Non-NoMarker error → run the precedence classifier from
@@ -505,7 +629,7 @@ func runInit(cmd *cobra.Command, args []string) error {
 			// (nil, nil) from the classifier only fires on the
 			// NoMarker + --bootstrap arm — already handled above by the
 			// NoMarker fast path. Reaching here is unreachable.
-			return runBootstrap(cmd.Context(), workspaceRoot, src)
+			return runBootstrap(cmd.Context(), cmd, workspaceRoot, name, src, source, func() { workspaceCreated = false })
 		}
 		// PRD R10: emit the rank-2 deprecation notice for the team
 		// config when the source resolves to the legacy whole-repo
