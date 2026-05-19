@@ -22,3 +22,12 @@
   main use case I want is the empty repo." Rank-2 already works;
   others fail-loud with hints — not part of the bootstrap feature
   surface.
+
+- **Trigger model: require explicit `--bootstrap` flag (no silent
+  auto-fallback).** Why: GitHub 404 ambiguity (private/empty/missing
+  all look the same) plus typo-resolves-to-different-empty-repo risk
+  rule out silent fallback. The flag matches niwa's existing
+  `--feature` / `--no-feature` idiom (4 prior pairs) and the
+  "explicit user intent → loud, convention → silent" gradient. In a
+  TTY without the flag, niwa prompts; in non-TTY, niwa fails fast
+  with a remediation hint pointing at `--bootstrap`.

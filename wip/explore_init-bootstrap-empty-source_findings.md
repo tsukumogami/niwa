@@ -134,7 +134,10 @@ user to inspect and push.
 
 ### User Focus
 
-Pending — user has not yet responded to the convergence narrowing.
+User chose the `--bootstrap` flag model (T1 resolution): no silent
+auto-fallback. TTY without the flag prompts; non-TTY without the flag
+fails fast with a remediation hint. Matches niwa's existing
+`--feature` / `--no-feature` idiom and sidesteps the 404 ambiguity.
 
 ## Accumulated Understanding
 
@@ -173,3 +176,8 @@ The empty-source bootstrap feature is shaped by five concrete findings:
 
 The primary feature is well-scoped and ready for design. Open questions
 G1-G4 are design decisions, not exploration gaps.
+
+## Decision: Crystallize
+
+User chose "ready to decide" at the end of Round 1. Proceeding to
+Phase 4 (Crystallize).
