@@ -6,27 +6,39 @@
       "id": 1,
       "question": "Bootstrap UX model: where does the worktree live, when is the registry entry written, and is the scaffold pre-committed or left dirty for the user?",
       "complexity": "critical",
-      "status": "pending"
+      "status": "complete",
+      "chosen": "W1+R1+C1 (in-place / immediate registry / pre-commit)",
+      "confidence": "high",
+      "report_file": "wip/design_init-bootstrap-empty-source_decision_1_report.md"
     },
     {
       "id": 2,
       "question": "Does v1 distinguish 'remote exists but has zero commits' (currently 404 indistinguishable from missing/private) from 'wrong slug' via an extra repos/get API call, or punt with a hint?",
       "complexity": "standard",
-      "status": "pending"
+      "status": "complete",
+      "chosen": "C",
+      "confidence": "high",
+      "report_file": "wip/design_init-bootstrap-empty-source_decision_2_report.md"
     },
     {
       "id": 3,
       "question": "Scope of adjacent failure-mode classification in v1: refactor error taxonomy with typed sentinels (malformed/auth/404/etc.) for case-specific hints, ship bootstrap path only, or middle ground (string-match hints at the init seam, defer typed refactor)?",
       "complexity": "standard",
-      "status": "pending"
+      "status": "complete",
+      "chosen": "B-narrow",
+      "confidence": "high",
+      "report_file": "wip/design_init-bootstrap-empty-source_decision_3_report.md"
     },
     {
       "id": 4,
       "question": "Minimal-scaffold derivation details: active vs commented [[sources]]/[groups.<vis>], GitHub-API fallback for visibility, .gitkeep in .niwa/claude/, --from slug as audit comment?",
       "complexity": "standard",
-      "status": "pending"
+      "status": "complete",
+      "chosen": "S-D",
+      "confidence": "medium-high",
+      "report_file": "wip/design_init-bootstrap-empty-source_decision_4_report.md"
     }
   ],
   "cross_validation": "pending",
-  "round": 0
+  "round": 1
 }
