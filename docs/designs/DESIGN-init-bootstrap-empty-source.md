@@ -56,7 +56,7 @@ Planned
 
 A user creating a new project on GitHub today cannot bootstrap a
 niwa-managed workspace in a single step. They run
-`niwa init commuter --from dangazineu/commuter` against an empty (or
+`niwa init <name> --from <owner>/<repo>` against an empty (or
 auto-initialized but `.niwa/`-less) remote and see:
 
 ```
@@ -465,8 +465,8 @@ documenting them here so future readers see they were made deliberately.
 
 The four decisions compose into one coherent flow:
 
-1. User runs `niwa init commuter --from dangazineu/commuter --bootstrap`.
-2. niwa resolves the clone URL and shallow-clones into `<cwd>/commuter/`
+1. User runs `niwa init <name> --from <owner>/<repo> --bootstrap`.
+2. niwa resolves the clone URL and shallow-clones into `<cwd>/<name>/`
    directly (not via tarball — bootstrap needs a working tree).
 3. Probe via `config.Discover` (in-memory or via the existing
    `MaterializeFromSource` plumbing) confirms no `.niwa/workspace.toml`
@@ -482,7 +482,7 @@ The four decisions compose into one coherent flow:
    state is saved (Decision 1's immediate registry).
 8. niwa prints a prominent stderr block with the worktree path, branch
    name, and next steps.
-9. The shell wrapper drops the user inside `<cwd>/commuter/` on branch
+9. The shell wrapper drops the user inside `<cwd>/<name>/` on branch
    `niwa-bootstrap` with a clean working tree. The user can run
    `niwa apply` locally before pushing, or `git push -u origin niwa-bootstrap`
    and merge first — both work.
@@ -634,12 +634,12 @@ if materializeErr != nil {
 ### Data Flow
 
 ```
-niwa init commuter --from dangazineu/commuter --bootstrap
+niwa init <name> --from <owner>/<repo> --bootstrap
   │
   ▼
 runInit
   ├─ resolveInitMode → modeClone
-  ├─ os.Mkdir(<cwd>/commuter)                    [today: init.go:217]
+  ├─ os.Mkdir(<cwd>/<name>)                      [today: init.go:217]
   ├─ workspace.MaterializeFromSource              [today: init.go:264]
   │     └─ returns *config.NoMarkerError           [config/discover.go:201]
   │
@@ -674,7 +674,7 @@ workspace.RunBootstrap(ctx, workspaceRoot, workspaceName, src, ...)
   ├─ printSuccess(...) + bootstrap WARNING block on stderr
   └─ writeLandingPath(workspaceRoot)              [today: init.go:390]
 
-Shell wrapper drops user inside /home/user/workspaces/commuter
+Shell wrapper drops user inside /home/user/workspaces/<name>
 on branch niwa-bootstrap with a clean working tree.
 ```
 
