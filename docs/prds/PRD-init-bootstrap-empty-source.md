@@ -1,5 +1,5 @@
 ---
-status: Accepted
+status: Done
 problem: |
   A user adopting a freshly-created GitHub repository as a niwa-managed
   workspace today must run three separate commands (`niwa init`, `niwa
@@ -21,7 +21,7 @@ goals: |
 
 ## Status
 
-Accepted
+Done
 
 ## Glossary
 
