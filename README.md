@@ -119,6 +119,7 @@ repos, regenerates content files, and cleans up repos removed from the config.
 | `niwa init <name> --from <org/repo>` | Create `./<name>/` and clone a shared workspace config from GitHub into it; `<name>` overrides the cloned `[workspace] name` everywhere niwa surfaces it |
 | `niwa init <name> --from <org/repo> --overlay <repo>` | Use `<repo>` as the overlay instead of auto-discovering one (`--overlay` and `--no-overlay` are mutually exclusive) |
 | `niwa init <name> --from <org/repo> --no-overlay` | Skip overlay discovery entirely |
+| `niwa init <name> --from <org/repo> --bootstrap` | Scaffold a minimal `.niwa/workspace.toml` when the source repo has no config yet; stage it on a `niwa-bootstrap/<sid>` branch. See `docs/guides/init-bootstrap.md` |
 
 When `<name>` is already registered to a different directory, `niwa init` refuses by default. Pass `--rebind` to retarget the registry entry to the new directory; the previous directory at the old root is left intact.
 | `niwa create [--name <name>]` | Create a new workspace instance; on a TTY, shows a live status line ("cloning <repo>...") while each repo is processed |

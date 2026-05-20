@@ -166,7 +166,7 @@ func AttachRun(ctx context.Context, opts Options) error {
 		if err := ensureFn(state.WorktreePath, nil); err != nil {
 			fmt.Fprintf(stderr, "warning: respawning per-worktree daemon: %v\n", err)
 		}
-		Warnings(state.WorktreePath, opts.SessionID, stderr)
+		Warnings(state.WorktreePath, state.EffectiveBranchName(), stderr)
 		fmt.Fprintf(stderr, "session: detached %s\n", opts.SessionID)
 	}()
 

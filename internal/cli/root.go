@@ -8,6 +8,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/tsukumogami/niwa/internal/buildinfo"
 	"github.com/tsukumogami/niwa/internal/cli/sessionattach"
+	"github.com/tsukumogami/niwa/internal/workspace"
 )
 
 var (
@@ -77,6 +78,19 @@ func Execute() {
 				fmt.Fprintln(os.Stderr, ece.Msg)
 			}
 			os.Exit(ece.Code)
+		}
+		// PRD R23: *workspace.InitConflictError carries an ExitCode
+		// field populated by the bootstrap classifier and the R25/R9/R13
+		// dispatch paths. Print the error's rendered text (the display
+		// wrapper produces the legacy "Detail\n  Suggestion" shape) and
+		// exit with the typed code. ExitCode == 0 means the field was
+		// not populated by the caller; fall back to the default exit 1
+		// so older code paths constructing InitConflictError without an
+		// explicit code keep their historical behavior.
+		var ice *workspace.InitConflictError
+		if errors.As(err, &ice) && ice.ExitCode > 0 {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(ice.ExitCode)
 		}
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)

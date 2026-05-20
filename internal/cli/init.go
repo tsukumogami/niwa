@@ -1,8 +1,11 @@
 package cli
 
 import (
+	"bufio"
+	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -11,6 +14,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/tsukumogami/niwa/internal/config"
 	"github.com/tsukumogami/niwa/internal/github"
+	"github.com/tsukumogami/niwa/internal/mcp"
 	"github.com/tsukumogami/niwa/internal/plugin"
 	sourcepkg "github.com/tsukumogami/niwa/internal/source"
 	"github.com/tsukumogami/niwa/internal/workspace"
@@ -44,6 +48,8 @@ func init() {
 	initCmd.Flags().BoolVar(&initNoOverlay, "no-overlay", false, "disable overlay discovery and association for this workspace")
 	initCmd.Flags().BoolVar(&initRebind, "rebind", false, "rebind a registered workspace name to this directory (use only when intentionally moving a workspace)")
 	initCmd.Flags().BoolVar(&initNoInstallPlugins, "no-install-plugins", false, "skip auto-installing the embedded niwa Claude Code plugin (otherwise installed once when a rank-2 source is detected)")
+	initCmd.Flags().BoolVar(&initBootstrap, "bootstrap", false, "when the source repo has no .niwa/workspace.toml, scaffold a minimal config and stage it on a niwa-bootstrap branch")
+	initCmd.Flags().BoolVar(&initNoBootstrap, "no-bootstrap", false, "explicitly decline bootstrap; equivalent to answering N at the R13 prompt (mutually exclusive with --bootstrap)")
 	initCmd.ValidArgsFunction = completeWorkspaceNames
 }
 
@@ -54,7 +60,256 @@ var (
 	initNoOverlay        bool
 	initRebind           bool
 	initNoInstallPlugins bool
+	initBootstrap        bool
+	initNoBootstrap      bool
 )
+
+// materializeFromSource is a package-level seam so unit tests can
+// inject a fake materialize result (typed errors, custom rank) without
+// hitting the network. Production defaults to workspace.MaterializeFromSource.
+var materializeFromSource = workspace.MaterializeFromSource
+
+// runBootstrap is the package-level seam that runInit invokes when the
+// NoMarker classifier resolves to "proceed with bootstrap" (either
+// --bootstrap was set or the TTY user typed Y). Issue 4 wires this to
+// the real two-phase scaffold + RunBootstrap orchestrator. Tests
+// override the seam to inject deterministic outcomes (success block
+// fixtures, rollback fault injection) without standing up a working
+// Applier or GitHub client.
+//
+// The function is responsible for:
+//   - looking up source-repo visibility via GetRepo (R17 soft-fail);
+//   - writing the FIRST ScaffoldFromSource at <workspaceRoot>/.niwa/;
+//   - signaling the caller to disarm the workspaceCreated defer
+//     IMMEDIATELY after the scaffold returns nil (load-bearing for R7);
+//   - invoking workspace.RunBootstrap with the SAME ScaffoldOptions so
+//     the worktree's second scaffold copy is byte-identical;
+//   - emitting the R19 success block on stderr and the R20 landing path
+//     to NIWA_RESPONSE_FILE.
+//
+// The disarm signal is wired via a `disarm func()` closure parameter
+// rather than returning a bool: runInit's defer body needs the close-
+// over `workspaceCreated` to flip in place, which would be brittle to
+// re-derive from a return value across error paths.
+var runBootstrap = defaultRunBootstrap
+
+func defaultRunBootstrap(ctx context.Context, cmd *cobra.Command, workspaceRoot, workspaceName string, src sourcepkg.Source, source string, disarm func()) error {
+	// Step 1: visibility lookup via GetRepo. R17 soft-fail to Private=false
+	// on any error; emit the cause-classified note to stderr and keep going.
+	private := false
+	gh := github.NewAPIClient(resolveGitHubToken())
+	repo, repoErr := gh.GetRepo(ctx, src.Owner, src.Repo)
+	switch {
+	case repoErr != nil:
+		cause := github.ClassifyVisibilityCause(repoErr)
+		fmt.Fprintf(cmd.ErrOrStderr(),
+			"note: could not determine remote visibility (%s); defaulting to [groups.public]. Edit .niwa/workspace.toml to change.\n",
+			cause)
+	case repo != nil:
+		private = repo.Private
+	}
+
+	opts := workspace.ScaffoldOptions{
+		Name:           workspaceName,
+		Org:            src.Owner,
+		Repo:           src.Repo,
+		Private:        private,
+		IncludeGitkeep: true,
+	}
+
+	// Step 2: FIRST scaffold write — at the workspace root. This is the
+	// file Applier.Create (inside RunBootstrap) will read for the
+	// [channels.mesh] block that drives role-dir creation.
+	if scErr := workspace.ScaffoldFromSource(workspaceRoot, opts); scErr != nil {
+		return fmt.Errorf("bootstrap step=create: %w", scErr)
+	}
+
+	// Step 3: LOAD-BEARING — disarm the workspaceCreated defer NOW, before
+	// invoking RunBootstrap. Once the scaffold lives at
+	// <workspaceRoot>/.niwa/workspace.toml, create-step and session-step
+	// failures must leave the workspace dir intact per R7. Disarming after
+	// RunBootstrap returns would delete the user's workspace on a
+	// create-step failure.
+	disarm()
+
+	// Step 4: build the applier and wire seam closures for RunBootstrap.
+	applier := workspace.NewApplier(gh)
+	applier.Reporter = workspace.NewReporter(cmd.ErrOrStderr())
+	applier.ConfigSourceURL = source
+	if globalCfg, gErr := config.LoadGlobalConfig(); gErr == nil {
+		if gDir, dErr := config.GlobalConfigDir(); dErr == nil {
+			applier.GlobalConfigDir = gDir
+		}
+		_ = globalCfg
+	}
+
+	createWrapper := func(ctx context.Context, wsRoot, instName string) (string, error) {
+		configDir := filepath.Join(wsRoot, workspace.StateDir)
+		configPath := filepath.Join(configDir, workspace.WorkspaceConfigFile)
+		result, loadErr := config.Load(configPath)
+		if loadErr != nil {
+			return "", loadErr
+		}
+		return applier.Create(ctx, result.Config, configDir, wsRoot, instName)
+	}
+
+	createSessionWrapper := func(ctx context.Context, instanceRoot, repoName, purpose, branchPrefix string, gitInvoker workspace.GitInvoker) (string, string, string, error) {
+		return mcp.CreateSession(ctx, mcp.CreateSessionParams{
+			InstanceRoot:  instanceRoot,
+			Repo:          repoName,
+			Purpose:       purpose,
+			BranchPrefix:  branchPrefix,
+			GitInvoker:    gitInvoker,
+			DaemonStarter: workspace.EnsureDaemonRunning,
+		})
+	}
+
+	result, runErr := workspace.RunBootstrap(ctx, workspace.BootstrapParams{
+		WorkspaceRoot:  workspaceRoot,
+		WorkspaceName:  workspaceName,
+		InstanceName:   workspaceName,
+		Src:            src,
+		GitInvoker:     workspace.StdGitInvoker(),
+		Reporter:       applier.Reporter,
+		ScaffoldOpts:   opts,
+		ApplierCreate:  createWrapper,
+		CreateSession:  createSessionWrapper,
+		DestroySession: workspace.DefaultDestroySession,
+	})
+	if runErr != nil {
+		return runErr
+	}
+
+	// R19 success block (Appendix B byte-equality contract). Preceded
+	// and followed by exactly one blank stderr line.
+	absWs, _ := filepath.Abs(workspaceRoot)
+	errOut := cmd.ErrOrStderr()
+	fmt.Fprintln(errOut, "")
+	fmt.Fprintf(errOut, "Workspace bootstrapped at:    %s\n", absWs)
+	fmt.Fprintf(errOut, "Instance:                     %s\n", result.InstancePath)
+	fmt.Fprintf(errOut, "Worktree:                     %s\n", result.WorktreePath)
+	fmt.Fprintf(errOut, "Branch:                       %s\n", result.BranchName)
+	fmt.Fprintln(errOut, "")
+	fmt.Fprintln(errOut, "Next steps:")
+	fmt.Fprintln(errOut, "  1. Inspect the scaffold:        git show HEAD")
+	fmt.Fprintf(errOut, "  2. Push the bootstrap branch:   git push -u origin %s\n", result.BranchName)
+	fmt.Fprintln(errOut, "  3. Merge to the default branch, then run `niwa apply` for drift checking.")
+	fmt.Fprintln(errOut, "")
+
+	// R20: landing path is the worktree, not the workspace root.
+	return writeLandingPath(result.WorktreePath)
+}
+
+// handleNoMarkerR13 implements the PRD R13 Flag Interactions table
+// for the *config.NoMarkerError arm. It runs AFTER R25 mutual exclusion
+// (already validated in runInit) and AFTER R9 host check (gated on
+// initBootstrap, already validated for bootstrap callers). The
+// effective flag state is whatever the caller passed today —
+// initBootstrap / initNoBootstrap are read directly.
+//
+// Returns (proceed, err):
+//   - (true, nil): caller should dispatch to bootstrap (either because
+//     --bootstrap was set or because the TTY user typed Y).
+//   - (false, nil): TTY user typed N (clean decline, exit 0).
+//   - (false, err): fail-fast paths — non-TTY no-flag, or --no-bootstrap.
+//
+// matErr carries the original materialize error so the NoMarker text
+// in the fail-fast strings comes from the typed error's Error() —
+// the same text the classifier helper produces.
+func handleNoMarkerR13(cmd *cobra.Command, matErr error, noMarker *config.NoMarkerError) (bool, error) {
+	// Branch 1: --bootstrap set → proceed (R13 row 1).
+	if initBootstrap {
+		return true, nil
+	}
+	// Branch 2: --no-bootstrap set → fail-fast with NoMarker text +
+	// decline reason. Exit 4 per R23. Applies to both TTY and non-TTY
+	// (rows 2 and 5).
+	if initNoBootstrap {
+		return false, displayConflict(&workspace.InitConflictError{
+			Err:        matErr,
+			Detail:     noMarker.Error(),
+			Suggestion: "--no-bootstrap was set; rerun without --no-bootstrap to opt into the bootstrap scaffold.",
+			ExitCode:   4,
+		})
+	}
+
+	// Branch 3: neither flag set.
+	if !IsStdinTTY() {
+		// Row 6: non-TTY no-flag → fail-fast, exact PRD R13 string.
+		return false, displayConflict(&workspace.InitConflictError{
+			Err:      matErr,
+			Detail:   "remote has no .niwa/workspace.toml and stdin is not a terminal; re-run with --bootstrap to scaffold",
+			ExitCode: 4,
+		})
+	}
+
+	// Row 3: TTY no-flag → R13 prompt with re-prompt on unknown input.
+	return promptBootstrap(cmd.InOrStdin(), cmd.ErrOrStderr())
+}
+
+// promptBootstrap implements the R13 TTY prompt loop. Returns
+// (true, nil) on Y/y/bare-Enter, (false, nil) on N/n. Any other input
+// re-prompts on the same writer. EOF mid-prompt is surfaced as
+// (false, err) so callers can distinguish a closed stdin from a clean
+// "N" decline.
+//
+// Factored out so unit tests can hit the prompt loop without touching
+// the rest of runInit. The TTY-vs-non-TTY decision belongs to the
+// caller — this helper assumes the caller has already gated on
+// IsStdinTTY.
+func promptBootstrap(in io.Reader, out io.Writer) (bool, error) {
+	const prompt = "Remote has no .niwa/workspace.toml. Scaffold a minimal config and stage it on a niwa-bootstrap branch? [Y/n] "
+	reader := bufio.NewReader(in)
+	for {
+		if _, err := fmt.Fprint(out, prompt); err != nil {
+			return false, fmt.Errorf("writing prompt: %w", err)
+		}
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			// EOF on a non-empty buffered line counts as a valid
+			// final answer; only true EOF on empty input propagates.
+			if err == io.EOF && line != "" {
+				// Fall through to the switch below.
+			} else {
+				return false, fmt.Errorf("reading bootstrap confirmation: %w", err)
+			}
+		}
+		switch strings.TrimSpace(line) {
+		case "", "y", "Y":
+			return true, nil
+		case "n", "N":
+			return false, nil
+		default:
+			// Unknown input: re-prompt. Continue the loop.
+		}
+	}
+}
+
+// initConflictDisplay wraps a *workspace.InitConflictError so the
+// rendered error text matches the historical "Detail\n  Suggestion"
+// shape that runInit's existing display layer emits, while preserving
+// the typed shape via Unwrap so cli.Execute() can recover ExitCode
+// through errors.As. The R23 exit-code mapping reads the inner
+// *InitConflictError's ExitCode field after type-asserting through
+// this wrapper.
+type initConflictDisplay struct {
+	inner *workspace.InitConflictError
+}
+
+func (e *initConflictDisplay) Error() string {
+	if e.inner.Suggestion == "" {
+		return e.inner.Detail
+	}
+	return fmt.Sprintf("%s\n  %s", e.inner.Detail, e.inner.Suggestion)
+}
+
+func (e *initConflictDisplay) Unwrap() error { return e.inner }
+
+// displayConflict wraps c so it prints with the legacy format and the
+// ExitCode survives the chain via errors.As.
+func displayConflict(c *workspace.InitConflictError) error {
+	return &initConflictDisplay{inner: c}
+}
 
 var initCmd = &cobra.Command{
 	Use:   "init [name]",
@@ -136,6 +391,20 @@ func runInit(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("--overlay and --no-overlay are mutually exclusive")
 	}
 
+	// PRD R25: --bootstrap and --no-bootstrap are mutually exclusive
+	// and run UPSTREAM of every other init validation. Exit code 2 per
+	// PRD R23. The InitConflictError carries the ExitCode field so
+	// cli.Execute() maps it to os.Exit(2); the display wrapper prints
+	// only the exact PRD-mandated string (no "sentinel:" prefix, no
+	// trailing suggestion line).
+	if initBootstrap && initNoBootstrap {
+		return displayConflict(&workspace.InitConflictError{
+			Err:      errors.New("--bootstrap and --no-bootstrap are mutually exclusive"),
+			Detail:   "--bootstrap and --no-bootstrap are mutually exclusive",
+			ExitCode: 2,
+		})
+	}
+
 	cwd, err := os.Getwd()
 	if err != nil {
 		return fmt.Errorf("getting working directory: %w", err)
@@ -161,6 +430,53 @@ func runInit(cmd *cobra.Command, args []string) error {
 	}
 
 	mode, name, source := resolveInitMode(args, initFrom, globalCfg)
+
+	// PRD R2 + R9: when --bootstrap is set with a clone source, parse
+	// the source up front so we can (a) derive the workspace name from
+	// the repo basename when no positional was supplied (R2), and (b)
+	// run the GitHub host check BEFORE any git invocation (R9 + R21).
+	// This step is gated on initBootstrap so the non-bootstrap clone
+	// path keeps its existing semantics — slug validation, ResolveCloneURL,
+	// MaterializeFromSource — unchanged.
+	//
+	// The parsed source is reused inside the modeClone case below to
+	// avoid a second parse call; we stash it in bootstrapSrc when set.
+	var bootstrapSrc sourcepkg.Source
+	var bootstrapSrcParsed bool
+	if initBootstrap && mode == modeClone && source != "" {
+		// Re-run slug-shape validation for non-URL inputs so a malformed
+		// --from slug surfaces the canonical parser error rather than
+		// "unsupported host" from IsGitHub on a garbage Host.
+		if !looksLikeURL(source) {
+			if _, parseErr := sourcepkg.Parse(source); parseErr != nil {
+				return fmt.Errorf("parsing --from slug: %w", parseErr)
+			}
+		}
+		src, parseErr := parseInitSource(source)
+		if parseErr != nil {
+			return fmt.Errorf("parsing --from: %w", parseErr)
+		}
+		bootstrapSrc = src
+		bootstrapSrcParsed = true
+
+		// R9 / R21: refuse non-GitHub hosts BEFORE any git invocation.
+		// Canonical slug form leaves src.Host == ""; IsGitHub treats
+		// that as GitHub per source.go:148. Exit code 3 per R23.
+		if !src.IsGitHub() {
+			return displayConflict(&workspace.InitConflictError{
+				Err:      errors.New("non-github host"),
+				Detail:   fmt.Sprintf("bootstrap supports only GitHub sources in v1; got host=%s", src.Host),
+				ExitCode: 3,
+			})
+		}
+
+		// R2: no positional arg + --bootstrap → derive name from src.Repo.
+		// Non-bootstrap no-name behavior (line 156-160 in resolveInitMode)
+		// is intentionally unchanged.
+		if name == "" {
+			name = src.Repo
+		}
+	}
 
 	workspaceRoot := cwd
 	if name != "" {
@@ -240,15 +556,23 @@ func runInit(cmd *cobra.Command, args []string) error {
 		// Validate the slug shape early via the canonical parser
 		// (PRD R3 strict parsing). Skip when source looks like a full
 		// URL or SSH address — those go through parseInitSource below.
-		if !looksLikeURL(source) {
+		// Skipped entirely when the bootstrap path already pre-parsed
+		// the source (R9 / R2) so we don't double-validate.
+		if !bootstrapSrcParsed && !looksLikeURL(source) {
 			if _, parseErr := sourcepkg.Parse(source); parseErr != nil {
 				return fmt.Errorf("parsing --from slug: %w", parseErr)
 			}
 		}
 
-		src, err := parseInitSource(source)
-		if err != nil {
-			return fmt.Errorf("parsing --from: %w", err)
+		var src sourcepkg.Source
+		if bootstrapSrcParsed {
+			src = bootstrapSrc
+		} else {
+			parsed, parseErr := parseInitSource(source)
+			if parseErr != nil {
+				return fmt.Errorf("parsing --from: %w", parseErr)
+			}
+			src = parsed
 		}
 
 		cloneURL, err := workspace.ResolveCloneURL(source, globalCfg.CloneProtocol())
@@ -261,9 +585,51 @@ func runInit(cmd *cobra.Command, args []string) error {
 		niwaDir := filepath.Join(workspaceRoot, workspace.StateDir)
 		fetcher := github.NewAPIClient(resolveGitHubToken())
 		reporter := workspace.NewReporter(os.Stderr)
-		teamConfigRank, err := workspace.MaterializeFromSource(cmd.Context(), src, source, niwaDir, config.TeamConfigMarkerSet(), fetcher, reporter)
-		if err != nil {
-			return fmt.Errorf("materializing config repo: %w", err)
+		teamConfigRank, materializeErr := materializeFromSource(cmd.Context(), src, source, niwaDir, config.TeamConfigMarkerSet(), fetcher, reporter)
+		if materializeErr != nil {
+			// PRD R13 NoMarker dispatch runs in the cli layer, not in
+			// the classifier — the prompt + TTY-detection branches
+			// can mutate the effective "should we bootstrap?" decision
+			// before the classifier maps the error into an exit code.
+			//
+			// Walk the chain once for *config.NoMarkerError so we can
+			// honor the R13 Flag Interactions table before calling
+			// classifyMaterializeError.
+			var noMarker *config.NoMarkerError
+			if errors.As(materializeErr, &noMarker) {
+				proceed, dispatchErr := handleNoMarkerR13(cmd, materializeErr, noMarker)
+				if dispatchErr != nil {
+					return dispatchErr
+				}
+				if !proceed {
+					// TTY-decline: clean exit 0. Disarm the workspace-dir
+					// cleanup defer so the user keeps the empty dir they
+					// can re-init in. R7 leaves cleanup off the table for
+					// the "clean decline" path; this matches the R23
+					// "exit 0" semantics for typed N.
+					workspaceCreated = false
+					return nil
+				}
+				// proceed == true → fall through to the bootstrap
+				// orchestrator below as if --bootstrap had been set originally.
+				return runBootstrap(cmd.Context(), cmd, workspaceRoot, name, src, source, func() { workspaceCreated = false })
+			}
+
+			// Non-NoMarker error → run the precedence classifier from
+			// Issue 1. classifyMaterializeError returns either a typed
+			// conflict (rendered via displayConflict) or the original
+			// error for the existing bare wrap to keep semantic parity.
+			conflict, rest := classifyMaterializeError(materializeErr, initBootstrap)
+			if conflict != nil {
+				return displayConflict(conflict)
+			}
+			if rest != nil {
+				return fmt.Errorf("materializing config repo: %w", rest)
+			}
+			// (nil, nil) from the classifier only fires on the
+			// NoMarker + --bootstrap arm — already handled above by the
+			// NoMarker fast path. Reaching here is unreachable.
+			return runBootstrap(cmd.Context(), cmd, workspaceRoot, name, src, source, func() { workspaceCreated = false })
 		}
 		// PRD R10: emit the rank-2 deprecation notice for the team
 		// config when the source resolves to the legacy whole-repo

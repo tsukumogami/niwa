@@ -500,7 +500,16 @@ func materializeFromGitHub(ctx context.Context, src source.Source, sourceURL, st
 		return "", nil, "", 0, fmt.Errorf("EnsureConfigSnapshot: fetch %s returned 304 unexpectedly", sourceURL)
 	}
 	if status != 200 {
-		return "", nil, "", 0, fmt.Errorf("EnsureConfigSnapshot: fetch %s returned %d", sourceURL, status)
+		// Construct a typed *github.StatusError so callers can reach the
+		// status code via errors.As. Wrap with %w through the same
+		// "EnsureConfigSnapshot: fetch <url>" framing the err-bearing
+		// branch (line 490) already uses.
+		return "", nil, "", 0, fmt.Errorf("EnsureConfigSnapshot: fetch %s: %w", sourceURL,
+			&github.StatusError{
+				StatusCode: status,
+				URL:        sourceURL,
+				Message:    fmt.Sprintf("github: FetchTarball returned %d", status),
+			})
 	}
 
 	var (

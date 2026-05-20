@@ -24,13 +24,15 @@ import (
 type tarballFakeServer struct {
 	srv *httptest.Server
 
-	mu       sync.Mutex
-	tarballs map[string][]byte    // key: owner/repo/ref → tarball bytes
-	commits  map[string]string    // key: owner/repo/ref → commit oid
-	etags    map[string]string    // key: owner/repo/ref → ETag
-	statuses map[string]int       // key: owner/repo/ref → status code override
-	renames  map[string]string    // key: owner/repo → "neworg/newrepo" target
-	requests []tarballFakeRequest // request log
+	mu          sync.Mutex
+	tarballs    map[string][]byte    // key: owner/repo/ref → tarball bytes
+	commits     map[string]string    // key: owner/repo/ref → commit oid
+	etags       map[string]string    // key: owner/repo/ref → ETag
+	statuses    map[string]int       // key: owner/repo/ref → status code override
+	renames     map[string]string    // key: owner/repo → "neworg/newrepo" target
+	repoMeta    map[string]string    // key: owner/repo → JSON body for GET /repos/{owner}/{repo}
+	metaStatus  map[string]int       // key: owner/repo → status code override for the bare repo metadata endpoint
+	requests    []tarballFakeRequest // request log
 }
 
 type tarballFakeRequest struct {
@@ -41,14 +43,36 @@ type tarballFakeRequest struct {
 
 func newTarballFakeServer() *tarballFakeServer {
 	s := &tarballFakeServer{
-		tarballs: map[string][]byte{},
-		commits:  map[string]string{},
-		etags:    map[string]string{},
-		statuses: map[string]int{},
-		renames:  map[string]string{},
+		tarballs:   map[string][]byte{},
+		commits:    map[string]string{},
+		etags:      map[string]string{},
+		statuses:   map[string]int{},
+		renames:    map[string]string{},
+		repoMeta:   map[string]string{},
+		metaStatus: map[string]int{},
 	}
 	s.srv = httptest.NewServer(http.HandlerFunc(s.handle))
 	return s
+}
+
+// SetRepoMetadata configures the JSON body returned for GET /repos/{owner}/{repo}
+// (no extra path segments). This is the endpoint GetRepo consumes for the
+// R17 visibility lookup. Pass a JSON object string like `{"private": true}`.
+func (s *tarballFakeServer) SetRepoMetadata(owner, repo, jsonBody string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.repoMeta[owner+"/"+repo] = jsonBody
+}
+
+// SetRepoMetadataStatus forces a status-code override for the bare
+// /repos/{owner}/{repo} metadata endpoint. Distinct from SetStatus, which
+// is keyed by (owner, repo, ref) and applies to commits/tarball paths.
+// Used by visibility-lookup soft-fail scenarios that need 401/403/404/500
+// on the metadata endpoint while leaving the tarball fetch path intact.
+func (s *tarballFakeServer) SetRepoMetadataStatus(owner, repo string, status int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.metaStatus[owner+"/"+repo] = status
 }
 
 // URL returns the base URL the niwa client should treat as the API
@@ -141,9 +165,36 @@ func (s *tarballFakeServer) handle(w http.ResponseWriter, r *http.Request) {
 	})
 	s.mu.Unlock()
 
-	// Path shape: /repos/{owner}/{repo}/{op}/{ref}
+	// Path shape:
+	//   /repos/{owner}/{repo}             → bare metadata (GetRepo)
+	//   /repos/{owner}/{repo}/{op}/{ref}  → tarball / commits
 	segments := strings.Split(strings.TrimPrefix(r.URL.Path, "/"), "/")
-	if len(segments) < 5 || segments[0] != "repos" {
+	if len(segments) < 3 || segments[0] != "repos" {
+		http.NotFound(w, r)
+		return
+	}
+
+	// Bare-metadata path (GetRepo).
+	if len(segments) == 3 {
+		owner, repo := segments[1], segments[2]
+		s.mu.Lock()
+		if status, ok := s.metaStatus[owner+"/"+repo]; ok {
+			s.mu.Unlock()
+			w.WriteHeader(status)
+			return
+		}
+		body, ok := s.repoMeta[owner+"/"+repo]
+		s.mu.Unlock()
+		if !ok {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(body))
+		return
+	}
+
+	if len(segments) < 5 {
 		http.NotFound(w, r)
 		return
 	}

@@ -373,8 +373,8 @@ func TestHandleListSessions_DaemonSubObject(t *testing.T) {
 	// Persist two SessionLifecycleState rows. SessionID must be 8 lowercase
 	// hex characters per the lifecycle validator.
 	for _, st := range []SessionLifecycleState{
-		NewSessionLifecycleState("aabbccdd", "myrepo", "live test", "", liveWT),
-		NewSessionLifecycleState("11223344", "myrepo", "dead test", "", deadWT),
+		NewSessionLifecycleState("aabbccdd", "myrepo", "live test", "", liveWT, ""),
+		NewSessionLifecycleState("11223344", "myrepo", "dead test", "", deadWT, ""),
 	} {
 		if err := WriteSessionLifecycleState(sessionsDir, st); err != nil {
 			t.Fatal(err)

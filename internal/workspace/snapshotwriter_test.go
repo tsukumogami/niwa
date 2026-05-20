@@ -258,7 +258,7 @@ func TestRefreshSnapshot_RetrySucceedsOnAttempt2(t *testing.T) {
 	// First HeadCommit returns transient 503; second succeeds with the
 	// same oid (no drift).
 	fetcher := &fakeFetcher{
-		headErrs:     []error{errors.New("github: HeadCommit returned 503"), nil},
+		headErrs:     []error{&github.StatusError{StatusCode: 503, Message: "github: HeadCommit returned 503"}, nil},
 		headStatuses: []int{503, 200},
 		headOIDs:     []string{"", "abc"},
 	}
@@ -299,7 +299,7 @@ func TestRefreshSnapshot_AllRetriesFailEmitOneWarning(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	headErr := errors.New("github: HeadCommit returned 503")
+	headErr := &github.StatusError{StatusCode: 503, Message: "github: HeadCommit returned 503"}
 	fetcher := &fakeFetcher{
 		headErrs:     []error{headErr, headErr, headErr, headErr},
 		headStatuses: []int{503, 503, 503, 503},
@@ -340,7 +340,7 @@ func TestRefreshSnapshot_PermanentErrorBypassesRetry(t *testing.T) {
 	})
 
 	fetcher := &fakeFetcher{
-		headErrs:     []error{errors.New("github: HeadCommit returned 401")},
+		headErrs:     []error{&github.StatusError{StatusCode: 401, Message: "github: HeadCommit returned 401"}},
 		headStatuses: []int{401},
 	}
 
@@ -373,7 +373,7 @@ func TestRefreshSnapshot_TransientStatusCodes(t *testing.T) {
 			})
 
 			fetcher := &fakeFetcher{
-				headErrs:     []error{fmt.Errorf("github: HeadCommit returned %d", status), nil},
+				headErrs:     []error{&github.StatusError{StatusCode: status, Message: fmt.Sprintf("github: HeadCommit returned %d", status)}, nil},
 				headStatuses: []int{status, 200},
 				headOIDs:     []string{"", "abc"},
 			}
