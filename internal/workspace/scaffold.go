@@ -139,6 +139,9 @@ repos = ["<bootstrap-repo>"]
 
 [groups.<vis-key>]
 visibility = "<vis-value>"
+# Bind the bootstrap repo to this group by name: explicit-repos sources carry
+# no live visibility, so name membership is what places the repo in a group.
+repos = ["<bootstrap-repo>"]
 
 # Bootstrap enabled mesh channels. Remove this block (and the [channels.mesh] line below) to disable.
 [channels.mesh]
