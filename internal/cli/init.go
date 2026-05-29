@@ -93,6 +93,42 @@ var materializeFromSource = workspace.MaterializeFromSource
 // re-derive from a return value across error paths.
 var runBootstrap = defaultRunBootstrap
 
+// runBootstrapOrchestrator is the test seam for workspace.RunBootstrap.
+// Tests stub it to drive defaultRunBootstrap end to end (e.g. asserting
+// the post-orchestrator registry write) without standing up a real
+// applier, git invoker, or session worktree.
+var runBootstrapOrchestrator = workspace.RunBootstrap
+
+// registerInGlobalRegistry writes (or refreshes) the global registry entry
+// for the workspace at workspaceRoot so it is discoverable via `niwa go`
+// and shell tab completion. The non-bootstrap clone path in runInit writes
+// the entry inline; defaultRunBootstrap calls this helper after the
+// bootstrap orchestrator returns so both paths leave a successfully
+// initialized workspace registered.
+func registerInGlobalRegistry(workspaceRoot, configPath, registryName, source string) error {
+	absRoot, err := filepath.Abs(workspaceRoot)
+	if err != nil {
+		return fmt.Errorf("resolving workspace root: %w", err)
+	}
+	absConfigPath, err := filepath.Abs(configPath)
+	if err != nil {
+		return fmt.Errorf("resolving config path: %w", err)
+	}
+	globalCfg, err := config.LoadGlobalConfig()
+	if err != nil {
+		return fmt.Errorf("loading global config: %w", err)
+	}
+	entry := config.RegistryEntry{
+		Root:   absRoot,
+		Source: absConfigPath,
+	}
+	if source != "" {
+		entry.SourceURL = source
+	}
+	globalCfg.SetRegistryEntry(registryName, entry)
+	return config.SaveGlobalConfig(globalCfg)
+}
+
 func defaultRunBootstrap(ctx context.Context, cmd *cobra.Command, workspaceRoot, workspaceName string, src sourcepkg.Source, source string, disarm func()) error {
 	// Step 1: visibility lookup via GetRepo. R17 soft-fail to Private=false
 	// on any error; emit the cause-classified note to stderr and keep going.
@@ -164,7 +200,7 @@ func defaultRunBootstrap(ctx context.Context, cmd *cobra.Command, workspaceRoot,
 		})
 	}
 
-	result, runErr := workspace.RunBootstrap(ctx, workspace.BootstrapParams{
+	result, runErr := runBootstrapOrchestrator(ctx, workspace.BootstrapParams{
 		WorkspaceRoot:  workspaceRoot,
 		WorkspaceName:  workspaceName,
 		InstanceName:   workspaceName,
@@ -178,6 +214,16 @@ func defaultRunBootstrap(ctx context.Context, cmd *cobra.Command, workspaceRoot,
 	})
 	if runErr != nil {
 		return runErr
+	}
+
+	// Register in the global registry. runInit's non-bootstrap clone path
+	// writes this entry inline; the bootstrap branch returns from runInit
+	// via this function before reaching that block, so we replicate it
+	// here. Failure is non-fatal — the workspace is fully usable, only
+	// `niwa go` / tab-completion discovery is lost.
+	configPath := filepath.Join(workspaceRoot, workspace.StateDir, workspace.WorkspaceConfigFile)
+	if regErr := registerInGlobalRegistry(workspaceRoot, configPath, workspaceName, source); regErr != nil {
+		fmt.Fprintf(cmd.ErrOrStderr(), "warning: could not update registry: %v\n", regErr)
 	}
 
 	// R19 success block (Appendix B byte-equality contract). Preceded
