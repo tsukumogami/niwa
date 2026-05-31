@@ -1,5 +1,5 @@
 ---
-status: Accepted
+status: In Progress
 problem: |
   niwa enumerates a workspace's role set at apply time to build the mesh
   inboxes but never persists it. Tools that address a role by name from
@@ -19,10 +19,11 @@ upstream: docs/briefs/BRIEF-niwa-role-table.md
 
 ## Status
 
-Accepted
+In Progress
 
 Requirements locked via autonomous `/scope` run (recommended-default
-judgment calls; no Open Questions remain). The feature carries
+judgment calls; no Open Questions remain). Design underway at
+`docs/designs/DESIGN-niwa-role-table.md`. The feature carries
 architectural choices left open for the design — the concrete file
 format, the exact location and filename under `.niwa/`, the schema field
 layout, and what a "delivery destination" resolves to — so a design doc
