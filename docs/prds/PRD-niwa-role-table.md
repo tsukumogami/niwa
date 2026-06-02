@@ -99,8 +99,14 @@ tools, and today every tool re-invents the same answer.
 
 ### Functional
 
-- **R1.** `niwa apply` SHALL emit a role-table data file as part of every
-  apply run that installs the mesh channel infrastructure.
+- **R1.** Emitting the role-table data file SHALL be symmetric across the
+  commands that materialize a workspace: both `niwa create` and `niwa apply`
+  SHALL emit the table as part of every run that installs the mesh channel
+  infrastructure. Because the two commands share one materialization pipeline,
+  emission is wired once into that shared pipeline and covers both entry points
+  with no command-specific behavior. A freshly created workspace SHALL therefore
+  carry the table after its initial materialization, before any explicit
+  `apply`.
 - **R2.** The table SHALL be written to a known, stable location under
   the workspace instance's `.niwa/` directory, fixed across applies so
   consumers can locate it without discovery heuristics.
@@ -154,6 +160,9 @@ tools, and today every tool re-invents the same answer.
 
 - [ ] After `niwa apply` on a workspace whose mesh infrastructure is
   installed, the role-table file exists at its fixed `.niwa/` location.
+- [ ] After a fresh `niwa create` (before any explicit `apply`), the
+  role-table file already exists at the same fixed `.niwa/` location, with
+  the same contents `apply` would produce for the same role set.
 - [ ] The table lists exactly the roles niwa enumerated for the workspace
   (coordinator + one per cloned repo + explicit overrides) — no missing
   roles and no extra entries.

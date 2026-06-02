@@ -144,8 +144,12 @@ Idempotency detail, Security Considerations invariants 1 and 2.
 (`internal/workspace/apply.go`) immediately after
 `InstallChannelInfrastructure` returns (around `apply.go:1276`, before Step 5),
 passing the enumerated roles, `instanceRoot`, and the existing `&writtenFiles`
-accumulator, so the table is emitted on every apply that installs mesh
+accumulator, so the table is emitted on every run that installs mesh
 infrastructure and is picked up by Step 7 into `InstanceState.ManagedFiles`.
+`runPipeline` is the pipeline shared by both `Applier.Create` (`apply.go:288`)
+and `Applier.Apply` (`apply.go:428`), so wiring here — and only here — gives
+create/apply symmetry (PRD R1) for free; do NOT add the call in an apply-only
+branch.
 
 **Scope.**
 - Obtain the enumerated role set at the call site the same way
@@ -163,12 +167,15 @@ infrastructure and is picked up by Step 7 into `InstanceState.ManagedFiles`.
 - [ ] The emitted table lists exactly the enumerated roles (coordinator + one
       per cloned repo + explicit overrides), with each `inbox` matching the
       inbox directory created in the same apply.
+- [ ] A test exercising the `Applier.Create` path asserts `.niwa/roles.json` is
+      emitted there too (the call is in shared `runPipeline`, not apply-only) —
+      locking PRD R1 create/apply symmetry.
 - [ ] `go test ./...`, `gofmt`, and `go vet` pass.
 
 **Dependencies.** `<<ISSUE:2>>`.
 
-**Design refs.** Key Interfaces (internal call site, managed-file
-registration), Implementation Approach Phase 3; PRD R1, R9, R10.
+**Design refs.** Key Interfaces (internal call site, create/apply symmetry,
+managed-file registration), Implementation Approach Phase 3; PRD R1, R9, R10.
 
 ---
 
@@ -189,6 +196,9 @@ acceptance criteria require.
   (R8).
 - Assert adding a repo and re-applying adds exactly one role entry; removing a
   repo removes exactly that entry.
+- Assert a fresh `niwa create` produces `.niwa/roles.json` before any explicit
+  `apply` (create/apply symmetry, R1; covers the init → create → apply workflow
+  per CLAUDE.md).
 - Assert the file contains no absolute host path (relative-path contract, R16).
 
 **Acceptance criteria.**

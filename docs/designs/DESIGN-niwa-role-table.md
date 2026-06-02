@@ -260,6 +260,16 @@ dependency and negligible cost.
   `InstallChannelInfrastructure` obtains them (the role enumeration is shared or
   re-invoked there); `EmitRoleTable` receives them plus `instanceRoot` and the
   `&writtenFiles` accumulator already threaded through the pipeline.
+- **Create/apply symmetry (PRD R1).** The step is placed in the shared
+  `runPipeline`, not in an apply-only path. Both entry points route through it —
+  `Applier.Create` (`apply.go:230` → `runPipeline` at `apply.go:288`) and
+  `Applier.Apply` (`apply.go:376` → `runPipeline` at `apply.go:428`). Emitting
+  here is therefore the single change that makes `roles.json` materialize on a
+  freshly created workspace's first pipeline run *and* regenerate idempotently
+  on every subsequent apply, with no command-specific code. The role
+  enumeration the step consumes is itself shared, so `create` and `apply` can
+  never produce divergent tables. Wiring the emit into an apply-only branch
+  would be the bug this placement avoids.
 - **Managed-file registration:** appending the path to `writtenFiles` is the
   whole integration — Step 7 (`apply.go:1435-1452`) already hashes every
   `writtenFiles` entry into a `ManagedFile` and persists it in
@@ -277,7 +287,8 @@ dependency and negligible cost.
    `roles` array to the freshly built one; if equal, the step returns without
    writing (the path is still appended to `writtenFiles` so tracking stays
    consistent). If different (or the file is absent), it sets `generated` and
-   marshals with `json.MarshalIndent`, writing `0o644`.
+   marshals with `json.MarshalIndent`, writing at mode `0o600` (see Security
+   Considerations invariant 1).
 5. Step 7 hashes `.niwa/roles.json` into a `ManagedFile` and `SaveState` writes
    it into `.niwa/instance.json`.
 
@@ -324,7 +335,10 @@ Add a `@critical` Gherkin scenario in `test/functional/features/` driving real
 lists exactly the enumerated roles (coordinator + one per cloned repo), each
 `inbox` matches the created inbox directory, a second apply is byte-identical,
 adding a repo adds exactly one entry, and removing one removes exactly that
-entry.
+entry. Add one `create`-path assertion (a fresh `niwa create` produces
+`.niwa/roles.json` before any explicit `apply`) to lock the create/apply
+symmetry the shared-pipeline placement provides — matching the CLAUDE.md
+guidance to cover the init → create → apply workflow.
 Deliverables: feature file plus any step bindings.
 
 ## Security Considerations
