@@ -14,6 +14,7 @@ chain_skipped: []
 chain_ran:
   - brief
   - prd
+  - design
 child_snapshots:
   brief:
     status: Accepted
@@ -23,6 +24,10 @@ child_snapshots:
     status: Accepted
     content_hash: dca42e6e44983c8f73a2be789da34300362de6ec
     captured_at: 2026-06-05T22:20:37Z
+  design:
+    status: Accepted
+    content_hash: 63d9f1e8f1f8b1c188aa549cf0abfccfc3b24eda
+    captured_at: 2026-06-05T22:28:28Z
 visibility: Public
 worktree_rebases:
   - phase: brief
@@ -33,6 +38,10 @@ worktree_rebases:
     upstream_commits: []
     impact: none
     rebased_at: 2026-06-05T22:19:00Z
+  - phase: design
+    upstream_commits: []
+    impact: none
+    rebased_at: 2026-06-05T22:22:00Z
 ---
 
 # /scope state — niwa-mesh-removal
