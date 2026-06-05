@@ -1,0 +1,36 @@
+---
+topic: niwa-mesh-removal
+chain_started: 2026-06-05T22:13:47Z
+last_updated: 2026-06-05T22:14:30Z
+phase_pointer: phase-2
+exit: UNSET
+exit_artifacts: []
+planned_chain:
+  - brief
+  - prd
+  - design
+  - plan
+chain_skipped: []
+chain_ran:
+  - brief
+child_snapshots:
+  brief:
+    status: Accepted
+    content_hash: 4e182658cd72be5e4f7644546e26fa0592f3c39f
+    captured_at: 2026-06-05T22:18:29Z
+visibility: Public
+worktree_rebases:
+  - phase: brief
+    upstream_commits: []
+    impact: none
+    rebased_at: 2026-06-05T22:15:00Z
+---
+
+# /scope state — niwa-mesh-removal
+
+Tactical chain (BRIEF -> PRD -> DESIGN -> PLAN) for removing niwa's pre-pivot
+agent-facing mesh while preserving worktree creation. Remove-first reframe;
+substantive sequencing already merged in the toolkit roadmap (do not re-decide).
+
+Brief context source: `wip/scope_niwa-mesh-removal_brief-context.md` (this worktree).
+Vision-side tracking worktree: `.niwa/worktrees/vision-0c91248d` (separate PR).
