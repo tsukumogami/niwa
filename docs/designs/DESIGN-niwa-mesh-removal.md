@@ -1,5 +1,5 @@
 ---
-status: Accepted
+status: Planned
 problem: |
   niwa's git-worktree creation is implemented inside the internal/mcp package,
   entangled with a non-functional pre-pivot agent-facing mesh (MCP server, task
@@ -28,7 +28,7 @@ upstream: docs/prds/PRD-niwa-mesh-removal.md
 
 ## Status
 
-Accepted
+Planned
 
 ## Upstream Design Reference
 

@@ -1,0 +1,6 @@
+2026/06/05 18:13:32 daemon starting pid=1783636 instance-root=/home/dgazineu/dev/niwaw/tsuku/tsuku-2/.niwa/worktrees/niwa-dab9a769
+2026/06/05 18:13:32 config retry_backoffs=30s,1m0s,1m30s stall_watchdog=15m0s sigterm_grace=5s
+2026/06/05 18:13:32 spawn_target path=/home/dgazineu/.local/bin/claude uid=1000 mode=0755
+2026/06/05 18:13:32 watched_roles count=1
+2026/06/05 18:13:32 daemon ready, PID file written
+2026/06/05 18:13:32 watch loop started orphans=0 fresh_retries=0 dead_workers=0
