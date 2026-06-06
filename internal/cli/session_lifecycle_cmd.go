@@ -21,11 +21,11 @@ func init() {
 
 var sessionCreateCmd = &cobra.Command{
 	Use:   "create <repo> <purpose>",
-	Short: "Create a new git-worktree session for a repo",
-	Long: `Create a new git-worktree session for a repo.
+	Short: "Create a new git worktree for a repo",
+	Long: `Create a new git worktree for a repo.
 
 Scaffolds a git worktree under .niwa/worktrees/<repo>-<session-id>/ and
-writes the session lifecycle state.
+writes the worktree lifecycle state.
 
 On success the shell wrapper navigates to the new worktree directory.`,
 	// We don't use cobra.ExactArgs because its default error exits 1 with a
@@ -39,10 +39,10 @@ On success the shell wrapper navigates to the new worktree directory.`,
 
 var sessionDestroyCmd = &cobra.Command{
 	Use:   "destroy <session-id>",
-	Short: "Destroy a session and remove its worktree",
-	Long: `Destroy a session: mark the session ended, remove the worktree, and
-delete the session branch (only if already merged; use --force to delete
-regardless).`,
+	Short: "Destroy a worktree and its working directory",
+	Long: `Destroy a worktree: mark its lifecycle state ended, remove the working
+directory, and delete the worktree branch (only if already merged; use
+--force to delete regardless).`,
 	// Same reasoning as sessionCreateCmd: RunE handles missing-arg with a
 	// usage string and exit code 2 via *sessionattach.ExitCodeError.
 	Args:              cobra.MaximumNArgs(1),
@@ -77,8 +77,8 @@ func runSessionCreate(cmd *cobra.Command, args []string) error {
 	if len(args) != 2 {
 		return &sessionattach.ExitCodeError{
 			Code: 2,
-			Msg: "niwa: usage: niwa session create <repo> <purpose>. " +
-				"Run `niwa session create --help` for details.",
+			Msg: "niwa: usage: niwa worktree create <repo> <purpose>. " +
+				"Run `niwa worktree create --help` for details.",
 		}
 	}
 	instanceRoot, err := resolveInstanceRoot()
@@ -120,8 +120,8 @@ func runSessionDestroy(cmd *cobra.Command, args []string) error {
 	if len(args) != 1 {
 		return &sessionattach.ExitCodeError{
 			Code: 2,
-			Msg: "niwa: usage: niwa session destroy <session-id> [--force]. " +
-				"Run `niwa session list` to discover existing sessions.",
+			Msg: "niwa: usage: niwa worktree destroy <session-id> [--force]. " +
+				"Run `niwa worktree list` to discover existing worktrees.",
 		}
 	}
 	instanceRoot, err := resolveInstanceRoot()

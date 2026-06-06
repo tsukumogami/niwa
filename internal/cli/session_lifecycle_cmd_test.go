@@ -267,7 +267,7 @@ func TestSessionList_AttachedAndAvailableMutuallyExclusive(t *testing.T) {
 }
 
 // TestRunSessionCreate_NoArgsReturnsUsageError verifies issue #135 behavior:
-// invoking `niwa session create` with no args must return
+// invoking `niwa worktree create` with no args must return
 // *sessionattach.ExitCodeError with Code=2 and a usage string that names the
 // expected positional arguments and points at --help. Cobra's default
 // ExactArgs error ("accepts 2 arg(s), received 0") exits 1 with a generic
@@ -286,10 +286,10 @@ func TestRunSessionCreate_NoArgsReturnsUsageError(t *testing.T) {
 	}
 	wantSubstrs := []string{
 		"niwa: usage",
-		"niwa session create",
+		"niwa worktree create",
 		"<repo>",
 		"<purpose>",
-		"niwa session create --help",
+		"niwa worktree create --help",
 	}
 	for _, s := range wantSubstrs {
 		if !strings.Contains(ece.Msg, s) {
@@ -316,7 +316,7 @@ func TestRunSessionCreate_OneArgReturnsUsageError(t *testing.T) {
 
 // TestRunSessionDestroy_NoArgsReturnsUsageError verifies issue #135 behavior
 // for destroy: usage error names <session-id> and points at
-// `niwa session list` (not --status active, since destroy operates on any
+// `niwa worktree list` (not --status active, since destroy operates on any
 // status).
 func TestRunSessionDestroy_NoArgsReturnsUsageError(t *testing.T) {
 	err := runSessionDestroy(sessionDestroyCmd, nil)
@@ -332,10 +332,10 @@ func TestRunSessionDestroy_NoArgsReturnsUsageError(t *testing.T) {
 	}
 	wantSubstrs := []string{
 		"niwa: usage",
-		"niwa session destroy",
+		"niwa worktree destroy",
 		"<session-id>",
 		"[--force]",
-		"niwa session list",
+		"niwa worktree list",
 	}
 	for _, s := range wantSubstrs {
 		if !strings.Contains(ece.Msg, s) {

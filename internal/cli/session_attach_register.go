@@ -21,17 +21,17 @@ func init() {
 
 var sessionAttachCmd = &cobra.Command{
 	Use:   "attach <session-id>",
-	Short: "Attach to a mesh session interactively",
-	Long: `Attach to a mesh session interactively.
+	Short: "Attach to a worktree interactively",
+	Long: `Attach to a worktree interactively.
 
-Validates the session worktree, acquires the in-use lock (attach.state +
-flock) so no other process attaches concurrently, validates the worker's
-claude transcript, and launches Claude Code with --resume so you can step
-into the conversation, prompt the agent, or fix things manually. When you
-exit Claude Code (Ctrl-D or /exit), niwa releases the lock.
+Validates the worktree, acquires the in-use lock (attach.state + flock) so
+no other process attaches concurrently, validates the worker's claude
+transcript, and launches Claude Code with --resume so you can step into the
+conversation, prompt the agent, or fix things manually. When you exit
+Claude Code (Ctrl-D or /exit), niwa releases the lock.
 
-Discovery: 'niwa session list' shows the AVAILABILITY column for each
-session. Use 'niwa session detach <id> --force' to break a stale lock.
+Discovery: 'niwa worktree list' shows the AVAILABILITY column for each
+worktree. Use 'niwa worktree detach <id> --force' to break a stale lock.
 
 Exit codes: 0 (clean exit), 1 (validation), 2 (usage), 3 (lock held),
 or the propagated claude exit code (capped at 125).`,
@@ -74,8 +74,8 @@ func runSessionAttach(cmd *cobra.Command, args []string) error {
 	if len(args) == 0 {
 		return &sessionattach.ExitCodeError{
 			Code: 2,
-			Msg: "niwa: usage: niwa session attach <session_id>. " +
-				"Run `niwa session list --status active` to discover available sessions.",
+			Msg: "niwa: usage: niwa worktree attach <session_id>. " +
+				"Run `niwa worktree list --status active` to discover available worktrees.",
 		}
 	}
 	instanceRoot, err := resolveInstanceRoot()
@@ -95,7 +95,7 @@ func runSessionDetach(cmd *cobra.Command, args []string) error {
 	if len(args) == 0 {
 		return &sessionattach.ExitCodeError{
 			Code: 2,
-			Msg: "niwa: usage: niwa session detach <session_id> [--force]. " +
+			Msg: "niwa: usage: niwa worktree detach <session_id> [--force]. " +
 				"Normal attach release happens automatically when claude code exits; " +
 				"this command exists to break stale locks.",
 		}

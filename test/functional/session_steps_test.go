@@ -88,6 +88,49 @@ func iCallCreateSession(ctx context.Context, repo, purpose, instance string) (co
 	return ctx, nil
 }
 
+// iCallCreateWorktree runs `niwa worktree create <repo> <purpose>` (the
+// canonical command name) from the instance root and stores the session_id +
+// worktree path parsed from the success line. Mirrors iCallCreateSession but
+// exercises the renamed command rather than the deprecated alias.
+func iCallCreateWorktree(ctx context.Context, repo, purpose, instance string) (context.Context, error) {
+	s := getState(ctx)
+	if s == nil {
+		return ctx, fmt.Errorf("no test state")
+	}
+	instRoot := filepath.Join(s.workspaceRoot, instance)
+	cmd := fmt.Sprintf("niwa worktree create %s %q", repo, purpose)
+	if err := runNiwa(s, instRoot, cmd); err != nil {
+		return ctx, fmt.Errorf("niwa worktree create: %w", err)
+	}
+	if s.exitCode != 0 {
+		return ctx, fmt.Errorf("niwa worktree create exit=%d\nstdout:\n%s\nstderr:\n%s",
+			s.exitCode, s.stdout, s.stderr)
+	}
+	m := sessionCreateRE.FindStringSubmatch(s.stdout)
+	if m == nil {
+		return ctx, fmt.Errorf("could not parse worktree create output: %q", s.stdout)
+	}
+	s.lastSessionID = strings.TrimSpace(m[1])
+	s.lastSessionWorktreePath = strings.TrimSpace(m[2])
+	return ctx, nil
+}
+
+// theLastCommandStderrContainsDeprecationNotice asserts that the previous
+// command printed the `niwa session` deprecation notice to stderr. Used to
+// pin the alias contract: invoking via `niwa session` must still work but
+// must warn.
+func theLastCommandStderrContainsDeprecationNotice(ctx context.Context) error {
+	s := getState(ctx)
+	if s == nil {
+		return fmt.Errorf("no test state")
+	}
+	const want = `"niwa session" is deprecated; use "niwa worktree"`
+	if !strings.Contains(s.stderr, want) {
+		return fmt.Errorf("stderr does not contain deprecation notice %q:\nstderr:\n%s", want, s.stderr)
+	}
+	return nil
+}
+
 // iCallDestroySession runs `niwa session destroy <id> --force` for the
 // session created by the previous step.
 func iCallDestroySession(ctx context.Context, instance string) (context.Context, error) {

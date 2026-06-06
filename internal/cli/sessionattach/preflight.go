@@ -1,8 +1,8 @@
-// Package sessionattach implements the niwa session attach and detach
-// commands. These let an operator step into a mesh session interactively,
+// Package sessionattach implements the niwa worktree attach and detach
+// commands. These let an operator step into a worktree interactively,
 // resume Claude Code with the worker's full transcript history, work
-// interactively, and detach cleanly with the session returning to normal
-// mesh operation.
+// interactively, and detach cleanly so the worktree returns to being
+// available.
 package sessionattach
 
 import (

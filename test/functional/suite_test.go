@@ -248,6 +248,8 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 
 	// --- Session lifecycle steps ---
 	ctx.Step(`^I call niwa_create_session for repo "([^"]*)" with purpose "([^"]*)" in instance "([^"]*)"$`, iCallCreateSession)
+	ctx.Step(`^I call niwa worktree create for repo "([^"]*)" with purpose "([^"]*)" in instance "([^"]*)"$`, iCallCreateWorktree)
+	ctx.Step(`^the last command stderr contains the session deprecation notice$`, theLastCommandStderrContainsDeprecationNotice)
 	ctx.Step(`^I call niwa_destroy_session in instance "([^"]*)"$`, iCallDestroySession)
 	ctx.Step(`^I run niwa session detach for the last session in instance "([^"]*)"$`, iRunSessionDetachForLastSessionInInstance)
 	ctx.Step(`^I run "([^"]*)" from channeled instance "([^"]*)"$`, iRunFromChanneledInstance)

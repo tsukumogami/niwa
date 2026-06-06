@@ -13,17 +13,57 @@ func init() {
 	sessionCmd.AddCommand(sessionListCmd)
 }
 
+// deprecatedSessionAlias is the legacy parent command name. Invoking any
+// subcommand via `niwa session ...` still resolves to the canonical
+// `worktree` commands (via the Aliases below) and prints a one-line
+// deprecation notice to stderr without altering behavior or exit code.
+const deprecatedSessionAlias = "session"
+
+// sessionCmd is the canonical `worktree` parent command. It keeps the
+// historical "session" name as an alias so existing scripts keep working;
+// the variable name is retained to minimize churn across the package.
 var sessionCmd = &cobra.Command{
-	Use:   "session",
-	Short: "Manage sessions in the workspace mesh",
-	Long: `Manage sessions in the workspace mesh.
+	Use:     "worktree",
+	Aliases: []string{deprecatedSessionAlias},
+	Short:   "Manage git worktrees in the workspace",
+	Long: `Manage git worktrees in the workspace.
 
 Subcommands:
-  attach    Attach to a session interactively (resume claude with full transcript)
-  create    Create a new git-worktree session for a repo
-  destroy   Destroy a session and remove its worktree
+  attach    Attach to a worktree interactively (resume claude with full transcript)
+  create    Create a new git worktree for a repo
+  destroy   Destroy a worktree and remove its working directory
   detach    Release a stale attach lock (operator escape hatch)
-  list      List session lifecycle states with availability projection`,
+  list      List worktree lifecycle states with availability projection`,
+	// PersistentPreRun fires for the parent and every subcommand. When the
+	// command was reached via the legacy "session" token on the command
+	// line, emit a deprecation notice to stderr. Behavior and exit code are
+	// unchanged; this is informational only.
+	PersistentPreRun: func(cmd *cobra.Command, _ []string) {
+		if invokedViaSessionAlias() {
+			fmt.Fprintln(cmd.ErrOrStderr(),
+				`"niwa session" is deprecated; use "niwa worktree"`)
+		}
+	},
+}
+
+// invokedViaSessionAlias reports whether the legacy "session" token appears
+// in os.Args before any "--" terminator. The canonical "worktree" token, if
+// present, takes precedence: a literal `niwa worktree ...` invocation never
+// triggers the notice even in the unlikely case a later argument is the word
+// "session".
+func invokedViaSessionAlias() bool {
+	for _, a := range os.Args[1:] {
+		if a == "--" {
+			return false
+		}
+		if a == "worktree" {
+			return false
+		}
+		if a == deprecatedSessionAlias {
+			return true
+		}
+	}
+	return false
 }
 
 // sessionListCmd lists per-session lifecycle states. Filter flags --repo,
@@ -31,19 +71,19 @@ Subcommands:
 // shows every session in the current instance.
 var sessionListCmd = &cobra.Command{
 	Use:   "list",
-	Short: "List session lifecycle states with availability projection",
-	Long: `List per-session lifecycle states.
+	Short: "List worktree lifecycle states with availability projection",
+	Long: `List per-worktree lifecycle states.
 
 Renders SESSION_ID, REPO, STATUS, AVAILABILITY, CREATED, PURPOSE for every
-session in the current workspace instance. AVAILABILITY values are:
+worktree in the current workspace instance. AVAILABILITY values are:
 
-  available  no attach lock held; the session is free for niwa session attach
-  attached   currently held by a niwa session attach process
+  available  no attach lock held; the worktree is free for niwa worktree attach
+  attached   currently held by a niwa worktree attach process
   stale      a sentinel exists but the holder is dead; the lock is no longer
              effective and the next read will reap it
 
 Filter flags AND-combine: --repo, --status, --attached, --available.
---attached and --available are mutually exclusive. Sessions with
+--attached and --available are mutually exclusive. Worktrees with
 AVAILABILITY=stale appear under neither filter; run without filters to
 see them.`,
 	RunE:          runSessionList,

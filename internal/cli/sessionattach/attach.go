@@ -107,8 +107,8 @@ func AttachRun(ctx context.Context, opts Options) error {
 		_ = lockFile.Close() // releases the flock as a side-effect of fd close
 	}()
 
-	// Step 3 (removed): there is no longer a mesh task store to consult for a
-	// running worker, so attach no longer waits for or force-kills one. The
+	// Step 3 (removed): attach no longer consults any external store for a
+	// running worker, so it no longer waits for or force-kills one. The
 	// attach lock acquired in Step 2 (flock + attach.state, with PID-liveness
 	// via the worktree package) is the sole and sufficient safety signal that
 	// no other live process is using this worktree.
