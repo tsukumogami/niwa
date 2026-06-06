@@ -274,22 +274,36 @@ func contentDirRoot(cfg *config.WorkspaceConfig, configDir string) string {
 	return filepath.Join(configDir, contentDir)
 }
 
-// installContentFile reads a source file relative to contentRoot, expands
-// template variables, and writes the result to the target path.
-// It verifies that the resolved source path stays within contentRoot.
-func installContentFile(contentRoot, source, target string, vars map[string]string) error {
+// renderContentFile reads a source file relative to contentRoot, verifies the
+// resolved source path stays within contentRoot, and returns the content with
+// template variables expanded. It performs no write — callers that need to
+// persist the result write the returned string themselves. This is the shared
+// read+containment+expand core used by both installContentFile (write-to-file)
+// and the worktree layer (render-to-string), so neither path can drift on the
+// containment guarantee.
+func renderContentFile(contentRoot, source string, vars map[string]string) (string, error) {
 	sourcePath := filepath.Join(contentRoot, source)
 
 	if err := checkContainment(sourcePath, contentRoot); err != nil {
-		return fmt.Errorf("content source %q: %w", source, err)
+		return "", fmt.Errorf("content source %q: %w", source, err)
 	}
 
 	data, err := os.ReadFile(sourcePath)
 	if err != nil {
-		return fmt.Errorf("reading content source %s: %w", sourcePath, err)
+		return "", fmt.Errorf("reading content source %s: %w", sourcePath, err)
 	}
 
-	content := expandVars(string(data), vars)
+	return expandVars(string(data), vars), nil
+}
+
+// installContentFile reads a source file relative to contentRoot, expands
+// template variables, and writes the result to the target path.
+// It verifies that the resolved source path stays within contentRoot.
+func installContentFile(contentRoot, source, target string, vars map[string]string) error {
+	content, err := renderContentFile(contentRoot, source, vars)
+	if err != nil {
+		return err
+	}
 
 	targetDir := filepath.Dir(target)
 	if err := os.MkdirAll(targetDir, 0o755); err != nil {

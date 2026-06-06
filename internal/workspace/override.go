@@ -893,6 +893,7 @@ func MergeWorkspaceOverlay(ws *config.WorkspaceConfig, overlay *config.Workspace
 func copyContentConfig(c config.ContentConfig) config.ContentConfig {
 	out := config.ContentConfig{
 		Workspace: c.Workspace,
+		Worktree:  c.Worktree,
 		Groups:    nil,
 		Repos:     nil,
 	}

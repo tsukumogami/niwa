@@ -392,14 +392,16 @@ func worktreeLayerVars(cfg *config.WorkspaceConfig, instanceRoot, worktreePath, 
 
 // renderWorktreeLayerBody produces the body of the worktree-context section.
 // When [claude.content.worktree].source is set, the body is rendered from that
-// template via the existing containment-checked installContentFile (expandVars +
-// checkContainment) with the worktree variable map. When unset, the generated
-// default purpose/branch body is returned — the Stage-1 behavior, unchanged.
+// template via the shared containment-checked renderContentFile (expandVars +
+// checkContainment on the SOURCE path) with the worktree variable map. When
+// unset, the generated default purpose/branch body is returned — the Stage-1
+// behavior, unchanged.
 //
-// The template is rendered into a containment-checked intermediate file at the
-// worktree root, read back as the section body, then removed; all writes route
-// through installContentFile so a crafted source cannot escape its directory.
-// purpose is only ever expanded into content, never a path component.
+// The template is rendered entirely in memory: renderContentFile reads the
+// source, runs the same symlink-aware containment check the instance content
+// path uses, and expands the variables, so a crafted source still cannot escape
+// its directory. No transient file is written into the worktree. purpose is
+// only ever expanded into content, never a path component.
 func renderWorktreeLayerBody(cfg *config.WorkspaceConfig, configDir, instanceRoot, worktreePath, repo, purpose, branch string) (string, error) {
 	source := cfg.Claude.Content.Worktree.Source
 	if source == "" {
@@ -413,30 +415,14 @@ func renderWorktreeLayerBody(cfg *config.WorkspaceConfig, configDir, instanceRoo
 		return "", err
 	}
 
-	// Render through installContentFile into a containment-checked intermediate
-	// at the worktree root, then read it back. The intermediate path is derived
-	// only from worktreePath (a fixed dot-file name), never from purpose.
-	intermediate := filepath.Join(worktreePath, ".niwa-worktree-layer.tmp")
-	if err := checkContainment(intermediate, worktreePath); err != nil {
-		return "", fmt.Errorf("worktree layer template: %w", err)
-	}
-
 	contentRoot := contentDirRoot(cfg, configDir)
-	if cfg.Claude.Content.Worktree.OverlayDir != "" {
-		contentRoot = cfg.Claude.Content.Worktree.OverlayDir
-	}
-
-	if err := installContentFile(contentRoot, source, intermediate, vars); err != nil {
+	rendered, err := renderContentFile(contentRoot, source, vars)
+	if err != nil {
 		return "", fmt.Errorf("rendering worktree layer template: %w", err)
 	}
-	defer os.Remove(intermediate)
 
-	rendered, err := os.ReadFile(intermediate)
-	if err != nil {
-		return "", fmt.Errorf("reading rendered worktree layer: %w", err)
-	}
 	// Normalize a trailing newline so the spliced section ends cleanly.
-	out := string(rendered)
+	out := rendered
 	if !strings.HasSuffix(out, "\n") {
 		out += "\n"
 	}

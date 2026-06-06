@@ -980,6 +980,29 @@ func emptyOverlay() *config.WorkspaceOverlay {
 	return &config.WorkspaceOverlay{}
 }
 
+// TestMergeWorkspaceOverlay_WorktreeContentSurvives verifies that a base-config
+// [claude.content.worktree].source is preserved through the overlay merge. The
+// merge deep-copies ContentConfig via copyContentConfig; this guards that the
+// Worktree field is copied alongside Workspace/Groups/Repos, so the configured
+// worktree template still renders in overlay-active workspaces.
+func TestMergeWorkspaceOverlay_WorktreeContentSurvives(t *testing.T) {
+	ws := baseWS()
+	ws.Claude.Content.Worktree = config.ContentEntry{Source: "worktree.md"}
+
+	// Use a non-empty overlay so the full merge/deep-copy path runs.
+	overlay := &config.WorkspaceOverlay{
+		Sources: []config.OverlaySourceConfig{{Org: "neworg", Repos: []string{"repo-b"}}},
+	}
+
+	merged, err := MergeWorkspaceOverlay(ws, overlay, t.TempDir())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := merged.Claude.Content.Worktree.Source; got != "worktree.md" {
+		t.Errorf("base worktree content source dropped on overlay merge: got %q, want %q", got, "worktree.md")
+	}
+}
+
 // TestMergeWorkspaceOverlay_DoesNotMutate verifies the base WorkspaceConfig is
 // not mutated by the merge.
 func TestMergeWorkspaceOverlay_DoesNotMutate(t *testing.T) {

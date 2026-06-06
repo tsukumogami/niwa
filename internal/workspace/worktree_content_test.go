@@ -245,6 +245,67 @@ func TestApplyToWorktreeRendersConfiguredTemplate(t *testing.T) {
 	}
 }
 
+// TestApplyToWorktreeConfiguredTemplateIsIdempotent pins idempotency for the
+// CONFIGURED template path (not just the default-layer path): re-applying with a
+// [claude.content.worktree].source set must replace the worktree-context section
+// in place, so the sentinel heading and the template body each appear exactly
+// once after multiple applies.
+func TestApplyToWorktreeConfiguredTemplateIsIdempotent(t *testing.T) {
+	cfg, configDir, instanceRoot, worktreePath := applyToWorktreeFixture(t)
+
+	tmpl := "Repo {repo_name} on branch {branch}.\n\nFocus: {purpose}\n"
+	if err := os.WriteFile(filepath.Join(configDir, "claude", "worktree.md"), []byte(tmpl), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg.Claude.Content.Worktree = config.ContentEntry{Source: "worktree.md"}
+
+	for i := 0; i < 3; i++ {
+		if _, err := ApplyToWorktree(cfg, configDir, instanceRoot, worktreePath, "apps", "app", "ship-the-thing", "branch-xyz", WorktreeApplyOptions{}); err != nil {
+			t.Fatalf("ApplyToWorktree iteration %d: %v", i, err)
+		}
+	}
+
+	local, err := os.ReadFile(filepath.Join(worktreePath, "CLAUDE.local.md"))
+	if err != nil {
+		t.Fatalf("reading worktree CLAUDE.local.md: %v", err)
+	}
+	body := string(local)
+
+	if n := strings.Count(body, worktreeContextHeading); n != 1 {
+		t.Errorf("expected worktree context heading exactly once after 3 applies, got %d:\n%s", n, body)
+	}
+	// The rendered template body line must also appear exactly once (the section
+	// is replaced, not stacked).
+	if n := strings.Count(body, "Repo app on branch branch-xyz"); n != 1 {
+		t.Errorf("expected rendered template body exactly once after 3 applies, got %d:\n%s", n, body)
+	}
+	if n := strings.Count(body, "Focus: ship-the-thing"); n != 1 {
+		t.Errorf("expected rendered purpose line exactly once after 3 applies, got %d:\n%s", n, body)
+	}
+}
+
+// TestApplyToWorktreeTemplateWritesNoTempFile guards the Fix-2 cleanup: the
+// configured-template path renders in memory and must never write a transient
+// .niwa-worktree-layer.tmp dotfile into the worktree.
+func TestApplyToWorktreeTemplateWritesNoTempFile(t *testing.T) {
+	cfg, configDir, instanceRoot, worktreePath := applyToWorktreeFixture(t)
+
+	tmpl := "Repo {repo_name} on branch {branch}.\n"
+	if err := os.WriteFile(filepath.Join(configDir, "claude", "worktree.md"), []byte(tmpl), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg.Claude.Content.Worktree = config.ContentEntry{Source: "worktree.md"}
+
+	if _, err := ApplyToWorktree(cfg, configDir, instanceRoot, worktreePath, "apps", "app", "ship-the-thing", "branch-xyz", WorktreeApplyOptions{}); err != nil {
+		t.Fatalf("ApplyToWorktree: %v", err)
+	}
+
+	tmpPath := filepath.Join(worktreePath, ".niwa-worktree-layer.tmp")
+	if _, err := os.Stat(tmpPath); !os.IsNotExist(err) {
+		t.Errorf("expected no transient %s, but stat returned err=%v", tmpPath, err)
+	}
+}
+
 // TestApplyToWorktreeUnsetTemplateUsesDefaultLayer is the regression guard for
 // the additive contract: with no [claude.content.worktree] configured, the
 // Stage-1 default purpose/branch layer is produced unchanged.
