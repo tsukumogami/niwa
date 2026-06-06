@@ -58,7 +58,7 @@ func TestScaffold_WithName(t *testing.T) {
 	}
 
 	// Verify commented sections are present.
-	for _, section := range []string{"[[sources]]", "[groups.public]", "[repos.my-repo]", "[claude.content.workspace]", "[[claude.hooks.pre_tool_use]]", "[claude.settings]", "[env]", "[channels]"} {
+	for _, section := range []string{"[[sources]]", "[groups.public]", "[repos.my-repo]", "[claude.content.workspace]", "[[claude.hooks.pre_tool_use]]", "[claude.settings]", "[env]"} {
 		if !strings.Contains(content, "# "+section) {
 			t.Errorf("expected commented section %q in template", section)
 		}
@@ -157,9 +157,6 @@ visibility = "<vis-value>"
 # Bind the bootstrap repo to this group by name: explicit-repos sources carry
 # no live visibility, so name membership is what places the repo in a group.
 repos = ["<bootstrap-repo>"]
-
-# Bootstrap enabled mesh channels. Remove this block (and the [channels.mesh] line below) to disable.
-[channels.mesh]
 
 # CLAUDE.md content hierarchy: drop a workspace.md in .niwa/claude/ to populate.
 # [claude.content.workspace]

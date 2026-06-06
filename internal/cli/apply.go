@@ -25,8 +25,6 @@ func init() {
 			"Does NOT override *.required misses. One-shot -- re-evaluated each invocation.")
 	applyCmd.Flags().BoolVar(&applyAllowPlaintextSecrets, "allow-plaintext-secrets", false,
 		"bypass the public-repo plaintext-secrets guardrail. Strictly one-shot -- no state persistence.")
-	applyCmd.Flags().BoolVar(&applyChannels, "channels", false, "enable channel infrastructure for this invocation (overrides NIWA_CHANNELS)")
-	applyCmd.Flags().BoolVar(&applyNoChannels, "no-channels", false, "disable channel infrastructure for this invocation (overrides --channels and NIWA_CHANNELS)")
 	applyCmd.Flags().BoolVar(&applyForce, "force", false,
 		"force apply through a detected URL change against a legacy working tree (PRD R26-R27).")
 	applyCmd.Flags().BoolVar(&applyNoInstallPlugins, "no-install-plugins", false,
@@ -41,8 +39,6 @@ var (
 	applyNoPull                bool
 	applyAllowMissingSecrets   bool
 	applyAllowPlaintextSecrets bool
-	applyChannels              bool
-	applyNoChannels            bool
 	applyForce                 bool
 	applyNoInstallPlugins      bool
 )
@@ -131,10 +127,6 @@ func runApply(cmd *cobra.Command, args []string) error {
 	}
 	applier.AllowMissingSecrets = applyAllowMissingSecrets
 	applier.AllowPlaintextSecrets = applyAllowPlaintextSecrets
-
-	// Resolve effective channel activation and synthesize cfg.Channels.Mesh when
-	// --channels or NIWA_CHANNELS activates channels without a config section.
-	cfg, applier.ChannelsSynthesized = resolveChannelsActivation(cmd, cfg, applyChannels, applyNoChannels)
 
 	// Resolve the effective workspace name for registry operations.
 	// configDir is `<workspaceRoot>/.niwa`, so its parent is where

@@ -114,9 +114,7 @@ func pidStartTime(pid int) (int64, error) {
 // can distinguish "no parent present" from "read failed".
 //
 // On non-Linux platforms, only level 1 (os.Getppid) can be resolved; deeper
-// walks return an error. The DESIGN commits to PPIDChain(1) for the
-// authorization check — the claude → mcp-serve topology only requires one
-// level — so this limitation does not constrain Issue #1 use-cases.
+// walks return an error.
 func PPIDChain(n int) ([]int, error) {
 	if n <= 0 {
 		return nil, fmt.Errorf("PPIDChain: n must be >= 1, got %d", n)

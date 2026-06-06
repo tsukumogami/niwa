@@ -58,12 +58,6 @@ type Applier struct {
 	// Empty string disables convention discovery.
 	ConfigSourceURL string
 
-	// ChannelsSynthesized is true when cfg.Channels.Mesh was synthesized from
-	// --channels or NIWA_CHANNELS rather than a permanent [channels.mesh] config
-	// section. When true, runPipeline emits a one-time notice advising the user
-	// how to persist the setting.
-	ChannelsSynthesized bool
-
 	// SkipPluginInstall mirrors --no-install-plugins (and the
 	// auto_install_plugins = false global config). When true, the
 	// plugin installer emits the skip-notice instead of materializing
@@ -153,11 +147,6 @@ const GlobalConfigOverrideFile = "niwa.toml"
 // subsequent runs.
 const noticeProviderShadow = "provider-shadow"
 
-// noticeChannelsFromFlag is the one-time notice key emitted when channels were
-// activated via --channels or NIWA_CHANNELS rather than a [channels.mesh] config
-// section. Hints the user how to persist the setting permanently.
-const noticeChannelsFromFlag = "channels-from-flag"
-
 // noticeConfigConverted is the one-time notice key for the PRD R28 lazy
 // conversion (legacy `.git/`-backed config dir converted to a snapshot).
 // After the first apply that performs the conversion, the notice is
@@ -189,13 +178,12 @@ type cloneResult struct {
 
 // pipelineOpts configures shared pipeline behavior for Create vs Apply.
 type pipelineOpts struct {
-	existingState       *InstanceState
-	skipGlobal          bool
-	overlayURL          string   // from InstanceState.OverlayURL (empty = no overlay URL in state)
-	noOverlay           bool     // from InstanceState.NoOverlay
-	configSourceURL     string   // original source URL for convention overlay discovery
-	disclosedNotices    []string // workspace-root-level notices already shown to the user
-	channelsSynthesized bool     // true when channels were synthesized by --channels or NIWA_CHANNELS
+	existingState    *InstanceState
+	skipGlobal       bool
+	overlayURL       string   // from InstanceState.OverlayURL (empty = no overlay URL in state)
+	noOverlay        bool     // from InstanceState.NoOverlay
+	configSourceURL  string   // original source URL for convention overlay discovery
+	disclosedNotices []string // workspace-root-level notices already shown to the user
 }
 
 // pipelineResult holds the outputs of the shared pipeline.
@@ -286,13 +274,12 @@ func (a *Applier) Create(ctx context.Context, cfg *config.WorkspaceConfig, confi
 	}
 
 	result, err := a.runPipeline(ctx, cfg, configDir, instanceRoot, now, &pipelineOpts{
-		existingState:       nil,
-		overlayURL:          initOverlayURL,
-		noOverlay:           initNoOverlay,
-		skipGlobal:          initSkipGlobal,
-		configSourceURL:     a.ConfigSourceURL,
-		disclosedNotices:    initDisclosedNotices,
-		channelsSynthesized: a.ChannelsSynthesized,
+		existingState:    nil,
+		overlayURL:       initOverlayURL,
+		noOverlay:        initNoOverlay,
+		skipGlobal:       initSkipGlobal,
+		configSourceURL:  a.ConfigSourceURL,
+		disclosedNotices: initDisclosedNotices,
 	})
 	if err != nil {
 		_ = os.RemoveAll(instanceRoot)
@@ -419,13 +406,12 @@ func (a *Applier) Apply(ctx context.Context, cfg *config.WorkspaceConfig, config
 	}
 
 	result, err := a.runPipeline(ctx, cfg, configDir, instanceRoot, now, &pipelineOpts{
-		existingState:       existingState,
-		skipGlobal:          existingState.SkipGlobal,
-		overlayURL:          existingState.OverlayURL,
-		noOverlay:           existingState.NoOverlay,
-		configSourceURL:     a.ConfigSourceURL,
-		disclosedNotices:    wsDisclosedNotices,
-		channelsSynthesized: a.ChannelsSynthesized,
+		existingState:    existingState,
+		skipGlobal:       existingState.SkipGlobal,
+		overlayURL:       existingState.OverlayURL,
+		noOverlay:        existingState.NoOverlay,
+		configSourceURL:  a.ConfigSourceURL,
+		disclosedNotices: wsDisclosedNotices,
 	})
 	if err != nil {
 		return err
@@ -1246,19 +1232,6 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		return nil, fmt.Errorf("installing workspace root settings: %w", err)
 	}
 	writtenFiles = append(writtenFiles, rootSettingsFiles...)
-
-	// Step 4.75: Install channel infrastructure (sessions dir, sessions.json,
-	// .mcp.json, ## Channels section) when [channels.mesh] is configured.
-	if err := InstallChannelInfrastructure(effectiveCfg, instanceRoot, &writtenFiles); err != nil {
-		return nil, fmt.Errorf("installing channel infrastructure: %w", err)
-	}
-
-	// Emit a one-time hint when channels were activated via --channels or
-	// NIWA_CHANNELS rather than a permanent [channels.mesh] config section.
-	if opts.channelsSynthesized && !sliceContains(opts.disclosedNotices, noticeChannelsFromFlag) {
-		a.Reporter.Defer("Hint: to persist channels for this workspace, add [channels.mesh] to workspace.toml or set NIWA_CHANNELS=1 in your shell profile.")
-		newDisclosures = append(newDisclosures, noticeChannelsFromFlag)
-	}
 
 	// Step 5: Install group-level CLAUDE.md files.
 	installedGroups := map[string]bool{}

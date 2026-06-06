@@ -19,10 +19,9 @@ import (
 // agent-facing MCP surface was removed, so every step drives the CLI.
 
 // iSetUpSingleRepoChanneledWorkspace creates one bare source repo named
-// "app" under group "apps" plus a config repo with [channels.mesh]. After
-// `niwa create` the instance layout is `<instance>/apps/app/`, and role
-// derivation yields "coordinator" (instance root) + "app". Use to exercise
-// the simplest topology that provisions a session-capable workspace.
+// "app" under group "apps" plus a config repo. After `niwa create` the
+// instance layout is `<instance>/apps/app/`. Use to exercise the simplest
+// topology that provisions a session-capable workspace.
 func iSetUpSingleRepoChanneledWorkspace(ctx context.Context, name string) (context.Context, error) {
 	s := getState(ctx)
 	if s == nil {
@@ -36,8 +35,6 @@ func iSetUpSingleRepoChanneledWorkspace(ctx context.Context, name string) (conte
 
 	body := fmt.Sprintf(`[workspace]
 name = %q
-
-[channels.mesh]
 
 [groups.apps]
 

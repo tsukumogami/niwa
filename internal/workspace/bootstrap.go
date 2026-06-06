@@ -159,8 +159,8 @@ var ErrBootstrapNonGitHub = errors.New("non-github host")
 //
 //  1. Verify Src.IsGitHub() (defense-in-depth; no git invocation on fail).
 //  2. Validate the slug shape via ResolveCloneURL (no network call).
-//  3. Call ApplierCreate to install the create-step (channels infra,
-//     bootstrap repo clone). Applier.Create owns its own teardown on
+//  3. Call ApplierCreate to install the create-step (bootstrap repo
+//     clone). Applier.Create owns its own teardown on
 //     failure (it runs os.RemoveAll on the instance dir before
 //     returning errors). Per PRD R7, failures AFTER ApplierCreate
 //     succeeds MUST NOT touch the instance dir — session/commit
@@ -175,8 +175,7 @@ var ErrBootstrapNonGitHub = errors.New("non-github host")
 //
 // RunBootstrap does NOT do its own workspace-root scaffold write —
 // runInit performs that BEFORE calling RunBootstrap, then disarms its
-// workspaceCreated defer. The runInit-owned write is what
-// Applier.Create reads to discover [channels.mesh].
+// workspaceCreated defer.
 func RunBootstrap(ctx context.Context, params BootstrapParams) (BootstrapResult, error) {
 	// Step 1: defense-in-depth host check. The cli layer's R9 gate
 	// already runs upstream of runInit, but the test contract requires
@@ -212,7 +211,7 @@ func RunBootstrap(ctx context.Context, params BootstrapParams) (BootstrapResult,
 	}
 
 	// Step 3: ApplierCreate. The create-step pipeline (clone bootstrap
-	// repo, install channels infra) may populate <ws>/<instanceName>
+	// repo) may populate <ws>/<instanceName>
 	// partway and then fail; the implicit contract for the create step
 	// is "either Applier.Create returns nil OR the instance dir does
 	// not survive". Applier.Create itself runs an internal

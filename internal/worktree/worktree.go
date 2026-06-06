@@ -2,8 +2,8 @@
 // worktree on a fresh branch, scaffolding its .niwa layout, persisting the
 // session lifecycle state, and tearing the worktree down again. It is a leaf
 // package — it imports neither internal/mcp nor internal/workspace — so the
-// CLI, the bootstrap orchestrator, and (until it is removed) the mcp server
-// can all share one implementation of the worktree+session primitives.
+// CLI and the bootstrap orchestrator share one implementation of the
+// worktree+session primitives.
 package worktree
 
 import (
@@ -48,9 +48,9 @@ type CreateSessionParams struct {
 	GitInvoker      GitInvoker
 }
 
-// ErrSessionUnknownRole is returned by CreateSession when the role
-// directory under <instanceRoot>/.niwa/roles/<repo> does not exist.
-// Callers map this to the UNKNOWN_ROLE structured error code.
+// ErrSessionUnknownRole is returned by CreateSession when the named repo
+// is not a cloned git repository in the workspace. Callers map this to the
+// UNKNOWN_ROLE structured error code.
 var ErrSessionUnknownRole = errors.New("unknown role")
 
 // ErrSessionAttached is returned by DestroySession when the session's
@@ -63,25 +63,18 @@ var ErrSessionUnknownRole = errors.New("unknown role")
 var ErrSessionAttached = errors.New("session attached")
 
 // scaffoldWorktreeNiwa creates the minimal .niwa layout for a per-session
-// worktree. It creates:
+// worktree. It creates only:
 //
-//   - .niwa/roles/<repo>/inbox/{in-progress,cancelled,expired,read}/
-//   - .niwa/tasks/
 //   - .niwa/sessions/
 //
-// It does NOT create mcp.json or workspace-context.md — those are
-// main-instance artifacts that are not needed in session worktrees.
-func scaffoldWorktreeNiwa(worktreePath, repo string) error {
+// where SessionLifecycleState files live. It does NOT create mcp.json or
+// workspace-context.md — those are main-instance artifacts that are not
+// needed in session worktrees.
+func scaffoldWorktreeNiwa(worktreePath string) error {
 	niwaDir := filepath.Join(worktreePath, ".niwa")
 	dirs := []string{
 		niwaDir,
-		filepath.Join(niwaDir, "tasks"),
 		filepath.Join(niwaDir, "sessions"),
-		filepath.Join(niwaDir, "roles", repo, "inbox"),
-		filepath.Join(niwaDir, "roles", repo, "inbox", "in-progress"),
-		filepath.Join(niwaDir, "roles", repo, "inbox", "cancelled"),
-		filepath.Join(niwaDir, "roles", repo, "inbox", "expired"),
-		filepath.Join(niwaDir, "roles", repo, "inbox", "read"),
 	}
 	for _, d := range dirs {
 		if err := os.MkdirAll(d, 0o700); err != nil {
@@ -148,10 +141,12 @@ func CreateSession(ctx context.Context, params CreateSessionParams) (sessionID, 
 		return "", "", "", errors.New("git invoker not configured")
 	}
 
-	// Validate role directory exists.
-	roleDir := filepath.Join(params.InstanceRoot, ".niwa", "roles", params.Repo)
-	if _, statErr := os.Stat(roleDir); errors.Is(statErr, os.ErrNotExist) {
-		return "", "", "", fmt.Errorf("%w: role %q not found at %s", ErrSessionUnknownRole, params.Repo, roleDir)
+	// Validate the repo exists as a cloned git repository in the workspace.
+	// This is the genuine precondition for a session: a worktree can only
+	// be added to a real repo. A missing repo maps to UNKNOWN_ROLE.
+	repoPath, repoErr := findRepoInWorkspace(params.InstanceRoot, params.Repo)
+	if repoErr != nil {
+		return "", "", "", fmt.Errorf("%w: %v", ErrSessionUnknownRole, repoErr)
 	}
 
 	// Generate a session ID.
@@ -162,12 +157,6 @@ func CreateSession(ctx context.Context, params CreateSessionParams) (sessionID, 
 	sid, idErr := newSessionLifecycleID(sessionsDir)
 	if idErr != nil {
 		return "", "", "", fmt.Errorf("generating session ID: %w", idErr)
-	}
-
-	// Find the actual git repo on disk.
-	repoPath, repoErr := findRepoInWorkspace(params.InstanceRoot, params.Repo)
-	if repoErr != nil {
-		return "", "", "", fmt.Errorf("%w: %v", ErrSessionUnknownRole, repoErr)
 	}
 
 	// Worktree under <instanceRoot>/.niwa/worktrees/<repo>-<sid>/.
@@ -196,7 +185,7 @@ func CreateSession(ctx context.Context, params CreateSessionParams) (sessionID, 
 	}
 
 	// Scaffold the .niwa layout in the worktree.
-	if scaffoldErr := scaffoldWorktreeNiwa(wtPath, params.Repo); scaffoldErr != nil {
+	if scaffoldErr := scaffoldWorktreeNiwa(wtPath); scaffoldErr != nil {
 		cleanupWorktree()
 		return "", "", branch, fmt.Errorf("scaffold: %w", scaffoldErr)
 	}
@@ -214,9 +203,7 @@ func CreateSession(ctx context.Context, params CreateSessionParams) (sessionID, 
 
 // DestroySession tears down the worktree and branch for a session: it reads
 // the session state, marks it ended, removes the git worktree, and deletes
-// the session branch. It is the worktree-removal core extracted from the MCP
-// destroy handler; mesh-side cleanup (worker kills, change cancellation,
-// daemon teardown) is handled separately by the caller.
+// the session branch.
 //
 // When force is false the branch is deleted with `git branch -d` (only if
 // merged); unmerged branches are left in place and a BranchWarning is

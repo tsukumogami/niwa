@@ -40,8 +40,7 @@ type DestroyWorkspaceOpts struct {
 // Sequence:
 //  1. Enumerate instances under workspaceRoot.
 //  2. Sort by instance name (alphabetical, deterministic).
-//  3. For each instance: TerminateDaemon → ValidateInstanceDir →
-//     RemoveAll(instanceDir).
+//  3. For each instance: ValidateInstanceDir → RemoveAll(instanceDir).
 //  4. After all instances are removed, RemoveAll(workspaceRoot).
 //
 // Per-instance synchronous ordering preserves resumability on partial

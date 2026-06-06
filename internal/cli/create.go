@@ -17,8 +17,6 @@ func init() {
 	rootCmd.AddCommand(createCmd)
 	createCmd.Flags().StringVar(&createName, "name", "", "custom instance name suffix (e.g., --name=hotfix produces <config>-hotfix)")
 	createCmd.Flags().StringVarP(&createRepo, "repo", "r", "", "land in this repo after creation")
-	createCmd.Flags().BoolVar(&createChannels, "channels", false, "enable channel infrastructure for this invocation (overrides NIWA_CHANNELS)")
-	createCmd.Flags().BoolVar(&createNoChannels, "no-channels", false, "disable channel infrastructure for this invocation (overrides --channels and NIWA_CHANNELS)")
 	createCmd.Flags().BoolVar(&createNoInstallPlugins, "no-install-plugins", false, "skip auto-installing the embedded niwa Claude Code plugin (otherwise installed once when a rank-2 source is detected)")
 	createCmd.Flags().BoolVar(&createAllowMissingSecrets, "allow-missing-secrets", false,
 		"downgrade unresolved vault:// references to empty strings with stderr warnings. "+
@@ -31,8 +29,6 @@ func init() {
 var (
 	createName                  string
 	createRepo                  string
-	createChannels              bool
-	createNoChannels            bool
 	createNoInstallPlugins      bool
 	createAllowMissingSecrets   bool
 	createAllowPlaintextSecrets bool
@@ -172,13 +168,6 @@ func runCreate(cmd *cobra.Command, args []string) error {
 			applier.ConfigSourceURL = entry.SourceURL
 		}
 	}
-
-	// Resolve effective channel activation, applying priority rules:
-	//   1. --no-channels flag → channels disabled
-	//   2. --channels flag    → channels enabled
-	//   3. [channels.mesh] config section present → channels already enabled (no synthesis needed)
-	//   4. NIWA_CHANNELS=1 env var → channels enabled default
-	cfg, applier.ChannelsSynthesized = resolveChannelsActivation(cmd, cfg, createChannels, createNoChannels)
 
 	instancePath, err := applier.Create(cmd.Context(), cfg, configDir, workspaceRoot, instanceName)
 	if err != nil {

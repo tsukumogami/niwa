@@ -12,20 +12,14 @@ import (
 
 func TestScaffoldWorktreeNiwa_CreatesLayout(t *testing.T) {
 	dir := t.TempDir()
-	if err := scaffoldWorktreeNiwa(dir, "myrepo"); err != nil {
+	if err := scaffoldWorktreeNiwa(dir); err != nil {
 		t.Fatalf("scaffoldWorktreeNiwa: %v", err)
 	}
 
 	niwaDir := filepath.Join(dir, ".niwa")
 	wantDirs := []string{
 		niwaDir,
-		filepath.Join(niwaDir, "tasks"),
 		filepath.Join(niwaDir, "sessions"),
-		filepath.Join(niwaDir, "roles", "myrepo", "inbox"),
-		filepath.Join(niwaDir, "roles", "myrepo", "inbox", "in-progress"),
-		filepath.Join(niwaDir, "roles", "myrepo", "inbox", "cancelled"),
-		filepath.Join(niwaDir, "roles", "myrepo", "inbox", "expired"),
-		filepath.Join(niwaDir, "roles", "myrepo", "inbox", "read"),
 	}
 	for _, d := range wantDirs {
 		if fi, err := os.Stat(d); err != nil {
@@ -35,10 +29,13 @@ func TestScaffoldWorktreeNiwa_CreatesLayout(t *testing.T) {
 		}
 	}
 
-	// Verify mcp.json and workspace-context.md are NOT created.
+	// Verify the removed mesh-shaped scaffolding (roles/, tasks/) and the
+	// main-instance artifacts (mcp.json, workspace-context.md) are NOT created.
 	for _, unwanted := range []string{
 		filepath.Join(dir, ".mcp.json"),
 		filepath.Join(dir, "workspace-context.md"),
+		filepath.Join(niwaDir, "tasks"),
+		filepath.Join(niwaDir, "roles"),
 	} {
 		if _, err := os.Stat(unwanted); err == nil {
 			t.Errorf("unexpected file created: %s", unwanted)
@@ -48,10 +45,10 @@ func TestScaffoldWorktreeNiwa_CreatesLayout(t *testing.T) {
 
 func TestScaffoldWorktreeNiwa_Idempotent(t *testing.T) {
 	dir := t.TempDir()
-	if err := scaffoldWorktreeNiwa(dir, "repo1"); err != nil {
+	if err := scaffoldWorktreeNiwa(dir); err != nil {
 		t.Fatalf("first call: %v", err)
 	}
-	if err := scaffoldWorktreeNiwa(dir, "repo1"); err != nil {
+	if err := scaffoldWorktreeNiwa(dir); err != nil {
 		t.Fatalf("second call: %v", err)
 	}
 }
@@ -133,9 +130,6 @@ func TestCreateSession_Integration(t *testing.T) {
 			t.Fatalf("git setup: %v", err)
 		}
 	}
-	if err := os.MkdirAll(filepath.Join(root, ".niwa", "roles", "myrepo"), 0o700); err != nil {
-		t.Fatal(err)
-	}
 	sessionsDir := filepath.Join(root, ".niwa", "sessions")
 	if err := os.MkdirAll(sessionsDir, 0o700); err != nil {
 		t.Fatal(err)
@@ -169,9 +163,7 @@ func TestCreateSession_Integration(t *testing.T) {
 	}
 
 	wantDirs := []string{
-		filepath.Join(worktreePath, ".niwa", "tasks"),
-		filepath.Join(worktreePath, ".niwa", "roles", "myrepo", "inbox"),
-		filepath.Join(worktreePath, ".niwa", "roles", "myrepo", "inbox", "in-progress"),
+		filepath.Join(worktreePath, ".niwa", "sessions"),
 	}
 	for _, d := range wantDirs {
 		if _, err := os.Stat(d); err != nil {
@@ -218,9 +210,6 @@ func TestDestroySession_Integration(t *testing.T) {
 		if _, err := runCmd(cmd[0], cmd[1:]...); err != nil {
 			t.Fatalf("git setup: %v", err)
 		}
-	}
-	if err := os.MkdirAll(filepath.Join(root, ".niwa", "roles", "myrepo"), 0o700); err != nil {
-		t.Fatal(err)
 	}
 	sessionsDir := filepath.Join(root, ".niwa", "sessions")
 	if err := os.MkdirAll(sessionsDir, 0o700); err != nil {

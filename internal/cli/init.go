@@ -154,8 +154,7 @@ func defaultRunBootstrap(ctx context.Context, cmd *cobra.Command, workspaceRoot,
 	}
 
 	// Step 2: FIRST scaffold write — at the workspace root. This is the
-	// file Applier.Create (inside RunBootstrap) will read for the
-	// [channels.mesh] block that drives role-dir creation.
+	// workspace.toml Applier.Create (inside RunBootstrap) will read.
 	if scErr := workspace.ScaffoldFromSource(workspaceRoot, opts); scErr != nil {
 		return fmt.Errorf("bootstrap step=create: %w", scErr)
 	}
