@@ -1,5 +1,5 @@
 ---
-status: Planned
+status: Current
 problem: |
   niwa's worktree commands (`niwa worktree create|destroy|list|attach|detach`)
   are asymmetric with the workspace-instance lifecycle (`niwa create|apply|destroy`).
@@ -33,7 +33,7 @@ upstream: docs/prds/PRD-worktree-command-parity.md
 
 ## Status
 
-Planned
+Current
 
 ## Upstream Design Reference
 
