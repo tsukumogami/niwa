@@ -37,6 +37,11 @@ type testState struct {
 	// in a single scenario; zeroed per the Before hook's fresh allocation.
 	lastSessionID           string // ID parsed from `niwa session create`
 	lastSessionWorktreePath string // worktree path parsed from `niwa session create`
+
+	// worktreeFileSnapshots records the bytes of named files inside the last
+	// worktree at snapshot time, so a later step can assert an idempotent
+	// re-apply produced no spurious change. Keyed by worktree-relative path.
+	worktreeFileSnapshots map[string]string
 }
 
 func getState(ctx context.Context) *testState {
@@ -249,6 +254,10 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 	// --- Session lifecycle steps ---
 	ctx.Step(`^I call niwa_create_session for repo "([^"]*)" with purpose "([^"]*)" in instance "([^"]*)"$`, iCallCreateSession)
 	ctx.Step(`^I call niwa worktree create for repo "([^"]*)" with purpose "([^"]*)" in instance "([^"]*)"$`, iCallCreateWorktree)
+	ctx.Step(`^I call niwa worktree apply for the last session in instance "([^"]*)"$`, iCallApplyWorktree)
+	ctx.Step(`^I call niwa session apply for the last session in instance "([^"]*)"$`, iCallApplySessionAlias)
+	ctx.Step(`^I snapshot the file "([^"]*)" in the last worktree$`, iSnapshotLastWorktreeFile)
+	ctx.Step(`^the file "([^"]*)" in the last worktree is unchanged$`, theLastWorktreeFileIsUnchanged)
 	ctx.Step(`^the last command stderr contains the session deprecation notice$`, theLastCommandStderrContainsDeprecationNotice)
 	ctx.Step(`^I call niwa_destroy_session in instance "([^"]*)"$`, iCallDestroySession)
 	ctx.Step(`^I run niwa session detach for the last session in instance "([^"]*)"$`, iRunSessionDetachForLastSessionInInstance)

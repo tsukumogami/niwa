@@ -54,6 +54,45 @@ Feature: niwa worktree (renamed from niwa session)
     Then the session is ended in instance "wt-content"
 
   # ---------------------------------------------------------------------
+  # Re-sync path: niwa worktree apply re-installs a worktree's content
+  # idempotently (the worktree analog of niwa apply). A second run must
+  # produce no spurious change, and the deprecated `niwa session apply`
+  # alias must resolve and warn.
+  # ---------------------------------------------------------------------
+
+  @critical
+  Scenario: niwa worktree apply re-syncs worktree content idempotently
+    Given a clean niwa environment
+    And a local git server is set up
+    And a single-repo channeled workspace "wt-apply" exists with repo content
+    When I run "niwa create wt-apply"
+    Then the exit code is 0
+    When I call niwa worktree create for repo "app" with purpose "resync-the-thing" in instance "wt-apply"
+    Then the last session is active in instance "wt-apply"
+    And the session worktree exists in instance "wt-apply"
+    # First apply: re-sync the existing worktree (no CreateSession).
+    When I call niwa worktree apply for the last session in instance "wt-apply"
+    Then the exit code is 0
+    And the file "CLAUDE.local.md" in the last worktree contains "app repo content layer"
+    And the file ".claude/rules/worktree-imports.md" in the last worktree contains "workspace-context.md"
+    And the file "CLAUDE.local.md" in the last worktree contains "resync-the-thing"
+    # Snapshot the content, then re-run apply and assert nothing changed.
+    When I snapshot the file "CLAUDE.local.md" in the last worktree
+    And I snapshot the file ".claude/rules/worktree-imports.md" in the last worktree
+    And I call niwa worktree apply for the last session in instance "wt-apply"
+    Then the exit code is 0
+    And the file "CLAUDE.local.md" in the last worktree is unchanged
+    And the file ".claude/rules/worktree-imports.md" in the last worktree is unchanged
+    # The deprecated alias resolves to the same command and warns.
+    When I call niwa session apply for the last session in instance "wt-apply"
+    Then the exit code is 0
+    And the last command stderr contains the session deprecation notice
+    And the file "CLAUDE.local.md" in the last worktree is unchanged
+    # Cleanup
+    When I call niwa_destroy_session in instance "wt-apply"
+    Then the session is ended in instance "wt-apply"
+
+  # ---------------------------------------------------------------------
   # Alias contract: niwa session create still works AND warns.
   # ---------------------------------------------------------------------
 

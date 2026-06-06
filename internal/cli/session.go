@@ -29,6 +29,7 @@ var sessionCmd = &cobra.Command{
 	Long: `Manage git worktrees in the workspace.
 
 Subcommands:
+  apply     Re-sync an existing worktree's CLAUDE content (idempotent)
   attach    Attach to a worktree interactively (resume claude with full transcript)
   create    Create a new git worktree for a repo
   destroy   Destroy a worktree and remove its working directory

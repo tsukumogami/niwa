@@ -19,7 +19,25 @@ import (
 
 func init() {
 	sessionCmd.AddCommand(sessionCreateCmd)
+	sessionCmd.AddCommand(sessionApplyCmd)
 	sessionCmd.AddCommand(sessionDestroyCmd)
+}
+
+var sessionApplyCmd = &cobra.Command{
+	Use:   "apply <session-id>",
+	Short: "Re-sync an existing worktree's CLAUDE content",
+	Long: `Re-sync an existing worktree's CLAUDE content.
+
+The worktree analog of ` + "`niwa apply`" + `: resolves an existing worktree from
+its session lifecycle state and re-installs the owning repo's CLAUDE content
+(plus the worktree rules import and the purpose/branch layer) idempotently.
+Unlike create, it does not scaffold a new worktree; the session must already
+exist and be active.`,
+	// Same reasoning as sessionCreateCmd/sessionDestroyCmd: RunE validates the
+	// arg count itself and returns an *sessionattach.ExitCodeError with Code=2.
+	Args:              cobra.MaximumNArgs(1),
+	ValidArgsFunction: completeSessionIDs,
+	RunE:              runSessionApply,
 }
 
 var sessionCreateCmd = &cobra.Command{
@@ -110,7 +128,8 @@ func runSessionCreate(cmd *cobra.Command, args []string) error {
 	// gets from `niwa apply`. The worktree already exists at this point; an
 	// install failure is surfaced but does not unwind the worktree (it can
 	// be re-synced later).
-	if err := applyContentToWorktree(instanceRoot, worktreePath, repo, purpose, branch); err != nil {
+	written, err := applyContentToWorktree(instanceRoot, worktreePath, repo, purpose, branch)
+	if err != nil {
 		return fmt.Errorf("niwa: error: installing content into worktree %s (the worktree exists; re-sync it later): %w", sessionID, err)
 	}
 
@@ -118,6 +137,7 @@ func runSessionCreate(cmd *cobra.Command, args []string) error {
 	// Landing-path delivery uses NIWA_RESPONSE_FILE separately; the
 	// shell wrapper's stdout-cd target is unaffected.
 	fmt.Fprintf(cmd.OutOrStdout(), "session: created %s at %s\n", sessionID, worktreePath)
+	printWorktreeContentFiles(cmd, written)
 
 	if err := validateLandingPath(worktreePath); err != nil {
 		return err
@@ -129,6 +149,55 @@ func runSessionCreate(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+// runSessionApply re-syncs an existing worktree's CLAUDE content. It resolves
+// the worktree path / repo / purpose / branch from the session's lifecycle
+// state (NO CreateSession), then runs the same shared content helper create
+// uses against the existing worktree. It is idempotent by construction
+// (workspace.ApplyToWorktree re-points the rules import and replaces the
+// worktree-context section rather than appending duplicates).
+func runSessionApply(cmd *cobra.Command, args []string) error {
+	if len(args) != 1 {
+		return &sessionattach.ExitCodeError{
+			Code: 2,
+			Msg: "niwa: usage: niwa worktree apply <session-id>. " +
+				"Run `niwa worktree list` to discover existing worktrees.",
+		}
+	}
+	instanceRoot, err := resolveInstanceRoot()
+	if err != nil {
+		return err
+	}
+	sessionID := args[0]
+
+	sessionsDir := filepath.Join(instanceRoot, ".niwa", "sessions")
+	state, err := worktree.ReadSessionLifecycleState(sessionsDir, sessionID)
+	if err != nil {
+		return fmt.Errorf("niwa: error: resolving session %s: %w", sessionID, err)
+	}
+	if state.Status == worktree.SessionStatusEnded || state.Status == worktree.SessionStatusAbandoned {
+		return &sessionattach.ExitCodeError{
+			Code: 1,
+			Msg: fmt.Sprintf("niwa: error: session %s is %s; cannot re-sync a terminal worktree",
+				sessionID, state.Status),
+		}
+	}
+	if state.WorktreePath == "" {
+		return &sessionattach.ExitCodeError{
+			Code: 1,
+			Msg:  fmt.Sprintf("niwa: error: session %s has no recorded worktree path", sessionID),
+		}
+	}
+
+	written, err := applyContentToWorktree(instanceRoot, state.WorktreePath, state.Repo, state.Purpose, state.EffectiveBranchName())
+	if err != nil {
+		return fmt.Errorf("niwa: error: re-syncing content into worktree %s: %w", sessionID, err)
+	}
+
+	fmt.Fprintf(cmd.OutOrStdout(), "session: applied %s at %s\n", sessionID, state.WorktreePath)
+	printWorktreeContentFiles(cmd, written)
+	return nil
+}
+
 // applyContentToWorktree loads the workspace config the way create/apply do
 // (walk up from the instance root to find .niwa/workspace.toml), resolves the
 // repo's group from the on-disk instance layout, and installs the repo's CLAUDE
@@ -136,20 +205,20 @@ func runSessionCreate(cmd *cobra.Command, args []string) error {
 // init.go/RunBootstrap composition: the leaf internal/worktree stays a leaf
 // (the content install lives in internal/workspace), and the CLI orchestrates
 // the two.
-func applyContentToWorktree(instanceRoot, worktreePath, repo, purpose, branch string) error {
+func applyContentToWorktree(instanceRoot, worktreePath, repo, purpose, branch string) ([]string, error) {
 	configPath, configDir, err := config.Discover(instanceRoot)
 	if err != nil {
-		return fmt.Errorf("locating workspace config: %w", err)
+		return nil, fmt.Errorf("locating workspace config: %w", err)
 	}
 	result, err := config.Load(configPath)
 	if err != nil {
-		return fmt.Errorf("loading workspace config: %w", err)
+		return nil, fmt.Errorf("loading workspace config: %w", err)
 	}
 	cfg := result.Config
 
 	group, err := workspace.FindRepoGroup(instanceRoot, repo)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	opts := workspace.WorktreeApplyOptions{Stderr: os.Stderr}
@@ -163,14 +232,22 @@ func applyContentToWorktree(instanceRoot, worktreePath, repo, purpose, branch st
 	// When no overlay is configured (empty OverlayURL or NoOverlay), opts.OverlayDir
 	// stays empty and the no-overlay path runs exactly as before.
 	if cfgWithOverlay, overlayDir, oErr := mergeWorktreeOverlay(cfg, instanceRoot); oErr != nil {
-		return oErr
+		return nil, oErr
 	} else if overlayDir != "" {
 		cfg = cfgWithOverlay
 		opts.OverlayDir = overlayDir
 	}
 
-	_, err = workspace.ApplyToWorktree(cfg, configDir, instanceRoot, worktreePath, group, repo, purpose, branch, opts)
-	return err
+	return workspace.ApplyToWorktree(cfg, configDir, instanceRoot, worktreePath, group, repo, purpose, branch, opts)
+}
+
+// printWorktreeContentFiles surfaces the written-files list returned by
+// applyContentToWorktree on stdout, so create and apply both report the
+// content they installed/updated. A nil/empty list prints nothing.
+func printWorktreeContentFiles(cmd *cobra.Command, written []string) {
+	for _, f := range written {
+		fmt.Fprintf(cmd.OutOrStdout(), "session: content %s\n", f)
+	}
 }
 
 // mergeWorktreeOverlay resolves the active workspace overlay (recorded in

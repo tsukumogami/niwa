@@ -202,6 +202,103 @@ func iCallCreateWorktree(ctx context.Context, repo, purpose, instance string) (c
 	return ctx, nil
 }
 
+// iCallApplyWorktree runs `niwa worktree apply <session-id>` (the canonical
+// command) for the session created by a preceding create step, re-syncing the
+// worktree's CLAUDE content idempotently. It resolves the session id from the
+// state stored by the create step (mirroring how an operator copies the id out
+// of create's output) and asserts a clean exit.
+func iCallApplyWorktree(ctx context.Context, instance string) (context.Context, error) {
+	s := getState(ctx)
+	if s == nil {
+		return ctx, fmt.Errorf("no test state")
+	}
+	if s.lastSessionID == "" {
+		return ctx, fmt.Errorf("no session_id stored; create a worktree first")
+	}
+	instRoot := filepath.Join(s.workspaceRoot, instance)
+	cmd := fmt.Sprintf("niwa worktree apply %s", s.lastSessionID)
+	if err := runNiwa(s, instRoot, cmd); err != nil {
+		return ctx, fmt.Errorf("niwa worktree apply: %w", err)
+	}
+	if s.exitCode != 0 {
+		return ctx, fmt.Errorf("niwa worktree apply exit=%d\nstdout:\n%s\nstderr:\n%s",
+			s.exitCode, s.stdout, s.stderr)
+	}
+	return ctx, nil
+}
+
+// iCallApplySessionAlias runs `niwa session apply <session-id>` (the deprecated
+// alias) for the last session, exercising the alias resolution + deprecation
+// notice on the apply verb.
+func iCallApplySessionAlias(ctx context.Context, instance string) (context.Context, error) {
+	s := getState(ctx)
+	if s == nil {
+		return ctx, fmt.Errorf("no test state")
+	}
+	if s.lastSessionID == "" {
+		return ctx, fmt.Errorf("no session_id stored; create a worktree first")
+	}
+	instRoot := filepath.Join(s.workspaceRoot, instance)
+	cmd := fmt.Sprintf("niwa session apply %s", s.lastSessionID)
+	if err := runNiwa(s, instRoot, cmd); err != nil {
+		return ctx, fmt.Errorf("niwa session apply: %w", err)
+	}
+	if s.exitCode != 0 {
+		return ctx, fmt.Errorf("niwa session apply exit=%d\nstdout:\n%s\nstderr:\n%s",
+			s.exitCode, s.stdout, s.stderr)
+	}
+	return ctx, nil
+}
+
+// iSnapshotLastWorktreeFile records the current bytes of relPath inside the
+// last worktree so a later step can assert the content was not changed by an
+// idempotent re-run.
+func iSnapshotLastWorktreeFile(ctx context.Context, relPath string) error {
+	s := getState(ctx)
+	if s == nil {
+		return fmt.Errorf("no test state")
+	}
+	if s.lastSessionWorktreePath == "" {
+		return fmt.Errorf("no worktree path stored; create a worktree first")
+	}
+	full := filepath.Join(s.lastSessionWorktreePath, relPath)
+	data, err := os.ReadFile(full)
+	if err != nil {
+		return fmt.Errorf("snapshotting %q in worktree %s: %w", relPath, s.lastSessionWorktreePath, err)
+	}
+	if s.worktreeFileSnapshots == nil {
+		s.worktreeFileSnapshots = map[string]string{}
+	}
+	s.worktreeFileSnapshots[relPath] = string(data)
+	return nil
+}
+
+// theLastWorktreeFileIsUnchanged asserts relPath inside the last worktree still
+// matches the snapshot taken earlier (the idempotency assertion: a second apply
+// produced no spurious change).
+func theLastWorktreeFileIsUnchanged(ctx context.Context, relPath string) error {
+	s := getState(ctx)
+	if s == nil {
+		return fmt.Errorf("no test state")
+	}
+	if s.lastSessionWorktreePath == "" {
+		return fmt.Errorf("no worktree path stored; create a worktree first")
+	}
+	want, ok := s.worktreeFileSnapshots[relPath]
+	if !ok {
+		return fmt.Errorf("no snapshot recorded for %q; snapshot it before asserting", relPath)
+	}
+	full := filepath.Join(s.lastSessionWorktreePath, relPath)
+	data, err := os.ReadFile(full)
+	if err != nil {
+		return fmt.Errorf("reading %q in worktree %s: %w", relPath, s.lastSessionWorktreePath, err)
+	}
+	if string(data) != want {
+		return fmt.Errorf("file %q changed after idempotent re-run\nbefore:\n%s\nafter:\n%s", full, want, string(data))
+	}
+	return nil
+}
+
 // theLastCommandStderrContainsDeprecationNotice asserts that the previous
 // command printed the `niwa session` deprecation notice to stderr. Used to
 // pin the alias contract: invoking via `niwa session` must still work but
