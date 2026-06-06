@@ -1,6 +1,6 @@
 ---
 schema: brief/v1
-status: Accepted
+status: Done
 problem: |
   niwa carries a pre-pivot agent-facing mesh (an MCP server, a
   task-delegation substrate, a per-worktree daemon, and apply-pipeline
@@ -20,7 +20,7 @@ outcome: |
 
 ## Status
 
-Accepted
+Done
 
 The framing here is settled: this is debt paydown that removes a
 non-functional subsystem while preserving the one capability built on top

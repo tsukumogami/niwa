@@ -1,6 +1,6 @@
 ---
 schema: brief/v1
-status: Accepted
+status: Done
 problem: |
   niwa now has two command levels — the workspace instance
   (`create`/`apply`/`destroy`) and the worktree (`worktree
@@ -22,7 +22,7 @@ outcome: |
 
 ## Status
 
-Accepted
+Done
 
 The framing here is settled at the problem altitude; the downstream PRD captures
 requirements and the DESIGN settles the symmetric verb set, the content-parity

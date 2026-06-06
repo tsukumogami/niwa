@@ -1,5 +1,5 @@
 ---
-status: Accepted
+status: Done
 problem: |
   niwa carries a pre-pivot agent-facing mesh (MCP server, task-delegation
   substrate, per-worktree daemon, apply-pipeline hook synthesis) that is
@@ -19,7 +19,7 @@ upstream: docs/briefs/BRIEF-niwa-mesh-removal.md
 
 ## Status
 
-Accepted
+Done
 
 ## Problem Statement
 

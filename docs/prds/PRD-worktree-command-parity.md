@@ -1,5 +1,5 @@
 ---
-status: Accepted
+status: Done
 problem: |
   niwa's worktree-level commands (`niwa worktree create|destroy|list|attach|detach`)
   are asymmetric with the workspace-instance lifecycle (`niwa create|apply|destroy`).
@@ -22,7 +22,7 @@ upstream: docs/briefs/BRIEF-worktree-command-parity.md
 
 ## Status
 
-Accepted
+Done
 
 ## Problem Statement
 
