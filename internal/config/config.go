@@ -321,8 +321,8 @@ func Parse(data []byte) (*ParseResult, error) {
 }
 
 // isContentConfigZero reports whether a ContentConfig carries any data.
-// A zero ContentConfig has an empty Workspace source and nil/empty
-// Groups and Repos maps.
+// A zero ContentConfig has an empty Workspace source, an empty Worktree
+// source, and nil/empty Groups and Repos maps.
 func isContentConfigZero(c ContentConfig) bool {
 	if c.Workspace.Source != "" {
 		return false

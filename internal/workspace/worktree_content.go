@@ -324,9 +324,11 @@ func installWorktreeRulesImport(instanceRoot, worktreePath string) ([]string, er
 // purpose is interpolated only into file content, never a filesystem path.
 //
 // When [claude.content.worktree].source is configured, the section body is
-// rendered from that template (expanded with the worktree variables) via the
-// existing containment-checked installContentFile. When unset, the generated
-// default purpose/branch body is used — the Stage-1 behavior, unchanged.
+// rendered from that template (expanded with the worktree variables) in-memory
+// via renderWorktreeLayerBody -> renderContentFile (the same containment-checked
+// read+expand core as installContentFile, but no transient file is written).
+// When unset, the generated default purpose/branch body is used — the Stage-1
+// behavior, unchanged.
 //
 // The CLAUDE.local.md target is computed from worktreePath alone (at the
 // worktree root) and verified to stay within the worktree via checkContainment,
