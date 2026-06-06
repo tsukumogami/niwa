@@ -1,5 +1,6 @@
 ---
-status: Current
+status: Superseded
+superseded_by: docs/designs/current/DESIGN-niwa-mesh-removal.md
 problem: |
   Functional tests can't prove that an LLM-driven coordinator actually used niwa MCP
   tools to delegate work. Today's graph-e2e scenario asserts marker files exist and
@@ -28,7 +29,7 @@ rationale: |
 
 ## Status
 
-Current
+Superseded by [DESIGN-niwa-mesh-removal.md](docs/designs/current/DESIGN-niwa-mesh-removal.md)
 
 ## Context and Problem Statement
 

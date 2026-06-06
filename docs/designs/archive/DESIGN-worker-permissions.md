@@ -1,5 +1,6 @@
 ---
-status: Current
+status: Superseded
+superseded_by: docs/designs/current/DESIGN-niwa-mesh-removal.md
 problem: |
   Worker sessions spawned by niwa's mesh daemon use --permission-mode=acceptEdits,
   which auto-approves file writes but blocks shell tool calls. Workers run headless
@@ -26,7 +27,7 @@ rationale: |
 
 ## Status
 
-Current
+Superseded by [DESIGN-niwa-mesh-removal.md](docs/designs/current/DESIGN-niwa-mesh-removal.md)
 
 ## Context and problem statement
 

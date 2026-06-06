@@ -1,5 +1,6 @@
 ---
-status: Current
+status: Superseded
+superseded_by: docs/designs/current/DESIGN-niwa-mesh-removal.md
 problem: |
   Nine open issues filed since #92 describe a coherent set of failures in
   the niwa mesh subsystem (multi-agent coordination): coordinator routing
@@ -81,7 +82,7 @@ rationale: |
 
 ## Status
 
-Planned
+Superseded by [DESIGN-niwa-mesh-removal.md](docs/designs/current/DESIGN-niwa-mesh-removal.md)
 
 ## Context and Problem Statement
 

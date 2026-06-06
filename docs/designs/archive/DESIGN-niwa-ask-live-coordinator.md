@@ -1,5 +1,6 @@
 ---
-status: Current
+status: Superseded
+superseded_by: docs/designs/current/DESIGN-niwa-mesh-removal.md
 problem: |
   When a worker calls niwa_ask(to='coordinator'), the daemon always spawns an ephemeral
   claude -p process to fabricate an answer, even when the coordinator is actively running
@@ -33,7 +34,7 @@ rationale: |
 
 ## Status
 
-Current
+Superseded by [DESIGN-niwa-mesh-removal.md](docs/designs/current/DESIGN-niwa-mesh-removal.md)
 
 ## Context and Problem Statement
 

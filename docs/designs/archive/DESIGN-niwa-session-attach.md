@@ -1,5 +1,6 @@
 ---
-status: Current
+status: Superseded
+superseded_by: docs/designs/current/DESIGN-worktree-command-parity.md
 upstream: docs/prds/PRD-niwa-session-attach.md
 problem: |
   Niwa's mesh has a single recovery primitive when a worker drifts off-task:
@@ -41,7 +42,7 @@ rationale: |
 
 ## Status
 
-Current
+Superseded by [DESIGN-worktree-command-parity.md](docs/designs/current/DESIGN-worktree-command-parity.md)
 
 ## Context and Problem Statement
 

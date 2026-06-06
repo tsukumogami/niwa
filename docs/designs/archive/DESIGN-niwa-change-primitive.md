@@ -1,5 +1,6 @@
 ---
-status: Current
+status: Superseded
+superseded_by: docs/designs/current/DESIGN-niwa-mesh-removal.md
 problem: |
   The the PRD locks every shape downstream features encode against — the
   ChangeState v=1 schema, the audit log v=2 bump, the four-event
@@ -82,7 +83,7 @@ rationale: |
 
 ## Status
 
-Current
+Superseded by [DESIGN-niwa-mesh-removal.md](docs/designs/current/DESIGN-niwa-mesh-removal.md)
 
 ## Amendments
 

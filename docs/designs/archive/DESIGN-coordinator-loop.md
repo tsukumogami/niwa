@@ -1,5 +1,6 @@
 ---
-status: Current
+status: Superseded
+superseded_by: docs/designs/current/DESIGN-niwa-mesh-removal.md
 problem: |
   When a coordinator delegates a long-running task via niwa_delegate, the stall
   watchdog kills the worker at 15-minute intervals because nothing calls
@@ -33,7 +34,7 @@ rationale: |
 
 ## Status
 
-Current
+Superseded by [DESIGN-niwa-mesh-removal.md](docs/designs/current/DESIGN-niwa-mesh-removal.md)
 
 ## Context and Problem Statement
 

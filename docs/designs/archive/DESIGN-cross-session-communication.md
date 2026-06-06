@@ -1,5 +1,6 @@
 ---
-status: Current
+status: Superseded
+superseded_by: docs/designs/current/DESIGN-niwa-mesh-removal.md
 upstream: docs/prds/PRD-cross-session-communication.md
 problem: |
   Niwa must provision a workspace-scoped mesh that lets any agent dispatch
@@ -58,7 +59,7 @@ rationale: |
 
 ## Status
 
-Current
+Superseded by [DESIGN-niwa-mesh-removal.md](docs/designs/current/DESIGN-niwa-mesh-removal.md)
 
 ## Context and Problem Statement
 

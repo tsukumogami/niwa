@@ -1,5 +1,6 @@
 ---
-status: Current
+status: Superseded
+superseded_by: docs/designs/current/DESIGN-niwa-mesh-removal.md
 upstream: docs/prds/PRD-mesh-session-lifecycle.md
 problem: |
   Niwa's task model spawns a fresh Claude process per delegation with no shared
@@ -30,7 +31,7 @@ rationale: |
 
 ## Status
 
-Current
+Superseded by [DESIGN-niwa-mesh-removal.md](docs/designs/current/DESIGN-niwa-mesh-removal.md)
 
 ## Context and Problem Statement
 
