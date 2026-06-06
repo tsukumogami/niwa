@@ -52,6 +52,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/tsukumogami/niwa/internal/mcp"
 	"github.com/tsukumogami/niwa/internal/workspace"
+	"github.com/tsukumogami/niwa/internal/worktree"
 )
 
 var meshWatchInstanceRoot string
@@ -392,23 +393,23 @@ func runMeshWatch(cmd *cobra.Command, args []string) error {
 // niwa_finish_task). Both flow to the per-supervisor watchdog goroutine
 // started inside spawnWorker.
 type spawnContext struct {
-	instanceRoot    string
+	instanceRoot string
 	// taskStoreRoot is the directory root for task state files. For session
 	// daemons (NIWA_MAIN_INSTANCE_ROOT set) tasks always live in the main
 	// instance; for main-instance daemons it equals instanceRoot.
 	// Zero value: falls back to instanceRoot via taskStoreRootDir().
-	taskStoreRoot   string
-	niwaDir         string
-	spawnBin        string
-	logger          *log.Logger
-	exitCh          chan<- supervisorExit
-	wg              *sync.WaitGroup
-	shutdownCtx     context.Context
-	backoffs        []time.Duration
-	stallWatchdog   time.Duration
-	sigTermGrace    time.Duration
-	workerPermMode  string // "bypassPermissions" or "acceptEdits"; resolved once at startup
-	claudeHomeDir   string // overrides os.UserHomeDir() for Guard 4 session file lookup; tests only
+	taskStoreRoot  string
+	niwaDir        string
+	spawnBin       string
+	logger         *log.Logger
+	exitCh         chan<- supervisorExit
+	wg             *sync.WaitGroup
+	shutdownCtx    context.Context
+	backoffs       []time.Duration
+	stallWatchdog  time.Duration
+	sigTermGrace   time.Duration
+	workerPermMode string // "bypassPermissions" or "acceptEdits"; resolved once at startup
+	claudeHomeDir  string // overrides os.UserHomeDir() for Guard 4 session file lookup; tests only
 }
 
 // taskStoreRootDir returns the effective task store root. When taskStoreRoot is
@@ -570,7 +571,7 @@ func pollOrphans(orphans []orphanEntry, s spawnContext) (remaining []orphanEntry
 		if startTime == 0 {
 			startTime = o.startTime
 		}
-		if mcp.IsPIDAlive(pid, startTime) {
+		if worktree.IsPIDAlive(pid, startTime) {
 			remaining = append(remaining, o)
 			continue
 		}
@@ -881,7 +882,7 @@ func handleInboxEvent(evt inboxEvent, s spawnContext) {
 	// because the JSONL is missing, Claude Code falls back to a fresh session.
 	if _, claimedSt, stErr := mcp.ReadState(taskDir); stErr == nil && claimedSt.SessionID != "" {
 		sessionsDir := filepath.Join(s.taskStoreRootDir(), ".niwa", "sessions")
-		if sessSt, lookupErr := mcp.ReadSessionLifecycleState(sessionsDir, claimedSt.SessionID); lookupErr == nil {
+		if sessSt, lookupErr := worktree.ReadSessionLifecycleState(sessionsDir, claimedSt.SessionID); lookupErr == nil {
 			convID := sessSt.ClaudeConversationID
 			if convID != "" && sessionIDRe.MatchString(convID) {
 				s.logger.Printf("inbox_event role=%s task=%s session_resume=%s", evt.role, evt.taskID, convID)
@@ -939,10 +940,10 @@ func spawnWorker(evt inboxEvent, taskDir string, s spawnContext) {
 			next.StateTransitions = append(next.StateTransitions,
 				mcp.StateTransition{From: mcp.TaskStateRunning, To: mcp.TaskStateAbandoned, At: now})
 			entry := &mcp.TransitionLogEntry{
-				Kind: "spawn_failed",
-				From: mcp.TaskStateRunning,
-				To:   mcp.TaskStateAbandoned,
-				At:   now,
+				Kind:  "spawn_failed",
+				From:  mcp.TaskStateRunning,
+				To:    mcp.TaskStateAbandoned,
+				At:    now,
 				Actor: &mcp.TransitionActor{Kind: "daemon", PID: os.Getpid()},
 			}
 			return &next, entry, nil
@@ -1081,7 +1082,7 @@ func spawnWorker(evt inboxEvent, taskDir string, s spawnContext) {
 	}
 
 	pid := cmd.Process.Pid
-	startTime, _ := mcp.PIDStartTime(pid)
+	startTime, _ := worktree.PIDStartTime(pid)
 
 	// Backfill pid + start_time into state.json under the task flock.
 	now := time.Now().UTC().Format(time.RFC3339Nano)
@@ -1632,7 +1633,7 @@ func captureConversationID(claudeSessionID string, logger *log.Logger) {
 		return
 	}
 	sessionsDir := filepath.Join(mainRoot, ".niwa", "sessions")
-	st, err := mcp.ReadSessionLifecycleState(sessionsDir, sessionID)
+	st, err := worktree.ReadSessionLifecycleState(sessionsDir, sessionID)
 	if err != nil {
 		logger.Printf("capture_conversation_id session=%s read_err=%v", sessionID, err)
 		return
@@ -1641,7 +1642,7 @@ func captureConversationID(claudeSessionID string, logger *log.Logger) {
 		return // already set; one-time write
 	}
 	st.ClaudeConversationID = claudeSessionID
-	if err := mcp.WriteSessionLifecycleState(sessionsDir, st); err != nil {
+	if err := worktree.WriteSessionLifecycleState(sessionsDir, st); err != nil {
 		logger.Printf("capture_conversation_id session=%s write_err=%v", sessionID, err)
 	}
 }
@@ -1786,11 +1787,11 @@ func retrySpawn(taskID, role string, s spawnContext) {
 			// ClaudeSessionID is preserved (not cleared).
 			resumeSessionID = capturedSessionID
 			entry = &mcp.TransitionLogEntry{
-				Kind:   "spawn",
-				At:     now,
+				Kind:    "spawn",
+				At:      now,
 				Attempt: cur.RestartCount,
-				Resume: true,
-				Actor:  &mcp.TransitionActor{Kind: "daemon", PID: os.Getpid()},
+				Resume:  true,
+				Actor:   &mcp.TransitionActor{Kind: "daemon", PID: os.Getpid()},
 			}
 			attemptNumber = cur.RestartCount
 		} else {
@@ -1999,7 +2000,7 @@ func reconcileRunningTasks(tasksDir string, logger *log.Logger) reconcileResult 
 		}
 
 		// Cases B / C: worker.pid is set. Verify liveness.
-		if st.Worker.PID > 0 && mcp.IsPIDAlive(st.Worker.PID, st.Worker.StartTime) {
+		if st.Worker.PID > 0 && worktree.IsPIDAlive(st.Worker.PID, st.Worker.StartTime) {
 			// Live orphan: stamp adopted_at and add to the orphan list.
 			if err := markAdopted(taskDir); err != nil {
 				logger.Printf("reconcile: task=%s adopt_err=%v action=treat_as_dead", taskID, err)
@@ -2329,17 +2330,18 @@ func roleFromInboxPath(p string) string {
 // ~/.claude.json plugin set with the workspace plugins absent.
 //
 // The contract:
-//   --add-dir <workspaceRoot>  brings the workspace's plain skills,
-//                              hooks, marketplaces, and CLAUDE.local.md
-//                              into Claude Code's discovery scope.
-//   --add-dir <repoPath>       brings the role's repo .claude/
-//                              (settings.local.json, hooks, repo-specific
-//                              skills) into scope.
-//   --setting-sources user,project,local
-//                              ensures all three setting layers are
-//                              honored. The default behaviour excludes
-//                              at least one source per Claude Code's
-//                              settings precedence rules.
+//
+//	--add-dir <workspaceRoot>  brings the workspace's plain skills,
+//	                           hooks, marketplaces, and CLAUDE.local.md
+//	                           into Claude Code's discovery scope.
+//	--add-dir <repoPath>       brings the role's repo .claude/
+//	                           (settings.local.json, hooks, repo-specific
+//	                           skills) into scope.
+//	--setting-sources user,project,local
+//	                           ensures all three setting layers are
+//	                           honored. The default behaviour excludes
+//	                           at least one source per Claude Code's
+//	                           settings precedence rules.
 //
 // Both <workspaceRoot> and <repoPath> are computed from
 // s.taskStoreRootDir() — for session daemons that's the workspace root,
@@ -2429,7 +2431,7 @@ func acquireDaemonPIDLock(path string) (*os.File, error) {
 // start-time is /proc/<pid>/stat field 22 (zero if unavailable).
 func writePIDFile(niwaDir string) error {
 	pid := os.Getpid()
-	startTime, err := mcp.PIDStartTime(pid)
+	startTime, err := worktree.PIDStartTime(pid)
 	if err != nil {
 		startTime = 0
 	}

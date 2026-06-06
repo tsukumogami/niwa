@@ -32,6 +32,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/tsukumogami/niwa/internal/worktree"
 )
 
 const protocolVersion = "2024-11-05"
@@ -843,7 +845,7 @@ func (s *Server) handleSendMessage(args sendMessageArgs) toolResult {
 // message to the target's role inbox atomically. Returns (msgID, errTR) where
 // errTR.IsError is true on failure.
 func (s *Server) sendMessage(args sendMessageArgs) (string, toolResult) {
-	return s.sendMessageWithID(newUUID(), args)
+	return s.sendMessageWithID(worktree.NewUUID(), args)
 }
 
 // sendMessageWithID is like sendMessage but uses the caller-supplied msgID.
@@ -1074,7 +1076,7 @@ func (s *Server) writeAskNotification(inboxDir, askTaskID, toRole string, questi
 	if err != nil {
 		return fmt.Errorf("cannot marshal ask body: %w", err)
 	}
-	msgID := newUUID()
+	msgID := worktree.NewUUID()
 	msg := Message{
 		V:      1,
 		ID:     msgID,
@@ -1258,7 +1260,7 @@ func (s *Server) registerSessionID() {
 		return
 	}
 	sid := os.Getenv("CLAUDE_SESSION_ID")
-	if sid == "" || !sessionIDRegex.MatchString(sid) {
+	if sid == "" || !worktree.ValidClaudeSessionID(sid) {
 		return
 	}
 	taskDir := taskDirPath(s.taskStoreRoot(), s.taskID)

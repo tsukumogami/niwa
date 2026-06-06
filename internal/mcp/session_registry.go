@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/tsukumogami/niwa/internal/worktree"
 )
 
 // ErrAlreadyRegistered is returned by WriteSessionEntry when a live session
@@ -28,7 +30,7 @@ func WriteSessionEntry(sessionsDir string, entry SessionEntry) error {
 	var kept []SessionEntry
 	for _, s := range registry.Sessions {
 		if s.Role == entry.Role {
-			if IsPIDAlive(s.PID, s.StartTime) {
+			if worktree.IsPIDAlive(s.PID, s.StartTime) {
 				return fmt.Errorf("%w: role %q already registered by live session PID %d (registered %s)",
 					ErrAlreadyRegistered, entry.Role, s.PID, s.RegisteredAt)
 			}
@@ -70,7 +72,7 @@ func lookupLiveCoordinator(instanceRoot string) (inboxDir string, found bool) {
 	var kept []SessionEntry
 	for _, entry := range registry.Sessions {
 		if entry.Role == "coordinator" {
-			if IsPIDAlive(entry.PID, entry.StartTime) {
+			if worktree.IsPIDAlive(entry.PID, entry.StartTime) {
 				return filepath.Join(instanceRoot, ".niwa", "roles", "coordinator", "inbox"), true
 			}
 			// Prune stale coordinator entry.
@@ -115,14 +117,14 @@ func (s *Server) maybeRegisterCoordinator() {
 	if data, err := os.ReadFile(registryPath); err == nil {
 		_ = json.Unmarshal(data, &registry)
 		for _, entry := range registry.Sessions {
-			if entry.Role == "coordinator" && IsPIDAlive(entry.PID, entry.StartTime) {
+			if entry.Role == "coordinator" && worktree.IsPIDAlive(entry.PID, entry.StartTime) {
 				return
 			}
 		}
 	}
 
-	startTime, _ := PIDStartTime(pid)
-	sessionID := NewSessionID()
+	startTime, _ := worktree.PIDStartTime(pid)
+	sessionID := worktree.NewSessionID()
 	inboxDir := filepath.Join(s.instanceRoot, ".niwa", "roles", s.role, "inbox")
 
 	entry := SessionEntry{

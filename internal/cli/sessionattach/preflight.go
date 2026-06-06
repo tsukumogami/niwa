@@ -11,7 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/tsukumogami/niwa/internal/mcp"
+	"github.com/tsukumogami/niwa/internal/worktree"
 )
 
 // EncodeProjectDir applies Claude Code's project-dir encoding rule: every
@@ -112,7 +112,7 @@ type PreflightOptions struct {
 // (exit 1) on every failure mode tested empirically. Pre-flight exists so
 // niwa can emit niwa-shaped error messages with three actionable cases
 // instead of claude's opaque "No conversation found with session ID: <uuid>".
-func Preflight(state mcp.SessionLifecycleState, opts PreflightOptions) error {
+func Preflight(state worktree.SessionLifecycleState, opts PreflightOptions) error {
 	if state.ClaudeConversationID == "" {
 		return &PreflightError{Case: CaseA, SessionID: state.SessionID}
 	}

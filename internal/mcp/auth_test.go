@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/tsukumogami/niwa/internal/worktree"
 )
 
 // writeTaskFixture creates `.niwa/tasks/<taskID>/` under instanceRoot with
@@ -194,12 +196,12 @@ func TestAuthorizeTaskCall_MissingTask(t *testing.T) {
 	}
 }
 
-// TestPPIDChain_ReturnsParent — scenario-3 foundation. PPIDChain(1) returns
+// TestPPIDChain_ReturnsParent — scenario-3 foundation. worktree.PPIDChain(1) returns
 // a non-zero PID corresponding to the test's parent process.
 func TestPPIDChain_ReturnsParent(t *testing.T) {
-	chain, err := PPIDChain(1)
+	chain, err := worktree.PPIDChain(1)
 	if err != nil {
-		t.Fatalf("PPIDChain(1): %v", err)
+		t.Fatalf("worktree.PPIDChain(1): %v", err)
 	}
 	if len(chain) != 1 {
 		t.Errorf("len = %d, want 1", len(chain))
@@ -212,18 +214,18 @@ func TestPPIDChain_ReturnsParent(t *testing.T) {
 // TestPPIDChain_NegativeN — n <= 0 is a programming error; must surface
 // a structured error rather than return an empty chain.
 func TestPPIDChain_NegativeN(t *testing.T) {
-	if _, err := PPIDChain(0); err == nil {
-		t.Error("PPIDChain(0) expected error, got nil")
+	if _, err := worktree.PPIDChain(0); err == nil {
+		t.Error("worktree.PPIDChain(0) expected error, got nil")
 	}
-	if _, err := PPIDChain(-1); err == nil {
-		t.Error("PPIDChain(-1) expected error, got nil")
+	if _, err := worktree.PPIDChain(-1); err == nil {
+		t.Error("worktree.PPIDChain(-1) expected error, got nil")
 	}
 }
 
 // TestAuthorizeTaskCall_Executor_PPIDStartTimeMismatch — when worker.pid/start_time are
 // set but do NOT match the current process's parent, the executor check
 // fails closed with NOT_TASK_PARTY. Uses a crafted state with impossible
-// pid/start_time values so the PPIDChain(1) comparison diverges.
+// pid/start_time values so the worktree.PPIDChain(1) comparison diverges.
 func TestAuthorizeTaskCall_Executor_PPIDStartTimeMismatch(t *testing.T) {
 	root := t.TempDir()
 	taskID := NewTaskID()

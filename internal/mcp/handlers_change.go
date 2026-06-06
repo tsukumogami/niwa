@@ -39,6 +39,7 @@ import (
 	"time"
 
 	"github.com/tsukumogami/niwa/internal/config"
+	wt "github.com/tsukumogami/niwa/internal/worktree"
 )
 
 // createChangeArgs holds parameters for niwa_create_change (PRD R3).
@@ -134,13 +135,13 @@ func (s *Server) handleCreateChange(args createChangeArgs) toolResult {
 		return errResult("niwa_create_change: instance root not configured")
 	}
 
-	if !sessionIDRe.MatchString(args.SessionID) {
+	if !wt.ValidSessionID(args.SessionID) {
 		return errResultCode("invalid_session_id",
 			fmt.Sprintf("session_id %q must match ^[0-9a-f]{8}$", args.SessionID))
 	}
 
 	sessionsDir := filepath.Join(root, ".niwa", "sessions")
-	sessionState, err := ReadSessionLifecycleState(sessionsDir, args.SessionID)
+	sessionState, err := wt.ReadSessionLifecycleState(sessionsDir, args.SessionID)
 	if err != nil {
 		return errResultCode("session_not_found",
 			fmt.Sprintf("session %s not found: %v", args.SessionID, err))

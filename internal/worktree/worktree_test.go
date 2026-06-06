@@ -1,0 +1,269 @@
+package worktree
+
+import (
+	"context"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+func TestScaffoldWorktreeNiwa_CreatesLayout(t *testing.T) {
+	dir := t.TempDir()
+	if err := scaffoldWorktreeNiwa(dir, "myrepo"); err != nil {
+		t.Fatalf("scaffoldWorktreeNiwa: %v", err)
+	}
+
+	niwaDir := filepath.Join(dir, ".niwa")
+	wantDirs := []string{
+		niwaDir,
+		filepath.Join(niwaDir, "tasks"),
+		filepath.Join(niwaDir, "sessions"),
+		filepath.Join(niwaDir, "roles", "myrepo", "inbox"),
+		filepath.Join(niwaDir, "roles", "myrepo", "inbox", "in-progress"),
+		filepath.Join(niwaDir, "roles", "myrepo", "inbox", "cancelled"),
+		filepath.Join(niwaDir, "roles", "myrepo", "inbox", "expired"),
+		filepath.Join(niwaDir, "roles", "myrepo", "inbox", "read"),
+	}
+	for _, d := range wantDirs {
+		if fi, err := os.Stat(d); err != nil {
+			t.Errorf("missing dir %s: %v", d, err)
+		} else if !fi.IsDir() {
+			t.Errorf("%s is not a directory", d)
+		}
+	}
+
+	// Verify mcp.json and workspace-context.md are NOT created.
+	for _, unwanted := range []string{
+		filepath.Join(dir, ".mcp.json"),
+		filepath.Join(dir, "workspace-context.md"),
+	} {
+		if _, err := os.Stat(unwanted); err == nil {
+			t.Errorf("unexpected file created: %s", unwanted)
+		}
+	}
+}
+
+func TestScaffoldWorktreeNiwa_Idempotent(t *testing.T) {
+	dir := t.TempDir()
+	if err := scaffoldWorktreeNiwa(dir, "repo1"); err != nil {
+		t.Fatalf("first call: %v", err)
+	}
+	if err := scaffoldWorktreeNiwa(dir, "repo1"); err != nil {
+		t.Fatalf("second call: %v", err)
+	}
+}
+
+func TestFindRepoInWorkspace(t *testing.T) {
+	root := t.TempDir()
+	// Create a group/repo structure.
+	repoPath := filepath.Join(root, "public", "myrepo")
+	if err := os.MkdirAll(filepath.Join(repoPath, ".git"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	got, err := findRepoInWorkspace(root, "myrepo")
+	if err != nil {
+		t.Fatalf("findRepoInWorkspace: %v", err)
+	}
+	if got != repoPath {
+		t.Errorf("got %q, want %q", got, repoPath)
+	}
+}
+
+func TestFindRepoInWorkspace_NotFound(t *testing.T) {
+	root := t.TempDir()
+	_, err := findRepoInWorkspace(root, "nonexistent")
+	if err == nil {
+		t.Error("expected error for nonexistent repo")
+	}
+}
+
+func TestCreateSession_RequiredFields(t *testing.T) {
+	root := t.TempDir()
+	cases := []struct {
+		name   string
+		params CreateSessionParams
+	}{
+		{"missing_repo", CreateSessionParams{InstanceRoot: root, Purpose: "p", GitInvoker: StdGitInvoker{}}},
+		{"missing_purpose", CreateSessionParams{InstanceRoot: root, Repo: "r", GitInvoker: StdGitInvoker{}}},
+		{"missing_invoker", CreateSessionParams{InstanceRoot: root, Repo: "r", Purpose: "p"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, _, _, err := CreateSession(context.Background(), tc.params); err == nil {
+				t.Errorf("expected error for %s", tc.name)
+			}
+		})
+	}
+}
+
+func TestCreateSession_UnknownRole(t *testing.T) {
+	root := t.TempDir()
+	_, _, _, err := CreateSession(context.Background(), CreateSessionParams{
+		InstanceRoot: root,
+		Repo:         "nonexistent",
+		Purpose:      "test",
+		GitInvoker:   StdGitInvoker{},
+	})
+	if err == nil {
+		t.Fatal("expected error for unknown role")
+	}
+}
+
+// TestCreateSession_Integration creates a real git repository and exercises
+// the full CreateSession flow, verifying the session state file, git
+// worktree, branch, and scaffolded .niwa layout.
+func TestCreateSession_Integration(t *testing.T) {
+	if _, err := runCmd("git", "--version"); err != nil {
+		t.Skip("git not available")
+	}
+
+	root := t.TempDir()
+	repoPath := filepath.Join(root, "group", "myrepo")
+	if err := os.MkdirAll(repoPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, cmd := range [][]string{
+		{"git", "-C", repoPath, "init", "-b", "main"},
+		{"git", "-C", repoPath, "-c", "user.email=test@test.com", "-c", "user.name=Test", "commit", "--allow-empty", "-m", "init"},
+	} {
+		if _, err := runCmd(cmd[0], cmd[1:]...); err != nil {
+			t.Fatalf("git setup: %v", err)
+		}
+	}
+	if err := os.MkdirAll(filepath.Join(root, ".niwa", "roles", "myrepo"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	sessionsDir := filepath.Join(root, ".niwa", "sessions")
+	if err := os.MkdirAll(sessionsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	sessionID, worktreePath, branch, err := CreateSession(context.Background(), CreateSessionParams{
+		InstanceRoot: root,
+		Repo:         "myrepo",
+		Purpose:      "integration test",
+		GitInvoker:   StdGitInvoker{},
+	})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	if sessionID == "" || worktreePath == "" {
+		t.Fatalf("empty session id or worktree path: %q %q", sessionID, worktreePath)
+	}
+
+	state, err := ReadSessionLifecycleState(sessionsDir, sessionID)
+	if err != nil {
+		t.Fatalf("ReadSessionLifecycleState: %v", err)
+	}
+	if state.Status != SessionStatusActive {
+		t.Errorf("status = %q, want active", state.Status)
+	}
+	if state.Repo != "myrepo" {
+		t.Errorf("repo = %q, want myrepo", state.Repo)
+	}
+	if state.WorktreePath != worktreePath {
+		t.Errorf("WorktreePath = %q, want %q", state.WorktreePath, worktreePath)
+	}
+
+	wantDirs := []string{
+		filepath.Join(worktreePath, ".niwa", "tasks"),
+		filepath.Join(worktreePath, ".niwa", "roles", "myrepo", "inbox"),
+		filepath.Join(worktreePath, ".niwa", "roles", "myrepo", "inbox", "in-progress"),
+	}
+	for _, d := range wantDirs {
+		if _, err := os.Stat(d); err != nil {
+			t.Errorf("missing scaffold dir %s: %v", d, err)
+		}
+	}
+
+	if branch != "session/"+sessionID {
+		t.Errorf("branch = %q, want %q", branch, "session/"+sessionID)
+	}
+	branchOutput, err := runCmd("git", "-C", repoPath, "branch")
+	if err != nil {
+		t.Fatalf("git branch: %v", err)
+	}
+	if !strings.Contains(branchOutput, "session/"+sessionID) {
+		t.Errorf("branch %q not found; got:\n%s", "session/"+sessionID, branchOutput)
+	}
+
+	worktreeOutput, err := runCmd("git", "-C", repoPath, "worktree", "list")
+	if err != nil {
+		t.Fatalf("git worktree list: %v", err)
+	}
+	if !strings.Contains(worktreeOutput, worktreePath) {
+		t.Errorf("worktree %q not listed; got:\n%s", worktreePath, worktreeOutput)
+	}
+}
+
+// TestDestroySession_Integration creates a real session then destroys it,
+// verifying the terminal state transition and idempotency.
+func TestDestroySession_Integration(t *testing.T) {
+	if _, err := runCmd("git", "--version"); err != nil {
+		t.Skip("git not available")
+	}
+
+	root := t.TempDir()
+	repoPath := filepath.Join(root, "group", "myrepo")
+	if err := os.MkdirAll(repoPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, cmd := range [][]string{
+		{"git", "-C", repoPath, "init", "-b", "main"},
+		{"git", "-C", repoPath, "-c", "user.email=test@test.com", "-c", "user.name=Test", "commit", "--allow-empty", "-m", "init"},
+	} {
+		if _, err := runCmd(cmd[0], cmd[1:]...); err != nil {
+			t.Fatalf("git setup: %v", err)
+		}
+	}
+	if err := os.MkdirAll(filepath.Join(root, ".niwa", "roles", "myrepo"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	sessionsDir := filepath.Join(root, ".niwa", "sessions")
+	if err := os.MkdirAll(sessionsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	sessionID, _, _, err := CreateSession(context.Background(), CreateSessionParams{
+		InstanceRoot: root,
+		Repo:         "myrepo",
+		Purpose:      "destroy test",
+		GitInvoker:   StdGitInvoker{},
+	})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	state, err := DestroySession(context.Background(), root, sessionID, true /* force */, StdGitInvoker{})
+	if err != nil {
+		t.Fatalf("DestroySession: %v", err)
+	}
+	if state.Status != SessionStatusEnded {
+		t.Errorf("status = %q, want ended", state.Status)
+	}
+
+	persisted, err := ReadSessionLifecycleState(sessionsDir, sessionID)
+	if err != nil {
+		t.Fatalf("ReadSessionLifecycleState after destroy: %v", err)
+	}
+	if persisted.Status != SessionStatusEnded {
+		t.Errorf("persisted status = %q, want ended", persisted.Status)
+	}
+
+	// Idempotent second destroy returns the terminal state, no error.
+	state2, err := DestroySession(context.Background(), root, sessionID, true, StdGitInvoker{})
+	if err != nil {
+		t.Fatalf("second DestroySession: %v", err)
+	}
+	if state2.Status != SessionStatusEnded {
+		t.Errorf("idempotent destroy status = %q, want ended", state2.Status)
+	}
+}
+
+// runCmd runs a command and returns its combined output.
+func runCmd(name string, args ...string) (string, error) {
+	out, err := exec.Command(name, args...).CombinedOutput()
+	return string(out), err
+}

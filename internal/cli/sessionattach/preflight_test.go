@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/tsukumogami/niwa/internal/mcp"
+	"github.com/tsukumogami/niwa/internal/worktree"
 )
 
 func TestEncodeProjectDirEmpiricalCases(t *testing.T) {
@@ -37,7 +37,7 @@ func TestTranscriptPathLayout(t *testing.T) {
 }
 
 func TestPreflightCaseAEmptyConvID(t *testing.T) {
-	state := mcp.SessionLifecycleState{
+	state := worktree.SessionLifecycleState{
 		SessionID:            "abcd1234",
 		ClaudeConversationID: "", // Case A trigger
 	}
@@ -67,7 +67,7 @@ func TestPreflightCaseAEmptyConvID(t *testing.T) {
 
 func TestPreflightCaseBTranscriptMissing(t *testing.T) {
 	home := t.TempDir()
-	state := mcp.SessionLifecycleState{
+	state := worktree.SessionLifecycleState{
 		SessionID:            "abcd1234",
 		ClaudeConversationID: "11111111-2222-3333-4444-555555555555",
 	}
@@ -98,7 +98,7 @@ func TestPreflightCaseCEmptyTranscript(t *testing.T) {
 	if err := os.WriteFile(path, []byte{}, 0o600); err != nil {
 		t.Fatalf("seed empty file: %v", err)
 	}
-	state := mcp.SessionLifecycleState{
+	state := worktree.SessionLifecycleState{
 		SessionID:            "abcd1234",
 		ClaudeConversationID: convID,
 	}
@@ -126,7 +126,7 @@ func TestPreflightHappyPath(t *testing.T) {
 	if err := os.WriteFile(path, []byte(`{"sessionId":"x"}`), 0o600); err != nil {
 		t.Fatalf("seed transcript: %v", err)
 	}
-	state := mcp.SessionLifecycleState{
+	state := worktree.SessionLifecycleState{
 		SessionID:            "abcd1234",
 		ClaudeConversationID: convID,
 	}

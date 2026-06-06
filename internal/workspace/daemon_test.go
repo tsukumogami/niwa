@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/tsukumogami/niwa/internal/mcp"
+	"github.com/tsukumogami/niwa/internal/worktree"
 )
 
 // ---------------------------------------------------------------------
@@ -87,7 +88,7 @@ func seedRunningTask(t *testing.T, niwaDir, role string, workerPID int) string {
 		t.Fatalf("write envelope: %v", err)
 	}
 
-	startTime, _ := mcp.PIDStartTime(workerPID)
+	startTime, _ := worktree.PIDStartTime(workerPID)
 	st := &mcp.TaskState{
 		V:      1,
 		TaskID: taskID,
@@ -264,7 +265,7 @@ func TestTerminateDaemon_DaemonGraceStillHonored(t *testing.T) {
 	}
 	daemonPID := daemon.Process.Pid
 
-	startTime, _ := mcp.PIDStartTime(daemonPID)
+	startTime, _ := worktree.PIDStartTime(daemonPID)
 	pidContent := strconv.Itoa(daemonPID) + "\n" + strconv.FormatInt(startTime, 10) + "\n"
 	pidPath := filepath.Join(niwaDir, "daemon.pid")
 	if err := os.WriteFile(pidPath, []byte(pidContent), 0o600); err != nil {
@@ -332,7 +333,7 @@ func TestTerminateDaemon_WorkerKilledBeforeDaemonGrace(t *testing.T) {
 	_ = seedRunningTask(t, niwaDir, "web", workerPID)
 
 	// Write daemon.pid.
-	startTime, _ := mcp.PIDStartTime(daemonPID)
+	startTime, _ := worktree.PIDStartTime(daemonPID)
 	pidContent := strconv.Itoa(daemonPID) + "\n" + strconv.FormatInt(startTime, 10) + "\n"
 	_ = os.WriteFile(filepath.Join(niwaDir, "daemon.pid"), []byte(pidContent), 0o600)
 

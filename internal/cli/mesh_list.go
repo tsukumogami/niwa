@@ -11,6 +11,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/tsukumogami/niwa/internal/mcp"
+	"github.com/tsukumogami/niwa/internal/worktree"
 )
 
 func init() {
@@ -69,7 +70,7 @@ func writeMeshListTable(out io.Writer, instanceRoot string, sessions []mcp.Sessi
 		"ROLE", "PID", "STATUS", "LAST-SEEN", "PENDING")
 	for _, s := range sessions {
 		status := "dead"
-		if mcp.IsPIDAlive(s.PID, s.StartTime) {
+		if worktree.IsPIDAlive(s.PID, s.StartTime) {
 			status = "alive"
 		}
 		lastSeen := "-"

@@ -1,4 +1,4 @@
-package mcp
+package worktree
 
 import (
 	"crypto/rand"
@@ -174,6 +174,11 @@ func readPPID(pid int) int {
 
 // NewSessionID generates a random session UUID for use during registration.
 func NewSessionID() string { return newUUID() }
+
+// NewUUID generates a random UUIDv4 (no external dependencies). Exported so
+// the mcp package can reuse the same generator for task and message IDs
+// without re-implementing the crypto/rand formatting.
+func NewUUID() string { return newUUID() }
 
 // PIDStartTime returns the start time for a PID (exported for session_register).
 func PIDStartTime(pid int) (int64, error) { return pidStartTime(pid) }

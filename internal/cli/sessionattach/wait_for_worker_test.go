@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/tsukumogami/niwa/internal/mcp"
+	"github.com/tsukumogami/niwa/internal/worktree"
 )
 
 // seedRunningTaskFixture writes the minimum task-store files (state.json,
@@ -64,9 +65,9 @@ func seedRunningTaskFixture(t *testing.T, mainInstanceRoot, worktreePath, repoNa
 		t.Fatalf("write state: %v", err)
 	}
 
-	// Mark the task as in-progress inside the worktree's role inbox. The
+	// Mark the task as in-progress inside the wtPath's role inbox. The
 	// findRunningWorker scan only counts tasks whose in-progress envelope
-	// lives under this worktree (so a task running in another worktree
+	// lives under this wtPath (so a task running in another wtPath
 	// doesn't trip the wait loop).
 	inboxInProgress := filepath.Join(worktreePath, ".niwa", "roles", repoName, "inbox", "in-progress")
 	if err := os.MkdirAll(inboxInProgress, 0o700); err != nil {
@@ -98,7 +99,7 @@ func startSleepChild(t *testing.T, seconds int) (int, int64) {
 		t.Skipf("sleep not available: %v", err)
 	}
 	pid := cmd.Process.Pid
-	startTime, _ := mcp.PIDStartTime(pid)
+	startTime, _ := worktree.PIDStartTime(pid)
 	reaped := make(chan struct{})
 	go func() {
 		_ = cmd.Wait()
@@ -112,14 +113,14 @@ func startSleepChild(t *testing.T, seconds int) (int, int64) {
 }
 
 // setupRunningWorkerInstance creates the workspace fixture
-// findRunningWorker needs: mainInstanceRoot + a session worktree under it.
+// findRunningWorker needs: mainInstanceRoot + a session wtPath under it.
 func setupRunningWorkerInstance(t *testing.T) (root, worktreePath, repoName string) {
 	t.Helper()
 	root = t.TempDir()
 	repoName = "myrepo"
 	worktreePath = filepath.Join(root, ".niwa", "worktrees", "myrepo-abcd1234")
 	if err := os.MkdirAll(filepath.Join(worktreePath, ".niwa"), 0o700); err != nil {
-		t.Fatalf("mkdir worktree: %v", err)
+		t.Fatalf("mkdir wtPath: %v", err)
 	}
 	return root, worktreePath, repoName
 }
@@ -127,8 +128,8 @@ func setupRunningWorkerInstance(t *testing.T) (root, worktreePath, repoName stri
 // TestFindRunningWorker_NoTasks asserts an empty task store reports no
 // running worker — the baseline path the happy-attach scenario relies on.
 func TestFindRunningWorker_NoTasks(t *testing.T) {
-	root, worktree, _ := setupRunningWorkerInstance(t)
-	if _, ok := findRunningWorker(root, worktree); ok {
+	root, wtPath, _ := setupRunningWorkerInstance(t)
+	if _, ok := findRunningWorker(root, wtPath); ok {
 		t.Errorf("expected no running worker in empty task store")
 	}
 }
@@ -137,11 +138,11 @@ func TestFindRunningWorker_NoTasks(t *testing.T) {
 // state=running with a live PID and an in-progress envelope in the
 // session's inbox; findRunningWorker must surface it.
 func TestFindRunningWorker_LiveTaskInWorktreeInbox(t *testing.T) {
-	root, worktree, repo := setupRunningWorkerInstance(t)
+	root, wtPath, repo := setupRunningWorkerInstance(t)
 	pid, start := startSleepChild(t, 30)
-	taskID := seedRunningTaskFixture(t, root, worktree, repo, pid, start)
+	taskID := seedRunningTaskFixture(t, root, wtPath, repo, pid, start)
 
-	got, ok := findRunningWorker(root, worktree)
+	got, ok := findRunningWorker(root, wtPath)
 	if !ok {
 		t.Fatalf("expected findRunningWorker to surface a task")
 	}
@@ -157,10 +158,10 @@ func TestFindRunningWorker_LiveTaskInWorktreeInbox(t *testing.T) {
 // runs at the end: a task in state=running whose worker.pid is dead does
 // not trip the wait loop.
 func TestFindRunningWorker_DeadHolderIsSkipped(t *testing.T) {
-	root, worktree, repo := setupRunningWorkerInstance(t)
+	root, wtPath, repo := setupRunningWorkerInstance(t)
 	// Use os.Getpid() with a bogus start_time so IsPIDAlive returns false.
-	seedRunningTaskFixture(t, root, worktree, repo, os.Getpid(), 1 /* bogus */)
-	if _, ok := findRunningWorker(root, worktree); ok {
+	seedRunningTaskFixture(t, root, wtPath, repo, os.Getpid(), 1 /* bogus */)
+	if _, ok := findRunningWorker(root, wtPath); ok {
 		t.Errorf("expected dead worker to be skipped")
 	}
 }
@@ -169,10 +170,10 @@ func TestFindRunningWorker_DeadHolderIsSkipped(t *testing.T) {
 // immediately (no wait, no kill) when nothing is running. This is the
 // common case for the happy-path attach.
 func TestHandleRunningWorker_NoWorkerNoOp(t *testing.T) {
-	root, worktree, _ := setupRunningWorkerInstance(t)
+	root, wtPath, _ := setupRunningWorkerInstance(t)
 	var stderr bytes.Buffer
 	opts := Options{InstanceRoot: root, Force: false}
-	if err := handleRunningWorker(context.Background(), opts, worktree, &stderr); err != nil {
+	if err := handleRunningWorker(context.Background(), opts, wtPath, &stderr); err != nil {
 		t.Errorf("unexpected err: %v", err)
 	}
 	if stderr.Len() != 0 {
@@ -184,13 +185,13 @@ func TestHandleRunningWorker_NoWorkerNoOp(t *testing.T) {
 // the running worker's process group is signalled and the function
 // returns after the worker exits within the grace period. Tests AC13.
 func TestHandleRunningWorker_ForceSIGTERMsWorker(t *testing.T) {
-	root, worktree, repo := setupRunningWorkerInstance(t)
+	root, wtPath, repo := setupRunningWorkerInstance(t)
 	pid, start := startSleepChild(t, 60)
-	seedRunningTaskFixture(t, root, worktree, repo, pid, start)
+	seedRunningTaskFixture(t, root, wtPath, repo, pid, start)
 
 	var stderr bytes.Buffer
 	opts := Options{InstanceRoot: root, Force: true, GraceSeconds: 1}
-	err := handleRunningWorker(context.Background(), opts, worktree, &stderr)
+	err := handleRunningWorker(context.Background(), opts, wtPath, &stderr)
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
@@ -200,7 +201,7 @@ func TestHandleRunningWorker_ForceSIGTERMsWorker(t *testing.T) {
 	// Confirm holder is dead.
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
-		if !mcp.IsPIDAlive(pid, start) {
+		if !worktree.IsPIDAlive(pid, start) {
 			return
 		}
 		time.Sleep(20 * time.Millisecond)
@@ -216,13 +217,13 @@ func TestHandleRunningWorker_ForceSIGTERMsWorker(t *testing.T) {
 // reports via either a state-transition out of TaskStateRunning OR a dead
 // PID.
 func TestHandleRunningWorker_WaitsForNaturalExit(t *testing.T) {
-	root, worktree, repo := setupRunningWorkerInstance(t)
+	root, wtPath, repo := setupRunningWorkerInstance(t)
 	// Seed a running task pointing at our own PID (alive). The wait loop
 	// will not terminate based on PID liveness; we'll mutate state.json to
 	// state=completed to simulate a natural exit.
 	myPID := os.Getpid()
-	myStart, _ := mcp.PIDStartTime(myPID)
-	taskID := seedRunningTaskFixture(t, root, worktree, repo, myPID, myStart)
+	myStart, _ := worktree.PIDStartTime(myPID)
+	taskID := seedRunningTaskFixture(t, root, wtPath, repo, myPID, myStart)
 
 	// After 400ms, transition the task to completed.
 	taskDir := filepath.Join(root, ".niwa", "tasks", taskID)
@@ -243,7 +244,7 @@ func TestHandleRunningWorker_WaitsForNaturalExit(t *testing.T) {
 		PollInterval: 50 * time.Millisecond,
 	}
 	startTime := time.Now()
-	if err := handleRunningWorker(context.Background(), opts, worktree, &stderr); err != nil {
+	if err := handleRunningWorker(context.Background(), opts, wtPath, &stderr); err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
 	elapsed := time.Since(startTime)
@@ -259,9 +260,9 @@ func TestHandleRunningWorker_WaitsForNaturalExit(t *testing.T) {
 // wait loop returns a 130 ExitCodeError so the operator can press Ctrl-C
 // to abandon the attach attempt without disturbing the worker.
 func TestHandleRunningWorker_SIGINTAborts(t *testing.T) {
-	root, worktree, repo := setupRunningWorkerInstance(t)
+	root, wtPath, repo := setupRunningWorkerInstance(t)
 	pid, start := startSleepChild(t, 60) // long-lived; would never naturally exit during test
-	seedRunningTaskFixture(t, root, worktree, repo, pid, start)
+	seedRunningTaskFixture(t, root, wtPath, repo, pid, start)
 
 	// Use ctx cancellation as the abort signal — handleRunningWorker selects
 	// on ctx.Done(), which is the same control flow as the SIGINT handler.
@@ -277,7 +278,7 @@ func TestHandleRunningWorker_SIGINTAborts(t *testing.T) {
 		Force:        false,
 		PollInterval: 50 * time.Millisecond,
 	}
-	err := handleRunningWorker(ctx, opts, worktree, &stderr)
+	err := handleRunningWorker(ctx, opts, wtPath, &stderr)
 	var ece *ExitCodeError
 	if !errors.As(err, &ece) {
 		t.Fatalf("want ExitCodeError, got %v", err)
@@ -286,7 +287,7 @@ func TestHandleRunningWorker_SIGINTAborts(t *testing.T) {
 		t.Errorf("Code = %d, want 130 (SIGINT abort per AC14b)", ece.Code)
 	}
 	// Worker should still be alive — abort must not signal the worker.
-	if !mcp.IsPIDAlive(pid, start) {
+	if !worktree.IsPIDAlive(pid, start) {
 		t.Errorf("worker was killed by abort path; abort must leave the worker untouched")
 	}
 }

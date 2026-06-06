@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/tsukumogami/niwa/internal/mcp"
+	"github.com/tsukumogami/niwa/internal/worktree"
 )
 
 // seedSessionList writes a minimal instance layout with two persisted
@@ -36,7 +36,7 @@ func seedSessionList(t *testing.T, includeLiveDaemon bool) string {
 	}
 	if includeLiveDaemon {
 		pid := os.Getpid()
-		startTime, _ := mcp.PIDStartTime(pid)
+		startTime, _ := worktree.PIDStartTime(pid)
 		pidContent := []byte(fmt.Sprintf("%d\n%d\n", pid, startTime))
 		if err := os.WriteFile(filepath.Join(liveWT, ".niwa", "daemon.pid"), pidContent, 0o600); err != nil {
 			t.Fatal(err)
@@ -49,11 +49,11 @@ func seedSessionList(t *testing.T, includeLiveDaemon bool) string {
 		t.Fatal(err)
 	}
 
-	for _, st := range []mcp.SessionLifecycleState{
-		mcp.NewSessionLifecycleState("aabbccdd", "myrepo", "live test", "", liveWT, ""),
-		mcp.NewSessionLifecycleState("11223344", "myrepo", "dead test", "", deadWT, ""),
+	for _, st := range []worktree.SessionLifecycleState{
+		worktree.NewSessionLifecycleState("aabbccdd", "myrepo", "live test", "", liveWT, ""),
+		worktree.NewSessionLifecycleState("11223344", "myrepo", "dead test", "", deadWT, ""),
 	} {
-		if err := mcp.WriteSessionLifecycleState(sessionsDir, st); err != nil {
+		if err := worktree.WriteSessionLifecycleState(sessionsDir, st); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -194,8 +194,8 @@ func TestSessionList_JSONAttachShapeMatchesMCP(t *testing.T) {
 	// Seed the live attach sentinel on the live-daemon session worktree.
 	liveWT := filepath.Join(root, "wt-live")
 	myPID := os.Getpid()
-	myStart, _ := mcp.PIDStartTime(myPID)
-	if err := mcp.WriteAttachState(liveWT, mcp.AttachState{
+	myStart, _ := worktree.PIDStartTime(myPID)
+	if err := worktree.WriteAttachState(liveWT, worktree.AttachState{
 		V:              1,
 		OwnerPID:       myPID,
 		OwnerStartTime: myStart,

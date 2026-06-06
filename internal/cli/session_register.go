@@ -11,6 +11,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/tsukumogami/niwa/internal/mcp"
+	"github.com/tsukumogami/niwa/internal/worktree"
 )
 
 var sessionRegisterRepo string
@@ -42,15 +43,15 @@ func runSessionRegister(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	sessionID := mcp.NewSessionID()
+	sessionID := worktree.NewSessionID()
 	pid := os.Getpid()
 
-	startTime, _ := mcp.PIDStartTime(pid)
+	startTime, _ := worktree.PIDStartTime(pid)
 
 	homeDir, _ := os.UserHomeDir()
 	cwd, _ := os.Getwd()
 
-	claudeSessionID := mcp.DiscoverClaudeSessionID(homeDir, cwd)
+	claudeSessionID := worktree.DiscoverClaudeSessionID(homeDir, cwd)
 	if claudeSessionID == "" {
 		fmt.Fprintln(os.Stderr, "warning: could not discover Claude session ID; claude_session_id will be omitted")
 	}
@@ -102,7 +103,7 @@ func isAlreadyRegistered(instanceRoot, role string) bool {
 		return false
 	}
 	for _, s := range registry.Sessions {
-		if s.Role == role && mcp.IsPIDAlive(s.PID, s.StartTime) {
+		if s.Role == role && worktree.IsPIDAlive(s.PID, s.StartTime) {
 			return true
 		}
 	}
@@ -153,4 +154,3 @@ func deriveRole(flagRole, repo, instanceRoot string) string {
 	}
 	return "coordinator"
 }
-

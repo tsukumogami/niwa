@@ -1,4 +1,4 @@
-package mcp
+package worktree
 
 import (
 	"crypto/rand"
@@ -21,6 +21,14 @@ var sessionIDRe = regexp.MustCompile(`^[0-9a-f]{8}$`)
 // sessions.json and any .tmp files.
 var sessionFileRe = regexp.MustCompile(`^[0-9a-f]{8}\.json$`)
 
+// ValidSessionID reports whether id matches the 8-character lowercase hex
+// session ID format. Exported so callers outside the package (e.g. the
+// change-create handler) can reject malformed session IDs before
+// constructing a path from them.
+func ValidSessionID(id string) bool {
+	return sessionIDRe.MatchString(id)
+}
+
 // SessionLifecycleState is the on-disk schema for a per-session lifecycle
 // state file at <instance>/.niwa/sessions/<session-id>.json.
 //
@@ -28,14 +36,14 @@ var sessionFileRe = regexp.MustCompile(`^[0-9a-f]{8}\.json$`)
 // The two types share no fields and are written by separate code paths.
 // Schema version v=1.
 type SessionLifecycleState struct {
-	V                    int    `json:"v"`
-	SessionID            string `json:"session_id"`
-	ParentSessionID      string `json:"parent_session_id,omitempty"`
-	Repo                 string `json:"repo"`
-	Purpose              string `json:"purpose"`
-	Status               string `json:"status"`
-	CreationTime         string `json:"creation_time"`
-	WorktreePath         string `json:"worktree_path"`
+	V               int    `json:"v"`
+	SessionID       string `json:"session_id"`
+	ParentSessionID string `json:"parent_session_id,omitempty"`
+	Repo            string `json:"repo"`
+	Purpose         string `json:"purpose"`
+	Status          string `json:"status"`
+	CreationTime    string `json:"creation_time"`
+	WorktreePath    string `json:"worktree_path"`
 	// BranchName is the git branch name backing this session's worktree.
 	// Added in v1.1 of the schema. Pre-v1.1 state files omit this field;
 	// readers must call EffectiveBranchName() (NOT read BranchName directly)

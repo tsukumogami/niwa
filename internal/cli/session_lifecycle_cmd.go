@@ -1,7 +1,9 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"sort"
@@ -9,8 +11,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/tsukumogami/niwa/internal/cli/sessionattach"
-	"github.com/tsukumogami/niwa/internal/mcp"
-	"github.com/tsukumogami/niwa/internal/workspace"
+	"github.com/tsukumogami/niwa/internal/worktree"
 )
 
 func init() {
@@ -23,8 +24,8 @@ var sessionCreateCmd = &cobra.Command{
 	Short: "Create a new git-worktree session for a repo",
 	Long: `Create a new git-worktree session for a repo.
 
-Scaffolds a git worktree under .niwa/worktrees/<repo>-<session-id>/,
-writes the session lifecycle state, and starts the per-worktree daemon.
+Scaffolds a git worktree under .niwa/worktrees/<repo>-<session-id>/ and
+writes the session lifecycle state.
 
 On success the shell wrapper navigates to the new worktree directory.`,
 	// We don't use cobra.ExactArgs because its default error exits 1 with a
@@ -39,9 +40,9 @@ On success the shell wrapper navigates to the new worktree directory.`,
 var sessionDestroyCmd = &cobra.Command{
 	Use:   "destroy <session-id>",
 	Short: "Destroy a session and remove its worktree",
-	Long: `Destroy a session: kill running workers, mark the session ended,
-stop the per-worktree daemon, remove the worktree, and delete the session
-branch (only if already merged; use --force to delete regardless).`,
+	Long: `Destroy a session: mark the session ended, remove the worktree, and
+delete the session branch (only if already merged; use --force to delete
+regardless).`,
 	// Same reasoning as sessionCreateCmd: RunE handles missing-arg with a
 	// usage string and exit code 2 via *sessionattach.ExitCodeError.
 	Args:              cobra.MaximumNArgs(1),
@@ -87,34 +88,28 @@ func runSessionCreate(cmd *cobra.Command, args []string) error {
 	repo := args[0]
 	purpose := args[1]
 
-	srv := mcp.New("coordinator", instanceRoot)
-	srv.SetDaemonFuncs(makeDaemonStarter(), workspace.TerminateDaemon)
-
-	result := srv.CreateSessionDirect(repo, purpose, "")
-	if result.IsError {
-		return renderMCPError(result.Content[0].Text)
+	sessionID, worktreePath, _, err := worktree.CreateSession(context.Background(), worktree.CreateSessionParams{
+		InstanceRoot: instanceRoot,
+		Repo:         repo,
+		Purpose:      purpose,
+		GitInvoker:   worktree.StdGitInvoker{},
+	})
+	if err != nil {
+		if errors.Is(err, worktree.ErrSessionUnknownRole) {
+			return fmt.Errorf("niwa: error: %v", err)
+		}
+		return fmt.Errorf("niwa: error: creating session: %w", err)
 	}
 
-	var resp struct {
-		SessionID    string `json:"session_id"`
-		WorktreePath string `json:"worktree_path"`
-		DaemonWarn   string `json:"daemon_warning,omitempty"`
-	}
-	if err := json.Unmarshal([]byte(result.Content[0].Text), &resp); err != nil {
-		return fmt.Errorf("parsing session response: %w", err)
-	}
-	if resp.DaemonWarn != "" {
-		fmt.Fprintln(cmd.ErrOrStderr(), "warning:", resp.DaemonWarn)
-	}
 	// Issue 10: success summary on stdout so callers can pipe it.
 	// Landing-path delivery uses NIWA_RESPONSE_FILE separately; the
 	// shell wrapper's stdout-cd target is unaffected.
-	fmt.Fprintf(cmd.OutOrStdout(), "session: created %s at %s\n", resp.SessionID, resp.WorktreePath)
+	fmt.Fprintf(cmd.OutOrStdout(), "session: created %s at %s\n", sessionID, worktreePath)
 
-	if err := validateLandingPath(resp.WorktreePath); err != nil {
+	if err := validateLandingPath(worktreePath); err != nil {
 		return err
 	}
-	if err := writeLandingPath(resp.WorktreePath); err != nil {
+	if err := writeLandingPath(worktreePath); err != nil {
 		return err
 	}
 	hintShellInit(cmd)
@@ -135,22 +130,12 @@ func runSessionDestroy(cmd *cobra.Command, args []string) error {
 	}
 	sessionID := args[0]
 
-	srv := mcp.New("coordinator", instanceRoot)
-	srv.SetDaemonFuncs(makeDaemonStarter(), workspace.TerminateDaemon)
-
-	result := srv.DestroySessionDirect(sessionID, sessionDestroyForce)
-	if result.IsError {
-		return renderMCPError(result.Content[0].Text)
+	state, err := worktree.DestroySession(context.Background(), instanceRoot, sessionID, sessionDestroyForce, worktree.StdGitInvoker{})
+	if err != nil {
+		return fmt.Errorf("niwa: error: destroying session %s: %w", sessionID, err)
 	}
-
-	var resp struct {
-		BranchWarn string `json:"branch_warning,omitempty"`
-	}
-	if err := json.Unmarshal([]byte(result.Content[0].Text), &resp); err != nil {
-		return fmt.Errorf("parsing destroy response: %w", err)
-	}
-	if resp.BranchWarn != "" {
-		fmt.Fprintln(cmd.ErrOrStderr(), "warning:", resp.BranchWarn)
+	if state.BranchWarning != "" {
+		fmt.Fprintln(cmd.ErrOrStderr(), "warning:", state.BranchWarning)
 	}
 
 	// Issue 10: destroy success on stdout, matching create.
@@ -164,9 +149,9 @@ func runSessionDestroy(cmd *cobra.Command, args []string) error {
 // present.
 //
 // Each row's AVAILABILITY value is projected from the per-worktree
-// attach.state sentinel via mcp.ReadAttachState (with reapStale=true so
+// attach.state sentinel via worktree.ReadAttachState (with reapStale=true so
 // the listing pass naturally cleans up dead-holder sentinels). Each row's
-// DAEMON value comes from mcp.DaemonHealthFor (reads daemon.pid + checks
+// DAEMON value comes from worktree.DaemonHealthFor (reads daemon.pid + checks
 // liveness).
 //
 // Sort order matches PRD R17: attached first (the operator's hot question
@@ -182,7 +167,7 @@ func runSessionLifecycleList(cmd *cobra.Command, repo, status string, onlyAttach
 	}
 
 	sessionsDir := filepath.Join(instanceRoot, ".niwa", "sessions")
-	all, err := mcp.ListSessionLifecycleStates(sessionsDir)
+	all, err := worktree.ListSessionLifecycleStates(sessionsDir)
 	if err != nil {
 		return fmt.Errorf("listing sessions: %w", err)
 	}
@@ -195,24 +180,24 @@ func runSessionLifecycleList(cmd *cobra.Command, repo, status string, onlyAttach
 		if status != "" && st.Status != status {
 			continue
 		}
-		attachState, avail, _ := mcp.ReadAttachState(st.WorktreePath, true /* reap dead-holder sentinels */)
-		if onlyAttached && avail != mcp.AttachAttached {
+		attachState, avail, _ := worktree.ReadAttachState(st.WorktreePath, true /* reap dead-holder sentinels */)
+		if onlyAttached && avail != worktree.AttachAttached {
 			continue
 		}
-		if onlyAvailable && avail != mcp.AttachAvailable {
+		if onlyAvailable && avail != worktree.AttachAvailable {
 			continue
 		}
 		// Project the live attach state onto the embedded
 		// SessionLifecycleState so the CLI JSON wire shape matches what
 		// niwa_list_sessions emits: same struct, same `attach` key
 		// shape, absent when no live lock is held.
-		if avail == mcp.AttachAttached && attachState != nil {
+		if avail == worktree.AttachAttached && attachState != nil {
 			st.Attach = attachState
 		}
 		rows = append(rows, lifecycleRow{
 			state:  st,
 			avail:  avail,
-			daemon: mcp.DaemonHealthFor(st.WorktreePath),
+			daemon: worktree.DaemonHealthFor(st.WorktreePath),
 		})
 	}
 	sort.SliceStable(rows, func(i, j int) bool {
@@ -262,8 +247,8 @@ func runSessionLifecycleList(cmd *cobra.Command, repo, status string, onlyAttach
 //  4. creation_time descending (newest first)
 func rowSortLess(a, b lifecycleRow) bool {
 	// Key 1: attached < others.
-	aAttached := a.avail == mcp.AttachAttached
-	bAttached := b.avail == mcp.AttachAttached
+	aAttached := a.avail == worktree.AttachAttached
+	bAttached := b.avail == worktree.AttachAttached
 	if aAttached != bAttached {
 		return aAttached // true sorts first
 	}
@@ -281,11 +266,11 @@ func rowSortLess(a, b lifecycleRow) bool {
 
 func statusRank(s string) int {
 	switch s {
-	case mcp.SessionStatusActive:
+	case worktree.SessionStatusActive:
 		return 0
-	case mcp.SessionStatusEnded:
+	case worktree.SessionStatusEnded:
 		return 1
-	case mcp.SessionStatusAbandoned:
+	case worktree.SessionStatusAbandoned:
 		return 2
 	default:
 		return 3
@@ -294,14 +279,14 @@ func statusRank(s string) int {
 
 // availabilityForTable reduces an AttachAvailability to one of the three
 // values rendered in the AVAILABILITY column.
-func availabilityForTable(a mcp.AttachAvailability) string {
+func availabilityForTable(a worktree.AttachAvailability) string {
 	switch a {
-	case mcp.AttachAttached:
-		return string(mcp.AttachAttached)
-	case mcp.AttachStale:
-		return string(mcp.AttachStale)
+	case worktree.AttachAttached:
+		return string(worktree.AttachAttached)
+	case worktree.AttachStale:
+		return string(worktree.AttachStale)
 	default:
-		return string(mcp.AttachAvailable)
+		return string(worktree.AttachAvailable)
 	}
 }
 
@@ -310,9 +295,9 @@ func availabilityForTable(a mcp.AttachAvailability) string {
 // (from .niwa/attach.state) and daemon health (from .niwa/daemon.pid).
 // Neither projection is persisted; both are read on every list.
 type lifecycleRow struct {
-	state  mcp.SessionLifecycleState
-	avail  mcp.AttachAvailability
-	daemon mcp.DaemonHealth
+	state  worktree.SessionLifecycleState
+	avail  worktree.AttachAvailability
+	daemon worktree.DaemonHealth
 }
 
 // sessionListJSONRow is the wire shape returned by
@@ -325,9 +310,9 @@ type lifecycleRow struct {
 // (sentinel present but reaped) from `available` (no sentinel) without
 // having to walk PIDs themselves.
 type sessionListJSONRow struct {
-	mcp.SessionLifecycleState
-	Daemon       mcp.DaemonHealth `json:"daemon"`
-	Availability string           `json:"availability"`
+	worktree.SessionLifecycleState
+	Daemon       worktree.DaemonHealth `json:"daemon"`
+	Availability string                `json:"availability"`
 }
 
 func writeSessionLifecycleTable(out interface{ Write([]byte) (int, error) }, rows []lifecycleRow, verbose bool) {

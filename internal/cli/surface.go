@@ -56,6 +56,7 @@ import (
 	"github.com/tsukumogami/niwa/internal/mcp"
 	"github.com/tsukumogami/niwa/internal/web"
 	"github.com/tsukumogami/niwa/internal/web/gc"
+	"github.com/tsukumogami/niwa/internal/worktree"
 )
 
 // surfaceServeFlags captures the parsed --port and --rotate-token values
@@ -286,7 +287,7 @@ func acquireSurfaceLock(lockPath string) error {
 		}
 		return tryCreateSurfaceLock(lockPath)
 	}
-	if mcp.IsProcessAlive(pid) {
+	if worktree.IsProcessAlive(pid) {
 		return fmt.Errorf("surface.lock held by PID %d", pid)
 	}
 	// Stale PID — reap and retry once.
@@ -338,7 +339,7 @@ func ensureSurfaceToken(configDir string, rotate bool) (string, error) {
 }
 
 func writeSurfaceToken(path string) error {
-	token := mcp.NewSessionID() // UUIDv4 from crypto/rand
+	token := worktree.NewSessionID() // UUIDv4 from crypto/rand
 	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, []byte(token+"\n"), 0o600); err != nil {
 		return fmt.Errorf("write surface.token tmp: %w", err)

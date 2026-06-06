@@ -25,6 +25,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/tsukumogami/niwa/internal/worktree"
 )
 
 // progressSummaryLimit truncates incoming progress summaries to bound the
@@ -296,11 +298,11 @@ func (s *Server) resolveCreationInboxDir(sessionID, role string) (string, toolRe
 		return filepath.Join(s.instanceRoot, ".niwa", "roles", role, "inbox"), toolResult{}
 	}
 	sessionsDir := filepath.Join(s.instanceRoot, ".niwa", "sessions")
-	session, err := ReadSessionLifecycleState(sessionsDir, sessionID)
+	session, err := worktree.ReadSessionLifecycleState(sessionsDir, sessionID)
 	if err != nil {
 		return "", errResultCode("SESSION_NOT_FOUND", fmt.Sprintf("session %q not found: %v", sessionID, err))
 	}
-	if session.Status != SessionStatusActive {
+	if session.Status != worktree.SessionStatusActive {
 		return "", errResultCode("SESSION_INACTIVE", fmt.Sprintf("session %q status is %q, want active", sessionID, session.Status))
 	}
 	// Guard worktree against the main instance root (the coordinator's root, not
@@ -330,7 +332,7 @@ func (s *Server) resolveCreationInboxDir(sessionID, role string) (string, toolRe
 func (s *Server) resolveInboxDir(sessionID, role string) (string, toolResult) {
 	if sessionID != "" {
 		sessionsDir := filepath.Join(s.instanceRoot, ".niwa", "sessions")
-		session, err := ReadSessionLifecycleState(sessionsDir, sessionID)
+		session, err := worktree.ReadSessionLifecycleState(sessionsDir, sessionID)
 		if err != nil {
 			return "", errResultCode("SESSION_NOT_FOUND", fmt.Sprintf("session %q not found: %v", sessionID, err))
 		}
@@ -1125,7 +1127,7 @@ func (s *Server) sendTaskMessage(toRole, msgType, taskID string, body any) {
 // reaches the main-instance inbox rather than being lost.
 func (s *Server) sendTaskMessageInSession(sessionID, toRole, msgType, taskID string, body any) {
 	sessionsDir := filepath.Join(s.taskStoreRoot(), ".niwa", "sessions")
-	session, err := ReadSessionLifecycleState(sessionsDir, sessionID)
+	session, err := worktree.ReadSessionLifecycleState(sessionsDir, sessionID)
 	if err != nil {
 		s.sendTaskMessage(toRole, msgType, taskID, body)
 		return
@@ -1145,7 +1147,7 @@ func (s *Server) writeTaskMessage(inboxDir, toRole, msgType, taskID string, body
 	if err != nil {
 		return
 	}
-	msgID := newUUID()
+	msgID := worktree.NewUUID()
 	msg := Message{
 		V:      1,
 		ID:     msgID,

@@ -9,7 +9,7 @@
 // pattern (see newSessionLifecycleID); the helper hoists the same control
 // flow so the F5 changestore (and any future per-directory namespace) can
 // reuse it without duplicating the retry loop.
-package mcp
+package worktree
 
 import (
 	"fmt"

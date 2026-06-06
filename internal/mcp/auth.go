@@ -24,6 +24,8 @@ package mcp
 
 import (
 	"path/filepath"
+
+	"github.com/tsukumogami/niwa/internal/worktree"
 )
 
 // accessKind enumerates the three authorization categories. Unexported so
@@ -193,7 +195,7 @@ func checkExecutor(id authIdentity, st *TaskState) *toolResult {
 	// /proc is absent; start_time returns 0 and we degrade to PID-match
 	// only per PRD Known Limitation).
 	if st.Worker.PID > 0 && st.Worker.StartTime > 0 {
-		chain, err := PPIDChain(1)
+		chain, err := worktree.PPIDChain(1)
 		if err != nil || len(chain) == 0 {
 			// Unable to read the parent PID: on Linux this is a hard
 			// failure (we expect a live claude -p parent); on macOS the
@@ -207,7 +209,7 @@ func checkExecutor(id authIdentity, st *TaskState) *toolResult {
 			r := errResultCode("NOT_TASK_PARTY", "not authorized for this task")
 			return &r
 		}
-		start, err := PIDStartTime(parentPID)
+		start, err := worktree.PIDStartTime(parentPID)
 		if err == nil && start != st.Worker.StartTime {
 			// Only treat a successful-but-divergent start_time as a
 			// failure. An error from PIDStartTime (macOS, read failure)

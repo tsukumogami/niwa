@@ -1,4 +1,4 @@
-package mcp
+package worktree
 
 import (
 	"encoding/base64"
@@ -15,6 +15,13 @@ import (
 // Values that don't match are rejected so invalid input can never reach
 // sessions.json or exec.Command.
 var sessionIDRegex = regexp.MustCompile(`^[a-zA-Z0-9_-]{8,128}$`)
+
+// ValidClaudeSessionID reports whether id is a syntactically valid Claude
+// session ID. Exported so callers outside the package can reject malformed
+// CLAUDE_SESSION_ID values before persisting them.
+func ValidClaudeSessionID(id string) bool {
+	return sessionIDRegex.MatchString(id)
+}
 
 // DiscoverClaudeSessionID tries three tiers to find the Claude session ID:
 //

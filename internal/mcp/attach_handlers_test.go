@@ -7,9 +7,11 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/tsukumogami/niwa/internal/worktree"
 )
 
-// seedAttachableSession writes a single SessionLifecycleState file plus a
+// seedAttachableSession writes a single worktree.SessionLifecycleState file plus a
 // minimal worktree directory under instanceRoot. Returns the worktree path
 // so the test can seed an attach.state sentinel under it.
 func seedAttachableSession(t *testing.T, instanceRoot, sessionID string) string {
@@ -22,15 +24,15 @@ func seedAttachableSession(t *testing.T, instanceRoot, sessionID string) string 
 	if err := os.MkdirAll(filepath.Join(worktreePath, ".niwa"), 0o700); err != nil {
 		t.Fatalf("mkdir worktree: %v", err)
 	}
-	state := SessionLifecycleState{
+	state := worktree.SessionLifecycleState{
 		V:            1,
 		SessionID:    sessionID,
 		Repo:         "niwa",
-		Status:       SessionStatusActive,
+		Status:       worktree.SessionStatusActive,
 		WorktreePath: worktreePath,
 		CreationTime: time.Now().UTC().Format(time.RFC3339),
 	}
-	if err := WriteSessionLifecycleState(sessionsDir, state); err != nil {
+	if err := worktree.WriteSessionLifecycleState(sessionsDir, state); err != nil {
 		t.Fatalf("write lifecycle state: %v", err)
 	}
 	return worktreePath
@@ -41,8 +43,8 @@ func seedAttachableSession(t *testing.T, instanceRoot, sessionID string) string 
 func seedLiveAttachSentinel(t *testing.T, worktreePath string) {
 	t.Helper()
 	pid := os.Getpid()
-	start, _ := PIDStartTime(pid)
-	if err := WriteAttachState(worktreePath, AttachState{
+	start, _ := worktree.PIDStartTime(pid)
+	if err := worktree.WriteAttachState(worktreePath, worktree.AttachState{
 		V:              1,
 		OwnerPID:       pid,
 		OwnerStartTime: start,
@@ -98,12 +100,12 @@ func TestHandleDestroySession_ProceedsWhenAttachedWithForce(t *testing.T) {
 		t.Fatalf("expected success with force, got error: %s", result.Content[0].Text)
 	}
 	// Confirm the state transitioned to ended.
-	st, err := ReadSessionLifecycleState(filepath.Join(root, ".niwa", "sessions"), "abcd1234")
+	st, err := worktree.ReadSessionLifecycleState(filepath.Join(root, ".niwa", "sessions"), "abcd1234")
 	if err != nil {
 		t.Fatalf("read state: %v", err)
 	}
-	if st.Status != SessionStatusEnded {
-		t.Errorf("status = %q, want %q", st.Status, SessionStatusEnded)
+	if st.Status != worktree.SessionStatusEnded {
+		t.Errorf("status = %q, want %q", st.Status, worktree.SessionStatusEnded)
 	}
 }
 
@@ -118,7 +120,7 @@ func TestHandleListSessions_AttachProjection(t *testing.T) {
 	if result.IsError {
 		t.Fatalf("unexpected error: %s", result.Content[0].Text)
 	}
-	var got []SessionLifecycleState
+	var got []worktree.SessionLifecycleState
 	if err := json.Unmarshal([]byte(result.Content[0].Text), &got); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
@@ -170,7 +172,7 @@ func TestHandleListSessions_AttachedFilter(t *testing.T) {
 	if result.IsError {
 		t.Fatalf("unexpected error: %s", result.Content[0].Text)
 	}
-	var got []SessionLifecycleState
+	var got []worktree.SessionLifecycleState
 	_ = json.Unmarshal([]byte(result.Content[0].Text), &got)
 	if len(got) != 1 || got[0].SessionID != "22222222" {
 		t.Errorf("attached filter returned %d rows: %+v", len(got), got)
@@ -188,7 +190,7 @@ func TestHandleListSessions_AvailableFilter(t *testing.T) {
 	if result.IsError {
 		t.Fatalf("unexpected error: %s", result.Content[0].Text)
 	}
-	var got []SessionLifecycleState
+	var got []worktree.SessionLifecycleState
 	_ = json.Unmarshal([]byte(result.Content[0].Text), &got)
 	if len(got) != 1 || got[0].SessionID != "11111111" {
 		t.Errorf("available filter returned %d rows: %+v", len(got), got)

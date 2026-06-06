@@ -31,6 +31,8 @@ import (
 	"regexp"
 	"syscall"
 	"time"
+
+	"github.com/tsukumogami/niwa/internal/worktree"
 )
 
 // Task-store error values surfaced to callers. Every caller (daemon, MCP
@@ -95,7 +97,7 @@ const (
 // NewTaskID returns a fresh UUIDv4 sourced from crypto/rand. Task IDs must be
 // unpredictable so a same-UID attacker cannot pre-seed `.niwa/tasks/<id>/`
 // before the daemon creates it (DESIGN Key Interfaces).
-func NewTaskID() string { return newUUID() }
+func NewTaskID() string { return worktree.NewUUID() }
 
 // OpenTaskLock opens `<taskDir>/.lock` with O_NOFOLLOW, creating it with mode
 // 0600 if needed. Callers flock this descriptor for the duration of their

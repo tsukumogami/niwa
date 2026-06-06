@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/tsukumogami/niwa/internal/worktree"
 )
 
 // deadPID returns a PID that is virtually guaranteed not to exist.
@@ -15,7 +17,7 @@ const deadPID = 999999999
 // liveEntry returns a SessionEntry whose PID is the current process (always alive).
 func liveEntry(role string) SessionEntry {
 	pid := os.Getpid()
-	start, _ := PIDStartTime(pid)
+	start, _ := worktree.PIDStartTime(pid)
 	return SessionEntry{
 		ID:           "test-live",
 		Role:         role,

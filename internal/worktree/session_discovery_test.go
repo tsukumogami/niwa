@@ -1,4 +1,4 @@
-package mcp
+package worktree
 
 import (
 	"encoding/base64"

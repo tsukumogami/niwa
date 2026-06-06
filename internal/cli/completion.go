@@ -9,8 +9,8 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/tsukumogami/niwa/internal/config"
-	"github.com/tsukumogami/niwa/internal/mcp"
 	"github.com/tsukumogami/niwa/internal/workspace"
+	"github.com/tsukumogami/niwa/internal/worktree"
 )
 
 // completeWorkspaceNames is the completion closure for any position that
@@ -84,7 +84,7 @@ func completeRepoNames(cmd *cobra.Command, args []string, toComplete string) ([]
 // session ID: the positional arg of `niwa session destroy`,
 // `niwa session attach`, and `niwa session detach`. It enumerates session
 // lifecycle state files under <instanceRoot>/.niwa/sessions/ via
-// mcp.ListSessionLifecycleStates.
+// worktree.ListSessionLifecycleStates.
 //
 // Instance resolution matches the runtime path used by the same commands
 // (resolveInstanceRoot): NIWA_INSTANCE_ROOT wins if set, otherwise we walk
@@ -103,7 +103,7 @@ func completeSessionIDs(cmd *cobra.Command, args []string, toComplete string) ([
 		return nil, cobra.ShellCompDirectiveNoFileComp
 	}
 	sessionsDir := filepath.Join(instanceRoot, ".niwa", "sessions")
-	states, err := mcp.ListSessionLifecycleStates(sessionsDir)
+	states, err := worktree.ListSessionLifecycleStates(sessionsDir)
 	if err != nil || len(states) == 0 {
 		return nil, cobra.ShellCompDirectiveNoFileComp
 	}

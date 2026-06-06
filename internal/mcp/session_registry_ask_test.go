@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/tsukumogami/niwa/internal/worktree"
 )
 
 // writeSessionsJSON writes sessions.json for the test's instanceRoot.
@@ -54,7 +56,7 @@ func TestHandleAsk_LiveCoordinator_WritesTaskAsk(t *testing.T) {
 
 	// Register a live coordinator in sessions.json.
 	pid := os.Getpid()
-	start, _ := PIDStartTime(pid)
+	start, _ := worktree.PIDStartTime(pid)
 	writeSessionsJSON(t, root, []SessionEntry{{
 		ID:           "coord-session",
 		Role:         "coordinator",
@@ -275,7 +277,7 @@ func TestHandleAsk_SessionWorktreeRoutesToMainInstance(t *testing.T) {
 
 	// Register a live coordinator in the main root's sessions.json.
 	pid := os.Getpid()
-	start, _ := PIDStartTime(pid)
+	start, _ := worktree.PIDStartTime(pid)
 	writeSessionsJSON(t, mainRoot, []SessionEntry{{
 		ID:           "coord-session",
 		Role:         "coordinator",
@@ -424,15 +426,15 @@ func TestHandleFinishTask_AsksAnswerRoutesToSessionWorktreeInbox(t *testing.T) {
 		t.Fatalf("mkdir sessions dir: %v", err)
 	}
 	sessionID := "deadbeef"
-	sessionState := SessionLifecycleState{
+	sessionState := worktree.SessionLifecycleState{
 		V:            1,
 		SessionID:    sessionID,
 		Repo:         "app",
-		Status:       SessionStatusActive,
+		Status:       worktree.SessionStatusActive,
 		WorktreePath: worktreeRoot,
 		CreationTime: time.Now().UTC().Format(time.RFC3339),
 	}
-	if err := WriteSessionLifecycleState(sessionsDir, sessionState); err != nil {
+	if err := worktree.WriteSessionLifecycleState(sessionsDir, sessionState); err != nil {
 		t.Fatalf("write session state: %v", err)
 	}
 

@@ -17,6 +17,7 @@ import (
 	"github.com/cucumber/godog"
 	"github.com/tsukumogami/niwa/internal/mcp"
 	"github.com/tsukumogami/niwa/internal/workspace"
+	"github.com/tsukumogami/niwa/internal/worktree"
 )
 
 // mesh_steps_test.go holds the step definitions introduced by Issue #10
@@ -1724,7 +1725,7 @@ func theCoordinatorSessionIsRegisteredInInstance(ctx context.Context, instance s
 		return ctx, fmt.Errorf("mkdir sessions: %w", err)
 	}
 	pid := os.Getpid()
-	start, _ := mcp.PIDStartTime(pid)
+	start, _ := worktree.PIDStartTime(pid)
 	entry := mcp.SessionEntry{
 		ID:           newTestUUIDv4(),
 		Role:         "coordinator",

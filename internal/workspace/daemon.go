@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/tsukumogami/niwa/internal/mcp"
+	"github.com/tsukumogami/niwa/internal/worktree"
 )
 
 // ErrDaemonSpawnTimeout is returned by EnsureDaemonRunning when the spawned
@@ -54,7 +55,7 @@ func EnsureDaemonRunning(instanceRoot string, extraEnv []string) error {
 		startTime = 0
 	}
 
-	if pid != 0 && mcp.IsPIDAlive(pid, startTime) {
+	if pid != 0 && worktree.IsPIDAlive(pid, startTime) {
 		return nil // daemon already running
 	}
 
@@ -148,7 +149,7 @@ func TerminateDaemon(instanceRoot string) error {
 		return nil // no daemon running
 	}
 
-	if !mcp.IsPIDAlive(pid, startTime) {
+	if !worktree.IsPIDAlive(pid, startTime) {
 		_ = os.Remove(filepath.Join(niwaDir, "daemon.pid"))
 		return nil
 	}
@@ -169,7 +170,7 @@ func TerminateDaemon(instanceRoot string) error {
 	deadline := time.Now().Add(grace)
 	for time.Now().Before(deadline) {
 		time.Sleep(100 * time.Millisecond)
-		if !mcp.IsPIDAlive(pid, startTime) {
+		if !worktree.IsPIDAlive(pid, startTime) {
 			_ = os.Remove(filepath.Join(niwaDir, "daemon.pid"))
 			return nil
 		}

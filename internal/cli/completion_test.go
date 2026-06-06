@@ -10,8 +10,8 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
-	"github.com/tsukumogami/niwa/internal/mcp"
 	"github.com/tsukumogami/niwa/internal/workspace"
+	"github.com/tsukumogami/niwa/internal/worktree"
 )
 
 // sandboxHome sets HOME and XDG_CONFIG_HOME to a fresh temp dir per test so
@@ -328,7 +328,7 @@ func TestCompleteGoTarget_NoArgs_EmptyWhenNothingMatches(t *testing.T) {
 
 // writeSessionState writes a minimal SessionLifecycleState JSON file under
 // <instanceRoot>/.niwa/sessions/<id>.json so completeSessionIDs can pick
-// it up. The schema mirrors what mcp.WriteSessionLifecycleState produces,
+// it up. The schema mirrors what worktree.WriteSessionLifecycleState produces,
 // but we write directly to bypass the regexp guard on session ID format
 // (the test IDs are all valid 8-hex anyway).
 func writeSessionState(t *testing.T, instanceRoot, id string) {
@@ -337,7 +337,7 @@ func writeSessionState(t *testing.T, instanceRoot, id string) {
 	if err := os.MkdirAll(sessionsDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	state := mcp.SessionLifecycleState{
+	state := worktree.SessionLifecycleState{
 		V:         1,
 		SessionID: id,
 		Repo:      "test-repo",

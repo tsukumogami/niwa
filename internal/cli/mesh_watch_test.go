@@ -18,6 +18,7 @@ import (
 	"github.com/fsnotify/fsnotify"
 	"github.com/tsukumogami/niwa/internal/mcp"
 	"github.com/tsukumogami/niwa/internal/workspace"
+	"github.com/tsukumogami/niwa/internal/worktree"
 )
 
 // ---------------------------------------------------------------------
@@ -2587,7 +2588,7 @@ func TestReconcile_LiveOrphan(t *testing.T) {
 	// long enough for reconciliation to classify it as alive; the test
 	// cleanup kills it.
 	orphan := startFakeWorker(t, []string{"/bin/sleep", "30"})
-	startTime, err := mcp.PIDStartTime(orphan.Process.Pid)
+	startTime, err := worktree.PIDStartTime(orphan.Process.Pid)
 	if err != nil {
 		t.Fatalf("PIDStartTime: %v", err)
 	}
@@ -2684,7 +2685,7 @@ func TestReconcile_StartTimeDivergence(t *testing.T) {
 	// Pick our own PID (definitely alive) but record a stale start_time.
 	// IsPIDAlive will compare the recorded start_time against /proc and
 	// return false on mismatch, which drives the dead-worker branch.
-	realStart, err := mcp.PIDStartTime(os.Getpid())
+	realStart, err := worktree.PIDStartTime(os.Getpid())
 	if err != nil {
 		t.Fatalf("PIDStartTime: %v", err)
 	}
@@ -2711,7 +2712,7 @@ func TestOrphanPolling_WorkerCompletes(t *testing.T) {
 	f := newDaemonTestFixture(t)
 
 	worker := startFakeWorker(t, []string{"/bin/sleep", "30"})
-	startTime, err := mcp.PIDStartTime(worker.Process.Pid)
+	startTime, err := worktree.PIDStartTime(worker.Process.Pid)
 	if err != nil {
 		t.Fatalf("PIDStartTime: %v", err)
 	}
@@ -2766,7 +2767,7 @@ func TestOrphanPolling_WorkerDies(t *testing.T) {
 	// Start, record, and immediately kill the worker. IsPIDAlive will
 	// return false, and the orphan poller should reclassify.
 	worker := startFakeWorker(t, []string{"/bin/sleep", "30"})
-	startTime, err := mcp.PIDStartTime(worker.Process.Pid)
+	startTime, err := worktree.PIDStartTime(worker.Process.Pid)
 	if err != nil {
 		t.Fatalf("PIDStartTime: %v", err)
 	}
@@ -2783,7 +2784,7 @@ func TestOrphanPolling_WorkerDies(t *testing.T) {
 	// Wait for the kernel to reap the PID so IsPIDAlive returns false.
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if !mcp.IsPIDAlive(worker.Process.Pid, startTime) {
+		if !worktree.IsPIDAlive(worker.Process.Pid, startTime) {
 			break
 		}
 		time.Sleep(20 * time.Millisecond)
@@ -3266,7 +3267,7 @@ func TestPollOrphans_TransientReadErrorKeepsEntry(t *testing.T) {
 	// Seed a task dir with state.json but REMOVE envelope.json so
 	// ReadState returns ErrCorruptedState (envelope read fails).
 	worker := startFakeWorker(t, []string{"/bin/sleep", "30"})
-	startTime, err := mcp.PIDStartTime(worker.Process.Pid)
+	startTime, err := worktree.PIDStartTime(worker.Process.Pid)
 	if err != nil {
 		t.Fatalf("PIDStartTime: %v", err)
 	}

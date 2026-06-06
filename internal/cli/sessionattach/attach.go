@@ -14,7 +14,7 @@ import (
 	"time"
 
 	"github.com/tsukumogami/niwa/internal/mcp"
-	"github.com/tsukumogami/niwa/internal/workspace"
+	"github.com/tsukumogami/niwa/internal/worktree"
 )
 
 // Options configures Run for the niwa session attach command.
@@ -36,18 +36,6 @@ type Options struct {
 	PollInterval time.Duration
 	// SuperviseFn allows tests to inject a stub for the claude exec.
 	SuperviseFn func(context.Context, SuperviseOptions) (int, error)
-	// TerminateDaemonFn allows tests to inject a no-op stub for the
-	// per-worktree daemon teardown. When nil, defaults to
-	// workspace.TerminateDaemon. Production callers leave this nil; tests
-	// MUST set it to avoid spawning real daemon processes from inside the
-	// test binary.
-	TerminateDaemonFn func(worktreePath string) error
-	// EnsureDaemonRunningFn mirrors TerminateDaemonFn for the respawn-on-
-	// detach path. When nil, defaults to workspace.EnsureDaemonRunning.
-	// Tests MUST set it to avoid os.Executable() spawning the test binary
-	// itself as a daemon (which leaks fsnotify watchers and PIDs across
-	// test runs).
-	EnsureDaemonRunningFn func(worktreePath string, extraEnv []string) error
 }
 
 // AttachRun executes the niwa session attach <id> command per the design
@@ -69,7 +57,7 @@ func AttachRun(ctx context.Context, opts Options) error {
 
 	// Step 1: read lifecycle state, validate status == active.
 	sessionsDir := filepath.Join(opts.InstanceRoot, ".niwa", "sessions")
-	state, err := mcp.ReadSessionLifecycleState(sessionsDir, opts.SessionID)
+	state, err := worktree.ReadSessionLifecycleState(sessionsDir, opts.SessionID)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return &ExitCodeError{Code: 1, Msg: fmt.Sprintf("niwa: error: session %s not found", opts.SessionID)}
@@ -80,9 +68,9 @@ func AttachRun(ctx context.Context, opts Options) error {
 		}
 		return &ExitCodeError{Code: 1, Msg: fmt.Sprintf("niwa: error: reading session state %s: %v", opts.SessionID, err)}
 	}
-	if state.Status != mcp.SessionStatusActive {
+	if state.Status != worktree.SessionStatusActive {
 		hint := ""
-		if state.Status == mcp.SessionStatusEnded {
+		if state.Status == worktree.SessionStatusEnded {
 			hint = " (For ended sessions, the worktree was removed on destroy; create a new session instead.)"
 		}
 		return &ExitCodeError{
@@ -95,19 +83,19 @@ func AttachRun(ctx context.Context, opts Options) error {
 	}
 
 	// Step 2: acquire flock, with stale-sentinel recovery retry.
-	lockPath := mcp.AttachLockPath(state.WorktreePath)
+	lockPath := worktree.AttachLockPath(state.WorktreePath)
 	if err := os.MkdirAll(filepath.Dir(lockPath), 0o700); err != nil {
 		return &ExitCodeError{Code: 1, Msg: fmt.Sprintf("niwa: error: ensuring .niwa dir: %v", err)}
 	}
 	lockFile, lockErr := acquireAttachLock(lockPath)
 	if lockErr == errLockHeld {
 		// Maybe stale -- read sentinel and retry once if reapable.
-		_, avail, _ := mcp.ReadAttachState(state.WorktreePath, true /* reap */)
-		if avail == mcp.AttachStale {
+		_, avail, _ := worktree.ReadAttachState(state.WorktreePath, true /* reap */)
+		if avail == worktree.AttachStale {
 			lockFile, lockErr = acquireAttachLock(lockPath)
 		}
 		if lockErr == errLockHeld {
-			st, _, _ := mcp.ReadAttachState(state.WorktreePath, false)
+			st, _, _ := worktree.ReadAttachState(state.WorktreePath, false)
 			if st != nil {
 				return &ExitCodeError{
 					Code: 3,
@@ -144,37 +132,20 @@ func AttachRun(ctx context.Context, opts Options) error {
 		return &ExitCodeError{Code: 1, Msg: err.Error()}
 	}
 
-	// Step 5: terminate the per-worktree daemon.
-	terminateFn := opts.TerminateDaemonFn
-	if terminateFn == nil {
-		terminateFn = workspace.TerminateDaemon
-	}
-	if err := terminateFn(state.WorktreePath); err != nil {
-		fmt.Fprintf(stderr, "warning: terminating per-worktree daemon: %v\n", err)
-	}
-
-	// Cleanup defer registered AFTER the daemon is torn down and BEFORE
-	// WriteAttachState so any error between here and the supervise call
-	// still respawns the daemon. Without this ordering, a sentinel-write
-	// failure would leave the daemon dead until the next niwa apply.
-	ensureFn := opts.EnsureDaemonRunningFn
-	if ensureFn == nil {
-		ensureFn = workspace.EnsureDaemonRunning
-	}
+	// Cleanup defer registered BEFORE WriteAttachState so any error between
+	// here and the supervise call still removes the attach sentinel and
+	// surfaces the worktree warnings on detach.
 	defer func() {
-		_ = mcp.RemoveAttachState(state.WorktreePath)
-		if err := ensureFn(state.WorktreePath, nil); err != nil {
-			fmt.Fprintf(stderr, "warning: respawning per-worktree daemon: %v\n", err)
-		}
+		_ = worktree.RemoveAttachState(state.WorktreePath)
 		Warnings(state.WorktreePath, state.EffectiveBranchName(), stderr)
 		fmt.Fprintf(stderr, "session: detached %s\n", opts.SessionID)
 	}()
 
-	// Step 6: write attach sentinel.
+	// Step 5: write attach sentinel.
 	myPID := os.Getpid()
-	myStart, _ := mcp.PIDStartTime(myPID)
+	myStart, _ := worktree.PIDStartTime(myPID)
 	startedAt := time.Now().UTC().Format(time.RFC3339)
-	if err := mcp.WriteAttachState(state.WorktreePath, mcp.AttachState{
+	if err := worktree.WriteAttachState(state.WorktreePath, worktree.AttachState{
 		V:              1,
 		OwnerPID:       myPID,
 		OwnerStartTime: myStart,
@@ -287,7 +258,7 @@ func findRunningWorker(mainInstanceRoot, worktreePath string) (runningTask, bool
 		if !inboxHasInProgress(rolesDir, taskID) {
 			continue
 		}
-		if st.Worker.PID > 0 && mcp.IsPIDAlive(st.Worker.PID, st.Worker.StartTime) {
+		if st.Worker.PID > 0 && worktree.IsPIDAlive(st.Worker.PID, st.Worker.StartTime) {
 			return runningTask{taskID: taskID, pid: st.Worker.PID, startTime: st.Worker.StartTime}, true
 		}
 	}

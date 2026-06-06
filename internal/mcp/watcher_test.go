@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/tsukumogami/niwa/internal/worktree"
 )
 
 // registerQuestionWaiter is a test helper that inserts a buffered channel into
@@ -29,7 +31,7 @@ func writeTaskAskFile(t *testing.T, dir string, fromRole, toRole, taskID string)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
-	msgID := newUUID()
+	msgID := worktree.NewUUID()
 	body := json.RawMessage(`{"ask_task_id":"` + taskID + `","from_role":"` + fromRole + `","question":{"text":"ok?"}}`)
 	msg := Message{
 		V:      1,
@@ -127,7 +129,7 @@ func TestNotifyNewFile_TerminalDeferredMoveToRead(t *testing.T) {
 
 	msg := Message{
 		V:      1,
-		ID:     newUUID(),
+		ID:     worktree.NewUUID(),
 		Type:   "task.completed",
 		TaskID: taskID,
 		From:   MessageFrom{Role: "web"},

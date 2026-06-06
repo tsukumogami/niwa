@@ -10,7 +10,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/tsukumogami/niwa/internal/mcp"
+	"github.com/tsukumogami/niwa/internal/worktree"
 )
 
 // session_steps_test.go holds step definitions for niwa_create_session and
@@ -118,12 +118,12 @@ func iCallDestroySession(ctx context.Context, instance string) (context.Context,
 
 // theSessionIsActiveInInstance asserts the session state file has status="active".
 func theSessionIsActiveInInstance(ctx context.Context, instance string) error {
-	return assertSessionStatus(ctx, instance, mcp.SessionStatusActive)
+	return assertSessionStatus(ctx, instance, worktree.SessionStatusActive)
 }
 
 // theSessionIsEndedInInstance asserts the session state file has status="ended".
 func theSessionIsEndedInInstance(ctx context.Context, instance string) error {
-	return assertSessionStatus(ctx, instance, mcp.SessionStatusEnded)
+	return assertSessionStatus(ctx, instance, worktree.SessionStatusEnded)
 }
 
 func assertSessionStatus(ctx context.Context, instance string, want string) error {
@@ -135,7 +135,7 @@ func assertSessionStatus(ctx context.Context, instance string, want string) erro
 		return fmt.Errorf("no session_id stored")
 	}
 	sessionsDir := filepath.Join(s.workspaceRoot, instance, ".niwa", "sessions")
-	state, err := mcp.ReadSessionLifecycleState(sessionsDir, s.lastSessionID)
+	state, err := worktree.ReadSessionLifecycleState(sessionsDir, s.lastSessionID)
 	if err != nil {
 		return fmt.Errorf("ReadSessionLifecycleState: %w", err)
 	}
@@ -210,7 +210,7 @@ func extractMCPContentText(raw string) (string, error) {
 	}
 	// Unescape the JSON string value.
 	var text string
-	if err := json.Unmarshal([]byte(`"` + m[1] + `"`), &text); err != nil {
+	if err := json.Unmarshal([]byte(`"`+m[1]+`"`), &text); err != nil {
 		return m[1], nil
 	}
 	return text, nil
@@ -331,7 +331,7 @@ func aSessionLifecycleStateExistsForRepo(ctx context.Context, repo, status, inst
 	}
 	instRoot := filepath.Join(s.workspaceRoot, instance)
 	sessionsDir := filepath.Join(instRoot, ".niwa", "sessions")
-	all, err := mcp.ListSessionLifecycleStates(sessionsDir)
+	all, err := worktree.ListSessionLifecycleStates(sessionsDir)
 	if err != nil {
 		return fmt.Errorf("listing session states: %w", err)
 	}
@@ -598,7 +598,7 @@ func theSessionClaudeConversationIDIsSet(ctx context.Context, instance string) e
 		return fmt.Errorf("no session_id stored")
 	}
 	sessionsDir := filepath.Join(s.workspaceRoot, instance, ".niwa", "sessions")
-	state, err := mcp.ReadSessionLifecycleState(sessionsDir, s.lastSessionID)
+	state, err := worktree.ReadSessionLifecycleState(sessionsDir, s.lastSessionID)
 	if err != nil {
 		return fmt.Errorf("ReadSessionLifecycleState: %w", err)
 	}
@@ -617,7 +617,7 @@ func theSessionClaudeConversationIDEquals(ctx context.Context, wantID, instance 
 		return fmt.Errorf("no session_id stored")
 	}
 	sessionsDir := filepath.Join(s.workspaceRoot, instance, ".niwa", "sessions")
-	state, err := mcp.ReadSessionLifecycleState(sessionsDir, s.lastSessionID)
+	state, err := worktree.ReadSessionLifecycleState(sessionsDir, s.lastSessionID)
 	if err != nil {
 		return fmt.Errorf("ReadSessionLifecycleState: %w", err)
 	}
@@ -800,15 +800,15 @@ func iSeedLiveAttachSentinelForLastSession(ctx context.Context, instance string)
 		return ctx, fmt.Errorf("no worktree path stored; call niwa_create_session first")
 	}
 	myPID := os.Getpid()
-	myStart, _ := mcp.PIDStartTime(myPID)
-	state := mcp.AttachState{
+	myStart, _ := worktree.PIDStartTime(myPID)
+	state := worktree.AttachState{
 		V:              1,
 		OwnerPID:       myPID,
 		OwnerStartTime: myStart,
 		StartedAt:      "2026-05-10T14:32:11Z",
 		LockPath:       ".niwa/attach.lock",
 	}
-	if err := mcp.WriteAttachState(s.lastSessionWorktreePath, state); err != nil {
+	if err := worktree.WriteAttachState(s.lastSessionWorktreePath, state); err != nil {
 		return ctx, fmt.Errorf("writing attach state: %w", err)
 	}
 	return ctx, nil

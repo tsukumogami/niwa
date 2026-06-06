@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/tsukumogami/niwa/internal/config"
+	"github.com/tsukumogami/niwa/internal/worktree"
 )
 
 // runGit runs `git args...` inside dir. Fails the test on non-zero exit
@@ -129,29 +130,29 @@ func setupLocalFixture(t *testing.T, root, baseContent, headContent, baseBranch,
 	return wt, baseSHA, headSHA
 }
 
-// setupChangeSession writes a SessionLifecycleState under
-// <root>/.niwa/sessions/<sid>.json pointing at worktree. Companion to
-// the fixture helpers above; tests that pass a sid that does not match
-// sessionIDRe will hit the invalid_session_id branch before this writes
+// setupChangeSession writes a worktree.SessionLifecycleState under
+// <root>/.niwa/sessions/<sid>.json pointing at worktreePath. Companion to
+// the fixture helpers above; tests that pass a sid that does not match the
+// session-ID format will hit the invalid_session_id branch before this writes
 // anything (verified explicitly in TestHandleCreateChange_InvalidSessionID).
-func setupChangeSession(t *testing.T, root, sid, worktree string) {
+func setupChangeSession(t *testing.T, root, sid, worktreePath string) {
 	t.Helper()
 	sessionsDir := filepath.Join(root, ".niwa", "sessions")
 	if err := os.MkdirAll(sessionsDir, 0o700); err != nil {
 		t.Fatalf("mkdir sessions: %v", err)
 	}
-	state := SessionLifecycleState{
+	state := worktree.SessionLifecycleState{
 		V:            1,
 		SessionID:    sid,
 		Repo:         "test-repo",
 		Purpose:      "change-handler test",
-		Status:       SessionStatusActive,
+		Status:       worktree.SessionStatusActive,
 		CreationTime: time.Now().UTC().Format(time.RFC3339),
-		WorktreePath: worktree,
+		WorktreePath: worktreePath,
 		CreatorPID:   os.Getpid(),
 	}
-	if err := WriteSessionLifecycleState(sessionsDir, state); err != nil {
-		t.Fatalf("WriteSessionLifecycleState: %v", err)
+	if err := worktree.WriteSessionLifecycleState(sessionsDir, state); err != nil {
+		t.Fatalf("worktree.WriteSessionLifecycleState: %v", err)
 	}
 }
 
