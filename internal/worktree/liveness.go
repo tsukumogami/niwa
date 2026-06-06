@@ -49,8 +49,8 @@ var processSignal = func(pid int) error {
 }
 
 // IsProcessAlive reports whether a process with the given PID is alive,
-// using only a PID (no start-time gate). Implements the D12 fail-closed
-// Signal(0) protocol used by .niwa/surface.lock stale-lock reaping:
+// using only a PID (no start-time gate). Implements a fail-closed Signal(0)
+// liveness probe:
 //
 //   - nil error: process exists and we have permission to signal it → alive.
 //   - os.ErrProcessDone or syscall.ESRCH: process is gone → dead.
@@ -58,9 +58,9 @@ var processSignal = func(pid int) error {
 //     report alive so a UID-mismatch race never reaps a live holder.
 //
 // Unlike IsPIDAlive, which combines PID with a start-time check for
-// recycle-safe daemon PID files, this helper assumes the caller holds a
-// short-lived lock where PID recycling is statistically improbable
-// (surface.lock is acquired at boot and released on shutdown).
+// recycle-safe PID files, this helper omits the start-time gate and assumes
+// the caller holds a short-lived lock where PID recycling is statistically
+// improbable.
 func IsProcessAlive(pid int) bool {
 	if pid <= 0 {
 		return false

@@ -150,19 +150,16 @@ func runSessionDestroy(cmd *cobra.Command, args []string) error {
 }
 
 // runSessionLifecycleList lists per-session lifecycle states, filtering by
-// repo, status, daemon health (via --json/--verbose surfaces), and attach
-// availability. Called by sessionListCmd when at least one filter flag is
-// present.
+// repo, status, and attach availability. Called by sessionListCmd when at
+// least one filter flag is present.
 //
 // Each row's AVAILABILITY value is projected from the per-worktree
 // attach.state sentinel via worktree.ReadAttachState (with reapStale=true so
-// the listing pass naturally cleans up dead-holder sentinels). Each row's
-// DAEMON value comes from worktree.DaemonHealthFor (reads daemon.pid + checks
-// liveness).
+// the listing pass naturally cleans up dead-holder sentinels).
 //
 // Sort order matches PRD R17: attached first (the operator's hot question
-// "is anyone in there?"), then daemon-alive first, then active before
-// terminal status, then creation_time descending.
+// "is anyone in there?"), then active before terminal status, then
+// creation_time descending.
 func runSessionLifecycleList(cmd *cobra.Command, repo, status string, onlyAttached, onlyAvailable bool) error {
 	if onlyAttached && onlyAvailable {
 		return fmt.Errorf("--attached and --available are mutually exclusive")
@@ -194,16 +191,15 @@ func runSessionLifecycleList(cmd *cobra.Command, repo, status string, onlyAttach
 			continue
 		}
 		// Project the live attach state onto the embedded
-		// SessionLifecycleState so the CLI JSON wire shape matches what
-		// niwa_list_sessions emits: same struct, same `attach` key
-		// shape, absent when no live lock is held.
+		// SessionLifecycleState so the CLI JSON wire shape carries the
+		// `attach` key (the full AttachState struct, absent when no live
+		// lock is held).
 		if avail == worktree.AttachAttached && attachState != nil {
 			st.Attach = attachState
 		}
 		rows = append(rows, lifecycleRow{
-			state:  st,
-			avail:  avail,
-			daemon: worktree.DaemonHealthFor(st.WorktreePath),
+			state: st,
+			avail: avail,
 		})
 	}
 	sort.SliceStable(rows, func(i, j int) bool {
@@ -212,16 +208,14 @@ func runSessionLifecycleList(cmd *cobra.Command, repo, status string, onlyAttach
 
 	if sessionListJSON {
 		// JSON mode: emit a fresh array (not null) when empty. The wire
-		// shape matches niwa_list_sessions for the `attach` key (full
-		// AttachState struct from the embedded SessionLifecycleState,
-		// absent when no live lock). The `daemon` and `availability`
-		// keys are CLI-specific projections.
+		// shape carries the full AttachState struct via the embedded
+		// SessionLifecycleState's `attach` key (absent when no live lock).
+		// The `availability` key is a CLI-specific projection.
 		out := cmd.OutOrStdout()
 		jsonRows := make([]sessionListJSONRow, 0, len(rows))
 		for _, r := range rows {
 			jsonRows = append(jsonRows, sessionListJSONRow{
 				SessionLifecycleState: r.state,
-				Daemon:                r.daemon,
 				Availability:          availabilityForTable(r.avail),
 			})
 		}
@@ -238,7 +232,7 @@ func runSessionLifecycleList(cmd *cobra.Command, repo, status string, onlyAttach
 		return nil
 	}
 
-	writeSessionLifecycleTable(cmd.OutOrStdout(), rows, sessionListVerbose)
+	writeSessionLifecycleTable(cmd.OutOrStdout(), rows)
 	if len(rows) == 0 {
 		fmt.Fprintln(cmd.OutOrStdout(), "(no sessions match the current filter)")
 	}
@@ -247,10 +241,8 @@ func runSessionLifecycleList(cmd *cobra.Command, repo, status string, onlyAttach
 
 // rowSortLess implements PRD R17's composite sort:
 //  1. attached first (the operator's hot question: "is anyone in there?")
-//  2. daemon-alive before dead (so live sessions sort up within each
-//     attach bucket)
-//  3. status: active before terminal
-//  4. creation_time descending (newest first)
+//  2. status: active before terminal
+//  3. creation_time descending (newest first)
 func rowSortLess(a, b lifecycleRow) bool {
 	// Key 1: attached < others.
 	aAttached := a.avail == worktree.AttachAttached
@@ -258,15 +250,11 @@ func rowSortLess(a, b lifecycleRow) bool {
 	if aAttached != bAttached {
 		return aAttached // true sorts first
 	}
-	// Key 2: daemon alive < dead.
-	if a.daemon.Alive != b.daemon.Alive {
-		return a.daemon.Alive
-	}
-	// Key 3: active < ended < abandoned.
+	// Key 2: active < ended < abandoned.
 	if a.state.Status != b.state.Status {
 		return statusRank(a.state.Status) < statusRank(b.state.Status)
 	}
-	// Key 4: creation_time descending (newer first).
+	// Key 3: creation_time descending (newer first).
 	return a.state.CreationTime > b.state.CreationTime
 }
 
@@ -296,39 +284,30 @@ func availabilityForTable(a worktree.AttachAvailability) string {
 	}
 }
 
-// lifecycleRow bundles a persisted SessionLifecycleState with the two
-// computed projections needed at table-render time: attach availability
-// (from .niwa/attach.state) and daemon health (from .niwa/daemon.pid).
-// Neither projection is persisted; both are read on every list.
+// lifecycleRow bundles a persisted SessionLifecycleState with the computed
+// attach-availability projection (from .niwa/attach.state) needed at
+// table-render time. The projection is not persisted; it is read on every
+// list.
 type lifecycleRow struct {
-	state  worktree.SessionLifecycleState
-	avail  worktree.AttachAvailability
-	daemon worktree.DaemonHealth
+	state worktree.SessionLifecycleState
+	avail worktree.AttachAvailability
 }
 
 // sessionListJSONRow is the wire shape returned by
 // `niwa session list --json`. The `attach` key (via the embedded
-// SessionLifecycleState.Attach pointer field) matches what
-// niwa_list_sessions emits exactly: the full AttachState struct when a
-// live lock is held, absent otherwise. The `daemon` sub-object comes
-// from PR #115 (also computed, not persisted). The `availability` key
-// is a CLI-side projection that lets callers distinguish `stale`
-// (sentinel present but reaped) from `available` (no sentinel) without
-// having to walk PIDs themselves.
+// SessionLifecycleState.Attach pointer field) carries the full AttachState
+// struct when a live lock is held, absent otherwise. The `availability` key
+// is a CLI-side projection that lets callers distinguish `stale` (sentinel
+// present but reaped) from `available` (no sentinel) without having to walk
+// PIDs themselves.
 type sessionListJSONRow struct {
 	worktree.SessionLifecycleState
-	Daemon       worktree.DaemonHealth `json:"daemon"`
-	Availability string                `json:"availability"`
+	Availability string `json:"availability"`
 }
 
-func writeSessionLifecycleTable(out interface{ Write([]byte) (int, error) }, rows []lifecycleRow, verbose bool) {
-	if verbose {
-		fmt.Fprintf(out, "  %-12s %-12s %-10s %-7s %-12s %-8s %-20s %-20s %s\n",
-			"SESSION_ID", "REPO", "STATUS", "DAEMON", "AVAILABILITY", "PID", "STARTED-AT", "CREATED", "PURPOSE")
-	} else {
-		fmt.Fprintf(out, "  %-12s %-12s %-10s %-7s %-12s %-20s %s\n",
-			"SESSION_ID", "REPO", "STATUS", "DAEMON", "AVAILABILITY", "CREATED", "PURPOSE")
-	}
+func writeSessionLifecycleTable(out interface{ Write([]byte) (int, error) }, rows []lifecycleRow) {
+	fmt.Fprintf(out, "  %-12s %-12s %-10s %-12s %-20s %s\n",
+		"SESSION_ID", "REPO", "STATUS", "AVAILABILITY", "CREATED", "PURPOSE")
 	for _, r := range rows {
 		s := r.state
 		created := "-"
@@ -341,25 +320,8 @@ func writeSessionLifecycleTable(out interface{ Write([]byte) (int, error) }, row
 		if len(purpose) > 40 {
 			purpose = purpose[:37] + "..."
 		}
-		daemonState := "dead"
-		if r.daemon.Alive {
-			daemonState = "alive"
-		}
 		availability := availabilityForTable(r.avail)
-		if verbose {
-			pidStr := "-"
-			if r.daemon.PID > 0 {
-				pidStr = fmt.Sprintf("%d", r.daemon.PID)
-			}
-			startedAt := r.daemon.StartedAt
-			if startedAt == "" {
-				startedAt = "-"
-			}
-			fmt.Fprintf(out, "  %-12s %-12s %-10s %-7s %-12s %-8s %-20s %-20s %s\n",
-				s.SessionID, s.Repo, s.Status, daemonState, availability, pidStr, startedAt, created, purpose)
-		} else {
-			fmt.Fprintf(out, "  %-12s %-12s %-10s %-7s %-12s %-20s %s\n",
-				s.SessionID, s.Repo, s.Status, daemonState, availability, created, purpose)
-		}
+		fmt.Fprintf(out, "  %-12s %-12s %-10s %-12s %-20s %s\n",
+			s.SessionID, s.Repo, s.Status, availability, created, purpose)
 	}
 }

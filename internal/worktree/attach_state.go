@@ -13,8 +13,8 @@ import (
 // process on clean exit. Stale sentinels (the recorded OwnerPID is dead per
 // IsPIDAlive) are detected by readers and may be opportunistically reaped.
 //
-// The file lives next to the daemon.pid / daemon.log / daemon.pid.lock files
-// already present in <worktree>/.niwa/ for session worktrees.
+// The file lives in <worktree>/.niwa/ alongside the session's other
+// per-worktree state.
 type AttachState struct {
 	V              int    `json:"v"`
 	OwnerPID       int    `json:"owner_pid"`
@@ -24,8 +24,8 @@ type AttachState struct {
 }
 
 // AttachAvailability is the computed projection of an attach.state file plus
-// its holder liveness. Renderers (niwa session list, niwa_list_sessions) use
-// this enum to render the AVAILABILITY column.
+// its holder liveness. The `niwa session list` renderer uses this enum to
+// render the AVAILABILITY column.
 type AttachAvailability string
 
 const (

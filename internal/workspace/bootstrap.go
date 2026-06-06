@@ -285,8 +285,8 @@ func DefaultDestroySession(ctx context.Context, instanceRoot, sessionID string, 
 		return fmt.Errorf("reading session state: %w", readErr)
 	}
 	// Minimal field extraction: we only need WorktreePath, Repo,
-	// EffectiveBranchName equivalent. To avoid an mcp import here, we
-	// read the JSON directly with the known schema.
+	// EffectiveBranchName equivalent. We read the JSON directly with the
+	// known schema rather than importing the worktree state types.
 	type stateShape struct {
 		Repo         string `json:"repo"`
 		BranchName   string `json:"branch_name,omitempty"`
@@ -311,10 +311,10 @@ func DefaultDestroySession(ctx context.Context, instanceRoot, sessionID string, 
 	return nil
 }
 
-// findRepoInWorkspaceForDestroy is a workspace-package mirror of the mcp
-// helper of the same name (kept local to avoid the mcp import direction).
-// Scans instanceRoot two levels deep for a directory named repoName that
-// contains a .git entry.
+// findRepoInWorkspaceForDestroy scans instanceRoot two levels deep for a
+// directory named repoName that contains a .git entry. It is a
+// workspace-package copy of worktree.findRepoInWorkspace, kept local to avoid
+// inverting the dependency direction (worktree is a leaf package).
 func findRepoInWorkspaceForDestroy(instanceRoot, repoName string) (string, error) {
 	topEntries, err := os.ReadDir(instanceRoot)
 	if err != nil {

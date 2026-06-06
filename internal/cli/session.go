@@ -57,7 +57,6 @@ var (
 	sessionListAttached  bool
 	sessionListAvailable bool
 	sessionListJSON      bool
-	sessionListVerbose   bool
 )
 
 func init() {
@@ -65,8 +64,7 @@ func init() {
 	sessionListCmd.Flags().StringVar(&sessionListStatus, "status", "", "Filter by status: active, ended, abandoned")
 	sessionListCmd.Flags().BoolVar(&sessionListAttached, "attached", false, "Show only sessions currently held by an attach lock")
 	sessionListCmd.Flags().BoolVar(&sessionListAvailable, "available", false, "Show only sessions with no attach lock held")
-	sessionListCmd.Flags().BoolVar(&sessionListJSON, "json", false, "Output JSON (one object per session, including daemon and attach sub-objects) instead of a table")
-	sessionListCmd.Flags().BoolVar(&sessionListVerbose, "verbose", false, "Include PID and STARTED_AT columns in the table view")
+	sessionListCmd.Flags().BoolVar(&sessionListJSON, "json", false, "Output JSON (one object per session, including the attach sub-object) instead of a table")
 }
 
 func runSessionList(cmd *cobra.Command, _ []string) error {

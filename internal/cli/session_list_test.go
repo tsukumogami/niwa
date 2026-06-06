@@ -3,7 +3,6 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,9 +12,8 @@ import (
 )
 
 // seedSessionList writes a minimal instance layout with two persisted
-// sessions: one whose daemon.pid points at the test process (alive), one
-// without a daemon.pid file (dead). Returns the instance root path.
-func seedSessionList(t *testing.T, includeLiveDaemon bool) string {
+// sessions. Returns the instance root path.
+func seedSessionList(t *testing.T) string {
 	t.Helper()
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, ".niwa-marker"), []byte{}, 0o600); err != nil {
@@ -29,29 +27,18 @@ func seedSessionList(t *testing.T, includeLiveDaemon bool) string {
 	}
 	sessionsDir := filepath.Join(root, ".niwa", "sessions")
 
-	// Session 1: live daemon (daemon.pid points at this test process).
-	liveWT := filepath.Join(root, "wt-live")
-	if err := os.MkdirAll(filepath.Join(liveWT, ".niwa"), 0o700); err != nil {
+	wt1 := filepath.Join(root, "wt-1")
+	if err := os.MkdirAll(filepath.Join(wt1, ".niwa"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if includeLiveDaemon {
-		pid := os.Getpid()
-		startTime, _ := worktree.PIDStartTime(pid)
-		pidContent := []byte(fmt.Sprintf("%d\n%d\n", pid, startTime))
-		if err := os.WriteFile(filepath.Join(liveWT, ".niwa", "daemon.pid"), pidContent, 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	// Session 2: dead daemon (no daemon.pid).
-	deadWT := filepath.Join(root, "wt-dead")
-	if err := os.MkdirAll(filepath.Join(deadWT, ".niwa"), 0o700); err != nil {
+	wt2 := filepath.Join(root, "wt-2")
+	if err := os.MkdirAll(filepath.Join(wt2, ".niwa"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 
 	for _, st := range []worktree.SessionLifecycleState{
-		worktree.NewSessionLifecycleState("aabbccdd", "myrepo", "live test", "", liveWT, ""),
-		worktree.NewSessionLifecycleState("11223344", "myrepo", "dead test", "", deadWT, ""),
+		worktree.NewSessionLifecycleState("aabbccdd", "myrepo", "first test", "", wt1, ""),
+		worktree.NewSessionLifecycleState("11223344", "myrepo", "second test", "", wt2, ""),
 	} {
 		if err := worktree.WriteSessionLifecycleState(sessionsDir, st); err != nil {
 			t.Fatal(err)
@@ -60,10 +47,10 @@ func seedSessionList(t *testing.T, includeLiveDaemon bool) string {
 	return root
 }
 
-// TestSessionList_TableHasDaemonColumn verifies Issue 13: the default
-// table view gains a DAEMON column rendering alive/dead.
-func TestSessionList_TableHasDaemonColumn(t *testing.T) {
-	root := seedSessionList(t, true)
+// TestSessionList_TableColumns verifies the default table view renders the
+// expected columns and omits the removed DAEMON column.
+func TestSessionList_TableColumns(t *testing.T) {
+	root := seedSessionList(t)
 	t.Setenv("NIWA_INSTANCE_ROOT", root)
 
 	resetSessionListFlags(t)
@@ -78,22 +65,22 @@ func TestSessionList_TableHasDaemonColumn(t *testing.T) {
 		t.Fatalf("runSessionList: %v", err)
 	}
 	out := stdout.String()
-	if !strings.Contains(out, "DAEMON") {
-		t.Errorf("table header missing DAEMON column:\n%s", out)
+	for _, col := range []string{"SESSION_ID", "REPO", "STATUS", "AVAILABILITY", "CREATED", "PURPOSE"} {
+		if !strings.Contains(out, col) {
+			t.Errorf("table header missing %s column:\n%s", col, out)
+		}
 	}
-	if !strings.Contains(out, "alive") {
-		t.Errorf("expected at least one row to render 'alive':\n%s", out)
-	}
-	if !strings.Contains(out, "dead") {
-		t.Errorf("expected at least one row to render 'dead':\n%s", out)
+	if strings.Contains(out, "DAEMON") {
+		t.Errorf("table header still renders the removed DAEMON column:\n%s", out)
 	}
 }
 
 // TestSessionList_JSONShape verifies --json emits an array of session
-// rows, each carrying the embedded SessionLifecycleState plus a daemon
-// sub-object with the alive/pid/started_at fields.
+// rows, each carrying the embedded SessionLifecycleState plus the
+// CLI-side availability projection, and no longer carrying a daemon
+// sub-object.
 func TestSessionList_JSONShape(t *testing.T) {
-	root := seedSessionList(t, true)
+	root := seedSessionList(t)
 	t.Setenv("NIWA_INSTANCE_ROOT", root)
 
 	resetSessionListFlags(t)
@@ -115,13 +102,11 @@ func TestSessionList_JSONShape(t *testing.T) {
 		t.Fatalf("rows = %d, want 2", len(rows))
 	}
 	for _, r := range rows {
-		daemon, ok := r["daemon"].(map[string]any)
-		if !ok {
-			t.Errorf("row missing daemon sub-object: %v", r)
-			continue
+		if _, ok := r["availability"].(string); !ok {
+			t.Errorf("row missing availability projection: %v", r)
 		}
-		if _, ok := daemon["alive"].(bool); !ok {
-			t.Errorf("daemon.alive must be boolean: %v", daemon)
+		if _, ok := r["daemon"]; ok {
+			t.Errorf("row still carries removed daemon sub-object: %v", r)
 		}
 	}
 }
@@ -129,7 +114,7 @@ func TestSessionList_JSONShape(t *testing.T) {
 // TestSessionList_JSONEmptyArray verifies --json emits [] (not null) when
 // no sessions match the filter.
 func TestSessionList_JSONEmptyArray(t *testing.T) {
-	root := seedSessionList(t, false)
+	root := seedSessionList(t)
 	t.Setenv("NIWA_INSTANCE_ROOT", root)
 
 	resetSessionListFlags(t)
@@ -150,34 +135,6 @@ func TestSessionList_JSONEmptyArray(t *testing.T) {
 	}
 }
 
-// TestSessionList_VerboseColumns verifies --verbose adds PID and STARTED-AT.
-func TestSessionList_VerboseColumns(t *testing.T) {
-	root := seedSessionList(t, true)
-	t.Setenv("NIWA_INSTANCE_ROOT", root)
-
-	resetSessionListFlags(t)
-	t.Cleanup(func() { resetSessionListFlags(t) })
-	sessionListVerbose = true
-
-	stdout := &bytes.Buffer{}
-	sessionListCmd.SetOut(stdout)
-	defer sessionListCmd.SetOut(os.Stdout)
-
-	if err := runSessionList(sessionListCmd, nil); err != nil {
-		t.Fatalf("runSessionList: %v", err)
-	}
-	out := stdout.String()
-	if !strings.Contains(out, "PID") {
-		t.Errorf("verbose header missing PID: %s", out)
-	}
-	if !strings.Contains(out, "STARTED-AT") {
-		t.Errorf("verbose header missing STARTED-AT: %s", out)
-	}
-	if !strings.Contains(out, fmt.Sprintf("%d", os.Getpid())) {
-		t.Errorf("verbose row missing PID for live session: %s", out)
-	}
-}
-
 // TestSessionList_JSONAttachShapeMatchesMCP verifies the wire-shape
 // contract introduced by the blocker-3 fix: when a live attach lock is
 // held, --json emits a top-level `attach` sub-object with the same
@@ -188,11 +145,11 @@ func TestSessionList_VerboseColumns(t *testing.T) {
 // can distinguish `stale` from `available` without walking PIDs.
 func TestSessionList_JSONAttachShapeMatchesMCP(t *testing.T) {
 	// Seed one session with a live attach.state sentinel and one without.
-	root := seedSessionList(t, true)
+	root := seedSessionList(t)
 	t.Setenv("NIWA_INSTANCE_ROOT", root)
 
-	// Seed the live attach sentinel on the live-daemon session worktree.
-	liveWT := filepath.Join(root, "wt-live")
+	// Seed the live attach sentinel on the first session worktree.
+	liveWT := filepath.Join(root, "wt-1")
 	myPID := os.Getpid()
 	myStart, _ := worktree.PIDStartTime(myPID)
 	if err := worktree.WriteAttachState(liveWT, worktree.AttachState{
@@ -282,7 +239,7 @@ func TestSessionList_JSONAttachShapeMatchesMCP(t *testing.T) {
 // TestSessionList_EmptyResultMessage verifies the table view emits a
 // "no sessions match" line when the filter yields no rows.
 func TestSessionList_EmptyResultMessage(t *testing.T) {
-	root := seedSessionList(t, false)
+	root := seedSessionList(t)
 	t.Setenv("NIWA_INSTANCE_ROOT", root)
 
 	resetSessionListFlags(t)
@@ -308,5 +265,4 @@ func resetSessionListFlags(t *testing.T) {
 	sessionListAttached = false
 	sessionListAvailable = false
 	sessionListJSON = false
-	sessionListVerbose = false
 }

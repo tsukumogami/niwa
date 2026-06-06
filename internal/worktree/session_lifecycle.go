@@ -55,16 +55,16 @@ type SessionLifecycleState struct {
 	CreatorStartTime     int64  `json:"creator_start_time"`
 	// BranchWarning is set in the destroy response when git branch -d fails
 	// (unmerged commits remain). Never written to disk; only present in the
-	// MCP/CLI response for that call. The json tag is intentionally omitted
+	// CLI response for that call. The json tag is intentionally omitted
 	// so serialization cannot accidentally persist this field.
 	BranchWarning string `json:"-"`
 
 	// Attach is a computed projection of the worktree's attach.state sentinel
 	// (read at projection time, NOT persisted into <sid>.json). Set by
-	// handlers that project lifecycle state into a response (niwa_list_sessions,
-	// niwa session list); nil when no live attach lock is held. omitempty
-	// produces an absent JSON key (not "null") when nil, matching the
-	// "absent, not null" contract documented in the PRD.
+	// `niwa session list` when it projects lifecycle state into a response;
+	// nil when no live attach lock is held. omitempty produces an absent JSON
+	// key (not "null") when nil, matching the "absent, not null" contract
+	// documented in the PRD.
 	Attach *AttachState `json:"attach,omitempty"`
 }
 
