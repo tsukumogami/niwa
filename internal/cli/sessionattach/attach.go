@@ -8,12 +8,10 @@ import (
 	"io/fs"
 	"os"
 	"os/exec"
-	"os/signal"
 	"path/filepath"
 	"syscall"
 	"time"
 
-	"github.com/tsukumogami/niwa/internal/mcp"
 	"github.com/tsukumogami/niwa/internal/worktree"
 )
 
@@ -117,10 +115,11 @@ func AttachRun(ctx context.Context, opts Options) error {
 		_ = lockFile.Close() // releases the flock as a side-effect of fd close
 	}()
 
-	// Step 3: wait for or kill the running worker.
-	if err := handleRunningWorker(ctx, opts, state.WorktreePath, stderr); err != nil {
-		return err
-	}
+	// Step 3 (removed): there is no longer a mesh task store to consult for a
+	// running worker, so attach no longer waits for or force-kills one. The
+	// attach lock acquired in Step 2 (flock + attach.state, with PID-liveness
+	// via the worktree package) is the sole and sufficient safety signal that
+	// no other live process is using this worktree.
 
 	// Step 4: preflight transcript validation.
 	workerCWD := filepath.Join(state.WorktreePath, state.Repo)
@@ -177,109 +176,6 @@ func AttachRun(ctx context.Context, opts Options) error {
 		return &ExitCodeError{Code: exitCode, Msg: ""} // empty msg => caller doesn't print extra
 	}
 	return nil
-}
-
-// handleRunningWorker implements PRD R6: wait for or SIGTERM-then-SIGKILL the
-// running worker in the session, depending on opts.Force. Honors SIGINT to
-// abort cleanly.
-func handleRunningWorker(ctx context.Context, opts Options, worktreePath string, stderr io.Writer) error {
-	pollInterval := opts.PollInterval
-	if pollInterval == 0 {
-		pollInterval = 1 * time.Second
-	}
-	if !opts.Force {
-		// Set up SIGINT handler for clean abort during the wait.
-		sigCh := make(chan os.Signal, 2)
-		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-		defer signal.Stop(sigCh)
-
-		lastPrint := time.Time{}
-		for {
-			task, ok := findRunningWorker(opts.InstanceRoot, worktreePath)
-			if !ok {
-				return nil
-			}
-			if time.Since(lastPrint) >= 5*time.Second {
-				fmt.Fprintf(stderr, "niwa: waiting for worker on task %s...\n", task.taskID)
-				lastPrint = time.Now()
-			}
-			select {
-			case <-time.After(pollInterval):
-				// keep polling
-			case <-sigCh:
-				return &ExitCodeError{Code: 130, Msg: ""}
-			case <-ctx.Done():
-				return &ExitCodeError{Code: 130, Msg: ""}
-			}
-		}
-	}
-	// --force: SIGTERM the worker's process group, wait grace, SIGKILL if needed.
-	task, ok := findRunningWorker(opts.InstanceRoot, worktreePath)
-	if !ok {
-		return nil
-	}
-	fmt.Fprintf(stderr, "warning: --force: terminating worker on task %s pid=%d\n", task.taskID, task.pid)
-	_ = syscall.Kill(-task.pid, syscall.SIGTERM)
-	if !waitForExit(task.pid, task.startTime, graceDuration(opts.GraceSeconds)) {
-		_ = syscall.Kill(-task.pid, syscall.SIGKILL)
-	}
-	return nil
-}
-
-// runningTask is a small struct holding the task-id + worker pid found by
-// findRunningWorker.
-type runningTask struct {
-	taskID    string
-	pid       int
-	startTime int64
-}
-
-// findRunningWorker walks the main instance's task store and returns the
-// first task whose envelope is in the session worktree's inbox AND whose
-// state is "running" with a live worker. Returns (nil, false) when no
-// matching task exists.
-func findRunningWorker(mainInstanceRoot, worktreePath string) (runningTask, bool) {
-	tasksDir := filepath.Join(mainInstanceRoot, ".niwa", "tasks")
-	entries, err := os.ReadDir(tasksDir)
-	if err != nil {
-		return runningTask{}, false
-	}
-	rolesDir := filepath.Join(worktreePath, ".niwa", "roles")
-	for _, e := range entries {
-		if !e.IsDir() {
-			continue
-		}
-		taskID := e.Name()
-		taskDir := filepath.Join(tasksDir, taskID)
-		_, st, err := mcp.ReadState(taskDir)
-		if err != nil || st.State != mcp.TaskStateRunning {
-			continue
-		}
-		if !inboxHasInProgress(rolesDir, taskID) {
-			continue
-		}
-		if st.Worker.PID > 0 && worktree.IsPIDAlive(st.Worker.PID, st.Worker.StartTime) {
-			return runningTask{taskID: taskID, pid: st.Worker.PID, startTime: st.Worker.StartTime}, true
-		}
-	}
-	return runningTask{}, false
-}
-
-func inboxHasInProgress(rolesDir, taskID string) bool {
-	roles, err := os.ReadDir(rolesDir)
-	if err != nil {
-		return false
-	}
-	for _, role := range roles {
-		if !role.IsDir() {
-			continue
-		}
-		p := filepath.Join(rolesDir, role.Name(), "inbox", "in-progress", taskID+".json")
-		if _, err := os.Stat(p); err == nil {
-			return true
-		}
-	}
-	return false
 }
 
 var errLockHeld = errors.New("attach lock held")

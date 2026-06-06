@@ -132,6 +132,12 @@ func runSessionDestroy(cmd *cobra.Command, args []string) error {
 
 	state, err := worktree.DestroySession(context.Background(), instanceRoot, sessionID, sessionDestroyForce, worktree.StdGitInvoker{})
 	if err != nil {
+		// A live attach holds the worktree and --force was not passed: surface
+		// the guard message verbatim (it carries the holder PID and recovery
+		// command) rather than burying it under a generic destroy prefix.
+		if errors.Is(err, worktree.ErrSessionAttached) {
+			return &sessionattach.ExitCodeError{Code: 1, Msg: "niwa: error: " + err.Error()}
+		}
 		return fmt.Errorf("niwa: error: destroying session %s: %w", sessionID, err)
 	}
 	if state.BranchWarning != "" {

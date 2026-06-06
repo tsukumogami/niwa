@@ -53,6 +53,15 @@ type CreateSessionParams struct {
 // Callers map this to the UNKNOWN_ROLE structured error code.
 var ErrSessionUnknownRole = errors.New("unknown role")
 
+// ErrSessionAttached is returned by DestroySession when the session's
+// worktree is held by a live attach process and force is false. It guards
+// the preserved worktree-attach primitive: destroying a worktree out from
+// under a live `niwa session attach` process would force-remove a directory
+// that process is actively using, risking loss of uncommitted work. Callers
+// (e.g. the CLI destroy command) map this to the SESSION_ATTACHED structured
+// error code. Passing force=true bypasses the guard.
+var ErrSessionAttached = errors.New("session attached")
+
 // scaffoldWorktreeNiwa creates the minimal .niwa layout for a per-session
 // worktree. It creates:
 //
@@ -216,6 +225,11 @@ func CreateSession(ctx context.Context, params CreateSessionParams) (sessionID, 
 //
 // DestroySession is idempotent: a session already in a terminal status is
 // returned unchanged with no git operations performed.
+//
+// When the session's worktree is held by a live attach process and force is
+// false, DestroySession performs no teardown and returns ErrSessionAttached
+// so the preserved attach primitive is not clobbered. force=true bypasses
+// this guard.
 func DestroySession(ctx context.Context, instanceRoot, sessionID string, force bool, gitInvoker GitInvoker) (SessionLifecycleState, error) {
 	if gitInvoker == nil {
 		return SessionLifecycleState{}, errors.New("git invoker not configured")
@@ -232,6 +246,22 @@ func DestroySession(ctx context.Context, instanceRoot, sessionID string, force b
 	}
 
 	worktreePath := state.WorktreePath
+
+	// Reject when an attach lock is held by a live process and force is not
+	// set. This protects the preserved worktree-attach primitive: removing the
+	// worktree out from under a live `niwa session attach` process would
+	// force-delete a directory it is actively using. reapStale is false so a
+	// genuinely live holder is never silently reaped. The message references
+	// the recovery command and the holder PID; callers pattern-match the
+	// ErrSessionAttached sentinel to surface the SESSION_ATTACHED error code.
+	if attachState, attachAvail, _ := ReadAttachState(worktreePath, false); attachAvail == AttachAttached && !force {
+		return state, fmt.Errorf(
+			"%w: session %s is currently attached (pid=%d, started=%s); "+
+				"run `niwa session detach %s --force` to release the attach lock first, "+
+				"or pass force=true to destroy regardless",
+			ErrSessionAttached, state.SessionID, attachState.OwnerPID, attachState.StartedAt, state.SessionID,
+		)
+	}
 
 	// Write terminal state.
 	state.Status = SessionStatusEnded
