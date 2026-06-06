@@ -153,12 +153,68 @@ func applyContentToWorktree(instanceRoot, worktreePath, repo, purpose, branch st
 	}
 
 	opts := workspace.WorktreeApplyOptions{Stderr: os.Stderr}
-	if gDir, gErr := config.GlobalConfigDir(); gErr == nil {
-		opts.GlobalConfigDir = gDir
+
+	// Resolve and merge the workspace overlay the same way `niwa apply` does, so
+	// a worktree of an overlay-augmented repo gets the overlay-merged CLAUDE
+	// content a repo checkout would. config.Load does NOT run the overlay merge,
+	// so the loaded cfg has no OverlaySource set; without this step an
+	// overlay-augmented repo would silently miss its overlay content. The
+	// overlay dir is recorded in InstanceState.OverlayURL by apply/create.
+	// When no overlay is configured (empty OverlayURL or NoOverlay), opts.OverlayDir
+	// stays empty and the no-overlay path runs exactly as before.
+	if cfgWithOverlay, overlayDir, oErr := mergeWorktreeOverlay(cfg, instanceRoot); oErr != nil {
+		return oErr
+	} else if overlayDir != "" {
+		cfg = cfgWithOverlay
+		opts.OverlayDir = overlayDir
 	}
 
 	_, err = workspace.ApplyToWorktree(cfg, configDir, instanceRoot, worktreePath, group, repo, purpose, branch, opts)
 	return err
+}
+
+// mergeWorktreeOverlay resolves the active workspace overlay (recorded in
+// InstanceState.OverlayURL) and merges its config into cfg, mirroring the
+// overlay merge `niwa apply` runs. It returns the merged config and the
+// resolved overlay clone directory. When no overlay is active (no recorded
+// URL, NoOverlay set, or the clone is absent), it returns the original cfg and
+// an empty overlay dir so the caller takes the no-overlay path.
+//
+// This runs only the structural config merge (which populates OverlaySource on
+// content entries); it deliberately does not re-run the overlay's vault
+// resolution, which the apply pipeline needs for env/secrets but the worktree
+// content install does not.
+func mergeWorktreeOverlay(cfg *config.WorkspaceConfig, instanceRoot string) (*config.WorkspaceConfig, string, error) {
+	state, err := workspace.LoadState(instanceRoot)
+	if err != nil {
+		// No readable state means no recorded overlay; fall back to the
+		// no-overlay path rather than failing the create.
+		return cfg, "", nil
+	}
+	if state.NoOverlay || state.OverlayURL == "" {
+		return cfg, "", nil
+	}
+
+	overlayDir, err := config.OverlayDir(state.OverlayURL)
+	if err != nil {
+		return nil, "", fmt.Errorf("resolving overlay directory: %w", err)
+	}
+	overlayTOML := filepath.Join(overlayDir, "workspace-overlay.toml")
+	overlay, err := config.ParseOverlay(overlayTOML)
+	if err != nil {
+		if os.IsNotExist(err) {
+			// The overlay clone is missing locally (e.g. never synced on this
+			// machine). Fall back to base content rather than hard-failing.
+			return cfg, "", nil
+		}
+		return nil, "", fmt.Errorf("parsing workspace overlay: %w", err)
+	}
+
+	merged, err := workspace.MergeWorkspaceOverlay(cfg, overlay, overlayDir)
+	if err != nil {
+		return nil, "", fmt.Errorf("merging workspace overlay: %w", err)
+	}
+	return merged, overlayDir, nil
 }
 
 func runSessionDestroy(cmd *cobra.Command, args []string) error {

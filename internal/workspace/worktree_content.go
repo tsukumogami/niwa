@@ -146,10 +146,11 @@ type WorktreeApplyOptions struct {
 	// OverlayDir is the local clone path of the overlay repo when one is
 	// active, used to append overlay content / resolve overlay-sourced repo
 	// content. Empty when no overlay is active.
+	//
+	// Overlay and global CLAUDE imports for the worktree rules file are
+	// resolved from the instance root (where apply materializes them), not
+	// from these opts — see installWorktreeRulesImport.
 	OverlayDir string
-	// GlobalConfigDir is the local global config clone, used to import
-	// CLAUDE.global.md when present. Empty when no global config is active.
-	GlobalConfigDir string
 	// Materializers is the set of repo materializers to run against the
 	// worktree. When nil, the default set is used (the same set the apply
 	// pipeline wires).

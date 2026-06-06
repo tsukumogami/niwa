@@ -129,6 +129,76 @@ func TestApplyToWorktreeIsIdempotent(t *testing.T) {
 	}
 }
 
+// TestApplyToWorktreeInstallsOverlayMergedContent pins the overlay path: a repo
+// whose content entry carries an OverlaySource (as MergeWorkspaceOverlay sets
+// for overlay-augmented repos) must succeed and have its overlay content
+// appended to the worktree's CLAUDE.local.md when opts.OverlayDir is set. This
+// is the regression guard for the create-time hard error: InstallRepoContentTo
+// returns "...OverlaySource ... but overlayDir is empty" when the CLI fails to
+// wire opts.OverlayDir, so a non-empty OverlayDir here is load-bearing.
+func TestApplyToWorktreeInstallsOverlayMergedContent(t *testing.T) {
+	cfg, configDir, instanceRoot, worktreePath := applyToWorktreeFixture(t)
+
+	// Stand up an overlay clone dir carrying the overlay content fragment.
+	overlayDir := filepath.Join(t.TempDir(), "overlay")
+	if err := os.MkdirAll(overlayDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const overlayMarker = "overlay-only content fragment for app"
+	if err := os.WriteFile(filepath.Join(overlayDir, "app-overlay.md"), []byte("# overlay\n\n"+overlayMarker+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate the post-merge config: the app entry has base Source plus the
+	// OverlaySource that MergeWorkspaceOverlay populates from an overlay=
+	// content entry.
+	entry := cfg.Claude.Content.Repos["app"]
+	entry.OverlaySource = "app-overlay.md"
+	cfg.Claude.Content.Repos["app"] = entry
+
+	written, err := ApplyToWorktree(cfg, configDir, instanceRoot, worktreePath, "apps", "app", "ship-the-thing", "branch-xyz",
+		WorktreeApplyOptions{OverlayDir: overlayDir})
+	if err != nil {
+		t.Fatalf("ApplyToWorktree with overlay source: %v", err)
+	}
+	if len(written) == 0 {
+		t.Fatal("expected written files, got none")
+	}
+
+	local, err := os.ReadFile(filepath.Join(worktreePath, "CLAUDE.local.md"))
+	if err != nil {
+		t.Fatalf("reading worktree CLAUDE.local.md: %v", err)
+	}
+	// Base content and overlay-appended content must both be present.
+	if !strings.Contains(string(local), "app repo content layer") {
+		t.Errorf("base repo content missing from worktree CLAUDE.local.md:\n%s", local)
+	}
+	if !strings.Contains(string(local), overlayMarker) {
+		t.Errorf("overlay-merged content missing from worktree CLAUDE.local.md:\n%s", local)
+	}
+}
+
+// TestApplyToWorktreeOverlaySourceRequiresOverlayDir documents the failure mode
+// the fix avoids: when a repo carries an OverlaySource but opts.OverlayDir is
+// empty, InstallRepoContentTo hard-errors. This is exactly what `niwa worktree
+// create` produced before the CLI resolved the overlay dir.
+func TestApplyToWorktreeOverlaySourceRequiresOverlayDir(t *testing.T) {
+	cfg, configDir, instanceRoot, worktreePath := applyToWorktreeFixture(t)
+
+	entry := cfg.Claude.Content.Repos["app"]
+	entry.OverlaySource = "app-overlay.md"
+	cfg.Claude.Content.Repos["app"] = entry
+
+	_, err := ApplyToWorktree(cfg, configDir, instanceRoot, worktreePath, "apps", "app", "ship-the-thing", "branch-xyz",
+		WorktreeApplyOptions{}) // OverlayDir left empty
+	if err == nil {
+		t.Fatal("expected an error when OverlaySource is set but OverlayDir is empty, got nil")
+	}
+	if !strings.Contains(err.Error(), "overlayDir is empty") {
+		t.Errorf("expected overlayDir-empty error, got: %v", err)
+	}
+}
+
 func TestFindRepoGroup(t *testing.T) {
 	instanceRoot := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(instanceRoot, "apps", "app"), 0o755); err != nil {
