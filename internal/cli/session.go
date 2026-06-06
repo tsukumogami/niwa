@@ -29,13 +29,6 @@ Subcommands:
 // sessionListCmd lists per-session lifecycle states. Filter flags --repo,
 // --status, --attached, --available all AND-combine. The flagless default
 // shows every session in the current instance.
-//
-// Earlier versions of niwa fell through to `niwa mesh list` (the
-// coordinator process registry) when invoked without flags, with a
-// deprecation warning. That alias was removed in PLAN issue 10 once the
-// AVAILABILITY column landed: the issue's UX sketch is incompatible with
-// the alias being default. Operators wanting the coordinator process
-// registry call `niwa mesh list` directly.
 var sessionListCmd = &cobra.Command{
 	Use:   "list",
 	Short: "List session lifecycle states with availability projection",
@@ -52,9 +45,7 @@ session in the current workspace instance. AVAILABILITY values are:
 Filter flags AND-combine: --repo, --status, --attached, --available.
 --attached and --available are mutually exclusive. Sessions with
 AVAILABILITY=stale appear under neither filter; run without filters to
-see them.
-
-For the coordinator process registry view, use 'niwa mesh list' directly.`,
+see them.`,
 	RunE:          runSessionList,
 	SilenceErrors: true,
 	SilenceUsage:  true,
@@ -82,31 +73,6 @@ func runSessionList(cmd *cobra.Command, _ []string) error {
 	return runSessionLifecycleList(cmd, sessionListRepo, sessionListStatus, sessionListAttached, sessionListAvailable)
 }
 
-// countPendingInbox counts JSON envelopes directly under
-// .niwa/roles/<role>/inbox/. Subdirectories (in-progress, cancelled,
-// expired, read) represent already-processed states and are excluded.
-// Non-existent inboxes (role has no provisioned inbox yet) contribute
-// 0 rather than erroring so a registry row with a missing inbox still
-// prints.
-func countPendingInbox(instanceRoot, role string) int {
-	inboxDir := filepath.Join(instanceRoot, ".niwa", "roles", role, "inbox")
-	entries, err := os.ReadDir(inboxDir)
-	if err != nil {
-		return 0
-	}
-	count := 0
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
-		}
-		if filepath.Ext(e.Name()) != ".json" {
-			continue
-		}
-		count++
-	}
-	return count
-}
-
 // resolveInstanceRoot returns the absolute path of the current instance
 // root. Priority: NIWA_INSTANCE_ROOT env var, then walk up from cwd to
 // find .niwa/instance.json.
@@ -119,4 +85,26 @@ func resolveInstanceRoot() (string, error) {
 		return "", fmt.Errorf("getting working directory: %w", err)
 	}
 	return discoverInstanceRoot(cwd)
+}
+
+// discoverInstanceRoot walks up from startDir to find the nearest
+// directory containing .niwa/instance.json. Mirrors
+// workspace.DiscoverInstance but avoids the circular import and lets
+// tests override via NIWA_INSTANCE_ROOT without running an apply first.
+func discoverInstanceRoot(startDir string) (string, error) {
+	abs, err := filepath.Abs(startDir)
+	if err != nil {
+		return "", fmt.Errorf("resolve path: %w", err)
+	}
+	dir := abs
+	for {
+		if _, err := os.Stat(filepath.Join(dir, ".niwa", "instance.json")); err == nil {
+			return dir, nil
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return "", fmt.Errorf("not inside a workspace instance (no .niwa/instance.json found walking up from %s)", startDir)
+		}
+		dir = parent
+	}
 }

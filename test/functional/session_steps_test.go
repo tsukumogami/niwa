@@ -2,7 +2,6 @@ package functional
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -13,107 +12,141 @@ import (
 	"github.com/tsukumogami/niwa/internal/worktree"
 )
 
-// session_steps_test.go holds step definitions for niwa_create_session and
-// niwa_destroy_session functional tests (Issue #97).
+// session_steps_test.go holds step definitions for the preserved
+// session-lifecycle CLI (`niwa session create` / `destroy` / `list` /
+// `detach`) and the attach-availability scenarios. These exercise the
+// worktree/session lifecycle directly through the compiled binary; the
+// agent-facing MCP surface was removed, so every step drives the CLI.
 
-// callMCPToolWithDaemonEnv is identical to callMCPToolAsRole except it does
-// NOT strip the fake-worker and daemon-spawn env vars
-// (NIWA_WORKER_SPAWN_COMMAND, NIWA_FAKE_SCENARIO, NIWA_FAKE_TEST_BINARY,
-// NIWA_FAKE_CLAUDE_SESSION_ID). Use this when calling tools that spawn a
-// daemon (e.g. niwa_create_session) so the daemon inherits the test env.
-func callMCPToolWithDaemonEnv(s *testState, instanceRoot, role, taskID, toolName, argsJSON string) (string, error) {
-	input := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"0.0.1"}}}` + "\n" +
-		`{"jsonrpc":"2.0","method":"notifications/initialized"}` + "\n" +
-		`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"` + toolName + `","arguments":` + argsJSON + `}}` + "\n"
+// iSetUpSingleRepoChanneledWorkspace creates one bare source repo named
+// "app" under group "apps" plus a config repo with [channels.mesh]. After
+// `niwa create` the instance layout is `<instance>/apps/app/`, and role
+// derivation yields "coordinator" (instance root) + "app". Use to exercise
+// the simplest topology that provisions a session-capable workspace.
+func iSetUpSingleRepoChanneledWorkspace(ctx context.Context, name string) (context.Context, error) {
+	s := getState(ctx)
+	if s == nil {
+		return ctx, fmt.Errorf("no test state")
+	}
+	url, err := s.gitServer.SourceRepo("app")
+	if err != nil {
+		return ctx, fmt.Errorf("creating source repo %q: %w", "app", err)
+	}
+	s.repoURLs["app"] = url
 
-	env := s.buildEnv()
-	envMap := make(map[string]string)
-	for _, kv := range env {
-		if i := strings.IndexByte(kv, '='); i >= 0 {
-			envMap[kv[:i]] = kv[i+1:]
-		}
-	}
-	envMap["NIWA_INSTANCE_ROOT"] = instanceRoot
-	envMap["NIWA_SESSION_ROLE"] = role
-	if taskID != "" {
-		envMap["NIWA_TASK_ID"] = taskID
-	} else {
-		delete(envMap, "NIWA_TASK_ID")
-	}
-	// Intentionally keep NIWA_WORKER_SPAWN_COMMAND, NIWA_FAKE_SCENARIO,
-	// NIWA_FAKE_TEST_BINARY, and NIWA_FAKE_CLAUDE_SESSION_ID so the daemon
-	// spawned by this call inherits the fake-worker environment.
+	body := fmt.Sprintf(`[workspace]
+name = %q
 
-	envSlice := make([]string, 0, len(envMap))
-	for k, v := range envMap {
-		envSlice = append(envSlice, k+"="+v)
-	}
+[channels.mesh]
 
-	cmd := exec.Command(s.binPath, "mcp-serve")
-	cmd.Env = envSlice
-	cmd.Stdin = strings.NewReader(input)
-	var stdout, stderr strings.Builder
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		if _, ok := err.(*exec.ExitError); !ok {
-			return "", fmt.Errorf("mcp-serve failed: %w\nstderr: %s", err, stderr.String())
-		}
+[groups.apps]
+
+[repos.app]
+url = %q
+group = "apps"
+`, name, url)
+	cfgURL, err := s.gitServer.ConfigRepo(name, body)
+	if err != nil {
+		return ctx, fmt.Errorf("creating config repo %q: %w", name, err)
 	}
-	return stdout.String(), nil
+	s.repoURLs[name] = cfgURL
+	if err := runNiwa(s, s.workspaceRoot, "niwa init --from "+cfgURL); err != nil {
+		return ctx, err
+	}
+	if s.exitCode != 0 {
+		return ctx, fmt.Errorf("niwa init exit=%d\nstdout:\n%s\nstderr:\n%s",
+			s.exitCode, s.stdout, s.stderr)
+	}
+	return ctx, nil
 }
 
-// iCallCreateSession calls niwa_create_session via the MCP interface and
-// stores the session_id and worktree_path in the scenario state.
+// sessionCreateRE parses the `niwa session create` success line:
+//
+//	session: created <id> at <path>
+var sessionCreateRE = regexp.MustCompile(`session: created (\S+) at (.+)`)
+
+// iCallCreateSession runs `niwa session create <repo> <purpose>` from the
+// instance root and stores the session_id + worktree path parsed from the
+// success line.
 func iCallCreateSession(ctx context.Context, repo, purpose, instance string) (context.Context, error) {
 	s := getState(ctx)
 	if s == nil {
 		return ctx, fmt.Errorf("no test state")
 	}
 	instRoot := filepath.Join(s.workspaceRoot, instance)
-	args := fmt.Sprintf(`{"repo":%q,"purpose":%q}`, repo, purpose)
-	out, err := callMCPToolWithDaemonEnv(s, instRoot, "coordinator", "", "niwa_create_session", args)
-	if err != nil {
-		return ctx, fmt.Errorf("callMCPToolWithDaemonEnv niwa_create_session: %w", err)
+	cmd := fmt.Sprintf("niwa session create %s %q", repo, purpose)
+	if err := runNiwa(s, instRoot, cmd); err != nil {
+		return ctx, fmt.Errorf("niwa session create: %w", err)
 	}
-	// Extract the content text from the MCP response JSON.
-	payload, extractErr := extractMCPContentText(out)
-	if extractErr != nil {
-		return ctx, fmt.Errorf("extracting content from create_session response: %w\nraw: %s", extractErr, out)
+	if s.exitCode != 0 {
+		return ctx, fmt.Errorf("niwa session create exit=%d\nstdout:\n%s\nstderr:\n%s",
+			s.exitCode, s.stdout, s.stderr)
 	}
-	var resp map[string]string
-	if err := json.Unmarshal([]byte(payload), &resp); err != nil {
-		return ctx, fmt.Errorf("parsing create_session payload %q: %w", payload, err)
+	m := sessionCreateRE.FindStringSubmatch(s.stdout)
+	if m == nil {
+		return ctx, fmt.Errorf("could not parse session create output: %q", s.stdout)
 	}
-	if resp["session_id"] == "" {
-		return ctx, fmt.Errorf("niwa_create_session returned empty session_id; payload: %s", payload)
-	}
-	s.lastSessionID = resp["session_id"]
-	s.lastSessionWorktreePath = resp["worktree_path"]
+	s.lastSessionID = strings.TrimSpace(m[1])
+	s.lastSessionWorktreePath = strings.TrimSpace(m[2])
 	return ctx, nil
 }
 
-// iCallDestroySession calls niwa_destroy_session via the MCP interface using
-// the session_id stored by the previous iCallCreateSession step.
+// iCallDestroySession runs `niwa session destroy <id> --force` for the
+// session created by the previous step.
 func iCallDestroySession(ctx context.Context, instance string) (context.Context, error) {
 	s := getState(ctx)
 	if s == nil {
 		return ctx, fmt.Errorf("no test state")
 	}
 	if s.lastSessionID == "" {
-		return ctx, fmt.Errorf("no session_id stored; call niwa_create_session first")
+		return ctx, fmt.Errorf("no session_id stored; create a session first")
 	}
 	instRoot := filepath.Join(s.workspaceRoot, instance)
-	args := fmt.Sprintf(`{"session_id":%q,"force":true}`, s.lastSessionID)
-	out, err := callMCPToolAsRole(s, instRoot, "coordinator", "", "niwa_destroy_session", args)
-	if err != nil {
-		return ctx, fmt.Errorf("callMCPToolAsRole niwa_destroy_session: %w", err)
+	cmd := fmt.Sprintf("niwa session destroy %s --force", s.lastSessionID)
+	if err := runNiwa(s, instRoot, cmd); err != nil {
+		return ctx, fmt.Errorf("niwa session destroy: %w", err)
 	}
-	// Verify the response is not an error.
-	if isErrorResult(out) {
-		return ctx, fmt.Errorf("niwa_destroy_session returned error; raw: %s", out)
+	if s.exitCode != 0 {
+		return ctx, fmt.Errorf("niwa session destroy exit=%d\nstdout:\n%s\nstderr:\n%s",
+			s.exitCode, s.stdout, s.stderr)
 	}
 	return ctx, nil
+}
+
+// iCallDestroySessionWithoutForce runs `niwa session destroy <id>` (no
+// --force). When a live attach lock is held the command exits non-zero and
+// prints the SESSION_ATTACHED guard message on stderr; callers assert
+// against that text via `the last MCP response contains code "..."`.
+func iCallDestroySessionWithoutForce(ctx context.Context, instance string) (context.Context, error) {
+	s := getState(ctx)
+	if s == nil {
+		return ctx, fmt.Errorf("no test state")
+	}
+	if s.lastSessionID == "" {
+		return ctx, fmt.Errorf("no session_id stored; create a session first")
+	}
+	instRoot := filepath.Join(s.workspaceRoot, instance)
+	cmd := fmt.Sprintf("niwa session destroy %s", s.lastSessionID)
+	if err := runNiwa(s, instRoot, cmd); err != nil {
+		return ctx, fmt.Errorf("niwa session destroy: %w", err)
+	}
+	return ctx, nil
+}
+
+// theLastMCPResponseContainsCode asserts that the last command's combined
+// stdout+stderr contains the given token. Retained under its historical
+// name so the session_attach feature text is unchanged; the underlying
+// surface is now the CLI's stderr rather than an MCP error payload.
+func theLastMCPResponseContainsCode(ctx context.Context, code string) error {
+	s := getState(ctx)
+	if s == nil {
+		return fmt.Errorf("no test state")
+	}
+	combined := s.stdout + s.stderr
+	if !strings.Contains(combined, code) {
+		return fmt.Errorf("response does not contain %q:\nstdout:\n%s\nstderr:\n%s", code, s.stdout, s.stderr)
+	}
+	return nil
 }
 
 // theSessionIsActiveInInstance asserts the session state file has status="active".
@@ -181,77 +214,6 @@ func theSessionScaffoldDirExistsInWorktree(ctx context.Context, relPath string) 
 	return nil
 }
 
-// extractMCPContentText pulls the text content from a raw MCP JSON-RPC
-// response stream. The tools/call response embeds a content array whose
-// first element has a "text" field.
-func extractMCPContentText(raw string) (string, error) {
-	// Find the tools/call result line (id:2).
-	for _, line := range splitLines(raw) {
-		var msg struct {
-			ID     int `json:"id"`
-			Result struct {
-				Content []struct {
-					Text string `json:"text"`
-				} `json:"content"`
-			} `json:"result"`
-		}
-		if err := json.Unmarshal([]byte(line), &msg); err != nil {
-			continue
-		}
-		if msg.ID == 2 && len(msg.Result.Content) > 0 {
-			return msg.Result.Content[0].Text, nil
-		}
-	}
-	// Fall back: try to match content[0].text via regex for escaped strings.
-	re := regexp.MustCompile(`"text"\s*:\s*"((?:[^"\\]|\\.)*)"`)
-	m := re.FindStringSubmatch(raw)
-	if m == nil {
-		return "", fmt.Errorf("no content text found in response")
-	}
-	// Unescape the JSON string value.
-	var text string
-	if err := json.Unmarshal([]byte(`"`+m[1]+`"`), &text); err != nil {
-		return m[1], nil
-	}
-	return text, nil
-}
-
-// isErrorResult checks if the raw MCP response indicates a tool error.
-func isErrorResult(raw string) bool {
-	for _, line := range splitLines(raw) {
-		var msg struct {
-			ID     int `json:"id"`
-			Result struct {
-				IsError bool `json:"isError"`
-			} `json:"result"`
-		}
-		if err := json.Unmarshal([]byte(line), &msg); err != nil {
-			continue
-		}
-		if msg.ID == 2 {
-			return msg.Result.IsError
-		}
-	}
-	return false
-}
-
-func splitLines(s string) []string {
-	var lines []string
-	start := 0
-	for i := 0; i < len(s); i++ {
-		if s[i] == '\n' {
-			if start < i {
-				lines = append(lines, s[start:i])
-			}
-			start = i + 1
-		}
-	}
-	if start < len(s) {
-		lines = append(lines, s[start:])
-	}
-	return lines
-}
-
 // iRunNiwaGoWithLastSessionID runs "niwa go <repo> <session-id>" using the
 // session ID stored by a preceding create step.
 func iRunNiwaGoWithLastSessionID(ctx context.Context, repo string) (context.Context, error) {
@@ -293,8 +255,7 @@ func theResponseFileContainsLastSessionWorktreePath(ctx context.Context, instanc
 
 // theResponseFileContainsPathUnderWorktreesDir verifies that the response
 // file written by niwa session create contains a path under the instance's
-// .niwa/worktrees/ directory. Used by AC-S5a where the session ID is not
-// known ahead of time (CLI creates and returns it at runtime).
+// .niwa/worktrees/ directory.
 func theResponseFileContainsPathUnderWorktreesDir(ctx context.Context, instance string) error {
 	s := getState(ctx)
 	if s == nil {
@@ -342,327 +303,6 @@ func aSessionLifecycleStateExistsForRepo(ctx context.Context, repo, status, inst
 	}
 	return fmt.Errorf("no session with repo=%q status=%q found in %s; got %d sessions",
 		repo, status, sessionsDir, len(all))
-}
-
-// iDelegateTaskToSessionRole calls niwa_delegate with session_id set to
-// s.lastSessionID, routing the task to the session's worktree daemon.
-// Stores the returned task_id in s.lastTaskID.
-func iDelegateTaskToSessionRole(ctx context.Context, role, instance string) (context.Context, error) {
-	s := getState(ctx)
-	if s == nil {
-		return ctx, fmt.Errorf("no test state")
-	}
-	if s.lastSessionID == "" {
-		return ctx, fmt.Errorf("no session_id stored; call niwa_create_session first")
-	}
-	instRoot := filepath.Join(s.workspaceRoot, instance)
-	args := fmt.Sprintf(`{"to":%q,"session_id":%q,"body":{"action":"test"},"mode":"async"}`, role, s.lastSessionID)
-	out, err := callMCPToolAsRole(s, instRoot, "coordinator", "", "niwa_delegate", args)
-	if err != nil {
-		return ctx, fmt.Errorf("niwa_delegate to session: %w", err)
-	}
-	if isErrorResult(out) {
-		return ctx, fmt.Errorf("niwa_delegate returned error: %s", out)
-	}
-	payload, err := extractMCPContentText(out)
-	if err != nil {
-		return ctx, fmt.Errorf("extracting task_id: %w", err)
-	}
-	var resp struct {
-		TaskID string `json:"task_id"`
-	}
-	if err := json.Unmarshal([]byte(payload), &resp); err != nil {
-		return ctx, fmt.Errorf("parsing delegate response %q: %w", payload, err)
-	}
-	if resp.TaskID == "" {
-		return ctx, fmt.Errorf("niwa_delegate returned empty task_id; payload: %s", payload)
-	}
-	s.lastTaskID = resp.TaskID
-	return ctx, nil
-}
-
-func iDelegateTaskToSessionRoleExpectingError(ctx context.Context, role, sessionID, instance string) (context.Context, error) {
-	s := getState(ctx)
-	if s == nil {
-		return ctx, fmt.Errorf("no test state")
-	}
-	instRoot := filepath.Join(s.workspaceRoot, instance)
-	args := fmt.Sprintf(`{"to":%q,"session_id":%q,"body":{"action":"test"},"mode":"async"}`, role, sessionID)
-	out, err := callMCPToolAsRole(s, instRoot, "coordinator", "", "niwa_delegate", args)
-	if err != nil {
-		return ctx, fmt.Errorf("callMCPToolAsRole: %w", err)
-	}
-	s.stdout = out
-	return ctx, nil
-}
-
-// iTryToDelegateTaskToSessionRole calls niwa_delegate using s.lastSessionID
-// and stores the raw MCP response in s.stdout without failing on errors.
-// Use this for scenarios that assert a specific error code in the response.
-func iTryToDelegateTaskToSessionRole(ctx context.Context, role, instance string) (context.Context, error) {
-	s := getState(ctx)
-	if s == nil {
-		return ctx, fmt.Errorf("no test state")
-	}
-	if s.lastSessionID == "" {
-		return ctx, fmt.Errorf("no session_id stored; call niwa_create_session first")
-	}
-	instRoot := filepath.Join(s.workspaceRoot, instance)
-	args := fmt.Sprintf(`{"to":%q,"session_id":%q,"body":{"action":"test"},"mode":"async"}`, role, s.lastSessionID)
-	out, err := callMCPToolAsRole(s, instRoot, "coordinator", "", "niwa_delegate", args)
-	if err != nil {
-		return ctx, fmt.Errorf("callMCPToolAsRole: %w", err)
-	}
-	s.stdout = out
-	return ctx, nil
-}
-
-// theLastMCPResponseContainsCode asserts that s.stdout contains the given
-// error code string (e.g. "SESSION_NOT_FOUND").
-func theLastMCPResponseContainsCode(ctx context.Context, code string) error {
-	s := getState(ctx)
-	if s == nil {
-		return fmt.Errorf("no test state")
-	}
-	if !strings.Contains(s.stdout, code) {
-		return fmt.Errorf("response does not contain code %q:\n%s", code, s.stdout)
-	}
-	return nil
-}
-
-// iDelegateTaskToRoleWithoutSessionID calls niwa_delegate with no session_id
-// and no read_only flag, storing the raw MCP response in s.stdout without
-// failing. Use this to assert SESSION_REQUIRED or other error responses.
-func iDelegateTaskToRoleWithoutSessionID(ctx context.Context, role, instance string) (context.Context, error) {
-	s := getState(ctx)
-	if s == nil {
-		return ctx, fmt.Errorf("no test state")
-	}
-	instRoot := filepath.Join(s.workspaceRoot, instance)
-	args := fmt.Sprintf(`{"to":%q,"body":{"action":"test"},"mode":"async"}`, role)
-	out, err := callMCPToolAsRole(s, instRoot, "coordinator", "", "niwa_delegate", args)
-	if err != nil {
-		return ctx, fmt.Errorf("callMCPToolAsRole: %w", err)
-	}
-	s.stdout = out
-	return ctx, nil
-}
-
-// iDelegateReadOnlyTaskToRole calls niwa_delegate with read_only:true and no
-// session_id, routing the task to the main clone daemon. Stores the returned
-// task_id in s.lastTaskID.
-func iDelegateReadOnlyTaskToRole(ctx context.Context, role, instance string) (context.Context, error) {
-	s := getState(ctx)
-	if s == nil {
-		return ctx, fmt.Errorf("no test state")
-	}
-	instRoot := filepath.Join(s.workspaceRoot, instance)
-	args := fmt.Sprintf(`{"to":%q,"body":{"action":"test"},"mode":"async","read_only":true}`, role)
-	out, err := callMCPToolAsRole(s, instRoot, "coordinator", "", "niwa_delegate", args)
-	if err != nil {
-		return ctx, fmt.Errorf("callMCPToolAsRole: %w", err)
-	}
-	if isErrorResult(out) {
-		return ctx, fmt.Errorf("read_only delegate returned error: %s", out)
-	}
-	payload, err := extractMCPContentText(out)
-	if err != nil {
-		return ctx, fmt.Errorf("extracting task_id from read_only delegate: %w", err)
-	}
-	var resp struct {
-		TaskID string `json:"task_id"`
-	}
-	if err := json.Unmarshal([]byte(payload), &resp); err != nil {
-		return ctx, fmt.Errorf("parsing read_only delegate response %q: %w", payload, err)
-	}
-	if resp.TaskID == "" {
-		return ctx, fmt.Errorf("read_only delegate returned empty task_id; payload: %s", payload)
-	}
-	s.lastTaskID = resp.TaskID
-	return ctx, nil
-}
-
-// iDelegateTaskToSessionRoleWithReadOnly calls niwa_delegate with both
-// session_id=s.lastSessionID and read_only:true. session_id takes precedence
-// so the task routes to the session worktree daemon. Stores task_id in s.lastTaskID.
-func iDelegateTaskToSessionRoleWithReadOnly(ctx context.Context, role, instance string) (context.Context, error) {
-	s := getState(ctx)
-	if s == nil {
-		return ctx, fmt.Errorf("no test state")
-	}
-	if s.lastSessionID == "" {
-		return ctx, fmt.Errorf("no session_id stored; call niwa_create_session first")
-	}
-	instRoot := filepath.Join(s.workspaceRoot, instance)
-	args := fmt.Sprintf(`{"to":%q,"session_id":%q,"body":{"action":"test"},"mode":"async","read_only":true}`, role, s.lastSessionID)
-	out, err := callMCPToolAsRole(s, instRoot, "coordinator", "", "niwa_delegate", args)
-	if err != nil {
-		return ctx, fmt.Errorf("callMCPToolAsRole: %w", err)
-	}
-	if isErrorResult(out) {
-		return ctx, fmt.Errorf("delegate with session_id+read_only returned error: %s", out)
-	}
-	payload, err := extractMCPContentText(out)
-	if err != nil {
-		return ctx, fmt.Errorf("extracting task_id: %w", err)
-	}
-	var resp struct {
-		TaskID string `json:"task_id"`
-	}
-	if err := json.Unmarshal([]byte(payload), &resp); err != nil {
-		return ctx, fmt.Errorf("parsing delegate response %q: %w", payload, err)
-	}
-	if resp.TaskID == "" {
-		return ctx, fmt.Errorf("delegate returned empty task_id; payload: %s", payload)
-	}
-	s.lastTaskID = resp.TaskID
-	return ctx, nil
-}
-
-// noTaskFilesExistInInstance checks that .niwa/tasks/ in the given instance
-// contains no .json files (i.e. no task was created).
-func noTaskFilesExistInInstance(ctx context.Context, instance string) error {
-	s := getState(ctx)
-	if s == nil {
-		return fmt.Errorf("no test state")
-	}
-	tasksDir := filepath.Join(s.workspaceRoot, instance, ".niwa", "tasks")
-	entries, err := os.ReadDir(tasksDir)
-	if os.IsNotExist(err) {
-		return nil
-	}
-	if err != nil {
-		return fmt.Errorf("reading tasks dir %s: %w", tasksDir, err)
-	}
-	for _, e := range entries {
-		if !e.IsDir() {
-			continue
-		}
-		subEntries, _ := os.ReadDir(filepath.Join(tasksDir, e.Name()))
-		for _, se := range subEntries {
-			if strings.HasSuffix(se.Name(), ".json") {
-				return fmt.Errorf("unexpected task file %s/%s in tasks dir", e.Name(), se.Name())
-			}
-		}
-	}
-	return nil
-}
-
-// theTaskWasRoutedThroughLastSessionID verifies that the task recorded in
-// s.lastTaskID has session_id == s.lastSessionID in its state.json.
-//
-// Task state always lives in the main instance root
-// (<instanceRoot>/.niwa/tasks/<taskID>/state.json) regardless of which daemon
-// processed the task — both main-clone routing and session-worktree routing
-// write state there. The session_id field is written by createTaskEnvelope
-// only when session routing is active, so its presence (and value) proves
-// which routing path was taken, not just that the task completed.
-func theTaskWasRoutedThroughLastSessionID(ctx context.Context, instance string) error {
-	s := getState(ctx)
-	if s == nil {
-		return fmt.Errorf("no test state")
-	}
-	if s.lastTaskID == "" {
-		return fmt.Errorf("no task_id stored; delegate a task first")
-	}
-	if s.lastSessionID == "" {
-		return fmt.Errorf("no session_id stored; call niwa_create_session first")
-	}
-	instRoot := filepath.Join(s.workspaceRoot, instance)
-	stateFile := filepath.Join(instRoot, ".niwa", "tasks", s.lastTaskID, "state.json")
-	data, err := os.ReadFile(stateFile)
-	if err != nil {
-		return fmt.Errorf("reading state.json for task %s: %w", s.lastTaskID, err)
-	}
-	var st struct {
-		SessionID string `json:"session_id"`
-	}
-	if err := json.Unmarshal(data, &st); err != nil {
-		return fmt.Errorf("parsing state.json: %w", err)
-	}
-	if st.SessionID != s.lastSessionID {
-		return fmt.Errorf("task %s was not routed through session %q: state.json has session_id=%q",
-			s.lastTaskID, s.lastSessionID, st.SessionID)
-	}
-	return nil
-}
-
-// theSessionClaudeConversationIDIsSet asserts that the session state file for
-// s.lastSessionID in instance has a non-empty ClaudeConversationID.
-func theSessionClaudeConversationIDIsSet(ctx context.Context, instance string) error {
-	s := getState(ctx)
-	if s == nil {
-		return fmt.Errorf("no test state")
-	}
-	if s.lastSessionID == "" {
-		return fmt.Errorf("no session_id stored")
-	}
-	sessionsDir := filepath.Join(s.workspaceRoot, instance, ".niwa", "sessions")
-	state, err := worktree.ReadSessionLifecycleState(sessionsDir, s.lastSessionID)
-	if err != nil {
-		return fmt.Errorf("ReadSessionLifecycleState: %w", err)
-	}
-	if state.ClaudeConversationID == "" {
-		return fmt.Errorf("session %s has empty ClaudeConversationID", s.lastSessionID)
-	}
-	return nil
-}
-
-func theSessionClaudeConversationIDEquals(ctx context.Context, wantID, instance string) error {
-	s := getState(ctx)
-	if s == nil {
-		return fmt.Errorf("no test state")
-	}
-	if s.lastSessionID == "" {
-		return fmt.Errorf("no session_id stored")
-	}
-	sessionsDir := filepath.Join(s.workspaceRoot, instance, ".niwa", "sessions")
-	state, err := worktree.ReadSessionLifecycleState(sessionsDir, s.lastSessionID)
-	if err != nil {
-		return fmt.Errorf("ReadSessionLifecycleState: %w", err)
-	}
-	if state.ClaudeConversationID != wantID {
-		return fmt.Errorf("ClaudeConversationID = %q, want %q", state.ClaudeConversationID, wantID)
-	}
-	return nil
-}
-
-func theWorkerInSessionWasSpawnedWith(ctx context.Context, want string) error {
-	s := getState(ctx)
-	if s == nil {
-		return fmt.Errorf("no test state")
-	}
-	if s.lastSessionWorktreePath == "" {
-		return fmt.Errorf("no session worktree path stored")
-	}
-	argsPath := filepath.Join(s.lastSessionWorktreePath, ".niwa", ".test", "worker_spawn_args.txt")
-	data, err := os.ReadFile(argsPath)
-	if err != nil {
-		return fmt.Errorf("reading session worker spawn args: %w", err)
-	}
-	if !strings.Contains(string(data), want) {
-		return fmt.Errorf("session worker spawn args do not contain %q:\n%s", want, string(data))
-	}
-	return nil
-}
-
-func theWorkerInSessionWasNotSpawnedWith(ctx context.Context, unwanted string) error {
-	s := getState(ctx)
-	if s == nil {
-		return fmt.Errorf("no test state")
-	}
-	if s.lastSessionWorktreePath == "" {
-		return fmt.Errorf("no session worktree path stored")
-	}
-	argsPath := filepath.Join(s.lastSessionWorktreePath, ".niwa", ".test", "worker_spawn_args.txt")
-	data, err := os.ReadFile(argsPath)
-	if err != nil {
-		return fmt.Errorf("reading session worker spawn args: %w", err)
-	}
-	if strings.Contains(string(data), unwanted) {
-		return fmt.Errorf("session worker spawn args contain unexpected %q:\n%s", unwanted, string(data))
-	}
-	return nil
 }
 
 func theMainCloneIsOnBranch(ctx context.Context, repoName, instance, branch string) error {
@@ -740,15 +380,6 @@ func theSessionWorktreeDirectoryDoesNotExist(ctx context.Context) error {
 	return nil
 }
 
-func iSetFakeClaudeSessionID(ctx context.Context, id string) (context.Context, error) {
-	s := getState(ctx)
-	if s == nil {
-		return ctx, fmt.Errorf("no test state")
-	}
-	s.envOverrides["NIWA_FAKE_CLAUDE_SESSION_ID"] = id
-	return ctx, nil
-}
-
 // findRepoPathInInstance scans instanceRoot two levels deep for a directory
 // named repoName that contains a .git entry.
 func findRepoPathInInstance(instanceRoot, repoName string) (string, error) {
@@ -788,16 +419,16 @@ func runGitInDir(dir string, args ...string) (string, error) {
 
 // iSeedLiveAttachSentinelForLastSession writes a <worktree>/.niwa/attach.state
 // JSON file that points at the test process's own PID + start_time. Used by
-// the @critical session_attach feature scenarios (Issue #117) to make a
-// session look "attached" without actually invoking `niwa session attach`
-// (which would require a real claude binary).
+// the @critical session_attach scenarios to make a session look "attached"
+// without actually invoking `niwa session attach` (which would require a
+// real claude binary).
 func iSeedLiveAttachSentinelForLastSession(ctx context.Context, instance string) (context.Context, error) {
 	s := getState(ctx)
 	if s == nil {
 		return ctx, fmt.Errorf("no test state")
 	}
 	if s.lastSessionWorktreePath == "" {
-		return ctx, fmt.Errorf("no worktree path stored; call niwa_create_session first")
+		return ctx, fmt.Errorf("no worktree path stored; create a session first")
 	}
 	myPID := os.Getpid()
 	myStart, _ := worktree.PIDStartTime(myPID)
@@ -814,41 +445,16 @@ func iSeedLiveAttachSentinelForLastSession(ctx context.Context, instance string)
 	return ctx, nil
 }
 
-// iCallDestroySessionWithoutForce calls niwa_destroy_session with force=false
-// and stores the raw MCP response in s.stdout. Unlike iCallDestroySession,
-// this does NOT fail on an error result -- callers assert against the error
-// code via `the last MCP response contains code "..."`. Used to test the
-// SESSION_ATTACHED gate per PRD R13/AC23.
-func iCallDestroySessionWithoutForce(ctx context.Context, instance string) (context.Context, error) {
-	s := getState(ctx)
-	if s == nil {
-		return ctx, fmt.Errorf("no test state")
-	}
-	if s.lastSessionID == "" {
-		return ctx, fmt.Errorf("no session_id stored; call niwa_create_session first")
-	}
-	instRoot := filepath.Join(s.workspaceRoot, instance)
-	args := fmt.Sprintf(`{"session_id":%q,"force":false}`, s.lastSessionID)
-	out, err := callMCPToolAsRole(s, instRoot, "coordinator", "", "niwa_destroy_session", args)
-	if err != nil {
-		return ctx, fmt.Errorf("callMCPToolAsRole niwa_destroy_session: %w", err)
-	}
-	s.stdout = out
-	return ctx, nil
-}
-
 // iRunSessionDetachForLastSessionInInstance runs `niwa session detach <id>`
 // against the most recently created session, executed from the given
-// instance root. Used by the @critical session_attach feature scenarios
-// (Issue #117) to verify the detach binary is wired in and behaves as a
-// no-op when no attach.state sentinel exists.
+// instance root.
 func iRunSessionDetachForLastSessionInInstance(ctx context.Context, instance string) (context.Context, error) {
 	s := getState(ctx)
 	if s == nil {
 		return ctx, fmt.Errorf("no test state")
 	}
 	if s.lastSessionID == "" {
-		return ctx, fmt.Errorf("no session_id stored; call niwa_create_session first")
+		return ctx, fmt.Errorf("no session_id stored; create a session first")
 	}
 	cwd := filepath.Join(s.workspaceRoot, instance)
 	cmd := fmt.Sprintf("niwa session detach %s", s.lastSessionID)
@@ -858,9 +464,8 @@ func iRunSessionDetachForLastSessionInInstance(ctx context.Context, instance str
 // iRunFromChanneledInstance runs a niwa command with cwd =
 // <workspaceRoot>/<instance>. The single-repo channeled workspace fixture
 // places the instance directly under workspaceRoot (no extra workspace-
-// name folder), unlike the registered-workspace fixture used by
-// iRunFromInstance. The session_attach.feature scenarios need this layout
-// so the niwa binary resolves the instance root via its walk-up logic.
+// name folder), so the niwa binary resolves the instance root via its
+// walk-up logic.
 func iRunFromChanneledInstance(ctx context.Context, command, instance string) (context.Context, error) {
 	s := getState(ctx)
 	if s == nil {

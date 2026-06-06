@@ -19,30 +19,24 @@ var stateKey = stateKeyType{}
 // testState holds per-scenario state. The Before hook resets it so each
 // scenario starts from a clean sandbox (fresh $HOME, fresh workspace root).
 type testState struct {
-	binPath       string            // absolute path to the niwa test binary
-	homeDir       string            // sandboxed $HOME for this scenario (holds .niwa/, .bashrc, etc.)
-	tmpDir        string            // scenario-scoped $TMPDIR (writes landed here stay isolated)
-	workspaceRoot string            // sandboxed directory where workspaces live
-	stdout        string            // last command's stdout
-	stderr        string            // last command's stderr
-	exitCode      int               // last command's exit code
-	shellPwd      string            // pwd reported by the last wrapped-shell run
-	shellStartPwd string            // cwd the wrapped shell started in (for "did not change" assertions)
-	envOverrides  map[string]string // per-scenario env var overrides (win over defaults)
-	gitServer     *localGitServer   // local bare-repo server for offline clone tests
-	repoURLs      map[string]string // name → file:// URL for repos created by localGitServer
+	binPath       string             // absolute path to the niwa test binary
+	homeDir       string             // sandboxed $HOME for this scenario (holds .niwa/, .bashrc, etc.)
+	tmpDir        string             // scenario-scoped $TMPDIR (writes landed here stay isolated)
+	workspaceRoot string             // sandboxed directory where workspaces live
+	stdout        string             // last command's stdout
+	stderr        string             // last command's stderr
+	exitCode      int                // last command's exit code
+	shellPwd      string             // pwd reported by the last wrapped-shell run
+	shellStartPwd string             // cwd the wrapped shell started in (for "did not change" assertions)
+	envOverrides  map[string]string  // per-scenario env var overrides (win over defaults)
+	gitServer     *localGitServer    // local bare-repo server for offline clone tests
+	repoURLs      map[string]string  // name → file:// URL for repos created by localGitServer
 	githubFake    *tarballFakeServer // GitHub API fake (per-scenario; spawned lazily)
 
-	// Mesh scenario state (Issue #10). These fields carry task + pause
-	// state between steps in a single scenario. They are zeroed per the
-	// scenario Before hook via the fresh testState allocation.
-	lastTaskID      string // ID of the most-recently created task envelope
-	pauseHookMarker string // base name of the active pause-hook marker file
-
-	// Session scenario state (Issue #97). Carry session lifecycle state
-	// between steps in a single scenario.
-	lastSessionID          string // ID returned by niwa_create_session
-	lastSessionWorktreePath string // worktree path returned by niwa_create_session
+	// Session scenario state. Carry session lifecycle state between steps
+	// in a single scenario; zeroed per the Before hook's fresh allocation.
+	lastSessionID           string // ID parsed from `niwa session create`
+	lastSessionWorktreePath string // worktree path parsed from `niwa session create`
 }
 
 func getState(ctx context.Context) *testState {
@@ -144,18 +138,12 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 		return setState(ctx, state), nil
 	})
 
-	// After hook: kill any niwa daemons this scenario left behind. Daemons
-	// are spawned with Setsid=true so they survive the test process exit
-	// and would hold flocks on daemon.pid.lock across scenarios, starving
-	// the next run. Walking the workspace root's children finds every
-	// daemon.pid the scenario wrote; the PID is SIGKILLed directly so no
-	// grace window applies.
+	// After hook: tear down per-scenario fakes.
 	ctx.After(func(ctx context.Context, sc *godog.Scenario, scenarioErr error) (context.Context, error) {
 		s := getState(ctx)
 		if s == nil {
 			return ctx, nil
 		}
-		killLeftoverDaemons(s.workspaceRoot)
 		if s.githubFake != nil {
 			s.githubFake.Close()
 			s.githubFake = nil
@@ -210,39 +198,6 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 	ctx.Step(`^the instance "([^"]*)" does not exist$`, theInstanceDoesNotExist)
 	ctx.Step(`^the repo "([^"]*)" exists in instance "([^"]*)"$`, theRepoExistsInInstance)
 
-	// Mesh / session steps
-	ctx.Step(`^NIWA_INSTANCE_ROOT is set to a temp directory$`, niwaInstanceRootIsSetToATempDirectory)
-	ctx.Step(`^I run "niwa session register" as role "([^"]*)"$`, iRunNiwaSessionRegisterAsRole)
-	ctx.Step(`^I run "niwa session register" from repo directory "([^"]*)"$`, iRunNiwaSessionRegisterFromRepoDir)
-	ctx.Step(`^I run "niwa session register" from instance root$`, iRunNiwaSessionRegisterFromInstanceRoot)
-	ctx.Step(`^a sessions\.json entry exists for role "([^"]*)"$`, aSessionsJSONEntryExistsForRole)
-	ctx.Step(`^the coordinator inbox directory exists$`, func(ctx context.Context) (context.Context, error) {
-		return ctx, theInboxDirectoryExistsForRole(ctx, "coordinator")
-	})
-	ctx.Step(`^the worker session sends a "([^"]*)" message to "([^"]*)" with body "([^"]*)"$`, theWorkerSessionSendsAMessageToWithBody)
-	ctx.Step(`^the coordinator inbox contains (\d+) message$`, theCoordinatorInboxContainsNMessages)
-	ctx.Step(`^the coordinator session checks messages$`, theCoordinatorSessionChecksMessages)
-	ctx.Step(`^a Claude session file exists for the parent process with session ID "([^"]*)" and matching cwd$`, aClaudeSessionFileExistsForParentProcessWithMatchingCwd)
-	ctx.Step(`^a Claude session file exists for the parent process with session ID "([^"]*)" and mismatched cwd$`, aClaudeSessionFileExistsForParentProcessWithMismatchedCwd)
-	ctx.Step(`^the sessions\.json entry for role "([^"]*)" has claude_session_id "([^"]*)"$`, theSessionsJSONEntryForRoleHasClaudeSessionID)
-	ctx.Step(`^the sessions\.json entry for role "([^"]*)" has no claude_session_id$`, theSessionsJSONEntryForRoleHasNoClaudeSessionID)
-
-	// Mesh daemon steps
-	ctx.Step(`^I remember the daemon PID for instance "([^"]*)"$`, iRememberDaemonPIDForInstance)
-	ctx.Step(`^the daemon PID for instance "([^"]*)" has not changed$`, theDaemonPIDForInstanceHasNotChanged)
-	ctx.Step(`^I remove the sessions directory from instance "([^"]*)"$`, iRemoveSessionsDirFromInstance)
-	ctx.Step(`^the daemon for instance "([^"]*)" eventually stops$`, theDaemonForInstanceEventuallyStops)
-	ctx.Step(`^I set NIWA_INSTANCE_ROOT to instance "([^"]*)"$`, iSetNiwaInstanceRootToInstance)
-	ctx.Step(`^the daemon log for instance "([^"]*)" eventually contains "([^"]*)"$`, theDaemonLogForInstanceEventuallyContains)
-
-	// niwa_ask / niwa_wait steps
-	ctx.Step(`^the coordinator asks the worker a question and the worker replies$`, theCoordinatorAsksWorkerAndReplies)
-	ctx.Step(`^the ask response contains the answer$`, theAskResponseContainsAnswer)
-	ctx.Step(`^the coordinator calls niwa_ask with timeout (\d+) seconds and no reply$`, theCoordinatorCallsAskWithTimeout)
-	ctx.Step(`^(\d+) "([^"]*)" messages are placed in the coordinator inbox$`, nMessagesPlacedInCoordinatorInbox)
-	ctx.Step(`^the coordinator calls niwa_wait for "([^"]*)" messages with count (\d+)$`, theCoordinatorCallsWait)
-	ctx.Step(`^the coordinator sends a message with invalid type "([^"]*)"$`, coordinatorSendsWithInvalidType)
-
 	// workspace-config-sources scenarios (PRD #72 regression + R28 lazy convert)
 	ctx.Step(`^the config repo "([^"]*)" is force-pushed to:$`, func(ctx context.Context, name string, body *godog.DocString) (context.Context, error) {
 		return theConfigRepoIsForcePushedTo(ctx, name, body.Content)
@@ -291,53 +246,7 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 	ctx.Step(`^I run claude -p from instance root "([^"]*)" with prompt:$`, iRunClaudePFromInstanceRoot)
 	ctx.Step(`^I run claude -p from repo "([^"]*)" in instance "([^"]*)" with prompt:$`, iRunClaudePFromRepoInInstance)
 
-	// Headless coordination steps
-	ctx.Step(`^I set up coordinator session for instance "([^"]*)"$`, iSetUpCoordinatorSessionForInstance)
-	ctx.Step(`^I set up worker session for instance "([^"]*)"$`, iSetUpWorkerSessionForInstance)
-	ctx.Step(`^I run claude -p from instance root "([^"]*)" with simulated worker reply and prompt:$`, iRunClaudePFromInstanceRootWithSimulatedWorkerReply)
-
-	// --- Mesh feature: functional-test harness (Issue #10) ---
-	ctx.Step(`^a channeled workspace "([^"]*)" exists$`, iSetUpChanneledWorkspace)
-	ctx.Step(`^a channeled workspace "([^"]*)" with permissions "([^"]*)" exists$`, iSetUpChanneledWorkspaceWithPermissions)
-	ctx.Step(`^the worker in instance "([^"]*)" was spawned with "([^"]*)"$`, theWorkerWasSpawnedWith)
-	ctx.Step(`^the worker in instance "([^"]*)" was not spawned with "([^"]*)"$`, theWorkerWasNotSpawnedWith)
-	ctx.Step(`^the daemon runs with fake worker scenario "([^"]*)"$`, iRunFakeWorkerWithScenario)
-	ctx.Step(`^the daemon has small timing overrides$`, iSetDefaultTimingOverrides)
-	ctx.Step(`^the daemon pauses before claiming envelopes$`, iPauseDaemonBeforeClaim)
-	ctx.Step(`^the daemon pauses after claiming envelopes$`, iPauseDaemonAfterClaim)
-	ctx.Step(`^the pause marker "([^"]*)" eventually appears$`, iPauseMarkerEventuallyAppears)
-	ctx.Step(`^I release the daemon pause marker$`, iReleaseDaemonPauseMarker)
-	ctx.Step(`^I delegate a task to role "([^"]*)" in instance "([^"]*)" with body '([^']*)'$`, func(ctx context.Context, role, instance, body string) (context.Context, error) {
-		return iDelegateTaskToRole(ctx, instance, role, body)
-	})
-	ctx.Step(`^I cancel the task in instance "([^"]*)"$`, iCancelTheTask)
-	ctx.Step(`^the task state in instance "([^"]*)" eventually becomes "([^"]*)"$`, theTaskStateEventuallyBecomes)
-	ctx.Step(`^the task reason in instance "([^"]*)" contains "([^"]*)"$`, theTaskReasonContains)
-	ctx.Step(`^the task restart_count in instance "([^"]*)" equals (\d+)$`, theTaskRestartCountEquals)
-	ctx.Step(`^the task transitions log in instance "([^"]*)" contains "([^"]*)"$`, theTransitionsLogContains)
-	ctx.Step(`^the daemon log for instance "([^"]*)" does not contain "([^"]*)"$`, theDaemonLogDoesNotContain)
-	ctx.Step(`^the daemon log for instance "([^"]*)" does not contain any of "([^"]*)"$`, theDaemonLogDoesNotContainAnyOf)
-	ctx.Step(`^I SIGKILL the daemon for instance "([^"]*)"$`, iSIGKILLTheDaemon)
-	ctx.Step(`^I SIGKILL the worker for instance "([^"]*)"$`, iSIGKILLTheWorker)
-	ctx.Step(`^I restart the daemon for instance "([^"]*)"$`, iRestartTheDaemon)
-	ctx.Step(`^I run two concurrent applies for instance "([^"]*)"$`, iRunTwoConcurrentApplies)
-	ctx.Step(`^exactly one daemon is running for instance "([^"]*)"$`, exactlyOneDaemonIsRunning)
-	ctx.Step(`^I update the task body in instance "([^"]*)" to '([^']*)'$`, iUpdateTheTaskBody)
-	ctx.Step(`^an unauthorized MCP call for instance "([^"]*)" receives NOT_TASK_PARTY$`, iVerifyAuthorizationDenied)
-	ctx.Step(`^the output contains status "([^"]*)"$`, theOutputContainsStatus)
-
-	// --- live coordinator ask routing (Issue #86) ---
-	ctx.Step(`^the coordinator session is registered in instance "([^"]*)"$`, theCoordinatorSessionIsRegisteredInInstance)
-	ctx.Step(`^the coordinator answers the question for instance "([^"]*)" via check_messages$`, theCoordinatorAnswersQuestionViaCheckMessages)
-	ctx.Step(`^the coordinator blocks on niwa_await_task and handles questions for instance "([^"]*)"$`, theCoordinatorBlocksAndHandlesQuestionsForInstance)
-
-	// --- @channels-e2e (Issue #11): real `claude -p` scenarios ---
-	ctx.Step(`^the daemon uses the real claude worker spawn path$`, iEnsureNoFakeWorker)
-	ctx.Step(`^I run claude -p preserving case from instance root "([^"]*)" with prompt:$`, iRunClaudePFromInstanceRootPreservingCase)
-	ctx.Step(`^I queue a niwa_finish_task instruction for role "([^"]*)" in instance "([^"]*)"$`, iDelegateTaskToRoleWithFinishInstruction)
-	ctx.Step(`^the task state in instance "([^"]*)" eventually becomes "([^"]*)" within (\d+) seconds$`, theTaskStateEventuallyBecomesWithin)
-
-	// --- Session lifecycle steps (Issue #97) ---
+	// --- Session lifecycle steps ---
 	ctx.Step(`^I call niwa_create_session for repo "([^"]*)" with purpose "([^"]*)" in instance "([^"]*)"$`, iCallCreateSession)
 	ctx.Step(`^I call niwa_destroy_session in instance "([^"]*)"$`, iCallDestroySession)
 	ctx.Step(`^I run niwa session detach for the last session in instance "([^"]*)"$`, iRunSessionDetachForLastSessionInInstance)
@@ -355,45 +264,14 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 	ctx.Step(`^a session lifecycle state file exists for repo "([^"]*)" with status "([^"]*)" in instance "([^"]*)"$`, aSessionLifecycleStateExistsForRepo)
 	ctx.Step(`^I run "niwa go ([^"]*)" with last session id$`, iRunNiwaGoWithLastSessionID)
 
-	// --- Session daemon + routing steps ---
-	ctx.Step(`^I delegate a task to session role "([^"]*)" in instance "([^"]*)"$`, iDelegateTaskToSessionRole)
-	ctx.Step(`^I try to delegate a task to session role "([^"]*)" in instance "([^"]*)"$`, iTryToDelegateTaskToSessionRole)
-	ctx.Step(`^I delegate a task to session role "([^"]*)" with session id "([^"]*)" in instance "([^"]*)" expecting an error$`, iDelegateTaskToSessionRoleExpectingError)
+	// --- Session destroy gate + branch/worktree assertions ---
 	ctx.Step(`^the last MCP response contains code "([^"]*)"$`, theLastMCPResponseContainsCode)
-	// Worktree-aware MCP calls (test goroutine acts as a session worker).
-	ctx.Step(`^I call niwa_check_messages as session worker for role "([^"]*)" in instance "([^"]*)"$`, iCallCheckMessagesAsSessionWorker)
-	ctx.Step(`^the worktree inbox for role "([^"]*)" contains a "([^"]*)" message$`, theWorktreeInboxForRoleContainsMessageType)
-	// Delegation isolation contract (SESSION_REQUIRED / read_only)
-	ctx.Step(`^I try to delegate a task to role "([^"]*)" without session_id in instance "([^"]*)"$`, iDelegateTaskToRoleWithoutSessionID)
-	ctx.Step(`^I delegate a read_only task to role "([^"]*)" in instance "([^"]*)"$`, iDelegateReadOnlyTaskToRole)
-	ctx.Step(`^I delegate a task to session role "([^"]*)" with read_only true in instance "([^"]*)"$`, iDelegateTaskToSessionRoleWithReadOnly)
-	ctx.Step(`^no task files exist in instance "([^"]*)"$`, noTaskFilesExistInInstance)
-	ctx.Step(`^the task was routed through the last session id in instance "([^"]*)"$`, theTaskWasRoutedThroughLastSessionID)
-	ctx.Step(`^the session claude_conversation_id is set in instance "([^"]*)"$`, theSessionClaudeConversationIDIsSet)
-	ctx.Step(`^the session claude_conversation_id equals "([^"]*)" in instance "([^"]*)"$`, theSessionClaudeConversationIDEquals)
-	ctx.Step(`^the worker in session was spawned with "([^"]*)"$`, theWorkerInSessionWasSpawnedWith)
-	ctx.Step(`^the worker in session was not spawned with "([^"]*)"$`, theWorkerInSessionWasNotSpawnedWith)
 	ctx.Step(`^the main clone of "([^"]*)" in instance "([^"]*)" is on branch "([^"]*)"$`, theMainCloneIsOnBranch)
 	ctx.Step(`^the session branch exists in repo "([^"]*)" of instance "([^"]*)"$`, theSessionBranchExistsInRepo)
 	ctx.Step(`^the session branch does not exist in repo "([^"]*)" of instance "([^"]*)"$`, theSessionBranchDoesNotExistInRepo)
 	ctx.Step(`^the session worktree directory does not exist$`, theSessionWorktreeDirectoryDoesNotExist)
-	ctx.Step(`^I set the fake Claude session ID to "([^"]*)"$`, iSetFakeClaudeSessionID)
 
-	// --- @channels-e2e-graph: real coordinator -> real workers delegation graph ---
-	ctx.Step(`^a multi-repo channeled workspace "([^"]*)" with web and backend exists$`, iSetUpMultiRepoChanneledWorkspace)
 	ctx.Step(`^a single-repo channeled workspace "([^"]*)" exists$`, iSetUpSingleRepoChanneledWorkspace)
-	ctx.Step(`^I plant a legacy session directory "([^"]*)" in instance "([^"]*)"$`, iPlantLegacySessionDir)
-	ctx.Step(`^I delete file "([^"]*)" in instance "([^"]*)"$`, iDeleteFileInInstance)
-	ctx.Step(`^I delete directory "([^"]*)" in instance "([^"]*)"$`, iDeleteDirectoryInInstance)
-	ctx.Step(`^I run claude -p preserving case from instance root "([^"]*)" within (\d+) seconds with prompt:$`, iRunClaudePFromInstanceRootPreservingCaseWithin)
-	ctx.Step(`^the file "([^"]*)" in repo "([^"]*)" of instance "([^"]*)" exactly matches "([^"]*)"$`, theFileInRepoOfInstanceExactlyMatches)
-	ctx.Step(`^exactly (\d+) tasks in instance "([^"]*)" are in state "completed"$`, func(ctx context.Context, n int, instance string) error {
-		return allTasksInInstanceAreCompleted(ctx, n, instance)
-	})
-	ctx.Step(`^the coordinator in instance "([^"]*)" emitted niwa_delegate calls to roles "([^"]*)"$`, theCoordinatorEmittedDelegateCallsForRoles)
-	ctx.Step(`^role "([^"]*)" in instance "([^"]*)" emitted at least (\d+) successful niwa_finish_task calls?$`, func(ctx context.Context, role, instance string, n int) error {
-		return roleEmittedFinishTaskCalls(ctx, role, n, instance)
-	})
 
 	// --- @critical: rank-2 deprecation + plugin auto-install ---
 	registerRank2Steps(ctx)

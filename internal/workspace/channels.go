@@ -360,49 +360,6 @@ func InstallChannelInfrastructure(cfg *config.WorkspaceConfig, instanceRoot stri
 	}
 	*writtenFiles = append(*writtenFiles, instanceSkill)
 
-	// Step 6: Hook scripts on disk. HooksMaterializer reads Scripts as
-	// file paths in Step 6.5 of runPipeline. injectChannelHooks (called
-	// in Step 0 of runPipeline) has already recorded these paths in
-	// cfg.Claude.Hooks; we just need the files to exist.
-	hooksDir := filepath.Join(niwaDir, "hooks")
-	if err := mkdirAllMode(hooksDir, 0o700); err != nil {
-		return fmt.Errorf("creating hooks dir: %w", err)
-	}
-	// Hook source scripts live under .niwa/ and therefore follow R48's
-	// file-mode rule (0600). HooksMaterializer (step 6.5) reads these
-	// bytes and writes them to .claude/hooks/<event>/ with mode 0755
-	// where Claude Code actually invokes them; the source files never
-	// need the execute bit themselves.
-	sessionStartPath := filepath.Join(hooksDir, "mesh-session-start.sh")
-	if err := writeIdempotent(sessionStartPath, []byte("#!/bin/sh\nniwa session register\n"), 0o600, os.Stderr); err != nil {
-		return fmt.Errorf("writing mesh-session-start.sh: %w", err)
-	}
-	*writtenFiles = append(*writtenFiles, sessionStartPath)
-
-	userPromptPath := filepath.Join(hooksDir, "mesh-user-prompt-submit.sh")
-	if err := writeIdempotent(userPromptPath, []byte("#!/bin/sh\nniwa session register --check-only\n"), 0o600, os.Stderr); err != nil {
-		return fmt.Errorf("writing mesh-user-prompt-submit.sh: %w", err)
-	}
-	*writtenFiles = append(*writtenFiles, userPromptPath)
-
-	// Stop hook: reset the stall watchdog at every turn boundary. The absolute
-	// binary path is resolved at apply time so the hook works even when niwa
-	// is not on PATH inside Claude Code's hook execution environment.
-	niwaBin, exErr := os.Executable()
-	if exErr != nil || niwaBin == "" {
-		niwaBin = "niwa"
-	}
-	stopHooksDir := filepath.Join(hooksDir, "stop")
-	if err := mkdirAllMode(stopHooksDir, 0o700); err != nil {
-		return fmt.Errorf("creating hooks/stop dir: %w", err)
-	}
-	stopScriptPath := filepath.Join(stopHooksDir, "report-progress.sh")
-	stopScriptContent := []byte("#!/bin/sh\n" + niwaBin + " mesh report-progress\n")
-	if err := writeIdempotent(stopScriptPath, stopScriptContent, 0o600, os.Stderr); err != nil {
-		return fmt.Errorf("writing report-progress.sh: %w", err)
-	}
-	*writtenFiles = append(*writtenFiles, stopScriptPath)
-
 	// Step 7: workspace-context.md ## Channels section. The coordinator
 	// is the only reader (workers read the task envelope, not this file)
 	// so Role is hardcoded. See Decision 5 / PRD R12.
@@ -1108,47 +1065,4 @@ func mkdirAllMode(path string, mode os.FileMode) error {
 		return err
 	}
 	return os.Chmod(path, mode)
-}
-
-// injectChannelHooks inserts SessionStart and UserPromptSubmit hook
-// entries into cfg.Claude.Hooks when the workspace has channel config.
-// Hook entries are prepended so they run before any user-defined hooks
-// for the same event. This mutates cfg in place and is called at the top
-// of runPipeline before any per-repo processing.
-//
-// HooksMaterializer reads Scripts as file paths and copies them with
-// os.ReadFile, so these must point to real files on disk.
-// InstallChannelInfrastructure writes the scripts; the call order in
-// runPipeline (injectChannelHooks in Step 0 → InstallChannelInfrastructure
-// in Step 4.75 → HooksMaterializer in Step 6.5) guarantees the files
-// exist by the time the materializer tries to read them.
-func injectChannelHooks(cfg *config.WorkspaceConfig, instanceRoot string) {
-	if !cfg.Channels.IsEnabled() {
-		return
-	}
-
-	if cfg.Claude.Hooks == nil {
-		cfg.Claude.Hooks = make(config.HooksConfig)
-	}
-
-	hooksDir := filepath.Join(instanceRoot, ".niwa", "hooks")
-	sessionStartScript := filepath.Join(hooksDir, "mesh-session-start.sh")
-	userPromptScript := filepath.Join(hooksDir, "mesh-user-prompt-submit.sh")
-	stopScript := filepath.Join(hooksDir, "stop", "report-progress.sh")
-
-	sessionStartEntry := config.HookEntry{Scripts: []string{sessionStartScript}}
-	userPromptEntry := config.HookEntry{Scripts: []string{userPromptScript}}
-	stopEntry := config.HookEntry{Scripts: []string{stopScript}}
-
-	cfg.Claude.Hooks["session_start"] = prependHookEntry(cfg.Claude.Hooks["session_start"], sessionStartEntry)
-	cfg.Claude.Hooks["user_prompt_submit"] = prependHookEntry(cfg.Claude.Hooks["user_prompt_submit"], userPromptEntry)
-	cfg.Claude.Hooks["stop"] = prependHookEntry(cfg.Claude.Hooks["stop"], stopEntry)
-}
-
-// prependHookEntry returns a new slice with entry prepended before existing.
-func prependHookEntry(existing []config.HookEntry, entry config.HookEntry) []config.HookEntry {
-	result := make([]config.HookEntry, 0, len(existing)+1)
-	result = append(result, entry)
-	result = append(result, existing...)
-	return result
 }

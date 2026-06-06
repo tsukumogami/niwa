@@ -350,13 +350,6 @@ func (a *Applier) Create(ctx context.Context, cfg *config.WorkspaceConfig, confi
 		return "", fmt.Errorf("saving instance state: %w", err)
 	}
 
-	// Spawn mesh watch daemon if channels are configured and no daemon is alive.
-	if cfg.Channels.IsEnabled() {
-		if err := EnsureDaemonRunning(instanceRoot, nil); err != nil {
-			a.Reporter.DeferWarn("could not start mesh daemon: %v", err)
-		}
-	}
-
 	n := len(result.repoStates)
 	if n == 1 {
 		a.Reporter.Log("created %s (1 repo) → %s", instanceName, instanceRoot)
@@ -533,13 +526,6 @@ func (a *Applier) Apply(ctx context.Context, cfg *config.WorkspaceConfig, config
 		return fmt.Errorf("saving instance state: %w", err)
 	}
 
-	// Spawn mesh watch daemon if channels are configured and no daemon is alive.
-	if cfg.Channels.IsEnabled() {
-		if err := EnsureDaemonRunning(instanceRoot, nil); err != nil {
-			a.Reporter.DeferWarn("could not start mesh daemon: %v", err)
-		}
-	}
-
 	n := len(result.repoStates)
 	if n == 1 {
 		a.Reporter.Log("applied %s (1 repo)", filepath.Base(instanceRoot))
@@ -558,14 +544,6 @@ func (a *Applier) Apply(ctx context.Context, cfg *config.WorkspaceConfig, config
 // clone, and install content. It returns the pipeline results without writing
 // state.
 func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, configDir, instanceRoot string, now time.Time, opts *pipelineOpts) (*pipelineResult, error) {
-	// Step 0: Inject channel hooks into cfg.Claude.Hooks so HooksMaterializer
-	// writes them per-repo. Must run before any per-repo processing so that
-	// every repo in the workspace receives the channel hook scripts.
-	// cfg is a pointer; injectChannelHooks mutates its Hooks map in place.
-	// The hook scripts are written to disk by InstallChannelInfrastructure
-	// (step 4.75) before HooksMaterializer reads them, so the order matters.
-	injectChannelHooks(cfg, instanceRoot)
-
 	// overlayDir is the local clone path of the overlay repo when one is active.
 	// It is local to this pipeline run; downstream steps that need it receive it
 	// as a function argument rather than reading it from the Applier.
@@ -1366,8 +1344,7 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 				}
 				merged[event] = relEntries
 			}
-			// Explicit config runs before discovered hooks for the same event.
-			// Channel hooks injected by injectChannelHooks are in effective.Claude.Hooks
+			// Explicit config runs before discovered hooks for the same event
 			// and must not silently discard user-authored discovered hooks.
 			for event, entries := range effective.Claude.Hooks {
 				if existing, ok := merged[event]; ok {

@@ -75,14 +75,6 @@ func DestroyWorkspace(workspaceRoot string, opts DestroyWorkspaceOpts) error {
 			opts.Reporter.Log("destroying instance: %s", filepath.Base(instanceDir))
 		}
 
-		if err := TerminateDaemon(instanceDir); err != nil {
-			// Match the existing destroy.go convention: log and continue.
-			if opts.Reporter != nil {
-				opts.Reporter.Warn("could not stop mesh daemon for %s: %v",
-					filepath.Base(instanceDir), err)
-			}
-		}
-
 		if err := ValidateInstanceDir(instanceDir); err != nil {
 			// An entry returned by EnumerateInstances that doesn't pass
 			// ValidateInstanceDir is anomalous (e.g., the workspace
