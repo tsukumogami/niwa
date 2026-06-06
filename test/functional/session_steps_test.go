@@ -315,6 +315,64 @@ func theLastCommandStderrContainsDeprecationNotice(ctx context.Context) error {
 	return nil
 }
 
+// iWriteUncommittedChangeInLastWorktree writes an untracked file into the last
+// worktree so `git status --porcelain` reports it dirty, exercising the destroy
+// uncommitted-work guard. The worktree is a real git worktree (created by
+// CreateSession), so an untracked file is genuine uncommitted work.
+func iWriteUncommittedChangeInLastWorktree(ctx context.Context, relPath string) error {
+	s := getState(ctx)
+	if s == nil {
+		return fmt.Errorf("no test state")
+	}
+	if s.lastSessionWorktreePath == "" {
+		return fmt.Errorf("no worktree path stored; create a worktree first")
+	}
+	full := filepath.Join(s.lastSessionWorktreePath, relPath)
+	if err := os.WriteFile(full, []byte("work in progress\n"), 0o600); err != nil {
+		return fmt.Errorf("writing uncommitted change %q in worktree %s: %w", relPath, s.lastSessionWorktreePath, err)
+	}
+	return nil
+}
+
+// iCallDestroyWorktree runs `niwa worktree destroy <session-id>` (no --force)
+// for the last session, resolving the id the way an operator copies it out of
+// create's output. It does NOT fail the step on a non-zero exit so the feature
+// can assert the refusal (exit code + guard message).
+func iCallDestroyWorktree(ctx context.Context, instance string) (context.Context, error) {
+	s := getState(ctx)
+	if s == nil {
+		return ctx, fmt.Errorf("no test state")
+	}
+	if s.lastSessionID == "" {
+		return ctx, fmt.Errorf("no session_id stored; create a worktree first")
+	}
+	instRoot := filepath.Join(s.workspaceRoot, instance)
+	cmd := fmt.Sprintf("niwa worktree destroy %s", s.lastSessionID)
+	return ctx, runNiwa(s, instRoot, cmd)
+}
+
+// iCallDestroyWorktreeForce runs `niwa worktree destroy <session-id> --force`
+// for the last session and asserts a clean exit.
+func iCallDestroyWorktreeForce(ctx context.Context, instance string) (context.Context, error) {
+	s := getState(ctx)
+	if s == nil {
+		return ctx, fmt.Errorf("no test state")
+	}
+	if s.lastSessionID == "" {
+		return ctx, fmt.Errorf("no session_id stored; create a worktree first")
+	}
+	instRoot := filepath.Join(s.workspaceRoot, instance)
+	cmd := fmt.Sprintf("niwa worktree destroy %s --force", s.lastSessionID)
+	if err := runNiwa(s, instRoot, cmd); err != nil {
+		return ctx, fmt.Errorf("niwa worktree destroy --force: %w", err)
+	}
+	if s.exitCode != 0 {
+		return ctx, fmt.Errorf("niwa worktree destroy --force exit=%d\nstdout:\n%s\nstderr:\n%s",
+			s.exitCode, s.stdout, s.stderr)
+	}
+	return ctx, nil
+}
+
 // iCallDestroySession runs `niwa session destroy <id> --force` for the
 // session created by the previous step.
 func iCallDestroySession(ctx context.Context, instance string) (context.Context, error) {

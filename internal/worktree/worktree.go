@@ -62,6 +62,36 @@ var ErrSessionUnknownRole = errors.New("unknown role")
 // error code. Passing force=true bypasses the guard.
 var ErrSessionAttached = errors.New("session attached")
 
+// ErrWorktreeDirty is returned by DestroySession when the session's worktree
+// holds uncommitted changes and force is false. It is the worktree analog of
+// the instance-level CheckUncommittedChanges guard: removing a worktree with
+// uncommitted work would discard that work irrecoverably (the worktree dir is
+// deleted by `git worktree remove --force`). Callers map this to an
+// actionable message instructing the operator to commit/stash or pass --force.
+// Passing force=true bypasses the guard.
+var ErrWorktreeDirty = errors.New("worktree has uncommitted changes")
+
+// worktreeHasUncommittedChanges reports whether worktreePath has uncommitted
+// git changes, mirroring the instance-level CheckUncommittedChanges pattern:
+// it runs `git status --porcelain` in the worktree and treats any non-empty
+// output as dirty. All git access flows through gitInvoker so the destroy
+// path stays test-injectable and the worktree package stays a leaf (no
+// internal/workspace import). A missing worktree directory is treated as not
+// dirty (nothing to lose), letting the idempotent teardown proceed.
+func worktreeHasUncommittedChanges(ctx context.Context, worktreePath string, gitInvoker GitInvoker) (bool, error) {
+	if worktreePath == "" {
+		return false, nil
+	}
+	if _, err := os.Stat(worktreePath); os.IsNotExist(err) {
+		return false, nil
+	}
+	out, err := gitInvoker.CommandContext(ctx, "-C", worktreePath, "status", "--porcelain").Output()
+	if err != nil {
+		return false, fmt.Errorf("checking git status for worktree %s: %w", worktreePath, err)
+	}
+	return len(strings.TrimSpace(string(out))) > 0, nil
+}
+
 // scaffoldWorktreeNiwa creates the minimal .niwa layout for a per-session
 // worktree. It creates only:
 //
@@ -217,6 +247,13 @@ func CreateSession(ctx context.Context, params CreateSessionParams) (sessionID, 
 // false, DestroySession performs no teardown and returns ErrSessionAttached
 // so the preserved attach primitive is not clobbered. force=true bypasses
 // this guard.
+//
+// When the worktree holds uncommitted changes and force is false,
+// DestroySession performs no teardown and returns ErrWorktreeDirty (the
+// worktree analog of the instance CheckUncommittedChanges guard) so unsaved
+// work is not discarded. force=true bypasses this guard. The guard order for
+// a live (non-terminal) session is: idempotent-terminal early-return, then the
+// attach-lock guard, then the dirty guard, then teardown.
 func DestroySession(ctx context.Context, instanceRoot, sessionID string, force bool, gitInvoker GitInvoker) (SessionLifecycleState, error) {
 	if gitInvoker == nil {
 		return SessionLifecycleState{}, errors.New("git invoker not configured")
@@ -248,6 +285,26 @@ func DestroySession(ctx context.Context, instanceRoot, sessionID string, force b
 				"or pass force=true to destroy regardless",
 			ErrSessionAttached, state.SessionID, attachState.OwnerPID, attachState.StartedAt, state.SessionID,
 		)
+	}
+
+	// Reject when the worktree holds uncommitted changes and force is not set.
+	// This mirrors the instance-level CheckUncommittedChanges guard: `git
+	// worktree remove --force` deletes the worktree directory, so destroying a
+	// dirty worktree would discard unsaved work. The check runs BEFORE any
+	// teardown (and before the terminal-state write) so a refused destroy
+	// leaves the session fully intact. force=true bypasses this guard.
+	if !force {
+		dirty, dirtyErr := worktreeHasUncommittedChanges(ctx, worktreePath, gitInvoker)
+		if dirtyErr != nil {
+			return state, dirtyErr
+		}
+		if dirty {
+			return state, fmt.Errorf(
+				"%w: worktree %s has uncommitted changes; commit or stash them, "+
+					"or pass --force to destroy and discard them",
+				ErrWorktreeDirty, worktreePath,
+			)
+		}
 	}
 
 	// Write terminal state.

@@ -63,7 +63,10 @@ var sessionDestroyCmd = &cobra.Command{
 	Short: "Destroy a worktree and its working directory",
 	Long: `Destroy a worktree: mark its lifecycle state ended, remove the working
 directory, and delete the worktree branch (only if already merged; use
---force to delete regardless).`,
+--force to delete regardless).
+
+Refuses to destroy a worktree that holds uncommitted changes unless --force
+is passed (the worktree analog of the instance-level uncommitted-work guard).`,
 	// Same reasoning as sessionCreateCmd: RunE handles missing-arg with a
 	// usage string and exit code 2 via *sessionattach.ExitCodeError.
 	Args:              cobra.MaximumNArgs(1),
@@ -91,7 +94,7 @@ func completeSessionCreateArgs(cmd *cobra.Command, args []string, toComplete str
 var sessionDestroyForce bool
 
 func init() {
-	sessionDestroyCmd.Flags().BoolVar(&sessionDestroyForce, "force", false, "Delete session branch even if it has unmerged commits")
+	sessionDestroyCmd.Flags().BoolVar(&sessionDestroyForce, "force", false, "Destroy even with uncommitted changes, and delete the branch regardless of merge status")
 }
 
 func runSessionCreate(cmd *cobra.Command, args []string) error {
@@ -314,6 +317,13 @@ func runSessionDestroy(cmd *cobra.Command, args []string) error {
 		// the guard message verbatim (it carries the holder PID and recovery
 		// command) rather than burying it under a generic destroy prefix.
 		if errors.Is(err, worktree.ErrSessionAttached) {
+			return &sessionattach.ExitCodeError{Code: 1, Msg: "niwa: error: " + err.Error()}
+		}
+		// The worktree holds uncommitted work and --force was not passed:
+		// surface the actionable guard message verbatim (it names the worktree
+		// path and the commit/stash/--force recovery options) rather than
+		// burying it under a generic destroy prefix.
+		if errors.Is(err, worktree.ErrWorktreeDirty) {
 			return &sessionattach.ExitCodeError{Code: 1, Msg: "niwa: error: " + err.Error()}
 		}
 		return fmt.Errorf("niwa: error: destroying session %s: %w", sessionID, err)

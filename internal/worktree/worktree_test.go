@@ -371,6 +371,169 @@ func TestDestroySession_AttachLockGuard(t *testing.T) {
 	})
 }
 
+// TestWorktreeHasUncommittedChanges exercises the dirty-check helper against a
+// real git repo: a clean checkout reports not-dirty, an untracked/modified file
+// reports dirty, and a missing path reports not-dirty (nothing to lose).
+func TestWorktreeHasUncommittedChanges(t *testing.T) {
+	if _, err := runCmd("git", "--version"); err != nil {
+		t.Skip("git not available")
+	}
+
+	repo := t.TempDir()
+	for _, cmd := range [][]string{
+		{"git", "-C", repo, "init", "-b", "main"},
+		{"git", "-C", repo, "-c", "user.email=test@test.com", "-c", "user.name=Test", "commit", "--allow-empty", "-m", "init"},
+	} {
+		if _, err := runCmd(cmd[0], cmd[1:]...); err != nil {
+			t.Fatalf("git setup: %v", err)
+		}
+	}
+
+	ctx := context.Background()
+	inv := StdGitInvoker{}
+
+	// Clean checkout: not dirty.
+	dirty, err := worktreeHasUncommittedChanges(ctx, repo, inv)
+	if err != nil {
+		t.Fatalf("clean check: %v", err)
+	}
+	if dirty {
+		t.Error("clean worktree reported dirty")
+	}
+
+	// Untracked file: dirty.
+	if err := os.WriteFile(filepath.Join(repo, "scratch.txt"), []byte("wip"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dirty, err = worktreeHasUncommittedChanges(ctx, repo, inv)
+	if err != nil {
+		t.Fatalf("dirty check: %v", err)
+	}
+	if !dirty {
+		t.Error("worktree with an untracked file reported not dirty")
+	}
+
+	// Missing path: not dirty (nothing to lose).
+	dirty, err = worktreeHasUncommittedChanges(ctx, filepath.Join(repo, "does-not-exist"), inv)
+	if err != nil {
+		t.Fatalf("missing-path check: %v", err)
+	}
+	if dirty {
+		t.Error("missing worktree path reported dirty")
+	}
+
+	// Empty path: not dirty.
+	dirty, err = worktreeHasUncommittedChanges(ctx, "", inv)
+	if err != nil {
+		t.Fatalf("empty-path check: %v", err)
+	}
+	if dirty {
+		t.Error("empty worktree path reported dirty")
+	}
+}
+
+// TestDestroySession_DirtyGuard verifies the uncommitted-work guard: a dirty
+// worktree is refused (ErrWorktreeDirty, no teardown, state preserved) unless
+// force is set, and a clean worktree destroys as before. Uses real git so the
+// porcelain status the helper reads is genuine.
+func TestDestroySession_DirtyGuard(t *testing.T) {
+	if _, err := runCmd("git", "--version"); err != nil {
+		t.Skip("git not available")
+	}
+
+	// setup creates a real repo + an active session whose worktree is a git
+	// worktree on a fresh branch, returning the root, session id, and worktree
+	// path so each subtest can dirty (or not dirty) it independently.
+	setup := func(t *testing.T) (root, sid, worktreePath string) {
+		t.Helper()
+		root = t.TempDir()
+		repoPath := filepath.Join(root, "group", "myrepo")
+		if err := os.MkdirAll(repoPath, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		for _, cmd := range [][]string{
+			{"git", "-C", repoPath, "init", "-b", "main"},
+			{"git", "-C", repoPath, "-c", "user.email=test@test.com", "-c", "user.name=Test", "commit", "--allow-empty", "-m", "init"},
+		} {
+			if _, err := runCmd(cmd[0], cmd[1:]...); err != nil {
+				t.Fatalf("git setup: %v", err)
+			}
+		}
+		sessionsDir := filepath.Join(root, ".niwa", "sessions")
+		if err := os.MkdirAll(sessionsDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		var err error
+		sid, worktreePath, _, err = CreateSession(context.Background(), CreateSessionParams{
+			InstanceRoot: root,
+			Repo:         "myrepo",
+			Purpose:      "dirty guard test",
+			GitInvoker:   StdGitInvoker{},
+		})
+		if err != nil {
+			t.Fatalf("CreateSession: %v", err)
+		}
+		return root, sid, worktreePath
+	}
+
+	// Refused: dirty worktree, force=false. No teardown; state stays active.
+	t.Run("refused_when_dirty", func(t *testing.T) {
+		root, sid, worktreePath := setup(t)
+		if err := os.WriteFile(filepath.Join(worktreePath, "scratch.txt"), []byte("wip"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		state, err := DestroySession(context.Background(), root, sid, false /* force */, StdGitInvoker{})
+		if !errors.Is(err, ErrWorktreeDirty) {
+			t.Fatalf("want ErrWorktreeDirty, got %v", err)
+		}
+		if state.Status == SessionStatusEnded {
+			t.Error("status must not advance to ended when destroy is refused")
+		}
+		// Persisted state must remain active (terminal write skipped) and the
+		// worktree must still exist (no teardown ran).
+		persisted, perr := ReadSessionLifecycleState(filepath.Join(root, ".niwa", "sessions"), sid)
+		if perr != nil {
+			t.Fatalf("ReadSessionLifecycleState: %v", perr)
+		}
+		if persisted.Status != SessionStatusActive {
+			t.Errorf("persisted status = %q, want active", persisted.Status)
+		}
+		if _, statErr := os.Stat(worktreePath); statErr != nil {
+			t.Errorf("worktree was torn down despite refusal: %v", statErr)
+		}
+	})
+
+	// Allowed: dirty worktree but force=true bypasses the guard.
+	t.Run("succeeds_when_dirty_but_force", func(t *testing.T) {
+		root, sid, worktreePath := setup(t)
+		if err := os.WriteFile(filepath.Join(worktreePath, "scratch.txt"), []byte("wip"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		state, err := DestroySession(context.Background(), root, sid, true /* force */, StdGitInvoker{})
+		if err != nil {
+			t.Fatalf("DestroySession with force on dirty worktree: %v", err)
+		}
+		if state.Status != SessionStatusEnded {
+			t.Errorf("status = %q, want ended", state.Status)
+		}
+	})
+
+	// Allowed: clean worktree, force=false destroys as before.
+	t.Run("succeeds_when_clean", func(t *testing.T) {
+		root, sid, _ := setup(t)
+
+		state, err := DestroySession(context.Background(), root, sid, false /* force */, StdGitInvoker{})
+		if err != nil {
+			t.Fatalf("DestroySession on clean worktree: %v", err)
+		}
+		if state.Status != SessionStatusEnded {
+			t.Errorf("status = %q, want ended", state.Status)
+		}
+	})
+}
+
 // runCmd runs a command and returns its combined output.
 func runCmd(name string, args ...string) (string, error) {
 	out, err := exec.Command(name, args...).CombinedOutput()

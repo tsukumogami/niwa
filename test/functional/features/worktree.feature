@@ -93,6 +93,36 @@ Feature: niwa worktree (renamed from niwa session)
     Then the session is ended in instance "wt-apply"
 
   # ---------------------------------------------------------------------
+  # Destroy symmetry: niwa worktree destroy refuses to remove a worktree
+  # holding uncommitted work unless --force is passed (the worktree analog
+  # of the instance-level uncommitted-work guard).
+  # ---------------------------------------------------------------------
+
+  @critical
+  Scenario: niwa worktree destroy refuses a dirty worktree without --force, succeeds with --force
+    Given a clean niwa environment
+    And a local git server is set up
+    And a single-repo channeled workspace "wt-dirty" exists
+    When I run "niwa create wt-dirty"
+    Then the exit code is 0
+    When I call niwa worktree create for repo "app" with purpose "guard-the-dirty" in instance "wt-dirty"
+    Then the last session is active in instance "wt-dirty"
+    And the session worktree exists in instance "wt-dirty"
+    # Introduce uncommitted work into the worktree.
+    When I write an uncommitted change "scratch.txt" in the last worktree
+    # Destroy without --force is refused: nonzero exit + actionable message,
+    # and the session stays active (no teardown).
+    And I call niwa worktree destroy for the last session in instance "wt-dirty"
+    Then the exit code is not 0
+    And the error output contains "uncommitted changes"
+    And the last session is active in instance "wt-dirty"
+    And the session worktree exists in instance "wt-dirty"
+    # --force bypasses the guard and destroys the worktree.
+    When I call niwa worktree destroy --force for the last session in instance "wt-dirty"
+    Then the exit code is 0
+    And the session is ended in instance "wt-dirty"
+
+  # ---------------------------------------------------------------------
   # Alias contract: niwa session create still works AND warns.
   # ---------------------------------------------------------------------
 
