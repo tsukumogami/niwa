@@ -15,10 +15,14 @@ Draft
 
 ## Scope Summary
 
-Remove niwa's non-functional pre-pivot mesh (the `internal/mcp` package, the
-pre-pivot CLI cluster, the per-worktree daemon, and apply-pipeline mesh-hook
-synthesis) while preserving git worktree creation as a first-class CLI command,
-landing the whole change in a single PR.
+Remove niwa's non-functional pre-pivot agent-facing surface in full — the
+`internal/mcp` package, the pre-pivot CLI cluster, the coordinator session
+registry and `niwa session register`, the change-review surface (`niwa surface`,
+`internal/web/*`, the change-store and audit subsystem), the per-worktree daemon,
+and apply-pipeline mesh-hook synthesis — while preserving git worktree creation
+(and the worktree-attach primitive) as first-class CLI commands. No MCP, no
+agent-coordination channels, and no change-review web UI remain in niwa. Lands in
+a single PR.
 
 ## Decomposition Strategy
 
@@ -78,38 +82,49 @@ code.
 **Type**: code
 **Files**: `internal/worktree/`, `internal/cli/session_lifecycle_cmd.go`, `internal/cli/session_register.go`, `internal/cli/daemon_starter.go`, `internal/cli/init.go`, `internal/cli/surface.go`, `internal/cli/go.go`, `internal/cli/completion.go`, `internal/cli/sessionattach/`, `internal/workspace/bootstrap.go`
 
-### Issue 2: Delete the mesh package, the pre-pivot CLI cluster, and the daemon
+### Issue 2: Delete the agent-facing surface in full
 
-**Goal**: With no surviving code importing `internal/mcp`, delete it in full
-along with the pre-pivot CLI cluster and the workspace daemon, and narrow the
-apply pipeline so it synthesizes no mesh hooks and spawns no background process.
+**Goal**: With worktree creation/attach re-pointed onto `internal/worktree/`,
+delete the entire agent-facing surface — `internal/mcp`, the pre-pivot CLI
+cluster, the coordinator registry and `niwa session register`, the change-review
+surface (`niwa surface` + `internal/web/*` + change-store + audit), and the
+per-worktree daemon — and narrow `niwa apply` so it synthesizes no mesh hooks and
+spawns no background process. After this stage niwa has no MCP, no
+agent-coordination channels, and no change-review web UI.
 
 **Acceptance Criteria**:
 - [ ] `internal/mcp/` is deleted in full (server, the MCP tools, audit subsystem,
       error-translation layer, task/change handlers and stores, watcher, auth,
-      daemon-starter wiring).
+      coordinator session registry, daemon-starter wiring).
 - [ ] The pre-pivot CLI files are deleted (`mesh*.go`, `task*.go`, `mcp_*.go` and
-      their tests — 14 files), and the `mesh`, `task`, and `mcp-serve` cobra
-      commands are unregistered (no orphaned subcommand registrations).
+      their tests), and the `mesh`, `task`, and `mcp-serve` cobra commands are
+      unregistered (no orphaned subcommand registrations).
+- [ ] `niwa session register` and its CLI file (`session_register.go`) are deleted
+      — the command exists only to populate the coordinator registry consumed by
+      the deleted mesh hooks.
+- [ ] The change-review surface is deleted: the `niwa surface` command
+      (`surface.go`), the `internal/web/*` packages (server, handlers, gc/sweep,
+      render), and the change-store + audit code in `internal/mcp`. The `niwa
+      surface` cobra command is unregistered.
 - [ ] `internal/workspace/daemon.go` is deleted (`EnsureDaemonRunning`,
-      `TerminateDaemon`).
-- [ ] `internal/workspace/channels.go` no longer synthesizes the three mesh hooks
+      `TerminateDaemon`); `daemon_starter.go` is deleted (its only mcp reference,
+      `ErrDaemonSpawnTimeout`, dies with the daemon).
+- [ ] `internal/workspace/channels.go` no longer synthesizes the mesh hooks
       (`mesh-session-start.sh`, `mesh-user-prompt-submit.sh`, `report-progress.sh`)
-      and no longer calls `EnsureDaemonRunning` (lines ~355 and ~538).
-- [ ] `niwa apply` against a workspace installs only declared hooks and starts no
-      background process.
-- [ ] `niwa status` no longer reports daemon health (the daemon-health column is
-      removed); surface reads only session state.
-- [ ] Affected tests are deleted or revised (the 8 pre-pivot CLI test files;
-      `workspace/daemon_test.go`).
-- [ ] A grep confirms zero references to `internal/mcp` remain outside deleted
-      files.
+      and no longer calls `EnsureDaemonRunning`.
+- [ ] `niwa apply` installs only declared hooks and starts no background process;
+      `niwa status` no longer reports daemon health.
+- [ ] Affected tests are deleted or revised; the surviving attach primitive no
+      longer references mcp (its `--force` mesh-task check is already removed in
+      Stage 1).
+- [ ] A grep confirms zero references to `internal/mcp` remain anywhere in the
+      tree.
 - [ ] `go build ./...`, `go vet ./...`, and `go test ./...` pass.
 
 **Dependencies**: Blocked by <<ISSUE:1>>
 
 **Type**: code
-**Files**: `internal/mcp/`, `internal/cli/`, `internal/workspace/channels.go`, `internal/workspace/daemon.go`
+**Files**: `internal/mcp/`, `internal/web/`, `internal/cli/`, `internal/workspace/channels.go`, `internal/workspace/daemon.go`
 
 ### Issue 3: Rename niwa session * to niwa worktree * with deprecation aliases
 

@@ -30,6 +30,15 @@ upstream: docs/prds/PRD-niwa-mesh-removal.md
 
 Planned
 
+Scope amendment (during implementation): the agent-facing surface to delete is
+wider than the original "internal/mcp + pre-pivot CLI" framing. It also includes
+the coordinator session registry and `niwa session register`, and the
+change-review surface (`niwa surface`, `internal/web/*`, the change-store and
+audit subsystem). All are agent-facing coordination — squarely the surface this
+design removes "in full" — and are deleted in Stage 2. niwa retains no MCP, no
+agent-coordination channels, and no change-review web UI. The worktree-attach
+primitive is still kept and decoupled (Decision C).
+
 ## Upstream Design Reference
 
 This design implements PRD-niwa-mesh-removal (`docs/prds/PRD-niwa-mesh-removal.md`,
