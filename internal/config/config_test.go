@@ -185,6 +185,48 @@ func TestParseNoWarningsForKnownFields(t *testing.T) {
 	}
 }
 
+func TestParseWorktreeContentEntry(t *testing.T) {
+	input := `
+[workspace]
+name = "test-ws"
+
+[[sources]]
+org = "myorg"
+
+[claude.content.worktree]
+source = "worktree.md"
+`
+	result, err := Parse([]byte(input))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := result.Config.Claude.Content.Worktree.Source; got != "worktree.md" {
+		t.Errorf("claude.content.worktree.source = %q, want %q", got, "worktree.md")
+	}
+	// The worktree entry is a known field: no unknown-field warning.
+	for _, w := range result.Warnings {
+		if strings.Contains(w, "worktree") {
+			t.Errorf("unexpected warning for known worktree field: %q", w)
+		}
+	}
+}
+
+func TestParseWorktreeContentSourceTraversalRejected(t *testing.T) {
+	input := `
+[workspace]
+name = "test-ws"
+
+[[sources]]
+org = "myorg"
+
+[claude.content.worktree]
+source = "../escape.md"
+`
+	if _, err := Parse([]byte(input)); err == nil {
+		t.Fatal("expected error for path traversal in worktree source, got nil")
+	}
+}
+
 func TestParseFullConfig(t *testing.T) {
 	result, err := Parse([]byte(fullConfig))
 	if err != nil {

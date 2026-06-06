@@ -208,6 +208,14 @@ type ContentConfig struct {
 	Workspace ContentEntry                `toml:"workspace"`
 	Groups    map[string]ContentEntry     `toml:"groups"`
 	Repos     map[string]RepoContentEntry `toml:"repos"`
+	// Worktree is the optional per-worktree content layer. When its Source is
+	// set, ApplyToWorktree renders that template (expanded with the worktree
+	// variables {purpose}/{branch}/{repo_name}/{worktree_path} alongside the
+	// existing {workspace}/{workspace_name}) as the worktree-specific layer.
+	// When unset, ApplyToWorktree falls back to the generated default
+	// purpose/branch section. Additive: an absent entry leaves worktree
+	// behavior unchanged.
+	Worktree ContentEntry `toml:"worktree"`
 }
 
 // ContentEntry is a single content source reference.
@@ -319,6 +327,9 @@ func isContentConfigZero(c ContentConfig) bool {
 	if c.Workspace.Source != "" {
 		return false
 	}
+	if c.Worktree.Source != "" {
+		return false
+	}
 	if len(c.Groups) > 0 {
 		return false
 	}
@@ -364,6 +375,9 @@ func validate(cfg *WorkspaceConfig) error {
 	// Reads from cfg.Claude.Content because Parse() migrates the legacy
 	// top-level [content] into [claude.content] before validate() runs.
 	if err := validateContentSource("claude.content.workspace.source", cfg.Claude.Content.Workspace.Source); err != nil {
+		return err
+	}
+	if err := validateContentSource("claude.content.worktree.source", cfg.Claude.Content.Worktree.Source); err != nil {
 		return err
 	}
 	for name, entry := range cfg.Claude.Content.Groups {

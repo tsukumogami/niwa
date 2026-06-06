@@ -68,6 +68,68 @@ func DiscoverHooks(configDir string) (config.HooksConfig, error) {
 	return hooks, nil
 }
 
+// DiscoverWorktreeHooks scans configDir/worktree-hooks/ for worktree-event
+// hook scripts and returns a HooksConfig mapping event names to script paths.
+// It is the worktree-lifecycle analog of DiscoverHooks: where DiscoverHooks
+// feeds Claude Code lifecycle hooks into a repo's settings, these scripts are
+// executed by niwa itself when ApplyToWorktree runs (on `niwa worktree
+// create`/`apply`).
+//
+// The same two layout styles DiscoverHooks supports are accepted:
+//   - worktree-hooks/{event}.sh   -> maps to event name (extension stripped)
+//   - worktree-hooks/{event}/*.sh -> each file maps to that event
+//
+// Non-.sh files are ignored. A missing worktree-hooks/ directory returns an
+// empty HooksConfig without error. Scripts are validated to stay within
+// configDir (no symlink escape).
+func DiscoverWorktreeHooks(configDir string) (config.HooksConfig, error) {
+	hooksDir := filepath.Join(configDir, "worktree-hooks")
+
+	if err := validateWithinDir(configDir, hooksDir); err != nil {
+		return nil, err
+	}
+
+	entries, err := os.ReadDir(hooksDir)
+	if os.IsNotExist(err) {
+		return config.HooksConfig{}, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("reading worktree-hooks directory: %w", err)
+	}
+
+	hooks := config.HooksConfig{}
+
+	for _, entry := range entries {
+		entryPath := filepath.Join(hooksDir, entry.Name())
+
+		if entry.IsDir() {
+			event := entry.Name()
+			subEntries, err := os.ReadDir(entryPath)
+			if err != nil {
+				return nil, fmt.Errorf("reading worktree-hooks subdirectory %q: %w", event, err)
+			}
+			for _, sub := range subEntries {
+				if sub.IsDir() || !strings.HasSuffix(sub.Name(), ".sh") {
+					continue
+				}
+				scriptPath := filepath.Join(entryPath, sub.Name())
+				if err := validateWithinDir(configDir, scriptPath); err != nil {
+					return nil, err
+				}
+				hooks[event] = append(hooks[event], config.HookEntry{Scripts: []string{scriptPath}})
+			}
+		} else if strings.HasSuffix(entry.Name(), ".sh") {
+			event := strings.TrimSuffix(entry.Name(), ".sh")
+			if err := validateWithinDir(configDir, entryPath); err != nil {
+				return nil, err
+			}
+			hooks[event] = append(hooks[event], config.HookEntry{Scripts: []string{entryPath}})
+		}
+	}
+
+	return hooks, nil
+}
+
 // DiscoverEnvFiles scans configDir/env/ for environment files.
 //
 // It looks for:

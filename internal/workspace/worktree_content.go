@@ -4,11 +4,19 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/tsukumogami/niwa/internal/config"
 )
+
+// worktreeApplyEvent is the worktree-lifecycle event run by ApplyToWorktree on
+// both `niwa worktree create` and `niwa worktree apply`. create internally runs
+// the apply path, so a single event covers both (mirroring how instance create
+// runs the apply pipeline).
+const worktreeApplyEvent = "apply"
 
 // worktreeRulesFile is the per-worktree rules import file. A worktree, when
 // launched as its own Claude Code project root, does not inherit the instance
@@ -184,7 +192,7 @@ func ApplyToWorktree(cfg *config.WorkspaceConfig, configDir, instanceRoot, workt
 	if !ClaudeEnabled(cfg, repo) {
 		// Claude content is disabled for this repo; install only the
 		// worktree-context layer so the worktree still records its purpose.
-		return installWorktreeContextLayer(worktreePath, repo, purpose, branch)
+		return installWorktreeContextLayer(cfg, configDir, instanceRoot, worktreePath, repo, purpose, branch)
 	}
 
 	var written []string
@@ -241,12 +249,20 @@ func ApplyToWorktree(cfg *config.WorkspaceConfig, configDir, instanceRoot, workt
 	}
 	written = append(written, rulesFiles...)
 
-	// 4. Worktree-specific layer naming the purpose and branch.
-	layerFiles, err := installWorktreeContextLayer(worktreePath, repo, purpose, branch)
+	// 4. Worktree-specific layer naming the purpose and branch (or the
+	//    configured [claude.content.worktree] template, when set).
+	layerFiles, err := installWorktreeContextLayer(cfg, configDir, instanceRoot, worktreePath, repo, purpose, branch)
 	if err != nil {
 		return nil, err
 	}
 	written = append(written, layerFiles...)
+
+	// 5. Worktree-event hooks, run on create/apply. Analog of the instance
+	//    setup-script run: discovered from <configDir>/worktree-hooks/ and
+	//    executed against the worktree, with worktree context in the env.
+	if err := runWorktreeHooks(configDir, worktreePath, repo, purpose, branch, opts.Stderr); err != nil {
+		return nil, err
+	}
 
 	return written, nil
 }
@@ -302,45 +318,195 @@ func installWorktreeRulesImport(instanceRoot, worktreePath string) ([]string, er
 	return []string{rulesPath}, nil
 }
 
-// installWorktreeContextLayer writes the generated purpose/branch section to
+// installWorktreeContextLayer writes the worktree-specific section to
 // <worktree>/CLAUDE.local.md. The section is delimited by a stable heading so a
 // re-apply replaces it in place rather than appending a duplicate (idempotent).
 // purpose is interpolated only into file content, never a filesystem path.
 //
-// The target path is computed from worktreePath alone (CLAUDE.local.md at the
+// When [claude.content.worktree].source is configured, the section body is
+// rendered from that template (expanded with the worktree variables) via the
+// existing containment-checked installContentFile. When unset, the generated
+// default purpose/branch body is used — the Stage-1 behavior, unchanged.
+//
+// The CLAUDE.local.md target is computed from worktreePath alone (at the
 // worktree root) and verified to stay within the worktree via checkContainment,
 // matching the containment discipline of the other content installers.
-func installWorktreeContextLayer(worktreePath, repo, purpose, branch string) ([]string, error) {
+func installWorktreeContextLayer(cfg *config.WorkspaceConfig, configDir, instanceRoot, worktreePath, repo, purpose, branch string) ([]string, error) {
 	target := filepath.Join(worktreePath, "CLAUDE.local.md")
 	if err := checkContainment(target, worktreePath); err != nil {
 		return nil, fmt.Errorf("worktree context layer: %w", err)
 	}
 
-	section := fmt.Sprintf("%s\n\nThis is a niwa worktree of repo %q.\n\n- Purpose: %s\n- Branch: %s\n",
-		worktreeContextHeading, repo, purpose, branch)
+	body, err := renderWorktreeLayerBody(cfg, configDir, instanceRoot, worktreePath, repo, purpose, branch)
+	if err != nil {
+		return nil, err
+	}
+	section := worktreeContextHeading + "\n\n" + body
 
 	existing, err := os.ReadFile(target)
 	if err != nil && !os.IsNotExist(err) {
 		return nil, fmt.Errorf("reading worktree CLAUDE.local.md: %w", err)
 	}
 
-	body := stripWorktreeContextSection(string(existing))
-	if len(body) > 0 {
+	merged := stripWorktreeContextSection(string(existing))
+	if len(merged) > 0 {
 		// Separate prior content from the appended section with a blank line.
-		for len(body) > 0 && (body[len(body)-1] == '\n') {
-			body = body[:len(body)-1]
+		for len(merged) > 0 && (merged[len(merged)-1] == '\n') {
+			merged = merged[:len(merged)-1]
 		}
-		body += "\n\n"
+		merged += "\n\n"
 	}
-	body += section
+	merged += section
 
 	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 		return nil, fmt.Errorf("creating worktree dir: %w", err)
 	}
-	if err := os.WriteFile(target, []byte(body), 0o644); err != nil {
+	if err := os.WriteFile(target, []byte(merged), 0o644); err != nil {
 		return nil, fmt.Errorf("writing worktree CLAUDE.local.md: %w", err)
 	}
 	return []string{target}, nil
+}
+
+// worktreeLayerVars builds the template variable map for the worktree layer.
+// It extends the instance content variables ({workspace}/{workspace_name}) with
+// the worktree-specific {purpose}/{branch}/{repo_name}/{worktree_path}. purpose
+// is data interpolated into content only; it is never used to build a path.
+func worktreeLayerVars(cfg *config.WorkspaceConfig, instanceRoot, worktreePath, repo, purpose, branch string) (map[string]string, error) {
+	absInstance, err := filepath.Abs(instanceRoot)
+	if err != nil {
+		return nil, fmt.Errorf("resolving instance root: %w", err)
+	}
+	absWorktree, err := filepath.Abs(worktreePath)
+	if err != nil {
+		return nil, fmt.Errorf("resolving worktree path: %w", err)
+	}
+	return map[string]string{
+		"{workspace}":      absInstance,
+		"{workspace_name}": cfg.Workspace.Name,
+		"{purpose}":        purpose,
+		"{branch}":         branch,
+		"{repo_name}":      repo,
+		"{worktree_path}":  absWorktree,
+	}, nil
+}
+
+// renderWorktreeLayerBody produces the body of the worktree-context section.
+// When [claude.content.worktree].source is set, the body is rendered from that
+// template via the existing containment-checked installContentFile (expandVars +
+// checkContainment) with the worktree variable map. When unset, the generated
+// default purpose/branch body is returned — the Stage-1 behavior, unchanged.
+//
+// The template is rendered into a containment-checked intermediate file at the
+// worktree root, read back as the section body, then removed; all writes route
+// through installContentFile so a crafted source cannot escape its directory.
+// purpose is only ever expanded into content, never a path component.
+func renderWorktreeLayerBody(cfg *config.WorkspaceConfig, configDir, instanceRoot, worktreePath, repo, purpose, branch string) (string, error) {
+	source := cfg.Claude.Content.Worktree.Source
+	if source == "" {
+		// Stage-1 default: generated purpose/branch section, unchanged.
+		return fmt.Sprintf("This is a niwa worktree of repo %q.\n\n- Purpose: %s\n- Branch: %s\n",
+			repo, purpose, branch), nil
+	}
+
+	vars, err := worktreeLayerVars(cfg, instanceRoot, worktreePath, repo, purpose, branch)
+	if err != nil {
+		return "", err
+	}
+
+	// Render through installContentFile into a containment-checked intermediate
+	// at the worktree root, then read it back. The intermediate path is derived
+	// only from worktreePath (a fixed dot-file name), never from purpose.
+	intermediate := filepath.Join(worktreePath, ".niwa-worktree-layer.tmp")
+	if err := checkContainment(intermediate, worktreePath); err != nil {
+		return "", fmt.Errorf("worktree layer template: %w", err)
+	}
+
+	contentRoot := contentDirRoot(cfg, configDir)
+	if cfg.Claude.Content.Worktree.OverlayDir != "" {
+		contentRoot = cfg.Claude.Content.Worktree.OverlayDir
+	}
+
+	if err := installContentFile(contentRoot, source, intermediate, vars); err != nil {
+		return "", fmt.Errorf("rendering worktree layer template: %w", err)
+	}
+	defer os.Remove(intermediate)
+
+	rendered, err := os.ReadFile(intermediate)
+	if err != nil {
+		return "", fmt.Errorf("reading rendered worktree layer: %w", err)
+	}
+	// Normalize a trailing newline so the spliced section ends cleanly.
+	out := string(rendered)
+	if !strings.HasSuffix(out, "\n") {
+		out += "\n"
+	}
+	return out, nil
+}
+
+// runWorktreeHooks discovers worktree-event hook scripts from
+// <configDir>/worktree-hooks/ and runs the scripts registered for the apply
+// event against the worktree. It is the worktree analog of the instance hook
+// surface: scripts come from the workspace config repo the operator already
+// trusts (same provenance as DiscoverHooks / setup scripts; no new external
+// input). Scripts run with the worktree as the working directory and the
+// worktree context exported as environment (NIWA_WORKTREE_*), so a hook can act
+// on purpose/branch/repo without parsing files.
+//
+// Scripts run in lexical order; the first non-zero exit stops the run and is
+// surfaced as an error (mirroring the setup-script contract). A missing
+// worktree-hooks/ directory or no scripts for the event is a no-op.
+func runWorktreeHooks(configDir, worktreePath, repo, purpose, branch string, stderr io.Writer) error {
+	if stderr == nil {
+		stderr = os.Stderr
+	}
+
+	hooks, err := DiscoverWorktreeHooks(configDir)
+	if err != nil {
+		return fmt.Errorf("discovering worktree hooks: %w", err)
+	}
+
+	entries := hooks[worktreeApplyEvent]
+	if len(entries) == 0 {
+		return nil
+	}
+
+	// Collect script paths in lexical order for a deterministic run order.
+	var scripts []string
+	for _, entry := range entries {
+		scripts = append(scripts, entry.Scripts...)
+	}
+	sort.Strings(scripts)
+
+	for _, scriptPath := range scripts {
+		info, err := os.Stat(scriptPath)
+		if err != nil {
+			return fmt.Errorf("worktree hook %s: stat: %w", scriptPath, err)
+		}
+		if info.Mode()&0o111 == 0 {
+			// Match the setup-script policy: warn and skip non-executable files
+			// rather than failing the apply.
+			fmt.Fprintf(stderr, "worktree hook %s: not executable (chmod +x to enable); skipping\n", scriptPath)
+			continue
+		}
+
+		cmd := exec.Command(scriptPath)
+		cmd.Dir = worktreePath
+		cmd.Stdout = stderr
+		cmd.Stderr = stderr
+		// purpose is exported as content data only; the worktree dir name and
+		// cmd.Dir are derived from worktreePath, never from purpose.
+		cmd.Env = append(os.Environ(),
+			"NIWA_WORKTREE_PATH="+worktreePath,
+			"NIWA_WORKTREE_REPO="+repo,
+			"NIWA_WORKTREE_PURPOSE="+purpose,
+			"NIWA_WORKTREE_BRANCH="+branch,
+		)
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("worktree hook %s failed: %w", scriptPath, err)
+		}
+	}
+
+	return nil
 }
 
 // stripWorktreeContextSection removes a previously-appended worktree-context
