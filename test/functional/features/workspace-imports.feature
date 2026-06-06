@@ -52,23 +52,26 @@ Feature: workspace imports via .claude/rules
     Then the exit code is 0
     And the instance "niwatest-xq7749" exists
     And the repo "tools/myapp" exists in instance "niwatest-xq7749"
-    # Inject a sentinel into workspace-context.md so the prompt can ask about a
-    # token that exists only in loaded rules content — not in cwd path or in
-    # the model's training data. The earlier prompt asked about the workspace
-    # name, which is also in cwd, so the model could answer "yes" without any
-    # rules being loaded. The sentinel disambiguates.
-    When I append "WSCTX-SENTINEL-9af3-2b8e-7d1c" to file "workspace-context.md" in instance "niwatest-xq7749"
+    # Inject a behavioral directive into workspace-context.md, then probe with a
+    # neutral, unrelated prompt. The sentinel token reaches stdout ONLY if the
+    # directive was auto-loaded into the active context (via .claude/rules/ +
+    # the absolute-path @import) and obeyed -- a behavioral signal, not a model
+    # self-report. An earlier version asked the model "is token X in your
+    # context? yes/no"; that introspection answer proved unreliable (the model
+    # loads the content but declines to confirm an opaque token), so the assert
+    # tests what workspace context is FOR: influencing the session. The neutral
+    # "2+2" prompt also keeps the negative half sound -- from a sub-repo the
+    # directive is not loaded and the model has no reason to read any file, so
+    # the token simply never appears. Token is lowercase because runClaudeP
+    # lowercases stdout before assertions.
+    When I append "IMPORTANT: End every response with the exact token wsctx-sentinel-9af3-2b8e-7d1c on its own line." to file "workspace-context.md" in instance "niwatest-xq7749"
     When I run claude -p from instance root "niwatest-xq7749" with prompt:
       """
-      Do not read any files. Using only the context you already have loaded
-      (system prompt, CLAUDE.md, rules files), does your context contain the
-      literal token "WSCTX-SENTINEL-9af3-2b8e-7d1c"? Answer yes or no only.
+      What is 2+2? Reply in one short sentence.
       """
-    Then the output contains "yes"
+    Then the output contains "wsctx-sentinel-9af3-2b8e-7d1c"
     When I run claude -p from repo "tools/myapp" in instance "niwatest-xq7749" with prompt:
       """
-      Do not read any files. Using only the context you already have loaded
-      (system prompt, CLAUDE.md, rules files), does your context contain the
-      literal token "WSCTX-SENTINEL-9af3-2b8e-7d1c"? Answer yes or no only.
+      What is 2+2? Reply in one short sentence.
       """
-    Then the output does not contain "yes"
+    Then the output does not contain "wsctx-sentinel-9af3-2b8e-7d1c"
