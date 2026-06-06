@@ -1,5 +1,5 @@
 ---
-status: Planned
+status: Current
 problem: |
   niwa's git-worktree creation is implemented inside the internal/mcp package,
   entangled with a non-functional pre-pivot agent-facing mesh (MCP server, task
@@ -28,7 +28,7 @@ upstream: docs/prds/PRD-niwa-mesh-removal.md
 
 ## Status
 
-Planned
+Current
 
 Scope amendment (during implementation): the agent-facing surface to delete is
 wider than the original "internal/mcp + pre-pivot CLI" framing. It also includes
