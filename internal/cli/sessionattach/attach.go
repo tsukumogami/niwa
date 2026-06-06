@@ -7,7 +7,6 @@ import (
 	"io"
 	"io/fs"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"syscall"
 	"time"
@@ -19,19 +18,12 @@ import (
 type Options struct {
 	InstanceRoot string
 	SessionID    string
-	Force        bool   // --force: SIGTERM running worker
 	ClaudeBin    string // empty = look up via PATH
 	HomeDir      string // empty = derived from os.UserHomeDir
 	Stdin        io.Reader
 	Stdout       io.Writer
 	Stderr       io.Writer
 
-	// GraceSeconds overrides the default 5-second SIGTERM-to-SIGKILL grace
-	// period for --force; primarily for tests.
-	GraceSeconds int
-	// PollInterval overrides the default 1-second worker-wait poll cadence
-	// for tests.
-	PollInterval time.Duration
 	// SuperviseFn allows tests to inject a stub for the claude exec.
 	SuperviseFn func(context.Context, SuperviseOptions) (int, error)
 }
@@ -221,16 +213,4 @@ func uidMismatchError(sessionsDir, sessionID string) *ExitCodeError {
 		Code: 1,
 		Msg:  fmt.Sprintf("niwa: error: cannot attach to session (permission denied; current uid=%d)", myUID),
 	}
-}
-
-// LookPathClaude is a small helper used by the attach command to surface the
-// "claude binary not found" check earlier in the flow than Supervise alone
-// would. Currently unused by Run (Supervise handles it) but exposed for the
-// cobra layer's --help validation.
-func LookPathClaude() (string, error) {
-	bin, err := exec.LookPath("claude")
-	if err != nil {
-		return "", fmt.Errorf("niwa: error: claude binary not found in PATH")
-	}
-	return bin, nil
 }

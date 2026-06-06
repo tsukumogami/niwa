@@ -176,11 +176,13 @@ func readPPID(pid int) int {
 func NewSessionID() string { return newUUID() }
 
 // NewUUID generates a random UUIDv4 (no external dependencies). Exported so
-// the mcp package can reuse the same generator for task and message IDs
-// without re-implementing the crypto/rand formatting.
+// other packages can share one UUIDv4 generator for entity IDs without
+// re-implementing the crypto/rand formatting.
 func NewUUID() string { return newUUID() }
 
-// PIDStartTime returns the start time for a PID (exported for session_register).
+// PIDStartTime returns the process start time (jiffies since boot) for a PID.
+// Exported so callers outside the package can record a recycle-safe PID
+// fingerprint without re-reading /proc/<pid>/stat themselves.
 func PIDStartTime(pid int) (int64, error) { return pidStartTime(pid) }
 
 // newUUID generates a random UUID v4 without external dependencies.

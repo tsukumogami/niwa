@@ -45,11 +45,10 @@ func (stdGitInvoker) CommandContext(ctx context.Context, args ...string) *exec.C
 func StdGitInvoker() GitInvoker { return stdGitInvoker{} }
 
 // CreateSessionFunc is the callback shape RunBootstrap invokes to create
-// the bootstrap session. The signature mirrors mcp.CreateSession but
-// using basic types so workspace stays ignorant of the mcp package
-// (mcp already imports workspace via daemon.go — the reverse direction
-// would form an import cycle). The cli layer adapts the two by passing
-// a thin closure that wraps mcp.CreateSession.
+// the bootstrap session. The signature mirrors worktree.CreateSession but
+// uses basic types so workspace stays ignorant of the worktree package and
+// the seam stays available as a test injection point. The cli layer adapts
+// the two by passing a thin closure that wraps worktree.CreateSession.
 //
 // The branchName return is the persisted branch the orchestrator must
 // pass to the session-destroy helper if the post-create rollback fires.
@@ -343,4 +342,3 @@ func findRepoInWorkspaceForDestroy(instanceRoot, repoName string) (string, error
 	}
 	return "", fmt.Errorf("repo %q not found in workspace %s", repoName, instanceRoot)
 }
-

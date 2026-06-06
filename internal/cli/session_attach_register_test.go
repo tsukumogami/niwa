@@ -30,7 +30,6 @@ func TestRunSessionAttach_NoArgsReturnsUsageError(t *testing.T) {
 		"niwa: usage",
 		"niwa session attach",
 		"<session_id>",
-		"[--force]",
 	}
 	for _, s := range wantSubstrs {
 		if !strings.Contains(ece.Msg, s) {

@@ -23,7 +23,7 @@ func ValidClaudeSessionID(id string) bool {
 	return sessionIDRegex.MatchString(id)
 }
 
-// DiscoverClaudeSessionID tries three tiers to find the Claude session ID:
+// DiscoverClaudeSessionID tries three strategies to find the Claude session ID:
 //
 //  1. CLAUDE_SESSION_ID env var (validated, returned immediately if valid;
 //     warns to stderr when set but invalid)

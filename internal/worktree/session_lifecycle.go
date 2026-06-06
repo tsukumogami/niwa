@@ -22,9 +22,8 @@ var sessionIDRe = regexp.MustCompile(`^[0-9a-f]{8}$`)
 var sessionFileRe = regexp.MustCompile(`^[0-9a-f]{8}\.json$`)
 
 // ValidSessionID reports whether id matches the 8-character lowercase hex
-// session ID format. Exported so callers outside the package (e.g. the
-// change-create handler) can reject malformed session IDs before
-// constructing a path from them.
+// session ID format. Exported so callers outside the package can reject
+// malformed session IDs before constructing a filesystem path from them.
 func ValidSessionID(id string) bool {
 	return sessionIDRe.MatchString(id)
 }

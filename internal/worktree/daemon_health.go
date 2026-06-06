@@ -58,8 +58,8 @@ func daemonHealthFor(worktreePath string) DaemonHealth {
 // readDaemonPIDFile reads <niwaDir>/daemon.pid and returns (pid, startTime, err).
 // Returns (0, 0, nil) for the missing-file case and the empty-placeholder case
 // (scaffoldWorktreeNiwa creates an empty daemon.pid that the real daemon
-// overwrites later). Mirrors workspace.ReadPIDFile but lives in mcp/ so
-// daemon-health probes don't pull in the workspace package (cyclic).
+// overwrites later). Mirrors workspace.ReadPIDFile but lives in the worktree
+// package so daemon-health probes don't pull in the workspace package (cyclic).
 func readDaemonPIDFile(niwaDir string) (pid int, startTime int64, err error) {
 	pidPath := filepath.Join(niwaDir, "daemon.pid")
 	data, err := os.ReadFile(pidPath)

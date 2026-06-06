@@ -11,13 +11,10 @@ func init() {
 }
 
 var (
-	sessionAttachForce bool
 	sessionDetachForce bool
 )
 
 func init() {
-	sessionAttachCmd.Flags().BoolVar(&sessionAttachForce, "force", false,
-		"SIGTERM the running worker before acquiring the attach lock")
 	sessionDetachCmd.Flags().BoolVar(&sessionDetachForce, "force", false,
 		"release the attach lock even if held by a live process")
 }
@@ -27,14 +24,11 @@ var sessionAttachCmd = &cobra.Command{
 	Short: "Attach to a mesh session interactively",
 	Long: `Attach to a mesh session interactively.
 
-Locks the session against further mesh use, terminates the per-worktree
-daemon, validates the worker's claude transcript, and launches Claude Code
-with --resume so you can step into the conversation, prompt the agent,
-or fix things manually. When you exit Claude Code (Ctrl-D or /exit), niwa
-releases the lock and the mesh resumes normally.
-
-Pass --force to SIGTERM a running worker before acquiring the lock.
-Without --force, attach waits for any running worker to finish naturally.
+Validates the session worktree, acquires the in-use lock (attach.state +
+flock) so no other process attaches concurrently, validates the worker's
+claude transcript, and launches Claude Code with --resume so you can step
+into the conversation, prompt the agent, or fix things manually. When you
+exit Claude Code (Ctrl-D or /exit), niwa releases the lock.
 
 Discovery: 'niwa session list' shows the AVAILABILITY column for each
 session. Use 'niwa session detach <id> --force' to break a stale lock.
@@ -80,7 +74,7 @@ func runSessionAttach(cmd *cobra.Command, args []string) error {
 	if len(args) == 0 {
 		return &sessionattach.ExitCodeError{
 			Code: 2,
-			Msg: "niwa: usage: niwa session attach <session_id> [--force]. " +
+			Msg: "niwa: usage: niwa session attach <session_id>. " +
 				"Run `niwa session list --status active` to discover available sessions.",
 		}
 	}
@@ -91,7 +85,6 @@ func runSessionAttach(cmd *cobra.Command, args []string) error {
 	return sessionattach.AttachRun(cmd.Context(), sessionattach.Options{
 		InstanceRoot: instanceRoot,
 		SessionID:    args[0],
-		Force:        sessionAttachForce,
 		Stdin:        cmd.InOrStdin(),
 		Stdout:       cmd.OutOrStdout(),
 		Stderr:       cmd.ErrOrStderr(),
