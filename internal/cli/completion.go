@@ -81,8 +81,8 @@ func completeRepoNames(cmd *cobra.Command, args []string, toComplete string) ([]
 }
 
 // completeSessionIDs is the completion closure for positions that accept a
-// session ID: the positional arg of `niwa session destroy`,
-// `niwa session attach`, and `niwa session detach`. It enumerates session
+// session ID: the positional arg of `niwa worktree apply`, `destroy`,
+// `attach`, and `detach`. It enumerates session
 // lifecycle state files under <instanceRoot>/.niwa/sessions/ via
 // worktree.ListSessionLifecycleStates.
 //
