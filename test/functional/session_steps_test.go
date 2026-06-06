@@ -57,6 +57,93 @@ group = "apps"
 	return ctx, nil
 }
 
+// iSetUpSingleRepoChanneledWorkspaceWithContent is iSetUpSingleRepoChanneledWorkspace
+// plus a repo content layer: the config repo ships content/repos/app.md and the
+// workspace.toml declares content_dir + [claude.content.repos.app].source so
+// `niwa apply` installs the repo's CLAUDE.local.md. Used to exercise that a
+// worktree gets the same repo content a checkout does.
+func iSetUpSingleRepoChanneledWorkspaceWithContent(ctx context.Context, name string) (context.Context, error) {
+	s := getState(ctx)
+	if s == nil {
+		return ctx, fmt.Errorf("no test state")
+	}
+	url, err := s.gitServer.SourceRepo("app")
+	if err != nil {
+		return ctx, fmt.Errorf("creating source repo %q: %w", "app", err)
+	}
+	s.repoURLs["app"] = url
+
+	const appContent = "# app repo content\n\nThis CLAUDE.local.md came from the app repo content layer.\n"
+	body := fmt.Sprintf(`[workspace]
+name = %q
+content_dir = "content"
+
+[groups.apps]
+
+[repos.app]
+url = %q
+group = "apps"
+
+[claude.content.repos.app]
+source = "repos/app.md"
+`, name, url)
+
+	cfgURL, err := s.gitServer.ConfigRepoFiles(name, map[string]string{
+		".niwa/workspace.toml":       body,
+		".niwa/content/repos/app.md": appContent,
+	})
+	if err != nil {
+		return ctx, fmt.Errorf("creating config repo %q: %w", name, err)
+	}
+	s.repoURLs[name] = cfgURL
+	if err := runNiwa(s, s.workspaceRoot, "niwa init --from "+cfgURL); err != nil {
+		return ctx, err
+	}
+	if s.exitCode != 0 {
+		return ctx, fmt.Errorf("niwa init exit=%d\nstdout:\n%s\nstderr:\n%s",
+			s.exitCode, s.stdout, s.stderr)
+	}
+	return ctx, nil
+}
+
+// theFileExistsInLastWorktree asserts relPath exists inside the worktree created
+// by the previous worktree-create step.
+func theFileExistsInLastWorktree(ctx context.Context, relPath string) error {
+	s := getState(ctx)
+	if s == nil {
+		return fmt.Errorf("no test state")
+	}
+	if s.lastSessionWorktreePath == "" {
+		return fmt.Errorf("no worktree path stored; create a worktree first")
+	}
+	full := filepath.Join(s.lastSessionWorktreePath, relPath)
+	if _, err := os.Stat(full); err != nil {
+		return fmt.Errorf("expected file %q in worktree %s: %w", relPath, s.lastSessionWorktreePath, err)
+	}
+	return nil
+}
+
+// theFileInLastWorktreeContains asserts relPath inside the last worktree
+// contains text.
+func theFileInLastWorktreeContains(ctx context.Context, relPath, text string) error {
+	s := getState(ctx)
+	if s == nil {
+		return fmt.Errorf("no test state")
+	}
+	if s.lastSessionWorktreePath == "" {
+		return fmt.Errorf("no worktree path stored; create a worktree first")
+	}
+	full := filepath.Join(s.lastSessionWorktreePath, relPath)
+	data, err := os.ReadFile(full)
+	if err != nil {
+		return fmt.Errorf("reading %q in worktree %s: %w", relPath, s.lastSessionWorktreePath, err)
+	}
+	if !strings.Contains(string(data), text) {
+		return fmt.Errorf("file %q does not contain %q\ncontent:\n%s", full, text, string(data))
+	}
+	return nil
+}
+
 // sessionCreateRE parses the `niwa session create` success line:
 //
 //	session: created <id> at <path>

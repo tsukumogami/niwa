@@ -43,6 +43,12 @@ func (s *localGitServer) Repo(name string) (string, error) {
 // file with the given content, and returns its file:// URL. It is the shared
 // implementation behind ConfigRepo and OverlayRepo.
 func (s *localGitServer) createRepoWithFile(name, filename, content string) (string, error) {
+	return s.createRepoWithFiles(name, map[string]string{filename: content})
+}
+
+// createRepoWithFiles creates a bare repo named <name>.git, commits every file
+// in files (relative path → content), and returns its file:// URL.
+func (s *localGitServer) createRepoWithFiles(name string, files map[string]string) (string, error) {
 	repoPath := filepath.Join(s.root, name+".git")
 	out, err := exec.Command("git", "init", "--bare", repoPath).CombinedOutput()
 	if err != nil {
@@ -64,12 +70,14 @@ func (s *localGitServer) createRepoWithFile(name, filename, content string) (str
 		return "", fmt.Errorf("git clone %q: %w\n%s", fileURL, err, out)
 	}
 
-	targetPath := filepath.Join(workDir, filename)
-	if err = os.MkdirAll(filepath.Dir(targetPath), 0o755); err != nil {
-		return "", fmt.Errorf("creating parent dir for %s: %w", filename, err)
-	}
-	if err = os.WriteFile(targetPath, []byte(content), 0o644); err != nil {
-		return "", fmt.Errorf("writing %s: %w", filename, err)
+	for filename, content := range files {
+		targetPath := filepath.Join(workDir, filename)
+		if err = os.MkdirAll(filepath.Dir(targetPath), 0o755); err != nil {
+			return "", fmt.Errorf("creating parent dir for %s: %w", filename, err)
+		}
+		if err = os.WriteFile(targetPath, []byte(content), 0o644); err != nil {
+			return "", fmt.Errorf("writing %s: %w", filename, err)
+		}
 	}
 
 	gitEnv := append(os.Environ(),
@@ -79,7 +87,7 @@ func (s *localGitServer) createRepoWithFile(name, filename, content string) (str
 		"GIT_COMMITTER_EMAIL=niwa-test@example.com",
 	)
 
-	addCmd := exec.Command("git", "add", filename)
+	addCmd := exec.Command("git", "add", "-A")
 	addCmd.Dir = workDir
 	addCmd.Env = gitEnv
 	if out, err = addCmd.CombinedOutput(); err != nil {
@@ -125,6 +133,15 @@ func (s *localGitServer) ConfigRepo(name, toml string) (string, error) {
 // target rank-2 behavior.
 func (s *localGitServer) ConfigRepoRank2(name, toml string) (string, error) {
 	return s.createRepoWithFile(name, "workspace.toml", toml)
+}
+
+// ConfigRepoFiles creates a bare repo named <name>.git committing every
+// file in files (relative path → content), then returns its file:// URL.
+// Use this when a config repo must ship more than workspace.toml — for
+// example, the rank-1 .niwa/workspace.toml plus a content markdown file
+// referenced via [claude.content.repos.*].source.
+func (s *localGitServer) ConfigRepoFiles(name string, files map[string]string) (string, error) {
+	return s.createRepoWithFiles(name, files)
 }
 
 // OverlayRepo creates a bare repo named <name>.git, commits

@@ -1293,69 +1293,23 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 	}
 
 	for _, cr := range classified {
-		effective := MergeOverrides(effectiveCfg, cr.Repo.Name)
-
-		// Merge discovered hooks as base; explicit config entries run first per event.
-		if len(discoveredHooks) > 0 {
-			merged := make(config.HooksConfig, len(discoveredHooks)+len(effective.Claude.Hooks))
-			// Start with discovered hooks (converted to relative paths).
-			for event, entries := range discoveredHooks {
-				var relEntries []config.HookEntry
-				for _, entry := range entries {
-					relScripts := make([]string, 0, len(entry.Scripts))
-					for _, absPath := range entry.Scripts {
-						rel, err := filepath.Rel(configDir, absPath)
-						if err != nil {
-							return nil, fmt.Errorf("materializer hooks: computing relative path for %s: %w", absPath, err)
-						}
-						relScripts = append(relScripts, rel)
-					}
-					relEntries = append(relEntries, config.HookEntry{
-						Matcher: entry.Matcher,
-						Scripts: relScripts,
-					})
-				}
-				merged[event] = relEntries
-			}
-			// Explicit config runs before discovered hooks for the same event
-			// and must not silently discard user-authored discovered hooks.
-			for event, entries := range effective.Claude.Hooks {
-				if existing, ok := merged[event]; ok {
-					merged[event] = append(entries, existing...)
-				} else {
-					merged[event] = entries
-				}
-			}
-			effective.Claude.Hooks = merged
-		}
-
 		repoDir := filepath.Join(instanceRoot, cr.Group, cr.Repo.Name)
-		mctx := &MaterializeContext{
-			Config:                effectiveCfg,
-			Effective:             effective,
+		files, err := runRepoMaterializers(a.Materializers, repoMaterializeInputs{
+			Cfg:                   effectiveCfg,
+			ConfigDir:             configDir,
 			RepoName:              cr.Repo.Name,
 			RepoDir:               repoDir,
-			ConfigDir:             configDir,
+			DiscoveredHooks:       discoveredHooks,
 			DiscoveredEnv:         discoveredEnv,
 			RepoIndex:             repoIndex,
 			SourceTuples:          sourceTuples,
 			AllowPlaintextSecrets: a.AllowPlaintextSecrets,
 			Stderr:                a.Reporter.Writer(),
+		})
+		if err != nil {
+			return nil, err
 		}
-
-		claudeOn := ClaudeEnabled(effectiveCfg, cr.Repo.Name)
-		for _, m := range a.Materializers {
-			// Skip hooks and settings materializers when claude is disabled.
-			if !claudeOn && (m.Name() == "hooks" || m.Name() == "settings") {
-				continue
-			}
-
-			files, err := m.Materialize(mctx)
-			if err != nil {
-				return nil, fmt.Errorf("materializer %s for repo %s: %w", m.Name(), cr.Repo.Name, err)
-			}
-			writtenFiles = append(writtenFiles, files...)
-		}
+		writtenFiles = append(writtenFiles, files...)
 	}
 
 	// Step 6.75: Run repo-provided setup scripts.

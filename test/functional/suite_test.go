@@ -274,6 +274,9 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 	ctx.Step(`^the session worktree directory does not exist$`, theSessionWorktreeDirectoryDoesNotExist)
 
 	ctx.Step(`^a single-repo channeled workspace "([^"]*)" exists$`, iSetUpSingleRepoChanneledWorkspace)
+	ctx.Step(`^a single-repo channeled workspace "([^"]*)" exists with repo content$`, iSetUpSingleRepoChanneledWorkspaceWithContent)
+	ctx.Step(`^the file "([^"]*)" exists in the last worktree$`, theFileExistsInLastWorktree)
+	ctx.Step(`^the file "([^"]*)" in the last worktree contains "([^"]*)"$`, theFileInLastWorktreeContains)
 
 	// --- @critical: rank-2 deprecation + plugin auto-install ---
 	registerRank2Steps(ctx)

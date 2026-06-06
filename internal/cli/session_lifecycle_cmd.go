@@ -5,12 +5,15 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sort"
 	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/tsukumogami/niwa/internal/cli/sessionattach"
+	"github.com/tsukumogami/niwa/internal/config"
+	"github.com/tsukumogami/niwa/internal/workspace"
 	"github.com/tsukumogami/niwa/internal/worktree"
 )
 
@@ -88,7 +91,7 @@ func runSessionCreate(cmd *cobra.Command, args []string) error {
 	repo := args[0]
 	purpose := args[1]
 
-	sessionID, worktreePath, _, err := worktree.CreateSession(context.Background(), worktree.CreateSessionParams{
+	sessionID, worktreePath, branch, err := worktree.CreateSession(context.Background(), worktree.CreateSessionParams{
 		InstanceRoot: instanceRoot,
 		Repo:         repo,
 		Purpose:      purpose,
@@ -99,6 +102,16 @@ func runSessionCreate(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("niwa: error: %v", err)
 		}
 		return fmt.Errorf("niwa: error: creating session: %w", err)
+	}
+
+	// Install the owning repo's CLAUDE content (and the worktree-context
+	// rules import + purpose/branch layer) into the new worktree, so a
+	// worktree ends up with the same class of accessories a repo checkout
+	// gets from `niwa apply`. The worktree already exists at this point; an
+	// install failure is surfaced but does not unwind the worktree (it can
+	// be re-synced later).
+	if err := applyContentToWorktree(instanceRoot, worktreePath, repo, purpose, branch); err != nil {
+		return fmt.Errorf("niwa: error: installing content into worktree %s (the worktree exists; re-sync it later): %w", sessionID, err)
 	}
 
 	// Issue 10: success summary on stdout so callers can pipe it.
@@ -114,6 +127,38 @@ func runSessionCreate(cmd *cobra.Command, args []string) error {
 	}
 	hintShellInit(cmd)
 	return nil
+}
+
+// applyContentToWorktree loads the workspace config the way create/apply do
+// (walk up from the instance root to find .niwa/workspace.toml), resolves the
+// repo's group from the on-disk instance layout, and installs the repo's CLAUDE
+// content into the worktree via workspace.ApplyToWorktree. It mirrors the
+// init.go/RunBootstrap composition: the leaf internal/worktree stays a leaf
+// (the content install lives in internal/workspace), and the CLI orchestrates
+// the two.
+func applyContentToWorktree(instanceRoot, worktreePath, repo, purpose, branch string) error {
+	configPath, configDir, err := config.Discover(instanceRoot)
+	if err != nil {
+		return fmt.Errorf("locating workspace config: %w", err)
+	}
+	result, err := config.Load(configPath)
+	if err != nil {
+		return fmt.Errorf("loading workspace config: %w", err)
+	}
+	cfg := result.Config
+
+	group, err := workspace.FindRepoGroup(instanceRoot, repo)
+	if err != nil {
+		return err
+	}
+
+	opts := workspace.WorktreeApplyOptions{Stderr: os.Stderr}
+	if gDir, gErr := config.GlobalConfigDir(); gErr == nil {
+		opts.GlobalConfigDir = gDir
+	}
+
+	_, err = workspace.ApplyToWorktree(cfg, configDir, instanceRoot, worktreePath, group, repo, purpose, branch, opts)
+	return err
 }
 
 func runSessionDestroy(cmd *cobra.Command, args []string) error {

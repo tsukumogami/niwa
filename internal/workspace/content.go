@@ -105,6 +105,18 @@ type RepoContentResult struct {
 //
 // Returns a result with content warnings and files written.
 func InstallRepoContent(cfg *config.WorkspaceConfig, configDir, overlayDir, instanceRoot, groupName, repoName string) (*RepoContentResult, error) {
+	repoDir := filepath.Join(instanceRoot, groupName, repoName)
+	return InstallRepoContentTo(cfg, configDir, overlayDir, instanceRoot, repoDir, groupName, repoName)
+}
+
+// InstallRepoContentTo is the target-directory-parameterized form of
+// InstallRepoContent. It installs the repo's CLAUDE.local.md (and subdir
+// content) into repoDir, while still resolving the {workspace} template
+// variable from instanceRoot. The instance apply path calls this with
+// repoDir = {instanceRoot}/{group}/{repo}; ApplyToWorktree calls it with the
+// worktree path so a worktree gets the same content a repo checkout does. Both
+// callers share this single function (no forked installer).
+func InstallRepoContentTo(cfg *config.WorkspaceConfig, configDir, overlayDir, instanceRoot, repoDir, groupName, repoName string) (*RepoContentResult, error) {
 	result := &RepoContentResult{}
 
 	absInstance, err := filepath.Abs(instanceRoot)
@@ -118,8 +130,6 @@ func InstallRepoContent(cfg *config.WorkspaceConfig, configDir, overlayDir, inst
 		"{group_name}":     groupName,
 		"{repo_name}":      repoName,
 	}
-
-	repoDir := filepath.Join(instanceRoot, groupName, repoName)
 
 	// Resolve source: explicit entry or auto-discovery.
 	entry, hasExplicit := cfg.Claude.Content.Repos[repoName]
