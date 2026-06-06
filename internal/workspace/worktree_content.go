@@ -201,7 +201,7 @@ func ApplyToWorktree(cfg *config.WorkspaceConfig, configDir, instanceRoot, workt
 	//    worktree. Same shared loop the instance apply path uses.
 	materializers := opts.Materializers
 	if materializers == nil {
-		materializers = defaultMaterializers(opts.Stderr)
+		materializers = defaultRepoMaterializers(opts.Stderr)
 	}
 	discoveredHooks, _ := DiscoverHooks(configDir)
 	wsEnvFile, repoEnvFiles, _ := DiscoverEnvFiles(configDir)
@@ -235,7 +235,7 @@ func ApplyToWorktree(cfg *config.WorkspaceConfig, configDir, instanceRoot, workt
 	// 3. Worktree rules import: an absolute @import to the instance's
 	//    workspace-context.md, plus overlay/global where present. Reuses the
 	//    same write/append helpers the instance root uses.
-	rulesFiles, err := installWorktreeRulesImport(instanceRoot, worktreePath, opts)
+	rulesFiles, err := installWorktreeRulesImport(instanceRoot, worktreePath)
 	if err != nil {
 		return nil, err
 	}
@@ -251,10 +251,14 @@ func ApplyToWorktree(cfg *config.WorkspaceConfig, configDir, instanceRoot, workt
 	return written, nil
 }
 
-// defaultMaterializers returns the same materializer set the apply pipeline
-// wires (HooksMaterializer, SettingsMaterializer, EnvMaterializer,
-// FilesMaterializer), so a worktree install matches a repo install.
-func defaultMaterializers(stderr io.Writer) []Materializer {
+// defaultRepoMaterializers returns the canonical repo-materializer set
+// (HooksMaterializer, SettingsMaterializer, EnvMaterializer, FilesMaterializer)
+// in canonical order. It is the single source of the materializer list for the
+// whole package: NewApplier wires it for the instance apply pipeline, and the
+// worktree path falls back to it when no override is supplied, so a worktree
+// install matches a repo install and the two paths cannot drift. Adding a
+// materializer here reaches both paths.
+func defaultRepoMaterializers(stderr io.Writer) []Materializer {
 	return []Materializer{
 		&HooksMaterializer{},
 		&SettingsMaterializer{},
@@ -268,7 +272,7 @@ func defaultMaterializers(stderr io.Writer) []Materializer {
 // overlay/global imports when those files exist at the instance root. Uses the
 // same writeWorkspaceRulesFile / appendToWorkspaceRulesFile helpers the instance
 // root uses, so the worktree's import file has the identical shape.
-func installWorktreeRulesImport(instanceRoot, worktreePath string, opts WorktreeApplyOptions) ([]string, error) {
+func installWorktreeRulesImport(instanceRoot, worktreePath string) ([]string, error) {
 	absInstance, err := filepath.Abs(instanceRoot)
 	if err != nil {
 		return nil, fmt.Errorf("resolving instance root: %w", err)

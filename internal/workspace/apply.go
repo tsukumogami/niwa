@@ -123,12 +123,7 @@ func NewApplier(gh github.Client) *Applier {
 		return EnsureOverlaySnapshot(ctx, url, dir, fetcher, a.Reporter)
 	}
 	aw := &applierWriter{a: a}
-	a.Materializers = []Materializer{
-		&HooksMaterializer{},
-		&SettingsMaterializer{},
-		&EnvMaterializer{Stderr: aw},
-		&FilesMaterializer{Stderr: aw},
-	}
+	a.Materializers = defaultRepoMaterializers(aw)
 	return a
 }
 
