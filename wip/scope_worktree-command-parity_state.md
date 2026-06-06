@@ -14,6 +14,7 @@ chain_skipped: []
 chain_ran:
   - brief
   - prd
+  - design
 child_snapshots:
   brief:
     status: Accepted
@@ -23,6 +24,10 @@ child_snapshots:
     status: Accepted
     content_hash: 1a6784a24de289d3b3157e4d915360e6b5fe95c0
     captured_at: 2026-06-06T16:30:44Z
+  design:
+    status: Accepted
+    content_hash: c0b2aa3cbf8ca6302c8edf12ba1f58fcffd7e121
+    captured_at: 2026-06-06T16:33:54Z
 visibility: Public
 worktree_rebases:
   - phase: brief
@@ -37,8 +42,12 @@ worktree_rebases:
     upstream_commits: []
     impact: none
     rebased_at: 2026-06-06T16:31:00Z
+  - phase: plan
+    upstream_commits: []
+    impact: none
+    rebased_at: 2026-06-06T16:34:00Z
 parent_orchestration:
-  invoking_child: design
+  invoking_child: plan
   suppress_status_aware_prompt: true
   rationale: fresh-chain
 ---
