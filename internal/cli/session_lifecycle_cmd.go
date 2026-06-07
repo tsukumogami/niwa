@@ -226,6 +226,14 @@ func applyContentToWorktree(instanceRoot, worktreePath, repo, purpose, branch st
 
 	opts := workspace.WorktreeApplyOptions{Stderr: os.Stderr}
 
+	// Thread the resolved personal/global .env.example failure policy so the
+	// worktree pre-pass applies the same policy as `niwa apply`. The global
+	// override snapshot was already synced by apply/create; here we read the
+	// already-present niwa.toml without re-syncing. Any unavailability (no
+	// global config registered, no niwa.toml, or a parse error) leaves the
+	// policy nil, which the resolver treats as "no global rung".
+	opts.GlobalEnvExamplePolicy = resolveGlobalEnvExamplePolicy(cfg.Workspace.Name)
+
 	// Resolve and merge the workspace overlay the same way `niwa apply` does, so
 	// a worktree of an overlay-augmented repo gets the overlay-merged CLAUDE
 	// content a repo checkout would. config.Load does NOT run the overlay merge,
@@ -242,6 +250,28 @@ func applyContentToWorktree(instanceRoot, worktreePath, repo, purpose, branch st
 	}
 
 	return workspace.ApplyToWorktree(cfg, configDir, instanceRoot, worktreePath, group, repo, purpose, branch, opts)
+}
+
+// resolveGlobalEnvExamplePolicy reads the already-synced personal global config
+// override (niwa.toml under the registered global config dir) and returns the
+// resolved .env.example failure policy for workspaceName. It does NOT sync the
+// snapshot (apply/create already did) and never fails the worktree apply: any
+// unavailability (no global config registered, no niwa.toml, or a parse error)
+// returns nil, which EffectiveEnvExamplePolicy treats as "no global rung".
+func resolveGlobalEnvExamplePolicy(workspaceName string) *config.EnvExamplePolicy {
+	gDir, err := config.GlobalConfigDir()
+	if err != nil || gDir == "" {
+		return nil
+	}
+	data, err := os.ReadFile(filepath.Join(gDir, workspace.GlobalConfigOverrideFile))
+	if err != nil {
+		return nil
+	}
+	parsed, err := config.ParseGlobalConfigOverride(data)
+	if err != nil {
+		return nil
+	}
+	return workspace.ResolveGlobalOverride(parsed, workspaceName).EnvExamplePolicy
 }
 
 // printWorktreeContentFiles surfaces the written-files list returned by

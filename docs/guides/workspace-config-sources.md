@@ -301,6 +301,108 @@ in summary:
 `Authorization: Bearer <token>` on outbound requests. The token
 never appears in error messages, log lines, or surfaced API types.
 
+## .env.example failure policy {#env-example-failure-policy}
+
+When `niwa apply` materializes a repo, a pre-pass scans that repo's
+`.env.example` for keys that look like real secrets (a vendor-token
+prefix, or a value with high entropy) but aren't declared in your
+workspace config. Each such detection produces a warning by default
+and apply continues. You can promote specific detections to hard
+failures that abort apply, and you can do it at the granularity that
+fits — a whole category, a single repo, or one named variable.
+
+### The `[env_example_policy]` block
+
+The policy lives in an `[env_example_policy]` table with two category
+keys, each accepting `"warn"` or `"fail"`:
+
+```toml
+[env_example_policy]
+vendor_token = "fail"   # warn | fail
+entropy = "warn"        # warn | fail
+```
+
+- `vendor_token` covers values that match a known vendor-token prefix.
+- `entropy` covers values that cross the entropy threshold.
+
+A key you leave out is unset — it inherits from the next-broader
+level rather than defaulting to anything on its own.
+
+At project scope (the workspace top level and per-repo positions) you
+can also set per-variable actions in an `[env_example_policy.vars]`
+sub-table, keyed by the exact variable name:
+
+```toml
+[env_example_policy.vars]
+STRIPE_EXAMPLE_KEY = "warn"
+ACME_API_TOKEN = "fail"
+```
+
+The `vars` sub-table is project-scope only. A personal/global config
+carries category keys only; a `vars` entry there has no effect.
+
+### The three levels
+
+The block can be set at three levels, broadest to most specific:
+
+| Level | Where | Scope | Supports `vars` |
+|-------|-------|-------|-----------------|
+| User | Personal/global niwa config — `[global]` or `[workspaces.<name>]` in `~/.config/niwa/config.toml` (or your global config repo's `niwa.toml`) | All workspaces (or one named workspace) | No |
+| Project | `[env_example_policy]` at the workspace config top level | The whole workspace | Yes |
+| Per-repo | `[repos.<name>.env_example_policy]` in the workspace config | One repo | Yes |
+
+### Precedence
+
+For each undeclared probable-secret key, niwa resolves one effective
+action by walking from most specific to broadest and taking the first
+match:
+
+1. Operator per-variable entry — per-repo `vars`, then workspace `vars`.
+2. The key's inline annotation (see below).
+3. Per-category policy — per-repo, then workspace, then user.
+4. Default: `warn`.
+
+So a per-variable entry beats a project setting, which beats a user
+setting. Any level you leave unset inherits the broader one, and when
+nothing is configured anywhere the action is `warn` — detections warn
+and don't block apply unless a `fail` policy applies.
+
+### Inline annotations in `.env.example`
+
+A repo can annotate a single line in its own `.env.example` with a
+trailing comment to set that key's action:
+
+```bash
+STRIPE_EXAMPLE_KEY=sk_test_xxxxxxxx # niwa: warn
+ACME_API_TOKEN=replace-me           # niwa: fail
+```
+
+The marker syntax is `# niwa: warn` or `# niwa: fail`. It's extracted
+independently of value quoting, so it works on unquoted, single-quoted,
+and double-quoted values; a `# niwa:` sequence inside a quoted value is
+not treated as a marker. An unknown marker is ignored with a warning
+naming the key.
+
+Because an inline annotation sits at step 2 of the cascade, an
+operator's per-variable config entry (step 1) overrides it. That's the
+operator's recourse: if a repo's inline `# niwa: warn` lowers a key
+you've set to `fail` at the category level, add an
+`[env_example_policy.vars]` entry for that key to take it back. When an
+inline annotation does lower a configured `fail` to `warn`, niwa emits
+a distinct warning so the downgrade is visible in apply output.
+
+### Per-run override and disabling the scan
+
+`niwa apply --allow-plaintext-secrets` downgrades every resolved
+`fail` to `warn` for that one run, across all repos, emitting a per-key
+audit line for each downgrade. Use it to push through a run without
+editing config; it doesn't change anything persisted.
+
+The separate `read_env_example = false` toggle (settable at the
+workspace and per-repo levels) is unchanged: it turns the whole scan
+off for that scope, so no detection — and no policy — runs at all. The
+failure policy applies only when the scan is on.
+
 ## Source layouts (rank-1, rank-2, rank-3) {#source-layouts}
 
 niwa probes each remote source for one of two recognized layouts.

@@ -3,12 +3,15 @@ package workspace
 import (
 	"strings"
 	"testing"
+
+	"github.com/tsukumogami/niwa/internal/config"
 )
 
 // TestClassifyEnvValueBlocklist verifies that all 16 vendor-token prefixes
-// produce isSafe=false with a reason containing the prefix string.
-// Prefix strings are hardcoded here (not range-iterated from envPrefixBlocklist)
-// so that the test is a precise specification of what is expected.
+// produce CategoryVendorToken. Prefix strings are hardcoded here (not
+// range-iterated from envPrefixBlocklist) so the test is a precise
+// specification of what is expected. The reason no longer echoes the matched
+// prefix (R22): the new control flow keys on the category.
 func TestClassifyEnvValueBlocklist(t *testing.T) {
 	cases := []struct {
 		prefix string
@@ -34,38 +37,38 @@ func TestClassifyEnvValueBlocklist(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.prefix, func(t *testing.T) {
-			isSafe, reason := classifyEnvValue(tc.value)
-			if isSafe {
-				t.Errorf("classifyEnvValue(%q): isSafe=true, want false", tc.prefix+"...")
+			category, reason := classifyEnvValue(tc.value)
+			if category != config.CategoryVendorToken {
+				t.Errorf("classifyEnvValue(%q): category=%v, want vendor-token", tc.prefix+"...", category)
 			}
-			if !strings.Contains(reason, tc.prefix) {
-				t.Errorf("reason %q does not contain prefix %q", reason, tc.prefix)
-			}
-			// R22: reason must not contain the value.
+			// R22: reason must not contain the value or the matched prefix.
 			if strings.Contains(reason, tc.value) {
 				t.Errorf("reason %q contains the value text (R22 violation)", reason)
+			}
+			if strings.Contains(reason, tc.prefix) {
+				t.Errorf("reason %q contains the matched prefix %q (R22 violation)", reason, tc.prefix)
 			}
 		})
 	}
 }
 
-// TestClassifyEnvValueBlocklistWinsOverLowEntropy verifies that a blocklist match
-// still produces isSafe=false even when the value's entropy is below 3.5.
+// TestClassifyEnvValueBlocklistWinsOverLowEntropy verifies that a blocklist
+// match still produces CategoryVendorToken even when the value's entropy is
+// below 3.5.
 func TestClassifyEnvValueBlocklistWinsOverLowEntropy(t *testing.T) {
 	// "sk_live_aaaa" has very low entropy but must still be flagged.
-	isSafe, reason := classifyEnvValue("sk_live_aaaa")
-	if isSafe {
-		t.Error("expected isSafe=false for blocklist prefix with low entropy")
+	category, reason := classifyEnvValue("sk_live_aaaa")
+	if category != config.CategoryVendorToken {
+		t.Errorf("expected CategoryVendorToken for blocklist prefix with low entropy, got %v", category)
 	}
-	if !strings.Contains(reason, "sk_live_") {
-		t.Errorf("reason %q does not contain prefix sk_live_", reason)
+	if strings.Contains(reason, "sk_live_") {
+		t.Errorf("reason %q contains the matched prefix (R22 violation)", reason)
 	}
 }
 
-// TestClassifyEnvValueAllowlist verifies that all known safe placeholder strings
-// produce isSafe=true.
-// Values are hardcoded here (not range-iterated from envSafeAllowlist) so that
-// the test is a precise specification of what is expected.
+// TestClassifyEnvValueAllowlist verifies that all known safe placeholder
+// strings produce CategorySafe. Values are hardcoded here (not range-iterated
+// from envSafeAllowlist) so the test is a precise specification.
 func TestClassifyEnvValueAllowlist(t *testing.T) {
 	cases := []string{
 		"",
@@ -79,9 +82,9 @@ func TestClassifyEnvValueAllowlist(t *testing.T) {
 
 	for _, value := range cases {
 		t.Run(value, func(t *testing.T) {
-			isSafe, _ := classifyEnvValue(value)
-			if !isSafe {
-				t.Errorf("classifyEnvValue(%q): isSafe=false, want true", value)
+			category, _ := classifyEnvValue(value)
+			if category != config.CategorySafe {
+				t.Errorf("classifyEnvValue(%q): category=%v, want safe", value, category)
 			}
 		})
 	}
@@ -89,44 +92,35 @@ func TestClassifyEnvValueAllowlist(t *testing.T) {
 
 // TestClassifyEnvValueStripePublicKeys verifies that pk_test_ and pk_live_
 // prefixed values are treated as safe regardless of the suffix content. These
-// are Stripe publishable keys, not secret keys, and any value with these
-// prefixes should be allowlisted.
+// are Stripe publishable keys, not secret keys.
 func TestClassifyEnvValueStripePublicKeys(t *testing.T) {
 	cases := []string{
-		// Literal placeholder form.
 		"pk_test_xxxxxxxxxxxx",
 		"pk_live_xxxxxxxxxxxx",
-		// Realistic Stripe publishable keys: high-entropy suffix but safe prefix.
-		// Suffix is kept short to avoid triggering secret-scanning heuristics
-		// while still exercising the entropy-override path.
 		"pk_test_51AbCdEfGhIjK",
 		"pk_live_51AbCdEfGhIjK",
 	}
 
 	for _, value := range cases {
 		t.Run(value, func(t *testing.T) {
-			isSafe, _ := classifyEnvValue(value)
-			if !isSafe {
-				t.Errorf("classifyEnvValue(%q): isSafe=false, want true (Stripe publishable key prefix)", value)
+			category, _ := classifyEnvValue(value)
+			if category != config.CategorySafe {
+				t.Errorf("classifyEnvValue(%q): category=%v, want safe (Stripe publishable key prefix)", value, category)
 			}
 		})
 	}
 }
 
-// TestClassifyEnvValueAllowlistOverridesEntropy verifies that an allowlist match
-// with entropy > 3.5 still produces isSafe=true.
+// TestClassifyEnvValueAllowlistOverridesEntropy verifies that an allowlist
+// match with entropy > 3.5 still produces CategorySafe.
 func TestClassifyEnvValueAllowlistOverridesEntropy(t *testing.T) {
-	// "https://example.com/callback" contains enough character variety that its
-	// entropy could be above 3.5; verify the allowlist wins regardless.
 	value := "https://example.com/callback"
 	entropy := shannonEntropy(value)
 	if entropy <= 3.5 {
-		// The test is meaningful only when entropy is actually above the threshold.
-		// If the value entropy is low, skip to avoid a trivially passing test.
 		t.Skipf("test value %q has entropy %.4f <= 3.5; not a meaningful override case", value, entropy)
 	}
-	isSafe, _ := classifyEnvValue(value)
-	if !isSafe {
+	category, _ := classifyEnvValue(value)
+	if category != config.CategorySafe {
 		t.Errorf("classifyEnvValue(%q): allowlist should override entropy (%.4f > 3.5)", value, entropy)
 	}
 }
@@ -134,23 +128,19 @@ func TestClassifyEnvValueAllowlistOverridesEntropy(t *testing.T) {
 // TestClassifyEnvValueEntropyThreshold verifies boundary behaviour around 3.5.
 //
 // Boundary rule (documented): entropy == 3.5 is treated as SAFE.
-// Only entropy strictly greater than 3.5 causes isSafe=false.
+// Only entropy strictly greater than 3.5 yields CategoryEntropy.
 func TestClassifyEnvValueEntropyThreshold(t *testing.T) {
-	// Build values with known entropy to test boundary precisely.
-	// Use strings whose entropy we can compute analytically.
-
 	// A string of identical characters has entropy 0 → safe.
-	isSafe, _ := classifyEnvValue("aaaaaaaaaa")
-	if !isSafe {
-		t.Error("low-entropy value (all same char): expected isSafe=true")
+	category, _ := classifyEnvValue("aaaaaaaaaa")
+	if category != config.CategorySafe {
+		t.Error("low-entropy value (all same char): expected CategorySafe")
 	}
 
-	// A string with high entropy → unsafe (not on blocklist, not on allowlist).
-	// "ABCDEFGHabcdefgh01234567" — 24 unique chars, all distinct → entropy = log2(24) ≈ 4.58.
+	// A high-entropy string (not on blocklist, not on allowlist) → entropy.
 	highEntropy := "ABCDEFGHabcdefgh01234567"
-	isSafe, reason := classifyEnvValue(highEntropy)
-	if isSafe {
-		t.Errorf("high-entropy value: expected isSafe=false, got true (entropy=%.4f)", shannonEntropy(highEntropy))
+	category, reason := classifyEnvValue(highEntropy)
+	if category != config.CategoryEntropy {
+		t.Errorf("high-entropy value: expected CategoryEntropy, got %v (entropy=%.4f)", category, shannonEntropy(highEntropy))
 	}
 	if !strings.Contains(reason, "entropy > 3.5") {
 		t.Errorf("reason %q does not contain 'entropy > 3.5'", reason)
@@ -160,79 +150,42 @@ func TestClassifyEnvValueEntropyThreshold(t *testing.T) {
 		t.Errorf("reason %q contains the value text (R22 violation)", reason)
 	}
 
-	// Exactly 3.5 boundary: use a string constructed so that shannonEntropy returns
-	// exactly 3.5.  We'll just assert the boundary is handled correctly by computing
-	// the entropy directly and checking the rule.
-	//
-	// "aabbccdd" has 4 unique chars each appearing 2 times → entropy = log2(4) = 2.0 → safe.
-	isSafe, _ = classifyEnvValue("aabbccdd")
-	if !isSafe {
-		t.Error("low-entropy value: expected isSafe=true")
+	// "aabbccdd" has 4 unique chars each appearing 2 times → entropy = 2.0 → safe.
+	category, _ = classifyEnvValue("aabbccdd")
+	if category != config.CategorySafe {
+		t.Error("low-entropy value: expected CategorySafe")
 	}
 }
 
-// TestClassifyEnvValueEntropyExactly35 explicitly documents and tests the
-// boundary at exactly 3.5.  Entropy == 3.5 is SAFE per the implementation.
+// TestClassifyEnvValueEntropyExactly35 documents and tests the boundary at
+// exactly 3.5. Entropy == 3.5 is SAFE per the implementation.
 func TestClassifyEnvValueEntropyExactly35(t *testing.T) {
-	// We need a string whose Shannon entropy is exactly 3.5 bits/char.
-	// H = -sum(p_i * log2(p_i))
-	// A string of 2^k characters each appearing once has entropy log2(2^k) = k.
-	// We want H = 3.5. Use a weighting approach:
-	//   8 symbols each appearing 2 times (total 16 chars) → H = log2(8) = 3.0  (not 3.5)
-	//   11 symbols: 8 appear once, 3 appear 2 times, total = 14. Not easily exact.
-	//
-	// Instead we use an empirical search: find a short string and verify by calling
-	// shannonEntropy.  The key correctness property we test is:
-	//   if shannonEntropy(v) == 3.5 → isSafe=true  (not classified as secret)
-	//   if shannonEntropy(v) > 3.5  → isSafe=false (classified as secret)
-	//
-	// We already test the >3.5 case in TestClassifyEnvValueEntropyThreshold.
-	// Here we build a string with exactly 3.5 entropy using a mathematical construction:
-	// Mix 12 distinct chars: 4 appear with weight 2, 8 appear with weight 1. Total = 16.
-	// H = -(4*(2/16)*log2(2/16) + 8*(1/16)*log2(1/16))
-	//   = -(4*(1/8)*log2(1/8) + 8*(1/16)*log2(1/16))
-	//   = -(4*(1/8)*(-3) + 8*(1/16)*(-4))
-	//   = -(4*(-3/8) + 8*(-4/16))
-	//   = -((-12/8) + (-32/16))
-	//   = -(-1.5 + -2.0)
-	//   = 3.5
-	//
-	// Construction: chars a,b,c,d appear twice; chars e,f,g,h,i,j,k,l appear once.
-	v := "aabbccddefghijkl" // 16 chars; 4 chars × 2 occurrences + 8 chars × 1 occurrence
+	// Construction: chars a,b,c,d appear twice; e..l appear once → H = 3.5.
+	v := "aabbccddefghijkl"
 	h := shannonEntropy(v)
 
 	const eps = 1e-9
 	if !(h >= 3.5-eps && h <= 3.5+eps) {
-		// The analytical construction may have floating-point deviation; log it but don't fail.
 		t.Logf("note: constructed string has entropy %.10f (target 3.5)", h)
 	}
 
-	isSafe, _ := classifyEnvValue(v)
+	category, _ := classifyEnvValue(v)
 	if h > 3.5 {
-		// If entropy is strictly above 3.5 the value should be flagged, but only if
-		// it is not on the allowlist (it is not).
-		if isSafe {
-			t.Errorf("entropy %.10f > 3.5: expected isSafe=false", h)
+		if category != config.CategoryEntropy {
+			t.Errorf("entropy %.10f > 3.5: expected CategoryEntropy, got %v", h, category)
 		}
 	} else {
-		// entropy <= 3.5: safe.
-		if !isSafe {
-			t.Errorf("entropy %.10f <= 3.5: expected isSafe=true", h)
+		if category != config.CategorySafe {
+			t.Errorf("entropy %.10f <= 3.5: expected CategorySafe, got %v", h, category)
 		}
 	}
 
-	// Test a value with entropy exactly equal to the boundary computed analytically.
-	// We also test an adjacent value slightly above 3.5 to confirm the strict comparison.
-	//
-	// A 128-char string with all 128 ASCII printable characters once each has
-	// entropy = log2(128) = 7.0, which is well above 3.5.
-	// We use a simpler construction: all 16 hex digits each appearing 4 times = 64 chars.
-	// H = -16 * (4/64) * log2(4/64) = -16 * (1/16) * log2(1/16) = -log2(1/16) = 4.0 > 3.5.
+	// 16 hex digits each appearing 4 times = 64 chars → H = 4.0 > 3.5.
 	hex64 := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 	h64 := shannonEntropy(hex64)
-	isSafe64, reason64 := classifyEnvValue(hex64)
-	if isSafe64 {
-		t.Errorf("entropy %.4f > 3.5: expected isSafe=false for hex64", h64)
+	category64, reason64 := classifyEnvValue(hex64)
+	if category64 != config.CategoryEntropy {
+		t.Errorf("entropy %.4f > 3.5: expected CategoryEntropy for hex64, got %v", h64, category64)
 	}
 	if !strings.Contains(reason64, "entropy > 3.5") {
 		t.Errorf("reason %q should contain 'entropy > 3.5'", reason64)
@@ -241,14 +194,14 @@ func TestClassifyEnvValueEntropyExactly35(t *testing.T) {
 
 // TestClassifyEnvValueEmptyString verifies that an empty value is always safe.
 func TestClassifyEnvValueEmptyString(t *testing.T) {
-	isSafe, _ := classifyEnvValue("")
-	if !isSafe {
-		t.Error("classifyEnvValue(\"\"): expected isSafe=true")
+	category, _ := classifyEnvValue("")
+	if category != config.CategorySafe {
+		t.Errorf("classifyEnvValue(\"\"): expected CategorySafe, got %v", category)
 	}
 }
 
 // TestClassifyEnvValueR22ReasonNoValue asserts that the reason string never
-// contains the literal value for every isSafe=false case.
+// contains the literal value (or any fragment of it) for probable-secret cases.
 func TestClassifyEnvValueR22ReasonNoValue(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -263,29 +216,18 @@ func TestClassifyEnvValueR22ReasonNoValue(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			isSafe, reason := classifyEnvValue(tc.value)
-			if isSafe {
-				t.Skipf("value classified as safe — R22 check only applies to isSafe=false cases")
+			category, reason := classifyEnvValue(tc.value)
+			if category == config.CategorySafe {
+				t.Skipf("value classified as safe — R22 check only applies to probable-secret cases")
 			}
 			if strings.Contains(reason, tc.value) {
 				t.Errorf("R22 violation: reason %q contains value text", reason)
 			}
-			// Also check that no fragment longer than 4 chars from the value
-			// appears in the reason (conservative leakage check).
+			// No fragment longer than 4 chars from the value should appear in
+			// the reason. The reason no longer echoes any prefix, so there is
+			// no exemption needed.
 			for i := 0; i+4 <= len(tc.value); i++ {
 				fragment := tc.value[i : i+4]
-				// Skip fragments that are part of the prefix itself (those are allowed
-				// in the reason as the rule name).
-				isBlocklistPrefix := false
-				for _, p := range envPrefixBlocklist {
-					if strings.HasPrefix(tc.value, p) && strings.Contains(p, fragment) {
-						isBlocklistPrefix = true
-						break
-					}
-				}
-				if isBlocklistPrefix {
-					continue
-				}
 				if strings.Contains(reason, fragment) {
 					t.Errorf("R22 violation: reason %q contains value fragment %q", reason, fragment)
 				}
@@ -297,22 +239,23 @@ func TestClassifyEnvValueR22ReasonNoValue(t *testing.T) {
 // TestClassifyEnvValueLowEntropyNoMatch verifies that a low-entropy value with
 // no blocklist or allowlist match is classified as safe.
 func TestClassifyEnvValueLowEntropyNoMatch(t *testing.T) {
-	// "production" has low entropy and is not on any list.
-	isSafe, _ := classifyEnvValue("production")
-	if !isSafe {
-		t.Errorf("low-entropy value 'production': expected isSafe=true (entropy=%.4f)", shannonEntropy("production"))
+	category, _ := classifyEnvValue("production")
+	if category != config.CategorySafe {
+		t.Errorf("low-entropy value 'production': expected CategorySafe (entropy=%.4f)", shannonEntropy("production"))
 	}
 }
 
-// TestClassifyEnvValueHighEntropyReason verifies that isSafe=false from entropy
+// TestClassifyEnvValueHighEntropyReason verifies that an entropy detection
 // produces a reason containing "entropy > 3.5".
 func TestClassifyEnvValueHighEntropyReason(t *testing.T) {
-	// Use a value with clearly high entropy and no blocklist prefix.
 	value := "xZ9qK2mP8wR1nF4tY7vJ0sL3"
-	isSafe, reason := classifyEnvValue(value)
-	if isSafe {
+	category, reason := classifyEnvValue(value)
+	if category == config.CategorySafe {
 		t.Logf("value entropy = %.4f", shannonEntropy(value))
 		t.Skip("value unexpectedly classified as safe — entropy may be <= 3.5")
+	}
+	if category != config.CategoryEntropy {
+		t.Errorf("expected CategoryEntropy, got %v", category)
 	}
 	if !strings.Contains(reason, "entropy > 3.5") {
 		t.Errorf("reason %q does not contain 'entropy > 3.5'", reason)

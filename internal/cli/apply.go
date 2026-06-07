@@ -24,7 +24,7 @@ func init() {
 		"downgrade unresolved vault:// references to empty strings with stderr warnings. "+
 			"Does NOT override *.required misses. One-shot -- re-evaluated each invocation.")
 	applyCmd.Flags().BoolVar(&applyAllowPlaintextSecrets, "allow-plaintext-secrets", false,
-		"bypass the public-repo plaintext-secrets guardrail. Strictly one-shot -- no state persistence.")
+		"bypass the public-repo plaintext-secrets guardrail and downgrade all .env.example failure-policy failures to warnings. Strictly one-shot -- no state persistence.")
 	applyCmd.Flags().BoolVar(&applyForce, "force", false,
 		"force apply through a detected URL change against a legacy working tree (PRD R26-R27).")
 	applyCmd.Flags().BoolVar(&applyNoInstallPlugins, "no-install-plugins", false,

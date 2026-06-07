@@ -138,6 +138,10 @@ type WorkspaceMeta struct {
 	// all repos in the workspace. nil means enabled (opt-out default).
 	// Per-repo overrides in RepoOverride.ReadEnvExample take precedence.
 	ReadEnvExample *bool `toml:"read_env_example,omitempty"`
+	// EnvExamplePolicy is the workspace-level .env.example failure policy.
+	// nil means inherit (from the global override, then the warn default).
+	// This is a project-scope position: its Vars sub-table is honored.
+	EnvExamplePolicy *EnvExamplePolicy `toml:"env_example_policy,omitempty"`
 }
 
 // ParseResult holds the parsed config and any non-fatal warnings.
@@ -201,6 +205,10 @@ type RepoOverride struct {
 	// ReadEnvExample overrides the workspace-level read_env_example setting
 	// for this repo. nil means inherit from WorkspaceMeta.ReadEnvExample.
 	ReadEnvExample *bool `toml:"read_env_example,omitempty"`
+	// EnvExamplePolicy is the per-repo .env.example failure policy. nil means
+	// inherit from the workspace policy. This is a project-scope position: its
+	// Vars sub-table is honored.
+	EnvExamplePolicy *EnvExamplePolicy `toml:"env_example_policy,omitempty"`
 }
 
 // ContentConfig declares the CLAUDE.md content hierarchy.
@@ -436,6 +444,10 @@ type GlobalOverride struct {
 	Env    EnvConfig         `toml:"env,omitempty"`
 	Files  map[string]string `toml:"files,omitempty"`
 	Vault  *VaultRegistry    `toml:"vault,omitempty"`
+	// EnvExamplePolicy is the personal/global .env.example failure policy.
+	// This is the net-new user rung: it carries per-category keys only. The
+	// Vars sub-table is project-scope only and is ignored here.
+	EnvExamplePolicy *EnvExamplePolicy `toml:"env_example_policy,omitempty"`
 }
 
 // GlobalConfigOverride is the top-level structure parsed from the global

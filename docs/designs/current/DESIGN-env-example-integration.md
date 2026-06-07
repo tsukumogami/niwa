@@ -37,6 +37,18 @@ rationale: |
 
 Current
 
+> **Update — superseded failure handling (env-example failure policy).**
+> Decision 1's "probable secret -> hard error" default and the
+> all-or-nothing `read_env_example` opt-out as the only control have been
+> superseded. Detections now warn by default; the fail-versus-warn response
+> is an opt-in, per-category policy resolved at user, project, and variable
+> granularity, and the public-remote special case is removed from the
+> pre-pass. The integration mechanism in this document (the pre-pass,
+> parser, classifier, and config plumbing) still stands -- only the response
+> to a detection changed. See
+> `docs/designs/current/DESIGN-env-example-failure-policy.md` and
+> `docs/prds/PRD-env-example-failure-policy.md`.
+
 ## Context and Problem Statement
 
 `ResolveEnvVars` (`internal/workspace/materialize.go:538`) is the canonical merge

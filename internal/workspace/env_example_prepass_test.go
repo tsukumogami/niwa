@@ -3,7 +3,6 @@ package workspace
 import (
 	"bytes"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -260,10 +259,11 @@ func TestEnvExamplePrePassUndeclaredSafe(t *testing.T) {
 	}
 }
 
-// TestEnvExamplePrePassUndeclaredProbableSecret verifies that an undeclared key
-// with a high-entropy value causes a non-nil error that names the key (but not
-// its value), and that ctx.EnvExampleVars is not set.
-func TestEnvExamplePrePassUndeclaredProbableSecret(t *testing.T) {
+// TestEnvExamplePrePassUndeclaredProbableSecretWarnsByDefault verifies that an
+// undeclared probable-secret key with NO policy configured warns (not fails) and
+// is included in the result — the warn-by-default posture. The warning names the
+// key and category but never the value.
+func TestEnvExamplePrePassUndeclaredProbableSecretWarnsByDefault(t *testing.T) {
 	repoDir := t.TempDir()
 
 	// High-entropy value with no blocklist prefix so only entropy triggers.
@@ -278,18 +278,189 @@ func TestEnvExamplePrePassUndeclaredProbableSecret(t *testing.T) {
 	e := &EnvMaterializer{Stderr: &stderr}
 	ctx := makeCtx(repoDir, newTestWorkspaceConfig(nil))
 
+	if err := e.runEnvExamplePrePass(ctx); err != nil {
+		t.Fatalf("expected no error (warn by default), got: %v", err)
+	}
+	stderrStr := stderr.String()
+	if !strings.Contains(stderrStr, "SECRET_TOKEN") {
+		t.Errorf("expected warning to name key SECRET_TOKEN, got: %q", stderrStr)
+	}
+	if !strings.Contains(stderrStr, "entropy") {
+		t.Errorf("expected warning to name category entropy, got: %q", stderrStr)
+	}
+	if strings.Contains(stderrStr, highEntropy) {
+		t.Errorf("warning must not contain value text, got: %q", stderrStr)
+	}
+	if ctx.EnvExampleVars["SECRET_TOKEN"] != highEntropy {
+		t.Errorf("expected SECRET_TOKEN included by default, got %v", ctx.EnvExampleVars)
+	}
+}
+
+// TestEnvExamplePrePassPerCategoryFail verifies that a workspace-level
+// per-category fail policy aborts apply for an undeclared key in that category,
+// naming the key and category but never the value.
+func TestEnvExamplePrePassPerCategoryFail(t *testing.T) {
+	repoDir := t.TempDir()
+
+	highEntropy := "xJ3kP9mQ2nR7sT4uV8wY1zA6bC0dE5f"
+	content := "SECRET_TOKEN=" + highEntropy + "\n"
+	envExample := filepath.Join(repoDir, ".env.example")
+	if err := os.WriteFile(envExample, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var stderr bytes.Buffer
+	e := &EnvMaterializer{Stderr: &stderr}
+	ws := newTestWorkspaceConfig(nil)
+	ws.Workspace.EnvExamplePolicy = &config.EnvExamplePolicy{Entropy: actionPtr(config.ActionFail)}
+	ctx := makeCtx(repoDir, ws)
+
 	err := e.runEnvExamplePrePass(ctx)
 	if err == nil {
-		t.Fatal("expected non-nil error for undeclared probable secret, got nil")
+		t.Fatal("expected non-nil error for entropy=fail policy, got nil")
 	}
 	if !strings.Contains(err.Error(), "SECRET_TOKEN") {
 		t.Errorf("expected error to name key SECRET_TOKEN, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "entropy") {
+		t.Errorf("expected error to name category entropy, got: %v", err)
 	}
 	if strings.Contains(err.Error(), highEntropy) {
 		t.Errorf("error must not contain value text, got: %v", err)
 	}
 	if ctx.EnvExampleVars != nil {
-		t.Errorf("expected nil EnvExampleVars on error path, got %v", ctx.EnvExampleVars)
+		t.Errorf("expected nil EnvExampleVars on fail path, got %v", ctx.EnvExampleVars)
+	}
+}
+
+// TestEnvExamplePrePassInlineWarnOverride verifies that an inline `# niwa: warn`
+// annotation on a key overrides a workspace-level per-category fail, so the key
+// warns and is included instead of failing.
+func TestEnvExamplePrePassInlineWarnOverride(t *testing.T) {
+	repoDir := t.TempDir()
+
+	highEntropy := "xJ3kP9mQ2nR7sT4uV8wY1zA6bC0dE5f"
+	content := "SECRET_TOKEN=" + highEntropy + " # niwa: warn\n"
+	envExample := filepath.Join(repoDir, ".env.example")
+	if err := os.WriteFile(envExample, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var stderr bytes.Buffer
+	e := &EnvMaterializer{Stderr: &stderr}
+	ws := newTestWorkspaceConfig(nil)
+	ws.Workspace.EnvExamplePolicy = &config.EnvExamplePolicy{Entropy: actionPtr(config.ActionFail)}
+	ctx := makeCtx(repoDir, ws)
+
+	if err := e.runEnvExamplePrePass(ctx); err != nil {
+		t.Fatalf("expected no error (inline warn overrides fail), got: %v", err)
+	}
+	if ctx.EnvExampleVars["SECRET_TOKEN"] != highEntropy {
+		t.Errorf("expected SECRET_TOKEN included via inline warn, got %v", ctx.EnvExampleVars)
+	}
+	// The inline-driven downgrade of a configured fail must be greppable.
+	stderrStr := stderr.String()
+	if !strings.Contains(stderrStr, "inline annotation lowered a configured fail") {
+		t.Errorf("expected inline-downgrade diagnostic, got: %q", stderrStr)
+	}
+	if !strings.Contains(stderrStr, "SECRET_TOKEN") {
+		t.Errorf("expected downgrade diagnostic to name the key, got: %q", stderrStr)
+	}
+	if strings.Contains(stderrStr, highEntropy) {
+		t.Errorf("diagnostics must not contain value text, got: %q", stderrStr)
+	}
+}
+
+// TestEnvExamplePrePassInlineWarnNoDowngradeWhenNotConfigured verifies that an
+// inline `# niwa: warn` annotation on a key with NO configured fail does NOT
+// emit the downgrade diagnostic (nothing was lowered).
+func TestEnvExamplePrePassInlineWarnNoDowngradeWhenNotConfigured(t *testing.T) {
+	repoDir := t.TempDir()
+
+	highEntropy := "xJ3kP9mQ2nR7sT4uV8wY1zA6bC0dE5f"
+	content := "SECRET_TOKEN=" + highEntropy + " # niwa: warn\n"
+	envExample := filepath.Join(repoDir, ".env.example")
+	if err := os.WriteFile(envExample, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var stderr bytes.Buffer
+	e := &EnvMaterializer{Stderr: &stderr}
+	ctx := makeCtx(repoDir, newTestWorkspaceConfig(nil))
+
+	if err := e.runEnvExamplePrePass(ctx); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if strings.Contains(stderr.String(), "inline annotation lowered") {
+		t.Errorf("did not expect downgrade diagnostic when nothing was configured, got: %q", stderr.String())
+	}
+}
+
+// TestEnvExamplePrePassAllowPlaintextDowngradesFailWithAudit verifies that
+// --allow-plaintext-secrets downgrades a resolved fail to warn, emits a
+// greppable per-key audit diagnostic, and includes the key. The audit line
+// names the key and category but never the value.
+func TestEnvExamplePrePassAllowPlaintextDowngradesFailWithAudit(t *testing.T) {
+	repoDir := t.TempDir()
+
+	highEntropy := "xJ3kP9mQ2nR7sT4uV8wY1zA6bC0dE5f"
+	content := "SECRET_TOKEN=" + highEntropy + "\n"
+	envExample := filepath.Join(repoDir, ".env.example")
+	if err := os.WriteFile(envExample, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var stderr bytes.Buffer
+	e := &EnvMaterializer{Stderr: &stderr}
+	ws := newTestWorkspaceConfig(nil)
+	ws.Workspace.EnvExamplePolicy = &config.EnvExamplePolicy{Entropy: actionPtr(config.ActionFail)}
+	ctx := makeCtx(repoDir, ws)
+	ctx.AllowPlaintextSecrets = true
+
+	if err := e.runEnvExamplePrePass(ctx); err != nil {
+		t.Fatalf("expected no error with AllowPlaintextSecrets, got: %v", err)
+	}
+	if ctx.EnvExampleVars["SECRET_TOKEN"] != highEntropy {
+		t.Errorf("expected SECRET_TOKEN included after downgrade, got %v", ctx.EnvExampleVars)
+	}
+	stderrStr := stderr.String()
+	if !strings.Contains(stderrStr, "allow-plaintext-secrets") {
+		t.Errorf("expected audit diagnostic mentioning allow-plaintext-secrets, got: %q", stderrStr)
+	}
+	if !strings.Contains(stderrStr, "SECRET_TOKEN") {
+		t.Errorf("expected audit diagnostic to name the key, got: %q", stderrStr)
+	}
+	if strings.Contains(stderrStr, highEntropy) {
+		t.Errorf("audit diagnostic must not contain value text, got: %q", stderrStr)
+	}
+}
+
+// TestEnvExamplePrePassNoRemoteDependency verifies that the pre-pass no longer
+// consults a git remote: a plain directory with no .git and a probable-secret
+// key warns by default (does not error and does not emit any guardrail-skip
+// notice), proving the public-remote branch was removed.
+func TestEnvExamplePrePassNoRemoteDependency(t *testing.T) {
+	// Plain directory, no .git, no remote.
+	repoDir := t.TempDir()
+
+	envExample := filepath.Join(repoDir, ".env.example")
+	if err := os.WriteFile(envExample, []byte("SECRET="+highEntropyValue+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var stderr bytes.Buffer
+	e := &EnvMaterializer{Stderr: &stderr}
+	ctx := makeCtx(repoDir, newTestWorkspaceConfig(nil))
+
+	if err := e.runEnvExamplePrePass(ctx); err != nil {
+		t.Fatalf("expected warn-by-default with no remote, got: %v", err)
+	}
+	stderrStr := stderr.String()
+	if strings.Contains(stderrStr, "remote") || strings.Contains(stderrStr, "guardrail") {
+		t.Errorf("expected no remote/guardrail mention, got: %q", stderrStr)
+	}
+	if ctx.EnvExampleVars["SECRET"] != highEntropyValue {
+		t.Errorf("expected SECRET included by default, got %v", ctx.EnvExampleVars)
 	}
 }
 
@@ -418,7 +589,11 @@ func TestEnvExamplePrePassNoValueInStderrOrError(t *testing.T) {
 
 	var stderr bytes.Buffer
 	e := &EnvMaterializer{Stderr: &stderr}
-	ctx := makeCtx(repoDir, newTestWorkspaceConfig(nil))
+	// Force the fail path with a vendor-token=fail policy (sk_live_ classifies
+	// as vendor-token) so an error is produced to inspect.
+	ws := newTestWorkspaceConfig(nil)
+	ws.Workspace.EnvExamplePolicy = &config.EnvExamplePolicy{VendorToken: actionPtr(config.ActionFail)}
+	ctx := makeCtx(repoDir, ws)
 
 	err := e.runEnvExamplePrePass(ctx)
 	if err == nil {
@@ -439,153 +614,14 @@ func TestEnvExamplePrePassNoValueInStderrOrError(t *testing.T) {
 	}
 }
 
-// initGitRepoWithRemote initialises a git repo in dir and adds a remote named
-// origin pointing to remoteURL. It skips the calling test if git is unavailable.
-func initGitRepoWithRemote(t *testing.T, dir, remoteURL string) {
-	t.Helper()
-	if _, err := exec.LookPath("git"); err != nil {
-		t.Skip("git not available in PATH")
-	}
-	if err := exec.Command("git", "init", dir).Run(); err != nil {
-		t.Fatalf("git init: %v", err)
-	}
-	if err := exec.Command("git", "-C", dir, "remote", "add", "origin", remoteURL).Run(); err != nil {
-		t.Fatalf("git remote add: %v", err)
-	}
-}
-
 // highEntropyValue is a test fixture string with Shannon entropy >3.5.
 // It uses a mix of cases and digits; the "T3st" prefix makes clear it is not a
 // real credential, which keeps it below secret-scanning heuristic thresholds.
 // that has no blocklist prefix, so only entropy triggers classification.
 const highEntropyValue = "T3stH1ghEntr0pyF1xture9ABCDef567"
 
-// TestPrePassPublicRemoteProbableSecret verifies that when a repo has a public
-// GitHub remote and AllowPlaintextSecrets is false, a probable-secret key
-// causes an error that names the key and mentions "public", and that no value
-// text appears in the error. EnvExampleVars is not set.
-func TestPrePassPublicRemoteProbableSecret(t *testing.T) {
-	repoDir := t.TempDir()
-	initGitRepoWithRemote(t, repoDir, "https://github.com/someorg/somerepo.git")
-
-	envExample := filepath.Join(repoDir, ".env.example")
-	if err := os.WriteFile(envExample, []byte("SECRET="+highEntropyValue+"\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	var stderr bytes.Buffer
-	e := &EnvMaterializer{Stderr: &stderr}
-	ctx := makeCtx(repoDir, newTestWorkspaceConfig(nil))
-	ctx.AllowPlaintextSecrets = false
-
-	err := e.runEnvExamplePrePass(ctx)
-	if err == nil {
-		t.Fatal("expected non-nil error for probable secret with public remote, got nil")
-	}
-	if !strings.Contains(err.Error(), "SECRET") {
-		t.Errorf("error should name key SECRET, got: %v", err)
-	}
-	if !strings.Contains(err.Error(), "public") {
-		t.Errorf("error should mention 'public' (public remote), got: %v", err)
-	}
-	if strings.Contains(err.Error(), highEntropyValue) {
-		t.Errorf("error must not contain value text, got: %v", err)
-	}
-	if ctx.EnvExampleVars != nil {
-		t.Errorf("expected nil EnvExampleVars on error path, got %v", ctx.EnvExampleVars)
-	}
-}
-
-// TestPrePassPublicRemoteAllowPlaintext verifies that when AllowPlaintextSecrets
-// is true, a probable-secret key from a repo with a public GitHub remote is
-// included in EnvExampleVars with a warning, and no error is returned.
-func TestPrePassPublicRemoteAllowPlaintext(t *testing.T) {
-	repoDir := t.TempDir()
-	initGitRepoWithRemote(t, repoDir, "https://github.com/someorg/somerepo.git")
-
-	envExample := filepath.Join(repoDir, ".env.example")
-	if err := os.WriteFile(envExample, []byte("SECRET="+highEntropyValue+"\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	var stderr bytes.Buffer
-	e := &EnvMaterializer{Stderr: &stderr}
-	ctx := makeCtx(repoDir, newTestWorkspaceConfig(nil))
-	ctx.AllowPlaintextSecrets = true
-
-	err := e.runEnvExamplePrePass(ctx)
-	if err != nil {
-		t.Fatalf("expected no error with AllowPlaintextSecrets=true, got: %v", err)
-	}
-	if ctx.EnvExampleVars["SECRET"] != highEntropyValue {
-		t.Errorf("EnvExampleVars[SECRET] = %q, want %q", ctx.EnvExampleVars["SECRET"], highEntropyValue)
-	}
-	if !strings.Contains(stderr.String(), "SECRET") {
-		t.Errorf("expected warning mentioning SECRET in stderr, got: %q", stderr.String())
-	}
-}
-
-// TestPrePassPrivateRemoteProbableSecret verifies that when a repo has a
-// non-GitHub remote (e.g., GitLab), a probable-secret key still causes an
-// error naming the key but NOT mentioning "public remote". EnvExampleVars is
-// not set.
-func TestPrePassPrivateRemoteProbableSecret(t *testing.T) {
-	repoDir := t.TempDir()
-	initGitRepoWithRemote(t, repoDir, "https://gitlab.com/org/repo.git")
-
-	envExample := filepath.Join(repoDir, ".env.example")
-	if err := os.WriteFile(envExample, []byte("SECRET="+highEntropyValue+"\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	var stderr bytes.Buffer
-	e := &EnvMaterializer{Stderr: &stderr}
-	ctx := makeCtx(repoDir, newTestWorkspaceConfig(nil))
-
-	err := e.runEnvExamplePrePass(ctx)
-	if err == nil {
-		t.Fatal("expected non-nil error for probable secret with private remote, got nil")
-	}
-	if !strings.Contains(err.Error(), "SECRET") {
-		t.Errorf("error should name key SECRET, got: %v", err)
-	}
-	if strings.Contains(err.Error(), "public remote") {
-		t.Errorf("error must not mention 'public remote' for non-GitHub URL, got: %v", err)
-	}
-	if ctx.EnvExampleVars != nil {
-		t.Errorf("expected nil EnvExampleVars on error path, got %v", ctx.EnvExampleVars)
-	}
-}
-
-// TestPrePassNoGitProbableSecret verifies that when the directory is not a git
-// repo, a probable-secret key still causes an error (guardrail skipped but
-// basic error still reported), a warning about guardrail skip is emitted to
-// stderr, and no value text appears in the error.
-func TestPrePassNoGitProbableSecret(t *testing.T) {
-	// Do NOT call initGitRepo — we want a plain directory with no .git.
-	repoDir := t.TempDir()
-
-	envExample := filepath.Join(repoDir, ".env.example")
-	if err := os.WriteFile(envExample, []byte("SECRET="+highEntropyValue+"\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	var stderr bytes.Buffer
-	e := &EnvMaterializer{Stderr: &stderr}
-	ctx := makeCtx(repoDir, newTestWorkspaceConfig(nil))
-
-	err := e.runEnvExamplePrePass(ctx)
-	if err == nil {
-		t.Fatal("expected non-nil error for probable secret with no git repo, got nil")
-	}
-	stderrStr := stderr.String()
-	if !strings.Contains(stderrStr, "guardrail skipped") {
-		t.Errorf("expected stderr warning about guardrail skip, got: %q", stderrStr)
-	}
-	if !strings.Contains(err.Error(), "SECRET") {
-		t.Errorf("error should name key SECRET, got: %v", err)
-	}
-	if strings.Contains(err.Error(), highEntropyValue) {
-		t.Errorf("error must not contain value text, got: %v", err)
-	}
+// actionPtr returns a pointer to the given Action, for building per-category
+// EnvExamplePolicy fixtures.
+func actionPtr(a config.Action) *config.Action {
+	return &a
 }
