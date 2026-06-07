@@ -1,5 +1,5 @@
 ---
-status: Proposed
+status: Planned
 problem: |
   niwa's .env.example pre-pass aborts apply on any probable-secret detection,
   with only coarse all-or-nothing controls. The accepted PRD requires a
@@ -31,7 +31,7 @@ upstream: docs/prds/PRD-env-example-failure-policy.md
 
 ## Status
 
-Proposed
+Planned
 
 ## Context and Problem Statement
 
