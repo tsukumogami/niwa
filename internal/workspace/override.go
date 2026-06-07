@@ -309,9 +309,10 @@ func ResolveGlobalOverride(g *config.GlobalConfigOverride, workspaceName string)
 	}
 
 	result := config.GlobalOverride{
-		Claude: base.Claude,
-		Env:    copyEnv(base.Env),
-		Files:  copyStringMap(base.Files),
+		Claude:           base.Claude,
+		Env:              copyEnv(base.Env),
+		Files:            copyStringMap(base.Files),
+		EnvExamplePolicy: copyEnvExamplePolicy(base.EnvExamplePolicy),
 	}
 
 	// Claude: workspace-specific wins per field.
@@ -405,6 +406,22 @@ func ResolveGlobalOverride(g *config.GlobalConfigOverride, workspaceName string)
 			result.Files = map[string]string{}
 		}
 		result.Files[k] = v
+	}
+
+	// EnvExamplePolicy: ws wins per category (global rung is category-only;
+	// Vars is project-scope and not carried here).
+	if ws.EnvExamplePolicy != nil {
+		if result.EnvExamplePolicy == nil {
+			result.EnvExamplePolicy = &config.EnvExamplePolicy{}
+		}
+		if ws.EnvExamplePolicy.VendorToken != nil {
+			v := *ws.EnvExamplePolicy.VendorToken
+			result.EnvExamplePolicy.VendorToken = &v
+		}
+		if ws.EnvExamplePolicy.Entropy != nil {
+			v := *ws.EnvExamplePolicy.Entropy
+			result.EnvExamplePolicy.Entropy = &v
+		}
 	}
 
 	return result
@@ -1142,6 +1159,29 @@ func copyEnv(e config.EnvConfig) config.EnvConfig {
 		Vars:    copyEnvVarsTable(e.Vars),
 		Secrets: copyEnvVarsTable(e.Secrets),
 	}
+}
+
+// copyEnvExamplePolicy returns a deep copy of an *EnvExamplePolicy, cloning
+// the Action pointers and the Vars map so the result can be mutated without
+// aliasing the source.
+func copyEnvExamplePolicy(p *config.EnvExamplePolicy) *config.EnvExamplePolicy {
+	if p == nil {
+		return nil
+	}
+	out := &config.EnvExamplePolicy{}
+	if p.VendorToken != nil {
+		v := *p.VendorToken
+		out.VendorToken = &v
+	}
+	if p.Entropy != nil {
+		v := *p.Entropy
+		out.Entropy = &v
+	}
+	if p.Vars != nil {
+		out.Vars = make(map[string]config.Action, len(p.Vars))
+		maps.Copy(out.Vars, p.Vars)
+	}
+	return out
 }
 
 // copyEnvVarsTable returns a deep copy of an EnvVarsTable, cloning

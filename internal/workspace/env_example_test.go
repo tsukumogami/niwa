@@ -132,7 +132,7 @@ func TestParseDotEnvExampleBasicSyntax(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			path := writeEnvExample(t, tc.input)
-			vars, warnings, err := parseDotEnvExample(path)
+			vars, _, warnings, err := parseDotEnvExample(path)
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
@@ -215,7 +215,7 @@ func TestParseDotEnvExamplePerLineWarnings(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			path := writeEnvExample(t, tc.input)
-			vars, warnings, err := parseDotEnvExample(path)
+			vars, _, warnings, err := parseDotEnvExample(path)
 			if err != nil {
 				t.Fatalf("unexpected whole-file error: %v", err)
 			}
@@ -258,7 +258,7 @@ func TestParseDotEnvExamplePerLineWarnings(t *testing.T) {
 func TestParseDotEnvExampleWarningFormat(t *testing.T) {
 	input := "NODIVIDER\n"
 	path := writeEnvExample(t, input)
-	_, warnings, err := parseDotEnvExample(path)
+	_, _, warnings, err := parseDotEnvExample(path)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -291,7 +291,7 @@ func TestParseDotEnvExampleWholeFileErrors(t *testing.T) {
 		}
 		t.Cleanup(func() { _ = os.Chmod(path, 0o644) })
 
-		vars, _, err := parseDotEnvExample(path)
+		vars, _, _, err := parseDotEnvExample(path)
 		if err == nil {
 			t.Fatal("expected error for permission denied, got nil")
 		}
@@ -309,7 +309,7 @@ func TestParseDotEnvExampleWholeFileErrors(t *testing.T) {
 			t.Fatalf("write: %v", err)
 		}
 
-		vars, _, err := parseDotEnvExample(path)
+		vars, _, _, err := parseDotEnvExample(path)
 		if err == nil {
 			t.Fatal("expected error for binary content, got nil")
 		}
@@ -331,7 +331,7 @@ func TestParseDotEnvExampleWholeFileErrors(t *testing.T) {
 			t.Fatalf("write: %v", err)
 		}
 
-		vars, _, err := parseDotEnvExample(path)
+		vars, _, _, err := parseDotEnvExample(path)
 		if err == nil {
 			t.Fatal("expected error for oversized file, got nil")
 		}
@@ -372,7 +372,7 @@ func TestParseDotEnvExampleNoValueInWarnings(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			path := writeEnvExample(t, tc.input)
-			_, warnings, err := parseDotEnvExample(path)
+			_, _, warnings, err := parseDotEnvExample(path)
 			if err != nil {
 				t.Fatalf("unexpected whole-file error: %v", err)
 			}

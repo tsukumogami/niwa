@@ -4,6 +4,8 @@ import (
 	"math"
 	"slices"
 	"strings"
+
+	"github.com/tsukumogami/niwa/internal/config"
 )
 
 // envPrefixBlocklist is the set of vendor-token prefixes that always indicate
@@ -48,46 +50,48 @@ var envSafePrefixes = []string{
 	"pk_live_",
 }
 
-// classifyEnvValue reports whether value is safe to materialize as an implicit
-// var. isSafe=false means the value is a probable secret; reason names the
-// detection rule (e.g. "known prefix sk_live_", "entropy > 3.5").
+// classifyEnvValue classifies value into a typed detection category. The
+// category keys the per-category failure-policy lookup; reason names the
+// detection rule for diagnostics (e.g. "vendor-token prefix", "entropy > 3.5").
+// A category of config.CategorySafe means the value is not a probable secret;
+// CategoryVendorToken and CategoryEntropy each mean a probable secret.
 //
 // Priority order:
-//  1. Blocklist match → isSafe=false, even when entropy is low.
-//  2. Allowlist match → isSafe=true, overrides entropy check.
-//  3. Entropy strictly > 3.5 → isSafe=false.
-//  4. Otherwise → isSafe=true.
+//  1. Blocklist match → CategoryVendorToken, even when entropy is low.
+//  2. Allowlist match → CategorySafe, overrides entropy check.
+//  3. Entropy strictly > 3.5 → CategoryEntropy.
+//  4. Otherwise → CategorySafe.
 //
-// reason MUST NOT include the value, any fragment of the value, or the raw
-// entropy score — only the rule name and threshold (R22: diagnostics never
-// contain secret bytes).
+// reason MUST NOT include the value, any fragment of the value, the matched
+// vendor prefix, or the raw entropy score — only the rule name and threshold
+// (R22: diagnostics never contain secret bytes).
 //
 // Boundary: entropy == 3.5 is treated as safe (strictly greater than 3.5 is
 // required to classify as a probable secret).
-func classifyEnvValue(value string) (isSafe bool, reason string) {
+func classifyEnvValue(value string) (category config.EnvDetectionCategory, reason string) {
 	// Step 1: blocklist check — wins regardless of entropy or allowlist.
 	for _, prefix := range envPrefixBlocklist {
 		if strings.HasPrefix(value, prefix) {
-			return false, "known prefix " + prefix
+			return config.CategoryVendorToken, "vendor-token prefix"
 		}
 	}
 
 	// Step 2: allowlist check — safe patterns override entropy.
 	if slices.Contains(envSafeAllowlist, value) {
-		return true, "allowlist match"
+		return config.CategorySafe, "allowlist match"
 	}
 	for _, prefix := range envSafePrefixes {
 		if strings.HasPrefix(value, prefix) {
-			return true, "allowlist match"
+			return config.CategorySafe, "allowlist match"
 		}
 	}
 
 	// Step 3: entropy check.
 	if shannonEntropy(value) > 3.5 {
-		return false, "entropy > 3.5"
+		return config.CategoryEntropy, "entropy > 3.5"
 	}
 
-	return true, ""
+	return config.CategorySafe, ""
 }
 
 // shannonEntropy computes the Shannon entropy of s in bits per character.

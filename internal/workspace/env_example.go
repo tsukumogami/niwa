@@ -6,6 +6,8 @@ import (
 	"os"
 	"regexp"
 	"strings"
+
+	"github.com/tsukumogami/niwa/internal/config"
 )
 
 // maxEnvExampleSize is the file-size limit for .env.example files.
@@ -26,6 +28,13 @@ var envKeyRe = regexp.MustCompile(`^[A-Za-z0-9_]+$`)
 //
 // Returns:
 //   - vars: parsed key-value map (nil on whole-file failure)
+//   - annotations: per-key inline failure-policy actions parsed from a trailing
+//     "# niwa: warn|fail" marker; absent when no valid marker is present. The
+//     marker is extracted independently of value quoting, so it works for
+//     unquoted, single-quoted, and double-quoted values; a "# niwa:" sequence
+//     inside a quoted value is not treated as a marker. An unknown marker emits
+//     a warning that names the key only (never the marker payload) and is then
+//     ignored.
 //   - warnings: per-line diagnostic strings in "file:line:problem" format;
 //     no value text ever appears in warning strings
 //   - err: non-nil only for whole-file failures (permission denied, binary
@@ -41,26 +50,27 @@ var envKeyRe = regexp.MustCompile(`^[A-Za-z0-9_]+$`)
 //     sequence is a per-line warning and the line is skipped
 //   - CRLF line endings are normalised to LF before parsing
 //   - Duplicate keys: last occurrence wins
-func parseDotEnvExample(path string) (map[string]string, []string, error) {
+func parseDotEnvExample(path string) (map[string]string, map[string]config.Action, []string, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, nil, fmt.Errorf("reading %s: %w", path, err)
+		return nil, nil, nil, fmt.Errorf("reading %s: %w", path, err)
 	}
 
 	if int64(len(data)) > maxEnvExampleSize {
-		return nil, nil, fmt.Errorf("%s: file exceeds 512 KB limit", path)
+		return nil, nil, nil, fmt.Errorf("%s: file exceeds 512 KB limit", path)
 	}
 
 	// Reject binary content: if the file contains a NUL byte it is not a
 	// text file and should not be parsed.
 	if bytes.IndexByte(data, 0) >= 0 {
-		return nil, nil, fmt.Errorf("%s: file contains binary content", path)
+		return nil, nil, nil, fmt.Errorf("%s: file contains binary content", path)
 	}
 
 	// Normalise CRLF to LF.
 	text := strings.ReplaceAll(string(data), "\r\n", "\n")
 
 	vars := make(map[string]string)
+	annotations := make(map[string]config.Action)
 	var warnings []string
 
 	lines := strings.Split(text, "\n")
@@ -91,6 +101,15 @@ func parseDotEnvExample(path string) (map[string]string, []string, error) {
 			continue
 		}
 
+		// Extract the inline policy annotation independently of value
+		// parsing so it works across all three value forms. A "# niwa:"
+		// sequence inside a quoted value is not treated as a marker.
+		action, hasMarker, unknownMarker := extractInlineAnnotation(rawVal)
+		if unknownMarker {
+			// Name the key only; never echo the marker payload (R22).
+			warnings = append(warnings, fmt.Sprintf("%s:%d:unknown niwa policy annotation for key %s; ignoring", path, lineNum, key))
+		}
+
 		// Parse the value.
 		value, warn := parseEnvExampleValue(rawVal)
 		if warn != "" {
@@ -99,9 +118,85 @@ func parseDotEnvExample(path string) (map[string]string, []string, error) {
 		}
 
 		vars[key] = value
+		if hasMarker {
+			annotations[key] = action
+		}
 	}
 
-	return vars, warnings, nil
+	return vars, annotations, warnings, nil
+}
+
+// extractInlineAnnotation scans the raw value portion of a .env.example line
+// (everything after the first '=') for a trailing "# niwa: warn|fail" marker.
+//
+// Extraction is independent of value quoting: it tracks single- and
+// double-quote state (respecting backslash escapes inside double quotes) so a
+// "#" inside a quoted value is never treated as the start of a comment, and a
+// "# niwa:" sequence inside a quoted value is therefore not a marker.
+//
+// Returns:
+//   - action: the parsed Action when a valid marker is found
+//   - hasMarker: true when a valid "# niwa: warn|fail" marker is present
+//   - unknownMarker: true when a "# niwa:" comment is present but its payload
+//     is not "warn" or "fail" (the caller warns by key and ignores it)
+func extractInlineAnnotation(raw string) (action config.Action, hasMarker, unknownMarker bool) {
+	comment, ok := trailingComment(raw)
+	if !ok {
+		return "", false, false
+	}
+
+	// comment is the text after the '#'. Recognise the niwa marker prefix.
+	rest, isNiwa := strings.CutPrefix(strings.TrimSpace(comment), "niwa:")
+	if !isNiwa {
+		return "", false, false
+	}
+
+	switch strings.TrimSpace(rest) {
+	case string(config.ActionWarn):
+		return config.ActionWarn, true, false
+	case string(config.ActionFail):
+		return config.ActionFail, true, false
+	default:
+		return "", false, true
+	}
+}
+
+// trailingComment returns the comment text (everything after a '#' that begins
+// an inline comment) from a raw value portion, and whether such a comment was
+// found. A '#' begins a comment only when it is outside any quoted region and
+// is preceded by whitespace (matching parseUnquoted's " #" rule), or when it is
+// the first character of the value region. Quote state is tracked so a '#'
+// inside a single- or double-quoted value is not a comment.
+func trailingComment(raw string) (string, bool) {
+	var inSingle, inDouble bool
+	for i := 0; i < len(raw); i++ {
+		ch := raw[i]
+		switch {
+		case inSingle:
+			if ch == '\'' {
+				inSingle = false
+			}
+		case inDouble:
+			if ch == '\\' {
+				i++ // skip escaped character
+				continue
+			}
+			if ch == '"' {
+				inDouble = false
+			}
+		case ch == '\'':
+			inSingle = true
+		case ch == '"':
+			inDouble = true
+		case ch == '#':
+			// A '#' outside quotes starts a comment when it is at the start
+			// of the value region or preceded by whitespace.
+			if i == 0 || raw[i-1] == ' ' || raw[i-1] == '\t' {
+				return raw[i+1:], true
+			}
+		}
+	}
+	return "", false
 }
 
 // parseEnvExampleValue parses the raw value portion (everything after '=') of

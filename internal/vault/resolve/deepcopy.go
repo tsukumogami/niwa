@@ -124,11 +124,36 @@ func deepCopyGlobalConfigOverride(in *config.GlobalConfigOverride) *config.Globa
 
 func deepCopyGlobalOverride(in config.GlobalOverride) config.GlobalOverride {
 	return config.GlobalOverride{
-		Claude: deepCopyClaudeOverride(in.Claude),
-		Env:    deepCopyEnv(in.Env),
-		Files:  cloneStringMap(in.Files),
-		Vault:  in.Vault, // shared; resolver does not mutate
+		Claude:           deepCopyClaudeOverride(in.Claude),
+		Env:              deepCopyEnv(in.Env),
+		Files:            cloneStringMap(in.Files),
+		Vault:            in.Vault, // shared; resolver does not mutate
+		EnvExamplePolicy: deepCopyEnvExamplePolicy(in.EnvExamplePolicy),
 	}
+}
+
+// deepCopyEnvExamplePolicy clones an *EnvExamplePolicy, including its Vars map
+// and the Action pointers, so the resolver never shares mutable state with its
+// input. Action values are immutable strings; the pointers are reallocated so
+// the copy is independent.
+func deepCopyEnvExamplePolicy(in *config.EnvExamplePolicy) *config.EnvExamplePolicy {
+	if in == nil {
+		return nil
+	}
+	out := &config.EnvExamplePolicy{}
+	if in.VendorToken != nil {
+		v := *in.VendorToken
+		out.VendorToken = &v
+	}
+	if in.Entropy != nil {
+		v := *in.Entropy
+		out.Entropy = &v
+	}
+	if in.Vars != nil {
+		out.Vars = make(map[string]config.Action, len(in.Vars))
+		maps.Copy(out.Vars, in.Vars)
+	}
+	return out
 }
 
 func cloneEnvVarsTable(in config.EnvVarsTable) config.EnvVarsTable {

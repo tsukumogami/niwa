@@ -40,7 +40,7 @@ func (e *EnvMaterializer) runEnvExamplePrePass(ctx *MaterializeContext) error {
 		return nil
 	}
 
-	vars, warnings, err := parseDotEnvExample(path)
+	vars, _, warnings, err := parseDotEnvExample(path)
 	for _, w := range warnings {
 		fmt.Fprintf(e.stderr(), "warning: %s\n", w)
 	}
@@ -78,7 +78,8 @@ func (e *EnvMaterializer) runEnvExamplePrePass(ctx *MaterializeContext) error {
 			continue
 		}
 
-		isSafe, reason := classifyEnvValue(value)
+		category, reason := classifyEnvValue(value)
+		isSafe := category == config.CategorySafe
 		if isSafe {
 			fmt.Fprintf(e.stderr(), "warning: .env.example in %s: undeclared key %s has a safe value; including\n", ctx.RepoName, key)
 			result[key] = value
