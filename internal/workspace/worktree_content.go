@@ -45,6 +45,10 @@ type repoMaterializeInputs struct {
 	SourceTuples          map[string][]SourceEntry
 	AllowPlaintextSecrets bool
 	Stderr                io.Writer
+	// GlobalEnvExamplePolicy is the resolved personal/global .env.example
+	// failure policy for the active workspace. nil when no global override is
+	// loaded on this path (the resolver treats nil as "no global rung").
+	GlobalEnvExamplePolicy *config.EnvExamplePolicy
 }
 
 // runRepoMaterializers runs the given materializers for a single repo against
@@ -101,6 +105,8 @@ func runRepoMaterializers(materializers []Materializer, in repoMaterializeInputs
 		SourceTuples:          in.SourceTuples,
 		AllowPlaintextSecrets: in.AllowPlaintextSecrets,
 		Stderr:                in.Stderr,
+
+		GlobalEnvExamplePolicy: in.GlobalEnvExamplePolicy,
 	}
 
 	var written []string
@@ -168,6 +174,12 @@ type WorktreeApplyOptions struct {
 	// Stderr receives diagnostic warnings during materialization. When nil,
 	// materializers fall back to os.Stderr.
 	Stderr io.Writer
+	// GlobalEnvExamplePolicy is the resolved personal/global .env.example
+	// failure policy for the active workspace, threaded into the pre-pass so
+	// the worktree path applies the same policy as the instance apply path.
+	// nil when no global override is available (the resolver treats nil as
+	// "no global rung").
+	GlobalEnvExamplePolicy *config.EnvExamplePolicy
 }
 
 // ApplyToWorktree installs, into worktreePath, the same class of CLAUDE
@@ -234,6 +246,8 @@ func ApplyToWorktree(cfg *config.WorkspaceConfig, configDir, instanceRoot, workt
 		SourceTuples:          map[string][]SourceEntry{},
 		AllowPlaintextSecrets: opts.AllowPlaintextSecrets,
 		Stderr:                opts.Stderr,
+
+		GlobalEnvExamplePolicy: opts.GlobalEnvExamplePolicy,
 	})
 	if err != nil {
 		return nil, err

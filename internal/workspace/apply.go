@@ -1083,6 +1083,13 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 	}
 	effectiveCfg = resolvedCfg
 
+	// globalEnvExamplePolicy is the resolved personal/global .env.example
+	// failure policy for the active workspace, threaded into the materialize
+	// context so the pre-pass can consult the global category rung. It stays
+	// nil when no global override is loaded (skipGlobal or no niwa.toml), which
+	// the resolver treats as "no global rung".
+	var globalEnvExamplePolicy *config.EnvExamplePolicy
+
 	// Resolve the personal overlay, then merge it into the team
 	// workspace. The merge happens AFTER resolution so that R8
 	// team_only enforcement in MergeGlobalOverride sees the
@@ -1096,6 +1103,7 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 			return nil, err
 		}
 		flattened := ResolveGlobalOverride(resolvedOverride, cfg.Workspace.Name)
+		globalEnvExamplePolicy = flattened.EnvExamplePolicy
 		merged, err := MergeGlobalOverride(resolvedCfg, flattened, a.GlobalConfigDir)
 		if err != nil {
 			return nil, err
@@ -1300,6 +1308,8 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 			SourceTuples:          sourceTuples,
 			AllowPlaintextSecrets: a.AllowPlaintextSecrets,
 			Stderr:                a.Reporter.Writer(),
+
+			GlobalEnvExamplePolicy: globalEnvExamplePolicy,
 		})
 		if err != nil {
 			return nil, err

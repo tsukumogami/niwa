@@ -73,10 +73,17 @@ type MaterializeContext struct {
 	DiscoveredEnv  *DiscoveredEnv                  // auto-discovered env files, may be nil
 	RepoIndex      map[string]string               // repo name -> on-disk path, for marketplace resolution
 
-	// AllowPlaintextSecrets, when true, bypasses the public-remote guardrail for
-	// .env.example probable-secret keys. Populated from Applier.AllowPlaintextSecrets
-	// via apply.go. Does not bypass the basic probable-secret classification.
+	// AllowPlaintextSecrets, when true, downgrades every .env.example pre-pass
+	// fail to warn for this run. Populated from Applier.AllowPlaintextSecrets
+	// via apply.go. Each downgrade emits a per-key audit diagnostic.
 	AllowPlaintextSecrets bool
+
+	// GlobalEnvExamplePolicy is the resolved personal/global .env.example
+	// failure policy for the active workspace (the flattened GlobalOverride
+	// EnvExamplePolicy). It is the broadest category rung consulted by
+	// EffectiveEnvExamplePolicy in the pre-pass. nil means no global rung is
+	// configured (the resolver treats nil as "skip this rung").
+	GlobalEnvExamplePolicy *config.EnvExamplePolicy
 
 	// SourceTuples, when non-nil, is populated by materializers with
 	// the per-file list of SourceEntry tuples describing which inputs

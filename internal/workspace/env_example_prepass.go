@@ -8,18 +8,27 @@ import (
 	"sort"
 
 	"github.com/tsukumogami/niwa/internal/config"
-	"github.com/tsukumogami/niwa/internal/guardrail"
 )
 
 // runEnvExamplePrePass reads .env.example from ctx.RepoDir and populates
 // ctx.EnvExampleVars and ctx.EnvExampleSources on success.
 //
-// Returns non-nil error only when probable-secret keys are found that are not
-// declared in the workspace config. Per-file parse errors and skip conditions
-// (absent file, symlink, binary content, size limit) emit warnings to stderr
-// and return nil — they are not failures.
+// For each undeclared, non-excluded key it classifies the value into a typed
+// detection category and resolves a warn/fail action via
+// EffectiveEnvExamplePolicy (operator per-variable -> inline annotation ->
+// per-category global/workspace/repo -> default warn). A resolved fail
+// accumulates an error that aborts apply; a resolved warn includes the key.
+// --allow-plaintext-secrets downgrades every resolved fail to warn for the
+// run, emitting a per-key audit diagnostic; an inline annotation lowering a
+// configured fail emits a distinct downgrade diagnostic. There is no
+// remote-visibility branch.
 //
-// The function never includes value text in any warning or error string (R22).
+// Per-file parse errors and skip conditions (absent file, symlink, binary
+// content, size limit) emit warnings to stderr and return nil — not failures.
+//
+// Every diagnostic names the key and category only; the function never
+// includes value text, a value fragment, the matched vendor prefix, or the
+// entropy score in any warning or error string (R10/R22).
 func (e *EnvMaterializer) runEnvExamplePrePass(ctx *MaterializeContext) error {
 	if !config.EffectiveReadEnvExample(ctx.Config, ctx.RepoName) {
 		return nil
@@ -40,7 +49,7 @@ func (e *EnvMaterializer) runEnvExamplePrePass(ctx *MaterializeContext) error {
 		return nil
 	}
 
-	vars, _, warnings, err := parseDotEnvExample(path)
+	vars, annotations, warnings, err := parseDotEnvExample(path)
 	for _, w := range warnings {
 		fmt.Fprintf(e.stderr(), "warning: %s\n", w)
 	}
@@ -58,10 +67,6 @@ func (e *EnvMaterializer) runEnvExamplePrePass(ctx *MaterializeContext) error {
 		declared[k] = true
 	}
 
-	// Hoist remote visibility check outside the key loop; ctx.RepoDir is fixed.
-	publicRemotes, haveGit := guardrail.EnumerateGitHubRemotes(ctx.RepoDir)
-	gitWarnOnce := false // warn at most once if a probable-secret key needs the guardrail
-
 	result := make(map[string]string)
 	var errs []error
 
@@ -78,28 +83,49 @@ func (e *EnvMaterializer) runEnvExamplePrePass(ctx *MaterializeContext) error {
 			continue
 		}
 
-		category, reason := classifyEnvValue(value)
-		isSafe := category == config.CategorySafe
-		if isSafe {
+		category, _ := classifyEnvValue(value)
+		if category == config.CategorySafe {
+			// Preserve the safe-key behavior: include without a
+			// probable-secret diagnostic.
 			fmt.Fprintf(e.stderr(), "warning: .env.example in %s: undeclared key %s has a safe value; including\n", ctx.RepoName, key)
 			result[key] = value
-		} else if !haveGit {
-			if !gitWarnOnce {
-				fmt.Fprintf(e.stderr(), "warning: .env.example in %s: could not check remote visibility; public-remote guardrail skipped\n", ctx.RepoName)
-				gitWarnOnce = true
+			continue
+		}
+
+		// Resolve the effective action for this undeclared probable-secret key.
+		// The inline annotation (parsed from the file) participates in the
+		// most-specific-wins cascade.
+		var inline *config.Action
+		if a, ok := annotations[key]; ok {
+			inline = &a
+		}
+		action := config.EffectiveEnvExamplePolicy(ctx.GlobalEnvExamplePolicy, ctx.Config, ctx.RepoName, key, category, inline)
+
+		// Detect an inline-driven downgrade: if the action resolved WITHOUT the
+		// inline annotation is fail but WITH it is warn, a repo-supplied inline
+		// annotation lowered an operator-configured floor. Emit a distinct,
+		// greppable diagnostic so the downgrade is observable (R-supply-chain).
+		if inline != nil {
+			withoutInline := config.EffectiveEnvExamplePolicy(ctx.GlobalEnvExamplePolicy, ctx.Config, ctx.RepoName, key, category, nil)
+			if withoutInline == config.ActionFail && action == config.ActionWarn {
+				fmt.Fprintf(e.stderr(), "warning: .env.example in %s: inline annotation lowered a configured fail to warn for key %s (category %s)\n", ctx.RepoName, key, category)
 			}
-			errs = append(errs, fmt.Errorf("key %s: %s", key, reason))
-		} else if len(publicRemotes) > 0 {
-			// Public GitHub remote found.
-			if ctx.AllowPlaintextSecrets {
-				fmt.Fprintf(e.stderr(), "warning: .env.example in %s: key %s is a probable secret but --allow-plaintext-secrets is set; including\n", ctx.RepoName, key)
-				result[key] = value
-			} else {
-				errs = append(errs, fmt.Errorf("key %s: %s (repo has a public GitHub remote; use --allow-plaintext-secrets to bypass or add to workspace [env.secrets])", key, reason))
-			}
-		} else {
-			// Private or non-GitHub remote: basic probable-secret error.
-			errs = append(errs, fmt.Errorf("key %s: %s", key, reason))
+		}
+
+		// --allow-plaintext-secrets downgrades every resolved fail to warn for
+		// this run, emitting a per-key audit diagnostic so the broadened blast
+		// radius is greppable (Decision 4).
+		if ctx.AllowPlaintextSecrets && action == config.ActionFail {
+			fmt.Fprintf(e.stderr(), "audit: .env.example in %s: --allow-plaintext-secrets downgraded fail to warn for key %s (category %s)\n", ctx.RepoName, key, category)
+			action = config.ActionWarn
+		}
+
+		switch action {
+		case config.ActionFail:
+			errs = append(errs, fmt.Errorf("key %s (category %s)", key, category))
+		default:
+			fmt.Fprintf(e.stderr(), "warning: .env.example in %s: undeclared key %s is a probable secret (category %s); including\n", ctx.RepoName, key, category)
+			result[key] = value
 		}
 	}
 
