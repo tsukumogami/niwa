@@ -22,7 +22,7 @@ func init() {
 		"downgrade unresolved vault:// references to empty strings with stderr warnings. "+
 			"Does NOT override *.required misses. One-shot -- re-evaluated each invocation.")
 	createCmd.Flags().BoolVar(&createAllowPlaintextSecrets, "allow-plaintext-secrets", false,
-		"bypass the public-repo plaintext-secrets guardrail. Strictly one-shot -- no state persistence.")
+		"bypass the public-repo plaintext-secrets guardrail and downgrade all .env.example failure-policy failures to warnings. Strictly one-shot -- no state persistence.")
 	createCmd.ValidArgsFunction = completeWorkspaceNames
 }
 

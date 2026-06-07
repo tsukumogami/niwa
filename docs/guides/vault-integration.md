@@ -527,12 +527,18 @@ it only for exceptional circumstances where the plaintext value is
 known to be safe (a throwaway scratch workspace, a test account
 token with no production access).
 
+The same flag also downgrades every `.env.example` failure-policy
+failure to a warning for that run (with a per-key audit line). See
+the env-example failure policy section of
+[workspace-config-sources.md](workspace-config-sources.md) for that
+policy.
+
 ## CLI reference
 
 | Surface | Purpose |
 |---------|---------|
 | `niwa apply --allow-missing-secrets` | Downgrade unresolved `vault://` references to empty strings with stderr warnings. Does NOT override `*.required` misses. |
-| `niwa apply --allow-plaintext-secrets` | Bypass the public-repo guardrail for one invocation. No state persistence. |
+| `niwa apply --allow-plaintext-secrets` | Bypass the public-repo guardrail and downgrade all `.env.example` failure-policy failures to warnings, for one invocation. No state persistence. |
 | `niwa status` (default) | Fully offline. Reads `state.json`, reports per-file drift and a shadowed-count summary. No provider calls. |
 | `niwa status --audit-secrets` | Classify every `*.secrets` value as plaintext / vault-ref / empty. Exits non-zero when plaintext values AND a vault are present. |
 | `niwa status --check-vault` | Re-resolve every `vault://` reference against the configured providers and compare fingerprints to stored state. Does NOT materialize. |
