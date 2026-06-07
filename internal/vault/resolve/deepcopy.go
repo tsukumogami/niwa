@@ -85,14 +85,16 @@ func deepCopyRepos(in map[string]config.RepoOverride) map[string]config.RepoOver
 	out := make(map[string]config.RepoOverride, len(in))
 	for name, ov := range in {
 		out[name] = config.RepoOverride{
-			URL:      ov.URL,
-			Group:    ov.Group,
-			Branch:   ov.Branch,
-			Scope:    ov.Scope,
-			Claude:   deepCopyClaudeOverride(ov.Claude),
-			Env:      deepCopyEnv(ov.Env),
-			Files:    cloneStringMap(ov.Files),
-			SetupDir: ov.SetupDir,
+			URL:              ov.URL,
+			Group:            ov.Group,
+			Branch:           ov.Branch,
+			Scope:            ov.Scope,
+			Claude:           deepCopyClaudeOverride(ov.Claude),
+			Env:              deepCopyEnv(ov.Env),
+			Files:            cloneStringMap(ov.Files),
+			SetupDir:         ov.SetupDir,
+			ReadEnvExample:   ov.ReadEnvExample,
+			EnvExamplePolicy: deepCopyEnvExamplePolicy(ov.EnvExamplePolicy),
 		}
 	}
 	return out
