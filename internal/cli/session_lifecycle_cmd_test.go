@@ -10,14 +10,14 @@ import (
 	"time"
 
 	"github.com/tsukumogami/niwa/internal/cli/sessionattach"
-	"github.com/tsukumogami/niwa/internal/mcp"
+	"github.com/tsukumogami/niwa/internal/worktree"
 )
 
 // seedLifecycleSessions writes N session lifecycle state files plus their
 // worktree directories under instanceRoot. The caller can then exercise
 // runSessionLifecycleList against the same instance root. Returns the
 // instance root path.
-func seedLifecycleSessions(t *testing.T, sessions []mcp.SessionLifecycleState) string {
+func seedLifecycleSessions(t *testing.T, sessions []worktree.SessionLifecycleState) string {
 	t.Helper()
 	root := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(root, ".niwa", "instance.json"), 0o700); err == nil {
@@ -40,7 +40,7 @@ func seedLifecycleSessions(t *testing.T, sessions []mcp.SessionLifecycleState) s
 				t.Fatalf("mkdir worktree %s: %v", s.WorktreePath, err)
 			}
 		}
-		if err := mcp.WriteSessionLifecycleState(sessionsDir, s); err != nil {
+		if err := worktree.WriteSessionLifecycleState(sessionsDir, s); err != nil {
 			t.Fatalf("write lifecycle state %s: %v", s.SessionID, err)
 		}
 	}
@@ -48,9 +48,9 @@ func seedLifecycleSessions(t *testing.T, sessions []mcp.SessionLifecycleState) s
 }
 
 func TestSessionList_AvailabilityColumnHeader(t *testing.T) {
-	root := seedLifecycleSessions(t, []mcp.SessionLifecycleState{
+	root := seedLifecycleSessions(t, []worktree.SessionLifecycleState{
 		{
-			V: 1, SessionID: "11111111", Repo: "niwa", Status: mcp.SessionStatusActive,
+			V: 1, SessionID: "11111111", Repo: "niwa", Status: worktree.SessionStatusActive,
 			WorktreePath: filepath.Join(t.TempDir(), "wt-11111111"),
 			CreationTime: time.Now().UTC().Format(time.RFC3339),
 		},
@@ -85,17 +85,17 @@ func TestSessionList_AvailabilityValuesRendered(t *testing.T) {
 		}
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
-	root := seedLifecycleSessions(t, []mcp.SessionLifecycleState{
-		{V: 1, SessionID: "11111111", Repo: "niwa", Status: mcp.SessionStatusActive, WorktreePath: wtFree, CreationTime: now},
-		{V: 1, SessionID: "22222222", Repo: "niwa", Status: mcp.SessionStatusActive, WorktreePath: wtAttached, CreationTime: now},
-		{V: 1, SessionID: "33333333", Repo: "niwa", Status: mcp.SessionStatusActive, WorktreePath: wtStale, CreationTime: now},
+	root := seedLifecycleSessions(t, []worktree.SessionLifecycleState{
+		{V: 1, SessionID: "11111111", Repo: "niwa", Status: worktree.SessionStatusActive, WorktreePath: wtFree, CreationTime: now},
+		{V: 1, SessionID: "22222222", Repo: "niwa", Status: worktree.SessionStatusActive, WorktreePath: wtAttached, CreationTime: now},
+		{V: 1, SessionID: "33333333", Repo: "niwa", Status: worktree.SessionStatusActive, WorktreePath: wtStale, CreationTime: now},
 	})
 	myPID := os.Getpid()
-	myStart, _ := mcp.PIDStartTime(myPID)
-	if err := mcp.WriteAttachState(wtAttached, mcp.AttachState{V: 1, OwnerPID: myPID, OwnerStartTime: myStart, StartedAt: now, LockPath: ".niwa/attach.lock"}); err != nil {
+	myStart, _ := worktree.PIDStartTime(myPID)
+	if err := worktree.WriteAttachState(wtAttached, worktree.AttachState{V: 1, OwnerPID: myPID, OwnerStartTime: myStart, StartedAt: now, LockPath: ".niwa/attach.lock"}); err != nil {
 		t.Fatalf("seed attached sentinel: %v", err)
 	}
-	if err := mcp.WriteAttachState(wtStale, mcp.AttachState{V: 1, OwnerPID: myPID, OwnerStartTime: 1 /* bogus */, StartedAt: now, LockPath: ".niwa/attach.lock"}); err != nil {
+	if err := worktree.WriteAttachState(wtStale, worktree.AttachState{V: 1, OwnerPID: myPID, OwnerStartTime: 1 /* bogus */, StartedAt: now, LockPath: ".niwa/attach.lock"}); err != nil {
 		t.Fatalf("seed stale sentinel: %v", err)
 	}
 	t.Setenv("NIWA_INSTANCE_ROOT", root)
@@ -117,7 +117,7 @@ func TestSessionList_AvailabilityValuesRendered(t *testing.T) {
 	// stale-sentinel rows: the listing pass reaps the dead-holder sentinel
 	// (reapStale=true), so the row renders as 'available' afterwards rather
 	// than 'stale'. Verify that the sentinel was actually removed from disk.
-	if _, err := os.Stat(mcp.AttachStatePath(wtStale)); !os.IsNotExist(err) {
+	if _, err := os.Stat(worktree.AttachStatePath(wtStale)); !os.IsNotExist(err) {
 		t.Errorf("stale sentinel was not reaped during list: %v", err)
 	}
 }
@@ -132,15 +132,15 @@ func TestSessionList_AttachedFirstSort(t *testing.T) {
 	for _, p := range []string{wtAttached, wtNewer, wtOlder} {
 		_ = os.MkdirAll(filepath.Join(p, ".niwa"), 0o700)
 	}
-	root := seedLifecycleSessions(t, []mcp.SessionLifecycleState{
+	root := seedLifecycleSessions(t, []worktree.SessionLifecycleState{
 		// Attached session is OLDEST but should sort first because of attached-first rule.
-		{V: 1, SessionID: "aaaaaaaa", Repo: "niwa", Status: mcp.SessionStatusActive, WorktreePath: wtAttached, CreationTime: older},
-		{V: 1, SessionID: "bbbbbbbb", Repo: "niwa", Status: mcp.SessionStatusActive, WorktreePath: wtNewer, CreationTime: newer},
-		{V: 1, SessionID: "cccccccc", Repo: "niwa", Status: mcp.SessionStatusActive, WorktreePath: wtOlder, CreationTime: older},
+		{V: 1, SessionID: "aaaaaaaa", Repo: "niwa", Status: worktree.SessionStatusActive, WorktreePath: wtAttached, CreationTime: older},
+		{V: 1, SessionID: "bbbbbbbb", Repo: "niwa", Status: worktree.SessionStatusActive, WorktreePath: wtNewer, CreationTime: newer},
+		{V: 1, SessionID: "cccccccc", Repo: "niwa", Status: worktree.SessionStatusActive, WorktreePath: wtOlder, CreationTime: older},
 	})
 	myPID := os.Getpid()
-	myStart, _ := mcp.PIDStartTime(myPID)
-	if err := mcp.WriteAttachState(wtAttached, mcp.AttachState{V: 1, OwnerPID: myPID, OwnerStartTime: myStart, StartedAt: newer, LockPath: ".niwa/attach.lock"}); err != nil {
+	myStart, _ := worktree.PIDStartTime(myPID)
+	if err := worktree.WriteAttachState(wtAttached, worktree.AttachState{V: 1, OwnerPID: myPID, OwnerStartTime: myStart, StartedAt: newer, LockPath: ".niwa/attach.lock"}); err != nil {
 		t.Fatalf("seed attached: %v", err)
 	}
 	t.Setenv("NIWA_INSTANCE_ROOT", root)
@@ -179,13 +179,13 @@ func TestSessionList_AttachedFilter(t *testing.T) {
 		_ = os.MkdirAll(filepath.Join(p, ".niwa"), 0o700)
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
-	root := seedLifecycleSessions(t, []mcp.SessionLifecycleState{
-		{V: 1, SessionID: "11111111", Repo: "niwa", Status: mcp.SessionStatusActive, WorktreePath: wtFree, CreationTime: now},
-		{V: 1, SessionID: "22222222", Repo: "niwa", Status: mcp.SessionStatusActive, WorktreePath: wtAttached, CreationTime: now},
+	root := seedLifecycleSessions(t, []worktree.SessionLifecycleState{
+		{V: 1, SessionID: "11111111", Repo: "niwa", Status: worktree.SessionStatusActive, WorktreePath: wtFree, CreationTime: now},
+		{V: 1, SessionID: "22222222", Repo: "niwa", Status: worktree.SessionStatusActive, WorktreePath: wtAttached, CreationTime: now},
 	})
 	myPID := os.Getpid()
-	myStart, _ := mcp.PIDStartTime(myPID)
-	_ = mcp.WriteAttachState(wtAttached, mcp.AttachState{V: 1, OwnerPID: myPID, OwnerStartTime: myStart, StartedAt: now, LockPath: ".niwa/attach.lock"})
+	myStart, _ := worktree.PIDStartTime(myPID)
+	_ = worktree.WriteAttachState(wtAttached, worktree.AttachState{V: 1, OwnerPID: myPID, OwnerStartTime: myStart, StartedAt: now, LockPath: ".niwa/attach.lock"})
 	t.Setenv("NIWA_INSTANCE_ROOT", root)
 
 	resetSessionListFlags(t)
@@ -214,13 +214,13 @@ func TestSessionList_AvailableFilter(t *testing.T) {
 		_ = os.MkdirAll(filepath.Join(p, ".niwa"), 0o700)
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
-	root := seedLifecycleSessions(t, []mcp.SessionLifecycleState{
-		{V: 1, SessionID: "11111111", Repo: "niwa", Status: mcp.SessionStatusActive, WorktreePath: wtFree, CreationTime: now},
-		{V: 1, SessionID: "22222222", Repo: "niwa", Status: mcp.SessionStatusActive, WorktreePath: wtAttached, CreationTime: now},
+	root := seedLifecycleSessions(t, []worktree.SessionLifecycleState{
+		{V: 1, SessionID: "11111111", Repo: "niwa", Status: worktree.SessionStatusActive, WorktreePath: wtFree, CreationTime: now},
+		{V: 1, SessionID: "22222222", Repo: "niwa", Status: worktree.SessionStatusActive, WorktreePath: wtAttached, CreationTime: now},
 	})
 	myPID := os.Getpid()
-	myStart, _ := mcp.PIDStartTime(myPID)
-	_ = mcp.WriteAttachState(wtAttached, mcp.AttachState{V: 1, OwnerPID: myPID, OwnerStartTime: myStart, StartedAt: now, LockPath: ".niwa/attach.lock"})
+	myStart, _ := worktree.PIDStartTime(myPID)
+	_ = worktree.WriteAttachState(wtAttached, worktree.AttachState{V: 1, OwnerPID: myPID, OwnerStartTime: myStart, StartedAt: now, LockPath: ".niwa/attach.lock"})
 	t.Setenv("NIWA_INSTANCE_ROOT", root)
 
 	resetSessionListFlags(t)
@@ -267,7 +267,7 @@ func TestSessionList_AttachedAndAvailableMutuallyExclusive(t *testing.T) {
 }
 
 // TestRunSessionCreate_NoArgsReturnsUsageError verifies issue #135 behavior:
-// invoking `niwa session create` with no args must return
+// invoking `niwa worktree create` with no args must return
 // *sessionattach.ExitCodeError with Code=2 and a usage string that names the
 // expected positional arguments and points at --help. Cobra's default
 // ExactArgs error ("accepts 2 arg(s), received 0") exits 1 with a generic
@@ -286,10 +286,10 @@ func TestRunSessionCreate_NoArgsReturnsUsageError(t *testing.T) {
 	}
 	wantSubstrs := []string{
 		"niwa: usage",
-		"niwa session create",
+		"niwa worktree create",
 		"<repo>",
 		"<purpose>",
-		"niwa session create --help",
+		"niwa worktree create --help",
 	}
 	for _, s := range wantSubstrs {
 		if !strings.Contains(ece.Msg, s) {
@@ -316,7 +316,7 @@ func TestRunSessionCreate_OneArgReturnsUsageError(t *testing.T) {
 
 // TestRunSessionDestroy_NoArgsReturnsUsageError verifies issue #135 behavior
 // for destroy: usage error names <session-id> and points at
-// `niwa session list` (not --status active, since destroy operates on any
+// `niwa worktree list` (not --status active, since destroy operates on any
 // status).
 func TestRunSessionDestroy_NoArgsReturnsUsageError(t *testing.T) {
 	err := runSessionDestroy(sessionDestroyCmd, nil)
@@ -332,10 +332,10 @@ func TestRunSessionDestroy_NoArgsReturnsUsageError(t *testing.T) {
 	}
 	wantSubstrs := []string{
 		"niwa: usage",
-		"niwa session destroy",
+		"niwa worktree destroy",
 		"<session-id>",
 		"[--force]",
-		"niwa session list",
+		"niwa worktree list",
 	}
 	for _, s := range wantSubstrs {
 		if !strings.Contains(ece.Msg, s) {
@@ -364,4 +364,3 @@ func TestSessionCommands_HaveCompletion(t *testing.T) {
 		}
 	}
 }
-

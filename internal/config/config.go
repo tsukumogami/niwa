@@ -96,25 +96,6 @@ type ClaudeEnvConfig struct {
 	Secrets EnvVarsTable `toml:"secrets,omitempty"`
 }
 
-// ChannelsMeshConfig holds the [channels.mesh] table. All fields are optional;
-// a bare [channels.mesh] section with no sub-keys enables the channel
-// infrastructure and roles are auto-derived from the workspace topology.
-type ChannelsMeshConfig struct {
-	Roles map[string]string `toml:"roles,omitempty"` // optional: role → repo name
-}
-
-// ChannelsConfig is the top-level [channels] table.
-type ChannelsConfig struct {
-	Mesh *ChannelsMeshConfig `toml:"mesh"`
-}
-
-// IsEnabled reports true when the [channels.mesh] section is present in the
-// config, regardless of whether any sub-keys are set. The Mesh field is nil
-// when the section is absent and non-nil (even if zero-value) when present.
-func (c ChannelsConfig) IsEnabled() bool {
-	return c.Mesh != nil
-}
-
 // WorkspaceConfig is the top-level configuration parsed from workspace.toml.
 type WorkspaceConfig struct {
 	Workspace WorkspaceMeta           `toml:"workspace"`
@@ -126,7 +107,6 @@ type WorkspaceConfig struct {
 	Env       EnvConfig               `toml:"env"`
 	Files     map[string]string       `toml:"files,omitempty"`
 	Instance  InstanceConfig          `toml:"instance,omitempty"`
-	Channels  ChannelsConfig          `toml:"channels,omitempty"`
 	// Vault carries the optional [vault] block (anonymous [vault.provider]
 	// or named [vault.providers.<name>] shape, plus [vault].team_only).
 	// nil when the config declares no vault providers.
@@ -228,6 +208,14 @@ type ContentConfig struct {
 	Workspace ContentEntry                `toml:"workspace"`
 	Groups    map[string]ContentEntry     `toml:"groups"`
 	Repos     map[string]RepoContentEntry `toml:"repos"`
+	// Worktree is the optional per-worktree content layer. When its Source is
+	// set, ApplyToWorktree renders that template (expanded with the worktree
+	// variables {purpose}/{branch}/{repo_name}/{worktree_path} alongside the
+	// existing {workspace}/{workspace_name}) as the worktree-specific layer.
+	// When unset, ApplyToWorktree falls back to the generated default
+	// purpose/branch section. Additive: an absent entry leaves worktree
+	// behavior unchanged.
+	Worktree ContentEntry `toml:"worktree"`
 }
 
 // ContentEntry is a single content source reference.
@@ -333,10 +321,13 @@ func Parse(data []byte) (*ParseResult, error) {
 }
 
 // isContentConfigZero reports whether a ContentConfig carries any data.
-// A zero ContentConfig has an empty Workspace source and nil/empty
-// Groups and Repos maps.
+// A zero ContentConfig has an empty Workspace source, an empty Worktree
+// source, and nil/empty Groups and Repos maps.
 func isContentConfigZero(c ContentConfig) bool {
 	if c.Workspace.Source != "" {
+		return false
+	}
+	if c.Worktree.Source != "" {
 		return false
 	}
 	if len(c.Groups) > 0 {
@@ -384,6 +375,9 @@ func validate(cfg *WorkspaceConfig) error {
 	// Reads from cfg.Claude.Content because Parse() migrates the legacy
 	// top-level [content] into [claude.content] before validate() runs.
 	if err := validateContentSource("claude.content.workspace.source", cfg.Claude.Content.Workspace.Source); err != nil {
+		return err
+	}
+	if err := validateContentSource("claude.content.worktree.source", cfg.Claude.Content.Worktree.Source); err != nil {
 		return err
 	}
 	for name, entry := range cfg.Claude.Content.Groups {

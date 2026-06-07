@@ -11,7 +11,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/tsukumogami/niwa/internal/mcp"
+	"github.com/tsukumogami/niwa/internal/worktree"
 )
 
 // DetachOptions configures Run for the niwa session detach command.
@@ -56,7 +56,7 @@ func DetachRun(ctx context.Context, opts DetachOptions) error {
 		return &ExitCodeError{Code: 1, Msg: err.Error()}
 	}
 
-	state, avail, err := mcp.ReadAttachState(worktreePath, false /* don't reap yet; we may need to act */)
+	state, avail, err := worktree.ReadAttachState(worktreePath, false /* don't reap yet; we may need to act */)
 	if err != nil {
 		// Treat read errors as non-blocking: report but exit 0 (the lock is
 		// not actively held by anyone we can identify).
@@ -65,15 +65,15 @@ func DetachRun(ctx context.Context, opts DetachOptions) error {
 	}
 
 	switch avail {
-	case mcp.AttachAvailable:
+	case worktree.AttachAvailable:
 		// Nothing to break.
 		return nil
-	case mcp.AttachStale:
-		if err := mcp.RemoveAttachState(worktreePath); err != nil {
+	case worktree.AttachStale:
+		if err := worktree.RemoveAttachState(worktreePath); err != nil {
 			return &ExitCodeError{Code: 1, Msg: fmt.Sprintf("niwa: error: removing stale attach state: %v", err)}
 		}
 		return nil
-	case mcp.AttachAttached:
+	case worktree.AttachAttached:
 		if !opts.Force {
 			return &ExitCodeError{
 				Code: 3,
@@ -92,7 +92,7 @@ func DetachRun(ctx context.Context, opts DetachOptions) error {
 		if !waitForExit(state.OwnerPID, state.OwnerStartTime, grace) {
 			_ = syscall.Kill(state.OwnerPID, syscall.SIGKILL)
 		}
-		if err := mcp.RemoveAttachState(worktreePath); err != nil {
+		if err := worktree.RemoveAttachState(worktreePath); err != nil {
 			return &ExitCodeError{Code: 1, Msg: fmt.Sprintf("niwa: error: removing attach state: %v", err)}
 		}
 		return &ExitCodeError{Code: 4, Msg: ""} // Code 4 = killed live holder
@@ -105,7 +105,7 @@ func DetachRun(ctx context.Context, opts DetachOptions) error {
 // when the session is not found or the file is corrupt.
 func worktreePathForSession(instanceRoot, sessionID string) (string, error) {
 	sessionsDir := filepath.Join(instanceRoot, ".niwa", "sessions")
-	state, err := mcp.ReadSessionLifecycleState(sessionsDir, sessionID)
+	state, err := worktree.ReadSessionLifecycleState(sessionsDir, sessionID)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return "", fmt.Errorf("niwa: error: session %s not found", sessionID)
@@ -122,12 +122,12 @@ func waitForExit(pid int, startTime int64, grace time.Duration) bool {
 	tick := time.NewTicker(50 * time.Millisecond)
 	defer tick.Stop()
 	for time.Now().Before(deadline) {
-		if !mcp.IsPIDAlive(pid, startTime) {
+		if !worktree.IsPIDAlive(pid, startTime) {
 			return true
 		}
 		<-tick.C
 	}
-	return !mcp.IsPIDAlive(pid, startTime)
+	return !worktree.IsPIDAlive(pid, startTime)
 }
 
 // graceDuration resolves the SIGTERM-to-SIGKILL grace period. Caller-supplied

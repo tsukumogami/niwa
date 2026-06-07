@@ -105,6 +105,18 @@ type RepoContentResult struct {
 //
 // Returns a result with content warnings and files written.
 func InstallRepoContent(cfg *config.WorkspaceConfig, configDir, overlayDir, instanceRoot, groupName, repoName string) (*RepoContentResult, error) {
+	repoDir := filepath.Join(instanceRoot, groupName, repoName)
+	return InstallRepoContentTo(cfg, configDir, overlayDir, instanceRoot, repoDir, groupName, repoName)
+}
+
+// InstallRepoContentTo is the target-directory-parameterized form of
+// InstallRepoContent. It installs the repo's CLAUDE.local.md (and subdir
+// content) into repoDir, while still resolving the {workspace} template
+// variable from instanceRoot. The instance apply path calls this with
+// repoDir = {instanceRoot}/{group}/{repo}; ApplyToWorktree calls it with the
+// worktree path so a worktree gets the same content a repo checkout does. Both
+// callers share this single function (no forked installer).
+func InstallRepoContentTo(cfg *config.WorkspaceConfig, configDir, overlayDir, instanceRoot, repoDir, groupName, repoName string) (*RepoContentResult, error) {
 	result := &RepoContentResult{}
 
 	absInstance, err := filepath.Abs(instanceRoot)
@@ -118,8 +130,6 @@ func InstallRepoContent(cfg *config.WorkspaceConfig, configDir, overlayDir, inst
 		"{group_name}":     groupName,
 		"{repo_name}":      repoName,
 	}
-
-	repoDir := filepath.Join(instanceRoot, groupName, repoName)
 
 	// Resolve source: explicit entry or auto-discovery.
 	entry, hasExplicit := cfg.Claude.Content.Repos[repoName]
@@ -264,22 +274,36 @@ func contentDirRoot(cfg *config.WorkspaceConfig, configDir string) string {
 	return filepath.Join(configDir, contentDir)
 }
 
-// installContentFile reads a source file relative to contentRoot, expands
-// template variables, and writes the result to the target path.
-// It verifies that the resolved source path stays within contentRoot.
-func installContentFile(contentRoot, source, target string, vars map[string]string) error {
+// renderContentFile reads a source file relative to contentRoot, verifies the
+// resolved source path stays within contentRoot, and returns the content with
+// template variables expanded. It performs no write — callers that need to
+// persist the result write the returned string themselves. This is the shared
+// read+containment+expand core used by both installContentFile (write-to-file)
+// and the worktree layer (render-to-string), so neither path can drift on the
+// containment guarantee.
+func renderContentFile(contentRoot, source string, vars map[string]string) (string, error) {
 	sourcePath := filepath.Join(contentRoot, source)
 
 	if err := checkContainment(sourcePath, contentRoot); err != nil {
-		return fmt.Errorf("content source %q: %w", source, err)
+		return "", fmt.Errorf("content source %q: %w", source, err)
 	}
 
 	data, err := os.ReadFile(sourcePath)
 	if err != nil {
-		return fmt.Errorf("reading content source %s: %w", sourcePath, err)
+		return "", fmt.Errorf("reading content source %s: %w", sourcePath, err)
 	}
 
-	content := expandVars(string(data), vars)
+	return expandVars(string(data), vars), nil
+}
+
+// installContentFile reads a source file relative to contentRoot, expands
+// template variables, and writes the result to the target path.
+// It verifies that the resolved source path stays within contentRoot.
+func installContentFile(contentRoot, source, target string, vars map[string]string) error {
+	content, err := renderContentFile(contentRoot, source, vars)
+	if err != nil {
+		return err
+	}
 
 	targetDir := filepath.Dir(target)
 	if err := os.MkdirAll(targetDir, 0o755); err != nil {

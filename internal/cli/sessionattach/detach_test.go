@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/tsukumogami/niwa/internal/mcp"
+	"github.com/tsukumogami/niwa/internal/worktree"
 )
 
 // setupSession seeds a fake instance root with a single lifecycle state file
@@ -29,14 +29,14 @@ func setupSession(t *testing.T) (instanceRoot, sessionID, worktreePath string) {
 	if err := os.MkdirAll(filepath.Join(worktreePath, ".niwa"), 0o700); err != nil {
 		t.Fatalf("mkdir worktree: %v", err)
 	}
-	state := mcp.SessionLifecycleState{
+	state := worktree.SessionLifecycleState{
 		V:            1,
 		SessionID:    sessionID,
 		Repo:         "niwa",
-		Status:       mcp.SessionStatusActive,
+		Status:       worktree.SessionStatusActive,
 		WorktreePath: worktreePath,
 	}
-	if err := mcp.WriteSessionLifecycleState(sessionsDir, state); err != nil {
+	if err := worktree.WriteSessionLifecycleState(sessionsDir, state); err != nil {
 		t.Fatalf("write lifecycle state: %v", err)
 	}
 	return instanceRoot, sessionID, worktreePath
@@ -60,7 +60,7 @@ func TestDetachNoSentinelIsNoOp(t *testing.T) {
 
 func TestDetachStaleSentinelAutoReaps(t *testing.T) {
 	root, sid, wt := setupSession(t)
-	if err := mcp.WriteAttachState(wt, mcp.AttachState{
+	if err := worktree.WriteAttachState(wt, worktree.AttachState{
 		V: 1, OwnerPID: os.Getpid(), OwnerStartTime: 1, // bogus start time
 		StartedAt: time.Now().UTC().Format(time.RFC3339),
 		LockPath:  ".niwa/attach.lock",
@@ -72,7 +72,7 @@ func TestDetachStaleSentinelAutoReaps(t *testing.T) {
 	}); err != nil {
 		t.Errorf("stale-detach: unexpected err %v", err)
 	}
-	if _, err := os.Stat(mcp.AttachStatePath(wt)); !os.IsNotExist(err) {
+	if _, err := os.Stat(worktree.AttachStatePath(wt)); !os.IsNotExist(err) {
 		t.Errorf("sentinel not reaped: %v", err)
 	}
 }
@@ -80,8 +80,8 @@ func TestDetachStaleSentinelAutoReaps(t *testing.T) {
 func TestDetachLiveHolderWithoutForceFailsCode3(t *testing.T) {
 	root, sid, wt := setupSession(t)
 	pid := os.Getpid()
-	start, _ := mcp.PIDStartTime(pid)
-	if err := mcp.WriteAttachState(wt, mcp.AttachState{
+	start, _ := worktree.PIDStartTime(pid)
+	if err := worktree.WriteAttachState(wt, worktree.AttachState{
 		V: 1, OwnerPID: pid, OwnerStartTime: start,
 		StartedAt: "2026-05-10T14:32:11Z",
 		LockPath:  ".niwa/attach.lock",
@@ -113,7 +113,7 @@ func TestDetachLiveHolderWithoutForceFailsCode3(t *testing.T) {
 		}
 	}
 	// Sentinel must NOT have been removed.
-	if _, err := os.Stat(mcp.AttachStatePath(wt)); err != nil {
+	if _, err := os.Stat(worktree.AttachStatePath(wt)); err != nil {
 		t.Errorf("sentinel should still exist: %v", err)
 	}
 }
@@ -126,8 +126,8 @@ func TestDetachLiveHolderForceKillsAndReturns4(t *testing.T) {
 		t.Skipf("sleep not available: %v", err)
 	}
 	t.Cleanup(func() { _ = cmd.Process.Kill(); _, _ = cmd.Process.Wait() })
-	start, _ := mcp.PIDStartTime(cmd.Process.Pid)
-	if err := mcp.WriteAttachState(wt, mcp.AttachState{
+	start, _ := worktree.PIDStartTime(cmd.Process.Pid)
+	if err := worktree.WriteAttachState(wt, worktree.AttachState{
 		V: 1, OwnerPID: cmd.Process.Pid, OwnerStartTime: start,
 		StartedAt: time.Now().UTC().Format(time.RFC3339),
 		LockPath:  ".niwa/attach.lock",
@@ -154,7 +154,7 @@ func TestDetachLiveHolderForceKillsAndReturns4(t *testing.T) {
 	if !strings.Contains(stderr.String(), "warning: detaching live attach holder") {
 		t.Errorf("missing live-holder warning in stderr: %q", stderr.String())
 	}
-	if _, err := os.Stat(mcp.AttachStatePath(wt)); !os.IsNotExist(err) {
+	if _, err := os.Stat(worktree.AttachStatePath(wt)); !os.IsNotExist(err) {
 		t.Errorf("sentinel not removed: %v", err)
 	}
 }

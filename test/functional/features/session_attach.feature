@@ -1,15 +1,16 @@
-Feature: niwa session attach + detach (Issue #117)
+Feature: niwa session attach + detach
   End-to-end scenarios that exercise `niwa session attach` and
   `niwa session detach` against the compiled `niwa` binary. These
   scenarios cover the parts of the attach UX that don't require
   spawning a real Claude Code process: the AVAILABILITY column
-  rendering on `niwa session list`, and the detach-no-op path for
-  sessions with no live lock. The full attach pipeline (lock acquire,
-  daemon terminate, claude --resume) is covered by unit tests in
+  rendering on `niwa session list`, the detach-no-op path for sessions
+  with no live lock, and the destroy gate that refuses to tear down a
+  session while an attach lock is held. The full attach pipeline (lock
+  acquire, claude --resume) is covered by unit tests in
   internal/cli/sessionattach.
 
   # ---------------------------------------------------------------------
-  # AVAILABILITY column appears for created sessions (PRD AC18).
+  # AVAILABILITY column appears for created sessions.
   # ---------------------------------------------------------------------
 
   @critical
@@ -26,12 +27,12 @@ Feature: niwa session attach + detach (Issue #117)
     And the output contains "SESSION_ID"
     And the output contains "AVAILABILITY"
     And the output contains "available"
-    # Cleanup: destroy the session so the daemon stops cleanly.
+    # Cleanup: destroy the session.
     When I call niwa_destroy_session in instance "attach-list"
     Then the session is ended in instance "attach-list"
 
   # ---------------------------------------------------------------------
-  # Detach is silently no-op when no lock is held (PRD AC15 inverse).
+  # Detach is silently no-op when no lock is held.
   # ---------------------------------------------------------------------
 
   @critical
@@ -53,13 +54,13 @@ Feature: niwa session attach + detach (Issue #117)
     Then the session is ended in instance "attach-detach-noop"
 
   # ---------------------------------------------------------------------
-  # SESSION_ATTACHED gate on niwa_destroy_session when a live attach lock
-  # is held (PRD R13 / AC23). Maps to the CUJ where the operator has
-  # stepped into a session and the coordinator must back off, not destroy.
+  # The destroy gate refuses to tear down a session while a live attach
+  # lock is held. Maps to the CUJ where the operator has stepped into a
+  # session and a coordinator must back off, not destroy.
   # ---------------------------------------------------------------------
 
   @critical
-  Scenario: niwa_destroy_session returns SESSION_ATTACHED when a live attach lock exists
+  Scenario: niwa session destroy refuses when a live attach lock exists
     Given a clean niwa environment
     And a local git server is set up
     And a single-repo channeled workspace "destroy-gate" exists
@@ -68,12 +69,12 @@ Feature: niwa session attach + detach (Issue #117)
     When I call niwa_create_session for repo "app" with purpose "destroy-gate-fixture" in instance "destroy-gate"
     Then the last session is active in instance "destroy-gate"
     # Simulate a human attached to the session by seeding an attach.state
-    # sentinel that points at the live test process. The destroy MCP tool
-    # must refuse with the SESSION_ATTACHED error per PRD R13.
+    # sentinel that points at the live test process. niwa session destroy
+    # without --force must refuse and point at the detach escape hatch.
     When I seed a live attach sentinel for the last session in instance "destroy-gate"
     When I call niwa_destroy_session without force in instance "destroy-gate"
-    Then the last MCP response contains code "SESSION_ATTACHED"
+    Then the last MCP response contains code "session attached"
     And the last MCP response contains code "niwa session detach"
-    # Force destroy bypasses the gate and proceeds with teardown per PRD AC24.
+    # --force bypasses the gate and proceeds with teardown.
     When I call niwa_destroy_session in instance "destroy-gate"
     Then the session is ended in instance "destroy-gate"

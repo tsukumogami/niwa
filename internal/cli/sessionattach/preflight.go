@@ -1,8 +1,8 @@
-// Package sessionattach implements the niwa session attach and detach
-// commands. These let an operator step into a mesh session interactively,
+// Package sessionattach implements the niwa worktree attach and detach
+// commands. These let an operator step into a worktree interactively,
 // resume Claude Code with the worker's full transcript history, work
-// interactively, and detach cleanly with the session returning to normal
-// mesh operation.
+// interactively, and detach cleanly so the worktree returns to being
+// available.
 package sessionattach
 
 import (
@@ -11,7 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/tsukumogami/niwa/internal/mcp"
+	"github.com/tsukumogami/niwa/internal/worktree"
 )
 
 // EncodeProjectDir applies Claude Code's project-dir encoding rule: every
@@ -51,8 +51,8 @@ func TranscriptPath(homeDir, workerCWD, convID string) string {
 type PreflightCase rune
 
 const (
-	// CaseA: SessionLifecycleState.ClaudeConversationID is empty (the worker
-	// crashed before MCP server startup, or the session was never run).
+	// CaseA: SessionLifecycleState.ClaudeConversationID is empty (the session
+	// never recorded a claude conversation id, e.g. it was never run).
 	CaseA PreflightCase = 'A'
 	// CaseB: the deterministic transcript path does not exist.
 	CaseB PreflightCase = 'B'
@@ -73,7 +73,7 @@ func (e *PreflightError) Error() string {
 	case CaseA:
 		return fmt.Sprintf(
 			"niwa: error: session %s has no captured claude conversation id "+
-				"(the worker may have crashed before MCP server startup; inspect with "+
+				"(the session never recorded one, so there is no transcript to resume; inspect with "+
 				"`niwa session list --status active` or remove with `niwa session destroy %s`).",
 			e.SessionID, e.SessionID,
 		)
@@ -112,7 +112,7 @@ type PreflightOptions struct {
 // (exit 1) on every failure mode tested empirically. Pre-flight exists so
 // niwa can emit niwa-shaped error messages with three actionable cases
 // instead of claude's opaque "No conversation found with session ID: <uuid>".
-func Preflight(state mcp.SessionLifecycleState, opts PreflightOptions) error {
+func Preflight(state worktree.SessionLifecycleState, opts PreflightOptions) error {
 	if state.ClaudeConversationID == "" {
 		return &PreflightError{Case: CaseA, SessionID: state.SessionID}
 	}

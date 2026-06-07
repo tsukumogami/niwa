@@ -64,7 +64,6 @@ content_dir = "claude"
 # GITHUB_TOKEN = "vault://team/GITHUB_TOKEN"
 # [files]
 # "extensions/design.md" = ".claude/shirabe-extensions/"
-# [channels]
 #
 # --- Vault providers (optional) ---
 # Pick ONE shape. The anonymous singular shape lets vault:// URIs omit
@@ -142,9 +141,6 @@ visibility = "<vis-value>"
 # Bind the bootstrap repo to this group by name: explicit-repos sources carry
 # no live visibility, so name membership is what places the repo in a group.
 repos = ["<bootstrap-repo>"]
-
-# Bootstrap enabled mesh channels. Remove this block (and the [channels.mesh] line below) to disable.
-[channels.mesh]
 
 # CLAUDE.md content hierarchy: drop a workspace.md in .niwa/claude/ to populate.
 # [claude.content.workspace]

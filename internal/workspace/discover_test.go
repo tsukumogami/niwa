@@ -9,6 +9,41 @@ import (
 	"github.com/tsukumogami/niwa/internal/config"
 )
 
+// --- DiscoverWorktreeHooks tests ---
+
+func TestDiscoverWorktreeHooks_MissingDir(t *testing.T) {
+	dir := t.TempDir()
+	hooks, err := DiscoverWorktreeHooks(dir)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(hooks) != 0 {
+		t.Fatalf("expected empty hooks, got %v", hooks)
+	}
+}
+
+func TestDiscoverWorktreeHooks_TopLevelAndSubdir(t *testing.T) {
+	dir := t.TempDir()
+	hooksDir := filepath.Join(dir, "worktree-hooks")
+	mustMkdir(t, hooksDir)
+	mustWriteFile(t, filepath.Join(hooksDir, "apply.sh"), "#!/bin/sh")
+
+	eventDir := filepath.Join(hooksDir, "create")
+	mustMkdir(t, eventDir)
+	mustWriteFile(t, filepath.Join(eventDir, "a.sh"), "#!/bin/sh")
+	mustWriteFile(t, filepath.Join(eventDir, "b.sh"), "#!/bin/sh")
+	mustWriteFile(t, filepath.Join(eventDir, "notes.txt"), "ignored")
+
+	hooks, err := DiscoverWorktreeHooks(dir)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	assertHookScripts(t, hooks, "apply", []string{filepath.Join(hooksDir, "apply.sh")})
+	if len(hooks["create"]) != 2 {
+		t.Errorf("expected 2 create entries, got %d: %v", len(hooks["create"]), hooks["create"])
+	}
+}
+
 // --- DiscoverHooks tests ---
 
 func TestDiscoverHooks_MissingDir(t *testing.T) {

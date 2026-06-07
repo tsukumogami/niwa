@@ -40,8 +40,7 @@ type DestroyWorkspaceOpts struct {
 // Sequence:
 //  1. Enumerate instances under workspaceRoot.
 //  2. Sort by instance name (alphabetical, deterministic).
-//  3. For each instance: TerminateDaemon → ValidateInstanceDir →
-//     RemoveAll(instanceDir).
+//  3. For each instance: ValidateInstanceDir → RemoveAll(instanceDir).
 //  4. After all instances are removed, RemoveAll(workspaceRoot).
 //
 // Per-instance synchronous ordering preserves resumability on partial
@@ -73,14 +72,6 @@ func DestroyWorkspace(workspaceRoot string, opts DestroyWorkspaceOpts) error {
 	for _, instanceDir := range instances {
 		if opts.Reporter != nil {
 			opts.Reporter.Log("destroying instance: %s", filepath.Base(instanceDir))
-		}
-
-		if err := TerminateDaemon(instanceDir); err != nil {
-			// Match the existing destroy.go convention: log and continue.
-			if opts.Reporter != nil {
-				opts.Reporter.Warn("could not stop mesh daemon for %s: %v",
-					filepath.Base(instanceDir), err)
-			}
 		}
 
 		if err := ValidateInstanceDir(instanceDir); err != nil {

@@ -65,13 +65,13 @@ source = "workspace.md"
 `,
 		},
 		{
-			name: "under [channels.mesh.roles]",
+			name: "under [env.vars]",
 			input: `
 [workspace]
 name = "ws"
 
-[channels.mesh.roles]
-NIWA_WORKER_SPAWN_COMMAND = "web"
+[env.vars]
+NIWA_WORKER_SPAWN_COMMAND = "/opt/bin/fake-claude"
 
 [claude.content.workspace]
 source = "workspace.md"

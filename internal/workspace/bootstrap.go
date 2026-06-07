@@ -45,11 +45,10 @@ func (stdGitInvoker) CommandContext(ctx context.Context, args ...string) *exec.C
 func StdGitInvoker() GitInvoker { return stdGitInvoker{} }
 
 // CreateSessionFunc is the callback shape RunBootstrap invokes to create
-// the bootstrap session. The signature mirrors mcp.CreateSession but
-// using basic types so workspace stays ignorant of the mcp package
-// (mcp already imports workspace via daemon.go — the reverse direction
-// would form an import cycle). The cli layer adapts the two by passing
-// a thin closure that wraps mcp.CreateSession.
+// the bootstrap session. The signature mirrors worktree.CreateSession but
+// uses basic types so workspace stays ignorant of the worktree package and
+// the seam stays available as a test injection point. The cli layer adapts
+// the two by passing a thin closure that wraps worktree.CreateSession.
 //
 // The branchName return is the persisted branch the orchestrator must
 // pass to the session-destroy helper if the post-create rollback fires.
@@ -160,8 +159,8 @@ var ErrBootstrapNonGitHub = errors.New("non-github host")
 //
 //  1. Verify Src.IsGitHub() (defense-in-depth; no git invocation on fail).
 //  2. Validate the slug shape via ResolveCloneURL (no network call).
-//  3. Call ApplierCreate to install the create-step (channels infra,
-//     bootstrap repo clone). Applier.Create owns its own teardown on
+//  3. Call ApplierCreate to install the create-step (bootstrap repo
+//     clone). Applier.Create owns its own teardown on
 //     failure (it runs os.RemoveAll on the instance dir before
 //     returning errors). Per PRD R7, failures AFTER ApplierCreate
 //     succeeds MUST NOT touch the instance dir — session/commit
@@ -176,8 +175,7 @@ var ErrBootstrapNonGitHub = errors.New("non-github host")
 //
 // RunBootstrap does NOT do its own workspace-root scaffold write —
 // runInit performs that BEFORE calling RunBootstrap, then disarms its
-// workspaceCreated defer. The runInit-owned write is what
-// Applier.Create reads to discover [channels.mesh].
+// workspaceCreated defer.
 func RunBootstrap(ctx context.Context, params BootstrapParams) (BootstrapResult, error) {
 	// Step 1: defense-in-depth host check. The cli layer's R9 gate
 	// already runs upstream of runInit, but the test contract requires
@@ -213,7 +211,7 @@ func RunBootstrap(ctx context.Context, params BootstrapParams) (BootstrapResult,
 	}
 
 	// Step 3: ApplierCreate. The create-step pipeline (clone bootstrap
-	// repo, install channels infra) may populate <ws>/<instanceName>
+	// repo) may populate <ws>/<instanceName>
 	// partway and then fail; the implicit contract for the create step
 	// is "either Applier.Create returns nil OR the instance dir does
 	// not survive". Applier.Create itself runs an internal
@@ -287,8 +285,8 @@ func DefaultDestroySession(ctx context.Context, instanceRoot, sessionID string, 
 		return fmt.Errorf("reading session state: %w", readErr)
 	}
 	// Minimal field extraction: we only need WorktreePath, Repo,
-	// EffectiveBranchName equivalent. To avoid an mcp import here, we
-	// read the JSON directly with the known schema.
+	// EffectiveBranchName equivalent. We read the JSON directly with the
+	// known schema rather than importing the worktree state types.
 	type stateShape struct {
 		Repo         string `json:"repo"`
 		BranchName   string `json:"branch_name,omitempty"`
@@ -313,10 +311,10 @@ func DefaultDestroySession(ctx context.Context, instanceRoot, sessionID string, 
 	return nil
 }
 
-// findRepoInWorkspaceForDestroy is a workspace-package mirror of the mcp
-// helper of the same name (kept local to avoid the mcp import direction).
-// Scans instanceRoot two levels deep for a directory named repoName that
-// contains a .git entry.
+// findRepoInWorkspaceForDestroy scans instanceRoot two levels deep for a
+// directory named repoName that contains a .git entry. It is a
+// workspace-package copy of worktree.findRepoInWorkspace, kept local to avoid
+// inverting the dependency direction (worktree is a leaf package).
 func findRepoInWorkspaceForDestroy(instanceRoot, repoName string) (string, error) {
 	topEntries, err := os.ReadDir(instanceRoot)
 	if err != nil {
@@ -343,4 +341,3 @@ func findRepoInWorkspaceForDestroy(instanceRoot, repoName string) (string, error
 	}
 	return "", fmt.Errorf("repo %q not found in workspace %s", repoName, instanceRoot)
 }
-

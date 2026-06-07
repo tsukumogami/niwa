@@ -31,6 +31,11 @@ goals: |
 
 Delivered
 
+Superseded: the cross-session communication substrate this PRD specified
+(per-role inboxes, the task-delegation state machine, niwa_ask) was removed by
+the niwa mesh removal. See docs/designs/archive/DESIGN-cross-session-communication.md.
+Retained as a historical record.
+
 ## Problem Statement
 
 Developers using niwa to manage multi-repo workspaces routinely need to

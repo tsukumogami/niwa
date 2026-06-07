@@ -11,33 +11,27 @@ func init() {
 }
 
 var (
-	sessionAttachForce bool
 	sessionDetachForce bool
 )
 
 func init() {
-	sessionAttachCmd.Flags().BoolVar(&sessionAttachForce, "force", false,
-		"SIGTERM the running worker before acquiring the attach lock")
 	sessionDetachCmd.Flags().BoolVar(&sessionDetachForce, "force", false,
 		"release the attach lock even if held by a live process")
 }
 
 var sessionAttachCmd = &cobra.Command{
 	Use:   "attach <session-id>",
-	Short: "Attach to a mesh session interactively",
-	Long: `Attach to a mesh session interactively.
+	Short: "Attach to a worktree interactively",
+	Long: `Attach to a worktree interactively.
 
-Locks the session against further mesh use, terminates the per-worktree
-daemon, validates the worker's claude transcript, and launches Claude Code
-with --resume so you can step into the conversation, prompt the agent,
-or fix things manually. When you exit Claude Code (Ctrl-D or /exit), niwa
-releases the lock and the mesh resumes normally.
+Validates the worktree, acquires the in-use lock (attach.state + flock) so
+no other process attaches concurrently, validates the worker's claude
+transcript, and launches Claude Code with --resume so you can step into the
+conversation, prompt the agent, or fix things manually. When you exit
+Claude Code (Ctrl-D or /exit), niwa releases the lock.
 
-Pass --force to SIGTERM a running worker before acquiring the lock.
-Without --force, attach waits for any running worker to finish naturally.
-
-Discovery: 'niwa session list' shows the AVAILABILITY column for each
-session. Use 'niwa session detach <id> --force' to break a stale lock.
+Discovery: 'niwa worktree list' shows the AVAILABILITY column for each
+worktree. Use 'niwa worktree detach <id> --force' to break a stale lock.
 
 Exit codes: 0 (clean exit), 1 (validation), 2 (usage), 3 (lock held),
 or the propagated claude exit code (capped at 125).`,
@@ -80,8 +74,8 @@ func runSessionAttach(cmd *cobra.Command, args []string) error {
 	if len(args) == 0 {
 		return &sessionattach.ExitCodeError{
 			Code: 2,
-			Msg: "niwa: usage: niwa session attach <session_id> [--force]. " +
-				"Run `niwa session list --status active` to discover available sessions.",
+			Msg: "niwa: usage: niwa worktree attach <session_id>. " +
+				"Run `niwa worktree list --status active` to discover available worktrees.",
 		}
 	}
 	instanceRoot, err := resolveInstanceRoot()
@@ -91,7 +85,6 @@ func runSessionAttach(cmd *cobra.Command, args []string) error {
 	return sessionattach.AttachRun(cmd.Context(), sessionattach.Options{
 		InstanceRoot: instanceRoot,
 		SessionID:    args[0],
-		Force:        sessionAttachForce,
 		Stdin:        cmd.InOrStdin(),
 		Stdout:       cmd.OutOrStdout(),
 		Stderr:       cmd.ErrOrStderr(),
@@ -102,7 +95,7 @@ func runSessionDetach(cmd *cobra.Command, args []string) error {
 	if len(args) == 0 {
 		return &sessionattach.ExitCodeError{
 			Code: 2,
-			Msg: "niwa: usage: niwa session detach <session_id> [--force]. " +
+			Msg: "niwa: usage: niwa worktree detach <session_id> [--force]. " +
 				"Normal attach release happens automatically when claude code exits; " +
 				"this command exists to break stale locks.",
 		}

@@ -34,5 +34,8 @@ go.work.sum
 # Functional test sandbox (per-scenario scratch)
 /.niwa-test/
 
+# niwa session-worktree scaffold (daemon pid/log, roles, sessions); never committed
+/.niwa/
+
 # Claude Code local config
 .claude/

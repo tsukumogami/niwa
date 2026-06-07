@@ -28,8 +28,8 @@ import (
 //
 // Failures inspecting any of the three kinds are reported as a single
 // trailing warning ("warning: could not inspect worktree state: ...") rather
-// than aborting -- the natural-detach release path must always reach the
-// daemon respawn step regardless.
+// than aborting -- the natural-detach release path must always run to
+// completion regardless.
 func Warnings(worktreePath, branchName string, w io.Writer) {
 	uncommitted, untracked, statusErr := classifyStatus(worktreePath)
 	if statusErr != nil {

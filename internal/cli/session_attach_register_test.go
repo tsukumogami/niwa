@@ -9,7 +9,7 @@ import (
 )
 
 // TestRunSessionAttach_NoArgsReturnsUsageError verifies PRD R10 behavior for
-// the attach command: invoking `niwa session attach` with no session_id must
+// the attach command: invoking `niwa worktree attach` with no session_id must
 // return *sessionattach.ExitCodeError with Code=2 and the verbatim usage
 // string (so root.Execute() translates it to os.Exit(2)). Cobra's default
 // ExactArgs error exits 1 with a generic message; this guard ensures we
@@ -28,9 +28,8 @@ func TestRunSessionAttach_NoArgsReturnsUsageError(t *testing.T) {
 	}
 	wantSubstrs := []string{
 		"niwa: usage",
-		"niwa session attach",
+		"niwa worktree attach",
 		"<session_id>",
-		"[--force]",
 	}
 	for _, s := range wantSubstrs {
 		if !strings.Contains(ece.Msg, s) {
@@ -58,7 +57,7 @@ func TestRunSessionDetach_NoArgsReturnsUsageError(t *testing.T) {
 	}
 	wantSubstrs := []string{
 		"niwa: usage",
-		"niwa session detach",
+		"niwa worktree detach",
 		"<session_id>",
 		"[--force]",
 		"break stale locks",

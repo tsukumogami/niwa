@@ -10,8 +10,8 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/tsukumogami/niwa/internal/config"
-	"github.com/tsukumogami/niwa/internal/mcp"
 	"github.com/tsukumogami/niwa/internal/workspace"
+	"github.com/tsukumogami/niwa/internal/worktree"
 )
 
 // sessionIDGoRE matches the 8-character lowercase hex session ID format used
@@ -256,7 +256,7 @@ func resolveSessionWorktree(cmd *cobra.Command, repo, sessionID string) error {
 		return err
 	}
 	sessionsDir := filepath.Join(instanceRoot, ".niwa", "sessions")
-	state, err := mcp.ReadSessionLifecycleState(sessionsDir, sessionID)
+	state, err := worktree.ReadSessionLifecycleState(sessionsDir, sessionID)
 	if err != nil {
 		return fmt.Errorf("session %q not found: %w", sessionID, err)
 	}

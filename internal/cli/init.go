@@ -14,10 +14,10 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/tsukumogami/niwa/internal/config"
 	"github.com/tsukumogami/niwa/internal/github"
-	"github.com/tsukumogami/niwa/internal/mcp"
 	"github.com/tsukumogami/niwa/internal/plugin"
 	sourcepkg "github.com/tsukumogami/niwa/internal/source"
 	"github.com/tsukumogami/niwa/internal/workspace"
+	"github.com/tsukumogami/niwa/internal/worktree"
 )
 
 // looksLikeURL reports whether s is a full URL or SSH address that
@@ -154,8 +154,7 @@ func defaultRunBootstrap(ctx context.Context, cmd *cobra.Command, workspaceRoot,
 	}
 
 	// Step 2: FIRST scaffold write — at the workspace root. This is the
-	// file Applier.Create (inside RunBootstrap) will read for the
-	// [channels.mesh] block that drives role-dir creation.
+	// workspace.toml Applier.Create (inside RunBootstrap) will read.
 	if scErr := workspace.ScaffoldFromSource(workspaceRoot, opts); scErr != nil {
 		return fmt.Errorf("bootstrap step=create: %w", scErr)
 	}
@@ -190,13 +189,12 @@ func defaultRunBootstrap(ctx context.Context, cmd *cobra.Command, workspaceRoot,
 	}
 
 	createSessionWrapper := func(ctx context.Context, instanceRoot, repoName, purpose, branchPrefix string, gitInvoker workspace.GitInvoker) (string, string, string, error) {
-		return mcp.CreateSession(ctx, mcp.CreateSessionParams{
-			InstanceRoot:  instanceRoot,
-			Repo:          repoName,
-			Purpose:       purpose,
-			BranchPrefix:  branchPrefix,
-			GitInvoker:    gitInvoker,
-			DaemonStarter: workspace.EnsureDaemonRunning,
+		return worktree.CreateSession(ctx, worktree.CreateSessionParams{
+			InstanceRoot: instanceRoot,
+			Repo:         repoName,
+			Purpose:      purpose,
+			BranchPrefix: branchPrefix,
+			GitInvoker:   gitInvoker,
 		})
 	}
 

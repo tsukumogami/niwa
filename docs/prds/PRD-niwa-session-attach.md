@@ -28,6 +28,12 @@ goals: |
 
 Done
 
+Partially superseded: the attach/detach primitive this PRD specified was retained
+but renamed to `niwa worktree attach`/`detach` and decoupled from the removed mesh
+daemon by the niwa mesh removal; its design is now governed by
+DESIGN-worktree-command-parity. See docs/designs/archive/DESIGN-niwa-session-attach.md.
+Retained as a historical record.
+
 ## Glossary
 
 Terms used throughout this PRD with their precise meaning in the niwa context.

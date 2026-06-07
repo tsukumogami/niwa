@@ -58,12 +58,6 @@ type Applier struct {
 	// Empty string disables convention discovery.
 	ConfigSourceURL string
 
-	// ChannelsSynthesized is true when cfg.Channels.Mesh was synthesized from
-	// --channels or NIWA_CHANNELS rather than a permanent [channels.mesh] config
-	// section. When true, runPipeline emits a one-time notice advising the user
-	// how to persist the setting.
-	ChannelsSynthesized bool
-
 	// SkipPluginInstall mirrors --no-install-plugins (and the
 	// auto_install_plugins = false global config). When true, the
 	// plugin installer emits the skip-notice instead of materializing
@@ -129,12 +123,7 @@ func NewApplier(gh github.Client) *Applier {
 		return EnsureOverlaySnapshot(ctx, url, dir, fetcher, a.Reporter)
 	}
 	aw := &applierWriter{a: a}
-	a.Materializers = []Materializer{
-		&HooksMaterializer{},
-		&SettingsMaterializer{},
-		&EnvMaterializer{Stderr: aw},
-		&FilesMaterializer{Stderr: aw},
-	}
+	a.Materializers = defaultRepoMaterializers(aw)
 	return a
 }
 
@@ -152,11 +141,6 @@ const GlobalConfigOverrideFile = "niwa.toml"
 // shadow, the notice is recorded in DisclosedNotices and suppressed on
 // subsequent runs.
 const noticeProviderShadow = "provider-shadow"
-
-// noticeChannelsFromFlag is the one-time notice key emitted when channels were
-// activated via --channels or NIWA_CHANNELS rather than a [channels.mesh] config
-// section. Hints the user how to persist the setting permanently.
-const noticeChannelsFromFlag = "channels-from-flag"
 
 // noticeConfigConverted is the one-time notice key for the PRD R28 lazy
 // conversion (legacy `.git/`-backed config dir converted to a snapshot).
@@ -189,13 +173,12 @@ type cloneResult struct {
 
 // pipelineOpts configures shared pipeline behavior for Create vs Apply.
 type pipelineOpts struct {
-	existingState       *InstanceState
-	skipGlobal          bool
-	overlayURL          string   // from InstanceState.OverlayURL (empty = no overlay URL in state)
-	noOverlay           bool     // from InstanceState.NoOverlay
-	configSourceURL     string   // original source URL for convention overlay discovery
-	disclosedNotices    []string // workspace-root-level notices already shown to the user
-	channelsSynthesized bool     // true when channels were synthesized by --channels or NIWA_CHANNELS
+	existingState    *InstanceState
+	skipGlobal       bool
+	overlayURL       string   // from InstanceState.OverlayURL (empty = no overlay URL in state)
+	noOverlay        bool     // from InstanceState.NoOverlay
+	configSourceURL  string   // original source URL for convention overlay discovery
+	disclosedNotices []string // workspace-root-level notices already shown to the user
 }
 
 // pipelineResult holds the outputs of the shared pipeline.
@@ -286,13 +269,12 @@ func (a *Applier) Create(ctx context.Context, cfg *config.WorkspaceConfig, confi
 	}
 
 	result, err := a.runPipeline(ctx, cfg, configDir, instanceRoot, now, &pipelineOpts{
-		existingState:       nil,
-		overlayURL:          initOverlayURL,
-		noOverlay:           initNoOverlay,
-		skipGlobal:          initSkipGlobal,
-		configSourceURL:     a.ConfigSourceURL,
-		disclosedNotices:    initDisclosedNotices,
-		channelsSynthesized: a.ChannelsSynthesized,
+		existingState:    nil,
+		overlayURL:       initOverlayURL,
+		noOverlay:        initNoOverlay,
+		skipGlobal:       initSkipGlobal,
+		configSourceURL:  a.ConfigSourceURL,
+		disclosedNotices: initDisclosedNotices,
 	})
 	if err != nil {
 		_ = os.RemoveAll(instanceRoot)
@@ -348,13 +330,6 @@ func (a *Applier) Create(ctx context.Context, cfg *config.WorkspaceConfig, confi
 
 	if err := SaveState(instanceRoot, state); err != nil {
 		return "", fmt.Errorf("saving instance state: %w", err)
-	}
-
-	// Spawn mesh watch daemon if channels are configured and no daemon is alive.
-	if cfg.Channels.IsEnabled() {
-		if err := EnsureDaemonRunning(instanceRoot, nil); err != nil {
-			a.Reporter.DeferWarn("could not start mesh daemon: %v", err)
-		}
 	}
 
 	n := len(result.repoStates)
@@ -426,13 +401,12 @@ func (a *Applier) Apply(ctx context.Context, cfg *config.WorkspaceConfig, config
 	}
 
 	result, err := a.runPipeline(ctx, cfg, configDir, instanceRoot, now, &pipelineOpts{
-		existingState:       existingState,
-		skipGlobal:          existingState.SkipGlobal,
-		overlayURL:          existingState.OverlayURL,
-		noOverlay:           existingState.NoOverlay,
-		configSourceURL:     a.ConfigSourceURL,
-		disclosedNotices:    wsDisclosedNotices,
-		channelsSynthesized: a.ChannelsSynthesized,
+		existingState:    existingState,
+		skipGlobal:       existingState.SkipGlobal,
+		overlayURL:       existingState.OverlayURL,
+		noOverlay:        existingState.NoOverlay,
+		configSourceURL:  a.ConfigSourceURL,
+		disclosedNotices: wsDisclosedNotices,
 	})
 	if err != nil {
 		return err
@@ -533,13 +507,6 @@ func (a *Applier) Apply(ctx context.Context, cfg *config.WorkspaceConfig, config
 		return fmt.Errorf("saving instance state: %w", err)
 	}
 
-	// Spawn mesh watch daemon if channels are configured and no daemon is alive.
-	if cfg.Channels.IsEnabled() {
-		if err := EnsureDaemonRunning(instanceRoot, nil); err != nil {
-			a.Reporter.DeferWarn("could not start mesh daemon: %v", err)
-		}
-	}
-
 	n := len(result.repoStates)
 	if n == 1 {
 		a.Reporter.Log("applied %s (1 repo)", filepath.Base(instanceRoot))
@@ -558,14 +525,6 @@ func (a *Applier) Apply(ctx context.Context, cfg *config.WorkspaceConfig, config
 // clone, and install content. It returns the pipeline results without writing
 // state.
 func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, configDir, instanceRoot string, now time.Time, opts *pipelineOpts) (*pipelineResult, error) {
-	// Step 0: Inject channel hooks into cfg.Claude.Hooks so HooksMaterializer
-	// writes them per-repo. Must run before any per-repo processing so that
-	// every repo in the workspace receives the channel hook scripts.
-	// cfg is a pointer; injectChannelHooks mutates its Hooks map in place.
-	// The hook scripts are written to disk by InstallChannelInfrastructure
-	// (step 4.75) before HooksMaterializer reads them, so the order matters.
-	injectChannelHooks(cfg, instanceRoot)
-
 	// overlayDir is the local clone path of the overlay repo when one is active.
 	// It is local to this pipeline run; downstream steps that need it receive it
 	// as a function argument rather than reading it from the Applier.
@@ -1269,19 +1228,6 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 	}
 	writtenFiles = append(writtenFiles, rootSettingsFiles...)
 
-	// Step 4.75: Install channel infrastructure (sessions dir, sessions.json,
-	// .mcp.json, ## Channels section) when [channels.mesh] is configured.
-	if err := InstallChannelInfrastructure(effectiveCfg, instanceRoot, &writtenFiles); err != nil {
-		return nil, fmt.Errorf("installing channel infrastructure: %w", err)
-	}
-
-	// Emit a one-time hint when channels were activated via --channels or
-	// NIWA_CHANNELS rather than a permanent [channels.mesh] config section.
-	if opts.channelsSynthesized && !sliceContains(opts.disclosedNotices, noticeChannelsFromFlag) {
-		a.Reporter.Defer("Hint: to persist channels for this workspace, add [channels.mesh] to workspace.toml or set NIWA_CHANNELS=1 in your shell profile.")
-		newDisclosures = append(newDisclosures, noticeChannelsFromFlag)
-	}
-
 	// Step 5: Install group-level CLAUDE.md files.
 	installedGroups := map[string]bool{}
 	for _, cr := range classified {
@@ -1342,70 +1288,23 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 	}
 
 	for _, cr := range classified {
-		effective := MergeOverrides(effectiveCfg, cr.Repo.Name)
-
-		// Merge discovered hooks as base; explicit config entries run first per event.
-		if len(discoveredHooks) > 0 {
-			merged := make(config.HooksConfig, len(discoveredHooks)+len(effective.Claude.Hooks))
-			// Start with discovered hooks (converted to relative paths).
-			for event, entries := range discoveredHooks {
-				var relEntries []config.HookEntry
-				for _, entry := range entries {
-					relScripts := make([]string, 0, len(entry.Scripts))
-					for _, absPath := range entry.Scripts {
-						rel, err := filepath.Rel(configDir, absPath)
-						if err != nil {
-							return nil, fmt.Errorf("materializer hooks: computing relative path for %s: %w", absPath, err)
-						}
-						relScripts = append(relScripts, rel)
-					}
-					relEntries = append(relEntries, config.HookEntry{
-						Matcher: entry.Matcher,
-						Scripts: relScripts,
-					})
-				}
-				merged[event] = relEntries
-			}
-			// Explicit config runs before discovered hooks for the same event.
-			// Channel hooks injected by injectChannelHooks are in effective.Claude.Hooks
-			// and must not silently discard user-authored discovered hooks.
-			for event, entries := range effective.Claude.Hooks {
-				if existing, ok := merged[event]; ok {
-					merged[event] = append(entries, existing...)
-				} else {
-					merged[event] = entries
-				}
-			}
-			effective.Claude.Hooks = merged
-		}
-
 		repoDir := filepath.Join(instanceRoot, cr.Group, cr.Repo.Name)
-		mctx := &MaterializeContext{
-			Config:                effectiveCfg,
-			Effective:             effective,
+		files, err := runRepoMaterializers(a.Materializers, repoMaterializeInputs{
+			Cfg:                   effectiveCfg,
+			ConfigDir:             configDir,
 			RepoName:              cr.Repo.Name,
 			RepoDir:               repoDir,
-			ConfigDir:             configDir,
+			DiscoveredHooks:       discoveredHooks,
 			DiscoveredEnv:         discoveredEnv,
 			RepoIndex:             repoIndex,
 			SourceTuples:          sourceTuples,
 			AllowPlaintextSecrets: a.AllowPlaintextSecrets,
 			Stderr:                a.Reporter.Writer(),
+		})
+		if err != nil {
+			return nil, err
 		}
-
-		claudeOn := ClaudeEnabled(effectiveCfg, cr.Repo.Name)
-		for _, m := range a.Materializers {
-			// Skip hooks and settings materializers when claude is disabled.
-			if !claudeOn && (m.Name() == "hooks" || m.Name() == "settings") {
-				continue
-			}
-
-			files, err := m.Materialize(mctx)
-			if err != nil {
-				return nil, fmt.Errorf("materializer %s for repo %s: %w", m.Name(), cr.Repo.Name, err)
-			}
-			writtenFiles = append(writtenFiles, files...)
-		}
+		writtenFiles = append(writtenFiles, files...)
 	}
 
 	// Step 6.75: Run repo-provided setup scripts.

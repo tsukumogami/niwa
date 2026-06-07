@@ -24,6 +24,12 @@ goals: |
 
 Done
 
+Superseded: the per-worktree mesh daemon and task-delegation lifecycle this PRD
+specified were removed by the niwa mesh removal. The git-worktree session model it
+introduced survives, governed now by DESIGN-worktree-command-parity (the `niwa
+worktree` commands). See docs/designs/archive/DESIGN-mesh-session-lifecycle.md.
+Retained as a historical record.
+
 ## Problem Statement
 
 When a coordinator delegates a sequence of tasks to the same repo agent—for example,
