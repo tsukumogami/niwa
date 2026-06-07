@@ -37,6 +37,6 @@ init → create → apply workflow, add a `@critical` Gherkin scenario in
 - `docs/guides/init-bootstrap.md` — `niwa init --bootstrap` flow: scaffold template, visibility lookup, branch-name format, success block
 - `docs/guides/machine-identity-vault-sync.md` — opting into machine-identity sync from your personal vault, vault key schema, audit surfaces
 - `docs/guides/one-time-notices.md` — how to add informational messages that appear once per workspace instance
-- `docs/guides/sessions.md` — session lifecycle: worktree sessions, conversation continuity, CLI reference
+- `docs/guides/worktree.md` — `niwa worktree` lifecycle: create/apply/destroy/list/attach/detach, content install, deprecation alias
 - `docs/guides/vault-integration.md` — vault provider architecture and acceptance coverage
 - `docs/guides/workspace-config-sources.md` — config source resolution, snapshot model, and discovery conventions
