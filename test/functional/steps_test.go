@@ -1067,6 +1067,16 @@ func iWriteFileToRepoInInstance(ctx context.Context, content, relFilePath, group
 	return ctx, nil
 }
 
+// iWriteFileBodyToRepoInInstance is the multi-line variant of
+// iWriteFileToRepoInInstance: it writes a Gherkin docstring body verbatim to a
+// file inside a managed repo directory. Use this when the file content spans
+// multiple lines (e.g. a .env.example with several keys, or an inline
+// annotation that must sit on its own line), which the single-line
+// double-quoted form cannot express.
+func iWriteFileBodyToRepoInInstance(ctx context.Context, relFilePath, groupRepo, instanceName string, body *godog.DocString) (context.Context, error) {
+	return iWriteFileToRepoInInstance(ctx, body.Content, relFilePath, groupRepo, instanceName)
+}
+
 // noNiwaTempFilesRemain scans the scenario's scoped TMPDIR for wrapper
 // leftovers. TMPDIR is set to s.tmpDir in buildEnv, so the wrapper's
 // `mktemp` creates files there; its `rm -f` should clean them up. Any
