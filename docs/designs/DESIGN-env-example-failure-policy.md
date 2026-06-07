@@ -161,11 +161,9 @@ a given key and category by walking, most-specific first:
 undeclared key's action, prints a value-free diagnostic naming the key and
 category, and either accumulates a failure (`fail`) or proceeds (`warn`). When an
 inline annotation lowers an otherwise-configured `fail` to `warn`, a distinct,
-greppable diagnostic is emitted, and an operator `ignore_inline_annotations`
-switch (workspace/global) disables inline annotations entirely for operators who
-do not want repo-supplied exemptions honored. The public-remote branch is
-removed. `--allow-plaintext-secrets` downgrades all resolved failures to warnings
-with per-key audit output.
+greppable diagnostic is emitted so the downgrade is observable. The public-remote
+branch is removed. `--allow-plaintext-secrets` downgrades all resolved failures to
+warnings with per-key audit output.
 
 This works as a whole because it reuses the workspace/per-repo cascade idiom,
 adds the user rung explicitly where none existed, isolates the behavior change to
@@ -206,8 +204,8 @@ the pre-pass, and keeps every broadened or repo-influenced control auditable.
 
 - Remove the `EnumerateGitHubRemotes`/`publicRemotes`/`haveGit` branch entirely.
 - For each undeclared, non-excluded key: classify -> resolve action via
-  `EffectiveEnvExamplePolicy` (passing the inline annotation, honoring
-  `ignore_inline_annotations`) -> if `AllowPlaintextSecrets`, force `warn` and
+  `EffectiveEnvExamplePolicy` (passing the inline annotation) -> if
+  `AllowPlaintextSecrets`, force `warn` and
   emit the audit diagnostic -> emit the value-free key+category diagnostic ->
   on `fail` accumulate an error, on `warn` continue. Failure aggregation and the
   final non-zero exit keep their current shape.
@@ -230,7 +228,7 @@ classify + resolve -> warn/fail.
 1. **Config types + resolver.** Add `Action`, `EnvExamplePolicy`, the struct
    fields (incl. `GlobalOverride` + its deep-copy/merge), and
    `EffectiveEnvExamplePolicy`; unit-test every precedence rung, inheritance
-   fall-through, inline-vs-config, `ignore_inline_annotations`, and default warn.
+   fall-through, inline-vs-config, and default warn.
 2. **Category enum.** Change `classifyEnvValue` to return the typed category;
    update its caller and tests.
 3. **Inline annotation parsing.** Add the quoting-independent extraction pass to
@@ -238,20 +236,17 @@ classify + resolve -> warn/fail.
    (no payload echo), spoofed `# niwa:` inside quoted values, and no-op on
    declared/excluded keys.
 4. **Pre-pass rewire + plumbing.** Resolve per key+category, apply warn/fail,
-   honor the flag downgrade with audit output, remove the public-remote branch,
-   thread the global policy through `MaterializeContext`; update pre-pass tests.
-5. **One-time upgrade notice.** Because the default flips from fail to warn,
-   existing CI relying on a non-zero exit silently passes after upgrade. Add a
-   one-time notice (mechanism in `docs/guides/one-time-notices.md`) announcing
-   warn-by-default and how to restore failing, shown once per instance.
-6. **Functional tests.** Add tagged Gherkin scenarios in
+   honor the flag downgrade with audit output, emit the greppable diagnostic when
+   an inline annotation lowers a configured `fail`, remove the public-remote
+   branch, thread the global policy through `MaterializeContext`; update pre-pass
+   tests.
+5. **Functional tests.** Add tagged Gherkin scenarios in
    `test/functional/features/` covering every PRD acceptance criterion (warn
    default, per-category fail, the three precedence levels, inline-vs-config
    override, per-run downgrade, remote-visibility removal, scan-disabled, and a
    value-bytes grep over stderr for no-secret-in-output).
-7. **Docs.** Document the policy block, inline annotation, the
-   `ignore_inline_annotations` switch, and the warn-by-default change in the
-   relevant config/contributor guide(s).
+6. **Docs.** Document the policy block, inline annotation, and the warn-by-default
+   change in the relevant config/contributor guide(s).
 
 ## Security Considerations
 
@@ -259,28 +254,26 @@ classify + resolve -> warn/fail.
   means a real secret in a public repo's `.env.example` no longer blocks `apply`
   by default; the highest-severity instance is a live vendor token in a public
   repo, which was the only remaining fail-closed floor. Mitigations: the warning
-  still fires every apply; an operator restores blocking with a one-line category
-  policy; and the one-time upgrade notice (step 5) surfaces the change so it is
-  not discovered silently.
+  still fires every apply, and an operator restores blocking with a one-line
+  category policy.
 - **Inline annotations are repo-controlled and outrank operator category policy.**
   Most-specific-wins means a repo's inline `# niwa: warn` on a key overrides an
   operator's category-level `fail`. The PRD/BRIEF settled this (the operator wins
   only by setting a per-variable entry), which leaves a supply-chain gap: a repo
-  can exempt a key the operator never inspects, amplified by warn-by-default alarm
-  fatigue. Documentation alone is not a control, so the design adds two:
-  (a) a distinct, greppable diagnostic whenever an inline annotation lowers a
-  configured `fail` to `warn`, and (b) an operator `ignore_inline_annotations`
-  switch (workspace/global) that disregards all inline annotations. The
-  authority-over-specificity alternative (operator `fail` is a floor inline cannot
-  lower) was rejected as contradicting the settled most-specific-wins rule; the
-  switch gives operators that posture explicitly instead. **This switch is a
-  design-introduced control beyond the PRD's requirements -- flagged for review.**
+  can exempt a key the operator never inspects. The mitigation is observability,
+  not silence: a distinct, greppable diagnostic fires whenever an inline
+  annotation lowers a configured `fail` to `warn`, so the downgrade is visible and
+  the operator's recourse (a per-variable config entry) is targeted. A broader
+  operator opt-out (ignoring inline annotations wholesale) was considered and
+  deferred -- the per-variable override plus the diagnostic cover the need without
+  the extra config surface, and the switch can be added later if the diagnostic
+  shows inline downgrades happening in practice.
 - **No secret bytes in diagnostics (R10/R22).** The new paths -- the warn
   diagnostic, the downgrade audit line, and the unknown-marker warning -- are all
   new string producers. The design binds them to the existing guarantee: they
   print the key name and the category enum only, never the value, a value
   fragment, the matched vendor prefix, the entropy score, or the raw marker
-  payload. A value-bytes grep over stderr (step 6) enforces it. (This also
+  payload. A value-bytes grep over stderr (step 5) enforces it. (This also
   resolves the latent question of whether the current `"known prefix sk_live_"`
   reason is a "fragment": the new paths print the category, not the prefix.)
 - **Bypass blast radius widened.** `--allow-plaintext-secrets` now downgrades all
@@ -304,14 +297,14 @@ classify + resolve -> warn/fail.
 **Negative / trade-offs:**
 
 - Weaker default posture (warn, not fail) until an operator opts in.
-- Repo-controlled inline exemptions are trusted unless overridden per variable or
-  disabled via `ignore_inline_annotations`.
+- Repo-controlled inline exemptions are trusted unless overridden per variable;
+  the greppable diagnostic makes such downgrades visible rather than silent.
 - New net-new global-config plumbing (field, deep-copy, merge, MaterializeContext)
   and a new parse path in `.env.example`.
 - The shared bypass flag now has a run-wide blast radius.
 
 **Mitigations:**
 
-- Loud per-key warnings; one-line opt-in to failing; per-variable override and
-  the ignore-inline switch for repo-supplied exemptions; per-key audit output for
-  bypass downgrades; a one-time upgrade notice for the default change.
+- Loud per-key warnings; one-line opt-in to failing; per-variable override for
+  repo-supplied exemptions; greppable diagnostics for inline-driven downgrades;
+  per-key audit output for bypass downgrades.

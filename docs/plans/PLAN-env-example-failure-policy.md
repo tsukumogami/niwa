@@ -4,7 +4,7 @@ status: Active
 execution_mode: single-pr
 upstream: docs/designs/DESIGN-env-example-failure-policy.md
 milestone: "env-example failure policy"
-issue_count: 7
+issue_count: 6
 ---
 
 # PLAN: env-example failure policy
@@ -51,10 +51,8 @@ most-specific-wins cascade.
   resolves most-specific-first: operator per-variable (per-repo `vars` ->
   workspace `vars`) -> inline annotation -> per-category (per-repo -> workspace ->
   global) -> default `warn`, with unset levels inheriting the next-broader level.
-- [ ] An `ignore_inline_annotations` switch (workspace/global) makes the resolver
-  disregard the inline argument.
 - [ ] Unit tests cover every precedence rung, inheritance fall-through,
-  inline-vs-config, `ignore_inline_annotations`, and the warn default.
+  inline-vs-config, and the warn default.
 
 **Dependencies**: None
 
@@ -102,9 +100,8 @@ remove the public-remote branch.
 
 **Acceptance Criteria**:
 - [ ] For each undeclared, non-excluded key the pre-pass classifies, resolves the
-  action via `EffectiveEnvExamplePolicy` (passing the inline annotation, honoring
-  `ignore_inline_annotations`), and warns or fails accordingly; warn-by-default
-  holds when nothing is configured.
+  action via `EffectiveEnvExamplePolicy` (passing the inline annotation), and
+  warns or fails accordingly; warn-by-default holds when nothing is configured.
 - [ ] The `EnumerateGitHubRemotes`/`publicRemotes`/`haveGit` branch is removed.
 - [ ] `--allow-plaintext-secrets` downgrades every resolved `fail` to `warn` for
   the run, emitting a per-key audit diagnostic; an inline annotation lowering a
@@ -119,20 +116,7 @@ remove the public-remote branch.
 **Type**: code
 **Files**: `internal/workspace/env_example_prepass.go`, `internal/workspace/materialize.go`, `internal/workspace/apply.go`
 
-### Issue 5: feat(cli): one-time warn-by-default upgrade notice
-
-**Goal**: Announce the default change once per instance.
-
-**Acceptance Criteria**:
-- [ ] A one-time notice (per `docs/guides/one-time-notices.md`) states that
-  `.env.example` detections now warn by default and shows how to restore failing.
-- [ ] The notice is shown at most once per workspace instance.
-
-**Dependencies**: Blocked by <<ISSUE:4>>
-
-**Type**: code
-
-### Issue 6: test(functional): env-example failure policy scenarios
+### Issue 5: test(functional): env-example failure policy scenarios
 
 **Goal**: Cover every PRD acceptance criterion end-to-end.
 
@@ -145,19 +129,19 @@ remove the public-remote branch.
   appear in any diagnostic.
 - [ ] The suite passes.
 
-**Dependencies**: Blocked by <<ISSUE:4>>, <<ISSUE:5>>
+**Dependencies**: Blocked by <<ISSUE:4>>
 
 **Type**: code
 **Files**: `test/functional/features/env-example-failure-policy.feature`
 
-### Issue 7: docs: document the env-example failure policy
+### Issue 6: docs: document the env-example failure policy
 
 **Goal**: Document the new configuration and behavior for users.
 
 **Acceptance Criteria**:
 - [ ] The relevant config/contributor guide documents the `[env_example_policy]`
-  block, the three levels and precedence, the inline annotation, the
-  `ignore_inline_annotations` switch, and the warn-by-default change.
+  block, the three levels and precedence, the inline annotation, and the
+  warn-by-default change.
 
 **Dependencies**: Blocked by <<ISSUE:4>>
 
@@ -172,9 +156,8 @@ graph TD
     I2["#2 typed category"]:::pending
     I3["#3 inline annotation parse"]:::pending
     I4["#4 pre-pass apply policy"]:::pending
-    I5["#5 upgrade notice"]:::pending
-    I6["#6 functional tests"]:::pending
-    I7["#7 docs"]:::pending
+    I5["#5 functional tests"]:::pending
+    I6["#6 docs"]:::pending
 
     I1 --> I3
     I1 --> I4
@@ -182,18 +165,15 @@ graph TD
     I3 --> I4
     I4 --> I5
     I4 --> I6
-    I4 --> I7
-    I5 --> I6
 
     classDef pending fill:#fff,stroke:#999,color:#333;
 ```
 
 ## Implementation Sequence
 
-- **Critical path:** Issue 1 -> Issue 3 -> Issue 4 -> Issue 5 -> Issue 6.
+- **Critical path:** Issue 1 -> Issue 3 -> Issue 4 -> Issue 5.
 - **Parallelizable:** Issues 1 and 2 can start together (independent). After
-  Issue 4, Issues 5 and 7 can proceed in parallel; Issue 6 follows Issue 5 so the
-  upgrade-notice path is exercised.
+  Issue 4, Issues 5 (functional tests) and 6 (docs) can proceed in parallel.
 - **Highest-risk unit:** Issue 4 (the behavior change, the bypass blast radius, and
   the value-free-diagnostics guarantee converge there); land it with its unit
-  tests before the functional suite in Issue 6.
+  tests before the functional suite in Issue 5.
