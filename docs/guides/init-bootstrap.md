@@ -34,7 +34,7 @@ When this succeeds you get:
 - A registry entry for `my-project` pointing at the new workspace.
 
 The shell wrapper drops you into the worktree directory automatically
-(via the same landing-path mechanism `niwa session create` uses). Push
+(via the same landing-path mechanism `niwa worktree create` uses). Push
 the bootstrap branch when you're ready:
 
 ```bash
@@ -149,7 +149,7 @@ after substituting the four path placeholders.
 The landing-path file (the worktree absolute path) is also written
 to `NIWA_RESPONSE_FILE` when the shell wrapper is sourced, so a
 sourced `niwa init --bootstrap` leaves your shell inside the
-worktree the same way `niwa session create` does.
+worktree the same way `niwa worktree create` does.
 
 ## Failure surfaces
 
@@ -180,10 +180,11 @@ so you can retry from a real niwa command rather than starting over:
   `<cwd>/<name>/.niwa/workspace.toml` is preserved; the instance
   directory is removed. Retry with `niwa create` from the workspace
   root.
-- **session-create step fails** (e.g., daemon-spawn timeout): stderr
-  prefix `bootstrap step=session-create:`. The workspace AND the
+- **session-create step fails** (e.g., `git worktree add` failure or a
+  content-install error): stderr prefix `bootstrap step=session-create:`.
+  The workspace AND the
   instance are preserved; the worktree and bootstrap branch are
-  cleaned up. Retry with `niwa session create <repo> bootstrap`.
+  cleaned up. Retry with `niwa worktree create <repo> bootstrap`.
 
 The rollback note printed alongside the prefix names the next
 command verbatim so you don't have to look it up.
@@ -208,9 +209,6 @@ visibility = "<vis-value>"
 # no live visibility, so name membership is what places the repo in a group.
 repos = ["<bootstrap-repo>"]
 
-# Bootstrap enabled mesh channels. Remove this block (and the [channels.mesh] line below) to disable.
-[channels.mesh]
-
 # CLAUDE.md content hierarchy: drop a workspace.md in .niwa/claude/ to populate.
 # [claude.content.workspace]
 # source = "workspace.md"
@@ -232,9 +230,6 @@ The `[[sources]]` allow-list scopes the first apply to the bootstrap
 repo only. Other repos in the same org are not cloned — edit the
 scaffold after the fact to broaden the scope.
 
-The `[channels.mesh]` block makes the workspace mesh-ready out of
-the box. Remove the comment line and the block to disable.
-
 The `.niwa/claude/.gitkeep` placeholder file (zero bytes) is written
 alongside the scaffold so the content directory pushes cleanly when
 you later uncomment `[claude.content.workspace]`.
@@ -243,7 +238,7 @@ you later uncomment `[claude.content.workspace]`.
 
 - `docs/guides/workspace-config-sources.md` — full schema for the
   config file the scaffold produces.
-- `docs/guides/sessions.md` — what the session-create step produces
-  and how to navigate session worktrees.
+- `docs/guides/worktree.md` — the `niwa worktree` lifecycle: what
+  worktree creation produces and how to navigate worktrees.
 - `docs/guides/functional-testing.md` — how the end-to-end Gherkin
   scenarios for this feature drive the GitHub fake and the PTY step.
