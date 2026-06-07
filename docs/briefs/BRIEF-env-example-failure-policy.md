@@ -10,8 +10,9 @@ problem: |
 outcome: |
   An owner runs apply and probable-secret detections warn without blocking
   by default. Owners opt into hard failures and tune, at user, project, and
-  variable granularity, which detections fail versus warn, so a security
-  team can restore strict blocking exactly where it wants it.
+  variable granularity, which detections fail versus warn, with the most
+  specific setting winning, so a security team can restore strict blocking
+  exactly where it wants it.
 ---
 
 # BRIEF: env-example failure policy
@@ -21,9 +22,12 @@ outcome: |
 Draft
 
 This brief frames the failure-handling policy for the existing `.env.example`
-secret pre-pass. It stops at problem, outcome, journeys, and scope; the
-downstream PRD owns the config schema, precedence rules, and the fate of the
-existing per-invocation bypass flag.
+secret pre-pass. It settles the user-facing behavior: the warn-by-default
+posture, the per-detection-category granularity, the user/project/variable
+precedence and inheritance, the two sources of a variable-level exemption, the
+per-run escape hatch, and the removal of the remote-visibility special case. The
+downstream PRD and design own only mechanism: the exact config schema, key
+names, and inline-annotation syntax.
 
 ## Problem Statement
 
@@ -56,13 +60,17 @@ the run completes. Probable-secret detections surface as warnings the owner can
 read and act on, but they no longer halt the apply on their own. The owner stays
 informed without being blocked by false positives on placeholder values.
 
-When an owner *wants* strict blocking, they turn it on deliberately. A
-security-conscious operator can make probable-secret detections fail across all
-their workspaces; a project can set its own policy; a single known-placeholder
-variable can be exempted even when its project blocks by default. The owner
-decides where on the warn-to-fail spectrum each detection sits, at the
-granularity that matches how they work, rather than accepting one global hard-fail
-or switching detection off entirely.
+When an owner *wants* strict blocking, they turn it on deliberately, and they can
+turn it on with precision: failures are configurable per detection category, so
+an operator can fail on recognized vendor tokens while still only warning on
+entropy hits. The response is set at user, project, or variable granularity.
+
+When settings disagree, the most specific one wins: a single variable's policy
+overrides its project's, which overrides the operator's personal default. Any
+level left unset inherits the broader one, and warn is the floor when nothing is
+set anywhere. The owner decides where on the warn-to-fail spectrum each detection
+sits, at the granularity that matches how they work, rather than accepting one
+global hard-fail or switching detection off entirely.
 
 ## User Journeys
 
@@ -74,13 +82,13 @@ detection emits a warning naming the key and the run completes successfully. The
 developer sees the signal, recognizes the value as a placeholder, and moves on
 without editing config or passing a flag.
 
-### Security-conscious operator opts into blocking everywhere
+### Security-conscious operator opts into blocking, by category
 
-An operator who treats any probable secret in `.env.example` as a release-blocker
-sets a failure policy in their personal niwa configuration so that probable-secret
-detections fail the apply. From then on, every workspace they apply enforces hard
-blocking on detections, restoring the old strict posture by their own choice
-rather than by default.
+An operator who treats recognized vendor tokens in `.env.example` as a
+release-blocker sets a failure policy in their personal niwa configuration so that
+vendor-token detections fail the apply, while entropy detections stay warnings.
+From then on, every workspace they apply enforces hard blocking on the category
+they chose, restoring strict handling on their own terms rather than by default.
 
 ### Project maintainer sets a project-level policy
 
@@ -88,34 +96,56 @@ A maintainer responsible for one workspace wants stricter handling for that
 project than the operator's personal default provides (or wants to relax it). They
 declare a failure policy at the project level. When that workspace is applied, the
 project policy governs, overriding the user-level default for that workspace's
-repos.
+repos, while any variable-level setting still wins over the project policy.
 
-### Known placeholder is exempted at the variable level
+### Repo documents a known placeholder inline
 
-A project blocks on probable-secret detections, but one variable in a repo's
-`.env.example` is a documented placeholder that scores high. The owner marks that
-single variable as warn-only at the variable level. Apply warns on that key and
-proceeds, while still blocking on any other probable-secret detection in the same
-file.
+A repo author knows one value in their `.env.example` scores high but is a
+documented placeholder. They mark that single variable warn-only with an inline
+annotation in the file itself. Anyone applying a workspace that includes the repo
+has the annotation honored: apply warns on that key and proceeds, while every
+other key in the file still gets the governing project or user policy.
+
+### Operator overrides a repo's inline exemption
+
+An operator does not trust a repo's self-applied inline exemption for a particular
+key and wants it to fail regardless of what the repo declared. They set a
+variable-level policy for that key in their own workspace configuration. On apply,
+the operator's variable-level setting wins over the repo's inline annotation, and
+the key fails as the operator intends.
 
 ## Scope Boundary
 
 **In:**
 
-- A per-detection failure policy with at least a warn response and a fail
-  response, replacing the pre-pass's single always-hard-fail behavior.
-- A default posture in which detections warn and do not block the apply; hard
+- A per-detection-category failure policy with a warn response and a fail
+  response, replacing the pre-pass's single always-hard-fail behavior. The
+  category distinguishes at least vendor-token matches from entropy detections, so
+  the two can be set independently.
+- A warn-by-default posture: detections warn and do not block the apply; hard
   failures are opt-in.
-- Resolution of the policy at user, project, and variable granularity, with a
-  defined precedence when the levels disagree.
-- The configuration surface(s) through which the policy is declared at each
-  level (the downstream PRD and design pick the exact schema and key names).
+- Resolution at user, project, and variable granularity, with most-specific-wins
+  precedence (variable over project over user), inheritance of any unset level
+  from the broader one, and warn as the default when nothing is set.
+- Two sources for a variable-level policy: an inline annotation in the repo's
+  `.env.example`, and an explicit entry in the operator's workspace configuration,
+  with the operator's configuration winning when both name the same variable.
+- Retaining the existing per-invocation bypass as a per-run override that
+  downgrades failures to warnings for a single apply.
+- Removing the remote-visibility special case from the pre-pass: no behavior is
+  conditioned on whether a repo's remote is public.
+- The configuration surfaces through which the policy is declared at each level
+  (the downstream PRD and design pick the exact schema, key names, and
+  annotation syntax).
 
 **Out:**
 
 - Changes to the detection heuristics themselves. The entropy threshold value and
   the blocklist/allowlist contents stay as they are; this feature governs the
   response to a detection, not how a detection is made.
+- Conditioning policy on remote visibility. It is removed as a default and
+  deliberately not reintroduced as a configurable axis; an operator who wants
+  strict handling for exposed repos sets a failing policy by level instead.
 - Replacing the existing whole-scan on/off control. The ability to disable the
   `.env.example` scan entirely for a repo or workspace remains the "stop looking"
   knob; this feature adds graduated responses between that and a hard fail, it
@@ -123,20 +153,6 @@ file.
 - Secret handling beyond the `.env.example` pre-pass: runtime scanning of real
   environment files at materialization, and vault-backed secret storage, are
   separate concerns.
-
-## Open Questions
-
-These framing details are deferred to the downstream PRD; none blocks the framing.
-
-- The exact configuration schema and key names for declaring the policy at each
-  level, and where "user-level" configuration physically lives.
-- The precedence rule when user, project, and variable policies disagree
-  (most-specific-wins is the working assumption; the PRD confirms it).
-- The granularity of the policy key: a single warn/fail switch for all detections
-  versus a policy keyed per detection category (vendor-token match versus entropy).
-- Whether the existing per-invocation bypass flag and the public-remote
-  special-case branch are retained, folded into the new policy, or deprecated once
-  failures are opt-in.
 
 ## References
 
