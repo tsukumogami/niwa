@@ -1,6 +1,6 @@
 ---
 schema: brief/v1
-status: Accepted
+status: Done
 problem: |
   niwa's .env.example pre-pass hard-fails apply on any probable-secret
   detection, but .env.example files hold placeholders that routinely trip
@@ -19,7 +19,7 @@ outcome: |
 
 ## Status
 
-Accepted
+Done
 
 This brief frames the failure-handling policy for the existing `.env.example`
 secret pre-pass. It settles the user-facing behavior: the warn-by-default

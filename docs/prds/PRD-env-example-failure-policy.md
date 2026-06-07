@@ -1,5 +1,5 @@
 ---
-status: In Progress
+status: Done
 problem: |
   niwa's .env.example pre-pass has one response to a probable-secret
   detection -- abort apply with a non-zero exit -- and the only controls are
@@ -20,7 +20,7 @@ upstream: docs/briefs/BRIEF-env-example-failure-policy.md
 
 ## Status
 
-In Progress
+Done
 
 ## Problem Statement
 
