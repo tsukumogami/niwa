@@ -29,6 +29,14 @@ goals: |
 
 Delivered
 
+> **Update — superseded failure handling (env-example failure policy).**
+> The hard-fail-on-probable-secret behavior this PRD delivered is
+> superseded: detections now warn by default, with an opt-in, per-category
+> fail/warn policy resolved at user, project, and variable granularity. The
+> `.env.example` integration this PRD defines otherwise stands. See
+> `docs/prds/PRD-env-example-failure-policy.md` and
+> `docs/designs/current/DESIGN-env-example-failure-policy.md`.
+
 ## Problem Statement
 
 Application repositories in the Node/JavaScript ecosystem almost
