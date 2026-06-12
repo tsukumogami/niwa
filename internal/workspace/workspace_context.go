@@ -166,6 +166,12 @@ func InstallWorkspaceRootSettings(cfg *config.WorkspaceConfig, configDir, instan
 
 	// Copy hook scripts to .claude/hooks/ (no .local rename for instance root).
 	installedHooks := make(map[string][]InstalledHookEntry)
+	// installedHookPaths is the flat list of hook scripts this apply actually
+	// installed. It — not a walk of the output directory — is what gets tracked
+	// in ManagedFiles, so a hook script no longer declared by any config (for
+	// example one synthesized by a since-removed feature) is left out of the
+	// produced set and pruned by cleanRemovedFiles on the next apply.
+	var installedHookPaths []string
 	if len(effective.Claude.Hooks) > 0 {
 		for event, entries := range effective.Claude.Hooks {
 			for _, entry := range entries {
@@ -189,6 +195,7 @@ func InstallWorkspaceRootSettings(cfg *config.WorkspaceConfig, configDir, instan
 					os.WriteFile(target, data, 0o755)
 
 					installedPaths = append(installedPaths, target)
+					installedHookPaths = append(installedHookPaths, target)
 				}
 				installedHooks[event] = append(installedHooks[event], InstalledHookEntry{
 					Matcher: entry.Matcher,
@@ -252,14 +259,11 @@ func InstallWorkspaceRootSettings(cfg *config.WorkspaceConfig, configDir, instan
 
 	var written []string
 	written = append(written, settingsPath)
-	// Collect hook files.
-	hooksDir := filepath.Join(claudeDir, "hooks")
-	filepath.Walk(hooksDir, func(path string, info os.FileInfo, err error) error {
-		if err == nil && !info.IsDir() {
-			written = append(written, path)
-		}
-		return nil
-	})
+	// Track only the hook scripts this apply installed, not every file present
+	// in the output directory. Walking .claude/hooks/ here would re-adopt
+	// orphaned scripts left by removed features, marking them as produced and
+	// shielding them from cleanRemovedFiles forever.
+	written = append(written, installedHookPaths...)
 
 	return written, nil
 }
