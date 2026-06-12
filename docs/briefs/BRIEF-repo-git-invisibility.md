@@ -1,6 +1,6 @@
 ---
 schema: brief/v1
-status: Draft
+status: Accepted
 problem: |
   niwa is meant to leave no trace in the git history of the repos it
   manages, but that invisibility depends on the user adding *.local* to
@@ -23,7 +23,7 @@ motivating_context: |
 
 ## Status
 
-Draft
+Accepted
 
 Authored as the BRIEF in a BRIEF -> PRD -> DESIGN -> PLAN chain for the
 repo-git-invisibility feature. The downstream PRD owns the requirements;
@@ -129,12 +129,3 @@ future change.
   output.
 - The content of the user's own committed `.gitignore`. niwa stops
   depending on it; niwa does not take over managing it.
-
-## Open Questions
-
-- Whether niwa should retroactively clean working trees already polluted
-  by older niwa versions, or only guarantee invisibility going forward.
-  The PRD owns this requirement boundary.
-- The exact set of trees and operations the automated check must cover
-  (apply alone, worktree creation, re-sync, or all of them) to count the
-  guarantee as verified. The PRD nails the acceptance criteria.
