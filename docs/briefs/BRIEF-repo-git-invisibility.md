@@ -73,32 +73,32 @@ by every contributor remembering a convention.
 
 ## User Journeys
 
-### Dana adopts niwa on an existing repository
+### A developer adopts niwa on an existing repository
 
-Dana runs niwa to manage a repository whose committed `.gitignore` has
-never heard of niwa and contains no `*.local*` pattern. niwa applies its
-configuration, writing its context and settings files into the working
-tree. Dana runs `git status` and sees nothing out of place -- the
-repository is exactly as clean as before niwa touched it. Dana never had
-to edit `.gitignore` to get there.
+A developer runs niwa to manage a repository whose committed `.gitignore`
+has never heard of niwa and contains no `*.local*` pattern. niwa applies
+its configuration, writing its context and settings files into the
+working tree. The developer runs `git status` and sees nothing out of
+place -- the repository is exactly as clean as before niwa touched it,
+without ever having edited `.gitignore`.
 
-### Raj spins up a worktree to start a task
+### A developer spins up a worktree to start a task
 
-Raj uses niwa to create a worktree for a piece of work. niwa checks out
-the branch and scaffolds its per-worktree state into the working tree.
-Raj runs `git status` in the new worktree before writing a line of code
-and sees a clean tree -- niwa's scaffolding is invisible, so the only
-changes that will ever appear are the ones Raj makes.
+A developer uses niwa to create a worktree for a piece of work. niwa
+checks out the branch and scaffolds its per-worktree state into the
+working tree. Running `git status` in the new worktree before writing a
+line of code shows a clean tree -- niwa's scaffolding is invisible, so
+the only changes that ever appear are the developer's own.
 
-### Mia adds a capability that writes a new file
+### A contributor adds a capability that writes a new file
 
-Mia is extending niwa with a feature that materializes a new file into
-managed repositories. She writes the code and runs the test suite. A test
-fails, reporting that her new file appears as untracked in a managed
-repository's `git status`. The failure tells Mia her file is leaking
-before she opens a pull request; she adjusts so niwa keeps the file
-invisible, and the test passes. The same test guards the boundary in CI
-for every future change.
+A contributor extends niwa with a feature that materializes a new file
+into managed repositories. They write the code and run the test suite. A
+test fails, reporting that the new file appears as untracked in a managed
+repository's `git status`. The failure surfaces the leak before a pull
+request opens; the contributor adjusts so niwa keeps the file invisible,
+and the test passes. The same test guards the boundary in CI for every
+future change.
 
 ## Scope Boundary
 
