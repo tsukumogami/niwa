@@ -812,7 +812,14 @@ func (e *EnvMaterializer) Materialize(ctx *MaterializeContext) ([]string, error)
 			return nil, fmt.Errorf("writing env output %q: %w", tgt.Path, err)
 		}
 		ctx.recordSources(abs, sources)
-		ctx.EnvOutputs = append(ctx.EnvOutputs, tgt.Path)
+		// Only custom names (not already matched by the base "*.local*"
+		// pattern) need an extra exclude entry. Recording the default
+		// .local.env here would add a redundant exclude line and change the
+		// managed block for repos that configured nothing -- so a repo with no
+		// env_output keeps the exact pre-feature exclude coverage.
+		if !matchedByBasePattern(tgt.Path) {
+			ctx.EnvOutputs = append(ctx.EnvOutputs, tgt.Path)
+		}
 		written = append(written, abs)
 	}
 
