@@ -162,33 +162,17 @@ guides for `env_output` and the inference table.
 **Type**: code
 **Files**: `test/functional/features/secret-output-targets.feature`, `docs/guides/vault-integration.md`, `docs/guides/workspace-config-sources.md`
 
-## Implementation Issues
-
-N/A -- single-pr mode. The Issue Outlines above are the decomposition;
-no GitHub issues or milestone are created.
-
-## Dependency Graph
-
-```mermaid
-graph TD
-    I1["Issue 1: config env_output"]
-    I2["Issue 2: envformat writers"]
-    I3["Issue 3: gitexclude extraPatterns"]
-    I4["Issue 4: materializer wiring"]
-    I5["Issue 5: functional + docs"]
-    I1 --> I4
-    I2 --> I4
-    I3 --> I4
-    I4 --> I5
-```
-
 ## Implementation Sequence
+
+Single-pr mode: no GitHub issues or milestone are created, so the
+dependency relationships are carried by the per-issue **Dependencies**
+fields above rather than a separate graph. The order:
 
 - **Parallelizable foundation:** Issues 1, 2, and 3 have no
   interdependency and can be built concurrently. Each is independently
   unit-tested.
-- **Integration:** Issue 4 composes all three and carries the
-  security-sensitive logic (path safety, coverage-before-write); it is the
-  critical-path node.
-- **Verification:** Issue 5 follows Issue 4.
-- **Critical path:** Issue 1 (or 2/3) -> Issue 4 -> Issue 5.
+- **Integration:** Issue 4 (blocked by 1, 2, 3) composes all three and
+  carries the security-sensitive logic (path safety,
+  coverage-before-write); it is the critical-path node.
+- **Verification:** Issue 5 (blocked by 4) follows.
+- **Critical path:** Issue 1 (or 2 / 3) -> Issue 4 -> Issue 5.
