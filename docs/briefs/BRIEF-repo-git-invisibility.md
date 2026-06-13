@@ -1,6 +1,6 @@
 ---
 schema: brief/v1
-status: Accepted
+status: Done
 problem: |
   niwa is meant to leave no trace in the git history of the repos it
   manages, but that invisibility depends on the user adding *.local* to
@@ -23,7 +23,7 @@ motivating_context: |
 
 ## Status
 
-Accepted
+Done
 
 Authored as the BRIEF in a BRIEF -> PRD -> DESIGN -> PLAN chain for the
 repo-git-invisibility feature. The downstream PRD owns the requirements;
