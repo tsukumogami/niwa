@@ -139,14 +139,6 @@ teeth.
 
 ## Dependency Graph
 
-Single-pr mode: dependencies are captured in the Issue Outlines' **Dependencies**
-fields rather than a separate diagram. The edges are:
-
-- Issue 1 -> Issue 2 (apply wiring needs the helper)
-- Issue 1 -> Issue 3 (worktree wiring needs the helper)
-- Issue 2 -> Issue 4 (functional tests exercise apply)
-- Issue 3 -> Issue 4 (functional tests exercise worktree create)
-
 ## Implementation Sequence
 
 **Critical path:** Issue 1 -> (Issue 2 and Issue 3) -> Issue 4.
