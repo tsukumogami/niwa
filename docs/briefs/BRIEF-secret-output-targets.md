@@ -1,6 +1,6 @@
 ---
 schema: brief/v1
-status: Accepted
+status: Done
 problem: |
   niwa expands resolved secrets into a single hardcoded per-repo file,
   .local.env. That name is not a convention in most stacks, so the file
@@ -22,7 +22,7 @@ motivating_context: |
 
 ## Status
 
-Accepted
+Done
 
 Framing settled before drafting via a brainstorming pass. UX decisions
 (default posture, configurability granularity, precedence, format

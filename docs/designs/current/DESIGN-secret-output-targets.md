@@ -1,5 +1,5 @@
 ---
-status: Planned
+status: Current
 upstream: docs/prds/PRD-secret-output-targets.md
 decision_provenance: inline-resolved
 problem: |
@@ -30,7 +30,7 @@ rationale: |
 
 ## Status
 
-Planned
+Current
 
 Authored under the /scope tactical chain (parent-orchestrated). Decision
 questions were resolved inline rather than via parallel decision agents
