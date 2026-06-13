@@ -580,6 +580,32 @@ func TestResolveGlobalOverrideWorkspaceVarsWin(t *testing.T) {
 	}
 }
 
+func TestResolveGlobalOverrideEnvOutput(t *testing.T) {
+	g := &config.GlobalConfigOverride{
+		Global: config.GlobalOverride{
+			EnvOutput: config.OutputTargets{{Path: "global.env"}},
+		},
+		Workspaces: map[string]config.GlobalOverride{
+			"ws-override": {EnvOutput: config.OutputTargets{{Path: ".env.local"}}},
+			"ws-inherit":  {},
+		},
+	}
+
+	// Workspace EnvOutput replaces the global one (list-level, not merge).
+	if got := ResolveGlobalOverride(g, "ws-override").EnvOutput; len(got) != 1 || got[0].Path != ".env.local" {
+		t.Errorf("workspace should replace global EnvOutput, got %+v", got)
+	}
+	// A workspace without EnvOutput inherits the global base -- this is the
+	// exact field-drop bug class that bit env_example_policy; guard it.
+	if got := ResolveGlobalOverride(g, "ws-inherit").EnvOutput; len(got) != 1 || got[0].Path != "global.env" {
+		t.Errorf("workspace should inherit global EnvOutput, got %+v", got)
+	}
+	// No matching workspace returns the base override with EnvOutput intact.
+	if got := ResolveGlobalOverride(g, "unknown").EnvOutput; len(got) != 1 || got[0].Path != "global.env" {
+		t.Errorf("base EnvOutput should survive, got %+v", got)
+	}
+}
+
 // --- MergeGlobalOverride tests ---
 
 // mustMerge wraps MergeGlobalOverride for tests that expect success.

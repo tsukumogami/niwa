@@ -142,6 +142,10 @@ type WorkspaceMeta struct {
 	// nil means inherit (from the global override, then the warn default).
 	// This is a project-scope position: its Vars sub-table is honored.
 	EnvExamplePolicy *EnvExamplePolicy `toml:"env_example_policy,omitempty"`
+	// EnvOutput is the workspace-level secret-output target declaration.
+	// Empty means inherit (from the global override, then the .local.env
+	// dotenv default). Per-repo EnvOutput overrides this.
+	EnvOutput OutputTargets `toml:"env_output,omitempty"`
 }
 
 // ParseResult holds the parsed config and any non-fatal warnings.
@@ -209,6 +213,10 @@ type RepoOverride struct {
 	// inherit from the workspace policy. This is a project-scope position: its
 	// Vars sub-table is honored.
 	EnvExamplePolicy *EnvExamplePolicy `toml:"env_example_policy,omitempty"`
+	// EnvOutput overrides the workspace-level secret-output target
+	// declaration for this repo. Empty means inherit from
+	// WorkspaceMeta.EnvOutput.
+	EnvOutput OutputTargets `toml:"env_output,omitempty"`
 }
 
 // ContentConfig declares the CLAUDE.md content hierarchy.
@@ -448,6 +456,10 @@ type GlobalOverride struct {
 	// This is the net-new user rung: it carries per-category keys only. The
 	// Vars sub-table is project-scope only and is ignored here.
 	EnvExamplePolicy *EnvExamplePolicy `toml:"env_example_policy,omitempty"`
+	// EnvOutput is the personal/global secret-output target declaration, the
+	// broadest rung consulted by EffectiveEnvOutput. Empty means no global
+	// rung is set.
+	EnvOutput OutputTargets `toml:"env_output,omitempty"`
 }
 
 // GlobalConfigOverride is the top-level structure parsed from the global

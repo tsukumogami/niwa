@@ -9,7 +9,7 @@ import (
 )
 
 func TestRenderNiwaBlock_EmptyInput(t *testing.T) {
-	out := string(renderNiwaBlock(nil))
+	out := string(renderNiwaBlock(nil, niwaExcludePatterns))
 	if !strings.Contains(out, niwaExcludeBegin) || !strings.Contains(out, niwaExcludeEnd) {
 		t.Fatalf("expected niwa markers in output, got:\n%s", out)
 	}
@@ -25,7 +25,7 @@ func TestRenderNiwaBlock_EmptyInput(t *testing.T) {
 
 func TestRenderNiwaBlock_PreservesUserContent(t *testing.T) {
 	existing := []byte("# my own ignores\nbuild/\n*.tmp\n")
-	out := string(renderNiwaBlock(existing))
+	out := string(renderNiwaBlock(existing, niwaExcludePatterns))
 
 	for _, want := range []string{"# my own ignores", "build/", "*.tmp"} {
 		if !strings.Contains(out, want) {
@@ -50,8 +50,8 @@ func TestRenderNiwaBlock_Idempotent(t *testing.T) {
 		[]byte("# header\n\nbuild/\n*.tmp\n"),
 	}
 	for _, in := range inputs {
-		once := renderNiwaBlock(in)
-		twice := renderNiwaBlock(once)
+		once := renderNiwaBlock(in, niwaExcludePatterns)
+		twice := renderNiwaBlock(once, niwaExcludePatterns)
 		if string(once) != string(twice) {
 			t.Errorf("renderNiwaBlock not idempotent for %q:\nonce:\n%s\ntwice:\n%s", in, once, twice)
 		}
@@ -66,7 +66,7 @@ func TestRenderNiwaBlock_ReplacesInPlace(t *testing.T) {
 		"stale-pattern\n" +
 		niwaExcludeEnd + "\n" +
 		"after-line\n")
-	out := string(renderNiwaBlock(existing))
+	out := string(renderNiwaBlock(existing, niwaExcludePatterns))
 
 	if strings.Contains(out, "stale-pattern") {
 		t.Errorf("stale pattern was not removed, got:\n%s", out)
@@ -78,6 +78,63 @@ func TestRenderNiwaBlock_ReplacesInPlace(t *testing.T) {
 	}
 	if n := strings.Count(out, niwaExcludeBegin); n != 1 {
 		t.Errorf("expected exactly one niwa block, found %d, got:\n%s", n, out)
+	}
+}
+
+func TestUnionPatterns(t *testing.T) {
+	// Base patterns always come first, in order.
+	got := unionPatterns(nil)
+	if len(got) != len(niwaExcludePatterns) {
+		t.Fatalf("expected only base patterns, got %v", got)
+	}
+	for i, p := range niwaExcludePatterns {
+		if got[i] != p {
+			t.Errorf("base[%d] = %q, want %q", i, got[i], p)
+		}
+	}
+
+	// Extras append after base, empties drop, and a duplicate of a base or a
+	// prior extra is removed.
+	got = unionPatterns([]string{".env", "", "*.local*", ".env", "secrets.json"})
+	want := []string{"*.local*", ".niwa/", ".env", "secrets.json"}
+	if len(got) != len(want) {
+		t.Fatalf("union = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("union[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestRenderNiwaBlock_IncludesExtraPatterns(t *testing.T) {
+	out := string(renderNiwaBlock(nil, unionPatterns([]string{".env", "config/secrets.json"})))
+	for _, want := range []string{"*.local*", ".niwa/", ".env", "config/secrets.json"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("expected %q in block, got:\n%s", want, out)
+		}
+	}
+}
+
+func TestEnsureRepoExclude_ExtraPatternsCoverCustomName(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	repo := t.TempDir()
+	runGit(t, repo, "init")
+
+	// A custom-named secret file (not matched by *.local*) must be invisible
+	// once passed as an extra pattern.
+	if err := EnsureRepoExclude(repo, ".env", "secrets.json"); err != nil {
+		t.Fatalf("EnsureRepoExclude: %v", err)
+	}
+	for _, name := range []string{".env", "secrets.json"} {
+		if err := os.WriteFile(filepath.Join(repo, name), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if out := gitStatusPorcelain(t, repo); out != "" {
+		t.Errorf("expected clean status with custom names excluded, got:\n%s", out)
 	}
 }
 

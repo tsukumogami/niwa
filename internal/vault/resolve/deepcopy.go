@@ -95,6 +95,7 @@ func deepCopyRepos(in map[string]config.RepoOverride) map[string]config.RepoOver
 			SetupDir:         ov.SetupDir,
 			ReadEnvExample:   ov.ReadEnvExample,
 			EnvExamplePolicy: deepCopyEnvExamplePolicy(ov.EnvExamplePolicy),
+			EnvOutput:        deepCopyEnvOutput(ov.EnvOutput),
 		}
 	}
 	return out
@@ -131,7 +132,20 @@ func deepCopyGlobalOverride(in config.GlobalOverride) config.GlobalOverride {
 		Files:            cloneStringMap(in.Files),
 		Vault:            in.Vault, // shared; resolver does not mutate
 		EnvExamplePolicy: deepCopyEnvExamplePolicy(in.EnvExamplePolicy),
+		EnvOutput:        deepCopyEnvOutput(in.EnvOutput),
 	}
+}
+
+// deepCopyEnvOutput clones an OutputTargets slice so the resolver never shares
+// the backing array with its input. OutputTarget fields are immutable strings,
+// so a shallow element copy is sufficient.
+func deepCopyEnvOutput(in config.OutputTargets) config.OutputTargets {
+	if in == nil {
+		return nil
+	}
+	out := make(config.OutputTargets, len(in))
+	copy(out, in)
+	return out
 }
 
 // deepCopyEnvExamplePolicy clones an *EnvExamplePolicy, including its Vars map

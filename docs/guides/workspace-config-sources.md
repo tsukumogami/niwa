@@ -403,6 +403,71 @@ workspace and per-repo levels) is unchanged: it turns the whole scan
 off for that scope, so no detection — and no policy — runs at all. The
 failure policy applies only when the scan is on.
 
+## Secret-output targets {#env-output}
+
+By default niwa expands each repo's resolved secrets into a single
+`.local.env` file in dotenv (`KEY=value`) form. The `env_output` setting
+makes that destination configurable per repo so each repo gets the file
+its stack actually reads.
+
+### The `env_output` setting
+
+`env_output` declares one or more output targets. It accepts three forms:
+
+```toml
+# a single target (format inferred from the extension)
+env_output = ".env.local"
+
+# a list of targets, each inferred
+env_output = [".env.local", "secrets.json"]
+
+# a list of tables when a target needs an explicit format
+env_output = [{ path = "secrets", format = "shell" }, { path = ".env" }]
+```
+
+A single array MUST NOT mix bare strings and tables; use a list of tables
+when any element needs an explicit `format`. Every declared target
+receives the repo's full resolved secret set.
+
+### Formats and extension inference
+
+Three formats are supported: `dotenv` (`KEY=value`, the default),
+`json` (a flat object), and `shell` (`export KEY='value'`). The format is
+inferred from the target's extension unless an explicit `format` is given:
+
+| Extension | Format |
+|-----------|--------|
+| `.json` | json |
+| `.sh` | shell |
+| `.env`, `.local.env`, `.env.local`, anything else, or no extension | dotenv |
+
+An explicit `format` always wins over inference.
+
+### The three levels and precedence
+
+| Level | Where it's set | Applies to |
+|-------|----------------|------------|
+| User | `env_output` in the personal/global override | All workspaces |
+| Project | `env_output` at the workspace config top level | The whole workspace |
+| Per-repo | `env_output` under `[repos.<name>]` | One repo |
+
+Resolution is most-specific-wins at the list level: a non-empty per-repo
+`env_output` replaces the workspace one, which replaces the user one. An
+unset level inherits the broader one. When nothing is set anywhere, the
+default is a single `.local.env` dotenv target — so a repo that declares
+no `env_output` keeps today's behavior byte-for-byte.
+
+### Git invisibility
+
+Whatever name you choose — including git-tracked-by-default names like
+`.env` — niwa records the target in the repo's git exclude coverage
+before writing it, so a resolved secret never becomes committable and you
+never edit the repo's committed `.gitignore`. A custom-named target in a
+directory niwa cannot confirm is a git repository is refused (fail-closed)
+rather than written unprotected. Target paths are validated: an absolute
+path, a path escaping the repo, or one escaping via a symlinked parent is
+rejected.
+
 ## Source layouts (rank-1, rank-2, rank-3) {#source-layouts}
 
 niwa probes each remote source for one of two recognized layouts.

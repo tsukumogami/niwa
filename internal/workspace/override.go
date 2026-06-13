@@ -313,6 +313,7 @@ func ResolveGlobalOverride(g *config.GlobalConfigOverride, workspaceName string)
 		Env:              copyEnv(base.Env),
 		Files:            copyStringMap(base.Files),
 		EnvExamplePolicy: copyEnvExamplePolicy(base.EnvExamplePolicy),
+		EnvOutput:        copyEnvOutput(base.EnvOutput),
 	}
 
 	// Claude: workspace-specific wins per field.
@@ -422,6 +423,11 @@ func ResolveGlobalOverride(g *config.GlobalConfigOverride, workspaceName string)
 			v := *ws.EnvExamplePolicy.Entropy
 			result.EnvExamplePolicy.Entropy = &v
 		}
+	}
+
+	// EnvOutput: ws wins outright when set (list-level replace, not merge).
+	if len(ws.EnvOutput) > 0 {
+		result.EnvOutput = copyEnvOutput(ws.EnvOutput)
 	}
 
 	return result
@@ -1181,6 +1187,18 @@ func copyEnvExamplePolicy(p *config.EnvExamplePolicy) *config.EnvExamplePolicy {
 		out.Vars = make(map[string]config.Action, len(p.Vars))
 		maps.Copy(out.Vars, p.Vars)
 	}
+	return out
+}
+
+// copyEnvOutput returns a copy of an OutputTargets slice so the result can be
+// mutated without aliasing the source. OutputTarget fields are immutable
+// strings, so a shallow element copy is sufficient.
+func copyEnvOutput(t config.OutputTargets) config.OutputTargets {
+	if t == nil {
+		return nil
+	}
+	out := make(config.OutputTargets, len(t))
+	copy(out, t)
 	return out
 }
 

@@ -67,11 +67,17 @@ niwa apply
 ```
 
 niwa resolves `vault://ANTHROPIC_API_KEY` against the Infisical CLI,
-materializes the `.local.env` file at mode `0o600`, and writes an
-instance-root `.gitignore` covering `*.local*`. When a team secret
-rotates upstream between two applies, the second apply re-resolves
-and prints `rotated <path>` to stderr for every materialized file
-whose vault-backed sources changed.
+materializes the `.local.env` file at mode `0o600`, and records the
+output in the repo's git exclude coverage so it stays invisible to git
+status. When a team secret rotates upstream between two applies, the
+second apply re-resolves and prints `rotated <path>` to stderr for every
+materialized file whose vault-backed sources changed.
+
+The output file name and format are configurable per repo via
+`env_output` (for example `.env.local`, `secrets.json`, or a sourceable
+`.sh`); see the
+[secret-output targets](workspace-config-sources.md#env-output) section.
+The default is `.local.env` in dotenv form.
 
 If your current directory is not a git repository (or is a git repo
 with no remotes configured), the public-repo guardrail can't
