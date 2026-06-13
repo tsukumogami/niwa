@@ -13,14 +13,19 @@ planned_chain:
 chain_skipped: []
 chain_ran:
   - brief
+  - prd
 visibility: Public
 child_snapshots:
   brief:
-    status: Draft
+    status: Accepted
     content_hash: 2a791bd6ecd6f26ad41943110ca81b1d90694ce0
     captured_at: 2026-06-13T03:23:35Z
+  prd:
+    status: Accepted
+    content_hash: cb9553f560bfb52a3259d5107d41c2d2756dbc39
+    captured_at: 2026-06-13T03:27:12Z
 parent_orchestration:
-  invoking_child: prd
+  invoking_child: design
   suppress_status_aware_prompt: true
   rationale: fresh-chain
 ---
