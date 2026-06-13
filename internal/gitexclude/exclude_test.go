@@ -113,6 +113,63 @@ func TestEnsureRepoExclude_PrimaryRepo(t *testing.T) {
 	}
 }
 
+func TestEnsureRepoExclude_CoversWorktree(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	root := t.TempDir()
+	primary := filepath.Join(root, "primary")
+	runGit(t, root, "init", primary)
+	// A worktree needs a commit to branch from.
+	if err := os.WriteFile(filepath.Join(primary, "README"), []byte("hi\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, primary, "add", "README")
+	runGit(t, primary, "commit", "-m", "init")
+
+	worktree := filepath.Join(root, "wt")
+	runGit(t, primary, "worktree", "add", worktree, "-b", "wtbranch")
+
+	// Record coverage from the worktree path. It must resolve to the shared
+	// common dir and make niwa-authored files invisible in the worktree.
+	if err := EnsureRepoExclude(worktree); err != nil {
+		t.Fatalf("EnsureRepoExclude(worktree): %v", err)
+	}
+
+	// Plant niwa-style output in the worktree working tree.
+	if err := os.MkdirAll(filepath.Join(worktree, ".niwa"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(worktree, ".niwa", "state"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(worktree, "CLAUDE.local.md"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if out := gitStatusPorcelain(t, worktree); out != "" {
+		t.Errorf("expected clean worktree status, got:\n%s", out)
+	}
+
+	// An uncovered file must still show, proving the exclude is scoped.
+	if err := os.WriteFile(filepath.Join(worktree, "leak.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if out := gitStatusPorcelain(t, worktree); !strings.Contains(out, "leak.txt") {
+		t.Errorf("expected uncovered leak.txt to show in status, got:\n%s", out)
+	}
+}
+
+func gitStatusPorcelain(t *testing.T, dir string) string {
+	t.Helper()
+	cmd := exec.Command("git", "-C", dir, "status", "--porcelain")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git status --porcelain: %v\n%s", err, out)
+	}
+	return strings.TrimSpace(string(out))
+}
+
 func runGit(t *testing.T, dir string, args ...string) {
 	t.Helper()
 	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
