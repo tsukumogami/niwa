@@ -142,19 +142,6 @@ never edits the repo's committed `.gitignore` to get that guarantee.
   pre-pass are untouched; this feature changes only the destination of
   the already-resolved set.
 
-## Open Questions
-
-These defer mechanism detail to the downstream PRD's Decisions and
-Trade-offs section. They do not affect the user-facing behavior settled
-above.
-
-- The exact configuration key name for the target declaration (for
-  example `output` versus `secrets_file`) and its precise nesting under
-  the existing env configuration block.
-- The exact spelling of the format identifiers and the extension-to-
-  format inference table's entries, including the fallback when an
-  extension is unknown.
-
 ## References
 
 - `docs/briefs/BRIEF-env-example-failure-policy.md` -- prior brief in the
