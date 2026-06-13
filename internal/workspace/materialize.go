@@ -110,15 +110,6 @@ type MaterializeContext struct {
 	Stderr io.Writer
 }
 
-// stderr returns the writer to use for diagnostic output, defaulting to
-// os.Stderr when no writer has been wired into the context.
-func (c *MaterializeContext) stderr() io.Writer {
-	if c != nil && c.Stderr != nil {
-		return c.Stderr
-	}
-	return os.Stderr
-}
-
 // recordSources appends the given SourceEntry slice to the context's
 // SourceTuples map keyed by path. It is a no-op when the map is nil
 // (tests that exercise a materializer in isolation commonly leave it

@@ -294,6 +294,9 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 	// --- @critical: rank-2 deprecation + plugin auto-install ---
 	registerRank2Steps(ctx)
 
+	// --- git invisibility: niwa stays out of managed repos' git status ---
+	registerGitInvisibilitySteps(ctx)
+
 	// --- Init-bootstrap harness extensions (Issue 5) ---
 	// GitHub tarball fake — spun up lazily per scenario; backed by the
 	// existing tarballFakeServer used by unit tests. Wire it into the
