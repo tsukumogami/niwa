@@ -1,6 +1,6 @@
 ---
 upstream: docs/prds/PRD-repo-git-invisibility.md
-status: Accepted
+status: Planned
 problem: |
   niwa writes files into the working trees of the git repositories it manages
   and the worktrees it creates, but its invisibility to those repos' git status
@@ -34,7 +34,7 @@ rationale: |
 
 ## Status
 
-Accepted
+Planned
 
 ## Context and Problem Statement
 
