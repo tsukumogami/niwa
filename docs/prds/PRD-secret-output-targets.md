@@ -1,5 +1,5 @@
 ---
-status: Draft
+status: Accepted
 problem: |
   Operators of niwa workspaces get every repo's resolved secrets in one
   hardcoded file, .local.env, in one hardcoded format, dotenv. Real repos
@@ -25,7 +25,7 @@ motivating_context: |
 
 ## Status
 
-Draft
+Accepted
 
 Upstream BRIEF (docs/briefs/BRIEF-secret-output-targets.md) is Accepted.
 The architectural shape of this feature -- a pluggable output-format
