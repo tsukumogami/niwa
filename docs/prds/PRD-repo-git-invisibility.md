@@ -1,5 +1,5 @@
 ---
-status: Accepted
+status: In Progress
 problem: |
   niwa writes files into the git repositories it manages, and is meant to
   leave no trace in their history. That invisibility currently depends on the
@@ -19,7 +19,7 @@ upstream: docs/briefs/BRIEF-repo-git-invisibility.md
 
 ## Status
 
-Accepted
+In Progress
 
 ## Problem Statement
 

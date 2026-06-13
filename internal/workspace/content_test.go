@@ -448,99 +448,6 @@ func TestInstallRepoContentAutoDiscoveryNoContentDir(t *testing.T) {
 	}
 }
 
-func TestCheckGitignoreMissingFile(t *testing.T) {
-	tmpDir := t.TempDir()
-	warnings := CheckGitignore(tmpDir, "testrepo")
-	if len(warnings) != 1 {
-		t.Fatalf("expected 1 warning, got %d", len(warnings))
-	}
-	if !strings.Contains(warnings[0].Message, ".gitignore missing") {
-		t.Errorf("unexpected warning message: %s", warnings[0].Message)
-	}
-}
-
-func TestCheckGitignoreMissingPattern(t *testing.T) {
-	tmpDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(tmpDir, ".gitignore"), []byte("*.log\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	warnings := CheckGitignore(tmpDir, "testrepo")
-	if len(warnings) != 1 {
-		t.Fatalf("expected 1 warning, got %d", len(warnings))
-	}
-	if !strings.Contains(warnings[0].Message, "*.local*") {
-		t.Errorf("unexpected warning message: %s", warnings[0].Message)
-	}
-}
-
-func TestCheckGitignoreHasPattern(t *testing.T) {
-	tmpDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(tmpDir, ".gitignore"), []byte("*.log\n*.local*\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	warnings := CheckGitignore(tmpDir, "testrepo")
-	if len(warnings) != 0 {
-		t.Errorf("unexpected warnings: %v", warnings)
-	}
-}
-
-func TestCheckGitignoreWarningOnWrite(t *testing.T) {
-	tmpDir := t.TempDir()
-	configDir := filepath.Join(tmpDir, "config")
-	contentDir := filepath.Join(configDir, "claude")
-	reposDir := filepath.Join(contentDir, "repos")
-	if err := os.MkdirAll(reposDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	source := "# {repo_name}\n"
-	if err := os.WriteFile(filepath.Join(reposDir, "myapp.md"), []byte(source), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	cfg := &config.WorkspaceConfig{
-		Workspace: config.WorkspaceMeta{
-			Name:       "myws",
-			ContentDir: "claude",
-		},
-		Claude: config.ClaudeConfig{
-			Content: config.ContentConfig{
-				Repos: map[string]config.RepoContentEntry{
-					"myapp": {Source: "repos/myapp.md"},
-				},
-			},
-		},
-	}
-
-	instanceRoot := filepath.Join(tmpDir, "instance")
-	repoDir := filepath.Join(instanceRoot, "public", "myapp")
-	if err := os.MkdirAll(repoDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	// .gitignore exists but lacks *.local*.
-	if err := os.WriteFile(filepath.Join(repoDir, ".gitignore"), []byte("*.log\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	result, err := InstallRepoContent(cfg, configDir, "", instanceRoot, "public", "myapp")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if len(result.Warnings) != 1 {
-		t.Fatalf("expected 1 warning, got %d", len(result.Warnings))
-	}
-	if !strings.Contains(result.Warnings[0].Message, "*.local*") {
-		t.Errorf("unexpected warning message: %s", result.Warnings[0].Message)
-	}
-
-	// File should still be written despite the warning.
-	if _, err := os.Stat(filepath.Join(repoDir, "CLAUDE.local.md")); err != nil {
-		t.Error("CLAUDE.local.md should be written even when gitignore warning is raised")
-	}
-}
-
 func TestCheckContainmentAccepted(t *testing.T) {
 	tmpDir := t.TempDir()
 	childDir := filepath.Join(tmpDir, "sub", "deep")
@@ -995,27 +902,6 @@ func TestInstallRepoContentOverlayOnlyNoBaseEmptyDir(t *testing.T) {
 	}
 }
 
-func TestHasLocalPattern(t *testing.T) {
-	tests := []struct {
-		name    string
-		content string
-		want    bool
-	}{
-		{"exact match", "*.local*\n", true},
-		{"among other lines", "*.log\n*.local*\nbuild/\n", true},
-		{"with leading whitespace", "  *.local*  \n", true},
-		{"no match", "*.log\nbuild/\n", false},
-		{"empty file", "", false},
-		{"partial match", "*.local\n", false},
-		{"substring", "foo*.local*bar\n", false},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := hasLocalPattern(strings.NewReader(tt.content))
-			if got != tt.want {
-				t.Errorf("hasLocalPattern(%q) = %v, want %v", tt.content, got, tt.want)
-			}
-		})
-	}
-}
+// gitignore-pattern warnings were removed: niwa now self-guarantees
+// invisibility via .git/info/exclude (see EnsureRepoExclude), so it no longer
+// inspects or warns about the repo's committed .gitignore.

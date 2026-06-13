@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/tsukumogami/niwa/internal/config"
+	"github.com/tsukumogami/niwa/internal/gitexclude"
 	"github.com/tsukumogami/niwa/internal/github"
 	"github.com/tsukumogami/niwa/internal/guardrail"
 	"github.com/tsukumogami/niwa/internal/secret"
@@ -1315,6 +1316,14 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 			return nil, err
 		}
 		writtenFiles = append(writtenFiles, files...)
+
+		// Record niwa's ignore coverage in the repo's .git/info/exclude so the
+		// files just materialized stay invisible to the repo's git status,
+		// independent of its committed .gitignore. Fail closed: a repo we cannot
+		// keep clean surfaces the error rather than leaking niwa-authored files.
+		if err := gitexclude.EnsureRepoExclude(repoDir); err != nil {
+			return nil, fmt.Errorf("recording git exclude coverage for repo %s: %w", cr.Repo.Name, err)
+		}
 	}
 
 	// Step 6.75: Run repo-provided setup scripts.

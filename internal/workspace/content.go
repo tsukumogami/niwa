@@ -1,9 +1,7 @@
 package workspace
 
 import (
-	"bufio"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -147,9 +145,6 @@ func InstallRepoContentTo(cfg *config.WorkspaceConfig, configDir, overlayDir, in
 		}
 		result.WrittenFiles = append(result.WrittenFiles, target)
 
-		w := CheckGitignore(repoDir, repoName)
-		result.Warnings = append(result.Warnings, w...)
-
 		// Append overlay content if present.
 		if hasExplicit && entry.OverlaySource != "" {
 			if overlayDir == "" {
@@ -184,8 +179,6 @@ func InstallRepoContentTo(cfg *config.WorkspaceConfig, configDir, overlayDir, in
 			return nil, fmt.Errorf("writing overlay CLAUDE.local.md for repo %q: %w", repoName, writeErr)
 		}
 		result.WrittenFiles = append(result.WrittenFiles, target)
-		w := CheckGitignore(repoDir, repoName)
-		result.Warnings = append(result.Warnings, w...)
 	}
 
 	// Install subdirectory content if present.
@@ -207,42 +200,6 @@ func InstallRepoContentTo(cfg *config.WorkspaceConfig, configDir, overlayDir, in
 	}
 
 	return result, nil
-}
-
-// CheckGitignore checks if a repo directory's .gitignore contains a *.local*
-// pattern. Returns a warning if the pattern is missing.
-func CheckGitignore(repoDir, repoName string) []ContentWarning {
-	gitignorePath := filepath.Join(repoDir, ".gitignore")
-	f, err := os.Open(gitignorePath)
-	if err != nil {
-		// No .gitignore at all means the pattern is missing.
-		return []ContentWarning{{
-			RepoName: repoName,
-			Message:  ".gitignore missing or unreadable; add *.local* pattern to keep CLAUDE.local.md out of version control",
-		}}
-	}
-	defer f.Close()
-
-	if hasLocalPattern(f) {
-		return nil
-	}
-
-	return []ContentWarning{{
-		RepoName: repoName,
-		Message:  ".gitignore does not contain *.local* pattern; add it to keep CLAUDE.local.md out of version control",
-	}}
-}
-
-// hasLocalPattern scans a reader for a line containing "*.local*".
-func hasLocalPattern(r io.Reader) bool {
-	scanner := bufio.NewScanner(r)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "*.local*" {
-			return true
-		}
-	}
-	return false
 }
 
 // autoDiscoverRepoSource checks for {content_dir}/repos/{repoName}.md
