@@ -14,6 +14,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"github.com/tsukumogami/niwa/internal/gitexclude"
 )
 
 // GitInvoker is the test-injection seam for the session-create pipeline's
@@ -218,6 +220,15 @@ func CreateSession(ctx context.Context, params CreateSessionParams) (sessionID, 
 	if scaffoldErr := scaffoldWorktreeNiwa(wtPath); scaffoldErr != nil {
 		cleanupWorktree()
 		return "", "", branch, fmt.Errorf("scaffold: %w", scaffoldErr)
+	}
+
+	// Record niwa's ignore coverage in the repo's shared .git/info/exclude so
+	// the worktree's .niwa/ scaffolding stays invisible to git status. Fail
+	// closed: a worktree we cannot keep clean is removed rather than left with
+	// niwa-authored files showing as untracked.
+	if exErr := gitexclude.EnsureRepoExclude(wtPath); exErr != nil {
+		cleanupWorktree()
+		return "", "", branch, fmt.Errorf("recording git exclude coverage: %w", exErr)
 	}
 
 	// Write the session state file. The branch name is persisted so destroy
