@@ -1091,6 +1091,11 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 	// the resolver treats as "no global rung".
 	var globalEnvExamplePolicy *config.EnvExamplePolicy
 
+	// globalEnvOutput is the resolved personal/global secret-output target
+	// declaration, threaded so the materializer resolves the same targets the
+	// pre-pass policy is threaded for. Empty when no global override is loaded.
+	var globalEnvOutput config.OutputTargets
+
 	// Resolve the personal overlay, then merge it into the team
 	// workspace. The merge happens AFTER resolution so that R8
 	// team_only enforcement in MergeGlobalOverride sees the
@@ -1105,6 +1110,7 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		}
 		flattened := ResolveGlobalOverride(resolvedOverride, cfg.Workspace.Name)
 		globalEnvExamplePolicy = flattened.EnvExamplePolicy
+		globalEnvOutput = flattened.EnvOutput
 		merged, err := MergeGlobalOverride(resolvedCfg, flattened, a.GlobalConfigDir)
 		if err != nil {
 			return nil, err
@@ -1298,7 +1304,7 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 
 	for _, cr := range classified {
 		repoDir := filepath.Join(instanceRoot, cr.Group, cr.Repo.Name)
-		files, err := runRepoMaterializers(a.Materializers, repoMaterializeInputs{
+		files, envOutputs, err := runRepoMaterializers(a.Materializers, repoMaterializeInputs{
 			Cfg:                   effectiveCfg,
 			ConfigDir:             configDir,
 			RepoName:              cr.Repo.Name,
@@ -1311,6 +1317,7 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 			Stderr:                a.Reporter.Writer(),
 
 			GlobalEnvExamplePolicy: globalEnvExamplePolicy,
+			GlobalEnvOutput:        globalEnvOutput,
 		})
 		if err != nil {
 			return nil, err
@@ -1319,9 +1326,11 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 
 		// Record niwa's ignore coverage in the repo's .git/info/exclude so the
 		// files just materialized stay invisible to the repo's git status,
-		// independent of its committed .gitignore. Fail closed: a repo we cannot
-		// keep clean surfaces the error rather than leaking niwa-authored files.
-		if err := gitexclude.EnsureRepoExclude(repoDir); err != nil {
+		// independent of its committed .gitignore. Custom secret-output target
+		// names (not matched by the base *.local* pattern) are passed so they
+		// are covered too. Fail closed: a repo we cannot keep clean surfaces the
+		// error rather than leaking niwa-authored files.
+		if err := gitexclude.EnsureRepoExclude(repoDir, envOutputs...); err != nil {
 			return nil, fmt.Errorf("recording git exclude coverage for repo %s: %w", cr.Repo.Name, err)
 		}
 	}

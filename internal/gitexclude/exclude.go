@@ -46,7 +46,12 @@ var niwaExcludePatterns = []string{"*.local*", ".niwa/"}
 // exclude file in a real repository returns an error so callers can fail closed
 // rather than leave niwa-authored files visible. A tree that is not a git
 // repository at all is a silent no-op: there is no git status to pollute.
-func EnsureRepoExclude(tree string) error {
+//
+// extraPatterns are additional ignore patterns (e.g. operator-chosen
+// secret-output target paths whose names are not matched by the base
+// "*.local*") unioned into the managed block, deduplicated against the base set
+// in stable order. Callers that pass none get exactly the historical behavior.
+func EnsureRepoExclude(tree string, extraPatterns ...string) error {
 	commonDir, err := gitCommonDir(tree)
 	if err != nil {
 		if errors.Is(err, errNotGitRepo) {
@@ -66,7 +71,7 @@ func EnsureRepoExclude(tree string) error {
 		return fmt.Errorf("reading %s: %w", excludePath, err)
 	}
 
-	updated := renderNiwaBlock(existing)
+	updated := renderNiwaBlock(existing, unionPatterns(extraPatterns))
 	if bytes.Equal(existing, updated) {
 		return nil
 	}
@@ -75,6 +80,37 @@ func EnsureRepoExclude(tree string) error {
 		return fmt.Errorf("writing %s: %w", excludePath, err)
 	}
 	return nil
+}
+
+// unionPatterns returns the base niwa patterns followed by the deduplicated
+// extra patterns, preserving order and dropping empties. The base set always
+// comes first so the managed block stays stable regardless of the extra set.
+func unionPatterns(extra []string) []string {
+	seen := make(map[string]bool, len(niwaExcludePatterns)+len(extra))
+	out := make([]string, 0, len(niwaExcludePatterns)+len(extra))
+	for _, p := range niwaExcludePatterns {
+		if !seen[p] {
+			seen[p] = true
+			out = append(out, p)
+		}
+	}
+	for _, p := range extra {
+		if p == "" || seen[p] {
+			continue
+		}
+		seen[p] = true
+		out = append(out, p)
+	}
+	return out
+}
+
+// IsGitRepo reports whether tree is inside a git repository. It is used by
+// callers that must positively confirm git-ignore coverage can be recorded
+// before writing a custom-named secret file (a non-git tree means
+// EnsureRepoExclude would no-op, leaving the file uncovered).
+func IsGitRepo(tree string) bool {
+	_, err := gitCommonDir(tree)
+	return err == nil
 }
 
 // gitCommonDir resolves the shared git directory for the working tree at tree.
@@ -108,9 +144,11 @@ func gitCommonDir(tree string) (string, error) {
 // replaced in place. Content outside the niwa markers is preserved verbatim.
 // The function is pure and idempotent: renderNiwaBlock(renderNiwaBlock(x)) is
 // equal to renderNiwaBlock(x). The result always ends with a trailing newline.
-func renderNiwaBlock(existing []byte) []byte {
+// patterns is the full ordered ignore set to write between the markers (base
+// plus any extras), already deduplicated by the caller.
+func renderNiwaBlock(existing []byte, patterns []string) []byte {
 	blockLines := []string{niwaExcludeBegin}
-	blockLines = append(blockLines, niwaExcludePatterns...)
+	blockLines = append(blockLines, patterns...)
 	blockLines = append(blockLines, niwaExcludeEnd)
 
 	var lines []string

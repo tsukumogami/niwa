@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/tsukumogami/niwa/internal/config"
+	"github.com/tsukumogami/niwa/internal/gitexclude"
 )
 
 // worktreeApplyEvent is the worktree-lifecycle event run by ApplyToWorktree on
@@ -49,6 +50,9 @@ type repoMaterializeInputs struct {
 	// failure policy for the active workspace. nil when no global override is
 	// loaded on this path (the resolver treats nil as "no global rung").
 	GlobalEnvExamplePolicy *config.EnvExamplePolicy
+	// GlobalEnvOutput is the resolved personal/global secret-output target
+	// declaration. Empty when no global override is loaded on this path.
+	GlobalEnvOutput config.OutputTargets
 }
 
 // runRepoMaterializers runs the given materializers for a single repo against
@@ -57,7 +61,7 @@ type repoMaterializeInputs struct {
 // materializers when claude is disabled for the repo. Returns the list of
 // written files. This is the single shared materializer path used by both the
 // instance apply pipeline and ApplyToWorktree.
-func runRepoMaterializers(materializers []Materializer, in repoMaterializeInputs) ([]string, error) {
+func runRepoMaterializers(materializers []Materializer, in repoMaterializeInputs) ([]string, []string, error) {
 	effective := MergeOverrides(in.Cfg, in.RepoName)
 
 	// Merge discovered hooks as base; explicit config entries run first per event.
@@ -71,7 +75,7 @@ func runRepoMaterializers(materializers []Materializer, in repoMaterializeInputs
 				for _, absPath := range entry.Scripts {
 					rel, err := filepath.Rel(in.ConfigDir, absPath)
 					if err != nil {
-						return nil, fmt.Errorf("materializer hooks: computing relative path for %s: %w", absPath, err)
+						return nil, nil, fmt.Errorf("materializer hooks: computing relative path for %s: %w", absPath, err)
 					}
 					relScripts = append(relScripts, rel)
 				}
@@ -107,6 +111,7 @@ func runRepoMaterializers(materializers []Materializer, in repoMaterializeInputs
 		Stderr:                in.Stderr,
 
 		GlobalEnvExamplePolicy: in.GlobalEnvExamplePolicy,
+		GlobalEnvOutput:        in.GlobalEnvOutput,
 	}
 
 	var written []string
@@ -119,11 +124,11 @@ func runRepoMaterializers(materializers []Materializer, in repoMaterializeInputs
 
 		files, err := m.Materialize(mctx)
 		if err != nil {
-			return nil, fmt.Errorf("materializer %s for repo %s: %w", m.Name(), in.RepoName, err)
+			return nil, nil, fmt.Errorf("materializer %s for repo %s: %w", m.Name(), in.RepoName, err)
 		}
 		written = append(written, files...)
 	}
-	return written, nil
+	return written, mctx.EnvOutputs, nil
 }
 
 // FindRepoGroup resolves the group a repo belongs to by scanning the instance
@@ -180,6 +185,10 @@ type WorktreeApplyOptions struct {
 	// nil when no global override is available (the resolver treats nil as
 	// "no global rung").
 	GlobalEnvExamplePolicy *config.EnvExamplePolicy
+	// GlobalEnvOutput is the resolved personal/global secret-output target
+	// declaration, threaded so the worktree path resolves the same targets as
+	// the instance apply path. Empty when no global override is available.
+	GlobalEnvOutput config.OutputTargets
 }
 
 // ApplyToWorktree installs, into worktreePath, the same class of CLAUDE
@@ -232,7 +241,7 @@ func ApplyToWorktree(cfg *config.WorkspaceConfig, configDir, instanceRoot, workt
 		}
 	}
 	repoIndex := map[string]string{repo: worktreePath}
-	matFiles, err := runRepoMaterializers(materializers, repoMaterializeInputs{
+	matFiles, envOutputs, err := runRepoMaterializers(materializers, repoMaterializeInputs{
 		Cfg:             cfg,
 		ConfigDir:       configDir,
 		RepoName:        repo,
@@ -248,11 +257,20 @@ func ApplyToWorktree(cfg *config.WorkspaceConfig, configDir, instanceRoot, workt
 		Stderr:                opts.Stderr,
 
 		GlobalEnvExamplePolicy: opts.GlobalEnvExamplePolicy,
+		GlobalEnvOutput:        opts.GlobalEnvOutput,
 	})
 	if err != nil {
 		return nil, err
 	}
 	written = append(written, matFiles...)
+
+	// Record git-ignore coverage for any custom secret-output target names so
+	// they stay invisible to the worktree's git status, matching the instance
+	// apply path's end state. The materializer already established coverage
+	// before writing; this re-asserts the full set idempotently.
+	if err := gitexclude.EnsureRepoExclude(worktreePath, envOutputs...); err != nil {
+		return nil, fmt.Errorf("recording git exclude coverage for worktree %s: %w", repo, err)
+	}
 
 	// 3. Worktree rules import: an absolute @import to the instance's
 	//    workspace-context.md, plus overlay/global where present. Reuses the

@@ -234,6 +234,11 @@ func applyContentToWorktree(instanceRoot, worktreePath, repo, purpose, branch st
 	// policy nil, which the resolver treats as "no global rung".
 	opts.GlobalEnvExamplePolicy = resolveGlobalEnvExamplePolicy(cfg.Workspace.Name)
 
+	// Thread the resolved personal/global secret-output target declaration so
+	// the worktree materializer resolves the same targets as `niwa apply`. Same
+	// no-fail posture as the policy above: any unavailability leaves it empty.
+	opts.GlobalEnvOutput = resolveGlobalEnvOutput(cfg.Workspace.Name)
+
 	// Resolve and merge the workspace overlay the same way `niwa apply` does, so
 	// a worktree of an overlay-augmented repo gets the overlay-merged CLAUDE
 	// content a repo checkout would. config.Load does NOT run the overlay merge,
@@ -272,6 +277,27 @@ func resolveGlobalEnvExamplePolicy(workspaceName string) *config.EnvExamplePolic
 		return nil
 	}
 	return workspace.ResolveGlobalOverride(parsed, workspaceName).EnvExamplePolicy
+}
+
+// resolveGlobalEnvOutput reads the already-synced personal global config
+// override and returns the resolved secret-output target declaration for
+// workspaceName. Like resolveGlobalEnvExamplePolicy it never fails the worktree
+// apply: any unavailability returns nil, which EffectiveEnvOutput treats as "no
+// global rung".
+func resolveGlobalEnvOutput(workspaceName string) config.OutputTargets {
+	gDir, err := config.GlobalConfigDir()
+	if err != nil || gDir == "" {
+		return nil
+	}
+	data, err := os.ReadFile(filepath.Join(gDir, workspace.GlobalConfigOverrideFile))
+	if err != nil {
+		return nil
+	}
+	parsed, err := config.ParseGlobalConfigOverride(data)
+	if err != nil {
+		return nil
+	}
+	return workspace.ResolveGlobalOverride(parsed, workspaceName).EnvOutput
 }
 
 // printWorktreeContentFiles surfaces the written-files list returned by
