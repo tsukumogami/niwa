@@ -60,7 +60,7 @@ func TestResolveAndMergeEffectiveConfigResolvesTeamVaultRef(t *testing.T) {
 	}
 	defer personalBundle.CloseAll()
 
-	effective, policy, err := ResolveAndMergeEffectiveConfig(
+	effective, policy, _, err := ResolveAndMergeEffectiveConfig(
 		ctx, cfg, nil, teamBundle, personalBundle,
 		EffectiveConfigOptions{Stderr: &bytes.Buffer{}},
 	)
@@ -119,7 +119,7 @@ func TestResolveAndMergeEffectiveConfigMergesPersonalOverlayEnv(t *testing.T) {
 	}
 	defer personalBundle.CloseAll()
 
-	effective, _, err := ResolveAndMergeEffectiveConfig(
+	effective, _, _, err := ResolveAndMergeEffectiveConfig(
 		ctx, cfg, override, teamBundle, personalBundle,
 		EffectiveConfigOptions{Stderr: &bytes.Buffer{}},
 	)
@@ -170,7 +170,7 @@ func TestResolveAndMergeEffectiveConfigAllowMissingDowngrades(t *testing.T) {
 	defer personalBundle.CloseAll()
 
 	var stderr bytes.Buffer
-	_, _, err = ResolveAndMergeEffectiveConfig(
+	_, _, _, err = ResolveAndMergeEffectiveConfig(
 		ctx, cfg, nil, teamBundle, personalBundle,
 		EffectiveConfigOptions{AllowMissingSecrets: true, Stderr: &stderr},
 	)
@@ -211,7 +211,7 @@ func TestResolveAndMergeEffectiveConfigNilOverridePassthrough(t *testing.T) {
 	}
 	defer personalBundle.CloseAll()
 
-	effective, policy, err := ResolveAndMergeEffectiveConfig(
+	effective, policy, _, err := ResolveAndMergeEffectiveConfig(
 		ctx, cfg, nil, teamBundle, personalBundle,
 		EffectiveConfigOptions{},
 	)

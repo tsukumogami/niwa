@@ -444,7 +444,7 @@ func TestApplyToWorktreeMaterializesVaultResolvedEnv(t *testing.T) {
 	}
 	defer personalBundle.CloseAll()
 
-	effective, _, err := ResolveAndMergeEffectiveConfig(
+	effective, _, _, err := ResolveAndMergeEffectiveConfig(
 		ctx, cfg, nil, teamBundle, personalBundle,
 		EffectiveConfigOptions{AllowMissingSecrets: true},
 	)
@@ -505,7 +505,7 @@ func TestApplyToWorktreeMergesPersonalOverlayEnv(t *testing.T) {
 	}
 	defer personalBundle.CloseAll()
 
-	effective, _, err := ResolveAndMergeEffectiveConfig(
+	effective, _, _, err := ResolveAndMergeEffectiveConfig(
 		ctx, cfg, override, teamBundle, personalBundle,
 		EffectiveConfigOptions{AllowMissingSecrets: true},
 	)
