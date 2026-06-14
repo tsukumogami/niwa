@@ -13,6 +13,8 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/tsukumogami/niwa/internal/cli/sessionattach"
 	"github.com/tsukumogami/niwa/internal/config"
+	"github.com/tsukumogami/niwa/internal/vault"
+	"github.com/tsukumogami/niwa/internal/vault/resolve"
 	"github.com/tsukumogami/niwa/internal/workspace"
 	"github.com/tsukumogami/niwa/internal/worktree"
 )
@@ -209,6 +211,8 @@ func runSessionApply(cmd *cobra.Command, args []string) error {
 // (the content install lives in internal/workspace), and the CLI orchestrates
 // the two.
 func applyContentToWorktree(instanceRoot, worktreePath, repo, purpose, branch string) ([]string, error) {
+	ctx := context.Background()
+
 	configPath, configDir, err := config.Discover(instanceRoot)
 	if err != nil {
 		return nil, fmt.Errorf("locating workspace config: %w", err)
@@ -226,19 +230,6 @@ func applyContentToWorktree(instanceRoot, worktreePath, repo, purpose, branch st
 
 	opts := workspace.WorktreeApplyOptions{Stderr: os.Stderr}
 
-	// Thread the resolved personal/global .env.example failure policy so the
-	// worktree pre-pass applies the same policy as `niwa apply`. The global
-	// override snapshot was already synced by apply/create; here we read the
-	// already-present niwa.toml without re-syncing. Any unavailability (no
-	// global config registered, no niwa.toml, or a parse error) leaves the
-	// policy nil, which the resolver treats as "no global rung".
-	opts.GlobalEnvExamplePolicy = resolveGlobalEnvExamplePolicy(cfg.Workspace.Name)
-
-	// Thread the resolved personal/global secret-output target declaration so
-	// the worktree materializer resolves the same targets as `niwa apply`. Same
-	// no-fail posture as the policy above: any unavailability leaves it empty.
-	opts.GlobalEnvOutput = resolveGlobalEnvOutput(cfg.Workspace.Name)
-
 	// Resolve and merge the workspace overlay the same way `niwa apply` does, so
 	// a worktree of an overlay-augmented repo gets the overlay-merged CLAUDE
 	// content a repo checkout would. config.Load does NOT run the overlay merge,
@@ -247,6 +238,11 @@ func applyContentToWorktree(instanceRoot, worktreePath, repo, purpose, branch st
 	// overlay dir is recorded in InstanceState.OverlayURL by apply/create.
 	// When no overlay is configured (empty OverlayURL or NoOverlay), opts.OverlayDir
 	// stays empty and the no-overlay path runs exactly as before.
+	//
+	// The structural overlay merge runs BEFORE the resolve+merge helper below
+	// so the helper sees the overlay-merged base (mirroring the instance
+	// pipeline's Step 0.6 → Step 6 ordering); the helper's personal-overlay
+	// merge then layers on top of that base.
 	if cfgWithOverlay, overlayDir, oErr := mergeWorktreeOverlay(cfg, instanceRoot); oErr != nil {
 		return nil, oErr
 	} else if overlayDir != "" {
@@ -254,16 +250,61 @@ func applyContentToWorktree(instanceRoot, worktreePath, repo, purpose, branch st
 		opts.OverlayDir = overlayDir
 	}
 
+	// Run the shared resolve+merge helper so the worktree apply path receives
+	// the same effective WorkspaceConfig the instance apply path does. Without
+	// this step, env.secrets vault:// URIs stay literal in the worktree's
+	// .local.env and personal-overlay env keys go missing — which broke
+	// `niwa worktree create` for any workspace using a personal global
+	// override or a vault-backed env entry. See issue #162.
+	//
+	// AllowMissingSecrets: true is deliberate. A worktree apply is a localized
+	// re-materialization; the instance create / apply already enforced strict
+	// secret resolution at bootstrap. A transient vault outage during a
+	// worktree apply should warn-and-continue rather than hard-fail the
+	// worktree.
+	globalOverride := loadGlobalConfigOverride()
+	teamBundle, err := resolve.BuildBundle(ctx, vault.DefaultRegistry, cfg.Vault, "workspace config")
+	if err != nil {
+		return nil, fmt.Errorf("building team vault bundle: %w", err)
+	}
+	defer teamBundle.CloseAll()
+	var overlayRegistry *config.VaultRegistry
+	if globalOverride != nil {
+		overlayRegistry = globalOverride.Global.Vault
+	}
+	personalBundle, err := resolve.BuildBundle(ctx, vault.DefaultRegistry, overlayRegistry, "global overlay")
+	if err != nil {
+		return nil, fmt.Errorf("building personal-overlay vault bundle: %w", err)
+	}
+	defer personalBundle.CloseAll()
+
+	gDir, _ := config.GlobalConfigDir()
+	effectiveCfg, globalEnvExamplePolicy, globalEnvOutput, err := workspace.ResolveAndMergeEffectiveConfig(
+		ctx, cfg, globalOverride, teamBundle, personalBundle,
+		workspace.EffectiveConfigOptions{
+			AllowMissingSecrets: true,
+			GlobalConfigDir:     gDir,
+			Stderr:              os.Stderr,
+		},
+	)
+	if err != nil {
+		return nil, fmt.Errorf("resolving effective workspace config: %w", err)
+	}
+	cfg = effectiveCfg
+	opts.GlobalEnvExamplePolicy = globalEnvExamplePolicy
+	opts.GlobalEnvOutput = globalEnvOutput
+
 	return workspace.ApplyToWorktree(cfg, configDir, instanceRoot, worktreePath, group, repo, purpose, branch, opts)
 }
 
-// resolveGlobalEnvExamplePolicy reads the already-synced personal global config
+// loadGlobalConfigOverride reads the already-synced personal global config
 // override (niwa.toml under the registered global config dir) and returns the
-// resolved .env.example failure policy for workspaceName. It does NOT sync the
-// snapshot (apply/create already did) and never fails the worktree apply: any
-// unavailability (no global config registered, no niwa.toml, or a parse error)
-// returns nil, which EffectiveEnvExamplePolicy treats as "no global rung".
-func resolveGlobalEnvExamplePolicy(workspaceName string) *config.EnvExamplePolicy {
+// parsed value. It does NOT sync the snapshot (apply/create already did) and
+// never fails the worktree apply: any unavailability (no global config
+// registered, no niwa.toml, or a parse error) returns nil, which the
+// resolve+merge helper treats as "no overlay registered" (team-only resolve,
+// no merge).
+func loadGlobalConfigOverride() *config.GlobalConfigOverride {
 	gDir, err := config.GlobalConfigDir()
 	if err != nil || gDir == "" {
 		return nil
@@ -276,28 +317,7 @@ func resolveGlobalEnvExamplePolicy(workspaceName string) *config.EnvExamplePolic
 	if err != nil {
 		return nil
 	}
-	return workspace.ResolveGlobalOverride(parsed, workspaceName).EnvExamplePolicy
-}
-
-// resolveGlobalEnvOutput reads the already-synced personal global config
-// override and returns the resolved secret-output target declaration for
-// workspaceName. Like resolveGlobalEnvExamplePolicy it never fails the worktree
-// apply: any unavailability returns nil, which EffectiveEnvOutput treats as "no
-// global rung".
-func resolveGlobalEnvOutput(workspaceName string) config.OutputTargets {
-	gDir, err := config.GlobalConfigDir()
-	if err != nil || gDir == "" {
-		return nil
-	}
-	data, err := os.ReadFile(filepath.Join(gDir, workspace.GlobalConfigOverrideFile))
-	if err != nil {
-		return nil
-	}
-	parsed, err := config.ParseGlobalConfigOverride(data)
-	if err != nil {
-		return nil
-	}
-	return workspace.ResolveGlobalOverride(parsed, workspaceName).EnvOutput
+	return parsed
 }
 
 // printWorktreeContentFiles surfaces the written-files list returned by
