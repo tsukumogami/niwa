@@ -1074,48 +1074,28 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		}
 	}
 
-	// Resolve the team workspace config.
-	resolvedCfg, err := resolve.ResolveWorkspace(ctx, cfg, resolve.ResolveOptions{
-		AllowMissing: a.AllowMissingSecrets,
-		TeamBundle:   teamBundle,
-	})
-	if err != nil {
-		return nil, err
-	}
-	effectiveCfg = resolvedCfg
-
+	// Resolve the team workspace config and merge the personal overlay via
+	// the shared helper. The same helper drives applyContentToWorktree in
+	// internal/cli/session_lifecycle_cmd.go so the two apply paths cannot
+	// drift on "what does an effective WorkspaceConfig look like after
+	// personal overlay resolution"; see effective_config.go for the
+	// drift-invariant rationale.
+	//
 	// globalEnvExamplePolicy is the resolved personal/global .env.example
 	// failure policy for the active workspace, threaded into the materialize
 	// context so the pre-pass can consult the global category rung. It stays
 	// nil when no global override is loaded (skipGlobal or no niwa.toml), which
 	// the resolver treats as "no global rung".
-	var globalEnvExamplePolicy *config.EnvExamplePolicy
-
-	// globalEnvOutput is the resolved personal/global secret-output target
-	// declaration, threaded so the materializer resolves the same targets the
-	// pre-pass policy is threaded for. Empty when no global override is loaded.
-	var globalEnvOutput config.OutputTargets
-
-	// Resolve the personal overlay, then merge it into the team
-	// workspace. The merge happens AFTER resolution so that R8
-	// team_only enforcement in MergeGlobalOverride sees the
-	// overlay's resolved MaybeSecret values, not pre-resolve URIs.
-	if globalOverride != nil {
-		resolvedOverride, err := resolve.ResolveGlobalOverride(ctx, globalOverride, resolve.ResolveOptions{
-			AllowMissing:   a.AllowMissingSecrets,
-			PersonalBundle: personalBundle,
-		})
-		if err != nil {
-			return nil, err
-		}
-		flattened := ResolveGlobalOverride(resolvedOverride, cfg.Workspace.Name)
-		globalEnvExamplePolicy = flattened.EnvExamplePolicy
-		globalEnvOutput = flattened.EnvOutput
-		merged, err := MergeGlobalOverride(resolvedCfg, flattened, a.GlobalConfigDir)
-		if err != nil {
-			return nil, err
-		}
-		effectiveCfg = merged
+	effectiveCfg, globalEnvExamplePolicy, globalEnvOutput, err := ResolveAndMergeEffectiveConfig(
+		ctx, cfg, globalOverride, teamBundle, personalBundle,
+		EffectiveConfigOptions{
+			AllowMissingSecrets: a.AllowMissingSecrets,
+			GlobalConfigDir:     a.GlobalConfigDir,
+			Stderr:              a.Reporter.Writer(),
+		},
+	)
+	if err != nil {
+		return nil, err
 	}
 
 	// Post-merge required/recommended enforcement (PRD R33/R34). The
