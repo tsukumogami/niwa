@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -15,6 +16,7 @@ import (
 	"github.com/tsukumogami/niwa/internal/gitexclude"
 	"github.com/tsukumogami/niwa/internal/github"
 	"github.com/tsukumogami/niwa/internal/guardrail"
+	"github.com/tsukumogami/niwa/internal/pluginrecord"
 	"github.com/tsukumogami/niwa/internal/secret"
 	"github.com/tsukumogami/niwa/internal/vault"
 	"github.com/tsukumogami/niwa/internal/vault/resolve"
@@ -86,6 +88,16 @@ type Applier struct {
 	// Defaults to HeadSHA. Overridable in tests.
 	headSHA func(dir string) (string, error)
 
+	// prunePluginRecords removes dangling records from Claude Code's global
+	// plugin install registry. It is the test seam for the automatic heal
+	// step in runPipeline: production wires it (via NewApplier) to
+	// pluginrecord.Prune(pluginrecord.Dangling), which targets the real
+	// ~/.claude registry; tests override it to point at a temp HOME via
+	// pluginrecord.WithPruneBaseDir so the heal never touches the user's
+	// home directory. When nil, the heal is a silent no-op — useful for
+	// unit tests that don't exercise the registry at all.
+	prunePluginRecords func() (pluginrecord.PruneReport, error)
+
 	// vaultRegistry overrides vault.DefaultRegistry for vault bundle building.
 	// Nil means use the process-wide DefaultRegistry (production behaviour).
 	// Tests set this to a fresh *vault.Registry with the fake backend registered
@@ -118,6 +130,12 @@ func NewApplier(gh github.Client) *Applier {
 		Cloner:       &Cloner{},
 		Reporter:     NewReporter(os.Stderr),
 		headSHA:      HeadSHA,
+	}
+	// The automatic dangling-record heal (runPipeline) prunes Claude Code's
+	// global plugin registry. Default to the real ~/.claude location;
+	// dangling-only keeps this broadly-run step from removing live records.
+	a.prunePluginRecords = func() (pluginrecord.PruneReport, error) {
+		return pluginrecord.Prune(pluginrecord.Dangling)
 	}
 	a.cloneOrSync = func(ctx context.Context, url, dir string) (bool, int, error) {
 		fetcher, _ := a.GitHubClient.(FetchClient)
@@ -1358,6 +1376,15 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		managedFiles = append(managedFiles, mf)
 	}
 
+	// Step 8: Automatic dangling plugin-record heal. Both Applier.Create and
+	// Applier.Apply route through runPipeline, so this repairs accumulated
+	// registry damage on every workspace create and update with no separate
+	// command (Decision 2; R3, R5). It is dangling-only (never removes live
+	// records), fail-safe (a malformed/absent registry is reported and
+	// skipped, never failing create or update), and it reports what it
+	// removed so the heal is never silent (R4).
+	a.healDanglingPluginRecords()
+
 	return &pipelineResult{
 		classified:       classified,
 		repoStates:       repoStates,
@@ -1369,6 +1396,57 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		overlayCommit:    pipelineOverlayCommit,
 		disclosedNotices: newDisclosures,
 	}, nil
+}
+
+// healDanglingPluginRecords prunes records from Claude Code's global plugin
+// install registry whose referenced directories are already gone, then reports
+// what it removed. It is invoked from runPipeline so it runs on every workspace
+// create and update.
+//
+// The step is fail-safe by contract: a nil seam, a malformed registry, or any
+// I/O error is reported via a deferred warning and never propagated, so a
+// damaged or absent registry can never fail a create or update. A successful
+// prune that removed at least one record logs the count and the affected
+// plugin keys; a no-op prune is silent.
+func (a *Applier) healDanglingPluginRecords() {
+	if a.prunePluginRecords == nil {
+		return
+	}
+
+	report, err := a.prunePluginRecords()
+	if err != nil {
+		a.Reporter.DeferWarn("could not heal dangling plugin records: %v", err)
+		return
+	}
+	if report.Removed == 0 {
+		return
+	}
+
+	affected := affectedPlugins(report)
+	if len(affected) > 0 {
+		a.Reporter.Log("healed %d dangling plugin record(s): %s", report.Removed, strings.Join(affected, ", "))
+	} else {
+		a.Reporter.Log("healed %d dangling plugin record(s)", report.Removed)
+	}
+}
+
+// affectedPlugins returns the sorted, de-duplicated set of plugin keys touched
+// by a prune: every key with at least one record removed, plus every key
+// dropped entirely because its record list became empty.
+func affectedPlugins(report pluginrecord.PruneReport) []string {
+	seen := make(map[string]struct{}, len(report.PerPlugin)+len(report.DroppedKeys))
+	for key := range report.PerPlugin {
+		seen[key] = struct{}{}
+	}
+	for _, key := range report.DroppedKeys {
+		seen[key] = struct{}{}
+	}
+	keys := make([]string, 0, len(seen))
+	for key := range seen {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // cleanRemovedFiles deletes managed files from the previous state that are

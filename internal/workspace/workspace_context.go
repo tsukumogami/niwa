@@ -4,12 +4,113 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/tsukumogami/niwa/internal/config"
 )
+
+// Marketplace track values. Track selects which version of a github
+// marketplace to register against.
+const (
+	// trackRelease registers against the latest stable (non-prerelease)
+	// release tag. It is the default for github sources.
+	trackRelease = "release"
+	// trackMain registers against the default branch (no pin).
+	trackMain = "main"
+)
+
+// resolveLatestStableRelease is the release-resolution SEAM. Given a github
+// "org/repo", it returns the highest non-prerelease semver tag and true, or
+// ("", false) when the repo has no stable release (or cannot be reached).
+//
+// It is a package-level var so unit tests inject a fake and never hit the
+// network. The default implementation shells out to git ls-remote.
+//
+// SPIKE FINDING (Decision 6): Claude Code does NOT honor a ref/tag/commit
+// pin field on a github marketplace SOURCE object — the object niwa writes
+// into known_marketplaces.json / extraKnownMarketplaces only accepts
+// source/repo/sparsePaths, and Claude clones the default-branch HEAD. The
+// `ref` field is honored only inside a marketplace.json catalog entry
+// (git-subdir source), which niwa does not author. We still resolve the
+// release and emit a best-effort "ref" on the github source: it is ignored
+// by Claude today but is forward-compatible if Claude adds source-level
+// pinning, and the resolution itself drives the report surfaced to users.
+var resolveLatestStableRelease = defaultResolveLatestStableRelease
+
+// defaultResolveLatestStableRelease lists the repo's tags via git ls-remote
+// and returns the highest non-prerelease semver tag.
+func defaultResolveLatestStableRelease(repo string) (string, bool) {
+	url := "https://github.com/" + repo
+	out, err := exec.Command("git", "ls-remote", "--tags", "--refs", url).Output()
+	if err != nil {
+		return "", false
+	}
+	var best string
+	var bestParsed [3]int
+	found := false
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) != 2 {
+			continue
+		}
+		tag := strings.TrimPrefix(fields[1], "refs/tags/")
+		parsed, ok := parseStableSemver(tag)
+		if !ok {
+			continue
+		}
+		if !found || compareSemver(parsed, bestParsed) > 0 {
+			best = tag
+			bestParsed = parsed
+			found = true
+		}
+	}
+	if !found {
+		return "", false
+	}
+	return best, true
+}
+
+// parseStableSemver parses a "vX.Y.Z" (or "X.Y.Z") tag into its numeric
+// components. It rejects prerelease tags (those carrying a "-" suffix such
+// as v1.2.3-rc.1 or v1.2.3-dev) and any tag that is not a clean three-part
+// numeric version, so only stable releases are considered.
+func parseStableSemver(tag string) ([3]int, bool) {
+	var v [3]int
+	s := strings.TrimPrefix(tag, "v")
+	// Reject prerelease and build-metadata suffixes.
+	if strings.ContainsAny(s, "-+") {
+		return v, false
+	}
+	parts := strings.Split(s, ".")
+	if len(parts) != 3 {
+		return v, false
+	}
+	for i, p := range parts {
+		n, err := strconv.Atoi(p)
+		if err != nil || n < 0 {
+			return v, false
+		}
+		v[i] = n
+	}
+	return v, true
+}
+
+// compareSemver returns -1, 0, or 1 comparing two parsed semver triples.
+func compareSemver(a, b [3]int) int {
+	for i := 0; i < 3; i++ {
+		switch {
+		case a[i] < b[i]:
+			return -1
+		case a[i] > b[i]:
+			return 1
+		}
+	}
+	return 0
+}
 
 const workspaceContextFile = "workspace-context.md"
 const workspaceContextImport = "@workspace-context.md"
@@ -229,6 +330,7 @@ func InstallWorkspaceRootSettings(cfg *config.WorkspaceConfig, configDir, instan
 	}
 
 	includeGit := false
+	var reports []string
 	doc, err := buildSettingsDoc(BuildSettingsConfig{
 		Settings:               effective.Claude.Settings,
 		InstalledHooks:         installedHooks,
@@ -239,10 +341,12 @@ func InstallWorkspaceRootSettings(cfg *config.WorkspaceConfig, configDir, instan
 		BaseDir:                instanceRoot,
 		IncludeGitInstructions: &includeGit,
 		UseAbsolutePaths:       true,
+		Reports:                &reports,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("building workspace root settings: %w", err)
 	}
+	emitReports(nil, reports)
 
 	data, err := json.MarshalIndent(doc, "", "  ")
 	if err != nil {
@@ -301,48 +405,121 @@ func InstallGlobalClaudeContent(globalConfigDir, instanceRoot string) ([]string,
 	return []string{destPath}, nil
 }
 
+// readMarketplaceManifestName reads the declared marketplace name from
+// dir/.claude-plugin/marketplace.json. It returns (name, true) when the
+// manifest can be read, parsed, and carries a non-empty "name". It returns
+// ("", false) on any failure (missing/unreadable/malformed manifest or empty
+// name) so callers can fall back to ref-derived keying without crashing.
+func readMarketplaceManifestName(dir string) (string, bool) {
+	manifestPath := filepath.Join(dir, ".claude-plugin", "marketplace.json")
+	data, err := os.ReadFile(manifestPath)
+	if err != nil {
+		return "", false
+	}
+	var manifest struct {
+		Name string `json:"name"`
+	}
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		return "", false
+	}
+	if manifest.Name == "" {
+		return "", false
+	}
+	return manifest.Name, true
+}
+
 // mapMarketplaceSourceWithIndex converts a niwa marketplace source string to the
 // Claude Code extraKnownMarketplaces format. Returns the marketplace name,
-// the entry object, and an error. It accepts a repoIndex for resolving repo:
-// references to absolute directory paths.
-func mapMarketplaceSourceWithIndex(source string, repoIndex map[string]string) (string, map[string]any, error) {
+// the entry object, an optional human-readable report (release-tracking
+// notice, empty when there is nothing to report), and an error. It accepts a
+// repoIndex for resolving repo: references to absolute directory paths,
+// autoUpdate to emit the configured per-marketplace auto-update policy, and
+// track to select the version a github source registers against.
+//
+// For local (repo:/directory) sources the registration key is read from the
+// marketplace's declared name in .claude-plugin/marketplace.json, falling back
+// to the repo-ref-derived name when the manifest cannot be read. Local sources
+// ignore track entirely. For github sources the repo name is used as the key.
+//
+// Track interpretation for github sources:
+//   - "" or "release": resolve the highest non-prerelease release tag and emit
+//     it as a best-effort "ref" on the source (see resolveLatestStableRelease
+//     for the SPIKE FINDING on why this is best-effort). When the repo has no
+//     stable release, fall back to the default branch (no ref) and return a
+//     report describing the fallback (R14, R16).
+//   - "main": register against the default branch, no ref (R15).
+//   - any other value: treated as an explicit ref and emitted verbatim (R17).
+func mapMarketplaceSourceWithIndex(source string, repoIndex map[string]string, autoUpdate bool, track string) (string, map[string]any, string, error) {
 	if strings.HasPrefix(source, repoRefPrefix) {
-		// repo:tools/.claude-plugin/marketplace.json -> directory source
+		// repo:tools/.claude-plugin/marketplace.json -> directory source.
+		// Local sources ignore track (no remote version to resolve).
 		resolved, err := ResolveMarketplaceSource(source, repoIndex)
 		if err != nil {
-			return "", nil, err
+			return "", nil, "", err
 		}
 		// The directory source type points to the directory containing
 		// .claude-plugin/marketplace.json. Strip the filename and the
 		// .claude-plugin directory to get the root.
 		dir := filepath.Dir(filepath.Dir(resolved))
-		// Use the repo name as the marketplace name.
+		// Prefer the marketplace's declared name; fall back to the repo name
+		// when the manifest cannot be read.
 		ref := strings.TrimPrefix(source, repoRefPrefix)
 		slashIdx := strings.IndexByte(ref, '/')
 		name := ref[:slashIdx]
+		if declared, ok := readMarketplaceManifestName(dir); ok {
+			name = declared
+		}
 		return name, map[string]any{
 			"source": map[string]any{
 				"source": "directory",
 				"path":   dir,
 			},
-			"autoUpdate": true,
-		}, nil
+			"autoUpdate": autoUpdate,
+		}, "", nil
 	}
 
 	// GitHub ref: "org/repo" -> {source: {source: "github", repo: "org/repo"}}
 	parts := strings.SplitN(source, "/", 3)
 	if len(parts) == 2 && parts[0] != "" && parts[1] != "" {
 		name := parts[1] // use repo name as marketplace name
+		src := map[string]any{
+			"source": "github",
+			"repo":   source,
+		}
+		report := applyGithubTrack(src, source, track)
 		return name, map[string]any{
-			"source": map[string]any{
-				"source": "github",
-				"repo":   source,
-			},
-			"autoUpdate": true,
-		}, nil
+			"source":     src,
+			"autoUpdate": autoUpdate,
+		}, report, nil
 	}
 
-	return "", nil, nil
+	return "", nil, "", nil
+}
+
+// applyGithubTrack mutates a github source map to register against the
+// configured track and returns a report string (empty when nothing needs
+// reporting). repo is the "org/repo" reference used for release resolution.
+func applyGithubTrack(src map[string]any, repo, track string) string {
+	switch track {
+	case "", trackRelease:
+		tag, ok := resolveLatestStableRelease(repo)
+		if !ok {
+			// No stable release: fall back to the default branch and report it.
+			return fmt.Sprintf(
+				"marketplace %q has no stable release; tracking the default branch",
+				repo,
+			)
+		}
+		src["ref"] = tag
+		return ""
+	case trackMain:
+		// Default branch: emit no ref.
+		return ""
+	default:
+		// Explicit ref/tag/version: emit verbatim.
+		src["ref"] = track
+		return ""
+	}
 }
 
 // generateWorkspaceContext produces the markdown content for the workspace

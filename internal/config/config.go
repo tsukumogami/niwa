@@ -29,10 +29,12 @@ type ClaudeConfig struct {
 	Enabled *bool     `toml:"enabled,omitempty"`
 	Plugins *[]string `toml:"plugins,omitempty"`
 	// Marketplaces is workspace-wide. Not merged from per-repo overrides.
-	Marketplaces []string        `toml:"marketplaces,omitempty"`
-	Hooks        HooksConfig     `toml:"hooks,omitempty"`
-	Settings     SettingsConfig  `toml:"settings,omitempty"`
-	Env          ClaudeEnvConfig `toml:"env,omitempty"`
+	// MarketplaceConfigs decodes both the legacy bare-string list and the
+	// new array-of-tables form via a custom UnmarshalTOML.
+	Marketplaces MarketplaceConfigs `toml:"marketplaces,omitempty"`
+	Hooks        HooksConfig        `toml:"hooks,omitempty"`
+	Settings     SettingsConfig     `toml:"settings,omitempty"`
+	Env          ClaudeEnvConfig    `toml:"env,omitempty"`
 	// Content declares the CLAUDE.md content hierarchy under
 	// [claude.content]. Workspace-scoped: per-repo overrides are not
 	// honored via RepoOverride.Claude. Migrated from the deprecated
@@ -53,6 +55,126 @@ type ClaudeOverride struct {
 	Hooks    HooksConfig     `toml:"hooks,omitempty"`
 	Settings SettingsConfig  `toml:"settings,omitempty"`
 	Env      ClaudeEnvConfig `toml:"env,omitempty"`
+}
+
+// MarketplaceConfig declares a single Claude plugin marketplace and its
+// per-marketplace policy. Source is the marketplace reference (a github
+// "org/repo", a "repo:<repo>/<path>" local source, etc.). AutoUpdate
+// controls whether Claude Code auto-updates this marketplace (default
+// false). Track selects which version to install ("release" for the
+// latest stable tag, "main" for the default branch, or an explicit ref);
+// empty defers to the source-type default.
+type MarketplaceConfig struct {
+	Source     string `toml:"source"`
+	AutoUpdate bool   `toml:"auto_update,omitempty"`
+	Track      string `toml:"track,omitempty"`
+}
+
+// MarketplaceConfigs is the [claude.marketplaces] list. It carries a
+// custom UnmarshalTOML so two authoring forms decode into the same typed
+// slice (see UnmarshalTOML).
+type MarketplaceConfigs []MarketplaceConfig
+
+// UnmarshalTOML implements toml.Unmarshaler for MarketplaceConfigs,
+// accepting both the legacy bare-string list and the new array-of-tables
+// form so existing configs keep working unchanged.
+//
+// Legacy:
+//
+//	marketplaces = ["org/repo", "repo:tools/.claude-plugin/marketplace.json"]
+//
+// New:
+//
+//	[[claude.marketplaces]]
+//	source = "org/repo"
+//	auto_update = true
+//	track = "main"
+//
+// A bare string maps to {Source: s, AutoUpdate: false, Track: ""}. A
+// table reads source (required), auto_update (optional, default false),
+// and track (optional). The two forms cannot be mixed in one list.
+func (m *MarketplaceConfigs) UnmarshalTOML(data any) error {
+	*m = nil
+
+	// The TOML library decodes an array-of-tables as []map[string]any and a
+	// bare-string list as []any; handle both. (It may also hand back a typed
+	// []string for a homogeneous string array.)
+	var items []any
+	switch v := data.(type) {
+	case []any:
+		items = v
+	case []map[string]any:
+		items = make([]any, len(v))
+		for i := range v {
+			items[i] = v[i]
+		}
+	case []string:
+		items = make([]any, len(v))
+		for i := range v {
+			items[i] = v[i]
+		}
+	default:
+		return fmt.Errorf("claude.marketplaces must be a TOML array, got %T", data)
+	}
+
+	out := make(MarketplaceConfigs, 0, len(items))
+	for i, item := range items {
+		switch v := item.(type) {
+		case string:
+			out = append(out, MarketplaceConfig{Source: v})
+		case map[string]any:
+			mc, err := marketplaceConfigFromTable(i, v)
+			if err != nil {
+				return err
+			}
+			out = append(out, mc)
+		default:
+			return fmt.Errorf(
+				"claude.marketplaces[%d] must be a string or a table, got %T",
+				i, item,
+			)
+		}
+	}
+	*m = out
+	return nil
+}
+
+// marketplaceConfigFromTable decodes a single [[claude.marketplaces]]
+// table into a MarketplaceConfig, validating field types and requiring a
+// non-empty source.
+func marketplaceConfigFromTable(idx int, tbl map[string]any) (MarketplaceConfig, error) {
+	var mc MarketplaceConfig
+
+	rawSource, ok := tbl["source"]
+	if !ok {
+		return mc, fmt.Errorf("claude.marketplaces[%d]: missing required field \"source\"", idx)
+	}
+	src, ok := rawSource.(string)
+	if !ok {
+		return mc, fmt.Errorf("claude.marketplaces[%d].source must be a string, got %T", idx, rawSource)
+	}
+	if src == "" {
+		return mc, fmt.Errorf("claude.marketplaces[%d].source must not be empty", idx)
+	}
+	mc.Source = src
+
+	if raw, ok := tbl["auto_update"]; ok {
+		b, ok := raw.(bool)
+		if !ok {
+			return mc, fmt.Errorf("claude.marketplaces[%d].auto_update must be a bool, got %T", idx, raw)
+		}
+		mc.AutoUpdate = b
+	}
+
+	if raw, ok := tbl["track"]; ok {
+		t, ok := raw.(string)
+		if !ok {
+			return mc, fmt.Errorf("claude.marketplaces[%d].track must be a string, got %T", idx, raw)
+		}
+		mc.Track = t
+	}
+
+	return mc, nil
 }
 
 // EnvVarsTable holds a map of env key→value paired with the three

@@ -1,6 +1,7 @@
 package workspace
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/tsukumogami/niwa/internal/config"
 	"github.com/tsukumogami/niwa/internal/github"
+	"github.com/tsukumogami/niwa/internal/pluginrecord"
 	"github.com/tsukumogami/niwa/internal/vault"
 	"github.com/tsukumogami/niwa/internal/vault/fake"
 )
@@ -3000,5 +3002,174 @@ func TestOverlayRepoFlowsThroughDiscoveryAndClassify(t *testing.T) {
 	}
 	if classifiedNames["repo1"] != "private" {
 		t.Errorf("regular repo not classified into private group: got %v", classifiedNames)
+	}
+}
+
+// seedPluginRegistry writes a Claude Code plugin registry under baseDir at the
+// canonical ~/.claude/plugins/installed_plugins.json location and returns its
+// path. The content is written verbatim so tests control byte-level shape.
+func seedPluginRegistry(t *testing.T, baseDir, content string) string {
+	t.Helper()
+	regPath := filepath.Join(baseDir, ".claude", "plugins", "installed_plugins.json")
+	if err := os.MkdirAll(filepath.Dir(regPath), 0o755); err != nil {
+		t.Fatalf("creating registry dir: %v", err)
+	}
+	if err := os.WriteFile(regPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("seeding registry: %v", err)
+	}
+	return regPath
+}
+
+// healWithBaseDir builds an Applier whose plugin-record heal seam targets the
+// registry under baseDir (via pluginrecord.WithPruneBaseDir) and whose reporter
+// writes to buf, then runs the heal. It mirrors how runPipeline invokes the
+// heal in production while keeping the prune pointed at a temp HOME.
+func healWithBaseDir(baseDir string, buf *bytes.Buffer) {
+	a := &Applier{
+		Reporter: NewReporter(buf),
+		prunePluginRecords: func() (pluginrecord.PruneReport, error) {
+			return pluginrecord.Prune(pluginrecord.Dangling, pluginrecord.WithPruneBaseDir(baseDir))
+		},
+	}
+	a.healDanglingPluginRecords()
+	a.Reporter.FlushDeferred()
+}
+
+func TestHealDanglingPluginRecords_RemovesDanglingKeepsLive(t *testing.T) {
+	home := t.TempDir()
+
+	// A live project path and install path that exist on disk; the heal must
+	// leave records pointing at these intact.
+	liveProject := filepath.Join(home, "live-project")
+	liveInstall := filepath.Join(home, "live-install")
+	for _, d := range []string{liveProject, liveInstall} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatalf("creating live dir: %v", err)
+		}
+	}
+
+	// Dangling paths: never created, so they are provably missing.
+	deadProject := filepath.Join(home, "gone-project")
+	deadInstall := filepath.Join(home, "gone-install")
+
+	content := fmt.Sprintf(`{
+  "version": 1,
+  "plugins": {
+    "alpha@market": [
+      {"scope": "project", "projectPath": %q, "installPath": %q},
+      {"scope": "project", "projectPath": %q, "installPath": %q}
+    ],
+    "beta@market": [
+      {"scope": "project", "projectPath": %q, "installPath": %q}
+    ]
+  }
+}`, liveProject, liveInstall, deadProject, deadInstall, deadProject, deadInstall)
+
+	regPath := seedPluginRegistry(t, home, content)
+
+	var buf bytes.Buffer
+	healWithBaseDir(home, &buf)
+
+	// Re-load the registry through the package to inspect what survived.
+	reg, err := pluginrecord.Load(pluginrecord.WithBaseDir(home))
+	if err != nil {
+		t.Fatalf("loading post-heal registry: %v", err)
+	}
+
+	// alpha@market keeps exactly the one live record; its dead record is gone.
+	alpha := reg.Plugins["alpha@market"]
+	if len(alpha) != 1 {
+		t.Fatalf("alpha@market: want 1 live record, got %d", len(alpha))
+	}
+	if alpha[0].ProjectPath != liveProject {
+		t.Errorf("alpha@market survivor: want projectPath %q, got %q", liveProject, alpha[0].ProjectPath)
+	}
+
+	// beta@market had only a dead record, so the key is dropped entirely.
+	if _, ok := reg.Plugins["beta@market"]; ok {
+		t.Errorf("beta@market: want key dropped (all records dangling), still present")
+	}
+
+	// The heal reports the count and the affected plugins.
+	out := buf.String()
+	if !strings.Contains(out, "healed 2 dangling plugin record(s)") {
+		t.Errorf("missing heal report line, got: %q", out)
+	}
+	if !strings.Contains(out, "alpha@market") || !strings.Contains(out, "beta@market") {
+		t.Errorf("heal report omits affected plugins, got: %q", out)
+	}
+
+	// A backup of the pre-heal registry exists alongside the original.
+	entries, err := os.ReadDir(filepath.Dir(regPath))
+	if err != nil {
+		t.Fatalf("reading registry dir: %v", err)
+	}
+	var sawBackup bool
+	for _, e := range entries {
+		if strings.Contains(e.Name(), ".niwa-bak.") {
+			sawBackup = true
+		}
+	}
+	if !sawBackup {
+		t.Errorf("expected a .niwa-bak backup after heal, dir entries: %v", entries)
+	}
+}
+
+func TestHealDanglingPluginRecords_MalformedRegistryDoesNotFail(t *testing.T) {
+	home := t.TempDir()
+	regPath := seedPluginRegistry(t, home, "{ this is not valid json")
+	before, err := os.ReadFile(regPath)
+	if err != nil {
+		t.Fatalf("reading seeded registry: %v", err)
+	}
+
+	var buf bytes.Buffer
+	// Must not panic and must not propagate an error (the helper returns void;
+	// fail-safe means create/update never fail). The malformed file is left
+	// untouched and the failure is reported as a deferred warning.
+	healWithBaseDir(home, &buf)
+
+	after, err := os.ReadFile(regPath)
+	if err != nil {
+		t.Fatalf("reading post-heal registry: %v", err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Errorf("malformed registry was modified; before=%q after=%q", before, after)
+	}
+	if !strings.Contains(buf.String(), "could not heal dangling plugin records") {
+		t.Errorf("expected a fail-safe warning for malformed registry, got: %q", buf.String())
+	}
+}
+
+func TestHealDanglingPluginRecords_AbsentRegistryIsNoop(t *testing.T) {
+	home := t.TempDir() // no registry seeded
+
+	var buf bytes.Buffer
+	healWithBaseDir(home, &buf)
+
+	if out := strings.TrimSpace(buf.String()); out != "" {
+		t.Errorf("absent registry should produce no output, got: %q", out)
+	}
+	// No registry file should have been created by the heal.
+	regPath := filepath.Join(home, ".claude", "plugins", "installed_plugins.json")
+	if _, err := os.Stat(regPath); !os.IsNotExist(err) {
+		t.Errorf("absent registry should stay absent, stat err = %v", err)
+	}
+}
+
+func TestHealDanglingPluginRecords_NilSeamIsNoop(t *testing.T) {
+	var buf bytes.Buffer
+	a := &Applier{Reporter: NewReporter(&buf)}
+	// No seam wired: must be a silent no-op rather than a nil-call panic.
+	a.healDanglingPluginRecords()
+	if out := strings.TrimSpace(buf.String()); out != "" {
+		t.Errorf("nil seam should produce no output, got: %q", out)
+	}
+}
+
+func TestNewApplierWiresPluginRecordHeal(t *testing.T) {
+	a := NewApplier(&mockGitHubClient{})
+	if a.prunePluginRecords == nil {
+		t.Fatal("NewApplier must wire a default plugin-record heal seam")
 	}
 }

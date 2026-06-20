@@ -780,18 +780,22 @@ func MergeWorkspaceOverlay(ws *config.WorkspaceConfig, overlay *config.Workspace
 		}
 	}
 
-	// Claude.Marketplaces: append overlay entries not already in base (union).
+	// Claude.Marketplaces: append overlay entries not already in base,
+	// unioning on .Source (base-wins on conflict, carrying base's fields).
 	// Sources that reference overlay-managed repos (via repo: prefix) belong in
-	// the overlay so they are only active when the overlay is accessible.
+	// the overlay so they are only active when the overlay is accessible. The
+	// overlay form is a bare-string list; each new source becomes a
+	// MarketplaceConfig with default policy.
 	if len(overlay.Claude.Marketplaces) > 0 {
 		existing := make(map[string]bool, len(merged.Claude.Marketplaces))
 		for _, m := range merged.Claude.Marketplaces {
-			existing[m] = true
+			existing[m.Source] = true
 		}
-		for _, m := range overlay.Claude.Marketplaces {
-			if !existing[m] {
-				merged.Claude.Marketplaces = append(merged.Claude.Marketplaces, m)
-				existing[m] = true
+		for _, source := range overlay.Claude.Marketplaces {
+			if !existing[source] {
+				merged.Claude.Marketplaces = append(merged.Claude.Marketplaces,
+					config.MarketplaceConfig{Source: source})
+				existing[source] = true
 			}
 		}
 	}

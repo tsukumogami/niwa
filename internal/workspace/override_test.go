@@ -1376,15 +1376,19 @@ func TestMergeWorkspaceOverlay_ContentOverlayMissingBaseReturnsError(t *testing.
 // TestMergeWorkspaceOverlay_MarketplacesAppend verifies that overlay marketplaces
 // are appended to the base config's list using union semantics (dedup by value).
 func TestMergeWorkspaceOverlay_MarketplacesAppend(t *testing.T) {
-	base := []string{"org/shirabe"}
 	ws := &config.WorkspaceConfig{
 		Workspace: config.WorkspaceMeta{Name: "test"},
-		Claude:    config.ClaudeConfig{Marketplaces: append([]string(nil), base...)},
+		Claude: config.ClaudeConfig{
+			// Base entry carries policy that must survive the union.
+			Marketplaces: config.MarketplaceConfigs{
+				{Source: "org/shirabe", AutoUpdate: true, Track: "main"},
+			},
+		},
 	}
 	overlay := &config.WorkspaceOverlay{
 		Claude: config.OverlayClaudeConfig{
-			// "org/shirabe" already in base — should be skipped.
-			// "repo:tools/..." is new — should be appended.
+			// "org/shirabe" already in base — should be skipped (base wins).
+			// "repo:tools/..." is new — should be appended with default policy.
 			Marketplaces: []string{"org/shirabe", "repo:tools/.claude-plugin/marketplace.json"},
 		},
 	}
@@ -1394,18 +1398,27 @@ func TestMergeWorkspaceOverlay_MarketplacesAppend(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	want := []string{"org/shirabe", "repo:tools/.claude-plugin/marketplace.json"}
-	if len(merged.Claude.Marketplaces) != len(want) {
-		t.Fatalf("Marketplaces = %v, want %v", merged.Claude.Marketplaces, want)
+	wantSources := []string{"org/shirabe", "repo:tools/.claude-plugin/marketplace.json"}
+	if len(merged.Claude.Marketplaces) != len(wantSources) {
+		t.Fatalf("Marketplaces = %v, want sources %v", merged.Claude.Marketplaces, wantSources)
 	}
-	for i, w := range want {
-		if merged.Claude.Marketplaces[i] != w {
-			t.Errorf("Marketplaces[%d] = %q, want %q", i, merged.Claude.Marketplaces[i], w)
+	for i, w := range wantSources {
+		if merged.Claude.Marketplaces[i].Source != w {
+			t.Errorf("Marketplaces[%d].Source = %q, want %q", i, merged.Claude.Marketplaces[i].Source, w)
 		}
 	}
 
+	// Base wins on conflict: the base entry keeps its policy/track.
+	if got := merged.Claude.Marketplaces[0]; !got.AutoUpdate || got.Track != "main" {
+		t.Errorf("base entry policy not carried: got %+v, want AutoUpdate=true Track=main", got)
+	}
+	// The appended overlay entry gets default policy.
+	if got := merged.Claude.Marketplaces[1]; got.AutoUpdate || got.Track != "" {
+		t.Errorf("overlay entry should have default policy: got %+v", got)
+	}
+
 	// Original must not be mutated.
-	if len(ws.Claude.Marketplaces) != 1 || ws.Claude.Marketplaces[0] != "org/shirabe" {
+	if len(ws.Claude.Marketplaces) != 1 || ws.Claude.Marketplaces[0].Source != "org/shirabe" {
 		t.Errorf("original Marketplaces mutated: %v", ws.Claude.Marketplaces)
 	}
 }

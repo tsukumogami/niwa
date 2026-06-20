@@ -127,7 +127,8 @@ func runDestroyInstance(cmd *cobra.Command, instanceDir, landingPath string, for
 		}
 	}
 
-	if err := workspace.DestroyInstance(instanceDir); err != nil {
+	if err := workspace.DestroyInstance(instanceDir,
+		workspace.WithDestroyReporter(workspace.NewReporter(cmd.ErrOrStderr()))); err != nil {
 		return err
 	}
 
@@ -338,6 +339,7 @@ func runDestroyWorkspace(cmd *cobra.Command, workspaceRoot string, instances []s
 	parent := filepath.Dir(workspaceRoot)
 
 	if err := workspace.DestroyWorkspace(workspaceRoot, workspace.DestroyWorkspaceOpts{
+		Reporter:    workspace.NewReporter(cmd.ErrOrStderr()),
 		ProgressOut: cmd.ErrOrStderr(),
 	}); err != nil {
 		return err

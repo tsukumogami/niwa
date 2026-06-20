@@ -1,6 +1,7 @@
 package workspace
 
 import (
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/tsukumogami/niwa/internal/config"
+	"github.com/tsukumogami/niwa/internal/pluginrecord"
 )
 
 // destroySetupWorkspace creates a workspace root with .niwa/workspace.toml and
@@ -390,6 +392,192 @@ func TestDestroyInstance_RejectsWorkspaceRoot(t *testing.T) {
 	// Directory should still exist.
 	if _, err := os.Stat(root); err != nil {
 		t.Errorf("workspace root should not be removed: %v", err)
+	}
+}
+
+// --- DestroyInstance plugin-record pruning ---
+
+// registryBaseDir returns a fresh temp directory standing in for the user's
+// home, where pluginrecord locates ~/.claude/plugins/installed_plugins.json.
+func registryBaseDir(t *testing.T) string {
+	t.Helper()
+	return t.TempDir()
+}
+
+// registryPath returns the on-disk registry path under a base (home) dir.
+func registryPath(base string) string {
+	return filepath.Join(base, ".claude", "plugins", "installed_plugins.json")
+}
+
+// seedRegistry writes a registry under base whose single plugin key holds one
+// record per supplied projectPath. The records carry an installPath that exists
+// (the base dir) so the dangling predicate would not match — only ownership
+// distinguishes them, which is what these tests exercise.
+func seedRegistry(t *testing.T, base string, projectPaths ...string) {
+	t.Helper()
+
+	type record struct {
+		Scope       string `json:"scope"`
+		ProjectPath string `json:"projectPath"`
+		InstallPath string `json:"installPath"`
+		Version     string `json:"version"`
+	}
+	records := make([]record, 0, len(projectPaths))
+	for _, p := range projectPaths {
+		records = append(records, record{
+			Scope:       "project",
+			ProjectPath: p,
+			InstallPath: base, // an existing dir, so not dangling
+			Version:     "1.0.0",
+		})
+	}
+
+	doc := map[string]any{
+		"version": "1",
+		"plugins": map[string]any{
+			"example@market": records,
+		},
+	}
+	data, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	path := registryPath(base)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// loadRegistryProjectPaths returns the projectPath of every record remaining in
+// the registry under base, sorted, for assertions.
+func loadRegistryProjectPaths(t *testing.T, base string) []string {
+	t.Helper()
+
+	reg, err := pluginrecord.Load(pluginrecord.WithBaseDir(base))
+	if err != nil {
+		t.Fatalf("loading registry: %v", err)
+	}
+	var paths []string
+	for _, records := range reg.Plugins {
+		for _, rec := range records {
+			paths = append(paths, rec.ProjectPath)
+		}
+	}
+	sort.Strings(paths)
+	return paths
+}
+
+// TestDestroyInstance_PrunesOwnedRecords destroys one of two sibling instances
+// whose directory names share a textual prefix and asserts the destroyed
+// instance's records are removed while the sibling's are left intact. This
+// exercises the instance-owned predicate's prefix precision.
+func TestDestroyInstance_PrunesOwnedRecords(t *testing.T) {
+	root := destroySetupWorkspace(t)
+	target := destroySetupInstance(t, root, "alpha")
+	sibling := destroySetupInstance(t, root, "alpha-sibling")
+
+	base := registryBaseDir(t)
+	// Records under the target (and a nested repo of it) plus the sibling.
+	seedRegistry(t, base,
+		target,
+		filepath.Join(target, "repo"),
+		sibling,
+		filepath.Join(sibling, "repo"),
+	)
+
+	if err := DestroyInstance(target, WithPluginRecordBaseDir(base)); err != nil {
+		t.Fatalf("DestroyInstance: %v", err)
+	}
+
+	if _, err := os.Stat(target); !os.IsNotExist(err) {
+		t.Errorf("instance directory should be removed, got err: %v", err)
+	}
+
+	got := loadRegistryProjectPaths(t, base)
+	want := []string{sibling, filepath.Join(sibling, "repo")}
+	sort.Strings(want)
+	if len(got) != len(want) {
+		t.Fatalf("remaining records = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("remaining records = %v, want %v", got, want)
+		}
+	}
+}
+
+// TestDestroyInstance_FailSafeAbsentRegistry asserts destroy succeeds when no
+// registry file exists at all (the common case on machines without Claude Code
+// plugins installed).
+func TestDestroyInstance_FailSafeAbsentRegistry(t *testing.T) {
+	root := destroySetupWorkspace(t)
+	inst := destroySetupInstance(t, root, "doomed")
+
+	base := registryBaseDir(t) // no registry seeded
+
+	if err := DestroyInstance(inst, WithPluginRecordBaseDir(base)); err != nil {
+		t.Fatalf("DestroyInstance should succeed with absent registry: %v", err)
+	}
+	if _, err := os.Stat(inst); !os.IsNotExist(err) {
+		t.Errorf("instance directory should be removed, got err: %v", err)
+	}
+}
+
+// TestDestroyInstance_FailSafeMalformedRegistry asserts destroy succeeds when
+// the registry is present but unparseable, and the malformed file is left
+// untouched (niwa never overwrites a foreign file it cannot parse).
+func TestDestroyInstance_FailSafeMalformedRegistry(t *testing.T) {
+	root := destroySetupWorkspace(t)
+	inst := destroySetupInstance(t, root, "doomed")
+
+	base := registryBaseDir(t)
+	path := registryPath(base)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	garbage := []byte("{ this is not valid json")
+	if err := os.WriteFile(path, garbage, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := DestroyInstance(inst, WithPluginRecordBaseDir(base)); err != nil {
+		t.Fatalf("DestroyInstance should succeed with malformed registry: %v", err)
+	}
+	if _, err := os.Stat(inst); !os.IsNotExist(err) {
+		t.Errorf("instance directory should be removed, got err: %v", err)
+	}
+
+	// The malformed file must be left exactly as it was.
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading registry after destroy: %v", err)
+	}
+	if string(after) != string(garbage) {
+		t.Errorf("malformed registry was modified: got %q, want %q", after, garbage)
+	}
+}
+
+// TestDestroyWorkspace_PrunesEachInstance asserts the workspace-wipe path prunes
+// records for every instance root it removes.
+func TestDestroyWorkspace_PrunesEachInstance(t *testing.T) {
+	root := destroySetupWorkspace(t)
+	a := destroySetupInstance(t, root, "alpha")
+	b := destroySetupInstance(t, root, "beta")
+
+	base := registryBaseDir(t)
+	seedRegistry(t, base, a, b)
+
+	if err := DestroyWorkspace(root, DestroyWorkspaceOpts{PluginRecordBaseDir: base}); err != nil {
+		t.Fatalf("DestroyWorkspace: %v", err)
+	}
+
+	got := loadRegistryProjectPaths(t, base)
+	if len(got) != 0 {
+		t.Errorf("expected all records pruned, got %v", got)
 	}
 }
 

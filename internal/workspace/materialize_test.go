@@ -1671,7 +1671,7 @@ func TestBuildSettingsDocEmptyPlugins(t *testing.T) {
 
 func TestBuildSettingsDocGitHubMarketplace(t *testing.T) {
 	doc, err := buildSettingsDoc(BuildSettingsConfig{
-		Marketplaces: []string{"tsukumogami/shirabe"},
+		Marketplaces: []config.MarketplaceConfig{{Source: "tsukumogami/shirabe"}},
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -1706,7 +1706,7 @@ func TestBuildSettingsDocRepoMarketplace(t *testing.T) {
 	repoIndex := map[string]string{"tools": repoDir}
 
 	doc, err := buildSettingsDoc(BuildSettingsConfig{
-		Marketplaces: []string{"repo:tools/.claude-plugin/marketplace.json"},
+		Marketplaces: []config.MarketplaceConfig{{Source: "repo:tools/.claude-plugin/marketplace.json"}},
 		RepoIndex:    repoIndex,
 	})
 	if err != nil {
@@ -1736,7 +1736,7 @@ func TestBuildSettingsDocRepoMarketplaceMissingRepo(t *testing.T) {
 	repoIndex := map[string]string{"other": "/tmp/other"}
 
 	_, err := buildSettingsDoc(BuildSettingsConfig{
-		Marketplaces: []string{"repo:tools/.claude-plugin/marketplace.json"},
+		Marketplaces: []config.MarketplaceConfig{{Source: "repo:tools/.claude-plugin/marketplace.json"}},
 		RepoIndex:    repoIndex,
 	})
 	if err == nil {
