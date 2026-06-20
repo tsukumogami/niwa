@@ -450,6 +450,11 @@ func readMarketplaceManifestName(dir string) (string, bool) {
 //   - "main": register against the default branch, no ref (R15).
 //   - any other value: treated as an explicit ref and emitted verbatim (R17).
 func mapMarketplaceSourceWithIndex(source string, repoIndex map[string]string, autoUpdate bool, track string) (string, map[string]any, string, error) {
+	name, err := marketplaceRegistrationName(source, repoIndex)
+	if err != nil {
+		return "", nil, "", err
+	}
+
 	if strings.HasPrefix(source, repoRefPrefix) {
 		// repo:tools/.claude-plugin/marketplace.json -> directory source.
 		// Local sources ignore track (no remote version to resolve).
@@ -461,14 +466,6 @@ func mapMarketplaceSourceWithIndex(source string, repoIndex map[string]string, a
 		// .claude-plugin/marketplace.json. Strip the filename and the
 		// .claude-plugin directory to get the root.
 		dir := filepath.Dir(filepath.Dir(resolved))
-		// Prefer the marketplace's declared name; fall back to the repo name
-		// when the manifest cannot be read.
-		ref := strings.TrimPrefix(source, repoRefPrefix)
-		slashIdx := strings.IndexByte(ref, '/')
-		name := ref[:slashIdx]
-		if declared, ok := readMarketplaceManifestName(dir); ok {
-			name = declared
-		}
 		return name, map[string]any{
 			"source": map[string]any{
 				"source": "directory",
@@ -481,7 +478,6 @@ func mapMarketplaceSourceWithIndex(source string, repoIndex map[string]string, a
 	// GitHub ref: "org/repo" -> {source: {source: "github", repo: "org/repo"}}
 	parts := strings.SplitN(source, "/", 3)
 	if len(parts) == 2 && parts[0] != "" && parts[1] != "" {
-		name := parts[1] // use repo name as marketplace name
 		src := map[string]any{
 			"source": "github",
 			"repo":   source,
@@ -494,6 +490,35 @@ func mapMarketplaceSourceWithIndex(source string, repoIndex map[string]string, a
 	}
 
 	return "", nil, "", nil
+}
+
+// marketplaceRegistrationName computes the registry key niwa uses for a
+// marketplace source: the manifest-declared name for a local repo:/directory
+// source (falling back to the repo-ref-derived name), or the repo name for a
+// github source. It is the single source of truth for the name shared by
+// mapMarketplaceSourceWithIndex (project-settings materialization) and the
+// global known_marketplaces reconciliation. Returns "" for an unrecognized
+// source.
+func marketplaceRegistrationName(source string, repoIndex map[string]string) (string, error) {
+	if strings.HasPrefix(source, repoRefPrefix) {
+		resolved, err := ResolveMarketplaceSource(source, repoIndex)
+		if err != nil {
+			return "", err
+		}
+		dir := filepath.Dir(filepath.Dir(resolved))
+		ref := strings.TrimPrefix(source, repoRefPrefix)
+		name := ref[:strings.IndexByte(ref, '/')]
+		if declared, ok := readMarketplaceManifestName(dir); ok {
+			name = declared
+		}
+		return name, nil
+	}
+
+	parts := strings.SplitN(source, "/", 3)
+	if len(parts) == 2 && parts[0] != "" && parts[1] != "" {
+		return parts[1], nil
+	}
+	return "", nil
 }
 
 // applyGithubTrack mutates a github source map to register against the
