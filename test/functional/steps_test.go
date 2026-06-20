@@ -80,7 +80,8 @@ func (s *testState) buildEnv() []string {
 	for _, kv := range base {
 		if strings.HasPrefix(kv, "HOME=") ||
 			strings.HasPrefix(kv, "XDG_CONFIG_HOME=") ||
-			strings.HasPrefix(kv, "TMPDIR=") {
+			strings.HasPrefix(kv, "TMPDIR=") ||
+			(s.pathPrefix != "" && strings.HasPrefix(kv, "PATH=")) {
 			continue
 		}
 		filtered = append(filtered, kv)
@@ -90,6 +91,12 @@ func (s *testState) buildEnv() []string {
 		"XDG_CONFIG_HOME="+filepath.Join(s.homeDir, ".config"),
 		"TMPDIR="+s.tmpDir,
 	)
+	// When a scenario installed a fake binary (e.g. a fake `claude` to make
+	// the harness probe deterministic), prepend its directory to PATH so the
+	// niwa subprocess resolves it ahead of any real binary.
+	if s.pathPrefix != "" {
+		env = append(env, "PATH="+s.pathPrefix+string(os.PathListSeparator)+os.Getenv("PATH"))
+	}
 	for k, v := range s.envOverrides {
 		env = append(env, k+"="+v)
 	}
