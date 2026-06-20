@@ -46,6 +46,7 @@ func init() {
 	initCmd.Flags().BoolVar(&initSkipGlobal, "skip-global", false, "disable global config overlay for this instance")
 	initCmd.Flags().StringVar(&initOverlay, "overlay", "", "overlay repo (org/repo or URL) to clone and associate with this workspace")
 	initCmd.Flags().BoolVar(&initNoOverlay, "no-overlay", false, "disable overlay discovery and association for this workspace")
+	initCmd.Flags().BoolVar(&initNoWorktreeDelegation, "no-worktree-delegation", false, "disable the worktree-delegation integration for this workspace (no hook, no deny fallback)")
 	initCmd.Flags().BoolVar(&initRebind, "rebind", false, "rebind a registered workspace name to this directory (use only when intentionally moving a workspace)")
 	initCmd.Flags().BoolVar(&initNoInstallPlugins, "no-install-plugins", false, "skip auto-installing the embedded niwa Claude Code plugin (otherwise installed once when a rank-2 source is detected)")
 	initCmd.Flags().BoolVar(&initBootstrap, "bootstrap", false, "when the source repo has no .niwa/workspace.toml, scaffold a minimal config and stage it on a niwa-bootstrap branch")
@@ -54,14 +55,15 @@ func init() {
 }
 
 var (
-	initFrom             string
-	initSkipGlobal       bool
-	initOverlay          string
-	initNoOverlay        bool
-	initRebind           bool
-	initNoInstallPlugins bool
-	initBootstrap        bool
-	initNoBootstrap      bool
+	initFrom                 string
+	initSkipGlobal           bool
+	initOverlay              string
+	initNoOverlay            bool
+	initNoWorktreeDelegation bool
+	initRebind               bool
+	initNoInstallPlugins     bool
+	initBootstrap            bool
+	initNoBootstrap          bool
 )
 
 // materializeFromSource is a package-level seam so unit tests can
@@ -964,22 +966,24 @@ func bootstrapCommandFor(kind string) string {
 }
 
 // buildInitState constructs an InstanceState for the flags that require
-// pre-apply state (--skip-global, --no-overlay, --overlay) and for the
-// init-time name override that a positional `niwa init <name>` records.
+// pre-apply state (--skip-global, --no-overlay, --no-worktree-delegation,
+// --overlay) and for the init-time name override that a positional
+// `niwa init <name>` records.
 // Returns (nil, nil) when no state needs to be written. Returns a
 // non-nil error when an explicit --overlay clone fails (hard error by
 // design).
 func buildInitState(cmd *cobra.Command, mode initMode, source, name string) (*workspace.InstanceState, error) {
 	ctx := cmd.Context()
-	needsState := initSkipGlobal || initNoOverlay || initOverlay != "" || (mode == modeClone) || name != ""
+	needsState := initSkipGlobal || initNoOverlay || initNoWorktreeDelegation || initOverlay != "" || (mode == modeClone) || name != ""
 	if !needsState {
 		return nil, nil
 	}
 
 	state := &workspace.InstanceState{
-		SchemaVersion:      workspace.SchemaVersion,
-		SkipGlobal:         initSkipGlobal,
-		ConfigNameOverride: name,
+		SchemaVersion:        workspace.SchemaVersion,
+		SkipGlobal:           initSkipGlobal,
+		NoWorktreeDelegation: initNoWorktreeDelegation,
+		ConfigNameOverride:   name,
 	}
 
 	switch {

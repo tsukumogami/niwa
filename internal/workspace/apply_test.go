@@ -1154,6 +1154,123 @@ enabled = false
 	assertFileContains(t, envPath, "MY_VAR=yes")
 }
 
+// TestCreateWorktreeDelegationOptOutGating verifies the Issue 6 gate on the
+// Step 6.4 worktree-delegation block. When NoWorktreeDelegation is set in the
+// workspace-root init state, Create must install NEITHER the worktree hook nor
+// the permissions.deny fallback into the per-repo settings.local.json. Without
+// the opt-out, the integration installs (hook on a supported harness, deny on an
+// unsupported one). Both branches leave a worktree marker, so the non-opt-out
+// case asserts at least one marker is present.
+func TestCreateWorktreeDelegationOptOutGating(t *testing.T) {
+	tests := []struct {
+		name    string
+		optOut  bool
+		present bool // whether a worktree-delegation marker must appear
+	}{
+		{name: "opt-out skips integration", optOut: true, present: false},
+		{name: "no opt-out installs integration", optOut: false, present: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			niwaDir := filepath.Join(tmpDir, ".niwa")
+			if err := os.MkdirAll(niwaDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+
+			configTOML := `
+[workspace]
+name = "test-ws"
+
+[[sources]]
+org = "testorg"
+
+[groups.public]
+visibility = "public"
+
+[claude.settings]
+permissions = "bypass"
+`
+			if err := os.WriteFile(filepath.Join(niwaDir, "workspace.toml"), []byte(configTOML), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			result, err := config.Load(filepath.Join(niwaDir, "workspace.toml"))
+			if err != nil {
+				t.Fatalf("loading config: %v", err)
+			}
+			cfg := result.Config
+
+			// Write the workspace-root init state Create reads via
+			// LoadState(workspaceRoot). The opt-out lives here, exactly as
+			// `niwa init --no-worktree-delegation` would have written it.
+			workspaceRoot := tmpDir
+			if tc.optOut {
+				if err := SaveState(workspaceRoot, &InstanceState{
+					SchemaVersion:        SchemaVersion,
+					NoWorktreeDelegation: true,
+				}); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			mockClient := &mockGitHubClient{
+				repos: map[string][]github.Repo{
+					"testorg": {
+						{Name: "app", Visibility: "public", SSHURL: "git@github.com:testorg/app.git"},
+					},
+				},
+			}
+
+			applier := NewApplier(mockClient)
+			applier.Cloner = &Cloner{}
+
+			instanceRoot := filepath.Join(workspaceRoot, "test-ws")
+			repoDir := filepath.Join(instanceRoot, "public", "app")
+			if err := os.MkdirAll(filepath.Join(repoDir, ".git"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(repoDir, ".gitignore"), []byte("*.local*\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			if _, err := applier.Create(context.Background(), cfg, niwaDir, workspaceRoot, cfg.Workspace.Name); err != nil {
+				t.Fatalf("create failed: %v", err)
+			}
+
+			settingsPath := filepath.Join(repoDir, ".claude", "settings.local.json")
+			// Markers across both branches: supported writes "from-hook" /
+			// "WorktreeCreate"; unsupported writes the "EnterWorktree" deny.
+			markers := []string{"from-hook", "WorktreeCreate", "EnterWorktree"}
+			if tc.present {
+				data, err := os.ReadFile(settingsPath)
+				if err != nil {
+					t.Fatalf("reading settings.local.json: %v", err)
+				}
+				found := false
+				for _, m := range markers {
+					if strings.Contains(string(data), m) {
+						found = true
+						break
+					}
+				}
+				if !found {
+					t.Errorf("expected a worktree-delegation marker in settings.local.json, got:\n%s", data)
+				}
+			} else {
+				// Opt-out: settings.local.json may still exist (it carries the
+				// bypass permissions), but it must contain no worktree marker.
+				if _, statErr := os.Stat(settingsPath); statErr == nil {
+					for _, m := range markers {
+						assertFileNotContains(t, settingsPath, m)
+					}
+				}
+			}
+		})
+	}
+}
+
 // setupOverlayDir creates a fake overlay directory with a workspace-overlay.toml
 // and returns its path. Used by overlay integration tests to avoid running git.
 func setupOverlayDir(t *testing.T, overlayTOML string) string {
