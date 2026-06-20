@@ -1,6 +1,6 @@
 ---
 schema: design/v1
-status: Accepted
+status: Planned
 upstream: docs/prds/PRD-niwa-default-worktree.md
 problem: |
   Claude Code agents in a niwa workspace create their own bare worktrees,
@@ -27,7 +27,7 @@ rationale: |
 
 ## Status
 
-Accepted
+Planned
 
 ## Context and Problem Statement
 
