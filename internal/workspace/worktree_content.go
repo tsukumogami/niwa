@@ -53,6 +53,9 @@ type repoMaterializeInputs struct {
 	// GlobalEnvOutput is the resolved personal/global secret-output target
 	// declaration. Empty when no global override is loaded on this path.
 	GlobalEnvOutput config.OutputTargets
+	// WorktreeDelegation carries the apply-time worktree-integration decision
+	// (probe result + niwa absolute path). nil installs neither hook nor deny.
+	WorktreeDelegation *WorktreeDelegation
 }
 
 // runRepoMaterializers runs the given materializers for a single repo against
@@ -112,6 +115,7 @@ func runRepoMaterializers(materializers []Materializer, in repoMaterializeInputs
 
 		GlobalEnvExamplePolicy: in.GlobalEnvExamplePolicy,
 		GlobalEnvOutput:        in.GlobalEnvOutput,
+		WorktreeDelegation:     in.WorktreeDelegation,
 	}
 
 	var written []string

@@ -121,6 +121,12 @@ type MaterializeContext struct {
 	// apply.go wires a.Reporter.Writer() so warnings clear the spinner
 	// before printing.
 	Stderr io.Writer
+
+	// WorktreeDelegation carries the apply-time worktree-integration decision
+	// (probe result + niwa absolute path), computed ONCE per apply and threaded
+	// to every repo's SettingsMaterializer. nil installs neither hook nor deny.
+	// See WorktreeDelegation for the supported/unsupported branch contract.
+	WorktreeDelegation *WorktreeDelegation
 }
 
 // recordSources appends the given SourceEntry slice to the context's
@@ -254,6 +260,52 @@ var hookEventMapping = map[string]string{
 	"notification":  "Notification",
 }
 
+// Worktree-delegation event and tool names used in the per-repo
+// settings.local.json. These ride the existing snake->Pascal hook event
+// pipeline (the names are already Pascal-cased here, so snakeToPascal is a
+// no-op for them) and the new permissions.deny capability.
+const (
+	// worktreeCreateEvent / worktreeRemoveEvent are the Claude Code hook event
+	// names installed when the harness supports per-repo worktree hooks. Both
+	// run an absolute-path "niwa worktree from-hook" command directly (no shim).
+	worktreeCreateEvent = "WorktreeCreate"
+	worktreeRemoveEvent = "WorktreeRemove"
+
+	// worktreeFromHookCommandSuffix is the niwa subcommand the hook invokes. The
+	// full command is "<abs-niwa> " + this suffix; abs-niwa is resolved at apply
+	// time via os.Executable().
+	worktreeFromHookCommandSuffix = "worktree from-hook"
+
+	// denyEnterWorktree / denyExitWorktree are the Claude Code tool names denied
+	// when the harness does NOT support the worktree hooks. Denying these steers
+	// agents to `niwa worktree create` instead of a competing bare checkout.
+	denyEnterWorktree = "EnterWorktree"
+	denyExitWorktree  = "ExitWorktree"
+)
+
+// WorktreeDelegation carries the apply-time decision for the per-repo worktree
+// integration, computed once per apply (not per repo) and threaded into each
+// repo's MaterializeContext. Hook and deny are MUTUALLY EXCLUSIVE: when
+// Supported is true the materializer writes the WorktreeCreate/WorktreeRemove
+// hook entries; when false it writes permissions.deny instead. The zero value
+// (nil pointer on the context) installs neither, leaving settings unchanged.
+type WorktreeDelegation struct {
+	// Supported is the harness probe result (SupportsWorktreeHooks). true =>
+	// write hooks; false => write permissions.deny.
+	Supported bool
+	// NiwaPath is the absolute path of the running niwa binary
+	// (os.Executable()). Used to build the hook command
+	// "<NiwaPath> worktree from-hook". Required when Supported is true.
+	NiwaPath string
+}
+
+// worktreeFromHookCommand returns the absolute-path hook command string Claude
+// invokes directly, e.g. "/abs/niwa worktree from-hook". The niwa path is
+// slash-normalized so the JSON command is stable across platforms.
+func worktreeFromHookCommand(niwaPath string) string {
+	return filepath.ToSlash(niwaPath) + " " + worktreeFromHookCommandSuffix
+}
+
 // snakeToPascal converts a snake_case string to PascalCase as a fallback when
 // the event name is not in hookEventMapping.
 func snakeToPascal(s string) string {
@@ -284,6 +336,13 @@ type BuildSettingsConfig struct {
 	// marketplaces with no stable release. The caller surfaces these to the
 	// user; leaving it nil discards them.
 	Reports *[]string
+
+	// WorktreeDelegation, when non-nil, installs the worktree-delegation
+	// integration into this document. Supported => WorktreeCreate/WorktreeRemove
+	// hook entries (absolute-path "niwa worktree from-hook" commands).
+	// Unsupported => permissions.deny: ["EnterWorktree","ExitWorktree"]. Hook and
+	// deny are mutually exclusive; nil installs neither.
+	WorktreeDelegation *WorktreeDelegation
 }
 
 // buildSettingsDoc produces the map[string]any JSON document for Claude Code
@@ -296,21 +355,42 @@ func buildSettingsDoc(cfg BuildSettingsConfig) (map[string]any, error) {
 	// reveals secret-backed values (rare for permissions, but a
 	// user may back any SettingsConfig value via vault://) and
 	// returns the literal plaintext otherwise.
+	//
+	// The permissions block may carry two independent keys: defaultMode (from
+	// the user's settings) and deny (from the worktree-delegation fallback). They
+	// are emitted into the SAME permissions map so a deny fallback never clobbers
+	// a configured defaultMode and vice versa.
+	var permissions map[string]any
 	if perm, ok := cfg.Settings["permissions"]; ok {
 		permStr := maybeSecretString(perm)
 		mapped, known := permissionsMapping[permStr]
 		if !known {
 			return nil, fmt.Errorf("unknown permissions value %q", permStr)
 		}
-		doc["permissions"] = map[string]any{
+		permissions = map[string]any{
 			"defaultMode": mapped,
 		}
 	}
 
-	// Build hooks block from installed hooks.
-	if len(cfg.InstalledHooks) > 0 {
-		hooksDoc := make(map[string]any, len(cfg.InstalledHooks))
+	// Worktree delegation: emit EITHER the hook entries OR the permissions.deny
+	// entries, never both (they are mutually exclusive — a deny blocks the tool
+	// before the hook would run). The hook entries are appended to the hooks
+	// block built below; the deny entries are merged into the permissions map
+	// here so they coexist with any configured defaultMode.
+	if wd := cfg.WorktreeDelegation; wd != nil && !wd.Supported {
+		if permissions == nil {
+			permissions = make(map[string]any)
+		}
+		permissions["deny"] = []any{denyEnterWorktree, denyExitWorktree}
+	}
 
+	if permissions != nil {
+		doc["permissions"] = permissions
+	}
+
+	// Build hooks block from installed hooks.
+	hooksDoc := make(map[string]any, len(cfg.InstalledHooks))
+	if len(cfg.InstalledHooks) > 0 {
 		// Sort event names for deterministic output.
 		events := make([]string, 0, len(cfg.InstalledHooks))
 		for event := range cfg.InstalledHooks {
@@ -354,6 +434,28 @@ func buildSettingsDoc(cfg BuildSettingsConfig) (map[string]any, error) {
 			}
 			hooksDoc[pascalEvent] = eventEntries
 		}
+	}
+
+	// Worktree delegation (supported branch): append the WorktreeCreate and
+	// WorktreeRemove hook entries, each an absolute-path "niwa worktree from-hook"
+	// command Claude invokes directly. These ride the same hooks-block shape as
+	// the installed-script hooks above; the event names are already Pascal-cased.
+	// The deny branch is handled in the permissions block above and is mutually
+	// exclusive with this one.
+	if wd := cfg.WorktreeDelegation; wd != nil && wd.Supported {
+		command := worktreeFromHookCommand(wd.NiwaPath)
+		worktreeEntry := []map[string]any{
+			{
+				"hooks": []map[string]string{
+					{"type": "command", "command": command},
+				},
+			},
+		}
+		hooksDoc[worktreeCreateEvent] = worktreeEntry
+		hooksDoc[worktreeRemoveEvent] = worktreeEntry
+	}
+
+	if len(hooksDoc) > 0 {
 		doc["hooks"] = hooksDoc
 	}
 
@@ -505,22 +607,27 @@ func (s *SettingsMaterializer) Materialize(ctx *MaterializeContext) ([]string, e
 		return nil, err
 	}
 
+	// The worktree-delegation decision (computed once per apply, threaded via the
+	// context) is itself enough to require a settings file even when nothing else
+	// is configured: it writes either the WorktreeCreate/WorktreeRemove hooks or
+	// the permissions.deny fallback.
 	if len(settings) == 0 && len(hooks) == 0 && len(resolvedEnv) == 0 &&
-		len(plugins) == 0 && len(marketplaces) == 0 {
+		len(plugins) == 0 && len(marketplaces) == 0 && ctx.WorktreeDelegation == nil {
 		return nil, nil
 	}
 
 	var reports []string
 	doc, err := buildSettingsDoc(BuildSettingsConfig{
-		Settings:         settings,
-		InstalledHooks:   hooks,
-		ResolvedEnvVars:  resolvedEnv,
-		Plugins:          plugins,
-		Marketplaces:     marketplaces,
-		RepoIndex:        ctx.RepoIndex,
-		BaseDir:          ctx.RepoDir,
-		UseAbsolutePaths: true,
-		Reports:          &reports,
+		Settings:           settings,
+		InstalledHooks:     hooks,
+		ResolvedEnvVars:    resolvedEnv,
+		Plugins:            plugins,
+		Marketplaces:       marketplaces,
+		RepoIndex:          ctx.RepoIndex,
+		BaseDir:            ctx.RepoDir,
+		UseAbsolutePaths:   true,
+		Reports:            &reports,
+		WorktreeDelegation: ctx.WorktreeDelegation,
 	})
 	if err != nil {
 		return nil, err
