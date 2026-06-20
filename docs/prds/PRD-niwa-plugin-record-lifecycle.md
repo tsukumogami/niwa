@@ -1,6 +1,6 @@
 ---
 schema: prd/v1
-status: In Progress
+status: Done
 problem: |
   niwa causes Claude Code to accumulate plugin install records it never
   cleans up, and force-enables marketplace auto-update that accelerates
@@ -27,7 +27,7 @@ motivating_context: |
 
 ## Status
 
-In Progress
+Done
 
 ## Problem Statement
 

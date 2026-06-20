@@ -1,6 +1,6 @@
 ---
 schema: brief/v1
-status: Accepted
+status: Done
 problem: |
   niwa registers Claude plugins for every repo of every workspace
   instance but never cleans up the install records it causes Claude
@@ -23,7 +23,7 @@ motivating_context: |
 
 ## Status
 
-Accepted
+Done
 
 The framing here is the problem, the user-visible outcome, and the
 boundary between what niwa owns and what belongs to Claude Code. The
