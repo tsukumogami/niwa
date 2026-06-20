@@ -295,8 +295,12 @@ func TestParseFullConfig(t *testing.T) {
 	if len(cfg.Claude.Marketplaces) != 2 {
 		t.Fatalf("claude.marketplaces count = %d, want 2", len(cfg.Claude.Marketplaces))
 	}
-	if cfg.Claude.Marketplaces[0] != "tsukumogami/shirabe" {
-		t.Errorf("claude.marketplaces[0] = %q, want tsukumogami/shirabe", cfg.Claude.Marketplaces[0])
+	if cfg.Claude.Marketplaces[0].Source != "tsukumogami/shirabe" {
+		t.Errorf("claude.marketplaces[0].Source = %q, want tsukumogami/shirabe", cfg.Claude.Marketplaces[0].Source)
+	}
+	// Legacy bare-string form decodes to default policy (R7).
+	if cfg.Claude.Marketplaces[0].AutoUpdate {
+		t.Errorf("legacy marketplace AutoUpdate = true, want false")
 	}
 	if cfg.Claude.Plugins == nil {
 		t.Fatal("claude.plugins should not be nil")
@@ -928,5 +932,96 @@ source = "workspace.md"
 		if strings.Contains(w, "deprecated") {
 			t.Errorf("expected no deprecation warning for canonical form, got: %v", result.Warnings)
 		}
+	}
+}
+
+// TestParseMarketplacesLegacyStringForm verifies the legacy bare-string
+// marketplaces list still parses, with each string mapping to a
+// MarketplaceConfig carrying default policy (R7, back-compat).
+func TestParseMarketplacesLegacyStringForm(t *testing.T) {
+	input := `
+[workspace]
+name = "test-ws"
+
+[claude]
+marketplaces = ["org/repo", "repo:tools/.claude-plugin/marketplace.json"]
+`
+	result, err := Parse([]byte(input))
+	if err != nil {
+		t.Fatalf("Parse returned error: %v", err)
+	}
+
+	got := result.Config.Claude.Marketplaces
+	want := MarketplaceConfigs{
+		{Source: "org/repo"},
+		{Source: "repo:tools/.claude-plugin/marketplace.json"},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("marketplaces count = %d, want %d (%+v)", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("marketplaces[%d] = %+v, want %+v", i, got[i], want[i])
+		}
+	}
+}
+
+// TestParseMarketplacesArrayOfTables verifies the new [[claude.marketplaces]]
+// table form parses, that absent auto_update defaults to false (R6), and
+// that auto_update/track are honored when present.
+func TestParseMarketplacesArrayOfTables(t *testing.T) {
+	input := `
+[workspace]
+name = "test-ws"
+
+[[claude.marketplaces]]
+source = "org/with-defaults"
+
+[[claude.marketplaces]]
+source = "org/opted-in"
+auto_update = true
+track = "main"
+
+[[claude.marketplaces]]
+source = "org/tracked"
+track = "v1.2.3"
+`
+	result, err := Parse([]byte(input))
+	if err != nil {
+		t.Fatalf("Parse returned error: %v", err)
+	}
+
+	got := result.Config.Claude.Marketplaces
+	want := MarketplaceConfigs{
+		{Source: "org/with-defaults", AutoUpdate: false, Track: ""},
+		{Source: "org/opted-in", AutoUpdate: true, Track: "main"},
+		{Source: "org/tracked", AutoUpdate: false, Track: "v1.2.3"},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("marketplaces count = %d, want %d (%+v)", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("marketplaces[%d] = %+v, want %+v", i, got[i], want[i])
+		}
+	}
+}
+
+// TestParseMarketplacesTableMissingSource rejects a table without the
+// required source field.
+func TestParseMarketplacesTableMissingSource(t *testing.T) {
+	input := `
+[workspace]
+name = "test-ws"
+
+[[claude.marketplaces]]
+auto_update = true
+`
+	_, err := Parse([]byte(input))
+	if err == nil {
+		t.Fatal("expected error for marketplace table missing source")
+	}
+	if !strings.Contains(err.Error(), "source") {
+		t.Errorf("error should mention missing source, got: %v", err)
 	}
 }

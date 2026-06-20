@@ -274,7 +274,7 @@ type BuildSettingsConfig struct {
 	InstalledHooks         map[string][]InstalledHookEntry
 	ResolvedEnvVars        map[string]string
 	Plugins                []string
-	Marketplaces           []string
+	Marketplaces           []config.MarketplaceConfig
 	RepoIndex              map[string]string
 	BaseDir                string // for computing relative hook paths
 	IncludeGitInstructions *bool
@@ -383,7 +383,8 @@ func buildSettingsDoc(cfg BuildSettingsConfig) (map[string]any, error) {
 	// extraKnownMarketplaces from marketplaces list.
 	if len(cfg.Marketplaces) > 0 {
 		mkts := make(map[string]any, len(cfg.Marketplaces))
-		for _, source := range cfg.Marketplaces {
+		for _, mc := range cfg.Marketplaces {
+			source := mc.Source
 			name, entry, err := mapMarketplaceSourceWithIndex(source, cfg.RepoIndex)
 			if err != nil {
 				return nil, fmt.Errorf("marketplace %q: %w", source, err)
