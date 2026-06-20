@@ -4,7 +4,7 @@ status: Active
 execution_mode: single-pr
 upstream: docs/designs/DESIGN-niwa-plugin-record-lifecycle.md
 milestone: "niwa plugin record lifecycle"
-issue_count: 9
+issue_count: 8
 ---
 
 # PLAN: niwa plugin record lifecycle
@@ -20,22 +20,21 @@ before implementation begins via /work-on.
 ## Scope Summary
 
 Implement the niwa-side fix for Claude plugin-record decay: a registry-
-access package, three pruning surfaces (destroy, apply, `niwa plugins
-prune`), a per-marketplace `auto_update` config (default off), the
-marketplace name-keying fix, and per-marketplace version tracking that
-defaults github sources to their latest stable release instead of main.
+access package, instance-scoped removal on destroy, an automatic
+dangling heal that runs on every workspace create and update, a
+per-marketplace `auto_update` config (default off), the marketplace
+name-keying fix, and per-marketplace version tracking that defaults
+github sources to their latest stable release instead of main.
 
 ## Decomposition Strategy
 
 **Horizontal.** The design describes loosely-coupled components with a
-clear prerequisite order: a foundation package that several call sites
-delegate to, plus an independent config-schema track. One component
-(`internal/pluginrecord`) is the prerequisite for the destroy, apply,
-and command surfaces, which matches the horizontal "prerequisite before
-consumers" shape rather than a walking skeleton — there is no runtime
-end-to-end path whose integration risk justifies a thin vertical slice
-first. The config track (Issues 6-7) is independent of the registry
-track (Issues 1-5) and runs in parallel.
+clear prerequisite order: a foundation package (`internal/pluginrecord`)
+that the destroy and create/update-heal surfaces delegate to, plus an
+independent config/marketplace track. There is no runtime end-to-end
+path whose integration risk justifies a walking skeleton; the natural
+shape is prerequisite-before-consumers. The config track (Issues 5-7)
+is independent of the registry track (Issues 1-4) and runs in parallel.
 
 ## Issue Outlines
 
@@ -67,7 +66,8 @@ and fail-safe handling of malformed or absent registries.
 ### Issue 2: feat(pluginrecord): dangling/instance predicates and Prune
 
 **Goal**: Add the removal predicates and the single `Prune(selector,
-opts)` entry point with dry-run and a removal report.
+opts)` entry point with a removal report (and an internal dry-run used
+by tests).
 
 **Acceptance Criteria**:
 - [ ] `dangling` matches a record whose non-empty `installPath` or
@@ -78,7 +78,8 @@ opts)` entry point with dry-run and a removal report.
 - [ ] `Prune` re-reads the latest file immediately before writing,
       removes matching records, drops now-empty plugin keys, and returns
       a report (count removed, per-plugin breakdown, backup path).
-- [ ] `dryRun` returns the same report with no write and no backup (R4).
+- [ ] The internal `dryRun` returns the same report with no write and no
+      backup (used by tests; not exposed by any command).
 - [ ] Removing only matches the selector; non-matching records are never
       removed (R9).
 
@@ -97,9 +98,8 @@ records owned by the instance roots they remove.
       instance root (R1); `DestroyWorkspace` prunes for every instance
       root it removes (R2).
 - [ ] The prune runs by the instance-owned predicate against the
-      instance root (not the dangling predicate), so the records are
-      matched by ownership; the order relative to `os.RemoveAll` is
-      pinned so the matching is unambiguous.
+      instance root (not the dangling predicate), with the order
+      relative to `os.RemoveAll` pinned so the matching is unambiguous.
 - [ ] A unit test seeds a registry with records for two sibling
       instances and asserts destroying one removes exactly its records
       and leaves the sibling's intact.
@@ -111,51 +111,40 @@ records owned by the instance roots they remove.
 **Type**: code
 **Files**: `internal/workspace/destroy.go`, `internal/workspace/destroy_workspace.go`, `internal/workspace/destroy_test.go`
 
-### Issue 4: feat(apply): dangling-only sweep in the apply pipeline
+### Issue 4: feat(workspace): automatic dangling heal on create and update
 
-**Goal**: Add a dangling-only prune step to `niwa apply` after managed-
-file cleanup and before state save.
+**Goal**: Add a dangling-only heal step to the shared `runPipeline` so
+it runs on every workspace create and update, repairing accumulated
+damage automatically and reporting what it removed.
 
 **Acceptance Criteria**:
-- [ ] After `niwa apply`, no record remains whose `installPath` or
-      `projectPath` directory is missing (R5).
-- [ ] The sweep removes only dangling records, never live ones.
-- [ ] A malformed/absent registry does not fail apply (fail-safe).
+- [ ] The heal runs in `runPipeline`, which both `Applier.Create` and
+      `Applier.Apply` invoke, so a fresh create and an update both heal
+      (R3, R5).
+- [ ] After create or update, no record remains whose `installPath` or
+      `projectPath` directory is missing; live records are left intact.
+- [ ] The heal reports the count removed and the affected plugins as
+      part of the command's output (R4).
+- [ ] A malformed/absent registry does not fail create or update
+      (fail-safe).
 
 **Dependencies**: Blocked by <<ISSUE:2>>
 
 **Type**: code
 **Files**: `internal/workspace/apply.go`, `internal/workspace/apply_test.go`
 
-### Issue 5: feat(cli): niwa plugins prune command
-
-**Goal**: Add `niwa plugins prune` — preview by default, `--apply` to
-remove dangling records.
-
-**Acceptance Criteria**:
-- [ ] Default run previews: prints dangling count, per-plugin breakdown,
-      and makes no change to the file on disk (R3, R4).
-- [ ] `--apply` performs the removal, prints the summary and the backup
-      location, and exits non-zero only on operational failure (not
-      merely because dangling records were found).
-- [ ] Registered under the existing `niwa plugins` command group.
-
-**Dependencies**: Blocked by <<ISSUE:2>>
-
-**Type**: code
-**Files**: `internal/cli/plugins.go`, `internal/cli/plugins_test.go`
-
-### Issue 6: feat(config): per-marketplace MarketplaceConfig with back-compat
+### Issue 5: feat(config): per-marketplace MarketplaceConfig with back-compat
 
 **Goal**: Migrate `ClaudeConfig.Marketplaces` from `[]string` to
-`[]MarketplaceConfig` ({Source, AutoUpdate}) with a custom
+`[]MarketplaceConfig` ({Source, AutoUpdate, Track}) with a custom
 `UnmarshalTOML` accepting the legacy string form.
 
 **Acceptance Criteria**:
 - [ ] Legacy `marketplaces = ["ref", ...]` configs parse unchanged, each
       mapping to `{Source: ref, AutoUpdate: false}` (R7, back-compat).
 - [ ] New `[[claude.marketplaces]]` tables with `source` + optional
-      `auto_update` parse; absent `auto_update` is `false` (R6 default).
+      `auto_update` + optional `track` parse; absent `auto_update` is
+      `false` (R6 default).
 - [ ] Overlay merge unions on `.Source` (base-wins on conflict).
 - [ ] All `[]string` consumers compile and pass against the new type —
       a compiler-driven sweep covers `MaterializeConfig`, `overlay.go`,
@@ -166,7 +155,7 @@ remove dangling records.
 **Type**: code
 **Files**: `internal/config/config.go`, `internal/config/config_test.go`, `internal/workspace/override.go`
 
-### Issue 7: feat(workspace): emit configured auto_update and key by declared name
+### Issue 6: feat(workspace): emit configured auto_update and key by declared name
 
 **Goal**: Make `mapMarketplaceSourceWithIndex` emit the configured
 `auto_update` (default false) and register local marketplaces under
@@ -181,12 +170,12 @@ their manifest-declared name.
       (R8); github sources retain repo-name keying.
 - [ ] Tests cover default-off, opted-in, and the name-keying case.
 
-**Dependencies**: Blocked by <<ISSUE:6>>
+**Dependencies**: Blocked by <<ISSUE:5>>
 
 **Type**: code
 **Files**: `internal/workspace/workspace_context.go`, `internal/workspace/materialize.go`, `internal/workspace/workspace_context_test.go`
 
-### Issue 8: feat(workspace): track latest stable marketplace release
+### Issue 7: feat(workspace): track latest stable marketplace release
 
 **Goal**: Add per-marketplace version tracking — default to the latest
 stable release for github sources, with branch and explicit-ref
@@ -196,9 +185,8 @@ overrides — and resolve/emit the pin.
 - [ ] First, confirm the `known_marketplaces` github-source pin field
       Claude Code honors (Decision 6 spike); record the finding and the
       fallback taken if no ref is honored.
-- [ ] `MarketplaceConfig` gains a `Track` value (`release` default,
-      `main`, or explicit ref); empty defaults to `release` for github
-      sources (R15, R17).
+- [ ] `track` is one of `release` (default for github), `main`, or an
+      explicit ref (R15, R17).
 - [ ] A github marketplace with no override resolves to its highest
       non-prerelease release tag and registers against it, not main
       (R14); a marketplace with no stable release falls back to the
@@ -206,27 +194,28 @@ overrides — and resolve/emit the pin.
 - [ ] Override to branch and override to explicit ref each register the
       requested target; unit tests cover all four cases.
 
-**Dependencies**: Blocked by <<ISSUE:7>>
+**Dependencies**: Blocked by <<ISSUE:6>>
 
 **Type**: code
-**Files**: `internal/config/config.go`, `internal/workspace/workspace_context.go`, `internal/workspace/workspace_context_test.go`
+**Files**: `internal/workspace/workspace_context.go`, `internal/config/config.go`, `internal/workspace/workspace_context_test.go`
 
-### Issue 9: test(functional): plugin-record lifecycle scenarios
+### Issue 8: test(functional): plugin-record lifecycle scenarios
 
-**Goal**: Add Gherkin functional scenarios exercising the pruning
-surfaces and release-tracking end-to-end with the localGitServer harness.
+**Goal**: Add Gherkin functional scenarios exercising teardown removal,
+the automatic create/update heal, and release-tracking end-to-end with
+the localGitServer harness.
 
 **Acceptance Criteria**:
 - [ ] Scenario: destroy an instance → its records are pruned (R1/R2).
-- [ ] Scenario: `niwa apply` → dangling records are swept (R5).
-- [ ] Scenario: `niwa plugins prune --apply` → an accumulated dangling
-      registry is recovered and a backup exists (R3/R11).
+- [ ] Scenario: create or update a workspace against a registry seeded
+      with dangling records → those records are healed and a backup
+      exists (R3/R11).
 - [ ] Scenario: a github marketplace registers against its release tag
       rather than main (R14).
 - [ ] Scenarios run offline via `localGitServer` and pass under
       `make test-functional` (R13).
 
-**Dependencies**: Blocked by <<ISSUE:3>>, <<ISSUE:4>>, <<ISSUE:5>>, <<ISSUE:8>>
+**Dependencies**: Blocked by <<ISSUE:3>>, <<ISSUE:4>>, <<ISSUE:7>>
 
 **Type**: test
 **Files**: `test/functional/features/plugin-record-lifecycle.feature`, `test/functional/steps_test.go`
@@ -243,26 +232,27 @@ Single-pr plan — dependencies are captured per outline (the
 Implementation Sequence below; no separate issue-graph diagram is
 rendered for single-pr. The edges are:
 
-- Issue 1 → Issue 2 → {Issue 3, Issue 4, Issue 5} → Issue 9
-- Issue 6 → Issue 7 → Issue 8 → Issue 9 (config / marketplace track)
+- Issue 1 → Issue 2 → {Issue 3, Issue 4} → Issue 8
+- Issue 5 → Issue 6 → Issue 7 → Issue 8 (config / marketplace track)
 
-Roots (no dependencies): Issue 1, Issue 6.
+Roots (no dependencies): Issue 1, Issue 5.
 
 ## Implementation Sequence
 
-**Critical path:** Issue 1 → Issue 2 → {Issue 3, 4, 5} → Issue 9, with
-the config/marketplace track (Issue 6 → 7 → 8) also feeding Issue 9.
+**Critical path:** Issue 1 → Issue 2 → {Issue 3, Issue 4} → Issue 8,
+with the config/marketplace track (Issue 5 → 6 → 7) also feeding
+Issue 8.
 
 **Parallelization:**
-- The config/marketplace track (Issue 6 → Issue 7 → Issue 8) is
+- The config/marketplace track (Issue 5 → Issue 6 → Issue 7) is
   independent of the registry track and can proceed in parallel from the
-  start. Issue 8 (version tracking) opens with the Decision 6 spike, so
+  start. Issue 7 (version tracking) opens with the Decision 6 spike, so
   start it early to de-risk the pin mechanism.
-- Once Issue 2 lands, Issues 3, 4, and 5 are independent of each other
-  and can be built in parallel.
-- Issue 9 (functional scenarios) lands last, after the pruning surfaces
-  and version tracking exist.
+- Once Issue 2 lands, Issues 3 and 4 are independent of each other and
+  can be built in parallel.
+- Issue 8 (functional scenarios) lands last, after the destroy/heal
+  surfaces and version tracking exist.
 
-**Suggested order for a single PR:** 1, 2, then 3/4/5 (any order), with
-6/7/8 interleaved wherever convenient (run the Issue 8 spike early), and
-9 last.
+**Suggested order for a single PR:** 1, 2, then 3/4, with 5/6/7
+interleaved wherever convenient (run the Issue 7 spike early), and 8
+last.

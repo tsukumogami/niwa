@@ -108,15 +108,15 @@ Functional:
   falls under that instance's root.
 - **R2.** When niwa destroys an entire workspace, it SHALL remove the
   install records for every instance under that workspace root.
-- **R3.** niwa SHALL provide a command that detects install records that
-  are dangling — a record whose `installPath` directory or whose
-  `projectPath` directory no longer exists — and removes them, reporting
-  how many records were removed and from which plugins.
-- **R4.** The recovery command SHALL support a preview mode that reports
-  what it would remove without modifying the registry.
-- **R5.** During `niwa apply`, niwa SHALL remove install records that
-  are dangling by the R3 criterion, so the common path self-heals
-  accumulated decay.
+- **R3.** Creating or updating a workspace SHALL automatically remove
+  dangling records — a record whose `installPath` directory or whose
+  `projectPath` directory no longer exists — from the registry, healing
+  previously-accumulated damage with no separate command.
+- **R4.** The automatic heal SHALL report how many records it removed and
+  from which plugins.
+- **R5.** The automatic heal SHALL run in the shared materialization
+  path that both workspace creation and update invoke, and SHALL remove
+  only dangling records, never records for live paths.
 - **R6.** niwa SHALL treat marketplace auto-update as a per-marketplace
   configuration value that defaults to disabled, and SHALL only enable
   auto-update for a marketplace when the workspace configuration opts it
@@ -171,13 +171,14 @@ Functional (version tracking):
       intact (verified against a seeded registry).
 - [ ] Destroying a workspace removes records for all of its instances
       and no others.
-- [ ] The recovery command removes every record whose `installPath` or
-      `projectPath` directory is missing, and reports the count and the
-      affected plugins.
-- [ ] The recovery command's preview mode reports the same set it would
-      remove and makes no change to the registry file on disk.
 - [ ] After `niwa apply`, no record remains whose `installPath` or
-      `projectPath` directory is missing.
+      `projectPath` directory is missing, and apply reports the count and
+      affected plugins it removed.
+- [ ] Creating a fresh workspace against a registry seeded with dangling
+      records removes those records too (the heal runs on create, not
+      only update).
+- [ ] The heal removes only records whose `installPath` or `projectPath`
+      directory is missing; records for live paths are left intact.
 - [ ] A marketplace registered by niwa has auto-update disabled unless
       the workspace configuration opts that marketplace in; an opted-in
       marketplace has auto-update enabled in the materialized
@@ -212,25 +213,27 @@ Functional (version tracking):
 
 These resolve the framing questions the upstream BRIEF deferred.
 
-- **Where pruning hooks in — all three surfaces, by role.** Teardown
-  cleanup (R1/R2) prevents new orphans at the moment niwa removes the
-  paths. A standalone recovery command (R3/R4) repairs damage that
-  already exists or accrues outside the teardown path. An apply-time
-  dangling sweep (R5) makes the most-run command self-healing.
-  Alternatives considered: teardown-only (rejected — does nothing for
-  the registries already damaged, which is the user's situation today);
-  command-only (rejected — leaves the common path silently
-  re-accumulating). The cost of doing all three is more integration
-  points; accepted because each covers a gap the others do not.
+- **Two surfaces: teardown removal and automatic heal — no command.**
+  Teardown cleanup (R1/R2) prevents new orphans at the moment niwa
+  removes the paths. The automatic dangling heal (R3/R4/R5) runs as part
+  of ordinary workspace creation and update and repairs damage that
+  already exists or accrues outside teardown. A standalone recovery
+  command was explicitly rejected: the user does not want an extra
+  command to fix broken environments, and the create/update path the
+  user already runs is the right place to self-heal. Alternatives:
+  teardown-only (rejected — does nothing for registries already damaged,
+  which is the situation today); a command (rejected per the above);
+  doing nothing automatic and relying on manual repair (rejected — it is
+  exactly the manual surgery this feature removes).
 
-- **Apply-time sweep is dangling-only, not instance-scoped.** R5
-  removes only records failing the missing-directory criterion, never
+- **The automatic heal is dangling-only, not instance-scoped.** R3/R5
+  remove only records failing the missing-directory criterion, never
   records for live paths. This keeps a frequently-run, broadly-scoped
-  command from making aggressive deletions. Removing records for
+  heal from making aggressive deletions. Removing records for
   marketplaces merely absent from the current config was considered and
-  rejected for apply — too easy to delete a record a different live
-  workspace still needs. Targeted instance-scoped removal stays bound to
-  destroy, where the instance is unambiguously going away.
+  rejected — too easy to delete a record a different live workspace still
+  needs. Targeted instance-scoped removal stays bound to destroy, where
+  the instance is unambiguously going away.
 
 - **Safety contract is stated here, mechanism deferred to DESIGN.**
   R10–R12 fix the requirement — atomic, backed-up, fail-safe mutation of
@@ -289,8 +292,8 @@ These resolve the framing questions the upstream BRIEF deferred.
 - **Complexity: Complex — a DESIGN is warranted before implementation.**
   The feature requires niwa to safely mutate a global file owned by
   another tool while concurrent sessions may read or write it, and it
-  spans several integration points (teardown, a recovery command, the
-  apply pipeline, and marketplace registration). The architectural shape
+  spans several integration points (teardown, the create/update heal,
+  and marketplace registration). The architectural shape
   of this feature warrants a DESIGN doc.
 
 ## Out of Scope
@@ -304,6 +307,9 @@ These resolve the framing questions the upstream BRIEF deferred.
 - Changing which plugins or marketplaces niwa installs, or any plugin's
   content. The feature concerns record lifecycle and update policy, not
   the plugin set.
+- A standalone repair command (a `niwa plugins prune` / `niwa doctor`
+  surface). Recovery is automatic on create/update; the user explicitly
+  does not want an extra command to fix broken environments.
 - The one-time manual registry cleanup already performed during the
   investigation. That unblocked the user; this work makes the fix
   systematic and is not a redo of it.

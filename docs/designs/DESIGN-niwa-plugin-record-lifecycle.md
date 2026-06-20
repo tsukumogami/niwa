@@ -13,12 +13,12 @@ decision: |
   Add an internal registry-access package that reads, filters, and
   atomically rewrites installed_plugins.json with a remove-only,
   re-read-before-write discipline, a one-time backup, and fail-safe
-  handling of malformed input. Wire it into three surfaces: instance-
-  scoped removal on destroy, a dangling-only sweep in apply, and a new
-  `niwa plugins prune` command (preview by default, --apply to act).
-  Change the marketplace config to an array of tables carrying a
-  per-marketplace auto_update (default false), and register marketplaces
-  under their manifest-declared name.
+  handling of malformed input. Wire it into two surfaces: instance-
+  scoped removal on destroy, and a dangling-only heal that runs on every
+  create and update (no separate command). Change the marketplace config
+  to an array of tables carrying a per-marketplace auto_update (default
+  false) and a version-tracking selection (default: latest release), and
+  register marketplaces under their manifest-declared name.
 rationale: |
   Remove-only mutation against the freshest on-disk content is
   idempotent and convergent, so niwa never corrupts or clobbers a
@@ -111,19 +111,22 @@ design introduces that interface.
   never resurrects records and never clobbers a foreign addition (beyond
   a benign, self-healing millisecond window).
 
-### Decision 2 — Recovery command surface
+### Decision 2 — Recovery: automatic on create/update, not a command
 
-- **`niwa plugins prune` (chosen).** A subcommand under the existing
-  `niwa plugins` group; preview by default, `--apply` to act. Fits the
-  group that already owns plugin-registry operations and the safe-by-
-  default destructive posture.
-- **`niwa doctor`.** No diagnostic-aggregation framework exists; building
-  one for a single check is premature. Rejected for now — the same logic
-  can later surface as a doctor check without breaking the command.
-- **Flag on `status`/`apply`.** `status` flags are strictly read-only
-  diagnostics; adding a mutation breaks that contract. `apply` already
-  owns the automatic sweep, so a flag there conflates the explicit
-  recovery path with the automatic one. Rejected.
+- **Standalone command (`niwa plugins prune` / `niwa doctor`).**
+  Rejected. The user does not want an extra command to fix broken
+  environments, and a single-check `doctor` framework is premature. A
+  command would also leave the common path silently re-accumulating
+  unless the user remembers to run it.
+- **Automatic heal in the shared materialization pipeline (chosen).**
+  Both `Applier.Create` (`apply.go:214`) and `Applier.Apply`
+  (`apply.go:352`) call `runPipeline` (`apply.go:528`). A dangling-only
+  heal step there runs on every workspace creation and update, so
+  accumulated damage is repaired as a side effect of the actions the
+  user already runs — no new surface to learn. The step reports what it
+  removed so the heal is visible.
+- **Read-only diagnostic + manual fix.** Rejected — it is the manual
+  surgery this feature exists to remove.
 
 ### Decision 3 — Per-marketplace auto_update config shape
 
@@ -198,9 +201,10 @@ design introduces that interface.
 
 niwa gains a single internal package that owns all registry access and
 encodes the remove-only, re-read-before-write, atomic, backed-up,
-fail-safe discipline once. Three call sites use it: destroy (instance-
-scoped removal), apply (dangling-only sweep), and `niwa plugins prune`
-(explicit recovery, preview by default). Separately, the marketplace
+fail-safe discipline once. Two call sites use it: destroy (instance-
+scoped removal) and the shared materialization pipeline (a dangling-only
+heal that runs on every create and update, repairing accumulated damage
+automatically with no separate command). Separately, the marketplace
 config becomes an array of tables carrying `auto_update` (default false)
 and a version-tracking selection (default: latest stable release), the
 two hardcoded `autoUpdate: true` literals become the configured value,
@@ -241,10 +245,10 @@ Responsibilities and surface:
   1. takes a non-clobbering snapshot backup before its first write — a
      timestamped sibling `installed_plugins.json.niwa-bak.<RFC3339>`,
      retaining the last N (e.g. 5) and pruning older ones (R11). A fixed
-     single-name backup is rejected: destroy, the apply sweep, and
-     `plugins prune` are independent operations that would each clobber
-     it, so a later erroneous prune would overwrite the only good
-     recovery point. The backup is written with `O_CREATE|O_EXCL` and
+     single-name backup is rejected: destroy and the create/update heal
+     are independent operations that would each clobber it, so a later
+     erroneous prune would overwrite the only good recovery point. The
+     backup is written with `O_CREATE|O_EXCL` and
      the source file's mode (via `os.Stat`), so a pre-planted symlink in
      the shared directory cannot redirect it and the copy does not widen
      permissions.
@@ -253,9 +257,11 @@ Responsibilities and surface:
   3. writes to a temp file in the same directory, created with
      `O_CREATE|O_EXCL`, then `os.Rename`s over the original (atomic, no
      truncation — R10);
-  4. returns a report: count removed, per-plugin breakdown, backup path.
+  4. returns a report: count removed, per-plugin breakdown, backup path
+     — surfaced to the user by the caller (R4).
   A `dryRun` flag computes and returns the same report without step 1 or
-  the write (R4).
+  the write; it is an internal/test capability, not exposed by any
+  user-facing command.
 
   The dangling existence check classifies a record from `installPath` /
   `projectPath` strings that originate in the foreign-owned file. It is
@@ -274,14 +280,13 @@ Responsibilities and surface:
   calls `Prune(instanceOwned(instanceRoot))` before/after
   `os.RemoveAll`. `DestroyWorkspace` (`destroy_workspace.go:53`) prunes
   each instance root it removes. (R1, R2)
-- **Apply.** A pipeline step after the managed-file cleanup and before
-  the state save (`internal/workspace/apply.go`, ~line 454) calls
-  `Prune(dangling)`. Dangling-only keeps the broadly-run command from
-  aggressive deletion. (R5)
-- **Recovery command.** `niwa plugins prune` registered in
-  `internal/cli/plugins.go`. Default run is `Prune(dangling, dryRun)`
-  and prints the preview; `--apply` performs it. Output reports count,
-  affected plugins, and backup location. (R3, R4)
+- **Automatic heal on create/update.** A step in `runPipeline`
+  (`internal/workspace/apply.go:528`, after managed-file cleanup and
+  before state save, ~line 454) calls `Prune(dangling)`. Because both
+  `Applier.Create` and `Applier.Apply` invoke `runPipeline`, the heal
+  runs on every workspace creation and update — no separate command. It
+  reports the count and affected plugins removed. Dangling-only keeps
+  this broadly-run step from aggressive deletion. (R3, R4, R5)
 
 ### Config and marketplace registration
 
@@ -309,30 +314,32 @@ Responsibilities and surface:
 ### Data flow (prune)
 
 ```
-caller (destroy | apply | plugins prune)
+caller (destroy | runPipeline heal)
   -> pluginrecord.Prune(selector, opts)
-       backup once (skip if dryRun)
+       backup once
        re-read latest installed_plugins.json   (empty if absent)
        filter records by selector              (remove-only)
-       dryRun? -> return report
        write temp in same dir -> os.Rename     (atomic)
        return report (removed, per-plugin, backup path)
 ```
+
+`Prune` retains an internal `dryRun` mode used by unit tests (compute
+the report with no write or backup); no user-facing command exposes it.
 
 ## Implementation Approach
 
 1. **`internal/pluginrecord` package + unit tests.** Locator, preserve-
    unknowns load/save, atomic write, backup, predicates, `Prune`/dryRun,
    malformed fail-safe, absent-file no-op. Tests use `t.TempDir` and an
-   injected base dir with seeded registries. (R3, R4, R9-R13)
+   injected base dir with seeded registries. (R9-R13)
 2. **Destroy integration + tests.** Wire `DestroyInstance` /
    `DestroyWorkspace`; unit tests assert instance-scoping precision
    (sibling-prefix paths untouched). (R1, R2)
-3. **Apply sweep + tests.** Add the dangling-only step; assert post-apply
-   no dangling record remains. (R5)
-4. **`niwa plugins prune` command + tests.** Preview default, `--apply`,
-   output summary. (R3, R4)
-5. **Config schema migration.** `MarketplaceConfig` + `UnmarshalTOML`
+3. **Automatic heal in the pipeline + tests.** Add the dangling-only
+   heal step to `runPipeline` so it runs on create and update; report
+   what it removed; assert post-create and post-apply no dangling record
+   remains and live records survive. (R3, R4, R5)
+4. **Config schema migration.** `MarketplaceConfig` + `UnmarshalTOML`
    back-compat, overlay merge on `.Source`, update all `[]string`
    consumers; tests for legacy and new forms. (R6, R7) The type change
    from `[]string` to `[]MarketplaceConfig` is breaking across more than
@@ -341,18 +348,18 @@ caller (destroy | apply | plugins prune)
    that assert `Marketplaces[i]` as a string. The enumerated call sites
    are not exhaustive; /plan should budget for the full blast radius via
    a compiler-driven sweep of `.Marketplaces` references.
-6. **Auto-update emission + name keying.** `mapMarketplaceSourceWithIndex`
+5. **Auto-update emission + name keying.** `mapMarketplaceSourceWithIndex`
    emits configured `auto_update` (default false) and keys local
    marketplaces by declared name; tests. (R6, R8)
-7. **Version-tracking spike + resolution + emission.** Confirm the
+6. **Version-tracking spike + resolution + emission.** Confirm the
    `known_marketplaces` github-source pin field (Decision 6 spike); add
    the `Track` field and latest-stable-tag resolution with branch
    fallback; emit the resolved pin in the github registration; tests for
    default-release, override-to-branch, explicit-pin, and no-release
    fallback. (R14-R17)
-8. **Functional scenarios.** Gherkin under `test/functional/features/`
-   using `localGitServer`: destroy→records-pruned, apply→dangling-swept,
-   `plugins prune --apply`→recovered, and a github marketplace
+7. **Functional scenarios.** Gherkin under `test/functional/features/`
+   using `localGitServer`: destroy→records-pruned, create/apply→dangling
+   records healed, and a github marketplace
    registering against its release tag rather than main. (R13)
 
 ## Security Considerations
@@ -395,9 +402,12 @@ caller (destroy | apply | plugins prune)
   GH token niwa uses for clone/api is reused.
 - **No secrets.** The registry holds no credentials; the feature reads
   and writes only plugin bookkeeping. No new secret handling.
-- **Preview-by-default.** The explicit recovery command makes no change
-  without `--apply`, reducing the chance of an unintended destructive
-  run.
+- **Automatic, but bounded and reversible.** The heal runs without an
+  explicit opt-in (it is part of create/update), so its safety rests on
+  being dangling-only (never touches live records), backed up before the
+  first write, and fail-safe on a malformed registry — not on a
+  confirmation prompt. It reports what it removed so the change is never
+  silent.
 
 ## Consequences
 

@@ -108,13 +108,14 @@ intended outcome, the registry no longer carries an accumulated backlog
 of dead records, so first-session resolution finds valid state and the
 skills register on the first try.
 
-### An operator recovers a registry that has already accumulated damage
+### An operator's accumulated damage heals on the next workspace action
 
-An operator who has worked across many instances for weeks finds the
-registry already full of stale records from instances long gone. Rather
-than hand-editing a Claude-owned file, the operator runs a niwa
-operation that detects and retires the dead records, restoring reliable
-registration without manual surgery.
+An operator who has worked across many instances for weeks has a
+registry already full of stale records from instances long gone. They
+do nothing special: the next time they create or update any niwa
+workspace, niwa removes the dead records as part of that ordinary
+action — no separate repair command, no hand-editing a Claude-owned
+file. Reliable registration is restored as a side effect of normal use.
 
 ### A developer gets released skills, not in-development builds
 
@@ -140,8 +141,9 @@ stable for daily use.
 
 - niwa retiring the plugin install records it is responsible for, over
   the workspace-instance lifecycle (creation through teardown).
-- A recovery path for registries that have already accumulated dead
-  records, so existing damage is repairable without manual file edits.
+- Automatic healing of previously-accumulated damage as part of
+  ordinary workspace creation and update — no separate repair command
+  and no manual file edits.
 - Making marketplace auto-update a configurable choice rather than a
   forced default, so niwa stops accelerating the churn.
 - Tracking a marketplace's stable releases by default instead of its
