@@ -266,14 +266,12 @@ func TestSessionList_AttachedAndAvailableMutuallyExclusive(t *testing.T) {
 	}
 }
 
-// TestRunSessionCreate_NoArgsReturnsUsageError verifies issue #135 behavior:
-// invoking `niwa worktree create` with no args must return
-// *sessionattach.ExitCodeError with Code=2 and a usage string that names the
-// expected positional arguments and points at --help. Cobra's default
-// ExactArgs error ("accepts 2 arg(s), received 0") exits 1 with a generic
-// message; this guard ensures we don't regress to that behavior.
-func TestRunSessionCreate_NoArgsReturnsUsageError(t *testing.T) {
-	err := runSessionCreate(sessionCreateCmd, nil)
+// TestRunSessionCreate_TooManyArgsReturnsUsageError verifies that passing more
+// than the two optional positionals (repo, purpose) is a usage error: code 2
+// with a usage string that points at --help. After Issue 1 both positionals
+// are optional, so the only positional-count error is overflow.
+func TestRunSessionCreate_TooManyArgsReturnsUsageError(t *testing.T) {
+	err := runSessionCreate(sessionCreateCmd, []string{"repo", "purpose", "extra"})
 	if err == nil {
 		t.Fatalf("want ExitCodeError, got nil")
 	}
@@ -287,8 +285,6 @@ func TestRunSessionCreate_NoArgsReturnsUsageError(t *testing.T) {
 	wantSubstrs := []string{
 		"niwa: usage",
 		"niwa worktree create",
-		"<repo>",
-		"<purpose>",
 		"niwa worktree create --help",
 	}
 	for _, s := range wantSubstrs {
@@ -298,19 +294,29 @@ func TestRunSessionCreate_NoArgsReturnsUsageError(t *testing.T) {
 	}
 }
 
-// TestRunSessionCreate_OneArgReturnsUsageError covers the partial-args case:
-// only <repo> supplied. The behavior should match the no-args case.
-func TestRunSessionCreate_OneArgReturnsUsageError(t *testing.T) {
-	err := runSessionCreate(sessionCreateCmd, []string{"some-repo"})
+// TestRunSessionCreate_NoArgsCwdOutsideWorkspaceErrors verifies that a bare
+// `niwa worktree create` (no repo arg) fails clearly when the process cwd does
+// not resolve under any workspace repo. The instance root is a temp dir with no
+// repos, so cwd inference must reject rather than fabricate a repo name.
+func TestRunSessionCreate_NoArgsCwdOutsideWorkspaceErrors(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, ".niwa"), 0o700); err != nil {
+		t.Fatalf("mkdir .niwa: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".niwa", "instance.json"), []byte("{}"), 0o600); err != nil {
+		t.Fatalf("write instance.json: %v", err)
+	}
+	t.Setenv("NIWA_INSTANCE_ROOT", root)
+
+	resetSessionCreateFlags(t)
+	defer resetSessionCreateFlags(t)
+
+	err := runSessionCreate(sessionCreateCmd, nil)
 	if err == nil {
-		t.Fatalf("want ExitCodeError, got nil")
+		t.Fatalf("want error inferring repo from cwd, got nil")
 	}
-	var ece *sessionattach.ExitCodeError
-	if !errors.As(err, &ece) {
-		t.Fatalf("err is not *ExitCodeError: %T", err)
-	}
-	if ece.Code != 2 {
-		t.Errorf("Code = %d, want 2", ece.Code)
+	if !strings.Contains(err.Error(), "infer repo from working directory") {
+		t.Errorf("error = %q, want substring 'infer repo from working directory'", err.Error())
 	}
 }
 
