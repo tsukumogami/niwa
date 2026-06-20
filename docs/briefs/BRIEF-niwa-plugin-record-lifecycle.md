@@ -82,37 +82,37 @@ clean up the workspace files it creates.
 
 ## User Journeys
 
-### Maya tears down a finished workspace instance
+### An operator tears down a finished workspace instance
 
-Maya finishes a feature across a niwa workspace instance and destroys
-it. Today the instance's directories are removed but its plugin records
-linger in the global registry, becoming dangling the moment their
-cached versions are swept. In the intended outcome, destroying the
+An operator finishes a feature across a niwa workspace instance and
+destroys it. Today the instance's directories are removed but its plugin
+records linger in the global registry, becoming dangling the moment
+their cached versions are swept. In the intended outcome, destroying the
 instance also retires the plugin records that instance caused, so no
 dead pointers are left behind for a future session to trip over.
 
-### Devin opens a fresh session and skills are simply there
+### A developer opens a fresh session and finds skills registered
 
-Devin starts a brand-new session in a workspace and expects the
+A developer starts a brand-new session in a workspace and expects the
 workflow skills to be available. Today resolution can land on one of
-many dead records and the skills fail to register until he reloads. In
-the intended outcome, the registry no longer carries an accumulated
-backlog of dead records, so first-session resolution finds valid state
-and the skills register on the first try.
+many dead records and the skills fail to register until a reload. In the
+intended outcome, the registry no longer carries an accumulated backlog
+of dead records, so first-session resolution finds valid state and the
+skills register on the first try.
 
-### Sam recovers a registry that has already accumulated damage
+### An operator recovers a registry that has already accumulated damage
 
-Sam has been working across many instances for weeks and the registry
-is already full of stale records from instances long gone. Rather than
-hand-editing a Claude-owned file, Sam runs a niwa operation that
-detects and retires the dead records, restoring reliable registration
-without manual surgery.
+An operator who has worked across many instances for weeks finds the
+registry already full of stale records from instances long gone. Rather
+than hand-editing a Claude-owned file, the operator runs a niwa
+operation that detects and retires the dead records, restoring reliable
+registration without manual surgery.
 
-### Priya wants daily-stable skills without forced auto-update churn
+### A marketplace author avoids forced auto-update churn
 
-Priya develops one of the marketplaces she also consumes. Today niwa
-force-enables auto-update on it, so every change she pushes churns
-cached versions and accelerates the dangling-record problem in her
+A developer who maintains a marketplace they also consume is hurt by
+niwa force-enabling auto-update on it: every change they push churns
+cached versions and accelerates the dangling-record problem in their
 other live sessions. In the intended outcome, auto-update is a choice
 rather than an imposition, so a locally-developed marketplace stays
 stable for daily use.
