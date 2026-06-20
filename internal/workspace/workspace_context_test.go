@@ -525,12 +525,39 @@ func TestInstallGlobalClaudeContentMigratesOldImport(t *testing.T) {
 	}
 }
 
+// stubResolver installs a fake release resolver for the duration of a test and
+// restores the original on cleanup, so unit tests never hit the network. The
+// fake returns (tag, ok) for any repo.
+func stubResolver(t *testing.T, tag string, ok bool) {
+	t.Helper()
+	orig := resolveLatestStableRelease
+	resolveLatestStableRelease = func(string) (string, bool) { return tag, ok }
+	t.Cleanup(func() { resolveLatestStableRelease = orig })
+}
+
+// localMarketplaceRepo writes a minimal marketplace under tmp/tools and returns
+// a repoIndex pointing at it.
+func localMarketplaceRepo(t *testing.T, manifest string) map[string]string {
+	t.Helper()
+	tmpDir := t.TempDir()
+	repoDir := filepath.Join(tmpDir, "tools")
+	pluginDir := filepath.Join(repoDir, ".claude-plugin")
+	if err := os.MkdirAll(pluginDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pluginDir, "marketplace.json"), []byte(manifest), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return map[string]string{"tools": repoDir}
+}
+
 // TestMapMarketplaceSourceAutoUpdateDefaultOff verifies that an unconfigured
 // marketplace (AutoUpdate false) emits autoUpdate: false for both github and
 // local sources.
 func TestMapMarketplaceSourceAutoUpdateDefaultOff(t *testing.T) {
+	stubResolver(t, "v1.0.0", true)
 	// GitHub source.
-	_, entry, err := mapMarketplaceSourceWithIndex("tsukumogami/shirabe", nil, false)
+	_, entry, _, err := mapMarketplaceSourceWithIndex("tsukumogami/shirabe", nil, false, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -539,17 +566,8 @@ func TestMapMarketplaceSourceAutoUpdateDefaultOff(t *testing.T) {
 	}
 
 	// Local source.
-	tmpDir := t.TempDir()
-	repoDir := filepath.Join(tmpDir, "tools")
-	pluginDir := filepath.Join(repoDir, ".claude-plugin")
-	if err := os.MkdirAll(pluginDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(pluginDir, "marketplace.json"), []byte("{}"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	repoIndex := map[string]string{"tools": repoDir}
-	_, entry, err = mapMarketplaceSourceWithIndex("repo:tools/.claude-plugin/marketplace.json", repoIndex, false)
+	repoIndex := localMarketplaceRepo(t, "{}")
+	_, entry, _, err = mapMarketplaceSourceWithIndex("repo:tools/.claude-plugin/marketplace.json", repoIndex, false, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -561,8 +579,9 @@ func TestMapMarketplaceSourceAutoUpdateDefaultOff(t *testing.T) {
 // TestMapMarketplaceSourceAutoUpdateOptedIn verifies that a marketplace with
 // AutoUpdate true emits autoUpdate: true for both github and local sources.
 func TestMapMarketplaceSourceAutoUpdateOptedIn(t *testing.T) {
+	stubResolver(t, "v1.0.0", true)
 	// GitHub source.
-	_, entry, err := mapMarketplaceSourceWithIndex("tsukumogami/shirabe", nil, true)
+	_, entry, _, err := mapMarketplaceSourceWithIndex("tsukumogami/shirabe", nil, true, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -571,22 +590,144 @@ func TestMapMarketplaceSourceAutoUpdateOptedIn(t *testing.T) {
 	}
 
 	// Local source.
-	tmpDir := t.TempDir()
-	repoDir := filepath.Join(tmpDir, "tools")
-	pluginDir := filepath.Join(repoDir, ".claude-plugin")
-	if err := os.MkdirAll(pluginDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(pluginDir, "marketplace.json"), []byte("{}"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	repoIndex := map[string]string{"tools": repoDir}
-	_, entry, err = mapMarketplaceSourceWithIndex("repo:tools/.claude-plugin/marketplace.json", repoIndex, true)
+	repoIndex := localMarketplaceRepo(t, "{}")
+	_, entry, _, err = mapMarketplaceSourceWithIndex("repo:tools/.claude-plugin/marketplace.json", repoIndex, true, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if entry["autoUpdate"] != true {
 		t.Errorf("local autoUpdate = %v, want true", entry["autoUpdate"])
+	}
+}
+
+// TestMapMarketplaceTrackDefaultRelease verifies that a github marketplace with
+// no track override resolves to its latest stable release tag and registers
+// against it (R14): the source carries a "ref" equal to the resolved tag.
+func TestMapMarketplaceTrackDefaultRelease(t *testing.T) {
+	stubResolver(t, "v1.2.3", true)
+	_, entry, report, err := mapMarketplaceSourceWithIndex("tsukumogami/shirabe", nil, false, "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if report != "" {
+		t.Errorf("unexpected report: %q", report)
+	}
+	src := entry["source"].(map[string]any)
+	if src["source"] != "github" {
+		t.Errorf("source type = %v, want github", src["source"])
+	}
+	if src["ref"] != "v1.2.3" {
+		t.Errorf("ref = %v, want v1.2.3 (resolved release, not main)", src["ref"])
+	}
+}
+
+// TestMapMarketplaceTrackMain verifies that an explicit track=main registers
+// against the default branch and emits no ref (R15).
+func TestMapMarketplaceTrackMain(t *testing.T) {
+	// Resolver must not be consulted for main; make it fail loudly if it is.
+	resolveLatestStableRelease = func(string) (string, bool) {
+		t.Fatalf("resolver should not be called for track=main")
+		return "", false
+	}
+	t.Cleanup(func() { resolveLatestStableRelease = defaultResolveLatestStableRelease })
+
+	_, entry, report, err := mapMarketplaceSourceWithIndex("tsukumogami/shirabe", nil, false, "main")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if report != "" {
+		t.Errorf("unexpected report: %q", report)
+	}
+	src := entry["source"].(map[string]any)
+	if _, hasRef := src["ref"]; hasRef {
+		t.Errorf("track=main must not emit a ref, got %v", src["ref"])
+	}
+}
+
+// TestMapMarketplaceTrackExplicitRef verifies that an explicit ref/tag is
+// emitted verbatim and the resolver is not consulted (R17).
+func TestMapMarketplaceTrackExplicitRef(t *testing.T) {
+	resolveLatestStableRelease = func(string) (string, bool) {
+		t.Fatalf("resolver should not be called for an explicit ref")
+		return "", false
+	}
+	t.Cleanup(func() { resolveLatestStableRelease = defaultResolveLatestStableRelease })
+
+	_, entry, report, err := mapMarketplaceSourceWithIndex("tsukumogami/shirabe", nil, false, "v2.0.0")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if report != "" {
+		t.Errorf("unexpected report: %q", report)
+	}
+	src := entry["source"].(map[string]any)
+	if src["ref"] != "v2.0.0" {
+		t.Errorf("ref = %v, want v2.0.0 (explicit ref emitted verbatim)", src["ref"])
+	}
+}
+
+// TestMapMarketplaceTrackNoReleaseFallback verifies that a github marketplace
+// with no stable release falls back to the default branch (no ref) and returns
+// a report describing the fallback (R16).
+func TestMapMarketplaceTrackNoReleaseFallback(t *testing.T) {
+	stubResolver(t, "", false)
+	_, entry, report, err := mapMarketplaceSourceWithIndex("tsukumogami/shirabe", nil, false, "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if report == "" {
+		t.Error("expected a fallback report for a marketplace with no stable release")
+	}
+	src := entry["source"].(map[string]any)
+	if _, hasRef := src["ref"]; hasRef {
+		t.Errorf("no-release fallback must not emit a ref, got %v", src["ref"])
+	}
+}
+
+// TestMapMarketplaceTrackLocalIgnored verifies that local sources ignore track
+// entirely (no ref, no report) even when a track is configured.
+func TestMapMarketplaceTrackLocalIgnored(t *testing.T) {
+	resolveLatestStableRelease = func(string) (string, bool) {
+		t.Fatalf("resolver should not be called for a local source")
+		return "", false
+	}
+	t.Cleanup(func() { resolveLatestStableRelease = defaultResolveLatestStableRelease })
+
+	repoIndex := localMarketplaceRepo(t, "{}")
+	_, entry, report, err := mapMarketplaceSourceWithIndex("repo:tools/.claude-plugin/marketplace.json", repoIndex, false, "release")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if report != "" {
+		t.Errorf("local source should produce no report, got %q", report)
+	}
+	src := entry["source"].(map[string]any)
+	if _, hasRef := src["ref"]; hasRef {
+		t.Errorf("local source must not emit a ref, got %v", src["ref"])
+	}
+}
+
+// TestParseStableSemver covers semver parsing/filtering used by the default
+// resolver: stable releases parse, prereleases and malformed tags are rejected.
+func TestParseStableSemver(t *testing.T) {
+	cases := []struct {
+		tag  string
+		want bool
+	}{
+		{"v1.2.3", true},
+		{"1.2.3", true},
+		{"v0.0.1", true},
+		{"v1.2.3-rc.1", false},
+		{"v1.2.3-dev", false},
+		{"v1.2", false},
+		{"v1.2.3.4", false},
+		{"latest", false},
+		{"v1.2.3+build", false},
+	}
+	for _, c := range cases {
+		if _, ok := parseStableSemver(c.tag); ok != c.want {
+			t.Errorf("parseStableSemver(%q) ok = %v, want %v", c.tag, ok, c.want)
+		}
 	}
 }
 
@@ -607,7 +748,7 @@ func TestMapMarketplaceSourceNameKeying(t *testing.T) {
 	}
 	repoIndex := map[string]string{"tools": repoDir}
 
-	name, entry, err := mapMarketplaceSourceWithIndex("repo:tools/.claude-plugin/marketplace.json", repoIndex, false)
+	name, entry, _, err := mapMarketplaceSourceWithIndex("repo:tools/.claude-plugin/marketplace.json", repoIndex, false, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -638,7 +779,7 @@ func TestMapMarketplaceSourceNameKeyingFallback(t *testing.T) {
 	}
 	repoIndex := map[string]string{"tools": repoDir}
 
-	name, _, err := mapMarketplaceSourceWithIndex("repo:tools/.claude-plugin/marketplace.json", repoIndex, false)
+	name, _, _, err := mapMarketplaceSourceWithIndex("repo:tools/.claude-plugin/marketplace.json", repoIndex, false, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

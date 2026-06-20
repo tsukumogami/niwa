@@ -279,6 +279,11 @@ type BuildSettingsConfig struct {
 	BaseDir                string // for computing relative hook paths
 	IncludeGitInstructions *bool
 	UseAbsolutePaths       bool // use absolute paths for hooks (instance root)
+	// Reports, when non-nil, collects human-readable notices produced while
+	// building the document — currently release-tracking fallbacks for github
+	// marketplaces with no stable release. The caller surfaces these to the
+	// user; leaving it nil discards them.
+	Reports *[]string
 }
 
 // buildSettingsDoc produces the map[string]any JSON document for Claude Code
@@ -385,9 +390,12 @@ func buildSettingsDoc(cfg BuildSettingsConfig) (map[string]any, error) {
 		mkts := make(map[string]any, len(cfg.Marketplaces))
 		for _, mc := range cfg.Marketplaces {
 			source := mc.Source
-			name, entry, err := mapMarketplaceSourceWithIndex(source, cfg.RepoIndex, mc.AutoUpdate)
+			name, entry, report, err := mapMarketplaceSourceWithIndex(source, cfg.RepoIndex, mc.AutoUpdate, mc.Track)
 			if err != nil {
 				return nil, fmt.Errorf("marketplace %q: %w", source, err)
+			}
+			if report != "" && cfg.Reports != nil {
+				*cfg.Reports = append(*cfg.Reports, report)
 			}
 			if name != "" {
 				mkts[name] = entry
@@ -399,6 +407,20 @@ func buildSettingsDoc(cfg BuildSettingsConfig) (map[string]any, error) {
 	}
 
 	return doc, nil
+}
+
+// emitReports writes each report line to w (falling back to os.Stderr when w
+// is nil). Used to surface marketplace release-tracking notices to the user.
+func emitReports(w io.Writer, reports []string) {
+	if len(reports) == 0 {
+		return
+	}
+	if w == nil {
+		w = os.Stderr
+	}
+	for _, r := range reports {
+		fmt.Fprintln(w, "niwa: "+r)
+	}
 }
 
 // resolveClaudeEnvVars resolves the claude.env promote + inline vars into a
@@ -488,6 +510,7 @@ func (s *SettingsMaterializer) Materialize(ctx *MaterializeContext) ([]string, e
 		return nil, nil
 	}
 
+	var reports []string
 	doc, err := buildSettingsDoc(BuildSettingsConfig{
 		Settings:         settings,
 		InstalledHooks:   hooks,
@@ -497,10 +520,12 @@ func (s *SettingsMaterializer) Materialize(ctx *MaterializeContext) ([]string, e
 		RepoIndex:        ctx.RepoIndex,
 		BaseDir:          ctx.RepoDir,
 		UseAbsolutePaths: true,
+		Reports:          &reports,
 	})
 	if err != nil {
 		return nil, err
 	}
+	emitReports(ctx.Stderr, reports)
 
 	data, err := json.MarshalIndent(doc, "", "  ")
 	if err != nil {
