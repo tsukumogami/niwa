@@ -71,6 +71,12 @@ type Registry struct {
 	// or -1 if the document had no "plugins" key.
 	pluginsIndex int
 
+	// pluginOrder preserves the order plugin keys appeared in the source
+	// document so a load/save cycle is byte-stable at the plugins-object
+	// level. Keys present in Plugins but absent here (added in memory) are
+	// emitted after the preserved keys, in sorted order, for determinism.
+	pluginOrder []string
+
 	// Plugins maps a plugin key to its ordered list of install records.
 	Plugins map[string][]Record
 }
@@ -192,40 +198,42 @@ func parse(data []byte) (*Registry, error) {
 			continue
 		}
 		reg.pluginsIndex = i
-		plugins, err := parsePlugins(f.Value)
+		plugins, order, err := parsePlugins(f.Value)
 		if err != nil {
 			return nil, err
 		}
 		reg.Plugins = plugins
+		reg.pluginOrder = order
 	}
 
 	return reg, nil
 }
 
 // parsePlugins decodes the "plugins" object into structured records while
-// retaining each record's raw bytes.
-func parsePlugins(raw json.RawMessage) (map[string][]Record, error) {
+// retaining each record's raw bytes and the order its keys appeared in.
+func parsePlugins(raw json.RawMessage) (map[string][]Record, []string, error) {
 	// A null or absent plugins value is an empty set.
 	if len(bytes.TrimSpace(raw)) == 0 || string(bytes.TrimSpace(raw)) == "null" {
-		return map[string][]Record{}, nil
+		return map[string][]Record{}, nil, nil
 	}
 
-	var rawByKey map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &rawByKey); err != nil {
-		return nil, fmt.Errorf("%w: plugins: %v", ErrMalformed, err)
+	fields, err := decodeOrderedObject(raw)
+	if err != nil {
+		return nil, nil, fmt.Errorf("%w: plugins: %v", ErrMalformed, err)
 	}
 
-	out := make(map[string][]Record, len(rawByKey))
-	for key, listRaw := range rawByKey {
+	out := make(map[string][]Record, len(fields))
+	order := make([]string, 0, len(fields))
+	for _, f := range fields {
 		var rawRecords []json.RawMessage
-		if err := json.Unmarshal(listRaw, &rawRecords); err != nil {
-			return nil, fmt.Errorf("%w: plugin %q records: %v", ErrMalformed, key, err)
+		if err := json.Unmarshal(f.Value, &rawRecords); err != nil {
+			return nil, nil, fmt.Errorf("%w: plugin %q records: %v", ErrMalformed, f.Key, err)
 		}
 		records := make([]Record, 0, len(rawRecords))
 		for _, rr := range rawRecords {
 			var m recordModel
 			if err := json.Unmarshal(rr, &m); err != nil {
-				return nil, fmt.Errorf("%w: plugin %q record: %v", ErrMalformed, key, err)
+				return nil, nil, fmt.Errorf("%w: plugin %q record: %v", ErrMalformed, f.Key, err)
 			}
 			records = append(records, Record{
 				Scope:       m.Scope,
@@ -234,9 +242,10 @@ func parsePlugins(raw json.RawMessage) (map[string][]Record, error) {
 				raw:         append(json.RawMessage(nil), rr...),
 			})
 		}
-		out[key] = records
+		out[f.Key] = records
+		order = append(order, f.Key)
 	}
-	return out, nil
+	return out, order, nil
 }
 
 // decodeOrderedObject decodes a JSON object preserving the order of its
@@ -331,15 +340,28 @@ func (r *Registry) Marshal() ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-// marshalPlugins re-emits the plugins object. Keys are sorted so output is
-// deterministic; each record is emitted from its retained raw bytes, so a
+// marshalPlugins re-emits the plugins object. Keys preserved from the
+// source document are emitted in their original order (byte-stable round
+// trip); keys added in memory are appended in sorted order for
+// determinism. Each record is emitted from its retained raw bytes, so a
 // record niwa never touched round-trips byte-for-byte.
 func (r *Registry) marshalPlugins() ([]byte, error) {
 	keys := make([]string, 0, len(r.Plugins))
-	for k := range r.Plugins {
-		keys = append(keys, k)
+	seen := make(map[string]bool, len(r.Plugins))
+	for _, k := range r.pluginOrder {
+		if _, ok := r.Plugins[k]; ok && !seen[k] {
+			keys = append(keys, k)
+			seen[k] = true
+		}
 	}
-	sort.Strings(keys)
+	var added []string
+	for k := range r.Plugins {
+		if !seen[k] {
+			added = append(added, k)
+		}
+	}
+	sort.Strings(added)
+	keys = append(keys, added...)
 
 	var buf bytes.Buffer
 	buf.WriteByte('{')

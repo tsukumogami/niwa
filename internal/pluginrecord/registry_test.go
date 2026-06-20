@@ -116,6 +116,26 @@ func TestRoundTrip_PreservesUnknownTopLevelKeysAndRecordFields(t *testing.T) {
 	}
 }
 
+func TestRoundTrip_PreservesPluginKeyOrder(t *testing.T) {
+	base := t.TempDir()
+	// Plugin keys deliberately out of sorted order: a byte-stable round
+	// trip must re-emit them in source order, not alphabetized.
+	const content = `{"version":1,"plugins":{"z@m":[{"scope":"user","projectPath":"/p","installPath":"/i"}],"a@m":[{"scope":"user","projectPath":"/q","installPath":"/j"}]}}`
+	seedRegistry(t, base, content, 0o644)
+
+	reg, err := Load(WithBaseDir(base))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	out, err := reg.Marshal()
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if string(out) != content {
+		t.Fatalf("plugin key order not preserved:\n got:  %s\n want: %s", out, content)
+	}
+}
+
 func TestSave_AtomicWriteNoLeftoverTemp(t *testing.T) {
 	base := t.TempDir()
 	const content = `{"version":1,"plugins":{"a@m":[{"scope":"user","projectPath":"/p","installPath":"/i"}]}}`
