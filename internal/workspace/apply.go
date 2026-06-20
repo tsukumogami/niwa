@@ -98,6 +98,15 @@ type Applier struct {
 	// unit tests that don't exercise the registry at all.
 	prunePluginRecords func() (pluginrecord.PruneReport, error)
 
+	// reconcileMarketplaceAutoUpdate sets the autoUpdate flag in Claude Code's
+	// global known_marketplaces.json for the marketplaces niwa manages, so an
+	// already-registered marketplace adopts the configured policy instead of
+	// keeping a stale value Claude Code does not refresh from project settings.
+	// Production wires it (via NewApplier) to pluginrecord.ReconcileAutoUpdate
+	// against the real ~/.claude; tests override it to a temp HOME or a fake.
+	// When nil, the reconcile is a silent no-op.
+	reconcileMarketplaceAutoUpdate func(desired map[string]bool) (pluginrecord.ReconcileReport, error)
+
 	// vaultRegistry overrides vault.DefaultRegistry for vault bundle building.
 	// Nil means use the process-wide DefaultRegistry (production behaviour).
 	// Tests set this to a fresh *vault.Registry with the fake backend registered
@@ -136,6 +145,11 @@ func NewApplier(gh github.Client) *Applier {
 	// dangling-only keeps this broadly-run step from removing live records.
 	a.prunePluginRecords = func() (pluginrecord.PruneReport, error) {
 		return pluginrecord.Prune(pluginrecord.Dangling)
+	}
+	// Reconcile the global marketplace registry's autoUpdate flag to the
+	// configured per-marketplace policy. Defaults to the real ~/.claude.
+	a.reconcileMarketplaceAutoUpdate = func(desired map[string]bool) (pluginrecord.ReconcileReport, error) {
+		return pluginrecord.ReconcileAutoUpdate(desired)
 	}
 	a.cloneOrSync = func(ctx context.Context, url, dir string) (bool, int, error) {
 		fetcher, _ := a.GitHubClient.(FetchClient)
@@ -1385,6 +1399,13 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 	// removed so the heal is never silent (R4).
 	a.healDanglingPluginRecords()
 
+	// Step 9: Reconcile the global marketplace registry's autoUpdate flag to
+	// the configured per-marketplace policy. niwa writes the policy into
+	// project settings, but Claude Code does not refresh an already-registered
+	// marketplace's global entry from those, so this closes the gap on every
+	// create and update (R18). Fail-safe like the heal above.
+	a.reconcileMarketplaceRegistry(effectiveCfg, repoIndex)
+
 	return &pipelineResult{
 		classified:       classified,
 		repoStates:       repoStates,
@@ -1427,6 +1448,42 @@ func (a *Applier) healDanglingPluginRecords() {
 		a.Reporter.Log("healed %d dangling plugin record(s): %s", report.Removed, strings.Join(affected, ", "))
 	} else {
 		a.Reporter.Log("healed %d dangling plugin record(s)", report.Removed)
+	}
+}
+
+// reconcileMarketplaceRegistry sets the autoUpdate flag in Claude Code's global
+// known_marketplaces.json to the configured per-marketplace policy for the
+// marketplaces niwa manages, so an already-registered marketplace adopts the
+// new policy instead of keeping a stale value Claude Code never refreshes from
+// project settings. It runs from runPipeline on every create and update.
+//
+// Like the dangling-record heal, it is fail-safe: a nil seam or any registry
+// error is reported via a deferred warning and never propagated, so a missing
+// or malformed registry can never fail a create or update.
+func (a *Applier) reconcileMarketplaceRegistry(cfg *config.WorkspaceConfig, repoIndex map[string]string) {
+	if a.reconcileMarketplaceAutoUpdate == nil || cfg == nil {
+		return
+	}
+
+	desired := make(map[string]bool, len(cfg.Claude.Marketplaces))
+	for _, mc := range cfg.Claude.Marketplaces {
+		name, err := marketplaceRegistrationName(mc.Source, repoIndex)
+		if err != nil || name == "" {
+			continue
+		}
+		desired[name] = mc.AutoUpdate
+	}
+	if len(desired) == 0 {
+		return
+	}
+
+	report, err := a.reconcileMarketplaceAutoUpdate(desired)
+	if err != nil {
+		a.Reporter.DeferWarn("could not reconcile marketplace auto-update policy: %v", err)
+		return
+	}
+	if len(report.Updated) > 0 {
+		a.Reporter.Log("updated auto-update policy for %d marketplace(s): %s", len(report.Updated), strings.Join(report.Updated, ", "))
 	}
 }
 

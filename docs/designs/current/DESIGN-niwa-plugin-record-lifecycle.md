@@ -33,6 +33,10 @@ rationale: |
 
 Current
 
+Amended 2026-06-20 — see the "Amendment: global marketplace-registry
+reconciliation" section at the end, added after a post-implementation
+gap surfaced (R18).
+
 ## Context and Problem Statement
 
 Claude Code keeps a global plugin install registry at
@@ -453,3 +457,49 @@ the report with no write or backup); no user-facing command exposes it.
   repo directories before committing; out of scope for this design.
 - Reporting the underlying Claude Code GC gap upstream is tracked
   separately.
+
+## Amendment 2026-06-20: global marketplace-registry reconciliation
+
+**Gap.** The original design (Decision 3, Decision 6, R6/R7) had niwa
+write the per-marketplace `auto_update` policy into each repo's project
+`extraKnownMarketplaces`. In use this proved insufficient: Claude Code
+merges project `extraKnownMarketplaces` into its global
+`known_marketplaces.json` only when registering a marketplace it does
+not already know. For an already-registered marketplace it keeps the
+existing global entry, so a marketplace niwa had previously registered
+with `autoUpdate: true` kept that stale value even after the config
+flipped it to false — the churn the feature set out to stop continued
+for existing installs. (Fresh registrations were unaffected.)
+
+**Decision.** niwa reconciles the global marketplace registry directly,
+the same self-healing posture the dangling-record heal already applies
+to `installed_plugins.json`. This is consistent with the design's
+established stance that niwa may safely mutate Claude-owned files under
+`~/.claude/plugins/` using the remove/edit-only, atomic, backed-up,
+fail-safe discipline.
+
+**Mechanism.**
+
+- `pluginrecord.ReconcileAutoUpdate(desired map[string]bool, opts...)`
+  loads `~/.claude/plugins/known_marketplaces.json` (preserve-unknowns,
+  ordered), sets `autoUpdate` to the desired value for each named
+  marketplace that ALREADY exists, and writes via the existing atomic
+  temp-and-rename with a timestamped backup. It never adds a
+  marketplace (Claude owns registration), touches only the named
+  entries, no-ops on an absent file, and returns `ErrMalformed`
+  (leaving the file untouched) on a malformed one.
+- A `runPipeline` step (Step 9), invoked on every create and update like
+  the heal, builds the desired map from `cfg.Claude.Marketplaces`
+  (name via the shared `marketplaceRegistrationName`, value from
+  `MarketplaceConfig.AutoUpdate`) and calls the reconcile through an
+  `Applier` seam. It is fail-safe: a nil seam or any registry error is a
+  deferred warning, never failing create/update. It reports which
+  marketplaces it updated.
+- `marketplaceRegistrationName` is extracted from
+  `mapMarketplaceSourceWithIndex` so the project-settings name and the
+  global-registry name are computed by one function and cannot drift.
+
+**Scope.** Reconciliation adjusts only the `autoUpdate` flag (the churn
+knob). It deliberately does not rewrite the source object — the
+version-tracking ref limitation (Decision 6 spike) is unchanged.
+Satisfies R18.

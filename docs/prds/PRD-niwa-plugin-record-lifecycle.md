@@ -29,6 +29,13 @@ motivating_context: |
 
 Done
 
+Amended 2026-06-20 (post-implementation): added R18 after a gap surfaced
+in use — niwa's per-marketplace auto-update policy reached project
+settings but not Claude Code's already-registered global marketplace
+entries, so existing registrations kept the stale `autoUpdate: true`.
+R18 requires niwa to reconcile the global registry for the marketplaces
+it manages.
+
 ## Problem Statement
 
 Claude Code keeps a global plugin registry at
@@ -164,6 +171,18 @@ Functional (version tracking):
 - **R17.** The version-tracking selection SHALL live in the same
   per-marketplace configuration as the auto-update value (R7).
 
+Functional (registry reconciliation — amendment 2026-06-20):
+
+- **R18.** For a marketplace niwa manages that is ALREADY registered in
+  Claude Code's global marketplace registry, niwa SHALL reconcile that
+  registry's auto-update flag to the configured value on create and
+  update — because Claude Code does not refresh an already-registered
+  marketplace's global entry from project settings, so the configured
+  policy (R6) would otherwise never reach an existing registration. The
+  reconciliation SHALL only adjust marketplaces niwa manages, SHALL NOT
+  add new marketplaces, and SHALL be fail-safe (an absent or malformed
+  registry never fails create or update).
+
 ## Acceptance Criteria
 
 - [ ] Destroying an instance removes exactly the records whose project
@@ -206,6 +225,10 @@ Functional (version tracking):
       registers exactly that ref.
 - [ ] A github marketplace with no published stable release registers
       tracking the default branch and the fallback is reported.
+- [ ] For an already-registered managed marketplace, create/update sets
+      its auto-update flag in the global marketplace registry to the
+      configured value, leaves unmanaged entries untouched, adds no new
+      marketplace, and is a no-op on an absent registry (R18).
 - [ ] New behavior is covered by unit tests and at least one functional
       (end-to-end) scenario.
 
