@@ -1,6 +1,6 @@
 ---
 schema: brief/v1
-status: Draft
+status: Accepted
 problem: |
   In a niwa workspace, asking an AI agent to "work in a worktree" can
   silently create two competing worktree systems for one repo: the agent's
@@ -22,7 +22,7 @@ motivating_context: |
 
 ## Status
 
-Draft
+Accepted
 
 The downstream PRD owns the requirements; the downstream DESIGN owns the
 delegation mechanism. This brief stops at the developer-facing framing.
@@ -124,13 +124,6 @@ rather than a quiet checkout missing its secrets and context.
 - Agent harnesses other than Claude Code.
 - Requirements-level specifics — exact configuration keys, flag names, and
   acceptance criteria. Those belong to the downstream PRD.
-
-## Open Questions
-
-- Whether the fallback (steer-to-niwa) is surfaced to the developer as a visible
-  difference or stays invisible. The PRD owns the developer-facing contract.
-- Whether a developer can opt a workspace instance out of the default, and how
-  that escape hatch is expressed. The PRD owns whether this is a requirement.
 
 ## References
 
