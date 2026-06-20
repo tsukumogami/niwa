@@ -1,6 +1,6 @@
 ---
 schema: prd/v1
-status: Accepted
+status: In Progress
 problem: |
   In a niwa workspace, agent-initiated worktree creation can silently produce a
   second, competing bare worktree alongside niwa's managed one. The bare
@@ -29,7 +29,7 @@ motivating_context: |
 
 ## Status
 
-Accepted
+In Progress
 
 The downstream DESIGN owns the delegation mechanism (hook scripts, the input
 adapter, removal reconciliation). This PRD owns the requirements and the

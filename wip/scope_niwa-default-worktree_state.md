@@ -15,6 +15,7 @@ planned_chain:
 chain_ran:
   - brief
   - prd
+  - design
 chain_skipped: []
 visibility: Public
 child_snapshots:
@@ -26,9 +27,12 @@ child_snapshots:
     status: Accepted
     content_hash: 54b7ac620eab1867cfd8f59df62285d872185721
     captured_at: 2026-06-20T21:39:39Z
+  design:
+    status: Accepted
+    content_hash: c66543a24e9d5f5c48fd0c25e0651ed4e025bbf6
+    captured_at: 2026-06-20T21:53:52Z
 parent_orchestration:
-  active_child: design
-  invoked_at: 2026-06-20T21:39:39Z
-# Auto chain: brief (accepted) -> prd (accepted) -> design (now) -> plan.
-# Stopping when the PLAN is ready for review.
+  active_child: plan
+  invoked_at: 2026-06-20T21:53:52Z
+# Auto chain: brief, prd, design accepted -> plan (now). Stop at PLAN ready for review.
 ```
