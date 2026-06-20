@@ -1,5 +1,5 @@
 ---
-status: Draft
+status: Complete
 question: |
   Can niwa install a Claude Code WorktreeCreate/WorktreeRemove hook that Claude
   Code actually fires for an agent operating inside a workspace repo, and at what
@@ -12,7 +12,7 @@ timebox: "1 session (~half a day)"
 
 ## Status
 
-Draft
+Complete
 
 ## Question
 
@@ -70,67 +70,108 @@ for hosts/versions that don't honor the hook.
 
 ## Approach
 
-Planned investigation steps (investigation not yet started):
+Investigation ran three headless experiments against Claude Code CLI v2.1.183,
+each launching `claude -p "<trivial prompt>" --worktree <name>
+--permission-mode bypassPermissions` in a throwaway git repo with a logging
+`WorktreeCreate` hook (capture stdin, create a worktree at a custom path, echo
+that path) configured at a different settings scope:
 
-1. **Baseline the contract.** In a throwaway git repo, configure a minimal
-   `WorktreeCreate` hook in that repo's `.claude/settings.json` that logs its stdin
-   to a file, creates a worktree at a known path, and echoes that path. Trigger it
-   via `claude --worktree test` and via an in-session "work in a worktree" request
-   (`EnterWorktree`). Confirm the hook fires in a git repo, capture the exact stdin
-   JSON, and confirm stdout-path and non-zero-exit-fails semantics.
-2. **Test the scope ladder.** Move the same hook up the settings hierarchy and
-   re-test which scope an in-repo agent honors:
-   - per-repo `<repo>/.claude/settings.json`
-   - workspace-root `<instanceRoot>/.claude/settings.json` (where niwa writes today),
-     with the agent launched both from the workspace root and from inside the repo
-   - user `~/.claude/settings.json` (control)
-   Record, for each, whether the hook fires for an agent whose project root is the
-   repo.
-3. **Map to niwa's installer.** Confirm whether `InstallWorkspaceRootSettings()` can
-   write the hook at whichever scope step 2 proves necessary, or whether niwa needs a
-   new per-repo settings-install path. Note any settings-precedence interactions.
-4. **Smoke-test `WorktreeRemove`.** Confirm it fires on exit/subagent-finish and that
-   a non-zero exit does not block (informs the detach-not-destroy design decision).
+- **Experiment A — per-repo `.claude/settings.json`.** Standalone git repo, hook in
+  its own `settings.json`. Question: does the hook fire in a git repo at all?
+- **Experiment B — workspace-root `.claude/settings.json`.** Hook only in a non-git
+  parent directory's `.claude/settings.json` (modelling niwa's current install
+  location); agent launched in a subdir git repo with no repo-level settings.
+  Question: does niwa's existing workspace-root install reach an in-repo agent?
+- **Experiment C — per-repo `.claude/settings.local.json`.** Hook only in the repo's
+  `settings.local.json` (niwa's actual per-repo materialization target, since repos
+  are git dirs and `.local` is gitignored). Question: does the hook fire from the
+  file niwa would actually write?
 
-Out of scope for this spike (deferred to the design): the production adapter,
-branch-name policy, full reconciliation of niwa's destroy guards, and the fallback
-wiring. The spike only needs enough of a hook to prove firing and scope.
+`WorktreeRemove` non-blocking behavior was taken from the docs rather than re-tested
+empirically: headless `-p` runs do not auto-clean worktrees (per the worktrees
+guide), so a removal would not fire in this harness. This is the one finding below
+not validated by hands-on test.
+
+Out of scope for this spike (deferred to the design): the production stdin->niwa
+adapter, branch-name policy, full reconciliation of niwa's destroy guards, and the
+fallback wiring.
 
 ## Findings
 
-Investigation not yet started.
+**1. The `WorktreeCreate` hook fires in a git repo and fully replaces default git
+worktree creation. (Experiment A — confirmed.)** The hook ran, and no
+`.claude/worktrees/` was created; the worktree landed at the custom path the hook
+echoed, on the branch the hook chose. `git worktree list` showed
+`/tmp/.../custom-worktrees/x-spikeA  [spike-spikeA]`. This directly disproves the
+issue's "hooks fire for non-git VCS only" premise.
 
-Established by prior exploration (carry-forward, not yet validated by hands-on test):
+**2. Real `WorktreeCreate` stdin contract (for `--worktree`).** The hook received:
+```json
+{"session_id":"...","transcript_path":"...","cwd":"/tmp/spike-wt/exp-a/repo",
+ "hook_event_name":"WorktreeCreate","name":"spikeA"}
+```
+Notable vs. the issue's assumed schema: the worktree name field is `name` (not
+`worktree_name`), and there is no `git_dir` or `worktree_path` for create (the path
+doesn't exist yet — the hook returns it). `cwd` is the repo root, so the niwa adapter
+can resolve the repo directly from `cwd`. The hook must print the destination path to
+stdout; Claude then uses that path as the session working directory.
 
-- Live Claude Code docs confirm `WorktreeCreate`/`WorktreeRemove` fire in git repos
-  and replace default git worktree logic — contradicting the earlier assumption that
-  the hooks fire only for non-git VCS. This is the basis for the spike being worth
-  running at all.
-- The hook stdin/stdout/exit contract is documented and fits delegation.
-- niwa already materializes worktrees at the workspace instance root and already
-  writes the workspace-root `.claude/settings.json` plus hook scripts on apply.
+**3. The workspace-root install location does NOT work. (Experiment B — confirmed,
+decisive for niwa.)** With the hook only in the non-git parent's
+`.claude/settings.json` and the agent launched in a subdir git repo, the hook did
+NOT fire. Claude fell back to default git behavior, creating
+`<repo>/.claude/worktrees/spikeB` on branch `worktree-spikeB`. Claude resolves
+project settings from the repo (git root) plus user/managed scope; it does not walk
+up to a parent directory's `.claude/`. niwa's current `InstallWorkspaceRootSettings()`
+target is therefore insufficient on its own.
 
-The open, untested variable is settings scope (step 2). Note for the investigator:
-when a `WorktreeCreate` hook is configured, Claude Code does not process
-`.worktreeinclude`, so the hook (i.e. `niwa worktree create`) must itself materialize
-any local files — which niwa already does.
+**4. The per-repo `settings.local.json` install location works. (Experiment C —
+confirmed.)** With the hook only in the repo's `settings.local.json` — niwa's actual
+per-repo materialization target — the hook fired and again replaced default behavior
+(worktree at the custom path, branch `spike-spikeC`). This is the correct install
+surface, and niwa already has the per-repo path to write it (`SettingsMaterializer` +
+`HooksMaterializer` in the shared `runRepoMaterializers` loop).
+
+**5. The settings `env` block does not reach the hook subprocess.** An
+`"env": {"HOOK_SCOPE": "perRepo"}` entry in the same `settings.json` that carried the
+(firing) hook did not appear in the hook's environment (logged `unknown`). niwa must
+pass any context to the hook via the command string, not the settings `env` block.
+
+**6. `WorktreeRemove` is fire-and-forget (from docs, not re-tested).** The hooks
+reference states `WorktreeRemove` failures are logged in debug mode only and cannot
+block removal. Claude treats the worktree as removed regardless of the hook's exit —
+which must be reconciled with niwa's dirty/attached destroy guards in the design.
+
+**7. Delegation dissolves the branch-name conflict.** Because the hook fully owns
+creation, niwa picks the branch and path; Claude just consumes the returned path. The
+`worktree-<name>` vs `session/<sid>` mismatch noted in exploration is moot under
+delegation — niwa controls both, and Claude's `name` can feed niwa's purpose.
 
 ## Recommendation
 
-Pending investigation.
+**GO on delegation, with the install scope narrowed to per-repo
+`.claude/settings.local.json`.**
 
-Decision criteria for the follow-on design:
+Hook delegation is viable today and is the right mechanism for "one worktree system,
+not two": the native `EnterWorktree`/`--worktree` path can be made to produce niwa
+worktrees transparently. The only correction to the exploration's assumption is the
+install location — it must be per-repo, not workspace-root.
 
-- **Go (proceed to delegation-first design)** if the hook fires for an in-repo agent
-  at a settings scope niwa can write (workspace-root preferred; per-repo acceptable
-  since niwa already materializes per-repo content). The design then specifies the
-  adapter, branch-name policy, remove semantics, and the deny+steer fallback.
-- **Go with narrowed scope** if the hook only fires at per-repo or user scope: design
-  proceeds but the install strategy shifts to that scope, and the fallback's role
-  grows for any repo niwa can't reach.
-- **No-go on delegation (fall back to deny+steer as the default)** if Claude Code
-  does not honor a niwa-installed hook at any scope niwa controls. In that case the
-  committed fallback — `permissions.deny: ["EnterWorktree","ExitWorktree"]` plus
-  CLAUDE.md guidance steering agents to `niwa worktree create`, installed by
-  `niwa apply` — becomes the primary mechanism, and a Claude Code feature request for
-  honoring worktree hooks in git repos at workspace scope is the longer-term path.
+Conditions and next steps for the follow-on design:
+
+- **Install the `WorktreeCreate`/`WorktreeRemove` hooks per-repo** via niwa's existing
+  `SettingsMaterializer`/`HooksMaterializer` path (writing `settings.local.json`),
+  applied to every workspace repo on `niwa apply` and into every niwa worktree. Do
+  NOT rely on `InstallWorkspaceRootSettings()` for the hook.
+- **Build a thin stdin->niwa adapter**: read the hook JSON, resolve the repo from
+  `cwd`, map `name` to a purpose, call `niwa worktree create`, and print the resulting
+  worktree path to stdout. This requires `niwa worktree create` to emit its worktree
+  path in a machine-readable form (or the adapter to capture it).
+- **Reconcile `WorktreeRemove`'s non-blocking nature with niwa's destroy guards**:
+  the remove hook should detach / best-effort clean, not force-destroy, leaving
+  dirty/attached teardown to `niwa worktree destroy`.
+- **Keep deny+steer as the documented fallback** (`permissions.deny:
+  ["EnterWorktree","ExitWorktree"]` + CLAUDE.md guidance) for hosts/Claude versions
+  that don't honor the per-repo hook — now a true fallback, not the default.
+
+No further spike is needed before `/design`.
