@@ -658,3 +658,79 @@ mid-rename filesystem error) is treated the same as an opt-out
 command and continues — `niwa apply` does not exit non-zero
 because the plugin install couldn't run. The `<install-path>.next/`
 staging directory is cleaned up so the next apply can retry.
+
+## Claude marketplaces {#claude-marketplaces}
+
+The `[claude]` block's `marketplaces` setting lists the Claude Code
+plugin marketplaces niwa registers for the workspace. niwa writes them
+into Claude's `known_marketplaces` / `extraKnownMarketplaces` so the
+plugins in `plugins = [...]` resolve.
+
+### Two authoring forms
+
+The legacy string-list form still works unchanged:
+
+```toml
+[claude]
+marketplaces = ["tsukumogami/shirabe", "repo:tools/.claude-plugin/marketplace.json"]
+plugins = ["shirabe@shirabe"]
+```
+
+The table form adds per-marketplace options:
+
+```toml
+[claude]
+plugins = ["shirabe@shirabe"]
+
+[[claude.marketplaces]]
+source = "tsukumogami/shirabe"
+# auto_update omitted -> false; track omitted -> latest release (github)
+
+[[claude.marketplaces]]
+source = "repo:tools/.claude-plugin/marketplace.json"
+auto_update = true
+```
+
+A bare string is equivalent to a table with that `source` and the
+defaults below.
+
+### `auto_update` (default: `false`)
+
+Whether Claude Code auto-updates the marketplace. **The default is now
+`false`** — previously niwa force-enabled auto-update on every
+marketplace, which churned cached plugin versions and was a contributing
+cause of dangling install records. Set `auto_update = true` per
+marketplace to opt back in. This matches Claude Code's own safer default
+for third-party marketplaces.
+
+### `track` (default: `release` for github sources)
+
+Which version of a github-sourced marketplace to track:
+
+- `release` (default) — niwa resolves the marketplace's latest stable
+  (non-prerelease) release tag.
+- `main` — track the default branch (the prior behavior).
+- an explicit ref/tag — pin to that ref.
+
+Local (`directory` / `repo:`) sources ignore `track`.
+
+> **Known limitation.** Claude Code's github marketplace *source* object
+> currently ignores a ref pin and always clones default-branch HEAD, so
+> a marketplace whose `main` carries an in-development version still
+> installs that `-dev` build today. niwa resolves the release tag and
+> records it best-effort (forward-compatible) and reports when it falls
+> back to the branch, but the effective switch to releases is blocked
+> upstream. Pinning a daily-stable marketplace via a local `repo:`
+> checkout of a release is the current workaround.
+
+### Automatic record healing
+
+On every `niwa create` and `niwa apply`, niwa removes *dangling* Claude
+plugin install records — records whose installed plugin directory or
+project path no longer exists — and reports how many it removed. This
+repairs registries that accumulated stale records over time (a frequent
+cause of skills intermittently failing to register) with no separate
+command. The heal only removes records whose referenced paths are gone;
+it never touches records for live workspaces, backs up the registry
+before the first change, and never fails create/apply on a registry
+error.
