@@ -37,19 +37,23 @@ standalone user value, which is why this is one PR, not several.
 
 ## Issue Outlines
 
-### Issue 1: feat(worktree): add --json output to niwa worktree create
+### Issue 1: feat(worktree): cwd-aware create, --json, and destroy --by-path
 
-**Goal**: Emit the created worktree's absolute path and session id as
-machine-readable JSON so callers don't scrape the human `session: created` line
-(PRD R4).
+**Goal**: Make the human worktree commands the shared core the hook reuses — infer
+the repo from cwd, emit a machine-readable path, and destroy by path (design
+Decisions 1, 2; PRD R4).
 
 **Acceptance Criteria**:
-- [ ] `niwa worktree create --json` prints a stable JSON object containing the
-  absolute worktree path and session id.
-- [ ] Default (non-`--json`) output is unchanged.
-- [ ] Unit test covers the JSON shape.
+- [ ] `niwa worktree create` accepts an optional repo arg; when omitted it infers
+  the repo from the process cwd (via the resolver from Issue 2), and purpose is
+  optional. A bare `niwa worktree create` from inside a repo works.
+- [ ] `niwa worktree create --json` prints a stable JSON object with the absolute
+  worktree path and session id; default (non-`--json`) output is unchanged.
+- [ ] `niwa worktree destroy --by-path <path>` resolves the path to a session and
+  destroys it.
+- [ ] Unit tests cover the JSON shape, cwd-inference, and `--by-path` resolution.
 
-**Dependencies**: None
+**Dependencies**: Blocked by <<ISSUE:2>>
 **Type**: code
 **Files**: `internal/cli/session_lifecycle_cmd.go`
 
@@ -72,16 +76,18 @@ safely (design Solution Architecture; PRD R3).
 
 ### Issue 3: feat(worktree): add `niwa worktree from-hook` (create + remove)
 
-**Goal**: The single hook entry point that routes Claude's WorktreeCreate /
-WorktreeRemove to niwa (design Decisions 1 and 3; PRD R1, R5, R6, R10).
+**Goal**: The thin hook entry, invoked directly by Claude (no shim script), that
+routes Claude's WorktreeCreate / WorktreeRemove to the shared core (design
+Decisions 1 and 3; PRD R1, R5, R6, R10).
 
 **Acceptance Criteria**:
 - [ ] `from-hook` reads the hook JSON on stdin and dispatches on
-  `hook_event_name`.
-- [ ] Create: resolves the repo via the cwd resolver (Issue 2), runs the two-step
-  flow `CreateSession` + `applyContentToWorktree` (secrets + CLAUDE context; R10
-  warn-and-continue surfaced), prints the absolute worktree path to stdout, exits
-  0; resolver failure or any create error exits non-zero.
+  `hook_event_name`; it is invoked directly as `niwa worktree from-hook` (the hook
+  `command` is an absolute-path binary invocation, not a shim script).
+- [ ] Create: resolves the repo from the stdin `cwd` via the resolver (Issue 2),
+  runs the two-step flow `CreateSession` + `applyContentToWorktree` (secrets +
+  CLAUDE context; R10 warn-and-continue surfaced), prints the absolute worktree path
+  to stdout, exits 0; resolver failure or any create error exits non-zero.
 - [ ] Remove: maps the worktree to a niwa session by `WorktreePath`
   (`ListSessionLifecycleStates` scan; Claude `session_id` is not niwa's sid),
   releases the agent's attach lock, attempts `DestroySession(force=false)`, and on
@@ -122,11 +128,10 @@ deny+steer when not — disclosed on every apply (design Decisions 4 and 6; PRD 
 R3, R8, R11, R12).
 
 **Acceptance Criteria**:
-- [ ] `HooksMaterializer` installs the mandatory shim script that invokes
-  `niwa worktree from-hook`.
 - [ ] When the probe (Issue 4) reports supported, `SettingsMaterializer` writes the
   `WorktreeCreate`/`WorktreeRemove` hook entries into each repo's
-  `settings.local.json`.
+  `settings.local.json`, each as an absolute-path `niwa worktree from-hook` command
+  Claude invokes directly (no shim script, no `HooksMaterializer` change).
 - [ ] When unsupported, it instead writes
   `permissions.deny: ["EnterWorktree","ExitWorktree"]` plus steer-to-niwa guidance
   (a new `permissions.deny` capability for the materializer); hook and deny are
@@ -187,12 +192,12 @@ issue graph is rendered (no issues are created in single-pr mode).
 
 ## Implementation Sequence
 
-- **Parallelizable first wave**: Issues 1, 2, and 4 have no dependencies and can be
-  built concurrently (the `--json` output, the cwd resolver, and the version
-  probe).
-- **Critical path**: 1 + 2 → 3 → 5 → 6 → 7. Issue 3 (`from-hook`) needs the
-  resolver and the JSON contract; Issue 5 (apply wiring) needs the subcommand and
-  the probe; Issue 6 (opt-out) gates Issue 5's install block; Issue 7 (functional
+- **Parallelizable first wave**: Issues 2 (cwd resolver) and 4 (version probe) have
+  no dependencies and can be built concurrently.
+- **Critical path**: 2 → 1 → 3 → 5 → 6 → 7. Issue 1 (cwd-aware create / `--json` /
+  `destroy --by-path`) needs the resolver; Issue 3 (`from-hook`) builds on the
+  resolver and the shared core; Issue 5 (apply wiring) needs the subcommand and the
+  probe; Issue 6 (opt-out) gates Issue 5's install block; Issue 7 (functional
   coverage) exercises the full integration including the opt-out.
 - **Riskiest issues** (build with the most care): Issue 3 (teardown data-safety and
   cwd security) and Issue 5 (touches per-repo settings on every apply). Both are

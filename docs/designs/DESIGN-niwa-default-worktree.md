@@ -73,15 +73,24 @@ install. Those are the decisions below.
 
 ### Decision 1 — WorktreeCreate adapter and repo resolution
 
-- **Chosen: a `niwa worktree from-hook` subcommand, invoked by a mandatory thin
-  hook shim.** A Claude Code hook entry can only be a script path, so niwa ships a
-  small shim script (via the `HooksMaterializer`) whose only job is to invoke
-  `niwa worktree from-hook`. The subcommand reads the hook JSON on stdin, resolves
-  the repo via a **new cwd→repo-name resolver** (see Solution Architecture), runs
-  the same two-step flow `niwa worktree create` uses today — `CreateSession`
-  **then** `applyContentToWorktree` (the step that materializes secrets and CLAUDE
-  context and carries R10's warn-and-continue) — and prints the worktree path to
-  stdout.
+- **Chosen: a `niwa worktree from-hook` subcommand, invoked directly by Claude (no
+  shim script).** A Claude Code hook `command` is an arbitrary command string Claude
+  runs with the hook JSON piped to stdin (the docs' own `WorktreeCreate` example is
+  an inline `bash -c`), so niwa writes the hook entry as an absolute-path invocation
+  of its own binary — `"<abs>/niwa worktree from-hook"` — with no separate shim file
+  and no PATH dependency. The subcommand reads the hook JSON on stdin, resolves the
+  repo via a **new cwd→repo-name resolver** (see Solution Architecture), and
+  delegates to the same create/destroy core the human commands use, running the
+  two-step flow `CreateSession` **then** `applyContentToWorktree` (the step that
+  materializes secrets and CLAUDE context and carries R10's warn-and-continue), then
+  prints the worktree path to stdout.
+- **The reusable logic lives on the human commands, not walled off in `from-hook`.**
+  `niwa worktree create` gains cwd-inference (repo arg optional, resolved via the
+  same resolver) and an optional purpose, so a developer can run a bare
+  `niwa worktree create` from inside a repo; `niwa worktree destroy` gains
+  `--by-path`. `from-hook` is a thin entry owning only the hook I/O contract (stdin
+  JSON in, bare path out, non-zero-exit-fails on create, non-blocking on remove),
+  delegating the real work to that shared core.
 - *Alternative: a pure shell hook script* that parses JSON with `jq` and calls
   `niwa worktree create`. Rejected: brittle shell parsing, hard to unit-test,
   command-injection surface from interpolating `name`/`cwd` into shell.
@@ -164,11 +173,12 @@ install. Those are the decisions below.
 
 ### Decision 6 — per-repo install and idempotency (PRD R3, R11)
 
-- **Chosen: install via the existing per-repo materializers.** The
-  `HooksMaterializer` ships the worktree hook script(s); the `SettingsMaterializer`
-  writes the `WorktreeCreate`/`WorktreeRemove` (or `permissions.deny`) entries into
-  each repo's `settings.local.json`. Both already run per repo on every apply and
-  are idempotent.
+- **Chosen: install via the existing per-repo `SettingsMaterializer`.** It writes
+  the `WorktreeCreate`/`WorktreeRemove` hook entries — each an absolute-path
+  `niwa worktree from-hook` command — or the `permissions.deny` entries into each
+  repo's `settings.local.json`. No shim script is shipped (the hook command invokes
+  the niwa binary directly), so no `HooksMaterializer` change is needed. The
+  materializer already runs per repo on every apply and is idempotent.
 - *Alternative: a new bespoke installer.* Rejected: duplicates machinery that
   already exists, runs per-repo, and is idempotent.
 
@@ -179,9 +189,10 @@ that routes Claude Code's native worktree creation through niwa:
 
 1. On `niwa apply`, unless the instance opted out, niwa probes the Claude Code
    version once.
-2. **Supported harness:** the per-repo materializers install a `WorktreeCreate`
-   hook (and `WorktreeRemove` hook) into each repo's `settings.local.json`, wired
-   to `niwa worktree from-hook`.
+2. **Supported harness:** the per-repo `SettingsMaterializer` writes
+   `WorktreeCreate`/`WorktreeRemove` hook entries into each repo's
+   `settings.local.json`, each an absolute-path `niwa worktree from-hook` command
+   Claude invokes directly (no shim script).
 3. **Unsupported harness:** the materializers instead write
    `permissions.deny: ["EnterWorktree","ExitWorktree"]` and steer-to-niwa guidance,
    and niwa emits a one-time fallback notice.
@@ -209,34 +220,40 @@ explicitly redirected — never a silent bare checkout.
   `cwd` (longest-prefix match). A `cwd` that resolves outside every workspace repo
   is rejected. This resolver is the single enforcement point for the security
   section's "reject out-of-workspace cwd" guarantee.
-- **`niwa worktree from-hook`** (new subcommand, `internal/cli`): the single entry
-  point for both hook events. Reads hook JSON on stdin; dispatches on
-  `hook_event_name`.
-  - *Create*: resolve the repo via the cwd→repo-name resolver (reject on no match).
-    Derive a purpose from `name` (control-chars stripped). Run the full two-step
-    flow — `CreateSession` then `applyContentToWorktree` — so the worktree gets its
-    secrets and CLAUDE context (R10's warn-and-continue is surfaced here). Print the
-    absolute worktree path to stdout, exit 0. On error, exit non-zero (Claude fails
-    creation — correct, since a partial worktree is worse than none).
+- **cwd-aware human commands** (extend existing `internal/cli` worktree commands):
+  `niwa worktree create` makes the repo arg optional (inferred from the process cwd
+  via the resolver) and the purpose optional, and gains `--json` (emit worktree path
+  + session id, reusing the `--json` precedent from `niwa worktree list`).
+  `niwa worktree destroy` gains `--by-path <path>` (resolve path→session internally).
+  These are the shared create/destroy core; humans get a bare `niwa worktree create`
+  from inside a repo, and `from-hook` delegates to the same core.
+- **`niwa worktree from-hook`** (new subcommand, `internal/cli`): a thin entry Claude
+  invokes **directly** (the hook `command` is an absolute-path `niwa worktree
+  from-hook`, no shim script). Reads hook JSON on stdin; dispatches on
+  `hook_event_name`; owns only the hook I/O contract and delegates to the core.
+  - *Create*: resolve the repo via the cwd→repo-name resolver from the stdin `cwd`
+    (reject on no match). Derive a purpose from `name` (control-chars stripped). Run
+    the two-step flow — `CreateSession` then `applyContentToWorktree` — so the
+    worktree gets its secrets and CLAUDE context (R10's warn-and-continue surfaced).
+    Print the absolute worktree path to stdout, exit 0. On error, exit non-zero
+    (Claude fails creation — correct, since a partial worktree is worse than none).
   - *Remove*: map the worktree to a niwa session by worktree path (scan
     `ListSessionLifecycleStates()` for the matching `WorktreePath`; Claude's
     `session_id` is not niwa's sid). Release the agent's attach lock, attempt
     `DestroySession(force=false)`, and on a genuine dirty rejection log-and-retain
     rather than force-delete (Decision 3). Always exit 0 (WorktreeRemove is
     non-blocking anyway).
-- **`niwa worktree create --json`** (extend existing command): emit the worktree
-  path (and session id) as JSON, reusing the `--json` precedent from
-  `niwa worktree list`. `from-hook` shares the same internal create path.
 - **Harness probe** (`internal/workspace`, e.g. `harness_compat.go`): run
   `claude --version` once per apply, parse, compare to the baseline; return
   supported/unsupported, optimistic on error.
-- **Materializer changes**: `SettingsMaterializer` emits either the worktree-hook
-  entries or the `permissions.deny` entries based on the probe result.
-  `WorktreeCreate`/`WorktreeRemove` event names ride the existing snake→Pascal hook
-  mapping. Today the materializer writes only `permissions.defaultMode`, so emitting
-  a `permissions.deny` array is a new capability the materializer must gain.
-  `HooksMaterializer` ships the mandatory hook shim script (a hook entry can only be
-  a script path). The whole block is gated off when the instance opted out.
+- **Materializer change**: `SettingsMaterializer` emits either the
+  `WorktreeCreate`/`WorktreeRemove` hook entries (each an absolute-path
+  `niwa worktree from-hook` command) or the `permissions.deny` entries based on the
+  probe result. `WorktreeCreate`/`WorktreeRemove` event names ride the existing
+  snake→Pascal hook mapping. Today the materializer writes only
+  `permissions.defaultMode`, so emitting a `permissions.deny` array is a new
+  capability it must gain. No shim script and no `HooksMaterializer` change are
+  needed. The whole block is gated off when the instance opted out.
 - **Instance-state opt-out**: new `InstanceState` bool set by
   `niwa init --no-worktree-delegation`, read in the apply pipeline.
 - **One-time notice**: a `worktree-fallback` notice key emitted when fallback mode
@@ -246,7 +263,7 @@ explicitly redirected — never a silent bare checkout.
 
 ```
 agent asks for a worktree
-  -> Claude WorktreeCreate hook shim (per-repo settings.local.json)
+  -> Claude WorktreeCreate hook (per-repo settings.local.json: abs-path command)
      -> niwa worktree from-hook  (stdin: session_id, cwd, name)
         -> cwd -> repo name (canonicalized, prefix-match, reject if outside)
         -> CreateSession(repo, purpose)          # worktree + branch + state
@@ -255,7 +272,7 @@ agent asks for a worktree
   -> Claude uses that path as the session working directory
 
 agent/session exits
-  -> Claude WorktreeRemove hook shim
+  -> Claude WorktreeRemove hook (abs-path command)
      -> niwa worktree from-hook (remove)
         -> worktree path -> session (scan WorktreePath)
         -> detach; DestroySession(force=false); dirty -> log-and-retain
@@ -267,18 +284,22 @@ one-time fallback notice on apply.
 
 ## Implementation Approach
 
-1. **`--json` for `niwa worktree create`** — smallest, independently useful;
-   unblocks the adapter's machine-readable contract (R4).
+1. **cwd-aware `niwa worktree create` + `--json` + `destroy --by-path`** — the
+   shared core: optional repo (inferred from cwd via the resolver), optional purpose,
+   machine-readable output (R4), and path-based destroy. Independently useful to
+   humans.
 2. **cwd→repo-name resolver + `niwa worktree from-hook` subcommand** — the
    canonicalizing resolver; create dispatch (resolver → two-step
    `CreateSession` + `applyContentToWorktree` → echo path); remove dispatch
    (path→session by `WorktreePath`, detach, guarded destroy, dirty→log-and-retain).
-   Unit-tested with synthetic hook JSON, including out-of-workspace and symlinked
-   `cwd` rejection.
+   Invoked directly by Claude (no shim). Unit-tested with synthetic hook JSON,
+   including out-of-workspace and symlinked `cwd` rejection.
 3. **Harness probe** — `claude --version` parse + baseline compare, optimistic on
    error.
-4. **Materializer wiring** — emit hook-or-deny per probe; ship the hook shim;
-   one-time fallback notice.
+4. **Materializer wiring** — `SettingsMaterializer` emits hook-or-deny per probe
+   (hook entry = absolute-path `niwa worktree from-hook`; new `permissions.deny`
+   capability); every-apply fallback disclosure + one-time explainer. No shim, no
+   `HooksMaterializer` change.
 5. **Init opt-out** — flag + `InstanceState` field + apply-pipeline gate.
 6. **Functional coverage** — a `@critical` Gherkin scenario exercising the
    create → list → destroy path through the hook, plus the deny path.
