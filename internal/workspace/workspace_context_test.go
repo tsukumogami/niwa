@@ -524,3 +524,125 @@ func TestInstallGlobalClaudeContentMigratesOldImport(t *testing.T) {
 		t.Errorf("old relative global import still present in CLAUDE.md:\n%s", string(claudeData))
 	}
 }
+
+// TestMapMarketplaceSourceAutoUpdateDefaultOff verifies that an unconfigured
+// marketplace (AutoUpdate false) emits autoUpdate: false for both github and
+// local sources.
+func TestMapMarketplaceSourceAutoUpdateDefaultOff(t *testing.T) {
+	// GitHub source.
+	_, entry, err := mapMarketplaceSourceWithIndex("tsukumogami/shirabe", nil, false)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if entry["autoUpdate"] != false {
+		t.Errorf("github autoUpdate = %v, want false", entry["autoUpdate"])
+	}
+
+	// Local source.
+	tmpDir := t.TempDir()
+	repoDir := filepath.Join(tmpDir, "tools")
+	pluginDir := filepath.Join(repoDir, ".claude-plugin")
+	if err := os.MkdirAll(pluginDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pluginDir, "marketplace.json"), []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	repoIndex := map[string]string{"tools": repoDir}
+	_, entry, err = mapMarketplaceSourceWithIndex("repo:tools/.claude-plugin/marketplace.json", repoIndex, false)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if entry["autoUpdate"] != false {
+		t.Errorf("local autoUpdate = %v, want false", entry["autoUpdate"])
+	}
+}
+
+// TestMapMarketplaceSourceAutoUpdateOptedIn verifies that a marketplace with
+// AutoUpdate true emits autoUpdate: true for both github and local sources.
+func TestMapMarketplaceSourceAutoUpdateOptedIn(t *testing.T) {
+	// GitHub source.
+	_, entry, err := mapMarketplaceSourceWithIndex("tsukumogami/shirabe", nil, true)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if entry["autoUpdate"] != true {
+		t.Errorf("github autoUpdate = %v, want true", entry["autoUpdate"])
+	}
+
+	// Local source.
+	tmpDir := t.TempDir()
+	repoDir := filepath.Join(tmpDir, "tools")
+	pluginDir := filepath.Join(repoDir, ".claude-plugin")
+	if err := os.MkdirAll(pluginDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pluginDir, "marketplace.json"), []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	repoIndex := map[string]string{"tools": repoDir}
+	_, entry, err = mapMarketplaceSourceWithIndex("repo:tools/.claude-plugin/marketplace.json", repoIndex, true)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if entry["autoUpdate"] != true {
+		t.Errorf("local autoUpdate = %v, want true", entry["autoUpdate"])
+	}
+}
+
+// TestMapMarketplaceSourceNameKeying verifies that a local marketplace whose
+// manifest declares a name different from its source ref registers under the
+// manifest-declared name (R8).
+func TestMapMarketplaceSourceNameKeying(t *testing.T) {
+	tmpDir := t.TempDir()
+	repoDir := filepath.Join(tmpDir, "tools")
+	pluginDir := filepath.Join(repoDir, ".claude-plugin")
+	if err := os.MkdirAll(pluginDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Manifest declares "tsukumogami" while the source ref is "tools".
+	manifest := `{"name": "tsukumogami"}`
+	if err := os.WriteFile(filepath.Join(pluginDir, "marketplace.json"), []byte(manifest), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	repoIndex := map[string]string{"tools": repoDir}
+
+	name, entry, err := mapMarketplaceSourceWithIndex("repo:tools/.claude-plugin/marketplace.json", repoIndex, false)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if name != "tsukumogami" {
+		t.Errorf("marketplace name = %q, want %q (manifest-declared name)", name, "tsukumogami")
+	}
+	source := entry["source"].(map[string]any)
+	if source["source"] != "directory" {
+		t.Errorf("source type = %v, want directory", source["source"])
+	}
+	if source["path"] != repoDir {
+		t.Errorf("path = %v, want %v", source["path"], repoDir)
+	}
+}
+
+// TestMapMarketplaceSourceNameKeyingFallback verifies that a local marketplace
+// whose manifest cannot supply a name falls back to the repo-ref-derived name.
+func TestMapMarketplaceSourceNameKeyingFallback(t *testing.T) {
+	tmpDir := t.TempDir()
+	repoDir := filepath.Join(tmpDir, "tools")
+	pluginDir := filepath.Join(repoDir, ".claude-plugin")
+	if err := os.MkdirAll(pluginDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Manifest has no name field -> fall back to ref-derived "tools".
+	if err := os.WriteFile(filepath.Join(pluginDir, "marketplace.json"), []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	repoIndex := map[string]string{"tools": repoDir}
+
+	name, _, err := mapMarketplaceSourceWithIndex("repo:tools/.claude-plugin/marketplace.json", repoIndex, false)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if name != "tools" {
+		t.Errorf("marketplace name = %q, want %q (ref-derived fallback)", name, "tools")
+	}
+}

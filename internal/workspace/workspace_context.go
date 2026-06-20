@@ -301,11 +301,40 @@ func InstallGlobalClaudeContent(globalConfigDir, instanceRoot string) ([]string,
 	return []string{destPath}, nil
 }
 
+// readMarketplaceManifestName reads the declared marketplace name from
+// dir/.claude-plugin/marketplace.json. It returns (name, true) when the
+// manifest can be read, parsed, and carries a non-empty "name". It returns
+// ("", false) on any failure (missing/unreadable/malformed manifest or empty
+// name) so callers can fall back to ref-derived keying without crashing.
+func readMarketplaceManifestName(dir string) (string, bool) {
+	manifestPath := filepath.Join(dir, ".claude-plugin", "marketplace.json")
+	data, err := os.ReadFile(manifestPath)
+	if err != nil {
+		return "", false
+	}
+	var manifest struct {
+		Name string `json:"name"`
+	}
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		return "", false
+	}
+	if manifest.Name == "" {
+		return "", false
+	}
+	return manifest.Name, true
+}
+
 // mapMarketplaceSourceWithIndex converts a niwa marketplace source string to the
 // Claude Code extraKnownMarketplaces format. Returns the marketplace name,
 // the entry object, and an error. It accepts a repoIndex for resolving repo:
-// references to absolute directory paths.
-func mapMarketplaceSourceWithIndex(source string, repoIndex map[string]string) (string, map[string]any, error) {
+// references to absolute directory paths, and autoUpdate to emit the configured
+// per-marketplace auto-update policy.
+//
+// For local (repo:/directory) sources the registration key is read from the
+// marketplace's declared name in .claude-plugin/marketplace.json, falling back
+// to the repo-ref-derived name when the manifest cannot be read. For github
+// sources the repo name is used as the key.
+func mapMarketplaceSourceWithIndex(source string, repoIndex map[string]string, autoUpdate bool) (string, map[string]any, error) {
 	if strings.HasPrefix(source, repoRefPrefix) {
 		// repo:tools/.claude-plugin/marketplace.json -> directory source
 		resolved, err := ResolveMarketplaceSource(source, repoIndex)
@@ -316,16 +345,20 @@ func mapMarketplaceSourceWithIndex(source string, repoIndex map[string]string) (
 		// .claude-plugin/marketplace.json. Strip the filename and the
 		// .claude-plugin directory to get the root.
 		dir := filepath.Dir(filepath.Dir(resolved))
-		// Use the repo name as the marketplace name.
+		// Prefer the marketplace's declared name; fall back to the repo name
+		// when the manifest cannot be read.
 		ref := strings.TrimPrefix(source, repoRefPrefix)
 		slashIdx := strings.IndexByte(ref, '/')
 		name := ref[:slashIdx]
+		if declared, ok := readMarketplaceManifestName(dir); ok {
+			name = declared
+		}
 		return name, map[string]any{
 			"source": map[string]any{
 				"source": "directory",
 				"path":   dir,
 			},
-			"autoUpdate": true,
+			"autoUpdate": autoUpdate,
 		}, nil
 	}
 
@@ -338,7 +371,7 @@ func mapMarketplaceSourceWithIndex(source string, repoIndex map[string]string) (
 				"source": "github",
 				"repo":   source,
 			},
-			"autoUpdate": true,
+			"autoUpdate": autoUpdate,
 		}, nil
 	}
 

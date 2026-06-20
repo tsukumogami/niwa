@@ -385,7 +385,7 @@ func buildSettingsDoc(cfg BuildSettingsConfig) (map[string]any, error) {
 		mkts := make(map[string]any, len(cfg.Marketplaces))
 		for _, mc := range cfg.Marketplaces {
 			source := mc.Source
-			name, entry, err := mapMarketplaceSourceWithIndex(source, cfg.RepoIndex)
+			name, entry, err := mapMarketplaceSourceWithIndex(source, cfg.RepoIndex, mc.AutoUpdate)
 			if err != nil {
 				return nil, fmt.Errorf("marketplace %q: %w", source, err)
 			}
