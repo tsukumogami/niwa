@@ -164,6 +164,36 @@ design introduces that interface.
   keying (no observed collision there); reconciling a github clone's
   declared name post-clone is noted as out of scope.
 
+### Decision 6 — Version tracking: which marketplace version to install
+
+- **Track main (status quo).** `{source: github, repo}` with no ref →
+  Claude clones the default branch and installs whatever
+  `marketplace.json` declares at HEAD — an in-development version that
+  turns over on every upstream commit. Rejected as the default; it is
+  the churn source.
+- **Explicit pin only.** A required `version`/`ref` per marketplace.
+  Reproducible but forces a manual bump to ever move forward, and most
+  consumers want "latest stable" not a frozen pin. Rejected as the
+  default; retained as one override mode.
+- **Latest stable release by default, with override (chosen).** niwa
+  resolves the marketplace's highest non-prerelease version tag and
+  registers against it; a per-marketplace setting overrides to the
+  branch or to an explicit ref; a marketplace with no stable release
+  falls back to the branch and reports it. Releases change far less
+  often than main, so version turnover — and the cache churn behind
+  dangling records — drops sharply. This reinforces the record-lifecycle
+  fix rather than sitting beside it.
+
+  *Mechanism is spike-gated.* Resolving the latest stable tag is
+  straightforward (GitHub API, or `git ls-remote --tags --refs` filtered
+  to non-prerelease semver, highest wins). What is unverified is how to
+  express the pin to Claude Code — whether its `known_marketplaces`
+  github source honors a `ref`/`commit` field. The spike confirms the
+  accepted field; the fallback, if no ref is honored, is to register the
+  resolved release in whatever source form Claude accepts, or to record
+  release-tracking as blocked on that capability and ship the override
+  config plus the resolution logic regardless.
+
 ## Decision Outcome
 
 niwa gains a single internal package that owns all registry access and
@@ -171,10 +201,12 @@ encodes the remove-only, re-read-before-write, atomic, backed-up,
 fail-safe discipline once. Three call sites use it: destroy (instance-
 scoped removal), apply (dangling-only sweep), and `niwa plugins prune`
 (explicit recovery, preview by default). Separately, the marketplace
-config becomes an array of tables carrying `auto_update` (default
-false), the two hardcoded `autoUpdate: true` literals become the
-configured value, and local marketplaces register under their manifest-
-declared name.
+config becomes an array of tables carrying `auto_update` (default false)
+and a version-tracking selection (default: latest stable release), the
+two hardcoded `autoUpdate: true` literals become the configured value,
+local marketplaces register under their manifest-declared name, and
+github marketplaces register pinned to their latest stable release
+rather than main.
 
 This works as a whole because every registry mutation flows through one
 audited path with one safety model, and because the mutation is
@@ -253,17 +285,26 @@ Responsibilities and surface:
 
 ### Config and marketplace registration
 
-- `MarketplaceConfig{ Source string; AutoUpdate bool }`;
+- `MarketplaceConfig{ Source string; AutoUpdate bool; Track string }`;
   `ClaudeConfig.Marketplaces` becomes `[]MarketplaceConfig` with a
   custom `UnmarshalTOML` accepting bare strings (legacy) and tables
-  (`internal/config/config.go`, pattern from `env_tables.go`).
+  (`internal/config/config.go`, pattern from `env_tables.go`). `Track`
+  is one of `release` (default, latest stable tag), `main` (default
+  branch), or an explicit version/ref; empty defaults to `release` for
+  github sources and is inert for local sources.
 - Overlay merge (`internal/workspace/override.go:783`) unions on
-  `.Source` (base-wins on conflict, carrying base's policy).
+  `.Source` (base-wins on conflict, carrying base's policy and track).
+- A **version-resolution step** runs at registration for github sources
+  whose effective track is `release`: resolve the highest non-prerelease
+  semver tag (GitHub API, or `git ls-remote --tags --refs`), and on no
+  stable release fall back to the branch and report it (R14, R16).
 - `mapMarketplaceSourceWithIndex`
   (`internal/workspace/workspace_context.go:308-346`) takes the
-  `AutoUpdate` value instead of hardcoding `true`, and for local
+  `AutoUpdate` value instead of hardcoding `true`; for local
   (`directory`/`repo:`) sources reads the manifest `name` for the
-  registration key. `materialize.go:386` iterates the structs.
+  registration key; and for github sources emits the resolved pin
+  (release tag or explicit ref) into the source — exact field gated by
+  the Decision 6 spike. `materialize.go:386` iterates the structs.
 
 ### Data flow (prune)
 
@@ -303,9 +344,16 @@ caller (destroy | apply | plugins prune)
 6. **Auto-update emission + name keying.** `mapMarketplaceSourceWithIndex`
    emits configured `auto_update` (default false) and keys local
    marketplaces by declared name; tests. (R6, R8)
-7. **Functional scenarios.** Gherkin under `test/functional/features/`
+7. **Version-tracking spike + resolution + emission.** Confirm the
+   `known_marketplaces` github-source pin field (Decision 6 spike); add
+   the `Track` field and latest-stable-tag resolution with branch
+   fallback; emit the resolved pin in the github registration; tests for
+   default-release, override-to-branch, explicit-pin, and no-release
+   fallback. (R14-R17)
+8. **Functional scenarios.** Gherkin under `test/functional/features/`
    using `localGitServer`: destroy→records-pruned, apply→dangling-swept,
-   `plugins prune --apply`→recovered. (R13)
+   `plugins prune --apply`→recovered, and a github marketplace
+   registering against its release tag rather than main. (R13)
 
 ## Security Considerations
 
@@ -337,6 +385,14 @@ caller (destroy | apply | plugins prune)
   safety rests on remove-only convergence (a wrongly-classified record
   is a regenerable cache entry Claude Code re-creates), not on the check
   being authoritative.
+- **Supply chain / version resolution.** Tracking the latest stable
+  release pins each github marketplace to a published release tag, which
+  is more reproducible than tracking a moving main branch. Resolution
+  reads tags over the network (GitHub API or `git ls-remote`); niwa
+  trusts the upstream repo's tags as it already trusts the repo itself,
+  and selects non-prerelease semver only, so a `-dev`/`-rc` tag is never
+  silently installed. No new credential is introduced — the existing
+  GH token niwa uses for clone/api is reused.
 - **No secrets.** The registry holds no credentials; the feature reads
   and writes only plugin bookkeeping. No new secret handling.
 - **Preview-by-default.** The explicit recovery command makes no change
@@ -352,6 +408,10 @@ caller (destroy | apply | plugins prune)
 - One audited package owns all registry access and its safety model.
 - Per-marketplace auto-update removes the churn accelerant while staying
   backward-compatible with existing configs.
+- Tracking stable releases instead of main cuts version turnover at its
+  source, which compounds with the auto-update default to sharply reduce
+  the cache churn that produces dangling records — and gives consumers
+  shipped versions instead of in-development builds.
 
 **Negative / costs:**
 

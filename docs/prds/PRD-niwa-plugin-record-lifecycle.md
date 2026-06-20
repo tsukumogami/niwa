@@ -76,6 +76,8 @@ up the records it causes and by not accelerating their decay.
 - A developer who develops a marketplace they also consume can keep it
   stable for daily use, because auto-update is opt-in rather than
   forced.
+- A consumer of a github-sourced marketplace runs its latest stable
+  release by default rather than an in-development build off main.
 - niwa never corrupts the registry file or destroys records it is not
   responsible for.
 
@@ -148,6 +150,20 @@ Non-functional:
   behavior on a malformed registry, using niwa's existing unit and
   functional test harnesses.
 
+Functional (version tracking):
+
+- **R14.** niwa SHALL register each github-sourced marketplace to track
+  its latest stable release by default — the highest non-prerelease
+  version tag — rather than the marketplace's default branch.
+- **R15.** niwa SHALL support a per-marketplace override of the tracked
+  version: latest stable release (default), the default branch (the
+  prior behavior), or an explicit pinned version/ref.
+- **R16.** When a github marketplace has no published stable release,
+  niwa SHALL fall back to the default branch and report that it did so,
+  rather than failing the operation.
+- **R17.** The version-tracking selection SHALL live in the same
+  per-marketplace configuration as the auto-update value (R7).
+
 ## Acceptance Criteria
 
 - [ ] Destroying an instance removes exactly the records whose project
@@ -182,6 +198,13 @@ Non-functional:
       marketplace registration niwa materializes.
 - [ ] A recoverable copy of the prior registry exists after a mutation,
       and restoring it reproduces the pre-mutation registry exactly.
+- [ ] A github marketplace with no version override registers tracking
+      its latest stable (non-prerelease) release, not its default branch.
+- [ ] Overriding a marketplace to the default branch registers it
+      tracking that branch; overriding to an explicit version/ref
+      registers exactly that ref.
+- [ ] A github marketplace with no published stable release registers
+      tracking the default branch and the fallback is reported.
 - [ ] New behavior is covered by unit tests and at least one functional
       (end-to-end) scenario.
 
@@ -225,6 +248,24 @@ These resolve the framing questions the upstream BRIEF deferred.
   track upstream automatically must opt in per marketplace; accepted
   because opting in is explicit and the churn cost of default-on is what
   this feature exists to remove.
+
+- **Track the latest stable release by default, with override (R14-R17).**
+  niwa registers github marketplaces against their main branch today, so
+  it installs in-development versions (e.g. a `-dev` build) that change
+  on every upstream commit. Tracking the latest stable release instead
+  cuts version turnover sharply — which directly reduces the cache churn
+  that produces dangling records — and gives consumers shipped versions.
+  Alternatives: explicit-pin-only (rejected as the default — forces a
+  manual bump to ever move forward, and most consumers want "latest
+  stable" not a frozen pin); default-to-main (rejected — it is the
+  current behavior and the source of the churn); release-only with no
+  override (rejected — a marketplace author consuming their own
+  in-development marketplace still needs a `main` escape hatch). Chosen:
+  default to latest stable release, with per-marketplace overrides for
+  the branch or an explicit ref. One mechanism unknown — whether Claude
+  Code's github marketplace source accepts a pinned ref, or whether niwa
+  must resolve and express it another way — is left to the DESIGN, which
+  may gate it on a spike.
 
 - **The marketplace name-keying fix is in scope (R8).** niwa currently
   keys a marketplace by its source ref rather than its manifest-declared

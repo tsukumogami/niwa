@@ -4,7 +4,7 @@ status: Active
 execution_mode: single-pr
 upstream: docs/designs/DESIGN-niwa-plugin-record-lifecycle.md
 milestone: "niwa plugin record lifecycle"
-issue_count: 8
+issue_count: 9
 ---
 
 # PLAN: niwa plugin record lifecycle
@@ -21,8 +21,9 @@ before implementation begins via /work-on.
 
 Implement the niwa-side fix for Claude plugin-record decay: a registry-
 access package, three pruning surfaces (destroy, apply, `niwa plugins
-prune`), and a per-marketplace `auto_update` config (default off) plus
-the marketplace name-keying fix.
+prune`), a per-marketplace `auto_update` config (default off), the
+marketplace name-keying fix, and per-marketplace version tracking that
+defaults github sources to their latest stable release instead of main.
 
 ## Decomposition Strategy
 
@@ -185,20 +186,47 @@ their manifest-declared name.
 **Type**: code
 **Files**: `internal/workspace/workspace_context.go`, `internal/workspace/materialize.go`, `internal/workspace/workspace_context_test.go`
 
-### Issue 8: test(functional): plugin-record lifecycle scenarios
+### Issue 8: feat(workspace): track latest stable marketplace release
 
-**Goal**: Add Gherkin functional scenarios exercising the three pruning
-surfaces end-to-end with the localGitServer harness.
+**Goal**: Add per-marketplace version tracking — default to the latest
+stable release for github sources, with branch and explicit-ref
+overrides — and resolve/emit the pin.
+
+**Acceptance Criteria**:
+- [ ] First, confirm the `known_marketplaces` github-source pin field
+      Claude Code honors (Decision 6 spike); record the finding and the
+      fallback taken if no ref is honored.
+- [ ] `MarketplaceConfig` gains a `Track` value (`release` default,
+      `main`, or explicit ref); empty defaults to `release` for github
+      sources (R15, R17).
+- [ ] A github marketplace with no override resolves to its highest
+      non-prerelease release tag and registers against it, not main
+      (R14); a marketplace with no stable release falls back to the
+      branch and reports it (R16).
+- [ ] Override to branch and override to explicit ref each register the
+      requested target; unit tests cover all four cases.
+
+**Dependencies**: Blocked by <<ISSUE:7>>
+
+**Type**: code
+**Files**: `internal/config/config.go`, `internal/workspace/workspace_context.go`, `internal/workspace/workspace_context_test.go`
+
+### Issue 9: test(functional): plugin-record lifecycle scenarios
+
+**Goal**: Add Gherkin functional scenarios exercising the pruning
+surfaces and release-tracking end-to-end with the localGitServer harness.
 
 **Acceptance Criteria**:
 - [ ] Scenario: destroy an instance → its records are pruned (R1/R2).
 - [ ] Scenario: `niwa apply` → dangling records are swept (R5).
 - [ ] Scenario: `niwa plugins prune --apply` → an accumulated dangling
       registry is recovered and a backup exists (R3/R11).
+- [ ] Scenario: a github marketplace registers against its release tag
+      rather than main (R14).
 - [ ] Scenarios run offline via `localGitServer` and pass under
       `make test-functional` (R13).
 
-**Dependencies**: Blocked by <<ISSUE:3>>, <<ISSUE:4>>, <<ISSUE:5>>
+**Dependencies**: Blocked by <<ISSUE:3>>, <<ISSUE:4>>, <<ISSUE:5>>, <<ISSUE:8>>
 
 **Type**: test
 **Files**: `test/functional/features/plugin-record-lifecycle.feature`, `test/functional/steps_test.go`
@@ -215,23 +243,26 @@ Single-pr plan — dependencies are captured per outline (the
 Implementation Sequence below; no separate issue-graph diagram is
 rendered for single-pr. The edges are:
 
-- Issue 1 → Issue 2 → {Issue 3, Issue 4, Issue 5} → Issue 8
-- Issue 6 → Issue 7 (independent track)
+- Issue 1 → Issue 2 → {Issue 3, Issue 4, Issue 5} → Issue 9
+- Issue 6 → Issue 7 → Issue 8 → Issue 9 (config / marketplace track)
 
 Roots (no dependencies): Issue 1, Issue 6.
 
 ## Implementation Sequence
 
-**Critical path:** Issue 1 → Issue 2 → {Issue 3, 4, 5} → Issue 8.
+**Critical path:** Issue 1 → Issue 2 → {Issue 3, 4, 5} → Issue 9, with
+the config/marketplace track (Issue 6 → 7 → 8) also feeding Issue 9.
 
 **Parallelization:**
-- The config track (Issue 6 → Issue 7) is independent of the registry
-  track and can proceed in parallel from the start.
+- The config/marketplace track (Issue 6 → Issue 7 → Issue 8) is
+  independent of the registry track and can proceed in parallel from the
+  start. Issue 8 (version tracking) opens with the Decision 6 spike, so
+  start it early to de-risk the pin mechanism.
 - Once Issue 2 lands, Issues 3, 4, and 5 are independent of each other
   and can be built in parallel.
-- Issue 8 (functional scenarios) lands last, after the three pruning
-  surfaces exist; it can additionally cover Issue 7's auto_update path
-  if convenient.
+- Issue 9 (functional scenarios) lands last, after the pruning surfaces
+  and version tracking exist.
 
 **Suggested order for a single PR:** 1, 2, then 3/4/5 (any order), with
-6/7 interleaved wherever convenient, and 8 last.
+6/7/8 interleaved wherever convenient (run the Issue 8 spike early), and
+9 last.

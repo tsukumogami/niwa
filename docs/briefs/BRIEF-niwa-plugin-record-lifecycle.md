@@ -32,6 +32,11 @@ contract, the auto-update default, the name-keying scope, and whether
 per-repo enablement can be reduced) are carried forward to the
 downstream PRD's Decisions and Trade-offs section.
 
+Edited after acceptance to add release-version tracking to scope: niwa
+should track a marketplace's stable releases by default rather than its
+main branch, since tracking main installs in-development versions and
+compounds the cache churn that drives record decay.
+
 ## Problem Statement
 
 Claude Code keeps a global plugin registry at
@@ -50,7 +55,10 @@ tears those instances down without removing the records, and it
 force-enables marketplace auto-update, which keeps cached plugin
 versions turning over so Claude Code's own cache sweep deletes the old
 ones. The records that pointed at those paths and versions are left
-behind as dangling pointers.
+behind as dangling pointers. Compounding this, niwa registers github
+marketplaces to track their main branch, so it installs in-development
+versions that turn over on every upstream commit rather than stable
+releases that change only when a version ships.
 
 The accumulated result is a registry where the overwhelming majority of
 a plugin's records are dead. When a new session resolves that plugin at
@@ -108,6 +116,15 @@ than hand-editing a Claude-owned file, the operator runs a niwa
 operation that detects and retires the dead records, restoring reliable
 registration without manual surgery.
 
+### A developer gets released skills, not in-development builds
+
+A developer relies on a github-sourced marketplace's workflow skills.
+Today niwa tracks the marketplace's main branch, so the developer runs
+whatever in-development version sits at HEAD — with the rough edges and
+the constant version turnover that implies. In the intended outcome,
+niwa tracks the marketplace's latest stable release by default, so the
+developer runs a shipped version and only moves when a new release lands.
+
 ### A marketplace author avoids forced auto-update churn
 
 A developer who maintains a marketplace they also consume is hurt by
@@ -127,6 +144,9 @@ stable for daily use.
   records, so existing damage is repairable without manual file edits.
 - Making marketplace auto-update a configurable choice rather than a
   forced default, so niwa stops accelerating the churn.
+- Tracking a marketplace's stable releases by default instead of its
+  main branch, with a per-marketplace override, so consumers run shipped
+  versions and version turnover drops.
 - Keeping the registry proportional to the workspace instances that
   currently exist.
 
