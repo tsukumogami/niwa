@@ -38,6 +38,24 @@ is coupled to readiness/merge. Driving manually, we deliberately did NOT run the
 cascade so the chain docs stay reviewable in the PR; a documented "implement, stop
 before finalization for review" mode would help.
 
+### F4 — nothing ensured user-facing documentation was updated
+The feature adds/changes user-visible CLI surface (`niwa worktree create` with
+optional repo/purpose + `--json`, `niwa worktree destroy --by-path`, the
+delegation integration, the `niwa init --no-worktree-delegation` opt-out, the
+deny+steer fallback) and the DESIGN itself references `docs/guides/worktree.md`.
+Yet no documentation update happened automatically:
+- `/plan` decomposed into 7 issues with NO documentation issue (Issue 7 was
+  functional tests only). The author of the plan (this run) missed it.
+- `/execute` has no doc-completeness step — it drives issues to merged code and
+  finalizes the chain, but never checks that user-facing docs reflect new
+  user-visible surface.
+- The per-issue coders correctly flagged docs as out-of-scope ("techwriter owns
+  them") and moved on, so the gap fell through every layer.
+Suggestion: either `/plan` should emit a docs issue whenever a plan adds
+user-visible CLI/behavior, or `/execute` should run a docs-coverage check before
+the done-signal (e.g. "new commands/flags appear in a committed guide"). Caught
+only because the author noticed post-execution.
+
 ## Execution findings (niwa code, not /execute friction — already fixed in-PR)
 
 ### R6 gap caught by the functional test (fixed)
