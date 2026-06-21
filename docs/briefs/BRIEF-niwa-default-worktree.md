@@ -1,6 +1,6 @@
 ---
 schema: brief/v1
-status: Accepted
+status: Done
 problem: |
   In a niwa workspace, asking an AI agent to "work in a worktree" can
   silently create two competing worktree systems for one repo: the agent's
@@ -22,7 +22,7 @@ motivating_context: |
 
 ## Status
 
-Accepted
+Done
 
 The downstream PRD owns the requirements; the downstream DESIGN owns the
 delegation mechanism. This brief stops at the developer-facing framing.
