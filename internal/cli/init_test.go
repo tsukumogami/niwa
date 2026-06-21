@@ -126,6 +126,7 @@ func executeInit(t *testing.T, args ...string) error {
 	initSkipGlobal = false
 	initOverlay = ""
 	initNoOverlay = false
+	initNoWorktreeDelegation = false
 	initRebind = false
 	initBootstrap = false
 	initNoBootstrap = false
@@ -418,6 +419,103 @@ func TestRunInit_NoOverlayWritesState(t *testing.T) {
 	}
 	if state.OverlayURL != "" {
 		t.Errorf("OverlayURL = %q, want empty for --no-overlay", state.OverlayURL)
+	}
+}
+
+// TestRunInit_NoWorktreeDelegationWritesState mirrors
+// TestRunInit_NoOverlayWritesState: with --no-worktree-delegation set,
+// buildInitState records NoWorktreeDelegation=true on the returned state.
+func TestRunInit_NoWorktreeDelegationWritesState(t *testing.T) {
+	dir := t.TempDir()
+	origDir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chdir(origDir) })
+
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, "xdg"))
+
+	// Scaffold first so workspace.toml exists.
+	if err := executeInit(t); err != nil {
+		t.Fatalf("scaffold init failed: %v", err)
+	}
+
+	// Reset flags: only --no-worktree-delegation is set.
+	initNoWorktreeDelegation = true
+	initNoOverlay = false
+	initOverlay = ""
+	initSkipGlobal = false
+	t.Cleanup(func() {
+		initNoWorktreeDelegation = false
+	})
+
+	state, err := buildInitState(initCmd, modeScaffold, "", "")
+	if err != nil {
+		t.Fatalf("buildInitState returned unexpected error: %v", err)
+	}
+	if state == nil {
+		t.Fatal("buildInitState returned nil with --no-worktree-delegation set")
+	}
+	if !state.NoWorktreeDelegation {
+		t.Error("NoWorktreeDelegation = false, want true")
+	}
+}
+
+// TestBuildInitState_NoWorktreeDelegationReversal verifies the opt-out is
+// reversible: re-running init WITHOUT the flag clears the field, so the next
+// apply re-installs the integration. buildInitState writes
+// NoWorktreeDelegation unconditionally from the flag var (mirroring SkipGlobal),
+// so a re-init with the flag absent yields a state with the field cleared.
+func TestBuildInitState_NoWorktreeDelegationReversal(t *testing.T) {
+	dir := t.TempDir()
+	origDir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chdir(origDir) })
+
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, "xdg"))
+
+	if err := executeInit(t); err != nil {
+		t.Fatalf("scaffold init failed: %v", err)
+	}
+
+	// First init: opt-out set.
+	initNoWorktreeDelegation = true
+	initNoOverlay = false
+	initOverlay = ""
+	initSkipGlobal = false
+	t.Cleanup(func() {
+		initNoWorktreeDelegation = false
+	})
+
+	first, err := buildInitState(initCmd, modeScaffold, "", "")
+	if err != nil {
+		t.Fatalf("first buildInitState error: %v", err)
+	}
+	if first == nil || !first.NoWorktreeDelegation {
+		t.Fatal("first init: expected NoWorktreeDelegation=true")
+	}
+
+	// Re-init WITHOUT the flag. Because a positional name is still passed the
+	// state is written, and the field must come back false.
+	initNoWorktreeDelegation = false
+
+	second, err := buildInitState(initCmd, modeScaffold, "", "reinit-name")
+	if err != nil {
+		t.Fatalf("second buildInitState error: %v", err)
+	}
+	if second == nil {
+		t.Fatal("second init: expected non-nil state")
+	}
+	if second.NoWorktreeDelegation {
+		t.Error("second init: NoWorktreeDelegation = true, want false after re-init without flag")
 	}
 }
 

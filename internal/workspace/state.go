@@ -98,6 +98,13 @@ type InstanceState struct {
 	OverlayURL     string  `json:"overlay_url,omitempty"`
 	NoOverlay      bool    `json:"no_overlay,omitempty"`
 	OverlayCommit  string  `json:"overlay_commit,omitempty"`
+	// NoWorktreeDelegation records the `niwa init --no-worktree-delegation`
+	// opt-out. When true, the apply pipeline skips the entire
+	// worktree-delegation integration (no probe, no hook, no deny). Mirrors
+	// SkipGlobal / NoOverlay: written at init time and read on every apply.
+	// omitempty keeps the field invisible to old binaries reading new state
+	// files.
+	NoWorktreeDelegation bool `json:"no_worktree_delegation,omitempty"`
 	// ConfigNameOverride records an explicit workspace name supplied to
 	// `niwa init <name>` when it differs from (or stands in for) the
 	// cloned config's `[workspace] name`. Apply.Create / Apply.Apply

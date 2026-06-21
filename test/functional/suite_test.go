@@ -32,6 +32,12 @@ type testState struct {
 	gitServer     *localGitServer    // local bare-repo server for offline clone tests
 	repoURLs      map[string]string  // name → file:// URL for repos created by localGitServer
 	githubFake    *tarballFakeServer // GitHub API fake (per-scenario; spawned lazily)
+	pathPrefix    string             // dir prepended to $PATH for niwa subprocesses (e.g. a fake claude)
+
+	// printedWorktreePath records the stdout of the last `niwa worktree
+	// from-hook` create dispatch (the bare absolute worktree path the hook
+	// prints back to Claude), so a later step can assert it exists / is gone.
+	printedWorktreePath string
 
 	// Session scenario state. Carry session lifecycle state between steps
 	// in a single scenario; zeroed per the Before hook's fresh allocation.
@@ -300,6 +306,10 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 	// --- plugin-record lifecycle: destroy prune, create/update heal,
 	// release-tracking (Issue 8) ---
 	registerPluginRecordSteps(ctx)
+
+	// --- worktree-delegation integration: from-hook create/remove + the
+	// supported/deny/opt-out install branches (deterministic via a fake claude) ---
+	registerWorktreeDelegationSteps(ctx)
 
 	// --- Init-bootstrap harness extensions (Issue 5) ---
 	// GitHub tarball fake — spun up lazily per scenario; backed by the

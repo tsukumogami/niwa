@@ -43,18 +43,24 @@ exist and be active.`,
 }
 
 var sessionCreateCmd = &cobra.Command{
-	Use:   "create <repo> <purpose>",
+	Use:   "create [repo] [purpose]",
 	Short: "Create a new git worktree for a repo",
 	Long: `Create a new git worktree for a repo.
 
 Scaffolds a git worktree under .niwa/worktrees/<repo>-<session-id>/ and
 writes the worktree lifecycle state.
 
-On success the shell wrapper navigates to the new worktree directory.`,
+Both arguments are optional. When <repo> is omitted, it is inferred from the
+process working directory (the repo whose checkout contains the cwd). When
+<purpose> is omitted, a generic "session" purpose is used.
+
+On success the shell wrapper navigates to the new worktree directory. Pass
+--json to print a stable JSON object with the worktree path and session id
+instead of the human-readable summary.`,
 	// We don't use cobra.ExactArgs because its default error exits 1 with a
-	// generic "accepts 2 arg(s), received 0" message. RunE validates arg count
-	// itself and returns an *sessionattach.ExitCodeError with Code=2 plus a
-	// usage string naming <repo> and <purpose>.
+	// generic message. RunE validates arg count itself and returns an
+	// *sessionattach.ExitCodeError with Code=2 on overflow. Both positionals
+	// are optional: a bare `niwa worktree create` infers the repo from cwd.
 	Args:              cobra.MaximumNArgs(2),
 	ValidArgsFunction: completeSessionCreateArgs,
 	RunE:              runSessionCreate,
@@ -66,6 +72,9 @@ var sessionDestroyCmd = &cobra.Command{
 	Long: `Destroy a worktree: mark its lifecycle state ended, remove the working
 directory, and delete the worktree branch (only if already merged; use
 --force to delete regardless).
+
+Identify the worktree either by <session-id> or by --by-path <path>, which
+resolves a worktree directory to its owning session before destroying it.
 
 Refuses to destroy a worktree that holds uncommitted changes unless --force
 is passed (the worktree analog of the instance-level uncommitted-work guard).`,
@@ -93,17 +102,41 @@ func completeSessionCreateArgs(cmd *cobra.Command, args []string, toComplete str
 	}
 }
 
-var sessionDestroyForce bool
+var (
+	sessionDestroyForce  bool
+	sessionDestroyByPath string
+	sessionCreateJSON    bool
+)
+
+// defaultSessionPurpose is used when `niwa worktree create` is run without an
+// explicit <purpose>. It mirrors the create-flow's existing freeform purpose
+// field; a generic value keeps a bare invocation working without prompting.
+const defaultSessionPurpose = "session"
 
 func init() {
 	sessionDestroyCmd.Flags().BoolVar(&sessionDestroyForce, "force", false, "Destroy even with uncommitted changes, and delete the branch regardless of merge status")
+	sessionDestroyCmd.Flags().StringVar(&sessionDestroyByPath, "by-path", "", "Resolve the worktree at this path to its session and destroy it (instead of passing a session id)")
+	sessionCreateCmd.Flags().BoolVar(&sessionCreateJSON, "json", false, "Print a JSON object with the worktree path and session id instead of the human-readable summary")
+}
+
+// sessionCreateJSONOutput is the stable wire shape emitted by
+// `niwa worktree create --json`. It is deliberately minimal and additive: the
+// absolute worktree path and the niwa session id are the two fields the hook
+// integration (and any scripting caller) depends on. Additional fields may be
+// appended later without breaking consumers that read these two keys.
+type sessionCreateJSONOutput struct {
+	SessionID    string `json:"session_id"`
+	WorktreePath string `json:"worktree_path"`
+	Repo         string `json:"repo"`
+	Purpose      string `json:"purpose"`
+	Branch       string `json:"branch"`
 }
 
 func runSessionCreate(cmd *cobra.Command, args []string) error {
-	if len(args) != 2 {
+	if len(args) > 2 {
 		return &sessionattach.ExitCodeError{
 			Code: 2,
-			Msg: "niwa: usage: niwa worktree create <repo> <purpose>. " +
+			Msg: "niwa: usage: niwa worktree create [repo] [purpose]. " +
 				"Run `niwa worktree create --help` for details.",
 		}
 	}
@@ -111,8 +144,35 @@ func runSessionCreate(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	repo := args[0]
-	purpose := args[1]
+
+	// <repo> is optional: when omitted, infer it from the process working
+	// directory (the repo whose checkout contains cwd). The resolver is the
+	// security boundary — a cwd outside every workspace repo is rejected, so a
+	// bare create cannot fabricate an arbitrary repo name.
+	var repo string
+	if len(args) >= 1 {
+		repo = args[0]
+	} else {
+		cwd, err := os.Getwd()
+		if err != nil {
+			return fmt.Errorf("niwa: error: getting working directory: %w", err)
+		}
+		repo, err = workspace.ResolveRepoNameFromCwd(instanceRoot, cwd)
+		if err != nil {
+			return &sessionattach.ExitCodeError{
+				Code: 2,
+				Msg: fmt.Sprintf("niwa: error: could not infer repo from working directory: %v. "+
+					"Pass the repo explicitly: niwa worktree create <repo> [purpose].", err),
+			}
+		}
+	}
+
+	// <purpose> is optional: a bare create uses a generic purpose so the flow
+	// (which carries purpose into the worktree-context layer) still has a value.
+	purpose := defaultSessionPurpose
+	if len(args) >= 2 {
+		purpose = args[1]
+	}
 
 	sessionID, worktreePath, branch, err := worktree.CreateSession(context.Background(), worktree.CreateSessionParams{
 		InstanceRoot: instanceRoot,
@@ -138,11 +198,29 @@ func runSessionCreate(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("niwa: error: installing content into worktree %s (the worktree exists; re-sync it later): %w", sessionID, err)
 	}
 
-	// Issue 10: success summary on stdout so callers can pipe it.
-	// Landing-path delivery uses NIWA_RESPONSE_FILE separately; the
-	// shell wrapper's stdout-cd target is unaffected.
-	fmt.Fprintf(cmd.OutOrStdout(), "session: created %s at %s\n", sessionID, worktreePath)
-	printWorktreeContentFiles(cmd, written)
+	// --json mode emits a single stable object and suppresses the human
+	// summary / content-file lines. The landing-path side effects below still
+	// run so the shell wrapper's cd target works identically in both modes.
+	if sessionCreateJSON {
+		out := sessionCreateJSONOutput{
+			SessionID:    sessionID,
+			WorktreePath: worktreePath,
+			Repo:         repo,
+			Purpose:      purpose,
+			Branch:       branch,
+		}
+		data, err := json.MarshalIndent(out, "", "  ")
+		if err != nil {
+			return fmt.Errorf("niwa: error: marshaling create output: %w", err)
+		}
+		fmt.Fprintln(cmd.OutOrStdout(), string(data))
+	} else {
+		// Issue 10: success summary on stdout so callers can pipe it.
+		// Landing-path delivery uses NIWA_RESPONSE_FILE separately; the
+		// shell wrapper's stdout-cd target is unaffected.
+		fmt.Fprintf(cmd.OutOrStdout(), "session: created %s at %s\n", sessionID, worktreePath)
+		printWorktreeContentFiles(cmd, written)
+	}
 
 	if err := validateLandingPath(worktreePath); err != nil {
 		return err
@@ -150,7 +228,9 @@ func runSessionCreate(cmd *cobra.Command, args []string) error {
 	if err := writeLandingPath(worktreePath); err != nil {
 		return err
 	}
-	hintShellInit(cmd)
+	if !sessionCreateJSON {
+		hintShellInit(cmd)
+	}
 	return nil
 }
 
@@ -373,8 +453,73 @@ func mergeWorktreeOverlay(cfg *config.WorkspaceConfig, instanceRoot string) (*co
 	return merged, overlayDir, nil
 }
 
+// resolveSessionIDByPath scans the instance's session lifecycle states for the
+// one whose WorktreePath matches wantPath, returning its session id. It is the
+// reverse lookup `niwa worktree destroy --by-path` (and the from-hook remove
+// path) need: a worktree directory -> its owning niwa session.
+//
+// Both the requested path and each recorded WorktreePath are canonicalized
+// (EvalSymlinks + Clean) before comparison, so a path passed with `..`
+// components, a trailing slash, or through a symlink still matches the session
+// that owns the same on-disk directory. A recorded path that no longer exists
+// on disk falls back to a lexical Clean so an already-removed worktree's
+// session can still be resolved (e.g. when destroy is retried).
+//
+// Terminal sessions (ended/abandoned) are skipped: their worktree directory is
+// gone, and matching one would attempt to destroy an already-destroyed session.
+// An unmatched path is an explicit, actionable error (exit code 1).
+func resolveSessionIDByPath(instanceRoot, wantPath string) (string, error) {
+	sessionsDir := filepath.Join(instanceRoot, ".niwa", "sessions")
+	states, err := worktree.ListSessionLifecycleStates(sessionsDir)
+	if err != nil {
+		return "", fmt.Errorf("niwa: error: listing sessions: %w", err)
+	}
+
+	wantCanon := canonicalizeWorktreePath(wantPath)
+	for _, st := range states {
+		if st.WorktreePath == "" {
+			continue
+		}
+		if st.Status == worktree.SessionStatusEnded || st.Status == worktree.SessionStatusAbandoned {
+			continue
+		}
+		if canonicalizeWorktreePath(st.WorktreePath) == wantCanon {
+			return st.SessionID, nil
+		}
+	}
+
+	return "", &sessionattach.ExitCodeError{
+		Code: 1,
+		Msg: fmt.Sprintf("niwa: error: no active worktree found at path %q. "+
+			"Run `niwa worktree list` to see worktrees and their paths.", wantPath),
+	}
+}
+
+// canonicalizeWorktreePath resolves symlinks and cleans path for comparison.
+// When the path does not exist on disk (EvalSymlinks fails), it falls back to
+// the absolute, lexically-cleaned form so an already-removed worktree still
+// compares equal to the same lexical path recorded in its session state.
+func canonicalizeWorktreePath(path string) string {
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		return filepath.Clean(resolved)
+	}
+	if abs, err := filepath.Abs(path); err == nil {
+		return filepath.Clean(abs)
+	}
+	return filepath.Clean(path)
+}
+
 func runSessionDestroy(cmd *cobra.Command, args []string) error {
-	if len(args) != 1 {
+	// Exactly one identifier is required: either a positional <session-id> OR
+	// --by-path <path>, but not both and not neither.
+	if sessionDestroyByPath != "" && len(args) >= 1 {
+		return &sessionattach.ExitCodeError{
+			Code: 2,
+			Msg: "niwa: usage: niwa worktree destroy takes either <session-id> or --by-path <path>, not both. " +
+				"Run `niwa worktree list` to discover existing worktrees.",
+		}
+	}
+	if sessionDestroyByPath == "" && len(args) != 1 {
 		return &sessionattach.ExitCodeError{
 			Code: 2,
 			Msg: "niwa: usage: niwa worktree destroy <session-id> [--force]. " +
@@ -385,7 +530,16 @@ func runSessionDestroy(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	sessionID := args[0]
+
+	var sessionID string
+	if sessionDestroyByPath != "" {
+		sessionID, err = resolveSessionIDByPath(instanceRoot, sessionDestroyByPath)
+		if err != nil {
+			return err
+		}
+	} else {
+		sessionID = args[0]
+	}
 
 	state, err := worktree.DestroySession(context.Background(), instanceRoot, sessionID, sessionDestroyForce, worktree.StdGitInvoker{})
 	if err != nil {

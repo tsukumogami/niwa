@@ -53,6 +53,9 @@ type repoMaterializeInputs struct {
 	// GlobalEnvOutput is the resolved personal/global secret-output target
 	// declaration. Empty when no global override is loaded on this path.
 	GlobalEnvOutput config.OutputTargets
+	// WorktreeDelegation carries the apply-time worktree-integration decision
+	// (probe result + niwa absolute path). nil installs neither hook nor deny.
+	WorktreeDelegation *WorktreeDelegation
 }
 
 // runRepoMaterializers runs the given materializers for a single repo against
@@ -112,6 +115,7 @@ func runRepoMaterializers(materializers []Materializer, in repoMaterializeInputs
 
 		GlobalEnvExamplePolicy: in.GlobalEnvExamplePolicy,
 		GlobalEnvOutput:        in.GlobalEnvOutput,
+		WorktreeDelegation:     in.WorktreeDelegation,
 	}
 
 	var written []string
@@ -268,7 +272,17 @@ func ApplyToWorktree(cfg *config.WorkspaceConfig, configDir, instanceRoot, workt
 	// they stay invisible to the worktree's git status, matching the instance
 	// apply path's end state. The materializer already established coverage
 	// before writing; this re-asserts the full set idempotently.
-	if err := gitexclude.EnsureRepoExclude(worktreePath, envOutputs...); err != nil {
+	//
+	// worktreeRulesFile (.claude/rules/worktree-imports.md) is the one
+	// niwa-authored worktree file under .claude/ whose name carries no ".local"
+	// infix, so the base "*.local*" pattern does not cover it. Without explicit
+	// coverage a freshly created worktree reads dirty to `git status
+	// --porcelain`, which makes the non-force from-hook teardown log-and-retain
+	// every delegated worktree (orphan accumulation). It is added here as an
+	// extra pattern — scoped to this exact path rather than widening the global
+	// niwaExcludePatterns — so genuine user-authored .claude/ files still show.
+	excludeExtras := append([]string{worktreeRulesFile}, envOutputs...)
+	if err := gitexclude.EnsureRepoExclude(worktreePath, excludeExtras...); err != nil {
 		return nil, fmt.Errorf("recording git exclude coverage for worktree %s: %w", repo, err)
 	}
 

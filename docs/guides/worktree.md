@@ -11,7 +11,7 @@ niwa manages worktrees through the `niwa worktree` command group. The legacy
 
 ## What a worktree gives you
 
-When you run `niwa worktree create <repo> <purpose>`, niwa:
+When you run `niwa worktree create [repo] [purpose]`, niwa:
 
 1. Creates a git branch `session/<id>` from the current HEAD of the repo.
 2. Adds a git worktree at `<instance>/.niwa/worktrees/<repo>-<id>/`.
@@ -41,7 +41,7 @@ directory, and its own CLAUDE content.
 ## Lifecycle
 
 ```
-niwa worktree create <repo> <purpose>
+niwa worktree create [repo] [purpose]
          |
          v
     [status: active]
@@ -101,6 +101,81 @@ becomes `ended`, and the state file stays on disk so `niwa worktree list
 > `.niwa/sessions/`, the on-disk schema is `SessionLifecycleState`, and the
 > identifier is still called a session id in JSON output. The user-facing
 > concept is the worktree.
+
+## Default worktree delegation for Claude Code
+
+In a niwa workspace, `niwa apply` makes niwa the default worktree mechanism for
+Claude Code agents. When an agent creates a worktree — whether you ask it to
+"work in a worktree" or it spins up an isolated sub-task — that worktree becomes
+a full niwa worktree, with the same secrets and CLAUDE context a real checkout
+gets, listed and tracked like any worktree you create by hand. You don't run a
+command; it happens through hooks niwa installs.
+
+This is on by default. There's nothing to set up per developer.
+
+### How it works
+
+Every `niwa apply` writes per-repo `WorktreeCreate` and `WorktreeRemove` hooks
+into each repo's Claude Code settings. The hooks call an internal command,
+`niwa worktree from-hook`, which is wired only for Claude to invoke — don't run
+it yourself. On create, it routes the agent's request through the same
+create flow `niwa worktree create` uses and hands the worktree path back to the
+agent as its working directory. On teardown, it reconciles the worktree with
+niwa's lifecycle so nothing is left orphaned.
+
+When the agent's worktree is created, the same content install that backs
+`niwa worktree create` runs. If a secret can't be resolved (a transient vault
+outage, say), creation continues and the missing secret is reported on stderr
+rather than failing silently.
+
+### Teardown: clean vs. dirty
+
+When an agent finishes and its worktree teardown fires:
+
+- A **clean** worktree (no uncommitted work) is destroyed and removed, the same
+  as a guarded `niwa worktree destroy`.
+- A worktree with **uncommitted changes** is retained, not deleted. niwa logs a
+  notice naming the session and leaves the work for you. Reclaim it once you've
+  reviewed it:
+
+  ```bash
+  niwa worktree destroy <id> --force
+  ```
+
+  The session record persists, so the worktree still shows up in
+  `niwa worktree list` — it's a surfaced orphan you can act on, never a silent
+  delete.
+
+### Fallback on an older harness
+
+The hooks need a Claude Code version that supports per-repo worktree hooks. On
+each apply, niwa runs `claude --version` once to check. Above the known-good
+baseline, it installs the hooks. Below it, niwa can't honor the integration, so
+instead of letting the agent make a degraded bare worktree it denies the native
+worktree tool and steers the agent to `niwa worktree create`.
+
+This fallback is disclosed, not silent. Because an old harness stays old across
+applies, niwa prints the fallback warning on **every** apply, with a one-time
+explainer the first time it kicks in. If you see it, run `niwa worktree create`
+to get a managed worktree.
+
+If `claude` isn't on your PATH or the probe can't read a version, niwa assumes
+the harness is supported and installs the hooks — it won't deny the tool on a
+guess.
+
+### Opting out
+
+To keep Claude Code's built-in worktree behavior instead, opt the instance out
+at init:
+
+```bash
+niwa init <name> --no-worktree-delegation
+```
+
+This skips the whole integration — no probe, no hooks, no deny fallback. It's
+persisted in instance state, like `--skip-global` and `--no-overlay`, and
+carried forward on every apply. It's reversible: re-run `niwa init` without the
+flag, then `niwa apply`, and the integration installs again.
 
 ## Customizing the worktree content layer
 
@@ -163,14 +238,27 @@ git branch --list 'session/*' # list all worktree branches
 
 ## Command reference
 
-### `niwa worktree create <repo> <purpose>`
+### `niwa worktree create [repo] [purpose]`
 
-Creates a worktree for the named repo: scaffolds the worktree on a new branch,
+Creates a worktree for a repo: scaffolds the worktree on a new branch,
 installs the repo's CLAUDE content plus the worktree rules import and the
 purpose/branch layer, runs worktree hooks, and writes the state file.
 
+Both positionals are optional.
+
+- **`repo`** — when omitted, niwa infers it from your current directory: the
+  repo whose checkout contains your working directory. A bare
+  `niwa worktree create` run from inside a workspace repo just works. If your
+  directory isn't inside any workspace repo, niwa exits with code 2 and tells
+  you to pass the repo explicitly.
+- **`purpose`** — when omitted, niwa uses a generic `session` purpose. Supply a
+  description when you want the worktree's CLAUDE.local.md layer and the
+  `niwa worktree list` PURPOSE column to say what the worktree is for.
+
 ```bash
 niwa worktree create niwa "implement the worktree apply command"
+niwa worktree create niwa            # repo named, generic purpose
+niwa worktree create                 # repo inferred from cwd, generic purpose
 ```
 
 On success niwa prints the created id and worktree path, lists the content
@@ -180,6 +268,31 @@ the worktree.
 If content installation fails after the worktree is created, niwa reports the
 error but leaves the worktree in place — you can re-sync it with
 `niwa worktree apply`.
+
+#### Machine-readable output: `--json`
+
+Pass `--json` to emit a single JSON object instead of the human summary and
+content-file lines. Use it when a script needs the worktree path or session id
+without scraping prose:
+
+```bash
+niwa worktree create niwa "spike" --json
+```
+
+```json
+{
+  "session_id": "ab12cd34",
+  "worktree_path": "/abs/path/to/.niwa/worktrees/niwa-ab12cd34",
+  "repo": "niwa",
+  "purpose": "spike",
+  "branch": "session/ab12cd34"
+}
+```
+
+The `worktree_path` and `session_id` fields are stable; more fields may be
+added later without breaking callers that read these. The shell-integration
+landing behavior is unchanged in `--json` mode — your shell still lands in the
+new worktree.
 
 ### `niwa worktree apply <id>`
 
@@ -206,6 +319,21 @@ when it's already merged (use `--force` to delete regardless).
 niwa worktree destroy ab12cd34
 niwa worktree destroy ab12cd34 --force
 ```
+
+Identify the worktree by session id or by path. `--by-path <path>` resolves a
+worktree directory to its owning session, then destroys it — useful when you
+have the path but not the id (a script holding the `--json` output's
+`worktree_path`, say):
+
+```bash
+niwa worktree destroy --by-path /abs/path/to/.niwa/worktrees/niwa-ab12cd34
+```
+
+Pass exactly one identifier: a session id or `--by-path`, not both and not
+neither. The path is canonicalized (symlinks resolved, `..` and trailing
+slashes normalized) before the lookup, so it matches regardless of how it's
+spelled. If no active worktree owns the path, niwa exits with code 1 and points
+you at `niwa worktree list`.
 
 Two guards protect uncommitted or in-use work:
 

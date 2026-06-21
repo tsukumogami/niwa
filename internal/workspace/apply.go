@@ -181,6 +181,26 @@ const noticeProviderShadow = "provider-shadow"
 // recorded in DisclosedNotices and suppressed on subsequent runs.
 const noticeConfigConverted = "config-converted-to-snapshot"
 
+// noticeWorktreeFallback is the one-time first-encounter explainer key for the
+// worktree-delegation deny fallback. It fires once per workspace instance,
+// pointing developers at `niwa worktree create`. It is DISTINCT from the
+// every-apply current-state warning: per docs/guides/one-time-notices.md, the
+// "harness does not support worktree hooks" fact is a current-state condition
+// surfaced on every apply, while this explainer is the one-time orientation.
+const noticeWorktreeFallback = "worktree-fallback"
+
+// worktreeFallbackWarning is the every-apply current-state message shown when
+// the harness does not support per-repo worktree hooks and niwa installs the
+// permissions.deny fallback instead. It surfaces on EVERY apply (not via a
+// one-time notice) because an unsupported harness stays unsupported across
+// applies — a current-state condition, not a first-encounter fact.
+const worktreeFallbackWarning = "worktree delegation unavailable: this Claude Code harness does not support per-repo worktree hooks; niwa denied native worktree creation. Use `niwa worktree create` instead."
+
+// worktreeFallbackExplainer is the one-time first-encounter orientation shown
+// alongside the every-apply warning the first time the deny fallback is
+// installed for a workspace instance.
+const worktreeFallbackExplainer = "note: agent-initiated worktree creation is disabled on this harness. Run `niwa worktree create` to get a niwa-managed worktree with secrets and CLAUDE context."
+
 // cloneWorkers is the maximum number of repos cloned concurrently.
 const cloneWorkers = 8
 
@@ -206,12 +226,13 @@ type cloneResult struct {
 
 // pipelineOpts configures shared pipeline behavior for Create vs Apply.
 type pipelineOpts struct {
-	existingState    *InstanceState
-	skipGlobal       bool
-	overlayURL       string   // from InstanceState.OverlayURL (empty = no overlay URL in state)
-	noOverlay        bool     // from InstanceState.NoOverlay
-	configSourceURL  string   // original source URL for convention overlay discovery
-	disclosedNotices []string // workspace-root-level notices already shown to the user
+	existingState        *InstanceState
+	skipGlobal           bool
+	overlayURL           string   // from InstanceState.OverlayURL (empty = no overlay URL in state)
+	noOverlay            bool     // from InstanceState.NoOverlay
+	noWorktreeDelegation bool     // from InstanceState.NoWorktreeDelegation
+	configSourceURL      string   // original source URL for convention overlay discovery
+	disclosedNotices     []string // workspace-root-level notices already shown to the user
 }
 
 // pipelineResult holds the outputs of the shared pipeline.
@@ -293,21 +314,24 @@ func (a *Applier) Create(ctx context.Context, cfg *config.WorkspaceConfig, confi
 	var initOverlayURL string
 	var initNoOverlay bool
 	var initSkipGlobal bool
+	var initNoWorktreeDelegation bool
 	var initDisclosedNotices []string
 	if initState != nil {
 		initOverlayURL = initState.OverlayURL
 		initNoOverlay = initState.NoOverlay
 		initSkipGlobal = initState.SkipGlobal
+		initNoWorktreeDelegation = initState.NoWorktreeDelegation
 		initDisclosedNotices = initState.DisclosedNotices
 	}
 
 	result, err := a.runPipeline(ctx, cfg, configDir, instanceRoot, now, &pipelineOpts{
-		existingState:    nil,
-		overlayURL:       initOverlayURL,
-		noOverlay:        initNoOverlay,
-		skipGlobal:       initSkipGlobal,
-		configSourceURL:  a.ConfigSourceURL,
-		disclosedNotices: initDisclosedNotices,
+		existingState:        nil,
+		overlayURL:           initOverlayURL,
+		noOverlay:            initNoOverlay,
+		skipGlobal:           initSkipGlobal,
+		noWorktreeDelegation: initNoWorktreeDelegation,
+		configSourceURL:      a.ConfigSourceURL,
+		disclosedNotices:     initDisclosedNotices,
 	})
 	if err != nil {
 		_ = os.RemoveAll(instanceRoot)
@@ -434,12 +458,13 @@ func (a *Applier) Apply(ctx context.Context, cfg *config.WorkspaceConfig, config
 	}
 
 	result, err := a.runPipeline(ctx, cfg, configDir, instanceRoot, now, &pipelineOpts{
-		existingState:    existingState,
-		skipGlobal:       existingState.SkipGlobal,
-		overlayURL:       existingState.OverlayURL,
-		noOverlay:        existingState.NoOverlay,
-		configSourceURL:  a.ConfigSourceURL,
-		disclosedNotices: wsDisclosedNotices,
+		existingState:        existingState,
+		skipGlobal:           existingState.SkipGlobal,
+		overlayURL:           existingState.OverlayURL,
+		noOverlay:            existingState.NoOverlay,
+		noWorktreeDelegation: existingState.NoWorktreeDelegation,
+		configSourceURL:      a.ConfigSourceURL,
+		disclosedNotices:     wsDisclosedNotices,
 	})
 	if err != nil {
 		return err
@@ -519,21 +544,22 @@ func (a *Applier) Apply(ctx context.Context, cfg *config.WorkspaceConfig, config
 	// from the caller-supplied instanceName parameter) and keeps the
 	// state file's InstanceName field aligned with the directory.
 	state := &InstanceState{
-		SchemaVersion:  SchemaVersion,
-		ConfigName:     &configName,
-		InstanceName:   filepath.Base(instanceRoot),
-		InstanceNumber: existingState.InstanceNumber,
-		Root:           instanceRoot,
-		Created:        existingState.Created,
-		LastApplied:    now,
-		SkipGlobal:     existingState.SkipGlobal,
-		NoOverlay:      existingState.NoOverlay,
-		OverlayURL:     finalOverlayURL,
-		OverlayCommit:  finalOverlayCommit,
-		ManagedFiles:   result.managedFiles,
-		Repos:          result.repoStates,
-		Shadows:        result.shadows,
-		AuthSources:    result.authSources,
+		SchemaVersion:        SchemaVersion,
+		ConfigName:           &configName,
+		InstanceName:         filepath.Base(instanceRoot),
+		InstanceNumber:       existingState.InstanceNumber,
+		Root:                 instanceRoot,
+		Created:              existingState.Created,
+		LastApplied:          now,
+		SkipGlobal:           existingState.SkipGlobal,
+		NoOverlay:            existingState.NoOverlay,
+		NoWorktreeDelegation: existingState.NoWorktreeDelegation,
+		OverlayURL:           finalOverlayURL,
+		OverlayCommit:        finalOverlayCommit,
+		ManagedFiles:         result.managedFiles,
+		Repos:                result.repoStates,
+		Shadows:              result.shadows,
+		AuthSources:          result.authSources,
 	}
 
 	if err := SaveState(instanceRoot, state); err != nil {
@@ -1296,6 +1322,53 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		writtenFiles = append(writtenFiles, result.WrittenFiles...)
 	}
 
+	// Step 6.4: Decide the worktree-delegation integration ONCE per apply
+	// (design Decisions 4 & 6), then thread it into every repo's
+	// SettingsMaterializer below. Running the probe once — not per repo — keeps
+	// the subprocess off the per-repo path. Hook and deny are mutually exclusive;
+	// the materializer writes one based on Supported.
+	//
+	// Gated on the init-time opt-out (Issue 6, design Decision 5): when
+	// `niwa init --no-worktree-delegation` set InstanceState.NoWorktreeDelegation,
+	// skip the entire block — no probe, no hook, no deny, no disclosure.
+	// worktreeDelegation stays nil, so the SettingsMaterializer writes neither
+	// the hook nor the deny entries. The opt-out is reversible: re-running init
+	// without the flag clears the state field, and the next apply re-enters this
+	// block and installs the integration.
+	var worktreeDelegation *WorktreeDelegation
+	if !opts.noWorktreeDelegation {
+		worktreeSupported := SupportsWorktreeHooks(ctx)
+		niwaPath, niwaPathErr := os.Executable()
+		worktreeDelegation = &WorktreeDelegation{
+			Supported: worktreeSupported,
+			NiwaPath:  niwaPath,
+		}
+		// If we cannot determine niwa's own path, we cannot write a valid hook
+		// command. Fall back to the deny branch so the integration still installs
+		// something deterministic rather than a broken hook. (os.Executable failing
+		// is extremely rare — a removed/renamed binary mid-run.)
+		if niwaPathErr != nil {
+			a.Reporter.DeferWarn("could not resolve niwa binary path for worktree hooks (%v); installing deny fallback", niwaPathErr)
+			worktreeDelegation.Supported = false
+		}
+
+		// Disclosure (design Decision 4): the deny fallback is a current-state
+		// condition, so its warning fires on EVERY apply; a one-time explainer fires
+		// only on first encounter. The decision is computed by the pure
+		// worktreeFallbackDisclosure helper.
+		warnFallback, explainFallback := worktreeFallbackDisclosure(
+			worktreeDelegation.Supported,
+			noticeDisclosed(opts.existingState, noticeWorktreeFallback),
+		)
+		if warnFallback {
+			a.Reporter.Warn("%s", worktreeFallbackWarning)
+		}
+		if explainFallback {
+			a.Reporter.Log("%s", worktreeFallbackExplainer)
+			newDisclosures = append(newDisclosures, noticeWorktreeFallback)
+		}
+	}
+
 	// Step 6.5: Run materializers (hooks, settings, env) for each repo.
 	discoveredHooks, _ := DiscoverHooks(configDir)
 	wsEnvFile, repoEnvFiles, _ := DiscoverEnvFiles(configDir)
@@ -1330,6 +1403,7 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 
 			GlobalEnvExamplePolicy: globalEnvExamplePolicy,
 			GlobalEnvOutput:        globalEnvOutput,
+			WorktreeDelegation:     worktreeDelegation,
 		})
 		if err != nil {
 			return nil, err
@@ -1577,6 +1651,27 @@ func instanceNumberFromName(configName, instanceName string) int {
 		}
 	}
 	return 0
+}
+
+// worktreeFallbackDisclosure is the pure decision for what to disclose about
+// the worktree-delegation fallback on a given apply. It is the single testable
+// seam for the disclosure policy from design Decision 4:
+//
+//   - When the harness SUPPORTS worktree hooks (supported=true), nothing is
+//     disclosed (warn=false, explain=false): the hooks are installed silently.
+//   - When the harness does NOT support hooks (supported=false), the
+//     every-apply current-state warning ALWAYS fires (warn=true), and the
+//     one-time first-encounter explainer fires only when it has not already
+//     been disclosed (explain = !alreadyDisclosed).
+//
+// alreadyDisclosed is noticeDisclosed(existingState, noticeWorktreeFallback)
+// from the caller; passing the bool keeps this function pure and trivially
+// testable without an InstanceState fixture.
+func worktreeFallbackDisclosure(supported, alreadyDisclosed bool) (warn, explain bool) {
+	if supported {
+		return false, false
+	}
+	return true, !alreadyDisclosed
 }
 
 // sliceContains reports whether s contains elem.

@@ -828,6 +828,63 @@ func TestInstanceStateNoOverlayRoundTrip(t *testing.T) {
 	}
 }
 
+func TestInstanceStateNoWorktreeDelegationRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+
+	state := &InstanceState{
+		SchemaVersion:        SchemaVersion,
+		InstanceName:         "test-no-worktree-delegation",
+		InstanceNumber:       1,
+		Root:                 dir,
+		NoWorktreeDelegation: true,
+		Created:              time.Now().Truncate(time.Second),
+		LastApplied:          time.Now().Truncate(time.Second),
+		Repos:                map[string]RepoState{},
+	}
+
+	if err := SaveState(dir, state); err != nil {
+		t.Fatalf("SaveState: %v", err)
+	}
+
+	loaded, err := LoadState(dir)
+	if err != nil {
+		t.Fatalf("LoadState: %v", err)
+	}
+
+	if !loaded.NoWorktreeDelegation {
+		t.Error("NoWorktreeDelegation = false, want true")
+	}
+}
+
+func TestInstanceStateNoWorktreeDelegationOmitEmpty(t *testing.T) {
+	// When the opt-out is unset (false), the key must not appear in the JSON
+	// so old binaries reading new state files stay unaffected.
+	dir := t.TempDir()
+
+	state := &InstanceState{
+		SchemaVersion:  SchemaVersion,
+		InstanceName:   "test-worktree-delegation-default",
+		InstanceNumber: 1,
+		Root:           dir,
+		Created:        time.Now().Truncate(time.Second),
+		LastApplied:    time.Now().Truncate(time.Second),
+		Repos:          map[string]RepoState{},
+	}
+
+	if err := SaveState(dir, state); err != nil {
+		t.Fatalf("SaveState: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(dir, StateDir, StateFile))
+	if err != nil {
+		t.Fatalf("reading state file: %v", err)
+	}
+
+	if containsKey(string(data), "no_worktree_delegation") {
+		t.Error(`JSON contains "no_worktree_delegation" when it should be omitted (zero value)`)
+	}
+}
+
 func TestInstanceStateOverlayFieldsOmitEmpty(t *testing.T) {
 	// When overlay fields are zero, they should not appear in the JSON output
 	// (omitempty ensures backward compatibility).
