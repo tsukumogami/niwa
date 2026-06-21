@@ -12,7 +12,7 @@ Feature: niwa worktree-delegation integration
   install-branch scenarios make the harness probe deterministic with a FAKE
   `claude` on PATH (a tiny script printing a chosen version).
 
-  Design: docs/designs/DESIGN-niwa-default-worktree.md
+  Design: docs/designs/current/DESIGN-niwa-default-worktree.md
 
   # ---------------------------------------------------------------------
   # Runtime: a WorktreeCreate hook routed through from-hook yields a niwa
