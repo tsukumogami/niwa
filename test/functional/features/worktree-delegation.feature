@@ -59,12 +59,11 @@ Feature: niwa worktree-delegation integration
     When I run "niwa worktree list --status active" from channeled instance "wd-remove"
     Then the exit code is 0
     And the output contains "active"
-    # The freshly delegated worktree carries niwa scaffolding (.claude/ context)
-    # that git reports as untracked, so the guarded (non-force) teardown would
-    # treat it as dirty and log-and-retain (design Decision 3). Commit the
-    # scaffolding so the worktree is genuinely clean — this is the clean-removal
-    # path the design's data flow describes (clean -> ended).
-    When I commit all changes in the printed worktree
+    # A freshly delegated worktree must read clean to git with NO commit: niwa
+    # records git-exclude coverage for the .claude/ scaffolding it writes
+    # (notably .claude/rules/worktree-imports.md), so the guarded (non-force)
+    # teardown sees a clean worktree and ends it (design Decision 3, clean ->
+    # ended). No workaround commit is needed.
     # Simulate Claude firing WorktreeRemove with the worktree_path: from-hook
     # is non-blocking (always exit 0) and ends the now-clean session.
     When I pipe a WorktreeRemove hook for the printed worktree path in instance "wd-remove"

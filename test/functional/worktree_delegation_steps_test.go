@@ -170,40 +170,6 @@ func runNiwaWithStdin(s *testState, cwd, command, stdin string) error {
 	return nil
 }
 
-// iCommitAllChangesInPrintedWorktree stages and commits everything in the
-// worktree printed by the create hook (including the niwa scaffolding git
-// reports as untracked), leaving the worktree clean. This lets a following
-// WorktreeRemove exercise the design's CLEAN-removal path (clean -> ended)
-// rather than the dirty log-and-retain path — without forcing the teardown
-// past the dirty guard, which production never does.
-func iCommitAllChangesInPrintedWorktree(ctx context.Context) error {
-	s := getState(ctx)
-	if s == nil {
-		return fmt.Errorf("no test state")
-	}
-	if s.printedWorktreePath == "" {
-		return fmt.Errorf("no printed worktree path stored; run a WorktreeCreate hook first")
-	}
-	gitEnv := append(os.Environ(),
-		"GIT_AUTHOR_NAME=niwa-test",
-		"GIT_AUTHOR_EMAIL=niwa-test@example.com",
-		"GIT_COMMITTER_NAME=niwa-test",
-		"GIT_COMMITTER_EMAIL=niwa-test@example.com",
-	)
-	for _, args := range [][]string{
-		{"add", "-A"},
-		{"commit", "-m", "commit delegated worktree scaffolding"},
-	} {
-		cmd := exec.Command("git", args...)
-		cmd.Dir = s.printedWorktreePath
-		cmd.Env = gitEnv
-		if out, err := cmd.CombinedOutput(); err != nil {
-			return fmt.Errorf("git %v in worktree %s: %w\n%s", args, s.printedWorktreePath, err, out)
-		}
-	}
-	return nil
-}
-
 // thePrintedWorktreePathExists asserts the worktree path printed by the last
 // WorktreeCreate hook dispatch exists on disk (a real niwa worktree was
 // created).
@@ -248,7 +214,6 @@ func registerWorktreeDelegationSteps(ctx *godog.ScenarioContext) {
 	ctx.Step(`^a worktree-delegation opt-out workspace "([^"]*)" exists$`, aWorktreeDelegationOptOutWorkspace)
 	ctx.Step(`^I pipe a WorktreeCreate hook for repo "([^"]*)" with name "([^"]*)" in instance "([^"]*)"$`, iPipeWorktreeCreateHook)
 	ctx.Step(`^I pipe a WorktreeRemove hook for the printed worktree path in instance "([^"]*)"$`, iPipeWorktreeRemoveHook)
-	ctx.Step(`^I commit all changes in the printed worktree$`, iCommitAllChangesInPrintedWorktree)
 	ctx.Step(`^the printed worktree path exists$`, thePrintedWorktreePathExists)
 	ctx.Step(`^the printed worktree path does not exist$`, thePrintedWorktreePathDoesNotExist)
 }

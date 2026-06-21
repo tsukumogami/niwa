@@ -3,6 +3,7 @@ package workspace
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -525,5 +526,117 @@ func TestApplyToWorktreeMergesPersonalOverlayEnv(t *testing.T) {
 	content := string(data)
 	if !strings.Contains(content, "PERSONAL_KEY=personal-value") {
 		t.Errorf("worktree .local.env missing personal-overlay key PERSONAL_KEY=personal-value, got:\n%s", content)
+	}
+}
+
+// TestApplyToWorktreeLeavesGitStatusClean is the regression guard for the
+// delegated-worktree teardown bug: a freshly created niwa worktree must read
+// CLEAN to `git status --porcelain` after ApplyToWorktree, with no user
+// changes. If any niwa-authored file (notably .claude/rules/worktree-imports.md)
+// is left untracked, the non-force from-hook WorktreeRemove path treats the
+// worktree as dirty and log-and-retains it, leaking an orphan on every clean
+// agent teardown. The test builds a real git worktree (the production scaffold
+// shape) and asserts both that niwa content is invisible AND that a genuine
+// user file still shows (the exclude is scoped, not a blanket .claude/ ignore).
+func TestApplyToWorktreeLeavesGitStatusClean(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	tmpDir := t.TempDir()
+
+	// Config dir with a repo content source (same shape as the shared fixture).
+	configDir := filepath.Join(tmpDir, "config")
+	reposDir := filepath.Join(configDir, "claude", "repos")
+	if err := os.MkdirAll(reposDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	source := "# {repo_name}\n\nThis is the app repo content layer for group {group_name}.\n"
+	if err := os.WriteFile(filepath.Join(reposDir, "app.md"), []byte(source), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.WorkspaceConfig{
+		Workspace: config.WorkspaceMeta{Name: "myws", ContentDir: "claude"},
+		Claude: config.ClaudeConfig{
+			Content: config.ContentConfig{
+				Repos: map[string]config.RepoContentEntry{
+					"app": {Source: "repos/app.md"},
+				},
+			},
+		},
+	}
+
+	// Instance root carrying a workspace-context.md for the rules import target.
+	instanceRoot := filepath.Join(tmpDir, "instance")
+	if err := os.MkdirAll(instanceRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(instanceRoot, workspaceContextFile), []byte("# workspace context\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Build a real git repo and add a worktree, mirroring how CreateSession
+	// scaffolds a delegated worktree: a primary checkout with one commit, then a
+	// linked worktree on a new branch. EnsureRepoExclude resolves the shared
+	// common dir from the worktree, so coverage recorded here is what production
+	// records.
+	primary := filepath.Join(tmpDir, "primary")
+	runGitWT(t, tmpDir, "init", primary)
+	if err := os.WriteFile(filepath.Join(primary, "README"), []byte("hi\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitWT(t, primary, "add", "README")
+	runGitWT(t, primary, "commit", "-m", "init")
+
+	worktreePath := filepath.Join(tmpDir, "wt")
+	runGitWT(t, primary, "worktree", "add", worktreePath, "-b", "wtbranch")
+
+	if _, err := ApplyToWorktree(cfg, configDir, instanceRoot, worktreePath, "apps", "app", "ship-the-thing", "branch-xyz", WorktreeApplyOptions{}); err != nil {
+		t.Fatalf("ApplyToWorktree: %v", err)
+	}
+
+	// Sanity: the rules import file (the formerly-uncovered file) was written.
+	if _, err := os.Stat(filepath.Join(worktreePath, worktreeRulesFile)); err != nil {
+		t.Fatalf("expected %s to be written: %v", worktreeRulesFile, err)
+	}
+
+	if out := gitStatusPorcelainWT(t, worktreePath); out != "" {
+		t.Errorf("freshly applied niwa worktree must read clean, got:\n%s", out)
+	}
+
+	// The exclude is scoped: a genuine user-authored file under .claude/ still
+	// shows, proving we did not blanket-ignore the whole .claude/ tree. git
+	// summarizes an untracked directory's contents as a single "?? .claude/"
+	// entry, so a non-empty status referencing .claude proves the user file
+	// surfaced (it would be empty if .claude/ were entirely ignored).
+	userFile := filepath.Join(worktreePath, ".claude", "user-notes.md")
+	if err := os.WriteFile(userFile, []byte("mine\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out := gitStatusPorcelainWT(t, worktreePath)
+	if out == "" || !strings.Contains(out, ".claude") {
+		t.Errorf("a genuine user .claude/ file must still show in status, got:\n%q", out)
+	}
+}
+
+func gitStatusPorcelainWT(t *testing.T, dir string) string {
+	t.Helper()
+	cmd := exec.Command("git", "-C", dir, "status", "--porcelain")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git status --porcelain: %v\n%s", err, out)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+func runGitWT(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	cmd.Env = append(os.Environ(),
+		"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@example.com",
+		"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@example.com",
+	)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
 	}
 }
