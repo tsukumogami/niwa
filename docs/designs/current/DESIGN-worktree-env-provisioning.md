@@ -1,5 +1,5 @@
 ---
-status: Planned
+status: Current
 upstream: docs/prds/PRD-worktree-env-provisioning.md
 problem: |
   `niwa worktree create`/`apply` materialize a worktree's environment through a
@@ -28,7 +28,7 @@ rationale: |
 
 ## Status
 
-Planned
+Current
 
 ## Upstream Design Reference
 

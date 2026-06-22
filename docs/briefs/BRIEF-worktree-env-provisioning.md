@@ -1,6 +1,6 @@
 ---
 schema: brief/v1
-status: Accepted
+status: Done
 problem: |
   Worktree creation runs its own secret-resolution path, separate from and
   divergent from the instance apply pipeline. That fork is why it breaks, and
@@ -25,7 +25,7 @@ motivating_context: |
 
 ## Status
 
-Accepted
+Done
 
 The brief stops at framing. The downstream PRD owns the requirements (how
 `niwa apply` reaches worktrees, what create does before a first apply); the
