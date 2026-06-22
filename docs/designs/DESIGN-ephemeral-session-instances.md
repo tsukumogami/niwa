@@ -17,8 +17,9 @@ decision: |
   instance context + a cd instruction. On end it looks the instance up by session id
   and `niwa destroy --force`s it. A `niwa reap` sweep reclaims orphans via
   `niwa list --json` plus a per-instance liveness marker. `niwa init` installs the
-  root-managed config (hooks and permission posture); `niwa apply` run from the
-  workspace root refreshes it and cascades into every instance and worktree.
+  root-managed config (hooks, permission posture, CLAUDE.md); context-aware
+  `niwa apply` refreshes it -- converging the subtree at the current scope (root,
+  instance, or worktree), with `--no-cascade` to cap heavy root ops.
 rationale: |
   The spike proved this end-to-end with no Agent SDK. A hook-backed Go subcommand
   mirrors the proven `niwa worktree from-hook` precedent, keeps logic testable, and
@@ -35,8 +36,8 @@ Planned
 
 This design owns the mechanism: the root materialization surface, the
 `niwa session from-hook` subcommand, the session->instance mapping store, the
-reaper, the supporting `--json` / liveness primitives, and the root-context
-`niwa apply` refresh path. The upstream PRD owns the requirements (R1-R12); this
+reaper, the supporting `--json` / liveness primitives, and the context-aware
+`niwa apply` refresh model. The upstream PRD owns the requirements (R1-R14); this
 design cites them and does not re-open them.
 
 ## Context and Problem Statement
@@ -79,36 +80,53 @@ lifts that established pattern from the worktree level to the instance level.
   signal niwa controls, not read from `source`/`agent_type`.
 - **Testability.** Logic belongs in a Go subcommand with unit tests, mirroring
   `niwa worktree from-hook`, not in shell embedded in `settings.json`.
-- **The root becomes managed config.** Hosting the hooks and permission posture at
-  the root forces a non-destructive refresh path that also reaches instances and
-  worktrees (R7, R8).
+- **The root becomes managed config.** Hosting the hooks, permission posture, and a
+  root `CLAUDE.md` forces a non-destructive, scope-aware refresh path (R7, R8, R13,
+  R14).
 - **Untrusted hook input.** `session_id` and other stdin fields are interpolated
   into paths and commands and must be validated before use.
 
 ## Considered Options
 
-### Decision 1 — root materialization surface and root-context `niwa apply` (R7, R8)
+### Decision 1 — root materialization surface and context-aware `niwa apply` (R7, R8, R13, R14)
 
-The session hooks and the permission posture (`permissions.defaultMode`) must live
-in the *workspace root's* `.claude/settings.json` -- not a managed surface today
-(niwa materializes the instance root via `InstallWorkspaceRootSettings` and per-repo
-dirs, but not the workspace root above the instances). Both ride the same
-`buildSettingsDoc` path that already emits the hooks and the permissions block
-together, so the permission posture is not a separate mechanism -- it is the same
-config landing at a new location.
+The session hooks, the permission posture (`permissions.defaultMode`), and a
+workspace-root `CLAUDE.md` must live in the *workspace root* -- not a managed surface
+today (niwa materializes the instance root via `InstallWorkspaceRootSettings` and
+per-repo dirs, but not the workspace root above the instances). The settings ride the
+same `buildSettingsDoc` path that already emits the hooks and the permissions block
+together, and the root `CLAUDE.md` reuses the existing workspace-context content at
+workspace altitude -- so none of this is a separate mechanism, it is the same config
+landing at a new location. The root `CLAUDE.md` matters because a session launched at
+the root loads its `CLAUDE.md` at startup; today it gets none, so the coordinator and
+any root session start with no workspace orientation.
 
 Two questions: where it lands first, and how it is refreshed. **Landing:** `niwa
-init` materializes the workspace-root `.claude/settings.json` from niwa's embedded
-templates, by default. **Refresh:** rather than a dedicated `niwa refresh` verb,
-`niwa apply` becomes usable from the workspace root. niwa already classifies cwd as
-root / instance / repo (`cwd_classify.go`); at the workspace root, `apply` converges
-the root-managed config and vault, then cascades into every instance (the existing
-instance-scoped `apply`) and each instance's worktrees. **Chosen:** init lands it,
-root-context `apply` refreshes it. Rejected: a new `niwa refresh` verb -- the root is
-just another surface `apply` already knows how to converge, and a second verb would
-drift from it; and hand-edited root settings -- the manual editing this feature
-removes. `apply` stays drift-aware via the existing content-materializer hashing, so
-a root-context apply is a no-op where everything is already current.
+init` materializes the workspace-root config by default.
+
+**Refresh -- context-aware `apply`.** Rather than a dedicated refresh verb, `apply`
+is made context-aware. niwa already classifies cwd (`cwd_classify.go`) as workspace
+root / inside-instance / outside; this design adds a fourth discrimination,
+**inside-worktree**, giving three managed scopes -- workspace root, instance,
+worktree. `apply` converges the **subtree rooted at the current scope** and never
+climbs above it or touches siblings:
+
+- at the **workspace root**: the root-managed config and vault, then every instance
+  (the existing instance-scoped `apply`) and each instance's worktrees;
+- at an **instance**: that instance and its worktrees;
+- at a **worktree**: that worktree alone.
+
+`apply --no-cascade` caps the operation at the current scope without descending --
+its primary use is refreshing only the root config after a hook/permission/CLAUDE.md
+edit without re-converging every instance. Adding the worktree scope refines today's
+behavior, where `apply` from anywhere inside an instance converges the whole instance;
+this is an intentional, pre-1.0 change for a uniform "converge my subtree" model.
+**Chosen:** init lands it, context-aware `apply` (+ `--no-cascade`) refreshes it.
+Rejected: a `niwa refresh` verb (the root is just another `apply` scope, and a second
+verb would drift) and a root-only `--root-only` flag (`--no-cascade` is its general
+form, meaningful at every scope). `apply` stays drift-aware via the existing
+content-materializer hashing, so it is a no-op where everything is already current,
+and it never destroys (that is `niwa destroy`).
 
 ### Decision 2 — the provisioning subcommand (R1, R3)
 
@@ -230,15 +248,19 @@ SessionEnd never fires.
 
 Components (new unless noted):
 
-- **Root materializer** -- emits the workspace-root `.claude/settings.json` (via the
-  shared `buildSettingsDoc`) with the SessionStart and SessionEnd hook entries (each
-  a `command` piping stdin to `niwa session from-hook`), the permission posture
-  (`permissions.defaultMode`), and the ephemeral-mode flag. Run by `niwa init` and by
-  root-context `niwa apply`; drift-aware via the existing content-materializer
-  hashing.
-- **Root-context `niwa apply`** -- when run from the workspace root, converges the
-  root-managed config and vault, then cascades into each instance (existing apply)
-  and each instance's worktrees.
+- **Root materializer** -- emits the workspace-root managed config: `.claude/settings.json`
+  (via the shared `buildSettingsDoc`) with the SessionStart and SessionEnd hook
+  entries (each a `command` piping stdin to `niwa session from-hook`), the permission
+  posture (`permissions.defaultMode`), and the ephemeral-mode flag, plus a
+  workspace-root `CLAUDE.md` (workspace-context content at root altitude). Run by
+  `niwa init` and by context-aware `niwa apply`; drift-aware via the existing
+  content-materializer hashing.
+- **Context-aware `niwa apply`** -- extends `cwd_classify` with an inside-worktree
+  scope (workspace root / instance / worktree) and converges the subtree at the
+  current scope: root -> root config + vault + every instance + their worktrees;
+  instance -> that instance + its worktrees; worktree -> that worktree. Never climbs
+  above the current scope. `--no-cascade` caps it at the current node (e.g. root
+  config only).
 - **`niwa session from-hook`** -- the hook entry point. Reads hook JSON on stdin,
   validates `session_id`, branches on `hook_event_name`:
   - *SessionStart:* guard (mode on? background-job? not already inside an
@@ -277,9 +299,12 @@ End-to-end flow:
   the existing session-state code.
 - Add `niwa reap` and wire an opportunistic call into `create`.
 - Add the root materializer (reusing `buildSettingsDoc`, emitting hooks + permission
-  posture); make `niwa init` install the root config by default with an opt-out flag
-  persisted in root state; make `niwa apply` root-context-aware so it converges the
-  root then cascades into instances and worktrees.
+  posture, plus a root `CLAUDE.md`); make `niwa init` install the root config by
+  default with an opt-out flag persisted in root state.
+- Extend `cwd_classify` with an inside-worktree scope and make `niwa apply`
+  context-aware: converge the subtree at the current scope, add `--no-cascade` to cap
+  at the current node. Unit-test each scope (root / instance / worktree) and the
+  `--no-cascade` cap.
 - Add a `@critical` functional Gherkin scenario covering provision-on-start /
   teardown-on-end and a reaper-reclaims-orphan scenario, using the offline
   `localGitServer` helper.
@@ -308,9 +333,14 @@ End-to-end flow:
 
 - Developers fan out agents from the root and each runs isolated, with no manual
   per-session create/destroy and no growing orphan pile.
-- niwa gains a root-managed-config surface (`niwa init` lands it, root-context
-  `niwa apply` refreshes it and cascades into instances and worktrees) it did not
-  have, plus `--json` output modes that are independently useful.
+- niwa gains a root-managed-config surface (`niwa init` lands it; context-aware
+  `niwa apply` refreshes it) it did not have, plus `--json` output modes that are
+  independently useful.
+- `niwa apply` becomes a uniform subtree-convergence operation across three scopes
+  (root / instance / worktree) with a `--no-cascade` cap. This refines today's
+  behavior -- `apply` inside an instance no longer always converges the whole
+  instance; a worktree is now its own scope -- an intentional, pre-1.0 semantics
+  change documented in the guide (Issue 10).
 - A root-level bypass-permissions posture applies to every session launched at the
   root, not only dispatched workers (settings resolve at launch and cannot be scoped
   per session). This is wider than per-instance bypass; the opt-in ephemeral mode

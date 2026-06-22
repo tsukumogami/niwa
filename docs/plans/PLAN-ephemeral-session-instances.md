@@ -23,8 +23,9 @@ ephemeral niwa instance": workspace-root SessionStart/SessionEnd hooks delegatin
 to a new `niwa session from-hook` subcommand, a session-to-instance mapping store,
 a `niwa reap` orphan sweep, the supporting `niwa create --json` / `niwa list
 --json` primitives, and the root-config materialization path (`niwa init` install
-plus root-context `niwa apply`, which refreshes the root and cascades into instances
-and worktrees). It does not re-open the requirements (PRD R1-R12) or the architecture
+plus context-aware `niwa apply`, which converges the subtree at the current scope and
+caps at the current node with `--no-cascade`). It does not re-open the requirements
+(PRD R1-R14) or the architecture
 (the DESIGN's seven decisions); it slices them into atomic issues.
 
 ## Decomposition Strategy
@@ -32,7 +33,7 @@ and worktrees). It does not re-open the requirements (PRD R1-R12) or the archite
 **Hybrid, walking-skeleton-first.** The three primitive issues (machine-readable
 `create`, `list` enumeration, the mapping store) carry no dependencies and form the
 foundation. The two `from-hook` branches and the reaper build on the primitives;
-the root materializer and root-context `apply` build on the hook subcommand existing; the
+the root materializer and context-aware `apply` build on the hook subcommand existing; the
 functional tests and the guide close the chain. Grouping rule: one issue per new
 CLI surface or store, with the SessionStart and SessionEnd branches split so the
 provisioning path (guard + create + inject) and the teardown path (resolve +
@@ -173,51 +174,58 @@ whose session ended without clean teardown, and invoke it opportunistically at
 
 ---
 
-### Issue 7: feat(init): workspace-root hook materialization
+### Issue 7: feat(init): workspace-root config materialization
 
 **Complexity:** complex
 
 **Goal:** Add the root materializer (`internal/workspace/root_materializer.go`),
-reusing the existing `buildSettingsDoc`, that writes the workspace-root
-`.claude/settings.json` with the SessionStart/SessionEnd hook entries, the permission
-posture (`permissions.defaultMode`), and the ephemeral-mode flag, and install it by
-default at `niwa init` with a persisted opt-out (PRD R7, R12).
+reusing the existing `buildSettingsDoc`, that writes the workspace-root managed
+config -- `.claude/settings.json` (SessionStart/SessionEnd hook entries, the
+permission posture `permissions.defaultMode`, and the ephemeral-mode flag) plus a
+workspace-root `CLAUDE.md` (workspace-context content at root altitude) -- and install
+it by default at `niwa init` with a persisted opt-out (PRD R7, R12).
 
 **Acceptance Criteria:**
 - The materializer writes `.claude/settings.json` at the workspace root (via
   `buildSettingsDoc`) with SessionStart and SessionEnd entries piping stdin to
   `niwa session from-hook`, the permission posture, and the ephemeral-mode flag
+- The materializer writes a workspace-root `CLAUDE.md` carrying workspace-context
+  content at root altitude
 - `niwa init` installs the root config by default, non-interactively, with no TTY
   attached
 - An init-time opt-out flag, persisted in root state, suppresses the install;
   re-running init without it (then `niwa apply` from the root) installs it
-- Unit tests cover the materialized settings content (hooks + permission posture) and
-  the opt-out path
+- Unit tests cover the materialized settings content (hooks + permission posture), the
+  root `CLAUDE.md`, and the opt-out path
 - `go test ./...` passes
 
 **Dependencies:** <<ISSUE:4>>, <<ISSUE:5>>
 
 ---
 
-### Issue 8: feat(apply): root-context recursive apply
+### Issue 8: feat(apply): context-aware subtree apply with --no-cascade
 
-**Complexity:** testable
+**Complexity:** complex
 
-**Goal:** Make `niwa apply` usable from the workspace root (`internal/cli/apply.go`,
-using the existing `cwd_classify` root/instance/repo detection): converge the
-root-managed config and vault, then cascade into every instance and worktree beneath
-it (PRD R8). Replaces a dedicated refresh verb.
+**Goal:** Extend `cwd_classify` with an inside-worktree scope and make `niwa apply`
+context-aware (`internal/cli/apply.go`, `internal/workspace/cwd_classify.go`): it
+converges the subtree at the current scope (workspace root / instance / worktree),
+never climbing above it, with a `--no-cascade` flag that caps the operation at the
+current scope (PRD R8, R13, R14).
 
 **Acceptance Criteria:**
-- Run from the workspace root, `niwa apply` regenerates the root-managed files
-  idempotently (via `buildSettingsDoc` + the existing content-materializer hashing;
-  no-op when already current), then runs the existing per-instance apply for each
-  instance and each instance's worktrees
-- Root-context `niwa apply` re-runs vault resolution for the root and destroys
-  nothing
-- Run from an instance, `niwa apply` keeps its existing instance-scoped behavior
-- A unit test asserts a stale root config is updated, an already-current root is a
-  no-op, and the cascade reaches instances/worktrees
+- `cwd_classify` distinguishes an inside-worktree cwd from inside-instance; `apply`
+  resolves its scope from cwd (or `--instance`/registry name)
+- At the workspace root, `apply` regenerates the root-managed files idempotently (via
+  `buildSettingsDoc` + content-materializer hashing; no-op when current), then runs
+  the existing per-instance apply for each instance and each instance's worktrees
+- At an instance, `apply` converges that instance and its worktrees; at a worktree,
+  only that worktree -- never climbing to a parent or touching siblings
+- `niwa apply --no-cascade` converges only the current scope without descending (at
+  the root: root config only, no instance reconvergence)
+- `apply` re-runs vault resolution for the scope and destroys nothing
+- Unit tests cover each scope (root / instance / worktree), the `--no-cascade` cap,
+  and the no-op-when-current case
 - `go test ./...` passes
 
 **Dependencies:** <<ISSUE:7>>
@@ -251,7 +259,9 @@ guide) and add it to the CLAUDE.md "Contributor Guides" list (PRD R7, R8 surface
 
 **Acceptance Criteria:**
 - The guide documents the SessionStart/End hooks, the mapping store, `niwa reap`,
-  root-context `niwa apply`, and the opt-out, mirroring the worktree guide's shape
+  context-aware `niwa apply` (the subtree model, `--no-cascade`, and the blast-radius
+  table per scope), the workspace-root `CLAUDE.md`, and the opt-out, mirroring the
+  worktree guide's shape
 - The guide is added to the CLAUDE.md "Contributor Guides" list
 
 **Dependencies:** <<ISSUE:7>>, <<ISSUE:8>>
@@ -269,7 +279,7 @@ graph TD
     I5["#5: from-hook SessionEnd"]
     I6["#6: reaper"]
     I7["#7: root materialization"]
-    I8["#8: root-context apply"]
+    I8["#8: context-aware subtree apply"]
     I9["#9: functional tests"]
     I10["#10: docs guide"]
 

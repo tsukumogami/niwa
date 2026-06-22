@@ -107,8 +107,10 @@ session that happens to start at the root.
   that reclaims instances whose session ended without clean teardown.
 - A boundary that keeps ordinary, non-worker sessions at the root from being turned
   into throwaway instances.
-- Installing the session-hook configuration at the workspace root by default when a
-  workspace is set up, and a supported way to refresh it on an existing workspace.
+- Maintaining the workspace-root configuration niwa owns -- the session hooks, the
+  permission posture, and a workspace-root CLAUDE.md -- installed by default when a
+  workspace is set up and refreshed on an existing workspace the same way the rest
+  of the workspace is refreshed, by running niwa's apply from the root.
 
 ### Out
 

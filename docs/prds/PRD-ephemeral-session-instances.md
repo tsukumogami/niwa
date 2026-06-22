@@ -110,16 +110,19 @@ Functional:
   being turned into an ephemeral instance. The guard does not rely on a native hook
   field to distinguish session kinds (none exists).
 - **R7.** niwa installs the workspace-root managed configuration -- the session
-  hooks and the session permission posture (`permissions.defaultMode`) -- by default
-  when a workspace is initialized, with no per-developer manual editing. Because a
-  root-launched session resolves its settings at launch from the root (the agent's
-  later `cd` into the instance does not reload them), the permission posture must
-  live at the root for root-launched sessions to inherit it, exactly as the hooks do.
-- **R8.** `niwa apply`, run from the workspace root, converges the root-managed
-  configuration (hooks and permission posture) and vault, then cascades into every
-  instance and worktree beneath it -- without re-running init and without destroying
-  instances. The root is just another surface `apply` converges; no separate refresh
-  command is introduced.
+  hooks, the session permission posture (`permissions.defaultMode`), and a
+  workspace-root `CLAUDE.md` -- by default when a workspace is initialized, with no
+  per-developer manual editing. Because a root-launched session resolves its settings
+  and `CLAUDE.md` at launch from the root (the agent's later `cd` into the instance
+  does not reload them), this configuration must live at the root for root-launched
+  sessions to inherit it.
+- **R8.** `niwa apply` is context-aware: it converges the subtree rooted at the
+  current scope and never reaches above it or into sibling scopes. At the workspace
+  root that subtree is the root-managed configuration and vault plus every instance
+  and each instance's worktrees; at an instance, that instance and its worktrees; at
+  a worktree, that worktree. `apply` only converges (idempotent, drift-aware) and
+  never destroys, and no separate refresh verb is introduced -- the root is just
+  another `apply` scope.
 - **R9.** `niwa create` exposes a machine-readable form of the created instance's
   path, so the provisioning hook can consume it programmatically rather than parsing
   human output or re-deriving the instance name.
@@ -129,6 +132,14 @@ Functional:
   marker the reaper can use to decide whether the backing session is still alive.
 - **R12.** A developer can opt an instance or workspace out of the
   ephemeral-per-session behavior, keeping plain background sessions at the root.
+- **R13.** `niwa apply --no-cascade` limits the operation to the current scope's own
+  configuration without descending into child scopes -- at the workspace root it
+  refreshes only the root-managed configuration without re-converging the instances
+  beneath it, for the heavy-op case.
+- **R14.** A worktree is a distinct `apply` scope: `niwa apply` run inside a worktree
+  converges that worktree, not the whole enclosing instance. This refines today's
+  behavior, where running `apply` from within an instance always converges the entire
+  instance.
 
 ## Acceptance Criteria
 
@@ -156,8 +167,13 @@ Functional:
 - [ ] The hooks install at the workspace root through a non-interactive workspace
   setup with no TTY attached.
 - [ ] Running `niwa apply` from the workspace root updates the root's managed
-  configuration (hooks and permission posture) to the current form and cascades into
-  the instances and worktrees beneath it, without destroying any instance.
+  configuration (hooks, permission posture, and the root `CLAUDE.md`) to the current
+  form and cascades into the instances and worktrees beneath it, without destroying
+  any instance.
+- [ ] `niwa apply --no-cascade` at the workspace root refreshes only the root-managed
+  configuration and does not re-converge the instances beneath it.
+- [ ] `niwa apply` run inside a worktree converges that worktree and not its sibling
+  worktrees or the rest of the enclosing instance.
 - [ ] The whole flow requires no agent harness other than Claude Code: with only
   Claude Code present, all of the above hold.
 
@@ -186,14 +202,20 @@ Functional:
   `SessionStart`. Alternative considered: rely on the agent re-rooting into the
   instance to pick up its context -- rejected, the spike showed `cd` does not
   re-root the session.
-- **The workspace root becomes a managed surface, refreshed by root-context `niwa
-  apply` (R7, R8).** The root now hosts the session hooks and the permission posture,
-  so it needs a non-destructive refresh path. Rather than a new verb, `niwa apply`
-  becomes usable from the workspace root and converges the root plus every instance
-  and worktree beneath it. Alternatives considered: a dedicated `niwa refresh` command
-  (rejected -- the root is just another surface `apply` already knows how to converge,
-  and a second verb would drift from it) and hand-edited root settings (rejected --
-  manual editing is the setup this feature removes).
+- **The workspace root becomes a managed surface, refreshed by context-aware `niwa
+  apply` (R7, R8, R13, R14).** The root now hosts the session hooks, the permission
+  posture, and a root `CLAUDE.md`, so it needs a non-destructive refresh path. Rather
+  than a new verb, `apply` is made context-aware: it converges the subtree at the
+  current scope (root, instance, or worktree) and never climbs above it, with
+  `--no-cascade` to cap the operation at the current scope for heavy ops. This adds
+  the worktree as a distinct scope, which refines today's behavior (where `apply` from
+  anywhere inside an instance converges the whole instance) -- an intentional,
+  pre-1.0 semantics change for a uniform "converge my subtree" model. Alternatives
+  considered: a dedicated `niwa refresh` command (rejected -- the root is just another
+  `apply` scope, and a second verb would drift from it); a `--root-only` flag scoped
+  to the root (rejected -- `--no-cascade` is its general form, meaningful at every
+  scope); and hand-edited root settings (rejected -- manual editing is the setup this
+  feature removes).
 - **The permission posture is ordinary root config, not a special gate (R7).** The
   `permissions.defaultMode` block is materialized at the root by the same
   `buildSettingsDoc` path that emits the hooks, governed by the same opt-in mode --
