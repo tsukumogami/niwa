@@ -367,6 +367,25 @@ func ApplyToWorktree(cfg *config.WorkspaceConfig, configDir, instanceRoot, workt
 	//    Same shared loop the instance apply path uses, but with the
 	//    EnvMaterializer dropped: a worktree does not re-resolve secrets, it
 	//    inherits the clone's already-materialized env output (step 2b below).
+	//
+	//    Secret-ref safety on the standalone path: removing the worktree path's
+	//    resolve+merge means cfg here is overlay-merged but UNRESOLVED, so any
+	//    vault:// ref in it is still a literal "vault://..." Plain string. This is
+	//    safe for the settings/files materializers because neither can write that
+	//    literal to disk:
+	//      - FilesMaterializer: [files] is map[string]string (source->dest PATHS),
+	//        never MaybeSecret; it copies file BYTES from the config snapshot, so a
+	//        vault:// string could only be a (non-existent) source path that fails
+	//        at read time -- it is never emitted as a value.
+	//      - SettingsMaterializer: the only settings value that reaches disk is the
+	//        "permissions" key, constrained to "bypass"/"ask". An unresolved
+	//        vault:// permissions value is rejected by buildSettingsDoc ("unknown
+	//        permissions value") BEFORE any write, so it fails closed rather than
+	//        landing a literal vault:// in settings.local.json. Every other
+	//        settings key is dropped by buildSettingsDoc and never written.
+	//    Env is the only materializer whose values can be secret-backed, and it is
+	//    handled by inherit-by-copy (step 2b), not re-resolution. The standalone
+	//    worktree path therefore writes no unresolved vault:// to disk.
 	materializers := opts.Materializers
 	if materializers == nil {
 		materializers = worktreeRepoMaterializers(opts.Stderr)
