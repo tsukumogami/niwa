@@ -1,5 +1,5 @@
 ---
-status: Draft
+status: Accepted
 problem: |
   `niwa worktree create` materializes a worktree's environment through a
   worktree-specific secret-resolution path that re-resolves secrets from their
@@ -26,7 +26,7 @@ motivating_context: |
 
 ## Status
 
-Draft
+Accepted
 
 ## Problem Statement
 
