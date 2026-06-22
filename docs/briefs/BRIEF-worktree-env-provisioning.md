@@ -1,6 +1,6 @@
 ---
 schema: brief/v1
-status: Draft
+status: Accepted
 problem: |
   Worktree creation runs its own secret-resolution path, separate from and
   divergent from the instance apply pipeline. That fork is why it breaks, and
@@ -25,7 +25,7 @@ motivating_context: |
 
 ## Status
 
-Draft
+Accepted
 
 The brief stops at framing. The downstream PRD owns the requirements (how
 `niwa apply` reaches worktrees, what create does before a first apply); the
@@ -140,20 +140,6 @@ consistent with the instance and with each other.
   hooks. That payload is already settled by the worktree command parity
   design.
 - Multi-repo or cross-repo coordination behavior.
-
-## Open Questions
-
-These defer framing details to the downstream PRD; none is a blocker.
-
-- Whether `niwa apply` refreshes existing worktrees automatically as part of
-  its run, or drives the existing `niwa worktree apply` per worktree as the
-  mechanism for doing so.
-- What `niwa worktree create` does when the instance has not yet materialized
-  the repo's environment (for example, env was just enabled and no apply has
-  run since): require a prior apply, or perform a one-time materialization in
-  that single bootstrap case.
-- Whether there is any legitimate exception to worktrees mirroring their
-  instance that the PRD must accommodate, or whether the mirror is absolute.
 
 ## References
 
