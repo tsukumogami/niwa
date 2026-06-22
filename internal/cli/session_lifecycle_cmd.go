@@ -13,8 +13,6 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/tsukumogami/niwa/internal/cli/sessionattach"
 	"github.com/tsukumogami/niwa/internal/config"
-	"github.com/tsukumogami/niwa/internal/vault"
-	"github.com/tsukumogami/niwa/internal/vault/resolve"
 	"github.com/tsukumogami/niwa/internal/workspace"
 	"github.com/tsukumogami/niwa/internal/worktree"
 )
@@ -291,8 +289,6 @@ func runSessionApply(cmd *cobra.Command, args []string) error {
 // (the content install lives in internal/workspace), and the CLI orchestrates
 // the two.
 func applyContentToWorktree(instanceRoot, worktreePath, repo, purpose, branch string) ([]string, error) {
-	ctx := context.Background()
-
 	configPath, configDir, err := config.Discover(instanceRoot)
 	if err != nil {
 		return nil, fmt.Errorf("locating workspace config: %w", err)
@@ -319,10 +315,13 @@ func applyContentToWorktree(instanceRoot, worktreePath, repo, purpose, branch st
 	// When no overlay is configured (empty OverlayURL or NoOverlay), opts.OverlayDir
 	// stays empty and the no-overlay path runs exactly as before.
 	//
-	// The structural overlay merge runs BEFORE the resolve+merge helper below
-	// so the helper sees the overlay-merged base (mirroring the instance
-	// pipeline's Step 0.6 → Step 6 ordering); the helper's personal-overlay
-	// merge then layers on top of that base.
+	// This runs only the vault-free structural merge: the worktree path no
+	// longer resolves secrets at all. It INHERITS the instance clone's
+	// already-materialized env output by byte-copy (workspace.inheritEnvOutputs),
+	// so there is no need to rebuild vault bundles or re-run
+	// ResolveAndMergeEffectiveConfig here. Removing that fork is the fix for the
+	// failures where a worktree create depended on a reachable/correctly-scoped
+	// secret source the instance had already satisfied at apply time.
 	if cfgWithOverlay, overlayDir, oErr := mergeWorktreeOverlay(cfg, instanceRoot); oErr != nil {
 		return nil, oErr
 	} else if overlayDir != "" {
@@ -330,49 +329,14 @@ func applyContentToWorktree(instanceRoot, worktreePath, repo, purpose, branch st
 		opts.OverlayDir = overlayDir
 	}
 
-	// Run the shared resolve+merge helper so the worktree apply path receives
-	// the same effective WorkspaceConfig the instance apply path does. Without
-	// this step, env.secrets vault:// URIs stay literal in the worktree's
-	// .local.env and personal-overlay env keys go missing — which broke
-	// `niwa worktree create` for any workspace using a personal global
-	// override or a vault-backed env entry. See issue #162.
-	//
-	// AllowMissingSecrets: true is deliberate. A worktree apply is a localized
-	// re-materialization; the instance create / apply already enforced strict
-	// secret resolution at bootstrap. A transient vault outage during a
-	// worktree apply should warn-and-continue rather than hard-fail the
-	// worktree.
-	globalOverride := loadGlobalConfigOverride()
-	teamBundle, err := resolve.BuildBundle(ctx, vault.DefaultRegistry, cfg.Vault, "workspace config")
-	if err != nil {
-		return nil, fmt.Errorf("building team vault bundle: %w", err)
+	// The global env_output rung is plain config (a list of target paths +
+	// formats), not secret-bearing, so it is read directly from the parsed
+	// personal global override rather than from a resolve+merge pass. The
+	// inherit primitive uses it (via config.EffectiveEnvOutput) to resolve which
+	// clone targets to copy. A nil override means no global rung is set.
+	if globalOverride := loadGlobalConfigOverride(); globalOverride != nil {
+		opts.GlobalEnvOutput = globalOverride.Global.EnvOutput
 	}
-	defer teamBundle.CloseAll()
-	var overlayRegistry *config.VaultRegistry
-	if globalOverride != nil {
-		overlayRegistry = globalOverride.Global.Vault
-	}
-	personalBundle, err := resolve.BuildBundle(ctx, vault.DefaultRegistry, overlayRegistry, "global overlay")
-	if err != nil {
-		return nil, fmt.Errorf("building personal-overlay vault bundle: %w", err)
-	}
-	defer personalBundle.CloseAll()
-
-	gDir, _ := config.GlobalConfigDir()
-	effectiveCfg, globalEnvExamplePolicy, globalEnvOutput, err := workspace.ResolveAndMergeEffectiveConfig(
-		ctx, cfg, globalOverride, teamBundle, personalBundle,
-		workspace.EffectiveConfigOptions{
-			AllowMissingSecrets: true,
-			GlobalConfigDir:     gDir,
-			Stderr:              os.Stderr,
-		},
-	)
-	if err != nil {
-		return nil, fmt.Errorf("resolving effective workspace config: %w", err)
-	}
-	cfg = effectiveCfg
-	opts.GlobalEnvExamplePolicy = globalEnvExamplePolicy
-	opts.GlobalEnvOutput = globalEnvOutput
 
 	return workspace.ApplyToWorktree(cfg, configDir, instanceRoot, worktreePath, group, repo, purpose, branch, opts)
 }

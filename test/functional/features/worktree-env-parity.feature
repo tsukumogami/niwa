@@ -1,18 +1,21 @@
 Feature: niwa worktree env parity
-  Regression coverage for issue #162: the worktree apply path must run the
-  same resolve+merge pipeline the instance apply path runs, so the worktree
-  .local.env carries the same env keys the instance .local.env does. Before
-  the fix, applyContentToWorktree never called MergeGlobalOverride, so a
-  personal-overlay-declared env key reached the instance .local.env but went
-  missing from the worktree .local.env.
+  A worktree's environment is INHERITED from the instance clone's already-
+  materialized .local.env by byte-copy, with no secret resolution and no
+  network access on the worktree path (DESIGN-worktree-env-provisioning,
+  decision A1). The instance clone resolves the environment once at
+  `niwa create`/`niwa apply` time; `niwa worktree create` then copies the
+  clone's output bytes into the worktree's config-resolved target(s).
 
-  This scenario covers the personal-overlay merge half of the fix. The vault
-  resolve half is covered by unit tests in internal/workspace; the functional
-  harness does not wire a fake vault backend, so it is not exercised here.
-  See the follow-up note in the issue #162 PR for the gap.
+  This scenario is the offline @critical coverage: the local git server provides
+  the clone, `niwa create` materializes a personal-overlay-declared env key into
+  the clone .local.env, and `niwa worktree create` inherits that key into the
+  worktree .local.env without re-resolving anything. The vault-resolution and
+  byte-equivalence-across-formats cases are covered by unit tests in
+  internal/workspace (inherit_env_test.go); the functional harness does not wire
+  a fake vault backend.
 
   @critical
-  Scenario: niwa worktree create installs personal-overlay env key into worktree .local.env
+  Scenario: niwa worktree create inherits the clone's env into the worktree .local.env
     Given a clean niwa environment
     And a local git server is set up
     And a source repo "myapp" exists
@@ -39,9 +42,9 @@ Feature: niwa worktree env parity
     When I call niwa worktree create for repo "myapp" with purpose "wt-env-parity" in instance "wt-env"
     Then the last session is active in instance "wt-env"
     And the session worktree exists in instance "wt-env"
-    # The personal-overlay env key must reach the worktree .local.env. Before
-    # the fix this assertion failed because applyContentToWorktree handed the
-    # un-merged cfg straight to ApplyToWorktree.
+    # The personal-overlay env key was resolved into the clone .local.env at
+    # `niwa create` time; the worktree inherits it by byte-copy. No secret
+    # resolution runs on the worktree path.
     And the file ".local.env" in the last worktree contains "PERSONAL_KEY=personal-value"
     # Cleanup
     When I call niwa_destroy_session in instance "wt-env"

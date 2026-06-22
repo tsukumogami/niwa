@@ -135,6 +135,139 @@ func runRepoMaterializers(materializers []Materializer, in repoMaterializeInputs
 	return written, mctx.EnvOutputs, nil
 }
 
+// repoEnvConfigured reports whether a repo would have any env output to
+// materialize, using the SAME config-only structural check ResolveEnvVars /
+// EnvMaterializer use to decide emptiness (counts of files/vars/secrets/repo
+// files / .env.example vars). It performs NO secret resolution and reads no
+// secret bytes -- it only inspects which inputs are declared.
+//
+// This is the distinguisher inheritEnvOutputs needs for R8: a repo that has env
+// configured but is missing a clone target is an error (the clone was not
+// applied), whereas a repo with no env configured at all legitimately produced
+// no output, so a missing target is not an error.
+func repoEnvConfigured(effectiveEnv config.EnvConfig, discovered *DiscoveredEnv, repoName string) bool {
+	files := effectiveEnv.Files
+	if len(files) == 0 && discovered != nil && discovered.WorkspaceFile != "" {
+		files = []string{discovered.WorkspaceFile}
+	}
+	hasVars := len(effectiveEnv.Vars.Values) > 0 || len(effectiveEnv.Secrets.Values) > 0
+	hasRepoFile := discovered != nil && discovered.RepoFiles != nil && discovered.RepoFiles[repoName] != ""
+	return len(files) > 0 || hasVars || hasRepoFile
+}
+
+// inheritEnvOutputs copies the instance clone's already-materialized env output
+// file(s) into a worktree's config-resolved target paths, byte-for-byte, with
+// no secret resolution and no network access. It is the single primitive that
+// produces a worktree's env (used by worktree create, worktree apply, and the
+// niwa apply worktree-refresh fan-out).
+//
+// For each target resolved from config.EffectiveEnvOutput, both the clone
+// source path and the worktree dest path pass through safeTargetPath (the target
+// set is config-derived and treated as untrusted, so a crafted ../ or symlinked
+// target.Path cannot read outside the clone nor write outside the worktree). The
+// clone source is stat'd; a missing source is the R8 condition only when the
+// repo has env configured (see repoEnvConfigured) -- a repo with no env at all
+// is not an error and copies nothing.
+//
+// For custom (non-"*.local*") target names the primitive reproduces the
+// EnvMaterializer's fail-closed ordering: it refuses on a non-git worktree
+// (IsGitRepo) and asserts git-exclude coverage BEFORE writing, so a custom-named
+// secret never lands git-visible. Parent dirs are created 0700 and files written
+// at secretFileMode (0600), matching the clone's secrecy posture.
+//
+// It returns the written worktree target paths (for the content file list) and
+// the custom target names that need re-asserting in the caller's excludeExtras
+// union.
+func inheritEnvOutputs(cloneRepoDir, worktreeDir string, cfg *config.WorkspaceConfig, repo string, globalEnvOutput config.OutputTargets, effectiveEnv config.EnvConfig, discovered *DiscoveredEnv) (written []string, customNames []string, err error) {
+	targets := config.EffectiveEnvOutput(globalEnvOutput, cfg, repo)
+	configured := repoEnvConfigured(effectiveEnv, discovered, repo)
+
+	// The clone repo dir must exist to inherit from. safeTargetPath resolves the
+	// clone source against this root via EvalSymlinks, which fails ENOENT on a
+	// missing root, so handle absence up front: a missing clone dir means the
+	// repo's env was never materialized. That is R8 when env is configured, and
+	// a no-op (nothing to inherit) when it is not.
+	if _, statErr := os.Stat(cloneRepoDir); statErr != nil {
+		if os.IsNotExist(statErr) {
+			if configured {
+				return nil, nil, fmt.Errorf("repo %s: clone directory %s does not exist; run `niwa apply` to materialize the instance environment first", repo, cloneRepoDir)
+			}
+			return nil, nil, nil
+		}
+		return nil, nil, fmt.Errorf("repo %s: stating clone directory %s: %w", repo, cloneRepoDir, statErr)
+	}
+
+	// Validate every source and dest path and collect custom (non-"*.local*")
+	// names up front, then establish exclude coverage for the whole set BEFORE
+	// any write -- mirroring EnvMaterializer so no secret file lands ahead of its
+	// exclude line.
+	type plannedTarget struct {
+		srcAbs  string
+		destAbs string
+		relPath string
+	}
+	var planned []plannedTarget
+	var customPatterns []string
+	for _, tgt := range targets {
+		srcAbs, err := safeTargetPath(cloneRepoDir, tgt.Path)
+		if err != nil {
+			return nil, nil, fmt.Errorf("env inherit source %q for repo %s: %w", tgt.Path, repo, err)
+		}
+		destAbs, err := safeTargetPath(worktreeDir, tgt.Path)
+		if err != nil {
+			return nil, nil, fmt.Errorf("env inherit dest %q for repo %s: %w", tgt.Path, repo, err)
+		}
+
+		info, statErr := os.Stat(srcAbs)
+		if statErr != nil {
+			if os.IsNotExist(statErr) {
+				if configured {
+					// R8: the repo has env configured but the clone holds no
+					// materialized output to inherit (e.g. env enabled after the
+					// last apply, or the clone was never applied).
+					return nil, nil, fmt.Errorf("repo %s: no materialized env output at %s to inherit; run `niwa apply` to materialize the instance environment first", repo, srcAbs)
+				}
+				// Repo has no env configured at all: nothing to copy, not an error.
+				continue
+			}
+			return nil, nil, fmt.Errorf("repo %s: stating clone env output %q: %w", repo, srcAbs, statErr)
+		}
+		if info.IsDir() {
+			return nil, nil, fmt.Errorf("repo %s: clone env output %q is a directory, not a file", repo, srcAbs)
+		}
+
+		planned = append(planned, plannedTarget{srcAbs: srcAbs, destAbs: destAbs, relPath: tgt.Path})
+		if !matchedByBasePattern(tgt.Path) {
+			customPatterns = append(customPatterns, tgt.Path)
+		}
+	}
+
+	if len(customPatterns) > 0 {
+		if !gitexclude.IsGitRepo(worktreeDir) {
+			return nil, nil, fmt.Errorf("repo %s: custom secret-output target requires a git repository to guarantee git invisibility, but %s is not a git repository", repo, worktreeDir)
+		}
+		if err := gitexclude.EnsureRepoExclude(worktreeDir, customPatterns...); err != nil {
+			return nil, nil, fmt.Errorf("repo %s: recording git exclude coverage for inherited custom secret-output targets: %w", repo, err)
+		}
+	}
+
+	for _, p := range planned {
+		data, err := os.ReadFile(p.srcAbs)
+		if err != nil {
+			return nil, nil, fmt.Errorf("repo %s: reading clone env output %q: %w", repo, p.srcAbs, err)
+		}
+		if err := os.MkdirAll(filepath.Dir(p.destAbs), 0o700); err != nil {
+			return nil, nil, fmt.Errorf("repo %s: creating parent dir for inherited env output %q: %w", repo, p.relPath, err)
+		}
+		if err := os.WriteFile(p.destAbs, data, secretFileMode); err != nil {
+			return nil, nil, fmt.Errorf("repo %s: writing inherited env output %q: %w", repo, p.relPath, err)
+		}
+		written = append(written, p.destAbs)
+	}
+
+	return written, customPatterns, nil
+}
+
 // FindRepoGroup resolves the group a repo belongs to by scanning the instance
 // layout (<instanceRoot>/<group>/<repo>) two levels deep. The on-disk layout is
 // the ground truth: niwa apply already cloned the repo into its group directory,
@@ -230,11 +363,13 @@ func ApplyToWorktree(cfg *config.WorkspaceConfig, configDir, instanceRoot, workt
 	}
 	written = append(written, result.WrittenFiles...)
 
-	// 2. Repo materializers (settings, env, files, hooks) targeted at the
-	//    worktree. Same shared loop the instance apply path uses.
+	// 2. Repo materializers (settings, files, hooks) targeted at the worktree.
+	//    Same shared loop the instance apply path uses, but with the
+	//    EnvMaterializer dropped: a worktree does not re-resolve secrets, it
+	//    inherits the clone's already-materialized env output (step 2b below).
 	materializers := opts.Materializers
 	if materializers == nil {
-		materializers = defaultRepoMaterializers(opts.Stderr)
+		materializers = worktreeRepoMaterializers(opts.Stderr)
 	}
 	discoveredHooks, _ := DiscoverHooks(configDir)
 	wsEnvFile, repoEnvFiles, _ := DiscoverEnvFiles(configDir)
@@ -267,6 +402,24 @@ func ApplyToWorktree(cfg *config.WorkspaceConfig, configDir, instanceRoot, workt
 		return nil, err
 	}
 	written = append(written, matFiles...)
+
+	// 2b. Env inherit: copy the clone's already-materialized env output file(s)
+	//     into the worktree's config-resolved targets, byte-for-byte. The
+	//     worktree path NEVER resolves secrets; it mirrors the clone. The
+	//     primitive establishes git-exclude coverage for custom target names
+	//     before writing (fail-closed) and reports those names so the
+	//     re-assert below carries them in the unioned exclude block.
+	cloneRepoDir := filepath.Join(instanceRoot, group, repo)
+	effectiveEnv := MergeOverrides(cfg, repo).Env
+	envInherited, envCustomNames, err := inheritEnvOutputs(
+		cloneRepoDir, worktreePath, cfg, repo, opts.GlobalEnvOutput, effectiveEnv,
+		&DiscoveredEnv{WorkspaceFile: relWsEnv, RepoFiles: repoEnvFiles},
+	)
+	if err != nil {
+		return nil, err
+	}
+	written = append(written, envInherited...)
+	envOutputs = append(envOutputs, envCustomNames...)
 
 	// Record git-ignore coverage for any custom secret-output target names so
 	// they stay invisible to the worktree's git status, matching the instance
@@ -325,6 +478,19 @@ func defaultRepoMaterializers(stderr io.Writer) []Materializer {
 		&HooksMaterializer{},
 		&SettingsMaterializer{},
 		&EnvMaterializer{Stderr: stderr},
+		&FilesMaterializer{Stderr: stderr},
+	}
+}
+
+// worktreeRepoMaterializers returns the materializer set run against a worktree:
+// the canonical set MINUS the EnvMaterializer. A worktree does not re-resolve
+// secrets; its env is produced by inheritEnvOutputs (byte-copy from the clone),
+// so running the env materializer here would re-introduce the live-resolution
+// fork this design removes. Settings, files, and hooks still materialize.
+func worktreeRepoMaterializers(stderr io.Writer) []Materializer {
+	return []Materializer{
+		&HooksMaterializer{},
+		&SettingsMaterializer{},
 		&FilesMaterializer{Stderr: stderr},
 	}
 }
