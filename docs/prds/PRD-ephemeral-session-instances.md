@@ -80,9 +80,10 @@ who fans out agents in a niwa workspace, and the cost lands on every fan-out.
 - As a developer setting up a workspace, I want the session-hook configuration
   installed at the root by default, so that the behavior is there without my wiring
   hooks by hand.
-- As a developer with an existing workspace, I want a supported command to refresh
-  the root's hook configuration, so that I adopt or update the behavior without
-  re-creating the workspace from scratch.
+- As a developer with an existing workspace, I want to run `niwa apply` from the
+  workspace root to refresh the root's managed configuration and everything beneath
+  it, so that I adopt or update the behavior without re-creating the workspace from
+  scratch.
 
 ## Requirements
 
@@ -108,13 +109,17 @@ Functional:
   that starts at the root: a guard prevents an ordinary or coordinator session from
   being turned into an ephemeral instance. The guard does not rely on a native hook
   field to distinguish session kinds (none exists).
-- **R7.** niwa installs the session-hook configuration at the workspace root by
-  default when a workspace is initialized, with no per-developer manual hook
-  editing.
-- **R8.** niwa provides a command to refresh or regenerate the workspace root's
-  managed configuration (including the session hooks) on an already-initialized
-  workspace, without re-running init from scratch and without destroying existing
-  instances.
+- **R7.** niwa installs the workspace-root managed configuration -- the session
+  hooks and the session permission posture (`permissions.defaultMode`) -- by default
+  when a workspace is initialized, with no per-developer manual editing. Because a
+  root-launched session resolves its settings at launch from the root (the agent's
+  later `cd` into the instance does not reload them), the permission posture must
+  live at the root for root-launched sessions to inherit it, exactly as the hooks do.
+- **R8.** `niwa apply`, run from the workspace root, converges the root-managed
+  configuration (hooks and permission posture) and vault, then cascades into every
+  instance and worktree beneath it -- without re-running init and without destroying
+  instances. The root is just another surface `apply` converges; no separate refresh
+  command is introduced.
 - **R9.** `niwa create` exposes a machine-readable form of the created instance's
   path, so the provisioning hook can consume it programmatically rather than parsing
   human output or re-deriving the instance name.
@@ -150,8 +155,9 @@ Functional:
   machine-readable form the reaper consumes.
 - [ ] The hooks install at the workspace root through a non-interactive workspace
   setup with no TTY attached.
-- [ ] Running the refresh command on an existing workspace updates the root's hook
-  configuration to the current managed form without destroying existing instances.
+- [ ] Running `niwa apply` from the workspace root updates the root's managed
+  configuration (hooks and permission posture) to the current form and cascades into
+  the instances and worktrees beneath it, without destroying any instance.
 - [ ] The whole flow requires no agent harness other than Claude Code: with only
   Claude Code present, all of the above hold.
 
@@ -180,11 +186,19 @@ Functional:
   `SessionStart`. Alternative considered: rely on the agent re-rooting into the
   instance to pick up its context -- rejected, the spike showed `cd` does not
   re-root the session.
-- **Hooks live at the workspace root, which makes a refresh command necessary (R7,
-  R8).** The root becomes managed configuration (it now hosts the session hooks), so
-  there must be a non-destructive way to update an already-initialized root.
-  Alternative considered: tell developers to hand-edit root `.claude/settings.json`
-  -- rejected, manual hook editing is the setup this feature removes.
+- **The workspace root becomes a managed surface, refreshed by root-context `niwa
+  apply` (R7, R8).** The root now hosts the session hooks and the permission posture,
+  so it needs a non-destructive refresh path. Rather than a new verb, `niwa apply`
+  becomes usable from the workspace root and converges the root plus every instance
+  and worktree beneath it. Alternatives considered: a dedicated `niwa refresh` command
+  (rejected -- the root is just another surface `apply` already knows how to converge,
+  and a second verb would drift from it) and hand-edited root settings (rejected --
+  manual editing is the setup this feature removes).
+- **The permission posture is ordinary root config, not a special gate (R7).** The
+  `permissions.defaultMode` block is materialized at the root by the same
+  `buildSettingsDoc` path that emits the hooks, governed by the same opt-in mode --
+  no separate mechanism. Consequence (see Known Limitations): a root-level bypass
+  posture applies to every session launched at the root, not only dispatched workers.
 - **`niwa create` needs machine-readable output (R9).** Today it does not emit the
   instance path in a stable machine-readable form; the hook needs it
   programmatically. The exact form (a `--json` mode or a documented stable line) is
@@ -204,6 +218,12 @@ Functional:
 - The coordinator-vs-worker guard is heuristic by necessity (no native
   discriminator); an unusual launch pattern could misclassify, which the opt-out
   (R12) exists to escape.
+- When the workspace opts into bypass permissions, the posture lives at the root and
+  so applies to every session launched there -- the coordinator and any ordinary
+  root session, not only dispatched workers -- because settings resolve at launch and
+  neither the hook nor dispatch can scope permission mode per session. This is a
+  wider grant than per-instance bypass; the opt-in mode (R12) bounds it to workspaces
+  that chose it.
 
 ## Out of Scope
 

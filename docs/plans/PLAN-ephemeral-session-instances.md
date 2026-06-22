@@ -23,16 +23,16 @@ ephemeral niwa instance": workspace-root SessionStart/SessionEnd hooks delegatin
 to a new `niwa session from-hook` subcommand, a session-to-instance mapping store,
 a `niwa reap` orphan sweep, the supporting `niwa create --json` / `niwa list
 --json` primitives, and the root-config materialization path (`niwa init` install
-plus a new `niwa refresh` command). It does not re-open the requirements (PRD
-R1-R12) or the architecture (the DESIGN's seven decisions); it slices them into
-atomic issues.
+plus root-context `niwa apply`, which refreshes the root and cascades into instances
+and worktrees). It does not re-open the requirements (PRD R1-R12) or the architecture
+(the DESIGN's seven decisions); it slices them into atomic issues.
 
 ## Decomposition Strategy
 
 **Hybrid, walking-skeleton-first.** The three primitive issues (machine-readable
 `create`, `list` enumeration, the mapping store) carry no dependencies and form the
 foundation. The two `from-hook` branches and the reaper build on the primitives;
-the root materializer and `refresh` build on the hook subcommand existing; the
+the root materializer and root-context `apply` build on the hook subcommand existing; the
 functional tests and the guide close the chain. Grouping rule: one issue per new
 CLI surface or store, with the SessionStart and SessionEnd branches split so the
 provisioning path (guard + create + inject) and the teardown path (resolve +
@@ -90,7 +90,8 @@ source of truth for teardown and the reaper (PRD R2).
 
 **Acceptance Criteria:**
 - Helpers persist `session_id`, `instance_name`, `instance_path`,
-  `transcript_path`, `created`, and `ephemeral: true`
+  `transcript_path`, `created`, `ephemeral: true`, and an optional `label` alias
+  (filled later from the session topic; never used to rename the on-disk instance)
 - `session_id` is validated against the UUID format before use as a path component;
   an invalid id is rejected without writing
 - Unit tests cover round-trip write/read/delete and rejection of a malformed
@@ -113,7 +114,9 @@ the mapping write, and the `additionalContext` injection (PRD R1, R3, R6).
 - Reads hook JSON on stdin and runs only when the workspace is in ephemeral-session
   mode, the session is a dispatched background job, and the launch cwd does not
   already resolve inside a niwa instance; otherwise it is a no-op
-- On passing the guard, runs `niwa create --json`, writes the Issue-3 mapping, and
+- On passing the guard, runs `niwa create --json --name <session-id-derived>` (named
+  from `session_id` since no topic slug exists yet at SessionStart, which also dodges
+  the `NextInstanceNumber` race), writes the Issue-3 mapping, and
   emits a `hookSpecificOutput.additionalContext` JSON carrying the instance path,
   the instance `CLAUDE.md`, and a cd instruction
 - An acceptance check identifies which hook signal exposes background-job-ness and
@@ -174,40 +177,47 @@ whose session ended without clean teardown, and invoke it opportunistically at
 
 **Complexity:** complex
 
-**Goal:** Add the root materializer (`internal/workspace/root_materializer.go`) that
-writes the workspace-root `.claude/settings.json` SessionStart/SessionEnd hook
-entries and the ephemeral-mode flag, and install it by default at `niwa init` with a
-persisted opt-out (PRD R7, R12).
+**Goal:** Add the root materializer (`internal/workspace/root_materializer.go`),
+reusing the existing `buildSettingsDoc`, that writes the workspace-root
+`.claude/settings.json` with the SessionStart/SessionEnd hook entries, the permission
+posture (`permissions.defaultMode`), and the ephemeral-mode flag, and install it by
+default at `niwa init` with a persisted opt-out (PRD R7, R12).
 
 **Acceptance Criteria:**
-- The materializer writes `.claude/settings.json` at the workspace root with
-  SessionStart and SessionEnd entries piping stdin to `niwa session from-hook`, plus
-  the ephemeral-mode flag
+- The materializer writes `.claude/settings.json` at the workspace root (via
+  `buildSettingsDoc`) with SessionStart and SessionEnd entries piping stdin to
+  `niwa session from-hook`, the permission posture, and the ephemeral-mode flag
 - `niwa init` installs the root config by default, non-interactively, with no TTY
   attached
 - An init-time opt-out flag, persisted in root state, suppresses the install;
-  re-running init without it (then refresh) installs it
-- Unit tests cover the materialized settings content and the opt-out path
+  re-running init without it (then `niwa apply` from the root) installs it
+- Unit tests cover the materialized settings content (hooks + permission posture) and
+  the opt-out path
 - `go test ./...` passes
 
 **Dependencies:** <<ISSUE:4>>, <<ISSUE:5>>
 
 ---
 
-### Issue 8: feat(refresh): regenerate root-managed config
+### Issue 8: feat(apply): root-context recursive apply
 
 **Complexity:** testable
 
-**Goal:** Add `niwa refresh` (`internal/cli/refresh.go`) to regenerate the
-root-managed files on an already-initialized workspace without re-running init or
-touching instances (PRD R8).
+**Goal:** Make `niwa apply` usable from the workspace root (`internal/cli/apply.go`,
+using the existing `cwd_classify` root/instance/repo detection): converge the
+root-managed config and vault, then cascade into every instance and worktree beneath
+it (PRD R8). Replaces a dedicated refresh verb.
 
 **Acceptance Criteria:**
-- `niwa refresh` regenerates the root-managed file set idempotently using the
-  existing content-materializer hashing (no-op when already current)
-- `niwa refresh` touches no instance directory and destroys nothing
-- A unit test asserts a stale root config is updated and an already-current root is a
-  no-op
+- Run from the workspace root, `niwa apply` regenerates the root-managed files
+  idempotently (via `buildSettingsDoc` + the existing content-materializer hashing;
+  no-op when already current), then runs the existing per-instance apply for each
+  instance and each instance's worktrees
+- Root-context `niwa apply` re-runs vault resolution for the root and destroys
+  nothing
+- Run from an instance, `niwa apply` keeps its existing instance-scoped behavior
+- A unit test asserts a stale root config is updated, an already-current root is a
+  no-op, and the cascade reaches instances/worktrees
 - `go test ./...` passes
 
 **Dependencies:** <<ISSUE:7>>
@@ -241,7 +251,7 @@ guide) and add it to the CLAUDE.md "Contributor Guides" list (PRD R7, R8 surface
 
 **Acceptance Criteria:**
 - The guide documents the SessionStart/End hooks, the mapping store, `niwa reap`,
-  `niwa refresh`, and the opt-out, mirroring the worktree guide's shape
+  root-context `niwa apply`, and the opt-out, mirroring the worktree guide's shape
 - The guide is added to the CLAUDE.md "Contributor Guides" list
 
 **Dependencies:** <<ISSUE:7>>, <<ISSUE:8>>
@@ -259,7 +269,7 @@ graph TD
     I5["#5: from-hook SessionEnd"]
     I6["#6: reaper"]
     I7["#7: root materialization"]
-    I8["#8: refresh"]
+    I8["#8: root-context apply"]
     I9["#9: functional tests"]
     I10["#10: docs guide"]
 

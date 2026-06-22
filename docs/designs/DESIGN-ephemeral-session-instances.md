@@ -16,8 +16,9 @@ decision: |
   session->instance mapping under the root's `.niwa/sessions/`, and injects the
   instance context + a cd instruction. On end it looks the instance up by session id
   and `niwa destroy --force`s it. A `niwa reap` sweep reclaims orphans via
-  `niwa list --json` plus a per-instance liveness marker. `niwa refresh` regenerates
-  the root-managed config; `niwa init` installs it by default.
+  `niwa list --json` plus a per-instance liveness marker. `niwa init` installs the
+  root-managed config (hooks and permission posture); `niwa apply` run from the
+  workspace root refreshes it and cascades into every instance and worktree.
 rationale: |
   The spike proved this end-to-end with no Agent SDK. A hook-backed Go subcommand
   mirrors the proven `niwa worktree from-hook` precedent, keeps logic testable, and
@@ -32,11 +33,11 @@ rationale: |
 
 Planned
 
-This design owns the mechanism: the root-hook materialization surface, the
+This design owns the mechanism: the root materialization surface, the
 `niwa session from-hook` subcommand, the session->instance mapping store, the
-reaper, the supporting `--json` / liveness primitives, and the `niwa refresh`
-command. The upstream PRD owns the requirements (R1-R12); this design cites them
-and does not re-open them.
+reaper, the supporting `--json` / liveness primitives, and the root-context
+`niwa apply` refresh path. The upstream PRD owns the requirements (R1-R12); this
+design cites them and does not re-open them.
 
 ## Context and Problem Statement
 
@@ -78,27 +79,36 @@ lifts that established pattern from the worktree level to the instance level.
   signal niwa controls, not read from `source`/`agent_type`.
 - **Testability.** Logic belongs in a Go subcommand with unit tests, mirroring
   `niwa worktree from-hook`, not in shell embedded in `settings.json`.
-- **The root becomes managed config.** Hosting hooks at the root forces a
-  non-destructive regenerate path (R7, R8).
+- **The root becomes managed config.** Hosting the hooks and permission posture at
+  the root forces a non-destructive refresh path that also reaches instances and
+  worktrees (R7, R8).
 - **Untrusted hook input.** `session_id` and other stdin fields are interpolated
   into paths and commands and must be validated before use.
 
 ## Considered Options
 
-### Decision 1 — root-hook materialization surface and the refresh command (R7, R8)
+### Decision 1 — root materialization surface and root-context `niwa apply` (R7, R8)
 
-The session hooks must live in the workspace root's `.claude/settings.json`, which
-is not a managed surface today (niwa materializes per-instance and per-repo
-content, not the root). Options: (a) hand-edited root settings -- rejected, manual
-hook editing is the setup this feature removes; (b) fold root materialization into
-`niwa apply` -- rejected, `apply` is instance-scoped convergence and the root is
-not an instance; (c) a dedicated root-materialization step run by `niwa init` and
-re-runnable via a new `niwa refresh` command. **Chosen: (c).** `niwa init`
-materializes the root `.claude/settings.json` (and any future root-managed files)
-from niwa's embedded templates; `niwa refresh` regenerates the same root-managed
-set idempotently on an already-initialized workspace, touching no instance and
-destroying nothing. `refresh` reuses the existing content-materializer hashing so
-it is drift-aware and a no-op when the root is already current.
+The session hooks and the permission posture (`permissions.defaultMode`) must live
+in the *workspace root's* `.claude/settings.json` -- not a managed surface today
+(niwa materializes the instance root via `InstallWorkspaceRootSettings` and per-repo
+dirs, but not the workspace root above the instances). Both ride the same
+`buildSettingsDoc` path that already emits the hooks and the permissions block
+together, so the permission posture is not a separate mechanism -- it is the same
+config landing at a new location.
+
+Two questions: where it lands first, and how it is refreshed. **Landing:** `niwa
+init` materializes the workspace-root `.claude/settings.json` from niwa's embedded
+templates, by default. **Refresh:** rather than a dedicated `niwa refresh` verb,
+`niwa apply` becomes usable from the workspace root. niwa already classifies cwd as
+root / instance / repo (`cwd_classify.go`); at the workspace root, `apply` converges
+the root-managed config and vault, then cascades into every instance (the existing
+instance-scoped `apply`) and each instance's worktrees. **Chosen:** init lands it,
+root-context `apply` refreshes it. Rejected: a new `niwa refresh` verb -- the root is
+just another surface `apply` already knows how to converge, and a second verb would
+drift from it; and hand-edited root settings -- the manual editing this feature
+removes. `apply` stays drift-aware via the existing content-materializer hashing, so
+a root-context apply is a no-op where everything is already current.
 
 ### Decision 2 — the provisioning subcommand (R1, R3)
 
@@ -157,6 +167,20 @@ worktree sessions), recording `session_id`, `instance_name`, `instance_path`,
 validated against the Claude session-id format (UUID) before being used as a path
 component. This store is the single source of truth for teardown and the reaper.
 
+**Instance naming.** The instance is named from the `session_id`, via
+`niwa create --name <session-id-derived-suffix>`. This is deliberate: at
+`SessionStart` the session has not yet processed its first user prompt, so no
+topic-derived slug exists -- the empirically-captured SessionStart stdin carried
+`session_id`, `transcript_path`, `cwd`, `agent_type`, `source`, and `model`, but no
+title or topic. `session_id` is the only stable, unique handle available at create
+time, and naming from it both gives a collision-free name and dodges the
+`NextInstanceNumber` race that an unnamed concurrent `niwa create` would hit. A
+human-friendly alias (e.g. derived from the first `UserPromptSubmit` once the topic
+is known) MAY be recorded as an optional `label` field on the mapping later, but the
+on-disk instance directory is never renamed -- renaming mid-session would break the
+running session's cwd, so durable identity stays the `session_id` and any slug is
+cosmetic metadata.
+
 ### Decision 6 — teardown and the reaper (R4, R5, R10, R11)
 
 **Teardown (SessionEnd branch):** resolve the instance by `session_id` through the
@@ -192,9 +216,11 @@ a cd instruction. The agent works inside the instance. On SessionEnd, the
 subcommand resolves the instance by session id and `niwa destroy --force`s it.
 `niwa reap` backstops orphans by joining `niwa list --json` against the mapping and
 a liveness marker, destroying only dead ephemeral instances. `niwa init` installs
-the root config by default; `niwa refresh` regenerates it idempotently. `niwa
+the root config (hooks and permission posture) by default; `niwa apply` from the
+workspace root refreshes it and cascades into instances and worktrees. `niwa
 create --json` and `niwa list --json` give the hook and reaper machine-readable
-surfaces.
+surfaces. Instances are named from `session_id` (the only stable handle available at
+SessionStart), with an optional friendly alias recorded later.
 
 This keeps niwa the system of record (every ephemeral instance is mapped, listed,
 and reclaimable), removes per-session manual setup, and bounds orphans even when
@@ -204,10 +230,15 @@ SessionEnd never fires.
 
 Components (new unless noted):
 
-- **Root materializer** -- emits the workspace-root `.claude/settings.json` with
-  the SessionStart and SessionEnd hook entries (each a `command` piping stdin to
-  `niwa session from-hook`) and the ephemeral-mode flag. Run by `niwa init` and
-  `niwa refresh`; drift-aware via the existing content-materializer hashing.
+- **Root materializer** -- emits the workspace-root `.claude/settings.json` (via the
+  shared `buildSettingsDoc`) with the SessionStart and SessionEnd hook entries (each
+  a `command` piping stdin to `niwa session from-hook`), the permission posture
+  (`permissions.defaultMode`), and the ephemeral-mode flag. Run by `niwa init` and by
+  root-context `niwa apply`; drift-aware via the existing content-materializer
+  hashing.
+- **Root-context `niwa apply`** -- when run from the workspace root, converges the
+  root-managed config and vault, then cascades into each instance (existing apply)
+  and each instance's worktrees.
 - **`niwa session from-hook`** -- the hook entry point. Reads hook JSON on stdin,
   validates `session_id`, branches on `hook_event_name`:
   - *SessionStart:* guard (mode on? background-job? not already inside an
@@ -220,7 +251,6 @@ Components (new unless noted):
   `niwa destroy --force` dead ephemeral instances. Also invoked at `niwa create`
   start.
 - **`niwa create --json` / `niwa list --json`** -- additive machine-readable output.
-- **`niwa refresh`** -- idempotent regeneration of root-managed files.
 
 End-to-end flow:
 
@@ -246,8 +276,10 @@ End-to-end flow:
 - Add the mapping store helpers (write/read/delete, `session_id` validation) beside
   the existing session-state code.
 - Add `niwa reap` and wire an opportunistic call into `create`.
-- Add the root materializer and `niwa refresh`; make `niwa init` install the root
-  config by default with an opt-out flag persisted in root state.
+- Add the root materializer (reusing `buildSettingsDoc`, emitting hooks + permission
+  posture); make `niwa init` install the root config by default with an opt-out flag
+  persisted in root state; make `niwa apply` root-context-aware so it converges the
+  root then cascades into instances and worktrees.
 - Add a `@critical` functional Gherkin scenario covering provision-on-start /
   teardown-on-end and a reaper-reclaims-orphan scenario, using the offline
   `localGitServer` helper.
@@ -276,8 +308,13 @@ End-to-end flow:
 
 - Developers fan out agents from the root and each runs isolated, with no manual
   per-session create/destroy and no growing orphan pile.
-- niwa gains a root-managed-config surface (`niwa init` + `niwa refresh`) it did not
+- niwa gains a root-managed-config surface (`niwa init` lands it, root-context
+  `niwa apply` refreshes it and cascades into instances and worktrees) it did not
   have, plus `--json` output modes that are independently useful.
+- A root-level bypass-permissions posture applies to every session launched at the
+  root, not only dispatched workers (settings resolve at launch and cannot be scoped
+  per session). This is wider than per-instance bypass; the opt-in ephemeral mode
+  bounds it to workspaces that chose it.
 - Instance build cost (a full clone per session) is unchanged and accepted; fan-out
   of N agents is N clones.
 - The background-job discriminator is the one residual feasibility detail; it is
