@@ -4,7 +4,7 @@ status: Draft
 execution_mode: single-pr
 upstream: docs/designs/DESIGN-ephemeral-session-instances.md
 milestone: "Ephemeral per-session instances"
-issue_count: 11
+issue_count: 10
 ---
 
 # PLAN: one ephemeral niwa instance per Claude Code session
@@ -239,14 +239,14 @@ instance from anywhere inside it.
 - `niwa apply --no-cascade` converges only the current scope without descending (at
   the root: root config only, no instance reconvergence)
 - `apply` re-runs vault resolution for the scope and destroys nothing
-- Worktree-scope `apply` resolves the workspace overlay's vault the same way the
-  apply path does (building on Issue 11's unified resolution, not reimplementing it,
-  and preserving its `AllowMissingSecrets` graceful degradation)
+- Worktree-scope `apply` delegates to the upstream inherit primitive (PR #168): the
+  worktree path inherits the instance's already-materialized environment and does NOT
+  resolve secrets on the worktree path
 - Unit tests cover each scope (root / instance / worktree), the `--no-cascade` cap,
   and the no-op-when-current case
 - `go test ./...` passes
 
-**Dependencies:** <<ISSUE:7>>, <<ISSUE:11>>
+**Dependencies:** <<ISSUE:7>>
 
 ---
 
@@ -286,34 +286,6 @@ guide) and add it to the CLAUDE.md "Contributor Guides" list (PRD R7, R8 surface
 
 ---
 
-### Issue 11: fix(worktree): resolve overlay vault on the worktree path
-
-**Complexity:** testable
-
-**Goal:** Fix the worktree-vs-apply vault-resolution asymmetry (folded in from
-tsukumogami/niwa#170) so `niwa worktree create` resolves the workspace overlay's
-vault the same way `niwa apply` does, and so worktree-scope `apply` (Issue 8) inherits
-correct resolution. Mirror the apply path's overlay-vault resolution
-(`internal/workspace/apply.go` ~887-920) in the worktree path
-(`internal/cli/session_lifecycle_cmd.go` `mergeWorktreeOverlay`,
-`internal/workspace/override.go` `MergeWorkspaceOverlay`), and make the
-unknown-provider branch honor `AllowMissing`/`Optional`
-(`internal/vault/resolve/resolve.go` ~502-517).
-
-**Acceptance Criteria:**
-- `niwa worktree create` succeeds and installs CLAUDE content in a workspace whose
-  overlay declares a vault provider + secret bindings (the config `niwa apply` handles)
-- `MergeWorkspaceOverlay` carries `overlay.Vault` into `merged.Vault` so the merged
-  config keeps the provider
-- With `AllowMissingSecrets`, an unresolvable provider degrades gracefully
-  (skip/warn, creation continues) instead of failing the content install
-- `niwa apply` behavior is unchanged
-- `go test ./...` passes
-
-**Dependencies:** None
-
----
-
 ## Dependency Graph
 
 ```mermaid
@@ -328,9 +300,7 @@ graph TD
     I8["#8: context-aware subtree apply"]
     I9["#9: functional tests"]
     I10["#10: docs guide"]
-    I11["#11: worktree overlay-vault fix"]
 
-    I11 --> I8
     I1 --> I4
     I3 --> I4
     I3 --> I5
@@ -351,7 +321,7 @@ graph TD
     classDef ready fill:#bbdefb
     classDef blocked fill:#fff9c4
 
-    class I1,I2,I3,I11 ready
+    class I1,I2,I3 ready
     class I4,I5,I6,I7,I8,I9,I10 blocked
 ```
 
@@ -361,12 +331,12 @@ graph TD
 
 **Critical path:** Issues 1 + 3 → Issue 4 → Issue 5 → Issue 7 → Issue 9.
 
-- **Batch 1 (foundation, parallel):** Issues 1, 2, 3, 11 — no dependencies, open them
-  first (Issue 11 is the worktree overlay-vault fix that unblocks Issue 8).
+- **Batch 1 (foundation, parallel):** Issues 1, 2, 3 — no dependencies, open them
+  first.
 - **Batch 2:** Issue 4 (needs 1, 3) and Issue 6 (needs 2, 3) in parallel.
 - **Batch 3:** Issue 5 (needs 3, 4).
 - **Batch 4:** Issue 7 (needs 4, 5) — root materializer and default install.
-- **Batch 5:** Issue 8 (needs 7, 11) and Issue 9 (needs 4, 5, 6, 7) in parallel.
+- **Batch 5:** Issue 8 (needs 7) and Issue 9 (needs 4, 5, 6, 7) in parallel.
 - **Batch 6:** Issue 10 (needs 7, 8) — the guide, last.
 
 **Parallelization opportunity:** after Batch 1, the provisioning branch (Issue 4)
@@ -381,5 +351,8 @@ functional tests.
   issues cite.
 - docs/guides/worktree.md — the `niwa worktree from-hook` precedent the hook
   subcommand and functional tests mirror.
-- tsukumogami/niwa#170 — the worktree-vs-apply overlay-vault resolution asymmetry,
-  folded into this plan as Issue 11 (a prerequisite for Issue 8's worktree-scope `apply`).
+- tsukumogami/niwa#170 — the worktree-vs-apply overlay-vault resolution asymmetry.
+  Resolved upstream by tsukumogami/niwa#168, which had the worktree path inherit the
+  instance's already-materialized environment instead of resolving secrets, so #170 is
+  no longer part of this plan and Issue 8's worktree-scope `apply` delegates to #168's
+  inherit primitive.

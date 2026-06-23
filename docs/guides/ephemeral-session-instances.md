@@ -207,14 +207,22 @@ scope from it (or from `--instance`, or a registry name argument):
 3. If cwd is at the **workspace root**, materialize the root-managed config,
    then converge every instance and each instance's worktrees.
 
+Worktrees are refreshed as part of the instance apply, not by a separate niwa
+cascade: an instance-scope `apply` refreshes the instance's environment and the
+worktree path inherits that already-materialized environment (the upstream
+inherit refresh). A worktree-scope `apply` likewise inherits the instance's
+environment rather than resolving secrets on the worktree path.
+
 This refines the prior behavior, where `apply` from anywhere inside an instance
 converged the whole instance. A worktree is now its own scope. This is an
 intentional, pre-1.0 semantics change toward a uniform "converge my subtree"
 model.
 
-`apply` re-runs vault resolution for the scope, is drift-aware (a no-op where
-everything is already current, via content-materializer hashing), and destroys
-nothing — destruction is `niwa destroy` / `niwa reap`.
+`apply` re-runs vault resolution at the root and instance scopes; at worktree
+scope the worktree inherits the instance's already-materialized environment
+instead of resolving secrets on the worktree path. It is drift-aware (a no-op
+where everything is already current, via content-materializer hashing), and
+destroys nothing — destruction is `niwa destroy` / `niwa reap`.
 
 ### `--no-cascade`
 
@@ -234,9 +242,9 @@ set:
 
 | Scope (cwd) | `niwa apply` converges | `niwa apply --no-cascade` converges |
 |-------------|------------------------|-------------------------------------|
-| Workspace root | Root-managed config (`.claude/settings.json` + root `CLAUDE.md`) and vault, then every instance, then each instance's worktrees | Root-managed config and vault only — no instance reconvergence |
-| Instance | That instance, then its worktrees | That instance only — skips its worktrees |
-| Worktree | That worktree alone | That worktree alone (no children to descend into; the flag is a no-op) |
+| Workspace root | Root-managed config (`.claude/settings.json` + root `CLAUDE.md`) and vault, then every instance, then each instance's worktrees (refreshed via the inherit refresh as part of each instance apply) | Root-managed config and vault only — no instance reconvergence |
+| Instance | That instance, then its worktrees (refreshed as part of this apply via the inherit refresh, not a separate niwa cascade) | That instance only — skips its worktrees |
+| Worktree | That worktree alone (inherits the instance's materialized environment; no secret resolution on the worktree path) | That worktree alone (no children to descend into; the flag is a no-op) |
 
 At no scope does `apply` climb above the current node or touch a sibling.
 

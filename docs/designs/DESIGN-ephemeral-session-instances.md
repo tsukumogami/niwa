@@ -115,7 +115,10 @@ climbs above it or touches siblings:
 - at the **workspace root**: the root-managed config and vault, then every instance
   (the existing instance-scoped `apply`) and each instance's worktrees;
 - at an **instance**: that instance and its worktrees;
-- at a **worktree**: that worktree alone.
+- at a **worktree**: that worktree alone. Worktree-scope `apply` delegates to the
+  upstream inherit primitive (tsukumogami/niwa#168): the worktree path inherits the
+  instance's already-materialized environment rather than resolving secrets on the
+  worktree path.
 
 `apply --no-cascade` caps the operation at the current scope without descending --
 its primary use is refreshing only the root config after a hook/permission/CLAUDE.md
@@ -283,9 +286,11 @@ Components (new unless noted):
 - **Context-aware `niwa apply`** -- extends `cwd_classify` with an inside-worktree
   scope (workspace root / instance / worktree) and converges the subtree at the
   current scope: root -> root config + vault + every instance + their worktrees;
-  instance -> that instance + its worktrees; worktree -> that worktree. Never climbs
-  above the current scope. `--no-cascade` caps it at the current node (e.g. root
-  config only).
+  instance -> that instance + its worktrees; worktree -> that worktree. At worktree
+  scope, `apply` delegates to the upstream inherit primitive (tsukumogami/niwa#168) --
+  the worktree path inherits the instance's already-materialized environment and does
+  not resolve secrets on the worktree path. Never climbs above the current scope.
+  `--no-cascade` caps it at the current node (e.g. root config only).
 - **`niwa instance from-hook`** -- the hook entry point. Reads hook JSON on stdin,
   validates `session_id`, branches on `hook_event_name`:
   - *SessionStart:* guard (ephemeral mode on? job `template == "bg"`? not already
@@ -337,7 +342,10 @@ End-to-end flow:
   (`TestResolveApplyScope_SingleFromInstance` / `_SingleFromNestedDir`) plus the
   `apply` help text, which document today's converge-the-whole-instance behavior.
   Converge the subtree at the current scope, add `--no-cascade` to cap at the current
-  node. Unit-test each scope (root / instance / worktree) and the `--no-cascade` cap.
+  node. Worktree-scope `apply` delegates to the upstream inherit primitive
+  (tsukumogami/niwa#168) -- the worktree path inherits the instance's
+  already-materialized environment instead of resolving secrets on the worktree path.
+  Unit-test each scope (root / instance / worktree) and the `--no-cascade` cap.
 - Add a `@critical` functional Gherkin scenario covering provision-on-start /
   teardown-on-end and a reaper-reclaims-orphan scenario, using the offline
   `localGitServer` helper.
@@ -396,3 +404,7 @@ End-to-end flow:
   native worker discriminator).
 - docs/guides/worktree.md -- the per-repo `niwa worktree from-hook` precedent this
   design lifts to the instance level.
+- tsukumogami/niwa#168 / #170 -- the worktree-vs-apply overlay-vault asymmetry (#170)
+  was superseded upstream by #168, which has the worktree path inherit the instance's
+  already-materialized environment instead of resolving secrets. Worktree-scope `apply`
+  delegates to that inherit primitive.
