@@ -107,6 +107,11 @@ type provisionResult struct {
 // exercising the guard + mapping + injection logic in isolation.
 var provisionInstanceFunc = realProvisionInstance
 
+// destroyInstanceFunc force-destroys the instance at instancePath. It is a
+// package variable so SessionEnd teardown tests can substitute a fake that
+// records the call without touching the filesystem.
+var destroyInstanceFunc = realDestroyInstance
+
 func runInstanceFromHook(cmd *cobra.Command, _ []string) error {
 	raw, err := io.ReadAll(cmd.InOrStdin())
 	if err != nil {
@@ -196,10 +201,55 @@ func runInstanceHookStart(cmd *cobra.Command, payload instanceHookPayload, jobsD
 	return nil
 }
 
-// runInstanceHookEnd handles a SessionEnd hook. Teardown is added in the next
-// issue (DESIGN Decision 6); for now it is a clean no-op so the SessionEnd
-// branch is wired but inert.
-func runInstanceHookEnd(_ *cobra.Command, _ instanceHookPayload) error {
+// runInstanceHookEnd handles a SessionEnd hook (DESIGN Decision 6, teardown).
+// It resolves the instance from the session->instance mapping BY session_id --
+// never from the hook's reported cwd, which is the launch root, not the
+// instance. It destroys the instance only when the mapping is marked
+// ephemeral:true (force semantics, equivalent to `niwa destroy --force`), then
+// deletes the mapping. A SessionEnd with no mapping (a non-worker session, or
+// one already reaped) is a clean no-op. SessionEnd is best-effort, so this
+// path always exits 0: teardown failures are surfaced on stderr but never fail
+// the hook (the reaper backstops any orphan).
+func runInstanceHookEnd(cmd *cobra.Command, payload instanceHookPayload) error {
+	stderr := cmd.ErrOrStderr()
+
+	// An invalid session id can carry no mapping (the mapping path is keyed by a
+	// validated id), so it is a clean no-op.
+	if !workspace.ValidSessionID(payload.SessionID) {
+		return nil
+	}
+
+	workspaceRoot, ok := resolveHookWorkspaceRoot(payload.Cwd)
+	if !ok {
+		// No resolvable workspace root means no mapping store to consult.
+		return nil
+	}
+
+	mapping, err := workspace.ReadSessionMapping(workspaceRoot, payload.SessionID)
+	if err != nil {
+		// No mapping: non-worker session or already reaped. Clean no-op.
+		return nil
+	}
+
+	// Only ever destroy instances carrying the ephemeral marker. A mapping
+	// without it is not ours to reclaim; leave the instance and the mapping
+	// untouched.
+	if !mapping.Ephemeral {
+		return nil
+	}
+
+	if mapping.InstancePath != "" {
+		if err := destroyInstanceFunc(mapping.InstancePath); err != nil {
+			// Best-effort: log and continue to mapping deletion so a transient
+			// destroy failure does not strand the mapping forever; the reaper
+			// reclaims the instance later if it still exists.
+			fmt.Fprintf(stderr, "niwa: warning: destroying instance for session %s: %v\n", payload.SessionID, err)
+		}
+	}
+
+	if err := workspace.DeleteSessionMapping(workspaceRoot, payload.SessionID); err != nil {
+		fmt.Fprintf(stderr, "niwa: warning: deleting session mapping %s: %v\n", payload.SessionID, err)
+	}
 	return nil
 }
 
@@ -423,4 +473,15 @@ func realProvisionInstance(ctx context.Context, workspaceRoot, cwd, namePrefix s
 	}
 
 	return provisionResult{Name: instanceName, Path: instancePath}, nil
+}
+
+// realDestroyInstance is the production teardown: it force-destroys the
+// instance directory, equivalent to `niwa destroy --force <instance>`. It
+// validates the directory is a destroyable instance (not a workspace root)
+// first. It is wired into destroyInstanceFunc; tests override that variable.
+func realDestroyInstance(instancePath string) error {
+	if err := workspace.ValidateInstanceDir(instancePath); err != nil {
+		return err
+	}
+	return workspace.DestroyInstance(instancePath)
 }

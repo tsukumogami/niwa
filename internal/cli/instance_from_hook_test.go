@@ -327,3 +327,168 @@ func TestIsBackgroundWorker_PrefixMismatch(t *testing.T) {
 		t.Error("isBackgroundWorker = true for a sessionId mismatch; want false")
 	}
 }
+
+// --- SessionEnd teardown ---
+
+// stubDestroy installs a fake destroyer recording the path it was asked to
+// destroy. It restores the original on cleanup.
+func stubDestroy(t *testing.T) *struct {
+	called  bool
+	gotPath string
+} {
+	t.Helper()
+	rec := &struct {
+		called  bool
+		gotPath string
+	}{}
+	prev := destroyInstanceFunc
+	destroyInstanceFunc = func(path string) error {
+		rec.called = true
+		rec.gotPath = path
+		return nil
+	}
+	t.Cleanup(func() { destroyInstanceFunc = prev })
+	return rec
+}
+
+func runEnd(t *testing.T, payload instanceHookPayload) (stderr string, err error) {
+	t.Helper()
+	var errBuf bytes.Buffer
+	instanceFromHookCmd.SetErr(&errBuf)
+	t.Cleanup(func() { instanceFromHookCmd.SetErr(os.Stderr) })
+	runErr := runInstanceHookEnd(instanceFromHookCmd, payload)
+	return errBuf.String(), runErr
+}
+
+// TestSessionEnd_ResolveAndDestroy: an ephemeral mapping is resolved by
+// session_id, the instance is destroyed, and the mapping is deleted.
+func TestSessionEnd_ResolveAndDestroy(t *testing.T) {
+	root := setupHookWorkspace(t, true)
+	rec := stubDestroy(t)
+
+	instancePath := filepath.Join(root, "test-ws-aabbccddeeff")
+	if err := workspace.WriteSessionMapping(root, workspace.SessionMapping{
+		SessionID:    testSessionID,
+		InstanceName: "test-ws-aabbccddeeff",
+		InstancePath: instancePath,
+		Ephemeral:    true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := runEnd(t, instanceHookPayload{
+		HookEventName: hookEventSessionEnd,
+		SessionID:     testSessionID,
+		Cwd:           root,
+	})
+	if err != nil {
+		t.Fatalf("runInstanceHookEnd: %v", err)
+	}
+	if !rec.called {
+		t.Fatal("destroyer was NOT called")
+	}
+	if rec.gotPath != instancePath {
+		t.Errorf("destroyed path = %q, want the mapped instance path %q", rec.gotPath, instancePath)
+	}
+	if _, err := workspace.ReadSessionMapping(root, testSessionID); err == nil {
+		t.Error("mapping still present after teardown; want deleted")
+	}
+}
+
+// TestSessionEnd_IgnoresCwd: the instance is resolved purely from the mapping by
+// session_id; the hook's cwd (the launch root) is NEVER used to pick a target,
+// even when an unrelated instance sits at the cwd.
+func TestSessionEnd_IgnoresCwd(t *testing.T) {
+	root := setupHookWorkspace(t, true)
+	rec := stubDestroy(t)
+
+	mappedPath := filepath.Join(root, "test-ws-mapped")
+	if err := workspace.WriteSessionMapping(root, workspace.SessionMapping{
+		SessionID:    testSessionID,
+		InstanceName: "test-ws-mapped",
+		InstancePath: mappedPath,
+		Ephemeral:    true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// A different, unrelated instance directory used as the hook cwd. If
+	// teardown wrongly resolved by cwd it would target this path.
+	otherInstance := filepath.Join(root, "other-instance")
+	if err := os.MkdirAll(otherInstance, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	st := &workspace.InstanceState{
+		SchemaVersion: workspace.SchemaVersion,
+		InstanceName:  "other-instance",
+		Root:          otherInstance,
+		Repos:         map[string]workspace.RepoState{},
+	}
+	if err := workspace.SaveState(otherInstance, st); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := runEnd(t, instanceHookPayload{
+		HookEventName: hookEventSessionEnd,
+		SessionID:     testSessionID,
+		Cwd:           otherInstance,
+	})
+	if err != nil {
+		t.Fatalf("runInstanceHookEnd: %v", err)
+	}
+	if rec.gotPath != mappedPath {
+		t.Errorf("destroyed path = %q, want the MAPPED path %q (cwd must be ignored)", rec.gotPath, mappedPath)
+	}
+}
+
+// TestSessionEnd_NoMapping_NoOp: a SessionEnd for a session with no mapping (a
+// non-worker, or one already reaped) is a clean no-op.
+func TestSessionEnd_NoMapping_NoOp(t *testing.T) {
+	root := setupHookWorkspace(t, true)
+	rec := stubDestroy(t)
+
+	_, err := runEnd(t, instanceHookPayload{
+		HookEventName: hookEventSessionEnd,
+		SessionID:     testSessionID,
+		Cwd:           root,
+	})
+	if err != nil {
+		t.Fatalf("runInstanceHookEnd: %v", err)
+	}
+	if rec.called {
+		t.Error("destroyer was called with no mapping; want clean no-op")
+	}
+}
+
+// TestSessionEnd_NonEphemeralMapping_NotDestroyed: a mapping NOT marked
+// ephemeral is never destroyed (defense against reclaiming a developer
+// instance).
+func TestSessionEnd_NonEphemeralMapping_NotDestroyed(t *testing.T) {
+	root := setupHookWorkspace(t, true)
+	rec := stubDestroy(t)
+
+	if err := workspace.WriteSessionMapping(root, workspace.SessionMapping{
+		SessionID:    testSessionID,
+		InstanceName: "keep-me",
+		InstancePath: filepath.Join(root, "keep-me"),
+		Ephemeral:    false,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := runEnd(t, instanceHookPayload{
+		HookEventName: hookEventSessionEnd,
+		SessionID:     testSessionID,
+		Cwd:           root,
+	})
+	if err != nil {
+		t.Fatalf("runInstanceHookEnd: %v", err)
+	}
+	if rec.called {
+		t.Error("destroyer was called for a non-ephemeral mapping; want skip")
+	}
+	// The mapping must survive (it is not ours to delete).
+	if _, err := workspace.ReadSessionMapping(root, testSessionID); err != nil {
+		t.Error("non-ephemeral mapping was deleted; want preserved")
+	}
+}
