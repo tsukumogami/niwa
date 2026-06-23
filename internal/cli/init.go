@@ -47,6 +47,7 @@ func init() {
 	initCmd.Flags().StringVar(&initOverlay, "overlay", "", "overlay repo (org/repo or URL) to clone and associate with this workspace")
 	initCmd.Flags().BoolVar(&initNoOverlay, "no-overlay", false, "disable overlay discovery and association for this workspace")
 	initCmd.Flags().BoolVar(&initNoWorktreeDelegation, "no-worktree-delegation", false, "disable the worktree-delegation integration for this workspace (no hook, no deny fallback)")
+	initCmd.Flags().BoolVar(&initNoEphemeralSessions, "no-ephemeral-sessions", false, "skip installing the workspace-root ephemeral-session config (SessionStart/SessionEnd hooks + root CLAUDE.md); re-run init without this flag to install it")
 	initCmd.Flags().BoolVar(&initRebind, "rebind", false, "rebind a registered workspace name to this directory (use only when intentionally moving a workspace)")
 	initCmd.Flags().BoolVar(&initNoInstallPlugins, "no-install-plugins", false, "skip auto-installing the embedded niwa Claude Code plugin (otherwise installed once when a rank-2 source is detected)")
 	initCmd.Flags().BoolVar(&initBootstrap, "bootstrap", false, "when the source repo has no .niwa/workspace.toml, scaffold a minimal config and stage it on a niwa-bootstrap branch")
@@ -60,6 +61,7 @@ var (
 	initOverlay              string
 	initNoOverlay            bool
 	initNoWorktreeDelegation bool
+	initNoEphemeralSessions  bool
 	initRebind               bool
 	initNoInstallPlugins     bool
 	initBootstrap            bool
@@ -756,6 +758,19 @@ func runInit(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// Install the workspace-root ephemeral-session config by default
+	// (non-interactive, no TTY). The --no-ephemeral-sessions opt-out suppresses
+	// it; re-running init without the flag installs it. Failure is non-fatal:
+	// the workspace is fully usable without the root config, and `niwa apply`
+	// from the root re-converges it.
+	if !initNoEphemeralSessions && rootConfigInstalls(mode) {
+		if _, mErr := workspace.MaterializeWorkspaceRoot(result.Config, workspaceRoot, workspace.RootMaterializeOptions{
+			EphemeralSessionMode: true,
+		}); mErr != nil {
+			fmt.Fprintf(cmd.ErrOrStderr(), "warning: could not install workspace-root session config: %v\n", mErr)
+		}
+	}
+
 	// Rebind confirmation warning (after success). Prominent on stderr
 	// per Security Considerations §6 — `--rebind` opens a registry-write
 	// path, and an automated agent passing it programmatically still
@@ -965,6 +980,17 @@ func bootstrapCommandFor(kind string) string {
 	}
 }
 
+// rootConfigInstalls reports whether the workspace-root ephemeral-session
+// config installs for the given init mode. It installs for the modes that
+// establish a registered workspace (named and clone). The bare no-args
+// scaffold (modeScaffold) is intentionally excluded: it only drops a commented
+// workspace.toml in cwd and writes no state file, so layering a managed root
+// config (and its EphemeralSessionMode state) onto it would break that
+// minimal, state-free contract.
+func rootConfigInstalls(mode initMode) bool {
+	return mode == modeNamed || mode == modeClone
+}
+
 // buildInitState constructs an InstanceState for the flags that require
 // pre-apply state (--skip-global, --no-overlay, --no-worktree-delegation,
 // --overlay) and for the init-time name override that a positional
@@ -974,7 +1000,12 @@ func bootstrapCommandFor(kind string) string {
 // design).
 func buildInitState(cmd *cobra.Command, mode initMode, source, name string) (*workspace.InstanceState, error) {
 	ctx := cmd.Context()
-	needsState := initSkipGlobal || initNoOverlay || initNoWorktreeDelegation || initOverlay != "" || (mode == modeClone) || name != ""
+	// The root ephemeral-session config installs by default for every init mode
+	// that already establishes a registered workspace (named or clone). The
+	// bare no-args scaffold stays state-free by design (it only drops a
+	// commented workspace.toml in cwd), so it does not opt in here.
+	ephemeralSessionMode := !initNoEphemeralSessions && rootConfigInstalls(mode)
+	needsState := initSkipGlobal || initNoOverlay || initNoWorktreeDelegation || initOverlay != "" || (mode == modeClone) || name != "" || ephemeralSessionMode
 	if !needsState {
 		return nil, nil
 	}
@@ -983,6 +1014,7 @@ func buildInitState(cmd *cobra.Command, mode initMode, source, name string) (*wo
 		SchemaVersion:        workspace.SchemaVersion,
 		SkipGlobal:           initSkipGlobal,
 		NoWorktreeDelegation: initNoWorktreeDelegation,
+		EphemeralSessionMode: ephemeralSessionMode,
 		ConfigNameOverride:   name,
 	}
 

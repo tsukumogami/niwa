@@ -343,7 +343,33 @@ type BuildSettingsConfig struct {
 	// Unsupported => permissions.deny: ["EnterWorktree","ExitWorktree"]. Hook and
 	// deny are mutually exclusive; nil installs neither.
 	WorktreeDelegation *WorktreeDelegation
+
+	// SessionHooks, when non-nil, installs the workspace-root
+	// SessionStart/SessionEnd hook entries (the ephemeral-session integration).
+	// Each is a single command piping the Claude hook JSON on stdin to an
+	// absolute-path "niwa instance from-hook"; both carry a generous timeout so
+	// the clone + vault cost of `niwa create` does not trip the harness timeout.
+	// nil installs neither entry, leaving the hooks block untouched.
+	SessionHooks *SessionHooks
 }
+
+// SessionHooks carries the inputs for the workspace-root
+// SessionStart/SessionEnd hook entries. Command is the full command string the
+// hook runs (an absolute-path "niwa instance from-hook"); TimeoutSeconds is the
+// per-command timeout (Claude Code's hook `timeout` field, in seconds) chosen
+// large enough to absorb `niwa create`'s clone + vault cost.
+type SessionHooks struct {
+	Command        string
+	TimeoutSeconds int
+}
+
+// Session hook event names written into the workspace-root settings.json. These
+// are the Claude Code SessionStart/SessionEnd events the ephemeral-session
+// integration rides; the names are already Pascal-cased.
+const (
+	sessionStartEvent = "SessionStart"
+	sessionEndEvent   = "SessionEnd"
+)
 
 // buildSettingsDoc produces the map[string]any JSON document for Claude Code
 // settings. It handles permissions, hooks, env, enabledPlugins,
@@ -453,6 +479,26 @@ func buildSettingsDoc(cfg BuildSettingsConfig) (map[string]any, error) {
 		}
 		hooksDoc[worktreeCreateEvent] = worktreeEntry
 		hooksDoc[worktreeRemoveEvent] = worktreeEntry
+	}
+
+	// Session hooks (ephemeral-session integration): emit the SessionStart and
+	// SessionEnd entries, each a single command piping stdin to "niwa instance
+	// from-hook" with a generous timeout. The timeout absorbs niwa create's
+	// clone + vault cost so the harness does not kill the hook mid-provision.
+	if sh := cfg.SessionHooks; sh != nil && sh.Command != "" {
+		sessionEntry := []map[string]any{
+			{
+				"hooks": []map[string]any{
+					{
+						"type":    "command",
+						"command": sh.Command,
+						"timeout": sh.TimeoutSeconds,
+					},
+				},
+			},
+		}
+		hooksDoc[sessionStartEvent] = sessionEntry
+		hooksDoc[sessionEndEvent] = sessionEntry
 	}
 
 	if len(hooksDoc) > 0 {
