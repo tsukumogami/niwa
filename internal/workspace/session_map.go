@@ -24,6 +24,22 @@ func ValidSessionID(id string) bool {
 	return sessionUUIDRe.MatchString(id)
 }
 
+// EphemeralSessionMode reports whether the workspace at workspaceRoot is
+// opted in to per-session ephemeral instance provisioning. It reads the
+// additive EphemeralSessionMode flag from the workspace-root state file
+// (.niwa/instance.json). It is the master switch of the `niwa instance
+// from-hook` SessionStart guard: when the workspace has no root state, or
+// the flag is absent/false, this returns false and the hook is inert, so an
+// ordinary workspace is never touched. A read or parse failure is treated as
+// "not enabled" (false), never as an error: the guard must fail safe.
+func EphemeralSessionMode(workspaceRoot string) bool {
+	state, err := LoadState(workspaceRoot)
+	if err != nil {
+		return false
+	}
+	return state.EphemeralSessionMode
+}
+
 // SessionMapping records the binding between a Claude Code session and the
 // ephemeral niwa instance provisioned for it. It is the single source of
 // truth for session teardown and the orphan reaper. Persisted at the

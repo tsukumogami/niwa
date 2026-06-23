@@ -106,6 +106,15 @@ type InstanceState struct {
 	// omitempty keeps the field invisible to old binaries reading new state
 	// files.
 	NoWorktreeDelegation bool `json:"no_worktree_delegation,omitempty"`
+	// EphemeralSessionMode records whether the workspace root is opted in to
+	// per-session ephemeral instance provisioning (the master switch of the
+	// `niwa instance from-hook` SessionStart guard). It is only meaningful on
+	// the workspace-root state file. Default false: when absent, the hook is
+	// inert, so an ordinary workspace is never touched. Written at init time
+	// (a later issue); read on every SessionStart hook invocation via
+	// EphemeralSessionMode. Mirrors SkipGlobal / NoOverlay / NoWorktreeDelegation
+	// as an additive bool; omitempty keeps it invisible to old binaries.
+	EphemeralSessionMode bool `json:"ephemeral_session_mode,omitempty"`
 	// ConfigNameOverride records an explicit workspace name supplied to
 	// `niwa init <name>` when it differs from (or stands in for) the
 	// cloned config's `[workspace] name`. Apply.Create / Apply.Apply
