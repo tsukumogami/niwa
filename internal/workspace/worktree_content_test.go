@@ -1,7 +1,6 @@
 package workspace
 
 import (
-	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -9,8 +8,6 @@ import (
 	"testing"
 
 	"github.com/tsukumogami/niwa/internal/config"
-	"github.com/tsukumogami/niwa/internal/vault"
-	"github.com/tsukumogami/niwa/internal/vault/resolve"
 )
 
 // applyToWorktreeFixture builds a config dir with a repo content source, an
@@ -408,124 +405,47 @@ func TestFindRepoGroup(t *testing.T) {
 	}
 }
 
-// TestApplyToWorktreeMaterializesVaultResolvedEnv pins the issue #162 fix from
-// the worktree-wiring side: when applyContentToWorktree drives the apply path
-// through the shared ResolveAndMergeEffectiveConfig helper, a vault://-backed
-// env.secrets entry is resolved BEFORE ApplyToWorktree runs and the worktree
-// .local.env carries the resolved plaintext rather than the literal vault://
-// URI.
-//
-// The test drives the wiring directly (helper -> ApplyToWorktree) rather than
-// going through the CLI so it exercises the workspace-package contract: any
-// caller that runs the helper first must end up with plaintext in the worktree.
-func TestApplyToWorktreeMaterializesVaultResolvedEnv(t *testing.T) {
-	withFakeVaultBackend(t)
-
+// TestApplyToWorktreeInheritsCloneEnv pins the new contract (DESIGN decision
+// A1): a worktree's env is INHERITED from the instance clone's already-
+// materialized output file by byte-copy, with NO secret resolution. The test
+// writes a clone .local.env carrying resolved plaintext (the shape the instance
+// apply pipeline produced) and asserts the worktree's .local.env is byte-
+// identical -- including that a value the clone resolved from vault:// arrives
+// as plaintext and no literal vault:// URI leaks into the worktree.
+func TestApplyToWorktreeInheritsCloneEnv(t *testing.T) {
 	cfg, configDir, instanceRoot, worktreePath := applyToWorktreeFixture(t)
 
-	const want = "resolved-token-value-xxxxx"
-	cfg.Vault = helperFakeProviderRegistry(map[string]string{"API_TOKEN": want})
-	cfg.Env = config.EnvConfig{
-		Secrets: config.EnvVarsTable{
-			Values: map[string]config.MaybeSecret{
-				"API_TOKEN": {Plain: "vault://API_TOKEN"},
-			},
-		},
+	// The repo has env configured (a workspace env file is enough for the
+	// "configured" predicate), so a present clone output is required to inherit.
+	cfg.Env = config.EnvConfig{Files: []string{"workspace.env"}}
+	if err := os.WriteFile(filepath.Join(configDir, "workspace.env"), []byte("PLACEHOLDER=1\n"), 0o644); err != nil {
+		t.Fatal(err)
 	}
 
-	ctx := context.Background()
-	teamBundle, err := resolve.BuildBundle(ctx, vault.DefaultRegistry, cfg.Vault, "test team")
-	if err != nil {
-		t.Fatalf("BuildBundle team: %v", err)
+	// The instance clone of the repo lives at <instanceRoot>/<group>/<repo> and
+	// already holds a materialized .local.env (resolved plaintext, no vault://).
+	cloneRepoDir := filepath.Join(instanceRoot, "apps", "app")
+	if err := os.MkdirAll(cloneRepoDir, 0o755); err != nil {
+		t.Fatal(err)
 	}
-	defer teamBundle.CloseAll()
-	personalBundle, err := resolve.BuildBundle(ctx, vault.DefaultRegistry, nil, "test personal")
-	if err != nil {
-		t.Fatalf("BuildBundle personal: %v", err)
-	}
-	defer personalBundle.CloseAll()
-
-	effective, _, _, err := ResolveAndMergeEffectiveConfig(
-		ctx, cfg, nil, teamBundle, personalBundle,
-		EffectiveConfigOptions{AllowMissingSecrets: true},
-	)
-	if err != nil {
-		t.Fatalf("ResolveAndMergeEffectiveConfig: %v", err)
+	const cloneEnv = "API_TOKEN=resolved-token-value-xxxxx\nPLACEHOLDER=1\n"
+	if err := os.WriteFile(filepath.Join(cloneRepoDir, ".local.env"), []byte(cloneEnv), 0o600); err != nil {
+		t.Fatal(err)
 	}
 
-	if _, err := ApplyToWorktree(effective, configDir, instanceRoot, worktreePath, "apps", "app", "ship-the-thing", "branch-xyz", WorktreeApplyOptions{}); err != nil {
+	if _, err := ApplyToWorktree(cfg, configDir, instanceRoot, worktreePath, "apps", "app", "ship-the-thing", "branch-xyz", WorktreeApplyOptions{}); err != nil {
 		t.Fatalf("ApplyToWorktree: %v", err)
 	}
 
-	envPath := filepath.Join(worktreePath, ".local.env")
-	data, err := os.ReadFile(envPath)
+	got, err := os.ReadFile(filepath.Join(worktreePath, ".local.env"))
 	if err != nil {
 		t.Fatalf("reading worktree .local.env: %v", err)
 	}
-	content := string(data)
-	if !strings.Contains(content, "API_TOKEN="+want) {
-		t.Errorf("worktree .local.env missing resolved value %q, got:\n%s", want, content)
+	if string(got) != cloneEnv {
+		t.Errorf("worktree env not byte-identical to clone:\n got: %q\nwant: %q", got, cloneEnv)
 	}
-	if strings.Contains(content, "vault://") {
-		t.Errorf("worktree .local.env must not contain literal vault:// URI:\n%s", content)
-	}
-}
-
-// TestApplyToWorktreeMergesPersonalOverlayEnv pins the other half of the
-// issue #162 fix: a personal global override declaring an env key reaches the
-// worktree .local.env once the shared helper runs MergeGlobalOverride.
-// Without this step the worktree path silently drops every overlay-only env
-// key -- causing the GH_TOKEN promote failure observed during this worktree's
-// own creation before the fix.
-func TestApplyToWorktreeMergesPersonalOverlayEnv(t *testing.T) {
-	withFakeVaultBackend(t)
-
-	cfg, configDir, instanceRoot, worktreePath := applyToWorktreeFixture(t)
-
-	override := &config.GlobalConfigOverride{
-		Global: config.GlobalOverride{
-			Env: config.EnvConfig{
-				Vars: config.EnvVarsTable{
-					Values: map[string]config.MaybeSecret{
-						"PERSONAL_KEY": {Plain: "personal-value"},
-					},
-				},
-			},
-		},
-	}
-
-	ctx := context.Background()
-	teamBundle, err := resolve.BuildBundle(ctx, vault.DefaultRegistry, nil, "test team")
-	if err != nil {
-		t.Fatalf("BuildBundle team: %v", err)
-	}
-	defer teamBundle.CloseAll()
-	personalBundle, err := resolve.BuildBundle(ctx, vault.DefaultRegistry, nil, "test personal")
-	if err != nil {
-		t.Fatalf("BuildBundle personal: %v", err)
-	}
-	defer personalBundle.CloseAll()
-
-	effective, _, _, err := ResolveAndMergeEffectiveConfig(
-		ctx, cfg, override, teamBundle, personalBundle,
-		EffectiveConfigOptions{AllowMissingSecrets: true},
-	)
-	if err != nil {
-		t.Fatalf("ResolveAndMergeEffectiveConfig: %v", err)
-	}
-
-	if _, err := ApplyToWorktree(effective, configDir, instanceRoot, worktreePath, "apps", "app", "ship-the-thing", "branch-xyz", WorktreeApplyOptions{}); err != nil {
-		t.Fatalf("ApplyToWorktree: %v", err)
-	}
-
-	envPath := filepath.Join(worktreePath, ".local.env")
-	data, err := os.ReadFile(envPath)
-	if err != nil {
-		t.Fatalf("reading worktree .local.env: %v", err)
-	}
-	content := string(data)
-	if !strings.Contains(content, "PERSONAL_KEY=personal-value") {
-		t.Errorf("worktree .local.env missing personal-overlay key PERSONAL_KEY=personal-value, got:\n%s", content)
+	if strings.Contains(string(got), "vault://") {
+		t.Errorf("worktree .local.env must not contain literal vault:// URI:\n%s", got)
 	}
 }
 

@@ -20,6 +20,7 @@ import (
 	"github.com/tsukumogami/niwa/internal/secret"
 	"github.com/tsukumogami/niwa/internal/vault"
 	"github.com/tsukumogami/niwa/internal/vault/resolve"
+	"github.com/tsukumogami/niwa/internal/worktree"
 )
 
 // Applier orchestrates the apply pipeline.
@@ -1433,6 +1434,34 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		}
 	}
 
+	// Step 6.6: Refresh the env of the instance's existing worktrees, sourcing
+	// from the clones just materialized above. This is the apply-side fan-out of
+	// the inherit primitive (DESIGN decision B2): after an apply no live worktree
+	// holds a value different from its clone (R6). Locked/detached/missing
+	// worktrees are skipped with a warning (R7); a skipped-but-live worktree's
+	// prior managed-file entries are forward-carried so cleanRemovedFiles does
+	// not delete its live secret file on the next apply.
+	repoGroups := make(map[string]string, len(classified))
+	for _, cr := range classified {
+		repoGroups[cr.Repo.Name] = cr.Group
+	}
+	worktreeManaged, err := a.refreshWorktreeEnvs(worktreeRefreshInputs{
+		instanceRoot:           instanceRoot,
+		cfg:                    effectiveCfg,
+		configDir:              configDir,
+		overlayDir:             overlayDir,
+		globalEnvOutput:        globalEnvOutput,
+		globalEnvExamplePolicy: globalEnvExamplePolicy,
+		repoIndex:              repoIndex,
+		repoGroups:             repoGroups,
+		existingState:          opts.existingState,
+		now:                    now,
+		allowPlaintextSecrets:  a.AllowPlaintextSecrets,
+	})
+	if err != nil {
+		return nil, err
+	}
+
 	// Step 6.75: Run repo-provided setup scripts.
 	for _, cr := range classified {
 		setupDir := ResolveSetupDir(effectiveCfg, cr.Repo.Name)
@@ -1475,6 +1504,13 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		}
 		managedFiles = append(managedFiles, mf)
 	}
+
+	// Merge the worktree-refresh managed files (Step 6.6). These are already
+	// fully-formed ManagedFile values: freshly-written worktree env outputs
+	// (hashed here) plus forward-carried entries copied verbatim from the prior
+	// state for skipped-but-live worktrees. Including them keeps cleanRemovedFiles
+	// from pruning a live worktree's secret file.
+	managedFiles = append(managedFiles, worktreeManaged...)
 
 	// Step 8: Automatic dangling plugin-record heal. Both Applier.Create and
 	// Applier.Apply route through runPipeline, so this repairs accumulated
@@ -1607,6 +1643,211 @@ func (a *Applier) cleanRemovedFiles(existingState *InstanceState, result *pipeli
 			}
 		}
 	}
+}
+
+// worktreeRefreshInputs bundles the inputs the apply-time worktree-refresh step
+// needs. It is a struct (rather than a long argument list) so refreshWorktreeEnvs
+// can be unit-tested in isolation with a fabricated set of sessions and a
+// stubbed git-registration check.
+type worktreeRefreshInputs struct {
+	instanceRoot           string
+	cfg                    *config.WorkspaceConfig
+	configDir              string
+	overlayDir             string
+	globalEnvOutput        config.OutputTargets
+	globalEnvExamplePolicy *config.EnvExamplePolicy
+	// repoIndex maps an in-scope repo name to its on-disk clone path. A worktree
+	// whose repo is absent from this map belongs to a removed repo and is skipped
+	// (no warning: a removed repo is not an edge state, it is out of scope).
+	repoIndex map[string]string
+	// repoGroups maps an in-scope repo name to its group, used to source the
+	// clone dir ApplyToWorktree inherits from.
+	repoGroups map[string]string
+	// existingState supplies the prior managed-file entries used for the
+	// forward-carry invariant. nil is tolerated (treated as no prior entries).
+	existingState         *InstanceState
+	now                   time.Time
+	allowPlaintextSecrets bool
+	// gitRegistered reports whether worktreePath is a worktree git still
+	// registers against cloneDir. nil defaults to gitRegistersWorktree (the real
+	// `git worktree list --porcelain` cross-check); injected in tests.
+	gitRegistered func(cloneDir, worktreePath string) bool
+}
+
+// refreshWorktreeEnvs enumerates the instance's session-backed worktrees and, for
+// each live worktree, re-runs the inherit primitive (via ApplyToWorktree) so its
+// env matches the just-materialized clone (R6). It implements the inclusion
+// pipeline and the managed-file forward-carry invariant from
+// DESIGN-worktree-env-provisioning.
+//
+// A worktree is REFRESHED only when all hold: the session Status is active, its
+// repo is in repoIndex (in-scope), its working dir exists, it is NOT attached
+// (ReadAttachState with reapStale=false — apply never reaps another process's
+// lock), and git still registers it against the clone. A worktree that is active
+// and dir-present but fails the attach/git check is SKIPPED-BUT-LIVE: it gets a
+// warning naming it and its prior managed-file entries are forward-carried
+// verbatim, so the next cleanRemovedFiles does not delete its live secret file.
+// A worktree whose dir is missing is treated as absent: its entries are NOT
+// forward-carried, so cleanup prunes them.
+//
+// It returns the ManagedFile entries to merge into the pipeline result: the
+// freshly-written worktree env outputs (hashed here) plus the forward-carried
+// entries for skipped-but-live worktrees. It never fails the apply for an
+// individual worktree edge state; only an unexpected enumeration error (which is
+// already tolerated by ListSessionLifecycleStates returning nil) would bubble up.
+func (a *Applier) refreshWorktreeEnvs(in worktreeRefreshInputs) ([]ManagedFile, error) {
+	gitRegistered := in.gitRegistered
+	if gitRegistered == nil {
+		gitRegistered = gitRegistersWorktree
+	}
+
+	sessionsDir := filepath.Join(in.instanceRoot, StateDir, "sessions")
+	sessions, err := worktree.ListSessionLifecycleStates(sessionsDir)
+	if err != nil {
+		// Enumeration failure is non-fatal: warn and refresh nothing. A worktree
+		// that cannot be enumerated also cannot be forward-carried, but a genuine
+		// directory-read error here is rare and apply should still succeed.
+		a.Reporter.DeferWarn("could not enumerate worktrees for env refresh: %v", err)
+		return nil, nil
+	}
+
+	// Index prior managed-file entries by the worktree dir they live under, so a
+	// skipped-but-live worktree can forward-carry exactly its own entries.
+	priorByWorktree := priorManagedFiles(in.existingState)
+
+	var out []ManagedFile
+	for _, s := range sessions {
+		// Out-of-scope: a removed repo is not an edge state. Skip silently; its
+		// entries drop so cleanup prunes them along with the removed clone.
+		group, inScope := in.repoGroups[s.Repo]
+		if s.Status != worktree.SessionStatusActive || !inScope {
+			continue
+		}
+		if _, ok := in.repoIndex[s.Repo]; !ok {
+			continue
+		}
+
+		wtPath := s.WorktreePath
+
+		// Missing working dir -> absent. Warn, skip, do NOT forward-carry: the
+		// files are gone, so cleanup pruning the stale entries is correct.
+		if _, statErr := os.Stat(wtPath); statErr != nil {
+			a.Reporter.DeferWarn("worktree %s (repo %s) directory is missing; skipping env refresh", wtPath, s.Repo)
+			continue
+		}
+
+		// Attached -> another process holds the lock. Skip-but-live: forward-carry.
+		// reapStale MUST be false; apply must never reap another process's lock.
+		if _, avail, _ := worktree.ReadAttachState(wtPath, false); avail == worktree.AttachAttached {
+			a.Reporter.DeferWarn("worktree %s (repo %s) is attached (locked) by another process; skipping env refresh", wtPath, s.Repo)
+			out = append(out, forwardCarry(priorByWorktree, wtPath)...)
+			continue
+		}
+
+		// Detached -> git no longer registers the path against its clone. Skip-but-
+		// live: forward-carry. An undetectable worktree defaults to skip.
+		cloneDir := filepath.Join(in.instanceRoot, group, s.Repo)
+		if !gitRegistered(cloneDir, wtPath) {
+			a.Reporter.DeferWarn("worktree %s (repo %s) is not registered with git (detached); skipping env refresh", wtPath, s.Repo)
+			out = append(out, forwardCarry(priorByWorktree, wtPath)...)
+			continue
+		}
+
+		// Included: refresh via the inherit path. Failure to refresh a single
+		// worktree is non-fatal — warn, forward-carry its prior entries (it is
+		// live), and move on rather than failing the whole apply.
+		written, refreshErr := ApplyToWorktree(
+			in.cfg, in.configDir, in.instanceRoot, wtPath, group, s.Repo,
+			s.Purpose, s.EffectiveBranchName(),
+			WorktreeApplyOptions{
+				OverlayDir:             in.overlayDir,
+				AllowPlaintextSecrets:  in.allowPlaintextSecrets,
+				Stderr:                 a.Reporter.Writer(),
+				GlobalEnvExamplePolicy: in.globalEnvExamplePolicy,
+				GlobalEnvOutput:        in.globalEnvOutput,
+			},
+		)
+		if refreshErr != nil {
+			a.Reporter.DeferWarn("could not refresh env for worktree %s (repo %s): %v; retaining prior managed entries", wtPath, s.Repo, refreshErr)
+			out = append(out, forwardCarry(priorByWorktree, wtPath)...)
+			continue
+		}
+
+		for _, p := range written {
+			hash, hashErr := HashFile(p)
+			if hashErr != nil {
+				a.Reporter.DeferWarn("could not hash refreshed worktree file %s: %v", p, hashErr)
+				continue
+			}
+			out = append(out, ManagedFile{
+				Path:        p,
+				ContentHash: hash,
+				Generated:   in.now,
+			})
+		}
+	}
+
+	return out, nil
+}
+
+// priorManagedFiles returns the prior state's managed-file entries, or nil when
+// no prior state exists. forwardCarry filters this list by worktree dir to carry
+// a skipped-but-live worktree's own entries forward.
+func priorManagedFiles(state *InstanceState) []ManagedFile {
+	if state == nil {
+		return nil
+	}
+	return state.ManagedFiles
+}
+
+// forwardCarry returns the prior managed-file entries that live under
+// worktreePath, copied verbatim (no re-hash, no byte rewrite). This is the
+// data-loss guard for skipped-but-live worktrees: re-adding their entries to the
+// current result keeps cleanRemovedFiles from deleting their live secret files.
+func forwardCarry(prior []ManagedFile, worktreePath string) []ManagedFile {
+	var carried []ManagedFile
+	for _, mf := range prior {
+		if pathUnder(worktreePath, mf.Path) {
+			carried = append(carried, mf)
+		}
+	}
+	return carried
+}
+
+// pathUnder reports whether candidate is at or under dir. Both are cleaned and
+// compared via filepath.Rel; a candidate that escapes dir (rel begins with "..")
+// is not under it.
+func pathUnder(dir, candidate string) bool {
+	rel, err := filepath.Rel(filepath.Clean(dir), filepath.Clean(candidate))
+	if err != nil {
+		return false
+	}
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+// gitRegistersWorktree reports whether git still registers worktreePath as a
+// worktree of the clone at cloneDir, via a `git worktree list --porcelain`
+// cross-check. A failed git invocation (clone not a git repo, git absent) makes
+// the worktree undetectable; the caller defaults such cases to skip-with-warning.
+func gitRegistersWorktree(cloneDir, worktreePath string) bool {
+	paths, err := listWorktrees(cloneDir)
+	if err != nil {
+		return false
+	}
+	target, err := filepath.Abs(worktreePath)
+	if err != nil {
+		target = worktreePath
+	}
+	for _, p := range paths {
+		abs, err := filepath.Abs(p)
+		if err != nil {
+			abs = p
+		}
+		if filepath.Clean(abs) == filepath.Clean(target) {
+			return true
+		}
+	}
+	return false
 }
 
 // cleanRemovedGroupDirs removes empty group directories for repos that

@@ -32,6 +32,52 @@ Step 3 onward is the work of `workspace.ApplyToWorktree`, which reuses the same
 installers the instance apply pipeline uses. A worktree and a repo checkout
 cannot drift, because there is a single materializer path behind both.
 
+## How a worktree gets its environment
+
+A worktree does not resolve secrets. It inherits the instance clone's
+already-materialized environment by copying the clone's resolved secret-output
+file(s) byte-for-byte into the worktree's target paths. The clone holds the
+fully-resolved environment from the last `niwa apply` — plaintext vars plus
+resolved secrets, written at 0600 and git-excluded — and the worktree mirrors
+it exactly. A worktree's env is byte-identical to its instance clone's, for
+every configured target and format (dotenv, json, shell, custom names).
+
+Because there's no resolution step, `niwa worktree create` and
+`niwa worktree apply` need no secret source and no network access. They can't
+fail on an unreachable vault, a wrong-org session, or an unassembled provider
+reference — those concerns belong to `niwa apply`, which already resolved the
+environment into the clone.
+
+### Refreshing a worktree's environment
+
+`niwa apply` is the refresh. After materializing each clone, the same run fans
+out to every existing worktree and re-copies the clone's env into it. So when
+you rotate a secret or change config and run `niwa apply`, clones and worktrees
+update together — there is no separate worktree-only secret-refresh command.
+`niwa worktree apply <id>` re-syncs a single worktree from its clone the same
+way, by inheritance, never by resolution.
+
+A worktree that is locked (attached by another process), detached from git, or
+whose directory is missing is skipped during `niwa apply` with a warning naming
+it; the apply still succeeds. A skipped-but-live worktree keeps its existing env
+file — the skip never deletes it.
+
+### Creating a worktree before the first apply
+
+A worktree can only inherit an environment the instance has already
+materialized. If a repo's env was enabled after the last apply, the clone holds
+no env output yet, so there is nothing to copy. In that case
+`niwa worktree create` exits non-zero with an error directing you to run
+`niwa apply` first:
+
+```bash
+niwa apply              # materialize the instance environment into the clones
+niwa worktree create niwa "..."   # now the worktree can inherit it
+```
+
+A repo that has no environment configured at all is not an error — the worktree
+simply has no env file to inherit.
+
 If your shell integration is active, the shell navigates into the new worktree
 directory on success. See `niwa shell-init` for setup.
 
@@ -107,9 +153,9 @@ becomes `ended`, and the state file stays on disk so `niwa worktree list
 In a niwa workspace, `niwa apply` makes niwa the default worktree mechanism for
 Claude Code agents. When an agent creates a worktree — whether you ask it to
 "work in a worktree" or it spins up an isolated sub-task — that worktree becomes
-a full niwa worktree, with the same secrets and CLAUDE context a real checkout
-gets, listed and tracked like any worktree you create by hand. You don't run a
-command; it happens through hooks niwa installs.
+a full niwa worktree, with the same environment and CLAUDE context a real
+checkout has, listed and tracked like any worktree you create by hand. You don't
+run a command; it happens through hooks niwa installs.
 
 This is on by default. There's nothing to set up per developer.
 
@@ -124,9 +170,12 @@ agent as its working directory. On teardown, it reconciles the worktree with
 niwa's lifecycle so nothing is left orphaned.
 
 When the agent's worktree is created, the same content install that backs
-`niwa worktree create` runs. If a secret can't be resolved (a transient vault
-outage, say), creation continues and the missing secret is reported on stderr
-rather than failing silently.
+`niwa worktree create` runs. The worktree inherits the instance clone's
+already-materialized environment, so creation needs no secret source and can't
+fail on a vault outage (see
+[How a worktree gets its environment](#how-a-worktree-gets-its-environment)). If
+the clone holds no env output yet, creation reports the error pointing at
+`niwa apply`.
 
 ### Teardown: clean vs. dirty
 
@@ -242,7 +291,12 @@ git branch --list 'session/*' # list all worktree branches
 
 Creates a worktree for a repo: scaffolds the worktree on a new branch,
 installs the repo's CLAUDE content plus the worktree rules import and the
-purpose/branch layer, runs worktree hooks, and writes the state file.
+purpose/branch layer, runs worktree hooks, and writes the state file. The
+worktree inherits the instance clone's already-materialized environment; it
+resolves no secrets and needs no network access (see
+[How a worktree gets its environment](#how-a-worktree-gets-its-environment)). If
+the clone has no env output to inherit, create exits non-zero and points you at
+`niwa apply`.
 
 Both positionals are optional.
 
@@ -309,6 +363,10 @@ It is idempotent by construction. Re-running overwrites the repo content,
 re-points the rules import without duplicating `@import` lines, and replaces the
 worktree-context section rather than appending a second copy. Applying to an
 ended or abandoned worktree is refused.
+
+Like create, it re-syncs the worktree's environment by inheriting the clone's
+materialized output — no secret resolution. For a workspace-wide refresh that
+updates clones and every worktree in one pass, run `niwa apply` instead.
 
 ### `niwa worktree destroy <id> [--force]`
 
