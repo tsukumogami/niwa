@@ -416,10 +416,13 @@ func printWorktreeContentFiles(cmd *cobra.Command, written []string) {
 // URL, NoOverlay set, or the clone is absent), it returns the original cfg and
 // an empty overlay dir so the caller takes the no-overlay path.
 //
-// This runs only the structural config merge (which populates OverlaySource on
-// content entries); it deliberately does not re-run the overlay's vault
-// resolution, which the apply pipeline needs for env/secrets but the worktree
-// content install does not.
+// It mirrors the apply path's overlay-vault resolution (apply.go ~887-920):
+// it builds the overlay's own vault bundle and resolves the overlay's env and
+// per-repo secrets against it before merging, then carries overlay.Vault into
+// the merged config (via MergeWorkspaceOverlay) so the merged config keeps the
+// provider. Resolution runs with AllowMissing so an unresolvable provider
+// degrades gracefully (skip/warn) instead of failing the content install --
+// the worktree create path must not be stricter than `niwa apply`.
 func mergeWorktreeOverlay(cfg *config.WorkspaceConfig, instanceRoot string) (*config.WorkspaceConfig, string, error) {
 	state, err := workspace.LoadState(instanceRoot)
 	if err != nil {
@@ -445,6 +448,31 @@ func mergeWorktreeOverlay(cfg *config.WorkspaceConfig, instanceRoot string) (*co
 		}
 		return nil, "", fmt.Errorf("parsing workspace overlay: %w", err)
 	}
+
+	// Resolve the overlay's vault references against its own provider bundle
+	// before merging, the same way the apply path does. A nil Vault yields an
+	// empty bundle, which passes overlay env without vault:// refs through
+	// unchanged. AllowMissing keeps an unresolvable provider non-fatal.
+	ctx := context.Background()
+	overlayVaultBundle, bundleErr := resolve.BuildBundle(ctx, nil, overlay.Vault, "workspace-overlay.toml")
+	if bundleErr != nil {
+		return nil, "", fmt.Errorf("building overlay vault bundle: %w", bundleErr)
+	}
+	defer overlayVaultBundle.CloseAll()
+
+	tmpCfg := &config.WorkspaceConfig{
+		Env:   overlay.Env,
+		Repos: overlay.Repos,
+	}
+	resolvedTmp, resolveErr := resolve.ResolveWorkspace(ctx, tmpCfg, resolve.ResolveOptions{
+		AllowMissing: true,
+		TeamBundle:   overlayVaultBundle,
+	})
+	if resolveErr != nil {
+		return nil, "", fmt.Errorf("resolving overlay vault references: %w", resolveErr)
+	}
+	overlay.Env = resolvedTmp.Env
+	overlay.Repos = resolvedTmp.Repos
 
 	merged, err := workspace.MergeWorkspaceOverlay(cfg, overlay, overlayDir)
 	if err != nil {

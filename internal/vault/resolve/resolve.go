@@ -504,12 +504,29 @@ func (w *walker) resolveOne(location string, ms config.MaybeSecret, isSecretsTab
 		// Unknown provider name at resolve time is actionable as a
 		// key-not-found problem from the user's perspective: they
 		// referenced a provider not declared in the active config.
-		// We return a wrapped ErrKeyNotFound so downstream
-		// diagnostics treat it as a missing reference.
+		// An undeclared provider is, from the resolver's perspective,
+		// an unresolvable reference -- so it must honor the same
+		// graceful-degradation contract as a missing key: ?required=false
+		// downgrades silently and AllowMissing downgrades with a warning.
+		// Without this, an optional or allow-missing reference against an
+		// undeclared provider hard-fails, contradicting the documented
+		// behavior (e.g. a worktree create against a workspace whose vault
+		// provider lives only in an overlay that didn't resolve).
+		if ref.Optional {
+			return config.MaybeSecret{}, nil
+		}
+		if w.opts.AllowMissing {
+			fmt.Fprintf(w.stderr,
+				"warning: vault: %s: provider %q not declared in the active bundle; downgrading to empty (--allow-missing-secrets)\n",
+				location, providerLabel(ref.ProviderName))
+			return config.MaybeSecret{}, nil
+		}
 		label := ref.ProviderName
 		if label == "" {
 			label = "(anonymous)"
 		}
+		// We return a wrapped ErrKeyNotFound so downstream
+		// diagnostics treat it as a missing reference.
 		return config.MaybeSecret{}, fmt.Errorf(
 			"vault: %s references provider %q but it is not declared in the active bundle: %w",
 			location, label, vault.ErrKeyNotFound,

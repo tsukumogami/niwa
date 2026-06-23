@@ -917,10 +917,22 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		overlay.Env = resolvedTmp.Env
 		overlay.Repos = resolvedTmp.Repos
 
+		// Capture the base config's vault before the merge. MergeWorkspaceOverlay
+		// now carries overlay.Vault into merged.Vault for callers that resolve
+		// against the merged config (the worktree path). The apply pipeline,
+		// however, has already resolved the overlay's env above against the
+		// overlay's own bundle and resolves the base vault separately downstream;
+		// inheriting the overlay provider into cfg.Vault here would make the
+		// downstream team-bundle build (and its provider auth) run a second
+		// time. Restore the base vault after the merge to keep apply's vault
+		// resolution exactly as it was before this change.
+		baseVault := cfg.Vault
+
 		mergedWS, mergeErr := MergeWorkspaceOverlay(cfg, overlay, overlayDir)
 		if mergeErr != nil {
 			return nil, fmt.Errorf("merging workspace overlay: %w", mergeErr)
 		}
+		mergedWS.Vault = baseVault
 		cfg = mergedWS
 	}
 
