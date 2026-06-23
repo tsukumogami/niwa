@@ -226,9 +226,13 @@ destroys nothing — destruction is `niwa destroy` / `niwa reap`.
 
 ### `--no-cascade`
 
-`niwa apply --no-cascade` caps the operation at the current scope without
-descending. Its primary use is refreshing only the root-managed config after a
-hook, permission, or `CLAUDE.md` edit, without re-converging every instance.
+`niwa apply --no-cascade` at the workspace root refreshes only the root-managed
+config and does not re-converge the instances beneath it. Its primary use is
+picking up a hook, permission, or `CLAUDE.md` edit at the root without paying for
+a full reconvergence of every instance. The flag has no effect at an instance
+(its worktrees refresh with it under the inherit model — a worktree is a derived
+view of its instance, not an independently skippable scope) or at a worktree
+(a leaf scope with nothing below it).
 
 ```bash
 # At the workspace root: refresh root config only, no instance reconvergence.
@@ -243,8 +247,8 @@ set:
 | Scope (cwd) | `niwa apply` converges | `niwa apply --no-cascade` converges |
 |-------------|------------------------|-------------------------------------|
 | Workspace root | Root-managed config (`.claude/settings.json` + root `CLAUDE.md`) and vault, then every instance, then each instance's worktrees (refreshed via the inherit refresh as part of each instance apply) | Root-managed config and vault only — no instance reconvergence |
-| Instance | That instance, then its worktrees (refreshed as part of this apply via the inherit refresh, not a separate niwa cascade) | That instance only — skips its worktrees |
-| Worktree | That worktree alone (inherits the instance's materialized environment; no secret resolution on the worktree path) | That worktree alone (no children to descend into; the flag is a no-op) |
+| Instance | That instance, then its worktrees (refreshed as part of this apply via the inherit refresh, not a separate niwa cascade) | Same as without the flag — the worktrees refresh with the instance under the inherit model, so `--no-cascade` has no effect here |
+| Worktree | That worktree alone (inherits the instance's materialized environment; no secret resolution on the worktree path) | That worktree alone (leaf scope, no children to descend into; the flag is a no-op) |
 
 At no scope does `apply` climb above the current node or touch a sibling.
 

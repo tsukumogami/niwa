@@ -132,10 +132,12 @@ Functional:
   marker the reaper can use to decide whether the backing session is still alive.
 - **R12.** A developer can opt an instance or workspace out of the
   ephemeral-per-session behavior, keeping plain background sessions at the root.
-- **R13.** `niwa apply --no-cascade` limits the operation to the current scope's own
-  configuration without descending into child scopes -- at the workspace root it
-  refreshes only the root-managed configuration without re-converging the instances
-  beneath it, for the heavy-op case.
+- **R13.** `niwa apply --no-cascade` at the workspace root refreshes only the
+  root-managed configuration and does not re-converge the instances beneath it -- this
+  is the heavy-op guarantee. The flag has no effect at an instance or a worktree:
+  under the inherit model a worktree refreshes together with its instance rather than
+  being an independently skippable scope, and a worktree is a leaf with nothing below
+  it.
 - **R14.** A worktree is a distinct `apply` scope: `niwa apply` run inside a worktree
   converges that worktree, not the whole enclosing instance. This refines today's
   behavior, where running `apply` from within an instance always converges the entire
@@ -207,14 +209,15 @@ Functional:
   posture, and a root `CLAUDE.md`, so it needs a non-destructive refresh path. Rather
   than a new verb, `apply` is made context-aware: it converges the subtree at the
   current scope (root, instance, or worktree) and never climbs above it, with
-  `--no-cascade` to cap the operation at the current scope for heavy ops. This adds
-  the worktree as a distinct scope, which refines today's behavior (where `apply` from
-  anywhere inside an instance converges the whole instance) -- an intentional,
-  pre-1.0 semantics change for a uniform "converge my subtree" model. Alternatives
-  considered: a dedicated `niwa refresh` command (rejected -- the root is just another
-  `apply` scope, and a second verb would drift from it); a `--root-only` flag scoped
-  to the root (rejected -- `--no-cascade` is its general form, meaningful at every
-  scope); and hand-edited root settings (rejected -- manual editing is the setup this
+  `--no-cascade` at the root refreshing the root-managed config without re-converging
+  the instances beneath it (the heavy-op case; a no-op at instance and worktree scope).
+  This adds the worktree as a distinct scope, which refines today's behavior (where
+  `apply` from anywhere inside an instance converges the whole instance) -- an
+  intentional, pre-1.0 semantics change for a uniform "converge my subtree" model.
+  Alternatives considered: a dedicated `niwa refresh` command (rejected -- the root is
+  just another `apply` scope, and a second verb would drift from it); a `--root-only`
+  flag scoped to the root (rejected -- `--no-cascade` is the name kept, and its heavy-op
+  guarantee is root-scoped); and hand-edited root settings (rejected -- manual editing is the setup this
   feature removes).
 - **The permission posture is ordinary root config, not a special gate (R7).** The
   `permissions.defaultMode` block is materialized at the root by the same

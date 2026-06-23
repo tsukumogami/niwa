@@ -120,17 +120,22 @@ climbs above it or touches siblings:
   instance's already-materialized environment rather than resolving secrets on the
   worktree path.
 
-`apply --no-cascade` caps the operation at the current scope without descending --
-its primary use is refreshing only the root config after a hook/permission/CLAUDE.md
-edit without re-converging every instance. Adding the worktree scope refines today's
-behavior, where `apply` from anywhere inside an instance converges the whole instance;
-this is an intentional, pre-1.0 change for a uniform "converge my subtree" model.
+`apply --no-cascade` at the workspace root refreshes only the root-managed config
+and does not re-converge the instances beneath it -- its purpose is picking up a
+hook/permission/CLAUDE.md edit at the root without paying for a full reconvergence
+of every instance. It has no effect at an instance or a worktree: under the inherit
+model (tsukumogami/niwa#168) a worktree is a derived view of its instance and refreshes
+together with it, so it is not an independently skippable scope, and a worktree is a
+leaf with nothing below it. Adding the worktree scope refines today's behavior, where
+`apply` from anywhere inside an instance converges the whole instance; this is an
+intentional, pre-1.0 change for a uniform "converge my subtree" model.
 **Chosen:** init lands it, context-aware `apply` (+ `--no-cascade`) refreshes it.
 Rejected: a `niwa refresh` verb (the root is just another `apply` scope, and a second
-verb would drift) and a root-only `--root-only` flag (`--no-cascade` is its general
-form, meaningful at every scope). `apply` stays drift-aware via the existing
-content-materializer hashing, so it is a no-op where everything is already current,
-and it never destroys (that is `niwa destroy`).
+verb would drift) and a root-only `--root-only` flag (`--no-cascade` is the name we
+keep, though the heavy-op guarantee it provides is root-scoped). `apply` stays
+content-idempotent via the existing content-materializer hashing, so it produces the
+same bytes where everything is already current, and it never destroys (that is
+`niwa destroy`).
 
 ### Decision 2 — the provisioning subcommand (R1, R3)
 
@@ -341,8 +346,9 @@ End-to-end flow:
   new worktree scope mode) and updates the existing `scope_test.go` cases
   (`TestResolveApplyScope_SingleFromInstance` / `_SingleFromNestedDir`) plus the
   `apply` help text, which document today's converge-the-whole-instance behavior.
-  Converge the subtree at the current scope, add `--no-cascade` to cap at the current
-  node. Worktree-scope `apply` delegates to the upstream inherit primitive
+  Converge the subtree at the current scope, add `--no-cascade` at the root to refresh
+  the root-managed config without re-converging the instances beneath it (a no-op at
+  instance and worktree scope). Worktree-scope `apply` delegates to the upstream inherit primitive
   (tsukumogami/niwa#168) -- the worktree path inherits the instance's
   already-materialized environment instead of resolving secrets on the worktree path.
   Unit-test each scope (root / instance / worktree) and the `--no-cascade` cap.
