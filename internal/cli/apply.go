@@ -31,7 +31,7 @@ func init() {
 	applyCmd.Flags().BoolVar(&applyNoInstallPlugins, "no-install-plugins", false,
 		"skip auto-installing the embedded niwa Claude Code plugin (otherwise installed once when a rank-2 source is detected).")
 	applyCmd.Flags().BoolVar(&applyNoCascade, "no-cascade", false,
-		"converge only the current scope without descending: at the workspace root, refresh root-managed config only (no instance reconvergence); at an instance, that instance only (skip its worktrees).")
+		"at the workspace root, refresh the root-managed config only and do not re-converge the instances beneath it. Has no effect at an instance (its worktrees refresh with it under the inherit model) or at a worktree (leaf scope).")
 	applyCmd.ValidArgsFunction = completeWorkspaceNames
 	_ = applyCmd.RegisterFlagCompletionFunc("instance", completeInstanceNames)
 }
@@ -69,10 +69,13 @@ Scope resolution (when no workspace-name argument is given):
   4. If cwd is at the workspace root, materialize the root-managed config, then
      converge every instance and each instance's worktrees.
 
-Use --no-cascade to cap the operation at the current scope without descending:
-at the workspace root it refreshes only the root-managed config (no instance
-reconvergence); at an instance it converges that instance only (skips its
-worktrees). Apply destroys nothing and is a no-op where everything is current.
+Use --no-cascade at the workspace root to refresh only the root-managed config
+(hooks, permission posture, CLAUDE.md) without re-converging the instances
+beneath it. It has no effect at an instance or a worktree: an instance always
+converges together with its worktrees (the inherit model makes a worktree a
+derived view of its instance, not an independently skippable scope), and a
+worktree is a leaf with nothing below it. Apply destroys nothing and is a no-op
+where everything is current.
 
 If a workspace name is given as a positional argument, it is resolved through
 the global registry (~/.config/niwa/config.toml) to find the workspace root
@@ -106,10 +109,12 @@ func runApply(cmd *cobra.Command, args []string) error {
 
 	// Worktree scope: converge that worktree alone, never the parent instance
 	// or siblings. This re-syncs the worktree's CLAUDE content through the same
-	// shared helper `niwa worktree apply` uses (which already resolves the
-	// workspace overlay's vault on the worktree path per Issue 11), so it does
-	// not need the instance-level applier setup below. --no-cascade is a no-op
-	// here: a worktree has no children to descend into.
+	// shared helper `niwa worktree apply` uses. Under the inherit model a
+	// worktree is a derived view of its instance: it inherits the instance's
+	// already-materialized environment and does not resolve secrets on the
+	// worktree path itself, so it does not need the instance-level applier setup
+	// below. --no-cascade is a no-op here: a worktree is a leaf scope with no
+	// children to descend into.
 	if scope.Mode == workspace.ApplyWorktree {
 		return runApplyWorktreeScope(cmd, scope)
 	}
@@ -178,12 +183,13 @@ func runApply(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Workspace-root scope: materialize the root-managed config + vault before
+	// Workspace-root scope: materialize the root-managed config before
 	// cascading into instances. This is the top of the subtree at the root
 	// scope; it runs whether or not --no-cascade is set (--no-cascade caps the
 	// operation HERE, skipping the instance loop below). MaterializeWorkspaceRoot
-	// is drift-aware via the content-materializer hashing it rides, so it is a
-	// no-op when the root config is already current.
+	// is content-idempotent — it produces the same bytes when the config is
+	// already current — but it does not skip the write: it rewrites the
+	// root-managed files via unconditional os.WriteFile on every apply.
 	if scope.Mode == workspace.ApplyAll && scope.WorkspaceRoot != "" {
 		if _, mErr := workspace.MaterializeWorkspaceRoot(cfg, scope.WorkspaceRoot, workspace.RootMaterializeOptions{
 			EphemeralSessionMode: workspace.EphemeralSessionMode(scope.WorkspaceRoot),

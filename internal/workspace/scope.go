@@ -13,14 +13,17 @@ type ApplyMode int
 
 const (
 	// ApplySingle targets the single instance the user is currently inside,
-	// plus that instance's worktrees (unless --no-cascade caps it).
+	// plus that instance's worktrees. The worktrees refresh together with the
+	// instance under the inherit model; --no-cascade has no effect at this
+	// scope.
 	ApplySingle ApplyMode = iota
 	// ApplyAll targets the workspace-root managed config plus every instance
-	// under the workspace root and each instance's worktrees (unless
-	// --no-cascade caps it to root config only).
+	// under the workspace root and each instance's worktrees. --no-cascade
+	// caps this to the root-managed config only, skipping the instance cascade.
 	ApplyAll
-	// ApplyNamed targets a specific instance selected by name (plus its
-	// worktrees, unless --no-cascade caps it).
+	// ApplyNamed targets a specific instance selected by name, plus its
+	// worktrees (which refresh together with the instance under the inherit
+	// model; --no-cascade has no effect at this scope).
 	ApplyNamed
 	// ApplyWorktree targets a single session worktree the user is currently
 	// inside, never the parent instance or sibling worktrees.
