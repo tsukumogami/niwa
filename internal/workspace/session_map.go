@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
+	"strings"
 	"time"
 )
 
@@ -123,6 +125,49 @@ func ReadSessionMapping(workspaceRoot, sessionID string) (SessionMapping, error)
 		return SessionMapping{}, fmt.Errorf("parsing session mapping %s: %w", sessionID, err)
 	}
 	return m, nil
+}
+
+// ListSessionMappings returns every session mapping recorded under the
+// workspace root's .niwa/sessions store. It is the reaper's entry point for
+// joining instances against their backing sessions: the reaper needs each
+// mapping's session_id (the liveness key) and instance_path, which the
+// list-instances surface alone does not carry.
+//
+// A missing store (the common case for non-ephemeral workspaces) yields an
+// empty slice and no error. Malformed or unreadable individual entries are
+// skipped rather than failing the whole scan, so a partially written store
+// never blocks reaping the entries that are intact. The result is sorted by
+// session id for deterministic iteration.
+func ListSessionMappings(workspaceRoot string) ([]SessionMapping, error) {
+	dir := sessionsDir(workspaceRoot)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("reading sessions directory: %w", err)
+	}
+
+	var out []SessionMapping
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(dir, entry.Name()))
+		if err != nil {
+			continue
+		}
+		var m SessionMapping
+		if err := json.Unmarshal(data, &m); err != nil {
+			continue
+		}
+		out = append(out, m)
+	}
+
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].SessionID < out[j].SessionID
+	})
+	return out, nil
 }
 
 // DeleteSessionMapping removes the mapping for sessionID from the workspace

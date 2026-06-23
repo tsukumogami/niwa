@@ -83,14 +83,6 @@ const (
 	sessionNamePrefixLen = 12
 )
 
-// jobState is the subset of ~/.claude/jobs/<id>/state.json this command reads
-// for the coordinator-vs-worker guard. The dir name is the session-id prefix;
-// the full SessionID inside confirms the match.
-type jobState struct {
-	SessionID string `json:"sessionId"`
-	Template  string `json:"template"`
-}
-
 // provisionResult carries the outcome of a successful instance provision: the
 // instance directory name and its absolute path. It mirrors the machine
 // surface of `niwa create --json` ({name, path}), which the real provisioner
@@ -134,17 +126,6 @@ func runInstanceFromHook(cmd *cobra.Command, _ []string) error {
 		// hard error -- it is simply not ours to handle.
 		return nil
 	}
-}
-
-// defaultJobsDir returns the Claude Code jobs directory (~/.claude/jobs). A
-// failure to resolve the home directory yields an empty string, which the
-// guard treats as "no job state" (no-op), so a missing HOME never aborts.
-func defaultJobsDir() string {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return ""
-	}
-	return filepath.Join(home, ".claude", "jobs")
 }
 
 // runInstanceHookStart handles a SessionStart hook. It applies the three-part
@@ -312,55 +293,6 @@ func isBackgroundWorker(jobsDir, sessionID string) bool {
 		return false
 	}
 	return js.Template == bgJobTemplate
-}
-
-// readJobState locates the job-state file for sessionID under jobsDir and
-// decodes it. The job dir name is the session-id prefix, so it first tries an
-// exact match on the full id, then falls back to scanning for a directory
-// whose name is a prefix of sessionID (the empirically observed layout). It
-// returns ok=false on any miss or decode failure.
-func readJobState(jobsDir, sessionID string) (jobState, bool) {
-	// Fast path: a directory named by the full session id.
-	if js, ok := decodeJobState(filepath.Join(jobsDir, sessionID, "state.json")); ok {
-		return js, true
-	}
-
-	// Fall back to scanning for a job dir whose name is a prefix of the
-	// session id (the observed layout uses a leading slice of the UUID).
-	entries, err := os.ReadDir(jobsDir)
-	if err != nil {
-		return jobState{}, false
-	}
-	for _, e := range entries {
-		if !e.IsDir() {
-			continue
-		}
-		name := e.Name()
-		if name == "" || len(name) > len(sessionID) {
-			continue
-		}
-		if sessionID[:len(name)] != name {
-			continue
-		}
-		if js, ok := decodeJobState(filepath.Join(jobsDir, name, "state.json")); ok {
-			return js, true
-		}
-	}
-	return jobState{}, false
-}
-
-// decodeJobState reads and decodes a single job-state file. ok=false on any
-// read or parse failure.
-func decodeJobState(path string) (jobState, bool) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return jobState{}, false
-	}
-	var js jobState
-	if err := json.Unmarshal(data, &js); err != nil {
-		return jobState{}, false
-	}
-	return js, true
 }
 
 // sessionStartInjection is the SessionStart hook output shape Claude Code

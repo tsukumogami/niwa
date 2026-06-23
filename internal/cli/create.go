@@ -135,6 +135,11 @@ func runCreate(cmd *cobra.Command, args []string) error {
 
 	workspaceRoot := filepath.Dir(configDir)
 
+	// Opportunistically reclaim orphaned ephemeral instances before creating a
+	// new one, so session fan-out self-bounds. Best-effort: a reap failure must
+	// never block create.
+	reapOpportunistically(workspaceRoot)
+
 	// Resolve the override-aware workspace name (falls back to
 	// cfg.Workspace.Name when no `niwa init <name>` override is set).
 	configName, err := resolveEffectiveWorkspaceName(workspaceRoot, cfg)
