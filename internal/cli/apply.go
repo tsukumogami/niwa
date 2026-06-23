@@ -201,9 +201,10 @@ func runApply(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	// Apply to each instance, collecting errors instead of aborting on first failure.
-	// After each instance converges, cascade into its worktrees (unless
-	// --no-cascade caps the operation at the instance scope).
+	// Apply to each instance, collecting errors instead of aborting on first
+	// failure. Each instance's live worktrees are refreshed inside the instance
+	// apply pipeline itself (Applier.refreshWorktreeEnvs), so there is no
+	// separate per-instance worktree cascade here.
 	var applyErrors []instanceError
 	for _, instanceRoot := range scope.Instances {
 		if applyErr := applier.Apply(cmd.Context(), cfg, configDir, instanceRoot); applyErr != nil {
@@ -212,11 +213,8 @@ func runApply(cmd *cobra.Command, args []string) error {
 				err:      applyErr,
 			})
 			fmt.Fprintf(os.Stderr, "error: applying to %s: %v\n", instanceRoot, applyErr)
-			// Skip worktree cascade for an instance that failed to converge.
+			// Skip an instance that failed to converge.
 			continue
-		}
-		if !applyNoCascade {
-			cascadeWorktrees(cmd, instanceRoot)
 		}
 	}
 
@@ -260,30 +258,6 @@ func runApplyWorktreeScope(cmd *cobra.Command, scope *workspace.ApplyScope) erro
 	fmt.Fprintf(cmd.OutOrStdout(), "apply: converged worktree at %s\n", target.WorktreePath)
 	printWorktreeContentFiles(cmd, written)
 	return nil
-}
-
-// cascadeWorktrees converges every active worktree of instanceRoot after the
-// instance itself has converged. Per-worktree failures are reported to stderr
-// but do not abort the cascade or fail the instance apply: a worktree is a
-// localized, derived surface. Inactive (ended/abandoned) sessions are skipped.
-func cascadeWorktrees(cmd *cobra.Command, instanceRoot string) {
-	sessionsDir := filepath.Join(instanceRoot, ".niwa", "sessions")
-	states, err := worktree.ListSessionLifecycleStates(sessionsDir)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "warning: enumerating worktrees of %s: %v\n", instanceRoot, err)
-		return
-	}
-	for _, state := range states {
-		if state.Status == worktree.SessionStatusEnded || state.Status == worktree.SessionStatusAbandoned {
-			continue
-		}
-		if state.WorktreePath == "" {
-			continue
-		}
-		if _, applyErr := applyContentToWorktree(instanceRoot, state.WorktreePath, state.Repo, state.Purpose, state.EffectiveBranchName()); applyErr != nil {
-			fmt.Fprintf(os.Stderr, "warning: applying to worktree %s: %v\n", state.WorktreePath, applyErr)
-		}
-	}
 }
 
 // lookupWorktreeSession finds the session lifecycle state whose recorded

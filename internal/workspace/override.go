@@ -912,16 +912,6 @@ func MergeWorkspaceOverlay(ws *config.WorkspaceConfig, overlay *config.Workspace
 		}
 	}
 
-	// Vault: carry the overlay's provider into the merged config when the base
-	// declares none. Without this, a workspace whose vault provider lives only
-	// in the overlay loses the provider after merge, so any vault:// reference
-	// downstream fails with "provider not declared" -- the worktree-vs-apply
-	// asymmetry this fixes. The base wins when it already declares a provider,
-	// matching the base-wins-per-key semantics used throughout the merge.
-	if merged.Vault == nil && overlay.Vault != nil {
-		merged.Vault = overlay.Vault
-	}
-
 	return &merged, nil
 }
 

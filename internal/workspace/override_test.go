@@ -1121,52 +1121,6 @@ func TestMergeWorkspaceOverlay_ReposBaseWins(t *testing.T) {
 	}
 }
 
-// TestMergeWorkspaceOverlay_CarriesOverlayVault verifies that when the base
-// config declares no vault provider, MergeWorkspaceOverlay carries the
-// overlay's vault into the merged config so the merged config keeps the
-// provider. This is the load-bearing fix for the worktree-vs-apply overlay
-// vault asymmetry: without it, a vault:// reference resolved against the
-// merged config fails with "provider not declared".
-func TestMergeWorkspaceOverlay_CarriesOverlayVault(t *testing.T) {
-	ws := baseWS() // no Vault
-	overlayVault := &config.VaultRegistry{
-		Provider: &config.VaultProviderConfig{Kind: "infisical"},
-	}
-	overlay := &config.WorkspaceOverlay{Vault: overlayVault}
-
-	merged, err := MergeWorkspaceOverlay(ws, overlay, t.TempDir())
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if merged.Vault == nil {
-		t.Fatal("expected merged.Vault to carry the overlay provider, got nil")
-	}
-	if merged.Vault.Provider == nil || merged.Vault.Provider.Kind != "infisical" {
-		t.Errorf("merged.Vault.Provider = %+v, want kind=infisical", merged.Vault.Provider)
-	}
-}
-
-// TestMergeWorkspaceOverlay_VaultBaseWins verifies that when the base config
-// already declares a vault provider, the overlay's vault does not override it.
-func TestMergeWorkspaceOverlay_VaultBaseWins(t *testing.T) {
-	ws := baseWS()
-	ws.Vault = &config.VaultRegistry{Provider: &config.VaultProviderConfig{Kind: "base-provider"}}
-	overlay := &config.WorkspaceOverlay{
-		Vault: &config.VaultRegistry{Provider: &config.VaultProviderConfig{Kind: "overlay-provider"}},
-	}
-
-	merged, err := MergeWorkspaceOverlay(ws, overlay, t.TempDir())
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if merged.Vault == nil || merged.Vault.Provider == nil {
-		t.Fatal("expected merged.Vault to retain the base provider")
-	}
-	if merged.Vault.Provider.Kind != "base-provider" {
-		t.Errorf("merged.Vault.Provider.Kind = %q, want base-provider (base wins)", merged.Vault.Provider.Kind)
-	}
-}
-
 // TestMergeWorkspaceOverlay_SettingsBaseWins verifies base wins on settings key collision.
 func TestMergeWorkspaceOverlay_SettingsBaseWins(t *testing.T) {
 	ws := baseWS()
