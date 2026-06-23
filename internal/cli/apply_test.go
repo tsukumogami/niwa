@@ -72,6 +72,33 @@ func TestApplyCmd_HasInstanceFlag(t *testing.T) {
 	}
 }
 
+// TestApplyCmd_HasNoCascadeFlag verifies the --no-cascade flag is registered
+// and defaults to false (so apply cascades into the subtree by default).
+func TestApplyCmd_HasNoCascadeFlag(t *testing.T) {
+	flag := applyCmd.Flags().Lookup("no-cascade")
+	if flag == nil {
+		t.Fatal("expected --no-cascade flag to be registered")
+	}
+	if flag.DefValue != "false" {
+		t.Errorf("expected default false, got %q", flag.DefValue)
+	}
+}
+
+// TestApplyCmd_NoCascadeFlagParses verifies parsing --no-cascade sets the
+// package-level var runApply reads to cap the operation at the current scope.
+func TestApplyCmd_NoCascadeFlagParses(t *testing.T) {
+	saved := applyNoCascade
+	t.Cleanup(func() { applyNoCascade = saved })
+
+	applyNoCascade = false
+	if err := applyCmd.ParseFlags([]string{"--no-cascade"}); err != nil {
+		t.Fatalf("ParseFlags: %v", err)
+	}
+	if !applyNoCascade {
+		t.Error("expected applyNoCascade to be true after --no-cascade")
+	}
+}
+
 // TestApplyCmd_HasAllowMissingSecretsFlag verifies the Issue 10 flag
 // is registered and defaults to false. The flag is plumbed into
 // workspace.Applier.AllowMissingSecrets, which is exercised in
@@ -155,6 +182,7 @@ func TestApplyModes_Values(t *testing.T) {
 		workspace.ApplySingle,
 		workspace.ApplyAll,
 		workspace.ApplyNamed,
+		workspace.ApplyWorktree,
 	}
 	seen := map[workspace.ApplyMode]bool{}
 	for _, m := range modes {
