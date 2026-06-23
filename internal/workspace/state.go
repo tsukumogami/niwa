@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 	"unicode"
 )
@@ -375,6 +376,85 @@ func EnumerateInstances(workspaceRoot string) ([]string, error) {
 	}
 
 	return instances, nil
+}
+
+// InstanceRecord is a machine-readable summary of one instance under a
+// workspace root, emitted by `niwa list --json`. Name is the instance
+// directory's base name; Path is its absolute directory; Ephemeral is true
+// when the instance is backed by an ephemeral session mapping (see the
+// session mapping store).
+type InstanceRecord struct {
+	Name      string `json:"name"`
+	Path      string `json:"path"`
+	Ephemeral bool   `json:"ephemeral"`
+}
+
+// EnumerateInstanceRecords enumerates the instances under workspaceRoot as
+// machine-readable records, sorted by name. The Ephemeral flag is resolved
+// from the workspace-root session mapping store: an instance is ephemeral
+// when some session mapping points at its directory. Workspaces with no
+// mapping store (the common case) yield Ephemeral:false for every instance.
+func EnumerateInstanceRecords(workspaceRoot string) ([]InstanceRecord, error) {
+	dirs, err := EnumerateInstances(workspaceRoot)
+	if err != nil {
+		return nil, err
+	}
+
+	ephemeralPaths := ephemeralInstancePaths(workspaceRoot)
+
+	records := make([]InstanceRecord, 0, len(dirs))
+	for _, dir := range dirs {
+		records = append(records, InstanceRecord{
+			Name:      filepath.Base(dir),
+			Path:      dir,
+			Ephemeral: ephemeralPaths[dir],
+		})
+	}
+	sort.Slice(records, func(i, j int) bool {
+		return records[i].Name < records[j].Name
+	})
+	return records, nil
+}
+
+// ephemeralInstancePaths returns the set of instance directories (absolute
+// paths) backed by an ephemeral session mapping under workspaceRoot.
+//
+// It reads the workspace-root session mapping store at
+// .niwa/sessions/<session_id>.json, the single source of truth shared with
+// the session teardown path and the reaper. When the store is absent (the
+// common case for non-ephemeral workspaces) it returns an empty set.
+// Malformed or unreadable entries are skipped rather than failing the scan,
+// since `niwa list` must stay usable even with a partially written store.
+func ephemeralInstancePaths(workspaceRoot string) map[string]bool {
+	out := make(map[string]bool)
+
+	sessionsDir := filepath.Join(workspaceRoot, StateDir, "sessions")
+	entries, err := os.ReadDir(sessionsDir)
+	if err != nil {
+		return out
+	}
+
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(sessionsDir, entry.Name()))
+		if err != nil {
+			continue
+		}
+		var m struct {
+			InstancePath string `json:"instance_path"`
+			Ephemeral    bool   `json:"ephemeral"`
+		}
+		if err := json.Unmarshal(data, &m); err != nil {
+			continue
+		}
+		if m.Ephemeral && m.InstancePath != "" {
+			out[m.InstancePath] = true
+		}
+	}
+
+	return out
 }
 
 // EnumerateRepos scans instanceRoot for repo directories and returns a sorted,
