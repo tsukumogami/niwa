@@ -1,12 +1,14 @@
 package cli
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/spf13/cobra"
 	"github.com/tsukumogami/niwa/internal/workspace"
 )
 
@@ -223,6 +225,88 @@ func TestFindRepoDir_SkipsDotDirs(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "not found") {
 		t.Errorf("expected 'not found' in error, got: %v", err)
+	}
+}
+
+// TestCreateCmd_HasJSONFlag pins the --json flag registration and default.
+func TestCreateCmd_HasJSONFlag(t *testing.T) {
+	flag := createCmd.Flags().Lookup("json")
+	if flag == nil {
+		t.Fatal("expected --json flag to be registered")
+	}
+	if flag.DefValue != "false" {
+		t.Errorf("expected default false, got %q", flag.DefValue)
+	}
+}
+
+// TestInstanceNumberFromState reads the number recorded in instance state.
+func TestInstanceNumberFromState(t *testing.T) {
+	dir := t.TempDir()
+	instanceDir := filepath.Join(dir, "tsuku-2")
+	stateDir := filepath.Join(instanceDir, ".niwa")
+	if err := os.MkdirAll(stateDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	state := workspace.InstanceState{
+		SchemaVersion:  1,
+		InstanceName:   "tsuku-2",
+		InstanceNumber: 2,
+		Root:           instanceDir,
+	}
+	data, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stateDir, "instance.json"), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := instanceNumberFromState(instanceDir); got != 2 {
+		t.Errorf("got %d, want 2", got)
+	}
+
+	// A missing state file yields 0, never a panic.
+	if got := instanceNumberFromState(filepath.Join(dir, "nope")); got != 0 {
+		t.Errorf("got %d for missing state, want 0", got)
+	}
+}
+
+// TestCreateResult_JSONShape asserts the emitted JSON carries exactly
+// {name, number, path}, that path is the created instance directory, and
+// that nothing else lands on stdout.
+func TestCreateResult_JSONShape(t *testing.T) {
+	instanceDir := filepath.Join(t.TempDir(), "tsuku-abc123")
+	res := createResult{Name: "tsuku-abc123", Number: 3, Path: instanceDir}
+
+	var buf bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetOut(&buf)
+	if err := json.NewEncoder(cmd.OutOrStdout()).Encode(res); err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+
+	// Decode back into a generic map to assert the exact key set.
+	var got map[string]any
+	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	wantKeys := map[string]bool{"name": true, "number": true, "path": true}
+	if len(got) != len(wantKeys) {
+		t.Errorf("expected keys %v, got %v", wantKeys, got)
+	}
+	for k := range wantKeys {
+		if _, ok := got[k]; !ok {
+			t.Errorf("missing key %q in %v", k, got)
+		}
+	}
+	if got["path"] != instanceDir {
+		t.Errorf("path = %v, want %q (the created instance dir)", got["path"], instanceDir)
+	}
+	if got["name"] != "tsuku-abc123" {
+		t.Errorf("name = %v, want tsuku-abc123", got["name"])
+	}
+	if got["number"].(float64) != 3 {
+		t.Errorf("number = %v, want 3", got["number"])
 	}
 }
 
