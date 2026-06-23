@@ -237,9 +237,11 @@ Functional:
 - Instance build cost is real (a full clone per session). This PRD takes that cost
   as accepted for the isolation it buys and does not require a cheaper instance
   primitive.
-- The coordinator-vs-worker guard is heuristic by necessity (no native
-  discriminator); an unusual launch pattern could misclassify, which the opt-out
-  (R12) exists to escape.
+- The coordinator-vs-worker guard relies on a Claude Code internal job-state file
+  (the dispatched-worker marker) that is not part of the documented hook contract; a
+  future format change there could break detection. The opt-in mode (R12) bounds the
+  blast radius to workspaces that chose it, and the reaper reclaims any instance a
+  misdetection creates, so the failure mode is wasted clones, not corruption.
 - When the workspace opts into bypass permissions, the posture lives at the root and
   so applies to every session launched there -- the coordinator and any ordinary
   root session, not only dispatched workers -- because settings resolve at launch and

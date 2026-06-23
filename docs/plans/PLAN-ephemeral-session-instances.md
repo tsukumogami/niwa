@@ -20,7 +20,7 @@ PR. No GitHub issues are materialized.
 
 This plan implements the DESIGN's mechanism for "1 Claude Code session == 1
 ephemeral niwa instance": workspace-root SessionStart/SessionEnd hooks delegating
-to a new `niwa session from-hook` subcommand, a session-to-instance mapping store,
+to a new `niwa instance from-hook` subcommand, a session-to-instance mapping store,
 a `niwa reap` orphan sweep, the supporting `niwa create --json` / `niwa list
 --json` primitives, and the root-config materialization path (`niwa init` install
 plus context-aware `niwa apply`, which converges the subtree at the current scope and
@@ -107,23 +107,27 @@ source of truth for teardown and the reaper (PRD R2).
 
 **Complexity:** complex
 
-**Goal:** Add the `niwa session from-hook` SessionStart branch
-(`internal/cli/session_from_hook.go`): the three-part guard, `niwa create --json`,
-the mapping write, and the `additionalContext` injection (PRD R1, R3, R6).
+**Goal:** Add the `niwa instance from-hook` SessionStart branch in a NEW file
+(`internal/cli/instance_from_hook.go`, distinct from the existing per-repo
+`session_from_hook_cmd.go`): the three-part guard, `niwa create --json`, the mapping
+write, and the `additionalContext` injection (PRD R1, R3, R6).
 
 **Acceptance Criteria:**
 - Reads hook JSON on stdin and runs only when the workspace is in ephemeral-session
-  mode, the session is a dispatched background job, and the launch cwd does not
-  already resolve inside a niwa instance; otherwise it is a no-op
-- On passing the guard, runs `niwa create --json --name <session-id-derived>` (named
-  from `session_id` since no topic slug exists yet at SessionStart, which also dodges
-  the `NextInstanceNumber` race), writes the Issue-3 mapping, and
-  emits a `hookSpecificOutput.additionalContext` JSON carrying the instance path,
-  the instance `CLAUDE.md`, and a cd instruction
-- An acceptance check identifies which hook signal exposes background-job-ness and
-  the guard keys on it, not on `source`/`agent_type`
-- Unit tests cover the guard matrix (mode off, non-job, already-inside-instance,
-  worker) and the injection JSON shape
+  mode, the session's job state (`~/.claude/jobs/<session-id>/state.json`) has
+  `template == "bg"`, and the launch cwd does not already resolve inside a niwa
+  instance; otherwise it is a no-op
+- The guard locates the job dir by `session_id` (the dir name is the session-id
+  prefix; the full `sessionId` in `state.json` confirms the match) and does NOT rely
+  on the `CLAUDE_JOB_DIR` env var, which is not reliably set
+- On passing the guard, runs `niwa create --json --name <session-id-prefix>` (a
+  >=12-char prefix of the UUID, since no topic slug exists yet at SessionStart; this
+  also dodges the `NextInstanceNumber` race), writes the Issue-3 mapping, and emits a
+  `hookSpecificOutput.additionalContext` JSON carrying the instance path, the instance
+  `CLAUDE.md`, and a cd instruction
+- Unit tests cover the guard matrix (mode off, `template != "bg"`,
+  already-inside-instance, worker) using a fixture job-state file, and the injection
+  JSON shape
 - `go test ./...` passes
 
 **Dependencies:** <<ISSUE:1>>, <<ISSUE:3>>
@@ -134,7 +138,7 @@ the mapping write, and the `additionalContext` injection (PRD R1, R3, R6).
 
 **Complexity:** testable
 
-**Goal:** Add the SessionEnd branch to `niwa session from-hook`: resolve the
+**Goal:** Add the SessionEnd branch to `niwa instance from-hook`: resolve the
 instance by `session_id` (never cwd) and `niwa destroy --force` it (PRD R4).
 
 **Acceptance Criteria:**
@@ -162,12 +166,14 @@ whose session ended without clean teardown, and invoke it opportunistically at
 **Acceptance Criteria:**
 - `niwa reap` joins `niwa list --json` against the mapping store and reclaims an
   instance only when it is marked ephemeral and its session is dead by the liveness
-  rule (per-instance marker plus transcript mtime / job absence beyond a TTL)
+  rule: the mapping's `session_id` has no live job at `~/.claude/jobs/<session-id>/`
+  (entry gone, or job `state` terminal / `updatedAt` older than a TTL). Job-state, not
+  transcript mtime, is the primary signal
 - `niwa reap` never destroys a non-ephemeral instance and never destroys solely on a
   TTL without the ephemeral marker
 - `niwa create` invokes the reaper opportunistically at start
-- Unit tests cover a dead ephemeral orphan reclaimed, a live ephemeral instance
-  spared, and a non-ephemeral instance never targeted
+- Unit tests cover a dead ephemeral orphan reclaimed, a live-but-idle ephemeral
+  instance spared (recent/live job state), and a non-ephemeral instance never targeted
 - `go test ./...` passes
 
 **Dependencies:** <<ISSUE:2>>, <<ISSUE:3>>
@@ -188,13 +194,17 @@ it by default at `niwa init` with a persisted opt-out (PRD R7, R12).
 **Acceptance Criteria:**
 - The materializer writes `.claude/settings.json` at the workspace root (via
   `buildSettingsDoc`) with SessionStart and SessionEnd entries piping stdin to
-  `niwa session from-hook`, the permission posture, and the ephemeral-mode flag
+  `niwa instance from-hook`, the permission posture, and the ephemeral-mode flag
+- The SessionStart/SessionEnd hook entries carry a generous timeout (>=120s) to
+  absorb `niwa create`'s clone + vault cost without tripping the harness timeout
 - The materializer writes a workspace-root `CLAUDE.md` carrying workspace-context
   content at root altitude
 - `niwa init` installs the root config by default, non-interactively, with no TTY
   attached
-- An init-time opt-out flag, persisted in root state, suppresses the install;
-  re-running init without it (then `niwa apply` from the root) installs it
+- An init-time opt-out flag, persisted in root state via the existing
+  `LoadState`/`SaveState` plumbing (the additive-field pattern used by
+  `ConfigNameOverride`), suppresses the install; re-running init without it (then
+  `niwa apply` from the root) installs it
 - Unit tests cover the materialized settings content (hooks + permission posture), the
   root `CLAUDE.md`, and the opt-out path
 - `go test ./...` passes
@@ -208,14 +218,19 @@ it by default at `niwa init` with a persisted opt-out (PRD R7, R12).
 **Complexity:** complex
 
 **Goal:** Extend `cwd_classify` with an inside-worktree scope and make `niwa apply`
-context-aware (`internal/cli/apply.go`, `internal/workspace/cwd_classify.go`): it
-converges the subtree at the current scope (workspace root / instance / worktree),
-never climbing above it, with a `--no-cascade` flag that caps the operation at the
-current scope (PRD R8, R13, R14).
+context-aware (`internal/cli/apply.go`, `internal/workspace/cwd_classify.go`,
+`internal/workspace/scope.go`): it converges the subtree at the current scope
+(workspace root / instance / worktree), never climbing above it, with a `--no-cascade`
+flag that caps the operation at the current scope (PRD R8, R13, R14). This is an
+intentional pre-1.0 behavior change -- today `ResolveApplyScope` converges the whole
+instance from anywhere inside it.
 
 **Acceptance Criteria:**
 - `cwd_classify` distinguishes an inside-worktree cwd from inside-instance; `apply`
   resolves its scope from cwd (or `--instance`/registry name)
+- `scope.go` `ResolveApplyScope` gains a worktree scope mode; the existing
+  `scope_test.go` cases (`TestResolveApplyScope_SingleFromInstance` /
+  `_SingleFromNestedDir`) and the `apply` help text are updated to the new semantics
 - At the workspace root, `apply` regenerates the root-managed files idempotently (via
   `buildSettingsDoc` + content-materializer hashing; no-op when current), then runs
   the existing per-instance apply for each instance and each instance's worktrees
@@ -224,11 +239,16 @@ current scope (PRD R8, R13, R14).
 - `niwa apply --no-cascade` converges only the current scope without descending (at
   the root: root config only, no instance reconvergence)
 - `apply` re-runs vault resolution for the scope and destroys nothing
+- Worktree-scope `apply` resolves the workspace overlay's vault the same way the
+  apply path does (it does NOT re-introduce the worktree-vs-apply vault asymmetry that
+  tsukumogami/niwa#170 fixes); this issue builds on #170's unified resolution rather
+  than reimplementing it, and preserves its `AllowMissingSecrets` graceful degradation
 - Unit tests cover each scope (root / instance / worktree), the `--no-cascade` cap,
   and the no-op-when-current case
 - `go test ./...` passes
 
-**Dependencies:** <<ISSUE:7>>
+**Dependencies:** <<ISSUE:7>> (and, externally, tsukumogami/niwa#170 -- the worktree
+overlay-vault fix this issue's worktree scope relies on; sequence after it)
 
 ---
 
@@ -329,7 +349,9 @@ functional tests.
 
 - docs/designs/DESIGN-ephemeral-session-instances.md — the architecture this plan
   decomposes (seven decisions, the end-to-end flow).
-- docs/prds/PRD-ephemeral-session-instances.md — the requirements (R1-R12) the
+- docs/prds/PRD-ephemeral-session-instances.md — the requirements (R1-R14) the
   issues cite.
 - docs/guides/worktree.md — the `niwa worktree from-hook` precedent the hook
   subcommand and functional tests mirror.
+- tsukumogami/niwa#170 — fixes the worktree-vs-apply overlay-vault resolution
+  asymmetry; a prerequisite for Issue 8's worktree-scope `apply`, ships independently.

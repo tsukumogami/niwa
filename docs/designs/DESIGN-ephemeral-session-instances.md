@@ -11,7 +11,7 @@ problem: |
   field distinguishes the coordinator from a worker.
 decision: |
   Install workspace-root SessionStart/SessionEnd hooks (a new root-materialization
-  surface) that delegate to a new `niwa session from-hook` subcommand. On start it
+  surface) that delegate to a new `niwa instance from-hook` subcommand. On start it
   detects a dispatched background-job session, runs `niwa create --json`, records a
   session->instance mapping under the root's `.niwa/sessions/`, and injects the
   instance context + a cd instruction. On end it looks the instance up by session id
@@ -25,7 +25,7 @@ rationale: |
   mirrors the proven `niwa worktree from-hook` precedent, keeps logic testable, and
   avoids brittle shell. Keying teardown on a mapping is forced by SessionEnd's cwd
   being the launch root; the reaper is forced by SessionEnd being best-effort; the
-  background-job guard is the one discriminator the spike surfaced.
+  background-job guard keys on the confirmed `template: "bg"` job-state marker.
 ---
 
 # DESIGN: one ephemeral niwa instance per Claude Code session
@@ -35,7 +35,7 @@ rationale: |
 Planned
 
 This design owns the mechanism: the root materialization surface, the
-`niwa session from-hook` subcommand, the session->instance mapping store, the
+`niwa instance from-hook` subcommand, the session->instance mapping store, the
 reaper, the supporting `--json` / liveness primitives, and the context-aware
 `niwa apply` refresh model. The upstream PRD owns the requirements (R1-R14); this
 design cites them and does not re-open them.
@@ -60,9 +60,10 @@ this design must honor:
   must resolve the instance from a `session_id` mapping, never from cwd.
 - `SessionEnd` is best-effort (one of three observed sessions fired none) -- so a
   reaper is mandatory.
-- The coordinator and workers are indistinguishable by `source`/`agent_type`; the
-  one signal the spike surfaced is that dispatched workers run as background jobs
-  (a `~/.claude/jobs/<id>` profile) where a foreground coordinator does not.
+- The coordinator and workers are indistinguishable by `source`/`agent_type`, but a
+  dispatched worker's job state at `~/.claude/jobs/<session-id>/state.json` carries
+  `template: "bg"` where an interactive session carries `template: "claude"` -- the
+  confirmed discriminator (see Decision 3).
 
 niwa already owns the analogous surface one level down: per-repo
 `WorktreeCreate`/`WorktreeRemove` hooks delegating to `niwa worktree from-hook`,
@@ -132,12 +133,20 @@ and it never destroys (that is `niwa destroy`).
 
 Options: embed `niwa create` plus JSON assembly directly in a shell hook
 (rejected -- brittle parsing, untestable) versus a Go subcommand the hook calls.
-**Chosen:** a new `niwa session from-hook` subcommand, mirroring `niwa worktree
-from-hook`. The root hook is a one-line `command` entry piping stdin to
-`niwa session from-hook`. The subcommand reads the hook JSON on stdin, branches on
-`hook_event_name` (SessionStart vs SessionEnd), and owns all logic: guard
-evaluation, `niwa create`, mapping writes, context injection, and teardown. Hook
-config is data; behavior is compiled and unit-tested.
+**Chosen:** a new `niwa instance from-hook` subcommand, mirroring the existing
+`niwa worktree from-hook` precedent. The root hook is a one-line `command` entry
+piping stdin to `niwa instance from-hook`. The subcommand reads the hook JSON on
+stdin, branches on `hook_event_name` (SessionStart vs SessionEnd), and owns all
+logic: guard evaluation, `niwa create`, mapping writes, context injection, and
+teardown. Hook config is data; behavior is compiled and unit-tested.
+
+**Naming -- avoid the `session` collision.** This is `niwa instance from-hook`, not
+`niwa session from-hook`, deliberately. niwa already ships a per-repo worktree hook
+command (`internal/cli/session_from_hook_cmd.go`) and in niwa "session" already means
+a worktree's lifecycle. This feature operates at the instance level on Claude
+SessionStart/SessionEnd events; naming it `instance from-hook` keeps it disjoint from
+the per-repo worktree command and from the overloaded "session" term. The two
+commands share nothing but the `from-hook` suffix convention.
 
 ### Decision 3 — the coordinator-vs-worker guard (R6)
 
@@ -152,16 +161,24 @@ coordinator's environment, so an env set before `claude agents` reaches both.
 inert unless the workspace root is in ephemeral-session mode (a root state flag,
 default off), so by default no session is touched -- this single switch satisfies
 both "ordinary sessions untouched" (R6) and the opt-out (R12). (2) **Background-job
-detection:** within ephemeral mode, provision only when the session is a dispatched
-background job, detected from the background-job profile Claude Code sets for
-Agent-View workers (the `~/.claude/jobs/<id>` signal the spike surfaced) and not
-present for a foreground coordinator. (3) **Re-entrancy no-op:** the subcommand
-no-ops if its launch cwd already resolves inside a niwa instance
-(`DiscoverInstance` succeeds), so a worker that itself dispatches sub-sessions does
-not nest. The exact field exposing background-job-ness is verified during
-implementation (an acceptance criterion); if it proves unavailable, the master
-switch still bounds blast radius to opt-in workspaces and the reaper still reclaims
-any coordinator instance.
+detection (confirmed signal):** within ephemeral mode, provision only when the
+session is a dispatched background job. The discriminator is empirically confirmed:
+Claude Code records each session's job state at `~/.claude/jobs/<session-id>/state.json`
+with a `template` field whose value is `"bg"` for a dispatched background worker and
+`"claude"` for an interactive/foreground session. The subcommand correlates its hook
+`session_id` to that job dir (the dir name is the session-id prefix; the full
+`sessionId` inside `state.json` confirms the match) and provisions only when
+`template == "bg"`. Note: the `CLAUDE_JOB_DIR` env var is NOT reliably set in every
+session, so the guard locates the job dir by session id rather than trusting the env
+var. (3) **Re-entrancy no-op:** the subcommand no-ops if its launch cwd already
+resolves inside a niwa instance (`DiscoverInstance` succeeds), so a worker that itself
+dispatches sub-sessions does not nest.
+
+`~/.claude/jobs/.../state.json` is an undocumented internal file, so the `template`
+read is a stability risk if Claude Code changes the format; the opt-in master switch
+bounds the blast radius to workspaces that chose it, and the reaper reclaims any
+instance a misfire creates, so a format change degrades to wasted clones, not
+corrupted developer instances.
 
 ### Decision 4 — context delivery and instance entry (R3)
 
@@ -186,7 +203,10 @@ validated against the Claude session-id format (UUID) before being used as a pat
 component. This store is the single source of truth for teardown and the reaper.
 
 **Instance naming.** The instance is named from the `session_id`, via
-`niwa create --name <session-id-derived-suffix>`. This is deliberate: at
+`niwa create --name <session-id-prefix>` using at least the first 12 hex characters
+of the UUID (niwa applies no charset/length validation to the `--name` suffix and a
+UUID is filesystem-safe; 12+ chars keeps collisions negligible while the job dir's
+own 8-char prefix shows shorter is used elsewhere). This is deliberate: at
 `SessionStart` the session has not yet processed its first user prompt, so no
 topic-derived slug exists -- the empirically-captured SessionStart stdin carried
 `session_id`, `transcript_path`, `cwd`, `agent_type`, `source`, and `model`, but no
@@ -207,12 +227,17 @@ Decision-5 store (never cwd), confirm the mapping is marked `ephemeral: true`, r
 session with no mapping (non-worker, or already reaped) is a clean no-op.
 **Reaper (`niwa reap`):** enumerate instances via `niwa list --json` (R10),
 join against the mapping store, and reclaim any instance whose backing session is
-no longer live. Liveness (R11) uses the per-instance marker plus the mapping's
-`transcript_path`: a session is dead if its transcript has not been modified within
-a TTL and/or its background job is gone. `niwa reap` only ever destroys instances
-marked `ephemeral: true` with a dead session -- it never touches developer
-instances. `reap` runs on demand and is also invoked opportunistically at the start
-of `niwa create` so fan-out self-bounds.
+no longer live. Liveness (R11) keys on the **same job-state source as the guard**:
+the mapping records the `session_id`, and the reaper checks
+`~/.claude/jobs/<session-id>/state.json` -- a session is dead when its job entry is
+gone, or its job `state` is terminal / `updatedAt` is older than a TTL. This is
+strictly more reliable than transcript mtime (which can be stale for a live-but-idle
+agent and would risk reaping a working session); transcript mtime is at most a
+secondary corroborator. `niwa reap` only ever destroys instances marked
+`ephemeral: true` with a confirmed-dead session -- it never touches developer
+instances, and never reaps on TTL alone without the ephemeral marker. `reap` runs on
+demand and is also invoked opportunistically at the start of `niwa create` so fan-out
+self-bounds.
 
 ### Decision 7 — machine-readable create and list (R9, R10)
 
@@ -227,7 +252,7 @@ unchanged.
 ## Decision Outcome
 
 A new root-materialization surface installs two workspace-root hooks that both
-delegate to `niwa session from-hook`. On SessionStart, the subcommand applies the
+delegate to `niwa instance from-hook`. On SessionStart, the subcommand applies the
 three-part guard, runs `niwa create --json`, writes a
 `.niwa/sessions/<session_id>.json` mapping, and injects the instance's context plus
 a cd instruction. The agent works inside the instance. On SessionEnd, the
@@ -250,7 +275,7 @@ Components (new unless noted):
 
 - **Root materializer** -- emits the workspace-root managed config: `.claude/settings.json`
   (via the shared `buildSettingsDoc`) with the SessionStart and SessionEnd hook
-  entries (each a `command` piping stdin to `niwa session from-hook`), the permission
+  entries (each a `command` piping stdin to `niwa instance from-hook`), the permission
   posture (`permissions.defaultMode`), and the ephemeral-mode flag, plus a
   workspace-root `CLAUDE.md` (workspace-context content at root altitude). Run by
   `niwa init` and by context-aware `niwa apply`; drift-aware via the existing
@@ -261,11 +286,12 @@ Components (new unless noted):
   instance -> that instance + its worktrees; worktree -> that worktree. Never climbs
   above the current scope. `--no-cascade` caps it at the current node (e.g. root
   config only).
-- **`niwa session from-hook`** -- the hook entry point. Reads hook JSON on stdin,
+- **`niwa instance from-hook`** -- the hook entry point. Reads hook JSON on stdin,
   validates `session_id`, branches on `hook_event_name`:
-  - *SessionStart:* guard (mode on? background-job? not already inside an
-    instance?) -> `niwa create --json` -> write mapping -> emit `additionalContext`
-    JSON (instance path + instance `CLAUDE.md` + cd instruction).
+  - *SessionStart:* guard (ephemeral mode on? job `template == "bg"`? not already
+    inside an instance?) -> `niwa create --json --name <session-id-prefix>` -> write
+    mapping -> emit `additionalContext` JSON (instance path + instance `CLAUDE.md` +
+    cd instruction).
   - *SessionEnd:* resolve mapping by `session_id` -> if `ephemeral` -> `niwa destroy
     --force` -> delete mapping. No mapping -> no-op.
 - **Mapping store** -- `.niwa/sessions/<session_id>.json` at the workspace root.
@@ -278,7 +304,7 @@ End-to-end flow:
 
 1. Developer runs `claude agents` at a workspace root in ephemeral mode and
    dispatches a worker.
-2. Worker `SessionStart` -> hook -> `niwa session from-hook` passes the guard ->
+2. Worker `SessionStart` -> hook -> `niwa instance from-hook` passes the guard ->
    `niwa create --json` clones an instance -> mapping written -> context injected.
 3. Agent `cd`s into the instance and works there in isolation.
 4. Worker ends -> `SessionEnd` -> hook resolves the instance by session id ->
@@ -291,20 +317,27 @@ End-to-end flow:
 - Add `--json` to `create` (and a `list` command with `--json`) over the existing
   `EnumerateInstances` / applier path; emit `{name, number, path}` /
   per-instance records.
-- Add `niwa session from-hook` with SessionStart/SessionEnd branches; unit-test the
-  guard matrix, the mapping read/write, the injection JSON, and the
-  resolve-by-session-id teardown with table tests (mirror
-  `internal/cli/...from-hook` worktree tests).
+- Add `niwa instance from-hook` (a new subcommand, NOT the existing per-repo
+  `session_from_hook_cmd.go`) with SessionStart/SessionEnd branches. The guard reads
+  `~/.claude/jobs/<session-id>/state.json` for `template == "bg"`; unit-test the guard
+  matrix (mode off / `template != "bg"` / already-inside-instance / worker), the
+  mapping read/write, the injection JSON, and the resolve-by-session-id teardown with
+  table tests (mirror the existing `from-hook` worktree tests).
 - Add the mapping store helpers (write/read/delete, `session_id` validation) beside
   the existing session-state code.
 - Add `niwa reap` and wire an opportunistic call into `create`.
 - Add the root materializer (reusing `buildSettingsDoc`, emitting hooks + permission
   posture, plus a root `CLAUDE.md`); make `niwa init` install the root config by
-  default with an opt-out flag persisted in root state.
+  default with an opt-out flag persisted in root state via the existing
+  `LoadState`/`SaveState` plumbing (the same additive-field pattern as
+  `ConfigNameOverride`).
 - Extend `cwd_classify` with an inside-worktree scope and make `niwa apply`
-  context-aware: converge the subtree at the current scope, add `--no-cascade` to cap
-  at the current node. Unit-test each scope (root / instance / worktree) and the
-  `--no-cascade` cap.
+  context-aware: this touches `internal/workspace/scope.go` (`ResolveApplyScope`, a
+  new worktree scope mode) and updates the existing `scope_test.go` cases
+  (`TestResolveApplyScope_SingleFromInstance` / `_SingleFromNestedDir`) plus the
+  `apply` help text, which document today's converge-the-whole-instance behavior.
+  Converge the subtree at the current scope, add `--no-cascade` to cap at the current
+  node. Unit-test each scope (root / instance / worktree) and the `--no-cascade` cap.
 - Add a `@critical` functional Gherkin scenario covering provision-on-start /
   teardown-on-end and a reaper-reclaims-orphan scenario, using the offline
   `localGitServer` helper.
@@ -347,9 +380,10 @@ End-to-end flow:
   bounds it to workspaces that chose it.
 - Instance build cost (a full clone per session) is unchanged and accepted; fan-out
   of N agents is N clones.
-- The background-job discriminator is the one residual feasibility detail; it is
-  pinned by an acceptance criterion, and the master switch + reaper bound the
-  damage if it needs a different signal.
+- The background-job discriminator is confirmed (`template: "bg"` in the session's
+  job state), so no feasibility unknown remains; its only residual risk is that the
+  job-state file is undocumented and could change format, which the master switch +
+  reaper bound to wasted clones rather than corruption.
 - Teardown on clean exit remains best-effort; the reaper is the guarantee, so an
   instance can outlive its session until the next sweep.
 
