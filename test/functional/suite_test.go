@@ -311,6 +311,10 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 	// supported/deny/opt-out install branches (deterministic via a fake claude) ---
 	registerWorktreeDelegationSteps(ctx)
 
+	// --- ephemeral-session integration: instance from-hook provision/teardown
+	// and the orphan reaper, driven against the offline localGitServer ---
+	registerEphemeralSessionSteps(ctx)
+
 	// --- Init-bootstrap harness extensions (Issue 5) ---
 	// GitHub tarball fake — spun up lazily per scenario; backed by the
 	// existing tarballFakeServer used by unit tests. Wire it into the
