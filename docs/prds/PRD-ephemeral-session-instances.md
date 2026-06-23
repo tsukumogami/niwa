@@ -1,6 +1,6 @@
 ---
 schema: prd/v1
-status: Accepted
+status: Done
 problem: |
   Background Claude Code sessions dispatched from a niwa workspace root all share
   one working tree, so parallel agents collide on branches and files. Provisioning
@@ -26,7 +26,7 @@ motivating_context: |
 
 ## Status
 
-Accepted
+Done
 
 The downstream DESIGN owns the mechanism (hook scripts, the session->instance
 mapping store, the reaper's liveness signal, the coordinator-vs-worker guard, and

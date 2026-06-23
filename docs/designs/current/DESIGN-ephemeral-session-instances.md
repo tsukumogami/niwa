@@ -1,6 +1,6 @@
 ---
 schema: design/v1
-status: Planned
+status: Current
 upstream: docs/prds/PRD-ephemeral-session-instances.md
 problem: |
   Claude Code background sessions dispatched from a niwa workspace root share one
@@ -32,7 +32,7 @@ rationale: |
 
 ## Status
 
-Planned
+Current
 
 This design owns the mechanism: the root materialization surface, the
 `niwa instance from-hook` subcommand, the session->instance mapping store, the

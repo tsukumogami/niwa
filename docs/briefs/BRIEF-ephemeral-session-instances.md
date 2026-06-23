@@ -1,6 +1,6 @@
 ---
 schema: brief/v1
-status: Accepted
+status: Done
 problem: |
   A developer who runs `claude agents` from a niwa workspace root to fan out
   parallel background sessions has them all share one working tree: the sessions
@@ -24,7 +24,7 @@ motivating_context: |
 
 ## Status
 
-Accepted
+Done
 
 The downstream PRD owns the requirements; the downstream DESIGN owns the hook and
 garbage-collection mechanism. This brief stops at the developer-facing framing.
