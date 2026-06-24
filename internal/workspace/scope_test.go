@@ -49,6 +49,22 @@ func setupWorkspace(t *testing.T, names []string) (workspaceRoot string) {
 	return root
 }
 
+// setupWorktree creates a session worktree under an instance at
+// <instanceRoot>/.niwa/worktrees/<repo>-<sid>/ and returns its path. It mirrors
+// the on-disk layout CreateSession writes: the worktree's own .niwa has no
+// instance.json, only a sessions dir.
+func setupWorktree(t *testing.T, instanceRoot, repo, sid string) string {
+	t.Helper()
+	wtPath := filepath.Join(instanceRoot, StateDir, "worktrees", repo+"-"+sid)
+	if err := os.MkdirAll(filepath.Join(wtPath, StateDir, "sessions"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return wtPath
+}
+
+// Subtree model (PRD R8, R13, R14): an instance cwd converges that instance
+// (ApplySingle); the apply caller cascades into its worktrees. ResolveApplyScope
+// itself returns only the instance here.
 func TestResolveApplyScope_SingleFromInstance(t *testing.T) {
 	root := setupWorkspace(t, []string{"ws-1", "ws-2"})
 	instanceDir := filepath.Join(root, "ws-1")
@@ -71,6 +87,10 @@ func TestResolveApplyScope_SingleFromInstance(t *testing.T) {
 	if scope.Config == "" {
 		t.Error("Config should be set when workspace.toml exists")
 	}
+	// Instance scope must NOT carry a worktree target.
+	if scope.Worktree.WorktreePath != "" {
+		t.Errorf("Worktree.WorktreePath = %q, want empty for instance scope", scope.Worktree.WorktreePath)
+	}
 }
 
 func TestResolveApplyScope_SingleFromNestedDir(t *testing.T) {
@@ -91,6 +111,75 @@ func TestResolveApplyScope_SingleFromNestedDir(t *testing.T) {
 	}
 	if scope.Instances[0] != instanceDir {
 		t.Errorf("Instances[0] = %q, want %q", scope.Instances[0], instanceDir)
+	}
+}
+
+// Worktree scope: a cwd inside a session worktree converges ONLY that worktree,
+// never the parent instance or siblings. This is the intentional pre-1.0 change
+// from the old whole-instance behavior.
+func TestResolveApplyScope_WorktreeScope(t *testing.T) {
+	root := setupWorkspace(t, []string{"ws-1"})
+	instanceDir := filepath.Join(root, "ws-1")
+	wtPath := setupWorktree(t, instanceDir, "repo", "abcd1234")
+
+	scope, err := ResolveApplyScope(wtPath, "")
+	if err != nil {
+		t.Fatalf("ResolveApplyScope: %v", err)
+	}
+
+	if scope.Mode != ApplyWorktree {
+		t.Errorf("Mode = %d, want ApplyWorktree (%d)", scope.Mode, ApplyWorktree)
+	}
+	if len(scope.Instances) != 0 {
+		t.Errorf("Instances count = %d, want 0 for worktree scope (never the parent instance)", len(scope.Instances))
+	}
+	if scope.Worktree.WorktreePath != wtPath {
+		t.Errorf("Worktree.WorktreePath = %q, want %q", scope.Worktree.WorktreePath, wtPath)
+	}
+	if scope.Worktree.InstanceRoot != instanceDir {
+		t.Errorf("Worktree.InstanceRoot = %q, want %q", scope.Worktree.InstanceRoot, instanceDir)
+	}
+	if scope.Config == "" {
+		t.Error("Config should be set when workspace.toml exists")
+	}
+}
+
+// A cwd nested deeper inside a worktree still resolves to that worktree's root.
+func TestResolveApplyScope_WorktreeScopeNested(t *testing.T) {
+	root := setupWorkspace(t, []string{"ws-1"})
+	instanceDir := filepath.Join(root, "ws-1")
+	wtPath := setupWorktree(t, instanceDir, "repo", "abcd1234")
+	nested := filepath.Join(wtPath, "src", "pkg")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	scope, err := ResolveApplyScope(nested, "")
+	if err != nil {
+		t.Fatalf("ResolveApplyScope: %v", err)
+	}
+	if scope.Mode != ApplyWorktree {
+		t.Errorf("Mode = %d, want ApplyWorktree (%d)", scope.Mode, ApplyWorktree)
+	}
+	if scope.Worktree.WorktreePath != wtPath {
+		t.Errorf("Worktree.WorktreePath = %q, want %q", scope.Worktree.WorktreePath, wtPath)
+	}
+}
+
+// Workspace-root scope carries the WorkspaceRoot path so apply can materialize
+// the root-managed config before cascading into instances.
+func TestResolveApplyScope_RootCarriesWorkspaceRoot(t *testing.T) {
+	root := setupWorkspace(t, []string{"ws-1", "ws-2"})
+
+	scope, err := ResolveApplyScope(root, "")
+	if err != nil {
+		t.Fatalf("ResolveApplyScope: %v", err)
+	}
+	if scope.Mode != ApplyAll {
+		t.Errorf("Mode = %d, want ApplyAll (%d)", scope.Mode, ApplyAll)
+	}
+	if scope.WorkspaceRoot != root {
+		t.Errorf("WorkspaceRoot = %q, want %q", scope.WorkspaceRoot, root)
 	}
 }
 

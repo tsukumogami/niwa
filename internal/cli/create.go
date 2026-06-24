@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -23,6 +24,8 @@ func init() {
 			"Does NOT override *.required misses. One-shot -- re-evaluated each invocation.")
 	createCmd.Flags().BoolVar(&createAllowPlaintextSecrets, "allow-plaintext-secrets", false,
 		"bypass the public-repo plaintext-secrets guardrail and downgrade all .env.example failure-policy failures to warnings. Strictly one-shot -- no state persistence.")
+	createCmd.Flags().BoolVar(&createJSON, "json", false,
+		"emit a single JSON object {name, number, path} for the created instance and nothing else on stdout")
 	createCmd.ValidArgsFunction = completeWorkspaceNames
 }
 
@@ -32,7 +35,15 @@ var (
 	createNoInstallPlugins      bool
 	createAllowMissingSecrets   bool
 	createAllowPlaintextSecrets bool
+	createJSON                  bool
 )
+
+// createResult is the machine-readable shape emitted by `niwa create --json`.
+type createResult struct {
+	Name   string `json:"name"`
+	Number int    `json:"number"`
+	Path   string `json:"path"`
+}
 
 var createCmd = &cobra.Command{
 	Use:   "create [workspace-name]",
@@ -124,6 +135,11 @@ func runCreate(cmd *cobra.Command, args []string) error {
 
 	workspaceRoot := filepath.Dir(configDir)
 
+	// Opportunistically reclaim orphaned ephemeral instances before creating a
+	// new one, so session fan-out self-bounds. Best-effort: a reap failure must
+	// never block create.
+	reapOpportunistically(workspaceRoot)
+
 	// Resolve the override-aware workspace name (falls back to
 	// cfg.Workspace.Name when no `niwa init <name>` override is set).
 	configName, err := resolveEffectiveWorkspaceName(workspaceRoot, cfg)
@@ -192,7 +208,32 @@ func runCreate(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	if createJSON {
+		// Emit exactly one JSON object to stdout and nothing else. The
+		// instance number is sourced from the freshly written instance
+		// state so it matches the on-disk record rather than re-deriving
+		// it from the name.
+		number := instanceNumberFromState(instancePath)
+		out := createResult{Name: instanceName, Number: number, Path: instancePath}
+		enc := json.NewEncoder(cmd.OutOrStdout())
+		if err := enc.Encode(out); err != nil {
+			return fmt.Errorf("encoding create JSON: %w", err)
+		}
+		return nil
+	}
+
 	hintShellInit(cmd)
 
 	return nil
+}
+
+// instanceNumberFromState reads the instance number recorded in the instance's
+// state file. A read failure yields 0 rather than aborting the command, since
+// the path is the load-bearing field for callers and the number is advisory.
+func instanceNumberFromState(instancePath string) int {
+	state, err := workspace.LoadState(instancePath)
+	if err != nil {
+		return 0
+	}
+	return state.InstanceNumber
 }

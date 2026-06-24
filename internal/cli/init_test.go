@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -127,6 +128,7 @@ func executeInit(t *testing.T, args ...string) error {
 	initOverlay = ""
 	initNoOverlay = false
 	initNoWorktreeDelegation = false
+	initNoEphemeralSessions = false
 	initRebind = false
 	initBootstrap = false
 	initNoBootstrap = false
@@ -754,5 +756,92 @@ func TestRunInit_ConflictOrphanedNiwaDir(t *testing.T) {
 	err = executeInit(t)
 	if err == nil {
 		t.Fatal("expected error for orphaned .niwa/ directory, got nil")
+	}
+}
+
+// TestRunInit_NamedMode_InstallsRootConfig verifies the workspace-root
+// ephemeral-session config installs by default in named mode: the root
+// .claude/settings.json and CLAUDE.md are written, the settings carry the
+// SessionStart/SessionEnd hooks, and the root state records
+// EphemeralSessionMode = true.
+func TestRunInit_NamedMode_InstallsRootConfig(t *testing.T) {
+	dir := t.TempDir()
+	origDir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chdir(origDir) })
+
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, "xdg"))
+
+	if err := executeInit(t, "my-project"); err != nil {
+		t.Fatalf("init failed: %v", err)
+	}
+
+	root := filepath.Join(dir, "my-project")
+
+	settingsPath := filepath.Join(root, ".claude", "settings.json")
+	data, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatalf("root settings.json not installed: %v", err)
+	}
+	if !strings.Contains(string(data), "instance from-hook") {
+		t.Errorf("root settings.json missing session-hook command:\n%s", data)
+	}
+	if !strings.Contains(string(data), "SessionStart") || !strings.Contains(string(data), "SessionEnd") {
+		t.Errorf("root settings.json missing SessionStart/SessionEnd entries:\n%s", data)
+	}
+
+	if _, err := os.Stat(filepath.Join(root, "CLAUDE.md")); err != nil {
+		t.Errorf("root CLAUDE.md not installed: %v", err)
+	}
+
+	state, err := workspace.LoadState(root)
+	if err != nil {
+		t.Fatalf("loading root state: %v", err)
+	}
+	if !state.EphemeralSessionMode {
+		t.Errorf("EphemeralSessionMode = false, want true (install-by-default)")
+	}
+}
+
+// TestRunInit_NoEphemeralSessions_SuppressesInstall verifies the opt-out path:
+// --no-ephemeral-sessions suppresses the root config install and records
+// EphemeralSessionMode = false in the root state.
+func TestRunInit_NoEphemeralSessions_SuppressesInstall(t *testing.T) {
+	dir := t.TempDir()
+	origDir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chdir(origDir) })
+
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, "xdg"))
+
+	if err := executeInit(t, "my-project", "--no-ephemeral-sessions"); err != nil {
+		t.Fatalf("init failed: %v", err)
+	}
+
+	root := filepath.Join(dir, "my-project")
+
+	if _, err := os.Stat(filepath.Join(root, ".claude", "settings.json")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("root settings.json should be suppressed with --no-ephemeral-sessions; stat returned %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "CLAUDE.md")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("root CLAUDE.md should be suppressed with --no-ephemeral-sessions; stat returned %v", err)
+	}
+
+	state, err := workspace.LoadState(root)
+	if err != nil {
+		t.Fatalf("loading root state: %v", err)
+	}
+	if state.EphemeralSessionMode {
+		t.Errorf("EphemeralSessionMode = true, want false with --no-ephemeral-sessions")
 	}
 }

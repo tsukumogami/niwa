@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/spf13/cobra"
 	"github.com/tsukumogami/niwa/internal/config"
 	"github.com/tsukumogami/niwa/internal/workspace"
 )
@@ -69,6 +70,33 @@ func TestApplyCmd_HasInstanceFlag(t *testing.T) {
 	}
 	if flag.DefValue != "" {
 		t.Errorf("expected empty default, got %q", flag.DefValue)
+	}
+}
+
+// TestApplyCmd_HasNoCascadeFlag verifies the --no-cascade flag is registered
+// and defaults to false (so apply cascades into the subtree by default).
+func TestApplyCmd_HasNoCascadeFlag(t *testing.T) {
+	flag := applyCmd.Flags().Lookup("no-cascade")
+	if flag == nil {
+		t.Fatal("expected --no-cascade flag to be registered")
+	}
+	if flag.DefValue != "false" {
+		t.Errorf("expected default false, got %q", flag.DefValue)
+	}
+}
+
+// TestApplyCmd_NoCascadeFlagParses verifies parsing --no-cascade sets the
+// package-level var runApply reads to cap the operation at the current scope.
+func TestApplyCmd_NoCascadeFlagParses(t *testing.T) {
+	saved := applyNoCascade
+	t.Cleanup(func() { applyNoCascade = saved })
+
+	applyNoCascade = false
+	if err := applyCmd.ParseFlags([]string{"--no-cascade"}); err != nil {
+		t.Fatalf("ParseFlags: %v", err)
+	}
+	if !applyNoCascade {
+		t.Error("expected applyNoCascade to be true after --no-cascade")
 	}
 }
 
@@ -155,6 +183,7 @@ func TestApplyModes_Values(t *testing.T) {
 		workspace.ApplySingle,
 		workspace.ApplyAll,
 		workspace.ApplyNamed,
+		workspace.ApplyWorktree,
 	}
 	seen := map[workspace.ApplyMode]bool{}
 	for _, m := range modes {
@@ -221,6 +250,141 @@ func TestUpdateRegistry_PreservesSourceURL(t *testing.T) {
 	absConfigPath, _ := filepath.Abs(configPath)
 	if entry.Source != absConfigPath {
 		t.Errorf("Source = %q, want %q", entry.Source, absConfigPath)
+	}
+}
+
+// setupRootScopeFixture builds a hermetic workspace-root fixture with one
+// child instance and returns the workspace root and the instance directory.
+// The root carries .niwa/workspace.toml (so cwd resolves to ApplyAll) and the
+// instance carries .niwa/instance.json (so it is enumerated as a cascade
+// target). No git remotes are configured, so the apply pipeline does no
+// network I/O — the cascade converges the repo-less instance entirely from
+// local state.
+func setupRootScopeFixture(t *testing.T) (workspaceRoot, instanceDir string) {
+	t.Helper()
+	workspaceRoot = t.TempDir()
+
+	niwaDir := filepath.Join(workspaceRoot, ".niwa")
+	if err := os.MkdirAll(niwaDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(niwaDir, "workspace.toml"),
+		[]byte("[workspace]\nname = \"cascade-ws\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	instanceDir = filepath.Join(workspaceRoot, "inst-1")
+	st := &workspace.InstanceState{
+		SchemaVersion: 1,
+		InstanceName:  "inst-1",
+		Root:          instanceDir,
+	}
+	if err := workspace.SaveState(instanceDir, st); err != nil {
+		t.Fatal(err)
+	}
+	return workspaceRoot, instanceDir
+}
+
+// runApplyAtRoot drives runApply with cwd at the given workspace root and the
+// given --no-cascade setting, restoring both the cwd and the package-level flag
+// afterward. It returns the runApply error so callers can assert on it.
+func runApplyAtRoot(t *testing.T, workspaceRoot string, noCascade bool) error {
+	t.Helper()
+
+	// Hermetic registry: updateRegistry writes into XDG_CONFIG_HOME.
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	savedWD, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(savedWD) })
+	if err := os.Chdir(workspaceRoot); err != nil {
+		t.Fatal(err)
+	}
+
+	savedCascade := applyNoCascade
+	t.Cleanup(func() { applyNoCascade = savedCascade })
+	applyNoCascade = noCascade
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(t.Context())
+	return runApply(cmd, nil)
+}
+
+// TestRunApply_RootScopeCascadesIntoInstances drives runApply at ROOT scope
+// (cwd at the workspace root, an ApplyAll fixture with one instance) and
+// asserts the context-aware apply wiring: a normal root apply materializes the
+// root-managed config (root .claude/settings.json) AND proceeds into the
+// instance cascade. The cascade is observed via a sentinel on the instance's
+// state file: a converged instance has its LastApplied stamped and managed
+// files recorded. This exercises behavior, not flag parsing — it confirms the
+// instance loop actually runs Applier.Apply.
+func TestRunApply_RootScopeCascadesIntoInstances(t *testing.T) {
+	root, instanceDir := setupRootScopeFixture(t)
+
+	if err := runApplyAtRoot(t, root, false); err != nil {
+		t.Fatalf("runApply (cascade) returned error: %v", err)
+	}
+
+	// Root-managed config materialized.
+	rootSettings := filepath.Join(root, ".claude", "settings.json")
+	if _, err := os.Stat(rootSettings); err != nil {
+		t.Errorf("expected root-managed settings at %s: %v", rootSettings, err)
+	}
+
+	// Sentinel: the instance was converged by the cascade. A fresh instance
+	// fixture has a zero LastApplied and no managed files; Applier.Apply
+	// stamps LastApplied and records managed files when it runs.
+	st, err := workspace.LoadState(instanceDir)
+	if err != nil {
+		t.Fatalf("loading instance state after cascade: %v", err)
+	}
+	if st.LastApplied.IsZero() {
+		t.Error("expected instance LastApplied to be stamped after cascade, got zero")
+	}
+	if len(st.ManagedFiles) == 0 {
+		t.Error("expected instance to have managed files after cascade, got none")
+	}
+}
+
+// TestRunApply_RootScopeNoCascadeSkipsInstances drives runApply at ROOT scope
+// with --no-cascade and asserts the short-circuit behavior: the root-managed
+// config is still materialized (root .claude/settings.json), but the operation
+// does NOT re-converge the instances beneath it. The same instance-state
+// sentinel proves the cascade was skipped: the instance's state file is
+// untouched (zero LastApplied, no managed files), which can only hold if
+// Applier.Apply was never entered for it.
+//
+// This is the real --no-cascade guarantee under the #168 inherit model:
+// --no-cascade caps the operation at the root scope. It is not flag-parse
+// wiring — it observes that the instance loop did not run.
+func TestRunApply_RootScopeNoCascadeSkipsInstances(t *testing.T) {
+	root, instanceDir := setupRootScopeFixture(t)
+
+	if err := runApplyAtRoot(t, root, true); err != nil {
+		t.Fatalf("runApply (--no-cascade) returned error: %v", err)
+	}
+
+	// Root-managed config is still materialized: --no-cascade at the root
+	// refreshes the root-managed config, it does not suppress it.
+	rootSettings := filepath.Join(root, ".claude", "settings.json")
+	if _, err := os.Stat(rootSettings); err != nil {
+		t.Errorf("expected root-managed settings at %s even with --no-cascade: %v", rootSettings, err)
+	}
+
+	// Sentinel: the instance was NOT converged. Its state file is exactly as
+	// the fixture wrote it — zero LastApplied, no managed files — proving the
+	// instance cascade was short-circuited.
+	st, err := workspace.LoadState(instanceDir)
+	if err != nil {
+		t.Fatalf("loading instance state after --no-cascade: %v", err)
+	}
+	if !st.LastApplied.IsZero() {
+		t.Errorf("expected instance LastApplied to stay zero with --no-cascade, got %v", st.LastApplied)
+	}
+	if len(st.ManagedFiles) != 0 {
+		t.Errorf("expected instance to have no managed files with --no-cascade, got %d", len(st.ManagedFiles))
 	}
 }
 

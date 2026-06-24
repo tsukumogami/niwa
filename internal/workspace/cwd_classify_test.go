@@ -81,6 +81,76 @@ func TestClassifyCwd_AtWorkspaceRootSiblingOfInstance(t *testing.T) {
 	}
 }
 
+func TestClassifyCwd_InsideWorktree(t *testing.T) {
+	root := destroySetupWorkspace(t)
+	instanceDir := destroySetupInstance(t, root, "alpha")
+
+	// Worktree at <instance>/.niwa/worktrees/<repo>-<sid>/ (the layout
+	// CreateSession writes; its own .niwa has no instance.json).
+	wtPath := filepath.Join(instanceDir, StateDir, "worktrees", "repo-abcd1234")
+	if err := os.MkdirAll(filepath.Join(wtPath, StateDir, "sessions"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := ClassifyCwd(wtPath)
+	if err != nil {
+		t.Fatalf("ClassifyCwd: %v", err)
+	}
+	if got.Class != CwdInsideWorktree {
+		t.Errorf("Class = %s, want %s", got.Class, CwdInsideWorktree)
+	}
+	if got.WorktreeDir != wtPath {
+		t.Errorf("WorktreeDir = %q, want %q", got.WorktreeDir, wtPath)
+	}
+	if got.InstanceDir != instanceDir {
+		t.Errorf("InstanceDir = %q, want %q", got.InstanceDir, instanceDir)
+	}
+	if got.WorkspaceRoot != root {
+		t.Errorf("WorkspaceRoot = %q, want %q", got.WorkspaceRoot, root)
+	}
+}
+
+func TestClassifyCwd_NestedInsideWorktree(t *testing.T) {
+	root := destroySetupWorkspace(t)
+	instanceDir := destroySetupInstance(t, root, "alpha")
+	wtPath := filepath.Join(instanceDir, StateDir, "worktrees", "repo-abcd1234")
+	nested := filepath.Join(wtPath, "src", "deep")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := ClassifyCwd(nested)
+	if err != nil {
+		t.Fatalf("ClassifyCwd: %v", err)
+	}
+	if got.Class != CwdInsideWorktree {
+		t.Errorf("Class = %s, want %s (a dir below a worktree is still inside-worktree)", got.Class, CwdInsideWorktree)
+	}
+	if got.WorktreeDir != wtPath {
+		t.Errorf("WorktreeDir = %q, want %q (should resolve to the worktree root)", got.WorktreeDir, wtPath)
+	}
+}
+
+func TestClassifyCwd_WorktreesDirItselfIsInstance(t *testing.T) {
+	// A cwd at <instance>/.niwa/worktrees (the parent of worktree roots, not a
+	// worktree itself) must NOT classify as inside-worktree: there is no
+	// worktree root at or above it. It walks up to the enclosing instance.
+	root := destroySetupWorkspace(t)
+	instanceDir := destroySetupInstance(t, root, "alpha")
+	worktreesDir := filepath.Join(instanceDir, StateDir, "worktrees")
+	if err := os.MkdirAll(worktreesDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := ClassifyCwd(worktreesDir)
+	if err != nil {
+		t.Fatalf("ClassifyCwd: %v", err)
+	}
+	if got.Class != CwdInsideInstance {
+		t.Errorf("Class = %s, want %s", got.Class, CwdInsideInstance)
+	}
+}
+
 func TestClassifyCwd_Outside(t *testing.T) {
 	dir := t.TempDir()
 
@@ -128,6 +198,7 @@ func TestCwdClass_String(t *testing.T) {
 	}{
 		{CwdInsideInstance, "inside-instance"},
 		{CwdAtWorkspaceRoot, "at-workspace-root"},
+		{CwdInsideWorktree, "inside-worktree"},
 		{CwdOutside, "outside"},
 	}
 	for _, tc := range cases {
