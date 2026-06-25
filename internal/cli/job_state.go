@@ -28,9 +28,14 @@ const jobLivenessTTL = 30 * time.Minute
 // state.json is an undocumented internal Claude Code file, so absent fields
 // decode to their zero value and every reader fails safe on a miss.
 type jobState struct {
-	SessionID string    `json:"sessionId"`
-	Template  string    `json:"template"`
-	State     string    `json:"state"`
+	SessionID string `json:"sessionId"`
+	Template  string `json:"template"`
+	State     string `json:"state"`
+	// Cwd is the working directory the background worker launched in. The
+	// dispatch identity-capture path (dispatch_capture.go) correlates a
+	// launched worker to its instance by matching this against the unique
+	// instance directory. Absent decodes to "".
+	Cwd       string    `json:"cwd"`
 	UpdatedAt time.Time `json:"updatedAt"`
 }
 
