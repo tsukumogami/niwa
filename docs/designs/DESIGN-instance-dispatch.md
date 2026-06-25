@@ -12,14 +12,14 @@ decision: |
   name, launches `claude --bg` rooted in it, recovers the session UUID by correlating
   the jobs-dir state.json whose cwd equals the unique instance directory, and writes an
   ephemeral mapping marked with a dispatch origin. Atomicity is a command self-rollback
-  (destroy the instance on any pre-mapping failure) plus a marker-and-TTL reaper backstop
+  (destroy the instance on any pre-mapping failure) plus a name-and-TTL reaper backstop
   that closes the SIGKILL gap a process-local rollback cannot. The command reuses the
   existing create, destroy, mapping, and reclamation machinery; it does not touch the
   hook path.
 rationale: |
   Correlating on the unique instance directory avoids depending on the undocumented
   background-launch stdout format and gives an exact disambiguation key. Self-rollback
-  handles every failure the command returns from; the marker+TTL reaper branch is the
+  handles every failure the command returns from; the name+TTL reaper branch is the
   only way to reclaim an instance orphaned by a SIGKILL, and gating it on a TTL longer
   than a dispatch keeps it from reaping a healthy in-flight instance. Reusing the
   existing primitives keeps the command additive and small.
@@ -146,18 +146,25 @@ on any failure between instance creation and a durable mapping write -- launch f
 just-created instance via the existing destroy path before returning an error. But a Go
 `defer` does not run on `SIGKILL`, OOM, or power loss, so self-rollback alone leaves an
 unmapped orphan in those cases and cannot strictly satisfy R32. The backstop closes that
-gap: the command drops a pending-marker inside the instance at create time -- a small
-file that embeds its own creation timestamp -- and removes it only after the mapping is
-durably written. The reaper gains a **separate marker scan** (not a branch inside
-`selectReapTargets`): because `EnumerateInstanceRecords` derives an instance's
-`Ephemeral` flag solely from the mapping store, an unmapped orphan is already
-`Ephemeral:false` and is dropped before any per-record branch runs, so the backstop
-cannot live inside that loop. The separate scan reclaims an instance when, and only when,
-its mapping is absent, the pending-marker is present, and the marker's embedded timestamp
-is older than a TTL strictly longer than the worst-case dispatch wall-clock. Reading the
-age from the embedded timestamp (not the directory mtime) keeps the gate reliable across
-filesystem mtime quirks. The TTL gate is what preserves R38 -- a healthy in-flight
-instance's marker is younger than the TTL and is never reaped. Rejected: A leaves the SIGKILL
+gap: the reaper gains a **separate scan** (not a branch inside `selectReapTargets`):
+because `EnumerateInstanceRecords` derives an instance's `Ephemeral` flag solely from the
+mapping store, an unmapped orphan is already `Ephemeral:false` and is dropped before any
+per-record branch runs, so the backstop cannot live inside that loop. The scan reclaims an
+instance when, and only when: its mapping is absent, **its directory name carries the
+dispatch `-disp-<hex>` signature**, and its age exceeds a TTL strictly longer than the
+worst-case dispatch wall-clock. **The eligibility signal is the instance NAME, not a
+marker file** -- the name is created atomically with the directory by the provision step,
+so there is no window in which a committed-on-disk dispatch instance lacks its signal
+(an earlier marker-file-only design left a create-then-write-marker gap in which a SIGKILL
+produced an instance that was both unmapped and unmarked, hence invisible to both sweeps
+-- an unreclaimable orphan; keying on the name closes it). For age, the command still
+writes a small `.niwa/dispatch-pending` file embedding an RFC3339 creation timestamp as
+the *precise* age source; when that file is absent or unparseable (the SIGKILL-before-marker
+case) the scan falls back to the directory mtime. The no-mapping gate excludes every
+successful dispatch (it is mapped); the name signature excludes developer instances
+(`<config>`, `<config>-2`) and hook-created instances (`<config>-<sessionhex>`, no
+`-disp-` segment); and the TTL gate preserves R38 -- a healthy in-flight instance is
+younger than the TTL and is never reaped. Rejected: A leaves the SIGKILL
 orphan; C is impossible because the store rejects a non-UUID provisional key
 (`session_map.go`) and would require weakening that validation.
 
@@ -245,7 +252,7 @@ management hints, and -- unless `--detach` was given -- attaches the terminal to
 session as the final step (D1). Any failure before the mapping is durable triggers a
 self-rollback that destroys the instance; the attach step runs only after that window has
 closed and its failure is non-fatal. A SIGKILL in that window leaves a marked, unmapped instance
-that the reaper's new marker+TTL branch reclaims later. Teardown of a normally-running
+that the reaper's new name+TTL branch reclaims later. Teardown of a normally-running
 dispatch is the existing reaper keyed on the ephemeral mapping plus job-state liveness,
 which already treats a terminal (`done`) or past-TTL session as dead.
 
@@ -265,9 +272,10 @@ Components (new unless noted):
 - **Instance creation.** Reuses `realProvisionInstance` with a generated
   `disp-<random>` name (D2). Returns the instance path. Triggers the existing
   opportunistic reap (R12) the way `runCreate` does.
-- **Pending-marker.** A small file written under the instance (e.g.
-  `.niwa/dispatch-pending`) at create time, containing its own creation timestamp,
-  removed after the mapping is durable. The reaper backstop scan keys on it (D4).
+- **Pending-marker (precise-age aid).** A small `.niwa/dispatch-pending` file written
+  immediately after create, embedding an RFC3339 creation timestamp. It is NOT the
+  backstop eligibility signal (the instance name is); it only supplies a precise age, with
+  directory mtime as the fallback when it is absent (D4).
 - **Background launcher (generalized from `sessionattach`).** A package-level function
   variable (test seam) that runs `claude --bg <prompt>` with `cmd.Dir = instanceDir`,
   forwarding the pass-through flags. Each of the prompt and the pass-through values is a
@@ -286,10 +294,12 @@ Components (new unless noted):
 - **Reaper backstop (additive separate scan in `internal/cli/reap.go`).** A scan distinct
   from `selectReapTargets` -- because that function's `Ephemeral` verdict comes from the
   mapping store and drops unmapped instances before any per-record check. The backstop
-  enumerates on-disk instances, and reclaims one only when it carries the dispatch
-  pending-marker, has no mapping, and the marker's embedded timestamp is older than the
-  backstop TTL. It never touches mapped instances (the existing sweep owns those) or young
-  in-flight instances (D4, D5).
+  enumerates on-disk instances and reclaims one only when its directory name carries the
+  dispatch `-disp-<hex>` signature, it has no mapping, and its age (marker timestamp, else
+  directory mtime) exceeds the backstop TTL. A shared name predicate is used by both the
+  command's naming and this scan so they cannot drift. It never touches mapped instances
+  (the existing sweep owns those), non-dispatch-named instances, or young in-flight ones
+  (D4, D5).
 - **`SessionMapping.Origin` (additive field, `internal/workspace/session_map.go`).**
 
 Data flow (happy path):
@@ -324,11 +334,13 @@ A single PR, built in this order so each step is independently testable:
    preflight, create + marker, launch, capture, mapping, marker removal, and the
    deferred self-rollback. Unit-test the guard/rollback matrix with a fake launcher and
    fake capture.
-5. Add the reaper marker+TTL backstop as a separate scan (not a `selectReapTargets`
-   branch, since an unmapped instance is `Ephemeral:false` and dropped there); read the
-   age from the marker's embedded timestamp via the injectable clock. Unit-test that it
-   reclaims a marked-unmapped-old instance, spares a marked-unmapped-young one (R38),
-   spares a mapped instance, and spares an unmarked developer instance.
+5. Add the reaper name+TTL backstop as a separate scan (not a `selectReapTargets`
+   branch, since an unmapped instance is `Ephemeral:false` and dropped there); gate on the
+   `-disp-<hex>` name signature + no-mapping + age (marker timestamp, else dir mtime) via
+   the injectable clock. Unit-test that it reclaims a disp-named-unmapped-old instance
+   (with marker, and without marker via mtime — the SIGKILL-before-marker case), spares a
+   disp-named-unmapped-young one (R38), spares a mapped instance, and never touches a
+   non-dispatch-named (developer/hook) instance.
 6. Add a `@critical` functional Gherkin scenario using the offline `localGitServer`
    harness and a stubbed launcher + fabricated jobs-dir: dispatch provisions and maps;
    an induced launch failure rolls back; a fabricated terminal/stale job state lets the
@@ -363,14 +375,15 @@ instant teardown.
   recovered id against `ValidSessionID` before it becomes a path component or mapping key
   -- the same validation the hook path already applies.
 - **Destroy blast radius.** Rollback and the reaper backstop destroy only the
-  command's own freshly-created instance (rollback) or an instance carrying the dispatch
-  pending-marker with no mapping past the TTL (backstop). A developer's normal instance
-  has no pending-marker and is never a target; a mapped instance is reclaimed only by the
-  existing liveness rule, unchanged.
-- **Marker forgery.** The pending-marker lives inside an instance directory under the
-  workspace; an attacker who can write there can already manipulate instances, so the
-  marker does not widen the trust boundary. The backstop's TTL and mapping-absent gate
-  keep a stray marker from causing a live instance to be reaped.
+  command's own freshly-created instance (rollback) or a `-disp-<hex>`-named instance with
+  no mapping past the TTL (backstop). A developer's normal instance is not dispatch-named
+  and is never a target; a mapped instance is reclaimed only by the existing liveness rule,
+  unchanged.
+- **Name-signature forgery.** The dispatch name signature and the pending-marker both live
+  inside the workspace; an attacker who can create a `-disp-<hex>`-named directory or write
+  a marker there can already manipulate instances, so neither widens the trust boundary. The
+  backstop's TTL and mapping-absent gates keep a stray dispatch-named directory from causing
+  a live (mapped) instance to be reaped.
 - **No new credentials or network surface.** The command adds no secret handling beyond
   what `niwa create` already does (it materializes the instance's declared env), and runs
   entirely on the local host.
@@ -388,9 +401,10 @@ Positive:
 
 Negative / mitigations:
 
-- The reaper gains a second reclamation branch (marker+TTL), a small increase in its
-  surface. Mitigated by gating it strictly (mapping-absent AND marker-present AND
-  age>TTL) and unit-testing the spare/reap matrix, including the in-flight (young) case.
+- The reaper gains a second reclamation scan (name+TTL), a small increase in its
+  surface. Mitigated by gating it strictly (mapping-absent AND `-disp-<hex>`-named AND
+  age>TTL) and unit-testing the spare/reap matrix, including the in-flight (young) case
+  and the no-marker (mtime-fallback) case.
 - Capture depends on Claude Code writing `state.json` with a `cwd` field; if that format
   changes, capture breaks. Mitigated because niwa's reaper already depends on the same
   file, so the dependency is shared, not new, and a capture failure rolls back cleanly

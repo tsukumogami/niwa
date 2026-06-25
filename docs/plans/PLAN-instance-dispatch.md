@@ -155,12 +155,16 @@ past-TTL orphan instances.
 
 **Acceptance Criteria**:
 - [ ] [offline] A scan separate from `selectReapTargets` (which drops unmapped instances as
-  `Ephemeral:false`) enumerates on-disk instances and reclaims one only when it carries the
-  dispatch pending-marker, has no mapping, and the marker's embedded timestamp is older than
-  the backstop TTL (age read via the injectable clock). **(D4, arch-review issue 1)**
-- [ ] [offline] Spare/reap matrix: marked+unmapped+old -> reaped; marked+unmapped+young ->
-  spared (R38); mapped (any age) -> not touched by the backstop (the existing sweep owns it);
-  unmarked developer instance -> never touched. **(R38, R41, R31)**
+  `Ephemeral:false`) enumerates on-disk instances and reclaims one only when its directory
+  name carries the dispatch `-disp-<hex>` signature, it has no mapping, and its age exceeds
+  the backstop TTL. Age uses the `.niwa/dispatch-pending` marker's embedded timestamp when
+  present, else the directory mtime (so a SIGKILL before the marker write is still
+  reclaimable). The name signal is atomic with directory creation, closing the orphan
+  window. **(D4, arch-review)**
+- [ ] [offline] Spare/reap matrix: disp-named+unmapped+old -> reaped (with marker, and
+  without marker via mtime); disp-named+unmapped+young -> spared (R38); mapped (any age) ->
+  not touched by the backstop (the existing sweep owns it); non-dispatch-named developer or
+  hook instance -> never touched. **(R38, R41, R31)**
 - [ ] [offline] The backstop is invoked on the same opportunistic occasions as the existing
   sweep (and via `niwa reap`); the existing reaper behavior and tests are unchanged. **(R12, R27, R1)**
 
