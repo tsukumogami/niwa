@@ -9,11 +9,23 @@ import (
 	"github.com/tsukumogami/niwa/internal/workspace"
 )
 
+// Canonical dispatch-shaped instance names: "<config>-disp-<8hex>". The backstop
+// keys eligibility on this NAME (isDispatchInstanceName), so the fixtures must use
+// the real shape dispatch produces, not an arbitrary "-disp-old" placeholder.
+const (
+	dispInstOld    = "test-ws-disp-0000aa11" // marked/aged old -> reapable
+	dispInstYoung  = "test-ws-disp-0000bb22" // young -> spared
+	dispInstMapped = "test-ws-disp-0000cc33" // mapped -> not touched
+	dispInstBad    = "test-ws-disp-0000dd44" // malformed marker -> mtime fallback
+	dispInstNoMark = "test-ws-disp-0000ee55" // no marker (SIGKILL-before-marker) -> mtime fallback
+	dispInstOrphan = "test-ws-disp-0000ff66" // marked/aged old -> reapable (combined test)
+	devInstName    = "test-ws-2"             // developer instance -> never matched
+	hookInstName   = "test-ws-aabbccdd"      // hook-created instance, no -disp- -> never matched
+)
+
 // writeDispatchMarkerAt writes a dispatch pending-marker inside the instance at
 // instancePath carrying the given RFC3339 timestamp, mirroring what the dispatch
-// command drops at create time. The instance's .niwa directory already exists
-// (makeReapInstance writes instance.json under it), but MkdirAll keeps this
-// robust regardless of call order.
+// command drops at create time.
 func writeDispatchMarkerAt(t *testing.T, instancePath string, ts time.Time) {
 	t.Helper()
 	marker := filepath.Join(instancePath, dispatchPendingMarker)
@@ -38,14 +50,24 @@ func writeRawDispatchMarker(t *testing.T, instancePath, contents string) {
 	}
 }
 
-// TestBackstop_MarkedUnmappedOld_Reclaimed: a marked, unmapped instance whose
-// marker timestamp is older than the TTL is reclaimed by the backstop -- the
-// SIGKILL-orphan case the backstop exists to close.
+// touchInstanceMtime sets the instance directory's modification time, used to
+// simulate an old instance whose age must be read from the directory mtime
+// (the SIGKILL-before-marker and malformed-marker fallback cases).
+func touchInstanceMtime(t *testing.T, instancePath string, ts time.Time) {
+	t.Helper()
+	if err := os.Chtimes(instancePath, ts, ts); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestBackstop_MarkedUnmappedOld_Reclaimed: a dispatch-named, unmapped instance
+// whose marker timestamp is older than the TTL is reclaimed by the backstop --
+// the SIGKILL-orphan case the backstop exists to close.
 func TestBackstop_MarkedUnmappedOld_Reclaimed(t *testing.T) {
 	root := setupHookWorkspace(t, true)
 	now := time.Now()
 
-	inst := makeReapInstance(t, root, "test-ws-disp-old")
+	inst := makeReapInstance(t, root, dispInstOld)
 	// No mapping written (unmapped). Marker older than the TTL.
 	writeDispatchMarkerAt(t, inst, now.Add(-2*dispatchBackstopTTL))
 
@@ -63,14 +85,42 @@ func TestBackstop_MarkedUnmappedOld_Reclaimed(t *testing.T) {
 	}
 }
 
-// TestBackstop_MarkedUnmappedYoung_Spared: a marked, unmapped instance whose
-// marker is younger than the TTL is SPARED -- this is the R38 in-flight
+// TestBackstop_DispNamedUnmappedOldNoMarker_ReclaimedViaMtime: a dispatch-named,
+// unmapped instance with NO marker file at all (the SIGKILL-before-marker race:
+// the instance dir was created but the process died before the marker write)
+// whose directory mtime is older than the TTL is reclaimed via the mtime
+// fallback. This is the orphan the name-keyed backstop exists to close -- it was
+// previously unreclaimable because it was both unmapped AND unmarked.
+func TestBackstop_DispNamedUnmappedOldNoMarker_ReclaimedViaMtime(t *testing.T) {
+	root := setupHookWorkspace(t, true)
+	now := time.Now()
+
+	inst := makeReapInstance(t, root, dispInstNoMark)
+	// No marker, no mapping. Age it by stamping the directory mtime past the TTL.
+	touchInstanceMtime(t, inst, now.Add(-2*dispatchBackstopTTL))
+
+	destroyed := stubDestroyAll(t)
+
+	n, err := reapBackstop(root, now)
+	if err != nil {
+		t.Fatalf("reapBackstop error: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("reaped count = %d, want 1 (SIGKILL-before-marker orphan must be reaped via mtime)", n)
+	}
+	if len(*destroyed) != 1 || (*destroyed)[0] != inst {
+		t.Fatalf("destroyed = %v, want [%s]", *destroyed, inst)
+	}
+}
+
+// TestBackstop_MarkedUnmappedYoung_Spared: a dispatch-named, unmapped instance
+// whose marker is younger than the TTL is SPARED -- this is the R38 in-flight
 // dispatch protection.
 func TestBackstop_MarkedUnmappedYoung_Spared(t *testing.T) {
 	root := setupHookWorkspace(t, true)
 	now := time.Now()
 
-	inst := makeReapInstance(t, root, "test-ws-disp-young")
+	inst := makeReapInstance(t, root, dispInstYoung)
 	// Marker just one minute old: comfortably within the TTL.
 	writeDispatchMarkerAt(t, inst, now.Add(-1*time.Minute))
 
@@ -88,14 +138,14 @@ func TestBackstop_MarkedUnmappedYoung_Spared(t *testing.T) {
 	}
 }
 
-// TestBackstop_MappedInstance_NotTouched: an instance that has a mapping is
-// owned by the primary sweep and is NEVER touched by the backstop, even when it
-// still carries a stale marker and the marker is past the TTL.
+// TestBackstop_MappedInstance_NotTouched: a dispatch-named instance that has a
+// mapping is owned by the primary sweep and is NEVER touched by the backstop,
+// even when it still carries a stale marker and the marker is past the TTL.
 func TestBackstop_MappedInstance_NotTouched(t *testing.T) {
 	root := setupHookWorkspace(t, true)
 	now := time.Now()
 
-	inst := makeReapInstance(t, root, "test-ws-disp-mapped")
+	inst := makeReapInstance(t, root, dispInstMapped)
 	mapEphemeral(t, root, reapLiveSessionID, inst, true)
 	// A stale marker past the TTL that was never cleaned up: the backstop must
 	// still ignore it because the instance is mapped.
@@ -118,13 +168,21 @@ func TestBackstop_MappedInstance_NotTouched(t *testing.T) {
 	}
 }
 
-// TestBackstop_UnmarkedInstance_NeverTouched: an instance with no marker (a
-// developer instance) is never touched, regardless of mapping or age.
-func TestBackstop_UnmarkedInstance_NeverTouched(t *testing.T) {
+// TestBackstop_NonDispatchName_NeverTouched: an instance whose name is NOT a
+// dispatch name -- a developer instance ("<config>-2") or a hook-created instance
+// ("<config>-<sessionhex>", no "-disp-" segment) -- is never touched, even when
+// it is unmapped and arbitrarily old. The name predicate is the load-bearing
+// guard that keeps the backstop off non-dispatch instances.
+func TestBackstop_NonDispatchName_NeverTouched(t *testing.T) {
 	root := setupHookWorkspace(t, true)
 	now := time.Now()
 
-	makeReapInstance(t, root, "test-ws-dev") // no marker, no mapping
+	dev := makeReapInstance(t, root, devInstName)   // no -disp- segment
+	hook := makeReapInstance(t, root, hookInstName) // <config>-<sessionhex>, no -disp-
+	// Age both past the TTL via mtime and even drop a marker on one: still must
+	// not be touched, because the NAME does not match.
+	touchInstanceMtime(t, dev, now.Add(-2*dispatchBackstopTTL))
+	writeDispatchMarkerAt(t, hook, now.Add(-2*dispatchBackstopTTL))
 
 	destroyed := stubDestroyAll(t)
 
@@ -133,22 +191,30 @@ func TestBackstop_UnmarkedInstance_NeverTouched(t *testing.T) {
 		t.Fatalf("reapBackstop error: %v", err)
 	}
 	if n != 0 {
-		t.Fatalf("reaped count = %d, want 0 (unmarked instance must never be touched)", n)
+		t.Fatalf("reaped count = %d, want 0 (non-dispatch-named instances must never be touched)", n)
 	}
 	if len(*destroyed) != 0 {
 		t.Fatalf("destroyed = %v, want []", *destroyed)
 	}
 }
 
-// TestBackstop_MalformedMarker_Spared: a marked, unmapped instance whose marker
-// timestamp is malformed/unparseable is SPARED (fail safe -- never reap on a
-// parse failure).
-func TestBackstop_MalformedMarker_Spared(t *testing.T) {
+// TestBackstop_MalformedMarker_FallsBackToMtime: a dispatch-named, unmapped
+// instance whose marker timestamp is malformed/unparseable does NOT spare the
+// instance forever -- it falls back to the directory mtime. With an old mtime it
+// is reaped; with a young mtime it is spared.
+func TestBackstop_MalformedMarker_FallsBackToMtime(t *testing.T) {
 	root := setupHookWorkspace(t, true)
 	now := time.Now()
 
-	inst := makeReapInstance(t, root, "test-ws-disp-bad")
-	writeRawDispatchMarker(t, inst, "not-a-timestamp\n")
+	// Malformed marker but an OLD directory mtime: reaped via the mtime fallback.
+	oldInst := makeReapInstance(t, root, dispInstBad)
+	writeRawDispatchMarker(t, oldInst, "not-a-timestamp\n")
+	touchInstanceMtime(t, oldInst, now.Add(-2*dispatchBackstopTTL))
+
+	// Malformed marker but a YOUNG directory mtime: spared via the mtime fallback.
+	youngInst := makeReapInstance(t, root, "test-ws-disp-00009977")
+	writeRawDispatchMarker(t, youngInst, "garbage")
+	touchInstanceMtime(t, youngInst, now.Add(-1*time.Minute))
 
 	destroyed := stubDestroyAll(t)
 
@@ -156,18 +222,18 @@ func TestBackstop_MalformedMarker_Spared(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reapBackstop error: %v", err)
 	}
-	if n != 0 {
-		t.Fatalf("reaped count = %d, want 0 (malformed marker must be spared)", n)
+	if n != 1 {
+		t.Fatalf("reaped count = %d, want 1 (malformed marker falls back to mtime: old reaped, young spared)", n)
 	}
-	if len(*destroyed) != 0 {
-		t.Fatalf("destroyed = %v, want [] (malformed marker must not trigger a destroy)", *destroyed)
+	if len(*destroyed) != 1 || (*destroyed)[0] != oldInst {
+		t.Fatalf("destroyed = %v, want [%s]", *destroyed, oldInst)
 	}
 }
 
 // TestBackstop_RunsViaReapWorkspace: the backstop is wired into reapWorkspace,
-// so a dead mapped instance (primary sweep) and a marked-unmapped-old instance
-// (backstop) are both reclaimed in a single reapWorkspace call, while the
-// primary path's behavior for the mapped instance is unchanged.
+// so a dead mapped instance (primary sweep) and a dispatch-named-unmapped-old
+// instance (backstop) are both reclaimed in a single reapWorkspace call, while
+// the primary path's behavior for the mapped instance is unchanged.
 func TestBackstop_RunsViaReapWorkspace(t *testing.T) {
 	root := setupHookWorkspace(t, true)
 	jobsDir := t.TempDir() // empty: the mapped session reads as dead
@@ -176,7 +242,7 @@ func TestBackstop_RunsViaReapWorkspace(t *testing.T) {
 	dead := makeReapInstance(t, root, "test-ws-dead")
 	mapEphemeral(t, root, reapDeadSessionID, dead, true)
 
-	orphan := makeReapInstance(t, root, "test-ws-disp-orphan")
+	orphan := makeReapInstance(t, root, dispInstOrphan)
 	writeDispatchMarkerAt(t, orphan, now.Add(-2*dispatchBackstopTTL))
 
 	destroyed := stubDestroyAll(t)
@@ -217,28 +283,40 @@ func TestSelectBackstopTargets_Matrix(t *testing.T) {
 	root := setupHookWorkspace(t, true)
 	now := time.Now()
 
-	old := makeReapInstance(t, root, "test-ws-old")     // marked, unmapped, old -> target
-	young := makeReapInstance(t, root, "test-ws-young") // marked, unmapped, young -> spared
-	mapped := makeReapInstance(t, root, "test-ws-map")  // marked, mapped, old -> spared
-	makeReapInstance(t, root, "test-ws-dev2")           // unmarked -> spared
-	bad := makeReapInstance(t, root, "test-ws-bad")     // malformed marker -> spared
+	old := makeReapInstance(t, root, dispInstOld)       // disp-named, marked, unmapped, old -> target
+	young := makeReapInstance(t, root, dispInstYoung)   // disp-named, marked, unmapped, young -> spared
+	mapped := makeReapInstance(t, root, dispInstMapped) // disp-named, marked, mapped, old -> spared
+	noMark := makeReapInstance(t, root, dispInstNoMark) // disp-named, NO marker, mtime old -> target
+	bad := makeReapInstance(t, root, dispInstBad)       // disp-named, malformed marker, mtime old -> target
+	dev := makeReapInstance(t, root, devInstName)       // non-disp name, old -> spared
+	hook := makeReapInstance(t, root, hookInstName)     // hook name, marked old -> spared
 
 	writeDispatchMarkerAt(t, old, now.Add(-2*dispatchBackstopTTL))
 	writeDispatchMarkerAt(t, young, now.Add(-1*time.Minute))
 	writeDispatchMarkerAt(t, mapped, now.Add(-2*dispatchBackstopTTL))
 	mapEphemeral(t, root, reapLiveSessionID, mapped, true)
+	touchInstanceMtime(t, noMark, now.Add(-2*dispatchBackstopTTL))
 	writeRawDispatchMarker(t, bad, "garbage")
+	touchInstanceMtime(t, bad, now.Add(-2*dispatchBackstopTTL))
+	touchInstanceMtime(t, dev, now.Add(-2*dispatchBackstopTTL))
+	writeDispatchMarkerAt(t, hook, now.Add(-2*dispatchBackstopTTL))
 
 	targets, err := selectBackstopTargets(root, now)
 	if err != nil {
 		t.Fatalf("selectBackstopTargets error: %v", err)
 	}
 
-	if len(targets) != 1 || targets[0].InstancePath != old {
-		got := make([]string, 0, len(targets))
-		for _, tg := range targets {
-			got = append(got, tg.InstancePath)
+	want := map[string]bool{old: true, noMark: true, bad: true}
+	got := make(map[string]bool, len(targets))
+	for _, tg := range targets {
+		got[tg.InstancePath] = true
+	}
+	if len(got) != len(want) {
+		t.Fatalf("targets = %v, want %v", got, want)
+	}
+	for p := range want {
+		if !got[p] {
+			t.Fatalf("missing expected target %s; got %v", p, got)
 		}
-		t.Fatalf("targets = %v, want [%s]", got, old)
 	}
 }

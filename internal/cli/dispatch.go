@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -31,12 +32,26 @@ var (
 )
 
 const (
+	// dispatchNameSegment is the segment embedded in every dispatch-created
+	// instance name, between the config name and the random hex suffix:
+	// "<config>-disp-<8hex>". It is the SOLE eligibility signal the reaper
+	// backstop keys on, because the directory name is created ATOMICALLY by
+	// provisionInstanceFunc -- there is no window (as there is with a marker
+	// file written after create) in which a SIGKILL can leave a dispatch
+	// instance both unmapped and unmarked. Both the dispatch naming
+	// (dispatchNameSuffix) and the backstop predicate (isDispatchInstanceName)
+	// derive from this const so they cannot drift.
+	dispatchNameSegment = "disp-"
+
 	// dispatchPendingMarker is the file dropped inside a dispatch-created
 	// instance at create time and removed only after the session mapping is
 	// durably written. Its contents are an RFC3339 creation timestamp. The
-	// reaper backstop (Issue 5) keys on this file plus the embedded timestamp
-	// to reclaim a SIGKILL-orphaned, marked-and-unmapped instance past the
-	// backstop TTL (DESIGN Decision 4).
+	// marker is now a PRECISION aid for the reaper backstop's age check (it
+	// carries the exact creation time), NOT the sole eligibility signal: the
+	// backstop keys eligibility on the instance NAME (dispatchNameSegment) and
+	// falls back to the directory mtime when the marker is absent (the
+	// SIGKILL-before-marker case), so the orphan window is closed (DESIGN
+	// Decision 4).
 	dispatchPendingMarker = ".niwa/dispatch-pending"
 
 	// dispatchCaptureTimeout bounds the jobs-dir cwd-correlation poll that
@@ -94,7 +109,12 @@ pass --detach/-d to skip the attach and return after printing the
 attach/logs/stop hints (the mode for fan-out and scripting).
 
 Any failure before the mapping is durable destroys the just-created instance,
-so dispatch never leaves an unreclaimable orphan.`,
+so dispatch never leaves an unreclaimable instance DIRECTORY. One caveat: if the
+worker launch succeeds but session-id capture then fails, the rollback deletes
+the instance directory, but the detached background process keeps running -- we
+never captured its session id, so we cannot stop it. That process has no mapping
+and is harmless, but it is yours to 'claude stop' once you find it in 'claude
+list'.`,
 	Args:          cobra.ExactArgs(1),
 	SilenceErrors: true,
 	SilenceUsage:  true,
@@ -154,24 +174,27 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	}
 	instancePath := res.Path
 
-	// (7) Drop the pending-marker carrying its own creation timestamp. The
-	// reaper backstop keys on this for the SIGKILL gap.
-	if err := writeDispatchMarker(instancePath); err != nil {
-		// The instance exists, so arm a manual rollback for this early failure.
-		_ = destroyInstanceFunc(instancePath)
-		return fmt.Errorf("niwa: error: writing dispatch pending-marker: %w", err)
-	}
-
-	// (8) Arm the deferred self-rollback. ANY early return after create -- and
-	// before success is set -- destroys the just-created instance (DESIGN
-	// Decision 4). A Go defer does not run on SIGKILL; the marker+TTL reaper
-	// backstop closes that remaining gap.
+	// (7) Arm the deferred self-rollback IMMEDIATELY after create, before any
+	// other work. ANY early return after create -- and before success is set --
+	// destroys the just-created instance promptly (DESIGN Decision 4). A Go
+	// defer does not run on SIGKILL; the name+TTL reaper backstop closes that
+	// remaining gap (the dispatch instance NAME, created atomically by provision,
+	// is the backstop's eligibility signal, so no marker is required).
 	success := false
 	defer func() {
 		if !success {
 			_ = destroyInstanceFunc(instancePath)
 		}
 	}()
+
+	// (8) Drop the pending-marker carrying its own creation timestamp. This is
+	// the FIRST action after arming rollback. The marker is a precision aid for
+	// the backstop's age check, not its eligibility signal; the instance name
+	// already makes a SIGKILL-orphaned instance reclaimable even if this write
+	// never lands. A write failure rolls back via the deferred destroy above.
+	if err := writeDispatchMarker(instancePath); err != nil {
+		return fmt.Errorf("niwa: error: writing dispatch pending-marker: %w", err)
+	}
 
 	// (9) Launch the background worker rooted in the instance. Flags become
 	// discrete argv elements -- never string-concatenated -- so a crafted value
@@ -182,6 +205,12 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	}
 
 	// (10) Capture the worker's full session UUID by jobs-dir cwd correlation.
+	// On failure the deferred rollback destroys the instance DIRECTORY, but the
+	// background worker launched in step (9) may still be running: capture failed,
+	// so we never obtained its session id and cannot 'claude stop' it. The
+	// orphaned process has no mapping and is harmless, but it is not auto-killed
+	// -- the user must stop it manually. The backstop reclaims the directory, not
+	// the process.
 	sessionID, err := dispatchCapture(defaultJobsDir(), instancePath, dispatchCaptureTimeout, nil, 0)
 	if err != nil {
 		return fmt.Errorf("niwa: error: capturing dispatch session id: %w", err)
@@ -231,13 +260,32 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 
 // dispatchNameSuffix returns a unique "disp-<8 lowercase hex>" name suffix,
 // using crypto/rand for collision safety under concurrency without a lock
-// (DESIGN Decision 2).
+// (DESIGN Decision 2). The provision path appends this to the config name, so
+// the resulting instance directory is "<config>-disp-<8hex>" -- the shape
+// isDispatchInstanceName recognizes.
 func dispatchNameSuffix() (string, error) {
 	var b [4]byte
 	if _, err := rand.Read(b[:]); err != nil {
 		return "", err
 	}
-	return "disp-" + hex.EncodeToString(b[:]), nil
+	return dispatchNameSegment + hex.EncodeToString(b[:]), nil
+}
+
+// dispatchInstanceNameRe matches a dispatch instance's base directory name: a
+// config name, then the "-disp-" segment, then exactly 8 lowercase hex digits
+// at the end. Anchoring on the 8-hex suffix mirrors dispatchNameSuffix exactly
+// so a developer instance ("<config>", "<config>-2") or a hook-created instance
+// ("<config>-<sessionhex>", no "-disp-" segment) never matches.
+var dispatchInstanceNameRe = regexp.MustCompile(`-` + dispatchNameSegment + `[0-9a-f]{8}$`)
+
+// isDispatchInstanceName reports whether name is a dispatch-created instance's
+// base directory name. The dispatch backstop uses this as its eligibility
+// signal: because provisionInstanceFunc creates the directory (and thus this
+// name) atomically, a dispatch instance is recognizable the instant it exists,
+// closing the SIGKILL-before-marker orphan window that a marker-file-only gate
+// left open.
+func isDispatchInstanceName(name string) bool {
+	return dispatchInstanceNameRe.MatchString(name)
 }
 
 // buildDispatchPassthrough turns the set pass-through flags into discrete argv

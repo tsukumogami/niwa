@@ -4,8 +4,11 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -436,6 +439,105 @@ func TestDispatch_SessionStartGuard_NoOpsInsideDispatchInstance(t *testing.T) {
 	// must make it a no-op -- no second instance is provisioned.
 	if sessionStartGuardPasses(root, instanceDir, sid, jobsDir) {
 		t.Fatalf("re-entrancy guard did not no-op inside a dispatch instance; it would nest a second instance")
+	}
+}
+
+// TestDispatch_Concurrent_DistinctMappings runs N dispatches concurrently
+// against a single workspace root with a fake provision that returns distinct
+// temp instance dirs and a fake capture that returns distinct UUIDs. It asserts
+// that all N produce distinct, intact ephemeral dispatch-origin mappings, none
+// clobbered, and the mapping store parses cleanly afterward (R36/R37 -- the
+// crypto/rand name suffix plus per-session-id mapping files mean concurrent
+// dispatches do not collide).
+func TestDispatch_Concurrent_DistinctMappings(t *testing.T) {
+	const n = 12
+
+	root := setupDispatchWorkspace(t)
+	chdir(t, root) // cwd is constant for all goroutines; no per-goroutine chdir
+	installDispatchFakes(t, root)
+	dispatchDetach = true // no attach in the fan-out path
+
+	// Override the launch seam with a goroutine-safe no-op. The default fake from
+	// installDispatchFakes mutates shared dispatchFakes counters without
+	// synchronization, which would be a data race under concurrent dispatch; this
+	// test asserts on the durable mappings instead of those counters.
+	dispatchLaunch = func(_ context.Context, _, _ string, _ []string) error { return nil }
+	destroyInstanceFunc = func(_ string) error { return nil }
+
+	// A goroutine-safe provision: each call mints a distinct instance dir under
+	// the workspace root using the unique namePrefix dispatch generated.
+	var provisionCount int64
+	provisionInstanceFunc = func(_ context.Context, r, _, namePrefix string) (provisionResult, error) {
+		atomic.AddInt64(&provisionCount, 1)
+		name := "test-ws-" + namePrefix
+		dir := filepath.Join(r, name)
+		if err := os.MkdirAll(filepath.Join(dir, ".niwa"), 0o755); err != nil {
+			return provisionResult{}, err
+		}
+		return provisionResult{Name: name, Path: dir}, nil
+	}
+
+	// A goroutine-safe capture handing back a distinct valid UUID per call.
+	var captureSeq int64
+	dispatchCapture = func(_, _ string, _ time.Duration, _ func() time.Time, _ time.Duration) (string, error) {
+		i := atomic.AddInt64(&captureSeq, 1)
+		// 12 distinct, well-formed lowercase UUIDs differing only in the final
+		// hex digit (i is 1..n, single hex digit covers n <= 15).
+		return fmt.Sprintf("00000000-0000-0000-0000-00000000000%x", i), nil
+	}
+
+	var wg sync.WaitGroup
+	errs := make([]error, n)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			var outBuf, errBuf bytes.Buffer
+			cmd := &cobra.Command{}
+			cmd.SetOut(&outBuf)
+			cmd.SetErr(&errBuf)
+			cmd.SetContext(context.Background())
+			errs[idx] = runDispatch(cmd, []string{fmt.Sprintf("task %d", idx)})
+		}(i)
+	}
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("dispatch %d failed: %v", i, err)
+		}
+	}
+
+	// The store parses, and every mapping is ephemeral + dispatch-origin.
+	mappings, err := workspace.ListSessionMappings(root)
+	if err != nil {
+		t.Fatalf("listing session mappings after concurrent dispatch: %v", err)
+	}
+	if len(mappings) != n {
+		t.Fatalf("got %d mappings, want %d (one per dispatch, none clobbered)", len(mappings), n)
+	}
+
+	seenSession := make(map[string]bool, n)
+	seenInstance := make(map[string]bool, n)
+	for _, m := range mappings {
+		if !m.Ephemeral {
+			t.Errorf("mapping %s not ephemeral", m.SessionID)
+		}
+		if m.Origin != "dispatch" {
+			t.Errorf("mapping %s origin = %q, want dispatch", m.SessionID, m.Origin)
+		}
+		if seenSession[m.SessionID] {
+			t.Errorf("duplicate session id %s", m.SessionID)
+		}
+		seenSession[m.SessionID] = true
+		if seenInstance[m.InstancePath] {
+			t.Errorf("two mappings share instance path %s (a clobber)", m.InstancePath)
+		}
+		seenInstance[m.InstancePath] = true
+	}
+
+	if got := atomic.LoadInt64(&provisionCount); got != n {
+		t.Errorf("provision called %d times, want %d", got, n)
 	}
 }
 

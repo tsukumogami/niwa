@@ -20,10 +20,12 @@ const jobLivenessTTL = 30 * time.Minute
 // jobState is the subset of ~/.claude/jobs/<id>/state.json niwa reads. The dir
 // name is the session-id prefix; the full SessionID inside confirms the match.
 //
-// Two distinct consumers read this file:
+// Three distinct consumers read this file:
 //   - the SessionStart guard (instance_from_hook.go) keys on Template == "bg"
 //     to confirm a dispatched background worker.
 //   - the reaper (reap.go) keys on State / UpdatedAt to decide liveness.
+//   - the dispatch capture path (dispatch_capture.go) keys on Cwd to correlate a
+//     launched worker to its instance directory and recover its session id.
 //
 // state.json is an undocumented internal Claude Code file, so absent fields
 // decode to their zero value and every reader fails safe on a miss.

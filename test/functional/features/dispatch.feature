@@ -6,9 +6,10 @@ Feature: niwa dispatch: provision, rollback, and reaper reclamation
   dispatch creates a fresh ephemeral instance, launches a `claude --bg` worker
   rooted in it, captures the worker's session UUID by jobs-dir cwd correlation,
   and records an ephemeral dispatch-origin mapping keyed on the UUID. Any failure
-  before the mapping is durable rolls the instance back. The marker+TTL reaper
-  backstop and the existing liveness-rule sweep reclaim the instance once its
-  session ends.
+  before the mapping is durable rolls the instance back. The name+TTL reaper
+  backstop (keyed on the dispatch instance name, so a SIGKILL before the marker
+  is written still leaves a reclaimable orphan) and the existing liveness-rule
+  sweep reclaim the instance once its session ends.
 
   The fake claude writes $HOME/.claude/jobs/<short>/state.json carrying the
   chosen UUID and the launch cwd (the instance dir, which dispatch sets via
