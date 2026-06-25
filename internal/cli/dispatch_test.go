@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -91,12 +93,14 @@ func installDispatchFakes(t *testing.T, workspaceRoot string) *dispatchFakes {
 	prevAttach := dispatchAttach
 	prevDestroy := destroyInstanceFunc
 	prevLabel := dispatchLabel
+	prevName := dispatchName
 	prevModel := dispatchModel
 	prevPerm := dispatchPermissionMode
 	prevAgent := dispatchAgent
 	prevDetach := dispatchDetach
 
 	dispatchLabel = ""
+	dispatchName = ""
 	dispatchModel = ""
 	dispatchPermissionMode = ""
 	dispatchAgent = ""
@@ -144,6 +148,7 @@ func installDispatchFakes(t *testing.T, workspaceRoot string) *dispatchFakes {
 		dispatchAttach = prevAttach
 		destroyInstanceFunc = prevDestroy
 		dispatchLabel = prevLabel
+		dispatchName = prevName
 		dispatchModel = prevModel
 		dispatchPermissionMode = prevPerm
 		dispatchAgent = prevAgent
@@ -590,4 +595,203 @@ func TestDispatch_PassthroughFlags_DiscreteArgv(t *testing.T) {
 			t.Fatalf("passthrough[%d] = %q, want %q (full %v)", i, gotPass[i], want[i], gotPass)
 		}
 	}
+}
+
+// TestSanitizeDispatchSlug exercises the slug normalization rules: lowercasing,
+// collapsing non-[a-z0-9] runs to a single hyphen, trimming leading/trailing
+// hyphens, capping length (re-trimming an exposed trailing hyphen), and
+// returning "" when nothing usable remains.
+func TestSanitizeDispatchSlug(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"spaces and punctuation", "My Feature!", "my-feature"},
+		{"underscores and double hyphens", "  __foo--bar__  ", "foo-bar"},
+		{"sentence with mixed case", "Refactor the AuthZ layer", "refactor-the-authz-layer"},
+		{"only punctuation", "!!!", ""},
+		{"empty", "", ""},
+		{"non-ascii dropped", "café", "caf"},
+		{"already a slug", "fix-bug-123", "fix-bug-123"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := sanitizeDispatchSlug(tc.in)
+			if got != tc.want {
+				t.Fatalf("sanitizeDispatchSlug(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+			assertSlugShape(t, got)
+		})
+	}
+}
+
+// TestSanitizeDispatchSlug_CapsLength verifies a very long input is capped to
+// maxDispatchSlugRunes with no trailing hyphen exposed by the cut.
+func TestSanitizeDispatchSlug_CapsLength(t *testing.T) {
+	// A run of words longer than the cap, with a hyphen-producing boundary
+	// positioned so a naive cut would leave a trailing hyphen.
+	long := ""
+	for i := 0; i < 60; i++ {
+		long += "ab "
+	}
+	got := sanitizeDispatchSlug(long)
+	if len([]rune(got)) > maxDispatchSlugRunes {
+		t.Fatalf("slug length = %d runes, want <= %d (%q)", len([]rune(got)), maxDispatchSlugRunes, got)
+	}
+	assertSlugShape(t, got)
+}
+
+// assertSlugShape asserts a slug only ever contains [a-z0-9-] and never leads or
+// trails with a hyphen (an empty slug is allowed).
+func assertSlugShape(t *testing.T, slug string) {
+	t.Helper()
+	if slug == "" {
+		return
+	}
+	for _, r := range slug {
+		if !((r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-') {
+			t.Fatalf("slug %q contains illegal rune %q", slug, r)
+		}
+	}
+	if strings.HasPrefix(slug, "-") || strings.HasSuffix(slug, "-") {
+		t.Fatalf("slug %q must not lead or trail with a hyphen", slug)
+	}
+}
+
+// TestDispatch_Name_SlugInInstanceAndSession verifies that --name "My Thing"
+// (1) produces an instance name that contains the slug AND still ends with the
+// "-disp-<8hex>" signature isDispatchInstanceName recognizes, and (2) forwards
+// "--name my-thing" to the launched worker.
+func TestDispatch_Name_SlugInInstanceAndSession(t *testing.T) {
+	root := setupDispatchWorkspace(t)
+	chdir(t, root)
+	f := installDispatchFakes(t, root)
+	dispatchName = "My Thing"
+
+	var gotName string
+	prevProvision := provisionInstanceFunc
+	provisionInstanceFunc = func(ctx context.Context, r, cwd, namePrefix string) (provisionResult, error) {
+		res, err := prevProvision(ctx, r, cwd, namePrefix)
+		gotName = res.Name
+		return res, err
+	}
+
+	var gotPass []string
+	dispatchLaunch = func(_ context.Context, _, _ string, passthrough []string) error {
+		f.launchCalled++
+		gotPass = passthrough
+		return nil
+	}
+	dispatchDetach = true
+
+	_, _, err := runDispatchCmd(t, "do a thing")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if !strings.Contains(gotName, "my-thing") {
+		t.Errorf("instance name %q should contain the slug %q", gotName, "my-thing")
+	}
+	if !isDispatchInstanceName(gotName) {
+		t.Errorf("instance name %q must still match isDispatchInstanceName (preserve the -disp-<8hex> signature)", gotName)
+	}
+	if !dispatchInstanceNameRe.MatchString(gotName) {
+		t.Errorf("instance name %q must still end with -disp-<8hex>", gotName)
+	}
+
+	if !passthroughHasNameSlug(gotPass, "my-thing") {
+		t.Errorf("launcher passthrough %v should contain \"--name my-thing\"", gotPass)
+	}
+}
+
+// TestDispatch_NoName_NoSlugNoNameFlag verifies that without --name the instance
+// name carries no slug (it is exactly "<config>-disp-<8hex>") and no "--name" is
+// forwarded to the worker -- the original behavior, unchanged.
+func TestDispatch_NoName_NoSlugNoNameFlag(t *testing.T) {
+	root := setupDispatchWorkspace(t)
+	chdir(t, root)
+	f := installDispatchFakes(t, root)
+
+	var gotName string
+	prevProvision := provisionInstanceFunc
+	provisionInstanceFunc = func(ctx context.Context, r, cwd, namePrefix string) (provisionResult, error) {
+		res, err := prevProvision(ctx, r, cwd, namePrefix)
+		gotName = res.Name
+		return res, err
+	}
+
+	var gotPass []string
+	dispatchLaunch = func(_ context.Context, _, _ string, passthrough []string) error {
+		f.launchCalled++
+		gotPass = passthrough
+		return nil
+	}
+	dispatchDetach = true
+
+	_, _, err := runDispatchCmd(t, "do a thing")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// With config "test-ws", the unchanged shape is "test-ws-disp-<8hex>".
+	if !regexp.MustCompile(`^test-ws-disp-[0-9a-f]{8}$`).MatchString(gotName) {
+		t.Errorf("instance name %q should be exactly <config>-disp-<8hex> with no slug", gotName)
+	}
+	for i, a := range gotPass {
+		if a == "--name" {
+			t.Errorf("no --name must be forwarded without the flag; passthrough[%d] = %q (full %v)", i, a, gotPass)
+		}
+	}
+}
+
+// TestDispatch_NameSanitizesEmpty_FallsBack verifies that --name "!!!" (which
+// sanitizes to "") falls back to the slug-less behavior: no slug in the instance
+// name and no "--name" forwarded.
+func TestDispatch_NameSanitizesEmpty_FallsBack(t *testing.T) {
+	root := setupDispatchWorkspace(t)
+	chdir(t, root)
+	f := installDispatchFakes(t, root)
+	dispatchName = "!!!"
+
+	var gotName string
+	prevProvision := provisionInstanceFunc
+	provisionInstanceFunc = func(ctx context.Context, r, cwd, namePrefix string) (provisionResult, error) {
+		res, err := prevProvision(ctx, r, cwd, namePrefix)
+		gotName = res.Name
+		return res, err
+	}
+
+	var gotPass []string
+	dispatchLaunch = func(_ context.Context, _, _ string, passthrough []string) error {
+		f.launchCalled++
+		gotPass = passthrough
+		return nil
+	}
+	dispatchDetach = true
+
+	_, _, err := runDispatchCmd(t, "do a thing")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if !regexp.MustCompile(`^test-ws-disp-[0-9a-f]{8}$`).MatchString(gotName) {
+		t.Errorf("an empty-sanitizing --name must fall back; name %q should be <config>-disp-<8hex>", gotName)
+	}
+	for i, a := range gotPass {
+		if a == "--name" {
+			t.Errorf("an empty-sanitizing --name must forward no --name; passthrough[%d] = %q (full %v)", i, a, gotPass)
+		}
+	}
+}
+
+// passthroughHasNameSlug reports whether pass contains the discrete pair
+// "--name" immediately followed by slug.
+func passthroughHasNameSlug(pass []string, slug string) bool {
+	for i := 0; i+1 < len(pass); i++ {
+		if pass[i] == "--name" && pass[i+1] == slug {
+			return true
+		}
+	}
+	return false
 }

@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -16,6 +17,7 @@ import (
 
 func init() {
 	dispatchCmd.Flags().StringVar(&dispatchLabel, "label", "", "optional human-friendly alias recorded on the session mapping")
+	dispatchCmd.Flags().StringVarP(&dispatchName, "name", "n", "", "optional display name for the session (sanitized into a slug; also names the niwa instance)")
 	dispatchCmd.Flags().StringVar(&dispatchModel, "model", "", "model to forward to the background worker (--model)")
 	dispatchCmd.Flags().StringVar(&dispatchPermissionMode, "permission-mode", "", "permission mode to forward to the background worker (--permission-mode)")
 	dispatchCmd.Flags().StringVar(&dispatchAgent, "agent", "", "agent to forward to the background worker (--agent)")
@@ -25,11 +27,18 @@ func init() {
 
 var (
 	dispatchLabel          string
+	dispatchName           string
 	dispatchModel          string
 	dispatchPermissionMode string
 	dispatchAgent          string
 	dispatchDetach         bool
 )
+
+// maxDispatchSlugRunes caps the sanitized --name slug so it cannot dominate the
+// instance directory name (which is "<config>-<slug>-disp-<8hex>"). 40 runes is
+// generous for a human-readable label while leaving room below filesystem name
+// limits for the config prefix and the "-disp-<8hex>" signature suffix.
+const maxDispatchSlugRunes = 40
 
 const (
 	// dispatchNameSegment is the segment embedded in every dispatch-created
@@ -157,8 +166,13 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 
 	// (4) Generate a unique disp-<8 hex> name suffix via crypto/rand and pass it
 	// as the customName branch of the existing provision path, sidestepping the
-	// racy numbered scan (DESIGN Decision 2).
-	namePrefix, err := dispatchNameSuffix()
+	// racy numbered scan (DESIGN Decision 2). When --name sanitizes to a usable
+	// slug it is inserted BEFORE the "-disp-<8hex>" segment, so the name becomes
+	// "<config>-<slug>-disp-<8hex>": the slug is additive and never replaces the
+	// random hex, so the end-anchored isDispatchInstanceName signature (and thus
+	// the reaper backstop) keeps matching.
+	slug := sanitizeDispatchSlug(dispatchName)
+	namePrefix, err := dispatchNameSuffix(slug)
 	if err != nil {
 		return fmt.Errorf("niwa: error: generating instance name: %w", err)
 	}
@@ -199,7 +213,7 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	// (9) Launch the background worker rooted in the instance. Flags become
 	// discrete argv elements -- never string-concatenated -- so a crafted value
 	// cannot inject a claude flag (DESIGN Decision 8).
-	passthrough := buildDispatchPassthrough()
+	passthrough := buildDispatchPassthrough(slug)
 	if err := dispatchLaunch(cmd.Context(), instancePath, prompt, passthrough); err != nil {
 		return fmt.Errorf("niwa: error: launching dispatch worker: %w", err)
 	}
@@ -266,17 +280,55 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-// dispatchNameSuffix returns a unique "disp-<8 lowercase hex>" name suffix,
-// using crypto/rand for collision safety under concurrency without a lock
-// (DESIGN Decision 2). The provision path appends this to the config name, so
-// the resulting instance directory is "<config>-disp-<8hex>" -- the shape
-// isDispatchInstanceName recognizes.
-func dispatchNameSuffix() (string, error) {
+// dispatchNameSuffix returns a unique name suffix anchored on a
+// "disp-<8 lowercase hex>" segment, using crypto/rand for collision safety under
+// concurrency without a lock (DESIGN Decision 2). The provision path appends this
+// to the config name, so the resulting instance directory is
+// "<config>-disp-<8hex>" -- the shape isDispatchInstanceName recognizes.
+//
+// When slug is non-empty it is inserted BEFORE the "disp-<8hex>" segment, giving
+// "<slug>-disp-<8hex>" (instance dir "<config>-<slug>-disp-<8hex>"). The slug is
+// additive: the random hex is always kept (uniqueness + signature) and the
+// "-disp-<8hex>" suffix stays end-anchored, so isDispatchInstanceName still
+// matches and the reaper backstop is unaffected.
+func dispatchNameSuffix(slug string) (string, error) {
 	var b [4]byte
 	if _, err := rand.Read(b[:]); err != nil {
 		return "", err
 	}
-	return dispatchNameSegment + hex.EncodeToString(b[:]), nil
+	suffix := dispatchNameSegment + hex.EncodeToString(b[:])
+	if slug != "" {
+		return slug + "-" + suffix, nil
+	}
+	return suffix, nil
+}
+
+// sanitizeDispatchSlug normalizes a raw --name value into a filesystem- and
+// flag-safe slug: lowercase, every run of characters outside [a-z0-9] collapsed
+// to a single hyphen, leading/trailing hyphens trimmed, and the result capped to
+// maxDispatchSlugRunes (re-trimming a trailing hyphen the cap may expose). It
+// returns "" when nothing usable remains, signaling the caller to fall back to
+// the slug-less behavior. The result is guaranteed to contain only [a-z0-9-] and
+// to neither lead nor trail with a hyphen.
+func sanitizeDispatchSlug(raw string) string {
+	var b strings.Builder
+	prevHyphen := false
+	for _, r := range strings.ToLower(raw) {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+			prevHyphen = false
+			continue
+		}
+		if !prevHyphen {
+			b.WriteByte('-')
+			prevHyphen = true
+		}
+	}
+	slug := strings.Trim(b.String(), "-")
+	if r := []rune(slug); len(r) > maxDispatchSlugRunes {
+		slug = strings.TrimRight(string(r[:maxDispatchSlugRunes]), "-")
+	}
+	return slug
 }
 
 // dispatchInstanceNameRe matches a dispatch instance's base directory name: a
@@ -299,7 +351,12 @@ func isDispatchInstanceName(name string) bool {
 // buildDispatchPassthrough turns the set pass-through flags into discrete argv
 // elements (flag, value pairs). Each value stays its own element so a crafted
 // value cannot smuggle in an extra claude flag (DESIGN Decision 8).
-func buildDispatchPassthrough() []string {
+//
+// A non-empty slug (the sanitized --name) is forwarded to the worker as
+// "--name <slug>" so the launched claude session carries the same display name
+// embedded in the instance directory. An empty slug forwards nothing, preserving
+// the original slug-less behavior.
+func buildDispatchPassthrough(slug string) []string {
 	var pass []string
 	if dispatchModel != "" {
 		pass = append(pass, "--model", dispatchModel)
@@ -309,6 +366,9 @@ func buildDispatchPassthrough() []string {
 	}
 	if dispatchAgent != "" {
 		pass = append(pass, "--agent", dispatchAgent)
+	}
+	if slug != "" {
+		pass = append(pass, "--name", slug)
 	}
 	return pass
 }
