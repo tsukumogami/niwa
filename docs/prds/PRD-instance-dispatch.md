@@ -102,6 +102,18 @@ command (working name `niwa dispatch`; final verb owned by the DESIGN).
 - **R4.** The command SHALL function independently of the ephemeral-session-mode master
   switch that gates the hook path. Dispatch is an explicit user action and SHALL NOT
   require ephemeral mode to be enabled, nor SHALL it consult or toggle that switch.
+- **R47.** By default, after a successful dispatch (instance created, session launched,
+  and mapping durably written), the command SHALL attach the developer's terminal to the
+  launched session (the equivalent of `claude attach <session>`), so the developer lands
+  inside the new session. A `--detach`/`-d` flag SHALL skip the attach and return
+  immediately after printing the R3 management hints (the mode suited to fan-out and
+  scripting). Attach is strictly the final step: it runs only after the dispatch has
+  fully succeeded, and an attach failure (for example, a fast session that already exited)
+  SHALL NOT be treated as a dispatch failure and SHALL NOT trigger rollback -- the command
+  SHALL degrade to printing the R3 hints. Detaching from, or closing, an attached session
+  SHALL NOT end the underlying session (it is a daemon-backed background session that
+  outlives the attach) and SHALL NOT itself reclaim the instance; reclamation remains
+  governed by the session's own lifecycle (R27-R31).
 
 ### Launch-location resolution
 
@@ -275,6 +287,15 @@ command (working name `niwa dispatch`; final verb owned by the DESIGN).
   never appears surfaces a capture failure within that bound rather than hanging. (That
   dispatch's wall-clock is otherwise dominated by instance-create cost is a property, not
   a tested threshold; see Known Limitations.)
+- **R48.** The full live lifecycle SHALL be covered by an automated end-to-end test that
+  runs the real `claude` -- initialize a workspace, dispatch, assert a well-constructed
+  dedicated instance and a registered session, stop the session, reclaim, and confirm the
+  instance is destroyed. Because Claude credentials are not available in CI, this test
+  SHALL be gated on a live-availability check and SHALL run whenever a usable `claude`
+  is present (for example, a local subscription); the gate SHALL skip the test ONLY when
+  no usable `claude` exists, and SHALL NOT silently skip it on a developer machine where
+  `claude` is usable. A local run of this test SHALL be part of the feature's definition
+  of done, recorded on the pull request.
 
 ## Acceptance Criteria
 
@@ -298,6 +319,12 @@ Happy path and configuration:
   full session UUID exists, recording instance name, instance path, the session id, and the
   dispatch-created provenance marker; an optional supplied label is recorded on it. **(R23,
   R24, R25)**
+- [ ] **[offline]** With a stubbed attach, a default (no `--detach`) dispatch invokes the
+  attach step exactly once, with the captured session id, only after the mapping was
+  written; `--detach`/`-d` skips the attach and returns after printing the management hints. **(R47)**
+- [ ] **[offline]** A stubbed attach that fails (non-zero) after a successful dispatch does
+  not roll back the instance and does not delete the mapping; the command prints the
+  management hints and reports the attach as a non-fatal warning. **(R47)**
 
 Launch-location resolution:
 
@@ -370,6 +397,16 @@ Coexistence with the hook path:
   dispatch-created instance, hits the existing re-entrancy guard and no-ops (provisions no
   second instance). **(R39, R40)**
 
+Live lifecycle (run locally, gated, never skipped when `claude` is usable):
+
+- [ ] **[live]** A gated automated test, run via a dedicated local target, performs the
+  full lifecycle against a real `claude`: init a workspace, `niwa dispatch`, assert a
+  well-constructed `<config>-disp-<hex>` instance (`.niwa/instance.json`, materialized
+  config/env) with the session registered in `claude agents` and rooted in that instance,
+  then `claude stop` + `niwa reap`, and confirm the instance directory and its mapping are
+  gone. A still-live second session is spared by the same reap. The gate skips only when
+  no usable `claude` is present; it runs (not skipped) on a machine where `claude` works. **(R48)**
+
 ### Requirement-to-criterion traceability
 
 Every requirement maps to at least one acceptance criterion above. Requirements verified
@@ -420,8 +457,10 @@ This section also closes the upstream BRIEF's Open Questions.
   rule, which can reclaim an ephemeral instance whose session has gone stale beyond the
   liveness TTL even if the process is technically alive but idle. This is pre-existing
   behavior shared with the hook path; the command does not worsen it, but a very long
-  idle dispatched session is subject to the same TTL backstop. Tuning the TTL is out of
-  scope.
+  idle dispatched session is subject to the same TTL backstop. Default attach (R47) makes
+  this more visible -- a developer sitting in an attached-but-idle session past the TTL
+  could see its instance reclaimed -- but the underlying behavior is unchanged. Tuning the
+  TTL is out of scope.
 - **Short-id scrape fragility.** Capturing the short identifier depends on the
   background-launch output format, which is human-oriented and undocumented as a stable
   contract. The full-UUID resolution via job state (R19) reduces but does not eliminate

@@ -4,7 +4,7 @@ status: Active
 execution_mode: single-pr
 upstream: docs/designs/DESIGN-instance-dispatch.md
 milestone: "instance-dispatch command"
-issue_count: 6
+issue_count: 7
 ---
 
 # PLAN: niwa instance-dispatch command
@@ -133,10 +133,15 @@ launch, capture, and mapping, with a deferred success-flagged self-rollback.
   `destroyInstanceFunc`) and return a clear error -- no instance dir and no mapping remain. **(R32-R35, R42)**
 - [ ] [offline] A worker self-dispatching (cwd inside an instance) creates a sibling under
   the shared workspace root, never nested. **(R6, R46)**
-- [ ] [offline] Flags `--label`, `--model`, `--permission-mode`, `--agent` are wired;
-  empty prompt rejected; an over-ARG_MAX prompt fails clearly. **(R2, R43, D1)**
+- [ ] [offline] Flags `--label`, `--model`, `--permission-mode`, `--agent`, `--detach`/`-d`
+  are wired; empty prompt rejected; an over-ARG_MAX prompt fails clearly. **(R2, R43, D1)**
+- [ ] [offline] With a stubbed attach: a default (no `--detach`) dispatch calls attach
+  exactly once with the captured session id, only after the mapping was written; `--detach`
+  skips attach and returns. A stubbed attach that fails does NOT roll back or delete the
+  mapping -- the command prints hints and warns. **(R47, D1)**
 - [ ] [live] `niwa dispatch "<task>"` at a workspace root launches a worker listed by
-  `claude agents`, rooted in the instance with its configuration. **(R5, R10, R14, R17)**
+  `claude agents`, rooted in the instance with its configuration, and (without `--detach`)
+  attaches the terminal to it. **(R5, R10, R14, R17, R47)**
 
 **Dependencies**: Blocked by <<ISSUE:1>>, <<ISSUE:2>>, <<ISSUE:3>>
 
@@ -189,6 +194,41 @@ reclamation without a live claude.
 **Type**: code
 **Files**: `test/functional/features/dispatch.feature`, `test/functional/dispatch_steps_test.go`
 
+### Issue 7: test(live): add the live end-to-end dispatch lifecycle test
+
+**Goal**: An automated end-to-end test that runs the real `claude` lifecycle against a
+local subscription -- init workspace, dispatch, assert a well-constructed dedicated
+instance and a registered session, stop the session, reap, and confirm the instance is
+destroyed. Gated to run whenever a live `claude` is available and never silently skipped
+locally; skipped only in an environment with no Claude credentials (e.g. CI without
+`ANTHROPIC_API_KEY` and no subscription).
+
+**Acceptance Criteria**:
+- [ ] [live] The test is guarded by a live-availability gate (build tag + a `claude`
+  presence/credential check) and a `make test-live` (or equivalent) target runs it. The
+  gate skips ONLY when no live `claude` is usable; when `claude` is usable the test runs
+  and is not skipped. CI without credentials skips it; a local run with a subscription
+  executes it. **(R48)**
+- [ ] [live] Init a fresh niwa workspace, run `niwa dispatch "<task>" --detach`, and assert
+  the dedicated instance is well-constructed: a distinct `<config>-disp-<hex>` directory
+  under the workspace root, containing `.niwa/instance.json`, the materialized Claude
+  configuration (settings/plugins), and the declared instance env. **(R5, R10, R14)**
+- [ ] [live] Assert the launched session is registered (`claude agents` lists it) and
+  rooted in that instance directory, and that the ephemeral `origin: dispatch` mapping
+  keyed on the session UUID exists. **(R14, R17, R23, R24)**
+- [ ] [live] Stop the session (`claude stop <id>`), then run `niwa reap`, and confirm the
+  instance directory is destroyed and its mapping deleted (reclamation is reaper-primary:
+  `stop` drives the session terminal, the next `reap` reclaims). **(R28, R29, R27)**
+- [ ] [live] Negative control: a second dispatched session that is still live is NOT
+  reclaimed by the same `reap` run -- only the stopped one is. **(R31)**
+- [ ] The live run is part of the PR's definition of done: the implementer runs
+  `make test-live` locally on a clean build and records the result in the PR. **(R48)**
+
+**Dependencies**: Blocked by <<ISSUE:4>>, <<ISSUE:5>>
+
+**Type**: code
+**Files**: `test/live/dispatch_live_test.go`, `Makefile`
+
 ## Dependency Graph
 
 Single-PR plan: no separate diagram is rendered. Dependencies are declared in each
@@ -196,11 +236,17 @@ outline's **Dependencies** field and serialized in the Implementation Sequence b
 
 ## Implementation Sequence
 
-- **Critical path:** Issue 1 -> Issue 3 -> Issue 4 -> Issue 5 -> Issue 6.
+- **Critical path:** Issue 1 -> Issue 3 -> Issue 4 -> Issue 5 -> Issue 6/7.
 - **Parallelizable:** Issues 1 and 2 have no dependencies and can be built first in any
   order; Issue 3 needs only Issue 1. Issue 4 is the integration point and needs 1, 2, 3.
-  Issue 5 needs 1 and 4. Issue 6 (end-to-end) is last, needing 4 and 5.
+  Issue 5 needs 1 and 4. Issue 6 (offline scenario) and Issue 7 (live scenario) are last,
+  each needing 4 and 5, and can be written in either order.
 - **Verify gates (run before the PR is marked ready):** `go build ./...`, `go vet ./...`,
-  `go test ./...` (unit), and `make test-functional-critical` (the Issue 6 scenario), all
-  green on a clean cache. The existing ephemeral-session hook tests must remain green
-  (R1 additive guarantee).
+  `go test ./...` (unit), and `make test-functional-critical` (the Issue 6 offline
+  scenario), all green on a clean cache. The existing ephemeral-session hook tests must
+  remain green (R1 additive guarantee).
+- **Live verification (definition of done, run locally, never skipped when `claude` is
+  usable):** `make test-live` (the Issue 7 lifecycle test) must pass on the implementer's
+  machine against a local Claude subscription -- init -> dispatch -> assert well-constructed
+  instance + registered session -> stop -> reap -> confirm destroyed. CI skips it when no
+  credentials are present; it is not skipped locally. The PR records the local run's result.

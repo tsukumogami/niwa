@@ -84,11 +84,30 @@ grounding research against the current niwa code:
 Options: a top-level `niwa dispatch <prompt>`; `niwa run`; `niwa agent`; a nested
 `niwa instance dispatch`. **Chosen: `niwa dispatch <prompt>`**, a top-level verb beside
 `niwa create`/`niwa reap`, with `--label` for the optional friendly name and
-pass-through `--model`/`--permission-mode`/`--agent` forwarded to `claude --bg`. It
-returns immediately after a successful dispatch, printing the session id and the
-`claude attach`/`logs`/`stop` hints, rather than attaching (attaching would block the
-launching terminal and defeat fan-out). Rejected: `run`/`agent` are vaguer and collide
-with common mental models; a nested subcommand buries a primary action.
+pass-through `--model`/`--permission-mode`/`--agent` forwarded to `claude --bg`.
+
+**Attach by default; `--detach`/`-d` to skip (R47).** The common interactive case is
+"give me a fresh isolated agent and let me work in it," so by default the command runs
+`claude attach <session>` as its final step, landing the developer inside the new
+session. `--detach`/`-d` skips the attach and returns after printing the
+`claude attach`/`logs`/`stop` hints -- the mode for fan-out and scripting. The naming
+follows the Docker convention (`docker run` attaches; `-d` detaches the terminal), which
+is more precise here than `--headless` (which connotes "no UI"). This is a deliberate
+inversion of an earlier "always return" stance: attaching is the better default for a
+single dispatch, and `--detach` preserves the non-blocking behavior for the many-agent
+case. Rejected names: `run`/`agent` are vaguer and collide with common mental models; a
+nested subcommand buries a primary action; `--headless`/`--no-attach` are viable flag
+spellings but `--detach`/`-d` is the most recognizable.
+
+The attach is structurally safe because it is strictly the **last** step, after the
+mapping is durable and the rollback window has closed: `claude --bg` is a daemon-backed
+session that outlives the attach, so detaching or closing the terminal neither ends the
+session nor reclaims the instance (reclamation stays governed by the session's own
+lifecycle). An attach failure -- e.g. a fast session that already exited -- is therefore
+not a dispatch failure: the command degrades to printing the hints and never rolls back.
+The session id needed for attach is already in hand from capture (D3): the correlated
+`state.json` gives the full `sessionId`, and its containing directory name gives the
+short id, so either form `claude attach` accepts is available.
 
 ### D2 -- Concurrency-safe instance naming
 
@@ -221,9 +240,11 @@ resolve to their workspace root; an unresolved directory is a clean error), veri
 the existing create path, drops a pending-marker in it, launches `claude --bg <prompt>`
 rooted in the instance, polls the jobs directory for the `state.json` whose `cwd` is the
 instance directory to recover the full session UUID, writes an ephemeral mapping
-(`origin: dispatch`) keyed on that UUID, removes the marker, and prints the session id
-with management hints. Any failure before the mapping is durable triggers a self-rollback
-that destroys the instance. A SIGKILL in that window leaves a marked, unmapped instance
+(`origin: dispatch`) keyed on that UUID, removes the marker, prints the session id with
+management hints, and -- unless `--detach` was given -- attaches the terminal to the new
+session as the final step (D1). Any failure before the mapping is durable triggers a
+self-rollback that destroys the instance; the attach step runs only after that window has
+closed and its failure is non-fatal. A SIGKILL in that window leaves a marked, unmapped instance
 that the reaper's new marker+TTL branch reclaims later. Teardown of a normally-running
 dispatch is the existing reaper keyed on the ephemeral mapping plus job-state liveness,
 which already treats a terminal (`done`) or past-TTL session as dead.
@@ -233,8 +254,12 @@ which already treats a terminal (`done`) or past-TTL session as dead.
 Components (new unless noted):
 
 - **`niwa dispatch` command (`internal/cli/dispatch.go`).** Cobra command; positional
-  prompt; `--label`, `--model`, `--permission-mode`, `--agent` flags. Orchestrates the
-  sequence below and owns the rollback.
+  prompt; `--label`, `--model`, `--permission-mode`, `--agent`, and `--detach`/`-d`
+  flags. Orchestrates the sequence below, owns the rollback, and runs the final attach
+  step unless `--detach` is set.
+- **Attach step (injectable).** A package-level function variable (test seam, like the
+  launcher) that runs `claude attach <session>`; production wires it to the real exec,
+  tests substitute a fake to assert it is/ isn't called and that its failure is non-fatal.
 - **Workspace resolution.** Reuses `workspace.ClassifyCwd`; maps each class to the
   enclosing `WorkspaceRoot`; `CwdOutside` -> clean error (R5-R9).
 - **Instance creation.** Reuses `realProvisionInstance` with a generated
@@ -277,6 +302,8 @@ Data flow (happy path):
 5. `WriteSessionMapping{session_id: UUID, instance_*: ..., ephemeral: true, origin:
    dispatch, label?}`.
 6. Remove pending-marker; disarm rollback; print id + hints.
+7. Unless `--detach`: `claude attach <session>` (final step; failure is non-fatal, no
+   rollback).
 
 Teardown: the existing reaper reclaims the instance when the session reaches a terminal
 or past-TTL job state (R27-R31). The backstop branch reclaims a SIGKILL-orphaned
@@ -306,6 +333,22 @@ A single PR, built in this order so each step is independently testable:
    harness and a stubbed launcher + fabricated jobs-dir: dispatch provisions and maps;
    an induced launch failure rolls back; a fabricated terminal/stale job state lets the
    reaper reclaim; a fabricated live job state is spared.
+7. Add the live end-to-end test (`test/live/`, a `make test-live` target). It runs the
+   real `claude` lifecycle: init a workspace, `niwa dispatch --detach`, assert the
+   well-constructed dedicated instance (`.niwa/instance.json`, materialized config/env)
+   and the registered session, then `claude stop` + `niwa reap`, and confirm the instance
+   is destroyed and the mapping deleted; a still-live second session is spared. The test
+   is gated on a live-availability check (a build tag plus a `claude`-usable probe) so it
+   runs whenever a usable `claude` is present and is skipped only when none is -- it is not
+   silently skipped on a developer machine. This is the offline scenario's live counterpart
+   and the feature's definition-of-done gate (R48).
+
+**Reclamation is reaper-primary, so `stop` does not destroy instantly.** Because no hook
+fires when an instance-rooted session ends, `claude stop` only drives the session's job
+state terminal; the instance is reclaimed by the next `niwa reap` (on demand, or
+opportunistically at the next dispatch/create). The live test therefore stops, then runs
+`reap`, then asserts destruction -- matching the real behavior rather than assuming an
+instant teardown.
 
 ## Security Considerations
 
