@@ -70,3 +70,51 @@ load-bearing question is whether that is reachable from a hook.
    dependency order?**
    How #171 and #172 interact; whether relaunch-in-instance moots cd+inject and
    changes the guard calculus; what the minimal-correct vs. ideal end states are.
+
+## Pivot (post round 1)
+
+Round 1 + a live user test reframed the problem. The hook can never re-root a
+session (confirmed). But the user verified that `claude --bg "<prompt>"` launched
+from INSIDE an instance directory (a) boots rooted in the instance, so settings/
+plugins/hooks/env resolve natively, AND (b) still registers in Agent View for
+unified management (`claude agents`/`attach`/`logs`/`stop`). This is the
+"instance-rooted dispatch" model: niwa pre-creates the instance, then launches
+`claude --bg` cwd'd into it. It bypasses both bug paths (#171 guard, #172 cd+inject)
+for the blessed path. Open strategic fork: AUGMENT (keep hook auto-provisioning as
+best-effort for un-wrapped sessions, fix 171/172 lightly) vs REPLACE (retire hook
+provisioning; the command is the only path; #171 may evaporate). Also observed:
+niwa already wraps the `claude` invocation (it injects `--channels`), so a launch-
+wrapper surface already exists to extend.
+
+New Core Question: design a `niwa`-owned instance-rooted dispatch command, and
+decide how to reposition #171/#172 around it (augment vs replace).
+
+## Round 2 Research Leads
+
+A. **How does niwa launch `claude` today, and what wrapper surface exists to host an
+   instance-rooted dispatch command?** The `--channels` injection proves niwa already
+   augments the `claude` invocation — find where (the launch/exec path, flag assembly,
+   the `--channels`/telegram wiring) and assess how a `niwa dispatch`-style command
+   (create instance -> `claude --bg` cwd'd into it -> capture id -> record mapping)
+   would slot in. Reuse over rebuild.
+
+B. **Does teardown/mapping work under pre-creation?** If niwa pre-creates the instance
+   and writes the session->instance mapping at create time (not via the SessionStart
+   hook), do the existing SessionEnd teardown branch (instance_from_hook.go) and
+   `niwa reap` still reclaim it correctly? Does SessionEnd even fire for a `claude --bg`
+   session? What changes in the mapping store / reaper, and is the `claude --bg`
+   `~/.claude/jobs/<id>` produced the same way the reaper's liveness check expects?
+
+C. **What is the `claude --bg` invocation contract?** Does it block or detach; is there
+   a machine-readable (`--json`) way to capture the session id (vs scraping
+   `backgrounded · <id>`); can the prompt come via stdin/file; what is the exit
+   behavior; how do `claude attach`/`agents`/`stop`/`logs` relate; any flags relevant
+   to settings/cwd (`--settings`, `--add-dir`, `--permission-mode`). Determines how
+   robustly niwa can drive and track the dispatched session.
+
+D. **Augment vs replace — what concretely changes in the current feature each way?** If
+   hook auto-provisioning is RETIRED: what code becomes dead (the guard, the
+   SessionStart branch, the `template`/job-state read, the master switch) and does #171
+   fully evaporate; what of #172 remains (root scaffold for the coordinator's own
+   config?). If KEPT (augment): what is the minimal best-effort 171/172 fix so the hook
+   path does not actively misfire or orphan. Recommend a default with reasons.
