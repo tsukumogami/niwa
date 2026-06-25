@@ -405,6 +405,40 @@ func TestDispatch_OverLongPrompt_Errors(t *testing.T) {
 	}
 }
 
+// TestDispatch_SessionStartGuard_NoOpsInsideDispatchInstance asserts that the
+// existing SessionStart re-entrancy guard no-ops against a dispatch-created
+// instance: a dispatch instance is a genuine, valid niwa instance (it carries
+// .niwa/instance.json), so a SessionStart hook whose launch cwd is inside it
+// fails guard step 3 and provisions no second instance. This proves the
+// dispatch path composes with the existing hook path without the hook code
+// changing (Issue 6 AC, R39/R40). It exercises the guard helper directly rather
+// than running a full hook, which is the simpler equivalent check.
+func TestDispatch_SessionStartGuard_NoOpsInsideDispatchInstance(t *testing.T) {
+	root := setupHookWorkspace(t, true) // ephemeral-session mode on
+	jobsDir := t.TempDir()
+
+	// A dispatch-created instance is shaped exactly like makeReapInstance's
+	// output: a real instance dir under the workspace root carrying
+	// .niwa/instance.json. Its name follows the disp-<hex> convention.
+	instanceDir := makeReapInstance(t, root, "test-ws-disp-abc12345")
+
+	// The session is a genuine background worker (so guards 1 and 2 pass); only
+	// the re-entrancy guard (3) should be what makes this a no-op.
+	const sid = "aabbccdd-eeff-1122-3344-556677889900"
+	writeJobState(t, jobsDir, sid, sid, bgJobTemplate)
+
+	// At the workspace root the guard passes (a fresh dispatch would provision).
+	if !sessionStartGuardPasses(root, root, sid, jobsDir) {
+		t.Fatalf("guard unexpectedly failed at the workspace root; expected it to pass there")
+	}
+
+	// With the launch cwd INSIDE the dispatch instance, the re-entrancy guard
+	// must make it a no-op -- no second instance is provisioned.
+	if sessionStartGuardPasses(root, instanceDir, sid, jobsDir) {
+		t.Fatalf("re-entrancy guard did not no-op inside a dispatch instance; it would nest a second instance")
+	}
+}
+
 func TestDispatch_PassthroughFlags_DiscreteArgv(t *testing.T) {
 	root := setupDispatchWorkspace(t)
 	chdir(t, root)

@@ -1,0 +1,293 @@
+package functional
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+
+	"github.com/cucumber/godog"
+)
+
+// dispatch_steps_test.go holds step definitions for the `niwa dispatch`
+// lifecycle integration (DESIGN-instance-dispatch, PLAN Issue 6). The runtime
+// steps drive the REAL niwa binary's dispatch and reap commands offline against
+// the localGitServer, with a FAKE `claude` on PATH that simulates what dispatch
+// needs WITHOUT a real claude, daemon, or network.
+//
+// The fake claude's `--bg` invocation writes the Claude Code job state that the
+// capture path correlates by cwd: $HOME/.claude/jobs/<short>/state.json carrying
+// the chosen full UUID and cwd == the launch cwd. dispatch sets cmd.Dir to the
+// instance dir, so the fake (which runs with that cwd) records the instance dir
+// as cwd, and dispatch_capture.go matches it. HOME is sandboxed, so the jobs dir
+// is hermetic.
+
+// dispatchFakeClaudeScript is the fake claude that the dispatch scenarios put on
+// PATH. behaviour selects the --bg outcome:
+//   - "ok": --bg writes a live job state for $FAKE_CLAUDE_SESSION_ID and exits 0
+//     (the success path);
+//   - "launch-fail": --bg exits non-zero, writing nothing (the induced launch
+//     failure that must roll the instance back).
+//
+// attach/logs exit 0 (dispatch only calls attach without --detach; the scenarios
+// pass --detach, so attach is never reached, but the fake handles it for
+// completeness). stop rewrites the job state to a terminal "done" so a later reap
+// reclaims the instance. Any other invocation exits non-zero so a stray real
+// code path fails loudly rather than silently hitting the network.
+func dispatchFakeClaudeScript(behaviour string) string {
+	bg := `  sid="${FAKE_CLAUDE_SESSION_ID:-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa}"
+  short=$(printf '%s' "$sid" | cut -c1-8)
+  jobdir="$HOME/.claude/jobs/$short"
+  mkdir -p "$jobdir"
+  cwd=$(pwd)
+  printf '{"sessionId":"%s","template":"bg","state":"running","cwd":"%s"}\n' "$sid" "$cwd" > "$jobdir/state.json"
+  printf 'backgrounded · %s\n' "$short"
+  exit 0`
+	if behaviour == "launch-fail" {
+		bg = `  echo "fake claude: induced launch failure" >&2
+  exit 1`
+	}
+	return fmt.Sprintf(`#!/bin/sh
+case "$1" in
+  --bg)
+%s
+    ;;
+  attach|logs)
+    exit 0
+    ;;
+  stop)
+    sid="$2"
+    short=$(printf '%%s' "$sid" | cut -c1-8)
+    jobdir="$HOME/.claude/jobs/$short"
+    if [ -f "$jobdir/state.json" ]; then
+      printf '{"sessionId":"%%s","template":"bg","state":"done","cwd":""}\n' "$sid" > "$jobdir/state.json"
+    fi
+    exit 0
+    ;;
+  *)
+    echo "fake claude: unsupported invocation: $*" >&2
+    exit 1
+    ;;
+esac
+`, bg)
+}
+
+// installDispatchFakeClaude writes the fake claude with the given behaviour into
+// a scenario-local bin dir and prepends it to PATH for every subsequent niwa
+// subprocess via testState.pathPrefix.
+func installDispatchFakeClaude(s *testState, behaviour string) error {
+	binDir := filepath.Join(s.homeDir, "fake-claude-bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		return fmt.Errorf("mkdir fake-claude-bin: %w", err)
+	}
+	scriptPath := filepath.Join(binDir, "claude")
+	if err := os.WriteFile(scriptPath, []byte(dispatchFakeClaudeScript(behaviour)), 0o755); err != nil {
+		return fmt.Errorf("writing fake claude script: %w", err)
+	}
+	s.pathPrefix = binDir
+	return nil
+}
+
+// aFakeClaudeForDispatchWithSession installs the success-path fake claude and
+// pins the UUID it will record, so the scenario can assert the mapping is keyed
+// on exactly that id.
+func aFakeClaudeForDispatchWithSession(ctx context.Context, sessionID string) (context.Context, error) {
+	s := getState(ctx)
+	if s == nil {
+		return ctx, fmt.Errorf("no test state")
+	}
+	if err := installDispatchFakeClaude(s, "ok"); err != nil {
+		return ctx, err
+	}
+	s.envOverrides["FAKE_CLAUDE_SESSION_ID"] = sessionID
+	return ctx, nil
+}
+
+// aFakeClaudeForDispatchThatFailsToLaunch installs the launch-fail fake claude,
+// whose --bg exits non-zero so dispatch's deferred self-rollback fires.
+func aFakeClaudeForDispatchThatFailsToLaunch(ctx context.Context) (context.Context, error) {
+	s := getState(ctx)
+	if s == nil {
+		return ctx, fmt.Errorf("no test state")
+	}
+	return ctx, installDispatchFakeClaude(s, "launch-fail")
+}
+
+// iRunCommandFromTheWorkspaceRoot runs the given niwa command from the workspace
+// root (where ClassifyCwd resolves the enclosing workspace) and, when it is a
+// dispatch, records the disp-<hex> instance directory it created.
+func iRunCommandFromTheWorkspaceRoot(ctx context.Context, command string) (context.Context, error) {
+	s := getState(ctx)
+	if s == nil {
+		return ctx, fmt.Errorf("no test state")
+	}
+	if err := runNiwa(s, s.workspaceRoot, command); err != nil {
+		return ctx, err
+	}
+	if strings.Contains(command, "dispatch") {
+		s.lastDispatchInstancePath = findDispatchInstance(s.workspaceRoot)
+	}
+	return ctx, nil
+}
+
+// findDispatchInstance returns the absolute path of the single disp-* instance
+// under workspaceRoot, or "" when none exists. The dispatch instance name is
+// "<config>-disp-<8 hex>", so the "-disp-" infix uniquely identifies it.
+func findDispatchInstance(workspaceRoot string) string {
+	entries, err := os.ReadDir(workspaceRoot)
+	if err != nil {
+		return ""
+	}
+	for _, e := range entries {
+		if e.IsDir() && strings.Contains(e.Name(), "-disp-") {
+			return filepath.Join(workspaceRoot, e.Name())
+		}
+	}
+	return ""
+}
+
+// aDispatchInstanceWasCreatedWithAWellFormedInstanceFile asserts a disp-<hex>
+// instance directory exists and carries a parseable .niwa/instance.json.
+func aDispatchInstanceWasCreatedWithAWellFormedInstanceFile(ctx context.Context) error {
+	s := getState(ctx)
+	if s == nil {
+		return fmt.Errorf("no test state")
+	}
+	inst := s.lastDispatchInstancePath
+	if inst == "" {
+		inst = findDispatchInstance(s.workspaceRoot)
+	}
+	if inst == "" {
+		return fmt.Errorf("no dispatch instance found under %s\nstdout:\n%s\nstderr:\n%s", s.workspaceRoot, s.stdout, s.stderr)
+	}
+	statePath := filepath.Join(inst, ".niwa", "instance.json")
+	data, err := os.ReadFile(statePath)
+	if err != nil {
+		return fmt.Errorf("reading instance state %s: %w", statePath, err)
+	}
+	var js map[string]any
+	if err := json.Unmarshal(data, &js); err != nil {
+		return fmt.Errorf("instance state %s is not well-formed JSON: %w", statePath, err)
+	}
+	s.lastDispatchInstancePath = inst
+	return nil
+}
+
+// theDispatchInstanceStillExists asserts the recorded disp instance directory is
+// still on disk (the reaper spared it).
+func theDispatchInstanceStillExists(ctx context.Context) error {
+	s := getState(ctx)
+	if s == nil {
+		return fmt.Errorf("no test state")
+	}
+	if s.lastDispatchInstancePath == "" {
+		return fmt.Errorf("no dispatch instance path recorded")
+	}
+	if _, err := os.Stat(s.lastDispatchInstancePath); err != nil {
+		return fmt.Errorf("dispatch instance %s should still exist: %w", s.lastDispatchInstancePath, err)
+	}
+	return nil
+}
+
+// noDispatchInstanceRemains asserts there is no disp-* instance under the
+// workspace root (rollback or reclamation removed it).
+func noDispatchInstanceRemains(ctx context.Context) error {
+	s := getState(ctx)
+	if s == nil {
+		return fmt.Errorf("no test state")
+	}
+	if inst := findDispatchInstance(s.workspaceRoot); inst != "" {
+		return fmt.Errorf("a dispatch instance still exists at %s; expected none\nstdout:\n%s\nstderr:\n%s", inst, s.stdout, s.stderr)
+	}
+	return nil
+}
+
+// aDispatchOriginMappingExistsForSession asserts the mapping at
+// .niwa/sessions/<sid>.json exists and records ephemeral:true, origin:"dispatch".
+func aDispatchOriginMappingExistsForSession(ctx context.Context, sessionID string) error {
+	s := getState(ctx)
+	if s == nil {
+		return fmt.Errorf("no test state")
+	}
+	path := filepath.Join(s.workspaceRoot, ".niwa", "sessions", sessionID+".json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("expected dispatch mapping at %s: %w\nstdout:\n%s\nstderr:\n%s", path, err, s.stdout, s.stderr)
+	}
+	var m struct {
+		Ephemeral bool   `json:"ephemeral"`
+		Origin    string `json:"origin"`
+	}
+	if err := json.Unmarshal(data, &m); err != nil {
+		return fmt.Errorf("parsing mapping %s: %w", path, err)
+	}
+	if !m.Ephemeral {
+		return fmt.Errorf("mapping %s is not ephemeral; want ephemeral:true", path)
+	}
+	if m.Origin != "dispatch" {
+		return fmt.Errorf("mapping %s origin = %q; want \"dispatch\"", path, m.Origin)
+	}
+	return nil
+}
+
+// noDispatchOriginMappingRemains asserts the sessions store holds no mapping at
+// all (rollback removed it, or none was ever written).
+func noDispatchOriginMappingRemains(ctx context.Context) error {
+	s := getState(ctx)
+	if s == nil {
+		return fmt.Errorf("no test state")
+	}
+	dir := filepath.Join(s.workspaceRoot, ".niwa", "sessions")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("reading sessions dir %s: %w", dir, err)
+	}
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".json") {
+			return fmt.Errorf("a session mapping still exists at %s; expected none", filepath.Join(dir, e.Name()))
+		}
+	}
+	return nil
+}
+
+// theDispatchSessionGoesTerminal rewrites the session's Claude Code job state to
+// a terminal "done", the shape a real `claude stop` produces. The reaper's
+// liveness rule then reads the session as dead and reclaims its mapped instance.
+func theDispatchSessionGoesTerminal(ctx context.Context, sessionID string) (context.Context, error) {
+	s := getState(ctx)
+	if s == nil {
+		return ctx, fmt.Errorf("no test state")
+	}
+	short := sessionID
+	if len(short) > 8 {
+		short = short[:8]
+	}
+	jobDir := filepath.Join(s.homeDir, ".claude", "jobs", short)
+	if err := os.MkdirAll(jobDir, 0o755); err != nil {
+		return ctx, fmt.Errorf("creating job-state dir %q: %w", jobDir, err)
+	}
+	state := fmt.Sprintf(`{"sessionId":%q,"template":"bg","state":"done","cwd":""}`, sessionID)
+	if err := os.WriteFile(filepath.Join(jobDir, "state.json"), []byte(state), 0o644); err != nil {
+		return ctx, fmt.Errorf("writing terminal job-state file: %w", err)
+	}
+	return ctx, nil
+}
+
+// registerDispatchSteps wires the dispatch-lifecycle steps into the scenario
+// context. Called from initializeScenario.
+func registerDispatchSteps(ctx *godog.ScenarioContext) {
+	ctx.Step(`^a fake claude for dispatch with session "([^"]*)"$`, aFakeClaudeForDispatchWithSession)
+	ctx.Step(`^a fake claude for dispatch that fails to launch$`, aFakeClaudeForDispatchThatFailsToLaunch)
+	ctx.Step(`^I run "([^"]*)" from the workspace root$`, iRunCommandFromTheWorkspaceRoot)
+	ctx.Step(`^a dispatch instance was created with a well-formed instance file$`, aDispatchInstanceWasCreatedWithAWellFormedInstanceFile)
+	ctx.Step(`^the dispatch instance still exists$`, theDispatchInstanceStillExists)
+	ctx.Step(`^no dispatch instance remains$`, noDispatchInstanceRemains)
+	ctx.Step(`^a dispatch-origin mapping exists for session "([^"]*)"$`, aDispatchOriginMappingExistsForSession)
+	ctx.Step(`^no dispatch-origin mapping remains$`, noDispatchOriginMappingRemains)
+	ctx.Step(`^the dispatch session "([^"]*)" goes terminal$`, theDispatchSessionGoesTerminal)
+}
