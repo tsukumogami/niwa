@@ -128,48 +128,129 @@ instance" redesign reachable from the SessionStart hook?
 
 (pending convergence response)
 
+## Round 2 (instance-rooted dispatch model)
+
+Triggered by a live user test: `claude --bg "<prompt>"` launched from INSIDE an
+instance dir (a) boots rooted in the instance (settings/plugins/hooks/env resolve
+natively) AND (b) registers in Agent View (`claude agents`/`attach`/`logs`/`stop`).
+So the instance-rooted dispatch model gives full fidelity AND unified management.
+
+### Key Insights
+
+- **`claude --bg` contract (lead C).** Detaches and returns immediately. NO `--json`
+  id capture — must scrape `backgrounded · <short-id>` or read the jobs dir. Prompt is
+  argv-only (no stdin/file). Honors `--settings`/`--add-dir`/`--plugin-dir`/`--model`/
+  `--permission-mode`/`--agent` at launch, resolving settings from the launch cwd.
+  SessionStart/SessionEnd hooks fire for `--bg` but resolve from the LAUNCH dir's
+  settings, not a parent's.
+
+- **The command is mostly assembly of existing parts (lead A).** Reuses
+  `realProvisionInstance`→`applier.Create` (which also materializes `claude.env`/
+  `GH_TOKEN` INTO the instance tree, so re-rooting cwd delivers env for free),
+  `WriteSessionMapping`, `reapWorkspace`, and a generalized form of the existing
+  `niwa session attach` supervisor (`sessionattach/supervise.go:44` already execs
+  `claude` with `cmd.Dir` set — swap `--resume <id>` for `--bg "<prompt>"`). The one
+  genuinely new building block is capturing a freshly-launched session's id. (Aside:
+  the `--channels` string the user saw is NOT in this branch — it's a separate mesh
+  launcher — so `session attach`, not a `--channels` wrapper, is the reuse surface.)
+
+- **Teardown works under pre-creation, via the reaper (lead B).** niwa must key the
+  durable mapping on the FULL session UUID, recovered from `~/.claude/jobs/<short-id>/
+  state.json`'s `sessionId` (the mapping store rejects non-UUID keys) — and that same
+  lookup IS the id-capture step lead A flagged. The workspace-root SessionEnd hook
+  almost certainly does NOT fire for an instance-rooted session (instance settings omit
+  the session hooks; resolution is from the instance), so teardown falls to `niwa reap`,
+  which is self-sufficient and runs opportunistically on every `niwa create`. The live
+  probe already shows finished bg sessions reach `state:"done"` (terminal), so the
+  reaper's liveness check should trip — bounding the leak risk lead B raised.
+
+- **REPLACE beats AUGMENT, by elimination (lead D).** Under REPLACE (retire hook
+  auto-provisioning; the command is the only provisioning path), the entire SessionStart
+  chain becomes dead code — `runInstanceHookStart`, `sessionStartGuardPasses`,
+  `isBackgroundWorker`, `buildSessionStartInjection`, `realProvisionInstance` (all
+  confirmed single-caller). **#171 evaporates completely** (the broken `template=="bg"`
+  guard has exactly one caller; the reaper reads a different job-state field set,
+  `State`/`UpdatedAt`, not `Template`). **#172's cd+inject half dies with it.** The
+  reaper, mapping store, and the guard-free SessionEnd teardown all survive. AUGMENT
+  cannot be made safe: round 1 proved there is NO race-free correct guard signal at
+  SessionStart on 2.1.191 (and the live probe showed `backend:"daemon"` on every
+  session, so it can't discriminate either), so any "best-effort net" can still misfire
+  on the coordinator and orphan instances. The lack of a good guard signal pushes to
+  REPLACE by elimination.
+
+- **#172a is independent of the decision (lead D).** The root scaffold dropping
+  Plugins/Marketplaces is a coordinator-fidelity fix that survives regardless of
+  augment/replace and converges via the existing unconditional root-`apply` rewrite.
+
+### Tensions
+
+- **User leaned AUGMENT; the evidence pushes REPLACE.** The user's instinct was to keep
+  the hook path as a best-effort net. But lead D + round 1 show "best-effort" is unsafe
+  here because no guard signal is both correct and race-free, so the net orphans the
+  coordinator. REPLACE is cleaner AND removes the unfixable bug rather than half-fixing
+  it. This is the one place the recommendation diverges from the user's stated lean.
+
+### Decisions
+
+- **Adopt the instance-rooted dispatch model** as the blessed path (validated end-to-end
+  by the user's `claude --bg`-from-instance test).
+- **Recover the full UUID + capture the session id via the jobs dir**, not stdout
+  scraping alone — one mechanism serves both id-capture and mapping-key needs.
+- **Teardown = reaper-primary** (root SessionEnd hook won't fire for instance-rooted
+  sessions).
+
+### User Focus
+
+The user validated the model empirically and proposed a niwa command wrapping
+`claude --bg` (slug via `claude -p` if not provided, create instance, launch, capture
+id, attach). They lean AUGMENT ("doesn't remove the need for 171/172, but makes partial
+acceptable") — pending the REPLACE recommendation.
+
 ## Accumulated Understanding
 
-Fixing these is NOT one redesign. The hook surface the whole feature rests on is
-provably incapable of re-rooting a session, so the only way to deliver per-instance
-settings/plugins/hooks/env is to control the dispatch call's cwd — which lives upstream
-of niwa, in the human's `claude agents` fan-out. That splits the work three ways:
+The hook surface the feature rests on is provably incapable of re-rooting a session, so
+per-instance settings/plugins/hooks/env can only be delivered by controlling the launch
+cwd — and the live test settled HOW: `claude --bg` launched from inside an instance dir
+boots rooted there (full fidelity) AND registers in Agent View (unified management). The
+exploration therefore converged off "patch the two bugs" and onto a redesign:
 
-1. **#171 — guard signal (must land first; gates everything).** Not a one-line swap,
-   and the live probe makes it harder than Lead 1 hoped: on 2.1.191 `template` is wrong,
-   `backend` is uniformly `daemon` (non-discriminating), and the only correct signal
-   (`sessionKind:"bg"`) is transcript-resident and absent from the first record at
-   SessionStart. So the fix must confront the race directly. Realistic options:
-   (a) read `sessionKind` from the transcript and tolerate-absence — treat "not yet
-   present" as defer/no-op, accepting some missed provisions (and lean on the
-   master-switch + re-entrancy + reaper to bound the wrong direction); (b) defer the
-   provisioning decision to a slightly later hook (e.g. the first UserPromptSubmit/
-   PreToolUse) where `sessionKind` is reliably present, at the cost of the
-   "instance ready before first work" contract; (c) a softer job-state heuristic
-   (non-empty `intent` + `respawnFlags`) accepting it is undocumented. Dropping the
-   check entirely (Option B) is rejected (full clone per session + unreclaimable
-   coordinator orphan).
+**The blessed path is an instance-rooted dispatch command.** niwa (1) pre-creates an
+ephemeral instance via the existing `applier.Create` (env materializes into the instance
+tree for free), (2) launches `claude --bg "<prompt>"` with cwd = the instance, (3) reads
+back the full session UUID from `~/.claude/jobs/<short-id>/state.json`, (4) writes the
+session->instance mapping keyed on that UUID with `Ephemeral:true`. The worker resolves
+the instance's settings/plugins/hooks/env natively at launch; teardown is the existing
+`niwa reap` (the root SessionEnd hook does not fire for instance-rooted sessions, and
+reap already runs opportunistically on `niwa create`). Most of this is assembly of
+existing parts (`applier.Create`, `WriteSessionMapping`, `reapWorkspace`, a generalized
+`session attach` supervisor); the one new piece is launch-and-capture-the-id.
 
-2. **#172a — root-scaffold forwarding bug (clean, independently shippable).** Hoist
-   `Plugins`/`Marketplaces` (and likely `env`/user hooks) into `writeRootSettings`.
-   github-sourced marketplaces hoist cleanly; instance-relative `directory` sources must
-   be filtered or deferred to root-scope `apply` (where a cloned instance and RepoIndex
-   exist). This makes the *root* config the session loads complete, but does not deliver
-   *instance* config.
+**This REPLACES hook auto-provisioning, which dissolves the bugs instead of patching
+them.** Retiring the SessionStart chain (`runInstanceHookStart`, the guard,
+`isBackgroundWorker`, `buildSessionStartInjection` — all single-caller) makes **#171
+evaporate** (the broken `template` guard has one caller and the reaper keys on different
+fields) and kills **#172's cd+inject half**. AUGMENT (keep the hook as a best-effort net)
+is rejected: round 1 proved there is no race-free correct guard signal at SessionStart on
+2.1.191, so any net still misfires on the coordinator and orphans instances. REPLACE is
+both cleaner and the only safe option.
 
-3. **#172b — the activation-model ceiling (a decision, not a bug).** cd+inject can never
-   deliver instance-specific settings.json/plugins/hooks. The real question — accept
-   cd+inject + root-hoist as the ceiling (file-isolation only) vs. invest in a
-   dispatch-time surface where niwa pre-creates instances and dispatches agents pointed
-   at them (full delivery, inverts the "provision on SessionStart" premise) — is a single,
-   contested, partly-irreversible architectural choice.
+**One fix survives the decision: #172a** (root scaffold drops Plugins/Marketplaces). The
+workspace-ROOT coordinator session still wants its own plugins/marketplaces, so hoisting
+them into `writeRootSettings` is an independent coordinator-fidelity fix, landing
+regardless. github-sourced marketplaces hoist cleanly; instance-relative `directory`
+sources need filtering or deferral to root-scope `apply`.
 
-Recommended shape: two scoped bug-fix issues (#171 signal, #172a root-hoist) + one
-decision record (cd+inject-ceiling vs. dispatch-time-relaunch) that can feed a future
-design if the answer is "build the dispatch surface." Not a spike — feasibility is
-already resolved. Not a full design doc up front — it would delay the primary
-file-isolation fix.
+**Disposition of the issues under REPLACE:**
+- **#171** — closed/mooted (retire the guard; nothing to fix).
+- **#172** — cd+inject half mooted by REPLACE; root-scaffold half becomes #172a, a small
+  standalone fix.
 
-One open contingency could still reshape this: if niwa already has (or could cheaply
-add) a wrapper over the `claude agents` dispatch call, the dispatch-time fix moves from
-"future design" toward "near-term," and #172b stops being a deferred decision.
+**Recommended artifact:** a DESIGN doc for the dispatch command (command interface; the
+launch-and-capture-id mechanism + UUID recovery; reaper-primary teardown; what the
+shipped PR #169 feature retires and the migration for already-`init`-ed workspaces;
+whether to keep the SessionEnd hook at all; default/opt-in posture), with #172a tracked
+as an independent fix. NOT two-bug-fixes-plus-decision-record (the round-1 shape) — the
+decision is now made (build the dispatch surface) and the work is a real design, not a
+patch. Open empirical confirmations for the design phase: reaper treats `state:"done"`
+as dead (live probe suggests yes); `claude --bg` id-capture robustness; whether long
+argv-only prompts need a workaround.
