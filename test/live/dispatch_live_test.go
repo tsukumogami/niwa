@@ -18,6 +18,15 @@
 // well-constructed instance + registered session -> stop -> reap -> assert
 // destroyed (DESIGN "Reclamation is reaper-primary").
 //
+// TIMING NOTE: `claude stop` (and a self-completing session) reaches the job
+// state `state=done` only after a few-second async lag. A single `niwa reap`
+// fired during that lag correctly SPARES the still-non-terminal session, so the
+// teardown assertion must tolerate the lag. The test therefore polls reap in a
+// bounded loop rather than reaping once and asserting immediately. The
+// deterministic "a live session is spared" case is covered by the OFFLINE
+// functional test (which fabricates fresh job state), so this live test does not
+// run a fragile real "stay-live" negative control.
+//
 // Assumptions:
 //   - A real `claude` on PATH backed by a usable subscription (the gate enforces
 //     presence; a credential failure surfaces as a test failure, not a skip,
@@ -43,8 +52,21 @@ import (
 )
 
 // liveDispatchPrompt is the trivial task the dispatched worker runs. Keeping it
-// to "reply OK and stop" minimizes subscription cost per run.
+// to "reply OK and stop" minimizes subscription cost per run. The session
+// self-completes quickly, which (together with an explicit `claude stop`) drives
+// its job state terminal so the reaper can reclaim the instance.
 const liveDispatchPrompt = "reply with the single word OK and stop"
+
+// teardownBudget bounds how long the timing-robust teardown poll runs. The
+// dispatch + a self-completing trivial session + the stop->done lag all fit
+// comfortably inside this window; it is generous so the few-second async lag
+// after `claude stop` never causes a false failure.
+const teardownBudget = 90 * time.Second
+
+// teardownInterval is the gap between successive `niwa reap` attempts in the
+// teardown poll. Each iteration reaps and then checks for destruction, so this
+// is the retry cadence while the session settles to terminal.
+const teardownInterval = 3 * time.Second
 
 // requireLiveClaude is the gate. It returns the resolved claude path when a
 // usable claude is present and otherwise SKIPS the test. The skip path is taken
@@ -62,19 +84,34 @@ func requireLiveClaude(t *testing.T) string {
 // TestDispatchLiveLifecycle runs the full real lifecycle. It is the feature's
 // definition-of-done gate (R48): the operator runs `make test-live` on a clean
 // build against a local subscription and records the result in the PR.
+//
+// Steps:
+//  1. Stand up the minimal offline workspace and build the niwa binary.
+//  2. `niwa dispatch <prompt> --detach` from the workspace root.
+//  3. Assert exactly one well-formed `<config>-disp-<8hex>` instance with a
+//     parseable instance.json, and an ephemeral Origin="dispatch" mapping keyed
+//     on the full session UUID.
+//  4. Assert the session is registered: a `claude agents --json` record whose
+//     cwd is the instance dir (capture its short id and full sessionId).
+//  5. `claude stop <shortId>` to exercise the stop path (tolerate already-done).
+//  6. Timing-robust teardown: poll up to teardownBudget, each iteration running
+//     `niwa reap` then checking whether the instance dir and mapping are gone;
+//     succeed on the first clean iteration, sleep teardownInterval otherwise.
+//  7. t.Cleanup stops any still-running session and removes nothing the test
+//     framework does not already remove; it is best-effort and idempotent.
 func TestDispatchLiveLifecycle(t *testing.T) {
 	claudeBin := requireLiveClaude(t)
 
 	niwaBin := buildNiwa(t)
 	workspaceRoot := initLiveWorkspace(t, niwaBin)
+	t.Logf("workspace root: %s", workspaceRoot)
 
 	// `claude attach/logs/stop` are keyed on a session's SHORT id (the
 	// ~/.claude/jobs/<short> basename), NOT the full UUID -- `claude stop <uuid>`
-	// returns "No job matching ...". dispatch prints the full UUID as the mapping
-	// key, so the test resolves each session's short id from `claude agents
-	// --json` (matching the record whose sessionId == the full UUID and using
-	// that record's "id") and stops by the short id everywhere. The cleanup must
-	// therefore collect SHORT ids so the backstop teardown actually stops them.
+	// returns "No job matching ...". The cleanup collects SHORT ids so the
+	// backstop teardown actually stops anything still live. Cleanup is
+	// best-effort and idempotent: stopping an already-stopped session is a no-op,
+	// so a failed run never leaves a live session behind.
 	var startedShortIDs []string
 	t.Cleanup(func() {
 		for _, short := range startedShortIDs {
@@ -89,55 +126,86 @@ func TestDispatchLiveLifecycle(t *testing.T) {
 	// (1) Dispatch a background worker. --detach so the test process does not
 	// attach a terminal; the worker runs headless and is managed via claude.
 	dispatchOut := runNiwaLive(t, niwaBin, workspaceRoot, "dispatch", liveDispatchPrompt, "--detach")
-	primaryID := parseDispatchedSessionID(t, dispatchOut)
-	primaryShort := resolveShortID(t, claudeBin, primaryID)
-	startedShortIDs = append(startedShortIDs, primaryShort)
-	t.Logf("dispatched primary session %s (short %s)", primaryID, primaryShort)
+	sessionID := parseDispatchedSessionID(t, dispatchOut)
+	t.Logf("dispatched session %s", sessionID)
 
-	// (2) Assert a well-constructed dedicated instance: a <config>-disp-<hex>
-	// directory under the workspace root carrying .niwa/instance.json and the
-	// materialized Claude config.
+	// (2) Assert a well-constructed dedicated instance: exactly one
+	// <config>-disp-<8hex> directory under the workspace root carrying a
+	// parseable .niwa/instance.json.
 	instancePath := assertDispatchInstance(t, workspaceRoot)
+	t.Logf("dispatch instance: %s", instancePath)
 
 	// (3) Assert the ephemeral dispatch-origin mapping keyed on the session UUID
-	// exists in the workspace's .niwa/sessions/.
-	assertDispatchMapping(t, workspaceRoot, primaryID, instancePath)
+	// exists in the workspace's .niwa/sessions/ and points at the instance.
+	assertDispatchMapping(t, workspaceRoot, sessionID, instancePath)
+	t.Logf("verified ephemeral dispatch mapping for %s", sessionID)
 
-	// (4) Assert the session is registered with claude.
-	assertSessionRegistered(t, claudeBin, primaryID)
+	// (4) Assert the session is registered with claude. Prefer matching by cwd
+	// (the instance dir) and capture the short id used by stop. Resolving by cwd
+	// is the most direct correlation between the instance and its session.
+	shortID := resolveSessionByCwd(t, claudeBin, instancePath, sessionID)
+	startedShortIDs = append(startedShortIDs, shortID)
+	t.Logf("session registered with claude (short id %s, cwd %s)", shortID, instancePath)
 
-	// (5) Negative control (optional, cheap): a SECOND still-live dispatched
-	// session must NOT be reclaimed by the reap that reclaims the stopped one.
-	secondOut := runNiwaLive(t, niwaBin, workspaceRoot, "dispatch", liveDispatchPrompt, "--detach")
-	secondID := parseDispatchedSessionID(t, secondOut)
-	secondShort := resolveShortID(t, claudeBin, secondID)
-	startedShortIDs = append(startedShortIDs, secondShort)
-	secondInstance := findInstanceForSession(t, workspaceRoot, secondID)
-	t.Logf("dispatched negative-control session %s (short %s)", secondID, secondShort)
-	assertSessionRegistered(t, claudeBin, secondID)
+	// (5) Stop the session to exercise the stop path. Tolerate it already being
+	// terminal (a trivial prompt may self-complete first): a stop of a done
+	// session is a no-op, not a failure.
+	stopSession(t, claudeBin, shortID)
+	t.Logf("issued claude stop %s", shortID)
 
-	// (6) Stop ONLY the primary session, then reap. Reclamation is
-	// reaper-primary: stop drives the session terminal, the next reap reclaims.
-	// stop is keyed on the SHORT id, not the full UUID.
-	stopSession(t, claudeBin, primaryShort)
-	waitSessionTerminal(t, claudeBin, primaryID)
-	runNiwaLive(t, niwaBin, workspaceRoot, "reap")
+	// (6) Timing-robust teardown. Poll up to teardownBudget: each iteration runs
+	// `niwa reap` from the workspace root, then checks whether the instance dir
+	// and its mapping file are gone. The stop->done transition is async (a
+	// few-second lag), so an early reap correctly spares the still-non-terminal
+	// session; the loop retries until the session settles terminal and the reap
+	// reclaims it. This directly tests reaper-primary teardown using the
+	// product's own liveness logic, tolerating the lag.
+	reapUntilGone(t, niwaBin, workspaceRoot, instancePath, sessionID)
+	t.Logf("instance and mapping reclaimed; reaper-primary teardown verified")
+}
 
-	// (7) The stopped session's instance and mapping are gone; the still-live
-	// second session's instance and mapping survive.
-	assertInstanceGone(t, instancePath)
-	assertMappingGone(t, workspaceRoot, primaryID)
-	assertInstanceExists(t, secondInstance)
-	assertMappingExists(t, workspaceRoot, secondID)
+// reapUntilGone polls reaper-primary teardown to completion. It runs `niwa reap`
+// then checks for destruction, retrying on teardownInterval until both the
+// instance dir and the mapping are gone or teardownBudget elapses. It fails only
+// if either still exists after the budget, so the few-second stop->done lag
+// never causes a false failure.
+func reapUntilGone(t *testing.T, niwaBin, workspaceRoot, instancePath, sessionID string) {
+	t.Helper()
+	mappingPath := filepath.Join(workspaceRoot, ".niwa", "sessions", sessionID+".json")
+	deadline := time.Now().Add(teardownBudget)
+	attempt := 0
+	for {
+		attempt++
+		runNiwaLive(t, niwaBin, workspaceRoot, "reap")
+		instGone := notExists(t, instancePath)
+		mapGone := notExists(t, mappingPath)
+		if instGone && mapGone {
+			t.Logf("reap attempt %d reclaimed instance and mapping", attempt)
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("after %s and %d reap attempts, teardown incomplete: instance gone=%v (%s), mapping gone=%v (%s)",
+				teardownBudget, attempt, instGone, instancePath, mapGone, mappingPath)
+		}
+		t.Logf("reap attempt %d: instance gone=%v, mapping gone=%v; session not yet terminal, retrying in %s",
+			attempt, instGone, mapGone, teardownInterval)
+		time.Sleep(teardownInterval)
+	}
+}
 
-	// (8) Tear down the negative-control session explicitly so the run leaves
-	// nothing behind (the t.Cleanup is a backstop for the failure path). stop is
-	// keyed on the SHORT id.
-	stopSession(t, claudeBin, secondShort)
-	waitSessionTerminal(t, claudeBin, secondID)
-	runNiwaLive(t, niwaBin, workspaceRoot, "reap")
-	assertInstanceGone(t, secondInstance)
-	assertMappingGone(t, workspaceRoot, secondID)
+// notExists reports whether path is absent. A stat error other than
+// not-exist fails the test, since it means the filesystem is in an unexpected
+// state rather than the path simply being gone.
+func notExists(t *testing.T, path string) bool {
+	t.Helper()
+	if _, err := os.Stat(path); err == nil {
+		return false
+	} else if os.IsNotExist(err) {
+		return true
+	} else {
+		t.Fatalf("stat %s: %v", path, err)
+		return false
+	}
 }
 
 // buildNiwa compiles the niwa binary into the test's temp dir and returns its
@@ -307,17 +375,6 @@ func findDispatchInstance(t *testing.T, workspaceRoot string) string {
 	return found[0]
 }
 
-// findInstanceForSession returns the instance_path recorded in the session's
-// mapping, resolving which disp-* directory belongs to that session.
-func findInstanceForSession(t *testing.T, workspaceRoot, sessionID string) string {
-	t.Helper()
-	m := readMapping(t, workspaceRoot, sessionID)
-	if m.InstancePath == "" {
-		t.Fatalf("mapping for session %s has empty instance_path", sessionID)
-	}
-	return m.InstancePath
-}
-
 // liveMapping is the subset of the session mapping the live assertions read.
 type liveMapping struct {
 	SessionID    string `json:"session_id"`
@@ -357,69 +414,32 @@ func assertDispatchMapping(t *testing.T, workspaceRoot, sessionID, instancePath 
 	}
 }
 
-// assertSessionRegistered asserts claude lists the session id. It prefers a
-// machine-readable `claude agents --json` and falls back to scanning the plain
-// `claude agents` text, so it tolerates either output mode.
-func assertSessionRegistered(t *testing.T, claudeBin, sessionID string) {
+// resolveSessionByCwd asserts the session is registered with claude and returns
+// the SHORT id `claude attach/logs/stop` accept (the ~/.claude/jobs/<short>
+// basename). It reads `claude agents --json` and prefers matching the record
+// whose "cwd" is the instance dir -- the most direct correlation between the
+// instance and its session -- falling back to matching on the full sessionId. It
+// returns that record's "id". It does NOT assume the short id is the first 8
+// chars of the UUID; it reads the authoritative handle claude reports. It fails
+// the test if the json mode is unavailable or no record matches, because the
+// live teardown depends on stopping by the correct short id.
+func resolveSessionByCwd(t *testing.T, claudeBin, instancePath, fullSessionID string) string {
 	t.Helper()
-	if jsonOut, ok := claudeAgentsJSON(t, claudeBin); ok {
-		if !strings.Contains(jsonOut, sessionID) {
-			t.Errorf("claude agents --json does not list session %s\noutput:\n%s", sessionID, jsonOut)
-		}
-		return
-	}
-	out, err := exec.Command(claudeBin, "agents").CombinedOutput()
-	if err != nil {
-		t.Fatalf("claude agents: %v\n%s", err, out)
-	}
-	if !strings.Contains(string(out), sessionID) {
-		t.Errorf("claude agents does not list session %s\noutput:\n%s", sessionID, out)
-	}
-}
+	records := claudeAgentRecords(t, claudeBin)
 
-// claudeAgentsJSON runs `claude agents --json` and returns its output and true
-// when the --json mode is supported (exit 0 with non-empty output); otherwise
-// returns ("", false) so the caller falls back to the text mode.
-func claudeAgentsJSON(t *testing.T, claudeBin string) (string, bool) {
-	t.Helper()
-	out, err := exec.Command(claudeBin, "agents", "--json").CombinedOutput()
-	if err != nil {
-		return "", false
-	}
-	trimmed := strings.TrimSpace(string(out))
-	if trimmed == "" {
-		return "", false
-	}
-	return trimmed, true
-}
-
-// resolveShortID maps a full session UUID to the SHORT id `claude attach/logs/
-// stop` accept (the ~/.claude/jobs/<short> basename). It reads `claude agents
-// --json`, finds the record whose "sessionId" equals the full UUID, and returns
-// that record's "id". It does NOT assume the short id is the first 8 chars of
-// the UUID -- it reads the authoritative handle claude reports. It fails the
-// test if the json mode is unavailable or no record matches, because the live
-// teardown depends on stopping by the correct short id.
-func resolveShortID(t *testing.T, claudeBin, fullSessionID string) string {
-	t.Helper()
-	jsonOut, ok := claudeAgentsJSON(t, claudeBin)
-	if !ok {
-		t.Fatalf("claude agents --json unavailable; cannot resolve the short id for %s (it is the claude stop/attach handle)", fullSessionID)
-	}
-	// The shape is either a top-level array of records or an object wrapping one
-	// (e.g. {"agents":[...]}). Decode loosely and walk for the matching record.
-	var records []map[string]any
-	if err := json.Unmarshal([]byte(jsonOut), &records); err != nil {
-		var wrapper map[string]json.RawMessage
-		if werr := json.Unmarshal([]byte(jsonOut), &wrapper); werr != nil {
-			t.Fatalf("claude agents --json is neither an array nor an object: %v / %v\noutput:\n%s", err, werr, jsonOut)
-		}
-		for _, raw := range wrapper {
-			if err := json.Unmarshal(raw, &records); err == nil && len(records) > 0 {
-				break
+	// Prefer a record whose cwd is the instance dir.
+	for _, rec := range records {
+		cwd, _ := rec["cwd"].(string)
+		if cwd != "" && samePath(cwd, instancePath) {
+			short, _ := rec["id"].(string)
+			if short == "" {
+				t.Fatalf("claude agents record with cwd %s has no \"id\" (short handle)\nrecord:\n%+v", instancePath, rec)
 			}
+			return short
 		}
 	}
+
+	// Fall back to matching on the full session id.
 	for _, rec := range records {
 		sid, _ := rec["sessionId"].(string)
 		if sid != fullSessionID {
@@ -427,78 +447,75 @@ func resolveShortID(t *testing.T, claudeBin, fullSessionID string) string {
 		}
 		short, _ := rec["id"].(string)
 		if short == "" {
-			t.Fatalf("claude agents record for session %s has no \"id\" (short handle)\noutput:\n%s", fullSessionID, jsonOut)
+			t.Fatalf("claude agents record for session %s has no \"id\" (short handle)", fullSessionID)
 		}
 		return short
 	}
-	t.Fatalf("no claude agents record with sessionId %s\noutput:\n%s", fullSessionID, jsonOut)
+
+	t.Fatalf("no claude agents record with cwd %s or sessionId %s; the session is not registered\nrecords:\n%+v",
+		instancePath, fullSessionID, records)
 	return ""
+}
+
+// samePath reports whether two paths refer to the same location, comparing
+// cleaned absolute forms. Claude may report a cwd with a trailing slash or a
+// symlinked prefix; EvalSymlinks normalizes both when possible, and a plain
+// Clean comparison is the fallback.
+func samePath(a, b string) bool {
+	if filepath.Clean(a) == filepath.Clean(b) {
+		return true
+	}
+	ra, errA := filepath.EvalSymlinks(a)
+	rb, errB := filepath.EvalSymlinks(b)
+	if errA == nil && errB == nil {
+		return filepath.Clean(ra) == filepath.Clean(rb)
+	}
+	return false
+}
+
+// claudeAgentRecords runs `claude agents --json` and decodes it into a slice of
+// loosely-typed records. The shape is either a top-level array of records or an
+// object wrapping one (e.g. {"agents":[...]}); both are handled. It fails the
+// test if the json mode is unavailable, because every live correlation depends
+// on it.
+func claudeAgentRecords(t *testing.T, claudeBin string) []map[string]any {
+	t.Helper()
+	out, err := exec.Command(claudeBin, "agents", "--json").CombinedOutput()
+	if err != nil {
+		t.Fatalf("claude agents --json: %v\n%s", err, out)
+	}
+	trimmed := strings.TrimSpace(string(out))
+	if trimmed == "" {
+		t.Fatalf("claude agents --json returned empty output")
+	}
+
+	var records []map[string]any
+	if err := json.Unmarshal([]byte(trimmed), &records); err == nil {
+		return records
+	}
+
+	var wrapper map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(trimmed), &wrapper); err != nil {
+		t.Fatalf("claude agents --json is neither an array nor an object: %v\noutput:\n%s", err, trimmed)
+	}
+	for _, raw := range wrapper {
+		if err := json.Unmarshal(raw, &records); err == nil && len(records) > 0 {
+			return records
+		}
+	}
+	t.Fatalf("claude agents --json object has no array of records\noutput:\n%s", trimmed)
+	return nil
 }
 
 // stopSession drives the session terminal with `claude stop <short>`. It MUST
 // be passed the SHORT id (the claude stop handle), not the full UUID -- the full
 // UUID yields "No job matching ...". Per the reaper-primary teardown, this does
-// not destroy the instance; the next reap does.
+// not destroy the instance; the next reap does. A stop of an already-terminal
+// session (a trivial prompt may self-complete) is tolerated: the error is logged,
+// not fatal, since the teardown poll reaps it either way.
 func stopSession(t *testing.T, claudeBin, shortID string) {
 	t.Helper()
 	if out, err := exec.Command(claudeBin, "stop", shortID).CombinedOutput(); err != nil {
-		t.Fatalf("claude stop %s: %v\n%s", shortID, err, out)
-	}
-}
-
-// waitSessionTerminal polls the session's ~/.claude/jobs state until it is no
-// longer listed by `claude agents` (or a bounded timeout elapses). It bounds the
-// race between `claude stop` returning and the daemon recording the terminal
-// state, so the subsequent reap sees a dead session.
-func waitSessionTerminal(t *testing.T, claudeBin, sessionID string) {
-	t.Helper()
-	deadline := time.Now().Add(60 * time.Second)
-	for time.Now().Before(deadline) {
-		out, err := exec.Command(claudeBin, "agents").CombinedOutput()
-		if err == nil && !strings.Contains(string(out), sessionID) {
-			return
-		}
-		time.Sleep(time.Second)
-	}
-	// Not fatal on its own: the reaper's job-state liveness rule also treats a
-	// stopped session as dead. Log so a flake is diagnosable.
-	t.Logf("session %s still listed by claude agents after stop+wait; proceeding to reap", sessionID)
-}
-
-// assertInstanceGone asserts the instance directory no longer exists.
-func assertInstanceGone(t *testing.T, instancePath string) {
-	t.Helper()
-	if _, err := os.Stat(instancePath); err == nil {
-		t.Errorf("instance %s should have been reaped but still exists", instancePath)
-	} else if !os.IsNotExist(err) {
-		t.Errorf("stat instance %s: %v", instancePath, err)
-	}
-}
-
-// assertInstanceExists asserts the instance directory still exists.
-func assertInstanceExists(t *testing.T, instancePath string) {
-	t.Helper()
-	if _, err := os.Stat(instancePath); err != nil {
-		t.Errorf("instance %s should still exist (its session is live): %v", instancePath, err)
-	}
-}
-
-// assertMappingGone asserts the session mapping was deleted.
-func assertMappingGone(t *testing.T, workspaceRoot, sessionID string) {
-	t.Helper()
-	path := filepath.Join(workspaceRoot, ".niwa", "sessions", sessionID+".json")
-	if _, err := os.Stat(path); err == nil {
-		t.Errorf("mapping %s should have been deleted but still exists", path)
-	} else if !os.IsNotExist(err) {
-		t.Errorf("stat mapping %s: %v", path, err)
-	}
-}
-
-// assertMappingExists asserts the session mapping still exists.
-func assertMappingExists(t *testing.T, workspaceRoot, sessionID string) {
-	t.Helper()
-	path := filepath.Join(workspaceRoot, ".niwa", "sessions", sessionID+".json")
-	if _, err := os.Stat(path); err != nil {
-		t.Errorf("mapping %s should still exist (its session is live): %v", path, err)
+		t.Logf("claude stop %s reported %v (tolerated; session may already be done)\n%s", shortID, err, out)
 	}
 }
