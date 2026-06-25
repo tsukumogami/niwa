@@ -65,6 +65,23 @@ instance" redesign reachable from the SessionStart hook?
   resolution), and SessionStart output supports `reloadSkills: true` (re-scan skill
   dirs). Plugins/marketplaces/settings-hooks remain strictly launch-time.
 
+- **Live probe on 2.1.191 (this machine — where #171 was observed) resolves the
+  signal gap, and the answer is bad for the easy fix.** The jobs dir contains the
+  exact sessions from #171's evidence (`c66f41d1`, `4f015f9e`). Findings:
+  - `template`: `"bg"` for `c66f41d1`, `"claude"` for `4f015f9e`/`d3bd64ce` — confirms
+    the #171 false-negative; it tracks the launch agent, not fg/bg.
+  - `backend`: `"daemon"` for **every** session, including the `template:"claude"`
+    workers. So `backend` does NOT discriminate on 2.1.191 — Lead 1's leading
+    race-free candidate is dead on the live version.
+  - `sessionKind:"bg"`: present in the transcript of all three dispatched workers
+    (the correct signal), BUT the **first transcript record carries no `sessionKind`**
+    (first record type is `mode`/`agent-setting`). So at SessionStart fire time the
+    signal is not yet present — the race is real and reproduced.
+  - Net: on 2.1.191 there is NO signal that is both correct and race-free at
+    SessionStart. `template` wrong, `backend` non-discriminating, `sessionKind`
+    correct-but-late. Softer separators that vary (`intent` = the dispatched task
+    prompt, `respawnFlags`, `originCwd`) exist but none is a documented fg/bg flag.
+
 ### Tensions
 
 - **Race-free-but-maybe-imprecise vs. correct-but-racy (the #171 signal choice).**
@@ -118,12 +135,20 @@ provably incapable of re-rooting a session, so the only way to deliver per-insta
 settings/plugins/hooks/env is to control the dispatch call's cwd — which lives upstream
 of niwa, in the human's `claude agents` fan-out. That splits the work three ways:
 
-1. **#171 — guard signal (must land first; gates everything).** Not a one-line swap.
-   `template` is unstable in both directions; the fix needs a *correct, race-free* signal
-   verified against the live Claude Code version. Leading candidate: read `backend ==
-   "daemon"` from job state (after confirming interactive sessions don't carry it),
-   possibly combined with the existing master-switch + re-entrancy gates, with the reaper
-   as backstop for residual false positives. Dropping the check (Option B) is rejected.
+1. **#171 — guard signal (must land first; gates everything).** Not a one-line swap,
+   and the live probe makes it harder than Lead 1 hoped: on 2.1.191 `template` is wrong,
+   `backend` is uniformly `daemon` (non-discriminating), and the only correct signal
+   (`sessionKind:"bg"`) is transcript-resident and absent from the first record at
+   SessionStart. So the fix must confront the race directly. Realistic options:
+   (a) read `sessionKind` from the transcript and tolerate-absence — treat "not yet
+   present" as defer/no-op, accepting some missed provisions (and lean on the
+   master-switch + re-entrancy + reaper to bound the wrong direction); (b) defer the
+   provisioning decision to a slightly later hook (e.g. the first UserPromptSubmit/
+   PreToolUse) where `sessionKind` is reliably present, at the cost of the
+   "instance ready before first work" contract; (c) a softer job-state heuristic
+   (non-empty `intent` + `respawnFlags`) accepting it is undocumented. Dropping the
+   check entirely (Option B) is rejected (full clone per session + unreclaimable
+   coordinator orphan).
 
 2. **#172a — root-scaffold forwarding bug (clean, independently shippable).** Hoist
    `Plugins`/`Marketplaces` (and likely `env`/user hooks) into `writeRootSettings`.
