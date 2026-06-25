@@ -46,7 +46,7 @@ verified to deliver full per-instance configuration at launch and to register th
 session in Agent View. The PRD specifies a command around that mechanism.
 
 The implementation must resolve several concrete technical problems established by
-grounding research against the current niwa code (wip/research/prd_instance-dispatch_phase2_code-facts.md):
+grounding research against the current niwa code:
 
 - **No session id exists before launch.** The durable mapping store
   (`internal/workspace/session_map.go`) keys on a canonical UUID and rejects anything

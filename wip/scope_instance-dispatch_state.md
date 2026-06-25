@@ -1,10 +1,11 @@
 ```yaml
 topic: instance-dispatch
 chain_started: 2026-06-25T03:44:15Z
-last_updated: 2026-06-25T03:44:15Z
-phase_pointer: phase-2
-exit: UNSET
-exit_artifacts: []
+last_updated: 2026-06-25T04:20:58Z
+phase_pointer: phase-4
+exit: full-run
+exit_artifacts:
+  - docs/plans/PLAN-instance-dispatch.md
 planned_chain:
   - brief
   - prd
@@ -15,6 +16,7 @@ chain_ran:
   - brief
   - prd
   - design
+  - plan
 child_snapshots:
   brief:
     status: Accepted
@@ -25,9 +27,13 @@ child_snapshots:
     content_hash: b9a19de9b58f5c12d96d1029bfef8a19dab7d3e4
     captured_at: 2026-06-25T04:00:57Z
   design:
-    status: Accepted
+    status: Planned
     content_hash: a70b920e4ad7a7af29e597f39f05f0b3e5c34d5d
     captured_at: 2026-06-25T04:12:03Z
+  plan:
+    status: Active
+    content_hash: 4f1a2e6722cc315e22d02978b1df287959ae9236
+    captured_at: 2026-06-25T04:20:58Z
 visibility: Public
 plan_execution_mode: single-pr
 execution_mode: auto
@@ -52,9 +58,4 @@ worktree_rebases:
     upstream_commits: []
     impact: none
     rebased_at: 2026-06-25T04:12:03Z
-parent_orchestration:
-  invoking_child: plan
-  suppress_status_aware_prompt: true
-  rationale: fresh-chain
-plan_execution_mode: single-pr
 ```
