@@ -204,14 +204,18 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("niwa: error: launching dispatch worker: %w", err)
 	}
 
-	// (10) Capture the worker's full session UUID by jobs-dir cwd correlation.
+	// (10) Capture the worker's full session UUID AND its short id by jobs-dir
+	// cwd correlation. The full UUID keys the durable mapping; the short id is
+	// the handle `claude attach/logs/stop` accept (those commands reject the
+	// full UUID with "No job matching ...", so every user-facing claude
+	// invocation below uses shortID, not sessionID).
 	// On failure the deferred rollback destroys the instance DIRECTORY, but the
 	// background worker launched in step (9) may still be running: capture failed,
 	// so we never obtained its session id and cannot 'claude stop' it. The
 	// orphaned process has no mapping and is harmless, but it is not auto-killed
 	// -- the user must stop it manually. The backstop reclaims the directory, not
 	// the process.
-	sessionID, err := dispatchCapture(defaultJobsDir(), instancePath, dispatchCaptureTimeout, nil, 0)
+	sessionID, shortID, err := dispatchCapture(defaultJobsDir(), instancePath, dispatchCaptureTimeout, nil, 0)
 	if err != nil {
 		return fmt.Errorf("niwa: error: capturing dispatch session id: %w", err)
 	}
@@ -236,22 +240,26 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	removeDispatchMarker(instancePath)
 	success = true
 
-	// (13) Print the session id and management hints.
+	// (13) Print the session id and management hints. The headline prints the
+	// full UUID (it is the durable mapping key the user can correlate), but the
+	// claude management hints use the SHORT id because `claude attach/logs/stop`
+	// are keyed on it -- the full UUID yields "No job matching ...".
 	out := cmd.OutOrStdout()
 	fmt.Fprintf(out, "Dispatched session %s\n", sessionID)
 	fmt.Fprintf(out, "  instance: %s\n", instancePath)
-	fmt.Fprintf(out, "  claude attach %s\n", sessionID)
-	fmt.Fprintf(out, "  claude logs %s\n", sessionID)
-	fmt.Fprintf(out, "  claude stop %s\n", sessionID)
+	fmt.Fprintf(out, "  claude attach %s\n", shortID)
+	fmt.Fprintf(out, "  claude logs %s\n", shortID)
+	fmt.Fprintf(out, "  claude stop %s\n", shortID)
 
 	// (14) Unless --detach, attach the terminal to the new session as the FINAL
-	// step. An attach failure is NON-fatal: the session and instance survive, so
-	// degrade to a warning and never roll back or delete the mapping (success is
-	// already true; DESIGN Decision 1).
+	// step. attach is keyed on the SHORT id, not the full UUID. An attach failure
+	// is NON-fatal: the session and instance survive, so degrade to a warning and
+	// never roll back or delete the mapping (success is already true; DESIGN
+	// Decision 1).
 	if !dispatchDetach {
-		if err := dispatchAttach(sessionID); err != nil {
+		if err := dispatchAttach(shortID); err != nil {
 			fmt.Fprintf(cmd.ErrOrStderr(), "niwa: warning: could not attach to session %s: %v\n", sessionID, err)
-			fmt.Fprintf(cmd.ErrOrStderr(), "niwa: the session is running; attach later with: claude attach %s\n", sessionID)
+			fmt.Fprintf(cmd.ErrOrStderr(), "niwa: the session is running; attach later with: claude attach %s\n", shortID)
 		}
 	}
 

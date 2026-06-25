@@ -17,8 +17,15 @@ import (
 	"github.com/tsukumogami/niwa/internal/workspace"
 )
 
-// dispatchTestSessionID is a canonical UUID a fake capture returns.
+// dispatchTestSessionID is a canonical full UUID a fake capture returns; it
+// keys the durable mapping.
 const dispatchTestSessionID = "abcdef12-3456-7890-abcd-ef1234567890"
+
+// dispatchTestShortID is the SHORT session id a fake capture returns alongside
+// the full UUID. It is deliberately NOT the first 8 chars of the UUID so tests
+// catch any regression that conflates the two (the short id is the
+// `claude attach/logs/stop` handle; the full UUID is the mapping key).
+const dispatchTestShortID = "shortid1"
 
 // setupDispatchWorkspace creates a workspace root with .niwa/workspace.toml so
 // ClassifyCwd resolves it to CwdAtWorkspaceRoot. It returns the root path.
@@ -112,9 +119,9 @@ func installDispatchFakes(t *testing.T, workspaceRoot string) *dispatchFakes {
 		return nil
 	}
 
-	dispatchCapture = func(_, _ string, _ time.Duration, _ func() time.Time, _ time.Duration) (string, error) {
+	dispatchCapture = func(_, _ string, _ time.Duration, _ func() time.Time, _ time.Duration) (string, string, error) {
 		f.captureCalled++
-		return dispatchTestSessionID, nil
+		return dispatchTestSessionID, dispatchTestShortID, nil
 	}
 
 	dispatchAttach = func(id string) error {
@@ -240,18 +247,30 @@ func TestDispatch_HappyPath_WritesMappingAndAttaches(t *testing.T) {
 		t.Errorf("pending-marker should be removed on success; stat err = %v", statErr)
 	}
 
-	// Attach called exactly once with the captured id.
+	// The mapping stays keyed on the FULL UUID even though attach uses the short
+	// id: ReadSessionMapping by the full UUID above succeeded, so this confirms
+	// the key did not switch to the short id.
+	if m.SessionID != dispatchTestSessionID {
+		t.Errorf("mapping SessionID = %q, want the full UUID %q", m.SessionID, dispatchTestSessionID)
+	}
+
+	// Attach called exactly once with the SHORT id (claude attach is keyed on
+	// the short id, not the full UUID).
 	if f.attachCalled != 1 {
 		t.Errorf("attach called %d times, want 1", f.attachCalled)
 	}
-	if f.attachedID != dispatchTestSessionID {
-		t.Errorf("attached id = %q, want %q", f.attachedID, dispatchTestSessionID)
+	if f.attachedID != dispatchTestShortID {
+		t.Errorf("attached id = %q, want the short id %q (not the full UUID)", f.attachedID, dispatchTestShortID)
 	}
 	if f.destroyCalled != 0 {
 		t.Errorf("instance must not be destroyed on success; destroy called %d", f.destroyCalled)
 	}
+	// The headline prints the full UUID; the claude hints print the short id.
 	if !bytes.Contains([]byte(stdout), []byte(dispatchTestSessionID)) {
-		t.Errorf("stdout should print the session id; got %q", stdout)
+		t.Errorf("stdout should print the full session id; got %q", stdout)
+	}
+	if !bytes.Contains([]byte(stdout), []byte("claude attach "+dispatchTestShortID)) {
+		t.Errorf("stdout should print the management hints keyed on the short id; got %q", stdout)
 	}
 }
 
@@ -329,9 +348,9 @@ func TestDispatch_Rollback_CaptureFailure(t *testing.T) {
 	root := setupDispatchWorkspace(t)
 	chdir(t, root)
 	f := installDispatchFakes(t, root)
-	dispatchCapture = func(_, _ string, _ time.Duration, _ func() time.Time, _ time.Duration) (string, error) {
+	dispatchCapture = func(_, _ string, _ time.Duration, _ func() time.Time, _ time.Duration) (string, string, error) {
 		f.captureCalled++
-		return "", errors.New("capture timeout")
+		return "", "", errors.New("capture timeout")
 	}
 
 	_, _, err := runDispatchCmd(t, "do a thing")
@@ -352,9 +371,9 @@ func TestDispatch_Rollback_MappingWriteFailure(t *testing.T) {
 	f := installDispatchFakes(t, root)
 	// Force a mapping-write failure by having capture return an invalid id;
 	// WriteSessionMapping rejects a non-UUID session id without writing.
-	dispatchCapture = func(_, _ string, _ time.Duration, _ func() time.Time, _ time.Duration) (string, error) {
+	dispatchCapture = func(_, _ string, _ time.Duration, _ func() time.Time, _ time.Duration) (string, string, error) {
 		f.captureCalled++
-		return "not-a-uuid", nil
+		return "not-a-uuid", "shortid1", nil
 	}
 
 	_, _, err := runDispatchCmd(t, "do a thing")
@@ -479,11 +498,13 @@ func TestDispatch_Concurrent_DistinctMappings(t *testing.T) {
 
 	// A goroutine-safe capture handing back a distinct valid UUID per call.
 	var captureSeq int64
-	dispatchCapture = func(_, _ string, _ time.Duration, _ func() time.Time, _ time.Duration) (string, error) {
+	dispatchCapture = func(_, _ string, _ time.Duration, _ func() time.Time, _ time.Duration) (string, string, error) {
 		i := atomic.AddInt64(&captureSeq, 1)
 		// 12 distinct, well-formed lowercase UUIDs differing only in the final
-		// hex digit (i is 1..n, single hex digit covers n <= 15).
-		return fmt.Sprintf("00000000-0000-0000-0000-00000000000%x", i), nil
+		// hex digit (i is 1..n, single hex digit covers n <= 15). A distinct
+		// short id accompanies each so the mapping key (full UUID) and the
+		// user-facing handle (short id) stay separable.
+		return fmt.Sprintf("00000000-0000-0000-0000-00000000000%x", i), fmt.Sprintf("short%x", i), nil
 	}
 
 	var wg sync.WaitGroup

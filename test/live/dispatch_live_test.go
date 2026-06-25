@@ -68,12 +68,17 @@ func TestDispatchLiveLifecycle(t *testing.T) {
 	niwaBin := buildNiwa(t)
 	workspaceRoot := initLiveWorkspace(t, niwaBin)
 
-	// Stop every session and reap every instance this test creates, even on
-	// failure, so a failed run never leaves a real session or instance around.
-	var startedSessions []string
+	// `claude attach/logs/stop` are keyed on a session's SHORT id (the
+	// ~/.claude/jobs/<short> basename), NOT the full UUID -- `claude stop <uuid>`
+	// returns "No job matching ...". dispatch prints the full UUID as the mapping
+	// key, so the test resolves each session's short id from `claude agents
+	// --json` (matching the record whose sessionId == the full UUID and using
+	// that record's "id") and stops by the short id everywhere. The cleanup must
+	// therefore collect SHORT ids so the backstop teardown actually stops them.
+	var startedShortIDs []string
 	t.Cleanup(func() {
-		for _, id := range startedSessions {
-			_ = exec.Command(claudeBin, "stop", id).Run()
+		for _, short := range startedShortIDs {
+			_ = exec.Command(claudeBin, "stop", short).Run()
 		}
 		// A best-effort final reap reclaims anything stop drove terminal.
 		cmd := exec.Command(niwaBin, "reap")
@@ -85,8 +90,9 @@ func TestDispatchLiveLifecycle(t *testing.T) {
 	// attach a terminal; the worker runs headless and is managed via claude.
 	dispatchOut := runNiwaLive(t, niwaBin, workspaceRoot, "dispatch", liveDispatchPrompt, "--detach")
 	primaryID := parseDispatchedSessionID(t, dispatchOut)
-	startedSessions = append(startedSessions, primaryID)
-	t.Logf("dispatched primary session %s", primaryID)
+	primaryShort := resolveShortID(t, claudeBin, primaryID)
+	startedShortIDs = append(startedShortIDs, primaryShort)
+	t.Logf("dispatched primary session %s (short %s)", primaryID, primaryShort)
 
 	// (2) Assert a well-constructed dedicated instance: a <config>-disp-<hex>
 	// directory under the workspace root carrying .niwa/instance.json and the
@@ -104,14 +110,16 @@ func TestDispatchLiveLifecycle(t *testing.T) {
 	// session must NOT be reclaimed by the reap that reclaims the stopped one.
 	secondOut := runNiwaLive(t, niwaBin, workspaceRoot, "dispatch", liveDispatchPrompt, "--detach")
 	secondID := parseDispatchedSessionID(t, secondOut)
-	startedSessions = append(startedSessions, secondID)
+	secondShort := resolveShortID(t, claudeBin, secondID)
+	startedShortIDs = append(startedShortIDs, secondShort)
 	secondInstance := findInstanceForSession(t, workspaceRoot, secondID)
-	t.Logf("dispatched negative-control session %s", secondID)
+	t.Logf("dispatched negative-control session %s (short %s)", secondID, secondShort)
 	assertSessionRegistered(t, claudeBin, secondID)
 
 	// (6) Stop ONLY the primary session, then reap. Reclamation is
 	// reaper-primary: stop drives the session terminal, the next reap reclaims.
-	stopSession(t, claudeBin, primaryID)
+	// stop is keyed on the SHORT id, not the full UUID.
+	stopSession(t, claudeBin, primaryShort)
 	waitSessionTerminal(t, claudeBin, primaryID)
 	runNiwaLive(t, niwaBin, workspaceRoot, "reap")
 
@@ -123,8 +131,9 @@ func TestDispatchLiveLifecycle(t *testing.T) {
 	assertMappingExists(t, workspaceRoot, secondID)
 
 	// (8) Tear down the negative-control session explicitly so the run leaves
-	// nothing behind (the t.Cleanup is a backstop for the failure path).
-	stopSession(t, claudeBin, secondID)
+	// nothing behind (the t.Cleanup is a backstop for the failure path). stop is
+	// keyed on the SHORT id.
+	stopSession(t, claudeBin, secondShort)
 	waitSessionTerminal(t, claudeBin, secondID)
 	runNiwaLive(t, niwaBin, workspaceRoot, "reap")
 	assertInstanceGone(t, secondInstance)
@@ -384,13 +393,56 @@ func claudeAgentsJSON(t *testing.T, claudeBin string) (string, bool) {
 	return trimmed, true
 }
 
-// stopSession drives the session terminal with `claude stop <id>`. Per the
-// reaper-primary teardown, this does not destroy the instance; the next reap
-// does.
-func stopSession(t *testing.T, claudeBin, sessionID string) {
+// resolveShortID maps a full session UUID to the SHORT id `claude attach/logs/
+// stop` accept (the ~/.claude/jobs/<short> basename). It reads `claude agents
+// --json`, finds the record whose "sessionId" equals the full UUID, and returns
+// that record's "id". It does NOT assume the short id is the first 8 chars of
+// the UUID -- it reads the authoritative handle claude reports. It fails the
+// test if the json mode is unavailable or no record matches, because the live
+// teardown depends on stopping by the correct short id.
+func resolveShortID(t *testing.T, claudeBin, fullSessionID string) string {
 	t.Helper()
-	if out, err := exec.Command(claudeBin, "stop", sessionID).CombinedOutput(); err != nil {
-		t.Fatalf("claude stop %s: %v\n%s", sessionID, err, out)
+	jsonOut, ok := claudeAgentsJSON(t, claudeBin)
+	if !ok {
+		t.Fatalf("claude agents --json unavailable; cannot resolve the short id for %s (it is the claude stop/attach handle)", fullSessionID)
+	}
+	// The shape is either a top-level array of records or an object wrapping one
+	// (e.g. {"agents":[...]}). Decode loosely and walk for the matching record.
+	var records []map[string]any
+	if err := json.Unmarshal([]byte(jsonOut), &records); err != nil {
+		var wrapper map[string]json.RawMessage
+		if werr := json.Unmarshal([]byte(jsonOut), &wrapper); werr != nil {
+			t.Fatalf("claude agents --json is neither an array nor an object: %v / %v\noutput:\n%s", err, werr, jsonOut)
+		}
+		for _, raw := range wrapper {
+			if err := json.Unmarshal(raw, &records); err == nil && len(records) > 0 {
+				break
+			}
+		}
+	}
+	for _, rec := range records {
+		sid, _ := rec["sessionId"].(string)
+		if sid != fullSessionID {
+			continue
+		}
+		short, _ := rec["id"].(string)
+		if short == "" {
+			t.Fatalf("claude agents record for session %s has no \"id\" (short handle)\noutput:\n%s", fullSessionID, jsonOut)
+		}
+		return short
+	}
+	t.Fatalf("no claude agents record with sessionId %s\noutput:\n%s", fullSessionID, jsonOut)
+	return ""
+}
+
+// stopSession drives the session terminal with `claude stop <short>`. It MUST
+// be passed the SHORT id (the claude stop handle), not the full UUID -- the full
+// UUID yields "No job matching ...". Per the reaper-primary teardown, this does
+// not destroy the instance; the next reap does.
+func stopSession(t *testing.T, claudeBin, shortID string) {
+	t.Helper()
+	if out, err := exec.Command(claudeBin, "stop", shortID).CombinedOutput(); err != nil {
+		t.Fatalf("claude stop %s: %v\n%s", shortID, err, out)
 	}
 }
 
