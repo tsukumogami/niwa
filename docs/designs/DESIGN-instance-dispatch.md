@@ -1,5 +1,5 @@
 ---
-status: Accepted
+status: Planned
 upstream: docs/prds/PRD-instance-dispatch.md
 problem: |
   niwa has no command that launches a Claude Code background worker rooted inside a
@@ -29,7 +29,7 @@ rationale: |
 
 ## Status
 
-Accepted
+Planned
 
 This design implements the Accepted PRD docs/prds/PRD-instance-dispatch.md (R1-R46). It
 is scoped for a single-PR plan. It is purely additive: the existing
@@ -187,6 +187,31 @@ before any instance is created; a prompt that would exceed the operating system'
 argument-length limit fails with a clear error rather than being truncated (R43).
 Rejected: any shell path would reintroduce injection and quoting hazards.
 
+### D9 -- Test seams
+
+Options: integration-only testing against a real `claude` and a live daemon; injectable
+seams for offline tests. **Chosen: injectable seams.** The launcher is a package-level
+function variable; the jobs-dir root and a clock are injected into capture and into the
+reaper backstop; `destroyInstanceFunc` is already a package variable; and instance
+creation runs against the existing offline `localGitServer` harness. Together these let
+every PRD [offline] acceptance criterion run in CI with a stubbed launcher and fabricated
+`state.json` files -- no live `claude`, no daemon. Rejected: integration-only testing is
+slow, flaky, cannot run in CI, and would leave the failure and reclamation paths -- the
+riskiest behavior -- effectively untested.
+
+### Hook-path coexistence (R39, R40)
+
+The command does not touch the existing SessionStart/SessionEnd hook code. The one
+interaction is benign and is relied upon, not modified: a dispatched worker boots inside
+a dispatch-created instance, which is an ordinary, valid niwa instance (it carries
+`.niwa/instance.json`). So if that instance carries the workspace's SessionStart hook,
+the hook's existing re-entrancy guard -- which no-ops when the launch cwd already
+resolves inside a valid instance -- fires and the hook provisions nothing (R39). The
+design's only obligation is that dispatch-created instances are indistinguishable to that
+guard from any other instance (R40), which holds because they are created through the same
+`realProvisionInstance` path. This interaction is covered by an acceptance criterion in
+the plan; no guard code changes.
+
 ## Decision Outcome
 
 `niwa dispatch <prompt>` resolves the enclosing workspace root from the current directory
@@ -332,7 +357,9 @@ Negative / mitigations:
   without a process-external agent, and the orphan is bounded and reclaimed.
 - The backstop TTL must be chosen longer than the worst-case dispatch wall-clock; a
   misconfigured (too-short) TTL could reap a slow in-flight instance. Mitigated by a
-  conservative default and making it the single tuning knob.
+  conservative default -- 30 minutes, far above a dispatch (a clone is seconds to low
+  minutes), and aligned in magnitude with the existing `jobLivenessTTL` though
+  conceptually separate -- making it the single tuning knob.
 
 ## References
 
