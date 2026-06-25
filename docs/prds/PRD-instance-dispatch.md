@@ -1,5 +1,5 @@
 ---
-status: Accepted
+status: In Progress
 problem: |
   Developers fanning out Claude Code background agents from a niwa workspace have no
   reliable one-step way to put each worker in its own fully-configured ephemeral
@@ -25,7 +25,7 @@ motivating_context: |
 
 ## Status
 
-Accepted
+In Progress
 
 This PRD is marked Complex: it warrants a downstream DESIGN before implementation
 (concurrency on instance naming, session-identity capture under a race, and
