@@ -1,6 +1,6 @@
 ---
 schema: brief/v1
-status: Accepted
+status: Done
 problem: |
   Fanning out Claude Code background agents from a niwa workspace has no reliable
   one-step path to put each worker in its own fully-configured instance. The
@@ -24,7 +24,7 @@ motivating_context: |
 
 ## Status
 
-Accepted
+Done
 
 This brief frames a net-new, additive niwa command. The downstream PRD owns the
 requirements (command interface, flags, the full corner-case requirement set); this

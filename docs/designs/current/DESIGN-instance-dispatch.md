@@ -1,5 +1,5 @@
 ---
-status: Planned
+status: Current
 upstream: docs/prds/PRD-instance-dispatch.md
 problem: |
   niwa has no command that launches a Claude Code background worker rooted inside a
@@ -29,7 +29,7 @@ rationale: |
 
 ## Status
 
-Planned
+Current
 
 This design implements the Accepted PRD docs/prds/PRD-instance-dispatch.md (R1-R46). It
 is scoped for a single-PR plan. It is purely additive: the existing
