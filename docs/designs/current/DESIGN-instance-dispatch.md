@@ -83,8 +83,10 @@ grounding research against the current niwa code:
 
 Options: a top-level `niwa dispatch <prompt>`; `niwa run`; `niwa agent`; a nested
 `niwa instance dispatch`. **Chosen: `niwa dispatch <prompt>`**, a top-level verb beside
-`niwa create`/`niwa reap`, with `--label` for the optional friendly name and
-pass-through `--model`/`--permission-mode`/`--agent` forwarded to `claude --bg`.
+`niwa create`/`niwa reap`, with `--label` for the optional freeform mapping alias,
+`--name`/`-n` for an optional session name (see D2 -- sanitized into a slug that names
+both the instance and the Claude session), and pass-through
+`--model`/`--permission-mode`/`--agent` forwarded to `claude --bg`.
 
 **Attach by default; `--detach`/`-d` to skip (R47).** The common interactive case is
 "give me a fresh isolated agent and let me work in it," so by default the command runs
@@ -118,6 +120,20 @@ A random token is collision-safe under concurrency without any lock and reads cl
 `niwa list` as a dispatch-created instance. Rejected: the numbered scan (TOCTOU, the
 exact race R36/R37 forbid); a timestamp (collisions when two dispatches start in the
 same instant).
+
+**Optional `--name`/`-n` slug (additive, signature-preserving).** When the developer
+passes `--name <raw>`, it is sanitized into a slug (lowercase, `[a-z0-9]` runs collapsed
+to single hyphens, trimmed, length-capped; empty result falls back to no slug) and used
+two ways: it is inserted into the instance name BEFORE the signature suffix --
+`<config>-<slug>-disp-<8 random hex>` -- and it is forwarded to the session as
+`claude --bg --name <slug>` so the Claude session carries a human display name in Agent
+View. The random 8-hex is always kept, so the `-disp-<8hex>` end-anchored signature the
+reaper backstop matches (`isDispatchInstanceName`, regex `-disp-[0-9a-f]{8}$`) is
+preserved and concurrency stays collision-safe even when two dispatches share a `--name`.
+The slug is additive: it never replaces the random token. With no `--name` (or an
+empty-after-sanitize one), behavior is exactly the random-token default. `--name` (the
+slug, which names the instance and the session) is distinct from `--label` (a freeform
+alias recorded only on the mapping).
 
 ### D3 -- Session-identity capture
 
