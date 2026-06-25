@@ -3,11 +3,20 @@ package cli
 import (
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/tsukumogami/niwa/internal/workspace"
 )
+
+// dispatchBackstopTTL bounds how long a dispatch-marked, unmapped instance may
+// sit before the reaper backstop reclaims it. It is chosen far longer than the
+// worst-case dispatch wall-clock (a clone plus a bounded capture poll is
+// seconds to low tens of seconds), so a healthy in-flight dispatch's marker is
+// always younger than the TTL and is never reaped (DESIGN Decision 4, R38).
+const dispatchBackstopTTL = 30 * time.Minute
 
 func init() {
 	rootCmd.AddCommand(reapCmd)
@@ -166,6 +175,131 @@ func reapWorkspace(workspaceRoot, jobsDir string, now time.Time) (int, error) {
 		}
 		if err := workspace.DeleteSessionMapping(workspaceRoot, t.SessionID); err != nil {
 			fmt.Fprintf(os.Stderr, "niwa: warning: deleting session mapping %s: %v\n", t.SessionID, err)
+		}
+		reaped++
+	}
+
+	// Second pass: the marker+TTL backstop. This is a SEPARATE scan, not a
+	// branch in selectReapTargets, because EnumerateInstanceRecords derives
+	// Ephemeral solely from the mapping store -- an unmapped orphan is already
+	// Ephemeral:false and is dropped before any per-record branch there. The
+	// backstop is the only path that may act on an UNMAPPED instance, and only
+	// under its own gates (marker present, no mapping, marker timestamp past the
+	// TTL). It runs after the primary reclamation so the existing sweep keeps
+	// ownership of every mapped instance (DESIGN Decision 4).
+	n, err := reapBackstop(workspaceRoot, now)
+	if err != nil {
+		return reaped, err
+	}
+	reaped += n
+
+	return reaped, nil
+}
+
+// backstopTarget is an instance the marker+TTL backstop has selected. Unlike a
+// reapTarget it carries no session id: a backstop target is by definition
+// unmapped, so there is no mapping entry to delete after the destroy.
+type backstopTarget struct {
+	InstancePath string
+}
+
+// selectBackstopTargets enumerates the on-disk instances under workspaceRoot and
+// returns those eligible for the marker+TTL backstop. An instance is eligible
+// only when ALL of the following hold:
+//
+//   - it has NO session mapping (joined against ListSessionMappings by instance
+//     path; absent means unmapped, the SIGKILL-orphan shape the backstop exists
+//     for);
+//   - it carries the dispatch pending-marker file; and
+//   - the marker's embedded RFC3339 timestamp is older than dispatchBackstopTTL
+//     relative to now.
+//
+// A marker that is missing, unreadable, or carries a malformed timestamp is
+// treated as NOT reapable (fail safe -- never reap on a parse failure). This
+// function performs no destruction, so it is unit-testable against fixture
+// instances and an injectable now.
+func selectBackstopTargets(workspaceRoot string, now time.Time) ([]backstopTarget, error) {
+	records, err := workspace.EnumerateInstanceRecords(workspaceRoot)
+	if err != nil {
+		return nil, fmt.Errorf("enumerating instances: %w", err)
+	}
+
+	mappings, err := workspace.ListSessionMappings(workspaceRoot)
+	if err != nil {
+		return nil, fmt.Errorf("listing session mappings: %w", err)
+	}
+	mappedPaths := make(map[string]bool, len(mappings))
+	for _, m := range mappings {
+		if m.InstancePath != "" {
+			mappedPaths[m.InstancePath] = true
+		}
+	}
+
+	var targets []backstopTarget
+	for _, rec := range records {
+		// A mapped instance is owned by the primary sweep; the backstop never
+		// touches it, regardless of age or whether a stale marker lingers.
+		if mappedPaths[rec.Path] {
+			continue
+		}
+
+		created, ok := readDispatchMarkerTime(rec.Path)
+		if !ok {
+			// No marker (a developer instance) or an unreadable/malformed
+			// marker: skip. Failing safe here preserves the never-reap-a-
+			// developer-instance guarantee and avoids reaping on a marker we
+			// cannot prove is old.
+			continue
+		}
+
+		if now.Sub(created) < dispatchBackstopTTL {
+			// A healthy in-flight dispatch: its marker is younger than the TTL.
+			// Spare it (R38).
+			continue
+		}
+
+		targets = append(targets, backstopTarget{InstancePath: rec.Path})
+	}
+
+	return targets, nil
+}
+
+// readDispatchMarkerTime reads the dispatch pending-marker inside instancePath
+// and parses its embedded RFC3339 timestamp. It returns (time, true) only when
+// the marker exists, is readable, and its first line parses as RFC3339;
+// otherwise it returns (zero, false). Reading the age from the embedded
+// timestamp (not the directory mtime) keeps the gate reliable across filesystem
+// mtime quirks (DESIGN Decision 4).
+func readDispatchMarkerTime(instancePath string) (time.Time, bool) {
+	data, err := os.ReadFile(filepath.Join(instancePath, dispatchPendingMarker))
+	if err != nil {
+		return time.Time{}, false
+	}
+	line := strings.TrimSpace(string(data))
+	ts, err := time.Parse(time.RFC3339, line)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return ts, true
+}
+
+// reapBackstop selects and reclaims marked, unmapped, past-TTL orphan instances
+// under workspaceRoot, returning the count actually destroyed. Each target is
+// force-destroyed via destroyInstanceFunc, the same path the primary sweep and
+// SessionEnd teardown use. A destroy failure on one target is surfaced on
+// stderr and does not abort the rest. There is no mapping to delete (a backstop
+// target is unmapped by definition).
+func reapBackstop(workspaceRoot string, now time.Time) (int, error) {
+	targets, err := selectBackstopTargets(workspaceRoot, now)
+	if err != nil {
+		return 0, err
+	}
+
+	reaped := 0
+	for _, t := range targets {
+		if err := destroyInstanceFunc(t.InstancePath); err != nil {
+			fmt.Fprintf(os.Stderr, "niwa: warning: reaping orphaned dispatch instance %s: %v\n", t.InstancePath, err)
+			continue
 		}
 		reaped++
 	}
