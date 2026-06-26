@@ -134,14 +134,15 @@ func iRunCommandFromTheWorkspaceRoot(ctx context.Context, command string) (conte
 
 // findDispatchInstance returns the absolute path of the single disp-* instance
 // under workspaceRoot, or "" when none exists. The dispatch instance name is
-// "<config>-disp-<8 hex>", so the "-disp-" infix uniquely identifies it.
+// "<config>+disp-<8 hex>" (no-name) or "<config>+<slug>-disp-<8 hex>" (named),
+// so a "+disp-" or "-disp-" infix uniquely identifies it.
 func findDispatchInstance(workspaceRoot string) string {
 	entries, err := os.ReadDir(workspaceRoot)
 	if err != nil {
 		return ""
 	}
 	for _, e := range entries {
-		if e.IsDir() && strings.Contains(e.Name(), "-disp-") {
+		if e.IsDir() && (strings.Contains(e.Name(), "+disp-") || strings.Contains(e.Name(), "-disp-")) {
 			return filepath.Join(workspaceRoot, e.Name())
 		}
 	}

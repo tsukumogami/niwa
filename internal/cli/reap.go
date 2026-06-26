@@ -214,7 +214,7 @@ type backstopTarget struct {
 // when ALL of the following hold:
 //
 //   - its base directory name is a dispatch instance name (isDispatchInstanceName
-//     -- "<config>-disp-<8hex>"). This NAME, not a marker file, is the
+//     -- "<config>+disp-<8hex>" or "<config>+<slug>-disp-<8hex>"). This NAME, not a marker file, is the
 //     eligibility signal: provisionInstanceFunc creates the directory atomically,
 //     so a dispatch instance is recognizable the instant it exists. That closes
 //     the SIGKILL-before-marker window a marker-file-only gate left open (an

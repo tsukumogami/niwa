@@ -9,18 +9,19 @@ import (
 	"github.com/tsukumogami/niwa/internal/workspace"
 )
 
-// Canonical dispatch-shaped instance names: "<config>-disp-<8hex>". The backstop
-// keys eligibility on this NAME (isDispatchInstanceName), so the fixtures must use
-// the real shape dispatch produces, not an arbitrary "-disp-old" placeholder.
+// Canonical dispatch-shaped instance names: "<config>+disp-<8hex>" (no-name
+// dispatch, where "+" is the universal end-of-config marker). The backstop keys
+// eligibility on this NAME (isDispatchInstanceName), so the fixtures must use the
+// real shape dispatch produces, not an arbitrary "-disp-old" placeholder.
 const (
-	dispInstOld    = "test-ws-disp-0000aa11" // marked/aged old -> reapable
-	dispInstYoung  = "test-ws-disp-0000bb22" // young -> spared
-	dispInstMapped = "test-ws-disp-0000cc33" // mapped -> not touched
-	dispInstBad    = "test-ws-disp-0000dd44" // malformed marker -> mtime fallback
-	dispInstNoMark = "test-ws-disp-0000ee55" // no marker (SIGKILL-before-marker) -> mtime fallback
-	dispInstOrphan = "test-ws-disp-0000ff66" // marked/aged old -> reapable (combined test)
+	dispInstOld    = "test-ws+disp-0000aa11" // marked/aged old -> reapable
+	dispInstYoung  = "test-ws+disp-0000bb22" // young -> spared
+	dispInstMapped = "test-ws+disp-0000cc33" // mapped -> not touched
+	dispInstBad    = "test-ws+disp-0000dd44" // malformed marker -> mtime fallback
+	dispInstNoMark = "test-ws+disp-0000ee55" // no marker (SIGKILL-before-marker) -> mtime fallback
+	dispInstOrphan = "test-ws+disp-0000ff66" // marked/aged old -> reapable (combined test)
 	devInstName    = "test-ws-2"             // developer instance -> never matched
-	hookInstName   = "test-ws-aabbccdd"      // hook-created instance, no -disp- -> never matched
+	hookInstName   = "test-ws-aabbccdd"      // hook-created instance, no disp- -> never matched
 )
 
 // writeDispatchMarkerAt writes a dispatch pending-marker inside the instance at
@@ -212,7 +213,7 @@ func TestBackstop_MalformedMarker_FallsBackToMtime(t *testing.T) {
 	touchInstanceMtime(t, oldInst, now.Add(-2*dispatchBackstopTTL))
 
 	// Malformed marker but a YOUNG directory mtime: spared via the mtime fallback.
-	youngInst := makeReapInstance(t, root, "test-ws-disp-00009977")
+	youngInst := makeReapInstance(t, root, "test-ws+disp-00009977")
 	writeRawDispatchMarker(t, youngInst, "garbage")
 	touchInstanceMtime(t, youngInst, now.Add(-1*time.Minute))
 
