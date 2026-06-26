@@ -597,11 +597,11 @@ func TestDispatch_PassthroughFlags_DiscreteArgv(t *testing.T) {
 	}
 }
 
-// TestSanitizeDispatchSlug exercises the slug normalization rules: lowercasing,
+// TestSanitizeInstanceSlug exercises the slug normalization rules: lowercasing,
 // collapsing non-[a-z0-9] runs to a single hyphen, trimming leading/trailing
 // hyphens, capping length (re-trimming an exposed trailing hyphen), and
 // returning "" when nothing usable remains.
-func TestSanitizeDispatchSlug(t *testing.T) {
+func TestSanitizeInstanceSlug(t *testing.T) {
 	cases := []struct {
 		name string
 		in   string
@@ -617,25 +617,25 @@ func TestSanitizeDispatchSlug(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := sanitizeDispatchSlug(tc.in)
+			got := sanitizeInstanceSlug(tc.in)
 			if got != tc.want {
-				t.Fatalf("sanitizeDispatchSlug(%q) = %q, want %q", tc.in, got, tc.want)
+				t.Fatalf("sanitizeInstanceSlug(%q) = %q, want %q", tc.in, got, tc.want)
 			}
 			assertSlugShape(t, got)
 		})
 	}
 }
 
-// TestSanitizeDispatchSlug_CapsLength verifies a very long input is capped to
+// TestSanitizeInstanceSlug_CapsLength verifies a very long input is capped to
 // maxDispatchSlugRunes with no trailing hyphen exposed by the cut.
-func TestSanitizeDispatchSlug_CapsLength(t *testing.T) {
+func TestSanitizeInstanceSlug_CapsLength(t *testing.T) {
 	// A run of words longer than the cap, with a hyphen-producing boundary
 	// positioned so a naive cut would leave a trailing hyphen.
 	long := ""
 	for i := 0; i < 60; i++ {
 		long += "ab "
 	}
-	got := sanitizeDispatchSlug(long)
+	got := sanitizeInstanceSlug(long)
 	if len([]rune(got)) > maxDispatchSlugRunes {
 		t.Fatalf("slug length = %d runes, want <= %d (%q)", len([]rune(got)), maxDispatchSlugRunes, got)
 	}

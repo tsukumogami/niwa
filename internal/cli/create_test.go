@@ -140,6 +140,48 @@ func TestComputeInstanceName_SkipsNonInstanceDir(t *testing.T) {
 	}
 }
 
+// TestCreateName_SanitizedIntoSlug pins that a --name value is normalized into a
+// lowercase slug before it becomes the instance suffix. The seam under test is
+// the sanitize -> computeInstanceName composition runCreate performs: spaces and
+// punctuation collapse to hyphens, and uppercase is lowercased, so the composed
+// instance name is "<config>-<slug>".
+func TestCreateName_SanitizedIntoSlug(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"spaces and punctuation", "My Feature!", "tsuku-my-feature"},
+		{"already a clean slug", "hotfix", "tsuku-hotfix"},
+		{"uppercase lowercased", "Hotfix", "tsuku-hotfix"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			slug := sanitizeInstanceSlug(tc.in)
+			if slug == "" {
+				t.Fatalf("sanitizeInstanceSlug(%q) returned empty, expected a usable slug", tc.in)
+			}
+			got, err := computeInstanceName("tsuku", slug, dir)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("name = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestCreateName_UnusableAfterSanitize asserts that a provided --name made up
+// entirely of unusable characters sanitizes to "", which runCreate treats as a
+// hard error rather than silently falling back to the numbered name.
+func TestCreateName_UnusableAfterSanitize(t *testing.T) {
+	if slug := sanitizeInstanceSlug("!!!"); slug != "" {
+		t.Fatalf("sanitizeInstanceSlug(%q) = %q, want empty", "!!!", slug)
+	}
+}
+
 func TestFindRepoDir_SingleMatch(t *testing.T) {
 	root := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(root, "public", "niwa"), 0o755); err != nil {

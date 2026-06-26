@@ -16,7 +16,7 @@ import (
 
 func init() {
 	rootCmd.AddCommand(createCmd)
-	createCmd.Flags().StringVar(&createName, "name", "", "custom instance name suffix (e.g., --name=hotfix produces <config>-hotfix)")
+	createCmd.Flags().StringVar(&createName, "name", "", "custom instance name suffix, sanitized into a lowercase slug of letters, digits, and hyphens (e.g., --name \"My Feature\" produces <config>-my-feature)")
 	createCmd.Flags().StringVarP(&createRepo, "repo", "r", "", "land in this repo after creation")
 	createCmd.Flags().BoolVar(&createNoInstallPlugins, "no-install-plugins", false, "skip auto-installing the embedded niwa Claude Code plugin (otherwise installed once when a rank-2 source is detected)")
 	createCmd.Flags().BoolVar(&createAllowMissingSecrets, "allow-missing-secrets", false,
@@ -60,7 +60,8 @@ of the instance root.
 Instance naming:
   - First instance uses the config name (e.g., "tsuku")
   - Subsequent instances are numbered: tsuku-2, tsuku-3, ...
-  - With --name=hotfix, produces: tsuku-hotfix`,
+  - With --name, the suffix is sanitized into a lowercase slug (letters,
+    digits, hyphens), e.g. --name "My Feature" produces: tsuku-my-feature`,
 	Args: cobra.MaximumNArgs(1),
 	RunE: runCreate,
 }
@@ -94,6 +95,18 @@ func computeInstanceName(configName, customName, workspaceRoot string) (string, 
 }
 
 func runCreate(cmd *cobra.Command, args []string) error {
+	// When --name is provided, sanitize it into a lowercase slug up front
+	// (the same normalization `niwa dispatch` applies) so an unusable value
+	// fails before any side effects. An unset flag (createName == "") keeps
+	// the default numbered naming and is never sanitized or rejected.
+	customName := createName
+	if createName != "" {
+		customName = sanitizeInstanceSlug(createName)
+		if customName == "" {
+			return fmt.Errorf("niwa: error: --name %q does not contain any usable characters for an instance name", createName)
+		}
+	}
+
 	var configPath, configDir string
 
 	if len(args) == 1 {
@@ -147,7 +160,7 @@ func runCreate(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	instanceName, err := computeInstanceName(configName, createName, workspaceRoot)
+	instanceName, err := computeInstanceName(configName, customName, workspaceRoot)
 	if err != nil {
 		return err
 	}

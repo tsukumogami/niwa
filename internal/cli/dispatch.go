@@ -171,7 +171,7 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	// "<config>-<slug>-disp-<8hex>": the slug is additive and never replaces the
 	// random hex, so the end-anchored isDispatchInstanceName signature (and thus
 	// the reaper backstop) keeps matching.
-	slug := sanitizeDispatchSlug(dispatchName)
+	slug := sanitizeInstanceSlug(dispatchName)
 	namePrefix, err := dispatchNameSuffix(slug)
 	if err != nil {
 		return fmt.Errorf("niwa: error: generating instance name: %w", err)
@@ -303,14 +303,18 @@ func dispatchNameSuffix(slug string) (string, error) {
 	return suffix, nil
 }
 
-// sanitizeDispatchSlug normalizes a raw --name value into a filesystem- and
+// sanitizeInstanceSlug normalizes a raw --name value into a filesystem- and
 // flag-safe slug: lowercase, every run of characters outside [a-z0-9] collapsed
 // to a single hyphen, leading/trailing hyphens trimmed, and the result capped to
 // maxDispatchSlugRunes (re-trimming a trailing hyphen the cap may expose). It
 // returns "" when nothing usable remains, signaling the caller to fall back to
 // the slug-less behavior. The result is guaranteed to contain only [a-z0-9-] and
 // to neither lead nor trail with a hyphen.
-func sanitizeDispatchSlug(raw string) string {
+//
+// It is shared by `niwa dispatch` (which embeds the slug in the ephemeral
+// instance name) and `niwa create` (which uses it as the --name suffix), so both
+// commands normalize a custom name identically.
+func sanitizeInstanceSlug(raw string) string {
 	var b strings.Builder
 	prevHyphen := false
 	for _, r := range strings.ToLower(raw) {
