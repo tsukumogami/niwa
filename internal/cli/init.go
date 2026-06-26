@@ -1112,7 +1112,8 @@ func printSuccess(cmd *cobra.Command, mode initMode, name, resolvedName, absPath
 	case modeClone:
 		fmt.Fprintf(w, "Workspace %q initialized at %s from remote config.\n", displayName, absPath)
 		fmt.Fprintln(w, "")
-		fmt.Fprintln(w, "Next steps:")
-		fmt.Fprintln(w, "  1. Run niwa apply to set up the workspace")
+		fmt.Fprintln(w, "The workspace root is ready. Create an instance to start working:")
+		fmt.Fprintln(w, "")
+		fmt.Fprintln(w, "  niwa create <name>")
 	}
 }

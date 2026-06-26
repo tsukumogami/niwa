@@ -109,7 +109,15 @@ func ClassifyCwd(cwd string) (CwdClassification, error) {
 	}
 
 	// Inside an instance? Next most specific case.
-	if instanceDir, err := DiscoverInstance(abs); err == nil {
+	//
+	// A workspace root carries its own .niwa/instance.json (init persists
+	// init-time state there for `niwa create` to read), so DiscoverInstance
+	// resolves the root to itself. That must NOT classify as inside-instance:
+	// treating the root as instance-0 is exactly the bug that made `niwa apply`
+	// at the root clone repos directly under it. When the discovered directory
+	// is a workspace root (carries .niwa/workspace.toml), fall through to the
+	// workspace-root case below — the root is never an instance.
+	if instanceDir, err := DiscoverInstance(abs); err == nil && !isWorkspaceRoot(instanceDir) {
 		// We expect to also find the workspace root by walking further up
 		// (instances live under workspace roots). If config.Discover
 		// fails here, it's an unusual layout (orphan instance) — treat
