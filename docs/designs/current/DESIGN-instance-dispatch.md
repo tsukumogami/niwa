@@ -165,6 +165,24 @@ If either invariant changes, the predicate must change too. The same `+` separat
 used by `niwa create --name` (producing `<config>+<slug>`); hook-created and numbered
 instances keep the `-` join, unchanged.
 
+**Final instance-naming reference.** Every form an instance directory name can take,
+and whether the reaper's dispatch predicate (`\+[a-z0-9_]*-[0-9a-f]{8}$`) matches it:
+
+| Origin | Invocation | Name (config `tsuku`) | Reapable? |
+|--------|-----------|------------------------|-----------|
+| dispatch | (no `--name`) | `tsuku+-4e33acfa` | yes |
+| dispatch | `--name "Auth Layer"` | `tsuku+auth_layer-4e33acfa` | yes |
+| create | first, no name | `tsuku` | no |
+| create | numbered | `tsuku-2`, `tsuku-3` | no |
+| create | `--name "Auth Layer"` | `tsuku+auth_layer` | no (no `-<8hex>` tail) |
+| hook (SessionStart) | auto | `tsuku-9333f04fbe4e` | no (no `+`) |
+
+Separator roles: `+` marks the end of the config name (dispatch and named-create only);
+`-` joins the fixed parts (numbered suffix, slug-to-hex, hook session prefix); `_` is the
+word separator inside a slug. The dispatch signature is the trailing `-<8hex>` gated on a
+preceding `+...` -- not the `+` alone, which is why a named-create instance is never
+reaped.
+
 ### D3 -- Session-identity capture
 
 Options: (A) scrape `backgrounded · <short-id>` from stdout, then read

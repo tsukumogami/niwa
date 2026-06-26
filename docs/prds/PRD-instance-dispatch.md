@@ -401,7 +401,7 @@ Live lifecycle (run locally, gated, never skipped when `claude` is usable):
 
 - [ ] **[live]** A gated automated test, run via a dedicated local target, performs the
   full lifecycle against a real `claude`: init a workspace, `niwa dispatch`, assert a
-  well-constructed `<config>-disp-<hex>` instance (`.niwa/instance.json`, materialized
+  well-constructed `<config>+-<hex>` instance (`.niwa/instance.json`, materialized
   config/env) with the session registered in `claude agents` and rooted in that instance,
   then `claude stop` + `niwa reap`, and confirm the instance directory and its mapping are
   gone. A still-live second session is spared by the same reap. The gate skips only when
