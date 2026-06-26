@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/BurntSushi/toml"
 )
@@ -119,6 +120,43 @@ func theWorkspaceRootHasWorkspaceTOML(ctx context.Context, name string) error {
 	path := filepath.Join(s.workspaceRoot, name, ".niwa", "workspace.toml")
 	if _, err := os.Stat(path); err != nil {
 		return fmt.Errorf("workspace.toml missing at %s: %w", path, err)
+	}
+	return nil
+}
+
+// theFileExistsUnderWorkspaceRoot asserts that
+// `<workspaceRoot>/<name>/<relPath>` exists. Used to verify root-altitude
+// materialization (e.g. the `.claude/skills/dispatch/SKILL.md` project skill
+// MaterializeWorkspaceRoot installs at the workspace root during `niwa init`).
+func theFileExistsUnderWorkspaceRoot(ctx context.Context, relPath, name string) error {
+	s := getState(ctx)
+	if s == nil {
+		return fmt.Errorf("no test state")
+	}
+	path := filepath.Join(s.workspaceRoot, name, filepath.FromSlash(relPath))
+	if _, err := os.Stat(path); err != nil {
+		return fmt.Errorf("expected file %q under workspace root %q: %w", relPath, name, err)
+	}
+	return nil
+}
+
+// theFileUnderWorkspaceRootContains asserts that
+// `<workspaceRoot>/<name>/<relPath>` exists and its content contains `want`.
+// Pairs with theFileExistsUnderWorkspaceRoot to confirm the materialized file
+// is the real artifact (e.g. the dispatch SKILL.md frontmatter and heading)
+// rather than an empty placeholder.
+func theFileUnderWorkspaceRootContains(ctx context.Context, relPath, name, want string) error {
+	s := getState(ctx)
+	if s == nil {
+		return fmt.Errorf("no test state")
+	}
+	path := filepath.Join(s.workspaceRoot, name, filepath.FromSlash(relPath))
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("reading %q under workspace root %q: %w", relPath, name, err)
+	}
+	if !strings.Contains(string(data), want) {
+		return fmt.Errorf("file %q under workspace root %q does not contain %q; got:\n%s", relPath, name, want, string(data))
 	}
 	return nil
 }
