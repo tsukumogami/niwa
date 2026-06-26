@@ -195,3 +195,146 @@ func TestMaterializeWorkspaceRoot_NoPermissionsConfigured(t *testing.T) {
 		t.Errorf("hooks block missing")
 	}
 }
+
+func TestMaterializeWorkspaceRoot_HoistsWorkspacePlugins(t *testing.T) {
+	// A github-sourced marketplace and its plugin hoist to the root settings so
+	// a root-launched session loads the workspace's plugins/skills. Track is
+	// "main" so the build does no network release resolution.
+	plugins := []string{"shirabe@shirabe"}
+	cfg := &config.WorkspaceConfig{
+		Workspace: config.WorkspaceMeta{Name: "ws"},
+		Claude: config.ClaudeConfig{
+			Plugins: &plugins,
+			Marketplaces: config.MarketplaceConfigs{
+				{Source: "tsukumogami/shirabe", Track: "main"},
+			},
+		},
+	}
+
+	doc, _ := materializeRoot(t, cfg, RootMaterializeOptions{EphemeralSessionMode: true})
+
+	enabled, ok := doc["enabledPlugins"].(map[string]any)
+	if !ok {
+		t.Fatalf("enabledPlugins block missing or wrong type: %#v", doc["enabledPlugins"])
+	}
+	if enabled["shirabe@shirabe"] != true {
+		t.Errorf("enabledPlugins[shirabe@shirabe] = %v, want true", enabled["shirabe@shirabe"])
+	}
+
+	mkts, ok := doc["extraKnownMarketplaces"].(map[string]any)
+	if !ok {
+		t.Fatalf("extraKnownMarketplaces block missing or wrong type: %#v", doc["extraKnownMarketplaces"])
+	}
+	if _, ok := mkts["shirabe"]; !ok {
+		t.Errorf("extraKnownMarketplaces missing github marketplace 'shirabe': %#v", mkts)
+	}
+}
+
+func TestMaterializeWorkspaceRoot_ExcludesInstanceLocalMarketplace(t *testing.T) {
+	// A repo:-sourced marketplace points into an instance checkout that does not
+	// exist at the workspace root, so it (and the plugin bound to it) is omitted
+	// from the root settings while a github-sourced sibling still hoists.
+	plugins := []string{"shirabe@shirabe", "tsukumogami@tsukumogami"}
+	cfg := &config.WorkspaceConfig{
+		Workspace: config.WorkspaceMeta{Name: "ws"},
+		Claude: config.ClaudeConfig{
+			Plugins: &plugins,
+			Marketplaces: config.MarketplaceConfigs{
+				{Source: "tsukumogami/shirabe", Track: "main"},
+				{Source: "repo:tools/.claude-plugin/marketplace.json"},
+			},
+		},
+	}
+
+	doc, _ := materializeRoot(t, cfg, RootMaterializeOptions{EphemeralSessionMode: true})
+
+	enabled, ok := doc["enabledPlugins"].(map[string]any)
+	if !ok {
+		t.Fatalf("enabledPlugins block missing: %#v", doc["enabledPlugins"])
+	}
+	if enabled["shirabe@shirabe"] != true {
+		t.Errorf("github-sourced plugin should hoist; enabledPlugins = %#v", enabled)
+	}
+	if _, present := enabled["tsukumogami@tsukumogami"]; present {
+		t.Errorf("instance-local plugin must be excluded from root, got enabledPlugins = %#v", enabled)
+	}
+
+	mkts, ok := doc["extraKnownMarketplaces"].(map[string]any)
+	if !ok {
+		t.Fatalf("extraKnownMarketplaces block missing: %#v", doc["extraKnownMarketplaces"])
+	}
+	if _, ok := mkts["shirabe"]; !ok {
+		t.Errorf("github marketplace should hoist; got %#v", mkts)
+	}
+	if _, ok := mkts["tsukumogami"]; ok {
+		t.Errorf("instance-local marketplace must be excluded from root; got %#v", mkts)
+	}
+}
+
+func TestRootHoistableConfig(t *testing.T) {
+	plugins := []string{"shirabe@shirabe", "tsukumogami@tsukumogami", "bare"}
+	marketplaces := config.MarketplaceConfigs{
+		{Source: "tsukumogami/shirabe"},
+		{Source: "repo:tools/.claude-plugin/marketplace.json"},
+	}
+
+	keptPlugins, keptMarketplaces, reports := rootHoistableConfig(plugins, marketplaces)
+
+	// github marketplace survives; repo: source is dropped.
+	if len(keptMarketplaces) != 1 || keptMarketplaces[0].Source != "tsukumogami/shirabe" {
+		t.Errorf("keptMarketplaces = %#v, want only tsukumogami/shirabe", keptMarketplaces)
+	}
+
+	// shirabe@shirabe (github marketplace) and the unqualified "bare" plugin
+	// survive; tsukumogami@tsukumogami (repo: marketplace) is dropped.
+	wantPlugins := map[string]bool{"shirabe@shirabe": true, "bare": true}
+	if len(keptPlugins) != len(wantPlugins) {
+		t.Fatalf("keptPlugins = %#v, want %v", keptPlugins, wantPlugins)
+	}
+	for _, p := range keptPlugins {
+		if !wantPlugins[p] {
+			t.Errorf("unexpected kept plugin %q", p)
+		}
+	}
+
+	// Both exclusions are reported, no silent truncation.
+	if len(reports) != 2 {
+		t.Fatalf("want 2 exclusion reports (marketplace + plugin), got %d: %#v", len(reports), reports)
+	}
+	joined := strings.Join(reports, "\n")
+	if !strings.Contains(joined, "repo:tools/.claude-plugin/marketplace.json") {
+		t.Errorf("marketplace exclusion report missing the source; got:\n%s", joined)
+	}
+	if !strings.Contains(joined, "tsukumogami@tsukumogami") {
+		t.Errorf("plugin exclusion report missing the plugin; got:\n%s", joined)
+	}
+}
+
+func TestRootHoistableConfig_NoExclusions(t *testing.T) {
+	// All github sources: nothing is excluded, so no reports are produced.
+	plugins := []string{"shirabe@shirabe"}
+	marketplaces := config.MarketplaceConfigs{{Source: "tsukumogami/shirabe"}}
+
+	keptPlugins, keptMarketplaces, reports := rootHoistableConfig(plugins, marketplaces)
+	if len(keptPlugins) != 1 || len(keptMarketplaces) != 1 {
+		t.Errorf("expected all entries kept; plugins=%#v marketplaces=%#v", keptPlugins, keptMarketplaces)
+	}
+	if len(reports) != 0 {
+		t.Errorf("expected no exclusion reports, got %#v", reports)
+	}
+}
+
+func TestPluginMarketplace(t *testing.T) {
+	cases := map[string]string{
+		"shirabe@shirabe":         "shirabe",
+		"tsukumogami@tsukumogami": "tsukumogami",
+		"bare":                    "",
+		"trailing@":               "",
+		"a@b@c":                   "c",
+	}
+	for in, want := range cases {
+		if got := pluginMarketplace(in); got != want {
+			t.Errorf("pluginMarketplace(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
