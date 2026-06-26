@@ -337,6 +337,17 @@ func SaveState(dir string, state *InstanceState) error {
 	return nil
 }
 
+// isWorkspaceRoot reports whether dir is a workspace root, i.e. it carries
+// .niwa/workspace.toml. A workspace root is never an instance: instances live
+// *under* a root and carry .niwa/instance.json without a workspace.toml. The
+// root may legitimately hold its own instance.json (init writes one to persist
+// the config-name override and ephemeral-session flags), so the presence of
+// workspace.toml is the authoritative signal that distinguishes the two.
+func isWorkspaceRoot(dir string) bool {
+	_, err := os.Stat(filepath.Join(dir, StateDir, WorkspaceConfigFile))
+	return err == nil
+}
+
 // DiscoverInstance walks up from startPath to find the nearest directory
 // containing .niwa/instance.json. It returns the directory containing the
 // instance state, or an error if none is found.

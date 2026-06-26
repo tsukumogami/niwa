@@ -140,6 +140,21 @@ func theFileExistsUnderWorkspaceRoot(ctx context.Context, relPath, name string) 
 	return nil
 }
 
+// theFileDoesNotExistUnderWorkspaceRoot asserts that
+// `<workspaceRoot>/<name>/<relPath>` is absent. Used to prove `niwa apply` at
+// the root does not materialize repos directly under the workspace root.
+func theFileDoesNotExistUnderWorkspaceRoot(ctx context.Context, relPath, name string) error {
+	s := getState(ctx)
+	if s == nil {
+		return fmt.Errorf("no test state")
+	}
+	path := filepath.Join(s.workspaceRoot, name, filepath.FromSlash(relPath))
+	if _, err := os.Stat(path); err == nil {
+		return fmt.Errorf("path %q exists under workspace root %q but should not (apply must not clone repos into the root)", relPath, name)
+	}
+	return nil
+}
+
 // theFileUnderWorkspaceRootContains asserts that
 // `<workspaceRoot>/<name>/<relPath>` exists and its content contains `want`.
 // Pairs with theFileExistsUnderWorkspaceRoot to confirm the materialized file
@@ -197,7 +212,6 @@ func theRegistryHasWorkspaceRootedAt(ctx context.Context, name, wantRoot string)
 	return nil
 }
 
-
 // iRunFromInstance runs `niwa <command>` with cwd set to the instance
 // directory `<workspaceRoot>/<workspace>/<instance>`, where the
 // `<workspace>` directory is the user-given name from `niwa init <name>`
@@ -212,7 +226,6 @@ func iRunFromInstance(ctx context.Context, command, instance, workspace string) 
 	cwd := filepath.Join(s.workspaceRoot, workspace, instance)
 	return ctx, runNiwa(s, cwd, command)
 }
-
 
 // niwaGoFromOutsideLandsIn runs `niwa go <name>` from a directory other
 // than the workspace, with a temp NIWA_RESPONSE_FILE set so the
@@ -266,4 +279,3 @@ func niwaGoFromOutsideLandsIn(ctx context.Context, name, expectedSubpath string)
 	}
 	return nil
 }
-

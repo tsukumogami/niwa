@@ -207,6 +207,15 @@ scope from it (or from `--instance`, or a registry name argument):
 3. If cwd is at the **workspace root**, materialize the root-managed config,
    then converge every instance and each instance's worktrees.
 
+The workspace root is **never** converged as an instance. `niwa init` persists
+an `.niwa/instance.json` at the root to carry init-time state that `niwa create`
+reads, so the root carries both `.niwa/workspace.toml` and `.niwa/instance.json`.
+The `workspace.toml` is authoritative: a directory that has it is the workspace
+root, classified as scope 3 above, not scope 2 — apply manages only its
+root-level config and clones no repos into the root. (Before this distinction
+was enforced, the root's `instance.json` made `apply` at the root treat the root
+as instance-0 and clone every configured repo directly under it.)
+
 Worktrees are refreshed as part of the instance apply, not by a separate niwa
 cascade: an instance-scope `apply` refreshes the instance's environment and the
 worktree path inherits that already-materialized environment (the upstream

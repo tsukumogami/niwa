@@ -142,10 +142,17 @@ On a TTY, `niwa create` and `niwa apply` show a single in-place status line for 
 Teams can share workspace configs via a GitHub repo:
 
 ```bash
-# Clone config from GitHub and set up the workspace
+# Clone config from GitHub; the workspace root is ready to use
 niwa init my-team --from my-org/workspace-config
-niwa apply
+# Create an instance to work in
+cd my-team && niwa create
 ```
+
+`niwa init` leaves you with a ready workspace root — it materializes the root
+configuration (CLAUDE.md, Claude Code settings and skills) but clones no repos.
+The repos live inside instances: `niwa create` makes one. You do not need to run
+`niwa apply` first; apply's job is to refresh an already-set-up workspace, not to
+set it up.
 
 The config repo is materialized as `.niwa/` — a snapshot of the source content at
 a specific commit, not a git checkout. Each `niwa apply` checks for upstream

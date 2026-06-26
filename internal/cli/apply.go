@@ -67,7 +67,9 @@ Scope resolution (when no workspace-name argument is given):
      instance or sibling worktrees).
   3. If cwd is inside an instance, converge that instance and its worktrees.
   4. If cwd is at the workspace root, materialize the root-managed config, then
-     converge every instance and each instance's worktrees.
+     converge every instance and each instance's worktrees. The workspace root
+     itself is never converged as an instance: apply manages only its root-level
+     config and clones no repos into the root.
 
 Use --no-cascade at the workspace root to refresh only the root-managed config
 (hooks, permission posture, CLAUDE.md) without re-converging the instances
