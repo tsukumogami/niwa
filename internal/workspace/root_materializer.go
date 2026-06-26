@@ -275,6 +275,16 @@ cloned repos.
 - Run niwa commands from the root to manage the workspace as a whole, or from
   inside an instance to operate on that instance.
 
+## Dispatching work to an isolated agent
+
+When you have been discussing what to build and are ready to hand the work off to
+run on its own, invoke the ` + "`/dispatch`" + ` skill. It synthesizes the conversation
+into a self-contained task brief and launches a background worker in its own fresh
+niwa instance via ` + "`niwa dispatch`" + ` -- the worker boots rooted in that instance
+(loading its full configuration) and appears in Agent View. The underlying command is
+` + "`niwa dispatch \"<task>\" --name <slug> [--detach]`" + `; ` + "`/dispatch`" + ` is the
+front door that writes the brief and runs it for you.
+
 ## Ephemeral sessions
 
 This workspace can provision a dedicated ephemeral instance per dispatched
