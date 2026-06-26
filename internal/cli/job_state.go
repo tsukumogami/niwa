@@ -39,13 +39,22 @@ type jobState struct {
 	// instance directory. Absent decodes to "".
 	Cwd       string    `json:"cwd"`
 	UpdatedAt time.Time `json:"updatedAt"`
+	// FirstTerminalAt is the timestamp Claude Code stamps when the session first
+	// reaches a terminal condition, regardless of the specific terminal `state`
+	// label. It is the authoritative "this session has ended" signal -- the
+	// reaper treats a non-zero value as terminal so an unrecognized terminal
+	// `state` (e.g. "stopped" from `claude stop`) is never mistaken for a live
+	// session. Absent decodes to the zero time.
+	FirstTerminalAt time.Time `json:"firstTerminalAt"`
 }
 
 // terminalJobStates is the set of job `state` values that mean the session has
 // ended. The exact vocabulary of state.json is undocumented, so this set is
-// matched case-insensitively and kept deliberately broad. A state value not in
-// this set is treated as non-terminal (still running), so the TTL is the
-// backstop for any unrecognized terminal label.
+// matched case-insensitively and kept deliberately broad. It is a secondary
+// signal: the authoritative terminal check is a non-zero FirstTerminalAt (see
+// sessionLive), which catches any terminal label not enumerated here. A state
+// value in neither path is treated as non-terminal, with the TTL as the final
+// backstop.
 var terminalJobStates = map[string]bool{
 	"completed": true,
 	"complete":  true,
@@ -59,6 +68,8 @@ var terminalJobStates = map[string]bool{
 	"timeout":   true,
 	"timedout":  true,
 	"killed":    true,
+	"stopped":   true,
+	"stop":      true,
 }
 
 // defaultJobsDir returns the Claude Code jobs directory (~/.claude/jobs). A
@@ -104,6 +115,12 @@ func sessionLive(jobsDir, sessionID string, now time.Time) bool {
 	// mistaken for this session. A recorded mismatch means this is not our job
 	// (treat as dead for our session).
 	if js.SessionID != "" && js.SessionID != sessionID {
+		return false
+	}
+	// Authoritative terminal signal: Claude Code stamps firstTerminalAt the
+	// moment the session ends, whatever the terminal `state` label. This catches
+	// labels the enumerated set below would miss (e.g. "stopped").
+	if !js.FirstTerminalAt.IsZero() {
 		return false
 	}
 	if terminalJobStates[strings.ToLower(strings.TrimSpace(js.State))] {
