@@ -16,7 +16,7 @@ import (
 
 func init() {
 	rootCmd.AddCommand(createCmd)
-	createCmd.Flags().StringVar(&createName, "name", "", "custom instance name suffix, sanitized into a lowercase slug of letters, digits, and underscores (e.g., --name \"My Feature\" produces <config>-my_feature)")
+	createCmd.Flags().StringVar(&createName, "name", "", "custom instance name suffix, sanitized into a lowercase slug of letters, digits, and underscores and joined to the config name with '+' (e.g., --name \"My Feature\" produces <config>+my_feature)")
 	createCmd.Flags().StringVarP(&createRepo, "repo", "r", "", "land in this repo after creation")
 	createCmd.Flags().BoolVar(&createNoInstallPlugins, "no-install-plugins", false, "skip auto-installing the embedded niwa Claude Code plugin (otherwise installed once when a rank-2 source is detected)")
 	createCmd.Flags().BoolVar(&createAllowMissingSecrets, "allow-missing-secrets", false,
@@ -61,16 +61,25 @@ Instance naming:
   - First instance uses the config name (e.g., "tsuku")
   - Subsequent instances are numbered: tsuku-2, tsuku-3, ...
   - With --name, the suffix is sanitized into a lowercase slug (letters,
-    digits, underscores), e.g. --name "My Feature" produces: tsuku-my_feature`,
+    digits, underscores) and joined to the config name with '+', e.g.
+    --name "My Feature" produces: tsuku+my_feature. The '+' marks the
+    config|slug boundary unambiguously (config names may contain '.', '-',
+    and '_', so none of those can serve as the separator).`,
 	Args: cobra.MaximumNArgs(1),
 	RunE: runCreate,
 }
 
 // computeInstanceName determines the instance directory name based on the
-// config name, existing instances, and an optional custom name suffix.
-func computeInstanceName(configName, customName, workspaceRoot string) (string, error) {
+// config name, existing instances, and an optional custom name suffix. When a
+// custom name is supplied it is joined to the config name with sep: callers
+// pass "+" for a user-supplied slug (so the config|slug boundary is
+// unambiguous -- "+" is excluded from NamePattern and the slug charset, so it
+// appears exactly once) and "-" for the legacy/internal hook suffix. The
+// numbered-scan branch (customName == "") never uses sep and always joins with
+// "-".
+func computeInstanceName(configName, customName, sep, workspaceRoot string) (string, error) {
 	if customName != "" {
-		return configName + "-" + customName, nil
+		return configName + sep + customName, nil
 	}
 
 	// First instance: use the config name directly.
@@ -160,7 +169,13 @@ func runCreate(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	instanceName, err := computeInstanceName(configName, customName, workspaceRoot)
+	// A user-supplied --name is joined with "+" so the config|slug boundary is
+	// unambiguous; the default numbered path joins with "-" (sep is unused there).
+	sep := "-"
+	if customName != "" {
+		sep = "+"
+	}
+	instanceName, err := computeInstanceName(configName, customName, sep, workspaceRoot)
 	if err != nil {
 		return err
 	}

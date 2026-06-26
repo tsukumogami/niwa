@@ -89,11 +89,12 @@ func stubProvision(t *testing.T, claudeMD string) *struct {
 		result       provisionResult
 	}{}
 	prev := provisionInstanceFunc
-	provisionInstanceFunc = func(_ context.Context, workspaceRoot, _, namePrefix string) (provisionResult, error) {
+	provisionInstanceFunc = func(_ context.Context, workspaceRoot, _, namePrefix, sep string) (provisionResult, error) {
 		rec.called = true
 		rec.gotName = namePrefix
 		rec.gotWorkspace = workspaceRoot
-		instanceDir := filepath.Join(workspaceRoot, "test-ws-"+namePrefix)
+		name := "test-ws" + sep + namePrefix
+		instanceDir := filepath.Join(workspaceRoot, name)
 		if err := os.MkdirAll(instanceDir, 0o755); err != nil {
 			return provisionResult{}, err
 		}
@@ -102,7 +103,7 @@ func stubProvision(t *testing.T, claudeMD string) *struct {
 				return provisionResult{}, err
 			}
 		}
-		rec.result = provisionResult{Name: "test-ws-" + namePrefix, Path: instanceDir}
+		rec.result = provisionResult{Name: name, Path: instanceDir}
 		return rec.result, nil
 	}
 	t.Cleanup(func() { provisionInstanceFunc = prev })

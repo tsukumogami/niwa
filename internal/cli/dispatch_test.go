@@ -108,14 +108,15 @@ func installDispatchFakes(t *testing.T, workspaceRoot string) *dispatchFakes {
 
 	lookClaude = func() (string, error) { return "/usr/bin/claude", nil }
 
-	provisionInstanceFunc = func(_ context.Context, root, _, namePrefix string) (provisionResult, error) {
+	provisionInstanceFunc = func(_ context.Context, root, _, namePrefix, sep string) (provisionResult, error) {
 		f.provisionCalled++
-		dir := filepath.Join(root, "test-ws-"+namePrefix)
+		name := "test-ws" + sep + namePrefix
+		dir := filepath.Join(root, name)
 		if err := os.MkdirAll(filepath.Join(dir, ".niwa"), 0o755); err != nil {
 			return provisionResult{}, err
 		}
 		f.instancePath = dir
-		return provisionResult{Name: "test-ws-" + namePrefix, Path: dir}, nil
+		return provisionResult{Name: name, Path: dir}, nil
 	}
 
 	dispatchLaunch = func(_ context.Context, _, _ string, _ []string) error {
@@ -400,9 +401,9 @@ func TestDispatch_SelfDispatch_ResolvesEnclosingWorkspaceRoot(t *testing.T) {
 
 	var gotRoot string
 	prev := provisionInstanceFunc
-	provisionInstanceFunc = func(ctx context.Context, r, cwd, namePrefix string) (provisionResult, error) {
+	provisionInstanceFunc = func(ctx context.Context, r, cwd, namePrefix, sep string) (provisionResult, error) {
 		gotRoot = r
-		return prev(ctx, r, cwd, namePrefix)
+		return prev(ctx, r, cwd, namePrefix, sep)
 	}
 
 	_, _, err := runDispatchCmd(t, "do a thing")
@@ -491,9 +492,9 @@ func TestDispatch_Concurrent_DistinctMappings(t *testing.T) {
 	// A goroutine-safe provision: each call mints a distinct instance dir under
 	// the workspace root using the unique namePrefix dispatch generated.
 	var provisionCount int64
-	provisionInstanceFunc = func(_ context.Context, r, _, namePrefix string) (provisionResult, error) {
+	provisionInstanceFunc = func(_ context.Context, r, _, namePrefix, sep string) (provisionResult, error) {
 		atomic.AddInt64(&provisionCount, 1)
-		name := "test-ws-" + namePrefix
+		name := "test-ws" + sep + namePrefix
 		dir := filepath.Join(r, name)
 		if err := os.MkdirAll(filepath.Join(dir, ".niwa"), 0o755); err != nil {
 			return provisionResult{}, err
@@ -674,8 +675,8 @@ func TestDispatch_Name_SlugInInstanceAndSession(t *testing.T) {
 
 	var gotName string
 	prevProvision := provisionInstanceFunc
-	provisionInstanceFunc = func(ctx context.Context, r, cwd, namePrefix string) (provisionResult, error) {
-		res, err := prevProvision(ctx, r, cwd, namePrefix)
+	provisionInstanceFunc = func(ctx context.Context, r, cwd, namePrefix, sep string) (provisionResult, error) {
+		res, err := prevProvision(ctx, r, cwd, namePrefix, sep)
 		gotName = res.Name
 		return res, err
 	}
@@ -696,16 +697,22 @@ func TestDispatch_Name_SlugInInstanceAndSession(t *testing.T) {
 	if !strings.Contains(gotName, "my_thing") {
 		t.Errorf("instance name %q should contain the slug %q", gotName, "my_thing")
 	}
+	// The config name and slug are joined with "+", so the full shape is
+	// "<config>+<slug>-disp-<8hex>".
+	if !regexp.MustCompile(`^test-ws\+my_thing-disp-[0-9a-f]{8}$`).MatchString(gotName) {
+		t.Errorf("instance name %q should be <config>+my_thing-disp-<8hex>", gotName)
+	}
 	if !isDispatchInstanceName(gotName) {
 		t.Errorf("instance name %q must still match isDispatchInstanceName (preserve the -disp-<8hex> signature)", gotName)
 	}
 	if !dispatchInstanceNameRe.MatchString(gotName) {
 		t.Errorf("instance name %q must still end with -disp-<8hex>", gotName)
 	}
-	// The end-anchored -disp-<8hex> regex is unaffected by underscores inside
-	// the slug: a literal underscore-slug instance name still matches.
-	if !isDispatchInstanceName("tsuku-my_thing-disp-deadbeef") {
-		t.Error("isDispatchInstanceName must still match an underscore-slug name like tsuku-my_thing-disp-deadbeef")
+	// The end-anchored -disp-<8hex> regex is unaffected by the "+" config|slug
+	// separator or underscores inside the slug: a "+"-joined underscore-slug
+	// instance name still matches.
+	if !isDispatchInstanceName("tsuku+my_thing-disp-deadbeef") {
+		t.Error("isDispatchInstanceName must still match a +-joined underscore-slug name like tsuku+my_thing-disp-deadbeef")
 	}
 
 	if !passthroughHasNameSlug(gotPass, "my_thing") {
@@ -723,8 +730,8 @@ func TestDispatch_NoName_NoSlugNoNameFlag(t *testing.T) {
 
 	var gotName string
 	prevProvision := provisionInstanceFunc
-	provisionInstanceFunc = func(ctx context.Context, r, cwd, namePrefix string) (provisionResult, error) {
-		res, err := prevProvision(ctx, r, cwd, namePrefix)
+	provisionInstanceFunc = func(ctx context.Context, r, cwd, namePrefix, sep string) (provisionResult, error) {
+		res, err := prevProvision(ctx, r, cwd, namePrefix, sep)
 		gotName = res.Name
 		return res, err
 	}
@@ -764,8 +771,8 @@ func TestDispatch_NameSanitizesEmpty_FallsBack(t *testing.T) {
 
 	var gotName string
 	prevProvision := provisionInstanceFunc
-	provisionInstanceFunc = func(ctx context.Context, r, cwd, namePrefix string) (provisionResult, error) {
-		res, err := prevProvision(ctx, r, cwd, namePrefix)
+	provisionInstanceFunc = func(ctx context.Context, r, cwd, namePrefix, sep string) (provisionResult, error) {
+		res, err := prevProvision(ctx, r, cwd, namePrefix, sep)
 		gotName = res.Name
 		return res, err
 	}

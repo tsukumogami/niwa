@@ -17,7 +17,7 @@ import (
 
 func init() {
 	dispatchCmd.Flags().StringVar(&dispatchLabel, "label", "", "optional human-friendly alias recorded on the session mapping")
-	dispatchCmd.Flags().StringVarP(&dispatchName, "name", "n", "", "optional display name for the session (sanitized into a slug; also names the niwa instance)")
+	dispatchCmd.Flags().StringVarP(&dispatchName, "name", "n", "", "optional display name for the session (sanitized into a slug; also names the niwa instance <config>+<slug>-disp-<id>)")
 	dispatchCmd.Flags().StringVar(&dispatchModel, "model", "", "model to forward to the background worker (--model)")
 	dispatchCmd.Flags().StringVar(&dispatchPermissionMode, "permission-mode", "", "permission mode to forward to the background worker (--permission-mode)")
 	dispatchCmd.Flags().StringVar(&dispatchAgent, "agent", "", "agent to forward to the background worker (--agent)")
@@ -35,7 +35,7 @@ var (
 )
 
 // maxDispatchSlugRunes caps the sanitized --name slug so it cannot dominate the
-// instance directory name (which is "<config>-<slug>-disp-<8hex>"). 40 runes is
+// instance directory name (which is "<config>+<slug>-disp-<8hex>"). 40 runes is
 // generous for a human-readable label while leaving room below filesystem name
 // limits for the config prefix and the "-disp-<8hex>" signature suffix.
 const maxDispatchSlugRunes = 40
@@ -168,13 +168,23 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	// as the customName branch of the existing provision path, sidestepping the
 	// racy numbered scan (DESIGN Decision 2). When --name sanitizes to a usable
 	// slug it is inserted BEFORE the "-disp-<8hex>" segment, so the name becomes
-	// "<config>-<slug>-disp-<8hex>": the slug is additive and never replaces the
+	// "<config>+<slug>-disp-<8hex>": the slug is additive and never replaces the
 	// random hex, so the end-anchored isDispatchInstanceName signature (and thus
-	// the reaper backstop) keeps matching.
+	// the reaper backstop) keeps matching. The "+" joins the config name to the
+	// slug ONLY when a slug is present (sep below); the random-only suffix keeps
+	// the "-" join so an un-named dispatch stays "<config>-disp-<8hex>".
 	slug := sanitizeInstanceSlug(dispatchName)
 	namePrefix, err := dispatchNameSuffix(slug)
 	if err != nil {
 		return fmt.Errorf("niwa: error: generating instance name: %w", err)
+	}
+	// "+" marks the config|slug boundary unambiguously (config names may contain
+	// '.', '-', and '_', so none of those can serve as the separator). It is used
+	// ONLY when a slug is present; the slug-less suffix keeps "-" so the
+	// "-disp-<8hex>" reaper signature is unchanged for the un-named case.
+	sep := "-"
+	if slug != "" {
+		sep = "+"
 	}
 
 	// (5) Self-bound orphans: run the opportunistic reclamation sweep the same
@@ -182,7 +192,7 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	reapOpportunistically(workspaceRoot)
 
 	// (6) Create the instance through the existing provision path.
-	res, err := provisionInstanceFunc(cmd.Context(), workspaceRoot, cwd, namePrefix)
+	res, err := provisionInstanceFunc(cmd.Context(), workspaceRoot, cwd, namePrefix, sep)
 	if err != nil {
 		return fmt.Errorf("niwa: error: provisioning dispatch instance: %w", err)
 	}
@@ -287,10 +297,12 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 // "<config>-disp-<8hex>" -- the shape isDispatchInstanceName recognizes.
 //
 // When slug is non-empty it is inserted BEFORE the "disp-<8hex>" segment, giving
-// "<slug>-disp-<8hex>" (instance dir "<config>-<slug>-disp-<8hex>"). The slug is
-// additive: the random hex is always kept (uniqueness + signature) and the
-// "-disp-<8hex>" suffix stays end-anchored, so isDispatchInstanceName still
-// matches and the reaper backstop is unaffected.
+// "<slug>-disp-<8hex>". The provision path joins this to the config name with
+// "+" (the config|slug separator), so the instance dir is
+// "<config>+<slug>-disp-<8hex>". The "+" is added by the join, NOT here -- this
+// suffix never carries it. The slug is additive: the random hex is always kept
+// (uniqueness + signature) and the "-disp-<8hex>" suffix stays end-anchored, so
+// isDispatchInstanceName still matches and the reaper backstop is unaffected.
 func dispatchNameSuffix(slug string) (string, error) {
 	var b [4]byte
 	if _, err := rand.Read(b[:]); err != nil {
@@ -314,7 +326,7 @@ func dispatchNameSuffix(slug string) (string, error) {
 // The word separator is an UNDERSCORE, never a dash: even a user-typed dash
 // (e.g. "auth-layer") collapses to "_" ("auth_layer"). This keeps the slug
 // dash-free so dashes stay purely structural in the instance directory name
-// "<config>-<slug>-disp-<8hex>", where the "-disp-<8hex>" signature the reaper
+// "<config>+<slug>-disp-<8hex>", where the "-disp-<8hex>" signature the reaper
 // backstop matches must stay unambiguous.
 //
 // It is shared by `niwa dispatch` (which embeds the slug in the ephemeral

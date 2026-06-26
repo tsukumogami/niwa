@@ -125,12 +125,12 @@ same instant).
 passes `--name <raw>`, it is sanitized into a slug (lowercase, runs of characters outside
 `[a-z0-9]` collapsed to single underscores, trimmed, length-capped; empty result falls
 back to no slug) and used two ways: it is inserted into the instance name BEFORE the
-signature suffix -- `<config>-<slug>-disp-<8 random hex>` -- and it is forwarded to the
+signature suffix -- `<config>+<slug>-disp-<8 random hex>` -- and it is forwarded to the
 session as
 `claude --bg --name <slug>` so the Claude session carries a human display name in Agent
 View. The separator inside the slug is an underscore, so the slug is dash-free
 (`"My Feature!"` -> `my_feature`, and even a user-typed dash collapses: `"auth-layer"` ->
-`auth_layer`); this keeps dashes purely structural in `<config>-<slug>-disp-<8hex>`. The
+`auth_layer`); this keeps dashes purely structural in `<config>+<slug>-disp-<8hex>`. The
 random 8-hex is always kept, so the `-disp-<8hex>` end-anchored signature the
 reaper backstop matches (`isDispatchInstanceName`, regex `-disp-[0-9a-f]{8}$`) is
 preserved and concurrency stays collision-safe even when two dispatches share a `--name`.
@@ -138,6 +138,22 @@ The slug is additive: it never replaces the random token. With no `--name` (or a
 empty-after-sanitize one), behavior is exactly the random-token default. `--name` (the
 slug, which names the instance and the session) is distinct from `--label` (a freeform
 alias recorded only on the mapping).
+
+**The `+` config|slug separator.** A `+` joins the config name to the slug -- the
+boundary is `<config>+<slug>`, not `<config>-<slug>`. The reason: a config (workspace)
+name is validated by `NamePattern = ^[a-zA-Z0-9._-]+$`, so it may itself contain `.`,
+`-`, and `_`. None of those can mark the config|slug boundary unambiguously, because a
+reader (or a parser) cannot tell whether a `-` belongs to the config name or separates it
+from the slug. `+` is filesystem-safe and shell-safe, and is excluded from `NamePattern`,
+from the slug charset `[a-z0-9_]`, and from hex -- so it appears exactly once in the name,
+marking the boundary unambiguously. Crucially, `+` is used ONLY when a user slug is
+present. The un-named dispatch keeps the `-` join (`<config>-disp-<8hex>`), so the
+`-disp-<8hex>` reaper signature is byte-identical to before for the no-slug case; in the
+named case the `-disp-<8hex>` suffix sits between the slug and the hex
+(`<config>+<slug>-disp-<8hex>`), so the end-anchored `isDispatchInstanceName` regex still
+matches both forms. The same `+` separator is used by `niwa create --name` (producing
+`<config>+<slug>`); hook-created and numbered instances (`<config>-<sessionhex>`,
+`<config>-2`) keep the `-` join, unchanged.
 
 ### D3 -- Session-identity capture
 

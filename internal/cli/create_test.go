@@ -15,7 +15,7 @@ import (
 func TestComputeInstanceName_FirstInstance(t *testing.T) {
 	dir := t.TempDir()
 
-	name, err := computeInstanceName("tsuku", "", dir)
+	name, err := computeInstanceName("tsuku", "", "-", dir)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -48,7 +48,7 @@ func TestComputeInstanceName_SubsequentInstance(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	name, err := computeInstanceName("tsuku", "", dir)
+	name, err := computeInstanceName("tsuku", "", "-", dir)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -60,25 +60,25 @@ func TestComputeInstanceName_SubsequentInstance(t *testing.T) {
 func TestComputeInstanceName_CustomName(t *testing.T) {
 	dir := t.TempDir()
 
-	name, err := computeInstanceName("tsuku", "hotfix", dir)
+	name, err := computeInstanceName("tsuku", "hotfix", "+", dir)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if name != "tsuku-hotfix" {
-		t.Errorf("expected %q, got %q", "tsuku-hotfix", name)
+	if name != "tsuku+hotfix" {
+		t.Errorf("expected %q, got %q", "tsuku+hotfix", name)
 	}
 }
 
 func TestComputeInstanceName_CustomNameIgnoresExisting(t *testing.T) {
 	dir := t.TempDir()
 
-	// Even if no instances exist, --name always produces config-name.
-	name, err := computeInstanceName("tsuku", "dev", dir)
+	// Even if no instances exist, --name always produces config<sep>name.
+	name, err := computeInstanceName("tsuku", "dev", "+", dir)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if name != "tsuku-dev" {
-		t.Errorf("expected %q, got %q", "tsuku-dev", name)
+	if name != "tsuku+dev" {
+		t.Errorf("expected %q, got %q", "tsuku+dev", name)
 	}
 }
 
@@ -92,7 +92,7 @@ func TestComputeInstanceName_DirExistsWithoutState(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	name, err := computeInstanceName("tsuku", "", dir)
+	name, err := computeInstanceName("tsuku", "", "-", dir)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -131,7 +131,7 @@ func TestComputeInstanceName_SkipsNonInstanceDir(t *testing.T) {
 	}
 
 	// computeInstanceName should skip tsuku-2 and return tsuku-3.
-	name, err := computeInstanceName("tsuku", "", dir)
+	name, err := computeInstanceName("tsuku", "", "-", dir)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -145,17 +145,18 @@ func TestComputeInstanceName_SkipsNonInstanceDir(t *testing.T) {
 // the sanitize -> computeInstanceName composition runCreate performs: spaces and
 // punctuation collapse to underscores, user-typed dashes also collapse to
 // underscores (so the slug stays dash-free), and uppercase is lowercased, so the
-// composed instance name is "<config>-<slug>".
+// composed instance name is "<config>+<slug>" (the "+" marks the config|slug
+// boundary; the underscore is the slug's own word separator).
 func TestCreateName_SanitizedIntoSlug(t *testing.T) {
 	cases := []struct {
 		name string
 		in   string
 		want string
 	}{
-		{"spaces and punctuation", "My Feature!", "tsuku-my_feature"},
-		{"already a clean slug", "hotfix", "tsuku-hotfix"},
-		{"uppercase lowercased", "Hotfix", "tsuku-hotfix"},
-		{"user-typed dash collapses to underscore", "auth-layer", "tsuku-auth_layer"},
+		{"spaces and punctuation", "My Feature!", "tsuku+my_feature"},
+		{"already a clean slug", "hotfix", "tsuku+hotfix"},
+		{"uppercase lowercased", "Hotfix", "tsuku+hotfix"},
+		{"user-typed dash collapses to underscore", "auth-layer", "tsuku+auth_layer"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -164,7 +165,7 @@ func TestCreateName_SanitizedIntoSlug(t *testing.T) {
 			if slug == "" {
 				t.Fatalf("sanitizeInstanceSlug(%q) returned empty, expected a usable slug", tc.in)
 			}
-			got, err := computeInstanceName("tsuku", slug, dir)
+			got, err := computeInstanceName("tsuku", slug, "+", dir)
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
