@@ -57,6 +57,12 @@ type SessionMapping struct {
 	// session topic. It is metadata only and is never used to rename the
 	// on-disk instance directory. omitempty keeps it absent when unset.
 	Label string `json:"label,omitempty"`
+	// Origin records which write path produced this mapping. The dispatch
+	// command sets it to "dispatch"; hook-written and developer-written
+	// mappings leave it absent, which decodes to "". It is informational
+	// provenance only -- the reaper ignores it, so reclamation eligibility
+	// is unchanged. omitempty keeps legacy mappings byte-identical.
+	Origin string `json:"origin,omitempty"`
 }
 
 // sessionsDir returns the workspace-root session mapping directory,

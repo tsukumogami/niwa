@@ -93,10 +93,13 @@ type provisionResult struct {
 }
 
 // provisionInstanceFunc provisions an ephemeral instance for the given session
-// under workspaceRoot, naming it from namePrefix (the `--name` suffix). It
-// returns the created instance's name and absolute path. It is a package
-// variable so tests can substitute a fake provisioner that does no clone,
-// exercising the guard + mapping + injection logic in isolation.
+// under workspaceRoot, naming it from namePrefix (the `--name` suffix) joined
+// to the config name with sep. The hook path passes "-" (so the hook-created
+// name stays byte-identical to before); the dispatch path passes "+" when a
+// user slug is present so the config|slug boundary is unambiguous. It returns
+// the created instance's name and absolute path. It is a package variable so
+// tests can substitute a fake provisioner that does no clone, exercising the
+// guard + mapping + injection logic in isolation.
 var provisionInstanceFunc = realProvisionInstance
 
 // destroyInstanceFunc force-destroys the instance at instancePath. It is a
@@ -156,7 +159,10 @@ func runInstanceHookStart(cmd *cobra.Command, payload instanceHookPayload, jobsD
 	}
 
 	namePrefix := payload.SessionID[:sessionNamePrefixLen]
-	res, err := provisionInstanceFunc(cmd.Context(), workspaceRoot, payload.Cwd, namePrefix)
+	// The hook joins the session-hex suffix with "-" so the provisioned name
+	// stays "<config>-<sessionhex>", byte-identical to the pre-"+"-separator
+	// behavior. "+" is reserved for user-supplied dispatch slugs.
+	res, err := provisionInstanceFunc(cmd.Context(), workspaceRoot, payload.Cwd, namePrefix, "-")
 	if err != nil {
 		return fmt.Errorf("niwa: error: provisioning instance for session %s: %w", payload.SessionID, err)
 	}
@@ -359,9 +365,10 @@ func resolveHookWorkspaceRoot(cwd string) (string, bool) {
 
 // realProvisionInstance is the production provisioner: it reuses the same
 // applier.Create path `niwa create --json --name <prefix>` drives, cloning an
-// instance under workspaceRoot named <config>-<prefix>. It is wired into
+// instance under workspaceRoot named <config><sep><prefix>. sep is "-" for the
+// hook path and "+" for a user-supplied dispatch slug. It is wired into
 // provisionInstanceFunc; tests override that variable to avoid a real clone.
-func realProvisionInstance(ctx context.Context, workspaceRoot, cwd, namePrefix string) (provisionResult, error) {
+func realProvisionInstance(ctx context.Context, workspaceRoot, cwd, namePrefix, sep string) (provisionResult, error) {
 	configPath, configDir, err := config.Discover(cwd)
 	if err != nil {
 		return provisionResult{}, fmt.Errorf("discovering workspace config from %q: %w", cwd, err)
@@ -378,7 +385,7 @@ func realProvisionInstance(ctx context.Context, workspaceRoot, cwd, namePrefix s
 		return provisionResult{}, err
 	}
 
-	instanceName, err := computeInstanceName(configName, namePrefix, workspaceRoot)
+	instanceName, err := computeInstanceName(configName, namePrefix, sep, workspaceRoot)
 	if err != nil {
 		return provisionResult{}, err
 	}

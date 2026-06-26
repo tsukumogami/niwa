@@ -3,6 +3,7 @@ package workspace
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -130,5 +131,76 @@ func TestDeleteSessionMapping_MissingIsNoError(t *testing.T) {
 	root := t.TempDir()
 	if err := DeleteSessionMapping(root, testSessionID); err != nil {
 		t.Errorf("deleting a missing mapping should be a no-op, got %v", err)
+	}
+}
+
+// TestSessionMapping_OriginRoundTrip verifies the additive Origin field
+// persists and reads back unchanged.
+func TestSessionMapping_OriginRoundTrip(t *testing.T) {
+	root := t.TempDir()
+
+	m := SessionMapping{
+		SessionID:    testSessionID,
+		InstanceName: "tsuku-disp-deadbeef",
+		InstancePath: filepath.Join(root, "tsuku-disp-deadbeef"),
+		Ephemeral:    true,
+		Origin:       "dispatch",
+	}
+	if err := WriteSessionMapping(root, m); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	got, err := ReadSessionMapping(root, testSessionID)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if got.Origin != "dispatch" {
+		t.Errorf("Origin = %q, want %q", got.Origin, "dispatch")
+	}
+}
+
+// TestSessionMapping_LegacyDecodesEmptyOrigin verifies a mapping JSON written
+// before the Origin field existed (no "origin" key) decodes with Origin == ""
+// and is otherwise intact -- the back-compat guarantee.
+func TestSessionMapping_LegacyDecodesEmptyOrigin(t *testing.T) {
+	root := t.TempDir()
+
+	// Hand-write a legacy mapping with no "origin" key, mirroring what an
+	// older niwa or the hook path would have produced.
+	dir := filepath.Join(root, ".niwa", "sessions")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	legacy := `{
+  "session_id": "` + testSessionID + `",
+  "instance_name": "tsuku-legacy",
+  "instance_path": "/tmp/tsuku-legacy",
+  "ephemeral": true
+}`
+	if err := os.WriteFile(filepath.Join(dir, testSessionID+".json"), []byte(legacy), 0o600); err != nil {
+		t.Fatalf("write legacy: %v", err)
+	}
+
+	got, err := ReadSessionMapping(root, testSessionID)
+	if err != nil {
+		t.Fatalf("read legacy: %v", err)
+	}
+	if got.Origin != "" {
+		t.Errorf("legacy Origin = %q, want empty", got.Origin)
+	}
+	if got.SessionID != testSessionID || got.InstanceName != "tsuku-legacy" || !got.Ephemeral {
+		t.Errorf("legacy mapping decoded unexpectedly: %+v", got)
+	}
+
+	// And it still round-trips: re-writing and re-reading preserves the
+	// (empty) Origin without emitting an "origin" key.
+	if err := WriteSessionMapping(root, got); err != nil {
+		t.Fatalf("rewrite: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, testSessionID+".json"))
+	if err != nil {
+		t.Fatalf("reread file: %v", err)
+	}
+	if strings.Contains(string(data), "origin") {
+		t.Errorf("rewritten legacy mapping should omit the origin key, got:\n%s", data)
 	}
 }

@@ -1,13 +1,35 @@
 package workspace
 
 import (
+	"embed"
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 
 	"github.com/tsukumogami/niwa/internal/config"
 )
+
+// rootSkillsFS embeds the workspace-root project skills tree
+// (internal/workspace/rootskills). Each rootskills/<name>/SKILL.md is
+// materialized as a project skill under <workspaceRoot>/.claude/skills/<name>/
+// so a Claude Code session launched at the workspace root loads it from the cwd
+// regardless of plugin enablement (plugins are not enabled at the root today).
+//
+//go:embed rootskills
+var rootSkillsFS embed.FS
+
+// rootSkillsDir is the embedded directory holding the workspace-root project
+// skills, and also the path prefix walked within rootSkillsFS.
+const rootSkillsDir = "rootskills"
+
+// rootSkillsTargetDir is the subdirectory under <workspaceRoot>/.claude where
+// project skills are installed.
+const rootSkillsTargetDir = "skills"
+
+// rootSkillFileName is the per-skill manifest file Claude Code loads.
+const rootSkillFileName = "SKILL.md"
 
 // rootClaudeDir is the workspace-root managed config directory. The
 // workspace root is a non-git directory above the instances, so the
@@ -99,6 +121,59 @@ func MaterializeWorkspaceRoot(cfg *config.WorkspaceConfig, workspaceRoot string,
 	}
 	written = append(written, claudePath)
 
+	skillPaths, err := writeRootSkills(workspaceRoot)
+	if err != nil {
+		return nil, err
+	}
+	written = append(written, skillPaths...)
+
+	return written, nil
+}
+
+// writeRootSkills materializes the embedded rootskills tree as project skills
+// under <workspaceRoot>/.claude/skills/. For each rootskills/<name>/SKILL.md it
+// writes <workspaceRoot>/.claude/skills/<name>/SKILL.md. Project skills are
+// loaded by Claude Code from the cwd's .claude/skills tree regardless of plugin
+// enablement, so installing them here makes the skill available at the
+// workspace root without depending on plugin loading.
+//
+// The walk is generic: every <name>/SKILL.md under the embedded tree is picked
+// up, so adding a new root skill needs no change here. The writes are plain
+// overwrites — the content is static, so re-running is idempotent. Returns the
+// list of written absolute paths.
+func writeRootSkills(workspaceRoot string) ([]string, error) {
+	skillsRoot := filepath.Join(workspaceRoot, rootClaudeDir, rootSkillsTargetDir)
+
+	var written []string
+	walkErr := fs.WalkDir(rootSkillsFS, rootSkillsDir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() || d.Name() != rootSkillFileName {
+			return nil
+		}
+		// path is rootskills/<name>/SKILL.md; the skill name is the parent dir.
+		name := filepath.Base(filepath.Dir(path))
+
+		data, readErr := rootSkillsFS.ReadFile(path)
+		if readErr != nil {
+			return fmt.Errorf("reading embedded root skill %q: %w", path, readErr)
+		}
+
+		skillDir := filepath.Join(skillsRoot, name)
+		if mkErr := os.MkdirAll(skillDir, 0o755); mkErr != nil {
+			return fmt.Errorf("creating workspace-root skill directory %q: %w", skillDir, mkErr)
+		}
+		skillPath := filepath.Join(skillDir, rootSkillFileName)
+		if wErr := os.WriteFile(skillPath, data, 0o644); wErr != nil {
+			return fmt.Errorf("writing workspace-root skill %q: %w", skillPath, wErr)
+		}
+		written = append(written, skillPath)
+		return nil
+	})
+	if walkErr != nil {
+		return nil, fmt.Errorf("installing workspace-root skills: %w", walkErr)
+	}
 	return written, nil
 }
 
@@ -199,6 +274,16 @@ cloned repos.
 - ` + "`niwa list`" + ` enumerates the instances; ` + "`niwa create`" + ` provisions a new one.
 - Run niwa commands from the root to manage the workspace as a whole, or from
   inside an instance to operate on that instance.
+
+## Dispatching work to an isolated agent
+
+When you have been discussing what to build and are ready to hand the work off to
+run on its own, invoke the ` + "`/dispatch`" + ` skill. It synthesizes the conversation
+into a self-contained task brief and launches a background worker in its own fresh
+niwa instance via ` + "`niwa dispatch`" + ` -- the worker boots rooted in that instance
+(loading its full configuration) and appears in Agent View. The underlying command is
+` + "`niwa dispatch \"<task>\" --name <slug> [--detach]`" + `; ` + "`/dispatch`" + ` is the
+front door that writes the brief and runs it for you.
 
 ## Ephemeral sessions
 

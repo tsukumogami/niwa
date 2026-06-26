@@ -1,4 +1,4 @@
-.PHONY: build test build-test test-functional test-functional-critical test-functional-claude-integration test-install clean
+.PHONY: build test build-test test-functional test-functional-critical test-functional-claude-integration test-install test-live clean
 
 # Build the niwa binary.
 build:
@@ -38,6 +38,15 @@ test-functional-claude-integration: build-test
 test-install: build-test
 	NIWA_TEST_BINARY=$(CURDIR)/niwa-test NIWA_TEST_PATHS=features/install-integration.feature go test -v ./test/functional/...
 	rm -rf .niwa-test
+
+# Run the gated live dispatch lifecycle test. It is behind the `live` build tag
+# and runs the REAL claude lifecycle (init -> dispatch -> assert instance +
+# session -> stop -> reap -> assert destroyed), so it executes only on a machine
+# with a usable `claude` and a local subscription. The test skips itself when no
+# `claude` is on PATH, and -count=1 defeats Go's test cache so a live run is
+# never served from a cached result.
+test-live:
+	go test -tags live -count=1 -v ./test/live/...
 
 clean:
 	rm -f niwa niwa-test

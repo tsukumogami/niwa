@@ -22,8 +22,9 @@ func materializeRoot(t *testing.T, cfg *config.WorkspaceConfig, opts RootMateria
 	if err != nil {
 		t.Fatalf("MaterializeWorkspaceRoot: %v", err)
 	}
-	if len(written) != 2 {
-		t.Fatalf("expected 2 written files (settings.json + CLAUDE.md), got %d: %v", len(written), written)
+	// settings.json + CLAUDE.md + at least one project skill (dispatch).
+	if len(written) < 3 {
+		t.Fatalf("expected >= 3 written files (settings.json + CLAUDE.md + skills), got %d: %v", len(written), written)
 	}
 
 	settingsPath := filepath.Join(root, rootClaudeDir, rootSettingsFile)
@@ -138,6 +139,47 @@ func TestMaterializeWorkspaceRoot_ClaudeMD(t *testing.T) {
 	}
 	if !strings.Contains(content, "multi-repo workspace managed by niwa") {
 		t.Errorf("root CLAUDE.md missing workspace-context orientation; got:\n%s", content)
+	}
+}
+
+func TestMaterializeWorkspaceRoot_DispatchSkill(t *testing.T) {
+	cfg := &config.WorkspaceConfig{Workspace: config.WorkspaceMeta{Name: "ws"}}
+	root := t.TempDir()
+	written, err := MaterializeWorkspaceRoot(cfg, root, RootMaterializeOptions{
+		NiwaPath:             "/abs/niwa",
+		EphemeralSessionMode: true,
+	})
+	if err != nil {
+		t.Fatalf("MaterializeWorkspaceRoot: %v", err)
+	}
+
+	skillPath := filepath.Join(root, rootClaudeDir, "skills", "dispatch", "SKILL.md")
+	data, err := os.ReadFile(skillPath)
+	if err != nil {
+		t.Fatalf("reading dispatch SKILL.md: %v", err)
+	}
+	content := string(data)
+
+	if !strings.HasPrefix(content, "---") {
+		t.Errorf("dispatch SKILL.md should start with YAML frontmatter; got:\n%s", content[:min(80, len(content))])
+	}
+	if !strings.Contains(content, "name: dispatch") {
+		t.Errorf("dispatch SKILL.md missing 'name: dispatch' frontmatter")
+	}
+	if !strings.Contains(content, "# /dispatch") {
+		t.Errorf("dispatch SKILL.md missing '# /dispatch' heading")
+	}
+
+	// The written paths slice must include the installed skill path.
+	found := false
+	for _, p := range written {
+		if p == skillPath {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("returned paths %v do not include dispatch skill path %q", written, skillPath)
 	}
 }
 

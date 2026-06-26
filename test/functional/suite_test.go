@@ -48,6 +48,11 @@ type testState struct {
 	// worktree at snapshot time, so a later step can assert an idempotent
 	// re-apply produced no spurious change. Keyed by worktree-relative path.
 	worktreeFileSnapshots map[string]string
+
+	// lastDispatchInstancePath records the disp-<hex> instance directory
+	// discovered after a `niwa dispatch` run, so later steps can assert its
+	// presence/absence without hardcoding the random name suffix.
+	lastDispatchInstancePath string
 }
 
 func getState(ctx context.Context) *testState {
@@ -201,6 +206,8 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 	ctx.Step(`^I pre-create directory "([^"]*)"$`, iPreCreateDirectory)
 	ctx.Step(`^the registry already has workspace "([^"]*)" rooted at "([^"]*)"$`, iRegisterWorkspaceAt)
 	ctx.Step(`^the workspace root "([^"]*)" has a workspace\.toml$`, theWorkspaceRootHasWorkspaceTOML)
+	ctx.Step(`^the file "([^"]*)" exists under workspace root "([^"]*)"$`, theFileExistsUnderWorkspaceRoot)
+	ctx.Step(`^the file "([^"]*)" under workspace root "([^"]*)" contains "([^"]*)"$`, theFileUnderWorkspaceRootContains)
 	ctx.Step(`^the registry has workspace "([^"]*)" rooted at "([^"]*)"$`, theRegistryHasWorkspaceRootedAt)
 	ctx.Step(`^the registry entry "([^"]*)" still points at "([^"]*)"$`, theRegistryHasWorkspaceRootedAt)
 	ctx.Step(`^niwa go "([^"]*)" from outside lands in "([^"]*)"$`, niwaGoFromOutsideLandsIn)
@@ -314,6 +321,10 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 	// --- ephemeral-session integration: instance from-hook provision/teardown
 	// and the orphan reaper, driven against the offline localGitServer ---
 	registerEphemeralSessionSteps(ctx)
+
+	// --- dispatch lifecycle: niwa dispatch provision/rollback and reaper
+	// reclamation, driven offline against the localGitServer with a fake claude ---
+	registerDispatchSteps(ctx)
 
 	// --- Init-bootstrap harness extensions (Issue 5) ---
 	// GitHub tarball fake — spun up lazily per scenario; backed by the

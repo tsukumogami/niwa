@@ -20,25 +20,44 @@ const jobLivenessTTL = 30 * time.Minute
 // jobState is the subset of ~/.claude/jobs/<id>/state.json niwa reads. The dir
 // name is the session-id prefix; the full SessionID inside confirms the match.
 //
-// Two distinct consumers read this file:
+// Three distinct consumers read this file:
 //   - the SessionStart guard (instance_from_hook.go) keys on Template == "bg"
 //     to confirm a dispatched background worker.
 //   - the reaper (reap.go) keys on State / UpdatedAt to decide liveness.
+//   - the dispatch capture path (dispatch_capture.go) keys on Cwd to correlate a
+//     launched worker to its instance directory and recover its session id.
 //
 // state.json is an undocumented internal Claude Code file, so absent fields
 // decode to their zero value and every reader fails safe on a miss.
 type jobState struct {
-	SessionID string    `json:"sessionId"`
-	Template  string    `json:"template"`
-	State     string    `json:"state"`
+	SessionID string `json:"sessionId"`
+	Template  string `json:"template"`
+	State     string `json:"state"`
+	// Cwd is the working directory the background worker launched in. The
+	// dispatch identity-capture path (dispatch_capture.go) correlates a
+	// launched worker to its instance by matching this against the unique
+	// instance directory. Absent decodes to "".
+	Cwd       string    `json:"cwd"`
 	UpdatedAt time.Time `json:"updatedAt"`
+	// FirstTerminalAt is the timestamp Claude Code stamps when the session first
+	// reaches a terminal condition, regardless of the specific terminal `state`
+	// label. It is the authoritative "this session has ended" signal: the reaper
+	// treats a non-zero value as terminal (see sessionLive), so a session that
+	// has ended is recognized even when its `state` label is not in
+	// terminalJobStates below. Absent decodes to the zero time.
+	FirstTerminalAt time.Time `json:"firstTerminalAt"`
 }
 
 // terminalJobStates is the set of job `state` values that mean the session has
 // ended. The exact vocabulary of state.json is undocumented, so this set is
-// matched case-insensitively and kept deliberately broad. A state value not in
-// this set is treated as non-terminal (still running), so the TTL is the
-// backstop for any unrecognized terminal label.
+// matched case-insensitively and kept deliberately broad (it includes
+// "stopped", the label `claude stop` produces). It is the SECONDARY terminal
+// signal -- the primary, authoritative one is a non-zero FirstTerminalAt, which
+// covers every ended session including these labels. This set is the fallback
+// for a state.json that records a terminal `state` without a FirstTerminalAt;
+// the two are intentionally redundant for the labels listed here, so neither
+// should be removed on the assumption the other always covers it. A state in
+// neither path is treated as non-terminal, with the TTL as the final backstop.
 var terminalJobStates = map[string]bool{
 	"completed": true,
 	"complete":  true,
@@ -52,6 +71,8 @@ var terminalJobStates = map[string]bool{
 	"timeout":   true,
 	"timedout":  true,
 	"killed":    true,
+	"stopped":   true,
+	"stop":      true,
 }
 
 // defaultJobsDir returns the Claude Code jobs directory (~/.claude/jobs). A
@@ -97,6 +118,13 @@ func sessionLive(jobsDir, sessionID string, now time.Time) bool {
 	// mistaken for this session. A recorded mismatch means this is not our job
 	// (treat as dead for our session).
 	if js.SessionID != "" && js.SessionID != sessionID {
+		return false
+	}
+	// Authoritative terminal signal: Claude Code stamps firstTerminalAt the
+	// moment the session ends, whatever the terminal `state` label. This catches
+	// a terminal session even when its label is not in terminalJobStates (the
+	// enumerated set is the secondary, fallback signal checked below).
+	if !js.FirstTerminalAt.IsZero() {
 		return false
 	}
 	if terminalJobStates[strings.ToLower(strings.TrimSpace(js.State))] {
