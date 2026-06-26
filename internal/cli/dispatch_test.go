@@ -647,10 +647,20 @@ func TestSanitizeInstanceSlug_CapsLength(t *testing.T) {
 
 // assertSlugShape asserts a slug only ever contains [a-z0-9_], never a dash, and
 // never leads or trails with an underscore (an empty slug is allowed).
+//
+// The dash-free property is LOAD-BEARING for isDispatchInstanceName: the dispatch
+// signature regex ("\+[a-z0-9_]*-[0-9a-f]{8}$") treats the "-" before the 8 hex
+// as the sole dash after the "+". If a slug could contain a dash, that structural
+// signature would be ambiguous. This helper pins the invariant.
 func assertSlugShape(t *testing.T, slug string) {
 	t.Helper()
 	if slug == "" {
 		return
+	}
+	// Explicit dash check first: this is the invariant isDispatchInstanceName
+	// depends on, so assert it unambiguously rather than only via the charset loop.
+	if strings.Contains(slug, "-") {
+		t.Fatalf("slug %q must NEVER contain a dash (isDispatchInstanceName's structural signature relies on slugs being dash-free)", slug)
 	}
 	for _, r := range slug {
 		if !((r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_') {
@@ -664,7 +674,7 @@ func assertSlugShape(t *testing.T, slug string) {
 
 // TestDispatch_Name_SlugInInstanceAndSession verifies that --name "My Thing"
 // (1) produces an instance name that contains the underscore slug AND still ends
-// with the "-disp-<8hex>" signature isDispatchInstanceName recognizes (the
+// with the structural "-<8hex>" signature isDispatchInstanceName recognizes (the
 // end-anchored regex is unaffected by underscores inside the slug), and (2)
 // forwards "--name my_thing" to the launched worker.
 func TestDispatch_Name_SlugInInstanceAndSession(t *testing.T) {
@@ -697,29 +707,32 @@ func TestDispatch_Name_SlugInInstanceAndSession(t *testing.T) {
 	if !strings.Contains(gotName, "my_thing") {
 		t.Errorf("instance name %q should contain the slug %q", gotName, "my_thing")
 	}
-	// The config name and slug are joined with "+", so the full shape is
-	// "<config>+<slug>-disp-<8hex>".
-	if !regexp.MustCompile(`^test-ws\+my_thing-disp-[0-9a-f]{8}$`).MatchString(gotName) {
-		t.Errorf("instance name %q should be <config>+my_thing-disp-<8hex>", gotName)
+	// The config name and slug are joined with "+", and the suffix ends in the
+	// mandatory "-<8hex>", so the full shape is "<config>+<slug>-<8hex>".
+	if !regexp.MustCompile(`^test-ws\+my_thing-[0-9a-f]{8}$`).MatchString(gotName) {
+		t.Errorf("instance name %q should be <config>+my_thing-<8hex>", gotName)
 	}
 	if !isDispatchInstanceName(gotName) {
-		t.Errorf("instance name %q must still match isDispatchInstanceName (preserve the -disp-<8hex> signature)", gotName)
+		t.Errorf("instance name %q must still match isDispatchInstanceName (preserve the +<slug>-<8hex> signature)", gotName)
 	}
 	if !dispatchInstanceNameRe.MatchString(gotName) {
-		t.Errorf("instance name %q must still end with -disp-<8hex>", gotName)
+		t.Errorf("instance name %q must still end with -<8hex> after a +slug", gotName)
 	}
-	// The end-anchored "disp-<8hex>" regex ("[-+]disp-[0-9a-f]{8}$") matches both
-	// dispatch forms: the no-name "<config>+disp-<8hex>" (where "+" precedes
-	// "disp") and the named "<config>+<slug>-disp-<8hex>" (where the slug<->disp
-	// "-" precedes "disp"). It still excludes hook-shaped, create-shaped, and
-	// developer instance names.
+	// The dispatch signature is purely structural (regex "\+[a-z0-9_]*-[0-9a-f]{8}$"):
+	// a "+", an optional dash-free slug, a "-", then exactly 8 hex. It matches both
+	// the no-name "<config>+-<8hex>" and the named "<config>+<slug>-<8hex>", and
+	// excludes hook-, create-, and developer-shaped names. The create-with-a-
+	// hex-shaped-slug case ("tsuku+deadbeef") is the critical FALSE: it proves a
+	// named-create cannot masquerade as dispatch, because its slug is dash-free so
+	// there is no "-" before the hex.
 	matches := map[string]bool{
-		"tsuku+disp-deadbeef":          true,  // no-name dispatch
-		"tsuku+my_thing-disp-deadbeef": true,  // named dispatch
-		"tsuku-9333f04fbe4e":           false, // hook-shaped (<config>-<sessionhex>)
-		"tsuku+my_feature":             false, // create-shaped (<config>+<slug>, no disp-<hex>)
-		"tsuku-2":                      false, // developer numbered instance
-		"tsuku":                        false, // first developer instance
+		"tsuku+-deadbeef":         true,  // no-name dispatch (<config>+-<8hex>)
+		"tsuku+my_thing-4e33acfa": true,  // named dispatch (<config>+<slug>-<8hex>)
+		"tsuku":                   false, // create first instance
+		"tsuku-2":                 false, // developer numbered instance
+		"tsuku+my_feature":        false, // create --name (<config>+<slug>, no -<8hex>)
+		"tsuku+deadbeef":          false, // create --name with a HEX-SHAPED slug (no "-" before hex)
+		"tsuku-9333f04fbe4e":      false, // hook 12-hex (<config>-<sessionhex>, no "+")
 	}
 	for name, want := range matches {
 		if got := isDispatchInstanceName(name); got != want {
@@ -733,7 +746,7 @@ func TestDispatch_Name_SlugInInstanceAndSession(t *testing.T) {
 }
 
 // TestDispatch_NoName_NoSlugNoNameFlag verifies that without --name the instance
-// name carries no slug (it is exactly "<config>+disp-<8hex>") and no "--name" is
+// name carries no slug (it is exactly "<config>+-<8hex>") and no "--name" is
 // forwarded to the worker -- the original behavior, unchanged.
 func TestDispatch_NoName_NoSlugNoNameFlag(t *testing.T) {
 	root := setupDispatchWorkspace(t)
@@ -761,10 +774,10 @@ func TestDispatch_NoName_NoSlugNoNameFlag(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// With config "test-ws" and no slug, the shape is "test-ws+disp-<8hex>" --
-	// "+" is the universal end-of-config marker for dispatch instances.
-	if !regexp.MustCompile(`^test-ws\+disp-[0-9a-f]{8}$`).MatchString(gotName) {
-		t.Errorf("instance name %q should be exactly <config>+disp-<8hex> with no slug", gotName)
+	// With config "test-ws" and no slug, the shape is "test-ws+-<8hex>" -- "+" is
+	// the end-of-config marker, immediately followed by the suffix's "-<8hex>".
+	if !regexp.MustCompile(`^test-ws\+-[0-9a-f]{8}$`).MatchString(gotName) {
+		t.Errorf("instance name %q should be exactly <config>+-<8hex> with no slug", gotName)
 	}
 	for i, a := range gotPass {
 		if a == "--name" {
@@ -803,8 +816,8 @@ func TestDispatch_NameSanitizesEmpty_FallsBack(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if !regexp.MustCompile(`^test-ws\+disp-[0-9a-f]{8}$`).MatchString(gotName) {
-		t.Errorf("an empty-sanitizing --name must fall back; name %q should be <config>+disp-<8hex>", gotName)
+	if !regexp.MustCompile(`^test-ws\+-[0-9a-f]{8}$`).MatchString(gotName) {
+		t.Errorf("an empty-sanitizing --name must fall back; name %q should be <config>+-<8hex>", gotName)
 	}
 	for i, a := range gotPass {
 		if a == "--name" {

@@ -114,7 +114,7 @@ short id, so either form `claude attach` accepts is available.
 ### D2 -- Concurrency-safe instance naming
 
 Options: the existing numbered scan; a timestamp suffix; a random token. **Chosen: name
-the instance `<config>+disp-<8 random hex>` and pass it through the existing
+the instance `<config>+-<8 random hex>` and pass it through the existing
 `--name`/`customName` create branch**, which bypasses the racy numbered scan entirely.
 A random token is collision-safe under concurrency without any lock and reads clearly in
 `niwa list` as a dispatch-created instance. Rejected: the numbered scan (TOCTOU, the
@@ -125,38 +125,45 @@ same instant).
 passes `--name <raw>`, it is sanitized into a slug (lowercase, runs of characters outside
 `[a-z0-9]` collapsed to single underscores, trimmed, length-capped; empty result falls
 back to no slug) and used two ways: it is inserted into the instance name BEFORE the
-signature suffix -- `<config>+<slug>-disp-<8 random hex>` -- and it is forwarded to the
-session as
+mandatory `-<8 random hex>` suffix -- `<config>+<slug>-<8 random hex>` -- and it is
+forwarded to the session as
 `claude --bg --name <slug>` so the Claude session carries a human display name in Agent
 View. The separator inside the slug is an underscore, so the slug is dash-free
 (`"My Feature!"` -> `my_feature`, and even a user-typed dash collapses: `"auth-layer"` ->
-`auth_layer`); this keeps dashes purely structural in `<config>+<slug>-disp-<8hex>`. The
-random 8-hex is always kept, so the `disp-<8hex>` end-anchored signature the
-reaper backstop matches (`isDispatchInstanceName`, regex `[-+]disp-[0-9a-f]{8}$`) is
-preserved and concurrency stays collision-safe even when two dispatches share a `--name`.
-The slug is additive: it never replaces the random token. With no `--name` (or an
+`auth_layer`); this dash-free property is load-bearing (see below). The random 8-hex is
+always kept, so the structural signature the reaper backstop matches
+(`isDispatchInstanceName`, regex `\+[a-z0-9_]*-[0-9a-f]{8}$`) is preserved and
+concurrency stays collision-safe even when two dispatches share a `--name`. The slug is
+additive: it never replaces the random token. With no `--name` (or an
 empty-after-sanitize one), behavior is exactly the random-token default. `--name` (the
 slug, which names the instance and the session) is distinct from `--label` (a freeform
 alias recorded only on the mapping).
 
-**The `+` end-of-config marker.** A `+` always marks the end of the config name in a
-dispatch instance name -- the no-name dispatch is `<config>+disp-<8hex>` and the named one
-is `<config>+<slug>-disp-<8hex>`. `+` is the UNIVERSAL marker for every dispatch
-instance, present whether or not a slug is supplied. The reason: a config (workspace) name
-is validated by `NamePattern = ^[a-zA-Z0-9._-]+$`, so it may itself contain `.`, `-`, and
-`_`. None of those can mark the config boundary unambiguously, because a reader (or a
-parser) cannot tell whether a `-` belongs to the config name or separates it from what
-follows. `+` is filesystem-safe and shell-safe, and is excluded from `NamePattern`, from
-the slug charset `[a-z0-9_]`, and from hex -- so it appears exactly once in the name,
-marking the boundary unambiguously. The reaper signature regex is
-`[-+]disp-[0-9a-f]{8}$`: the `[-+]` class accepts either the `+` (no-slug case, where `+`
-sits directly before `disp`) or the `-` (named case, where the `-` comes from the
-slug<->`disp` join), while still requiring the `disp-<8hex>` signature so a create
-instance (`<config>+<slug>`, no `disp-<hex>`), a hook-created instance
-(`<config>-<sessionhex>`, no `disp-` segment), and a developer instance (`<config>`,
-`<config>-2`) are never matched. The same `+` separator is used by `niwa create --name`
-(producing `<config>+<slug>`); hook-created and numbered instances keep the `-` join,
-unchanged.
+**The dispatch signature is purely structural -- there is no `disp` literal.** Earlier
+iterations embedded a literal `disp-` segment in the name; that has been DROPPED. The
+naming already encodes "this is a dispatch instance" via three structural facts: (1) a `+`
+marks the end of the config name; (2) a mandatory `-<8hex>` tail always terminates the
+name; and (3) the slug between them is dash-free. So the no-name dispatch is
+`<config>+-<8hex>` (the `+` and the suffix's `-` sit adjacent) and the named one is
+`<config>+<slug>-<8hex>`, and `isDispatchInstanceName` keys on the regex
+`\+[a-z0-9_]*-[0-9a-f]{8}$`: a `+`, an optional dash-free slug, a `-`, then exactly 8
+lowercase hex at the end.
+
+Why `+`: a config (workspace) name is validated by `NamePattern = ^[a-zA-Z0-9._-]+$`, so
+it may itself contain `.`, `-`, and `_`. None of those can mark the config boundary
+unambiguously. `+` is filesystem-safe and shell-safe, and is excluded from `NamePattern`,
+from the slug charset `[a-z0-9_]`, and from hex -- so it appears exactly once in the name.
+Why the `disp` literal is unnecessary: the predicate depends on two invariants, both
+pinned by tests. **(a)** Slugs are dash-free (`sanitizeInstanceSlug` collapses every dash
+to `_`), so the `-` immediately before the 8 hex is the SOLE dash after the `+`. **(b)**
+`create --name` appends no trailing `-<8hex>` -- its instance is just `<config>+<slug>` --
+so a named-create can never present this structure (even a hex-shaped slug like
+`<config>+deadbeef` lacks the `-` before the hex). Together these exclude a create
+instance (`<config>+<slug>`, no `-<8hex>`), a hook-created instance
+(`<config>-<sessionhex>`, no `+`), and a developer instance (`<config>`, `<config>-2`).
+If either invariant changes, the predicate must change too. The same `+` separator is
+used by `niwa create --name` (producing `<config>+<slug>`); hook-created and numbered
+instances keep the `-` join, unchanged.
 
 ### D3 -- Session-identity capture
 
@@ -190,7 +197,7 @@ because `EnumerateInstanceRecords` derives an instance's `Ephemeral` flag solely
 mapping store, an unmapped orphan is already `Ephemeral:false` and is dropped before any
 per-record branch runs, so the backstop cannot live inside that loop. The scan reclaims an
 instance when, and only when: its mapping is absent, **its directory name carries the
-dispatch `disp-<hex>` signature**, and its age exceeds a TTL strictly longer than the
+dispatch name signature**, and its age exceeds a TTL strictly longer than the
 worst-case dispatch wall-clock. **The eligibility signal is the instance NAME, not a
 marker file** -- the name is created atomically with the directory by the provision step,
 so there is no window in which a committed-on-disk dispatch instance lacks its signal
@@ -201,8 +208,8 @@ writes a small `.niwa/dispatch-pending` file embedding an RFC3339 creation times
 the *precise* age source; when that file is absent or unparseable (the SIGKILL-before-marker
 case) the scan falls back to the directory mtime. The no-mapping gate excludes every
 successful dispatch (it is mapped); the name signature excludes developer instances
-(`<config>`, `<config>-2`) and hook-created instances (`<config>-<sessionhex>`, no
-`-disp-` segment); and the TTL gate preserves R38 -- a healthy in-flight instance is
+(`<config>`, `<config>-2`) and hook-created instances (`<config>-<sessionhex>`, no `+`
+marker); and the TTL gate preserves R38 -- a healthy in-flight instance is
 younger than the TTL and is never reaped. Rejected: A leaves the SIGKILL
 orphan; C is impossible because the store rejects a non-UUID provisional key
 (`session_map.go`) and would require weakening that validation.
@@ -282,7 +289,7 @@ the plan; no guard code changes.
 `niwa dispatch <prompt>` resolves the enclosing workspace root from the current directory
 using the existing `ClassifyCwd` (workspace root, inside-instance, inside-worktree all
 resolve to their workspace root; an unresolved directory is a clean error), verifies
-`claude` is on `PATH`, then: creates an instance named `<config>+disp-<random>` through
+`claude` is on `PATH`, then: creates an instance named `<config>+-<random>` through
 the existing create path, drops a pending-marker in it, launches `claude --bg <prompt>`
 rooted in the instance, polls the jobs directory for the `state.json` whose `cwd` is the
 instance directory to recover the full session UUID, writes an ephemeral mapping
@@ -309,7 +316,7 @@ Components (new unless noted):
 - **Workspace resolution.** Reuses `workspace.ClassifyCwd`; maps each class to the
   enclosing `WorkspaceRoot`; `CwdOutside` -> clean error (R5-R9).
 - **Instance creation.** Reuses `realProvisionInstance` with a generated
-  `disp-<random>` name (D2). Returns the instance path. Triggers the existing
+  `+-<random>` structural name (D2). Returns the instance path. Triggers the existing
   opportunistic reap (R12) the way `runCreate` does.
 - **Pending-marker (precise-age aid).** A small `.niwa/dispatch-pending` file written
   immediately after create, embedding an RFC3339 creation timestamp. It is NOT the
@@ -334,7 +341,7 @@ Components (new unless noted):
   from `selectReapTargets` -- because that function's `Ephemeral` verdict comes from the
   mapping store and drops unmapped instances before any per-record check. The backstop
   enumerates on-disk instances and reclaims one only when its directory name carries the
-  dispatch `disp-<hex>` signature, it has no mapping, and its age (marker timestamp, else
+  dispatch name signature, it has no mapping, and its age (marker timestamp, else
   directory mtime) exceeds the backstop TTL. A shared name predicate is used by both the
   command's naming and this scan so they cannot drift. It never touches mapped instances
   (the existing sweep owns those), non-dispatch-named instances, or young in-flight ones
@@ -344,7 +351,7 @@ Components (new unless noted):
 Data flow (happy path):
 
 1. `niwa dispatch "<task>"` -> resolve workspace root; preflight `claude` on PATH.
-2. Create instance `<config>+disp-<rand>`; write pending-marker; arm deferred rollback.
+2. Create instance `<config>+-<rand>`; write pending-marker; arm deferred rollback.
 3. Launch `claude --bg "<task>"` with cwd = instance dir.
 4. Poll jobs dir until a `state.json` has `cwd == instanceDir`; read full `sessionId`
    (or time out -> rollback).
@@ -375,10 +382,10 @@ A single PR, built in this order so each step is independently testable:
    fake capture.
 5. Add the reaper name+TTL backstop as a separate scan (not a `selectReapTargets`
    branch, since an unmapped instance is `Ephemeral:false` and dropped there); gate on the
-   `disp-<hex>` name signature + no-mapping + age (marker timestamp, else dir mtime) via
-   the injectable clock. Unit-test that it reclaims a disp-named-unmapped-old instance
+   the dispatch name signature name signature + no-mapping + age (marker timestamp, else dir mtime) via
+   the injectable clock. Unit-test that it reclaims a dispatch-named-unmapped-old instance
    (with marker, and without marker via mtime — the SIGKILL-before-marker case), spares a
-   disp-named-unmapped-young one (R38), spares a mapped instance, and never touches a
+   dispatch-named-unmapped-young one (R38), spares a mapped instance, and never touches a
    non-dispatch-named (developer/hook) instance.
 6. Add a `@critical` functional Gherkin scenario using the offline `localGitServer`
    harness and a stubbed launcher + fabricated jobs-dir: dispatch provisions and maps;
@@ -414,12 +421,12 @@ instant teardown.
   recovered id against `ValidSessionID` before it becomes a path component or mapping key
   -- the same validation the hook path already applies.
 - **Destroy blast radius.** Rollback and the reaper backstop destroy only the
-  command's own freshly-created instance (rollback) or a `disp-<hex>`-named instance with
+  command's own freshly-created instance (rollback) or a dispatch-named instance with
   no mapping past the TTL (backstop). A developer's normal instance is not dispatch-named
   and is never a target; a mapped instance is reclaimed only by the existing liveness rule,
   unchanged.
 - **Name-signature forgery.** The dispatch name signature and the pending-marker both live
-  inside the workspace; an attacker who can create a `disp-<hex>`-named directory or write
+  inside the workspace; an attacker who can create a dispatch-named directory or write
   a marker there can already manipulate instances, so neither widens the trust boundary. The
   backstop's TTL and mapping-absent gates keep a stray dispatch-named directory from causing
   a live (mapped) instance to be reaped.
@@ -441,7 +448,7 @@ Positive:
 Negative / mitigations:
 
 - The reaper gains a second reclamation scan (name+TTL), a small increase in its
-  surface. Mitigated by gating it strictly (mapping-absent AND `disp-<hex>`-named AND
+  surface. Mitigated by gating it strictly (mapping-absent AND dispatch-named AND
   age>TTL) and unit-testing the spare/reap matrix, including the in-flight (young) case
   and the no-marker (mtime-fallback) case.
 - Capture depends on Claude Code writing `state.json` with a `cwd` field; if that format

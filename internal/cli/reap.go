@@ -214,7 +214,8 @@ type backstopTarget struct {
 // when ALL of the following hold:
 //
 //   - its base directory name is a dispatch instance name (isDispatchInstanceName
-//     -- "<config>+disp-<8hex>" or "<config>+<slug>-disp-<8hex>"). This NAME, not a marker file, is the
+//     -- the purely structural "<config>+-<8hex>" or "<config>+<slug>-<8hex>", regex
+//     "\+[a-z0-9_]*-[0-9a-f]{8}$", no "disp" literal). This NAME, not a marker file, is the
 //     eligibility signal: provisionInstanceFunc creates the directory atomically,
 //     so a dispatch instance is recognizable the instant it exists. That closes
 //     the SIGKILL-before-marker window a marker-file-only gate left open (an
@@ -230,8 +231,9 @@ type backstopTarget struct {
 //     must show age > TTL; a present-but-malformed marker does NOT spare the
 //     instance forever -- it falls back to mtime.
 //
-// A developer instance ("<config>", "<config>-2") and a hook-created instance
-// ("<config>-<sessionhex>", no "-disp-" segment) never match the name predicate,
+// A developer instance ("<config>", "<config>-2"), a hook-created instance
+// ("<config>-<sessionhex>", no "+" marker), and a create instance
+// ("<config>+<slug>", no trailing "-<8hex>") never match the name predicate,
 // so they are never touched regardless of age or mapping. This function performs
 // no destruction, so it is unit-testable against fixture instances and an
 // injectable now.

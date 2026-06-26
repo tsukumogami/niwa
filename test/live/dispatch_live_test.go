@@ -46,10 +46,17 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
 )
+
+// liveDispatchInstanceNameRe mirrors the CLI's isDispatchInstanceName signature:
+// a "+" (end-of-config marker), an optional dash-free slug, a "-", then 8
+// lowercase hex digits at the end. It matches "<config>+-<8hex>" (no-name) and
+// "<config>+<slug>-<8hex>" (named); there is no "disp" literal.
+var liveDispatchInstanceNameRe = regexp.MustCompile(`\+[a-z0-9_]*-[0-9a-f]{8}$`)
 
 // liveDispatchPrompt is the trivial task the dispatched worker runs. Keeping it
 // to "reply OK and stop" minimizes subscription cost per run. The session
@@ -88,7 +95,7 @@ func requireLiveClaude(t *testing.T) string {
 // Steps:
 //  1. Stand up the minimal offline workspace and build the niwa binary.
 //  2. `niwa dispatch <prompt> --detach` from the workspace root.
-//  3. Assert exactly one well-formed `<config>+disp-<8hex>` instance with a
+//  3. Assert exactly one well-formed `<config>+-<8hex>` instance with a
 //     parseable instance.json, and an ephemeral Origin="dispatch" mapping keyed
 //     on the full session UUID.
 //  4. Assert the session is registered: a `claude agents --json` record whose
@@ -130,7 +137,7 @@ func TestDispatchLiveLifecycle(t *testing.T) {
 	t.Logf("dispatched session %s", sessionID)
 
 	// (2) Assert a well-constructed dedicated instance: exactly one
-	// <config>+disp-<8hex> directory under the workspace root carrying a
+	// <config>+-<8hex> directory under the workspace root carrying a
 	// parseable .niwa/instance.json.
 	instancePath := assertDispatchInstance(t, workspaceRoot)
 	t.Logf("dispatch instance: %s", instancePath)
@@ -335,7 +342,7 @@ func parseDispatchedSessionID(t *testing.T, dispatchOut string) string {
 	return ""
 }
 
-// assertDispatchInstance asserts exactly one <config>+disp-<hex> instance exists
+// assertDispatchInstance asserts exactly one <config>+-<hex> instance exists
 // under the workspace root with a parseable .niwa/instance.json, and returns its
 // path. The materialized Claude config (the instance's .niwa tree) is created by
 // the same provision path niwa create uses, so a well-formed instance.json plus
@@ -355,7 +362,7 @@ func assertDispatchInstance(t *testing.T, workspaceRoot string) string {
 	return inst
 }
 
-// findDispatchInstance returns the single disp-* instance directory under
+// findDispatchInstance returns the single dispatch instance directory under
 // workspaceRoot, failing if zero or more than one exists.
 func findDispatchInstance(t *testing.T, workspaceRoot string) string {
 	t.Helper()
@@ -365,16 +372,16 @@ func findDispatchInstance(t *testing.T, workspaceRoot string) string {
 	}
 	var found []string
 	for _, e := range entries {
-		// The no-name dispatch instance is "<config>+disp-<hex>"; a named one is
-		// "<config>+<slug>-disp-<hex>". Match either "+disp-" or "-disp-" so both
-		// forms are recognized (and a config name ending in "-disp" is not
-		// mistaken for the no-name dispatch marker).
-		if e.IsDir() && (strings.Contains(e.Name(), "+disp-") || strings.Contains(e.Name(), "-disp-")) {
+		// The no-name dispatch instance is "<config>+-<hex>"; a named one is
+		// "<config>+<slug>-<hex>". The structural regex matches both and is not
+		// fooled by a config name that itself contains a dash (e.g. "live-disp"),
+		// since it anchors on the "+...-<8hex>" tail.
+		if e.IsDir() && liveDispatchInstanceNameRe.MatchString(e.Name()) {
 			found = append(found, filepath.Join(workspaceRoot, e.Name()))
 		}
 	}
 	if len(found) != 1 {
-		t.Fatalf("expected exactly one disp-* instance under %s, found %d: %v", workspaceRoot, len(found), found)
+		t.Fatalf("expected exactly one dispatch instance under %s, found %d: %v", workspaceRoot, len(found), found)
 	}
 	return found[0]
 }

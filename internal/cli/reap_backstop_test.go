@@ -9,19 +9,20 @@ import (
 	"github.com/tsukumogami/niwa/internal/workspace"
 )
 
-// Canonical dispatch-shaped instance names: "<config>+disp-<8hex>" (no-name
-// dispatch, where "+" is the universal end-of-config marker). The backstop keys
-// eligibility on this NAME (isDispatchInstanceName), so the fixtures must use the
-// real shape dispatch produces, not an arbitrary "-disp-old" placeholder.
+// Canonical dispatch-shaped instance names: "<config>+-<8hex>" (no-name
+// dispatch, where "+" is the end-of-config marker and the suffix is the
+// mandatory "-<8hex>"). The backstop keys eligibility on this NAME's purely
+// structural signature (isDispatchInstanceName, "\+[a-z0-9_]*-[0-9a-f]{8}$" --
+// no "disp" literal), so the fixtures must use the real shape dispatch produces.
 const (
-	dispInstOld    = "test-ws+disp-0000aa11" // marked/aged old -> reapable
-	dispInstYoung  = "test-ws+disp-0000bb22" // young -> spared
-	dispInstMapped = "test-ws+disp-0000cc33" // mapped -> not touched
-	dispInstBad    = "test-ws+disp-0000dd44" // malformed marker -> mtime fallback
-	dispInstNoMark = "test-ws+disp-0000ee55" // no marker (SIGKILL-before-marker) -> mtime fallback
-	dispInstOrphan = "test-ws+disp-0000ff66" // marked/aged old -> reapable (combined test)
-	devInstName    = "test-ws-2"             // developer instance -> never matched
-	hookInstName   = "test-ws-aabbccdd"      // hook-created instance, no disp- -> never matched
+	dispInstOld    = "test-ws+-0000aa11" // marked/aged old -> reapable
+	dispInstYoung  = "test-ws+-0000bb22" // young -> spared
+	dispInstMapped = "test-ws+-0000cc33" // mapped -> not touched
+	dispInstBad    = "test-ws+-0000dd44" // malformed marker -> mtime fallback
+	dispInstNoMark = "test-ws+-0000ee55" // no marker (SIGKILL-before-marker) -> mtime fallback
+	dispInstOrphan = "test-ws+-0000ff66" // marked/aged old -> reapable (combined test)
+	devInstName    = "test-ws-2"         // developer instance -> never matched
+	hookInstName   = "test-ws-aabbccdd"  // hook-created instance, no "+" -> never matched
 )
 
 // writeDispatchMarkerAt writes a dispatch pending-marker inside the instance at
@@ -171,15 +172,15 @@ func TestBackstop_MappedInstance_NotTouched(t *testing.T) {
 
 // TestBackstop_NonDispatchName_NeverTouched: an instance whose name is NOT a
 // dispatch name -- a developer instance ("<config>-2") or a hook-created instance
-// ("<config>-<sessionhex>", no "-disp-" segment) -- is never touched, even when
+// ("<config>-<sessionhex>", no "+" marker) -- is never touched, even when
 // it is unmapped and arbitrarily old. The name predicate is the load-bearing
 // guard that keeps the backstop off non-dispatch instances.
 func TestBackstop_NonDispatchName_NeverTouched(t *testing.T) {
 	root := setupHookWorkspace(t, true)
 	now := time.Now()
 
-	dev := makeReapInstance(t, root, devInstName)   // no -disp- segment
-	hook := makeReapInstance(t, root, hookInstName) // <config>-<sessionhex>, no -disp-
+	dev := makeReapInstance(t, root, devInstName)   // no "+" marker
+	hook := makeReapInstance(t, root, hookInstName) // <config>-<sessionhex>, no "+"
 	// Age both past the TTL via mtime and even drop a marker on one: still must
 	// not be touched, because the NAME does not match.
 	touchInstanceMtime(t, dev, now.Add(-2*dispatchBackstopTTL))
@@ -213,7 +214,7 @@ func TestBackstop_MalformedMarker_FallsBackToMtime(t *testing.T) {
 	touchInstanceMtime(t, oldInst, now.Add(-2*dispatchBackstopTTL))
 
 	// Malformed marker but a YOUNG directory mtime: spared via the mtime fallback.
-	youngInst := makeReapInstance(t, root, "test-ws+disp-00009977")
+	youngInst := makeReapInstance(t, root, "test-ws+-00009977")
 	writeRawDispatchMarker(t, youngInst, "garbage")
 	touchInstanceMtime(t, youngInst, now.Add(-1*time.Minute))
 
@@ -284,11 +285,11 @@ func TestSelectBackstopTargets_Matrix(t *testing.T) {
 	root := setupHookWorkspace(t, true)
 	now := time.Now()
 
-	old := makeReapInstance(t, root, dispInstOld)       // disp-named, marked, unmapped, old -> target
-	young := makeReapInstance(t, root, dispInstYoung)   // disp-named, marked, unmapped, young -> spared
-	mapped := makeReapInstance(t, root, dispInstMapped) // disp-named, marked, mapped, old -> spared
-	noMark := makeReapInstance(t, root, dispInstNoMark) // disp-named, NO marker, mtime old -> target
-	bad := makeReapInstance(t, root, dispInstBad)       // disp-named, malformed marker, mtime old -> target
+	old := makeReapInstance(t, root, dispInstOld)       // dispatch-named, marked, unmapped, old -> target
+	young := makeReapInstance(t, root, dispInstYoung)   // dispatch-named, marked, unmapped, young -> spared
+	mapped := makeReapInstance(t, root, dispInstMapped) // dispatch-named, marked, mapped, old -> spared
+	noMark := makeReapInstance(t, root, dispInstNoMark) // dispatch-named, NO marker, mtime old -> target
+	bad := makeReapInstance(t, root, dispInstBad)       // dispatch-named, malformed marker, mtime old -> target
 	dev := makeReapInstance(t, root, devInstName)       // non-disp name, old -> spared
 	hook := makeReapInstance(t, root, hookInstName)     // hook name, marked old -> spared
 

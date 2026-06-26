@@ -17,7 +17,7 @@ import (
 
 func init() {
 	dispatchCmd.Flags().StringVar(&dispatchLabel, "label", "", "optional human-friendly alias recorded on the session mapping")
-	dispatchCmd.Flags().StringVarP(&dispatchName, "name", "n", "", "optional display name for the session (sanitized into a slug; also names the niwa instance: <config>+disp-<id> with no name, <config>+<slug>-disp-<id> with one -- '+' always marks the end of the config name)")
+	dispatchCmd.Flags().StringVarP(&dispatchName, "name", "n", "", "optional display name for the session (sanitized into a slug; also names the niwa instance: <config>+-<id> with no name, <config>+<slug>-<id> with one -- '+' always marks the end of the config name)")
 	dispatchCmd.Flags().StringVar(&dispatchModel, "model", "", "model to forward to the background worker (--model)")
 	dispatchCmd.Flags().StringVar(&dispatchPermissionMode, "permission-mode", "", "permission mode to forward to the background worker (--permission-mode)")
 	dispatchCmd.Flags().StringVar(&dispatchAgent, "agent", "", "agent to forward to the background worker (--agent)")
@@ -35,32 +35,21 @@ var (
 )
 
 // maxDispatchSlugRunes caps the sanitized --name slug so it cannot dominate the
-// instance directory name (which is "<config>+<slug>-disp-<8hex>"). 40 runes is
+// instance directory name (which is "<config>+<slug>-<8hex>"). 40 runes is
 // generous for a human-readable label while leaving room below filesystem name
-// limits for the config prefix and the "-disp-<8hex>" signature suffix.
+// limits for the config prefix and the "-<8hex>" signature suffix.
 const maxDispatchSlugRunes = 40
 
 const (
-	// dispatchNameSegment is the segment embedded in every dispatch-created
-	// instance name, between the config name and the random hex suffix:
-	// "<config>+disp-<8hex>". It is the SOLE eligibility signal the reaper
-	// backstop keys on, because the directory name is created ATOMICALLY by
-	// provisionInstanceFunc -- there is no window (as there is with a marker
-	// file written after create) in which a SIGKILL can leave a dispatch
-	// instance both unmapped and unmarked. Both the dispatch naming
-	// (dispatchNameSuffix) and the backstop predicate (isDispatchInstanceName)
-	// derive from this const so they cannot drift.
-	dispatchNameSegment = "disp-"
-
 	// dispatchPendingMarker is the file dropped inside a dispatch-created
 	// instance at create time and removed only after the session mapping is
 	// durably written. Its contents are an RFC3339 creation timestamp. The
 	// marker is now a PRECISION aid for the reaper backstop's age check (it
 	// carries the exact creation time), NOT the sole eligibility signal: the
-	// backstop keys eligibility on the instance NAME (dispatchNameSegment) and
-	// falls back to the directory mtime when the marker is absent (the
-	// SIGKILL-before-marker case), so the orphan window is closed (DESIGN
-	// Decision 4).
+	// backstop keys eligibility on the instance NAME (isDispatchInstanceName,
+	// the purely structural "+<dash-free-slug>-<8hex>" signature) and falls back
+	// to the directory mtime when the marker is absent (the SIGKILL-before-marker
+	// case), so the orphan window is closed (DESIGN Decision 4).
 	dispatchPendingMarker = ".niwa/dispatch-pending"
 
 	// dispatchCaptureTimeout bounds the jobs-dir cwd-correlation poll that
@@ -164,25 +153,24 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("niwa: error: claude binary not found in PATH; install Claude Code before dispatching")
 	}
 
-	// (4) Generate a unique disp-<8 hex> name suffix via crypto/rand and pass it
+	// (4) Generate a unique "-<8 hex>" name suffix via crypto/rand and pass it
 	// as the customName branch of the existing provision path, sidestepping the
 	// racy numbered scan (DESIGN Decision 2). When --name sanitizes to a usable
-	// slug it is inserted BEFORE the "-disp-<8hex>" segment, so the name becomes
-	// "<config>+<slug>-disp-<8hex>": the slug is additive and never replaces the
-	// random hex, so the end-anchored isDispatchInstanceName signature (and thus
-	// the reaper backstop) keeps matching.
+	// slug it is prepended, so the suffix is "<slug>-<8hex>" and the name becomes
+	// "<config>+<slug>-<8hex>"; with no slug the suffix is "-<8hex>" and the name
+	// is "<config>+-<8hex>". The random hex is always kept, and the mandatory
+	// "-<8hex>" is the structural signature isDispatchInstanceName (and thus the
+	// reaper backstop) keys on -- there is no "disp" literal.
 	slug := sanitizeInstanceSlug(dispatchName)
 	namePrefix, err := dispatchNameSuffix(slug)
 	if err != nil {
 		return fmt.Errorf("niwa: error: generating instance name: %w", err)
 	}
-	// "+" is the UNIVERSAL end-of-config marker for dispatch instances, used for
-	// every dispatch whether or not a slug is present: no-name dispatch is
-	// "<config>+disp-<8hex>", named is "<config>+<slug>-disp-<8hex>". It marks the
-	// config boundary unambiguously (config names may contain '.', '-', and '_',
-	// so none of those can serve as the separator). isDispatchInstanceName accepts
-	// either the "+" (no slug) or "-" (slug-disp join) before "disp", so both
-	// forms still match the reaper signature.
+	// "+" is the end-of-config marker for dispatch instances, present for every
+	// dispatch whether or not a slug is supplied: no-name dispatch is
+	// "<config>+-<8hex>", named is "<config>+<slug>-<8hex>". It marks the config
+	// boundary unambiguously (config names may contain '.', '-', and '_', so none
+	// of those can serve as the separator).
 	const sep = "+"
 
 	// (5) Self-bound orphans: run the opportunistic reclamation sweep the same
@@ -288,28 +276,29 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-// dispatchNameSuffix returns a unique name suffix anchored on a
-// "disp-<8 lowercase hex>" segment, using crypto/rand for collision safety under
+// dispatchNameSuffix returns a unique name suffix ending in a mandatory "-" plus
+// 8 lowercase hex digits, using crypto/rand for collision safety under
 // concurrency without a lock (DESIGN Decision 2). The provision path joins this
-// to the config name with "+" (the universal end-of-config marker for dispatch
-// instances), so the resulting instance directory is "<config>+disp-<8hex>" --
-// the shape isDispatchInstanceName recognizes.
+// to the config name with "+" (the end-of-config marker for dispatch instances).
 //
-// When slug is non-empty it is inserted BEFORE the "disp-<8hex>" segment, giving
-// "<slug>-disp-<8hex>". The provision path again joins this with "+", so the
-// instance dir is "<config>+<slug>-disp-<8hex>". The "+" is added by the join,
-// NOT here -- this suffix never carries it. The slug is additive: the random hex
-// is always kept (uniqueness + signature) and the "disp-<8hex>" suffix stays
-// end-anchored, so isDispatchInstanceName (regex "[-+]disp-[0-9a-f]{8}$") still
-// matches both forms and the reaper backstop is unaffected.
+// With no slug the suffix is "-<8hex>", so the instance dir is "<config>+-<8hex>"
+// (the "+" then "-" sit adjacent). With a slug the suffix is "<slug>-<8hex>", so
+// the dir is "<config>+<slug>-<8hex>". The "+" is added by the join, NOT here.
+// There is no longer a "disp" literal: the dispatch signature is now purely
+// structural -- a "+", an optional dash-free slug, a "-", then exactly 8 hex --
+// which isDispatchInstanceName recognizes via the regex
+// "\+[a-z0-9_]*-[0-9a-f]{8}$". The mandatory "-<8hex>" is what distinguishes a
+// dispatch instance from a `create --name` instance ("<config>+<slug>", no
+// trailing "-<8hex>"); it relies on slugs being dash-free (sanitizeInstanceSlug)
+// so the only "-" after the "+" is the one this suffix adds.
 func dispatchNameSuffix(slug string) (string, error) {
 	var b [4]byte
 	if _, err := rand.Read(b[:]); err != nil {
 		return "", err
 	}
-	suffix := dispatchNameSegment + hex.EncodeToString(b[:])
+	suffix := "-" + hex.EncodeToString(b[:])
 	if slug != "" {
-		return slug + "-" + suffix, nil
+		return slug + suffix, nil
 	}
 	return suffix, nil
 }
@@ -323,10 +312,12 @@ func dispatchNameSuffix(slug string) (string, error) {
 // [a-z0-9_] and to neither lead nor trail with an underscore.
 //
 // The word separator is an UNDERSCORE, never a dash: even a user-typed dash
-// (e.g. "auth-layer") collapses to "_" ("auth_layer"). This keeps the slug
-// dash-free so dashes stay purely structural in the instance directory name
-// "<config>+<slug>-disp-<8hex>", where the "-disp-<8hex>" signature the reaper
-// backstop matches must stay unambiguous.
+// (e.g. "auth-layer") collapses to "_" ("auth_layer"). This dash-free invariant
+// is load-bearing: the dispatch instance name is "<config>+<slug>-<8hex>", and
+// isDispatchInstanceName keys on the "-" immediately before the 8 hex digits
+// being the SOLE dash after the "+". If a slug could contain a dash, that
+// structural signature would be ambiguous (and a `create --name` instance could
+// masquerade as a dispatch one). TestSanitizeInstanceSlug pins this invariant.
 //
 // It is shared by `niwa dispatch` (which embeds the slug in the ephemeral
 // instance name) and `niwa create` (which uses it as the --name suffix), so both
@@ -352,17 +343,17 @@ func sanitizeInstanceSlug(raw string) string {
 	return slug
 }
 
-// dispatchInstanceNameRe matches a dispatch instance's base directory name:
-// a config name, then either "+" (no-name dispatch, where "+" is the
-// end-of-config marker directly before "disp") or "-" (named dispatch, where
-// the "-" comes from the slug<->disp join), then the "disp-" segment, then
-// exactly 8 lowercase hex digits at the end. The "[-+]" class accepts both
-// "<config>+disp-<8hex>" and "<config>+<slug>-disp-<8hex>". Anchoring on the
-// "disp-<8hex>" suffix mirrors dispatchNameSuffix exactly so a developer
-// instance ("<config>", "<config>-2"), a create instance ("<config>+<slug>",
-// no "disp-<hex>"), or a hook-created instance ("<config>-<sessionhex>", no
-// "disp-" segment) never matches.
-var dispatchInstanceNameRe = regexp.MustCompile(`[-+]` + dispatchNameSegment + `[0-9a-f]{8}$`)
+// dispatchInstanceNameRe matches a dispatch instance's base directory name by
+// its purely STRUCTURAL signature -- there is no "disp" literal. The shape is:
+// a "+" (the end-of-config marker), then an optional dash-free slug
+// ("[a-z0-9_]*"), then a mandatory "-", then exactly 8 lowercase hex digits at
+// the end. So it matches both "<config>+-<8hex>" (no-name dispatch; the slug is
+// empty, the "+" and "-" sit adjacent) and "<config>+<slug>-<8hex>" (named
+// dispatch). A developer instance ("<config>", "<config>-2"), a hook-created
+// instance ("<config>-<sessionhex>", no "+"), and a create instance
+// ("<config>+<slug>", no trailing "-<8hex>" -- including a hex-shaped slug like
+// "<config>+deadbeef", which has no "-" before the hex) never match.
+var dispatchInstanceNameRe = regexp.MustCompile(`\+[a-z0-9_]*-[0-9a-f]{8}$`)
 
 // isDispatchInstanceName reports whether name is a dispatch-created instance's
 // base directory name. The dispatch backstop uses this as its eligibility
@@ -370,6 +361,15 @@ var dispatchInstanceNameRe = regexp.MustCompile(`[-+]` + dispatchNameSegment + `
 // name) atomically, a dispatch instance is recognizable the instant it exists,
 // closing the SIGKILL-before-marker orphan window that a marker-file-only gate
 // left open.
+//
+// This predicate relies on two invariants, both pinned by tests below:
+//
+//	(a) slugs are dash-free (sanitizeInstanceSlug collapses every dash to "_"),
+//	    so the "-" immediately before the 8 hex is the ONLY dash after the "+";
+//	(b) `create --name` appends no trailing "-<8hex>" (its instance is just
+//	    "<config>+<slug>"), so a named-create can never present this structure.
+//
+// If either invariant changes, this predicate must change too.
 func isDispatchInstanceName(name string) bool {
 	return dispatchInstanceNameRe.MatchString(name)
 }

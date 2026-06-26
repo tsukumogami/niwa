@@ -6,10 +6,17 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/cucumber/godog"
 )
+
+// dispatchInstanceNameRe mirrors the CLI's isDispatchInstanceName signature: a
+// "+" (end-of-config marker), an optional dash-free slug, a "-", then 8 lowercase
+// hex digits at the end. It matches "<config>+-<8hex>" (no-name) and
+// "<config>+<slug>-<8hex>" (named); there is no "disp" literal.
+var dispatchInstanceNameRe = regexp.MustCompile(`\+[a-z0-9_]*-[0-9a-f]{8}$`)
 
 // dispatch_steps_test.go holds step definitions for the `niwa dispatch`
 // lifecycle integration (DESIGN-instance-dispatch, PLAN Issue 6). The runtime
@@ -117,7 +124,7 @@ func aFakeClaudeForDispatchThatFailsToLaunch(ctx context.Context) (context.Conte
 
 // iRunCommandFromTheWorkspaceRoot runs the given niwa command from the workspace
 // root (where ClassifyCwd resolves the enclosing workspace) and, when it is a
-// dispatch, records the disp-<hex> instance directory it created.
+// dispatch, records the dispatch instance directory it created.
 func iRunCommandFromTheWorkspaceRoot(ctx context.Context, command string) (context.Context, error) {
 	s := getState(ctx)
 	if s == nil {
@@ -132,24 +139,24 @@ func iRunCommandFromTheWorkspaceRoot(ctx context.Context, command string) (conte
 	return ctx, nil
 }
 
-// findDispatchInstance returns the absolute path of the single disp-* instance
+// findDispatchInstance returns the absolute path of the single dispatch instance
 // under workspaceRoot, or "" when none exists. The dispatch instance name is
-// "<config>+disp-<8 hex>" (no-name) or "<config>+<slug>-disp-<8 hex>" (named),
-// so a "+disp-" or "-disp-" infix uniquely identifies it.
+// "<config>+-<8 hex>" (no-name) or "<config>+<slug>-<8 hex>" (named), which the
+// structural dispatchInstanceNameRe uniquely identifies.
 func findDispatchInstance(workspaceRoot string) string {
 	entries, err := os.ReadDir(workspaceRoot)
 	if err != nil {
 		return ""
 	}
 	for _, e := range entries {
-		if e.IsDir() && (strings.Contains(e.Name(), "+disp-") || strings.Contains(e.Name(), "-disp-")) {
+		if e.IsDir() && dispatchInstanceNameRe.MatchString(e.Name()) {
 			return filepath.Join(workspaceRoot, e.Name())
 		}
 	}
 	return ""
 }
 
-// aDispatchInstanceWasCreatedWithAWellFormedInstanceFile asserts a disp-<hex>
+// aDispatchInstanceWasCreatedWithAWellFormedInstanceFile asserts a dispatch
 // instance directory exists and carries a parseable .niwa/instance.json.
 func aDispatchInstanceWasCreatedWithAWellFormedInstanceFile(ctx context.Context) error {
 	s := getState(ctx)
@@ -176,7 +183,7 @@ func aDispatchInstanceWasCreatedWithAWellFormedInstanceFile(ctx context.Context)
 	return nil
 }
 
-// theDispatchInstanceStillExists asserts the recorded disp instance directory is
+// theDispatchInstanceStillExists asserts the recorded dispatch instance directory is
 // still on disk (the reaper spared it).
 func theDispatchInstanceStillExists(ctx context.Context) error {
 	s := getState(ctx)
@@ -192,7 +199,7 @@ func theDispatchInstanceStillExists(ctx context.Context) error {
 	return nil
 }
 
-// noDispatchInstanceRemains asserts there is no disp-* instance under the
+// noDispatchInstanceRemains asserts there is no dispatch instance under the
 // workspace root (rollback or reclamation removed it).
 func noDispatchInstanceRemains(ctx context.Context) error {
 	s := getState(ctx)
