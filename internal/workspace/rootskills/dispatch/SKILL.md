@@ -16,7 +16,7 @@ clone, its own branch, its own Agent View session) instead of in this conversati
 ## The one thing that matters: the worker starts blind
 
 `niwa dispatch` launches a brand-new `claude --bg` session in a fresh clone of the
-workspace. It has the workspace's committed state and tooling, but **none of this chat** --
+workspace. It has the workspace's pushed (remote) state and tooling, but **none of this chat** --
 no decisions, no constraints, no "we agreed not to touch X." The task brief you write is
 the worker's ONLY context. So your real job here is synthesis: turn the conversation into a
 brief a competent stranger could execute cold.
@@ -30,13 +30,14 @@ Read back over the conversation and write a brief that stands on its own. Includ
 - **Goal** -- one or two sentences: what done looks like.
 - **Context / decisions** -- the conclusions reached in the chat that the worker can't see:
   chosen approach, rejected alternatives, constraints, assumptions.
-- **Pointers to durable artifacts** -- prefer referencing committed files the worker's clone
+- **Pointers to durable artifacts** -- prefer referencing pushed files the worker's clone
   already has (e.g. "implement `docs/designs/DESIGN-foo.md`", "the issue is tsukumogami/niwa#123")
-  over re-explaining them. The clone has committed state, NOT this session's uncommitted edits.
+  over re-explaining them. The clone is made from each repo's remote, so it has the PUSHED
+  state, NOT this session's uncommitted edits or unpushed local commits.
 - **Acceptance criteria** -- how the worker (and you) will know it's done.
 - **Out of scope** -- what NOT to touch.
 
-If the work is already fully captured in a committed doc or issue, the brief can be short and
+If the work is already fully captured in a pushed doc or issue, the brief can be short and
 point at it. If it lives only in this chat, the brief must carry it.
 
 ### 2. Write the brief to a stable file
@@ -80,8 +81,9 @@ running in its own instance. If they want to fan out more, repeat from step 1.
 
 - **Don't paste giant context into the prompt.** Put it in the brief file; the prompt just
   points at it. Long prompts also risk the argument-length limit.
-- **The worker can't see your uncommitted work.** If the task depends on edits that only exist
-  in this session's tree, either commit them first or spell them out in the brief.
+- **The worker can't see your unpushed work.** The clone comes from the remotes, so if the
+  task depends on edits that only exist in this session's tree (uncommitted, or committed but
+  not pushed), either commit AND push them first, or spell them out in the brief.
 - **Don't do the work yourself here.** This skill's job is to hand off, not to implement. If
   the user actually wants the work done in this session, that's a normal task, not a dispatch.
 - **One brief, one worker.** For parallel work, write a separate brief and dispatch per unit so

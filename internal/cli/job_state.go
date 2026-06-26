@@ -41,20 +41,23 @@ type jobState struct {
 	UpdatedAt time.Time `json:"updatedAt"`
 	// FirstTerminalAt is the timestamp Claude Code stamps when the session first
 	// reaches a terminal condition, regardless of the specific terminal `state`
-	// label. It is the authoritative "this session has ended" signal -- the
-	// reaper treats a non-zero value as terminal so an unrecognized terminal
-	// `state` (e.g. "stopped" from `claude stop`) is never mistaken for a live
-	// session. Absent decodes to the zero time.
+	// label. It is the authoritative "this session has ended" signal: the reaper
+	// treats a non-zero value as terminal (see sessionLive), so a session that
+	// has ended is recognized even when its `state` label is not in
+	// terminalJobStates below. Absent decodes to the zero time.
 	FirstTerminalAt time.Time `json:"firstTerminalAt"`
 }
 
 // terminalJobStates is the set of job `state` values that mean the session has
 // ended. The exact vocabulary of state.json is undocumented, so this set is
-// matched case-insensitively and kept deliberately broad. It is a secondary
-// signal: the authoritative terminal check is a non-zero FirstTerminalAt (see
-// sessionLive), which catches any terminal label not enumerated here. A state
-// value in neither path is treated as non-terminal, with the TTL as the final
-// backstop.
+// matched case-insensitively and kept deliberately broad (it includes
+// "stopped", the label `claude stop` produces). It is the SECONDARY terminal
+// signal -- the primary, authoritative one is a non-zero FirstTerminalAt, which
+// covers every ended session including these labels. This set is the fallback
+// for a state.json that records a terminal `state` without a FirstTerminalAt;
+// the two are intentionally redundant for the labels listed here, so neither
+// should be removed on the assumption the other always covers it. A state in
+// neither path is treated as non-terminal, with the TTL as the final backstop.
 var terminalJobStates = map[string]bool{
 	"completed": true,
 	"complete":  true,
@@ -119,7 +122,8 @@ func sessionLive(jobsDir, sessionID string, now time.Time) bool {
 	}
 	// Authoritative terminal signal: Claude Code stamps firstTerminalAt the
 	// moment the session ends, whatever the terminal `state` label. This catches
-	// labels the enumerated set below would miss (e.g. "stopped").
+	// a terminal session even when its label is not in terminalJobStates (the
+	// enumerated set is the secondary, fallback signal checked below).
 	if !js.FirstTerminalAt.IsZero() {
 		return false
 	}
