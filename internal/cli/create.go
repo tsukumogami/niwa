@@ -16,7 +16,7 @@ import (
 
 func init() {
 	rootCmd.AddCommand(createCmd)
-	createCmd.Flags().StringVar(&createName, "name", "", "custom instance name suffix, sanitized into a lowercase slug of letters, digits, and hyphens (e.g., --name \"My Feature\" produces <config>-my-feature)")
+	createCmd.Flags().StringVar(&createName, "name", "", "custom instance name suffix, sanitized into a lowercase slug of letters, digits, and underscores (e.g., --name \"My Feature\" produces <config>-my_feature)")
 	createCmd.Flags().StringVarP(&createRepo, "repo", "r", "", "land in this repo after creation")
 	createCmd.Flags().BoolVar(&createNoInstallPlugins, "no-install-plugins", false, "skip auto-installing the embedded niwa Claude Code plugin (otherwise installed once when a rank-2 source is detected)")
 	createCmd.Flags().BoolVar(&createAllowMissingSecrets, "allow-missing-secrets", false,
@@ -61,7 +61,7 @@ Instance naming:
   - First instance uses the config name (e.g., "tsuku")
   - Subsequent instances are numbered: tsuku-2, tsuku-3, ...
   - With --name, the suffix is sanitized into a lowercase slug (letters,
-    digits, hyphens), e.g. --name "My Feature" produces: tsuku-my-feature`,
+    digits, underscores), e.g. --name "My Feature" produces: tsuku-my_feature`,
 	Args: cobra.MaximumNArgs(1),
 	RunE: runCreate,
 }

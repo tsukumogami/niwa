@@ -598,22 +598,24 @@ func TestDispatch_PassthroughFlags_DiscreteArgv(t *testing.T) {
 }
 
 // TestSanitizeInstanceSlug exercises the slug normalization rules: lowercasing,
-// collapsing non-[a-z0-9] runs to a single hyphen, trimming leading/trailing
-// hyphens, capping length (re-trimming an exposed trailing hyphen), and
-// returning "" when nothing usable remains.
+// collapsing non-[a-z0-9] runs to a single underscore, trimming leading/trailing
+// underscores, capping length (re-trimming an exposed trailing underscore), and
+// returning "" when nothing usable remains. The separator is an underscore so a
+// user-typed dash collapses to "_" and the slug stays dash-free.
 func TestSanitizeInstanceSlug(t *testing.T) {
 	cases := []struct {
 		name string
 		in   string
 		want string
 	}{
-		{"spaces and punctuation", "My Feature!", "my-feature"},
-		{"underscores and double hyphens", "  __foo--bar__  ", "foo-bar"},
-		{"sentence with mixed case", "Refactor the AuthZ layer", "refactor-the-authz-layer"},
+		{"spaces and punctuation", "My Feature!", "my_feature"},
+		{"underscores and double hyphens", "  __foo--bar__  ", "foo_bar"},
+		{"sentence with mixed case", "Refactor the AuthZ layer", "refactor_the_authz_layer"},
+		{"user-typed dash collapses to underscore", "auth-layer", "auth_layer"},
 		{"only punctuation", "!!!", ""},
 		{"empty", "", ""},
 		{"non-ascii dropped", "café", "caf"},
-		{"already a slug", "fix-bug-123", "fix-bug-123"},
+		{"already an underscore slug", "fix_bug_123", "fix_bug_123"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -627,7 +629,7 @@ func TestSanitizeInstanceSlug(t *testing.T) {
 }
 
 // TestSanitizeInstanceSlug_CapsLength verifies a very long input is capped to
-// maxDispatchSlugRunes with no trailing hyphen exposed by the cut.
+// maxDispatchSlugRunes with no trailing underscore exposed by the cut.
 func TestSanitizeInstanceSlug_CapsLength(t *testing.T) {
 	// A run of words longer than the cap, with a hyphen-producing boundary
 	// positioned so a naive cut would leave a trailing hyphen.
@@ -642,27 +644,28 @@ func TestSanitizeInstanceSlug_CapsLength(t *testing.T) {
 	assertSlugShape(t, got)
 }
 
-// assertSlugShape asserts a slug only ever contains [a-z0-9-] and never leads or
-// trails with a hyphen (an empty slug is allowed).
+// assertSlugShape asserts a slug only ever contains [a-z0-9_], never a dash, and
+// never leads or trails with an underscore (an empty slug is allowed).
 func assertSlugShape(t *testing.T, slug string) {
 	t.Helper()
 	if slug == "" {
 		return
 	}
 	for _, r := range slug {
-		if !((r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-') {
-			t.Fatalf("slug %q contains illegal rune %q", slug, r)
+		if !((r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_') {
+			t.Fatalf("slug %q contains illegal rune %q (only [a-z0-9_] allowed; dashes are forbidden)", slug, r)
 		}
 	}
-	if strings.HasPrefix(slug, "-") || strings.HasSuffix(slug, "-") {
-		t.Fatalf("slug %q must not lead or trail with a hyphen", slug)
+	if strings.HasPrefix(slug, "_") || strings.HasSuffix(slug, "_") {
+		t.Fatalf("slug %q must not lead or trail with an underscore", slug)
 	}
 }
 
 // TestDispatch_Name_SlugInInstanceAndSession verifies that --name "My Thing"
-// (1) produces an instance name that contains the slug AND still ends with the
-// "-disp-<8hex>" signature isDispatchInstanceName recognizes, and (2) forwards
-// "--name my-thing" to the launched worker.
+// (1) produces an instance name that contains the underscore slug AND still ends
+// with the "-disp-<8hex>" signature isDispatchInstanceName recognizes (the
+// end-anchored regex is unaffected by underscores inside the slug), and (2)
+// forwards "--name my_thing" to the launched worker.
 func TestDispatch_Name_SlugInInstanceAndSession(t *testing.T) {
 	root := setupDispatchWorkspace(t)
 	chdir(t, root)
@@ -690,8 +693,8 @@ func TestDispatch_Name_SlugInInstanceAndSession(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if !strings.Contains(gotName, "my-thing") {
-		t.Errorf("instance name %q should contain the slug %q", gotName, "my-thing")
+	if !strings.Contains(gotName, "my_thing") {
+		t.Errorf("instance name %q should contain the slug %q", gotName, "my_thing")
 	}
 	if !isDispatchInstanceName(gotName) {
 		t.Errorf("instance name %q must still match isDispatchInstanceName (preserve the -disp-<8hex> signature)", gotName)
@@ -699,9 +702,14 @@ func TestDispatch_Name_SlugInInstanceAndSession(t *testing.T) {
 	if !dispatchInstanceNameRe.MatchString(gotName) {
 		t.Errorf("instance name %q must still end with -disp-<8hex>", gotName)
 	}
+	// The end-anchored -disp-<8hex> regex is unaffected by underscores inside
+	// the slug: a literal underscore-slug instance name still matches.
+	if !isDispatchInstanceName("tsuku-my_thing-disp-deadbeef") {
+		t.Error("isDispatchInstanceName must still match an underscore-slug name like tsuku-my_thing-disp-deadbeef")
+	}
 
-	if !passthroughHasNameSlug(gotPass, "my-thing") {
-		t.Errorf("launcher passthrough %v should contain \"--name my-thing\"", gotPass)
+	if !passthroughHasNameSlug(gotPass, "my_thing") {
+		t.Errorf("launcher passthrough %v should contain \"--name my_thing\"", gotPass)
 	}
 }
 

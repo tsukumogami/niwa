@@ -143,17 +143,19 @@ func TestComputeInstanceName_SkipsNonInstanceDir(t *testing.T) {
 // TestCreateName_SanitizedIntoSlug pins that a --name value is normalized into a
 // lowercase slug before it becomes the instance suffix. The seam under test is
 // the sanitize -> computeInstanceName composition runCreate performs: spaces and
-// punctuation collapse to hyphens, and uppercase is lowercased, so the composed
-// instance name is "<config>-<slug>".
+// punctuation collapse to underscores, user-typed dashes also collapse to
+// underscores (so the slug stays dash-free), and uppercase is lowercased, so the
+// composed instance name is "<config>-<slug>".
 func TestCreateName_SanitizedIntoSlug(t *testing.T) {
 	cases := []struct {
 		name string
 		in   string
 		want string
 	}{
-		{"spaces and punctuation", "My Feature!", "tsuku-my-feature"},
+		{"spaces and punctuation", "My Feature!", "tsuku-my_feature"},
 		{"already a clean slug", "hotfix", "tsuku-hotfix"},
 		{"uppercase lowercased", "Hotfix", "tsuku-hotfix"},
+		{"user-typed dash collapses to underscore", "auth-layer", "tsuku-auth_layer"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -305,32 +305,38 @@ func dispatchNameSuffix(slug string) (string, error) {
 
 // sanitizeInstanceSlug normalizes a raw --name value into a filesystem- and
 // flag-safe slug: lowercase, every run of characters outside [a-z0-9] collapsed
-// to a single hyphen, leading/trailing hyphens trimmed, and the result capped to
-// maxDispatchSlugRunes (re-trimming a trailing hyphen the cap may expose). It
-// returns "" when nothing usable remains, signaling the caller to fall back to
-// the slug-less behavior. The result is guaranteed to contain only [a-z0-9-] and
-// to neither lead nor trail with a hyphen.
+// to a single underscore, leading/trailing underscores trimmed, and the result
+// capped to maxDispatchSlugRunes (re-trimming a trailing underscore the cap may
+// expose). It returns "" when nothing usable remains, signaling the caller to
+// fall back to the slug-less behavior. The result is guaranteed to contain only
+// [a-z0-9_] and to neither lead nor trail with an underscore.
+//
+// The word separator is an UNDERSCORE, never a dash: even a user-typed dash
+// (e.g. "auth-layer") collapses to "_" ("auth_layer"). This keeps the slug
+// dash-free so dashes stay purely structural in the instance directory name
+// "<config>-<slug>-disp-<8hex>", where the "-disp-<8hex>" signature the reaper
+// backstop matches must stay unambiguous.
 //
 // It is shared by `niwa dispatch` (which embeds the slug in the ephemeral
 // instance name) and `niwa create` (which uses it as the --name suffix), so both
 // commands normalize a custom name identically.
 func sanitizeInstanceSlug(raw string) string {
 	var b strings.Builder
-	prevHyphen := false
+	prevSep := false
 	for _, r := range strings.ToLower(raw) {
 		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
 			b.WriteRune(r)
-			prevHyphen = false
+			prevSep = false
 			continue
 		}
-		if !prevHyphen {
-			b.WriteByte('-')
-			prevHyphen = true
+		if !prevSep {
+			b.WriteByte('_')
+			prevSep = true
 		}
 	}
-	slug := strings.Trim(b.String(), "-")
+	slug := strings.Trim(b.String(), "_")
 	if r := []rune(slug); len(r) > maxDispatchSlugRunes {
-		slug = strings.TrimRight(string(r[:maxDispatchSlugRunes]), "-")
+		slug = strings.TrimRight(string(r[:maxDispatchSlugRunes]), "_")
 	}
 	return slug
 }

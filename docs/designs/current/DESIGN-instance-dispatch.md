@@ -122,12 +122,16 @@ exact race R36/R37 forbid); a timestamp (collisions when two dispatches start in
 same instant).
 
 **Optional `--name`/`-n` slug (additive, signature-preserving).** When the developer
-passes `--name <raw>`, it is sanitized into a slug (lowercase, `[a-z0-9]` runs collapsed
-to single hyphens, trimmed, length-capped; empty result falls back to no slug) and used
-two ways: it is inserted into the instance name BEFORE the signature suffix --
-`<config>-<slug>-disp-<8 random hex>` -- and it is forwarded to the session as
+passes `--name <raw>`, it is sanitized into a slug (lowercase, runs of characters outside
+`[a-z0-9]` collapsed to single underscores, trimmed, length-capped; empty result falls
+back to no slug) and used two ways: it is inserted into the instance name BEFORE the
+signature suffix -- `<config>-<slug>-disp-<8 random hex>` -- and it is forwarded to the
+session as
 `claude --bg --name <slug>` so the Claude session carries a human display name in Agent
-View. The random 8-hex is always kept, so the `-disp-<8hex>` end-anchored signature the
+View. The separator inside the slug is an underscore, so the slug is dash-free
+(`"My Feature!"` -> `my_feature`, and even a user-typed dash collapses: `"auth-layer"` ->
+`auth_layer`); this keeps dashes purely structural in `<config>-<slug>-disp-<8hex>`. The
+random 8-hex is always kept, so the `-disp-<8hex>` end-anchored signature the
 reaper backstop matches (`isDispatchInstanceName`, regex `-disp-[0-9a-f]{8}$`) is
 preserved and concurrency stays collision-safe even when two dispatches share a `--name`.
 The slug is additive: it never replaces the random token. With no `--name` (or an
