@@ -279,6 +279,35 @@ launched at the root, not only dispatched workers. This is wider than
 per-instance bypass; the opt-in ephemeral mode bounds it to workspaces that
 chose the feature.
 
+### Workspace plugins and skills at the root
+
+The root `.claude/settings.json` also carries the workspace's **plugins** and
+**marketplaces** (`enabledPlugins` / `extraKnownMarketplaces`), so a session
+launched at the workspace root — including a dispatched worker before its
+ephemeral instance is provisioned — loads the workspace's plugins and the skills
+they carry. This is the same `enabledPlugins` / `extraKnownMarketplaces` block an
+instance gets, with one exception below.
+
+Forwarding these into the root scaffold (rather than relying on the SessionStart
+hook to deliver them) is deliberate: Claude Code resolves plugins, marketplaces,
+hooks, and env from the launch directory's `settings.json` **at startup**, before
+the SessionStart hook runs. The hook injects only `additionalContext` and an
+instruction to `cd` into the instance; a mid-session `cd` cannot re-resolve plugin
+or settings configuration (the same reason it does not reload `CLAUDE.md`). So the
+only place a plugin can become available to a root-launched session is the root's
+own `settings.json`.
+
+The one exception is marketplaces with no root-resolvable path. A github-sourced
+marketplace (`org/repo`) hoists to the root unchanged. A `repo:`-sourced
+marketplace resolves to a directory inside an instance checkout (for example a
+private `tools` repo) that does not exist at the workspace root, so it has no
+root-stable path. Such a marketplace — and any plugin bound to it — is excluded
+from the root settings and a notice is printed at `niwa init` / `niwa apply` time
+(no silent drop). Those plugins still load normally inside a provisioned instance,
+where the `repo:` source resolves. In short: a root-launched session has the
+workspace's github-sourced plugins/skills; instance-local (`repo:`) plugins are
+available only once the session is inside its instance.
+
 ## Opting out
 
 The feature installs by default at `niwa init`. To skip it:
@@ -312,4 +341,11 @@ root, and the root config installs again.
   instance has no such marker and is never a target.
 - The root materializer (`internal/workspace/root_materializer.go`) reuses the
   shared `buildSettingsDoc`, so the root settings ride the same path the
-  instance settings do.
+  instance settings do for permissions, hooks, env, plugins, and marketplaces.
+  One field is deliberately filtered, not forwarded verbatim: the root receives
+  only the **root-hoistable** subset of marketplaces (see `rootHoistableConfig`).
+  github-sourced marketplaces hoist as-is; `repo:`-sourced ones point into an
+  instance checkout that does not exist at the root, so they and the plugins
+  bound to them are excluded and reported. Do not assume the root settings are a
+  byte-for-byte copy of an instance's — they match for everything except those
+  instance-local marketplaces.

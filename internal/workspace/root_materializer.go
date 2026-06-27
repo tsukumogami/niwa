@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/tsukumogami/niwa/internal/config"
 )
@@ -15,7 +16,10 @@ import (
 // (internal/workspace/rootskills). Each rootskills/<name>/SKILL.md is
 // materialized as a project skill under <workspaceRoot>/.claude/skills/<name>/
 // so a Claude Code session launched at the workspace root loads it from the cwd
-// regardless of plugin enablement (plugins are not enabled at the root today).
+// regardless of plugin enablement. These are niwa-owned skills (e.g. dispatch)
+// that must exist even when no plugin marketplace does; the workspace's own
+// plugins are forwarded separately into the root settings by writeRootSettings
+// (see rootHoistableConfig).
 //
 //go:embed rootskills
 var rootSkillsFS embed.FS
@@ -182,18 +186,33 @@ func writeRootSkills(workspaceRoot string) ([]string, error) {
 // effective [claude.settings] block (MergeInstanceOverrides) -- the same input
 // the instance-root materializer feeds to buildSettingsDoc -- so the
 // permissions.defaultMode value matches what an instance would get. The
+// effective plugins and marketplaces are forwarded too, filtered to the subset
+// that resolves at the workspace root (see rootHoistableConfig), so a
+// root-launched session loads the workspace's plugins/skills. The
 // SessionStart/SessionEnd hook entries and the ephemeral-mode flag are layered
 // on top via the SessionHooks injection.
 func writeRootSettings(cfg *config.WorkspaceConfig, workspaceRoot, niwaPath string, ephemeral bool) (string, error) {
 	effective := MergeInstanceOverrides(cfg)
 
+	// Forward only the plugins/marketplaces that have a root-resolvable form.
+	// repo:-sourced marketplaces point into an instance checkout that does not
+	// exist at the workspace root, so they (and the plugins bound to them) are
+	// excluded and reported -- never silently dropped.
+	rootPlugins, rootMarketplaces, hoistReports := rootHoistableConfig(effective.Plugins, effective.Claude.Marketplaces)
+
 	includeGit := false
-	var reports []string
+	reports := append([]string(nil), hoistReports...)
 	doc, err := buildSettingsDoc(BuildSettingsConfig{
 		// Permission posture: sourced exactly as the instance root sources it,
 		// from the effective [claude.settings] map. buildSettingsDoc maps the
 		// "permissions" key to permissions.defaultMode.
-		Settings:               effective.Claude.Settings,
+		Settings: effective.Claude.Settings,
+		// Plugins/marketplaces: the root-hoistable subset, so the workspace's
+		// plugins (and the skills they carry) load for a session launched at the
+		// workspace root, matching what an instance would get for the github-
+		// sourced entries.
+		Plugins:                rootPlugins,
+		Marketplaces:           rootMarketplaces,
 		BaseDir:                workspaceRoot,
 		IncludeGitInstructions: &includeGit,
 		UseAbsolutePaths:       true,
@@ -227,6 +246,78 @@ func writeRootSettings(cfg *config.WorkspaceConfig, workspaceRoot, niwaPath stri
 		return "", fmt.Errorf("writing workspace-root settings: %w", err)
 	}
 	return settingsPath, nil
+}
+
+// rootHoistableConfig partitions the effective workspace plugins and
+// marketplaces into the subset that loads at the workspace root and the subset
+// that does not. A root-launched session resolves its Claude config from the
+// workspace root, where no instance has been provisioned and no repos are
+// cloned, so an instance-relative source has no path to point at.
+//
+//   - github-sourced marketplaces ("org/repo") are root-stable: the source is a
+//     remote reference that resolves identically anywhere, so they hoist as-is.
+//   - repo:-sourced marketplaces ("repo:<name>/...") resolve to a directory
+//     inside an instance checkout (e.g. a private `tools` repo) that exists only
+//     once an instance is created. They have no root-resolvable path and are
+//     excluded.
+//
+// A plugin is kept only when its marketplace hoisted (or it carries no
+// "@marketplace" qualifier): Claude Code cannot enable a plugin from a
+// marketplace it does not know at the root. Excluded marketplaces and plugins
+// are returned as human-readable reports so the omission is visible rather than
+// silent; the caller surfaces them via emitReports.
+func rootHoistableConfig(plugins []string, marketplaces []config.MarketplaceConfig) (keptPlugins []string, keptMarketplaces []config.MarketplaceConfig, reports []string) {
+	// Registration names of the marketplaces that survived to the root. This is
+	// the set the plugin filter consults. github names derive without a
+	// repoIndex (the repo name), which is all the kept entries need.
+	rootMarketplaceNames := make(map[string]bool)
+	var excludedMarketplaces []string
+	for _, mc := range marketplaces {
+		if strings.HasPrefix(mc.Source, repoRefPrefix) {
+			excludedMarketplaces = append(excludedMarketplaces, mc.Source)
+			continue
+		}
+		keptMarketplaces = append(keptMarketplaces, mc)
+		if name, err := marketplaceRegistrationName(mc.Source, nil); err == nil && name != "" {
+			rootMarketplaceNames[name] = true
+		}
+	}
+
+	var excludedPlugins []string
+	for _, p := range plugins {
+		mkt := pluginMarketplace(p)
+		if mkt == "" || rootMarketplaceNames[mkt] {
+			keptPlugins = append(keptPlugins, p)
+			continue
+		}
+		excludedPlugins = append(excludedPlugins, p)
+	}
+
+	if len(excludedMarketplaces) > 0 {
+		reports = append(reports, fmt.Sprintf(
+			"workspace root: omitting %d instance-local marketplace(s) with no root-resolvable path (%s); their plugins load only inside a provisioned instance",
+			len(excludedMarketplaces), strings.Join(excludedMarketplaces, ", "),
+		))
+	}
+	if len(excludedPlugins) > 0 {
+		reports = append(reports, fmt.Sprintf(
+			"workspace root: omitting %d plugin(s) bound to an instance-local marketplace (%s); they load only inside a provisioned instance",
+			len(excludedPlugins), strings.Join(excludedPlugins, ", "),
+		))
+	}
+	return keptPlugins, keptMarketplaces, reports
+}
+
+// pluginMarketplace returns the marketplace registration name a plugin entry
+// binds to: the substring after the last "@" in a "plugin@marketplace" string.
+// Returns "" when the entry carries no "@" qualifier (or a trailing "@" with no
+// name), in which case the plugin is not tied to a specific marketplace.
+func pluginMarketplace(plugin string) string {
+	at := strings.LastIndexByte(plugin, '@')
+	if at < 0 || at == len(plugin)-1 {
+		return ""
+	}
+	return plugin[at+1:]
 }
 
 // writeRootClaudeMD writes <workspaceRoot>/CLAUDE.md with workspace-context
