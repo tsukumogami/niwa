@@ -1,5 +1,5 @@
 ---
-status: Planned
+status: Current
 problem: |
   niwa cannot materialize a verbatim-named, non-gitignored file at the two
   non-repo levels of a workspace -- the workspace root and each instance root.
@@ -26,7 +26,7 @@ upstream: docs/prds/PRD-mcp-root-instance-distribution.md
 
 ## Status
 
-Planned
+Current
 
 ## Context and Problem Statement
 

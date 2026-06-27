@@ -1,6 +1,6 @@
 ---
 schema: brief/v1
-status: Accepted
+status: Done
 problem: |
   niwa can distribute files into the repos it manages, but it cannot place a
   verbatim-named, non-gitignored file at the two non-repo levels of a workspace
@@ -25,7 +25,7 @@ motivating_context: |
 
 ## Status
 
-Accepted
+Done
 
 Authored as the BRIEF in a BRIEF -> PRD -> DESIGN -> PLAN chain for the
 mcp-root-instance-distribution feature. The downstream PRD owns the

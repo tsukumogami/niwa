@@ -1,5 +1,5 @@
 ---
-status: In Progress
+status: Done
 problem: |
   niwa cannot place a verbatim-named, non-gitignored file at the workspace root
   or at an instance root. The per-repo [files] mechanism forces a .local infix
@@ -18,7 +18,7 @@ upstream: docs/briefs/BRIEF-mcp-root-instance-distribution.md
 
 ## Status
 
-In Progress
+Done
 
 ## Problem Statement
 
