@@ -229,6 +229,7 @@ type WorkspaceConfig struct {
 	Env       EnvConfig               `toml:"env"`
 	Files     map[string]string       `toml:"files,omitempty"`
 	Instance  InstanceConfig          `toml:"instance,omitempty"`
+	Root      RootConfig              `toml:"root,omitempty"`
 	// Vault carries the optional [vault] block (anonymous [vault.provider]
 	// or named [vault.providers.<name>] shape, plus [vault].team_only).
 	// nil when the config declares no vault providers.
@@ -242,6 +243,16 @@ type InstanceConfig struct {
 	Claude *ClaudeOverride   `toml:"claude,omitempty"`
 	Env    EnvConfig         `toml:"env,omitempty"`
 	Files  map[string]string `toml:"files,omitempty"`
+}
+
+// RootConfig holds configuration for the workspace root -- the non-git parent
+// directory that holds the instance subdirectories. Today only [root.files] is
+// defined: a source-to-destination file-distribution table materialized
+// verbatim (no .local infix) at the workspace root, mirroring [instance.files]
+// for the instance root. The workspace root is not a git repository, so the
+// .local rewrite the per-repo [files] table applies has no purpose here.
+type RootConfig struct {
+	Files map[string]string `toml:"files,omitempty"`
 }
 
 // WorkspaceMeta holds top-level workspace metadata.

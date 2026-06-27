@@ -2256,3 +2256,134 @@ func TestFilesMaterializerNotifiesOnLocalInfixInjection(t *testing.T) {
 		t.Errorf("destination already containing .local must not emit a notice, got:\n%s", got)
 	}
 }
+
+// --- materializeVerbatimFiles (non-repo verbatim copy) ---
+
+func TestMaterializeVerbatimFilesSingleFileVerbatim(t *testing.T) {
+	tmpDir := t.TempDir()
+	configDir := filepath.Join(tmpDir, "config")
+	targetDir := filepath.Join(tmpDir, "target")
+	os.MkdirAll(configDir, 0o755)
+	os.MkdirAll(targetDir, 0o755)
+	os.WriteFile(filepath.Join(configDir, "mcp.json"), []byte(`{"mcpServers":{}}`), 0o644)
+
+	ctx := &MaterializeContext{ConfigDir: configDir, RepoDir: targetDir}
+	written, err := materializeVerbatimFiles(ctx, map[string]string{"mcp.json": ".mcp.json"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	want := filepath.Join(targetDir, ".mcp.json")
+	if len(written) != 1 || written[0] != want {
+		t.Fatalf("written = %v, want [%s]", written, want)
+	}
+	if _, err := os.Stat(want); err != nil {
+		t.Errorf("expected verbatim file at %s: %v", want, err)
+	}
+	// Crucially: NO .local infix was inserted.
+	if _, err := os.Stat(filepath.Join(targetDir, ".mcp.local.json")); err == nil {
+		t.Error("verbatim copy must not produce a .local-renamed file")
+	}
+}
+
+func TestMaterializeVerbatimFilesDirSourceVerbatim(t *testing.T) {
+	tmpDir := t.TempDir()
+	configDir := filepath.Join(tmpDir, "config")
+	targetDir := filepath.Join(tmpDir, "target")
+	os.MkdirAll(filepath.Join(configDir, "bundle", "sub"), 0o755)
+	os.MkdirAll(targetDir, 0o755)
+	os.WriteFile(filepath.Join(configDir, "bundle", "a.json"), []byte("a"), 0o644)
+	os.WriteFile(filepath.Join(configDir, "bundle", "sub", "b.md"), []byte("b"), 0o644)
+
+	ctx := &MaterializeContext{ConfigDir: configDir, RepoDir: targetDir}
+	written, err := materializeVerbatimFiles(ctx, map[string]string{"bundle/": "cfg/"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(written) != 2 {
+		t.Fatalf("expected 2 files, got %d: %v", len(written), written)
+	}
+	expected := map[string]bool{
+		filepath.Join(targetDir, "cfg", "a.json"):      true,
+		filepath.Join(targetDir, "cfg", "sub", "b.md"): true,
+	}
+	for _, w := range written {
+		if !expected[w] {
+			t.Errorf("unexpected/renamed written file: %q (expected verbatim names)", w)
+		}
+	}
+}
+
+func TestMaterializeVerbatimFilesEmptyDestSkipped(t *testing.T) {
+	tmpDir := t.TempDir()
+	configDir := filepath.Join(tmpDir, "config")
+	targetDir := filepath.Join(tmpDir, "target")
+	os.MkdirAll(configDir, 0o755)
+	os.MkdirAll(targetDir, 0o755)
+	os.WriteFile(filepath.Join(configDir, "mcp.json"), []byte("{}"), 0o644)
+
+	ctx := &MaterializeContext{ConfigDir: configDir, RepoDir: targetDir}
+	written, err := materializeVerbatimFiles(ctx, map[string]string{"mcp.json": ""})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(written) != 0 {
+		t.Errorf("empty-dest entry should be skipped, got %v", written)
+	}
+}
+
+func TestMaterializeVerbatimFilesRejectsSourceTraversal(t *testing.T) {
+	tmpDir := t.TempDir()
+	configDir := filepath.Join(tmpDir, "config")
+	targetDir := filepath.Join(tmpDir, "target")
+	os.MkdirAll(configDir, 0o755)
+	os.MkdirAll(targetDir, 0o755)
+
+	ctx := &MaterializeContext{ConfigDir: configDir, RepoDir: targetDir}
+	if _, err := materializeVerbatimFiles(ctx, map[string]string{"../../../etc/passwd": ".mcp.json"}); err == nil {
+		t.Fatal("expected error for source path traversal")
+	}
+}
+
+func TestMaterializeVerbatimFilesRejectsDestEscape(t *testing.T) {
+	tmpDir := t.TempDir()
+	configDir := filepath.Join(tmpDir, "config")
+	targetDir := filepath.Join(tmpDir, "target")
+	os.MkdirAll(configDir, 0o755)
+	os.MkdirAll(targetDir, 0o755)
+	os.WriteFile(filepath.Join(configDir, "mcp.json"), []byte("{}"), 0o644)
+
+	ctx := &MaterializeContext{ConfigDir: configDir, RepoDir: targetDir}
+	if _, err := materializeVerbatimFiles(ctx, map[string]string{"mcp.json": "../escape.json"}); err == nil {
+		t.Fatal("expected error for destination escaping the target root")
+	}
+}
+
+func TestMaterializeVerbatimFilesMode0600AndRecordsSource(t *testing.T) {
+	tmpDir := t.TempDir()
+	configDir := filepath.Join(tmpDir, "config")
+	targetDir := filepath.Join(tmpDir, "target")
+	os.MkdirAll(configDir, 0o755)
+	os.MkdirAll(targetDir, 0o755)
+	os.WriteFile(filepath.Join(configDir, "mcp.json"), []byte("{}"), 0o644)
+
+	ctx := &MaterializeContext{
+		ConfigDir:    configDir,
+		RepoDir:      targetDir,
+		SourceTuples: map[string][]SourceEntry{},
+	}
+	written, err := materializeVerbatimFiles(ctx, map[string]string{"mcp.json": ".mcp.json"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	info, err := os.Stat(written[0])
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Errorf("verbatim file mode = %o, want 0o600", got)
+	}
+	srcs := ctx.SourceTuples[written[0]]
+	if len(srcs) != 1 || srcs[0].SourceID != "mcp.json" {
+		t.Errorf("source not recorded for fingerprinting: %v", srcs)
+	}
+}

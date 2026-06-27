@@ -65,6 +65,17 @@ content_dir = "claude"
 # [files]
 # "extensions/design.md" = ".claude/shirabe-extensions/"
 #
+# --- Verbatim file distribution at the non-repo levels ---
+# [files] above targets each managed repo and inserts a .local infix so the
+# output stays gitignored. The two tables below target the non-git levels --
+# the instance root and the workspace root -- and copy VERBATIM (no .local),
+# so a tool config that loads by an exact filename keeps its name. Example: a
+# Claude Code project .mcp.json available to sessions started at those levels.
+# [instance.files]
+# "mcp.json" = ".mcp.json"
+# [root.files]
+# "mcp.json" = ".mcp.json"
+#
 # --- Vault providers (optional) ---
 # Pick ONE shape. The anonymous singular shape lets vault:// URIs omit
 # the provider name (e.g., vault://API_KEY). The named shape allows

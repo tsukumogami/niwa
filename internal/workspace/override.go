@@ -19,6 +19,21 @@ type EffectiveConfig struct {
 	Env     config.EnvConfig
 	Files   map[string]string
 	Plugins []string
+
+	// InstanceFiles is the verbatim file-distribution table for the instance
+	// root, sourced ONLY from [instance.files]. It is deliberately kept
+	// separate from Files (which blends the repo-level [files] table with
+	// [instance.files] via the legacy seeding in MergeInstanceOverrides) so the
+	// instance-root materializer never distributes repo-targeted [files]
+	// entries. Populated only by MergeInstanceOverrides; nil on the per-repo
+	// MergeOverrides path.
+	InstanceFiles map[string]string
+
+	// RootFiles is the verbatim file-distribution table for the workspace root,
+	// sourced from [root.files]. Like InstanceFiles it is materialized verbatim
+	// (no .local infix) at a non-git level. Populated only by
+	// MergeInstanceOverrides.
+	RootFiles map[string]string
 }
 
 // MergeOverrides produces the effective configuration for a repo by combining
@@ -165,6 +180,13 @@ func MergeInstanceOverrides(ws *config.WorkspaceConfig) EffectiveConfig {
 		Env:     copyEnv(ws.Env),
 		Files:   copyStringMap(ws.Files),
 		Plugins: wsPlugins,
+		// Verbatim non-repo file tables, each sourced ONLY from its own table
+		// (not from the repo-level [files] seeding above). Set before the
+		// early-return below so [root.files] still surfaces when there are no
+		// [instance.*] overrides. Empty-valued keys are dropped (no base table
+		// at these single-source levels for an empty value to remove from).
+		InstanceFiles: nonEmptyStringMap(ws.Instance.Files),
+		RootFiles:     nonEmptyStringMap(ws.Root.Files),
 	}
 
 	override := ws.Instance
@@ -1150,6 +1172,28 @@ func copyStringMap(m map[string]string) map[string]string {
 	}
 	out := make(map[string]string, len(m))
 	maps.Copy(out, m)
+	return out
+}
+
+// nonEmptyStringMap copies m, dropping keys whose value is the empty string.
+// The verbatim non-repo file tables (InstanceFiles, RootFiles) are
+// single-source, so an empty value is not "remove a workspace default" (there
+// is none) -- it is simply an entry with no destination, which is skipped.
+// Returns nil when m is nil or yields no non-empty entries.
+func nonEmptyStringMap(m map[string]string) map[string]string {
+	if len(m) == 0 {
+		return nil
+	}
+	var out map[string]string
+	for k, v := range m {
+		if v == "" {
+			continue
+		}
+		if out == nil {
+			out = make(map[string]string, len(m))
+		}
+		out[k] = v
+	}
 	return out
 }
 

@@ -338,3 +338,85 @@ func TestPluginMarketplace(t *testing.T) {
 		}
 	}
 }
+
+func TestMaterializeWorkspaceRoot_RootFilesVerbatim(t *testing.T) {
+	root := t.TempDir()
+	configDir := filepath.Join(root, ".niwa")
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(configDir, "mcp.json"), []byte(`{"mcpServers":{}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.WorkspaceConfig{
+		Workspace: config.WorkspaceMeta{Name: "ws"},
+		Root:      config.RootConfig{Files: map[string]string{"mcp.json": ".mcp.json"}},
+	}
+
+	written, err := MaterializeWorkspaceRoot(cfg, root, RootMaterializeOptions{
+		NiwaPath:  "/abs/niwa",
+		ConfigDir: configDir,
+	})
+	if err != nil {
+		t.Fatalf("MaterializeWorkspaceRoot: %v", err)
+	}
+
+	verbatim := filepath.Join(root, ".mcp.json")
+	if _, statErr := os.Stat(verbatim); statErr != nil {
+		t.Errorf("expected verbatim .mcp.json at workspace root: %v", statErr)
+	}
+	if _, statErr := os.Stat(filepath.Join(root, ".mcp.local.json")); statErr == nil {
+		t.Error("workspace-root distribution must not insert a .local infix")
+	}
+	if !contains(written, verbatim) {
+		t.Errorf("written set %v should include %s", written, verbatim)
+	}
+}
+
+func contains(haystack []string, needle string) bool {
+	for _, h := range haystack {
+		if h == needle {
+			return true
+		}
+	}
+	return false
+}
+
+func TestInstallWorkspaceRootSettings_InstanceFilesVerbatimTracked(t *testing.T) {
+	tmp := t.TempDir()
+	configDir := filepath.Join(tmp, ".niwa")
+	instanceRoot := filepath.Join(tmp, "instance")
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(instanceRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(configDir, "mcp.json"), []byte(`{"mcpServers":{}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.WorkspaceConfig{
+		Workspace: config.WorkspaceMeta{Name: "ws"},
+		Instance:  config.InstanceConfig{Files: map[string]string{"mcp.json": ".mcp.json"}},
+	}
+
+	written, err := InstallWorkspaceRootSettings(cfg, configDir, instanceRoot, map[string]string{})
+	if err != nil {
+		t.Fatalf("InstallWorkspaceRootSettings: %v", err)
+	}
+
+	verbatim := filepath.Join(instanceRoot, ".mcp.json")
+	if _, statErr := os.Stat(verbatim); statErr != nil {
+		t.Errorf("expected verbatim .mcp.json at instance root: %v", statErr)
+	}
+	if _, statErr := os.Stat(filepath.Join(instanceRoot, ".mcp.local.json")); statErr == nil {
+		t.Error("instance-root distribution must not insert a .local infix")
+	}
+	// The returned set feeds ManagedFiles, which drives drift + cleanRemovedFiles.
+	// Tracking the path here is what makes removal-cleanup work on the next apply.
+	if !contains(written, verbatim) {
+		t.Errorf("written set %v should include %s (so it is tracked in ManagedFiles)", written, verbatim)
+	}
+}

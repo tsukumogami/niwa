@@ -196,6 +196,7 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 	// Local git server
 	ctx.Step(`^a local git server is set up$`, aLocalGitServerIsSetUp)
 	ctx.Step(`^a config repo "([^"]*)" exists with body:$`, aConfigRepoExistsWithBody)
+	ctx.Step(`^a config repo "([^"]*)" exists with a "([^"]*)" source file and body:$`, aConfigRepoWithSourceFileAndBody)
 	ctx.Step(`^an overlay repo "([^"]*)" exists with body:$`, anOverlayRepoExistsWithBody)
 	ctx.Step(`^a source repo "([^"]*)" exists$`, aSourceRepoExists)
 	ctx.Step(`^I run niwa init from config repo "([^"]*)"$`, iRunNiwaInitFromConfigRepo)

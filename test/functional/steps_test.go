@@ -927,6 +927,32 @@ func aConfigRepoExistsWithBody(ctx context.Context, name string, body *godog.Doc
 	return ctx, nil
 }
 
+// aConfigRepoWithSourceFileAndBody creates a config repo carrying both the
+// workspace.toml (from the docstring) and an additional source file the config
+// can distribute (e.g. an mcp.json referenced by [instance.files]/[root.files]).
+// The source file gets a small, recognizable MCP-config body so a materialized
+// copy can be asserted on by content.
+func aConfigRepoWithSourceFileAndBody(ctx context.Context, name, srcFile string, body *godog.DocString) (context.Context, error) {
+	s := getState(ctx)
+	if s == nil {
+		return ctx, fmt.Errorf("no test state")
+	}
+	content := body.Content
+	for repoName, repoURL := range s.repoURLs {
+		content = strings.ReplaceAll(content, "{repo:"+repoName+"}", repoURL)
+	}
+	files := map[string]string{
+		"workspace.toml": content,
+		srcFile:          `{"mcpServers":{"demo":{"command":"demo"}}}`,
+	}
+	url, err := s.gitServer.ConfigRepoFiles(name, files)
+	if err != nil {
+		return ctx, fmt.Errorf("creating config repo %q with source file %q: %w", name, srcFile, err)
+	}
+	s.repoURLs[name] = url
+	return ctx, nil
+}
+
 // anOverlayRepoExistsWithBody creates a bare repo with a committed
 // workspace-overlay.toml and stores its file:// URL in state keyed by name.
 func anOverlayRepoExistsWithBody(ctx context.Context, name string, body *godog.DocString) (context.Context, error) {

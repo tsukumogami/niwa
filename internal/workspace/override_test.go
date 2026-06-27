@@ -1523,3 +1523,77 @@ func TestMergeWorkspaceOverlay_RepoOverrideDeepCopy(t *testing.T) {
 		t.Errorf("original ws repo-a hook script = %q, want original.sh", origHooks[0].Scripts[0])
 	}
 }
+
+func TestMergeInstanceOverridesPopulatesInstanceAndRootFiles(t *testing.T) {
+	ws := &config.WorkspaceConfig{
+		Instance: config.InstanceConfig{
+			Files: map[string]string{"mcp.json": ".mcp.json"},
+		},
+		Root: config.RootConfig{
+			Files: map[string]string{"mcp.json": ".mcp.json"},
+		},
+	}
+	eff := MergeInstanceOverrides(ws)
+	if got := eff.InstanceFiles["mcp.json"]; got != ".mcp.json" {
+		t.Errorf("InstanceFiles[mcp.json] = %q, want %q", got, ".mcp.json")
+	}
+	if got := eff.RootFiles["mcp.json"]; got != ".mcp.json" {
+		t.Errorf("RootFiles[mcp.json] = %q, want %q", got, ".mcp.json")
+	}
+}
+
+// Conflation guard: the repo-level [files] table must NOT surface in
+// InstanceFiles. The legacy Files field still blends the two (unchanged), but
+// the dedicated InstanceFiles field is sourced only from [instance.files].
+func TestMergeInstanceOverridesInstanceFilesExcludesRepoFiles(t *testing.T) {
+	ws := &config.WorkspaceConfig{
+		Files: map[string]string{"repo-src.md": "repo-dest.md"},
+		// No [instance.files], no [root.files].
+	}
+	eff := MergeInstanceOverrides(ws)
+	if len(eff.InstanceFiles) != 0 {
+		t.Errorf("InstanceFiles should be empty when only repo [files] is set, got %v", eff.InstanceFiles)
+	}
+	if len(eff.RootFiles) != 0 {
+		t.Errorf("RootFiles should be empty when only repo [files] is set, got %v", eff.RootFiles)
+	}
+	// The legacy blended Files field is left untouched.
+	if got := eff.Files["repo-src.md"]; got != "repo-dest.md" {
+		t.Errorf("legacy Files[repo-src.md] = %q, want %q", got, "repo-dest.md")
+	}
+}
+
+// [root.files] must surface even when there are no [instance.*] overrides
+// (the early-return path in MergeInstanceOverrides must not skip it).
+func TestMergeInstanceOverridesRootFilesWithoutInstanceOverrides(t *testing.T) {
+	ws := &config.WorkspaceConfig{
+		Root: config.RootConfig{
+			Files: map[string]string{"mcp.json": ".mcp.json"},
+		},
+	}
+	eff := MergeInstanceOverrides(ws)
+	if got := eff.RootFiles["mcp.json"]; got != ".mcp.json" {
+		t.Errorf("RootFiles[mcp.json] = %q, want %q (early-return skipped root.files)", got, ".mcp.json")
+	}
+}
+
+func TestMergeInstanceOverridesDropsEmptyValuedFiles(t *testing.T) {
+	ws := &config.WorkspaceConfig{
+		Instance: config.InstanceConfig{
+			Files: map[string]string{"keep.json": ".keep.json", "drop.json": ""},
+		},
+		Root: config.RootConfig{
+			Files: map[string]string{"drop.json": ""},
+		},
+	}
+	eff := MergeInstanceOverrides(ws)
+	if _, ok := eff.InstanceFiles["drop.json"]; ok {
+		t.Error("empty-valued instance.files entry should be dropped")
+	}
+	if got := eff.InstanceFiles["keep.json"]; got != ".keep.json" {
+		t.Errorf("InstanceFiles[keep.json] = %q, want %q", got, ".keep.json")
+	}
+	if len(eff.RootFiles) != 0 {
+		t.Errorf("RootFiles with only an empty value should be nil/empty, got %v", eff.RootFiles)
+	}
+}

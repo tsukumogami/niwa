@@ -369,6 +369,17 @@ func InstallWorkspaceRootSettings(cfg *config.WorkspaceConfig, configDir, instan
 	// shielding them from cleanRemovedFiles forever.
 	written = append(written, installedHookPaths...)
 
+	// Distribute [instance.files] verbatim (no .local) to the instance root.
+	// Reuse the MaterializeContext already built above (RepoDir=instanceRoot,
+	// ConfigDir=configDir). Appending to written joins these files to the
+	// instance's ManagedFiles set, so drift detection and cleanRemovedFiles
+	// apply: dropping an [instance.files] entry deletes the file on next apply.
+	instanceFiles, err := materializeVerbatimFiles(mctx, effective.InstanceFiles)
+	if err != nil {
+		return nil, fmt.Errorf("materializing instance-root files: %w", err)
+	}
+	written = append(written, instanceFiles...)
+
 	return written, nil
 }
 
