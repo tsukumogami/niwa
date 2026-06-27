@@ -1025,3 +1025,52 @@ auto_update = true
 		t.Errorf("error should mention missing source, got: %v", err)
 	}
 }
+
+func TestParseRootAndInstanceFiles(t *testing.T) {
+	input := `
+[workspace]
+name = "test"
+
+[[sources]]
+org = "myorg"
+
+[files]
+"repo-src.md" = "repo-dest.md"
+
+[instance.files]
+"mcp.json" = ".mcp.json"
+
+[root.files]
+"mcp.json" = ".mcp.json"
+`
+	result, err := Parse([]byte(input))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	cfg := result.Config
+
+	if got := cfg.Instance.Files["mcp.json"]; got != ".mcp.json" {
+		t.Errorf("instance.files[mcp.json] = %q, want %q", got, ".mcp.json")
+	}
+	if got := cfg.Root.Files["mcp.json"]; got != ".mcp.json" {
+		t.Errorf("root.files[mcp.json] = %q, want %q", got, ".mcp.json")
+	}
+	if got := cfg.Files["repo-src.md"]; got != "repo-dest.md" {
+		t.Errorf("repo-level files[repo-src.md] = %q, want %q", got, "repo-dest.md")
+	}
+	// The three tables are independent: a repo-level entry must not leak into
+	// the instance or root tables, and vice versa.
+	if _, ok := cfg.Root.Files["repo-src.md"]; ok {
+		t.Error("repo-level [files] entry leaked into [root.files]")
+	}
+	if _, ok := cfg.Instance.Files["repo-src.md"]; ok {
+		t.Error("repo-level [files] entry leaked into [instance.files]")
+	}
+
+	// [root.files] must be a known field (no unknown-field warning for it).
+	for _, w := range result.Warnings {
+		if strings.Contains(w, "root") {
+			t.Errorf("unexpected warning mentioning root: %q", w)
+		}
+	}
+}
