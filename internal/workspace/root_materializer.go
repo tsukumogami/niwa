@@ -83,6 +83,11 @@ type RootMaterializeOptions struct {
 	// materialized config records the workspace's ephemeral posture alongside
 	// the hooks that act on it.
 	EphemeralSessionMode bool
+
+	// ConfigDir is the workspace config source directory (typically
+	// <workspaceRoot>/.niwa). It is the source root for [root.files] verbatim
+	// file distribution; required only when [root.files] is non-empty.
+	ConfigDir string
 }
 
 // MaterializeWorkspaceRoot writes the workspace-root managed config:
@@ -130,6 +135,28 @@ func MaterializeWorkspaceRoot(cfg *config.WorkspaceConfig, workspaceRoot string,
 		return nil, err
 	}
 	written = append(written, skillPaths...)
+
+	// Distribute [root.files] verbatim (no .local) to the workspace root.
+	// Unlike the instance root, the workspace root has no managed-file state
+	// store, so these writes are overwrite-idempotent like the other
+	// root-managed files (settings.json, CLAUDE.md, skills): re-written every
+	// apply, not removal-cleaned. The returned paths are reported but the
+	// callers do not yet track them.
+	if rootFiles := MergeInstanceOverrides(cfg).RootFiles; len(rootFiles) > 0 {
+		if opts.ConfigDir == "" {
+			return nil, fmt.Errorf("materializing workspace-root files: [root.files] is set but no config dir was provided")
+		}
+		mctx := &MaterializeContext{
+			Config:    cfg,
+			RepoDir:   workspaceRoot,
+			ConfigDir: opts.ConfigDir,
+		}
+		filePaths, fErr := materializeVerbatimFiles(mctx, rootFiles)
+		if fErr != nil {
+			return nil, fmt.Errorf("materializing workspace-root files: %w", fErr)
+		}
+		written = append(written, filePaths...)
+	}
 
 	return written, nil
 }

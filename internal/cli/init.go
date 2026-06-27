@@ -766,6 +766,7 @@ func runInit(cmd *cobra.Command, args []string) error {
 	if !initNoEphemeralSessions && rootConfigInstalls(mode) {
 		if _, mErr := workspace.MaterializeWorkspaceRoot(result.Config, workspaceRoot, workspace.RootMaterializeOptions{
 			EphemeralSessionMode: true,
+			ConfigDir:            filepath.Join(workspaceRoot, workspace.StateDir),
 		}); mErr != nil {
 			fmt.Fprintf(cmd.ErrOrStderr(), "warning: could not install workspace-root session config: %v\n", mErr)
 		}
