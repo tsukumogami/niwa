@@ -1204,7 +1204,40 @@ func (f *FilesMaterializer) Materialize(ctx *MaterializeContext) ([]string, erro
 	return written, nil
 }
 
-// materializeFile copies a single file from the config directory to the repo.
+// writeManagedFile is the shared copy core for distributed files: it validates
+// that targetPath stays within ctx.RepoDir, creates parent directories, writes
+// data with the restrictive secretFileMode, and records (sourceID, content
+// hash) for drift fingerprinting. The per-level rename strategy (the per-repo
+// .local infix vs. verbatim at the non-repo levels) is applied by the caller
+// before it computes targetPath; this helper is rename-agnostic so the repo and
+// non-repo paths share one implementation of the actual file I/O and tracking.
+func (ctx *MaterializeContext) writeManagedFile(targetPath, sourceID string, data []byte) error {
+	if err := checkContainment(targetPath, ctx.RepoDir); err != nil {
+		return fmt.Errorf("file destination %q: %w", targetPath, err)
+	}
+
+	targetDir := filepath.Dir(targetPath)
+	if err := os.MkdirAll(targetDir, 0o755); err != nil {
+		return fmt.Errorf("creating directory %s: %w", targetDir, err)
+	}
+
+	if err := os.WriteFile(targetPath, data, secretFileMode); err != nil {
+		return fmt.Errorf("writing file %s: %w", targetPath, err)
+	}
+
+	// Record the source (path + content-hash) for fingerprinting.
+	// Hashing the already-loaded bytes avoids a second file read.
+	sum := sha256.Sum256(data)
+	ctx.recordSources(targetPath, []SourceEntry{{
+		Kind:         SourceKindPlaintext,
+		SourceID:     sourceID,
+		VersionToken: "sha256:" + hex.EncodeToString(sum[:]),
+	}})
+	return nil
+}
+
+// materializeFile copies a single file from the config directory to the repo,
+// applying the per-repo .local rename strategy.
 func (f *FilesMaterializer) materializeFile(ctx *MaterializeContext, src, dest string) ([]string, error) {
 	srcPath := filepath.Join(ctx.ConfigDir, src)
 	if err := checkContainment(srcPath, ctx.ConfigDir); err != nil {
@@ -1235,29 +1268,118 @@ func (f *FilesMaterializer) materializeFile(ctx *MaterializeContext, src, dest s
 		targetPath = filepath.Join(ctx.RepoDir, destDir, rewritten)
 	}
 
-	if err := checkContainment(targetPath, ctx.RepoDir); err != nil {
-		return nil, fmt.Errorf("file destination %q: %w", dest, err)
+	if err := ctx.writeManagedFile(targetPath, src, data); err != nil {
+		return nil, err
 	}
-
-	targetDir := filepath.Dir(targetPath)
-	if err := os.MkdirAll(targetDir, 0o755); err != nil {
-		return nil, fmt.Errorf("creating directory %s: %w", targetDir, err)
-	}
-
-	if err := os.WriteFile(targetPath, data, secretFileMode); err != nil {
-		return nil, fmt.Errorf("writing file %s: %w", targetPath, err)
-	}
-
-	// Record the source (path + content-hash) for fingerprinting.
-	// Hashing the already-loaded bytes avoids a second file read.
-	sum := sha256.Sum256(data)
-	ctx.recordSources(targetPath, []SourceEntry{{
-		Kind:         SourceKindPlaintext,
-		SourceID:     src,
-		VersionToken: "sha256:" + hex.EncodeToString(sum[:]),
-	}})
-
 	return []string{targetPath}, nil
+}
+
+// materializeVerbatimFiles copies the given source-to-destination mappings into
+// ctx.RepoDir VERBATIM: the destination name the author wrote is used as-is, with
+// no .local infix inserted. It is the non-repo (workspace-root and instance-root)
+// counterpart to FilesMaterializer's per-repo .local copy, sharing the same
+// containment, write, and source-recording core (writeManagedFile). Source and
+// destination containment are enforced exactly as the repo path enforces them.
+// Empty-string destinations are skipped (removal semantics). Returns the written
+// paths so the caller can track them as managed files.
+func materializeVerbatimFiles(ctx *MaterializeContext, files map[string]string) ([]string, error) {
+	if len(files) == 0 {
+		return nil, nil
+	}
+
+	// Sort source keys for deterministic output.
+	sources := make([]string, 0, len(files))
+	for src := range files {
+		sources = append(sources, src)
+	}
+	sort.Strings(sources)
+
+	var written []string
+	for _, src := range sources {
+		dest := files[src]
+		if dest == "" {
+			continue // removed via empty-string override
+		}
+		var (
+			w   []string
+			err error
+		)
+		if strings.HasSuffix(src, "/") {
+			w, err = materializeVerbatimDir(ctx, src, dest)
+		} else {
+			w, err = materializeVerbatimFile(ctx, src, dest)
+		}
+		if err != nil {
+			return nil, err
+		}
+		written = append(written, w...)
+	}
+	return written, nil
+}
+
+// materializeVerbatimFile copies a single file verbatim (no .local rename).
+func materializeVerbatimFile(ctx *MaterializeContext, src, dest string) ([]string, error) {
+	srcPath := filepath.Join(ctx.ConfigDir, src)
+	if err := checkContainment(srcPath, ctx.ConfigDir); err != nil {
+		return nil, fmt.Errorf("file source %q: %w", src, err)
+	}
+
+	data, err := os.ReadFile(srcPath)
+	if err != nil {
+		return nil, fmt.Errorf("reading file %s: %w", src, err)
+	}
+
+	// Verbatim: a directory destination (trailing /) places the file under its
+	// own basename unchanged; an explicit destination is used as written.
+	var targetPath string
+	if strings.HasSuffix(dest, "/") {
+		targetPath = filepath.Join(ctx.RepoDir, dest, filepath.Base(src))
+	} else {
+		targetPath = filepath.Join(ctx.RepoDir, dest)
+	}
+
+	if err := ctx.writeManagedFile(targetPath, src, data); err != nil {
+		return nil, err
+	}
+	return []string{targetPath}, nil
+}
+
+// materializeVerbatimDir walks a source directory and copies each file verbatim
+// (no .local rename), preserving directory structure under dest.
+func materializeVerbatimDir(ctx *MaterializeContext, src, dest string) ([]string, error) {
+	srcDir := filepath.Join(ctx.ConfigDir, strings.TrimSuffix(src, "/"))
+	if err := checkContainment(srcDir, ctx.ConfigDir); err != nil {
+		return nil, fmt.Errorf("directory source %q: %w", src, err)
+	}
+
+	var written []string
+	walkErr := filepath.Walk(srcDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.IsDir() {
+			return nil
+		}
+		rel, err := filepath.Rel(srcDir, path)
+		if err != nil {
+			return fmt.Errorf("computing relative path: %w", err)
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return fmt.Errorf("reading %s: %w", path, err)
+		}
+		targetPath := filepath.Join(ctx.RepoDir, strings.TrimSuffix(dest, "/"), rel)
+		sourceID := filepath.Join(strings.TrimSuffix(src, "/"), rel)
+		if err := ctx.writeManagedFile(targetPath, sourceID, data); err != nil {
+			return err
+		}
+		written = append(written, targetPath)
+		return nil
+	})
+	if walkErr != nil {
+		return nil, fmt.Errorf("walking directory %s: %w", src, walkErr)
+	}
+	return written, nil
 }
 
 // materializeDir walks a source directory and copies each file to the
@@ -1321,30 +1443,12 @@ func (f *FilesMaterializer) materializeDir(ctx *MaterializeContext, src, dest st
 			}
 		}
 
-		if err := checkContainment(targetPath, ctx.RepoDir); err != nil {
-			return fmt.Errorf("file destination %q: %w", targetPath, err)
-		}
-
-		targetDir := filepath.Dir(targetPath)
-		if err := os.MkdirAll(targetDir, 0o755); err != nil {
-			return fmt.Errorf("creating directory %s: %w", targetDir, err)
-		}
-
-		if err := os.WriteFile(targetPath, data, secretFileMode); err != nil {
-			return fmt.Errorf("writing %s: %w", targetPath, err)
-		}
-
-		// Record (source-rel-path, content-hash) so fingerprinting
-		// treats each file in the walked tree as its own source.
-		// Using the path relative to srcDir keeps the SourceID stable
+		// Record the source relative to srcDir so the SourceID is stable
 		// across platforms and independent of ctx.ConfigDir.
-		sum := sha256.Sum256(data)
 		relFromConfig := filepath.Join(strings.TrimSuffix(src, "/"), rel)
-		ctx.recordSources(targetPath, []SourceEntry{{
-			Kind:         SourceKindPlaintext,
-			SourceID:     relFromConfig,
-			VersionToken: "sha256:" + hex.EncodeToString(sum[:]),
-		}})
+		if err := ctx.writeManagedFile(targetPath, relFromConfig, data); err != nil {
+			return err
+		}
 
 		written = append(written, targetPath)
 		return nil
