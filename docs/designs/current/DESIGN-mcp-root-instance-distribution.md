@@ -250,6 +250,43 @@ is the supported way to auto-load the delivered MCP server today.
 
 ## Solution Architecture
 
+### Config example (the motivating case)
+
+To deliver the same `.mcp.json` to the workspace root and every instance root,
+an author adds two tables to `workspace.toml`. The key is the source path
+(relative to the `.niwa` config dir); the value is the verbatim destination (an
+explicit filename, no trailing slash, so no `.local` is inserted):
+
+```toml
+# .niwa/workspace.toml
+
+# Workspace root (the parent dir holding the instance subdirectories).
+[root.files]
+"mcp.json" = ".mcp.json"
+
+# Every instance root (the now-live table).
+[instance.files]
+"mcp.json" = ".mcp.json"
+
+# So a session at either level auto-loads the project MCP server without a
+# per-session trust prompt. permissions = "bypass" maps to Claude Code's
+# bypassPermissions mode (see Decision 5); it is the supported way to suppress
+# the prompt today. Drop this block if a trust prompt is acceptable.
+[claude.settings]
+permissions = "bypass"
+```
+
+Given a source file `mcp.json` in the config dir, `niwa apply` produces
+`<workspaceRoot>/.mcp.json` and `<eachInstanceRoot>/.mcp.json` verbatim (and
+`niwa create` produces it at a new instance root). The source is named
+`mcp.json` rather than `.mcp.json` only to keep it a visible template in the
+config repo; mapping `".mcp.json" = ".mcp.json"` works identically.
+
+The `[claude.settings]` block is independent of the file tables: it is the
+existing settings surface, shown here because the trust-prompt behavior
+(Decision 5) is part of making the *delivered* file useful. A workspace that
+already runs in `bypassPermissions` mode needs no addition.
+
 ### Components
 
 **`config.RootConfig`** (`internal/config/config.go`) -- new
