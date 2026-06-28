@@ -19,6 +19,12 @@ The feasibility question is settled: the mechanism works end-to-end with no niwa
 code changes and no Agent SDK. Two design problems remain — both demonstrated
 live, both downstream design work, neither a feasibility blocker.
 
+A later follow-up probe (2026-06-27) added one more empirical finding that
+reshaped the garbage-collection contract: the Claude Code job entry lifecycle
+across the done/idle/delete states. It is recorded below under "Job-entry
+lifecycle across done/idle/delete" and grounds the DESIGN's delete-only,
+entry-present teardown rule (Decision 6 revision).
+
 ## Question
 
 niwa's model distinguishes a *workspace* (the root from `niwa init`) from a
@@ -95,6 +101,48 @@ were read from the log.
   agents` launch and the dispatched workers all presented `source:startup`,
   `agent_type:claude`; the coordinator launch spuriously created an instance.
 
+## Job-entry lifecycle across done/idle/delete (follow-up probe, 2026-06-27)
+
+The original spike settled feasibility but left the garbage-collection
+discriminator coarse: it knew `SessionEnd` was best-effort and keyed teardown on a
+mapping, but it did not pin down what observable signal distinguishes "the session
+ended / is gone" from "the session finished a task but is still resumable in the
+Agent View." A follow-up probe on a live machine (against real
+`~/.claude/jobs/*/state.json` plus a capture probe) settled it:
+
+- **A finished background session stays resumable for a long time, with its job
+  entry intact.** Three `template: "bg"` sessions in `state: "done"` had
+  `firstTerminalAt` stamped 37 min – 2 h 13 m *before* their last heartbeat — they
+  finished a task, recorded `done` + `firstTerminalAt`, and kept living (resumable)
+  for hours, job entry present the whole time.
+- **Explicit deletion is what removes the job entry.** A real dispatched
+  `template: "bg"` worker (ephemeral mode on) went `done` + `firstTerminalAt`
+  stamped, and its `~/.claude/jobs/<id>/` entry stayed present for 4+ minutes
+  ("completed but resumable" in the Agent View). Pressing **Ctrl+X twice (delete)**
+  removed the entry — the last recorded state was still `done` /
+  `firstTerminalAt`-set, so removal was driven by the delete, not by the terminal
+  state. A non-terminal interactive session deleted the same way also lost its
+  entry.
+
+**Conclusion (verified end to end):** completion and idle KEEP the
+`~/.claude/jobs/<id>/` entry; explicit delete REMOVES it. So **entry-present** is a
+faithful proxy for "the session still exists in the Agent View" and **entry-gone**
+is a faithful proxy for "the developer deleted it." This is the discriminator the
+GC must key on — not terminal `state`, not `firstTerminalAt`, not an idle TTL, each
+of which is true of a live-but-resumable session.
+
+**Key Claude Code facts (documented).** `SessionEnd` `reason` values are `clear`,
+`resume` ("suspended for later resumption"), `logout`, `prompt_input_exit`,
+`bypass_permissions_disabled`, and `other`. None uniquely means "the user deleted
+the session" — deletion is observable only as the job entry disappearing. The
+job-state file is undocumented and internal, so every reader must fail safe and
+absent fields decode to zero.
+
+**Not probed:** the ~1-hour Agent-View supervisor process-stop on a finished bg
+session. Whether the job entry survives that stop is unknown; the DESIGN's
+Decision 6 records how the contract handles that residual (accept it, with an
+optional long-TTL backstop as a follow-up).
+
 ## Recommendation
 
 Proceed to design. The achievable architecture, proven here:
@@ -106,7 +154,10 @@ Proceed to design. The achievable architecture, proven here:
   instance's context arrives by injection, not relocation.
 - **Garbage-collect on end:** a `SessionEnd` hook looks the instance up by
   `session_id` (never `cwd`) and runs `niwa destroy --force`, backstopped by a
-  reaper that sweeps instances whose `SessionEnd` never fired.
+  reaper that sweeps instances whose `SessionEnd` never fired. *(Superseded by the
+  2026-06-27 follow-up above: `SessionEnd` fires on idle-suspend, not uniquely on
+  delete, so the reaper became the SINGLE teardown path keyed on entry-gone =
+  deleted. See DESIGN Decision 6 revision.)*
 
 Two problems are design work, not feasibility unknowns: (a) a **coordinator-vs-worker
 guard**, since no native hook field distinguishes them; and (b) a **GC model** keyed
