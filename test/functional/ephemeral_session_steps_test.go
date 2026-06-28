@@ -47,8 +47,11 @@ func aBackgroundJobStateForSession(ctx context.Context, sessionID string) (conte
 
 // aDeadSessionForSession makes a session dead by removing its Claude Code job
 // state under $HOME/.claude/jobs/<sid>/. A gone job entry is the reaper's
-// primary liveness signal (DESIGN Decision 6, R11): the session ended without a
-// clean SessionEnd, so the ephemeral instance it provisioned is now an orphan.
+// liveness signal (DESIGN Decision 6, revised): it is the proxy for the
+// developer deleting the session from the Agent View, so the ephemeral instance
+// it provisioned is now reclaimable. Bound to two step phrasings: the literal
+// "deleted from the Agent View" and the legacy "has ended without firing
+// SessionEnd" (both mean the entry is gone).
 func aDeadSessionForSession(ctx context.Context, sessionID string) (context.Context, error) {
 	s := getState(ctx)
 	if s == nil {
@@ -140,6 +143,7 @@ func theSessionMappingDoesNotExistForSession(ctx context.Context, sessionID stri
 func registerEphemeralSessionSteps(ctx *godog.ScenarioContext) {
 	ctx.Step(`^a background job state exists for session "([^"]*)"$`, aBackgroundJobStateForSession)
 	ctx.Step(`^the session "([^"]*)" has ended without firing SessionEnd$`, aDeadSessionForSession)
+	ctx.Step(`^the session "([^"]*)" is deleted from the Agent View$`, aDeadSessionForSession)
 	ctx.Step(`^I pipe a SessionStart hook for session "([^"]*)"$`, iPipeASessionStartHookForSession)
 	ctx.Step(`^I pipe a SessionEnd hook for session "([^"]*)"$`, iPipeASessionEndHookForSession)
 	ctx.Step(`^I run niwa reap from the workspace root$`, iRunNiwaReapFromTheWorkspaceRoot)

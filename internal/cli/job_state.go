@@ -4,75 +4,31 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 )
-
-// jobLivenessTTL is how long a job-state file's updatedAt may lag before the
-// session is treated as dead even if its state is not (yet) terminal. A live
-// background worker rewrites its job state continuously, so a stale updatedAt
-// past this window is a strong signal the session ended without recording a
-// terminal state (a crash, a kill, or an orphaned SessionEnd). The reaper still
-// only reclaims instances carrying the ephemeral marker, so a conservative TTL
-// only delays reclamation; it never risks a developer instance.
-const jobLivenessTTL = 30 * time.Minute
 
 // jobState is the subset of ~/.claude/jobs/<id>/state.json niwa reads. The dir
 // name is the session-id prefix; the full SessionID inside confirms the match.
 //
-// Three distinct consumers read this file:
+// Two distinct consumers read this file:
 //   - the SessionStart guard (instance_from_hook.go) keys on Template == "bg"
 //     to confirm a dispatched background worker.
-//   - the reaper (reap.go) keys on State / UpdatedAt to decide liveness.
 //   - the dispatch capture path (dispatch_capture.go) keys on Cwd to correlate a
 //     launched worker to its instance directory and recover its session id.
+//
+// The reaper's liveness rule (sessionLive) keys on the job ENTRY existing, not
+// on any field inside it, so no field here feeds liveness (DESIGN Decision 6).
 //
 // state.json is an undocumented internal Claude Code file, so absent fields
 // decode to their zero value and every reader fails safe on a miss.
 type jobState struct {
 	SessionID string `json:"sessionId"`
 	Template  string `json:"template"`
-	State     string `json:"state"`
 	// Cwd is the working directory the background worker launched in. The
 	// dispatch identity-capture path (dispatch_capture.go) correlates a
 	// launched worker to its instance by matching this against the unique
 	// instance directory. Absent decodes to "".
-	Cwd       string    `json:"cwd"`
-	UpdatedAt time.Time `json:"updatedAt"`
-	// FirstTerminalAt is the timestamp Claude Code stamps when the session first
-	// reaches a terminal condition, regardless of the specific terminal `state`
-	// label. It is the authoritative "this session has ended" signal: the reaper
-	// treats a non-zero value as terminal (see sessionLive), so a session that
-	// has ended is recognized even when its `state` label is not in
-	// terminalJobStates below. Absent decodes to the zero time.
-	FirstTerminalAt time.Time `json:"firstTerminalAt"`
-}
-
-// terminalJobStates is the set of job `state` values that mean the session has
-// ended. The exact vocabulary of state.json is undocumented, so this set is
-// matched case-insensitively and kept deliberately broad (it includes
-// "stopped", the label `claude stop` produces). It is the SECONDARY terminal
-// signal -- the primary, authoritative one is a non-zero FirstTerminalAt, which
-// covers every ended session including these labels. This set is the fallback
-// for a state.json that records a terminal `state` without a FirstTerminalAt;
-// the two are intentionally redundant for the labels listed here, so neither
-// should be removed on the assumption the other always covers it. A state in
-// neither path is treated as non-terminal, with the TTL as the final backstop.
-var terminalJobStates = map[string]bool{
-	"completed": true,
-	"complete":  true,
-	"done":      true,
-	"finished":  true,
-	"failed":    true,
-	"error":     true,
-	"errored":   true,
-	"canceled":  true,
-	"cancelled": true,
-	"timeout":   true,
-	"timedout":  true,
-	"killed":    true,
-	"stopped":   true,
-	"stop":      true,
+	Cwd string `json:"cwd"`
 }
 
 // defaultJobsDir returns the Claude Code jobs directory (~/.claude/jobs). A
@@ -86,53 +42,50 @@ func defaultJobsDir() string {
 	return filepath.Join(home, ".claude", "jobs")
 }
 
-// sessionLive reports whether the session identified by sessionID has a live
-// Claude Code job under jobsDir, evaluated as of now. This is the reaper's
-// liveness rule (DESIGN Decision 6, R11), keyed on the SAME job-state source as
-// the SessionStart guard.
+// sessionLive reports whether the session identified by sessionID still exists
+// as a Claude Code background session, evaluated as of now. This is the reaper's
+// liveness rule (DESIGN Decision 6, R11): a session is LIVE exactly while its
+// job ENTRY at <jobsDir>/<session-id>/state.json is present, and DEAD only once
+// that entry is gone.
 //
-// A session is LIVE (returns true) only when all hold:
+// Entry-present is a faithful proxy for "the session still exists in the Agent
+// View" -- it covers both a running session and an idle-but-resumable one (it
+// finished a task or was suspended but is still listed and re-openable). Entry-
+// gone is a faithful proxy for "the developer deleted the session." Liveness
+// deliberately does NOT look at the job `state`, at `firstTerminalAt`, or at an
+// idle TTL: each of those is true of a live idle-but-resumable session, so
+// keying on any of them would reap an instance whose session is still resumable
+// (the reaped-on-completion / reaped-on-idle bug this rule fixes).
+//
+// A session is LIVE (returns true) when:
 //   - a job-state file for the session exists and decodes, and
-//   - its sessionId (when recorded) matches sessionID, and
-//   - its State is not terminal, and
-//   - its UpdatedAt is within jobLivenessTTL of now (or unset).
+//   - its sessionId (when recorded) matches sessionID.
 //
-// It is DEAD (returns false) when the job entry is gone, the state is terminal,
-// or updatedAt is older than the TTL. Job-state -- not transcript mtime -- is
-// the primary signal; this never reaps a live-but-idle worker that is still
-// rewriting its job state. An empty jobsDir (HOME unresolved) yields false:
-// without a jobs dir there is no liveness evidence, so the caller falls back to
-// the ephemeral-marker-only safety (it still never reaps a non-ephemeral
-// instance).
+// It is DEAD (returns false) when the job entry is gone or the recorded
+// sessionId is for a different session. An empty jobsDir (HOME unresolved)
+// yields false: without a jobs dir there is no liveness evidence, so the caller
+// falls back to the ephemeral-marker-only safety (it still never reaps a
+// non-ephemeral instance). The `now` parameter is retained for signature
+// stability with the reaper's injected clock; the entry-present rule does not
+// consult it.
 func sessionLive(jobsDir, sessionID string, now time.Time) bool {
 	if jobsDir == "" {
 		return false
 	}
 	js, ok := readJobState(jobsDir, sessionID)
 	if !ok {
-		// Job entry gone: the session is dead.
+		// Job entry gone: the session was deleted, so it is dead.
 		return false
 	}
 	// The dir is keyed by the session-id prefix, so confirm the full id inside
-	// matches before trusting the rest -- a colliding prefix must not be
-	// mistaken for this session. A recorded mismatch means this is not our job
-	// (treat as dead for our session).
+	// matches before trusting it -- a colliding prefix must not be mistaken for
+	// this session. A recorded mismatch means this is not our job (treat as dead
+	// for our session).
 	if js.SessionID != "" && js.SessionID != sessionID {
 		return false
 	}
-	// Authoritative terminal signal: Claude Code stamps firstTerminalAt the
-	// moment the session ends, whatever the terminal `state` label. This catches
-	// a terminal session even when its label is not in terminalJobStates (the
-	// enumerated set is the secondary, fallback signal checked below).
-	if !js.FirstTerminalAt.IsZero() {
-		return false
-	}
-	if terminalJobStates[strings.ToLower(strings.TrimSpace(js.State))] {
-		return false
-	}
-	if !js.UpdatedAt.IsZero() && now.Sub(js.UpdatedAt) > jobLivenessTTL {
-		return false
-	}
+	// The entry exists and is ours: the session is live (running or
+	// idle-but-resumable). It is reclaimed only once this entry disappears.
 	return true
 }
 

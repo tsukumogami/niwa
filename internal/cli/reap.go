@@ -17,11 +17,12 @@ import (
 // seconds to low tens of seconds), so a healthy in-flight dispatch is always
 // younger than the TTL and is never reaped (DESIGN Decision 4, R38).
 //
-// This is conceptually distinct from jobLivenessTTL (job_state.go), which bounds
-// how stale a live worker's job-state may get before its SESSION is treated as
-// dead. The two happen to share the same 30-minute value but answer different
-// questions (unmapped-instance age vs. job-state staleness); keep them separate
-// constants so either can change without disturbing the other.
+// This TTL governs ONLY the name+TTL backstop for UNMAPPED orphan instances
+// (the SIGKILL-before-mapping case, selectBackstopTargets). It is unrelated to
+// session liveness: a MAPPED instance is reclaimed by the primary sweep on the
+// entry-present rule (sessionLive, job_state.go), never on this TTL. The two
+// concerns are deliberately separate -- this constant ages unmapped instances,
+// not job-state.
 const dispatchBackstopTTL = 30 * time.Minute
 
 func init() {
@@ -30,22 +31,22 @@ func init() {
 
 var reapCmd = &cobra.Command{
 	Use:   "reap",
-	Short: "Reclaim ephemeral instances whose backing session has ended",
-	Long: `Reclaim ephemeral instances whose Claude Code session ended without a
-clean teardown.
+	Short: "Reclaim ephemeral instances whose backing session was deleted",
+	Long: `Reclaim ephemeral instances whose Claude Code session was deleted.
 
 reap enumerates the workspace's instances, joins each against its
 session->instance mapping, and force-destroys an instance only when BOTH hold:
 
   - the instance is marked ephemeral (provisioned for a session), and
-  - its session is dead by the liveness rule: the session's Claude Code job at
-    ~/.claude/jobs/<session-id>/ is gone, its job state is terminal, or its
-    job state has not been updated within the liveness window.
+  - its session is dead by the liveness rule: the session's Claude Code job
+    entry at ~/.claude/jobs/<session-id>/ is GONE (the proxy for the developer
+    deleting the session from the Agent View).
 
-A non-ephemeral (developer) instance is NEVER targeted, and an instance is
-NEVER reaped on the time-to-live alone without the ephemeral marker. Job state
--- not transcript mtime -- is the primary liveness signal, so a live-but-idle
-worker that is still rewriting its job state is spared.
+Teardown is delete-only. A session that finished its task, went idle, or was
+suspended keeps its job entry -- and so keeps its instance, which stays
+resumable -- and is reclaimed only once that entry disappears. A non-ephemeral
+(developer) instance is NEVER targeted, and an instance is NEVER reaped without
+the ephemeral marker.
 
 reap runs on demand and is also invoked opportunistically at the start of
 niwa create so session fan-out self-bounds.`,
@@ -146,7 +147,9 @@ func selectReapTargets(workspaceRoot, jobsDir string, now time.Time) ([]reapTarg
 		}
 
 		if sessionLive(jobsDir, mapping.SessionID, now) {
-			// The session is still live (or live-but-idle): spare it.
+			// The session still exists (running or idle-but-resumable): its job
+			// entry is present, so spare the instance. Only a deleted session
+			// (entry gone) is reclaimed.
 			continue
 		}
 
@@ -161,8 +164,8 @@ func selectReapTargets(workspaceRoot, jobsDir string, now time.Time) ([]reapTarg
 
 // reapWorkspace selects and reclaims orphaned ephemeral instances under
 // workspaceRoot, returning the count actually destroyed. For each target it
-// force-destroys the instance (via destroyInstanceFunc, the same non-interactive
-// path SessionEnd teardown uses) and deletes the mapping entry. A destroy
+// force-destroys the instance (via destroyInstanceFunc, the non-interactive
+// destroy path) and deletes the mapping entry. A destroy
 // failure on one target is surfaced on stderr and does not abort the rest, so a
 // single stuck instance never blocks reclaiming the others.
 func reapWorkspace(workspaceRoot, jobsDir string, now time.Time) (int, error) {
@@ -327,8 +330,8 @@ func readDispatchMarkerTime(instancePath string) (time.Time, bool) {
 
 // reapBackstop selects and reclaims dispatch-named, unmapped, past-TTL orphan
 // instances under workspaceRoot, returning the count actually destroyed. Each target is
-// force-destroyed via destroyInstanceFunc, the same path the primary sweep and
-// SessionEnd teardown use. A destroy failure on one target is surfaced on
+// force-destroyed via destroyInstanceFunc, the same path the primary sweep
+// uses. A destroy failure on one target is surfaced on
 // stderr and does not abort the rest. There is no mapping to delete (a backstop
 // target is unmapped by definition).
 func reapBackstop(workspaceRoot string, now time.Time) (int, error) {
