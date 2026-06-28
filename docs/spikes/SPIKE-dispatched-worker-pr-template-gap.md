@@ -6,7 +6,7 @@ question: |
   shirabe /scope and /execute workflows (which author a template-conformant PR), and
   what is the narrowest durable fix that makes the next dispatched worker conformant
   by construction?
-timebox: "1 session (diagnosis only; no fix implemented)"
+timebox: "1 session (diagnosis + the niwa-side fix)"
 ---
 
 # SPIKE: dispatched workers ignore the pr-creation two-part PR template
@@ -15,9 +15,14 @@ timebox: "1 session (diagnosis only; no fix implemented)"
 
 Complete
 
-The cause is identified and reproduced from inside a live dispatched instance. This
-spike diagnoses and recommends only. No fix is implemented here; landing the fix is
-deferred for human direction (see Recommendation).
+The cause is identified and reproduced from inside a live dispatched instance. The
+**primary fix — niwa-side plugin pre-warming during instance provisioning — is
+implemented in this PR** (see the "Implemented in this PR" note under Recommendation).
+Two items the diagnosis surfaced remain deliberately out of scope and are tracked as
+follow-ups: the shirabe-side hardening of the hand-run fallback (H2, a different repo)
+and the `autoUpdate`-vs-pinned-`ref` marketplace mismatch (a config/overlay concern).
+So this PR closes the root cause (the plugin-load race, H1); it does not by itself
+close every path the originating question describes.
 
 ## Question
 
@@ -220,23 +225,37 @@ construction (the niwa fix) over relying on the agent to remember (brief/CI nudg
 ### Primary — close the plugin-load race in niwa (owner: niwa)
 
 Make instance provisioning install/resolve the declared github-sourced marketplaces
-and plugins to disk **before** launching the worker, so the skills are present when
-Claude Code enumerates them at startup. niwa already has the shape for this in
-`internal/plugin/` (it materializes its own plugin pre-launch); extend the dispatch
-path (`internal/cli/dispatch.go` -> `dispatch_launcher.go`) to either shell out to
-`claude plugin marketplace add` / `claude plugin install` for the declared set, or
-block on a readiness check until the marketplace cache is resolved, before
-`dispatchLaunch`. Also reconcile the `autoUpdate: true` vs pinned-`ref` mismatch so
-the marketplace resolves deterministically instead of re-fetching at every startup.
+and plugins to disk as part of provisioning, so the skills are present when the first
+Claude session in the instance enumerates them at startup. The right home is the
+provisioning pipeline, not the dispatch launch step: the race fires at first-session
+skill enumeration regardless of who starts the session, so `niwa create` followed by
+a manual `claude` launch hits it just as `niwa dispatch` does. niwa already has the
+shape for this — `internal/plugin/` materializes its own plugin during apply, and the
+`Applier` already manages Claude's global marketplace registry
+(`reconcileMarketplaceAutoUpdate`, `prunePluginRecords`). Add a sibling step that
+shells out to `claude plugin marketplace add` / `claude plugin install` for the
+declared github set, gated by the existing `auto_install_plugins` opt-out.
+
+Separately, reconcile the `autoUpdate: true` vs pinned-`ref` mismatch so the
+marketplace resolves deterministically instead of re-fetching at every startup (a
+config/overlay concern, tracked as its own follow-up).
 
 This is the durable root fix: it makes `/scope`, `/execute`, and every other shirabe
-skill invocable for dispatched workers. Once `/execute` is koto-driven, the
-`pr_finalization` state inlines the correct spec and authors a conformant PR with no
-agent memory required — which dissolves H2 in the normal path.
+skill invocable for any worker in a provisioned instance. Once `/execute` is
+koto-driven, the `pr_finalization` state inlines the correct spec and authors a
+conformant PR with no agent memory required — which dissolves H2 in the normal path.
 
-Trade-off: it adds latency to dispatch (a network clone before launch) and couples
-niwa to Claude Code's plugin CLI surface. Both are acceptable for correctness; the
-latency is one-time per instance and the CLI surface is already a dependency.
+Trade-off: it adds latency to provisioning (a network clone) and couples niwa to
+Claude Code's plugin CLI surface. Both are acceptable for correctness; the latency is
+one-time per instance and the CLI surface is already a dependency.
+
+**Implemented in this PR** as `Applier.PrewarmDeclaredPlugins` — a best-effort,
+non-fatal seam wired via `configurePluginAutoInstall` and called from both `Create`
+and `Apply` after settings are materialized, so dispatch, plain `create`, and `apply`
+all benefit. It reads the instance's `settings.json`, runs `marketplace add` for
+github sources (skipping directory sources, which are already local) and
+`install --scope project` for enabled plugins, honors the opt-out, and bounds each
+call with a timeout.
 
 ### Companion — harden the hand-run fallback in shirabe (owner: shirabe)
 
