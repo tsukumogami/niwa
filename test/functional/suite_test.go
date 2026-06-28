@@ -328,6 +328,10 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 	// reclamation, driven offline against the localGitServer with a fake claude ---
 	registerDispatchSteps(ctx)
 
+	// --- plugin pre-warm settings drift (#179): the pre-warm must not dirty
+	// niwa's managed settings.json while still resolving plugins to disk ---
+	registerPrewarmDriftSteps(ctx)
+
 	// --- Init-bootstrap harness extensions (Issue 5) ---
 	// GitHub tarball fake — spun up lazily per scenario; backed by the
 	// existing tarballFakeServer used by unit tests. Wire it into the

@@ -62,11 +62,38 @@ func TestPrewarm_GithubMarketplacesAndPlugins(t *testing.T) {
 
 	want := [][]string{
 		{instance, "marketplace", "add", "tsukumogami/shirabe"},
-		{instance, "install", "shirabe@shirabe", "--scope", "project"},
-		{instance, "install", "tsukumogami@tsukumogami", "--scope", "project"},
+		{instance, "install", "shirabe@shirabe", "--scope", "local"},
+		{instance, "install", "tsukumogami@tsukumogami", "--scope", "local"},
 	}
 	if !reflect.DeepEqual(*calls, want) {
 		t.Errorf("calls =\n  %v\nwant\n  %v", *calls, want)
+	}
+}
+
+// TestPrewarm_InstallsAtLocalScopeNotProject guards the #179 fix: the install must
+// use `--scope local`, never `--scope project`. Project scope re-serializes the
+// instance's .claude/settings.json -- the file niwa fingerprints as managed -- so the
+// next `niwa apply` falsely reports it "modified outside niwa". Local scope writes the
+// enablement to the unmanaged settings.local.json instead while still populating the
+// plugin cache, so the race fix holds without dirtying the managed file.
+func TestPrewarm_InstallsAtLocalScopeNotProject(t *testing.T) {
+	instance := writeInstanceSettings(t, `{
+	  "enabledPlugins": {"shirabe@shirabe": true}
+	}`)
+	calls := recordPluginCalls(t, nil)
+
+	prewarmDeclaredPlugins(instance, nil, false)
+
+	for _, c := range *calls {
+		if len(c) >= 2 && c[1] == "install" {
+			scope := c[len(c)-1]
+			if scope == "project" {
+				t.Errorf("install must not use --scope project (dirties niwa-managed settings.json); call %v", c)
+			}
+			if scope != "local" {
+				t.Errorf("install must use --scope local, got %q in call %v", scope, c)
+			}
+		}
 	}
 }
 
@@ -78,7 +105,7 @@ func TestPrewarm_SkipsDisabledPlugins(t *testing.T) {
 
 	prewarmDeclaredPlugins(instance, nil, false)
 
-	want := [][]string{{instance, "install", "on@mkt", "--scope", "project"}}
+	want := [][]string{{instance, "install", "on@mkt", "--scope", "local"}}
 	if !reflect.DeepEqual(*calls, want) {
 		t.Errorf("disabled plugin should be skipped; calls = %v, want %v", *calls, want)
 	}
