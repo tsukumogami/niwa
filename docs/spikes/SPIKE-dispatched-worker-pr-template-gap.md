@@ -142,6 +142,17 @@ Worth noting: niwa already knows how to materialize a plugin to disk before laun
 `~/.claude/plugins/marketplaces/niwa/` from the binary, with no network. That
 machinery just isn't applied to the workspace-declared marketplaces.
 
+**Confirming experiment.** Running `/reload-plugins` mid-session made every shirabe
+skill (`scope`, `execute`, `design`, `plan`, `brief`, `prd`, ...) invocable
+immediately — no install, no clone, no network. The on-disk state was identical
+before and after; only the enumeration was re-run. This is the signature of a startup
+enumeration race, not a missing or broken install: if provisioning had genuinely
+failed to put the plugin on disk (the premise of `fix-root-plugin-provisioning.md`), a
+reload would have nothing to enumerate and would not fix it. The single variable is
+*when enumeration runs relative to install completion*. The durable automated
+equivalent of that manual reload is for niwa to resolve the declared marketplaces to
+disk before launching the worker, so the first enumeration already sees them.
+
 An aggravating factor: a version/config mismatch widens the race window. This
 instance's settings pin shirabe to `ref: v0.13.0`, but the shared
 `known_marketplaces.json` has shirabe with `autoUpdate: true` and no pin, and the
