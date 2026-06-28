@@ -31,4 +31,5 @@ func configurePluginAutoInstall(applier *workspace.Applier, flagOptOut bool) {
 	}
 	applier.SkipPluginInstall = flagOptOut || skipFromGlobal
 	applier.InstallNiwaPlugin = installNiwaPluginAdapter
+	applier.PrewarmDeclaredPlugins = prewarmDeclaredPlugins
 }

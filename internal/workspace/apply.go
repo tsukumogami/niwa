@@ -76,6 +76,18 @@ type Applier struct {
 	// exercise rank-2 + plugin-install at the same time.
 	InstallNiwaPlugin func(state *InstanceState, reporter *Reporter, skipInstall bool)
 
+	// PrewarmDeclaredPlugins resolves the instance's workspace-declared Claude
+	// marketplaces/plugins (the github-sourced ones) to disk after the pipeline
+	// materializes .claude/settings.json, so the FIRST Claude session started in
+	// the instance finds them already installed when it enumerates skills. This
+	// closes the race where a github marketplace is cloned asynchronously during
+	// that session's own startup and finishes AFTER enumeration, leaving its
+	// skills uninvocable. It runs for every provisioned instance, not just the
+	// dispatch path: `niwa create` followed by a manual `claude` launch hits the
+	// same race. Wired from cli (where the claude exec lives) via NewApplier's
+	// callers; nil means no-op (tests, or a surface that didn't wire it).
+	PrewarmDeclaredPlugins func(instanceRoot string, reporter *Reporter, skipInstall bool)
+
 	// cloneOrSync materializes or refreshes the overlay snapshot at dir.
 	// Returns wasFreshClone=true when no marker/.git was present (fresh
 	// materialization), so callers can distinguish "overlay doesn't
@@ -360,6 +372,14 @@ func (a *Applier) Create(ctx context.Context, cfg *config.WorkspaceConfig, confi
 		}
 	}
 
+	// Resolve the workspace-declared marketplaces/plugins to disk now, while the
+	// just-materialized settings.json is fresh, so the first Claude session in this
+	// instance enumerates them without losing the async-clone race. Runs for every
+	// instance create (dispatch and plain `niwa create` alike); best-effort.
+	if a.PrewarmDeclaredPlugins != nil {
+		a.PrewarmDeclaredPlugins(instanceRoot, a.Reporter, a.SkipPluginInstall)
+	}
+
 	// Use the effective configName (resolved earlier above) for the
 	// instance-number derivation so `niwa init my-name --from upstream`
 	// correctly resolves the first instance to InstanceNumber=1 (not 0).
@@ -498,6 +518,13 @@ func (a *Applier) Apply(ctx context.Context, cfg *config.WorkspaceConfig, config
 		if a.InstallNiwaPlugin != nil {
 			a.InstallNiwaPlugin(nil, a.Reporter, a.SkipPluginInstall)
 		}
+	}
+
+	// Pre-warm the workspace-declared marketplaces/plugins to disk on every apply
+	// too, so a re-applied instance picks up newly declared plugins before its next
+	// Claude session enumerates skills. Best-effort; see Create for the rationale.
+	if a.PrewarmDeclaredPlugins != nil {
+		a.PrewarmDeclaredPlugins(instanceRoot, a.Reporter, a.SkipPluginInstall)
 	}
 
 	// Emit `rotated <path>` to stderr for every managed file whose
