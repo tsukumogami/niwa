@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"sort"
@@ -54,26 +53,19 @@ func mapEphemeral(t *testing.T, workspaceRoot, sessionID, instancePath string, e
 	}
 }
 
-// writeLiveJobState writes a job-state file for sessionID under jobsDir with the
-// given state value and updatedAt, so the reaper's liveness rule has a fixture
-// to read. The dir is named by the full session id (readJobState's fast path).
-func writeLiveJobState(t *testing.T, jobsDir, sessionID, state string, updatedAt time.Time) {
+// writeJobEntry writes a present job-state entry for sessionID under jobsDir, so
+// the reaper's entry-present liveness rule reads the session as LIVE. The `body`
+// JSON only needs to carry the matching sessionId; the reaper keys on the entry
+// existing, not on any field inside it (DESIGN Decision 6). The dir is named by
+// the full session id (readJobState's fast path).
+func writeJobEntry(t *testing.T, jobsDir, sessionID string) {
 	t.Helper()
 	dir := filepath.Join(jobsDir, sessionID)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	js := jobState{
-		SessionID: sessionID,
-		Template:  bgJobTemplate,
-		State:     state,
-		UpdatedAt: updatedAt,
-	}
-	data, err := json.Marshal(js)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "state.json"), data, 0o644); err != nil {
+	body := []byte(`{"sessionId":"` + sessionID + `","template":"` + bgJobTemplate + `"}`)
+	if err := os.WriteFile(filepath.Join(dir, "state.json"), body, 0o644); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -122,18 +114,19 @@ func TestReap_DeadEphemeralOrphan_Reclaimed(t *testing.T) {
 	}
 }
 
-// TestReap_TerminalJobState_Reclaimed: an ephemeral instance whose job state is
-// terminal (the session ended, recording a final state) is reclaimed even when
-// the job entry still exists and updatedAt is recent.
-func TestReap_TerminalJobState_Reclaimed(t *testing.T) {
+// TestReap_CompletedResumable_Spared: an ephemeral instance whose session
+// recorded a terminal state but whose job entry is still present (the
+// completed-but-resumable case) is SPARED. Under the old rule a terminal state
+// reaped it the instant the task finished; entry-present liveness keeps it.
+func TestReap_CompletedResumable_Spared(t *testing.T) {
 	root := setupHookWorkspace(t, true)
 	jobsDir := t.TempDir()
 	now := time.Now()
 
 	inst := makeReapInstance(t, root, "test-ws-done")
-	mapEphemeral(t, root, reapDeadSessionID, inst, true)
-	// Terminal state, recently updated: state takes precedence over the TTL.
-	writeLiveJobState(t, jobsDir, reapDeadSessionID, "completed", now)
+	mapEphemeral(t, root, reapLiveSessionID, inst, true)
+	// Job entry present (the session is still listed and resumable).
+	writeJobEntry(t, jobsDir, reapLiveSessionID)
 
 	destroyed := stubDestroyAll(t)
 
@@ -141,17 +134,20 @@ func TestReap_TerminalJobState_Reclaimed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reapWorkspace error: %v", err)
 	}
-	if n != 1 {
-		t.Fatalf("reaped count = %d, want 1", n)
+	if n != 0 {
+		t.Fatalf("reaped count = %d, want 0 (completed-but-resumable must be spared)", n)
 	}
-	if len(*destroyed) != 1 || (*destroyed)[0] != inst {
-		t.Fatalf("destroyed = %v, want [%s]", *destroyed, inst)
+	if len(*destroyed) != 0 {
+		t.Fatalf("destroyed = %v, want [] (resumable instance must not be destroyed)", *destroyed)
+	}
+	if _, err := workspace.ReadSessionMapping(root, reapLiveSessionID); err != nil {
+		t.Errorf("mapping for resumable session was deleted; want retained: %v", err)
 	}
 }
 
-// TestReap_LiveIdleEphemeral_Spared: an ephemeral instance whose job state is
-// non-terminal and freshly updated (a live-but-idle worker still rewriting its
-// job state) is SPARED -- never destroyed, mapping retained.
+// TestReap_LiveIdleEphemeral_Spared: an ephemeral instance whose session's job
+// entry is present (a live or idle-but-resumable worker) is SPARED -- never
+// destroyed, mapping retained.
 func TestReap_LiveIdleEphemeral_Spared(t *testing.T) {
 	root := setupHookWorkspace(t, true)
 	jobsDir := t.TempDir()
@@ -159,8 +155,7 @@ func TestReap_LiveIdleEphemeral_Spared(t *testing.T) {
 
 	inst := makeReapInstance(t, root, "test-ws-live")
 	mapEphemeral(t, root, reapLiveSessionID, inst, true)
-	// Non-terminal state, updated one minute ago: comfortably within the TTL.
-	writeLiveJobState(t, jobsDir, reapLiveSessionID, "running", now.Add(-1*time.Minute))
+	writeJobEntry(t, jobsDir, reapLiveSessionID)
 
 	destroyed := stubDestroyAll(t)
 
@@ -176,33 +171,6 @@ func TestReap_LiveIdleEphemeral_Spared(t *testing.T) {
 	}
 	if _, err := workspace.ReadSessionMapping(root, reapLiveSessionID); err != nil {
 		t.Errorf("mapping for live session was deleted; want retained: %v", err)
-	}
-}
-
-// TestReap_StaleJobState_Reclaimed: an ephemeral instance whose job state is
-// non-terminal but whose updatedAt is older than the TTL is reclaimed -- the
-// session crashed or was killed without recording a terminal state.
-func TestReap_StaleJobState_Reclaimed(t *testing.T) {
-	root := setupHookWorkspace(t, true)
-	jobsDir := t.TempDir()
-	now := time.Now()
-
-	inst := makeReapInstance(t, root, "test-ws-stale")
-	mapEphemeral(t, root, reapLiveSessionID, inst, true)
-	// Non-terminal state but updatedAt well past the TTL: treated as dead.
-	writeLiveJobState(t, jobsDir, reapLiveSessionID, "running", now.Add(-2*jobLivenessTTL))
-
-	destroyed := stubDestroyAll(t)
-
-	n, err := reapWorkspace(root, jobsDir, now)
-	if err != nil {
-		t.Fatalf("reapWorkspace error: %v", err)
-	}
-	if n != 1 {
-		t.Fatalf("reaped count = %d, want 1 (stale job is dead)", n)
-	}
-	if len(*destroyed) != 1 || (*destroyed)[0] != inst {
-		t.Fatalf("destroyed = %v, want [%s]", *destroyed, inst)
 	}
 }
 
@@ -270,7 +238,7 @@ func TestReap_MixedWorkspace_OnlyDeadEphemeralReaped(t *testing.T) {
 	mapEphemeral(t, root, reapLiveSessionID, live, true)   // live job
 	mapEphemeral(t, root, reapNonEphSessionID, dev, false) // non-ephemeral
 
-	writeLiveJobState(t, jobsDir, reapLiveSessionID, "running", now)
+	writeJobEntry(t, jobsDir, reapLiveSessionID)
 
 	destroyed := stubDestroyAll(t)
 
@@ -312,7 +280,7 @@ func TestSelectReapTargets_DeterministicSelection(t *testing.T) {
 	mapEphemeral(t, root, reapDeadSessionID, dead, true)
 	mapEphemeral(t, root, reapLiveSessionID, live, true)
 	mapEphemeral(t, root, reapNonEphSessionID, dev, false)
-	writeLiveJobState(t, jobsDir, reapLiveSessionID, "running", now)
+	writeJobEntry(t, jobsDir, reapLiveSessionID)
 
 	targets, err := selectReapTargets(root, jobsDir, now)
 	if err != nil {

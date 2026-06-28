@@ -10,13 +10,16 @@ problem: |
   session->instance mapping (not cwd), SessionEnd is best-effort, and no native hook
   field distinguishes the coordinator from a worker.
 decision: |
-  Install workspace-root SessionStart/SessionEnd hooks (a new root-materialization
-  surface) that delegate to a new `niwa instance from-hook` subcommand. On start it
+  Install a workspace-root SessionStart hook (a new root-materialization
+  surface) that delegates to a new `niwa instance from-hook` subcommand (a
+  SessionEnd hook was originally installed for teardown but is no longer, per the
+  Decision 6 revision). On start it
   detects a dispatched background-job session, runs `niwa create --json`, records a
   session->instance mapping under the root's `.niwa/sessions/`, and injects the
-  instance context + a cd instruction. On end it looks the instance up by session id
-  and `niwa destroy --force`s it. A `niwa reap` sweep reclaims orphans via
-  `niwa list --json` plus a per-instance liveness marker. `niwa init` installs the
+  instance context + a cd instruction. Teardown is delete-only: an instance is
+  reclaimed solely by the `niwa reap` sweep, which keys liveness on the session's
+  Claude Code job entry being PRESENT (the session is live, including idle-but-
+  resumable) versus GONE (the developer deleted the session). `niwa init` installs the
   root-managed config (hooks, permission posture, CLAUDE.md); context-aware
   `niwa apply` refreshes it -- converging the subtree at the current scope (root,
   instance, or worktree), with `--no-cascade` to cap heavy root ops.
@@ -24,8 +27,11 @@ rationale: |
   The spike proved this end-to-end with no Agent SDK. A hook-backed Go subcommand
   mirrors the proven `niwa worktree from-hook` precedent, keeps logic testable, and
   avoids brittle shell. Keying teardown on a mapping is forced by SessionEnd's cwd
-  being the launch root; the reaper is forced by SessionEnd being best-effort; the
-  background-job guard keys on the confirmed `template: "bg"` job-state marker.
+  being the launch root; the reaper is the SINGLE teardown path because the
+  Agent-View session lifecycle has an idle-but-resumable state that SessionEnd
+  cannot distinguish from deletion, so liveness keys on the job entry being present
+  (live) vs gone (deleted); the background-job guard keys on the confirmed
+  `template: "bg"` job-state marker.
 ---
 
 # DESIGN: one ephemeral niwa instance per Claude Code session
@@ -47,8 +53,9 @@ niwa creates multiple ephemeral instances of a workspace (`niwa create` ->
 Claude Code's `claude agents` dispatches background sessions that inherit the
 launch directory's cwd, so sessions fanned out from the workspace root share one
 tree and collide. The PRD requires each dispatched session to run in its own
-ephemeral instance, provisioned on `SessionStart` and reclaimed on `SessionEnd`,
-with a reaper so orphans are bounded.
+ephemeral instance, provisioned on `SessionStart` and reclaimed once the session
+is gone (originally framed as "on `SessionEnd`"; revised to delete-only,
+reaper-driven teardown in Decision 6), with a reaper so orphans are bounded.
 
 The spike (docs/spikes/SPIKE-ephemeral-session-instances.md) fixed the constraints
 this design must honor:
@@ -229,23 +236,102 @@ cosmetic metadata.
 
 ### Decision 6 — teardown and the reaper (R4, R5, R10, R11)
 
-**Teardown (SessionEnd branch):** resolve the instance by `session_id` through the
-Decision-5 store (never cwd), confirm the mapping is marked `ephemeral: true`, run
-`niwa destroy --force <instance>`, and delete the mapping entry. A SessionEnd for a
-session with no mapping (non-worker, or already reaped) is a clean no-op.
-**Reaper (`niwa reap`):** enumerate instances via `niwa list --json` (R10),
-join against the mapping store, and reclaim any instance whose backing session is
-no longer live. Liveness (R11) keys on the **same job-state source as the guard**:
-the mapping records the `session_id`, and the reaper checks
-`~/.claude/jobs/<session-id>/state.json` -- a session is dead when its job entry is
-gone, or its job `state` is terminal / `updatedAt` is older than a TTL. This is
-strictly more reliable than transcript mtime (which can be stale for a live-but-idle
-agent and would risk reaping a working session); transcript mtime is at most a
-secondary corroborator. `niwa reap` only ever destroys instances marked
-`ephemeral: true` with a confirmed-dead session -- it never touches developer
-instances, and never reaps on TTL alone without the ephemeral marker. `reap` runs on
-demand and is also invoked opportunistically at the start of `niwa create` so fan-out
-self-bounds.
+> **Revision (2026-06-27) — delete-only teardown.** This decision was revised
+> after the shipped behavior reaped instances the moment their session finished a
+> task or went idle. The original rule (quoted at the end of this decision)
+> collapsed three distinct session conditions into "dead". The Agent-View
+> background-session lifecycle has a state the original design never modeled --
+> **idle-but-resumable** -- and BOTH teardown paths misread it as termination. The
+> corrected contract keys liveness on **job-entry presence alone** and tears down
+> **only on explicit session deletion**. See the spike's empirical findings
+> (docs/spikes/SPIKE-ephemeral-session-instances.md, "Job-entry lifecycle across
+> done/idle/delete").
+
+**The idle-but-resumable state.** A dispatched background session in the Agent View
+moves through more than two states. Besides "running" and "gone" it can be
+**finished/idle/suspended yet still listed and fully resumable**: it has stamped a
+terminal `state` and a `firstTerminalAt` in its job state, but the developer can
+re-open it in `claude agents` and it keeps working. Empirically (spike, verified
+2026-06-27) such sessions kept their `~/.claude/jobs/<id>/` entry for hours -- and
+across a real dispatched worker, the entry disappeared only when the developer
+explicitly deleted the session (Ctrl+X twice in `claude agents`), with the last
+recorded state still `done`/`firstTerminalAt`-stamped. So:
+
+- **job-entry present** is a faithful proxy for "the session still exists in the
+  Agent View" (running OR idle-but-resumable), and
+- **job-entry gone** is a faithful proxy for "the developer deleted the session."
+
+There is no documented hook event or `SessionEnd` `reason` value that uniquely
+means "deleted": Claude Code fires `SessionEnd` with `reason: resume` on
+idle-suspend, `clear` on `/clear`, `logout`, `prompt_input_exit`,
+`bypass_permissions_disabled`, or `other` -- none of which mean the session is
+gone. Deletion is observable *only* as the job entry disappearing.
+
+**Teardown -- delete-only, reaper-driven.** Tear down an ephemeral instance only
+when its backing session is deleted. The reaper (`niwa reap`) is the SINGLE
+teardown path, keyed on the entry-gone proxy. A session that finishes its task,
+goes idle, or is suspended keeps its instance, so the developer can resume it into
+the same isolated clone. This is the human's explicit choice: only-on-delete, over
+"deletion OR truly-dead" and over "keep-idle with a long TTL."
+
+**The liveness rule (R11) -- entry-present.** A session is **live** ⇔ its Claude
+Code job entry at `~/.claude/jobs/<session-id>/state.json` exists (and its recorded
+`sessionId`, when present, matches). It is **dead** only when the entry is gone.
+The reaper reclaims an instance only when it is marked `ephemeral: true` AND its
+session is dead by this rule. The three conditions the original rule also treated
+as dead -- a terminal `state`, a stamped `firstTerminalAt`, and an `updatedAt`
+older than a 30-minute TTL -- are **dropped**: every one of them is true of a live
+idle-but-resumable session, so every one of them produced the reported bug.
+Consequently `jobLivenessTTL` and `terminalJobStates` (job_state.go) and the
+`state` / `updatedAt` / `firstTerminalAt` fields of the read struct become unused
+and are removed; `template` (the SessionStart guard) and `cwd` (the dispatch
+identity-capture path) still have readers and stay. Job-entry presence remains
+strictly more reliable than transcript mtime, which is never consulted.
+
+**SessionEnd is no longer a teardown trigger.** The original `SessionEnd` branch
+resolved the instance by `session_id` and force-destroyed it. Because `SessionEnd`
+fires on idle-suspend/`resume`/`clear` -- never uniquely on delete -- that branch
+tore instances down while their sessions were still resumable (the secondary cause
+of the bug, alongside the reaper's TTL/terminal misfire). The branch becomes a
+no-op: it may log, but it never destroys. The workspace-root materializer
+correspondingly stops installing the `SessionEnd` hook entry, so a freshly
+materialized workspace carries only the `SessionStart` provisioning hook. The
+handler-level no-op is the load-bearing safety, because a workspace whose
+`settings.json` was materialized before this fix still carries the `SessionEnd`
+entry until it re-applies, and that stale entry must not destroy. SessionStart
+provisioning is unchanged.
+
+**Reaper mechanics (unchanged except the liveness rule).** `niwa reap` still
+enumerates instances via `niwa list --json` (R10), joins them against the mapping
+store, and only ever force-destroys instances marked `ephemeral: true` with a dead
+session; it never touches a developer instance and never reaps on a marker or a TTL
+alone. It runs on demand and opportunistically at the start of `niwa create`, so
+fan-out self-bounds. The separate **dispatch backstop** (`selectBackstopTargets`,
+keyed on the dispatch instance NAME plus `dispatchBackstopTTL` for UNMAPPED orphan
+instances -- Decision 4) is untouched: it handles the SIGKILL-before-mapping case,
+a different concern from session liveness, and keeps its own TTL constant.
+
+**Residual -- the ~1-hour supervisor process-stop.** The Agent View stops a
+finished background session's supervisor process after roughly an hour. Whether
+that stop also removes the `~/.claude/jobs/<id>/` entry was not observed in the
+spike. If it does, the pure entry-present rule would let the reaper reclaim an
+instance that is still resumable -- a window much narrower than, but the same shape
+as, the bug being fixed. The chosen contract **accepts** this (option a): the
+human explicitly asked for only-on-delete teardown, and an instance reclaimed an
+hour after its session went idle is a far smaller surprise than one reclaimed the
+instant a task finished. A generous long-TTL backstop (e.g. 24 h, distinct from the
+removed 30-minute liveness TTL) is recorded as an **optional follow-up** (option b)
+for truly abandoned instances, not part of this fix. Settling the residual needs an
+empirical check of the entry's fate across the process-stop, which the spike did
+not run.
+
+> **Original (superseded) reasoning, retained for the audit trail:**
+> *Teardown (SessionEnd branch):* resolve the instance by `session_id` through the
+> Decision-5 store, confirm `ephemeral: true`, run `niwa destroy --force`, delete
+> the mapping. *Reaper liveness:* a session is dead when its job entry is gone, OR
+> its job `state` is terminal, OR `updatedAt` is older than a TTL. -- This
+> collapsed the idle-but-resumable state into "dead" and is the direct source of
+> the reaped-on-completion / reaped-on-idle bug.
 
 ### Decision 7 — machine-readable create and list (R9, R10)
 
@@ -259,14 +345,17 @@ unchanged.
 
 ## Decision Outcome
 
-A new root-materialization surface installs two workspace-root hooks that both
-delegate to `niwa instance from-hook`. On SessionStart, the subcommand applies the
+A new root-materialization surface installs a workspace-root SessionStart hook
+delegating to `niwa instance from-hook`. On SessionStart, the subcommand applies the
 three-part guard, runs `niwa create --json`, writes a
 `.niwa/sessions/<session_id>.json` mapping, and injects the instance's context plus
-a cd instruction. The agent works inside the instance. On SessionEnd, the
-subcommand resolves the instance by session id and `niwa destroy --force`s it.
-`niwa reap` backstops orphans by joining `niwa list --json` against the mapping and
-a liveness marker, destroying only dead ephemeral instances. `niwa init` installs
+a cd instruction. The agent works inside the instance. SessionEnd is NOT a teardown
+trigger (it fires on idle-suspend, not uniquely on delete), so its hook is no longer
+installed and its handler branch is a no-op. `niwa reap` is the single teardown
+path: it joins `niwa list --json` against the mapping and reclaims an ephemeral
+instance only once its session's job entry is gone -- the proxy for the developer
+deleting the session -- so completed, idle, and suspended sessions keep their
+instances. `niwa init` installs
 the root config (hooks and permission posture) by default; `niwa apply` from the
 workspace root refreshes it and cascades into instances and worktrees. `niwa
 create --json` and `niwa list --json` give the hook and reaper machine-readable
@@ -274,16 +363,18 @@ surfaces. Instances are named from `session_id` (the only stable handle availabl
 SessionStart), with an optional friendly alias recorded later.
 
 This keeps niwa the system of record (every ephemeral instance is mapped, listed,
-and reclaimable), removes per-session manual setup, and bounds orphans even when
-SessionEnd never fires.
+and reclaimable), removes per-session manual setup, keeps a finished-but-resumable
+session's instance alive until the developer deletes the session, and reclaims it
+on the next reap once that delete removes the job entry.
 
 ## Solution Architecture
 
 Components (new unless noted):
 
 - **Root materializer** -- emits the workspace-root managed config: `.claude/settings.json`
-  (via the shared `buildSettingsDoc`) with the SessionStart and SessionEnd hook
-  entries (each a `command` piping stdin to `niwa instance from-hook`), the permission
+  (via the shared `buildSettingsDoc`) with the SessionStart hook entry (a `command`
+  piping stdin to `niwa instance from-hook`; the SessionEnd entry is no longer
+  installed, per the Decision 6 revision), the permission
   posture (`permissions.defaultMode`), and the ephemeral-mode flag, plus a
   workspace-root `CLAUDE.md` (workspace-context content at root altitude). Run by
   `niwa init` and by context-aware `niwa apply`; drift-aware via the existing
@@ -302,12 +393,14 @@ Components (new unless noted):
     inside an instance?) -> `niwa create --json --name <session-id-prefix>` -> write
     mapping -> emit `additionalContext` JSON (instance path + instance `CLAUDE.md` +
     cd instruction).
-  - *SessionEnd:* resolve mapping by `session_id` -> if `ephemeral` -> `niwa destroy
-    --force` -> delete mapping. No mapping -> no-op.
+  - *SessionEnd:* no-op (the branch may log but never destroys). It fires on
+    idle-suspend/`resume`/`clear`, not uniquely on delete, so it is not a teardown
+    signal -- the reaper owns teardown (Decision 6 revision).
 - **Mapping store** -- `.niwa/sessions/<session_id>.json` at the workspace root.
-- **`niwa reap`** -- enumerate (`list --json`) + join mapping + liveness check ->
-  `niwa destroy --force` dead ephemeral instances. Also invoked at `niwa create`
-  start.
+- **`niwa reap`** -- enumerate (`list --json`) + join mapping + liveness check
+  (job entry present = live, gone = deleted) -> `niwa destroy --force` only
+  instances whose session is deleted. The SINGLE teardown path. Also invoked at
+  `niwa create` start.
 - **`niwa create --json` / `niwa list --json`** -- additive machine-readable output.
 
 End-to-end flow:
@@ -317,10 +410,13 @@ End-to-end flow:
 2. Worker `SessionStart` -> hook -> `niwa instance from-hook` passes the guard ->
    `niwa create --json` clones an instance -> mapping written -> context injected.
 3. Agent `cd`s into the instance and works there in isolation.
-4. Worker ends -> `SessionEnd` -> hook resolves the instance by session id ->
-   `niwa destroy --force` -> mapping deleted.
-5. If step 4 never fires (crash/kill), the next `niwa reap` (on demand or at the
-   next `niwa create`) reclaims the orphan via the liveness check.
+4. Worker finishes its task / goes idle / is suspended -> the instance is KEPT
+   (the session is still listed and resumable in the Agent View). `SessionEnd` may
+   fire (`reason: resume`, etc.) but is a no-op.
+5. Developer deletes the session (Ctrl+X twice in `claude agents`) -> its
+   `~/.claude/jobs/<id>/` entry disappears -> the next `niwa reap` (on demand or at
+   the next `niwa create`) sees the entry gone and reclaims the instance, deleting
+   the mapping.
 
 ## Implementation Approach
 
@@ -328,11 +424,12 @@ End-to-end flow:
   `EnumerateInstances` / applier path; emit `{name, number, path}` /
   per-instance records.
 - Add `niwa instance from-hook` (a new subcommand, NOT the existing per-repo
-  `session_from_hook_cmd.go`) with SessionStart/SessionEnd branches. The guard reads
-  `~/.claude/jobs/<session-id>/state.json` for `template == "bg"`; unit-test the guard
-  matrix (mode off / `template != "bg"` / already-inside-instance / worker), the
-  mapping read/write, the injection JSON, and the resolve-by-session-id teardown with
-  table tests (mirror the existing `from-hook` worktree tests).
+  `session_from_hook_cmd.go`) with a SessionStart provisioning branch and a
+  SessionEnd no-op branch. The guard reads `~/.claude/jobs/<session-id>/state.json`
+  for `template == "bg"`; unit-test the guard matrix (mode off / `template != "bg"`
+  / already-inside-instance / worker), the mapping read/write, the injection JSON,
+  and that SessionEnd never destroys (it is a no-op), with table tests (mirror the
+  existing `from-hook` worktree tests). Teardown lives in the reaper, not here.
 - Add the mapping store helpers (write/read/delete, `session_id` validation) beside
   the existing session-state code.
 - Add `niwa reap` and wire an opportunistic call into `create`.
@@ -352,9 +449,11 @@ End-to-end flow:
   (tsukumogami/niwa#168) -- the worktree path inherits the instance's
   already-materialized environment instead of resolving secrets on the worktree path.
   Unit-test each scope (root / instance / worktree) and the `--no-cascade` cap.
-- Add a `@critical` functional Gherkin scenario covering provision-on-start /
-  teardown-on-end and a reaper-reclaims-orphan scenario, using the offline
-  `localGitServer` helper.
+- Add `@critical` functional Gherkin scenarios: provision-on-start; an
+  idle/completed session KEEPS its instance (the regression guard for this fix);
+  and a reaper-reclaims-orphan scenario where the instance is reclaimed only once
+  the job entry is gone (the delete proxy) -- using the offline `localGitServer`
+  helper.
 
 ## Security Considerations
 
@@ -398,8 +497,14 @@ End-to-end flow:
   job state), so no feasibility unknown remains; its only residual risk is that the
   job-state file is undocumented and could change format, which the master switch +
   reaper bound to wasted clones rather than corruption.
-- Teardown on clean exit remains best-effort; the reaper is the guarantee, so an
-  instance can outlive its session until the next sweep.
+- Teardown is delete-only and reaper-driven: an instance survives task completion,
+  idle, and suspension (so its session can be resumed into the same clone) and is
+  reclaimed only after the developer deletes the session, on the next reap sweep.
+  An instance therefore intentionally outlives a finished-but-resumable session.
+- Residual: if the ~1-hour Agent-View supervisor process-stop also removes the job
+  entry, the entry-present rule would reclaim a still-resumable instance after that
+  stop. Accepted as part of the only-on-delete contract; an optional 24 h backstop
+  is noted as a follow-up (Decision 6).
 
 ## References
 
@@ -407,7 +512,9 @@ End-to-end flow:
   implements (R1-R12).
 - docs/spikes/SPIKE-ephemeral-session-instances.md -- the feasibility findings and
   the three load-bearing constraints (mapping-not-cwd, best-effort SessionEnd, no
-  native worker discriminator).
+  native worker discriminator), plus the "Job-entry lifecycle across
+  done/idle/delete" findings that ground the Decision 6 revision (entry-present
+  liveness, delete-only teardown).
 - docs/guides/worktree.md -- the per-repo `niwa worktree from-hook` precedent this
   design lifts to the instance level.
 - tsukumogami/niwa#168 / #170 -- the worktree-vs-apply overlay-vault asymmetry (#170)

@@ -40,9 +40,11 @@ var dispatchInstanceNameRe = regexp.MustCompile(`\+[a-z0-9_]*-[0-9a-f]{8}$`)
 //
 // attach/logs exit 0 (dispatch only calls attach without --detach; the scenarios
 // pass --detach, so attach is never reached, but the fake handles it for
-// completeness). stop rewrites the job state to a terminal "done" so a later reap
-// reclaims the instance. Any other invocation exits non-zero so a stray real
-// code path fails loudly rather than silently hitting the network.
+// completeness). stop rewrites the job state to a terminal "done" (the shape a
+// real `claude stop` produces); note that under delete-only teardown a terminal
+// state keeps the instance -- only deleting the session (its job entry gone)
+// makes a later reap reclaim it. Any other invocation exits non-zero so a stray
+// real code path fails loudly rather than silently hitting the network.
 func dispatchFakeClaudeScript(behaviour string) string {
 	bg := `  sid="${FAKE_CLAUDE_SESSION_ID:-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa}"
   short=$(printf '%s' "$sid" | cut -c1-8)
@@ -263,10 +265,13 @@ func noDispatchOriginMappingRemains(ctx context.Context) error {
 	return nil
 }
 
-// theDispatchSessionGoesTerminal rewrites the session's Claude Code job state to
-// a terminal "done", the shape a real `claude stop` produces. The reaper's
-// liveness rule then reads the session as dead and reclaims its mapped instance.
-func theDispatchSessionGoesTerminal(ctx context.Context, sessionID string) (context.Context, error) {
+// theDispatchSessionIsDeleted removes the session's Claude Code job entry under
+// $HOME/.claude/jobs/<short>/, the shape produced when the developer deletes the
+// session from the Agent View. A gone job entry is the reaper's liveness signal
+// (DESIGN Decision 6, revised -- delete-only teardown): the reaper then reads
+// the session as dead and reclaims its mapped instance. A session that merely
+// finished a task or went idle keeps its entry and is spared.
+func theDispatchSessionIsDeleted(ctx context.Context, sessionID string) (context.Context, error) {
 	s := getState(ctx)
 	if s == nil {
 		return ctx, fmt.Errorf("no test state")
@@ -276,12 +281,8 @@ func theDispatchSessionGoesTerminal(ctx context.Context, sessionID string) (cont
 		short = short[:8]
 	}
 	jobDir := filepath.Join(s.homeDir, ".claude", "jobs", short)
-	if err := os.MkdirAll(jobDir, 0o755); err != nil {
-		return ctx, fmt.Errorf("creating job-state dir %q: %w", jobDir, err)
-	}
-	state := fmt.Sprintf(`{"sessionId":%q,"template":"bg","state":"done","cwd":""}`, sessionID)
-	if err := os.WriteFile(filepath.Join(jobDir, "state.json"), []byte(state), 0o644); err != nil {
-		return ctx, fmt.Errorf("writing terminal job-state file: %w", err)
+	if err := os.RemoveAll(jobDir); err != nil {
+		return ctx, fmt.Errorf("removing job-state dir %q: %w", jobDir, err)
 	}
 	return ctx, nil
 }
@@ -297,5 +298,5 @@ func registerDispatchSteps(ctx *godog.ScenarioContext) {
 	ctx.Step(`^no dispatch instance remains$`, noDispatchInstanceRemains)
 	ctx.Step(`^a dispatch-origin mapping exists for session "([^"]*)"$`, aDispatchOriginMappingExistsForSession)
 	ctx.Step(`^no dispatch-origin mapping remains$`, noDispatchOriginMappingRemains)
-	ctx.Step(`^the dispatch session "([^"]*)" goes terminal$`, theDispatchSessionGoesTerminal)
+	ctx.Step(`^the dispatch session "([^"]*)" is deleted from the Agent View$`, theDispatchSessionIsDeleted)
 }

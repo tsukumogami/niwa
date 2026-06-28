@@ -791,8 +791,12 @@ func TestRunInit_NamedMode_InstallsRootConfig(t *testing.T) {
 	if !strings.Contains(string(data), "instance from-hook") {
 		t.Errorf("root settings.json missing session-hook command:\n%s", data)
 	}
-	if !strings.Contains(string(data), "SessionStart") || !strings.Contains(string(data), "SessionEnd") {
-		t.Errorf("root settings.json missing SessionStart/SessionEnd entries:\n%s", data)
+	if !strings.Contains(string(data), "SessionStart") {
+		t.Errorf("root settings.json missing SessionStart entry:\n%s", data)
+	}
+	// Teardown is reaper-driven, so no SessionEnd hook is installed.
+	if strings.Contains(string(data), "SessionEnd") {
+		t.Errorf("root settings.json has a SessionEnd entry; want none (reaper-driven teardown):\n%s", data)
 	}
 
 	if _, err := os.Stat(filepath.Join(root, "CLAUDE.md")); err != nil {

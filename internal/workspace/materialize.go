@@ -481,10 +481,16 @@ func buildSettingsDoc(cfg BuildSettingsConfig) (map[string]any, error) {
 		hooksDoc[worktreeRemoveEvent] = worktreeEntry
 	}
 
-	// Session hooks (ephemeral-session integration): emit the SessionStart and
-	// SessionEnd entries, each a single command piping stdin to "niwa instance
-	// from-hook" with a generous timeout. The timeout absorbs niwa create's
-	// clone + vault cost so the harness does not kill the hook mid-provision.
+	// Session hooks (ephemeral-session integration): emit ONLY the SessionStart
+	// entry -- a single command piping stdin to "niwa instance from-hook" with a
+	// generous timeout. The timeout absorbs niwa create's clone + vault cost so
+	// the harness does not kill the hook mid-provision.
+	//
+	// No SessionEnd entry is installed: teardown is delete-only and owned by the
+	// reaper (DESIGN Decision 6, revised). SessionEnd fires on idle-suspend, not
+	// uniquely on delete, so wiring it would reclaim still-resumable instances;
+	// the `niwa instance from-hook` SessionEnd branch is a defensive no-op for
+	// any pre-existing settings.json that still carries the entry.
 	if sh := cfg.SessionHooks; sh != nil && sh.Command != "" {
 		sessionEntry := []map[string]any{
 			{
@@ -498,7 +504,6 @@ func buildSettingsDoc(cfg BuildSettingsConfig) (map[string]any, error) {
 			},
 		}
 		hooksDoc[sessionStartEvent] = sessionEntry
-		hooksDoc[sessionEndEvent] = sessionEntry
 	}
 
 	if len(hooksDoc) > 0 {

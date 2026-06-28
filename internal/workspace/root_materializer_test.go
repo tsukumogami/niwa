@@ -74,7 +74,13 @@ func TestMaterializeWorkspaceRoot_SessionHooks(t *testing.T) {
 		t.Fatalf("hooks block missing: %#v", doc["hooks"])
 	}
 
-	for _, event := range []string{sessionStartEvent, sessionEndEvent} {
+	// Only the SessionStart hook is installed -- teardown is reaper-driven, so
+	// no SessionEnd entry is materialized (DESIGN Decision 6, revised).
+	if _, present := hooks[sessionEndEvent]; present {
+		t.Errorf("%s hook entry is present; want absent (teardown is reaper-driven)", sessionEndEvent)
+	}
+
+	for _, event := range []string{sessionStartEvent} {
 		entries, ok := hooks[event].([]any)
 		if !ok || len(entries) != 1 {
 			t.Fatalf("%s entries missing or wrong shape: %#v", event, hooks[event])

@@ -33,6 +33,19 @@ mapping store, the reaper's liveness signal, the coordinator-vs-worker guard, an
 the supporting niwa primitives). This PRD owns the requirements and the
 developer-facing contract.
 
+> **Update note (2026-06-27) — what "the session ends" means.** This PRD was written
+> assuming a dispatched session has two states: running, or ended/gone. The
+> Agent-View background-session lifecycle has a third the PRD did not model —
+> **idle-but-resumable** (the session finished a task or was suspended but is still
+> listed and can be re-opened). The shipped behavior reaped instances as soon as a
+> session reached that state, which was a bug. The refined contract: an instance is
+> torn down **only when the developer deletes the session** from the Agent View;
+> completed, idle, and suspended sessions keep their instances and stay resumable.
+> Read R4, R5, and the "A session finishes and its instance disappears" journey at
+> this altitude — "ends" / "finishes" mean **deleted**, not "completed a task." The
+> mechanism (delete-only, reaper-driven, entry-present liveness) lives in the DESIGN
+> (Decision 6 revision); the requirements below are otherwise unchanged.
+
 ## Problem Statement
 
 niwa creates multiple ephemeral instances of one workspace, each a full independent

@@ -29,6 +29,13 @@ Done
 The downstream PRD owns the requirements; the downstream DESIGN owns the hook and
 garbage-collection mechanism. This brief stops at the developer-facing framing.
 
+> **Update note (2026-06-27).** Read "cleaned up when it ends" / "A session finishes
+> and its instance disappears" at this altitude: an instance is reclaimed when the
+> developer **deletes** the session from the Agent View, not the moment a session
+> finishes a task. A completed, idle, or suspended session is still listed and
+> resumable and keeps its instance. The refined teardown contract (delete-only,
+> reaper-driven) lives in the DESIGN (Decision 6 revision).
+
 ## Problem Statement
 
 niwa already lets a developer create multiple instances of one workspace -- full,

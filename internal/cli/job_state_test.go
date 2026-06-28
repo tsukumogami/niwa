@@ -63,14 +63,16 @@ func TestJobState_AbsentCwdDecodesEmpty(t *testing.T) {
 	}
 }
 
-// TestSessionLive_StoppedAndFirstTerminalAt verifies the reaper treats a
-// `claude stop`-produced session as terminal. `claude stop` drives the job
-// state to `state: "stopped"` (not in the legacy terminal-state list) and
-// stamps `firstTerminalAt`; either signal must mark the session dead so its
-// instance is reclaimed promptly rather than only after the TTL.
-func TestSessionLive_StoppedAndFirstTerminalAt(t *testing.T) {
+// TestSessionLive_EntryPresentIsLive verifies the entry-present liveness rule
+// (DESIGN Decision 6, revised): a session is live exactly while its job entry
+// exists, regardless of a terminal `state`, a stamped `firstTerminalAt`, or a
+// stale `updatedAt`. Those conditions are all true of a live idle-but-resumable
+// session, so keying on them was the reaped-on-completion / reaped-on-idle bug.
+// Only an entry that is GONE (the delete proxy) reads as dead.
+func TestSessionLive_EntryPresentIsLive(t *testing.T) {
 	const sid = "a23abd0f-d6d4-4200-be90-090eb43c3581"
-	now := time.Date(2026, 6, 26, 1, 12, 0, 0, time.UTC)
+	// `now` is far past every timestamp below; the entry-present rule ignores it.
+	now := time.Date(2026, 6, 26, 5, 0, 0, 0, time.UTC)
 
 	write := func(t *testing.T, body string) string {
 		t.Helper()
@@ -91,22 +93,25 @@ func TestSessionLive_StoppedAndFirstTerminalAt(t *testing.T) {
 		live bool
 	}{
 		{
-			name: "stopped state with firstTerminalAt is dead",
-			body: `{"sessionId":"` + sid + `","state":"stopped","firstTerminalAt":"2026-06-26T01:10:05Z","updatedAt":"2026-06-26T01:10:05Z"}`,
-			live: false,
+			// A completed-but-resumable session: terminal `done` + firstTerminalAt
+			// stamped, but still listed and re-openable. Entry present => LIVE.
+			name: "done with firstTerminalAt is live (idle-but-resumable)",
+			body: `{"sessionId":"` + sid + `","state":"done","firstTerminalAt":"2026-06-26T01:10:05Z","updatedAt":"2026-06-26T01:10:05Z"}`,
+			live: true,
 		},
 		{
-			name: "stopped state alone (no firstTerminalAt) is dead via the state set",
+			name: "stopped state alone is live while its entry exists",
 			body: `{"sessionId":"` + sid + `","state":"stopped","updatedAt":"2026-06-26T01:11:59Z"}`,
-			live: false,
+			live: true,
 		},
 		{
-			name: "unknown terminal label rescued by firstTerminalAt",
-			body: `{"sessionId":"` + sid + `","state":"someNewTerminalLabel","firstTerminalAt":"2026-06-26T01:10:05Z","updatedAt":"2026-06-26T01:11:59Z"}`,
-			live: false,
+			// updatedAt hours past the old 30-minute TTL: TTL is gone, entry present => LIVE.
+			name: "stale updatedAt (past the removed TTL) is live",
+			body: `{"sessionId":"` + sid + `","state":"running","updatedAt":"2026-06-26T01:00:00Z"}`,
+			live: true,
 		},
 		{
-			name: "running with fresh updatedAt and no firstTerminalAt is live",
+			name: "running with fresh updatedAt is live",
 			body: `{"sessionId":"` + sid + `","state":"running","updatedAt":"2026-06-26T01:11:59Z"}`,
 			live: true,
 		},
@@ -119,4 +124,40 @@ func TestSessionLive_StoppedAndFirstTerminalAt(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestSessionLive_EntryGoneIsDead verifies that a session whose job entry is
+// absent reads as dead -- the delete proxy the reaper reclaims on. A recorded
+// sessionId for a DIFFERENT session is likewise dead-for-our-session.
+func TestSessionLive_EntryGoneIsDead(t *testing.T) {
+	const sid = "a23abd0f-d6d4-4200-be90-090eb43c3581"
+	now := time.Date(2026, 6, 26, 5, 0, 0, 0, time.UTC)
+
+	t.Run("no job entry is dead", func(t *testing.T) {
+		dir := t.TempDir() // empty jobs dir: the session was deleted.
+		if sessionLive(dir, sid, now) {
+			t.Fatal("sessionLive = true for a gone job entry; want false (deleted)")
+		}
+	})
+
+	t.Run("empty jobsDir is dead", func(t *testing.T) {
+		if sessionLive("", sid, now) {
+			t.Fatal("sessionLive = true for an empty jobsDir; want false")
+		}
+	})
+
+	t.Run("prefix collision with a different sessionId is dead", func(t *testing.T) {
+		dir := t.TempDir()
+		jobDir := filepath.Join(dir, sid[:8])
+		if err := os.MkdirAll(jobDir, 0o700); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		body := `{"sessionId":"ffffffff-0000-0000-0000-000000000000","state":"running"}`
+		if err := os.WriteFile(filepath.Join(jobDir, "state.json"), []byte(body), 0o600); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+		if sessionLive(dir, sid, now) {
+			t.Fatal("sessionLive = true for a sessionId mismatch; want false")
+		}
+	})
 }

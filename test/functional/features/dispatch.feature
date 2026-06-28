@@ -8,8 +8,9 @@ Feature: niwa dispatch: provision, rollback, and reaper reclamation
   and records an ephemeral dispatch-origin mapping keyed on the UUID. Any failure
   before the mapping is durable rolls the instance back. The name+TTL reaper
   backstop (keyed on the dispatch instance name, so a SIGKILL before the marker
-  is written still leaves a reclaimable orphan) and the existing liveness-rule
-  sweep reclaim the instance once its session ends.
+  is written still leaves a reclaimable orphan) and the liveness-rule sweep
+  reclaim the instance once its session is deleted (its job entry disappears); a
+  session that merely finished a task or went idle keeps its instance.
 
   The fake claude writes $HOME/.claude/jobs/<short>/state.json carrying the
   chosen UUID and the launch cwd (the instance dir, which dispatch sets via
@@ -56,10 +57,10 @@ Feature: niwa dispatch: provision, rollback, and reaper reclamation
     And no dispatch instance remains
     And no dispatch-origin mapping remains
 
-  # --- Reaper reclaims a terminated dispatch session ---
+  # --- Reaper reclaims a deleted dispatch session ---
 
   @critical
-  Scenario: niwa reap reclaims a dispatch instance after its session goes terminal
+  Scenario: niwa reap reclaims a dispatch instance after its session is deleted
     Given a clean niwa environment
     And a local git server is set up
     And a config repo "myws" exists with body:
@@ -73,7 +74,7 @@ Feature: niwa dispatch: provision, rollback, and reaper reclamation
     When I run "niwa dispatch reap-me --detach" from the workspace root
     Then the exit code is 0
     And a dispatch instance was created with a well-formed instance file
-    When the dispatch session "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" goes terminal
+    When the dispatch session "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" is deleted from the Agent View
     And I run niwa reap from the workspace root
     Then the exit code is 0
     And no dispatch instance remains

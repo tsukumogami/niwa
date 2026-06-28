@@ -50,14 +50,14 @@ const rootSettingsFile = "settings.json"
 const rootClaudeFile = "CLAUDE.md"
 
 // instanceFromHookCommandSuffix is the niwa subcommand the workspace-root
-// SessionStart/SessionEnd hook invokes. The full command is
+// SessionStart hook invokes. The full command is
 // "<abs-niwa> " + this suffix; abs-niwa is resolved at materialize time via
 // os.Executable(). It is the instance-level hook entry point (distinct from
 // "worktree from-hook"); see internal/cli/instance_from_hook.go.
 const instanceFromHookCommandSuffix = "instance from-hook"
 
 // rootSessionHookTimeoutSeconds is the per-command timeout written on the
-// workspace-root SessionStart/SessionEnd hook entries. It is generous (>= 120s)
+// workspace-root SessionStart hook entry. It is generous (>= 120s)
 // on purpose: a SessionStart hook provisions an ephemeral instance via
 // `niwa create`, whose clone + vault cost can exceed a default harness timeout.
 const rootSessionHookTimeoutSeconds = 180
@@ -93,8 +93,9 @@ type RootMaterializeOptions struct {
 // MaterializeWorkspaceRoot writes the workspace-root managed config:
 //
 //   - <workspaceRoot>/.claude/settings.json built via the shared
-//     buildSettingsDoc, carrying the SessionStart and SessionEnd hook entries
-//     (each piping stdin to "niwa instance from-hook" with a generous timeout),
+//     buildSettingsDoc, carrying the SessionStart hook entry
+//     (piping stdin to "niwa instance from-hook" with a generous timeout; no
+//     SessionEnd entry -- teardown is reaper-driven, DESIGN Decision 6),
 //     the permission posture (permissions.defaultMode, sourced the same way
 //     instance materialization sources it), and the ephemeral-session-mode flag.
 //   - <workspaceRoot>/CLAUDE.md carrying workspace-context content at root
@@ -216,7 +217,7 @@ func writeRootSkills(workspaceRoot string) ([]string, error) {
 // effective plugins and marketplaces are forwarded too, filtered to the subset
 // that resolves at the workspace root (see rootHoistableConfig), so a
 // root-launched session loads the workspace's plugins/skills. The
-// SessionStart/SessionEnd hook entries and the ephemeral-mode flag are layered
+// SessionStart hook entry and the ephemeral-mode flag are layered
 // on top via the SessionHooks injection.
 func writeRootSettings(cfg *config.WorkspaceConfig, workspaceRoot, niwaPath string, ephemeral bool) (string, error) {
 	effective := MergeInstanceOverrides(cfg)
@@ -407,8 +408,10 @@ front door that writes the brief and runs it for you.
 
 This workspace can provision a dedicated ephemeral instance per dispatched
 session. When ephemeral-session mode is enabled, a background session launched
-at this root is given its own niwa instance on SessionStart and that instance is
-torn down on SessionEnd. The SessionStart/SessionEnd hooks in
-` + "`.claude/settings.json`" + ` drive this; they invoke ` + "`niwa instance from-hook`" + `.
+at this root is given its own niwa instance on SessionStart. The instance is
+kept while the session exists -- including after it finishes a task or goes idle
+(the session stays resumable) -- and is reclaimed by ` + "`niwa reap`" + ` only once the
+session is deleted. The SessionStart hook in
+` + "`.claude/settings.json`" + ` drives provisioning; it invokes ` + "`niwa instance from-hook`" + `.
 `
 }
