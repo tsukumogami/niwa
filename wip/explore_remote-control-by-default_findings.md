@@ -130,3 +130,7 @@ makes a `--bg` worker steerable in Agent View or whether the daemon-level
 precedence for daemon workers (which shapes the override-resolution logic). Both are
 resolvable only by a live test, so they belong in a spike or a design's validation
 step rather than another code-reading round.
+
+## Decision: Crystallize
+
+User chose to move to artifact selection after round 1.
