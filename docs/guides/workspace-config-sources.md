@@ -659,6 +659,36 @@ command and continues — `niwa apply` does not exit non-zero
 because the plugin install couldn't run. The `<install-path>.next/`
 staging directory is cleaned up so the next apply can retry.
 
+## Remote control on dispatch {#remote-control-on-dispatch}
+
+`niwa dispatch` launches a background Claude Code worker you monitor later from
+Agent View, claude.ai, or mobile. Claude Code Remote -- the bridge that makes a
+session steerable from those places -- is off unless turned on, and a dispatched
+worker starts headless, so you cannot enable it after the fact.
+
+Set `remote_control_on_dispatch = true` in your host config's `[global]` section
+(`~/.config/niwa/config.toml`) to make every `niwa dispatch` worker start with
+Claude Code Remote on:
+
+```toml
+[global]
+remote_control_on_dispatch = true
+```
+
+- **Scoped to `niwa dispatch` only.** Interactive sessions, ephemeral
+  SessionStart-hook sessions, and `niwa apply` instances are unaffected. When the
+  key is unset, dispatch behaves exactly as before.
+- **Overridable downstream.** A `remoteControlAtStartup` value under a workspace's
+  `[claude.settings]` (or an instance's `[instance.claude.settings]`) wins over the
+  host default. Because `[claude.settings]` values are strings, write it quoted:
+  `remoteControlAtStartup = "false"`.
+- **Eligibility.** Claude Code Remote also requires a first-party claude.ai login
+  (not an API key) with the right scopes and an account/org where the bridge rollout
+  is enabled. If `ANTHROPIC_API_KEY` is set, niwa prints a one-line reason and still
+  launches the worker without remote-control.
+
+See `docs/guides/remote-control-on-dispatch.md` for the full walkthrough.
+
 ## Claude marketplaces {#claude-marketplaces}
 
 The `[claude]` block's `marketplaces` setting lists the Claude Code
