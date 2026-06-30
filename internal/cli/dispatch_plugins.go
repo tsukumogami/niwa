@@ -137,6 +137,10 @@ var runClaudePluginCmd = func(ctx context.Context, dir string, args ...string) e
 type instanceSettings struct {
 	EnabledPlugins         map[string]bool             `json:"enabledPlugins"`
 	ExtraKnownMarketplaces map[string]marketplaceEntry `json:"extraKnownMarketplaces"`
+	// RemoteControlAtStartup mirrors the Claude Code settings key. It is non-nil
+	// only when a downstream [claude.settings] explicitly set it, which is how the
+	// dispatch remote-control resolver tells "downstream decided" from "unset".
+	RemoteControlAtStartup *bool `json:"remoteControlAtStartup"`
 }
 
 type marketplaceEntry struct {

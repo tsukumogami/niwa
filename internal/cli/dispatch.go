@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/tsukumogami/niwa/internal/config"
 	"github.com/tsukumogami/niwa/internal/workspace"
 )
 
@@ -210,6 +211,27 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	// discrete argv elements -- never string-concatenated -- so a crafted value
 	// cannot inject a claude flag (DESIGN Decision 8).
 	passthrough := buildDispatchPassthrough(slug)
+
+	// (9a) Remote-control-on-dispatch default-fill. When the host preference
+	// (~/.config/niwa/config.toml [global].remote_control_on_dispatch) is on and
+	// the dispatched instance left remoteControlAtStartup unset, append the
+	// Claude Code Remote settings flag so the worker starts steerable. The flag
+	// is two discrete argv elements (no shell interpolation). This is the only
+	// dispatch-exclusive seam, so the default never leaks to interactive,
+	// ephemeral, or `niwa apply` sessions. A missing/unreadable global config or
+	// instance settings file degrades to "no injection" -- never a dispatch
+	// failure -- preserving today's behavior when the preference is unset.
+	if gc, gcErr := config.LoadGlobalConfig(); gcErr == nil {
+		inst, _ := readInstanceSettings(instancePath)
+		inject, warning := resolveDispatchRemoteControl(gc.Global, inst, os.Environ())
+		if warning != "" {
+			fmt.Fprintf(cmd.ErrOrStderr(), "niwa dispatch: %s\n", warning)
+		}
+		if inject {
+			passthrough = append(passthrough, "--settings", remoteControlSettingsJSON)
+		}
+	}
+
 	if err := dispatchLaunch(cmd.Context(), instancePath, prompt, passthrough); err != nil {
 		return fmt.Errorf("niwa: error: launching dispatch worker: %w", err)
 	}

@@ -27,6 +27,13 @@ type GlobalConfigSource struct {
 type GlobalSettings struct {
 	CloneProtocol      string `toml:"clone_protocol,omitempty"`
 	AutoInstallPlugins *bool  `toml:"auto_install_plugins,omitempty"`
+	// RemoteControlOnDispatch, when non-nil and true, makes `niwa dispatch`
+	// workers start with Claude Code Remote enabled by default (the worker is
+	// launched with `remoteControlAtStartup: true`). It is a host-level default
+	// scoped to dispatched workers only; a downstream `[claude.settings]`
+	// remoteControlAtStartup value overrides it. nil preserves today's behavior
+	// (no remote-control injection).
+	RemoteControlOnDispatch *bool `toml:"remote_control_on_dispatch,omitempty"`
 }
 
 // SkipPluginInstall reports whether the user has explicitly opted
