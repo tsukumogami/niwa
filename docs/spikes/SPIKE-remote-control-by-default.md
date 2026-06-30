@@ -20,9 +20,10 @@ Go. Variant A proved the core claim live: a `claude --bg` worker launched with
 `--settings '{"remoteControlAtStartup":true}'` — and nothing else — is steerable
 from Agent View / mobile. The per-session key alone is sufficient; the daemon-level
 `autoAddRemoteControlDaemonWorker` is NOT required (it was unset during the test).
-The niwa plumbing the exploration designed is therefore viable. One secondary item
-(settings-source precedence, Variant C) remains open and is a design detail, not a
-feasibility blocker.
+Variant C also settled the precedence question: `claude --settings` outranks the
+project/user settings.json, so niwa must apply the host default as a default-fill
+only (inject when unset), never as a blind override. The niwa plumbing the
+exploration designed is viable with that one constraint.
 
 ## Question
 
@@ -154,11 +155,23 @@ Preconditions (confirmed before the test):
   condition Variant B existed to test. The per-session key does not depend on the
   daemon-global setting for `--bg` steerability.
 
-**Variant C — settings-source precedence: still open (secondary).**
-- Not tested. Whether `--settings` outranks a downstream project/user
-  `remoteControlAtStartup: false` determines the override-resolution strategy in the
-  design (niwa-self-resolves vs. rely on claude precedence). Not a feasibility
-  blocker; resolve during design.
+**Variant C — settings-source precedence: `--settings` WINS over project settings.json.**
+- Setup: throwaway cwd with project `.claude/settings.json` = `{"remoteControlAtStartup": false}`,
+  launched `claude --bg --settings '{"remoteControlAtStartup":true}' "..."`. Worker
+  short ID `4fce317c`.
+- Result: the worker's status bar showed `/rc connecting…` → `/rc` (green) — the
+  Remote Control bridge CONNECTED despite the project file saying `false`. (User
+  settings also have `false`; `--settings` beat both.)
+- **Conclusion: `claude --settings` outranks the project (and user)
+  `.claude/settings.json` for `remoteControlAtStartup`.** A downstream project-level
+  "off" does NOT defeat a `--settings`-injected "on".
+- **Design consequence:** niwa must NOT blindly inject `--settings true`. The
+  niwa-materialized instance settings.json IS a project settings.json, so a user who
+  sets `remoteControlAtStartup: false` via workspace/instance niwa config would be
+  silently overridden — breaking "overridable downstream". niwa must self-resolve:
+  read the dispatched instance's effective `remoteControlAtStartup`, and inject
+  `--settings true` ONLY when the key is unset downstream (i.e., apply the host
+  default solely as a default-fill, never as an override).
 
 ## Recommendation
 
@@ -169,11 +182,11 @@ proven: the per-session key alone makes a dispatched `--bg` worker steerable, so
 design does not need to wrestle with the daemon-global
 `autoAddRemoteControlDaemonWorker` scoping problem.
 
-Carry one open question into the design: settings-source precedence (Variant C),
-which picks the downstream-override mechanism. A quick precedence probe (inject
-`true` via `--settings` while a project `.claude/settings.json` sets `false`) settles
-it; until then, the safe design is to have niwa resolve the override itself (read the
-dispatched instance's effective `remoteControlAtStartup`, inject only when unset).
+Override mechanism is now decided (Variant C): because `--settings` outranks the
+instance's project settings.json, niwa must resolve the override itself — read the
+dispatched instance's effective `remoteControlAtStartup` and inject `--settings true`
+ONLY when the key is unset downstream. The host toggle is a default-fill, never a
+hard override; this is what preserves "overridable downstream".
 
 Eligibility caveat unchanged: remote-control requires a first-party claude.ai OAuth
 login with the right scopes + subscription and an account/org where the bridge
