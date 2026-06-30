@@ -422,13 +422,13 @@ func buildSettingsDoc(cfg BuildSettingsConfig) (map[string]any, error) {
 	// the key here lets a downstream value both reach the worker and be read
 	// back by the dispatch resolver. SettingsConfig values are strings, so the
 	// TOML value is written quoted ("true"/"false") and parsed to a bool.
-	if rc, ok := cfg.Settings["remoteControlAtStartup"]; ok {
+	if rc, ok := cfg.Settings[config.RemoteControlAtStartupKey]; ok {
 		raw := maybeSecretString(rc)
 		b, err := strconv.ParseBool(strings.TrimSpace(raw))
 		if err != nil {
-			return nil, fmt.Errorf("invalid [claude.settings] remoteControlAtStartup value %q: want \"true\" or \"false\"", raw)
+			return nil, fmt.Errorf("invalid [claude.settings] %s value %q: want \"true\" or \"false\"", config.RemoteControlAtStartupKey, raw)
 		}
-		doc["remoteControlAtStartup"] = b
+		doc[config.RemoteControlAtStartupKey] = b
 	}
 
 	// Build hooks block from installed hooks.

@@ -42,7 +42,7 @@ Current
 The accepted PRD (`docs/prds/PRD-remote-control-by-default.md`) requires that
 `niwa dispatch` workers default to starting with Claude Code Remote enabled,
 configured by a single host-level niwa preference, applied **only** to dispatched
-workers, as a default a downstream workspace / instance / repo config can turn off,
+workers, as a default a downstream workspace or instance config can turn off,
 with a clear message when the host cannot use remote-control and no change to today's
 behavior when the preference is unset.
 
@@ -165,7 +165,7 @@ Chosen: **1a + 2a + 3a.**
   `--settings '{"remoteControlAtStartup":true}'` to the dispatch passthrough only when
   warranted.
 - Extend niwa's Claude settings vocabulary so a downstream
-  `[claude.settings].remoteControlAtStartup` (workspace / instance / repo) materializes
+  `[claude.settings].remoteControlAtStartup` (workspace or instance) materializes
   into the instance settings.json (`buildSettingsDoc`) and is read back
   (`readInstanceSettings`), making the downstream override both effective at the worker
   and visible to the resolver.
@@ -236,7 +236,7 @@ Four touch points, each small and independently testable:
 
 Data flow: `~/.config/niwa/config.toml [global].remote_control_on_dispatch` →
 `runDispatch` reads it → cross-checks the provisioned instance's effective
-`remoteControlAtStartup` (which already reflects the full workspace/instance/repo +
+`remoteControlAtStartup` (which already reflects the full workspace/instance +
 overlay merge, now that the key is in the vocabulary) → conditionally appends one
 dispatch-only `--settings` flag → `claude --bg` worker starts with the bridge on.
 

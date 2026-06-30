@@ -223,6 +223,10 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	// failure -- preserving today's behavior when the preference is unset.
 	if gc, gcErr := config.LoadGlobalConfig(); gcErr == nil {
 		inst, _ := readInstanceSettings(instancePath)
+		// The eligibility check must inspect the SAME environment the worker
+		// inherits -- realDispatchLaunch launches with cmd.Env = os.Environ() -- so
+		// the warning describes the worker's actual auth context. Keep these two
+		// env sources identical if either ever stops using os.Environ().
 		inject, warning := resolveDispatchRemoteControl(gc.Global, inst, os.Environ())
 		if warning != "" {
 			fmt.Fprintf(cmd.ErrOrStderr(), "niwa dispatch: %s\n", warning)

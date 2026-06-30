@@ -121,9 +121,11 @@ func TestDispatch_RemoteControl_HostUnset_NoChange(t *testing.T) {
 	if _, _, err := runDispatchCmd(t, "do a thing"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	// AC4: argv unchanged from the no-flags baseline (no --name because dispatchName is "").
-	if slices.Contains(pass, "--settings") {
-		t.Fatalf("preference unset must not alter argv; got %v", pass)
+	// AC4: with the preference unset, the passthrough must be byte-for-byte the
+	// baseline buildDispatchPassthrough produces -- not merely "--settings absent".
+	// dispatchName is "" here, so the baseline carries no flags at all.
+	if want := buildDispatchPassthrough(""); !slices.Equal(pass, want) {
+		t.Fatalf("preference unset must not alter argv; got %v, want %v", pass, want)
 	}
 }
 

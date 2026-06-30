@@ -12,8 +12,8 @@ outcome: |
   A developer dispatches a worker and can immediately watch and steer it from
   Agent View / claude.ai / mobile, because niwa turned remote-control on by
   default -- configured once at the host level and applied only to dispatched
-  workers -- while still being able to turn it off for a specific workspace,
-  instance, or repo when they don't want it.
+  workers -- while still being able to turn it off for a specific workspace
+  or instance when they don't want it.
 motivating_context: |
   A feasibility spike (docs/spikes/SPIKE-remote-control-by-default.md, Complete)
   proved the mechanism end-to-end: launching a `claude --bg` worker with the
@@ -65,7 +65,7 @@ the developer's interactive sessions and other niwa-launched sessions are untouc
 and keep behaving exactly as before.
 
 The default is a default, not a mandate. When the developer doesn't want a particular
-workspace, instance, or repo's dispatched workers to start steerable, they turn it off
+workspace or instance's dispatched workers to start steerable, they turn it off
 there, and that downstream choice wins over the host default. So the common case
 (dispatch and immediately monitor) costs nothing, and the exception (this corner of my
 work should stay private/local) is still expressible. The developer never has to
@@ -82,13 +82,13 @@ already there in Agent View, live -- they read its progress over coffee, and whe
 heads down the wrong path, they send it a steering message and it course-corrects.
 They never enabled anything for this specific worker; dispatching it was enough.
 
-### A developer opts a sensitive repo out of the default
+### A developer opts a sensitive workspace out of the default
 
-The same developer works on one repo whose dispatched workers they would rather keep
-off the remote-control bridge. They set remote-control off for that repo in its niwa
-config. From then on, workers dispatched for that repo start unsteerable while every
-other dispatch still starts steerable. The host default stays on everywhere else; the
-one place they said "not here" is honored.
+The same developer works in one workspace whose dispatched workers they would rather
+keep off the remote-control bridge. They set remote-control off in that workspace's
+niwa config. From then on, workers dispatched from that workspace start unsteerable
+while every other dispatch still starts steerable. The host default stays on
+everywhere else; the one place they said "not here" is honored.
 
 ### A developer on an ineligible host is told why, not left guessing
 
@@ -103,7 +103,7 @@ worker never appeared as steerable.
 
 In scope: a single host-level niwa preference that defaults `niwa dispatch` workers to
 start with Claude Code Remote on; scoping that effect to dispatched workers only; a
-downstream (workspace / instance / repo) override that turns it off and wins over the
+downstream (workspace or instance) override that turns it off and wins over the
 host default; and a clear message when the host cannot use remote-control.
 
 Out of scope: enabling remote-control on interactive root/instance sessions, ephemeral

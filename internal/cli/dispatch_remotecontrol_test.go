@@ -13,7 +13,10 @@ func TestResolveDispatchRemoteControl(t *testing.T) {
 	cleanEnv := []string{"PATH=/usr/bin", "HOME=/home/dev"}
 	apiKeyEnv := append([]string{apiKey}, cleanEnv...)
 
-	// host {unset,false,true} × downstream {nil,false,true} × API key {absent,present}.
+	// Curated cases over host {unset,false,true} × downstream {nil,false,true} ×
+	// API key {absent,present}. Not all 18 cells are enumerated: once host is
+	// off/unset or downstream is decided, the later dimensions are short-circuited
+	// and redundant, so only the reachable equivalence classes are listed.
 	cases := []struct {
 		name        string
 		host        *bool

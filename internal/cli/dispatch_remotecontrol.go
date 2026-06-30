@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/tsukumogami/niwa/internal/config"
@@ -8,9 +9,11 @@ import (
 
 // remoteControlSettingsJSON is the inline Claude Code settings document niwa
 // injects via `claude --settings` to start a dispatched worker with the Remote
-// Control bridge on. It is a fixed literal -- never built from user input -- and
-// is appended to the dispatch argv as a single discrete element.
-const remoteControlSettingsJSON = `{"remoteControlAtStartup":true}`
+// Control bridge on. It is built from config.RemoteControlAtStartupKey -- never
+// from user input -- so the injected flag, the materializer, and the read-back
+// share one spelling. It is appended to the dispatch argv as a single discrete
+// element.
+var remoteControlSettingsJSON = fmt.Sprintf("{%q:true}", config.RemoteControlAtStartupKey)
 
 // apiKeyForcedWarning is the one-line reason printed when the host wants
 // remote-control on a dispatched worker but ANTHROPIC_API_KEY is set, which

@@ -10,7 +10,7 @@ problem: |
 goals: |
   Give niwa a single host-level preference that makes `niwa dispatch` workers start
   with Claude Code Remote on, applied only to dispatched workers, as a default that
-  a downstream workspace / instance / repo can turn off. Where the host cannot
+  a downstream workspace or instance can turn off. Where the host cannot
   actually use remote-control, steer the developer with a clear reason rather than
   a silent no-op.
 upstream: docs/briefs/BRIEF-remote-control-by-default.md
@@ -58,7 +58,7 @@ arrive without it, and the only workaround is a per-dispatch ritual.
 - Scope the effect to `niwa dispatch` workers only -- interactive root/instance
   sessions, ephemeral SessionStart-hook sessions, and `niwa apply` instances are
   untouched.
-- Keep it a default, not a mandate: a downstream workspace / instance / repo config
+- Keep it a default, not a mandate: a downstream workspace or instance config
   can turn it off, and that downstream choice wins over the host default.
 - When the host cannot actually use Claude Code Remote, surface a clear reason on
   dispatch rather than silently starting a worker that never becomes steerable.
@@ -71,8 +71,8 @@ arrive without it, and the only workaround is a per-dispatch ritual.
   steerable" once at the host level so that every `niwa dispatch` worker is
   immediately watchable and steerable from Agent View / mobile without a per-dispatch
   step.
-- As a developer with one sensitive repo, I want to turn the default off for that
-  repo so that its dispatched workers start unsteerable while every other dispatch
+- As a developer with one sensitive workspace, I want to turn the default off for that
+  workspace so that its dispatched workers start unsteerable while every other dispatch
   still starts steerable.
 - As a developer on a host that cannot use remote-control, I want niwa to tell me
   why remote-control was not enabled for a dispatch so that I understand the gap
@@ -95,7 +95,7 @@ R3. When the preference is on and no downstream override is present, a dispatche
 worker MUST start with Claude Code Remote enabled (the worker loads
 `remoteControlAtStartup: true`).
 
-R4. A downstream niwa config (workspace, instance, or repo) that sets
+R4. A downstream niwa config (workspace or instance) that sets
 `remoteControlAtStartup` MUST win over the host preference. In particular, a downstream
 value of `false` MUST cause the dispatched worker to start with remote-control off even
 when the host preference is on. The host preference is a default-fill, never a forced

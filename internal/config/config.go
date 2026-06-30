@@ -319,6 +319,15 @@ type HookEntry struct {
 // accepts raw strings through MaybeSecret's TextUnmarshaler.
 type SettingsConfig map[string]MaybeSecret
 
+// RemoteControlAtStartupKey is the Claude Code settings key that enables the
+// Remote Control bridge at session startup. It is the single source of truth for
+// the spelling shared by the three sites that must agree: the materializer that
+// emits it into a dispatched instance's settings.json, the dispatch argv that
+// injects it via `claude --settings`, and the reader that detects a downstream
+// override. The struct tag on the reader cannot reference a const (Go limitation),
+// so a test pins that tag to this value.
+const RemoteControlAtStartupKey = "remoteControlAtStartup"
+
 // EnvConfig defines environment configuration under [env]. It carries a list
 // of env files, a non-sensitive var map ([env.vars]) and a sensitive var map
 // ([env.secrets]), plus the three requirement-description sub-tables under

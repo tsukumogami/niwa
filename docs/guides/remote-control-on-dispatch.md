@@ -24,9 +24,9 @@ The preference is **scoped to `niwa dispatch` only**. Interactive sessions, ephe
 SessionStart-hook sessions, and `niwa apply` instances are unaffected. When the
 preference is unset, dispatch behaves exactly as before.
 
-## Turn it off for a specific workspace, instance, or repo
+## Turn it off for a specific workspace or instance
 
-The host preference is a default, not a mandate. To opt a workspace, instance, or repo
+The host preference is a default, not a mandate. To opt a workspace or instance
 out, set `remoteControlAtStartup` under that scope's `[claude.settings]` in
 `workspace.toml`:
 
