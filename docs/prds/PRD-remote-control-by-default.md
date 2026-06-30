@@ -1,6 +1,6 @@
 ---
 schema: prd/v1
-status: Accepted
+status: Done
 problem: |
   `niwa dispatch` launches background Claude Code workers the developer cannot be
   at the keyboard for, yet Claude Code Remote (the steer-from-afar bridge) is off
@@ -29,7 +29,7 @@ motivating_context: |
 
 ## Status
 
-Accepted
+Done
 
 The downstream DESIGN owns the implementation mechanism (the host-config field, the
 dispatch-time read-and-resolve, the `--settings` injection seam, and the eligibility

@@ -1,6 +1,6 @@
 ---
 schema: brief/v1
-status: Accepted
+status: Done
 problem: |
   When a developer dispatches a background worker with `niwa dispatch`, they are
   by definition not at that worker's keyboard, so they cannot turn on Claude Code
@@ -27,7 +27,7 @@ motivating_context: |
 
 ## Status
 
-Accepted
+Done
 
 The downstream PRD owns the requirements; the downstream DESIGN owns the host-toggle
 placement and the dispatch-time injection mechanism. This brief stops at the
