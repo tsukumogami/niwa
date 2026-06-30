@@ -218,9 +218,11 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	// Claude Code Remote settings flag so the worker starts steerable. The flag
 	// is two discrete argv elements (no shell interpolation). This is the only
 	// dispatch-exclusive seam, so the default never leaks to interactive,
-	// ephemeral, or `niwa apply` sessions. A missing/unreadable global config or
-	// instance settings file degrades to "no injection" -- never a dispatch
-	// failure -- preserving today's behavior when the preference is unset.
+	// ephemeral, or `niwa apply` sessions. Neither read can fail the dispatch: a
+	// missing/unreadable global config degrades to "no injection" (the preference
+	// is treated as unset), and an unreadable instance settings file is treated as
+	// "downstream unset" -- so the host default-fill still applies. Either way the
+	// dispatch always launches.
 	if gc, gcErr := config.LoadGlobalConfig(); gcErr == nil {
 		inst, _ := readInstanceSettings(instancePath)
 		// The eligibility check must inspect the SAME environment the worker
