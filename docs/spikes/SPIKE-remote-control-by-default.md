@@ -1,5 +1,5 @@
 ---
-status: Draft
+status: Complete
 question: |
   Does enabling Claude Code Remote on a `niwa dispatch` background worker actually
   make that worker live-steerable from Agent View / mobile — and is the per-session
@@ -14,13 +14,15 @@ timebox: "1 session (manual live dogfood, no niwa code changes)"
 
 ## Status
 
-Draft
+Complete
 
-The feasibility of the niwa-side plumbing is already understood (see Context). What
-is NOT proven is the claude-side behavior this whole feature depends on: that
-turning on `remoteControlAtStartup` for a `claude --bg` worker yields a worker you
-can actually steer remotely. This spike settles that go/no-go before any niwa code
-is written.
+Go. Variant A proved the core claim live: a `claude --bg` worker launched with
+`--settings '{"remoteControlAtStartup":true}'` — and nothing else — is steerable
+from Agent View / mobile. The per-session key alone is sufficient; the daemon-level
+`autoAddRemoteControlDaemonWorker` is NOT required (it was unset during the test).
+The niwa plumbing the exploration designed is therefore viable. One secondary item
+(settings-source precedence, Variant C) remains open and is a design detail, not a
+feasibility blocker.
 
 ## Question
 
@@ -128,25 +130,52 @@ test; remove any throwaway dispatched workers.
 
 ## Findings
 
-Investigation not yet started — preconditions confirmed (auth eligible, baseline
-`remoteControlAtStartup: false`), core steerability test pending.
+Run on 2026-06-29, host `claude` v2.1.196, niwa-code-free (raw `claude --bg`).
 
-To be filled in per variant:
-- Variant A (per-session key only): <steerable? evidence>
-- Variant B (+ daemon setting): <needed? evidence>
-- Variant C (precedence): <which source wins>
+Preconditions (confirmed before the test):
+- `~/.claude/settings.json`: `remoteControlAtStartup: false` (baseline, RC off),
+  `autoAddRemoteControlDaemonWorker: <unset>`, `agentPushNotifEnabled: true`.
+- Inherited env clean: no `CLAUDE_CODE_REMOTE`, no `DISABLE_GROWTHBOOK`. Host
+  logged in with network egress.
+
+**Variant A — per-session key only: STEERABLE (proven).**
+- Launched: `claude --bg --settings '{"remoteControlAtStartup":true}' "<keep-alive
+  worker prompt>"` from a throwaway cwd. Worker short ID `19171115`.
+- The daemon roster (`~/.claude/daemon/roster.json`) recorded the worker with the
+  injected `--settings {"remoteControlAtStartup":true}` in both `launch.args` and
+  `respawnFlags` — confirming the setting reached the spawned process and survives
+  respawn. `claude agents --json` showed it `status: busy / state: working`.
+- The user confirmed live from Agent View / mobile that the worker was
+  remote-controllable (steerable), with `autoAddRemoteControlDaemonWorker` left
+  unset. **Conclusion: the per-session settings key alone is sufficient.**
+
+**Variant B — daemon-level `autoAddRemoteControlDaemonWorker`: NOT NEEDED.**
+- Not run. Variant A succeeded with the daemon setting unset, which is exactly the
+  condition Variant B existed to test. The per-session key does not depend on the
+  daemon-global setting for `--bg` steerability.
+
+**Variant C — settings-source precedence: still open (secondary).**
+- Not tested. Whether `--settings` outranks a downstream project/user
+  `remoteControlAtStartup: false` determines the override-resolution strategy in the
+  design (niwa-self-resolves vs. rely on claude precedence). Not a feasibility
+  blocker; resolve during design.
 
 ## Recommendation
 
-Pending investigation. Decision shape:
+**Go — proceed to a Design Doc** for the niwa host toggle (`*bool` on
+`config.GlobalSettings`) plus the dispatch-only `--settings
+'{"remoteControlAtStartup":true}'` injection in `runDispatch`. Feasibility is
+proven: the per-session key alone makes a dispatched `--bg` worker steerable, so the
+design does not need to wrestle with the daemon-global
+`autoAddRemoteControlDaemonWorker` scoping problem.
 
-- **Go (per-session key sufficient):** proceed to a Design Doc for the niwa host
-  toggle + dispatch-only `--settings` injection; precedence result picks the
-  override-resolution strategy.
-- **Go (daemon setting also required):** proceed to design, but the design must
-  address that `autoAddRemoteControlDaemonWorker` is daemon-global (not per-session),
-  which complicates dispatch-only scoping — call that out as the central design
-  decision.
-- **No-go (not steerable, or blocked by org/rollout policy):** stop; record the
-  blocker. The niwa feature can't deliver remote-control the host account isn't
-  entitled to.
+Carry one open question into the design: settings-source precedence (Variant C),
+which picks the downstream-override mechanism. A quick precedence probe (inject
+`true` via `--settings` while a project `.claude/settings.json` sets `false`) settles
+it; until then, the safe design is to have niwa resolve the override itself (read the
+dispatched instance's effective `remoteControlAtStartup`, inject only when unset).
+
+Eligibility caveat unchanged: remote-control requires a first-party claude.ai OAuth
+login with the right scopes + subscription and an account/org where the bridge
+rollout is enabled. An API-key-only worker can never be remote-controlled; niwa
+should surface a clear message rather than silently no-op when ineligible.
