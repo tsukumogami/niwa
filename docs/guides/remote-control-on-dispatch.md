@@ -26,13 +26,21 @@ preference is unset, dispatch behaves exactly as before.
 
 ## Turn it off for a specific workspace or instance
 
-The host preference is a default, not a mandate. To opt a workspace or instance
-out, set `remoteControlAtStartup` under that scope's `[claude.settings]` in
-`workspace.toml`:
+The host preference is a default, not a mandate. To opt out, set
+`remoteControlAtStartup` under the relevant scope's Claude settings in
+`workspace.toml` -- `[claude.settings]` for the whole workspace, or
+`[instance.claude.settings]` for the instance root:
 
 ```toml
+# workspace scope
 [claude.settings]
 # values in [claude.settings] are written as quoted strings
+remoteControlAtStartup = "false"
+```
+
+```toml
+# instance scope
+[instance.claude.settings]
 remoteControlAtStartup = "false"
 ```
 

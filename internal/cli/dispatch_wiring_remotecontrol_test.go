@@ -146,7 +146,48 @@ func TestDispatch_RemoteControl_APIKey_WarnsAndSkips(t *testing.T) {
 	if hasRemoteControlSettings(pass) {
 		t.Fatalf("API-key auth precludes remote-control; --settings should be absent, got %v", pass)
 	}
-	if !strings.Contains(stderr, "ANTHROPIC_API_KEY") {
-		t.Fatalf("expected an eligibility warning mentioning ANTHROPIC_API_KEY on stderr, got %q", stderr)
+	if !strings.Contains(stderr, apiKeyForcedWarning) {
+		t.Fatalf("expected the exact eligibility warning on stderr, got %q", stderr)
+	}
+}
+
+// A malformed instance settings.json is unreadable, so the resolver treats the
+// downstream value as unset and the host default-fill still injects -- the dispatch
+// must never fail on it.
+func TestDispatch_RemoteControl_MalformedInstanceSettings_DegradesToInject(t *testing.T) {
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	root := setupDispatchWorkspace(t)
+	chdir(t, root)
+	setHostConfig(t, hostRConDispatch)
+	f := installDispatchFakes(t, root)
+	provisionWithInstanceSettings(t, f, `{ this is not json`)
+	var pass []string
+	captureLaunchPassthrough(f, &pass)
+
+	if _, _, err := runDispatchCmd(t, "do a thing"); err != nil {
+		t.Fatalf("a malformed instance settings.json must not fail dispatch: %v", err)
+	}
+	if !hasRemoteControlSettings(pass) {
+		t.Fatalf("unreadable downstream value should be treated as unset -> inject; got %v", pass)
+	}
+}
+
+// An invalid host-config value makes LoadGlobalConfig fail; dispatch must degrade
+// to no injection (today's behavior) rather than fail.
+func TestDispatch_RemoteControl_InvalidHostConfig_NoInjectNoFail(t *testing.T) {
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	root := setupDispatchWorkspace(t)
+	chdir(t, root)
+	setHostConfig(t, "[global]\nremote_control_on_dispatch = \"notabool\"\n")
+	f := installDispatchFakes(t, root)
+	provisionWithInstanceSettings(t, f, "")
+	var pass []string
+	captureLaunchPassthrough(f, &pass)
+
+	if _, _, err := runDispatchCmd(t, "do a thing"); err != nil {
+		t.Fatalf("an invalid host config must not fail dispatch: %v", err)
+	}
+	if slices.Contains(pass, "--settings") {
+		t.Fatalf("invalid host config should degrade to no injection; got %v", pass)
 	}
 }
