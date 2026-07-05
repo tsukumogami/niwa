@@ -93,6 +93,13 @@ niwa dispatch "Read <abs-path-to-brief> for your complete task brief, then imple
   look in. Only omit `--detach` if the user explicitly wants to jump straight into the worker.
 - **`--name`** gives the session a readable name in Agent View (sanitized into a slug; it also
   names the instance, e.g. `<config>+<slug>-<id>`).
+- **`--model`** (optional) picks the model that runs the worker's main chat loop. Pass it when
+  the user asked for a specific model, or when the work clearly warrants a heavier or lighter
+  one. It accepts either a capability **category** -- `fast`, `balanced`, or `powerful` -- or a
+  versionless vendor name -- `fable`, `sonnet`, `opus`, `haiku`. Prefer a category unless the
+  user named a specific model, since categories stay correct as concrete models change. Omit the
+  flag to use the workspace default (the `[global] dispatch_model` host setting, if any). Example:
+  `niwa dispatch "..." --name "<topic>" --model powerful --detach`.
 - Pass the brief's absolute path in the prompt; keep the inline summary short (the prompt is a
   single shell argument).
 

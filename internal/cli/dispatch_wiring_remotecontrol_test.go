@@ -124,7 +124,7 @@ func TestDispatch_RemoteControl_HostUnset_NoChange(t *testing.T) {
 	// AC4: with the preference unset, the passthrough must be byte-for-byte the
 	// baseline buildDispatchPassthrough produces -- not merely "--settings absent".
 	// dispatchName is "" here, so the baseline carries no flags at all.
-	if want := buildDispatchPassthrough(""); !slices.Equal(pass, want) {
+	if want := buildDispatchPassthrough("", ""); !slices.Equal(pass, want) {
 		t.Fatalf("preference unset must not alter argv; got %v, want %v", pass, want)
 	}
 }
