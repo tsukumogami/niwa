@@ -1074,3 +1074,33 @@ org = "myorg"
 		}
 	}
 }
+
+func TestParsePluginPathEnv(t *testing.T) {
+	const tomlSrc = `
+[workspace]
+name = "test-ws"
+
+[[claude.plugin_path_env]]
+name = "SHIRABE_WORK_SUMMARY"
+plugin = "work-summary@shirabe"
+path = "scripts/render-work-in-flight.sh"
+`
+	result, err := Parse([]byte(tomlSrc))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	cfg := result.Config
+	if len(cfg.Claude.PluginPathEnv) != 1 {
+		t.Fatalf("PluginPathEnv count = %d, want 1", len(cfg.Claude.PluginPathEnv))
+	}
+	b := cfg.Claude.PluginPathEnv[0]
+	if b.Name != "SHIRABE_WORK_SUMMARY" || b.Plugin != "work-summary@shirabe" || b.Path != "scripts/render-work-in-flight.sh" {
+		t.Errorf("binding = %+v, want name/plugin/path populated", b)
+	}
+	// The block must not surface as an unknown-field warning.
+	for _, w := range result.Warnings {
+		if strings.Contains(w, "plugin_path_env") {
+			t.Errorf("unexpected unknown-field warning for plugin_path_env: %q", w)
+		}
+	}
+}
