@@ -35,11 +35,6 @@ type ClaudeConfig struct {
 	Hooks        HooksConfig        `toml:"hooks,omitempty"`
 	Settings     SettingsConfig     `toml:"settings,omitempty"`
 	Env          ClaudeEnvConfig    `toml:"env,omitempty"`
-	// PluginPathEnv declares environment variables whose values niwa resolves
-	// at provisioning time to absolute paths inside installed Claude plugins.
-	// Workspace-scoped (like Marketplaces); not merged from per-repo overrides.
-	// See PluginPathEnvBinding for the resolution and fail-safe semantics.
-	PluginPathEnv []PluginPathEnvBinding `toml:"plugin_path_env,omitempty"`
 	// Content declares the CLAUDE.md content hierarchy under
 	// [claude.content]. Workspace-scoped: per-repo overrides are not
 	// honored via RepoOverride.Claude. Migrated from the deprecated
@@ -316,32 +311,6 @@ type HooksConfig map[string][]HookEntry
 type HookEntry struct {
 	Matcher string   `toml:"matcher,omitempty"`
 	Scripts []string `toml:"scripts"`
-}
-
-// PluginPathEnvBinding declares one environment variable whose value niwa
-// resolves at provisioning time to an absolute path inside an installed Claude
-// plugin's cache directory. It lets workspace config expose a plugin-shipped
-// script's resolved path to materialized hooks, which receive only
-// ${CLAUDE_PROJECT_DIR} at runtime and so cannot self-resolve the
-// version-unstable plugin cache path.
-//
-// niwa stays generic: the plugin key, the plugin-relative script path, and the
-// env var name are all config-declared — no plugin name is hardcoded in the
-// niwa binary. Resolution is fail-safe: if the plugin is not installed, the
-// declared path escapes the plugin install dir, or the resolved file does not
-// exist, niwa omits the variable entirely (rather than injecting an untrusted
-// or partial value), so a hook reading it sees an empty value and no-ops.
-type PluginPathEnvBinding struct {
-	// Name is the environment variable to set (e.g. "SHIRABE_WORK_SUMMARY").
-	Name string `toml:"name"`
-	// Plugin is the installed plugin to resolve. It matches an entry in Claude
-	// Code's installed_plugins registry, either by its full
-	// "<plugin>@<marketplace>" key or by the bare "<plugin>" name.
-	Plugin string `toml:"plugin"`
-	// Path is the plugin-relative path of the script to expose. The resolved
-	// value is <plugin-install-dir>/<Path>; a Path that escapes the install
-	// dir (via "..") is rejected fail-safe.
-	Path string `toml:"path"`
 }
 
 // SettingsConfig maps setting keys to their values. The primary key today is

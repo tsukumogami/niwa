@@ -98,60 +98,6 @@ func TestApplyToWorktreeInstallsContentRulesAndLayer(t *testing.T) {
 	}
 }
 
-// TestApplyToWorktreeInjectsPluginPathEnv proves a `niwa worktree`-created
-// session gets the resolved [[claude.plugin_path_env]] binding (e.g.
-// SHIRABE_WORK_SUMMARY) materialized into its settings.local.json, so the
-// capture hook resolves the plugin script instead of no-oping. Injection mirrors
-// the instance apply pipeline.
-func TestApplyToWorktreeInjectsPluginPathEnv(t *testing.T) {
-	cfg, configDir, instanceRoot, worktreePath := applyToWorktreeFixture(t)
-	cfg.Claude.PluginPathEnv = []config.PluginPathEnvBinding{
-		{Name: "SHIRABE_WORK_SUMMARY", Plugin: "work-summary@shirabe", Path: "scripts/render.sh"},
-	}
-	installDir := fakePluginDir(t, "scripts/render.sh")
-	wantPath := filepath.Join(installDir, "scripts/render.sh")
-
-	opts := WorktreeApplyOptions{
-		PluginInstallPath: func(key string) (string, bool) {
-			if pluginKeyMatches("work-summary@shirabe", key) {
-				return installDir, true
-			}
-			return "", false
-		},
-	}
-	if _, err := ApplyToWorktree(cfg, configDir, instanceRoot, worktreePath, "apps", "app", "ship-the-thing", "branch-xyz", opts); err != nil {
-		t.Fatalf("ApplyToWorktree: %v", err)
-	}
-
-	env := readSettingsEnv(t, filepath.Join(worktreePath, ".claude", "settings.local.json"))
-	if env["SHIRABE_WORK_SUMMARY"] != wantPath {
-		t.Errorf("worktree settings SHIRABE_WORK_SUMMARY = %q, want %q", env["SHIRABE_WORK_SUMMARY"], wantPath)
-	}
-}
-
-// TestApplyToWorktreeUnresolvablePluginPathEnvIsAbsent proves the fail-safe on
-// the worktree path: an unresolvable binding injects no variable (the hook reads
-// empty and no-ops) and the worktree apply still succeeds.
-func TestApplyToWorktreeUnresolvablePluginPathEnvIsAbsent(t *testing.T) {
-	cfg, configDir, instanceRoot, worktreePath := applyToWorktreeFixture(t)
-	cfg.Claude.PluginPathEnv = []config.PluginPathEnvBinding{
-		{Name: "SHIRABE_WORK_SUMMARY", Plugin: "work-summary@shirabe", Path: "scripts/render.sh"},
-	}
-	opts := WorktreeApplyOptions{
-		PluginInstallPath: func(string) (string, bool) { return "", false },
-	}
-	if _, err := ApplyToWorktree(cfg, configDir, instanceRoot, worktreePath, "apps", "app", "ship-the-thing", "branch-xyz", opts); err != nil {
-		t.Fatalf("ApplyToWorktree must still succeed when the plugin is unresolvable: %v", err)
-	}
-
-	settingsPath := filepath.Join(worktreePath, ".claude", "settings.local.json")
-	if _, err := os.Stat(settingsPath); err == nil {
-		if _, present := readSettingsEnv(t, settingsPath)["SHIRABE_WORK_SUMMARY"]; present {
-			t.Error("SHIRABE_WORK_SUMMARY must be absent when the plugin is unresolvable (fail-safe)")
-		}
-	}
-}
-
 func TestApplyToWorktreeIsIdempotent(t *testing.T) {
 	cfg, configDir, instanceRoot, worktreePath := applyToWorktreeFixture(t)
 

@@ -120,15 +120,6 @@ type Applier struct {
 	// When nil, the reconcile is a silent no-op.
 	reconcileMarketplaceAutoUpdate func(desired map[string]bool) (pluginrecord.ReconcileReport, error)
 
-	// pluginInstallPath resolves an installed Claude plugin (by registry key or
-	// bare name) to its on-disk install directory. It is the test seam for
-	// Issue 4's [[claude.plugin_path_env]] resolution: production wires it (via
-	// NewApplier) to defaultPluginInstallPath, which reads the real
-	// installed_plugins.json; tests inject a fake pointing at a temp plugin cache
-	// so the injection can be proven without a real ~/.claude. When nil, no
-	// plugin-path env var resolves (the fail-safe: the hooks no-op).
-	pluginInstallPath PluginInstallPathFunc
-
 	// vaultRegistry overrides vault.DefaultRegistry for vault bundle building.
 	// Nil means use the process-wide DefaultRegistry (production behaviour).
 	// Tests set this to a fresh *vault.Registry with the fake backend registered
@@ -177,10 +168,6 @@ func NewApplier(gh github.Client) *Applier {
 		fetcher, _ := a.GitHubClient.(FetchClient)
 		return EnsureOverlaySnapshot(ctx, url, dir, fetcher, a.Reporter)
 	}
-	// Resolve [[claude.plugin_path_env]] bindings against the real Claude Code
-	// installed-plugins registry. Fail-safe by contract (see
-	// defaultPluginInstallPath); nil-safe in runPipeline.
-	a.pluginInstallPath = defaultPluginInstallPath
 	aw := &applierWriter{a: a}
 	a.Materializers = defaultRepoMaterializers(aw)
 	return a
@@ -1206,24 +1193,6 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		return nil, err
 	}
 
-	// Issue 4: resolve [[claude.plugin_path_env]] bindings to absolute
-	// plugin-cache paths and inject them as Claude env vars, so
-	// niwa-materialized hooks (which receive only ${CLAUDE_PROJECT_DIR} at
-	// runtime and cannot self-resolve the version-unstable plugin cache path)
-	// can reach a plugin-shipped script by reading the injected variable
-	// (e.g. SHIRABE_WORK_SUMMARY). This is done HERE, in the shared pipeline
-	// that `niwa create`, `niwa apply`, and `niwa dispatch` (which provisions
-	// via Create) all run, so every entry point wires an identical instance —
-	// a requirement, not an optimization. Injecting into effectiveCfg's
-	// [claude.env].vars makes the value flow through the existing env pipeline
-	// into BOTH the instance-root settings.json and each repo's
-	// settings.local.json env block. Resolution is fail-safe: an unresolvable
-	// binding (plugin absent, path escapes the cache, or file missing) is
-	// omitted, so the hook reads an empty value and no-ops rather than
-	// executing an untrusted fallback. Running on every provision refreshes the
-	// path after a plugin version bump.
-	injectPluginPathEnv(effectiveCfg, resolvePluginPathEnv(effectiveCfg.Claude.PluginPathEnv, a.pluginInstallPath))
-
 	// Step 3: Create group directories and clone repos concurrently.
 	//
 	// Group directory creation runs sequentially (fast local I/O; repos in the
@@ -1811,11 +1780,6 @@ func (a *Applier) refreshWorktreeEnvs(in worktreeRefreshInputs) ([]ManagedFile, 
 				Stderr:                 a.Reporter.Writer(),
 				GlobalEnvExamplePolicy: in.globalEnvExamplePolicy,
 				GlobalEnvOutput:        in.globalEnvOutput,
-				// Resolve plugin-path bindings with the same resolver the instance
-				// pipeline used, so a refreshed worktree resolves the same plugin as
-				// its parent. in.cfg is the already-injected effectiveCfg, so this is
-				// idempotent (the operator-collision guard skips the present key).
-				PluginInstallPath: a.pluginInstallPath,
 			},
 		)
 		if refreshErr != nil {
