@@ -154,6 +154,17 @@ func runInstanceHookStart(cmd *cobra.Command, payload instanceHookPayload, jobsD
 		return nil
 	}
 
+	// Defense in depth for the reaper backstop: a dispatched bg worker booting
+	// inside an ephemeral dispatch instance that still carries the pending marker
+	// but has no mapping self-heals by writing the mapping itself, so the worker
+	// is never left as an unmapped orphan the backstop could reap even if its
+	// dispatch parent died before mapping it. This is a terminal case (the worker
+	// is already inside its instance), so on success it returns without
+	// provisioning a new one.
+	if maybeAdoptSelf(workspaceRoot, payload, jobsDir) {
+		return nil
+	}
+
 	if !sessionStartGuardPasses(workspaceRoot, payload.Cwd, payload.SessionID, jobsDir) {
 		return nil
 	}
@@ -272,6 +283,83 @@ func isBackgroundWorker(jobsDir, sessionID string) bool {
 		return false
 	}
 	return js.Template == bgJobTemplate
+}
+
+// maybeAdoptSelf handles the adopt-self case of the SessionStart guard: a
+// dispatched background worker booting INSIDE an ephemeral dispatch instance that
+// still carries the pending marker but has no mapping writes the mapping itself.
+// It returns true when it took ownership of this hook invocation (the worker is
+// already inside its instance, so the caller must NOT provision a new one),
+// whether or not the mapping write ultimately succeeded; it returns false when
+// this is not the adopt-self shape, so the caller falls through to the ordinary
+// three-part guard.
+//
+// This is the defense-in-depth complement to the reaper backstop's own liveness
+// check: it makes the worker's own boot a mapping source, so the data-loss path
+// (a dispatch parent that dies before writing the mapping, leaving a live but
+// unmapped instance) is closed even without the parent surviving. It deliberately
+// mirrors the ordinary guard's gates -- ephemeral mode on, a confirmed bg worker
+// -- so an ordinary session is never touched, and it relaxes only guard #3
+// (re-entrancy) for exactly this case: the instance must be a dispatch instance
+// with an unresolved pending marker and no mapping, not any nested/dev instance.
+func maybeAdoptSelf(workspaceRoot string, payload instanceHookPayload, jobsDir string) bool {
+	// Honor the master switch: outside ephemeral-session mode the hook is inert.
+	if !workspace.EphemeralSessionMode(workspaceRoot) {
+		return false
+	}
+
+	// Only a dispatched background worker self-heals.
+	if !isBackgroundWorker(jobsDir, payload.SessionID) {
+		return false
+	}
+
+	// The worker must be booting inside a genuine instance (the condition that
+	// makes guard #3 no-op for a dispatched worker). A workspace-root or
+	// non-instance cwd is not an adopt-self case.
+	instanceDir, err := workspace.DiscoverInstance(payload.Cwd)
+	if err != nil {
+		return false
+	}
+	if workspace.ValidateInstanceDir(instanceDir) != nil {
+		return false
+	}
+
+	// The instance must be a dispatch instance carrying an unresolved pending
+	// marker: dispatch drops the marker at create and removes it only after the
+	// mapping is durably written, so marker-present + unmapped is precisely the
+	// "parent died before mapping" shape. A non-dispatch instance, or a dispatch
+	// instance whose marker was already cleaned up, is not healed here.
+	if !isDispatchInstanceName(filepath.Base(instanceDir)) {
+		return false
+	}
+	if _, err := os.Stat(filepath.Join(instanceDir, dispatchPendingMarker)); err != nil {
+		return false
+	}
+
+	// If a mapping already exists for this session (the parent mapped it, or a
+	// prior hook run did), there is nothing to heal -- fall through to the guard,
+	// which no-ops on re-entrancy.
+	if _, err := workspace.ReadSessionMapping(workspaceRoot, payload.SessionID); err == nil {
+		return false
+	}
+
+	// Write the missing mapping. This is the terminal action for this worker's
+	// SessionStart: it is already inside its instance, so we never provision a
+	// nested one regardless of the write outcome.
+	mapping := workspace.SessionMapping{
+		SessionID:      payload.SessionID,
+		InstanceName:   filepath.Base(instanceDir),
+		InstancePath:   instanceDir,
+		TranscriptPath: payload.TranscriptPath,
+		Ephemeral:      true,
+		Origin:         backstopAdoptedOrigin,
+	}
+	if err := workspace.WriteSessionMapping(workspaceRoot, mapping); err != nil {
+		// Best effort: a failed self-heal must not break the session. The reaper
+		// backstop's own liveness check remains the primary protection.
+		fmt.Fprintf(os.Stderr, "niwa: warning: self-healing session mapping for %s: %v\n", payload.SessionID, err)
+	}
+	return true
 }
 
 // sessionStartInjection is the SessionStart hook output shape Claude Code

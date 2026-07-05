@@ -297,6 +297,160 @@ func TestSessionStart_PassingWorker_Provisions(t *testing.T) {
 	}
 }
 
+// makeDispatchInstance creates a genuine instance directory named name under
+// root (with .niwa/instance.json so DiscoverInstance/ValidateInstanceDir accept
+// it as an instance, no workspace.toml so it is not a root) and, when marker is
+// true, drops the dispatch pending marker inside it. It returns the instance dir.
+func makeDispatchInstance(t *testing.T, root, name string, marker bool) string {
+	t.Helper()
+	dir := filepath.Join(root, name)
+	st := &workspace.InstanceState{
+		SchemaVersion: workspace.SchemaVersion,
+		InstanceName:  name,
+		Root:          dir,
+		Repos:         map[string]workspace.RepoState{},
+	}
+	if err := workspace.SaveState(dir, st); err != nil {
+		t.Fatal(err)
+	}
+	if marker {
+		m := filepath.Join(dir, dispatchPendingMarker)
+		if err := os.MkdirAll(filepath.Dir(m), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(m, []byte("2026-01-01T00:00:00Z\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return dir
+}
+
+// TestSessionStart_DispatchOrphanSelfHeals: a bg worker booting inside a
+// dispatch-named instance that carries the pending marker but has no mapping
+// (its dispatch parent died before mapping it) self-heals -- the hook writes the
+// mapping itself, marked ephemeral and adopted-origin, and does NOT provision a
+// nested instance. This closes the data-loss window without the reaper's own
+// liveness check having to fire.
+func TestSessionStart_DispatchOrphanSelfHeals(t *testing.T) {
+	root := setupHookWorkspace(t, true)
+	jobsDir := t.TempDir()
+	writeJobState(t, jobsDir, testSessionID, testSessionID, "bg")
+	rec := stubProvision(t, "guidance")
+
+	instanceDir := makeDispatchInstance(t, root, "test-ws+-0000abcd", true /* marker */)
+
+	out, _, err := runStart(t, instanceHookPayload{
+		HookEventName:  hookEventSessionStart,
+		SessionID:      testSessionID,
+		Cwd:            instanceDir,
+		TranscriptPath: "/tmp/t.jsonl",
+	}, jobsDir)
+	if err != nil {
+		t.Fatalf("runInstanceHookStart: %v", err)
+	}
+	if rec.called {
+		t.Error("provisioner was called; want self-heal only (no nested provision)")
+	}
+	if out != "" {
+		t.Errorf("stdout = %q, want empty (self-heal emits no injection)", out)
+	}
+
+	m, err := workspace.ReadSessionMapping(root, testSessionID)
+	if err != nil {
+		t.Fatalf("self-healed mapping not written: %v", err)
+	}
+	if m.InstancePath != instanceDir {
+		t.Errorf("mapping InstancePath = %q, want %q", m.InstancePath, instanceDir)
+	}
+	if !m.Ephemeral {
+		t.Error("mapping Ephemeral = false, want true")
+	}
+	if m.Origin != backstopAdoptedOrigin {
+		t.Errorf("mapping Origin = %q, want %q", m.Origin, backstopAdoptedOrigin)
+	}
+	if m.TranscriptPath != "/tmp/t.jsonl" {
+		t.Errorf("mapping TranscriptPath = %q, want the hook transcript", m.TranscriptPath)
+	}
+}
+
+// TestSessionStart_DispatchOrphanAlreadyMapped_NoOp: when a dispatch instance
+// already has a mapping (the parent wrote it, or a prior hook run did), the
+// worker's SessionStart does not rewrite it and does not provision -- guard #3
+// re-entrancy simply no-ops. The existing mapping is left untouched.
+func TestSessionStart_DispatchOrphanAlreadyMapped_NoOp(t *testing.T) {
+	root := setupHookWorkspace(t, true)
+	jobsDir := t.TempDir()
+	writeJobState(t, jobsDir, testSessionID, testSessionID, "bg")
+	rec := stubProvision(t, "guidance")
+
+	instanceDir := makeDispatchInstance(t, root, "test-ws+-0000abcd", true)
+	// A pre-existing mapping written by the parent (Origin "dispatch").
+	if err := workspace.WriteSessionMapping(root, workspace.SessionMapping{
+		SessionID:    testSessionID,
+		InstanceName: "test-ws+-0000abcd",
+		InstancePath: instanceDir,
+		Ephemeral:    true,
+		Origin:       "dispatch",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	out, _, err := runStart(t, instanceHookPayload{
+		HookEventName: hookEventSessionStart,
+		SessionID:     testSessionID,
+		Cwd:           instanceDir,
+	}, jobsDir)
+	if err != nil {
+		t.Fatalf("runInstanceHookStart: %v", err)
+	}
+	if rec.called {
+		t.Error("provisioner was called; want re-entrancy no-op")
+	}
+	if out != "" {
+		t.Errorf("stdout = %q, want empty", out)
+	}
+	// The existing mapping must be untouched (not rewritten to adopted-origin).
+	m, err := workspace.ReadSessionMapping(root, testSessionID)
+	if err != nil {
+		t.Fatalf("ReadSessionMapping: %v", err)
+	}
+	if m.Origin != "dispatch" {
+		t.Errorf("mapping Origin = %q, want %q (self-heal must not overwrite an existing mapping)", m.Origin, "dispatch")
+	}
+}
+
+// TestSessionStart_DispatchInstanceNoMarker_NoHeal: a dispatch-named instance
+// with NO pending marker (a completed dispatch whose marker was already cleaned
+// up) is NOT self-healed -- marker-present is the signal that a mapping is
+// genuinely missing. The worker's SessionStart no-ops on re-entrancy and writes
+// no mapping.
+func TestSessionStart_DispatchInstanceNoMarker_NoHeal(t *testing.T) {
+	root := setupHookWorkspace(t, true)
+	jobsDir := t.TempDir()
+	writeJobState(t, jobsDir, testSessionID, testSessionID, "bg")
+	rec := stubProvision(t, "guidance")
+
+	instanceDir := makeDispatchInstance(t, root, "test-ws+-0000abcd", false /* no marker */)
+
+	out, _, err := runStart(t, instanceHookPayload{
+		HookEventName: hookEventSessionStart,
+		SessionID:     testSessionID,
+		Cwd:           instanceDir,
+	}, jobsDir)
+	if err != nil {
+		t.Fatalf("runInstanceHookStart: %v", err)
+	}
+	if rec.called {
+		t.Error("provisioner was called; want re-entrancy no-op")
+	}
+	if out != "" {
+		t.Errorf("stdout = %q, want empty", out)
+	}
+	if _, err := workspace.ReadSessionMapping(root, testSessionID); err == nil {
+		t.Error("a mapping was written for an unmarked instance; want none (no self-heal)")
+	}
+}
+
 // TestBuildSessionStartInjection_NoClaudeMD: a missing instance CLAUDE.md is
 // tolerated; the path + cd instruction still inject.
 func TestBuildSessionStartInjection_NoClaudeMD(t *testing.T) {
