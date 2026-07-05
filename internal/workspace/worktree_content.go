@@ -367,6 +367,14 @@ type WorktreeApplyOptions struct {
 	// declaration, threaded so the worktree path resolves the same targets as
 	// the instance apply path. Empty when no global override is available.
 	GlobalEnvOutput config.OutputTargets
+	// PluginInstallPath is the plugin-install-dir resolver used to inject
+	// [[claude.plugin_path_env]] bindings (e.g. SHIRABE_WORK_SUMMARY) into the
+	// worktree's settings before materialization, mirroring the instance apply
+	// pipeline. nil defaults to the production registry-backed resolver; the
+	// apply-refresh path passes the Applier's resolver so a worktree resolves
+	// the same plugin as its parent instance. Resolution is fail-safe: an
+	// unresolvable binding is omitted.
+	PluginInstallPath PluginInstallPathFunc
 }
 
 // ApplyToWorktree installs, into worktreePath, the same class of CLAUDE
@@ -431,6 +439,22 @@ func ApplyToWorktree(cfg *config.WorkspaceConfig, configDir, instanceRoot, workt
 	if materializers == nil {
 		materializers = worktreeRepoMaterializers(opts.Stderr)
 	}
+
+	// Inject [[claude.plugin_path_env]] bindings (e.g. SHIRABE_WORK_SUMMARY) into
+	// cfg's [claude.env].vars before materialization, mirroring the instance apply
+	// pipeline (see injectPluginPathEnv at the runPipeline call site). Without this
+	// a `niwa worktree`-created session would materialize an empty binding and its
+	// capture hook would no-op. The value flows into settings.local.json via the
+	// SettingsMaterializer (present in the worktree materializer set). This runs on
+	// the vault-free, overlay-merged cfg the worktree path uses; the injected value
+	// is a plaintext plugin-cache path (never a secret), and the operator-collision
+	// and fail-safe guards live in injectPluginPathEnv/resolvePluginPathEnv.
+	pluginLookup := opts.PluginInstallPath
+	if pluginLookup == nil {
+		pluginLookup = defaultPluginInstallPath
+	}
+	injectPluginPathEnv(cfg, resolvePluginPathEnv(cfg.Claude.PluginPathEnv, pluginLookup))
+
 	discoveredHooks, _ := DiscoverHooks(configDir)
 	wsEnvFile, repoEnvFiles, _ := DiscoverEnvFiles(configDir)
 	relWsEnv := wsEnvFile

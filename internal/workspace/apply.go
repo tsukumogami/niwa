@@ -1811,6 +1811,11 @@ func (a *Applier) refreshWorktreeEnvs(in worktreeRefreshInputs) ([]ManagedFile, 
 				Stderr:                 a.Reporter.Writer(),
 				GlobalEnvExamplePolicy: in.globalEnvExamplePolicy,
 				GlobalEnvOutput:        in.globalEnvOutput,
+				// Resolve plugin-path bindings with the same resolver the instance
+				// pipeline used, so a refreshed worktree resolves the same plugin as
+				// its parent. in.cfg is the already-injected effectiveCfg, so this is
+				// idempotent (the operator-collision guard skips the present key).
+				PluginInstallPath: a.pluginInstallPath,
 			},
 		)
 		if refreshErr != nil {

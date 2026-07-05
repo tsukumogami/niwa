@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/tsukumogami/niwa/internal/config"
+	"github.com/tsukumogami/niwa/internal/pluginrecord"
 )
 
 // fakePluginDir creates a plugin install directory containing a script at
@@ -80,6 +81,29 @@ func TestResolvePluginPathEnv_PathEscapeRejected(t *testing.T) {
 	}
 }
 
+func TestResolvePluginPathEnv_SymlinkEscapeRejected(t *testing.T) {
+	installDir := t.TempDir()
+	// Plant a file OUTSIDE the install dir, then a symlink INSIDE the install dir
+	// that points at it. A lexical containment check on "esc/x" passes (it stays
+	// under installDir as a string), but following the "esc" link escapes.
+	outsideDir := t.TempDir()
+	outsideFile := filepath.Join(outsideDir, "x")
+	if err := os.WriteFile(outsideFile, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outsideDir, filepath.Join(installDir, "esc")); err != nil {
+		t.Fatal(err)
+	}
+
+	lookup := func(string) (string, bool) { return installDir, true }
+	got := resolvePluginPathEnv([]config.PluginPathEnvBinding{
+		{Name: "SHIRABE_WORK_SUMMARY", Plugin: "work-summary", Path: "esc/x"},
+	}, lookup)
+	if got != nil {
+		t.Errorf("a symlink inside the install dir pointing outside must be rejected after EvalSymlinks, got %v", got)
+	}
+}
+
 func TestResolvePluginPathEnv_NilLookup(t *testing.T) {
 	got := resolvePluginPathEnv([]config.PluginPathEnvBinding{
 		{Name: "X", Plugin: "p", Path: "s.sh"},
@@ -121,5 +145,36 @@ func TestInjectPluginPathEnv_EmptyIsNoOp(t *testing.T) {
 	injectPluginPathEnv(cfg, nil)
 	if cfg.Claude.Env.Vars.Values != nil {
 		t.Errorf("empty env should leave config untouched, got %v", cfg.Claude.Env.Vars.Values)
+	}
+}
+
+func TestInjectPluginPathEnv_DoesNotOverwriteOperatorVar(t *testing.T) {
+	cfg := &config.WorkspaceConfig{}
+	cfg.Claude.Env.Vars.Values = map[string]config.MaybeSecret{
+		"SHIRABE_WORK_SUMMARY": {Plain: "/operator/set/value"},
+	}
+	injectPluginPathEnv(cfg, map[string]string{"SHIRABE_WORK_SUMMARY": "/plugin/render.sh"})
+	if got := cfg.Claude.Env.Vars.Values["SHIRABE_WORK_SUMMARY"].Plain; got != "/operator/set/value" {
+		t.Errorf("operator-declared env var was overwritten: got %q, want %q", got, "/operator/set/value")
+	}
+}
+
+func TestResolvePluginInstallDir_AmbiguousBareNameIsFailSafe(t *testing.T) {
+	// Two marketplaces ship the same bare plugin name with DISTINCT install dirs.
+	// A bare-name binding must not resolve non-deterministically to whichever the
+	// unordered registry map yields first; it must fail safe (omit).
+	reg := &pluginrecord.Registry{
+		Plugins: map[string][]pluginrecord.Record{
+			"work-summary@shirabe": {{InstallPath: "/cache/shirabe/work-summary"}},
+			"work-summary@evil":    {{InstallPath: "/cache/evil/work-summary"}},
+		},
+	}
+	if _, ok := resolvePluginInstallDir(reg, "work-summary"); ok {
+		t.Error("a bare name matching two distinct installed plugins must be omitted (fail-safe)")
+	}
+	// A full "<plugin>@<marketplace>" key still matches exactly one.
+	got, ok := resolvePluginInstallDir(reg, "work-summary@shirabe")
+	if !ok || got != "/cache/shirabe/work-summary" {
+		t.Errorf("full key must resolve unambiguously: got %q ok=%v", got, ok)
 	}
 }
