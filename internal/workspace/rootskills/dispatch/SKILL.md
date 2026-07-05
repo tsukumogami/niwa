@@ -36,9 +36,34 @@ Read back over the conversation and write a brief that stands on its own. Includ
   state, NOT this session's uncommitted edits or unpushed local commits.
 - **Acceptance criteria** -- how the worker (and you) will know it's done.
 - **Out of scope** -- what NOT to touch.
+- **Final-message work-in-flight block** -- the instruction described in step 1a below.
 
 If the work is already fully captured in a pushed doc or issue, the brief can be short and
 point at it. If it lives only in this chat, the brief must carry it.
+
+### 1a. Require the work-in-flight block in the worker's final message
+
+A dispatched worker runs in the background: its user-visible `systemMessage` channel
+does NOT reach the Agent View dashboard row, so the only durable surface for the
+session's real pull-request set is the worker's own final message. Every brief you
+write MUST therefore instruct the worker to **end its final message with the
+standardized work-in-flight block** (the block under the literal marker
+`=== WORK IN FLIGHT ===`).
+
+Do not spell out the block's layout in the brief. There is exactly ONE source of
+truth for its format -- the shirabe `work-summary` component (the same renderer the
+`/inflight` skill and the ambient hooks use); reference it, don't restate it, so the
+two layers cannot drift. Tell the worker to produce the block from its real captured
+PR state (never invented references), and to apply the **same terminal-safety
+sanitization** that governs every other emission of the block: strip control and ANSI
+bytes, keep one line per PR with the bare URL last, never a newline or `|` inside a
+cell, and never a second `=== WORK IN FLIGHT ===` marker inside any field. If the
+worker opened no PRs, it says so in one line rather than emitting an empty marker.
+
+Concretely, add a line to the brief such as: "When you finish, end your final message
+with the standardized `=== WORK IN FLIGHT ===` block (the shirabe work-summary format,
+same as `/inflight`) listing every PR you opened, one per line with its bare URL last;
+apply the block's terminal-safety sanitization and never invent a PR reference."
 
 ### 2. Write the brief to a stable file
 
