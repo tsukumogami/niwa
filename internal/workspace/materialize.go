@@ -520,7 +520,18 @@ func buildSettingsDoc(cfg BuildSettingsConfig) (map[string]any, error) {
 				},
 			},
 		}
-		hooksDoc[sessionStartEvent] = sessionEntry
+		// Merge, do not overwrite: an installed hook registered on the
+		// session_start event (e.g. dot-niwa's compaction re-injection hook)
+		// already built a SessionStart block above (hooksDoc[pascalEvent], with
+		// pascalEvent == "SessionStart" == sessionStartEvent). A plain assignment
+		// here would silently drop that installed hook, leaving only the ephemeral
+		// entry -- which breaks compaction re-injection (R10) in ephemeral-session
+		// mode. Installed entries come FIRST (stable order), ephemeral appended.
+		if existing, ok := hooksDoc[sessionStartEvent].([]map[string]any); ok {
+			hooksDoc[sessionStartEvent] = append(existing, sessionEntry...)
+		} else {
+			hooksDoc[sessionStartEvent] = sessionEntry
+		}
 	}
 
 	if len(hooksDoc) > 0 {

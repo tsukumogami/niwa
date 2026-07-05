@@ -91,12 +91,42 @@ func runRepoMaterializers(materializers []Materializer, in repoMaterializeInputs
 		}
 		// Explicit config runs before discovered hooks for the same event
 		// and must not silently discard user-authored discovered hooks.
+		//
+		// Dedup by resolved script path: a script present in BOTH a declared
+		// [[claude.hooks.<event>]] entry AND auto-discovered under
+		// hooks/<event>/ must register exactly once, keeping the declared
+		// entry (which carries the matcher). Without this, the same script
+		// materializes twice and the discovered copy — having no matcher —
+		// fires on every tool call.
 		for event, entries := range effective.Claude.Hooks {
-			if existing, ok := merged[event]; ok {
-				merged[event] = append(entries, existing...)
-			} else {
+			existing, ok := merged[event]
+			if !ok {
 				merged[event] = entries
+				continue
 			}
+			// Collect the resolved paths declared for this event.
+			declaredPaths := make(map[string]bool)
+			for _, e := range entries {
+				for _, s := range e.Scripts {
+					declaredPaths[resolveHookScriptPath(in.ConfigDir, s)] = true
+				}
+			}
+			// Keep only discovered scripts not already declared.
+			deduped := make([]config.HookEntry, 0, len(existing))
+			for _, de := range existing {
+				kept := make([]string, 0, len(de.Scripts))
+				for _, s := range de.Scripts {
+					if !declaredPaths[resolveHookScriptPath(in.ConfigDir, s)] {
+						kept = append(kept, s)
+					}
+				}
+				if len(kept) > 0 {
+					deduped = append(deduped, config.HookEntry{Matcher: de.Matcher, Scripts: kept})
+				}
+			}
+			// Declared entries first (retaining their matcher), then any
+			// discovered entries that weren't also declared.
+			merged[event] = append(append([]config.HookEntry(nil), entries...), deduped...)
 		}
 		effective.Claude.Hooks = merged
 	}
@@ -133,6 +163,17 @@ func runRepoMaterializers(materializers []Materializer, in repoMaterializeInputs
 		written = append(written, files...)
 	}
 	return written, mctx.EnvOutputs, nil
+}
+
+// resolveHookScriptPath resolves a hook script reference to a cleaned absolute
+// path for dedup comparison. Discovered-hook scripts and relative declared
+// scripts are joined against configDir; absolute scripts (global-config hooks)
+// are cleaned as-is. It is comparison-only — the returned path is never written.
+func resolveHookScriptPath(configDir, script string) string {
+	if filepath.IsAbs(script) {
+		return filepath.Clean(script)
+	}
+	return filepath.Clean(filepath.Join(configDir, script))
 }
 
 // repoEnvConfigured reports whether a repo would have any env output to
@@ -390,6 +431,7 @@ func ApplyToWorktree(cfg *config.WorkspaceConfig, configDir, instanceRoot, workt
 	if materializers == nil {
 		materializers = worktreeRepoMaterializers(opts.Stderr)
 	}
+
 	discoveredHooks, _ := DiscoverHooks(configDir)
 	wsEnvFile, repoEnvFiles, _ := DiscoverEnvFiles(configDir)
 	relWsEnv := wsEnvFile
