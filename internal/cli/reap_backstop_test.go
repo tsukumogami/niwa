@@ -75,7 +75,7 @@ func TestBackstop_MarkedUnmappedOld_Reclaimed(t *testing.T) {
 
 	destroyed := stubDestroyAll(t)
 
-	n, err := reapBackstop(root, now)
+	n, err := reapBackstop(root, t.TempDir(), now)
 	if err != nil {
 		t.Fatalf("reapBackstop error: %v", err)
 	}
@@ -103,7 +103,7 @@ func TestBackstop_DispNamedUnmappedOldNoMarker_ReclaimedViaMtime(t *testing.T) {
 
 	destroyed := stubDestroyAll(t)
 
-	n, err := reapBackstop(root, now)
+	n, err := reapBackstop(root, t.TempDir(), now)
 	if err != nil {
 		t.Fatalf("reapBackstop error: %v", err)
 	}
@@ -128,7 +128,7 @@ func TestBackstop_MarkedUnmappedYoung_Spared(t *testing.T) {
 
 	destroyed := stubDestroyAll(t)
 
-	n, err := reapBackstop(root, now)
+	n, err := reapBackstop(root, t.TempDir(), now)
 	if err != nil {
 		t.Fatalf("reapBackstop error: %v", err)
 	}
@@ -155,7 +155,7 @@ func TestBackstop_MappedInstance_NotTouched(t *testing.T) {
 
 	destroyed := stubDestroyAll(t)
 
-	n, err := reapBackstop(root, now)
+	n, err := reapBackstop(root, t.TempDir(), now)
 	if err != nil {
 		t.Fatalf("reapBackstop error: %v", err)
 	}
@@ -188,7 +188,7 @@ func TestBackstop_NonDispatchName_NeverTouched(t *testing.T) {
 
 	destroyed := stubDestroyAll(t)
 
-	n, err := reapBackstop(root, now)
+	n, err := reapBackstop(root, t.TempDir(), now)
 	if err != nil {
 		t.Fatalf("reapBackstop error: %v", err)
 	}
@@ -220,7 +220,7 @@ func TestBackstop_MalformedMarker_FallsBackToMtime(t *testing.T) {
 
 	destroyed := stubDestroyAll(t)
 
-	n, err := reapBackstop(root, now)
+	n, err := reapBackstop(root, t.TempDir(), now)
 	if err != nil {
 		t.Fatalf("reapBackstop error: %v", err)
 	}
@@ -278,6 +278,204 @@ func TestBackstop_RunsViaReapWorkspace(t *testing.T) {
 	}
 }
 
+// TestBackstop_LiveUnmappedOld_SparedAndAdopted is the primary data-loss
+// regression: a dispatch-named, unmapped instance whose marker is past the TTL --
+// the exact shape the old backstop force-destroyed -- is SPARED when a live
+// background job's cwd points at it (the dispatch parent died before mapping, but
+// the detached worker is still running). The backstop must not destroy it and
+// must ADOPT it by writing the missing session mapping so the liveness-checking
+// primary sweep owns it from then on.
+func TestBackstop_LiveUnmappedOld_SparedAndAdopted(t *testing.T) {
+	root := setupHookWorkspace(t, true)
+	jobsDir := t.TempDir()
+	now := time.Now()
+
+	inst := makeReapInstance(t, root, "test-ws+-0000a1b2")
+	// Unmapped, marker aged well past the TTL (a worker that has run for hours).
+	writeDispatchMarkerAt(t, inst, now.Add(-4*dispatchBackstopTTL))
+	// A live worker is still running in the instance: its job's cwd is the
+	// instance dir.
+	writeJobEntryWithCwd(t, jobsDir, reapLiveSessionID, inst)
+
+	destroyed := stubDestroyAll(t)
+
+	n, err := reapBackstop(root, jobsDir, now)
+	if err != nil {
+		t.Fatalf("reapBackstop error: %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("reaped count = %d, want 0 (a live worker's instance must never be destroyed)", n)
+	}
+	if len(*destroyed) != 0 {
+		t.Fatalf("destroyed = %v, want [] (live-worker instance must not be destroyed)", *destroyed)
+	}
+
+	// The instance must be adopted: a mapping is written from the live worker's
+	// session id, marked ephemeral and adopted-origin, pointing at the instance.
+	m, err := workspace.ReadSessionMapping(root, reapLiveSessionID)
+	if err != nil {
+		t.Fatalf("adopted mapping not written: %v", err)
+	}
+	if m.InstancePath != inst {
+		t.Errorf("adopted mapping InstancePath = %q, want %q", m.InstancePath, inst)
+	}
+	if !m.Ephemeral {
+		t.Error("adopted mapping Ephemeral = false, want true")
+	}
+	if m.Origin != backstopAdoptedOrigin {
+		t.Errorf("adopted mapping Origin = %q, want %q", m.Origin, backstopAdoptedOrigin)
+	}
+	if m.InstanceName != filepath.Base(inst) {
+		t.Errorf("adopted mapping InstanceName = %q, want %q", m.InstanceName, filepath.Base(inst))
+	}
+}
+
+// TestBackstop_OrphanNoLiveMatch_StillReaped confirms the liveness check does NOT
+// regress the backstop's real purpose: a dispatch-named, unmapped, past-TTL
+// instance with NO job whose cwd matches it is still a genuine SIGKILL orphan and
+// is reaped -- even when the jobs tree is non-empty (other, unrelated workers are
+// running).
+func TestBackstop_OrphanNoLiveMatch_StillReaped(t *testing.T) {
+	root := setupHookWorkspace(t, true)
+	jobsDir := t.TempDir()
+	now := time.Now()
+
+	inst := makeReapInstance(t, root, "test-ws+-0000c3d4")
+	writeDispatchMarkerAt(t, inst, now.Add(-2*dispatchBackstopTTL))
+	// A live job exists but its cwd points somewhere else entirely (an unrelated
+	// worker), so it must not spare this orphan.
+	writeJobEntryWithCwd(t, jobsDir, reapLiveSessionID, filepath.Join(root, "some-other-place"))
+
+	destroyed := stubDestroyAll(t)
+
+	n, err := reapBackstop(root, jobsDir, now)
+	if err != nil {
+		t.Fatalf("reapBackstop error: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("reaped count = %d, want 1 (an orphan with no cwd-matched worker must still be reaped)", n)
+	}
+	if len(*destroyed) != 1 || (*destroyed)[0] != inst {
+		t.Fatalf("destroyed = %v, want [%s]", *destroyed, inst)
+	}
+	// No mapping should have been written for a genuine orphan.
+	if _, err := workspace.ReadSessionMapping(root, reapLiveSessionID); err == nil {
+		t.Error("a mapping was written for a non-matching worker; want none")
+	}
+}
+
+// TestBackstop_LiveAmbiguous_SparedNotAdopted: when more than one job claims the
+// same unmapped past-TTL instance, the backstop cannot single out an id to adopt,
+// but a live worker IS present, so the instance is SPARED (not destroyed) and no
+// mapping is written.
+func TestBackstop_LiveAmbiguous_SparedNotAdopted(t *testing.T) {
+	root := setupHookWorkspace(t, true)
+	jobsDir := t.TempDir()
+	now := time.Now()
+
+	inst := makeReapInstance(t, root, "test-ws+-0000e5f6")
+	writeDispatchMarkerAt(t, inst, now.Add(-2*dispatchBackstopTTL))
+	// Two distinct jobs both claim this instance's cwd -> ambiguous.
+	writeJobEntryWithCwd(t, jobsDir, reapLiveSessionID, inst)
+	writeJobEntryWithCwd(t, jobsDir, reapDeadSessionID, inst)
+
+	destroyed := stubDestroyAll(t)
+
+	n, err := reapBackstop(root, jobsDir, now)
+	if err != nil {
+		t.Fatalf("reapBackstop error: %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("reaped count = %d, want 0 (an ambiguous live match must spare the instance)", n)
+	}
+	if len(*destroyed) != 0 {
+		t.Fatalf("destroyed = %v, want [] (spared on ambiguous live match)", *destroyed)
+	}
+	// Ambiguity means no single id to adopt: no mapping is written for either id.
+	if _, err := workspace.ReadSessionMapping(root, reapLiveSessionID); err == nil {
+		t.Error("a mapping was written despite ambiguity; want none")
+	}
+	if _, err := workspace.ReadSessionMapping(root, reapDeadSessionID); err == nil {
+		t.Error("a mapping was written despite ambiguity; want none")
+	}
+}
+
+// TestReapWorkspace_LiveDispatchOrphan_AdoptedNotDestroyed exercises the full
+// reapWorkspace path end to end: a dead mapped instance is reaped by the primary
+// sweep while a live-but-unmapped dispatch orphan is adopted (not destroyed) by
+// the backstop in the same call.
+func TestReapWorkspace_LiveDispatchOrphan_AdoptedNotDestroyed(t *testing.T) {
+	root := setupHookWorkspace(t, true)
+	jobsDir := t.TempDir()
+	now := time.Now()
+
+	dead := makeReapInstance(t, root, "test-ws-dead")
+	mapEphemeral(t, root, reapDeadSessionID, dead, true) // no job -> dead -> reaped
+
+	orphan := makeReapInstance(t, root, "test-ws+-00007788")
+	writeDispatchMarkerAt(t, orphan, now.Add(-3*dispatchBackstopTTL))
+	writeJobEntryWithCwd(t, jobsDir, reapLiveSessionID, orphan) // live -> adopted
+
+	destroyed := stubDestroyAll(t)
+
+	n, err := reapWorkspace(root, jobsDir, now)
+	if err != nil {
+		t.Fatalf("reapWorkspace error: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("reaped count = %d, want 1 (only the dead mapped instance; the live orphan is adopted)", n)
+	}
+	if len(*destroyed) != 1 || (*destroyed)[0] != dead {
+		t.Fatalf("destroyed = %v, want [%s] (the live orphan must not be destroyed)", *destroyed, dead)
+	}
+
+	// The live orphan is now mapped (adopted); the dead mapping was deleted.
+	m, err := workspace.ReadSessionMapping(root, reapLiveSessionID)
+	if err != nil {
+		t.Fatalf("live orphan was not adopted: %v", err)
+	}
+	if m.InstancePath != orphan || m.Origin != backstopAdoptedOrigin {
+		t.Errorf("adopted mapping = %+v, want InstancePath=%s Origin=%s", m, orphan, backstopAdoptedOrigin)
+	}
+	if _, err := workspace.ReadSessionMapping(root, reapDeadSessionID); err == nil {
+		t.Error("dead mapping retained after reapWorkspace; want deleted")
+	}
+}
+
+// TestSelectBackstopTargets_LiveOrphan_ClassifiedAsAdoption checks the pure
+// selection: a live-but-unmapped past-TTL orphan is returned as an adoption (with
+// the discovered session id), not as a destroy target.
+func TestSelectBackstopTargets_LiveOrphan_ClassifiedAsAdoption(t *testing.T) {
+	root := setupHookWorkspace(t, true)
+	jobsDir := t.TempDir()
+	now := time.Now()
+
+	live := makeReapInstance(t, root, "test-ws+-0000aa11")
+	writeDispatchMarkerAt(t, live, now.Add(-2*dispatchBackstopTTL))
+	writeJobEntryWithCwd(t, jobsDir, reapLiveSessionID, live)
+
+	orphan := makeReapInstance(t, root, "test-ws+-0000bb22")
+	writeDispatchMarkerAt(t, orphan, now.Add(-2*dispatchBackstopTTL))
+
+	targets, adoptions, err := selectBackstopTargets(root, jobsDir, now)
+	if err != nil {
+		t.Fatalf("selectBackstopTargets error: %v", err)
+	}
+
+	if len(targets) != 1 || targets[0].InstancePath != orphan {
+		t.Fatalf("destroy targets = %v, want [%s]", targets, orphan)
+	}
+	if len(adoptions) != 1 {
+		t.Fatalf("adoptions = %v, want exactly 1", adoptions)
+	}
+	if adoptions[0].InstancePath != live {
+		t.Errorf("adoption InstancePath = %q, want %q", adoptions[0].InstancePath, live)
+	}
+	if adoptions[0].SessionID != reapLiveSessionID {
+		t.Errorf("adoption SessionID = %q, want %q", adoptions[0].SessionID, reapLiveSessionID)
+	}
+}
+
 // TestSelectBackstopTargets_Matrix exercises the pure selection logic across the
 // full spare/reap matrix in one workspace and asserts the exact target set,
 // independent of the destroy path.
@@ -303,7 +501,7 @@ func TestSelectBackstopTargets_Matrix(t *testing.T) {
 	touchInstanceMtime(t, dev, now.Add(-2*dispatchBackstopTTL))
 	writeDispatchMarkerAt(t, hook, now.Add(-2*dispatchBackstopTTL))
 
-	targets, err := selectBackstopTargets(root, now)
+	targets, _, err := selectBackstopTargets(root, t.TempDir(), now)
 	if err != nil {
 		t.Fatalf("selectBackstopTargets error: %v", err)
 	}

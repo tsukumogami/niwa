@@ -119,6 +119,46 @@ func matchSessionByCwd(jobsDir, targetDir string) (id, short string, ambiguous b
 	return found, foundShort, false, nil
 }
 
+// liveJobInInstance reports whether a live Claude Code background job is running
+// with its working directory inside instanceDir, reusing the SAME jobs-dir cwd
+// correlation the dispatch capture path uses (matchSessionByCwd). This is the
+// single shared implementation of that correlation: dispatch capture calls it
+// (through captureSessionID) to recover a launched worker's session id, and the
+// reaper backstop calls it to avoid destroying an unmapped instance a live
+// worker is still running in.
+//
+// It returns:
+//   - (sessionID, true) when exactly one job claims instanceDir and its recorded
+//     sessionId is a valid UUID -- the caller can adopt the orphan by writing the
+//     missing mapping from sessionID.
+//   - ("", true) when a live job claims instanceDir but its id cannot be singled
+//     out (more than one job claims it, or the sole match has not yet recorded a
+//     valid id). The instance must be SPARED but cannot be adopted.
+//   - ("", false) when no job's cwd matches instanceDir (no live worker there).
+//
+// A jobs-dir read error fails safe as ("", true): without being able to rule out
+// a live worker, the caller must not destroy the instance. An empty jobsDir (HOME
+// unresolved) yields ("", false): there is no jobs tree to observe.
+func liveJobInInstance(jobsDir, instanceDir string) (sessionID string, live bool) {
+	if jobsDir == "" {
+		return "", false
+	}
+	targetDir := normalizePath(instanceDir)
+	id, _, ambiguous, err := matchSessionByCwd(jobsDir, targetDir)
+	if err != nil {
+		// Could not read the jobs dir to rule out a surviving worker. Fail safe
+		// so the data-loss path never destroys an instance we merely failed to
+		// observe.
+		return "", true
+	}
+	if ambiguous {
+		// More than one job claims this unique dir: a live worker is present even
+		// though we cannot single out which id to adopt.
+		return "", true
+	}
+	return id, id != ""
+}
+
 // normalizePath resolves symlinks then cleans path so two spellings of the
 // same directory compare equal. EvalSymlinks fails on a path that does not
 // exist (e.g. a stale job's cwd); in that case fall back to Clean alone so a

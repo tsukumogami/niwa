@@ -70,6 +70,22 @@ func writeJobEntry(t *testing.T, jobsDir, sessionID string) {
 	}
 }
 
+// writeJobEntryWithCwd writes a present job-state entry for sessionID under
+// jobsDir whose recorded cwd is cwd, so the backstop's liveness correlation
+// (liveJobInInstance -> matchSessionByCwd) matches it to the instance at cwd.
+// This models a detached dispatch worker still running in an unmapped instance.
+func writeJobEntryWithCwd(t *testing.T, jobsDir, sessionID, cwd string) {
+	t.Helper()
+	dir := filepath.Join(jobsDir, sessionID)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := []byte(`{"sessionId":"` + sessionID + `","template":"` + bgJobTemplate + `","cwd":"` + cwd + `"}`)
+	if err := os.WriteFile(filepath.Join(dir, "state.json"), body, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // stubDestroyAll installs a fake destroyInstanceFunc that records every path it
 // was asked to destroy, without touching the filesystem. It restores the
 // original on cleanup and returns a pointer to the recorded slice.

@@ -25,6 +25,14 @@ import (
 // not job-state.
 const dispatchBackstopTTL = 30 * time.Minute
 
+// backstopAdoptedOrigin is the SessionMapping.Origin the backstop stamps on a
+// mapping it writes to adopt a live-but-unmapped dispatch orphan (a worker whose
+// dispatch parent died before writing the mapping). It marks the mapping as
+// recovered by the reaper rather than authored by the dispatch command
+// ("dispatch") or the SessionStart hook (absent), so the provenance of a healed
+// mapping is traceable.
+const backstopAdoptedOrigin = "adopted"
+
 func init() {
 	rootCmd.AddCommand(reapCmd)
 }
@@ -196,7 +204,7 @@ func reapWorkspace(workspaceRoot, jobsDir string, now time.Time) (int, error) {
 	// under its own gates (dispatch instance name, no mapping, age past the TTL).
 	// It runs after the primary reclamation so the existing sweep keeps ownership
 	// of every mapped instance (DESIGN Decision 4).
-	n, err := reapBackstop(workspaceRoot, now)
+	n, err := reapBackstop(workspaceRoot, jobsDir, now)
 	if err != nil {
 		return reaped, err
 	}
@@ -205,16 +213,33 @@ func reapWorkspace(workspaceRoot, jobsDir string, now time.Time) (int, error) {
 	return reaped, nil
 }
 
-// backstopTarget is an instance the marker+TTL backstop has selected. Unlike a
-// reapTarget it carries no session id: a backstop target is by definition
-// unmapped, so there is no mapping entry to delete after the destroy.
+// backstopTarget is an instance the marker+TTL backstop has selected for
+// DESTRUCTION. Unlike a reapTarget it carries no session id: a backstop target
+// is by definition unmapped AND has no surviving worker, so there is no mapping
+// entry to delete after the destroy.
 type backstopTarget struct {
 	InstancePath string
 }
 
+// backstopAdoption is a dispatch-named, unmapped, past-TTL instance the backstop
+// spared BECAUSE a live worker is still running in it (its dispatch parent died
+// before writing the mapping). Rather than destroy it -- the data-loss incident
+// this guards -- the backstop adopts it: it writes the missing SessionMapping
+// from the discovered session id so the liveness-checking primary sweep owns it
+// from then on. It carries the session id and instance identity the mapping
+// needs.
+type backstopAdoption struct {
+	InstancePath string
+	InstanceName string
+	SessionID    string
+}
+
 // selectBackstopTargets enumerates the on-disk instances under workspaceRoot and
-// returns those eligible for the name+TTL backstop. An instance is eligible only
-// when ALL of the following hold:
+// classifies the dispatch-named, unmapped, past-TTL ones into two sets: instances
+// to DESTROY (genuine SIGKILL orphans with no surviving worker) and instances to
+// ADOPT (a live worker is still running in them, so a mapping is written instead
+// of destroying them). An instance is considered by the backstop only when ALL of
+// the following hold:
 //
 //   - its base directory name is a dispatch instance name (isDispatchInstanceName
 //     -- the purely structural "<config>+-<8hex>" or "<config>+<slug>-<8hex>", regex
@@ -234,21 +259,34 @@ type backstopTarget struct {
 //     must show age > TTL; a present-but-malformed marker does NOT spare the
 //     instance forever -- it falls back to mtime.
 //
+// The past-TTL gate alone is NOT sufficient to destroy: the TTL was chosen for
+// the worst-case dispatch *capture* wall-clock, not a session's *lifetime*. A
+// dispatch parent that dies (SIGKILL/crash) after launching the detached worker
+// but before writing the mapping leaves the worker running -- for hours, far past
+// this TTL -- while the instance stays unmapped. Reaping on name+TTL alone
+// destroyed that live worker's workspace (the data-loss incident). So before an
+// unmapped past-TTL instance is destroyed, liveJobInInstance reuses the dispatch
+// capture path's jobs-dir cwd correlation to check for a surviving worker: if one
+// is found the instance is spared and, when the worker's session id is
+// recoverable, adopted (a mapping is written so the primary sweep owns it). Only
+// an instance with NO live cwd-matched worker is destroyed -- the backstop's real
+// purpose (SIGKILL orphans that left nothing running).
+//
 // A developer instance ("<config>", "<config>-2"), a hook-created instance
 // ("<config>-<sessionhex>", no "+" marker), and a create instance
 // ("<config>+<slug>", no trailing "-<8hex>") never match the name predicate,
 // so they are never touched regardless of age or mapping. This function performs
-// no destruction, so it is unit-testable against fixture instances and an
-// injectable now.
-func selectBackstopTargets(workspaceRoot string, now time.Time) ([]backstopTarget, error) {
+// no destruction and writes no mapping, so it is unit-testable against fixture
+// instances, a fixture jobs tree, and an injectable now.
+func selectBackstopTargets(workspaceRoot, jobsDir string, now time.Time) ([]backstopTarget, []backstopAdoption, error) {
 	records, err := workspace.EnumerateInstanceRecords(workspaceRoot)
 	if err != nil {
-		return nil, fmt.Errorf("enumerating instances: %w", err)
+		return nil, nil, fmt.Errorf("enumerating instances: %w", err)
 	}
 
 	mappings, err := workspace.ListSessionMappings(workspaceRoot)
 	if err != nil {
-		return nil, fmt.Errorf("listing session mappings: %w", err)
+		return nil, nil, fmt.Errorf("listing session mappings: %w", err)
 	}
 	mappedPaths := make(map[string]bool, len(mappings))
 	for _, m := range mappings {
@@ -258,6 +296,7 @@ func selectBackstopTargets(workspaceRoot string, now time.Time) ([]backstopTarge
 	}
 
 	var targets []backstopTarget
+	var adoptions []backstopAdoption
 	for _, rec := range records {
 		// The dispatch instance NAME is the eligibility signal. A non-dispatch
 		// name (developer or hook-created instance) is never a backstop target.
@@ -283,10 +322,29 @@ func selectBackstopTargets(workspaceRoot string, now time.Time) ([]backstopTarge
 			continue
 		}
 
+		// Past the TTL. Before destroying, confirm no live worker is still
+		// running in the instance: a dispatch parent that died after launching
+		// the detached worker but before writing the mapping leaves a live,
+		// unmapped, past-TTL instance whose destruction is data loss.
+		sessionID, live := liveJobInInstance(jobsDir, rec.Path)
+		if live {
+			if sessionID != "" {
+				// Adopt: write the missing mapping so the primary sweep owns it.
+				adoptions = append(adoptions, backstopAdoption{
+					InstancePath: rec.Path,
+					InstanceName: filepath.Base(rec.Path),
+					SessionID:    sessionID,
+				})
+			}
+			// Live but unidentifiable (ambiguous or id not yet recorded): spare
+			// without adopting rather than risk destroying a live worker.
+			continue
+		}
+
 		targets = append(targets, backstopTarget{InstancePath: rec.Path})
 	}
 
-	return targets, nil
+	return targets, adoptions, nil
 }
 
 // dispatchInstanceAge returns the creation time the backstop ages a dispatch
@@ -329,15 +387,34 @@ func readDispatchMarkerTime(instancePath string) (time.Time, bool) {
 }
 
 // reapBackstop selects and reclaims dispatch-named, unmapped, past-TTL orphan
-// instances under workspaceRoot, returning the count actually destroyed. Each target is
-// force-destroyed via destroyInstanceFunc, the same path the primary sweep
-// uses. A destroy failure on one target is surfaced on
-// stderr and does not abort the rest. There is no mapping to delete (a backstop
-// target is unmapped by definition).
-func reapBackstop(workspaceRoot string, now time.Time) (int, error) {
-	targets, err := selectBackstopTargets(workspaceRoot, now)
+// instances under workspaceRoot, returning the count actually destroyed. It first
+// ADOPTS every live-but-unmapped orphan by writing the missing session mapping
+// (so the liveness-checking primary sweep owns it from then on, closing the
+// data-loss window a dead dispatch parent opens); adopted instances are NOT
+// counted as reaped. It then force-destroys each genuine orphan (no surviving
+// worker) via destroyInstanceFunc, the same path the primary sweep uses. A
+// destroy or adopt failure on one instance is surfaced on stderr and does not
+// abort the rest. There is no mapping to delete for a destroyed target (it is
+// unmapped by definition).
+func reapBackstop(workspaceRoot, jobsDir string, now time.Time) (int, error) {
+	targets, adoptions, err := selectBackstopTargets(workspaceRoot, jobsDir, now)
 	if err != nil {
 		return 0, err
+	}
+
+	// Adopt live orphans first: write the mapping the dead dispatch parent never
+	// wrote, so a subsequent sweep spares the worker on the entry-present rule.
+	for _, a := range adoptions {
+		m := workspace.SessionMapping{
+			SessionID:    a.SessionID,
+			InstanceName: a.InstanceName,
+			InstancePath: a.InstancePath,
+			Ephemeral:    true,
+			Origin:       backstopAdoptedOrigin,
+		}
+		if err := workspace.WriteSessionMapping(workspaceRoot, m); err != nil {
+			fmt.Fprintf(os.Stderr, "niwa: warning: adopting live dispatch orphan %s: %v\n", a.InstancePath, err)
+		}
 	}
 
 	reaped := 0
