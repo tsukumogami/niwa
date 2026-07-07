@@ -63,6 +63,11 @@ func MergeOverrides(ws *config.WorkspaceConfig, repoName string) EffectiveConfig
 			// override. Copy the pointer so the per-repo SettingsMaterializer can read
 			// the resolved preference.
 			WorkSummaryHooks: ws.Claude.WorkSummaryHooks,
+			// PrBodyHook is the workspace-level off switch for the default-on
+			// pr-body PreToolUse hook injection. Workspace-scoped like
+			// WorkSummaryHooks: carried straight through, never merged from a
+			// per-repo override.
+			PrBodyHook: ws.Claude.PrBodyHook,
 		},
 		Env:     copyEnv(ws.Env),
 		Files:   copyStringMap(ws.Files),

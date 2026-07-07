@@ -43,6 +43,15 @@ type ClaudeConfig struct {
 	// key absent) means the default is on. Workspace-scoped, like Marketplaces:
 	// not merged from per-repo overrides.
 	WorkSummaryHooks *bool `toml:"work_summary_hooks,omitempty"`
+	// PrBodyHook is the off switch for niwa's default-on injection of the
+	// shirabe pr-body PreToolUse hook (a Bash-matched hook that runs
+	// `shirabe pr-body-hook` to gate a malformed `gh pr create` / `gh pr edit`
+	// before it runs). niwa injects it by default into any instance that
+	// installs the shirabe plugin; setting this key to false in the workspace
+	// [claude] block suppresses it. nil (the key absent) means the default is
+	// on. Workspace-scoped, like WorkSummaryHooks: not merged from per-repo
+	// overrides.
+	PrBodyHook *bool `toml:"pr_body_hook,omitempty"`
 	// Content declares the CLAUDE.md content hierarchy under
 	// [claude.content]. Workspace-scoped: per-repo overrides are not
 	// honored via RepoOverride.Claude. Migrated from the deprecated
