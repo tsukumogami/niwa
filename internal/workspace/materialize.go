@@ -361,6 +361,11 @@ type BuildSettingsConfig struct {
 	// already excludes any mode a workspace still declares for itself, so this
 	// list is injected as-is with no further dedup.
 	WorkSummaryHooks []WorkSummaryHookMode
+	// PrBodyHook, when true, injects niwa's built-in default pr-body PreToolUse
+	// hook (a Bash-matched `shirabe pr-body-hook` pass-through). The caller
+	// already applied the shirabe-plugin gate, the off switch, and dedup against
+	// a workspace's own declaration.
+	PrBodyHook bool
 }
 
 // SessionHooks carries the inputs for the workspace-root
@@ -489,6 +494,65 @@ func resolveWorkSummaryHooks(eff EffectiveConfig, installed map[string][]Install
 		modes = append(modes, d)
 	}
 	return modes
+}
+
+// prBodyHookCommand returns the inline PreToolUse hook command that gates a
+// `gh pr create` / `gh pr edit` against the mechanical PR-body rule before it
+// runs. It is a pure pass-through to `shirabe pr-body-hook`, which reads the
+// hook JSON on stdin and prints an allow/deny decision.
+//
+// Unlike the work-summary PostToolUse pass-through it must NOT `exec` and must
+// swallow a non-zero exit: a PreToolUse hook that exits non-zero BLOCKS the tool
+// call, and this hook matches every Bash command. An outdated shirabe that
+// predates the `pr-body-hook` subcommand exits non-zero on the unknown
+// subcommand, so the `command -v shirabe` guard plus the trailing `|| exit 0`
+// fall back to "allow" against a stale or absent binary. The current binary
+// always exits 0, so the guard only ever fires on a stale install.
+func prBodyHookCommand() string {
+	return "command -v shirabe >/dev/null 2>&1 || exit 0; shirabe pr-body-hook 2>/dev/null || exit 0"
+}
+
+// prBodyHookEnabled resolves the off switch: the default-on injection is
+// suppressed only when the workspace explicitly sets [claude] pr_body_hook =
+// false. A nil pointer (the key absent) means on.
+func prBodyHookEnabled(eff EffectiveConfig) bool {
+	if v := eff.Claude.PrBodyHook; v != nil {
+		return *v
+	}
+	return true
+}
+
+// prBodyHookInstalled reports whether an installed pre_tool_use hook already
+// registers `shirabe pr-body-hook`, so a workspace that still declares the hook
+// itself is not double-registered by the niwa default. Mirrors
+// workSummaryModeInstalled; an unreadable script is treated as "not a pr-body
+// hook" (inject the default), which is safe because the guard makes a duplicate
+// harmless.
+func prBodyHookInstalled(installed map[string][]InstalledHookEntry) bool {
+	const marker = "pr-body-hook"
+	for _, entry := range installed["pre_tool_use"] {
+		for _, path := range entry.Paths {
+			data, err := os.ReadFile(path)
+			if err != nil {
+				continue
+			}
+			if strings.Contains(string(data), marker) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// resolvePrBodyHook decides whether niwa should inject its default pr-body
+// PreToolUse hook for a repo. It returns false unless the effective config
+// installs the shirabe plugin and the off switch is on, and it drops the default
+// when the workspace already declares the hook itself (no double-registration).
+func resolvePrBodyHook(eff EffectiveConfig, installed map[string][]InstalledHookEntry) bool {
+	if !installsShirabePlugin(eff.Plugins) || !prBodyHookEnabled(eff) {
+		return false
+	}
+	return !prBodyHookInstalled(installed)
 }
 
 // buildSettingsDoc produces the map[string]any JSON document for Claude Code
@@ -641,6 +705,31 @@ func buildSettingsDoc(cfg BuildSettingsConfig) (map[string]any, error) {
 		}
 		if m.Matcher != "" {
 			entry["matcher"] = m.Matcher
+		}
+		if existing, ok := hooksDoc[pascalEvent].([]map[string]any); ok {
+			hooksDoc[pascalEvent] = append(existing, entry)
+		} else {
+			hooksDoc[pascalEvent] = []map[string]any{entry}
+		}
+	}
+
+	// Pr-body hook (default-on for shirabe adopters): inject the PreToolUse
+	// pass-through the caller resolved. Like the work-summary hooks it is an
+	// inline `command -v shirabe`-guarded command with no script file, but it
+	// must not exec and swallows a non-zero exit (see prBodyHookCommand) because
+	// a non-zero PreToolUse exit blocks the tool call. It is appended to the
+	// PreToolUse block so it composes with any installed PreToolUse Bash hook
+	// (e.g. a gate-online entry) rather than replacing it.
+	if cfg.PrBodyHook {
+		pascalEvent, ok := hookEventMapping["pre_tool_use"]
+		if !ok {
+			pascalEvent = snakeToPascal("pre_tool_use")
+		}
+		entry := map[string]any{
+			"matcher": "Bash",
+			"hooks": []map[string]string{
+				{"type": "command", "command": prBodyHookCommand()},
+			},
 		}
 		if existing, ok := hooksDoc[pascalEvent].([]map[string]any); ok {
 			hooksDoc[pascalEvent] = append(existing, entry)
@@ -842,6 +931,11 @@ func (s *SettingsMaterializer) Materialize(ctx *MaterializeContext) ([]string, e
 	// deduped against any work-summary hook the workspace still declares itself.
 	workSummaryHooks := resolveWorkSummaryHooks(ctx.Effective, hooks)
 
+	// Resolve niwa's default-on pr-body PreToolUse hook injection: false unless
+	// this instance installs the shirabe plugin and the off switch is on, already
+	// deduped against a pr-body hook the workspace still declares itself.
+	prBodyHook := resolvePrBodyHook(ctx.Effective, hooks)
+
 	// The worktree-delegation decision (computed once per apply, threaded via the
 	// context) is itself enough to require a settings file even when nothing else
 	// is configured: it writes either the WorktreeCreate/WorktreeRemove hooks or
@@ -850,7 +944,7 @@ func (s *SettingsMaterializer) Materialize(ctx *MaterializeContext) ([]string, e
 	// non-empty plugin list, so this rarely decides the outcome).
 	if len(settings) == 0 && len(hooks) == 0 && len(resolvedEnv) == 0 &&
 		len(plugins) == 0 && len(marketplaces) == 0 && ctx.WorktreeDelegation == nil &&
-		len(workSummaryHooks) == 0 {
+		len(workSummaryHooks) == 0 && !prBodyHook {
 		return nil, nil
 	}
 
@@ -867,6 +961,7 @@ func (s *SettingsMaterializer) Materialize(ctx *MaterializeContext) ([]string, e
 		Reports:            &reports,
 		WorktreeDelegation: ctx.WorktreeDelegation,
 		WorkSummaryHooks:   workSummaryHooks,
+		PrBodyHook:         prBodyHook,
 	})
 	if err != nil {
 		return nil, err
