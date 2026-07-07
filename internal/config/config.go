@@ -35,6 +35,14 @@ type ClaudeConfig struct {
 	Hooks        HooksConfig        `toml:"hooks,omitempty"`
 	Settings     SettingsConfig     `toml:"settings,omitempty"`
 	Env          ClaudeEnvConfig    `toml:"env,omitempty"`
+	// WorkSummaryHooks is the off switch for niwa's default-on injection of
+	// the three session-work-summary hooks (PostToolUse capture, UserPromptSubmit
+	// absence, SessionStart compact). niwa injects those hooks by default into any
+	// instance that installs the shirabe plugin; setting this key to false in the
+	// workspace [claude] block suppresses all three for the workspace. nil (the
+	// key absent) means the default is on. Workspace-scoped, like Marketplaces:
+	// not merged from per-repo overrides.
+	WorkSummaryHooks *bool `toml:"work_summary_hooks,omitempty"`
 	// Content declares the CLAUDE.md content hierarchy under
 	// [claude.content]. Workspace-scoped: per-repo overrides are not
 	// honored via RepoOverride.Claude. Migrated from the deprecated

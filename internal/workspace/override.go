@@ -57,6 +57,12 @@ func MergeOverrides(ws *config.WorkspaceConfig, repoName string) EffectiveConfig
 			Hooks:    copyHooks(ws.Claude.Hooks),
 			Settings: copySettings(ws.Claude.Settings),
 			Env:      copyClaudeEnv(ws.Claude.Env),
+			// WorkSummaryHooks is the workspace-level off switch for the default-on
+			// work-summary hook injection. It is workspace-scoped (like Marketplaces),
+			// so it is carried straight through and never merged from a per-repo
+			// override. Copy the pointer so the per-repo SettingsMaterializer can read
+			// the resolved preference.
+			WorkSummaryHooks: ws.Claude.WorkSummaryHooks,
 		},
 		Env:     copyEnv(ws.Env),
 		Files:   copyStringMap(ws.Files),

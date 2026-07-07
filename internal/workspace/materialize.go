@@ -352,6 +352,15 @@ type BuildSettingsConfig struct {
 	// the clone + vault cost of `niwa create` does not trip the harness timeout.
 	// nil installs neither entry, leaving the hooks block untouched.
 	SessionHooks *SessionHooks
+
+	// WorkSummaryHooks, when non-empty, injects niwa's built-in default
+	// work-summary hook registrations (each a pure `command -v shirabe`-guarded
+	// pass-through to `shirabe work-summary <mode>`) into the hooks block. The
+	// caller (SettingsMaterializer) computes this set: it is empty unless the
+	// instance installs the shirabe plugin and the off switch is on, and it
+	// already excludes any mode a workspace still declares for itself, so this
+	// list is injected as-is with no further dedup.
+	WorkSummaryHooks []WorkSummaryHookMode
 }
 
 // SessionHooks carries the inputs for the workspace-root
@@ -371,6 +380,116 @@ const (
 	sessionStartEvent = "SessionStart"
 	sessionEndEvent   = "SessionEnd"
 )
+
+// shirabePluginName is the plugin name (the part before "@marketplace") that
+// gates the default-on work-summary hook injection. niwa injects the three
+// work-summary hooks only into an instance whose effective [claude] plugins
+// install shirabe; the ambient summary travels with shirabe adoption rather
+// than with every provisioned instance.
+const shirabePluginName = "shirabe"
+
+// WorkSummaryHookMode describes one of the three default work-summary hook
+// registrations niwa injects for a shirabe adopter. Event is the snake_case
+// niwa hook event (mapped to a Claude Pascal event exactly like the installed
+// hooks), Matcher is the optional event matcher, and Mode is the
+// `shirabe work-summary <Mode>` verb the injected command execs.
+type WorkSummaryHookMode struct {
+	Event   string
+	Matcher string
+	Mode    string
+}
+
+// workSummaryHookDefaults is niwa's built-in default set of work-summary hook
+// registrations, injected (subject to the shirabe-plugin gate and the off
+// switch) into every repo that installs the shirabe plugin. Each is a pure
+// pass-through to the on-PATH shirabe binary; see workSummaryHookCommand.
+var workSummaryHookDefaults = []WorkSummaryHookMode{
+	{Event: "post_tool_use", Matcher: "Bash", Mode: "capture"},
+	{Event: "user_prompt_submit", Matcher: "", Mode: "absence"},
+	{Event: "session_start", Matcher: "compact", Mode: "compact"},
+}
+
+// workSummaryHookCommand returns the inline hook command string for a
+// work-summary mode. It is a pure pass-through: the `command -v shirabe` guard
+// makes the hook a fail-safe no-op (exit 0, never aborting a turn) wherever the
+// shirabe binary is absent from PATH, and otherwise execs
+// `shirabe work-summary <mode>`, which owns the ledger, gate, render, and
+// hook-JSON emission. No script file is carried; the command mirrors the
+// direct-command SessionHooks precedent.
+func workSummaryHookCommand(mode string) string {
+	return "command -v shirabe >/dev/null 2>&1 || exit 0; exec shirabe work-summary " + mode
+}
+
+// installsShirabePlugin reports whether the effective plugin list installs the
+// shirabe plugin. Plugin entries take the form "name@marketplace" (or a bare
+// "name"); the gate matches on the plugin name, so "shirabe@shirabe" and a bare
+// "shirabe" both qualify.
+func installsShirabePlugin(plugins []string) bool {
+	for _, p := range plugins {
+		name := p
+		if at := strings.IndexByte(p, '@'); at >= 0 {
+			name = p[:at]
+		}
+		if name == shirabePluginName {
+			return true
+		}
+	}
+	return false
+}
+
+// workSummaryHooksEnabled resolves the off switch: the default-on injection is
+// suppressed only when the workspace explicitly sets [claude] work_summary_hooks
+// = false. A nil pointer (the key absent) means on.
+func workSummaryHooksEnabled(eff EffectiveConfig) bool {
+	if v := eff.Claude.WorkSummaryHooks; v != nil {
+		return *v
+	}
+	return true
+}
+
+// workSummaryModeInstalled reports whether an installed hook for the given
+// snake_case event already registers `shirabe work-summary <mode>`. It reads the
+// materialized hook scripts (populated by the HooksMaterializer, which runs
+// before the SettingsMaterializer) and matches the `work-summary <mode>` marker,
+// so a workspace that still declares these hooks in its own config is not
+// double-registered by the niwa default. A script that cannot be read is treated
+// as "not a work-summary hook" (the default is injected), which is safe: the
+// guard makes a duplicate harmless, but the read normally succeeds.
+func workSummaryModeInstalled(installed map[string][]InstalledHookEntry, event, mode string) bool {
+	marker := "work-summary " + mode
+	for _, entry := range installed[event] {
+		for _, path := range entry.Paths {
+			data, err := os.ReadFile(path)
+			if err != nil {
+				continue
+			}
+			if strings.Contains(string(data), marker) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// resolveWorkSummaryHooks decides which work-summary hook registrations niwa
+// should inject by default for a repo. It returns nil (inject nothing) unless
+// the effective config installs the shirabe plugin and the off switch is on.
+// When it injects, it drops any mode a workspace already declares for itself so
+// the default never double-registers (coordinates with the dot-niwa cleanup that
+// retires the redundant declaration).
+func resolveWorkSummaryHooks(eff EffectiveConfig, installed map[string][]InstalledHookEntry) []WorkSummaryHookMode {
+	if !installsShirabePlugin(eff.Plugins) || !workSummaryHooksEnabled(eff) {
+		return nil
+	}
+	var modes []WorkSummaryHookMode
+	for _, d := range workSummaryHookDefaults {
+		if workSummaryModeInstalled(installed, d.Event, d.Mode) {
+			continue
+		}
+		modes = append(modes, d)
+	}
+	return modes
+}
 
 // buildSettingsDoc produces the map[string]any JSON document for Claude Code
 // settings. It handles permissions, hooks, env, enabledPlugins,
@@ -496,6 +615,38 @@ func buildSettingsDoc(cfg BuildSettingsConfig) (map[string]any, error) {
 		}
 		hooksDoc[worktreeCreateEvent] = worktreeEntry
 		hooksDoc[worktreeRemoveEvent] = worktreeEntry
+	}
+
+	// Work-summary hooks (default-on for shirabe adopters): inject the built-in
+	// pass-through registrations the caller resolved. Each is an inline
+	// `command -v shirabe`-guarded command (no script file), mirroring the
+	// direct-command SessionHooks precedent. The caller already applied the
+	// shirabe-plugin gate, the off switch, and dedup against a workspace's own
+	// declaration, so the set is injected as-is.
+	//
+	// These are injected BEFORE the SessionHooks block below so a SessionStart
+	// `compact` work-summary entry is present when the ephemeral SessionStart
+	// merge runs: that merge appends the ephemeral entry to the existing
+	// SessionStart block, preserving the compaction re-injection hook (R10) in
+	// ephemeral-session mode.
+	for _, m := range cfg.WorkSummaryHooks {
+		pascalEvent, ok := hookEventMapping[m.Event]
+		if !ok {
+			pascalEvent = snakeToPascal(m.Event)
+		}
+		entry := map[string]any{
+			"hooks": []map[string]string{
+				{"type": "command", "command": workSummaryHookCommand(m.Mode)},
+			},
+		}
+		if m.Matcher != "" {
+			entry["matcher"] = m.Matcher
+		}
+		if existing, ok := hooksDoc[pascalEvent].([]map[string]any); ok {
+			hooksDoc[pascalEvent] = append(existing, entry)
+		} else {
+			hooksDoc[pascalEvent] = []map[string]any{entry}
+		}
 	}
 
 	// Session hooks (ephemeral-session integration): emit ONLY the SessionStart
@@ -686,12 +837,20 @@ func (s *SettingsMaterializer) Materialize(ctx *MaterializeContext) ([]string, e
 		return nil, err
 	}
 
+	// Resolve niwa's default-on work-summary hook injection: empty unless this
+	// instance installs the shirabe plugin and the off switch is on, already
+	// deduped against any work-summary hook the workspace still declares itself.
+	workSummaryHooks := resolveWorkSummaryHooks(ctx.Effective, hooks)
+
 	// The worktree-delegation decision (computed once per apply, threaded via the
 	// context) is itself enough to require a settings file even when nothing else
 	// is configured: it writes either the WorktreeCreate/WorktreeRemove hooks or
-	// the permissions.deny fallback.
+	// the permissions.deny fallback. The default work-summary hooks are likewise
+	// enough on their own (though in practice a shirabe adopter also carries a
+	// non-empty plugin list, so this rarely decides the outcome).
 	if len(settings) == 0 && len(hooks) == 0 && len(resolvedEnv) == 0 &&
-		len(plugins) == 0 && len(marketplaces) == 0 && ctx.WorktreeDelegation == nil {
+		len(plugins) == 0 && len(marketplaces) == 0 && ctx.WorktreeDelegation == nil &&
+		len(workSummaryHooks) == 0 {
 		return nil, nil
 	}
 
@@ -707,6 +866,7 @@ func (s *SettingsMaterializer) Materialize(ctx *MaterializeContext) ([]string, e
 		UseAbsolutePaths:   true,
 		Reports:            &reports,
 		WorktreeDelegation: ctx.WorktreeDelegation,
+		WorkSummaryHooks:   workSummaryHooks,
 	})
 	if err != nil {
 		return nil, err
