@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -87,6 +88,58 @@ func sessionLive(jobsDir, sessionID string, now time.Time) bool {
 	// The entry exists and is ours: the session is live (running or
 	// idle-but-resumable). It is reclaimed only once this entry disappears.
 	return true
+}
+
+// instanceHasLiveJob reports whether any present Claude Code job is rooted
+// inside instancePath -- i.e. a live session is currently working there. It is
+// the reaper's mapping-INDEPENDENT liveness guard, distinct from sessionLive
+// (which keys on a mapping's session_id): the backstop acts on UNMAPPED
+// instances, so it has no session id to feed sessionLive, yet an unmapped
+// instance can still be alive (a long-lived worker, or one whose mapping is
+// absent). A dispatched worker launches with cmd.Dir == its instance
+// directory, so its job-state cwd records exactly that path; this scans every
+// job entry and returns true when any job's cwd equals instancePath or is
+// nested under it.
+//
+// It exists to stop the reaper -- especially the name+TTL backstop -- from
+// destroying an instance a running session lives in, which is what deleted the
+// caller's own instance mid-dispatch. An empty jobsDir (HOME unresolved) or an
+// unreadable jobs tree yields false: with no evidence of a live job the guard
+// does not spare, so the caller falls back to its other eligibility gates
+// (name, TTL, mapping) -- it never widens what is reaped, only narrows it.
+func instanceHasLiveJob(jobsDir, instancePath string) bool {
+	if jobsDir == "" || instancePath == "" {
+		return false
+	}
+	instance := filepath.Clean(instancePath)
+
+	entries, err := os.ReadDir(jobsDir)
+	if err != nil {
+		return false
+	}
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		js, ok := decodeJobState(filepath.Join(jobsDir, e.Name(), "state.json"))
+		if !ok || js.Cwd == "" {
+			continue
+		}
+		if pathWithin(filepath.Clean(js.Cwd), instance) {
+			return true
+		}
+	}
+	return false
+}
+
+// pathWithin reports whether path is at or below base. Both are expected to be
+// cleaned absolute paths. It matches an exact equality and a true descendant
+// (base + separator prefix), so "/a/binstance" is NOT treated as within "/a/b".
+func pathWithin(path, base string) bool {
+	if path == base {
+		return true
+	}
+	return strings.HasPrefix(path, base+string(os.PathSeparator))
 }
 
 // readJobState locates the job-state file for sessionID under jobsDir and
