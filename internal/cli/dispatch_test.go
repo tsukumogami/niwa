@@ -571,6 +571,11 @@ func TestDispatch_Concurrent_DistinctMappings(t *testing.T) {
 func TestDispatch_PassthroughFlags_DiscreteArgv(t *testing.T) {
 	root := setupDispatchWorkspace(t)
 	chdir(t, root)
+	// Isolate the host global config so this test does not pick up the
+	// developer's real ~/.config/niwa/config.toml (e.g. a
+	// remote_control_on_dispatch=true default would otherwise append a
+	// --settings element and make the passthrough assertion non-hermetic).
+	setHostConfig(t, "")
 	installDispatchFakes(t, root)
 	dispatchModel = "sonnet"
 	dispatchPermissionMode = "acceptEdits"
