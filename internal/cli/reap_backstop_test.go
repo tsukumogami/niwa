@@ -75,7 +75,7 @@ func TestBackstop_MarkedUnmappedOld_Reclaimed(t *testing.T) {
 
 	destroyed := stubDestroyAll(t)
 
-	n, err := reapBackstop(root, now)
+	n, err := reapBackstop(root, t.TempDir(), now)
 	if err != nil {
 		t.Fatalf("reapBackstop error: %v", err)
 	}
@@ -103,7 +103,7 @@ func TestBackstop_DispNamedUnmappedOldNoMarker_ReclaimedViaMtime(t *testing.T) {
 
 	destroyed := stubDestroyAll(t)
 
-	n, err := reapBackstop(root, now)
+	n, err := reapBackstop(root, t.TempDir(), now)
 	if err != nil {
 		t.Fatalf("reapBackstop error: %v", err)
 	}
@@ -128,7 +128,7 @@ func TestBackstop_MarkedUnmappedYoung_Spared(t *testing.T) {
 
 	destroyed := stubDestroyAll(t)
 
-	n, err := reapBackstop(root, now)
+	n, err := reapBackstop(root, t.TempDir(), now)
 	if err != nil {
 		t.Fatalf("reapBackstop error: %v", err)
 	}
@@ -155,7 +155,7 @@ func TestBackstop_MappedInstance_NotTouched(t *testing.T) {
 
 	destroyed := stubDestroyAll(t)
 
-	n, err := reapBackstop(root, now)
+	n, err := reapBackstop(root, t.TempDir(), now)
 	if err != nil {
 		t.Fatalf("reapBackstop error: %v", err)
 	}
@@ -188,7 +188,7 @@ func TestBackstop_NonDispatchName_NeverTouched(t *testing.T) {
 
 	destroyed := stubDestroyAll(t)
 
-	n, err := reapBackstop(root, now)
+	n, err := reapBackstop(root, t.TempDir(), now)
 	if err != nil {
 		t.Fatalf("reapBackstop error: %v", err)
 	}
@@ -220,7 +220,7 @@ func TestBackstop_MalformedMarker_FallsBackToMtime(t *testing.T) {
 
 	destroyed := stubDestroyAll(t)
 
-	n, err := reapBackstop(root, now)
+	n, err := reapBackstop(root, t.TempDir(), now)
 	if err != nil {
 		t.Fatalf("reapBackstop error: %v", err)
 	}
@@ -303,7 +303,7 @@ func TestSelectBackstopTargets_Matrix(t *testing.T) {
 	touchInstanceMtime(t, dev, now.Add(-2*dispatchBackstopTTL))
 	writeDispatchMarkerAt(t, hook, now.Add(-2*dispatchBackstopTTL))
 
-	targets, err := selectBackstopTargets(root, now)
+	targets, err := selectBackstopTargets(root, t.TempDir(), now)
 	if err != nil {
 		t.Fatalf("selectBackstopTargets error: %v", err)
 	}
@@ -320,5 +320,142 @@ func TestSelectBackstopTargets_Matrix(t *testing.T) {
 		if !got[p] {
 			t.Fatalf("missing expected target %s; got %v", p, got)
 		}
+	}
+}
+
+// writeJobStateCwd writes a present job-state entry under jobsDir/<dirName>
+// whose recorded cwd is cwd. It models a live Claude Code worker rooted in an
+// instance directory (a dispatched worker launches with cmd.Dir == its
+// instance, so its job-state cwd is that instance path). The reaper's
+// mapping-independent liveness guard (instanceHasLiveJob) keys on this cwd.
+func writeJobStateCwd(t *testing.T, jobsDir, dirName, cwd string) {
+	t.Helper()
+	dir := filepath.Join(jobsDir, dirName)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := []byte(`{"template":"` + bgJobTemplate + `","cwd":"` + cwd + `"}`)
+	if err := os.WriteFile(filepath.Join(dir, "state.json"), body, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestBackstop_LiveWorkerRooted_Spared is the regression guard for the
+// data-loss bug: a dispatch-named, UNMAPPED, past-TTL instance that a live
+// Claude Code worker is currently rooted in (its job-state cwd is the instance
+// directory) must NOT be reaped by the backstop. Before the fix the backstop
+// keyed on name + age alone and reaped exactly this shape -- including the
+// caller's own instance mid-dispatch. It also encodes "dispatch cannot reap its
+// own caller": the caller is precisely a live worker rooted in its instance.
+func TestBackstop_LiveWorkerRooted_Spared(t *testing.T) {
+	root := setupHookWorkspace(t, true)
+	jobsDir := t.TempDir()
+	now := time.Now()
+
+	inst := makeReapInstance(t, root, dispInstOld)
+	// Unmapped and well past the TTL -- the exact shape the backstop would
+	// otherwise reclaim.
+	writeDispatchMarkerAt(t, inst, now.Add(-2*dispatchBackstopTTL))
+	// But a live worker is rooted in it: its job-state cwd is the instance dir.
+	writeJobStateCwd(t, jobsDir, "0000aa11", inst)
+
+	destroyed := stubDestroyAll(t)
+
+	n, err := reapBackstop(root, jobsDir, now)
+	if err != nil {
+		t.Fatalf("reapBackstop error: %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("reaped count = %d, want 0 (a live worker's instance must never be reaped)", n)
+	}
+	if len(*destroyed) != 0 {
+		t.Fatalf("destroyed = %v, want [] (live instance must not be destroyed)", *destroyed)
+	}
+}
+
+// TestBackstop_LiveWorkerInWorktree_Spared: a worker whose cwd is a
+// subdirectory of the instance (e.g. a per-repo worktree) still counts as live,
+// so the instance is spared. The guard matches at-or-below the instance path,
+// not just an exact cwd.
+func TestBackstop_LiveWorkerInWorktree_Spared(t *testing.T) {
+	root := setupHookWorkspace(t, true)
+	jobsDir := t.TempDir()
+	now := time.Now()
+
+	inst := makeReapInstance(t, root, dispInstOld)
+	writeDispatchMarkerAt(t, inst, now.Add(-2*dispatchBackstopTTL))
+	writeJobStateCwd(t, jobsDir, "0000aa11", filepath.Join(inst, "public", "tsuku"))
+
+	destroyed := stubDestroyAll(t)
+
+	n, err := reapBackstop(root, jobsDir, now)
+	if err != nil {
+		t.Fatalf("reapBackstop error: %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("reaped count = %d, want 0 (a worker rooted in a subdir is still live)", n)
+	}
+	if len(*destroyed) != 0 {
+		t.Fatalf("destroyed = %v, want [] (live instance must not be destroyed)", *destroyed)
+	}
+}
+
+// TestBackstop_DeadWorkerSiblingCwd_StillReaped: a genuinely orphaned
+// dispatch instance (unmapped, past TTL, NO live job rooted in it) is still
+// reclaimed. A live job whose cwd sits beside the instance -- a sibling path
+// sharing a name prefix -- must not be mistaken for one inside it. This pins
+// that the liveness guard narrows reaping to live instances only and does not
+// disable the backstop.
+func TestBackstop_DeadWorkerSiblingCwd_StillReaped(t *testing.T) {
+	root := setupHookWorkspace(t, true)
+	jobsDir := t.TempDir()
+	now := time.Now()
+
+	inst := makeReapInstance(t, root, dispInstOld)
+	writeDispatchMarkerAt(t, inst, now.Add(-2*dispatchBackstopTTL))
+	// A live job, but rooted in a SIBLING directory that shares the instance's
+	// path as a string prefix without the separator boundary. It must not spare
+	// the instance.
+	writeJobStateCwd(t, jobsDir, "0000bb22", inst+"-other")
+
+	destroyed := stubDestroyAll(t)
+
+	n, err := reapBackstop(root, jobsDir, now)
+	if err != nil {
+		t.Fatalf("reapBackstop error: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("reaped count = %d, want 1 (a genuine orphan must still be reaped)", n)
+	}
+	if len(*destroyed) != 1 || (*destroyed)[0] != inst {
+		t.Fatalf("destroyed = %v, want [%s]", *destroyed, inst)
+	}
+}
+
+// TestInstanceHasLiveJob exercises the mapping-independent liveness helper
+// directly across its spare/reclaim cases.
+func TestInstanceHasLiveJob(t *testing.T) {
+	jobsDir := t.TempDir()
+	inst := "/ws/test-ws+-0000aa11"
+
+	if instanceHasLiveJob(jobsDir, inst) {
+		t.Fatal("empty jobs dir must report no live job")
+	}
+	if instanceHasLiveJob("", inst) {
+		t.Fatal("empty jobsDir must report no live job (fail safe)")
+	}
+
+	writeJobStateCwd(t, jobsDir, "0000aa11", inst)
+	if !instanceHasLiveJob(jobsDir, inst) {
+		t.Fatal("a job whose cwd is the instance must count as live")
+	}
+	if !instanceHasLiveJob(jobsDir, inst+"/") {
+		t.Fatal("a trailing separator on instancePath must still match (cleaned)")
+	}
+	if instanceHasLiveJob(jobsDir, inst+"-other") {
+		t.Fatal("a sibling path sharing a prefix must not match")
+	}
+	if instanceHasLiveJob(jobsDir, "/ws/test-ws+-0000bb22") {
+		t.Fatal("an unrelated instance must not match")
 	}
 }

@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/cucumber/godog"
 )
@@ -287,6 +288,61 @@ func theDispatchSessionIsDeleted(ctx context.Context, sessionID string) (context
 	return ctx, nil
 }
 
+// theDispatchOriginMappingIsRemoved deletes every session mapping under the
+// workspace root's .niwa/sessions store, modeling a dispatch instance whose
+// mapping was lost while its worker keeps running -- the unmapped-but-live shape
+// the reaper backstop must not reclaim. The live job entry the fake claude wrote
+// is left in place, so a session is still rooted in the instance.
+func theDispatchOriginMappingIsRemoved(ctx context.Context) (context.Context, error) {
+	s := getState(ctx)
+	if s == nil {
+		return ctx, fmt.Errorf("no test state")
+	}
+	dir := filepath.Join(s.workspaceRoot, ".niwa", "sessions")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return ctx, nil
+		}
+		return ctx, fmt.Errorf("reading sessions dir %s: %w", dir, err)
+	}
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".json") {
+			if err := os.Remove(filepath.Join(dir, e.Name())); err != nil {
+				return ctx, fmt.Errorf("removing mapping %s: %w", e.Name(), err)
+			}
+		}
+	}
+	return ctx, nil
+}
+
+// theDispatchInstanceIsAgedPastTheBackstopTTL backdates the recorded dispatch
+// instance directory's mtime well past the name+TTL backstop window (30 minutes;
+// two hours here for a generous margin) so the backstop considers it old enough
+// to reclaim. A successful dispatch already removed the pending-marker, so the
+// backstop ages the instance by directory mtime; the marker is also removed here
+// for determinism. Combined with a removed mapping and a still-present live job,
+// this is the exact shape that must be SPARED by the liveness guard.
+func theDispatchInstanceIsAgedPastTheBackstopTTL(ctx context.Context) (context.Context, error) {
+	s := getState(ctx)
+	if s == nil {
+		return ctx, fmt.Errorf("no test state")
+	}
+	inst := s.lastDispatchInstancePath
+	if inst == "" {
+		inst = findDispatchInstance(s.workspaceRoot)
+	}
+	if inst == "" {
+		return ctx, fmt.Errorf("no dispatch instance recorded to age")
+	}
+	_ = os.Remove(filepath.Join(inst, ".niwa", "dispatch-pending"))
+	old := time.Now().Add(-2 * time.Hour)
+	if err := os.Chtimes(inst, old, old); err != nil {
+		return ctx, fmt.Errorf("backdating instance mtime %s: %w", inst, err)
+	}
+	return ctx, nil
+}
+
 // registerDispatchSteps wires the dispatch-lifecycle steps into the scenario
 // context. Called from initializeScenario.
 func registerDispatchSteps(ctx *godog.ScenarioContext) {
@@ -299,4 +355,6 @@ func registerDispatchSteps(ctx *godog.ScenarioContext) {
 	ctx.Step(`^a dispatch-origin mapping exists for session "([^"]*)"$`, aDispatchOriginMappingExistsForSession)
 	ctx.Step(`^no dispatch-origin mapping remains$`, noDispatchOriginMappingRemains)
 	ctx.Step(`^the dispatch session "([^"]*)" is deleted from the Agent View$`, theDispatchSessionIsDeleted)
+	ctx.Step(`^the dispatch-origin mapping is removed$`, theDispatchOriginMappingIsRemoved)
+	ctx.Step(`^the dispatch instance is aged past the backstop TTL$`, theDispatchInstanceIsAgedPastTheBackstopTTL)
 }

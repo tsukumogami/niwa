@@ -153,6 +153,17 @@ func selectReapTargets(workspaceRoot, jobsDir string, now time.Time) ([]reapTarg
 			continue
 		}
 
+		// Defense in depth against the data-loss class this reaper fixes: even
+		// if the mapping-keyed liveness rule above reads the session as dead
+		// (a stale or mis-keyed mapping), never destroy an instance a live
+		// Claude Code session is currently rooted in. A dispatched worker
+		// launches with cmd.Dir == its instance, so its job-state cwd points at
+		// the instance directory; if any present job's cwd resolves inside this
+		// instance, a session is still working there and it must be spared.
+		if instanceHasLiveJob(jobsDir, rec.Path) {
+			continue
+		}
+
 		targets = append(targets, reapTarget{
 			SessionID:    mapping.SessionID,
 			InstancePath: rec.Path,
@@ -196,7 +207,7 @@ func reapWorkspace(workspaceRoot, jobsDir string, now time.Time) (int, error) {
 	// under its own gates (dispatch instance name, no mapping, age past the TTL).
 	// It runs after the primary reclamation so the existing sweep keeps ownership
 	// of every mapped instance (DESIGN Decision 4).
-	n, err := reapBackstop(workspaceRoot, now)
+	n, err := reapBackstop(workspaceRoot, jobsDir, now)
 	if err != nil {
 		return reaped, err
 	}
@@ -233,14 +244,23 @@ type backstopTarget struct {
 //     SIGKILL-before-marker case, and the malformed-marker case). Either source
 //     must show age > TTL; a present-but-malformed marker does NOT spare the
 //     instance forever -- it falls back to mtime.
+//   - NO live Claude Code session is rooted in it. An unmapped dispatch instance
+//     is NOT necessarily an orphan: a worker that outlives the TTL, or one whose
+//     mapping is missing, is still alive. A dispatched worker launches with
+//     cmd.Dir == its instance, so its job-state cwd points at the instance
+//     directory; instanceHasLiveJob spares any instance a present job's cwd
+//     resolves inside. This is the load-bearing guard that stops the backstop
+//     from reaping a live instance -- including the caller's own -- on name+age
+//     alone (the data-loss class this fix closes). The TTL alone was unsafe: a
+//     dispatched session can live for hours, far past the 30-minute TTL.
 //
 // A developer instance ("<config>", "<config>-2"), a hook-created instance
 // ("<config>-<sessionhex>", no "+" marker), and a create instance
 // ("<config>+<slug>", no trailing "-<8hex>") never match the name predicate,
 // so they are never touched regardless of age or mapping. This function performs
-// no destruction, so it is unit-testable against fixture instances and an
-// injectable now.
-func selectBackstopTargets(workspaceRoot string, now time.Time) ([]backstopTarget, error) {
+// no destruction, so it is unit-testable against fixture instances, a fixture
+// jobs tree, and an injectable now.
+func selectBackstopTargets(workspaceRoot, jobsDir string, now time.Time) ([]backstopTarget, error) {
 	records, err := workspace.EnumerateInstanceRecords(workspaceRoot)
 	if err != nil {
 		return nil, fmt.Errorf("enumerating instances: %w", err)
@@ -280,6 +300,16 @@ func selectBackstopTargets(workspaceRoot string, now time.Time) ([]backstopTarge
 
 		if now.Sub(created) < dispatchBackstopTTL {
 			// A healthy in-flight dispatch: younger than the TTL. Spare it (R38).
+			continue
+		}
+
+		// A live Claude Code session may still be rooted in this instance even
+		// though it is unmapped and past the TTL (a long-lived worker, or one
+		// whose mapping is absent). The backstop must never delete an instance
+		// out from under a running session -- doing so was the data-loss bug
+		// (it reaped the caller's own live instance mid-dispatch). Spare any
+		// instance a present job's cwd resolves inside.
+		if instanceHasLiveJob(jobsDir, rec.Path) {
 			continue
 		}
 
@@ -333,9 +363,10 @@ func readDispatchMarkerTime(instancePath string) (time.Time, bool) {
 // force-destroyed via destroyInstanceFunc, the same path the primary sweep
 // uses. A destroy failure on one target is surfaced on
 // stderr and does not abort the rest. There is no mapping to delete (a backstop
-// target is unmapped by definition).
-func reapBackstop(workspaceRoot string, now time.Time) (int, error) {
-	targets, err := selectBackstopTargets(workspaceRoot, now)
+// target is unmapped by definition). jobsDir feeds the liveness gate in
+// selectBackstopTargets so a live-but-unmapped instance is never reclaimed.
+func reapBackstop(workspaceRoot, jobsDir string, now time.Time) (int, error) {
+	targets, err := selectBackstopTargets(workspaceRoot, jobsDir, now)
 	if err != nil {
 		return 0, err
 	}

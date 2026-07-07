@@ -174,6 +174,40 @@ func TestReap_LiveIdleEphemeral_Spared(t *testing.T) {
 	}
 }
 
+// TestReap_MappedDeadButLiveJobRooted_Spared: belt-and-suspenders for the
+// primary sweep. An ephemeral instance whose MAPPING reads dead by the
+// entry-present rule (no job entry for its session id) is nonetheless SPARED
+// when a live Claude Code job is rooted inside it (a mis-keyed or stale mapping
+// must never let the reaper delete a directory a running session lives in).
+func TestReap_MappedDeadButLiveJobRooted_Spared(t *testing.T) {
+	root := setupHookWorkspace(t, true)
+	jobsDir := t.TempDir()
+	now := time.Now()
+
+	inst := makeReapInstance(t, root, "test-ws-stale")
+	// Mapping points at a session with NO job entry -> sessionLive reads dead.
+	mapEphemeral(t, root, reapDeadSessionID, inst, true)
+	// But a live worker is actually rooted in the instance (its cwd is the dir),
+	// recorded under a job whose name is not a prefix of reapDeadSessionID.
+	writeJobStateCwd(t, jobsDir, "0000aa11", inst)
+
+	destroyed := stubDestroyAll(t)
+
+	n, err := reapWorkspace(root, jobsDir, now)
+	if err != nil {
+		t.Fatalf("reapWorkspace error: %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("reaped count = %d, want 0 (a live-rooted instance must be spared even with a dead mapping)", n)
+	}
+	if len(*destroyed) != 0 {
+		t.Fatalf("destroyed = %v, want [] (live instance must not be destroyed)", *destroyed)
+	}
+	if _, err := workspace.ReadSessionMapping(root, reapDeadSessionID); err != nil {
+		t.Errorf("mapping deleted while a live job was rooted in the instance; want retained: %v", err)
+	}
+}
+
 // TestReap_NonEphemeralInstance_NeverTargeted: a developer (non-ephemeral)
 // instance is NEVER reaped, even with a dead session and an empty jobs dir. The
 // ephemeral marker is the load-bearing guard.

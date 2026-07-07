@@ -210,8 +210,25 @@ bug it caused.)
 
 `reap` never destroys a non-ephemeral (developer) instance, and never reaps on a
 marker alone — the session must be gone. An ephemeral instance with no resolvable
-mapping is skipped rather than guessed at — without a session id the liveness rule
-can't run.
+mapping is skipped by the primary (mapping-keyed) sweep — without a session id the
+entry-present liveness rule can't run.
+
+### Never reap a live instance, mapped or not
+
+Above the mapping-keyed rule sits a second, mapping-**independent** liveness
+guard that both the primary sweep and the name+TTL backstop consult:
+`instanceHasLiveJob`. A dispatched worker launches rooted in its instance
+(`cmd.Dir == <instance>`), so its Claude Code job-state records that directory as
+its `cwd`. Before destroying any instance, the reaper scans the jobs dir and
+spares any instance a present job's `cwd` resolves inside. This closes a
+data-loss class the mapping-keyed rule alone could not: an **unmapped**
+dispatch-named instance (a lost or not-yet-written mapping) whose worker is still
+alive was previously reclaimable by the backstop on name and age alone — and a
+dispatched session can live for hours, far past the backstop's 30-minute TTL, so
+a long-lived worker was guaranteed to age into a reap. Because the caller of a
+reap is itself a live session rooted in its own instance, this guard is also what
+stops `niwa dispatch` (which reaps opportunistically before provisioning) from
+deleting the instance it is running inside.
 
 `reap` runs on demand and is also invoked opportunistically at the start of
 `niwa create`, so session fan-out self-bounds. The opportunistic call never
@@ -366,12 +383,15 @@ root, and the root config installs again.
 - The mapping store lives in `internal/workspace/session_map.go`. `session_id`
   is validated against the UUID pattern on every path construction; don't relax
   that check — it guards path traversal from untrusted hook input.
-- The job-state read is shared by two consumers
+- The job-state read is shared by three consumers
   (`internal/cli/job_state.go`): the SessionStart guard keys on
-  `template == "bg"`, and the reaper's liveness rule keys on the job entry being
-  present (live) vs gone (deleted) — it reads no other field. `state.json` is an
-  undocumented Claude Code file, so absent fields decode to zero and every reader
-  fails safe on a miss.
+  `template == "bg"`; the reaper's mapping-keyed liveness rule (`sessionLive`)
+  keys on the job entry being present (live) vs gone (deleted); and the reaper's
+  mapping-independent guard (`instanceHasLiveJob`) keys on any present job's
+  `cwd` resolving inside the instance, sparing an instance a live session is
+  rooted in even when it has no usable mapping (the backstop's case). `state.json`
+  is an undocumented Claude Code file, so absent fields decode to zero and every
+  reader fails safe on a miss.
 - `niwa reap` destroys with `--force`, which skips the uncommitted-work guard. It
   is constrained to instances carrying the `ephemeral: true` marker whose session
   is gone (job entry deleted) — a developer's normal instance has no such marker

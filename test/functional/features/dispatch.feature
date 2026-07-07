@@ -101,3 +101,33 @@ Feature: niwa dispatch: provision, rollback, and reaper reclamation
     Then the exit code is 0
     And the dispatch instance still exists
     And a dispatch-origin mapping exists for session "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+
+  # --- Reaper spares a live worker whose mapping was lost (backstop liveness) ---
+  # Regression guard for the data-loss bug. An UNMAPPED, past-TTL dispatch
+  # instance that a live worker is still rooted in must NOT be reclaimed by the
+  # name+TTL backstop. Before the fix the backstop keyed on name + age alone,
+  # with no liveness check, and deleted exactly this shape -- including the
+  # caller's own instance mid-dispatch, which vanished its cwd and then broke the
+  # follow-on provisioning clone. The live worker's job-state cwd is the instance
+  # dir, so the reaper's mapping-independent liveness guard spares it.
+
+  @critical
+  Scenario: niwa reap spares an unmapped dispatch instance whose worker is still live
+    Given a clean niwa environment
+    And a local git server is set up
+    And a config repo "myws" exists with body:
+      """
+      [workspace]
+      name = "myws"
+      """
+    When I run niwa init from config repo "myws"
+    Then the exit code is 0
+    Given a fake claude for dispatch with session "dddddddd-dddd-4ddd-8ddd-dddddddddddd"
+    When I run "niwa dispatch keep-live --detach" from the workspace root
+    Then the exit code is 0
+    And a dispatch instance was created with a well-formed instance file
+    When the dispatch-origin mapping is removed
+    And the dispatch instance is aged past the backstop TTL
+    And I run niwa reap from the workspace root
+    Then the exit code is 0
+    And the dispatch instance still exists
