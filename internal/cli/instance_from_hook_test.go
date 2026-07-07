@@ -365,8 +365,8 @@ func TestSessionStart_DispatchOrphanSelfHeals(t *testing.T) {
 	if !m.Ephemeral {
 		t.Error("mapping Ephemeral = false, want true")
 	}
-	if m.Origin != backstopAdoptedOrigin {
-		t.Errorf("mapping Origin = %q, want %q", m.Origin, backstopAdoptedOrigin)
+	if m.Origin != selfHealedOrigin {
+		t.Errorf("mapping Origin = %q, want %q", m.Origin, selfHealedOrigin)
 	}
 	if m.TranscriptPath != "/tmp/t.jsonl" {
 		t.Errorf("mapping TranscriptPath = %q, want the hook transcript", m.TranscriptPath)

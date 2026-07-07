@@ -25,13 +25,22 @@ import (
 // not job-state.
 const dispatchBackstopTTL = 30 * time.Minute
 
-// backstopAdoptedOrigin is the SessionMapping.Origin the backstop stamps on a
-// mapping it writes to adopt a live-but-unmapped dispatch orphan (a worker whose
-// dispatch parent died before writing the mapping). It marks the mapping as
-// recovered by the reaper rather than authored by the dispatch command
-// ("dispatch") or the SessionStart hook (absent), so the provenance of a healed
-// mapping is traceable.
+// backstopAdoptedOrigin is the SessionMapping.Origin the reaper backstop stamps
+// on a mapping it writes to adopt a live-but-unmapped dispatch orphan (a worker
+// whose dispatch parent died before writing the mapping). It marks the mapping as
+// recovered by the reaper -- distinct from a mapping authored by the dispatch
+// command ("dispatch"), recovered by the worker's own SessionStart self-heal
+// (selfHealedOrigin), or authored by the ordinary SessionStart hook (absent) --
+// so the provenance of a healed mapping is traceable.
 const backstopAdoptedOrigin = "adopted"
+
+// selfHealedOrigin is the SessionMapping.Origin the SessionStart self-heal
+// (maybeAdoptSelf) stamps on a mapping the booting worker writes for ITSELF when
+// its dispatch parent died before mapping it. It is deliberately distinct from
+// backstopAdoptedOrigin: the worker recovered its own mapping at boot, the reaper
+// did not, so the two recovery paths stay distinguishable in tooling. Both differ
+// from a normal dispatch ("dispatch") or ordinary-hook (absent) mapping.
+const selfHealedOrigin = "self-healed"
 
 func init() {
 	rootCmd.AddCommand(reapCmd)

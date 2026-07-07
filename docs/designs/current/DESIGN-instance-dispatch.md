@@ -12,16 +12,18 @@ decision: |
   name, launches `claude --bg` rooted in it, recovers the session UUID by correlating
   the jobs-dir state.json whose cwd equals the unique instance directory, and writes an
   ephemeral mapping marked with a dispatch origin. Atomicity is a command self-rollback
-  (destroy the instance on any pre-mapping failure) plus a name-and-TTL reaper backstop
-  that closes the SIGKILL gap a process-local rollback cannot. The command reuses the
-  existing create, destroy, mapping, and reclamation machinery; it does not touch the
-  hook path.
+  (destroy the instance on any pre-mapping failure) plus a liveness-aware name-and-TTL
+  reaper backstop that closes the SIGKILL gap a process-local rollback cannot -- sparing
+  and adopting a live-but-unmapped orphan rather than destroying it (see D4a), with a
+  SessionStart self-heal as defense in depth. The command reuses the existing create,
+  destroy, mapping, and reclamation machinery; it does not touch the hook path.
 rationale: |
   Correlating on the unique instance directory avoids depending on the undocumented
   background-launch stdout format and gives an exact disambiguation key. Self-rollback
   handles every failure the command returns from; the name+TTL reaper branch is the
-  only way to reclaim an instance orphaned by a SIGKILL, and gating it on a TTL longer
-  than a dispatch keeps it from reaping a healthy in-flight instance. Reusing the
+  only way to reclaim an instance orphaned by a SIGKILL, and a liveness check before
+  destruction keeps it from reaping a live worker whose parent died before mapping it
+  (a past-TTL but running instance), sparing and adopting it instead (D4a). Reusing the
   existing primitives keeps the command additive and small.
 ---
 
@@ -227,10 +229,66 @@ the *precise* age source; when that file is absent or unparseable (the SIGKILL-b
 case) the scan falls back to the directory mtime. The no-mapping gate excludes every
 successful dispatch (it is mapped); the name signature excludes developer instances
 (`<config>`, `<config>-2`) and hook-created instances (`<config>-<sessionhex>`, no `+`
-marker); and the TTL gate preserves R38 -- a healthy in-flight instance is
+marker); and the TTL gate preserves R38 -- a *young* in-flight instance is
 younger than the TTL and is never reaped. Rejected: A leaves the SIGKILL
 orphan; C is impossible because the store rejects a non-UUID provisional key
 (`session_map.go`) and would require weakening that validation.
+
+**Hardening note (see D4a).** The name+no-mapping+TTL gate above is necessary but
+NOT sufficient to *destroy*: it wrongly assumed an unmapped past-TTL instance is a
+dead orphan. A dispatch parent that dies after launching the detached worker but
+before writing the mapping leaves a **live** worker in an unmapped instance whose
+lifetime (hours) far exceeds the TTL (sized for dispatch *capture*, seconds) -- so
+the backstop as originally specified destroyed a running worker's workspace. D4a
+adds a liveness check before destruction to close that data-loss path.
+
+### D4a -- Liveness-aware backstop and self-healing mapping
+
+The D4 backstop, as first specified, keyed destruction on name + no-mapping +
+age>TTL alone. Two composing facts made that unsafe:
+
+- **Defect A -- a worker can outlive its mapping.** `runDispatch` provisions the
+  instance, launches the detached `claude --bg` worker, then (still in the
+  short-lived parent) polls the jobs dir to recover the UUID and only then writes
+  the mapping. If the parent dies (SIGKILL/crash) between launch and the mapping
+  write, the worker keeps running while the instance stays **unmapped**. It cannot
+  be prevented by pre-writing the mapping: the store is UUID-keyed and the UUID
+  does not exist until after launch (see the D4 rejection of option C).
+- **Defect B -- the backstop had no liveness check.** The TTL was chosen for the
+  worst-case dispatch *capture* wall-clock (seconds); a healthy worker's *lifetime*
+  is hours. Once Defect A left a worker unmapped, the name+TTL gate destroyed its
+  live workspace at the 30-minute mark -- branch, worktree, and uncommitted work.
+
+**Fix 1 (primary) -- liveness check + adopt.** Before destroying an unmapped,
+past-TTL, dispatch-named instance, the backstop scans `~/.claude/jobs/*/state.json`
+for a job whose normalized `cwd` matches the candidate instance, reusing the
+dispatch capture path's cwd correlation (`matchSessionByCwd`, wrapped by a shared
+`liveJobInInstance` so capture and the reaper cannot drift). A live cwd-matched
+worker **spares** the instance; when its session id is recoverable the backstop
+**adopts** the orphan -- it writes the missing `SessionMapping` (`Ephemeral: true`,
+`Origin: "adopted"`) so the liveness-checking primary sweep owns it thereafter. An
+ambiguous match (more than one job, or an id not yet recorded) spares without
+adopting. A genuine orphan with no live cwd-matched worker is still reaped,
+preserving the backstop's SIGKILL-cleanup purpose. A jobs-dir read error fails
+**safe** -- the instance is spared, never destroyed on an unobservable state. The
+`dispatchBackstopTTL` is unchanged: the fix is a liveness check, not a longer TTL.
+
+**Fix 2 (defense-in-depth) -- SessionStart self-heal.** A dispatched `bg` worker
+booting inside an ephemeral dispatch instance that still carries the
+`.niwa/dispatch-pending` marker but has no mapping writes the mapping itself (it
+knows its own session id and cwd), stamped `Origin: "self-healed"`. This removes
+dispatch-parent survival as a single point of failure: the worker -- the one
+process that both survives the parent's death and knows the post-launch UUID -- is
+the most direct root-cause fix the UUID-keyed store permits. The SessionStart
+re-entrancy guard is relaxed for exactly this adopt-self shape (dispatch instance
++ marker present + no mapping) and still no-ops for an ordinary nested/dev
+instance. Self-heal fires only in ephemeral-session mode with the hook installed;
+Fix 1 is the universal safety net for dispatch configurations where it cannot.
+
+**Provenance taxonomy.** The two recovery paths carry distinct `Origin` values so a
+healed mapping is traceable: `"adopted"` (recovered by the reaper backstop) vs.
+`"self-healed"` (the worker mapped itself at boot), both distinct from a normal
+dispatch (`"dispatch"`) and an ordinary-hook mapping (absent).
 
 ### D5 -- In-flight instance protection under concurrent reclamation
 
@@ -240,8 +298,10 @@ verdict derives entirely from the mapping store, and `selectReapTargets` skips a
 instance without a mapping. An in-flight dispatch's instance has no mapping until the
 command finishes, so a concurrent dispatch's opportunistic sweep cannot see it (R38).
 The only path that could see an unmapped instance is the D4 backstop, and its TTL gate
-(longer than a dispatch) excludes a young in-flight instance. Rejected: a lock adds a new
-failure mode and contention for a window the data model already protects.
+(longer than a dispatch) excludes a young in-flight instance; a *past-TTL* instance that
+is nonetheless live (its dispatch parent died before mapping it) is protected by the D4a
+liveness check, not the TTL gate. Rejected: a lock adds a new failure mode and contention
+for a window the data model already protects.
 
 ### D6 -- Mapping provenance marker
 
@@ -359,10 +419,14 @@ Components (new unless noted):
   from `selectReapTargets` -- because that function's `Ephemeral` verdict comes from the
   mapping store and drops unmapped instances before any per-record check. The backstop
   enumerates on-disk instances and reclaims one only when its directory name carries the
-  dispatch name signature, it has no mapping, and its age (marker timestamp, else
-  directory mtime) exceeds the backstop TTL. A shared name predicate is used by both the
-  command's naming and this scan so they cannot drift. It never touches mapped instances
-  (the existing sweep owns those), non-dispatch-named instances, or young in-flight ones
+  dispatch name signature, it has no mapping, its age (marker timestamp, else
+  directory mtime) exceeds the backstop TTL, **and no live worker is running in it**
+  (a jobs-dir cwd-correlation liveness check, D4a). A live cwd-matched worker is spared
+  and adopted (the missing mapping is written) instead of destroyed. A shared name
+  predicate is used by both the command's naming and this scan so they cannot drift, and
+  a shared `liveJobInInstance` helper reuses the dispatch capture correlation. It never
+  touches mapped instances (the existing sweep owns those), non-dispatch-named instances,
+  live-but-unmapped ones, or young in-flight ones
   (D4, D5).
 - **`SessionMapping.Origin` (additive field, `internal/workspace/session_map.go`).**
 
@@ -381,7 +445,8 @@ Data flow (happy path):
 
 Teardown: the existing reaper reclaims the instance when the session reaches a terminal
 or past-TTL job state (R27-R31). The backstop branch reclaims a SIGKILL-orphaned
-marked-and-unmapped instance after the backstop TTL.
+marked-and-unmapped instance after the backstop TTL, but only once no live worker is
+running in it -- a live orphan is spared and adopted instead (D4a).
 
 ## Implementation Approach
 
@@ -404,7 +469,9 @@ A single PR, built in this order so each step is independently testable:
    the injectable clock. Unit-test that it reclaims a dispatch-named-unmapped-old instance
    (with marker, and without marker via mtime — the SIGKILL-before-marker case), spares a
    dispatch-named-unmapped-young one (R38), spares a mapped instance, and never touches a
-   non-dispatch-named (developer/hook) instance.
+   non-dispatch-named (developer/hook) instance. (Hardened in D4a: the scan now also runs
+   a jobs-dir liveness check before destroying, sparing and adopting a live-but-unmapped
+   orphan; a companion SessionStart self-heal writes the mapping from inside the worker.)
 6. Add a `@critical` functional Gherkin scenario using the offline `localGitServer`
    harness and a stubbed launcher + fabricated jobs-dir: dispatch provisions and maps;
    an induced launch failure rolls back; a fabricated terminal/stale job state lets the
@@ -440,9 +507,10 @@ instant teardown.
   -- the same validation the hook path already applies.
 - **Destroy blast radius.** Rollback and the reaper backstop destroy only the
   command's own freshly-created instance (rollback) or a dispatch-named instance with
-  no mapping past the TTL (backstop). A developer's normal instance is not dispatch-named
-  and is never a target; a mapped instance is reclaimed only by the existing liveness rule,
-  unchanged.
+  no mapping past the TTL **and no live worker running in it** (backstop; D4a). A
+  developer's normal instance is not dispatch-named and is never a target; a live-but-
+  unmapped worker is spared and adopted, not destroyed; a mapped instance is reclaimed
+  only by the existing liveness rule, unchanged.
 - **Name-signature forgery.** The dispatch name signature and the pending-marker both live
   inside the workspace; an attacker who can create a dispatch-named directory or write
   a marker there can already manipulate instances, so neither widens the trust boundary. The
@@ -465,17 +533,21 @@ Positive:
 
 Negative / mitigations:
 
-- The reaper gains a second reclamation scan (name+TTL), a small increase in its
-  surface. Mitigated by gating it strictly (mapping-absent AND dispatch-named AND
-  age>TTL) and unit-testing the spare/reap matrix, including the in-flight (young) case
-  and the no-marker (mtime-fallback) case.
+- The reaper gains a second reclamation scan (name+TTL+liveness), a small increase in its
+  surface. Mitigated by gating it strictly (mapping-absent AND dispatch-named AND age>TTL
+  AND no live cwd-matched worker) and unit-testing the spare/reap/adopt matrix, including
+  the in-flight (young) case, the no-marker (mtime-fallback) case, the live-orphan
+  spare-and-adopt case, and the ambiguous-match spare-without-adopt case.
 - Capture depends on Claude Code writing `state.json` with a `cwd` field; if that format
   changes, capture breaks. Mitigated because niwa's reaper already depends on the same
   file, so the dependency is shared, not new, and a capture failure rolls back cleanly
   rather than orphaning.
 - A SIGKILL between create and mapping leaves an instance reclaimed only after the
   backstop TTL, not immediately. Accepted: the alternative (immediate) is impossible
-  without a process-external agent, and the orphan is bounded and reclaimed.
+  without a process-external agent, and the orphan is bounded and reclaimed. When the
+  SIGKILL happens *after* the worker launched (so a live worker is running), the backstop
+  spares and adopts it rather than destroying it (D4a), and the worker's own SessionStart
+  self-heal writes the mapping first when ephemeral-session mode is active.
 - The backstop TTL must be chosen longer than the worst-case dispatch wall-clock; a
   misconfigured (too-short) TTL could reap a slow in-flight instance. Mitigated by a
   conservative default -- 30 minutes, far above a dispatch (a clone is seconds to low

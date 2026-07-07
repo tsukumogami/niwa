@@ -352,7 +352,7 @@ func maybeAdoptSelf(workspaceRoot string, payload instanceHookPayload, jobsDir s
 		InstancePath:   instanceDir,
 		TranscriptPath: payload.TranscriptPath,
 		Ephemeral:      true,
-		Origin:         backstopAdoptedOrigin,
+		Origin:         selfHealedOrigin,
 	}
 	if err := workspace.WriteSessionMapping(workspaceRoot, mapping); err != nil {
 		// Best effort: a failed self-heal must not break the session. The reaper
