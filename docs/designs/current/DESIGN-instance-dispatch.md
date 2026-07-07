@@ -85,8 +85,8 @@ Options: a top-level `niwa dispatch <prompt>`; `niwa run`; `niwa agent`; a neste
 `niwa instance dispatch`. **Chosen: `niwa dispatch <prompt>`**, a top-level verb beside
 `niwa create`/`niwa reap`, with `--label` for the optional freeform mapping alias,
 `--name`/`-n` for an optional session name (see D2 -- sanitized into a slug that names
-both the instance and the Claude session), and pass-through
-`--model`/`--permission-mode`/`--agent` forwarded to `claude --bg`.
+both the instance and the Claude session), a resolved `--model` (see D1a), and
+pass-through `--permission-mode`/`--agent` forwarded verbatim to `claude --bg`.
 
 **Attach by default; `--detach`/`-d` to skip (R47).** The common interactive case is
 "give me a fresh isolated agent and let me work in it," so by default the command runs
@@ -110,6 +110,42 @@ not a dispatch failure: the command degrades to printing the hints and never rol
 The session id needed for attach is already in hand from capture (D3): the correlated
 `state.json` gives the full `sessionId`, and its containing directory name gives the
 short id, so either form `claude attach` accepts is available.
+
+### D1a -- Model resolution for `--model`
+
+Options: forward `--model`'s value verbatim to `claude --bg` (an opaque passthrough,
+the original behavior); resolve it through a niwa-owned vocabulary. **Chosen: resolve.**
+`niwa dispatch --model` accepts a portable, vendor-neutral capability **category** --
+`fast` / `balanced` / `powerful` -- which niwa maps to a concrete **versionless** vendor
+name (`haiku` / `sonnet` / `opus`) forwarded as `claude --model <name>`; a versionless
+vendor name (`fable` / `opus` / `sonnet` / `haiku`) passes through unchanged; and any
+other value is forwarded **as-is with a stderr warning** rather than rejected. The
+resolver is a pure function (`resolveDispatchModel`) so the mapping is table-tested.
+
+Three deliberate choices:
+
+- **Versionless targets keep niwa out of version-pinning.** A category resolves to
+  `opus`, never `claude-opus-4-8`; Claude Code resolves the alias to whatever concrete
+  model that name currently points at, so niwa's vocabulary does not go stale when the
+  lineup moves. The category layer is also the seam a future multi-vendor router can
+  remap without touching call sites.
+- **Unknown warns, does not error.** niwa must not become a gatekeeper that breaks the
+  instant a new alias ships or a caller passes a full model id; the warning surfaces a
+  typo without blocking the launch. The accepted vocabulary is listed in the flag help
+  (`knownModelHint`) so it is discoverable from `niwa dispatch --help`.
+- **`fable` is a passthrough name, not a category.** The three categories are a
+  representative capability scale, not an exhaustive vendor enumeration; Fable is
+  reachable by its versionless name but is intentionally not assigned a capability tier.
+
+**Host default (`[global] dispatch_model`).** A new scalar on `config.GlobalSettings`
+(`~/.config/niwa/config.toml [global]`) supplies the model when `--model` is omitted; an
+explicit `--model` always overrides it, and an unset default forwards no model
+(preserving the original behavior). This mirrors the `remote_control_on_dispatch`
+host-default pattern from DESIGN-remote-control-by-default. Both scalars share a known
+gap: no `niwa config set` path exists for `[global]` scalar keys, so `dispatch_model` is
+set by hand-editing the file today. That gap is tracked in tsukumogami/niwa#182
+(scalar-key setter) and is deliberately out of scope here; shipping `dispatch_model`
+does not widen it beyond what `remote_control_on_dispatch` already established.
 
 ### D2 -- Concurrency-safe instance naming
 
