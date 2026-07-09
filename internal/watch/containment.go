@@ -141,10 +141,24 @@ func VerifyContainmentApplied(merged map[string]any) error {
 	if !ok {
 		return fmt.Errorf("containment check: permissions stanza missing")
 	}
-	if mode, _ := perms["defaultMode"].(string); mode == "bypassPermissions" || mode == "" {
-		return fmt.Errorf("containment check: permission mode %q is not fail-closed", mode)
+	// Allowlist, not denylist: assert the mode is exactly one of the intended
+	// fail-closed modes. A denylist (reject only "bypassPermissions") fails open
+	// -- it would accept "acceptEdits", "dontAsk", "auto", or a typo as
+	// fail-closed -- which is the pattern this file's env handling and the
+	// design's Decisions 3/4/7 deliberately reject.
+	mode, _ := perms["defaultMode"].(string)
+	if !failClosedPermissionModes[mode] {
+		return fmt.Errorf("containment check: permission mode %q is not an allowed fail-closed mode", mode)
 	}
 	return nil
+}
+
+// failClosedPermissionModes is the allowlist of permission modes the contained
+// session may run under. It matches exactly what ContainmentProfile produces
+// ("default", which rejects a would-prompt call in an unattended --bg session).
+// A new fail-closed mode is admitted only by being added here explicitly.
+var failClosedPermissionModes = map[string]bool{
+	"default": true,
 }
 
 // SyntheticHomeDir returns the path of the synthetic HOME inside an instance and

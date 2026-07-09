@@ -116,6 +116,17 @@ func TestVerifyContainmentApplied_RejectsRelaxations(t *testing.T) {
 		t.Error("bypassPermissions must be rejected")
 	}
 
+	// A non-bypass mode that is still not fail-closed -> reject. This is the
+	// allowlist case a denylist would wrongly accept: acceptEdits (and any other
+	// mode ContainmentProfile does not produce) must be rejected.
+	for _, badMode := range []string{"acceptEdits", "dontAsk", "auto", "plan", "typo"} {
+		m := ContainmentProfile()
+		m["permissions"].(map[string]any)["defaultMode"] = badMode
+		if err := VerifyContainmentApplied(m); err == nil {
+			t.Errorf("permission mode %q must be rejected (only the fail-closed allowlist passes)", badMode)
+		}
+	}
+
 	// Missing sandbox stanza (a merge dropped it) -> reject.
 	if err := VerifyContainmentApplied(map[string]any{"permissions": base["permissions"]}); err == nil {
 		t.Error("missing sandbox stanza must be rejected")
