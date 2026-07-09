@@ -15,11 +15,11 @@ outcome: |
   a glance. The review session is contained by construction, so a hostile
   PR cannot exfiltrate or act; the containment is enforced, not promised.
 motivating_context: |
-  This is the walking-skeleton first slice of making niwa dispatch
-  proactive: the thinnest complete, usable, testable thread that also
-  proves the security boundary the whole proactive-dispatch direction
-  depends on. It is deliberately run by hand -- scheduling comes later, on
-  a thread already proven to work.
+  niwa dispatch is a pull verb today. This feature is the first,
+  deliberately minimal version of proactive PR-review dispatch: run by
+  hand, it stages a contained, pre-drafted review. It is kept small on
+  purpose so the security containment it introduces is proven working
+  before scheduling and richer state are layered on top of it.
 ---
 
 # BRIEF: niwa watch --once PR-review dispatch
@@ -28,11 +28,12 @@ motivating_context: |
 
 Draft
 
-Framing for the first proactive-dispatch slice. The downstream PRD owns
-the requirements (the exact poll query, the metadata brief's fields, the
-handled-set contract); the downstream DESIGN owns the architecture (where
-the containment profile is carried, the credential-scrub model). This
-BRIEF frames the problem, the outcome, the journeys, and the boundary.
+Framing for the first, minimal version of proactive PR-review dispatch in
+niwa. The downstream PRD owns the requirements (the exact poll query, the
+metadata brief's fields, the handled-set contract); the downstream DESIGN
+owns the architecture (where the containment profile is carried, the
+credential-scrub model). This BRIEF frames the problem, the outcome, the
+journeys, and the boundary.
 
 ## Problem Statement
 
@@ -161,7 +162,7 @@ the developer personally stage work; team noise stays out of the inbox.
 ### OUT
 
 - **Scheduling / always-on.** Driving `watch --once` from an OS timer or a
-  harness routine is later work; this slice is run by hand.
+  harness routine is later work; this feature is run by hand.
 - **Durable dedup/cursor state.** Re-request expiry after new commits,
   unblock-time freshness re-validation (still open? still requesting me?
   not force-pushed?), and cursor/ETag polling are later hardening; the
@@ -169,7 +170,7 @@ the developer personally stage work; team noise stays out of the inbox.
 - **Attention and cost controls.** Concurrency caps, batching, heads-down
   suppression, priority ordering, bulk discard, and cost-containment
   policy are later work.
-- **Multi-repo scale-out.** Beyond the minimum the skeleton exercises,
+- **Multi-repo scale-out.** Beyond the minimum this feature exercises,
   scaling the poll across a large workspace is later work.
 - **Any relevance model or session-resident skill in the watcher.** The
   PR-review path is deterministic end to end -- poll, relevance
@@ -182,19 +183,19 @@ the developer personally stage work; team noise stays out of the inbox.
   not cover Windows, and its egress proxy does not TLS-terminate by
   default (leaving a domain-fronting seam). These are recorded as known
   residual risks for the review session's threat model, not necessarily
-  solved in this slice.
+  solved in this first version.
 
 ## Open Questions
 
 These defer framing details to the downstream PRD; none blocks the framing.
 
-- **Workspace-repo coverage of the first slice.** Whether the skeleton's
-  poll covers every repo in the workspace or a deliberately minimal set,
-  and how the workspace's repo list is enumerated for the intersection.
+- **Workspace-repo coverage of this first version.** Whether the poll
+  covers every repo in the workspace or a deliberately minimal set, and
+  how the workspace's repo list is enumerated for the intersection.
 - **Handled-set minimum contract.** Whether the flat handled-set is keyed
   purely by stable PR identity, or also records the dispatch outcome --
-  the minimum the PRD pins for the skeleton, distinct from the richer
-  dedup state deferred to later work.
+  the minimum the PRD pins for this first version, distinct from the
+  richer dedup state deferred to later work.
 - **Directly-requested qualifier semantics.** The precise semantics the
   PRD fixes for "directly requested" (the user-scoped review-request
   qualifier) so team-scoped requests are excluded deterministically.
