@@ -87,6 +87,16 @@ to the model's good judgment. The developer gets the convenience of
 work-already-underway without inheriting the risk of pointing an
 authority-bearing agent at content a stranger wrote.
 
+And saying "post it" stays safe. The developer's approval turns into a
+posted review without the outside world ever being handed to the agent
+that read the PR: the post happens through a trusted step, on the draft
+the developer just read, kept separate from the contained session. So the
+one-gesture "post it or discard" the developer experiences is also the
+moment the act boundary is crossed -- cleanly, by a trusted step, rather
+than by un-caging the session that met the hostile input. (The scope
+boundary below states this as a firm requirement and its rejected
+alternative.)
+
 ## User Journeys
 
 ### The requested reviewer triages a drafted review
@@ -95,10 +105,12 @@ A developer in the middle of a working session runs `niwa watch --once`.
 It finds one open PR across their workspace's repos where they are the
 directly-requested reviewer, stages a contained agent that reads the diff
 in its own clone and drafts a review, and returns. Moments later the
-developer sees the agent in their agent view, reads the draft, and posts
-it -- or discards it -- with a single gesture. Trigger: a manual run.
-Outcome: a review the developer can act on immediately, that they never
-had to notice or launch.
+developer sees the agent in their agent view and reads the draft. On
+approval, a single gesture posts the review through a trusted step that
+runs outside the contained session -- the agent that read the PR never
+posts. Discarding instead posts nothing and records the PR as handled.
+Trigger: a manual run. Outcome: a review the developer can act on
+immediately, that they never had to notice or launch.
 
 ### The developer re-runs and nothing is re-staged
 
@@ -138,14 +150,19 @@ the developer personally stage work; team noise stays out of the inbox.
 
 - A new niwa verb, `niwa watch --once`: a stateless, single-shot,
   run-by-hand CLI invocation, consistent with niwa's no-daemon identity.
-- A poll for open PRs where the developer is the *directly-requested*
-  reviewer, intersected with the repos in their workspace.
+- A poll of **GitHub** for open PRs where the developer is the
+  *directly-requested* reviewer, intersected with the repos in their
+  workspace. Targeting GitHub is a deliberate first-version narrowing --
+  it is the host that carries the directly-requested signal this feature
+  keys on; other hosts (and niwa's broader cross-host reach) are later
+  work, not an accidental omission.
 - A **mechanical, metadata-only** dispatch brief -- repo, PR number,
   title, author, link, and the directly-requested fact -- with the diff
   and PR body *never inlined*; the staged agent reads them in its own
   clone after launch.
 - Dispatching one contained review agent through the existing
-  `niwa dispatch`, staged to draft a review and halt before posting.
+  `niwa dispatch`, staged to draft a review to a known location and halt
+  before posting.
 - An **enforced containment profile** on the dispatched session, treated
   as co-equal parts: (a) an OS-level no-egress sandbox with filesystem
   writes scoped to the clone and a fail-closed permission mode, and
@@ -153,11 +170,34 @@ the developer personally stage work; team noise stays out of the inbox.
   the read-only task's minimum. This is net-new dispatch surface and
   enters bundled with this feature because this is the feature that first
   needs it.
+- **Fail closed on the containment.** If the enforced profile cannot be
+  applied to the dispatched instance -- the OS sandbox is absent or
+  unsupported for any reason, not only on Windows -- `watch --once`
+  refuses to dispatch that review rather than dispatching it uncontained.
+  A review that will not run is strictly better than one that runs with
+  the outbound path open; "silently uncontained" is not an acceptable
+  degraded mode.
+- A **post-on-approval** step that crosses the act boundary without
+  un-caging the drafting session: the contained agent leaves its drafted
+  review at a known location and halts; on the developer's approval a
+  **separate trusted action** -- run outside the sandbox, not sharing the
+  contained session's environment, holding a credential scoped to nothing
+  beyond posting that review -- posts the reviewed draft to the host.
+  Discard posts nothing and records the PR as handled. The invariant: the
+  session that read untrusted content never posts, and its containment is
+  never lifted to let it.
+- A **minimal per-run staging bound** so a single manual run over a
+  workspace with many pending review requests does not stage a burst of
+  full instances at once (a small hard cap, or one-at-a-time). This is the
+  first-run safety floor only; the richer concurrency and cost controls
+  remain later work.
 - A dumb, flat handled-set file so an already-handled PR is not
   re-dispatched on the next manual run.
 - An adversarial test as part of done: a hostile PR is dispatched under
-  the profile and its outbound actions are confirmed denied at the
-  tool/OS layer.
+  the profile and its outbound actions (network egress, push, arbitrary
+  posting) are confirmed denied at the tool/OS layer -- distinct from the
+  narrow trusted post step, which acts only on the developer-approved
+  draft.
 
 ### OUT
 
@@ -167,9 +207,11 @@ the developer personally stage work; team noise stays out of the inbox.
   unblock-time freshness re-validation (still open? still requesting me?
   not force-pushed?), and cursor/ETag polling are later hardening; the
   handled-set here is deliberately minimal.
-- **Attention and cost controls.** Concurrency caps, batching, heads-down
-  suppression, priority ordering, bulk discard, and cost-containment
-  policy are later work.
+- **Attention and cost controls.** Batching, heads-down suppression,
+  priority ordering, bulk discard, cost-containment policy, and the richer
+  configurable concurrency model are later work. (The minimal per-run
+  staging bound above is the first-run safety floor, not this level of
+  control.)
 - **Multi-repo scale-out.** Beyond the minimum this feature exercises,
   scaling the poll across a large workspace is later work.
 - **Any relevance model or session-resident skill in the watcher.** The
@@ -184,6 +226,11 @@ the developer personally stage work; team noise stays out of the inbox.
   default (leaving a domain-fronting seam). These are recorded as known
   residual risks for the review session's threat model, not necessarily
   solved in this first version.
+- **Posting by un-caging the review agent.** Lifting the drafting
+  session's containment on unblock, or handing it a write-scoped token, so
+  the same agent that read the PR can post -- this is explicitly rejected,
+  not deferred. It would re-open the exact vector the containment closes.
+  Posting only ever happens in the separate trusted step above.
 
 ## Open Questions
 
@@ -199,6 +246,16 @@ These defer framing details to the downstream PRD; none blocks the framing.
 - **Directly-requested qualifier semantics.** The precise semantics the
   PRD fixes for "directly requested" (the user-scoped review-request
   qualifier) so team-scoped requests are excluded deterministically.
+- **Shape of the trusted post step.** The IN boundary fixes that posting
+  is a separate trusted action on the developer-approved draft, never the
+  un-caged agent, and that its credential is scoped to posting alone. What
+  the PRD/DESIGN still pin: the affordance the developer touches (a niwa
+  subcommand, a printed ready-to-run command, or another host-side
+  gesture), where the trusted step runs, and how its narrowly-scoped
+  posting credential is provisioned and kept out of the contained env.
+- **The per-run staging bound's value.** The IN boundary fixes that a
+  minimal bound exists and fails safe; the PRD pins the exact floor
+  (one-at-a-time versus a small fixed cap) for this first version.
 
 ## References
 
