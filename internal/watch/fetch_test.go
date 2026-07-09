@@ -65,7 +65,7 @@ func TestFetchPRHead_CheckoutIsFaithfulAndFilterNeutered(t *testing.T) {
 	src, sha := makeSourceRepo(t)
 
 	dst := filepath.Join(t.TempDir(), "checkout")
-	if err := FetchPRHead(context.Background(), src, sha, dst); err != nil {
+	if err := FetchPRHead(context.Background(), src, sha, dst, ""); err != nil {
 		t.Fatalf("FetchPRHead: %v", err)
 	}
 
@@ -87,7 +87,7 @@ func TestFetchPRHead_CheckoutIsFaithfulAndFilterNeutered(t *testing.T) {
 
 func TestFetchPRHead_RejectsMalformedSHA(t *testing.T) {
 	for _, bad := range []string{"", "HEAD", "not-hex", "../../etc", "$(rm -rf)", "abc"} {
-		if err := FetchPRHead(context.Background(), "https://example.test/r.git", bad, t.TempDir()); err == nil {
+		if err := FetchPRHead(context.Background(), "https://example.test/r.git", bad, t.TempDir(), ""); err == nil {
 			t.Errorf("FetchPRHead accepted malformed SHA %q", bad)
 		}
 	}

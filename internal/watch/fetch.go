@@ -48,8 +48,11 @@ var gitHardeningConfig = []string{
 // file from the reviewed tree). The agent then reads a faithful, ordinary file
 // tree.
 //
-// sha must be a validated commit SHA. checkoutDir is created fresh.
-func FetchPRHead(ctx context.Context, remoteURL, sha, checkoutDir string) error {
+// sha must be a validated commit SHA. checkoutDir is created fresh. token, when
+// non-empty, authenticates the fetch to a private repo via an HTTP auth header
+// (the fetch is trusted niwa code and legitimately needs repo read access; the
+// token is passed to git, never into the contained session's environment).
+func FetchPRHead(ctx context.Context, remoteURL, sha, checkoutDir, token string) error {
 	if !commitSHAPattern.MatchString(sha) {
 		return fmt.Errorf("fetch: refusing malformed commit SHA %q", sha)
 	}
@@ -75,8 +78,13 @@ func FetchPRHead(ctx context.Context, remoteURL, sha, checkoutDir string) error 
 	}
 	// 2. fetch the exact SHA as inert objects. --no-tags and
 	//    --no-recurse-submodules keep the fetch from following anything beyond
-	//    the requested object.
-	fetchArgs := append(append([]string{}, gitHardeningConfig...),
+	//    the requested object. When a token is supplied, an HTTP auth header
+	//    authenticates the fetch to a private repo.
+	fetchArgs := append([]string{}, gitHardeningConfig...)
+	if token != "" {
+		fetchArgs = append(fetchArgs, "-c", "http.extraheader=Authorization: Bearer "+token)
+	}
+	fetchArgs = append(fetchArgs,
 		"fetch", "--no-tags", "--no-recurse-submodules", "--depth", "1", remoteURL, sha)
 	if err := runGit(ctx, checkoutDir, env, fetchArgs...); err != nil {
 		return fmt.Errorf("fetch: git fetch %s: %w", sha, err)
