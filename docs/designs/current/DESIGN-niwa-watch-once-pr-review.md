@@ -1,5 +1,5 @@
 ---
-status: Proposed
+status: Accepted
 upstream: docs/prds/PRD-niwa-watch-once-pr-review.md
 problem: |
   niwa dispatch is a pull verb that launches a background worker inheriting
@@ -31,7 +31,7 @@ rationale: |
 
 ## Status
 
-Proposed
+Accepted
 
 Technical design for the first version of proactive PR-review dispatch in
 niwa, implementing the Accepted PRD. Scoped to a single-PR change in the
@@ -123,13 +123,21 @@ existing per-instance `.claude/settings.json` write/merge
   / repo hooks can run, and submodule recursion fetches attacker URLs. The
   fetch step therefore MUST: fetch a specific commit SHA (not follow refs
   arbitrarily); run with hooks disabled, LFS smudge disabled
-  (`GIT_LFS_SKIP_SMUDGE=1` and no `filter.lfs` invocation), submodule
-  recursion off, `protocol.ext`/`protocol.file` disabled, and an isolated
-  gitconfig (`GIT_CONFIG_NOSYSTEM=1`, `HOME` pointed away from the
-  developer's gitconfig for the fetch); and expose the tree to the session
-  by reading blobs by SHA / using a bare-style object store rather than a
-  working-tree checkout that honors filters. The agent reads content but
-  no checkout-time program runs.
+  (`GIT_LFS_SKIP_SMUDGE=1`, `filter.lfs.smudge`/`.process` unset), submodule
+  recursion off, `protocol.ext`/`protocol.file` disabled, an empty
+  `core.attributesFile`, and an isolated gitconfig (`GIT_CONFIG_NOSYSTEM=1`,
+  `HOME` pointed away from the developer's gitconfig for the fetch).
+
+  **Exposure primitive (chosen concretely):** a **filter-neutered checkout**
+  of the fetched SHA into a working tree the agent reads as ordinary files
+  -- with the git settings above making the checkout populate raw blob
+  contents (LFS pointer files, no smudge, no filter/hook execution). This is
+  preferred over `git archive` (which honors `.gitattributes export-ignore`,
+  letting an attacker hide a malicious file from the reviewed tree while it
+  stays in the merged PR) and over a bare object store the agent would have
+  to `git show` (which contradicts the "read the local checkout" prompt).
+  The checkout gives the agent a faithful, ordinary file tree and runs no
+  checkout-time program. The prompt and data flow refer to this checkout.
 - **Option 2B (rejected): allow `github.com` egress in the session** so the
   agent can clone/fetch the PR itself. Rejected because an allowed host is
   an exfiltration channel: an injected agent could push to an
@@ -153,14 +161,35 @@ existing per-instance `.claude/settings.json` write/merge
   credential commonly lives on *disk* under the developer's home directory
   (`~/.config/gh/hosts.yml`, `~/.netrc`, `~/.ssh/` plus a forwarded
   `SSH_AUTH_SOCK`). Handing the session the real `HOME` would reintroduce
-  the very credential the env scrub removed. So the contained session runs
-  with `HOME` set to a scratch directory inside its instance (no developer
-  dotfiles), `SSH_AUTH_SOCK` and `GH_*`/`GITHUB_*` excluded, and the OS
-  sandbox's filesystem policy denying reads outside the clone/instance in
-  any case (R7 write-scoping generalized to reads of credential paths). The
-  canary-absence test (PRD AC12) covers `GITHUB_TOKEN`, `GH_TOKEN`,
-  `SSH_AUTH_SOCK`, and a planted `~/.netrc`/`~/.config/gh` sentinel, not
-  just one env var.
+  the very credential the env scrub removed. The **primary guard is a
+  synthetic `HOME`** -- set to a scratch directory inside the instance with
+  no developer dotfiles -- so the credential files are simply not present at
+  the paths tools look for; this is an allowlist-shaped (fail-closed) guard,
+  not a path denylist (which would share the fail-open weakness Option 3B
+  rejects). `SSH_AUTH_SOCK` and `GH_*`/`GITHUB_*` are also excluded from the
+  env. The sandbox's filesystem policy still applies, but note it cannot
+  literally "deny all reads outside the clone" -- the session needs
+  `/usr/bin`, shared libraries, and locale data to run; the guarantee is
+  that *developer credentials* are unreachable (synthetic HOME), not that
+  the filesystem is empty.
+
+  The one secret the session legitimately holds is the **model API
+  credential** (it must reach the model to function). That is acceptable
+  only because the sandbox holds: with no tool egress, the session cannot
+  exfiltrate even the credential it carries. If the sandbox were bypassed,
+  this credential would be exposed -- another reason the sandbox enforcement
+  must be *verified live*, not assumed (see Security Considerations).
+
+  The canary-absence test (PRD AC12) covers `GITHUB_TOKEN`, `GH_TOKEN`,
+  `SSH_AUTH_SOCK`, and a planted `~/.netrc`/`~/.config/gh` sentinel under the
+  real home, not just one env var.
+
+  **Writable region.** The agent must write its drafted review, so the
+  sandbox's write scope is the **instance directory** (which contains the
+  clone), and the draft lands at `<instanceRoot>/watch-review-draft.md` --
+  outside the clone's working tree so it does not pollute the reviewed repo.
+  (This reconciles the draft location with the write scope; R7's
+  "writes scoped to its clone" is realized as "scoped to its instance.")
 - **Option 3B (rejected): denylist known-sensitive variables** out of
   `os.Environ()`. Rejected because a denylist is unbounded and fails open:
   any secret the list does not anticipate leaks through. An allowlist fails
@@ -218,26 +247,46 @@ existing per-instance `.claude/settings.json` write/merge
 
 ### Decision 7 -- Fail-closed detection
 
-- **Option 7A (chosen): preflight the containment, then re-verify per
-  instance immediately before launch.** Two checkpoints, both fail-closed:
+  **The boundary is delegated to the harness -- so it must be *verified*,
+  not assumed.** niwa has no OS sandbox of its own; egress denial and the
+  fail-closed permission mode are enforced by the Claude Code harness's
+  `sandbox.*` settings. The design therefore depends on a harness version
+  that (a) supports `sandbox.enabled` + `sandbox.network.allowedDomains`,
+  (b) treats an **empty** `allowedDomains` as *deny-all* (not allow-all),
+  and (c) actually creates and enforces the sandbox for a `--bg --detach`
+  launch. These are assumptions, and a silent inversion (empty read as
+  allow-all, or the sandbox failing to start and the session running
+  uncontained with only a warning) would pass every settings-shaped check.
+  So verification is layered and fail-closed:
+
+- **Option 7A (chosen): preflight, re-verify the effective settings, and
+  prove enforcement live.** Three checkpoints:
   - *Preflight (before any instance is created):* refuse on an unsupported
     platform (`GOOS == "windows"`) **and** actively probe that the OS
     sandbox can be created now -- not merely that the OS is nominally
-    supported -- so a missing/broken sandbox binary or a kernel that denies
-    the sandbox surfaces as a refusal rather than an uncontained launch.
-  - *Post-merge re-verification (per instance, immediately before `claude
-    --bg`):* because the containment lives in a *merged*
-    `.claude/settings.json`, niwa re-reads the final merged document for
-    that specific instance and asserts the sandbox stanza
-    (`sandbox.enabled: true`, empty `allowedDomains`, fail-closed permission
-    mode) is present and was not dropped or overridden by the merge. If the
-    assertion fails, that PR is not launched (and not recorded handled).
-  On either failure `watch --once` prints the reason to stderr and exits
-  non-zero.
+    supported. Record the minimum harness capability required and refuse if
+    absent.
+  - *Effective-settings re-verification (per instance, before launch):* the
+    containment lives in a *merged* `.claude/settings.json`, and the harness
+    applies its own downstream merge (managed/enterprise settings, and the
+    `--settings` flag `niwa dispatch` already injects for remote control at
+    high precedence). niwa must both re-read the merged instance file to
+    confirm the sandbox stanza survived *and* ensure its own `--settings`
+    injection does not relax `sandbox.*`. Where niwa cannot observe the
+    harness's final merge, it must not silently assume the stanza wins.
+  - *Live enforcement proof (the real check):* settings presence does not
+    prove the sandbox is enforcing. The adversarial acceptance test
+    (Implementation step 6) attempts **actual egress** from inside the
+    session -- both a domain connection and a **raw socket to a literal IP**
+    -- and asserts both fail. This live attempt is what distinguishes
+    deny-all from a silently-inverted allow-all and a proxy-only egress path
+    (where a raw socket could escape) from a default-deny network namespace.
+  On any preflight/re-verify failure `watch --once` prints the reason to
+  stderr and exits non-zero; the live proof gates release, not each run.
 - **Option 7B (rejected): dispatch, then check.** Rejected because a session
   could reach a runnable state uncontained before the check fires; the
-  preflight-plus-re-verify guarantees no uncontained session is ever
-  launched.
+  preflight-plus-re-verify-plus-live-proof layering guarantees no
+  uncontained session is silently trusted.
 
 ## Decision Outcome
 
@@ -250,7 +299,8 @@ poll-and-dispatch pass:
    `user-review-requested:<login>`; intersect the results with the
    workspace's repos (Decision 4).
 3. **Dedup + bound.** Drop PRs already in the handled-set; order the rest
-   oldest-request-first and take at most the per-run bound (default 3).
+   by PR `created_at` (oldest first -- a deterministic key available from
+   the single search) and take at most the per-run bound (default 3).
 4. **Per selected PR:** provision an instance (reusing dispatch's
    provisioning); pre-fetch the PR head into the clone with the trusted CLI
    (Decision 2); merge the no-egress sandbox profile into the instance's
@@ -274,35 +324,53 @@ and posts it via the GitHub API from the trusted context (Decision 6);
 - **`internal/cli/watch.go` (new).** Registers `watchCmd` with `--once` and
   the `post`/`discard` subcommands via `init()` + `rootCmd.AddCommand`.
   Orchestrates the pass above.
-- **`internal/github` (extended).** A new client method,
-  `SearchReviewRequestedPRs(ctx, login) ([]PRRef, error)`, wrapping
-  `GET /search/issues`, plus `CurrentLogin(ctx) (string, error)` wrapping
-  `GET /user`. `PRRef{Owner, Repo, Number, URL, RequestedAt}`. Auth reuses
+- **`internal/github` (extended).** Three net-new client methods (the
+  client has only `ListRepos`/`GetRepo` today): `CurrentLogin(ctx)
+  (string, error)` wrapping `GET /user`; `SearchReviewRequestedPRs(ctx,
+  login) ([]PRRef, error)` wrapping `GET /search/issues`; and
+  `CreateReview(ctx, owner, repo, number int, body, event string) error`
+  wrapping `POST /repos/{owner}/{repo}/pulls/{number}/reviews` for the
+  trusted post step, where `event` is supplied by trusted niwa code (default
+  `COMMENT`) and never read from the draft. `PRRef{Owner, Repo, Number, URL,
+  CreatedAt}` -- `CreatedAt` is the PR's `created_at` from the search
+  payload (the review-*request* time is not in that payload; ordering uses
+  `created_at` as a deterministic, single-call proxy). Auth reuses
   `resolveGitHubToken` and `NewAPIClient`.
 - **Containment on the dispatch path (net-new dispatch surface).**
-  - A containment-profile builder that produces the settings fragment
+  - A containment-profile builder producing the sandbox settings fragment
     (`sandbox.enabled: true`, `sandbox.network.allowedDomains: []`,
-    fail-closed permission mode) merged into the instance settings via the
-    existing merge seam.
-  - An env-allowlist parameter threaded into the launch seam
-    (`dispatchLaunch`), so the watch path launches with
-    `cmd.Env = allowlisted(os.Environ())` instead of the full environment.
-    The ordinary dispatch path is unchanged.
-  - A trusted PR-head pre-fetch step run against the provisioned clone
-    before launch.
+    fail-closed permission mode), applied to the instance settings via the
+    same merge helper `applier.Create` uses (`MergeInstanceOverrides` /
+    the root-settings writer) -- watch is a *second writer* to
+    `.claude/settings.json`, ordered Create -> watch-merge -> re-verify ->
+    launch.
+  - An env-allowlist on the launch seam. The launch func gains an options
+    parameter, e.g. `dispatchLaunch(ctx, instanceDir, prompt, passthrough,
+    LaunchOpts)` where `LaunchOpts{EnvOverride []string}`; `EnvOverride ==
+    nil` preserves today's `cmd.Env = os.Environ()` so the ordinary dispatch
+    path is unchanged, and the watch path passes the allowlisted env
+    (including the synthetic `HOME`).
+  - A trusted, hardened PR-head fetch + filter-neutered checkout (Decision
+    2) run before launch.
 - **Handled-set store.** Read/append helpers over
   `<workspaceRoot>/.niwa/watch-handled` (flat `owner/repo#number` lines).
-- **Staged-review record.** At dispatch, niwa persists `{handle, owner,
-  repo, number, url, draftPath}` alongside the existing `SessionMapping`
-  so `post`/`discard` can resolve a handle to its PR and draft.
+- **Staged-review record + handle.** The **handle is the dispatch session
+  short id** shown in the agent view (the `shortID` from the existing
+  `SessionMapping` capture). At dispatch niwa writes a small record
+  `{handle, owner, repo, number, url, draftPath}` to
+  `<workspaceRoot>/.niwa/watch/<handle>.json`; `post <handle>` /
+  `discard <handle>` load it to resolve the PR and draft. The record schema
+  and store are an explicit early deliverable (the post/discard phase
+  depends on them).
 
 ### The metadata-only prompt
 
 Assembled by a pure function of the `PRRef` (satisfying the determinism
 requirement): a fixed instruction template interpolating only `owner/repo`,
 the PR number, and the PR URL. It instructs the agent to read the PR (title,
-body, diff, linked issue, CI status) from its local clone at the pre-fetched
-ref, treat all of it as untrusted, write its review to the known draft path,
+body, diff, linked issue, CI status) from its filter-neutered local checkout
+of the pre-fetched PR head, treat all of it as untrusted, write its review to
+the known draft path,
 and stop before posting. No title, body, diff, or author name is
 interpolated.
 
@@ -323,12 +391,13 @@ watch --once
         |
   intersect with workspace repos (config.Discover)
         |
-  minus handled-set; order oldest-first; take <= bound
+  minus handled-set; order by created_at (oldest first); take <= bound
         |
   for each PR (trusted CLI, outside sandbox):
      provision instance (applier.Create)
-     git fetch PR head into clone            <- untrusted content as data
+     fetch PR head SHA + filter-neutered checkout   <- untrusted content as data
      merge no-egress sandbox profile into instance .claude/settings.json
+     re-verify merged sandbox stanza
      write metadata-only prompt
      launch claude --bg  --detach  with allowlisted env  (NO GitHub token)
      persist staged-review record; append handled-set (on success)
@@ -342,31 +411,46 @@ watch --once
 
 ## Implementation Approach
 
-Phased so each step is independently testable:
+Phased so each step is independently testable. The handled-set and
+staged-review record schemas are defined up front (step 0) since later steps
+depend on them.
 
-1. **GitHub poll.** Add `CurrentLogin` and `SearchReviewRequestedPRs` to the
-   client; unit-test against the existing fake server (`NIWA_GITHUB_API_URL`).
+0. **State schemas.** Define the handled-set format (`owner/repo#number`
+   lines) and the staged-review record (`{handle, owner, repo, number, url,
+   draftPath}` at `.niwa/watch/<handle>.json`), with read/write helpers.
+1. **GitHub poll.** Add `CurrentLogin`, `SearchReviewRequestedPRs`, and
+   `CreateReview` to the client; unit-test against the existing fake server
+   (`NIWA_GITHUB_API_URL`).
 2. **Workspace intersection + dedup + bound.** Enumerate workspace repos,
-   intersect, apply the handled-set and the oldest-first bound. Pure,
-   table-testable logic.
-3. **Containment surface.** Add the env-allowlist parameter to the launch
-   seam (with synthetic `HOME`) and the containment-profile builder +
-   settings merge + per-instance post-merge re-verification; add the
-   hardened PR-head fetch (SHA, no filter-honoring checkout, LFS/hooks/
-   submodules/ext-protocols disabled, isolated gitconfig). Unit-test the
-   allowlist (subset + canary absence for `GITHUB_TOKEN`/`GH_TOKEN`/
-   `SSH_AUTH_SOCK` and an on-disk `~/.netrc`/`~/.config/gh` sentinel), the
-   merged settings document, and that a `.gitattributes`+`filter=lfs`
-   fixture triggers no smudge during fetch.
-4. **`watch --once` orchestration.** Wire poll -> select -> per-PR
-   provision/fetch/merge/launch -> record. Fail-closed preflight and
-   fail-loud error paths.
-5. **Post/discard subcommands.** Resolve handle -> staged-review record;
-   post via API from the trusted context; discard records handled.
-6. **Adversarial test.** A hostile-PR fixture whose title/body/diff attempt
-   egress/push/exfiltration; assert the outbound actions, executed directly
-   in the session, are denied at the OS/tool layer (see Security
-   Considerations for the test shape).
+   intersect, apply the handled-set and the `created_at`-ordered bound.
+   Pure, table-testable logic.
+3. **Hardened PR-head fetch (isolated -- the sharpest risk).** Fetch by SHA
+   + filter-neutered checkout (LFS smudge / hooks / submodule recursion /
+   ext-protocols disabled, empty `core.attributesFile`, isolated gitconfig).
+   Test against fixtures: a `.gitattributes`+`filter=lfs` PR triggers no
+   smudge and no egress during fetch; an `export-ignore`-marked malicious
+   file is still present in the checked-out tree (not hidden).
+4. **Containment surface.** Add the `LaunchOpts{EnvOverride}` seam (nil =
+   unchanged) with the synthetic `HOME`; the containment-profile builder +
+   settings second-write via the existing merge helper + per-instance
+   re-verification. Unit-test the allowlist (subset + canary absence for
+   `GITHUB_TOKEN`/`GH_TOKEN`/`SSH_AUTH_SOCK` and an on-disk
+   `~/.netrc`/`~/.config/gh` sentinel) and the merged settings document.
+5. **`watch --once` orchestration.** Wire preflight -> poll -> select ->
+   per-PR provision/fetch/merge/re-verify/launch -> record. Fail-closed
+   preflight and fail-loud error paths.
+6. **Post/discard subcommands.** Resolve handle -> staged-review record;
+   post via `CreateReview` with the `event` fixed in code; discard records
+   handled.
+7. **Adversarial / live-enforcement test (the boundary proof).** A hostile-PR
+   fixture whose title/body/diff attempt egress, push, and exfiltration.
+   From inside the running contained session (bypassing the model), the test
+   attempts **real outbound network** -- both a connection to a domain and a
+   **raw socket to a literal IP** -- and a write outside the instance, and
+   asserts each fails at the OS layer (connection blocked / EPERM). This live
+   attempt, not a settings-file assertion, is what proves empty-allowlist =
+   deny-all and that the sandbox is actually enforcing for the `--bg
+   --detach` launch; it gates release.
 
 ## Security Considerations
 
@@ -387,15 +471,26 @@ behalf (see Decision 2). Inside the session the content is read but never
 treated as instructions; the session cannot act on it because it has no
 egress and no privileged credentials.
 
-**Permission scope / network.** Containment is the OS-level sandbox
-(`sandbox.enabled`, empty `sandbox.network.allowedDomains`, fail-closed
-permission mode) applied via the instance settings merge and re-verified
-per instance before launch (Decision 7). The empty allowlist blocks the
-agent's *tool* egress (Bash and its subprocesses, alternate binaries,
-write-then-run) at the OS layer; the Claude Code harness's own model-API
-channel is separate and is what keeps the session runnable. Denial is
-therefore the sandbox's, not the model's -- the adversarial test asserts
-this by executing outbound actions directly in the session (PRD AC9/AC14).
+**Permission scope / network -- and the delegated dependency.** Containment
+is the OS-level sandbox (`sandbox.enabled`, empty
+`sandbox.network.allowedDomains`, fail-closed permission mode) applied via
+the instance settings merge and re-verified per instance before launch
+(Decision 7). **niwa does not implement the sandbox; it delegates to the
+Claude Code harness.** The whole boundary therefore rests on the harness
+(a) treating an empty allowlist as deny-all, (b) actually creating and
+enforcing the sandbox for the `--bg --detach` launch, and (c) not letting a
+downstream settings merge (managed settings, or the `--settings` remote-
+control flag `niwa dispatch` injects) relax `sandbox.*`. These are
+assumptions a settings-shaped check cannot confirm -- a silent inversion
+would pass every such check -- so the design **proves enforcement live**:
+the release-gating adversarial test attempts real egress (a domain
+connection and a raw socket to a literal IP) and an out-of-instance write
+from inside the session, and requires each to fail at the OS layer (Decision
+7, Implementation step 7; PRD AC9/AC14). Denial is thus verified to be the
+sandbox's, not the model's. (The harness's own model-API endpoint remains
+reachable -- that channel is what runs the session -- so "empty allowlist"
+means "no *attacker-useful* egress," not "no packets at all"; it is not an
+exfiltration sink.)
 
 **Credential scoping.** The session environment is an allowlist (model auth
 + `PATH`/locale + a synthetic `HOME`); the GitHub token, `SSH_AUTH_SOCK`,
@@ -421,26 +516,38 @@ Code session reading a repo.
 - **Windows.** The OS sandbox is unavailable on Windows; the design fails
   closed there (refuses to dispatch) rather than running uncontained. Windows
   self-hosters get no staged reviews until a later version addresses it.
-- **Proxy TLS termination / domain-fronting.** The sandbox's egress proxy
-  may not TLS-terminate by default, leaving a narrow SNI-evasion seam. With
-  an empty allowlist the exposure is limited (there is no allowed host to
-  front through for the agent's tools), but it is recorded, not closed.
+- **Egress mechanism (proxy vs network namespace).** If the harness enforces
+  egress with a default-deny network namespace, raw sockets are blocked and
+  the residual is only a narrow SNI/domain-fronting seam through any allowed
+  host. If it enforces egress proxy-only, a subprocess opening a raw socket
+  to an arbitrary IP could escape entirely -- a hole, not a seam. The live
+  raw-socket test (Implementation step 7) is what surfaces which regime is in
+  force; the feature requires the deny-all-network posture and treats a
+  passing raw-socket escape as a release blocker, not an accepted residual.
 - **Model-channel cost.** The always-available model channel means a
   hostile PR can still consume model tokens (a cost/DoS vector, not an
   exfiltration one). The per-run staging bound and the handled-set limit the
   blast radius; richer cost controls are deferred.
-- **Draft text.** The drafted review text is authored by the untrusted
-  session and could contain attacker-influenced prose. The approving
-  developer reads it before the trusted step posts it -- the human is the
-  trust checkpoint for the draft's *content*, while containment covers the
-  session's *actions*.
+- **Draft text is a second-order channel.** The drafted review text is
+  authored by the untrusted session and could carry attacker-influenced
+  prose. The approving developer reads it before the trusted step posts it
+  -- the human is the trust checkpoint for the draft's *content*, while
+  containment covers the session's *actions*. This assumption is load-bearing
+  and specifically means the draft must NOT be auto-ingested by another agent
+  without a human read; the `post` step already treats the draft as inert
+  data (event fixed in code, body opaque, path validated), but a future
+  automated consumer of the draft would reopen this channel.
 
 ## Consequences
 
 ### Positive
 
 - The dispatch decision is injection-proof by construction: no
-  author-controlled text enters the prompt.
+  author-controlled text enters the prompt. The workspace intersection
+  strengthens this -- only known-good `owner/repo` identifiers from the
+  developer's own workspace reach the prompt, so the sole attacker-chosen
+  value is the PR number (an integer), leaving no room to inject text via
+  the identifiers themselves.
 - The review session cannot egress (empty allowlist) and cannot act with
   the developer's GitHub credentials (token absent from its env), so a
   hostile PR is contained at the OS/process layer rather than by the model.
