@@ -1,5 +1,5 @@
 ---
-status: Accepted
+status: In Progress
 problem: |
   niwa dispatch is a pull verb: a developer must notice a PR review is
   waiting, hand it off, and wait for the agent to read and draft. Nothing
@@ -26,7 +26,7 @@ motivating_context: |
 
 ## Status
 
-Accepted
+In Progress
 
 Requirements for the first version of proactive PR-review dispatch in niwa.
 Upstream framing is the Accepted BRIEF. This PRD states WHAT the feature
