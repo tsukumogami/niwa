@@ -108,12 +108,28 @@ existing per-instance `.claude/settings.json` write/merge
 ### Decision 2 -- How the untrusted PR content reaches the clone under no egress
 
 - **Option 2A (chosen): niwa pre-fetches the PR head during provisioning,
-  outside the sandbox; the session runs with an empty egress allowlist.**
-  The trusted CLI fetches the PR's head ref into the clone as part of
-  setup (a `git fetch` of a ref is a data operation that does not execute
-  PR content). The review session then reads local files and needs no
-  network of its own, so `allowedDomains` is genuinely empty for the
-  agent's tools.
+  outside the sandbox, as inert data; the session runs with an empty egress
+  allowlist.** The trusted CLI fetches the PR's head **commit SHA** and
+  makes its tree available to the session **without a filter-honoring
+  checkout**, then the review session reads local files and needs no network
+  of its own, so `allowedDomains` is genuinely empty for the agent's tools.
+
+  This fetch is itself an attack surface and must be hardened, because it
+  runs in trusted niwa code *before* the sandbox boundary exists. A naive
+  `git fetch` + checkout of attacker content can execute code and egress on
+  its own: a `.gitattributes` marking a path `filter=lfs` triggers a
+  `git-lfs` smudge (arbitrary fetch to an attacker-named URL), custom filter
+  drivers route through the developer's ambient gitconfig, `core.hooksPath`
+  / repo hooks can run, and submodule recursion fetches attacker URLs. The
+  fetch step therefore MUST: fetch a specific commit SHA (not follow refs
+  arbitrarily); run with hooks disabled, LFS smudge disabled
+  (`GIT_LFS_SKIP_SMUDGE=1` and no `filter.lfs` invocation), submodule
+  recursion off, `protocol.ext`/`protocol.file` disabled, and an isolated
+  gitconfig (`GIT_CONFIG_NOSYSTEM=1`, `HOME` pointed away from the
+  developer's gitconfig for the fetch); and expose the tree to the session
+  by reading blobs by SHA / using a bare-style object store rather than a
+  working-tree checkout that honors filters. The agent reads content but
+  no checkout-time program runs.
 - **Option 2B (rejected): allow `github.com` egress in the session** so the
   agent can clone/fetch the PR itself. Rejected because an allowed host is
   an exfiltration channel: an injected agent could push to an
@@ -129,8 +145,22 @@ existing per-instance `.claude/settings.json` write/merge
 
 - **Option 3A (chosen): build `cmd.Env` from an explicit allowlist** for the
   watch launch path -- the Claude/Anthropic auth the model channel needs
-  plus `PATH`/`HOME`/locale -- and nothing else. The GitHub token and every
-  other inherited secret are absent.
+  plus `PATH`/locale -- and a **synthetic `HOME`**, not the developer's.
+  The GitHub token and every other inherited secret are absent from the
+  environment.
+
+  Scrubbing the environment is necessary but not sufficient: the GitHub
+  credential commonly lives on *disk* under the developer's home directory
+  (`~/.config/gh/hosts.yml`, `~/.netrc`, `~/.ssh/` plus a forwarded
+  `SSH_AUTH_SOCK`). Handing the session the real `HOME` would reintroduce
+  the very credential the env scrub removed. So the contained session runs
+  with `HOME` set to a scratch directory inside its instance (no developer
+  dotfiles), `SSH_AUTH_SOCK` and `GH_*`/`GITHUB_*` excluded, and the OS
+  sandbox's filesystem policy denying reads outside the clone/instance in
+  any case (R7 write-scoping generalized to reads of credential paths). The
+  canary-absence test (PRD AC12) covers `GITHUB_TOKEN`, `GH_TOKEN`,
+  `SSH_AUTH_SOCK`, and a planted `~/.netrc`/`~/.config/gh` sentinel, not
+  just one env var.
 - **Option 3B (rejected): denylist known-sensitive variables** out of
   `os.Environ()`. Rejected because a denylist is unbounded and fails open:
   any secret the list does not anticipate leaks through. An allowlist fails
@@ -169,6 +199,17 @@ existing per-instance `.claude/settings.json` write/merge
   PR coordinates niwa persisted at dispatch, and posts via the GitHub API
   with the dispatcher's token. The token lives only in this trusted path,
   never in the contained session.
+
+  The draft is authored by the untrusted session, so the post step treats
+  it as **inert data, never as control**: the review `event` (the field
+  that would make a review APPROVE / REQUEST_CHANGES / COMMENT) is fixed by
+  trusted code -- it is **not** read from the draft -- and defaults to a
+  non-approving `COMMENT`, so a malicious draft cannot dictate an approval;
+  a stronger disposition, if offered, is an explicit developer choice on the
+  `post` command, not something the draft can set. The draft body is passed
+  as an opaque API body. Before reading, niwa validates that the recorded
+  `draftPath` resolves inside the instance root (no traversal) and that the
+  handle maps to a known staged-review record.
 - **Option 6B (rejected): print a ready-to-run `gh pr review` command** for
   the developer to paste. Rejected because it makes "post it" a copy step
   rather than one gesture and pushes credential handling onto the developer;
@@ -177,14 +218,26 @@ existing per-instance `.claude/settings.json` write/merge
 
 ### Decision 7 -- Fail-closed detection
 
-- **Option 7A (chosen): preflight the containment before provisioning.**
-  If the platform cannot enforce the OS sandbox (e.g. `GOOS == "windows"`)
-  or the sandbox settings cannot be applied, `watch --once` refuses to
-  dispatch, prints the reason to stderr, and exits non-zero -- before any
-  instance is created.
+- **Option 7A (chosen): preflight the containment, then re-verify per
+  instance immediately before launch.** Two checkpoints, both fail-closed:
+  - *Preflight (before any instance is created):* refuse on an unsupported
+    platform (`GOOS == "windows"`) **and** actively probe that the OS
+    sandbox can be created now -- not merely that the OS is nominally
+    supported -- so a missing/broken sandbox binary or a kernel that denies
+    the sandbox surfaces as a refusal rather than an uncontained launch.
+  - *Post-merge re-verification (per instance, immediately before `claude
+    --bg`):* because the containment lives in a *merged*
+    `.claude/settings.json`, niwa re-reads the final merged document for
+    that specific instance and asserts the sandbox stanza
+    (`sandbox.enabled: true`, empty `allowedDomains`, fail-closed permission
+    mode) is present and was not dropped or overridden by the merge. If the
+    assertion fails, that PR is not launched (and not recorded handled).
+  On either failure `watch --once` prints the reason to stderr and exits
+  non-zero.
 - **Option 7B (rejected): dispatch, then check.** Rejected because a session
   could reach a runnable state uncontained before the check fires; the
-  preflight guarantees no uncontained session is ever launched.
+  preflight-plus-re-verify guarantees no uncontained session is ever
+  launched.
 
 ## Decision Outcome
 
@@ -297,9 +350,14 @@ Phased so each step is independently testable:
    intersect, apply the handled-set and the oldest-first bound. Pure,
    table-testable logic.
 3. **Containment surface.** Add the env-allowlist parameter to the launch
-   seam and the containment-profile builder + settings merge; add the
-   PR-head pre-fetch. Unit-test the allowlist (subset + canary absence) and
-   the merged settings document.
+   seam (with synthetic `HOME`) and the containment-profile builder +
+   settings merge + per-instance post-merge re-verification; add the
+   hardened PR-head fetch (SHA, no filter-honoring checkout, LFS/hooks/
+   submodules/ext-protocols disabled, isolated gitconfig). Unit-test the
+   allowlist (subset + canary absence for `GITHUB_TOKEN`/`GH_TOKEN`/
+   `SSH_AUTH_SOCK` and an on-disk `~/.netrc`/`~/.config/gh` sentinel), the
+   merged settings document, and that a `.gitattributes`+`filter=lfs`
+   fixture triggers no smudge during fetch.
 4. **`watch --once` orchestration.** Wire poll -> select -> per-PR
    provision/fetch/merge/launch -> record. Fail-closed preflight and
    fail-loud error paths.
@@ -312,7 +370,70 @@ Phased so each step is independently testable:
 
 ## Security Considerations
 
-*(Populated by the Phase 5 security review below.)*
+This feature exists to contain a remote-execution vector, so security is the
+design's center, not an appendix. A party who opens a PR requesting the
+developer's review is an untrusted author whose title/body/diff reach a
+session running with the developer's authority. The boundary must be
+deterministic.
+
+**External artifact handling.** The launch prompt carries only
+platform-vouched identifiers (repo, PR number, URL) -- no author-controlled
+text -- so the dispatch decision cannot be injected. The untrusted PR
+content is fetched by trusted niwa code as **inert data** (by commit SHA,
+no filter-honoring checkout, with LFS smudge, hooks, submodule recursion,
+and `protocol.ext`/`protocol.file` disabled and an isolated gitconfig), so
+fetching cannot execute checkout-time programs or egress on the attacker's
+behalf (see Decision 2). Inside the session the content is read but never
+treated as instructions; the session cannot act on it because it has no
+egress and no privileged credentials.
+
+**Permission scope / network.** Containment is the OS-level sandbox
+(`sandbox.enabled`, empty `sandbox.network.allowedDomains`, fail-closed
+permission mode) applied via the instance settings merge and re-verified
+per instance before launch (Decision 7). The empty allowlist blocks the
+agent's *tool* egress (Bash and its subprocesses, alternate binaries,
+write-then-run) at the OS layer; the Claude Code harness's own model-API
+channel is separate and is what keeps the session runnable. Denial is
+therefore the sandbox's, not the model's -- the adversarial test asserts
+this by executing outbound actions directly in the session (PRD AC9/AC14).
+
+**Credential scoping.** The session environment is an allowlist (model auth
++ `PATH`/locale + a synthetic `HOME`); the GitHub token, `SSH_AUTH_SOCK`,
+and `GH_*`/`GITHUB_*` are absent, and the synthetic `HOME` plus the
+sandbox's filesystem policy keep on-disk credentials (`~/.config/gh`,
+`~/.netrc`, `~/.ssh`) out of reach (Decision 3). The posting credential
+lives only in the out-of-band trusted `post` step; it never enters the
+contained session. The act boundary holds: the drafting session's
+containment is never lifted, and posting happens in a separate trusted
+context on a developer-approved draft, with the review disposition
+(`event`) fixed by trusted code so a hostile draft cannot force an approval
+(Decision 6).
+
+**Data exposure.** The persisted state (handled-set of `owner/repo#number`,
+staged-review records of PR coordinates + draft path) is low-sensitivity
+workspace metadata at rest under `.niwa/`; it contains no secrets. The PR's
+content does reach the model API by design (the review has to read it);
+that is inherent to reviewing and is the same trust posture as any Claude
+Code session reading a repo.
+
+**Accepted residual risks.**
+
+- **Windows.** The OS sandbox is unavailable on Windows; the design fails
+  closed there (refuses to dispatch) rather than running uncontained. Windows
+  self-hosters get no staged reviews until a later version addresses it.
+- **Proxy TLS termination / domain-fronting.** The sandbox's egress proxy
+  may not TLS-terminate by default, leaving a narrow SNI-evasion seam. With
+  an empty allowlist the exposure is limited (there is no allowed host to
+  front through for the agent's tools), but it is recorded, not closed.
+- **Model-channel cost.** The always-available model channel means a
+  hostile PR can still consume model tokens (a cost/DoS vector, not an
+  exfiltration one). The per-run staging bound and the handled-set limit the
+  blast radius; richer cost controls are deferred.
+- **Draft text.** The drafted review text is authored by the untrusted
+  session and could contain attacker-influenced prose. The approving
+  developer reads it before the trusted step posts it -- the human is the
+  trust checkpoint for the draft's *content*, while containment covers the
+  session's *actions*.
 
 ## Consequences
 
@@ -333,8 +454,11 @@ Phased so each step is independently testable:
 - Net-new GitHub client surface (search + user), a containment path, and
   two subcommands make this a sizeable single PR.
 - Pre-fetching the PR head means niwa's trusted code touches untrusted repo
-  content (as data); it must fetch without running repository-supplied
-  hooks.
+  content; getting this wrong (a filter-honoring checkout, LFS smudge, repo
+  hooks, submodule recursion) would execute attacker code *outside* the
+  sandbox. Decision 2 constrains the fetch to inert-data handling to close
+  that, but it is the sharpest implementation risk and carries a dedicated
+  test.
 - The empty egress allowlist means the agent cannot use `gh`/network tools;
   the prompt must direct it to the local clone, and some agent conveniences
   are unavailable in-session (acceptable, and the point).
