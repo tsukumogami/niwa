@@ -156,13 +156,24 @@ the developer personally stage work; team noise stays out of the inbox.
   it is the host that carries the directly-requested signal this feature
   keys on; other hosts (and niwa's broader cross-host reach) are later
   work, not an accidental omission.
-- A **mechanical, metadata-only** dispatch brief -- repo, PR number,
-  title, author, link, and the directly-requested fact -- with the diff
-  and PR body *never inlined*; the staged agent reads them in its own
-  clone after launch.
+- A **mechanical, metadata-only** dispatch prompt that carries only
+  platform-vouched structural identifiers -- the repo, the PR number, the
+  PR URL, and the fact that the developer is a directly-requested reviewer
+  -- plus fixed instructions. No externally-authored free text enters the
+  prompt: not the diff, not the PR body, and *not the PR title or author
+  name* (both are author-controlled). The staged agent reads the title,
+  body, diff, linked issue, and CI status in its own clone after launch,
+  treating all of it as untrusted. Keeping the prompt free of any
+  author-controlled text is what makes the dispatch decision itself
+  injection-proof -- a crafted PR can influence only reasoning inside the
+  sandbox, never what was dispatched or with what authority. (The
+  agent-view label likewise derives from the platform identifiers, e.g.
+  the repo and PR number, not the attacker-controlled title.)
 - Dispatching one contained review agent through the existing
-  `niwa dispatch`, staged to draft a review to a known location and halt
-  before posting.
+  `niwa dispatch`, always invoked with `--detach` (`-d`) so a single run
+  stages each review into the agent view and returns without attaching a
+  terminal to any staged session. The agent is staged to draft a review to
+  a known location and halt before posting.
 - An **enforced containment profile** on the dispatched session, treated
   as co-equal parts: (a) an OS-level no-egress sandbox with filesystem
   writes scoped to the clone and a fail-closed permission mode, and

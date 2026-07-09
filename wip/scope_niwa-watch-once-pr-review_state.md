@@ -1,7 +1,7 @@
 ---
 topic: niwa-watch-once-pr-review
 chain_started: 2026-07-09T15:33:59Z
-last_updated: 2026-07-09T16:33:59Z
+last_updated: 2026-07-09T17:00:04Z
 phase_pointer: phase-2
 visibility: Public
 exit: UNSET
@@ -17,8 +17,8 @@ chain_ran:
 child_snapshots:
   brief:
     status: Draft
-    content_hash: 2e00707c608c61fb66b56c52f17e52910d9c5757
-    captured_at: 2026-07-09T16:33:59Z
+    content_hash: 4ddbb65d5d8d1fbb515e19b64275ab68ed4b8d68
+    captured_at: 2026-07-09T17:00:04Z
 worktree_rebases: []
 # HARD APPROVAL GATE (dispatcher): /brief produced BRIEF in Draft; jury
 # all-PASS (content-quality + structural-format). Execution PAUSED here
