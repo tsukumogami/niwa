@@ -1,6 +1,6 @@
 ---
 schema: brief/v1
-status: Draft
+status: Accepted
 problem: |
   niwa dispatch is a pull verb: the developer must notice a PR review is
   waiting, decide to hand it off, and wait for an agent to read and draft.
@@ -26,14 +26,17 @@ motivating_context: |
 
 ## Status
 
-Draft
+Accepted
 
 Framing for the first, minimal version of proactive PR-review dispatch in
-niwa. The downstream PRD owns the requirements (the exact poll query, the
-metadata brief's fields, the handled-set contract); the downstream DESIGN
-owns the architecture (where the containment profile is carried, the
-credential-scrub model). This BRIEF frames the problem, the outcome, the
-journeys, and the boundary.
+niwa. The two-reviewer jury (content-quality and structural-format)
+returned all-PASS, and the framing was ratified by the dispatcher. The
+downstream PRD owns the requirements (the exact poll query, the metadata
+prompt's fields, the handled-set contract, the trusted post step's shape,
+and the per-run staging bound's value); the downstream DESIGN owns the
+architecture (where the containment profile is carried, the credential-scrub
+model, and how the narrowly-scoped posting credential is provisioned). This
+BRIEF frames the problem, the outcome, the journeys, and the boundary.
 
 ## Problem Statement
 
@@ -242,31 +245,6 @@ the developer personally stage work; team noise stays out of the inbox.
   the same agent that read the PR can post -- this is explicitly rejected,
   not deferred. It would re-open the exact vector the containment closes.
   Posting only ever happens in the separate trusted step above.
-
-## Open Questions
-
-These defer framing details to the downstream PRD; none blocks the framing.
-
-- **Workspace-repo coverage of this first version.** Whether the poll
-  covers every repo in the workspace or a deliberately minimal set, and
-  how the workspace's repo list is enumerated for the intersection.
-- **Handled-set minimum contract.** Whether the flat handled-set is keyed
-  purely by stable PR identity, or also records the dispatch outcome --
-  the minimum the PRD pins for this first version, distinct from the
-  richer dedup state deferred to later work.
-- **Directly-requested qualifier semantics.** The precise semantics the
-  PRD fixes for "directly requested" (the user-scoped review-request
-  qualifier) so team-scoped requests are excluded deterministically.
-- **Shape of the trusted post step.** The IN boundary fixes that posting
-  is a separate trusted action on the developer-approved draft, never the
-  un-caged agent, and that its credential is scoped to posting alone. What
-  the PRD/DESIGN still pin: the affordance the developer touches (a niwa
-  subcommand, a printed ready-to-run command, or another host-side
-  gesture), where the trusted step runs, and how its narrowly-scoped
-  posting credential is provisioned and kept out of the contained env.
-- **The per-run staging bound's value.** The IN boundary fixes that a
-  minimal bound exists and fails safe; the PRD pins the exact floor
-  (one-at-a-time versus a small fixed cap) for this first version.
 
 ## References
 

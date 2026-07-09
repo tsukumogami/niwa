@@ -1,8 +1,10 @@
 ---
 topic: niwa-watch-once-pr-review
 chain_started: 2026-07-09T15:33:59Z
-last_updated: 2026-07-09T17:00:04Z
+last_updated: 2026-07-09T17:04:34Z
 phase_pointer: phase-2
+execution_mode: auto
+plan_execution_mode: single-pr
 visibility: Public
 exit: UNSET
 exit_artifacts: []
@@ -16,15 +18,16 @@ chain_ran:
   - brief
 child_snapshots:
   brief:
-    status: Draft
-    content_hash: 4ddbb65d5d8d1fbb515e19b64275ab68ed4b8d68
-    captured_at: 2026-07-09T17:00:04Z
+    status: Accepted
+    content_hash: 92a7aa6fca806bfa5f36ebc379539163cb33eb9f
+    captured_at: 2026-07-09T17:04:34Z
 worktree_rebases: []
 # HARD APPROVAL GATE (dispatcher): /brief produced BRIEF in Draft; jury
 # all-PASS (content-quality + structural-format). Execution PAUSED here
 # awaiting dispatcher approval before /prd, /design, /plan and the Accept
 # transition of the BRIEF. Sentinel cleared (child returned).
-paused_at_gate: brief
+brief_approved: true
+brief_approved_at: 2026-07-09T17:04:34Z
 # Dispatcher-imposed hard approval gate: produce BRIEF, then STOP for
 # human approval before invoking /prd, /design, /plan. See dispatch brief
 # at .niwa/dispatch-briefs/ed1-watch-once.md. Roadmap feature: ED1 of
