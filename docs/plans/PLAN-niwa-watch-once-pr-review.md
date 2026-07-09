@@ -1,6 +1,6 @@
 ---
 schema: plan/v1
-status: Draft
+status: Active
 execution_mode: single-pr
 upstream: docs/designs/current/DESIGN-niwa-watch-once-pr-review.md
 milestone: "niwa watch --once PR-review dispatch"
@@ -11,7 +11,7 @@ issue_count: 8
 
 ## Status
 
-Draft
+Active
 
 Single-PR plan decomposing the Accepted design into eight sequenced,
 independently-testable issues landing on one branch and PR.
@@ -121,7 +121,9 @@ enforcement test comes last as the boundary proof that gates release.
 - [ ] Fail-closed preflight: refuse (non-zero exit + stderr reason) when the OS sandbox cannot be enforced (e.g. `GOOS == "windows"` or the sandbox cannot be created) before any instance is created (PRD R9, AC13).
 - [ ] Per selected PR: provision the instance, run the hardened fetch (Issue 4), merge + re-verify the containment (Issue 5), assemble a metadata-only prompt (only `owner/repo`, PR number, URL + fixed instructions; a pure function -- no title/body/diff/author), and launch `claude --bg` with `--detach` and the allowlisted env; persist the staged-review record and append the handled-set only on success (PRD R4, R5, R6, R11, AC1, AC2, AC7, AC18).
 - [ ] A staged session is discoverable in the Claude Code agent view after a run (PRD R13, AC20).
-- [ ] Empty poll: print a "nothing to stage" message and exit zero (PRD AC6). Poll/dispatch failure: print the error, exit non-zero, and do not record the affected PR as handled (PRD R12, AC17).
+- [ ] Empty poll (no matching PRs): print a "nothing to stage" message and exit zero (PRD AC6).
+- [ ] Poll failure (GitHub query error, missing/expired auth, host unreachable, rate limit): print an error naming the failure, exit non-zero, and record nothing -- distinct from the empty-success path (PRD R12, AC19).
+- [ ] Dispatch failure for a selected PR: print the error, exit non-zero, and do not record that PR as handled so a later run re-attempts it (PRD R12, AC17).
 
 **Dependencies**: Blocked by <<ISSUE:1>>, <<ISSUE:2>>, <<ISSUE:3>>, <<ISSUE:4>>, <<ISSUE:5>>
 
@@ -150,6 +152,7 @@ enforcement test comes last as the boundary proof that gates release.
 - [ ] A hostile-PR fixture whose title/body/diff attempt `curl ... | sh`, a `git push`, and secret exfiltration is dispatched under the containment profile.
 - [ ] From inside the running session (bypassing the model), the test attempts real outbound network -- a connection to a domain AND a raw socket to a literal IP -- and asserts each fails at the OS layer (connection blocked / EPERM) (PRD AC9, AC14; design Decision 7, Security Considerations).
 - [ ] From inside the session, a write outside the instance directory is denied (PRD R7, AC10).
+- [ ] From inside the unattended session, a tool action Claude Code would normally gate behind an approval prompt (e.g. a command not on any allow-list) is denied rather than auto-approved -- behaviorally verifying the fail-closed permission mode, the third leg of R7 (PRD R7, AC11).
 - [ ] The test is wired so a passing egress/raw-socket escape fails the build (it gates release), and documents the platform requirement (Linux/macOS/WSL2; Windows fails closed and skips).
 
 **Dependencies**: Blocked by <<ISSUE:5>>, <<ISSUE:6>>

@@ -1,13 +1,14 @@
 ---
 topic: niwa-watch-once-pr-review
 chain_started: 2026-07-09T15:33:59Z
-last_updated: 2026-07-09T17:45:12Z
+last_updated: 2026-07-09T17:51:49Z
 phase_pointer: phase-2
 execution_mode: auto
 plan_execution_mode: single-pr
 visibility: Public
-exit: UNSET
-exit_artifacts: []
+exit: full-run
+exit_artifacts:
+  - docs/plans/PLAN-niwa-watch-once-pr-review.md
 planned_chain:
   - brief
   - prd
@@ -18,6 +19,7 @@ chain_ran:
   - brief
   - prd
   - design
+  - plan
 child_snapshots:
   brief:
     status: Accepted
@@ -28,9 +30,13 @@ child_snapshots:
     content_hash: 04dae6a364bb603a30ee61f6f8a87b9d09d613df
     captured_at: 2026-07-09T17:21:52Z
   design:
-    status: Accepted
+    status: Planned
     content_hash: 754936fce38a74af1f972d0f210167548ea89bde
     captured_at: 2026-07-09T17:45:12Z
+  plan:
+    status: Active
+    content_hash: 44352304de0394389732b2213e96a1e3b4442d20
+    captured_at: 2026-07-09T17:51:49Z
 worktree_rebases: []
 # HARD APPROVAL GATE (dispatcher): /brief produced BRIEF in Draft; jury
 # all-PASS (content-quality + structural-format). Execution PAUSED here

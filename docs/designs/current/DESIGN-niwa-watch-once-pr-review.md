@@ -1,5 +1,5 @@
 ---
-status: Accepted
+status: Planned
 upstream: docs/prds/PRD-niwa-watch-once-pr-review.md
 problem: |
   niwa dispatch is a pull verb that launches a background worker inheriting
@@ -31,7 +31,7 @@ rationale: |
 
 ## Status
 
-Accepted
+Planned
 
 Technical design for the first version of proactive PR-review dispatch in
 niwa, implementing the Accepted PRD. Scoped to a single-PR change in the
