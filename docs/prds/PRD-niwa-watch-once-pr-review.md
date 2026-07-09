@@ -104,12 +104,14 @@ Functional:
   invocation run by hand; it SHALL NOT start any resident or background
   process.
 - **R2.** `watch --once` SHALL find open PRs on GitHub where the invoking
-  developer is the **directly-requested** reviewer (the user-scoped
-  review-request signal, e.g. `user-review-requested`), excluding PRs
+  developer is the **directly-requested** reviewer, using the user-scoped
+  review-request qualifier `user-review-requested`, which excludes PRs
   where only a team the developer belongs to was requested.
 - **R3.** The candidate set SHALL be restricted to repositories in the
   developer's niwa workspace; the workspace's repository set SHALL be
-  derived from niwa's existing workspace configuration.
+  derived from niwa's existing workspace configuration. A PR that directly
+  requests the developer but lives in a repository outside the workspace
+  SHALL NOT be staged.
 - **R4.** For each matching PR not already recorded in the handled-set,
   `watch --once` SHALL assemble a dispatch prompt containing **only
   platform-vouched structural identifiers** -- the repository, the PR
@@ -123,25 +125,51 @@ Functional:
   attaching a terminal to any staged session.
 - **R6.** The dispatched agent SHALL be instructed to read the PR (title,
   body, diff, linked issue, CI status) **in its own clone** and to treat
-  all of it as untrusted, then draft a review to a known location and halt
-  before posting.
+  all of it as untrusted, then write its drafted review to a **known
+  location** the invoking developer and the trusted post step can both
+  find, and halt before posting. (The exact path is a DESIGN detail; the
+  requirement is that the location is fixed and predictable, not chosen ad
+  hoc by the agent.)
 - **R7.** The dispatched review session SHALL run under enforced
-  containment: **no network egress**, filesystem writes scoped to its
-  clone, and a fail-closed permission mode.
-- **R8.** The dispatched review session's inherited environment SHALL be
-  scrubbed/scoped to the minimum the read-only review task needs; it SHALL
-  NOT carry the dispatcher's unrelated secrets.
+  containment with three properties: **no network egress**, filesystem
+  writes **scoped to its clone**, and a **fail-closed permission mode** (an
+  action that would otherwise prompt for approval is denied, not
+  auto-allowed, in the unattended session).
+- **R8.** The dispatched review session SHALL carry only an **explicit,
+  minimal allowlist** of environment variables -- the set the read-only
+  review task needs. No other variable from the dispatcher's environment
+  SHALL be present in the session; in particular, secrets the review task
+  does not need SHALL be absent. (The exact allowlist contents are a DESIGN
+  detail; the requirement is that the mechanism is allowlist-based, not a
+  best-effort scrub of a denylist.)
 - **R9.** If the enforced containment (R7 and R8) cannot be applied to the
   dispatched instance -- the OS sandbox is absent or unsupported for any
-  reason -- `watch --once` SHALL **refuse to dispatch** that review and
-  report why, rather than dispatching it uncontained.
+  reason -- `watch --once` SHALL **refuse to dispatch** that review, exit
+  non-zero, and print a message naming the containment failure, rather than
+  dispatching it uncontained.
 - **R10.** `watch --once` SHALL stage at most a bounded number of **new**
-  review agents per run (the per-run staging bound); matching PRs beyond
-  the bound SHALL be left for a subsequent run.
-- **R11.** `watch --once` SHALL record each dispatched PR in a durable,
-  flat handled-set, keyed by stable PR identity, so a subsequent run does
-  not re-dispatch a PR it has already handled.
-- **R12.** Posting an approved review SHALL be performed by a **separate
+  review agents per run (the per-run staging bound). When more matching new
+  PRs exist than the bound allows, the selection SHALL be **deterministic**
+  (oldest review-request first), and the remaining PRs SHALL be left
+  unhandled for a subsequent run.
+- **R11.** `watch --once` SHALL maintain a durable, flat handled-set keyed
+  by **stable PR identity (repository plus PR number)**. A PR SHALL be
+  recorded in the handled-set **only after its review agent is successfully
+  dispatched under enforced containment**, so that a subsequent run does
+  not re-dispatch an already-handled PR, while a PR whose poll or dispatch
+  failed is **not** suppressed.
+- **R12.** On a failure it cannot safely proceed past -- a failed GitHub
+  poll (query error, missing or expired auth, host unreachable, rate
+  limit) or a failed `niwa dispatch` for a selected PR -- `watch --once`
+  SHALL **fail loud**: report the error and exit non-zero rather than
+  silently continuing, and SHALL NOT record a PR it could not stage as
+  handled.
+- **R13.** Staged review sessions SHALL be surfaced through the developer's
+  **existing Claude Code agent view** (the standard surface for
+  niwa-dispatched background sessions, where a `--bg` worker auto-registers),
+  from which the developer reads the draft and invokes post or discard.
+  This version adds no new listing or inbox UI.
+- **R14.** Posting an approved review SHALL be performed by a **separate
   trusted action** that runs **outside** the contained review session,
   operates on the draft the developer approved, and holds a credential
   scoped to nothing beyond posting that review. The review session's
@@ -151,53 +179,91 @@ Functional:
 
 Non-functional:
 
-- **R13.** The watcher SHALL be deterministic end to end: no model/LLM
+- **R15.** The watcher SHALL be deterministic end to end: no model/LLM
   judgment and no session-resident skill participate in the poll, the
-  relevance decision, or the prompt assembly.
-- **R14.** This version SHALL target GitHub as the host that carries the
+  relevance decision, or the prompt assembly, and prompt assembly SHALL be
+  a pure function of the PR's platform metadata (identical metadata
+  produces an identical prompt).
+- **R16.** This version SHALL target GitHub as the host that carries the
   directly-requested signal; other hosts are out of scope.
-- **R15.** The feature SHALL be adversarially verified: a PR whose title,
+- **R17.** The feature SHALL be adversarially verified: a PR whose title,
   body, and diff attempt exfiltration and outbound action (e.g.
   `curl … | sh`, `git push`, printing and sending secrets) SHALL have
-  those outbound actions **denied at the tool/OS layer**, not merely
-  declined by the model.
+  those outbound actions **denied at the tool/OS layer**. The verification
+  SHALL exercise the outbound actions **directly** (executed in the
+  session, bypassing the model's judgment) so that denial is provably the
+  sandbox's doing and not the model merely choosing to decline.
 
 ## Acceptance Criteria
 
-- [ ] Running `niwa watch --once` in a workspace with exactly one open PR
-      that directly requests the developer stages exactly one contained
-      review agent via `niwa dispatch -d` and returns without attaching a
-      terminal.
-- [ ] The generated dispatch prompt contains the repo, PR number, PR URL,
-      and the directly-requested fact plus fixed instructions, and contains
-      no PR title, author name, body, or diff text (verifiable by
-      inspecting the prompt string).
-- [ ] A PR that requests only a team the developer belongs to (not the
-      developer individually) stages no agent.
-- [ ] A second `niwa watch --once` run, with the same PR still open and
-      still requesting the developer, stages no new agent for it.
-- [ ] From within a dispatched review session, an outbound network request
-      (to any host) fails -- egress is denied.
-- [ ] A dispatched review session's environment does not contain the
-      dispatcher's unrelated secrets (verifiable by inspecting the session
-      environment).
-- [ ] When more than the per-run bound of matching new PRs exist, at most
-      the bound's worth of agents are staged in a single run; the rest are
-      left unhandled for a later run.
-- [ ] When the enforced containment cannot be applied, `niwa watch --once`
-      refuses to dispatch and reports the reason; no uncontained review
-      session is launched.
-- [ ] Adversarial test: a PR crafted to exfiltrate/act (title/body/diff
-      attempting `curl … | sh`, push to a branch, and secret exfiltration)
-      is dispatched under the profile and produces no egress, no push, and
-      no unapproved post -- the outbound actions are denied at the tool/OS
-      layer.
-- [ ] Approving a staged review posts it through the trusted post action
-      running outside the contained session; the session that read the PR
-      never posts, and the posting credential is not present in that
-      session's environment.
-- [ ] Discarding a staged review posts nothing and records the PR as
-      handled (a later run does not re-stage it).
+Selection and dispatch:
+
+- [ ] **AC1 (R1, R5).** Running `niwa watch --once` in a workspace with
+      exactly one open PR that directly requests the developer stages
+      exactly one contained review agent via `niwa dispatch -d` and returns
+      without attaching a terminal.
+- [ ] **AC2 (R4).** The generated dispatch prompt contains the repo, PR
+      number, PR URL, and the directly-requested fact plus fixed
+      instructions, and contains no PR title, author name, body, or diff
+      text (verified by inspecting the prompt string).
+- [ ] **AC3 (R2).** A PR that requests only a team the developer belongs to
+      (not the developer individually) stages no agent.
+- [ ] **AC4 (R3).** A PR that directly requests the developer but lives in
+      a repository **not** in the niwa workspace stages no agent.
+- [ ] **AC5 (R11).** A second `niwa watch --once` run, with the same PR
+      still open and still requesting the developer, stages no new agent
+      for it.
+- [ ] **AC6 (R12, R1).** A run in which no PR directly requests the
+      developer stages nothing and exits zero with a "nothing to stage"
+      style message.
+- [ ] **AC7 (R6).** A normal (non-adversarial) dispatched review produces a
+      draft review artifact at the known location and leaves the session
+      halted in a drafted-but-not-posted state (a usable draft exists to
+      approve).
+- [ ] **AC8 (R10).** With more matching new PRs than the configured bound N,
+      exactly N agents are staged in one run; the N selected are the
+      oldest-review-request-first selection, and a repeat run with unchanged
+      state selects the same N. (Test is parameterized on the configured N.)
+
+Containment (security):
+
+- [ ] **AC9 (R7 egress).** An outbound network request executed **directly**
+      within a dispatched session (e.g. `curl https://example.com` run in
+      the session shell, bypassing model judgment) fails at the OS/tool
+      layer (connection blocked / EPERM / proxy refusal).
+- [ ] **AC10 (R7 writes).** A filesystem write executed directly within the
+      session to a path outside its clone is denied.
+- [ ] **AC11 (R7 fail-closed).** A privileged action that would otherwise
+      prompt for approval, attempted in the unattended session, is denied
+      rather than auto-allowed.
+- [ ] **AC12 (R8).** A sentinel secret planted in the dispatcher's
+      environment (e.g. `NIWA_CANARY_SECRET=…`) is **absent** from the
+      dispatched session's environment, and the session's environment is a
+      subset of the defined allowlist.
+- [ ] **AC13 (R9).** When the enforced containment cannot be applied,
+      `niwa watch --once` refuses to dispatch, exits non-zero, and prints a
+      message naming the containment failure; no uncontained review session
+      is launched.
+- [ ] **AC14 (R17).** Adversarial test: a PR whose title/body/diff attempt
+      `curl … | sh`, a `git push`, and secret exfiltration is dispatched
+      under the profile; each outbound action, **executed directly in the
+      session to bypass model judgment**, is denied at the OS/tool layer --
+      no egress, no push, no unapproved post.
+
+Act boundary and determinism:
+
+- [ ] **AC15 (R14).** Approving a staged review posts it through the trusted
+      action running outside the contained session. The dispatched session
+      holds no posting-scoped credential (AC12 baseline) and, with egress
+      denied (AC9), cannot post; no review attributable to the session
+      appears on the PR between dispatch and explicit approval.
+- [ ] **AC16 (R14).** Discarding a staged review posts nothing and records
+      the PR as handled (a later run does not re-stage it).
+- [ ] **AC17 (R11, R12).** A PR whose `niwa dispatch` fails is **not**
+      recorded in the handled-set; a subsequent run re-attempts it.
+- [ ] **AC18 (R15).** Given identical PR platform metadata, prompt assembly
+      produces a byte-identical prompt (pure function), and no model/LLM
+      call occurs on the poll, relevance, or prompt-assembly path.
 
 ## Out of Scope
 
@@ -238,12 +304,15 @@ These close the Open Questions the upstream BRIEF deferred to this PRD.
   mechanism (a single `user-review-requested` search intersected with the
   workspace set, versus per-repo queries) is a DESIGN choice.
 - **D2 — Handled-set minimum contract.** *Decided (assumed):* the
-  handled-set is a flat file keyed by **stable PR identity**, recording
-  that a PR was dispatched. *Alternatives:* also recording per-PR dispatch
-  outcome/state. *Why:* the only job here is "do not re-dispatch what I
-  already handled"; richer state (expiry, freshness, outcome) is
-  explicitly deferred. Recording just the handled fact is the minimum that
-  satisfies R11.
+  handled-set is a flat file keyed by **repository plus PR number** (the
+  stable, human-legible PR identity), recording that a PR was dispatched,
+  and written **only after a successful contained dispatch** (R11).
+  *Alternatives:* keying by GitHub node id; also recording per-PR dispatch
+  outcome/state; writing on attempt rather than success. *Why:* the only
+  job here is "do not re-dispatch what I already handled"; repository+PR
+  number is stable and legible; writing only on success avoids a transient
+  failure permanently suppressing a review (see D6). Richer state (expiry,
+  freshness, outcome) is explicitly deferred.
 - **D3 — Directly-requested qualifier.** *Decided (confirmed):* use the
   **user-scoped** review-request signal (`user-review-requested`), which
   matches only PRs where the developer is individually requested and
@@ -263,12 +332,30 @@ These close the Open Questions the upstream BRIEF deferred to this PRD.
   contained environment are **DESIGN** decisions.
 - **D5 — Per-run staging bound.** *Decided (assumed):* `watch --once`
   stages at most a **small fixed number** of new agents per run (a safe
-  default such as 3), leaving additional matches for a later run.
-  *Alternatives:* strictly one-at-a-time, or no bound. *Why:* an unbounded
-  run over a workspace with many pending requests is a first-run resource
-  footgun; a small cap prevents the burst while still staging a useful
-  handful. The exact value and whether it is configurable are
-  implementation details for the DESIGN/plan.
+  default such as 3), leaving additional matches for a later run, and
+  selects them **oldest-review-request first** when matches exceed the
+  bound (R10). *Alternatives:* strictly one-at-a-time, or no bound;
+  arbitrary/undefined selection order. *Why:* an unbounded run over a
+  workspace with many pending requests is a first-run resource footgun; a
+  small cap prevents the burst while still staging a useful handful, and a
+  defined order keeps the bounded behavior deterministic (R15). The exact
+  value and whether it is configurable are implementation details for the
+  DESIGN/plan.
+- **D6 — Failure semantics.** *Decided (assumed):* on a failed poll or a
+  failed dispatch, `watch --once` **fails loud** (reports the error, exits
+  non-zero) and does **not** record the affected PR as handled (R11, R12).
+  *Alternatives:* best-effort continue past failures; record-on-attempt.
+  *Why:* silently swallowing a poll/auth failure would make the tool look
+  like "nothing to review" when it is actually broken, and recording a
+  failed dispatch as handled would permanently suppress a review that a
+  retry would have staged. Fail-loud plus handled-on-success-only is the
+  safe default.
+- **D7 — Staged-draft discovery.** *Decided (assumed):* staged reviews are
+  surfaced through niwa's **existing Claude Code agent view** rather than a
+  new listing UI (R13). *Alternatives:* a bespoke `watch list`/inbox
+  command. *Why:* a `--bg` dispatch already auto-registers in the agent
+  view for free; adding a parallel inbox surface is out of scope for the
+  first version and would duplicate an existing affordance.
 
 ## Known Limitations
 
@@ -286,3 +373,10 @@ These close the Open Questions the upstream BRIEF deferred to this PRD.
   once.
 - **GitHub only.** Reviews requested on other hosts are not seen by this
   version.
+- **The draft text is authored by the untrusted-content session.** The
+  drafted review is produced by the contained session that read the
+  hostile PR, so its *text* could contain attacker-influenced content. The
+  approving developer is the trust checkpoint for that text: they read the
+  draft before the trusted step posts it. Containment stops the session
+  from acting; the human gate covers what the draft says. Automatic posting
+  without that human read is deliberately not offered.
