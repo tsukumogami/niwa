@@ -1,9 +1,54 @@
 package cli
 
 import (
+	"context"
+	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/spf13/cobra"
 )
+
+// TestCheckSandboxCapability_FailClosed validates the preflight is fail-closed
+// in the actual environment: it returns nil only when the sandbox is genuinely
+// enforceable here, and otherwise a descriptive refusal -- never a silent pass.
+func TestCheckSandboxCapability_FailClosed(t *testing.T) {
+	err := checkSandboxCapability(context.Background())
+	if err == nil {
+		t.Log("host reports sandbox-capable; preflight would permit dispatch")
+		return
+	}
+	// On an incapable host the refusal must name the missing capability, so an
+	// operator understands why dispatch was refused.
+	msg := err.Error()
+	if !strings.Contains(msg, "sandbox") {
+		t.Errorf("refusal message should explain the sandbox incapability, got %q", msg)
+	}
+}
+
+// TestRunWatchOnce_RefusesWhenSandboxIncapable proves the command fails closed:
+// when the capability probe reports the host cannot contain a session, the run
+// refuses before touching the workspace or GitHub.
+func TestRunWatchOnce_RefusesWhenSandboxIncapable(t *testing.T) {
+	prev := sandboxCapabilityCheck
+	sentinel := errors.New("no netns here")
+	sandboxCapabilityCheck = func(context.Context) error { return sentinel }
+	t.Cleanup(func() { sandboxCapabilityCheck = prev })
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	err := runWatchOnce(cmd, nil)
+	if err == nil {
+		t.Fatal("expected watch --once to refuse when the sandbox is incapable")
+	}
+	if !errors.Is(err, sentinel) {
+		t.Errorf("refusal should wrap the capability error, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "uncontained") {
+		t.Errorf("refusal message should say it refuses to dispatch uncontained, got %q", err.Error())
+	}
+}
 
 func TestOwnerRepoFromGitURL(t *testing.T) {
 	cases := []struct {

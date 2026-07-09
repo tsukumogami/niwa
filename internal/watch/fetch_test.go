@@ -94,7 +94,7 @@ func TestFetchPRHead_RejectsMalformedSHA(t *testing.T) {
 }
 
 func TestHardenedGitEnv_ExcludesCredentialsAndConfig(t *testing.T) {
-	env := hardenedGitEnv("/scratch/home")
+	env := hardenedGitEnv("/scratch/home", "")
 	joined := strings.Join(env, "\n")
 	// Isolated config + skipped smudge.
 	for _, want := range []string{"HOME=/scratch/home", "GIT_CONFIG_NOSYSTEM=1", "GIT_LFS_SKIP_SMUDGE=1"} {
@@ -108,6 +108,36 @@ func TestHardenedGitEnv_ExcludesCredentialsAndConfig(t *testing.T) {
 		if strings.HasPrefix(name, "GH_") || strings.HasPrefix(name, "GITHUB_") || name == "SSH_AUTH_SOCK" {
 			t.Errorf("hardened git env leaked credential var %q", name)
 		}
+	}
+}
+
+// TestFetchToken_NeverInArgv is the Finding-A regression guard: the auth token
+// must ride the environment (GIT_CONFIG_VALUE_0), never the git command line.
+func TestFetchToken_NeverInArgv(t *testing.T) {
+	const token = "ghp_supersecrettoken"
+
+	// The fetch argv is a pure function of remote + sha; the token is not an
+	// argument to it.
+	args := hardenedFetchArgs("https://github.com/acme/api.git", "abcdef1234")
+	if strings.Contains(strings.Join(args, " "), token) {
+		t.Fatalf("token leaked into git fetch argv: %v", args)
+	}
+	for _, a := range args {
+		if strings.Contains(a, "extraheader") || strings.Contains(a, "Authorization") {
+			t.Errorf("auth header must not be a git argv element, found %q", a)
+		}
+	}
+
+	// The token is carried in the environment instead, only as a config VALUE.
+	env := hardenedGitEnv("/scratch/home", token)
+	var inEnv bool
+	for _, kv := range env {
+		if strings.HasPrefix(kv, "GIT_CONFIG_VALUE_0=") && strings.Contains(kv, token) {
+			inEnv = true
+		}
+	}
+	if !inEnv {
+		t.Error("token should be carried via GIT_CONFIG_VALUE_0 in the environment")
 	}
 }
 

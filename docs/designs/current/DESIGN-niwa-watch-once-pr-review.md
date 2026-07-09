@@ -262,10 +262,15 @@ existing per-instance `.claude/settings.json` write/merge
 - **Option 7A (chosen): preflight, re-verify the effective settings, and
   prove enforcement live.** Three checkpoints:
   - *Preflight (before any instance is created):* refuse on an unsupported
-    platform (`GOOS == "windows"`) **and** actively probe that the OS
-    sandbox can be created now -- not merely that the OS is nominally
-    supported. Record the minimum harness capability required and refuse if
-    absent.
+    platform **and** actively probe that the OS sandbox can be created now --
+    not merely that the OS is nominally supported. Concretely, on Linux this
+    checks the backend and dependency the harness itself requires (`bwrap`
+    and `socat` on PATH -- the harness silently disables the sandbox and runs
+    uncontained when `socat` is absent) and functionally verifies a
+    network-isolated namespace can be created (`bwrap --unshare-net`
+    succeeds), so a locked-down or nested container that denies user
+    namespaces is refused rather than dispatched uncontained; macOS checks
+    for `sandbox-exec`; any other platform is refused.
   - *Effective-settings re-verification (per instance, before launch):* the
     containment lives in a *merged* `.claude/settings.json`, and the harness
     applies its own downstream merge (managed/enterprise settings, and the

@@ -70,7 +70,12 @@ func FetchPRHead(ctx context.Context, remoteURL, sha, checkoutDir, token string)
 		return fmt.Errorf("fetch: creating fetch-local HOME: %w", err)
 	}
 	defer os.RemoveAll(gitHome)
-	env := hardenedGitEnv(gitHome)
+	// The auth header, when present, is injected via git's environment-variable
+	// config mechanism (GIT_CONFIG_COUNT/KEY/VALUE) -- NOT a `-c` argv flag --
+	// so the token never appears in the process command line (readable by any
+	// local user via `ps` / /proc/<pid>/cmdline). The environment is only
+	// readable by the process owner and root.
+	env := hardenedGitEnv(gitHome, token)
 
 	// 1. init an empty repo we control (its config is clean).
 	if err := runGit(ctx, checkoutDir, env, "init", "--quiet"); err != nil {
@@ -78,14 +83,8 @@ func FetchPRHead(ctx context.Context, remoteURL, sha, checkoutDir, token string)
 	}
 	// 2. fetch the exact SHA as inert objects. --no-tags and
 	//    --no-recurse-submodules keep the fetch from following anything beyond
-	//    the requested object. When a token is supplied, an HTTP auth header
-	//    authenticates the fetch to a private repo.
-	fetchArgs := append([]string{}, gitHardeningConfig...)
-	if token != "" {
-		fetchArgs = append(fetchArgs, "-c", "http.extraheader=Authorization: Bearer "+token)
-	}
-	fetchArgs = append(fetchArgs,
-		"fetch", "--no-tags", "--no-recurse-submodules", "--depth", "1", remoteURL, sha)
+	//    the requested object.
+	fetchArgs := hardenedFetchArgs(remoteURL, sha)
 	if err := runGit(ctx, checkoutDir, env, fetchArgs...); err != nil {
 		return fmt.Errorf("fetch: git fetch %s: %w", sha, err)
 	}
@@ -99,10 +98,21 @@ func FetchPRHead(ctx context.Context, remoteURL, sha, checkoutDir, token string)
 	return nil
 }
 
+// hardenedFetchArgs builds the git argv for the hardened fetch. It NEVER
+// contains the auth token (that rides the environment, see hardenedGitEnv), so
+// the token cannot leak via `ps` / /proc/<pid>/cmdline.
+func hardenedFetchArgs(remoteURL, sha string) []string {
+	args := append([]string{}, gitHardeningConfig...)
+	return append(args,
+		"fetch", "--no-tags", "--no-recurse-submodules", "--depth", "1", remoteURL, sha)
+}
+
 // hardenedGitEnv builds the environment for a hardened git invocation: an
 // isolated gitconfig (no system, a scratch HOME), LFS smudge skipped, and no
-// interactive credential prompt.
-func hardenedGitEnv(gitHome string) []string {
+// interactive credential prompt. When token is non-empty, the HTTP auth header
+// is injected via git's environment-variable config mechanism so it stays off
+// the command line.
+func hardenedGitEnv(gitHome, token string) []string {
 	// Start from a minimal base rather than os.Environ() so no ambient
 	// GIT_* / credential variables leak in.
 	base := []string{
@@ -114,6 +124,13 @@ func hardenedGitEnv(gitHome string) []string {
 	}
 	if p := os.Getenv("PATH"); p != "" {
 		base = append(base, "PATH="+p)
+	}
+	if token != "" {
+		base = append(base,
+			"GIT_CONFIG_COUNT=1",
+			"GIT_CONFIG_KEY_0=http.extraheader",
+			"GIT_CONFIG_VALUE_0=Authorization: Bearer "+token,
+		)
 	}
 	return base
 }

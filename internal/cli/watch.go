@@ -1,11 +1,14 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -61,10 +64,15 @@ var watchDiscardCmd = &cobra.Command{
 func runWatchOnce(cmd *cobra.Command, _ []string) error {
 	ctx := cmd.Context()
 
-	// (1) Fail-closed preflight: refuse where the OS sandbox cannot be enforced,
-	// BEFORE creating any instance, rather than dispatch uncontained.
-	if runtime.GOOS == "windows" {
-		return fmt.Errorf("niwa watch: the OS sandbox is unavailable on Windows; refusing to dispatch a review uncontained")
+	// (1) Fail-closed preflight: actively verify the OS sandbox can be enforced
+	// on this host NOW -- not merely that the OS is nominally supported -- BEFORE
+	// creating any instance, rather than dispatch uncontained. A non-Windows host
+	// whose sandbox backend is missing or whose kernel/container denies the
+	// network namespace would otherwise dispatch a hostile-PR review with no
+	// egress containment (the harness silently degrades to "no sandbox + a
+	// warning").
+	if err := sandboxCapabilityCheck(ctx); err != nil {
+		return fmt.Errorf("niwa watch: refusing to dispatch uncontained: %w", err)
 	}
 	if _, err := lookClaude(); err != nil {
 		return fmt.Errorf("niwa watch: claude binary not found in PATH; install Claude Code before watching")
@@ -253,6 +261,48 @@ func runWatchDiscard(cmd *cobra.Command, args []string) error {
 	}
 	fmt.Fprintf(cmd.OutOrStdout(), "niwa watch: discarded staged review for %s/%s#%d\n", rec.Owner, rec.Repo, rec.Number)
 	return nil
+}
+
+// sandboxCapabilityCheck is the preflight capability probe (a seam so tests can
+// substitute it). Production wires it to checkSandboxCapability.
+var sandboxCapabilityCheck = checkSandboxCapability
+
+// checkSandboxCapability actively verifies that the Claude Code OS sandbox can
+// be enforced on this host right now, and returns a descriptive error (never
+// nil-on-doubt) when it cannot. This is Decision 7's active probe: it catches
+// the silent-degradation cases the design refuses to tolerate -- a missing
+// sandbox backend or dependency, or a kernel/container that cannot create the
+// network namespace -- so `watch --once` never dispatches uncontained on a
+// non-Windows-but-incapable host.
+func checkSandboxCapability(ctx context.Context) error {
+	switch runtime.GOOS {
+	case "linux":
+		// The sandbox backend and the dependency the harness itself requires
+		// (and names when it disables the sandbox): bubblewrap + socat.
+		if _, err := exec.LookPath("bwrap"); err != nil {
+			return fmt.Errorf("the OS sandbox backend 'bwrap' (bubblewrap) is not on PATH; this host cannot enforce no-egress")
+		}
+		if _, err := exec.LookPath("socat"); err != nil {
+			return fmt.Errorf("the OS sandbox dependency 'socat' is not on PATH; the harness cannot enable the sandbox without it")
+		}
+		// Functional probe: can a network-isolated namespace actually be created
+		// here? On a locked-down/nested container that denies user namespaces,
+		// bwrap exits non-zero and we refuse.
+		pctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(pctx, "bwrap", "--ro-bind", "/", "/", "--unshare-net", "--die-with-parent", "true")
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("the OS sandbox cannot create a network namespace on this host (%v); it cannot enforce no-egress", err)
+		}
+		return nil
+	case "darwin":
+		if _, err := exec.LookPath("sandbox-exec"); err != nil {
+			return fmt.Errorf("the macOS sandbox tool 'sandbox-exec' is not on PATH; this host cannot enforce no-egress")
+		}
+		return nil
+	default:
+		return fmt.Errorf("the OS sandbox is unavailable on GOOS=%s (Linux, macOS, and WSL2 are supported)", runtime.GOOS)
+	}
 }
 
 // workspaceRootFromCwd resolves the enclosing workspace root or errors.
