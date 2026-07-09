@@ -38,6 +38,24 @@ Feature: niwa dispatch: provision, rollback, and reaper reclamation
     And a dispatch instance was created with a well-formed instance file
     And a dispatch-origin mapping exists for session "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 
+  # --- Model selection resolves a category to a concrete model ---
+
+  @critical
+  Scenario: dispatch resolves a capability category and forwards it to the worker
+    Given a clean niwa environment
+    And a local git server is set up
+    And a config repo "myws" exists with body:
+      """
+      [workspace]
+      name = "myws"
+      """
+    When I run niwa init from config repo "myws"
+    Then the exit code is 0
+    Given a fake claude for dispatch with session "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+    When I run "niwa dispatch model-task --model powerful --detach" from the workspace root
+    Then the exit code is 0
+    And the launched claude was invoked with "--model opus"
+
   # --- Rollback on launch failure ---
 
   @critical

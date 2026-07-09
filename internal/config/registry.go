@@ -34,6 +34,13 @@ type GlobalSettings struct {
 	// remoteControlAtStartup value overrides it. nil preserves today's behavior
 	// (no remote-control injection).
 	RemoteControlOnDispatch *bool `toml:"remote_control_on_dispatch,omitempty"`
+	// DispatchModel is the default model for a `niwa dispatch` worker's main
+	// chat loop when the command is run without --model. It accepts the same
+	// vocabulary as the flag: a capability category (fast/balanced/powerful) or
+	// a versionless vendor name (fable/opus/sonnet/haiku). An explicit --model
+	// always overrides it; "" (the default) forwards no model, preserving
+	// today's behavior.
+	DispatchModel string `toml:"dispatch_model,omitempty"`
 }
 
 // SkipPluginInstall reports whether the user has explicitly opted

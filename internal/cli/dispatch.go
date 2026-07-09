@@ -19,7 +19,7 @@ import (
 func init() {
 	dispatchCmd.Flags().StringVar(&dispatchLabel, "label", "", "optional human-friendly alias recorded on the session mapping")
 	dispatchCmd.Flags().StringVarP(&dispatchName, "name", "n", "", "optional display name for the session (sanitized into a slug; also names the niwa instance: <config>+-<id> with no name, <config>+<slug>-<id> with one -- '+' always marks the end of the config name)")
-	dispatchCmd.Flags().StringVar(&dispatchModel, "model", "", "model to forward to the background worker (--model)")
+	dispatchCmd.Flags().StringVar(&dispatchModel, "model", "", "model for the worker's main chat loop: a capability category or a versionless vendor name ("+knownModelHint()+"); overrides the [global] dispatch_model default")
 	dispatchCmd.Flags().StringVar(&dispatchPermissionMode, "permission-mode", "", "permission mode to forward to the background worker (--permission-mode)")
 	dispatchCmd.Flags().StringVar(&dispatchAgent, "agent", "", "agent to forward to the background worker (--agent)")
 	dispatchCmd.Flags().BoolVarP(&dispatchDetach, "detach", "d", false, "do not attach the terminal to the new session; print hints and return")
@@ -207,12 +207,33 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("niwa: error: writing dispatch pending-marker: %w", err)
 	}
 
-	// (9) Launch the background worker rooted in the instance. Flags become
-	// discrete argv elements -- never string-concatenated -- so a crafted value
-	// cannot inject a claude flag (DESIGN Decision 8).
-	passthrough := buildDispatchPassthrough(slug)
+	// (9) Load the host global config ONCE, best-effort. A missing or unreadable
+	// config degrades to "no dispatch_model default" and "no remote-control
+	// injection" -- neither can fail the dispatch (both features are opt-in
+	// defaults, so absence just means today's behavior).
+	gc, gcErr := config.LoadGlobalConfig()
 
-	// (9a) Remote-control-on-dispatch default-fill. When the host preference
+	// (9a) Resolve the effective main-loop model. The --model flag wins; when it
+	// is unset the host [global] dispatch_model default fills in; when neither is
+	// set nothing is forwarded. The chosen value (a category or a versionless
+	// vendor name) is resolved to the concrete name `claude --model` receives, and
+	// an unrecognized value is forwarded as-is with a warning rather than blocking
+	// the launch (see resolveDispatchModel).
+	effectiveModel := dispatchModel
+	if effectiveModel == "" && gcErr == nil && gc != nil {
+		effectiveModel = strings.TrimSpace(gc.Global.DispatchModel)
+	}
+	resolvedModel, modelWarning := resolveDispatchModel(effectiveModel)
+	if modelWarning != "" {
+		fmt.Fprintf(cmd.ErrOrStderr(), "niwa dispatch: %s\n", modelWarning)
+	}
+
+	// (9b) Build the pass-through argv. Flags become discrete argv elements --
+	// never string-concatenated -- so a crafted value cannot inject a claude flag
+	// (DESIGN Decision 8).
+	passthrough := buildDispatchPassthrough(slug, resolvedModel)
+
+	// (9c) Remote-control-on-dispatch default-fill. When the host preference
 	// (~/.config/niwa/config.toml [global].remote_control_on_dispatch) is on and
 	// the dispatched instance left remoteControlAtStartup unset, append the
 	// Claude Code Remote settings flag so the worker starts steerable. The flag
@@ -222,8 +243,9 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	// missing/unreadable global config degrades to "no injection" (the preference
 	// is treated as unset), and an unreadable instance settings file is treated as
 	// "downstream unset" -- so the host default-fill still applies. Either way the
-	// dispatch always launches.
-	if gc, gcErr := config.LoadGlobalConfig(); gcErr == nil {
+	// dispatch always launches. The global config is loaded once in step (9) and
+	// reused here.
+	if gcErr == nil {
 		inst, _ := readInstanceSettings(instancePath)
 		// The eligibility check must inspect the SAME environment the worker
 		// inherits -- realDispatchLaunch launches with cmd.Env = os.Environ() -- so
@@ -410,10 +432,14 @@ func isDispatchInstanceName(name string) bool {
 // "--name <slug>" so the launched claude session carries the same display name
 // embedded in the instance directory. An empty slug forwards nothing, preserving
 // the original slug-less behavior.
-func buildDispatchPassthrough(slug string) []string {
+//
+// model is the already-resolved main-loop model (see resolveDispatchModel): a
+// concrete versionless name, forwarded as "--model <model>", or "" to forward
+// nothing. Resolution happens in the caller so this stays a pure argv builder.
+func buildDispatchPassthrough(slug, model string) []string {
 	var pass []string
-	if dispatchModel != "" {
-		pass = append(pass, "--model", dispatchModel)
+	if model != "" {
+		pass = append(pass, "--model", model)
 	}
 	if dispatchPermissionMode != "" {
 		pass = append(pass, "--permission-mode", dispatchPermissionMode)

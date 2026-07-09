@@ -51,6 +51,7 @@ func dispatchFakeClaudeScript(behaviour string) string {
   short=$(printf '%s' "$sid" | cut -c1-8)
   jobdir="$HOME/.claude/jobs/$short"
   mkdir -p "$jobdir"
+  printf '%s\n' "$*" > "$HOME/dispatch-launch-argv"
   cwd=$(pwd)
   printf '{"sessionId":"%s","template":"bg","state":"running","cwd":"%s"}\n' "$sid" "$cwd" > "$jobdir/state.json"
   printf 'backgrounded · %s\n' "$short"
@@ -343,9 +344,29 @@ func theDispatchInstanceIsAgedPastTheBackstopTTL(ctx context.Context) (context.C
 	return ctx, nil
 }
 
+// theLaunchedClaudeWasInvokedWith asserts that the argv the fake claude recorded
+// on its --bg launch contains the given substring (e.g. "--model opus"). The
+// success-path fake writes its full argument line to $HOME/dispatch-launch-argv.
+func theLaunchedClaudeWasInvokedWith(ctx context.Context, want string) error {
+	s := getState(ctx)
+	if s == nil {
+		return fmt.Errorf("no test state")
+	}
+	path := filepath.Join(s.homeDir, "dispatch-launch-argv")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("reading launched claude argv %s: %w\nstdout:\n%s\nstderr:\n%s", path, err, s.stdout, s.stderr)
+	}
+	if !strings.Contains(string(data), want) {
+		return fmt.Errorf("launched claude argv %q does not contain %q", strings.TrimSpace(string(data)), want)
+	}
+	return nil
+}
+
 // registerDispatchSteps wires the dispatch-lifecycle steps into the scenario
 // context. Called from initializeScenario.
 func registerDispatchSteps(ctx *godog.ScenarioContext) {
+	ctx.Step(`^the launched claude was invoked with "([^"]*)"$`, theLaunchedClaudeWasInvokedWith)
 	ctx.Step(`^a fake claude for dispatch with session "([^"]*)"$`, aFakeClaudeForDispatchWithSession)
 	ctx.Step(`^a fake claude for dispatch that fails to launch$`, aFakeClaudeForDispatchThatFailsToLaunch)
 	ctx.Step(`^I run "([^"]*)" from the workspace root$`, iRunCommandFromTheWorkspaceRoot)
