@@ -1,5 +1,5 @@
 ---
-status: Draft
+status: Accepted
 problem: |
   niwa dispatch is a pull verb: a developer must notice a PR review is
   waiting, hand it off, and wait for the agent to read and draft. Nothing
@@ -26,7 +26,7 @@ motivating_context: |
 
 ## Status
 
-Draft
+Accepted
 
 Requirements for the first version of proactive PR-review dispatch in niwa.
 Upstream framing is the Accepted BRIEF. This PRD states WHAT the feature
@@ -165,10 +165,12 @@ Functional:
   silently continuing, and SHALL NOT record a PR it could not stage as
   handled.
 - **R13.** Staged review sessions SHALL be surfaced through the developer's
-  **existing Claude Code agent view** (the standard surface for
-  niwa-dispatched background sessions, where a `--bg` worker auto-registers),
-  from which the developer reads the draft and invokes post or discard.
-  This version adds no new listing or inbox UI.
+  **existing Claude Code agent view**. `niwa dispatch --detach` (R5) does
+  not attach a terminal, but it still launches the worker as a `claude
+  --bg` background session, and that background session is what
+  auto-registers in the agent view -- so a detached dispatch is
+  discoverable there without any new listing or inbox UI. The developer
+  reads the draft and invokes post or discard from that surface.
 - **R14.** Posting an approved review SHALL be performed by a **separate
   trusted action** that runs **outside** the contained review session,
   operates on the draft the developer approved, and holds a credential
@@ -185,7 +187,9 @@ Non-functional:
   a pure function of the PR's platform metadata (identical metadata
   produces an identical prompt).
 - **R16.** This version SHALL target GitHub as the host that carries the
-  directly-requested signal; other hosts are out of scope.
+  directly-requested signal; other hosts are out of scope. Host scope is
+  enforced structurally by the GitHub-specific `user-review-requested`
+  query (D3) -- no non-GitHub source is polled.
 - **R17.** The feature SHALL be adversarially verified: a PR whose title,
   body, and diff attempt exfiltration and outbound action (e.g.
   `curl … | sh`, `git push`, printing and sending secrets) SHALL have
@@ -233,9 +237,11 @@ Containment (security):
       layer (connection blocked / EPERM / proxy refusal).
 - [ ] **AC10 (R7 writes).** A filesystem write executed directly within the
       session to a path outside its clone is denied.
-- [ ] **AC11 (R7 fail-closed).** A privileged action that would otherwise
-      prompt for approval, attempted in the unattended session, is denied
-      rather than auto-allowed.
+- [ ] **AC11 (R7 fail-closed).** A tool action that Claude Code would
+      normally gate behind an approval prompt (for example, a command not
+      on any allow-list), attempted in the unattended session, is **denied**
+      rather than auto-approved -- confirming the session runs in a
+      fail-closed mode, not an auto-allow mode.
 - [ ] **AC12 (R8).** A sentinel secret planted in the dispatcher's
       environment (e.g. `NIWA_CANARY_SECRET=…`) is **absent** from the
       dispatched session's environment, and the session's environment is a
@@ -264,6 +270,17 @@ Act boundary and determinism:
 - [ ] **AC18 (R15).** Given identical PR platform metadata, prompt assembly
       produces a byte-identical prompt (pure function), and no model/LLM
       call occurs on the poll, relevance, or prompt-assembly path.
+- [ ] **AC19 (R12 poll branch).** A run in which the GitHub poll itself
+      fails (simulated expired/absent auth, rate limit, or unreachable
+      host) exits non-zero, prints an error naming the failure, stages
+      nothing, and records no PR as handled -- distinct from the empty-poll
+      success path (AC6).
+- [ ] **AC20 (R13).** After a run stages a review, the staged session is
+      discoverable in the existing Claude Code agent view (it registered as
+      a background session), not merely present as an on-disk draft.
+- [ ] **AC21 (R14 post success).** Invoking the trusted post action outside
+      the contained session on a developer-approved draft successfully
+      posts that review to the PR on the host.
 
 ## Out of Scope
 
