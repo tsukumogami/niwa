@@ -78,11 +78,30 @@ func TestFetchPRHead_CheckoutIsFaithfulAndFilterNeutered(t *testing.T) {
 	if got := readFile(t, dst, "secret.txt"); got != "SHOULD-BE-VISIBLE" {
 		t.Errorf("export-ignore file missing or altered: %q (git archive would hide it)", got)
 	}
-	// The LFS-attributed file is present with its RAW committed bytes -- the
-	// smudge did not run (which would have replaced or fetched content).
-	if got := readFile(t, dst, "data.bin"); got != "RAW-COMMITTED-BYTES" {
-		t.Errorf("data.bin = %q, want raw bytes (no LFS smudge)", got)
+	// The LFS-attributed file is checked out as its RAW committed blob -- the
+	// smudge did not run. We compare against the committed blob read with
+	// cat-file (which never smudges), so the check is deterministic whether or
+	// not git-lfs is installed on the host: if git-lfs is present, the fixture
+	// commit stored an LFS pointer and FetchPRHead must reproduce that pointer
+	// (not download the real content); if absent, it stored the raw bytes. A
+	// smudge on our checkout would alter the content and fail this.
+	committedBlob := gitCatFileBlob(t, src, "HEAD:data.bin")
+	if got := readFile(t, dst, "data.bin"); got != committedBlob {
+		t.Errorf("data.bin checkout %q != committed blob %q (a smudge altered it)", got, committedBlob)
 	}
+}
+
+// gitCatFileBlob returns the raw committed blob at rev (e.g. "HEAD:path").
+// cat-file never applies smudge filters, so it is the ground-truth committed
+// content.
+func gitCatFileBlob(t *testing.T, repoDir, rev string) string {
+	t.Helper()
+	cmd := exec.Command("git", "-C", repoDir, "cat-file", "-p", rev)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git cat-file %s: %v\n%s", rev, err, out)
+	}
+	return string(out)
 }
 
 func TestFetchPRHead_RejectsMalformedSHA(t *testing.T) {
