@@ -161,6 +161,67 @@ var failClosedPermissionModes = map[string]bool{
 	"default": true,
 }
 
+// ApplyContainment merges the no-egress sandbox profile into a provisioned
+// instance's .claude/settings.json and re-verifies that the stanza survived the
+// merge, returning an error if it did not. niwa already wrote the instance
+// settings during provisioning, so this is a second, containment-enforcing
+// write; the re-verification is the per-instance fail-closed check that runs
+// before launch (a dropped or relaxed stanza means the PR must not be
+// launched). The re-verification here confirms niwa's own merge; the harness's
+// downstream merge and live enforcement are proven separately by the
+// adversarial egress test.
+func ApplyContainment(instancePath string) error {
+	settingsPath := filepath.Join(instancePath, ".claude", "settings.json")
+	settings := map[string]any{}
+	if data, err := os.ReadFile(settingsPath); err == nil {
+		if err := json.Unmarshal(data, &settings); err != nil {
+			return fmt.Errorf("apply containment: parsing %s: %w", settingsPath, err)
+		}
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("apply containment: reading %s: %w", settingsPath, err)
+	}
+
+	profile := ContainmentProfile()
+	// The sandbox stanza is fully owned by the containment profile -- overwrite
+	// it so no pre-existing sandbox config can relax the no-egress posture.
+	settings["sandbox"] = profile["sandbox"]
+	// Merge permissions at the key level: set the fail-closed defaultMode while
+	// preserving any existing allow/deny/ask entries.
+	perms, _ := settings["permissions"].(map[string]any)
+	if perms == nil {
+		perms = map[string]any{}
+	}
+	for k, v := range profile["permissions"].(map[string]any) {
+		perms[k] = v
+	}
+	settings["permissions"] = perms
+
+	out, err := json.MarshalIndent(settings, "", "  ")
+	if err != nil {
+		return fmt.Errorf("apply containment: encoding settings: %w", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(settingsPath), 0o755); err != nil {
+		return fmt.Errorf("apply containment: creating .claude dir: %w", err)
+	}
+	if err := os.WriteFile(settingsPath, out, 0o644); err != nil {
+		return fmt.Errorf("apply containment: writing settings: %w", err)
+	}
+
+	// Re-read from disk and re-verify the stanza survived the write/merge.
+	data, err := os.ReadFile(settingsPath)
+	if err != nil {
+		return fmt.Errorf("apply containment: re-reading settings: %w", err)
+	}
+	var merged map[string]any
+	if err := json.Unmarshal(data, &merged); err != nil {
+		return fmt.Errorf("apply containment: re-parsing settings: %w", err)
+	}
+	if err := VerifyContainmentApplied(merged); err != nil {
+		return err
+	}
+	return nil
+}
+
 // SyntheticHomeDir returns the path of the synthetic HOME inside an instance and
 // ensures it exists. It holds no developer dotfiles.
 func SyntheticHomeDir(instanceDir string) (string, error) {

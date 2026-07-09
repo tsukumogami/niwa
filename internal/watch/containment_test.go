@@ -1,9 +1,74 @@
 package watch
 
 import (
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func TestApplyContainment_MergesAndVerifies(t *testing.T) {
+	inst := t.TempDir()
+	claudeDir := filepath.Join(inst, ".claude")
+	if err := os.MkdirAll(claudeDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Pre-existing instance settings with unrelated keys and a permissions.deny
+	// list that must be preserved, plus a permissive sandbox that must be
+	// overwritten.
+	existing := `{
+	  "hooks": {"x": 1},
+	  "permissions": {"deny": ["Bash(rm:*)"]},
+	  "sandbox": {"enabled": false, "network": {"allowedDomains": ["evil.example.com"]}}
+	}`
+	settingsPath := filepath.Join(claudeDir, "settings.json")
+	if err := os.WriteFile(settingsPath, []byte(existing), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := ApplyContainment(inst); err != nil {
+		t.Fatalf("ApplyContainment: %v", err)
+	}
+
+	data, _ := os.ReadFile(settingsPath)
+	var got map[string]any
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatal(err)
+	}
+	// The permissive sandbox was overwritten to the no-egress profile.
+	if err := VerifyContainmentApplied(got); err != nil {
+		t.Errorf("post-merge settings do not verify: %v", err)
+	}
+	// Unrelated keys preserved.
+	if _, ok := got["hooks"]; !ok {
+		t.Error("unrelated 'hooks' key was dropped")
+	}
+	// The pre-existing deny list is preserved alongside the new defaultMode.
+	perms := got["permissions"].(map[string]any)
+	if perms["defaultMode"] != "default" {
+		t.Errorf("defaultMode = %v, want default", perms["defaultMode"])
+	}
+	if _, ok := perms["deny"]; !ok {
+		t.Error("pre-existing permissions.deny was dropped")
+	}
+}
+
+func TestApplyContainment_NoExistingSettings(t *testing.T) {
+	inst := t.TempDir()
+	if err := ApplyContainment(inst); err != nil {
+		t.Fatalf("ApplyContainment with no existing settings: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(inst, ".claude", "settings.json"))
+	if err != nil {
+		t.Fatalf("settings not written: %v", err)
+	}
+	var got map[string]any
+	_ = json.Unmarshal(data, &got)
+	if err := VerifyContainmentApplied(got); err != nil {
+		t.Errorf("written settings do not verify: %v", err)
+	}
+}
 
 // TestBuildContainedEnv_CanaryAbsentAndAllowlistSubset is the AC12 canary test:
 // a planted secret and credential-bearing variables in the parent env must be
