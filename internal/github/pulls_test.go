@@ -120,6 +120,34 @@ func TestCreateReview_InvalidCoords(t *testing.T) {
 	}
 }
 
+func TestGetPullHead_OK(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/repos/acme/api/pulls/42" {
+			t.Errorf("unexpected path %q", r.URL.Path)
+		}
+		_, _ = io.WriteString(w, `{"head":{"sha":"abcdef1234567890","repo":{"clone_url":"https://github.com/forker/api.git"}}}`)
+	}))
+	defer srv.Close()
+	c := &APIClient{HTTPClient: http.DefaultClient, BaseURL: srv.URL}
+	ph, err := c.GetPullHead(context.Background(), "acme", "api", 42)
+	if err != nil {
+		t.Fatalf("GetPullHead: %v", err)
+	}
+	if ph.SHA != "abcdef1234567890" {
+		t.Errorf("sha = %q", ph.SHA)
+	}
+	if ph.CloneURL != "https://github.com/forker/api.git" {
+		t.Errorf("cloneURL = %q", ph.CloneURL)
+	}
+}
+
+func TestGetPullHead_InvalidCoords(t *testing.T) {
+	c := &APIClient{HTTPClient: http.DefaultClient, BaseURL: "https://example.test"}
+	if _, err := c.GetPullHead(context.Background(), "", "api", 42); err == nil {
+		t.Fatal("expected error on empty owner")
+	}
+}
+
 func TestOwnerRepoFromAPIURL(t *testing.T) {
 	cases := []struct {
 		in          string

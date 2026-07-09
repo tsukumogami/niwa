@@ -24,21 +24,21 @@ func RepoKey(owner, repo string) string {
 // dispatch this run. It is a pure function so the deterministic selection
 // contract is table-testable:
 //
-//   - keep only PRs whose repository is in the workspace (workspaceRepos, keyed
-//     by RepoKey) -- a directly-requested PR outside the workspace is dropped;
+//   - keep only PRs whose repository is in the workspace (scope) -- a
+//     directly-requested PR outside the workspace is dropped;
 //   - drop PRs already recorded in the handled-set (handled, keyed by
 //     HandledKey);
 //   - order the remainder oldest-PR-first by CreatedAt, with a stable tie-break
 //     on repo then number so a repeat run over unchanged state selects the same
 //     set;
 //   - take at most bound.
-func Select(prs []github.PRRef, workspaceRepos, handled map[string]bool, bound int) []github.PRRef {
+func Select(prs []github.PRRef, scope *WorkspaceScope, handled map[string]bool, bound int) []github.PRRef {
 	if bound <= 0 {
 		bound = DefaultPerRunBound
 	}
 	var kept []github.PRRef
 	for _, pr := range prs {
-		if !workspaceRepos[RepoKey(pr.Owner, pr.Repo)] {
+		if !scope.Contains(pr.Owner, pr.Repo) {
 			continue
 		}
 		if handled[HandledKey(pr.Owner, pr.Repo, pr.Number)] {

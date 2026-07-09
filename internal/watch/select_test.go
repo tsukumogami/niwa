@@ -6,12 +6,8 @@ import (
 	"github.com/tsukumogami/niwa/internal/github"
 )
 
-func ws(keys ...string) map[string]bool {
-	m := map[string]bool{}
-	for _, k := range keys {
-		m[k] = true
-	}
-	return m
+func ws(keys ...string) *WorkspaceScope {
+	return NewWorkspaceScope(keys, nil)
 }
 
 func TestSelect_IntersectsWorkspaceAndDropsHandled(t *testing.T) {

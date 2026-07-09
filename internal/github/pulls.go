@@ -139,6 +139,59 @@ func (c *APIClient) SearchReviewRequestedPRs(ctx context.Context, login string) 
 	return all, nil
 }
 
+// PullHead identifies the head commit of a PR: the exact SHA (so the fetch pins
+// it against a force-push race) and the clone URL of the repo the head lives in
+// (the fork, for a cross-repo PR).
+type PullHead struct {
+	SHA      string
+	CloneURL string
+}
+
+// GetPullHead returns the head commit SHA and clone URL for a PR
+// (GET /repos/{owner}/{repo}/pulls/{number}). The SHA is what the hardened
+// fetch pins.
+func (c *APIClient) GetPullHead(ctx context.Context, owner, repo string, number int) (PullHead, error) {
+	var ph PullHead
+	if owner == "" || repo == "" || number <= 0 {
+		return ph, fmt.Errorf("GetPullHead: invalid PR coordinates %q/%q#%d", owner, repo, number)
+	}
+	url := fmt.Sprintf("%s/repos/%s/%s/pulls/%d", c.BaseURL, owner, repo, number)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return ph, fmt.Errorf("creating request: %w", err)
+	}
+	c.applyAuth(req)
+	req.Header.Set("Accept", "application/vnd.github+json")
+
+	resp, err := c.HTTPClient.Do(req)
+	if err != nil {
+		return ph, fmt.Errorf("querying PR: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return ph, fmt.Errorf("GitHub PR GET returned status %d", resp.StatusCode)
+	}
+	var body struct {
+		Head struct {
+			SHA  string `json:"sha"`
+			Repo *struct {
+				CloneURL string `json:"clone_url"`
+			} `json:"repo"`
+		} `json:"head"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		return ph, fmt.Errorf("decoding PR: %w", err)
+	}
+	if body.Head.SHA == "" {
+		return ph, fmt.Errorf("PR %s/%s#%d has no head sha", owner, repo, number)
+	}
+	ph.SHA = body.Head.SHA
+	if body.Head.Repo != nil {
+		ph.CloneURL = body.Head.Repo.CloneURL
+	}
+	return ph, nil
+}
+
 // CreateReview posts a review to a pull request. event is supplied by the
 // caller (trusted niwa code), never derived from body; body is treated as an
 // opaque payload. This is the trusted post step that runs outside the contained
