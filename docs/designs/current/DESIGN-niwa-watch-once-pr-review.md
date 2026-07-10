@@ -11,20 +11,28 @@ problem: |
 decision: |
   Add a `niwa watch --once` verb that polls GitHub (`user-review-requested`),
   intersects with the workspace's repos, and for each new PR provisions an
-  instance, pre-fetches the PR head with the trusted CLI (outside any
-  sandbox), merges a no-egress sandbox profile into the instance's
-  `.claude/settings.json`, and launches the review agent detached with an
-  allowlisted environment that excludes the GitHub token. A metadata-only
-  prompt carries no author-controlled text. Posting is a separate trusted
-  subcommand (`niwa watch post`) that runs outside the sandbox on the
-  developer-approved draft.
+  instance and launches a detached review agent. Containment is governed by
+  two nested global switches: `watch_containment` (on|off, default on) and,
+  when on, `watch_sandbox` (required|optional|disabled, default required).
+  With containment on, niwa pre-fetches the PR head with the trusted CLI
+  (outside any sandbox), launches the agent with a credential-scrubbed
+  environment (no GitHub token), a synthetic HOME, and a fail-closed
+  permission mode, and merges the OS no-egress sandbox profile into the
+  instance's `.claude/settings.json` when `watch_sandbox` calls for it; the
+  agent drafts its review to a known file the developer posts from their own
+  session. With containment off the agent runs an ordinary dispatch with the
+  developer's real environment and posts the review itself. A metadata-only
+  prompt carries no author-controlled text in every mode.
 rationale: |
-  The sandbox profile rides niwa's existing settings-merge seam; pre-fetching
-  the PR with trusted code lets the agent run with a truly empty egress
-  allowlist (the agent's tools reach nothing), so the GitHub token is never
-  needed in-session and the boundary does not rest on the model. Reusing the
-  dispatch provisioning path keeps the change to one PR while adding the
-  containment as net-new dispatch surface.
+  Containment stays on by default because the review reads untrusted PR
+  content; the two switches let an operator relax it deliberately for trusted
+  sources rather than by accident. The sandbox profile rides niwa's existing
+  settings-merge seam; pre-fetching the PR with trusted code lets a contained
+  agent run with a truly empty egress allowlist and no GitHub token, so the
+  boundary does not rest on the model. Posting falls out of the model -- the
+  token's presence decides who posts -- so niwa needs no posting verb or
+  posting credential. Reusing the dispatch provisioning path keeps the change
+  focused while adding the containment as net-new dispatch surface.
 ---
 
 # DESIGN: niwa watch --once PR-review dispatch
@@ -36,17 +44,22 @@ Current
 Technical design for the first version of proactive PR-review dispatch in
 niwa, implementing the Accepted PRD.
 
-**Amendment (sandbox capability, provisioning, and fallback policy).** A
+**Amendment (containment model, sandbox capability, and provisioning).** A
 feasibility investigation established that the OS sandbox's requirement is a
 root-gated kernel capability that varies by host, not a missing package. The
 earlier "sandbox works or refuse, Windows-only caveat" framing is superseded
-by **Decision 8**: adaptive per-host enforcement levels, unprivileged-by-default
-provisioning of `bwrap`/`socat` via tsuku with an opt-in `niwa setup-sandbox`
-for the one privileged step on hardened Linux, an operator-owned
-`uncontained_policy` (default `refuse`) governing the no-enforcement fallback, and
-`sandbox.failIfUnavailable` to close the harness fail-open. This expands the
-change beyond a single niwa PR (a tsuku recipe and a `setup-sandbox` command
-join it); the Implementation Approach and the downstream PLAN carry the added
+by **Decision 8**: containment is now **optional**, expressed as two nested
+global switches -- `watch_containment` (on|off) governing the credential
+scrub + synthetic HOME + fail-closed bundle, and `watch_sandbox`
+(required|optional|disabled) governing the OS no-egress cage. The design adds
+adaptive per-host backend selection, unprivileged-by-default provisioning of
+`bwrap`/`socat` via tsuku with an opt-in `niwa setup-sandbox` for the one
+privileged step on hardened Linux, and `sandbox.failIfUnavailable` to close
+the harness fail-open. Posting falls out of the model (no `post` subcommand):
+a contained agent drafts, the developer posts from their own session; an
+uncontained agent (containment off) posts directly. This expands the change
+beyond a single niwa PR (a tsuku recipe and a `setup-sandbox` command join
+it); the Implementation Approach and the downstream PLAN carry the added
 work.
 
 ## Context and Problem Statement
@@ -64,13 +77,15 @@ developer's credentials and unrestricted egress.
 The feature must: (1) find open PRs where the developer is the
 directly-requested reviewer, restricted to the workspace's repos; (2)
 dispatch one review agent per new PR from a prompt that carries only
-platform-vouched identifiers; (3) run that agent under an enforced profile
-with no network egress, filesystem writes scoped to its clone, a fail-closed
-permission mode, and an environment scrubbed to an explicit allowlist; (4)
-let the developer post the drafted review with a trusted action that never
-lifts the session's containment; and (5) skip already-handled PRs. The
-enforcement is the crux, and it must hold at the tool/OS layer, not rest on
-the model's judgment.
+platform-vouched identifiers; (3) by default (containment on) run that agent
+under an enforced profile with an environment scrubbed to an explicit
+allowlist, a synthetic HOME, a fail-closed permission mode, and -- when
+`watch_sandbox` calls for it -- an OS no-egress sandbox with filesystem
+writes scoped to the instance; (4) have that contained agent draft its review
+for the developer to post from their own session, while letting an operator
+turn containment off for trusted sources so the agent posts directly; and (5)
+skip already-handled PRs. When containment is on, the enforcement is the crux,
+and it must hold at the tool/OS layer, not rest on the model's judgment.
 
 The relevant existing surface (grounding for the decisions below): the
 dispatch flow and its `--detach` semantics in `internal/cli/dispatch.go`;
@@ -97,8 +112,11 @@ existing per-instance `.claude/settings.json` write/merge
 - **Single-PR implementability.** The change should reuse niwa's dispatch
   provisioning and settings-merge machinery rather than build a parallel
   stack.
-- **Fail closed.** Where containment cannot be enforced, the verb must
-  refuse to dispatch rather than dispatch uncontained.
+- **Fail closed by default.** With the default switches (`watch_containment
+  = on`, `watch_sandbox = required`), where the OS sandbox cannot be
+  enforced the verb must refuse to dispatch rather than silently dispatch a
+  session that is less contained than requested. Weakening containment is
+  only ever an explicit operator setting, never a silent degradation.
 - **No daemon.** `watch --once` is a stateless single-shot verb.
 
 ## Considered Options
@@ -208,8 +226,12 @@ existing per-instance `.claude/settings.json` write/merge
   closed.
 
   The existing `cmd.Env = os.Environ()` behavior is left unchanged for the
-  ordinary `niwa dispatch` path; the allowlist is a new parameter used only
-  by the contained watch launch.
+  ordinary `niwa dispatch` path; the allowlist + synthetic HOME are used only
+  when `watch_containment` is on. When `watch_containment` is off, the watch
+  launch reuses the ordinary full-environment path (no allowlist, real
+  `HOME`), because that mode is by definition an ordinary dispatch with the
+  developer's real credentials -- the GitHub token included, so the agent can
+  post (Decision 6).
 
 ### Decision 4 -- The poll query and the workspace intersection
 
@@ -232,35 +254,65 @@ existing per-instance `.claude/settings.json` write/merge
   state).** Rejected as premature -- the only question this version asks is
   "handled or not," and richer dedup/expiry state is explicitly deferred.
 
-### Decision 6 -- The post-on-approval affordance
+### Decision 6 -- How a review gets posted
 
-- **Option 6A (chosen): a trusted `niwa watch post <handle>` subcommand**
-  (with `niwa watch discard <handle>`) that runs in the dispatcher's
-  trusted context, reads the drafted review from the known location and the
-  PR coordinates niwa persisted at dispatch, and posts via the GitHub API
-  with the dispatcher's token. The token lives only in this trusted path,
-  never in the contained session.
+Posting is not a niwa verb; it falls out of the containment model. The GitHub
+token's presence or absence in the session -- which `watch_containment`
+already controls -- is what decides who posts, so there is no separate posting
+step to design, credential to mint, or `post` subcommand to build.
 
-  The draft is authored by the untrusted session, so the post step treats
-  it as **inert data, never as control**: the review `event` (the field
-  that would make a review APPROVE / REQUEST_CHANGES / COMMENT) is fixed by
-  trusted code -- it is **not** read from the draft -- and defaults to a
-  non-approving `COMMENT`, so a malicious draft cannot dictate an approval;
-  a stronger disposition, if offered, is an explicit developer choice on the
-  `post` command, not something the draft can set. The draft body is passed
-  as an opaque API body. Before reading, niwa validates that the recorded
-  `draftPath` resolves inside the instance root (no traversal) and that the
-  handle maps to a known staged-review record.
-- **Option 6B (rejected): print a ready-to-run `gh pr review` command** for
-  the developer to paste. Rejected because it makes "post it" a copy step
-  rather than one gesture and pushes credential handling onto the developer;
-  the subcommand keeps the one-gesture promise while preserving the
-  boundary.
+- **Option 6A (chosen): let the token decide who posts.** When
+  `watch_containment` is on, the session carries no GitHub token (Decision 3)
+  and, under the OS sandbox, cannot egress (Decision 2), so it can only draft
+  its review to the known location. The developer reads that draft and posts
+  it from their **own trusted session** -- already outside the containment,
+  already holding their real credentials -- so niwa never lifts the session's
+  containment and never provisions a posting credential. When
+  `watch_containment` is off, the session runs an ordinary dispatch with the
+  developer's real environment (token included), so the agent **reviews and
+  posts the review directly itself** using its normal tooling (e.g. `gh`); the
+  dispatch is still detached, and in this trusted mode the agent posts
+  autonomously. Because niwa posts nothing, it exposes no `post` or `discard`
+  subcommand; a staged session the developer no longer wants is dismissed from
+  the Claude Code agents view.
+- **Option 6B (rejected): a trusted `niwa watch post <handle>` subcommand**
+  that reads the drafted review and posts it via the GitHub API with a
+  narrowly-scoped credential niwa provisions and keeps out of the contained
+  session. Rejected because it makes niwa a credential broker for a step the
+  developer's own already-trusted session can do directly, and it adds a
+  subcommand, a persisted staged-review record keyed to it, and the machinery
+  to fix the review `event` in trusted code so a hostile draft cannot force an
+  approval -- all of which the "the developer posts their own draft" model
+  removes. The residual risk it was guarding (a malicious draft dictating an
+  APPROVE) is instead handled by the developer reading the draft before
+  posting.
+- **Option 6C (rejected): print a ready-to-run `gh pr review` command** for
+  the developer to paste. Rejected as a strictly worse version of 6A's
+  contained path: it still assumes niwa assembles a post command, but adds a
+  brittle copy-paste step and hard-codes the disposition, where letting the
+  developer post from their own session leaves them in full control of what
+  and how they post.
 
-### Decision 7 -- Fail-closed detection
+### Decision 7 -- Preflight resolution and fail-closed detection
 
-  **The boundary is delegated to the harness -- so it must be *verified*,
-  not assumed.** niwa has no OS sandbox of its own; egress denial and the
+The preflight resolves the two containment switches (defined in Decision 8)
+and follows this authoritative matrix. It is the single source of truth for
+what a dispatched session gets and for the one cell that refuses:
+
+| `watch_containment` | `watch_sandbox` | The dispatched review session gets |
+|---|---|---|
+| on | required | Credential scrub + synthetic HOME + fail-closed, **and** the OS sandbox. If the sandbox cannot be enforced on the host, `watch --once` **refuses** to dispatch that review (do not dispatch). |
+| on | optional | Credential scrub + synthetic HOME + fail-closed. The OS sandbox is added when available; otherwise the review proceeds **contained without it**. |
+| on | disabled | Credential scrub + synthetic HOME + fail-closed. The OS sandbox is **never attempted**. |
+| off | (not consulted) | **Nothing** -- a normal `niwa dispatch` with the developer's real environment and credentials, as if they ran it themselves. |
+
+The live-enforcement proof below applies only where the OS sandbox is in force
+(the top two rows, when the sandbox is actually enabled); the credential scrub
+and fail-closed mode apply to all three `on` rows; the `off` row is uncontained
+by the operator's explicit choice and has no boundary to verify.
+
+  **When the OS sandbox is in force, the boundary is delegated to the harness
+  -- so it must be *verified*, not assumed.** niwa has no OS sandbox of its own; egress denial and the
   fail-closed permission mode are enforced by the Claude Code harness's
   `sandbox.*` settings. The design therefore depends on a harness version
   that (a) supports `sandbox.enabled` + `sandbox.network.allowedDomains`,
@@ -273,18 +325,20 @@ existing per-instance `.claude/settings.json` write/merge
 
 - **Option 7A (chosen): preflight, re-verify the effective settings, and
   prove enforcement live.** Three checkpoints:
-  - *Preflight (before any instance is created):* actively probe that the OS
-    sandbox can be created now -- not merely that the OS is nominally
-    supported -- and select the enforcement level for the host (see Decision 8
-    for the capability levels and the operator-owned policy that governs what
-    happens when no level is available). Concretely, on macOS the built-in
-    `sandbox-exec` (Seatbelt) is available unprivileged; on Linux the probe
-    checks the backend and dependency the harness requires (`bwrap` and
-    `socat` on PATH) and functionally verifies a capability-bearing,
+  - *Preflight (before any instance is created):* resolve `watch_containment`
+    and `watch_sandbox`, then -- only when the OS sandbox is called for --
+    actively probe that it can be created now, not merely that the OS is
+    nominally supported, and select the backend for the host (see Decision 8
+    for the per-host backends and the switch semantics). Concretely, on macOS
+    the built-in `sandbox-exec` (Seatbelt) is available unprivileged; on Linux
+    the probe checks the backend and dependency the harness requires (`bwrap`
+    and `socat` on PATH) and functionally verifies a capability-bearing,
     network-isolable user namespace (`bwrap --unshare-net` succeeds -- it
-    fails on a kernel that restricts unprivileged user namespaces). When no
-    enforceable level exists, the configured fallback policy decides between
-    refusing and proceeding (Decision 8); the default is to refuse.
+    fails on a kernel that restricts unprivileged user namespaces). When the
+    sandbox cannot be enforced, the matrix above decides: **refuse** under
+    `watch_sandbox = required`, or proceed contained-without-sandbox under
+    `optional`. Under `watch_sandbox = disabled` or `watch_containment = off`
+    the probe is skipped entirely.
   - *Effective-settings re-verification (per instance, before launch):* the
     containment lives in a *merged* `.claude/settings.json`, and the harness
     applies its own downstream merge (managed/enterprise settings, and the
@@ -307,11 +361,13 @@ existing per-instance `.claude/settings.json` write/merge
   preflight-plus-re-verify-plus-live-proof layering guarantees no
   uncontained session is silently trusted.
 
-### Decision 8 -- Sandbox capability across hosts, provisioning, and the fallback policy
+### Decision 8 -- The containment switches, sandbox capability across hosts, and provisioning
 
 *Added after a feasibility investigation (see the Amendment note in Status).
 The earlier framing -- "the sandbox works or the feature refuses" with a
-Windows-only caveat -- was too coarse. Scope is real Linux and macOS hosts.*
+Windows-only caveat, plus an `uncontained_policy` trichotomy -- was too
+coarse. Containment is now optional and expressed as two nested switches.
+Scope is real Linux and macOS hosts.*
 
 **The empirical capability picture.** The Claude Code sandbox's requirements
 vary by host, and the difference is a **root-gated kernel capability**, not a
@@ -333,11 +389,12 @@ missing package:
 
 **Decision (three parts):**
 
-- **8A -- Adaptive enforcement level.** The preflight (Decision 7) detects the
-  strongest enforceable boundary and dispatches under it: Seatbelt on macOS,
-  the `bwrap`+`socat` no-egress profile on capable Linux. When neither is
-  available, the run does not silently weaken -- it consults the fallback
-  policy (8C).
+- **8A -- Adaptive per-host backend.** When the OS sandbox is enabled, the
+  preflight (Decision 7) detects the strongest enforceable backend and
+  dispatches under it: Seatbelt on macOS, the `bwrap`+`socat` no-egress
+  profile on capable Linux. When neither is available, the run does not
+  silently weaken -- the `watch_sandbox` switch (8C) decides between refusing
+  and proceeding contained-without-sandbox.
 - **8B -- Provisioning, unprivileged by default.** `bwrap` and `socat` are
   declared as **Linux-only runtime dependencies** of niwa's tsuku recipe
   (both are installable as prebuilt bottles), so a normal `tsuku install`
@@ -347,37 +404,59 @@ missing package:
   hardened Linux host -- is an **opt-in** `niwa setup-sandbox` command
   (install the AppArmor profile / set the sysctl) run once, never per
   dispatch. The default install requires no elevation; on macOS and permissive
-  Linux nothing more is needed; on hardened Linux the feature refuses (8C)
-  until `niwa setup-sandbox` is run. This keeps "standard install leaves a
-  ready system" true wherever the kernel permits it, and reduces the
-  hardened-Linux case to a single documented command rather than a
-  multi-step manual install.
-- **8C -- Operator-owned fallback policy.** What happens when no enforceable
-  level exists is a **policy decision the operator owns**, not a hard-coded
-  refusal. A durable setting `[watch] uncontained_policy` (resolved on the
-  usual `flag > config header > default` stack) takes one of:
-  `refuse` (the safe default -- fail closed), `warn` (dispatch, but emit and
-  record a prominent warning so the operator knowingly accepts the weaker
-  bar), or `allow` (dispatch without the warning, for a standing informed
-  decision). "Uncontained" means only the *OS-level egress denial* is absent;
-  the metadata-only prompt, the credential-scrubbed environment, and the
-  human review-before-post gate all still apply. The default stays `refuse`
-  so loosening is always an explicit opt-out, never an accident.
+  Linux nothing more is needed; on hardened Linux, under the default
+  `watch_sandbox = required`, the feature refuses (8C) until `niwa
+  setup-sandbox` is run. This keeps "standard install leaves a ready system"
+  true wherever the kernel permits it, and reduces the hardened-Linux case to
+  a single documented command rather than a multi-step manual install.
+- **8C -- The two containment switches.** Containment is **optional**,
+  expressed today as two niwa **global config settings** (each resolved on the
+  usual `flag > config header > default` stack):
+  - **`watch_containment`** (outer): `on` (default) or `off`. "Containment" is
+    the no-secrets/no-auto-approve bundle -- the credential-scrubbed
+    environment, the synthetic HOME, and the fail-closed permission mode
+    (Decision 3). When `off`, none of it applies: the watch launch is an
+    ordinary `niwa dispatch` with the developer's real environment and
+    credentials, and the agent posts its review directly (Decision 6).
+  - **`watch_sandbox`** (inner, consulted **only** when containment is on):
+    `required` (default), `optional`, or `disabled`. This is the OS no-egress
+    network cage (bwrap+socat on Linux, Seatbelt on macOS). `required` refuses
+    to dispatch if the cage cannot be enforced on the host; `optional` adds
+    the cage when available and otherwise proceeds contained-without-cage;
+    `disabled` never attempts it. The preflight resolves both switches and
+    follows the matrix in Decision 7.
 
-**Closing the fail-open at the harness layer.** Independently of the level, the
-dispatched instance settings set `sandbox.failIfUnavailable: true` and
-`allowUnsandboxedCommands: false`, so Claude Code *refuses to run* rather than
-silently disabling the sandbox and proceeding with a warning. This, plus the
-niwa-side preflight (Decision 7) and the `uncontained_policy` gate, means an
-uncontained session is only ever produced by an explicit operator choice.
+  The default (`on` + `required`) is the strongest posture, so loosening is
+  always an explicit operator choice, never an accident.
+
+  **Future work -- granular policy.** Both switches are a **single global
+  setting** today. Making the policy granular -- per repository, per PR
+  author, or per team/org (e.g. "contained for external contributors, off for
+  trusted teammates") -- is the natural next step this global switch is a
+  first step toward. It is deliberately out of scope here: the config surface,
+  the resolution precedence across scopes, and the per-PR author lookup are
+  all deferred.
+
+**Closing the fail-open at the harness layer.** Whenever the OS sandbox is
+enabled, the dispatched instance settings set `sandbox.failIfUnavailable:
+true` and `allowUnsandboxedCommands: false`, so Claude Code *refuses to run*
+rather than silently disabling the sandbox and proceeding with a warning.
+This, plus the niwa-side preflight (Decision 7), means a session is never
+*less* contained than its resolved switches call for -- a session runs
+uncontained only when `watch_containment = off`, and without the OS cage only
+when `watch_sandbox` explicitly permits it.
 
 ## Decision Outcome
 
 `niwa watch --once` is a new verb (`internal/cli/watch.go`) that runs one
 poll-and-dispatch pass:
 
-1. **Preflight (fail-closed).** Verify the OS sandbox can be enforced on
-   this platform. If not, print the reason and exit non-zero (Decision 7).
+1. **Preflight (fail-closed).** Resolve `watch_containment` and
+   `watch_sandbox` and follow the Decision 7 matrix. When the OS sandbox is
+   called for, verify it can be enforced on this platform; if it cannot,
+   refuse (print the reason, exit non-zero) under `watch_sandbox = required`
+   or proceed contained-without-sandbox under `optional`. When
+   `watch_containment = off`, skip the sandbox entirely.
 2. **Poll.** Resolve the login and search GitHub for open PRs with
    `user-review-requested:<login>`; intersect the results with the
    workspace's repos (Decision 4).
@@ -385,34 +464,39 @@ poll-and-dispatch pass:
    by PR `created_at` (oldest first -- a deterministic key available from
    the single search) and take at most the per-run bound (default 3).
 4. **Per selected PR:** provision an instance (reusing dispatch's
-   provisioning); pre-fetch the PR head into the clone with the trusted CLI
-   (Decision 2); merge the no-egress sandbox profile into the instance's
-   `.claude/settings.json` (Decision 1); write a metadata-only prompt
-   (Decision `prompt`); launch `claude --bg` detached with an allowlisted
-   environment (Decision 3); persist the PR coordinates and draft path
+   provisioning); when containment is on, pre-fetch the PR head into the clone
+   with the trusted CLI (Decision 2) and merge the OS no-egress sandbox
+   profile into the instance's `.claude/settings.json` when `watch_sandbox`
+   calls for it (Decision 1); write a metadata-only prompt (Decision
+   `prompt`); launch `claude --bg` detached -- with an allowlisted environment
+   and synthetic HOME when containment is on, or the ordinary full environment
+   when it is off (Decision 3); persist the PR coordinates and draft path
    alongside the session mapping; record the PR in the handled-set only on
    success (Decision 5).
 5. **Report.** On an empty result, print "nothing to stage" and exit zero.
    On a poll or dispatch failure, print the error and exit non-zero without
    recording the affected PR as handled.
 
-Posting is out-of-band: `niwa watch post <handle>` reads the approved draft
-and posts it via the GitHub API from the trusted context (Decision 6);
-`niwa watch discard <handle>` records the PR handled and posts nothing.
+Posting is not a niwa verb (Decision 6). When containment is on, the session
+holds no token and drafts to the known location; the developer posts that
+draft from their own trusted session. When containment is off, the agent
+posts its review directly. niwa has no `post` or `discard` subcommand; a
+staged session is dismissed from the Claude Code agents view.
 
 ## Solution Architecture
 
 ### Components
 
-- **`internal/cli/watch.go` (new).** Registers `watchCmd` with `--once` and
-  the `post`/`discard` subcommands via `init()` + `rootCmd.AddCommand`.
-  Orchestrates the pass above.
-- **Capability tiering + `niwa setup-sandbox` (new, Decision 8).** The
-  preflight resolves the enforcement level (Seatbelt / bwrap-socat / none) and
-  consults `uncontained_policy`; `niwa setup-sandbox` is the opt-in privileged
-  command that unlocks the capability on hardened Linux (AppArmor profile or
-  sysctl). The `uncontained_policy` value is read from niwa config on the
-  `flag > config header > default(refuse)` stack.
+- **`internal/cli/watch.go` (new).** Registers `watchCmd` with `--once` (no
+  subcommands) via `init()` + `rootCmd.AddCommand`. Orchestrates the pass
+  above.
+- **Switch resolution + `niwa setup-sandbox` (new, Decision 8).** The
+  preflight reads `watch_containment` and `watch_sandbox` from niwa config
+  (each on the `flag > config header > default` stack; defaults `on` and
+  `required`) and, when the OS sandbox is called for, resolves the per-host
+  backend (Seatbelt / bwrap-socat / none). `niwa setup-sandbox` is the opt-in
+  privileged command that unlocks the capability on hardened Linux (AppArmor
+  profile or sysctl).
 - **niwa tsuku recipe (packaging, Decision 8B).** A curated `recipes/n/niwa.toml`
   (shadowing today's auto-generated download recipe) declaring
   `runtime_dependencies = ["bubblewrap", "socat"]` scoped to Linux, plus a new
@@ -421,68 +505,85 @@ and posts it via the GitHub API from the trusted context (Decision 6);
   `.claude/settings.json` also sets `sandbox.failIfUnavailable: true` and
   `allowUnsandboxedCommands: false` so the harness refuses rather than silently
   disabling the sandbox.
-- **`internal/github` (extended).** Three net-new client methods (the
-  client has only `ListRepos`/`GetRepo` today): `CurrentLogin(ctx)
-  (string, error)` wrapping `GET /user`; `SearchReviewRequestedPRs(ctx,
-  login) ([]PRRef, error)` wrapping `GET /search/issues`; and
-  `CreateReview(ctx, owner, repo, number int, body, event string) error`
-  wrapping `POST /repos/{owner}/{repo}/pulls/{number}/reviews` for the
-  trusted post step, where `event` is supplied by trusted niwa code (default
-  `COMMENT`) and never read from the draft. `PRRef{Owner, Repo, Number, URL,
-  CreatedAt}` -- `CreatedAt` is the PR's `created_at` from the search
-  payload (the review-*request* time is not in that payload; ordering uses
-  `created_at` as a deterministic, single-call proxy). Auth reuses
-  `resolveGitHubToken` and `NewAPIClient`.
-- **Containment on the dispatch path (net-new dispatch surface).**
-  - A containment-profile builder producing the sandbox settings fragment
-    (`sandbox.enabled: true`, `sandbox.network.allowedDomains: []`,
-    fail-closed permission mode), applied to the instance settings via the
-    same merge helper `applier.Create` uses (`MergeInstanceOverrides` /
-    the root-settings writer) -- watch is a *second writer* to
-    `.claude/settings.json`, ordered Create -> watch-merge -> re-verify ->
-    launch.
+- **`internal/github` (extended).** Two net-new client methods (the client
+  has only `ListRepos`/`GetRepo` today): `CurrentLogin(ctx) (string, error)`
+  wrapping `GET /user`; and `SearchReviewRequestedPRs(ctx, login) ([]PRRef,
+  error)` wrapping `GET /search/issues`. No `CreateReview` method is needed --
+  niwa posts nothing (Decision 6): a contained agent drafts for the developer
+  to post from their own session, and an uncontained agent posts with its own
+  tooling. `PRRef{Owner, Repo, Number, URL, CreatedAt}` -- `CreatedAt` is the
+  PR's `created_at` from the search payload (the review-*request* time is not
+  in that payload; ordering uses `created_at` as a deterministic, single-call
+  proxy). Auth reuses `resolveGitHubToken` and `NewAPIClient` (for the poll,
+  in trusted niwa code -- separate from the token the off-mode session
+  inherits).
+- **Containment on the dispatch path (net-new dispatch surface, active only
+  when `watch_containment` is on).**
+  - A containment-profile builder producing the settings fragment applied to
+    the instance settings via the same merge helper `applier.Create` uses
+    (`MergeInstanceOverrides` / the root-settings writer) -- watch is a
+    *second writer* to `.claude/settings.json`, ordered Create -> watch-merge
+    -> re-verify -> launch. The fail-closed permission settings are written
+    whenever containment is on; the OS-cage stanza (`sandbox.enabled: true`,
+    `sandbox.network.allowedDomains: []`, `sandbox.failIfUnavailable: true`)
+    is written only when `watch_sandbox` is enabled for the run.
   - An env-allowlist on the launch seam. The launch func gains an options
     parameter, e.g. `dispatchLaunch(ctx, instanceDir, prompt, passthrough,
     LaunchOpts)` where `LaunchOpts{EnvOverride []string}`; `EnvOverride ==
-    nil` preserves today's `cmd.Env = os.Environ()` so the ordinary dispatch
-    path is unchanged, and the watch path passes the allowlisted env
-    (including the synthetic `HOME`).
-  - A trusted, hardened PR-head fetch + filter-neutered checkout (Decision
-    2) run before launch.
+    nil` preserves today's `cmd.Env = os.Environ()`, so both the ordinary
+    dispatch path **and** the `watch_containment = off` path stay unchanged,
+    and the contained watch path passes the allowlisted env (including the
+    synthetic `HOME`).
+  - A trusted, hardened PR-head fetch + filter-neutered checkout (Decision 2)
+    run before launch **only when containment is on** (so the contained agent
+    needs no network); when containment is off, the agent fetches the PR
+    itself with its inherited credentials.
 - **Handled-set store.** Read/append helpers over
   `<workspaceRoot>/.niwa/watch-handled` (flat `owner/repo#number` lines).
 - **Staged-review record + handle.** The **handle is the dispatch session
   short id** shown in the agent view (the `shortID` from the existing
   `SessionMapping` capture). At dispatch niwa writes a small record
   `{handle, owner, repo, number, url, draftPath}` to
-  `<workspaceRoot>/.niwa/watch/<handle>.json`; `post <handle>` /
-  `discard <handle>` load it to resolve the PR and draft. The record schema
-  and store are an explicit early deliverable (the post/discard phase
-  depends on them).
+  `<workspaceRoot>/.niwa/watch/<handle>.json`. With no `post`/`discard`
+  subcommand consuming it, the record is discoverability metadata: it lets the
+  developer (or a thin `--json`-style report, if added later) map a staged
+  session in the agent view back to its PR and draft path. `draftPath` is
+  populated only for contained runs (the off-mode agent posts directly and
+  writes no draft).
 
 ### The metadata-only prompt
 
 Assembled by a pure function of the `PRRef` (satisfying the determinism
 requirement): a fixed instruction template interpolating only `owner/repo`,
-the PR number, and the PR URL. It instructs the agent to read the PR (title,
-body, diff, linked issue, CI status) from its filter-neutered local checkout
-of the pre-fetched PR head, treat all of it as untrusted, write its review to
-the known draft path,
-and stop before posting. No title, body, diff, or author name is
-interpolated.
+the PR number, and the PR URL. No title, body, diff, or author name is
+interpolated. The template has two fixed variants, selected by
+`watch_containment`:
 
-### The known draft location
+- **Contained (on):** read the PR (title, body, diff, linked issue, CI
+  status) from the filter-neutered local checkout of the pre-fetched PR head,
+  treat all of it as untrusted, write the review to the known draft path, and
+  **stop before posting** (the session has no credential to post with).
+- **Uncontained (off):** read the PR from the host with the inherited
+  credentials and **post the review directly** on completion.
+
+Both variants are fixed strings chosen by trusted code, so which one is used
+is never the untrusted content's decision.
+
+### The known draft location (contained runs)
 
 niwa defines a fixed path in the instance (e.g.
-`<instanceRoot>/watch-review-draft.md`) recorded in the staged-review
-record. The agent writes there; `niwa watch post` reads there.
+`<instanceRoot>/watch-review-draft.md`) recorded in the staged-review record.
+The contained agent writes there; the developer reads there before posting
+from their own session. (Off-mode runs write no draft -- the agent posts
+directly.)
 
 ### Data flow
 
 ```
 watch --once
-  preflight sandbox  --(unsupported)--> stderr + non-zero exit
-        | ok
+  resolve watch_containment (on|off), watch_sandbox (required|optional|disabled)
+  preflight: on+required+sandbox-unenforceable --> stderr + non-zero exit (refuse)
+        | otherwise proceed
   GET /user -> login
   GET /search/issues (user-review-requested:login, is:open, is:pr)
         |
@@ -490,20 +591,24 @@ watch --once
         |
   minus handled-set; order by created_at (oldest first); take <= bound
         |
-  for each PR (trusted CLI, outside sandbox):
+  for each PR:
      provision instance (applier.Create)
-     fetch PR head SHA + filter-neutered checkout   <- untrusted content as data
-     merge no-egress sandbox profile into instance .claude/settings.json
-     re-verify merged sandbox stanza
-     write metadata-only prompt
-     launch claude --bg  --detach  with allowlisted env  (NO GitHub token)
+     if containment on:
+        fetch PR head SHA + filter-neutered checkout  <- untrusted content as data
+        if sandbox enabled: merge no-egress profile into .claude/settings.json;
+                            re-verify merged sandbox stanza
+        write contained prompt (draft + stop before posting)
+        launch claude --bg --detach with allowlisted env + synthetic HOME  (NO GitHub token)
+     if containment off:
+        write uncontained prompt (review + post directly)
+        launch claude --bg --detach with ordinary env  (developer's real credentials)
      persist staged-review record; append handled-set (on success)
         |
-  agent view shows the staged session; developer reads the draft
+  agent view shows the staged session
         |
-  niwa watch post <handle>  (trusted, outside sandbox)
-     read draft + PR coords -> POST /repos/{o}/{r}/pulls/{n}/reviews (dispatcher token)
-  niwa watch discard <handle> -> record handled, post nothing
+  containment on  -> developer reads the draft, posts it from their own session
+  containment off -> agent has already posted the review
+  (dismiss an unwanted staged session directly from the agents view)
 ```
 
 ## Implementation Approach
@@ -515,9 +620,9 @@ depend on them.
 0. **State schemas.** Define the handled-set format (`owner/repo#number`
    lines) and the staged-review record (`{handle, owner, repo, number, url,
    draftPath}` at `.niwa/watch/<handle>.json`), with read/write helpers.
-1. **GitHub poll.** Add `CurrentLogin`, `SearchReviewRequestedPRs`, and
-   `CreateReview` to the client; unit-test against the existing fake server
-   (`NIWA_GITHUB_API_URL`).
+1. **GitHub poll.** Add `CurrentLogin` and `SearchReviewRequestedPRs` to the
+   client; unit-test against the existing fake server (`NIWA_GITHUB_API_URL`).
+   No review-posting method is added -- niwa posts nothing (Decision 6).
 2. **Workspace intersection + dedup + bound.** Enumerate workspace repos,
    intersect, apply the handled-set and the `created_at`-ordered bound.
    Pure, table-testable logic.
@@ -528,26 +633,34 @@ depend on them.
    smudge and no egress during fetch; an `export-ignore`-marked malicious
    file is still present in the checked-out tree (not hidden).
 4. **Containment surface.** Add the `LaunchOpts{EnvOverride}` seam (nil =
-   unchanged) with the synthetic `HOME`; the containment-profile builder +
-   settings second-write via the existing merge helper + per-instance
-   re-verification. Unit-test the allowlist (subset + canary absence for
+   unchanged, used for both ordinary dispatch and `watch_containment = off`)
+   with the synthetic `HOME` for the contained path; the containment-profile
+   builder + settings second-write via the existing merge helper + per-instance
+   re-verification, with the OS-cage stanza written only when `watch_sandbox`
+   is enabled. Unit-test the allowlist (subset + canary absence for
    `GITHUB_TOKEN`/`GH_TOKEN`/`SSH_AUTH_SOCK` and an on-disk
    `~/.netrc`/`~/.config/gh` sentinel) and the merged settings document.
-5. **`watch --once` orchestration.** Wire preflight -> poll -> select ->
-   per-PR provision/fetch/merge/re-verify/launch -> record. Fail-closed
-   preflight and fail-loud error paths.
-6. **Post/discard subcommands.** Resolve handle -> staged-review record;
-   post via `CreateReview` with the `event` fixed in code; discard records
-   handled.
-7. **Adversarial / live-enforcement test (the boundary proof).** A hostile-PR
-   fixture whose title/body/diff attempt egress, push, and exfiltration.
-   From inside the running contained session (bypassing the model), the test
-   attempts **real outbound network** -- both a connection to a domain and a
-   **raw socket to a literal IP** -- and a write outside the instance, and
-   asserts each fails at the OS layer (connection blocked / EPERM). This live
-   attempt, not a settings-file assertion, is what proves empty-allowlist =
-   deny-all and that the sandbox is actually enforcing for the `--bg
-   --detach` launch; it gates release.
+5. **Switch resolution + `watch --once` orchestration.** Read
+   `watch_containment`/`watch_sandbox` (flag > config > default). Wire
+   preflight -> poll -> select -> per-PR provision -> (contained:
+   fetch/merge/re-verify/launch-allowlisted | off: launch-ordinary) -> record.
+   Fail-closed preflight (refuse only in the on+required+unenforceable cell)
+   and fail-loud error paths.
+6. **Containment-off path.** The uncontained variant: an ordinary dispatch
+   (nil `EnvOverride`, no sandbox stanza, no pre-fetch) with the uncontained
+   prompt, so the agent reviews and posts directly. Verify it inherits the
+   developer's environment and needs no niwa post step.
+7. **Adversarial / live-enforcement test (the boundary proof, sandboxed path
+   only).** A hostile-PR fixture whose title/body/diff attempt egress, push,
+   and exfiltration, dispatched with containment on and the OS sandbox
+   enforced. From inside the running contained session (bypassing the model),
+   the test attempts **real outbound network** -- both a connection to a
+   domain and a **raw socket to a literal IP** -- and a write outside the
+   instance, and asserts each fails at the OS layer (connection blocked /
+   EPERM). This live attempt, not a settings-file assertion, is what proves
+   empty-allowlist = deny-all and that the sandbox is actually enforcing for
+   the `--bg --detach` launch; it gates release. It does not apply to the
+   `watch_containment = off` path, which is uncontained by design.
 
 ## Security Considerations
 
@@ -568,12 +681,17 @@ behalf (see Decision 2). Inside the session the content is read but never
 treated as instructions; the session cannot act on it because it has no
 egress and no privileged credentials.
 
-**Permission scope / network -- and the delegated dependency.** Containment
-is the OS-level sandbox (`sandbox.enabled`, empty
-`sandbox.network.allowedDomains`, fail-closed permission mode) applied via
-the instance settings merge and re-verified per instance before launch
-(Decision 7). **niwa does not implement the sandbox; it delegates to the
-Claude Code harness.** The whole boundary therefore rests on the harness
+**Permission scope / network -- and the delegated dependency.** The analysis
+below covers the default posture, `watch_containment = on` with the OS
+sandbox enabled (`watch_sandbox = required`, or `optional` and available); an
+operator who sets `watch_containment = off` has explicitly opted out of it for
+a trusted source, and `watch_sandbox = disabled`/`optional`-unavailable keeps
+the credential scrub and fail-closed mode but not the OS cage. When the OS
+sandbox is enabled it is applied via the instance settings merge
+(`sandbox.enabled`, empty `sandbox.network.allowedDomains`, fail-closed
+permission mode) and re-verified per instance before launch (Decision 7).
+**niwa does not implement the sandbox; it delegates to the Claude Code
+harness.** The whole boundary therefore rests on the harness
 (a) treating an empty allowlist as deny-all, (b) actually creating and
 enforcing the sandbox for the `--bg --detach` launch, and (c) not letting a
 downstream settings merge (managed settings, or the `--settings` remote-
@@ -589,17 +707,20 @@ reachable -- that channel is what runs the session -- so "empty allowlist"
 means "no *attacker-useful* egress," not "no packets at all"; it is not an
 exfiltration sink.)
 
-**Credential scoping.** The session environment is an allowlist (model auth
-+ `PATH`/locale + a synthetic `HOME`); the GitHub token, `SSH_AUTH_SOCK`,
-and `GH_*`/`GITHUB_*` are absent, and the synthetic `HOME` plus the
-sandbox's filesystem policy keep on-disk credentials (`~/.config/gh`,
-`~/.netrc`, `~/.ssh`) out of reach (Decision 3). The posting credential
-lives only in the out-of-band trusted `post` step; it never enters the
-contained session. The act boundary holds: the drafting session's
-containment is never lifted, and posting happens in a separate trusted
-context on a developer-approved draft, with the review disposition
-(`event`) fixed by trusted code so a hostile draft cannot force an approval
-(Decision 6).
+**Credential scoping.** When `watch_containment` is on, the session
+environment is an allowlist (model auth + `PATH`/locale + a synthetic
+`HOME`); the GitHub token, `SSH_AUTH_SOCK`, and `GH_*`/`GITHUB_*` are absent,
+and the synthetic `HOME` plus the sandbox's filesystem policy keep on-disk
+credentials (`~/.config/gh`, `~/.netrc`, `~/.ssh`) out of reach (Decision 3).
+Posting never happens inside this session: it holds no token, so the
+developer posts the draft from their **own trusted session** and the drafting
+session's containment is never lifted (Decision 6). Because niwa mints no
+posting credential and runs no post step, there is no scoped token to leak
+and no in-code review `event` to protect -- the developer reading the draft
+before posting is the checkpoint that a hostile draft cannot force an
+unwanted approval. When `watch_containment` is off, the session deliberately
+inherits the developer's real credentials (that is the point of the mode) and
+posts directly; the operator has accepted that trust for the source.
 
 **Data exposure.** The persisted state (handled-set of `owner/repo#number`,
 staged-review records of PR coordinates + draft path) is low-sensitivity
@@ -611,15 +732,20 @@ Code session reading a repo.
 **Accepted residual risks.**
 
 - **Hardened Linux needs a one-time privileged setup.** On a kernel that
-  restricts unprivileged user namespaces (e.g. Ubuntu 24.04), the sandbox
-  cannot run until `niwa setup-sandbox` is run once (Decision 8); until then
-  the feature follows `uncontained_policy` (default: refuse). macOS and
-  permissive Linux need no elevation. This residual is a property of the OS
-  security model, not a niwa limitation -- the capability is root-gated and
-  not user-installable.
-- **Windows.** The OS sandbox is unavailable on Windows; the design fails
-  closed there (refuses to dispatch) rather than running uncontained. Windows
-  self-hosters get no staged reviews until a later version addresses it.
+  restricts unprivileged user namespaces (e.g. Ubuntu 24.04), the OS sandbox
+  cannot run until `niwa setup-sandbox` is run once (Decision 8). Until then,
+  under the default `watch_sandbox = required` the feature refuses to stage
+  those reviews; `optional` stages them contained-without-cage and `disabled`
+  never attempts the cage. macOS and permissive Linux need no elevation. This
+  residual is a property of the OS security model, not a niwa limitation --
+  the capability is root-gated and not user-installable.
+- **Windows.** The OS sandbox is unavailable on Windows; under the default
+  `watch_containment = on` + `watch_sandbox = required` the design fails
+  closed there (refuses to dispatch) rather than running a session less
+  contained than requested. Windows self-hosters get no contained staged
+  reviews until a later version addresses it (they can opt into
+  `watch_sandbox = optional`/`disabled` or `watch_containment = off` at their
+  own risk).
 - **Egress mechanism (proxy vs network namespace).** If the harness enforces
   egress with a default-deny network namespace, raw sockets are blocked and
   the residual is only a narrow SNI/domain-fronting seam through any allowed
@@ -632,15 +758,18 @@ Code session reading a repo.
   hostile PR can still consume model tokens (a cost/DoS vector, not an
   exfiltration one). The per-run staging bound and the handled-set limit the
   blast radius; richer cost controls are deferred.
-- **Draft text is a second-order channel.** The drafted review text is
-  authored by the untrusted session and could carry attacker-influenced
-  prose. The approving developer reads it before the trusted step posts it
-  -- the human is the trust checkpoint for the draft's *content*, while
-  containment covers the session's *actions*. This assumption is load-bearing
-  and specifically means the draft must NOT be auto-ingested by another agent
-  without a human read; the `post` step already treats the draft as inert
-  data (event fixed in code, body opaque, path validated), but a future
-  automated consumer of the draft would reopen this channel.
+- **Draft text is a second-order channel.** With containment on, the drafted
+  review text is authored by the untrusted session and could carry
+  attacker-influenced prose. The developer reads it before posting it from
+  their own session -- the human is the trust checkpoint for the draft's
+  *content*, while containment covers the session's *actions*. This
+  assumption is load-bearing and specifically means the draft must NOT be
+  auto-ingested by another agent, or piped straight into a post, without a
+  human read: nothing in niwa posts the draft automatically (there is no
+  `post` verb), but a future automated consumer of the draft would reopen
+  this channel. With containment off, the operator has chosen to trust the
+  source, so the agent's direct post is accepted without this intermediate
+  read.
 
 ## Consequences
 
@@ -652,27 +781,32 @@ Code session reading a repo.
   developer's own workspace reach the prompt, so the sole attacker-chosen
   value is the PR number (an integer), leaving no room to inject text via
   the identifiers themselves.
-- The review session cannot egress (empty allowlist) and cannot act with
-  the developer's GitHub credentials (token absent from its env), so a
-  hostile PR is contained at the OS/process layer rather than by the model.
+- By default (containment on), the review session cannot egress (empty
+  allowlist) and cannot act with the developer's GitHub credentials (token
+  absent from its env), so a hostile PR is contained at the OS/process layer
+  rather than by the model.
+- Posting falls out of the model instead of needing its own verb and scoped
+  credential: the token's presence decides who posts, so niwa never brokers a
+  posting credential.
 - Credential scoping and the sandbox profile land as reusable dispatch
   surface a later contained-dispatch feature can adopt.
 - The verb reuses existing provisioning and settings-merge machinery.
 - The feature runs unprivileged out of the box on macOS and permissive Linux;
   the only elevation is a single opt-in `niwa setup-sandbox` on hardened
-  Linux, and the operator -- not the code -- chooses the no-enforcement fallback.
+  Linux, and the two switches let the operator -- not the code -- decide when
+  to relax containment for a trusted source.
 
 ### Negative / costs
 
-- Net-new GitHub client surface (search + user), a containment path, and two
-  subcommands make the niwa verb itself sizeable; the Decision-8 amendment
-  adds a tsuku recipe, a `setup-sandbox` command, and a config policy, so the
-  effort now spans niwa **and** a tsuku-recipe change -- it is no longer a
-  single niwa PR.
-- The capability tiering and `uncontained_policy` add operator-facing surface
-  (a config knob, a setup command, and per-host behavior to document); a wrong
-  default here would be a security regression, so the default is `refuse` and
-  the fail-open is closed at both the niwa and harness layers.
+- Net-new GitHub client surface (search + user) and the containment path make
+  the niwa verb itself sizeable; the Decision-8 amendment adds a tsuku recipe,
+  a `setup-sandbox` command, and the two config switches, so the effort now
+  spans niwa **and** a tsuku-recipe change -- it is no longer a single niwa
+  PR. (Dropping the `post`/`discard` subcommands trims some of this back.)
+- The two switches add operator-facing surface (two config knobs, a setup
+  command, and per-host behavior to document); a wrong default here would be a
+  security regression, so the defaults are the strongest posture (`on` +
+  `required`) and the fail-open is closed at both the niwa and harness layers.
 - Pre-fetching the PR head means niwa's trusted code touches untrusted repo
   content; getting this wrong (a filter-honoring checkout, LFS smudge, repo
   hooks, submodule recursion) would execute attacker code *outside* the
