@@ -1,5 +1,5 @@
 ---
-status: Accepted
+status: Planned
 upstream: docs/prds/PRD-provider-auth-provision.md
 problem: |
   niwa reads a machine-identity credential to resolve a workspace's vault secrets but
@@ -25,7 +25,7 @@ rationale: |
 
 ## Status
 
-Accepted
+Planned
 
 Technical design for the `niwa provider-auth provision` command, downstream of the
 Accepted `docs/prds/PRD-provider-auth-provision.md`. Resolves the three framing questions
