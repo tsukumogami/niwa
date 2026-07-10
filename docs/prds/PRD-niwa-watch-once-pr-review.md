@@ -143,10 +143,11 @@ Functional:
   detail; the requirement is that the mechanism is allowlist-based, not a
   best-effort scrub of a denylist.)
 - **R9.** If the enforced containment (R7 and R8) cannot be applied to the
-  dispatched instance -- the OS sandbox is absent or unsupported for any
-  reason -- `watch --once` SHALL **refuse to dispatch** that review, exit
-  non-zero, and print a message naming the containment failure, rather than
-  dispatching it uncontained.
+  dispatched instance -- the OS sandbox is absent or the host cannot enforce
+  it -- `watch --once` SHALL consult the operator-configured fallback policy
+  (R20) rather than silently dispatching uncontained. Under the default
+  policy it SHALL **refuse to dispatch**, exit non-zero, and print a message
+  naming the containment failure and the remediation (R19).
 - **R10.** `watch --once` SHALL stage at most a bounded number of **new**
   review agents per run (the per-run staging bound). When more matching new
   PRs exist than the bound allows, the selection SHALL be **deterministic**
@@ -197,6 +198,33 @@ Non-functional:
   SHALL exercise the outbound actions **directly** (executed in the
   session, bypassing the model's judgment) so that denial is provably the
   sandbox's doing and not the model merely choosing to decline.
+
+Sandbox capability, provisioning, and fallback policy (added by amendment):
+
+- **R18.** The preflight SHALL select the strongest enforceable containment
+  tier available on the host -- the built-in Seatbelt sandbox on macOS, or
+  the `bwrap`+`socat` no-egress profile on a Linux host with a
+  capability-bearing user namespace -- and dispatch under it. It SHALL NOT
+  require the same tier on every platform.
+- **R19.** A standard, **unprivileged** niwa installation SHALL provide the
+  Linux sandbox binaries (`bwrap`, `socat`) automatically (as Linux-only
+  runtime dependencies); macOS SHALL require none. The one privileged step --
+  unlocking the kernel capability on a hardened Linux host -- SHALL be a
+  single opt-in command (`niwa setup-sandbox`), never a per-dispatch or
+  multi-step manual requirement. The default install SHALL NOT require
+  elevation.
+- **R20.** The behavior when no enforceable tier is available SHALL be an
+  operator-owned policy `uncontained_policy` (resolved `flag > config header
+  > default`) with values `refuse` (default), `warn` (dispatch with a
+  recorded prominent warning), and `allow`. The default SHALL be `refuse`, so
+  weakening is always an explicit opt-out. When the policy permits an
+  uncontained dispatch, the metadata-only prompt (R4), the credential-scrubbed
+  environment (R8), and the human review-before-post gate (R14) SHALL still
+  apply.
+- **R21.** The dispatched instance settings SHALL set the harness to **refuse
+  to run** rather than silently disable the sandbox
+  (`sandbox.failIfUnavailable`), so an uncontained session is never produced
+  by a silent harness degradation -- only by the explicit R20 policy.
 
 ## Acceptance Criteria
 
@@ -376,11 +404,15 @@ These close the Open Questions the upstream BRIEF deferred to this PRD.
 
 ## Known Limitations
 
-- **Windows and the sandbox.** The OS-level sandbox that enforces
-  no-egress is not available on Windows. Per R9 the feature fails closed
-  there (it refuses to dispatch rather than dispatching uncontained), so
-  Windows self-hosters get no staged reviews until later work addresses
-  the gap.
+- **Hardened Linux needs a one-time privileged setup.** On a Linux kernel
+  that restricts unprivileged user namespaces (e.g. Ubuntu 24.04), the
+  sandbox cannot run until `niwa setup-sandbox` (R19) is run once; until
+  then the feature follows `uncontained_policy` (R20; default: refuse).
+  macOS and permissive Linux need no elevation. This capability is
+  root-gated by the OS and cannot be granted by an unprivileged install.
+- **Windows.** The OS-level sandbox is not available on Windows; the
+  feature fails closed there (R9/R20 default), so Windows self-hosters get
+  no staged reviews until later work addresses the gap.
 - **Egress proxy TLS termination.** The no-egress sandbox's proxy does not
   TLS-terminate by default, leaving a domain-fronting / SNI-evasion seam.
   This is a recorded residual risk for the review session's threat model,

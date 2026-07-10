@@ -4,7 +4,7 @@ status: Active
 execution_mode: single-pr
 upstream: docs/designs/current/DESIGN-niwa-watch-once-pr-review.md
 milestone: "niwa watch --once PR-review dispatch"
-issue_count: 8
+issue_count: 11
 ---
 
 # PLAN: niwa watch --once PR-review dispatch
@@ -13,8 +13,11 @@ issue_count: 8
 
 Active
 
-Single-PR plan decomposing the Accepted design into eight sequenced,
-independently-testable issues landing on one branch and PR.
+Single-PR plan decomposing the Accepted design into sequenced,
+independently-testable issues landing on one branch and PR. Issues 1-8 are the
+core verb + containment; issues 9-11 add the Decision-8 amendment
+(capability-tiered preflight, `niwa setup-sandbox`, and fail-closed harness
+settings), with a companion tsuku-recipe change tracked separately.
 
 ## Scope Summary
 
@@ -160,6 +163,58 @@ enforcement test comes last as the boundary proof that gates release.
 **Type**: code
 **Files**: `internal/watch/adversarial_test.go`
 
+### Issue 9: feat(watch): capability-tiered preflight and uncontained_policy
+
+**Goal**: Replace the hard-refuse preflight with an adaptive tier selection plus an operator-owned fallback policy (design Decision 8A/8C, PRD R18/R20/R9).
+
+**Acceptance Criteria**:
+- [ ] The preflight selects the strongest enforceable tier: macOS Seatbelt (built-in), or Linux `bwrap`+`socat` with a capability-bearing user namespace (the existing functional probe); it does not require the same tier on every platform (R18).
+- [ ] A durable `uncontained_policy` setting (`refuse` default | `warn` | `allow`) is read on the `flag > config header > default` stack; when no tier is enforceable the run follows it -- refuse (non-zero + reason + remediation), warn (dispatch + recorded prominent warning), or allow (R20).
+- [ ] Under `warn`/`allow`, the metadata-only prompt, credential-scrubbed env, and human gate still apply (asserted structurally).
+- [ ] Default behavior is unchanged for a capable host (dispatch) and for an incapable host with no config (refuse).
+
+**Dependencies**: Blocked by <<ISSUE:5>>, <<ISSUE:6>>
+
+**Type**: code
+**Files**: `internal/cli/watch.go`
+
+### Issue 10: feat(cli): niwa setup-sandbox (hardened-Linux capability unlock)
+
+**Goal**: The opt-in privileged command that unlocks the sandbox capability on a hardened Linux host (design Decision 8B, PRD R19).
+
+**Acceptance Criteria**:
+- [ ] `niwa setup-sandbox` detects the hardened-userns condition and installs an AppArmor profile for `bwrap` (or sets the sysctl), reporting what it changed; it is idempotent and a no-op where the capability already exists.
+- [ ] It is the ONLY privileged step; it is never invoked per dispatch; on macOS / permissive Linux it reports "already capable" and changes nothing.
+- [ ] The `watch --once` refuse message (Issue 9) names this command as the remediation.
+
+**Dependencies**: Blocked by <<ISSUE:9>>
+
+**Type**: code
+**Files**: `internal/cli/setup_sandbox.go`
+
+### Issue 11: feat(watch): fail-closed harness settings (failIfUnavailable)
+
+**Goal**: Make the harness refuse rather than silently disable the sandbox (design Decision 8, PRD R21).
+
+**Acceptance Criteria**:
+- [ ] The containment profile (Issue 5) also sets `sandbox.failIfUnavailable: true` and `allowUnsandboxedCommands: false` in the merged instance settings.
+- [ ] The pre-launch re-verification asserts both survived the merge.
+
+**Dependencies**: Blocked by <<ISSUE:5>>
+
+**Type**: code
+**Files**: `internal/watch/containment.go`
+
+### Companion change (tsuku repo, not this PR)
+
+Packaging the Linux sandbox deps (PRD R19) lands in **tsukumogami/tsuku**, not
+niwa: a curated `recipes/n/niwa.toml` declaring Linux-only
+`runtime_dependencies = ["bubblewrap", "socat"]` (shadowing today's
+auto-generated download recipe), plus `recipes/b/bubblewrap.toml`
+(homebrew-bottle action) and a `socat`/`socat1` naming fix. Tracked as a
+companion tsuku PR; it does not block the niwa code but is required for the
+"standard install provides the binaries" contract.
+
 ## Implementation Issues
 
 Single-pr mode: the work is decomposed inline under **Issue Outlines** above
@@ -178,7 +233,14 @@ graph TD
     I6["Issue 6: watch --once verb"]:::pending
     I7["Issue 7: post/discard"]:::pending
     I8["Issue 8: adversarial live test"]:::pending
+    I9["Issue 9: tiered preflight + policy"]:::pending
+    I10["Issue 10: niwa setup-sandbox"]:::pending
+    I11["Issue 11: failIfUnavailable settings"]:::pending
 
+    I5 --> I9
+    I6 --> I9
+    I9 --> I10
+    I5 --> I11
     I1 --> I3
     I2 --> I3
     I1 --> I6
