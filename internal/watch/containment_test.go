@@ -174,6 +174,20 @@ func TestVerifyContainmentApplied_RejectsRelaxations(t *testing.T) {
 		t.Error("sandbox.enabled=false must be rejected")
 	}
 
+	// failIfUnavailable dropped -> reject (would allow silent fail-open).
+	noFail := ContainmentProfile()
+	noFail["sandbox"].(map[string]any)["failIfUnavailable"] = false
+	if err := VerifyContainmentApplied(noFail); err == nil {
+		t.Error("sandbox.failIfUnavailable=false must be rejected")
+	}
+
+	// allowUnsandboxedCommands relaxed -> reject (unsandboxed escape hatch).
+	escape := ContainmentProfile()
+	escape["sandbox"].(map[string]any)["allowUnsandboxedCommands"] = true
+	if err := VerifyContainmentApplied(escape); err == nil {
+		t.Error("sandbox.allowUnsandboxedCommands=true must be rejected")
+	}
+
 	// bypassPermissions -> reject (not fail-closed).
 	bypass := ContainmentProfile()
 	bypass["permissions"].(map[string]any)["defaultMode"] = "bypassPermissions"

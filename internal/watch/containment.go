@@ -88,6 +88,16 @@ type sandboxSettings struct {
 		Network struct {
 			AllowedDomains []string `json:"allowedDomains"`
 		} `json:"network"`
+		// failIfUnavailable makes the harness REFUSE to run rather than
+		// silently disabling the sandbox and proceeding with a warning when its
+		// backend is unavailable. allowUnsandboxedCommands=false is the paired
+		// belt-and-suspenders. Together they close the harness fail-open so an
+		// uncontained session is never produced by a silent degradation -- only
+		// by the explicit uncontained_policy (Decision 8 / PRD R21). (Exact
+		// setting-key paths are per the Claude Code sandbox settings schema; see
+		// the sandboxing docs.)
+		FailIfUnavailable        bool `json:"failIfUnavailable"`
+		AllowUnsandboxedCommands bool `json:"allowUnsandboxedCommands"`
 	} `json:"sandbox"`
 	Permissions struct {
 		DefaultMode string `json:"defaultMode"`
@@ -101,6 +111,8 @@ func ContainmentProfile() map[string]any {
 	var s sandboxSettings
 	s.Sandbox.Enabled = true
 	s.Sandbox.Network.AllowedDomains = []string{} // deny-all
+	s.Sandbox.FailIfUnavailable = true            // refuse rather than run uncontained
+	s.Sandbox.AllowUnsandboxedCommands = false    // no unsandboxed escape hatch
 	s.Permissions.DefaultMode = "default"         // fail-closed in --bg
 
 	// Round-trip through JSON to a generic map so the caller can merge it into
@@ -136,6 +148,14 @@ func VerifyContainmentApplied(merged map[string]any) error {
 	}
 	if len(domains) != 0 {
 		return fmt.Errorf("containment check: allowedDomains must be empty (deny-all), got %d entries", len(domains))
+	}
+	// Fail-open closure: the harness must refuse rather than silently disable
+	// the sandbox, and must not permit an unsandboxed escape hatch.
+	if fail, _ := sandbox["failIfUnavailable"].(bool); !fail {
+		return fmt.Errorf("containment check: sandbox.failIfUnavailable must be true")
+	}
+	if allow, _ := sandbox["allowUnsandboxedCommands"].(bool); allow {
+		return fmt.Errorf("containment check: sandbox.allowUnsandboxedCommands must be false")
 	}
 	perms, ok := merged["permissions"].(map[string]any)
 	if !ok {
