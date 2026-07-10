@@ -41,11 +41,20 @@ type GlobalSettings struct {
 	// always overrides it; "" (the default) forwards no model, preserving
 	// today's behavior.
 	DispatchModel string `toml:"dispatch_model,omitempty"`
-	// WatchUncontainedPolicy is the host-level default for what `niwa watch
-	// --once` does when the OS sandbox cannot be enforced: "refuse" (the safe
-	// default), "warn" (dispatch with a recorded warning), or "allow". The
-	// per-run --uncontained flag overrides it; "" resolves to "refuse".
-	WatchUncontainedPolicy string `toml:"watch_uncontained_policy,omitempty"`
+	// WatchContainment is the outer of the two `niwa watch --once` containment
+	// switches: "on" (the default) applies the containment bundle to the
+	// dispatched review session -- a credential-scrubbed environment, a
+	// synthetic HOME, and a fail-closed permission mode; "off" runs an ordinary
+	// dispatch with the developer's real environment and credentials. "" resolves
+	// to "on". WatchSandbox is only consulted when this is "on".
+	WatchContainment string `toml:"watch_containment,omitempty"`
+	// WatchSandbox is the inner switch, consulted only when WatchContainment is
+	// "on": it governs the OS no-egress sandbox (bubblewrap+socat on Linux,
+	// Seatbelt on macOS). "required" (the default) refuses to dispatch when the
+	// sandbox cannot be enforced; "optional" uses the sandbox when available and
+	// otherwise proceeds contained without it; "disabled" never attempts it. ""
+	// resolves to "required".
+	WatchSandbox string `toml:"watch_sandbox,omitempty"`
 }
 
 // SkipPluginInstall reports whether the user has explicitly opted

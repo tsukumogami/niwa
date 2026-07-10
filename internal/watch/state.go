@@ -107,9 +107,10 @@ func isHandledKey(s string) bool {
 	return true
 }
 
-// StagedRecord is what niwa persists at dispatch time so the trusted post and
-// discard subcommands can resolve a handle to its PR and drafted review. The
-// handle is the dispatch session's short id (shown in the agent view).
+// StagedRecord is discoverability metadata niwa persists at dispatch time so a
+// handle can be resolved to its PR and drafted review (e.g. to find the draft a
+// contained session wrote). The handle is the dispatch session's short id (shown
+// in the agent view).
 type StagedRecord struct {
 	Handle    string `json:"handle"`
 	Owner     string `json:"owner"`

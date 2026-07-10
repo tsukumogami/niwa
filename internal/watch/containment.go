@@ -91,9 +91,10 @@ type sandboxSettings struct {
 		// failIfUnavailable makes the harness REFUSE to run rather than
 		// silently disabling the sandbox and proceeding with a warning when its
 		// backend is unavailable. allowUnsandboxedCommands=false is the paired
-		// belt-and-suspenders. Together they close the harness fail-open so an
-		// uncontained session is never produced by a silent degradation -- only
-		// by the explicit uncontained_policy (Decision 8 / PRD R21). (Exact
+		// belt-and-suspenders. Together they close the harness fail-open so that
+		// once niwa has decided to enforce the OS sandbox (watch_containment on,
+		// watch_sandbox required or optional-and-available), a silent harness
+		// degradation cannot quietly drop it (design Decision 7 / PRD R21). (Exact
 		// setting-key paths are per the Claude Code sandbox settings schema; see
 		// the sandboxing docs.)
 		FailIfUnavailable        bool `json:"failIfUnavailable"`
@@ -104,58 +105,72 @@ type sandboxSettings struct {
 	} `json:"permissions"`
 }
 
-// ContainmentProfile returns the settings fragment that enforces no egress and
-// a fail-closed permission mode. It is marshaled and merged into the instance
-// settings before launch.
-func ContainmentProfile() map[string]any {
+// ContainmentProfile returns the settings fragment merged into the instance
+// settings before launch. It always sets the fail-closed permission mode (part
+// of the containment bundle applied for every `watch_containment = on` run).
+// withSandbox additionally enables the OS no-egress sandbox stanza; it is false
+// for the `watch_sandbox = disabled` and `optional`-but-unavailable cells of the
+// containment matrix (design Decision 7), where the session is credential- and
+// permission-contained but has no OS-level network cage.
+func ContainmentProfile(withSandbox bool) map[string]any {
 	var s sandboxSettings
-	s.Sandbox.Enabled = true
-	s.Sandbox.Network.AllowedDomains = []string{} // deny-all
-	s.Sandbox.FailIfUnavailable = true            // refuse rather than run uncontained
-	s.Sandbox.AllowUnsandboxedCommands = false    // no unsandboxed escape hatch
-	s.Permissions.DefaultMode = "default"         // fail-closed in --bg
+	s.Permissions.DefaultMode = "default" // fail-closed in --bg
+	if withSandbox {
+		s.Sandbox.Enabled = true
+		s.Sandbox.Network.AllowedDomains = []string{} // deny-all
+		s.Sandbox.FailIfUnavailable = true            // refuse rather than run uncontained
+		s.Sandbox.AllowUnsandboxedCommands = false    // no unsandboxed escape hatch
+	}
 
 	// Round-trip through JSON to a generic map so the caller can merge it into
 	// the existing settings document.
 	data, _ := json.Marshal(s)
 	var m map[string]any
 	_ = json.Unmarshal(data, &m)
+	if !withSandbox {
+		// Own only the permission mode; leave the sandbox stanza untouched so no
+		// half-configured (and unenforced) sandbox is written.
+		delete(m, "sandbox")
+	}
 	return m
 }
 
 // VerifyContainmentApplied re-reads a merged settings document and asserts the
-// sandbox stanza survived the merge: sandbox.enabled is true, allowedDomains is
-// present and empty, and the permission mode is fail-closed. This is the
-// per-instance re-verification that runs immediately before launch; a false
-// result means the stanza was dropped or relaxed by the merge and the PR must
-// NOT be launched.
-func VerifyContainmentApplied(merged map[string]any) error {
-	sandbox, ok := merged["sandbox"].(map[string]any)
-	if !ok {
-		return fmt.Errorf("containment check: sandbox stanza missing from merged settings")
-	}
-	enabled, _ := sandbox["enabled"].(bool)
-	if !enabled {
-		return fmt.Errorf("containment check: sandbox.enabled is not true")
-	}
-	network, ok := sandbox["network"].(map[string]any)
-	if !ok {
-		return fmt.Errorf("containment check: sandbox.network missing")
-	}
-	domains, ok := network["allowedDomains"].([]any)
-	if !ok {
-		return fmt.Errorf("containment check: sandbox.network.allowedDomains missing")
-	}
-	if len(domains) != 0 {
-		return fmt.Errorf("containment check: allowedDomains must be empty (deny-all), got %d entries", len(domains))
-	}
-	// Fail-open closure: the harness must refuse rather than silently disable
-	// the sandbox, and must not permit an unsandboxed escape hatch.
-	if fail, _ := sandbox["failIfUnavailable"].(bool); !fail {
-		return fmt.Errorf("containment check: sandbox.failIfUnavailable must be true")
-	}
-	if allow, _ := sandbox["allowUnsandboxedCommands"].(bool); allow {
-		return fmt.Errorf("containment check: sandbox.allowUnsandboxedCommands must be false")
+// containment survived the merge. The fail-closed permission mode is always
+// required. When withSandbox is true it additionally asserts the no-egress
+// sandbox stanza (enabled, empty allowedDomains, failIfUnavailable, no
+// unsandboxed escape hatch). This is the per-instance re-verification that runs
+// immediately before launch; a false result means the containment was dropped
+// or relaxed by the merge and the PR must NOT be launched.
+func VerifyContainmentApplied(merged map[string]any, withSandbox bool) error {
+	if withSandbox {
+		sandbox, ok := merged["sandbox"].(map[string]any)
+		if !ok {
+			return fmt.Errorf("containment check: sandbox stanza missing from merged settings")
+		}
+		enabled, _ := sandbox["enabled"].(bool)
+		if !enabled {
+			return fmt.Errorf("containment check: sandbox.enabled is not true")
+		}
+		network, ok := sandbox["network"].(map[string]any)
+		if !ok {
+			return fmt.Errorf("containment check: sandbox.network missing")
+		}
+		domains, ok := network["allowedDomains"].([]any)
+		if !ok {
+			return fmt.Errorf("containment check: sandbox.network.allowedDomains missing")
+		}
+		if len(domains) != 0 {
+			return fmt.Errorf("containment check: allowedDomains must be empty (deny-all), got %d entries", len(domains))
+		}
+		// Fail-open closure: the harness must refuse rather than silently disable
+		// the sandbox, and must not permit an unsandboxed escape hatch.
+		if fail, _ := sandbox["failIfUnavailable"].(bool); !fail {
+			return fmt.Errorf("containment check: sandbox.failIfUnavailable must be true")
+		}
+		if allow, _ := sandbox["allowUnsandboxedCommands"].(bool); allow {
+			return fmt.Errorf("containment check: sandbox.allowUnsandboxedCommands must be false")
+		}
 	}
 	perms, ok := merged["permissions"].(map[string]any)
 	if !ok {
@@ -190,7 +205,7 @@ var failClosedPermissionModes = map[string]bool{
 // launched). The re-verification here confirms niwa's own merge; the harness's
 // downstream merge and live enforcement are proven separately by the
 // adversarial egress test.
-func ApplyContainment(instancePath string) error {
+func ApplyContainment(instancePath string, withSandbox bool) error {
 	settingsPath := filepath.Join(instancePath, ".claude", "settings.json")
 	settings := map[string]any{}
 	if data, err := os.ReadFile(settingsPath); err == nil {
@@ -201,10 +216,13 @@ func ApplyContainment(instancePath string) error {
 		return fmt.Errorf("apply containment: reading %s: %w", settingsPath, err)
 	}
 
-	profile := ContainmentProfile()
-	// The sandbox stanza is fully owned by the containment profile -- overwrite
-	// it so no pre-existing sandbox config can relax the no-egress posture.
-	settings["sandbox"] = profile["sandbox"]
+	profile := ContainmentProfile(withSandbox)
+	if withSandbox {
+		// The sandbox stanza is fully owned by the containment profile --
+		// overwrite it so no pre-existing sandbox config can relax the no-egress
+		// posture.
+		settings["sandbox"] = profile["sandbox"]
+	}
 	// Merge permissions at the key level: set the fail-closed defaultMode while
 	// preserving any existing allow/deny/ask entries.
 	perms, _ := settings["permissions"].(map[string]any)
@@ -227,7 +245,7 @@ func ApplyContainment(instancePath string) error {
 		return fmt.Errorf("apply containment: writing settings: %w", err)
 	}
 
-	// Re-read from disk and re-verify the stanza survived the write/merge.
+	// Re-read from disk and re-verify the containment survived the write/merge.
 	data, err := os.ReadFile(settingsPath)
 	if err != nil {
 		return fmt.Errorf("apply containment: re-reading settings: %w", err)
@@ -236,7 +254,7 @@ func ApplyContainment(instancePath string) error {
 	if err := json.Unmarshal(data, &merged); err != nil {
 		return fmt.Errorf("apply containment: re-parsing settings: %w", err)
 	}
-	if err := VerifyContainmentApplied(merged); err != nil {
+	if err := VerifyContainmentApplied(merged, withSandbox); err != nil {
 		return err
 	}
 	return nil

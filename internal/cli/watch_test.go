@@ -1,13 +1,15 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"errors"
-	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/spf13/cobra"
+
+	"github.com/tsukumogami/niwa/internal/config"
 )
 
 // TestCheckSandboxCapability_FailClosed validates the preflight is fail-closed
@@ -27,10 +29,14 @@ func TestCheckSandboxCapability_FailClosed(t *testing.T) {
 	}
 }
 
-// TestRunWatchOnce_RefusesWhenSandboxIncapable proves the command fails closed:
-// when the capability probe reports the host cannot contain a session, the run
-// refuses before touching the workspace or GitHub.
-func TestRunWatchOnce_RefusesWhenSandboxIncapable(t *testing.T) {
+// TestRunWatchOnce_RefusesWhenSandboxRequiredButIncapable proves the default
+// posture (containment on, sandbox required) fails closed: when the probe reports
+// the host cannot enforce the sandbox, the run refuses before touching the
+// workspace or GitHub. XDG_CONFIG_HOME points at an empty dir so the defaults --
+// not the host's config -- are exercised.
+func TestRunWatchOnce_RefusesWhenSandboxRequiredButIncapable(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
 	prev := sandboxCapabilityCheck
 	sentinel := errors.New("no netns here")
 	sandboxCapabilityCheck = func(context.Context) error { return sentinel }
@@ -40,40 +46,70 @@ func TestRunWatchOnce_RefusesWhenSandboxIncapable(t *testing.T) {
 	cmd.SetContext(context.Background())
 	err := runWatchOnce(cmd, nil)
 	if err == nil {
-		t.Fatal("expected watch --once to refuse when the sandbox is incapable")
+		t.Fatal("expected watch --once to refuse when sandbox=required cannot be enforced")
 	}
 	if !errors.Is(err, sentinel) {
 		t.Errorf("refusal should wrap the capability error, got %v", err)
 	}
-	if !strings.Contains(err.Error(), "uncontained") {
-		t.Errorf("refusal message should say it refuses to dispatch uncontained, got %q", err.Error())
+	if !strings.Contains(err.Error(), "refusing to dispatch") {
+		t.Errorf("refusal message should say it refuses to dispatch, got %q", err.Error())
 	}
 }
 
-// TestRunWatchOnce_WarnPolicyDoesNotRefuse proves the warn fallback is a
-// fallthrough, not a distinct dispatch path: when the capability probe fails and
-// --uncontained=warn is set, the preflight does NOT return the uncontained
-// refusal -- control continues into the unchanged downstream (which then fails
-// for an unrelated, benign reason in this bare test env). This structurally
-// asserts warn/allow keep the same metadata-prompt/credential-scrub/human-gate
-// path (Issue 9 AC3): there is no alternate uncontained dispatch path to diverge
-// onto.
-func TestRunWatchOnce_WarnPolicyDoesNotRefuse(t *testing.T) {
-	prev := sandboxCapabilityCheck
-	sandboxCapabilityCheck = func(context.Context) error { return errors.New("no netns here") }
-	t.Cleanup(func() { sandboxCapabilityCheck = prev })
+// TestResolveContainmentPlan walks the containment matrix (design Decision 7)
+// with a stubbed capability probe.
+func TestResolveContainmentPlan(t *testing.T) {
+	capable := func(context.Context) error { return nil }
+	incapable := func(context.Context) error { return errors.New("no netns") }
 
-	prevPolicy := watchUncontained
-	watchUncontained = "warn"
-	t.Cleanup(func() { watchUncontained = prevPolicy })
+	cases := []struct {
+		name                 string
+		containment, sandbox string
+		probe                func(context.Context) error
+		wantContained        bool
+		wantSandbox          bool
+		wantErr              bool
+	}{
+		{"off never probes", "off", "required", nil, false, false, false},
+		{"on+disabled", "on", "disabled", nil, true, false, false},
+		{"on+required capable", "on", "required", capable, true, true, false},
+		{"on+required incapable refuses", "on", "required", incapable, false, false, true},
+		{"on+optional capable uses sandbox", "on", "optional", capable, true, true, false},
+		{"on+optional incapable proceeds without", "on", "optional", incapable, true, false, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.probe != nil {
+				prev := sandboxCapabilityCheck
+				sandboxCapabilityCheck = tc.probe
+				t.Cleanup(func() { sandboxCapabilityCheck = prev })
+			}
+			cmd := &cobra.Command{}
+			var errbuf bytes.Buffer
+			cmd.SetErr(&errbuf)
+			cmd.SetContext(context.Background())
 
-	cmd := &cobra.Command{}
-	cmd.SetContext(context.Background())
-	err := runWatchOnce(cmd, nil)
-	// It must have moved past the preflight: whatever error surfaces downstream,
-	// it is not the fail-closed "refusing to dispatch uncontained" refusal.
-	if err != nil && strings.Contains(err.Error(), "refusing to dispatch uncontained") {
-		t.Errorf("warn policy must not refuse at the preflight; got %v", err)
+			plan, err := resolveContainmentPlan(context.Background(), cmd, tc.containment, tc.sandbox)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected refusal for %s", tc.name)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if plan.contained != tc.wantContained || plan.applySandbox != tc.wantSandbox {
+				t.Errorf("plan = {contained:%v sandbox:%v}, want {contained:%v sandbox:%v}",
+					plan.contained, plan.applySandbox, tc.wantContained, tc.wantSandbox)
+			}
+			// The optional-unavailable cell prints a notice and proceeds.
+			if tc.containment == "on" && tc.sandbox == "optional" && !tc.wantSandbox {
+				if !strings.Contains(errbuf.String(), "proceeding contained without it") {
+					t.Errorf("optional-unavailable should print a notice, got %q", errbuf.String())
+				}
+			}
+		})
 	}
 }
 
@@ -99,60 +135,41 @@ func TestOwnerRepoFromGitURL(t *testing.T) {
 	}
 }
 
-func TestResolveUncontainedPolicy(t *testing.T) {
+func TestResolveContainmentSwitches(t *testing.T) {
+	mk := func(c, s string) *config.GlobalConfig {
+		gc := &config.GlobalConfig{}
+		gc.Global.WatchContainment = c
+		gc.Global.WatchSandbox = s
+		return gc
+	}
 	cases := []struct {
-		flag, configDefault string
-		want                string
-		wantErr             bool
+		name         string
+		gc           *config.GlobalConfig
+		wantC, wantS string
+		wantErr      bool
 	}{
-		// Empty everywhere -> the safe default.
-		{"", "", "refuse", false},
-		// Config default applies when the flag is empty.
-		{"", "warn", "warn", false},
-		{"", "allow", "allow", false},
-		// Flag overrides the config default (flag > config > default).
-		{"refuse", "allow", "refuse", false},
-		{"allow", "refuse", "allow", false},
-		{"warn", "", "warn", false},
-		// Invalid values are hard errors (fail-closed), never coerced.
-		{"bogus", "", "", true},
-		{"", "bogus", "", true},
-		{"ALLOW", "", "", true}, // case-sensitive; not silently normalized
+		{"nil -> defaults", nil, "on", "required", false},
+		{"empty -> defaults", mk("", ""), "on", "required", false},
+		{"containment off", mk("off", ""), "off", "required", false},
+		{"sandbox optional", mk("", "optional"), "on", "optional", false},
+		{"sandbox disabled", mk("on", "disabled"), "on", "disabled", false},
+		{"invalid containment", mk("maybe", ""), "", "", true},
+		{"invalid sandbox", mk("on", "sometimes"), "", "", true},
 	}
 	for _, tc := range cases {
-		got, err := resolveUncontainedPolicy(tc.flag, tc.configDefault)
+		c, s, err := resolveContainmentSwitches(tc.gc)
 		if tc.wantErr {
 			if err == nil {
-				t.Errorf("resolveUncontainedPolicy(%q,%q) expected error, got %q", tc.flag, tc.configDefault, got)
+				t.Errorf("%s: expected error", tc.name)
 			}
 			continue
 		}
 		if err != nil {
-			t.Errorf("resolveUncontainedPolicy(%q,%q) unexpected error: %v", tc.flag, tc.configDefault, err)
+			t.Errorf("%s: unexpected error: %v", tc.name, err)
 			continue
 		}
-		if got != tc.want {
-			t.Errorf("resolveUncontainedPolicy(%q,%q) = %q, want %q", tc.flag, tc.configDefault, got, tc.want)
-		}
-	}
-}
-
-func TestValidateDraftPath(t *testing.T) {
-	root := filepath.FromSlash("/ws")
-	good := filepath.Join(root, "inst+watch-a-b-1-deadbeef", "watch-review-draft.md")
-	if err := validateDraftPath(root, good); err != nil {
-		t.Errorf("expected valid draft path to pass: %v", err)
-	}
-
-	bad := []string{
-		filepath.FromSlash("/etc/passwd"),                         // outside root
-		filepath.Join(root, "inst", "other.md"),                   // wrong basename
-		filepath.Join(root, "..", "etc", "watch-review-draft.md"), // traversal out
-		filepath.FromSlash("/wsother/inst/watch-review-draft.md"), // prefix-but-not-child
-	}
-	for _, p := range bad {
-		if err := validateDraftPath(root, p); err == nil {
-			t.Errorf("expected draft path %q to be rejected", p)
+		if c != tc.wantC || s != tc.wantS {
+			t.Errorf("%s: got (%q,%q), want (%q,%q)", tc.name, c, s, tc.wantC, tc.wantS)
 		}
 	}
 }

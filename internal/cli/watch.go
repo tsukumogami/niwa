@@ -18,66 +18,98 @@ import (
 	"github.com/tsukumogami/niwa/internal/workspace"
 )
 
-var (
-	watchOnce        bool
-	watchUncontained string
-)
+var watchOnce bool
 
 func init() {
 	watchCmd.Flags().BoolVar(&watchOnce, "once", false, "perform exactly one poll-and-dispatch pass and exit (the only supported mode)")
-	watchCmd.Flags().StringVar(&watchUncontained, "uncontained", "", "policy when the OS sandbox cannot be enforced: refuse (default) | warn | allow. Overrides the host [global] watch_uncontained_policy default. 'warn'/'allow' dispatch WITHOUT OS-level egress containment.")
-	watchCmd.AddCommand(watchPostCmd)
-	watchCmd.AddCommand(watchDiscardCmd)
 	rootCmd.AddCommand(watchCmd)
 }
 
-// resolveUncontainedPolicy resolves the fallback policy on the
-// flag > config-default > "refuse" stack and validates it. An invalid value is
-// a hard error (fail-closed), never silently coerced.
-func resolveUncontainedPolicy(flag, configDefault string) (string, error) {
-	v := flag
-	if v == "" {
-		v = configDefault
+// containmentPlan is the resolved posture for a run, derived from the two global
+// switches (design Decision 7). contained is watch_containment == "on";
+// applySandbox is true only when the OS no-egress sandbox will actually be
+// enabled for the dispatched session (containment on, and sandbox required, or
+// optional and available on this host).
+type containmentPlan struct {
+	contained    bool
+	applySandbox bool
+}
+
+// resolveContainmentSwitches reads the two switches from the global config and
+// validates them. Defaults are the safe posture: containment "on", sandbox
+// "required". An unrecognized value is a hard error, never silently coerced.
+func resolveContainmentSwitches(gc *config.GlobalConfig) (containment, sandbox string, err error) {
+	containment, sandbox = "on", "required"
+	if gc != nil {
+		if v := gc.Global.WatchContainment; v != "" {
+			containment = v
+		}
+		if v := gc.Global.WatchSandbox; v != "" {
+			sandbox = v
+		}
 	}
-	if v == "" {
-		v = "refuse"
-	}
-	switch v {
-	case "refuse", "warn", "allow":
-		return v, nil
+	switch containment {
+	case "on", "off":
 	default:
-		return "", fmt.Errorf("invalid uncontained policy %q (want refuse | warn | allow)", v)
+		return "", "", fmt.Errorf("invalid watch_containment %q (want on | off)", containment)
+	}
+	switch sandbox {
+	case "required", "optional", "disabled":
+	default:
+		return "", "", fmt.Errorf("invalid watch_sandbox %q (want required | optional | disabled)", sandbox)
+	}
+	return containment, sandbox, nil
+}
+
+// resolveContainmentPlan walks the containment matrix for the resolved switch
+// values and, where the sandbox is in play, runs the capability probe. It
+// returns an error only in the on+required+unenforceable cell (fail-closed
+// refusal); the on+optional-unavailable cell logs a notice and proceeds
+// contained without the OS sandbox.
+func resolveContainmentPlan(ctx context.Context, cmd *cobra.Command, containment, sandbox string) (containmentPlan, error) {
+	if containment == "off" {
+		return containmentPlan{contained: false, applySandbox: false}, nil
+	}
+	switch sandbox {
+	case "disabled":
+		return containmentPlan{contained: true, applySandbox: false}, nil
+	case "required":
+		if err := sandboxCapabilityCheck(ctx); err != nil {
+			return containmentPlan{}, fmt.Errorf("refusing to dispatch: watch_sandbox=required but the OS sandbox cannot be enforced here: %w\n"+
+				"  run `niwa setup-sandbox` once to enable it, or set watch_sandbox to optional (proceed contained without it) or disabled", err)
+		}
+		return containmentPlan{contained: true, applySandbox: true}, nil
+	default: // "optional"
+		if err := sandboxCapabilityCheck(ctx); err != nil {
+			fmt.Fprintf(cmd.ErrOrStderr(),
+				"niwa watch: notice -- OS sandbox unavailable (%v); proceeding contained without it (watch_sandbox=optional).\n", err)
+			return containmentPlan{contained: true, applySandbox: false}, nil
+		}
+		return containmentPlan{contained: true, applySandbox: true}, nil
 	}
 }
 
 var watchCmd = &cobra.Command{
 	Use:   "watch",
-	Short: "Stage contained review agents for PRs you were directly requested on",
+	Short: "Stage review agents for PRs you were directly requested on",
 	Long: `watch --once performs a single poll-and-dispatch pass: it finds open PRs
 on GitHub where you are the directly-requested reviewer (intersected with the
-repos in your niwa workspace), and for each new one stages a contained review
-agent that reads the PR in an isolated clone, drafts a review, and halts. The
-review session runs with no network egress and a credential-scrubbed
-environment, so a hostile PR cannot exfiltrate or act.
+repos in your niwa workspace), and for each new one dispatches a review agent
+that reads the PR in an isolated clone and drafts a review.
 
-It is a stateless single-shot verb -- no daemon, no resident process. Use
-'niwa watch post <handle>' to post an approved draft and
-'niwa watch discard <handle>' to drop one.`,
+Containment is governed by two global settings. watch_containment (on by
+default) applies a credential-scrubbed environment, a synthetic HOME, and a
+fail-closed permission mode -- so a hostile PR cannot exfiltrate or act -- and
+the agent only drafts; you post the draft from your own session. watch_sandbox
+(required by default; optional | disabled) governs the OS no-egress sandbox
+under containment: required refuses if it cannot be enforced, optional proceeds
+without it, disabled never attempts it. With watch_containment = off the agent
+runs as an ordinary dispatch with your real credentials and posts the review
+itself.
+
+It is a stateless single-shot verb -- no daemon, no resident process. A staged
+session you no longer want is dismissed from the Claude Code agents view.`,
 	RunE: runWatchOnce,
-}
-
-var watchPostCmd = &cobra.Command{
-	Use:   "post <handle>",
-	Short: "Post the approved draft review for a staged PR (trusted, outside the sandbox)",
-	Args:  cobra.ExactArgs(1),
-	RunE:  runWatchPost,
-}
-
-var watchDiscardCmd = &cobra.Command{
-	Use:   "discard <handle>",
-	Short: "Discard a staged PR review without posting",
-	Args:  cobra.ExactArgs(1),
-	RunE:  runWatchDiscard,
 }
 
 // runWatchOnce is the single poll-and-dispatch pass. It is fail-closed (refuses
@@ -87,33 +119,19 @@ var watchDiscardCmd = &cobra.Command{
 func runWatchOnce(cmd *cobra.Command, _ []string) error {
 	ctx := cmd.Context()
 
-	// (1) Preflight: actively verify the OS sandbox can be enforced on this host
-	// NOW -- not merely that the OS is nominally supported -- BEFORE creating any
-	// instance. When it cannot be enforced, what happens is the operator's
-	// policy (Decision 8 / R20), resolved flag > [global] config > default
-	// "refuse" -- never a silent uncontained dispatch.
-	if err := sandboxCapabilityCheck(ctx); err != nil {
-		configDefault := ""
-		if gc, gerr := config.LoadGlobalConfig(); gerr == nil && gc != nil {
-			configDefault = gc.Global.WatchUncontainedPolicy
-		}
-		policy, perr := resolveUncontainedPolicy(watchUncontained, configDefault)
-		if perr != nil {
-			return fmt.Errorf("niwa watch: %w", perr)
-		}
-		switch policy {
-		case "refuse":
-			return fmt.Errorf("niwa watch: refusing to dispatch uncontained: %w\n"+
-				"  run `niwa setup-sandbox` once to enable the OS sandbox, or set "+
-				"watch_uncontained_policy (or --uncontained) to warn|allow to dispatch "+
-				"WITHOUT OS-level egress containment", err)
-		case "warn":
-			fmt.Fprintf(cmd.ErrOrStderr(),
-				"niwa watch: WARNING -- dispatching UNCONTAINED (no OS-level egress denial): %v\n"+
-					"  the metadata-only prompt, credential-scrubbed env, and human review gate still apply.\n", err)
-		case "allow":
-			// Standing informed decision: proceed without a warning.
-		}
+	// (1) Preflight: resolve the containment posture from the two global switches
+	// (design Decision 7) BEFORE creating any instance. This refuses only in the
+	// on+required+unenforceable cell; every other cell yields a plan the per-PR
+	// stage applies. A capability probe runs here (not per PR) when the sandbox
+	// is in play.
+	gc, _ := config.LoadGlobalConfig()
+	containment, sandbox, err := resolveContainmentSwitches(gc)
+	if err != nil {
+		return fmt.Errorf("niwa watch: %w", err)
+	}
+	plan, err := resolveContainmentPlan(ctx, cmd, containment, sandbox)
+	if err != nil {
+		return fmt.Errorf("niwa watch: %w", err)
 	}
 	if _, err := lookClaude(); err != nil {
 		return fmt.Errorf("niwa watch: claude binary not found in PATH; install Claude Code before watching")
@@ -162,7 +180,7 @@ func runWatchOnce(cmd *cobra.Command, _ []string) error {
 	}
 
 	for _, pr := range selected {
-		if err := stageReview(cmd, root, cwd, token, client, pr); err != nil {
+		if err := stageReview(cmd, root, cwd, token, client, pr, plan); err != nil {
 			// Fail loud; the PR was not recorded handled (see stageReview), so a
 			// later run re-attempts it.
 			return fmt.Errorf("niwa watch: staging %s/%s#%d: %w", pr.Owner, pr.Repo, pr.Number, err)
@@ -171,10 +189,14 @@ func runWatchOnce(cmd *cobra.Command, _ []string) error {
 	return nil
 }
 
-// stageReview provisions an instance, fetches the PR head as inert data, applies
-// the containment profile, and launches a detached, contained review agent. The
-// handled-set and the staged-review record are written ONLY on success.
-func stageReview(cmd *cobra.Command, root, cwd, token string, client *github.APIClient, pr github.PRRef) error {
+// stageReview provisions an instance, fetches the PR head as inert data, and
+// launches a detached review agent under the resolved containment plan. When
+// contained it applies the containment bundle (scrubbed env, synthetic HOME,
+// fail-closed mode, and the OS sandbox when plan.applySandbox) and the agent
+// only drafts; when uncontained it dispatches with the developer's real
+// environment and the agent posts the review itself. The handled-set and the
+// staged-review record are written ONLY on success.
+func stageReview(cmd *cobra.Command, root, cwd, token string, client *github.APIClient, pr github.PRRef, plan containmentPlan) error {
 	ctx := cmd.Context()
 
 	head, err := client.GetPullHead(ctx, pr.Owner, pr.Repo, pr.Number)
@@ -212,22 +234,28 @@ func stageReview(cmd *cobra.Command, root, cwd, token string, client *github.API
 		return fmt.Errorf("fetching PR head: %w", err)
 	}
 
-	synthHome, err := watch.SyntheticHomeDir(instancePath)
-	if err != nil {
-		return err
-	}
-	// Apply and re-verify the no-egress containment profile before launch.
-	if err := watch.ApplyContainment(instancePath); err != nil {
-		return err
+	// Build the launch posture from the plan. Contained: scrubbed env + synthetic
+	// HOME + the containment settings (with the OS sandbox when applySandbox), and
+	// the agent only drafts. Uncontained: nil env (the launcher uses os.Environ(),
+	// the developer's real credentials) and the agent posts the review itself.
+	var env []string
+	if plan.contained {
+		synthHome, err := watch.SyntheticHomeDir(instancePath)
+		if err != nil {
+			return err
+		}
+		if err := watch.ApplyContainment(instancePath, plan.applySandbox); err != nil {
+			return err
+		}
+		env = watch.BuildContainedEnv(os.Environ(), synthHome)
 	}
 
-	prompt := watch.BuildReviewPrompt(pr, watch.DefaultCloneRelDir, watch.DefaultDraftRelPath)
-	env := watch.BuildContainedEnv(os.Environ(), synthHome)
+	prompt := watch.BuildReviewPrompt(pr, watch.DefaultCloneRelDir, watch.DefaultDraftRelPath, !plan.contained)
 	passthrough := buildDispatchPassthrough(slug, "")
 
-	// Launch detached (no terminal attach) with the contained env.
+	// Launch detached (no terminal attach). env is nil for an uncontained run.
 	if err := dispatchLaunch(ctx, instancePath, prompt, passthrough, env); err != nil {
-		return fmt.Errorf("launching contained review agent: %w", err)
+		return fmt.Errorf("launching review agent: %w", err)
 	}
 
 	// Record ONLY on success, so a failed stage does not suppress a re-attempt.
@@ -248,59 +276,6 @@ func stageReview(cmd *cobra.Command, root, cwd, token string, client *github.API
 	success = true
 	fmt.Fprintf(cmd.OutOrStdout(),
 		"niwa watch: staged review for %s/%s#%d (handle %s)\n", pr.Owner, pr.Repo, pr.Number, slug)
-	return nil
-}
-
-// runWatchPost posts an approved draft review. It is the trusted step: it runs
-// outside the contained session, holds the GitHub token (which never entered
-// that session), and fixes the review event in code so a hostile draft cannot
-// force an approval.
-func runWatchPost(cmd *cobra.Command, args []string) error {
-	ctx := cmd.Context()
-	handle := args[0]
-
-	root, err := workspaceRootFromCwd()
-	if err != nil {
-		return err
-	}
-	rec, err := watch.LoadStagedRecord(root, handle)
-	if err != nil {
-		return fmt.Errorf("niwa watch post: %w", err)
-	}
-	if err := validateDraftPath(root, rec.DraftPath); err != nil {
-		return fmt.Errorf("niwa watch post: %w", err)
-	}
-	body, err := os.ReadFile(rec.DraftPath)
-	if err != nil {
-		return fmt.Errorf("niwa watch post: reading draft: %w", err)
-	}
-
-	client := github.NewAPIClient(resolveGitHubToken())
-	// event is fixed in trusted code -- never read from the (untrusted) draft.
-	if err := client.CreateReview(ctx, rec.Owner, rec.Repo, rec.Number, string(body), "COMMENT"); err != nil {
-		return fmt.Errorf("niwa watch post: posting review: %w", err)
-	}
-	// The PR was already recorded handled at stage time; keep it idempotent.
-	_ = watch.AppendHandled(root, watch.HandledKey(rec.Owner, rec.Repo, rec.Number))
-	fmt.Fprintf(cmd.OutOrStdout(), "niwa watch: posted review to %s/%s#%d\n", rec.Owner, rec.Repo, rec.Number)
-	return nil
-}
-
-// runWatchDiscard drops a staged review without posting.
-func runWatchDiscard(cmd *cobra.Command, args []string) error {
-	handle := args[0]
-	root, err := workspaceRootFromCwd()
-	if err != nil {
-		return err
-	}
-	rec, err := watch.LoadStagedRecord(root, handle)
-	if err != nil {
-		return fmt.Errorf("niwa watch discard: %w", err)
-	}
-	if err := watch.AppendHandled(root, watch.HandledKey(rec.Owner, rec.Repo, rec.Number)); err != nil {
-		return fmt.Errorf("niwa watch discard: %w", err)
-	}
-	fmt.Fprintf(cmd.OutOrStdout(), "niwa watch: discarded staged review for %s/%s#%d\n", rec.Owner, rec.Repo, rec.Number)
 	return nil
 }
 
@@ -344,38 +319,6 @@ func checkSandboxCapability(ctx context.Context) error {
 	default:
 		return fmt.Errorf("the OS sandbox is unavailable on GOOS=%s (Linux, macOS, and WSL2 are supported)", runtime.GOOS)
 	}
-}
-
-// workspaceRootFromCwd resolves the enclosing workspace root or errors.
-func workspaceRootFromCwd() (string, error) {
-	cwd, err := os.Getwd()
-	if err != nil {
-		return "", fmt.Errorf("getting working directory: %w", err)
-	}
-	class, err := workspace.ClassifyCwd(cwd)
-	if err != nil {
-		return "", fmt.Errorf("classifying working directory: %w", err)
-	}
-	if class.WorkspaceRoot == "" {
-		return "", fmt.Errorf("not inside a niwa workspace")
-	}
-	return class.WorkspaceRoot, nil
-}
-
-// validateDraftPath rejects a recorded draft path that does not resolve inside
-// the workspace root or whose basename is not the expected draft file. The
-// record is on disk and could be tampered; this closes a traversal surface
-// before the trusted post step reads the file.
-func validateDraftPath(root, draftPath string) error {
-	clean := filepath.Clean(draftPath)
-	rootClean := filepath.Clean(root)
-	if !strings.HasPrefix(clean, rootClean+string(os.PathSeparator)) {
-		return fmt.Errorf("draft path %q is outside the workspace", draftPath)
-	}
-	if filepath.Base(clean) != watch.DefaultDraftRelPath {
-		return fmt.Errorf("unexpected draft file name %q", filepath.Base(clean))
-	}
-	return nil
 }
 
 // workspaceScope builds the workspace-membership matcher from the discovered

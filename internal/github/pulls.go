@@ -1,7 +1,6 @@
 package github
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -190,41 +189,6 @@ func (c *APIClient) GetPullHead(ctx context.Context, owner, repo string, number 
 		ph.CloneURL = body.Head.Repo.CloneURL
 	}
 	return ph, nil
-}
-
-// CreateReview posts a review to a pull request. event is supplied by the
-// caller (trusted niwa code), never derived from body; body is treated as an
-// opaque payload. This is the trusted post step that runs outside the contained
-// review session.
-func (c *APIClient) CreateReview(ctx context.Context, owner, repo string, number int, body, event string) error {
-	if owner == "" || repo == "" || number <= 0 {
-		return fmt.Errorf("CreateReview: invalid PR coordinates %q/%q#%d", owner, repo, number)
-	}
-	if event == "" {
-		event = "COMMENT"
-	}
-	payload, err := json.Marshal(map[string]string{"body": body, "event": event})
-	if err != nil {
-		return fmt.Errorf("encoding review payload: %w", err)
-	}
-	url := fmt.Sprintf("%s/repos/%s/%s/pulls/%d/reviews", c.BaseURL, owner, repo, number)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
-	if err != nil {
-		return fmt.Errorf("creating request: %w", err)
-	}
-	c.applyAuth(req)
-	req.Header.Set("Accept", "application/vnd.github+json")
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := c.HTTPClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("posting review: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
-		return fmt.Errorf("GitHub review POST returned status %d", resp.StatusCode)
-	}
-	return nil
 }
 
 // ownerRepoFromAPIURL parses "<base>/repos/<owner>/<repo>" into owner, repo.

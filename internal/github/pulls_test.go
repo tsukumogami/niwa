@@ -2,7 +2,6 @@ package github
 
 import (
 	"context"
-	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -80,43 +79,6 @@ func TestSearchReviewRequestedPRs_EmptyLogin(t *testing.T) {
 	c := &APIClient{HTTPClient: http.DefaultClient, BaseURL: "https://example.test"}
 	if _, err := c.SearchReviewRequestedPRs(context.Background(), ""); err == nil {
 		t.Fatal("expected error on empty login")
-	}
-}
-
-func TestCreateReview_FixedEventAndBody(t *testing.T) {
-	var gotBody map[string]string
-	var gotPath string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotPath = r.URL.Path
-		_ = json.NewDecoder(r.Body).Decode(&gotBody)
-		w.WriteHeader(http.StatusOK)
-		_, _ = io.WriteString(w, `{"id":1}`)
-	}))
-	defer srv.Close()
-
-	c := &APIClient{HTTPClient: http.DefaultClient, BaseURL: srv.URL}
-	// Empty event defaults to COMMENT (never approves); body passes through opaque.
-	if err := c.CreateReview(context.Background(), "acme", "api", 42, "LGTM with notes", ""); err != nil {
-		t.Fatalf("CreateReview: %v", err)
-	}
-	if gotPath != "/repos/acme/api/pulls/42/reviews" {
-		t.Errorf("path = %q", gotPath)
-	}
-	if gotBody["event"] != "COMMENT" {
-		t.Errorf("event = %q, want COMMENT (default, never derived from draft)", gotBody["event"])
-	}
-	if gotBody["body"] != "LGTM with notes" {
-		t.Errorf("body = %q", gotBody["body"])
-	}
-}
-
-func TestCreateReview_InvalidCoords(t *testing.T) {
-	c := &APIClient{HTTPClient: http.DefaultClient, BaseURL: "https://example.test"}
-	if err := c.CreateReview(context.Background(), "", "api", 42, "x", "COMMENT"); err == nil {
-		t.Fatal("expected error on empty owner")
-	}
-	if err := c.CreateReview(context.Background(), "acme", "api", 0, "x", "COMMENT"); err == nil {
-		t.Fatal("expected error on non-positive PR number")
 	}
 }
 
