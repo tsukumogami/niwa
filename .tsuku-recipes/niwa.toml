@@ -3,6 +3,14 @@ name = "niwa"
 description = "Declarative workspace manager for AI-assisted development"
 homepage = "https://github.com/tsukumogami/niwa"
 version_format = "semver"
+# Linux-only sandbox tools for `niwa watch --once` (Claude Code OS no-egress
+# sandbox: bwrap + socat). Declared cross-platform here, but each dependency
+# recipe is itself Linux-only (bubblewrap: supported_os=["linux"]; socat:
+# unsupported on darwin), so tsuku's runtime-dependency walk skips both on
+# macOS, which uses the built-in Seatbelt sandbox and needs neither. On Linux
+# they install and niwa's binary wrapper puts them on PATH so the sandbox
+# preflight's exec.LookPath("bwrap"/"socat") resolves.
+runtime_dependencies = ["bubblewrap", "socat"]
 
 [version]
 github_repo = "tsukumogami/niwa"
