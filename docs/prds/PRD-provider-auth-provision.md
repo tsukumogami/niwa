@@ -1,5 +1,5 @@
 ---
-status: Accepted
+status: In Progress
 problem: |
   niwa consumes a machine-identity credential to resolve a workspace's vault
   secrets, but gives a developer or agent no help obtaining that credential.
@@ -22,7 +22,7 @@ motivating_context: |
 
 ## Status
 
-Accepted
+In Progress
 
 Requirements for the native `niwa provider-auth provision` command, downstream of
 `docs/briefs/BRIEF-provider-auth-provision.md`. This feature is Complex: it adds a
