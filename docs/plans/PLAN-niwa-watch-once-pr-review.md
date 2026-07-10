@@ -14,10 +14,32 @@ issue_count: 11
 Active
 
 Single-PR plan decomposing the Accepted design into sequenced,
-independently-testable issues landing on one branch and PR. Issues 1-8 are the
-core verb + containment; issues 9-11 add the Decision-8 amendment
-(capability-tiered preflight, `niwa setup-sandbox`, and fail-closed harness
-settings), with a companion tsuku-recipe change tracked separately.
+independently-testable issues landing on one branch and PR.
+
+**Progress at a glance** (per-issue detail in each outline's `Status:` line):
+
+| Issue | Status |
+|-------|--------|
+| 1 state schemas | Done -- implemented + unit-tested green |
+| 2 GitHub client methods | Done -- implemented + unit-tested green |
+| 3 selection | Done -- implemented + unit-tested green |
+| 4 hardened fetch | Done -- implemented + unit-tested green |
+| 5 containment surface | Done -- implemented + unit-tested green |
+| 6 watch --once verb | Implemented (compiles; helpers unit-tested); end-to-end run not yet verified (needs a workspace + GitHub + a capable host) |
+| 7 post/discard | Implemented (compiles; helpers unit-tested); end-to-end not yet verified |
+| 8 adversarial live gate | Scaffold only -- the live egress proof needs a sandbox-capable host (blocked here) |
+| 9 tiered preflight + policy | Not started (Decision-8 amendment) |
+| 10 niwa setup-sandbox | Not started (Decision-8 amendment) |
+| 11 failIfUnavailable settings | Not started (Decision-8 amendment) |
+| companion tsuku recipe | Not started (lands in tsukumogami/tsuku) |
+
+**What's left to reach a merge-ready feature:** implement issues 9-11
+(capability tiers + `uncontained_policy` + `setup-sandbox` + fail-open close),
+land the companion tsuku recipe, wire the live containment gate to self-drive,
+and run that gate green on a sandbox-capable host. Also promote issue 6's
+hard-refuse preflight to the issue-9 tiered/configurable form. Two code-review
+findings (token-off-argv, active sandbox-capability preflight) are already
+fixed. `go build/vet/test ./...` is green for what's implemented.
 
 ## Scope Summary
 
@@ -43,11 +65,13 @@ enforcement test comes last as the boundary proof that gates release.
 
 **Goal**: Define and unit-test the durable state the watcher reads and writes -- the handled-set and the per-staged-review record -- with read/write helpers.
 
+**Status:** Done -- implemented + unit-tested green.
+
 **Acceptance Criteria**:
-- [ ] A handled-set store under `<workspaceRoot>/.niwa/watch-handled`, one `owner/repo#number` line per handled PR, with append + membership helpers (PRD R11, AC5).
-- [ ] A staged-review record `{handle, owner, repo, number, url, draftPath}` persisted at `<workspaceRoot>/.niwa/watch/<handle>.json`, with write + load-by-handle helpers.
-- [ ] Handled-set membership is exact on `owner/repo#number`; a malformed line is ignored, not fatal.
-- [ ] Unit tests cover round-trip, membership, and missing-file (empty set) cases.
+- [x] A handled-set store under `<workspaceRoot>/.niwa/watch-handled`, one `owner/repo#number` line per handled PR, with append + membership helpers (PRD R11, AC5).
+- [x] A staged-review record `{handle, owner, repo, number, url, draftPath}` persisted at `<workspaceRoot>/.niwa/watch/<handle>.json`, with write + load-by-handle helpers.
+- [x] Handled-set membership is exact on `owner/repo#number`; a malformed line is ignored, not fatal.
+- [x] Unit tests cover round-trip, membership, and missing-file (empty set) cases.
 
 **Dependencies**: None
 
@@ -58,11 +82,13 @@ enforcement test comes last as the boundary proof that gates release.
 
 **Goal**: Add the three net-new GitHub client methods the watcher and the post step need, tested against the existing fake server.
 
+**Status:** Done -- implemented + unit-tested green.
+
 **Acceptance Criteria**:
-- [ ] `CurrentLogin(ctx) (string, error)` wraps `GET /user`.
-- [ ] `SearchReviewRequestedPRs(ctx, login) ([]PRRef, error)` wraps `GET /search/issues?q=is:pr+is:open+user-review-requested:<login>`; `PRRef{Owner, Repo, Number, URL, CreatedAt}` is parsed from the payload (PRD R2, D3).
-- [ ] `CreateReview(ctx, owner, repo, number, body, event)` wraps `POST /repos/{owner}/{repo}/pulls/{number}/reviews`; `event` is a parameter set by the caller (never derived from `body`) and defaults to `COMMENT` (PRD R14; design Decision 6).
-- [ ] Auth reuses `resolveGitHubToken` + `NewAPIClient`; unit tests run against `NIWA_GITHUB_API_URL`.
+- [x] `CurrentLogin(ctx) (string, error)` wraps `GET /user`.
+- [x] `SearchReviewRequestedPRs(ctx, login) ([]PRRef, error)` wraps `GET /search/issues?q=is:pr+is:open+user-review-requested:<login>`; `PRRef{Owner, Repo, Number, URL, CreatedAt}` is parsed from the payload (PRD R2, D3).
+- [x] `CreateReview(ctx, owner, repo, number, body, event)` wraps `POST /repos/{owner}/{repo}/pulls/{number}/reviews`; `event` is a parameter set by the caller (never derived from `body`) and defaults to `COMMENT` (PRD R14; design Decision 6).
+- [x] Auth reuses `resolveGitHubToken` + `NewAPIClient`; unit tests run against `NIWA_GITHUB_API_URL`.
 
 **Dependencies**: None
 
@@ -73,12 +99,14 @@ enforcement test comes last as the boundary proof that gates release.
 
 **Goal**: Turn the raw poll results into the bounded, ordered set of PRs to dispatch, as pure table-testable logic.
 
+**Status:** Done -- implemented + unit-tested green.
+
 **Acceptance Criteria**:
-- [ ] Intersect `PRRef`s with the workspace's repositories from `config.Discover` -> `Sources`/`Repos`; a PR outside the workspace is dropped (PRD R3, AC4).
-- [ ] Drop PRs already in the handled-set (PRD R11, AC5).
-- [ ] Order the remainder by PR `created_at` (oldest first) and take at most the per-run bound (default 3); a repeat run over unchanged state selects the same set (PRD R10, AC8).
-- [ ] Team-only requests never appear (guaranteed upstream by the `user-review-requested` query; a test asserts the query shape) (PRD R2, AC3).
-- [ ] Pure functions with table tests.
+- [x] Intersect `PRRef`s with the workspace's repositories from `config.Discover` -> `Sources`/`Repos`; a PR outside the workspace is dropped (PRD R3, AC4).
+- [x] Drop PRs already in the handled-set (PRD R11, AC5).
+- [x] Order the remainder by PR `created_at` (oldest first) and take at most the per-run bound (default 3); a repeat run over unchanged state selects the same set (PRD R10, AC8).
+- [x] Team-only requests never appear (guaranteed upstream by the `user-review-requested` query; a test asserts the query shape) (PRD R2, AC3).
+- [x] Pure functions with table tests.
 
 **Dependencies**: Blocked by <<ISSUE:1>>, <<ISSUE:2>>
 
@@ -89,11 +117,13 @@ enforcement test comes last as the boundary proof that gates release.
 
 **Goal**: Fetch a PR's head as inert data and expose it to the review session as ordinary files without executing any checkout-time program (the sharpest risk, isolated).
 
+**Status:** Done -- implemented + unit-tested green.
+
 **Acceptance Criteria**:
-- [ ] Fetch a specific head commit SHA (not arbitrary ref-following) with hooks disabled, `GIT_LFS_SKIP_SMUDGE=1` and `filter.lfs.smudge`/`.process` unset, submodule recursion off, `protocol.ext`/`protocol.file` disabled, empty `core.attributesFile`, and `GIT_CONFIG_NOSYSTEM=1` with a fetch-local `HOME` (design Decision 2).
-- [ ] Expose via a filter-neutered checkout the agent reads as normal files; `git archive` is NOT used.
-- [ ] Fixture test: a PR whose `.gitattributes` marks a path `filter=lfs` produces no smudge and no network call during fetch/checkout.
-- [ ] Fixture test: a file marked `export-ignore` is still present in the checked-out tree (not hidden from review).
+- [x] Fetch a specific head commit SHA (not arbitrary ref-following) with hooks disabled, `GIT_LFS_SKIP_SMUDGE=1` and `filter.lfs.smudge`/`.process` unset, submodule recursion off, `protocol.ext`/`protocol.file` disabled, empty `core.attributesFile`, and `GIT_CONFIG_NOSYSTEM=1` with a fetch-local `HOME` (design Decision 2).
+- [x] Expose via a filter-neutered checkout the agent reads as normal files; `git archive` is NOT used.
+- [x] Fixture test: a PR whose `.gitattributes` marks a path `filter=lfs` produces no smudge and no network call during fetch/checkout.
+- [x] Fixture test: a file marked `export-ignore` is still present in the checked-out tree (not hidden from review).
 
 **Dependencies**: None
 
@@ -104,11 +134,13 @@ enforcement test comes last as the boundary proof that gates release.
 
 **Goal**: Add the net-new contained-dispatch surface -- an allowlisted environment with synthetic HOME, the no-egress sandbox settings merge, and per-instance re-verification -- without changing the ordinary dispatch path.
 
+**Status:** Done -- implemented + unit-tested green (incl. the permission-allowlist review fix).
+
 **Acceptance Criteria**:
-- [ ] The launch seam gains `LaunchOpts{EnvOverride []string}`; `EnvOverride == nil` preserves today's `cmd.Env = os.Environ()` so ordinary `niwa dispatch` is unchanged (design Decision 3).
-- [ ] The watch launch env is an explicit allowlist (model auth + `PATH`/locale + a synthetic `HOME` inside the instance); `GITHUB_TOKEN`, `GH_TOKEN`, `GH_*`/`GITHUB_*`, and `SSH_AUTH_SOCK` are absent (PRD R8).
-- [ ] A containment-profile builder produces `sandbox.enabled: true`, empty `sandbox.network.allowedDomains`, and a fail-closed permission mode, applied to the instance `.claude/settings.json` via the existing merge helper; niwa re-reads the merged file and asserts the stanza survived before launch (PRD R7, R9; design Decisions 1, 7).
-- [ ] Canary test: a planted `NIWA_CANARY_SECRET` and `SSH_AUTH_SOCK` in the parent env, and an on-disk `~/.netrc` / `~/.config/gh` sentinel under the real home, are all absent from the built session env / synthetic HOME; the session env is a subset of the allowlist (PRD AC12).
+- [x] The launch seam gains `LaunchOpts{EnvOverride []string}`; `EnvOverride == nil` preserves today's `cmd.Env = os.Environ()` so ordinary `niwa dispatch` is unchanged (design Decision 3).
+- [x] The watch launch env is an explicit allowlist (model auth + `PATH`/locale + a synthetic `HOME` inside the instance); `GITHUB_TOKEN`, `GH_TOKEN`, `GH_*`/`GITHUB_*`, and `SSH_AUTH_SOCK` are absent (PRD R8).
+- [x] A containment-profile builder produces `sandbox.enabled: true`, empty `sandbox.network.allowedDomains`, and a fail-closed permission mode, applied to the instance `.claude/settings.json` via the existing merge helper; niwa re-reads the merged file and asserts the stanza survived before launch (PRD R7, R9; design Decisions 1, 7).
+- [x] Canary test: a planted `NIWA_CANARY_SECRET` and `SSH_AUTH_SOCK` in the parent env, and an on-disk `~/.netrc` / `~/.config/gh` sentinel under the real home, are all absent from the built session env / synthetic HOME; the session env is a subset of the allowlist (PRD AC12).
 
 **Dependencies**: None
 
@@ -118,6 +150,8 @@ enforcement test comes last as the boundary proof that gates release.
 ### Issue 6: feat(watch): the watch --once orchestration verb
 
 **Goal**: Wire the full single-shot pass together as the `niwa watch --once` verb, fail-closed and fail-loud.
+
+**Status:** Implemented -- compiles, helpers unit-tested; the end-to-end run (provision -> stage) is not yet verified (needs a workspace + GitHub + a sandbox-capable host). Its hard-refuse preflight AC is superseded by the tiered/configurable form in issue 9.
 
 **Acceptance Criteria**:
 - [ ] `internal/cli/watch.go` registers `watchCmd` (with `--once`) via `init()` + `rootCmd.AddCommand`; it is stateless and starts no resident process (PRD R1).
@@ -137,6 +171,8 @@ enforcement test comes last as the boundary proof that gates release.
 
 **Goal**: Let the developer post an approved draft or discard a staged review, from the trusted context, without ever touching the contained session.
 
+**Status:** Implemented -- compiles, helpers unit-tested; end-to-end not yet verified.
+
 **Acceptance Criteria**:
 - [ ] `niwa watch post <handle>` resolves the staged-review record (handle = dispatch session short id), reads the draft at the recorded path (validated to resolve inside the instance root), and posts via `CreateReview` with `event` fixed in code (default `COMMENT`) -- run outside the sandbox with the dispatcher token, which never entered the session (PRD R14, AC15, AC21; design Decision 6).
 - [ ] `niwa watch discard <handle>` posts nothing and records the PR as handled (PRD R14, AC16).
@@ -150,6 +186,8 @@ enforcement test comes last as the boundary proof that gates release.
 ### Issue 8: test(watch): adversarial live-enforcement boundary proof
 
 **Goal**: Prove -- by live execution inside a real contained session -- that egress and out-of-instance action are denied at the OS layer, not merely declined by the model. This is the release gate.
+
+**Status:** Scaffold only -- the live egress/raw-socket proof is unimplemented; it needs a sandbox-capable host (blocked in the authoring environment).
 
 **Acceptance Criteria**:
 - [ ] A hostile-PR fixture whose title/body/diff attempt `curl ... | sh`, a `git push`, and secret exfiltration is dispatched under the containment profile.
@@ -167,6 +205,8 @@ enforcement test comes last as the boundary proof that gates release.
 
 **Goal**: Replace the hard-refuse preflight with an adaptive tier selection plus an operator-owned fallback policy (design Decision 8A/8C, PRD R18/R20/R9).
 
+**Status:** Not started (Decision-8 amendment).
+
 **Acceptance Criteria**:
 - [ ] The preflight selects the strongest enforceable tier: macOS Seatbelt (built-in), or Linux `bwrap`+`socat` with a capability-bearing user namespace (the existing functional probe); it does not require the same tier on every platform (R18).
 - [ ] A durable `uncontained_policy` setting (`refuse` default | `warn` | `allow`) is read on the `flag > config header > default` stack; when no tier is enforceable the run follows it -- refuse (non-zero + reason + remediation), warn (dispatch + recorded prominent warning), or allow (R20).
@@ -182,6 +222,8 @@ enforcement test comes last as the boundary proof that gates release.
 
 **Goal**: The opt-in privileged command that unlocks the sandbox capability on a hardened Linux host (design Decision 8B, PRD R19).
 
+**Status:** Not started (Decision-8 amendment).
+
 **Acceptance Criteria**:
 - [ ] `niwa setup-sandbox` detects the hardened-userns condition and installs an AppArmor profile for `bwrap` (or sets the sysctl), reporting what it changed; it is idempotent and a no-op where the capability already exists.
 - [ ] It is the ONLY privileged step; it is never invoked per dispatch; on macOS / permissive Linux it reports "already capable" and changes nothing.
@@ -195,6 +237,8 @@ enforcement test comes last as the boundary proof that gates release.
 ### Issue 11: feat(watch): fail-closed harness settings (failIfUnavailable)
 
 **Goal**: Make the harness refuse rather than silently disable the sandbox (design Decision 8, PRD R21).
+
+**Status:** Not started (Decision-8 amendment).
 
 **Acceptance Criteria**:
 - [ ] The containment profile (Issue 5) also sets `sandbox.failIfUnavailable: true` and `allowUnsandboxedCommands: false` in the merged instance settings.
