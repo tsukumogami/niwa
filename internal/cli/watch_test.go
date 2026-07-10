@@ -72,6 +72,44 @@ func TestOwnerRepoFromGitURL(t *testing.T) {
 	}
 }
 
+func TestResolveUncontainedPolicy(t *testing.T) {
+	cases := []struct {
+		flag, configDefault string
+		want                string
+		wantErr             bool
+	}{
+		// Empty everywhere -> the safe default.
+		{"", "", "refuse", false},
+		// Config default applies when the flag is empty.
+		{"", "warn", "warn", false},
+		{"", "allow", "allow", false},
+		// Flag overrides the config default (flag > config > default).
+		{"refuse", "allow", "refuse", false},
+		{"allow", "refuse", "allow", false},
+		{"warn", "", "warn", false},
+		// Invalid values are hard errors (fail-closed), never coerced.
+		{"bogus", "", "", true},
+		{"", "bogus", "", true},
+		{"ALLOW", "", "", true}, // case-sensitive; not silently normalized
+	}
+	for _, tc := range cases {
+		got, err := resolveUncontainedPolicy(tc.flag, tc.configDefault)
+		if tc.wantErr {
+			if err == nil {
+				t.Errorf("resolveUncontainedPolicy(%q,%q) expected error, got %q", tc.flag, tc.configDefault, got)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("resolveUncontainedPolicy(%q,%q) unexpected error: %v", tc.flag, tc.configDefault, err)
+			continue
+		}
+		if got != tc.want {
+			t.Errorf("resolveUncontainedPolicy(%q,%q) = %q, want %q", tc.flag, tc.configDefault, got, tc.want)
+		}
+	}
+}
+
 func TestValidateDraftPath(t *testing.T) {
 	root := filepath.FromSlash("/ws")
 	good := filepath.Join(root, "inst+watch-a-b-1-deadbeef", "watch-review-draft.md")

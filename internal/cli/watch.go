@@ -18,13 +18,36 @@ import (
 	"github.com/tsukumogami/niwa/internal/workspace"
 )
 
-var watchOnce bool
+var (
+	watchOnce        bool
+	watchUncontained string
+)
 
 func init() {
 	watchCmd.Flags().BoolVar(&watchOnce, "once", false, "perform exactly one poll-and-dispatch pass and exit (the only supported mode)")
+	watchCmd.Flags().StringVar(&watchUncontained, "uncontained", "", "policy when the OS sandbox cannot be enforced: refuse (default) | warn | allow. Overrides the host [global] watch_uncontained_policy default. 'warn'/'allow' dispatch WITHOUT OS-level egress containment.")
 	watchCmd.AddCommand(watchPostCmd)
 	watchCmd.AddCommand(watchDiscardCmd)
 	rootCmd.AddCommand(watchCmd)
+}
+
+// resolveUncontainedPolicy resolves the fallback policy on the
+// flag > config-default > "refuse" stack and validates it. An invalid value is
+// a hard error (fail-closed), never silently coerced.
+func resolveUncontainedPolicy(flag, configDefault string) (string, error) {
+	v := flag
+	if v == "" {
+		v = configDefault
+	}
+	if v == "" {
+		v = "refuse"
+	}
+	switch v {
+	case "refuse", "warn", "allow":
+		return v, nil
+	default:
+		return "", fmt.Errorf("invalid uncontained policy %q (want refuse | warn | allow)", v)
+	}
 }
 
 var watchCmd = &cobra.Command{
@@ -64,15 +87,33 @@ var watchDiscardCmd = &cobra.Command{
 func runWatchOnce(cmd *cobra.Command, _ []string) error {
 	ctx := cmd.Context()
 
-	// (1) Fail-closed preflight: actively verify the OS sandbox can be enforced
-	// on this host NOW -- not merely that the OS is nominally supported -- BEFORE
-	// creating any instance, rather than dispatch uncontained. A non-Windows host
-	// whose sandbox backend is missing or whose kernel/container denies the
-	// network namespace would otherwise dispatch a hostile-PR review with no
-	// egress containment (the harness silently degrades to "no sandbox + a
-	// warning").
+	// (1) Preflight: actively verify the OS sandbox can be enforced on this host
+	// NOW -- not merely that the OS is nominally supported -- BEFORE creating any
+	// instance. When it cannot be enforced, what happens is the operator's
+	// policy (Decision 8 / R20), resolved flag > [global] config > default
+	// "refuse" -- never a silent uncontained dispatch.
 	if err := sandboxCapabilityCheck(ctx); err != nil {
-		return fmt.Errorf("niwa watch: refusing to dispatch uncontained: %w", err)
+		configDefault := ""
+		if gc, gerr := config.LoadGlobalConfig(); gerr == nil && gc != nil {
+			configDefault = gc.Global.WatchUncontainedPolicy
+		}
+		policy, perr := resolveUncontainedPolicy(watchUncontained, configDefault)
+		if perr != nil {
+			return fmt.Errorf("niwa watch: %w", perr)
+		}
+		switch policy {
+		case "refuse":
+			return fmt.Errorf("niwa watch: refusing to dispatch uncontained: %w\n"+
+				"  run `niwa setup-sandbox` once to enable the OS sandbox, or set "+
+				"watch_uncontained_policy (or --uncontained) to warn|allow to dispatch "+
+				"WITHOUT OS-level egress containment", err)
+		case "warn":
+			fmt.Fprintf(cmd.ErrOrStderr(),
+				"niwa watch: WARNING -- dispatching UNCONTAINED (no OS-level egress denial): %v\n"+
+					"  the metadata-only prompt, credential-scrubbed env, and human review gate still apply.\n", err)
+		case "allow":
+			// Standing informed decision: proceed without a warning.
+		}
 	}
 	if _, err := lookClaude(); err != nil {
 		return fmt.Errorf("niwa watch: claude binary not found in PATH; install Claude Code before watching")

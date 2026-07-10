@@ -41,6 +41,11 @@ type GlobalSettings struct {
 	// always overrides it; "" (the default) forwards no model, preserving
 	// today's behavior.
 	DispatchModel string `toml:"dispatch_model,omitempty"`
+	// WatchUncontainedPolicy is the host-level default for what `niwa watch
+	// --once` does when the OS sandbox cannot be enforced: "refuse" (the safe
+	// default), "warn" (dispatch with a recorded warning), or "allow". The
+	// per-run --uncontained flag overrides it; "" resolves to "refuse".
+	WatchUncontainedPolicy string `toml:"watch_uncontained_policy,omitempty"`
 }
 
 // SkipPluginInstall reports whether the user has explicitly opted
