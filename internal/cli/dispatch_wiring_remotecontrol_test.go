@@ -55,7 +55,7 @@ func provisionWithInstanceSettings(t *testing.T, f *dispatchFakes, settingsBody 
 
 // captureLaunchPassthrough overrides the launch seam to record the passthrough argv.
 func captureLaunchPassthrough(f *dispatchFakes, got *[]string) {
-	dispatchLaunch = func(_ context.Context, _, _ string, passthrough []string) error {
+	dispatchLaunch = func(_ context.Context, _, _ string, passthrough []string, _ []string) error {
 		f.launchCalled++
 		*got = passthrough
 		return nil

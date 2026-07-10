@@ -21,8 +21,14 @@ var dispatchLaunch = realDispatchLaunch
 // passed as a single argv element -- never shell-interpolated -- so quotes,
 // newlines, and metacharacters in it cannot inject a command (D8).
 //
+// env selects the worker's environment: a nil env inherits the full parent
+// environment (os.Environ()), the behavior every ordinary dispatch relies on;
+// a non-nil env is used verbatim, which is how the contained watch path passes
+// an allowlisted, credential-scrubbed environment. Passing an explicit env is
+// the ONLY way the worker's environment differs from the supervisor's.
+//
 // An empty prompt is rejected before any exec (R43).
-func realDispatchLaunch(ctx context.Context, instanceDir, prompt string, passthrough []string) error {
+func realDispatchLaunch(ctx context.Context, instanceDir, prompt string, passthrough, env []string) error {
 	if prompt == "" {
 		return fmt.Errorf("dispatch: empty prompt")
 	}
@@ -35,9 +41,13 @@ func realDispatchLaunch(ctx context.Context, instanceDir, prompt string, passthr
 	args := buildClaudeBgArgs(prompt, passthrough)
 	cmd := exec.CommandContext(ctx, bin, args...)
 	cmd.Dir = instanceDir
-	// Inherit the parent environment so the worker sees the same context the
-	// supervisor does (mirrors the sessionattach supervisor).
-	cmd.Env = os.Environ()
+	if env == nil {
+		// Inherit the parent environment so the worker sees the same context the
+		// supervisor does (mirrors the sessionattach supervisor).
+		cmd.Env = os.Environ()
+	} else {
+		cmd.Env = env
+	}
 
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("dispatch: launching claude --bg: %w", err)

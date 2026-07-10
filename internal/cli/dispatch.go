@@ -260,7 +260,7 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	if err := dispatchLaunch(cmd.Context(), instancePath, prompt, passthrough); err != nil {
+	if err := dispatchLaunch(cmd.Context(), instancePath, prompt, passthrough, nil); err != nil {
 		return fmt.Errorf("niwa: error: launching dispatch worker: %w", err)
 	}
 

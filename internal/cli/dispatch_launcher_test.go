@@ -50,7 +50,7 @@ func TestBuildClaudeBgArgs_PromptRemainsSingleElement(t *testing.T) {
 // TestRealDispatchLaunch_EmptyPromptRejected verifies an empty prompt is
 // rejected before any exec (R43). It does not depend on claude being present.
 func TestRealDispatchLaunch_EmptyPromptRejected(t *testing.T) {
-	err := realDispatchLaunch(context.Background(), t.TempDir(), "", nil)
+	err := realDispatchLaunch(context.Background(), t.TempDir(), "", nil, nil)
 	if err == nil {
 		t.Fatal("expected an error for an empty prompt, got nil")
 	}
