@@ -47,6 +47,6 @@ const DefaultCloneRelDir = "pr-clone"
 
 // DefaultDraftRelPath is the fixed, predictable location (relative to the
 // session working directory / instance root) where the review agent writes its
-// draft, so the developer can find it (contained mode) or the agent can post it
-// (uncontained mode).
+// draft, so the developer can find it and submit it themselves (the agent never
+// posts, in any mode).
 const DefaultDraftRelPath = "watch-review-draft.md"

@@ -205,10 +205,11 @@ func runWatchOnce(cmd *cobra.Command, _ []string) error {
 // stageReview provisions an instance, fetches the PR head as inert data, and
 // launches a detached review agent under the resolved containment plan. When
 // contained it applies the containment bundle (scrubbed env, synthetic HOME,
-// fail-closed mode, and the OS sandbox when plan.applySandbox) and the agent
-// only drafts; when uncontained it dispatches with the developer's real
-// environment and the agent posts the review itself. The handled-set and the
-// staged-review record are written ONLY on success.
+// fail-closed mode, and the OS sandbox when plan.applySandbox); when uncontained
+// it dispatches with the developer's real environment so the agent can read the
+// surrounding context. In both cases the agent only drafts and waits -- it never
+// posts. The handled-set and the staged-review record are written ONLY on
+// success.
 func stageReview(cmd *cobra.Command, root, cwd, token string, client *github.APIClient, pr github.PRRef, plan containmentPlan) error {
 	ctx := cmd.Context()
 
