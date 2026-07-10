@@ -1,6 +1,6 @@
 ---
 schema: brief/v1
-status: Accepted
+status: Done
 problem: |
   niwa dispatch is a pull verb: the developer must notice a PR review is
   waiting, decide to hand it off, and wait for an agent to read and draft.
@@ -26,7 +26,7 @@ motivating_context: |
 
 ## Status
 
-Accepted
+Done
 
 Framing for the first, minimal version of proactive PR-review dispatch in
 niwa. The two-reviewer jury (content-quality and structural-format)
