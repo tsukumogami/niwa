@@ -2,6 +2,7 @@ package watch
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"os"
 	"os/exec"
@@ -112,6 +113,14 @@ func hardenedFetchArgs(remoteURL, sha string) []string {
 // interactive credential prompt. When token is non-empty, the HTTP auth header
 // is injected via git's environment-variable config mechanism so it stays off
 // the command line.
+//
+// The header is HTTP Basic with the token as the password (username
+// "x-access-token"), which is what GitHub's git-over-HTTPS transport accepts --
+// the same form GitHub Actions' checkout uses. A `Bearer` header is accepted by
+// the REST API but rejected by the git transport (401), which then makes git
+// fall back to a credential prompt and fail under GIT_TERMINAL_PROMPT=0; a
+// malformed auth header is worse than none, since it also breaks the
+// no-auth-needed public-repo case.
 func hardenedGitEnv(gitHome, token string) []string {
 	// Start from a minimal base rather than os.Environ() so no ambient
 	// GIT_* / credential variables leak in.
@@ -126,10 +135,11 @@ func hardenedGitEnv(gitHome, token string) []string {
 		base = append(base, "PATH="+p)
 	}
 	if token != "" {
+		cred := base64.StdEncoding.EncodeToString([]byte("x-access-token:" + token))
 		base = append(base,
 			"GIT_CONFIG_COUNT=1",
 			"GIT_CONFIG_KEY_0=http.extraheader",
-			"GIT_CONFIG_VALUE_0=Authorization: Bearer "+token,
+			"GIT_CONFIG_VALUE_0=Authorization: Basic "+cred,
 		)
 	}
 	return base

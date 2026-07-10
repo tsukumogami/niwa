@@ -2,6 +2,7 @@ package watch
 
 import (
 	"context"
+	"encoding/base64"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -147,16 +148,29 @@ func TestFetchToken_NeverInArgv(t *testing.T) {
 		}
 	}
 
-	// The token is carried in the environment instead, only as a config VALUE.
+	// The token is carried in the environment instead, as an HTTP Basic auth
+	// header value (username x-access-token, token as password) -- the form
+	// GitHub's git transport accepts. A Bearer header is rejected by the git
+	// endpoint (see hardenedGitEnv).
 	env := hardenedGitEnv("/scratch/home", token)
-	var inEnv bool
+	wantCred := base64.StdEncoding.EncodeToString([]byte("x-access-token:" + token))
+	wantVal := "GIT_CONFIG_VALUE_0=Authorization: Basic " + wantCred
+	var found bool
 	for _, kv := range env {
-		if strings.HasPrefix(kv, "GIT_CONFIG_VALUE_0=") && strings.Contains(kv, token) {
-			inEnv = true
+		if kv == wantVal {
+			found = true
+		}
+		if strings.Contains(kv, "Bearer") {
+			t.Errorf("Bearer header is rejected by the git transport; must use Basic, got %q", kv)
 		}
 	}
-	if !inEnv {
-		t.Error("token should be carried via GIT_CONFIG_VALUE_0 in the environment")
+	if !found {
+		t.Errorf("expected Basic x-access-token header in env, want %q", wantVal)
+	}
+	// Sanity: the value decodes back to the x-access-token:token credential.
+	dec, _ := base64.StdEncoding.DecodeString(wantCred)
+	if string(dec) != "x-access-token:"+token {
+		t.Errorf("credential encoding mismatch: %q", dec)
 	}
 }
 
