@@ -101,20 +101,35 @@ type sandboxSettings struct {
 		AllowUnsandboxedCommands bool `json:"allowUnsandboxedCommands"`
 	} `json:"sandbox"`
 	Permissions struct {
-		DefaultMode string `json:"defaultMode"`
+		DefaultMode string   `json:"defaultMode,omitempty"`
+		Ask         []string `json:"ask,omitempty"`
 	} `json:"permissions"`
+}
+
+// postGuardAskRules require operator approval before the dispatched session can
+// submit a review or comment. It is a convenience guard against accidental
+// posting on the trusted uncontained path (where the agent holds real
+// credentials) -- an accident-prevention click, NOT a security boundary:
+// command-string matching is not one (that is what the OS sandbox is for). The
+// prompt already tells the agent not to post; this catches a stray
+// prompt-following. It is applied in every mode (harmless where the session has
+// no credentials or no egress).
+var postGuardAskRules = []string{
+	"Bash(gh pr review:*)",
+	"Bash(gh pr comment:*)",
 }
 
 // ContainmentProfile returns the settings fragment merged into the instance
 // settings before launch. It always sets the fail-closed permission mode (part
 // of the containment bundle applied for every `watch_containment = on` run).
 // withSandbox additionally enables the OS no-egress sandbox stanza; it is false
-// for the `watch_sandbox = disabled` and `optional`-but-unavailable cells of the
-// containment matrix (design Decision 7), where the session is credential- and
+// for the `watch_sandbox = optional`-but-unavailable cell of the containment
+// matrix (design Decision 7), where the session is credential- and
 // permission-contained but has no OS-level network cage.
 func ContainmentProfile(withSandbox bool) map[string]any {
 	var s sandboxSettings
-	s.Permissions.DefaultMode = "default" // fail-closed in --bg
+	s.Permissions.DefaultMode = "default"    // fail-closed in --bg
+	s.Permissions.Ask = postGuardAskRules[:] // require approval before posting
 	if withSandbox {
 		s.Sandbox.Enabled = true
 		s.Sandbox.Network.AllowedDomains = []string{} // deny-all
@@ -256,6 +271,56 @@ func ApplyContainment(instancePath string, withSandbox bool) error {
 	}
 	if err := VerifyContainmentApplied(merged, withSandbox); err != nil {
 		return err
+	}
+	return nil
+}
+
+// ApplyPostGuard merges only the post-guard ask rules into a provisioned
+// instance's settings, leaving the permission mode and everything else as the
+// ordinary dispatch wrote it. It is the uncontained-path counterpart to
+// ApplyContainment (which folds the same rules in via the profile): the
+// accident guard applies in every mode, but an uncontained run must keep its
+// normal (not fail-closed) permission posture otherwise.
+func ApplyPostGuard(instancePath string) error {
+	settingsPath := filepath.Join(instancePath, ".claude", "settings.json")
+	settings := map[string]any{}
+	if data, err := os.ReadFile(settingsPath); err == nil {
+		if err := json.Unmarshal(data, &settings); err != nil {
+			return fmt.Errorf("apply post-guard: parsing %s: %w", settingsPath, err)
+		}
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("apply post-guard: reading %s: %w", settingsPath, err)
+	}
+
+	perms, _ := settings["permissions"].(map[string]any)
+	if perms == nil {
+		perms = map[string]any{}
+	}
+	existing, _ := perms["ask"].([]any)
+	have := make(map[string]bool, len(existing))
+	for _, v := range existing {
+		if s, ok := v.(string); ok {
+			have[s] = true
+		}
+	}
+	for _, rule := range postGuardAskRules {
+		if !have[rule] {
+			existing = append(existing, rule)
+			have[rule] = true
+		}
+	}
+	perms["ask"] = existing
+	settings["permissions"] = perms
+
+	out, err := json.MarshalIndent(settings, "", "  ")
+	if err != nil {
+		return fmt.Errorf("apply post-guard: encoding settings: %w", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(settingsPath), 0o755); err != nil {
+		return fmt.Errorf("apply post-guard: creating .claude dir: %w", err)
+	}
+	if err := os.WriteFile(settingsPath, out, 0o644); err != nil {
+		return fmt.Errorf("apply post-guard: writing settings: %w", err)
 	}
 	return nil
 }

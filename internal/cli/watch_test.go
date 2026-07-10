@@ -71,7 +71,6 @@ func TestResolveContainmentPlan(t *testing.T) {
 		wantErr              bool
 	}{
 		{"off never probes", "off", "required", nil, false, false, false},
-		{"on+disabled", "on", "disabled", nil, true, false, false},
 		{"on+required capable", "on", "required", capable, true, true, false},
 		{"on+required incapable refuses", "on", "required", incapable, false, false, true},
 		{"on+optional capable uses sandbox", "on", "optional", capable, true, true, false},
@@ -152,7 +151,7 @@ func TestResolveContainmentSwitches(t *testing.T) {
 		{"empty -> defaults", mk("", ""), "on", "required", false},
 		{"containment off", mk("off", ""), "off", "required", false},
 		{"sandbox optional", mk("", "optional"), "on", "optional", false},
-		{"sandbox disabled", mk("on", "disabled"), "on", "disabled", false},
+		{"disabled is no longer valid", mk("on", "disabled"), "", "", true},
 		{"invalid containment", mk("maybe", ""), "", "", true},
 		{"invalid sandbox", mk("on", "sometimes"), "", "", true},
 	}

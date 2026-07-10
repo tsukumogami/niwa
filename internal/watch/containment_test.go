@@ -157,8 +157,8 @@ func TestContainmentProfile_ShapeAndVerify(t *testing.T) {
 	}
 }
 
-// TestContainmentProfile_NoSandbox covers the watch_sandbox = disabled /
-// optional-unavailable cells: the profile still enforces the fail-closed
+// TestContainmentProfile_NoSandbox covers the watch_sandbox =
+// optional-but-unavailable cell: the profile still enforces the fail-closed
 // permission mode but carries no sandbox stanza, and it verifies with
 // withSandbox=false.
 func TestContainmentProfile_NoSandbox(t *testing.T) {
@@ -180,8 +180,8 @@ func TestContainmentProfile_NoSandbox(t *testing.T) {
 	}
 }
 
-// TestApplyContainment_NoSandbox proves the on+optional/disabled path writes the
-// fail-closed permission mode without enabling the sandbox stanza.
+// TestApplyContainment_NoSandbox proves the on+optional-but-unavailable path
+// writes the fail-closed permission mode without enabling the sandbox stanza.
 func TestApplyContainment_NoSandbox(t *testing.T) {
 	inst := t.TempDir()
 	if err := ApplyContainment(inst, false); err != nil {
@@ -200,6 +200,68 @@ func TestApplyContainment_NoSandbox(t *testing.T) {
 		if enabled, _ := sb["enabled"].(bool); enabled {
 			t.Error("no-sandbox apply must not enable a sandbox")
 		}
+	}
+}
+
+func askContains(ask []any, rule string) int {
+	n := 0
+	for _, v := range ask {
+		if s, ok := v.(string); ok && s == rule {
+			n++
+		}
+	}
+	return n
+}
+
+// TestContainmentProfile_IncludesPostGuard: the post-guard ask rules ride in the
+// profile in both sandbox modes, so a contained run always carries the accident
+// guard.
+func TestContainmentProfile_IncludesPostGuard(t *testing.T) {
+	for _, ws := range []bool{true, false} {
+		perms := ContainmentProfile(ws)["permissions"].(map[string]any)
+		ask, _ := perms["ask"].([]any)
+		if askContains(ask, "Bash(gh pr review:*)") == 0 || askContains(ask, "Bash(gh pr comment:*)") == 0 {
+			t.Errorf("withSandbox=%v: profile missing post-guard ask rules, got %v", ws, ask)
+		}
+	}
+}
+
+// TestApplyPostGuard_MergesAndDedups proves the uncontained path adds the guard
+// rules without duplicating them, preserves unrelated rules, and does NOT change
+// the ordinary (non-fail-closed) permission mode.
+func TestApplyPostGuard_MergesAndDedups(t *testing.T) {
+	inst := t.TempDir()
+	claudeDir := filepath.Join(inst, ".claude")
+	if err := os.MkdirAll(claudeDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	existing := `{"permissions":{"defaultMode":"acceptEdits","ask":["Bash(gh pr review:*)","Bash(rm:*)"]}}`
+	if err := os.WriteFile(filepath.Join(claudeDir, "settings.json"), []byte(existing), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := ApplyPostGuard(inst); err != nil {
+		t.Fatalf("ApplyPostGuard: %v", err)
+	}
+
+	data, _ := os.ReadFile(filepath.Join(claudeDir, "settings.json"))
+	var got map[string]any
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatal(err)
+	}
+	perms := got["permissions"].(map[string]any)
+	if perms["defaultMode"] != "acceptEdits" {
+		t.Errorf("ApplyPostGuard must not change defaultMode, got %v", perms["defaultMode"])
+	}
+	ask, _ := perms["ask"].([]any)
+	if n := askContains(ask, "Bash(gh pr review:*)"); n != 1 {
+		t.Errorf("review rule count = %d, want 1 (no duplicate)", n)
+	}
+	if askContains(ask, "Bash(gh pr comment:*)") == 0 {
+		t.Error("comment guard rule should have been added")
+	}
+	if askContains(ask, "Bash(rm:*)") == 0 {
+		t.Error("unrelated ask rule must be preserved")
 	}
 }
 

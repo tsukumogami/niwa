@@ -35,6 +35,19 @@ type containmentPlan struct {
 	applySandbox bool
 }
 
+// posture is the human-readable contract the run operates under, surfaced once
+// per run so the operator always knows which guarantees are in force.
+func (p containmentPlan) posture() string {
+	switch {
+	case !p.contained:
+		return "uncontained (real credentials, no OS sandbox) -- the agent drafts and waits; you submit"
+	case p.applySandbox:
+		return "contained, sandbox in force (no egress, credential-scrubbed)"
+	default:
+		return "contained, no sandbox (credential-scrubbed, fail-closed; egress not blocked here)"
+	}
+}
+
 // resolveContainmentSwitches reads the two switches from the global config and
 // validates them. Defaults are the safe posture: containment "on", sandbox
 // "required". An unrecognized value is a hard error, never silently coerced.
@@ -54,9 +67,9 @@ func resolveContainmentSwitches(gc *config.GlobalConfig) (containment, sandbox s
 		return "", "", fmt.Errorf("invalid watch_containment %q (want on | off)", containment)
 	}
 	switch sandbox {
-	case "required", "optional", "disabled":
+	case "required", "optional":
 	default:
-		return "", "", fmt.Errorf("invalid watch_sandbox %q (want required | optional | disabled)", sandbox)
+		return "", "", fmt.Errorf("invalid watch_sandbox %q (want required | optional)", sandbox)
 	}
 	return containment, sandbox, nil
 }
@@ -71,12 +84,10 @@ func resolveContainmentPlan(ctx context.Context, cmd *cobra.Command, containment
 		return containmentPlan{contained: false, applySandbox: false}, nil
 	}
 	switch sandbox {
-	case "disabled":
-		return containmentPlan{contained: true, applySandbox: false}, nil
 	case "required":
 		if err := sandboxCapabilityCheck(ctx); err != nil {
 			return containmentPlan{}, fmt.Errorf("refusing to dispatch: watch_sandbox=required but the OS sandbox cannot be enforced here: %w\n"+
-				"  run `niwa setup-sandbox` once to enable it, or set watch_sandbox to optional (proceed contained without it) or disabled", err)
+				"  run `niwa setup-sandbox` once to enable it, or set watch_sandbox to optional (proceed contained without the sandbox)", err)
 		}
 		return containmentPlan{contained: true, applySandbox: true}, nil
 	default: // "optional"
@@ -97,15 +108,16 @@ on GitHub where you are the directly-requested reviewer (intersected with the
 repos in your niwa workspace), and for each new one dispatches a review agent
 that reads the PR in an isolated clone and drafts a review.
 
-Containment is governed by two global settings. watch_containment (on by
-default) applies a credential-scrubbed environment, a synthetic HOME, and a
-fail-closed permission mode -- so a hostile PR cannot exfiltrate or act -- and
-the agent only drafts; you post the draft from your own session. watch_sandbox
-(required by default; optional | disabled) governs the OS no-egress sandbox
-under containment: required refuses if it cannot be enforced, optional proceeds
-without it, disabled never attempts it. With watch_containment = off the agent
-runs as an ordinary dispatch with your real credentials and posts the review
-itself.
+In every mode the agent only drafts a review and waits -- it never posts;
+you read the draft and submit it yourself. Containment is governed by two
+global settings. watch_containment (on by default) applies a credential-scrubbed
+environment, a synthetic HOME, and a fail-closed permission mode. watch_sandbox
+(required by default; optional) decides what a contained run does on a
+sandbox-incapable host: required refuses, optional proceeds contained without the
+OS no-egress sandbox (on a capable host both use it). With watch_containment =
+off the agent runs as an ordinary dispatch with your real credentials so it can
+read the linked issue, CI, and threads a good review needs -- only review PRs you
+trust in that mode. Each run reports the posture it is operating under.
 
 It is a stateless single-shot verb -- no daemon, no resident process. A staged
 session you no longer want is dismissed from the Claude Code agents view.`,
@@ -133,6 +145,7 @@ func runWatchOnce(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return fmt.Errorf("niwa watch: %w", err)
 	}
+	fmt.Fprintf(cmd.OutOrStdout(), "niwa watch: %s\n", plan.posture())
 	if _, err := lookClaude(); err != nil {
 		return fmt.Errorf("niwa watch: claude binary not found in PATH; install Claude Code before watching")
 	}
@@ -235,9 +248,10 @@ func stageReview(cmd *cobra.Command, root, cwd, token string, client *github.API
 	}
 
 	// Build the launch posture from the plan. Contained: scrubbed env + synthetic
-	// HOME + the containment settings (with the OS sandbox when applySandbox), and
-	// the agent only drafts. Uncontained: nil env (the launcher uses os.Environ(),
-	// the developer's real credentials) and the agent posts the review itself.
+	// HOME + the containment settings (with the OS sandbox when applySandbox).
+	// Uncontained: nil env (the launcher uses os.Environ(), the developer's real
+	// credentials). The agent only ever drafts and waits in either case; the
+	// post-guard ask rule is applied both ways as accident prevention.
 	var env []string
 	if plan.contained {
 		synthHome, err := watch.SyntheticHomeDir(instancePath)
@@ -248,9 +262,11 @@ func stageReview(cmd *cobra.Command, root, cwd, token string, client *github.API
 			return err
 		}
 		env = watch.BuildContainedEnv(os.Environ(), synthHome)
+	} else if err := watch.ApplyPostGuard(instancePath); err != nil {
+		return err
 	}
 
-	prompt := watch.BuildReviewPrompt(pr, watch.DefaultCloneRelDir, watch.DefaultDraftRelPath, !plan.contained)
+	prompt := watch.BuildReviewPrompt(pr, watch.DefaultCloneRelDir, watch.DefaultDraftRelPath)
 	passthrough := buildDispatchPassthrough(slug, "")
 
 	// Launch detached (no terminal attach). env is nil for an uncontained run.

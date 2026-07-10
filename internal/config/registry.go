@@ -49,11 +49,11 @@ type GlobalSettings struct {
 	// to "on". WatchSandbox is only consulted when this is "on".
 	WatchContainment string `toml:"watch_containment,omitempty"`
 	// WatchSandbox is the inner switch, consulted only when WatchContainment is
-	// "on": it governs the OS no-egress sandbox (bubblewrap+socat on Linux,
-	// Seatbelt on macOS). "required" (the default) refuses to dispatch when the
-	// sandbox cannot be enforced; "optional" uses the sandbox when available and
-	// otherwise proceeds contained without it; "disabled" never attempts it. ""
-	// resolves to "required".
+	// "on": on a sandbox-incapable host, does the contained run refuse or proceed
+	// degraded? "required" (the default) refuses to dispatch when the OS no-egress
+	// sandbox (bubblewrap+socat on Linux, Seatbelt on macOS) cannot be enforced;
+	// "optional" proceeds contained without it. On a capable host both use the
+	// sandbox. "" resolves to "required".
 	WatchSandbox string `toml:"watch_sandbox,omitempty"`
 }
 

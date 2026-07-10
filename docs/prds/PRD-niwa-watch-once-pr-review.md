@@ -13,11 +13,14 @@ goals: |
   metadata-only dispatch prompt. Containment is configurable through two
   nested switches. By default the review session is contained
   (credential-scrubbed env, synthetic HOME, fail-closed permissions, and an
-  OS no-egress sandbox) so a hostile PR cannot exfiltrate or act; the agent
-  drafts a review the developer then posts from their own trusted session.
-  An operator who fully trusts the PR authors can turn containment off,
-  running an ordinary dispatch that reviews and posts directly. The
-  contained path's boundary is proven by an adversarial test.
+  OS no-egress sandbox) so a hostile PR cannot exfiltrate or act. In every
+  mode the agent drafts its review to a file and waits; posting is always a
+  human act -- the operator reads the draft and submits it themselves. An
+  operator who trusts the PR authors can turn containment off, running an
+  ordinary dispatch with the developer's real environment so the agent can
+  read the linked issue, CI status, and review threads a substantive review
+  needs -- then still drafts and waits. The contained path's boundary is
+  proven by an adversarial test.
 upstream: docs/briefs/BRIEF-niwa-watch-once-pr-review.md
 motivating_context: |
   This is the first, minimal version of proactive PR-review dispatch in
@@ -78,14 +81,16 @@ the accident of a missing dependency.
 - Keep the dispatch **decision** injection-proof by carrying only
   platform-vouched metadata into the prompt, never externally-authored
   text. This holds in every containment mode.
-- Keep the **act boundary** intact whenever containment is on: the review
-  session holds no GitHub token and can only draft, so the developer posts
-  the draft from their own trusted session and niwa never lifts the
-  session's containment to post.
+- Keep **posting a human act in every mode**: the dispatched agent drafts
+  its review to a file and waits, and never posts, comments, approves, or
+  pushes. When containment is on the session also holds no GitHub token and
+  can only draft, so the developer posts the draft from their own trusted
+  session and niwa never lifts containment to post.
 - Let an operator who trusts the PR authors **turn containment off**,
-  running an ordinary dispatch that reviews and posts directly with the
-  developer's own credentials -- the "I fully trust PRs from my peers"
-  path.
+  running an ordinary dispatch with the developer's own credentials so the
+  agent can **read** the linked issue, CI status, and review threads a
+  substantive review needs -- the "I fully trust PRs from my peers" path.
+  Even then the agent only drafts and waits; the operator posts.
 - Stay a **plain, stateless, single-shot CLI verb** -- deterministic, no
   model, no session-resident skill, no daemon.
 
@@ -100,8 +105,10 @@ the accident of a missing dependency.
   stays one short step without ever handing the untrusted session my
   credentials.
 - As a developer who fully trusts PRs from my peers in a private repo, I
-  want to turn containment off so the review agent reviews and posts
-  directly, so that trusted reviews need no separate posting step from me.
+  want to turn containment off so the review agent runs with my real
+  environment and can read the linked issue, CI status, and review threads,
+  so that its draft reflects the full context -- I still read and post the
+  draft myself.
 - As the owner of a workspace, I want the review session that reads an
   untrusted PR to be unable to reach the network or act with my credentials
   by default, so that a malicious PR cannot turn my convenience into a
@@ -124,7 +131,12 @@ Functional:
 - **R2.** `watch --once` SHALL find open PRs on GitHub where the invoking
   developer is the **directly-requested** reviewer, using the user-scoped
   review-request qualifier `user-review-requested`, which excludes PRs
-  where only a team the developer belongs to was requested.
+  where only a team the developer belongs to was requested. This qualifier
+  fires on more than PRs the operator personally vetted: it also matches
+  **teammate-assigned review requests, CODEOWNERS auto-requests, and
+  external-fork triage** -- PRs the operator did not personally choose. That
+  breadth is accepted for this version; the operator's responsibility is
+  documented in R24.
 - **R3.** The candidate set SHALL be restricted to repositories in the
   developer's niwa workspace; the workspace's repository set SHALL be
   derived from niwa's existing workspace configuration. A PR that directly
@@ -142,14 +154,17 @@ Functional:
   (`-d`)**, so a single run stages each review and returns without
   attaching a terminal to any staged session.
 - **R6.** The dispatched agent SHALL be instructed to read the PR (title,
-  body, diff, linked issue, CI status) **in its own clone** and to treat all
-  of it as untrusted. When `watch_containment` is on (R7), the agent holds no
-  credential to post with, so it SHALL write its drafted review to a **known
-  location** the invoking developer can find and SHALL halt before posting.
-  When `watch_containment` is off, the agent SHALL instead review and post
-  the review directly itself (R14). (The known draft path is a DESIGN detail;
-  the requirement is that the location is fixed and predictable, not chosen
-  ad hoc by the agent.)
+  body, diff, linked issue, CI status) and to treat all of it as untrusted,
+  then **write its drafted review to a known location** and **halt before
+  posting** -- in **every** mode. The agent SHALL NOT post, comment,
+  approve, or push. When `watch_containment` is on (R7), the agent reads
+  from its own pre-fetched clone and holds no credential to post with. When
+  `watch_containment` is off, the agent runs with the developer's real
+  environment so it can **read** the linked issue, CI status, and review
+  threads a substantive review needs, then still drafts to the known
+  location and waits (R14). (The known draft path is a DESIGN detail; the
+  requirement is that the location is fixed and predictable, not chosen ad
+  hoc by the agent.)
 - **R7.** When `watch_containment` is **on** (the default), the dispatched
   review session SHALL run with the **containment bundle**: an environment
   scrubbed to an explicit allowlist (R8), a **synthetic HOME** in place of
@@ -201,24 +216,28 @@ Functional:
   not attach a terminal, but it still launches the worker as a `claude
   --bg` background session, and that background session is what
   auto-registers in the agent view -- so a detached dispatch is
-  discoverable there without any new listing or inbox UI. When containment
-  is on, the developer reads the draft and posts it from their own trusted
-  session; when containment is off, the agent has already posted. A staged
-  session the developer no longer wants can be **dismissed directly from the
-  Claude Code agents view** -- no niwa command is needed.
-- **R14.** Posting falls out of the containment model, so niwa SHALL NOT
-  provide a `post` subcommand or a `discard` subcommand; `niwa watch` has no
-  subcommands beyond `--once`. When `watch_containment` is on, the dispatched
-  session holds **no GitHub token**, so it can only draft its review to the
-  known location (R6); the developer posts that draft from their **own
-  trusted session**, and the session's containment SHALL NOT be lifted to
-  post. When `watch_containment` is off, the session holds the developer's
-  real credentials and the dispatched agent **reviews and posts the review
-  directly itself** (the dispatch is still detached; in this trusted mode the
-  agent posts autonomously). A staged session the developer no longer wants is
-  dismissed from the Claude Code agents view (R13); because a PR is recorded
-  handled on successful dispatch (R11), dismissing it stages no duplicate on a
-  later run.
+  discoverable there without any new listing or inbox UI. In every mode the
+  developer reads the draft and posts it from their own trusted session; the
+  agent never posts. A staged session the developer no longer wants can be
+  **dismissed directly from the Claude Code agents view** -- no niwa command
+  is needed.
+- **R14.** Posting is always a human act, so niwa SHALL NOT provide a `post`
+  subcommand or a `discard` subcommand; `niwa watch` has no subcommands
+  beyond `--once`. In **every** mode the dispatched agent drafts its review
+  to the known location (R6) and halts; it SHALL NOT post, comment, approve,
+  or push, and the developer posts the draft from their **own trusted
+  session**. When `watch_containment` is on, the dispatched session holds
+  **no GitHub token**, so it cannot post even if the untrusted content told
+  it to, and its containment SHALL NOT be lifted to post. When
+  `watch_containment` is off, the session holds the developer's real
+  credentials so the agent can read the surrounding context (linked issue,
+  CI, review threads), but it still only drafts and waits; the dispatched
+  instance settings SHALL additionally carry a **post-guard** (R22) that
+  gates any review/comment submission behind operator approval, so a stray
+  prompt-following cannot post under the operator's name. A staged session
+  the developer no longer wants is dismissed from the Claude Code agents view
+  (R13); because a PR is recorded handled on successful dispatch (R11),
+  dismissing it stages no duplicate on a later run.
 
 Non-functional:
 
@@ -250,16 +269,18 @@ settings** (making them granular -- per repository, per PR author, or per
 team -- is future work; see Out of Scope). The outer switch
 `watch_containment` is `on` (default) or `off`. The inner switch
 `watch_sandbox`, consulted **only** when containment is on, is `required`
-(default), `optional`, or `disabled`. `watch_containment` governs the
-credential-scrub + synthetic-HOME + fail-closed bundle (R7/R8);
-`watch_sandbox` governs the OS no-egress network cage (bwrap+socat on Linux,
-Seatbelt on macOS). The two resolve per this matrix:
+(default) or `optional`. `watch_containment` governs the credential-scrub +
+synthetic-HOME + fail-closed bundle (R7/R8); `watch_sandbox` governs the OS
+no-egress network cage (bwrap+socat on Linux, Seatbelt on macOS). On a
+sandbox-capable host both `watch_sandbox` values use the sandbox; the switch
+decides only what happens on a sandbox-incapable host -- **refuse**
+(`required`) or **proceed contained-without-sandbox** (`optional`). The two
+resolve per this matrix:
 
 | `watch_containment` | `watch_sandbox` | The dispatched review session gets |
 |---|---|---|
 | on | required | Credential scrub + synthetic HOME + fail-closed, **and** the OS sandbox. If the sandbox cannot be enforced on the host, `watch --once` **refuses** to dispatch that review (R9). |
 | on | optional | Credential scrub + synthetic HOME + fail-closed. The OS sandbox is added when available; otherwise the review proceeds **contained without it**. |
-| on | disabled | Credential scrub + synthetic HOME + fail-closed. The OS sandbox is **never attempted**. |
 | off | (not consulted) | **Nothing** -- an ordinary `niwa dispatch` with the developer's real environment and credentials, as if they ran it themselves. |
 
 - **R18.** When `watch_containment` is on, whether the session also runs
@@ -284,6 +305,27 @@ Seatbelt on macOS). The two resolve per this matrix:
   sandbox (`sandbox.failIfUnavailable`), so a nominally-sandboxed session is
   never produced by a silent harness degradation -- only the explicit
   `watch_sandbox` setting decides whether the OS sandbox is in force.
+- **R22.** The dispatched instance settings SHALL carry a **post-guard**: an
+  ask-approval rule (in code, `permissions.ask` on `gh pr review` and `gh pr
+  comment`) requiring operator approval before any review or comment
+  submission. This guard SHALL be applied in **every** mode (it is harmless
+  where the session has no credentials or no egress). It is a **convenience /
+  accident-prevention guard for the trusted uncontained path, NOT a security
+  boundary** -- command-string matching is not a security boundary (the OS
+  sandbox is). It exists so a stray prompt-following cannot post under the
+  operator's name without a click; the prompt already instructs the agent not
+  to post.
+- **R23.** Each run SHALL **report the posture** it is operating under -- one
+  of "contained, sandbox in force", "contained, no sandbox", or
+  "uncontained" -- so the operator always knows which contract is in force for
+  a staged review.
+- **R24.** Documentation SHALL state the operator's responsibility when
+  running uncontained: **only review PRs you trust.** Because
+  `user-review-requested` fires on teammate assignments, CODEOWNERS
+  auto-requests, and external-fork triage (R2), an un-vetted PR can be staged
+  automatically. The draft-and-wait gate (R6/R14) and the post-guard (R22) are
+  what keep such an auto-assignment from acting before the operator looks at
+  the draft.
 
 ## Acceptance Criteria
 
@@ -374,10 +416,19 @@ Act boundary and determinism:
 - [ ] **AC20 (R13).** After a run stages a review, the staged session is
       discoverable in the existing Claude Code agent view (it registered as
       a background session), not merely present as an on-disk draft.
-- [ ] **AC21 (R14 uncontained post).** With `watch_containment = off`, the
-      dispatched agent holds the developer's real credentials and posts its
-      review to the PR on the host **directly**, with no separate niwa post
-      step involved.
+- [ ] **AC21 (R14, R6 uncontained draft).** With `watch_containment = off`,
+      the dispatched agent holds the developer's real credentials and can read
+      the linked issue, CI status, and review threads, but it still writes its
+      review to the known draft location and **halts before posting** -- no
+      review attributable to the session appears on the PR until the operator
+      posts the draft themselves.
+- [ ] **AC22 (R22 post-guard).** With `watch_containment = off`, the
+      dispatched instance settings gate `gh pr review` / `gh pr comment`
+      behind an approval prompt (`permissions.ask`), so an attempt to submit a
+      review from inside the unattended session is not auto-approved.
+- [ ] **AC23 (R23 posture report).** Each run prints the posture it is
+      operating under -- "contained, sandbox in force", "contained, no
+      sandbox", or "uncontained" -- matching the resolved switches.
 
 ## Out of Scope
 
@@ -396,15 +447,23 @@ Act boundary and determinism:
 - **Ambient sources.** Slack, CI logs, or any source whose relevance must
   be manufactured by a model, and the deterministic pre-model gate they
   require.
-- **Granular containment policy.** Letting the review agent post directly is
-  **no longer a rejected alternative** -- it is the supported
-  `watch_containment = off` mode. What stays out of scope is making that
-  choice granular: the two switches are a **single global setting each** in
-  this version. Making containment granular -- per
+- **Granular containment policy.** Making the two switches granular -- per
   repository, per PR author, or per team/org (e.g. "contained for external
   contributors, off for trusted teammates") -- is the intended next step and
-  is deliberately not built here. The global switch is a first step toward
+  is deliberately not built here. The two switches are a **single global
+  setting each** in this version. The global switch is a first step toward
   it, not the end state.
+- **Automated author / fork / association gating (future work).** Filtering
+  which PRs may run uncontained by author, fork status, or
+  `author_association` is **not** built here. Today the operator is the gate:
+  when running uncontained they must only review PRs they trust (R24). This
+  filter is the first of two roadmap items that would let uncontained runs be
+  scoped automatically instead of by operator discipline.
+- **Credential-free act path (MCP release-to-act gate, future work).** A path
+  that lets a **contained** session post without being handed credentials --
+  an MCP release-to-act gate the operator releases -- is **not** built here.
+  It is the second roadmap item, and it is what would eventually promote
+  contained mode from informational to practical (see Known Limitations).
 - **Closing the sandbox's residual caveats.** Windows sandbox support and
   the egress proxy's TLS-termination / domain-fronting seam (see Known
   Limitations).
@@ -439,21 +498,23 @@ These close the Open Questions the upstream BRIEF deferred to this PRD.
   `review-requested` (includes team requests). *Why:* team requests are
   explicitly excluded by the framing; the user-scoped qualifier is the
   deterministic filter that enforces it.
-- **D4 — Posting model (no post verb).** *Decided:* posting falls out of the
-  containment model rather than being a niwa action. The presence or absence
-  of the GitHub token in the session decides who posts: when
-  `watch_containment` is on the session has no token and can only draft, so
-  the developer posts the draft from their **own trusted session**; when
-  `watch_containment` is off the agent holds the developer's real credentials
-  and posts the review **directly itself**. niwa provides no `post` or
-  `discard` subcommand. *Alternatives:* a niwa-provided trusted `post`
-  subcommand holding a narrowly-scoped posting credential, or printing a
-  ready-to-run `gh` command. *Why:* keying "who posts" to the token that the
-  containment switch already controls removes niwa from credential
-  provisioning entirely and keeps the model coherent -- there is no extra
-  posting-scoped credential to mint, carry, or keep out of the sandbox. The
-  developer's own session is already trusted, so a contained draft they post
-  themselves honors the containment invariant without a bespoke verb.
+- **D4 — Posting model (no post verb; posting is always human).** *Decided:*
+  the dispatched agent drafts its review to a file and waits in **every**
+  mode; posting is always a human act, never a niwa action and never the
+  agent's. The developer posts the draft from their **own trusted session**.
+  When `watch_containment` is on the session also has no GitHub token, so it
+  cannot post even if prompted; when off, the session holds real credentials
+  (so it can read the surrounding context) but is held back by the prompt and
+  the post-guard (R22). niwa provides no `post` or `discard` subcommand.
+  *Alternatives:* a niwa-provided trusted `post` subcommand holding a
+  narrowly-scoped posting credential; printing a ready-to-run `gh` command; or
+  (an earlier framing) letting the off-mode agent post directly, keying "who
+  posts" to the token. *Why:* keeping posting a human act in every mode makes
+  the contained and uncontained paths differ only in **read context and
+  credentials**, not in who posts, so there is no auto-post to reason about
+  under injection and no posting credential for niwa to mint or carry. The
+  developer's own session is already trusted, so a draft they post themselves
+  honors the model in both modes without a bespoke verb.
 - **D5 — Per-run staging bound.** *Decided (assumed):* `watch --once`
   stages at most a **small fixed number** of new agents per run (a safe
   default such as 3), leaving additional matches for a later run, and
@@ -488,16 +549,15 @@ These close the Open Questions the upstream BRIEF deferred to this PRD.
   sandbox cannot run until `niwa setup-sandbox` (R19) is run once. Until then,
   with `watch_sandbox = required` (the default) the feature **refuses** to
   stage those reviews (R9); with `watch_sandbox = optional` it stages them
-  contained without the OS sandbox; with `watch_sandbox = disabled` the OS
-  sandbox is never attempted. macOS and permissive Linux need no elevation.
-  This capability is root-gated by the OS and cannot be granted by an
-  unprivileged install.
+  contained without the OS sandbox. macOS and permissive Linux need no
+  elevation. This capability is root-gated by the OS and cannot be granted by
+  an unprivileged install.
 - **Windows.** The OS-level sandbox is not available on Windows; with the
   default `watch_containment = on` and `watch_sandbox = required`, the
   feature fails closed there (R9), so Windows self-hosters get no staged
   reviews until later work addresses the gap (they can still opt into
-  `watch_sandbox = optional`/`disabled`, or `watch_containment = off`, at
-  their own risk).
+  `watch_sandbox = optional`, or `watch_containment = off`, at their own
+  risk).
 - **Egress proxy TLS termination.** The no-egress sandbox's proxy does not
   TLS-terminate by default, leaving a domain-fronting / SNI-evasion seam.
   This is a recorded residual risk for the review session's threat model,
@@ -507,12 +567,23 @@ These close the Open Questions the upstream BRIEF deferred to this PRD.
   once.
 - **GitHub only.** Reviews requested on other hosts are not seen by this
   version.
-- **The draft text is authored by the untrusted-content session.** When
-  containment is on, the drafted review is produced by the contained session
-  that read the hostile PR, so its *text* could contain attacker-influenced
-  content. The developer is the trust checkpoint for that text: they read the
-  draft before posting it from their own session. Containment stops the
-  session from acting; the human read covers what the draft says. When
-  containment is off, the operator has explicitly chosen to trust the PR
-  source, so the agent posts without that intermediate human read -- that is
-  the meaning of the `off` mode, not a gap.
+- **The draft text is authored by the untrusted-content session.** The
+  drafted review is produced by the session that read the PR, so its *text*
+  could contain attacker-influenced content -- in **every** mode. The
+  developer is the trust checkpoint for that text: they read the draft before
+  posting it from their own session. Containment (when on) stops the session
+  from acting; the human read covers what the draft says. When containment is
+  off the operator has chosen to trust the source enough to give the session
+  real read credentials, but the agent still drafts and waits -- the human
+  read before posting is not skipped.
+- **Contained mode is informational today, not yet practical for most
+  reviews.** With no egress, the contained session cannot reach the linked
+  issue, CI status, or review threads a substantive review needs, so its
+  draft is limited to what the diff alone shows. **Uncontained +
+  operator-trust is the intended practical path** until two roadmap items
+  land: (a) automated author/fork/`author_association` filtering to gate which
+  PRs may run uncontained, and (b) a credential-free act path (an MCP
+  release-to-act gate) that lets a contained session post without being handed
+  credentials -- which is what will promote contained mode from informational
+  to practical. `watch_containment` still defaults to `on` (safe by default);
+  the operator consciously opts into `off` for trusted repos.
