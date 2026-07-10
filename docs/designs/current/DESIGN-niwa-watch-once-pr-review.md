@@ -40,10 +40,10 @@ niwa, implementing the Accepted PRD.
 feasibility investigation established that the OS sandbox's requirement is a
 root-gated kernel capability that varies by host, not a missing package. The
 earlier "sandbox works or refuse, Windows-only caveat" framing is superseded
-by **Decision 8**: adaptive per-host enforcement tiers, unprivileged-by-default
+by **Decision 8**: adaptive per-host enforcement levels, unprivileged-by-default
 provisioning of `bwrap`/`socat` via tsuku with an opt-in `niwa setup-sandbox`
 for the one privileged step on hardened Linux, an operator-owned
-`uncontained_policy` (default `refuse`) governing the no-tier fallback, and
+`uncontained_policy` (default `refuse`) governing the no-enforcement fallback, and
 `sandbox.failIfUnavailable` to close the harness fail-open. This expands the
 change beyond a single niwa PR (a tsuku recipe and a `setup-sandbox` command
 join it); the Implementation Approach and the downstream PLAN carry the added
@@ -275,15 +275,15 @@ existing per-instance `.claude/settings.json` write/merge
   prove enforcement live.** Three checkpoints:
   - *Preflight (before any instance is created):* actively probe that the OS
     sandbox can be created now -- not merely that the OS is nominally
-    supported -- and select the enforcement tier for the host (see Decision 8
-    for the capability tiers and the operator-owned policy that governs what
-    happens when no tier is available). Concretely, on macOS the built-in
+    supported -- and select the enforcement level for the host (see Decision 8
+    for the capability levels and the operator-owned policy that governs what
+    happens when no level is available). Concretely, on macOS the built-in
     `sandbox-exec` (Seatbelt) is available unprivileged; on Linux the probe
     checks the backend and dependency the harness requires (`bwrap` and
     `socat` on PATH) and functionally verifies a capability-bearing,
     network-isolable user namespace (`bwrap --unshare-net` succeeds -- it
     fails on a kernel that restricts unprivileged user namespaces). When no
-    enforceable tier exists, the configured fallback policy decides between
+    enforceable level exists, the configured fallback policy decides between
     refusing and proceeding (Decision 8); the default is to refuse.
   - *Effective-settings re-verification (per instance, before launch):* the
     containment lives in a *merged* `.claude/settings.json`, and the harness
@@ -333,7 +333,7 @@ missing package:
 
 **Decision (three parts):**
 
-- **8A -- Adaptive enforcement tier.** The preflight (Decision 7) detects the
+- **8A -- Adaptive enforcement level.** The preflight (Decision 7) detects the
   strongest enforceable boundary and dispatches under it: Seatbelt on macOS,
   the `bwrap`+`socat` no-egress profile on capable Linux. When neither is
   available, the run does not silently weaken -- it consults the fallback
@@ -353,7 +353,7 @@ missing package:
   hardened-Linux case to a single documented command rather than a
   multi-step manual install.
 - **8C -- Operator-owned fallback policy.** What happens when no enforceable
-  tier exists is a **policy decision the operator owns**, not a hard-coded
+  level exists is a **policy decision the operator owns**, not a hard-coded
   refusal. A durable setting `[watch] uncontained_policy` (resolved on the
   usual `flag > config header > default` stack) takes one of:
   `refuse` (the safe default -- fail closed), `warn` (dispatch, but emit and
@@ -364,7 +364,7 @@ missing package:
   human review-before-post gate all still apply. The default stays `refuse`
   so loosening is always an explicit opt-out, never an accident.
 
-**Closing the fail-open at the harness layer.** Independently of the tier, the
+**Closing the fail-open at the harness layer.** Independently of the level, the
 dispatched instance settings set `sandbox.failIfUnavailable: true` and
 `allowUnsandboxedCommands: false`, so Claude Code *refuses to run* rather than
 silently disabling the sandbox and proceeding with a warning. This, plus the
@@ -408,7 +408,7 @@ and posts it via the GitHub API from the trusted context (Decision 6);
   the `post`/`discard` subcommands via `init()` + `rootCmd.AddCommand`.
   Orchestrates the pass above.
 - **Capability tiering + `niwa setup-sandbox` (new, Decision 8).** The
-  preflight resolves the enforcement tier (Seatbelt / bwrap-socat / none) and
+  preflight resolves the enforcement level (Seatbelt / bwrap-socat / none) and
   consults `uncontained_policy`; `niwa setup-sandbox` is the opt-in privileged
   command that unlocks the capability on hardened Linux (AppArmor profile or
   sysctl). The `uncontained_policy` value is read from niwa config on the
@@ -660,7 +660,7 @@ Code session reading a repo.
 - The verb reuses existing provisioning and settings-merge machinery.
 - The feature runs unprivileged out of the box on macOS and permissive Linux;
   the only elevation is a single opt-in `niwa setup-sandbox` on hardened
-  Linux, and the operator -- not the code -- chooses the no-tier fallback.
+  Linux, and the operator -- not the code -- chooses the no-enforcement fallback.
 
 ### Negative / costs
 

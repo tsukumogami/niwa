@@ -13,34 +13,6 @@ issue_count: 11
 
 Active
 
-Single-PR plan decomposing the Accepted design into sequenced,
-independently-testable issues landing on one branch and PR.
-
-**Progress at a glance** (per-issue detail in each outline's `Status:` line):
-
-| Issue | Status |
-|-------|--------|
-| 1 state schemas | Done -- implemented + unit-tested green |
-| 2 GitHub client methods | Done -- implemented + unit-tested green |
-| 3 selection | Done -- implemented + unit-tested green |
-| 4 hardened fetch | Done -- implemented + unit-tested green |
-| 5 containment surface | Done -- implemented + unit-tested green |
-| 6 watch --once verb | Implemented (compiles; helpers unit-tested); end-to-end run not yet verified (needs a workspace + GitHub + a capable host) |
-| 7 post/discard | Implemented (compiles; helpers unit-tested); end-to-end not yet verified |
-| 8 adversarial live gate | Scaffold only -- the live egress proof needs a sandbox-capable host (blocked here) |
-| 9 tiered preflight + policy | Not started (Decision-8 amendment) |
-| 10 niwa setup-sandbox | Not started (Decision-8 amendment) |
-| 11 failIfUnavailable settings | Not started (Decision-8 amendment) |
-| companion tsuku recipe | Not started (lands in tsukumogami/tsuku) |
-
-**What's left to reach a merge-ready feature:** implement issues 9-11
-(capability tiers + `uncontained_policy` + `setup-sandbox` + fail-open close),
-land the companion tsuku recipe, wire the live containment gate to self-drive,
-and run that gate green on a sandbox-capable host. Also promote issue 6's
-hard-refuse preflight to the issue-9 tiered/configurable form. Two code-review
-findings (token-off-argv, active sandbox-capability preflight) are already
-fixed. `go build/vet/test ./...` is green for what's implemented.
-
 ## Scope Summary
 
 Implement `niwa watch --once` -- a contained PR-review dispatch verb -- plus
@@ -65,8 +37,6 @@ enforcement test comes last as the boundary proof that gates release.
 
 **Goal**: Define and unit-test the durable state the watcher reads and writes -- the handled-set and the per-staged-review record -- with read/write helpers.
 
-**Status:** Done -- implemented + unit-tested green.
-
 **Acceptance Criteria**:
 - [x] A handled-set store under `<workspaceRoot>/.niwa/watch-handled`, one `owner/repo#number` line per handled PR, with append + membership helpers (PRD R11, AC5).
 - [x] A staged-review record `{handle, owner, repo, number, url, draftPath}` persisted at `<workspaceRoot>/.niwa/watch/<handle>.json`, with write + load-by-handle helpers.
@@ -82,8 +52,6 @@ enforcement test comes last as the boundary proof that gates release.
 
 **Goal**: Add the three net-new GitHub client methods the watcher and the post step need, tested against the existing fake server.
 
-**Status:** Done -- implemented + unit-tested green.
-
 **Acceptance Criteria**:
 - [x] `CurrentLogin(ctx) (string, error)` wraps `GET /user`.
 - [x] `SearchReviewRequestedPRs(ctx, login) ([]PRRef, error)` wraps `GET /search/issues?q=is:pr+is:open+user-review-requested:<login>`; `PRRef{Owner, Repo, Number, URL, CreatedAt}` is parsed from the payload (PRD R2, D3).
@@ -98,8 +66,6 @@ enforcement test comes last as the boundary proof that gates release.
 ### Issue 3: feat(watch): workspace intersection, dedup, and bounded ordered selection
 
 **Goal**: Turn the raw poll results into the bounded, ordered set of PRs to dispatch, as pure table-testable logic.
-
-**Status:** Done -- implemented + unit-tested green.
 
 **Acceptance Criteria**:
 - [x] Intersect `PRRef`s with the workspace's repositories from `config.Discover` -> `Sources`/`Repos`; a PR outside the workspace is dropped (PRD R3, AC4).
@@ -117,8 +83,6 @@ enforcement test comes last as the boundary proof that gates release.
 
 **Goal**: Fetch a PR's head as inert data and expose it to the review session as ordinary files without executing any checkout-time program (the sharpest risk, isolated).
 
-**Status:** Done -- implemented + unit-tested green.
-
 **Acceptance Criteria**:
 - [x] Fetch a specific head commit SHA (not arbitrary ref-following) with hooks disabled, `GIT_LFS_SKIP_SMUDGE=1` and `filter.lfs.smudge`/`.process` unset, submodule recursion off, `protocol.ext`/`protocol.file` disabled, empty `core.attributesFile`, and `GIT_CONFIG_NOSYSTEM=1` with a fetch-local `HOME` (design Decision 2).
 - [x] Expose via a filter-neutered checkout the agent reads as normal files; `git archive` is NOT used.
@@ -133,8 +97,6 @@ enforcement test comes last as the boundary proof that gates release.
 ### Issue 5: feat(dispatch): containment launch surface -- env allowlist, sandbox profile, re-verify
 
 **Goal**: Add the net-new contained-dispatch surface -- an allowlisted environment with synthetic HOME, the no-egress sandbox settings merge, and per-instance re-verification -- without changing the ordinary dispatch path.
-
-**Status:** Done -- implemented + unit-tested green (incl. the permission-allowlist review fix).
 
 **Acceptance Criteria**:
 - [x] The launch seam gains `LaunchOpts{EnvOverride []string}`; `EnvOverride == nil` preserves today's `cmd.Env = os.Environ()` so ordinary `niwa dispatch` is unchanged (design Decision 3).
@@ -151,11 +113,9 @@ enforcement test comes last as the boundary proof that gates release.
 
 **Goal**: Wire the full single-shot pass together as the `niwa watch --once` verb, fail-closed and fail-loud.
 
-**Status:** Implemented -- compiles, helpers unit-tested; the end-to-end run (provision -> stage) is not yet verified (needs a workspace + GitHub + a sandbox-capable host). Its hard-refuse preflight AC is superseded by the tiered/configurable form in issue 9.
-
 **Acceptance Criteria**:
 - [ ] `internal/cli/watch.go` registers `watchCmd` (with `--once`) via `init()` + `rootCmd.AddCommand`; it is stateless and starts no resident process (PRD R1).
-- [ ] Fail-closed preflight: refuse (non-zero exit + stderr reason) when the OS sandbox cannot be enforced (e.g. `GOOS == "windows"` or the sandbox cannot be created) before any instance is created (PRD R9, AC13).
+- [ ] Fail-closed preflight: refuse (non-zero exit + stderr reason) when the OS sandbox cannot be enforced (e.g. `GOOS == "windows"` or the sandbox cannot be created) before any instance is created (PRD R9, AC13). Superseded by the capability-based/configurable preflight in Issue 9.
 - [ ] Per selected PR: provision the instance, run the hardened fetch (Issue 4), merge + re-verify the containment (Issue 5), assemble a metadata-only prompt (only `owner/repo`, PR number, URL + fixed instructions; a pure function -- no title/body/diff/author), and launch `claude --bg` with `--detach` and the allowlisted env; persist the staged-review record and append the handled-set only on success (PRD R4, R5, R6, R11, AC1, AC2, AC7, AC18).
 - [ ] A staged session is discoverable in the Claude Code agent view after a run (PRD R13, AC20).
 - [ ] Empty poll (no matching PRs): print a "nothing to stage" message and exit zero (PRD AC6).
@@ -171,8 +131,6 @@ enforcement test comes last as the boundary proof that gates release.
 
 **Goal**: Let the developer post an approved draft or discard a staged review, from the trusted context, without ever touching the contained session.
 
-**Status:** Implemented -- compiles, helpers unit-tested; end-to-end not yet verified.
-
 **Acceptance Criteria**:
 - [ ] `niwa watch post <handle>` resolves the staged-review record (handle = dispatch session short id), reads the draft at the recorded path (validated to resolve inside the instance root), and posts via `CreateReview` with `event` fixed in code (default `COMMENT`) -- run outside the sandbox with the dispatcher token, which never entered the session (PRD R14, AC15, AC21; design Decision 6).
 - [ ] `niwa watch discard <handle>` posts nothing and records the PR as handled (PRD R14, AC16).
@@ -187,8 +145,6 @@ enforcement test comes last as the boundary proof that gates release.
 
 **Goal**: Prove -- by live execution inside a real contained session -- that egress and out-of-instance action are denied at the OS layer, not merely declined by the model. This is the release gate.
 
-**Status:** Scaffold only -- the live egress/raw-socket proof is unimplemented; it needs a sandbox-capable host (blocked in the authoring environment).
-
 **Acceptance Criteria**:
 - [ ] A hostile-PR fixture whose title/body/diff attempt `curl ... | sh`, a `git push`, and secret exfiltration is dispatched under the containment profile.
 - [ ] From inside the running session (bypassing the model), the test attempts real outbound network -- a connection to a domain AND a raw socket to a literal IP -- and asserts each fails at the OS layer (connection blocked / EPERM) (PRD AC9, AC14; design Decision 7, Security Considerations).
@@ -201,15 +157,13 @@ enforcement test comes last as the boundary proof that gates release.
 **Type**: code
 **Files**: `internal/watch/adversarial_test.go`
 
-### Issue 9: feat(watch): capability-tiered preflight and uncontained_policy
+### Issue 9: feat(watch): capability-based preflight and uncontained_policy
 
-**Goal**: Replace the hard-refuse preflight with an adaptive tier selection plus an operator-owned fallback policy (design Decision 8A/8C, PRD R18/R20/R9).
-
-**Status:** Not started (Decision-8 amendment).
+**Goal**: Replace the hard-refuse preflight with an adaptive level selection plus an operator-owned fallback policy (design Decision 8A/8C, PRD R18/R20/R9).
 
 **Acceptance Criteria**:
-- [ ] The preflight selects the strongest enforceable tier: macOS Seatbelt (built-in), or Linux `bwrap`+`socat` with a capability-bearing user namespace (the existing functional probe); it does not require the same tier on every platform (R18).
-- [ ] A durable `uncontained_policy` setting (`refuse` default | `warn` | `allow`) is read on the `flag > config header > default` stack; when no tier is enforceable the run follows it -- refuse (non-zero + reason + remediation), warn (dispatch + recorded prominent warning), or allow (R20).
+- [ ] The preflight selects the strongest enforceable level: macOS Seatbelt (built-in), or Linux `bwrap`+`socat` with a capability-bearing user namespace (the existing functional probe); it does not require the same level on every platform (R18).
+- [ ] A durable `uncontained_policy` setting (`refuse` default | `warn` | `allow`) is read on the `flag > config header > default` stack; when no level is enforceable the run follows it -- refuse (non-zero + reason + remediation), warn (dispatch + recorded prominent warning), or allow (R20).
 - [ ] Under `warn`/`allow`, the metadata-only prompt, credential-scrubbed env, and human gate still apply (asserted structurally).
 - [ ] Default behavior is unchanged for a capable host (dispatch) and for an incapable host with no config (refuse).
 
@@ -221,8 +175,6 @@ enforcement test comes last as the boundary proof that gates release.
 ### Issue 10: feat(cli): niwa setup-sandbox (hardened-Linux capability unlock)
 
 **Goal**: The opt-in privileged command that unlocks the sandbox capability on a hardened Linux host (design Decision 8B, PRD R19).
-
-**Status:** Not started (Decision-8 amendment).
 
 **Acceptance Criteria**:
 - [ ] `niwa setup-sandbox` detects the hardened-userns condition and installs an AppArmor profile for `bwrap` (or sets the sysctl), reporting what it changed; it is idempotent and a no-op where the capability already exists.
@@ -238,8 +190,6 @@ enforcement test comes last as the boundary proof that gates release.
 
 **Goal**: Make the harness refuse rather than silently disable the sandbox (design Decision 8, PRD R21).
 
-**Status:** Not started (Decision-8 amendment).
-
 **Acceptance Criteria**:
 - [ ] The containment profile (Issue 5) also sets `sandbox.failIfUnavailable: true` and `allowUnsandboxedCommands: false` in the merged instance settings.
 - [ ] The pre-launch re-verification asserts both survived the merge.
@@ -249,9 +199,7 @@ enforcement test comes last as the boundary proof that gates release.
 **Type**: code
 **Files**: `internal/watch/containment.go`
 
-### Companion change (tsuku repo, not this PR)
-
-Packaging the Linux sandbox deps (PRD R19) lands in **tsukumogami/tsuku**, not
+**Companion change (tsuku repo, not this PR).** Packaging the Linux sandbox deps (PRD R19) lands in **tsukumogami/tsuku**, not
 niwa: a curated `recipes/n/niwa.toml` declaring Linux-only
 `runtime_dependencies = ["bubblewrap", "socat"]` (shadowing today's
 auto-generated download recipe), plus `recipes/b/bubblewrap.toml`
@@ -259,32 +207,22 @@ auto-generated download recipe), plus `recipes/b/bubblewrap.toml`
 companion tsuku PR; it does not block the niwa code but is required for the
 "standard install provides the binaries" contract.
 
-## Implementation Issues
-
-Single-pr mode: the work is decomposed inline under **Issue Outlines** above
-and lands on one shared branch and PR. No GitHub issues or milestone are
-created; there is no issue table to link.
-
 ## Dependency Graph
 
 ```mermaid
 graph TD
-    I1["Issue 1: state schemas"]:::pending
-    I2["Issue 2: github methods"]:::pending
-    I3["Issue 3: select/dedup/bound"]:::pending
-    I4["Issue 4: hardened fetch"]:::pending
-    I5["Issue 5: containment surface"]:::pending
-    I6["Issue 6: watch --once verb"]:::pending
-    I7["Issue 7: post/discard"]:::pending
-    I8["Issue 8: adversarial live test"]:::pending
-    I9["Issue 9: tiered preflight + policy"]:::pending
-    I10["Issue 10: niwa setup-sandbox"]:::pending
-    I11["Issue 11: failIfUnavailable settings"]:::pending
+    I1["Issue 1: state schemas"]
+    I2["Issue 2: github methods"]
+    I3["Issue 3: select/dedup/bound"]
+    I4["Issue 4: hardened fetch"]
+    I5["Issue 5: containment surface"]
+    I6["Issue 6: watch --once verb"]
+    I7["Issue 7: post/discard"]
+    I8["Issue 8: adversarial live test"]
+    I9["Issue 9: capability-based preflight + policy"]
+    I10["Issue 10: niwa setup-sandbox"]
+    I11["Issue 11: failIfUnavailable settings"]
 
-    I5 --> I9
-    I6 --> I9
-    I9 --> I10
-    I5 --> I11
     I1 --> I3
     I2 --> I3
     I1 --> I6
@@ -297,10 +235,28 @@ graph TD
     I6 --> I7
     I5 --> I8
     I6 --> I8
+    I5 --> I9
+    I6 --> I9
+    I9 --> I10
+    I5 --> I11
 
-    classDef pending fill:#eee,stroke:#999,color:#333;
-    classDef done fill:#d4edda,stroke:#28a745,color:#155724;
+    classDef done fill:#c8e6c9
+    classDef ready fill:#bbdefb
+    classDef blocked fill:#fff9c4
+
+    class I1,I2,I3,I4,I5 done
+    class I6,I11 ready
+    class I7,I8,I9,I10 blocked
 ```
+
+**Legend**: Green = done, Blue = ready, Yellow = blocked
+
+Issues 1-5 are complete (implemented and unit-tested; all acceptance criteria
+checked). Issues 6 and 7 are implemented but their end-to-end acceptance
+criteria are not yet verified on a sandbox-capable host, so they remain open;
+Issue 6's blockers are all done, so it is `ready`. Issue 8 (the live-enforcement
+release gate) and Issues 9-11 (the Decision-8 amendment) are not yet done. The
+companion tsuku recipe change is likewise pending in tsukumogami/tsuku.
 
 ## Implementation Sequence
 
@@ -312,6 +268,9 @@ graph TD
   join; it needs 1-5.
 - **Then:** Issue 7 (post/discard) after 6; Issue 8 (the adversarial
   live-enforcement proof) after 5 + 6 as the last, release-gating step.
+- **Decision-8 amendment:** Issue 9 (capability-based preflight + `uncontained_policy`)
+  after 5 + 6, then Issue 10 (`setup-sandbox`) after 9; Issue 11
+  (`failIfUnavailable` settings) after 5.
 
 Critical path: (1,2) -> 3 -> 6 -> 8. The security-critical issues (4, 5, 8)
 carry the sharpest risk and the boundary proof; treat their reviews with

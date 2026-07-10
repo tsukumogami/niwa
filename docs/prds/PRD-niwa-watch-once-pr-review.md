@@ -202,10 +202,10 @@ Non-functional:
 Sandbox capability, provisioning, and fallback policy (added by amendment):
 
 - **R18.** The preflight SHALL select the strongest enforceable containment
-  tier available on the host -- the built-in Seatbelt sandbox on macOS, or
+  level available on the host -- the built-in Seatbelt sandbox on macOS, or
   the `bwrap`+`socat` no-egress profile on a Linux host with a
   capability-bearing user namespace -- and dispatch under it. It SHALL NOT
-  require the same tier on every platform.
+  require the same level on every platform.
 - **R19.** A standard, **unprivileged** niwa installation SHALL provide the
   Linux sandbox binaries (`bwrap`, `socat`) automatically (as Linux-only
   runtime dependencies); macOS SHALL require none. The one privileged step --
@@ -213,7 +213,7 @@ Sandbox capability, provisioning, and fallback policy (added by amendment):
   single opt-in command (`niwa setup-sandbox`), never a per-dispatch or
   multi-step manual requirement. The default install SHALL NOT require
   elevation.
-- **R20.** The behavior when no enforceable tier is available SHALL be an
+- **R20.** The behavior when no enforceable level is available SHALL be an
   operator-owned policy `uncontained_policy` (resolved `flag > config header
   > default`) with values `refuse` (default), `warn` (dispatch with a
   recorded prominent warning), and `allow`. The default SHALL be `refuse`, so
