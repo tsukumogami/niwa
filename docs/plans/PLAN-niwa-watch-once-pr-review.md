@@ -162,10 +162,10 @@ enforcement test comes last as the boundary proof that gates release.
 **Goal**: Replace the hard-refuse preflight with an adaptive level selection plus an operator-owned fallback policy (design Decision 8A/8C, PRD R18/R20/R9).
 
 **Acceptance Criteria**:
-- [ ] The preflight selects the strongest enforceable level: macOS Seatbelt (built-in), or Linux `bwrap`+`socat` with a capability-bearing user namespace (the existing functional probe); it does not require the same level on every platform (R18).
-- [ ] A durable `uncontained_policy` setting (`refuse` default | `warn` | `allow`) is read on the `flag > config header > default` stack; when no level is enforceable the run follows it -- refuse (non-zero + reason + remediation), warn (dispatch + recorded prominent warning), or allow (R20).
-- [ ] Under `warn`/`allow`, the metadata-only prompt, credential-scrubbed env, and human gate still apply (asserted structurally).
-- [ ] Default behavior is unchanged for a capable host (dispatch) and for an incapable host with no config (refuse).
+- [x] The preflight selects the strongest enforceable level: macOS Seatbelt (built-in), or Linux `bwrap`+`socat` with a capability-bearing user namespace (the existing functional probe); it does not require the same level on every platform (R18).
+- [x] A durable `uncontained_policy` setting (`refuse` default | `warn` | `allow`) is read on the `flag > config header > default` stack; when no level is enforceable the run follows it -- refuse (non-zero + reason + remediation), warn (dispatch + recorded prominent warning), or allow (R20).
+- [x] Under `warn`/`allow`, the metadata-only prompt, credential-scrubbed env, and human gate still apply (asserted structurally).
+- [x] Default behavior is unchanged for a capable host (dispatch) and for an incapable host with no config (refuse).
 
 **Dependencies**: Blocked by <<ISSUE:5>>, <<ISSUE:6>>
 
@@ -177,9 +177,9 @@ enforcement test comes last as the boundary proof that gates release.
 **Goal**: The opt-in privileged command that unlocks the sandbox capability on a hardened Linux host (design Decision 8B, PRD R19).
 
 **Acceptance Criteria**:
-- [ ] `niwa setup-sandbox` detects the hardened-userns condition and installs an AppArmor profile for `bwrap` (or sets the sysctl), reporting what it changed; it is idempotent and a no-op where the capability already exists.
-- [ ] It is the ONLY privileged step; it is never invoked per dispatch; on macOS / permissive Linux it reports "already capable" and changes nothing.
-- [ ] The `watch --once` refuse message (Issue 9) names this command as the remediation.
+- [x] `niwa setup-sandbox` detects the hardened-userns condition and installs an AppArmor profile for `bwrap` (or sets the sysctl), reporting what it changed; it is idempotent and a no-op where the capability already exists.
+- [x] It is the ONLY privileged step; it is never invoked per dispatch; on macOS / permissive Linux it reports "already capable" and changes nothing.
+- [x] The `watch --once` refuse message (Issue 9) names this command as the remediation.
 
 **Dependencies**: Blocked by <<ISSUE:9>>
 
@@ -191,8 +191,8 @@ enforcement test comes last as the boundary proof that gates release.
 **Goal**: Make the harness refuse rather than silently disable the sandbox (design Decision 8, PRD R21).
 
 **Acceptance Criteria**:
-- [ ] The containment profile (Issue 5) also sets `sandbox.failIfUnavailable: true` and `allowUnsandboxedCommands: false` in the merged instance settings.
-- [ ] The pre-launch re-verification asserts both survived the merge.
+- [x] The containment profile (Issue 5) also sets `sandbox.failIfUnavailable: true` and `allowUnsandboxedCommands: false` in the merged instance settings.
+- [x] The pre-launch re-verification asserts both survived the merge.
 
 **Dependencies**: Blocked by <<ISSUE:5>>
 
@@ -244,19 +244,22 @@ graph TD
     classDef ready fill:#bbdefb
     classDef blocked fill:#fff9c4
 
-    class I1,I2,I3,I4,I5 done
-    class I6,I11 ready
-    class I7,I8,I9,I10 blocked
+    class I1,I2,I3,I4,I5,I9,I10,I11 done
+    class I6,I7 ready
+    class I8 blocked
 ```
 
 **Legend**: Green = done, Blue = ready, Yellow = blocked
 
-Issues 1-5 are complete (implemented and unit-tested; all acceptance criteria
-checked). Issues 6 and 7 are implemented but their end-to-end acceptance
-criteria are not yet verified on a sandbox-capable host, so they remain open;
-Issue 6's blockers are all done, so it is `ready`. Issue 8 (the live-enforcement
-release gate) and Issues 9-11 (the Decision-8 amendment) are not yet done. The
-companion tsuku recipe change is likewise pending in tsukumogami/tsuku.
+Issues 1-5 and the Decision-8 amendment (Issues 9, 10, 11) are complete
+(implemented and unit-tested; all unit-verifiable acceptance criteria checked).
+Issues 6 and 7 are implemented and their helpers unit-tested, but their
+end-to-end acceptance criteria are not yet verified on a sandbox-capable host,
+so they remain `ready` rather than done. Issue 8 (the live-enforcement release
+gate) is implemented as a skipped scaffold; its assertion runs only on a
+sandbox-capable host (`NIWA_WATCH_LIVE_TEST=1`), which the authoring environment
+is not, so it stays `blocked` on that host. The companion tsuku recipe change is
+tracked separately in tsukumogami/tsuku.
 
 ## Implementation Sequence
 

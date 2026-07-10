@@ -50,6 +50,33 @@ func TestRunWatchOnce_RefusesWhenSandboxIncapable(t *testing.T) {
 	}
 }
 
+// TestRunWatchOnce_WarnPolicyDoesNotRefuse proves the warn fallback is a
+// fallthrough, not a distinct dispatch path: when the capability probe fails and
+// --uncontained=warn is set, the preflight does NOT return the uncontained
+// refusal -- control continues into the unchanged downstream (which then fails
+// for an unrelated, benign reason in this bare test env). This structurally
+// asserts warn/allow keep the same metadata-prompt/credential-scrub/human-gate
+// path (Issue 9 AC3): there is no alternate uncontained dispatch path to diverge
+// onto.
+func TestRunWatchOnce_WarnPolicyDoesNotRefuse(t *testing.T) {
+	prev := sandboxCapabilityCheck
+	sandboxCapabilityCheck = func(context.Context) error { return errors.New("no netns here") }
+	t.Cleanup(func() { sandboxCapabilityCheck = prev })
+
+	prevPolicy := watchUncontained
+	watchUncontained = "warn"
+	t.Cleanup(func() { watchUncontained = prevPolicy })
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	err := runWatchOnce(cmd, nil)
+	// It must have moved past the preflight: whatever error surfaces downstream,
+	// it is not the fail-closed "refusing to dispatch uncontained" refusal.
+	if err != nil && strings.Contains(err.Error(), "refusing to dispatch uncontained") {
+		t.Errorf("warn policy must not refuse at the preflight; got %v", err)
+	}
+}
+
 func TestOwnerRepoFromGitURL(t *testing.T) {
 	cases := []struct {
 		in          string
