@@ -1218,16 +1218,29 @@ func theFileInInstanceDoesNotContain(ctx context.Context, relPath, instance, tex
 
 // --- Claude integration steps ---
 
-// claudeIsAvailable checks that the claude CLI and ANTHROPIC_API_KEY are
-// available. Returns godog.ErrPending to skip the scenario when either is absent.
+// claudeIsAvailable checks that the claude CLI can authenticate. Returns
+// godog.ErrPending to skip the scenario when it cannot.
+//
+// CI has no interactive Claude session, so it authenticates the CLI through
+// ANTHROPIC_API_KEY and skips when the key is absent. Locally, the scenario
+// relies on whatever auth the claude CLI already holds (a subscription login
+// or OAuth token), so a developer signed in to claude can run these tests
+// without setting an API key.
 func claudeIsAvailable(ctx context.Context) (context.Context, error) {
 	if _, err := exec.LookPath("claude"); err != nil {
 		return ctx, godog.ErrPending
 	}
-	if os.Getenv("ANTHROPIC_API_KEY") == "" {
+	if runningInCI() && os.Getenv("ANTHROPIC_API_KEY") == "" {
 		return ctx, godog.ErrPending
 	}
 	return ctx, nil
+}
+
+// runningInCI reports whether the suite is executing under a CI system.
+// GitHub Actions sets GITHUB_ACTIONS; CI is the broader convention most
+// runners honor.
+func runningInCI() bool {
+	return os.Getenv("GITHUB_ACTIONS") != "" || os.Getenv("CI") != ""
 }
 
 // iRunClaudePFromInstanceRoot runs claude -p with the given prompt from the
@@ -1260,9 +1273,18 @@ func runClaudeP(s *testState, cwd, prompt string) error {
 	if err != nil {
 		return godog.ErrPending
 	}
-	env := s.buildEnv()
+	var env []string
 	if key := os.Getenv("ANTHROPIC_API_KEY"); key != "" {
-		env = append(env, "ANTHROPIC_API_KEY="+key)
+		// A key is provided (the CI path): run in the sandboxed environment
+		// and authenticate the claude CLI through the key.
+		env = append(s.buildEnv(), "ANTHROPIC_API_KEY="+key)
+	} else {
+		// No key (the local path): use the developer's real environment so
+		// claude authenticates through their existing login session, which the
+		// sandboxed HOME/XDG_CONFIG_HOME would otherwise hide. Only the claude
+		// invocation runs unsandboxed; niwa state was already materialized
+		// under the sandbox HOME in earlier steps.
+		env = os.Environ()
 	}
 	cmd := exec.Command(claudeBin, "-p", prompt)
 	cmd.Dir = cwd
