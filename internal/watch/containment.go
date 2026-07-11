@@ -334,3 +334,47 @@ func SyntheticHomeDir(instanceDir string) (string, error) {
 	}
 	return home, nil
 }
+
+// PreserveModelCredentials seeds the synthetic HOME with ONLY the Claude model
+// channel credential from the developer's real ~/.claude/.credentials.json, so a
+// contained review session can still reach the model while host credentials stay
+// hidden. Without this, a session authenticated by the credentials file (rather
+// than an env token) has no model access under the synthetic HOME and cannot run
+// at all.
+//
+// It copies ONLY the `claudeAiOauth` object. The same file also holds MCP OAuth
+// tokens (and possibly other channels) that the read-only review task has no
+// business seeing; those are deliberately dropped, so this both fixes auth and
+// keeps the scrub tight. When the file is absent (env-token auth, or no login)
+// it is a no-op -- the env allowlist carries the model token in that case.
+func PreserveModelCredentials(realHome, syntheticHome string) error {
+	src := filepath.Join(realHome, ".claude", ".credentials.json")
+	data, err := os.ReadFile(src)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("preserve model credentials: reading %s: %w", src, err)
+	}
+	var all map[string]json.RawMessage
+	if err := json.Unmarshal(data, &all); err != nil {
+		return fmt.Errorf("preserve model credentials: parsing credentials: %w", err)
+	}
+	oauth, ok := all["claudeAiOauth"]
+	if !ok {
+		// No Anthropic OAuth channel in the file; nothing model-related to carry.
+		return nil
+	}
+	out, err := json.Marshal(map[string]json.RawMessage{"claudeAiOauth": oauth})
+	if err != nil {
+		return fmt.Errorf("preserve model credentials: encoding: %w", err)
+	}
+	dstDir := filepath.Join(syntheticHome, ".claude")
+	if err := os.MkdirAll(dstDir, 0o700); err != nil {
+		return fmt.Errorf("preserve model credentials: creating %s: %w", dstDir, err)
+	}
+	if err := os.WriteFile(filepath.Join(dstDir, ".credentials.json"), out, 0o600); err != nil {
+		return fmt.Errorf("preserve model credentials: writing credential: %w", err)
+	}
+	return nil
+}

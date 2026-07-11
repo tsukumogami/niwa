@@ -265,6 +265,59 @@ func TestApplyPostGuard_MergesAndDedups(t *testing.T) {
 	}
 }
 
+// TestPreserveModelCredentials_KeepsOnlyModelChannel proves the fix carries the
+// Anthropic model credential into the synthetic HOME but strips the MCP (and any
+// other) channels the review task must not see, and that a missing file is a
+// no-op.
+func TestPreserveModelCredentials_KeepsOnlyModelChannel(t *testing.T) {
+	realHome := t.TempDir()
+	synthHome := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(realHome, ".claude"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	creds := `{"claudeAiOauth":{"accessToken":"model-tok","refreshToken":"r"},"mcpOAuth":{"slack|x":"leak-me"}}`
+	if err := os.WriteFile(filepath.Join(realHome, ".claude", ".credentials.json"), []byte(creds), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := PreserveModelCredentials(realHome, synthHome); err != nil {
+		t.Fatalf("PreserveModelCredentials: %v", err)
+	}
+
+	dst := filepath.Join(synthHome, ".claude", ".credentials.json")
+	data, err := os.ReadFile(dst)
+	if err != nil {
+		t.Fatalf("seeded credential missing: %v", err)
+	}
+	var got map[string]json.RawMessage
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := got["claudeAiOauth"]; !ok {
+		t.Error("model channel (claudeAiOauth) must be preserved")
+	}
+	if _, ok := got["mcpOAuth"]; ok {
+		t.Error("mcpOAuth must be stripped -- the review task must not see MCP creds")
+	}
+	if strings.Contains(string(data), "leak-me") {
+		t.Error("non-model credential leaked into the synthetic HOME")
+	}
+	// 0600 on the seeded credential.
+	if fi, err := os.Stat(dst); err == nil && fi.Mode().Perm() != 0o600 {
+		t.Errorf("seeded credential perms = %o, want 600", fi.Mode().Perm())
+	}
+
+	// Missing source file -> no-op, no error, no file written.
+	empty := t.TempDir()
+	fresh := t.TempDir()
+	if err := PreserveModelCredentials(empty, fresh); err != nil {
+		t.Errorf("missing credentials file should be a no-op, got %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(fresh, ".claude", ".credentials.json")); !os.IsNotExist(err) {
+		t.Error("no credential should be written when the source is absent")
+	}
+}
+
 func TestVerifyContainmentApplied_RejectsRelaxations(t *testing.T) {
 	base := ContainmentProfile(true)
 

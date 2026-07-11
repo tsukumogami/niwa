@@ -259,6 +259,13 @@ func stageReview(cmd *cobra.Command, root, cwd, token string, client *github.API
 		if err != nil {
 			return err
 		}
+		// Seed the synthetic HOME with only the model-channel credential so the
+		// contained agent can reach the model; host creds stay hidden.
+		if home, herr := os.UserHomeDir(); herr == nil {
+			if err := watch.PreserveModelCredentials(home, synthHome); err != nil {
+				return err
+			}
+		}
 		if err := watch.ApplyContainment(instancePath, plan.applySandbox); err != nil {
 			return err
 		}
