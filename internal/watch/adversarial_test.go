@@ -3,10 +3,12 @@ package watch
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"testing"
@@ -69,11 +71,15 @@ func TestContainedSessionDeniesEgress_OnHarness(t *testing.T) {
 	}
 }
 
-// assertSandboxedSessionDeniesEgress writes the production review-session
-// settings (ApplyReviewSettings with sandbox=true, plus the bypassPermissions
-// mode a niwa dispatch sets so the Bash tool auto-runs), launches `claude -p`
-// in that instance, and asserts an in-session egress attempt was blocked at the
-// OS/proxy layer.
+// assertSandboxedSessionDeniesEgress launches a session the EXACT way niwa
+// dispatch does -- `claude --bg <prompt>` in the instance, under the production
+// review settings (ApplyReviewSettings sandbox=true plus the bypassPermissions
+// mode a dispatch sets) -- so this is the real agents-view session path, not a
+// `claude -p` proxy. It makes that session's Bash tool attempt a RAW TCP connect
+// to a literal IP (no DNS, no TLS -- so a cert error can't be mistaken for a
+// block) and writes the connect exit code to a file in the instance, which the
+// sandbox permits (instance-local writes) and which we read back deterministically
+// rather than scraping the session log. A successful connect is a release blocker.
 func assertSandboxedSessionDeniesEgress(t *testing.T) error {
 	t.Helper()
 	inst := t.TempDir()
@@ -84,54 +90,86 @@ func assertSandboxedSessionDeniesEgress(t *testing.T) error {
 	// bypassPermissions, so the sandboxed Bash tool executes (and is then caged)
 	// rather than stalling on a permission prompt in a --bg session.
 	settingsPath := filepath.Join(inst, ".claude", "settings.json")
-	raw, err := os.ReadFile(settingsPath)
+	if err := patchDefaultMode(settingsPath, "bypassPermissions"); err != nil {
+		return err
+	}
+
+	const marker = "egress-probe.result"
+	probe := "Run exactly this one Bash command with the Bash tool, then stop: " +
+		"timeout 5 bash -c 'echo > /dev/tcp/1.1.1.1/443' 2>/dev/null; printf 'NET=%s' \"$?\" > " + marker
+
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "claude", "--bg", probe)
+	cmd.Dir = inst
+	cmd.Stdin = nil
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("launch claude --bg (failIfUnavailable=true means a start failure = no enforceable sandbox here): %w\n%s", err, out)
+	}
+	if sid := parseBgSessionID(out); sid != "" {
+		defer func() { _ = exec.Command("claude", "stop", sid).Run() }()
+	}
+
+	// Poll for the result file the sandboxed session writes when the probe runs.
+	resultPath := filepath.Join(inst, marker)
+	var content string
+	for ctx.Err() == nil {
+		if b, rerr := os.ReadFile(resultPath); rerr == nil && len(b) > 0 {
+			content = strings.TrimSpace(string(b))
+			break
+		}
+		time.Sleep(3 * time.Second)
+	}
+	switch {
+	case content == "":
+		return fmt.Errorf("inconclusive: the sandboxed --bg session never wrote the egress-probe result; cannot confirm the block")
+	case content == "NET=0":
+		return fmt.Errorf("EGRESS NOT BLOCKED: a raw TCP connect to 1.1.1.1:443 succeeded from inside the sandboxed session (%q). The boundary FAILED", content)
+	default:
+		// A nonzero connect exit (timeout/refused/no-route) = no egress. Proven.
+		return nil
+	}
+}
+
+// patchDefaultMode sets permissions.defaultMode in an instance settings file,
+// mirroring what a niwa dispatch writes so the sandboxed Bash tool auto-runs.
+func patchDefaultMode(settingsPath, mode string) error {
+	b, err := os.ReadFile(settingsPath)
 	if err != nil {
 		return err
 	}
 	var m map[string]any
-	if err := json.Unmarshal(raw, &m); err != nil {
+	if err := json.Unmarshal(b, &m); err != nil {
 		return err
 	}
 	perms, _ := m["permissions"].(map[string]any)
 	if perms == nil {
 		perms = map[string]any{}
 	}
-	perms["defaultMode"] = "bypassPermissions"
+	perms["defaultMode"] = mode
 	m["permissions"] = perms
-	patched, _ := json.MarshalIndent(m, "", "  ")
-	if err := os.WriteFile(settingsPath, patched, 0o644); err != nil {
+	out, err := json.MarshalIndent(m, "", "  ")
+	if err != nil {
 		return err
 	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
-	defer cancel()
-	const probe = "Use the Bash tool to run exactly this one command, then stop: " +
-		`curl -sS -m 6 -o /dev/null -w 'PROBE_HTTP=%{http_code}' https://example.com 2>&1; echo "|PROBE_EXIT=$?"`
-	cmd := exec.CommandContext(ctx, "claude", "-p",
-		"--settings", settingsPath,
-		"--output-format", "json",
-		probe)
-	cmd.Dir = inst
-	cmd.Stdin = nil
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return &egressTestError{msg: "sandboxed claude session failed to run (with failIfUnavailable=true, a start failure means the sandbox is unavailable on this host): " + err.Error() + "\n" + string(out)}
-	}
-	s := string(out)
-	if strings.Contains(s, "PROBE_HTTP=200") {
-		return &egressTestError{msg: "EGRESS NOT BLOCKED: the sandboxed session reached the network (PROBE_HTTP=200). The boundary FAILED:\n" + s}
-	}
-	if !strings.Contains(s, "PROBE_HTTP=000") {
-		return &egressTestError{msg: "inconclusive: the in-session egress probe produced no PROBE_HTTP marker (the Bash tool may not have run); cannot confirm the block:\n" + s}
-	}
-	// PROBE_HTTP=000 present and 200 absent: the sandboxed session's Bash tool
-	// attempted real egress and the OS/proxy denied it. Boundary proven.
-	return nil
+	return os.WriteFile(settingsPath, out, 0o644)
 }
 
-type egressTestError struct{ msg string }
+var (
+	ansiRe      = regexp.MustCompile(`\x1b\[[0-9;]*m`)
+	bgSessionRe = regexp.MustCompile(`backgrounded[^\n]*?([0-9a-f]{8})`)
+)
 
-func (e *egressTestError) Error() string { return e.msg }
+// parseBgSessionID extracts the background session id from `claude --bg` output
+// ("backgrounded · <id>"), stripping ANSI color codes first. Returns "" if not
+// found (cleanup is then skipped -- non-fatal).
+func parseBgSessionID(out []byte) string {
+	if m := bgSessionRe.FindSubmatch(ansiRe.ReplaceAll(out, nil)); len(m) == 2 {
+		return string(m[1])
+	}
+	return ""
+}
 
 // attemptEgressProbe attempts real outbound network access two ways: a raw TCP
 // socket to a literal IP and a DNS-based dial to a hostname. It returns nil if
