@@ -89,6 +89,42 @@ func theConfigRepoIsForcePushedTo(ctx context.Context, name string, body string)
 	return ctx, nil
 }
 
+// aDispatchBriefExistsInWorkspaceRoot writes a task brief to
+// <workspaceRoot>/.niwa/dispatch-briefs/<file>, exactly where the niwa-owned
+// /dispatch skill drops it immediately before invoking `niwa dispatch`. This
+// is niwa-local runtime state living inside the config dir; the next config
+// snapshot refresh (drift swap) must carry it across rather than clobber it.
+func aDispatchBriefExistsInWorkspaceRoot(ctx context.Context, file string) (context.Context, error) {
+	s := getState(ctx)
+	if s == nil {
+		return ctx, fmt.Errorf("no test state")
+	}
+	briefsDir := filepath.Join(s.workspaceRoot, ".niwa", "dispatch-briefs")
+	if err := os.MkdirAll(briefsDir, 0o755); err != nil {
+		return ctx, fmt.Errorf("creating dispatch-briefs dir: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(briefsDir, file), []byte("# task brief\n"), 0o644); err != nil {
+		return ctx, fmt.Errorf("writing dispatch brief %q: %w", file, err)
+	}
+	return ctx, nil
+}
+
+// theDispatchBriefStillExistsInWorkspaceRoot asserts the brief written by
+// aDispatchBriefExistsInWorkspaceRoot survived a config snapshot refresh.
+// Before the fix, the atomic swap that replaces <workspaceRoot>/.niwa/ with
+// freshly fetched upstream content took dispatch-briefs/ down with it.
+func theDispatchBriefStillExistsInWorkspaceRoot(ctx context.Context, file string) (context.Context, error) {
+	s := getState(ctx)
+	if s == nil {
+		return ctx, fmt.Errorf("no test state")
+	}
+	path := filepath.Join(s.workspaceRoot, ".niwa", "dispatch-briefs", file)
+	if _, err := os.Stat(path); err != nil {
+		return ctx, fmt.Errorf("dispatch brief %q was clobbered by the config snapshot refresh (expected it at %s): %w", file, path, err)
+	}
+	return ctx, nil
+}
+
 // theProvenanceMarkerExistsInWorkspaceRoot asserts that
 // .niwa-snapshot.toml exists at <workspaceRoot>/.niwa/. The
 // `init from config repo` scenarios put the snapshot at workspaceRoot
