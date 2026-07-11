@@ -15,8 +15,10 @@ goals: |
   so it appears in the developer's own `claude agents` view and authenticates
   normally. Containment is a single axis -- the OS no-egress sandbox --
   governed by one global setting `watch_sandbox` (required by default, or
-  off). Under the sandbox the agent can read anything on disk but reach no
-  network, so a hostile PR can neither exfiltrate a secret nor act on the PR.
+  off). In `required` mode the agent can read anything on disk but reach no
+  network -- the OS sandbox cages Bash egress and a PreToolUse hook closes the
+  WebFetch/WebSearch/MCP channels it does not cover -- so a hostile PR can
+  neither exfiltrate a secret nor act on the PR.
   In every mode the agent drafts its review to a file and waits; posting is
   always a human act -- the operator reads the draft and submits it themselves.
   An operator who trusts the PR's authors can set `watch_sandbox = off` to run
@@ -85,10 +87,11 @@ the operator already trusts, never the accident of a missing dependency.
   Claude daemon -- a session bound to a synthetic home would register with a
   separate transient daemon and never appear there.
 - By default, make the review session **safe against a hostile PR by
-  construction** -- the OS no-egress sandbox cuts it off from the network, so
-  injection can influence only reasoning inside a sealed session, never the
-  outside world. The agent can still read anything on disk, but with no
-  network it can neither exfiltrate what it reads nor act on the PR.
+  construction** -- every egress channel is closed (the OS sandbox cages Bash,
+  a PreToolUse hook denies WebFetch/WebSearch/MCP), so injection can influence
+  only reasoning inside a sealed session, never the outside world. The agent can
+  still read anything on disk, but with no network it can neither exfiltrate
+  what it reads nor act on the PR.
 - Keep the dispatch **decision** injection-proof by carrying only
   platform-vouched metadata into the prompt, never externally-authored
   text. This holds in every mode.
@@ -164,17 +167,17 @@ Functional:
   through the existing `niwa dispatch`, invoked **always with `--detach`
   (`-d`)**, so a single run stages each review and returns without
   attaching a terminal to any staged session.
-- **R6.** The dispatched agent SHALL be instructed to read the PR (title,
-  body, diff, linked issue, CI status) and to treat all of it as untrusted,
-  then **write its drafted review to a known location** and **halt before
-  posting** -- in **every** mode. The agent SHALL NOT post, comment,
-  approve, or push. When `watch_sandbox` is `required` (R7), the agent reads
-  from its own pre-fetched clone (with no network it cannot fetch the PR
-  itself) and cannot reach the network to post. When `watch_sandbox` is
-  `off`, the agent runs with the developer's real credentials and live
-  network so it can **read** the linked issue, CI status, and review threads
-  a substantive review needs, then still drafts to the known location and
-  waits (R14). (The known draft path is a DESIGN detail; the requirement is
+- **R6.** The dispatched agent SHALL be instructed to read the PR, treat all of
+  it as untrusted, then **write its drafted review to a known location** and
+  **halt before posting** -- in **every** mode. The agent SHALL NOT post,
+  comment, approve, or push. When `watch_sandbox` is `required` (R7), the agent
+  reads **only from its own pre-fetched clone** -- the PR head diff that trusted
+  code staged for it; with no network it cannot fetch the PR itself, cannot
+  reach the linked issue, CI status, or review threads live, and cannot reach
+  the network to post. When `watch_sandbox` is `off`, the agent runs with the
+  developer's real credentials and live network so it can **read** the linked
+  issue, CI status, and review threads a substantive review needs, then still
+  drafts to the known location and waits (R14). (The known draft path is a DESIGN detail; the requirement is
   that the location is fixed and predictable, not chosen ad hoc by the
   agent.)
 - **R7.** The dispatched review session SHALL always run under the
@@ -183,20 +186,29 @@ Functional:
   the session appear in the developer's own `claude agents` view (R13) and
   authenticate normally. Containment is a **single axis** -- the OS no-egress
   sandbox, on or off -- governed by the global setting `watch_sandbox` (R18).
-  When `watch_sandbox` is `required` (the default), the session runs inside
-  the OS no-egress sandbox, which supplies **no network egress**; the sandbox
-  is the security boundary. When `watch_sandbox` is `off`, the session runs
-  as an ordinary dispatch with full network access.
+  When `watch_sandbox` is `required` (the default), the session has **no network
+  egress** on any channel: the OS sandbox cages Bash-subprocess egress, and a
+  PreToolUse hook (plus `--strict-mcp-config`) closes the WebFetch/WebSearch/MCP
+  channels the OS sandbox does not cage. That combination is the security
+  boundary. When `watch_sandbox` is `off`, the session runs as an ordinary
+  dispatch with full network access.
 - **R8.** The dispatched review session SHALL NOT hide the developer's
   credentials or scrub its environment. It runs under the real HOME and real
   environment precisely so it registers with the developer's real Claude
   daemon (appearing in the agents view, R13) and authenticates normally. The
-  security boundary is **egress denial, not credential hiding**: under the
-  sandbox the session CAN read anything on disk -- `~/.ssh`, `~/.config/gh`,
+  security boundary is **egress denial, not credential hiding**: in `required`
+  mode the session CAN read anything on disk -- `~/.ssh`, `~/.config/gh`,
   `~/.aws`, the `gh` token -- but can reach **no network**, so it can neither
   exfiltrate a secret nor act on the PR (posting, pushing, and merging all
-  need the network) regardless of which binary it uses. One choke point
-  covers both exfiltration and acting. (A synthetic HOME plus an env-var
+  need the network) regardless of which binary it uses. Reaching no network
+  takes a **combination**, because the OS sandbox (`sandbox.enabled`) cages only
+  **Bash** subprocesses: the OS sandbox closes Bash egress, and a PreToolUse
+  hook (matcher `WebFetch|WebSearch|mcp__`) plus `--strict-mcp-config` close the
+  non-Bash channels -- WebFetch, WebSearch, and MCP tools -- that would
+  otherwise egress outside it. Credential-hiding is unnecessary **only because
+  every one of those channels is closed**; if any were open, the on-disk token
+  would not be useless (it is extractable and usable by any HTTP-capable
+  program). (A synthetic HOME plus an env-var
   allowlist was the previous approach; it is rejected -- see the DESIGN's
   superseded-alternative note -- because it removed the session from the
   developer's agents view and broke Claude auth.)
@@ -249,9 +261,8 @@ Functional:
   session holds the developer's real credentials and live network so the
   agent can read the surrounding context (linked issue, CI, review threads),
   but it still only drafts and waits; the dispatched instance settings SHALL
-  additionally carry a **post-guard** (R22) that gates any review/comment
-  submission behind operator approval, so a stray prompt-following cannot
-  post under the operator's name. A staged session the developer no longer
+  additionally carry a **post-guard** (R22) that blocks any review/comment
+  submission, so a stray prompt-following cannot post under the operator's name. A staged session the developer no longer
   wants is dismissed from the Claude Code agents view (R13); because a PR is
   recorded handled on successful dispatch (R11), dismissing it stages no
   duplicate on a later run.
@@ -270,11 +281,12 @@ Non-functional:
 - **R17.** The sandboxed path SHALL be adversarially verified: a PR whose
   title, body, and diff attempt exfiltration and outbound action (e.g.
   `curl … | sh`, `git push`, printing and sending secrets), dispatched with
-  `watch_sandbox = required` and the OS sandbox enforced, SHALL have those
-  outbound actions **denied at the tool/OS layer**. The verification SHALL
-  exercise the outbound actions **directly** (executed in the session,
-  bypassing the model's judgment) so that denial is provably the sandbox's
-  doing and not the model merely choosing to decline. This test is the
+  `watch_sandbox = required` and the sandbox enforced, SHALL have outbound
+  actions on **all three egress channels denied**: a WebFetch, an MCP tool call,
+  and a raw Bash socket. The verification SHALL exercise the outbound actions
+  **directly** (executed in a real sandboxed session, bypassing the model's
+  judgment) so that denial is provably the sandbox-plus-hook's doing and not the
+  model merely choosing to decline. This test is the
   boundary proof for the sandbox and is required whenever `watch_sandbox =
   required`; it does **not** apply to the `watch_sandbox = off` path, which
   is uncontained by the operator's explicit choice.
@@ -295,7 +307,7 @@ The switch resolves per this matrix:
 
 | `watch_sandbox` | The dispatched review session |
 |---|---|
-| required (default) | Real HOME + the OS no-egress sandbox = the boundary; refuse if the sandbox cannot be enforced (R9). |
+| required (default) | Real HOME; no network on any channel -- OS sandbox over Bash + a PreToolUse hook over WebFetch/WebSearch/MCP = the boundary; refuse if the sandbox cannot be enforced (R9). |
 | off | Real HOME, no sandbox; the developer's real credentials and live network, for richer live context. The trusted path -- only for PRs the operator trusts. |
 
 - **R18.** Whether the session runs inside the OS no-egress sandbox SHALL be
@@ -320,19 +332,19 @@ The switch resolves per this matrix:
   a nominally-sandboxed session is never produced by a silent harness
   degradation -- only the explicit `watch_sandbox` setting decides whether
   the OS sandbox is in force.
-- **R22.** The dispatched instance settings SHALL carry a **post-guard**: an
-  ask-approval rule (in code, `permissions.ask` on `gh pr review` and `gh pr
-  comment`) requiring operator approval before any review or comment
-  submission. This guard SHALL be applied in **every** mode (it is harmless
-  where the session has no network). It is a **convenience /
+- **R22.** The dispatched instance settings SHALL carry a **post-guard**: a
+  **PreToolUse hook** (matcher `Bash`) that denies `gh pr review` and `gh pr
+  comment`. It is a hook rather than a `permissions.ask`/`deny` rule because the
+  session runs under `bypassPermissions`, where permission rules do not fire but
+  a PreToolUse hook still does. This guard SHALL be applied in **every** mode (it
+  is harmless where the session already has no egress). It is a **convenience /
   accident-prevention guard for the trusted (`off`) path, NOT a security
-  boundary** -- command/hook-level act-gating is not a security boundary: a
-  token is extractable from disk and usable via any HTTP-capable program
-  (curl, git, python) without ever invoking the gated command, so a
-  `permissions.ask` rule, a `gh` wrapper, and a post-guard cannot contain a
-  hostile agent (the OS no-egress sandbox is the boundary). It exists so a
-  stray prompt-following cannot post under the operator's name without a
-  click; the prompt already instructs the agent not to post.
+  boundary** -- command/hook-level act-gating is not a security boundary: a token
+  is extractable from disk and usable via any HTTP-capable program (curl, git,
+  python) without ever invoking the gated command, so a hook denying a `gh`
+  command cannot contain a hostile agent (egress denial is the boundary). It
+  exists so a stray prompt-following cannot post under the operator's name; the
+  prompt already instructs the agent not to post.
 - **R23.** Each run SHALL **report its posture** -- one of "sandboxed (OS
   no-egress boundary)" or "uncontained (trusted; no sandbox)" -- so the
   operator always knows which contract is in force for a staged review.
@@ -406,10 +418,11 @@ Containment (security):
       failure; no session is launched.
 - [ ] **AC14 (R17).** Adversarial test (sandboxed path): a PR whose
       title/body/diff attempt `curl … | sh`, a `git push`, and secret
-      exfiltration is dispatched with `watch_sandbox = required` and the OS
-      sandbox enforced; each outbound action, **executed directly in the
-      session to bypass model judgment**, is denied at the OS/tool layer --
-      no egress, no push, no unapproved post.
+      exfiltration is dispatched with `watch_sandbox = required` and the sandbox
+      enforced; outbound attempts on **all three egress channels** -- a
+      **WebFetch**, an **MCP tool** call, and a **raw Bash socket** -- each
+      **executed directly in a real `claude --bg` sandboxed session to bypass
+      model judgment**, are denied -- no egress, no push, no unapproved post.
 
 Act boundary and determinism:
 
@@ -443,9 +456,9 @@ Act boundary and determinism:
       posting** -- no review attributable to the session appears on the PR
       until the operator posts the draft themselves.
 - [ ] **AC22 (R22 post-guard).** With `watch_sandbox = off`, the dispatched
-      instance settings gate `gh pr review` / `gh pr comment` behind an
-      approval prompt (`permissions.ask`), so an attempt to submit a review
-      from inside the unattended session is not auto-approved.
+      instance settings carry a PreToolUse hook (matcher `Bash`) that denies
+      `gh pr review` / `gh pr comment`, so an attempt to submit a review from
+      inside the unattended session is blocked rather than auto-run.
 - [ ] **AC23 (R23 posture report).** Each run prints the posture it is
       operating under -- "sandboxed (OS no-egress boundary)" or "uncontained
       (trusted; no sandbox)" -- matching the resolved `watch_sandbox` setting.
@@ -485,6 +498,10 @@ Act boundary and determinism:
   MCP release-to-act gate the operator releases -- is **not** built here. It
   is the second roadmap item, and it is what would eventually promote
   sandboxed mode from limited to fully practical (see Known Limitations).
+- **Vetted egress-free MCP allowlist for sandbox mode (future work).** Letting a
+  sandboxed session use specific read-only MCP servers that cannot themselves
+  egress -- widening what a no-egress review can see without opening a network
+  channel -- is a possible later enhancement, not built here.
 - **Closing the sandbox's residual caveats.** Windows sandbox support and
   the egress proxy's TLS-termination / domain-fronting seam (see Known
   Limitations).
