@@ -228,6 +228,11 @@ func stageReview(cmd *cobra.Command, root, cwd, token string, client *github.API
 
 	prompt := watch.BuildReviewPrompt(pr, watch.DefaultCloneRelDir, watch.DefaultDraftRelPath)
 	passthrough := buildDispatchPassthrough(slug, "")
+	if plan.sandbox {
+		// Belt-and-suspenders: reduce MCP server loading so the egress-deny hook
+		// is not the only thing standing between an MCP tool and the network.
+		passthrough = append(passthrough, "--strict-mcp-config")
+	}
 
 	// Launch detached (no terminal attach) with the real environment.
 	if err := dispatchLaunch(ctx, instancePath, prompt, passthrough, nil); err != nil {

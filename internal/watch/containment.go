@@ -7,71 +7,84 @@ import (
 	"path/filepath"
 )
 
-// sandboxSettings is the no-egress sandbox profile merged into a dispatched
-// instance's .claude/settings.json. An EMPTY allowedDomains is the deny-all
-// posture (the live adversarial test proves the harness honors it as deny-all,
-// not allow-all).
-type sandboxSettings struct {
-	Sandbox struct {
-		Enabled bool `json:"enabled"`
-		Network struct {
-			AllowedDomains []string `json:"allowedDomains"`
-		} `json:"network"`
-		// failIfUnavailable makes the harness REFUSE to run rather than
-		// silently disabling the sandbox and proceeding with a warning when its
-		// backend is unavailable. allowUnsandboxedCommands=false is the paired
-		// belt-and-suspenders. Together they close the harness fail-open so that
-		// once niwa has decided to enforce the OS sandbox (watch_sandbox
-		// required), a silent harness degradation cannot quietly drop it. (Exact
-		// setting-key paths are per the Claude Code sandbox settings schema; see
-		// the sandboxing docs.)
-		FailIfUnavailable        bool `json:"failIfUnavailable"`
-		AllowUnsandboxedCommands bool `json:"allowUnsandboxedCommands"`
-	} `json:"sandbox"`
-	Permissions struct {
-		Ask []string `json:"ask,omitempty"`
-	} `json:"permissions"`
+// Matcher strings for the two PreToolUse hooks. They are also the identity used
+// to dedupe (an entry is "already present" iff some hook shares its matcher).
+const (
+	// egressDenyMatcher matches the out-of-sandbox egress channels: WebFetch,
+	// WebSearch, and every MCP tool (mcp__ prefix). These make network calls
+	// OUTSIDE the OS sandbox (which cages only Bash subprocesses), so in sandbox
+	// mode they must be denied by a hook that fires even under bypassPermissions.
+	egressDenyMatcher = "WebFetch|WebSearch|mcp__"
+	// postGuardMatcher matches Bash so the post-guard can inspect gh commands and
+	// refuse a review/comment post. Applied in every mode (accident prevention).
+	postGuardMatcher = "Bash"
+)
+
+// noEgressSandboxStanza is the no-egress OS sandbox profile merged into a
+// dispatched instance's .claude/settings.json when sandbox mode is on. An EMPTY
+// allowedDomains is the deny-all posture (the live adversarial test proves the
+// harness honors it as deny-all, not allow-all). failIfUnavailable makes the
+// harness REFUSE to run rather than silently disabling the sandbox, and
+// allowUnsandboxedCommands=false removes the unsandboxed escape hatch; together
+// they close the harness fail-open so a silent degradation cannot quietly drop
+// the sandbox once niwa has decided to enforce it.
+func noEgressSandboxStanza() map[string]any {
+	return map[string]any{
+		"enabled": true,
+		"network": map[string]any{
+			"allowedDomains": []any{}, // deny-all
+		},
+		"failIfUnavailable":        true,  // refuse rather than run uncontained
+		"allowUnsandboxedCommands": false, // no unsandboxed escape hatch
+	}
 }
 
-// postGuardAskRules require operator approval before the dispatched session can
-// submit a review or comment. It is a convenience guard against accidental
-// posting: the session runs with the developer's real credentials, so this is an
-// accident-prevention click, NOT a security boundary (command-string matching is
-// not one -- that is what the OS sandbox is for). The prompt already tells the
-// agent not to post; this catches a stray prompt-following. It is applied in
-// every mode.
-var postGuardAskRules = []string{
-	"Bash(gh pr review:*)",
-	"Bash(gh pr comment:*)",
+// egressDenyHook returns the PreToolUse hook that denies the out-of-sandbox
+// egress channels (WebFetch, WebSearch, and all MCP tools). It is applied in
+// sandbox mode only. The hook fires even under bypassPermissions -- unlike
+// permissions.ask/deny -- which is why it, not a permission rule, is the closure
+// for these channels. Exit 2 blocks the tool call.
+func egressDenyHook() map[string]any {
+	return map[string]any{
+		"matcher": egressDenyMatcher,
+		"hooks": []any{
+			map[string]any{
+				"type":    "command",
+				"command": "echo 'niwa watch: no-egress sandbox -- WebFetch/WebSearch/MCP are disabled' >&2; exit 2",
+			},
+		},
+	}
 }
 
-// SandboxProfile returns the settings fragment used for a sandboxed review run:
-// the no-egress OS sandbox stanza plus the post-guard ask rules. It does NOT set
-// permissions.defaultMode -- the review session runs under the developer's real
-// environment and daemon, so no fail-closed permission mode is imposed.
-func SandboxProfile() map[string]any {
-	var s sandboxSettings
-	s.Sandbox.Enabled = true
-	s.Sandbox.Network.AllowedDomains = []string{} // deny-all
-	s.Sandbox.FailIfUnavailable = true            // refuse rather than run uncontained
-	s.Sandbox.AllowUnsandboxedCommands = false    // no unsandboxed escape hatch
-	s.Permissions.Ask = postGuardAskRules[:]      // require approval before posting
-
-	// Round-trip through JSON to a generic map so the caller can merge it into
-	// the existing settings document.
-	data, _ := json.Marshal(s)
-	var m map[string]any
-	_ = json.Unmarshal(data, &m)
-	return m
+// postGuardHook returns the PreToolUse hook that refuses an accidental review or
+// comment post. It inspects the Bash tool's command payload and blocks a
+// `gh pr review`/`gh pr comment`. Applied in BOTH modes: the session runs with
+// the developer's real credentials, so this is accident prevention (posting is
+// always a human act), NOT a security boundary. The prompt already tells the
+// agent not to post; this catches a stray prompt-following.
+func postGuardHook() map[string]any {
+	return map[string]any{
+		"matcher": postGuardMatcher,
+		"hooks": []any{
+			map[string]any{
+				"type":    "command",
+				"command": "grep -qE '\"command\":.*gh[[:space:]]+pr[[:space:]]+(review|comment)' && { echo 'niwa watch: posting is a human step -- draft the review and stop' >&2; exit 2; } || exit 0",
+			},
+		},
+	}
 }
 
 // ApplyReviewSettings merges the review-session settings into a provisioned
 // instance's .claude/settings.json and re-verifies they survived the merge. The
-// post-guard ask rules are always merged in (dedup, preserving any existing ask
-// entries and other permission keys). When sandbox is true the no-egress sandbox
+// post-guard PreToolUse hook is always appended (dedup by matcher, preserving any
+// existing hooks and other keys). When sandbox is true the no-egress sandbox
 // stanza is written (fully owned, so no pre-existing sandbox config can relax the
-// posture). The re-verification is the per-instance check that runs before
-// launch; a dropped or relaxed stanza means the PR must not be launched.
+// posture) and the egress-deny PreToolUse hook is appended (dedup by matcher). It
+// does NOT set permissions.defaultMode or permissions.ask -- the review session
+// runs under the developer's real environment and daemon, and the dispatch that
+// launches it already sets bypassPermissions. The re-verification is the
+// per-instance check that runs before launch; a dropped or relaxed stanza means
+// the PR must not be launched.
 func ApplyReviewSettings(instancePath string, sandbox bool) error {
 	settingsPath := filepath.Join(instancePath, ".claude", "settings.json")
 	settings := map[string]any{}
@@ -86,30 +99,27 @@ func ApplyReviewSettings(instancePath string, sandbox bool) error {
 	if sandbox {
 		// The sandbox stanza is fully owned -- overwrite it so no pre-existing
 		// sandbox config can relax the no-egress posture.
-		settings["sandbox"] = SandboxProfile()["sandbox"]
+		settings["sandbox"] = noEgressSandboxStanza()
 	}
 
-	// Always merge the post-guard ask rules into permissions.ask, deduping and
-	// preserving any existing ask entries and other permission keys.
-	perms, _ := settings["permissions"].(map[string]any)
-	if perms == nil {
-		perms = map[string]any{}
+	// Ensure hooks.PreToolUse is an array, preserving any existing entries and
+	// other hook events.
+	hooks, _ := settings["hooks"].(map[string]any)
+	if hooks == nil {
+		hooks = map[string]any{}
 	}
-	existing, _ := perms["ask"].([]any)
-	have := make(map[string]bool, len(existing))
-	for _, v := range existing {
-		if s, ok := v.(string); ok {
-			have[s] = true
-		}
+	preToolUse, _ := hooks["PreToolUse"].([]any)
+
+	// Always append the Bash post-guard, deduped by matcher.
+	if !preToolUseHasMatcher(preToolUse, postGuardMatcher) {
+		preToolUse = append(preToolUse, postGuardHook())
 	}
-	for _, rule := range postGuardAskRules {
-		if !have[rule] {
-			existing = append(existing, rule)
-			have[rule] = true
-		}
+	// In sandbox mode, append the egress-deny hook, deduped by matcher.
+	if sandbox && !preToolUseHasMatcher(preToolUse, egressDenyMatcher) {
+		preToolUse = append(preToolUse, egressDenyHook())
 	}
-	perms["ask"] = existing
-	settings["permissions"] = perms
+	hooks["PreToolUse"] = preToolUse
+	settings["hooks"] = hooks
 
 	out, err := json.MarshalIndent(settings, "", "  ")
 	if err != nil {
@@ -135,10 +145,11 @@ func ApplyReviewSettings(instancePath string, sandbox bool) error {
 }
 
 // VerifyReviewSettings re-reads a merged settings document and asserts the
-// review-session settings survived the merge. The post-guard ask rules are always
-// required. When sandbox is true it additionally asserts the no-egress sandbox
-// stanza (enabled, empty allowedDomains, failIfUnavailable, no unsandboxed escape
-// hatch).
+// review-session settings survived the merge. The post-guard PreToolUse hook
+// (matcher "Bash") is always required. When sandbox is true it additionally
+// asserts the no-egress sandbox stanza (enabled, empty allowedDomains,
+// failIfUnavailable, no unsandboxed escape hatch) AND the egress-deny PreToolUse
+// hook (matcher "WebFetch|WebSearch|mcp__").
 func VerifyReviewSettings(merged map[string]any, sandbox bool) error {
 	if sandbox {
 		sb, ok := merged["sandbox"].(map[string]any)
@@ -168,22 +179,44 @@ func VerifyReviewSettings(merged map[string]any, sandbox bool) error {
 		if allow, _ := sb["allowUnsandboxedCommands"].(bool); allow {
 			return fmt.Errorf("review settings check: sandbox.allowUnsandboxedCommands must be false")
 		}
-	}
-	perms, ok := merged["permissions"].(map[string]any)
-	if !ok {
-		return fmt.Errorf("review settings check: permissions stanza missing")
-	}
-	ask, _ := perms["ask"].([]any)
-	have := make(map[string]bool, len(ask))
-	for _, v := range ask {
-		if s, ok := v.(string); ok {
-			have[s] = true
+		// The egress-deny hook closes the out-of-sandbox channels (WebFetch,
+		// WebSearch, MCP) that the OS sandbox does not cage.
+		if !hasPreToolUseMatcher(merged, egressDenyMatcher) {
+			return fmt.Errorf("review settings check: egress-deny PreToolUse hook (matcher %q) missing", egressDenyMatcher)
 		}
 	}
-	for _, rule := range postGuardAskRules {
-		if !have[rule] {
-			return fmt.Errorf("review settings check: post-guard ask rule %q missing", rule)
-		}
+	// The Bash post-guard is required in every mode.
+	if !hasPreToolUseMatcher(merged, postGuardMatcher) {
+		return fmt.Errorf("review settings check: post-guard PreToolUse hook (matcher %q) missing", postGuardMatcher)
 	}
 	return nil
+}
+
+// hasPreToolUseMatcher walks merged["hooks"]["PreToolUse"] (a []any of maps) and
+// returns true if any entry's "matcher" equals the given string.
+func hasPreToolUseMatcher(merged map[string]any, matcher string) bool {
+	hooks, ok := merged["hooks"].(map[string]any)
+	if !ok {
+		return false
+	}
+	preToolUse, ok := hooks["PreToolUse"].([]any)
+	if !ok {
+		return false
+	}
+	return preToolUseHasMatcher(preToolUse, matcher)
+}
+
+// preToolUseHasMatcher reports whether any entry in a PreToolUse array has the
+// given matcher. Shared by the apply-time dedupe and the verify-time check.
+func preToolUseHasMatcher(preToolUse []any, matcher string) bool {
+	for _, entry := range preToolUse {
+		m, ok := entry.(map[string]any)
+		if !ok {
+			continue
+		}
+		if s, _ := m["matcher"].(string); s == matcher {
+			return true
+		}
+	}
+	return false
 }
