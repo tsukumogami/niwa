@@ -64,3 +64,36 @@ Feature: workspace config sources (snapshot model)
     When I run "niwa apply lazy"
     Then the exit code is 0
     And the error output does not contain "converted from working tree to snapshot"
+
+  # --- dispatch-brief survival across a config-snapshot refresh ---
+  # The /dispatch skill writes a task brief to
+  # <workspaceRoot>/.niwa/dispatch-briefs/<slug>.md and then runs `niwa
+  # dispatch`, whose provision path refreshes the config snapshot on the SAME
+  # .niwa dir. The atomic swap replaces the whole dir with freshly fetched
+  # upstream content, so the brief — niwa-local runtime state, not source
+  # content — must be carried across the swap or it vanishes before the
+  # dispatched worker can read it. This bit config-in-repo single-repo
+  # workspaces deterministically: the config source repo is the repo the
+  # worker commits to, so its HEAD advances and the drift check fires on
+  # every dispatch. A local (non-GitHub) config source always re-materializes
+  # on apply, so this scenario exercises the swap without needing drift.
+
+  @critical
+  Scenario: niwa apply preserves dispatch briefs across a config-snapshot refresh
+    Given a clean niwa environment
+    And a local git server is set up
+    And a config repo "briefws" exists with body:
+      """
+      [workspace]
+      name = "briefws"
+      """
+    When I run niwa init from config repo "briefws"
+    Then the exit code is 0
+    And the provenance marker exists
+    # The coordinator drops a brief into the workspace-root config dir, then
+    # a dispatch/apply runs a config refresh on that same dir.
+    Given a dispatch brief "probe.md" exists in the workspace root
+    When I run "niwa apply briefws"
+    Then the exit code is 0
+    # The brief must survive the refresh so the dispatched worker can read it.
+    And the dispatch brief "probe.md" still exists in the workspace root

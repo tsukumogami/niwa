@@ -17,6 +17,14 @@ import (
 	"github.com/tsukumogami/niwa/internal/source"
 )
 
+// dispatchBriefsDirName is the directory under the config dir where the
+// niwa-owned /dispatch skill writes task briefs
+// (<workspaceRoot>/.niwa/dispatch-briefs/<slug>.md) immediately before
+// invoking `niwa dispatch`. It is niwa-written local state, not upstream
+// source content, so the snapshot swap must carry it across the swap the
+// same way it carries instance.json. See preserveDispatchBriefs.
+const dispatchBriefsDirName = "dispatch-briefs"
+
 // driftCheckBackoff is the wait schedule used by headCommitWithRetry.
 // Its length determines the number of retries (e.g., len()==3 means
 // up to 3 retries on top of the initial attempt for 4 attempts total).
@@ -437,6 +445,17 @@ func materializeAndSwap(ctx context.Context, configDir string, src source.Source
 		return rank, fmt.Errorf("EnsureConfigSnapshot: preserve instance state: %w", err)
 	}
 
+	// Preserve dispatch-briefs/ across the swap for the same reason
+	// instance.json is preserved: it is niwa-written local state living under
+	// the config dir, not upstream source content, so the whole-directory
+	// rotation would otherwise destroy it. This is the reported single-repo
+	// defect: the /dispatch skill writes a brief here, then `niwa dispatch`
+	// runs this refresh on the same config dir before the worker can read it.
+	if err := preserveDispatchBriefs(configDir, staging); err != nil {
+		_ = safeRemoveAll(staging)
+		return rank, fmt.Errorf("EnsureConfigSnapshot: preserve dispatch briefs: %w", err)
+	}
+
 	if err := SwapSnapshotAtomic(configDir, staging); err != nil {
 		_ = safeRemoveAll(staging)
 		return rank, fmt.Errorf("EnsureConfigSnapshot: %w", err)
@@ -463,6 +482,43 @@ func preserveInstanceState(configDir, staging string) error {
 	dst := filepath.Join(staging, StateFile)
 	if err := os.WriteFile(dst, data, 0o644); err != nil {
 		return fmt.Errorf("write %s: %w", dst, err)
+	}
+	return nil
+}
+
+// preserveDispatchBriefs copies <configDir>/dispatch-briefs/ into staging
+// when it exists, so the atomic swap doesn't clobber the task briefs the
+// /dispatch skill drops there. It is the directory-tree counterpart to
+// preserveInstanceState: dispatch-briefs/ is niwa-written local state under
+// the config dir, not upstream source content, so it must ride across the
+// swap that otherwise replaces the whole config dir with fetched content.
+//
+// No-op when the directory is absent (a workspace that never dispatched).
+// The copy reuses copySubtree, which skips non-regular entries and enforces
+// the same path-safety guards the fallback snapshot copy uses, so a brief
+// with a hostile name or a planted symlink cannot escape staging on
+// promotion. New niwa-local paths extend the carry-over set explicitly
+// (see also preserveInstanceState); Issue #74 tracks the longer-term
+// manifest-driven fetch that makes the source-vs-local-state distinction
+// structural.
+func preserveDispatchBriefs(configDir, staging string) error {
+	src := filepath.Join(configDir, dispatchBriefsDirName)
+	info, err := os.Stat(src)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("stat %s: %w", src, err)
+	}
+	if !info.IsDir() {
+		// A non-directory at this path is not a brief store; leave it to the
+		// swap rather than guessing. This mirrors preserveInstanceState's
+		// narrow, explicit carry-over.
+		return nil
+	}
+	dst := filepath.Join(staging, dispatchBriefsDirName)
+	if err := copySubtree(src, dst); err != nil {
+		return fmt.Errorf("copy %s: %w", src, err)
 	}
 	return nil
 }
