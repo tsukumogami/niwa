@@ -5,83 +5,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 )
 
-// envAllowlist is the explicit set of environment variable names the contained
-// review session may carry. It is an ALLOWLIST (fail-closed): anything not
-// named here is dropped, so a secret the design did not anticipate cannot leak
-// through -- unlike a denylist, which fails open. The review task is read-only
-// and reaches nothing but the model channel, so it needs the model/harness auth
-// plus the minimum to run a process. It explicitly does NOT include the GitHub
-// token or any host credential.
-//
-// Note HOME is deliberately absent here: it is replaced by a synthetic HOME
-// (see BuildContainedEnv) so on-disk credentials under the developer's real
-// home (~/.config/gh, ~/.netrc, ~/.ssh) are not reachable.
-var envAllowlist = map[string]bool{
-	// Anthropic / Claude model-channel auth (the one secret the session needs).
-	"ANTHROPIC_API_KEY":       true,
-	"ANTHROPIC_AUTH_TOKEN":    true,
-	"ANTHROPIC_BASE_URL":      true,
-	"CLAUDE_CODE_OAUTH_TOKEN": true,
-	// Minimum to run a process.
-	"PATH":     true,
-	"LANG":     true,
-	"LC_ALL":   true,
-	"LC_CTYPE": true,
-	"TERM":     true,
-	"TZ":       true,
-}
-
-// deniedEnvNames is a defense-in-depth explicit-deny list checked by tests and
-// asserted never to appear in a contained env even if some future edit to the
-// allowlist is careless. These are the credential-bearing variables the
-// containment must keep out of the session.
-var deniedEnvNames = []string{
-	"GITHUB_TOKEN", "GH_TOKEN", "GH_ENTERPRISE_TOKEN", "SSH_AUTH_SOCK",
-}
-
-// BuildContainedEnv builds the environment for a contained review session from
-// the parent environment (typically os.Environ()), keeping only the allowlist
-// and substituting a synthetic HOME. syntheticHome is a scratch directory
-// inside the dispatched instance (no developer dotfiles); it becomes the
-// session's HOME so credential files under the real home are absent.
-//
-// The result never contains the GitHub token, SSH agent socket, GH_*/GITHUB_*
-// variables, or any variable outside the allowlist.
-func BuildContainedEnv(parentEnv []string, syntheticHome string) []string {
-	out := make([]string, 0, len(envAllowlist)+1)
-	for _, kv := range parentEnv {
-		eq := strings.IndexByte(kv, '=')
-		if eq <= 0 {
-			continue
-		}
-		name := kv[:eq]
-		if name == "HOME" {
-			continue // replaced by the synthetic HOME below
-		}
-		// Belt-and-suspenders: never carry a GH_*/GITHUB_* variable even if one
-		// were mistakenly added to the allowlist.
-		if strings.HasPrefix(name, "GH_") || strings.HasPrefix(name, "GITHUB_") {
-			continue
-		}
-		if envAllowlist[name] {
-			out = append(out, kv)
-		}
-	}
-	if syntheticHome != "" {
-		out = append(out, "HOME="+syntheticHome)
-	}
-	return out
-}
-
-// sandboxSettings is the no-egress containment profile merged into a dispatched
+// sandboxSettings is the no-egress sandbox profile merged into a dispatched
 // instance's .claude/settings.json. An EMPTY allowedDomains is the deny-all
 // posture (the live adversarial test proves the harness honors it as deny-all,
-// not allow-all). permissions.defaultMode is "default", which fails closed in
-// an unattended --bg session: a would-prompt tool call is rejected, not
-// auto-allowed.
+// not allow-all).
 type sandboxSettings struct {
 	Sandbox struct {
 		Enabled bool `json:"enabled"`
@@ -92,206 +21,76 @@ type sandboxSettings struct {
 		// silently disabling the sandbox and proceeding with a warning when its
 		// backend is unavailable. allowUnsandboxedCommands=false is the paired
 		// belt-and-suspenders. Together they close the harness fail-open so that
-		// once niwa has decided to enforce the OS sandbox (watch_containment on,
-		// watch_sandbox required or optional-and-available), a silent harness
-		// degradation cannot quietly drop it (design Decision 7 / PRD R21). (Exact
+		// once niwa has decided to enforce the OS sandbox (watch_sandbox
+		// required), a silent harness degradation cannot quietly drop it. (Exact
 		// setting-key paths are per the Claude Code sandbox settings schema; see
 		// the sandboxing docs.)
 		FailIfUnavailable        bool `json:"failIfUnavailable"`
 		AllowUnsandboxedCommands bool `json:"allowUnsandboxedCommands"`
 	} `json:"sandbox"`
 	Permissions struct {
-		DefaultMode string   `json:"defaultMode,omitempty"`
-		Ask         []string `json:"ask,omitempty"`
+		Ask []string `json:"ask,omitempty"`
 	} `json:"permissions"`
 }
 
 // postGuardAskRules require operator approval before the dispatched session can
 // submit a review or comment. It is a convenience guard against accidental
-// posting on the trusted uncontained path (where the agent holds real
-// credentials) -- an accident-prevention click, NOT a security boundary:
-// command-string matching is not one (that is what the OS sandbox is for). The
-// prompt already tells the agent not to post; this catches a stray
-// prompt-following. It is applied in every mode (harmless where the session has
-// no credentials or no egress).
+// posting: the session runs with the developer's real credentials, so this is an
+// accident-prevention click, NOT a security boundary (command-string matching is
+// not one -- that is what the OS sandbox is for). The prompt already tells the
+// agent not to post; this catches a stray prompt-following. It is applied in
+// every mode.
 var postGuardAskRules = []string{
 	"Bash(gh pr review:*)",
 	"Bash(gh pr comment:*)",
 }
 
-// ContainmentProfile returns the settings fragment merged into the instance
-// settings before launch. It always sets the fail-closed permission mode (part
-// of the containment bundle applied for every `watch_containment = on` run).
-// withSandbox additionally enables the OS no-egress sandbox stanza; it is false
-// for the `watch_sandbox = optional`-but-unavailable cell of the containment
-// matrix (design Decision 7), where the session is credential- and
-// permission-contained but has no OS-level network cage.
-func ContainmentProfile(withSandbox bool) map[string]any {
+// SandboxProfile returns the settings fragment used for a sandboxed review run:
+// the no-egress OS sandbox stanza plus the post-guard ask rules. It does NOT set
+// permissions.defaultMode -- the review session runs under the developer's real
+// environment and daemon, so no fail-closed permission mode is imposed.
+func SandboxProfile() map[string]any {
 	var s sandboxSettings
-	s.Permissions.DefaultMode = "default"    // fail-closed in --bg
-	s.Permissions.Ask = postGuardAskRules[:] // require approval before posting
-	if withSandbox {
-		s.Sandbox.Enabled = true
-		s.Sandbox.Network.AllowedDomains = []string{} // deny-all
-		s.Sandbox.FailIfUnavailable = true            // refuse rather than run uncontained
-		s.Sandbox.AllowUnsandboxedCommands = false    // no unsandboxed escape hatch
-	}
+	s.Sandbox.Enabled = true
+	s.Sandbox.Network.AllowedDomains = []string{} // deny-all
+	s.Sandbox.FailIfUnavailable = true            // refuse rather than run uncontained
+	s.Sandbox.AllowUnsandboxedCommands = false    // no unsandboxed escape hatch
+	s.Permissions.Ask = postGuardAskRules[:]      // require approval before posting
 
 	// Round-trip through JSON to a generic map so the caller can merge it into
 	// the existing settings document.
 	data, _ := json.Marshal(s)
 	var m map[string]any
 	_ = json.Unmarshal(data, &m)
-	if !withSandbox {
-		// Own only the permission mode; leave the sandbox stanza untouched so no
-		// half-configured (and unenforced) sandbox is written.
-		delete(m, "sandbox")
-	}
 	return m
 }
 
-// VerifyContainmentApplied re-reads a merged settings document and asserts the
-// containment survived the merge. The fail-closed permission mode is always
-// required. When withSandbox is true it additionally asserts the no-egress
-// sandbox stanza (enabled, empty allowedDomains, failIfUnavailable, no
-// unsandboxed escape hatch). This is the per-instance re-verification that runs
-// immediately before launch; a false result means the containment was dropped
-// or relaxed by the merge and the PR must NOT be launched.
-func VerifyContainmentApplied(merged map[string]any, withSandbox bool) error {
-	if withSandbox {
-		sandbox, ok := merged["sandbox"].(map[string]any)
-		if !ok {
-			return fmt.Errorf("containment check: sandbox stanza missing from merged settings")
-		}
-		enabled, _ := sandbox["enabled"].(bool)
-		if !enabled {
-			return fmt.Errorf("containment check: sandbox.enabled is not true")
-		}
-		network, ok := sandbox["network"].(map[string]any)
-		if !ok {
-			return fmt.Errorf("containment check: sandbox.network missing")
-		}
-		domains, ok := network["allowedDomains"].([]any)
-		if !ok {
-			return fmt.Errorf("containment check: sandbox.network.allowedDomains missing")
-		}
-		if len(domains) != 0 {
-			return fmt.Errorf("containment check: allowedDomains must be empty (deny-all), got %d entries", len(domains))
-		}
-		// Fail-open closure: the harness must refuse rather than silently disable
-		// the sandbox, and must not permit an unsandboxed escape hatch.
-		if fail, _ := sandbox["failIfUnavailable"].(bool); !fail {
-			return fmt.Errorf("containment check: sandbox.failIfUnavailable must be true")
-		}
-		if allow, _ := sandbox["allowUnsandboxedCommands"].(bool); allow {
-			return fmt.Errorf("containment check: sandbox.allowUnsandboxedCommands must be false")
-		}
-	}
-	perms, ok := merged["permissions"].(map[string]any)
-	if !ok {
-		return fmt.Errorf("containment check: permissions stanza missing")
-	}
-	// Allowlist, not denylist: assert the mode is exactly one of the intended
-	// fail-closed modes. A denylist (reject only "bypassPermissions") fails open
-	// -- it would accept "acceptEdits", "dontAsk", "auto", or a typo as
-	// fail-closed -- which is the pattern this file's env handling and the
-	// design's Decisions 3/4/7 deliberately reject.
-	mode, _ := perms["defaultMode"].(string)
-	if !failClosedPermissionModes[mode] {
-		return fmt.Errorf("containment check: permission mode %q is not an allowed fail-closed mode", mode)
-	}
-	return nil
-}
-
-// failClosedPermissionModes is the allowlist of permission modes the contained
-// session may run under. It matches exactly what ContainmentProfile produces
-// ("default", which rejects a would-prompt call in an unattended --bg session).
-// A new fail-closed mode is admitted only by being added here explicitly.
-var failClosedPermissionModes = map[string]bool{
-	"default": true,
-}
-
-// ApplyContainment merges the no-egress sandbox profile into a provisioned
-// instance's .claude/settings.json and re-verifies that the stanza survived the
-// merge, returning an error if it did not. niwa already wrote the instance
-// settings during provisioning, so this is a second, containment-enforcing
-// write; the re-verification is the per-instance fail-closed check that runs
-// before launch (a dropped or relaxed stanza means the PR must not be
-// launched). The re-verification here confirms niwa's own merge; the harness's
-// downstream merge and live enforcement are proven separately by the
-// adversarial egress test.
-func ApplyContainment(instancePath string, withSandbox bool) error {
+// ApplyReviewSettings merges the review-session settings into a provisioned
+// instance's .claude/settings.json and re-verifies they survived the merge. The
+// post-guard ask rules are always merged in (dedup, preserving any existing ask
+// entries and other permission keys). When sandbox is true the no-egress sandbox
+// stanza is written (fully owned, so no pre-existing sandbox config can relax the
+// posture). The re-verification is the per-instance check that runs before
+// launch; a dropped or relaxed stanza means the PR must not be launched.
+func ApplyReviewSettings(instancePath string, sandbox bool) error {
 	settingsPath := filepath.Join(instancePath, ".claude", "settings.json")
 	settings := map[string]any{}
 	if data, err := os.ReadFile(settingsPath); err == nil {
 		if err := json.Unmarshal(data, &settings); err != nil {
-			return fmt.Errorf("apply containment: parsing %s: %w", settingsPath, err)
+			return fmt.Errorf("apply review settings: parsing %s: %w", settingsPath, err)
 		}
 	} else if !os.IsNotExist(err) {
-		return fmt.Errorf("apply containment: reading %s: %w", settingsPath, err)
+		return fmt.Errorf("apply review settings: reading %s: %w", settingsPath, err)
 	}
 
-	profile := ContainmentProfile(withSandbox)
-	if withSandbox {
-		// The sandbox stanza is fully owned by the containment profile --
-		// overwrite it so no pre-existing sandbox config can relax the no-egress
-		// posture.
-		settings["sandbox"] = profile["sandbox"]
-	}
-	// Merge permissions at the key level: set the fail-closed defaultMode while
-	// preserving any existing allow/deny/ask entries.
-	perms, _ := settings["permissions"].(map[string]any)
-	if perms == nil {
-		perms = map[string]any{}
-	}
-	for k, v := range profile["permissions"].(map[string]any) {
-		perms[k] = v
-	}
-	settings["permissions"] = perms
-
-	out, err := json.MarshalIndent(settings, "", "  ")
-	if err != nil {
-		return fmt.Errorf("apply containment: encoding settings: %w", err)
-	}
-	if err := os.MkdirAll(filepath.Dir(settingsPath), 0o755); err != nil {
-		return fmt.Errorf("apply containment: creating .claude dir: %w", err)
-	}
-	if err := os.WriteFile(settingsPath, out, 0o644); err != nil {
-		return fmt.Errorf("apply containment: writing settings: %w", err)
+	if sandbox {
+		// The sandbox stanza is fully owned -- overwrite it so no pre-existing
+		// sandbox config can relax the no-egress posture.
+		settings["sandbox"] = SandboxProfile()["sandbox"]
 	}
 
-	// Re-read from disk and re-verify the containment survived the write/merge.
-	data, err := os.ReadFile(settingsPath)
-	if err != nil {
-		return fmt.Errorf("apply containment: re-reading settings: %w", err)
-	}
-	var merged map[string]any
-	if err := json.Unmarshal(data, &merged); err != nil {
-		return fmt.Errorf("apply containment: re-parsing settings: %w", err)
-	}
-	if err := VerifyContainmentApplied(merged, withSandbox); err != nil {
-		return err
-	}
-	return nil
-}
-
-// ApplyPostGuard merges only the post-guard ask rules into a provisioned
-// instance's settings, leaving the permission mode and everything else as the
-// ordinary dispatch wrote it. It is the uncontained-path counterpart to
-// ApplyContainment (which folds the same rules in via the profile): the
-// accident guard applies in every mode, but an uncontained run must keep its
-// normal (not fail-closed) permission posture otherwise.
-func ApplyPostGuard(instancePath string) error {
-	settingsPath := filepath.Join(instancePath, ".claude", "settings.json")
-	settings := map[string]any{}
-	if data, err := os.ReadFile(settingsPath); err == nil {
-		if err := json.Unmarshal(data, &settings); err != nil {
-			return fmt.Errorf("apply post-guard: parsing %s: %w", settingsPath, err)
-		}
-	} else if !os.IsNotExist(err) {
-		return fmt.Errorf("apply post-guard: reading %s: %w", settingsPath, err)
-	}
-
+	// Always merge the post-guard ask rules into permissions.ask, deduping and
+	// preserving any existing ask entries and other permission keys.
 	perms, _ := settings["permissions"].(map[string]any)
 	if perms == nil {
 		perms = map[string]any{}
@@ -314,23 +113,77 @@ func ApplyPostGuard(instancePath string) error {
 
 	out, err := json.MarshalIndent(settings, "", "  ")
 	if err != nil {
-		return fmt.Errorf("apply post-guard: encoding settings: %w", err)
+		return fmt.Errorf("apply review settings: encoding settings: %w", err)
 	}
 	if err := os.MkdirAll(filepath.Dir(settingsPath), 0o755); err != nil {
-		return fmt.Errorf("apply post-guard: creating .claude dir: %w", err)
+		return fmt.Errorf("apply review settings: creating .claude dir: %w", err)
 	}
 	if err := os.WriteFile(settingsPath, out, 0o644); err != nil {
-		return fmt.Errorf("apply post-guard: writing settings: %w", err)
+		return fmt.Errorf("apply review settings: writing settings: %w", err)
 	}
-	return nil
+
+	// Re-read from disk and re-verify the settings survived the write/merge.
+	data, err := os.ReadFile(settingsPath)
+	if err != nil {
+		return fmt.Errorf("apply review settings: re-reading settings: %w", err)
+	}
+	var merged map[string]any
+	if err := json.Unmarshal(data, &merged); err != nil {
+		return fmt.Errorf("apply review settings: re-parsing settings: %w", err)
+	}
+	return VerifyReviewSettings(merged, sandbox)
 }
 
-// SyntheticHomeDir returns the path of the synthetic HOME inside an instance and
-// ensures it exists. It holds no developer dotfiles.
-func SyntheticHomeDir(instanceDir string) (string, error) {
-	home := filepath.Join(instanceDir, ".watch-home")
-	if err := os.MkdirAll(home, 0o700); err != nil {
-		return "", fmt.Errorf("creating synthetic HOME: %w", err)
+// VerifyReviewSettings re-reads a merged settings document and asserts the
+// review-session settings survived the merge. The post-guard ask rules are always
+// required. When sandbox is true it additionally asserts the no-egress sandbox
+// stanza (enabled, empty allowedDomains, failIfUnavailable, no unsandboxed escape
+// hatch).
+func VerifyReviewSettings(merged map[string]any, sandbox bool) error {
+	if sandbox {
+		sb, ok := merged["sandbox"].(map[string]any)
+		if !ok {
+			return fmt.Errorf("review settings check: sandbox stanza missing from merged settings")
+		}
+		enabled, _ := sb["enabled"].(bool)
+		if !enabled {
+			return fmt.Errorf("review settings check: sandbox.enabled is not true")
+		}
+		network, ok := sb["network"].(map[string]any)
+		if !ok {
+			return fmt.Errorf("review settings check: sandbox.network missing")
+		}
+		domains, ok := network["allowedDomains"].([]any)
+		if !ok {
+			return fmt.Errorf("review settings check: sandbox.network.allowedDomains missing")
+		}
+		if len(domains) != 0 {
+			return fmt.Errorf("review settings check: allowedDomains must be empty (deny-all), got %d entries", len(domains))
+		}
+		// Fail-open closure: the harness must refuse rather than silently disable
+		// the sandbox, and must not permit an unsandboxed escape hatch.
+		if fail, _ := sb["failIfUnavailable"].(bool); !fail {
+			return fmt.Errorf("review settings check: sandbox.failIfUnavailable must be true")
+		}
+		if allow, _ := sb["allowUnsandboxedCommands"].(bool); allow {
+			return fmt.Errorf("review settings check: sandbox.allowUnsandboxedCommands must be false")
+		}
 	}
-	return home, nil
+	perms, ok := merged["permissions"].(map[string]any)
+	if !ok {
+		return fmt.Errorf("review settings check: permissions stanza missing")
+	}
+	ask, _ := perms["ask"].([]any)
+	have := make(map[string]bool, len(ask))
+	for _, v := range ask {
+		if s, ok := v.(string); ok {
+			have[s] = true
+		}
+	}
+	for _, rule := range postGuardAskRules {
+		if !have[rule] {
+			return fmt.Errorf("review settings check: post-guard ask rule %q missing", rule)
+		}
+	}
+	return nil
 }

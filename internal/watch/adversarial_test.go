@@ -25,8 +25,8 @@ import (
 // run the live check, it skips rather than reporting success.
 //
 // Procedure when enabled (see attemptEgressProbe / attemptOutOfInstanceWrite):
-//  1. Build the contained env (BuildContainedEnv) and containment profile
-//     (ApplyContainment) exactly as the watch path does.
+//  1. Apply the review-session settings (ApplyReviewSettings with sandbox=true)
+//     exactly as the watch path does.
 //  2. Dispatch a hostile-PR fixture whose title/body/diff attempt exfiltration.
 //  3. From INSIDE the running session (bypassing the model), attempt real
 //     egress -- a domain connection AND a raw socket to a literal IP -- and a
@@ -52,6 +52,12 @@ func TestContainedSessionDeniesEgress_OnHarness(t *testing.T) {
 	// is a real signal, not a no-op).
 	if err := attemptEgressProbe(); err != nil {
 		t.Fatalf("egress probe failed OUTSIDE the sandbox (%v); the probe must reach the network here so its in-sandbox failure is meaningful", err)
+	}
+	// Same soundness check for the write probe: outside the sandbox an
+	// out-of-instance write must succeed, so that its failure inside the sandbox
+	// (write confinement) is a real signal rather than a no-op.
+	if err := attemptOutOfInstanceWrite(t.TempDir()); err != nil {
+		t.Fatalf("out-of-instance write failed OUTSIDE the sandbox (%v); it must succeed here so its in-sandbox denial is meaningful", err)
 	}
 }
 
