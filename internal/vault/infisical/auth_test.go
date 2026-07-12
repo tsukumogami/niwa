@@ -176,3 +176,62 @@ func TestAuthenticate_MissingClientSecret(t *testing.T) {
 		t.Errorf("error = %q; want mention of client_secret", err.Error())
 	}
 }
+
+func TestResolveAPIURL_ConfigValueWins(t *testing.T) {
+	t.Setenv("NIWA_INFISICAL_API_URL", "https://env-override.example/api")
+	got := resolveAPIURL("https://config-value.example/api")
+	if got != "https://config-value.example/api" {
+		t.Errorf("resolveAPIURL = %q, want config value to win over env", got)
+	}
+}
+
+func TestResolveAPIURL_EnvOverrideWinsOverDefault(t *testing.T) {
+	t.Setenv("NIWA_INFISICAL_API_URL", "https://env-override.example/api")
+	got := resolveAPIURL("")
+	if got != "https://env-override.example/api" {
+		t.Errorf("resolveAPIURL = %q, want env override", got)
+	}
+}
+
+func TestResolveAPIURL_DefaultWhenNeitherSet(t *testing.T) {
+	t.Setenv("NIWA_INFISICAL_API_URL", "")
+	got := resolveAPIURL("")
+	if got != defaultAPIURL {
+		t.Errorf("resolveAPIURL = %q, want default %q", got, defaultAPIURL)
+	}
+}
+
+func TestValidateAPIURL_NonHTTPSHardRejected(t *testing.T) {
+	cases := []string{
+		"http://app.infisical.com/api",
+		"ftp://app.infisical.com/api",
+		"",
+		"not-a-url\x00with-control-bytes",
+	}
+	for _, apiURL := range cases {
+		_, err := ValidateAPIURL(apiURL)
+		if err == nil {
+			t.Errorf("ValidateAPIURL(%q): want error for non-https value, got nil", apiURL)
+		}
+	}
+}
+
+func TestValidateAPIURL_DefaultIsNotFlagged(t *testing.T) {
+	nonDefault, err := ValidateAPIURL(defaultAPIURL)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if nonDefault {
+		t.Error("nonDefault = true for the cloud default, want false")
+	}
+}
+
+func TestValidateAPIURL_NonDefaultHTTPSIsFlaggedNotRejected(t *testing.T) {
+	nonDefault, err := ValidateAPIURL("https://self-hosted.example.com/api")
+	if err != nil {
+		t.Fatalf("unexpected error for a well-formed non-default https URL: %v", err)
+	}
+	if !nonDefault {
+		t.Error("nonDefault = false for a non-default https URL, want true")
+	}
+}
