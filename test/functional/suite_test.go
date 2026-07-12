@@ -33,6 +33,7 @@ type testState struct {
 	repoURLs      map[string]string  // name → file:// URL for repos created by localGitServer
 	githubFake    *tarballFakeServer // GitHub API fake (per-scenario; spawned lazily)
 	pathPrefix    string             // dir prepended to $PATH for niwa subprocesses (e.g. a fake claude)
+	sharedBinDir  string             // dir always prepended to $PATH holding hermetic stubs (e.g. a fake infisical)
 
 	// printedWorktreePath records the stdout of the last `niwa worktree
 	// from-hook` create dispatch (the bare absolute worktree path the hook
@@ -125,6 +126,17 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 			}
 		}
 
+		// sharedBinDir holds hermetic stubs that every scenario needs on PATH
+		// regardless of any per-scenario pathPrefix fake. It carries a fake
+		// `infisical` so a `niwa create` whose config declares an infisical
+		// vault provider never shells out to the real Infisical CLI (which,
+		// on a machine where it is installed, contacts the network / demands a
+		// login and fails the run). See writeFakeInfisical.
+		sharedBinDir := filepath.Join(sandbox, "shared-bin")
+		if err := writeFakeInfisical(sharedBinDir); err != nil {
+			return ctx, err
+		}
+
 		// workspaceRoot must live outside any existing niwa instance tree so that
 		// niwa init's CheckInitConflicts check does not fire when the developer's
 		// machine has a niwa workspace ancestor covering the repo root. Using the
@@ -147,6 +159,7 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 			homeDir:       homeDir,
 			tmpDir:        tmpDir,
 			workspaceRoot: workspaceRoot,
+			sharedBinDir:  sharedBinDir,
 			envOverrides:  make(map[string]string),
 			gitServer:     gs,
 			repoURLs:      make(map[string]string),
