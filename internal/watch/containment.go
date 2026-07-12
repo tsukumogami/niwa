@@ -28,6 +28,14 @@ const (
 	// postGuardMatcher matches Bash so the post-guard can inspect gh commands and
 	// refuse a review/comment post. Applied in every mode (accident prevention).
 	postGuardMatcher = "Bash"
+	// autoAllowMatcher matches the normal review tools. In the operator-approval
+	// posture the session runs under a non-bypass permission mode, so these tools --
+	// which would otherwise prompt and hang a --bg session -- need an explicit allow
+	// decision. Bash egress stays caged by the OS sandbox and posting stays blocked by
+	// the post-guard (an explicit deny overrides this allow), so auto-allowing here does
+	// not widen the boundary; it restores the autonomy bypassPermissions gave for free.
+	// It shares the Bash channel with the post-guard as a distinct matcher entry.
+	autoAllowMatcher = "Bash|Read|Glob|Grep"
 )
 
 // guardBinPath returns the absolute path to the niwa binary the filesystem-guard
@@ -84,33 +92,65 @@ func egressDenyHook() map[string]any {
 	}
 }
 
-// fsGuardHook returns the PreToolUse hook that denies a filesystem escape via the
+// fsGuardHook returns the PreToolUse hook that guards a filesystem escape via the
 // built-in Write/Edit/MultiEdit/NotebookEdit tools. It is applied in sandbox mode
 // only. The OS sandbox confines Bash writes to the instance, but the built-in file
-// tools run through the permission system, which bypassPermissions skips -- so this
-// hook is the closure for that channel, the filesystem counterpart to
-// egressDenyHook. It delegates the decision to `niwa watch guard-fs --root
-// <instancePath>`, which resolves the target path against that explicit instance
-// root and exits 0 (inside -> allow) or 2 (outside -> deny). Baking the instance
-// path into the hook (rather than letting the guard infer it from CLAUDE_PROJECT_DIR
-// or cwd) makes the containment root niwa's own record, immune to an ambient value
-// inherited wider than the instance. The wrapper maps any non-zero guard exit -- 2,
-// or a failure to run the guard at all -- to exit 2 (block), so it is fail-closed: a
-// missing or erroring guard denies the write rather than letting it through. It is a
-// hard deny, not an ask: a review-drafting agent's only legitimate writes (the draft
-// and clone-local files) are inside the instance, so an out-of-instance write is
-// never legitimate.
-func fsGuardHook(instancePath string) map[string]any {
-	cmd := fmt.Sprintf(
-		`%s watch guard-fs --root %s; ec=$?; if [ "$ec" = "0" ]; then exit 0; else exit 2; fi`,
-		shellQuote(guardBinPath()), shellQuote(instancePath),
-	)
+// tools run through the permission system, so this hook is the closure for that
+// channel, the filesystem counterpart to egressDenyHook. It delegates the decision to
+// `niwa watch guard-fs --root <instancePath>`, which resolves the target path against
+// that explicit instance root. Baking the instance path into the hook (rather than
+// letting the guard infer it from CLAUDE_PROJECT_DIR or cwd) makes the containment
+// root niwa's own record, immune to an ambient value inherited wider than the instance.
+//
+// The wrapper has two shapes selected by ask:
+//
+//   - ask == false (hard-deny posture, the shipped floor): the guard exits 0 (inside)
+//     or non-zero (outside / fail-closed) and the wrapper maps any non-zero to exit 2
+//     (block). An out-of-instance write is a hard deny -- correct under
+//     bypassPermissions, where a hook's ask is inert.
+//   - ask == true (operator-approval posture): the guard runs with --ask-outside and
+//     prints an allow/ask PreToolUse decision on stdout, so the wrapper passes the exit
+//     code straight through (0 for a resolved decision, 2 for a fail-closed deny).
+//     Under a non-bypass permission mode the harness honors the decision, so an
+//     out-of-instance write surfaces an operator approval that fails closed if
+//     unanswered, while an in-instance write is auto-approved.
+func fsGuardHook(instancePath string, ask bool) map[string]any {
+	var cmd string
+	if ask {
+		cmd = fmt.Sprintf(
+			`%s watch guard-fs --root %s --ask-outside`,
+			shellQuote(guardBinPath()), shellQuote(instancePath),
+		)
+	} else {
+		cmd = fmt.Sprintf(
+			`%s watch guard-fs --root %s; ec=$?; if [ "$ec" = "0" ]; then exit 0; else exit 2; fi`,
+			shellQuote(guardBinPath()), shellQuote(instancePath),
+		)
+	}
 	return map[string]any{
 		"matcher": fsGuardMatcher,
 		"hooks": []any{
 			map[string]any{
 				"type":    "command",
 				"command": cmd,
+			},
+		},
+	}
+}
+
+// autoAllowHook returns the PreToolUse hook that auto-approves the normal review tools
+// (Bash/Read/Glob/Grep) in the operator-approval posture. Under a non-bypass permission
+// mode these tools would otherwise prompt and hang the --bg session; the hook emits an
+// explicit allow decision on stdout so the review runs autonomously. It is applied only
+// in the ask posture (bypassPermissions already allows these in the hard-deny posture).
+func autoAllowHook() map[string]any {
+	const decision = `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow","permissionDecisionReason":"niwa watch review: in-instance tool auto-approved"}}`
+	return map[string]any{
+		"matcher": autoAllowMatcher,
+		"hooks": []any{
+			map[string]any{
+				"type":    "command",
+				"command": "printf '%s' " + shellQuote(decision),
 			},
 		},
 	}
@@ -137,16 +177,28 @@ func postGuardHook() map[string]any {
 // ApplyReviewSettings merges the review-session settings into a provisioned
 // instance's .claude/settings.json and re-verifies they survived the merge. The
 // post-guard PreToolUse hook is always appended (dedup by matcher, preserving any
-// existing hooks and other keys). When sandbox is true the no-egress sandbox
-// stanza is written (fully owned, so no pre-existing sandbox config can relax the
-// posture) and both the egress-deny and the filesystem-guard PreToolUse hooks are
-// appended (dedup by matcher) -- the two channels the OS sandbox does not cage. It
-// does NOT set permissions.defaultMode or permissions.ask -- the review session
-// runs under the developer's real environment and daemon, and the dispatch that
-// launches it already sets bypassPermissions. The re-verification is the
-// per-instance check that runs before launch; a dropped or relaxed stanza means
-// the PR must not be launched.
-func ApplyReviewSettings(instancePath string, sandbox bool) error {
+// existing hooks and other keys). When sandbox is true the no-egress sandbox stanza
+// is written (fully owned, so no pre-existing sandbox config can relax the posture)
+// and both the egress-deny and the filesystem-guard PreToolUse hooks are appended
+// (dedup by matcher) -- the two channels the OS sandbox does not cage.
+//
+// The ask flag selects the out-of-instance-write posture (it is meaningful only when
+// sandbox is true):
+//
+//   - ask == false (hard-deny posture, the shipped floor): the emitted settings are
+//     the PR #198 shape. permissions.defaultMode is NOT set (the session inherits the
+//     bypassPermissions the dispatch applies), no auto-allow hook is added, and the
+//     filesystem guard uses its exit-code wrapper (out-of-instance = hard deny).
+//   - ask == true (operator-approval posture): niwa fully owns
+//     permissions.defaultMode = "default" (so a hook ask is honored instead of
+//     silently allowed), appends the Bash/Read/Glob/Grep auto-allow hook (so the
+//     non-bypass session does not hang on the normal review tools), and wires the
+//     filesystem guard with --ask-outside (out-of-instance = operator ask). The caller
+//     seeds workspace trust separately; this function assembles the settings only.
+//
+// The re-verification is the per-instance check that runs before launch; a dropped or
+// relaxed stanza means the PR must not be launched.
+func ApplyReviewSettings(instancePath string, sandbox, ask bool) error {
 	settingsPath := filepath.Join(instancePath, ".claude", "settings.json")
 	settings := map[string]any{}
 	if data, err := os.ReadFile(settingsPath); err == nil {
@@ -161,6 +213,18 @@ func ApplyReviewSettings(instancePath string, sandbox bool) error {
 		// The sandbox stanza is fully owned -- overwrite it so no pre-existing
 		// sandbox config can relax the no-egress posture.
 		settings["sandbox"] = noEgressSandboxStanza()
+	}
+
+	// In the operator-approval posture niwa owns permissions.defaultMode so a hook's
+	// ask decision is honored (under bypassPermissions it would be silently allowed).
+	// Other permissions keys (e.g. a pre-existing deny list) are preserved.
+	if sandbox && ask {
+		perms, _ := settings["permissions"].(map[string]any)
+		if perms == nil {
+			perms = map[string]any{}
+		}
+		perms["defaultMode"] = "default"
+		settings["permissions"] = perms
 	}
 
 	// Ensure hooks.PreToolUse is an array, preserving any existing entries and
@@ -180,8 +244,13 @@ func ApplyReviewSettings(instancePath string, sandbox bool) error {
 	if sandbox && !preToolUseHasMatcher(preToolUse, egressDenyMatcher) {
 		preToolUse = append(preToolUse, egressDenyHook())
 	}
+	// In the ask posture, append the auto-allow hook for the normal review tools so
+	// the non-bypass session runs autonomously.
+	if sandbox && ask && !preToolUseHasMatcher(preToolUse, autoAllowMatcher) {
+		preToolUse = append(preToolUse, autoAllowHook())
+	}
 	if sandbox && !preToolUseHasMatcher(preToolUse, fsGuardMatcher) {
-		preToolUse = append(preToolUse, fsGuardHook(instancePath))
+		preToolUse = append(preToolUse, fsGuardHook(instancePath, ask))
 	}
 	hooks["PreToolUse"] = preToolUse
 	settings["hooks"] = hooks
@@ -206,7 +275,7 @@ func ApplyReviewSettings(instancePath string, sandbox bool) error {
 	if err := json.Unmarshal(data, &merged); err != nil {
 		return fmt.Errorf("apply review settings: re-parsing settings: %w", err)
 	}
-	return VerifyReviewSettings(merged, sandbox)
+	return VerifyReviewSettings(merged, sandbox, ask)
 }
 
 // VerifyReviewSettings re-reads a merged settings document and asserts the
@@ -215,8 +284,10 @@ func ApplyReviewSettings(instancePath string, sandbox bool) error {
 // asserts the no-egress sandbox stanza (enabled, empty allowedDomains,
 // failIfUnavailable, no unsandboxed escape hatch), the egress-deny PreToolUse hook
 // (matcher "WebFetch|WebSearch|mcp__"), AND the filesystem-guard PreToolUse hook
-// (matcher "Write|Edit|NotebookEdit").
-func VerifyReviewSettings(merged map[string]any, sandbox bool) error {
+// (matcher "Write|Edit|MultiEdit|NotebookEdit"). When ask is true it also asserts the
+// operator-approval posture: permissions.defaultMode == "default" and the
+// Bash/Read/Glob/Grep auto-allow PreToolUse hook.
+func VerifyReviewSettings(merged map[string]any, sandbox, ask bool) error {
 	if sandbox {
 		sb, ok := merged["sandbox"].(map[string]any)
 		if !ok {
@@ -254,6 +325,21 @@ func VerifyReviewSettings(merged map[string]any, sandbox bool) error {
 		// (Write/Edit/NotebookEdit) that the OS sandbox does not cage.
 		if !hasPreToolUseMatcher(merged, fsGuardMatcher) {
 			return fmt.Errorf("review settings check: filesystem-guard PreToolUse hook (matcher %q) missing", fsGuardMatcher)
+		}
+		// The operator-approval posture additionally requires the non-bypass permission
+		// mode (so a hook ask is honored) and the auto-allow hook (so the non-bypass
+		// session runs autonomously).
+		if ask {
+			perms, ok := merged["permissions"].(map[string]any)
+			if !ok {
+				return fmt.Errorf("review settings check: permissions block missing under the operator-approval posture")
+			}
+			if mode, _ := perms["defaultMode"].(string); mode != "default" {
+				return fmt.Errorf("review settings check: permissions.defaultMode must be \"default\" under the operator-approval posture, got %q", mode)
+			}
+			if !hasPreToolUseMatcher(merged, autoAllowMatcher) {
+				return fmt.Errorf("review settings check: auto-allow PreToolUse hook (matcher %q) missing under the operator-approval posture", autoAllowMatcher)
+			}
 		}
 	}
 	// The Bash post-guard is required in every mode.

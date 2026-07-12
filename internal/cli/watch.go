@@ -206,8 +206,13 @@ func stageReview(cmd *cobra.Command, root, cwd, token string, client *github.API
 	instancePath := provRes.Path
 
 	success := false
+	askPosture := false
 	defer func() {
 		if !success {
+			if askPosture {
+				// Undo the trust seed for an instance we are about to destroy.
+				_ = removeInstanceTrustFunc(instancePath)
+			}
 			_ = destroyInstanceFunc(instancePath)
 		}
 	}()
@@ -218,11 +223,19 @@ func stageReview(cmd *cobra.Command, root, cwd, token string, client *github.API
 		return fmt.Errorf("fetching PR head: %w", err)
 	}
 
-	// Apply the review-session settings: always the post-guard ask rule, plus the
-	// OS no-egress sandbox stanza when plan.sandbox. The session launches with a
+	// Resolve the out-of-instance-write posture for a sandboxed review. The
+	// operator-approval (ask) posture requires a trusted workspace and an instance
+	// outside ~/.claude; resolveAskPosture seeds workspace trust when it can guarantee
+	// both, and returns false (the shipped hard-deny fallback) otherwise.
+	askPosture = resolveAskPosture(instancePath, plan.sandbox)
+
+	// Apply the review-session settings: always the post-guard rule, plus the OS
+	// no-egress sandbox stanza when plan.sandbox. When askPosture is on, the sandboxed
+	// session runs under a non-bypass permission mode so an out-of-instance write
+	// surfaces an operator approval instead of a hard deny. The session launches with a
 	// nil env override, so the launcher uses os.Environ() -- the developer's real
 	// environment and Claude daemon. The agent only ever drafts and waits.
-	if err := watch.ApplyReviewSettings(instancePath, plan.sandbox); err != nil {
+	if err := watch.ApplyReviewSettings(instancePath, plan.sandbox, askPosture); err != nil {
 		return err
 	}
 
@@ -256,8 +269,62 @@ func stageReview(cmd *cobra.Command, root, cwd, token string, client *github.API
 	}
 	success = true
 	fmt.Fprintf(cmd.OutOrStdout(),
-		"niwa watch: staged review for %s/%s#%d (handle %s)\n", pr.Owner, pr.Repo, pr.Number, slug)
+		"niwa watch: staged review for %s/%s#%d (handle %s)%s\n",
+		pr.Owner, pr.Repo, pr.Number, slug, reviewWritePosture(plan.sandbox, askPosture))
 	return nil
+}
+
+// reviewWritePosture returns a human-readable suffix naming how an out-of-instance
+// write is handled, so the operator knows whether an anomalous write surfaces an
+// approval or is hard-denied. It is empty for a non-sandboxed (trusted) review.
+func reviewWritePosture(sandbox, ask bool) string {
+	if !sandbox {
+		return ""
+	}
+	if ask {
+		return " -- out-of-instance writes surface an operator approval"
+	}
+	return " -- out-of-instance writes are hard-denied"
+}
+
+// ensureInstanceTrustedFunc / removeInstanceTrustFunc / reviewHomeDir are seams so a
+// test can drive resolveAskPosture without touching the real ~/.claude.json or HOME.
+var (
+	ensureInstanceTrustedFunc = watch.EnsureInstanceTrusted
+	removeInstanceTrustFunc   = watch.RemoveInstanceTrust
+	reviewHomeDir             = os.UserHomeDir
+)
+
+// resolveAskPosture reports whether the operator-approval (ask) posture can be used
+// for a sandboxed review instance, seeding workspace trust as a side effect when it
+// can. It returns false -- the shipped hard-deny fallback -- when the sandbox is off,
+// HOME cannot be resolved, the instance lives under ~/.claude (a location Claude Code
+// protects independently of mode/trust/hooks), or trust cannot be seeded. The ask
+// posture is never entered without a guaranteed trusted workspace, so a fallback never
+// fails open relative to the shipped deny.
+func resolveAskPosture(instancePath string, sandbox bool) bool {
+	if !sandbox {
+		return false
+	}
+	home, err := reviewHomeDir()
+	if err != nil || home == "" {
+		return false
+	}
+	abs, err := filepath.Abs(instancePath)
+	if err != nil {
+		return false
+	}
+	abs = filepath.Clean(abs)
+	claudeHome := filepath.Clean(filepath.Join(home, ".claude"))
+	if abs == claudeHome || strings.HasPrefix(abs, claudeHome+string(os.PathSeparator)) {
+		// Under ~/.claude: the sensitive-location protection would block the review's
+		// own in-instance writes regardless of trust, so autonomy cannot be guaranteed.
+		return false
+	}
+	if err := ensureInstanceTrustedFunc(instancePath); err != nil {
+		return false
+	}
+	return true
 }
 
 // sandboxCapabilityCheck is the preflight capability probe (a seam so tests can
