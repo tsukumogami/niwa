@@ -3,6 +3,7 @@ package onboard
 import (
 	"errors"
 	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -287,5 +288,108 @@ func TestRun_PhaseIndividualRoutesToRunIndividualSetup(t *testing.T) {
 	}
 	if n := srv.CountRequests("GET /v1/auth/universal-auth/identities/ident-123"); n != 1 {
 		t.Errorf("read-identity requests = %d, want 1 -- Run's redactor-attached ctx must reach the real REST call", n)
+	}
+}
+
+// TestRun_PhaseVerifyOnlyRequiresOptionsVerify mirrors the
+// PhaseTeam/opts.Team and PhaseIndividual/opts.Individual nil-check
+// tests: R15's re-run shortcut requires Options.Verify, and a caller
+// that omits it gets a plain (untyped) caller-bug error, never a
+// typed exit outcome for a phase it never actually reached.
+func TestRun_PhaseVerifyOnlyRequiresOptionsVerify(t *testing.T) {
+	os.Unsetenv(apiURLEnvVarForTest)
+	result, err := Run(Options{
+		Interactive:   false,
+		SetupOverride: PhaseVerifyOnly,
+	})
+	if err == nil {
+		t.Fatal("want an error, got nil")
+	}
+	var ece *ExitCodeError
+	if errors.As(err, &ece) {
+		t.Fatalf("a nil Options.Verify is a caller bug, not a typed exit outcome -- got *ExitCodeError{Code: %d}", ece.Code)
+	}
+	if result.Setup != PhaseVerifyOnly {
+		t.Errorf("Setup = %v, want PhaseVerifyOnly to flow through even on this caller-bug error", result.Setup)
+	}
+}
+
+// TestRun_PhaseVerifyOnlyRoutesToVerifyIndividual drives R15's re-run
+// shortcut end to end: no mint, no store -- Run goes straight to the
+// R11 wizard-end check. The GlobalOverride here deliberately declares
+// no credential-sync provider, so VerifyIndividual returns its own
+// setup-level ExitVerification failure; that's enough to prove Run
+// actually reached VerifyIndividual (rather than merely compiling)
+// without requiring a full credential-sync vault fixture.
+func TestRun_PhaseVerifyOnlyRoutesToVerifyIndividual(t *testing.T) {
+	os.Unsetenv(apiURLEnvVarForTest)
+	result, err := Run(Options{
+		Interactive:   false,
+		SetupOverride: PhaseVerifyOnly,
+		Verify: &VerifyIndividualParams{
+			Kind:    "infisical",
+			Project: "uuid-1",
+		},
+	})
+	var ece *ExitCodeError
+	if !errors.As(err, &ece) {
+		t.Fatalf("err is not *ExitCodeError: %T (%v)", err, err)
+	}
+	if ece.Code != ExitVerification {
+		t.Errorf("Code = %d, want ExitVerification (%d) -- confirms Run reached VerifyIndividual", ece.Code, ExitVerification)
+	}
+	if result.Setup != PhaseVerifyOnly {
+		t.Errorf("Setup = %v, want PhaseVerifyOnly", result.Setup)
+	}
+}
+
+// TestRun_PhaseIndividualSuccessCallsVerifyIndividual drives the full
+// individual pipeline through Run (mint, R9 verify, store via a fake
+// `infisical` CLI on PATH) and confirms the R11 wizard-end check runs
+// immediately afterward: the credential-sync provider in Verify is
+// wired to a fake commander that resolves the stored pair cleanly, so
+// a nil error here can only mean Run reached RunIndividualSetup,
+// succeeded, and then reached VerifyIndividual, which also succeeded.
+func TestRun_PhaseIndividualSuccessCallsVerifyIndividual(t *testing.T) {
+	os.Unsetenv(apiURLEnvVarForTest)
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	fake := newIndividualFakeServer()
+	srv := fake.Start()
+	defer srv.Close()
+
+	// A fake `infisical` CLI on PATH so RunIndividualSetup's real
+	// execSecretsSetRunner subprocess call for `secrets set` succeeds
+	// without a real Infisical service -- it only needs to drain
+	// stdin and exit 0.
+	binDir := t.TempDir()
+	script := "#!/bin/sh\ncat >/dev/null\nexit 0\n"
+	if err := os.WriteFile(filepath.Join(binDir, "infisical"), []byte(script), 0o755); err != nil {
+		t.Fatalf("writing fake infisical: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	individualParams := baseIndividualParams(srv, t.TempDir())
+
+	verifyCmd := &fakeVerifyCommander{
+		stdout: `{"p-` + testWorkspaceProject + `": "version = \"1\"\nclient_id = \"cid\"\nclient_secret = \"csec\"\n"}`,
+	}
+
+	result, err := Run(Options{
+		Interactive:      false,
+		SetupOverride:    PhaseIndividual,
+		TopologyOverride: TopologySameLogin,
+		Individual:       &individualParams,
+		Verify: &VerifyIndividualParams{
+			GlobalOverride: testVerifyGlobalOverride("sync-project", verifyCmd),
+			Kind:           "infisical",
+			Project:        testWorkspaceProject,
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error (want the full individual pipeline plus R11 check to succeed): %v", err)
+	}
+	if result.Setup != PhaseIndividual {
+		t.Errorf("Setup = %v, want PhaseIndividual", result.Setup)
 	}
 }

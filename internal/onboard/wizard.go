@@ -64,6 +64,36 @@ type Options struct {
 	// Only consulted once SetupOverride resolves to PhaseIndividual;
 	// nil is a caller bug at that point, mirroring Team above.
 	Individual *IndividualSetupParams
+
+	// Verify carries the R11 wizard-end check's inputs (Issue 8).
+	// Consulted after a successful RunIndividualSetup, and directly
+	// when SetupOverride is PhaseVerifyOnly (R15's re-run-goes-
+	// straight-to-verification shortcut). nil is a caller bug once
+	// SetupOverride resolves to either of those, mirroring
+	// Team/Individual above.
+	Verify *VerifyIndividualParams
+
+	// Preconditions carries the R22 session and personal-overlay
+	// precondition inputs (Issue 8). nil skips R22 entirely -- every
+	// caller not yet wired for it (and every existing test) keeps
+	// today's behavior unchanged; a caller ready to exercise R22
+	// populates this field and Run enforces both checks at wizard
+	// entry, before the api_url gate and before any routing decision.
+	Preconditions *PreconditionsParams
+}
+
+// PreconditionsParams collects the R22 precondition inputs Run
+// consults when Options.Preconditions is non-nil.
+type PreconditionsParams struct {
+	// SessionChecker overrides the production
+	// infisical.DetectSessionStatus call; nil uses the real CLI.
+	// Tests inject a fake.
+	SessionChecker SessionChecker
+	// Overlay carries EnsurePersonalOverlay's own inputs, including
+	// its own Pause for the scaffold-and-guide step.
+	Overlay EnsurePersonalOverlayParams
+	// Pause backs the session-login pause (EnsureAuthenticatedSession).
+	Pause func(prompt string) error
 }
 
 // Result is the wizard's terminal outcome. Setup is populated whenever
@@ -131,6 +161,29 @@ func Run(opts Options) (Result, error) {
 		return result, fmt.Errorf("onboard: Options.Confirm must be non-nil when Interactive is true and AcceptAPIURL is false")
 	}
 
+	// A redactor is attached once here, before any of R22's
+	// preconditions, the api_url gate, or either runner makes its first
+	// bearer-carrying call, and shared by all of them -- R17 requires
+	// every secret registered on it before use, and this is the one
+	// place every call path funnels through. Neither RunTeam nor
+	// RunIndividualSetup attaches its own; without this, every secret
+	// they register would have nowhere to land, and scrub-before-error
+	// would silently no-op.
+	ctx := secret.WithRedactor(context.Background(), secret.NewRedactor())
+
+	// R22 preconditions run at wizard entry, before detection/routing
+	// and before the api_url gate below -- Options.Preconditions is nil
+	// for every caller not yet wired for R22, which keeps today's
+	// behavior unchanged for them (Issue 8).
+	if opts.Preconditions != nil {
+		if err := EnsureAuthenticatedSession(ctx, opts.Preconditions.SessionChecker, opts.Preconditions.Pause); err != nil {
+			return result, fmt.Errorf("onboard: R22 session precondition: %w", err)
+		}
+		if _, err := EnsurePersonalOverlay(ctx, opts.Preconditions.Overlay); err != nil {
+			return result, fmt.Errorf("onboard: R22 personal-overlay precondition: %w", err)
+		}
+	}
+
 	apiURL := infisical.ResolveAPIURL(opts.APIURLConfigVal)
 	if err := CheckAPIURL(apiURL, opts.AcceptAPIURL, opts.Interactive, opts.Confirm); err != nil {
 		return result, &ExitCodeError{Code: ExitNonInteractivePrecondition, Msg: err.Error()}
@@ -139,15 +192,6 @@ func Run(opts Options) (Result, error) {
 	if opts.SetupOverride == PhaseUnknown {
 		return result, fmt.Errorf("onboard: setup detection is not yet implemented; pass --team or --individual")
 	}
-
-	// A redactor is attached once here, before either runner makes its
-	// first bearer-carrying call, and shared by both -- R17 requires
-	// every secret registered on it before use, and this is the one
-	// place both call paths funnel through. Neither RunTeam nor
-	// RunIndividualSetup attaches its own; without this, every secret
-	// they register would have nowhere to land, and scrub-before-error
-	// would silently no-op.
-	ctx := secret.WithRedactor(context.Background(), secret.NewRedactor())
 
 	if opts.SetupOverride == PhaseTeam {
 		if opts.Team == nil {
@@ -164,6 +208,33 @@ func Run(opts Options) (Result, error) {
 			return result, fmt.Errorf("onboard: Options.Individual must be populated when SetupOverride is PhaseIndividual")
 		}
 		if _, err := RunIndividualSetup(ctx, *opts.Individual); err != nil {
+			return result, err
+		}
+		// R11 wizard-end check: the individual pipeline's mint/store
+		// succeeded, but success isn't declared until the stored
+		// credential proves it resolves through the same read topology
+		// `niwa apply` uses (Issue 8). The Verify nil-check sits here,
+		// after RunIndividualSetup runs, rather than up front -- a
+		// caller whose individual pipeline fails before ever reaching
+		// this point (e.g. an induced mint/verify failure) must still
+		// get that typed failure back, not a caller-bug error about a
+		// step it never reached.
+		if opts.Verify == nil {
+			return result, fmt.Errorf("onboard: Options.Verify must be populated when SetupOverride is PhaseIndividual")
+		}
+		if err := VerifyIndividual(ctx, *opts.Verify); err != nil {
+			return result, err
+		}
+		return result, nil
+	}
+
+	if opts.SetupOverride == PhaseVerifyOnly {
+		// R15: re-running against a completed individual setup goes
+		// straight to the wizard-end check -- no re-mint, no re-store.
+		if opts.Verify == nil {
+			return result, fmt.Errorf("onboard: Options.Verify must be populated when SetupOverride is PhaseVerifyOnly")
+		}
+		if err := VerifyIndividual(ctx, *opts.Verify); err != nil {
 			return result, err
 		}
 		return result, nil
