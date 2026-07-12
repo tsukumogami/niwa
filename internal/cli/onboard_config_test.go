@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/tsukumogami/niwa/internal/config"
 )
 
 // writeOnboardWorkspace creates a temp instance directory with the
@@ -183,7 +185,7 @@ func TestLoadOnboardConfig_PersonalOverlaySyncSpecResolvesFromGlobalVaultProvide
 		"identity_name = \"Test Identity\"\n"+
 		"env = \"dev\"\n")
 
-	overlayDir, err := configGlobalConfigDirForTest(t)
+	overlayDir, err := config.GlobalConfigDir()
 	if err != nil {
 		t.Fatalf("resolving overlay dir: %v", err)
 	}
@@ -205,20 +207,6 @@ func TestLoadOnboardConfig_PersonalOverlaySyncSpecResolvesFromGlobalVaultProvide
 	if got, _ := bundle.syncSpec.Config["project"].(string); got != "personal-proj" {
 		t.Errorf("syncSpec.Config[project] = %q, want personal-proj", got)
 	}
-}
-
-// configGlobalConfigDirForTest resolves the same path
-// config.GlobalConfigDir() would, for a test that needs to write the
-// personal-overlay fixture at the right place without depending on the
-// internal/config package's own directory-layout details staying
-// duplicated inline.
-func configGlobalConfigDirForTest(t *testing.T) (string, error) {
-	t.Helper()
-	xdg := os.Getenv("XDG_CONFIG_HOME")
-	if xdg == "" {
-		t.Fatal("XDG_CONFIG_HOME must be set by sandboxOnboardHome before calling this helper")
-	}
-	return filepath.Join(xdg, "niwa", "global"), nil
 }
 
 func TestResolveOperatorBearer_EnvOverrideMissingIsClearGuidanceNotPanic(t *testing.T) {

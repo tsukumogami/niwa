@@ -12,6 +12,17 @@ import (
 	"github.com/tsukumogami/niwa/internal/secret/reveal"
 )
 
+// HTTPClient is the client every management REST call (and auth.go's
+// authenticateHTTP, membership.go's ReadProjectMembership) uses,
+// mirroring internal/github/client.go's APIClient.HTTPClient seam for
+// the identical problem. Defaults to http.DefaultClient; a test that
+// needs these calls to trust a self-signed cert (e.g., an httptest.
+// NewTLSServer-backed double) reassigns this package-level var for the
+// double's lifetime and restores it afterward, rather than mutating
+// the process-global http.DefaultClient every HTTP caller in the
+// binary shares.
+var HTTPClient = http.DefaultClient
+
 // ErrIdentityNotFound is returned by ReadIdentity when the Infisical
 // API responds 404 for the given identity ID -- the identity exists
 // at the org level (or doesn't exist at all) but has no Universal
@@ -76,7 +87,7 @@ func ReadIdentity(ctx context.Context, apiURL string, bearer secret.Value, ident
 	}
 	setBearerHeader(req, bearer)
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := HTTPClient.Do(req)
 	if err != nil {
 		return "", secret.Errorf("infisical: ReadIdentity: HTTP GET failed: %w", err)
 	}
@@ -161,7 +172,7 @@ func MintClientSecret(ctx context.Context, apiURL string, bearer secret.Value, i
 	}
 	setBearerHeader(req, bearer)
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := HTTPClient.Do(req)
 	if err != nil {
 		return secret.Value{}, "", secret.Errorf("infisical: MintClientSecret: HTTP POST failed: %w", err)
 	}
@@ -235,7 +246,7 @@ func RevokeClientSecret(ctx context.Context, apiURL string, bearer secret.Value,
 	}
 	setBearerHeader(req, bearer)
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := HTTPClient.Do(req)
 	if err != nil {
 		return secret.Errorf("infisical: RevokeClientSecret: HTTP POST failed: %w", err)
 	}
@@ -293,7 +304,7 @@ func ReadEnvironmentSecrets(ctx context.Context, apiURL string, accessToken secr
 	}
 	setBearerHeader(req, accessToken)
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := HTTPClient.Do(req)
 	if err != nil {
 		return secret.Errorf("infisical: ReadEnvironmentSecrets: HTTP GET failed: %w", err)
 	}

@@ -25,7 +25,6 @@ func registerOnboardSteps(ctx *godog.ScenarioContext) {
 	ctx.Step(`^the infisical REST double mints client_secret "([^"]*)" with secret id "([^"]*)" for identity "([^"]*)"$`, theRestDoubleMints)
 	ctx.Step(`^the infisical REST double exchanges client_secret "([^"]*)" for access token "([^"]*)"$`, theRestDoubleLoginExchange)
 	ctx.Step(`^the infisical REST double serves environment secrets for project "([^"]*)" env "([^"]*)"$`, theRestDoubleServesEnvSecrets)
-	ctx.Step(`^the infisical REST double grants project "([^"]*)" identity "([^"]*)" membership$`, theRestDoubleGrantsMembership)
 
 	ctx.Step(`^the personal-overlay pointer is registered as "([^"]*)"$`, thePersonalOverlayPointerIsRegistered)
 	ctx.Step(`^the personal overlay repo is git-initialized$`, thePersonalOverlayRepoIsGitInitialized)
@@ -110,15 +109,6 @@ func theRestDoubleServesEnvSecrets(ctx context.Context, project, env string) (co
 		return ctx, err
 	}
 	fake.SetEnvironmentSecretsPresent(project, env, "/")
-	return ctx, nil
-}
-
-func theRestDoubleGrantsMembership(ctx context.Context, project, identityID string) (context.Context, error) {
-	_, fake, err := requireInfisicalFake(ctx)
-	if err != nil {
-		return ctx, err
-	}
-	fake.SetMembershipGranted(project, identityID)
 	return ctx, nil
 }
 

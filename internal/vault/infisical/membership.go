@@ -61,7 +61,7 @@ func ReadProjectMembership(ctx context.Context, apiURL string, bearer secret.Val
 	}
 	setBearerHeader(req, bearer)
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := HTTPClient.Do(req)
 	if err != nil {
 		return false, secret.Errorf("infisical: ReadProjectMembership: HTTP GET failed: %w", err)
 	}

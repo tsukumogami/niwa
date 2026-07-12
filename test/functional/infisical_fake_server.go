@@ -7,6 +7,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+
+	"github.com/tsukumogami/niwa/internal/vault/infisical"
 )
 
 // infisicalFakeServer is the httptest counterpart of the Infisical
@@ -33,10 +35,12 @@ import (
 type infisicalFakeServer struct {
 	srv *httptest.Server
 
-	// prevDefaultClient saves http.DefaultClient as it was before this
+	// prevHTTPClient saves infisical.HTTPClient as it was before this
 	// server overrode it (see newInfisicalFakeServer's comment on why
-	// that override exists), restored by Close.
-	prevDefaultClient *http.Client
+	// that override exists), restored by Close. Scoped to the one
+	// package that needs it -- not the process-global
+	// http.DefaultClient every HTTP caller in the binary shares.
+	prevHTTPClient *http.Client
 
 	mu sync.Mutex
 
@@ -139,18 +143,21 @@ func newInfisicalFakeServer() *infisicalFakeServer {
 	// self-signed cert isn't in any trust store by default, so:
 	//
 	//   - In-process callers (this package's own *_test.go unit tests,
-	//     which invoke internal/vault/infisical functions directly via
-	//     http.DefaultClient) need http.DefaultClient swapped for
-	//     s.srv.Client() -- done here, restored by Close -- since
-	//     those functions have no client-injection seam of their own.
+	//     which invoke internal/vault/infisical functions directly)
+	//     need infisical.HTTPClient swapped for s.srv.Client() -- done
+	//     here, restored by Close. infisical.HTTPClient is that
+	//     package's own injectable-client seam (mirroring
+	//     internal/github/client.go's APIClient.HTTPClient), so this
+	//     override is scoped to the one package that needs it, not the
+	//     process-global http.DefaultClient every HTTP caller shares.
 	//   - The niwa subprocess under test (a separate process spawned
 	//     by the Gherkin steps) picks up trust via the SSL_CERT_FILE
 	//     env var, which Go's crypto/x509 honors as the process's sole
 	//     root pool on Linux; CertPEM() below hands the step definition
 	//     the bytes to write to a file and wire in via iSetEnv.
 	s.srv = httptest.NewTLSServer(http.HandlerFunc(s.handle))
-	s.prevDefaultClient = http.DefaultClient
-	http.DefaultClient = s.srv.Client()
+	s.prevHTTPClient = infisical.HTTPClient
+	infisical.HTTPClient = s.srv.Client()
 	return s
 }
 
@@ -168,7 +175,7 @@ func (s *infisicalFakeServer) CertPEM() []byte {
 // Close shuts down the underlying httptest.Server. Safe to call
 // multiple times.
 func (s *infisicalFakeServer) Close() {
-	http.DefaultClient = s.prevDefaultClient
+	infisical.HTTPClient = s.prevHTTPClient
 	s.srv.Close()
 }
 

@@ -139,7 +139,7 @@ func authenticateHTTP(ctx context.Context, apiURL, clientID, clientSecret string
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := HTTPClient.Do(req)
 	if err != nil {
 		return "", secret.Errorf("infisical auth: HTTP POST failed: %w", err)
 	}
