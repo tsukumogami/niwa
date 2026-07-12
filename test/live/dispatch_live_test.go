@@ -12,20 +12,24 @@
 // credential-less CI environment the tag means it is not even built; if invoked
 // anyway, the probe skips it.
 //
-// The test exercises the reaper-primary teardown the DESIGN specifies: a
-// `claude stop` only drives the session's job state terminal; the instance is
-// reclaimed by the NEXT `niwa reap`. So the lifecycle is dispatch -> assert
-// well-constructed instance + registered session -> stop -> reap -> assert
-// destroyed (DESIGN "Reclamation is reaper-primary").
+// The test exercises the reaper-primary teardown the DESIGN specifies: the
+// instance is reclaimed by `niwa reap`, not by the stop/delete call itself. The
+// reaper treats a session as live exactly while its ~/.claude/jobs entry is
+// present and dead only once that entry is gone (DESIGN Decision 6; #177 "reap
+// instances only on session delete, not on idle"). A `claude stop` keeps the
+// session listed and resumable, so its job entry PERSISTS and the reaper
+// correctly spares it; only `claude rm` (delete) removes the entry and makes the
+// instance reclaimable. So the lifecycle is dispatch -> assert well-constructed
+// instance + registered session -> stop -> delete -> reap -> assert destroyed
+// (DESIGN "Reclamation is reaper-primary").
 //
-// TIMING NOTE: `claude stop` (and a self-completing session) reaches the job
-// state `state=done` only after a few-second async lag. A single `niwa reap`
-// fired during that lag correctly SPARES the still-non-terminal session, so the
-// teardown assertion must tolerate the lag. The test therefore polls reap in a
-// bounded loop rather than reaping once and asserting immediately. The
-// deterministic "a live session is spared" case is covered by the OFFLINE
-// functional test (which fabricates fresh job state), so this live test does not
-// run a fragile real "stay-live" negative control.
+// TIMING NOTE: `claude rm` removes the job entry after a short async lag. A
+// single `niwa reap` fired during that lag correctly SPARES the still-listed
+// session, so the teardown assertion must tolerate the lag. The test therefore
+// polls reap in a bounded loop rather than reaping once and asserting
+// immediately. The deterministic "a live session is spared" case is covered by
+// the OFFLINE functional test (which fabricates fresh job state), so this live
+// test does not run a fragile real "stay-live" negative control.
 //
 // Assumptions:
 //   - A real `claude` on PATH backed by a usable subscription (the gate enforces
@@ -100,7 +104,9 @@ func requireLiveClaude(t *testing.T) string {
 //     on the full session UUID.
 //  4. Assert the session is registered: a `claude agents --json` record whose
 //     cwd is the instance dir (capture its short id and full sessionId).
-//  5. `claude stop <shortId>` to exercise the stop path (tolerate already-done).
+//  5. `claude stop <shortId>` to exercise the stop path, then `claude rm
+//     <shortId>` to delete the session and remove its job entry -- the delete is
+//     what makes the instance reclaimable (tolerate an already-exited session).
 //  6. Timing-robust teardown: poll up to teardownBudget, each iteration running
 //     `niwa reap` then checking whether the instance dir and mapping are gone;
 //     succeed on the first clean iteration, sleep teardownInterval otherwise.
@@ -113,18 +119,20 @@ func TestDispatchLiveLifecycle(t *testing.T) {
 	workspaceRoot := initLiveWorkspace(t, niwaBin)
 	t.Logf("workspace root: %s", workspaceRoot)
 
-	// `claude attach/logs/stop` are keyed on a session's SHORT id (the
-	// ~/.claude/jobs/<short> basename), NOT the full UUID -- `claude stop <uuid>`
-	// returns "No job matching ...". The cleanup collects SHORT ids so the
-	// backstop teardown actually stops anything still live. Cleanup is
-	// best-effort and idempotent: stopping an already-stopped session is a no-op,
-	// so a failed run never leaves a live session behind.
+	// `claude attach/logs/stop/rm` are keyed on a session's SHORT id (the
+	// ~/.claude/jobs/<short> basename), NOT the full UUID -- `claude rm <uuid>`
+	// returns "No job matching ...". The cleanup collects SHORT ids so it can
+	// DELETE anything still live: `claude rm` removes the job entry (stop alone
+	// only suspends, leaving the entry and sparing the instance from reap), so a
+	// final reap can then reclaim the instance. Cleanup is best-effort and
+	// idempotent: rm of an already-deleted session is a no-op, so a failed run
+	// never leaves a live session or its instance behind.
 	var startedShortIDs []string
 	t.Cleanup(func() {
 		for _, short := range startedShortIDs {
-			_ = exec.Command(claudeBin, "stop", short).Run()
+			_ = exec.Command(claudeBin, "rm", short).Run()
 		}
-		// A best-effort final reap reclaims anything stop drove terminal.
+		// A best-effort final reap reclaims any instance whose session rm deleted.
 		cmd := exec.Command(niwaBin, "reap")
 		cmd.Dir = workspaceRoot
 		_ = cmd.Run()
@@ -154,11 +162,16 @@ func TestDispatchLiveLifecycle(t *testing.T) {
 	startedShortIDs = append(startedShortIDs, shortID)
 	t.Logf("session registered with claude (short id %s, cwd %s)", shortID, instancePath)
 
-	// (5) Stop the session to exercise the stop path. Tolerate it already being
-	// terminal (a trivial prompt may self-complete first): a stop of a done
-	// session is a no-op, not a failure.
+	// (5) Stop then delete the session. `claude stop` exercises the stop path and
+	// leaves the session listed/resumable -- its job entry persists, so the
+	// reaper still spares it. `claude rm` then deletes the session and removes the
+	// job entry, which is what makes the instance reclaimable by the next reap.
+	// Both tolerate the session having already self-completed (a trivial prompt
+	// may finish first): stop/rm of an already-exited session is not a failure.
 	stopSession(t, claudeBin, shortID)
 	t.Logf("issued claude stop %s", shortID)
+	deleteSession(t, claudeBin, shortID)
+	t.Logf("issued claude rm %s", shortID)
 
 	// (6) Timing-robust teardown. Poll up to teardownBudget: each iteration runs
 	// `niwa reap` from the workspace root, then checks whether the instance dir
@@ -174,8 +187,8 @@ func TestDispatchLiveLifecycle(t *testing.T) {
 // reapUntilGone polls reaper-primary teardown to completion. It runs `niwa reap`
 // then checks for destruction, retrying on teardownInterval until both the
 // instance dir and the mapping are gone or teardownBudget elapses. It fails only
-// if either still exists after the budget, so the few-second stop->done lag
-// never causes a false failure.
+// if either still exists after the budget, so the short async lag between
+// `claude rm` and the job entry disappearing never causes a false failure.
 func reapUntilGone(t *testing.T, niwaBin, workspaceRoot, instancePath, sessionID string) {
 	t.Helper()
 	mappingPath := filepath.Join(workspaceRoot, ".niwa", "sessions", sessionID+".json")
@@ -528,5 +541,19 @@ func stopSession(t *testing.T, claudeBin, shortID string) {
 	t.Helper()
 	if out, err := exec.Command(claudeBin, "stop", shortID).CombinedOutput(); err != nil {
 		t.Logf("claude stop %s reported %v (tolerated; session may already be done)\n%s", shortID, err, out)
+	}
+}
+
+// deleteSession deletes the session with `claude rm <short>`, removing its
+// ~/.claude/jobs entry so the next `niwa reap` reclaims the instance. Unlike
+// stop, rm works on an already-exited session, so a trivial prompt that
+// self-completed is handled the same way. It MUST be passed the SHORT id (the
+// claude job handle), not the full UUID -- the full UUID yields "No job matching
+// ...". A rm of an already-deleted session is tolerated: the error is logged,
+// not fatal, since the teardown poll reaps on the entry being gone either way.
+func deleteSession(t *testing.T, claudeBin, shortID string) {
+	t.Helper()
+	if out, err := exec.Command(claudeBin, "rm", shortID).CombinedOutput(); err != nil {
+		t.Logf("claude rm %s reported %v (tolerated; session may already be deleted)\n%s", shortID, err, out)
 	}
 }
