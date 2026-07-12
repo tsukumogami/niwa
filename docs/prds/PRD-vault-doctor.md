@@ -1,5 +1,5 @@
 ---
-status: Accepted
+status: In Progress
 problem: |
   niwa validates the team-vault credential-sync contract in exactly one
   place: a parse function deep in the apply read path. Validation is
@@ -33,7 +33,7 @@ motivating_context: |
 
 ## Status
 
-Accepted
+In Progress
 
 ## Problem Statement
 
