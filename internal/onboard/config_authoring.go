@@ -321,6 +321,17 @@ func sanitizeCommitEnv(env []string) []string {
 // niwa.toml file inside it may or may not exist yet -- an absent file is
 // treated as empty content, matching "starts empty if the repo/file is
 // being scaffolded."
+//
+// The landing check that InsertOrReplaceTable performs is a content-only
+// comparison: it does not know whether the matching bytes on disk were
+// ever actually committed (e.g. a prior run wrote the file but died before
+// `git commit`, because overlayDir wasn't yet a git repo). To avoid
+// silently reporting a false "already landed" on such a retry, `git add`
+// and the "anything staged?" check always run -- regardless of whether
+// InsertOrReplaceTable itself reports a content change -- and only the
+// staged-diff outcome decides whether `git commit` runs. A truly
+// unmodified, already-committed niwa.toml results in an empty `git add`
+// and no staged diff, so no commit fires and Changed is reported false.
 func WritePersonalOverlayVaultProvider(ctx context.Context, gitInvoker workspace.GitInvoker, overlayDir, kind, project, apiURL string) (WriteResult, error) {
 	tomlPath := filepath.Join(overlayDir, workspace.GlobalConfigOverrideFile)
 
@@ -333,9 +344,28 @@ func WritePersonalOverlayVaultProvider(ctx context.Context, gitInvoker workspace
 	}
 
 	tableBody := RenderVaultProviderTable("global.vault.provider", kind, project, apiURL)
-	newContent, changed := InsertOrReplaceTable(existing, "global.vault.provider", tableBody)
+	newContent, contentChanged := InsertOrReplaceTable(existing, "global.vault.provider", tableBody)
 
-	if !changed {
+	if contentChanged {
+		if err := atomicWriteFile(tomlPath, newContent, 0o600); err != nil {
+			return WriteResult{}, fmt.Errorf("writing %s: %w", tomlPath, err)
+		}
+	}
+
+	addCmd := gitInvoker.CommandContext(ctx, "-C", overlayDir, "add", workspace.GlobalConfigOverrideFile)
+	if out, err := addCmd.CombinedOutput(); err != nil {
+		return WriteResult{}, fmt.Errorf("git add %s: %w\n%s", workspace.GlobalConfigOverrideFile, err, out)
+	}
+
+	// git diff --cached --quiet exits 0 when nothing is staged relative
+	// to HEAD, non-zero when something is. This is what actually decides
+	// whether a commit is needed -- not contentChanged -- so a file that
+	// matches on disk but was never committed still gets committed.
+	diffCmd := gitInvoker.CommandContext(ctx, "-C", overlayDir, "diff", "--cached", "--quiet", "--", workspace.GlobalConfigOverrideFile)
+	diffErr := diffCmd.Run()
+	nothingStaged := diffErr == nil
+
+	if nothingStaged {
 		return WriteResult{
 			Site:     SitePersonalOverlay,
 			Landed:   LandedUpstreamRepo,
@@ -343,15 +373,6 @@ func WritePersonalOverlayVaultProvider(ctx context.Context, gitInvoker workspace
 			Changed:  false,
 			Message:  fmt.Sprintf("upstream repo: %s already declares this vault provider; no change", tomlPath),
 		}, nil
-	}
-
-	if err := atomicWriteFile(tomlPath, newContent, 0o600); err != nil {
-		return WriteResult{}, fmt.Errorf("writing %s: %w", tomlPath, err)
-	}
-
-	addCmd := gitInvoker.CommandContext(ctx, "-C", overlayDir, "add", workspace.GlobalConfigOverrideFile)
-	if out, err := addCmd.CombinedOutput(); err != nil {
-		return WriteResult{}, fmt.Errorf("git add %s: %w\n%s", workspace.GlobalConfigOverrideFile, err, out)
 	}
 
 	commitCmd := gitInvoker.CommandContext(ctx, "-C", overlayDir, "commit", "-m", "onboard: update personal-overlay vault provider")

@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -199,14 +200,33 @@ func TestInsertOrReplaceTable_ReplaceAtEOF(t *testing.T) {
 
 // recordingGitInvoker is a minimal test double mirroring
 // workspace's recordingGitInvoker: it substitutes `true` for every
-// invocation so no real git process runs, while still recording argv.
+// invocation so no real git process runs, while still recording argv and
+// exposing the returned *exec.Cmd so a test can inspect Env after the
+// caller assigns it. A `diff --cached --quiet` invocation is special-cased
+// to exit 1 (as if something were staged), so the fake always exercises
+// the commit path the way a real repo with a pending change would.
 type recordingGitInvoker struct {
 	invocations [][]string
+	cmds        []*exec.Cmd
 }
 
 func (r *recordingGitInvoker) CommandContext(ctx context.Context, args ...string) *exec.Cmd {
 	r.invocations = append(r.invocations, append([]string(nil), args...))
-	return exec.CommandContext(ctx, "true")
+	isDiff := false
+	for _, a := range args {
+		if a == "diff" {
+			isDiff = true
+			break
+		}
+	}
+	var cmd *exec.Cmd
+	if isDiff {
+		cmd = exec.CommandContext(ctx, "false")
+	} else {
+		cmd = exec.CommandContext(ctx, "true")
+	}
+	r.cmds = append(r.cmds, cmd)
+	return cmd
 }
 
 func TestWritePersonalOverlayVaultProvider_RealGitCommitNoPush(t *testing.T) {
@@ -264,6 +284,54 @@ func TestWritePersonalOverlayVaultProvider_RealGitCommitNoPush(t *testing.T) {
 	log2 := runGit(t, overlayDir, "log", "--oneline")
 	if log != log2 {
 		t.Errorf("re-run produced a new commit:\nbefore:\n%s\nafter:\n%s", log, log2)
+	}
+}
+
+// TestWritePersonalOverlayVaultProvider_RetryAfterUncommittedWrite
+// regression-tests a git-state-divergence trap: if a prior attempt wrote
+// niwa.toml to disk but never committed it (e.g. it raced R22's overlay
+// scaffold and overlayDir wasn't yet a git repo at write time), a retry
+// must not treat byte-identical content on disk as "already landed" --
+// the content-only landing check is not proof of a commit. The retry must
+// still stage and commit the pre-existing bytes.
+func TestWritePersonalOverlayVaultProvider_RetryAfterUncommittedWrite(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	overlayDir := t.TempDir()
+
+	// Simulate the exact content InsertOrReplaceTable would have written,
+	// present on disk but with no git repo backing it yet (as if a prior
+	// call wrote the file and then failed at `git add`).
+	tableBody := RenderVaultProviderTable("global.vault.provider", "infisical", "acme", "https://app.infisical.com")
+	if err := os.WriteFile(filepath.Join(overlayDir, "niwa.toml"), []byte(tableBody), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Now the repo comes into existence (R22's precondition step runs).
+	runGit(t, overlayDir, "init")
+	runGit(t, overlayDir, "commit", "--allow-empty", "-m", "initial")
+
+	res, err := WritePersonalOverlayVaultProvider(context.Background(), workspace.StdGitInvoker(), overlayDir, "infisical", "acme", "https://app.infisical.com")
+	if err != nil {
+		t.Fatalf("WritePersonalOverlayVaultProvider: %v", err)
+	}
+	if !res.Changed {
+		t.Error("expected Changed=true: the file matched on disk but was never committed")
+	}
+
+	log := runGit(t, overlayDir, "log", "--oneline")
+	if !strings.Contains(log, "onboard: update personal-overlay vault provider") {
+		t.Errorf("the pre-existing bytes were never committed:\n%s", log)
+	}
+
+	// A further re-run now really is a no-op.
+	res2, err := WritePersonalOverlayVaultProvider(context.Background(), workspace.StdGitInvoker(), overlayDir, "infisical", "acme", "https://app.infisical.com")
+	if err != nil {
+		t.Fatalf("second WritePersonalOverlayVaultProvider: %v", err)
+	}
+	if res2.Changed {
+		t.Error("expected Changed=false once the content is actually committed")
 	}
 }
 
@@ -338,18 +406,42 @@ func TestWritePersonalOverlayVaultProvider_HostileCharacterFixture(t *testing.T)
 	if gotURL != hostileURL {
 		t.Errorf("api_url round-trip mismatch:\ngot:  %q\nwant: %q", gotURL, hostileURL)
 	}
-	// The hostile "[other]" text must not have become an actual table:
-	// a stray top-level [other] would parse fine on its own but this
-	// asserts it was contained inside the quoted string, not injected as
-	// a sibling table with unexpected content.
-	if _, present := parsed.Workspaces["other"]; present {
-		t.Error("hostile value injected a spurious workspace/table entry")
+
+	// The round-trip equality above is the real proof that the hostile
+	// `injected = true` / `[other]` text stayed inert string content
+	// rather than becoming real TOML structure: if it had escaped the
+	// quotes, either the parse would fail (an unterminated/malformed
+	// table) or gotURL would come back truncated/mismatched. As a second,
+	// independent check, parse into a generic map and confirm the only
+	// top-level key is "global" -- an injected "[other]" table would
+	// appear here as a sibling key.
+	var raw map[string]any
+	if err := toml.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("written niwa.toml did not parse into a generic map: %v", err)
+	}
+	if len(raw) != 1 {
+		t.Errorf("expected exactly one top-level key (\"global\"), got keys: %v", mapKeys(raw))
+	}
+	if _, ok := raw["other"]; ok {
+		t.Error("hostile value injected a spurious top-level [other] table")
 	}
 }
 
+func mapKeys(m map[string]any) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	return keys
+}
+
 func TestWritePersonalOverlayVaultProvider_NoAuthorArgNoAuthorEnv(t *testing.T) {
+	// Parent env: explicitly set the variables a malicious or careless
+	// caller would use to inject identity, mirroring
+	// TestRunBootstrap_R18_NoAuthorArgNoAuthorEnv in internal/workspace.
 	t.Setenv("GIT_AUTHOR_NAME", "injected-by-parent")
 	t.Setenv("GIT_COMMITTER_EMAIL", "evil@example.com")
+	t.Setenv("GIT_AUTHOR_DATE", "2000-01-01T00:00:00Z")
 
 	overlayDir := t.TempDir()
 	rec := &recordingGitInvoker{}
@@ -358,11 +450,14 @@ func TestWritePersonalOverlayVaultProvider_NoAuthorArgNoAuthorEnv(t *testing.T) 
 		t.Fatalf("WritePersonalOverlayVaultProvider: %v", err)
 	}
 
+	commitEnvRe := regexp.MustCompile(`^GIT_(AUTHOR|COMMITTER)_(NAME|EMAIL|DATE)=`)
 	foundCommit := false
 	foundPush := false
-	for _, inv := range rec.invocations {
+	for i, inv := range rec.invocations {
+		isCommit := false
 		for _, a := range inv {
 			if a == "commit" {
+				isCommit = true
 				foundCommit = true
 			}
 			if a == "push" {
@@ -372,12 +467,46 @@ func TestWritePersonalOverlayVaultProvider_NoAuthorArgNoAuthorEnv(t *testing.T) 
 				t.Error("commit invocation contains --author")
 			}
 		}
+		if !isCommit {
+			continue
+		}
+		// Inspect the actual *exec.Cmd the driver constructed: this is
+		// what proves sanitizeCommitEnv ran, not just that some commit
+		// invocation was recorded.
+		for _, kv := range rec.cmds[i].Env {
+			if commitEnvRe.MatchString(kv) {
+				t.Errorf("commit cmd.Env leaked %q (parent env must be filtered)", kv)
+			}
+		}
 	}
 	if !foundCommit {
 		t.Error("no git commit invocation recorded")
 	}
 	if foundPush {
 		t.Error("a git push invocation was recorded; the overlay driver must never push")
+	}
+}
+
+func TestSanitizeCommitEnv(t *testing.T) {
+	in := []string{
+		"GIT_AUTHOR_NAME=injected",
+		"GIT_AUTHOR_EMAIL=evil@example.com",
+		"GIT_AUTHOR_DATE=2000-01-01T00:00:00Z",
+		"GIT_COMMITTER_NAME=injected",
+		"GIT_COMMITTER_EMAIL=evil@example.com",
+		"GIT_COMMITTER_DATE=2000-01-01T00:00:00Z",
+		"GIT_DIR=/some/path",
+		"PATH=/usr/bin",
+	}
+	got := sanitizeCommitEnv(in)
+	want := []string{"GIT_DIR=/some/path", "PATH=/usr/bin"}
+	if len(got) != len(want) {
+		t.Fatalf("sanitizeCommitEnv(%v) = %v, want %v", in, got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("sanitizeCommitEnv[%d] = %q, want %q", i, got[i], want[i])
+		}
 	}
 }
 
@@ -414,8 +543,8 @@ func TestWriteLocalPointer_DirectWriteNoGit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reading config.toml: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(tmp, "niwa", "config.toml", ".git")); err == nil {
-		t.Error("no git repo should exist for the local pointer file")
+	if _, err := os.Stat(filepath.Join(tmp, "niwa", ".git")); !errors.Is(err, os.ErrNotExist) {
+		t.Error("no git repo should exist for the local pointer directory; WriteLocalPointer must not invoke git")
 	}
 	if !strings.Contains(string(data), "acme/dot-niwa-overlay") {
 		t.Errorf("config.toml missing registered repo:\n%s", data)
