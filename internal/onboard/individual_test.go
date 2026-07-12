@@ -251,6 +251,53 @@ type storedBody struct {
 	APIURL       string `toml:"api_url"`
 }
 
+func TestRunIndividualSetup_RejectsEmptyConfigSourcedFields(t *testing.T) {
+	fake := newIndividualFakeServer()
+	srv := fake.Start()
+	defer srv.Close()
+
+	for _, tc := range []struct {
+		name   string
+		mutate func(*IndividualSetupParams)
+	}{
+		{"empty Kind", func(p *IndividualSetupParams) { p.Kind = "" }},
+		{"empty Project", func(p *IndividualSetupParams) { p.Project = "" }},
+		{"empty IdentityID", func(p *IndividualSetupParams) { p.IdentityID = "" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			runner := &fakeSecretsSetRunner{}
+			p := baseIndividualParams(srv, t.TempDir())
+			tc.mutate(&p)
+
+			_, err := runIndividualSetup(testCtx(), p, runner)
+			if err == nil {
+				t.Fatal("want a fail-fast error, got nil")
+			}
+			if len(runner.Calls()) != 0 {
+				t.Errorf("secrets set fired despite an invalid config-sourced field")
+			}
+		})
+	}
+}
+
+func TestRunIndividualSetup_RejectsUnresolvedTopology(t *testing.T) {
+	fake := newIndividualFakeServer()
+	srv := fake.Start()
+	defer srv.Close()
+
+	runner := &fakeSecretsSetRunner{}
+	p := baseIndividualParams(srv, t.TempDir())
+	p.Topology = TopologyUnknown
+
+	_, err := runIndividualSetup(testCtx(), p, runner)
+	if err == nil {
+		t.Fatal("want a fail-fast error for an unresolved topology, got nil")
+	}
+	if len(runner.Calls()) != 0 {
+		t.Errorf("secrets set fired despite an unresolved topology")
+	}
+}
+
 func TestRunIndividualSetup_HappyPath(t *testing.T) {
 	fake := newIndividualFakeServer()
 	srv := fake.Start()

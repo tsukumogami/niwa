@@ -134,6 +134,14 @@ func runIndividualSetup(ctx context.Context, p IndividualSetupParams, runner sec
 	if p.Topology != TopologySameLogin && p.Topology != TopologySplitLogin {
 		return result, fmt.Errorf("onboard: RunIndividualSetup requires TopologySameLogin or TopologySplitLogin, got %v", p.Topology)
 	}
+	if p.Kind == "" || p.Project == "" || p.IdentityID == "" {
+		// All three are config-sourced, never operator-typed, but an
+		// empty one would otherwise silently produce a malformed store
+		// path/key (e.g. "/niwa/provider-auth/" with no kind segment)
+		// rather than a clear failure -- fail fast instead of writing
+		// something a later `niwa apply` would fail to parse.
+		return result, fmt.Errorf("onboard: RunIndividualSetup requires non-empty Kind, Project, and IdentityID")
+	}
 
 	dir := p.RecordDir
 	if dir == "" {
