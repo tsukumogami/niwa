@@ -5,30 +5,26 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/tsukumogami/niwa/internal/secret"
 	"github.com/tsukumogami/niwa/internal/vault/infisical"
 )
 
 // Options collects the resolved inputs Run's shared entry sequence
 // needs: the operator's setup/topology overrides, the api_url
-// acknowledgment flag, and whether the run is interactive. Real
-// config/session wiring -- the workspace's declared vault provider, the
-// identity id, and an authenticated bearer -- lands with the team and
-// individual runners (Issues 5/6); until then Run exercises the entry
-// sequence (the non-TTY precondition, then the api_url trust gate) and
-// routes to a not-yet-implemented stub in place of those runners.
+// acknowledgment flag, whether the run is interactive, and the
+// per-phase inputs (Team, Individual) the team and individual runners
+// need once SetupOverride resolves to one of them.
 type Options struct {
 	// SetupOverride is the operator's --team/--individual choice, or
 	// PhaseUnknown when neither flag was passed. Today this is Run's
 	// only routing input -- a non-unknown value both selects the
-	// eventual runner AND, at this skeleton stage, is returned verbatim
-	// rather than confirmed against Detect's inference. Once the
-	// team/individual runners land (Issues 5/6), whoever wires Detect in
-	// must decide whether a supplied override skips Detect entirely (no
-	// ClientID fetched) or only skips ConfirmSetup while Detect still
-	// runs to populate DetectionResult.ClientID -- the design's R2 text
-	// ("MUST confirm or override") reads as the latter, since the
-	// individual runner needs ClientID regardless of how the phase was
-	// chosen.
+	// runner AND is returned verbatim rather than confirmed against
+	// Detect's inference. Whoever wires Detect in must decide whether a
+	// supplied override skips Detect entirely (no ClientID fetched) or
+	// only skips ConfirmSetup while Detect still runs to populate
+	// DetectionResult.ClientID -- the design's R2 text ("MUST confirm
+	// or override") reads as the latter, since the individual runner
+	// needs ClientID regardless of how the phase was chosen.
 	SetupOverride SetupPhase
 	// TopologyOverride is the operator's --same-login/--split-login
 	// choice, or TopologyUnknown when neither flag was passed. Only
@@ -60,13 +56,21 @@ type Options struct {
 	// internal/cli/onboard.go, populates it once detection/config
 	// wiring lands).
 	Team *TeamOptions
+
+	// Individual carries the operator-session and config-sourced
+	// inputs the individual runner (Issue 6) needs -- the identity to
+	// mint against, the workspace project/environment, the
+	// credential-sync destination spec, and the confirmed topology.
+	// Only consulted once SetupOverride resolves to PhaseIndividual;
+	// nil is a caller bug at that point, mirroring Team above.
+	Individual *IndividualSetupParams
 }
 
 // Result is the wizard's terminal outcome. Setup is populated whenever
 // the phase is known -- from the operator's override today, from
-// detection once the team/individual runners land -- even on an error
-// return, so callers (the --json envelope) can name the setup a failed
-// run was attempting.
+// detection once Detect is wired into Run -- even on an error return,
+// so callers (the --json envelope) can name the setup a failed run was
+// attempting.
 type Result struct {
 	Setup SetupPhase
 }
@@ -97,12 +101,14 @@ func checkNonInteractivePrecondition(interactive bool, setup SetupPhase, topolog
 // Run executes the wizard's shared entry sequence: the non-TTY/override
 // precondition (R18/AC-30), then the api_url trust gate (Decision 3
 // step 0 / Decision 4), which must run before any bearer-carrying call.
-// Once both pass, Run routes to the setup runner named by
-// opts.SetupOverride. The team and individual runners themselves land
-// in Issues 5/6; until then this returns a plain (untyped, exit-1
-// fallback) error naming the phase that would have run, so the command
-// surface, exit codes, and non-TTY/api_url contracts are fully wired
-// and testable ahead of those runners.
+// Once both pass, Run attaches a redactor and routes to the setup
+// runner named by opts.SetupOverride (RunTeam or RunIndividualSetup).
+// Detect/ConfirmSetup/ConfirmTopology are not yet wired in here -- a
+// caller must resolve SetupOverride and TopologyOverride itself (the
+// command layer's --team/--individual/--same-login/--split-login flags
+// today); this returns a plain (untyped, exit-1 fallback) error when
+// SetupOverride is PhaseUnknown or any other phase this function
+// doesn't yet route.
 func Run(opts Options) (Result, error) {
 	// Result.Setup carries opts.SetupOverride through every return path
 	// below, including the two gate-failure paths -- not just the stub
@@ -134,11 +140,30 @@ func Run(opts Options) (Result, error) {
 		return result, fmt.Errorf("onboard: setup detection is not yet implemented; pass --team or --individual")
 	}
 
+	// A redactor is attached once here, before either runner makes its
+	// first bearer-carrying call, and shared by both -- R17 requires
+	// every secret registered on it before use, and this is the one
+	// place both call paths funnel through. Neither RunTeam nor
+	// RunIndividualSetup attaches its own; without this, every secret
+	// they register would have nowhere to land, and scrub-before-error
+	// would silently no-op.
+	ctx := secret.WithRedactor(context.Background(), secret.NewRedactor())
+
 	if opts.SetupOverride == PhaseTeam {
 		if opts.Team == nil {
 			return result, fmt.Errorf("onboard: Options.Team must be populated when SetupOverride is PhaseTeam")
 		}
-		if _, err := RunTeam(context.Background(), *opts.Team); err != nil {
+		if _, err := RunTeam(ctx, *opts.Team); err != nil {
+			return result, err
+		}
+		return result, nil
+	}
+
+	if opts.SetupOverride == PhaseIndividual {
+		if opts.Individual == nil {
+			return result, fmt.Errorf("onboard: Options.Individual must be populated when SetupOverride is PhaseIndividual")
+		}
+		if _, err := RunIndividualSetup(ctx, *opts.Individual); err != nil {
 			return result, err
 		}
 		return result, nil

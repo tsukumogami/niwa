@@ -385,6 +385,20 @@ func (execSecretsSetRunner) Run(ctx context.Context, args []string, stdin []byte
 // response bodies -- consistent with the existing `infisical export`
 // delegation's argv hygiene (internal/vault/infisical/subprocess.go),
 // which passes --projectId/--env/--path the same way.
+//
+// Verified (not merely assumed) against the locally installed CLI
+// (version 0.43.101, matching NOTE-onboard-rest-verification.md's
+// pinned version): `secrets set KEY=@/dev/stdin ...` with a value piped
+// to stdin proceeds past argument parsing into the network call (it
+// fails later on an unrelated 404 for a fake project id), whereas the
+// same invocation against a deliberately nonexistent file path fails
+// immediately with "open <path>: no such file or directory" / "Unable
+// to read file <path>" -- a distinct, earlier error. That difference is
+// the CLI actually opening and reading /dev/stdin as the secret's
+// value, not silently treating the literal string as the value (which
+// would have produced the SAME behavior in both cases: proceeding to
+// the network call with a garbage value instead of failing to read a
+// nonexistent path).
 func storeCredential(ctx context.Context, runner secretsSetRunner, destProject, destEnv, path, key string, body secret.Value) error {
 	if destProject == "" {
 		return secret.Errorf("onboard: storeCredential requires a non-empty destination project (credential-sync provider spec missing \"project\")")

@@ -493,11 +493,74 @@ func TestRunIndividualSetup_SelfReferentialGuardRefusesAndRevokes(t *testing.T) 
 	if !strings.Contains(err.Error(), "refusing to write") {
 		t.Errorf("error = %q, want it to name the self-referential refusal", err.Error())
 	}
+	var exitErr *ExitCodeError
+	if !asExitCodeError(err, &exitErr) {
+		t.Fatalf("error is not an *ExitCodeError: %v", err)
+	}
+	if exitErr.Code != ExitStorageWrite {
+		t.Errorf("code = %d, want %d -- no dedicated exit code exists for this refusal in Decision 2's table, so it shares the closest bucket (the write did not happen)", exitErr.Code, ExitStorageWrite)
+	}
 	if calls := runner.Calls(); len(calls) != 0 {
 		t.Errorf("secrets set fired %d times, want 0 -- guard runs before any write", len(calls))
 	}
 	if n := len(fake.Revoked()); n != 1 {
 		t.Errorf("revoked %d secrets, want exactly 1 (the just-minted secret, best-effort)", n)
+	}
+}
+
+// TestRunIndividualSetup_SelfReferentialGuardRevokeFailureIsWarningOnly
+// mirrors the AC-33 supersession revoke-failure test for the
+// guard-refusal path: a failed best-effort revoke of the just-minted
+// secret must still surface as a warning inside the returned error,
+// never as a second failure mode or a changed outcome.
+func TestRunIndividualSetup_SelfReferentialGuardRevokeFailureIsWarningOnly(t *testing.T) {
+	fake := newIndividualFakeServer()
+	fake.failRevokeFor["secret-id-1"] = true // the first (and only) secret this run mints
+	srv := fake.Start()
+	defer srv.Close()
+
+	runner := &fakeSecretsSetRunner{}
+	p := baseIndividualParams(srv, t.TempDir())
+	p.SyncSpec.Config = vault.ProviderConfig{"project": p.Project, "env": "dev"}
+
+	_, err := runIndividualSetup(testCtx(), p, runner)
+	if err == nil {
+		t.Fatal("expected a self-referential refusal error")
+	}
+	if !strings.Contains(err.Error(), "refusing to write") {
+		t.Errorf("error = %q, want it to still name the self-referential refusal", err.Error())
+	}
+	if n := len(fake.Revoked()); n != 0 {
+		t.Errorf("revoked %d secrets, want 0 -- the revoke attempt itself failed", n)
+	}
+}
+
+// TestRunIndividualSetup_StoreFailureRevokeFailureIsWarningOnly mirrors
+// the AC-33 supersession revoke-failure test for the store-failure path
+// (AC-34): a failed best-effort revoke of the just-minted secret must
+// not change the storage-write exit outcome.
+func TestRunIndividualSetup_StoreFailureRevokeFailureIsWarningOnly(t *testing.T) {
+	fake := newIndividualFakeServer()
+	fake.failRevokeFor["secret-id-1"] = true
+	srv := fake.Start()
+	defer srv.Close()
+
+	runner := &fakeSecretsSetRunner{exitCode: 1, stderr: []byte("error: write failed")}
+	p := baseIndividualParams(srv, t.TempDir())
+
+	_, err := runIndividualSetup(testCtx(), p, runner)
+	if err == nil {
+		t.Fatal("expected a storage-write error")
+	}
+	var exitErr *ExitCodeError
+	if !asExitCodeError(err, &exitErr) {
+		t.Fatalf("error is not an *ExitCodeError: %v", err)
+	}
+	if exitErr.Code != ExitStorageWrite {
+		t.Errorf("code = %d, want %d -- a failed revoke must not change the storage-write outcome (AC-34)", exitErr.Code, ExitStorageWrite)
+	}
+	if n := len(fake.Revoked()); n != 0 {
+		t.Errorf("revoked %d secrets, want 0 -- the revoke attempt itself failed", n)
 	}
 }
 

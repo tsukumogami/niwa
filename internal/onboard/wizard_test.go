@@ -219,3 +219,73 @@ func TestRun_InteractiveAPIURLDeclineFails(t *testing.T) {
 		t.Errorf("Code = %d, want ExitNonInteractivePrecondition (%d)", ece.Code, ExitNonInteractivePrecondition)
 	}
 }
+
+// TestRun_PhaseIndividualRequiresOptionsIndividual mirrors the
+// PhaseTeam/opts.Team nil-check test: a caller that resolves
+// SetupOverride to PhaseIndividual without populating Options.Individual
+// is misconfigured, and must get a plain (untyped) caller-bug error --
+// never silently routed anywhere.
+func TestRun_PhaseIndividualRequiresOptionsIndividual(t *testing.T) {
+	os.Unsetenv(apiURLEnvVarForTest)
+	result, err := Run(Options{
+		Interactive:      false,
+		SetupOverride:    PhaseIndividual,
+		TopologyOverride: TopologySameLogin,
+	})
+	if err == nil {
+		t.Fatal("want an error, got nil")
+	}
+	var ece *ExitCodeError
+	if errors.As(err, &ece) {
+		t.Fatalf("a nil Options.Individual is a caller bug, not a typed exit outcome -- got *ExitCodeError{Code: %d}", ece.Code)
+	}
+	if result.Setup != PhaseIndividual {
+		t.Errorf("Setup = %v, want PhaseIndividual to flow through even on this caller-bug error", result.Setup)
+	}
+}
+
+// TestRun_PhaseIndividualRoutesToRunIndividualSetup drives Run all the
+// way through the entry sequence and into RunIndividualSetup with a
+// fully populated Options.Individual, confirming the routing branch
+// actually reaches the individual runner (rather than merely compiling)
+// and that the redactor Run attaches is usable by it -- the read-hop
+// failure below is induced deliberately so this test doesn't need a
+// full REST double for every endpoint the happy path would hit.
+func TestRun_PhaseIndividualRoutesToRunIndividualSetup(t *testing.T) {
+	os.Unsetenv(apiURLEnvVarForTest)
+
+	srv := newIndividualFakeServer()
+	srv.failReadEnv = true
+	httpSrv := srv.Start()
+	defer httpSrv.Close()
+
+	result, err := Run(Options{
+		Interactive:      false,
+		SetupOverride:    PhaseIndividual,
+		TopologyOverride: TopologySameLogin,
+		Individual: &IndividualSetupParams{
+			APIURL:      httpSrv.URL,
+			IdentityID:  "ident-123",
+			Kind:        "infisical",
+			Project:     testWorkspaceProject,
+			Environment: "dev",
+			Topology:    TopologySameLogin,
+		},
+	})
+	if err == nil {
+		t.Fatal("want the induced read-hop failure to propagate, got nil")
+	}
+	var ece *ExitCodeError
+	if !errors.As(err, &ece) {
+		t.Fatalf("err is not *ExitCodeError: %T (%v)", err, err)
+	}
+	if ece.Code != ExitAuthFailure {
+		t.Errorf("Code = %d, want ExitAuthFailure (%d) -- confirms Run actually reached RunIndividualSetup", ece.Code, ExitAuthFailure)
+	}
+	if result.Setup != PhaseIndividual {
+		t.Errorf("Setup = %v, want PhaseIndividual", result.Setup)
+	}
+	if n := srv.CountRequests("GET /v1/auth/universal-auth/identities/ident-123"); n != 1 {
+		t.Errorf("read-identity requests = %d, want 1 -- Run's redactor-attached ctx must reach the real REST call", n)
+	}
+}
