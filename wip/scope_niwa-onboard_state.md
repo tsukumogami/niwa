@@ -1,7 +1,8 @@
 ```yaml
 topic: niwa-onboard
 chain_started: 2026-07-12T02:58:23Z
-last_updated: 2026-07-12T03:27:21Z
+last_updated: 2026-07-12T03:33:48Z
+execution_mode: auto
 phase_pointer: phase-2
 exit: UNSET
 exit_artifacts: []
@@ -15,8 +16,12 @@ chain_ran:
   - brief
 child_snapshots:
   brief:
-    status: Draft
-    content_hash: b059d473503365524a983cbcf8124b755a7b789e
-    captured_at: 2026-07-12T03:27:21Z
+    status: Accepted
+    content_hash: 9f853464330f7d11922d4080b5f1dff3f42c476a
+    captured_at: 2026-07-12T03:33:48Z
 visibility: Public
+parent_orchestration:
+  invoking_child: prd
+  suppress_status_aware_prompt: true
+  rationale: fresh-chain
 ```
