@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -132,6 +133,27 @@ func TestDetect_AmbiguousFailureAssumesSplitLoginPrior(t *testing.T) {
 	}
 }
 
+func TestDetect_TransportFailureAssumesSplitLoginPrior(t *testing.T) {
+	// A genuine transport failure (server unreachable) is a different
+	// unclassifiable shape than the malformed-body case above -- both
+	// must fall back to the same split-login prior per Assumption C's
+	// "treats any failure as split-login" language, not just the
+	// malformed-JSON case.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	unreachableURL := srv.URL
+	srv.Close() // now genuinely unreachable -- connection refused
+
+	result, err := Detect(context.Background(), unreachableURL, testBearer(), "ident-1", false, false)
+	if err != nil {
+		t.Fatalf("unexpected hard error on a transport failure: %v", err)
+	}
+	if result.Phase != PhaseIndividual || result.Topology != TopologySplitLogin {
+		t.Errorf("got Phase=%v Topology=%v, want the split-login prior (PhaseIndividual/TopologySplitLogin)", result.Phase, result.Topology)
+	}
+}
+
 func TestConfirmSetup_AcceptsInferred(t *testing.T) {
 	confirm := func(prompt string, defaultYes bool) (bool, error) { return true, nil }
 	got, err := ConfirmSetup(PhaseTeam, confirm)
@@ -192,7 +214,7 @@ func TestConfirmTopology_PromptNamesSplitLoginExplicitly(t *testing.T) {
 	if _, err := ConfirmTopology(TopologySplitLogin, confirm); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if seen == "" {
-		t.Fatal("expected confirm to be invoked with a prompt")
+	if !strings.Contains(seen, "split-login") || !strings.Contains(seen, "doesn't yet reach the team vault's org") {
+		t.Fatalf("prompt %q does not name split-login and explain why, per Decision 3's stated prompt text", seen)
 	}
 }

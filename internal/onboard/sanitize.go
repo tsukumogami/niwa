@@ -109,10 +109,35 @@ func toASCIILabel(label string) string {
 
 	encoded, err := punycodeEncode([]rune(label))
 	if err != nil {
-		// This implementation could not encode the label -- fall back
-		// to a plainly-visible escape rather than silently passing the
-		// raw homoglyph through unrendered.
-		return Sanitize(label)
+		// punycodeEncode failed (effectively unreachable for a real
+		// DNS label, which is length-limited well below where this
+		// triggers) -- fall back to escaping every non-ASCII rune
+		// explicitly. Sanitize alone is not enough here: a homoglyph
+		// rune is typically printable, so Sanitize would pass it
+		// through unescaped, silently defeating the fallback's whole
+		// purpose.
+		return sanitizeNonASCII(label)
 	}
 	return "xn--" + encoded
+}
+
+// sanitizeNonASCII is toASCIILabel's fallback for the case where
+// punycodeEncode itself fails: every non-ASCII rune is escaped
+// explicitly (in addition to Sanitize's control-byte handling), so a
+// printable homoglyph can't slip through unrendered the way it would
+// under Sanitize alone.
+func sanitizeNonASCII(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		if r >= 0x80 {
+			if r > 0xffff {
+				fmt.Fprintf(&b, "\\U%08x", r)
+			} else {
+				fmt.Fprintf(&b, "\\u%04x", r)
+			}
+			continue
+		}
+		b.WriteRune(r)
+	}
+	return Sanitize(b.String())
 }

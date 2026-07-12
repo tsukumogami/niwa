@@ -1,11 +1,15 @@
 package onboard
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
 	"testing"
+
+	"github.com/tsukumogami/niwa/internal/secret"
+	"github.com/tsukumogami/niwa/internal/vault/infisical"
 )
 
 func TestCheckAPIURL_NonHTTPSHardRejectsInEveryMode(t *testing.T) {
@@ -88,33 +92,40 @@ func TestCheckAPIURL_InteractiveWithoutConfirmFuncErrors(t *testing.T) {
 
 // TestAPIURLGate_BlocksDownstreamCallOnReject asserts the load-bearing
 // ordering rule (AC-5): when the api_url gate rejects, the detection
-// call downstream must never fire. It models the wizard's actual
-// entry sequence -- gate first, only proceed to the bearer-carrying
-// call if the gate passes -- against a request-counting REST double,
-// for both hard-reject rules.
+// call downstream must never fire. Each case points CheckAPIURL at the
+// REST double's OWN url (not an unrelated hostname), then composes the
+// wizard's intended sequence -- call Detect's ReadIdentity only if the
+// gate returned nil -- against that same double. This makes the
+// request-counter assertion a real regression check: if CheckAPIURL
+// ever let one of these cases through with a nil error, the composed
+// ReadIdentity call would actually reach the double and the counter
+// would go non-zero, catching the regression rather than passing
+// vacuously.
 func TestAPIURLGate_BlocksDownstreamCallOnReject(t *testing.T) {
+	bearer := secret.New([]byte("probe-bearer"), secret.Origin{})
+
 	cases := []struct {
 		name        string
-		apiURL      func(serverURL string) string
+		newServer   func(http.Handler) *httptest.Server
 		accept      bool
 		interactive bool
 		confirm     ConfirmFunc
 	}{
 		{
-			name:   "non-https hard reject",
-			apiURL: func(serverURL string) string { return "http://plain-not-https.example.com/api" },
-			accept: true, // even with the override, rule 1 has no override
+			name:      "non-https hard reject",
+			newServer: httptest.NewServer, // plain http:// -- what rule 1 rejects
+			accept:    true,               // even with the override, rule 1 has no override
 		},
 		{
 			name:        "non-default https declined",
-			apiURL:      func(serverURL string) string { return "https://self-hosted.example.com/api" },
+			newServer:   httptest.NewTLSServer, // https://127.0.0.1:port -- well-formed, non-default
 			accept:      false,
 			interactive: true,
 			confirm:     func(prompt string, defaultYes bool) (bool, error) { return false, nil },
 		},
 		{
 			name:        "non-default https non-interactive no accept",
-			apiURL:      func(serverURL string) string { return "https://self-hosted.example.com/api" },
+			newServer:   httptest.NewTLSServer,
 			accept:      false,
 			interactive: false,
 		},
@@ -123,26 +134,31 @@ func TestAPIURLGate_BlocksDownstreamCallOnReject(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			var requests int32
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			srv := c.newServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				atomic.AddInt32(&requests, 1)
 				w.WriteHeader(http.StatusOK)
 			}))
 			defer srv.Close()
 
-			apiURL := c.apiURL(srv.URL)
+			apiURL := srv.URL
 
 			err := CheckAPIURL(apiURL, c.accept, c.interactive, c.confirm)
 			if err == nil {
 				t.Fatalf("%s: expected the gate to reject", c.name)
 			}
 
-			// Simulate the wizard's own sequencing: the detection call
-			// (represented here by the request-counting server) is
-			// only ever reached if the gate returned nil. Since it
-			// returned an error, the wizard must short-circuit before
-			// issuing any request -- assert exactly that.
+			// The wizard's own sequencing: the detection call is only
+			// ever reached if the gate returned nil. err is non-nil
+			// here, so this must not execute -- but it's real,
+			// reachable code (not a test-only stub), so a future
+			// CheckAPIURL regression that returns nil here would cause
+			// this to actually hit the double.
+			if err == nil {
+				_, _ = infisical.ReadIdentity(context.Background(), apiURL, bearer, "probe-identity")
+			}
+
 			if atomic.LoadInt32(&requests) != 0 {
-				t.Fatalf("%s: gate rejected but %d request(s) reached the downstream server", c.name, requests)
+				t.Fatalf("%s: gate rejected but %d request(s) reached the downstream double", c.name, requests)
 			}
 		})
 	}
