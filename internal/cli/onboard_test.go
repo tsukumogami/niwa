@@ -128,18 +128,24 @@ func TestRunOnboard_NonTTYWithTeamOverridePassesPreconditionGate(t *testing.T) {
 
 	err := runOnboard(onboardCmd, nil)
 	// Precondition and api_url gate both pass with a bare --team
-	// override; what's left is the not-yet-implemented stub (an
-	// untyped error, not one of the five typed codes) -- AC-3's "the
-	// override forces the named setup" is what routed it there instead
-	// of the exit-2 fail-fast.
+	// override, routing into the real team runner (Issue 5) instead of
+	// the exit-2 fail-fast -- AC-3's "the override forces the named
+	// setup". This test predates the team runner landing and originally
+	// asserted the not-yet-implemented stub's message; runOnboard
+	// itself does not yet construct an onboard.TeamOptions (that
+	// config/session wiring is a later issue), so Run's own
+	// Options.Team-must-be-populated guard is what fires here -- still
+	// an untyped error (not one of the five typed exit codes), and it
+	// still names the team phase, just with a different message than
+	// the old stub.
 	var ece *onboard.ExitCodeError
 	if errors.As(err, &ece) {
 		t.Fatalf("expected --team to satisfy the non-TTY precondition, got ExitCodeError (Code=%d): %v", ece.Code, err)
 	}
 	if err == nil {
-		t.Fatal("want the not-yet-implemented stub error, got nil")
+		t.Fatal("want an error naming the team phase, got nil")
 	}
-	if !strings.Contains(err.Error(), "team") {
+	if !strings.Contains(err.Error(), "Team") {
 		t.Errorf("error = %q, want it to name the team setup (AC-3 override forces the named setup)", err.Error())
 	}
 }

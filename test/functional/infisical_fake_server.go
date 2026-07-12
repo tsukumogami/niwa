@@ -9,11 +9,13 @@ import (
 )
 
 // infisicalFakeServer is the httptest counterpart of the Infisical
-// management REST surface internal/vault/infisical/management.go
-// consumes: read-identity, mint-client-secret, universal-auth login
-// (the R9 verification hop, same endpoint auth.go's authenticateHTTP
-// already targets), revoke, and the environment secrets-read the R9
-// read hop targets. Structurally modeled on tarballFakeServer.
+// management REST surface internal/vault/infisical consumes:
+// read-identity, mint-client-secret, universal-auth login (the R9
+// verification hop, same endpoint auth.go's authenticateHTTP already
+// targets), revoke, the environment secrets-read the R9 read hop
+// targets, and the project-identity-membership read the team-phase
+// environment-grant landing check (membership.go) targets.
+// Structurally modeled on tarballFakeServer.
 //
 // Wire it into the niwa subprocess under test by setting
 // NIWA_INFISICAL_API_URL to the server's URL -- the same mechanism
@@ -42,8 +44,13 @@ type infisicalFakeServer struct {
 	mintResponses map[string]mintFixture
 
 	// environmentSecrets holds the tri-state fixture for the R9 read
-	// hop / environment-grant proxy, keyed by "projectID/env/path".
+	// hop, keyed by "projectID/env/path".
 	environmentSecrets map[string]environmentFixture
+
+	// memberships holds the tri-state fixture for the team-phase
+	// environment-grant landing check (the project-identity-membership
+	// read), keyed by "projectID/identityID".
+	memberships map[string]membershipFixture
 
 	// loginClientSecrets maps a clientSecret value to the accessToken
 	// the universal-auth login exchange should return for it.
@@ -72,11 +79,20 @@ type mintFixture struct {
 	secretID     string
 }
 
-// environmentFixture models the R9 read-hop / environment-grant
-// response state for one (project, env, path) tuple.
+// environmentFixture models the R9 read-hop response state for one
+// (project, env, path) tuple.
 type environmentFixture struct {
 	present   bool
 	malformed bool
+}
+
+// membershipFixture models one (project, identity) pair's
+// project-identity-membership response state -- the team-phase
+// environment-grant landing check.
+type membershipFixture struct {
+	present   bool
+	malformed bool
+	granted   bool
 }
 
 // faultMode names the fault-injection dimensions AC-lists for issue
@@ -104,6 +120,7 @@ func newInfisicalFakeServer() *infisicalFakeServer {
 		identities:         map[string]identityFixture{},
 		mintResponses:      map[string]mintFixture{},
 		environmentSecrets: map[string]environmentFixture{},
+		memberships:        map[string]membershipFixture{},
 		loginClientSecrets: map[string]string{},
 		faults:             map[faultMode]int{},
 	}
@@ -201,6 +218,32 @@ func (s *infisicalFakeServer) SetEnvironmentSecretsMalformed(projectID, env, pat
 	s.environmentSecrets[envKey(projectID, env, path)] = environmentFixture{present: true, malformed: true}
 }
 
+// SetMembershipGranted seeds a present membership response for the
+// given (projectID, identityID) pair with at least one role assigned
+// -- the team-phase environment-grant landing check's "granted"
+// outcome.
+func (s *infisicalFakeServer) SetMembershipGranted(projectID, identityID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.memberships[membershipKey(projectID, identityID)] = membershipFixture{present: true, granted: true}
+}
+
+// SetMembershipAbsent removes any seeded membership, so the next read
+// 404s -- no grant.
+func (s *infisicalFakeServer) SetMembershipAbsent(projectID, identityID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.memberships, membershipKey(projectID, identityID))
+}
+
+// SetMembershipMalformed seeds a 200 response body missing the
+// expected identityMembership.roles field.
+func (s *infisicalFakeServer) SetMembershipMalformed(projectID, identityID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.memberships[membershipKey(projectID, identityID)] = membershipFixture{present: true, malformed: true}
+}
+
 // SetFault forces the given fault mode to respond with status for
 // every subsequent matching request. Pass status 0 to clear a
 // previously set fault.
@@ -263,6 +306,7 @@ func (s *infisicalFakeServer) handle(w http.ResponseWriter, r *http.Request) {
 	//   .../universal-auth/login                                (login)
 	//   .../identities/{id}/client-secrets/{secretId}/revoke     (revoke)
 	//   .../identities/{id}/client-secrets                       (mint)
+	//   .../projects/{id}/memberships/identities/{id}            (membership)
 	//   .../identities/{id}                                      (read-identity)
 	//   .../v4/secrets                                           (env read)
 	segments := strings.Split(strings.TrimPrefix(r.URL.Path, "/"), "/")
@@ -274,6 +318,8 @@ func (s *infisicalFakeServer) handle(w http.ResponseWriter, r *http.Request) {
 		s.handleRevoke(w, r, segments)
 	case r.Method == http.MethodPost && matchesSuffix(segments, "identities", "*", "client-secrets"):
 		s.handleMint(w, r, segments)
+	case r.Method == http.MethodGet && matchesSuffix(segments, "projects", "*", "memberships", "identities", "*"):
+		s.handleReadMembership(w, r, segments)
 	case r.Method == http.MethodGet && matchesSuffix(segments, "identities", "*"):
 		s.handleReadIdentity(w, r, segments)
 	case r.Method == http.MethodGet && matchesSuffix(segments, "v4", "secrets"):
@@ -359,6 +405,41 @@ func (s *infisicalFakeServer) handleReadIdentity(w http.ResponseWriter, r *http.
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"identityUniversalAuth": map[string]string{"clientId": fixture.clientID},
+	})
+}
+
+func (s *infisicalFakeServer) handleReadMembership(w http.ResponseWriter, r *http.Request, segments []string) {
+	// Routing already confirmed the shape
+	// .../projects/{projectID}/memberships/identities/{identityID}.
+	identityID := segments[len(segments)-1]
+	projectID := segments[len(segments)-4]
+
+	s.mu.Lock()
+	if status, ok := s.faults[faultWrongOrg]; ok {
+		s.mu.Unlock()
+		w.WriteHeader(status)
+		return
+	}
+	fixture, ok := s.memberships[membershipKey(projectID, identityID)]
+	s.mu.Unlock()
+
+	if !ok || !fixture.present {
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+	if fixture.malformed {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"identityMembership": {}}`))
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	roles := []map[string]string{}
+	if fixture.granted {
+		roles = append(roles, map[string]string{"role": "member"})
+	}
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"identityMembership": map[string]any{"roles": roles},
 	})
 }
 
@@ -448,4 +529,8 @@ func envKey(projectID, env, path string) string {
 		path = "/"
 	}
 	return projectID + "/" + env + "/" + path
+}
+
+func membershipKey(projectID, identityID string) string {
+	return projectID + "/" + identityID
 }

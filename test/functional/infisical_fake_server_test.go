@@ -157,6 +157,39 @@ func TestInfisicalFakeServer_FaultInjection(t *testing.T) {
 	})
 }
 
+// TestInfisicalFakeServer_ReadProjectMembership verifies the double's
+// project-identity-membership endpoint composes with the real client
+// function end-to-end -- granted, not-yet-granted, and absent.
+func TestInfisicalFakeServer_ReadProjectMembership(t *testing.T) {
+	srv := newInfisicalFakeServer()
+	defer srv.Close()
+
+	srv.SetMembershipGranted("proj-1", "ident-1")
+
+	ctx := secret.WithRedactor(context.Background(), secret.NewRedactor())
+	bearer := secret.New([]byte("operator-bearer-value"), secret.Origin{})
+
+	granted, err := infisical.ReadProjectMembership(ctx, srv.URL(), bearer, "proj-1", "ident-1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !granted {
+		t.Error("granted = false, want true")
+	}
+
+	granted, err = infisical.ReadProjectMembership(ctx, srv.URL(), bearer, "proj-1", "ident-absent")
+	if err != nil {
+		t.Fatalf("a 404 must not be an error: %v", err)
+	}
+	if granted {
+		t.Error("granted = true, want false for an absent membership")
+	}
+
+	if got := srv.CountRequests("/memberships/identities/ident-1"); got != 1 {
+		t.Errorf("CountRequests(/memberships/identities/ident-1) = %d, want 1", got)
+	}
+}
+
 // TestInfisicalFakeServer_RequestRecorder confirms the recorder
 // tracks every request and CountRequests filters correctly -- the
 // mechanism AC-10's team-path assertion depends on.

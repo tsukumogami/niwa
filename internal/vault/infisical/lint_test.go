@@ -11,21 +11,39 @@ import (
 )
 
 // forbiddenManagementCallPattern matches a direct call-site invocation
-// of any of the three management functions team-phase code must never
-// drive with the operator's session JWT (Decision 4 / AC-10). It
-// matches the bare identifier followed by "(" so a qualified call from
-// another package (infisical.ReadIdentity(...)) is caught the same as
-// an unqualified one from within this package, while a mere mention in
-// a comment or string literal (no trailing paren) is not.
-var forbiddenManagementCallPattern = regexp.MustCompile(`\b(ReadIdentity|MintClientSecret|RevokeClientSecret)\s*\(`)
+// of either of the two MUTATING management functions team-phase code
+// must never drive with the operator's session JWT (Decision 4 /
+// AC-10): MintClientSecret (mints a credential) and RevokeClientSecret
+// (revokes one). It matches the bare identifier followed by "(" so a
+// qualified call from another package (infisical.MintClientSecret(...))
+// is caught the same as an unqualified one from within this package,
+// while a mere mention in a comment or string literal (no trailing
+// paren) is not.
+//
+// ReadIdentity is deliberately NOT in this pattern. It was originally
+// banned outright alongside the two mutating calls, but Issue 5 (the
+// team runner) settled a narrower boundary: ReadIdentity is a
+// read-only probe, authenticated with the operator's own session
+// bearer, and it is the landing check the design itself requires for
+// the Universal-Auth-attach step ("does the identity now expose a
+// client_id?") and the R21 re-run verification sweep. AC-10's actual
+// custody guarantee is that team-phase code never CREATES an identity,
+// never ATTACHES Universal Auth, and never GRANTS environment access
+// through a management REST call with the operator's session JWT --
+// reads that merely check whether those things already happened do
+// not touch that boundary. The runtime request recorder (see below)
+// is what actually enforces this at the call level: it asserts zero
+// team-path calls to the mint/revoke (client-secrets) endpoints, while
+// permitting the identity-read and project-membership-read calls the
+// landing checks and R21 sweep require.
+var forbiddenManagementCallPattern = regexp.MustCompile(`\b(MintClientSecret|RevokeClientSecret)\s*\(`)
 
 // TestAC10_NoManagementCallsFromTeamPhaseCode is the static half of
 // the AC-10 backstop Decision 4 accepts in place of a compiler-
 // enforced package boundary: it greps every source file under
 // internal/onboard whose name signals team-phase code (matching
 // "team", case-insensitive) for a direct call-site invocation of
-// ReadIdentity, MintClientSecret, or RevokeClientSecret, and fails if
-// it finds one.
+// MintClientSecret or RevokeClientSecret, and fails if it finds one.
 //
 // This is a DIRECT CALL-SITE check only. It does not catch
 // indirection: assigning one of these functions to a variable or
@@ -79,7 +97,7 @@ func TestAC10_NoManagementCallsFromTeamPhaseCode(t *testing.T) {
 
 	if len(violations) > 0 {
 		t.Fatalf(
-			"AC-10 violation: team-phase file(s) call a management REST function directly (must run only against the operator's own non-privileged CLI delegations, never ReadIdentity/MintClientSecret/RevokeClientSecret):\n%s",
+			"AC-10 violation: team-phase file(s) call a mutating management REST function directly (must run only against the operator's own non-privileged CLI delegations, never MintClientSecret/RevokeClientSecret):\n%s",
 			strings.Join(violations, "\n"),
 		)
 	}

@@ -1,6 +1,7 @@
 package onboard
 
 import (
+	"context"
 	"errors"
 	"fmt"
 
@@ -50,6 +51,15 @@ type Options struct {
 	// consulted when Interactive is true and AcceptAPIURL is false; must
 	// be non-nil in that case.
 	Confirm ConfirmFunc
+
+	// Team carries the operator-session and config-sourced inputs the
+	// team runner (Issue 5) needs -- the project id, the identity to
+	// check/guide, and the operator's own session bearer. Only
+	// consulted once SetupOverride resolves to PhaseTeam; nil is a
+	// caller bug at that point (every production caller,
+	// internal/cli/onboard.go, populates it once detection/config
+	// wiring lands).
+	Team *TeamOptions
 }
 
 // Result is the wizard's terminal outcome. Setup is populated whenever
@@ -123,5 +133,16 @@ func Run(opts Options) (Result, error) {
 	if opts.SetupOverride == PhaseUnknown {
 		return result, fmt.Errorf("onboard: setup detection is not yet implemented; pass --team or --individual")
 	}
+
+	if opts.SetupOverride == PhaseTeam {
+		if opts.Team == nil {
+			return result, fmt.Errorf("onboard: Options.Team must be populated when SetupOverride is PhaseTeam")
+		}
+		if _, err := RunTeam(context.Background(), *opts.Team); err != nil {
+			return result, err
+		}
+		return result, nil
+	}
+
 	return result, fmt.Errorf("onboard: %s setup is not yet implemented", opts.SetupOverride)
 }
