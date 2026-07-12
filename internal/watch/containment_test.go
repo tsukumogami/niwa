@@ -3,6 +3,7 @@ package watch
 import (
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -263,6 +264,62 @@ func TestVerifyReviewSettings_RequiresAskPostureBits(t *testing.T) {
 	}
 	if err := VerifyReviewSettings(full, true, true); err != nil {
 		t.Errorf("full ask-posture doc must verify: %v", err)
+	}
+}
+
+// TestAskPosture_PostGuardStillBlocksPosting proves that under the ask posture the
+// Bash post-guard still refuses a `gh pr review`/`gh pr comment` even though the
+// auto-allow hook (which shares the Bash channel) emits an allow. The two hooks are
+// distinct matcher entries; the post-guard's own exit-2 is what blocks posting, and
+// the harness's deny-over-allow precedence is what makes it win at runtime. This test
+// executes the post-guard command the ask-posture settings actually emit and asserts it
+// exits 2 for a posting command and 0 for a benign one -- so the guard itself is wired
+// and fires regardless of posture.
+func TestAskPosture_PostGuardStillBlocksPosting(t *testing.T) {
+	inst := t.TempDir()
+	if err := ApplyReviewSettings(inst, true, true); err != nil {
+		t.Fatalf("ApplyReviewSettings(sandbox, ask): %v", err)
+	}
+	got := readSettings(t, inst)
+
+	// The ask posture wires BOTH the post-guard (matcher "Bash") and the auto-allow
+	// (matcher "Bash|Read|Glob|Grep") as distinct entries; neither displaces the other.
+	if n := countPreToolUseMatcher(t, got, postGuardMatcher); n != 1 {
+		t.Fatalf("post-guard hook must be present under the ask posture, got %d", n)
+	}
+	if n := countPreToolUseMatcher(t, got, autoAllowMatcher); n != 1 {
+		t.Fatalf("auto-allow hook must be present under the ask posture, got %d", n)
+	}
+
+	postGuard := preToolUseCommand(t, got, postGuardMatcher)
+	if postGuard == "" {
+		t.Fatal("post-guard command missing")
+	}
+
+	runHook := func(payload string) int {
+		c := exec.Command("sh", "-c", postGuard)
+		c.Stdin = strings.NewReader(payload)
+		if err := c.Run(); err != nil {
+			if ee, ok := err.(*exec.ExitError); ok {
+				return ee.ExitCode()
+			}
+			t.Fatalf("running post-guard: %v", err)
+		}
+		return 0
+	}
+
+	// A posting command is blocked (exit 2) even though the auto-allow hook would allow
+	// the same Bash tool.
+	if code := runHook(`{"tool_name":"Bash","tool_input":{"command":"gh pr review 5 --approve"}}`); code != 2 {
+		t.Errorf("post-guard must block `gh pr review` under the ask posture (exit 2), got %d", code)
+	}
+	if code := runHook(`{"tool_name":"Bash","tool_input":{"command":"gh pr comment 5 --body hi"}}`); code != 2 {
+		t.Errorf("post-guard must block `gh pr comment` under the ask posture (exit 2), got %d", code)
+	}
+	// A benign command is not blocked by the post-guard (exit 0), leaving the auto-allow
+	// hook free to approve it.
+	if code := runHook(`{"tool_name":"Bash","tool_input":{"command":"git status"}}`); code != 0 {
+		t.Errorf("post-guard must not block a benign Bash command (exit 0), got %d", code)
 	}
 }
 

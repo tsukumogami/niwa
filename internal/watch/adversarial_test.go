@@ -116,10 +116,38 @@ func assertSandboxedSessionDeniesEgress(t *testing.T) error {
 	guardBinPath = func() string { return guardBin }
 	defer func() { guardBinPath = origGuardBin }()
 
+	// Isolate the trust store to a throwaway HOME. The Claude daemon OWNS
+	// ~/.claude.json and re-flushes it after the session ends, so a file-level
+	// RemoveInstanceTrust against the real config loses the race and leaves a stale
+	// trust entry behind. Redirecting HOME to a t.TempDir means every write the seed
+	// AND the daemon make to ~/.claude.json lands in a directory t.TempDir removes on
+	// cleanup, so a live run never accumulates cruft in the developer's real config.
+	// Credentials and the daemon runtime live in the ~/.claude DIRECTORY, shared
+	// read-through via a symlink so the session still authenticates; only ~/.claude.json
+	// (the trust store) is redirected. Every claude invocation below runs under
+	// claudeEnv so it reads the isolated config and sees the isolated session.
+	realHome, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("resolving real HOME: %w", err)
+	}
+	testHome := t.TempDir()
+	if err := os.Symlink(filepath.Join(realHome, ".claude"), filepath.Join(testHome, ".claude")); err != nil {
+		return fmt.Errorf("sharing ~/.claude credentials into the isolated test HOME: %w", err)
+	}
+	if data, rerr := os.ReadFile(filepath.Join(realHome, ".claude.json")); rerr == nil {
+		if werr := os.WriteFile(filepath.Join(testHome, ".claude.json"), data, 0o600); werr != nil {
+			return fmt.Errorf("seeding the isolated test HOME config: %w", werr)
+		}
+	}
+	claudeEnv := append(os.Environ(), "HOME="+testHome)
+	origTrustHome := trustHomeDir
+	trustHomeDir = func() (string, error) { return testHome, nil }
+	defer func() { trustHomeDir = origTrustHome }()
+
 	// Operator-approval posture: the ask-posture settings write defaultMode=default,
 	// and the session must run in a TRUSTED workspace or Claude Code silently ignores
 	// the hook allow/ask decisions. Seed trust for the instance exactly as the watch
-	// path does, and remove it on teardown.
+	// path does (into the isolated test HOME), and remove it on teardown.
 	if err := ApplyReviewSettings(inst, true, true); err != nil {
 		return err
 	}
@@ -151,6 +179,7 @@ func assertSandboxedSessionDeniesEgress(t *testing.T) error {
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "claude", "--bg", "--strict-mcp-config", probe)
 	cmd.Dir = inst
+	cmd.Env = claudeEnv
 	cmd.Stdin = nil
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -158,7 +187,11 @@ func assertSandboxedSessionDeniesEgress(t *testing.T) error {
 	}
 	sid := parseBgSessionID(out)
 	if sid != "" {
-		defer func() { _ = exec.Command("claude", "stop", sid).Run() }()
+		defer func() {
+			stop := exec.Command("claude", "stop", sid)
+			stop.Env = claudeEnv
+			_ = stop.Run()
+		}()
 	}
 
 	// Poll for the result file the sandboxed session writes (before the blocking
@@ -203,7 +236,7 @@ func assertSandboxedSessionDeniesEgress(t *testing.T) error {
 
 	// Give the session time to reach and block on the out-of-instance write, then make
 	// the two operator-approval assertions.
-	if err := assertPendingApprovalSurfaced(t, ctx, sid, inst); err != nil {
+	if err := assertPendingApprovalSurfaced(t, ctx, claudeEnv, sid, inst); err != nil {
 		return err
 	}
 
@@ -223,12 +256,14 @@ func assertSandboxedSessionDeniesEgress(t *testing.T) error {
 // session it CAN observe that is NOT waiting on a permission prompt while the write is
 // pending is a failure. It never false-passes the fail-closed check, which the caller
 // makes independently.
-func assertPendingApprovalSurfaced(t *testing.T, ctx context.Context, sid, inst string) error {
+func assertPendingApprovalSurfaced(t *testing.T, ctx context.Context, claudeEnv []string, sid, inst string) error {
 	t.Helper()
 	deadline := time.Now().Add(90 * time.Second)
 	var lastRaw string
 	for time.Now().Before(deadline) && ctx.Err() == nil {
-		out, err := exec.Command("claude", "agents", "--json").CombinedOutput()
+		agentsCmd := exec.Command("claude", "agents", "--json")
+		agentsCmd.Env = claudeEnv
+		out, err := agentsCmd.CombinedOutput()
 		if err != nil {
 			lastRaw = fmt.Sprintf("agents --json error: %v", err)
 			time.Sleep(3 * time.Second)

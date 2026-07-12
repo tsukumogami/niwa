@@ -1,6 +1,6 @@
 ---
 schema: design/v1
-status: Planned
+status: Current
 problem: |
   In a sandboxed `niwa watch --once` review session (`watch_sandbox = required`),
   an out-of-instance Write/Edit/MultiEdit/NotebookEdit is a hard deny (PR #198).
@@ -40,7 +40,7 @@ rationale: |
 
 ## Status
 
-Planned
+Current
 
 Refinement of the shipped `niwa watch --once` containment (see
 `docs/designs/current/DESIGN-niwa-watch-once-pr-review.md` and PR #198),
