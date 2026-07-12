@@ -53,6 +53,27 @@ whose code-verified DESIGN/PRD docs are mined into `wip/research/mined_*.md`)
   the vault-doctor logic from #199) tells them whether onboarding actually
   landed, instead of a later `niwa apply` failing silently.
 
+## Author Amendment (2026-07-12, at the BRIEF approval gate)
+
+The two-login / org-switch flow is NOT intrinsic to onboarding — it's a
+property of one vault topology. Two shapes are both common and must be
+first-class:
+
+1. **Same-login shape**: the workspace vault project and the personal overlay
+   project live in the same Infisical account/org (example: the author's
+   commuter workspace). No login switch during individual setup.
+2. **Split-login shape**: the workspace vault lives in a dedicated org
+   (example: a tsukumogami org with a project for the workspace vault) while
+   the personal overlay vault lives in the operator's personal account. The
+   individual setup needs the login switch.
+
+The invariant: mint the client secret against the org hosting the workspace
+vault; store the credential into the vault backing the personal overlay. The
+wizard must make the topology an explicit, easy-to-reason-about choice at
+onboarding time, insert only the login pauses the chosen shape requires, and
+make switching shapes later easy (re-running the wizard against the new
+topology). The BRIEF must not frame the org switch as universal.
+
 ## Open Questions for Drafting
 
 - Wizard shape specifics (mode auto-detection vs explicit `--team` flag,

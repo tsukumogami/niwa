@@ -2,25 +2,25 @@
 schema: brief/v1
 status: Draft
 problem: |
-  niwa vault onboarding is a long, cross-context, multi-login choreography.
-  Every step is mechanical, but the whole sequence must land on an exact
-  credential shape or it fails silently at a later `niwa apply`, far from the
-  mistake. It spans a team phase and an individual phase with an org-context
-  switch between them, and today it lives as hand-run shell in runbooks that
-  humans copy and get wrong.
+  niwa vault onboarding is a long, cross-context choreography spanning a team
+  phase and an individual phase. Every step is mechanical, but the whole
+  sequence must land on an exact credential shape or it fails silently at a
+  later `niwa apply`, far from the mistake. Depending on the vault topology the
+  individual phase may also require a login switch, and the operator gets no
+  help working out which. Today it lives as hand-run shell in runbooks.
 outcome: |
   A team admin or a developer runs one command, `niwa onboard`, and is walked
-  through setup as a wizard. It handles the mode they're in, automates every
-  mechanical and exact-shape step, and pauses only for the human logins it
-  can't do for them. The credential comes out in the exact contract shape by
-  construction, the wizard confirms it resolves before declaring success, and
-  nobody has to hold the sequence in their head or ships a silently broken vault.
+  through setup as a wizard. It handles the mode they're in, makes the vault
+  topology an explicit choice, automates every mechanical and exact-shape step,
+  and pauses only for the logins that topology actually needs. The credential
+  comes out in the exact contract shape by construction, the wizard confirms it
+  resolves before declaring success, and nobody ships a silently broken vault.
 motivating_context: |
   Two prior efforts productized the individual pieces of this flow in isolation:
   tsukumogami/niwa#194 (mint-and-store a credential on an existing identity) and
   tsukumogami/niwa#199 (a doctor that validates the credential contract live).
-  Neither owned the whole choreography, the org switch, or the team-phase setup.
-  This brief frames the wizard those pieces become building blocks of.
+  Neither owned the whole choreography, the topology choice, or the team-phase
+  setup. This brief frames the wizard those pieces become building blocks of.
 ---
 
 # BRIEF: niwa onboard
@@ -44,14 +44,21 @@ where that resolution works is a long setup sequence, and the read side gives no
 help performing it. Someone onboarding a machine-identity workspace has to run
 the whole thing by hand.
 
-The sequence spans two phases with an org-context switch in the middle. A team
-admin, once per workspace, creates the machine identity in the vault org,
-attaches Universal Auth to it, grants that identity read access on the target
-environment, and creates the folder structure the workspace expects. Then every
-developer, once each, sets up their personal overlay, mints a fresh client secret
-on the team identity while logged into the team org, switches their login to their
-personal org, stores the credential into their personal vault, and confirms it
-resolves.
+The sequence spans two phases. A team admin, once per workspace, creates the
+machine identity in the vault org, attaches Universal Auth to it, grants that
+identity read access on the target environment, and creates the folder structure
+the workspace expects. Then every developer, once each, sets up their personal
+overlay, mints a fresh client secret against the org that hosts the workspace
+vault, stores the credential into the vault that backs their personal overlay,
+and confirms it resolves.
+
+That crossing from the workspace-vault org to the personal-overlay vault is where
+a hidden assumption lives. When the workspace vault and the personal overlay
+share one account, the developer stays in a single session throughout. When the
+workspace vault lives in a dedicated org and the overlay vault lives in the
+developer's personal account, the same crossing requires a login switch in the
+middle. Both shapes are common, and today the developer has to work out on their
+own which one they're in, with no help, before they can even follow the runbook.
 
 Every step is mechanical and deterministic, which is exactly what makes the
 current state frustrating: a machine could do all of it, yet a human does it by
@@ -79,6 +86,15 @@ doing and takes them down the matching path. It performs every mechanical step
 itself and stops only at the points where a human genuinely has to act, the
 interactive vault logins where the operator picks an organization or completes an
 SSO round-trip. It walks them to each login, waits, and resumes on the other side.
+
+How many of those login pauses there are is a property the wizard makes explicit
+rather than one the operator has to discover. During the individual setup it
+presents the vault topology as a named choice, whether the workspace vault and
+the personal overlay share one account or live in separate ones, and inserts only
+the login pauses the chosen shape actually requires: none when they share an
+account, one switch when they're split. If the operator's topology changes later,
+they re-run the wizard against the new shape and it re-mints and re-stores the
+credential where it now belongs.
 
 For the individual setup, the credential the wizard writes is correct by
 construction. Because niwa assembles the vault path, the prefixed key, and the
@@ -118,12 +134,15 @@ API directly.
 A developer has cloned a workspace whose team-phase setup is already done, and
 their `niwa apply` can't resolve the team's secrets because they have no
 credential yet. They run the wizard in its individual setup. It sets up their
-personal overlay, mints a fresh client secret on the team identity while they're
-logged into the team org, then pauses and walks them through switching their login
-to their personal org. On the other side it stores the credential in their
-personal vault at the exact contract shape and confirms it resolves. Their next
-apply works, and they never learned the vault path, the key prefix, or the body
-format.
+personal overlay and asks which vault topology they're in: whether the workspace
+vault and their personal overlay share one account, or the workspace vault lives
+in a separate org from their personal one. It mints a fresh client secret against
+the org that hosts the workspace vault, and if the topology is the split shape it
+pauses here and walks them through the one login switch to their personal account;
+in the shared shape it just keeps going. Either way it stores the credential in
+the overlay's vault at the exact contract shape and confirms it resolves. Their
+next apply works, and they never learned the vault path, the key prefix, the body
+format, or had to figure out on their own whether a login switch was even needed.
 
 ### Team admin hits a step their plan won't allow
 
@@ -156,12 +175,20 @@ teammates depend on it.
   which setup applies and branches accordingly.
 - Automating every mechanical and exact-shape step of both setups: the team-phase
   identity, authentication, access grant, and folder creation; and the individual
-  phase's mint, org switch, store, and verify.
+  phase's mint, store, verify, and (when the topology calls for it) the login
+  switch between them.
+- Making the vault topology an explicit choice during the individual setup, between
+  the same-login shape (workspace vault and personal overlay in one account) and
+  the split-login shape (workspace vault in a dedicated org, overlay vault in the
+  operator's personal account), and letting an operator switch shapes later by
+  re-running the wizard, which re-mints and re-stores the credential where it now
+  belongs.
 - Producing the individual-phase credential in the exact credential-sync contract
   shape by construction (the vault path, the prefixed key, and the required TOML
   body), so it can't be stored malformed.
-- Pausing only for the irreducible human logins, the interactive organization picks
-  and any SSO round-trip, and resuming automatically afterward.
+- Pausing only for the human logins the chosen topology actually requires, the
+  interactive organization picks and any SSO round-trip, and resuming automatically
+  afterward.
 - Delegating the privileged team-phase steps to the operator's own authenticated
   `infisical` CLI session, the same delegation niwa already uses for vault reads.
 - Degrading gracefully when a step is gated by the operator's provider plan:
@@ -203,6 +230,11 @@ the framing.
   guided run that blocks on the interactive login, a resumable multi-step flow, or
   another shape). The requirement is that the operator is walked to each login and
   the automation continues afterward; the resume mechanism is design territory.
+- How the wizard names the vault topology and how it settles which shape applies:
+  inferring it from the personal overlay and workspace config, asking the operator
+  outright, or a mix. The requirement is that topology is an explicit, reason-able
+  choice that drives how many login pauses appear; the naming and detection
+  mechanism is a PRD and design detail.
 
 ## References
 
