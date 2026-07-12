@@ -1,5 +1,5 @@
 ---
-status: Accepted
+status: Planned
 upstream: docs/prds/PRD-vault-doctor.md
 problem: |
   The PRD fixes what the vault doctor must do: enumerate every
@@ -40,7 +40,7 @@ rationale: |
 
 ## Status
 
-Accepted
+Planned
 
 ## Context and Problem Statement
 
