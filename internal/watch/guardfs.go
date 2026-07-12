@@ -25,28 +25,42 @@ type guardFSInput struct {
 }
 
 // GuardFSDecision is the filesystem-escape guard for a contained review session.
-// It reads a PreToolUse hook payload (a Write/Edit/NotebookEdit call) from stdin
-// and returns the process exit code the hook contract uses: 0 allows the write,
-// 2 blocks it. It is fail-closed by construction -- unreadable input, unparseable
-// JSON, a missing target path, or an undeterminable instance root all return 2
-// (deny), so a malformed or adversarial payload can never coax an allow.
+// It reads a PreToolUse hook payload (a Write/Edit/NotebookEdit call) from stdin and
+// returns the process exit code the hook contract uses: 0 for a resolved decision, 2
+// to block. It is fail-closed by construction -- unreadable input, unparseable JSON,
+// a missing target path, or an undeterminable instance root all return 2 (deny), so a
+// malformed or adversarial payload can never coax a write through, in either mode.
 //
 // The OS sandbox cages only Bash subprocesses; the built-in
-// Write/Edit/MultiEdit/NotebookEdit tools run through the permission system, which
-// a dispatched session's bypassPermissions skips. So without this hook an injected
+// Write/Edit/MultiEdit/NotebookEdit tools run through the permission system, which a
+// dispatched session's bypassPermissions skips. So without this hook an injected
 // review agent could write outside the instance (~/.ssh/authorized_keys, ~/.bashrc,
 // ~/.gitconfig hooksPath) and persist / gain code execution from merely reading an
 // untrusted PR. The guard closes that: a write whose resolved target is inside the
-// instance is allowed (the agent must write its draft and clone-local files there);
-// any write that resolves outside the instance is denied. There is no operator
-// prompt -- a review-drafting agent has no legitimate out-of-instance write, so this
-// is a hard deny (symmetric with the network egress deny), not an ask.
+// instance is permitted (the agent must write its draft and clone-local files there);
+// a write that resolves outside the instance is not.
 //
-// rootOverride is the instance path the review-session hook bakes in (via --root).
-// It is the authoritative containment root: niwa knows the instance path at
-// settings-write time, so the guard does not have to trust an ambient value such as
-// CLAUDE_PROJECT_DIR, which could in principle be inherited wider than the instance.
-func GuardFSDecision(stdin io.Reader, stderr io.Writer, rootOverride string) int {
+// askOutside selects the guard's two postures for the out-of-instance case:
+//
+//   - askOutside == false (hard-deny posture, the shipped floor): an out-of-instance
+//     write is a hard deny (exit 2) and an in-instance write is a plain allow (exit 0);
+//     no decision object is printed. This is inert-under-bypassPermissions safe -- the
+//     exit code is the whole contract.
+//   - askOutside == true (operator-approval posture): the guard prints a PreToolUse
+//     permission-decision object to stdout -- "allow" for an in-instance write, "ask"
+//     for an out-of-instance one -- and exits 0. Under a non-bypass permission mode the
+//     harness honors the hook decision, so the out-of-instance write surfaces an
+//     operator approval that fails closed if unanswered, while the in-instance write is
+//     auto-approved so the review runs without hanging on a prompt.
+//
+// In both postures every fail-closed path exits 2 with no decision object, so the
+// out-of-instance escape can only ever become an ask for a cleanly-resolved target.
+//
+// rootOverride is the instance path the review-session hook bakes in (via --root). It
+// is the authoritative containment root: niwa knows the instance path at settings-write
+// time, so the guard does not have to trust an ambient value such as CLAUDE_PROJECT_DIR,
+// which could in principle be inherited wider than the instance.
+func GuardFSDecision(stdin io.Reader, stdout, stderr io.Writer, rootOverride string, askOutside bool) int {
 	data, err := io.ReadAll(io.LimitReader(stdin, 32<<20))
 	if err != nil {
 		fmt.Fprintf(stderr, "niwa watch guard-fs: reading hook input: %v\n", err)
@@ -73,10 +87,46 @@ func GuardFSDecision(stdin io.Reader, stderr io.Writer, rootOverride string) int
 		return 2
 	}
 	if writeWithinInstance(target, root) {
+		if askOutside {
+			emitDecision(stdout, "allow", "in-instance write permitted by niwa watch review guard")
+		}
+		return 0
+	}
+	if askOutside {
+		// Operator-approval posture: surface the anomalous out-of-instance write as an
+		// approval the operator can accept or deny in the agents view. An unanswered ask
+		// fails closed (the write does not land).
+		emitDecision(stdout, "ask", fmt.Sprintf("out-of-instance write to %q; operator approval required", target))
 		return 0
 	}
 	fmt.Fprintf(stderr, "niwa watch: writing outside the review instance is denied by the no-egress sandbox (target %q)\n", target)
 	return 2
+}
+
+// preToolUseDecision is the PreToolUse hookSpecificOutput the guard prints on stdout
+// in the operator-approval posture. permissionDecision is "allow" or "ask"; the
+// harness honors it under a non-bypass permission mode.
+type preToolUseDecision struct {
+	HookSpecificOutput struct {
+		HookEventName            string `json:"hookEventName"`
+		PermissionDecision       string `json:"permissionDecision"`
+		PermissionDecisionReason string `json:"permissionDecisionReason"`
+	} `json:"hookSpecificOutput"`
+}
+
+// emitDecision writes a PreToolUse permission-decision object to stdout. A marshal
+// failure is silent: the caller still returns exit 0 for an allow (harmless) and, for
+// an ask, an absent decision under a non-bypass mode falls through to the normal
+// permission flow -- which prompts, so the out-of-instance write still does not
+// silently land.
+func emitDecision(stdout io.Writer, decision, reason string) {
+	var d preToolUseDecision
+	d.HookSpecificOutput.HookEventName = "PreToolUse"
+	d.HookSpecificOutput.PermissionDecision = decision
+	d.HookSpecificOutput.PermissionDecisionReason = reason
+	if out, err := json.Marshal(d); err == nil {
+		fmt.Fprintln(stdout, string(out))
+	}
 }
 
 // guardInstanceRoot resolves the review instance root the write is confined to.
