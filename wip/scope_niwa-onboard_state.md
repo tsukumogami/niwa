@@ -30,3 +30,9 @@ parent_orchestration:
   suppress_status_aware_prompt: true
   rationale: fresh-chain
 ```
+
+<!-- worktree sync note (2026-07-12T04:05Z): upstream main gained 022d7cb
+(feat(watch): real HOME + single watch_sandbox switch, #198). Impact: none —
+watch subsystem, no path/symbol/contract this chain depends on. Synced via
+merge commit d9eb042 rather than rebase (force-push unavailable in this
+session). -->
