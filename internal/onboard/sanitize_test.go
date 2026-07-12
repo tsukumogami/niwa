@@ -98,6 +98,28 @@ func TestSanitizeURL_SanitizesHostInFullURL(t *testing.T) {
 	}
 }
 
+func TestSanitizeURL_HomoglyphHostSurvivesControlBytesElsewhereInTheURL(t *testing.T) {
+	// net/url.Parse rejects any string carrying a raw control byte
+	// anywhere in it -- not just in the host -- so a homoglyph host
+	// paired with an incidental control byte in the path must not fall
+	// through to a no-host-awareness fallback and lose punycode
+	// protection. QA-found regression.
+	cyrillicHomoglyph := "gооgle.com" // U+043E Cyrillic о x2, standing in for Latin o
+	raw := "https://" + cyrillicHomoglyph + "/path\r\x1b[2Ksegment"
+
+	got := SanitizeURL(raw)
+
+	if strings.Contains(got, cyrillicHomoglyph) {
+		t.Fatalf("SanitizeURL(%q) = %q, still contains the raw homoglyph host -- punycode protection was lost", raw, got)
+	}
+	if !strings.Contains(got, "xn--") {
+		t.Fatalf("SanitizeURL(%q) = %q, want the homoglyph host rendered as its xn-- form", raw, got)
+	}
+	if strings.ContainsAny(got, "\r\x1b") {
+		t.Fatalf("SanitizeURL(%q) = %q, still contains a raw control byte", raw, got)
+	}
+}
+
 func TestSanitizeURL_FallsBackOnUnparseable(t *testing.T) {
 	in := "not\x1ba-url"
 	got := SanitizeURL(in)

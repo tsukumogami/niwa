@@ -79,16 +79,30 @@ func SanitizeHost(host string) string {
 // SanitizeURL formats a URL for terminal display: Sanitize handles
 // control/non-printable bytes across the whole string, and
 // SanitizeHost additionally punycode-normalizes the host component, so
-// a homoglyph host is visible rather than passing as legitimate. Falls
-// back to Sanitize(raw) when raw doesn't parse as a URL with a host --
-// callers should not assume the result round-trips through url.Parse.
+// a homoglyph host is visible rather than passing as legitimate.
+//
+// raw is run through Sanitize BEFORE url.Parse, not after: net/url
+// rejects any string carrying a raw control byte anywhere in it (not
+// just in the host) with a parse error, so a homoglyph host paired
+// with an incidental control byte elsewhere in the same string --
+// hardly a contrived combination for a hostile config- or
+// response-sourced value -- would otherwise make url.Parse fail and
+// fall through to the no-host-awareness fallback, silently losing the
+// punycode protection this function exists to provide. Sanitize's
+// escapes are themselves plain printable ASCII, so they never
+// reintroduce a parse failure.
+//
+// Falls back to the sanitized raw string when it still doesn't parse
+// as a URL with a host -- callers should not assume the result
+// round-trips through url.Parse.
 func SanitizeURL(raw string) string {
-	u, err := url.Parse(raw)
+	sanitized := Sanitize(raw)
+	u, err := url.Parse(sanitized)
 	if err != nil || u.Host == "" {
-		return Sanitize(raw)
+		return sanitized
 	}
 	u.Host = SanitizeHost(u.Host)
-	return Sanitize(u.String())
+	return u.String()
 }
 
 // toASCIILabel converts one dot-separated hostname label to its
