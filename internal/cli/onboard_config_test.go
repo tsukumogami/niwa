@@ -77,14 +77,14 @@ func TestLoadOnboardConfig_NamedProviderShapeNotYetSupportedIsClearGuidance(t *t
 func TestLoadOnboardConfig_MissingIdentityFieldsNameEachOne(t *testing.T) {
 	sandboxOnboardHome(t)
 	// Declares kind and project only -- identity_id, identity_name, and
-	// environment are all absent.
+	// env are all absent.
 	writeOnboardWorkspace(t, "[vault.provider]\nkind = \"infisical\"\nproject = \"proj-1\"\n")
 
 	_, err := loadOnboardConfig()
 	if err == nil {
 		t.Fatal("want an error, got nil")
 	}
-	for _, field := range []string{"identity_id", "identity_name", "environment"} {
+	for _, field := range []string{"identity_id", "identity_name", "env"} {
 		if !strings.Contains(err.Error(), field) {
 			t.Errorf("err = %q, want it to name missing field %q", err.Error(), field)
 		}
@@ -102,8 +102,8 @@ func TestLoadOnboardConfig_FullyDeclaredProviderResolvesEveryField(t *testing.T)
 		"identity_id = \"ident-1\"\n"+
 		"identity_name = \"Test Identity\"\n"+
 		"auth_method = \"Universal Auth\"\n"+
-		"environment = \"dev\"\n"+
-		"secret_path = \"/team\"\n")
+		"env = \"dev\"\n"+
+		"path = \"/team\"\n")
 
 	bundle, err := loadOnboardConfig()
 	if err != nil {
@@ -141,7 +141,7 @@ func TestLoadOnboardConfig_AuthMethodDefaultsToUniversalAuthWhenAbsent(t *testin
 		"project = \"proj-1\"\n"+
 		"identity_id = \"ident-1\"\n"+
 		"identity_name = \"Test Identity\"\n"+
-		"environment = \"dev\"\n")
+		"env = \"dev\"\n")
 
 	bundle, err := loadOnboardConfig()
 	if err != nil {
@@ -159,7 +159,7 @@ func TestLoadOnboardConfig_MissingPersonalOverlayFileIsEmptyOverrideNotError(t *
 		"project = \"proj-1\"\n"+
 		"identity_id = \"ident-1\"\n"+
 		"identity_name = \"Test Identity\"\n"+
-		"environment = \"dev\"\n")
+		"env = \"dev\"\n")
 	// Deliberately no niwa.toml written under XDG_CONFIG_HOME/niwa/global.
 
 	bundle, err := loadOnboardConfig()
@@ -181,7 +181,7 @@ func TestLoadOnboardConfig_PersonalOverlaySyncSpecResolvesFromGlobalVaultProvide
 		"project = \"proj-1\"\n"+
 		"identity_id = \"ident-1\"\n"+
 		"identity_name = \"Test Identity\"\n"+
-		"environment = \"dev\"\n")
+		"env = \"dev\"\n")
 
 	overlayDir, err := configGlobalConfigDirForTest(t)
 	if err != nil {

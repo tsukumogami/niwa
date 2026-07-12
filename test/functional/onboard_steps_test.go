@@ -34,6 +34,7 @@ func registerOnboardSteps(ctx *godog.ScenarioContext) {
 	ctx.Step(`^the onboard mint record for kind "([^"]*)" project "([^"]*)" has secret id "([^"]*)"$`, theOnboardMintRecordHasSecretID)
 
 	ctx.Step(`^I run "([^"]*)" from workspace "([^"]*)" under a pty with input "([^"]*)"$`, iRunFromWorkspaceUnderPTYWithInput)
+	ctx.Step(`^I run "([^"]*)" from workspace "([^"]*)" with input "([^"]*)"$`, iRunFromWorkspaceWithInput)
 	ctx.Step(`^the infisical REST double recorded a request containing "([^"]*)"$`, theRestDoubleRecordedARequestContaining)
 	ctx.Step(`^the infisical REST double recorded no request containing "([^"]*)"$`, theRestDoubleRecordedNoRequestContaining)
 }
@@ -298,5 +299,45 @@ func iRunFromWorkspaceUnderPTYWithInput(ctx context.Context, command, workspace,
 	s.stdout = out[:idx]
 	s.stderr = s.stdout + stderr.String()
 	s.shellPwd = ""
+	return ctx, nil
+}
+
+// iRunFromWorkspaceWithInput runs niwa from a named workspace's .niwa
+// directory (matching iRunFromWorkspace's own resolution) with the
+// given input piped to stdin -- no pty involved. The team runner's
+// guided-step Pause (internal/onboard/team.go) reads one line
+// directly from Options.In regardless of whether stdin is a
+// terminal; Interactive/IsStdinTTY only gates the wizard's own
+// Detect/api_url confirmation prompts, not these guided pauses. Used
+// for the AC-20 partial-resume scenario, which needs to answer
+// exactly one guided pause without needing a real pty.
+func iRunFromWorkspaceWithInput(ctx context.Context, command, workspace, input string) (context.Context, error) {
+	s := getState(ctx)
+	if s == nil {
+		return ctx, fmt.Errorf("no test state")
+	}
+	args := strings.Fields(command)
+	if len(args) > 0 && args[0] == "niwa" {
+		args[0] = s.binPath
+	}
+	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
+	cmd.Dir = filepath.Join(s.workspaceRoot, workspace, ".niwa")
+	cmd.Env = s.buildEnv()
+	cmd.Stdin = strings.NewReader(strings.ReplaceAll(input, `\n`, "\n"))
+	var stdout, stderr strings.Builder
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	s.stdout = stdout.String()
+	s.stderr = stderr.String()
+	s.shellPwd = ""
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			s.exitCode = exitErr.ExitCode()
+			return ctx, nil
+		}
+		return ctx, fmt.Errorf("command execution failed: %w", err)
+	}
+	s.exitCode = 0
 	return ctx, nil
 }

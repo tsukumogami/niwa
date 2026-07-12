@@ -74,7 +74,7 @@ func loadOnboardConfig() (onboardConfigBundle, error) {
 	if cfg.Vault == nil || cfg.Vault.IsEmpty() {
 		return bundle, fmt.Errorf(
 			"onboard: the workspace config at %s declares no [vault.provider] block yet; "+
-				"author one (kind, project, identity_id, identity_name, environment) "+
+				"author one (kind, project, identity_id, identity_name, env) "+
 				"before running `niwa onboard`",
 			configPath,
 		)
@@ -96,8 +96,16 @@ func loadOnboardConfig() (onboardConfigBundle, error) {
 	bundle.identityID = getStr("identity_id")
 	bundle.identityName = getStr("identity_name")
 	bundle.authMethod = getStr("auth_method")
-	bundle.environmentSlug = getStr("environment")
-	bundle.secretPath = getStr("secret_path")
+	// "env" and "path" -- not "environment"/"secret_path" -- to match
+	// the exact key names internal/vault/infisical's own Factory.Open
+	// already reads from this same [vault.provider] table (see its doc
+	// comment). A workspace author who already declares env/path for
+	// ordinary vault:// URI resolution must not be told a DIFFERENT
+	// key is "missing," and the wizard and the vault provider must
+	// never be able to disagree about which environment/path is in
+	// effect by reading two different keys for the same concept.
+	bundle.environmentSlug = getStr("env")
+	bundle.secretPath = getStr("path")
 	bundle.apiURLConfigVal = getStr("api_url")
 
 	if bundle.authMethod == "" {
@@ -119,7 +127,7 @@ func loadOnboardConfig() (onboardConfigBundle, error) {
 		missing = append(missing, "identity_name")
 	}
 	if bundle.environmentSlug == "" {
-		missing = append(missing, "environment")
+		missing = append(missing, "env")
 	}
 	if len(missing) > 0 {
 		return bundle, fmt.Errorf(

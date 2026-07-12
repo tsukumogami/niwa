@@ -41,7 +41,7 @@ func setupOnboardTestEnv(t *testing.T) {
 		"project = \"proj-1\"\n" +
 		"identity_id = \"ident-1\"\n" +
 		"identity_name = \"Test Identity\"\n" +
-		"environment = \"dev\"\n"
+		"env = \"dev\"\n"
 	if err := os.WriteFile(filepath.Join(niwaDir, "workspace.toml"), []byte(cfg), 0o644); err != nil {
 		t.Fatalf("writing workspace.toml: %v", err)
 	}

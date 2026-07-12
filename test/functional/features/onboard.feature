@@ -23,7 +23,7 @@ Feature: niwa onboard: team/individual vault setup wizard
       project = "team-proj-1"
       identity_id = "ident-1"
       identity_name = "Test Identity"
-      environment = "dev"
+      env = "dev"
       """
     And a personal overlay exists with body:
       """
@@ -75,14 +75,18 @@ Feature: niwa onboard: team/individual vault setup wizard
     And the infisical REST double recorded no request containing "client-secrets"
 
   # --- AC-20: a partial team setup resumes at the first incomplete step ---
+  # Identity is already landed (a real REST read confirms it, no
+  # prompt); the environment grant is not yet present, so the wizard
+  # must skip straight past the identity step and prompt only for the
+  # grant -- proving already-done steps are detected and skipped
+  # rather than re-walked from the top (R15/AC-20).
 
-  Scenario: re-run against an already-landed team setup resumes straight through with no guided pauses
+  Scenario: re-run against a partially-landed team setup skips the done step and resumes at the grant step
     Given the infisical REST double has identity "ident-1" with client_id "client-abc"
-    And the infisical REST double grants project "team-proj-1" identity "ident-1" membership
-    When I run "niwa onboard --team --accept-api-url" from workspace "acme"
-    Then the exit code is 0
-    And the infisical REST double recorded a request containing "/v1/auth/universal-auth/identities/ident-1"
-    And the infisical REST double recorded a request containing "memberships/identities/ident-1"
+    When I run "niwa onboard --team --accept-api-url" from workspace "acme" with input "\n"
+    Then the infisical REST double recorded a request containing "/v1/auth/universal-auth/identities/ident-1"
+    And the output does not contain "create a machine identity"
+    And the output contains "grant Test Identity read access to the dev environment"
 
   # --- AC-21: a topology change re-mints and re-stores at the new location ---
 
