@@ -116,20 +116,93 @@ func (s *testState) buildEnv() []string {
 }
 
 // writeFakeInfisical installs a stub `infisical` executable in dir. niwa only
-// ever invokes `infisical export ... --format json`; the stub emits an empty
-// JSON object so credential resolution finds no keys (vault.ErrKeyNotFound)
-// and apply proceeds offline, and it exits 0 for any other subcommand. This
-// keeps the functional suite from contacting the real Infisical service or
-// depending on a developer login when a scenario's config declares an
+// ever invokes `infisical export ... --format json` in scenarios that predate
+// the onboard wizard; the stub emits an empty JSON object so credential
+// resolution finds no keys (vault.ErrKeyNotFound) and apply proceeds offline.
+// This keeps the functional suite from contacting the real Infisical service
+// or depending on a developer login when a scenario's config declares an
 // infisical vault provider.
+//
+// Extended for the onboard wizard's team-phase CLI delegations (R19), the
+// stub also serves:
+//
+//   - `login status --json` -- emits the shape confirmed in
+//     NOTE-onboard-rest-verification.md. Controlled by INFISICAL_STUB_LOGIN_STATUS
+//     ("authenticated" [default] or anything else for "no session") and
+//     INFISICAL_STUB_LOGIN_ORG (org id, default "test-org").
+//   - `secrets folders create` -- exits 0 by default; INFISICAL_STUB_PLAN_GATE=1
+//     or INFISICAL_STUB_FOLDER_CREATE_FAIL=1 forces a non-zero exit with a
+//     recognisable stderr message, so a scenario can seed a plan-gate or a
+//     plain store-write failure independently.
+//   - `secrets set` -- captures its argv and stdin body under
+//     INFISICAL_STUB_STORE_DIR (default "$TMPDIR/infisical-stub-store") for
+//     later inspection, then exits 0 unless INFISICAL_STUB_PLAN_GATE=1 or
+//     INFISICAL_STUB_SECRETS_SET_FAIL=1 is set.
+//
+// All INFISICAL_STUB_* variables are ordinary env vars: since the stub
+// inherits the niwa subprocess's environment unchanged (cmd.Env = nil per the
+// commander's subprocess-hygiene invariant), a scenario configures the stub
+// the same way it configures anything else -- iSetEnv, consumed by
+// buildEnv() into the niwa subprocess's env, which passes it straight
+// through to this script.
 func writeFakeInfisical(dir string) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("mkdir shared-bin: %w", err)
 	}
 	script := `#!/bin/sh
-if [ "$1" = "export" ]; then
-  echo '{}'
-fi
+case "$1" in
+  export)
+    echo '{}'
+    exit 0
+    ;;
+  login)
+    if [ "$2" = "status" ]; then
+      status="${INFISICAL_STUB_LOGIN_STATUS:-authenticated}"
+      if [ "$status" = "authenticated" ]; then
+        org="${INFISICAL_STUB_LOGIN_ORG:-test-org}"
+        printf '{"sessions":[{"principalType":"user","status":"authenticated","organization":"%s"}]}\n' "$org"
+      else
+        printf '{"sessions":[]}\n'
+      fi
+      exit 0
+    fi
+    exit 0
+    ;;
+  secrets)
+    case "$2" in
+      folders)
+        if [ "$3" = "create" ]; then
+          if [ "$INFISICAL_STUB_PLAN_GATE" = "1" ]; then
+            echo "error: plan does not allow additional folders" >&2
+            exit 1
+          fi
+          if [ "$INFISICAL_STUB_FOLDER_CREATE_FAIL" = "1" ]; then
+            echo "error: folder create failed" >&2
+            exit 1
+          fi
+        fi
+        exit 0
+        ;;
+      set)
+        storeDir="${INFISICAL_STUB_STORE_DIR:-$TMPDIR/infisical-stub-store}"
+        mkdir -p "$storeDir"
+        shift 2
+        printf '%s\n' "$@" > "$storeDir/last-set-args"
+        cat > "$storeDir/last-set-body"
+        if [ "$INFISICAL_STUB_PLAN_GATE" = "1" ]; then
+          echo "error: plan does not allow secret writes" >&2
+          exit 1
+        fi
+        if [ "$INFISICAL_STUB_SECRETS_SET_FAIL" = "1" ]; then
+          echo "error: write failed" >&2
+          exit 1
+        fi
+        exit 0
+        ;;
+    esac
+    exit 0
+    ;;
+esac
 exit 0
 `
 	if err := os.WriteFile(filepath.Join(dir, "infisical"), []byte(script), 0o755); err != nil {
