@@ -5,20 +5,45 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
-// Matcher strings for the two PreToolUse hooks. They are also the identity used
-// to dedupe (an entry is "already present" iff some hook shares its matcher).
+// Matcher strings for the PreToolUse hooks. They are also the identity used to
+// dedupe (an entry is "already present" iff some hook shares its matcher).
 const (
 	// egressDenyMatcher matches the out-of-sandbox egress channels: WebFetch,
 	// WebSearch, and every MCP tool (mcp__ prefix). These make network calls
 	// OUTSIDE the OS sandbox (which cages only Bash subprocesses), so in sandbox
 	// mode they must be denied by a hook that fires even under bypassPermissions.
 	egressDenyMatcher = "WebFetch|WebSearch|mcp__"
+	// fsGuardMatcher matches the built-in file tools. Like the egress channels
+	// these run OUTSIDE the OS sandbox (through the permission system, which a
+	// dispatched session's bypassPermissions skips), so in sandbox mode a write
+	// that resolves outside the instance must be denied by a hook. This is the
+	// filesystem-escape counterpart to egressDenyMatcher.
+	fsGuardMatcher = "Write|Edit|NotebookEdit"
 	// postGuardMatcher matches Bash so the post-guard can inspect gh commands and
 	// refuse a review/comment post. Applied in every mode (accident prevention).
 	postGuardMatcher = "Bash"
 )
+
+// guardBinPath returns the absolute path to the niwa binary the filesystem-guard
+// hook invokes (as `<niwa> watch guard-fs`). In production it is the running
+// executable; tests override it to point at a built binary. If the executable
+// path cannot be determined it falls back to "niwa" (resolved on PATH) -- and the
+// hook wrapper fails closed (deny) if even that is not found, so a bad path can
+// never silently allow an out-of-instance write.
+var guardBinPath = func() string {
+	if p, err := os.Executable(); err == nil {
+		return p
+	}
+	return "niwa"
+}
+
+// shellQuote single-quotes s for safe embedding in the hook command string.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
 
 // noEgressSandboxStanza is the no-egress OS sandbox profile merged into a
 // dispatched instance's .claude/settings.json when sandbox mode is on. An EMPTY
@@ -56,6 +81,34 @@ func egressDenyHook() map[string]any {
 	}
 }
 
+// fsGuardHook returns the PreToolUse hook that denies a filesystem escape via the
+// built-in Write/Edit/NotebookEdit tools. It is applied in sandbox mode only. The
+// OS sandbox confines Bash writes to the instance, but the built-in file tools run
+// through the permission system, which bypassPermissions skips -- so this hook is
+// the closure for that channel, the filesystem counterpart to egressDenyHook. It
+// delegates the decision to `niwa watch guard-fs`, which resolves the target path
+// against the instance root and exits 0 (inside -> allow) or 2 (outside -> deny).
+// The wrapper maps any non-zero guard exit -- 2, or a failure to run the guard at
+// all -- to exit 2 (block), so it is fail-closed: a missing or erroring guard
+// denies the write rather than letting it through. It is a hard deny, not an ask:
+// a review-drafting agent's only legitimate writes (the draft and clone-local
+// files) are inside the instance, so an out-of-instance write is never legitimate.
+func fsGuardHook() map[string]any {
+	cmd := fmt.Sprintf(
+		`%s watch guard-fs; ec=$?; if [ "$ec" = "0" ]; then exit 0; else exit 2; fi`,
+		shellQuote(guardBinPath()),
+	)
+	return map[string]any{
+		"matcher": fsGuardMatcher,
+		"hooks": []any{
+			map[string]any{
+				"type":    "command",
+				"command": cmd,
+			},
+		},
+	}
+}
+
 // postGuardHook returns the PreToolUse hook that refuses an accidental review or
 // comment post. It inspects the Bash tool's command payload and blocks a
 // `gh pr review`/`gh pr comment`. Applied in BOTH modes: the session runs with
@@ -79,7 +132,8 @@ func postGuardHook() map[string]any {
 // post-guard PreToolUse hook is always appended (dedup by matcher, preserving any
 // existing hooks and other keys). When sandbox is true the no-egress sandbox
 // stanza is written (fully owned, so no pre-existing sandbox config can relax the
-// posture) and the egress-deny PreToolUse hook is appended (dedup by matcher). It
+// posture) and both the egress-deny and the filesystem-guard PreToolUse hooks are
+// appended (dedup by matcher) -- the two channels the OS sandbox does not cage. It
 // does NOT set permissions.defaultMode or permissions.ask -- the review session
 // runs under the developer's real environment and daemon, and the dispatch that
 // launches it already sets bypassPermissions. The re-verification is the
@@ -114,9 +168,13 @@ func ApplyReviewSettings(instancePath string, sandbox bool) error {
 	if !preToolUseHasMatcher(preToolUse, postGuardMatcher) {
 		preToolUse = append(preToolUse, postGuardHook())
 	}
-	// In sandbox mode, append the egress-deny hook, deduped by matcher.
+	// In sandbox mode, append the egress-deny and filesystem-guard hooks (the two
+	// channels the OS sandbox does not cage), each deduped by matcher.
 	if sandbox && !preToolUseHasMatcher(preToolUse, egressDenyMatcher) {
 		preToolUse = append(preToolUse, egressDenyHook())
+	}
+	if sandbox && !preToolUseHasMatcher(preToolUse, fsGuardMatcher) {
+		preToolUse = append(preToolUse, fsGuardHook())
 	}
 	hooks["PreToolUse"] = preToolUse
 	settings["hooks"] = hooks
@@ -148,8 +206,9 @@ func ApplyReviewSettings(instancePath string, sandbox bool) error {
 // review-session settings survived the merge. The post-guard PreToolUse hook
 // (matcher "Bash") is always required. When sandbox is true it additionally
 // asserts the no-egress sandbox stanza (enabled, empty allowedDomains,
-// failIfUnavailable, no unsandboxed escape hatch) AND the egress-deny PreToolUse
-// hook (matcher "WebFetch|WebSearch|mcp__").
+// failIfUnavailable, no unsandboxed escape hatch), the egress-deny PreToolUse hook
+// (matcher "WebFetch|WebSearch|mcp__"), AND the filesystem-guard PreToolUse hook
+// (matcher "Write|Edit|NotebookEdit").
 func VerifyReviewSettings(merged map[string]any, sandbox bool) error {
 	if sandbox {
 		sb, ok := merged["sandbox"].(map[string]any)
@@ -179,10 +238,15 @@ func VerifyReviewSettings(merged map[string]any, sandbox bool) error {
 		if allow, _ := sb["allowUnsandboxedCommands"].(bool); allow {
 			return fmt.Errorf("review settings check: sandbox.allowUnsandboxedCommands must be false")
 		}
-		// The egress-deny hook closes the out-of-sandbox channels (WebFetch,
+		// The egress-deny hook closes the out-of-sandbox network channels (WebFetch,
 		// WebSearch, MCP) that the OS sandbox does not cage.
 		if !hasPreToolUseMatcher(merged, egressDenyMatcher) {
 			return fmt.Errorf("review settings check: egress-deny PreToolUse hook (matcher %q) missing", egressDenyMatcher)
+		}
+		// The filesystem-guard hook closes the out-of-sandbox write channel
+		// (Write/Edit/NotebookEdit) that the OS sandbox does not cage.
+		if !hasPreToolUseMatcher(merged, fsGuardMatcher) {
+			return fmt.Errorf("review settings check: filesystem-guard PreToolUse hook (matcher %q) missing", fsGuardMatcher)
 		}
 	}
 	// The Bash post-guard is required in every mode.

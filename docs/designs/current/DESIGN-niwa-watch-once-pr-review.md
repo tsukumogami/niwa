@@ -252,7 +252,22 @@ existing per-instance `.claude/settings.json` write/merge
   **Writable region.** The agent must write its drafted review; the draft
   lands at `<instanceRoot>/watch-review-draft.md` in the instance directory
   (which contains the clone), outside the clone's working tree so it does not
-  pollute the reviewed repo.
+  pollute the reviewed repo. Writes are confined to the instance the same way
+  egress is confined to nothing. The OS sandbox restricts **Bash** writes to the
+  instance, but the built-in `Write`/`Edit`/`NotebookEdit` tools -- like
+  WebFetch/MCP -- run OUTSIDE it (through the permission system, which
+  `bypassPermissions` skips), so a **filesystem-guard PreToolUse hook** (matcher
+  `Write|Edit|NotebookEdit`) adjudicates them: a write that resolves inside the
+  instance is allowed, one that resolves outside is denied. Without it an injected
+  agent could write `~/.ssh/authorized_keys`, `~/.bashrc`, or a `~/.gitconfig`
+  `core.hooksPath` and gain persistence or code execution from merely reading an
+  untrusted PR. The deny is **hard, not an operator prompt**: a review-drafting
+  agent has no legitimate out-of-instance write (its only writes are the draft and
+  clone-local files), so an `ask` would add prompt-fatigue risk with no benefit --
+  and a forced `ask` in a headless `--bg` session has unverified behavior (it
+  could stall the session), whereas a hard deny is provably fail-closed, symmetric
+  with the network egress deny. Operator-gated approval (`ask`) is a possible
+  future refinement once that headless behavior is confirmed fail-closed.
 - **Option 3B (rejected, previously chosen): a credential-scrubbed env
   allowlist plus a synthetic HOME.** An earlier version of this design
   scrubbed `cmd.Env` to an explicit allowlist (model auth + `PATH`/locale) and
@@ -408,13 +423,17 @@ operator's explicit choice and has no boundary to verify.
     harness's final merge, it must not silently assume the stanza wins.
   - *Live enforcement proof (the real check):* settings presence does not
     prove enforcement. The adversarial acceptance test (Implementation step 7)
-    attempts **actual egress on all three channels** from inside a real
-    `claude --bg` sandboxed session -- a **WebFetch**, an **MCP tool** call, and
-    a **raw Bash socket to a literal IP** -- and asserts each fails. The raw
-    Bash socket distinguishes deny-all from a silently-inverted allow-all and a
-    proxy-only egress path (where a raw socket could escape) from a default-deny
-    network namespace; the WebFetch and MCP attempts prove the PreToolUse hook
-    closes the channels the OS sandbox does not cage.
+    attempts **actual escape on all four credential-leak channels** from inside a
+    real `claude --bg` sandboxed session -- a **WebFetch**, an **MCP tool** call,
+    a **raw Bash socket to a literal IP**, and a **built-in Write to a path
+    outside the instance** -- and asserts each fails. The raw Bash socket
+    distinguishes deny-all from a silently-inverted allow-all and a proxy-only
+    egress path (where a raw socket could escape) from a default-deny network
+    namespace; the WebFetch and MCP attempts prove the egress-deny PreToolUse hook
+    closes the network channels the OS sandbox does not cage; the out-of-instance
+    Write proves the filesystem-guard PreToolUse hook closes the write channel it
+    does not cage (checked authoritatively -- the out-of-instance file must be
+    absent afterward, not merely the agent's self-report).
   On any preflight/re-verify failure `watch --once` prints the reason to
   stderr and exits non-zero; the live proof gates release, not each run.
 - **Option 7B (rejected): dispatch, then check.** Rejected because a session
@@ -612,6 +631,17 @@ Claude Code agents view.
   `--strict-mcp-config` to limit MCP server loading. Together with the OS
   sandbox this closes every egress channel. Written only when `watch_sandbox =
   required`.
+- **Filesystem-guard hook settings (`required` only).** Because `sandbox.enabled`
+  restricts only Bash writes, the built-in `Write`/`Edit`/`NotebookEdit` tools
+  (which run through the permission system that `bypassPermissions` skips) could
+  otherwise write outside the instance. The merged instance
+  `.claude/settings.json` adds a **PreToolUse hook** (matcher
+  `Write|Edit|NotebookEdit`) that delegates to `niwa watch guard-fs`: it resolves
+  the target path against the instance root and exits 0 (inside -> allow) or 2
+  (outside -> deny), with the hook wrapper mapping any non-zero or failed-to-run
+  outcome to a block (fail-closed). This is the filesystem counterpart to the
+  egress-deny hook -- a hard deny, since a review-drafting agent has no legitimate
+  out-of-instance write. Written only when `watch_sandbox = required`.
 - **Post-guard settings (every mode).** The merged instance
   `.claude/settings.json` also adds a **PreToolUse hook** (matcher `Bash`) that
   denies `gh pr review` and `gh pr comment`, so a review/comment submission from

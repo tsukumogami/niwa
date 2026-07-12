@@ -65,6 +65,9 @@ func TestApplyReviewSettings_NoSandbox(t *testing.T) {
 	if n := countPreToolUseMatcher(t, got, egressDenyMatcher); n != 0 {
 		t.Errorf("no-sandbox apply must not add the egress-deny hook, got %d", n)
 	}
+	if n := countPreToolUseMatcher(t, got, fsGuardMatcher); n != 0 {
+		t.Errorf("no-sandbox apply must not add the filesystem-guard hook, got %d", n)
+	}
 	// No fail-closed permission mode is imposed.
 	if perms, ok := got["permissions"].(map[string]any); ok {
 		if _, present := perms["defaultMode"]; present {
@@ -114,6 +117,9 @@ func TestApplyReviewSettings_Sandbox(t *testing.T) {
 	if n := countPreToolUseMatcher(t, got, egressDenyMatcher); n != 1 {
 		t.Errorf("egress-deny hook must be present exactly once, got %d", n)
 	}
+	if n := countPreToolUseMatcher(t, got, fsGuardMatcher); n != 1 {
+		t.Errorf("filesystem-guard hook must be present exactly once, got %d", n)
+	}
 	// Pre-existing PreToolUse entry preserved alongside the appended hooks.
 	if n := countPreToolUseMatcher(t, got, "Read"); n != 1 {
 		t.Errorf("pre-existing PreToolUse 'Read' hook must be preserved, got %d", n)
@@ -150,6 +156,9 @@ func TestApplyReviewSettings_DedupesHooks(t *testing.T) {
 	}
 	if n := countPreToolUseMatcher(t, got, egressDenyMatcher); n != 1 {
 		t.Errorf("re-apply must not duplicate the egress-deny hook, got %d", n)
+	}
+	if n := countPreToolUseMatcher(t, got, fsGuardMatcher); n != 1 {
+		t.Errorf("re-apply must not duplicate the filesystem-guard hook, got %d", n)
 	}
 }
 
@@ -190,6 +199,25 @@ func TestVerifyReviewSettings_RequiresEgressDeny(t *testing.T) {
 	}
 }
 
+// TestVerifyReviewSettings_RequiresFSGuard rejects a sandbox doc that is missing
+// the filesystem-guard hook (Write/Edit/NotebookEdit could escape the instance).
+func TestVerifyReviewSettings_RequiresFSGuard(t *testing.T) {
+	noFSGuard := map[string]any{
+		"sandbox": noEgressSandboxStanza(),
+		"hooks": map[string]any{
+			// Has the post-guard and egress-deny, but not the filesystem guard.
+			"PreToolUse": []any{postGuardHook(), egressDenyHook()},
+		},
+	}
+	if err := VerifyReviewSettings(noFSGuard, true); err == nil {
+		t.Error("missing filesystem-guard hook must be rejected under sandbox mode")
+	}
+	// The same doc is fine in non-sandbox mode (filesystem guard not required there).
+	if err := VerifyReviewSettings(noFSGuard, false); err != nil {
+		t.Errorf("non-sandbox mode must not require the filesystem-guard hook: %v", err)
+	}
+}
+
 // TestVerifyReviewSettings_RejectsRelaxations rejects any weakening of the
 // no-egress sandbox stanza.
 func TestVerifyReviewSettings_RejectsRelaxations(t *testing.T) {
@@ -198,7 +226,7 @@ func TestVerifyReviewSettings_RejectsRelaxations(t *testing.T) {
 		return map[string]any{
 			"sandbox": noEgressSandboxStanza(),
 			"hooks": map[string]any{
-				"PreToolUse": []any{postGuardHook(), egressDenyHook()},
+				"PreToolUse": []any{postGuardHook(), egressDenyHook(), fsGuardHook()},
 			},
 		}
 	}

@@ -280,16 +280,19 @@ Non-functional:
   query (D3) -- no non-GitHub source is polled.
 - **R17.** The sandboxed path SHALL be adversarially verified: a PR whose
   title, body, and diff attempt exfiltration and outbound action (e.g.
-  `curl … | sh`, `git push`, printing and sending secrets), dispatched with
-  `watch_sandbox = required` and the sandbox enforced, SHALL have outbound
-  actions on **all three egress channels denied**: a WebFetch, an MCP tool call,
-  and a raw Bash socket. The verification SHALL exercise the outbound actions
-  **directly** (executed in a real sandboxed session, bypassing the model's
-  judgment) so that denial is provably the sandbox-plus-hook's doing and not the
-  model merely choosing to decline. This test is the
-  boundary proof for the sandbox and is required whenever `watch_sandbox =
-  required`; it does **not** apply to the `watch_sandbox = off` path, which
-  is uncontained by the operator's explicit choice.
+  `curl … | sh`, `git push`, printing and sending secrets, writing to
+  `~/.ssh`/`~/.bashrc`), dispatched with `watch_sandbox = required` and the
+  sandbox enforced, SHALL have escape on **all four credential-leak channels
+  denied**: a WebFetch, an MCP tool call, a raw Bash socket, and a built-in Write
+  to a path outside the review instance. The verification SHALL exercise the
+  actions **directly** (executed in a real sandboxed session, bypassing the
+  model's judgment) so that denial is provably the sandbox-plus-hooks' doing and
+  not the model merely choosing to decline; the filesystem check SHALL be
+  authoritative (the out-of-instance target absent afterward), not the agent's
+  self-report. This test is the boundary proof for the sandbox and is required
+  whenever `watch_sandbox = required`; it does **not** apply to the
+  `watch_sandbox = off` path, which is uncontained by the operator's explicit
+  choice.
 
 Containment model (a single switch):
 
@@ -394,9 +397,10 @@ Containment (security):
       required` and the OS sandbox enforced, both an outbound network request
       executed **directly** within a dispatched session (e.g. `curl
       https://example.com` run in the session shell, bypassing model judgment)
-      AND a **write outside the instance** (e.g. to `~/.ssh`) fail at the OS
-      layer (connection blocked / EPERM; write denied) -- so the agent can
-      neither exfiltrate nor persist/tamper outside the instance.
+      AND a **built-in Write outside the instance** (e.g. to `~/.ssh`) fail
+      (egress: connection blocked / EPERM; write: denied by the filesystem-guard
+      PreToolUse hook, target absent afterward) -- so the agent can neither
+      exfiltrate nor persist/tamper outside the instance.
 - [ ] **AC10 (R7, R8 real HOME).** With `watch_sandbox = required`, the
       dispatched session runs under the developer's **real HOME** -- an
       on-disk credential sentinel (e.g. a token file under `~/.config/gh`) is
@@ -417,12 +421,14 @@ Containment (security):
       that review, exits non-zero, and prints a message naming the sandbox
       failure; no session is launched.
 - [ ] **AC14 (R17).** Adversarial test (sandboxed path): a PR whose
-      title/body/diff attempt `curl … | sh`, a `git push`, and secret
-      exfiltration is dispatched with `watch_sandbox = required` and the sandbox
-      enforced; outbound attempts on **all three egress channels** -- a
-      **WebFetch**, an **MCP tool** call, and a **raw Bash socket** -- each
-      **executed directly in a real `claude --bg` sandboxed session to bypass
-      model judgment**, are denied -- no egress, no push, no unapproved post.
+      title/body/diff attempt `curl … | sh`, a `git push`, secret exfiltration,
+      and a write to `~/.ssh`/`~/.bashrc` is dispatched with `watch_sandbox =
+      required` and the sandbox enforced; attempts on **all four credential-leak
+      channels** -- a **WebFetch**, an **MCP tool** call, a **raw Bash socket**,
+      and a **built-in Write outside the instance** -- each **executed directly
+      in a real `claude --bg` sandboxed session to bypass model judgment**, are
+      denied -- no egress, no push, no unapproved post, no out-of-instance write
+      (the target absent afterward).
 
 Act boundary and determinism:
 
