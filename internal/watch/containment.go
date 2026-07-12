@@ -16,12 +16,15 @@ const (
 	// OUTSIDE the OS sandbox (which cages only Bash subprocesses), so in sandbox
 	// mode they must be denied by a hook that fires even under bypassPermissions.
 	egressDenyMatcher = "WebFetch|WebSearch|mcp__"
-	// fsGuardMatcher matches the built-in file tools. Like the egress channels
-	// these run OUTSIDE the OS sandbox (through the permission system, which a
-	// dispatched session's bypassPermissions skips), so in sandbox mode a write
-	// that resolves outside the instance must be denied by a hook. This is the
-	// filesystem-escape counterpart to egressDenyMatcher.
-	fsGuardMatcher = "Write|Edit|NotebookEdit"
+	// fsGuardMatcher matches the built-in file-writing tools. Like the egress
+	// channels these run OUTSIDE the OS sandbox (through the permission system,
+	// which a dispatched session's bypassPermissions skips), so in sandbox mode a
+	// write that resolves outside the instance must be denied by a hook. This is the
+	// filesystem-escape counterpart to egressDenyMatcher. MultiEdit is listed
+	// explicitly alongside Edit: the harness matches by substring (so "Edit" already
+	// covers "MultiEdit"), but naming it keeps the guard correct if a future harness
+	// anchors matcher comparison.
+	fsGuardMatcher = "Write|Edit|MultiEdit|NotebookEdit"
 	// postGuardMatcher matches Bash so the post-guard can inspect gh commands and
 	// refuse a review/comment post. Applied in every mode (accident prevention).
 	postGuardMatcher = "Bash"
@@ -82,21 +85,25 @@ func egressDenyHook() map[string]any {
 }
 
 // fsGuardHook returns the PreToolUse hook that denies a filesystem escape via the
-// built-in Write/Edit/NotebookEdit tools. It is applied in sandbox mode only. The
-// OS sandbox confines Bash writes to the instance, but the built-in file tools run
-// through the permission system, which bypassPermissions skips -- so this hook is
-// the closure for that channel, the filesystem counterpart to egressDenyHook. It
-// delegates the decision to `niwa watch guard-fs`, which resolves the target path
-// against the instance root and exits 0 (inside -> allow) or 2 (outside -> deny).
-// The wrapper maps any non-zero guard exit -- 2, or a failure to run the guard at
-// all -- to exit 2 (block), so it is fail-closed: a missing or erroring guard
-// denies the write rather than letting it through. It is a hard deny, not an ask:
-// a review-drafting agent's only legitimate writes (the draft and clone-local
-// files) are inside the instance, so an out-of-instance write is never legitimate.
-func fsGuardHook() map[string]any {
+// built-in Write/Edit/MultiEdit/NotebookEdit tools. It is applied in sandbox mode
+// only. The OS sandbox confines Bash writes to the instance, but the built-in file
+// tools run through the permission system, which bypassPermissions skips -- so this
+// hook is the closure for that channel, the filesystem counterpart to
+// egressDenyHook. It delegates the decision to `niwa watch guard-fs --root
+// <instancePath>`, which resolves the target path against that explicit instance
+// root and exits 0 (inside -> allow) or 2 (outside -> deny). Baking the instance
+// path into the hook (rather than letting the guard infer it from CLAUDE_PROJECT_DIR
+// or cwd) makes the containment root niwa's own record, immune to an ambient value
+// inherited wider than the instance. The wrapper maps any non-zero guard exit -- 2,
+// or a failure to run the guard at all -- to exit 2 (block), so it is fail-closed: a
+// missing or erroring guard denies the write rather than letting it through. It is a
+// hard deny, not an ask: a review-drafting agent's only legitimate writes (the draft
+// and clone-local files) are inside the instance, so an out-of-instance write is
+// never legitimate.
+func fsGuardHook(instancePath string) map[string]any {
 	cmd := fmt.Sprintf(
-		`%s watch guard-fs; ec=$?; if [ "$ec" = "0" ]; then exit 0; else exit 2; fi`,
-		shellQuote(guardBinPath()),
+		`%s watch guard-fs --root %s; ec=$?; if [ "$ec" = "0" ]; then exit 0; else exit 2; fi`,
+		shellQuote(guardBinPath()), shellQuote(instancePath),
 	)
 	return map[string]any{
 		"matcher": fsGuardMatcher,
@@ -174,7 +181,7 @@ func ApplyReviewSettings(instancePath string, sandbox bool) error {
 		preToolUse = append(preToolUse, egressDenyHook())
 	}
 	if sandbox && !preToolUseHasMatcher(preToolUse, fsGuardMatcher) {
-		preToolUse = append(preToolUse, fsGuardHook())
+		preToolUse = append(preToolUse, fsGuardHook(instancePath))
 	}
 	hooks["PreToolUse"] = preToolUse
 	settings["hooks"] = hooks

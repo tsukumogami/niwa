@@ -226,7 +226,7 @@ func TestVerifyReviewSettings_RejectsRelaxations(t *testing.T) {
 		return map[string]any{
 			"sandbox": noEgressSandboxStanza(),
 			"hooks": map[string]any{
-				"PreToolUse": []any{postGuardHook(), egressDenyHook(), fsGuardHook()},
+				"PreToolUse": []any{postGuardHook(), egressDenyHook(), fsGuardHook("/review-instance")},
 			},
 		}
 	}
