@@ -58,15 +58,30 @@ type onboardEnvelope struct {
 	Detail   string `json:"detail"`
 }
 
+// runOnboard is the cobra RunE entry point. It delegates to
+// resolveAndRunOnboard for the actual work so that the --json envelope
+// (below) can be emitted exactly once, from a single call site, for
+// every terminal outcome -- including the flag-conflict usage errors,
+// not just the wizard's own gate/stub outcomes.
 func runOnboard(cmd *cobra.Command, args []string) error {
+	result, runErr := resolveAndRunOnboard(cmd)
+
+	if onboardJSON {
+		emitOnboardJSON(cmd, result, runErr)
+	}
+
+	return runErr
+}
+
+func resolveAndRunOnboard(cmd *cobra.Command) (onboard.Result, error) {
 	if onboardTeam && onboardIndividual {
-		return fmt.Errorf("--team and --individual are mutually exclusive")
+		return onboard.Result{}, fmt.Errorf("--team and --individual are mutually exclusive")
 	}
 	if onboardSameLogin && onboardSplitLogin {
-		return fmt.Errorf("--same-login and --split-login are mutually exclusive")
+		return onboard.Result{}, fmt.Errorf("--same-login and --split-login are mutually exclusive")
 	}
 	if onboardTeam && (onboardSameLogin || onboardSplitLogin) {
-		return fmt.Errorf("--same-login/--split-login only apply to an individual setup; combining either with --team is a usage conflict")
+		return onboard.Result{}, fmt.Errorf("--same-login/--split-login only apply to an individual setup; combining either with --team is a usage conflict")
 	}
 
 	setupOverride := onboard.PhaseUnknown
@@ -96,19 +111,13 @@ func runOnboard(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	result, runErr := onboard.Run(onboard.Options{
+	return onboard.Run(onboard.Options{
 		SetupOverride:    setupOverride,
 		TopologyOverride: topologyOverride,
 		AcceptAPIURL:     onboardAcceptAPIURL,
 		Interactive:      interactive,
 		Confirm:          confirm,
 	})
-
-	if onboardJSON {
-		emitOnboardJSON(cmd, result, runErr)
-	}
-
-	return runErr
 }
 
 // emitOnboardJSON writes the --json terminal envelope to stdout,

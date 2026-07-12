@@ -183,6 +183,41 @@ func TestRunOnboard_JSONEnvelopeShape(t *testing.T) {
 	}
 }
 
+// TestRunOnboard_JSONEnvelopeEmittedOnFlagConflict guards a scrutiny
+// finding: --json must emit exactly one envelope on stdout for every
+// terminal outcome, including the flag-conflict usage errors -- not
+// just the wizard's own gate/stub outcomes. Before the fix, the three
+// mutual-exclusion checks returned before runOnboard ever reached the
+// --json block, so `niwa onboard --json --team --individual` silently
+// produced zero JSON objects despite --json's own flag help text.
+func TestRunOnboard_JSONEnvelopeEmittedOnFlagConflict(t *testing.T) {
+	resetOnboardFlags()
+	defer resetOnboardFlags()
+	onboardJSON = true
+	onboardTeam = true
+	onboardIndividual = true
+
+	var buf bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetOut(&buf)
+
+	err := runOnboard(cmd, nil)
+	if err == nil {
+		t.Fatal("want the mutual-exclusion error, got nil")
+	}
+
+	var env map[string]any
+	if decodeErr := json.Unmarshal(buf.Bytes(), &env); decodeErr != nil {
+		t.Fatalf("stdout is not valid JSON: %v (stdout: %q)", decodeErr, buf.String())
+	}
+	if env["exit_code"] != float64(1) {
+		t.Errorf("exit_code = %v, want 1 (untyped fallback for a plain usage conflict)", env["exit_code"])
+	}
+	if !strings.Contains(env["detail"].(string), "mutually exclusive") {
+		t.Errorf("detail = %v, want substring 'mutually exclusive'", env["detail"])
+	}
+}
+
 func TestRunOnboard_JSONEnvelopeCarriesSetupOnStubError(t *testing.T) {
 	resetOnboardFlags()
 	defer resetOnboardFlags()

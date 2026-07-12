@@ -4,6 +4,8 @@ import (
 	"errors"
 	"os"
 	"testing"
+
+	"github.com/tsukumogami/niwa/internal/vault/infisical"
 )
 
 func TestCheckNonInteractivePrecondition_InteractiveAlwaysPasses(t *testing.T) {
@@ -61,6 +63,21 @@ func TestResolveAPIURLForGate_DefaultWhenNeitherSet(t *testing.T) {
 	got := resolveAPIURLForGate("")
 	if got != cloudDefaultAPIURL {
 		t.Errorf("resolveAPIURLForGate = %q, want default %q", got, cloudDefaultAPIURL)
+	}
+}
+
+// TestCloudDefaultAPIURL_MatchesInfisicalDefault guards against drift
+// between cloudDefaultAPIURL (duplicated here because infisical's real
+// default is unexported) and infisical's actual default: if the two
+// ever diverge, ValidateAPIURL would classify our "default" as
+// non-default, which this test would catch.
+func TestCloudDefaultAPIURL_MatchesInfisicalDefault(t *testing.T) {
+	nonDefault, err := infisical.ValidateAPIURL(cloudDefaultAPIURL)
+	if err != nil {
+		t.Fatalf("unexpected error validating cloudDefaultAPIURL: %v", err)
+	}
+	if nonDefault {
+		t.Errorf("cloudDefaultAPIURL %q no longer matches infisical's real default -- update the duplicated constant", cloudDefaultAPIURL)
 	}
 }
 
@@ -158,6 +175,41 @@ func TestRun_NonDefaultAPIURLWithAcceptFlagPasses(t *testing.T) {
 	if result.Setup != PhaseTeam {
 		t.Errorf("Setup = %v, want PhaseTeam", result.Setup)
 	}
+}
+
+// TestRun_ResultSetupPropagatesOnGateFailures guards a scrutiny
+// finding: Result.Setup must carry opts.SetupOverride through on the
+// two gate-failure returns, not just the stub success/not-implemented
+// path, per Result's own doc comment ("so a caller's --json envelope
+// can still name the setup a failed run was attempting"). Before the
+// fix, both gate-failure returns discarded a known override with a
+// bare Result{}.
+func TestRun_ResultSetupPropagatesOnGateFailures(t *testing.T) {
+	os.Unsetenv(apiURLEnvVar)
+
+	t.Run("non-interactive precondition failure", func(t *testing.T) {
+		result, err := Run(Options{Interactive: false, SetupOverride: PhaseIndividual})
+		if err == nil {
+			t.Fatal("want the non-TTY precondition error, got nil")
+		}
+		if result.Setup != PhaseIndividual {
+			t.Errorf("Setup = %v, want PhaseIndividual to propagate on the precondition-failure path", result.Setup)
+		}
+	})
+
+	t.Run("api_url gate failure", func(t *testing.T) {
+		result, err := Run(Options{
+			Interactive:     false,
+			SetupOverride:   PhaseTeam,
+			APIURLConfigVal: "https://self-hosted.example.com/api",
+		})
+		if err == nil {
+			t.Fatal("want the api_url gate error, got nil")
+		}
+		if result.Setup != PhaseTeam {
+			t.Errorf("Setup = %v, want PhaseTeam to propagate on the api_url gate-failure path", result.Setup)
+		}
+	})
 }
 
 func TestRun_InteractiveAPIURLDeclineFails(t *testing.T) {

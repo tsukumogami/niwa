@@ -109,17 +109,23 @@ func resolveAPIURLForGate(configVal string) string {
 // surface, exit codes, and non-TTY/api_url contracts are fully wired
 // and testable ahead of those runners.
 func Run(opts Options) (Result, error) {
+	// Result.Setup carries opts.SetupOverride through every return path
+	// below, including the two gate-failure paths -- not just the stub
+	// success/not-implemented path -- so a caller's --json envelope can
+	// still name the setup a failed run was attempting.
+	result := Result{Setup: opts.SetupOverride}
+
 	if err := checkNonInteractivePrecondition(opts.Interactive, opts.SetupOverride, opts.TopologyOverride); err != nil {
-		return Result{}, &ExitCodeError{Code: ExitNonInteractivePrecondition, Msg: err.Error()}
+		return result, &ExitCodeError{Code: ExitNonInteractivePrecondition, Msg: err.Error()}
 	}
 
 	apiURL := resolveAPIURLForGate(opts.APIURLConfigVal)
 	if err := CheckAPIURL(apiURL, opts.AcceptAPIURL, opts.Interactive, opts.Confirm); err != nil {
-		return Result{}, &ExitCodeError{Code: ExitNonInteractivePrecondition, Msg: err.Error()}
+		return result, &ExitCodeError{Code: ExitNonInteractivePrecondition, Msg: err.Error()}
 	}
 
 	if opts.SetupOverride == PhaseUnknown {
-		return Result{}, fmt.Errorf("onboard: setup detection is not yet implemented; pass --team or --individual")
+		return result, fmt.Errorf("onboard: setup detection is not yet implemented; pass --team or --individual")
 	}
-	return Result{Setup: opts.SetupOverride}, fmt.Errorf("onboard: %s setup is not yet implemented", opts.SetupOverride)
+	return result, fmt.Errorf("onboard: %s setup is not yet implemented", opts.SetupOverride)
 }
