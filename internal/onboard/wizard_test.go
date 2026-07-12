@@ -522,3 +522,150 @@ func TestRun_PhaseIndividualSuccessCallsVerifyIndividual(t *testing.T) {
 		t.Errorf("Setup = %v, want PhaseIndividual", result.Setup)
 	}
 }
+
+// --- Options.Detect wiring (Issue 9: invoking the previously-unwired
+// Detect funnel from Run itself) ---
+
+// TestRun_DetectNilFallsThroughToNotImplemented pins that a caller
+// which still resolves SetupOverride itself (every test above this
+// one) is completely unaffected by the Detect wiring: PhaseUnknown
+// with Options.Detect left nil hits the exact same untyped
+// not-yet-implemented error as before.
+func TestRun_DetectNilFallsThroughToNotImplemented(t *testing.T) {
+	os.Unsetenv(apiURLEnvVarForTest)
+	confirmAccept := func(prompt string, defaultYes bool) (bool, error) { return true, nil }
+
+	_, err := Run(Options{Interactive: true, Confirm: confirmAccept})
+	if err == nil {
+		t.Fatal("want the not-yet-implemented stub error, got nil")
+	}
+	var ece *ExitCodeError
+	if errors.As(err, &ece) {
+		t.Fatalf("stub error must be untyped, got *ExitCodeError{Code: %d}", ece.Code)
+	}
+}
+
+// TestRun_DetectTeamVaultEmptyRoutesTeam confirms Run's own Detect
+// invocation resolves PhaseTeam (the free, no-network-call signal)
+// and routes into the team branch -- reaching the "Options.Team must
+// be populated" caller-bug error (not the not-yet-implemented stub)
+// proves routing actually happened via Detect.
+func TestRun_DetectTeamVaultEmptyRoutesTeam(t *testing.T) {
+	os.Unsetenv(apiURLEnvVarForTest)
+	confirmAccept := func(prompt string, defaultYes bool) (bool, error) { return true, nil }
+
+	result, err := Run(Options{
+		Interactive: true,
+		Confirm:     confirmAccept,
+		Detect: &DetectInputs{
+			Bearer:         testBearer(),
+			IdentityID:     "ident-1",
+			TeamVaultEmpty: true,
+		},
+	})
+	if err == nil {
+		t.Fatal("want the Options.Team caller-bug error, got nil")
+	}
+	if got := err.Error(); !strings.Contains(got, "Options.Team must be populated") {
+		t.Errorf("err = %q, want it to name Options.Team (proves Detect routed to PhaseTeam)", got)
+	}
+	if result.Setup != PhaseTeam {
+		t.Errorf("Setup = %v, want PhaseTeam", result.Setup)
+	}
+}
+
+// TestRun_DetectIndividualDeclineAbortsWithExitDecline is the AC-32
+// unit-level pin: when Detect infers an individual setup and the
+// operator declines the confirmation prompt, Run must abort with
+// ExitDecline (exit 3) -- not silently switch to the team setup. This
+// is deliberately different from ConfirmSetup's own tested "decline
+// switches to the other phase" contract (TestConfirmSetup_
+// OverridesToOther): switching phases here would mean team-setup
+// writes could occur despite the operator having said "no" to what it
+// was actually asked, which AC-4 forbids.
+func TestRun_DetectIndividualDeclineAbortsWithExitDecline(t *testing.T) {
+	os.Unsetenv(apiURLEnvVarForTest)
+
+	srv := newIndividualFakeServer() // identity found -> PhaseIndividual
+	httpSrv := srv.Start()
+	defer httpSrv.Close()
+
+	var confirmPrompts []string
+	confirmDecline := func(prompt string, defaultYes bool) (bool, error) {
+		confirmPrompts = append(confirmPrompts, prompt)
+		return false, nil
+	}
+
+	result, err := Run(Options{
+		Interactive: true,
+		Confirm:     confirmDecline,
+		Detect: &DetectInputs{
+			APIURL:     httpSrv.URL,
+			Bearer:     testBearer(),
+			IdentityID: "ident-1",
+		},
+	})
+	var ece *ExitCodeError
+	if !errors.As(err, &ece) {
+		t.Fatalf("err is not *ExitCodeError: %T (%v)", err, err)
+	}
+	if ece.Code != ExitDecline {
+		t.Errorf("Code = %d, want ExitDecline (%d)", ece.Code, ExitDecline)
+	}
+	if result.Setup != PhaseIndividual {
+		t.Errorf("Setup = %v, want PhaseIndividual (the declined setup, still named per Result's own doc contract)", result.Setup)
+	}
+	if len(confirmPrompts) != 1 {
+		t.Fatalf("want exactly one confirm prompt (the setup-confirmation), got %d: %v", len(confirmPrompts), confirmPrompts)
+	}
+	if n := srv.CountRequests("client-secrets"); n != 0 {
+		t.Errorf("mint requests = %d, want 0 -- a decline must change no state (AC-4)", n)
+	}
+}
+
+// TestRun_DetectIndividualAcceptRoutesThroughFullPipeline confirms the
+// accept path: Detect infers individual (identity found; same-login,
+// since the read-identity call just succeeded with the current
+// session), the operator accepts both the setup and topology
+// confirmations, and Run proceeds into the real individual pipeline
+// with the detected topology threaded onto Options.Individual.
+func TestRun_DetectIndividualAcceptRoutesThroughFullPipeline(t *testing.T) {
+	os.Unsetenv(apiURLEnvVarForTest)
+
+	srv := newIndividualFakeServer()
+	srv.failReadEnv = true // stop the pipeline right after mint+verify-hop begins, before any store
+	httpSrv := srv.Start()
+	defer httpSrv.Close()
+
+	confirmAccept := func(prompt string, defaultYes bool) (bool, error) { return true, nil }
+
+	result, err := Run(Options{
+		Interactive: true,
+		Confirm:     confirmAccept,
+		Detect: &DetectInputs{
+			APIURL:     httpSrv.URL,
+			Bearer:     testBearer(),
+			IdentityID: "ident-1",
+		},
+		Individual: &IndividualSetupParams{
+			APIURL:      httpSrv.URL,
+			IdentityID:  "ident-1",
+			Kind:        "infisical",
+			Project:     testWorkspaceProject,
+			Environment: "dev",
+			// Topology deliberately left unset here: Run must set it
+			// from the confirmed detection result, not require the
+			// caller to have already guessed it.
+		},
+	})
+	if result.Setup != PhaseIndividual {
+		t.Errorf("Setup = %v, want PhaseIndividual", result.Setup)
+	}
+	var ece *ExitCodeError
+	if !errors.As(err, &ece) {
+		t.Fatalf("err is not *ExitCodeError: %T (%v)", err, err)
+	}
+	if ece.Code != ExitAuthFailure {
+		t.Errorf("Code = %d, want ExitAuthFailure (%d) -- confirms Run reached RunIndividualSetup with a resolved topology", ece.Code, ExitAuthFailure)
+	}
+}

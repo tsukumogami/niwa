@@ -16,15 +16,14 @@ import (
 // need once SetupOverride resolves to one of them.
 type Options struct {
 	// SetupOverride is the operator's --team/--individual choice, or
-	// PhaseUnknown when neither flag was passed. Today this is Run's
-	// only routing input -- a non-unknown value both selects the
-	// runner AND is returned verbatim rather than confirmed against
-	// Detect's inference. Whoever wires Detect in must decide whether a
-	// supplied override skips Detect entirely (no ClientID fetched) or
-	// only skips ConfirmSetup while Detect still runs to populate
-	// DetectionResult.ClientID -- the design's R2 text ("MUST confirm
-	// or override") reads as the latter, since the individual runner
-	// needs ClientID regardless of how the phase was chosen.
+	// PhaseUnknown when neither flag was passed. A non-unknown value
+	// both selects the runner AND skips Detect entirely (Issue 9): no
+	// ClientID is fetched via Detect's own ReadIdentity call, because
+	// RunIndividualSetup performs its own ReadIdentity as the first
+	// step of its pipeline regardless of how the phase was chosen --
+	// there is no caller that needs Detect's DetectionResult.ClientID
+	// once an override is supplied. PhaseUnknown routes through Run's
+	// own Detect invocation (see Options.Detect) instead.
 	SetupOverride SetupPhase
 	// TopologyOverride is the operator's --same-login/--split-login
 	// choice, or TopologyUnknown when neither flag was passed. Only
@@ -80,6 +79,38 @@ type Options struct {
 	// populates this field and Run enforces both checks at wizard
 	// entry, before the api_url gate and before any routing decision.
 	Preconditions *PreconditionsParams
+
+	// Detect carries the raw inputs Run needs to invoke the detection
+	// funnel (detect.go) itself when SetupOverride is PhaseUnknown
+	// (R2: infer, then confirm or override -- Issue 9's wiring of the
+	// previously-unwired Detect call). nil combined with PhaseUnknown
+	// falls through to the pre-existing "not yet implemented" error,
+	// so every caller that resolves SetupOverride itself (every
+	// existing test, and any --team/--individual invocation) is
+	// unaffected.
+	Detect *DetectInputs
+}
+
+// DetectInputs collects Detect's raw inputs (detect.go's own
+// parameters) for the caller that wants Run to perform detection
+// itself rather than resolving SetupOverride up front. Only consulted
+// when SetupOverride is PhaseUnknown.
+type DetectInputs struct {
+	// APIURL is the same resolved, already-gated api_url Team/
+	// Individual carry -- Detect's ReadIdentity call is the first
+	// bearer-carrying call once the api_url gate above has passed.
+	APIURL string
+	// Bearer is the operator's own live session bearer.
+	Bearer secret.Value
+	// IdentityID is the config-sourced identity id Detect checks.
+	IdentityID string
+	// TeamVaultEmpty is Detect's free local signal
+	// (config.VaultRegistry.IsEmpty() on the team config).
+	TeamVaultEmpty bool
+	// PersonalCredResolves is Detect's R15 free local signal: whether
+	// the personal overlay already declares a credential-sync entry
+	// that resolves for the target (kind, project) pair.
+	PersonalCredResolves bool
 }
 
 // PreconditionsParams collects the R22 precondition inputs Run
@@ -133,12 +164,15 @@ func checkNonInteractivePrecondition(interactive bool, setup SetupPhase, topolog
 // step 0 / Decision 4), which must run before any bearer-carrying call.
 // Once both pass, Run attaches a redactor and routes to the setup
 // runner named by opts.SetupOverride (RunTeam or RunIndividualSetup).
-// Detect/ConfirmSetup/ConfirmTopology are not yet wired in here -- a
-// caller must resolve SetupOverride and TopologyOverride itself (the
-// command layer's --team/--individual/--same-login/--split-login flags
-// today); this returns a plain (untyped, exit-1 fallback) error when
-// SetupOverride is PhaseUnknown or any other phase this function
-// doesn't yet route.
+// When SetupOverride is PhaseUnknown (no --team/--individual flag),
+// Run performs detection itself (Issue 9): it invokes Detect against
+// opts.Detect's inputs, then confirms an inferred individual setup via
+// opts.Confirm before any state changes, declining into ExitDecline
+// rather than silently switching to the other phase (AC-4/AC-32).
+// opts.Detect nil (every caller that resolves SetupOverride itself --
+// every existing test, and any --team/--individual invocation) falls
+// through to the pre-existing "not yet implemented" error, preserving
+// prior behavior for those callers exactly.
 func Run(opts Options) (Result, error) {
 	// Result.Setup carries opts.SetupOverride through every return path
 	// below, including the two gate-failure paths -- not just the stub
@@ -189,11 +223,66 @@ func Run(opts Options) (Result, error) {
 		return result, &ExitCodeError{Code: ExitNonInteractivePrecondition, Msg: err.Error()}
 	}
 
-	if opts.SetupOverride == PhaseUnknown {
-		return result, fmt.Errorf("onboard: setup detection is not yet implemented; pass --team or --individual")
+	setupPhase := opts.SetupOverride
+	topology := opts.TopologyOverride
+
+	// R2: when the operator didn't supply --team/--individual, Run
+	// performs detection itself, then presents the inferred phase for
+	// confirmation before any state changes (AC-2/AC-4). A decline
+	// here is a genuine abort (AC-32, exit 3) -- it does NOT silently
+	// switch to the other phase; the explicit --team/--individual
+	// override already exists for that (AC-3), and the wizard must
+	// not guess a different action than the one it just asked the
+	// operator to confirm. This is why the shared ConfirmSetup helper
+	// (detect.go), whose own tested contract is "decline switches to
+	// the other phase," is deliberately not reused here -- its
+	// contract is real and pinned by its own tests, just not the one
+	// this confirmation needs.
+	if setupPhase == PhaseUnknown {
+		if opts.Detect == nil {
+			return result, fmt.Errorf("onboard: setup detection is not yet implemented; pass --team or --individual")
+		}
+		det, err := Detect(ctx, opts.Detect.APIURL, opts.Detect.Bearer, opts.Detect.IdentityID, opts.Detect.TeamVaultEmpty, opts.Detect.PersonalCredResolves)
+		if err != nil {
+			return result, err
+		}
+		// Result.Setup names the detected phase from this point on,
+		// including a decline return below -- matching Result's own
+		// doc comment ("populated whenever the phase is known ...
+		// even on an error return"), so a caller's --json envelope can
+		// still say which setup the operator declined.
+		result.Setup = det.Phase
+
+		switch det.Phase {
+		case PhaseTeam, PhaseVerifyOnly:
+			// The team path has no confirmable inference short of
+			// R21's own re-verification, and PhaseVerifyOnly is an
+			// automatic route (R15), not an operator choice -- neither
+			// presents a decline-able prompt.
+			setupPhase = det.Phase
+		case PhaseIndividual:
+			if opts.Confirm == nil {
+				return result, fmt.Errorf("onboard: Options.Confirm must be non-nil to confirm a detected individual setup")
+			}
+			ok, err := opts.Confirm(fmt.Sprintf("Detected: individual setup (%s). Continue?", det.Topology), true)
+			if err != nil {
+				return result, err
+			}
+			if !ok {
+				return result, &ExitCodeError{Code: ExitDecline, Msg: "onboard: operator declined the detected individual setup"}
+			}
+			resolvedTopology, err := ConfirmTopology(det.Topology, opts.Confirm)
+			if err != nil {
+				return result, err
+			}
+			setupPhase = PhaseIndividual
+			topology = resolvedTopology
+		default:
+			return result, fmt.Errorf("onboard: Detect returned unrecognized phase %s", det.Phase)
+		}
 	}
 
-	if opts.SetupOverride == PhaseTeam {
+	if setupPhase == PhaseTeam {
 		if opts.Team == nil {
 			return result, fmt.Errorf("onboard: Options.Team must be populated when SetupOverride is PhaseTeam")
 		}
@@ -203,9 +292,16 @@ func Run(opts Options) (Result, error) {
 		return result, nil
 	}
 
-	if opts.SetupOverride == PhaseIndividual {
+	if setupPhase == PhaseIndividual {
 		if opts.Individual == nil {
 			return result, fmt.Errorf("onboard: Options.Individual must be populated when SetupOverride is PhaseIndividual")
+		}
+		if topology != TopologyUnknown {
+			// Detection above resolved a topology the caller's
+			// pre-built Individual params couldn't have known in
+			// advance; every other path (an explicit --same-login/
+			// --split-login override) already set this consistently.
+			opts.Individual.Topology = topology
 		}
 		if _, err := RunIndividualSetup(ctx, *opts.Individual); err != nil {
 			return result, err
@@ -228,7 +324,7 @@ func Run(opts Options) (Result, error) {
 		return result, nil
 	}
 
-	if opts.SetupOverride == PhaseVerifyOnly {
+	if setupPhase == PhaseVerifyOnly {
 		// R15: re-running against a completed individual setup goes
 		// straight to the wizard-end check -- no re-mint, no re-store.
 		if opts.Verify == nil {
@@ -240,5 +336,5 @@ func Run(opts Options) (Result, error) {
 		return result, nil
 	}
 
-	return result, fmt.Errorf("onboard: %s setup is not yet implemented", opts.SetupOverride)
+	return result, fmt.Errorf("onboard: %s setup is not yet implemented", setupPhase)
 }

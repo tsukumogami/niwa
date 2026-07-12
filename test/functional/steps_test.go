@@ -134,10 +134,20 @@ func (s *testState) buildEnv() []string {
 //     or INFISICAL_STUB_FOLDER_CREATE_FAIL=1 forces a non-zero exit with a
 //     recognisable stderr message, so a scenario can seed a plan-gate or a
 //     plain store-write failure independently.
-//   - `secrets set` -- captures its argv and stdin body under
-//     INFISICAL_STUB_STORE_DIR (default "$TMPDIR/infisical-stub-store") for
-//     later inspection, then exits 0 unless INFISICAL_STUB_PLAN_GATE=1 or
-//     INFISICAL_STUB_SECRETS_SET_FAIL=1 is set.
+//   - `secrets set` -- persists its stdin body under
+//     INFISICAL_STUB_STORE_DIR (default "$TMPDIR/infisical-stub-store"),
+//     keyed by projectId/env/path/key (parsed from argv) so a later `export`
+//     of the same (project, env, path) round-trips it back -- the wizard-end
+//     verification (R11) reads back exactly what the individual pipeline
+//     just stored via this same delegation, both against this one stub.
+//     Also captures the last invocation's raw argv/body under
+//     last-set-args/last-set-body for scenarios that only need to assert on
+//     the call shape. Exits 0 unless INFISICAL_STUB_PLAN_GATE=1 or
+//     INFISICAL_STUB_SECRETS_SET_FAIL=1 is set (checked before the body is
+//     persisted, so an induced failure leaves no stored entry).
+//   - `export --projectId --env --path --format json` -- returns the
+//     persisted entries for that (project, env, path) as a flat JSON object,
+//     or `{}` when none were ever stored there.
 //
 // All INFISICAL_STUB_* variables are ordinary env vars: since the stub
 // inherits the niwa subprocess's environment unchanged (cmd.Env = nil per the
@@ -150,9 +160,56 @@ func writeFakeInfisical(dir string) error {
 		return fmt.Errorf("mkdir shared-bin: %w", err)
 	}
 	script := `#!/bin/sh
+storeDir="${INFISICAL_STUB_STORE_DIR:-$TMPDIR/infisical-stub-store}"
+
+# parse_pej scans the remaining argv for --projectId/--env/--path and
+# sets projectId/envName/secretPath. Shared by export and secrets-set
+# so both compute the same storage key from the same flag names.
+parse_pej() {
+  projectId=""
+  envName=""
+  secretPath=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --projectId) projectId="$2"; shift 2 ;;
+      --env) envName="$2"; shift 2 ;;
+      --path) secretPath="$2"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+}
+
+# json_escape_stdin reads stdin and emits it as a JSON string body
+# (without the surrounding quotes): backslashes and quotes escaped,
+# newlines joined with a literal \n so a multi-line TOML credential
+# body round-trips as one JSON string value.
+json_escape_stdin() {
+  awk '
+    { line = $0; gsub(/\\/, "\\\\", line); gsub(/"/, "\\\"", line);
+      if (NR > 1) printf "\\n";
+      printf "%s", line }
+  '
+}
+
 case "$1" in
   export)
-    echo '{}'
+    shift
+    parse_pej "$@"
+    entryDir="$storeDir/secrets/$projectId/$envName$secretPath"
+    if [ -d "$entryDir" ] && [ -n "$(ls -A "$entryDir" 2>/dev/null)" ]; then
+      printf '{'
+      first=1
+      for f in "$entryDir"/*; do
+        key=$(basename "$f")
+        if [ "$first" = "1" ]; then first=0; else printf ','; fi
+        printf '"%s":"' "$key"
+        json_escape_stdin < "$f"
+        printf '"'
+      done
+      printf '}\n'
+    else
+      echo '{}'
+    fi
     exit 0
     ;;
   login)
@@ -184,11 +241,14 @@ case "$1" in
         exit 0
         ;;
       set)
-        storeDir="${INFISICAL_STUB_STORE_DIR:-$TMPDIR/infisical-stub-store}"
         mkdir -p "$storeDir"
-        shift 2
-        printf '%s\n' "$@" > "$storeDir/last-set-args"
-        cat > "$storeDir/last-set-body"
+        keyArg="$3"
+        key="${keyArg%%=*}"
+        shift 3
+        parse_pej "$@"
+        printf '%s\n' "$keyArg" "$@" > "$storeDir/last-set-args"
+        body="$storeDir/last-set-body"
+        cat > "$body"
         if [ "$INFISICAL_STUB_PLAN_GATE" = "1" ]; then
           echo "error: plan does not allow secret writes" >&2
           exit 1
@@ -197,6 +257,9 @@ case "$1" in
           echo "error: write failed" >&2
           exit 1
         fi
+        entryDir="$storeDir/secrets/$projectId/$envName$secretPath"
+        mkdir -p "$entryDir"
+        cp "$body" "$entryDir/$key"
         exit 0
         ;;
     esac

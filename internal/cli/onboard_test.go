@@ -4,12 +4,81 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/spf13/cobra"
 	"github.com/tsukumogami/niwa/internal/onboard"
 )
+
+// setupOnboardTestEnv gives runOnboard a real, valid workspace config to
+// load: a temp instance directory declaring [vault.provider] with every
+// field loadOnboardConfig requires, chdir'd into for the duration of the
+// test (t.Chdir auto-restores on cleanup), plus a sandboxed HOME/
+// XDG_CONFIG_HOME so config.GlobalConfigDir() resolves somewhere
+// writable and never touches the real developer machine's config. The
+// operator-bearer escape hatch is set so resolveOperatorBearer succeeds
+// without a real `infisical login` session.
+func setupOnboardTestEnv(t *testing.T) {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv(operatorBearerEnvOverride, "test-operator-token")
+
+	instanceDir := t.TempDir()
+	niwaDir := filepath.Join(instanceDir, ".niwa")
+	if err := os.MkdirAll(niwaDir, 0o755); err != nil {
+		t.Fatalf("creating .niwa dir: %v", err)
+	}
+	cfg := "[workspace]\n" +
+		"name = \"test-ws\"\n" +
+		"\n" +
+		"[vault.provider]\n" +
+		"kind = \"infisical\"\n" +
+		"project = \"proj-1\"\n" +
+		"identity_id = \"ident-1\"\n" +
+		"identity_name = \"Test Identity\"\n" +
+		"environment = \"dev\"\n"
+	if err := os.WriteFile(filepath.Join(niwaDir, "workspace.toml"), []byte(cfg), 0o644); err != nil {
+		t.Fatalf("writing workspace.toml: %v", err)
+	}
+	t.Chdir(instanceDir)
+
+	// A real `infisical` binary may happen to be on the machine's PATH
+	// (it is on this repo's own dev/CI image, installed via tsuku for
+	// the functional suite) -- without a stub ahead of it, R22's
+	// EnsureAuthenticatedSession precondition would shell out to it
+	// for real and print its own login-status guidance to stdout,
+	// making these plain CLI-plumbing unit tests depend on whatever
+	// session state that real binary happens to have. Install a
+	// minimal stub reporting "authenticated" first on PATH so R22's
+	// precondition is a no-op here, exactly like the functional
+	// suite's own writeFakeInfisical does for the same reason.
+	installFakeInfisicalOnPath(t)
+}
+
+// installFakeInfisicalOnPath writes a tiny `infisical login status
+// --json` stub reporting an authenticated session and prepends its
+// directory to PATH for the duration of the test, so R22's session
+// precondition is satisfied without depending on the host machine's
+// real infisical CLI or session state.
+func installFakeInfisicalOnPath(t *testing.T) {
+	t.Helper()
+	bin := t.TempDir()
+	script := "#!/bin/sh\n" +
+		"if [ \"$1\" = \"login\" ] && [ \"$2\" = \"status\" ]; then\n" +
+		"  printf '{\"sessions\":[{\"principalType\":\"user\",\"status\":\"authenticated\",\"organization\":\"test-org\"}]}\\n'\n" +
+		"  exit 0\n" +
+		"fi\n" +
+		"exit 0\n"
+	if err := os.WriteFile(filepath.Join(bin, "infisical"), []byte(script), 0o755); err != nil {
+		t.Fatalf("writing fake infisical stub: %v", err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
 
 // TestOnboardCmd_WiredIntoRoot asserts onboard is registered on the
 // root command as a single command with no subcommands (AC-1).
@@ -99,6 +168,7 @@ func TestRunOnboard_TeamWithTopologyFlagIsUsageConflict(t *testing.T) {
 func TestRunOnboard_NonTTYNoOverrideFailsFastExitTwo(t *testing.T) {
 	resetOnboardFlags()
 	defer resetOnboardFlags()
+	setupOnboardTestEnv(t)
 	// onboard.IsStdinTTY defaults to real term detection, which is false
 	// under `go test` (stdin isn't a terminal), so no stub is needed for
 	// the "non-interactive" half of this test -- but stub explicitly so
@@ -121,38 +191,35 @@ func TestRunOnboard_NonTTYNoOverrideFailsFastExitTwo(t *testing.T) {
 func TestRunOnboard_NonTTYWithTeamOverridePassesPreconditionGate(t *testing.T) {
 	resetOnboardFlags()
 	defer resetOnboardFlags()
+	setupOnboardTestEnv(t)
 	onboardTeam = true
 	prevTTY := onboard.IsStdinTTY
 	onboard.IsStdinTTY = func() bool { return false }
 	defer func() { onboard.IsStdinTTY = prevTTY }()
 
-	err := runOnboard(onboardCmd, nil)
+	result, err := resolveAndRunOnboard(onboardCmd)
 	// Precondition and api_url gate both pass with a bare --team
-	// override, routing into the real team runner (Issue 5) instead of
-	// the exit-2 fail-fast -- AC-3's "the override forces the named
-	// setup". This test predates the team runner landing and originally
-	// asserted the not-yet-implemented stub's message; runOnboard
-	// itself does not yet construct an onboard.TeamOptions (that
-	// config/session wiring is a later issue), so Run's own
-	// Options.Team-must-be-populated guard is what fires here -- still
-	// an untyped error (not one of the five typed exit codes), and it
-	// still names the team phase, just with a different message than
-	// the old stub.
+	// override, routing into the real team runner instead of the
+	// exit-2 fail-fast -- AC-3's "the override forces the named
+	// setup". What happens inside the team runner from here on is a
+	// subprocess/network integration concern (there is no real
+	// `infisical` session in this unit test's sandbox) covered by the
+	// functional Gherkin suite, not asserted here; this test only
+	// pins that the CLI wiring reached the team phase at all rather
+	// than failing the non-TTY precondition.
 	var ece *onboard.ExitCodeError
-	if errors.As(err, &ece) {
-		t.Fatalf("expected --team to satisfy the non-TTY precondition, got ExitCodeError (Code=%d): %v", ece.Code, err)
+	if errors.As(err, &ece) && ece.Code == onboard.ExitNonInteractivePrecondition {
+		t.Fatalf("expected --team to satisfy the non-TTY precondition, got ExitNonInteractivePrecondition: %v", err)
 	}
-	if err == nil {
-		t.Fatal("want an error naming the team phase, got nil")
-	}
-	if !strings.Contains(err.Error(), "Team") {
-		t.Errorf("error = %q, want it to name the team setup (AC-3 override forces the named setup)", err.Error())
+	if result.Setup != onboard.PhaseTeam {
+		t.Errorf("Setup = %v, want PhaseTeam (AC-3 override forces the named setup)", result.Setup)
 	}
 }
 
 func TestRunOnboard_JSONEnvelopeShape(t *testing.T) {
 	resetOnboardFlags()
 	defer resetOnboardFlags()
+	setupOnboardTestEnv(t)
 	onboardJSON = true
 	prevTTY := onboard.IsStdinTTY
 	onboard.IsStdinTTY = func() bool { return false }
@@ -227,6 +294,7 @@ func TestRunOnboard_JSONEnvelopeEmittedOnFlagConflict(t *testing.T) {
 func TestRunOnboard_JSONEnvelopeCarriesSetupOnStubError(t *testing.T) {
 	resetOnboardFlags()
 	defer resetOnboardFlags()
+	setupOnboardTestEnv(t)
 	onboardJSON = true
 	onboardTeam = true
 	prevTTY := onboard.IsStdinTTY

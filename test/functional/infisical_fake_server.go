@@ -2,6 +2,7 @@ package functional
 
 import (
 	"encoding/json"
+	"encoding/pem"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -31,6 +32,11 @@ import (
 // fired for the just-minted id" (AC-34).
 type infisicalFakeServer struct {
 	srv *httptest.Server
+
+	// prevDefaultClient saves http.DefaultClient as it was before this
+	// server overrode it (see newInfisicalFakeServer's comment on why
+	// that override exists), restored by Close.
+	prevDefaultClient *http.Client
 
 	mu sync.Mutex
 
@@ -124,16 +130,47 @@ func newInfisicalFakeServer() *infisicalFakeServer {
 		loginClientSecrets: map[string]string{},
 		faults:             map[faultMode]int{},
 	}
-	s.srv = httptest.NewServer(http.HandlerFunc(s.handle))
+	// TLS, not plain HTTP: CheckAPIURL (internal/onboard/apiurl.go)
+	// unconditionally hard-rejects a non-https api_url in every mode,
+	// with no override -- a deliberate, no-escape-hatch rule (Decision
+	// 4's supply-chain guard). A plain-HTTP double would make every
+	// scenario that drives the real onboard binary against it fail
+	// that gate before ever reaching a mint/verify call. httptest's
+	// self-signed cert isn't in any trust store by default, so:
+	//
+	//   - In-process callers (this package's own *_test.go unit tests,
+	//     which invoke internal/vault/infisical functions directly via
+	//     http.DefaultClient) need http.DefaultClient swapped for
+	//     s.srv.Client() -- done here, restored by Close -- since
+	//     those functions have no client-injection seam of their own.
+	//   - The niwa subprocess under test (a separate process spawned
+	//     by the Gherkin steps) picks up trust via the SSL_CERT_FILE
+	//     env var, which Go's crypto/x509 honors as the process's sole
+	//     root pool on Linux; CertPEM() below hands the step definition
+	//     the bytes to write to a file and wire in via iSetEnv.
+	s.srv = httptest.NewTLSServer(http.HandlerFunc(s.handle))
+	s.prevDefaultClient = http.DefaultClient
+	http.DefaultClient = s.srv.Client()
 	return s
 }
 
 // URL returns the base URL to set NIWA_INFISICAL_API_URL to.
 func (s *infisicalFakeServer) URL() string { return s.srv.URL }
 
+// CertPEM returns the server's self-signed certificate, PEM-encoded,
+// for a scenario to write to a file and point SSL_CERT_FILE at so the
+// niwa subprocess under test trusts this server (see the TLS comment
+// on newInfisicalFakeServer above).
+func (s *infisicalFakeServer) CertPEM() []byte {
+	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: s.srv.Certificate().Raw})
+}
+
 // Close shuts down the underlying httptest.Server. Safe to call
 // multiple times.
-func (s *infisicalFakeServer) Close() { s.srv.Close() }
+func (s *infisicalFakeServer) Close() {
+	http.DefaultClient = s.prevDefaultClient
+	s.srv.Close()
+}
 
 // SetIdentityPresent seeds a present, well-formed identity with the
 // given Universal-Auth clientID.

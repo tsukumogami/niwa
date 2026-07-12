@@ -19,21 +19,22 @@ var stateKey = stateKeyType{}
 // testState holds per-scenario state. The Before hook resets it so each
 // scenario starts from a clean sandbox (fresh $HOME, fresh workspace root).
 type testState struct {
-	binPath       string             // absolute path to the niwa test binary
-	homeDir       string             // sandboxed $HOME for this scenario (holds .niwa/, .bashrc, etc.)
-	tmpDir        string             // scenario-scoped $TMPDIR (writes landed here stay isolated)
-	workspaceRoot string             // sandboxed directory where workspaces live
-	stdout        string             // last command's stdout
-	stderr        string             // last command's stderr
-	exitCode      int                // last command's exit code
-	shellPwd      string             // pwd reported by the last wrapped-shell run
-	shellStartPwd string             // cwd the wrapped shell started in (for "did not change" assertions)
-	envOverrides  map[string]string  // per-scenario env var overrides (win over defaults)
-	gitServer     *localGitServer    // local bare-repo server for offline clone tests
-	repoURLs      map[string]string  // name → file:// URL for repos created by localGitServer
-	githubFake    *tarballFakeServer // GitHub API fake (per-scenario; spawned lazily)
-	pathPrefix    string             // dir prepended to $PATH for niwa subprocesses (e.g. a fake claude)
-	sharedBinDir  string             // dir always prepended to $PATH holding hermetic stubs (e.g. a fake infisical)
+	binPath       string               // absolute path to the niwa test binary
+	homeDir       string               // sandboxed $HOME for this scenario (holds .niwa/, .bashrc, etc.)
+	tmpDir        string               // scenario-scoped $TMPDIR (writes landed here stay isolated)
+	workspaceRoot string               // sandboxed directory where workspaces live
+	stdout        string               // last command's stdout
+	stderr        string               // last command's stderr
+	exitCode      int                  // last command's exit code
+	shellPwd      string               // pwd reported by the last wrapped-shell run
+	shellStartPwd string               // cwd the wrapped shell started in (for "did not change" assertions)
+	envOverrides  map[string]string    // per-scenario env var overrides (win over defaults)
+	gitServer     *localGitServer      // local bare-repo server for offline clone tests
+	repoURLs      map[string]string    // name → file:// URL for repos created by localGitServer
+	githubFake    *tarballFakeServer   // GitHub API fake (per-scenario; spawned lazily)
+	infisicalFake *infisicalFakeServer // Infisical management REST double (per-scenario; spawned lazily)
+	pathPrefix    string               // dir prepended to $PATH for niwa subprocesses (e.g. a fake claude)
+	sharedBinDir  string               // dir always prepended to $PATH holding hermetic stubs (e.g. a fake infisical)
 
 	// printedWorktreePath records the stdout of the last `niwa worktree
 	// from-hook` create dispatch (the bare absolute worktree path the hook
@@ -176,6 +177,10 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 		if s.githubFake != nil {
 			s.githubFake.Close()
 			s.githubFake = nil
+		}
+		if s.infisicalFake != nil {
+			s.infisicalFake.Close()
+			s.infisicalFake = nil
 		}
 		return ctx, nil
 	})
@@ -361,4 +366,7 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 	// TTY simulation: drive niwa init under util-linux `script -q` so
 	// stdin is a real pty. The supplied input is fed line-by-line.
 	ctx.Step(`^I run "([^"]*)" under a pty with input "([^"]*)"$`, iRunUnderPTYWithInput)
+
+	// --- niwa onboard: individual/team setup wizard (Issue 9) ---
+	registerOnboardSteps(ctx)
 }

@@ -7,6 +7,8 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/tsukumogami/niwa/internal/onboard"
+	"github.com/tsukumogami/niwa/internal/vault/infisical"
+	"github.com/tsukumogami/niwa/internal/workspace"
 )
 
 func init() {
@@ -111,12 +113,83 @@ func resolveAndRunOnboard(cmd *cobra.Command) (onboard.Result, error) {
 		}
 	}
 
+	bundle, err := loadOnboardConfig()
+	if err != nil {
+		return onboard.Result{}, err
+	}
+	bearer, err := resolveOperatorBearer()
+	if err != nil {
+		return onboard.Result{}, err
+	}
+	apiURL := infisical.ResolveAPIURL(bundle.apiURLConfigVal)
+
+	pause := func(prompt string) error {
+		return onboard.Pause(prompt, cmd.InOrStdin(), cmd.OutOrStdout())
+	}
+
+	teamOpts := &onboard.TeamOptions{
+		APIURL:          apiURL,
+		Bearer:          bearer,
+		ProjectID:       bundle.projectID,
+		IdentityID:      bundle.identityID,
+		IdentityName:    bundle.identityName,
+		AuthMethod:      bundle.authMethod,
+		EnvironmentSlug: bundle.environmentSlug,
+		SecretPath:      bundle.secretPath,
+		In:              cmd.InOrStdin(),
+		Out:             cmd.OutOrStdout(),
+	}
+	individualOpts := &onboard.IndividualSetupParams{
+		APIURL:      apiURL,
+		Bearer:      bearer,
+		IdentityID:  bundle.identityID,
+		Kind:        bundle.kind,
+		Project:     bundle.projectID,
+		Environment: bundle.environmentSlug,
+		SecretPath:  bundle.secretPath,
+		SyncSpec:    bundle.syncSpec,
+		Topology:    topologyOverride,
+		Pause:       pause,
+	}
+	verifyOpts := &onboard.VerifyIndividualParams{
+		GlobalOverride: bundle.globalOverride,
+		TeamVault:      bundle.teamVault,
+		Kind:           bundle.kind,
+		Project:        bundle.projectID,
+	}
+	preconditionsOpts := &onboard.PreconditionsParams{
+		Overlay: onboard.EnsurePersonalOverlayParams{
+			OverlayDir: bundle.overlayDir,
+			Repo:       bundle.registeredRepo,
+			GitInvoker: workspace.StdGitInvoker(),
+			Pause:      pause,
+		},
+		Pause: pause,
+	}
+
+	var detectOpts *onboard.DetectInputs
+	if setupOverride == onboard.PhaseUnknown {
+		detectOpts = &onboard.DetectInputs{
+			APIURL:               apiURL,
+			Bearer:               bearer,
+			IdentityID:           bundle.identityID,
+			TeamVaultEmpty:       bundle.teamVault == nil || bundle.teamVault.IsEmpty(),
+			PersonalCredResolves: personalCredResolves(cmd.Context(), bundle),
+		}
+	}
+
 	return onboard.Run(onboard.Options{
 		SetupOverride:    setupOverride,
 		TopologyOverride: topologyOverride,
+		APIURLConfigVal:  bundle.apiURLConfigVal,
 		AcceptAPIURL:     onboardAcceptAPIURL,
 		Interactive:      interactive,
 		Confirm:          confirm,
+		Team:             teamOpts,
+		Individual:       individualOpts,
+		Verify:           verifyOpts,
+		Preconditions:    preconditionsOpts,
+		Detect:           detectOpts,
 	})
 }
 
