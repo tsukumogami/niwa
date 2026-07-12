@@ -263,11 +263,15 @@ existing per-instance `.claude/settings.json` write/merge
   `core.hooksPath` and gain persistence or code execution from merely reading an
   untrusted PR. The deny is **hard, not an operator prompt**: a review-drafting
   agent has no legitimate out-of-instance write (its only writes are the draft and
-  clone-local files), so an `ask` would add prompt-fatigue risk with no benefit --
-  and a forced `ask` in a headless `--bg` session has unverified behavior (it
-  could stall the session), whereas a hard deny is provably fail-closed, symmetric
-  with the network egress deny. Operator-gated approval (`ask`) is a possible
-  future refinement once that headless behavior is confirmed fail-closed.
+  clone-local files), and a hard deny is provably fail-closed and symmetric with
+  the network egress deny. An operator-approval (`ask`) refinement -- surfacing the
+  write for a human to approve in the agents view -- was investigated and found
+  **fail-open** under the session's `bypassPermissions` mode: a PreToolUse hook's
+  `permissionDecision: "ask"` is not honored there (verified -- the hook fires and
+  emits a valid ask, yet the write lands), so it cannot be used without a
+  permission-posture redesign that runs the session outside `bypassPermissions`.
+  That upgrade is tracked as future work (niwa#201); the hard deny is the
+  fail-closed default until it lands.
 - **Option 3B (rejected, previously chosen): a credential-scrubbed env
   allowlist plus a synthetic HOME.** An earlier version of this design
   scrubbed `cmd.Env` to an explicit allowlist (model auth + `PATH`/locale) and
