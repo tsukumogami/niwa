@@ -172,8 +172,12 @@ guarantees apply.
   `projects[<instanceRealPath>] = {hasTrustDialogAccepted: true,
   hasTrustDialogHooksAccepted: true}`, preserving every other key, written via a
   temp file and rename. `hasTrustDialogHooksAccepted` is set alongside so a
-  hooks-trust prompt cannot hang the `--bg` session. Removal is best-effort on
-  instance destroy so stale entries for reclaimed instances do not accumulate.
+  hooks-trust prompt cannot hang the `--bg` session. `RemoveInstanceTrust` is
+  best-effort and is wired into the instance-reclamation path (both `niwa reap`
+  sweeps), so the trust grant is removed exactly when the instance it was granted for
+  is reclaimed -- the success path, where the instance is kept and reaped later, not
+  just the staging-failure destroy. It is a safe no-op for instances that never held a
+  grant, so calling it on every reaped instance is correct.
 - **Settings assembly (`internal/watch/containment.go`, `ApplyReviewSettings`)** --
   gains an `ask` posture flag. In the ask posture it writes
   `permissions.defaultMode = "default"` (fully owned, overriding the inherited
@@ -287,11 +291,29 @@ stageReview
   sandbox and posting is still blocked by the post guard. The net tool posture for
   the normal case is unchanged; only the out-of-instance write changed from deny to
   operator-gated.
-- **Residual: `~/.claude.json` write race.** The real Claude daemon also writes
-  `~/.claude.json`. niwa's atomic temp-and-rename merge preserves existing keys, and
-  the seed happens before the daemon has an entry for the fresh instance, so the
-  window is narrow; a lost seed degrades to a broken-autonomy session the operator
-  can re-stage, not to a fail-open. Tracked as a residual, not a blocker.
+- **Accepted limitation: `~/.claude.json` lost-update race.** `~/.claude.json` is
+  owned and frequently written by Claude Code itself (oauth account, MCP-server
+  approvals, per-project history, counters). niwa's read-modify-write is atomic in the
+  sense that the temp-file-and-rename can never produce a *corrupt* or half-written
+  file, but it does NOT prevent a *lost update*: if a Claude process writes
+  `~/.claude.json` in the window between niwa's read and its rename, niwa's rename
+  silently clobbers that concurrent write. In a workspace where the operator runs
+  Claude sessions concurrently the window is real, if intermittent, and what is lost is
+  genuine Claude state.
+
+  **Decision: accept and document.** Claude Code exposes no other trust store (Option C
+  above), so the shared-file write is the only available mechanism, and it is
+  unavoidable for the ask posture. The exposure is bounded: niwa performs one small
+  merge per staged review (not a hot loop), it only ever adds/removes a single
+  `projects[<instance>]` entry, and it re-reads immediately before writing so it merges
+  against the freshest on-disk state it can. The two alternatives were weighed and not
+  taken now: an advisory `flock` around the read-modify-write would only narrow the
+  window because Claude Code is not guaranteed to honor the same lock, and further
+  narrowing the read-to-rename interval buys little beyond the single-merge shape
+  already in place. If concurrent-write loss is observed in practice, revisit with an
+  `flock` best-effort guard. The seed happens before the daemon has an entry for the
+  fresh instance, so a lost seed (the reverse direction) degrades to a broken-autonomy
+  session the operator can re-stage -- never a fail-open.
 
 ## Consequences
 

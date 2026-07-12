@@ -85,6 +85,45 @@ func stubDestroyAll(t *testing.T) *[]string {
 	return &destroyed
 }
 
+// stubRemoveTrust installs a fake removeInstanceTrustFunc that records every path
+// whose trust entry reap asked to remove, restoring the original on cleanup.
+func stubRemoveTrust(t *testing.T) *[]string {
+	t.Helper()
+	var untrusted []string
+	prev := removeInstanceTrustFunc
+	removeInstanceTrustFunc = func(path string) error {
+		untrusted = append(untrusted, path)
+		return nil
+	}
+	t.Cleanup(func() { removeInstanceTrustFunc = prev })
+	return &untrusted
+}
+
+// TestReap_RemovesWorkspaceTrust: reclaiming an instance also removes its Claude
+// Code workspace-trust entry, so a successfully-staged review's trust grant does
+// not outlive the instance it was granted for.
+func TestReap_RemovesWorkspaceTrust(t *testing.T) {
+	root := setupHookWorkspace(t, true)
+	jobsDir := t.TempDir() // empty: no job for any session -> dead
+
+	inst := makeReapInstance(t, root, "test-ws-trust")
+	mapEphemeral(t, root, reapDeadSessionID, inst, true)
+
+	stubDestroyAll(t)
+	untrusted := stubRemoveTrust(t)
+
+	n, err := reapWorkspace(root, jobsDir, time.Now())
+	if err != nil {
+		t.Fatalf("reapWorkspace error: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("reaped count = %d, want 1", n)
+	}
+	if len(*untrusted) != 1 || (*untrusted)[0] != inst {
+		t.Fatalf("reap must remove the trust entry for the reclaimed instance; untrusted = %v, want [%s]", *untrusted, inst)
+	}
+}
+
 // TestReap_DeadEphemeralOrphan_Reclaimed: an ephemeral instance whose session
 // has no live job (job entry gone) is reclaimed -- destroyed and its mapping
 // deleted.
