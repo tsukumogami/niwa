@@ -1,6 +1,6 @@
 ---
 schema: brief/v1
-status: Accepted
+status: Done
 problem: |
   niwa vault onboarding is a long, cross-context choreography spanning a team
   phase and an individual phase. Every step is mechanical, but the whole
@@ -27,7 +27,7 @@ motivating_context: |
 
 ## Status
 
-Accepted
+Done
 
 This brief frames a net-new niwa command that owns the entire vault-onboarding
 choreography. The downstream PRD owns the requirements (the wizard's interface,

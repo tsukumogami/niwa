@@ -1,5 +1,5 @@
 ---
-status: In Progress
+status: Done
 problem: |
   Onboarding a machine-identity workspace vault is a long, cross-context
   choreography that today lives as hand-run shell in runbooks. A team admin
@@ -34,7 +34,7 @@ motivating_context: |
 
 ## Status
 
-In Progress
+Done
 
 Complexity: **Complex**. A technical design follows this PRD. The multi-org
 choreography, the interactive-wizard shape with topology branches, the
