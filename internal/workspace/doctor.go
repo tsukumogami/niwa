@@ -61,12 +61,15 @@ type CheckProviderAuthResult struct {
 	// OtherFailures holds any additional (kind, project) pairs
 	// discovered across the three vault-registry sources (team config,
 	// workspace overlay, personal global overlay) whose resolved body
-	// failed to parse, or whose vault was unreachable. Unlike Target, a
-	// swept pair that simply falls through to CLI-session (no local-
-	// file or vault entry at all) is NOT included here -- that is the
-	// normal, successful fallback apply.go's injectProviderTokens
-	// already tolerates for any pair it isn't specifically responsible
-	// for proving. Only genuinely broken resolved bodies are reported.
+	// failed to parse (malformed, missing field, unsupported schema
+	// version). Unlike Target, a swept pair that simply falls through
+	// to CLI-session (no local-file or vault entry at all) is NOT
+	// included here, and neither is a vault-unreachable condition on
+	// it (isSoftenable, PRD R13.1) -- both are the normal,
+	// successful-or-tolerated outcomes apply.go's injectProviderTokens
+	// already accepts for any pair it isn't specifically responsible
+	// for proving. Only a hard, non-softenable parse failure is
+	// reported here; see checkSweptPair for the exact rule.
 	OtherFailures []ProviderAuthCheckResult
 }
 
@@ -119,14 +122,18 @@ func pairsFromRegistry(vr *config.VaultRegistry) []kindProjectPair {
 // workspace overlay, team config, and personal global overlay,
 // matching apply.go's three injectProviderTokens call sites exactly),
 // applying the SAME graceful semantics injectProviderTokens/isSoftenable
-// already use in production: a pair with no local-file or vault entry
-// at all silently falls through to CLI-session (not a failure -- most
-// declared pairs legitimately resolve this way), while a pair whose
-// vault entry resolved but failed to parse, or whose vault was
-// unreachable, is reported as a failure. Either teamVault or
-// overlayVault may be nil (or both) when the caller doesn't have that
-// registry loaded; the sweep simply contributes nothing for a nil
-// registry, and the target-pair check below is unaffected.
+// already use in production (see checkSweptPair): a pair with no
+// local-file or vault entry at all silently falls through to
+// CLI-session (not a failure -- most declared pairs legitimately
+// resolve this way), a vault-unreachable condition on it is likewise
+// tolerated (isSoftenable, PRD R13.1 -- a transient blip on a pair
+// this function isn't specifically responsible for proving), and only
+// a pair whose vault entry resolved but failed to parse (malformed
+// body, missing field, unsupported schema version) is reported as a
+// failure. Either teamVault or overlayVault may be nil (or both) when
+// the caller doesn't have that registry loaded; the sweep simply
+// contributes nothing for a nil registry, and the target-pair check
+// below is unaffected.
 //
 // Self-exclusion (R9): the pool's vaultCredLoader carries
 // SelfKind/SelfProject populated from the credential-sync provider's
