@@ -1,6 +1,6 @@
 ---
 schema: design/v1
-status: Accepted
+status: Planned
 problem: |
   Standing up a machine-identity vault for a niwa workspace is a long
   cross-context choreography that today lives as hand-run shell in runbooks: a
@@ -46,7 +46,7 @@ upstream: docs/prds/PRD-niwa-onboard.md
 
 ## Status
 
-Accepted
+Planned
 
 This design satisfies PRD-niwa-onboard (In Progress) and supersedes the
 standalone command surfaces of tsukumogami/niwa#194 (`provider-auth provision`)
