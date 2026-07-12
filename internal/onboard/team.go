@@ -13,6 +13,7 @@
 package onboard
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -102,7 +103,22 @@ func RunTeam(ctx context.Context, opts TeamOptions) (TeamResult, error) {
 		opts.CreateFolder = defaultCreateFolder
 	}
 
-	if err := ensureFolder(ctx, opts); err != nil {
+	// One bufio.Reader for every guided Pause across this whole
+	// invocation, not one per Pause call: bufio.Reader fills its
+	// internal buffer from opts.In in one Read, which for any real
+	// pipe, file, or strings.Reader typically returns more than one
+	// buffered line at once. A fresh bufio.Reader per Pause call (as
+	// the public Pause function itself constructs) would silently
+	// discard that over-read, unconsumed input the moment it goes out
+	// of scope -- breaking AC-9b for any non-interactive input source
+	// that returns multiple lines per Read (which is the common case
+	// for piped/scripted stdin, not just an unusual edge case). A real
+	// interactive TTY, which tends to return one line per Read, masks
+	// this bug -- which is why it matters to reuse br explicitly here
+	// rather than calling the public Pause helper directly.
+	br := bufio.NewReader(opts.In)
+
+	if err := ensureFolder(ctx, opts, br); err != nil {
 		return TeamResult{}, err
 	}
 	// ensureIdentityAndUA's clientID return is deliberately discarded
@@ -114,13 +130,23 @@ func RunTeam(ctx context.Context, opts TeamOptions) (TeamResult, error) {
 	// resumed-run guarantee (a run that starts already-landed must hit
 	// the same verifyR21 code path a stepped-through run does). Do not
 	// "optimize" this into a single fetch.
-	if _, err := ensureIdentityAndUA(ctx, opts); err != nil {
+	if _, err := ensureIdentityAndUA(ctx, opts, br); err != nil {
 		return TeamResult{}, err
 	}
-	if err := ensureGrant(ctx, opts); err != nil {
+	if err := ensureGrant(ctx, opts, br); err != nil {
 		return TeamResult{}, err
 	}
 	return verifyR21(ctx, opts)
+}
+
+// pause prints instruction (sanitized, matching the public Pause
+// function's own behavior) and reads one line from the shared br,
+// discarding its content -- used instead of calling Pause directly so
+// every guided step within one RunTeam invocation reads from the same
+// bufio.Reader (see RunTeam's comment on br for why that matters).
+func pause(instruction string, br *bufio.Reader, out io.Writer) error {
+	_, err := readLine(Sanitize(instruction), br, out)
+	return err
 }
 
 // ensureFolder automates folder/secret-path creation via the
@@ -131,7 +157,7 @@ func RunTeam(ctx context.Context, opts TeamOptions) (TeamResult, error) {
 // step (AC-11, never a raw provider error), and re-invoking the
 // delegation after the operator's Pause both re-attempts the creation
 // and re-checks whether it now exists.
-func ensureFolder(ctx context.Context, opts TeamOptions) error {
+func ensureFolder(ctx context.Context, opts TeamOptions, br *bufio.Reader) error {
 	for {
 		err := opts.CreateFolder(ctx, opts.ProjectID, opts.EnvironmentSlug, opts.SecretPath)
 		if err == nil {
@@ -149,7 +175,7 @@ func ensureFolder(ctx context.Context, opts TeamOptions) error {
 			Sanitize(opts.EnvironmentSlug),
 			Sanitize(opts.ProjectID),
 		)
-		if err := Pause(instruction, opts.In, opts.Out); err != nil {
+		if err := pause(instruction, br, opts.Out); err != nil {
 			return fmt.Errorf("onboard: waiting for guided folder creation: %w", err)
 		}
 		// Loop back: re-attempt the same idempotent delegation as the
@@ -166,7 +192,7 @@ func ensureFolder(ctx context.Context, opts TeamOptions) error {
 // instruction covers both in one prompt, matching the design's single
 // "identity create, UA attach" step. A failed landing check
 // re-surfaces the instruction and does not advance (AC-9b).
-func ensureIdentityAndUA(ctx context.Context, opts TeamOptions) (string, error) {
+func ensureIdentityAndUA(ctx context.Context, opts TeamOptions, br *bufio.Reader) (string, error) {
 	for {
 		clientID, err := infisical.ReadIdentity(ctx, opts.APIURL, opts.Bearer, opts.IdentityID)
 		if err == nil {
@@ -187,7 +213,7 @@ func ensureIdentityAndUA(ctx context.Context, opts TeamOptions) (string, error) 
 				"Press Enter once done.",
 			Sanitize(opts.IdentityName), Sanitize(opts.AuthMethod),
 		)
-		if err := Pause(instruction, opts.In, opts.Out); err != nil {
+		if err := pause(instruction, br, opts.Out); err != nil {
 			return "", fmt.Errorf("onboard: waiting for guided identity creation: %w", err)
 		}
 	}
@@ -208,7 +234,7 @@ func ensureIdentityAndUA(ctx context.Context, opts TeamOptions) (string, error) 
 // both inherit that same project-level-only blind spot; the design's
 // documented fallback for it is trusting the operator's claim, which
 // is exactly what the guided instruction below does.
-func ensureGrant(ctx context.Context, opts TeamOptions) error {
+func ensureGrant(ctx context.Context, opts TeamOptions, br *bufio.Reader) error {
 	for {
 		granted, err := infisical.ReadProjectMembership(ctx, opts.APIURL, opts.Bearer, opts.ProjectID, opts.IdentityID)
 		if err != nil {
@@ -229,7 +255,7 @@ func ensureGrant(ctx context.Context, opts TeamOptions) error {
 				"Press Enter once done.",
 			Sanitize(opts.IdentityName), Sanitize(opts.EnvironmentSlug), Sanitize(opts.ProjectID),
 		)
-		if err := Pause(instruction, opts.In, opts.Out); err != nil {
+		if err := pause(instruction, br, opts.Out); err != nil {
 			return fmt.Errorf("onboard: waiting for guided environment grant: %w", err)
 		}
 	}

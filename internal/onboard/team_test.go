@@ -26,10 +26,18 @@ type teamTestServer struct {
 	identityPresent bool
 	clientID        string
 	unauthorized    bool
+	// identityFailCount, when positive, forces the next N read-identity
+	// calls to 404 regardless of identityPresent, decrementing on each
+	// call -- lets a test model "the landing check fails exactly once,
+	// then lands" without needing a Reader-side callback.
+	identityFailCount int32
 
 	membershipPresent bool
 	granted           bool
 	membershipUnauth  bool
+	// membershipFailCount is identityFailCount's counterpart for the
+	// membership landing check.
+	membershipFailCount int32
 
 	mintRevokeCalls int32
 	authHeaders     []string
@@ -56,6 +64,11 @@ func (s *teamTestServer) handle(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusForbidden)
 			return
 		}
+		if atomic.LoadInt32(&s.membershipFailCount) > 0 {
+			atomic.AddInt32(&s.membershipFailCount, -1)
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
 		if !s.membershipPresent {
 			w.WriteHeader(http.StatusNotFound)
 			return
@@ -71,6 +84,11 @@ func (s *teamTestServer) handle(w http.ResponseWriter, r *http.Request) {
 	case strings.Contains(r.URL.Path, "/identities/"):
 		if s.unauthorized {
 			w.WriteHeader(http.StatusForbidden)
+			return
+		}
+		if atomic.LoadInt32(&s.identityFailCount) > 0 {
+			atomic.AddInt32(&s.identityFailCount, -1)
+			w.WriteHeader(http.StatusNotFound)
 			return
 		}
 		if !s.identityPresent {
@@ -216,6 +234,43 @@ func TestRunTeam_IdentityNotYetCreated_AC9_AC9b(t *testing.T) {
 	}
 	if !strings.Contains(printed, "Universal Auth") {
 		t.Errorf("AC-9: guided instruction missing auth method token, got: %s", printed)
+	}
+}
+
+// TestRunTeam_GuidedStepsShareBufferedInput_PipedStdin is a regression
+// test for a bug QA found: Pause (prompt.go) builds a fresh
+// bufio.Reader on every call, so two sequential guided steps sharing
+// the same io.Reader would silently lose input that a single Read
+// call had already buffered ahead -- any real pipe, file, or
+// strings.Reader typically returns more than one line's worth of
+// bytes per Read, unlike this package's other tests' flippingReader,
+// which deliberately returns exactly one line per Read and so never
+// exercised this path. Uses a plain strings.Reader carrying two lines
+// up front (no per-read callback) to model realistic piped/scripted
+// stdin, and drives both the identity and grant guided steps failing
+// exactly once each (via identityFailCount/membershipFailCount) in a
+// single RunTeam call.
+func TestRunTeam_GuidedStepsShareBufferedInput_PipedStdin(t *testing.T) {
+	srv := newTeamTestServer()
+	defer srv.Close()
+	srv.identityPresent = true
+	srv.clientID = "client-abc"
+	srv.identityFailCount = 1
+	srv.membershipPresent = true
+	srv.granted = true
+	srv.membershipFailCount = 1
+
+	opts := baseTeamOptions(srv.URL())
+	opts.In = strings.NewReader("\n\n") // two lines available in one Read, no callback
+	var out strings.Builder
+	opts.Out = &out
+
+	result, err := RunTeam(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("unexpected error (bug: guided steps sharing buffered piped input lost data): %v", err)
+	}
+	if result.ClientID != "client-abc" {
+		t.Errorf("ClientID = %q, want client-abc", result.ClientID)
 	}
 }
 
