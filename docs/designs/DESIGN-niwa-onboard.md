@@ -615,10 +615,13 @@ nothing here because the new code never touches it.
   as a second, distinct purpose from `Provider`/`Resolve` (restating that both
   authenticate as the operator's own session and neither is reachable through
   `vault.Provider`), and a small static test (walking `internal/onboard`'s
-  team-phase call sites, or an equivalent lint rule) that fails if any of
-  `ReadIdentity`/`MintClientSecret`/`RevokeClientSecret` is called from
-  team-phase code — giving this choice the call-graph audit backstop a dedicated
-  package would provide "for free," at a fraction of the structural cost.
+  team-phase call sites, or an equivalent lint rule) that fails if either
+  mutating management call (`MintClientSecret`/`RevokeClientSecret`) is called
+  from team-phase code — giving this choice the call-graph audit backstop a
+  dedicated package would provide "for free," at a fraction of the structural
+  cost. `ReadIdentity` is deliberately outside the ban: the team path's own
+  landing checks (AC-9's "identity now exposes a `client_id`" and the R21
+  sweep) require that read-only probe, so the lint bans mutation, not reads.
 
 The rationale: R9 reuse is strictly cheapest here (a same-package call versus an
 import edge under both competitors). `vault.Provider` is untouched and unendangered
@@ -1203,9 +1206,11 @@ mechanics, not just prose. In the team phase the one automated action is
 `infisical secrets folders create`, a CLI delegation on the operator's own session
 — never a management REST call. That boundary is enforced two ways: a runtime
 request recorder asserts zero calls to any identity/org/project management endpoint
-on the team path (AC-10), and a static call-site lint test fails if
-`ReadIdentity`/`MintClientSecret`/`RevokeClientSecret` appears at a team-phase call
-site. The two checks are not equal, and the design says so plainly: the static lint
+on the team path (AC-10), and a static call-site lint test fails if a mutating
+management call (`MintClientSecret`/`RevokeClientSecret`) appears at a team-phase
+call site — `ReadIdentity` stays allowed there as the read-only landing-check probe
+AC-9 and the R21 sweep themselves require. The two checks are not equal, and the
+design says so plainly: the static lint
 is a **direct-call-site** check only — it does not catch indirect dispatch through
 function values or interface methods, so no one should over-trust it. The **runtime
 request recorder is the load-bearing check**: it asserts zero management-endpoint
