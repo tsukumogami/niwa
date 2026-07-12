@@ -351,6 +351,50 @@ func sanitizeCommitEnv(env []string) []string {
 	return out
 }
 
+// fallbackCommitAuthorName and fallbackCommitAuthorEmail are the neutral
+// identity injected into a commit's env only when the target repo has no
+// git identity resolvable at all (no system, global, or local
+// user.name/user.email, and no passwd/hostname autodetection available --
+// the exact state of a bare CI runner). Without this, `git commit` hard-
+// fails with "empty ident name not allowed", which is both a real gap for
+// an operator onboarding from a fresh machine and the reason CI runners
+// fail these commits. An operator's own configured identity is always
+// checked first and is never overridden by this fallback.
+const (
+	fallbackCommitAuthorName  = "niwa onboard"
+	fallbackCommitAuthorEmail = "onboard@niwa.invalid"
+)
+
+// hasResolvableGitIdentity reports whether repoDir already resolves a
+// usable git identity, via the same resolution `git commit` itself
+// performs (`git var GIT_AUTHOR_IDENT`: local/global/system config, then
+// passwd/hostname autodetection). A non-nil error from that command means
+// git could not determine an identity by any means, so commitEnvForCommit
+// must supply one.
+func hasResolvableGitIdentity(ctx context.Context, gitInvoker workspace.GitInvoker, repoDir string) bool {
+	return gitInvoker.CommandContext(ctx, "-C", repoDir, "var", "GIT_AUTHOR_IDENT").Run() == nil
+}
+
+// commitEnvForCommit returns the env a `git commit` in repoDir should run
+// with: sanitizeCommitEnv's usual stripping of any inherited
+// GIT_AUTHOR_*/GIT_COMMITTER_* variables, plus -- only when repoDir has no
+// identity resolvable by any means -- a neutral fallback identity appended
+// so the commit doesn't hard-fail. Shared by both onboard commit call
+// sites (WritePersonalOverlayVaultProvider and EnsurePersonalOverlay's
+// scaffold commit).
+func commitEnvForCommit(ctx context.Context, gitInvoker workspace.GitInvoker, repoDir string) []string {
+	env := sanitizeCommitEnv(os.Environ())
+	if hasResolvableGitIdentity(ctx, gitInvoker, repoDir) {
+		return env
+	}
+	return append(env,
+		"GIT_AUTHOR_NAME="+fallbackCommitAuthorName,
+		"GIT_AUTHOR_EMAIL="+fallbackCommitAuthorEmail,
+		"GIT_COMMITTER_NAME="+fallbackCommitAuthorName,
+		"GIT_COMMITTER_EMAIL="+fallbackCommitAuthorEmail,
+	)
+}
+
 // WritePersonalOverlayVaultProvider is the site-1 driver: it surgically
 // inserts or replaces the `[global.vault.provider]` table in the personal
 // overlay's niwa.toml (at overlayDir, per config.GlobalConfigDir --
@@ -418,7 +462,7 @@ func WritePersonalOverlayVaultProvider(ctx context.Context, gitInvoker workspace
 	}
 
 	commitCmd := gitInvoker.CommandContext(ctx, "-C", overlayDir, "commit", "-m", "onboard: update personal-overlay vault provider")
-	commitCmd.Env = sanitizeCommitEnv(os.Environ())
+	commitCmd.Env = commitEnvForCommit(ctx, gitInvoker, overlayDir)
 	if out, err := commitCmd.CombinedOutput(); err != nil {
 		return WriteResult{}, fmt.Errorf("git commit: %w\n%s", err, out)
 	}

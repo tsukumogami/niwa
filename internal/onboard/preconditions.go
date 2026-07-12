@@ -158,7 +158,7 @@ func EnsurePersonalOverlay(ctx context.Context, p EnsurePersonalOverlayParams) (
 		return result, fmt.Errorf("onboard: git add: %w\n%s", err, out)
 	}
 	commitCmd := p.GitInvoker.CommandContext(ctx, "-C", p.OverlayDir, "commit", "-m", "onboard: scaffold personal-overlay config")
-	commitCmd.Env = sanitizeCommitEnv(os.Environ())
+	commitCmd.Env = commitEnvForCommit(ctx, p.GitInvoker, p.OverlayDir)
 	if out, err := commitCmd.CombinedOutput(); err != nil {
 		return result, fmt.Errorf("onboard: git commit: %w\n%s", err, out)
 	}

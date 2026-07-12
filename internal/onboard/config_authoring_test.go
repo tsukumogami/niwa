@@ -541,6 +541,105 @@ func TestSanitizeCommitEnv(t *testing.T) {
 	}
 }
 
+// TestWritePersonalOverlayVaultProvider_FallbackIdentityWhenUnconfigured
+// is the hermetic regression for the CI failure this fix addresses: on a
+// machine with no git identity resolvable anywhere (no system, global, or
+// local user.name/user.email, and no passwd/hostname autodetection --
+// simulated here the same way CI reproduces it), `git commit` must still
+// succeed by falling back to the neutral onboard identity rather than
+// hard-failing with "empty ident name not allowed".
+func TestWritePersonalOverlayVaultProvider_FallbackIdentityWhenUnconfigured(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	// Sandbox away every source of ambient identity: no global/system
+	// gitconfig, and a HOME/XDG_CONFIG_HOME that couldn't hold one even
+	// if git looked there.
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
+	t.Setenv("GIT_CONFIG_SYSTEM", os.DevNull)
+
+	overlayDir := t.TempDir()
+	ctx := context.Background()
+	initCmd := exec.CommandContext(ctx, "git", "-C", overlayDir, "init")
+	if out, err := initCmd.CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v\n%s", err, out)
+	}
+
+	// Confirm the sandbox actually reproduces the failure mode this test
+	// guards against: no identity resolvable at all.
+	if workspace.StdGitInvoker().CommandContext(ctx, "-C", overlayDir, "var", "GIT_AUTHOR_IDENT").Run() == nil {
+		t.Skip("test environment has a passwd/hostname-derived git identity available; cannot exercise the no-identity path")
+	}
+
+	res, err := WritePersonalOverlayVaultProvider(ctx, workspace.StdGitInvoker(), overlayDir, "infisical", "acme", "https://app.infisical.com")
+	if err != nil {
+		t.Fatalf("WritePersonalOverlayVaultProvider: %v", err)
+	}
+	if !res.Changed {
+		t.Error("expected Changed=true on first write")
+	}
+
+	logCmd := exec.CommandContext(ctx, "git", "-C", overlayDir, "log", "-1", "--format=%an <%ae> / %cn <%ce>")
+	out, err := logCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git log: %v\n%s", err, out)
+	}
+	want := fallbackCommitAuthorName + " <" + fallbackCommitAuthorEmail + "> / " + fallbackCommitAuthorName + " <" + fallbackCommitAuthorEmail + ">"
+	if got := strings.TrimSpace(string(out)); got != want {
+		t.Errorf("commit identity = %q, want %q", got, want)
+	}
+}
+
+// TestWritePersonalOverlayVaultProvider_PrefersConfiguredIdentity is the
+// counterpart regression: when the repo DOES have a configured identity
+// (even only a local one, no global/system config), that identity must be
+// used verbatim -- the fallback must never override an operator's own
+// configured name/email.
+func TestWritePersonalOverlayVaultProvider_PrefersConfiguredIdentity(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
+	t.Setenv("GIT_CONFIG_SYSTEM", os.DevNull)
+
+	overlayDir := t.TempDir()
+	ctx := context.Background()
+	for _, args := range [][]string{
+		{"init"},
+		{"config", "user.name", "Operator Name"},
+		{"config", "user.email", "operator@example.com"},
+	} {
+		cmd := exec.CommandContext(ctx, "git", append([]string{"-C", overlayDir}, args...)...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+
+	res, err := WritePersonalOverlayVaultProvider(ctx, workspace.StdGitInvoker(), overlayDir, "infisical", "acme", "https://app.infisical.com")
+	if err != nil {
+		t.Fatalf("WritePersonalOverlayVaultProvider: %v", err)
+	}
+	if !res.Changed {
+		t.Error("expected Changed=true on first write")
+	}
+
+	logCmd := exec.CommandContext(ctx, "git", "-C", overlayDir, "log", "-1", "--format=%an <%ae> / %cn <%ce>")
+	out, err := logCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git log: %v\n%s", err, out)
+	}
+	want := "Operator Name <operator@example.com> / Operator Name <operator@example.com>"
+	if got := strings.TrimSpace(string(out)); got != want {
+		t.Errorf("commit identity = %q, want %q (must prefer the operator's configured identity over the fallback)", got, want)
+	}
+}
+
 func runGit(t *testing.T, dir string, args ...string) string {
 	t.Helper()
 	cmd := exec.CommandContext(context.Background(), "git", append([]string{"-C", dir}, args...)...)
