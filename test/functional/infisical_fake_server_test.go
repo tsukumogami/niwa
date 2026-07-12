@@ -3,8 +3,11 @@ package functional
 import (
 	"context"
 	"net/http"
+	"os"
+	"strings"
 	"testing"
 
+	"github.com/tsukumogami/niwa/internal/onboard"
 	"github.com/tsukumogami/niwa/internal/secret"
 	"github.com/tsukumogami/niwa/internal/secret/reveal"
 	"github.com/tsukumogami/niwa/internal/vault/infisical"
@@ -187,6 +190,67 @@ func TestInfisicalFakeServer_ReadProjectMembership(t *testing.T) {
 
 	if got := srv.CountRequests("/memberships/identities/ident-1"); got != 1 {
 		t.Errorf("CountRequests(/memberships/identities/ident-1) = %d, want 1", got)
+	}
+}
+
+// TestInfisicalFakeServer_TeamPath_AC10_ZeroManagementCalls drives the
+// real internal/onboard.RunTeam end-to-end -- both the REST calls
+// (against this double) and the folder-create CLI delegation (against
+// the writeFakeInfisical stub on PATH, the same double the team-phase
+// custody boundary's runtime request recorder is described against in
+// DESIGN-niwa-onboard.md's Security Considerations) -- and asserts
+// zero client-secrets (mint/revoke) calls landed on the team path.
+// This is the load-bearing AC-10 proof: unlike team_test.go's
+// package-local httptest double, this ties the assertion to the exact
+// double the design names.
+func TestInfisicalFakeServer_TeamPath_AC10_ZeroManagementCalls(t *testing.T) {
+	stubDir := t.TempDir()
+	if err := writeFakeInfisical(stubDir); err != nil {
+		t.Fatalf("writeFakeInfisical: %v", err)
+	}
+	origPath := os.Getenv("PATH")
+	if err := os.Setenv("PATH", stubDir+string(os.PathListSeparator)+origPath); err != nil {
+		t.Fatalf("setting PATH: %v", err)
+	}
+	defer os.Setenv("PATH", origPath)
+
+	srv := newInfisicalFakeServer()
+	defer srv.Close()
+	srv.SetIdentityPresent("ident-1", "client-abc")
+	srv.SetMembershipGranted("proj-1", "ident-1")
+
+	ctx := secret.WithRedactor(context.Background(), secret.NewRedactor())
+	bearer := secret.New([]byte("operator-bearer-value"), secret.Origin{})
+
+	opts := onboard.TeamOptions{
+		APIURL:          srv.URL(),
+		Bearer:          bearer,
+		ProjectID:       "proj-1",
+		IdentityID:      "ident-1",
+		IdentityName:    "ci-bot",
+		AuthMethod:      "Universal Auth",
+		EnvironmentSlug: "dev",
+		SecretPath:      "/team",
+		In:              strings.NewReader(""),
+		Out:             &strings.Builder{},
+	}
+
+	result, err := onboard.RunTeam(ctx, opts)
+	if err != nil {
+		t.Fatalf("RunTeam: %v", err)
+	}
+	if result.ClientID != "client-abc" {
+		t.Errorf("ClientID = %q, want client-abc", result.ClientID)
+	}
+
+	if got := srv.CountRequests("/client-secrets"); got != 0 {
+		t.Errorf("AC-10: client-secrets (mint/revoke) call count on team path = %d, want 0", got)
+	}
+	if got := srv.CountRequests("/identities/ident-1"); got == 0 {
+		t.Error("expected the identity landing-check read to have fired")
+	}
+	if got := srv.CountRequests("/memberships/identities/ident-1"); got == 0 {
+		t.Error("expected the membership landing-check read to have fired")
 	}
 }
 

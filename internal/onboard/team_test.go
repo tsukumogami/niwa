@@ -362,54 +362,93 @@ func TestRunTeam_FolderHardFailureSurfacesAsError(t *testing.T) {
 
 // TestRunTeam_R21_AC35 proves the R21 sweep names the missing
 // artifact distinctly, and is reported with an "R21" prefix (never
-// R11's wording), when a probe fails on the final sweep despite the
-// earlier per-step checks having passed.
-func TestRunTeam_R21_MissingGrant_AC35(t *testing.T) {
-	srv := newTeamTestServer()
-	defer srv.Close()
-	srv.identityPresent = true
-	srv.clientID = "client-abc"
-	srv.membershipPresent = false // never granted; ensureGrant's own
-	// loop would normally block forever on a real Pause -- simulate
-	// "the operator says it's done" but the grant never actually shows
-	// up, by short-circuiting straight to a granted=false verify.
+// R11's wording), for each of the three probes it composes -- identity,
+// grant, and folder -- exercised directly against verifyR21 to isolate
+// the R21-sweep-specific naming/prefix behavior (RunTeam's own
+// ensure* loops would otherwise block forever on a real Pause waiting
+// for a probe that this test deliberately never lands).
+func TestRunTeam_R21_NamesMissingArtifact_AC35(t *testing.T) {
+	cases := []struct {
+		name         string
+		setup        func(srv *teamTestServer)
+		wantContains string
+	}{
+		{
+			name: "missing identity",
+			setup: func(srv *teamTestServer) {
+				srv.identityPresent = false
+			},
+			wantContains: "client_id",
+		},
+		{
+			name: "missing grant",
+			setup: func(srv *teamTestServer) {
+				srv.identityPresent = true
+				srv.clientID = "client-abc"
+				srv.membershipPresent = false
+			},
+			wantContains: "grant",
+		},
+		{
+			name: "missing folder",
+			setup: func(srv *teamTestServer) {
+				srv.identityPresent = true
+				srv.clientID = "client-abc"
+				srv.membershipPresent = true
+				srv.granted = true
+			},
+			wantContains: "folder",
+		},
+	}
 
-	opts := baseTeamOptions(srv.URL())
-	// A reader that returns exactly one line then EOF: ensureGrant
-	// will Pause once, but membershipPresent stays false, so the loop
-	// would Pause again and hit EOF, producing a plain error -- NOT
-	// what this test wants. Instead, exercise verifyR21 directly to
-	// isolate the R21-sweep-specific naming/prefix behavior.
-	_ = opts
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := newTeamTestServer()
+			defer srv.Close()
+			tc.setup(srv)
 
-	_, err := verifyR21WithProbe(srv.URL())
-	if err == nil {
-		t.Fatal("expected R21 verification error")
-	}
-	var exitErr *ExitCodeError
-	if !errors.As(err, &exitErr) {
-		t.Fatalf("err = %v, want *ExitCodeError", err)
-	}
-	if exitErr.Code != ExitVerification {
-		t.Errorf("Code = %d, want ExitVerification", exitErr.Code)
-	}
-	if !strings.HasPrefix(exitErr.Msg, "R21 ") {
-		t.Errorf("Msg = %q, want an R21-prefixed message distinct from R11", exitErr.Msg)
-	}
-	if !strings.Contains(exitErr.Msg, "grant") {
-		t.Errorf("Msg = %q, want it to name the missing grant artifact", exitErr.Msg)
+			folderErr := error(nil)
+			if tc.wantContains == "folder" {
+				folderErr = errors.New("boom: folder create failed")
+			}
+
+			var err error
+			withCreateFolder(t, func(ctx context.Context, projectID, env, path string) error {
+				return folderErr
+			}, func() {
+				_, err = verifyR21WithProbe(srv.URL())
+			})
+
+			if err == nil {
+				t.Fatal("expected R21 verification error")
+			}
+			var exitErr *ExitCodeError
+			if !errors.As(err, &exitErr) {
+				t.Fatalf("err = %v, want *ExitCodeError", err)
+			}
+			if exitErr.Code != ExitVerification {
+				t.Errorf("Code = %d, want ExitVerification", exitErr.Code)
+			}
+			if !strings.HasPrefix(exitErr.Msg, "R21 ") {
+				t.Errorf("Msg = %q, want an R21-prefixed message distinct from R11", exitErr.Msg)
+			}
+			if !strings.Contains(exitErr.Msg, tc.wantContains) {
+				t.Errorf("Msg = %q, want it to name the missing %s artifact", exitErr.Msg, tc.wantContains)
+			}
+		})
 	}
 }
 
 // verifyR21WithProbe is a thin helper isolating verifyR21 against a
-// server with an identity present but no membership -- the missing-
-// grant R21 failure shape.
+// pre-seeded teamTestServer.
 func verifyR21WithProbe(apiURL string) (TeamResult, error) {
 	opts := TeamOptions{
-		APIURL:     apiURL,
-		Bearer:     teamTestBearer(),
-		ProjectID:  "proj-1",
-		IdentityID: "ident-1",
+		APIURL:          apiURL,
+		Bearer:          teamTestBearer(),
+		ProjectID:       "proj-1",
+		IdentityID:      "ident-1",
+		EnvironmentSlug: "dev",
+		SecretPath:      "/team",
 	}
 	return verifyR21(context.Background(), opts)
 }
