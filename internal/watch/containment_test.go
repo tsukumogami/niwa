@@ -4,21 +4,95 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 )
 
-func TestApplyContainment_MergesAndVerifies(t *testing.T) {
+// readSettings reads and parses an instance's .claude/settings.json.
+func readSettings(t *testing.T, inst string) map[string]any {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(inst, ".claude", "settings.json"))
+	if err != nil {
+		t.Fatalf("settings not written: %v", err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("parsing settings: %v", err)
+	}
+	return got
+}
+
+// countPreToolUseMatcher counts PreToolUse entries with the given matcher.
+func countPreToolUseMatcher(t *testing.T, settings map[string]any, matcher string) int {
+	t.Helper()
+	hooks, ok := settings["hooks"].(map[string]any)
+	if !ok {
+		return 0
+	}
+	preToolUse, ok := hooks["PreToolUse"].([]any)
+	if !ok {
+		return 0
+	}
+	n := 0
+	for _, entry := range preToolUse {
+		m, ok := entry.(map[string]any)
+		if !ok {
+			continue
+		}
+		if s, _ := m["matcher"].(string); s == matcher {
+			n++
+		}
+	}
+	return n
+}
+
+// TestApplyReviewSettings_NoSandbox writes only the Bash post-guard hook and
+// leaves no sandbox stanza and no egress-deny hook.
+func TestApplyReviewSettings_NoSandbox(t *testing.T) {
+	inst := t.TempDir()
+	if err := ApplyReviewSettings(inst, false); err != nil {
+		t.Fatalf("ApplyReviewSettings(false): %v", err)
+	}
+	got := readSettings(t, inst)
+	if err := VerifyReviewSettings(got, false); err != nil {
+		t.Errorf("written no-sandbox settings do not verify: %v", err)
+	}
+	if _, present := got["sandbox"]; present {
+		t.Error("no-sandbox apply must not write a sandbox stanza")
+	}
+	if n := countPreToolUseMatcher(t, got, postGuardMatcher); n != 1 {
+		t.Errorf("no-sandbox apply must add the Bash post-guard hook exactly once, got %d", n)
+	}
+	if n := countPreToolUseMatcher(t, got, egressDenyMatcher); n != 0 {
+		t.Errorf("no-sandbox apply must not add the egress-deny hook, got %d", n)
+	}
+	if n := countPreToolUseMatcher(t, got, fsGuardMatcher); n != 0 {
+		t.Errorf("no-sandbox apply must not add the filesystem-guard hook, got %d", n)
+	}
+	// No fail-closed permission mode is imposed.
+	if perms, ok := got["permissions"].(map[string]any); ok {
+		if _, present := perms["defaultMode"]; present {
+			t.Error("ApplyReviewSettings must not set permissions.defaultMode")
+		}
+		if _, present := perms["ask"]; present {
+			t.Error("ApplyReviewSettings must not set permissions.ask")
+		}
+	}
+}
+
+// TestApplyReviewSettings_Sandbox writes the no-egress sandbox stanza, the
+// egress-deny hook, and the Bash post-guard hook; overwrites a permissive
+// pre-existing sandbox; and preserves unrelated keys and pre-existing hooks.
+func TestApplyReviewSettings_Sandbox(t *testing.T) {
 	inst := t.TempDir()
 	claudeDir := filepath.Join(inst, ".claude")
 	if err := os.MkdirAll(claudeDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	// Pre-existing instance settings with unrelated keys and a permissions.deny
-	// list that must be preserved, plus a permissive sandbox that must be
-	// overwritten.
 	existing := `{
-	  "hooks": {"x": 1},
+	  "hooks": {
+	    "PostToolUse": [{"matcher": "Edit", "hooks": []}],
+	    "PreToolUse": [{"matcher": "Read", "hooks": []}]
+	  },
 	  "permissions": {"deny": ["Bash(rm:*)"]},
 	  "sandbox": {"enabled": false, "network": {"allowedDomains": ["evil.example.com"]}}
 	}`
@@ -27,295 +101,198 @@ func TestApplyContainment_MergesAndVerifies(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := ApplyContainment(inst, true); err != nil {
-		t.Fatalf("ApplyContainment: %v", err)
+	if err := ApplyReviewSettings(inst, true); err != nil {
+		t.Fatalf("ApplyReviewSettings: %v", err)
 	}
 
-	data, _ := os.ReadFile(settingsPath)
-	var got map[string]any
-	if err := json.Unmarshal(data, &got); err != nil {
-		t.Fatal(err)
-	}
-	// The permissive sandbox was overwritten to the no-egress profile.
-	if err := VerifyContainmentApplied(got, true); err != nil {
+	got := readSettings(t, inst)
+	// The permissive sandbox was overwritten to the no-egress profile and both
+	// required hooks are present.
+	if err := VerifyReviewSettings(got, true); err != nil {
 		t.Errorf("post-merge settings do not verify: %v", err)
 	}
-	// Unrelated keys preserved.
-	if _, ok := got["hooks"]; !ok {
-		t.Error("unrelated 'hooks' key was dropped")
+	if n := countPreToolUseMatcher(t, got, postGuardMatcher); n != 1 {
+		t.Errorf("Bash post-guard hook must be present exactly once, got %d", n)
 	}
-	// The pre-existing deny list is preserved alongside the new defaultMode.
+	if n := countPreToolUseMatcher(t, got, egressDenyMatcher); n != 1 {
+		t.Errorf("egress-deny hook must be present exactly once, got %d", n)
+	}
+	if n := countPreToolUseMatcher(t, got, fsGuardMatcher); n != 1 {
+		t.Errorf("filesystem-guard hook must be present exactly once, got %d", n)
+	}
+	// Pre-existing PreToolUse entry preserved alongside the appended hooks.
+	if n := countPreToolUseMatcher(t, got, "Read"); n != 1 {
+		t.Errorf("pre-existing PreToolUse 'Read' hook must be preserved, got %d", n)
+	}
+	// Unrelated hook event preserved.
+	hooks := got["hooks"].(map[string]any)
+	if _, ok := hooks["PostToolUse"]; !ok {
+		t.Error("unrelated 'PostToolUse' hook event was dropped")
+	}
+	// Pre-existing deny list preserved.
 	perms := got["permissions"].(map[string]any)
-	if perms["defaultMode"] != "default" {
-		t.Errorf("defaultMode = %v, want default", perms["defaultMode"])
-	}
 	if _, ok := perms["deny"]; !ok {
 		t.Error("pre-existing permissions.deny was dropped")
 	}
+	// No fail-closed permission mode is imposed.
+	if _, present := perms["defaultMode"]; present {
+		t.Error("ApplyReviewSettings must not set permissions.defaultMode")
+	}
 }
 
-func TestApplyContainment_NoExistingSettings(t *testing.T) {
+// TestApplyReviewSettings_DedupesHooks re-applying does not append duplicate
+// hooks (dedupe by matcher).
+func TestApplyReviewSettings_DedupesHooks(t *testing.T) {
 	inst := t.TempDir()
-	if err := ApplyContainment(inst, true); err != nil {
-		t.Fatalf("ApplyContainment with no existing settings: %v", err)
+	if err := ApplyReviewSettings(inst, true); err != nil {
+		t.Fatalf("first apply: %v", err)
 	}
-	data, err := os.ReadFile(filepath.Join(inst, ".claude", "settings.json"))
-	if err != nil {
-		t.Fatalf("settings not written: %v", err)
+	if err := ApplyReviewSettings(inst, true); err != nil {
+		t.Fatalf("second apply: %v", err)
 	}
-	var got map[string]any
-	_ = json.Unmarshal(data, &got)
-	if err := VerifyContainmentApplied(got, true); err != nil {
-		t.Errorf("written settings do not verify: %v", err)
+	got := readSettings(t, inst)
+	if n := countPreToolUseMatcher(t, got, postGuardMatcher); n != 1 {
+		t.Errorf("re-apply must not duplicate the post-guard hook, got %d", n)
+	}
+	if n := countPreToolUseMatcher(t, got, egressDenyMatcher); n != 1 {
+		t.Errorf("re-apply must not duplicate the egress-deny hook, got %d", n)
+	}
+	if n := countPreToolUseMatcher(t, got, fsGuardMatcher); n != 1 {
+		t.Errorf("re-apply must not duplicate the filesystem-guard hook, got %d", n)
 	}
 }
 
-// TestBuildContainedEnv_CanaryAbsentAndAllowlistSubset is the AC12 canary test:
-// a planted secret and credential-bearing variables in the parent env must be
-// absent from the contained session env, and the session env must be a subset
-// of the allowlist (plus the synthetic HOME).
-func TestBuildContainedEnv_CanaryAbsentAndAllowlistSubset(t *testing.T) {
-	parent := []string{
-		"PATH=/usr/bin",
-		"HOME=/home/dev", // must be replaced by synthetic HOME
-		"ANTHROPIC_API_KEY=sk-model",
-		"NIWA_CANARY_SECRET=canary", // planted secret -> must NOT survive
-		"GITHUB_TOKEN=ghp_secret",
-		"GH_TOKEN=gh_secret",
-		"GH_ENTERPRISE_TOKEN=ghe",
-		"GITHUB_ACTIONS=true",
-		"SSH_AUTH_SOCK=/tmp/agent.sock",
-		"AWS_SECRET_ACCESS_KEY=aws",
-		"LANG=en_US.UTF-8",
+// TestVerifyReviewSettings_RequiresPostGuard rejects a doc without the Bash
+// post-guard hook, in both modes.
+func TestVerifyReviewSettings_RequiresPostGuard(t *testing.T) {
+	// No hooks at all, non-sandbox -> reject.
+	if err := VerifyReviewSettings(map[string]any{}, false); err == nil {
+		t.Error("missing post-guard hook must be rejected (non-sandbox)")
 	}
-	syntheticHome := "/instance/.watch-home"
+	// A sandbox doc that has the egress-deny hook but not the post-guard -> reject.
+	noGuard := map[string]any{
+		"sandbox": noEgressSandboxStanza(),
+		"hooks": map[string]any{
+			"PreToolUse": []any{egressDenyHook()},
+		},
+	}
+	if err := VerifyReviewSettings(noGuard, true); err == nil {
+		t.Error("missing post-guard hook must be rejected even with a valid sandbox + egress-deny")
+	}
+}
 
-	env := BuildContainedEnv(parent, syntheticHome)
+// TestVerifyReviewSettings_RequiresEgressDeny rejects a sandbox doc that is
+// missing the egress-deny hook (WebFetch/WebSearch/MCP would be reachable).
+func TestVerifyReviewSettings_RequiresEgressDeny(t *testing.T) {
+	noEgress := map[string]any{
+		"sandbox": noEgressSandboxStanza(),
+		"hooks": map[string]any{
+			"PreToolUse": []any{postGuardHook()},
+		},
+	}
+	if err := VerifyReviewSettings(noEgress, true); err == nil {
+		t.Error("missing egress-deny hook must be rejected under sandbox mode")
+	}
+	// The same doc is fine in non-sandbox mode (egress-deny not required there).
+	if err := VerifyReviewSettings(noEgress, false); err != nil {
+		t.Errorf("non-sandbox mode must not require the egress-deny hook: %v", err)
+	}
+}
 
-	got := map[string]string{}
-	for _, kv := range env {
-		eq := strings.IndexByte(kv, '=')
-		got[kv[:eq]] = kv[eq+1:]
+// TestVerifyReviewSettings_RequiresFSGuard rejects a sandbox doc that is missing
+// the filesystem-guard hook (Write/Edit/NotebookEdit could escape the instance).
+func TestVerifyReviewSettings_RequiresFSGuard(t *testing.T) {
+	noFSGuard := map[string]any{
+		"sandbox": noEgressSandboxStanza(),
+		"hooks": map[string]any{
+			// Has the post-guard and egress-deny, but not the filesystem guard.
+			"PreToolUse": []any{postGuardHook(), egressDenyHook()},
+		},
 	}
+	if err := VerifyReviewSettings(noFSGuard, true); err == nil {
+		t.Error("missing filesystem-guard hook must be rejected under sandbox mode")
+	}
+	// The same doc is fine in non-sandbox mode (filesystem guard not required there).
+	if err := VerifyReviewSettings(noFSGuard, false); err != nil {
+		t.Errorf("non-sandbox mode must not require the filesystem-guard hook: %v", err)
+	}
+}
 
-	// Allowed survivors.
-	if got["PATH"] != "/usr/bin" {
-		t.Errorf("PATH not carried: %q", got["PATH"])
-	}
-	if got["ANTHROPIC_API_KEY"] != "sk-model" {
-		t.Errorf("model auth not carried: %q", got["ANTHROPIC_API_KEY"])
-	}
-	if got["LANG"] != "en_US.UTF-8" {
-		t.Errorf("LANG not carried")
-	}
-	// Synthetic HOME, not the developer's.
-	if got["HOME"] != syntheticHome {
-		t.Errorf("HOME = %q, want synthetic %q", got["HOME"], syntheticHome)
-	}
-
-	// Every denied credential-bearing var and the canary must be absent.
-	mustBeAbsent := []string{
-		"NIWA_CANARY_SECRET", "GITHUB_TOKEN", "GH_TOKEN", "GH_ENTERPRISE_TOKEN",
-		"GITHUB_ACTIONS", "SSH_AUTH_SOCK", "AWS_SECRET_ACCESS_KEY",
-	}
-	for _, name := range mustBeAbsent {
-		if _, present := got[name]; present {
-			t.Errorf("contained env must not contain %q", name)
+// TestVerifyReviewSettings_RejectsRelaxations rejects any weakening of the
+// no-egress sandbox stanza.
+func TestVerifyReviewSettings_RejectsRelaxations(t *testing.T) {
+	// Build a valid sandbox doc, then relax one field at a time.
+	base := func() map[string]any {
+		return map[string]any{
+			"sandbox": noEgressSandboxStanza(),
+			"hooks": map[string]any{
+				"PreToolUse": []any{postGuardHook(), egressDenyHook(), fsGuardHook("/review-instance")},
+			},
 		}
 	}
-	for _, name := range deniedEnvNames {
-		if _, present := got[name]; present {
-			t.Errorf("denied env var %q leaked into contained session", name)
-		}
+	// Sanity: the base doc verifies.
+	if err := VerifyReviewSettings(base(), true); err != nil {
+		t.Fatalf("base sandbox doc should verify: %v", err)
 	}
-
-	// The env is a subset of the allowlist (+ HOME).
-	for name := range got {
-		if name == "HOME" {
-			continue
-		}
-		if !envAllowlist[name] {
-			t.Errorf("contained env contains non-allowlisted var %q", name)
-		}
-	}
-}
-
-func TestBuildContainedEnv_DropsHomeWhenNoSynthetic(t *testing.T) {
-	env := BuildContainedEnv([]string{"HOME=/home/dev", "PATH=/bin"}, "")
-	for _, kv := range env {
-		if strings.HasPrefix(kv, "HOME=") {
-			t.Errorf("HOME must not be carried when no synthetic home is given: %q", kv)
-		}
-	}
-}
-
-func TestContainmentProfile_ShapeAndVerify(t *testing.T) {
-	profile := ContainmentProfile(true)
-	// A correct profile verifies.
-	if err := VerifyContainmentApplied(profile, true); err != nil {
-		t.Fatalf("freshly-built profile should verify: %v", err)
-	}
-}
-
-// TestContainmentProfile_NoSandbox covers the watch_sandbox =
-// optional-but-unavailable cell: the profile still enforces the fail-closed
-// permission mode but carries no sandbox stanza, and it verifies with
-// withSandbox=false.
-func TestContainmentProfile_NoSandbox(t *testing.T) {
-	profile := ContainmentProfile(false)
-	if _, present := profile["sandbox"]; present {
-		t.Error("no-sandbox profile must not carry a sandbox stanza")
-	}
-	perms, ok := profile["permissions"].(map[string]any)
-	if !ok || perms["defaultMode"] != "default" {
-		t.Errorf("no-sandbox profile must still set the fail-closed permission mode, got %v", profile["permissions"])
-	}
-	if err := VerifyContainmentApplied(profile, false); err != nil {
-		t.Fatalf("no-sandbox profile should verify with withSandbox=false: %v", err)
-	}
-	// A non-fail-closed permission mode is still rejected without the sandbox.
-	profile["permissions"].(map[string]any)["defaultMode"] = "bypassPermissions"
-	if err := VerifyContainmentApplied(profile, false); err == nil {
-		t.Error("bypassPermissions must be rejected even without the sandbox")
-	}
-}
-
-// TestApplyContainment_NoSandbox proves the on+optional-but-unavailable path
-// writes the fail-closed permission mode without enabling the sandbox stanza.
-func TestApplyContainment_NoSandbox(t *testing.T) {
-	inst := t.TempDir()
-	if err := ApplyContainment(inst, false); err != nil {
-		t.Fatalf("ApplyContainment(withSandbox=false): %v", err)
-	}
-	data, err := os.ReadFile(filepath.Join(inst, ".claude", "settings.json"))
-	if err != nil {
-		t.Fatalf("settings not written: %v", err)
-	}
-	var got map[string]any
-	_ = json.Unmarshal(data, &got)
-	if err := VerifyContainmentApplied(got, false); err != nil {
-		t.Errorf("written no-sandbox settings do not verify: %v", err)
-	}
-	if sb, ok := got["sandbox"].(map[string]any); ok {
-		if enabled, _ := sb["enabled"].(bool); enabled {
-			t.Error("no-sandbox apply must not enable a sandbox")
-		}
-	}
-}
-
-func askContains(ask []any, rule string) int {
-	n := 0
-	for _, v := range ask {
-		if s, ok := v.(string); ok && s == rule {
-			n++
-		}
-	}
-	return n
-}
-
-// TestContainmentProfile_IncludesPostGuard: the post-guard ask rules ride in the
-// profile in both sandbox modes, so a contained run always carries the accident
-// guard.
-func TestContainmentProfile_IncludesPostGuard(t *testing.T) {
-	for _, ws := range []bool{true, false} {
-		perms := ContainmentProfile(ws)["permissions"].(map[string]any)
-		ask, _ := perms["ask"].([]any)
-		if askContains(ask, "Bash(gh pr review:*)") == 0 || askContains(ask, "Bash(gh pr comment:*)") == 0 {
-			t.Errorf("withSandbox=%v: profile missing post-guard ask rules, got %v", ws, ask)
-		}
-	}
-}
-
-// TestApplyPostGuard_MergesAndDedups proves the uncontained path adds the guard
-// rules without duplicating them, preserves unrelated rules, and does NOT change
-// the ordinary (non-fail-closed) permission mode.
-func TestApplyPostGuard_MergesAndDedups(t *testing.T) {
-	inst := t.TempDir()
-	claudeDir := filepath.Join(inst, ".claude")
-	if err := os.MkdirAll(claudeDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	existing := `{"permissions":{"defaultMode":"acceptEdits","ask":["Bash(gh pr review:*)","Bash(rm:*)"]}}`
-	if err := os.WriteFile(filepath.Join(claudeDir, "settings.json"), []byte(existing), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := ApplyPostGuard(inst); err != nil {
-		t.Fatalf("ApplyPostGuard: %v", err)
-	}
-
-	data, _ := os.ReadFile(filepath.Join(claudeDir, "settings.json"))
-	var got map[string]any
-	if err := json.Unmarshal(data, &got); err != nil {
-		t.Fatal(err)
-	}
-	perms := got["permissions"].(map[string]any)
-	if perms["defaultMode"] != "acceptEdits" {
-		t.Errorf("ApplyPostGuard must not change defaultMode, got %v", perms["defaultMode"])
-	}
-	ask, _ := perms["ask"].([]any)
-	if n := askContains(ask, "Bash(gh pr review:*)"); n != 1 {
-		t.Errorf("review rule count = %d, want 1 (no duplicate)", n)
-	}
-	if askContains(ask, "Bash(gh pr comment:*)") == 0 {
-		t.Error("comment guard rule should have been added")
-	}
-	if askContains(ask, "Bash(rm:*)") == 0 {
-		t.Error("unrelated ask rule must be preserved")
-	}
-}
-
-func TestVerifyContainmentApplied_RejectsRelaxations(t *testing.T) {
-	base := ContainmentProfile(true)
 
 	// allowedDomains non-empty -> reject (egress would be permitted).
-	relaxed := ContainmentProfile(true)
+	relaxed := base()
 	relaxed["sandbox"].(map[string]any)["network"].(map[string]any)["allowedDomains"] = []any{"evil.example.com"}
-	if err := VerifyContainmentApplied(relaxed, true); err == nil {
+	if err := VerifyReviewSettings(relaxed, true); err == nil {
 		t.Error("non-empty allowedDomains must be rejected")
 	}
 
 	// sandbox disabled -> reject.
-	off := ContainmentProfile(true)
+	off := base()
 	off["sandbox"].(map[string]any)["enabled"] = false
-	if err := VerifyContainmentApplied(off, true); err == nil {
+	if err := VerifyReviewSettings(off, true); err == nil {
 		t.Error("sandbox.enabled=false must be rejected")
 	}
 
 	// failIfUnavailable dropped -> reject (would allow silent fail-open).
-	noFail := ContainmentProfile(true)
+	noFail := base()
 	noFail["sandbox"].(map[string]any)["failIfUnavailable"] = false
-	if err := VerifyContainmentApplied(noFail, true); err == nil {
+	if err := VerifyReviewSettings(noFail, true); err == nil {
 		t.Error("sandbox.failIfUnavailable=false must be rejected")
 	}
 
 	// allowUnsandboxedCommands relaxed -> reject (unsandboxed escape hatch).
-	escape := ContainmentProfile(true)
+	escape := base()
 	escape["sandbox"].(map[string]any)["allowUnsandboxedCommands"] = true
-	if err := VerifyContainmentApplied(escape, true); err == nil {
+	if err := VerifyReviewSettings(escape, true); err == nil {
 		t.Error("sandbox.allowUnsandboxedCommands=true must be rejected")
 	}
 
-	// bypassPermissions -> reject (not fail-closed).
-	bypass := ContainmentProfile(true)
-	bypass["permissions"].(map[string]any)["defaultMode"] = "bypassPermissions"
-	if err := VerifyContainmentApplied(bypass, true); err == nil {
-		t.Error("bypassPermissions must be rejected")
-	}
-
-	// A non-bypass mode that is still not fail-closed -> reject. This is the
-	// allowlist case a denylist would wrongly accept: acceptEdits (and any other
-	// mode ContainmentProfile does not produce) must be rejected.
-	for _, badMode := range []string{"acceptEdits", "dontAsk", "auto", "plan", "typo"} {
-		m := ContainmentProfile(true)
-		m["permissions"].(map[string]any)["defaultMode"] = badMode
-		if err := VerifyContainmentApplied(m, true); err == nil {
-			t.Errorf("permission mode %q must be rejected (only the fail-closed allowlist passes)", badMode)
-		}
-	}
-
 	// Missing sandbox stanza (a merge dropped it) -> reject.
-	if err := VerifyContainmentApplied(map[string]any{"permissions": base["permissions"]}, true); err == nil {
+	noSandbox := map[string]any{
+		"hooks": map[string]any{"PreToolUse": []any{postGuardHook(), egressDenyHook()}},
+	}
+	if err := VerifyReviewSettings(noSandbox, true); err == nil {
 		t.Error("missing sandbox stanza must be rejected")
+	}
+}
+
+// TestHasPreToolUseMatcher covers the walk over the PreToolUse array.
+func TestHasPreToolUseMatcher(t *testing.T) {
+	doc := map[string]any{
+		"hooks": map[string]any{
+			"PreToolUse": []any{postGuardHook(), egressDenyHook()},
+		},
+	}
+	if !hasPreToolUseMatcher(doc, postGuardMatcher) {
+		t.Error("expected to find the Bash post-guard matcher")
+	}
+	if !hasPreToolUseMatcher(doc, egressDenyMatcher) {
+		t.Error("expected to find the egress-deny matcher")
+	}
+	if hasPreToolUseMatcher(doc, "Nope") {
+		t.Error("did not expect to find an absent matcher")
+	}
+	// Missing hooks / wrong shapes return false, not panic.
+	if hasPreToolUseMatcher(map[string]any{}, postGuardMatcher) {
+		t.Error("empty doc must not report a matcher present")
+	}
+	if hasPreToolUseMatcher(map[string]any{"hooks": map[string]any{"PreToolUse": "nope"}}, postGuardMatcher) {
+		t.Error("non-array PreToolUse must not report a matcher present")
 	}
 }

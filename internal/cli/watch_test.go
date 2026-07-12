@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"strings"
@@ -56,25 +55,23 @@ func TestRunWatchOnce_RefusesWhenSandboxRequiredButIncapable(t *testing.T) {
 	}
 }
 
-// TestResolveContainmentPlan walks the containment matrix (design Decision 7)
-// with a stubbed capability probe.
-func TestResolveContainmentPlan(t *testing.T) {
+// TestResolveReviewPlan walks the single-switch matrix with a stubbed capability
+// probe: off never probes and yields no sandbox; required probes and either
+// sandboxes (capable) or refuses (incapable).
+func TestResolveReviewPlan(t *testing.T) {
 	capable := func(context.Context) error { return nil }
 	incapable := func(context.Context) error { return errors.New("no netns") }
 
 	cases := []struct {
-		name                 string
-		containment, sandbox string
-		probe                func(context.Context) error
-		wantContained        bool
-		wantSandbox          bool
-		wantErr              bool
+		name        string
+		mode        string
+		probe       func(context.Context) error
+		wantSandbox bool
+		wantErr     bool
 	}{
-		{"off never probes", "off", "required", nil, false, false, false},
-		{"on+required capable", "on", "required", capable, true, true, false},
-		{"on+required incapable refuses", "on", "required", incapable, false, false, true},
-		{"on+optional capable uses sandbox", "on", "optional", capable, true, true, false},
-		{"on+optional incapable proceeds without", "on", "optional", incapable, true, false, false},
+		{"off never probes", "off", nil, false, false},
+		{"required capable", "required", capable, true, false},
+		{"required incapable refuses", "required", incapable, false, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -83,30 +80,21 @@ func TestResolveContainmentPlan(t *testing.T) {
 				sandboxCapabilityCheck = tc.probe
 				t.Cleanup(func() { sandboxCapabilityCheck = prev })
 			}
-			cmd := &cobra.Command{}
-			var errbuf bytes.Buffer
-			cmd.SetErr(&errbuf)
-			cmd.SetContext(context.Background())
-
-			plan, err := resolveContainmentPlan(context.Background(), cmd, tc.containment, tc.sandbox)
+			plan, err := resolveReviewPlan(context.Background(), tc.mode)
 			if tc.wantErr {
 				if err == nil {
 					t.Fatalf("expected refusal for %s", tc.name)
+				}
+				if !strings.Contains(err.Error(), "refusing to dispatch") {
+					t.Errorf("refusal should say it refuses to dispatch, got %q", err.Error())
 				}
 				return
 			}
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
-			if plan.contained != tc.wantContained || plan.applySandbox != tc.wantSandbox {
-				t.Errorf("plan = {contained:%v sandbox:%v}, want {contained:%v sandbox:%v}",
-					plan.contained, plan.applySandbox, tc.wantContained, tc.wantSandbox)
-			}
-			// The optional-unavailable cell prints a notice and proceeds.
-			if tc.containment == "on" && tc.sandbox == "optional" && !tc.wantSandbox {
-				if !strings.Contains(errbuf.String(), "proceeding contained without it") {
-					t.Errorf("optional-unavailable should print a notice, got %q", errbuf.String())
-				}
+			if plan.sandbox != tc.wantSandbox {
+				t.Errorf("plan.sandbox = %v, want %v", plan.sandbox, tc.wantSandbox)
 			}
 		})
 	}
@@ -134,29 +122,27 @@ func TestOwnerRepoFromGitURL(t *testing.T) {
 	}
 }
 
-func TestResolveContainmentSwitches(t *testing.T) {
-	mk := func(c, s string) *config.GlobalConfig {
+func TestResolveSandboxMode(t *testing.T) {
+	mk := func(s string) *config.GlobalConfig {
 		gc := &config.GlobalConfig{}
-		gc.Global.WatchContainment = c
 		gc.Global.WatchSandbox = s
 		return gc
 	}
 	cases := []struct {
-		name         string
-		gc           *config.GlobalConfig
-		wantC, wantS string
-		wantErr      bool
+		name    string
+		gc      *config.GlobalConfig
+		want    string
+		wantErr bool
 	}{
-		{"nil -> defaults", nil, "on", "required", false},
-		{"empty -> defaults", mk("", ""), "on", "required", false},
-		{"containment off", mk("off", ""), "off", "required", false},
-		{"sandbox optional", mk("", "optional"), "on", "optional", false},
-		{"disabled is no longer valid", mk("on", "disabled"), "", "", true},
-		{"invalid containment", mk("maybe", ""), "", "", true},
-		{"invalid sandbox", mk("on", "sometimes"), "", "", true},
+		{"nil -> default required", nil, "required", false},
+		{"empty -> default required", mk(""), "required", false},
+		{"off", mk("off"), "off", false},
+		{"required", mk("required"), "required", false},
+		{"optional is no longer valid", mk("optional"), "", true},
+		{"invalid", mk("sometimes"), "", true},
 	}
 	for _, tc := range cases {
-		c, s, err := resolveContainmentSwitches(tc.gc)
+		mode, err := resolveSandboxMode(tc.gc)
 		if tc.wantErr {
 			if err == nil {
 				t.Errorf("%s: expected error", tc.name)
@@ -167,8 +153,8 @@ func TestResolveContainmentSwitches(t *testing.T) {
 			t.Errorf("%s: unexpected error: %v", tc.name, err)
 			continue
 		}
-		if c != tc.wantC || s != tc.wantS {
-			t.Errorf("%s: got (%q,%q), want (%q,%q)", tc.name, c, s, tc.wantC, tc.wantS)
+		if mode != tc.want {
+			t.Errorf("%s: got %q, want %q", tc.name, mode, tc.want)
 		}
 	}
 }

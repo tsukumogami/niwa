@@ -1,32 +1,38 @@
 package cli
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
 
-func TestPlanSetupSandboxLinux(t *testing.T) {
+func TestValidateApplyProfileArgs(t *testing.T) {
+	realFile := filepath.Join(t.TempDir(), "bwrap")
+	if err := os.WriteFile(realFile, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("seeding temp bwrap: %v", err)
+	}
+
 	cases := []struct {
-		name                            string
-		bwrapOK, socatOK, netnsOK, root bool
-		want                            setupAction
+		name      string
+		isRoot    bool
+		bwrapPath string
+		wantErr   bool
 	}{
-		// Missing deps dominate: setup-sandbox never installs binaries.
-		{"no bwrap", false, true, false, true, actionInstallDeps},
-		{"no socat", true, false, false, true, actionInstallDeps},
-		{"no bwrap even if root and netns", false, true, true, true, actionInstallDeps},
-		// Deps present and the namespace works -> already capable, no-op.
-		{"capable non-root", true, true, true, false, actionAlreadyCapable},
-		{"capable root", true, true, true, true, actionAlreadyCapable},
-		// Hardened (netns fails) splits on privilege.
-		{"hardened non-root", true, true, false, false, actionNeedRoot},
-		{"hardened root", true, true, false, true, actionApplyProfile},
+		// The elevated child must be root -- a non-root child is a misuse.
+		{"not root", false, realFile, true},
+		// Root but no path: nothing to install for.
+		{"root empty path", true, "", true},
+		// Root and a nonexistent path: the parent-resolved binary must exist.
+		{"root nonexistent path", true, filepath.Join(t.TempDir(), "missing"), true},
+		// Root and a real file: the only valid case.
+		{"root real file", true, realFile, false},
 	}
 	for _, tc := range cases {
-		got := planSetupSandboxLinux(tc.bwrapOK, tc.socatOK, tc.netnsOK, tc.root)
-		if got != tc.want {
-			t.Errorf("%s: planSetupSandboxLinux(%v,%v,%v,%v) = %d, want %d",
-				tc.name, tc.bwrapOK, tc.socatOK, tc.netnsOK, tc.root, got, tc.want)
+		err := validateApplyProfileArgs(tc.isRoot, tc.bwrapPath)
+		if (err != nil) != tc.wantErr {
+			t.Errorf("%s: validateApplyProfileArgs(%v, %q) err = %v, wantErr = %v",
+				tc.name, tc.isRoot, tc.bwrapPath, err, tc.wantErr)
 		}
 	}
 }
