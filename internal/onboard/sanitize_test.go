@@ -117,14 +117,18 @@ func TestPunycodeEncode_KnownVector(t *testing.T) {
 	}
 }
 
-func TestPunycodeEncode_AllASCIIRoundTripsPlain(t *testing.T) {
+func TestPunycodeEncode_AllASCIIInputGetsTrailingDelimiter(t *testing.T) {
+	// Not a round trip -- the raw Bootstring primitive always appends
+	// the "-" delimiter after any basic-code-point run, even when
+	// there's nothing non-ASCII left to encode after it. This only
+	// exercises that low-level behavior directly; toASCIILabel never
+	// calls punycodeEncode for an all-ASCII label in the first place
+	// (see TestSanitizeHost_ASCIIPassthrough), so callers never see
+	// this trailing dash.
 	got, err := punycodeEncode([]rune("plain"))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	// All-basic input still gets the trailing delimiter per the
-	// algorithm; toASCIILabel never calls this for all-ASCII labels,
-	// so this only asserts the primitive itself is well-behaved.
 	if got != "plain-" {
 		t.Errorf("punycodeEncode(plain) = %q, want plain-", got)
 	}

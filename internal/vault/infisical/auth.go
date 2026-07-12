@@ -92,8 +92,8 @@ func resolveAPIURL(configVal string) string {
 // Rule 2 (flagged, not rejected here): a well-formed https URL that
 // differs from the Infisical cloud default is returned with
 // nonDefault=true. This function does not itself gate on that flag --
-// it hands the decision to the caller, which is the entry-time gate a
-// later issue wires (an interactive confirm, or --accept-api-url /
+// it hands the decision to the caller, which is the entry-time gate
+// (onboard.CheckAPIURL: an interactive confirm, or --accept-api-url /
 // exit 2 in a non-TTY run). R14 permits a workspace to declare a
 // non-default api_url for a self-hosted instance; this function's job
 // is only to make that declaration visible and scheme-checked, never

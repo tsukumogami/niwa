@@ -14,13 +14,6 @@ import (
 // issue) can map it to exit 2 via errors.Is.
 var ErrAPIURLNotAccepted = errors.New("onboard: api_url requires explicit acknowledgment (confirm or --accept-api-url)")
 
-// ConfirmFunc is the prompt-kit hook CheckAPIURL (and the detection
-// funnel's ConfirmSetup/ConfirmTopology) use to ask for explicit
-// acknowledgment. Bound to onboard.Confirm over real stdin/stdout in
-// production; tests and the non-interactive path substitute their
-// own.
-type ConfirmFunc func(prompt string, defaultYes bool) (bool, error)
-
 // CheckAPIURL runs the entry-time api_url trust gate (Decision 3 step
 // 0 / Decision 4's supply-chain guard). It MUST run right after
 // infisical's resolveAPIURL and strictly before any bearer-carrying

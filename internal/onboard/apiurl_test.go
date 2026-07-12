@@ -140,25 +140,42 @@ func TestAPIURLGate_BlocksDownstreamCallOnReject(t *testing.T) {
 			}))
 			defer srv.Close()
 
+			// ReadIdentity dials through http.DefaultClient, which
+			// doesn't trust httptest.NewTLSServer's self-signed cert by
+			// default -- without this, a regression's composed call
+			// below would fail at the TLS handshake before ever
+			// reaching the double's handler, and the request counter
+			// would never move even when it should. Swap in the
+			// server's own trusting client for the duration of this
+			// subtest so the composed call can actually complete.
+			prevClient := *http.DefaultClient
+			*http.DefaultClient = *srv.Client()
+			defer func() { *http.DefaultClient = prevClient }()
+
 			apiURL := srv.URL
 
 			err := CheckAPIURL(apiURL, c.accept, c.interactive, c.confirm)
-			if err == nil {
-				t.Fatalf("%s: expected the gate to reject", c.name)
-			}
 
 			// The wizard's own sequencing: the detection call is only
-			// ever reached if the gate returned nil. err is non-nil
-			// here, so this must not execute -- but it's real,
-			// reachable code (not a test-only stub), so a future
-			// CheckAPIURL regression that returns nil here would cause
-			// this to actually hit the double.
+			// ever reached if the gate returned nil. This must run
+			// BEFORE any t.Fatal on err -- t.Fatal calls
+			// runtime.Goexit, which would make this unreachable
+			// regardless of outcome and silently defeat the whole
+			// point of composing a real call here. err is expected to
+			// be non-nil below, so in the passing case this is
+			// correctly skipped; a future CheckAPIURL regression that
+			// returns nil here would cause this to actually hit the
+			// double, and the assertions below (both non-fatal, so
+			// both always run) would catch it.
 			if err == nil {
 				_, _ = infisical.ReadIdentity(context.Background(), apiURL, bearer, "probe-identity")
 			}
 
+			if err == nil {
+				t.Errorf("%s: expected the gate to reject", c.name)
+			}
 			if atomic.LoadInt32(&requests) != 0 {
-				t.Fatalf("%s: gate rejected but %d request(s) reached the downstream double", c.name, requests)
+				t.Errorf("%s: gate rejected but %d request(s) reached the downstream double", c.name, requests)
 			}
 		})
 	}

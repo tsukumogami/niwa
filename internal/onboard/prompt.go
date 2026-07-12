@@ -56,6 +56,13 @@ type Option struct {
 	Value string
 }
 
+// ConfirmFunc is the prompt-kit hook the api_url gate
+// (CheckAPIURL) and the detection funnel (ConfirmSetup,
+// ConfirmTopology) use to ask for explicit acknowledgment. Bound to
+// this package's own Confirm over real stdin/stdout in production;
+// tests and the non-interactive path substitute their own.
+type ConfirmFunc func(prompt string, defaultYes bool) (bool, error)
+
 // readLine writes prompt to out, then reads one line from br. This is
 // the one shared step every prompt-kit primitive's re-prompt loop
 // calls, generalized from promptBootstrap's and ReadConfirmation's EOF
