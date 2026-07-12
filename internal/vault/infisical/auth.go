@@ -80,6 +80,17 @@ func resolveAPIURL(configVal string) string {
 	return defaultAPIURL
 }
 
+// ResolveAPIURL is the exported form of resolveAPIURL, for callers
+// outside this package that need the same precedence ahead of any
+// bearer-carrying call -- currently the onboard wizard's entry-time
+// api_url gate (internal/onboard/wizard.go), which must resolve the
+// api_url before Detect's first privileged call, using whatever
+// [vault.provider] api_url the workspace config declares (empty when
+// not yet loaded).
+func ResolveAPIURL(configVal string) string {
+	return resolveAPIURL(configVal)
+}
+
 // ValidateAPIURL checks a resolved api_url against the two-rule
 // supply-chain guard Decision 4 requires, run at wizard entry right
 // after resolveAPIURL and before any bearer-carrying call.

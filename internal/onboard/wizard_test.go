@@ -4,8 +4,6 @@ import (
 	"errors"
 	"os"
 	"testing"
-
-	"github.com/tsukumogami/niwa/internal/vault/infisical"
 )
 
 func TestCheckNonInteractivePrecondition_InteractiveAlwaysPasses(t *testing.T) {
@@ -42,47 +40,17 @@ func TestCheckNonInteractivePrecondition_NonInteractiveIndividualWithTopologyPas
 	}
 }
 
-func TestResolveAPIURLForGate_ConfigValWins(t *testing.T) {
-	t.Setenv(apiURLEnvVar, "https://env-value.example/api")
-	got := resolveAPIURLForGate("https://config-value.example/api")
-	if got != "https://config-value.example/api" {
-		t.Errorf("resolveAPIURLForGate = %q, want config value to win over env", got)
-	}
-}
-
-func TestResolveAPIURLForGate_EnvWinsOverDefault(t *testing.T) {
-	t.Setenv(apiURLEnvVar, "https://env-value.example/api")
-	got := resolveAPIURLForGate("")
-	if got != "https://env-value.example/api" {
-		t.Errorf("resolveAPIURLForGate = %q, want env override", got)
-	}
-}
-
-func TestResolveAPIURLForGate_DefaultWhenNeitherSet(t *testing.T) {
-	os.Unsetenv(apiURLEnvVar)
-	got := resolveAPIURLForGate("")
-	if got != cloudDefaultAPIURL {
-		t.Errorf("resolveAPIURLForGate = %q, want default %q", got, cloudDefaultAPIURL)
-	}
-}
-
-// TestCloudDefaultAPIURL_MatchesInfisicalDefault guards against drift
-// between cloudDefaultAPIURL (duplicated here because infisical's real
-// default is unexported) and infisical's actual default: if the two
-// ever diverge, ValidateAPIURL would classify our "default" as
-// non-default, which this test would catch.
-func TestCloudDefaultAPIURL_MatchesInfisicalDefault(t *testing.T) {
-	nonDefault, err := infisical.ValidateAPIURL(cloudDefaultAPIURL)
-	if err != nil {
-		t.Fatalf("unexpected error validating cloudDefaultAPIURL: %v", err)
-	}
-	if nonDefault {
-		t.Errorf("cloudDefaultAPIURL %q no longer matches infisical's real default -- update the duplicated constant", cloudDefaultAPIURL)
-	}
-}
+// apiURLEnvVarForTest mirrors infisical's unexported env-override
+// variable name, used only to clear/set the environment around tests
+// that must not depend on whatever value happens to be inherited from
+// the test runner's environment. See infisical.ResolveAPIURL, which
+// Run calls directly -- there's no wizard-local resolution left to
+// unit-test here beyond what infisical's own auth_test.go already
+// covers.
+const apiURLEnvVarForTest = "NIWA_INFISICAL_API_URL"
 
 func TestRun_NonInteractiveNoOverrideFailsFastBeforeAPIURLGate(t *testing.T) {
-	os.Unsetenv(apiURLEnvVar)
+	os.Unsetenv(apiURLEnvVarForTest)
 	_, err := Run(Options{Interactive: false})
 	var ece *ExitCodeError
 	if !errors.As(err, &ece) {
@@ -94,7 +62,7 @@ func TestRun_NonInteractiveNoOverrideFailsFastBeforeAPIURLGate(t *testing.T) {
 }
 
 func TestRun_NonInteractiveIndividualWithoutTopologyFails(t *testing.T) {
-	os.Unsetenv(apiURLEnvVar)
+	os.Unsetenv(apiURLEnvVarForTest)
 	_, err := Run(Options{Interactive: false, SetupOverride: PhaseIndividual})
 	var ece *ExitCodeError
 	if !errors.As(err, &ece) {
@@ -106,7 +74,7 @@ func TestRun_NonInteractiveIndividualWithoutTopologyFails(t *testing.T) {
 }
 
 func TestRun_NonInteractiveTeamOverridePassesPreconditionThenHitsStub(t *testing.T) {
-	os.Unsetenv(apiURLEnvVar)
+	os.Unsetenv(apiURLEnvVarForTest)
 	result, err := Run(Options{Interactive: false, SetupOverride: PhaseTeam})
 	// Precondition and api_url gate both pass; the not-yet-implemented
 	// stub returns a plain (untyped) error, not an *ExitCodeError -- it
@@ -185,7 +153,7 @@ func TestRun_NonDefaultAPIURLWithAcceptFlagPasses(t *testing.T) {
 // fix, both gate-failure returns discarded a known override with a
 // bare Result{}.
 func TestRun_ResultSetupPropagatesOnGateFailures(t *testing.T) {
-	os.Unsetenv(apiURLEnvVar)
+	os.Unsetenv(apiURLEnvVarForTest)
 
 	t.Run("non-interactive precondition failure", func(t *testing.T) {
 		result, err := Run(Options{Interactive: false, SetupOverride: PhaseIndividual})
@@ -210,6 +178,29 @@ func TestRun_ResultSetupPropagatesOnGateFailures(t *testing.T) {
 			t.Errorf("Setup = %v, want PhaseTeam to propagate on the api_url gate-failure path", result.Setup)
 		}
 	})
+}
+
+// TestRun_InteractiveWithoutConfirmIsCallerBugNotPolicyFailure guards a
+// maintainability finding: a caller that sets Interactive without also
+// wiring Confirm (and without AcceptAPIURL) is misconfigured, not
+// hitting the non-interactive precondition -- Run must not fold that
+// case into ExitNonInteractivePrecondition, which would misreport a
+// programmer error as a policy outcome a script might reasonably
+// branch on.
+func TestRun_InteractiveWithoutConfirmIsCallerBugNotPolicyFailure(t *testing.T) {
+	_, err := Run(Options{
+		Interactive:     true,
+		SetupOverride:   PhaseTeam,
+		APIURLConfigVal: "https://self-hosted.example.com/api",
+		// Confirm deliberately left nil.
+	})
+	if err == nil {
+		t.Fatal("want an error, got nil")
+	}
+	var ece *ExitCodeError
+	if errors.As(err, &ece) {
+		t.Fatalf("a nil Confirm with Interactive=true is a caller bug, not ExitNonInteractivePrecondition -- got *ExitCodeError{Code: %d}", ece.Code)
+	}
 }
 
 func TestRun_InteractiveAPIURLDeclineFails(t *testing.T) {

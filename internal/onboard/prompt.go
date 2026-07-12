@@ -30,17 +30,25 @@ var IsStdinTTY = func() bool {
 
 // ErrNonInteractive is returned by Gate when stdin is not a terminal
 // and no override was supplied. This is a typed condition, not a
-// plain error string, so the command layer can map it to exit 2 (R18)
-// via errors.Is rather than string-matching.
+// plain error string, so a caller can map it to an exit code via
+// errors.Is rather than string-matching.
 var ErrNonInteractive = errors.New("onboard: stdin is not a terminal and no override was supplied")
 
-// Gate is the single TTY-or-override check the wizard performs once
-// at entry (Decision 3), before any prompt-kit primitive is used.
-// Confirm, Select, and Pause do not each re-check TTY state
-// themselves -- gating per-primitive would let an interactive-looking
-// prompt slip past a script that inherited a closed stdin partway
-// through a run. override lets a non-interactive run proceed anyway;
-// the command layer's flag surface decides when that's appropriate.
+// Gate is a generic TTY-or-override primitive: given a single "do I
+// already have enough non-interactive input to proceed" bool, it
+// re-derives IsStdinTTY() itself and fails closed when neither holds.
+//
+// wizard.go's Run does NOT call Gate -- AC-30's actual non-interactive
+// precondition is more specific than a single bool (a missing setup
+// override always fails, but a missing topology override only matters
+// once the setup is or would resolve to individual), so Run implements
+// that rule directly via checkNonInteractivePrecondition, which takes
+// the already-decided interactive bool as a parameter instead of
+// re-deriving it -- re-deriving here would call IsStdinTTY() a second
+// time per invocation, splitting the "single TTY gate at entry"
+// Decision 3 calls for across two independent checks. Gate remains
+// available for any future caller whose override condition really is
+// a single bool.
 func Gate(override bool) error {
 	if override || IsStdinTTY() {
 		return nil

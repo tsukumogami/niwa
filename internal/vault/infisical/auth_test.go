@@ -201,6 +201,20 @@ func TestResolveAPIURL_DefaultWhenNeitherSet(t *testing.T) {
 	}
 }
 
+// TestResolveAPIURL_ExportedWrapperMatchesPrivate guards the exported
+// ResolveAPIURL wrapper (added for internal/onboard's entry-time api_url
+// gate, which needs this package's precedence but lives outside this
+// package) against drifting from the private implementation it wraps.
+func TestResolveAPIURL_ExportedWrapperMatchesPrivate(t *testing.T) {
+	t.Setenv("NIWA_INFISICAL_API_URL", "https://env-override.example/api")
+	cases := []string{"", "https://config-value.example/api"}
+	for _, c := range cases {
+		if got, want := ResolveAPIURL(c), resolveAPIURL(c); got != want {
+			t.Errorf("ResolveAPIURL(%q) = %q, want %q (resolveAPIURL)", c, got, want)
+		}
+	}
+}
+
 func TestValidateAPIURL_NonHTTPSHardRejected(t *testing.T) {
 	cases := []string{
 		"http://app.infisical.com/api",
