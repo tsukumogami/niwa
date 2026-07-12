@@ -28,19 +28,16 @@ import (
 	"github.com/tsukumogami/niwa/internal/secret/reveal"
 	"github.com/tsukumogami/niwa/internal/vault"
 	"github.com/tsukumogami/niwa/internal/vault/infisical"
+	"github.com/tsukumogami/niwa/internal/workspace"
 )
 
-// credentialSyncPathPrefix and credentialSyncKeyPrefix mirror
-// workspace.CredentialSyncPathPrefix and its unexported "p-" key
-// prefix (internal/workspace/credentialpool.go) exactly. The two
-// packages cannot share the unexported constant directly without
-// widening that package's surface for a two-line value, so this is
-// kept in lockstep by convention -- any change to the credential-sync
-// contract's path/key shape must update both.
-const (
-	credentialSyncPathPrefix = "/niwa/provider-auth/"
-	credentialSyncKeyPrefix  = "p-"
-)
+// credentialSyncKeyPrefix mirrors workspace's unexported "p-" key
+// prefix (internal/workspace/credentialpool.go) -- that one genuinely
+// can't be imported, since exporting it would widen that package's
+// surface for a one-line value. The path prefix itself is the already-
+// exported workspace.CredentialSyncPathPrefix, reused directly below
+// rather than duplicated.
+const credentialSyncKeyPrefix = "p-"
 
 // defaultDestinationEnv mirrors infisical's own unexported defaultEnv
 // ("dev"), used when the credential-sync provider's spec does not
@@ -223,7 +220,7 @@ func runIndividualSetup(ctx context.Context, p IndividualSetupParams, runner sec
 		r.RegisterValue(bodyValue)
 	}
 
-	storePath := credentialSyncPathPrefix + p.Kind
+	storePath := workspace.CredentialSyncPathPrefix + p.Kind
 	storeKey := credentialSyncKeyPrefix + p.Project
 
 	destProject, _ := p.SyncSpec.Config["project"].(string)
