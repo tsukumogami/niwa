@@ -104,6 +104,72 @@ func TestVerifyIndividual_HappyPath(t *testing.T) {
 // AC-18b: a malformed stored body produces an ExitVerification error
 // naming the (kind, project) pair, its source, and the nature of the
 // failure -- never a bare "verification failed" message.
+// TestVerifyIndividual_SweepFailureOnOtherPairIsReported drives AC-18's
+// "enumerated across the three vault-registry sources" requirement at
+// the onboard package boundary: the just-stored target pair resolves
+// cleanly, but a different pair declared in a swept registry has a
+// malformed body, and VerifyIndividual must still fail -- R11-prefixed
+// -- naming that other pair, not report a bare success.
+func TestVerifyIndividual_SweepFailureOnOtherPairIsReported(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	cmd := &fakeVerifyCommander{stdout: `{
+		"p-uuid-1": "version = \"1\"\nclient_id = \"cid\"\nclient_secret = \"csec\"\n",
+		"p-other-project": "not = [valid toml"
+	}`}
+
+	teamVault := &config.VaultRegistry{
+		Provider: &config.VaultProviderConfig{
+			Kind:   "infisical",
+			Config: map[string]any{"project": "other-project"},
+		},
+	}
+
+	err := VerifyIndividual(context.Background(), VerifyIndividualParams{
+		GlobalOverride: testVerifyGlobalOverride("sync-project", cmd),
+		TeamVault:      teamVault,
+		Kind:           "infisical",
+		Project:        "uuid-1",
+	})
+	var ece *ExitCodeError
+	if !errors.As(err, &ece) {
+		t.Fatalf("err is not *ExitCodeError: %T (%v)", err, err)
+	}
+	if ece.Code != ExitVerification {
+		t.Errorf("Code = %d, want ExitVerification (%d)", ece.Code, ExitVerification)
+	}
+	for _, want := range []string{"R11", "other-project", "malformed"} {
+		if !strings.Contains(ece.Msg, want) {
+			t.Errorf("Msg = %q, want it to contain %q", ece.Msg, want)
+		}
+	}
+}
+
+// TestVerifyIndividual_SweepIgnoresUnrelatedCLISessionPair confirms the
+// sweep's graceful semantics reach all the way through VerifyIndividual:
+// an unrelated declared pair that simply has no stored credential at
+// all (falls through to CLI-session) must not fail the check.
+func TestVerifyIndividual_SweepIgnoresUnrelatedCLISessionPair(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	cmd := &fakeVerifyCommander{stdout: `{"p-uuid-1": "version = \"1\"\nclient_id = \"cid\"\nclient_secret = \"csec\"\n"}`}
+
+	teamVault := &config.VaultRegistry{
+		Provider: &config.VaultProviderConfig{
+			Kind:   "infisical",
+			Config: map[string]any{"project": "other-project"},
+		},
+	}
+
+	err := VerifyIndividual(context.Background(), VerifyIndividualParams{
+		GlobalOverride: testVerifyGlobalOverride("sync-project", cmd),
+		TeamVault:      teamVault,
+		Kind:           "infisical",
+		Project:        "uuid-1",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error -- an unrelated CLI-session-fallback pair must not fail R11: %v", err)
+	}
+}
+
 func TestVerifyIndividual_MalformedBodyNamesPairSourceAndNature(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	cmd := &fakeVerifyCommander{stdout: `{"p-uuid-1": "not = [valid toml"}`}

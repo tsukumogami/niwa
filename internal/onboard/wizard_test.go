@@ -1,10 +1,14 @@
 package onboard
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/tsukumogami/niwa/internal/vault/infisical"
 )
 
 func TestCheckNonInteractivePrecondition_InteractiveAlwaysPasses(t *testing.T) {
@@ -288,6 +292,131 @@ func TestRun_PhaseIndividualRoutesToRunIndividualSetup(t *testing.T) {
 	}
 	if n := srv.CountRequests("GET /v1/auth/universal-auth/identities/ident-123"); n != 1 {
 		t.Errorf("read-identity requests = %d, want 1 -- Run's redactor-attached ctx must reach the real REST call", n)
+	}
+}
+
+// --- Options.Preconditions wiring (R22) ---
+
+// TestRun_PreconditionsNilIsANoOp confirms that leaving
+// Options.Preconditions nil (every test above this one does exactly
+// that) keeps today's behavior unchanged -- Run must not attempt any
+// R22 check when the field isn't populated.
+func TestRun_PreconditionsNilIsANoOp(t *testing.T) {
+	os.Unsetenv(apiURLEnvVarForTest)
+	result, err := Run(Options{Interactive: false, SetupOverride: PhaseTeam})
+	var ece *ExitCodeError
+	if errors.As(err, &ece) {
+		t.Fatalf("nil Preconditions must not produce a typed R22 outcome, got *ExitCodeError{Code: %d}", ece.Code)
+	}
+	if err == nil {
+		t.Fatal("want the not-yet-implemented stub error (Options.Team nil), got nil")
+	}
+	if result.Setup != PhaseTeam {
+		t.Errorf("Setup = %v, want PhaseTeam", result.Setup)
+	}
+}
+
+// TestRun_PreconditionsSessionFailureHaltsBeforeRouting drives the R22
+// session precondition through Run itself (not just the standalone
+// EnsureAuthenticatedSession unit tests): a checker reporting no
+// session and a nil pause function must halt Run before it ever
+// reaches the api_url gate or Team/Individual routing -- proven here
+// by supplying a SetupOverride that would otherwise hit the
+// Options.Team nil-check, and confirming the session-precondition
+// error surfaces instead.
+func TestRun_PreconditionsSessionFailureHaltsBeforeRouting(t *testing.T) {
+	os.Unsetenv(apiURLEnvVarForTest)
+	checker := func(ctx context.Context) (infisical.SessionStatus, error) {
+		return infisical.SessionStatus{Authenticated: false}, nil
+	}
+
+	_, err := Run(Options{
+		Interactive:   false,
+		SetupOverride: PhaseTeam, // opts.Team is nil; if routing were reached, THIS is the error we'd otherwise see.
+		Preconditions: &PreconditionsParams{
+			SessionChecker: checker,
+			// Pause left nil: EnsureAuthenticatedSession errors rather
+			// than blocking forever, which is exactly what proves Run
+			// actually invoked it before anything else.
+		},
+	})
+	if err == nil {
+		t.Fatal("want the R22 session-precondition error, got nil")
+	}
+	if !strings.Contains(err.Error(), "R22 session precondition") {
+		t.Errorf("err = %v, want it to name the R22 session precondition (proving Run halted there, not at the Options.Team nil-check)", err)
+	}
+}
+
+// TestRun_PreconditionsOverlayFailureHaltsBeforeRouting mirrors the
+// session test for the overlay half of R22: an EnsurePersonalOverlay
+// failure (here, an unregistered pointer with no Repo supplied) must
+// also halt Run before routing.
+func TestRun_PreconditionsOverlayFailureHaltsBeforeRouting(t *testing.T) {
+	os.Unsetenv(apiURLEnvVarForTest)
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	alwaysAuthenticated := func(ctx context.Context) (infisical.SessionStatus, error) {
+		return infisical.SessionStatus{Authenticated: true}, nil
+	}
+
+	_, err := Run(Options{
+		Interactive:   false,
+		SetupOverride: PhaseTeam, // opts.Team is nil; would error differently if routing were reached.
+		Preconditions: &PreconditionsParams{
+			SessionChecker: alwaysAuthenticated,
+			Overlay: EnsurePersonalOverlayParams{
+				OverlayDir: filepath.Join(t.TempDir(), "overlay"),
+				// Repo deliberately empty: the pointer is unregistered
+				// (fresh XDG_CONFIG_HOME above) and EnsurePersonalOverlay
+				// requires a Repo to register it.
+			},
+		},
+	})
+	if err == nil {
+		t.Fatal("want the R22 personal-overlay-precondition error, got nil")
+	}
+	if !strings.Contains(err.Error(), "R22 personal-overlay precondition") {
+		t.Errorf("err = %v, want it to name the R22 personal-overlay precondition (proving Run halted there, not at the Options.Team nil-check)", err)
+	}
+}
+
+// TestRun_PreconditionsPassThenReachesRouting proves the positive
+// direction: when both R22 checks succeed, Run proceeds past them into
+// its normal routing (reaching the same Options.Team nil-check error
+// the no-preconditions tests above see), rather than the precondition
+// block silently swallowing the rest of Run.
+func TestRun_PreconditionsPassThenReachesRouting(t *testing.T) {
+	os.Unsetenv(apiURLEnvVarForTest)
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	overlayDir := filepath.Join(t.TempDir(), "overlay")
+	mustGitInit(t, overlayDir)
+
+	alwaysAuthenticated := func(ctx context.Context) (infisical.SessionStatus, error) {
+		return infisical.SessionStatus{Authenticated: true}, nil
+	}
+
+	result, err := Run(Options{
+		Interactive:   false,
+		SetupOverride: PhaseTeam,
+		Preconditions: &PreconditionsParams{
+			SessionChecker: alwaysAuthenticated,
+			Overlay: EnsurePersonalOverlayParams{
+				OverlayDir: overlayDir, // already a git repo; pointer registration is skippable via Repo below.
+				Repo:       "acme/dot-niwa-overlay",
+			},
+		},
+	})
+	var ece *ExitCodeError
+	if errors.As(err, &ece) {
+		t.Fatalf("expected R22 to pass and reach the Options.Team nil-check (untyped), got *ExitCodeError{Code: %d}", ece.Code)
+	}
+	if err == nil || !strings.Contains(err.Error(), "Options.Team must be populated") {
+		t.Fatalf("err = %v, want it to reach the Options.Team nil-check, proving Run passed both R22 checks and continued routing", err)
+	}
+	if result.Setup != PhaseTeam {
+		t.Errorf("Setup = %v, want PhaseTeam", result.Setup)
 	}
 }
 
