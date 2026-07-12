@@ -1,6 +1,6 @@
 ---
 schema: brief/v1
-status: Draft
+status: Accepted
 problem: |
   niwa vault onboarding is a long, cross-context choreography spanning a team
   phase and an individual phase. Every step is mechanical, but the whole
@@ -27,7 +27,7 @@ motivating_context: |
 
 ## Status
 
-Draft
+Accepted
 
 This brief frames a net-new niwa command that owns the entire vault-onboarding
 choreography. The downstream PRD owns the requirements (the wizard's interface,
@@ -216,25 +216,6 @@ teammates depend on it.
   tsukumogami/niwa#199 (`niwa vault check`) as standalone shipped commands. Their
   mechanics are folded into the wizard as internal building blocks; this feature
   supersedes them rather than shipping alongside them.
-
-## Open Questions
-
-These framing details are deferred to the downstream PRD and DESIGN; none blocks
-the framing.
-
-- How the wizard determines which setup an operator is in: automatic detection from
-  the workspace and session state, an explicit flag, an early prompt, or a mix. The
-  requirement is one command with two setups and interactive branching; the
-  detection mechanism is a design choice.
-- How the wizard pauses for a human login and resumes on the other side (a single
-  guided run that blocks on the interactive login, a resumable multi-step flow, or
-  another shape). The requirement is that the operator is walked to each login and
-  the automation continues afterward; the resume mechanism is design territory.
-- How the wizard names the vault topology and how it settles which shape applies:
-  inferring it from the personal overlay and workspace config, asking the operator
-  outright, or a mix. The requirement is that topology is an explicit, reason-able
-  choice that drives how many login pauses appear; the naming and detection
-  mechanism is a PRD and design detail.
 
 ## References
 
