@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/tsukumogami/niwa/internal/config"
@@ -27,7 +28,7 @@ import (
 )
 
 // EncodeTOMLString renders s as a TOML basic string (double-quoted),
-// escaping every byte that would otherwise let the value break out of the
+// escaping every rune that would otherwise let the value break out of the
 // quotes or inject structure: backslash, double-quote, and the C0 control
 // bytes (newline, tab, carriage return, etc. via their short escapes; any
 // other control byte via \u00XX). A value carrying a literal `"`, a
@@ -65,12 +66,27 @@ func EncodeTOMLString(s string) string {
 	return b.String()
 }
 
+// topLevelHeaderPattern matches a whole line (once trimmed) that is
+// exactly a table header (`[table]`) or array-of-tables header
+// (`[[table]]`), optionally followed by a trailing comment. Requiring the
+// *entire* line to be the bracketed token (rather than merely testing a
+// leading "[") is what keeps a continuation line of a hand-written
+// multi-line array or inline table -- e.g. `  [1, 2],` inside some
+// unrelated `key = [\n  [1, 2],\n]` value -- from being misread as a
+// table boundary: that line has trailing content (`,`) the pattern
+// rejects. This is still a line-based heuristic, not a TOML tokenizer, so
+// a bracketed value that closes exactly at end-of-line with nothing else
+// on it (rare, but possible in hand-authored arrays) can still false-positive;
+// RenderVaultProviderTable never emits such a value, and the surgical
+// primitive is documented as a text-level tool, not a parser replacement.
+var topLevelHeaderPattern = regexp.MustCompile(`^(\[[^\[\]]*\]|\[\[[^\[\]]*\]\])(\s*#.*)?$`)
+
 // isTopLevelHeaderLine reports whether line (already trimmed of leading/
 // trailing whitespace) opens a new top-level TOML section: a standard
 // table header (`[table]`) or an array-of-tables header (`[[table]]`).
 // Either one ends the span of a preceding table.
 func isTopLevelHeaderLine(trimmed string) bool {
-	return strings.HasPrefix(trimmed, "[")
+	return topLevelHeaderPattern.MatchString(trimmed)
 }
 
 // InsertOrReplaceTable applies the surgical table-level edit described in
@@ -225,13 +241,18 @@ func RenderVaultProviderTable(tablePath, kind, project, apiURL string) string {
 }
 
 // ConfigSite identifies one of the three places onboard authors
-// configuration.
+// configuration. The zero value is deliberately not one of the three real
+// sites (see siteUnset) so a zero-value WriteResult can't be mistaken for
+// a legitimate SitePersonalOverlay result by a caller that forgets to
+// check the accompanying error.
 type ConfigSite int
 
 const (
+	// siteUnset is the zero value: "no site" rather than any real one.
+	siteUnset ConfigSite = iota
 	// SitePersonalOverlay is the operator's personal-overlay repo
 	// (niwa.toml at its root, a real git clone).
-	SitePersonalOverlay ConfigSite = iota
+	SitePersonalOverlay
 	// SiteLocalPointer is ~/.config/niwa/config.toml -- not a git repo.
 	SiteLocalPointer
 	// SiteTeamConfig is the team's workspace source repo -- shared and
@@ -240,13 +261,20 @@ const (
 )
 
 // LandedOn reports which side of the upstream/operator-local boundary a
-// config write landed on (AC-25).
+// config write landed on (AC-25). The zero value is deliberately not one
+// of the three real outcomes (see landedUnset) for the same
+// zero-value-footgun reason as ConfigSite above: a caller that reads
+// WriteResult.Landed without first checking the accompanying error must
+// not be able to mistake an unset zero value for LandedUpstreamRepo.
 type LandedOn int
 
 const (
+	// landedUnset is the zero value: "nothing determined" rather than
+	// any real outcome.
+	landedUnset LandedOn = iota
 	// LandedUpstreamRepo means the write was committed (without pushing)
 	// to a repo the operator owns.
-	LandedUpstreamRepo LandedOn = iota
+	LandedUpstreamRepo
 	// LandedOperatorLocal means the write went to machine-local state
 	// with no git involved.
 	LandedOperatorLocal
@@ -258,16 +286,30 @@ const (
 // WriteResult reports the outcome of one config-authoring write, including
 // which side it landed on (AC-25).
 type WriteResult struct {
+	// Site and Landed are always populated on a nil-error return, even
+	// when Changed is false (a no-op landing-check hit still landed
+	// somewhere -- it just didn't need a fresh write). Both are zero
+	// (siteUnset / landedUnset) only on a zero-value WriteResult that a
+	// caller constructed itself or received alongside a non-nil error;
+	// check the error first.
 	Site ConfigSite
-	// Landed is unset (zero value) only when Changed is false and no
-	// write of any kind was attempted or needed; callers should not infer
-	// meaning from Landed on a no-op result beyond "nothing happened".
+	// Landed reports which side of the upstream/operator-local boundary
+	// the write is on. For SitePersonalOverlay, "landed" describes what
+	// InsertOrReplaceTable's landing check determined -- see Changed's
+	// caveat about what specifically counts as a change for that site.
 	Landed LandedOn
 	// Location is the file path the config lives in (site 1 and 2) or
 	// the destination path named for the operator to edit (site 3).
 	Location string
 	// Changed reports whether this call produced a new write (false for
-	// an idempotent no-op landing-check hit).
+	// an idempotent no-op landing-check hit). For SitePersonalOverlay
+	// specifically, Changed reflects whether a commit was made, which is
+	// gated on `git diff --cached --quiet` after an unconditional `git
+	// add` (see WritePersonalOverlayVaultProvider) -- not on whether
+	// InsertOrReplaceTable itself rewrote the file. A practical
+	// consequence: if niwa.toml already carried unrelated uncommitted
+	// edits at call time, `git add` stages the whole current file
+	// content, so those edits ride along into this same commit.
 	Changed bool
 	// Message is a human-readable summary suitable for direct display,
 	// already naming which side (upstream repo vs. operator-local) the

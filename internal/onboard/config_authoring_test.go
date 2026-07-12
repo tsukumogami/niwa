@@ -196,6 +196,37 @@ func TestInsertOrReplaceTable_ReplaceAtEOF(t *testing.T) {
 	}
 }
 
+// TestInsertOrReplaceTable_MultilineArrayIsNotAHeaderBoundary guards
+// against a false-positive header match: a continuation line of a
+// hand-written multi-line array (e.g. `  [1, 2],`) starts with `[` but is
+// not a table header, and must not truncate the preceding table's span.
+func TestInsertOrReplaceTable_MultilineArrayIsNotAHeaderBoundary(t *testing.T) {
+	existing := []byte(`[global.vault.provider]
+kind = "old"
+matrix = [
+  [1, 2],
+  [3, 4],
+]
+project = "old-project"
+
+[unrelated.table]
+key = "value"
+`)
+	newBody := "[global.vault.provider]\nkind = \"new\"\n"
+
+	got, changed := InsertOrReplaceTable(existing, "global.vault.provider", newBody)
+	if !changed {
+		t.Fatal("expected changed=true")
+	}
+	gotStr := string(got)
+	if strings.Contains(gotStr, "matrix") || strings.Contains(gotStr, "old-project") {
+		t.Errorf("multi-line array continuation line was misread as a header boundary, truncating the replace early:\n%s", gotStr)
+	}
+	if !strings.Contains(gotStr, "[unrelated.table]\nkey = \"value\"") {
+		t.Errorf("unrelated trailing table was not preserved:\n%s", gotStr)
+	}
+}
+
 // --- WritePersonalOverlayVaultProvider ---
 
 // recordingGitInvoker is a minimal test double mirroring
