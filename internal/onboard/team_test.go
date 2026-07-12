@@ -90,17 +90,11 @@ func teamTestBearer() secret.Value {
 	return secret.New([]byte("operator-bearer-value"), secret.Origin{})
 }
 
-// withCreateFolder swaps the createFolder seam for the duration of fn,
-// restoring the original afterward. Tests must not run in parallel
-// with each other (they don't; t.Parallel is never called here).
-func withCreateFolder(t *testing.T, fn func(ctx context.Context, projectID, env, path string) error, body func()) {
-	t.Helper()
-	orig := createFolder
-	createFolder = fn
-	defer func() { createFolder = orig }()
-	body()
-}
-
+// baseTeamOptions returns a TeamOptions with CreateFolder defaulted to
+// an always-succeeding stub; callers that care about the folder step
+// specifically override opts.CreateFolder directly (a plain field
+// assignment -- no shared global, so tests carry no cross-test state
+// and are safe to run in parallel).
 func baseTeamOptions(apiURL string) TeamOptions {
 	return TeamOptions{
 		APIURL:          apiURL,
@@ -113,6 +107,9 @@ func baseTeamOptions(apiURL string) TeamOptions {
 		SecretPath:      "/team",
 		In:              strings.NewReader(""),
 		Out:             &strings.Builder{},
+		CreateFolder: func(ctx context.Context, projectID, env, path string) error {
+			return nil
+		},
 	}
 }
 
@@ -133,26 +130,27 @@ func TestRunTeam_HappyPath_AC8_AC10_AC12(t *testing.T) {
 
 	var folderCalls int32
 	var capturedArgs []string
-	withCreateFolder(t, func(ctx context.Context, projectID, env, path string) error {
+	opts := baseTeamOptions(srv.URL())
+	opts.CreateFolder = func(ctx context.Context, projectID, env, path string) error {
 		atomic.AddInt32(&folderCalls, 1)
 		capturedArgs = []string{projectID, env, path}
 		return nil
-	}, func() {
-		result, err := RunTeam(context.Background(), baseTeamOptions(srv.URL()))
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if result.ClientID != "client-abc" {
-			t.Errorf("ClientID = %q, want client-abc", result.ClientID)
-		}
-	})
+	}
+
+	result, err := RunTeam(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.ClientID != "client-abc" {
+		t.Errorf("ClientID = %q, want client-abc", result.ClientID)
+	}
 
 	if folderCalls == 0 {
-		t.Error("AC-8: createFolder was never invoked")
+		t.Error("AC-8: CreateFolder was never invoked")
 	}
 	wantArgs := []string{"proj-1", "dev", "/team"}
 	if len(capturedArgs) != 3 || capturedArgs[0] != wantArgs[0] || capturedArgs[1] != wantArgs[1] || capturedArgs[2] != wantArgs[2] {
-		t.Errorf("createFolder args = %v, want %v", capturedArgs, wantArgs)
+		t.Errorf("CreateFolder args = %v, want %v", capturedArgs, wantArgs)
 	}
 
 	if got := atomic.LoadInt32(&srv.mintRevokeCalls); got != 0 {
@@ -199,19 +197,15 @@ func TestRunTeam_IdentityNotYetCreated_AC9_AC9b(t *testing.T) {
 	opts.In = in
 	opts.Out = &out
 
-	withCreateFolder(t, func(ctx context.Context, projectID, env, path string) error {
-		return nil
-	}, func() {
-		srv.membershipPresent = true
-		srv.granted = true
-		result, err := RunTeam(context.Background(), opts)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if result.ClientID != "client-xyz" {
-			t.Errorf("ClientID = %q, want client-xyz", result.ClientID)
-		}
-	})
+	srv.membershipPresent = true
+	srv.granted = true
+	result, err := RunTeam(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.ClientID != "client-xyz" {
+		t.Errorf("ClientID = %q, want client-xyz", result.ClientID)
+	}
 
 	if pauseCount < 2 {
 		t.Fatalf("AC-9b: expected the landing check to fail once and re-surface, pauseCount = %d", pauseCount)
@@ -272,13 +266,9 @@ func TestRunTeam_GrantNotYetPresent_AC9(t *testing.T) {
 	opts.In = in
 	opts.Out = &out
 
-	withCreateFolder(t, func(ctx context.Context, projectID, env, path string) error {
-		return nil
-	}, func() {
-		if _, err := RunTeam(context.Background(), opts); err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-	})
+	if _, err := RunTeam(context.Background(), opts); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 
 	printed := out.String()
 	if !strings.Contains(printed, "dev") {
@@ -315,21 +305,21 @@ func TestRunTeam_PlanGatedFolder_AC11(t *testing.T) {
 	opts.Out = &out
 
 	var calls int32
-	withCreateFolder(t, func(ctx context.Context, projectID, env, path string) error {
+	opts.CreateFolder = func(ctx context.Context, projectID, env, path string) error {
 		atomic.AddInt32(&calls, 1)
 		if gated {
 			return infisical.ErrPlanGated
 		}
 		return nil
-	}, func() {
-		result, err := RunTeam(context.Background(), opts)
-		if err != nil {
-			t.Fatalf("expected plan-gate to degrade to guided instructions, not error out: %v", err)
-		}
-		if result.ClientID != "client-abc" {
-			t.Errorf("ClientID = %q, want client-abc", result.ClientID)
-		}
-	})
+	}
+
+	result, err := RunTeam(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("expected plan-gate to degrade to guided instructions, not error out: %v", err)
+	}
+	if result.ClientID != "client-abc" {
+		t.Errorf("ClientID = %q, want client-abc", result.ClientID)
+	}
 
 	if calls < 2 {
 		t.Fatalf("AC-11: expected createFolder to be retried after the guided pause, calls = %d", calls)
@@ -347,17 +337,17 @@ func TestRunTeam_FolderHardFailureSurfacesAsError(t *testing.T) {
 	defer srv.Close()
 
 	opts := baseTeamOptions(srv.URL())
-	withCreateFolder(t, func(ctx context.Context, projectID, env, path string) error {
+	opts.CreateFolder = func(ctx context.Context, projectID, env, path string) error {
 		return errors.New("boom: folder create failed")
-	}, func() {
-		_, err := RunTeam(context.Background(), opts)
-		if err == nil {
-			t.Fatal("expected a raw error for a non-plan-gated folder failure")
-		}
-		if errors.Is(err, infisical.ErrPlanGated) {
-			t.Error("a generic failure must not be treated as plan-gated")
-		}
-	})
+	}
+
+	_, err := RunTeam(context.Background(), opts)
+	if err == nil {
+		t.Fatal("expected a raw error for a non-plan-gated folder failure")
+	}
+	if errors.Is(err, infisical.ErrPlanGated) {
+		t.Error("a generic failure must not be treated as plan-gated")
+	}
 }
 
 // TestRunTeam_R21_AC35 proves the R21 sweep names the missing
@@ -412,11 +402,8 @@ func TestRunTeam_R21_NamesMissingArtifact_AC35(t *testing.T) {
 				folderErr = errors.New("boom: folder create failed")
 			}
 
-			var err error
-			withCreateFolder(t, func(ctx context.Context, projectID, env, path string) error {
+			_, err := verifyR21WithProbe(srv.URL(), func(ctx context.Context, projectID, env, path string) error {
 				return folderErr
-			}, func() {
-				_, err = verifyR21WithProbe(srv.URL())
 			})
 
 			if err == nil {
@@ -441,7 +428,7 @@ func TestRunTeam_R21_NamesMissingArtifact_AC35(t *testing.T) {
 
 // verifyR21WithProbe is a thin helper isolating verifyR21 against a
 // pre-seeded teamTestServer.
-func verifyR21WithProbe(apiURL string) (TeamResult, error) {
+func verifyR21WithProbe(apiURL string, createFolder FolderCreator) (TeamResult, error) {
 	opts := TeamOptions{
 		APIURL:          apiURL,
 		Bearer:          teamTestBearer(),
@@ -449,6 +436,7 @@ func verifyR21WithProbe(apiURL string) (TeamResult, error) {
 		IdentityID:      "ident-1",
 		EnvironmentSlug: "dev",
 		SecretPath:      "/team",
+		CreateFolder:    createFolder,
 	}
 	return verifyR21(context.Background(), opts)
 }
@@ -467,13 +455,9 @@ func TestRunTeam_ResumeSkipsGuidedStepsWhenAlreadyLanded(t *testing.T) {
 	opts := baseTeamOptions(srv.URL())
 	opts.In = &neverReadReader{t: t}
 
-	withCreateFolder(t, func(ctx context.Context, projectID, env, path string) error {
-		return nil
-	}, func() {
-		if _, err := RunTeam(context.Background(), opts); err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-	})
+	if _, err := RunTeam(context.Background(), opts); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 }
 
 type neverReadReader struct{ t *testing.T }

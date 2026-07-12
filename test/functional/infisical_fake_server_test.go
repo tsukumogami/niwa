@@ -191,6 +191,20 @@ func TestInfisicalFakeServer_ReadProjectMembership(t *testing.T) {
 	if got := srv.CountRequests("/memberships/identities/ident-1"); got != 1 {
 		t.Errorf("CountRequests(/memberships/identities/ident-1) = %d, want 1", got)
 	}
+
+	// The malformed fixture's body ({"identityMembership": {}}) is
+	// well-formed JSON missing the roles field -- unlike ReadIdentity's
+	// required clientId, ReadProjectMembership has no required field to
+	// validate, so an absent/empty roles array is indistinguishable
+	// from "not granted" rather than a parse error.
+	srv.SetMembershipMalformed("proj-1", "ident-malformed")
+	granted, err = infisical.ReadProjectMembership(ctx, srv.URL(), bearer, "proj-1", "ident-malformed")
+	if err != nil {
+		t.Fatalf("unexpected error for the malformed (empty-roles) fixture: %v", err)
+	}
+	if granted {
+		t.Error("granted = true, want false for a response with no roles field")
+	}
 }
 
 // TestInfisicalFakeServer_TeamPath_AC10_ZeroManagementCalls drives the

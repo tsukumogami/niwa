@@ -57,6 +57,29 @@ type TeamOptions struct {
 	// In and Out back the guided steps' Pause prompts.
 	In  io.Reader
 	Out io.Writer
+
+	// CreateFolder is the folder-create CLI-delegation seam. nil (the
+	// production default) wires up infisical.CreateSecretsFolder
+	// against the real CLI on PATH; team_test.go substitutes a fake
+	// directly here instead of touching a package-level global, so
+	// tests carry no shared mutable state and remain safe to run in
+	// parallel.
+	CreateFolder FolderCreator
+}
+
+// FolderCreator is the folder-create CLI-delegation seam's shape.
+// infisical.CreateSecretsFolder's own commander parameter is of an
+// unexported type, so this package cannot inject a fake commander
+// directly into it; FolderCreator lets TeamOptions carry a swappable
+// function value instead, at the same three-string call shape.
+type FolderCreator func(ctx context.Context, projectID, env, path string) error
+
+// defaultCreateFolder is the production FolderCreator: it shells out
+// to the real infisical CLI (or, under test, the writeFakeInfisical
+// stub on PATH) via infisical.CreateSecretsFolder's own default
+// commander.
+func defaultCreateFolder(ctx context.Context, projectID, env, path string) error {
+	return infisical.CreateSecretsFolder(ctx, nil, projectID, env, path)
 }
 
 // TeamResult is RunTeam's terminal, successful outcome.
@@ -64,17 +87,6 @@ type TeamResult struct {
 	// ClientID is the identity's Universal Auth client_id, confirmed
 	// present by the R21 sweep.
 	ClientID string
-}
-
-// createFolder is the folder-create CLI-delegation seam. Production
-// wiring shells out to the real infisical CLI (or, under test, the
-// writeFakeInfisical stub on PATH) via infisical.CreateSecretsFolder's
-// own default commander -- infisical's commander type is unexported,
-// so this package has no other injection point. team_test.go
-// substitutes this var directly, mirroring the IsStdinTTY seam in
-// prompt.go.
-var createFolder = func(ctx context.Context, projectID, env, path string) error {
-	return infisical.CreateSecretsFolder(ctx, nil, projectID, env, path)
 }
 
 // RunTeam runs the team-phase step loop: folder creation, then the
@@ -86,9 +98,22 @@ var createFolder = func(ctx context.Context, projectID, env, path string) error 
 // finds everything already done walks straight through with no
 // prompts at all.
 func RunTeam(ctx context.Context, opts TeamOptions) (TeamResult, error) {
+	if opts.CreateFolder == nil {
+		opts.CreateFolder = defaultCreateFolder
+	}
+
 	if err := ensureFolder(ctx, opts); err != nil {
 		return TeamResult{}, err
 	}
+	// ensureIdentityAndUA's clientID return is deliberately discarded
+	// here: verifyR21 below re-fetches it fresh rather than threading
+	// this value through, because Decision 1 requires every landing
+	// decision to be a live world-state probe, never a remembered
+	// value -- reusing it here would be exactly the "remembered
+	// cursor" the design exists to avoid, and would silently break the
+	// resumed-run guarantee (a run that starts already-landed must hit
+	// the same verifyR21 code path a stepped-through run does). Do not
+	// "optimize" this into a single fetch.
 	if _, err := ensureIdentityAndUA(ctx, opts); err != nil {
 		return TeamResult{}, err
 	}
@@ -108,7 +133,7 @@ func RunTeam(ctx context.Context, opts TeamOptions) (TeamResult, error) {
 // and re-checks whether it now exists.
 func ensureFolder(ctx context.Context, opts TeamOptions) error {
 	for {
-		err := createFolder(ctx, opts.ProjectID, opts.EnvironmentSlug, opts.SecretPath)
+		err := opts.CreateFolder(ctx, opts.ProjectID, opts.EnvironmentSlug, opts.SecretPath)
 		if err == nil {
 			return nil
 		}
@@ -174,6 +199,15 @@ func ensureIdentityAndUA(ctx context.Context, opts TeamOptions) (string, error) 
 // confirmed in NOTE-onboard-rest-verification.md as the environment-
 // grant landing check's REST surface. A failed landing check
 // re-surfaces the instruction and does not advance (AC-9b).
+//
+// granted here confirms project-level role assignment only -- per
+// ReadProjectMembership's own doc comment, it cannot verify that the
+// assigned role's permission conditions actually scope to
+// opts.EnvironmentSlug specifically (that finer-grained detail isn't
+// readable from this endpoint). This landing check, and R21 below,
+// both inherit that same project-level-only blind spot; the design's
+// documented fallback for it is trusting the operator's claim, which
+// is exactly what the guided instruction below does.
 func ensureGrant(ctx context.Context, opts TeamOptions) error {
 	for {
 		granted, err := infisical.ReadProjectMembership(ctx, opts.APIURL, opts.Bearer, opts.ProjectID, opts.IdentityID)
@@ -209,7 +243,11 @@ func ensureGrant(ctx context.Context, opts TeamOptions) error {
 // of the ensure* guided loops above ever prompting. On failure, names
 // the first missing artifact and is reported distinctly from R11
 // (AC-35): the message is always prefixed "R21", never reusing R11's
-// wording.
+// wording. R11 itself (the individual-phase wizard-end check) is not
+// implemented in this package yet -- it lands in a later plan issue
+// (PLAN-niwa-onboard.md Issue 8) -- so there is nothing to diff
+// against directly today; "distinct" means this prefix convention,
+// not a byte-for-byte comparison against existing R11 output.
 func verifyR21(ctx context.Context, opts TeamOptions) (TeamResult, error) {
 	clientID, err := infisical.ReadIdentity(ctx, opts.APIURL, opts.Bearer, opts.IdentityID)
 	if err != nil {
@@ -233,7 +271,10 @@ func verifyR21(ctx context.Context, opts TeamOptions) (TeamResult, error) {
 		}
 	}
 
-	if err := createFolder(ctx, opts.ProjectID, opts.EnvironmentSlug, opts.SecretPath); err != nil {
+	if opts.CreateFolder == nil {
+		opts.CreateFolder = defaultCreateFolder
+	}
+	if err := opts.CreateFolder(ctx, opts.ProjectID, opts.EnvironmentSlug, opts.SecretPath); err != nil {
 		return TeamResult{}, &ExitCodeError{
 			Code: ExitVerification,
 			Msg:  fmt.Sprintf("R21 team verification failed: secret-path folder does not exist: %v", err),
