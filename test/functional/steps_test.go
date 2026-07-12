@@ -75,13 +75,27 @@ func iSetEnvToTempPath(ctx context.Context, key string) (context.Context, error)
 // temp files don't leak across scenarios or into the real user environment.
 // Per-scenario overrides win last.
 func (s *testState) buildEnv() []string {
+	// pathDirs are prepended to $PATH for the niwa subprocess, highest
+	// priority first: a per-scenario pathPrefix (e.g. a fake `claude`) wins
+	// over the always-present sharedBinDir (hermetic stubs like a fake
+	// `infisical`), and both win over the inherited PATH. When any prefix is
+	// present the inherited PATH is stripped and rebuilt so the ordering holds.
+	var pathDirs []string
+	if s.pathPrefix != "" {
+		pathDirs = append(pathDirs, s.pathPrefix)
+	}
+	if s.sharedBinDir != "" {
+		pathDirs = append(pathDirs, s.sharedBinDir)
+	}
+	overridePath := len(pathDirs) > 0
+
 	base := os.Environ()
 	filtered := base[:0]
 	for _, kv := range base {
 		if strings.HasPrefix(kv, "HOME=") ||
 			strings.HasPrefix(kv, "XDG_CONFIG_HOME=") ||
 			strings.HasPrefix(kv, "TMPDIR=") ||
-			(s.pathPrefix != "" && strings.HasPrefix(kv, "PATH=")) {
+			(overridePath && strings.HasPrefix(kv, "PATH=")) {
 			continue
 		}
 		filtered = append(filtered, kv)
@@ -91,16 +105,37 @@ func (s *testState) buildEnv() []string {
 		"XDG_CONFIG_HOME="+filepath.Join(s.homeDir, ".config"),
 		"TMPDIR="+s.tmpDir,
 	)
-	// When a scenario installed a fake binary (e.g. a fake `claude` to make
-	// the harness probe deterministic), prepend its directory to PATH so the
-	// niwa subprocess resolves it ahead of any real binary.
-	if s.pathPrefix != "" {
-		env = append(env, "PATH="+s.pathPrefix+string(os.PathListSeparator)+os.Getenv("PATH"))
+	if overridePath {
+		parts := append(append([]string{}, pathDirs...), os.Getenv("PATH"))
+		env = append(env, "PATH="+strings.Join(parts, string(os.PathListSeparator)))
 	}
 	for k, v := range s.envOverrides {
 		env = append(env, k+"="+v)
 	}
 	return env
+}
+
+// writeFakeInfisical installs a stub `infisical` executable in dir. niwa only
+// ever invokes `infisical export ... --format json`; the stub emits an empty
+// JSON object so credential resolution finds no keys (vault.ErrKeyNotFound)
+// and apply proceeds offline, and it exits 0 for any other subcommand. This
+// keeps the functional suite from contacting the real Infisical service or
+// depending on a developer login when a scenario's config declares an
+// infisical vault provider.
+func writeFakeInfisical(dir string) error {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("mkdir shared-bin: %w", err)
+	}
+	script := `#!/bin/sh
+if [ "$1" = "export" ]; then
+  echo '{}'
+fi
+exit 0
+`
+	if err := os.WriteFile(filepath.Join(dir, "infisical"), []byte(script), 0o755); err != nil {
+		return fmt.Errorf("writing fake infisical script: %w", err)
+	}
+	return nil
 }
 
 // runNiwa executes the test binary with the given args from cwd and records
