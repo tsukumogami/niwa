@@ -1,0 +1,51 @@
+{
+  "topic": "niwa-onboard",
+  "decisions": [
+    {
+      "id": 1,
+      "question": "Wizard control-flow and resume architecture: how does the wizard model the two-setup choreography and partial completion — a persisted step state machine, or stateless re-derivation of remaining work from observable world state on every run (or a hybrid)? Where does any state live, and how does the same model serve first run, resume-after-interruption, guided-dashboard waits, and the re-run-goes-straight-to-verification behavior (PRD R15, AC-20)?",
+      "status": "complete",
+      "complexity": "critical",
+      "report_file": "wip/design_niwa-onboard_decision_1_report.md",
+      "chosen": "hybrid: stateless world-state re-derivation for all resume/skip/landing decisions; one persisted non-secret record {secret_id, minted_at} keyed (kind, project) at ~/.config/niwa/ solely for R20 revocation (one datum, one consumer, zero role in resume)",
+      "flag_for_design": "exact REST shapes for the UA-attach and environment-grant landing checks unverified; confirm early in DESIGN mechanics"
+    },
+    {
+      "id": 2,
+      "question": "Command surface and exit-code vocabulary: single `niwa onboard` command with interactive branching vs subcommands (e.g. `onboard team` / `onboard individual`); the flag surface (--team override, --json, non-TTY behavior); and one reconciled exit-code vocabulary given the two superseded designs chose different code assignments (PRD R16, R18).",
+      "status": "complete",
+      "complexity": "standard",
+      "report_file": "wip/design_niwa-onboard_decision_2_report.md",
+      "chosen": "single `niwa onboard` command; boolean override-flag pairs; fresh sequential exit codes 2-6 via onboard.ExitCodeError (1 stays repo-wide untyped fallback)"
+    },
+    {
+      "id": 3,
+      "question": "Mode and topology detection + prompt UX: how the wizard infers team vs individual setup and same-login vs split-login topology from workspace config, personal overlay, and session state; what it asks vs infers-and-confirms; and whether to build on the repo's two hand-rolled TTY prompt helpers or introduce a small prompt abstraction (PRD R2, R3, R13; net-new prompt loop per codebase research).",
+      "status": "complete",
+      "complexity": "standard",
+      "report_file": "wip/design_niwa-onboard_decision_3_report.md",
+      "chosen": "layered local-first detection reusing the R8 identity-GET as the only live probe; topology always a named confirmable prompt; small internal prompt kit (Confirm/Select/Pause) with shared re-prompt/EOF loop; single TTY gate at entry",
+      "flag_for_design": "identity-GET failure-shape (not-found vs unauthorized-for-org) as topology signal is unverified against the real CLI/REST error surface; DESIGN mechanics must confirm or specify the assume-split-login-and-confirm fallback"
+    },
+    {
+      "id": 4,
+      "question": "Infisical interaction architecture: where the net-new management REST client (read identity, mint client secret, revoke, verify-login) lives relative to internal/vault/infisical (extend vs new package); how the operator's CLI session and org context are detected and driven (login walk-through, org switch); how api_url is sourced; and how the two hermetic test doubles (CLI stub on PATH + HTTP REST double with seeding, fault injection, request recording) are wired so PRD R19's ACs are executable (PRD R8, R9, R14, R19; secret-hygiene rules inherited from the superseded provision design).",
+      "status": "complete",
+      "complexity": "critical",
+      "report_file": "wip/design_niwa-onboard_decision_4_report.md",
+      "chosen": "extend internal/vault/infisical in place: plain package-level management functions (ReadIdentity/MintClientSecret/RevokeClientSecret) in management.go, never Provider methods; same-package R9 reuse; commander-based session detection with call-error classification authoritative; api_url via config>env>default precedence; httptest-based infisicalFakeServer + extended CLI stub; AC-10 closed via package doc + static call-site lint test",
+      "flag_for_design": "REST paths inherited from the superseded provision design, not re-verified against current Infisical docs; infisical login status parseability unverified (fallback: classify the call's own error)"
+    },
+    {
+      "id": 5,
+      "question": "Config authoring mechanics: how the wizard writes the personal-overlay and workspace-config blocks it owns — surgical TOML-block insertion vs struct re-marshal vs guided templates; which durable source each write lands in (personal overlay repo, team config repo, global overlay) given .niwa/ is a read-only snapshot; and whether the wizard commits/pushes those edits or stages them and instructs the operator (PRD R12, R21; workspace-config-sources constraint).",
+      "status": "complete",
+      "complexity": "standard",
+      "report_file": "wip/design_niwa-onboard_decision_5_report.md",
+      "chosen": "per-site mechanism: surgical table-level TOML insertion + landing check; overlay repo commit-no-push; local pointer direct write; team-config rendered snippet only"
+    }
+  ],
+  "cross_validation": "passed",
+  "cross_validation_notes": "No conflicts. D2 supplies the override flags D3 assumes; D4's error classification is the authoritative signal behind D3's topology-inference fallback; D5's per-write landing checks are consistent with D1's probe-based idempotence; D1's ~/.config/niwa/ R20 record is disjoint from D5's config surfaces. High-priority assumptions carried to DESIGN: (a) UA-attach and environment-grant landing-check REST shapes unverified (D1); (b) management REST paths inherited from the superseded provision design, not re-verified (D4); (c) infisical login status parseability unverified — fallback is classifying the management call's own error (D3/D4).",
+  "round": 0
+}
