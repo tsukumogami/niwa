@@ -16,11 +16,29 @@ timebox: "1 session, static observation + docs; one live overnight test deferred
 In Progress
 
 The statically-observable questions are answered from a live machine (Claude Code
-2.1.207) and the docs. One dynamic question — what the RC process's
-host-unreachable-timeout exit does to the jobs entry and bridge, and whether the
-daemon re-establishes the bridge on wake — could not be forced inside a short
-background session and is specified below as a live overnight test on the real host.
-The live sessions on the observed machine were NOT disturbed.
+2.1.207) and the docs. The dynamic question is now under **direct live observation on
+the real host** (see "Live observation" below): the host is an always-on Linux desktop
+that never sleeps, yet its idle RC sessions still get disconnected after several hours —
+so a read-only watcher is recording what changes locally at the moment a bridge drops.
+The live sessions on the observed machine are NOT disturbed (read-only).
+
+### Diagnosis correction (load-bearing)
+
+The exploration's original diagnosis — "a laptop that sleeps overnight trips the ~10-min
+host-unreachable timeout" — is **wrong for the reported environment.** The host is an
+always-on Linux desktop that never sleeps and stays networked; its RC sessions still
+disconnect after hours of idle. Consequences:
+
+- **Keep-host-awake is NOT the fix** — the host is already always awake and reachable.
+- The Claude Code docs claim pure idle with network up does not disconnect; the observed
+  behavior contradicts that. The real trigger is an **idle-driven bridge drop on a
+  reachable host** (server-side idle expiry of the bridge, a token/session TTL, or the
+  daemon retiring an idle worker — the live watch will narrow this).
+- The viable mechanisms are therefore **(a) a heartbeat/nudge that keeps the session
+  active so the bridge never idles out**, and/or **(b) detect the dropped bridge and
+  re-establish it** (`claude respawn <id>`, RC re-armed via stored `respawnFlags`). The
+  earlier-deprioritized "nudge" approach is back in contention precisely because the
+  cause is idle, not unreachability.
 
 ## Question
 
@@ -87,40 +105,45 @@ recovery is real but imperfect. Inference: the jobs entry persists across a time
 exit and the daemon respawns with RC re-armed, but whether the respawn re-establishes
 a reachable bridge (and how fast) is unconfirmed.
 
-## What remains unverified — live overnight test (deferred to the real host)
+## Live observation (in progress on this always-on host)
 
-Run on the actual laptop that sleeps, with a throwaway RC dispatch session (never on a
-session you care about):
+Because the host never sleeps, the idle-disconnect reproduces here without any sleep
+step. A read-only watcher (`wip/research/spike_niwa-session-keep-alive_timeseries.md`)
+snapshots every RC session's `bridgeSessionId`/`state`/`firstTerminalAt` every 30 min
+and records what changes when a bridge drops. Baseline (2026-07-13T20:07Z) had 5 live
+RC bridges, including idle `done`/`blocked` sessions still holding their bridge. The
+watch answers, from real data:
 
-1. `niwa dispatch "sleep-test; do nothing" --name ka-test` with RC on; confirm the new
-   `~/.claude/jobs/<id>/state.json` has a `bridgeSessionId`.
-2. Record the entry's `bridgeSessionId`, `state`, `updatedAt`, and the file's mtime.
-3. Let the laptop sleep overnight (or cut its network > 15 min to force the timeout).
-4. In the morning, BEFORE touching anything, capture: does the entry still exist? is
-   `bridgeSessionId` still present / changed / cleared? did `daemon.log` log a respawn?
-   is the session reachable from the phone?
-5. Separately: close a second throwaway session in the agents TUI, and archive a third
-   in claude.ai; diff each entry before/after to see exactly what each action does to
-   the local state (entry deleted? a flag set?).
+1. When an idle RC session finally disconnects, does `bridgeSessionId` get **cleared**,
+   does the **entry get removed**, or does neither (only a server-side change invisible
+   locally)?
+2. Does the daemon log a respawn / does the bridge come back on its own?
+3. How long does idle-to-disconnect actually take here?
 
-The answers to (4) and (5) decide whether the "detect-and-respawn" layer is needed at
-all, and whether entry-gone is a safe close signal.
+Still needing a manual step (not scriptable read-only): diff a throwaway session's entry
+across an explicit **agents-TUI close** and a **claude.ai archive**, to see whether
+either leaves a local signal distinct from an idle bridge-drop. That decides whether
+entry-gone is a safe "developer is done" signal.
 
 ## Recommendation (feeds the DESIGN)
 
-The spike reframes the feature substantially:
+With the always-on-host correction, the feature reshapes as follows:
 
-- **The primary mechanism should be keeping the host awake/networked** (a sleep
-  inhibitor held while an opted-in live RC session exists). If the host never goes
-  unreachable, the ~10-min timeout never fires, the bridge never drops, and F5's
-  close-vs-lost ambiguity never has to be resolved at runtime. This sidesteps the crux
-  rather than betting on a fragile signal.
+- **Keep-host-awake is out.** The host never sleeps; there is no unreachable window to
+  prevent. Do not build a sleep inhibitor.
+- **The cause is an idle bridge-drop on a reachable host.** The two candidate mechanisms
+  are (a) a **heartbeat** that keeps the session active so the bridge never idles out,
+  and (b) **detect-and-re-establish** the dropped bridge. The live watch decides which is
+  feasible: if the drop clears `bridgeSessionId` but leaves the entry resumable, (b) is
+  clean; if a heartbeat prevents the drop entirely, (a) is simpler. They may combine.
 - **Lean on the daemon, don't rebuild it.** F2/F3 show Claude Code already respawns dead
-  RC workers with RC re-armed. niwa's recovery layer, if any, should be thin: observe
-  `bridgeSessionId` presence (F1) and, at most, invoke `claude respawn <id>` — not a
-  bespoke supervisor.
-- **Treat entry-gone as "developer is done" only after the live test (5) confirms** a
-  TUI-close/archive actually removes the entry and a timeout exit does not. Until then,
-  the design must not resurrect on entry-gone.
-- **`selfWake`/cron (F4)** is a possible lightweight keep-warm lever but has a 7-day TTL
-  and is undocumented for this use; treat as secondary.
+  RC workers with RC re-armed via stored `respawnFlags`. niwa's recovery layer, if any,
+  should be thin: read `bridgeSessionId` presence (F1) to detect a dropped bridge and, at
+  most, invoke `claude respawn <id>` — not a bespoke supervisor.
+- **`selfWake`/cron (F4)** is the most promising heartbeat primitive: Claude Code already
+  has session-scoped scheduled wake. A keep-alive could ride it (7-day TTL, undocumented
+  for this use) rather than niwa poking the session from outside.
+- **The close-vs-lost signal (F5) still gates safety.** Until a throwaway-session test
+  shows that an agents-TUI close / claude.ai archive leaves a local signal distinct from
+  an idle bridge-drop, the design must not treat entry-gone (or bridge-gone) as
+  "developer is done" and must not auto-resurrect on it.
