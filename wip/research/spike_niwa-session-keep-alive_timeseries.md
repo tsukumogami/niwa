@@ -44,3 +44,53 @@ INTERPRETATION of iteration-1 event (2026-07-13T20:39Z):
   another live session's) genuine idle bridge-drop, distinguishing killed/cleanup from
   a true idle drop.
 -->
+```
+===== 2026-07-13T21:11:10Z (it 1) =====
+32544a2d commuter_wip     rc  blocked  cse_01F545JxskhdtLRyAe3DDsTw   ft=2026-07-13T20:14:21.067Z upd=20:35:00.440
+4be9ad6d session-state-re no  blocked  -                              ft=2026-07-13T17:41:47.214Z upd=17:44:20.879
+71e6c42b niwa_keep_alive  rc  working  cse_018pJczirAQ4dsCdNJM7hZwM   ft=None upd=20:41:44.750
+9a06b95e feature_4_real_c rc  done     cse_01Tja6DLTxPUH236N611S7cC   ft=2026-07-13T19:42:44.102Z upd=19:42:44.102
+d12be1a5 niwa_teleport    rc  working  cse_01C5u1kUSuT6wEbZMSUsBRqp   ft=None upd=20:56:21.636
+```
+```
+===== 2026-07-13T21:41:10Z (it 2) =====
+32544a2d commuter_wip     rc  blocked  cse_01F545JxskhdtLRyAe3DDsTw   ft=2026-07-13T20:14:21.067Z upd=20:35:00.440
+4be9ad6d session-state-re no  blocked  -                              ft=2026-07-13T17:41:47.214Z upd=17:44:20.879
+71e6c42b niwa_keep_alive  rc  working  cse_018pJczirAQ4dsCdNJM7hZwM   ft=None upd=20:41:44.750
+9a06b95e feature_4_real_c rc  done     cse_01Tja6DLTxPUH236N611S7cC   ft=2026-07-13T19:42:44.102Z upd=19:42:44.102
+d12be1a5 niwa_teleport    rc  working  cse_01C5u1kUSuT6wEbZMSUsBRqp   ft=None upd=20:56:21.636
+```
+```
+===== 2026-07-13T22:11:10Z (it 3) =====
+32544a2d commuter_wip     rc  done     cse_01F545JxskhdtLRyAe3DDsTw   ft=2026-07-13T20:14:21.067Z upd=22:01:55.048
+4be9ad6d session-state-re no  blocked  -                              ft=2026-07-13T17:41:47.214Z upd=17:44:20.879
+71e6c42b niwa_keep_alive  rc  working  cse_018pJczirAQ4dsCdNJM7hZwM   ft=None upd=21:42:25.228
+96295a92 niwa_worktree_er rc  blocked  cse_0197vc3PBL1DAx1zgwdXK3gz   ft=None upd=22:06:50.428
+9a06b95e feature_4_real_c rc  done     cse_01Tja6DLTxPUH236N611S7cC   ft=2026-07-13T19:42:44.102Z upd=19:42:44.102
+d12be1a5 niwa_teleport    rc  done     cse_01C5u1kUSuT6wEbZMSUsBRqp   ft=2026-07-13T21:58:04.743Z upd=21:58:04.743
+```
+```
+===== 2026-07-13T22:41:10Z (it 4) =====
+176618cd cloud_multirepo  rc  blocked  cse_01AsM1FyqsYXZJgdJD9UNG41   ft=None upd=22:39:37.734
+32544a2d commuter_wip     rc  done     cse_01F545JxskhdtLRyAe3DDsTw   ft=2026-07-13T20:14:21.067Z upd=22:39:54.846
+4be9ad6d session-state-re no  blocked  -                              ft=2026-07-13T17:41:47.214Z upd=17:44:20.879
+71e6c42b niwa_keep_alive  rc  working  cse_018pJczirAQ4dsCdNJM7hZwM   ft=None upd=21:42:25.228
+96295a92 niwa_worktree_er rc  blocked  cse_0197vc3PBL1DAx1zgwdXK3gz   ft=None upd=22:06:50.428
+9a06b95e feature_4_real_c rc  done     cse_01Tja6DLTxPUH236N611S7cC   ft=2026-07-13T19:42:44.102Z upd=19:42:44.102
+d12be1a5 niwa_teleport    rc  working  cse_01C5u1kUSuT6wEbZMSUsBRqp   ft=2026-07-13T21:58:04.743Z upd=22:41:00.985
+```
+
+<!--
+OBSERVATION at 22:43Z (4 iterations, ~2.5h of watching):
+- NO local bridge-drop event yet on any watched RC session.
+- feature_4_real_c (9a06b95e): idle with updatedAt FROZEN at 19:42:44 for ~3h, and
+  bridgeSessionId STILL present locally. Cleanest idle specimen.
+- commuter_wip (32544a2d): went 'done'; updatedAt keeps MOVING (20:35 -> 22:01 -> 22:39)
+  even while idle -> the daemon or a self-wake touches the entry periodically; bridge held.
+- niwa_teleport (d12be1a5): oscillates done<->working (still actively used).
+KEY EMERGING HYPOTHESIS: the local bridgeSessionId may persist regardless of actual
+server-side RC reachability. If so, state.json is NOT a reliable dropped-bridge signal,
+which would favor a HEARTBEAT (prevent-the-drop) design over detect-and-reconnect.
+CANNOT confirm locally -- needs a phone/claude.ai reachability check of an idle session
+while its local bridge still shows present. Watcher continues (up to ~12h).
+-->
