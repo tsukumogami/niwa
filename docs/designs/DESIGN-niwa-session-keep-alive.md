@@ -8,18 +8,21 @@ problem: |
   the lapse rather than detect and repair it — within niwa's launch-time-only,
   daemon-free relationship to the sessions it dispatches.
 decision: |
-  Arm a token-light periodic self-wake on the dispatched session at launch (riding
-  Claude Code's own scheduled self-wake / session-cron primitive), so the session
-  pings often enough that its remote bridge never idles out. niwa turns this on via
-  the existing dispatch settings-injection path when the session is opted in, records
-  the opt-in on the durable session mapping, and does nothing at runtime; the wake is
-  self-contained in the session and stops when the session's job entry is gone.
+  Arm a periodic self-wake on the dispatched session at launch (riding Claude Code's own
+  scheduled self-wake / session-cron primitive), delivered as a non-visible, context-isolated
+  wake so the session stays active enough that its remote bridge never idles out without
+  cluttering the conversation or eating its context. niwa turns this on via the existing
+  dispatch injection path when the session is opted in, records the opt-in on the durable
+  session mapping, and does nothing at runtime; the wake is self-contained in the session and
+  stops when the session's job entry is gone.
 rationale: |
   Prevention is the only reliable option: the spike proved a dropped bridge is not
   locally observable and the daemon does not recover an idle drop, so detect-and-
   reconnect cannot be built. Riding the session's own self-wake keeps niwa daemon-free
-  (no new per-session watcher), makes the heartbeat stop automatically when the session
-  ends, and keeps the token cost to a bounded periodic no-op rather than real work.
+  (no new per-session watcher) and makes the heartbeat stop automatically when the session
+  ends; delivering it as a non-visible, context-isolated wake keeps the cost to context
+  footprint (not tokens) and holds that footprint near zero, since the session is kept alive
+  precisely so its context stays usable for the developer to resume.
 ---
 
 # DESIGN: niwa session keep-alive
@@ -64,8 +67,14 @@ stops cleanly.
 - **Stay daemon-free.** niwa is deliberately pull-based with no per-session process; the
   design should not introduce niwa's first long-lived per-session supervisor if it can
   be avoided.
-- **Token-light and side-effect-free (PRD R11).** The heartbeat must not do the session's
-  work, consume a meaningful token budget, or alter conversation/on-disk state.
+- **Context footprint is the real cost, not tokens (PRD R11).** Token billing for the
+  heartbeat is immaterial. The load-bearing constraint is that the keep-alive must **not
+  accumulate turns in the session's main context window** — the session is kept alive
+  precisely so the developer can resume real work on it, so a heartbeat that fills its
+  context (or forces an overnight compaction) defeats the purpose. The wake must be delivered
+  so it neither clutters the visible conversation nor eats the usable context.
+- **Side-effect-free (PRD R11).** The heartbeat must not do the session's work or alter the
+  conversation's on-disk / working state.
 - **Stops on session end, cooperates with the reaper (PRD R6/R7/R9).** Keep-alive must
   end when the job entry is gone and must never resurrect a gone session or block reaping.
 - **Opt-in, default off, zero effect on non-participants (PRD R1/R2/R8).** The arming must
@@ -123,13 +132,38 @@ pattern in the codebase (see Solution Architecture). The alternative surfaces (f
 config-only) were already settled in the PRD's Decisions; C1 implements that decision by
 copying the nearest precedent 1:1.
 
+### Decision D — the wake's context footprint
+
+The keep-alive exists to preserve a session for the developer to resume; a heartbeat that
+consumes that session's context works against its own goal. How the wake is delivered decides
+its context cost.
+
+**D1. A main-thread `/loop` (rejected).** Each hourly wake is a normal turn appended to the
+session's own conversation. Over a night these accumulate in the context window and force
+compaction — clutter in exactly the context we are trying to keep usable. Rejected.
+
+**D2. A non-visible, context-isolated wake (chosen).** Deliver the wake so its work stays out
+of the main conversation: as a background/meta turn and/or delegated to a throwaway isolated
+sub-task, so only a minimal trace — or nothing — reaches the session's context. This is a
+real, available shape, grounded in observed Claude Code behavior: background self-wake turns
+are recorded as `isMeta: true` (hidden from the visible chat), and sub-agent work lives in a
+separate transcript so the main thread stays `isSidechain: false` and un-bloated. (This very
+design session's own scheduled wake-ups are all `isMeta` and its research sub-agents left no
+turns in the main transcript — direct evidence the isolated/meta shape exists and works.)
+
+The remaining unknown is the **floor**: whether a context-isolated/meta wake still keeps the
+bridge warm. If yes, context cost is near-zero; if keeping the bridge warm turns out to
+require real main-thread work, D2's sub-task isolation still keeps it *minimal* rather than
+zero. Which shape is lightest-that-still-works is a Phase 0 measurement.
+
 ## Decision Outcome
 
 Arm an **in-session hourly self-wake** on opted-in dispatched RC sessions (A1), armed at
-launch through the **least-invasive available seam** (B1 preferred, B2 fallback), with the
-opt-in plumbed by **mirroring `remote_control_on_dispatch`** (C1). niwa adds no runtime
-component and no reaper coupling; the wake stops automatically when the session's job entry
-is gone.
+launch through the **least-invasive available seam** (B1 preferred, B2 fallback), delivered
+as a **non-visible, context-isolated wake** (D2) so it does not clutter the session's
+conversation or eat its context, with the opt-in plumbed by **mirroring
+`remote_control_on_dispatch`** (C1). niwa adds no runtime component and no reaper coupling;
+the wake stops automatically when the session's job entry is gone.
 
 This outcome is **gated on an efficacy validation** (Implementation Approach, Phase 0): it
 is not yet proven that a local self-wake resets the server-side idle that causes the 6–12h
@@ -169,10 +203,13 @@ Five components, four of which are near-copies of the `remote_control_on_dispatc
    instruction — no untrusted input, a single argv element (preserving the D8 no-shell-
    interpolation guard).
 
-3. **The in-session heartbeat.** The armed session runs an hourly self-wake whose action is
-   a near-no-op (a minimal fixed wake that cycles a turn without doing the session's work or
-   touching files). It rides Claude Code's session-scoped cron, so it persists across
-   idle/resume for the cron's lifetime and requires nothing from niwa at runtime.
+3. **The in-session heartbeat.** The armed session runs an hourly self-wake whose action is a
+   near-no-op, delivered in the **context-isolated / non-visible shape** from Decision D2 — a
+   background/meta wake and/or a throwaway isolated sub-task — so it neither appears in the
+   visible conversation nor accumulates turns in the session's main context. It rides Claude
+   Code's session-scoped cron, so it persists across idle/resume for the cron's lifetime and
+   requires nothing from niwa at runtime. The exact lightest-that-still-keeps-the-bridge-warm
+   shape is fixed by the Phase 0 measurement.
 
 4. **Durable opt-in record.** Add `KeepAlive bool json:"keep_alive,omitempty"` to
    `SessionMapping` (`session_map.go:49-66`), set in the mapping literal at
@@ -195,13 +232,16 @@ construction.
 
 - **Phase 0 — Efficacy validation (mandatory gate).** On a throwaway RC dispatch session,
   arm the hourly self-wake and confirm the session is still reachable from claude.ai past
-  the 12h mark (where an un-armed session is confirmed unreachable). In the same run,
-  determine whether B1 (hook/settings arming) works or the B2 prompt fallback is needed,
-  measure the per-wake token cost (to confirm the ≤ ~2,000 tokens / 12h ceiling), confirm the
-  session-scoped wake actually tears down when the job entry is removed (`claude rm` /
-  TUI close), and confirm what a claude.ai **archive** does to the local job entry (the PRD's
-  open Known Limitation). If the self-wake does not keep the bridge reachable, STOP: the
-  feature is infeasible with current primitives; record that and do not ship the plumbing.
+  the 12h mark (where an un-armed session is confirmed unreachable). In the same run:
+  (a) find the **lightest wake shape** (Decision D2 candidates: meta no-op vs isolated
+  sub-task vs, only as a baseline, a main-thread loop) that *still keeps the bridge
+  reachable*, and **measure the main-context growth per wake** for each — the lightest
+  shape that works becomes the fixed wake shape; (b) determine whether B1 (hook/settings
+  arming) works or the B2 prompt fallback is needed; (c) confirm the session-scoped wake
+  tears down when the job entry is removed (`claude rm` / TUI close); (d) confirm what a
+  claude.ai **archive** does to the local job entry (the PRD's open Known Limitation). If no
+  wake shape keeps the bridge reachable, STOP: the feature is infeasible with current
+  primitives; record that and do not ship the plumbing.
 - **Phase 1 — Opt-in plumbing.** Add the flag, the config key, the resolver, and the
   `SessionMapping.KeepAlive` field, mirroring the `remote_control_on_dispatch` files and
   their tests 1:1.
@@ -261,10 +301,14 @@ construction.
   with no runtime component to renew it, so a single opt-in keeps a session alive for at most
   ~7 days before the wake lapses. Acceptable for the overnight/commute use case; documented,
   not silently assumed.
-- Non-zero token cost (~1–2 thousand tokens per 12h idle window per session at hourly),
-  immaterial against a working session but not literally zero.
+- **Context footprint depends on the Phase 0 shape.** Token billing is immaterial (~1–2k
+  tokens per 12h window). The tracked cost is main-context growth: the non-visible/isolated
+  wake (D2) targets near-zero, but if Phase 0 finds the bridge only stays warm with real
+  main-thread work, the footprint is minimal rather than zero — that measured floor is the
+  honest number the feature ships with.
 
-**Mitigations.** The Phase 0 gate proves or kills efficacy before any plumbing ships; the
-fixed, non-configurable hourly cadence bounds token cost by construction; preferring B1 keeps
-the session prompt clean; the 7-day bound is documented as a Known Limitation carried from the
-PRD.
+**Mitigations.** The Phase 0 gate proves or kills efficacy — and fixes the lightest wake
+shape by measuring context growth — before any plumbing ships; the fixed, non-configurable
+hourly cadence bounds cost by construction; the non-visible/isolated wake (D2) keeps the
+session's conversation and context clean; preferring B1 keeps the session prompt clean; the
+7-day bound is documented as a Known Limitation carried from the PRD.
