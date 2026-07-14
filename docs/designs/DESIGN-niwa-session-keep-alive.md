@@ -107,30 +107,51 @@ reliable local signal to trigger on. This is why the PRD requires prevention (R5
 
 ### Decision B — how the self-wake is armed at launch
 
-The spike/research found no CLI flag, settings key, or documented hook that schedules a
-cron at `claude --bg` startup; the two available launch-time seams are:
+There is **no deterministic launch-time seam** to arm a recurring self-wake. The panel's
+platform librarian confirmed from the Claude Code docs: no CLI flag or settings key schedules
+a cron at startup, and hooks explicitly "can't trigger `/` commands or tool calls" — a
+`SessionStart` hook can only inject *text* the model reads. So every available path is a
+**nudge**: niwa injects an instruction and relies on the agent itself calling
+`/loop` / `CronCreate` in its first turn. This reframes B1/B2 as two *channels* for the same
+nudge, not a deterministic-vs-fallback pair — and makes "can a recurring wake be armed at
+launch at all?" a Phase 0 *output*, not an assumption.
 
-**B1. A launch-time arming seam that does not alter the task prompt (preferred).** niwa
-arms the wake through a channel separate from the session's work prompt — a materialized
-`SessionStart`-style hook or a settings-carried instruction — so the session's first turn
-and working state are untouched (better for R11). Feasibility of arming a recurring wake
-this way is the open item the validation spike must confirm.
+**B1. SessionStart `additionalContext` nudge (preferred channel).** niwa already materializes
+a workspace-root `SessionStart` hook (`niwa instance from-hook`) that injects
+`additionalContext`. Keep-alive can add its self-arm instruction there — a channel *separate
+from the developer's task prompt*, so the task prompt is untouched. Still a nudge (the agent
+must act on it), but cleaner than polluting the prompt.
 
-**B2. Prompt augmentation (fallback).** niwa prepends a short instruction to the dispatched
-prompt telling the agent to create the heartbeat loop. dispatch already fully controls the
-final prompt argv (`dispatch.go:124` → `buildClaudeBgArgs`), so this is mechanically
-trivial and argv-safe. Rejected as the primary because it pollutes the session's first turn
-and depends on the agent reliably setting up the loop — a mild but real R11 tension. Kept as
-the fallback if B1 proves infeasible.
+**B2. Task-prompt augmentation (fallback channel).** niwa prepends the self-arm instruction
+to the dispatched prompt itself; dispatch fully controls the final prompt argv
+(`dispatch.go:124` → `buildClaudeBgArgs`, a single argv element, so it is argv-safe under
+D8). Rejected as primary because it pollutes the session's first turn. Used only if the
+SessionStart channel proves unreliable in Phase 0.
+
+Neither is a settings key — see Decision B-note below; keep-alive does **not** add a
+`--settings` flag.
+
+**B-note — no second `--settings`.** RC is injected as a discrete `--settings <json>` argv
+pair and niwa never merges settings JSON. A second `--settings` for keep-alive would be
+passed verbatim alongside RC's, and the CLI's repeated-`--settings` behavior is undocumented
+(likely last-wins), so it could clobber `remoteControlAtStartup` and break the very bridge
+keep-alive protects. Since arming is a text nudge (B1/B2), not a setting, keep-alive avoids
+the `--settings` channel entirely and this collision does not arise.
 
 ### Decision C — the opt-in surface plumbing
 
-**C1. Mirror `remote_control_on_dispatch` (chosen).** A `--keep-alive` dispatch flag plus a
-`[global] keep_alive_on_dispatch` config key, resolved flag > downstream > host-default,
-default off, recorded on the durable session mapping. This reuses an established, tested
-pattern in the codebase (see Solution Architecture). The alternative surfaces (flag-only,
-config-only) were already settled in the PRD's Decisions; C1 implements that decision by
-copying the nearest precedent 1:1.
+**C1. Follow `remote_control_on_dispatch` (chosen), plus a new per-dispatch flag layer.** A
+`--keep-alive` dispatch flag plus a `[global] keep_alive_on_dispatch *bool` config key,
+resolved flag > downstream > host-default, default off, recorded on the durable session
+mapping. The config key + resolver + argv wiring copy the RC feature closely; the config
+field mirrors `RemoteControlOnDispatch *bool` (a tri-state pointer, nil = today's behavior)
+exactly. **One part is genuinely new, not a copy:** RC has *no* per-dispatch flag, and the
+librarian confirmed the codebase has no bool tri-state flag pattern to borrow (`--model`
+uses a plain empty-string check, and `cmd.Flags().Changed` is used nowhere). So the
+per-dispatch `--keep-alive` override — which R2 requires to work in both directions — needs
+a new flag mechanism (a `*bool` flag or a `Flags().Changed` check) that /plan must specify as
+net-new work, not "mirror an existing flag." The alternative surfaces (flag-only, config-only)
+were settled in the PRD's Decisions.
 
 ### Decision D — the wake's context footprint
 
@@ -138,7 +159,7 @@ The keep-alive exists to preserve a session for the developer to resume; a heart
 consumes that session's context works against its own goal. How the wake is delivered decides
 its context cost.
 
-**D1. A main-thread `/loop` (rejected).** Each hourly wake is a normal turn appended to the
+**D1. A main-thread `/loop` (rejected).** Each wake is a normal turn appended to the
 session's own conversation. Over a night these accumulate in the context window and force
 compaction — clutter in exactly the context we are trying to keep usable. Rejected.
 
@@ -158,106 +179,145 @@ zero. Which shape is lightest-that-still-works is a Phase 0 measurement.
 
 ## Decision Outcome
 
-Arm an **in-session hourly self-wake** on opted-in dispatched RC sessions (A1), armed at
-launch through the **least-invasive available seam** (B1 preferred, B2 fallback), delivered
-as a **non-visible, context-isolated wake** (D2) so it does not clutter the session's
-conversation or eat its context, with the opt-in plumbed by **mirroring
-`remote_control_on_dispatch`** (C1). niwa adds no runtime component and no reaper coupling;
-the wake stops automatically when the session's job entry is gone.
+Arm an **in-session sub-hourly self-wake** on opted-in dispatched RC sessions (A1), armed at
+launch through the **SessionStart `additionalContext` nudge** (B1, prompt-augmentation B2 as
+fallback), delivered as a **non-visible, context-isolated wake** (D2) so it does not clutter
+the session's conversation or eat its context, with the opt-in plumbed by **following
+`remote_control_on_dispatch` plus a new flag layer** (C1). niwa adds no runtime component and
+no reaper coupling; the wake stops automatically when the session's job entry is gone.
 
-This outcome is **gated on an efficacy validation** (Implementation Approach, Phase 0): it
-is not yet proven that a local self-wake resets the server-side idle that causes the 6–12h
-drop. If validation shows a self-wake does not keep the bridge reachable, the feature is not
-buildable with current Claude Code primitives and the honest outcome is to stop and report
-that — the design does not pretend otherwise. Every other part of the design (plumbing,
-stop-on-gone, observability) is low-risk and well-precedented; the single load-bearing
-unknown is efficacy, so the design front-loads proving it.
+This outcome is **gated on Phase 0 validation** of *two* load-bearing unknowns, either of
+which can kill the feature:
 
-**Cadence rationale.** The observed drop is 6–12h, so an hourly wake sits comfortably below
-the floor with wide margin. Over a 12h idle window that is ~12 minimal wakes; at a per-wake
-cost on the order of 100–200 tokens (to be measured in Phase 0), that is roughly 1–2 thousand
-tokens per 12h window — orders of magnitude below a working session. The design fixes the
-PRD-deferred R11 ceiling at **≤ ~2,000 keep-alive tokens per 12h window** (superseding the
-PRD's illustrative "hundreds"); the interval is a fixed hourly constant, not configurable. A
-short 5–10 min interval is unnecessary here (that guards a ~10-min *network* timeout, which
-does not apply to an always-on host) and would multiply token cost.
+1. **Efficacy** — it is unproven that a local self-wake resets the server-side idle behind
+   the 6–12h drop (the docs don't even describe an activity-based bridge idle timer).
+2. **Process survival** — the Claude Code supervisor **stops a session's process ~1 hour
+   after it goes idle/unattached**, and a cron only fires while the process runs. So the wake
+   must fire *inside* that ~1h window (hence sub-hourly), and it must be shown that a cron
+   fire actually keeps the process alive past the stop. If the process stops regardless, the
+   wake dies before it can help.
+
+If Phase 0 shows no wake shape keeps the bridge reachable, or that a launch-nudge cannot arm
+a surviving recurring wake at all, the feature is not buildable with current primitives and
+the honest outcome is to stop and report that. Every other part of the design (plumbing,
+stop-on-gone, observability) is low-risk and well-precedented; these two unknowns are the
+whole risk, so the design front-loads proving them.
+
+**Cadence rationale.** Two constraints set the interval. The idle-drop floor is 6–12h, but
+the **~1h supervisor process-stop is the tighter bound**: the wake must fire within that hour
+or the process is paused and nothing fires. So the interval is a fixed constant **well under
+one hour** (e.g. ~30 minutes), giving margin against the ~1h stop plus the cron's ±30-min
+jitter — Phase 0 fixes the exact value against the measured stop timing. Over a 12h window
+that is ~24 minimal wakes; at ~100–200 tokens each that is roughly 2–5 thousand tokens per
+12h window — still orders of magnitude below a working session. The design fixes the R11
+ceiling at **≤ ~5,000 keep-alive tokens per 12h window**; the interval is a fixed constant,
+not user-configurable. (Token cost is immaterial regardless — per the PRD, context footprint,
+not tokens, is the tracked cost; see Decision D.)
 
 ## Solution Architecture
 
-Five components, four of which are near-copies of the `remote_control_on_dispatch` feature.
+Five components. The config/resolver/mapping plumbing closely follows the
+`remote_control_on_dispatch` feature; the per-dispatch flag and the arming nudge are net-new.
 
-1. **Opt-in resolution.** Add a `--keep-alive` flag (registered in `dispatch.go` `init()`,
-   as a tri-state via `cmd.Flags().Changed` so "explicit off" differs from "unset") and a
-   `GlobalSettings.KeepAliveOnDispatch *bool` config key (`registry.go`, tag
-   `keep_alive_on_dispatch,omitempty`). A new `resolveDispatchKeepAlive` (a
-   `dispatch_keepalive.go` mirroring `dispatch_remotecontrol.go:37-50`) resolves
-   flag > downstream > host-default, default off — the flag-fill half borrowed from the
-   `--model` precedent (`dispatch.go:222-225`), the downstream/host half from the RC
-   resolver. Keep-alive is meaningful only when RC is on; requesting it for a non-RC session
-   resolves to a no-op plus a warning (R3).
+1. **Opt-in resolution.** Add a `GlobalSettings.KeepAliveOnDispatch *bool` config key
+   (`registry.go`, tag `keep_alive_on_dispatch,omitempty`), mirroring `RemoteControlOnDispatch`
+   exactly, and a `resolveDispatchKeepAlive` resolver (`dispatch_keepalive.go` following
+   `dispatch_remotecontrol.go:37-50`) for the downstream > host-default half. **New work:** a
+   `--keep-alive` per-dispatch flag registered in `dispatch.go` `init()` — since R2 needs
+   both-direction override, it must distinguish "unset" from "explicit false" (a `*bool` flag
+   or a `Flags().Changed` check), a pattern not present in the codebase today (RC has no flag;
+   `--model` uses a string-empty check). The flag layers on top of the RC-style resolver as
+   flag > downstream > host-default, default off. Keep-alive is meaningful only when RC is on;
+   requesting it for a non-RC session is a no-op plus a warning (R3).
 
-2. **Arming at launch.** When resolution is on, niwa arms the self-wake at the dispatch
-   launch seam (`dispatch.go:248-261`, alongside the RC `--settings` append). B1: emit the
-   arming via a hook/settings channel; B2 fallback: augment the prompt argv before
-   `dispatchLaunch` (`dispatch.go:263`). The arming payload is a fixed, trivial heartbeat
-   instruction — no untrusted input, a single argv element (preserving the D8 no-shell-
-   interpolation guard).
+2. **Arming at launch (a nudge, not a setting).** When resolution is on, niwa injects a fixed
+   self-arm instruction via the SessionStart `additionalContext` channel (B1) — the workspace
+   hook niwa already materializes — or, as fallback, prepends it to the task prompt argv
+   before `dispatchLaunch` (`dispatch.go:263`, B2). It does **not** append a `--settings` flag
+   (see Decision B-note). The instruction is a fixed niwa-authored constant (no untrusted
+   input; the B2 prompt path is a single argv element, preserving the D8 no-shell-
+   interpolation guard). Whether the nudge reliably arms a surviving recurring wake is a
+   Phase 0 output.
 
-3. **The in-session heartbeat.** The armed session runs an hourly self-wake whose action is a
-   near-no-op, delivered in the **context-isolated / non-visible shape** from Decision D2 — a
+3. **The in-session heartbeat.** The armed session runs a **sub-hourly** self-wake (interval
+   fixed under the ~1h supervisor stop; see Cadence rationale) whose action is a near-no-op,
+   delivered in the **context-isolated / non-visible shape** from Decision D2 — a
    background/meta wake and/or a throwaway isolated sub-task — so it neither appears in the
    visible conversation nor accumulates turns in the session's main context. It rides Claude
-   Code's session-scoped cron, so it persists across idle/resume for the cron's lifetime and
-   requires nothing from niwa at runtime. The exact lightest-that-still-keeps-the-bridge-warm
-   shape is fixed by the Phase 0 measurement.
+   Code's session-scoped cron (7-day TTL, fixed from creation, no renewal). The exact
+   lightest-shape-that-keeps-the-bridge-warm-and-survives-the-supervisor-stop is fixed by the
+   Phase 0 measurement.
 
 4. **Durable opt-in record.** Add `KeepAlive bool json:"keep_alive,omitempty"` to
    `SessionMapping` (`session_map.go:49-66`), set in the mapping literal at
    `dispatch.go:285-293`. `omitempty` keeps legacy mappings byte-identical (same discipline
    as `Origin`). This record is informational — it powers observability, not reaping.
 
-5. **Observability (R10).** `niwa` reports which live sessions are kept alive by joining
-   `SessionMapping.KeepAlive == true` with the existing liveness signal (`sessionLive`), so
-   the report shows opted-in sessions that are still live.
+5. **Observability (R10).** Extend `niwa list` (which already emits per-instance
+   `{name, path, ephemeral}` from the session mapping, `list.go`) to surface the
+   `SessionMapping.KeepAlive` flag, joined with the existing liveness signal (`sessionLive`),
+   so the report shows opted-in sessions that are still live.
 
 **Stop-on-gone and reaper cooperation.** Nothing new is wired into the reaper.
-`sessionLive`/`instanceHasLiveJob` (`job_state.go`) key purely on the Claude Code job entry;
-the self-wake is session-scoped and dies when that entry is removed (TUI close / `claude rm`)
-— so keep-alive stops automatically (R6) and cannot resurrect a gone session (R7). The
-reaper does **not** read `SessionMapping.KeepAlive`; keep-alive must never suppress reaping,
-which preserves R9. Because the mechanism is purely in-session, this property holds by
-construction.
+`sessionLive`/`instanceHasLiveJob` (`job_state.go`) key purely on the Claude Code job entry,
+independent of `bridgeSessionId` (librarian-confirmed), and the reaper reads no timestamp, so
+an hourly wake cannot defer reaping — R9 holds by construction. The cron is librarian-confirmed
+**session-scoped and in-process** (no host-level task), so it cannot fire against a gone
+session — R7 holds. The wake stops when the session's job entry is gone; `claude rm` and a
+TUI close roster-remove the session, which tears down its in-process cron. **One nuance to
+confirm in Phase 0:** the docs guarantee only that the session is de-listed and its `tmp/` is
+removed — whether `state.json` itself is physically deleted (which is what niwa's `sessionLive`
+tests) is inferred, not documented. If a close de-lists but leaves `state.json`, niwa would
+still see the session as live; Phase 0(c) pins this down. The reaper does **not** read
+`SessionMapping.KeepAlive`; keep-alive must never suppress reaping.
 
 ## Implementation Approach
 
-- **Phase 0 — Efficacy validation (mandatory gate).** On a throwaway RC dispatch session,
-  arm the hourly self-wake and confirm the session is still reachable from claude.ai past
-  the 12h mark (where an un-armed session is confirmed unreachable). In the same run:
-  (a) find the **lightest wake shape** (Decision D2 candidates: meta no-op vs isolated
-  sub-task vs, only as a baseline, a main-thread loop) that *still keeps the bridge
-  reachable*, and **measure the main-context growth per wake** for each — the lightest
-  shape that works becomes the fixed wake shape; (b) determine whether B1 (hook/settings
-  arming) works or the B2 prompt fallback is needed; (c) confirm the session-scoped wake
-  tears down when the job entry is removed (`claude rm` / TUI close); (d) confirm what a
-  claude.ai **archive** does to the local job entry (the PRD's open Known Limitation). If no
-  wake shape keeps the bridge reachable, STOP: the feature is infeasible with current
-  primitives; record that and do not ship the plumbing.
-- **Phase 1 — Opt-in plumbing.** Add the flag, the config key, the resolver, and the
-  `SessionMapping.KeepAlive` field, mirroring the `remote_control_on_dispatch` files and
-  their tests 1:1.
-- **Phase 2 — Arming wiring.** Wire the resolved opt-in to the arming seam chosen in Phase 0
-  (B1 or B2) at the dispatch launch point.
-- **Phase 3 — Observability.** Add the `niwa` report of kept-alive live sessions (R10).
-- **Phase 4 — Tests.** Unit tests mirroring the RC suite (resolver precedence, argv/prompt
-  injection, mapping round-trip, non-RC no-op warning) plus one end-to-end reachability test
-  that reproduces the Phase 0 validation as an automated check where feasible.
+- **Phase 0 — Feasibility validation (mandatory gate; multi-session, multi-day).** This gate
+  spans several throwaway RC dispatch sessions run across multiple days (each reachability
+  datum needs a ~12h idle window and the shapes must be compared), not a single run. It must
+  answer, in rough dependency order:
+  - **(0) Can a launch nudge arm a *surviving recurring* wake at all?** There is no
+    deterministic seam — confirm the SessionStart `additionalContext` nudge (B1), or the
+    prompt fallback (B2), actually gets the agent to create a cron that keeps firing. If
+    neither reliably arms a surviving wake, STOP.
+  - **(1) Process survival past the ~1h supervisor stop.** Confirm a sub-hourly wake fires
+    *before* the supervisor pauses the idle process, and that the fire keeps the process alive
+    (resets the stop-clock). Fix the exact interval against the measured stop timing. If the
+    process is stopped regardless, the wake dies and the feature STOPs.
+  - **(2) Efficacy.** With the wake surviving, confirm the session stays reachable from
+    claude.ai past the 12h mark where an un-armed control is confirmed unreachable. If not,
+    STOP.
+  - **(3) Lightest wake shape.** Among the shapes that satisfy (1)+(2) — meta no-op, isolated
+    sub-task, or (baseline) main-thread loop — **measure main-context growth per wake** and
+    fix the lightest one as the shipped shape.
+  - **(4) Finished/`done` sessions.** Confirm the mechanism still holds for a session that has
+    gone `done`/idle overnight (the common morning case), given the same ~1h process-stop.
+  - **(5) Stop signals.** Confirm `claude rm` / TUI close removes `state.json` (not just
+    de-lists) and tears down the cron; and confirm what a claude.ai **archive** does to the
+    local entry (the PRD's open Known Limitation).
+  Any STOP means the feature is infeasible with current primitives — record it and do not ship
+  the plumbing.
+- **Phase 1 — Opt-in plumbing.** Add the config key, the resolver, and the
+  `SessionMapping.KeepAlive` field following the `remote_control_on_dispatch` files/tests, plus
+  the net-new `--keep-alive` tri-state flag (no existing pattern to copy — see Solution
+  Architecture #1).
+- **Phase 2 — Arming wiring.** Wire the resolved opt-in to the arming nudge channel fixed in
+  Phase 0 (B1 SessionStart `additionalContext`, or B2 prompt fallback) at the dispatch launch
+  point.
+- **Phase 3 — Observability.** Extend `niwa list` to surface kept-alive live sessions (R10).
+- **Phase 4 — Tests.** Unit tests following the RC suite (resolver precedence, flag override
+  both directions, arming-injection, mapping round-trip, non-RC no-op warning) plus one
+  end-to-end reachability test that reproduces the Phase 0 validation as an automated check
+  where feasible.
 
 ## Security Considerations
 
-- **Injection safety.** The arming payload (settings/hook or prompt text) is a fixed,
-  niwa-authored constant with no untrusted input, passed as a single argv element — the
-  existing D8 no-shell-interpolation guard is preserved. There is no new path for
-  user-controlled data to reach a shell.
+- **Injection safety.** The arming payload (SessionStart `additionalContext`, or the B2
+  prompt text — never a `--settings` flag) is a fixed, niwa-authored constant with no
+  untrusted input; the B2 prompt path is a single argv element, preserving the existing D8
+  no-shell-interpolation guard. There is no new path for user-controlled data to reach a
+  shell.
 - **Heartbeat action scope.** The self-wake cycles a turn under the session's own permission
   mode. To avoid the heartbeat doing anything with tools, its action is a fixed trivial
   no-op prompt; it must never carry dynamic or externally-influenced content. This keeps the
@@ -270,13 +330,15 @@ construction.
 - **No reaping subversion.** Keep-alive is not coupled to the reaper and cannot hold an
   ended session alive or resurrect one (R7/R9); it cannot be used to keep an instance
   un-reclaimed against the user's intent.
-- **Resource-exhaustion consideration.** The wake interval is a fixed hourly constant, not
-  user-configurable — the opt-in is boolean (mirroring `remote_control_on_dispatch`), so
-  there is no surface through which a token-draining short interval could be set. The
-  per-session cost is bounded by construction (~24 minimal wakes/day).
-- **Idempotent arming.** niwa arms exactly one session-scoped wake per opted-in session; the
-  arming is idempotent and does not self-re-arm or schedule additional crons, so there is no
-  amplification path from the arming seam.
+- **Resource-exhaustion consideration.** The wake interval is a fixed sub-hourly constant, not
+  user-configurable — the opt-in is boolean, so there is no surface through which a
+  token-draining short interval could be set. The per-session cost is bounded by construction
+  (~48 minimal wakes/day; token cost immaterial, context cost minimized by D2).
+- **Idempotent arming.** The arming instruction directs the agent to create exactly one
+  session-scoped cron and to no-op if one is already present, so a re-delivered nudge cannot
+  stack crons. Because arming is a nudge (not deterministic), Phase 0 must confirm the agent
+  honors the once-only instruction under both channels; under B1 the SessionStart injection
+  fires once per session start, bounding delivery.
 - **Archive must stop the wake.** The Phase 0 validation must confirm that archiving a
   session in claude.ai ends the local job entry (or otherwise stops the wake); if archive
   leaves the entry present, keep-alive would keep waking a session the user considers done.
@@ -287,28 +349,39 @@ construction.
 
 **Positive.**
 - Solves overnight reachability within niwa's daemon-free model — no new per-session runtime.
-- Four of five components are near-copies of a tested, existing feature, so plumbing risk is
-  low.
-- Stops cleanly and automatically on session end; requires zero reaper changes.
+- The config/resolver/mapping plumbing closely follows a tested, existing feature, so that
+  part is low-risk.
+- Stops cleanly and automatically on session end; requires zero reaper changes (R9 by
+  construction, librarian-confirmed).
 
 **Negative / risks.**
-- **Efficacy is unproven** until the Phase 0 validation; the whole feature is contingent on a
-  local self-wake actually resetting the server-side idle. This is the one real risk and is
-  deliberately gated first.
-- If B1 arming proves infeasible, the B2 prompt fallback mildly pollutes the session's first
-  turn (an R11 tension, bounded to one small fixed instruction).
+- **Two unproven platform behaviors gate the whole feature** (Phase 0). (1) *Efficacy* — that
+  a local self-wake resets the server-side idle at all (the docs don't even describe an
+  activity-based bridge idle timer). (2) *Process survival* — the supervisor stops an idle
+  session's process ~1h in, and a cron only fires while the process runs; if a sub-hourly fire
+  doesn't keep the process alive, the wake dies before it helps. Either can kill the feature;
+  both are gated first.
+- **No deterministic arming.** There is no launch-time seam to arm a cron; arming is a *nudge*
+  the agent must act on (SessionStart `additionalContext`, or prompt fallback). Reliability of
+  the nudge is itself a Phase 0 output. The B2 fallback mildly pollutes the first turn.
+- **Finished/`done` sessions** — the common morning case is a session that went idle overnight;
+  it is subject to the same ~1h process-stop, so keep-alive is only as good as the
+  process-survival result. Note the "no effect except a keep-alive marker" property (R8/R11)
+  holds strictly for *non-opted* sessions; an opted-in session's entry-removal timing differs
+  from a control by design.
 - **Bounded duration.** Claude Code's cron carries a ~7-day TTL and niwa arms only at launch
   with no runtime component to renew it, so a single opt-in keeps a session alive for at most
   ~7 days before the wake lapses. Acceptable for the overnight/commute use case; documented,
   not silently assumed.
-- **Context footprint depends on the Phase 0 shape.** Token billing is immaterial (~1–2k
-  tokens per 12h window). The tracked cost is main-context growth: the non-visible/isolated
-  wake (D2) targets near-zero, but if Phase 0 finds the bridge only stays warm with real
-  main-thread work, the footprint is minimal rather than zero — that measured floor is the
-  honest number the feature ships with.
+- **Context footprint depends on the Phase 0 shape.** Token billing is immaterial (~2–5k
+  tokens per 12h window at the sub-hourly cadence). The tracked cost is main-context growth:
+  the non-visible/isolated wake (D2) targets near-zero, but if Phase 0 finds the bridge only
+  stays warm with real main-thread work, the footprint is minimal rather than zero — that
+  measured floor is the honest number the feature ships with.
 
-**Mitigations.** The Phase 0 gate proves or kills efficacy — and fixes the lightest wake
-shape by measuring context growth — before any plumbing ships; the fixed, non-configurable
-hourly cadence bounds cost by construction; the non-visible/isolated wake (D2) keeps the
-session's conversation and context clean; preferring B1 keeps the session prompt clean; the
+**Mitigations.** The Phase 0 gate proves or kills the two platform unknowns — and fixes the
+lightest wake shape by measuring context growth — before any plumbing ships; the fixed,
+non-configurable sub-hourly cadence bounds cost by construction; the non-visible/isolated wake
+(D2) keeps the session's conversation and context clean; the SessionStart nudge keeps the task
+prompt clean; the
 7-day bound is documented as a Known Limitation carried from the PRD.

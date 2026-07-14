@@ -9,8 +9,9 @@ problem: |
 outcome: |
   A developer can mark a dispatched RC session to be kept alive, leave it
   overnight, and still reach and steer it from the phone the next morning.
-  The keep-alive releases on its own once the developer closes the session
-  in the agents TUI or archives it in claude.ai.
+  The keep-alive releases on its own once the developer is done with the
+  session — closing it in the agents TUI, and (pending validation of the
+  local effect) archiving it in claude.ai.
 motivating_context: |
   The recurring pattern: a developer dispatches a session to work overnight
   and only checks on it from a phone during the morning commute. The value
@@ -28,6 +29,11 @@ boundary. The downstream PRD owns the opt-in surface, the "still-live"
 signal, and the acceptance criteria; the DESIGN owns the mechanism (a
 heartbeat that keeps the session active so its connection never idles out
 — see docs/spikes/SPIKE-niwa-session-keep-alive.md).
+
+Edited in place after a review panel: the claude.ai-archive release path is
+softened to "pending validation" here and downstream, since the design's
+Phase 0 must confirm what an archive does to the local session state before
+that release can be promised. The TUI-close release remains the primary path.
 
 ## Problem Statement
 
@@ -85,10 +91,11 @@ its context, and accepts the next steer.
 
 A developer decides a kept-alive session is done — the work landed, or
 they want to stop it. The trigger is the developer closing the session in
-the Claude agents TUI, or archiving it in the claude.ai web UI. The
-outcome: niwa observes the session is no longer one the developer wants
-held, stops keeping it alive, and does not relaunch or resurrect it. A
-session the developer deliberately ended stays ended.
+the Claude agents TUI (and, once the archive path is validated, archiving
+it in the claude.ai web UI). The outcome: niwa observes the session is no
+longer one the developer wants held, stops keeping it alive, and does not
+relaunch or resurrect it. A session the developer deliberately ended stays
+ended.
 
 ### A non-participating dispatch is untouched
 

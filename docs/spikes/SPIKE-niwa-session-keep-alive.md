@@ -151,10 +151,31 @@ a ~12h-idle session (e.g. `feature_4_real_commute`) is *actually reachable right
 - Reachable → the local bridge is trustworthy and the disconnect is rarer/slower than
   the 6–12h estimate; re-scope the trigger.
 
+**Resolved (human-confirmed, 2026-07-14):** the ~12h-idle `feature_4_real_commute` was
+**not reachable** from the phone while its local `bridgeSessionId` still showed present —
+confirming reading (b). The local bridge field is a stale, unreliable signal; the design is
+built around a heartbeat that prevents the drop, not detection.
+
 Still also needing a manual step (not scriptable read-only): diff a throwaway session's
 entry across an explicit **agents-TUI close** and a **claude.ai archive**, to see
 whether either leaves a local signal distinct from an idle bridge-drop. That decides
 whether entry-gone is a safe "developer is done" signal.
+
+### Panel follow-up — platform facts (from the design-review librarian, Claude Code docs)
+
+Two facts surfaced during the design review that sharpen the mechanism and belong on the
+record with the other platform findings:
+
+- **No deterministic launch-time arming.** No CLI flag/settings key schedules a cron at
+  `claude --bg` startup, and hooks "can't trigger `/` commands or tool calls" — a SessionStart
+  hook can only inject text. So a keep-alive wake can only be *nudged* into existence (the
+  agent must self-arm a `/loop`/cron); there is no guaranteed arming seam.
+- **The supervisor stops an idle process ~1h in.** Scheduled tasks fire only while the process
+  runs, and the supervisor stops a session's process ~1 hour after it goes idle/unattached.
+  So a keep-alive wake must fire *within* that hour (sub-hourly) and must itself keep the
+  process alive — a tighter constraint than the 6–12h bridge idle, and a second thing the
+  design's Phase 0 must prove. The session-scoped cron is confirmed in-process (dies with the
+  session; no host-level task), and its TTL is a fixed 7 days from creation (no renewal).
 
 ## Recommendation (feeds the DESIGN)
 

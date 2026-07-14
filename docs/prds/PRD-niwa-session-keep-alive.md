@@ -53,9 +53,9 @@ keeping alive rather than letting lapse.
 - A developer can opt a dispatched RC session into being kept reachable across long
   idle stretches, and rely on it still being reachable and steerable from a phone
   after the idle gap.
-- The keep-alive releases on its own once the developer is done with the session
-  (closing it in the agents TUI or archiving it in claude.ai), without holding a
-  session alive that the developer deliberately ended.
+- The keep-alive releases on its own once the developer is done with the session —
+  closing it in the agents TUI, and (pending validation of the local effect) archiving
+  it in claude.ai — without holding a session alive that the developer deliberately ended.
 - A developer who does not opt in — and every existing dispatch — sees no change in
   behavior.
 
@@ -65,8 +65,9 @@ keeping alive rather than letting lapse.
   be kept alive, so that when I check it from my phone in the morning it is still
   reachable and holds its context.
 - As a developer who finished with a kept-alive session, I want closing it in the
-  agents TUI (or archiving it in claude.ai) to stop the keep-alive, so that a
-  session I deliberately ended is not held open or relaunched.
+  agents TUI (and, once the archive path is validated, archiving it in claude.ai) to
+  stop the keep-alive, so that a session I deliberately ended is not held open or
+  relaunched.
 - As a developer who did not opt in, I want dispatch to behave exactly as it does
   today, so that the feature never changes runs I did not ask it to.
 - As an operator managing a workspace, I want to set a workspace-wide default for
@@ -87,15 +88,18 @@ Functional:
   surfaces a clear warning, not an error.
 - **R4.** While a keep-alive session is live, niwa SHALL keep its remote connection
   from lapsing due to idle, so that the session remains reachable from the Claude
-  mobile app and claude.ai for as long as it stays live.
+  mobile app and claude.ai for as long as it stays live (subject to the keep-alive
+  vehicle's lifetime; renewal beyond that is Out of Scope).
 - **R5.** Because a dropped remote connection is not observable from niwa's local
   state (the local remote-bridge identifier persists after the connection has
   actually dropped) and is not recovered by the Claude Code daemon, the feature
   SHALL keep the connection active proactively and SHALL NOT depend on detecting a
   dropped connection to do its job.
 - **R6.** Keep-alive for a session SHALL stop once that session is no longer live by
-  niwa's existing liveness signal (the Claude Code job entry is gone) — which is
-  what closing the session in the agents TUI produces. A session the developer has
+  niwa's existing liveness signal (the Claude Code job entry is gone). Closing the
+  session in the agents TUI (or `claude rm`) is expected to produce this; the exact
+  local effect of a TUI close / claude.ai archive on the job entry is confirmed in the
+  design's Phase 0 (it is inferred, not yet documented). A session the developer has
   ended SHALL NOT be kept alive.
 - **R7.** The feature SHALL NOT recreate, relaunch, or resurrect a session whose
   entry has been removed. It keeps a live session live; it never revives a gone one.
@@ -124,10 +128,10 @@ Non-functional:
 - [ ] Requesting keep-alive for a non-RC session performs no keep-alive and prints a
       warning; the dispatch still succeeds (R3).
 - [ ] An opted-in RC session and an equivalent non-opted RC session are both left idle
-      for at least 12 hours (exceeding the ~6–12h disconnect ceiling the spike observed).
-      After the idle period, a steering command issued from claude.ai / the mobile app is
-      accepted by the opted-in session, while the non-opted session returns unreachable
-      (R4, R5).
+      for at least 12 hours (at or beyond the reported ~6–12h disconnect window; the spike
+      confirmed one unreachable data point at ~12h). After the idle period, a steering
+      command issued from claude.ai / the mobile app is accepted by the opted-in session,
+      while the non-opted session returns unreachable (R4, R5).
 - [ ] Closing an opted-in session in the agents TUI stops its keep-alive, and the
       session is not relaunched or resurrected afterward (verified by the job entry
       staying absent and no new session appearing) (R6, R7).
@@ -141,11 +145,11 @@ Non-functional:
 - [ ] `niwa` reports which live sessions are currently kept alive, and the report
       matches the set that was opted in and is still live (R10).
 - [ ] Over a 12-hour keep-alive window, keep-alive-attributable model-token usage stays
-      at or below a small fixed ceiling (the design fixes the number at roughly 2,000 tokens
-      for the window, far below the volume a working turn consumes), measured via the
-      session's token accounting; and the session's conversation transcript and on-disk
-      files are unchanged by keep-alive except for a keep-alive marker (a diff against a
-      control run shows no other difference) (R11).
+      at or below a small fixed ceiling (the design fixes the number at roughly 5,000 tokens
+      for the window at the sub-hourly cadence, far below the volume a working turn consumes),
+      measured via the session's token accounting; and the session's conversation transcript
+      and on-disk files show no change from keep-alive beyond its own non-visible wake records
+      (a diff against a control run shows no other difference) (R11).
 
 ## Out of Scope
 
