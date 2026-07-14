@@ -1,6 +1,6 @@
 ---
 schema: brief/v1
-status: Draft
+status: Accepted
 problem: |
   Remote-control-enabled sessions launched with `niwa dispatch` lose their
   remote connection after a few hours of idle and become unreachable from
@@ -20,13 +20,14 @@ motivating_context: |
 
 ## Status
 
-Draft
+Accepted
 
 Framing for an optional keep-alive over `niwa dispatch` remote-control
 sessions. Stops at the feature's problem, outcome, journeys, and scope
 boundary. The downstream PRD owns the opt-in surface, the "still-live"
-signal, and the acceptance criteria; the DESIGN owns the mechanism
-(host wake-hold versus reconnect supervision).
+signal, and the acceptance criteria; the DESIGN owns the mechanism (a
+heartbeat that keeps the session active so its connection never idles out
+— see docs/spikes/SPIKE-niwa-session-keep-alive.md).
 
 ## Problem Statement
 
@@ -126,20 +127,6 @@ is a thing you ask for, never a default that changes existing runs.
   opted-in session exists.
 - The exact opt-in surface, the precise "still-live" signal, and the
   acceptance criteria — those are the downstream PRD's to settle.
-
-## Open Questions
-
-- What is the exact opt-in surface — a per-dispatch flag, a workspace
-  `[global]` config key, or both — and how does it relate to the existing
-  `remote_control_on_dispatch` preference? The PRD decides.
-- How is "still-live, not yet closed/archived" defined precisely? niwa's
-  existing present-or-gone session signal is the obvious proxy; the PRD
-  decides whether that alone is sufficient or whether an additional signal
-  is required to separate "the developer closed it" from "it dropped but
-  the developer still wants it."
-- What is the default state (off, presumably) and what does the feature do
-  when the host genuinely cannot be kept reachable (for example, a forced
-  shutdown rather than sleep)? The PRD sets the expectation.
 
 ## References
 
