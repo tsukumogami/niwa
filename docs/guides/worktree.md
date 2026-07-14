@@ -48,6 +48,14 @@ fail on an unreachable vault, a wrong-org session, or an unassembled provider
 reference — those concerns belong to `niwa apply`, which already resolved the
 environment into the clone.
 
+The same inherit-don't-resolve rule covers `[claude.env] promote`. When a
+promoted key's value comes from a secret source — a vault reference or the
+machine-identity sync, resolved only at `niwa apply` time and absent from the
+static config the worktree path sees — the worktree reads it from the clone's
+already-materialized env when writing `settings.local.json`, rather than
+re-resolving it. So a worktree's promoted Claude env matches the clone's without
+the worktree path ever touching a secret source.
+
 ### Refreshing a worktree's environment
 
 `niwa apply` is the refresh. After materializing each clone, the same run fans

@@ -56,6 +56,11 @@ type repoMaterializeInputs struct {
 	// WorktreeDelegation carries the apply-time worktree-integration decision
 	// (probe result + niwa absolute path). nil installs neither hook nor deny.
 	WorktreeDelegation *WorktreeDelegation
+	// InheritedEnv, when non-nil, is the clone's already-materialized env from
+	// which the SettingsMaterializer resolves [claude.env] promoted keys instead
+	// of re-resolving secrets. The worktree path sets this (see ApplyToWorktree);
+	// the instance apply path leaves it nil so promotion resolves from config.
+	InheritedEnv map[string]string
 }
 
 // runRepoMaterializers runs the given materializers for a single repo against
@@ -146,6 +151,7 @@ func runRepoMaterializers(materializers []Materializer, in repoMaterializeInputs
 		GlobalEnvExamplePolicy: in.GlobalEnvExamplePolicy,
 		GlobalEnvOutput:        in.GlobalEnvOutput,
 		WorktreeDelegation:     in.WorktreeDelegation,
+		InheritedEnv:           in.InheritedEnv,
 	}
 
 	var written []string
@@ -309,6 +315,56 @@ func inheritEnvOutputs(cloneRepoDir, worktreeDir string, cfg *config.WorkspaceCo
 	return written, customPatterns, nil
 }
 
+// readCloneEnvOutput reads the instance clone's already-materialized env output
+// file(s) for a repo and merges them into a single key->value map. It is the
+// promoted-key counterpart to inheritEnvOutputs: the worktree path resolves
+// [claude.env] promoted keys from this inherited env rather than re-resolving
+// secrets (the worktree apply runs no vault / machine-identity sync, so a
+// promoted key sourced from a secret is absent from the static config it sees).
+//
+// Every source path passes through safeTargetPath (the config-derived target set
+// is untrusted), so a crafted ../ or symlinked target.Path cannot read outside
+// the clone. A missing clone dir or a missing/dir output file yields no keys
+// rather than an error: the caller resolves promoted keys against the result and
+// surfaces a genuinely-absent key as the promote error, while inheritEnvOutputs
+// owns the friendlier R8 "run niwa apply first" message for a missing clone. The
+// returned map is always non-nil so it can signal "worktree path" to the
+// SettingsMaterializer even when empty.
+func readCloneEnvOutput(cloneRepoDir string, cfg *config.WorkspaceConfig, repo string, globalEnvOutput config.OutputTargets) (map[string]string, error) {
+	out := map[string]string{}
+	if _, err := os.Stat(cloneRepoDir); err != nil {
+		if os.IsNotExist(err) {
+			return out, nil
+		}
+		return nil, fmt.Errorf("repo %s: stating clone directory %s: %w", repo, cloneRepoDir, err)
+	}
+
+	for _, tgt := range config.EffectiveEnvOutput(globalEnvOutput, cfg, repo) {
+		srcAbs, err := safeTargetPath(cloneRepoDir, tgt.Path)
+		if err != nil {
+			return nil, fmt.Errorf("repo %s: clone env output %q: %w", repo, tgt.Path, err)
+		}
+		info, statErr := os.Stat(srcAbs)
+		if statErr != nil {
+			if os.IsNotExist(statErr) {
+				continue
+			}
+			return nil, fmt.Errorf("repo %s: stating clone env output %q: %w", repo, srcAbs, statErr)
+		}
+		if info.IsDir() {
+			continue
+		}
+		parsed, err := parseEnvFile(srcAbs)
+		if err != nil {
+			return nil, fmt.Errorf("repo %s: parsing clone env output %q: %w", repo, srcAbs, err)
+		}
+		for k, v := range parsed {
+			out[k] = v
+		}
+	}
+	return out, nil
+}
+
 // FindRepoGroup resolves the group a repo belongs to by scanning the instance
 // layout (<instanceRoot>/<group>/<repo>) two levels deep. The on-disk layout is
 // the ground truth: niwa apply already cloned the repo into its group directory,
@@ -441,6 +497,20 @@ func ApplyToWorktree(cfg *config.WorkspaceConfig, configDir, instanceRoot, workt
 		}
 	}
 	repoIndex := map[string]string{repo: worktreePath}
+
+	// The SettingsMaterializer resolves [claude.env] promoted keys, but the
+	// worktree path's cfg is unresolved (no vault / machine-identity sync ran),
+	// so a promoted key backed by a secret is absent from it. Inherit those
+	// values from the instance clone's already-materialized env — the same
+	// source inheritEnvOutputs copies in step 2b — so the settings file carries
+	// the promoted key rather than failing to resolve it. A non-nil (possibly
+	// empty) map signals the worktree path to the materializer.
+	cloneRepoDir := filepath.Join(instanceRoot, group, repo)
+	inheritedEnv, err := readCloneEnvOutput(cloneRepoDir, cfg, repo, opts.GlobalEnvOutput)
+	if err != nil {
+		return nil, fmt.Errorf("reading clone env for worktree promote inheritance: %w", err)
+	}
+
 	matFiles, envOutputs, err := runRepoMaterializers(materializers, repoMaterializeInputs{
 		Cfg:             cfg,
 		ConfigDir:       configDir,
@@ -458,6 +528,7 @@ func ApplyToWorktree(cfg *config.WorkspaceConfig, configDir, instanceRoot, workt
 
 		GlobalEnvExamplePolicy: opts.GlobalEnvExamplePolicy,
 		GlobalEnvOutput:        opts.GlobalEnvOutput,
+		InheritedEnv:           inheritedEnv,
 	})
 	if err != nil {
 		return nil, err
@@ -470,7 +541,6 @@ func ApplyToWorktree(cfg *config.WorkspaceConfig, configDir, instanceRoot, workt
 	//     primitive establishes git-exclude coverage for custom target names
 	//     before writing (fail-closed) and reports those names so the
 	//     re-assert below carries them in the unioned exclude block.
-	cloneRepoDir := filepath.Join(instanceRoot, group, repo)
 	effectiveEnv := MergeOverrides(cfg, repo).Env
 	envInherited, envCustomNames, err := inheritEnvOutputs(
 		cloneRepoDir, worktreePath, cfg, repo, opts.GlobalEnvOutput, effectiveEnv,
