@@ -128,6 +128,17 @@ type MaterializeContext struct {
 	// to every repo's SettingsMaterializer. nil installs neither hook nor deny.
 	// See WorktreeDelegation for the supported/unsupported branch contract.
 	WorktreeDelegation *WorktreeDelegation
+
+	// InheritedEnv, when non-nil, is the clone's already-materialized env used
+	// to resolve [claude.env] promoted keys on the worktree path. The worktree
+	// apply does not re-resolve secrets (see ApplyToWorktree); it inherits the
+	// instance clone's env output. When this is set, resolveClaudeEnvVars looks
+	// promoted keys up here instead of calling ResolveEnvVars, so a promoted key
+	// whose value was sourced from vault or the machine-identity sync — and is
+	// therefore absent from the static config the worktree path sees — is still
+	// found. A non-nil but empty map means "worktree path, no inherited env",
+	// which is distinct from nil ("instance path, resolve from config").
+	InheritedEnv map[string]string
 }
 
 // recordSources appends the given SourceEntry slice to the context's
@@ -861,12 +872,26 @@ func resolveClaudeEnvVars(ctx *MaterializeContext) (map[string]string, []SourceE
 
 	// Step 1: resolve promoted keys from the env pipeline.
 	if len(claudeEnv.Promote) > 0 {
-		resolvedEnv, envSources, err := ResolveEnvVars(ctx)
-		if err != nil {
-			return nil, nil, fmt.Errorf("resolving env for promote: %w", err)
-		}
-		if resolvedEnv == nil {
-			resolvedEnv = map[string]string{}
+		var resolvedEnv map[string]string
+		var envSources []SourceEntry
+		if ctx.InheritedEnv != nil {
+			// Worktree path: the config here is unresolved (no vault /
+			// machine-identity sync ran), so a promoted key sourced from a
+			// secret would be absent from ResolveEnvVars. Inherit the value
+			// from the clone's already-materialized env instead, mirroring how
+			// the worktree path inherits env output files rather than
+			// re-resolving them (see inheritEnvOutputs). No source tuples are
+			// recorded: the worktree path does not track SourceFingerprints.
+			resolvedEnv = ctx.InheritedEnv
+		} else {
+			var err error
+			resolvedEnv, envSources, err = ResolveEnvVars(ctx)
+			if err != nil {
+				return nil, nil, fmt.Errorf("resolving env for promote: %w", err)
+			}
+			if resolvedEnv == nil {
+				resolvedEnv = map[string]string{}
+			}
 		}
 		for _, key := range claudeEnv.Promote {
 			val, found := resolvedEnv[key]
