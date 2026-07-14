@@ -1,5 +1,5 @@
 ---
-status: In Progress
+status: Complete
 question: |
   For an optional keep-alive over niwa-dispatched remote-control sessions, can niwa
   reliably tell a still-active session that merely lost its RC connection apart from
@@ -13,14 +13,17 @@ timebox: "1 session, static observation + docs; one live overnight test deferred
 
 ## Status
 
-In Progress
+Complete
 
-The statically-observable questions are answered from a live machine (Claude Code
-2.1.207) and the docs. The dynamic question is now under **direct live observation on
-the real host** (see "Live observation" below): the host is an always-on Linux desktop
-that never sleeps, yet its idle RC sessions still get disconnected after several hours —
-so a read-only watcher is recording what changes locally at the moment a bridge drops.
-The live sessions on the observed machine are NOT disturbed (read-only).
+Answered from a live always-on Linux desktop (Claude Code 2.1.207), ~12h of hourly
+read-only probing, and the docs. **Key result, human-confirmed:** a ~12h-idle RC
+session was NOT reachable from the phone, yet its local `bridgeSessionId` was STILL
+present in `state.json`. So the local bridge field is a **stale, unreliable signal**:
+niwa cannot detect a dropped RC bridge by reading local state, and the daemon does not
+auto-recover an idle-dropped bridge. The one reliable mechanism is to **prevent the
+drop with a heartbeat**. The only remaining micro-test (close-vs-archive local diff) is
+a design-time follow-up, not a blocker for the direction. Live sessions were not
+disturbed (read-only).
 
 ### Diagnosis correction (load-bearing)
 
@@ -155,23 +158,28 @@ whether entry-gone is a safe "developer is done" signal.
 
 ## Recommendation (feeds the DESIGN)
 
-With the always-on-host correction, the feature reshapes as follows:
+The empirical result forces a single direction:
 
-- **Keep-host-awake is out.** The host never sleeps; there is no unreachable window to
-  prevent. Do not build a sleep inhibitor.
-- **The cause is an idle bridge-drop on a reachable host.** The two candidate mechanisms
-  are (a) a **heartbeat** that keeps the session active so the bridge never idles out,
-  and (b) **detect-and-re-establish** the dropped bridge. The live watch decides which is
-  feasible: if the drop clears `bridgeSessionId` but leaves the entry resumable, (b) is
-  clean; if a heartbeat prevents the drop entirely, (a) is simpler. They may combine.
-- **Lean on the daemon, don't rebuild it.** F2/F3 show Claude Code already respawns dead
-  RC workers with RC re-armed via stored `respawnFlags`. niwa's recovery layer, if any,
-  should be thin: read `bridgeSessionId` presence (F1) to detect a dropped bridge and, at
-  most, invoke `claude respawn <id>` — not a bespoke supervisor.
-- **`selfWake`/cron (F4)** is the most promising heartbeat primitive: Claude Code already
-  has session-scoped scheduled wake. A keep-alive could ride it (7-day TTL, undocumented
-  for this use) rather than niwa poking the session from outside.
-- **The close-vs-lost signal (F5) still gates safety.** Until a throwaway-session test
-  shows that an agents-TUI close / claude.ai archive leaves a local signal distinct from
-  an idle bridge-drop, the design must not treat entry-gone (or bridge-gone) as
-  "developer is done" and must not auto-resurrect on it.
+- **Keep-host-awake is out.** The host never sleeps; there is no unreachable window.
+- **Detect-and-reconnect via local state is out.** The confirmed result — unreachable
+  session, `bridgeSessionId` still present — means `state.json` does NOT reflect the
+  real bridge state. niwa cannot detect a dropped bridge locally, so it cannot know when
+  to reconnect. (F1's `bridgeSessionId` seam detects "was RC ever armed," not "is RC up
+  now.")
+- **The daemon does not rescue the idle case.** It respawns *dead workers* (F2), but an
+  idle-dropped bridge leaves the worker alive with a stale bridge, so no respawn fires
+  and the bridge is never re-established. "Lean on the daemon" does not cover this.
+- **Prevent the drop with a heartbeat — the one thing that works.** Keep the opted-in
+  session active often enough that its bridge never crosses the server-side idle
+  threshold. The threshold is under ~12h and needs tuning empirically; nudge
+  conservatively (e.g. hourly or more often).
+- **`selfWake`/`session_cron` (F4) is the natural vehicle.** Claude Code already has
+  session-scoped scheduled self-wake; a keep-alive should ride it (a session waking
+  itself periodically) rather than niwa poking from outside — subject to its 7-day TTL,
+  which itself bounds max keep-alive duration and must be re-armed.
+- **Stop condition.** Since no local field distinguishes closed/archived from
+  idle-dropped (F5) and the bridge field is stale, the keep-alive is anchored on niwa's
+  own opt-in record plus the one real signal that does exist — the jobs **entry being
+  removed** (`claude rm` / TUI close / cleanup). Heartbeat while the entry exists and the
+  session is opted-in; stop when the entry is gone. A design-time throwaway-session test
+  should still confirm exactly what a claude.ai **archive** does to the local entry.

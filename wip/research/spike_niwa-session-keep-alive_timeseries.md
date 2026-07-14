@@ -428,3 +428,96 @@ fd065b82 tsukumogami_for_ rc  done     cse_011BJoz8ZiTjCDwpWWyn682Y   ft=2026-07
 d12be1a5 niwa_teleport    rc  done     cse_01C5u1kUSuT6wEbZMSUsBRqp   ft=2026-07-13T21:58:04.743Z upd=04:11:00.389
 fd065b82 tsukumogami_for_ rc  done     cse_011BJoz8ZiTjCDwpWWyn682Y   ft=2026-07-14T04:01:49.736Z upd=04:01:49.736
 ```
+```
+===== 2026-07-14T08:17:32Z (it 19) =====
+176618cd cloud_multirepo  rc  done     cse_01AsM1FyqsYXZJgdJD9UNG41   ft=2026-07-14T03:44:48.864Z upd=03:44:48.864
+32544a2d commuter_wip     rc  done     cse_01F545JxskhdtLRyAe3DDsTw   ft=2026-07-13T20:14:21.067Z upd=02:40:42.144
+3a6e45ed charter_booked_s rc  done     cse_01G2hLrF4RsCnEmUXS6KCNe9   ft=2026-07-14T03:06:38.244Z upd=04:24:13.084
+42b38a00 seller_wallet    rc  blocked  cse_018RPPkBveGj5pZBAL14PFvy   ft=None upd=04:05:21.912
+71e6c42b niwa_keep_alive  rc  working  cse_018pJczirAQ4dsCdNJM7hZwM   ft=None upd=07:58:21.735
+96295a92 niwa_worktree_er rc  done     cse_0197vc3PBL1DAx1zgwdXK3gz   ft=2026-07-14T01:49:49.877Z upd=02:50:00.331
+979b7019 teleport_charter rc  done     cse_01BuYG2r3CTErWeQLFDPSKsS   ft=2026-07-14T02:15:33.264Z upd=02:57:34.040
+9a06b95e feature_4_real_c rc  done     cse_01Tja6DLTxPUH236N611S7cC   ft=2026-07-13T19:42:44.102Z upd=19:42:44.102
+d12be1a5 niwa_teleport    rc  done     cse_01C5u1kUSuT6wEbZMSUsBRqp   ft=2026-07-13T21:58:04.743Z upd=04:11:00.389
+fd065b82 tsukumogami_for_ rc  done     cse_011BJoz8ZiTjCDwpWWyn682Y   ft=2026-07-14T04:01:49.736Z upd=04:01:49.736
+```
+```
+===== 2026-07-14T08:47:32Z (it 20) =====
+176618cd cloud_multirepo  rc  done     cse_01AsM1FyqsYXZJgdJD9UNG41   ft=2026-07-14T03:44:48.864Z upd=03:44:48.864
+32544a2d commuter_wip     rc  done     cse_01F545JxskhdtLRyAe3DDsTw   ft=2026-07-13T20:14:21.067Z upd=02:40:42.144
+3a6e45ed charter_booked_s rc  done     cse_01G2hLrF4RsCnEmUXS6KCNe9   ft=2026-07-14T03:06:38.244Z upd=04:24:13.084
+42b38a00 seller_wallet    rc  blocked  cse_018RPPkBveGj5pZBAL14PFvy   ft=None upd=04:05:21.912
+71e6c42b niwa_keep_alive  rc  working  cse_018pJczirAQ4dsCdNJM7hZwM   ft=None upd=07:58:21.735
+96295a92 niwa_worktree_er rc  done     cse_0197vc3PBL1DAx1zgwdXK3gz   ft=2026-07-14T01:49:49.877Z upd=02:50:00.331
+979b7019 teleport_charter rc  done     cse_01BuYG2r3CTErWeQLFDPSKsS   ft=2026-07-14T02:15:33.264Z upd=02:57:34.040
+9a06b95e feature_4_real_c rc  done     cse_01Tja6DLTxPUH236N611S7cC   ft=2026-07-13T19:42:44.102Z upd=19:42:44.102
+d12be1a5 niwa_teleport    rc  done     cse_01C5u1kUSuT6wEbZMSUsBRqp   ft=2026-07-13T21:58:04.743Z upd=04:11:00.389
+fd065b82 tsukumogami_for_ rc  done     cse_011BJoz8ZiTjCDwpWWyn682Y   ft=2026-07-14T04:01:49.736Z upd=04:01:49.736
+```
+```
+===== 2026-07-14T09:17:32Z (it 21) =====
+176618cd cloud_multirepo  rc  done     cse_01AsM1FyqsYXZJgdJD9UNG41   ft=2026-07-14T03:44:48.864Z upd=03:44:48.864
+32544a2d commuter_wip     rc  done     cse_01F545JxskhdtLRyAe3DDsTw   ft=2026-07-13T20:14:21.067Z upd=02:40:42.144
+3a6e45ed charter_booked_s rc  done     cse_01G2hLrF4RsCnEmUXS6KCNe9   ft=2026-07-14T03:06:38.244Z upd=04:24:13.084
+42b38a00 seller_wallet    rc  blocked  cse_018RPPkBveGj5pZBAL14PFvy   ft=None upd=04:05:21.912
+71e6c42b niwa_keep_alive  rc  working  cse_018pJczirAQ4dsCdNJM7hZwM   ft=None upd=07:58:21.735
+96295a92 niwa_worktree_er rc  done     cse_0197vc3PBL1DAx1zgwdXK3gz   ft=2026-07-14T01:49:49.877Z upd=02:50:00.331
+979b7019 teleport_charter rc  done     cse_01BuYG2r3CTErWeQLFDPSKsS   ft=2026-07-14T02:15:33.264Z upd=02:57:34.040
+9a06b95e feature_4_real_c rc  done     cse_01Tja6DLTxPUH236N611S7cC   ft=2026-07-13T19:42:44.102Z upd=19:42:44.102
+d12be1a5 niwa_teleport    rc  done     cse_01C5u1kUSuT6wEbZMSUsBRqp   ft=2026-07-13T21:58:04.743Z upd=04:11:00.389
+fd065b82 tsukumogami_for_ rc  done     cse_011BJoz8ZiTjCDwpWWyn682Y   ft=2026-07-14T04:01:49.736Z upd=04:01:49.736
+```
+```
+===== 2026-07-14T09:47:32Z (it 22) =====
+176618cd cloud_multirepo  rc  done     cse_01AsM1FyqsYXZJgdJD9UNG41   ft=2026-07-14T03:44:48.864Z upd=03:44:48.864
+32544a2d commuter_wip     rc  done     cse_01F545JxskhdtLRyAe3DDsTw   ft=2026-07-13T20:14:21.067Z upd=02:40:42.144
+3a6e45ed charter_booked_s rc  done     cse_01G2hLrF4RsCnEmUXS6KCNe9   ft=2026-07-14T03:06:38.244Z upd=04:24:13.084
+42b38a00 seller_wallet    rc  blocked  cse_018RPPkBveGj5pZBAL14PFvy   ft=None upd=04:05:21.912
+71e6c42b niwa_keep_alive  rc  working  cse_018pJczirAQ4dsCdNJM7hZwM   ft=None upd=07:58:21.735
+96295a92 niwa_worktree_er rc  done     cse_0197vc3PBL1DAx1zgwdXK3gz   ft=2026-07-14T01:49:49.877Z upd=02:50:00.331
+979b7019 teleport_charter rc  done     cse_01BuYG2r3CTErWeQLFDPSKsS   ft=2026-07-14T02:15:33.264Z upd=02:57:34.040
+9a06b95e feature_4_real_c rc  done     cse_01Tja6DLTxPUH236N611S7cC   ft=2026-07-13T19:42:44.102Z upd=19:42:44.102
+d12be1a5 niwa_teleport    rc  done     cse_01C5u1kUSuT6wEbZMSUsBRqp   ft=2026-07-13T21:58:04.743Z upd=04:11:00.389
+fd065b82 tsukumogami_for_ rc  done     cse_011BJoz8ZiTjCDwpWWyn682Y   ft=2026-07-14T04:01:49.736Z upd=04:01:49.736
+```
+```
+===== 2026-07-14T10:17:32Z (it 23) =====
+176618cd cloud_multirepo  rc  done     cse_01AsM1FyqsYXZJgdJD9UNG41   ft=2026-07-14T03:44:48.864Z upd=03:44:48.864
+32544a2d commuter_wip     rc  done     cse_01F545JxskhdtLRyAe3DDsTw   ft=2026-07-13T20:14:21.067Z upd=02:40:42.144
+3a6e45ed charter_booked_s rc  done     cse_01G2hLrF4RsCnEmUXS6KCNe9   ft=2026-07-14T03:06:38.244Z upd=04:24:13.084
+42b38a00 seller_wallet    rc  blocked  cse_018RPPkBveGj5pZBAL14PFvy   ft=None upd=04:05:21.912
+71e6c42b niwa_keep_alive  rc  working  cse_018pJczirAQ4dsCdNJM7hZwM   ft=None upd=07:58:21.735
+96295a92 niwa_worktree_er rc  done     cse_0197vc3PBL1DAx1zgwdXK3gz   ft=2026-07-14T01:49:49.877Z upd=02:50:00.331
+979b7019 teleport_charter rc  done     cse_01BuYG2r3CTErWeQLFDPSKsS   ft=2026-07-14T02:15:33.264Z upd=02:57:34.040
+9a06b95e feature_4_real_c rc  done     cse_01Tja6DLTxPUH236N611S7cC   ft=2026-07-13T19:42:44.102Z upd=19:42:44.102
+d12be1a5 niwa_teleport    rc  done     cse_01C5u1kUSuT6wEbZMSUsBRqp   ft=2026-07-13T21:58:04.743Z upd=04:11:00.389
+fd065b82 tsukumogami_for_ rc  done     cse_011BJoz8ZiTjCDwpWWyn682Y   ft=2026-07-14T04:01:49.736Z upd=04:01:49.736
+```
+```
+===== 2026-07-14T10:47:33Z (it 24) =====
+176618cd cloud_multirepo  rc  done     cse_01AsM1FyqsYXZJgdJD9UNG41   ft=2026-07-14T03:44:48.864Z upd=03:44:48.864
+32544a2d commuter_wip     rc  done     cse_01F545JxskhdtLRyAe3DDsTw   ft=2026-07-13T20:14:21.067Z upd=02:40:42.144
+3a6e45ed charter_booked_s rc  done     cse_01G2hLrF4RsCnEmUXS6KCNe9   ft=2026-07-14T03:06:38.244Z upd=04:24:13.084
+42b38a00 seller_wallet    rc  blocked  cse_018RPPkBveGj5pZBAL14PFvy   ft=None upd=04:05:21.912
+71e6c42b niwa_keep_alive  rc  working  cse_018pJczirAQ4dsCdNJM7hZwM   ft=None upd=07:58:21.735
+96295a92 niwa_worktree_er rc  done     cse_0197vc3PBL1DAx1zgwdXK3gz   ft=2026-07-14T01:49:49.877Z upd=02:50:00.331
+979b7019 teleport_charter rc  done     cse_01BuYG2r3CTErWeQLFDPSKsS   ft=2026-07-14T02:15:33.264Z upd=02:57:34.040
+9a06b95e feature_4_real_c rc  done     cse_01Tja6DLTxPUH236N611S7cC   ft=2026-07-13T19:42:44.102Z upd=19:42:44.102
+d12be1a5 niwa_teleport    rc  done     cse_01C5u1kUSuT6wEbZMSUsBRqp   ft=2026-07-13T21:58:04.743Z upd=04:11:00.389
+fd065b82 tsukumogami_for_ rc  done     cse_011BJoz8ZiTjCDwpWWyn682Y   ft=2026-07-14T04:01:49.736Z upd=04:01:49.736
+```
+```
+===== 2026-07-14T11:17:33Z (it 25) =====
+176618cd cloud_multirepo  rc  done     cse_01AsM1FyqsYXZJgdJD9UNG41   ft=2026-07-14T03:44:48.864Z upd=03:44:48.864
+32544a2d commuter_wip     rc  done     cse_01F545JxskhdtLRyAe3DDsTw   ft=2026-07-13T20:14:21.067Z upd=02:40:42.144
+3a6e45ed charter_booked_s rc  done     cse_01G2hLrF4RsCnEmUXS6KCNe9   ft=2026-07-14T03:06:38.244Z upd=04:24:13.084
+42b38a00 seller_wallet    rc  blocked  cse_018RPPkBveGj5pZBAL14PFvy   ft=None upd=04:05:21.912
+71e6c42b niwa_keep_alive  rc  working  cse_018pJczirAQ4dsCdNJM7hZwM   ft=None upd=11:17:24.124
+96295a92 niwa_worktree_er rc  done     cse_0197vc3PBL1DAx1zgwdXK3gz   ft=2026-07-14T01:49:49.877Z upd=02:50:00.331
+979b7019 teleport_charter rc  done     cse_01BuYG2r3CTErWeQLFDPSKsS   ft=2026-07-14T02:15:33.264Z upd=02:57:34.040
+9a06b95e feature_4_real_c rc  done     cse_01Tja6DLTxPUH236N611S7cC   ft=2026-07-13T19:42:44.102Z upd=19:42:44.102
+d12be1a5 niwa_teleport    rc  done     cse_01C5u1kUSuT6wEbZMSUsBRqp   ft=2026-07-13T21:58:04.743Z upd=04:11:00.389
+fd065b82 tsukumogami_for_ rc  done     cse_011BJoz8ZiTjCDwpWWyn682Y   ft=2026-07-14T04:01:49.736Z upd=04:01:49.736
+```
+
+<!-- SPIKE CONCLUDED 2026-07-14T07:57Z: human confirmed a ~12h-idle session is NOT phone-reachable while its local bridgeSessionId still shows present. Local field is stale; heartbeat/prevent is the design direction. Probe loop stopped. -->
