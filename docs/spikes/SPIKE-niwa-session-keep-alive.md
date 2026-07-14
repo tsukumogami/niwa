@@ -120,10 +120,38 @@ watch answers, from real data:
 2. Does the daemon log a respawn / does the bridge come back on its own?
 3. How long does idle-to-disconnect actually take here?
 
-Still needing a manual step (not scriptable read-only): diff a throwaway session's entry
-across an explicit **agents-TUI close** and a **claude.ai archive**, to see whether
-either leaves a local signal distinct from an idle bridge-drop. That decides whether
-entry-gone is a safe "developer is done" signal.
+### Result (after ~12h of hourly probing, 2026-07-13T20:07Z → 2026-07-14T07:57Z)
+
+**The local `bridgeSessionId` did NOT clear on idle.** The cleanest specimen,
+`feature_4_real_commute` (9a06b95e), went terminal at 2026-07-13T19:42 and its
+`updatedAt` stayed frozen at 19:42:44 (genuinely untouched) for **~12 hours**, yet its
+`bridgeSessionId` remained present in `state.json` the entire time. `commuter_wip`
+(idle ~11.7h) likewise held its bridge. Across the full watch, **zero** watched RC
+sessions showed a local `BRIDGE-CLEARED` or idle `ENTRY-REMOVED` event; the only
+removal seen was the iteration-1 completion-cleanup (`bg settled ... killed`).
+
+By the reported timing (idle RC sessions disconnect within ~6–12h), a session idle
+since 19:42 should have dropped by ~07:42. It did not drop *locally*. Two readings
+remain, and they are NOT separable from inside the host:
+
+- **(b) The local field is stale** — the RC connection dropped server-side but
+  `state.json` still shows the old `bridgeSessionId`. If so, **niwa cannot detect a
+  dropped bridge by reading `state.json`**, and the design must PREVENT the drop
+  (heartbeat) rather than detect-and-reconnect.
+- **(a) The connection did not actually drop** for these sessions — in which case the
+  disconnect trigger is narrower/different than assumed and needs re-characterizing.
+
+**Decisive missing datum (needs the human):** check from the phone / claude.ai whether
+a ~12h-idle session (e.g. `feature_4_real_commute`) is *actually reachable right now*.
+- Not reachable, but local bridge still present → confirms (b): local state is a stale
+  signal; design around a heartbeat.
+- Reachable → the local bridge is trustworthy and the disconnect is rarer/slower than
+  the 6–12h estimate; re-scope the trigger.
+
+Still also needing a manual step (not scriptable read-only): diff a throwaway session's
+entry across an explicit **agents-TUI close** and a **claude.ai archive**, to see
+whether either leaves a local signal distinct from an idle bridge-drop. That decides
+whether entry-gone is a safe "developer is done" signal.
 
 ## Recommendation (feeds the DESIGN)
 
