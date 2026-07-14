@@ -141,8 +141,8 @@ Non-functional:
 - [ ] `niwa` reports which live sessions are currently kept alive, and the report
       matches the set that was opted in and is still live (R10).
 - [ ] Over a 12-hour keep-alive window, keep-alive-attributable model-token usage stays
-      at or below a small fixed ceiling (the design fixes the number; on the order of
-      hundreds of tokens total, not the volume a working turn consumes), measured via the
+      at or below a small fixed ceiling (the design fixes the number at roughly 2,000 tokens
+      for the window, far below the volume a working turn consumes), measured via the
       session's token accounting; and the session's conversation transcript and on-disk
       files are unchanged by keep-alive except for a keep-alive marker (a diff against a
       control run shows no other difference) (R11).
