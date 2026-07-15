@@ -1,5 +1,5 @@
 ---
-status: Proposed
+status: Accepted
 upstream: docs/prds/PRD-interactive-codex-session.md
 problem: |
   niwa prepares a workspace for exactly one agent, Claude Code. The context
@@ -34,7 +34,7 @@ rationale: |
 
 ## Status
 
-Proposed
+Accepted
 
 Upstream PRD: docs/prds/PRD-interactive-codex-session.md (In Progress). The
 downstream PLAN decomposes this into implementation issues.
@@ -138,16 +138,18 @@ once, outside the `[claude]` cascade.
   Codex") belongs in the committed `workspace.toml`, not each developer's local
   state file. (`EphemeralSessionMode` is the right precedent for *shape* — a
   session-global knob resolved via a fail-safe accessor — but not for storage
-  tier.)
+  layer.)
 - **Option 2C: global `~/.config/niwa/config.toml` (mirror `DispatchModel`
   exactly).** Rejected as the default's home: the agent is a per-workspace choice,
   not a per-host one. A single global default would force every workspace on the
   host to the same agent. The *override* half, though, is exactly `DispatchModel`'s
   flag pattern, which 2A adopts.
-- **Option 2D: a fifth field in the `[claude]` override cascade.** Rejected by
-  the PRD (R4) and the driver: the cascade is a per-repo merge structure; an agent
-  field there would wrongly imply a repo could pick a different agent than its
-  siblings within one session.
+- **Option 2D: a fifth field in the `[claude]` override cascade.** This is a
+  constraint the PRD (R4) forbids rather than a live option, but it is recorded
+  here with its independent engineering reason: the cascade is a per-repo merge
+  structure, so an agent field there would wrongly imply a repo could pick a
+  different agent than its siblings within one session — which is exactly the
+  per-repo-mergeable modeling the driver rules out.
 
 ### Decision 3 — Which levels materialize Codex context
 
@@ -287,6 +289,23 @@ func (a Agent) LocalContextFileName() string
 func (a Agent) WritesRepoLevelContext() bool
 ```
 
+Two contracts on the accessors are load-bearing:
+
+- **Zero value is Claude.** The zero value `Agent("")` MUST behave as
+  `AgentClaude` in `RootContextFileName`, `LocalContextFileName`, and
+  `WritesRepoLevelContext` (and `ParseAgent("")` returns `AgentClaude`). Many
+  `RootMaterializeOptions` and apply-path values are constructed across the CLI
+  and tests; a fail-safe zero value means a construction site that does not yet
+  set the agent degrades to today's Claude behavior rather than to a broken empty
+  filename, so backward compatibility does not depend on updating every
+  construction site at once.
+- **The codex `LocalContextFileName` value is provisional.** `WritesRepoLevelContext()`
+  is false for codex in this slice, so `LocalContextFileName()` returning
+  `AGENTS.md` for codex is currently a dead branch. Its value is provisional: the
+  deferred repository-level Codex work (Decision 3B) may choose a different
+  mechanism (for example appending into a repository's own `AGENTS.md`), so this
+  branch is not a committed contract yet.
+
 Keeping the closed set, the validation, and the filename mapping on one type
 means a later agent or a filename change is a one-file edit.
 
@@ -313,6 +332,25 @@ that can surface an error, unlike `EphemeralSessionMode`'s post-hoc state read.
   when `!agent.WritesRepoLevelContext()`, return early without writing (Decision
   3). Under Claude they behave exactly as today.
 
+**Entry points that must resolve and carry the agent.** The resolved agent must
+reach every command that materializes context, or that path silently runs with
+the zero-value agent (which, by the fail-safe contract above, is Claude — so a
+missed wiring degrades to today's behavior, never to breakage, but a
+codex-default workspace would then be under-served on that path). The full set:
+
+- `niwa apply` and `niwa create` — the primary apply pipeline (`Applier.Apply` /
+  `Applier.Create` → `runPipeline`) and the workspace-root materializer
+  (`MaterializeWorkspaceRoot`).
+- `niwa init` — calls `MaterializeWorkspaceRoot`; it already holds the parsed
+  config, so it can resolve the agent from `cfg.Workspace.DefaultAgent` at init
+  and avoid writing a Claude-named root file that only self-heals on first apply.
+- `niwa reset` — runs `runPipeline`.
+- the ephemeral `instance from-hook` path — goes through the `Applier`.
+- the worktree lifecycle — `ApplyToWorktree`, reached from the session-lifecycle
+  command.
+
+The PLAN carries this list so no materializing entry point is left unwired.
+
 ### Data flow
 
 ```
@@ -324,6 +362,31 @@ CLI (apply/create): flags + env + cfg.Workspace.DefaultAgent
                 -> repo/worktree writers  : skip when agent == codex
 ```
 
+### What the Codex `AGENTS.md` carries (and what it does not)
+
+At the instance root, niwa writes more than the primary `CLAUDE.md`: it also
+writes companion files (`workspace-context.md`, an overlay content file, a global
+content file, and a `.claude/rules` import file) and stitches them into the
+primary `CLAUDE.md` through `@import` lines. Claude follows those imports; Codex
+does not — Codex reads only the literal `AGENTS.md` at its working directory. So
+the instance-root `AGENTS.md` this slice writes carries the primary workspace
+content layer (the `[claude.content.workspace]` source), not the
+`@import`-composed companions.
+
+This slice deliberately does not inline the companion layers into `AGENTS.md`.
+Doing so is a materialization change (concatenating the companion bodies rather
+than emitting separate `@import`-ed files) that belongs with the full
+agent-neutral content work, which owns the content-tree generalization. The
+consequence is recorded honestly below: a Codex session gets the primary
+workspace and root content, which is the core orientation, but not the overlay or
+global companion layers in this slice.
+
+Separately, `MaterializeWorkspaceRoot` also writes Claude-specific artifacts
+(`.claude/settings.json`, root skills, the SessionStart hook entry) that are not
+renamed or suppressed under Codex. These are harmless — Codex ignores `~/.claude`
+and the workspace `.claude/` directory — and generalizing them is later config
+work; this slice leaves them as-is by design.
+
 ### Secret and model seams
 
 - `OPENAI_API_KEY` requires no new code: it is a row in the existing
@@ -331,8 +394,12 @@ CLI (apply/create): flags + env + cfg.Workspace.DefaultAgent
   scaffold gains a commented `OPENAI_API_KEY` example next to the
   `ANTHROPIC_API_KEY` one, and a config round-trip test asserts it decodes and
   resolves like the Claude key.
-- `dispatch_model.go` gains an agent dimension: `modelCategories` becomes keyed by
-  agent (Claude unchanged; Codex a parallel versionless map), and
+- `dispatch_model.go` gains an agent dimension across all three of its
+  Claude-specific data structures: `modelCategories` becomes keyed by agent
+  (Claude unchanged; Codex a parallel versionless map), AND `knownModelNames`
+  (the set that suppresses the "unrecognized model" warning) becomes agent-scoped
+  — otherwise a legitimate Codex model name would trip the warning branch — AND
+  the warning message's listed vocabulary is drawn from the selected agent's sets.
   `resolveDispatchModel` takes the agent. The single existing call site resolves
   under `claude`, preserving current output exactly.
 
@@ -351,11 +418,14 @@ atomic issues:
    wire `ResolveAgent` at the entry points. Unknown-agent errors surface here.
    Tests: config decode, precedence end-to-end, error on unknown value.
 3. **Filename seam at the niwa-owned levels.** Thread `Agent` onto
-   `RootMaterializeOptions` and the apply pipeline; replace the `CLAUDE.md`
-   literals at the workspace-root and group write sites with
+   `RootMaterializeOptions` and the apply pipeline, wiring every materializing
+   entry point enumerated in Solution Architecture (`apply`, `create`, `init`,
+   `reset`, the `instance from-hook` path, and the worktree lifecycle); replace the
+   `CLAUDE.md` literals at the workspace-root and group write sites with
    `RootContextFileName()`. Parameterize the existing `content_test.go` /
    `root_materializer_test.go` cases by agent; assert `AGENTS.md` under Codex and
-   byte-for-byte-unchanged `CLAUDE.md` under Claude.
+   byte-for-byte-unchanged `CLAUDE.md` under Claude, and that a construction site
+   left at the zero-value agent still produces the Claude output.
 4. **Repository/worktree skip under Codex.** Make `InstallRepoContent(To)` and the
    worktree context layer skip when the agent does not write repo-level content;
    assert no repo-level file is written under Codex and the git working tree stays
@@ -368,21 +438,37 @@ atomic issues:
    identical under Claude; unit-test the Codex resolution and the unchanged Claude
    resolution.
 
-Units 1 and 2 gate the rest (they define the `Agent` value and its resolution);
-3 and 4 are the materialization core; 5 and 6 are independent seam extensions that
-can land in parallel with 3/4.
+Units 1 and 2 gate the rest (they define the `Agent` value and its resolution).
+Unit 4 depends on unit 3: the repository/worktree skip needs the agent already
+threaded through the apply pipeline that unit 3 wires, so 3 lands before 4. Units
+5 and 6 are independent seam extensions that can land in parallel with 3/4. All
+six carry the fail-safe zero-value contract (a construction site that has not yet
+set the agent behaves as Claude), so partial landings never break the default
+path.
 
 ## Security Considerations
 
-- **Agent value is a closed set, validated before use.** The only place a
-  user-supplied agent string enters the system is `ParseAgent`, which rejects
-  anything outside `{claude, codex}`. Because the agent selects a filename
-  (`CLAUDE.md` / `AGENTS.md`) and gates a code path, an unvalidated value could
-  otherwise become a path component. Validation at the single parse boundary
-  closes this: the filename accessors operate on an already-validated `Agent`,
-  never on raw input, so no user string reaches a filesystem path. There is no
-  string interpolation of the agent value into a path — the filenames are fixed
-  constants selected by the validated enum.
+- **Agent value is a closed set, validated at a single boundary, from three
+  sources.** The agent string reaches the system from three inputs — the `--agent`
+  flag, the `NIWA_AGENT` environment variable, and the `[workspace].default_agent`
+  config field — and every one is forced through `ResolveAgent` → `ParseAgent`,
+  which rejects anything outside `{claude, codex}`, before any filename is chosen.
+  The config source is the most untrusted of the three: a `workspace.toml` cloned
+  from an untrusted upstream carries a committed `default_agent` value. Its worst
+  case is bounded to a rejected `apply` (an unknown value fails `ParseAgent` with a
+  clear error), never an arbitrary write: because the agent selects a filename
+  (`CLAUDE.md` / `AGENTS.md`) and gates a code path, validation at the single parse
+  boundary is what closes the risk. The filename accessors operate on an
+  already-validated `Agent` and return fixed string constants selected by the
+  enum — there is no interpolation of the agent value into a path, so even a
+  hypothetically-unvalidated value yields a wrong-but-fixed filename, never a
+  traversal.
+- **Config field is a raw string, validated at resolution — not a "trusted type."**
+  `WorkspaceMeta.DefaultAgent` is typed `string`, not `Agent`, so a value decoded
+  from `workspace.toml` never "looks validated" by its type; it is a raw string
+  that `ResolveAgent` must parse. This keeps validation from being silently
+  skipped by a future edit that trusts the field's type, and keeps the closed-set
+  check centralized on `ParseAgent`.
 - **No new credential handling.** `OPENAI_API_KEY` flows through the existing
   vault-backed secret table with no new parsing, storage, or logging path; it
   inherits the same handling `ANTHROPIC_API_KEY` already has. The design does not
@@ -411,12 +497,18 @@ can land in parallel with 3/4.
 ### Negative / limitations
 
 - Repository- and worktree-level per-repo context is not delivered to Codex in
-  this slice. A `codex` session gets workspace-root and group context (the bulk of
-  workspace orientation) via its working-directory ingestion at the instance root,
-  but not the per-repository layer Claude gets from `CLAUDE.local.md`. Mitigation:
-  this is the documented boundary of the launch slice; repository-level Codex
-  context lands with the full config work, which also brings the collision guard
-  and git-clean coverage it requires.
+  this slice. A `codex` session gets the workspace-root and instance-root primary
+  content via its working-directory ingestion at the instance root, but not the
+  per-repository layer Claude gets from `CLAUDE.local.md`. Mitigation: this is the
+  documented boundary of the launch slice; repository-level Codex context lands
+  with the full config work, which also brings the collision guard and git-clean
+  coverage it requires.
+- The `@import`-composed companion layers (overlay content, global content, the
+  workspace-context import file) are not inlined into the Codex `AGENTS.md` in this
+  slice, because Codex follows no `@import` lines. A Codex session therefore sees
+  the primary workspace/root content but not those companions. Mitigation: the
+  primary content is the core orientation; inlining the companions is a
+  materialization change owned by the full agent-neutral content work.
 - Switching agents between applies can leave the prior agent's tree on disk (niwa
   refreshes only the active agent's tree). Mitigation: apply under the agent you
   are about to run; tracked removal is deferred (PRD Known Limitations).

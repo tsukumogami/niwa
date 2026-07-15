@@ -1,7 +1,7 @@
 ---
 topic: interactive-codex-session
 last_updated: 2026-07-15T05:40:54Z
-phase_pointer: phase-2-chain-orchestration (design)
+phase_pointer: phase-2-chain-orchestration (plan)
 chain_started: 2026-07-15T05:40:54Z
 repo_visibility: Public
 execution_mode: auto
@@ -15,14 +15,18 @@ planned_chain:
 chain_ran:
   - brief
   - prd
+  - design
 chain_skipped: []
 child_snapshots:
   brief:
     status: Accepted
     path: docs/briefs/BRIEF-interactive-codex-session.md
   prd:
-    status: Accepted
+    status: In Progress
     path: docs/prds/PRD-interactive-codex-session.md
+  design:
+    status: Accepted
+    path: docs/designs/current/DESIGN-interactive-codex-session.md
 r6_predicates:
   P1: fires (selector modeling — session-global knob vs config-cascade field — is an architectural alternative left for DESIGN)
   P2: fires (introduces an agent-abstraction/output-name-by-agent seam not present in the repo today)
