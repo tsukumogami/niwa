@@ -50,9 +50,12 @@ discriminator, its validation, its filename mapping, and session resolution.
 - [ ] `ParseAgent(s string) (Agent, error)`: empty string returns `AgentClaude`;
       `claude`/`codex` return the matching constant; any other value returns an
       error naming the accepted set `claude, codex` (PRD R15).
-- [ ] `RootContextFileName()` returns `CLAUDE.md` for claude (and the zero value)
-      and `AGENTS.md` for codex; `LocalContextFileName()` returns `CLAUDE.local.md`
-      for claude (and zero value) and `AGENTS.md` for codex (PRD R5, R6).
+- [ ] The accessors are methods on `Agent`. `RootContextFileName()` returns
+      `CLAUDE.md` for claude (and the zero value) and `AGENTS.md` for codex;
+      `LocalContextFileName()` returns `CLAUDE.local.md` for claude (and zero value)
+      and `AGENTS.md` for codex (PRD R5, R6). Note: the codex `LocalContextFileName`
+      value is provisional seam-completeness — Issue 4 skips all repo-level writes
+      under codex, so this branch is currently unused (do not "fix" it away).
 - [ ] `WritesRepoLevelContext()` returns true for claude (and zero value), false
       for codex (PRD R6a).
 - [ ] The zero value `Agent("")` behaves as `AgentClaude` in every accessor
@@ -90,8 +93,13 @@ per-session flag/env override, resolved once per session.
       `claude, codex` (PRD R15).
 - [ ] The persisted workspace default is unchanged by a per-session override (PRD
       R3).
+- [ ] The selector is session-global: `DefaultAgent` lives on `WorkspaceMeta`, not
+      as a field of the per-repo `[claude]` override structure (`ClaudeOverride`)
+      (PRD R4).
 - [ ] Tests: `[workspace].default_agent` decodes; precedence end-to-end for each
-      source and both directions; unknown-value error.
+      source and both directions; unknown-value error. Test homes:
+      `internal/config/config_test.go`, `internal/cli/apply_test.go`,
+      `internal/cli/create_test.go`.
 - [ ] Default/unselected behavior is unchanged; `go test ./...` and `go vet` pass.
 
 **Dependencies**: Blocked by <<ISSUE:1>>
@@ -115,19 +123,39 @@ levels with the agent-aware filename accessor.
 - [ ] The resolved agent is carried to every materializing entry point: `apply`,
       `create`, `init`, `reset`, the `instance from-hook` path, and the worktree
       lifecycle. A path that does not set the agent uses the zero value (= claude)
-      and is unchanged.
+      and is unchanged. Entry points that have no `--agent` flag (`init`, `reset`,
+      the `instance from-hook` path, the worktree lifecycle) resolve the agent from
+      the parsed config via `agent.ParseAgent(cfg.Workspace.DefaultAgent)` — this
+      issue owns wiring that call at those sites (Issue 2 owns the flag/env wiring
+      at `apply`/`create`).
 - [ ] Under codex, the workspace-root and group files are written as `AGENTS.md`;
       under claude (and the zero value) they are `CLAUDE.md`, byte-for-byte
       identical to today (PRD R6, R7, R13).
+- [ ] The materialized context body is identical whether the agent is codex or
+      claude — the codex `AGENTS.md` body equals the claude `CLAUDE.md` body at the
+      same level; only the filename differs (PRD R5, R8).
+- [ ] A `CLAUDE.md` tree and an `AGENTS.md` tree may coexist in one workspace
+      without error, and each apply writes a fresh tree for the selected agent
+      (PRD R8a).
 - [ ] `content_test.go` and `root_materializer_test.go` are parameterized by
-      agent and assert both the codex `AGENTS.md` output and the unchanged claude
-      output, including a zero-value-agent case.
+      agent and assert the codex `AGENTS.md` output, the byte-for-byte-unchanged
+      claude output, the zero-value-agent = claude case, and the body-identity and
+      coexistence properties above.
 - [ ] No launch/exec code is added; `go test ./...` and `go vet` pass.
+
+Out of scope for this issue (do not change): the `CLAUDE.md` string literals in
+`internal/workspace/workspace_context.go` (`removeImportFromCLAUDE`) are migration
+*reads* of the primary file, not output writes — leave them. The
+`instance from-hook` SessionStart-injection read of the instance `CLAUDE.md`
+(`buildSessionStartInjection`) is part of the deferred hooks/provisioning work
+(out of F2 scope, per the DESIGN) — it is not retargeted to `AGENTS.md` in this
+slice, so a Codex ephemeral session's hook injection is a later feature's concern,
+not this one's.
 
 **Dependencies**: Blocked by <<ISSUE:1>>, <<ISSUE:2>>
 
 **Type**: code
-**Files**: `internal/workspace/root_materializer.go`, `internal/workspace/content.go`, `internal/workspace/apply.go`
+**Files**: `internal/workspace/root_materializer.go`, `internal/workspace/content.go`, `internal/workspace/apply.go`, `internal/workspace/worktree_content.go`, `internal/cli/apply.go`, `internal/cli/create.go`, `internal/cli/init.go`, `internal/cli/reset.go`, `internal/cli/instance_from_hook.go`, `internal/cli/session_lifecycle_cmd.go`
 
 ### Issue 4: feat(workspace): skip repository/worktree context writes under Codex
 
@@ -145,13 +173,15 @@ overwritten.
       modified under codex (PRD R6a).
 - [ ] Under claude (and the zero value) the repository/worktree writes are
       byte-for-byte unchanged (PRD R7, R13).
-- [ ] Tests assert the codex skip (no repo-level file, clean tree) and the
-      unchanged claude behavior; `go test ./...` and `go vet` pass.
+- [ ] Tests (in `internal/workspace/content_test.go` and
+      `internal/workspace/worktree_content_test.go`) assert the codex skip (no
+      repo-level file, clean tree) and the unchanged claude behavior; `go test ./...`
+      and `go vet` pass.
 
 **Dependencies**: Blocked by <<ISSUE:3>>
 
 **Type**: code
-**Files**: `internal/workspace/content.go`, `internal/workspace/worktree_content.go`
+**Files**: `internal/workspace/content.go`, `internal/workspace/worktree_content.go`, `internal/workspace/apply.go`
 
 ### Issue 5: feat(config): bind OPENAI_API_KEY alongside ANTHROPIC_API_KEY
 
@@ -167,14 +197,18 @@ mechanism change.
       that both keys coexist in one workspace without one disturbing the other
       (PRD R9, R10).
 - [ ] The relevant guide documents binding `OPENAI_API_KEY` and Claude/Codex host
-      coexistence (`~/.claude` + `~/.codex`).
-- [ ] No change to the Claude-Code-Remote API-key special case; `go test ./...`
-      and `go vet` pass.
+      coexistence (`~/.claude` + `~/.codex`), and records the launch-slice boundary:
+      under Codex, niwa materializes context at the workspace-root and group levels
+      only, so repository-level context and the `@import`-composed companion layers
+      are not delivered to a Codex session in this slice.
+- [ ] No change to the Claude-Code-Remote API-key special case in
+      `internal/cli/dispatch_remotecontrol.go` (verify: that file is untouched in
+      the diff); `go test ./...` and `go vet` pass.
 
-**Dependencies**: Blocked by <<ISSUE:1>>
+**Dependencies**: None
 
 **Type**: code
-**Files**: `internal/workspace/scaffold.go`, `internal/config/vault_test.go`
+**Files**: `internal/workspace/scaffold.go`, `internal/config/vault_test.go`, `docs/guides/vault-integration.md`
 
 ### Issue 6: feat(cli): make the model-category resolver agent-aware
 
@@ -185,11 +219,15 @@ keeping the Claude resolution byte-identical.
 - [ ] `modelCategories` and `knownModelNames` (and the "unrecognized model"
       warning vocabulary) become agent-scoped: claude keeps
       `fast/balanced/powerful -> haiku/sonnet/opus` and its known names; codex gets
-      a parallel versionless Codex model-name map and known-name set (adjustable
-      defaults) (PRD R11).
+      a parallel versionless Codex map — suggested defaults `fast -> gpt-5-codex-mini`,
+      `balanced -> gpt-5-codex`, `powerful -> gpt-5` with a matching known-name set
+      (versionless and adjustable, exactly as the Claude names are; the exact
+      strings are not load-bearing since nothing consumes them yet) (PRD R11).
 - [ ] `resolveDispatchModel` takes the selected agent and resolves against that
-      agent's sets; the existing call site resolves under `claude` and produces
-      byte-identical output to today (PRD R11, R13).
+      agent's sets; the existing call site (`dispatch.go`) resolves under `claude`
+      and produces byte-identical output to today, including the `--help` model-hint
+      text; the existing `dispatch_model_test.go` cases pass unmodified (PRD R11,
+      R13).
 - [ ] An unrecognized model value is still forwarded unchanged with a warning
       under either agent (PRD R12).
 - [ ] The resolver is verified at the unit level (codex resolution yields Codex

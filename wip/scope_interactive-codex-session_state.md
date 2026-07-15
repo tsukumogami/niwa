@@ -1,12 +1,14 @@
 ---
 topic: interactive-codex-session
-last_updated: 2026-07-15T05:40:54Z
-phase_pointer: phase-3-exit-finalization
+last_updated: 2026-07-15T06:28:18Z
+phase_pointer: complete
 chain_started: 2026-07-15T05:40:54Z
 repo_visibility: Public
 execution_mode: auto
-exit:
-exit_artifacts: []
+exit: full-run
+exit_artifacts:
+  - docs/plans/PLAN-interactive-codex-session.md
+chain_completed: 2026-07-15T06:28:18Z
 planned_chain:
   - brief
   - prd
@@ -29,7 +31,7 @@ child_snapshots:
     status: Planned
     path: docs/designs/current/DESIGN-interactive-codex-session.md
   plan:
-    status: Active
+    status: Active  # terminal artifact
     path: docs/plans/PLAN-interactive-codex-session.md
 r6_predicates:
   P1: fires (selector modeling — session-global knob vs config-cascade field — is an architectural alternative left for DESIGN)
