@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/tsukumogami/niwa/internal/agent"
 	"github.com/tsukumogami/niwa/internal/config"
 	"github.com/tsukumogami/niwa/internal/workspace"
 )
@@ -19,7 +20,7 @@ import (
 func init() {
 	dispatchCmd.Flags().StringVar(&dispatchLabel, "label", "", "optional human-friendly alias recorded on the session mapping")
 	dispatchCmd.Flags().StringVarP(&dispatchName, "name", "n", "", "optional display name for the session (sanitized into a slug; also names the niwa instance: <config>+-<id> with no name, <config>+<slug>-<id> with one -- '+' always marks the end of the config name)")
-	dispatchCmd.Flags().StringVar(&dispatchModel, "model", "", "model for the worker's main chat loop: a capability category or a versionless vendor name ("+knownModelHint()+"); overrides the [global] dispatch_model default")
+	dispatchCmd.Flags().StringVar(&dispatchModel, "model", "", "model for the worker's main chat loop: a capability category or a versionless vendor name ("+knownModelHint(agent.AgentClaude)+"); overrides the [global] dispatch_model default")
 	dispatchCmd.Flags().StringVar(&dispatchPermissionMode, "permission-mode", "", "permission mode to forward to the background worker (--permission-mode)")
 	dispatchCmd.Flags().StringVar(&dispatchAgent, "agent", "", "agent to forward to the background worker (--agent)")
 	dispatchCmd.Flags().BoolVarP(&dispatchDetach, "detach", "d", false, "do not attach the terminal to the new session; print hints and return")
@@ -223,7 +224,9 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	if effectiveModel == "" && gcErr == nil && gc != nil {
 		effectiveModel = strings.TrimSpace(gc.Global.DispatchModel)
 	}
-	resolvedModel, modelWarning := resolveDispatchModel(effectiveModel)
+	// F2 lands the resolver as agent-aware groundwork; the dispatch launcher
+	// stays Claude, so resolving under Claude preserves today's behavior exactly.
+	resolvedModel, modelWarning := resolveDispatchModel(agent.AgentClaude, effectiveModel)
 	if modelWarning != "" {
 		fmt.Fprintf(cmd.ErrOrStderr(), "niwa dispatch: %s\n", modelWarning)
 	}
