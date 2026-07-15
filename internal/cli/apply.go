@@ -32,6 +32,8 @@ func init() {
 		"skip auto-installing the embedded niwa Claude Code plugin (otherwise installed once when a rank-2 source is detected).")
 	applyCmd.Flags().BoolVar(&applyNoCascade, "no-cascade", false,
 		"at the workspace root, refresh the root-managed config only and do not re-converge the instances beneath it. Has no effect at an instance (its worktrees refresh with it under the inherit model) or at a worktree (leaf scope).")
+	applyCmd.Flags().StringVar(&applyAgent, "agent", "",
+		"select the coding agent to prepare the workspace for (claude or codex) for this session, overriding the workspace default_agent; NIWA_AGENT sets it per shell.")
 	applyCmd.ValidArgsFunction = completeWorkspaceNames
 	_ = applyCmd.RegisterFlagCompletionFunc("instance", completeInstanceNames)
 }
@@ -45,6 +47,7 @@ var (
 	applyForce                 bool
 	applyNoInstallPlugins      bool
 	applyNoCascade             bool
+	applyAgent                 string
 )
 
 var applyCmd = &cobra.Command{
@@ -159,6 +162,16 @@ func runApply(cmd *cobra.Command, args []string) error {
 	applier.AllowMissingSecrets = applyAllowMissingSecrets
 	applier.AllowPlaintextSecrets = applyAllowPlaintextSecrets
 
+	// Resolve the session-global agent once (flag > NIWA_AGENT > workspace
+	// default_agent > claude) and thread it into materialization. An unknown
+	// value fails here with a clear error rather than materializing an unusable
+	// workspace.
+	resolvedAgent, agErr := resolveSessionAgent(applyAgent, cfg)
+	if agErr != nil {
+		return agErr
+	}
+	applier.Agent = resolvedAgent
+
 	// Resolve the effective workspace name for registry operations.
 	// configDir is `<workspaceRoot>/.niwa`, so its parent is where
 	// `niwa init <name>` persisted any ConfigNameOverride.
@@ -196,6 +209,7 @@ func runApply(cmd *cobra.Command, args []string) error {
 		if _, mErr := workspace.MaterializeWorkspaceRoot(cfg, scope.WorkspaceRoot, workspace.RootMaterializeOptions{
 			EphemeralSessionMode: workspace.EphemeralSessionMode(scope.WorkspaceRoot),
 			ConfigDir:            configDir,
+			Agent:                resolvedAgent,
 		}); mErr != nil {
 			return fmt.Errorf("materializing workspace-root config: %w", mErr)
 		}

@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/tsukumogami/niwa/internal/agent"
 	"github.com/tsukumogami/niwa/internal/config"
 )
 
@@ -84,6 +85,13 @@ type RootMaterializeOptions struct {
 	// the hooks that act on it.
 	EphemeralSessionMode bool
 
+	// Agent is the resolved session-global coding agent this materialize
+	// prepares the workspace root for. The zero value behaves as Claude
+	// (agent.AgentClaude), so a caller that does not set it writes the
+	// workspace-root context file exactly as before (CLAUDE.md). Under Codex it
+	// selects AGENTS.md.
+	Agent agent.Agent
+
 	// ConfigDir is the workspace config source directory (typically
 	// <workspaceRoot>/.niwa). It is the source root for [root.files] verbatim
 	// file distribution; required only when [root.files] is non-empty.
@@ -125,7 +133,7 @@ func MaterializeWorkspaceRoot(cfg *config.WorkspaceConfig, workspaceRoot string,
 	}
 	written = append(written, settingsPath)
 
-	claudePath, err := writeRootClaudeMD(cfg, workspaceRoot)
+	claudePath, err := writeRootClaudeMD(cfg, workspaceRoot, opts.Agent)
 	if err != nil {
 		return nil, err
 	}
@@ -357,11 +365,11 @@ func pluginMarketplace(plugin string) string {
 // reuse generateWorkspaceContext (which classifies discovered repos). It writes
 // a minimal workspace-root CLAUDE.md describing the workspace and the
 // ephemeral-session model instead.
-func writeRootClaudeMD(cfg *config.WorkspaceConfig, workspaceRoot string) (string, error) {
+func writeRootClaudeMD(cfg *config.WorkspaceConfig, workspaceRoot string, ag agent.Agent) (string, error) {
 	content := generateRootClaudeContent(cfg)
-	claudePath := filepath.Join(workspaceRoot, rootClaudeFile)
+	claudePath := filepath.Join(workspaceRoot, ag.RootContextFileName())
 	if err := os.WriteFile(claudePath, []byte(content), 0o644); err != nil {
-		return "", fmt.Errorf("writing workspace-root CLAUDE.md: %w", err)
+		return "", fmt.Errorf("writing workspace-root context file: %w", err)
 	}
 	return claudePath, nil
 }

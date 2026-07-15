@@ -306,6 +306,16 @@ func applyContentToWorktree(instanceRoot, worktreePath, repo, purpose, branch st
 
 	opts := workspace.WorktreeApplyOptions{Stderr: os.Stderr}
 
+	// Resolve the session-global agent from the workspace default (and the
+	// NIWA_AGENT env override) so a worktree is prepared for the same agent the
+	// instance is. DefaultAgent is a workspace-level field unaffected by the
+	// overlay merge below.
+	resolvedAgent, agErr := resolveSessionAgent("", cfg)
+	if agErr != nil {
+		return nil, agErr
+	}
+	opts.Agent = resolvedAgent
+
 	// Resolve and merge the workspace overlay the same way `niwa apply` does, so
 	// a worktree of an overlay-augmented repo gets the overlay-merged CLAUDE
 	// content a repo checkout would. config.Load does NOT run the overlay merge,

@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/tsukumogami/niwa/internal/agent"
 	"github.com/tsukumogami/niwa/internal/config"
 )
 
@@ -20,9 +21,11 @@ func (w ContentWarning) String() string {
 }
 
 // InstallWorkspaceContent reads the workspace content source file, expands
-// template variables, and writes it to {instanceRoot}/CLAUDE.md.
+// template variables, and writes it to {instanceRoot}/{agent context file}.
+// The output filename is chosen by the selected agent (CLAUDE.md for Claude,
+// AGENTS.md for Codex); the content source is unchanged by agent.
 // Returns the list of files written.
-func InstallWorkspaceContent(cfg *config.WorkspaceConfig, configDir, instanceRoot string) ([]string, error) {
+func InstallWorkspaceContent(cfg *config.WorkspaceConfig, configDir, instanceRoot string, ag agent.Agent) ([]string, error) {
 	if cfg.Claude.Content.Workspace.Source == "" {
 		return nil, nil
 	}
@@ -38,7 +41,7 @@ func InstallWorkspaceContent(cfg *config.WorkspaceConfig, configDir, instanceRoo
 	}
 
 	source := cfg.Claude.Content.Workspace.Source
-	target := filepath.Join(instanceRoot, "CLAUDE.md")
+	target := filepath.Join(instanceRoot, ag.RootContextFileName())
 
 	if err := installContentFile(contentDirRoot(cfg, configDir), source, target, vars); err != nil {
 		return nil, err
@@ -50,7 +53,7 @@ func InstallWorkspaceContent(cfg *config.WorkspaceConfig, configDir, instanceRoo
 // variables, and writes it to {instanceRoot}/{groupName}/CLAUDE.md.
 // Group directories are non-git directories, so they get CLAUDE.md (not .local).
 // Returns the list of files written.
-func InstallGroupContent(cfg *config.WorkspaceConfig, configDir, instanceRoot, groupName string) ([]string, error) {
+func InstallGroupContent(cfg *config.WorkspaceConfig, configDir, instanceRoot, groupName string, ag agent.Agent) ([]string, error) {
 	entry, ok := cfg.Claude.Content.Groups[groupName]
 	if !ok || entry.Source == "" {
 		return nil, nil
@@ -67,7 +70,7 @@ func InstallGroupContent(cfg *config.WorkspaceConfig, configDir, instanceRoot, g
 		"{group_name}":     groupName,
 	}
 
-	target := filepath.Join(instanceRoot, groupName, "CLAUDE.md")
+	target := filepath.Join(instanceRoot, groupName, ag.RootContextFileName())
 
 	// Overlay-added groups have OverlayDir set; source is resolved directly from
 	// that directory (not from configDir/contentDir) because the overlay has its
@@ -102,9 +105,9 @@ type RepoContentResult struct {
 // is set, an error is returned.
 //
 // Returns a result with content warnings and files written.
-func InstallRepoContent(cfg *config.WorkspaceConfig, configDir, overlayDir, instanceRoot, groupName, repoName string) (*RepoContentResult, error) {
+func InstallRepoContent(cfg *config.WorkspaceConfig, configDir, overlayDir, instanceRoot, groupName, repoName string, ag agent.Agent) (*RepoContentResult, error) {
 	repoDir := filepath.Join(instanceRoot, groupName, repoName)
-	return InstallRepoContentTo(cfg, configDir, overlayDir, instanceRoot, repoDir, groupName, repoName)
+	return InstallRepoContentTo(cfg, configDir, overlayDir, instanceRoot, repoDir, groupName, repoName, ag)
 }
 
 // InstallRepoContentTo is the target-directory-parameterized form of
@@ -114,8 +117,19 @@ func InstallRepoContent(cfg *config.WorkspaceConfig, configDir, overlayDir, inst
 // repoDir = {instanceRoot}/{group}/{repo}; ApplyToWorktree calls it with the
 // worktree path so a worktree gets the same content a repo checkout does. Both
 // callers share this single function (no forked installer).
-func InstallRepoContentTo(cfg *config.WorkspaceConfig, configDir, overlayDir, instanceRoot, repoDir, groupName, repoName string) (*RepoContentResult, error) {
+//
+// When the selected agent does not write repository/worktree-level context
+// (WritesRepoLevelContext reports false, as it does for Codex), this is a no-op:
+// niwa writes no CLAUDE.local.md and no in-repo AGENTS.md, so it neither
+// clobbers a repository's own committed AGENTS.md nor dirties the git working
+// tree. Repository-level Codex context is deferred (see
+// DESIGN-interactive-codex-session).
+func InstallRepoContentTo(cfg *config.WorkspaceConfig, configDir, overlayDir, instanceRoot, repoDir, groupName, repoName string, ag agent.Agent) (*RepoContentResult, error) {
 	result := &RepoContentResult{}
+
+	if !ag.WritesRepoLevelContext() {
+		return result, nil
+	}
 
 	absInstance, err := filepath.Abs(instanceRoot)
 	if err != nil {

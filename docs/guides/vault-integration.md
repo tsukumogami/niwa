@@ -211,6 +211,36 @@ A personal overlay that tries to shadow a `team_only` key fails
 with a distinct error. Personal-wins (see below) does not apply
 to the allow-list.
 
+## Binding multiple agents' keys (OpenAI Codex)
+
+The secret table is agent-neutral: it is keyed by environment-variable
+name, so binding a second agent's credential is just another row. A
+workspace prepared for OpenAI Codex (`[workspace].default_agent =
+"codex"`) binds `OPENAI_API_KEY` exactly the way a Claude workspace
+binds `ANTHROPIC_API_KEY`, and the two coexist:
+
+```toml
+[claude.env.secrets]
+ANTHROPIC_API_KEY = "vault://team/ANTHROPIC_API_KEY"
+OPENAI_API_KEY    = "vault://team/OPENAI_API_KEY"
+```
+
+Binding one key does not disturb the other, and Codex and Claude keep
+separate homes on the host (`~/.codex` and `~/.claude`) with separate
+credentials, so both agents can run on the same machine without
+collision. No mechanism change is needed to bind a Codex key — the
+existing vault resolution handles any env-var-named secret.
+
+**Launch-slice boundary.** When `default_agent = "codex"`, niwa
+materializes its context as `AGENTS.md` at the workspace-owned levels
+(the workspace root and each group directory). Repository- and
+worktree-level Codex context, and inlining the `@import`-composed
+companion layers (overlay/global content) into `AGENTS.md`, are not
+delivered in this slice — a Codex session launched at the instance root
+reads the root `AGENTS.md` directly. See
+[DESIGN-interactive-codex-session](../designs/current/DESIGN-interactive-codex-session.md)
+for the scope rationale.
+
 ## Personal overlay flow
 
 The personal overlay is a separate config repo (named via

@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/tsukumogami/niwa/internal/agent"
 	"github.com/tsukumogami/niwa/internal/config"
 	"github.com/tsukumogami/niwa/internal/gitexclude"
 )
@@ -396,6 +397,12 @@ func FindRepoGroup(instanceRoot, repoName string) (string, error) {
 // WorktreeApplyOptions carries the inputs ApplyToWorktree needs that are not
 // derivable from the worktree path alone.
 type WorktreeApplyOptions struct {
+	// Agent is the resolved session-global coding agent this worktree apply
+	// prepares for. The zero value behaves as Claude (agent.AgentClaude), so a
+	// caller that does not set it gets today's behavior. Under an agent that
+	// does not write repository/worktree-level context (Codex), the repo-content
+	// and worktree-context-layer writes are skipped.
+	Agent agent.Agent
 	// OverlayDir is the local clone path of the overlay repo when one is
 	// active, used to append overlay content / resolve overlay-sourced repo
 	// content. Empty when no overlay is active.
@@ -447,14 +454,15 @@ func ApplyToWorktree(cfg *config.WorkspaceConfig, configDir, instanceRoot, workt
 	if !ClaudeEnabled(cfg, repo) {
 		// Claude content is disabled for this repo; install only the
 		// worktree-context layer so the worktree still records its purpose.
-		return installWorktreeContextLayer(cfg, configDir, instanceRoot, worktreePath, repo, purpose, branch)
+		return installWorktreeContextLayer(cfg, configDir, instanceRoot, worktreePath, repo, purpose, branch, opts.Agent)
 	}
 
 	var written []string
 
 	// 1. Owning repo's content (CLAUDE.local.md + subdir content), targeted at
-	//    the worktree root. Same function the instance apply path calls.
-	result, err := InstallRepoContentTo(cfg, configDir, opts.OverlayDir, instanceRoot, worktreePath, group, repo)
+	//    the worktree root. Same function the instance apply path calls. A no-op
+	//    under an agent that does not write repository-level context (Codex).
+	result, err := InstallRepoContentTo(cfg, configDir, opts.OverlayDir, instanceRoot, worktreePath, group, repo, opts.Agent)
 	if err != nil {
 		return nil, fmt.Errorf("installing repo content into worktree: %w", err)
 	}
@@ -581,7 +589,7 @@ func ApplyToWorktree(cfg *config.WorkspaceConfig, configDir, instanceRoot, workt
 
 	// 4. Worktree-specific layer naming the purpose and branch (or the
 	//    configured [claude.content.worktree] template, when set).
-	layerFiles, err := installWorktreeContextLayer(cfg, configDir, instanceRoot, worktreePath, repo, purpose, branch)
+	layerFiles, err := installWorktreeContextLayer(cfg, configDir, instanceRoot, worktreePath, repo, purpose, branch, opts.Agent)
 	if err != nil {
 		return nil, err
 	}
@@ -676,7 +684,13 @@ func installWorktreeRulesImport(instanceRoot, worktreePath string) ([]string, er
 // The CLAUDE.local.md target is computed from worktreePath alone (at the
 // worktree root) and verified to stay within the worktree via checkContainment,
 // matching the containment discipline of the other content installers.
-func installWorktreeContextLayer(cfg *config.WorkspaceConfig, configDir, instanceRoot, worktreePath, repo, purpose, branch string) ([]string, error) {
+func installWorktreeContextLayer(cfg *config.WorkspaceConfig, configDir, instanceRoot, worktreePath, repo, purpose, branch string, ag agent.Agent) ([]string, error) {
+	// Under an agent that does not write repository/worktree-level context
+	// (Codex), the worktree-context layer is skipped: niwa writes no
+	// CLAUDE.local.md into the worktree, keeping the git working tree clean.
+	if !ag.WritesRepoLevelContext() {
+		return nil, nil
+	}
 	target := filepath.Join(worktreePath, "CLAUDE.local.md")
 	if err := checkContainment(target, worktreePath); err != nil {
 		return nil, fmt.Errorf("worktree context layer: %w", err)

@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/tsukumogami/niwa/internal/agent"
 	"github.com/tsukumogami/niwa/internal/config"
 	"github.com/tsukumogami/niwa/internal/gitexclude"
 	"github.com/tsukumogami/niwa/internal/github"
@@ -31,6 +32,13 @@ type Applier struct {
 	NoPull          bool
 	AllowDirty      bool
 	GlobalConfigDir string // empty string means global config not registered
+
+	// Agent is the resolved session-global coding agent this apply prepares
+	// the workspace for. The zero value (agent.Agent("")) behaves as Claude
+	// (agent.AgentClaude), so an Applier constructed without setting this field
+	// materializes exactly as it did before agent selection existed. The CLI
+	// entry points set it from agent.ResolveAgent before calling Apply/Create.
+	Agent agent.Agent
 
 	// Reporter receives all progress and diagnostic output for this applier.
 	// NewApplier initializes it with NewReporter(os.Stderr). Callers may
@@ -1263,7 +1271,7 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 	}
 
 	// Step 4: Install workspace-level CLAUDE.md.
-	wsFiles, err := InstallWorkspaceContent(effectiveCfg, configDir, instanceRoot)
+	wsFiles, err := InstallWorkspaceContent(effectiveCfg, configDir, instanceRoot, a.Agent)
 	if err != nil {
 		return nil, fmt.Errorf("installing workspace content: %w", err)
 	}
@@ -1317,7 +1325,7 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		}
 		installedGroups[cr.Group] = true
 
-		groupFiles, err := InstallGroupContent(effectiveCfg, configDir, instanceRoot, cr.Group)
+		groupFiles, err := InstallGroupContent(effectiveCfg, configDir, instanceRoot, cr.Group, a.Agent)
 		if err != nil {
 			return nil, fmt.Errorf("installing group content for %q: %w", cr.Group, err)
 		}
@@ -1340,7 +1348,7 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 			continue
 		}
 
-		result, err := InstallRepoContent(effectiveCfg, configDir, overlayDir, instanceRoot, cr.Group, cr.Repo.Name)
+		result, err := InstallRepoContent(effectiveCfg, configDir, overlayDir, instanceRoot, cr.Group, cr.Repo.Name, a.Agent)
 		if err != nil {
 			return nil, fmt.Errorf("installing repo content for %q: %w", cr.Repo.Name, err)
 		}
@@ -1775,6 +1783,7 @@ func (a *Applier) refreshWorktreeEnvs(in worktreeRefreshInputs) ([]ManagedFile, 
 			in.cfg, in.configDir, in.instanceRoot, wtPath, group, s.Repo,
 			s.Purpose, s.EffectiveBranchName(),
 			WorktreeApplyOptions{
+				Agent:                  a.Agent,
 				OverlayDir:             in.overlayDir,
 				AllowPlaintextSecrets:  in.allowPlaintextSecrets,
 				Stderr:                 a.Reporter.Writer(),

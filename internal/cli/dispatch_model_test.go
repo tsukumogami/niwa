@@ -2,12 +2,15 @@ package cli
 
 import (
 	"testing"
+
+	"github.com/tsukumogami/niwa/internal/agent"
 )
 
-// TestResolveDispatchModel pins the resolution contract: categories map to a
-// concrete versionless name, known vendor names pass through lowercased with no
-// warning, and anything else is forwarded UNCHANGED with a warning (never
-// rejected), so a full model id or a not-yet-known alias still launches.
+// TestResolveDispatchModel pins the resolution contract under Claude (unchanged
+// from before agent-awareness): categories map to a concrete versionless name,
+// known vendor names pass through lowercased with no warning, and anything else
+// is forwarded UNCHANGED with a warning (never rejected), so a full model id or
+// a not-yet-known alias still launches. The zero-value agent resolves as Claude.
 func TestResolveDispatchModel(t *testing.T) {
 	cases := []struct {
 		name      string
@@ -32,14 +35,65 @@ func TestResolveDispatchModel(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			gotModel, gotWarn := resolveDispatchModel(tc.in)
-			if gotModel != tc.wantModel {
-				t.Errorf("resolveDispatchModel(%q) model = %q, want %q", tc.in, gotModel, tc.wantModel)
-			}
-			if (gotWarn != "") != tc.wantWarn {
-				t.Errorf("resolveDispatchModel(%q) warning = %q, want warn=%v", tc.in, gotWarn, tc.wantWarn)
+			// Explicit Claude and the zero-value agent must resolve identically.
+			for _, ag := range []agent.Agent{agent.AgentClaude, agent.Agent("")} {
+				gotModel, gotWarn := resolveDispatchModel(ag, tc.in)
+				if gotModel != tc.wantModel {
+					t.Errorf("resolveDispatchModel(%q, %q) model = %q, want %q", ag, tc.in, gotModel, tc.wantModel)
+				}
+				if (gotWarn != "") != tc.wantWarn {
+					t.Errorf("resolveDispatchModel(%q, %q) warning = %q, want warn=%v", ag, tc.in, gotWarn, tc.wantWarn)
+				}
 			}
 		})
+	}
+}
+
+// TestResolveDispatchModelCodex asserts the resolver is agent-aware: under Codex
+// the categories resolve to Codex model names (distinct from Claude), Codex
+// known names pass through, and an unrecognized value is still forwarded with a
+// warning. F2 lands this as groundwork; no session is launched.
+func TestResolveDispatchModelCodex(t *testing.T) {
+	cases := []struct {
+		name      string
+		in        string
+		wantModel string
+		wantWarn  bool
+	}{
+		{"category fast", "fast", "gpt-5-codex-mini", false},
+		{"category balanced", "balanced", "gpt-5-codex", false},
+		{"category powerful", "powerful", "gpt-5", false},
+		{"category case-insensitive", "Fast", "gpt-5-codex-mini", false},
+		{"codex vendor name passthrough", "gpt-5-codex", "gpt-5-codex", false},
+		{"claude name is unknown under codex", "haiku", "haiku", true},
+		{"unknown alias forwarded with warning", "o4-mini", "o4-mini", true},
+		{"empty forwards nothing", "", "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			gotModel, gotWarn := resolveDispatchModel(agent.AgentCodex, tc.in)
+			if gotModel != tc.wantModel {
+				t.Errorf("resolveDispatchModel(codex, %q) model = %q, want %q", tc.in, gotModel, tc.wantModel)
+			}
+			if (gotWarn != "") != tc.wantWarn {
+				t.Errorf("resolveDispatchModel(codex, %q) warning = %q, want warn=%v", tc.in, gotWarn, tc.wantWarn)
+			}
+		})
+	}
+}
+
+// TestDispatchModelCategoriesDifferByAgent asserts each category resolves to a
+// distinct model per agent (the whole point of the per-agent map).
+func TestDispatchModelCategoriesDifferByAgent(t *testing.T) {
+	for _, cat := range []string{"fast", "balanced", "powerful"} {
+		claudeModel, _ := resolveDispatchModel(agent.AgentClaude, cat)
+		codexModel, _ := resolveDispatchModel(agent.AgentCodex, cat)
+		if claudeModel == "" || codexModel == "" {
+			t.Fatalf("category %q resolved empty (claude=%q codex=%q)", cat, claudeModel, codexModel)
+		}
+		if claudeModel == codexModel {
+			t.Errorf("category %q resolves to the same model for both agents: %q", cat, claudeModel)
+		}
 	}
 }
 
