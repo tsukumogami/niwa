@@ -107,14 +107,20 @@ reliable local signal to trigger on. This is why the PRD requires prevention (R5
 
 ### Decision B — how the self-wake is armed at launch
 
-There is **no deterministic launch-time seam** to arm a recurring self-wake. The panel's
-platform librarian confirmed from the Claude Code docs: no CLI flag or settings key schedules
-a cron at startup, and hooks explicitly "can't trigger `/` commands or tool calls" — a
-`SessionStart` hook can only inject *text* the model reads. So every available path is a
-**nudge**: niwa injects an instruction and relies on the agent itself calling
-`/loop` / `CronCreate` in its first turn. This reframes B1/B2 as two *channels* for the same
-nudge, not a deterministic-vs-fallback pair — and makes "can a recurring wake be armed at
-launch at all?" a Phase 0 *output*, not an assumption.
+There is **no programmatic seam** to arm a recurring self-wake — confirmed from docs *and* by
+inspecting the host. No CLI flag or settings key schedules a cron at startup; Claude Code hooks
+"can't trigger `/` commands or tool calls" (a `SessionStart` hook can only inject *text*); and
+there is **no writable cron/schedule file** niwa could seed — the schedule lives in the running
+process (replayed from the transcript), created only by the in-session scheduler tool. So the
+scheduler call is **necessarily agent-mediated**: niwa injects an instruction and the agent
+itself calls `/loop` / `CronCreate` in its first turn. niwa's deterministic contribution is the
+instruction (which it fully controls); the scheduler call is the agent's.
+
+This is far less fragile than it sounds, and is **demonstrated**: the very session that
+produced this design was `niwa dispatch`-launched, RC-enabled, and stayed alive and reachable
+for ~1.5 days by exactly this agent-armed self-wake, arming and re-arming it dozens of times
+without failure (see the spike's Existence Proof). B1/B2 are therefore two *channels* for the
+same proven nudge — not a risky unknown.
 
 **B1. SessionStart `additionalContext` nudge (preferred channel).** niwa already materializes
 a workspace-root `SessionStart` hook (`niwa instance from-hook`) that injects
@@ -186,22 +192,23 @@ the session's conversation or eat its context, with the opt-in plumbed by **foll
 `remote_control_on_dispatch` plus a new flag layer** (C1). niwa adds no runtime component and
 no reaper coupling; the wake stops automatically when the session's job entry is gone.
 
-This outcome is **gated on Phase 0 validation** of *two* load-bearing unknowns, either of
-which can kill the feature:
+**The core mechanism is demonstrated, not hypothetical.** The session that produced this
+design was `niwa dispatch`-launched with RC and stayed reachable for ~1.5 days on exactly this
+agent-armed self-wake (spike Existence Proof). That live run demonstrates the two behaviors
+that were the feature's biggest unknowns:
 
-1. **Efficacy** — it is unproven that a local self-wake resets the server-side idle behind
-   the 6–12h drop (the docs don't even describe an activity-based bridge idle timer).
-2. **Process survival** — the Claude Code supervisor **stops a session's process ~1 hour
-   after it goes idle/unattached**, and a cron only fires while the process runs. So the wake
-   must fire *inside* that ~1h window (hence sub-hourly), and it must be shown that a cron
-   fire actually keeps the process alive past the stop. If the process stops regardless, the
-   wake dies before it can help.
+1. **Efficacy** — a self-wake kept the session reachable across idle (demonstrated ~1.5 days).
+2. **Process survival** — the sub-/~hourly wakes kept the process from the ~1h supervisor
+   stop (demonstrated). The interval must stay under ~1h; that constraint is real but met.
 
-If Phase 0 shows no wake shape keeps the bridge reachable, or that a launch-nudge cannot arm
-a surviving recurring wake at all, the feature is not buildable with current primitives and
-the honest outcome is to stop and report that. Every other part of the design (plumbing,
-stop-on-gone, observability) is low-risk and well-precedented; these two unknowns are the
-whole risk, so the design front-loads proving them.
+What Phase 0 still has to confirm is narrower: the wakes in the existence proof were **real,
+visible working turns**, whereas the design's wake is a **non-visible / no-op** turn (D2). So
+Phase 0 must show that a *minimal, context-isolated* wake — still a real API round-trip, just
+hidden from the chat — keeps the bridge warm the same way, plus one clean multi-hour
+single-gap survival, plus the stop-signal / archive checks. If a non-visible wake turns out
+*not* to keep the bridge warm, the fallback is a lightest-visible wake (D2's sub-task
+isolation) — a context cost, not a feasibility failure. The plumbing, stop-on-gone, and
+observability are low-risk and well-precedented.
 
 **Cadence rationale.** Two constraints set the interval. The idle-drop floor is 6–12h, but
 the **~1h supervisor process-stop is the tighter bound**: the wake must fire within that hour
@@ -273,31 +280,29 @@ still see the session as live; Phase 0(c) pins this down. The reaper does **not*
 
 ## Implementation Approach
 
-- **Phase 0 — Feasibility validation (mandatory gate; multi-session, multi-day).** This gate
-  spans several throwaway RC dispatch sessions run across multiple days (each reachability
-  datum needs a ~12h idle window and the shapes must be compared), not a single run. It must
-  answer, in rough dependency order:
-  - **(0) Can a launch nudge arm a *surviving recurring* wake at all?** There is no
-    deterministic seam — confirm the SessionStart `additionalContext` nudge (B1), or the
-    prompt fallback (B2), actually gets the agent to create a cron that keeps firing. If
-    neither reliably arms a surviving wake, STOP.
-  - **(1) Process survival past the ~1h supervisor stop.** Confirm a sub-hourly wake fires
-    *before* the supervisor pauses the idle process, and that the fire keeps the process alive
-    (resets the stop-clock). Fix the exact interval against the measured stop timing. If the
-    process is stopped regardless, the wake dies and the feature STOPs.
-  - **(2) Efficacy.** With the wake surviving, confirm the session stays reachable from
-    claude.ai past the 12h mark where an un-armed control is confirmed unreachable. If not,
-    STOP.
-  - **(3) Lightest wake shape.** Among the shapes that satisfy (1)+(2) — meta no-op, isolated
-    sub-task, or (baseline) main-thread loop — **measure main-context growth per wake** and
-    fix the lightest one as the shipped shape.
-  - **(4) Finished/`done` sessions.** Confirm the mechanism still holds for a session that has
-    gone `done`/idle overnight (the common morning case), given the same ~1h process-stop.
-  - **(5) Stop signals.** Confirm `claude rm` / TUI close removes `state.json` (not just
+- **Phase 0 — Validation (mandatory gate; multi-session, multi-day).** The core mechanism is
+  already demonstrated by the existence-proof session (agent-armed self-wake kept a dispatched
+  RC session alive ~1.5 days, surviving the ~1h supervisor stop). Phase 0 confirms the parts
+  the existence proof did *not* exercise, in rough dependency order:
+  - **(1) Non-visible / no-op wake efficacy — the key residual.** The existence proof used
+    real *visible working* turns. Confirm that a **minimal, context-isolated** wake (D2: a
+    `isMeta`/no-op turn — still a real API round-trip, just hidden from the chat) keeps the
+    bridge warm the same way, and **measure main-context growth per wake** for the candidate
+    shapes; fix the lightest shape that works. If a non-visible wake does not keep the bridge
+    warm, fall back to the lightest *visible* isolated sub-task (a context cost, not a STOP).
+  - **(2) Clean single-gap reachability.** Reconfirm on a fresh throwaway session at the fixed
+    sub-hourly cadence: reachable from claude.ai past the 12h mark where an un-armed control is
+    unreachable. (Corroborates the existence proof under controlled conditions.)
+  - **(3) Finished/`done` sessions.** Confirm the mechanism holds for a session that went
+    `done`/idle overnight (the common morning case), given the ~1h process-stop.
+  - **(4) Stop signals.** Confirm `claude rm` / TUI close removes `state.json` (not just
     de-lists) and tears down the cron; and confirm what a claude.ai **archive** does to the
     local entry (the PRD's open Known Limitation).
-  Any STOP means the feature is infeasible with current primitives — record it and do not ship
-  the plumbing.
+  - **(5) Arming-channel reliability.** Confirm the chosen nudge channel (B1 SessionStart
+    `additionalContext` for a `--bg` worker, else B2 prompt) reliably arms the wake — the
+    existence proof shows agent-arming works; this fixes *which* channel niwa uses.
+  Only (1) could, at worst, force the visible-wake fallback; the rest are confirmations that
+  refine the shipped shape rather than open feasibility questions.
 - **Phase 1 — Opt-in plumbing.** Add the config key, the resolver, and the
   `SessionMapping.KeepAlive` field following the `remote_control_on_dispatch` files/tests, plus
   the net-new `--keep-alive` tri-state flag (no existing pattern to copy — see Solution
@@ -355,18 +360,19 @@ still see the session as live; Phase 0(c) pins this down. The reaper does **not*
   construction, librarian-confirmed).
 
 **Negative / risks.**
-- **Two unproven platform behaviors gate the whole feature** (Phase 0). (1) *Efficacy* — that
-  a local self-wake resets the server-side idle at all (the docs don't even describe an
-  activity-based bridge idle timer). (2) *Process survival* — the supervisor stops an idle
-  session's process ~1h in, and a cron only fires while the process runs; if a sub-hourly fire
-  doesn't keep the process alive, the wake dies before it helps. Either can kill the feature;
-  both are gated first.
-- **No deterministic arming.** There is no launch-time seam to arm a cron; arming is a *nudge*
-  the agent must act on (SessionStart `additionalContext`, or prompt fallback). Reliability of
-  the nudge is itself a Phase 0 output. The B2 fallback mildly pollutes the first turn.
-- **Finished/`done` sessions** — the common morning case is a session that went idle overnight;
-  it is subject to the same ~1h process-stop, so keep-alive is only as good as the
-  process-survival result. Note the "no effect except a keep-alive marker" property (R8/R11)
+- **The core mechanism is demonstrated** (existence-proof session, ~1.5 days). The residual
+  risk is narrow: the demonstration used *visible working* wakes, so it is not yet proven that
+  a **non-visible / no-op** wake (D2) keeps the bridge warm. If it doesn't, the fallback is a
+  lightest *visible* isolated sub-task — a context cost, not a feasibility failure. So the
+  feature is very likely buildable; the open question is *how cheap* the wake can be, not
+  *whether* it works.
+- **Arming is agent-mediated (no programmatic seam).** There is no cron-arming flag/hook and no
+  writable schedule file (investigated); the agent must self-arm from an injected instruction.
+  This is proven reliable (the existence-proof session armed/re-armed dozens of times), but it
+  is not a deterministic API call, and the B2 channel mildly pollutes the first turn.
+- **Finished/`done` sessions** — the common morning case is a session that went idle overnight,
+  subject to the ~1h process-stop; the existence proof survived this, but Phase 0(3) reconfirms
+  it for the no-op shape. Note the "no effect except a keep-alive marker" property (R8/R11)
   holds strictly for *non-opted* sessions; an opted-in session's entry-removal timing differs
   from a control by design.
 - **Bounded duration.** Claude Code's cron carries a ~7-day TTL and niwa arms only at launch

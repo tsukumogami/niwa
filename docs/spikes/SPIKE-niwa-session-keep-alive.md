@@ -173,9 +173,36 @@ record with the other platform findings:
 - **The supervisor stops an idle process ~1h in.** Scheduled tasks fire only while the process
   runs, and the supervisor stops a session's process ~1 hour after it goes idle/unattached.
   So a keep-alive wake must fire *within* that hour (sub-hourly) and must itself keep the
-  process alive — a tighter constraint than the 6–12h bridge idle, and a second thing the
-  design's Phase 0 must prove. The session-scoped cron is confirmed in-process (dies with the
-  session; no host-level task), and its TTL is a fixed 7 days from creation (no renewal).
+  process alive. The session-scoped cron is confirmed in-process (dies with the session; no
+  host-level task), and its TTL is a fixed 7 days from creation (no renewal).
+
+### Existence proof — this session (human-observed, 2026-07-15)
+
+The session running this very investigation (`~/.claude/jobs/71e6c42b`, name `niwa_keep_alive`,
+`kind: bg`, RC on — `bridgeSessionId` present) **was launched by `niwa dispatch` and stayed
+alive and reachable for ~1.5 days across many idle gaps, kept alive by its own periodic
+self-wakes** (the `session_cron` created by the agent's scheduled-wakeup calls). This is a
+live demonstration that the core mechanism works end to end on a real dispatched RC session:
+
+- **Efficacy** (a self-wake keeps the session reachable across idle) — demonstrated.
+- **Process survival past the ~1h supervisor stop** — demonstrated (the sub-/~hourly wakes
+  kept the process from being paused/reaped for ~1.5 days).
+- **Agent-mediated arming is reliable** — the agent armed and re-armed the wake dozens of
+  times without failure. The instruction ("schedule a wake every N minutes") is trivial and
+  unambiguous.
+
+Two honest caveats: (1) the wakes here were **real, visible working turns**, not the designed
+**non-visible / no-op** wake — so what remains to confirm is that a minimal, context-isolated
+wake (still a real API round-trip, just hidden from the chat) keeps the bridge warm the same
+way; and (2) no single idle gap here exceeded the ~1h wake interval, so a true multi-hour
+single-gap survival is still worth one clean measurement. Both are narrower than the original
+"is this feasible at all" question — which this session answers yes.
+
+**Programmatic arming is not available on this platform.** Investigation of this host found no
+writable cron/schedule file niwa could seed (the schedule lives in the running process,
+replayed from the transcript), and Claude Code hooks cannot trigger `/`-commands or tool calls.
+So the cron-creation step is necessarily agent-mediated; niwa's deterministic contribution is
+the (fully niwa-controlled) arming instruction, not the scheduler call itself.
 
 ## Recommendation (feeds the DESIGN)
 
