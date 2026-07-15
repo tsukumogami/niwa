@@ -1,7 +1,7 @@
 ---
 topic: interactive-codex-session
 last_updated: 2026-07-15T05:40:54Z
-phase_pointer: phase-2-chain-orchestration (plan)
+phase_pointer: phase-3-exit-finalization
 chain_started: 2026-07-15T05:40:54Z
 repo_visibility: Public
 execution_mode: auto
@@ -16,6 +16,7 @@ chain_ran:
   - brief
   - prd
   - design
+  - plan
 chain_skipped: []
 child_snapshots:
   brief:
@@ -25,13 +26,17 @@ child_snapshots:
     status: In Progress
     path: docs/prds/PRD-interactive-codex-session.md
   design:
-    status: Accepted
+    status: Planned
     path: docs/designs/current/DESIGN-interactive-codex-session.md
+  plan:
+    status: Active
+    path: docs/plans/PLAN-interactive-codex-session.md
 r6_predicates:
   P1: fires (selector modeling — session-global knob vs config-cascade field — is an architectural alternative left for DESIGN)
   P2: fires (introduces an agent-abstraction/output-name-by-agent seam not present in the repo today)
   P3: fires (keystone abstraction with multiple contested decision points; Complex)
 chain_proposal: proceed (auto)
+plan_execution_mode: single-pr
 notes: |
   Cold-start. No on-disk artifacts at canonical paths. Visibility=Public (niwa
   CLAUDE.md declares "## Repo Visibility: Public"). All four child gates fire:

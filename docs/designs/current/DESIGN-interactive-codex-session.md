@@ -1,5 +1,5 @@
 ---
-status: Accepted
+status: Planned
 upstream: docs/prds/PRD-interactive-codex-session.md
 problem: |
   niwa prepares a workspace for exactly one agent, Claude Code. The context
@@ -34,7 +34,7 @@ rationale: |
 
 ## Status
 
-Accepted
+Planned
 
 Upstream PRD: docs/prds/PRD-interactive-codex-session.md (In Progress). The
 downstream PLAN decomposes this into implementation issues.
