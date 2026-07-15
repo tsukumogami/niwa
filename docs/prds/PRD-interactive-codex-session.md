@@ -1,5 +1,5 @@
 ---
-status: Draft
+status: Accepted
 problem: |
   niwa prepares a workspace for a single agent, Claude Code: it writes the
   context tree as CLAUDE.md files, binds ANTHROPIC_API_KEY, and resolves model
@@ -28,7 +28,7 @@ motivating_context: |
 
 ## Status
 
-Draft
+Accepted
 
 The downstream DESIGN owns the architecture: how the agent selector is modeled,
 how the output-filename-by-agent seam is introduced, and how per-agent model
@@ -72,12 +72,14 @@ no way to ask for another.
 - Claude remains the default; a workspace that does not select an agent behaves
   exactly as it does today.
 
-This feature is deliberately the smallest usable slice. Its architectural shape
--- a session-global agent discriminator plus an output-filename-by-agent seam --
-warrants a DESIGN doc before implementation, and several implementation choices
-are left open for that DESIGN to settle (see Decisions and Trade-offs and Open
-Questions). The forthcoming DESIGN-interactive-codex-session document owns those
-choices.
+This feature is deliberately the smallest usable slice. In particular, under
+Codex the `AGENTS.md` tree is materialized only at the niwa-owned non-repository
+levels (workspace-root and group); repository- and worktree-level Codex context is
+deferred (see Out of Scope). Its architectural shape -- a session-global agent
+discriminator plus an output-filename-by-agent seam -- warrants a DESIGN doc
+before implementation, and several implementation choices are left open for that
+DESIGN to settle (see Decisions and Trade-offs and Open Questions). The
+forthcoming DESIGN-interactive-codex-session document owns those choices.
 
 ## User Stories
 
@@ -111,7 +113,13 @@ choices.
 
 - **R3.** niwa SHALL let a single session override the workspace default agent,
   affecting only that session and leaving the persisted workspace default
-  unchanged.
+  unchanged. The override SHALL be surfaced through **both** a command-line flag
+  (e.g. `--agent <name>`) and an environment variable (e.g. `NIWA_AGENT`), so a
+  developer can switch per-invocation or per-shell. When both are supplied, the
+  flag wins; when neither is supplied, the workspace default applies; when there
+  is no workspace default, the agent is `claude`. (The exact flag/env spelling and
+  the resolution wiring are a DESIGN detail; this requirement fixes that both
+  surfaces exist and their precedence order.)
 
 - **R4.** The selected agent SHALL be resolved once per session as a
   session-global value -- a single discriminator for the whole workspace
@@ -128,11 +136,24 @@ choices.
   content source (the directory and source files niwa reads context from), which
   SHALL NOT change based on the selected agent.
 
-- **R6.** When the selected agent is `codex`, niwa SHALL materialize the same
-  layered context tree it writes today -- at the workspace root, group, repo, and
-  worktree levels -- under the filename `AGENTS.md`, and the repo/worktree-level
-  local variant under the corresponding Codex-appropriate local filename, in the
-  same locations it writes the Claude filenames today.
+- **R6.** When the selected agent is `codex`, niwa SHALL materialize its context
+  content under the filename `AGENTS.md` at the niwa-owned, non-repository levels
+  of the tree -- the workspace-root and group levels, the same directories where
+  it writes `CLAUDE.md` today. These directories are niwa-owned and are not git
+  repositories, so an `AGENTS.md` written there cannot collide with a repository's
+  own committed `AGENTS.md` nor dirty any git working tree. A `codex` session
+  launched at the workspace/instance root reads this `AGENTS.md` at its working
+  directory directly (the verified Codex ingestion behavior). Repository- and
+  worktree-level Codex context is deliberately deferred (see Out of Scope and the
+  Decisions and Trade-offs rationale).
+
+- **R6a.** When the selected agent is `codex`, niwa SHALL NOT write the
+  repository- and worktree-level context files (the `CLAUDE.local.md` files it
+  writes for Claude): writing a Claude-named local file under Codex would be inert
+  (Codex does not read it), and writing an `AGENTS.md` inside a cloned repository
+  is deferred because it requires collision handling with a repository's own
+  committed `AGENTS.md` and git-clean coverage (see Out of Scope). Under Codex the
+  repository/worktree levels are simply left unwritten in this slice.
 
 - **R7.** When the selected agent is `claude` (including the default,
   unselected case), niwa SHALL write the context tree exactly as it does today,
@@ -142,6 +163,15 @@ choices.
   be identical regardless of the selected agent; only the output filename differs
   by agent. (Whether the two agents should ever receive materially different
   context bodies is out of scope for this slice; see Out of Scope.)
+
+- **R8a.** Each apply SHALL materialize a complete, fresh context tree for the
+  currently-selected agent, overwriting any prior tree niwa wrote for that same
+  agent, so the active agent never reads a stale niwa-written tree. Context trees
+  for different agents MAY coexist in a workspace (a `CLAUDE.md` tree and an
+  `AGENTS.md` tree side by side is not an error). niwa does NOT remove a
+  previously-selected agent's tree when the agent changes between applies (see
+  Known Limitations); the contract is that a developer applies under the agent
+  they are about to run, so the just-applied tree is always fresh.
 
 ### Functional -- credentials
 
@@ -155,10 +185,15 @@ choices.
 
 ### Functional -- model categories
 
-- **R11.** When the selected agent is `codex`, niwa SHALL resolve the portable
-  model categories (`fast`, `balanced`, `powerful`) to Codex model names, through
-  the existing model-resolution seam. When the selected agent is `claude`,
-  category resolution SHALL be unchanged.
+- **R11.** When the selected agent is `codex`, niwa's model-resolution seam SHALL
+  resolve the portable model categories (`fast`, `balanced`, `powerful`) to Codex
+  model names; when the selected agent is `claude`, category resolution SHALL be
+  unchanged. This requirement wires the resolver to be agent-aware as keystone
+  groundwork -- the seam's only consumer today is the background-dispatch launcher,
+  which is out of scope for this slice (see Out of Scope), so delivery of the
+  resolved Codex model to a running agent is not part of F2. The requirement is
+  satisfied and verified at the resolver level (a unit assertion on the resolution
+  function), not through a launched session.
 
 - **R12.** An unrecognized model value SHALL continue to be forwarded unchanged
   (with a warning), preserving today's behavior of not gatekeeping model names,
@@ -186,31 +221,44 @@ choices.
       worktree context tree as `CLAUDE.md` / `CLAUDE.local.md`, byte-for-byte
       identical to today (R7, R13).
 - [ ] A workspace can declare a default agent of `codex`, and after `niwa apply`
-      the context tree is written as `AGENTS.md` (and the repo/worktree local
-      variant) at the workspace root, each group, each repo, and applied
-      worktrees -- in the same locations the Claude filenames are written today
+      the context content is written as `AGENTS.md` at the workspace-root and group
+      levels -- the same niwa-owned directories where `CLAUDE.md` is written today
       (R1, R2, R6).
-- [ ] A single session can override the agent to `codex` while the persisted
-      workspace default remains `claude`; the override affects only that
-      session's preparation and does not rewrite the workspace default (R3).
+- [ ] Under `codex`, niwa writes no repository- or worktree-level context file:
+      no `CLAUDE.local.md` and no in-repo `AGENTS.md`, so no git working tree is
+      dirtied and no repository's own committed `AGENTS.md` is overwritten (R6a).
+- [ ] A single session can override the agent in either direction -- `codex` over
+      a `claude` default, and `claude` over a `codex` default -- while the
+      persisted workspace default is unchanged; the override affects only that
+      session's preparation (R3).
+- [ ] After switching the selected agent and re-applying, the just-applied agent's
+      context tree is freshly written (not stale), and the two agents' trees are
+      permitted to coexist without error (R8a).
 - [ ] The selected agent is resolved once per session and is not exposed as a
       per-repo field in the `[claude]` override cascade (R4) -- verified by the
-      selector living in a session-global location, not in `ClaudeOverride`.
+      selector living in a session-global location, not as a field of the per-repo
+      `[claude]` override structure.
+- [ ] A per-session override is expressible both as a command-line flag and as an
+      environment variable; when both are set the flag wins, and when neither is
+      set the workspace default (else `claude`) applies (R3).
 - [ ] The materialized context body is identical whether the agent is `claude` or
       `codex`; only the output filename differs (R5, R8).
 - [ ] A prepared workspace can carry both `OPENAI_API_KEY` and `ANTHROPIC_API_KEY`
       bound through the same mechanism, and binding one does not remove or corrupt
       the other (R9, R10).
-- [ ] With agent `codex`, resolving the `fast` / `balanced` / `powerful`
-      categories yields Codex model names; with agent `claude`, category
-      resolution is unchanged (R11).
+- [ ] Calling the model-resolution function with agent `codex` and each category
+      (`fast` / `balanced` / `powerful`) returns a Codex model name distinct from
+      the Claude resolution; calling it with agent `claude` returns exactly today's
+      values -- both verified as unit assertions on the resolver, not through a
+      launched session (R11).
 - [ ] An unrecognized model value is still forwarded unchanged with a warning
       under either agent (R12).
 - [ ] An unknown agent value is rejected with an error that names the accepted
       values (`claude`, `codex`) (R15).
 - [ ] No new code path launches, spawns, or exec's an agent session (R14) --
-      verified by inspection: the feature only affects materialization,
-      selection, secret binding, and model resolution.
+      verified mechanically: the change introduces no new `os/exec` invocation of
+      an agent binary (`claude`, `codex`), only materialization, selection, secret
+      binding, and model resolution.
 - [ ] The existing niwa test suite (`go test ./...` and functional tests) passes
       with the change in place (R13).
 
@@ -232,10 +280,36 @@ choices.
 - **Agent-specific context bodies.** This slice materializes the same content
   body under a different filename. Whether Codex should ever receive different
   context than Claude is deferred to later work.
+- **Repository- and worktree-level Codex context.** Under Codex, this slice writes
+  `AGENTS.md` only at the niwa-owned non-repository levels (workspace-root and
+  group). Writing an `AGENTS.md` inside a cloned repository or worktree needs
+  collision handling against a repository's own committed `AGENTS.md` (the current
+  repo-level write is a blind overwrite) and extension of niwa's git-clean
+  exclusion mechanism (which today covers only `*.local*`-named files, not
+  `AGENTS.md`). Both are deferred to later work; delivering them requires the
+  full agent-neutral config layer's machinery.
 - **Claude behavior changes.** The incumbent path is not refactored beyond the
   seams the new agent needs (the output-filename seam and the per-agent model
   map). Claude remains the default and its materialization, secret binding, and
   model resolution are otherwise untouched.
+- **Delivering the resolved Codex model to a running agent.** The per-agent model
+  resolver is wired as groundwork (R11), but its only consumer is the
+  background-dispatch launcher, which is out of scope. Nothing in this slice hands
+  the resolved model to a live session.
+
+## Known Limitations
+
+- **Switching agents leaves the prior agent's tree in place.** niwa always writes
+  a fresh tree for the agent it is applying under (R8a), but it does not remove a
+  previously-selected agent's materialized tree when the agent changes. A
+  workspace can therefore carry both a `CLAUDE.md` tree and an `AGENTS.md` tree.
+  This is harmless as long as a developer applies under the agent they are about
+  to run (the just-applied tree is fresh); it becomes stale only if a developer
+  runs an agent whose tree was not refreshed by the latest apply. Tracked removal
+  of a superseded agent's tree is deferred to the full agent-neutral config work.
+- **The Codex model resolver has no in-scope consumer.** As noted in Out of Scope,
+  the resolved Codex model is not delivered to a running session in this slice; it
+  is verified at the resolver level only.
 
 ## Decisions and Trade-offs
 
@@ -247,12 +321,36 @@ choices.
   the workspace-root state flag precedent, the global-config-plus-per-invocation-
   flag precedent, or another shape -- is left to the DESIGN.
 
+- **The per-session override is surfaced as both a flag and an environment
+  variable, flag-wins.** The upstream BRIEF deferred the override surface (flag,
+  env var, or both) to this PRD. Decision: support both, because the two serve
+  different ergonomics -- a flag for a single explicit invocation, an environment
+  variable for a shell session that runs the agent repeatedly -- and a
+  flag-over-env precedence keeps an explicit invocation authoritative (R3). The
+  exact spelling and the resolver wiring are left to the DESIGN. The alternative
+  (pick one surface) was rejected as needlessly limiting for a keystone selector
+  other features will build on.
+
 - **Output filename is a function of the selected agent, separate from the content
   source.** Rather than duplicating the content tree or branching materialization
   wholesale, the requirement isolates the single thing that changes -- the output
   filename -- behind an agent-driven seam, keeping the content pipeline shared
   (R5, R8). The trade-off is that agent-specific content bodies are explicitly not
   supported in this slice; that is an accepted limitation for the launch slice.
+
+- **Codex context is materialized only at the niwa-owned non-repository levels for
+  this slice.** The workspace-root and group directories are niwa-owned and are
+  not git repositories, so an `AGENTS.md` there cannot collide with a repository's
+  committed file nor dirty a working tree, and a `codex` session launched at the
+  workspace/instance root reads it directly. Writing `AGENTS.md` inside a cloned
+  repository was considered and deferred (R6a, Out of Scope): niwa's repo-level
+  content write is a blind overwrite that would clobber a repository's own
+  committed `AGENTS.md`, and its git-clean exclusion mechanism covers only
+  `*.local*`-named files, so an in-repo `AGENTS.md` would also dirty the tree.
+  Handling both correctly belongs with the full agent-neutral config work. The
+  chosen slice delivers a working Codex session at the canonical launch point with
+  zero collision risk, and the agent-aware filename seam it introduces extends to
+  the repository levels later without rework.
 
 - **Reuse the existing secret split and model-resolution seam rather than build
   agent-neutral config now.** The secret-binding mechanism and the model-category
@@ -262,13 +360,16 @@ choices.
 
 ## Open Questions
 
-- Which existing session-global precedent the agent selector should mirror, and
-  the exact per-session override surface (a flag, an environment variable, or
-  both), is deferred to the DESIGN. The requirement fixes only that the selector
-  is session-global and not a per-repo cascade field (R4).
+- Which existing session-global precedent the agent selector's persisted default
+  should mirror (the workspace-root state file, a workspace-config field, or the
+  global config), and the concrete storage location, is deferred to the DESIGN.
+  The requirements fix that the selector is session-global and not a per-repo
+  cascade field (R4), and that the per-session override is expressible as both a
+  flag and an environment variable with the flag winning (R3).
 - The concrete Codex model-name values that `fast` / `balanced` / `powerful`
   resolve to, and whether resolution dispatches on the selected agent inside the
   existing seam or through a per-agent map, is deferred to the DESIGN (R11, R12).
-- The exact Codex local-context filename (the `CLAUDE.local.md` analog for repo
-  and worktree levels) is deferred to the DESIGN, which will confirm the filename
-  Codex reads for repo-local context.
+- Repository- and worktree-level Codex context is out of scope for this slice
+  (R6a, Out of Scope), so the repo-local Codex filename question is deferred with
+  it. When that work is picked up, the DESIGN will resolve the in-repo `AGENTS.md`
+  collision-and-git-clean handling described in Out of Scope.
