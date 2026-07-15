@@ -129,6 +129,11 @@ func runReset(cmd *cobra.Command, args []string) error {
 			applier.ConfigSourceURL = entry.SourceURL
 		}
 	}
+	resolvedAgent, agErr := resolveSessionAgent("", cfg)
+	if agErr != nil {
+		return agErr
+	}
+	applier.Agent = resolvedAgent
 	instancePath, err := applier.Create(cmd.Context(), cfg, configDir, workspaceRoot, state.InstanceName)
 	if err != nil {
 		return fmt.Errorf("recreating instance: %w", err)

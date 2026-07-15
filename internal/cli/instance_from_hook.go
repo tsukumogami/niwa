@@ -379,6 +379,11 @@ func realProvisionInstance(ctx context.Context, workspaceRoot, cwd, namePrefix, 
 		}
 	}
 
+	resolvedAgent, agErr := resolveSessionAgent("", cfg)
+	if agErr != nil {
+		return provisionResult{}, agErr
+	}
+	applier.Agent = resolvedAgent
 	instancePath, err := applier.Create(ctx, cfg, configDir, workspaceRoot, instanceName)
 	if err != nil {
 		return provisionResult{}, err

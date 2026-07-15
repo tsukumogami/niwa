@@ -189,6 +189,11 @@ func defaultRunBootstrap(ctx context.Context, cmd *cobra.Command, workspaceRoot,
 		if loadErr != nil {
 			return "", loadErr
 		}
+		resolvedAgent, agErr := resolveSessionAgent("", result.Config)
+		if agErr != nil {
+			return "", agErr
+		}
+		applier.Agent = resolvedAgent
 		return applier.Create(ctx, result.Config, configDir, wsRoot, instName)
 	}
 
@@ -764,9 +769,17 @@ func runInit(cmd *cobra.Command, args []string) error {
 	// the workspace is fully usable without the root config, and `niwa apply`
 	// from the root re-converges it.
 	if !initNoEphemeralSessions && rootConfigInstalls(mode) {
+		// Resolve the workspace default agent (honoring NIWA_AGENT) so the
+		// workspace-root context file is written under the right filename at
+		// init time rather than only self-healing on the first apply.
+		rootAgent, agErr := resolveSessionAgent("", result.Config)
+		if agErr != nil {
+			return agErr
+		}
 		if _, mErr := workspace.MaterializeWorkspaceRoot(result.Config, workspaceRoot, workspace.RootMaterializeOptions{
 			EphemeralSessionMode: true,
 			ConfigDir:            filepath.Join(workspaceRoot, workspace.StateDir),
+			Agent:                rootAgent,
 		}); mErr != nil {
 			fmt.Fprintf(cmd.ErrOrStderr(), "warning: could not install workspace-root session config: %v\n", mErr)
 		}

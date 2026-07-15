@@ -26,6 +26,8 @@ func init() {
 		"bypass the public-repo plaintext-secrets guardrail and downgrade all .env.example failure-policy failures to warnings. Strictly one-shot -- no state persistence.")
 	createCmd.Flags().BoolVar(&createJSON, "json", false,
 		"emit a single JSON object {name, number, path} for the created instance and nothing else on stdout")
+	createCmd.Flags().StringVar(&createAgent, "agent", "",
+		"select the coding agent to prepare the instance for (claude or codex) for this session, overriding the workspace default_agent; NIWA_AGENT sets it per shell.")
 	createCmd.ValidArgsFunction = completeWorkspaceNames
 }
 
@@ -36,6 +38,7 @@ var (
 	createAllowMissingSecrets   bool
 	createAllowPlaintextSecrets bool
 	createJSON                  bool
+	createAgent                 string
 )
 
 // createResult is the machine-readable shape emitted by `niwa create --json`.
@@ -198,6 +201,12 @@ func runCreate(cmd *cobra.Command, args []string) error {
 	configurePluginAutoInstall(applier, createNoInstallPlugins)
 	applier.AllowMissingSecrets = createAllowMissingSecrets
 	applier.AllowPlaintextSecrets = createAllowPlaintextSecrets
+
+	resolvedAgent, agErr := resolveSessionAgent(createAgent, cfg)
+	if agErr != nil {
+		return agErr
+	}
+	applier.Agent = resolvedAgent
 
 	// Wire up the global config overlay so vault resolution and personal-wins
 	// merging work during create. ConfigSourceURL is a fallback for overlay

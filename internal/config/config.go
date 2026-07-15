@@ -279,6 +279,14 @@ type WorkspaceMeta struct {
 	DefaultBranch string `toml:"default_branch,omitempty"`
 	ContentDir    string `toml:"content_dir,omitempty"`
 	SetupDir      string `toml:"setup_dir,omitempty"`
+	// DefaultAgent is the workspace-default coding agent niwa prepares the
+	// workspace for (e.g. "claude" or "codex"). It is a session-global
+	// discriminator, not a per-repo mergeable value, so it lives here on the
+	// workspace metadata rather than in the [claude] override cascade. It is
+	// stored as a raw string (validated at resolution time by
+	// internal/agent.ParseAgent) so internal/config does not import
+	// internal/agent. Empty means the default agent (claude).
+	DefaultAgent string `toml:"default_agent,omitempty"`
 	// VaultScope (PRD D-11) selects which [workspaces.<scope>] entry in
 	// the personal overlay applies to this workspace. When unset, the
 	// personal overlay falls back to matching on workspace source-org
