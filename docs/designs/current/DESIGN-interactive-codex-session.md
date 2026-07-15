@@ -332,24 +332,41 @@ that can surface an error, unlike `EphemeralSessionMode`'s post-hoc state read.
   when `!agent.WritesRepoLevelContext()`, return early without writing (Decision
   3). Under Claude they behave exactly as today.
 
-**Entry points that must resolve and carry the agent.** The resolved agent must
-reach every command that materializes context, or that path silently runs with
-the zero-value agent (which, by the fail-safe contract above, is Claude — so a
-missed wiring degrades to today's behavior, never to breakage, but a
-codex-default workspace would then be under-served on that path). The full set:
+**Entry points split into two classes.** Materialization is reached from two
+kinds of command, and the agent they carry differs by class.
+
+*Workspace-preparation entry points* prepare a workspace the developer will then
+run an agent in, so they carry the **resolved** agent (flag > `NIWA_AGENT` >
+`default_agent` > claude):
 
 - `niwa apply` and `niwa create` — the primary apply pipeline (`Applier.Apply` /
   `Applier.Create` → `runPipeline`) and the workspace-root materializer
   (`MaterializeWorkspaceRoot`).
-- `niwa init` — calls `MaterializeWorkspaceRoot`; it already holds the parsed
-  config, so it can resolve the agent from `cfg.Workspace.DefaultAgent` at init
-  and avoid writing a Claude-named root file that only self-heals on first apply.
+- `niwa init` — calls `MaterializeWorkspaceRoot`; it holds the parsed config, so
+  it resolves the agent at init and avoids writing a Claude-named root file that
+  only self-heals on first apply.
 - `niwa reset` — runs `runPipeline`.
-- the ephemeral `instance from-hook` path — goes through the `Applier`.
 - the worktree lifecycle — `ApplyToWorktree`, reached from the session-lifecycle
   command.
 
-The PLAN carries this list so no materializing entry point is left unwired.
+*Launch-coupled provisioning entry points* provision an instance and then launch
+a specific agent binary into it. In this slice that binary is always **Claude**
+(the Claude `SessionStart` hook, `niwa dispatch`, and `niwa watch` all spawn
+`claude`), so they prepare a **Claude** instance regardless of `default_agent` —
+preparing it for another agent would materialize context the launched Claude
+worker cannot read. The shared `realProvisionInstance` therefore pins
+`applier.Agent = AgentClaude` for all three. Because a codex-default workspace
+launching a Claude worker is a mismatch a developer should see rather than have
+silently downgraded, **`niwa dispatch` refuses** when the resolved agent is not
+Claude, naming `NIWA_AGENT=claude` as the escape hatch (its own `--agent` flag is
+Claude's subagent passthrough, a different concept). A Codex `SessionStart` hook
+and Codex background dispatch are later features that will carry a Codex agent
+through these paths.
+
+The zero-value agent is Claude (the fail-safe contract above), so a
+workspace-preparation path left unwired degrades to today's behavior rather than
+breakage. The PLAN carries both lists so no entry point is left unwired or
+mis-wired.
 
 ### Data flow
 
@@ -418,10 +435,10 @@ atomic issues:
    wire `ResolveAgent` at the entry points. Unknown-agent errors surface here.
    Tests: config decode, precedence end-to-end, error on unknown value.
 3. **Filename seam at the niwa-owned levels.** Thread `Agent` onto
-   `RootMaterializeOptions` and the apply pipeline, wiring every materializing
-   entry point enumerated in Solution Architecture (`apply`, `create`, `init`,
-   `reset`, the `instance from-hook` path, and the worktree lifecycle); replace the
-   `CLAUDE.md` literals at the workspace-root and group write sites with
+   `RootMaterializeOptions` and the apply pipeline, wiring the
+   workspace-preparation entry points (`apply`, `create`, `init`, `reset`, the
+   worktree lifecycle) to carry the resolved agent; replace the `CLAUDE.md`
+   literals at the workspace-root and group write sites with
    `RootContextFileName()`. Parameterize the existing `content_test.go` /
    `root_materializer_test.go` cases by agent; assert `AGENTS.md` under Codex and
    byte-for-byte-unchanged `CLAUDE.md` under Claude, and that a construction site
@@ -430,6 +447,13 @@ atomic issues:
    worktree context layer skip when the agent does not write repo-level content;
    assert no repo-level file is written under Codex and the git working tree stays
    clean, and that Claude behavior is unchanged.
+4b. **Launch-coupled provisioning prepares Claude, and dispatch refuses Codex.**
+   Pin the shared `realProvisionInstance` (the Claude `SessionStart` hook,
+   `niwa dispatch`, `niwa watch`) to `AgentClaude`, since all three launch a
+   Claude worker. Make `niwa dispatch` resolve the workspace agent and refuse when
+   it is not Claude, naming `NIWA_AGENT=claude` as the escape hatch. Cover with a
+   `@critical` functional scenario (dispatch refuses in a codex-default
+   workspace).
 5. **`OPENAI_API_KEY` binding.** Add the scaffold example and a config round-trip
    test mirroring the `ANTHROPIC_API_KEY` test; document coexistence in the
    relevant guide.

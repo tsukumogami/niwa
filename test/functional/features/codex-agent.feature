@@ -39,6 +39,26 @@ Feature: select OpenAI Codex as the workspace agent
     And the file "tools/app/AGENTS.md" does not exist in instance "ws"
 
   @critical
+  Scenario: niwa dispatch refuses in a codex-default workspace
+    # niwa dispatch launches a Claude worker, so it refuses when the workspace
+    # agent is codex rather than silently preparing a Codex instance a Claude
+    # worker cannot read. The refusal fires before any instance is provisioned.
+    Given a clean niwa environment
+    And a local git server is set up
+    And a config repo "ws" exists with body:
+      """
+      [workspace]
+      name = "ws"
+      default_agent = "codex"
+      """
+    When I run niwa init from config repo "ws"
+    Then the exit code is 0
+    When I run "niwa dispatch some-task --detach" from the workspace root
+    Then the exit code is not 0
+    And the error output contains "does not support"
+    And the error output contains "NIWA_AGENT=claude"
+
+  @critical
   Scenario: the default (Claude) workspace still materializes CLAUDE.md
     Given a clean niwa environment
     And a local git server is set up
