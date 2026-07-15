@@ -1,6 +1,6 @@
 ---
 schema: brief/v1
-status: Accepted
+status: Done
 problem: |
   niwa prepares a workspace for one agent only: it writes a CLAUDE.md context
   tree, binds ANTHROPIC_API_KEY, and resolves model categories to Claude model
@@ -26,7 +26,7 @@ motivating_context: |
 
 ## Status
 
-Accepted
+Done
 
 The downstream PRD owns the requirements; the downstream DESIGN owns the
 selector modeling and the output-filename-by-agent seam. This brief stops at

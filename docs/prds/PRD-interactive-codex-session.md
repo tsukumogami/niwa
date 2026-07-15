@@ -1,5 +1,5 @@
 ---
-status: In Progress
+status: Done
 problem: |
   niwa prepares a workspace for a single agent, Claude Code: it writes the
   context tree as CLAUDE.md files, binds ANTHROPIC_API_KEY, and resolves model
@@ -28,7 +28,7 @@ motivating_context: |
 
 ## Status
 
-In Progress
+Done
 
 The downstream DESIGN owns the architecture: how the agent selector is modeled,
 how the output-filename-by-agent seam is introduced, and how per-agent model

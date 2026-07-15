@@ -1,5 +1,5 @@
 ---
-status: Planned
+status: Current
 upstream: docs/prds/PRD-interactive-codex-session.md
 problem: |
   niwa prepares a workspace for exactly one agent, Claude Code. The context
@@ -34,10 +34,11 @@ rationale: |
 
 ## Status
 
-Planned
+Current
 
-Upstream PRD: docs/prds/PRD-interactive-codex-session.md (In Progress). The
-downstream PLAN decomposes this into implementation issues.
+Upstream PRD: docs/prds/PRD-interactive-codex-session.md (Done). This design was
+implemented on the feat/interactive-codex-session branch; the PLAN that
+decomposed it into issues was finalized and removed on completion.
 
 ## Context and Problem Statement
 
