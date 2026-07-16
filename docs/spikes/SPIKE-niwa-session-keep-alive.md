@@ -204,6 +204,51 @@ replayed from the transcript), and Claude Code hooks cannot trigger `/`-commands
 So the cron-creation step is necessarily agent-mediated; niwa's deterministic contribution is
 the (fully niwa-controlled) arming instruction, not the scheduler call itself.
 
+### No-op wake validation — A/B experiment (human-confirmed, 2026-07-16)
+
+The one residual the existence proof left open — does a **minimal, non-visible no-op** wake
+(not real work) keep the bridge warm? — was tested directly with two throwaway `niwa dispatch`
+RC sessions left idle overnight:
+
+- **A `keepalive_noop_test`** — armed a no-op ~hourly self-wake (session_cron), otherwise idle.
+- **B `keepalive_control`** — no wake, fully idle.
+
+Result after ~18h idle:
+
+- **A stayed alive the entire time** (original process never terminated; the no-op wake fired
+  ~hourly for 18h) **and was confirmed reachable from claude.ai** (the human opened and
+  successfully steered it).
+- **B's process was terminated at ~8h** (no live process; `state: done`) **and was confirmed
+  unreachable from claude.ai** (did not respond).
+
+**Conclusion: a non-visible, no-op self-wake is sufficient to keep a dispatched RC session
+reachable across a long idle window, at near-zero context cost.** This closes the design's last
+open question — the D2 non-visible/no-op wake shape works; no fallback to a visible wake is
+needed. (Both the ~1h process-stop survival and the 6–12h+ bridge-idle survival are covered by
+this single 18h run.)
+
+### Archive does NOT stop keep-alive (human-confirmed, 2026-07-16)
+
+The PRD's open Known Limitation — what a claude.ai **archive** does to the local job entry —
+was tested directly: the surviving `keepalive_noop_test` was archived from the claude.ai web UI
+while alive, and its local state was watched.
+
+- **From the UI:** the session was gone (the human confirmed "gone from the UI").
+- **Locally: nothing changed.** ~46 min after archive, the `~/.claude/jobs/<id>/state.json`
+  entry still existed, `bridgeSessionId` still present, the process still alive, and the
+  keep-alive **cron kept firing** (twice more after archive). Archiving is a **UI-only,
+  server-side action that does not propagate to the local machine.**
+
+**Implications (negative result):**
+- **`niwa reap` does NOT see an archived session as done** — the jobs entry persists, so
+  `sessionLive` stays true and the instance is not reclaimed.
+- **Keep-alive keeps running on an archived session** — the cron keeps waking a session the
+  user can no longer see, for up to the 7-day TTL, and its niwa instance leaks until then.
+- **Archive is therefore NOT a valid stop signal.** Only closing/removing the session
+  (agents-TUI close / `claude rm`), which removes the local jobs entry, stops keep-alive. The
+  design documents this as a limitation: **close, don't just archive, to release keep-alive;**
+  the 7-day cron TTL is the backstop for an archived-but-not-closed session.
+
 ## Recommendation (feeds the DESIGN)
 
 The empirical result forces a single direction:

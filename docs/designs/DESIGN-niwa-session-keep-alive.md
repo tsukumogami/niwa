@@ -201,14 +201,19 @@ that were the feature's biggest unknowns:
 2. **Process survival** — the sub-/~hourly wakes kept the process from the ~1h supervisor
    stop (demonstrated). The interval must stay under ~1h; that constraint is real but met.
 
-What Phase 0 still has to confirm is narrower: the wakes in the existence proof were **real,
-visible working turns**, whereas the design's wake is a **non-visible / no-op** turn (D2). So
-Phase 0 must show that a *minimal, context-isolated* wake — still a real API round-trip, just
-hidden from the chat — keeps the bridge warm the same way, plus one clean multi-hour
-single-gap survival, plus the stop-signal / archive checks. If a non-visible wake turns out
-*not* to keep the bridge warm, the fallback is a lightest-visible wake (D2's sub-task
-isolation) — a context cost, not a feasibility failure. The plumbing, stop-on-gone, and
-observability are low-risk and well-precedented.
+The one residual that remained — whether a **non-visible / no-op** wake (D2), not the
+existence proof's visible working turns, keeps the bridge warm — has now been **validated
+directly** (spike, No-op wake validation): a throwaway session armed with a no-op non-visible
+wake stayed reachable from claude.ai across ~18h idle while an un-armed control died. So the D2
+wake shape works at near-zero context cost; no visible-wake fallback is needed. The plumbing,
+stop-on-gone, and observability are low-risk and well-precedented.
+
+**One validated limitation shapes the stop signal:** testing confirmed that **archiving a
+session in claude.ai does not stop keep-alive** — it is a UI-only action that does not remove
+the local jobs entry, so the cron keeps firing and `niwa reap` still sees the session as live.
+Only closing/removing the session (agents-TUI close / `claude rm`), which removes the jobs
+entry, stops keep-alive. This is documented as a limitation (see Consequences); the 7-day cron
+TTL backstops an archived-but-not-closed session.
 
 **Cadence rationale.** Two constraints set the interval. The idle-drop floor is 6–12h, but
 the **~1h supervisor process-stop is the tighter bound**: the wake must fire within that hour
@@ -271,38 +276,31 @@ independent of `bridgeSessionId` (librarian-confirmed), and the reaper reads no 
 an hourly wake cannot defer reaping — R9 holds by construction. The cron is librarian-confirmed
 **session-scoped and in-process** (no host-level task), so it cannot fire against a gone
 session — R7 holds. The wake stops when the session's job entry is gone; `claude rm` and a
-TUI close roster-remove the session, which tears down its in-process cron. **One nuance to
-confirm in Phase 0:** the docs guarantee only that the session is de-listed and its `tmp/` is
-removed — whether `state.json` itself is physically deleted (which is what niwa's `sessionLive`
-tests) is inferred, not documented. If a close de-lists but leaves `state.json`, niwa would
-still see the session as live; Phase 0(c) pins this down. The reaper does **not** read
-`SessionMapping.KeepAlive`; keep-alive must never suppress reaping.
+TUI close roster-remove the session, which tears down its in-process cron (Phase 0(a)
+confirms `state.json` is physically removed, not just de-listed). **A claude.ai archive is NOT
+a stop signal** — testing confirmed archiving is UI-only and does not remove the local jobs
+entry, so keep-alive keeps firing and the reaper still sees the session as live (see
+Consequences). The reaper does **not** read `SessionMapping.KeepAlive`; keep-alive must never
+suppress reaping.
 
 ## Implementation Approach
 
-- **Phase 0 — Validation (mandatory gate; multi-session, multi-day).** The core mechanism is
-  already demonstrated by the existence-proof session (agent-armed self-wake kept a dispatched
-  RC session alive ~1.5 days, surviving the ~1h supervisor stop). Phase 0 confirms the parts
-  the existence proof did *not* exercise, in rough dependency order:
-  - **(1) Non-visible / no-op wake efficacy — the key residual.** The existence proof used
-    real *visible working* turns. Confirm that a **minimal, context-isolated** wake (D2: a
-    `isMeta`/no-op turn — still a real API round-trip, just hidden from the chat) keeps the
-    bridge warm the same way, and **measure main-context growth per wake** for the candidate
-    shapes; fix the lightest shape that works. If a non-visible wake does not keep the bridge
-    warm, fall back to the lightest *visible* isolated sub-task (a context cost, not a STOP).
-  - **(2) Clean single-gap reachability.** Reconfirm on a fresh throwaway session at the fixed
-    sub-hourly cadence: reachable from claude.ai past the 12h mark where an un-armed control is
-    unreachable. (Corroborates the existence proof under controlled conditions.)
-  - **(3) Finished/`done` sessions.** Confirm the mechanism holds for a session that went
-    `done`/idle overnight (the common morning case), given the ~1h process-stop.
-  - **(4) Stop signals.** Confirm `claude rm` / TUI close removes `state.json` (not just
-    de-lists) and tears down the cron; and confirm what a claude.ai **archive** does to the
-    local entry (the PRD's open Known Limitation).
-  - **(5) Arming-channel reliability.** Confirm the chosen nudge channel (B1 SessionStart
-    `additionalContext` for a `--bg` worker, else B2 prompt) reliably arms the wake — the
-    existence proof shows agent-arming works; this fixes *which* channel niwa uses.
-  Only (1) could, at worst, force the visible-wake fallback; the rest are confirmations that
-  refine the shipped shape rather than open feasibility questions.
+- **Phase 0 — Validation.** The core mechanism and its key residuals were validated ahead of
+  implementation (see the spike). **Already confirmed:** the existence-proof session (agent-armed
+  self-wake kept a dispatched RC session alive ~1.5 days, past the ~1h supervisor stop); the
+  **non-visible / no-op wake** (a throwaway session on a no-op wake stayed reachable from
+  claude.ai ~18h while an un-armed control died — so the D2 shape works at near-zero context
+  cost, no visible-wake fallback needed); and the **archive behavior** (archiving in claude.ai
+  does not stop keep-alive — see Consequences). **Remaining confirmations for the
+  implementation** (refinements, not feasibility gates):
+  - **(a) Close/remove teardown.** Confirm `claude rm` / agents-TUI close removes `state.json`
+    (what `sessionLive` tests), not just de-lists it, so keep-alive and the reaper both see the
+    session as gone.
+  - **(b) Finished/`done` sessions.** Reconfirm the no-op wake holds for a session that went
+    `done`/idle overnight (the validation covered this, but pin the shipped cadence to it).
+  - **(c) Arming-channel choice.** Fix which nudge channel niwa uses — B1 SessionStart
+    `additionalContext` for a `--bg` worker if it fires reliably, else B2 prompt. Agent-arming
+    itself is proven (existence proof + no-op test both armed via the agent).
 - **Phase 1 — Opt-in plumbing.** Add the config key, the resolver, and the
   `SessionMapping.KeepAlive` field following the `remote_control_on_dispatch` files/tests, plus
   the net-new `--keep-alive` tri-state flag (no existing pattern to copy — see Solution
@@ -344,11 +342,13 @@ still see the session as live; Phase 0(c) pins this down. The reaper does **not*
   stack crons. Because arming is a nudge (not deterministic), Phase 0 must confirm the agent
   honors the once-only instruction under both channels; under B1 the SessionStart injection
   fires once per session start, bounding delivery.
-- **Archive must stop the wake.** The Phase 0 validation must confirm that archiving a
-  session in claude.ai ends the local job entry (or otherwise stops the wake); if archive
-  leaves the entry present, keep-alive would keep waking a session the user considers done.
-  Confirming this closes the "wakes a user-dead session" gap and is a gate on shipping
-  (see the archive Known Limitation carried from the PRD).
+- **Archive does not stop the wake (confirmed limitation).** Testing confirmed archiving a
+  session in claude.ai is UI-only and leaves the local jobs entry intact, so keep-alive keeps
+  waking a session the user considers done, and its instance stays un-reaped, until the session
+  is closed/removed or the 7-day cron TTL lapses. This is a bounded resource leak, not a
+  security escalation (the wake still runs only under the session's own already-authorized
+  identity and its fixed no-op action), but it is documented so users know to *close*, not just
+  archive, to release keep-alive (see Consequences / Known behavior).
 
 ## Consequences
 
@@ -360,12 +360,17 @@ still see the session as live; Phase 0(c) pins this down. The reaper does **not*
   construction, librarian-confirmed).
 
 **Negative / risks.**
-- **The core mechanism is demonstrated** (existence-proof session, ~1.5 days). The residual
-  risk is narrow: the demonstration used *visible working* wakes, so it is not yet proven that
-  a **non-visible / no-op** wake (D2) keeps the bridge warm. If it doesn't, the fallback is a
-  lightest *visible* isolated sub-task — a context cost, not a feasibility failure. So the
-  feature is very likely buildable; the open question is *how cheap* the wake can be, not
-  *whether* it works.
+- **The core mechanism is validated** — the existence-proof session (~1.5 days) plus a direct
+  A/B test where a non-visible **no-op** wake kept a dispatched session reachable from claude.ai
+  ~18h while an un-armed control died. Efficacy, process-survival, and the near-zero-context
+  no-op shape are all confirmed; no visible-wake fallback is needed. This is the strongest kind
+  of de-risking — the feature works, measured end to end.
+- **Archive does not release keep-alive (confirmed limitation).** Archiving a session in
+  claude.ai is UI-only: it does not remove the local jobs entry, so keep-alive keeps waking the
+  session and `niwa reap` keeps its instance, until the session is *closed/removed* or the 7-day
+  cron TTL lapses. Users must **close (not just archive)** to release keep-alive promptly; the
+  7-day TTL is the backstop. niwa cannot detect archive locally (it is server-side and the local
+  bridge field is stale), so this is documented behavior, not a bug to fix in v1.
 - **Arming is agent-mediated (no programmatic seam).** There is no cron-arming flag/hook and no
   writable schedule file (investigated); the agent must self-arm from an injected instruction.
   This is proven reliable (the existence-proof session armed/re-armed dozens of times), but it

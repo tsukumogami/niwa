@@ -9,9 +9,8 @@ problem: |
 outcome: |
   A developer can mark a dispatched RC session to be kept alive, leave it
   overnight, and still reach and steer it from the phone the next morning.
-  The keep-alive releases on its own once the developer is done with the
-  session — closing it in the agents TUI, and (pending validation of the
-  local effect) archiving it in claude.ai.
+  The keep-alive releases once the developer closes or removes the session;
+  archiving it in claude.ai alone does not release it.
 motivating_context: |
   The recurring pattern: a developer dispatches a session to work overnight
   and only checks on it from a phone during the morning commute. The value
@@ -30,10 +29,11 @@ signal, and the acceptance criteria; the DESIGN owns the mechanism (a
 heartbeat that keeps the session active so its connection never idles out
 — see docs/spikes/SPIKE-niwa-session-keep-alive.md).
 
-Edited in place after a review panel: the claude.ai-archive release path is
-softened to "pending validation" here and downstream, since the design's
-Phase 0 must confirm what an archive does to the local session state before
-that release can be promised. The TUI-close release remains the primary path.
+Edited in place after review + live testing: archiving in claude.ai was found NOT
+to release keep-alive — it is a UI-only action that leaves the local session state
+intact, so keep-alive keeps running until the session is closed/removed. The release
+path is therefore closing or removing the session, not archiving; the archive
+behavior is documented downstream as a known limitation.
 
 ## Problem Statement
 
@@ -90,12 +90,11 @@ its context, and accepts the next steer.
 ### Finishing with a session releases the hold
 
 A developer decides a kept-alive session is done — the work landed, or
-they want to stop it. The trigger is the developer closing the session in
-the Claude agents TUI (and, once the archive path is validated, archiving
-it in the claude.ai web UI). The outcome: niwa observes the session is no
-longer one the developer wants held, stops keeping it alive, and does not
-relaunch or resurrect it. A session the developer deliberately ended stays
-ended.
+they want to stop it. The trigger is the developer closing or removing the
+session in the Claude agents TUI. The outcome: niwa observes the session is
+no longer one the developer wants held, stops keeping it alive, and does not
+relaunch or resurrect it. A session the developer deliberately closed stays
+ended. (Archiving in claude.ai alone does not release it — closing does.)
 
 ### A non-participating dispatch is untouched
 
@@ -114,9 +113,9 @@ is a thing you ask for, never a default that changes existing runs.
   should keep reachable across long idle/unreachable windows.
 - Keeping an opted-in, still-live RC dispatch session reachable through
   the overnight idle gap so it can be resumed from a phone in the morning.
-- Releasing the keep-alive when the developer closes the session in the
-  agents TUI or archives it in claude.ai, so a deliberately-ended session
-  is not held or relaunched.
+- Releasing the keep-alive when the developer closes or removes the session
+  in the agents TUI, so a deliberately-ended session is not held or relaunched.
+  (Archiving in claude.ai alone does not release it — see the Status note.)
 - Leaving every non-opted-in dispatch, and every session the feature is
   off for, behaving exactly as it does today.
 

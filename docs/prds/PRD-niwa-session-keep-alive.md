@@ -53,9 +53,9 @@ keeping alive rather than letting lapse.
 - A developer can opt a dispatched RC session into being kept reachable across long
   idle stretches, and rely on it still being reachable and steerable from a phone
   after the idle gap.
-- The keep-alive releases on its own once the developer is done with the session —
-  closing it in the agents TUI, and (pending validation of the local effect) archiving
-  it in claude.ai — without holding a session alive that the developer deliberately ended.
+- The keep-alive releases once the developer is done with the session by closing or removing
+  it, without holding a session alive that the developer deliberately ended. (Archiving in
+  claude.ai alone does not release it — see Known Limitations.)
 - A developer who does not opt in — and every existing dispatch — sees no change in
   behavior.
 
@@ -64,10 +64,10 @@ keeping alive rather than letting lapse.
 - As a developer running work overnight, I want to mark a dispatched RC session to
   be kept alive, so that when I check it from my phone in the morning it is still
   reachable and holds its context.
-- As a developer who finished with a kept-alive session, I want closing it in the
-  agents TUI (and, once the archive path is validated, archiving it in claude.ai) to
-  stop the keep-alive, so that a session I deliberately ended is not held open or
-  relaunched.
+- As a developer who finished with a kept-alive session, I want closing or removing it
+  (agents TUI close or `claude rm`) to stop the keep-alive, so that a session I deliberately
+  ended is not held open or relaunched. (Archiving alone does not stop it — see Known
+  Limitations.)
 - As a developer who did not opt in, I want dispatch to behave exactly as it does
   today, so that the feature never changes runs I did not ask it to.
 - As an operator managing a workspace, I want to set a workspace-wide default for
@@ -96,11 +96,10 @@ Functional:
   SHALL keep the connection active proactively and SHALL NOT depend on detecting a
   dropped connection to do its job.
 - **R6.** Keep-alive for a session SHALL stop once that session is no longer live by
-  niwa's existing liveness signal (the Claude Code job entry is gone). Closing the
-  session in the agents TUI (or `claude rm`) is expected to produce this; the exact
-  local effect of a TUI close / claude.ai archive on the job entry is confirmed in the
-  design's Phase 0 (it is inferred, not yet documented). A session the developer has
-  ended SHALL NOT be kept alive.
+  niwa's existing liveness signal (the Claude Code job entry is gone), which closing or
+  removing the session (agents TUI close or `claude rm`) produces. Archiving a session in
+  claude.ai does NOT remove the job entry and therefore does NOT stop keep-alive (confirmed;
+  see Known Limitations). A session the developer has closed or removed SHALL NOT be kept alive.
 - **R7.** The feature SHALL NOT recreate, relaunch, or resurrect a session whose
   entry has been removed. It keeps a live session live; it never revives a gone one.
 - **R8.** A dispatch that is not opted in SHALL behave exactly as it does today, and
@@ -132,9 +131,12 @@ Non-functional:
       confirmed one unreachable data point at ~12h). After the idle period, a steering
       command issued from claude.ai / the mobile app is accepted by the opted-in session,
       while the non-opted session returns unreachable (R4, R5).
-- [ ] Closing an opted-in session in the agents TUI stops its keep-alive, and the
-      session is not relaunched or resurrected afterward (verified by the job entry
-      staying absent and no new session appearing) (R6, R7).
+- [ ] Closing or removing an opted-in session in the agents TUI (or `claude rm`) stops its
+      keep-alive, and the session is not relaunched or resurrected afterward (verified by the
+      job entry staying absent and no new session appearing) (R6, R7).
+- [ ] Archiving an opted-in session in the claude.ai web UI does NOT remove its local job
+      entry and does NOT stop keep-alive (documented limitation); only closing/removing it does
+      (R6).
 - [ ] For a dispatch without opt-in, the session's transcript, on-disk files, and
       job-entry metadata match a control dispatch on current `niwa dispatch` (a diff
       shows no difference beyond timestamps), and no keep-alive timer or process is
@@ -192,11 +194,13 @@ These resolve the Open Questions the upstream BRIEF deferred to this PRD.
 
 ## Known Limitations
 
-- **claude.ai archive vs. TUI close.** The stop condition keys off the local job entry
-  being removed (R6), which is what an agents-TUI close / `claude rm` produces. Whether
-  archiving a session in the claude.ai web UI removes the local job entry the same way
-  is unconfirmed; if it does not, keep-alive may continue until the entry is otherwise
-  removed. A design-time throwaway-session test should confirm the archive path.
+- **Archiving does not stop keep-alive (confirmed).** Testing confirmed that archiving a
+  session in the claude.ai web UI is a UI-only action: it removes the session from the web UI
+  but does not remove the local job entry. So keep-alive keeps running and the session's
+  instance stays un-reaped until the session is closed/removed (agents TUI close or
+  `claude rm`) or the keep-alive vehicle's ~7-day lifetime lapses. Developers must **close, not
+  just archive**, to release keep-alive promptly; niwa cannot detect the archived state locally
+  (it is server-side, and the local bridge signal is stale).
 - **Idle threshold and duration bound.** The exact idle interval that triggers the
   drop is not precisely known (observed to occur within roughly 6–12 hours); the design
   must keep the connection active on a conservative interval. If the chosen vehicle is
