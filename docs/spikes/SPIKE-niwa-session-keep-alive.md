@@ -249,6 +249,19 @@ while alive, and its local state was watched.
   design documents this as a limitation: **close, don't just archive, to release keep-alive;**
   the 7-day cron TTL is the backstop for an archived-but-not-closed session.
 
+**Stop-signal chain confirmed (same session, teardown test):**
+
+| Action | Local jobs entry | Effect on keep-alive / reap |
+|---|---|---|
+| `claude stop <id>` | persists (state=stopped) | halts process/cron, but niwa still sees the session live |
+| `claude rm <id>` (= TUI close/remove) | **removed** | `sessionLive` false → `niwa reap` reclaims the instance |
+| claude.ai archive | persists | UI-only; does NOT stop keep-alive or free the instance |
+
+Verified end to end: after `claude rm` on both throwaway sessions, their `~/.claude/jobs/<id>`
+entries were gone and `niwa reap` reported "Reaped 2 orphaned ephemeral instance(s)". So R6's
+stop-on-entry-gone and R9's reaper cooperation both hold for the close/remove path; archive is
+the sole gap, documented as a limitation.
+
 ## Recommendation (feeds the DESIGN)
 
 The empirical result forces a single direction:

@@ -293,9 +293,10 @@ suppress reaping.
   cost, no visible-wake fallback needed); and the **archive behavior** (archiving in claude.ai
   does not stop keep-alive — see Consequences). **Remaining confirmations for the
   implementation** (refinements, not feasibility gates):
-  - **(a) Close/remove teardown.** Confirm `claude rm` / agents-TUI close removes `state.json`
-    (what `sessionLive` tests), not just de-lists it, so keep-alive and the reaper both see the
-    session as gone.
+  - **(a) Close/remove teardown — confirmed.** Tested: `claude rm` removes the `state.json`
+    entry (whereas `claude stop` leaves it), and `niwa reap` then reclaims the instance
+    ("Reaped 2 orphaned ephemeral instance(s)"). R6 stop-on-entry-gone and R9 reaper cooperation
+    both hold for the close/remove path.
   - **(b) Finished/`done` sessions.** Reconfirm the no-op wake holds for a session that went
     `done`/idle overnight (the validation covered this, but pin the shipped cadence to it).
   - **(c) Arming-channel choice.** Fix which nudge channel niwa uses — B1 SessionStart
