@@ -24,6 +24,12 @@ func init() {
 	dispatchCmd.Flags().StringVar(&dispatchPermissionMode, "permission-mode", "", "permission mode to forward to the background worker (--permission-mode)")
 	dispatchCmd.Flags().StringVar(&dispatchAgent, "agent", "", "agent to forward to the background worker (--agent)")
 	dispatchCmd.Flags().BoolVarP(&dispatchDetach, "detach", "d", false, "do not attach the terminal to the new session; print hints and return")
+	// --keep-alive is tri-state (unset / explicit true / explicit false) so it
+	// can override the [global] keep_alive_on_dispatch host default in BOTH
+	// directions; a plain BoolVar cannot distinguish "not given" from "false".
+	// NoOptDefVal makes the bare `--keep-alive` form mean explicit true.
+	dispatchCmd.Flags().Var(triBoolValue{&dispatchKeepAlive}, "keep-alive", "arm a keep-alive self-wake on the dispatched worker so its remote-control session stays reachable across long idle (only applies when remote control is on; --keep-alive=false forces it off)")
+	dispatchCmd.Flags().Lookup("keep-alive").NoOptDefVal = "true"
 	rootCmd.AddCommand(dispatchCmd)
 }
 
@@ -34,6 +40,10 @@ var (
 	dispatchPermissionMode string
 	dispatchAgent          string
 	dispatchDetach         bool
+	// dispatchKeepAlive holds the tri-state --keep-alive value: nil when the
+	// flag was not given, otherwise a pointer to the explicit true/false (see
+	// triBoolValue in dispatch_keepalive.go).
+	dispatchKeepAlive *bool
 )
 
 // maxDispatchSlugRunes caps the sanitized --name slug so it cannot dominate the
@@ -265,9 +275,11 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	// is treated as unset), and an unreadable instance settings file is treated as
 	// "downstream unset" -- so the host default-fill still applies. Either way the
 	// dispatch always launches. The global config is loaded once in step (9) and
-	// reused here.
+	// reused here. The instance settings are read once too -- the keep-alive
+	// resolution in (9d) consults the same projection.
+	inst, _ := readInstanceSettings(instancePath)
+	rcInjected := false
 	if gcErr == nil {
-		inst, _ := readInstanceSettings(instancePath)
 		// The eligibility check must inspect the SAME environment the worker
 		// inherits -- realDispatchLaunch launches with cmd.Env = os.Environ() -- so
 		// the warning describes the worker's actual auth context. Keep these two
@@ -278,6 +290,25 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 		}
 		if inject {
 			passthrough = append(passthrough, "--settings", remoteControlSettingsJSON)
+			rcInjected = true
+		}
+	}
+
+	// (9d) Keep-alive arming. When keep-alive resolves on AND the worker starts
+	// with remote control (either injected above or decided downstream), prepend
+	// the fixed self-arm instruction to the task prompt (channel B2; see
+	// dispatch_keepalive.go for why the SessionStart channel does not reach a
+	// dispatched worker). The instruction rides the same single argv element as
+	// the prompt, so the D8 no-shell-interpolation guard is preserved, and its
+	// fixed few-hundred-byte size is well inside the conservative maxPromptBytes
+	// margin validated in step (1). Requesting keep-alive without remote control
+	// warns and arms nothing -- the dispatch itself always proceeds. Without the
+	// opt-in this block changes nothing: the launch stays byte-identical.
+	if dispatchKeepAlive != nil && *dispatchKeepAlive {
+		if remoteControlEnabled(rcInjected, inst) {
+			prompt = keepAliveArmingInstruction + prompt
+		} else {
+			fmt.Fprintf(cmd.ErrOrStderr(), "niwa dispatch: %s\n", keepAliveNonRCWarning)
 		}
 	}
 
