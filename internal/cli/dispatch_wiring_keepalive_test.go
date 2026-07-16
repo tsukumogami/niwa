@@ -2,8 +2,12 @@ package cli
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/tsukumogami/niwa/internal/workspace"
 )
 
 // captureLaunchPrompt overrides the launch seam to record the final prompt the
@@ -217,6 +221,63 @@ func TestDispatch_KeepAlive_DownstreamOn_Arms(t *testing.T) {
 	}
 	if !strings.HasPrefix(prompt, keepAliveArmingInstruction) {
 		t.Fatalf("a downstream keep-alive opt-in must arm; prompt = %q", prompt)
+	}
+}
+
+// An armed dispatch records KeepAlive on the durable session mapping; the
+// record carries the ARMED state, not the mere request.
+func TestDispatch_KeepAlive_Armed_RecordedOnMapping(t *testing.T) {
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	root := setupDispatchWorkspace(t)
+	chdir(t, root)
+	setHostConfig(t, hostRConDispatch)
+	f := installDispatchFakes(t, root)
+	provisionWithInstanceSettings(t, f, "")
+	var prompt string
+	captureLaunchPrompt(f, &prompt, nil)
+	dispatchKeepAlive = kaBoolPtr(true)
+
+	if _, _, err := runDispatchCmd(t, "do a thing"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	m, err := workspace.ReadSessionMapping(root, dispatchTestSessionID)
+	if err != nil {
+		t.Fatalf("reading mapping: %v", err)
+	}
+	if !m.KeepAlive {
+		t.Fatal("mapping.KeepAlive = false, want true for an armed dispatch")
+	}
+}
+
+// A keep-alive REQUEST that could not arm (no RC) must not be recorded: the
+// mapping stays byte-identical to a non-opted one (no keep_alive key).
+func TestDispatch_KeepAlive_NonRC_NotRecordedOnMapping(t *testing.T) {
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	root := setupDispatchWorkspace(t)
+	chdir(t, root)
+	setHostConfig(t, "")
+	f := installDispatchFakes(t, root)
+	provisionWithInstanceSettings(t, f, "")
+	var prompt string
+	captureLaunchPrompt(f, &prompt, nil)
+	dispatchKeepAlive = kaBoolPtr(true)
+
+	if _, _, err := runDispatchCmd(t, "do a thing"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	m, err := workspace.ReadSessionMapping(root, dispatchTestSessionID)
+	if err != nil {
+		t.Fatalf("reading mapping: %v", err)
+	}
+	if m.KeepAlive {
+		t.Fatal("mapping.KeepAlive = true, want false when arming was skipped (non-RC)")
+	}
+	raw, err := os.ReadFile(filepath.Join(root, ".niwa", "sessions", dispatchTestSessionID+".json"))
+	if err != nil {
+		t.Fatalf("reading raw mapping: %v", err)
+	}
+	if strings.Contains(string(raw), "keep_alive") {
+		t.Fatalf("an unarmed dispatch's mapping must omit the keep_alive key, got:\n%s", raw)
 	}
 }
 

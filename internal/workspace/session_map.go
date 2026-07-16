@@ -63,6 +63,13 @@ type SessionMapping struct {
 	// provenance only -- the reaper ignores it, so reclamation eligibility
 	// is unchanged. omitempty keeps legacy mappings byte-identical.
 	Origin string `json:"origin,omitempty"`
+	// KeepAlive records that the dispatch armed a keep-alive self-wake on
+	// this session (the resolved opt-in AND remote control on, so the arming
+	// actually happened). Like Origin it is informational only: it powers
+	// `niwa list` observability and is NEVER read by the reaper -- keep-alive
+	// must not defer or suppress reclamation, which keys purely on the job
+	// entry. omitempty keeps non-opted and legacy mappings byte-identical.
+	KeepAlive bool `json:"keep_alive,omitempty"`
 }
 
 // sessionsDir returns the workspace-root session mapping directory,

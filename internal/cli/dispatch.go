@@ -312,9 +312,14 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	if gcErr == nil && gc != nil {
 		hostGlobal = gc.Global
 	}
+	// keepAliveArmed records that the arming actually happened (resolved on AND
+	// remote control on); it is what the durable mapping carries in step (11),
+	// so `niwa list` reports sessions genuinely kept alive, not mere requests.
+	keepAliveArmed := false
 	if resolveDispatchKeepAlive(dispatchKeepAlive, hostGlobal, inst) {
 		if remoteControlEnabled(rcInjected, inst) {
 			prompt = keepAliveArmingInstruction + prompt
+			keepAliveArmed = true
 		} else {
 			fmt.Fprintf(cmd.ErrOrStderr(), "niwa dispatch: %s\n", keepAliveNonRCWarning)
 		}
@@ -349,6 +354,7 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 		Ephemeral:    true,
 		Origin:       "dispatch",
 		Label:        dispatchLabel,
+		KeepAlive:    keepAliveArmed,
 		Created:      time.Now().UTC(),
 	}
 	if err := workspace.WriteSessionMapping(workspaceRoot, mapping); err != nil {
