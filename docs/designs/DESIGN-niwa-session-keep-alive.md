@@ -1,6 +1,6 @@
 ---
 upstream: docs/prds/PRD-niwa-session-keep-alive.md
-status: Accepted
+status: Planned
 problem: |
   Dispatched remote-control sessions lose reachability after a few hours of idle,
   and niwa has no way to keep an opted-in session's remote connection from lapsing.
@@ -29,7 +29,7 @@ rationale: |
 
 ## Status
 
-Accepted
+Planned
 
 ## Context and Problem Statement
 
