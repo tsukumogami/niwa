@@ -18,7 +18,7 @@ Feature: niwa dispatch keep-alive: opt-in, arming, record, and observability
   "No-op wake validation"). These scenarios cover everything up to the launch
   seam: resolution, the injected payload, the record, and the report.
 
-  Design: docs/designs/DESIGN-niwa-session-keep-alive.md
+  Design: docs/designs/current/DESIGN-niwa-session-keep-alive.md
 
   # --- The full keep-alive workflow on a remote-control worker ---
 

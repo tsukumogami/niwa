@@ -1,5 +1,5 @@
 ---
-status: In Progress
+status: Done
 problem: |
   Developers who dispatch remote-control sessions with `niwa dispatch` to run
   unattended lose reachability after a few hours of idle: the session's remote
@@ -25,7 +25,7 @@ motivating_context: |
 
 ## Status
 
-In Progress
+Done
 
 ## Problem Statement
 

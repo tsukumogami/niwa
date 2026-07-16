@@ -111,7 +111,7 @@ a reachable bridge (and how fast) is unconfirmed.
 ## Live observation (in progress on this always-on host)
 
 Because the host never sleeps, the idle-disconnect reproduces here without any sleep
-step. A read-only watcher (`wip/research/spike_niwa-session-keep-alive_timeseries.md`)
+step. A read-only watcher (a scratch time-series log kept during the spike)
 snapshots every RC session's `bridgeSessionId`/`state`/`firstTerminalAt` every 30 min
 and records what changes when a bridge drops. Baseline (2026-07-13T20:07Z) had 5 live
 RC bridges, including idle `done`/`blocked` sessions still holding their bridge. The

@@ -1,6 +1,6 @@
 ---
 schema: brief/v1
-status: Accepted
+status: Done
 problem: |
   Remote-control-enabled sessions launched with `niwa dispatch` lose their
   remote connection after a few hours of idle and become unreachable from
@@ -20,7 +20,7 @@ motivating_context: |
 
 ## Status
 
-Accepted
+Done
 
 Framing for an optional keep-alive over `niwa dispatch` remote-control
 sessions. Stops at the feature's problem, outcome, journeys, and scope
