@@ -625,6 +625,22 @@ func buildSettingsDoc(cfg BuildSettingsConfig) (map[string]any, error) {
 		doc[config.RemoteControlAtStartupKey] = b
 	}
 
+	// keepAliveOnDispatch: the same boolean passthrough shape as
+	// remoteControlAtStartup, emitted only when a user explicitly sets it under
+	// [claude.settings]. The key is niwa-defined (Claude Code ignores it);
+	// carrying it in settings.json lets a downstream workspace decide dispatch
+	// keep-alive for its own instances, read back by the dispatch resolver the
+	// same way the remote-control downstream value is. Nothing turns it on by
+	// default here -- the host-level default lives at the dispatch launch seam.
+	if ka, ok := cfg.Settings[config.KeepAliveOnDispatchKey]; ok {
+		raw := maybeSecretString(ka)
+		b, err := strconv.ParseBool(strings.TrimSpace(raw))
+		if err != nil {
+			return nil, fmt.Errorf("invalid [claude.settings] %s value %q: want \"true\" or \"false\"", config.KeepAliveOnDispatchKey, raw)
+		}
+		doc[config.KeepAliveOnDispatchKey] = b
+	}
+
 	// Build hooks block from installed hooks.
 	hooksDoc := make(map[string]any, len(cfg.InstalledHooks))
 	if len(cfg.InstalledHooks) > 0 {

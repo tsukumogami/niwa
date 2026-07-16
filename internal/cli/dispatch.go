@@ -294,17 +294,25 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// (9d) Keep-alive arming. When keep-alive resolves on AND the worker starts
-	// with remote control (either injected above or decided downstream), prepend
-	// the fixed self-arm instruction to the task prompt (channel B2; see
-	// dispatch_keepalive.go for why the SessionStart channel does not reach a
-	// dispatched worker). The instruction rides the same single argv element as
-	// the prompt, so the D8 no-shell-interpolation guard is preserved, and its
-	// fixed few-hundred-byte size is well inside the conservative maxPromptBytes
-	// margin validated in step (1). Requesting keep-alive without remote control
-	// warns and arms nothing -- the dispatch itself always proceeds. Without the
-	// opt-in this block changes nothing: the launch stays byte-identical.
-	if dispatchKeepAlive != nil && *dispatchKeepAlive {
+	// (9d) Keep-alive arming. The opt-in resolves flag > downstream > host
+	// default (resolveDispatchKeepAlive); an unreadable host config degrades to
+	// "host default unset" through the zero GlobalSettings, so keep-alive --
+	// like remote-control -- can never fail the dispatch. When it resolves on
+	// AND the worker starts with remote control (either injected above or
+	// decided downstream), prepend the fixed self-arm instruction to the task
+	// prompt (channel B2; see dispatch_keepalive.go for why the SessionStart
+	// channel does not reach a dispatched worker). The instruction rides the
+	// same single argv element as the prompt, so the D8 no-shell-interpolation
+	// guard is preserved, and its fixed few-hundred-byte size is well inside
+	// the conservative maxPromptBytes margin validated in step (1). Requesting
+	// keep-alive without remote control warns and arms nothing -- the dispatch
+	// itself always proceeds. Without the opt-in this block changes nothing:
+	// the launch stays byte-identical.
+	var hostGlobal config.GlobalSettings
+	if gcErr == nil && gc != nil {
+		hostGlobal = gc.Global
+	}
+	if resolveDispatchKeepAlive(dispatchKeepAlive, hostGlobal, inst) {
 		if remoteControlEnabled(rcInjected, inst) {
 			prompt = keepAliveArmingInstruction + prompt
 		} else {

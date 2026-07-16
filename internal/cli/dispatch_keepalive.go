@@ -2,6 +2,8 @@ package cli
 
 import (
 	"strconv"
+
+	"github.com/tsukumogami/niwa/internal/config"
 )
 
 // keepAliveArmingInstruction is the fixed, niwa-authored self-arm nudge
@@ -70,6 +72,37 @@ func (v triBoolValue) Set(s string) error {
 }
 
 func (v triBoolValue) Type() string { return "bool" }
+
+// resolveDispatchKeepAlive decides whether this dispatch opts into keep-alive.
+// Precedence is flag > downstream > host-default, default off:
+//
+//   - flag is the tri-state --keep-alive value; when given it wins in BOTH
+//     directions (force-on when the host default is off, force-off when on).
+//   - The downstream layer is the instance's materialized [claude.settings]
+//     keepAliveOnDispatch value; like the remote-control resolver, a decided
+//     downstream value is respected and the host default never overrides it.
+//   - global.KeepAliveOnDispatch is the host-level default-fill; nil or false
+//     means today's behavior (off).
+//
+// Unlike resolveDispatchRemoteControl this returns the resolved opt-in itself,
+// not an injection decision: a downstream "on" still needs niwa to act (the
+// arming is a launch-time prompt prepend; there is no settings key the worker
+// could honor by itself). The RC gate (remoteControlEnabled) is applied by the
+// caller, not here -- resolution and eligibility are separate questions.
+//
+// inst may be nil (settings unreadable); that is treated as "downstream unset".
+func resolveDispatchKeepAlive(flag *bool, global config.GlobalSettings, inst *instanceSettings) bool {
+	if flag != nil {
+		return *flag
+	}
+	if inst != nil && inst.KeepAliveOnDispatch != nil {
+		return *inst.KeepAliveOnDispatch
+	}
+	if global.KeepAliveOnDispatch != nil {
+		return *global.KeepAliveOnDispatch
+	}
+	return false
+}
 
 // remoteControlEnabled reports whether the dispatched worker will start with
 // the Remote Control bridge on: either niwa injected the RC settings flag for

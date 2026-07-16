@@ -34,6 +34,14 @@ type GlobalSettings struct {
 	// remoteControlAtStartup value overrides it. nil preserves today's behavior
 	// (no remote-control injection).
 	RemoteControlOnDispatch *bool `toml:"remote_control_on_dispatch,omitempty"`
+	// KeepAliveOnDispatch, when non-nil and true, makes `niwa dispatch` arm a
+	// keep-alive self-wake on workers that start with remote control, so their
+	// remote session stays reachable across long idle. It is a host-level
+	// default scoped to dispatched workers only; the per-dispatch --keep-alive
+	// flag overrides it in both directions, and a downstream instance setting
+	// outranks it too. nil preserves today's behavior (no keep-alive arming).
+	// It mirrors RemoteControlOnDispatch, plus the flag layer RC does not have.
+	KeepAliveOnDispatch *bool `toml:"keep_alive_on_dispatch,omitempty"`
 	// DispatchModel is the default model for a `niwa dispatch` worker's main
 	// chat loop when the command is run without --model. It accepts the same
 	// vocabulary as the flag: a capability category (fast/balanced/powerful) or

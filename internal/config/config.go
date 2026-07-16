@@ -353,6 +353,16 @@ type SettingsConfig map[string]MaybeSecret
 // so a test pins that tag to this value.
 const RemoteControlAtStartupKey = "remoteControlAtStartup"
 
+// KeepAliveOnDispatchKey is the settings key a downstream [claude.settings]
+// uses to decide dispatch keep-alive for its own instances. Unlike
+// RemoteControlAtStartupKey it is a niwa-defined key, not a Claude Code one --
+// Claude Code ignores it in settings.json; the materializer emits it there so
+// the dispatch keep-alive resolver can read the downstream decision back,
+// exactly the same read-back seam the remote-control resolver rides. It is the
+// single source of truth for the spelling shared by the materializer and the
+// reader (the reader's struct tag cannot reference a const, so a test pins it).
+const KeepAliveOnDispatchKey = "keepAliveOnDispatch"
+
 // EnvConfig defines environment configuration under [env]. It carries a list
 // of env files, a non-sensitive var map ([env.vars]) and a sensitive var map
 // ([env.secrets]), plus the three requirement-description sub-tables under

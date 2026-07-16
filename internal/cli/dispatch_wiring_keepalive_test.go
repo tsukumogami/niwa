@@ -133,6 +133,93 @@ func TestDispatch_KeepAlive_Unset_PromptUnchanged(t *testing.T) {
 	}
 }
 
+// hostRCAndKeepAlive turns on both dispatch defaults: the worker starts with
+// remote control AND keep-alive resolves on with no flag given.
+const hostRCAndKeepAlive = "[global]\nremote_control_on_dispatch = true\nkeep_alive_on_dispatch = true\n"
+
+// Host default on + no flag => arms (the [global] keep_alive_on_dispatch
+// default fills exactly like the RC host default).
+func TestDispatch_KeepAlive_HostDefaultOn_Arms(t *testing.T) {
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	root := setupDispatchWorkspace(t)
+	chdir(t, root)
+	setHostConfig(t, hostRCAndKeepAlive)
+	f := installDispatchFakes(t, root)
+	provisionWithInstanceSettings(t, f, "")
+	var prompt string
+	captureLaunchPrompt(f, &prompt, nil)
+
+	if _, _, err := runDispatchCmd(t, "do a thing"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.HasPrefix(prompt, keepAliveArmingInstruction) {
+		t.Fatalf("host keep_alive_on_dispatch default must arm; prompt = %q", prompt)
+	}
+}
+
+// --keep-alive=false overrides a host-on default (the flag wins in the OFF
+// direction; force-on over host-off is covered by the flag-on tests, whose
+// host config carries no keep_alive_on_dispatch).
+func TestDispatch_KeepAlive_FlagFalse_OverridesHostOn(t *testing.T) {
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	root := setupDispatchWorkspace(t)
+	chdir(t, root)
+	setHostConfig(t, hostRCAndKeepAlive)
+	f := installDispatchFakes(t, root)
+	provisionWithInstanceSettings(t, f, "")
+	var prompt string
+	captureLaunchPrompt(f, &prompt, nil)
+	dispatchKeepAlive = kaBoolPtr(false)
+
+	if _, _, err := runDispatchCmd(t, "do a thing"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if prompt != "do a thing" {
+		t.Fatalf("--keep-alive=false must override the host default; prompt = %q", prompt)
+	}
+}
+
+// A downstream [claude.settings] keepAliveOnDispatch=false wins over a host-on
+// default (default-fill semantics: the host default never overrides a decided
+// downstream value), mirroring the RC downstream-off-wins shape.
+func TestDispatch_KeepAlive_DownstreamOff_WinsOverHostOn(t *testing.T) {
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	root := setupDispatchWorkspace(t)
+	chdir(t, root)
+	setHostConfig(t, hostRCAndKeepAlive)
+	f := installDispatchFakes(t, root)
+	provisionWithInstanceSettings(t, f, `{"keepAliveOnDispatch": false}`)
+	var prompt string
+	captureLaunchPrompt(f, &prompt, nil)
+
+	if _, _, err := runDispatchCmd(t, "do a thing"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if prompt != "do a thing" {
+		t.Fatalf("downstream off must win over the host default; prompt = %q", prompt)
+	}
+}
+
+// A downstream keepAliveOnDispatch=true arms even with the host default unset
+// (the downstream layer is a real opt-in surface, not just an override).
+func TestDispatch_KeepAlive_DownstreamOn_Arms(t *testing.T) {
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	root := setupDispatchWorkspace(t)
+	chdir(t, root)
+	setHostConfig(t, hostRConDispatch) // RC on, keep-alive unset at the host
+	f := installDispatchFakes(t, root)
+	provisionWithInstanceSettings(t, f, `{"keepAliveOnDispatch": true}`)
+	var prompt string
+	captureLaunchPrompt(f, &prompt, nil)
+
+	if _, _, err := runDispatchCmd(t, "do a thing"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.HasPrefix(prompt, keepAliveArmingInstruction) {
+		t.Fatalf("a downstream keep-alive opt-in must arm; prompt = %q", prompt)
+	}
+}
+
 // Explicit --keep-alive=false => no arming and no warning, even with RC on.
 func TestDispatch_KeepAlive_FlagFalse_NoArm(t *testing.T) {
 	t.Setenv("ANTHROPIC_API_KEY", "")

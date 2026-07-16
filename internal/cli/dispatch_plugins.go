@@ -141,6 +141,11 @@ type instanceSettings struct {
 	// only when a downstream [claude.settings] explicitly set it, which is how the
 	// dispatch remote-control resolver tells "downstream decided" from "unset".
 	RemoteControlAtStartup *bool `json:"remoteControlAtStartup"`
+	// KeepAliveOnDispatch mirrors the niwa-defined settings key (Claude Code
+	// ignores it). Non-nil only when a downstream [claude.settings] explicitly
+	// set it; the dispatch keep-alive resolver reads it as the downstream layer
+	// between the --keep-alive flag and the host default.
+	KeepAliveOnDispatch *bool `json:"keepAliveOnDispatch"`
 }
 
 type marketplaceEntry struct {
