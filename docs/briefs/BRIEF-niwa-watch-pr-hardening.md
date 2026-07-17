@@ -1,6 +1,6 @@
 ---
 schema: brief/v1
-status: Draft
+status: Accepted
 problem: |
   The shipped `niwa watch --once` wedge is not trustworthy across repeated
   runs: its SHA-blind handled-set never re-fires a genuine re-request,
@@ -26,7 +26,7 @@ motivating_context: |
 
 ## Status
 
-Draft
+Accepted
 
 Framing for the hardening pass over the shipped `niwa watch --once`
 PR-review wedge. The downstream PRD owns the requirements (the exact
