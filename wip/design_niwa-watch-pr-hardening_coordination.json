@@ -1,0 +1,12 @@
+{
+  "topic": "niwa-watch-pr-hardening",
+  "decisions": [
+    {"id": 1, "question": "Dispatch-state representation, SHA-awareness, trigger-semantics, migration", "status": "complete", "complexity": "standard", "report": "wip/design_niwa-watch-pr-hardening_decision_1_report.md"},
+    {"id": 2, "question": "Session continuation + liveness/idle/attached detection", "status": "complete", "complexity": "critical", "report": "wip/design_niwa-watch-pr-hardening_decision_2_report.md"},
+    {"id": 3, "question": "Freshness re-validation hook point and mechanism", "status": "complete", "complexity": "standard", "report": "wip/design_niwa-watch-pr-hardening_decision_3_report.md"},
+    {"id": 4, "question": "Total-staged cap - counting, config, composition", "status": "complete", "complexity": "standard", "report": "wip/design_niwa-watch-pr-hardening_decision_4_report.md"}
+  ],
+  "cross_validation": "complete",
+  "round": 1,
+  "cross_validation_notes": "Decisions are mutually consistent and share one spine: the two-store split by lifetime (permanent SHA-aware handled-set + GC'd StagedRecord with session refs). D2 needs the session/conv id in the record; D1 adds it. D4's cap counts live records and introduces staged-record GC; D1 depends on that GC to bound record growth; D3's watcher-pass prune IS the GC trigger. D2's resume is cap-neutral (D4). No conflicts. The one cross-cutting risk (both stores grow monotonically) is resolved by the shared staged-record GC that D3 (freshness prune) and D4 (dead-record prune) both feed."
+}
