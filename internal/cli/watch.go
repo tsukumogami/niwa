@@ -157,20 +157,111 @@ func runWatchOnce(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("niwa watch: reading handled-set: %w", err)
 	}
 
-	selected := watch.Select(prs, scope, watch.HandledMembership(handled), watch.DefaultPerRunBound)
-	if len(selected) == 0 {
-		fmt.Fprintln(cmd.OutOrStdout(), "niwa watch: nothing to stage")
-		return nil
+	// Liveness anchor: for every staged record, ask whether a Claude Code job is
+	// still rooted in its instance. A dismissed or crashed-and-reaped session has
+	// no live job, so its PR re-fires fresh on a new head; a still-running review
+	// suppresses the re-fire (Defer). Keyed by PR identity (HandledIdentity).
+	live, err := liveStagedSessions(root)
+	if err != nil {
+		return fmt.Errorf("niwa watch: reading staged records: %w", err)
 	}
 
-	for _, pr := range selected {
-		if err := stageReview(cmd, root, cwd, token, client, pr, plan); err != nil {
-			// Fail loud; the PR was not recorded handled (see stageReview), so a
-			// later run re-attempts it.
-			return fmt.Errorf("niwa watch: staging %s/%s#%d: %w", pr.Owner, pr.Repo, pr.Number, err)
+	// Confirm the current head of every previously-handled, in-scope PR so the
+	// decision can compare it against the last-dispatched SHA. Never-handled PRs
+	// need no re-check (they stage fresh regardless of head), so this re-polls
+	// only the PRs already in the handled-set. A fetch failure is fail-loud: a
+	// broken head re-check must not masquerade as "nothing changed".
+	heads, err := currentHeads(ctx, client, prs, scope, handled)
+	if err != nil {
+		return fmt.Errorf("niwa watch: confirming PR heads: %w", err)
+	}
+
+	plans := watch.Decide(prs, scope, handled, live, heads, watch.DefaultPerRunBound)
+
+	staged := 0
+	for _, p := range plans {
+		id := watch.HandledIdentity(p.PR.Owner, p.PR.Repo, p.PR.Number)
+		switch p.Kind {
+		case watch.Fresh:
+			if err := stageReview(cmd, root, cwd, token, client, p.PR, plan); err != nil {
+				// Fail loud; the PR was not recorded handled (see stageReview), so a
+				// later run re-attempts it.
+				return fmt.Errorf("niwa watch: staging %s/%s#%d: %w", p.PR.Owner, p.PR.Repo, p.PR.Number, err)
+			}
+			staged++
+		case watch.Noop:
+			// A legacy unknown-SHA entry adopts the current head without staging, so
+			// it only re-fires on genuinely new activity later. A non-legacy Noop
+			// (unchanged or unconfirmed head) records nothing.
+			if recorded, ok := handled[id]; ok && recorded == "" {
+				if head, ok := heads[id]; ok && head != "" {
+					if err := watch.AppendHandled(root, p.PR.Owner, p.PR.Repo, p.PR.Number, head); err != nil {
+						return fmt.Errorf("niwa watch: adopting head for %s/%s#%d: %w", p.PR.Owner, p.PR.Repo, p.PR.Number, err)
+					}
+				}
+			}
+		default:
+			// Defer (and the reserved Continue, which routes here until Issue 5):
+			// nothing to stage this pass.
 		}
 	}
+	if staged == 0 {
+		fmt.Fprintln(cmd.OutOrStdout(), "niwa watch: nothing to stage")
+	}
 	return nil
+}
+
+// liveStagedSessions maps each staged PR identity to whether a Claude Code job
+// is still rooted in its recorded instance. It reads the staged-record store
+// (best-effort per record: a record that fails to load is skipped, not fatal)
+// and probes liveness via instanceHasLiveJob against the jobs directory. When
+// several records share a PR identity, any live session marks the PR live.
+func liveStagedSessions(root string) (map[string]bool, error) {
+	handles, err := watch.ListStagedHandles(root)
+	if err != nil {
+		return nil, err
+	}
+	jobsDir := defaultJobsDir()
+	live := map[string]bool{}
+	for _, h := range handles {
+		rec, err := watch.LoadStagedRecord(root, h)
+		if err != nil {
+			continue // a malformed/partial record is not evidence of a live session
+		}
+		id := watch.HandledIdentity(rec.Owner, rec.Repo, rec.Number)
+		if instanceHasLiveJob(jobsDir, rec.InstancePath) {
+			live[id] = true
+		}
+	}
+	return live, nil
+}
+
+// currentHeads fetches the current head SHA of every previously-handled, in-scope
+// PR so Decide can compare it against the last-dispatched SHA. It re-checks only
+// PRs already in the handled-set: a never-handled PR stages fresh regardless of
+// its head, so re-polling it here would be wasted work. The returned map is keyed
+// by PR identity (HandledIdentity). A fetch failure is returned as an error so the
+// pass fails loud rather than treating an unconfirmed head as unchanged.
+func currentHeads(ctx context.Context, client *github.APIClient, prs []github.PRRef, scope *watch.WorkspaceScope, handled map[string]string) (map[string]string, error) {
+	heads := map[string]string{}
+	for _, pr := range prs {
+		if !scope.Contains(pr.Owner, pr.Repo) {
+			continue
+		}
+		id := watch.HandledIdentity(pr.Owner, pr.Repo, pr.Number)
+		if _, ok := handled[id]; !ok {
+			continue // never handled: Decide stages fresh without a head comparison
+		}
+		if _, done := heads[id]; done {
+			continue // the same PR can appear once per page; fetch its head once
+		}
+		head, err := client.GetPullHead(ctx, pr.Owner, pr.Repo, pr.Number)
+		if err != nil {
+			return nil, fmt.Errorf("%s/%s#%d: %w", pr.Owner, pr.Repo, pr.Number, err)
+		}
+		heads[id] = head.SHA
+	}
+	return heads, nil
 }
 
 // stageReview provisions an instance, fetches the PR head as inert data, and
@@ -254,12 +345,13 @@ func stageReview(cmd *cobra.Command, root, cwd, token string, client *github.API
 
 	// Record ONLY on success, so a failed stage does not suppress a re-attempt.
 	rec := watch.StagedRecord{
-		Handle:    slug,
-		Owner:     pr.Owner,
-		Repo:      pr.Repo,
-		Number:    pr.Number,
-		URL:       pr.URL,
-		DraftPath: filepath.Join(instancePath, watch.DefaultDraftRelPath),
+		Handle:       slug,
+		Owner:        pr.Owner,
+		Repo:         pr.Repo,
+		Number:       pr.Number,
+		URL:          pr.URL,
+		DraftPath:    filepath.Join(instancePath, watch.DefaultDraftRelPath),
+		InstancePath: instancePath,
 	}
 	if err := watch.SaveStagedRecord(root, rec); err != nil {
 		return err

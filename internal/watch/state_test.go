@@ -221,12 +221,13 @@ func TestTriggerSemantics_HeaderRoundTrip(t *testing.T) {
 func TestStagedRecord_RoundTrip(t *testing.T) {
 	ws := t.TempDir()
 	rec := StagedRecord{
-		Handle:    "abcd1234",
-		Owner:     "acme",
-		Repo:      "api",
-		Number:    42,
-		URL:       "https://github.com/acme/api/pull/42",
-		DraftPath: filepath.Join(ws, "inst", "watch-review-draft.md"),
+		Handle:       "abcd1234",
+		Owner:        "acme",
+		Repo:         "api",
+		Number:       42,
+		URL:          "https://github.com/acme/api/pull/42",
+		DraftPath:    filepath.Join(ws, "inst", "watch-review-draft.md"),
+		InstancePath: filepath.Join(ws, "inst"),
 	}
 	if err := SaveStagedRecord(ws, rec); err != nil {
 		t.Fatalf("SaveStagedRecord: %v", err)

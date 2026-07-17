@@ -20,28 +20,76 @@ func RepoKey(owner, repo string) string {
 	return strings.ToLower(owner) + "/" + strings.ToLower(repo)
 }
 
-// Select turns the raw poll results into the bounded, ordered set of PRs to
-// dispatch this run. It is a pure function so the deterministic selection
-// contract is table-testable:
+// PlanKind is the per-PR re-dispatch verdict the decision layer produces. It is
+// keyed on the last-dispatched head SHA versus the PR's current head and on
+// whether a live staged session already exists for the PR.
+type PlanKind int
+
+const (
+	// Fresh stages a new review agent for the PR this pass: the PR was never
+	// handled, or its head advanced and no live session is still reviewing it.
+	// Fresh is the only kind that consumes the per-run bound.
+	Fresh PlanKind = iota
+	// Noop does nothing durable to stage: the current head matches the last
+	// dispatched SHA (already reviewed at this head), or the current head could
+	// not be confirmed this pass (fail-closed: never re-fire on uncertainty). A
+	// legacy unknown-SHA entry is also a Noop whose only effect is adopting the
+	// current head into the handled-set without restaging (handled by the caller).
+	Noop
+	// Defer suppresses a re-fire while a live session is still reviewing the PR at
+	// an older head. It is the fallback for the "new head, live session" case;
+	// Issue 5 flips a detached-idle live session to Continue (context-preserving
+	// resume) while a busy/attached one stays Defer.
+	Defer
+	// Continue is RESERVED for Issue 5's context-preserving resume of a live,
+	// detached-idle session at the new head. It is declared so downstream issues
+	// can name it, but Decide never returns it yet: the "new head, live session"
+	// case routes to Defer below. See the TODO in Decide.
+	Continue
+)
+
+// Plan is the decision layer's verdict for one requested PR: the PR itself plus
+// the kind of action the pass should take. It is the SHA-aware successor to the
+// bare []PRRef the pass selected before -- the applying pass keys on Kind.
+type Plan struct {
+	PR   github.PRRef
+	Kind PlanKind
+}
+
+// Decide turns the raw poll results into a per-PR re-dispatch plan. It is a pure
+// function so the deterministic decision contract is table-testable, the way the
+// earlier Select was:
 //
 //   - keep only PRs whose repository is in the workspace (scope) -- a
-//     directly-requested PR outside the workspace is dropped;
-//   - drop PRs already recorded in the handled-set (handled, keyed by
-//     HandledIdentity);
+//     directly-requested PR outside the workspace is dropped entirely;
 //   - order the remainder oldest-PR-first by CreatedAt, with a stable tie-break
-//     on repo then number so a repeat run over unchanged state selects the same
-//     set;
-//   - take at most bound.
-func Select(prs []github.PRRef, scope *WorkspaceScope, handled map[string]bool, bound int) []github.PRRef {
+//     on repo then number, so a repeat run over unchanged state produces the same
+//     plan;
+//   - classify each kept PR against the SHA-aware handled-set and liveness:
+//   - never handled (absent from handledSHAs)          -> Fresh
+//   - legacy unknown-SHA entry (recorded == "")        -> Noop (adopt current
+//     head without restaging; the caller records it)
+//   - current head unconfirmed (absent from heads)     -> Noop (fail-closed)
+//   - current head == recorded SHA                     -> Noop (already reviewed)
+//   - new head, a live session still reviewing         -> Defer
+//   - new head, no live session                        -> Fresh
+//   - truncate to bound, counting only Fresh plans -- Noop and Defer do not
+//     consume the bound, and excess Fresh plans (oldest-first) beyond the bound
+//     are dropped, exactly as Select dropped the overflow.
+//
+// handledSHAs maps a PR identity (HandledIdentity) to its last-dispatched head
+// SHA ("" for a legacy unknown-SHA entry); heads maps a PR identity to its
+// current head SHA (populated by the caller only for PRs it re-checked, so an
+// absent entry means "head not confirmed this pass"); live maps a PR identity to
+// whether a staged review session is still alive for it.
+func Decide(prs []github.PRRef, scope *WorkspaceScope, handledSHAs map[string]string, live map[string]bool, heads map[string]string, bound int) []Plan {
 	if bound <= 0 {
 		bound = DefaultPerRunBound
 	}
+
 	var kept []github.PRRef
 	for _, pr := range prs {
 		if !scope.Contains(pr.Owner, pr.Repo) {
-			continue
-		}
-		if handled[HandledIdentity(pr.Owner, pr.Repo, pr.Number)] {
 			continue
 		}
 		kept = append(kept, pr)
@@ -59,8 +107,46 @@ func Select(prs []github.PRRef, scope *WorkspaceScope, handled map[string]bool, 
 		return a.Number < b.Number
 	})
 
-	if len(kept) > bound {
-		kept = kept[:bound]
+	var plans []Plan
+	freshUsed := 0
+	for _, pr := range kept {
+		kind := decideKind(pr, handledSHAs, live, heads)
+		if kind == Fresh {
+			if freshUsed >= bound {
+				continue // per-run bound: drop overflow Fresh, re-decided next pass
+			}
+			freshUsed++
+		}
+		plans = append(plans, Plan{PR: pr, Kind: kind})
 	}
-	return kept
+	return plans
+}
+
+// decideKind is the pure per-PR classifier behind Decide. It consults only the
+// SHA-aware handled-set, the current-head map, and liveness -- no ordering or
+// bound. See Decide's doc for the branch table.
+func decideKind(pr github.PRRef, handledSHAs map[string]string, live map[string]bool, heads map[string]string) PlanKind {
+	id := HandledIdentity(pr.Owner, pr.Repo, pr.Number)
+	recorded, handledBefore := handledSHAs[id]
+	if !handledBefore {
+		return Fresh // never handled: stage a first review
+	}
+	if recorded == "" {
+		return Noop // legacy unknown-SHA entry: adopt current head, do not restage
+	}
+	head, haveHead := heads[id]
+	if !haveHead {
+		return Noop // current head unconfirmed this pass: fail-closed, do not re-fire
+	}
+	if head == recorded {
+		return Noop // already reviewed at this head
+	}
+	if live[id] {
+		// New head while a session is still reviewing the PR. Suppress the re-fire
+		// for now. TODO(Issue 5): a detached-idle live session flips to Continue
+		// (context-preserving resume at the new head); a busy/attached one stays
+		// Defer. Until then every live session Defers.
+		return Defer
+	}
+	return Fresh // new head, no live session: re-fire a review
 }

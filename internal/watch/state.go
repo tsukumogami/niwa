@@ -297,6 +297,12 @@ type StagedRecord struct {
 	Number    int    `json:"number"`
 	URL       string `json:"url"`
 	DraftPath string `json:"draft_path"`
+	// InstancePath is the absolute path of the niwa instance the review session
+	// was launched in. It is the liveness anchor: the re-dispatch decision maps a
+	// staged record to a live/dead session by asking whether any Claude Code job
+	// is rooted at this path (instanceHasLiveJob). It is niwa-generated (a
+	// provisioned instance directory), never author-controlled.
+	InstancePath string `json:"instance_path"`
 }
 
 // SaveStagedRecord writes a staged-review record keyed by handle.
