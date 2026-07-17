@@ -303,6 +303,13 @@ type StagedRecord struct {
 	// is rooted at this path (instanceHasLiveJob). It is niwa-generated (a
 	// provisioned instance directory), never author-controlled.
 	InstancePath string `json:"instance_path"`
+	// DispatchedSHA is the head SHA the review was staged against. It is the base
+	// for the freshness ancestry check: a still-open, still-requested PR is fresh
+	// only while this SHA remains an ancestor of the PR's current head (ordinary
+	// advancement); a force-push/rebase that moves the head off this SHA makes the
+	// staged review stale. It is platform-vouched hex from GetPullHead, never
+	// author-controlled free text.
+	DispatchedSHA string `json:"dispatched_sha"`
 }
 
 // SaveStagedRecord writes a staged-review record keyed by handle.
@@ -340,6 +347,23 @@ func LoadStagedRecord(workspaceRoot, handle string) (StagedRecord, error) {
 		return rec, fmt.Errorf("decoding staged record for %q: %w", handle, err)
 	}
 	return rec, nil
+}
+
+// DeleteStagedRecord removes the staged-review record for a handle. It is the
+// record-layer counterpart to the instance reaper: the watcher-pass GC calls it
+// to prune a dead or stale record so the record store stops growing unbounded.
+// The handle is validated against the safe charset before it becomes a path
+// component (the traversal guard LoadStagedRecord applies). Removing a record
+// that is already gone is not an error -- the prune is idempotent across passes.
+func DeleteStagedRecord(workspaceRoot, handle string) error {
+	if !isSafeHandle(handle) {
+		return fmt.Errorf("refusing to delete record with unsafe handle %q", handle)
+	}
+	err := os.Remove(filepath.Join(workspaceRoot, stagedRecordsRelDir, handle+".json"))
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("deleting staged record for %q: %w", handle, err)
+	}
+	return nil
 }
 
 // ListStagedHandles returns the handles of all staged records, sorted.

@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -152,6 +153,17 @@ func runWatchOnce(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("niwa watch: searching review-requested PRs: %w", err)
 	}
 
+	// Staged-record GC (runs EACH PASS, before the decision): prune records whose
+	// session is dead, and discard records that fail freshness (PR closed/no longer
+	// requested, or force-pushed off the dispatched head). This is the record-layer
+	// counterpart to reapOpportunistically -- it bounds record-store growth and
+	// frees capacity on dismissal, and it runs before liveStagedSessions/Decide so a
+	// dead or stale record never inflates the live-count or suppresses a re-fire. A
+	// per-record failure is skipped, not fatal: one bad record must not abort the
+	// pass (fail-safe), matching the shipped skip-malformed contract.
+	requested := requestedIdentities(prs)
+	pruneStagedRecords(ctx, cmd.OutOrStdout(), root, client, requested)
+
 	handled, err := watch.LoadHandledSet(root)
 	if err != nil {
 		return fmt.Errorf("niwa watch: reading handled-set: %w", err)
@@ -234,6 +246,117 @@ func liveStagedSessions(root string) (map[string]bool, error) {
 		}
 	}
 	return live, nil
+}
+
+// prFreshnessClient is the subset of the GitHub client the freshness check needs:
+// the current head of a PR and the ancestry of the dispatched SHA against it.
+// *github.APIClient satisfies it; a test passes a fake so the prune logic is
+// exercised without a live server.
+type prFreshnessClient interface {
+	GetPullHead(ctx context.Context, owner, repo string, number int) (github.PullHead, error)
+	CompareCommits(ctx context.Context, owner, repo, base, head string) (github.Ancestry, error)
+}
+
+// stagedInstanceLiveFunc is a seam over instanceHasLiveJob so a test can drive the
+// prune's liveness branch without staging real Claude Code jobs.
+var stagedInstanceLiveFunc = instanceHasLiveJob
+
+// requestedIdentities projects the poll results onto the set of PR identities that
+// are still open and still requesting the developer's review. Presence in this set
+// is the freshness predicate's "stillRequested" input.
+func requestedIdentities(prs []github.PRRef) map[string]bool {
+	set := make(map[string]bool, len(prs))
+	for _, pr := range prs {
+		set[watch.HandledIdentity(pr.Owner, pr.Repo, pr.Number)] = true
+	}
+	return set
+}
+
+// recordAncestry resolves the ancestry of a staged record's dispatched SHA against
+// its PR's current head, on the trusted GitHub API. An identical head short-circuits
+// to Ancestor without a compare call. Any API error yields AncestryUnknown -- an
+// inconclusive result the freshness predicate treats conservatively (keeps the
+// review) rather than a fatal error, so a transient hiccup never discards a valid
+// staged review nor aborts the pass.
+func recordAncestry(ctx context.Context, client prFreshnessClient, rec watch.StagedRecord) github.Ancestry {
+	head, err := client.GetPullHead(ctx, rec.Owner, rec.Repo, rec.Number)
+	if err != nil {
+		return github.AncestryUnknown
+	}
+	if head.SHA == rec.DispatchedSHA {
+		return github.AncestryAncestor // unchanged head: trivially an ancestor
+	}
+	ancestry, err := client.CompareCommits(ctx, rec.Owner, rec.Repo, rec.DispatchedSHA, head.SHA)
+	if err != nil {
+		return github.AncestryUnknown
+	}
+	return ancestry
+}
+
+// evalRecordFreshness runs the freshness predicate for one staged record against
+// live GitHub state: stillRequested from the poll set, ancestry from the trusted
+// compare (only fetched when still requested, since a not-requested record is stale
+// regardless of ancestry). It is shared by the watcher-pass prune and the session
+// pre-flight subcommand so both apply the identical deterministic check.
+func evalRecordFreshness(ctx context.Context, client prFreshnessClient, requested map[string]bool, rec watch.StagedRecord) (ok bool, reason string) {
+	id := watch.HandledIdentity(rec.Owner, rec.Repo, rec.Number)
+	stillRequested := requested[id]
+	ancestry := github.AncestryUnknown
+	if stillRequested {
+		ancestry = recordAncestry(ctx, client, rec)
+	}
+	return watch.Freshness(rec, stillRequested, ancestry)
+}
+
+// pruneStagedRecords is the staged-record GC: for every staged record it either
+// prunes a dead record (no live job in its instance) or evaluates freshness on a
+// live one and discards it when stale. In both cases the record is deleted and the
+// instance is best-effort destroyed (a dead session's instance is already gone;
+// destroy is idempotent). A live+fresh record is kept untouched.
+//
+// It never aborts the pass: a record that fails to load is skipped (a
+// malformed/partial record is not evidence of anything), and a delete/destroy error
+// is reported but does not stop the sweep -- one bad record must not block pruning
+// the rest, matching the shipped skip-malformed contract. It is best-effort by
+// design (the next pass re-runs it), so it returns nothing.
+func pruneStagedRecords(ctx context.Context, out io.Writer, root string, client prFreshnessClient, requested map[string]bool) {
+	handles, err := watch.ListStagedHandles(root)
+	if err != nil {
+		// Listing failed (e.g. an unreadable store): nothing to prune this pass, and
+		// the decision layer's own load is fail-loud, so stay quiet here.
+		return
+	}
+	jobsDir := defaultJobsDir()
+	for _, h := range handles {
+		rec, err := watch.LoadStagedRecord(root, h)
+		if err != nil {
+			continue // skip-and-continue: a bad record is not fatal to the pass
+		}
+
+		if !stagedInstanceLiveFunc(jobsDir, rec.InstancePath) {
+			discardStagedRecord(out, root, h, rec, "session no longer live")
+			continue
+		}
+
+		if ok, reason := evalRecordFreshness(ctx, client, requested, rec); !ok {
+			discardStagedRecord(out, root, h, rec, reason)
+		}
+		// live + fresh: keep the record and its session untouched.
+	}
+}
+
+// discardStagedRecord tears down one staged review: best-effort destroy the
+// instance (so a stale session does not linger) then delete the record. The reason
+// is printed so the operator sees which condition retired the review.
+func discardStagedRecord(out io.Writer, root, handle string, rec watch.StagedRecord, reason string) {
+	fmt.Fprintf(out, "niwa watch: discarding staged review for %s/%s#%d (handle %s): %s\n",
+		rec.Owner, rec.Repo, rec.Number, handle, reason)
+	if rec.InstancePath != "" {
+		_ = destroyInstanceFunc(rec.InstancePath) // best-effort: a dead instance is already gone
+	}
+	if err := watch.DeleteStagedRecord(root, handle); err != nil {
+		fmt.Fprintf(out, "niwa watch: warning: could not delete staged record %s: %v\n", handle, err)
+	}
 }
 
 // currentHeads fetches the current head SHA of every previously-handled, in-scope
@@ -345,13 +468,14 @@ func stageReview(cmd *cobra.Command, root, cwd, token string, client *github.API
 
 	// Record ONLY on success, so a failed stage does not suppress a re-attempt.
 	rec := watch.StagedRecord{
-		Handle:       slug,
-		Owner:        pr.Owner,
-		Repo:         pr.Repo,
-		Number:       pr.Number,
-		URL:          pr.URL,
-		DraftPath:    filepath.Join(instancePath, watch.DefaultDraftRelPath),
-		InstancePath: instancePath,
+		Handle:        slug,
+		Owner:         pr.Owner,
+		Repo:          pr.Repo,
+		Number:        pr.Number,
+		URL:           pr.URL,
+		DraftPath:     filepath.Join(instancePath, watch.DefaultDraftRelPath),
+		InstancePath:  instancePath,
+		DispatchedSHA: head.SHA,
 	}
 	if err := watch.SaveStagedRecord(root, rec); err != nil {
 		return err

@@ -110,6 +110,74 @@ func TestGetPullHead_InvalidCoords(t *testing.T) {
 	}
 }
 
+func TestCompareCommits_StatusMapping(t *testing.T) {
+	cases := []struct {
+		status string
+		want   Ancestry
+	}{
+		{"identical", AncestryAncestor},
+		{"behind", AncestryAncestor}, // base behind head: head only advanced
+		{"ahead", AncestryDiverged},  // base ahead of head: head rewound
+		{"diverged", AncestryDiverged},
+	}
+	for _, tc := range cases {
+		t.Run(tc.status, func(t *testing.T) {
+			var gotPath string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotPath = r.URL.Path
+				_, _ = io.WriteString(w, `{"status":"`+tc.status+`"}`)
+			}))
+			defer srv.Close()
+			c := &APIClient{HTTPClient: http.DefaultClient, BaseURL: srv.URL}
+			got, err := c.CompareCommits(context.Background(), "acme", "api", "base123", "head456")
+			if err != nil {
+				t.Fatalf("CompareCommits: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("status %q -> %v, want %v", tc.status, got, tc.want)
+			}
+			if wantPath := "/repos/acme/api/compare/base123...head456"; gotPath != wantPath {
+				t.Errorf("compare path = %q, want %q", gotPath, wantPath)
+			}
+		})
+	}
+}
+
+// TestCompareCommits_UnknownOnErrorPaths proves the inconclusive paths return
+// AncestryUnknown with an error (never a wrong Ancestor/Diverged), so a caller can
+// treat them conservatively rather than acting on a bad signal.
+func TestCompareCommits_UnknownOnErrorPaths(t *testing.T) {
+	t.Run("unrecognized status", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = io.WriteString(w, `{"status":"weird"}`)
+		}))
+		defer srv.Close()
+		c := &APIClient{HTTPClient: http.DefaultClient, BaseURL: srv.URL}
+		got, err := c.CompareCommits(context.Background(), "acme", "api", "b", "h")
+		if got != AncestryUnknown || err == nil {
+			t.Errorf("unrecognized status: got (%v, %v), want (AncestryUnknown, error)", got, err)
+		}
+	})
+	t.Run("non-200", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusNotFound)
+		}))
+		defer srv.Close()
+		c := &APIClient{HTTPClient: http.DefaultClient, BaseURL: srv.URL}
+		got, err := c.CompareCommits(context.Background(), "acme", "api", "b", "h")
+		if got != AncestryUnknown || err == nil {
+			t.Errorf("non-200: got (%v, %v), want (AncestryUnknown, error)", got, err)
+		}
+	})
+	t.Run("empty coordinates", func(t *testing.T) {
+		c := &APIClient{HTTPClient: http.DefaultClient, BaseURL: "https://example.test"}
+		got, err := c.CompareCommits(context.Background(), "acme", "api", "", "h")
+		if got != AncestryUnknown || err == nil {
+			t.Errorf("empty base: got (%v, %v), want (AncestryUnknown, error)", got, err)
+		}
+	})
+}
+
 func TestOwnerRepoFromAPIURL(t *testing.T) {
 	cases := []struct {
 		in          string

@@ -221,13 +221,14 @@ func TestTriggerSemantics_HeaderRoundTrip(t *testing.T) {
 func TestStagedRecord_RoundTrip(t *testing.T) {
 	ws := t.TempDir()
 	rec := StagedRecord{
-		Handle:       "abcd1234",
-		Owner:        "acme",
-		Repo:         "api",
-		Number:       42,
-		URL:          "https://github.com/acme/api/pull/42",
-		DraftPath:    filepath.Join(ws, "inst", "watch-review-draft.md"),
-		InstancePath: filepath.Join(ws, "inst"),
+		Handle:        "abcd1234",
+		Owner:         "acme",
+		Repo:          "api",
+		Number:        42,
+		URL:           "https://github.com/acme/api/pull/42",
+		DraftPath:     filepath.Join(ws, "inst", "watch-review-draft.md"),
+		InstancePath:  filepath.Join(ws, "inst"),
+		DispatchedSHA: "abcdef1234567",
 	}
 	if err := SaveStagedRecord(ws, rec); err != nil {
 		t.Fatalf("SaveStagedRecord: %v", err)
@@ -256,6 +257,40 @@ func TestStagedRecord_UnsafeHandleRejected(t *testing.T) {
 		}
 		if _, err := LoadStagedRecord(ws, bad); err == nil {
 			t.Errorf("LoadStagedRecord accepted unsafe handle %q", bad)
+		}
+	}
+}
+
+func TestDeleteStagedRecord(t *testing.T) {
+	ws := t.TempDir()
+	rec := StagedRecord{Handle: "abcd1234", Owner: "acme", Repo: "api", Number: 42}
+	if err := SaveStagedRecord(ws, rec); err != nil {
+		t.Fatalf("SaveStagedRecord: %v", err)
+	}
+
+	// Deleting an existing record removes it from the store.
+	if err := DeleteStagedRecord(ws, "abcd1234"); err != nil {
+		t.Fatalf("DeleteStagedRecord: %v", err)
+	}
+	handles, err := ListStagedHandles(ws)
+	if err != nil {
+		t.Fatalf("ListStagedHandles: %v", err)
+	}
+	if len(handles) != 0 {
+		t.Fatalf("record not deleted: %v", handles)
+	}
+
+	// Deleting a record that is already gone is not an error (idempotent prune).
+	if err := DeleteStagedRecord(ws, "abcd1234"); err != nil {
+		t.Errorf("DeleteStagedRecord on missing record: %v", err)
+	}
+}
+
+func TestDeleteStagedRecord_UnsafeHandleRejected(t *testing.T) {
+	ws := t.TempDir()
+	for _, bad := range []string{"../escape", "a/b", "with space", ""} {
+		if err := DeleteStagedRecord(ws, bad); err == nil {
+			t.Errorf("DeleteStagedRecord accepted unsafe handle %q", bad)
 		}
 	}
 }
