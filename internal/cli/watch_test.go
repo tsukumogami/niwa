@@ -11,6 +11,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/tsukumogami/niwa/internal/config"
+	"github.com/tsukumogami/niwa/internal/watch"
 )
 
 // TestCheckSandboxCapability_FailClosed validates the preflight is fail-closed
@@ -158,6 +159,72 @@ func TestResolveSandboxMode(t *testing.T) {
 		if mode != tc.want {
 			t.Errorf("%s: got %q, want %q", tc.name, mode, tc.want)
 		}
+	}
+}
+
+// TestResolveMaxStaged mirrors the resolveSandboxMode contract for the cross-run
+// staged-agent cap: unset (0) and nil resolve to the default, a positive value is
+// honored, and a negative value is a hard error.
+func TestResolveMaxStaged(t *testing.T) {
+	mk := func(n int) *config.GlobalConfig {
+		gc := &config.GlobalConfig{}
+		gc.Global.WatchMaxStaged = n
+		return gc
+	}
+	cases := []struct {
+		name    string
+		gc      *config.GlobalConfig
+		want    int
+		wantErr bool
+	}{
+		{"nil -> default", nil, watch.DefaultMaxStaged, false},
+		{"zero -> default", mk(0), watch.DefaultMaxStaged, false},
+		{"explicit positive honored", mk(8), 8, false},
+		{"explicit one honored", mk(1), 1, false},
+		{"negative rejected", mk(-1), 0, true},
+	}
+	for _, tc := range cases {
+		got, err := resolveMaxStaged(tc.gc)
+		if tc.wantErr {
+			if err == nil {
+				t.Errorf("%s: expected error", tc.name)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("%s: unexpected error: %v", tc.name, err)
+			continue
+		}
+		if got != tc.want {
+			t.Errorf("%s: got %d, want %d", tc.name, got, tc.want)
+		}
+	}
+}
+
+// TestCountLiveStaged: the cap's occupancy input counts only entries whose value is
+// true. A Defer'd session is recorded live (true) and so counts toward the cap; a
+// PR with no live agent never appears as true. Continuation (Issue 5) reuses one of
+// these already-counted agents, so it is cap-neutral.
+func TestCountLiveStaged(t *testing.T) {
+	if got := countLiveStaged(nil); got != 0 {
+		t.Errorf("nil map: got %d, want 0", got)
+	}
+	if got := countLiveStaged(map[string]bool{}); got != 0 {
+		t.Errorf("empty map: got %d, want 0", got)
+	}
+	live := map[string]bool{
+		"acme/api#1": true, // fresh live
+		"acme/api#2": true, // deferred but live (still holds an agent)
+		"acme/web#3": true, // continuing live (already counted; cap-neutral)
+	}
+	if got := countLiveStaged(live); got != 3 {
+		t.Errorf("three live: got %d, want 3", got)
+	}
+	// Defensive: a false entry (not produced by liveStagedSessions today) is not
+	// counted as an occupied agent.
+	mixed := map[string]bool{"acme/api#1": true, "acme/api#2": false}
+	if got := countLiveStaged(mixed); got != 1 {
+		t.Errorf("one live + one false: got %d, want 1", got)
 	}
 }
 

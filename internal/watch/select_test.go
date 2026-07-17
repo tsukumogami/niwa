@@ -223,6 +223,36 @@ func TestDecide_ZeroBoundUsesDefault(t *testing.T) {
 	}
 }
 
+// TestStageBudget composes the per-run bound with the cross-run staged-agent cap.
+// It is the pure helper runWatchOnce uses to size a pass's fresh budget.
+func TestStageBudget(t *testing.T) {
+	cases := []struct {
+		name        string
+		perRunBound int
+		maxStaged   int
+		liveCount   int
+		want        int
+	}{
+		// Plenty of cap slack: the per-run bound governs (min picks the bound).
+		{"slack larger than bound -> bound", DefaultPerRunBound, DefaultMaxStaged, 0, DefaultPerRunBound},
+		// Cap slack smaller than the per-run bound: the remaining cap governs.
+		{"slack smaller than bound -> remaining", DefaultPerRunBound, DefaultMaxStaged, 3, 2},
+		{"one slot of slack -> 1", DefaultPerRunBound, DefaultMaxStaged, 4, 1},
+		// Cap exactly saturated: zero budget, caller must short-circuit.
+		{"cap reached -> 0", DefaultPerRunBound, DefaultMaxStaged, DefaultMaxStaged, 0},
+		// Over-saturated (more live than the cap, e.g. after lowering it): clamped to 0.
+		{"over cap -> clamped 0", DefaultPerRunBound, DefaultMaxStaged, DefaultMaxStaged + 2, 0},
+		// Slack equal to the bound: the bound governs (min of equals).
+		{"slack equals bound", 3, 6, 3, 3},
+	}
+	for _, tc := range cases {
+		if got := StageBudget(tc.perRunBound, tc.maxStaged, tc.liveCount); got != tc.want {
+			t.Errorf("%s: StageBudget(%d, %d, %d) = %d, want %d",
+				tc.name, tc.perRunBound, tc.maxStaged, tc.liveCount, got, tc.want)
+		}
+	}
+}
+
 func itoa(n int) string {
 	if n == 0 {
 		return "0"

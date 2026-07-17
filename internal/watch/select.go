@@ -13,6 +13,32 @@ import (
 // Richer, configurable concurrency control is deferred.
 const DefaultPerRunBound = 3
 
+// DefaultMaxStaged is the cross-run cap on how many live staged review agents may
+// exist at once, composed with DefaultPerRunBound. It sits modestly above the
+// per-run bound of 3 because each staged agent is a full, self-contained instance
+// (its own clone and Claude Code session); 5 lets a small backlog drain over a
+// couple of passes without letting staged instances accumulate without limit.
+const DefaultMaxStaged = 5
+
+// StageBudget composes the per-run bound with the cross-run staged-agent cap into
+// the number of fresh reviews a single pass may stage:
+// min(perRunBound, maxStaged - liveCount), clamped to never go negative. A return
+// of 0 means the cap is saturated and no fresh review may be staged this pass
+// (the caller must short-circuit rather than pass 0 into Decide, whose own
+// bound <= 0 fallback would restore DefaultPerRunBound). Only Fresh consumes the
+// budget; a future Continue (Issue 5) reuses an already-counted live agent and is
+// cap-neutral, so it must not decrement liveCount against this budget.
+func StageBudget(perRunBound, maxStaged, liveCount int) int {
+	remaining := maxStaged - liveCount
+	if remaining < 0 {
+		remaining = 0
+	}
+	if remaining < perRunBound {
+		return remaining
+	}
+	return perRunBound
+}
+
 // RepoKey is the workspace-membership key for a repository: "owner/repo",
 // lowercased so matching is robust to case differences between the GitHub
 // search payload and the workspace config.

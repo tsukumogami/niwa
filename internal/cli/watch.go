@@ -60,6 +60,41 @@ func resolveSandboxMode(gc *config.GlobalConfig) (string, error) {
 	}
 }
 
+// resolveMaxStaged reads the watch_max_staged switch from the global config and
+// resolves it into the cross-run staged-agent cap, mirroring resolveSandboxMode.
+// It follows the decision layer's `<= 0 -> default` convention: an unset value (0)
+// resolves to watch.DefaultMaxStaged, and a positive value is honored as-is. Only a
+// truly negative value is a hard error -- never silently coerced -- consistent with
+// resolveSandboxMode rejecting an unrecognized mode.
+func resolveMaxStaged(gc *config.GlobalConfig) (int, error) {
+	max := 0
+	if gc != nil {
+		max = gc.Global.WatchMaxStaged
+	}
+	if max < 0 {
+		return 0, fmt.Errorf("invalid watch_max_staged %d (must be >= 0; 0 means the default of %d)", max, watch.DefaultMaxStaged)
+	}
+	if max == 0 {
+		return watch.DefaultMaxStaged, nil
+	}
+	return max, nil
+}
+
+// countLiveStaged counts the live staged review agents: entries in the liveness map
+// whose value is true. It is the cross-run cap's occupancy input. A Defer'd session
+// is live (it still holds an agent) and so counts; a future Continue (Issue 5)
+// reuses one of these already-counted agents rather than adding one, so continuation
+// is cap-neutral and must not inflate this count.
+func countLiveStaged(live map[string]bool) int {
+	n := 0
+	for _, isLive := range live {
+		if isLive {
+			n++
+		}
+	}
+	return n
+}
+
 // resolveReviewPlan turns the resolved sandbox mode into a plan. "off" returns a
 // no-sandbox plan (the trusted path). "required" runs the capability probe and
 // returns a sandboxed plan on success, or a fail-closed refusal when the OS
@@ -110,6 +145,10 @@ func runWatchOnce(cmd *cobra.Command, _ []string) error {
 	// runs here (not per PR) when the sandbox is required.
 	gc, _ := config.LoadGlobalConfig()
 	mode, err := resolveSandboxMode(gc)
+	if err != nil {
+		return fmt.Errorf("niwa watch: %w", err)
+	}
+	maxStaged, err := resolveMaxStaged(gc)
 	if err != nil {
 		return fmt.Errorf("niwa watch: %w", err)
 	}
@@ -188,13 +227,50 @@ func runWatchOnce(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("niwa watch: confirming PR heads: %w", err)
 	}
 
+	// Cross-run staged-agent cap (Issue 4): count the live staged agents (the prune
+	// above has already removed dead/stale records, so this reflects real occupancy),
+	// then compose the cap with the per-run bound into a per-pass fresh budget. Only
+	// Fresh consumes the budget; Noop-adopt and Defer proceed regardless. A future
+	// Continue (Issue 5) reuses one of these already-counted live agents, so it is
+	// cap-neutral and must NOT be gated on this budget.
+	liveCount := countLiveStaged(live)
+	budget := watch.StageBudget(watch.DefaultPerRunBound, maxStaged, liveCount)
+
 	plans := watch.Decide(prs, scope, handled, live, heads, watch.DefaultPerRunBound)
+
+	// Count the fresh reviews the decision planned so we can report when the cap
+	// leaves some pending (unrecorded) for a later pass.
+	freshPlanned := 0
+	for _, p := range plans {
+		if p.Kind == watch.Fresh {
+			freshPlanned++
+		}
+	}
+	out := cmd.OutOrStdout()
+	capBlocked := budget < freshPlanned
+	if capBlocked {
+		if budget <= 0 {
+			fmt.Fprintf(out, "niwa watch: staged-agent cap reached (%d live staged, cap %d); %d eligible fresh review(s) stay pending (unrecorded) for a later pass\n",
+				liveCount, maxStaged, freshPlanned)
+		} else {
+			fmt.Fprintf(out, "niwa watch: staged-agent cap: staging %d of %d eligible fresh review(s) this pass (%d live staged, cap %d); the rest stay pending for a later pass\n",
+				budget, freshPlanned, liveCount, maxStaged)
+		}
+	}
 
 	staged := 0
 	for _, p := range plans {
 		id := watch.HandledIdentity(p.PR.Owner, p.PR.Repo, p.PR.Number)
 		switch p.Kind {
 		case watch.Fresh:
+			// Cap/per-run budget: stage only while budget remains. Surplus Fresh stays
+			// unrecorded so the next pass re-decides it oldest-first (backfill). Because
+			// Decide already ordered plans oldest-first, staging the first `budget` here
+			// preserves that ordering. A future Continue (Issue 5) is cap-neutral and
+			// would NOT be gated at this site.
+			if staged >= budget {
+				continue
+			}
 			if err := stageReview(cmd, root, cwd, token, client, p.PR, plan); err != nil {
 				// Fail loud; the PR was not recorded handled (see stageReview), so a
 				// later run re-attempts it.
@@ -217,8 +293,10 @@ func runWatchOnce(cmd *cobra.Command, _ []string) error {
 			// nothing to stage this pass.
 		}
 	}
-	if staged == 0 {
-		fmt.Fprintln(cmd.OutOrStdout(), "niwa watch: nothing to stage")
+	if staged == 0 && !capBlocked {
+		// Only claim "nothing to stage" when the pass genuinely had nothing to do; a
+		// cap-blocked pass already reported that eligible PRs stay pending.
+		fmt.Fprintln(out, "niwa watch: nothing to stage")
 	}
 	return nil
 }
