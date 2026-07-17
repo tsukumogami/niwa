@@ -8,9 +8,10 @@ problem: |
   bound exists so live staged agents accumulate without limit.
 outcome: |
   A developer runs watch repeatedly and trusts what it stages: a re-request
-  after new commits re-fires exactly once, a staged review whose PR moved
-  on discards itself instead of presenting a dead draft, and live staged
-  agents never exceed a fixed cap no matter how bursty the request stream.
+  after new commits continues their existing review session with everything
+  it already learned (or starts fresh when none survives), a staged review
+  whose PR moved on discards itself instead of presenting a dead draft, and
+  live staged agents never exceed a fixed cap however bursty the stream.
 motivating_context: |
   The first version of proactive PR-review dispatch shipped deliberately
   minimal: its own scope boundary deferred durable dedup/cursor state,
@@ -48,6 +49,14 @@ tool whose job is to turn that signal into a staged review -- silently
 ignores it forever. The developer is back to manual triage for exactly
 the PRs that are most actively in motion.
 
+And the review session from the first pass is not disposable. Over that
+review the developer often hands the agent real context -- what they
+expect from the change, the docs and code that matter, what to weigh --
+so by the time a review is posted the session is the best-informed
+reviewer of the next iteration that exists. A dedup model that can only
+choose between "ignore the re-request" and "start a naive session from
+scratch" throws that investment away either way.
+
 The staged reviews themselves go stale invisibly. Proactive staging
 means hours or days can pass between the dispatch and the human
 unblocking the session, and in that window the PR can merge, close, drop
@@ -67,8 +76,9 @@ means no ceiling on inbox flood or on the cost a bursty week of review
 requests can incur.
 
 Underneath all three gaps is a contract question the first version never
-had to answer. A PR review request is a level-triggered signal -- "this
-PR is now at state S and wants your review" -- so the right dedup state
+had to answer -- one the next feature author feels rather than today's
+developer. A PR review request is a level-triggered signal -- "this PR is
+now at state S and wants your review" -- so the right dedup state
 coalesces to current state and only ever cares about the latest diff.
 But the dispatch-state contract this hardening introduces will outlive
 the PR wedge, and a future source that is a genuine event stream (
@@ -80,14 +90,22 @@ drops events.
 ## User Outcome
 
 A developer who runs `niwa watch --once` more than once -- by hand
-today, on a schedule later -- stops second-guessing it. When a PR they
-already reviewed comes back with new commits and a fresh review request,
-the next run stages a fresh review of the new diff, exactly one, without
-the developer bookkeeping which PRs are "done". While an earlier staged
-review for that PR is still sitting in the agent view, the watcher
-holds off rather than piling a second agent onto the same PR; the
-developer's dismissal of the old session is the gesture that says
-"superseded, go again".
+today, on a schedule later -- stops second-guessing it. When a PR comes
+back with new commits and a fresh review request, what happens depends on
+the review session they already have. If that session is still alive and
+idle in their agent view, it picks the change back up: the reviewer they
+briefed looks at the new diff, carrying everything it already learned,
+rather than a stranger starting over. If they threw that session away, or
+it crashed, the next run stages a clean one against the new head. Either
+way exactly one review agent ends up on the PR -- never two -- and the
+developer does no bookkeeping about which PRs are "done".
+
+An active session is never yanked out from under them. If new commits
+land while the developer is attached to that review or it is mid-thought,
+the watcher does not interrupt it; the update waits until the session is
+idle (or the next run catches it). Dismissing a session stays the
+developer's call and means "I'm finished with this reviewer" -- the next
+change then starts fresh, because they chose to discard the context.
 
 When the developer unblocks a staged review, it is either still real or
 it says so: a session whose PR has merged, closed, stopped requesting
@@ -100,25 +118,32 @@ staged sessions are dismissed or completed.
 
 ## User Journeys
 
-### The author pushes fixes and re-requests review
+### The reviewer the developer briefed picks up the revision
 
-A developer reviewed a PR staged by an earlier watch run and dismissed
-the session after posting; the PR author pushes new commits addressing
-the feedback and re-requests the developer's review. Trigger: the next
-`niwa watch --once` run, with the PR's head SHA changed since the last
-dispatch and no live staged session for it. Outcome: exactly one fresh
-review agent is staged against the new head; the developer finds a
-drafted review of the updated diff, not silence.
+A developer reviewed a PR staged by an earlier watch run, gave the agent
+real context along the way, posted the review, and left the session
+sitting idle in their agent view rather than dismissing it. The author
+pushes commits addressing the feedback and re-requests review. Trigger:
+the next `niwa watch --once` run, with the head SHA changed and the
+review session still alive and idle. Outcome: that same session takes up
+the new diff -- the reviewer they already briefed, re-evaluating the
+revision with everything it learned the first time -- instead of a fresh
+agent starting from nothing. Had the developer dismissed the session, the
+same run would instead stage one clean review against the new head; a
+crashed-and-reaped session lands there too. Either path stages exactly
+one agent, never a second alongside the first.
 
-### New commits land while the old session is still staged
+### New commits arrive while the developer is still in the review
 
-The same developer has not yet looked at a staged review when the PR
-author force-pushes twice more and re-requests each time. Trigger:
-watch runs while a live staged session for that PR still exists.
-Outcome: nothing new is staged -- there are never two live sessions for
-one PR, and intermediate pushes are coalesced rather than queued.
-When the developer dismisses the stale session, the next run stages one
-review against the then-current head, not a backlog of three.
+The developer is attached to a staged review, or the session is
+mid-thought, when the author force-pushes twice more and re-requests each
+time. Trigger: watch runs while that session is live but busy. Outcome:
+the watcher does not interrupt an active session -- it leaves the work
+untouched and lets the update wait until the session goes idle (or a
+later run catches it). When the session is next free it takes up the
+latest head, the intermediate pushes coalesced into one current diff
+rather than a queue of three superseded ones. Throughout, there is never
+a second live session racing the first.
 
 ### Unblocking a review whose PR moved on
 
@@ -146,17 +171,29 @@ subsequent runs backfill from the still-pending requests, oldest first.
 - **SHA-aware handled state.** The handled-set records the last-
   dispatched head SHA alongside the PR identity, replacing the
   permanent SHA-blind entry as the dedup contract.
-- **The decided re-dispatch rule, implemented as stated:** per requested
-  PR, per pass, dispatch iff the head SHA changed since the last
-  dispatch AND no live staged session exists for that PR; otherwise
-  skip. Coalesce to current state -- no queue of intermediate pushes,
-  never two live sessions for the same PR. A dismissed-then-unchanged
-  PR does not re-stage; a crashed session, once reaped, counts as no
-  live session, so a real re-request re-fires.
-- **Liveness the watcher can actually check.** The per-PR staged record
-  carries whatever reference makes "is a session still live for this
-  PR?" a clean lookup (today the record has no session/instance
-  reference and liveness is only inferable from naming).
+- **The decided re-dispatch behavior.** Per requested PR, per pass, keyed
+  on new activity (the head SHA moved since the last dispatch):
+  - no surviving review session -> stage one fresh session against the
+    current head (a dismissed session, or a crashed-and-reaped one, both
+    count as none surviving);
+  - a live *and idle* review session -> that session continues against
+    the new activity, its accumulated reviewer context retained rather
+    than discarded;
+  - a live *but busy or attached* session -> not interrupted; the update
+    waits until it is idle, or the next run picks it up.
+
+  Across all cases: coalesce to the current head (no queue of superseded
+  diffs), and never two live sessions for one PR. An unchanged head does
+  nothing; dismissal is the developer's signal to discard the reviewer.
+- **A niwa capability to target and update a live-idle session.** The
+  watcher must be able to tell a live-idle review session from a
+  live-busy one, and to hand a live-idle session the updated PR state
+  without discarding its context. The per-PR staged record carries
+  whatever reference makes both a clean lookup (today it holds no
+  session/instance reference and liveness is only inferable from naming).
+  *How* niwa continues a session -- stop/resume by id with a new prompt
+  and a fresh checkout, or another mechanism -- is a DESIGN decision, not
+  fixed here.
 - **Unblock-time freshness re-validation.** Before a staged review is
   acted on: is the PR still open, still requesting this developer, and
   not force-pushed since the dispatch? A staged review that fails the
@@ -169,9 +206,11 @@ subsequent runs backfill from the still-pending requests, oldest first.
   level-triggered (coalesce to current, the PR wedge) or edge-triggered
   (distinct events, a future message-stream wedge), so PR coalescing is
   a per-source choice, not a baked-in universal.
-- **Tests for the re-dispatch matrix:** re-fire on new SHA, suppress
-  while live, re-fire after dismissal or reap, no re-stage on unchanged
-  SHA -- plus freshness self-discard and cap enforcement.
+- **Tests for the re-dispatch matrix:** fresh stage when no session
+  survives, resume the live-idle session on a new head, do-not-interrupt
+  a live-busy session, coalesce multiple pushes to the current head,
+  fresh stage after dismissal or reap, no-op on an unchanged head --
+  plus freshness self-discard and cap enforcement.
 - **Verification (not reconstruction) of multi-repo scope.** The
   shipped scope matching already spans all workspace repos; this pass
   exercises it as part of validating the hardening, without rebuilding
@@ -215,6 +254,14 @@ subsequent runs backfill from the still-pending requests, oldest first.
 - How the staged record references its session/instance for the
   liveness lookup, and what "dismissed" looks like from the watcher's
   side of that reference.
+- The mechanism by which niwa continues a live-idle session against new
+  activity -- stop/resume by id with a new prompt and a fresh checkout is
+  one candidate; the DESIGN weighs it against alternatives. Includes how
+  the updated PR head reaches the session's contained clone as inert data
+  without reopening the containment model.
+- How the watcher distinguishes live-idle from live-busy/attached, and
+  what it does when a session never returns to idle (defer indefinitely
+  vs a bound after which it stages fresh).
 
 ## References
 
