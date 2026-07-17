@@ -1,6 +1,6 @@
 ---
 upstream: docs/prds/PRD-niwa-watch-pr-hardening.md
-status: Accepted
+status: Planned
 problem: |
   The shipped `niwa watch --once` verb cannot support re-request re-fire,
   unblock-time freshness, or a cross-run staged cap on its current state: the
@@ -42,7 +42,7 @@ rationale: |
 
 ## Status
 
-Accepted
+Planned
 
 ## Context and Problem Statement
 
