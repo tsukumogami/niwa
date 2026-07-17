@@ -18,7 +18,7 @@ func TestSelect_IntersectsWorkspaceAndDropsHandled(t *testing.T) {
 		{Owner: "acme", Repo: "api", Number: 5, CreatedAt: "2026-01-02T00:00:00Z"},  // already handled
 	}
 	workspace := ws("acme/api", "acme/web")
-	handled := map[string]bool{HandledKey("acme", "api", 5): true}
+	handled := map[string]bool{HandledIdentity("acme", "api", 5): true}
 
 	got := Select(prs, workspace, handled, 10)
 	if len(got) != 2 {

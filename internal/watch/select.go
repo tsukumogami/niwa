@@ -27,7 +27,7 @@ func RepoKey(owner, repo string) string {
 //   - keep only PRs whose repository is in the workspace (scope) -- a
 //     directly-requested PR outside the workspace is dropped;
 //   - drop PRs already recorded in the handled-set (handled, keyed by
-//     HandledKey);
+//     HandledIdentity);
 //   - order the remainder oldest-PR-first by CreatedAt, with a stable tie-break
 //     on repo then number so a repeat run over unchanged state selects the same
 //     set;
@@ -41,7 +41,7 @@ func Select(prs []github.PRRef, scope *WorkspaceScope, handled map[string]bool, 
 		if !scope.Contains(pr.Owner, pr.Repo) {
 			continue
 		}
-		if handled[HandledKey(pr.Owner, pr.Repo, pr.Number)] {
+		if handled[HandledIdentity(pr.Owner, pr.Repo, pr.Number)] {
 			continue
 		}
 		kept = append(kept, pr)

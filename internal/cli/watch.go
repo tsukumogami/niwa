@@ -157,7 +157,7 @@ func runWatchOnce(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("niwa watch: reading handled-set: %w", err)
 	}
 
-	selected := watch.Select(prs, scope, handled, watch.DefaultPerRunBound)
+	selected := watch.Select(prs, scope, watch.HandledMembership(handled), watch.DefaultPerRunBound)
 	if len(selected) == 0 {
 		fmt.Fprintln(cmd.OutOrStdout(), "niwa watch: nothing to stage")
 		return nil
@@ -264,7 +264,7 @@ func stageReview(cmd *cobra.Command, root, cwd, token string, client *github.API
 	if err := watch.SaveStagedRecord(root, rec); err != nil {
 		return err
 	}
-	if err := watch.AppendHandled(root, watch.HandledKey(pr.Owner, pr.Repo, pr.Number)); err != nil {
+	if err := watch.AppendHandled(root, pr.Owner, pr.Repo, pr.Number, head.SHA); err != nil {
 		return err
 	}
 	success = true

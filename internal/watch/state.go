@@ -22,72 +22,217 @@ const handledSetRelPath = ".niwa/watch-handled"
 // staged-review record per dispatched PR, keyed by handle.
 const stagedRecordsRelDir = ".niwa/watch"
 
-// HandledKey is the stable identity of a PR in the handled-set: "owner/repo#number".
-func HandledKey(owner, repo string, number int) string {
+// TriggerSemantics declares how a source's dispatch state coalesces. The PR
+// source is level-triggered: a PR has one live review that re-fires on a new
+// head, coalescing intermediate pushes. A future edge-triggered source records
+// SemanticsEdge so it is not forced into that PR coalescing.
+type TriggerSemantics string
+
+const (
+	// SemanticsLevel is the PR source's declaration: one live review per PR,
+	// re-fired on head advancement, intermediate pushes coalesced.
+	SemanticsLevel TriggerSemantics = "level"
+	// SemanticsEdge is reserved for a source that must react to every event
+	// rather than to the latest state. No source declares it yet.
+	SemanticsEdge TriggerSemantics = "edge"
+)
+
+// stateHeaderPrefix is the leading comment the handled-set carries so the
+// declared trigger semantics round-trip. LoadHandledSet tolerates it (and any
+// other comment line) as a non-data line.
+const stateHeaderPrefix = "# niwa-watch-state v2"
+
+// HandledKey is the SHA-aware handled-set line for a PR:
+// "owner/repo#number@<sha>". An empty sha yields the bare identity
+// ("owner/repo#number"), the legacy "handled at unknown SHA" shape.
+func HandledKey(owner, repo string, number int, sha string) string {
+	if sha == "" {
+		return HandledIdentity(owner, repo, number)
+	}
+	return HandledIdentity(owner, repo, number) + "@" + sha
+}
+
+// HandledIdentity is the stable per-PR identity used to key the handled-set,
+// independent of the last-dispatched SHA: "owner/repo#number".
+func HandledIdentity(owner, repo string, number int) string {
 	return fmt.Sprintf("%s/%s#%d", owner, repo, number)
 }
 
-// LoadHandledSet reads the handled-set for a workspace. A missing file is an
-// empty set, not an error (the first run has none). Malformed lines are
-// skipped, never fatal.
-func LoadHandledSet(workspaceRoot string) (map[string]bool, error) {
-	set := map[string]bool{}
+// LoadHandledSet reads the handled-set for a workspace and returns a map from
+// each PR identity ("owner/repo#number") to its last-dispatched head SHA. An
+// empty SHA means "handled at unknown SHA" -- a legacy SHA-less line loaded in
+// place, which the decision layer adopts to the current head without re-staging.
+// A missing file is an empty set, not an error (the first run has none).
+// Malformed lines are skipped, never fatal. When an identity appears more than
+// once, the last occurrence wins.
+func LoadHandledSet(workspaceRoot string) (map[string]string, error) {
+	m, _, err := loadHandledState(workspaceRoot)
+	return m, err
+}
+
+// LoadTriggerSemantics returns the trigger semantics the handled-set declares.
+// A file without a declaration -- including a legacy file with no header --
+// defaults to SemanticsLevel, the PR source's behavior.
+func LoadTriggerSemantics(workspaceRoot string) (TriggerSemantics, error) {
+	_, sem, err := loadHandledState(workspaceRoot)
+	return sem, err
+}
+
+// HandledMembership projects the SHA-aware handled map onto a set-membership
+// view for callers that only need "is this PR handled?" and not the SHA. It is a
+// thin compatibility path over LoadHandledSet's primary SHA map.
+func HandledMembership(handled map[string]string) map[string]bool {
+	set := make(map[string]bool, len(handled))
+	for id := range handled {
+		set[id] = true
+	}
+	return set
+}
+
+// loadHandledState is the single-scan core behind LoadHandledSet and
+// LoadTriggerSemantics: it returns the identity->last-SHA map and the declared
+// trigger semantics in one pass.
+func loadHandledState(workspaceRoot string) (map[string]string, TriggerSemantics, error) {
+	m := map[string]string{}
+	sem := SemanticsLevel
 	f, err := os.Open(filepath.Join(workspaceRoot, handledSetRelPath))
 	if err != nil {
 		if os.IsNotExist(err) {
-			return set, nil
+			return m, sem, nil
 		}
-		return nil, fmt.Errorf("opening handled-set: %w", err)
+		return nil, sem, fmt.Errorf("opening handled-set: %w", err)
 	}
 	defer f.Close()
 
 	sc := bufio.NewScanner(f)
 	for sc.Scan() {
 		line := strings.TrimSpace(sc.Text())
-		if line == "" || !isHandledKey(line) {
+		if line == "" {
+			continue
+		}
+		if strings.HasPrefix(line, "#") {
+			if s, ok := parseSemanticsHeader(line); ok {
+				sem = s
+			}
+			continue // comment/header line: not data
+		}
+		id, sha, ok := parseHandledLine(line)
+		if !ok {
 			continue // malformed lines are ignored, not fatal
 		}
-		set[line] = true
+		m[id] = sha // last occurrence per identity wins
 	}
 	if err := sc.Err(); err != nil {
-		return nil, fmt.Errorf("reading handled-set: %w", err)
+		return nil, sem, fmt.Errorf("reading handled-set: %w", err)
 	}
-	return set, nil
+	return m, sem, nil
 }
 
-// AppendHandled records a PR as handled. It is called only after a successful
-// contained dispatch, so a transient poll/dispatch failure never permanently
-// suppresses a review. Appending an already-present key is a no-op.
-func AppendHandled(workspaceRoot, key string) error {
+// AppendHandled records a PR as handled at the given head SHA. It is called only
+// after a successful contained dispatch, so a transient poll/dispatch failure
+// never permanently suppresses a review. It is idempotent per identity: an entry
+// already present has its recorded SHA moved forward to sha, and the file is
+// rewritten rather than accumulating a duplicate line; re-recording the same SHA
+// is a no-op. The declared trigger semantics and every other entry are preserved.
+func AppendHandled(workspaceRoot, owner, repo string, number int, sha string) error {
+	key := HandledKey(owner, repo, number, sha)
 	if !isHandledKey(key) {
 		return fmt.Errorf("refusing to append malformed handled key %q", key)
 	}
-	set, err := LoadHandledSet(workspaceRoot)
+	id := HandledIdentity(owner, repo, number)
+
+	m, sem, err := loadHandledState(workspaceRoot)
 	if err != nil {
 		return err
 	}
-	if set[key] {
-		return nil
+	if existing, ok := m[id]; ok && existing == sha {
+		return nil // already recorded at this SHA
 	}
+	m[id] = sha
+	return writeHandledState(workspaceRoot, m, sem)
+}
+
+// writeHandledState rewrites the handled-set atomically (temp file + rename): the
+// trigger-semantics header followed by one "identity[@sha]" line per entry,
+// sorted by identity for a deterministic file. A legacy unknown-SHA entry (empty
+// sha) round-trips as a bare identity line, preserving its "handled at unknown
+// SHA" meaning.
+func writeHandledState(workspaceRoot string, m map[string]string, sem TriggerSemantics) error {
 	dir := filepath.Join(workspaceRoot, ".niwa")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("creating .niwa dir: %w", err)
 	}
-	f, err := os.OpenFile(filepath.Join(workspaceRoot, handledSetRelPath),
-		os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
-	if err != nil {
-		return fmt.Errorf("opening handled-set for append: %w", err)
+
+	ids := make([]string, 0, len(m))
+	for id := range m {
+		ids = append(ids, id)
 	}
-	defer f.Close()
-	if _, err := fmt.Fprintln(f, key); err != nil {
+	sort.Strings(ids)
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s semantics=%s\n", stateHeaderPrefix, sem)
+	for _, id := range ids {
+		if sha := m[id]; sha != "" {
+			fmt.Fprintf(&b, "%s@%s\n", id, sha)
+		} else {
+			fmt.Fprintln(&b, id)
+		}
+	}
+
+	tmp, err := os.CreateTemp(dir, "watch-handled-*.tmp")
+	if err != nil {
+		return fmt.Errorf("creating handled-set temp: %w", err)
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName) // no-op after a successful rename
+	if _, err := tmp.WriteString(b.String()); err != nil {
+		tmp.Close()
 		return fmt.Errorf("writing handled-set: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("closing handled-set temp: %w", err)
+	}
+	if err := os.Chmod(tmpName, 0o644); err != nil {
+		return fmt.Errorf("setting handled-set mode: %w", err)
+	}
+	if err := os.Rename(tmpName, filepath.Join(workspaceRoot, handledSetRelPath)); err != nil {
+		return fmt.Errorf("replacing handled-set: %w", err)
 	}
 	return nil
 }
 
-// isHandledKey validates the "owner/repo#number" shape. Used both to reject a
-// malformed append and to skip a malformed line on read.
+// parseHandledLine parses a handled-set data line into its PR identity and
+// last-dispatched SHA. It accepts both the SHA-aware "owner/repo#number@<sha>"
+// shape and the legacy SHA-less "owner/repo#number" shape (sha == ""). ok is
+// false for a malformed line, which the caller skips.
+func parseHandledLine(line string) (identity, sha string, ok bool) {
+	if at := strings.IndexByte(line, '@'); at >= 0 {
+		identity, sha = line[:at], line[at+1:]
+		if !isHandledIdentity(identity) || !isHexSHA(sha) {
+			return "", "", false
+		}
+		return identity, sha, true
+	}
+	if !isHandledIdentity(line) {
+		return "", "", false
+	}
+	return line, "", true
+}
+
+// isHandledKey validates a handled-set data line -- either the SHA-aware
+// "owner/repo#number@<sha>" shape or the legacy SHA-less identity. It is the
+// guard AppendHandled uses to refuse writing a malformed key, and mirrors the
+// tolerance parseHandledLine applies on read.
 func isHandledKey(s string) bool {
+	_, _, ok := parseHandledLine(s)
+	return ok
+}
+
+// isHandledIdentity validates the bare "owner/repo#number" identity shape,
+// preserving the shipped structural/charset checks (non-empty owner/repo, a
+// numeric PR number) so a malformed or hostile line is skipped, never fatal and
+// never interpolated anywhere executable.
+func isHandledIdentity(s string) bool {
 	slash := strings.IndexByte(s, '/')
 	hash := strings.IndexByte(s, '#')
 	if slash <= 0 || hash <= slash+1 {
@@ -105,6 +250,40 @@ func isHandledKey(s string) bool {
 		}
 	}
 	return true
+}
+
+// isHexSHA reports whether s is a plausible git head SHA: 7 to 64 lowercase hex
+// digits (an abbreviated SHA-1 through a full SHA-256). The charset check keeps a
+// hostile SHA field from smuggling anything but hex into the permanent state.
+func isHexSHA(s string) bool {
+	if len(s) < 7 || len(s) > 64 {
+		return false
+	}
+	for _, r := range s {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+// parseSemanticsHeader extracts a "semantics=<value>" declaration from a comment
+// line, returning the recognized TriggerSemantics. An unrecognized or absent
+// value yields ok == false, so the caller keeps its default.
+func parseSemanticsHeader(line string) (TriggerSemantics, bool) {
+	for _, field := range strings.Fields(line) {
+		v, found := strings.CutPrefix(field, "semantics=")
+		if !found {
+			continue
+		}
+		switch TriggerSemantics(v) {
+		case SemanticsLevel:
+			return SemanticsLevel, true
+		case SemanticsEdge:
+			return SemanticsEdge, true
+		}
+	}
+	return "", false
 }
 
 // StagedRecord is discoverability metadata niwa persists at dispatch time so a
