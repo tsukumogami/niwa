@@ -310,6 +310,21 @@ type StagedRecord struct {
 	// staged review stale. It is platform-vouched hex from GetPullHead, never
 	// author-controlled free text.
 	DispatchedSHA string `json:"dispatched_sha"`
+	// SessionID is the review session's full Claude Code conversation UUID,
+	// captured best-effort at stage time by the jobs-dir cwd-correlation
+	// (captureSessionID). It is the id `claude --resume <SessionID>` accepts (the
+	// session UUID equals the resume/conversation id and names the transcript
+	// file), so it is what a Continue resumes on. Empty when capture missed: such
+	// a record can never be Continued (it stays Defer). It is niwa-captured from
+	// ~/.claude/jobs/*/state.json and MUST pass workspace.ValidSessionID (the
+	// lowercase-UUID charset) before it becomes a CLI argument.
+	SessionID string `json:"session_id,omitempty"`
+	// ShortID is the review session's short id -- the jobs-dir basename shown in
+	// the agent view and the handle `claude stop <ShortID>` accepts (the full
+	// UUID is rejected by `claude stop`). Continuation stops the prior
+	// detached-idle process by this id before resuming. Empty when capture
+	// missed. It MUST pass isSafeHandle before it becomes a CLI argument.
+	ShortID string `json:"short_id,omitempty"`
 }
 
 // SaveStagedRecord writes a staged-review record keyed by handle.
@@ -388,6 +403,12 @@ func ListStagedHandles(workspaceRoot string) ([]string, error) {
 	sort.Strings(handles)
 	return handles, nil
 }
+
+// IsSafeHandle reports whether h passes the conservative handle charset the
+// staged-record store enforces. It is the exported form callers use to validate
+// a captured short id (isSafeHandle precedent) before it becomes a CLI argument
+// -- e.g. `claude stop <ShortID>` in the continuation path.
+func IsSafeHandle(h string) bool { return isSafeHandle(h) }
 
 // isSafeHandle allows only a conservative charset for a value that becomes a
 // filename: lowercase/uppercase alphanumerics, dash, and underscore.

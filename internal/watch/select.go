@@ -26,8 +26,8 @@ const DefaultMaxStaged = 5
 // of 0 means the cap is saturated and no fresh review may be staged this pass
 // (the caller must short-circuit rather than pass 0 into Decide, whose own
 // bound <= 0 fallback would restore DefaultPerRunBound). Only Fresh consumes the
-// budget; a future Continue (Issue 5) reuses an already-counted live agent and is
-// cap-neutral, so it must not decrement liveCount against this budget.
+// budget; Continue reuses an already-counted live agent and is cap-neutral, so it
+// must not decrement liveCount against this budget.
 func StageBudget(perRunBound, maxStaged, liveCount int) int {
 	remaining := maxStaged - liveCount
 	if remaining < 0 {
@@ -67,10 +67,13 @@ const (
 	// Issue 5 flips a detached-idle live session to Continue (context-preserving
 	// resume) while a busy/attached one stays Defer.
 	Defer
-	// Continue is RESERVED for Issue 5's context-preserving resume of a live,
-	// detached-idle session at the new head. It is declared so downstream issues
-	// can name it, but Decide never returns it yet: the "new head, live session"
-	// case routes to Defer below. See the TODO in Decide.
+	// Continue is Issue 5's context-preserving resume of a live, detached-idle
+	// session at the new head. Decide returns it for the "new head, live session"
+	// case when the session is classified detached-idle AND carries a valid
+	// captured resume id (both surfaced through the continuable map); a
+	// busy/attached/unclassifiable live session stays Defer. Continue reuses an
+	// already-counted live agent, so it is cap-neutral (it does not consume the
+	// per-run/cross-run Fresh budget).
 	Continue
 )
 
@@ -97,18 +100,25 @@ type Plan struct {
 //     head without restaging; the caller records it)
 //   - current head unconfirmed (absent from heads)     -> Noop (fail-closed)
 //   - current head == recorded SHA                     -> Noop (already reviewed)
-//   - new head, a live session still reviewing         -> Defer
-//   - new head, no live session                        -> Fresh
-//   - truncate to bound, counting only Fresh plans -- Noop and Defer do not
-//     consume the bound, and excess Fresh plans (oldest-first) beyond the bound
-//     are dropped, exactly as Select dropped the overflow.
+//   - new head, a live+detached-idle+resumable session  -> Continue
+//   - new head, a live but busy/attached session        -> Defer
+//   - new head, no live session                         -> Fresh
+//   - truncate to bound, counting only Fresh plans -- Noop, Defer, and Continue
+//     do not consume the bound (Continue reuses an already-counted live agent),
+//     and excess Fresh plans (oldest-first) beyond the bound are dropped, exactly
+//     as Select dropped the overflow.
 //
 // handledSHAs maps a PR identity (HandledIdentity) to its last-dispatched head
 // SHA ("" for a legacy unknown-SHA entry); heads maps a PR identity to its
 // current head SHA (populated by the caller only for PRs it re-checked, so an
 // absent entry means "head not confirmed this pass"); live maps a PR identity to
-// whether a staged review session is still alive for it.
-func Decide(prs []github.PRRef, scope *WorkspaceScope, handledSHAs map[string]string, live map[string]bool, heads map[string]string, bound int) []Plan {
+// whether a staged review session is still alive for it; continuable maps a PR
+// identity to whether that live session is safe to context-preserving-resume
+// (classified detached-idle by the caller AND carrying a valid captured resume
+// id). continuable is a strict subset of live: an id is continuable only if it
+// is also live. Keeping the classification out of Decide (the caller computes
+// it) keeps this a pure function of maps, table-testable the way Select is.
+func Decide(prs []github.PRRef, scope *WorkspaceScope, handledSHAs map[string]string, live, continuable map[string]bool, heads map[string]string, bound int) []Plan {
 	if bound <= 0 {
 		bound = DefaultPerRunBound
 	}
@@ -136,7 +146,7 @@ func Decide(prs []github.PRRef, scope *WorkspaceScope, handledSHAs map[string]st
 	var plans []Plan
 	freshUsed := 0
 	for _, pr := range kept {
-		kind := decideKind(pr, handledSHAs, live, heads)
+		kind := decideKind(pr, handledSHAs, live, continuable, heads)
 		if kind == Fresh {
 			if freshUsed >= bound {
 				continue // per-run bound: drop overflow Fresh, re-decided next pass
@@ -149,9 +159,9 @@ func Decide(prs []github.PRRef, scope *WorkspaceScope, handledSHAs map[string]st
 }
 
 // decideKind is the pure per-PR classifier behind Decide. It consults only the
-// SHA-aware handled-set, the current-head map, and liveness -- no ordering or
-// bound. See Decide's doc for the branch table.
-func decideKind(pr github.PRRef, handledSHAs map[string]string, live map[string]bool, heads map[string]string) PlanKind {
+// SHA-aware handled-set, the current-head map, liveness, and continuation
+// eligibility -- no ordering or bound. See Decide's doc for the branch table.
+func decideKind(pr github.PRRef, handledSHAs map[string]string, live, continuable map[string]bool, heads map[string]string) PlanKind {
 	id := HandledIdentity(pr.Owner, pr.Repo, pr.Number)
 	recorded, handledBefore := handledSHAs[id]
 	if !handledBefore {
@@ -168,10 +178,14 @@ func decideKind(pr github.PRRef, handledSHAs map[string]string, live map[string]
 		return Noop // already reviewed at this head
 	}
 	if live[id] {
-		// New head while a session is still reviewing the PR. Suppress the re-fire
-		// for now. TODO(Issue 5): a detached-idle live session flips to Continue
-		// (context-preserving resume at the new head); a busy/attached one stays
-		// Defer. Until then every live session Defers.
+		// New head while a session is still reviewing the PR. A detached-idle
+		// session that carries a valid captured resume id (continuable) is
+		// context-preserving-resumed at the new head; a busy/attached or
+		// unclassifiable live session stays Defer (fail-closed: continuation
+		// fires only on positive confirmation).
+		if continuable[id] {
+			return Continue
+		}
 		return Defer
 	}
 	return Fresh // new head, no live session: re-fire a review

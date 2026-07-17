@@ -43,7 +43,7 @@ func TestDecide_NeverHandledIsFresh(t *testing.T) {
 		pr("acme", "web", 7, "2026-01-01T00:00:00Z"),
 		pr("other", "out", 1, "2026-01-02T00:00:00Z"), // outside workspace
 	}
-	plans := Decide(prs, ws("acme/api", "acme/web"), nil, nil, nil, 10)
+	plans := Decide(prs, ws("acme/api", "acme/web"), nil, nil, nil, nil, 10)
 
 	if len(plans) != 2 {
 		t.Fatalf("got %d plans, want 2 (out-of-scope dropped): %+v", len(plans), plans)
@@ -59,7 +59,7 @@ func TestDecide_NeverHandledIsFresh(t *testing.T) {
 
 func TestDecide_OutOfWorkspaceDropped(t *testing.T) {
 	prs := []github.PRRef{pr("stranger", "repo", 1, "2026-01-01T00:00:00Z")}
-	plans := Decide(prs, ws("acme/api"), nil, nil, nil, 10)
+	plans := Decide(prs, ws("acme/api"), nil, nil, nil, nil, 10)
 	if len(plans) != 0 {
 		t.Fatalf("expected out-of-workspace PR dropped, got %+v", plans)
 	}
@@ -73,7 +73,7 @@ func TestDecide_UnchangedHeadIsNoop(t *testing.T) {
 	handled := map[string]string{id: "aaaaaaa"}
 	heads := map[string]string{id: "aaaaaaa"}
 
-	plans := Decide(prs, ws("acme/api"), handled, nil, heads, 10)
+	plans := Decide(prs, ws("acme/api"), handled, nil, nil, heads, 10)
 	if len(plans) != 1 || plans[0].Kind != Noop {
 		t.Fatalf("unchanged head must be Noop, got %+v", plans)
 	}
@@ -87,7 +87,7 @@ func TestDecide_NewHeadNoLiveIsFresh(t *testing.T) {
 	handled := map[string]string{id: "oldsha0"}
 	heads := map[string]string{id: "newsha1"}
 
-	plans := Decide(prs, ws("acme/api"), handled, nil, heads, 10)
+	plans := Decide(prs, ws("acme/api"), handled, nil, nil, heads, 10)
 	if len(plans) != 1 || plans[0].Kind != Fresh {
 		t.Fatalf("new head with no live session must be Fresh, got %+v", plans)
 	}
@@ -102,7 +102,7 @@ func TestDecide_NewHeadDismissedIsFresh(t *testing.T) {
 	heads := map[string]string{id: "newsha1"}
 	live := map[string]bool{id: false} // record gone / session dead
 
-	plans := Decide(prs, ws("acme/api"), handled, live, heads, 10)
+	plans := Decide(prs, ws("acme/api"), handled, live, nil, heads, 10)
 	if len(plans) != 1 || plans[0].Kind != Fresh {
 		t.Fatalf("new head after dismissal must be Fresh, got %+v", plans)
 	}
@@ -118,9 +118,73 @@ func TestDecide_NewHeadWhileLiveIsDefer(t *testing.T) {
 	heads := map[string]string{id: "newsha1"}
 	live := map[string]bool{id: true}
 
-	plans := Decide(prs, ws("acme/api"), handled, live, heads, 10)
+	plans := Decide(prs, ws("acme/api"), handled, live, nil, heads, 10)
 	if len(plans) != 1 || plans[0].Kind != Defer {
 		t.Fatalf("new head while live must Defer, got %+v", plans)
+	}
+}
+
+// TestDecide_NewHeadWhileLiveDetachedIdleIsContinue: the head advanced, a session
+// is still live AND it is continuable (detached-idle with a captured resume id) ->
+// Continue (Issue 5's flip). A live-but-not-continuable session at the same input
+// would Defer (see the preceding test).
+func TestDecide_NewHeadWhileLiveDetachedIdleIsContinue(t *testing.T) {
+	prs := []github.PRRef{pr("acme", "api", 42, "2026-01-01T00:00:00Z")}
+	id := HandledIdentity("acme", "api", 42)
+	handled := map[string]string{id: "oldsha0"}
+	heads := map[string]string{id: "newsha1"}
+	live := map[string]bool{id: true}
+	continuable := map[string]bool{id: true}
+
+	plans := Decide(prs, ws("acme/api"), handled, live, continuable, heads, 10)
+	if len(plans) != 1 || plans[0].Kind != Continue {
+		t.Fatalf("new head while live+detached-idle must Continue, got %+v", plans)
+	}
+}
+
+// TestDecide_ContinuableRequiresLive: continuable is a strict subset of live. A
+// stale continuable entry for a PR whose session is NOT live must never Continue
+// (it re-fires Fresh, since a not-live session at a new head is a fresh re-review).
+func TestDecide_ContinuableRequiresLive(t *testing.T) {
+	prs := []github.PRRef{pr("acme", "api", 42, "2026-01-01T00:00:00Z")}
+	id := HandledIdentity("acme", "api", 42)
+	handled := map[string]string{id: "oldsha0"}
+	heads := map[string]string{id: "newsha1"}
+	live := map[string]bool{id: false}
+	continuable := map[string]bool{id: true} // stale / inconsistent input
+
+	plans := Decide(prs, ws("acme/api"), handled, live, continuable, heads, 10)
+	if len(plans) != 1 || plans[0].Kind != Fresh {
+		t.Fatalf("continuable without live must not Continue (Fresh), got %+v", plans)
+	}
+}
+
+// TestDecide_ContinueIsCapNeutral: Continue does not consume the Fresh budget. A
+// bound of 1 with one Fresh PR and one Continue PR must yield BOTH -- the Continue
+// is not counted against the bound, and the Fresh fits.
+func TestDecide_ContinueIsCapNeutral(t *testing.T) {
+	prs := []github.PRRef{
+		pr("acme", "api", 1, "2026-01-01T00:00:00Z"), // will Continue
+		pr("acme", "api", 2, "2026-01-02T00:00:00Z"), // will Fresh
+	}
+	id1 := HandledIdentity("acme", "api", 1)
+	handled := map[string]string{id1: "oldsha0"} // #1 handled; #2 never handled
+	heads := map[string]string{id1: "newsha1"}
+	live := map[string]bool{id1: true}
+	continuable := map[string]bool{id1: true}
+
+	plans := Decide(prs, ws("acme/api"), handled, live, continuable, heads, 1)
+	var nContinue, nFresh int
+	for _, p := range plans {
+		switch p.Kind {
+		case Continue:
+			nContinue++
+		case Fresh:
+			nFresh++
+		}
+	}
+	if nContinue != 1 || nFresh != 1 {
+		t.Fatalf("bound=1 must admit 1 Continue (cap-neutral) + 1 Fresh, got continue=%d fresh=%d (%+v)", nContinue, nFresh, plans)
 	}
 }
 
@@ -133,7 +197,7 @@ func TestDecide_LegacyUnknownSHAIsNoopAdopt(t *testing.T) {
 	handled := map[string]string{id: ""} // legacy unknown-SHA entry
 	heads := map[string]string{id: "currenthead"}
 
-	plans := Decide(prs, ws("acme/api"), handled, nil, heads, 10)
+	plans := Decide(prs, ws("acme/api"), handled, nil, nil, heads, 10)
 	if len(plans) != 1 || plans[0].Kind != Noop {
 		t.Fatalf("legacy unknown-SHA entry must be Noop (adopt), got %+v", plans)
 	}
@@ -147,7 +211,7 @@ func TestDecide_UnconfirmedHeadIsNoop(t *testing.T) {
 	handled := map[string]string{id: "oldsha0"}
 	// heads deliberately empty: the head re-check did not land.
 
-	plans := Decide(prs, ws("acme/api"), handled, nil, nil, 10)
+	plans := Decide(prs, ws("acme/api"), handled, nil, nil, nil, 10)
 	if len(plans) != 1 || plans[0].Kind != Noop {
 		t.Fatalf("unconfirmed head must fail closed to Noop, got %+v", plans)
 	}
@@ -167,7 +231,7 @@ func TestDecide_BoundTruncatesFreshOnly(t *testing.T) {
 	handled := map[string]string{idD: "ddddddd"}
 	heads := map[string]string{idD: "ddddddd"}
 
-	plans := Decide(prs, scope, handled, nil, heads, 2)
+	plans := Decide(prs, scope, handled, nil, nil, heads, 2)
 	if got := countKind(plans, Fresh); got != 2 {
 		t.Fatalf("bound=2 must cap Fresh at 2, got %d: %+v", got, plans)
 	}
@@ -195,8 +259,8 @@ func TestDecide_Determinism(t *testing.T) {
 		pr("acme", "a", 3, "2026-01-01T00:00:00Z"),
 	}
 	scope := ws("acme/a", "acme/b")
-	first := Decide(prs, scope, nil, nil, nil, 10)
-	second := Decide(prs, scope, nil, nil, nil, 10)
+	first := Decide(prs, scope, nil, nil, nil, nil, 10)
+	second := Decide(prs, scope, nil, nil, nil, nil, 10)
 	if len(first) != 3 || len(second) != 3 {
 		t.Fatalf("expected 3 plans each, got %d and %d", len(first), len(second))
 	}
@@ -217,7 +281,7 @@ func TestDecide_ZeroBoundUsesDefault(t *testing.T) {
 	for i := 0; i < 5; i++ {
 		prs = append(prs, pr("acme", "r", i+1, "2026-01-01T00:00:00Z"))
 	}
-	plans := Decide(prs, ws("acme/r"), nil, nil, nil, 0)
+	plans := Decide(prs, ws("acme/r"), nil, nil, nil, nil, 0)
 	if got := countKind(plans, Fresh); got != DefaultPerRunBound {
 		t.Fatalf("zero bound should fall back to DefaultPerRunBound=%d, got %d", DefaultPerRunBound, got)
 	}

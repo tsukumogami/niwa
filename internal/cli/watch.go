@@ -21,6 +21,20 @@ import (
 
 var watchOnce bool
 
+// watchCapture is the session-id capture seam (a var so tests can substitute a
+// fake). Production wires it to captureSessionID: the same jobs-dir cwd
+// correlation `niwa dispatch` uses to recover a launched worker's resume-usable
+// session UUID and short id.
+var watchCapture = captureSessionID
+
+// watchCaptureTimeout bounds the best-effort session-id capture in stageReview.
+// It is shorter than the dispatch path's timeout because a capture miss here is
+// non-fatal (the record simply saves without ids and that PR can never be
+// Continued); the pass must not stall for long per PR on a host where capture
+// does not resolve. A capture SUCCESS returns as soon as the job appears, so the
+// full timeout is only ever paid on a genuine miss.
+const watchCaptureTimeout = 10 * time.Second
+
 func init() {
 	watchCmd.Flags().BoolVar(&watchOnce, "once", false, "perform exactly one poll-and-dispatch pass and exit (the only supported mode)")
 	rootCmd.AddCommand(watchCmd)
@@ -211,10 +225,19 @@ func runWatchOnce(cmd *cobra.Command, _ []string) error {
 	// Liveness anchor: for every staged record, ask whether a Claude Code job is
 	// still rooted in its instance. A dismissed or crashed-and-reaped session has
 	// no live job, so its PR re-fires fresh on a new head; a still-running review
-	// suppresses the re-fire (Defer). Keyed by PR identity (HandledIdentity).
-	live, err := liveStagedSessions(root)
+	// suppresses the re-fire (Defer). continuableRecs additionally carries, per PR
+	// identity, the record of a live session that is safe to context-preserving-
+	// resume (detached-idle with a valid captured resume id) -- the Continue input.
+	// Both are keyed by PR identity (HandledIdentity).
+	live, continuableRecs, err := liveStagedSessions(root)
 	if err != nil {
 		return fmt.Errorf("niwa watch: reading staged records: %w", err)
+	}
+	// Project the continuable records onto the bool map Decide consumes (Decide
+	// stays a pure function of maps; the record is looked up at apply time).
+	continuable := make(map[string]bool, len(continuableRecs))
+	for id := range continuableRecs {
+		continuable[id] = true
 	}
 
 	// Confirm the current head of every previously-handled, in-scope PR so the
@@ -236,7 +259,7 @@ func runWatchOnce(cmd *cobra.Command, _ []string) error {
 	liveCount := countLiveStaged(live)
 	budget := watch.StageBudget(watch.DefaultPerRunBound, maxStaged, liveCount)
 
-	plans := watch.Decide(prs, scope, handled, live, heads, watch.DefaultPerRunBound)
+	plans := watch.Decide(prs, scope, handled, live, continuable, heads, watch.DefaultPerRunBound)
 
 	// Count the fresh reviews the decision planned so we can report when the cap
 	// leaves some pending (unrecorded) for a later pass.
@@ -266,8 +289,8 @@ func runWatchOnce(cmd *cobra.Command, _ []string) error {
 			// Cap/per-run budget: stage only while budget remains. Surplus Fresh stays
 			// unrecorded so the next pass re-decides it oldest-first (backfill). Because
 			// Decide already ordered plans oldest-first, staging the first `budget` here
-			// preserves that ordering. A future Continue (Issue 5) is cap-neutral and
-			// would NOT be gated at this site.
+			// preserves that ordering. Continue is cap-neutral and is NOT gated at
+			// this site (it is handled by its own case below).
 			if staged >= budget {
 				continue
 			}
@@ -277,6 +300,19 @@ func runWatchOnce(cmd *cobra.Command, _ []string) error {
 				return fmt.Errorf("niwa watch: staging %s/%s#%d: %w", p.PR.Owner, p.PR.Repo, p.PR.Number, err)
 			}
 			staged++
+		case watch.Continue:
+			// Continue is cap-neutral: it reuses an already-counted live agent, so it
+			// is NOT gated on the Fresh budget. Resume the detached-idle session at the
+			// new head through the same sandbox-applying launch path a fresh stage uses.
+			// The continuable record was resolved during the liveness sweep; a missing
+			// entry (a race between the sweep and now) degrades to a no-op this pass.
+			rec, ok := continuableRecs[id]
+			if !ok {
+				continue
+			}
+			if err := continueReview(cmd, root, cwd, token, client, p.PR, rec, plan); err != nil {
+				return fmt.Errorf("niwa watch: continuing %s/%s#%d: %w", p.PR.Owner, p.PR.Repo, p.PR.Number, err)
+			}
 		case watch.Noop:
 			// A legacy unknown-SHA entry adopts the current head without staging, so
 			// it only re-fires on genuinely new activity later. A non-legacy Noop
@@ -289,8 +325,8 @@ func runWatchOnce(cmd *cobra.Command, _ []string) error {
 				}
 			}
 		default:
-			// Defer (and the reserved Continue, which routes here until Issue 5):
-			// nothing to stage this pass.
+			// Defer: a live busy/attached session still holds the PR; nothing to
+			// stage this pass.
 		}
 	}
 	if staged == 0 && !capBlocked {
@@ -301,29 +337,261 @@ func runWatchOnce(cmd *cobra.Command, _ []string) error {
 	return nil
 }
 
-// liveStagedSessions maps each staged PR identity to whether a Claude Code job
-// is still rooted in its recorded instance. It reads the staged-record store
-// (best-effort per record: a record that fails to load is skipped, not fatal)
-// and probes liveness via instanceHasLiveJob against the jobs directory. When
-// several records share a PR identity, any live session marks the PR live.
-func liveStagedSessions(root string) (map[string]bool, error) {
+// liveStagedSessions reads the staged-record store once and returns, per PR
+// identity: (1) whether a Claude Code job is still rooted in its recorded
+// instance (the liveness anchor the cap and Defer both key on), and (2) for a
+// live session that is safe to context-preserving-resume, the record to resume
+// (the continuation input). It is best-effort per record: a record that fails to
+// load is skipped, not fatal. When several records share a PR identity, any live
+// session marks the PR live; continuation, however, requires an UNAMBIGUOUS
+// single continuable record for the identity -- if two live sessions for the
+// same PR both classify continuable, neither is continued (fail-closed to Defer)
+// rather than guessing which to resume.
+func liveStagedSessions(root string) (live map[string]bool, continuable map[string]watch.StagedRecord, err error) {
 	handles, err := watch.ListStagedHandles(root)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	jobsDir := defaultJobsDir()
-	live := map[string]bool{}
+	now := timeNow()
+	live = map[string]bool{}
+	continuable = map[string]watch.StagedRecord{}
+	ambiguous := map[string]bool{}
 	for _, h := range handles {
 		rec, err := watch.LoadStagedRecord(root, h)
 		if err != nil {
 			continue // a malformed/partial record is not evidence of a live session
 		}
 		id := watch.HandledIdentity(rec.Owner, rec.Repo, rec.Number)
-		if instanceHasLiveJob(jobsDir, rec.InstancePath) {
-			live[id] = true
+		if !instanceHasLiveJob(jobsDir, rec.InstancePath) {
+			continue
 		}
+		live[id] = true
+		if !recordContinuable(jobsDir, rec, now) {
+			continue
+		}
+		if ambiguous[id] {
+			continue
+		}
+		if _, seen := continuable[id]; seen {
+			// A second continuable record for the same PR: refuse to pick one.
+			delete(continuable, id)
+			ambiguous[id] = true
+			continue
+		}
+		continuable[id] = rec
 	}
-	return live, nil
+	return live, continuable, nil
+}
+
+// timeNow is a seam over time.Now so continuation-liveness tests can pin the
+// clock. It matches the reaper's injected-clock convention.
+var timeNow = time.Now
+
+// recordContinuable reports whether a live staged record is safe to
+// context-preserving-resume: it must carry a valid captured resume id (a UUID)
+// AND a safe short id (needed to stop the prior process), pass the two-way
+// liveness cross-check (sessionLive on the id AND instanceHasLiveJob on the
+// instance), and classify as detached-idle. Any failure -> not continuable
+// (Defer). This is the fail-closed gate: Continue fires only on positive
+// confirmation across every axis.
+func recordContinuable(jobsDir string, rec watch.StagedRecord, now time.Time) bool {
+	if !workspace.ValidSessionID(rec.SessionID) {
+		return false // no resume-usable id captured: can never Continue (stays Defer)
+	}
+	if !watch.IsSafeHandle(rec.ShortID) {
+		return false // no safe short id to `claude stop` the prior process
+	}
+	// Two-way liveness cross-check: the persisted id must resolve to a live
+	// session AND a live job must be rooted in the instance. A mismatch means a
+	// stale or mis-captured handle -- never act on it.
+	if !sessionLive(jobsDir, rec.SessionID, now) {
+		return false
+	}
+	if !instanceHasLiveJob(jobsDir, rec.InstancePath) {
+		return false
+	}
+	return watch.ClassifySessionActivity(recordJobActivity(jobsDir, rec)) == watch.ActivityDetachedIdle
+}
+
+// recordJobActivity reads the Claude Code job state for a staged record and
+// projects it onto the pure watch.JobActivity the classifier consumes. An
+// invalid/absent/mismatched session id yields an unreadable activity (which
+// classifies dead/unknown), never a wrong Continue.
+func recordJobActivity(jobsDir string, rec watch.StagedRecord) watch.JobActivity {
+	if !workspace.ValidSessionID(rec.SessionID) {
+		return watch.JobActivity{Readable: false}
+	}
+	js, ok := readJobState(jobsDir, rec.SessionID)
+	if !ok {
+		return watch.JobActivity{Readable: false}
+	}
+	// The job dir is keyed by a session-id prefix; confirm the full id matches
+	// before trusting the fields, so a colliding prefix is not misclassified.
+	if js.SessionID != "" && js.SessionID != rec.SessionID {
+		return watch.JobActivity{Readable: false}
+	}
+	return watch.JobActivity{
+		Readable:      true,
+		State:         js.State,
+		Tempo:         js.Tempo,
+		InFlightTasks: js.InFlight.Tasks,
+		AwaitingInput: len(js.Block) > 0 || js.Needs != "",
+	}
+}
+
+// captureReviewSession runs the best-effort session-id capture for a launched
+// review agent and returns the validated (SessionID, ShortID) pair, or ("", "")
+// on any miss/timeout/validation failure. It never errors: a capture miss is a
+// non-fatal degrade (the record saves without ids and that PR stays Defer).
+func captureReviewSession(instancePath string) (sessionID, shortID string) {
+	sid, short, err := watchCapture(defaultJobsDir(), instancePath, watchCaptureTimeout, nil, 0)
+	if err != nil {
+		return "", ""
+	}
+	// captureSessionID already validates the UUID, but re-check both ids here so
+	// nothing unvalidated is ever persisted.
+	if !workspace.ValidSessionID(sid) || !watch.IsSafeHandle(short) {
+		return "", ""
+	}
+	return sid, short
+}
+
+// stopSessionFunc is the seam over `claude stop <shortID>` so continuation tests
+// can drive the stop step without a real daemon. Production wires it to
+// realStopSession.
+var stopSessionFunc = realStopSession
+
+// realStopSession stops a background review session by its short id (the id
+// `claude stop` accepts; the full UUID is rejected). The short id is charset-
+// validated before it becomes an argument -- defense in depth over the capture-
+// time validation. A stop is required before a resume so the prior detached-idle
+// process is not-live when `claude --resume` takes over.
+func realStopSession(ctx context.Context, shortID string) error {
+	if !watch.IsSafeHandle(shortID) {
+		return fmt.Errorf("refusing to stop: unsafe short id %q", shortID)
+	}
+	bin, err := exec.LookPath("claude")
+	if err != nil {
+		return fmt.Errorf("claude binary not found in PATH")
+	}
+	return exec.CommandContext(ctx, bin, "stop", shortID).Run()
+}
+
+// continueReview performs the context-preserving continuation of a live,
+// detached-idle review session at the PR's new head. It is SECURITY-CRITICAL: it
+// re-asserts containment via the SAME path a fresh stage uses (ApplyReviewSettings
+// + dispatchLaunch), never the lighter sessionattach path, so the OS no-egress
+// sandbox re-enters over the resumed session's Bash. Every step fails closed:
+//
+//   - The persisted ids are re-validated before they become CLI arguments.
+//   - Liveness is cross-checked two ways at execution time (sessionLive on the
+//     id AND instanceHasLiveJob on the instance); a mismatch degrades to a no-op
+//     this pass (never acts on an ambiguous handle) rather than resuming.
+//   - The new head is fetched as inert data into the SAME instance's clone (the
+//     resume must run in the instance whose ~/.claude transcript is keyed by the
+//     SessionID), via the shipped hardened FetchPRHead path.
+//   - The sandbox posture is the plan runWatchOnce already resolved fail-closed:
+//     if the sandbox could not be enforced on this host, runWatchOnce refused the
+//     whole pass before reaching here (resolveReviewPlan), so a continuation NEVER
+//     resumes uncontained -- exactly as a fresh stage cannot.
+//   - The prior process is stopped before the resume; a stop failure aborts the
+//     continuation (no resume alongside a possibly-still-live prior process).
+//   - The re-review prompt is a FIXED TEMPLATE (BuildResumePrompt) carrying no
+//     PR-derived free text; the updated PR reaches the model only as inert clone
+//     data.
+//
+// Continue is cap-neutral: it reuses an already-counted live agent and consumes
+// no Fresh budget. On success the handled-set moves to the new head (so the
+// continuation does not re-fire) and the record's DispatchedSHA is refreshed.
+func continueReview(cmd *cobra.Command, root, cwd, token string, client *github.APIClient, pr github.PRRef, rec watch.StagedRecord, plan reviewPlan) error {
+	ctx := cmd.Context()
+	out := cmd.OutOrStdout()
+
+	// (0) Re-validate the persisted ids before they become CLI arguments / a stop
+	// target. The liveness sweep already checked these, but never resume/stop on
+	// an id that does not validate here.
+	if !workspace.ValidSessionID(rec.SessionID) {
+		return fmt.Errorf("captured session id is not a valid UUID")
+	}
+	if !watch.IsSafeHandle(rec.ShortID) {
+		return fmt.Errorf("captured short id is unsafe")
+	}
+	instancePath := rec.InstancePath
+	if instancePath == "" || !filepath.IsAbs(instancePath) {
+		return fmt.Errorf("staged record has no absolute instance path")
+	}
+	instancePath = filepath.Clean(instancePath)
+
+	// (1) Two-way liveness cross-check at EXECUTION time. On any mismatch, do not
+	// act on an ambiguous handle: degrade to a no-op this pass. The next pass
+	// re-decides (Fresh if the session is truly gone, Defer/Continue if still live).
+	jobsDir := defaultJobsDir()
+	now := timeNow()
+	if !sessionLive(jobsDir, rec.SessionID, now) || !instanceHasLiveJob(jobsDir, instancePath) {
+		fmt.Fprintf(out, "niwa watch: skipping continuation of %s/%s#%d (liveness cross-check failed at resume time); will re-decide next pass\n",
+			pr.Owner, pr.Repo, pr.Number)
+		return nil
+	}
+
+	// (2) Fetch the new head as inert data into the SAME instance's clone.
+	head, err := client.GetPullHead(ctx, pr.Owner, pr.Repo, pr.Number)
+	if err != nil {
+		return err
+	}
+	cloneURL := head.CloneURL
+	if cloneURL == "" {
+		cloneURL = fmt.Sprintf("https://github.com/%s/%s.git", pr.Owner, pr.Repo)
+	}
+	cloneDir := filepath.Join(instancePath, watch.DefaultCloneRelDir)
+	if err := watch.FetchPRHead(ctx, cloneURL, head.SHA, cloneDir, token); err != nil {
+		return fmt.Errorf("fetching PR head: %w", err)
+	}
+
+	// (3) Re-assert containment on the SAME instance: re-run ApplyReviewSettings
+	// (sandbox stanza + hooks + post-guard). This runs on a NEW untrusted diff, so
+	// re-asserting -- not assuming the stage-time settings still hold -- is required.
+	askPosture := resolveAskPosture(instancePath, plan.sandbox)
+	if err := watch.ApplyReviewSettings(instancePath, plan.sandbox, askPosture); err != nil {
+		return err
+	}
+
+	// (4) Stop the prior detached-idle process so the resume can take over. A stop
+	// failure aborts the continuation (degrade to a no-op this pass) rather than
+	// resuming alongside a process that may still be live.
+	if err := stopSessionFunc(ctx, rec.ShortID); err != nil {
+		fmt.Fprintf(out, "niwa watch: could not stop session %s for %s/%s#%d (%v); skipping continuation this pass\n",
+			rec.ShortID, pr.Owner, pr.Repo, pr.Number, err)
+		return nil
+	}
+
+	// (5) Launch the resume through the SAME sandbox-applying dispatch path a fresh
+	// stage uses -- NOT the lighter sessionattach path -- so the OS no-egress sandbox
+	// re-enters over the resumed session's Bash. The passthrough mirrors stageReview
+	// (buildDispatchPassthrough + --strict-mcp-config when sandboxed) and additionally
+	// carries --resume <SessionID>. The re-review prompt is a fixed template.
+	prompt := watch.BuildResumePrompt(watch.DefaultCloneRelDir, watch.DefaultDraftRelPath)
+	passthrough := buildDispatchPassthrough(rec.Handle, "")
+	passthrough = append(passthrough, "--resume", rec.SessionID)
+	if plan.sandbox {
+		passthrough = append(passthrough, "--strict-mcp-config")
+	}
+	if err := dispatchLaunch(ctx, instancePath, prompt, passthrough, nil); err != nil {
+		return fmt.Errorf("resuming review agent: %w", err)
+	}
+
+	// (6) Move the handled-set to the new head so the continuation does not re-fire,
+	// and refresh the record's DispatchedSHA. The record keeps its instance and ids.
+	rec.DispatchedSHA = head.SHA
+	if err := watch.SaveStagedRecord(root, rec); err != nil {
+		return err
+	}
+	if err := watch.AppendHandled(root, pr.Owner, pr.Repo, pr.Number, head.SHA); err != nil {
+		return err
+	}
+	fmt.Fprintf(out, "niwa watch: continued review for %s/%s#%d (handle %s, resumed session %s)%s\n",
+		pr.Owner, pr.Repo, pr.Number, rec.Handle, rec.ShortID, reviewWritePosture(plan.sandbox, askPosture))
+	return nil
 }
 
 // prFreshnessClient is the subset of the GitHub client the freshness check needs:
@@ -544,6 +812,16 @@ func stageReview(cmd *cobra.Command, root, cwd, token string, client *github.API
 		return fmt.Errorf("launching review agent: %w", err)
 	}
 
+	// Best-effort capture of the review session's resume-usable ids (Issue 5) by
+	// jobs-dir cwd correlation -- the same path `niwa dispatch` uses. The full
+	// UUID is what `claude --resume` accepts; the short id is what `claude stop`
+	// accepts. A capture MISS is non-fatal: the record saves without ids and that
+	// PR can never be Continued (it stays Defer), never a crash. Both ids are
+	// charset-validated before they are persisted (and again before they become a
+	// CLI argument in continueReview): the UUID against workspace.ValidSessionID,
+	// the short id against isSafeHandle.
+	sessionID, shortID := captureReviewSession(instancePath)
+
 	// Record ONLY on success, so a failed stage does not suppress a re-attempt.
 	rec := watch.StagedRecord{
 		Handle:        slug,
@@ -554,6 +832,8 @@ func stageReview(cmd *cobra.Command, root, cwd, token string, client *github.API
 		DraftPath:     filepath.Join(instancePath, watch.DefaultDraftRelPath),
 		InstancePath:  instancePath,
 		DispatchedSHA: head.SHA,
+		SessionID:     sessionID,
+		ShortID:       shortID,
 	}
 	if err := watch.SaveStagedRecord(root, rec); err != nil {
 		return err
