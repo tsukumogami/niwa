@@ -430,6 +430,38 @@ containment unchanged, with input validation on the new persisted fields.
   iterations, a larger residency window than one-shot dispatch. Contained by
   egress denial (see Security); bounded by the cap and the freshness/GC prune.
 
+### Implementation-surfaced residuals (recorded during build)
+
+- **Idle is detectable; attached is not.** The job state exposes a positive
+  detached-idle signal (`state==done && tempo==idle && inFlight.tasks==0` and no
+  pending human question) that the classifier keys on, AND-ing the fields so a stale
+  `inFlight.tasks` count cannot alone read as busy. But no field marks a human
+  terminal-attach to a *watch* instance (niwa's attach sentinel is worktree-only).
+  The detectable human-in-the-loop proxy — an awaiting-answer (`block`/`needs`)
+  session — maps to Defer. The residual: a *silent idle terminal-attach* (a human
+  ran `claude --resume` to read the draft and is idle with no pending question) is
+  invisible, so a continuation could stop-and-resume it. Bounded by: watch sessions
+  are dispatched detached; the normal flow is read-draft-then-dismiss (dismissal
+  removes the job entry → not live → not continued); the two-way liveness
+  cross-check; and stop-before-resume. Accepted as a narrow residual, not closed.
+- **`--resume` + `--name` compatibility is unverified offline.** The continuation
+  launch mirrors the fresh-stage passthrough byte-for-byte (`buildDispatchPassthrough`
+  emits `--name`) and appends `--resume <uuid>`. Whether `claude --bg` accepts
+  `--resume` alongside `--name` for an already-named session is only confirmable on
+  the live harness. A failure here is non-dangerous and recoverable: a failed resume
+  launch does not update the handled-set, so the next pass stages fresh (losing the
+  continued context but never breaking containment or leaving two live sessions).
+- **The resume execution + OS-sandbox re-entry were not executed in the authoring
+  run.** The classifier, decision flip, id capture/validation, cap-neutrality, and
+  the two-way liveness cross-check are all unit-tested offline; the actual
+  stop-and-resume execution and the containment re-entry are covered by
+  `TestResumedSessionDeniesEgress_OnHarness`, which is skip-gated (needs
+  `NIWA_WATCH_LIVE_TEST=1` on a bwrap/claude host) and was not run without that infra.
+  Containment is inherited structurally (same `ApplyReviewSettings` + `dispatchLaunch`
+  path + pass-level fail-closed refusal as a fresh stage), a code-reviewable property,
+  but the empirical egress-denial assertion should be run on a capable host before
+  relying on continuation in `watch_sandbox=required` mode.
+
 ### Mitigations carried into the plan
 
 - Sequence continuation last; keep A-C independently shippable.
