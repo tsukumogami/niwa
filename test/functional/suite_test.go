@@ -342,6 +342,7 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 	// --- dispatch lifecycle: niwa dispatch provision/rollback and reaper
 	// reclamation, driven offline against the localGitServer with a fake claude ---
 	registerDispatchSteps(ctx)
+	registerKeepAliveSteps(ctx)
 
 	// --- plugin pre-warm settings drift (#179): the pre-warm must not dirty
 	// niwa's managed settings.json while still resolving plugins to disk ---

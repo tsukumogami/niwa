@@ -98,6 +98,7 @@ func installDispatchFakes(t *testing.T, workspaceRoot string) *dispatchFakes {
 	prevPerm := dispatchPermissionMode
 	prevAgent := dispatchAgent
 	prevDetach := dispatchDetach
+	prevKeepAlive := dispatchKeepAlive
 
 	dispatchLabel = ""
 	dispatchName = ""
@@ -105,6 +106,7 @@ func installDispatchFakes(t *testing.T, workspaceRoot string) *dispatchFakes {
 	dispatchPermissionMode = ""
 	dispatchAgent = ""
 	dispatchDetach = false
+	dispatchKeepAlive = nil
 
 	lookClaude = func() (string, error) { return "/usr/bin/claude", nil }
 
@@ -154,6 +156,7 @@ func installDispatchFakes(t *testing.T, workspaceRoot string) *dispatchFakes {
 		dispatchPermissionMode = prevPerm
 		dispatchAgent = prevAgent
 		dispatchDetach = prevDetach
+		dispatchKeepAlive = prevKeepAlive
 	})
 
 	return f

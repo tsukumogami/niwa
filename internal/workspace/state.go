@@ -407,6 +407,12 @@ type InstanceRecord struct {
 	Name      string `json:"name"`
 	Path      string `json:"path"`
 	Ephemeral bool   `json:"ephemeral"`
+	// KeepAlive marks an instance whose backing session was dispatched with
+	// keep-alive armed AND is still live. EnumerateInstanceRecords leaves it
+	// false: the liveness half of the join (the Claude Code job-entry signal)
+	// lives at the CLI layer, so the list command fills this in. omitempty
+	// keeps the --json shape unchanged for every non-participating instance.
+	KeepAlive bool `json:"keep_alive,omitempty"`
 }
 
 // EnumerateInstanceRecords enumerates the instances under workspaceRoot as
