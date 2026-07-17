@@ -1,5 +1,5 @@
 ---
-status: Accepted
+status: In Progress
 problem: |
   The shipped `niwa watch --once` PR-review wedge is not trustworthy across
   repeated runs. Its dedup state is a flat, permanent, SHA-blind handled-set,
@@ -27,7 +27,7 @@ motivating_context: |
 
 ## Status
 
-Accepted
+In Progress
 
 ## Problem Statement
 
