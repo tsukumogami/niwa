@@ -106,6 +106,7 @@ func assertResumedSessionDeniesEgress(t *testing.T) error {
 
 	// (1) Launch a fresh sandboxed session to establish the transcript. It writes a
 	// small in-instance marker and stops, so we know it reached a terminal turn.
+	start := time.Now()
 	bootstrap := "You are in a no-egress review sandbox. Use the Write tool to write a file named ready.txt in the current directory containing the single word ready, then STOP."
 	first := exec.CommandContext(ctx, "claude", "--bg", "--strict-mcp-config", bootstrap)
 	first.Dir = inst
@@ -113,6 +114,7 @@ func assertResumedSessionDeniesEgress(t *testing.T) error {
 	if out, err := first.CombinedOutput(); err != nil {
 		return fmt.Errorf("launch fresh claude --bg (a start failure = no enforceable sandbox here): %w\n%s", err, out)
 	}
+	t.Logf("resume-live[%s]: fresh session launched; recovering conv id...", time.Since(start).Round(time.Second))
 
 	// (2) Recover the conversation id by the jobs-dir cwd correlation -- the same id
 	// `claude --resume` accepts. Poll until the job records its sessionId.
@@ -127,11 +129,24 @@ func assertResumedSessionDeniesEgress(t *testing.T) error {
 	if convID == "" {
 		return fmt.Errorf("inconclusive: could not recover the fresh session's conversation id from the jobs dir")
 	}
+	// Give the fresh turn a moment to reach its terminal write, then record whether it
+	// actually wrote its marker -- this isolates "the write mechanism works in this
+	// harness" from any resume-specific problem.
+	readyPath := filepath.Join(inst, "ready.txt")
+	for i := 0; i < 30 && ctx.Err() == nil; i++ {
+		if fileExists(readyPath) {
+			break
+		}
+		time.Sleep(2 * time.Second)
+	}
+	t.Logf("resume-live[%s]: recovered convID=%s shortID=%s; fresh session wrote ready.txt=%v",
+		time.Since(start).Round(time.Second), convID, shortID, fileExists(readyPath))
 
 	// (3) Stop the prior process so the resume can take over.
 	stop := exec.CommandContext(ctx, "claude", "stop", shortID)
 	stop.Env = claudeEnv
 	_ = stop.Run()
+	t.Logf("resume-live[%s]: stopped %s; re-asserting settings and resuming...", time.Since(start).Round(time.Second), shortID)
 
 	// (4) Re-assert containment (as continueReview does) and RESUME with the same
 	// sandbox-applying launch path, carrying --resume <convID>.
@@ -150,6 +165,8 @@ func assertResumedSessionDeniesEgress(t *testing.T) error {
 		return fmt.Errorf("launch resumed claude --bg --resume (a start failure = the resume could not be contained here): %w\n%s", err, out)
 	}
 	rsid := parseBgSessionID(out)
+	t.Logf("resume-live[%s]: resume launched rsid=%q; launch output: %s",
+		time.Since(start).Round(time.Second), rsid, strings.TrimSpace(string(out)))
 	if rsid != "" {
 		defer func() {
 			s := exec.Command("claude", "stop", rsid)
@@ -162,15 +179,23 @@ func assertResumedSessionDeniesEgress(t *testing.T) error {
 	// inconclusive (never a false pass); RAW==0 is a release blocker.
 	resultPath := filepath.Join(inst, marker)
 	var content string
-	for ctx.Err() == nil {
+	for i := 0; ctx.Err() == nil; i++ {
 		if b, rerr := os.ReadFile(resultPath); rerr == nil && len(b) > 0 {
 			content = strings.TrimSpace(string(b))
 			break
 		}
+		if i > 0 && i%10 == 0 { // ~every 30s
+			t.Logf("resume-live[%s]: still waiting for the resumed session to write %s (instance now holds: %s)",
+				time.Since(start).Round(time.Second), marker, strings.Join(instFiles(inst), ", "))
+		}
 		time.Sleep(3 * time.Second)
 	}
 	if content == "" {
-		return fmt.Errorf("inconclusive: the resumed sandboxed session never wrote the egress-probe result; cannot confirm the block")
+		// Diagnostics: the resumed session launched but never wrote the probe result.
+		// Surface what it actually did so the next run distinguishes a resumed-agent
+		// that ran-but-did-not-write (a test-prompt issue) from a resume that stalled.
+		dumpResumeDiagnostics(t, inst, realHome, convID, rsid, claudeEnv)
+		return fmt.Errorf("inconclusive: the resumed sandboxed session never wrote the egress-probe result; cannot confirm the block (see resume-live diagnostics above)")
 	}
 	raw := ""
 	for _, line := range strings.Split(content, "\n") {
@@ -185,6 +210,101 @@ func assertResumedSessionDeniesEgress(t *testing.T) error {
 		return fmt.Errorf("EGRESS NOT BLOCKED: a raw TCP connect to 1.1.1.1:443 succeeded from inside the RESUMED session (%q). The sandbox did NOT re-enter on resume -- the boundary FAILED", content)
 	}
 	return nil
+}
+
+// fileExists reports whether path names an existing (non-dir) file.
+func fileExists(path string) bool {
+	fi, err := os.Stat(path)
+	return err == nil && !fi.IsDir()
+}
+
+// instFiles lists the base names of files directly in dir (diagnostics only).
+func instFiles(dir string) []string {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return []string{"<unreadable: " + err.Error() + ">"}
+	}
+	var names []string
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	if len(names) == 0 {
+		return []string{"<empty>"}
+	}
+	return names
+}
+
+// trunc bounds a diagnostic blob so a stuck-session dump stays readable.
+func trunc(s string, n int) string {
+	s = strings.TrimSpace(s)
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + fmt.Sprintf("... [+%d bytes]", len(s)-n)
+}
+
+// dumpResumeDiagnostics surfaces what the resumed session actually did when it
+// never wrote the probe result: the instance contents, the bg session's own logs,
+// its job state, and the tail of the original and resumed transcripts. It writes
+// only to the test log (never a network or fs mutation) so a re-run distinguishes
+// a resumed agent that ran-but-did-not-write from a resume that stalled or never
+// processed the new prompt.
+func dumpResumeDiagnostics(t *testing.T, inst, realHome, convID, rsid string, env []string) {
+	t.Helper()
+	t.Logf("resume-live DIAG: instance %s holds: %s", inst, strings.Join(instFiles(inst), ", "))
+
+	if rsid != "" {
+		logs := exec.Command("claude", "logs", rsid)
+		logs.Env = env
+		if out, err := logs.CombinedOutput(); err == nil {
+			t.Logf("resume-live DIAG: `claude logs %s`:\n%s", rsid, trunc(string(out), 3000))
+		} else {
+			t.Logf("resume-live DIAG: `claude logs %s` errored: %v\n%s", rsid, err, trunc(string(out), 500))
+		}
+	} else {
+		t.Logf("resume-live DIAG: no resumed short id parsed from the launch output (the resume may not have backgrounded)")
+	}
+
+	jobsDir := filepath.Join(realHome, ".claude", "jobs")
+	if rsid != "" {
+		if matches, _ := filepath.Glob(filepath.Join(jobsDir, rsid+"*", "state.json")); len(matches) > 0 {
+			if b, err := os.ReadFile(matches[0]); err == nil {
+				t.Logf("resume-live DIAG: resumed job state: %s", trunc(string(b), 1200))
+			}
+		} else {
+			t.Logf("resume-live DIAG: no jobs-dir entry for resumed id %s* (session may have exited or never registered)", rsid)
+		}
+	}
+
+	// Transcript tails: did the resumed turn receive/act on the probe prompt?
+	dumpTranscriptTail(t, realHome, "original", convID)
+	if rsid != "" {
+		dumpTranscriptTail(t, realHome, "resumed", rsid)
+	}
+}
+
+// dumpTranscriptTail logs the last few lines of the transcript whose basename
+// starts with idPrefix, under ~/.claude/projects/*/. idPrefix may be a full
+// session UUID or an 8-char short id (the full id starts with it).
+func dumpTranscriptTail(t *testing.T, realHome, label, idPrefix string) {
+	t.Helper()
+	matches, _ := filepath.Glob(filepath.Join(realHome, ".claude", "projects", "*", idPrefix+"*.jsonl"))
+	if len(matches) == 0 {
+		t.Logf("resume-live DIAG: %s transcript (%s*) not found", label, idPrefix)
+		return
+	}
+	b, err := os.ReadFile(matches[0])
+	if err != nil {
+		t.Logf("resume-live DIAG: %s transcript unreadable: %v", label, err)
+		return
+	}
+	lines := strings.Split(strings.TrimSpace(string(b)), "\n")
+	tail := lines
+	if len(tail) > 4 {
+		tail = tail[len(tail)-4:]
+	}
+	t.Logf("resume-live DIAG: %s transcript %s (%d lines); tail:\n%s",
+		label, filepath.Base(matches[0]), len(lines), trunc(strings.Join(tail, "\n"), 2500))
 }
 
 // sessionIDForCwd scans <jobsDir>/*/state.json for the job whose cwd equals inst
