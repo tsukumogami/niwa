@@ -580,8 +580,23 @@ func continueReview(cmd *cobra.Command, root, cwd, token string, client *github.
 		return fmt.Errorf("resuming review agent: %w", err)
 	}
 
-	// (6) Move the handled-set to the new head so the continuation does not re-fire,
-	// and refresh the record's DispatchedSHA. The record keeps its instance and ids.
+	// (6) Re-capture the resumed session's ids and move the handled-set to the new
+	// head. `claude --bg --resume` mints a NEW session id (it ignores --session-id),
+	// so the record's stored ids are now stale -- refresh them the same way a fresh
+	// stage does. Leaving the stale id would be a correctness bug: `sessionLive`
+	// treats the stopped prior session's lingering job entry as live-and-idle, so the
+	// next pass would resume that stale conversation and lose the review just added.
+	//
+	// Today the re-capture is ambiguous -- the stopped prior session's job entry and
+	// the resumed session share the instance cwd -- so captureReviewSession returns
+	// empty and the record becomes non-continuable until the human dismisses it: a
+	// further re-request before dismissal Defers, then re-stages Fresh after
+	// dismissal (the review is never lost, only its context carry-over for that
+	// interim push). That is the safe once-per-session behavior. Chainable
+	// continuation across multiple pushes before a dismissal needs a capture-newest
+	// disambiguation; wiring it here (assign captureReviewSession) means that
+	// improvement lights up continuation-chaining with no change at this call site.
+	rec.SessionID, rec.ShortID = captureReviewSession(instancePath)
 	rec.DispatchedSHA = head.SHA
 	if err := watch.SaveStagedRecord(root, rec); err != nil {
 		return err
@@ -589,8 +604,8 @@ func continueReview(cmd *cobra.Command, root, cwd, token string, client *github.
 	if err := watch.AppendHandled(root, pr.Owner, pr.Repo, pr.Number, head.SHA); err != nil {
 		return err
 	}
-	fmt.Fprintf(out, "niwa watch: continued review for %s/%s#%d (handle %s, resumed session %s)%s\n",
-		pr.Owner, pr.Repo, pr.Number, rec.Handle, rec.ShortID, reviewWritePosture(plan.sandbox, askPosture))
+	fmt.Fprintf(out, "niwa watch: continued review for %s/%s#%d (handle %s)%s\n",
+		pr.Owner, pr.Repo, pr.Number, rec.Handle, reviewWritePosture(plan.sandbox, askPosture))
 	return nil
 }
 

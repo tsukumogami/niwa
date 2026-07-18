@@ -444,13 +444,22 @@ containment unchanged, with input validation on the new persisted fields.
   are dispatched detached; the normal flow is read-draft-then-dismiss (dismissal
   removes the job entry → not live → not continued); the two-way liveness
   cross-check; and stop-before-resume. Accepted as a narrow residual, not closed.
-- **`--resume` + `--name` compatibility is unverified offline.** The continuation
-  launch mirrors the fresh-stage passthrough byte-for-byte (`buildDispatchPassthrough`
-  emits `--name`) and appends `--resume <uuid>`. Whether `claude --bg` accepts
-  `--resume` alongside `--name` for an already-named session is only confirmable on
-  the live harness. A failure here is non-dangerous and recoverable: a failed resume
-  launch does not update the handled-set, so the next pass stages fresh (losing the
-  continued context but never breaking containment or leaving two live sessions).
+- **`--resume` + `--name` works, and `--bg` mints a new session id (verified by a
+  live smoke).** `claude --bg --resume <uuid> --name <slug>` launches cleanly and
+  carries the prior conversation forward (context is preserved). But `--bg` mints a
+  *new* session id (it ignores `--session-id`), so the resumed session's id differs
+  from the one the record stored. Because `sessionLive` treats any lingering job
+  entry as live — and `claude stop` leaves the stopped entry present — a record left
+  pointing at the stopped id would read as live-and-idle and drive a wrong second
+  resume that loses the just-added review. `continueReview` therefore re-captures the
+  session ids after resume (like a fresh stage). Today that re-capture is *ambiguous*
+  (the stopped prior entry and the resumed one share the instance cwd), so it yields
+  empty ids and the record becomes non-continuable until dismissal: continuation is
+  correct **once per session**, a further re-request before the human dismisses it
+  Defers, and it re-stages Fresh after dismissal (the review is never lost, only its
+  context carry-over for that interim push). **Chainable** continuation across
+  multiple pushes before a dismissal needs a capture-newest disambiguation — a
+  bounded follow-up that lights up with no change at the `continueReview` call site.
 - **The resume execution + OS-sandbox re-entry were not executed in the authoring
   run.** The classifier, decision flip, id capture/validation, cap-neutrality, and
   the two-way liveness cross-check are all unit-tested offline; the actual
