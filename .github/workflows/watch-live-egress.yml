@@ -1,0 +1,88 @@
+# Live OS-sandbox egress gate for `niwa watch` (Issue 5 / ED2).
+#
+# Runs the two live containment tests that a normal PR run SKIPS:
+#   - TestContainedSessionDeniesEgress_OnHarness (ED1 fresh-stage containment)
+#   - TestResumedSessionDeniesEgress_OnHarness   (ED2 continuation re-entry)
+# Each launches a REAL `claude` session under the OS no-egress sandbox and asserts
+# a raw Bash TCP connect from inside it is denied at the OS layer.
+#
+# This is DELIBERATELY manual-only (workflow_dispatch). It is not a PR gate:
+#   - it is slow (each test launches real agent turns, minutes each);
+#   - it needs infrastructure a PR run cannot assume (a real `claude`, the OS
+#     sandbox backend, and a runner where bubblewrap can create a network
+#     namespace);
+#   - the tests share the runner's ~/.claude and run no-egress sessions, so they
+#     are disposable-host only (double-gated below) and must never touch a
+#     developer's machine.
+#
+# Requirements to actually RUN (rather than skip):
+#   - repo secret ANTHROPIC_API_KEY (claude auth in CI; same secret test.yml uses);
+#   - an Ubuntu runner where `niwa setup-sandbox` can unlock the AppArmor
+#     userns restriction (ubuntu-24.04 restricts it by default; the step below
+#     installs the least-privilege bwrap profile via sudo, which is passwordless
+#     on GitHub runners).
+# When ANTHROPIC_API_KEY is absent, the job is a no-op (the tests skip because
+# `claude` cannot authenticate) rather than a false pass.
+
+name: Watch live egress gate
+
+on:
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: "Why you're running the live egress gate (for the run log)"
+        required: false
+        default: "manual verification of the OS-sandbox egress boundary"
+
+jobs:
+  live-egress:
+    name: Live egress gate (disposable host)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - name: Set up Go
+        uses: actions/setup-go@7a3fe6cf4cb3a834922a1244abfce67bcef6a0c5  # v6.2.0
+        with:
+          go-version-file: 'go.mod'
+          cache-dependency-path: go.sum
+
+      - name: Install sandbox backend (bubblewrap + socat)
+        run: sudo apt-get update && sudo apt-get install -y bubblewrap socat
+
+      - name: Unlock the OS sandbox on this runner (AppArmor userns profile)
+        # ubuntu-24.04 sets kernel.apparmor_restrict_unprivileged_userns=1, which
+        # stops bwrap from creating the sandbox's network namespace. niwa's own
+        # setup-sandbox installs a least-privilege AppArmor profile granting just
+        # bwrap the userns capability. No TTY here, so invoke the elevated form
+        # directly (sudo is passwordless on GitHub runners).
+        run: |
+          go build -o /tmp/niwa ./cmd/niwa
+          BWRAP="$(command -v bwrap)"
+          sudo /tmp/niwa setup-sandbox --apply-profile --bwrap-path "$BWRAP" || true
+          # Confirm the sandbox can now build a netns; if not, the gate will skip
+          # its sandbox-dependent assertions rather than false-pass.
+          if bwrap --ro-bind / / --unshare-net --die-with-parent true; then
+            echo "netns OK: the OS sandbox can be enforced on this runner"
+          else
+            echo "::warning::bwrap still cannot create a netns; the live egress tests will not be able to enforce the sandbox here"
+          fi
+
+      - name: Install Claude CLI
+        if: env.ANTHROPIC_API_KEY != ''
+        run: npm install -g @anthropic-ai/claude-code
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+
+      - name: Run the live egress gate
+        # Double-gated on purpose: NIWA_WATCH_LIVE_TEST=1 opts into the live gate,
+        # NIWA_WATCH_LIVE_TEST_DISPOSABLE_HOST=1 asserts this is a throwaway host
+        # (true for an ephemeral CI runner, never a developer workstation). The
+        # tests self-skip (never false-pass) when claude or the sandbox is absent.
+        run: |
+          go test ./internal/watch/ -run DeniesEgress -v -timeout 20m
+        env:
+          NIWA_WATCH_LIVE_TEST: "1"
+          NIWA_WATCH_LIVE_TEST_DISPOSABLE_HOST: "1"
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
