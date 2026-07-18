@@ -9,7 +9,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -40,15 +39,7 @@ import (
 // in `claude agents --json`. A single egress channel getting through, or a landed
 // out-of-instance write, is a release blocker. See assertSandboxedSessionDeniesEgress.
 func TestContainedSessionDeniesEgress_OnHarness(t *testing.T) {
-	if os.Getenv("NIWA_WATCH_LIVE_TEST") != "1" {
-		t.Skip("live containment gate: set NIWA_WATCH_LIVE_TEST=1 on a host with the Claude Code OS sandbox to run; skipping (never a false pass)")
-	}
-	if runtime.GOOS == "windows" {
-		t.Skip("OS sandbox unavailable on Windows (feature fails closed there)")
-	}
-	if _, err := exec.LookPath("claude"); err != nil {
-		t.Skip("claude not on PATH; the live containment gate needs the harness")
-	}
+	requireDisposableLiveHost(t)
 
 	// Soundness first: the probes must genuinely work OUTSIDE the sandbox, so
 	// their failure INSIDE it is a real signal and not a no-op.

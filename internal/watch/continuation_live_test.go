@@ -31,15 +31,7 @@ import (
 // genuinely reaches the network OUTSIDE the sandbox so an in-sandbox failure is a
 // real signal.
 func TestResumedSessionDeniesEgress_OnHarness(t *testing.T) {
-	if os.Getenv("NIWA_WATCH_LIVE_TEST") != "1" {
-		t.Skip("live containment gate: set NIWA_WATCH_LIVE_TEST=1 on a host with the Claude Code OS sandbox to run; skipping (never a false pass)")
-	}
-	if runtime.GOOS == "windows" {
-		t.Skip("OS sandbox unavailable on Windows (feature fails closed there)")
-	}
-	if _, err := exec.LookPath("claude"); err != nil {
-		t.Skip("claude not on PATH; the live containment gate needs the harness")
-	}
+	requireDisposableLiveHost(t)
 
 	// Soundness: the raw-socket probe must reach the network OUTSIDE the sandbox,
 	// so its failure INSIDE the resumed session is a real signal and not a no-op.
@@ -210,6 +202,32 @@ func assertResumedSessionDeniesEgress(t *testing.T) error {
 		return fmt.Errorf("EGRESS NOT BLOCKED: a raw TCP connect to 1.1.1.1:443 succeeded from inside the RESUMED session (%q). The sandbox did NOT re-enter on resume -- the boundary FAILED", content)
 	}
 	return nil
+}
+
+// requireDisposableLiveHost gates the live containment tests. They launch REAL
+// authenticated `claude` sessions that share your real ~/.claude (symlinked into an
+// isolated HOME so the session can authenticate) and run them under a no-egress
+// sandbox. On a primary workstation those throwaway no-egress sessions can look
+// like your own login broke, and pointing sandboxed sessions at your real daemon
+// and credential store is not something to do casually. So beyond
+// NIWA_WATCH_LIVE_TEST=1, they require an explicit acknowledgment that this is a
+// disposable/CI host -- never a developer's primary machine.
+func requireDisposableLiveHost(t *testing.T) {
+	t.Helper()
+	if os.Getenv("NIWA_WATCH_LIVE_TEST") != "1" {
+		t.Skip("live containment gate: set NIWA_WATCH_LIVE_TEST=1 to run; skipping (never a false pass)")
+	}
+	if os.Getenv("NIWA_WATCH_LIVE_TEST_DISPOSABLE_HOST") != "1" {
+		t.Skip("live containment gate: these tests run REAL authenticated claude sessions " +
+			"against your real ~/.claude under a no-egress sandbox. Run ONLY on a disposable/CI " +
+			"host, never your primary workstation. Set NIWA_WATCH_LIVE_TEST_DISPOSABLE_HOST=1 to confirm.")
+	}
+	if runtime.GOOS == "windows" {
+		t.Skip("OS sandbox unavailable on Windows (feature fails closed there)")
+	}
+	if _, err := exec.LookPath("claude"); err != nil {
+		t.Skip("claude not on PATH; the live containment gate needs the harness")
+	}
 }
 
 // fileExists reports whether path names an existing (non-dir) file.

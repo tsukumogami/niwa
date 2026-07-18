@@ -464,12 +464,21 @@ containment unchanged, with input validation on the new persisted fields.
   run.** The classifier, decision flip, id capture/validation, cap-neutrality, and
   the two-way liveness cross-check are all unit-tested offline; the actual
   stop-and-resume execution and the containment re-entry are covered by
-  `TestResumedSessionDeniesEgress_OnHarness`, which is skip-gated (needs
-  `NIWA_WATCH_LIVE_TEST=1` on a bwrap/claude host) and was not run without that infra.
-  Containment is inherited structurally (same `ApplyReviewSettings` + `dispatchLaunch`
-  path + pass-level fail-closed refusal as a fresh stage), a code-reviewable property,
-  but the empirical egress-denial assertion should be run on a capable host before
-  relying on continuation in `watch_sandbox=required` mode.
+  `TestResumedSessionDeniesEgress_OnHarness` (and the ED1 `TestContainedSessionDeniesEgress_OnHarness`).
+  Both are **disposable/CI-host only**: to run a real authenticated `claude` session
+  they symlink the developer's real `~/.claude` into an isolated HOME, so a
+  no-egress run on a primary workstation makes those throwaway sessions look like the
+  user's own login broke. They are double-gated -- `NIWA_WATCH_LIVE_TEST=1` AND
+  `NIWA_WATCH_LIVE_TEST_DISPOSABLE_HOST=1` -- and skip loudly otherwise, so they are
+  never run casually on a real machine. On the one real run attempted, the contained
+  gate PASSED (fresh-session egress denied at the OS layer); the resumed gate went
+  *inconclusive* (the resumed session did not write the probe result in time -- no
+  egress leak observed), and the test now dumps the resumed session's logs/transcript
+  on that path so a CI re-run is decisive. Containment is inherited structurally (same
+  `ApplyReviewSettings` + `dispatchLaunch` path + pass-level fail-closed refusal as a
+  fresh stage), a code-reviewable property, but the empirical resumed-egress assertion
+  should be run on a disposable bwrap/claude host before relying on continuation in
+  `watch_sandbox=required` mode.
 
 ### Mitigations carried into the plan
 
