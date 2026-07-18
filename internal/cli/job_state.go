@@ -30,6 +30,27 @@ type jobState struct {
 	// launched worker to its instance by matching this against the unique
 	// instance directory. Absent decodes to "".
 	Cwd string `json:"cwd"`
+	// The remaining fields feed ONLY the watch continuation classifier
+	// (recordJobActivity -> watch.ClassifySessionActivity). They are the job
+	// lifecycle/tempo fields the reaper and capture paths deliberately ignore.
+	// Absent decodes to the zero value, so a state.json without them classifies
+	// dead/unknown (fail-closed), never a wrong Continue.
+	//
+	// State is the job lifecycle ("done", "working", "blocked"); Tempo is the
+	// session tempo ("idle", "active", "blocked").
+	State string `json:"state"`
+	Tempo string `json:"tempo"`
+	// InFlight.Tasks counts in-flight sub-tasks. Advisory only: a nonzero value
+	// forces busy, but a zero value is not sufficient for idle on its own (stale
+	// teammate counts persist after a turn ends).
+	InFlight struct {
+		Tasks int `json:"tasks"`
+	} `json:"inFlight"`
+	// Block is present (non-nil) when the session is blocked on a pending
+	// question; Needs is non-empty when it needs a human answer. Either marks
+	// the session as awaiting a human (the "attached" proxy).
+	Block json.RawMessage `json:"block"`
+	Needs string          `json:"needs"`
 }
 
 // defaultJobsDir returns the Claude Code jobs directory (~/.claude/jobs). A

@@ -191,6 +191,85 @@ func (c *APIClient) GetPullHead(ctx context.Context, owner, repo string, number 
 	return ph, nil
 }
 
+// Ancestry is the relationship between a dispatched head SHA (base) and a PR's
+// current head SHA (head), as reported by the trusted GitHub compare API. It is
+// the freshness ancestry signal: the freshness predicate consumes it to tell an
+// ordinary head advancement (base still an ancestor of head) from a
+// force-push/rebase that moved the head off the dispatched base. The zero value
+// is AncestryUnknown so an inconclusive check fails safe (never a wrong
+// "diverged").
+type Ancestry int
+
+const (
+	// AncestryUnknown means the ancestry could not be determined (an API error,
+	// an unrecognized status). Callers must treat it conservatively -- it is not
+	// evidence of divergence.
+	AncestryUnknown Ancestry = iota
+	// AncestryAncestor means base is an ancestor of head: the head only advanced
+	// (or is identical). This is ordinary advancement, not a freshness failure.
+	AncestryAncestor
+	// AncestryDiverged means base is no longer an ancestor of head: the head was
+	// force-pushed/rebased off the dispatched base, or rewound behind it.
+	AncestryDiverged
+)
+
+// CompareCommits reports the ancestry relationship between base and head in a
+// repository (GET /repos/{owner}/{repo}/compare/{base}...{head}). It answers the
+// freshness question "is the dispatched head still an ancestor of the current
+// head?" on the trusted GitHub API -- never a git invocation inside the untrusted
+// clone, which could execute attacker-supplied hooks. base and head are
+// platform-vouched hex SHAs, so the compare path carries no author-authored free
+// text.
+//
+// The compare status is mapped to an Ancestry:
+//
+//   - "identical" / "behind": base is an ancestor of head (head only advanced)
+//     -> AncestryAncestor.
+//   - "ahead": base is ahead of head (head moved backwards / was rewound behind
+//     the dispatched base) -> AncestryDiverged.
+//   - "diverged": the histories forked (a force-push/rebase off the dispatched
+//     head) -> AncestryDiverged.
+//
+// Any transport/decoding error or an unrecognized status yields AncestryUnknown
+// with an error, so the caller can treat an inconclusive check conservatively
+// (never discard a still-valid review on a transient API hiccup) rather than
+// aborting the pass.
+func (c *APIClient) CompareCommits(ctx context.Context, owner, repo, base, head string) (Ancestry, error) {
+	if owner == "" || repo == "" || base == "" || head == "" {
+		return AncestryUnknown, fmt.Errorf("CompareCommits: invalid coordinates %q/%q %q...%q", owner, repo, base, head)
+	}
+	url := fmt.Sprintf("%s/repos/%s/%s/compare/%s...%s", c.BaseURL, owner, repo, base, head)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return AncestryUnknown, fmt.Errorf("creating request: %w", err)
+	}
+	c.applyAuth(req)
+	req.Header.Set("Accept", "application/vnd.github+json")
+
+	resp, err := c.HTTPClient.Do(req)
+	if err != nil {
+		return AncestryUnknown, fmt.Errorf("querying compare: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return AncestryUnknown, fmt.Errorf("GitHub compare returned status %d", resp.StatusCode)
+	}
+	var body struct {
+		Status string `json:"status"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		return AncestryUnknown, fmt.Errorf("decoding compare: %w", err)
+	}
+	switch body.Status {
+	case "identical", "behind":
+		return AncestryAncestor, nil
+	case "ahead", "diverged":
+		return AncestryDiverged, nil
+	default:
+		return AncestryUnknown, fmt.Errorf("unrecognized compare status %q", body.Status)
+	}
+}
+
 // ownerRepoFromAPIURL parses "<base>/repos/<owner>/<repo>" into owner, repo.
 func ownerRepoFromAPIURL(apiURL string) (owner, repo string, ok bool) {
 	idx := strings.Index(apiURL, "/repos/")

@@ -57,6 +57,14 @@ type GlobalSettings struct {
 	// host (bubblewrap+socat on Linux, Seatbelt on macOS); "off" dispatches with no
 	// sandbox (the trusted path). "" resolves to "required".
 	WatchSandbox string `toml:"watch_sandbox,omitempty"`
+	// WatchMaxStaged is the cross-run cap on how many live staged review agents
+	// `niwa watch --once` allows at once, composed with the per-run bound. It is a
+	// plain int following the decision layer's `<= 0 -> default` convention: 0 (the
+	// default) resolves to watch.DefaultMaxStaged, a positive value is honored, and a
+	// negative value is a hard error at the use site (resolveMaxStaged). The cap
+	// counts records whose instance still has a live job, so a dismissed or dead
+	// session frees capacity on the next pass.
+	WatchMaxStaged int `toml:"watch_max_staged,omitempty"`
 }
 
 // SkipPluginInstall reports whether the user has explicitly opted
