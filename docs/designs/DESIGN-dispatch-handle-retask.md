@@ -1,6 +1,6 @@
 ---
 schema: design/v1
-status: Proposed
+status: Planned
 problem: |
   Claude Code offers no in-place delivery into a live background
   session, so re-tasking a dispatched worker means a relaunch that
@@ -34,7 +34,7 @@ upstream: docs/prds/PRD-dispatch-handle-retask.md
 
 ## Status
 
-Proposed
+Planned
 
 ## Context and Problem Statement
 
