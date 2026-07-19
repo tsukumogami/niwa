@@ -220,16 +220,32 @@ modes:
   ledger branch, **not delivered** — in a clean isolated env with the feature
   available and the env var reaching the worker, the redirected managed-settings
   file's `allowedChannelPlugins` did not populate `policySettings` in 2.1.215.
-- **ledger** — seeds the isolated `tengu_harbor_ledger` to include the plugin.
-  **Not run by the assistant:** the local auto-mode permission classifier denied
-  the command (editing the approved-channels list is fenced as a safety-control
-  modification, including in a sandbox).
+- **ledger** — seeds the isolated `tengu_harbor_ledger` (in the sandbox
+  config's `cachedGrowthBookFeatures`) to include the plugin. Denied to the
+  assistant by the local auto-mode permission classifier (editing the
+  approved-channels list is fenced as a safety-control modification, including
+  in a sandbox); run by the operator. Result: seed confirmed present in the
+  config ("ledger has niwa-push: True"), yet the channel **skipped** at the
+  allowlist via the ledger branch and **not delivered**. The gate used the
+  server-side approved list (observed in the real config:
+  `[discord, telegram, fakechat, imessage]`), not the seeded file — the ledger
+  is evaluated live/refreshed from the server on daemon startup, so editing the
+  local cache does not change what the gate reads. (This also indicates the
+  earlier `tengu_harbor` seed was not load-bearing: the server value is
+  independently `true`.)
 - **dev** — `--dangerously-load-development-channels`. **Not run by the
   assistant:** the local auto-mode permission classifier denied the command (the
   dangerous dev-channels flag is fenced).
 
-The two bypass modes require the operator to run the harness directly; the
-managed mode is unrestricted and produced the definitive negative above.
+- **dev** — `--dangerously-load-development-channels`. Denied to the assistant
+  by the local auto-mode permission classifier (the dangerous dev-channels flag
+  is fenced). On `--bg` the flag is dropped by the daemon's flag-forwarding
+  whitelist regardless (approaches E, H), so it does not arm a headless worker;
+  it functions on interactive/foreground sessions.
+
+The managed and ledger modes each produced a definitive negative in a clean
+isolated environment: neither the redirected managed-settings allowlist nor a
+seeded local ledger arms a niwa-authored channel on `--bg` in 2.1.215.
 
 ## Findings
 
