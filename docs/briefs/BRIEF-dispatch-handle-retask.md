@@ -1,6 +1,6 @@
 ---
 schema: brief/v1
-status: Draft
+status: Accepted
 problem: |
   A dispatch handle is launch-and-observe only. Neither a headless
   coordinator nor an operator can hand a running worker a follow-up task
@@ -25,11 +25,15 @@ motivating_context: |
 
 ## Status
 
-Draft
+Accepted
 
 Framing produced by a /scope chain grounded in a completed exploration
-with live spikes against Claude Code 2.1.214. The downstream PRD owns
-the requirements articulation, including the open questions below.
+with live spikes against Claude Code 2.1.214. Accepted after jury
+all-PASS and operator review on the PR. The downstream PRD owns the
+requirements articulation; the questions deferred at acceptance
+(command surface, keep-alive coupling, channel-path adoption, sandboxed
+watch interaction, superseded-session cleanup) resolve in the PRD's
+Decisions and Trade-offs section.
 
 ## Problem Statement
 
@@ -138,19 +142,6 @@ Out of scope:
   and belong in an upstream feature request, tracked separately.
 - Re-tasking sessions niwa did not dispatch, or sessions in another
   workspace.
-
-## Open Questions
-
-- Command surface: name (`niwa retask`?) and whether it takes a handle,
-  a session id, or both.
-- Whether a retask should imply or require keep-alive for workers
-  expected to receive follow-ups.
-- How the command detects and adopts the platform channel path if the
-  allowlist restriction lifts, without changing its interface.
-- How retask interacts with sandboxed watch review sessions, whose
-  settings are re-asserted per continuation today.
-- Whether the superseded session after a forced fork is removed
-  immediately or retained briefly for audit.
 
 ## References
 
