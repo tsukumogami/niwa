@@ -103,8 +103,8 @@ for every consumer.
 - **R5. Chainable capture.** When the platform mints a new session id
   underneath, retask reliably recovers the surviving session's ids even
   though the instance briefly correlates with more than one job entry.
-  Ambiguity is resolved deterministically (newest-registration wins,
-  validated before use); an unresolvable capture fails closed without
+  Ambiguity is resolved deterministically and the recovered ids are
+  validated before use; an unresolvable capture fails closed without
   corrupting the mapping. Retask N+1 works after retask N.
 - **R6. Handle stability.** The niwa-level handle (instance name,
   mapping file identity) survives retasks unchanged. Callers never need
@@ -188,8 +188,8 @@ disposable-host gate watch already uses).
   interpretation (a prompt containing `$(...)`, quotes, and newlines
   arrives byte-identical).
 - [ ] (unit) Capture disambiguation with two job entries sharing the
-  instance cwd: newest registration wins; a tie or an invalid id fails
-  closed.
+  instance cwd resolves to exactly one valid candidate; residual
+  ambiguity or an invalid id fails closed.
 
 ## Out of Scope
 
