@@ -1,4 +1,31 @@
 ---
+status: Proposed
+problem: |
+  Claude Code offers no in-place delivery into a live background
+  session, so re-tasking a dispatched worker means a relaunch that
+  mints a new session id while the old job entry lingers — ambiguous
+  capture, mapping desync, reap races, and (for watch) lost sandbox
+  re-assertion. niwa needs one primitive that crosses those hazards
+  safely for both the new retask command and watch's continuation.
+decision: |
+  A shared engine in internal/cli: default-deny worker classification,
+  stop-then-resume through the dispatch launch path, exclude-known
+  capture keyed on the superseded id already held in the mapping,
+  write-new-then-delete-old mapping rebind under a per-instance flock
+  the reaper also honors, superseded job entry removed last. The
+  delivery step sits behind a func-var seam; rebind stays caller-owned
+  (retask command rebinds the session mapping, watch rebinds its
+  staged record). Generic retask refuses watch-sandboxed instances.
+rationale: |
+  Exclude-known needs no ordering signal and collapses capture to the
+  already-tested single-match case; write-new-then-delete-old plus
+  live-mapping-wins reap preference makes every crash window
+  self-heal; the flock pattern mirrors the attach lock and closes the
+  stop-window reap race; keeping the engine in internal/cli reuses
+  watch's proven seams without exporting internals; the func-var seam
+  lets a future platform channel replace fork-based delivery without
+  interface change. Refusing sandboxed instances is the only safe
+  answer while containment re-assertion requires watch-only context.
 upstream: docs/prds/PRD-dispatch-handle-retask.md
 ---
 
@@ -93,12 +120,16 @@ cross-validated.
   stopped code paths). No observable field supports the branch; two
   paths mean two test matrices for one behavior.
 
-Worker classification reuses decoded job-state fields only: gone =
-`!sessionLive`; busy = state running/working, active tempo, or
-in-flight tasks; blocked/attached-proxy = blocked state or a pending
-need; anything else is retaskable. Six sentinel errors (target-unknown,
-session-gone, busy, blocked, capture-ambiguous, conflict) each carry
-target, detected state, and reason (N3).
+Worker classification is default-deny (see Security Considerations,
+R-SEC-2): gone = `!sessionLive`; a worker is retaskable only when the
+decoded job state positively proves it idle (terminal state, no active
+tempo, no in-flight tasks, no pending need); busy, blocked, absent, or
+undecodable signals all refuse. niwa's job-state decoder does not yet
+decode these fields — adding and validating them against real state
+files is part of the live-gate step. Seven sentinel errors
+(target-unknown, session-gone, busy, blocked, sandboxed,
+capture-ambiguous, conflict) each carry target, detected state, and
+reason (N3).
 
 ### Q2 — Surviving-session capture
 
@@ -212,6 +243,14 @@ Components (all in `internal/cli` unless noted):
   passthrough set dispatch already accepts where meaningful. Owns:
   lock acquisition, precondition classification call, engine call,
   SessionMapping rebind, superseded job-entry removal, output.
+  Refuses instances carrying a watch staged record or a sandbox
+  stanza in their settings (R-SEC-1, `sandboxed` sentinel error) —
+  only watch's own continuation path can safely re-assert review
+  containment. The lock filename is built from the resolved
+  `mapping.InstanceName` after a path-component assertion (R-SEC-4),
+  and every session id read from a mapping body is re-validated with
+  `ValidSessionID` immediately before entering argv or a path
+  (R-SEC-3).
 - **`retask_engine.go` — engine.** `classifyWorker(jobsDir, ids)` →
   retaskable | busy | blocked | gone (+ reason fields);
   `resumeDelivery(req) (result, error)` implementing stop → relaunch
@@ -271,3 +310,79 @@ intact (the stopped worker remains resumable; nothing was removed).
 6. **Docs.** `docs/guides/` page for retask semantics (states,
    errors, fork-under-the-hood caveat), CLAUDE.md index line, and the
    upstream-facts note feeding the separate platform feature request.
+
+## Security Considerations
+
+The security review produced four required behaviors, all reflected in
+the architecture above, plus a clean bill on the overall privilege
+posture.
+
+- **R-SEC-1 — refuse watch-sandboxed instances.** Watch review
+  sessions run under a no-egress OS sandbox because they carry
+  untrusted PR content, and that containment is re-asserted through
+  `ApplyReviewSettings` plus a verification gate that only watch's own
+  continuation path knows how to drive (it holds the owner/repo/ask
+  context). A generic retask would relaunch the session against
+  whatever `.claude/settings.json` sits on disk — which a
+  bypass-permissions review worker could have rewritten — restoring
+  egress to a transcript full of untrusted content. `niwa retask`
+  therefore detects a watch staged record or sandbox stanza and
+  refuses with the `sandboxed` sentinel, directing the operator to
+  watch.
+- **R-SEC-2 — default-deny classification.** The busy/blocked signals
+  the classifier needs are not currently decoded by niwa's job-state
+  reader; a naive classifier would decode zero values and treat a busy
+  worker as retaskable, stopping it mid-turn. The classifier refuses
+  unless the decoded state positively proves idleness, and the new
+  fields it reads are validated against real state files in the
+  live-gate step before anything depends on them.
+- **R-SEC-3 — session-id revalidation at point of use.** The mapping
+  filename's id is validated today, but the JSON body's id is what
+  flows into `claude stop` / `--resume` / `claude rm` argv. A corrupt
+  or hand-edited body could smuggle a flag-shaped string or an
+  unrelated session's UUID. Every id read from a mapping body is
+  re-checked with `ValidSessionID` immediately before argv or path
+  use.
+- **R-SEC-4 — lock filename from validated resolved name.** The lock
+  path component is the resolved `InstanceName`, asserted to be a
+  bare path component (no separators, not `.`/`..`), never the raw
+  user-controlled target string — closing traversal out of
+  `.niwa/locks/`.
+
+Clean findings: retask introduces no new trust boundary — every
+surface it reads or writes (mapping store, lock dir, jobs dir,
+instance settings) is same-user, and anyone able to forge those files
+can already run `claude` directly. The prompt argument rides the
+existing single-argv, no-shell-interpolation dispatch guard. The flock
+pattern self-releases on crash. Privilege posture: no root, no managed
+settings, writes confined to the workspace and niwa state (N4).
+
+## Consequences
+
+Positive:
+
+- Every dispatch handle becomes re-taskable with one command, with
+  the single-owner invariant enforced instead of documented.
+- Watch continuation chains past once-per-session, closing #211's ask
+  through shared machinery rather than a watch-only patch.
+- The reap join's collision preference and the per-instance lock fix
+  latent races that exist today independent of retask.
+- The delivery seam localizes fork-awareness, so a future platform
+  channel unlock is an implementation swap, not a redesign.
+
+Negative, with mitigations:
+
+- The underlying session id rotates per retask; external references
+  to the raw id go stale. Mitigated by handle stability (mapping,
+  `--json` reporting both ids) and documented in the guide.
+- A crash between resume and rebind can briefly leave a live job with
+  a stale mapping — inherent to fork-based delivery, not fixable by
+  ordering. Mitigated by the reap sweep's live-mapping-wins self-heal
+  and surfaced as a documented limitation.
+- Retask refuses sandboxed review instances, a capability gap
+  operators may hit. Deliberate (R-SEC-1); watch remains the driver
+  for those sessions.
+- Two platform behaviors are extrapolated (uniform stop-then-resume on
+  dead-process jobs; chained exclude-known capture). Gated by the
+  live-gate verification step before dependent code lands; respawn
+  fallback documented.
