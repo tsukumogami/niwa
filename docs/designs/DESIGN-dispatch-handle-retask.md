@@ -73,6 +73,51 @@ The affected code: `internal/cli/dispatch.go` (launch + capture),
 (observability join), and `internal/cli/watch.go` (`continueReview`,
 the existing one-shot form of this flow).
 
+## System Model
+
+What this feature is, at the system level, before any implementation
+detail:
+
+- **Runtime shape: a CLI verb, not a daemon.** `niwa retask` is a
+  short-lived invocation like `dispatch`, `list`, and `reap`: it runs,
+  acts, exits. niwa keeps its no-runtime-component model — nothing
+  niwa-owned runs between invocations. The long-running processes on
+  the host remain Claude Code's own (its daemon and session
+  processes); niwa observes them through files and drives them through
+  the `claude` CLI.
+- **Network surface: none.** No port, no socket, no IPC endpoint. All
+  coordination is filesystem-based: read-only reads of Claude Code's
+  jobs directory, niwa's own mapping files, and one per-instance lock
+  file. Delivery of the instruction itself rides a `claude` CLI
+  relaunch, not a connection to the running process.
+- **State and survival.** All state is durable on disk: the
+  conversation transcript (Claude Code's), the job entry (Claude
+  Code's), and the session mapping (niwa's). Consequently:
+
+  | Worker state | Retask behavior |
+  |---|---|
+  | Live and idle | Delivered (stop, relaunch with context) |
+  | Process dead, job entry intact | Delivered (relaunch from the durable transcript) |
+  | Host rebooted since dispatch | Delivered (nothing needed lived in memory) |
+  | Actively running a turn | Refused — retask never interrupts work |
+  | Attached to a terminal | Refused — a human owns the session |
+  | Session removed (`claude rm`) | Refused — the association is gone; fail closed, never guess |
+  | Watch-sandboxed review session | Refused — only watch can safely re-assert containment |
+
+- **Scale: no per-session cost at rest.** Running 100 sessions on one
+  host adds nothing from this feature: no niwa processes, watchers, or
+  open descriptors exist between invocations. One retask costs a scan
+  of the jobs directory (linear in session count), one flock, and a
+  few small file writes. Locks are per-instance, so concurrent retasks
+  of different workers never contend; two against the same worker
+  serialize deliberately. The ceilings at high session counts are
+  Claude Code's own pre-existing ones (daemon process pool and memory,
+  the ~1h idle-process stop, OS fd/process limits) — retask changes
+  none of them and keeps no session alive that would otherwise stop.
+- **Trust boundary: unchanged.** Whoever has the invoking user's
+  filesystem access can retask, exactly as they can already dispatch,
+  stop, or attach. No new boundary is introduced.
+
 ## Decision Drivers
 
 - **Single-owner invariant (R3/R6):** one live session per instance;
