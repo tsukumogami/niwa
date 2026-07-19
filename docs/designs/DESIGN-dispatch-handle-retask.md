@@ -89,7 +89,16 @@ detail:
   coordination is filesystem-based: read-only reads of Claude Code's
   jobs directory, niwa's own mapping files, and one per-instance lock
   file. Delivery of the instruction itself rides a `claude` CLI
-  relaunch, not a connection to the running process.
+  relaunch — and that relaunch is the platform's fork: Claude Code
+  mints a new session id on every resume of a background session, and
+  no supported in-place channel exists (verified by spike). This
+  design does not prevent the fork; it makes the fork harmless. The
+  transcript carries over, the superseded session is removed, the
+  mapping rebinds, and the niwa handle stays the caller's stable
+  identity — the session id rotating underneath is the one visible
+  residue, documented as a limitation. If the platform ever opens an
+  in-place delivery channel, it replaces the fork behind the delivery
+  seam and the rotation disappears without an interface change.
 - **State and survival.** All state is durable on disk: the
   conversation transcript (Claude Code's), the job entry (Claude
   Code's), and the session mapping (niwa's). Consequently:
