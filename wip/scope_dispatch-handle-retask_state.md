@@ -13,7 +13,11 @@ chain_ran:
   - brief
 chain_skipped: []
 visibility: Public
-operator_directive: chain paused after BRIEF PR per operator instruction; resume at /prd after BRIEF review/acceptance
+operator_directive: BRIEF approved and Accepted; continue through prd, design, plan on this branch; keep PR 212 updated and CI green; pause for operator review when PLAN is ready
+parent_orchestration:
+  parent: scope
+  child: prd
+  invoked_at: 2026-07-19T01:50:00Z
 worktree_rebases:
   - onto: 45d4ce086409bc5fbeb7ebf8f5d081017d04eff9
     commits: "45d4ce0 feat(watch): harden the --once PR-review wedge (ED2) (#210)"
