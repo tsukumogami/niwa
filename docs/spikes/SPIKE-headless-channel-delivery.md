@@ -206,6 +206,31 @@ privilege-controlled allowlist.
    override GrowthBook feature values including `tengu_harbor_ledger`; the
    reader is unreachable code in 2.1.214 (approach M).
 
+### Q. Isolated environment matrix (throwaway `CLAUDE_CONFIG_DIR`, seeded feature cache)
+
+A harness created a throwaway config dir, seeded its
+`cachedGrowthBookFeatures` (including `tengu_harbor: true`), launched one `--bg`
+worker with the timer channel plugin, and checked registration plus delivery
+(the channel instruction asks the worker to write `TIMER-ARRIVED.txt`). Three
+modes:
+
+- **managed** — allowlist via `CLAUDE_CODE_MANAGED_SETTINGS_PATH` pointing at a
+  user-owned `managed-settings.json` with `allowedChannelPlugins`; ledger not
+  modified. Ran to completion. Result: **skipped** at the allowlist via the
+  ledger branch, **not delivered** — in a clean isolated env with the feature
+  available and the env var reaching the worker, the redirected managed-settings
+  file's `allowedChannelPlugins` did not populate `policySettings` in 2.1.215.
+- **ledger** — seeds the isolated `tengu_harbor_ledger` to include the plugin.
+  **Not run by the assistant:** the local auto-mode permission classifier denied
+  the command (editing the approved-channels list is fenced as a safety-control
+  modification, including in a sandbox).
+- **dev** — `--dangerously-load-development-channels`. **Not run by the
+  assistant:** the local auto-mode permission classifier denied the command (the
+  dangerous dev-channels flag is fenced).
+
+The two bypass modes require the operator to run the harness directly; the
+managed mode is unrestricted and produced the definitive negative above.
+
 ## Findings
 
 - **Channels register on `--bg` sessions.** Demonstrated by the Telegram plugin
