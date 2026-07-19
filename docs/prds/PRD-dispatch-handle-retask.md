@@ -1,6 +1,6 @@
 ---
 schema: prd/v1
-status: Accepted
+status: In Progress
 problem: |
   Whoever holds a niwa dispatch handle — a headless coordinator, an
   operator, or niwa watch — cannot hand the running worker a follow-up
@@ -32,7 +32,7 @@ motivating_context: |
 
 ## Status
 
-Accepted
+In Progress
 
 ## Problem Statement
 

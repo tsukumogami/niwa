@@ -11,13 +11,18 @@ planned_chain:
   - plan
 chain_ran:
   - brief
+  - prd
 chain_skipped: []
 visibility: Public
 operator_directive: BRIEF approved and Accepted; continue through prd, design, plan on this branch; keep PR 212 updated and CI green; pause for operator review when PLAN is ready
 parent_orchestration:
   parent: scope
-  child: prd
-  invoked_at: 2026-07-19T01:50:00Z
+  child: design
+  invoked_at: 2026-07-19T01:55:00Z
+child_snapshots_prd:
+  status: Accepted
+  jury: all-PASS (completeness PASS, clarity PASS, testability PASS after revision)
+  captured_at: 2026-07-19T01:55:00Z
 worktree_rebases:
   - onto: 45d4ce086409bc5fbeb7ebf8f5d081017d04eff9
     commits: "45d4ce0 feat(watch): harden the --once PR-review wedge (ED2) (#210)"
