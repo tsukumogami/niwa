@@ -125,9 +125,11 @@ Worker classification is default-deny (see Security Considerations,
 R-SEC-2): gone = `!sessionLive`; a worker is retaskable only when the
 decoded job state positively proves it idle (terminal state, no active
 tempo, no in-flight tasks, no pending need); busy, blocked, absent, or
-undecodable signals all refuse. niwa's job-state decoder does not yet
-decode these fields — adding and validating them against real state
-files is part of the live-gate step. Seven sentinel errors
+undecodable signals all refuse. The decoder and classifier already
+exist: watch's continuation work decodes the activity fields and ships
+`watch.ClassifySessionActivity`, a fail-closed positive-idle
+classifier — `classifyWorker` wraps it rather than inventing a second
+classification. Seven sentinel errors
 (target-unknown, session-gone, busy, blocked, sandboxed,
 capture-ambiguous, conflict) each carry target, detected state, and
 reason (N3).
@@ -269,7 +271,9 @@ Components (all in `internal/cli` unless noted):
 - **Lock.** `.niwa/locks/<instance>.lock` under the workspace root,
   non-blocking flock, held for the CLI invocation. `selectReapTargets`
   gains the same trylock (skip instance when held) and the
-  live-mapping-wins collision preference.
+  live-mapping-wins collision preference; the existing
+  `instanceHasLiveJob` cwd guard is retained unchanged — the new
+  checks compose with it, they do not replace it.
 - **Watch adoption.** `continueReview` replaces its inline stop +
   dispatchLaunch + `captureReviewSession` block with an engine call
   carrying `PreLaunch: ApplyReviewSettings(...)` and the staged
@@ -300,8 +304,9 @@ intact (the stopped worker remains resumable; nothing was removed).
    crash interleavings (write-new done/delete-old pending, both
    pending); lock helpers; reap trylock + collision preference with
    the interleaving tests N2's criterion names.
-3. **Engine.** `classifyWorker` against fixture state files (the six
-   error taxonomy); `resumeDelivery` with the exclusion-extended
+3. **Engine.** `classifyWorker` wrapping
+   `watch.ClassifySessionActivity` against fixture state files (the
+   seven sentinel-error taxonomy); `resumeDelivery` with the exclusion-extended
    capture seam; unit tests drive the seams with fakes.
 4. **Command.** `retask.go` wiring, target resolution, `--json`,
    prompt-as-single-argv guard test.
@@ -330,13 +335,15 @@ posture.
   therefore detects a watch staged record or sandbox stanza and
   refuses with the `sandboxed` sentinel, directing the operator to
   watch.
-- **R-SEC-2 — default-deny classification.** The busy/blocked signals
-  the classifier needs are not currently decoded by niwa's job-state
-  reader; a naive classifier would decode zero values and treat a busy
+- **R-SEC-2 — default-deny classification.** A naive classifier
+  keying on undecoded fields would read zero values and treat a busy
   worker as retaskable, stopping it mid-turn. The classifier refuses
-  unless the decoded state positively proves idleness, and the new
-  fields it reads are validated against real state files in the
-  live-gate step before anything depends on them.
+  unless the decoded state positively proves idleness. Watch's
+  continuation work already ships exactly this discipline
+  (`watch.ClassifySessionActivity`, fail-closed, positive-idle);
+  `classifyWorker` reuses it, and the live-gate step re-confirms the
+  field semantics against real state files rather than introducing a
+  parallel decoder.
 - **R-SEC-3 — session-id revalidation at point of use.** The mapping
   filename's id is validated today, but the JSON body's id is what
   flows into `claude stop` / `--resume` / `claude rm` argv. A corrupt
@@ -380,6 +387,12 @@ Negative, with mitigations:
   a stale mapping — inherent to fork-based delivery, not fixable by
   ordering. Mitigated by the reap sweep's live-mapping-wins self-heal
   and surfaced as a documented limitation.
+- A failed `claude rm` of the superseded entry (rebind already
+  durable) leaves two job entries on the cwd until the next retask,
+  whose exclude-known capture again excludes the recorded old id — the
+  ambiguity does not compound, but the stale entry lingers for the
+  operator to remove; the command reports it rather than failing the
+  completed retask.
 - Retask refuses sandboxed review instances, a capability gap
   operators may hit. Deliberate (R-SEC-1); watch remains the driver
   for those sessions.
