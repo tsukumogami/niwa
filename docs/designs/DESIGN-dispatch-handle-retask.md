@@ -1,4 +1,5 @@
 ---
+schema: design/v1
 status: Proposed
 problem: |
   Claude Code offers no in-place delivery into a live background
