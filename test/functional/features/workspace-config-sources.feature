@@ -97,3 +97,38 @@ Feature: workspace config sources (snapshot model)
     Then the exit code is 0
     # The brief must survive the refresh so the dispatched worker can read it.
     And the dispatch brief "probe.md" still exists in the workspace root
+
+  # --- issue #214: upstream config changes take effect on the SAME apply ---
+  # The reconcile that refreshes the workspace-root .niwa/ snapshot from the
+  # source must run BEFORE the config drives materialization, and the swapped
+  # workspace.toml must be reloaded. Otherwise a settings change pushed to the
+  # source only lands one apply later: the reconcile swaps the snapshot on disk
+  # but the stale config already materialized the managed files.
+
+  @critical
+  Scenario: niwa apply reconciles a settings change from the source on the same run
+    Given a clean niwa environment
+    And a local git server is set up
+    And a config repo "recon" exists with body:
+      """
+      [workspace]
+      name = "recon"
+      """
+    When I run niwa init from config repo "recon"
+    Then the exit code is 0
+    And the provenance marker exists
+    When I run "niwa apply recon"
+    Then the exit code is 0
+    # Upstream adds a permission posture to the config.
+    When the config repo "recon" is force-pushed to:
+      """
+      [workspace]
+      name = "recon"
+
+      [claude.settings]
+      permissions = "bypass"
+      """
+    And I run "niwa apply recon"
+    Then the exit code is 0
+    # A single apply must materialize the new posture -- not require a second run.
+    And the file ".claude/settings.json" under the workspace root contains "bypassPermissions"

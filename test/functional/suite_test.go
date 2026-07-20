@@ -239,6 +239,7 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 	ctx.Step(`^the config dir is a git working tree from config repo "([^"]*)"$`, theConfigDirIsAGitWorkingTree)
 	ctx.Step(`^a dispatch brief "([^"]*)" exists in the workspace root$`, aDispatchBriefExistsInWorkspaceRoot)
 	ctx.Step(`^the dispatch brief "([^"]*)" still exists in the workspace root$`, theDispatchBriefStillExistsInWorkspaceRoot)
+	ctx.Step(`^the file "([^"]*)" under the workspace root contains "([^"]*)"$`, theMaterializedFileAtWorkspaceRootContains)
 
 	// Assertions
 	ctx.Step(`^the exit code is (\d+)$`, theExitCodeIs)
