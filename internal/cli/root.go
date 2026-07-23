@@ -8,6 +8,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/tsukumogami/niwa/internal/buildinfo"
 	"github.com/tsukumogami/niwa/internal/cli/sessionattach"
+	"github.com/tsukumogami/niwa/internal/onboard"
 	"github.com/tsukumogami/niwa/internal/workspace"
 )
 
@@ -91,6 +92,16 @@ func Execute() {
 		if errors.As(err, &ice) && ice.ExitCode > 0 {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(ice.ExitCode)
+		}
+		// *onboard.ExitCodeError carries niwa onboard's own exit-code
+		// vocabulary (Decision 2): a third errors.As arm, same shape as
+		// the sessionattach arm above.
+		var oce *onboard.ExitCodeError
+		if errors.As(err, &oce) {
+			if oce.Msg != "" {
+				fmt.Fprintln(os.Stderr, oce.Msg)
+			}
+			os.Exit(oce.Code)
 		}
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
