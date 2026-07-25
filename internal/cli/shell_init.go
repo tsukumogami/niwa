@@ -71,6 +71,47 @@ niwa() {
 }
 `
 
+// zshCompdefDeferGuard makes the cobra-generated `compdef _niwa niwa`
+// registration survive being sourced before compinit has run.
+//
+// zsh loads ~/.zshenv (and everything it sources -- including ~/.tsuku/env and
+// ~/.niwa/env) before ~/.zshrc, where compinit typically lives. At .zshenv time
+// the `compdef` autoload function does not exist yet, so cobra's compdef call
+// silently no-ops and tab-completion never activates. This is the common macOS
+// case: the default shell is zsh and the integration is sourced from an env
+// file. bash is unaffected because its `complete` builtin is always available.
+//
+// When compdef is missing, queue a one-shot precmd hook. By the time the first
+// prompt is drawn, all rc files (and thus compinit) have loaded, so compdef
+// exists and the registration succeeds. The hook then removes itself.
+const zshCompdefDeferGuard = `
+# niwa: register completion even if this file was sourced before compinit ran
+# (e.g. from ~/.zshenv or ~/.tsuku/env, which zsh loads before ~/.zshrc).
+if ! (( $+functions[compdef] )); then
+    __niwa_register_completion() {
+        (( $+functions[compdef] )) && compdef _niwa niwa
+        precmd_functions=(${precmd_functions:#__niwa_register_completion})
+        (( $+functions[__niwa_register_completion] )) && unfunction __niwa_register_completion
+    }
+    if [[ -z ${precmd_functions[(r)__niwa_register_completion]} ]]; then
+        precmd_functions+=(__niwa_register_completion)
+    fi
+fi
+`
+
+// guardZshCompdef wraps cobra's unconditional top-level `compdef _niwa niwa`
+// so it becomes a no-op instead of a "command not found: compdef" error when
+// the completion is sourced before compinit has run (see zshCompdefDeferGuard).
+// The deferral guard handles the actual registration in that case; this only
+// silences the stray error. If cobra's output format changes and the exact
+// line is not found, the input is returned unchanged (the deferral guard and
+// the shell wrappers that redirect stderr still keep things working).
+func guardZshCompdef(s string) string {
+	const bare = "\ncompdef _niwa niwa\n"
+	const guarded = "\n(( $+functions[compdef] )) && compdef _niwa niwa\n"
+	return strings.Replace(s, bare, guarded, 1)
+}
+
 var shellInitBashCmd = &cobra.Command{
 	Use:   "bash",
 	Short: "Generate bash shell integration",
@@ -98,7 +139,8 @@ var shellInitZshCmd = &cobra.Command{
 		if err := rootCmd.GenZshCompletion(&buf); err != nil {
 			return fmt.Errorf("generating zsh completions: %w", err)
 		}
-		fmt.Fprint(cmd.OutOrStdout(), buf.String())
+		fmt.Fprint(cmd.OutOrStdout(), guardZshCompdef(buf.String()))
+		fmt.Fprint(cmd.OutOrStdout(), zshCompdefDeferGuard)
 		return nil
 	},
 }

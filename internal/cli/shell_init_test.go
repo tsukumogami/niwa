@@ -56,6 +56,66 @@ func TestShellInitZsh_ValidSyntax(t *testing.T) {
 	}
 }
 
+// TestShellInitZsh_CompdefDeferGuard verifies the zsh integration ships the
+// deferral guard that re-registers completion when the script is sourced before
+// compinit has run (the default macOS case, where the env file is sourced from
+// ~/.zshenv, before ~/.zshrc's compinit). Without it, cobra's `compdef` call
+// no-ops and tab-completion silently never activates.
+func TestShellInitZsh_CompdefDeferGuard(t *testing.T) {
+	var out bytes.Buffer
+	shellInitZshCmd.SetOut(&out)
+
+	if err := shellInitZshCmd.RunE(shellInitZshCmd, nil); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	output := out.String()
+	for _, want := range []string{
+		"$+functions[compdef]",                  // guards on compdef availability
+		"__niwa_register_completion",            // the deferred registration function
+		"compdef _niwa niwa",                    // performs the registration
+		"precmd_functions+=",                    // queues the one-shot precmd hook
+		"unfunction __niwa_register_completion", // hook cleans itself up
+	} {
+		if !strings.Contains(output, want) {
+			t.Errorf("zsh output missing defer-guard fragment %q", want)
+		}
+	}
+
+	// The guard must come after the completion function is defined so the
+	// deferred compdef refers to an existing _niwa.
+	if i, j := strings.Index(output, "_niwa()"), strings.Index(output, "__niwa_register_completion"); i == -1 || j == -1 || j < i {
+		t.Errorf("defer guard must appear after the _niwa() definition (i=%d, j=%d)", i, j)
+	}
+
+	// Cobra's own top-level registration must be guarded so it does not error
+	// with "command not found: compdef" when sourced before compinit.
+	if strings.Contains(output, "\ncompdef _niwa niwa\n") {
+		t.Error("cobra's unconditional `compdef _niwa niwa` should be guarded, not emitted bare")
+	}
+	if !strings.Contains(output, "(( $+functions[compdef] )) && compdef _niwa niwa") {
+		t.Error("zsh output missing guarded top-level compdef registration")
+	}
+}
+
+func TestGuardZshCompdef(t *testing.T) {
+	// The bare cobra line is replaced exactly once.
+	in := "#compdef niwa\ncompdef _niwa niwa\n\n_niwa() { : }\n"
+	got := guardZshCompdef(in)
+	if strings.Contains(got, "\ncompdef _niwa niwa\n") {
+		t.Errorf("bare compdef line still present:\n%s", got)
+	}
+	if !strings.Contains(got, "(( $+functions[compdef] )) && compdef _niwa niwa") {
+		t.Errorf("guarded compdef line missing:\n%s", got)
+	}
+
+	// Unknown format is returned unchanged (graceful fallback).
+	unknown := "something else entirely\n"
+	if guardZshCompdef(unknown) != unknown {
+		t.Error("guardZshCompdef should return unmatched input unchanged")
+	}
+}
+
 // TestShellWrapperTemplate_CdEligibleCommands verifies each command that
 // must trigger __niwa_cd_wrap is present in the wrapper's case dispatcher.
 // Use per-command membership checks rather than a golden-string match on the
