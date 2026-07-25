@@ -33,6 +33,13 @@ type Applier struct {
 	AllowDirty      bool
 	GlobalConfigDir string // empty string means global config not registered
 
+	// CloneWorkers bounds how many repos are cloned concurrently. Values <= 0
+	// mean "use the built-in default" (cloneWorkers). Lowering it helps on slow
+	// or unreliable links where many parallel git transports saturate the
+	// connection. The CLI wires this from the --parallel flag and the [global]
+	// clone_workers config (flag > config > default).
+	CloneWorkers int
+
 	// Agent is the resolved session-global coding agent this apply prepares
 	// the workspace for. The zero value (agent.Agent("")) behaves as Claude
 	// (agent.AgentClaude), so an Applier constructed without setting this field
@@ -108,6 +115,12 @@ type Applier struct {
 	// headSHA is the function used to read the HEAD commit SHA of a repo.
 	// Defaults to HeadSHA. Overridable in tests.
 	headSHA func(dir string) (string, error)
+
+	// cloneRepo performs a single clone of one repo (no retry). When nil it
+	// falls back to a.Cloner.CloneWithBranch. Overridable in tests so the
+	// retry loop in cloneWithRetry can be exercised against simulated transient
+	// and permanent failures without invoking git.
+	cloneRepo func(ctx context.Context, url, targetDir, branch string, r *Reporter) (bool, error)
 
 	// prunePluginRecords removes dangling records from Claude Code's global
 	// plugin install registry. It is the test seam for the automatic heal
@@ -222,8 +235,57 @@ const worktreeFallbackWarning = "worktree delegation unavailable: this Claude Co
 // installed for a workspace instance.
 const worktreeFallbackExplainer = "note: agent-initiated worktree creation is disabled on this harness. Run `niwa worktree create` to get a niwa-managed worktree with secrets and CLAUDE context."
 
-// cloneWorkers is the maximum number of repos cloned concurrently.
+// cloneWorkers is the default maximum number of repos cloned concurrently
+// when neither Applier.CloneWorkers nor the [global] clone_workers config
+// overrides it.
 const cloneWorkers = 8
+
+// cloneBackoff is the wait schedule between clone retries. Its length is the
+// number of retries on top of the initial attempt (len==3 -> up to 4 attempts
+// total). A transient clone failure (network blip, saturated link) is retried
+// after the corresponding wait; permanent failures (see isPermanentCloneError)
+// and successes return immediately. Tests override this slice to skip real
+// waits. Mirrors driftCheckBackoff in snapshotwriter.go.
+var cloneBackoff = []time.Duration{
+	1 * time.Second,
+	2 * time.Second,
+	4 * time.Second,
+}
+
+// permanentCloneErrorMarkers are lowercased substrings that identify a clone
+// failure as permanent (not worth retrying): a missing/inaccessible repo, an
+// auth failure, or a bad ref. Anything not matching is treated as transient.
+//
+// Caveat: over SSH a genuinely-missing repo prints "ERROR: Repository not
+// found." which niwa's git-output filter drops (uppercase, non-"fatal:"
+// prefix), leaving only the ambiguous "fatal: Could not read from remote
+// repository." — indistinguishable from a transient timeout. That case is
+// retried a few times before surfacing the error. HTTPS clones and bad-branch
+// refs do carry a "fatal:"-prefixed permanent marker and fail fast.
+var permanentCloneErrorMarkers = []string{
+	"repository not found",
+	"not found in upstream",
+	"permission denied",
+	"authentication failed",
+	"invalid username or password",
+	"could not read username",
+	"does not appear to be a git repository",
+}
+
+// isPermanentCloneError reports whether err is a clone failure that should not
+// be retried. A nil error is not permanent (there is nothing to classify).
+func isPermanentCloneError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	for _, marker := range permanentCloneErrorMarkers {
+		if strings.Contains(msg, marker) {
+			return true
+		}
+	}
+	return false
+}
 
 // cloneJob carries per-repo inputs to a clone worker.
 type cloneJob struct {
@@ -242,6 +304,7 @@ type cloneResult struct {
 	targetDir string // echoed from job so the orchestrator can call repoAlreadyCloned
 	cloned    bool
 	syncWarn  string // non-empty if sync produced a deferred warning
+	retries   int    // number of transient-failure retries before this clone succeeded
 	err       error  // non-nil on clone failure; does not include sync errors
 }
 
@@ -1229,7 +1292,11 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		jobs := make(chan cloneJob, total)
 		results := make(chan cloneResult, total)
 
-		workers := min(cloneWorkers, total)
+		workers := a.CloneWorkers
+		if workers <= 0 {
+			workers = cloneWorkers
+		}
+		workers = min(workers, total)
 		for range workers {
 			go a.cloneWorker(ctx, jobs, results)
 		}
@@ -1255,6 +1322,9 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 				cancel()
 			}
 			if cloneErr == nil {
+				if r.retries > 0 {
+					a.Reporter.DeferWarn("cloned %s after %d transient failure(s)", r.name, r.retries)
+				}
 				if r.syncWarn != "" {
 					a.Reporter.DeferWarn("%s", r.syncWarn)
 				}
@@ -2076,12 +2146,13 @@ func repoAlreadyCloned(dir string) bool {
 func (a *Applier) cloneWorker(ctx context.Context, jobs <-chan cloneJob, results chan<- cloneResult) {
 	noop := NewReporterWithTTY(io.Discard, false)
 	for job := range jobs {
-		cloned, err := a.Cloner.CloneWithBranch(ctx, job.cloneURL, job.targetDir, job.branch, noop)
+		cloned, retries, err := a.cloneWithRetry(ctx, job, noop)
 		if err != nil {
 			results <- cloneResult{
 				name:      job.cr.Repo.Name,
 				cloneURL:  job.cloneURL,
 				targetDir: job.targetDir,
+				retries:   retries,
 				err:       err,
 			}
 			continue
@@ -2104,9 +2175,45 @@ func (a *Applier) cloneWorker(ctx context.Context, jobs <-chan cloneJob, results
 			cloneURL:  job.cloneURL,
 			targetDir: job.targetDir,
 			cloned:    cloned,
+			retries:   retries,
 			syncWarn:  syncWarn,
 		}
 	}
+}
+
+// cloneWithRetry clones a single repo, retrying transient failures over
+// cloneBackoff. It returns whether a fresh clone was performed, how many
+// retries were spent before success (0 when the first attempt succeeded or the
+// repo already existed), and the final error.
+//
+// A permanent failure (isPermanentCloneError) is not retried. Between attempts
+// the partially-written target directory is removed so the next clone starts
+// clean; a git clone that fails typically leaves a half-populated dir that
+// would otherwise make the retry a no-op or fail on a non-empty target.
+// Context cancellation aborts the wait and returns ctx.Err().
+func (a *Applier) cloneWithRetry(ctx context.Context, job cloneJob, r *Reporter) (cloned bool, retries int, err error) {
+	cloneOnce := a.cloneRepo
+	if cloneOnce == nil {
+		cloneOnce = a.Cloner.CloneWithBranch
+	}
+	attempts := len(cloneBackoff) + 1
+	for i := 0; i < attempts; i++ {
+		cloned, err = cloneOnce(ctx, job.cloneURL, job.targetDir, job.branch, r)
+		if err == nil {
+			return cloned, i, nil
+		}
+		if isPermanentCloneError(err) || i == attempts-1 || ctx.Err() != nil {
+			return false, i, err
+		}
+		// Clear the partial clone so the retry starts from a clean target.
+		_ = os.RemoveAll(job.targetDir)
+		select {
+		case <-time.After(cloneBackoff[i]):
+		case <-ctx.Done():
+			return false, i, ctx.Err()
+		}
+	}
+	return false, attempts - 1, err
 }
 
 // discoverAllRepos collects repos from all sources, enforcing per-source

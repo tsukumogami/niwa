@@ -27,6 +27,12 @@ type GlobalConfigSource struct {
 type GlobalSettings struct {
 	CloneProtocol      string `toml:"clone_protocol,omitempty"`
 	AutoInstallPlugins *bool  `toml:"auto_install_plugins,omitempty"`
+	// CloneWorkers is the host-level default for how many repos apply/create/
+	// dispatch clone concurrently. Zero (omitted) preserves niwa's built-in
+	// default; a positive value caps concurrency. The --parallel flag overrides
+	// it for a single run. Useful on consistently slow or flaky networks where
+	// the default parallelism saturates the link.
+	CloneWorkers int `toml:"clone_workers,omitempty"`
 	// RemoteControlOnDispatch, when non-nil and true, makes `niwa dispatch`
 	// workers start with Claude Code Remote enabled by default (the worker is
 	// launched with `remoteControlAtStartup: true`). It is a host-level default
@@ -106,6 +112,15 @@ func (g *GlobalConfig) CloneProtocol() string {
 		return g.Global.CloneProtocol
 	}
 	return "ssh"
+}
+
+// CloneWorkers returns the configured maximum number of repos cloned
+// concurrently during apply/create/dispatch. Zero (the default) means "unset":
+// callers fall back to niwa's built-in default. Lowering it on a slow or
+// unreliable network reduces the chance that many parallel git transports
+// saturate the link and one clone times out.
+func (g *GlobalConfig) CloneWorkers() int {
+	return g.Global.CloneWorkers
 }
 
 // RegisteredNames returns a sorted, sanitized list of workspace names from

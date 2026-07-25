@@ -24,6 +24,8 @@ func init() {
 	dispatchCmd.Flags().StringVar(&dispatchPermissionMode, "permission-mode", "", "permission mode to forward to the background worker (--permission-mode)")
 	dispatchCmd.Flags().StringVar(&dispatchAgent, "agent", "", "agent to forward to the background worker (--agent)")
 	dispatchCmd.Flags().BoolVarP(&dispatchDetach, "detach", "d", false, "do not attach the terminal to the new session; print hints and return")
+	dispatchCmd.Flags().IntVar(&dispatchParallel, "parallel", 0,
+		"maximum repos to clone concurrently when provisioning the dispatch instance (>=1). Lower this on slow or flaky networks; 1 clones serially. Overrides the [global] clone_workers config. 0 (the default) uses clone_workers, else niwa's built-in default.")
 	// --keep-alive is tri-state (unset / explicit true / explicit false) so it
 	// can override the [global] keep_alive_on_dispatch host default in BOTH
 	// directions; a plain BoolVar cannot distinguish "not given" from "false".
@@ -40,6 +42,7 @@ var (
 	dispatchPermissionMode string
 	dispatchAgent          string
 	dispatchDetach         bool
+	dispatchParallel       int
 	// dispatchKeepAlive holds the tri-state --keep-alive value: nil when the
 	// flag was not given, otherwise a pointer to the explicit true/false (see
 	// triBoolValue in dispatch_keepalive.go).
@@ -207,7 +210,10 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	// way runCreate does, before creating the new instance (R12).
 	reapOpportunistically(workspaceRoot)
 
-	// (6) Create the instance through the existing provision path.
+	// (6) Create the instance through the existing provision path. --parallel
+	// rides into realProvisionInstance via provisionCloneWorkers (the provision
+	// signature is fixed and shared with the hook/reap callers).
+	provisionCloneWorkers = dispatchParallel
 	res, err := provisionInstanceFunc(cmd.Context(), workspaceRoot, cwd, namePrefix, sep)
 	if err != nil {
 		return fmt.Errorf("niwa: error: provisioning dispatch instance: %w", err)
