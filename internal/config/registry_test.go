@@ -72,6 +72,30 @@ func TestCloneProtocolExplicit(t *testing.T) {
 	}
 }
 
+func TestCloneWorkersDefault(t *testing.T) {
+	cfg := &GlobalConfig{}
+	if got := cfg.CloneWorkers(); got != 0 {
+		t.Errorf("CloneWorkers() = %d, want 0 (unset)", got)
+	}
+}
+
+func TestCloneWorkersExplicit(t *testing.T) {
+	cfg := &GlobalConfig{Global: GlobalSettings{CloneWorkers: 2}}
+	if got := cfg.CloneWorkers(); got != 2 {
+		t.Errorf("CloneWorkers() = %d, want 2", got)
+	}
+}
+
+func TestCloneWorkersParsedFromTOML(t *testing.T) {
+	cfg, err := ParseGlobalConfig([]byte("[global]\nclone_workers = 3\n"))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := cfg.CloneWorkers(); got != 3 {
+		t.Errorf("CloneWorkers() = %d, want 3", got)
+	}
+}
+
 func TestLookupWorkspaceFound(t *testing.T) {
 	cfg, err := ParseGlobalConfig([]byte(sampleGlobalConfig))
 	if err != nil {

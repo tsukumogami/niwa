@@ -103,6 +103,12 @@ type provisionResult struct {
 // guard + mapping + injection logic in isolation.
 var provisionInstanceFunc = realProvisionInstance
 
+// provisionCloneWorkers overrides clone concurrency for realProvisionInstance.
+// `niwa dispatch --parallel` sets it before provisioning; the SessionStart hook
+// and reap paths leave it 0, meaning "use the [global] clone_workers config,
+// else the built-in default". A positive value overrides the config.
+var provisionCloneWorkers int
+
 // destroyInstanceFunc force-destroys the instance at instancePath. It is a
 // package variable so SessionEnd teardown tests can substitute a fake that
 // records the call without touching the filesystem.
@@ -370,10 +376,16 @@ func realProvisionInstance(ctx context.Context, workspaceRoot, cwd, namePrefix, 
 	applier := workspace.NewApplier(gh)
 	applier.Reporter = workspace.NewReporter(os.Stderr)
 	configurePluginAutoInstall(applier, false)
+	// provisionCloneWorkers is set by `niwa dispatch --parallel`; the hook and
+	// reap callers leave it 0 (auto). It wins over clone_workers when > 0.
+	applier.CloneWorkers = provisionCloneWorkers
 
 	if globalCfg, gErr := config.LoadGlobalConfig(); gErr == nil {
 		if gDir, gErr := config.GlobalConfigDir(); gErr == nil {
 			applier.GlobalConfigDir = gDir
+		}
+		if provisionCloneWorkers <= 0 {
+			applier.CloneWorkers = globalCfg.CloneWorkers()
 		}
 		if entry := globalCfg.LookupWorkspace(configName); entry != nil {
 			applier.ConfigSourceURL = entry.SourceURL

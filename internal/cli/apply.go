@@ -34,6 +34,8 @@ func init() {
 		"at the workspace root, refresh the root-managed config only and do not re-converge the instances beneath it. Has no effect at an instance (its worktrees refresh with it under the inherit model) or at a worktree (leaf scope).")
 	applyCmd.Flags().StringVar(&applyAgent, "agent", "",
 		"select the coding agent to prepare the workspace for (claude or codex) for this session, overriding the workspace default_agent; NIWA_AGENT sets it per shell.")
+	applyCmd.Flags().IntVar(&applyParallel, "parallel", 0,
+		"maximum repos to clone concurrently (>=1). Lower this on slow or flaky networks; 1 clones serially. Overrides the [global] clone_workers config. 0 (the default) uses clone_workers, else niwa's built-in default.")
 	applyCmd.ValidArgsFunction = completeWorkspaceNames
 	_ = applyCmd.RegisterFlagCompletionFunc("instance", completeInstanceNames)
 }
@@ -48,6 +50,7 @@ var (
 	applyNoInstallPlugins      bool
 	applyNoCascade             bool
 	applyAgent                 string
+	applyParallel              int
 )
 
 var applyCmd = &cobra.Command{
@@ -152,6 +155,10 @@ func runApply(cmd *cobra.Command, args []string) error {
 	applier.Reporter = workspace.NewReporterWithTTY(os.Stderr, !noProgress && term.IsTerminal(int(os.Stderr.Fd())))
 	applier.NoPull = applyNoPull
 	applier.AllowDirty = applyAllowDirty
+	// --parallel wins when > 0; otherwise the [global] clone_workers config
+	// (resolved below when it loads) sets the default; otherwise the Applier
+	// falls back to its built-in default.
+	applier.CloneWorkers = applyParallel
 	configurePluginAutoInstall(applier, applyNoInstallPlugins)
 	if applyAllowDirty {
 		// PRD R32: --allow-dirty is meaningless under the snapshot
@@ -189,6 +196,11 @@ func runApply(cmd *cobra.Command, args []string) error {
 		// manually-maintained personal overlays (no remote configured) work.
 		if gDir, gErr := config.GlobalConfigDir(); gErr == nil {
 			applier.GlobalConfigDir = gDir
+		}
+		// clone_workers is the host-level concurrency default; --parallel (set
+		// above) overrides it when provided.
+		if applyParallel <= 0 {
+			applier.CloneWorkers = globalCfg.CloneWorkers()
 		}
 		// ConfigSourceURL is the original GitHub URL stored at init time.
 		// It enables convention overlay discovery when OverlayURL is not yet

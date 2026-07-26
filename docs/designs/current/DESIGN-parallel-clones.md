@@ -102,6 +102,14 @@ spinner.
 
 ### Decision 2: Concurrency cap and control
 
+> **Update (issue #219):** The cap of 8 is now the *default*, not a fixed
+> constant. `apply`, `create`, and `dispatch` accept `--parallel <n>`, and a
+> `[global] clone_workers` config sets a per-host default (flag > config >
+> built-in 8). The "no CLI flag" alternative below was reversed: on slow or
+> unreliable networks, 8 parallel git transports saturate the link and one clone
+> times out, so an escape hatch to lower concurrency is worth the surface. The
+> default behavior is unchanged when neither knob is set.
+
 With workers running concurrently, how many repos should clone simultaneously?
 Too few and there's limited speedup. Too many and network saturation, OS file
 descriptor limits, or connection throttling from the git host become concerns.
@@ -136,6 +144,14 @@ meaningful safety.
 ---
 
 ### Decision 3: Error handling in the worker pool
+
+> **Update (issue #219):** Fail-fast still applies, but only *after* retries are
+> exhausted. Each worker now retries a transient clone failure (network blip,
+> saturated link) over a short backoff before reporting an error, clearing the
+> partial target directory between attempts. Permanent failures (missing repo,
+> auth denied, bad ref) are detected and fail fast without retrying. This keeps
+> the cancel-on-first-real-error behavior below while surviving the transient
+> exit-128 failures that made multi-repo apply flaky on slow networks.
 
 When one repo fails to clone, there are three approaches to the remaining
 in-flight workers: stop them immediately, let them all finish and collect

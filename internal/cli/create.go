@@ -28,6 +28,8 @@ func init() {
 		"emit a single JSON object {name, number, path} for the created instance and nothing else on stdout")
 	createCmd.Flags().StringVar(&createAgent, "agent", "",
 		"select the coding agent to prepare the instance for (claude or codex) for this session, overriding the workspace default_agent; NIWA_AGENT sets it per shell.")
+	createCmd.Flags().IntVar(&createParallel, "parallel", 0,
+		"maximum repos to clone concurrently (>=1). Lower this on slow or flaky networks; 1 clones serially. Overrides the [global] clone_workers config. 0 (the default) uses clone_workers, else niwa's built-in default.")
 	createCmd.ValidArgsFunction = completeWorkspaceNames
 }
 
@@ -39,6 +41,7 @@ var (
 	createAllowPlaintextSecrets bool
 	createJSON                  bool
 	createAgent                 string
+	createParallel              int
 )
 
 // createResult is the machine-readable shape emitted by `niwa create --json`.
@@ -201,6 +204,9 @@ func runCreate(cmd *cobra.Command, args []string) error {
 	configurePluginAutoInstall(applier, createNoInstallPlugins)
 	applier.AllowMissingSecrets = createAllowMissingSecrets
 	applier.AllowPlaintextSecrets = createAllowPlaintextSecrets
+	// --parallel wins when > 0; otherwise the [global] clone_workers config
+	// (resolved below when it loads) applies; otherwise the Applier default.
+	applier.CloneWorkers = createParallel
 
 	resolvedAgent, agErr := resolveSessionAgent(createAgent, cfg)
 	if agErr != nil {
@@ -216,6 +222,9 @@ func runCreate(cmd *cobra.Command, args []string) error {
 	if globalCfg, gErr := config.LoadGlobalConfig(); gErr == nil {
 		if gDir, gErr := config.GlobalConfigDir(); gErr == nil {
 			applier.GlobalConfigDir = gDir
+		}
+		if createParallel <= 0 {
+			applier.CloneWorkers = globalCfg.CloneWorkers()
 		}
 		if entry := globalCfg.LookupWorkspace(configName); entry != nil {
 			applier.ConfigSourceURL = entry.SourceURL
