@@ -430,6 +430,14 @@ type WorktreeApplyOptions struct {
 	// declaration, threaded so the worktree path resolves the same targets as
 	// the instance apply path. Empty when no global override is available.
 	GlobalEnvOutput config.OutputTargets
+	// WorktreeDelegation carries the apply-time worktree-integration decision
+	// (probe result + niwa fallback path) so a worktree's settings record the
+	// same hook or deny entries as the clone it was made from. Without it the
+	// two configurations drift: the clone carries one of them and the worktree
+	// carries neither. nil installs neither, which is the pre-Decision-9
+	// behavior, so a caller that does not set it is unaffected.
+	// See DESIGN-niwa-default-worktree.md Decision 9.
+	WorktreeDelegation *WorktreeDelegation
 }
 
 // ApplyToWorktree installs, into worktreePath, the same class of CLAUDE
@@ -536,6 +544,7 @@ func ApplyToWorktree(cfg *config.WorkspaceConfig, configDir, instanceRoot, workt
 
 		GlobalEnvExamplePolicy: opts.GlobalEnvExamplePolicy,
 		GlobalEnvOutput:        opts.GlobalEnvOutput,
+		WorktreeDelegation:     opts.WorktreeDelegation,
 		InheritedEnv:           inheritedEnv,
 	})
 	if err != nil {

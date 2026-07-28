@@ -348,7 +348,8 @@ func guardedNiwaHookCommand(niwaPath, suffix string) string {
 }
 
 // shellSingleQuote wraps s in single quotes for safe interpolation into a shell
-// command, escaping any embedded single quote the standard way ('\'').
+// command. An embedded single quote is escaped the standard way: close the
+// quoted run, emit a backslash-escaped quote, reopen the run.
 func shellSingleQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }

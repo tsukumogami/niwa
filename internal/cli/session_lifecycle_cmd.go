@@ -306,6 +306,19 @@ func applyContentToWorktree(instanceRoot, worktreePath, repo, purpose, branch st
 
 	opts := workspace.WorktreeApplyOptions{Stderr: os.Stderr}
 
+	// Decision 9: record the same worktree-delegation configuration the clone
+	// carries, so a worktree's settings do not drift from its clone's. The
+	// decision is recomputed here rather than read from state because this path
+	// runs outside an apply -- `niwa worktree create` and the WorktreeCreate hook
+	// both land here. Resolution mirrors the apply pipeline: probe the harness,
+	// take this binary's path as the hook command's fallback arm, and degrade to
+	// the deny branch if that path cannot be resolved.
+	if delegation, dErr := resolveWorktreeDelegation(instanceRoot); dErr != nil {
+		fmt.Fprintf(os.Stderr, "niwa: warning: %v; worktree settings will carry no delegation entries\n", dErr)
+	} else {
+		opts.WorktreeDelegation = delegation
+	}
+
 	// Resolve the session-global agent from the workspace default (and the
 	// NIWA_AGENT env override) so a worktree is prepared for the same agent the
 	// instance is. DefaultAgent is a workspace-level field unaffected by the
@@ -716,4 +729,29 @@ func writeSessionLifecycleTable(out interface{ Write([]byte) (int, error) }, row
 		fmt.Fprintf(out, "  %-12s %-12s %-10s %-12s %-20s %s\n",
 			s.SessionID, s.Repo, s.Status, availability, created, purpose)
 	}
+}
+
+// resolveWorktreeDelegation computes the worktree-delegation decision for a
+// worktree content install, mirroring what the apply pipeline computes per
+// apply (DESIGN-niwa-default-worktree.md Decisions 4, 5, 7, and 9).
+//
+// It returns (nil, nil) when the instance opted out at init time: the opt-out
+// means no hook AND no deny anywhere, so a worktree must not reintroduce either.
+// It returns an error only when this binary's own path cannot be resolved, in
+// which case the caller warns and installs neither rather than writing a hook
+// whose fallback arm points nowhere.
+func resolveWorktreeDelegation(instanceRoot string) (*workspace.WorktreeDelegation, error) {
+	if state, err := workspace.LoadState(instanceRoot); err == nil && state != nil && state.NoWorktreeDelegation {
+		return nil, nil
+	}
+
+	niwaPath, err := os.Executable()
+	if err != nil {
+		return nil, fmt.Errorf("resolving niwa binary path for worktree hooks: %w", err)
+	}
+
+	return &workspace.WorktreeDelegation{
+		Supported: workspace.SupportsWorktreeHooks(context.Background()),
+		NiwaPath:  niwaPath,
+	}, nil
 }

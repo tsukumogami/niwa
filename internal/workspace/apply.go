@@ -1554,6 +1554,7 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		existingState:          opts.existingState,
 		now:                    now,
 		allowPlaintextSecrets:  a.AllowPlaintextSecrets,
+		worktreeDelegation:     worktreeDelegation,
 	})
 	if err != nil {
 		return nil, err
@@ -1765,6 +1766,10 @@ type worktreeRefreshInputs struct {
 	existingState         *InstanceState
 	now                   time.Time
 	allowPlaintextSecrets bool
+	// worktreeDelegation is the apply-time worktree-integration decision, passed
+	// through so a refreshed worktree records the same hook or deny entries as
+	// its clone (Decision 9). nil installs neither.
+	worktreeDelegation *WorktreeDelegation
 	// gitRegistered reports whether worktreePath is a worktree git still
 	// registers against cloneDir. nil defaults to gitRegistersWorktree (the real
 	// `git worktree list --porcelain` cross-check); injected in tests.
@@ -1863,6 +1868,9 @@ func (a *Applier) refreshWorktreeEnvs(in worktreeRefreshInputs) ([]ManagedFile, 
 				Stderr:                 a.Reporter.Writer(),
 				GlobalEnvExamplePolicy: in.globalEnvExamplePolicy,
 				GlobalEnvOutput:        in.globalEnvOutput,
+				// Decision 9: give the worktree the same delegation configuration
+				// the clone got on this apply, so the two do not drift.
+				WorktreeDelegation: in.worktreeDelegation,
 			},
 		)
 		if refreshErr != nil {

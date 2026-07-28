@@ -1,6 +1,7 @@
 package workspace
 
 import (
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -559,4 +560,104 @@ func runGitWT(t *testing.T, dir string, args ...string) {
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
 	}
+}
+
+// worktreeSettingsDoc reads the worktree's materialized settings.local.json,
+// returning nil when the file does not exist.
+func worktreeSettingsDoc(t *testing.T, worktreePath string) map[string]any {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(worktreePath, ".claude", "settings.local.json"))
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		t.Fatalf("reading worktree settings: %v", err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(data, &doc); err != nil {
+		t.Fatalf("parsing worktree settings: %v", err)
+	}
+	return doc
+}
+
+// TestApplyToWorktreeCarriesDelegationDecision covers design Decision 9: a
+// worktree's settings must record the same hook or deny entries as the clone it
+// was made from. Before this, ApplyToWorktree never passed the decision through,
+// so the clone carried one of them and the worktree carried neither.
+func TestApplyToWorktreeCarriesDelegationDecision(t *testing.T) {
+	t.Run("supported writes hooks", func(t *testing.T) {
+		cfg, configDir, instanceRoot, worktreePath := applyToWorktreeFixture(t)
+
+		if _, err := ApplyToWorktree(
+			cfg, configDir, instanceRoot, worktreePath, "apps", "app", "purpose", "branch-xyz",
+			WorktreeApplyOptions{WorktreeDelegation: &WorktreeDelegation{
+				Supported: true,
+				NiwaPath:  "/usr/local/bin/niwa",
+			}},
+		); err != nil {
+			t.Fatalf("ApplyToWorktree: %v", err)
+		}
+
+		doc := worktreeSettingsDoc(t, worktreePath)
+		if doc == nil {
+			t.Fatal("expected a worktree settings file carrying the hook entries")
+		}
+		for _, event := range []string{"WorktreeCreate", "WorktreeRemove"} {
+			cmds := worktreeHookCommands(t, doc, event)
+			if len(cmds) != 1 {
+				t.Fatalf("%s: expected 1 hook command in the worktree settings, got %v", event, cmds)
+			}
+			if !strings.Contains(cmds[0], "exec niwa worktree from-hook") {
+				t.Errorf("%s command %q should carry the PATH-first arm", event, cmds[0])
+			}
+		}
+	})
+
+	t.Run("unsupported writes deny", func(t *testing.T) {
+		cfg, configDir, instanceRoot, worktreePath := applyToWorktreeFixture(t)
+
+		if _, err := ApplyToWorktree(
+			cfg, configDir, instanceRoot, worktreePath, "apps", "app", "purpose", "branch-xyz",
+			WorktreeApplyOptions{WorktreeDelegation: &WorktreeDelegation{Supported: false}},
+		); err != nil {
+			t.Fatalf("ApplyToWorktree: %v", err)
+		}
+
+		doc := worktreeSettingsDoc(t, worktreePath)
+		if doc == nil {
+			t.Fatal("expected a worktree settings file carrying the deny entries")
+		}
+		perms, ok := doc["permissions"].(map[string]any)
+		if !ok {
+			t.Fatalf("expected permissions in the worktree settings, got %v", doc)
+		}
+		deny, ok := perms["deny"].([]any)
+		if !ok || len(deny) != 2 {
+			t.Fatalf("expected two permissions.deny entries, got %v", perms["deny"])
+		}
+	})
+
+	t.Run("nil preserves prior behavior", func(t *testing.T) {
+		cfg, configDir, instanceRoot, worktreePath := applyToWorktreeFixture(t)
+
+		if _, err := ApplyToWorktree(
+			cfg, configDir, instanceRoot, worktreePath, "apps", "app", "purpose", "branch-xyz",
+			WorktreeApplyOptions{},
+		); err != nil {
+			t.Fatalf("ApplyToWorktree: %v", err)
+		}
+
+		doc := worktreeSettingsDoc(t, worktreePath)
+		if doc == nil {
+			return // no settings file at all is the pre-Decision-9 shape
+		}
+		if cmds := worktreeHookCommands(t, doc, "WorktreeCreate"); cmds != nil {
+			t.Errorf("nil delegation must not write hook entries, got %v", cmds)
+		}
+		if perms, ok := doc["permissions"].(map[string]any); ok {
+			if _, hasDeny := perms["deny"]; hasDeny {
+				t.Error("nil delegation must not write permissions.deny")
+			}
+		}
+	})
 }
