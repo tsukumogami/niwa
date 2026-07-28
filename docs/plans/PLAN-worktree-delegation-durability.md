@@ -151,7 +151,7 @@ note that an installed hook resolves niwa from PATH.
   before the fix, or by asserting the specific new strings).
 - `docs/guides/worktree.md` documents both the create-failure reconciliation and
   the PATH-first hook resolution.
-- No `wip/` paths are referenced from any committed artifact.
+- No scratch-directory paths are referenced from any committed artifact.
 
 **Dependencies**: <<ISSUE:1>>, <<ISSUE:2>>, <<ISSUE:3>>
 
