@@ -1,200 +1,153 @@
 ---
 status: Complete
 question: |
-  Why does Claude Code's EnterWorktree tool create a native git worktree that niwa
-  cannot see -- instead of delegating to niwa's installed WorktreeCreate hook -- when
-  an agent isolates inside a nested-git niwa workspace, and which direction should
-  close the gap?
-timebox: "1 session: live reproduction on the installed harness + source trace; fix decision deferred to a design revision"
+  Why does an agent isolating inside a nested-git niwa workspace end up with a
+  bare worktree niwa cannot see, instead of the niwa-managed worktree the
+  installed WorktreeCreate hook is supposed to produce -- and which direction
+  should close the gap?
+timebox: "1 session: live reproduction across two harness versions plus a source trace"
 ---
 
-# SPIKE: EnterWorktree bypasses niwa's worktree hook in a nested-git workspace
+# SPIKE: agent worktree creation does not produce a niwa worktree
 
 ## Status
 
 Complete
 
-Answered by live reproduction on the installed harness (Claude Code 2.1.215) plus a
-source trace. **Key result:** this is not a workspace-config mistake -- it is a
-Claude Code harness-behavior change that falsified a load-bearing assumption in the
-shipped worktree-delegation design (`docs/designs/current/DESIGN-niwa-default-worktree.md`,
-Decision 4). On 2.1.215 niwa installs a `WorktreeCreate` hook that can never fire and
-never trips its own fallback, silently re-introducing the bare worktree the feature
-existed to remove. The fix is a design-level correction (see Recommendation); three
-small validation questions (Q1-Q3) are handed to that design.
+**This spike replaces an earlier version that reached the wrong conclusion.**
+The earlier version reported that the harness had changed to decide
+native-vs-hook by an upward git-repo discovery walk, taking a native path
+whenever an enclosing repo was found and never consulting the hook. Direct
+reproduction on the exact version that report tested does not support that
+finding. This version records what reproduces and what does not, and revises the
+recommendation accordingly. The correctness issue it feeds is
+`tsukumogami/niwa#221`.
 
 ## Question
 
-In a niwa workspace, `niwa apply` installs a Claude Code `WorktreeCreate` /
-`WorktreeRemove` hook so that an agent's native "work in a worktree" action produces a
-niwa-managed worktree (with secrets, workspace context, and a session record) rather
-than a bare in-repo checkout. In practice, when an agent isolates while working inside
-a nested repo, it gets a plain native `git worktree` under
-`<repo>/.claude/worktrees/<name>` and niwa has no record of it. Why is the hook
-bypassed, and which direction should close the gap?
-
-## Context
-
-The worktree-delegation feature (issue #167, landed 2026-06-20) rests on a feasibility
-spike (`docs/spikes/SPIKE-niwa-default-worktree.md`) that exercised the hook against
-Claude Code v2.1.183 and concluded the per-repo `.claude/settings.local.json` hook
-fires from inside a git repo and replaces native worktree creation (that spike's
-Experiment C). The design (`docs/designs/current/DESIGN-niwa-default-worktree.md`)
-installs the hook per-repo and adds an apply-time `claude --version` support probe:
-at/above the known-good baseline it installs the hook; below it, it installs a
-`permissions.deny: ["EnterWorktree","ExitWorktree"]` + steer-to-`niwa worktree create`
-fallback (Decision 4). The two are mutually exclusive.
-
-A niwa workspace root is deliberately not a git repository -- each managed repo is
-nested one level down. The apparent intent was that isolation would flow through the
-hook. The observed behavior contradicts that, and this spike establishes why.
+`niwa apply` installs a Claude Code `WorktreeCreate` / `WorktreeRemove` hook so
+that an agent's native "work in a worktree" action produces a niwa-managed
+worktree — with secrets, workspace context, and a session record — rather than a
+bare in-repo checkout. In practice an agent isolating inside a nested repo ended
+up with a plain worktree under `<repo>/.claude/worktrees/<name>` that
+`niwa worktree list` had no record of. Why, and what closes the gap?
 
 ## Approach
 
-1. Reproduce the native-vs-hook trigger on the installed harness, from both a non-git
-   directory and inside a nested repo, and record the exact deciding factor.
-2. Trace the niwa side: where the hook is emitted, what `niwa worktree from-hook`
-   would have done, and where the support probe decides hook-vs-fallback.
-3. Compare the installed harness version against the design's baseline and against the
-   documented `EnterWorktree` behavior to explain the discrepancy with the spike.
-4. Map the alternatives with trade-offs and code-surface effort; recommend a direction.
+1. Build minimal fixtures that isolate one variable at a time — hook present or
+   absent, hook succeeding or failing, cwd inside a git repo or at a non-git
+   root — and drive `EnterWorktree` against each from a headless harness run,
+   recording the verbatim tool result, the resulting `git worktree list`, and the
+   hook's stdin.
+2. Repeat the decisive fixtures against the older harness version the original
+   report tested, installed side by side, so a behavior change between versions
+   would be visible rather than assumed.
+3. Trace the niwa side end to end against a real workspace, with the installed
+   binary and again with a binary built from `main`.
 
 ## Findings
 
-### 1. The deciding factor is an upward git-repo discovery walk from the live cwd
+### 1. The hook fires from inside a git repo, on both harness versions
 
-`EnterWorktree` chooses its path by walking up from the live session working directory
-(which tracks the shell, not a fixed session root) looking for an enclosing git
-repository:
+In a git repo carrying a `WorktreeCreate` hook in `.claude/settings.local.json`,
+the hook fired and no native worktree was created. Hook stdin carried the
+documented payload (`session_id`, `transcript_path`, `cwd`, `hook_event_name`,
+`name`) and the path the hook printed to stdout became the session's working
+directory.
 
-- **Enclosing repo found** -> it creates a native `git worktree` under
-  `<repo>/.claude/worktrees/<name>` on a new branch and never consults the hook.
-- **No enclosing repo found** -> it looks for a `WorktreeCreate` hook in that cwd's
-  settings scope. If one is configured, it delegates; if not, it errors.
+This held on the version the earlier report tested and on a later one. There is
+no upward-discovery behavior that preempts the hook, and no harness regression to
+detect. The design's version floor and its apply-time probe stand as shipped.
 
-Reproduced live on Claude Code 2.1.215, both ways:
+### 2. A failing hook fails loudly; it does not fall back to a native worktree
 
-- cwd inside a nested repo -> a native worktree was created (its `.git` file points to
-  `<repo>/.git/worktrees/<name>`; `git worktree list` shows it `locked`), and
-  `niwa worktree list` shows zero sessions. This matches the originally observed
-  behavior exactly.
-- cwd at the true non-git workspace root -> `Cannot create a worktree: not in a git
-  repository and no WorktreeCreate hooks are configured.`
+A `WorktreeCreate` hook that exits non-zero makes `EnterWorktree` fail with the
+hook's stderr surfaced in the tool result. No worktree is created by either path.
+This also held on both versions. So a broken hook is a visible failure, not the
+silent degradation the feature exists to prevent — which matters, because it
+means the observed bare worktree cannot be explained by hook failure.
 
-Because an agent working in a workspace is almost always cwd'd inside a repo (that is
-where the code is), the enclosing-repo branch is the common case, and the hook is never
-reached.
+### 3. The reported symptom needs a session with no hook in scope
 
-### 2. The hook is installed where it can never fire, and absent where it would
+A repo with no `WorktreeCreate` hook reproduces the reported artifact exactly: a
+worktree at `<repo>/.claude/worktrees/<name>` on branch `worktree-<name>`, marked
+`locked`, with no niwa session record. That is the only configuration observed to
+produce it.
 
-niwa emits the `WorktreeCreate` / `WorktreeRemove` hook into every nested repo's
-`.claude/settings.local.json` (`internal/workspace/materialize.go:698-708`, threaded
-per repo at `internal/workspace/apply.go:1442`). It never emits it into the non-git
-workspace-root `.claude/settings.json` -- that document is built separately and
-receives only the SessionStart hook (`internal/workspace/root_materializer.go:241-260`).
-So the hook is present exactly where the native path preempts it (inside repos), and
-absent at the one cwd where `EnterWorktree` would actually consult it (the non-git
-root). It is dead on both branches.
+### 4. What actually broke: the hook command is pinned to a version-specific path
 
-### 3. Root cause: a falsified monotonic-support assumption (harness regression)
+`niwa apply` writes the hook command from `os.Executable()`
+(`internal/workspace/apply.go`). Under a versioned install layout — each release
+in its own directory, with a stable shim on `PATH` pointing at the current one —
+that resolves to a version-pinned path. Every repo in every workspace instance on
+the machine under test carried a hook naming a release several versions behind
+the current one.
 
-The installed harness is Claude Code 2.1.215; the design's known-good baseline is
-2.1.183 (`internal/workspace/harness_compat.go:17`). The support probe is monotonic --
-"at or above baseline => supported" (`harness_compat.go:56`) -- so 2.1.215 reports
-supported, niwa installs the per-repo hook, and the deny+steer fallback (which only
-fires when unsupported) never triggers.
+That pinned release predated the fix for promoted `[claude.env]` key inheritance
+in worktrees (#207), so `niwa worktree from-hook` died with `claude.env: promoted
+key "GH_TOKEN" not found in resolved env vars`, and agent worktree creation was
+broken workspace-wide. Repointing the same hook at a binary built from `main`
+made the flow succeed end to end: a niwa worktree under `.niwa/worktrees/`, a
+session record, visible to `niwa worktree list`.
 
-But the harness behavior changed after 2.1.183. The feasibility spike's Experiment C
-observed the per-repo hook firing from inside a git repo on v2.1.183; on 2.1.215 the
-current `EnterWorktree` contract is the opposite -- the hook is consulted only when no
-enclosing git repo is found, and inside a repo the native path is taken unconditionally.
-The design encoded the now-false assumption verbatim in Decision 4: "an unsupported
-harness stays unsupported across applies"
-(`docs/designs/current/DESIGN-niwa-default-worktree.md:150`). The probe only models the
-below-baseline direction of "unsupported"; it has no way to express "above baseline but
-support was later removed." `harness_compat.go` has been frozen since the feature landed.
+Two problems sit here, and only one was already fixed. The promoted-key bug was
+fixed upstream. The pinning was not: upgrading niwa strands every previously
+applied workspace on the old binary until each is re-applied, and nothing detects
+or reports it. The pinning is not recoverable from inside the process — on Linux
+`os.Executable()` reads `/proc/self/exe`, which the kernel has already resolved
+past every symlink.
 
-Two ironies worth carrying into the design:
+The workspace-root `SessionStart` hook (`niwa instance from-hook`) is written the
+same way and has the same defect. It is the more consequential of the two,
+because it provisions instances in-process: a stale binary running that apply
+stamps its own stale path into every repo of each newly created instance.
 
-- Decision 4 rejected "lazy post-hoc detection (observe whether the hook fired)" because
-  it "only triggers after a user already got a bare worktree" (`DESIGN-...:160-162`) --
-  which is exactly the failure now occurring under the version-pin approach it chose
-  instead. Post-hoc detection is the one method that would have caught this.
-- The design's stated mitigation for release coupling -- "update the constant in a patch
-  if hook behavior changes" (`DESIGN-...` Consequences) -- only covers a raised floor,
-  not a ceiling; it cannot express "hook works in [2.1.183, X) but breaks at >= X."
+### 5. A failed create leaves state behind
 
-### 4. This silently violates the accepted PRD
+`from-hook` creates the git worktree and writes the session record before
+installing content. Session creation is atomic; content install is not. When
+content install failed, the tool call failed loudly but the git worktree and an
+`active` session record both survived, so `niwa worktree list` reported an
+`active` worktree no process was in. Cleanup took a manual force-destroy plus a
+prune. This reproduced on both failing runs.
 
-Under 2.1.215 the agent gets a bare in-repo checkout niwa cannot see. Against
-`docs/prds/PRD-niwa-default-worktree.md`: R1 (agent creation must yield a niwa
-worktree), R5 (one worktree per task, no separate bare checkout), R7 (a
-harness-does-not-honor condition must steer to `niwa worktree create`, not silently
-degrade), and R8 (fallback must be surfaced) are all violated, along with the
-single-system-of-record goal. R10 (secret resolution inside a delegated worktree) is
-moot because delegation never happens; R9 (the init-time opt-out) is unaffected. This
-is precisely the silent-degradation failure the feature was built to remove. No open
-issue tracks it (the nearest, #170, is an unrelated `niwa worktree create` bug).
+### 6. Worktree settings do not carry the delegation decision
 
-### 5. What `niwa worktree from-hook` would have done, and a useful asymmetry
+`ApplyToWorktree` runs the repo materializers against a worktree but never passes
+the worktree-delegation decision, and its options struct has no field for one. A
+niwa worktree's own `settings.local.json` therefore records neither the hook
+entries nor the deny entries, while its clone records one of them. Latent today —
+delegation still resolves for a session working inside a worktree — but the two
+configurations drift.
 
-Had it been reached, `niwa worktree from-hook` (WorktreeCreate) reads the hook's stdin
-JSON, resolves the owning repo from `cwd`, creates a niwa-managed worktree under
-`<instanceRoot>/.niwa/worktrees/<repo>-<sid>/` on a niwa-chosen branch, installs
-secrets + workspace context, writes a session-lifecycle state file, and echoes the
-path back to Claude. Note the path asymmetry: niwa worktrees live under
-`.niwa/worktrees/*`, native ones under `.claude/worktrees/*`. They are distinguishable,
-which matters for any post-hoc reconciliation option.
+### 7. Validation questions the earlier version left open
 
-### 6. Alternatives and code-surface effort
-
-| Option | What it does | Effort | Key trade-off |
-|--------|--------------|--------|---------------|
-| A. Workflow guidance only | Tell agents to isolate from the non-git root | trivial | Doubly broken: errors at the true root (no hook there) and any `cd` into a repo flips it to native. Non-functional alone. |
-| B. Install the hook at the root | Also emit the hook into the non-git workspace/instance root settings | small (code) | Efficacy narrow and unconfirmed: agents are steered into the instance/repo, so a root hook is often not the discovery scope. Needs Q2 confirmed. |
-| C. `niwa worktree adopt` | Register a pre-existing native worktree as a niwa session after the fact | medium | Content-install is already path-agnostic and idempotent, but session creation always runs `git worktree add`, so adopt needs a new command + repo/branch readback + tolerating worktrees outside `.niwa/worktrees/`. Reactive. |
-| D. Fix the probe -> deny+steer | Detect the regressed harness; fall back to the deny+steer the design already builds per-repo | small | Gives up transparent delegation (agent is blocked and redirected to `niwa worktree create`), but restores R7/R8 correctness cheaply because the deny machinery already exists (`materialize.go:601-606`). Needs Q1 confirmed. |
-| E. Non-monotonic detection | Make support a range or empirical, not a version floor | small (ceiling) / small-medium (post-hoc) / large (apply-time self-test) | Ceiling is brittle (chase every release); post-hoc reflects reality but is reactive; a real self-test has no existing harness to spawn/inspect. |
-| F. Accept native worktrees | Scope niwa's lifecycle to root-level ephemeral instances; drop the hook expectation and the now-misleading wiring | low | Abandons "one mechanism, not two" (PRD R1/R5); interactive in-repo isolation stays niwa-invisible. Plausible only because background-worker isolation already uses ephemeral instance clones, not worktrees. |
-
-The options compose rather than compete: the realistic shape is D+E for correctness now,
-then a design decision on the detection method and whether B (or C) can restore true
-delegation.
+- **Does the per-repo `permissions.deny` actually block `EnterWorktree` from
+  inside the repo?** Yes, and more completely than expected: the tool is absent
+  from the session altogether, including under a `bypassPermissions` default
+  mode. The deny+steer fallback works as designed.
+- **Does a `WorktreeCreate` hook at a non-git workspace root fire from a non-git
+  cwd?** Yes. Hook stdin's `cwd` is that non-git root — which means
+  `from-hook`'s cwd-to-repo resolver has no repo to resolve, so a root-scope
+  install is not usable without a different resolution strategy.
+- **Which version changed the behavior?** None. The premise was wrong.
 
 ## Recommendation
 
-**Go: treat this as a correctness regression and route to a revision of
-`docs/designs/current/DESIGN-niwa-default-worktree.md` (Decisions 4 and 6).** The
-recommended direction is layered:
+Treat this as two ordinary defects in the shipped integration rather than a
+harness regression, and do not build harness-detection machinery for a regression
+that did not happen.
 
-1. **Restore correctness first (small).** Make harness detection non-monotonic so
-   2.1.215 is recognized as not honoring the in-repo hook, which flips niwa to the
-   deny+steer fallback it already installs per-repo. This satisfies PRD R7/R8 (no
-   silent bare worktree; disclosed fallback) with minimal new code -- it re-triggers
-   existing machinery rather than building new machinery.
-2. **Choose a detection method (design decision).** Weigh a version ceiling (cheap,
-   brittle) against post-hoc detection (reactive but reflects reality -- worth
-   reconsidering now that the pure version pin has failed once) or a hybrid. Replace or
-   augment the version-floor probe.
-3. **Decide the delegation model (larger design question).** Determine whether
-   transparent delegation is still achievable at all under current `EnterWorktree`
-   semantics. If yes, pursue an instance/workspace-root hook install (Option B), gated
-   on Q2 and a workflow that keeps an isolating agent's cwd at the non-git root. If not,
-   accept deny+steer as the primary mode (a deliberate scope reduction from the shipped
-   intent) and optionally add `niwa worktree adopt` (Option C) to reconcile native
-   worktrees that slip through.
+1. **Make the emitted hook command survive a niwa upgrade.** Resolve `niwa` from
+   `PATH` with the recorded absolute path as a fallback, applied to both hook
+   consumers through one shared helper.
+2. **Reconcile a failed delegated create** through the same guarded teardown the
+   remove path already uses, so a failure leaves no phantom `active` worktree.
+3. **Close the worktree settings gap** so a worktree's delegation configuration
+   matches its clone's.
 
-### Validation questions for the design revision
+The delegation model itself needs no revision. Transparent delegation is not
+merely still achievable — it works today, once the hook invokes a current niwa.
 
-- **Q1.** Does the per-repo `permissions.deny:["EnterWorktree","ExitWorktree"]` actually
-  block `EnterWorktree` when the cwd is inside the repo on 2.1.215? (Very likely, since
-  an in-repo cwd resolves that repo's settings; untested here.)
-- **Q2.** Does a `WorktreeCreate` hook installed at the non-git workspace-root /
-  instance-root `settings.json` fire when `EnterWorktree` is invoked with cwd at that
-  non-git root? (The root-cwd error message suggests root-scope settings are consulted;
-  needs a positive test.)
-- **Q3.** Exactly which Claude Code version in (2.1.183, 2.1.215] changed the behavior?
-  (Needed to set any version ceiling.)
-
-These are small, targeted validations -- not blockers on the direction. No further
-open-ended investigation is needed before the design revision.
+These are carried by `docs/designs/current/DESIGN-niwa-default-worktree.md`
+Decisions 7, 8, and 9, with a re-validation note under Decision 4.

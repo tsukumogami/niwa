@@ -15,6 +15,10 @@ decision: |
   force-destroys the session. An apply-time `claude --version` probe chooses
   between the hook (supported) and a deny+steer fallback (unsupported), disclosed
   via a one-time notice. An init-time opt-out disables the whole integration.
+  The emitted hook command resolves niwa from PATH with the recorded absolute
+  path as a fallback, so an installed hook survives a niwa upgrade, and a
+  delegated create that fails partway reconciles through the same guarded
+  teardown the remove path uses.
 rationale: |
   The feasibility spike proved per-repo hooks fire in git repos and replace
   default worktree creation; niwa already owns the per-repo settings/hooks install
@@ -28,6 +32,11 @@ rationale: |
 ## Status
 
 Current
+
+Revised after the shipped integration proved not to survive a niwa upgrade.
+Decisions 7, 8, and 9 are additions; Decision 6 no longer fixes the hook
+command's shape, which Decision 7 now owns. Decision 4 was re-validated against
+a live harness and stands unchanged — see the note under it.
 
 ## Context and Problem Statement
 
@@ -161,6 +170,18 @@ install. Those are the decisions below.
   Rejected: only triggers after a user already got a bare worktree, and needs a
   brittle success-observation state machine.
 
+  **Re-validated.** This decision was reported as falsified — the claim being
+  that the harness had stopped honoring the per-repo hook above the baseline,
+  making the version floor unable to express "supported in a range". Direct
+  reproduction says otherwise: on both the version the report tested and a later
+  one, a per-repo `WorktreeCreate` hook fires from inside a git repo and
+  replaces native worktree creation. A hook that exits non-zero makes the tool
+  call fail loudly with the hook's stderr; there is no silent fallback to a
+  native worktree. The reported symptom — a bare worktree under the repo's own
+  `.claude/worktrees/` — reproduces only in a session with no hook in scope at
+  all. The probe and the version floor stand as designed, and no non-monotonic
+  detection is warranted.
+
 ### Decision 5 — init-time opt-out (PRD R9)
 
 - **Chosen: a `niwa init --no-worktree-delegation` flag persisted as an
@@ -174,13 +195,138 @@ install. Those are the decisions below.
 ### Decision 6 — per-repo install and idempotency (PRD R3, R11)
 
 - **Chosen: install via the existing per-repo `SettingsMaterializer`.** It writes
-  the `WorktreeCreate`/`WorktreeRemove` hook entries — each an absolute-path
-  `niwa worktree from-hook` command — or the `permissions.deny` entries into each
-  repo's `settings.local.json`. No shim script is shipped (the hook command invokes
-  the niwa binary directly), so no `HooksMaterializer` change is needed. The
-  materializer already runs per repo on every apply and is idempotent.
+  the `WorktreeCreate`/`WorktreeRemove` hook entries — or the `permissions.deny`
+  entries — into each repo's `settings.local.json`. No shim script is shipped
+  (the hook command invokes the niwa binary directly), so no `HooksMaterializer`
+  change is needed. The materializer already runs per repo on every apply and is
+  idempotent.
 - *Alternative: a new bespoke installer.* Rejected: duplicates machinery that
   already exists, runs per-repo, and is idempotent.
+
+### Decision 7 — how the hook command names the niwa binary (PRD R3, R11)
+
+The original form of Decision 6 wrote the hook as a bare absolute path taken
+from `os.Executable()`. That does not survive a niwa upgrade. Under a versioned
+install layout — where each release lives in its own directory and a stable
+shim on `PATH` points at the current one — `os.Executable()` resolves to the
+version-pinned path, so every installed hook keeps invoking the release that
+happened to run `niwa apply`. Upgrading niwa leaves every previously applied
+workspace calling the old binary until each one is re-applied, and nothing
+detects or reports that. When the pinned release predates a fix the hook
+depends on, agent-initiated worktree creation is broken workspace-wide.
+
+The pinning is not recoverable from inside the process. On Linux
+`os.Executable()` reads `/proc/self/exe`, which the kernel has already resolved
+past every symlink, so the stable path is gone before niwa can observe it.
+
+- **Chosen: a `PATH`-first command with the recorded absolute path as a
+  fallback.** The emitted command is
+
+  ```
+  command -v niwa >/dev/null 2>&1 && exec niwa <subcommand>; exec '<abs>' <subcommand>
+  ```
+
+  `PATH` resolution is what fixes the bug: a user who upgrades niwa gets a
+  working hook with no re-apply. The recorded absolute path costs one clause and
+  keeps the integration working where niwa is not on the hook subprocess's
+  `PATH` — a harness launched from a desktop environment rather than a shell
+  inherits the session manager's `PATH`, not the one a shell profile builds.
+  Dropping the absolute path entirely would turn those working setups into loud
+  failures.
+
+  Two details are load-bearing. The branches are separated by `;` rather than
+  `||`: a failed `exec` terminates a non-interactive shell before `||` would be
+  evaluated, so `||` reads as a fallback it is not. And `<abs>` is
+  single-quoted, because hook commands go through a shell and an install path
+  containing a space would otherwise split.
+
+  The same shape applies to **both** hook consumers — the per-repo
+  `WorktreeCreate`/`WorktreeRemove` command and the workspace-root `SessionStart`
+  `niwa instance from-hook` command — through one shared helper. Fixing only the
+  per-repo hook would leave the defect self-perpetuating: the root hook
+  provisions instances in-process, so a stale binary running that apply stamps
+  its own stale path into every repo of each newly created instance.
+
+- *Alternative: `PATH`-only, dropping the absolute path.* Rejected: it produces
+  a byte-identical command across hosts, which is the strongest form of
+  idempotency, but it regresses every environment where the harness runs without
+  niwa on `PATH` from working to failing.
+- *Alternative: keep the absolute path and detect staleness* (record the
+  applying version, compare on a later run, nudge a re-apply). Rejected: it
+  detects rather than fixes — the hook stays broken until the user acts on a
+  notice — and the detector would have to run inside the stale binary, which is
+  the wrong version to know it is the wrong version.
+- *Alternative: write an absolute path to a stable non-versioned location.*
+  Rejected: not implementable. `os.Executable()` cannot recover the pre-symlink
+  path on Linux, and reconstructing it via a `PATH` lookup at apply time is the
+  chosen option with the answer re-frozen — which reacquires the staleness bug
+  the moment the install manager repoints its shim.
+
+### Decision 8 — create-path failure reconciliation (PRD R6, R8)
+
+`niwa worktree from-hook` creates the git worktree and writes the session record
+before installing content. Session creation is already atomic — every failure
+after `git worktree add` cleans up after itself — but content install is not.
+When it fails, the tool call fails loudly (correct, and required by R8), while
+the git worktree and an `active` session record both survive. `niwa worktree
+list` then reports an `active` worktree no process is in, which contradicts R6's
+premise that niwa is the system of record for active worktrees. Repeated
+failures accumulate: each agent retry leaves another row and another directory.
+
+- **Chosen: reconcile through the existing teardown.** On any failure after
+  `git worktree add` succeeds, the hook create path runs the same guarded
+  `DestroySession` the `WorktreeRemove` path runs — non-force — and returns an
+  error naming both the original failure and what niwa did about it. In the
+  normal case that is a full rollback with no new machinery: the record moves to
+  `ended`, the worktree is removed, and the session branch is deleted (it was
+  created at HEAD with no commits, so the guarded delete succeeds). In the rare
+  case where a workspace-authored worktree apply script touched tracked files
+  before a later step failed, the dirty guard refuses and niwa retains and logs
+  — character for character the behavior Decision 3 already specifies.
+
+  This makes the create path consistent with Decision 3 by construction rather
+  than by argument: it is the same call, the same guard ordering, the same
+  retain-and-log fallback. A reviewer checks that it calls the same function
+  rather than reasoning afresh about whether create-failure cleanup is safe.
+
+  The interactive `niwa worktree create` path deliberately keeps its existing
+  retain-and-tell behavior. A human is standing at the terminal, the worktree is
+  a real place they asked for, and re-syncing it is a genuine repair. An agent
+  never enters the directory on the failure path and will not come back to it.
+
+- *Alternative: a new `failed` terminal status.* Rejected: terminality is
+  spelled out as a two-value comparison at several production sites, and missing
+  one leaves a `failed` session reading as live forever. The information such a
+  status would carry — why this worktree does not exist — belongs in the error
+  the user reads at the moment it happens. If it later proves necessary, an
+  additive `failure_reason` field on the state file is the cheap follow-up, not
+  a new status.
+- *Alternative: bespoke full rollback* (remove worktree, delete branch, delete
+  the state file). Rejected: deleting a state file is a new operation with no
+  precedent — niwa marks records terminal and keeps them — and a rollback that
+  fails partway can delete the record while leaving the directory, producing
+  exactly the unsurfaced orphan this decision exists to prevent.
+- *Alternative: leave the state and improve the error.* Rejected: it leaves
+  `niwa worktree list` asserting an `active` worktree that is not, and the rows
+  accumulate for as long as the underlying cause persists.
+
+### Decision 9 — worktree settings parity (PRD R3)
+
+`ApplyToWorktree` runs the repo materializers against a worktree but never
+passes the worktree-delegation decision, and its options struct has no field to
+carry one. A niwa-managed worktree's own `settings.local.json` therefore records
+neither the hook entries nor the deny entries, while the clone it was made from
+records one of them.
+
+- **Chosen: thread the delegation decision into the worktree apply path**, so a
+  worktree's settings match its clone's. The gap is latent rather than
+  user-visible today — delegation still resolves for a session working inside a
+  worktree — but the two configurations drifting is the kind of divergence R3's
+  "install at the scope required for it to take effect" exists to rule out, and
+  it would become load-bearing the moment settings resolution changed.
+- *Alternative: leave it and document the asymmetry.* Rejected: the asymmetry
+  has no rationale behind it — it is an omission, not a decision — and
+  documenting an omission costs more than closing it.
 
 ## Decision Outcome
 
@@ -329,11 +475,21 @@ one-time fallback notice on apply.
   (non-force) destroy and forces only past the agent's own attach lock, never past
   the dirty guard (Decision 3). Genuine uncommitted work (niwa scaffolding is
   git-excluded, so it doesn't count) causes a log-and-retain, not a silent delete.
-- **Version probe / trusted PATH.** Executing `claude --version` runs a PATH binary
-  and its output is parsed, never executed. The optimistic-on-error behavior
-  (assume supported if the probe fails) assumes a trusted PATH — the same trust
-  model niwa already extends to the `git` binary it shells out to. A hostile PATH is
+- **Trusted PATH: version probe and hook command.** Executing `claude --version`
+  runs a PATH binary and its output is parsed, never executed. The
+  optimistic-on-error behavior (assume supported if the probe fails) assumes a
+  trusted PATH — the same trust model niwa already extends to the `git` binary it
+  shells out to. Decision 7 widens the same assumption to the hook command, which
+  resolves `niwa` from PATH before falling back to a recorded absolute path. This
+  is the same class of trust rather than a new boundary: an attacker who can
+  prepend a PATH entry already controls the `git` niwa invokes constantly, and can
+  rewrite `settings.local.json` (mode 0o600, user-owned) directly. A hostile PATH is
   out of scope (it would compromise far more than this feature).
+- **Shell quoting in the emitted hook command.** The hook command is a shell
+  string, so the fallback path is single-quoted with embedded single quotes
+  escaped. Without quoting, an install path containing a space would split into
+  separate words — a latent defect in the original single-token form that a
+  longer composed command would otherwise make reachable.
 - **No new secret surface.** Secret materialization reuses `applyContentToWorktree`
   unchanged; R10 only requires that resolution failures be surfaced (they already
   are, on stderr), not new handling.
@@ -348,8 +504,27 @@ one-time fallback notice on apply.
   opt-outs — minimal new surface, idempotent by construction (R3, R11, R12).
 - Fallback and secret-degradation are disclosed, never silent (R7, R8, R10).
 - Logic lives in a testable Go subcommand, not shell.
+- Installed hooks survive a niwa upgrade without a re-apply (Decision 7), and a
+  failed delegated create leaves no phantom `active` worktree behind
+  (Decision 8).
 
 **Negative / mitigations**
+
+- *A contributor working on niwa itself may have their hook resolve the release
+  binary from PATH rather than their branch build.* Decision 7 prefers PATH, so
+  a local `from-hook` change is not exercised by a manual worktree test unless
+  the branch build is ahead of the release on PATH. Mitigation: the ordinary Go
+  workflow (install the branch build first); worth knowing because it bites
+  precisely the people changing this code.
+- *Which binary actually ran is no longer readable off the settings file.* The
+  emitted command names both candidates, and resolution depends on the invoking
+  process's PATH. Mitigation: the fallback path is still recorded verbatim, and
+  `niwa --version` from the same environment answers the question directly.
+- *A reconciled create failure records `ended`, which does not distinguish "the
+  agent finished here" from "this never got off the ground".* Mitigation: the
+  reason is in the error the user reads at the time; if the distinction proves
+  to matter, an additive `failure_reason` field is the follow-up rather than a
+  new terminal status.
 
 - *Couples niwa to Claude Code's release behavior via the version baseline.*
   Mitigation: baseline is a single constant, optimistic on probe failure, and the
