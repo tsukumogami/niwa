@@ -63,12 +63,17 @@ const instanceFromHookCommandSuffix = "instance from-hook"
 // `niwa create`, whose clone + vault cost can exceed a default harness timeout.
 const rootSessionHookTimeoutSeconds = 180
 
-// instanceFromHookCommand returns the absolute-path hook command string Claude
-// invokes for the workspace-root session hooks, e.g.
-// "/abs/niwa instance from-hook". The niwa path is slash-normalized so the
-// JSON command is stable across platforms.
+// instanceFromHookCommand returns the hook command string Claude invokes for
+// the workspace-root SessionStart hook.
+//
+// It shares guardedNiwaHookCommand with the per-repo worktree hook because both
+// consumers had the same staleness defect, and this one propagates it: the
+// SessionStart hook provisions instances in-process, so a stale binary running
+// that apply stamps its own stale path into every repo of each newly created
+// instance. Fixing only the per-repo hook would leave the defect regenerating
+// itself. See DESIGN-niwa-default-worktree.md Decision 7.
 func instanceFromHookCommand(niwaPath string) string {
-	return filepath.ToSlash(niwaPath) + " " + instanceFromHookCommandSuffix
+	return guardedNiwaHookCommand(niwaPath, instanceFromHookCommandSuffix)
 }
 
 // RootMaterializeOptions carries the inputs the root materializer needs that
