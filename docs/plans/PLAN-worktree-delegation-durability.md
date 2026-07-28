@@ -2,7 +2,6 @@
 schema: plan/v1
 status: Active
 execution_mode: single-pr
-upstream: docs/designs/current/DESIGN-niwa-default-worktree.md
 milestone: "Worktree delegation durability"
 issue_count: 4
 ---
@@ -19,6 +18,12 @@ Make the shipped worktree-delegation integration survive a niwa upgrade and fail
 cleanly, by implementing Decisions 7, 8, and 9 of
 `docs/designs/current/DESIGN-niwa-default-worktree.md`. Resolves
 `tsukumogami/niwa#221`.
+
+This plan carries no `upstream:` link on purpose. The design it implements
+belongs to a chain that already completed — its BRIEF and PRD are at Done and
+this work does not reopen them, because nothing about the requirements changed.
+Linking it would present a settled chain as mid-flight. The design is referenced
+by path here and in every outline instead.
 
 ## Decomposition Strategy
 
