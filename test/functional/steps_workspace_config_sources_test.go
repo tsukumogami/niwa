@@ -142,6 +142,30 @@ func theProvenanceMarkerExistsInWorkspaceRoot(ctx context.Context) (context.Cont
 	return ctx, nil
 }
 
+// theMaterializedFileAtWorkspaceRootContains asserts that the niwa-materialized
+// file at <workspaceRoot>/<relPath> exists and contains want. Unlike
+// theFileUnderWorkspaceRootContains (which anchors under a named subdir), this
+// targets the workspace root directly, as the `init from config repo` flow
+// makes the root itself the niwa-managed dir. Materialized files are written
+// from the loaded config, so this proves a source-side config change took
+// effect on the SAME apply run (issue #214): a stale config would leave the old
+// content in place and require a second apply.
+func theMaterializedFileAtWorkspaceRootContains(ctx context.Context, relPath, want string) (context.Context, error) {
+	s := getState(ctx)
+	if s == nil {
+		return ctx, fmt.Errorf("no test state")
+	}
+	path := filepath.Join(s.workspaceRoot, relPath)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ctx, fmt.Errorf("reading %s: %w", path, err)
+	}
+	if !strings.Contains(string(data), want) {
+		return ctx, fmt.Errorf("expected %s to contain %q, got:\n%s", path, want, string(data))
+	}
+	return ctx, nil
+}
+
 // theConfigDirIsAGitWorkingTree converts the snapshot at
 // <workspaceRoot>/.niwa/ back to a legacy git working tree by:
 //  1. removing the provenance marker
