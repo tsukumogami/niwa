@@ -2,11 +2,17 @@
 topic: worktree-delegation-durability
 chain_started: 2026-07-28T00:00:00Z
 last_updated: 2026-07-28T00:00:00Z
-phase_pointer: phase-1
+phase_pointer: phase-3
 visibility: Public
-exit: UNSET
-exit_artifacts: []
+exit: full-run
+exit_artifacts:
+  - docs/plans/PLAN-worktree-delegation-durability.md
+  - docs/designs/current/DESIGN-niwa-default-worktree.md
+  - docs/spikes/SPIKE-enterworktree-hook-bypass.md
 planned_chain:
+  - design
+  - plan
+chain_ran:
   - design
   - plan
 chain_skipped:
