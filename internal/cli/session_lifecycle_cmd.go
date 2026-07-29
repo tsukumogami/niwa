@@ -741,7 +741,19 @@ func writeSessionLifecycleTable(out interface{ Write([]byte) (int, error) }, row
 // which case the caller warns and installs neither rather than writing a hook
 // whose fallback arm points nowhere.
 func resolveWorktreeDelegation(instanceRoot string) (*workspace.WorktreeDelegation, error) {
-	if state, err := workspace.LoadState(instanceRoot); err == nil && state != nil && state.NoWorktreeDelegation {
+	// Fail CLOSED on an unreadable instance state. LoadState errors on a missing
+	// or corrupt file and on a schema_version newer than this binary
+	// understands, and that last case is reachable here: the hook command
+	// resolves niwa from PATH, so an older niwa can run against state a newer
+	// one wrote. Treating a read failure as "not opted out" would let that older
+	// binary quietly re-enable an integration the workspace disabled with
+	// `niwa init --no-worktree-delegation`. The apply pipeline fails closed on a
+	// state-read error; so does this path.
+	state, err := workspace.LoadState(instanceRoot)
+	if err != nil {
+		return nil, fmt.Errorf("reading instance state to check the worktree-delegation opt-out: %w", err)
+	}
+	if state != nil && state.NoWorktreeDelegation {
 		return nil, nil
 	}
 
@@ -750,8 +762,20 @@ func resolveWorktreeDelegation(instanceRoot string) (*workspace.WorktreeDelegati
 		return nil, fmt.Errorf("resolving niwa binary path for worktree hooks: %w", err)
 	}
 
+	// Bound the probe. It runs on every worktree create and apply -- including
+	// inside a hook subprocess -- so a `claude` wrapper that hangs would
+	// otherwise block worktree creation until the harness's own hook timeout
+	// fires, which is a much worse failure than an unprobed harness.
+	ctx, cancel := context.WithTimeout(context.Background(), worktreeProbeTimeout)
+	defer cancel()
+
 	return &workspace.WorktreeDelegation{
-		Supported: workspace.SupportsWorktreeHooks(context.Background()),
+		Supported: workspace.SupportsWorktreeHooks(ctx),
 		NiwaPath:  niwaPath,
 	}, nil
 }
+
+// worktreeProbeTimeout bounds the `claude --version` support probe on the
+// worktree paths. The probe is a single fast subprocess; this is a hang guard,
+// not a performance budget.
+const worktreeProbeTimeout = 5 * time.Second

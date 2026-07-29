@@ -185,14 +185,23 @@ fail on a vault outage (see
 the clone holds no env output yet, creation reports the error pointing at
 `niwa apply`.
 
-The installed hook resolves `niwa` from your `PATH`, falling back to the
-absolute path of the binary that ran `niwa apply` only when `PATH` doesn't carry
-it. That means upgrading niwa takes effect immediately in workspaces you applied
-earlier — you don't have to re-apply each one to stop them calling the old
-binary. If you install niwa somewhere your agent's environment can't see (a
-harness launched from a desktop environment inherits the session manager's
-`PATH`, not your shell profile's), the recorded absolute path keeps the
-integration working.
+The installed hook resolves `niwa` from your `PATH`, falling back to the absolute
+path of the binary that ran `niwa apply` only when `PATH` doesn't carry it. From
+that apply onward, upgrading niwa takes effect without re-applying — the hook
+picks up whichever niwa your `PATH` names.
+
+A workspace applied by an older niwa still carries the previous hook text, which
+names one exact binary, so it keeps invoking that binary until you apply it once
+more. Run `niwa apply` once per existing workspace to pick up the change; after
+that the hook maintains itself.
+
+Two consequences worth knowing. If you install niwa somewhere your agent's
+environment can't see — a harness launched from a desktop environment inherits
+the session manager's `PATH`, not your shell profile's — the recorded absolute
+path keeps the integration working. And because `PATH` is now what decides,
+a `niwa` earlier on your `PATH` than the one you apply with is the one the hook
+runs; if it's too old to know the `worktree from-hook` subcommand the hook fails
+loudly rather than falling back, so keep a single niwa on `PATH`.
 
 ### When a delegated create fails
 

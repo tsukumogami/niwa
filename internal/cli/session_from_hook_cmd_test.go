@@ -389,8 +389,8 @@ func TestReconcileFailedHookCreate_CleanRollsBack(t *testing.T) {
 	}
 	// ...and the reconciliation outcome must be named so they know what was
 	// left behind.
-	if !strings.Contains(err.Error(), "removed") {
-		t.Errorf("error %q should say the partial worktree was removed", err)
+	if !strings.Contains(err.Error(), "rolled back") {
+		t.Errorf("error %q should say the partial worktree was rolled back", err)
 	}
 
 	if _, statErr := os.Stat(created.WorktreePath); !os.IsNotExist(statErr) {
@@ -450,5 +450,66 @@ func TestReconcileFailedHookCreate_DirtyRetains(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "retained") {
 		t.Errorf("error %q should say the worktree was retained", err)
+	}
+}
+
+// TestFromHookCreate_ContentInstallFailureLeavesNoActiveSession drives a REAL
+// content-install failure through runFromHookCreate, rather than calling the
+// reconciliation helper directly. This is the test that actually guards the
+// wiring: without the reconcile call in the create path it fails, because the
+// worktree and an active session record both survive.
+//
+// The failure is induced by declaring a repo content source that does not
+// exist, so ApplyToWorktree fails after CreateSession has already run
+// `git worktree add` and written the session record.
+func TestFromHookCreate_ContentInstallFailureLeavesNoActiveSession(t *testing.T) {
+	f := newCreateFlowFixture(t)
+	resetSessionCreateFlags(t)
+	defer resetSessionCreateFlags(t)
+
+	// Re-point the workspace config at a content source that is not on disk.
+	wsTOML := "[workspace]\nname = \"testws\"\ncontent_dir = \"claude\"\n\n" +
+		"[claude.content.repos." + f.repo + "]\nsource = \"repos/does-not-exist.md\"\n"
+	if err := os.WriteFile(filepath.Join(f.root, ".niwa", "workspace.toml"), []byte(wsTOML), 0o644); err != nil {
+		t.Fatalf("rewrite workspace.toml: %v", err)
+	}
+
+	hookJSON := mustHookJSON(t, map[string]any{
+		"hook_event_name": "WorktreeCreate",
+		"session_id":      "claude-sid-fail",
+		"cwd":             f.repoPath,
+		"name":            "doomed",
+	})
+
+	out, errOut, err := runFromHook(t, f.repoPath, hookJSON)
+	if err == nil {
+		t.Fatalf("expected the hook to fail; stdout=%q stderr=%q", out, errOut)
+	}
+	// The hook contract is that stdout carries ONLY a worktree path. On failure
+	// it must carry nothing, or Claude Code would chdir into a path that the
+	// rollback just deleted.
+	if strings.TrimSpace(out) != "" {
+		t.Errorf("failed create must print no worktree path, got %q", out)
+	}
+
+	states, listErr := worktree.ListSessionLifecycleStates(f.sessionsDir)
+	if listErr != nil {
+		t.Fatalf("list sessions: %v", listErr)
+	}
+	for _, st := range states {
+		if st.Status == worktree.SessionStatusActive {
+			t.Errorf("session %s left active after a failed create (worktree %s)", st.SessionID, st.WorktreePath)
+		}
+		if st.WorktreePath != "" {
+			if _, statErr := os.Stat(st.WorktreePath); !os.IsNotExist(statErr) {
+				t.Errorf("worktree %s survived a failed create, stat err = %v", st.WorktreePath, statErr)
+			}
+		}
+	}
+
+	// No stray git worktree registration should remain either.
+	listOut, _ := exec.Command("git", "-C", f.repoPath, "worktree", "list").CombinedOutput()
+	if strings.Count(strings.TrimSpace(string(listOut)), "\n") != 0 {
+		t.Errorf("expected only the main checkout registered, got:\n%s", listOut)
 	}
 }

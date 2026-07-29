@@ -324,6 +324,23 @@ records one of them.
   worktree — but the two configurations drifting is the kind of divergence R3's
   "install at the scope required for it to take effect" exists to rule out, and
   it would become load-bearing the moment settings resolution changed.
+
+  The mechanism behind "latent" is worth stating, because the obvious objection
+  is that installing the hook *into* worktrees would break nested creation: the
+  cwd-to-repo resolver deliberately rejects a path under `.niwa/worktrees/`, so a
+  hook firing with a worktree cwd would fail. It does not fire with one. For a
+  session inside a linked git worktree the harness resolves settings from the
+  main checkout and reports the main checkout as the hook payload's `cwd`, so the
+  resolver is never handed a worktree path. Verified end to end: creating a
+  worktree from inside a worktree yields a second niwa-managed worktree with its
+  own session record. Parity is a consistency fix, not a repair of an observed
+  bypass, and it does not introduce one.
+
+  What parity means here is *which branch* is installed — hook or deny — not
+  byte-equality. The fallback arm records whichever binary ran that particular
+  apply, so a worktree and its clone can carry different absolute fallbacks.
+  Since Decision 7 made PATH authoritative, that difference does not affect which
+  niwa runs.
 - *Alternative: leave it and document the asymmetry.* Rejected: the asymmetry
   has no rationale behind it — it is an omission, not a decision — and
   documenting an omission costs more than closing it.
@@ -520,6 +537,17 @@ one-time fallback notice on apply.
   emitted command names both candidates, and resolution depends on the invoking
   process's PATH. Mitigation: the fallback path is still recorded verbatim, and
   `niwa --version` from the same environment answers the question directly.
+- *`command -v niwa` proves presence, not compatibility.* On a machine with more
+  than one niwa on PATH, the hook runs whichever comes first; if that one
+  predates `worktree from-hook` it fails rather than falling through, because
+  `exec` has already replaced the shell. This is a real regression for that
+  configuration, traded against permanent silent staleness for everyone else —
+  and it fails loudly, which the staleness it replaces did not. Probing for the
+  subcommand rather than the binary would close it at the cost of a second
+  subprocess per hook invocation.
+- *Workspaces applied before this change keep the old pinned command* until they
+  are applied once more. The fix is not retroactive; it takes effect from the
+  next apply onward, which is worth calling out in release notes.
 - *A reconciled create failure records `ended`, which does not distinguish "the
   agent finished here" from "this never got off the ground".* Mitigation: the
   reason is in the error the user reads at the time; if the distinction proves

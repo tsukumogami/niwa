@@ -187,9 +187,10 @@ func runFromHookCreate(cmd *cobra.Command, payload hookPayload) error {
 func reconcileFailedHookCreate(stderr io.Writer, instanceRoot, sessionID string, cause error) error {
 	base := fmt.Errorf("niwa: error: installing content into worktree %s: %w", sessionID, cause)
 
-	if _, err := worktree.DestroySession(
+	state, err := worktree.DestroySession(
 		context.Background(), instanceRoot, sessionID, false /* force */, worktree.StdGitInvoker{},
-	); err != nil {
+	)
+	if err != nil {
 		if errors.Is(err, worktree.ErrWorktreeDirty) {
 			fmt.Fprintf(stderr,
 				"niwa: notice: worktree for session %s has uncommitted changes; "+
@@ -202,7 +203,14 @@ func reconcileFailedHookCreate(stderr io.Writer, instanceRoot, sessionID string,
 		return fmt.Errorf("%w (rollback incomplete: %v)", base, err)
 	}
 
-	return fmt.Errorf("%w (the partially created worktree was removed)", base)
+	// DestroySession reports a branch it declined to delete through
+	// BranchWarning rather than an error, so carry it: otherwise the message
+	// below asserts a clean rollback while a session branch survives.
+	if state.BranchWarning != "" {
+		return fmt.Errorf("%w (the partially created worktree was rolled back; %s)", base, state.BranchWarning)
+	}
+
+	return fmt.Errorf("%w (the partially created worktree was rolled back)", base)
 }
 
 // runFromHookRemove handles a WorktreeRemove hook. WorktreeRemove is

@@ -333,6 +333,16 @@ func worktreeFromHookCommand(niwaPath string) string {
 // rather than a shell inherits the session manager's PATH, which need not carry
 // niwa at all; dropping it would turn those working setups into loud failures.
 //
+// Known limitation: `command -v niwa` proves PRESENCE, not COMPATIBILITY. On a
+// machine with more than one niwa installed, the hook runs whichever one PATH
+// names first, and if that one predates `worktree from-hook` the hook fails
+// rather than falling through to the absolute arm — `exec` has already replaced
+// the shell by then. That is a deliberate trade: the failure is loud (the
+// harness surfaces the hook's stderr in the tool result), whereas the absolute
+// path it replaces went stale silently and permanently. Probing for the
+// subcommand instead of the binary would close it at the cost of a second
+// subprocess on every hook invocation.
+//
 // Two details are load-bearing. The arms are separated by `;` rather than `||`:
 // a failed `exec` terminates a non-interactive shell before `||` would be
 // evaluated, so `||` would read as a fallback it is not. And the absolute path
