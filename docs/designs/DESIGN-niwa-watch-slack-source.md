@@ -317,10 +317,11 @@ Two pieces of durable state, mirroring the shipped split by lifetime:
 One pass, per configured channel:
 
 1. **Discover new admissions.** `conversations.history` over the window
-   `[now - lookback_days, now]`, which returns thread parents. For each parent
-   whose own `ts` is newer than the poll cursor, evaluate B1-B3 against the
-   parent. For each parent whose `latest_reply` is newer than the poll cursor,
-   fetch `conversations.replies` and evaluate B1-B3 against each new reply. A
+   `[now - lookback_days, now]`, which returns the channel's top-level messages
+   (thread parents and un-threaded messages, never replies). For each whose own
+   `ts` is newer than the poll cursor, evaluate B1-B3 against it. For each
+   thread parent whose `latest_reply` is newer than the poll cursor, fetch
+   `conversations.replies` and evaluate B1-B3 against each new reply. A
    qualifying message admits its thread (`thread_ts` when set, otherwise `ts`)
    into the watched set with an empty watermark.
 2. **Poll watched threads.** For each thread already in the watched set,
