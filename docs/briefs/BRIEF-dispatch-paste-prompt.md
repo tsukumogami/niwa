@@ -1,6 +1,6 @@
 ---
 schema: brief/v1
-status: Draft
+status: Accepted
 problem: |
   `niwa dispatch` takes its prompt as a single positional argument, so the
   multiline error text a developer is looking at cannot be handed to a
@@ -21,7 +21,7 @@ motivating_context: |
 
 ## Status
 
-Draft
+Accepted
 
 Framing for inline prompt capture on `niwa dispatch`. Stops at the feature's
 problem, outcome, journeys, and scope boundary. The downstream PRD owns the
@@ -30,8 +30,11 @@ cannot carry the capture, and the acceptance criteria; the DESIGN owns the
 capture mechanism, the submit and newline gestures, and where the reader
 lives in the tree.
 
-The Open Questions section must clear before this brief transitions to
-Accepted; its four items are the handoff payload the downstream PRD resolves.
+Phase 4 jury returned both-PASS. The four open questions this brief carried in
+Draft -- the size ceiling and how the developer learns of it, the behavior when
+the terminal cannot carry an interactive capture, whether capture composes with
+a request not to attach, and what a non-interactive invocation does beyond not
+hanging -- resolve in the downstream PRD's Decisions and Trade-offs section.
 
 ## Problem Statement
 
@@ -166,22 +169,6 @@ these boundaries.
 - **Prompt synthesis.** Turning a conversation into a well-formed task brief
   is the `/dispatch` skill's job and stays there. This feature carries text
   the developer already has.
-
-## Open Questions
-
-- What the size ceiling should be, and how the developer is told. The PRD
-  must state the ceiling as a requirement rather than inherit today's
-  behavior: the current limit is known to be wrong in both its value and its
-  coverage, so there is nothing sound to inherit.
-- What happens when the terminal cannot carry an interactive capture --
-  refuse with guidance, or fall back to a cruder termination gesture.
-- Whether the capture should be reachable when the developer has asked not
-  to attach to the resulting session, or whether those compose at all. This
-  sits directly against the in-scope commitment to preserve attach behavior:
-  if they compose, the feature has two exit shapes to specify; if they do
-  not, the command has a flag combination it must reject clearly.
-- What a non-interactive invocation should do beyond not hanging, given that
-  scripted piping is out of scope as a design driver but not as a caller.
 
 ## References
 
