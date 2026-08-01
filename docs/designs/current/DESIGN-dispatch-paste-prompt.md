@@ -1,0 +1,499 @@
+---
+schema: design/v1
+status: Current
+upstream: docs/prds/PRD-dispatch-paste-prompt.md
+problem: |
+  `niwa dispatch` takes its prompt as one positional argument, so a developer
+  cannot hand a dispatched worker the multiline error already on their screen
+  without retyping it, summarizing it into a guess, or getting shell quoting
+  right on the first attempt. The requirements are settled; what remains is how
+  to read a multiline prompt from a terminal without a per-line size limit,
+  without replaying a pasted log's control sequences into the display, and
+  without leaving the terminal altered for the next command.
+decision: |
+  A new `internal/promptcapture` package reads the prompt directly over
+  `term.MakeRaw`, parsing bracketed-paste markers itself rather than delegating
+  to a line editor. The payload accumulates as raw bytes while a separate
+  append-only transcript renders bounded, neutralized records to standard error.
+  `runDispatch` gains an arity-selected branch and a capture seam sited after
+  every preflight check and before the first instance is created, so abandonment
+  costs nothing and the launcher stays unreachable from any interactive path.
+rationale: |
+  The reader was chosen on fidelity rather than speed: measured against pasted
+  colour codes, invalid UTF-8, NUL bytes, and a 130,433-byte single line, the
+  library line editor corrupts the payload where a hand-rolled loop does not,
+  and it offers no hook to sanitize its own echo -- which the requirement to
+  preserve the payload while neutralizing the display makes decisive. Placement
+  outside `internal/tui` avoids a standing byte-for-byte sync obligation with
+  another repository, and siting the capture before provisioning turns abandon
+  into a no-op rather than a rollback.
+---
+
+## Status
+
+Current
+
+Downstream of `docs/prds/PRD-dispatch-paste-prompt.md` (In Progress). Five
+decision questions were investigated independently; the cross-validation that
+reconciled them is summarized under Decision Outcome.
+
+## Context and Problem Statement
+
+`niwa dispatch` launches a background worker and takes its task as a single
+positional argument. The requirements for interactive capture are settled
+upstream. The technical problem is narrower and has four parts that interact.
+
+Reading multiline input from a terminal is not a solved problem in the standard
+library. Canonical mode imposes a per-line buffer limit and hands back one line
+at a time; escaping it means raw mode, which means owning key decoding, echo,
+and terminal restoration. The obvious shortcut -- a line editor from
+`golang.org/x/term` -- brings its own echo, which is exactly the thing that must
+be separable here, because a pasted log's control sequences have to survive into
+the payload while never reaching the screen.
+
+Bracketed paste is what makes the central gesture work. When a terminal delimits
+a pasted block, the bytes between the markers are inert, so Enter can submit
+without truncating a paste at its first line. The markers arrive split across
+read boundaries, contain bytes the payload may also contain, and are absent
+entirely on older terminals -- a state the implementation is forbidden to probe
+for and must simply survive.
+
+Terminal state is borrowed, not owned. Raw mode and paste mode are process-wide
+effects on a device the shell will use next. Leaking either is a failure the
+developer experiences on their following command, and the ways to leak are
+signals, suspend, and the handoff to `claude attach` that follows a successful
+dispatch.
+
+Finally, the capture must be unreachable from the paths that are not interactive.
+`niwa watch` invokes the launcher directly on a cron timer; a capture placed one
+layer too deep would give a scheduled sweep an interactive read that never
+returns.
+
+## Decision Drivers
+
+- **Payload fidelity is non-negotiable except where an exception is stated.** The
+  submitted bytes reach the worker byte-for-byte, apart from three exceptions the
+  requirements name: the instruction niwa prepends, the separator inserted at a
+  paste boundary, and line-break normalization inside a paste. A component that
+  normalizes, replaces, or drops any other byte is disqualified regardless of its
+  other merits -- and, decisively, a component that makes the exceptions
+  impossible to confine is disqualified too.
+- **The display is adversarial input.** A pasted log is untrusted with respect to
+  the terminal: it can contain cursor movement, colour, and bytes that would
+  otherwise kill or suspend the process.
+- **Restoration failures are silent and land elsewhere.** They surface on the
+  developer's next command, so the discipline has to hold across signals and
+  suspend, not just clean returns.
+- **The non-interactive paths must not change.** Structurally, not carefully.
+- **No new dependency without cause.** `golang.org/x/term` is already a direct
+  requirement and the existing picker already drives raw mode with it.
+- **Testability at the boundary that carries the risk.** The reader's cross-chunk
+  state is where correctness is hard; the design should make it drivable without
+  a terminal.
+
+## Considered Options
+
+### Reader surface
+
+**Chosen: a hand-rolled reader over `term.MakeRaw`.** Parses bracketed-paste
+markers itself, accumulates the payload as bytes, and emits rendering separately.
+Measured at 1.16 ms for a 130,433-byte single line, byte-exact across ANSI colour
+codes, invalid UTF-8, NUL, and embedded control bytes.
+
+**Rejected: `x/term.Terminal.ReadLine` with an `ErrPasteIndicator` loop.** This
+was the round-one recommendation and it loses on fidelity, not performance. It
+replaces pasted colour codes with the Unicode replacement character, returns an
+empty capture when the input contains a single invalid UTF-8 byte, truncates at
+4,096 bytes per line on terminals without paste delimiters, conflates the cancel
+and end-of-input keys, and owns its echo with no hook to neutralize it -- which
+makes the payload-versus-display split the requirements demand impossible to
+implement on top of it.
+
+**Rejected: bubbletea.** Works, but drops invalid UTF-8, re-scans the accumulated
+buffer on each event (measured 16x slower), and costs eighteen new modules for a
+component that needs three functions the repository already imports.
+
+An earlier argument against `ReadLine` on superlinear echo cost was retired
+during this phase: the supporting measurement was a short-write defect in the
+test harness, which affects every candidate reader equally. The rejection stands
+on fidelity alone.
+
+### Placement
+
+**Chosen: a new `internal/promptcapture` package.** Mirrors the existing
+`Pick`/`pick` split -- an exported entry point that binds the real terminal, and
+an unexported core taking an injected reader and writer.
+
+**Rejected: `internal/tui`.** Every file in that package is a byte-for-byte
+mirror of another repository's copy under a standing sync obligation declared in
+its header. A niwa-only reader added there either breaks that invariant or forces
+a matching change elsewhere.
+
+**Rejected: `internal/cli` directly.** Workable, but it puts a terminal state
+machine in the package that holds command wiring, and it makes the core harder to
+test in isolation.
+
+### Rendering
+
+**Chosen: an append-only transcript of bounded records.** Reads of 64 bytes or
+fewer echo verbatim after neutralization; a pasted block emits a count line plus
+its first and last line, width-truncated. Cost is proportional to terminal width
+rather than to payload size.
+
+**Rejected: full echo of every byte.** Not on speed -- it is linear -- but because
+130 KB of replay scrolls the developer's own failure off the screen, and because
+supporting deletion against a full-echo display requires a line editor the
+requirements do not ask for.
+
+**Rejected: reusing `SanitizeDisplayString`.** It leaves carriage return,
+backspace, bell, and 8-bit control sequences intact, and it lives in the synced
+package. A stronger neutralizer belongs in the new package.
+
+### Cancellation and terminal mode
+
+**Chosen: clear ISIG via `term.MakeRaw`, handle the interrupt as a byte, and also
+install a signal handler.** A pasted `0x03` or `0x1A` must not kill or suspend
+the process mid-capture, which the payload-preservation requirement makes
+mandatory. Both arms produce the same observable outcome.
+
+**Rejected: keeping ISIG set.** Simpler signal story, but a pasted log containing
+an interrupt or suspend byte would terminate the capture and lose the buffer.
+
+## Decision Outcome
+
+The capture is a new package that owns raw mode on standard input, renders to
+standard error, and returns three outcomes -- submitted text, end-of-input on an
+empty buffer, or abandonment. `runDispatch` selects it by argument arity and
+calls it after every preflight check and before the first instance exists.
+
+The gesture set reconciles the independently-derived recommendations with the
+author's decision that Enter submits:
+
+| Gesture | Bytes outside a paste | Effect |
+|---|---|---|
+| Submit | `0x0D` | Submit the buffer |
+| Submit, alias | `0x04` or end of input, buffer non-empty | Submit the buffer |
+| End of input | `0x04` or end of input, buffer empty | End without dispatching |
+| Newline | `0x0A` | Append one newline |
+| Newline, passive | `0x1B 0x0D` and the two CSI-u encodings | Append one newline if they arrive; never negotiated |
+| Cancel | `0x03`, or SIGINT | Abandon |
+| Delete rune | `0x7F`, `0x08` | Remove the last rune |
+| Delete word | `0x17` | Remove the trailing non-whitespace run, then preceding whitespace |
+| Delete line | `0x15` | Remove back to and including the previous newline |
+
+Inside a bracketed-paste block every byte is literal. That is what makes Enter
+safe as a submit gesture, and it is also why the requirement it rests on is
+scoped to terminals that delimit pastes: where markers never arrive, a pasted
+newline is a typed newline and the paste submits at its first line. That
+degradation is stated in the requirements, documented for developers, and pinned
+by a characterization test rather than mitigated.
+
+Three conclusions were reached independently by more than one decision and are
+recorded as settled: no new dependency is needed; the payload and the rendering
+must be produced by separate code paths; and `internal/tui` is the wrong home for
+new code because of its sync obligation.
+
+## Solution Architecture
+
+### Components
+
+```
+internal/promptcapture/
+  promptcapture.go       Read (binds os.Stdin/os.Stderr) + read (injectable core)
+  neutralize.go          byte-level display neutralization
+  terminal.go            raw-mode and paste-mode lifecycle, signal handling
+internal/cli/
+  prompt.go              + IsStderrTTY, beside the existing IsStdinTTY
+  dispatch.go            + dispatchPromptCapture seam, arity branch, gate
+```
+
+### Core interface
+
+```go
+// Read runs the capture against the real terminal.
+func Read(ctx context.Context, limit int) (string, error)
+
+// read is the testable core: tests inject a reader and a writer.
+func read(ctx context.Context, stdin io.Reader, stderr io.Writer, limit int) (string, error)
+
+var ErrCanceled    = errors.New("promptcapture: canceled")
+var ErrEndOfInput  = errors.New("promptcapture: end of input on an empty buffer")
+```
+
+`limit` is a parameter rather than a package constant: the ceiling is derived in
+`internal/cli` from the argument-length maximum minus the reserve, and the core
+has no business re-deriving it.
+
+### Data flow
+
+Bytes arrive from standard input in chunks. The loop maintains **three** pieces
+of state that survive a read boundary, and all three are where the implementation
+risk lives:
+
+- **A held-back prefix**, when a chunk ends partway through what may be a paste
+  marker. The bytes are not appended until the loop knows whether they complete a
+  marker or are payload.
+- **A carriage-return flag**, so a `0x0D` ending one chunk and a `0x0A` opening
+  the next collapse to one line feed rather than two breaks.
+- **A pending line break**, set when a pasted block ends on an unterminated line
+  and flushed immediately before the next byte is appended. Setting it at the
+  end-of-paste marker unconditionally would give a bare paste a trailing newline
+  it never had; deferring it is what makes R5's separator appear only when typed
+  text actually follows.
+
+Inside a paste block, line-break bytes are normalized per R41 -- a lone carriage
+return and a carriage-return line-feed pair each become one line feed -- and every
+other byte appends untouched. Outside a paste block, bytes route through the
+gesture table.
+
+R41 is a deliberate, stated exception to byte-for-byte fidelity, and it is the
+one place the design alters pasted bytes. Terminals differ in which byte they
+deliver for a pasted line break; Terminal.app sends carriage returns. Preserving
+them exactly would hand the worker a stack trace whose lines are separated by
+carriage returns, which renders as a single overwritten line and defeats the
+purpose of carrying the error verbatim. The alternative -- normalizing at the
+worker instead -- was rejected because it would put terminal-specific knowledge
+in a component that has never needed it.
+
+Two outputs leave the loop and never mix: the payload buffer, which grows and
+truncates only at its end, and the transcript, which appends bounded neutralized
+records to standard error.
+
+### The size ceiling in the loop
+
+Crossing the ceiling is loop state, never an outcome, which is how a core with a
+single return value satisfies a refusal that leaves the capture open.
+
+The order matters and is the opposite of the obvious one. The input **is
+appended**, and then the buffer is checked: if it now exceeds `limit`, the loop
+sets an over-ceiling mark and emits a refusal record to the transcript naming the
+buffer's actual size and the limit in bytes, and directing the developer to write
+the text to a file and dispatch a prompt referencing that path. Reading
+continues. The mark makes the capture unsubmittable -- the submit gesture
+re-emits the refusal instead of returning -- and deletion clears it once the
+buffer fits. Appending nothing would be simpler and wrong: the buffer could never
+be over the ceiling, so the mark could never be set, the deletion path would be
+unreachable, and the message could not name a size larger than the limit. It
+would also lose exactly what the requirement exists to save.
+
+Retention is bounded, and the bound narrows the delete-down promise honestly. The
+buffer holds up to a stated multiple of the ceiling. An append that would take it
+beyond that bound is refused **in full** -- the buffer is left untouched, nothing
+partial is kept -- and the refusal says the input was not retained. Keeping a
+prefix instead would be worse than keeping nothing, because a truncated log looks
+complete.
+
+This case is not the edge; it is the common one. A full continuous-integration
+log measures several times the ceiling, so it exceeds any reasonable retention
+bound in a single append from an empty buffer. Deleting by hand down from several
+times the ceiling is not a recovery a developer would attempt, so for input that
+far over the real remedy is the message's file-and-reference guidance, and the
+developer's clipboard still holds the original. The delete-down path serves the
+case it can actually serve: a buffer modestly over the limit.
+
+Whitespace-only input is refused at submit with the command's existing
+empty-prompt error. The existing check runs before the capture and compares
+against the empty string, so it does not cover this; the capture path validates
+its own result.
+
+### Neutralization rule
+
+Tab passes through. Every other C0 control byte and DEL renders in caret
+notation; C1 controls and invalid UTF-8 render as hex escapes.
+
+The property to implement and test is the escaping rule itself, not a summary of
+it. Because no escape-introducing byte survives, the transcript cannot carry an
+operating-system command, a device-control or application-program string, a mode
+set, or a cursor movement -- an implementation that only guaranteed "the cursor
+never moves up, left, or to column zero" would satisfy a weaker property and
+still leak a clipboard write or a title change.
+
+The rule also protects the payload, which is the stronger reason for it. A
+terminal only answers sequences it renders; because the transcript renders none,
+an embedded device query cannot provoke a response that would arrive back on
+standard input and land inside the capture.
+
+### Terminal lifecycle
+
+Raw mode is applied to the standard input descriptor -- deliberately unlike the
+existing picker, which raws the standard error descriptor while reading standard
+input, correct only because the two usually name the same device. Two states are
+held: the pre-capture state every exit path restores, and the raw state a resume
+returns to.
+
+Restoration runs from a function-scoped defer plus a handler covering SIGINT,
+SIGQUIT, SIGTERM, SIGHUP, SIGTSTP, and SIGCONT. Suspend has one non-obvious step:
+resetting SIGTSTP to its default disposition does not reliably suspend the
+process in Go, so the handler restores the terminal and raises SIGSTOP itself,
+leaving re-entry into raw mode to the SIGCONT branch. That sequence was verified
+end-to-end on a pseudo-terminal; the textbook idiom silently fails to suspend.
+
+SIGQUIT is handled for a reason worth stating: its default action dumps core, and
+the core would contain the captured payload. Leaving it unhandled would put the
+prompt on disk, which nothing else in this path does.
+
+The SIGCONT branch checks that the process is in the foreground process group
+before re-entering raw mode. A capture that is suspended and then resumed in the
+background must not stamp raw settings onto the terminal the shell is using.
+
+End of input arriving after a hangup is treated as abandonment rather than
+submission, so closing a terminal window mid-capture cannot dispatch a
+half-composed prompt.
+
+All handlers are torn down before `runDispatch` reaches the attach handoff, so
+`claude attach` inherits a clean terminal and default signal dispositions.
+
+### Call site and gate
+
+The capture sits after the workspace, agent, and binary preflight checks and
+before the first instance is created. Abandonment at the prompt is therefore
+outside the rollback window entirely -- nothing exists to roll back -- and the
+command fails fast on a missing binary or wrong workspace before the developer
+types anything.
+
+The interactivity gate requires both standard input and standard error to be
+terminals. It is evaluated only in the zero-argument branch, so the
+positional-argument path never consults terminal state.
+
+### The size ceiling outside the loop
+
+The upstream dependency has landed. The corrected cap, its derivation, and the
+check immediately before the worker starts are all on the main branch, so the
+conditional the requirements carried does not apply and this work does not
+rebuild them. What remains for this feature is the third piece: applying the
+existing ceiling to the capture path.
+
+The ceiling is already derived rather than chosen -- the largest single argument
+the operating system accepts, minus a reserve equal to everything niwa may
+prepend after validation -- and it is already one value on every supported
+platform. The existing rejection message already states both sizes and directs
+the developer to write the detail to a file and reference its path, which is what
+the requirements ask of it.
+
+Validation already runs before any instance is created, and a second check
+already runs immediately before the worker process starts. That late check is not
+redundant: the keep-alive instruction is prepended after validation, and whether
+it arms depends on settings that do not exist until the instance has been
+provisioned, so the late check is what turns a future prepend that forgets to
+declare itself into a failure naming niwa's own limit rather than an opaque exec
+error after an instance already exists.
+
+The capture path passes the same derived ceiling into the reader and reuses the
+same message text for the in-capture refusal, so the two paths cannot drift into
+quoting different limits or offering different advice.
+
+## Implementation Approach
+
+1. **Harness prerequisites.** Add the chunked feed, the held-open-pipe step,
+   bounded timeouts on any step supplying standard input, and a signal-sending
+   step. Without the chunked feed the terminal-driven scenarios fail on a harness
+   defect rather than on the code.
+2. **The capture core.** The reader loop and its three pieces of cross-chunk
+   state, the ceiling refusal and its message, deletion, and the neutralizer,
+   driven by injected reader and writer. Tested at chunk size one, which is where
+   the marker-splitting, carriage-return and pending-break bugs live.
+3. **Terminal lifecycle.** Raw mode, paste mode, the signal set, and the
+   suspend/resume sequence.
+4. **Command wiring.** The arity change, the interactivity gate and its new
+   standard-error seam, the capture seam, the derived ceiling and its reserve,
+   validation before provisioning on both paths, and the re-check immediately
+   before the worker starts.
+5. **Reachability guard.** The test that drives the launcher path used by
+   `niwa watch` with the capture seam stubbed to fail on call.
+6. **Documentation.** Usage and long help, the README, and the degradation on
+   terminals without paste delimiters.
+
+## Security Considerations
+
+**Pasted content is untrusted with respect to the terminal.** A log can contain
+cursor movement, screen clears, and colour. Echoing it raw would let pasted
+content redraw the display -- including over the prompt that says how large the
+input is. The neutralizer is the mitigation, and its invariant (nothing emitted
+moves the cursor up, left, or to column zero) is the security property, not a
+cosmetic one.
+
+**Pasted content is untrusted with respect to process control.** With ISIG set, a
+pasted `0x03` terminates the process, a pasted `0x1C` terminates it and dumps
+core containing the payload, and a pasted `0x1A` suspends it mid-capture. Each
+loses the buffer. Clearing ISIG is what makes the payload-preservation
+requirement satisfiable and captures all three as ordinary bytes; `IXON` and
+`IEXTEN` carry the same hazard for flow control and literal-next and are cleared
+by the same call.
+
+**The payload becomes an autonomous worker's opening instruction.** Argv
+construction is unchanged -- the prompt is one element, never passed through a
+shell, so content cannot escape into command construction -- but it would be too
+strong to say the surface is untouched. This feature exists to move text a
+developer has *not* authored, and often has not read in full, into a worker's
+opening instruction, and the bounded transcript means the middle of a large paste
+is never displayed. Provenance is the surface, and it does shift. The control
+that applies is the worker's own permission boundary, not anything in the
+capture: a dispatched worker is constrained by what it is allowed to do, and that
+constraint is where pasted instructions are contained. Worth knowing when pasting
+a log from a source you do not control.
+
+**Terminal state is a shared resource.** Failing to restore raw mode leaves the
+next command in the developer's shell without line editing or signal handling.
+The failure is silent, delayed, and attributed elsewhere. This is why restoration
+is a signal-handled discipline rather than a defer, and why suspend and resume
+are covered rather than assumed.
+
+**Retention above the ceiling is bounded.** The oversized refusal keeps the whole
+buffer so the developer can delete down to a submittable size, which without a
+bound would let a pathological paste grow until the process is killed -- leaving
+the terminal raw, since no handler runs. Retention is capped at a stated multiple
+of the ceiling; an append that would exceed the cap is refused in full and
+retained not at all, rather than truncated, so a partial log is never mistaken
+for a whole one.
+
+**A forged paste-end marker submits early.** A pasted payload containing the
+end-of-paste byte sequence ends the block from the reader's point of view, so the
+remainder is interpreted as typed input and its first line break submits. This is
+the same failure mode as a terminal without paste delimiters, arriving by a
+different route, and it is documented alongside that degradation rather than
+detected.
+
+**No new external input, no new privilege, no new persistence.** The capture
+reads a terminal the process already owns, writes to a stream it already writes
+to, and adds no file, socket, or credential surface. The prompt is still never
+written to disk -- which is why SIGQUIT is handled rather than left to dump core,
+and it is an improvement on the positional path, where the whole prompt lands in
+the developer's shell history.
+
+## Consequences
+
+### Positive
+
+- The gesture matches what five independently built terminal tools converged on
+  and what the developer already knows from other tools.
+- Abandonment is free: no instance exists to reclaim, by construction rather than
+  by rollback.
+- The default attach survives, because the capture reads the terminal rather than
+  draining a pipe, removing the detachment the existing workaround forces.
+- No new dependency.
+- The payload-versus-display split is structural, which makes both the fidelity
+  guarantee and the display-safety property testable without a terminal.
+
+### Negative
+
+- A terminal state machine with signal handling is genuinely more code than
+  calling a line editor, and it is code that is hard to get right at the chunk
+  boundaries.
+- On terminals without paste delimiters, a multiline paste submits at its first
+  line and the remainder reaches the shell. This is documented and pinned by a
+  test rather than mitigated, and it is the accepted cost of Enter-submits.
+- The transcript shows a bounded summary of a large paste rather than its full
+  text, so the developer confirms extent and identity rather than reading every
+  line back.
+- niwa acquires its first signal-handling code, which is a new class of thing to
+  maintain.
+
+### Mitigations
+
+- The cross-chunk state is tested at chunk size one, which is the boundary where
+  the marker and newline bugs live.
+- The degradation on non-delimiting terminals is stated in the requirements,
+  documented where developers will find it, and pinned by a characterization
+  test so a future change to it is deliberate.
+- Terminal restoration is asserted by comparing terminal state before and after
+  across submit, abandonment, interrupt, termination, and suspend/resume.

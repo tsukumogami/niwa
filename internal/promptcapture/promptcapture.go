@@ -1,0 +1,549 @@
+// Package promptcapture reads an interactive multiline prompt from the
+// terminal.
+//
+// It is deliberately not part of internal/tui: every file in that package is a
+// copy of tsukumogami/tsuku's under a standing byte-equivalence obligation, and
+// this reader is niwa-only.
+//
+// The package keeps two outputs strictly separate. The payload is the bytes the
+// developer submitted, preserved exactly apart from the line-break
+// normalization documented on Read. The transcript is what reaches the screen,
+// and every byte of it passes through neutralize first, so pasted content can
+// never act on the terminal. Nothing that is rendered determines what is sent.
+package promptcapture
+
+import (
+	"errors"
+	"fmt"
+	"io"
+	"strings"
+)
+
+// ErrCanceled reports that the developer abandoned the capture. Callers treat
+// it as a deliberate user action, matching tui.ErrCanceled's contract: report
+// it without dispatching, create nothing, exit non-zero.
+var ErrCanceled = errors.New("promptcapture: canceled")
+
+// ErrEndOfInput reports end of input on an empty buffer. End of input on a
+// non-empty buffer submits instead, so a developer reaching for the key the
+// older workaround taught them does not lose their paste.
+var ErrEndOfInput = errors.New("promptcapture: end of input on an empty buffer")
+
+const (
+	pasteStart = "\x1b[200~"
+	pasteEnd   = "\x1b[201~"
+
+	// retentionMultiple bounds how far above the ceiling the buffer may grow so
+	// the developer can delete down to a submittable size. An append that would
+	// exceed it is refused in full rather than truncated: a partially retained
+	// log looks complete and is not.
+	retentionMultiple = 2
+
+	displayWidth = 100
+)
+
+// Read runs the capture against the real terminal, reading standard input and
+// rendering to standard error. Standard output is left alone so a caller can
+// redirect it.
+//
+// limit is the largest prompt the caller will accept, in bytes. It is a
+// parameter rather than a package constant because the ceiling is derived by the
+// caller from the platform's argument limit and the caller's own reserve.
+func Read(limit int) (string, error) {
+	restore, err := enterRaw()
+	if err != nil {
+		return "", err
+	}
+	defer restore()
+	return read(stdin(), stderr(), limit)
+}
+
+// read is the capture core. Tests drive it with an ordinary reader and writer,
+// at any chunk size, without a terminal.
+func read(r io.Reader, w io.Writer, limit int) (string, error) {
+	c := &capture{
+		w:         w,
+		limit:     limit,
+		retention: limit * retentionMultiple,
+	}
+	c.banner()
+
+	buf := make([]byte, 4096)
+	for {
+		n, err := r.Read(buf)
+		for i := 0; i < n; i++ {
+			done, text, cerr := c.step(buf[i])
+			if done {
+				return text, cerr
+			}
+		}
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return c.endOfInput()
+			}
+			return "", err
+		}
+	}
+}
+
+type capture struct {
+	w         io.Writer
+	limit     int
+	retention int
+
+	buf []byte // the payload
+
+	// Three pieces of state that must survive a read boundary. They are where
+	// the correctness risk lives, which is why the tests drive every path
+	// through them at chunk size one.
+	held         []byte // a partial paste marker, not yet known to be one
+	lastWasCR    bool   // a carriage return ended the previous chunk, inside a paste
+	pendingBreak bool   // a paste ended mid-line; insert one newline before the next append
+
+	inPaste     bool
+	pasteBuf    []byte
+	pasteDenied bool // this paste exceeded the retention bound; retain none of it
+
+	overCeiling bool
+
+	// echoedOnLine counts characters echoed since the last thing that moved the
+	// cursor to a fresh line. A single-character delete can only be erased in
+	// place while this is positive; past that the character is not on screen
+	// where a backspace could reach it.
+	echoedOnLine int
+}
+
+// maxHeld bounds how long a byte run is withheld while it might still complete
+// a recognized sequence. A pasted log is full of escape bytes and none of them
+// should stall the reader.
+const maxHeld = 16
+
+type seqKind int
+
+const (
+	seqNone    seqKind = iota // definitely not a recognized sequence
+	seqPartial                // could still become one; keep holding
+	seqPasteStart
+	seqPasteEnd
+	seqNewline
+)
+
+// classify decides what a withheld escape run is.
+//
+// Inside a paste only the end marker is recognized: every other byte is payload,
+// including escape sequences that would mean something outside. A pasted log
+// carrying a modified-Enter encoding must arrive at the worker verbatim.
+func classify(s string, inPaste bool) seqKind {
+	if inPaste {
+		switch {
+		case s == pasteEnd:
+			return seqPasteEnd
+		case strings.HasPrefix(pasteEnd, s):
+			return seqPartial
+		}
+		return seqNone
+	}
+
+	switch {
+	case s == pasteStart:
+		return seqPasteStart
+	case s == pasteEnd:
+		return seqPasteEnd
+	case strings.HasPrefix(pasteStart, s) || strings.HasPrefix(pasteEnd, s):
+		return seqPartial
+	}
+
+	// Alt+Enter, and Esc-then-Enter, which are the same two bytes.
+	if s == "\x1b\r" || s == "\x1b\n" {
+		return seqNewline
+	}
+	if s == "\x1b" {
+		return seqPartial
+	}
+	return classifyCSIEnter(s)
+}
+
+// classifyCSIEnter recognizes a modified Enter reported by a terminal that has
+// been configured to distinguish it -- which is what Claude Code's terminal
+// setup does, so a developer who has run it will reach for Shift+Enter here.
+//
+// Two encodings are in use. The kitty keyboard protocol reports Enter as
+// CSI 13 ; <modifiers> u, and xterm's modifyOtherKeys reports it as
+// CSI 27 ; <modifiers> ; 13 ~. Any modifier combination counts: shift, alt,
+// control, super, and any mix of them all mean "newline, not submit". Bare
+// Enter arrives as a single carriage return and is not matched here, so it
+// still submits.
+//
+// These are recognized only if they arrive. Asking for them means emitting a
+// protocol-enable sequence, which is capability negotiation -- something this
+// capture deliberately does not do, and which would add a third piece of
+// terminal state to restore.
+func classifyCSIEnter(s string) seqKind {
+	const (
+		kitty  = "\x1b[13;"
+		xterm  = "\x1b[27;"
+		xtermK = "13~"
+	)
+	switch {
+	case strings.HasPrefix(kitty, s) || strings.HasPrefix(xterm, s):
+		return seqPartial
+
+	case strings.HasPrefix(s, kitty):
+		rest := s[len(kitty):]
+		if rest == "" {
+			return seqPartial
+		}
+		if d := strings.TrimRight(rest, "u"); allDigits(d) && d != "" {
+			if strings.HasSuffix(rest, "u") {
+				return seqNewline
+			}
+			return seqPartial
+		}
+		return seqNone
+
+	case strings.HasPrefix(s, xterm):
+		rest := s[len(xterm):]
+		mods, tail, split := strings.Cut(rest, ";")
+		if !split {
+			if allDigits(rest) {
+				return seqPartial
+			}
+			return seqNone
+		}
+		if !allDigits(mods) || mods == "" {
+			return seqNone
+		}
+		switch {
+		case tail == xtermK:
+			return seqNewline
+		case strings.HasPrefix(xtermK, tail):
+			return seqPartial
+		}
+		return seqNone
+	}
+	return seqNone
+}
+
+func allDigits(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// step consumes one byte. It reports done when the capture has an outcome.
+func (c *capture) step(b byte) (done bool, text string, err error) {
+	// Sequence matching takes precedence, because every byte in a recognized
+	// sequence is also a plausible payload byte and only context decides.
+	if len(c.held) > 0 || b == 0x1b {
+		c.held = append(c.held, b)
+		s := string(c.held)
+
+		switch classify(s, c.inPaste) {
+		case seqPasteStart:
+			c.held = nil
+			c.inPaste = true
+			c.lastWasCR = false
+			c.pasteBuf = nil
+			c.pasteDenied = false
+			return false, "", nil
+		case seqPasteEnd:
+			c.held = nil
+			c.closePaste()
+			return false, "", nil
+		case seqNewline:
+			c.held = nil
+			c.appendTyped('\n')
+			return false, "", nil
+		case seqPartial:
+			if len(c.held) < maxHeld {
+				return false, "", nil
+			}
+			// Too long to be anything we know; fall through and replay.
+		}
+
+		// Not a recognized sequence. Replay the held bytes as ordinary input;
+		// the current byte is already among them.
+		held := c.held
+		c.held = nil
+		for _, hb := range held {
+			if done, text, err := c.ordinary(hb); done {
+				return done, text, err
+			}
+		}
+		return false, "", nil
+	}
+	return c.ordinary(b)
+}
+
+func (c *capture) ordinary(b byte) (bool, string, error) {
+	if c.inPaste {
+		c.appendPasted(b)
+		return false, "", nil
+	}
+
+	switch b {
+	case 0x0d: // Enter submits.
+		return c.submit()
+	case 0x04: // End of input: submit if there is anything, otherwise finish.
+		if len(c.buf) == 0 {
+			return true, "", ErrEndOfInput
+		}
+		return c.submit()
+	case 0x03: // Interrupt arrives as a byte because raw mode clears ISIG.
+		return true, "", ErrCanceled
+	case 0x0a: // Ctrl-J inserts a newline without submitting.
+		c.appendTyped('\n')
+	case 0x7f, 0x08:
+		c.deleteRune()
+	case 0x17:
+		c.deleteWord()
+	case 0x15:
+		c.deleteLine()
+	default:
+		c.appendTyped(b)
+	}
+	return false, "", nil
+}
+
+func (c *capture) submit() (bool, string, error) {
+	if c.overCeiling {
+		c.refuse()
+		return false, "", nil
+	}
+	return true, string(c.buf), nil
+}
+
+func (c *capture) endOfInput() (string, error) {
+	if len(c.buf) == 0 {
+		return "", ErrEndOfInput
+	}
+	if c.overCeiling {
+		// A stream that ends while the buffer is unsubmittable is not a submit.
+		return "", ErrCanceled
+	}
+	return string(c.buf), nil
+}
+
+// appendPasted accumulates a byte inside a paste block, normalizing line breaks
+// to a single line feed. Terminals differ in which byte they deliver for a
+// pasted break; preserving them exactly would hand the worker a stack trace
+// whose lines are separated by carriage returns, which renders as one
+// overwritten line.
+func (c *capture) appendPasted(b byte) {
+	if c.pasteDenied {
+		return
+	}
+	switch b {
+	case '\r':
+		c.pasteBuf = append(c.pasteBuf, '\n')
+		c.lastWasCR = true
+	case '\n':
+		if c.lastWasCR {
+			c.lastWasCR = false
+			return
+		}
+		c.pasteBuf = append(c.pasteBuf, '\n')
+	default:
+		c.pasteBuf = append(c.pasteBuf, b)
+		c.lastWasCR = false
+	}
+	if len(c.buf)+len(c.pasteBuf) > c.retention {
+		c.pasteDenied = true
+		c.pasteBuf = nil
+	}
+}
+
+func (c *capture) closePaste() {
+	c.inPaste = false
+	c.lastWasCR = false
+
+	if c.pasteDenied {
+		c.pasteDenied = false
+		c.pasteBuf = nil
+		fmt.Fprintf(c.w, "\r\n[input too large to hold; nothing was kept. Limit is %d bytes. Write the detail to a file and reference its path from a shorter prompt.]\r\n", c.limit)
+		return
+	}
+
+	pasted := c.pasteBuf
+	c.pasteBuf = nil
+	if len(pasted) == 0 {
+		return
+	}
+
+	c.flushPendingBreak()
+	c.buf = append(c.buf, pasted...)
+
+	// A paste that ended mid-line owes a break to whatever is typed next. Adding
+	// it now would give a bare paste a trailing newline it never had, so the
+	// obligation is deferred.
+	if pasted[len(pasted)-1] != '\n' {
+		c.pendingBreak = true
+	}
+
+	c.renderPaste(pasted)
+	c.echoedOnLine = 0
+	c.checkCeiling()
+}
+
+func (c *capture) appendTyped(b byte) {
+	if len(c.buf)+1 > c.retention {
+		c.refuseUnretained()
+		return
+	}
+	c.flushPendingBreak()
+	c.buf = append(c.buf, b)
+
+	// A newline the developer typed is echoed as an actual line break, not
+	// through the neutralizer. Neutralizing it renders "^J" and then the
+	// trailing carriage return puts the cursor back at column zero of the SAME
+	// line, so the next thing typed overwrites what is already there -- and a
+	// later submit looks like it deleted the rest of the line.
+	//
+	// The neutralizer exists to stop PASTED bytes from acting on the terminal.
+	// A break the developer asked for is not that: moving to the next line is
+	// exactly what they requested, and it cannot move the cursor up, left, or
+	// over existing text.
+	if b == '\n' {
+		fmt.Fprint(c.w, "\r\n")
+		c.echoedOnLine = 0
+		c.checkCeiling()
+		return
+	}
+
+	rendered := neutralize([]byte{b})
+	fmt.Fprint(c.w, rendered)
+	c.echoedOnLine += len(rendered)
+	c.checkCeiling()
+}
+
+func (c *capture) flushPendingBreak() {
+	if c.pendingBreak {
+		c.pendingBreak = false
+		c.buf = append(c.buf, '\n')
+		fmt.Fprint(c.w, "\r\n")
+		c.echoedOnLine = 0
+	}
+}
+
+// checkCeiling runs after the append, never before it. Appending nothing would
+// be simpler and wrong: the buffer could never exceed the limit, so the
+// unsubmittable mark could never be set, deletion could never clear it, and the
+// message could not name a size larger than the limit. It would also discard
+// exactly what the developer needs to keep.
+func (c *capture) checkCeiling() {
+	over := len(c.buf) > c.limit
+	if over && !c.overCeiling {
+		c.overCeiling = true
+		c.refuse()
+		return
+	}
+	c.overCeiling = over
+}
+
+func (c *capture) refuse() {
+	fmt.Fprintf(c.w, "\r\n[%d bytes entered, limit is %d. Delete some, or write the detail to a file and reference its path from a shorter prompt.]\r\n", len(c.buf), c.limit)
+}
+
+func (c *capture) refuseUnretained() {
+	fmt.Fprintf(c.w, "\r\n[input too large to hold; nothing was kept. Limit is %d bytes. Write the detail to a file and reference its path from a shorter prompt.]\r\n", c.limit)
+}
+
+func (c *capture) deleteRune() {
+	if len(c.buf) == 0 {
+		return
+	}
+	i := len(c.buf) - 1
+	for i > 0 && c.buf[i]&0xc0 == 0x80 {
+		i--
+	}
+	removed := neutralize(c.buf[i:])
+	c.buf = c.buf[:i]
+	c.afterDelete(len(removed))
+}
+
+func (c *capture) deleteWord() {
+	i := len(c.buf)
+	for i > 0 && isSpace(c.buf[i-1]) {
+		i--
+	}
+	for i > 0 && !isSpace(c.buf[i-1]) {
+		i--
+	}
+	c.buf = c.buf[:i]
+	c.afterDelete(-1)
+}
+
+func (c *capture) deleteLine() {
+	i := len(c.buf)
+	if i > 0 && c.buf[i-1] == '\n' {
+		i--
+	}
+	for i > 0 && c.buf[i-1] != '\n' {
+		i--
+	}
+	c.buf = c.buf[:i]
+	c.afterDelete(-1)
+}
+
+func isSpace(b byte) bool {
+	return b == ' ' || b == '\t' || b == '\n'
+}
+
+// afterDelete gives the developer feedback proportional to what was removed.
+//
+// erasable is the number of rendered columns the deletion took off the current
+// visual line, or -1 when the deletion was too large to undo on screen. A single
+// character that is still on the line is erased in place with backspaces, which
+// is what a terminal does and what the developer expects; anything larger, or
+// anything reaching back past the current line, gets one status line instead.
+//
+// Printing a status line on every keystroke -- which an earlier version did --
+// turns backspacing over a typo into a column of byte counts and fragments the
+// text being typed.
+func (c *capture) afterDelete(erasable int) {
+	c.pendingBreak = false
+
+	if erasable > 0 && erasable <= c.echoedOnLine {
+		for i := 0; i < erasable; i++ {
+			fmt.Fprint(c.w, "\b \b")
+		}
+		c.echoedOnLine -= erasable
+	} else {
+		fmt.Fprintf(c.w, "\r\n[%d bytes]\r\n", len(c.buf))
+		c.echoedOnLine = 0
+	}
+
+	was := c.overCeiling
+	c.overCeiling = len(c.buf) > c.limit
+	if was && !c.overCeiling {
+		fmt.Fprint(c.w, "[within the limit again]\r\n")
+		c.echoedOnLine = 0
+	}
+}
+
+func (c *capture) banner() {
+	fmt.Fprintf(c.w,
+		"Paste or type the task, then press Enter to dispatch.\r\n"+
+			"Ctrl-J for a newline, Ctrl-C to cancel. Limit %d bytes.\r\n",
+		c.limit)
+}
+
+// renderPaste emits a bounded record rather than replaying the payload. The
+// developer gets the extent and the identity of what they pasted at a cost
+// proportional to terminal width, not to payload size -- and a large paste does
+// not scroll away the failure they were looking at.
+func (c *capture) renderPaste(pasted []byte) {
+	lines := strings.Split(strings.TrimSuffix(string(pasted), "\n"), "\n")
+	fmt.Fprintf(c.w, "\r\n[pasted %d line(s), %d bytes]\r\n", len(lines), len(pasted))
+	fmt.Fprintf(c.w, "  %s\r\n", truncateForDisplay(neutralize([]byte(lines[0])), displayWidth))
+	if len(lines) > 2 {
+		fmt.Fprintf(c.w, "  ... %d more line(s)\r\n", len(lines)-2)
+	}
+	if len(lines) > 1 {
+		last := lines[len(lines)-1]
+		fmt.Fprintf(c.w, "  %s\r\n", truncateForDisplay(neutralize([]byte(last)), displayWidth))
+	}
+}
