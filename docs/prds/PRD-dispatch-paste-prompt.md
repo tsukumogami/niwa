@@ -1,6 +1,6 @@
 ---
 schema: prd/v1
-status: Draft
+status: Accepted
 problem: |
   A developer who hits a failure in the terminal cannot hand that failure to a
   dispatched worker. `niwa dispatch` takes its prompt as a single positional
@@ -26,7 +26,7 @@ motivating_context: |
 
 ## Status
 
-Draft
+Accepted
 
 Requirements for interactive prompt capture on `niwa dispatch`, downstream of
 the Accepted BRIEF. The Decisions and Trade-offs section closes the four
@@ -526,6 +526,11 @@ would go to the redirect target.
 - The reserve costs headroom on invocations where nothing is prepended.
   Recovering it would require resolving whether the prepend applies before
   provisioning, which this PRD does not require.
+- The terminal-driven scenarios depend on a terminal utility whose behavior
+  differs between platforms. Continuous integration runs on one of them, so the
+  criteria are enforced there; a developer running the suite on another platform
+  may find those scenarios unavailable. Whether they skip or fail on such a host
+  is an implementation choice, but they should not fail silently.
 
 ## Out of Scope
 
