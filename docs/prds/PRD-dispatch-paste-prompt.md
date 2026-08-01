@@ -532,12 +532,16 @@ would go to the redirect target.
 - The ceiling is unreachable for the payloads this feature exists to serve and
   reachable only by pasting a whole run. The refusal is a real path for a real
   user, not a defensive check, and its wording carries the weight.
-- Echo cost is a live hazard on a single very long line. A probe measured one
-  candidate library path completing a 12,000-byte single line but failing to
-  finish a 20,000-byte one inside 20 seconds, while the same path round-tripped
-  a 205 KB multi-line payload in about 2 seconds. The hazard is line length, not
-  total size, and a pasted log is many short lines. R37 states the requirement
-  this imposes; it rules out at least one otherwise-convenient implementation.
+- An earlier revision recorded an echo cost that appeared superlinear on a
+  single long line. Instrumented re-measurement retired that: the child received
+  4095, 4095, 2, 1 bytes and then nothing, because the test harness does a short
+  write to the terminal and never retries the remainder. It is a harness defect,
+  affects every candidate reader, and is not a property of any library. Driven
+  by a terminal that retries short writes, a 130,433-byte single line is
+  captured in about a millisecond. R37 stands as a requirement, but it does not
+  rest on that measurement, and the functional harness needs the chunked feed
+  described in R33's neighbourhood or its terminal-driven scenarios will fail
+  for reasons unrelated to the code under test.
 - A promptless invocation from a script that inherits an interactive terminal
   passes the interactivity gate and opens a capture. This is a caller bug; the
   mitigations are that the capture is visibly waiting (R27) and that abandonment
