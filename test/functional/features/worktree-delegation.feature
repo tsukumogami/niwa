@@ -170,3 +170,32 @@ Feature: niwa worktree-delegation integration
     Then the exit code is 0
     And the file ".claude/settings.json" under the workspace root contains "command -v niwa"
     And the file ".claude/settings.json" under the workspace root contains "exec niwa instance from-hook"
+
+  # ---------------------------------------------------------------------
+  # Create-path atomicity (DESIGN Decision 8): a delegated create that fails
+  # AFTER `git worktree add` must reconcile rather than strand state. Session
+  # creation is already atomic; content install is not, so without the
+  # reconciliation the tool call fails while the worktree and an `active`
+  # session record both survive -- and `niwa worktree list` then reports an
+  # active worktree no process is in.
+  # ---------------------------------------------------------------------
+
+  @critical
+  Scenario: a failed delegated create leaves no active session behind
+    Given a clean niwa environment
+    And a fake claude reporting version "2.1.183" is on PATH
+    And a local git server is set up
+    And a single-repo channeled workspace "wd-rollback" exists with repo content
+    When I run "niwa create wd-rollback"
+    Then the exit code is 0
+    And the repo "apps/app" exists in instance "wd-rollback"
+    # Break content install only -- the instance itself is already built.
+    When the content source "content/repos/app.md" is missing from instance "wd-rollback"
+    And I pipe a WorktreeCreate hook for repo "apps/app" with name "doomed" in instance "wd-rollback"
+    # The hook must fail so Claude Code does not chdir into a rolled-back path.
+    Then the exit code is not 0
+    # niwa is the system of record: no active row, and nothing left on disk.
+    When I run "niwa worktree list" from channeled instance "wd-rollback"
+    Then the exit code is 0
+    And the output does not contain "active"
+    And no extra worktree is registered for repo "apps/app" in instance "wd-rollback"
