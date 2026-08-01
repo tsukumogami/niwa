@@ -421,20 +421,7 @@ func TestDispatch_SelfDispatch_ResolvesEnclosingWorkspaceRoot(t *testing.T) {
 	}
 }
 
-func TestDispatch_OverLongPrompt_Errors(t *testing.T) {
-	root := setupDispatchWorkspace(t)
-	chdir(t, root)
-	f := installDispatchFakes(t, root)
-
-	big := bytes.Repeat([]byte("a"), maxPromptBytes+1)
-	_, _, err := runDispatchCmd(t, string(big))
-	if err == nil {
-		t.Fatal("expected an error for an over-limit prompt")
-	}
-	if f.provisionCalled != 0 {
-		t.Errorf("nothing must be created for an over-limit prompt; provision called %d", f.provisionCalled)
-	}
-}
+// Prompt-size boundary coverage lives in dispatch_promptsize_test.go.
 
 // TestDispatch_SessionStartGuard_NoOpsInsideDispatchInstance asserts that the
 // existing SessionStart re-entrancy guard no-ops against a dispatch-created

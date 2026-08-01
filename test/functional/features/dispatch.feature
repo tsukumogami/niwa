@@ -149,3 +149,48 @@ Feature: niwa dispatch: provision, rollback, and reaper reclamation
     And I run niwa reap from the workspace root
     Then the exit code is 0
     And the dispatch instance still exists
+
+  # --- Interactive prompt capture ---
+  #
+  # With no prompt argument on a terminal, dispatch opens a capture: paste or
+  # type the task, press Enter to dispatch. The pasted block is delimited by the
+  # terminal's bracketed-paste markers, which is what makes the newlines inside
+  # it inert so a single Enter can submit.
+
+  @critical
+  Scenario: a pasted multiline task dispatches and reaches the worker verbatim
+    Given a clean niwa environment
+    And a local git server is set up
+    And a config repo "myws" exists with body:
+      """
+      [workspace]
+      name = "myws"
+      """
+    When I run niwa init from config repo "myws"
+    Then the exit code is 0
+    Given a fake claude for dispatch with session "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"
+    When I run "niwa dispatch --detach" under a pty with input "\e[200~panic: runtime error\n\tmain.go:42\e[201~\r"
+    Then the exit code is 0
+    And the launched claude was invoked with "panic: runtime error"
+
+  # The never-block guarantee. Standard input is a pipe that is never written to
+  # and never closed, so a command that reads it hangs rather than receiving an
+  # immediate end-of-input. That distinction is the whole point: with stdin at
+  # /dev/null this scenario would pass against an implementation that violates
+  # the guarantee.
+
+  @critical
+  Scenario: dispatch with no prompt and no terminal refuses instead of waiting
+    Given a clean niwa environment
+    And a local git server is set up
+    And a config repo "myws" exists with body:
+      """
+      [workspace]
+      name = "myws"
+      """
+    When I run niwa init from config repo "myws"
+    Then the exit code is 0
+    Given a fake claude for dispatch with session "ffffffff-ffff-4fff-8fff-ffffffffffff"
+    When I run "niwa dispatch" with stdin held open
+    Then the exit code is 1
+    And the error output contains "not an interactive terminal"

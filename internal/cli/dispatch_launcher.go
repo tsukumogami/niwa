@@ -32,6 +32,14 @@ func realDispatchLaunch(ctx context.Context, instanceDir, prompt string, passthr
 	if prompt == "" {
 		return fmt.Errorf("dispatch: empty prompt")
 	}
+	// Backstop, not the user-facing check: runDispatch step (1) is where an
+	// oversized prompt is supposed to be rejected, early and with advice. This
+	// guard sits on the string that actually reaches execve, so if something is
+	// ever prepended without being counted in dispatchPromptReserve the failure
+	// names the limit instead of surfacing as an opaque E2BIG.
+	if len(prompt) > maxArgStringBytes {
+		return fmt.Errorf("dispatch: prompt is %d bytes, over the %d-byte single-argument exec limit", len(prompt), maxArgStringBytes)
+	}
 
 	bin, err := exec.LookPath("claude")
 	if err != nil {

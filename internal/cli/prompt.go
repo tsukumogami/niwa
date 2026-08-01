@@ -27,6 +27,20 @@ var IsStdinTTY = func() bool {
 	return term.IsTerminal(int(os.Stdin.Fd()))
 }
 
+// IsStderrTTY reports whether stderr is connected to a terminal.
+//
+// The interactive prompt capture reads stdin and renders to stderr, so it needs
+// both to be terminals: rendering into a redirect would put the capture's own
+// display in a file while the developer stares at nothing. Stdout is
+// deliberately not consulted -- it carries dispatch's session hints, which a
+// caller may redirect without giving up the capture.
+//
+// Exposed as a variable for the same reason as IsStdinTTY: tests stub it rather
+// than rebinding a real descriptor.
+var IsStderrTTY = func() bool {
+	return term.IsTerminal(int(os.Stderr.Fd()))
+}
+
 // ReadConfirmation writes prompt to out, reads a single line from in,
 // trims surrounding whitespace, and reports whether the result equals
 // expected. EOF or read error returns (false, err).
