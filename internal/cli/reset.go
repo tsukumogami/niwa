@@ -91,6 +91,30 @@ func runReset(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("loading workspace config: %w", err)
 	}
+	token := resolveGitHubToken()
+	gh := github.NewAPIClient(token)
+
+	applier := workspace.NewApplier(gh)
+	// Reset runs runPipeline; wire the plugin auto-installer so the
+	// rank-2 overlay notice fired during the pipeline triggers
+	// /niwa:migrate-config install. Reset doesn't surface its own
+	// --no-install-plugins flag — the persistent
+	// auto_install_plugins=false global setting is honored.
+	configurePluginAutoInstall(applier, false)
+
+	// Reconcile before the config drives the rebuild (issue #227) -- reset exists
+	// to rebuild from the current config. Reports through the applier's default
+	// stderr reporter; the cmd-bound one below is DestroyInstance's.
+	//
+	// This runs before the destroy below on purpose: a reconcile that fails --
+	// unreachable source, a refetch that cannot complete -- returns here with
+	// the instance still intact, rather than leaving the user with nothing
+	// where their instance was.
+	result, err = workspace.ReconcileAndReloadConfig(cmd.Context(), configPath, gh, applier.Reporter, result)
+	if err != nil {
+		return err
+	}
+	// Surface config-load warnings once, against the effective config.
 	for _, w := range result.Warnings {
 		fmt.Fprintf(os.Stderr, "warning: %s\n", w)
 	}
@@ -107,16 +131,6 @@ func runReset(cmd *cobra.Command, args []string) error {
 	// is the directory name being recreated (e.g. "myws-2"). When the
 	// workspace was initialized with `niwa init <name>`, the registry
 	// entry lives under the override name, not cfg.Workspace.Name.
-	token := resolveGitHubToken()
-	gh := github.NewAPIClient(token)
-
-	applier := workspace.NewApplier(gh)
-	// Reset runs runPipeline; wire the plugin auto-installer so the
-	// rank-2 overlay notice fired during the pipeline triggers
-	// /niwa:migrate-config install. Reset doesn't surface its own
-	// --no-install-plugins flag — the persistent
-	// auto_install_plugins=false global setting is honored.
-	configurePluginAutoInstall(applier, false)
 	registryName, err := resolveEffectiveWorkspaceName(workspaceRoot, cfg)
 	if err != nil {
 		return err

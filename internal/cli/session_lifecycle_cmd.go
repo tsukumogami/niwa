@@ -288,6 +288,13 @@ func runSessionApply(cmd *cobra.Command, args []string) error {
 // init.go/RunBootstrap composition: the leaf internal/worktree stays a leaf
 // (the content install lives in internal/workspace), and the CLI orchestrates
 // the two.
+//
+// This is the one config reader that deliberately does NOT call
+// reconcileConfigFromSource first, so it is not a fifth site someone forgot
+// (issues #214, #227). A worktree is a derived view of its instance under the
+// inherit model: it takes the environment its instance already materialized,
+// and converging it must not advance it past the instance it belongs to.
+// Reconcile by converging the instance.
 func applyContentToWorktree(instanceRoot, worktreePath, repo, purpose, branch string) ([]string, error) {
 	configPath, configDir, err := config.Discover(instanceRoot)
 	if err != nil {

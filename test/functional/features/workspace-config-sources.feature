@@ -132,3 +132,281 @@ Feature: workspace config sources (snapshot model)
     Then the exit code is 0
     # A single apply must materialize the new posture -- not require a second run.
     And the file ".claude/settings.json" under the workspace root contains "bypassPermissions"
+
+  # --- issue #227: a newly declared env key reaches .local.env on the SAME apply ---
+  # The #214 scenario above asserts the workspace-ROOT settings posture, which is
+  # materialized from the config `niwa apply` loads at the root, in the same
+  # process that reconciles the snapshot. Per-repo secret output (.local.env) is
+  # materialized further down, inside the per-instance apply pipeline, from the
+  # config that pipeline is handed. A newly declared [env.vars] / [env.secrets]
+  # key must land on the apply that pulls it, not the one after -- otherwise a
+  # correct declaration reads as a broken value lookup.
+  #
+  # Both key kinds are asserted: they travel the same resolution path, and both
+  # were reported stale, which rules out value resolution as the cause.
+  #
+  # This one is a regression guard rather than a fix. #227 reports the symptom
+  # on 0.20.1, which was tagged before #216 shipped, so the apply path was
+  # already correct by the time the report landed; this pins that it stays so.
+  # The create/reset/from-hook scenarios below are the ones that were failing.
+
+  @critical
+  Scenario: niwa apply materializes a newly declared env key into .local.env on the same run
+    Given a clean niwa environment
+    And a local git server is set up
+    And a source repo "app" exists
+    And a config repo "envrecon" exists with body:
+      """
+      [workspace]
+      name = "envrecon"
+
+      [groups.tools]
+
+      [env.vars]
+      EXISTING_VAR = "existing-var-value"
+
+      [env.secrets]
+      EXISTING_SECRET = "existing-secret-value"
+
+      [repos.app]
+      url = "{repo:app}"
+      group = "tools"
+      """
+    When I run niwa init from config repo "envrecon"
+    Then the exit code is 0
+    And the provenance marker exists
+    When I run "niwa create envrecon"
+    Then the exit code is 0
+    When I run "niwa apply envrecon"
+    Then the exit code is 0
+    And the file "tools/app/.local.env" in instance "envrecon" contains "EXISTING_VAR=existing-var-value"
+    # Upstream declares one new key of each kind.
+    When the config repo "envrecon" is force-pushed to:
+      """
+      [workspace]
+      name = "envrecon"
+
+      [groups.tools]
+
+      [env.vars]
+      EXISTING_VAR = "existing-var-value"
+      ADDED_VAR = "added-var-value"
+
+      [env.secrets]
+      EXISTING_SECRET = "existing-secret-value"
+      ADDED_SECRET = "added-secret-value"
+
+      [repos.app]
+      url = "{repo:app}"
+      group = "tools"
+      """
+    And I run "niwa apply envrecon"
+    Then the exit code is 0
+    # One apply must be enough for both keys.
+    And the file "tools/app/.local.env" in instance "envrecon" contains "ADDED_VAR=added-var-value"
+    And the file "tools/app/.local.env" in instance "envrecon" contains "ADDED_SECRET=added-secret-value"
+
+  # --- issue #227: the same guarantee on the instance-creation path ---
+  # `niwa create` refreshes the config snapshot from the source too, for the
+  # stated reason that create should pick up upstream maintainer changes. But
+  # the refresh runs after the config was loaded, and the loaded config is what
+  # drives materialization -- so a key added upstream since the last read is
+  # missed. Unlike apply there is no "just run it again" here: the instance is
+  # created once, and it comes up with an incomplete environment.
+
+  @critical
+  Scenario: niwa create materializes a newly declared env key into a new instance
+    Given a clean niwa environment
+    And a local git server is set up
+    And a source repo "app" exists
+    And a config repo "envcreate" exists with body:
+      """
+      [workspace]
+      name = "envcreate"
+
+      [groups.tools]
+
+      [env.vars]
+      EXISTING_VAR = "existing-var-value"
+
+      [env.secrets]
+      EXISTING_SECRET = "existing-secret-value"
+
+      [repos.app]
+      url = "{repo:app}"
+      group = "tools"
+      """
+    When I run niwa init from config repo "envcreate"
+    Then the exit code is 0
+    When I run "niwa create envcreate"
+    Then the exit code is 0
+    And the file "tools/app/.local.env" in instance "envcreate" contains "EXISTING_VAR=existing-var-value"
+    # Upstream declares a new key, then a second instance is created.
+    When the config repo "envcreate" is force-pushed to:
+      """
+      [workspace]
+      name = "envcreate"
+
+      [groups.tools]
+
+      [env.vars]
+      EXISTING_VAR = "existing-var-value"
+      ADDED_VAR = "added-var-value"
+
+      [env.secrets]
+      EXISTING_SECRET = "existing-secret-value"
+      ADDED_SECRET = "added-secret-value"
+
+      [repos.app]
+      url = "{repo:app}"
+      group = "tools"
+      """
+    And I run "niwa create envcreate"
+    Then the exit code is 0
+    # The freshly created instance must carry the keys its own run pulled down.
+    And the file "tools/app/.local.env" in instance "envcreate-2" contains "ADDED_VAR=added-var-value"
+    And the file "tools/app/.local.env" in instance "envcreate-2" contains "ADDED_SECRET=added-secret-value"
+
+  # --- issue #227: the same guarantee on the reset path ---
+  # Reset exists to rebuild an instance from the current config, so rebuilding
+  # it from a pre-refresh read is exactly the wrong outcome -- the user asked
+  # for the current config and got the previous one.
+  #
+  # One key kind is enough here. Both travel the same ResolveEnvVars path, and
+  # the apply and create scenarios above already pin that both kinds do; what is
+  # unproven on this path is the reconcile, not the resolution.
+
+  @critical
+  Scenario: niwa reset rebuilds an instance from a newly declared env key
+    Given a clean niwa environment
+    And a local git server is set up
+    And a source repo "app" exists
+    And a config repo "envreset" exists with body:
+      """
+      [workspace]
+      name = "envreset"
+
+      [groups.tools]
+
+      [env.vars]
+      EXISTING_VAR = "existing-var-value"
+
+      [repos.app]
+      url = "{repo:app}"
+      group = "tools"
+      """
+    When I run niwa init from config repo "envreset"
+    Then the exit code is 0
+    When I run "niwa create envreset"
+    Then the exit code is 0
+    And the file "tools/app/.local.env" in instance "envreset" contains "EXISTING_VAR=existing-var-value"
+    # Upstream declares a new key, then the instance is reset.
+    When the config repo "envreset" is force-pushed to:
+      """
+      [workspace]
+      name = "envreset"
+
+      [groups.tools]
+
+      [env.vars]
+      EXISTING_VAR = "existing-var-value"
+      ADDED_VAR = "added-var-value"
+
+      [repos.app]
+      url = "{repo:app}"
+      group = "tools"
+      """
+    And I run "niwa reset envreset" from workspace root
+    Then the exit code is 0
+    And the file "tools/app/.local.env" in instance "envreset" contains "ADDED_VAR=added-var-value"
+
+  # --- issue #227: the same guarantee on the session-provisioning path ---
+  # This is the path a dispatched session's instance comes up through, and it
+  # runs once per instance with nothing behind it. A key declared upstream
+  # since the last read would be missing from that session's environment for as
+  # long as the session lives, with no second run to recover it.
+  #
+  # One key kind, for the same reason as the reset scenario above.
+
+  @critical
+  Scenario: an ephemeral session instance is provisioned with a newly declared env key
+    Given a clean niwa environment
+    And a local git server is set up
+    And a source repo "app" exists
+    And a config repo "envhook" exists with body:
+      """
+      [workspace]
+      name = "envhook"
+
+      [groups.tools]
+
+      [env.vars]
+      EXISTING_VAR = "existing-var-value"
+
+      [repos.app]
+      url = "{repo:app}"
+      group = "tools"
+      """
+    When I run niwa init from config repo "envhook"
+    Then the exit code is 0
+    # Upstream declares a new key BEFORE the session is provisioned, so the
+    # on-disk snapshot the hook reads is a run behind.
+    When the config repo "envhook" is force-pushed to:
+      """
+      [workspace]
+      name = "envhook"
+
+      [groups.tools]
+
+      [env.vars]
+      EXISTING_VAR = "existing-var-value"
+      ADDED_VAR = "added-var-value"
+
+      [repos.app]
+      url = "{repo:app}"
+      group = "tools"
+      """
+    Given a background job state exists for session "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+    When I pipe a SessionStart hook for session "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+    Then the exit code is 0
+    And the instance "envhook-cccccccc-ccc" exists
+    And the file "tools/app/.local.env" in instance "envhook-cccccccc-ccc" contains "ADDED_VAR=added-var-value"
+
+  # --- reset reconciles before it destroys ---
+  # Reset destroys an instance and rebuilds it. The reconcile has to run first:
+  # if it runs after, a source that is briefly unreachable takes the rebuild
+  # down with it and the user is left with nothing where their instance was.
+  # The guarantee lives in the order of two statements in runReset, so it needs
+  # a test of its own -- a reorder would otherwise reintroduce the data loss
+  # with the whole suite still green.
+
+  @critical
+  Scenario: niwa reset leaves the instance intact when the source is unreachable
+    Given a clean niwa environment
+    And a local git server is set up
+    And a source repo "app" exists
+    And a config repo "envsafe" exists with body:
+      """
+      [workspace]
+      name = "envsafe"
+
+      [groups.tools]
+
+      [env.vars]
+      EXISTING_VAR = "existing-var-value"
+
+      [repos.app]
+      url = "{repo:app}"
+      group = "tools"
+      """
+    When I run niwa init from config repo "envsafe"
+    Then the exit code is 0
+    When I run "niwa create envsafe"
+    Then the exit code is 0
+    And the file "tools/app/.local.env" in instance "envsafe" contains "EXISTING_VAR=existing-var-value"
+    # The config source goes away, then the user resets.
+    When the config repo "envsafe" is unreachable
+    And I run "niwa reset envsafe" from workspace root
+    Then the exit code is not 0
+    # Reset failed, but it must not have destroyed anything on the way.
+    And the file "tools/app/.local.env" in instance "envsafe" contains "EXISTING_VAR=existing-var-value"

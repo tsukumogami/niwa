@@ -156,6 +156,24 @@ func runCreate(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+
+	token := resolveGitHubToken()
+	gh := github.NewAPIClient(token)
+
+	// Built here rather than with the rest of the applier wiring below because
+	// the reconcile needs a fetcher and a reporter; everything else it needs
+	// comes from the config that reconcile returns.
+	applier := workspace.NewApplier(gh)
+	applier.Reporter = workspace.NewReporterWithTTY(os.Stderr, !noProgress && term.IsTerminal(int(os.Stderr.Fd())))
+
+	// Reconcile before the config drives materialization (issue #227). Placed
+	// above the name and agent resolution below so those read it too; there is
+	// no second run to recover a create, because the instance is created once.
+	result, err = workspace.ReconcileAndReloadConfig(cmd.Context(), configPath, gh, applier.Reporter, result)
+	if err != nil {
+		return err
+	}
+	// Surface config-load warnings once, against the effective config.
 	for _, w := range result.Warnings {
 		fmt.Fprintf(os.Stderr, "warning: %s\n", w)
 	}
@@ -192,11 +210,6 @@ func runCreate(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("instance directory already exists: %s", instanceDir)
 	}
 
-	token := resolveGitHubToken()
-	gh := github.NewAPIClient(token)
-
-	applier := workspace.NewApplier(gh)
-	applier.Reporter = workspace.NewReporterWithTTY(os.Stderr, !noProgress && term.IsTerminal(int(os.Stderr.Fd())))
 	// Wire the plugin auto-installer so the rank-2 overlay notice
 	// fired inside runPipeline can trigger `/niwa:migrate-config`
 	// install. Without this seam the install is a silent no-op even

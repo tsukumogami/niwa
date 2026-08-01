@@ -358,6 +358,22 @@ func realProvisionInstance(ctx context.Context, workspaceRoot, cwd, namePrefix, 
 	if err != nil {
 		return provisionResult{}, err
 	}
+
+	token := resolveGitHubToken()
+	gh := github.NewAPIClient(token)
+
+	applier := workspace.NewApplier(gh)
+	applier.Reporter = workspace.NewReporter(os.Stderr)
+
+	// Reconcile before the config drives materialization (issue #227). Every
+	// dispatched session's instance comes up through here, once, with no apply
+	// behind it to correct a stale read.
+	result, err = workspace.ReconcileAndReloadConfig(ctx, configPath, gh, applier.Reporter, result)
+	if err != nil {
+		return provisionResult{}, err
+	}
+	// No result.Warnings loop here, unlike apply/create/reset: this runs from a
+	// Claude hook whose stdout is a protocol, not a terminal someone is reading.
 	cfg := result.Config
 
 	configName, err := resolveEffectiveWorkspaceName(workspaceRoot, cfg)
@@ -370,11 +386,6 @@ func realProvisionInstance(ctx context.Context, workspaceRoot, cwd, namePrefix, 
 		return provisionResult{}, err
 	}
 
-	token := resolveGitHubToken()
-	gh := github.NewAPIClient(token)
-
-	applier := workspace.NewApplier(gh)
-	applier.Reporter = workspace.NewReporter(os.Stderr)
 	configurePluginAutoInstall(applier, false)
 	// provisionCloneWorkers is set by `niwa dispatch --parallel`; the hook and
 	// reap callers leave it 0 (auto). It wins over clone_workers when > 0.
