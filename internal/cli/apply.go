@@ -166,36 +166,19 @@ func runApply(cmd *cobra.Command, args []string) error {
 	applier.AllowMissingSecrets = applyAllowMissingSecrets
 	applier.AllowPlaintextSecrets = applyAllowPlaintextSecrets
 
-	// Reconcile the workspace-root config snapshot from its source BEFORE
-	// loading drives materialization (issue #214). EnsureConfigSnapshotWithStatus
-	// already runs per-instance inside Applier.Apply, but only AFTER the config
-	// here was loaded and the root-managed files written, and the swapped
-	// workspace.toml is never reloaded into the cfg that drives this apply -- so
-	// upstream config changes (permission posture, plugins, hooks, CLAUDE.md
-	// content) only took effect one apply later. Refreshing here and reloading
-	// closes that gap; it also realizes the "downstream EnsureConfigSnapshot"
-	// reconcile that checkConfigSourceURLChange's contract already assumes runs
-	// after the --force URL-change gate.
-	//
-	// Gated on an existing provenance marker so this touches only workspaces
-	// already in the snapshot model: it must not pre-empt the case-2 legacy
-	// working-tree conversion (whose one-time "manual edits will not persist"
-	// notice is emitted by the per-instance Apply), and it correctly leaves
-	// local-only workspaces (no marker, no source to track) untouched.
-	if _, statErr := os.Stat(filepath.Join(configDir, workspace.ProvenanceFile)); statErr == nil {
-		if _, _, snapErr := workspace.EnsureConfigSnapshotWithStatus(
-			cmd.Context(), configDir, config.TeamConfigMarkerSet(), gh, applier.Reporter,
-		); snapErr != nil {
-			return fmt.Errorf("reconciling workspace-root config from source: %w", snapErr)
-		}
-		// Reload so the freshly-swapped workspace.toml drives root
-		// materialization and the instance loop below, not the stale snapshot.
-		result, err = config.Load(configPath)
-		if err != nil {
-			return err
-		}
-		cfg = result.Config
+	// Reconcile the workspace-root config snapshot from its source BEFORE the
+	// loaded config drives root materialization and the instance loop below
+	// (issue #214). Ordering only: it runs after checkConfigSourceURLChange
+	// above, so the --force gate still sees pre-sync state. It is NOT the
+	// re-materialization that gate's doc describes -- refreshSnapshot refetches
+	// from the source recorded in the provenance marker and never consults the
+	// registry's URL, so a marker-bearing snapshot is not re-pointed at a
+	// changed registry URL by anything on this path.
+	result, err = workspace.ReconcileAndReloadConfig(cmd.Context(), configPath, gh, applier.Reporter, result)
+	if err != nil {
+		return err
 	}
+	cfg = result.Config
 
 	// Surface config-load warnings once, reflecting the effective
 	// (post-reconcile) config.

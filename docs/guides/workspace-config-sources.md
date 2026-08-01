@@ -214,6 +214,44 @@ stale behavior should follow the deferred `--strict-refresh` flag
 (documented as future work in PRD-workspace-config-sources Out of
 Scope).
 
+### Same-run effect
+
+For a workspace in the snapshot model — one whose `.niwa/` carries a
+provenance marker — a refreshed snapshot takes effect on the run that pulls
+it. `apply`, `create`, `reset`, and the `instance from-hook` path behind
+session provisioning, `niwa dispatch`, and `niwa watch` each reconcile the
+config from its source and re-read it before it drives materialization. Push
+a new `[claude.settings]` posture, plugin, hook, or `[env.vars]` /
+`[env.secrets]` key upstream, and the next single command materializes it.
+You never need a second run.
+
+Three cases fall outside that guarantee. Check which one you are in before
+concluding a value is broken — the symptom is identical to a bad reference.
+
+**A config dir that is still a legacy git working tree** (`.niwa/.git`, no
+marker) gets converted to a snapshot on its next command. That one
+conversion run materializes from the pre-conversion config, so an upstream
+change lands on the run after it. Every run from then on is same-run.
+Reconciling ahead of the conversion would cost the one-time notice telling
+you local edits in that directory stop persisting, which is worth more than
+the single late run.
+
+**A workspace with a registered `source_url` but no marker and no `.git`**
+never reconciles — not on the second run, not ever. This is not the same as
+having no source: the registry says the workspace tracks a repo, and it
+does not. The self-contained single-repo bootstrap produces this shape.
+Tracked as issue #215.
+
+**Worktrees** never reconcile, by design. Under the inherit model a worktree
+is a derived view of its instance: it copies the environment its instance
+already materialized, and worktree-scoped `apply` and `niwa worktree` re-read
+the root config themselves to rewrite posture, `[files]`, hooks, and CLAUDE
+content — from whatever is on disk, without refreshing it first. Converge the
+instance to move a worktree forward.
+
+A true local-only workspace has no source to track and is correctly left
+alone.
+
 ## Failure modes
 
 | Trigger | Behavior |

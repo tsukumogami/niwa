@@ -348,6 +348,15 @@ type pipelineResult struct {
 // instanceName is the directory name for the new instance (e.g. "myws-2");
 // cfg.Workspace.Name is the config identity and must not be mutated by the
 // caller — it is used for personal overlay scope lookup and InstanceState.ConfigName.
+//
+// CALLER CONTRACT: cfg must have been read AFTER the config snapshot was
+// reconciled from its source. Create refreshes the snapshot itself (below), but
+// it materializes from this cfg, so a caller that read before the refresh gets
+// a run-late materialization — issues #214 and #227. Satisfy this by passing
+// the config ReconcileAndReloadConfig returns.
+// The reconcile is not done here because cfg is the caller's value: the caller
+// also derives instanceName and the resolved agent from it, and silently
+// swapping it underneath would leave those disagreeing with what is written.
 func (a *Applier) Create(ctx context.Context, cfg *config.WorkspaceConfig, configDir, workspaceRoot, instanceName string) (string, error) {
 	now := time.Now()
 
@@ -497,6 +506,14 @@ func (a *Applier) Create(ctx context.Context, cfg *config.WorkspaceConfig, confi
 
 // Apply runs the full apply pipeline on an existing instance: discover repos,
 // classify, clone, install content, clean up removed repos, and update state.
+//
+// Same caller contract as Create: cfg must have been read after the config
+// snapshot was reconciled from its source (see ReconcileAndReloadConfig). Apply
+// is called in a loop over the instances of one workspace, so resolving the cfg
+// once above the loop also keeps every instance in a run on the same parsed
+// config. Note this narrows rather than closes cross-instance skew: the
+// EnsureConfigSnapshotWithStatus call below still runs per instance, so the
+// config DIRECTORY runPipeline reads can rotate mid-run if upstream moves.
 func (a *Applier) Apply(ctx context.Context, cfg *config.WorkspaceConfig, configDir, instanceRoot string) error {
 	now := time.Now()
 

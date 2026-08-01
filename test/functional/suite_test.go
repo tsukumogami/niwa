@@ -235,6 +235,7 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 	ctx.Step(`^the config repo "([^"]*)" is force-pushed to:$`, func(ctx context.Context, name string, body *godog.DocString) (context.Context, error) {
 		return theConfigRepoIsForcePushedTo(ctx, name, body.Content)
 	})
+	ctx.Step(`^the config repo "([^"]*)" is unreachable$`, theConfigRepoIsUnreachable)
 	ctx.Step(`^the provenance marker exists$`, theProvenanceMarkerExistsInWorkspaceRoot)
 	ctx.Step(`^the config dir is a git working tree from config repo "([^"]*)"$`, theConfigDirIsAGitWorkingTree)
 	ctx.Step(`^a dispatch brief "([^"]*)" exists in the workspace root$`, aDispatchBriefExistsInWorkspaceRoot)

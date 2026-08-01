@@ -220,3 +220,24 @@ func theConfigDirIsAGitWorkingTree(ctx context.Context, configRepoName string) (
 	_ = os.RemoveAll(clone)
 	return ctx, nil
 }
+
+// theConfigRepoIsUnreachable renames the bare repo backing the named config
+// source out of the way, so the next fetch against its recorded URL fails the
+// way a briefly-unreachable remote does. Used to prove `niwa reset` reconciles
+// before it destroys: the destroy must not have happened when the refetch
+// fails, or the user is left with nothing where their instance was.
+func theConfigRepoIsUnreachable(ctx context.Context, name string) (context.Context, error) {
+	s := getState(ctx)
+	if s == nil {
+		return ctx, fmt.Errorf("no test state")
+	}
+	url, ok := s.repoURLs[name]
+	if !ok {
+		return ctx, fmt.Errorf("no URL stored for config repo %q", name)
+	}
+	bareDir := strings.TrimPrefix(url, "file://")
+	if err := os.Rename(bareDir, bareDir+".moved"); err != nil {
+		return ctx, fmt.Errorf("making config repo %q unreachable: %w", name, err)
+	}
+	return ctx, nil
+}
