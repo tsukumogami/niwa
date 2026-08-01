@@ -143,10 +143,15 @@ into a reachable one.
 
 ### Capture behavior
 
-- **R4.** Multiline input SHALL be captured whole. A line break SHALL NOT
-  terminate the capture, submit the input, or truncate it, whether it arrives as
-  a carriage return, a line feed, or both, and whether or not the terminal
-  delimits pasted blocks.
+- **R4.** On terminals that delimit pasted blocks, multiline input SHALL be
+  captured whole: a line break inside a pasted block SHALL NOT terminate the
+  capture, submit the input, or truncate it, whether it arrives as a carriage
+  return, a line feed, or both.
+- **R40.** On terminals that do not delimit pasted blocks, a pasted line break is
+  indistinguishable from a typed one, so a multiline paste submits at its first
+  line break and the remainder reaches the shell. The command SHALL NOT probe for
+  the capability (R23) and SHALL NOT attempt to detect this state. The
+  degradation SHALL be documented where a developer will find it.
 - **R35.** Input accepted so far SHALL be rendered as it is entered, so the
   developer can see what will be sent before sending it.
 - **R30.** Text the developer submits SHALL be preserved exactly in the prompt,
@@ -283,8 +288,11 @@ whose harness can make it fail.
 
 ### Unit tests over an injectable capture core
 
-- [ ] A paste whose line breaks are line feeds does not return after the first
-      line; the same paste with carriage-return breaks also does not (R4).
+- [ ] A delimited paste whose line breaks are line feeds does not return after
+      the first line; the same delimited paste with carriage-return breaks also
+      does not (R4).
+- [ ] Undelimited input containing a line break returns at that break, pinning
+      the documented degradation so a future change to it is deliberate (R40).
 - [ ] Input arriving across multiple reads, split at an arbitrary boundary, is
       captured whole (R4).
 - [ ] One submit gesture returns the captured text for a bare paste (R4).
@@ -387,7 +395,7 @@ Against each of GNOME Terminal, Terminal.app, iTerm2, and Ghostty, and inside
 tmux:
 
 - [ ] A multiline paste is captured whole and is not truncated at its first line
-      (R4, R23).
+      (R4).
 - [ ] A large paste renders without visible corruption (R35, R37).
 - [ ] The capture is visibly waiting before any input is given (R27).
 
@@ -447,11 +455,25 @@ dispatch instead of an error.
 When the session is interactive but the terminal lacks paste-boundary support,
 there is nothing honest to say: enabling the capability is a silent no-op and
 the resulting state is indistinguishable from ordinary typing. So the command
-does not probe and does not warn (R23). The guarantee that survives is stated
-unconditionally in R4 -- multiline input is never truncated at a line break, on
-any terminal, whichever byte carries it -- rather than as a promise conditioned
-on a fact the implementation is forbidden to learn. The one behavior that
-genuinely does depend on paste boundaries is the separator R5 inserts, which is
+does not probe and does not warn (R23).
+
+An earlier revision stated R4's no-truncation guarantee unconditionally, which
+had a consequence that only became visible once the gestures were chosen: if a
+pasted line break cannot be distinguished from a typed one, then Enter cannot be
+the submit gesture, because submitting on Enter would truncate a paste at its
+first line on exactly those terminals. That inverted the gesture set -- Ctrl-D
+to submit, Enter to insert a newline -- which is the ceremony the BRIEF names as
+part of the problem, and which five independently built terminal chat tools
+rejected in favor of Enter.
+
+The trade was taken deliberately: R4 is scoped to terminals that delimit pasted
+blocks, R40 states the resulting degradation plainly and requires it be
+documented, and a characterization criterion pins the degraded behavior so a
+future change to it is a decision rather than an accident. Bracketed paste is
+effectively universal in current terminals, transparent over remote sessions,
+and forwarded by multiplexers, so the terminals this exposes are old ones. The
+one behavior that genuinely does depend on paste boundaries is the separator R5
+inserts, which is
 therefore scoped to terminals that provide them.
 
 ### Capture and detach compose
@@ -520,6 +542,10 @@ would go to the redirect target.
   passes the interactivity gate and opens a capture. This is a caller bug; the
   mitigations are that the capture is visibly waiting (R27) and that abandonment
   is clean (R7, R9).
+- On a terminal that does not delimit pasted blocks, a multiline paste submits at
+  its first line break and the remainder reaches the shell (R40). This is the
+  cost of taking Enter as the submit gesture, and it is not detectable from
+  inside the process. It is documented rather than mitigated.
 - Behavior inside multiplexers and the rendering quality of a large paste cannot
   be checked by any harness in this repository. They are manual criteria, which
   means they are checked at release time by a person or not at all.
