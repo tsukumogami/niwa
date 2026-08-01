@@ -3,6 +3,7 @@ package cli
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -14,6 +15,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/tsukumogami/niwa/internal/agent"
 	"github.com/tsukumogami/niwa/internal/config"
+	"github.com/tsukumogami/niwa/internal/promptcapture"
 	"github.com/tsukumogami/niwa/internal/workspace"
 )
 
@@ -144,12 +146,26 @@ var dispatchAttach = func(id string) error {
 }
 
 var dispatchCmd = &cobra.Command{
-	Use:   "dispatch <prompt>",
+	Use:   "dispatch [prompt]",
 	Short: "Launch a background Claude Code worker in a fresh ephemeral instance",
 	Long: `dispatch creates a fresh ephemeral niwa instance, launches a Claude Code
 background worker rooted inside it, captures the worker's session id, and
 records an ephemeral dispatch-origin mapping so the instance is reclaimed when
 the session ends.
+
+The prompt is optional. With no prompt argument, dispatch opens an interactive
+capture on the terminal: paste or type the task, press Enter to dispatch,
+Ctrl-J for a newline, Ctrl-C to cancel. This is the way to hand a worker an
+error you are looking at rather than one you can describe -- select it, run
+'niwa dispatch', paste, press Enter.
+
+The capture relies on the terminal marking where a paste begins and ends, which
+current terminals do. On one that does not, a pasted line break is
+indistinguishable from a typed one, so a multiline paste submits at its first
+line and the rest reaches the shell; pass the prompt as an argument there.
+
+With no prompt AND no terminal -- a script, a hook, a cron job -- dispatch fails
+immediately rather than waiting on input that will never arrive.
 
 By default the terminal then attaches to the new session (like docker run);
 pass --detach/-d to skip the attach and return after printing the
@@ -162,24 +178,37 @@ the instance directory, but the detached background process keeps running -- we
 never captured its session id, so we cannot stop it. That process has no mapping
 and is harmless, but it is yours to 'claude stop' once you find it in 'claude
 list'.`,
-	Args:          cobra.ExactArgs(1),
+	Args:          cobra.MaximumNArgs(1),
 	SilenceErrors: true,
 	SilenceUsage:  true,
 	RunE:          runDispatch,
 }
 
-func runDispatch(cmd *cobra.Command, args []string) error {
-	prompt := args[0]
+// dispatchPromptCapture reads a prompt interactively from the terminal. It is a
+// package variable so tests can drive the capture path without a terminal, and
+// so the launcher-reachability test can stub it to fail if it is ever called
+// from a path that must never be interactive.
+var dispatchPromptCapture = promptcapture.Read
 
-	// (1) Validate the prompt before touching anything.
-	if prompt == "" {
-		return fmt.Errorf("niwa: error: dispatch prompt must not be empty")
-	}
-	// The limit already excludes dispatchPromptReserve, so a prompt that passes
-	// here still fits after step (9d) may prepend the keep-alive instruction --
-	// there is one check, it is early, and it covers the final string.
-	if len(prompt) > maxPromptBytes {
-		return fmt.Errorf("niwa: error: dispatch prompt is too long (%d bytes, limit %d); it is passed to claude as a single exec argument, so it cannot be truncated or split. Write the detail to a file and reference its path from a shorter prompt", len(prompt), maxPromptBytes)
+// dispatchInteractive reports whether an interactive capture can run. Both stdin
+// and stderr must be terminals: the capture reads the first and renders to the
+// second. Stdout is left out on purpose so it stays redirectable.
+var dispatchInteractive = func() bool { return IsStdinTTY() && IsStderrTTY() }
+
+func runDispatch(cmd *cobra.Command, args []string) error {
+	// Arity selects the path, so no invocation can request both a positional
+	// prompt and a capture. An explicit empty argument stays an error: it is
+	// usually an unset variable in a script, and turning it into a capture
+	// trigger would open an interactive prompt inside a cron job.
+	var prompt string
+	interactive := len(args) == 0
+	if !interactive {
+		prompt = args[0]
+
+		// (1) Validate the prompt before touching anything.
+		if err := validateDispatchPrompt(prompt); err != nil {
+			return err
+		}
 	}
 
 	// (2) Resolve the enclosing workspace root from cwd. Inside an instance or
@@ -221,6 +250,30 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	// claude fails with no instance dir and no mapping on disk (R16, R13).
 	if _, err := lookClaude(); err != nil {
 		return fmt.Errorf("niwa: error: claude binary not found in PATH; install Claude Code before dispatching")
+	}
+
+	// (3b) With no positional prompt, capture one from the terminal. This sits
+	// after every preflight check and before anything is created, so abandoning
+	// the capture costs nothing -- there is no instance to roll back -- and a
+	// wrong workspace or a missing claude fails before the developer types.
+	if interactive {
+		if !dispatchInteractive() {
+			return fmt.Errorf("niwa: error: no prompt given and this is not an interactive terminal; pass the prompt as an argument: niwa dispatch \"<task>\"")
+		}
+		captured, err := dispatchPromptCapture(maxPromptBytes)
+		if err != nil {
+			switch {
+			case errors.Is(err, promptcapture.ErrCanceled):
+				return fmt.Errorf("niwa: canceled")
+			case errors.Is(err, promptcapture.ErrEndOfInput):
+				return fmt.Errorf("niwa: error: dispatch prompt must not be empty")
+			}
+			return fmt.Errorf("niwa: error: reading prompt: %w", err)
+		}
+		if err := validateDispatchPrompt(captured); err != nil {
+			return err
+		}
+		prompt = captured
 	}
 
 	// (4) Generate a unique "-<8 hex>" name suffix via crypto/rand and pass it
@@ -584,4 +637,24 @@ func writeDispatchMarker(instancePath string) error {
 // beside a written mapping is never acted on.
 func removeDispatchMarker(instancePath string) {
 	_ = os.Remove(filepath.Join(instancePath, dispatchPendingMarker))
+}
+
+// validateDispatchPrompt applies the same rules to a captured prompt as to a
+// positional one, so the two paths cannot drift into quoting different limits
+// or offering different advice.
+//
+// The whitespace check exists because the capture can produce a buffer that is
+// non-empty but carries nothing: the positional path's own empty check compares
+// against the empty string and would let it through.
+func validateDispatchPrompt(prompt string) error {
+	if strings.TrimSpace(prompt) == "" {
+		return fmt.Errorf("niwa: error: dispatch prompt must not be empty")
+	}
+	// The limit already excludes dispatchPromptReserve, so a prompt that passes
+	// here still fits after step (9d) may prepend the keep-alive instruction --
+	// there is one check, it is early, and it covers the final string.
+	if len(prompt) > maxPromptBytes {
+		return fmt.Errorf("niwa: error: dispatch prompt is too long (%d bytes, limit %d); it is passed to claude as a single exec argument, so it cannot be truncated or split. Write the detail to a file and reference its path from a shorter prompt", len(prompt), maxPromptBytes)
+	}
+	return nil
 }

@@ -363,4 +363,5 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 	// TTY simulation: drive niwa init under util-linux `script -q` so
 	// stdin is a real pty. The supplied input is fed line-by-line.
 	ctx.Step(`^I run "([^"]*)" under a pty with input "([^"]*)"$`, iRunUnderPTYWithInput)
+	ctx.Step(`^I run "([^"]*)" with stdin held open$`, iRunWithStdinHeldOpen)
 }

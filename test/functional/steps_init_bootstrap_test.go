@@ -3,12 +3,21 @@ package functional
 import (
 	"context"
 	"fmt"
+	"io"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/cucumber/godog"
 )
+
+// ptyStepTimeout bounds every step that hands the binary a standard input the
+// step controls. Without it a command that waits on input the scenario never
+// sends burns the suite's global deadline and takes every other scenario with
+// it; with it, the failure is a step failure naming the command.
+const ptyStepTimeout = 60 * time.Second
 
 // aGitHubFakeIsConfigured spins up the per-scenario tarballFakeServer
 // and points the niwa binary at it via NIWA_GITHUB_API_URL. The fake
@@ -45,9 +54,9 @@ func theGitHubFakeServesAtRefWithWorkspaceMarker(ctx context.Context, slug, ref 
 	}
 	wrapper := fmt.Sprintf("%s-%s-bootstrap", owner, repo)
 	s.githubFake.SetTarball(owner, repo, ref, map[string]string{
-		wrapper + "/":                       "",
-		wrapper + "/.niwa/":                 "",
-		wrapper + "/.niwa/workspace.toml":   "[workspace]\nname = \"" + repo + "\"\n",
+		wrapper + "/":                     "",
+		wrapper + "/.niwa/":               "",
+		wrapper + "/.niwa/workspace.toml": "[workspace]\nname = \"" + repo + "\"\n",
 	})
 	s.githubFake.SetCommit(owner, repo, ref, "abcdef0123456789abcdef0123456789abcdef01")
 	return ctx, nil
@@ -175,15 +184,54 @@ func iRunUnderPTYWithInput(ctx context.Context, command, input string) (context.
 	// the pty master side). The child's stdin is fed by writing to
 	// script's own stdin via cmd.Stdin — script forwards stdin bytes
 	// to the pty so the child sees them as terminal input.
-	cmd := exec.CommandContext(ctx, "script", "-q", "-c", innerCmd, "/dev/null")
+	// A scenario whose input never terminates must fail as a step rather than
+	// run out the suite's global deadline. godog's context carries no deadline
+	// of its own, so one is imposed here.
+	ptyCtx, cancel := context.WithTimeout(ctx, ptyStepTimeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ptyCtx, "script", "-q", "-c", innerCmd, "/dev/null")
 	cmd.Env = s.buildEnv()
-	// Convert "\n" escapes (so feature files can write `y\n`).
+	// Convert escapes so feature files can write `y\n` and paste markers.
 	rawInput := strings.ReplaceAll(input, `\n`, "\n")
-	cmd.Stdin = strings.NewReader(rawInput)
+	rawInput = strings.ReplaceAll(rawInput, `\r`, "\r")
+	rawInput = strings.ReplaceAll(rawInput, `\e`, "\x1b")
+
+	// Feed the pty in chunks rather than one burst. `script` performs a short
+	// write to the pty master and does not retry the remainder, so a large
+	// single write silently loses everything past the first few kilobytes and
+	// the child waits forever for input that was never delivered. Chunking
+	// keeps each write inside the pty buffer. This is a property of the
+	// harness, not of any reader under test.
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		return ctx, fmt.Errorf("creating pty input pipe: %w", err)
+	}
+	cmd.Stdin = pr
+	go func() {
+		defer pw.Close()
+		const chunk = 2048
+		for i := 0; i < len(rawInput); i += chunk {
+			end := i + chunk
+			if end > len(rawInput) {
+				end = len(rawInput)
+			}
+			if _, err := io.WriteString(pw, rawInput[i:end]); err != nil {
+				return
+			}
+			if end < len(rawInput) {
+				time.Sleep(20 * time.Millisecond)
+			}
+		}
+	}()
 	var stdout, stderr strings.Builder
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	runErr := cmd.Run()
+	pr.Close()
+	if ptyCtx.Err() == context.DeadlineExceeded {
+		return ctx, fmt.Errorf("pty step did not terminate within %s; the command is waiting on input that never arrives", ptyStepTimeout)
+	}
 	s.stdout = stdout.String()
 	// util-linux `script` interleaves stdout and stderr on its single
 	// PTY surface; the child's stderr is mirrored on stdout under PTY.
@@ -216,7 +264,7 @@ func splitOwnerRepo(slug string) (string, string, error) {
 }
 
 // shellQuote escapes s for use inside a `bash -c` string. Single-quotes
-// are doubled with the standard `'\''` trick. Used by iRunUnderPTYWithInput
+// are doubled with the standard `'\”` trick. Used by iRunUnderPTYWithInput
 // to thread arbitrary command strings through `script -c` safely.
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
