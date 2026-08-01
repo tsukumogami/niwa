@@ -112,9 +112,10 @@ into a reachable one.
   by issue #225, which corrects the prompt cap and adds a check immediately
   before exec. R14's derivation names terms introduced there. Interactive
   capture removes the outer guard that currently makes the defect nearly
-  unreachable, so shipping capture on the uncorrected cap is not an option. If
-  #225 has not landed when this work starts, R34 states what this work must
-  carry instead.
+  unreachable, so shipping capture on the uncorrected cap is not an option.
+  **Satisfied:** the correction merged before implementation began, so R34's
+  conditional does not fire and this work applies the existing ceiling rather
+  than establishing it.
 - **R34.** If the #225 baseline is absent, this work SHALL itself establish it:
   the prompt SHALL be validated against R14's derived ceiling before any
   instance is created, and the final argument SHALL be re-checked immediately

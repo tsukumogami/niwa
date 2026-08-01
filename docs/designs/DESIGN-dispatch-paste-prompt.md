@@ -1,6 +1,6 @@
 ---
 schema: design/v1
-status: Accepted
+status: Planned
 upstream: docs/prds/PRD-dispatch-paste-prompt.md
 problem: |
   `niwa dispatch` takes its prompt as one positional argument, so a developer
@@ -31,7 +31,7 @@ rationale: |
 
 ## Status
 
-Accepted
+Planned
 
 Downstream of `docs/prds/PRD-dispatch-paste-prompt.md` (In Progress). Five
 decision questions were investigated independently; the cross-validation that
@@ -357,26 +357,30 @@ positional-argument path never consults terminal state.
 
 ### The size ceiling outside the loop
 
-The upstream dependency is live: the corrected cap has not landed, so this work
-establishes it, as the requirements provide for. Three pieces are needed and only
-the first is inside the capture.
+The upstream dependency has landed. The corrected cap, its derivation, and the
+check immediately before the worker starts are all on the main branch, so the
+conditional the requirements carried does not apply and this work does not
+rebuild them. What remains for this feature is the third piece: applying the
+existing ceiling to the capture path.
 
-The ceiling is derived rather than chosen -- the largest single argument the
-operating system accepts, minus a reserve equal to everything niwa may prepend
-after validation -- and it is one value on every supported platform, since the
-tighter platform's limit is safe on the other.
+The ceiling is already derived rather than chosen -- the largest single argument
+the operating system accepts, minus a reserve equal to everything niwa may
+prepend after validation -- and it is already one value on every supported
+platform. The existing rejection message already states both sizes and directs
+the developer to write the detail to a file and reference its path, which is what
+the requirements ask of it.
 
-Validation runs before any instance is created, against both the captured text
-and a positional argument, so a rejected prompt never leaves an instance to
-reclaim.
+Validation already runs before any instance is created, and a second check
+already runs immediately before the worker process starts. That late check is not
+redundant: the keep-alive instruction is prepended after validation, and whether
+it arms depends on settings that do not exist until the instance has been
+provisioned, so the late check is what turns a future prepend that forgets to
+declare itself into a failure naming niwa's own limit rather than an opaque exec
+error after an instance already exists.
 
-A second check runs immediately before the worker process starts, against the
-final argument string. This is not redundant. The keep-alive instruction is
-prepended after validation, and whether it arms depends on settings that do not
-exist until the instance has been provisioned. Reserving its length up front
-makes the early check sound; the late check is what turns a future prepend that
-forgets to declare itself into a failure naming niwa's own limit rather than an
-opaque operating-system exec error after an instance already exists.
+The capture path passes the same derived ceiling into the reader and reuses the
+same message text for the in-capture refusal, so the two paths cannot drift into
+quoting different limits or offering different advice.
 
 ## Implementation Approach
 

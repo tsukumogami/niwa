@@ -16,6 +16,7 @@ chain_skipped: []
 chain_ran:
   - brief
   - prd
+  - design
 child_snapshots:
   brief:
     status: Accepted
@@ -25,6 +26,10 @@ child_snapshots:
     status: Accepted
     content_hash: 5cb516015715618cb5eabad17950b8eabde60d55
     captured_at: 2026-08-01T17:30:00Z
+  design:
+    status: Accepted
+    content_hash: 0d7dfe00ea5299c8056a1c9ea135b750aca0181a
+    captured_at: 2026-08-01T18:10:00Z
 worktree_rebases:
   - phase: brief
     upstream_commits: []
@@ -38,8 +43,20 @@ worktree_rebases:
     upstream_commits: []
     impact: none
     rebased_at: 2026-08-01T17:31:00Z
+  - phase: plan
+    upstream_commits: [61719b7]
+    impact: intent-changing-resolved-in-place
+    rebased_at: 2026-08-01T18:11:00Z
+    notes: >-
+      PR #226 merged the corrected prompt cap while this chain was in its design
+      phase. The DESIGN and the PRD both stated the dependency as unlanded and
+      required this work to establish the baseline itself. Resolved in place:
+      both documents now record the dependency as satisfied, and the plan applies
+      the existing ceiling to the capture path rather than rebuilding it. The
+      merged constants and rejection message match what the design specified, so
+      no design decision changed -- only the amount of work.
 parent_orchestration:
-  invoking_child: design
+  invoking_child: plan
   suppress_status_aware_prompt: true
   rationale: fresh-chain
 pull_request: https://github.com/tsukumogami/niwa/pull/224
