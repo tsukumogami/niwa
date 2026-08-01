@@ -267,14 +267,27 @@ func (c *capture) appendTyped(b byte) {
 	}
 	c.flushPendingBreak()
 	c.buf = append(c.buf, b)
+
+	// A newline the developer typed is echoed as an actual line break, not
+	// through the neutralizer. Neutralizing it renders "^J" and then the
+	// trailing carriage return puts the cursor back at column zero of the SAME
+	// line, so the next thing typed overwrites what is already there -- and a
+	// later submit looks like it deleted the rest of the line.
+	//
+	// The neutralizer exists to stop PASTED bytes from acting on the terminal.
+	// A break the developer asked for is not that: moving to the next line is
+	// exactly what they requested, and it cannot move the cursor up, left, or
+	// over existing text.
+	if b == '\n' {
+		fmt.Fprint(c.w, "\r\n")
+		c.echoedOnLine = 0
+		c.checkCeiling()
+		return
+	}
+
 	rendered := neutralize([]byte{b})
 	fmt.Fprint(c.w, rendered)
-	if b == '\n' {
-		fmt.Fprint(c.w, "\r")
-		c.echoedOnLine = 0
-	} else {
-		c.echoedOnLine += len(rendered)
-	}
+	c.echoedOnLine += len(rendered)
 	c.checkCeiling()
 }
 

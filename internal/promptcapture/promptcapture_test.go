@@ -368,3 +368,50 @@ func TestDeleteAfterPasteDoesNotEraseIntoTheSummary(t *testing.T) {
 		t.Fatalf("no size feedback after deleting into a paste: %q", got)
 	}
 }
+
+// A newline the developer types with Ctrl-J must reach the screen as a real
+// line break. Rendering it through the neutralizer produces "^J" followed by a
+// bare carriage return, which parks the cursor at column zero of the same line:
+// subsequent typing overwrites what is already there, and the eventual submit
+// looks like it deleted the rest of the line.
+func TestTypedNewlineEchoesAsARealLineBreak(t *testing.T) {
+	var out bytes.Buffer
+	c := &capture{w: &out, limit: bigLimit, retention: bigLimit * retentionMultiple}
+	for _, b := range []byte("one") {
+		c.step(b)
+	}
+	out.Reset()
+
+	c.step(0x0a) // Ctrl-J
+	for _, b := range []byte("two") {
+		c.step(b)
+	}
+
+	got := out.String()
+	if strings.Contains(got, "^J") {
+		t.Fatalf("a typed newline was rendered as caret notation: %q", got)
+	}
+	if !strings.Contains(got, "\r\n") {
+		t.Fatalf("a typed newline did not move to the next line: %q", got)
+	}
+	// A carriage return that is not part of a line break would return the
+	// cursor to column zero of the current line and overwrite it.
+	if idx := strings.Index(got, "\r"); idx >= 0 && !strings.HasPrefix(got[idx:], "\r\n") {
+		t.Fatalf("bare carriage return in the transcript: %q", got)
+	}
+	if string(c.buf) != "one\ntwo" {
+		t.Fatalf("payload is %q, want %q", c.buf, "one\ntwo")
+	}
+}
+
+// The payload was always correct; only the display was wrong. Pin that so a
+// future change to the echo cannot quietly alter what is sent.
+func TestTypedNewlineSubmitsBothLines(t *testing.T) {
+	got, err, _ := runAll(t, "first\nsecond\r", bigLimit)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "first\nsecond" {
+		t.Fatalf("got %q, want %q", got, "first\nsecond")
+	}
+}
