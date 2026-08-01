@@ -109,13 +109,13 @@ handing it to a dispatched worker -- and how the user signals input is finished.
   so every chord affordance requires raw mode, and annotation is in scope. The
   evidence favors taking raw mode, but the cost is real and was named twice.
 
-- **Overflow policy contradicts guidance already in the tree.** The `/dispatch`
-  skill's Cautions section says "Don't paste giant context into the prompt. Put
-  it in the brief file; the prompt just points at it" -- the opposite of what
-  this feature optimizes for. Both can be right (the skill addresses an agent
-  synthesizing a brief; this addresses a human pasting a log they cannot
-  summarize), but the tree should not carry two contradictory instructions
-  silently. (lead-dispatch-flow)
+- ~~**Overflow policy contradicts guidance already in the tree.**~~ **Withdrawn.**
+  lead-dispatch-flow flagged the `/dispatch` skill's "Don't paste giant context
+  into the prompt. Put it in the brief file" as contradicting this feature. It
+  does not: the skill is agent-facing, and an agent will happily do the
+  indirection; this feature is human-facing, and a human will not. Different
+  callers, different correct answers, nothing to reconcile. Resolved during
+  round 1 convergence -- see the decisions file.
 
 - **Echo fidelity is a genuine fork with no free option.** Sanitize the display
   but send raw bytes, and the user is not seeing what they send; sanitize both,
@@ -164,13 +164,10 @@ handing it to a dispatched worker -- and how the user signals input is finished.
 
 ### Open Questions
 
-1. What happens when a paste exceeds the cap: reject at the paste boundary with
-   the buffer left editable, truncate with confirmation, or spill to a brief
-   file under `.niwa/dispatch-briefs/` and pass a pointer? lead-dispatch-flow
-   argues the spill design may be more interesting than the capture mechanism
-   and matches what the `/dispatch` skill already prescribes.
-2. Should `maxPromptBytes` be fixed as part of this work or filed separately?
-   It is pre-existing, but paste is what makes it hit.
+1. ~~What happens when a paste exceeds the cap?~~ **Decided:** cap and error at
+   the paste boundary, prompt still alive. No auto-spill. See decisions file.
+2. ~~Should `maxPromptBytes` be fixed as part of this work?~~ **Decided:** yes,
+   it is load-bearing once the cap is the overflow strategy.
 3. Hand-roll the reader on `term.MakeRaw`, or build on `x/term.Terminal.ReadLine`?
 4. Does the echoed buffer contain the same bytes as the dispatched payload?
 5. Where does the code live -- `internal/cli` (unencumbered) or `internal/tui`
