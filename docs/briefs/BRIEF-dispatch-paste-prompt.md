@@ -36,6 +36,14 @@ the terminal cannot carry an interactive capture, whether capture composes with
 a request not to attach, and what a non-interactive invocation does beyond not
 hanging -- resolve in the downstream PRD's Decisions and Trade-offs section.
 
+Edited in place after acceptance. The Problem Statement originally claimed the
+detach flag was mandatory for the `"$(cat)"` workaround, on the reasoning that
+standard input had been spent feeding the prompt. That is wrong: a command
+substitution leaves standard input attached to the terminal, verified by
+probe, so the default attach works. Detachment is only forced in the piped
+variant. The correction matters downstream -- left standing, it would send a
+designer looking for a consumed file descriptor that was never consumed.
+
 ## Problem Statement
 
 `niwa dispatch` launches a background worker in a fresh instance and takes
@@ -53,16 +61,17 @@ try, against text full of quotes, backslashes, and dollar signs that the
 shell will happily reinterpret.
 
 There is a workaround, and its shape shows the size of the gap. A developer
-who already knows it can write `niwa dispatch -d "$(cat)"`, paste, and press
+who already knows it can write `niwa dispatch "$(cat)"`, paste, and press
 Ctrl-D. That is what a developer does today and nothing this feature
 proposes to keep -- it is cited here as evidence of the gap, not as a
-candidate gesture. It takes three pieces of knowledge: the command
-substitution, the end-of-input key, and the fact that the detach flag is not
-optional here. None are discoverable from the command's help, and the last
-is a genuine surprise: the terminal attaches to the new session by default,
-but that path is closed once stdin has been spent feeding the prompt. So the
-developer who most wants to hand off a failure and watch the worker pick it
-up is exactly the developer the workaround drops back at a shell prompt.
+candidate gesture. It takes two pieces of knowledge, neither discoverable
+from the command's help: that a command substitution can stand in for the
+argument at all, and that the capture ends on an end-of-input key rather than
+on Enter. It also runs blind -- nothing echoes back what was captured, so the
+developer submits a prompt they have not seen. And it is fragile in a way
+that punishes the obvious variation: piping into it (`some-command | niwa
+dispatch "$(cat)"`) leaves standard input an exhausted pipe, so the default
+attach has nothing to read from and the flow only works with detachment added.
 
 The felt result is that dispatching gets reserved for work the developer can
 describe from memory, and the failures scrolling past in the terminal -- the

@@ -44,13 +44,12 @@ exact text is what the worker needs.
 Getting it into the argument means retyping it, summarizing it down to the
 developer's guess about the error rather than the error itself, or wrapping it
 in quoting that has to survive text full of quotes, backslashes, and dollar
-signs. A workaround exists -- `niwa dispatch -d "$(cat)"`, paste, Ctrl-D -- and
-its shape measures the gap: three pieces of knowledge, none discoverable from
-the command's help, and the last one a surprise, because `-d` is not optional
-there. The terminal attaches to the new session by default, but that path
-closes once stdin has been spent feeding the prompt. The developer who most
-wants to hand off a failure and watch a worker pick it up is exactly the one
-the workaround strands at a shell.
+signs. A workaround exists -- `niwa dispatch "$(cat)"`, paste, Ctrl-D -- and its
+shape measures the gap: two pieces of knowledge, neither discoverable from the
+command's help, and a capture that runs blind, since nothing echoes back what
+was taken before it is sent. Its obvious variation is worse: piping into the
+substitution leaves standard input an exhausted pipe, so the default attach has
+nothing to read and the flow only works once detachment is added.
 
 Two facts sharpen the timing. The command's prompt size cap is currently
 mis-set (issue #225): it sits exactly on Linux's per-argument `execve` limit
