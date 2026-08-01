@@ -113,31 +113,159 @@ type capture struct {
 	echoedOnLine int
 }
 
+// maxHeld bounds how long a byte run is withheld while it might still complete
+// a recognized sequence. A pasted log is full of escape bytes and none of them
+// should stall the reader.
+const maxHeld = 16
+
+type seqKind int
+
+const (
+	seqNone    seqKind = iota // definitely not a recognized sequence
+	seqPartial                // could still become one; keep holding
+	seqPasteStart
+	seqPasteEnd
+	seqNewline
+)
+
+// classify decides what a withheld escape run is.
+//
+// Inside a paste only the end marker is recognized: every other byte is payload,
+// including escape sequences that would mean something outside. A pasted log
+// carrying a modified-Enter encoding must arrive at the worker verbatim.
+func classify(s string, inPaste bool) seqKind {
+	if inPaste {
+		switch {
+		case s == pasteEnd:
+			return seqPasteEnd
+		case strings.HasPrefix(pasteEnd, s):
+			return seqPartial
+		}
+		return seqNone
+	}
+
+	switch {
+	case s == pasteStart:
+		return seqPasteStart
+	case s == pasteEnd:
+		return seqPasteEnd
+	case strings.HasPrefix(pasteStart, s) || strings.HasPrefix(pasteEnd, s):
+		return seqPartial
+	}
+
+	// Alt+Enter, and Esc-then-Enter, which are the same two bytes.
+	if s == "\x1b\r" || s == "\x1b\n" {
+		return seqNewline
+	}
+	if s == "\x1b" {
+		return seqPartial
+	}
+	return classifyCSIEnter(s)
+}
+
+// classifyCSIEnter recognizes a modified Enter reported by a terminal that has
+// been configured to distinguish it -- which is what Claude Code's terminal
+// setup does, so a developer who has run it will reach for Shift+Enter here.
+//
+// Two encodings are in use. The kitty keyboard protocol reports Enter as
+// CSI 13 ; <modifiers> u, and xterm's modifyOtherKeys reports it as
+// CSI 27 ; <modifiers> ; 13 ~. Any modifier combination counts: shift, alt,
+// control, super, and any mix of them all mean "newline, not submit". Bare
+// Enter arrives as a single carriage return and is not matched here, so it
+// still submits.
+//
+// These are recognized only if they arrive. Asking for them means emitting a
+// protocol-enable sequence, which is capability negotiation -- something this
+// capture deliberately does not do, and which would add a third piece of
+// terminal state to restore.
+func classifyCSIEnter(s string) seqKind {
+	const (
+		kitty  = "\x1b[13;"
+		xterm  = "\x1b[27;"
+		xtermK = "13~"
+	)
+	switch {
+	case strings.HasPrefix(kitty, s) || strings.HasPrefix(xterm, s):
+		return seqPartial
+
+	case strings.HasPrefix(s, kitty):
+		rest := s[len(kitty):]
+		if rest == "" {
+			return seqPartial
+		}
+		if d := strings.TrimRight(rest, "u"); allDigits(d) && d != "" {
+			if strings.HasSuffix(rest, "u") {
+				return seqNewline
+			}
+			return seqPartial
+		}
+		return seqNone
+
+	case strings.HasPrefix(s, xterm):
+		rest := s[len(xterm):]
+		mods, tail, split := strings.Cut(rest, ";")
+		if !split {
+			if allDigits(rest) {
+				return seqPartial
+			}
+			return seqNone
+		}
+		if !allDigits(mods) || mods == "" {
+			return seqNone
+		}
+		switch {
+		case tail == xtermK:
+			return seqNewline
+		case strings.HasPrefix(xtermK, tail):
+			return seqPartial
+		}
+		return seqNone
+	}
+	return seqNone
+}
+
+func allDigits(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
 // step consumes one byte. It reports done when the capture has an outcome.
 func (c *capture) step(b byte) (done bool, text string, err error) {
-	// Marker matching takes precedence over everything, because a marker byte
-	// is also a plausible payload byte and only its context decides.
+	// Sequence matching takes precedence, because every byte in a recognized
+	// sequence is also a plausible payload byte and only context decides.
 	if len(c.held) > 0 || b == 0x1b {
 		c.held = append(c.held, b)
 		s := string(c.held)
-		switch {
-		case s == pasteStart:
+
+		switch classify(s, c.inPaste) {
+		case seqPasteStart:
 			c.held = nil
 			c.inPaste = true
 			c.lastWasCR = false
 			c.pasteBuf = nil
 			c.pasteDenied = false
 			return false, "", nil
-		case s == pasteEnd:
+		case seqPasteEnd:
 			c.held = nil
 			c.closePaste()
 			return false, "", nil
-		case strings.HasPrefix(pasteStart, s) || strings.HasPrefix(pasteEnd, s):
+		case seqNewline:
+			c.held = nil
+			c.appendTyped('\n')
 			return false, "", nil
+		case seqPartial:
+			if len(c.held) < maxHeld {
+				return false, "", nil
+			}
+			// Too long to be anything we know; fall through and replay.
 		}
-		// Not a marker after all. Replay the held bytes as ordinary input and
-		// fall through to handle nothing further; the current byte is already
-		// among them.
+
+		// Not a recognized sequence. Replay the held bytes as ordinary input;
+		// the current byte is already among them.
 		held := c.held
 		c.held = nil
 		for _, hb := range held {

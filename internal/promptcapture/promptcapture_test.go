@@ -415,3 +415,77 @@ func TestTypedNewlineSubmitsBothLines(t *testing.T) {
 		t.Fatalf("got %q, want %q", got, "first\nsecond")
 	}
 }
+
+// A terminal configured to distinguish a modified Enter -- which is what Claude
+// Code's terminal setup does -- reports it as an escape sequence rather than a
+// carriage return. Every modifier combination means newline; bare Enter still
+// submits.
+//
+// Before this was handled, the sequence landed in the payload as literal escape
+// bytes and Alt+Enter submitted early leaving a stray escape behind, so a
+// developer with a configured terminal silently sent garbage to the worker.
+func TestModifiedEnterInsertsANewline(t *testing.T) {
+	for name, seq := range map[string]string{
+		"alt+enter":                   "\x1b\r",
+		"esc then ctrl-j":             "\x1b\n",
+		"kitty shift+enter":           "\x1b[13;2u",
+		"kitty ctrl+enter":            "\x1b[13;5u",
+		"kitty super+shift+enter":     "\x1b[13;10u",
+		"modifyOtherKeys shift+enter": "\x1b[27;2;13~",
+		"modifyOtherKeys ctrl+enter":  "\x1b[27;5;13~",
+	} {
+		t.Run(name, func(t *testing.T) {
+			got, err, _ := runAll(t, "one"+seq+"two\r", bigLimit)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != "one\ntwo" {
+				t.Fatalf("got %q, want %q -- %s must insert a newline, not submit or leak bytes", got, "one\ntwo", name)
+			}
+		})
+	}
+}
+
+// Bare Enter is a lone carriage return and must keep submitting.
+func TestBareEnterStillSubmits(t *testing.T) {
+	got, err, _ := runAll(t, "done\r", bigLimit)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "done" {
+		t.Fatalf("got %q, want %q", got, "done")
+	}
+}
+
+// Inside a paste every byte is payload, including sequences that would mean
+// something outside it. A pasted log carrying a modified-Enter encoding must
+// reach the worker verbatim.
+func TestModifiedEnterInsideAPasteStaysLiteral(t *testing.T) {
+	payload := "before\x1b[13;2uafter"
+	got, err, _ := runAll(t, paste(payload)+"\r", bigLimit)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != payload {
+		t.Fatalf("got %q, want the sequence preserved verbatim inside the paste", got)
+	}
+}
+
+// An escape run that is not a recognized sequence must not stall the reader or
+// vanish. A pasted log is full of them.
+func TestUnrecognizedEscapeRunsAreReplayedAsPayload(t *testing.T) {
+	for _, seq := range []string{
+		"\x1b[31m",       // an ordinary colour code
+		"\x1b[13;2x",     // kitty shape, wrong terminator
+		"\x1b[27;2;99~",  // modifyOtherKeys shape, not Enter
+		"\x1b]0;title\a", // an operating-system command
+	} {
+		got, err, _ := runAll(t, "a"+seq+"b\r", bigLimit)
+		if err != nil {
+			t.Fatalf("%q: unexpected error: %v", seq, err)
+		}
+		if got != "a"+seq+"b" {
+			t.Fatalf("%q: got %q, want the run preserved", seq, got)
+		}
+	}
+}
