@@ -71,9 +71,13 @@ returns.
 
 ## Decision Drivers
 
-- **Payload fidelity is non-negotiable.** The submitted bytes reach the worker
-  byte-for-byte. Any component that normalizes, replaces, or drops bytes on the
-  way through is disqualified regardless of its other merits.
+- **Payload fidelity is non-negotiable except where an exception is stated.** The
+  submitted bytes reach the worker byte-for-byte, apart from three exceptions the
+  requirements name: the instruction niwa prepends, the separator inserted at a
+  paste boundary, and line-break normalization inside a paste. A component that
+  normalizes, replaces, or drops any other byte is disqualified regardless of its
+  other merits -- and, decisively, a component that makes the exceptions
+  impossible to confine is disqualified too.
 - **The display is adversarial input.** A pasted log is untrusted with respect to
   the terminal: it can contain cursor movement, colour, and bytes that would
   otherwise kill or suspend the process.
@@ -222,16 +226,59 @@ has no business re-deriving it.
 
 ### Data flow
 
-Bytes arrive from standard input in chunks. The loop maintains two pieces of
-cross-chunk state: a held-back prefix, when a chunk ends partway through what may
-be a paste marker, and a carriage-return flag, so that a `0x0D` at the end of one
-chunk and a `0x0A` at the start of the next collapse to a single newline. Inside
-a paste block bytes append to the payload untouched. Outside it, bytes route
-through the gesture table.
+Bytes arrive from standard input in chunks. The loop maintains **three** pieces
+of state that survive a read boundary, and all three are where the implementation
+risk lives:
+
+- **A held-back prefix**, when a chunk ends partway through what may be a paste
+  marker. The bytes are not appended until the loop knows whether they complete a
+  marker or are payload.
+- **A carriage-return flag**, so a `0x0D` ending one chunk and a `0x0A` opening
+  the next collapse to one line feed rather than two breaks.
+- **A pending line break**, set when a pasted block ends on an unterminated line
+  and flushed immediately before the next byte is appended. Setting it at the
+  end-of-paste marker unconditionally would give a bare paste a trailing newline
+  it never had; deferring it is what makes R5's separator appear only when typed
+  text actually follows.
+
+Inside a paste block, line-break bytes are normalized per R41 -- a lone carriage
+return and a carriage-return line-feed pair each become one line feed -- and every
+other byte appends untouched. Outside a paste block, bytes route through the
+gesture table.
+
+R41 is a deliberate, stated exception to byte-for-byte fidelity, and it is the
+one place the design alters pasted bytes. Terminals differ in which byte they
+deliver for a pasted line break; Terminal.app sends carriage returns. Preserving
+them exactly would hand the worker a stack trace whose lines are separated by
+carriage returns, which renders as a single overwritten line and defeats the
+purpose of carrying the error verbatim. The alternative -- normalizing at the
+worker instead -- was rejected because it would put terminal-specific knowledge
+in a component that has never needed it.
 
 Two outputs leave the loop and never mix: the payload buffer, which grows and
 truncates only at its end, and the transcript, which appends bounded neutralized
 records to standard error.
+
+### The size ceiling in the loop
+
+Crossing the ceiling is loop state, never an outcome, which is how a core with a
+single return value satisfies a refusal that leaves the capture open. When an
+append would take the buffer past `limit`, the loop appends nothing, emits a
+refusal record to the transcript naming the buffer's size and the limit in bytes
+and directing the developer to write the text to a file and dispatch a prompt
+referencing that path, and continues reading. A buffer over the ceiling marks the
+capture unsubmittable: the submit gesture re-emits the refusal instead of
+returning. Deletion clears the mark once the buffer fits.
+
+Retention is bounded. The buffer holds up to a small multiple of the ceiling so
+the developer can delete down to a submittable size; input beyond that cap is
+refused without being retained, so a pathological paste cannot grow the process
+until it is killed with the terminal still raw.
+
+Whitespace-only input is refused at submit with the command's existing
+empty-prompt error. The existing check runs before the capture and compares
+against the empty string, so it does not cover this; the capture path validates
+its own result.
 
 ### Neutralization rule
 
@@ -292,20 +339,45 @@ The interactivity gate requires both standard input and standard error to be
 terminals. It is evaluated only in the zero-argument branch, so the
 positional-argument path never consults terminal state.
 
+### The size ceiling outside the loop
+
+The upstream dependency is live: the corrected cap has not landed, so this work
+establishes it, as the requirements provide for. Three pieces are needed and only
+the first is inside the capture.
+
+The ceiling is derived rather than chosen -- the largest single argument the
+operating system accepts, minus a reserve equal to everything niwa may prepend
+after validation -- and it is one value on every supported platform, since the
+tighter platform's limit is safe on the other.
+
+Validation runs before any instance is created, against both the captured text
+and a positional argument, so a rejected prompt never leaves an instance to
+reclaim.
+
+A second check runs immediately before the worker process starts, against the
+final argument string. This is not redundant. The keep-alive instruction is
+prepended after validation, and whether it arms depends on settings that do not
+exist until the instance has been provisioned. Reserving its length up front
+makes the early check sound; the late check is what turns a future prepend that
+forgets to declare itself into a failure naming niwa's own limit rather than an
+opaque operating-system exec error after an instance already exists.
+
 ## Implementation Approach
 
 1. **Harness prerequisites.** Add the chunked feed, the held-open-pipe step,
    bounded timeouts on any step supplying standard input, and a signal-sending
    step. Without the chunked feed the terminal-driven scenarios fail on a harness
    defect rather than on the code.
-2. **The capture core.** The reader loop and its cross-chunk state, driven by
-   injected reader and writer, with the neutralizer. Tested at chunk size one,
-   which is where the marker-splitting and carriage-return-flag bugs live.
+2. **The capture core.** The reader loop and its three pieces of cross-chunk
+   state, the ceiling refusal and its message, deletion, and the neutralizer,
+   driven by injected reader and writer. Tested at chunk size one, which is where
+   the marker-splitting, carriage-return and pending-break bugs live.
 3. **Terminal lifecycle.** Raw mode, paste mode, the signal set, and the
    suspend/resume sequence.
 4. **Command wiring.** The arity change, the interactivity gate and its new
-   standard-error seam, the capture seam, and the ceiling enforcement on the
-   capture path.
+   standard-error seam, the capture seam, the derived ceiling and its reserve,
+   validation before provisioning on both paths, and the re-check immediately
+   before the worker starts.
 5. **Reachability guard.** The test that drives the launcher path used by
    `niwa watch` with the capture seam stubbed to fail on call.
 6. **Documentation.** Usage and long help, the README, and the degradation on

@@ -240,9 +240,17 @@ into a reachable one.
   without truncation and without hanging.
 - **R10.** The bytes the developer submitted SHALL appear byte-for-byte in the
   worker's argv, in the same single argv element the positional path produces,
-  subject only to the prepend accounted for in R14 and the single line feed R5
-  may insert at a paste boundary. No other trimming, normalization, or
-  re-encoding SHALL be applied.
+  subject only to three stated exceptions: the prepend accounted for in R14, the
+  single line feed R5 may insert at a paste boundary, and the line-break
+  normalization required by R41. No other trimming, normalization, or re-encoding
+  SHALL be applied.
+- **R41.** Line breaks inside a pasted block SHALL be normalized to a single line
+  feed: a lone carriage return, and a carriage return followed by a line feed,
+  each become one line feed. This is required because terminals differ in which
+  byte they deliver for a pasted line break, and a prompt whose lines are
+  separated by carriage returns reaches the worker as one unreadable line --
+  defeating the purpose of carrying the error verbatim. No other byte inside a
+  pasted block SHALL be altered.
 
 ### Non-interactive and degraded terminals
 
@@ -336,6 +344,9 @@ whose harness can make it fail.
       text becomes the launcher's final argv element (R1, R10).
 - [ ] A submitted payload containing quotes, backslashes, and dollar signs
       arrives byte-for-byte as one argv element (R10).
+- [ ] A pasted block whose line breaks are carriage returns, and one whose line
+      breaks are carriage-return line-feed pairs, each arrive with single line
+      feeds; every other byte in the block is unaltered (R41).
 - [ ] Over the four combinations of (stdin is a terminal, stderr is a terminal),
       the capture runs only when both are true; the other three refuse without
       reading, and the refusal names the positional-argument form (R20, R21).
