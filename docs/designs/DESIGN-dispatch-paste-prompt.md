@@ -262,18 +262,34 @@ records to standard error.
 ### The size ceiling in the loop
 
 Crossing the ceiling is loop state, never an outcome, which is how a core with a
-single return value satisfies a refusal that leaves the capture open. When an
-append would take the buffer past `limit`, the loop appends nothing, emits a
-refusal record to the transcript naming the buffer's size and the limit in bytes
-and directing the developer to write the text to a file and dispatch a prompt
-referencing that path, and continues reading. A buffer over the ceiling marks the
-capture unsubmittable: the submit gesture re-emits the refusal instead of
-returning. Deletion clears the mark once the buffer fits.
+single return value satisfies a refusal that leaves the capture open.
 
-Retention is bounded. The buffer holds up to a small multiple of the ceiling so
-the developer can delete down to a submittable size; input beyond that cap is
-refused without being retained, so a pathological paste cannot grow the process
-until it is killed with the terminal still raw.
+The order matters and is the opposite of the obvious one. The input **is
+appended**, and then the buffer is checked: if it now exceeds `limit`, the loop
+sets an over-ceiling mark and emits a refusal record to the transcript naming the
+buffer's actual size and the limit in bytes, and directing the developer to write
+the text to a file and dispatch a prompt referencing that path. Reading
+continues. The mark makes the capture unsubmittable -- the submit gesture
+re-emits the refusal instead of returning -- and deletion clears it once the
+buffer fits. Appending nothing would be simpler and wrong: the buffer could never
+be over the ceiling, so the mark could never be set, the deletion path would be
+unreachable, and the message could not name a size larger than the limit. It
+would also lose exactly what the requirement exists to save.
+
+Retention is bounded, and the bound narrows the delete-down promise honestly. The
+buffer holds up to a stated multiple of the ceiling. An append that would take it
+beyond that bound is refused **in full** -- the buffer is left untouched, nothing
+partial is kept -- and the refusal says the input was not retained. Keeping a
+prefix instead would be worse than keeping nothing, because a truncated log looks
+complete.
+
+This case is not the edge; it is the common one. A full continuous-integration
+log measures several times the ceiling, so it exceeds any reasonable retention
+bound in a single append from an empty buffer. Deleting by hand down from several
+times the ceiling is not a recovery a developer would attempt, so for input that
+far over the real remedy is the message's file-and-reference guidance, and the
+developer's clipboard still holds the original. The delete-down path serves the
+case it can actually serve: a buffer modestly over the limit.
 
 Whitespace-only input is refused at submit with the command's existing
 empty-prompt error. The existing check runs before the capture and compares
@@ -421,8 +437,10 @@ are covered rather than assumed.
 **Retention above the ceiling is bounded.** The oversized refusal keeps the whole
 buffer so the developer can delete down to a submittable size, which without a
 bound would let a pathological paste grow until the process is killed -- leaving
-the terminal raw, since no handler runs. Retention is capped at a small multiple
-of the ceiling; input beyond that cap is refused outright rather than held.
+the terminal raw, since no handler runs. Retention is capped at a stated multiple
+of the ceiling; an append that would exceed the cap is refused in full and
+retained not at all, rather than truncated, so a partial log is never mistaken
+for a whole one.
 
 **A forged paste-end marker submits early.** A pasted payload containing the
 end-of-paste byte sequence ends the block from the reader's point of view, so the

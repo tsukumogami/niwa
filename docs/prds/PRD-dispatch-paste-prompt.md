@@ -231,6 +231,14 @@ into a reachable one.
   entire buffer including the input that crossed the ceiling, so the developer
   can delete down to a submittable size (R36) rather than lose what they pasted.
   A buffer above the ceiling SHALL NOT be submittable.
+- **R42.** Retention under R17 SHALL be bounded. An append that would take the
+  buffer beyond a stated retention bound SHALL be refused in full and retained
+  not at all, and the refusal SHALL say so, because a partially retained paste is
+  worse than none: it looks complete and is not. The bound SHALL be a stated
+  multiple of the ceiling, and it narrows R17 deliberately -- deleting by hand
+  down from several times the ceiling is not a recovery path a developer would
+  use, so for input that far over, the refusal message's file-and-reference
+  guidance (R18) is the real remedy and the clipboard still holds the original.
 - **R18.** The refusal message SHALL state the size of the input and the limit,
   both in bytes, and SHALL direct the developer to write the text to a file and
   dispatch a prompt referencing that path. It SHALL NOT instruct the developer
@@ -315,9 +323,12 @@ whose harness can make it fail.
       successful submit (R8).
 - [ ] Deleting entered text reduces the buffer, and a buffer reduced from above
       the ceiling to below it becomes submittable (R36, R17).
-- [ ] Typing A, then pasting B where A+B crosses the ceiling: the refusal fires,
-      the buffer still contains A and B, and a submit attempt is refused until
-      the buffer is reduced (R17).
+- [ ] Typing A, then pasting B where A+B crosses the ceiling but stays within the
+      retention bound: the refusal fires, the buffer still contains A and B, and a
+      submit attempt is refused until the buffer is reduced (R17).
+- [ ] An append that would take the buffer past the retention bound is refused in
+      full, the buffer is unchanged, and the refusal says the input was not
+      retained (R42).
 - [ ] The refusal message contains both byte counts and directs the developer to
       a file-and-reference approach; it does not contain "shorten" (R18).
 - [ ] Submitted text containing terminal control sequences is returned
