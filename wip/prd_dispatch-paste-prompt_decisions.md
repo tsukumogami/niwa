@@ -71,6 +71,34 @@ Trade-offs section, which is the closure surface for the BRIEF's open questions.
     restoration. Each is a hang risk, so the count stays small and the PTY step
     gains a timeout.
 
+## Round-2 jury findings
+
+14. **Echo cost is superlinear on a single long line, and it is an
+    implementation property rather than an inherent one.** The Phase 2 probe
+    measured a 20,000-byte single line failing to complete in 20 seconds while
+    12,000 completed, and attributed it to `x/term`'s per-character echo. The
+    same probe round-tripped a 205 KB *multi-line* payload in 2.07 seconds, so
+    the hazard is line length, not total size -- which matters, because a pasted
+    log is many short lines and is the case the feature serves. The
+    bracketed-paste research independently warned against that same library path
+    for exactly this reason and recommended a reader that echoes a compact
+    placeholder rather than replaying the payload. The PRD response is therefore
+    a responsiveness requirement that constrains DESIGN away from the slow path,
+    plus a Known Limitation recording the measurement against the specific
+    library path, rather than lowering the ceiling to match one implementation's
+    weakness.
+
+15. **Rendering of captured input was never required.** The Problem Statement
+    names the workaround's blindness as a defect, and R30 presupposed a render
+    ("rendering MAY sanitize") that no requirement mandated. An implementation
+    that read without echoing satisfied every requirement while reproducing the
+    defect. Adding it as a requirement.
+
+16. **A refusal that retains text needs a way to remove text.** R17 promised the
+    developer could reduce their input, and nothing in the document gave the
+    capture any means of deletion. The capability is a requirement; the gesture
+    stays DESIGN's.
+
 ## Remaining unknowns carried into the PRD
 
 - Whether a macOS-failing PTY scenario is acceptable (CI is ubuntu-only; the

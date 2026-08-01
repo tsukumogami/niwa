@@ -12,9 +12,10 @@ goals: |
   Running `niwa dispatch` with no prompt opens an interactive capture in the
   terminal the developer is already in. Pasting a failure and sending it takes
   one gesture, whether or not the developer adds context of their own, and
-  lands them attached to a session already working on it. The capture states
-  its size limit while the input is still recoverable, restores the terminal on
-  every exit path, and never blocks a scripted or hooked invocation.
+  lands them attached to a session already working on it. The capture shows
+  what it has taken, states its size limit while the input is still
+  recoverable, restores the terminal on every exit path, and never blocks a
+  scripted or hooked invocation.
 upstream: docs/briefs/BRIEF-dispatch-paste-prompt.md
 motivating_context: |
   The recurring pattern is that the material most worth handing to a worker --
@@ -32,11 +33,13 @@ the Accepted BRIEF. The Decisions and Trade-offs section closes the four
 questions that BRIEF deferred. DESIGN owns the capture mechanism, the submit
 and newline gestures, where the reader lives, and how cancellation is signalled.
 
-Revised after a three-reviewer jury returned all-FAIL. The revision closes four
-requirements that had no acceptance criterion, retags eight criteria that
-claimed requirements they did not exercise, replaces four criteria that could
-not fail regardless of implementation, and defines five behaviors an
-implementer would otherwise have had to invent.
+Revised twice after jury rounds returned all-FAIL. Requirement numbers R24 and
+the original R2/R25 split are retired rather than reused, so the numbering stays
+auditable against those rounds. The second revision resolves a contradiction
+between the oversized refusal and the exit-path enumeration, states three
+behaviors that had been assumed rather than required (rendering of captured
+input, deletion of entered text, responsiveness), and rewrites six criteria that
+a violating implementation could have passed.
 
 ## Problem Statement
 
@@ -71,6 +74,7 @@ into a reachable one.
   file, or getting shell quoting right.
 - The bare paste and the annotated paste use the same gesture, with no mode to
   choose and no decision required before starting.
+- The developer sees what has been captured before it is sent.
 - The developer stays attached to the session they just started, as they would
   with a prompt passed as an argument.
 - Oversized input is refused while it is still recoverable, with a message that
@@ -88,13 +92,16 @@ into a reachable one.
   already know alongside the pasted log, so that the worker does not re-derive
   paths I have eliminated.
 - As a developer triaging a failure I cannot localize, I want to be told my
-  paste is too large while my input is still on screen, so that I can send a
-  smaller slice instead of losing it.
+  paste is too large while my input is still on screen and removable, so that I
+  can cut it down and send a slice instead of starting over.
 - As a developer who changes their mind mid-capture, I want to back out and
   find my terminal working normally, so that the next command behaves.
 - As a developer who opens the capture and then realizes I have nothing to
   paste, I want submitting nothing to end the command cleanly rather than
   dispatch an empty task.
+- As an author of a hook that runs `niwa dispatch` with no prompt by mistake, I
+  want the command to fail immediately rather than wait forever on input that
+  will never arrive, so that a scheduled job fails visibly instead of hanging.
 - As an operator whose cron job calls `niwa dispatch` with a prompt argument, I
   want that path to behave exactly as it does today, so that nothing I have
   automated starts waiting on input.
@@ -102,11 +109,18 @@ into a reachable one.
 ## Dependencies
 
 - **D1.** This PRD's size requirements are stated over the baseline established
-  by issue #225, which corrects the prompt cap and adds a launcher backstop.
-  R14's derivation names terms introduced there. If that work does not land
-  first, this feature must carry the same correction, because interactive
+  by issue #225, which corrects the prompt cap and adds a check immediately
+  before exec. R14's derivation names terms introduced there. Interactive
   capture removes the outer guard that currently makes the defect nearly
-  unreachable. Shipping capture on the uncorrected cap is not an option.
+  unreachable, so shipping capture on the uncorrected cap is not an option. If
+  #225 has not landed when this work starts, R34 states what this work must
+  carry instead.
+- **R34.** If the #225 baseline is absent, this work SHALL itself establish it:
+  the prompt SHALL be validated against R14's derived ceiling before any
+  instance is created, and the final argument SHALL be re-checked immediately
+  before the worker process is started, so that a prepend which fails to declare
+  itself in the reserve is reported against niwa's own named limit rather than
+  surfacing as an operating-system exec failure after provisioning.
 
 ## Requirements
 
@@ -115,9 +129,7 @@ into a reachable one.
 - **R1.** `niwa dispatch` invoked with no positional argument on an interactive
   session SHALL open a prompt that captures multiline text.
 - **R2.** `niwa dispatch` invoked with one positional argument SHALL NOT consult
-  the terminal state and SHALL NOT open a capture. (The preservation guarantee
-  for that path is R25; this requirement states only that capture is not
-  reachable from it.)
+  the terminal state and SHALL NOT open a capture.
 - **R3.** The argument contract SHALL accept zero or one positional argument.
   Two or more SHALL remain an error naming the expected form, so a developer who
   forgot to quote a multi-word prompt gets a diagnostic rather than a capture.
@@ -131,16 +143,27 @@ into a reachable one.
 
 ### Capture behavior
 
-- **R4.** Multiline input SHALL be captured whole. An embedded newline SHALL NOT
-  terminate the capture, submit the input, or truncate it, regardless of whether
-  the terminal delimits pasted blocks. This is unconditional; it is not scoped to
-  terminals with paste-boundary support.
+- **R4.** Multiline input SHALL be captured whole. A line break SHALL NOT
+  terminate the capture, submit the input, or truncate it, whether it arrives as
+  a carriage return, a line feed, or both, and whether or not the terminal
+  delimits pasted blocks.
+- **R35.** Input accepted so far SHALL be rendered as it is entered, so the
+  developer can see what will be sent before sending it.
+- **R30.** Text the developer submits SHALL be preserved exactly in the prompt,
+  including any terminal control sequences it contains. The rendering required
+  by R35 SHALL neutralize control sequences so that pasted content cannot alter
+  the display. What is rendered SHALL NOT determine what is sent.
+- **R36.** The capture SHALL allow the developer to remove text they have
+  entered. The gesture is DESIGN's; the capability is required, because R17's
+  refusal promises the developer can reduce their input.
 - **R5.** The developer SHALL be able to type text alongside pasted text and
   send both together, using the same submit gesture as a bare paste. No flag,
-  mode, or prior decision SHALL be required to reach either case. The submitted
-  text SHALL preserve the boundary between pasted and typed content: typed text
-  SHALL NOT be joined onto the final line of a pasted block that did not end in
-  a newline.
+  mode, or prior decision SHALL be required to reach either case. On terminals
+  that delimit pasted blocks, the end of a pasted block SHALL be treated as a
+  line boundary: if the block's final line was unterminated, exactly one line
+  feed SHALL be inserted before subsequent typed text. On terminals that do not
+  delimit pasted blocks this is not detectable and the developer supplies the
+  break themselves via R6.
 - **R6.** The capture SHALL provide a means of entering a newline manually,
   distinct from the submit gesture.
 - **R28.** End-of-input on a non-empty buffer SHALL submit the accumulated text,
@@ -148,10 +171,10 @@ into a reachable one.
   command without dispatching.
 - **R29.** Submitting an empty or whitespace-only capture SHALL fail with the
   existing empty-prompt error rather than dispatching.
-- **R30.** Text the developer submits SHALL be preserved exactly in the prompt,
-  including any terminal control sequences it contains. Rendering of the capture
-  MAY sanitize control sequences for display; the two SHALL be independent, so
-  what is rendered never determines what is sent.
+- **R37.** Input up to the R14 ceiling SHALL be accepted without perceptible
+  stall, including when it arrives as a single line. Accepting a payload the
+  ceiling admits SHALL NOT take materially longer than accepting the same number
+  of bytes spread across many lines.
 
 ### Cancellation, exit paths, and terminal state
 
@@ -160,12 +183,23 @@ into a reachable one.
 - **R8.** Abandonment SHALL be distinguishable from end-of-input in the captured
   result, so the command reports a cancelled capture rather than dispatching or
   reporting an empty prompt.
-- **R9.** On every exit path -- submit, abandonment (however signalled), the
-  empty and oversized refusals, and receipt of SIGTERM or SIGHUP -- the
-  terminal's mode SHALL be restored to its state before the capture began.
-- **R31.** The non-TTY refusal (R20), the oversized refusal (R17), the
-  empty-capture refusal (R29), and abandonment SHALL each exit non-zero with the
-  command's ordinary error exit status. No new exit code is introduced.
+- **R9.** On every path that ends the command -- submit, abandonment, the
+  empty-capture refusal, and receipt of SIGINT, SIGTERM, or SIGHUP -- the
+  terminal's mode SHALL be restored to its state before the capture began. The
+  oversized refusal is not on this list because it does not end the command
+  (R17).
+- **R38.** If the capture is suspended and resumed, the terminal's mode SHALL be
+  re-established on resume, so a suspended capture does not leave the terminal
+  altered for a foregrounded shell.
+- **R39.** Receipt of SIGINT during a capture SHALL restore the terminal and
+  abandon cleanly, satisfying R7 and R9. Whether the interrupt reaches the
+  process as a signal or as an input byte follows from DESIGN's terminal-mode
+  choice; the observable outcome does not.
+- **R31.** The non-TTY refusal (R20), the empty-capture refusal (R29), and
+  abandonment SHALL each exit non-zero with the command's ordinary error exit
+  status. No new exit code is introduced. The oversized refusal has no exit
+  status of its own, because the developer's next action determines how the
+  command ends.
 
 ### Reachability
 
@@ -177,36 +211,39 @@ into a reachable one.
 
 - **R14.** The prompt size ceiling SHALL be `maxArgStringBytes -
   dispatchPromptReserve`, where `maxArgStringBytes` is the largest single argv
-  string `execve` accepts on the tightest supported platform and
+  string the operating system accepts on the tightest supported platform and
   `dispatchPromptReserve` is the length of everything niwa may prepend to the
   prompt after validation. It SHALL be expressed as that derivation, not as a
   literal, so a change to either term visibly moves it. On the current baseline
-  this evaluates to 130,433 bytes (roughly 127 KB).
+  it evaluates to 130,433 bytes (roughly 127 KB).
 - **R15.** A single ceiling SHALL apply on every supported platform. No
   platform-conditional definition SHALL exist.
 - **R16.** The ceiling SHALL be enforced against text captured interactively,
-  not only against a positional argument.
+  not only against a positional argument, and the reserve SHALL be subtracted on
+  both paths.
 - **R17.** Input SHALL be refused at the moment it crosses the ceiling, before
   any instance is created. The capture SHALL remain open and SHALL retain the
-  text already entered, so the developer can reduce it rather than lose it.
+  entire buffer including the input that crossed the ceiling, so the developer
+  can delete down to a submittable size (R36) rather than lose what they pasted.
+  A buffer above the ceiling SHALL NOT be submittable.
 - **R18.** The refusal message SHALL state the size of the input and the limit,
   both in bytes, and SHALL direct the developer to write the text to a file and
   dispatch a prompt referencing that path. It SHALL NOT instruct the developer
   to shorten or re-select the text.
-- **R19.** The capture SHALL disable canonical-mode line buffering before its
-  first read, so no per-line length limit applies to input. A single line longer
-  than the terminal's line-discipline buffer reaches this limit well before it
-  reaches R14's ceiling.
+- **R19.** No per-line length limit SHALL apply to captured input. A single line
+  longer than the terminal's line-discipline buffer SHALL be captured intact,
+  without truncation and without hanging.
 - **R10.** The bytes the developer submitted SHALL appear byte-for-byte in the
   worker's argv, in the same single argv element the positional path produces,
-  subject only to the prepend accounted for in R14. No trimming, normalization,
-  or re-encoding SHALL be applied to the submitted bytes.
+  subject only to the prepend accounted for in R14 and the single line feed R5
+  may insert at a paste boundary. No other trimming, normalization, or
+  re-encoding SHALL be applied.
 
 ### Non-interactive and degraded terminals
 
 - **R20.** When no positional argument is supplied and the session is not
   interactive, the command SHALL fail immediately with a message naming the
-  argument form that works, and SHALL NOT read from standard input.
+  positional-argument form that works, and SHALL NOT read from standard input.
 - **R21.** The interactivity test SHALL require both standard input and standard
   error to be terminals, since the capture reads the former and renders to the
   latter while standard output carries the command's existing session hints.
@@ -214,9 +251,10 @@ into a reachable one.
   capture's behavior beyond R21's gate.
 - **R23.** The command SHALL NOT probe the terminal for capability, and SHALL
   NOT warn about a missing capability.
-- **R27.** The capture SHALL render a visible indication that the command is
-  waiting for input before its first read, so a promptless invocation from a
-  script that inherits a terminal is visibly stalled rather than silently so.
+- **R27.** Before its first read the capture SHALL render human-readable text
+  indicating that the command is waiting for input, so a promptless invocation
+  from a script that inherits a terminal is visibly stalled rather than silently
+  so. Control sequences alone do not satisfy this.
 
 ### Preservation
 
@@ -232,54 +270,67 @@ into a reachable one.
 - **R32.** Documentation stating or implying that the prompt argument is
   mandatory SHALL be updated: the command's own usage and long help, and the
   repository README.
-- **R33.** The functional-test harness SHALL gain a bounded timeout on its
-  terminal-driven step, so a scenario that fails to terminate fails as a step
-  rather than exhausting the suite's global deadline.
+- **R33.** Every functional-test step that hands the binary a standard input the
+  step does not control SHALL carry a bounded timeout, so a scenario that fails
+  to terminate fails as a step rather than exhausting the suite's global
+  deadline. This covers both the terminal-driven step and the held-open-pipe
+  step R20's criterion requires.
 
 ## Acceptance Criteria
 
-Each criterion names the requirements it verifies. Criteria are filed at the
-level whose harness can actually make them fail.
+Each criterion names the requirements it verifies, and is filed at the level
+whose harness can make it fail.
 
 ### Unit tests over an injectable capture core
 
+- [ ] A paste whose line breaks are line feeds does not return after the first
+      line; the same paste with carriage-return breaks also does not (R4).
 - [ ] Input arriving across multiple reads, split at an arbitrary boundary, is
       captured whole (R4).
-- [ ] Input containing embedded newlines and no paste delimiters does not return
-      after the first line (R4, R23).
 - [ ] One submit gesture returns the captured text for a bare paste (R4).
-- [ ] One submit gesture returns paste plus typed text, with the boundary
-      preserved and the typed text not joined onto an unterminated final pasted
-      line (R5).
+- [ ] For a delimited paste ending mid-line followed by typed text, the returned
+      string equals the pasted bytes, one line feed, then the typed bytes --
+      compared exactly (R5).
 - [ ] The manual-newline gesture inserts a newline and does not submit (R6).
+- [ ] Input accepted so far appears on the render target as it is entered (R35).
 - [ ] End-of-input on a non-empty buffer returns the accumulated text; on an
       empty buffer it returns the end-of-input outcome (R28).
 - [ ] Abandonment returns a sentinel distinct from both end-of-input and a
       successful submit (R8).
-- [ ] Input at exactly the ceiling is accepted; one byte over is refused (R14).
-- [ ] The reserve counts against the ceiling: text that would fit only without
-      the prepend is refused (R14, R16).
-- [ ] After a refusal the capture is still accepting input and the previously
-      entered text is retained (R17).
+- [ ] Deleting entered text reduces the buffer, and a buffer reduced from above
+      the ceiling to below it becomes submittable (R36, R17).
+- [ ] Typing A, then pasting B where A+B crosses the ceiling: the refusal fires,
+      the buffer still contains A and B, and a submit attempt is refused until
+      the buffer is reduced (R17).
 - [ ] The refusal message contains both byte counts and directs the developer to
       a file-and-reference approach; it does not contain "shorten" (R18).
 - [ ] Submitted text containing terminal control sequences is returned
-      unmodified, while the bytes written to the render target are sanitized
-      (R30).
+      unmodified, while the bytes written to the render target contain no
+      executable control sequence from the input (R30).
 - [ ] Nothing written to the render target is a capability query sequence, and no
       capability warning text is emitted (R23).
-- [ ] A visible waiting indication is written to the render target before the
-      first read (R27).
+- [ ] The bytes written before the first read contain non-empty human-readable
+      text once escape sequences are stripped (R27).
+- [ ] A single line of 130,433 bytes is accepted, and accepting it takes no more
+      than a small constant multiple of the time taken to accept the same byte
+      count split across many lines (R19, R37).
 
 ### Command-level unit tests over a capture seam
 
+- [ ] The ceiling constant equals 130,433 on the current baseline, stated
+      independently of the implementation's own derivation (R14, R15).
+- [ ] A prompt one byte over the ceiling is refused and a prompt at the ceiling
+      is accepted (R14).
+- [ ] A prompt sized between the ceiling and the ceiling plus the reserve is
+      refused before provisioning, on both the capture path and the argument
+      path (R16, R26, R34).
 - [ ] With no argument and an interactive session, the capture is invoked and its
       text becomes the launcher's final argv element (R1, R10).
 - [ ] A submitted payload containing quotes, backslashes, and dollar signs
       arrives byte-for-byte as one argv element (R10).
 - [ ] Over the four combinations of (stdin is a terminal, stderr is a terminal),
       the capture runs only when both are true; the other three refuse without
-      reading (R20, R21).
+      reading, and the refusal names the positional-argument form (R20, R21).
 - [ ] With both terminal checks true and a non-terminal standard output, the
       capture still runs and its rendering goes to the error stream (R22).
 - [ ] With a positional argument, the capture seam is never invoked and the
@@ -294,10 +345,10 @@ level whose harness can actually make them fail.
       the attach path runs (R13).
 - [ ] Driving the launcher path used by `niwa watch` with the capture seam
       stubbed to fail on call never invokes the stub (R11).
-- [ ] The non-TTY refusal, the oversized refusal, the empty refusal, and
-      abandonment each return a non-zero status (R31).
+- [ ] The non-TTY refusal, the empty refusal, and abandonment each return a
+      non-zero status (R31).
 - [ ] On the positional path, exit codes, messages, and argv construction match
-      the pre-change baseline (R25).
+      goldens recorded from the issue #225 baseline before this change (R25).
 
 ### `@critical` functional scenarios
 
@@ -305,10 +356,18 @@ level whose harness can actually make them fail.
       contains the pasted text verbatim (R1, R4, R10).
 - [ ] `niwa dispatch` with no argument and standard input attached to a pipe that
       is never written to and never closed exits within a bounded time rather
-      than blocking (R20).
+      than blocking (R20, R33).
 - [ ] The terminal's mode after an abandoned capture matches its mode before
       (R9).
 - [ ] The terminal's mode after a normal submit matches its mode before (R9).
+- [ ] The terminal's mode after the capture receives SIGTERM matches its mode
+      before; likewise for SIGHUP (R9).
+- [ ] The terminal's mode after an interrupt during capture matches its mode
+      before, and no instance is created (R39, R7).
+- [ ] The terminal's mode after the capture is suspended and resumed matches its
+      mode before (R38).
+- [ ] The terminal's mode after an empty-capture refusal matches its mode before
+      (R9).
 - [ ] An oversized paste followed by abandonment exits non-zero and leaves no
       instance (R17, R26).
 - [ ] A single line longer than the line-discipline buffer, fed after the capture
@@ -316,24 +375,21 @@ level whose harness can actually make them fail.
 
 ### Verified by inspection
 
-- [ ] The ceiling is a single derivation with no platform-conditional definition
-      (R15).
 - [ ] No documentation states or implies that the prompt argument is mandatory:
       the command's usage string, its long help, and the README all describe the
       argument as optional (R32).
-- [ ] The terminal-driven functional step carries a bounded timeout, so a
-      non-terminating scenario fails as a step (R33).
-- [ ] Terminal restoration covers SIGTERM and SIGHUP. Keyboard interrupt is not
-      covered by a signal test because a capture in raw mode receives it as an
-      input byte rather than as a signal; it is covered by the abandonment
-      criterion instead (R9).
+- [ ] Every functional step that supplies the binary a standard input it does not
+      control carries a bounded timeout (R33).
 
 ### Verified manually before release
 
-- [ ] Capture works inside a terminal multiplexer.
-- [ ] A large paste renders without visible corruption.
-- [ ] Capture behaves correctly in each terminal named in the supported set (see
-      Open Questions).
+Against each of GNOME Terminal, Terminal.app, iTerm2, and Ghostty, and inside
+tmux:
+
+- [ ] A multiline paste is captured whole and is not truncated at its first line
+      (R4, R23).
+- [ ] A large paste renders without visible corruption (R35, R37).
+- [ ] The capture is visibly waiting before any input is given (R27).
 
 ## Decisions and Trade-offs
 
@@ -363,6 +419,17 @@ ordinary prompt text pointing at a file, not the `--prompt-file` flag the BRIEF
 excluded, so it survives the scope boundary -- and it is what the dispatch skill
 already tells agents to do with large context.
 
+### The oversized refusal is not an exit
+
+An earlier revision listed the oversized refusal both as a state the capture
+survives and as a path that ends the command, which cannot both be true. R17
+settles it: crossing the ceiling refuses the input and leaves the capture open,
+holding the whole buffer, including the text that crossed. The developer deletes
+down to a submittable size (R36) or abandons. Discarding the overflowing paste
+instead would satisfy the letter of "retain the text already entered" while
+losing exactly what the requirement exists to save, since in the central case
+the paste is the entire input.
+
 ### A non-interactive session refuses; a limited terminal degrades
 
 The BRIEF asked what happens when the terminal cannot carry the capture. These
@@ -381,9 +448,11 @@ When the session is interactive but the terminal lacks paste-boundary support,
 there is nothing honest to say: enabling the capability is a silent no-op and
 the resulting state is indistinguishable from ordinary typing. So the command
 does not probe and does not warn (R23). The guarantee that survives is stated
-unconditionally in R4 -- multiline input is never truncated at an embedded
-newline, on any terminal -- rather than as a promise conditioned on a fact the
-implementation is forbidden to learn.
+unconditionally in R4 -- multiline input is never truncated at a line break, on
+any terminal, whichever byte carries it -- rather than as a promise conditioned
+on a fact the implementation is forbidden to learn. The one behavior that
+genuinely does depend on paste boundaries is the separator R5 inserts, which is
+therefore scoped to terminals that provide them.
 
 ### Capture and detach compose
 
@@ -391,8 +460,7 @@ The BRIEF flagged this as sitting against the commitment to preserve attach.
 They compose (R13). `--detach` has one meaning -- skip the final attach -- and it
 is independent of how the prompt was obtained. "Paste a prompt, then fan out
 without attaching" is coherent, and the command's own help already describes
-detach as the mode for fan-out and scripting. Forbidding the combination would
-be code written to prevent something harmless.
+detach as the mode for fan-out and scripting.
 
 ### The non-interactive path is unchanged, and structurally so
 
@@ -413,20 +481,19 @@ would reintroduce the mode-choice the BRIEF rules out.
 ### End-of-input submits rather than discards
 
 The workaround this feature replaces taught developers that Ctrl-D ends a
-capture, so a developer will reach for it. Two readings were available: treat
-end-of-input as a second submit gesture, or treat it as a terminating condition
-that discards the buffer. R28 chooses submission. Discarding would take the
-gesture a developer already has muscle memory for and make it the one that loses
-their paste, which is the worst available outcome for the feature's central use
-case.
+capture, so a developer will reach for it. R28 makes it a submit gesture rather
+than a discard. Discarding would take the gesture a developer already has muscle
+memory for and make it the one that loses their paste.
 
 ### Rendering and payload are independent
 
-R30 separates what is displayed from what is sent. A pasted log can contain
-terminal control sequences, and echoing them raw is a display-corruption path.
-Sanitizing the payload instead would silently alter the evidence the developer
-is trying to hand over. Splitting them costs a little care in the
-implementation and avoids both.
+R35 requires the capture to show what it has taken, which the Problem Statement
+names as a defect of the workaround rather than a nicety. R30 then splits
+display from payload: a pasted log can contain terminal control sequences, and
+echoing them raw is a display-corruption path, while sanitizing the payload
+would silently alter the evidence the developer is handing over. Neutralizing on
+the way to the screen and preserving on the way to the worker costs a little
+care and avoids both.
 
 ### The interactivity gate covers standard error, not standard output
 
@@ -443,6 +510,12 @@ would go to the redirect target.
 - The ceiling is unreachable for the payloads this feature exists to serve and
   reachable only by pasting a whole run. The refusal is a real path for a real
   user, not a defensive check, and its wording carries the weight.
+- Echo cost is a live hazard on a single very long line. A probe measured one
+  candidate library path completing a 12,000-byte single line but failing to
+  finish a 20,000-byte one inside 20 seconds, while the same path round-tripped
+  a 205 KB multi-line payload in about 2 seconds. The hazard is line length, not
+  total size, and a pasted log is many short lines. R37 states the requirement
+  this imposes; it rules out at least one otherwise-convenient implementation.
 - A promptless invocation from a script that inherits an interactive terminal
   passes the interactivity gate and opens a capture. This is a caller bug; the
   mitigations are that the capture is visibly waiting (R27) and that abandonment
@@ -450,9 +523,6 @@ would go to the redirect target.
 - Behavior inside multiplexers and the rendering quality of a large paste cannot
   be checked by any harness in this repository. They are manual criteria, which
   means they are checked at release time by a person or not at all.
-- Keyboard interrupt during a raw-mode capture arrives as an input byte, not a
-  signal, so the signal-restoration guarantee in R9 is exercised for SIGTERM and
-  SIGHUP but verified by inspection rather than by a test that sends SIGINT.
 - The reserve costs headroom on invocations where nothing is prepended.
   Recovering it would require resolving whether the prepend applies before
   provisioning, which this PRD does not require.
@@ -467,22 +537,16 @@ would go to the redirect target.
 - Changing how the prompt reaches the worker after capture, including any
   transport change that would raise the ceiling.
 - Prompt synthesis, which the dispatch skill owns.
-- The capture mechanism, the specific submit and newline gestures, the choice of
-  terminal API, and where the reader lives in the tree. These are DESIGN
-  decisions; the requirements above constrain them without making them.
+- The capture mechanism, the specific submit, newline, deletion, and
+  cancellation gestures, the choice of terminal API, and where the reader lives
+  in the tree. These are DESIGN decisions; the requirements above constrain them
+  without making them.
 - A global no-input flag. If niwa wants one it belongs on the root command.
-- Correcting the prompt size cap itself, tracked as issue #225 and stated here
-  as dependency D1.
 - Changing what the generated workspace context or the dispatch skill tell
   agents. Both instruct agents to pass a positional prompt, which remains
   correct; capture is a human-facing affordance and adding it there would invite
   agents to reach for an interactive path they cannot use.
 
-## Open Questions
-
-- Whether a functional scenario requiring a Linux-specific terminal utility is
-  acceptable, given continuous integration runs only on Linux but developers run
-  the suite on other platforms. The alternative trades a broken local run for
-  silent coverage loss.
-- Which terminals the manual-verification criteria name. Without a named set
-  that criterion is unfalsifiable.
+Correcting the prompt size cap is tracked separately as issue #225. The
+correction is not excluded from this work: R34 requires it here if that issue
+has not landed first.
