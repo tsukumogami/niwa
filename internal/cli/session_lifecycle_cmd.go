@@ -306,6 +306,19 @@ func applyContentToWorktree(instanceRoot, worktreePath, repo, purpose, branch st
 
 	opts := workspace.WorktreeApplyOptions{Stderr: os.Stderr}
 
+	// Decision 9: record the same worktree-delegation configuration the clone
+	// carries, so a worktree's settings do not drift from its clone's. The
+	// decision is recomputed here rather than read from state because this path
+	// runs outside an apply -- `niwa worktree create` and the WorktreeCreate hook
+	// both land here. Resolution mirrors the apply pipeline: probe the harness,
+	// take this binary's path as the hook command's fallback arm, and degrade to
+	// the deny branch if that path cannot be resolved.
+	if delegation, dErr := resolveWorktreeDelegation(instanceRoot); dErr != nil {
+		fmt.Fprintf(os.Stderr, "niwa: warning: %v; worktree settings will carry no delegation entries\n", dErr)
+	} else {
+		opts.WorktreeDelegation = delegation
+	}
+
 	// Resolve the session-global agent from the workspace default (and the
 	// NIWA_AGENT env override) so a worktree is prepared for the same agent the
 	// instance is. DefaultAgent is a workspace-level field unaffected by the
@@ -717,3 +730,52 @@ func writeSessionLifecycleTable(out interface{ Write([]byte) (int, error) }, row
 			s.SessionID, s.Repo, s.Status, availability, created, purpose)
 	}
 }
+
+// resolveWorktreeDelegation computes the worktree-delegation decision for a
+// worktree content install, mirroring what the apply pipeline computes per
+// apply (DESIGN-niwa-default-worktree.md Decisions 4, 5, 7, and 9).
+//
+// It returns (nil, nil) when the instance opted out at init time: the opt-out
+// means no hook AND no deny anywhere, so a worktree must not reintroduce either.
+// It returns an error only when this binary's own path cannot be resolved, in
+// which case the caller warns and installs neither rather than writing a hook
+// whose fallback arm points nowhere.
+func resolveWorktreeDelegation(instanceRoot string) (*workspace.WorktreeDelegation, error) {
+	// Fail CLOSED on an unreadable instance state. LoadState errors on a missing
+	// or corrupt file and on a schema_version newer than this binary
+	// understands, and that last case is reachable here: the hook command
+	// resolves niwa from PATH, so an older niwa can run against state a newer
+	// one wrote. Treating a read failure as "not opted out" would let that older
+	// binary quietly re-enable an integration the workspace disabled with
+	// `niwa init --no-worktree-delegation`. The apply pipeline fails closed on a
+	// state-read error; so does this path.
+	state, err := workspace.LoadState(instanceRoot)
+	if err != nil {
+		return nil, fmt.Errorf("reading instance state to check the worktree-delegation opt-out: %w", err)
+	}
+	if state != nil && state.NoWorktreeDelegation {
+		return nil, nil
+	}
+
+	niwaPath, err := os.Executable()
+	if err != nil {
+		return nil, fmt.Errorf("resolving niwa binary path for worktree hooks: %w", err)
+	}
+
+	// Bound the probe. It runs on every worktree create and apply -- including
+	// inside a hook subprocess -- so a `claude` wrapper that hangs would
+	// otherwise block worktree creation until the harness's own hook timeout
+	// fires, which is a much worse failure than an unprobed harness.
+	ctx, cancel := context.WithTimeout(context.Background(), worktreeProbeTimeout)
+	defer cancel()
+
+	return &workspace.WorktreeDelegation{
+		Supported: workspace.SupportsWorktreeHooks(ctx),
+		NiwaPath:  niwaPath,
+	}, nil
+}
+
+// worktreeProbeTimeout bounds the `claude --version` support probe on the
+// worktree paths. The probe is a single fast subprocess; this is a hang guard,
+// not a performance budget.
+const worktreeProbeTimeout = 5 * time.Second

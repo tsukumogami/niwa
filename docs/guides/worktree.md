@@ -185,6 +185,44 @@ fail on a vault outage (see
 the clone holds no env output yet, creation reports the error pointing at
 `niwa apply`.
 
+The installed hook resolves `niwa` from your `PATH`, falling back to the absolute
+path of the binary that ran `niwa apply` only when `PATH` doesn't carry it. From
+that apply onward, upgrading niwa takes effect without re-applying — the hook
+picks up whichever niwa your `PATH` names.
+
+A workspace applied by an older niwa still carries the previous hook text, which
+names one exact binary, so it keeps invoking that binary until you apply it once
+more. Run `niwa apply` once per existing workspace to pick up the change; after
+that the hook maintains itself.
+
+Two consequences worth knowing. If you install niwa somewhere your agent's
+environment can't see — a harness launched from a desktop environment inherits
+the session manager's `PATH`, not your shell profile's — the recorded absolute
+path keeps the integration working. And because `PATH` is now what decides,
+a `niwa` earlier on your `PATH` than the one you apply with is the one the hook
+runs; if it's too old to know the `worktree from-hook` subcommand the hook fails
+loudly rather than falling back, so keep a single niwa on `PATH`.
+
+### When a delegated create fails
+
+Creating the worktree and installing content into it are two steps, and the
+second one can fail — a missing secret, an unreadable config source. When it
+does, niwa reconciles rather than leaving the half-built worktree behind: it
+runs the same guarded teardown described below, so a failed create leaves no
+worktree and no `active` session claiming one. The agent's tool call fails with
+an error naming both the original cause and what was cleaned up.
+
+The one exception is a worktree that already holds uncommitted work, which can
+only happen when one of your own [worktree hooks](#worktree-hooks) touched
+tracked files before a later step failed. That worktree is retained and logged,
+exactly as a dirty teardown is.
+
+Note that `niwa worktree create` behaves differently on the same failure: it
+retains the worktree and tells you to re-sync it with `niwa worktree apply <id>`.
+That's deliberate. You're at a terminal and the worktree is a real place you
+asked for, whereas an agent never enters the directory on the failure path and
+won't come back to it.
+
 ### Teardown: clean vs. dirty
 
 When an agent finishes and its worktree teardown fires:

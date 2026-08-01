@@ -132,3 +132,70 @@ Feature: niwa worktree-delegation integration
     And the file "apps/app/.claude/settings.local.json" in instance "wd-optout" does not contain "WorktreeCreate"
     And the file "apps/app/.claude/settings.local.json" in instance "wd-optout" does not contain "worktree from-hook"
     And the file "apps/app/.claude/settings.local.json" in instance "wd-optout" does not contain "EnterWorktree"
+
+  # ---------------------------------------------------------------------
+  # Durability (DESIGN Decision 7): the emitted hook command resolves niwa
+  # from PATH and falls back to the absolute path recorded at apply time, so
+  # an installed hook keeps working after a niwa upgrade rather than pinning
+  # the release that happened to run apply. Both hook consumers get the same
+  # shape -- the per-repo worktree hook and the workspace-root SessionStart
+  # hook, which propagates staleness because it provisions instances in
+  # process.
+  # ---------------------------------------------------------------------
+
+  @critical
+  Scenario: the worktree hook command resolves niwa from PATH before its fallback
+    Given a clean niwa environment
+    And a fake claude reporting version "2.1.183" is on PATH
+    And a local git server is set up
+    And a single-repo channeled workspace "wd-durable" exists
+    When I run "niwa create wd-durable"
+    Then the exit code is 0
+    And the repo "apps/app" exists in instance "wd-durable"
+    # The PATH arm is what survives an upgrade.
+    And the file "apps/app/.claude/settings.local.json" in instance "wd-durable" contains "command -v niwa"
+    And the file "apps/app/.claude/settings.local.json" in instance "wd-durable" contains "exec niwa worktree from-hook"
+    # The fallback arm keeps the integration working where niwa is off PATH.
+    And the file "apps/app/.claude/settings.local.json" in instance "wd-durable" contains "; exec "
+    # `||` would be evaluated only if exec returned, which it does not.
+    And the file "apps/app/.claude/settings.local.json" in instance "wd-durable" does not contain "||"
+
+  @critical
+  Scenario: the workspace-root session hook gets the same durable shape
+    Given a clean niwa environment
+    And a fake claude reporting version "2.1.183" is on PATH
+    And a local git server is set up
+    And a single-repo channeled workspace "wd-root-hook" exists
+    When I run "niwa create wd-root-hook"
+    Then the exit code is 0
+    And the file ".claude/settings.json" under the workspace root contains "command -v niwa"
+    And the file ".claude/settings.json" under the workspace root contains "exec niwa instance from-hook"
+
+  # ---------------------------------------------------------------------
+  # Create-path atomicity (DESIGN Decision 8): a delegated create that fails
+  # AFTER `git worktree add` must reconcile rather than strand state. Session
+  # creation is already atomic; content install is not, so without the
+  # reconciliation the tool call fails while the worktree and an `active`
+  # session record both survive -- and `niwa worktree list` then reports an
+  # active worktree no process is in.
+  # ---------------------------------------------------------------------
+
+  @critical
+  Scenario: a failed delegated create leaves no active session behind
+    Given a clean niwa environment
+    And a fake claude reporting version "2.1.183" is on PATH
+    And a local git server is set up
+    And a single-repo channeled workspace "wd-rollback" exists with repo content
+    When I run "niwa create wd-rollback"
+    Then the exit code is 0
+    And the repo "apps/app" exists in instance "wd-rollback"
+    # Break content install only -- the instance itself is already built.
+    When the content source "content/repos/app.md" is missing from instance "wd-rollback"
+    And I pipe a WorktreeCreate hook for repo "apps/app" with name "doomed" in instance "wd-rollback"
+    # The hook must fail so Claude Code does not chdir into a rolled-back path.
+    Then the exit code is not 0
+    # niwa is the system of record: no active row, and nothing left on disk.
+    When I run "niwa worktree list" from channeled instance "wd-rollback"
+    Then the exit code is 0
+    And the output does not contain "active"
+    And no extra worktree is registered for repo "apps/app" in instance "wd-rollback"

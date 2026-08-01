@@ -1449,10 +1449,14 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 			Supported: worktreeSupported,
 			NiwaPath:  niwaPath,
 		}
-		// If we cannot determine niwa's own path, we cannot write a valid hook
-		// command. Fall back to the deny branch so the integration still installs
-		// something deterministic rather than a broken hook. (os.Executable failing
-		// is extremely rare — a removed/renamed binary mid-run.)
+		// If we cannot determine niwa's own path, fall back to the deny branch.
+		// Since Decision 7 the hook command resolves `niwa` from PATH first, so a
+		// PATH-only command would still be writable here — but it would be a hook
+		// with no fallback arm, which fails loudly in exactly the environments the
+		// fallback exists for. Deny+steer is the graceful degradation the design
+		// already builds, so we prefer it over a hook that might not resolve.
+		// (os.Executable failing is extremely rare — a removed/renamed binary
+		// mid-run.)
 		if niwaPathErr != nil {
 			a.Reporter.DeferWarn("could not resolve niwa binary path for worktree hooks (%v); installing deny fallback", niwaPathErr)
 			worktreeDelegation.Supported = false
@@ -1550,6 +1554,7 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		existingState:          opts.existingState,
 		now:                    now,
 		allowPlaintextSecrets:  a.AllowPlaintextSecrets,
+		worktreeDelegation:     worktreeDelegation,
 	})
 	if err != nil {
 		return nil, err
@@ -1761,6 +1766,10 @@ type worktreeRefreshInputs struct {
 	existingState         *InstanceState
 	now                   time.Time
 	allowPlaintextSecrets bool
+	// worktreeDelegation is the apply-time worktree-integration decision, passed
+	// through so a refreshed worktree records the same hook or deny entries as
+	// its clone (Decision 9). nil installs neither.
+	worktreeDelegation *WorktreeDelegation
 	// gitRegistered reports whether worktreePath is a worktree git still
 	// registers against cloneDir. nil defaults to gitRegistersWorktree (the real
 	// `git worktree list --porcelain` cross-check); injected in tests.
@@ -1859,6 +1868,9 @@ func (a *Applier) refreshWorktreeEnvs(in worktreeRefreshInputs) ([]ManagedFile, 
 				Stderr:                 a.Reporter.Writer(),
 				GlobalEnvExamplePolicy: in.globalEnvExamplePolicy,
 				GlobalEnvOutput:        in.globalEnvOutput,
+				// Decision 9: give the worktree the same delegation configuration
+				// the clone got on this apply, so the two do not drift.
+				WorktreeDelegation: in.worktreeDelegation,
 			},
 		)
 		if refreshErr != nil {

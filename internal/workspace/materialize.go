@@ -283,9 +283,9 @@ const (
 	worktreeCreateEvent = "WorktreeCreate"
 	worktreeRemoveEvent = "WorktreeRemove"
 
-	// worktreeFromHookCommandSuffix is the niwa subcommand the hook invokes. The
-	// full command is "<abs-niwa> " + this suffix; abs-niwa is resolved at apply
-	// time via os.Executable().
+	// worktreeFromHookCommandSuffix is the niwa subcommand the hook invokes.
+	// guardedNiwaHookCommand composes the full command from it; see that
+	// function for the PATH-first shape.
 	worktreeFromHookCommandSuffix = "worktree from-hook"
 
 	// denyEnterWorktree / denyExitWorktree are the Claude Code tool names denied
@@ -306,16 +306,62 @@ type WorktreeDelegation struct {
 	// write hooks; false => write permissions.deny.
 	Supported bool
 	// NiwaPath is the absolute path of the running niwa binary
-	// (os.Executable()). Used to build the hook command
-	// "<NiwaPath> worktree from-hook". Required when Supported is true.
+	// (os.Executable()). It is the FALLBACK arm of the emitted hook command,
+	// used only when `niwa` is not on the hook subprocess's PATH; see
+	// guardedNiwaHookCommand. Required when Supported is true.
 	NiwaPath string
 }
 
-// worktreeFromHookCommand returns the absolute-path hook command string Claude
-// invokes directly, e.g. "/abs/niwa worktree from-hook". The niwa path is
-// slash-normalized so the JSON command is stable across platforms.
+// worktreeFromHookCommand returns the hook command string Claude invokes for
+// the per-repo WorktreeCreate/WorktreeRemove hooks.
 func worktreeFromHookCommand(niwaPath string) string {
-	return filepath.ToSlash(niwaPath) + " " + worktreeFromHookCommandSuffix
+	return guardedNiwaHookCommand(niwaPath, worktreeFromHookCommandSuffix)
+}
+
+// guardedNiwaHookCommand builds the hook command niwa writes into a settings
+// document: resolve `niwa` from PATH, and fall back to the absolute path
+// recorded at apply time only when PATH does not carry it.
+//
+//	command -v niwa >/dev/null 2>&1 && exec niwa <suffix>; exec '<abs>' <suffix>
+//
+// PATH-first is what makes an installed hook survive a niwa upgrade. Under a
+// versioned install layout os.Executable() resolves to a version-pinned path
+// (on Linux it reads /proc/self/exe, which the kernel has already resolved past
+// every symlink), so an absolute-only command keeps invoking whichever release
+// happened to run `niwa apply` until the workspace is applied again. The
+// absolute arm is kept because a harness launched from a desktop environment
+// rather than a shell inherits the session manager's PATH, which need not carry
+// niwa at all; dropping it would turn those working setups into loud failures.
+//
+// Known limitation: `command -v niwa` proves PRESENCE, not COMPATIBILITY. On a
+// machine with more than one niwa installed, the hook runs whichever one PATH
+// names first, and if that one predates `worktree from-hook` the hook fails
+// rather than falling through to the absolute arm — `exec` has already replaced
+// the shell by then. That is a deliberate trade: the failure is loud (the
+// harness surfaces the hook's stderr in the tool result), whereas the absolute
+// path it replaces went stale silently and permanently. Probing for the
+// subcommand instead of the binary would close it at the cost of a second
+// subprocess on every hook invocation.
+//
+// Two details are load-bearing. The arms are separated by `;` rather than `||`:
+// a failed `exec` terminates a non-interactive shell before `||` would be
+// evaluated, so `||` would read as a fallback it is not. And the absolute path
+// is single-quoted, because the command goes through a shell and an install
+// path containing a space would otherwise split into separate words.
+//
+// The path is slash-normalized so the emitted JSON is stable across platforms.
+// See DESIGN-niwa-default-worktree.md Decision 7.
+func guardedNiwaHookCommand(niwaPath, suffix string) string {
+	normalized := filepath.ToSlash(niwaPath)
+	return "command -v niwa >/dev/null 2>&1 && exec niwa " + suffix +
+		"; exec " + shellSingleQuote(normalized) + " " + suffix
+}
+
+// shellSingleQuote wraps s in single quotes for safe interpolation into a shell
+// command. An embedded single quote is escaped the standard way: close the
+// quoted run, emit a backslash-escaped quote, reopen the run.
+func shellSingleQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 // snakeToPascal converts a snake_case string to PascalCase as a fallback when

@@ -142,13 +142,75 @@ func runFromHookCreate(cmd *cobra.Command, payload hookPayload) error {
 	// secret warnings surface on stderr inside this helper (AllowMissingSecrets
 	// warn-and-continue); a hard failure still fails creation.
 	if _, err := applyContentToWorktree(instanceRoot, worktreePath, repo, purpose, branch); err != nil {
-		return fmt.Errorf("niwa: error: installing content into worktree %s: %w", sessionID, err)
+		// Reconcile rather than strand (design Decision 8). CreateSession is
+		// already atomic — every failure after `git worktree add` cleans up after
+		// itself — but content install is not, so without this the tool call fails
+		// loudly while the git worktree and an `active` session record both
+		// survive, and `niwa worktree list` reports an active worktree no process
+		// is in. That contradicts R6's system-of-record premise, and the rows
+		// accumulate for as long as the underlying cause persists.
+		//
+		// This deliberately diverges from runSessionCreate, which retains and
+		// tells. A human is standing at the terminal, the worktree is a real place
+		// they asked for, and re-syncing it is a genuine repair. An agent never
+		// enters the directory on this path and will not come back to it.
+		return reconcileFailedHookCreate(cmd.ErrOrStderr(), instanceRoot, sessionID, err)
 	}
 
 	// Hook contract: stdout carries ONLY the absolute worktree path. Claude
 	// uses this as the session working directory.
 	fmt.Fprintln(cmd.OutOrStdout(), worktreePath)
 	return nil
+}
+
+// reconcileFailedHookCreate undoes a partially-created delegated worktree after
+// the create path failed past `git worktree add`, and returns the error the
+// hook exits with.
+//
+// It runs the SAME guarded teardown the WorktreeRemove path runs —
+// DestroySession with force=false — so the feature has one reconciliation
+// mechanism rather than two. In the normal case that is a full rollback: the
+// record moves to a terminal state, the worktree is removed, and the session
+// branch is deleted (it was created at HEAD with no commits, so the guarded
+// delete succeeds).
+//
+// The dirty guard stays armed even though a failed create is almost never
+// dirty. Every file niwa writes into a worktree is git-excluded, and the agent
+// never enters the directory on this path, so the one way real work can be
+// present is a workspace-authored worktree apply script that touched tracked
+// files before a later step failed. That is exactly the case Decision 3 says to
+// retain, so it is retained and logged rather than forced.
+//
+// The returned error always names the original cause; the reconciliation
+// outcome is appended so the developer reading the failed tool call knows
+// whether anything was left behind.
+func reconcileFailedHookCreate(stderr io.Writer, instanceRoot, sessionID string, cause error) error {
+	base := fmt.Errorf("niwa: error: installing content into worktree %s: %w", sessionID, cause)
+
+	state, err := worktree.DestroySession(
+		context.Background(), instanceRoot, sessionID, false /* force */, worktree.StdGitInvoker{},
+	)
+	if err != nil {
+		if errors.Is(err, worktree.ErrWorktreeDirty) {
+			fmt.Fprintf(stderr,
+				"niwa: notice: worktree for session %s has uncommitted changes; "+
+					"retaining it (not deleted). Reclaim it with `niwa worktree destroy %s --force` once reviewed.\n",
+				sessionID, sessionID)
+			return fmt.Errorf("%w (worktree retained: it has uncommitted changes)", base)
+		}
+		fmt.Fprintf(stderr,
+			"niwa: warning: rolling back session %s after a failed create: %v\n", sessionID, err)
+		return fmt.Errorf("%w (rollback incomplete: %v)", base, err)
+	}
+
+	// DestroySession reports a branch it declined to delete through
+	// BranchWarning rather than an error, so carry it: otherwise the message
+	// below asserts a clean rollback while a session branch survives.
+	if state.BranchWarning != "" {
+		return fmt.Errorf("%w (the partially created worktree was rolled back; %s)", base, state.BranchWarning)
+	}
+
+	return fmt.Errorf("%w (the partially created worktree was rolled back)", base)
 }
 
 // runFromHookRemove handles a WorktreeRemove hook. WorktreeRemove is

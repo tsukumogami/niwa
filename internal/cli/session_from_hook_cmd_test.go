@@ -3,7 +3,9 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -361,4 +363,153 @@ func mustHookJSON(t *testing.T, m map[string]any) string {
 		t.Fatalf("marshal hook json: %v", err)
 	}
 	return string(b)
+}
+
+// TestReconcileFailedHookCreate_CleanRollsBack covers design Decision 8's
+// normal case: a delegated create that fails past `git worktree add` must leave
+// no worktree, no session branch, and no `active` session record behind, so
+// `niwa worktree list` never reports an active worktree no process is in.
+func TestReconcileFailedHookCreate_CleanRollsBack(t *testing.T) {
+	f := newCreateFlowFixture(t)
+	resetSessionCreateFlags(t)
+	defer resetSessionCreateFlags(t)
+
+	created := createViaHook(t, f, "will-fail")
+
+	var stderr bytes.Buffer
+	cause := errors.New("promoted key \"GH_TOKEN\" not found in resolved env vars")
+	err := reconcileFailedHookCreate(&stderr, f.root, created.SessionID, cause)
+
+	if err == nil {
+		t.Fatal("reconcileFailedHookCreate must return an error so the hook exits non-zero")
+	}
+	// The original cause must survive so the developer sees WHY it failed.
+	if !errors.Is(err, cause) {
+		t.Errorf("error %v must wrap the original cause", err)
+	}
+	// ...and the reconciliation outcome must be named so they know what was
+	// left behind.
+	if !strings.Contains(err.Error(), "rolled back") {
+		t.Errorf("error %q should say the partial worktree was rolled back", err)
+	}
+
+	if _, statErr := os.Stat(created.WorktreePath); !os.IsNotExist(statErr) {
+		t.Errorf("worktree %s should have been removed, stat err = %v", created.WorktreePath, statErr)
+	}
+
+	state, readErr := worktree.ReadSessionLifecycleState(f.sessionsDir, created.SessionID)
+	if readErr != nil {
+		t.Fatalf("read state: %v", readErr)
+	}
+	if state.Status == worktree.SessionStatusActive {
+		t.Errorf("session %s left active after a failed create; status=%q", created.SessionID, state.Status)
+	}
+
+	// The session branch was created at HEAD with no commits, so the guarded
+	// delete inside DestroySession should have removed it.
+	out, _ := exec.Command("git", "-C", f.repoPath, "branch", "--list", created.BranchName).CombinedOutput()
+	if strings.TrimSpace(string(out)) != "" {
+		t.Errorf("session branch %q should have been deleted, git branch --list gave %q",
+			created.BranchName, out)
+	}
+}
+
+// TestReconcileFailedHookCreate_DirtyRetains covers the exception Decision 8
+// carves out. A failed create is almost never dirty — every file niwa writes is
+// git-excluded and the agent never enters the directory — but a workspace-
+// authored worktree apply script can touch tracked files before a later step
+// fails. That is the case Decision 3 says to retain, so the dirty guard stays
+// armed here rather than being forced past.
+func TestReconcileFailedHookCreate_DirtyRetains(t *testing.T) {
+	f := newCreateFlowFixture(t)
+	resetSessionCreateFlags(t)
+	defer resetSessionCreateFlags(t)
+
+	created := createViaHook(t, f, "dirty-on-failure")
+
+	dirtyFile := filepath.Join(created.WorktreePath, "uncommitted.txt")
+	if err := os.WriteFile(dirtyFile, []byte("a hook script wrote this\n"), 0o644); err != nil {
+		t.Fatalf("write dirty file: %v", err)
+	}
+
+	var stderr bytes.Buffer
+	cause := errors.New("content install blew up")
+	err := reconcileFailedHookCreate(&stderr, f.root, created.SessionID, cause)
+
+	if err == nil {
+		t.Fatal("reconcileFailedHookCreate must return an error so the hook exits non-zero")
+	}
+	if !errors.Is(err, cause) {
+		t.Errorf("error %v must wrap the original cause", err)
+	}
+	if _, statErr := os.Stat(created.WorktreePath); statErr != nil {
+		t.Errorf("dirty worktree was deleted (should be retained): %v", statErr)
+	}
+	if !strings.Contains(stderr.String(), "retaining it") {
+		t.Errorf("expected a retain notice on stderr, got:\n%s", stderr.String())
+	}
+	if !strings.Contains(err.Error(), "retained") {
+		t.Errorf("error %q should say the worktree was retained", err)
+	}
+}
+
+// TestFromHookCreate_ContentInstallFailureLeavesNoActiveSession drives a REAL
+// content-install failure through runFromHookCreate, rather than calling the
+// reconciliation helper directly. This is the test that actually guards the
+// wiring: without the reconcile call in the create path it fails, because the
+// worktree and an active session record both survive.
+//
+// The failure is induced by declaring a repo content source that does not
+// exist, so ApplyToWorktree fails after CreateSession has already run
+// `git worktree add` and written the session record.
+func TestFromHookCreate_ContentInstallFailureLeavesNoActiveSession(t *testing.T) {
+	f := newCreateFlowFixture(t)
+	resetSessionCreateFlags(t)
+	defer resetSessionCreateFlags(t)
+
+	// Re-point the workspace config at a content source that is not on disk.
+	wsTOML := "[workspace]\nname = \"testws\"\ncontent_dir = \"claude\"\n\n" +
+		"[claude.content.repos." + f.repo + "]\nsource = \"repos/does-not-exist.md\"\n"
+	if err := os.WriteFile(filepath.Join(f.root, ".niwa", "workspace.toml"), []byte(wsTOML), 0o644); err != nil {
+		t.Fatalf("rewrite workspace.toml: %v", err)
+	}
+
+	hookJSON := mustHookJSON(t, map[string]any{
+		"hook_event_name": "WorktreeCreate",
+		"session_id":      "claude-sid-fail",
+		"cwd":             f.repoPath,
+		"name":            "doomed",
+	})
+
+	out, errOut, err := runFromHook(t, f.repoPath, hookJSON)
+	if err == nil {
+		t.Fatalf("expected the hook to fail; stdout=%q stderr=%q", out, errOut)
+	}
+	// The hook contract is that stdout carries ONLY a worktree path. On failure
+	// it must carry nothing, or Claude Code would chdir into a path that the
+	// rollback just deleted.
+	if strings.TrimSpace(out) != "" {
+		t.Errorf("failed create must print no worktree path, got %q", out)
+	}
+
+	states, listErr := worktree.ListSessionLifecycleStates(f.sessionsDir)
+	if listErr != nil {
+		t.Fatalf("list sessions: %v", listErr)
+	}
+	for _, st := range states {
+		if st.Status == worktree.SessionStatusActive {
+			t.Errorf("session %s left active after a failed create (worktree %s)", st.SessionID, st.WorktreePath)
+		}
+		if st.WorktreePath != "" {
+			if _, statErr := os.Stat(st.WorktreePath); !os.IsNotExist(statErr) {
+				t.Errorf("worktree %s survived a failed create, stat err = %v", st.WorktreePath, statErr)
+			}
+		}
+	}
+
+	// No stray git worktree registration should remain either.
+	listOut, _ := exec.Command("git", "-C", f.repoPath, "worktree", "list").CombinedOutput()
+	if strings.Count(strings.TrimSpace(string(listOut)), "\n") != 0 {
+		t.Errorf("expected only the main checkout registered, got:\n%s", listOut)
+	}
 }

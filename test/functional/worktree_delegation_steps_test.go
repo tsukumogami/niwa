@@ -216,4 +216,72 @@ func registerWorktreeDelegationSteps(ctx *godog.ScenarioContext) {
 	ctx.Step(`^I pipe a WorktreeRemove hook for the printed worktree path in instance "([^"]*)"$`, iPipeWorktreeRemoveHook)
 	ctx.Step(`^the printed worktree path exists$`, thePrintedWorktreePathExists)
 	ctx.Step(`^the printed worktree path does not exist$`, thePrintedWorktreePathDoesNotExist)
+	ctx.Step(`^the content source "([^"]*)" is missing from instance "([^"]*)"$`, theRepoContentSourceIsMissingFromInstance)
+	ctx.Step(`^no extra worktree is registered for repo "([^"]*)" in instance "([^"]*)"$`, noWorktreeIsRegisteredForRepo)
+}
+
+// theRepoContentSourceIsMissingFromInstance deletes a repo's content source
+// from an instance's config snapshot AFTER the instance has been built. The
+// instance itself stays intact; only a subsequent worktree content install
+// fails, which is the seam needed to exercise the create-path reconciliation
+// (DESIGN Decision 8) end to end. A content source that has gone missing is a
+// realistic shape of the general failure: `ApplyToWorktree` runs after
+// `CreateSession` has already made the git worktree and written the session
+// record, so anything failing there leaves partial state unless it reconciles.
+func theRepoContentSourceIsMissingFromInstance(ctx context.Context, relPath, instance string) (context.Context, error) {
+	s := getState(ctx)
+	if s == nil {
+		return ctx, fmt.Errorf("no test state")
+	}
+	// The config snapshot is discovered by walking UP from the instance root, so
+	// it lives in the workspace root's .niwa, not the instance's. Prefer that,
+	// and fall back to the instance-scoped path so the step keeps working if the
+	// snapshot ever moves.
+	instRoot := filepath.Join(s.workspaceRoot, instance)
+	target := filepath.Join(s.workspaceRoot, ".niwa", relPath)
+	if _, err := os.Stat(target); err != nil {
+		target = filepath.Join(instRoot, ".niwa", relPath)
+	}
+	if _, err := os.Stat(target); err != nil {
+		// Fail loudly with the snapshot layout rather than silently no-op:
+		// a step that quietly removes nothing would make the scenario pass
+		// for the wrong reason.
+		var found []string
+		for _, root := range []string{filepath.Join(s.workspaceRoot, ".niwa"), filepath.Join(instRoot, ".niwa")} {
+			_ = filepath.WalkDir(root, func(p string, d os.DirEntry, werr error) error {
+				if werr == nil && !d.IsDir() {
+					if rel, rerr := filepath.Rel(s.workspaceRoot, p); rerr == nil {
+						found = append(found, rel)
+					}
+				}
+				return nil
+			})
+		}
+		return ctx, fmt.Errorf("content source %q not found at %s; snapshot contains:\n  %s",
+			relPath, target, strings.Join(found, "\n  "))
+	}
+	if err := os.Remove(target); err != nil {
+		return ctx, fmt.Errorf("removing content source %s: %w", target, err)
+	}
+	return ctx, nil
+}
+
+// noWorktreeIsRegisteredForRepo asserts git has no worktree registered for the
+// repo beyond its own checkout, so a rolled-back create leaves no dangling
+// registration behind.
+func noWorktreeIsRegisteredForRepo(ctx context.Context, groupRepo, instance string) (context.Context, error) {
+	s := getState(ctx)
+	if s == nil {
+		return ctx, fmt.Errorf("no test state")
+	}
+	repoPath := filepath.Join(s.workspaceRoot, instance, groupRepo)
+	out, err := exec.Command("git", "-C", repoPath, "worktree", "list").CombinedOutput()
+	if err != nil {
+		return ctx, fmt.Errorf("git worktree list in %s: %w\n%s", repoPath, err, out)
+	}
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	if len(lines) != 1 {
+		return ctx, fmt.Errorf("expected only the main checkout registered, got:\n%s", out)
+	}
+	return ctx, nil
 }
