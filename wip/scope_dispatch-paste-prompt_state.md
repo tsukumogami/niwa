@@ -17,14 +17,22 @@ chain_ran:
   - brief
 child_snapshots:
   brief:
-    status: Draft
-    content_hash: 52a222f391ad0377b4d062f970875915a6c48c8f
-    captured_at: 2026-08-01T16:31:10Z
+    status: Accepted
+    content_hash: 81298c04f82dc2f3cac009a7de2a2429b00a7d30
+    captured_at: 2026-08-01T16:36:00Z
 worktree_rebases:
   - phase: brief
     upstream_commits: []
     impact: none
     rebased_at: 2026-08-01T16:23:05Z
+  - phase: prd
+    upstream_commits: []
+    impact: none
+    rebased_at: 2026-08-01T16:36:00Z
+parent_orchestration:
+  invoking_child: prd
+  suppress_status_aware_prompt: true
+  rationale: fresh-chain
 pull_request: https://github.com/tsukumogami/niwa/pull/224
 brief_open_questions_carried:
   - id: size-ceiling
