@@ -72,13 +72,47 @@ const (
 	// triggers self-rollback, never a hang (DESIGN Decision 3, R20/R22).
 	dispatchCaptureTimeout = 30 * time.Second
 
-	// maxPromptBytes guards against a prompt that would exceed the operating
-	// system's argument-length limit. ARG_MAX is at least 4096 on every POSIX
-	// platform and is typically far larger; a conservative bound below it
-	// leaves room for the binary path, the flags, and the environment, and
-	// fails clearly rather than letting exec truncate or reject the call with
-	// an opaque error (DESIGN Decision 8, R43).
-	maxPromptBytes = 128 * 1024
+	// maxArgStringBytes is the largest byte length niwa lets a SINGLE argv
+	// element reach. The prompt is handed to claude as one discrete argv element
+	// (buildClaudeBgArgs), so the binding kernel limit is the per-string one --
+	// not ARG_MAX, which bounds the TOTAL of argv plus envp. Leaving headroom
+	// below ARG_MAX for the binary path, the flags, and the environment does
+	// nothing for a single oversized string, and a single oversized string is
+	// the only way a dispatch realistically hits an exec limit.
+	//
+	// On Linux the per-string limit is MAX_ARG_STRLEN, a fixed 32 pages (131072
+	// bytes at the usual 4 KiB page size) counted INCLUSIVE of the NUL
+	// terminator, so the largest argument execve accepts is one byte less.
+	// Probed directly: 131071 succeeds, 131072 returns E2BIG.
+	//
+	// macOS imposes no per-string cap; it bounds argv plus envp together against
+	// ARG_MAX (262144). We apply the Linux number on both platforms anyway. It
+	// is the tighter constraint in practice, it keeps the accepted prompt size
+	// identical everywhere -- so a prompt that dispatches on Linux dispatches on
+	// macOS -- and it avoids modelling a total-size budget whose environment
+	// term niwa does not control. The cost is that a darwin host would in
+	// principle accept a somewhat larger prompt; the benefit is one number, one
+	// behavior, and no platform-conditional cap to keep honest.
+	maxArgStringBytes = 32*4096 - 1
+
+	// dispatchPromptReserve is the byte allowance held back at validation time
+	// for text niwa itself prepends to the prompt AFTER the check. Today that is
+	// exactly keepAliveArmingInstruction, prepended in step (9d) -- long after
+	// the step (1) check, and only when keep-alive resolves on, which cannot be
+	// known before the instance exists. Reserving its full length up front makes
+	// the single early check sound for BOTH outcomes: whatever (9d) decides, the
+	// string that reaches execve still fits maxArgStringBytes, and the rejection
+	// still lands before anything is provisioned.
+	//
+	// Anything else that starts prepending to the prompt must be added here.
+	dispatchPromptReserve = len(keepAliveArmingInstruction)
+
+	// maxPromptBytes is the largest user-supplied prompt dispatch accepts: the
+	// exec ceiling minus everything niwa may later prepend. Exceeding it fails
+	// clearly and early rather than letting exec reject the call with an opaque
+	// E2BIG after an instance has already been provisioned (DESIGN Decision 8,
+	// R43).
+	maxPromptBytes = maxArgStringBytes - dispatchPromptReserve
 )
 
 // lookClaude reports the path to the claude binary or an error if it is not on
@@ -141,8 +175,11 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	if prompt == "" {
 		return fmt.Errorf("niwa: error: dispatch prompt must not be empty")
 	}
+	// The limit already excludes dispatchPromptReserve, so a prompt that passes
+	// here still fits after step (9d) may prepend the keep-alive instruction --
+	// there is one check, it is early, and it covers the final string.
 	if len(prompt) > maxPromptBytes {
-		return fmt.Errorf("niwa: error: dispatch prompt is too long (%d bytes, limit %d); shorten it rather than relying on truncation", len(prompt), maxPromptBytes)
+		return fmt.Errorf("niwa: error: dispatch prompt is too long (%d bytes, limit %d); it is passed to claude as a single exec argument, so it cannot be truncated or split. Write the detail to a file and reference its path from a shorter prompt", len(prompt), maxPromptBytes)
 	}
 
 	// (2) Resolve the enclosing workspace root from cwd. Inside an instance or
@@ -309,11 +346,14 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	// prompt (channel B2; see dispatch_keepalive.go for why the SessionStart
 	// channel does not reach a dispatched worker). The instruction rides the
 	// same single argv element as the prompt, so the D8 no-shell-interpolation
-	// guard is preserved, and its fixed few-hundred-byte size is well inside
-	// the conservative maxPromptBytes margin validated in step (1). Requesting
-	// keep-alive without remote control warns and arms nothing -- the dispatch
-	// itself always proceeds. Without the opt-in this block changes nothing:
-	// the launch stays byte-identical.
+	// guard is preserved, and its fixed size was already reserved by step (1):
+	// maxPromptBytes is the exec ceiling minus dispatchPromptReserve, which is
+	// this constant's length, so a prompt that got here can absorb the prepend
+	// and still fit in one argv element. This is a reservation, not a margin:
+	// grow the instruction and maxPromptBytes shrinks by the same amount.
+	// Requesting keep-alive without remote control warns and arms nothing --
+	// the dispatch itself always proceeds. Without the opt-in this block
+	// changes nothing: the launch stays byte-identical.
 	var hostGlobal config.GlobalSettings
 	if gcErr == nil && gc != nil {
 		hostGlobal = gc.Global
