@@ -1,0 +1,44 @@
+{
+  "topic": "dispatch-paste-prompt",
+  "upstream": "docs/prds/PRD-dispatch-paste-prompt.md",
+  "visibility": "Public",
+  "scope": "Tactical",
+  "execution_mode": "auto",
+  "decisions": [
+    {
+      "id": 1,
+      "slug": "reader-surface",
+      "question": "Which terminal-reading surface carries the capture, and what loop shape satisfies the line-break, no-per-line-limit, and responsiveness requirements at once?",
+      "requirements": ["R4", "R19", "R37", "R10", "R30"],
+      "status": "pending"
+    },
+    {
+      "id": 2,
+      "slug": "gestures",
+      "question": "What are the submit, manual-newline, deletion, and cancellation gestures, and how is each detected once the terminal is in raw mode?",
+      "requirements": ["R5", "R6", "R8", "R28", "R36", "R39"],
+      "status": "pending"
+    },
+    {
+      "id": 3,
+      "slug": "placement-and-seams",
+      "question": "Where does the reader live, and what seam shape makes the capture unreachable from the launcher while keeping the command-level behaviors unit-testable?",
+      "requirements": ["R1", "R2", "R11", "R20", "R21", "R22"],
+      "status": "pending"
+    },
+    {
+      "id": 4,
+      "slug": "rendering",
+      "question": "How is captured input rendered so the developer sees what will be sent, without replaying control sequences and without the superlinear echo cost measured on one candidate path?",
+      "requirements": ["R27", "R30", "R35", "R37"],
+      "status": "pending"
+    },
+    {
+      "id": 5,
+      "slug": "terminal-lifecycle",
+      "question": "How are raw mode and paste mode entered, restored, and re-established across every exit path including signals and suspend/resume?",
+      "requirements": ["R9", "R38", "R39", "R7"],
+      "status": "pending"
+    }
+  ]
+}
