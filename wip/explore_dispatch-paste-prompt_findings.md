@@ -216,3 +216,8 @@ happens to this feature: `maxPromptBytes` sits exactly on `MAX_ARG_STRLEN`
 rather than below it, and the keep-alive prepend evades the check entirely, so
 sufficiently large prompts pass validation and then fail at exec after the
 instance has already been provisioned.
+
+## Decision: Crystallize
+
+User confirmed round 1 findings are sufficient. Proceeding to artifact type
+selection.
