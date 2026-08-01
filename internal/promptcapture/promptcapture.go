@@ -105,6 +105,12 @@ type capture struct {
 	pasteDenied bool // this paste exceeded the retention bound; retain none of it
 
 	overCeiling bool
+
+	// echoedOnLine counts characters echoed since the last thing that moved the
+	// cursor to a fresh line. A single-character delete can only be erased in
+	// place while this is positive; past that the character is not on screen
+	// where a backspace could reach it.
+	echoedOnLine int
 }
 
 // step consumes one byte. It reports done when the capture has an outcome.
@@ -250,6 +256,7 @@ func (c *capture) closePaste() {
 	}
 
 	c.renderPaste(pasted)
+	c.echoedOnLine = 0
 	c.checkCeiling()
 }
 
@@ -260,9 +267,13 @@ func (c *capture) appendTyped(b byte) {
 	}
 	c.flushPendingBreak()
 	c.buf = append(c.buf, b)
-	fmt.Fprint(c.w, neutralize([]byte{b}))
+	rendered := neutralize([]byte{b})
+	fmt.Fprint(c.w, rendered)
 	if b == '\n' {
 		fmt.Fprint(c.w, "\r")
+		c.echoedOnLine = 0
+	} else {
+		c.echoedOnLine += len(rendered)
 	}
 	c.checkCeiling()
 }
@@ -272,6 +283,7 @@ func (c *capture) flushPendingBreak() {
 		c.pendingBreak = false
 		c.buf = append(c.buf, '\n')
 		fmt.Fprint(c.w, "\r\n")
+		c.echoedOnLine = 0
 	}
 }
 
@@ -306,8 +318,9 @@ func (c *capture) deleteRune() {
 	for i > 0 && c.buf[i]&0xc0 == 0x80 {
 		i--
 	}
+	removed := neutralize(c.buf[i:])
 	c.buf = c.buf[:i]
-	c.redrawAfterDelete()
+	c.afterDelete(len(removed))
 }
 
 func (c *capture) deleteWord() {
@@ -319,7 +332,7 @@ func (c *capture) deleteWord() {
 		i--
 	}
 	c.buf = c.buf[:i]
-	c.redrawAfterDelete()
+	c.afterDelete(-1)
 }
 
 func (c *capture) deleteLine() {
@@ -331,20 +344,42 @@ func (c *capture) deleteLine() {
 		i--
 	}
 	c.buf = c.buf[:i]
-	c.redrawAfterDelete()
+	c.afterDelete(-1)
 }
 
 func isSpace(b byte) bool {
 	return b == ' ' || b == '\t' || b == '\n'
 }
 
-func (c *capture) redrawAfterDelete() {
+// afterDelete gives the developer feedback proportional to what was removed.
+//
+// erasable is the number of rendered columns the deletion took off the current
+// visual line, or -1 when the deletion was too large to undo on screen. A single
+// character that is still on the line is erased in place with backspaces, which
+// is what a terminal does and what the developer expects; anything larger, or
+// anything reaching back past the current line, gets one status line instead.
+//
+// Printing a status line on every keystroke -- which an earlier version did --
+// turns backspacing over a typo into a column of byte counts and fragments the
+// text being typed.
+func (c *capture) afterDelete(erasable int) {
 	c.pendingBreak = false
-	fmt.Fprintf(c.w, "\r\n[%d bytes]\r\n", len(c.buf))
+
+	if erasable > 0 && erasable <= c.echoedOnLine {
+		for i := 0; i < erasable; i++ {
+			fmt.Fprint(c.w, "\b \b")
+		}
+		c.echoedOnLine -= erasable
+	} else {
+		fmt.Fprintf(c.w, "\r\n[%d bytes]\r\n", len(c.buf))
+		c.echoedOnLine = 0
+	}
+
 	was := c.overCeiling
 	c.overCeiling = len(c.buf) > c.limit
 	if was && !c.overCeiling {
 		fmt.Fprint(c.w, "[within the limit again]\r\n")
+		c.echoedOnLine = 0
 	}
 }
 

@@ -287,3 +287,84 @@ func TestEscapeThatIsNotAMarkerIsPayload(t *testing.T) {
 		t.Fatalf("got %q, want the escape sequence preserved", got)
 	}
 }
+
+// Backspacing over a typo must erase in place rather than printing a status
+// line per keystroke. An earlier version printed "[N bytes]" on every delete,
+// which turned correcting a five-character typo into a column of byte counts
+// and fragmented the text being typed.
+func TestSingleCharacterDeleteErasesInPlace(t *testing.T) {
+	var out bytes.Buffer
+	c := &capture{w: &out, limit: bigLimit, retention: bigLimit * retentionMultiple}
+	for _, b := range []byte("thihs") {
+		c.step(b)
+	}
+	out.Reset()
+
+	c.step(0x7f) // backspace
+	c.step(0x7f)
+
+	got := out.String()
+	if strings.Contains(got, "bytes]") {
+		t.Fatalf("a single-character delete printed a status line: %q", got)
+	}
+	if got != "\b \b\b \b" {
+		t.Fatalf("got %q, want two in-place erases", got)
+	}
+	if string(c.buf) != "thi" {
+		t.Fatalf("buffer is %q, want %q", c.buf, "thi")
+	}
+}
+
+// A delete that reaches back past what is on the current line cannot be undone
+// with backspaces, so it falls back to one status line. Word and line kills do
+// the same, because erasing them in place would need a real line editor.
+func TestLargeDeletesFallBackToOneStatusLine(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		key  byte
+	}{
+		{"word kill", 0x17},
+		{"line kill", 0x15},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var out bytes.Buffer
+			c := &capture{w: &out, limit: bigLimit, retention: bigLimit * retentionMultiple}
+			for _, b := range []byte("some words here") {
+				c.step(b)
+			}
+			out.Reset()
+
+			c.step(tc.key)
+
+			got := out.String()
+			if !strings.Contains(got, "bytes]") {
+				t.Fatalf("%s did not report the new size: %q", tc.name, got)
+			}
+			if strings.Count(got, "bytes]") != 1 {
+				t.Fatalf("%s printed %d status lines, want 1: %q", tc.name, strings.Count(got, "bytes]"), got)
+			}
+		})
+	}
+}
+
+// Deleting back into a pasted block cannot be erased on screen either: the
+// paste rendered as a summary, not as its own text, so there is nothing there to
+// back over.
+func TestDeleteAfterPasteDoesNotEraseIntoTheSummary(t *testing.T) {
+	var out bytes.Buffer
+	c := &capture{w: &out, limit: bigLimit, retention: bigLimit * retentionMultiple}
+	for _, b := range []byte(paste("line one\nline two")) {
+		c.step(b)
+	}
+	out.Reset()
+
+	c.step(0x7f) // backspace with nothing echoed on the current line
+
+	got := out.String()
+	if strings.Contains(got, "\b") {
+		t.Fatalf("backspaced into a paste summary: %q", got)
+	}
+	if !strings.Contains(got, "bytes]") {
+		t.Fatalf("no size feedback after deleting into a paste: %q", got)
+	}
+}
