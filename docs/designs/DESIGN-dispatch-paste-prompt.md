@@ -1,6 +1,6 @@
 ---
 schema: design/v1
-status: Proposed
+status: Accepted
 upstream: docs/prds/PRD-dispatch-paste-prompt.md
 problem: |
   `niwa dispatch` takes its prompt as one positional argument, so a developer
@@ -31,7 +31,7 @@ rationale: |
 
 ## Status
 
-Proposed
+Accepted
 
 Downstream of `docs/prds/PRD-dispatch-paste-prompt.md` (In Progress). Five
 decision questions were investigated independently; the cross-validation that
