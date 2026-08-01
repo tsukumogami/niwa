@@ -236,9 +236,19 @@ records to standard error.
 ### Neutralization rule
 
 Tab passes through. Every other C0 control byte and DEL renders in caret
-notation; C1 controls and invalid UTF-8 render as hex escapes. The resulting
-invariant is testable and stronger than stripping: nothing emitted to the
-transcript moves the cursor up, left, or to column zero.
+notation; C1 controls and invalid UTF-8 render as hex escapes.
+
+The property to implement and test is the escaping rule itself, not a summary of
+it. Because no escape-introducing byte survives, the transcript cannot carry an
+operating-system command, a device-control or application-program string, a mode
+set, or a cursor movement -- an implementation that only guaranteed "the cursor
+never moves up, left, or to column zero" would satisfy a weaker property and
+still leak a clipboard write or a title change.
+
+The rule also protects the payload, which is the stronger reason for it. A
+terminal only answers sequences it renders; because the transcript renders none,
+an embedded device query cannot provoke a response that would arrive back on
+standard input and land inside the capture.
 
 ### Terminal lifecycle
 
@@ -249,11 +259,23 @@ held: the pre-capture state every exit path restores, and the raw state a resume
 returns to.
 
 Restoration runs from a function-scoped defer plus a handler covering SIGINT,
-SIGTERM, SIGHUP, SIGTSTP, and SIGCONT. Suspend has one non-obvious step:
+SIGQUIT, SIGTERM, SIGHUP, SIGTSTP, and SIGCONT. Suspend has one non-obvious step:
 resetting SIGTSTP to its default disposition does not reliably suspend the
 process in Go, so the handler restores the terminal and raises SIGSTOP itself,
 leaving re-entry into raw mode to the SIGCONT branch. That sequence was verified
 end-to-end on a pseudo-terminal; the textbook idiom silently fails to suspend.
+
+SIGQUIT is handled for a reason worth stating: its default action dumps core, and
+the core would contain the captured payload. Leaving it unhandled would put the
+prompt on disk, which nothing else in this path does.
+
+The SIGCONT branch checks that the process is in the foreground process group
+before re-entering raw mode. A capture that is suspended and then resumed in the
+background must not stamp raw settings onto the terminal the shell is using.
+
+End of input arriving after a hangup is treated as abandonment rather than
+submission, so closing a terminal window mid-capture cannot dispatch a
+half-composed prompt.
 
 All handlers are torn down before `runDispatch` reaches the attach handoff, so
 `claude attach` inherits a clean terminal and default signal dispositions.
@@ -299,18 +321,24 @@ moves the cursor up, left, or to column zero) is the security property, not a
 cosmetic one.
 
 **Pasted content is untrusted with respect to process control.** With ISIG set, a
-pasted `0x03` terminates the process and a pasted `0x1A` suspends it, mid-capture,
-losing the buffer. Clearing ISIG is what makes the payload-preservation
-requirement satisfiable; `IXON` and `IEXTEN` carry the same hazard for flow
-control and literal-next and are cleared by the same call.
+pasted `0x03` terminates the process, a pasted `0x1C` terminates it and dumps
+core containing the payload, and a pasted `0x1A` suspends it mid-capture. Each
+loses the buffer. Clearing ISIG is what makes the payload-preservation
+requirement satisfiable and captures all three as ordinary bytes; `IXON` and
+`IEXTEN` carry the same hazard for flow control and literal-next and are cleared
+by the same call.
 
-**The payload becomes an autonomous worker's opening instruction.** This is not
-new -- the positional path has always had it -- and the mitigation is unchanged:
-the prompt is one argv element, never passed through a shell, so the content
-cannot escape into command construction. The capture does not widen this surface;
-it changes only where the bytes come from. A developer pasting a log they did not
-write should know it will be read as instructions, which is a property of
-dispatch rather than of this feature.
+**The payload becomes an autonomous worker's opening instruction.** Argv
+construction is unchanged -- the prompt is one element, never passed through a
+shell, so content cannot escape into command construction -- but it would be too
+strong to say the surface is untouched. This feature exists to move text a
+developer has *not* authored, and often has not read in full, into a worker's
+opening instruction, and the bounded transcript means the middle of a large paste
+is never displayed. Provenance is the surface, and it does shift. The control
+that applies is the worker's own permission boundary, not anything in the
+capture: a dispatched worker is constrained by what it is allowed to do, and that
+constraint is where pasted instructions are contained. Worth knowing when pasting
+a log from a source you do not control.
 
 **Terminal state is a shared resource.** Failing to restore raw mode leaves the
 next command in the developer's shell without line editing or signal handling.
@@ -318,10 +346,25 @@ The failure is silent, delayed, and attributed elsewhere. This is why restoratio
 is a signal-handled discipline rather than a defer, and why suspend and resume
 are covered rather than assumed.
 
+**Retention above the ceiling is bounded.** The oversized refusal keeps the whole
+buffer so the developer can delete down to a submittable size, which without a
+bound would let a pathological paste grow until the process is killed -- leaving
+the terminal raw, since no handler runs. Retention is capped at a small multiple
+of the ceiling; input beyond that cap is refused outright rather than held.
+
+**A forged paste-end marker submits early.** A pasted payload containing the
+end-of-paste byte sequence ends the block from the reader's point of view, so the
+remainder is interpreted as typed input and its first line break submits. This is
+the same failure mode as a terminal without paste delimiters, arriving by a
+different route, and it is documented alongside that degradation rather than
+detected.
+
 **No new external input, no new privilege, no new persistence.** The capture
 reads a terminal the process already owns, writes to a stream it already writes
 to, and adds no file, socket, or credential surface. The prompt is still never
-written to disk.
+written to disk -- which is why SIGQUIT is handled rather than left to dump core,
+and it is an improvement on the positional path, where the whole prompt lands in
+the developer's shell history.
 
 ## Consequences
 
