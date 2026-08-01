@@ -1,6 +1,6 @@
 ---
 schema: prd/v1
-status: In Progress
+status: Done
 problem: |
   A developer who hits a failure in the terminal cannot hand that failure to a
   dispatched worker. `niwa dispatch` takes its prompt as a single positional
@@ -26,7 +26,7 @@ motivating_context: |
 
 ## Status
 
-In Progress
+Done
 
 Requirements for interactive prompt capture on `niwa dispatch`, downstream of
 the Accepted BRIEF. The Decisions and Trade-offs section closes the four

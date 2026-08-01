@@ -1,6 +1,6 @@
 ---
 schema: brief/v1
-status: Accepted
+status: Done
 problem: |
   `niwa dispatch` takes its prompt as a single positional argument, so the
   multiline error text a developer is looking at cannot be handed to a
@@ -21,7 +21,7 @@ motivating_context: |
 
 ## Status
 
-Accepted
+Done
 
 Framing for inline prompt capture on `niwa dispatch`. Stops at the feature's
 problem, outcome, journeys, and scope boundary. The downstream PRD owns the
