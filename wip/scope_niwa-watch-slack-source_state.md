@@ -1,7 +1,7 @@
 ---
 topic: niwa-watch-slack-source
 chain_started: 2026-08-01T21:18:41Z
-last_updated: 2026-08-01T21:19:17Z
+last_updated: 2026-08-01T21:29:20Z
 phase_pointer: phase-2
 visibility: Public
 exit: UNSET
@@ -12,7 +12,8 @@ planned_chain:
   - design
   - plan
 chain_skipped: []
-chain_ran: []
+chain_ran:
+  - brief
 worktree_rebases:
   - onto: origin/main
     commits: 2
@@ -23,12 +24,11 @@ worktree_rebases:
       driver D9 with a concrete number and strengthens Decision 4's rejection
       of prompt-inlining; no decision changes. Fold the citation in when
       /design revises the DESIGN.
-parent_orchestration:
-  parent: scope
-  topic: niwa-watch-slack-source
-  child: brief
-  invoked_at: 2026-08-01T21:19:41Z
 child_snapshots:
+  brief:
+    status: Draft
+    content_hash: 6623137c4756201a0344401fdcf5e3418ebc2c6e
+    captured_at: 2026-08-01T21:29:20Z
   design:
     status: Proposed
     content_hash: 70c9f55e919d2c41aeed40862b86c9c654be920e

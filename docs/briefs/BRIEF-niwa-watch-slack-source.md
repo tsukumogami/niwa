@@ -178,8 +178,8 @@ Their inbox goes back to carrying only threads that are still theirs.
   precision refinement for later, once whole-workspace grounding is shown to be
   insufficient.
 - **Reading Slack live during drafting.** The agent works from the conversation
-  as captured when the work was staged. Reading Slack live during the work is a wider
-  capability, with its own consequences for what else that work could reach.
+  as captured when the work was staged. Live reads are a wider capability, with
+  their own consequences for what else the work could reach.
 - **Multiple Slack workspaces.** One Slack workspace per niwa workspace.
 - **Other question sources.** CI failures and issue threads are separate future
   queues that would reuse this feature's admission shape.
@@ -193,8 +193,8 @@ cite them.
 
 1. **How many channels does the first version answer in?** The parent roadmap
    scopes the initial slice to one channel and pushes multi-channel to the
-   hardening feature that follows, while the settled shape of the setting is a
-   list of channels. Whether "multi-channel" means "more than one entry in the
+   hardening feature that follows, while the setting that binds channels is
+   already a list. Whether "multi-channel" means "more than one entry in the
    list" or "many channels at volume" decides whether the first version caps
    the list. The design currently leaves it uncapped.
 
@@ -206,7 +206,8 @@ cite them.
    the typical case or the only one.
 
 3. **What must happen when the release gate cannot be offered?** On a machine
-   where the developer cannot be offered that approval, the feature can either
+   where that approval cannot be put in front of the developer, the feature can
+   either
    stage a draft the developer posts by hand or refuse to run at all. The
    design currently chooses the former. That is a product decision about
    whether a degraded version is better than none, and it should be made as
@@ -222,7 +223,7 @@ cite them.
 
 ## References
 
-- `docs/designs/current/DESIGN-niwa-watch-once-pr-review.md` -- the review-request
-  queue this feature's framing is the second instance of.
+- `docs/designs/current/DESIGN-niwa-watch-once-pr-review.md` -- the
+  review-request queue this feature's framing is the second instance of.
 - `docs/designs/current/DESIGN-niwa-watch-pr-hardening.md` -- the durable state
   and attention controls the staged-work model depends on.
