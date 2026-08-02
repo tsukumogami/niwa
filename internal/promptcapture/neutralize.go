@@ -68,16 +68,55 @@ func hexEscape(c byte) string {
 
 // truncateForDisplay bounds a single rendered line to width columns, counting
 // runes rather than bytes so a multi-byte character is never split.
+//
+// It walks the string rather than converting it to a rune slice. The
+// conversion is the obvious spelling and allocates four bytes per rune over the
+// WHOLE input before discarding all but width of them -- 2.4 MB to render 100
+// columns of a 614 KB line. Walking costs one pass bounded by width.
 func truncateForDisplay(s string, width int) string {
 	if width <= 0 {
 		return ""
 	}
-	if utf8.RuneCountInString(s) <= width {
-		return s
-	}
 	const ellipsis = "..."
-	if width <= len(ellipsis) {
-		return string([]rune(s)[:width])
+	keep := width
+	if width > len(ellipsis) {
+		keep = width - len(ellipsis)
 	}
-	return string([]rune(s)[:width-len(ellipsis)]) + ellipsis
+
+	// Find the byte offset of rune `keep`, and learn whether more follow,
+	// without scanning past what we need.
+	cut, seen := len(s), 0
+	for i := range s {
+		if seen == keep {
+			cut = i
+		}
+		seen++
+		if seen > width {
+			return s[:cut] + ellipsisIf(width > len(ellipsis))
+		}
+	}
+	return s
+}
+
+func ellipsisIf(yes bool) string {
+	if yes {
+		return "..."
+	}
+	return ""
+}
+
+// truncateBytesForNeutralize bounds how many raw bytes are handed to
+// neutralize when the result will be cut to width columns anyway. Four bytes
+// per column covers the worst case: a byte that renders as a four-character
+// hex escape. Cutting on a rune boundary keeps a multi-byte character whole so
+// neutralize does not see it as invalid.
+func truncateBytesForNeutralize(b []byte, width int) []byte {
+	max := width * 4
+	if len(b) <= max {
+		return b
+	}
+	for max > 0 && !utf8.RuneStart(b[max]) {
+		max--
+	}
+	return b[:max]
 }

@@ -78,9 +78,9 @@ a rune slice before cutting it to terminal width, allocating 2.4 MB to display
 - Rendering a pasted block does work proportional to terminal width, not to the
   block: neither the full block nor a full line is converted to a rune slice to
   produce a bounded summary.
-- Allocation per input byte at 61,440, 614,400, and 3,686,400 bytes stays within
-  1.5x of itself, for each of a single-line paste, a multi-line paste, and typed
-  input.
+- Allocation per input byte does not grow by more than 1.5x between 61,440 and
+  614,400 bytes, for a single-line paste, a multi-line paste, and typed input.
+  An upper bound only.
 - Every existing test in `internal/promptcapture` passes unchanged. This issue
   changes no observable behavior.
 

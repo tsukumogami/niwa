@@ -13,6 +13,8 @@
 package promptcapture
 
 import (
+	"bufio"
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -61,12 +63,20 @@ func Read(limit int) (string, error) {
 // read is the capture core. Tests drive it with an ordinary reader and writer,
 // at any chunk size, without a terminal.
 func read(r io.Reader, w io.Writer, limit int) (string, error) {
+	// The transcript is buffered and flushed once per read chunk. Unbuffered,
+	// every echoed byte is its own write syscall -- and on a terminal that does
+	// not delimit pastes, every byte of a paste arrives as typed input, so a
+	// 582 KB paste becomes ~582,000 syscalls. Flushing at the read boundary
+	// costs nothing in latency: that is where the terminal hands us input
+	// anyway.
+	bw := bufio.NewWriter(w)
 	c := &capture{
-		w:         w,
+		w:         bw,
 		limit:     limit,
 		retention: limit * retentionMultiple,
 	}
 	c.banner()
+	bw.Flush()
 
 	buf := make([]byte, 4096)
 	for {
@@ -74,12 +84,16 @@ func read(r io.Reader, w io.Writer, limit int) (string, error) {
 		for i := 0; i < n; i++ {
 			done, text, cerr := c.step(buf[i])
 			if done {
+				bw.Flush()
 				return text, cerr
 			}
 		}
+		bw.Flush()
 		if err != nil {
 			if errors.Is(err, io.EOF) {
-				return c.endOfInput()
+				text, cerr := c.endOfInput()
+				bw.Flush()
+				return text, cerr
 			}
 			return "", err
 		}
@@ -536,14 +550,34 @@ func (c *capture) banner() {
 // proportional to terminal width, not to payload size -- and a large paste does
 // not scroll away the failure they were looking at.
 func (c *capture) renderPaste(pasted []byte) {
-	lines := strings.Split(strings.TrimSuffix(string(pasted), "\n"), "\n")
-	fmt.Fprintf(c.w, "\r\n[pasted %d line(s), %d bytes]\r\n", len(lines), len(pasted))
-	fmt.Fprintf(c.w, "  %s\r\n", truncateForDisplay(neutralize([]byte(lines[0])), displayWidth))
-	if len(lines) > 2 {
-		fmt.Fprintf(c.w, "  ... %d more line(s)\r\n", len(lines)-2)
+	// Locate the first and last line by scanning for separators rather than
+	// splitting. strings.Split over a 582 KB log copies the whole payload and
+	// builds a slice header per line, all to print at most two of them.
+	body := bytes.TrimSuffix(pasted, []byte("\n"))
+	count := bytes.Count(body, []byte("\n")) + 1
+
+	first := body
+	if i := bytes.IndexByte(body, '\n'); i >= 0 {
+		first = body[:i]
 	}
-	if len(lines) > 1 {
-		last := lines[len(lines)-1]
-		fmt.Fprintf(c.w, "  %s\r\n", truncateForDisplay(neutralize([]byte(last)), displayWidth))
+
+	fmt.Fprintf(c.w, "\r\n[pasted %d line(s), %d bytes]\r\n", count, len(pasted))
+	fmt.Fprintf(c.w, "  %s\r\n", renderLine(first))
+	if count > 2 {
+		fmt.Fprintf(c.w, "  ... %d more line(s)\r\n", count-2)
 	}
+	if count > 1 {
+		last := body
+		if i := bytes.LastIndexByte(body, '\n'); i >= 0 {
+			last = body[i+1:]
+		}
+		fmt.Fprintf(c.w, "  %s\r\n", renderLine(last))
+	}
+}
+
+// renderLine neutralizes only as much of a line as the display can hold. The
+// cost is proportional to displayWidth, not to the line, which is what the
+// bounded-record promise actually requires.
+func renderLine(line []byte) string {
+	return truncateForDisplay(neutralize(truncateBytesForNeutralize(line, displayWidth)), displayWidth)
 }
