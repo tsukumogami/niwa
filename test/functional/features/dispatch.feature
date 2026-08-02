@@ -194,3 +194,32 @@ Feature: niwa dispatch: provision, rollback, and reaper reclamation
     When I run "niwa dispatch" with stdin held open
     Then the exit code is 1
     And the error output contains "not an interactive terminal"
+
+  # --- Oversized prompts ---
+  #
+  # A prompt too large to travel as one argv element is not refused. niwa writes
+  # it to a file inside the instance and hands the worker a pointer plus an
+  # excerpt. The path must be absolute: the fake worker resolves it from "/" so
+  # an instance-relative path fails this scenario rather than passing by
+  # accident, since dispatch sets the worker's cwd to the instance.
+  #
+  # This goes through the capture rather than a positional argument, and it has
+  # to: delivering an oversized prompt positionally would require the harness to
+  # exec niwa with an argument past the very limit under test. The capture is
+  # the only path where niwa builds the oversized string itself.
+
+  @critical
+  Scenario: an oversized prompt dispatches through a spilled file
+    Given a clean niwa environment
+    And a local git server is set up
+    And a config repo "myws" exists with body:
+      """
+      [workspace]
+      name = "myws"
+      """
+    When I run niwa init from config repo "myws"
+    Then the exit code is 0
+    Given a fake claude for dispatch with session "dddddddd-dddd-4ddd-8ddd-dddddddddddd"
+    When I dispatch a generated paste of 140000 bytes
+    Then the exit code is 0
+    And the worker received a pointer to a spilled prompt

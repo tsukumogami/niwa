@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 )
 
 // dispatchLaunch is the package-level launcher seam. Production wires it to
@@ -27,18 +28,55 @@ var dispatchLaunch = realDispatchLaunch
 // an allowlisted, credential-scrubbed environment. Passing an explicit env is
 // the ONLY way the worker's environment differs from the supervisor's.
 //
-// An empty prompt is rejected before any exec (R43).
-func realDispatchLaunch(ctx context.Context, instanceDir, prompt string, passthrough, env []string) error {
-	if prompt == "" {
+// The prompt arrives in two pieces. body is the developer's text and is the
+// only part a spill may move to a file; prefix is niwa-authored text (today,
+// the keep-alive arming instruction) that always rides the argv element. They
+// are kept apart all the way down to here because the caller cannot know
+// whether a spill will happen -- that depends on the composed length -- and
+// once concatenated the distinction cannot be recovered without the exec layer
+// knowing about the keep-alive feature.
+//
+// An empty prompt is rejected before any exec. The check binds to body, NOT to
+// the composed string: prefix is a long constant whenever keep-alive is armed,
+// so testing the pair would silently stop rejecting an empty task.
+func realDispatchLaunch(ctx context.Context, instanceDir, prefix, body string, passthrough, env []string) error {
+	if body == "" {
 		return fmt.Errorf("dispatch: empty prompt")
 	}
-	// Backstop, not the user-facing check: runDispatch step (1) is where an
-	// oversized prompt is supposed to be rejected, early and with advice. This
-	// guard sits on the string that actually reaches execve, so if something is
-	// ever prepended without being counted in dispatchPromptReserve the failure
-	// names the limit instead of surfacing as an opaque E2BIG.
+	// The spill runs BEFORE the assertions below, and this order is the whole
+	// point. Reversed, an oversized prompt would be refused at the guard
+	// instead of spilled, reinstating the wall on exactly the path this exists
+	// to keep open.
+	//
+	// Two things trigger it. Length is the obvious one. A NUL is the other: an
+	// argv element cannot carry one, so such a prompt dies at exec with an
+	// opaque "invalid argument" -- a defect that predates the spill and is one
+	// paste away, since the capture preserves raw control bytes deliberately.
+	// A prompt argv cannot carry changes vehicle rather than failing, whatever
+	// the reason argv cannot carry it. The file takes raw bytes, so the NUL
+	// survives where the developer put it.
+	prompt := prefix + body
+	if len(prompt) > maxArgStringBytes || strings.ContainsRune(body, 0) {
+		token, err := spillToken()
+		if err != nil {
+			return fmt.Errorf("dispatch: %w", err)
+		}
+		path, err := spillPrompt(instanceDir, token, body)
+		if err != nil {
+			return fmt.Errorf("dispatch: %w", err)
+		}
+		prompt = composeSpillPointer(prefix, path, body, token)
+	}
+
+	// Assertions, not user-facing checks. Under the spill above neither is
+	// reachable in normal operation, which is the point: they guard against a
+	// future prepend that forgets the spill decision, exactly as the size one
+	// used to guard against a prepend that forgot the reserve.
 	if len(prompt) > maxArgStringBytes {
 		return fmt.Errorf("dispatch: prompt is %d bytes, over the %d-byte single-argument exec limit", len(prompt), maxArgStringBytes)
+	}
+	if i := strings.IndexByte(prompt, 0); i >= 0 {
+		return fmt.Errorf("dispatch: prompt contains a NUL byte at offset %d; an argv element cannot carry one", i)
 	}
 
 	bin, err := exec.LookPath("claude")

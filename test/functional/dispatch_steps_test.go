@@ -52,6 +52,12 @@ func dispatchFakeClaudeScript(behaviour string) string {
   jobdir="$HOME/.claude/jobs/$short"
   mkdir -p "$jobdir"
   printf '%s\n' "$*" > "$HOME/dispatch-launch-argv"
+  # If the prompt is a spill pointer, resolve it from / rather than from the
+  # instance dir. An instance-relative path would resolve here and must not.
+  spill=$(printf '%s' "$*" | sed -n 's/^file: \(.*\)$/\1/p' | head -1)
+  if [ -n "$spill" ]; then
+    ( cd / && cat "$spill" ) > "$HOME/dispatch-spilled-body" 2>/dev/null || true
+  fi
   cwd=$(pwd)
   printf '{"sessionId":"%s","template":"bg","state":"running","cwd":"%s"}\n' "$sid" "$cwd" > "$jobdir/state.json"
   printf 'backgrounded · %s\n' "$short"

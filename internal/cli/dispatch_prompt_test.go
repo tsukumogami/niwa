@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -25,7 +26,7 @@ func runDispatchArgs(t *testing.T, args []string) (stdout, stderr string, err er
 }
 
 // stubCapture replaces the capture seam for the duration of a test.
-func stubCapture(t *testing.T, fn func(limit int) (string, error)) {
+func stubCapture(t *testing.T, fn func() (string, error)) {
 	t.Helper()
 	prev := dispatchPromptCapture
 	dispatchPromptCapture = fn
@@ -57,7 +58,7 @@ func workspaceForDispatch(t *testing.T) (*dispatchFakes, *string) {
 func TestDispatchCapture_TextReachesTheLauncher(t *testing.T) {
 	_, launched := workspaceForDispatch(t)
 	stubCaptureTTY(t, true, true)
-	stubCapture(t, func(int) (string, error) { return "pasted failure text", nil })
+	stubCapture(t, func() (string, error) { return "pasted failure text", nil })
 
 	if _, _, err := runDispatchArgs(t, nil); err != nil {
 		t.Fatalf("dispatch with a captured prompt: %v", err)
@@ -71,7 +72,7 @@ func TestDispatchCapture_MetacharacterPayloadSurvivesVerbatim(t *testing.T) {
 	_, launched := workspaceForDispatch(t)
 	stubCaptureTTY(t, true, true)
 	payload := `a "quoted" $VAR \back\slash 'single' ` + "`tick`" + " \n second line"
-	stubCapture(t, func(int) (string, error) { return payload, nil })
+	stubCapture(t, func() (string, error) { return payload, nil })
 
 	if _, _, err := runDispatchArgs(t, nil); err != nil {
 		t.Fatalf("dispatch: %v", err)
@@ -97,7 +98,7 @@ func TestDispatchCapture_GateRequiresBothStreams(t *testing.T) {
 			stubCaptureTTY(t, tc.stdin, tc.stderrT)
 
 			called := false
-			stubCapture(t, func(int) (string, error) {
+			stubCapture(t, func() (string, error) {
 				called = true
 				return "captured", nil
 			})
@@ -128,7 +129,7 @@ func TestDispatchCapture_PositionalArgumentNeverConsultsTheTerminal(t *testing.T
 	IsStderrTTY = func() bool { consulted = true; return true }
 	t.Cleanup(func() { IsStdinTTY, IsStderrTTY = prevIn, prevErr })
 
-	stubCapture(t, func(int) (string, error) {
+	stubCapture(t, func() (string, error) {
 		t.Fatal("capture was invoked on the positional-argument path")
 		return "", nil
 	})
@@ -144,7 +145,7 @@ func TestDispatchCapture_PositionalArgumentNeverConsultsTheTerminal(t *testing.T
 func TestDispatchCapture_AbandonmentProvisionsNothing(t *testing.T) {
 	f, _ := workspaceForDispatch(t)
 	stubCaptureTTY(t, true, true)
-	stubCapture(t, func(int) (string, error) { return "", promptcapture.ErrCanceled })
+	stubCapture(t, func() (string, error) { return "", promptcapture.ErrCanceled })
 
 	_, _, err := runDispatchArgs(t, nil)
 	if err == nil {
@@ -158,7 +159,7 @@ func TestDispatchCapture_AbandonmentProvisionsNothing(t *testing.T) {
 func TestDispatchCapture_EndOfInputOnEmptyBufferIsEmptyPromptError(t *testing.T) {
 	f, _ := workspaceForDispatch(t)
 	stubCaptureTTY(t, true, true)
-	stubCapture(t, func(int) (string, error) { return "", promptcapture.ErrEndOfInput })
+	stubCapture(t, func() (string, error) { return "", promptcapture.ErrEndOfInput })
 
 	_, _, err := runDispatchArgs(t, nil)
 	if err == nil || !strings.Contains(err.Error(), "must not be empty") {
@@ -172,7 +173,7 @@ func TestDispatchCapture_EndOfInputOnEmptyBufferIsEmptyPromptError(t *testing.T)
 func TestDispatchCapture_WhitespaceOnlySubmissionIsRefused(t *testing.T) {
 	f, _ := workspaceForDispatch(t)
 	stubCaptureTTY(t, true, true)
-	stubCapture(t, func(int) (string, error) { return "  \n\t  \n", nil })
+	stubCapture(t, func() (string, error) { return "  \n\t  \n", nil })
 
 	_, _, err := runDispatchArgs(t, nil)
 	if err == nil || !strings.Contains(err.Error(), "must not be empty") {
@@ -183,50 +184,61 @@ func TestDispatchCapture_WhitespaceOnlySubmissionIsRefused(t *testing.T) {
 	}
 }
 
-func TestDispatchCapture_OversizedCaptureIsRefusedBeforeProvisioning(t *testing.T) {
-	f, _ := workspaceForDispatch(t)
-	stubCaptureTTY(t, true, true)
-	stubCapture(t, func(int) (string, error) {
-		return strings.Repeat("x", maxPromptBytes+1), nil
-	})
+// Both paths must behave identically on an oversized prompt: same spill file
+// contents, same pointer wording, same excerpt. This replaces the pair of tests
+// that asserted both paths quote the same REFUSAL -- there is no refusal now,
+// and "both paths agree" is still the property worth holding.
+func TestDispatchCapture_BothPathsSpillIdentically(t *testing.T) {
+	oversized := strings.Repeat("x", maxArgStringBytes+1)
 
-	_, _, err := runDispatchArgs(t, nil)
-	if err == nil || !strings.Contains(err.Error(), "too long") {
-		t.Fatalf("got %v, want the too-long error", err)
+	argPrompt := launchedPromptFor(t, oversized, false)
+	capPrompt := launchedPromptFor(t, oversized, true)
+
+	argNorm := normalizeSpillPointer(argPrompt)
+	capNorm := normalizeSpillPointer(capPrompt)
+	if argNorm != capNorm {
+		t.Fatalf("paths produced different pointers once the instance dir and token are normalized:\n arg: %s\n cap: %s",
+			argNorm, capNorm)
 	}
-	if f.provisionCalled != 0 {
-		t.Fatalf("provisioned %d instances; want 0", f.provisionCalled)
+	if strings.Contains(strings.ToLower(argPrompt), "too long") {
+		t.Fatalf("an oversized prompt still surfaces a size refusal: %s", argPrompt)
 	}
 }
 
-// The capture path and the argument path must quote the same limit and offer
-// the same advice, because both come from one validator rather than two
-// literals.
-func TestDispatchCapture_BothPathsShareOneRejection(t *testing.T) {
-	oversized := strings.Repeat("x", maxPromptBytes+1)
-
-	_, _ = workspaceForDispatch(t)
-	_, _, argErr := runDispatchArgs(t, []string{oversized})
-
-	_, _ = workspaceForDispatch(t)
-	stubCaptureTTY(t, true, true)
-	stubCapture(t, func(int) (string, error) { return oversized, nil })
-	_, _, capErr := runDispatchArgs(t, nil)
-
-	if argErr == nil || capErr == nil {
-		t.Fatalf("expected both paths to reject: arg=%v capture=%v", argErr, capErr)
+// launchedPromptFor dispatches oversized text by one of the two paths and
+// returns the argv element the worker would have received.
+func launchedPromptFor(t *testing.T, body string, viaCapture bool) string {
+	t.Helper()
+	f, _ := workspaceForDispatch(t)
+	var got string
+	captureLaunchPrompt(f, &got, nil)
+	if viaCapture {
+		stubCaptureTTY(t, true, true)
+		stubCapture(t, func() (string, error) { return body, nil })
+		if _, _, err := runDispatchArgs(t, nil); err != nil {
+			t.Fatalf("capture path: %v", err)
+		}
+		return got
 	}
-	if argErr.Error() != capErr.Error() {
-		t.Fatalf("paths disagree:\n arg: %v\n cap: %v", argErr, capErr)
+	if _, _, err := runDispatchArgs(t, []string{body}); err != nil {
+		t.Fatalf("argument path: %v", err)
 	}
-	if strings.Contains(strings.ToLower(argErr.Error()), "shorten") {
-		t.Fatalf("rejection tells the developer to shorten: %v", argErr)
-	}
+	return got
+}
+
+// normalizeSpillPointer replaces the two things that legitimately differ
+// between runs -- the instance directory and the per-launch token -- so the
+// rest of the pointer can be compared byte for byte.
+func normalizeSpillPointer(s string) string {
+	s = regexp.MustCompile(`prompt-[0-9a-f]{16}`).ReplaceAllString(s, "prompt-<token>")
+	s = regexp.MustCompile(`NIWA-PROMPT-EXCERPT-[0-9a-f]{16}`).ReplaceAllString(s, "NIWA-PROMPT-EXCERPT-<token>")
+	s = regexp.MustCompile(`file: \S+`).ReplaceAllString(s, "file: <path>")
+	return s
 }
 
 func TestDispatchCapture_ExplicitEmptyArgumentStillErrors(t *testing.T) {
 	_, _ = workspaceForDispatch(t)
-	stubCapture(t, func(int) (string, error) {
+	stubCapture(t, func() (string, error) {
 		t.Fatal("an explicit empty argument must not trigger a capture")
 		return "", nil
 	})

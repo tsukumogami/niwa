@@ -97,24 +97,13 @@ const (
 	// behavior, and no platform-conditional cap to keep honest.
 	maxArgStringBytes = 32*4096 - 1
 
-	// dispatchPromptReserve is the byte allowance held back at validation time
-	// for text niwa itself prepends to the prompt AFTER the check. Today that is
-	// exactly keepAliveArmingInstruction, prepended in step (9d) -- long after
-	// the step (1) check, and only when keep-alive resolves on, which cannot be
-	// known before the instance exists. Reserving its full length up front makes
-	// the single early check sound for BOTH outcomes: whatever (9d) decides, the
-	// string that reaches execve still fits maxArgStringBytes, and the rejection
-	// still lands before anything is provisioned.
-	//
-	// Anything else that starts prepending to the prompt must be added here.
-	dispatchPromptReserve = len(keepAliveArmingInstruction)
-
-	// maxPromptBytes is the largest user-supplied prompt dispatch accepts: the
-	// exec ceiling minus everything niwa may later prepend. Exceeding it fails
-	// clearly and early rather than letting exec reject the call with an opaque
-	// E2BIG after an instance has already been provisioned (DESIGN Decision 8,
-	// R43).
-	maxPromptBytes = maxArgStringBytes - dispatchPromptReserve
+	// There is deliberately no reserve here any more. One existed because a
+	// REFUSAL has to happen before provisioning while the keep-alive prepend is
+	// decided after, so the only sound answer was to reserve the worst case up
+	// front and charge it to the developer. Making the decision a route rather
+	// than a refusal dissolves that: nothing is denied, so the decision need not
+	// be early, and once it can be late it is made against the final argv string
+	// in the launcher, where no estimate is needed.
 )
 
 // lookClaude reports the path to the claude binary or an error if it is not on
@@ -176,8 +165,10 @@ so dispatch never leaves an unreclaimable instance DIRECTORY. One caveat: if the
 worker launch succeeds but session-id capture then fails, the rollback deletes
 the instance directory, but the detached background process keeps running -- we
 never captured its session id, so we cannot stop it. That process has no mapping
-and is harmless, but it is yours to 'claude stop' once you find it in 'claude
-list'.`,
+and it is yours to 'claude stop' once you find it in 'claude list'. It is mostly
+harmless, with one caveat: a prompt too large to pass as a command argument is
+written into the instance, so a worker in that window may find its task file
+already deleted and proceed on the excerpt it was given.`,
 	Args:          cobra.MaximumNArgs(1),
 	SilenceErrors: true,
 	SilenceUsage:  true,
@@ -247,7 +238,9 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	}
 
 	// (3) Preflight claude on PATH BEFORE creating any instance, so an absent
-	// claude fails with no instance dir and no mapping on disk (R16, R13).
+	// claude fails with no instance dir and no mapping on disk
+	// (PRD-instance-dispatch R16, R13 -- both numbers mean something unrelated
+	// in PRD-dispatch-paste-prompt, so the document is named).
 	if _, err := lookClaude(); err != nil {
 		return fmt.Errorf("niwa: error: claude binary not found in PATH; install Claude Code before dispatching")
 	}
@@ -260,7 +253,7 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 		if !dispatchInteractive() {
 			return fmt.Errorf("niwa: error: no prompt given and this is not an interactive terminal; pass the prompt as an argument: niwa dispatch \"<task>\"")
 		}
-		captured, err := dispatchPromptCapture(maxPromptBytes)
+		captured, err := dispatchPromptCapture()
 		if err != nil {
 			switch {
 			case errors.Is(err, promptcapture.ErrCanceled):
@@ -414,17 +407,24 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	// keepAliveArmed records that the arming actually happened (resolved on AND
 	// remote control on); it is what the durable mapping carries in step (11),
 	// so `niwa list` reports sessions genuinely kept alive, not mere requests.
+	// promptPrefix is niwa-authored text that always rides the argv element.
+	// Keeping it separate from the developer's prompt is what lets the launcher
+	// spill only the latter: once the two are concatenated the distinction is
+	// gone, and a spill would write niwa's arming instruction into the file
+	// where the developer's text belongs -- producing a session recorded and
+	// reported as kept alive that was never actually armed.
+	promptPrefix := ""
 	keepAliveArmed := false
 	if resolveDispatchKeepAlive(dispatchKeepAlive, hostGlobal, inst) {
 		if remoteControlEnabled(rcInjected, inst) {
-			prompt = keepAliveArmingInstruction + prompt
+			promptPrefix = keepAliveArmingInstruction
 			keepAliveArmed = true
 		} else {
 			fmt.Fprintf(cmd.ErrOrStderr(), "niwa dispatch: %s\n", keepAliveNonRCWarning)
 		}
 	}
 
-	if err := dispatchLaunch(cmd.Context(), instancePath, prompt, passthrough, nil); err != nil {
+	if err := dispatchLaunch(cmd.Context(), instancePath, promptPrefix, prompt, passthrough, nil); err != nil {
 		return fmt.Errorf("niwa: error: launching dispatch worker: %w", err)
 	}
 
@@ -650,11 +650,9 @@ func validateDispatchPrompt(prompt string) error {
 	if strings.TrimSpace(prompt) == "" {
 		return fmt.Errorf("niwa: error: dispatch prompt must not be empty")
 	}
-	// The limit already excludes dispatchPromptReserve, so a prompt that passes
-	// here still fits after step (9d) may prepend the keep-alive instruction --
-	// there is one check, it is early, and it covers the final string.
-	if len(prompt) > maxPromptBytes {
-		return fmt.Errorf("niwa: error: dispatch prompt is too long (%d bytes, limit %d); it is passed to claude as a single exec argument, so it cannot be truncated or split. Write the detail to a file and reference its path from a shorter prompt", len(prompt), maxPromptBytes)
-	}
+	// No size check. A prompt too large to travel as one argv element is not
+	// refused: the launcher writes it to a file inside the instance and hands
+	// the worker a pointer instead. Nothing about a prompt's size is the
+	// developer's problem any more, so nothing here has an opinion about it.
 	return nil
 }

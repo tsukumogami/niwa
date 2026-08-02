@@ -100,8 +100,9 @@ niwa dispatch "Read <abs-path-to-brief> for your complete task brief, then imple
   user named a specific model, since categories stay correct as concrete models change. Omit the
   flag to use the workspace default (the `[global] dispatch_model` host setting, if any). Example:
   `niwa dispatch "..." --name "<topic>" --model powerful --detach`.
-- Pass the brief's absolute path in the prompt; keep the inline summary short (the prompt is a
-  single shell argument).
+- Pass the brief's absolute path in the prompt and keep the inline summary short. The prompt
+  rides a single argv element and is never passed through a shell, so quoting and
+  metacharacters are not a hazard.
 
 ### 4. Report back
 
@@ -111,8 +112,11 @@ running in its own instance. If they want to fan out more, repeat from step 1.
 
 ## Cautions
 
-- **Don't paste giant context into the prompt.** Put it in the brief file; the prompt just
-  points at it. Long prompts also risk the argument-length limit.
+- **Put giant context in the brief file, not the prompt.** The prompt just points at it. This
+  is about legibility, not size: a prompt that is a wall of pasted text is harder for you and
+  the user to read back later than one that names a durable artifact. niwa handles size on its
+  own -- a prompt too large to pass as a command argument is written to a file automatically
+  and the worker gets a pointer -- so there is no limit here to work around.
 - **The worker can't see your unpushed work.** The clone comes from the remotes, so if the
   task depends on edits that only exist in this session's tree (uncommitted, or committed but
   not pushed), either commit AND push them first, or spell them out in the brief.

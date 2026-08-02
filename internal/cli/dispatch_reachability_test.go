@@ -14,7 +14,7 @@ import (
 //
 // This test fails the day someone moves the capture into the launcher.
 func TestLauncherCannotReachTheCapture(t *testing.T) {
-	stubCapture(t, func(int) (string, error) {
+	stubCapture(t, func() (string, error) {
 		t.Fatal("the capture was invoked from the launcher path; a cron-driven " +
 			"sweep would block forever waiting on input that never arrives")
 		return "", nil
@@ -31,7 +31,7 @@ func TestLauncherCannotReachTheCapture(t *testing.T) {
 
 	// Drive the real launcher seam the way watch.go does: a prompt built by the
 	// caller, passed positionally, with no terminal involved.
-	err := dispatchLaunch(context.Background(), root, "resume the review", nil, nil)
+	err := dispatchLaunch(context.Background(), root, "", "resume the review", nil, nil)
 	if err != nil {
 		t.Fatalf("launcher returned %v", err)
 	}
@@ -44,12 +44,12 @@ func TestLauncherCannotReachTheCapture(t *testing.T) {
 // property that makes the reachability guarantee structural: there is no branch
 // in the launcher that could ever want to ask.
 func TestLauncherRejectsEmptyPromptRatherThanCapturing(t *testing.T) {
-	stubCapture(t, func(int) (string, error) {
+	stubCapture(t, func() (string, error) {
 		t.Fatal("the launcher tried to capture a prompt instead of rejecting an empty one")
 		return "", nil
 	})
 
-	err := realDispatchLaunch(context.Background(), t.TempDir(), "", nil, nil)
+	err := realDispatchLaunch(context.Background(), t.TempDir(), "", "", nil, nil)
 	if err == nil {
 		t.Fatal("expected the launcher to reject an empty prompt")
 	}

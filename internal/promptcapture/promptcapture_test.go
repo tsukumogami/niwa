@@ -40,7 +40,7 @@ const bigLimit = 1 << 20
 
 // runAll drives read at several chunk sizes, including one, and requires the
 // same result from each.
-func runAll(t *testing.T, input string, limit int) (string, error, string) {
+func runAll(t *testing.T, input string, backstop int) (string, error, string) {
 	t.Helper()
 	var (
 		firstText string
@@ -49,7 +49,7 @@ func runAll(t *testing.T, input string, limit int) (string, error, string) {
 	)
 	for i, size := range []int{1, 3, 7, 4096} {
 		var out bytes.Buffer
-		got, err := read(&chunked{src: []byte(input), size: size}, &out, limit)
+		got, err := read(&chunked{src: []byte(input), size: size}, &out, backstop)
 		if i == 0 {
 			firstText, firstErr, firstOut = got, err, out.String()
 			continue
@@ -172,68 +172,27 @@ func TestCancelIsDistinctFromEndOfInput(t *testing.T) {
 	}
 }
 
-func TestCeilingRetainsWhatCrossedAndDeletionRecovers(t *testing.T) {
-	// Type A, then paste B, so A+B crosses a small ceiling.
-	input := "AAAA" + paste("BBBBBB")
+func TestBackstopAppendIsRefusedInFull(t *testing.T) {
+	backstop := 16
+	big := strings.Repeat("x", backstop+50)
 	var out bytes.Buffer
-	c := &capture{w: &out, limit: 8, retention: 8 * retentionMultiple}
-	c.banner()
-	for _, b := range []byte(input) {
-		if done, _, _ := c.step(b); done {
-			t.Fatal("capture ended early")
-		}
-	}
-
-	if !c.overCeiling {
-		t.Fatal("expected the capture to be marked over the ceiling")
-	}
-	if got := string(c.buf); got != "AAAA\nBBBBBB" && got != "AAAABBBBBB" {
-		t.Fatalf("buffer did not retain what crossed: %q", got)
-	}
-	if !strings.Contains(out.String(), "limit is 8") {
-		t.Fatalf("refusal did not name the limit: %q", out.String())
-	}
-	if strings.Contains(strings.ToLower(out.String()), "shorten") {
-		t.Fatalf("refusal tells the developer to shorten: %q", out.String())
-	}
-	if !strings.Contains(out.String(), "file") {
-		t.Fatalf("refusal does not name the file alternative: %q", out.String())
-	}
-
-	// Submitting while over the ceiling must not return.
-	if done, _, _ := c.step(0x0d); done {
-		t.Fatal("submit succeeded while over the ceiling")
-	}
-
-	// Delete down, then submit.
-	for i := 0; i < 10; i++ {
-		c.step(0x7f)
-	}
-	if c.overCeiling {
-		t.Fatalf("still over the ceiling after deleting down to %d bytes", len(c.buf))
-	}
-	done, text, err := c.step(0x0d)
-	if !done || err != nil {
-		t.Fatalf("submit after deleting down: done=%v err=%v", done, err)
-	}
-	if len(text) > 8 {
-		t.Fatalf("submitted %d bytes over an 8-byte limit", len(text))
-	}
-}
-
-func TestOverRetentionAppendIsRefusedInFull(t *testing.T) {
-	limit := 16
-	big := strings.Repeat("x", limit*retentionMultiple+50)
-	var out bytes.Buffer
-	c := &capture{w: &out, limit: limit, retention: limit * retentionMultiple}
+	c := &capture{w: &out, backstop: backstop}
 	for _, b := range []byte(paste(big)) {
 		c.step(b)
 	}
 	if len(c.buf) != 0 {
 		t.Fatalf("buffer retained %d bytes of an over-bound paste; want none", len(c.buf))
 	}
-	if !strings.Contains(out.String(), "nothing was kept") {
+	if !strings.Contains(strings.ToLower(out.String()), "nothing from it was kept") {
 		t.Fatalf("refusal did not say the input was not retained: %q", out.String())
+	}
+	// The backstop is a memory bound, not a product limit: it must not read as
+	// a size ceiling or hand out size advice.
+	low := strings.ToLower(out.String())
+	for _, forbidden := range []string{"limit", "too large", "too long", "shorten", "re-select", "reference its path"} {
+		if strings.Contains(low, forbidden) {
+			t.Errorf("backstop refusal contains %q, which describes a size limit: %q", forbidden, out.String())
+		}
 	}
 }
 
@@ -294,7 +253,7 @@ func TestEscapeThatIsNotAMarkerIsPayload(t *testing.T) {
 // and fragmented the text being typed.
 func TestSingleCharacterDeleteErasesInPlace(t *testing.T) {
 	var out bytes.Buffer
-	c := &capture{w: &out, limit: bigLimit, retention: bigLimit * retentionMultiple}
+	c := &capture{w: &out, backstop: bigLimit}
 	for _, b := range []byte("thihs") {
 		c.step(b)
 	}
@@ -328,7 +287,7 @@ func TestLargeDeletesFallBackToOneStatusLine(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var out bytes.Buffer
-			c := &capture{w: &out, limit: bigLimit, retention: bigLimit * retentionMultiple}
+			c := &capture{w: &out, backstop: bigLimit}
 			for _, b := range []byte("some words here") {
 				c.step(b)
 			}
@@ -352,7 +311,7 @@ func TestLargeDeletesFallBackToOneStatusLine(t *testing.T) {
 // back over.
 func TestDeleteAfterPasteDoesNotEraseIntoTheSummary(t *testing.T) {
 	var out bytes.Buffer
-	c := &capture{w: &out, limit: bigLimit, retention: bigLimit * retentionMultiple}
+	c := &capture{w: &out, backstop: bigLimit}
 	for _, b := range []byte(paste("line one\nline two")) {
 		c.step(b)
 	}
@@ -376,7 +335,7 @@ func TestDeleteAfterPasteDoesNotEraseIntoTheSummary(t *testing.T) {
 // looks like it deleted the rest of the line.
 func TestTypedNewlineEchoesAsARealLineBreak(t *testing.T) {
 	var out bytes.Buffer
-	c := &capture{w: &out, limit: bigLimit, retention: bigLimit * retentionMultiple}
+	c := &capture{w: &out, backstop: bigLimit}
 	for _, b := range []byte("one") {
 		c.step(b)
 	}
