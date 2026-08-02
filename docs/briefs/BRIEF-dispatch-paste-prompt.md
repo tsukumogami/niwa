@@ -143,7 +143,7 @@ session working on the text they handed over. Whether that
 text travelled as an argument or was parked in a file the worker reads is
 niwa's business, decided from the size of what was submitted, and it changes
 nothing the developer has to do. What they can still see, when they look at
-the session later, is enough of the text to recognize which handoff it was.
+the worker later, is enough of the text to recognize which handoff it was.
 
 ## User Journeys
 
@@ -179,11 +179,12 @@ different road than the eight-line one they sent an hour earlier.
 
 ### Recognizing a session after the fact
 
-A developer who fanned out three workers over a morning comes back and looks
-at the list. The one they dispatched a whole build log to is identifiable
-from its opening line -- enough of the pasted text is visible to tell it apart
-from the other two -- rather than showing only a filename they never chose.
-They can still reach the full text if they want it.
+A developer who fanned out three workers over a morning opens the one they
+dispatched a whole build log to. Its first message starts with text from that
+log rather than with a filename they never chose, so they know at a glance
+which handoff it was. They can still reach the full text if they want it.
+Telling the three apart from the outside is what `--name` is for; this journey
+is about what the worker opens on.
 
 ### Dispatching oversized text from a script
 

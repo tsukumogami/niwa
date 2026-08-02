@@ -57,11 +57,11 @@ same numbering discipline as the earlier rounds, and the replacements begin at
 R43. R10 was consumed by the earlier revisions and is not reused; the
 amendment's fidelity requirement is R51.
 
-The status moved back from Done to In Progress, which is the honest reading:
-the capture shipped and its criteria hold, but every criterion covering R43
-through R60 describes work that has not been built. Leaving the document at
-Done would assert that acceptance criteria are met when roughly a third of them
-have never run.
+The status moved back from Done to In Progress. The capture shipped, but the
+amendment rewrote or invalidated enough of the criteria that the section is no
+longer a record of what has been verified, so every box is left unchecked and
+the whole set is re-run as part of this work. The Acceptance Criteria preamble
+says which criteria are new.
 
 The reversal came from using the shipped command. The refusal message told the
 developer to write the text to a file and dispatch a prompt referencing that
@@ -114,7 +114,7 @@ The limit belonged to a transport niwa chose, and asking the developer to route
 around it asked them to compensate for a decision they never made and could not
 see.
 
-The cost concentrates where the feature is most useful. Measured payloads: a Go
+The cost concentrated where the feature is most useful. Measured payloads: a Go
 panic is about 5.6 KB, a failing `go test ./...` about 7.7 KB, a CI failure
 excerpt about 9.2 KB -- all comfortably inside the argv limit. A whole run is
 not: `go test -v ./...` measures about 326 KB and a full CI log about 582 KB.
@@ -246,6 +246,13 @@ the other size requirements rather than here.
   entered. The gesture is DESIGN's; the capability is required because a
   capture the developer can see (R35) but cannot correct is worse than no
   rendering at all. It no longer serves a size refusal, since there is none.
+- **R41.** Line breaks inside a pasted block SHALL be normalized to a single line
+  feed: a lone carriage return, and a carriage return followed by a line feed,
+  each become one line feed. This is required because terminals differ in which
+  byte they deliver for a pasted line break, and a prompt whose lines are
+  separated by carriage returns reaches the worker as one unreadable line --
+  defeating the purpose of carrying the error verbatim. No other byte inside a
+  pasted block SHALL be altered.
 - **R5.** The developer SHALL be able to type text alongside pasted text and
   send both together, using the same submit gesture as a bare paste. No flag,
   mode, or prior decision SHALL be required to reach either case. On terminals
@@ -263,9 +270,11 @@ the other size requirements rather than here.
   existing empty-prompt error rather than dispatching.
 - **R37.** Input SHALL be accepted without perceptible stall, including when it
   arrives as a single line, at every size up to and including a whole
-  continuous-integration log. Accepting a payload SHALL NOT take materially
-  longer than accepting the same number of bytes spread across many lines, and
-  the per-byte cost SHALL NOT grow with how much has already been entered.
+  continuous-integration log. The work done per byte accepted SHALL NOT grow
+  with how much has already been entered, and SHALL NOT depend on whether the
+  bytes arrive as one line or many. Stated over work done rather than over
+  elapsed time, because this document already records one bogus superlinear
+  measurement that came from timing a harness.
 
 ### Cancellation, exit paths, and terminal state
 
@@ -332,7 +341,9 @@ magnitude.
   platform-conditional definition SHALL exist.
 - **R47.** The spill SHALL apply identically to a prompt supplied as a
   positional argument and to one captured interactively. The two paths SHALL
-  NOT differ in threshold, in file format, or in the pointer they produce.
+  NOT differ in threshold, in file contents, or in the wording and structure of
+  the pointer. They will differ in the pointer's path, since R59 makes each
+  spilled filename unique; that difference is the only one permitted.
 - **R48.** The spill SHALL apply on every path that launches a worker,
   including the launcher path `niwa watch` drives directly. No launch path
   SHALL be able to reach `execve` with an argv string over
@@ -370,7 +381,12 @@ magnitude.
   that two launches into the same instance cannot collide. This is not
   hypothetical: `niwa watch`'s continuation path launches repeatedly into an
   instance it did not create and does not replace, so an instance can host more
-  than one launch over its life.
+  than one launch over its life. Uniqueness SHALL come from an unpredictable
+  per-launch token rather than a counter or a content hash, because the same
+  token also delimits the excerpt (R52) and an attacker-predictable delimiter
+  can be forged by the very text it delimits. A content hash additionally fails
+  the requirement outright, since `niwa watch`'s continuation prompts are fixed
+  templates that hash identically on every pass.
 - **R51.** The bytes the developer submitted SHALL reach the worker
   byte-for-byte -- in the argv element when they fit, and in the spill file
   when they do not -- subject only to three stated exceptions: the single line
@@ -378,17 +394,36 @@ magnitude.
   by R41, and the prepends R58 keeps in argv. No other trimming, normalization,
   or re-encoding SHALL be applied, and the spill file SHALL carry no header,
   footer, or wrapper around the submitted bytes.
+
+  One exception is forced by the operating system rather than chosen: an argv
+  element cannot contain a NUL byte, so a below-threshold prompt containing one
+  cannot reach the worker byte-for-byte by any implementation. See R61.
+- **R61.** A prompt containing a NUL byte SHALL fail with a message naming the
+  NUL as the cause, rather than surfacing as an opaque `invalid argument` from
+  exec. This is a pre-existing defect rather than one the amendment introduces:
+  the capture preserves raw control bytes in the payload deliberately, so a
+  binary-contaminated log is one paste away from an unexplained launch failure
+  today, and neither the size check nor the pre-exec assertion catches it.
+  Above the threshold the problem disappears on its own, since the bytes travel
+  in a file; the requirement covers the path where they still travel in argv.
 - **R52.** The pointer the worker receives SHALL name the file by a path the
   worker can resolve regardless of its working directory, SHALL instruct the
   worker to read that file as its task, and SHALL carry a leading excerpt of
-  the submitted text. The excerpt SHALL be bounded above so the pointer stays
-  small, and bounded BELOW so it does its job: two dispatches whose submitted
-  prompts differ SHALL produce different argv elements whenever their texts
-  differ within the excerpt's length, and the lower bound SHALL be large enough
-  that ordinary failure output -- a first stack frame, a first assertion line --
-  fits inside it. The excerpt SHALL be truncated on a character boundary and
-  SHALL be labelled as a prefix, so a worker cannot mistake a truncated stack
-  trace for a whole one.
+  the submitted text. The excerpt SHALL be at least 512 bytes of the submitted
+  text, or the whole of it when it is shorter -- an absolute floor, not one
+  expressed in terms of the excerpt's own length, so that shrinking the excerpt
+  fails a test rather than trivially satisfying a self-referential property.
+  512 bytes carries a first stack frame or a first assertion line, which is
+  what makes a session identifiable. The label SHALL state how much was cut,
+  not merely that something was: a prefix marker without a magnitude leaves a
+  worker unable to judge whether reading the file matters. The delimiter around
+  the excerpt SHALL be unpredictable to the submitted text, so that pasted
+  content cannot forge it and appear to escape the quotation; the R59 token
+  serves this. The excerpt SHALL be bounded above so the
+  whole argv element stays well under `maxArgStringBytes`; DESIGN picks the
+  upper bound within those two constraints. The excerpt SHALL be truncated on a
+  character boundary and SHALL be labelled as a prefix, so a worker cannot
+  mistake a truncated stack trace for a whole one.
 - **R53.** A spilled prompt SHALL be written inside the instance the worker is
   launched into, so that the existing rollback-on-failure and reclamation
   lifecycle removes it. No spilled prompt SHALL outlive its instance, and a
@@ -399,18 +434,14 @@ magnitude.
   reclamation is the disposal mechanism, and it is the only one.
 - **R54.** The spilled file SHALL be created readable and writable by its owner
   only, and by no group or other, matching the mode the existing in-instance
-  dispatch marker uses. The directory holding it SHALL be no more permissive.
+  dispatch marker uses. The directory holding it SHALL be no more permissive,
+  which means niwa SHALL create a directory it controls: the instance's
+  existing state directory is created world-readable and a later create call
+  does not lower an existing directory's mode, so the spill cannot simply be
+  dropped beside the dispatch marker.
 - **R19.** No per-line length limit SHALL apply to captured input. A single line
   longer than the terminal's line-discipline buffer SHALL be captured intact,
   without truncation and without hanging.
-- **R41.** Line breaks inside a pasted block SHALL be normalized to a single line
-  feed: a lone carriage return, and a carriage return followed by a line feed,
-  each become one line feed. This is required because terminals differ in which
-  byte they deliver for a pasted line break, and a prompt whose lines are
-  separated by carriage returns reaches the worker as one unreadable line --
-  defeating the purpose of carrying the error verbatim. No other byte inside a
-  pasted block SHALL be altered.
-
 ### Non-interactive and degraded terminals
 
 - **R20.** When no positional argument is supplied and the session is not
@@ -455,9 +486,11 @@ magnitude.
   R43, and `docs/designs/current/DESIGN-instance-dispatch.md` where it restates
   that requirement. The two upstream artifacts are at terminal status and SHALL
   be annotated in place rather than rewritten, naming this PRD as the
-  superseding requirement. Writing a brief file remains the recommended
-  practice for agents, for reasons that have nothing to do with size; the
-  correction is to stop citing a limit that no longer refuses anything.
+  superseding requirement. The BRIEF for this same topic is amended directly by
+  this chain rather than annotated, so it is not on the list. Writing a brief
+  file remains the recommended practice for agents, for reasons that have
+  nothing to do with size; the correction is to stop citing a limit that no
+  longer refuses anything.
 - **R60.** Code comments citing requirement numbers from
   `docs/prds/PRD-instance-dispatch.md` SHALL be disambiguated where this PRD
   reuses the same number for a different meaning. `dispatch_launcher.go` cites
@@ -474,6 +507,14 @@ magnitude.
 
 Each criterion names the requirements it verifies, and is filed at the level
 whose harness can make it fail.
+
+Every box is unchecked. Criteria naming R43 through R60 are new and describe
+unbuilt work. The rest were satisfied by the shipped capture, but the amendment
+changes the code underneath most of them -- the capture loses its limit
+parameter, the launcher's signature changes, and the argv element is composed
+one layer deeper -- so they are re-run rather than carried over as ticked. A
+criterion that survives untouched and still passes can be ticked as the work
+lands; none is assumed.
 
 ### Unit tests over an injectable capture core
 
@@ -497,14 +538,14 @@ whose harness can make it fail.
 - [ ] Abandonment returns a sentinel distinct from both end-of-input and a
       successful submit (R8).
 - [ ] Deleting entered text reduces the buffer (R36).
-- [ ] Over the sample {0, 1, 131,070, 131,071, 131,072, 614,400} bytes, every
-      input is accepted, is submittable, and is returned byte-for-byte (R43).
+- [ ] Over the sample {0, 1, 131,070, 131,071, 131,072, 614,400} bytes, the
+      capture accepts every input and returns it byte-for-byte. Size never
+      blocks a return; the zero-byte case still returns empty and is rejected
+      downstream by R29, which is a content rule, not a size one (R43).
 - [ ] Over that same sample, and over the bytes written before the first read,
-      nothing on the render target names a byte ceiling, states a maximum, or
-      asks the developer to remove or shorten input. Checked as a substantive
-      property, with a secondary lint for the substrings "limit", "too long",
-      and "too large". The R49 refusal is the one message exempt from the lint,
-      and it is covered by its own criterion below (R43, R49).
+      nothing on the render target contains the substrings "limit", "too long",
+      or "too large", case-insensitively. The R49 backstop refusal is the one
+      message exempt, and it has its own criterion below (R43, R49).
 - [ ] Six appends of 614,400 bytes each -- 3.6 MB cumulative, well past the
       point where any earlier retention bound would have fired -- are all
       accepted, so the backstop is genuinely far above what a developer
@@ -555,21 +596,26 @@ whose harness can make it fail.
       still begins with the arming instruction, and the session mapping's
       keep-alive flag matches what was actually sent (R58).
 - [ ] The same oversized payload supplied as a positional argument and returned
-      from the capture seam produces byte-identical spill file contents, and
-      pointer text that is identical once each run's instance directory is
-      replaced by a placeholder -- same instruction wording, same in-instance
-      filename shape, same excerpt bytes (R47).
+      from the capture seam produces byte-identical spill file contents.
+      Compared as separate assertions from the path: identical instruction
+      wording and identical excerpt bytes. The two paths' spill paths differ
+      only in the instance directory and the uniqueness token, and are equal
+      once both are normalized (R47, R59).
 - [ ] An oversized prompt produces a spill file whose bytes equal the submitted
       bytes exactly, with no header, footer, or trailing newline added (R51).
 - [ ] The worker's argv element for an oversized prompt contains the spill
       file's path, an instruction to read it, a fixed marker constant
-      delimiting the excerpt, and at most N bytes of excerpt with N asserted
-      against its derivation. The path satisfies `filepath.IsAbs`. The whole
-      argv element stays under `maxArgStringBytes`. A cut falling mid-character
-      moves back to a character boundary (R52).
-- [ ] Two dispatches whose submitted prompts differ within the excerpt's length
-      produce different argv elements, so the excerpt cannot be degraded to a
-      single byte while still passing (R52).
+      delimiting the excerpt -- built from a fixed prefix constant plus the
+      launch's unique token, and asserted absent from the excerpt bytes -- a
+      statement of how many bytes of how many were quoted, and an excerpt of at
+      least 512 bytes. The path
+      satisfies `filepath.IsAbs`. The whole argv element stays under
+      `maxArgStringBytes`. A cut falling mid-character moves back to a character
+      boundary (R52).
+- [ ] Two prompts identical for their first 512 bytes and differing at byte 513
+      produce different argv elements. The differing position is fixed by the
+      criterion rather than by the excerpt's own length, so an excerpt shrunk
+      below the floor fails (R52).
 - [ ] The spill file's mode is 0600 and the directory holding it is no more
       permissive than 0700 (R54).
 - [ ] The spill file lives under the instance the worker is launched into, and
@@ -650,7 +696,7 @@ whose harness can make it fail.
       (R9).
 - [ ] The terminal's mode after a normal submit matches its mode before (R9).
 - [ ] The terminal's mode after the capture receives SIGTERM matches its mode
-      before; likewise for SIGHUP (R9).
+      before; likewise for SIGHUP and SIGQUIT (R9).
 - [ ] The terminal's mode after an interrupt during capture matches its mode
       before, and no instance is created (R39, R7).
 - [ ] The terminal's mode after the capture is suspended and resumed matches its
@@ -888,6 +934,12 @@ would go to the redirect target.
   it existed only in process memory. The positional path was already worse --
   the whole prompt lands in shell history -- but the capture path was better,
   and is now better only below the threshold.
+- **A dispatch whose session-id capture fails destroys the instance under a
+  worker that is already running.** That window exists today and the command's
+  own help calls the resulting orphan harmless. With a spilled prompt it is
+  less harmless: the worker wakes up, finds the path gone, and proceeds on the
+  excerpt alone. The alternative is leaving instances behind, which is worse,
+  so this is documented rather than fixed.
 - **A spilled prompt is not the worker's literal opening message.** The worker
   receives an instruction to read a file. It must spend a tool call to get the
   text, and a worker that ignores the instruction proceeds on the excerpt
