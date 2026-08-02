@@ -43,6 +43,31 @@ chain_ran:
       spill file after exec returns would race the worker's read, since
       `claude --bg` returns before the worker has read anything.
       Instance reclamation is the disposal mechanism instead (R53).
+
+      Round two found four more, including one contradiction the round-one
+      fixes introduced: R47 demanded identical pointer text while R59
+      demanded unique filenames. R52's excerpt floor was self-referential
+      and trivially satisfied by one byte; it now has an absolute 512-byte
+      floor.
+  - name: design
+    outcome: amended-in-place
+    decisions_investigated: 4
+    note: |
+      Two investigations conflicted on the spill filename -- one wanted an
+      unpredictable nonce so the excerpt fence cannot be forged by the text
+      it delimits, the other an instance-scoped counter so two runs produce
+      identical pointer text. Resolved for the nonce: the counter's only
+      advantage was a criterion that round two had already rewritten to
+      normalize the token.
+
+      Three findings changed the PRD rather than the design. A probe showed
+      an argv element cannot carry a NUL byte, which is a live defect on the
+      below-threshold path today (R61). R37's copy-count criterion was wrong
+      -- it fails on shipped code at 8.5x for reasons predating the
+      amendment -- and was replaced with the invariant the requirement is
+      actually about. R49's "refuse the append in full" was undefined for
+      typed input, where the unit is one byte and a literal reading emits a
+      refusal per byte.
 parent_orchestration:
   parent: scope
   topic: dispatch-paste-prompt
