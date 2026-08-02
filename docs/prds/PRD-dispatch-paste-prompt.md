@@ -406,14 +406,17 @@ magnitude.
   One exception is forced by the operating system rather than chosen: an argv
   element cannot contain a NUL byte, so a below-threshold prompt containing one
   cannot reach the worker byte-for-byte by any implementation. See R61.
-- **R61.** A prompt containing a NUL byte SHALL fail with a message naming the
-  NUL as the cause, rather than surfacing as an opaque `invalid argument` from
-  exec. This is a pre-existing defect rather than one the amendment introduces:
-  the capture preserves raw control bytes in the payload deliberately, so a
-  binary-contaminated log is one paste away from an unexplained launch failure
-  today, and neither the size check nor the pre-exec assertion catches it.
-  Above the threshold the problem disappears on its own, since the bytes travel
-  in a file; the requirement covers the path where they still travel in argv.
+- **R61.** A prompt containing a NUL byte SHALL spill, at any size. An argv
+  element cannot carry a NUL, so such a prompt fails at exec today with an
+  opaque `invalid argument` that neither the size check nor the pre-exec
+  assertion explains -- a pre-existing defect rather than one the amendment
+  introduces, and a reachable one, since the capture preserves raw control
+  bytes deliberately and a binary-contaminated log is one paste away. Spilling
+  rather than refusing follows the same principle as R44: a prompt argv cannot
+  carry changes vehicle instead of failing. The file takes raw bytes, so the
+  NUL survives where the developer put it. A NUL reaching the composed argv
+  string by any other route SHALL still be refused with a message naming it,
+  as a backstop.
 - **R52.** The pointer the worker receives SHALL name the file by a path the
   worker can resolve regardless of its working directory, SHALL instruct the
   worker to read that file as its task, and SHALL carry a leading excerpt of
@@ -648,6 +651,22 @@ lands; none is assumed.
       below the floor fails (R52).
 - [ ] The spill file's mode is 0600 and the directory holding it is no more
       permissive than 0700 (R54).
+- [ ] The spill filename matches the pattern the instance's own `.gitignore`
+      carries, so a workspace nested inside a larger tracked working tree
+      cannot stage a spilled prompt with `git add -A` (R54).
+- [ ] A second launch into an instance whose spill directory already exists
+      succeeds; the same launch against a path that is a symlink, a
+      non-directory, or a directory more permissive than 0700 fails and
+      provisions nothing (R54, R59).
+- [ ] With keep-alive armed and an empty task, the launch is refused -- the
+      emptiness check binds to the developer's text, not to the composed string
+      (R29, R58).
+- [ ] A prompt containing a NUL byte spills at any size, the spill file
+      contains the NUL where the developer put it, and no argv element carries
+      one (R61).
+- [ ] The excerpt is asserted not to contain the launch token rather than
+      scrubbed of it, and the token is not derived from the instance name's
+      random suffix (R52, R59).
 - [ ] The spill file lives under the instance the worker is launched into, and
       destroying that instance removes it (R53).
 - [ ] Two launches into the SAME instance produce two spill files, neither

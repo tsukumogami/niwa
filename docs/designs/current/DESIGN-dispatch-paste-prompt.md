@@ -419,6 +419,29 @@ func realDispatchLaunch(ctx context.Context, instanceDir, prefix, body string,
 var spillPrompt = writeSpillFile
 ```
 
+Three ordering rules bind the launcher, and each replaces something the split
+would otherwise break silently.
+
+**The empty-prompt guard binds to `body`, never to the pair.** The shipped
+guard rejects an empty prompt before any exec. Ported naively as
+`prefix+body == ""` it stops firing the moment keep-alive arms, because the
+prefix is a long constant -- so an empty task would launch a worker with
+nothing but an arming instruction. It must test `body`.
+
+**The spill decision runs before the assertions, and the assertions run on the
+composed string.** Ordering them the other way would refuse an oversized prompt
+at the guard instead of spilling it, reinstating the wall on precisely the path
+this amendment exists to keep open.
+
+**A NUL in the body triggers the spill rather than a refusal.** The design's
+thesis is that a prompt too large for argv changes vehicle rather than failing;
+a prompt that argv cannot carry *for a different reason* should do the same. The
+file takes raw bytes, so a NUL survives there, and the excerpt is neutralized
+anyway. Triggering on `oversized || containsNUL` makes the refusal disappear
+for the exact input class the capture is built to preserve -- binary-contaminated
+logs -- and is cheaper than the assertion it replaces. The assertion still stays
+as a backstop for a NUL that reaches the composed string by some other route.
+
 ### Data flow
 
 Bytes arrive from standard input in chunks. The loop maintains **three** pieces
@@ -622,7 +645,7 @@ reading a different one. The weaker guarantee is the better trade, and it costs
 nothing in practice because that path builds its prompts from fixed templates
 that never spill.
 
-**What the file is.** `<instance>/.niwa/dispatch-prompts/prompt-<token>.txt`,
+**What the file is.** `<instance>/.niwa/dispatch-prompts/prompt-<token>.local.txt`,
 the directory created at `0700` and the file opened `O_CREATE|O_EXCL|O_WRONLY`
 at `0600`.
 
@@ -637,9 +660,46 @@ classifier keys on a directory whose immediate parent is `worktrees` under
 being safe the moment anything created a subdirectory inside it. Cheap to
 avoid, so avoid it.
 
-The extension is `.txt` and specifically not `.md`: the content is a pasted log
-carried verbatim, and calling it markdown invites the reading agent to
-interpret backtick fences that are just log output.
+The extension is `.local.txt`, and both halves are load-bearing. Not `.md`,
+because the content is a pasted log carried verbatim and calling it markdown
+invites the reading agent to interpret backtick fences that are just log
+output. And `.local` because the instance `.gitignore` niwa writes carries
+exactly one pattern, `*.local*`, and nothing else -- the `.niwa/` exclusion
+exists only for cloned repos and worktrees, never for the instance root. The
+comment on that ignore-writing code names the hazard itself: the instance root
+is not a git directory, but users frequently place it inside a larger tracked
+working tree. In that layout a `git add -A` from the outer repo would stage a
+spilled prompt. Slotting into the existing convention costs nothing and
+survives a user who deletes and regenerates the ignore file.
+
+### Where the spilled prompt is not the only copy
+
+Two exposures matter more than the file's mode, and both predate the
+amendment. Naming them is what makes the disk trade-off legible rather than
+alarming.
+
+**argv is world-readable on a default Linux host.** `/proc/<pid>/cmdline` is
+mode 444 and the usual mount carries no `hidepid`, so any local user can read a
+worker's full prompt for as long as it runs -- which is far longer than the
+capture window. Below the threshold that is the whole prompt. Above it, only
+the neutralized excerpt. On a multi-user machine the spill therefore *narrows*
+the exposure rather than widening it, which is the opposite of the intuition
+that writing to disk is the riskier move.
+
+**The worker's transcript already persists the prompt.** Claude Code writes a
+session's transcript to a deterministic path under the user's home directory,
+keyed by the worker's working directory -- niwa computes that path itself for
+the attach preflight. The opening prompt is the first user message and lands
+there. That directory is not inside the instance, so instance reclamation does
+not remove it: the transcript outlives the instance it describes.
+
+Which means the property the shipped design claimed was never quite the
+property it had. "The prompt is never written to disk" was true of niwa's own
+process and false of the system: the prompt reached disk on every path, via the
+transcript, before this amendment existed. What the amendment actually changes
+is that niwa now writes a copy too -- one it controls, at 0600, that it removes
+with the instance. Above the threshold, what the transcript captures shrinks
+from the whole prompt to the excerpt.
 
 **The workspace root's state directory would have destroyed the file.** The
 config snapshot is rotated wholesale on every apply, carrying only two things
@@ -665,6 +725,13 @@ path builds its prompts from fixed templates far below the threshold -- which a
 test pins, so a template grown past it is caught as a change rather than
 discovered as a spilled file.
 
+That pin is now load-bearing for containment, not merely for tidiness. The
+instance it would spill into is running a review of an untrusted pull-request
+diff under the sandbox, egress-denial, and filesystem-guard triad, and the
+no-sweep decision means anything written there stays readable by that agent for
+the instance's life. Keeping the templates below the threshold is what makes
+that hypothetical.
+
 **Create the spill directory with a single-level create, not a recursive one.**
 A recursive create under a deleted instance root would rebuild the chain and
 leave a directory matching the dispatch-name signature but carrying no instance
@@ -681,6 +748,20 @@ The spill runs later, after work that can fail, which is why it gets the
 stricter call. The cost is that a fake provisioner skipping the state directory
 makes the spill fail rather than silently create it -- correct for a path that
 must not invent instance structure.
+
+**An existing spill directory is inspected, not inherited.** The second launch
+into any instance finds the directory already there, so this is a guaranteed
+path rather than an edge. Swallowing the exists-error is the obvious port and
+is wrong: the exclusive-create on the file defends against a planted symlink at
+the *file*, not at the *parent*, and a `dispatch-prompts` symlinked at
+somewhere like `~/.ssh` would take the raw prompt bytes with it. On the exists
+error, stat the path without following links and require that it is a real
+directory, not a symlink, owned by this user, at mode 0700; anything else is an
+error returned into the rollback window. The planting attacker here is a
+same-uid process, which is a weak boundary -- but this codebase already treats
+it as one worth defending, using a single-level create on symlink grounds
+during init and skipping non-regular entries when copying so a hostile repo
+cannot smuggle links out of staging.
 
 ### What the worker receives
 
@@ -709,12 +790,24 @@ identical argv elements, which is the distinguishability failure the floor
 exists to forbid.
 
 The fence is a fixed prefix plus the launch's random token, on its own line at
-each end, and the token is redacted from the excerpt as a belt. A fixed marker
-constant is forgeable by the very text it delimits, and "no realistic payload
-contains our marker" is not a claim worth making about whole CI logs. The token
-is minted after the bytes are read, so no submitted text can contain it. The
+each end. A fixed marker constant is forgeable by the very text it delimits,
+and "no realistic payload contains our marker" is not a claim worth making
+about whole CI logs. The token is 128 bits of cryptographic randomness minted
+*after* the body is a fixed string, so no submitted text can contain it. The
 ordering above is the other half of the defence: even a worker that treats
 forged post-fence text as instructions has already read niwa's framing.
+
+Two invariants keep that argument true, and both are worth stating because
+plausible refactors break them. The token MUST be minted after the body is
+final, and MUST NOT be derived from or shared with the instance name's existing
+random suffix -- that suffix is tempting because it is already minted, and it
+is knowable in advance by a self-dispatching worker reading its own working
+directory, which would hand exactly the predictability the fence exists to
+deny. And the excerpt is *checked* for the token rather than scrubbed of it: a
+match is a hard error, not something to redact. Redaction cannot fire under the
+minting order, and if it ever did it would silently mutate the excerpt and
+perturb both the quoted byte count and the distinguishability the excerpt floor
+guarantees. An assertion fails loudly if the ordering ever inverts.
 
 The path is absolute, because a relative path stops resolving the moment the
 worker or one of its subagents changes directory. The cost is that the instance
@@ -810,11 +903,30 @@ shell, so content cannot escape into command construction -- but it would be too
 strong to say the surface is untouched. This feature exists to move text a
 developer has *not* authored, and often has not read in full, into a worker's
 opening instruction, and the bounded transcript means the middle of a large paste
-is never displayed. Provenance is the surface, and it does shift. The control
-that applies is the worker's own permission boundary, not anything in the
-capture: a dispatched worker is constrained by what it is allowed to do, and that
-constraint is where pasted instructions are contained. Worth knowing when pasting
-a log from a source you do not control.
+is never displayed. Provenance is the surface, and it does shift. The shipped version of this paragraph said the containment is the worker's own
+permission boundary. That is true only when the workspace has one. A dispatched
+worker's permission mode comes from the instance's materialized settings, which
+come from the workspace config; `niwa dispatch` sets no mode of its own and
+forwards one only when the developer passes the flag. Under a bypass posture
+the boundary is nil, and niwa's own code says what that costs: the file-guard
+hook exists precisely because a dispatched session's bypass mode skips the
+permission system, and its comment enumerates writing outside the instance to
+persist or gain execution.
+
+`niwa watch` builds a three-part containment -- OS sandbox, egress denial, and
+a filesystem guard -- because it knows its input is untrusted. An ordinary
+`niwa dispatch` gets none of it. This design does not close that gap, and it
+should not pretend to: the honest statement is that pasting a log from a source
+you do not control hands that source the worker's authority, and how much
+authority that is depends on a workspace setting the command does not consult.
+
+The excerpt sharpens rather than softens this. Its first bytes are exactly the
+head of the pasted text, so an attacker who controls the log controls what the
+worker reads first, and the fence does nothing about an instruction *inside*
+the quotation -- only about text appearing to end it. The Negative consequences
+note that a worker ignoring the read instruction proceeds on the excerpt alone;
+those two facts together make the excerpt a channel worth naming rather than a
+convenience.
 
 **Terminal state is a shared resource.** Failing to restore raw mode leaves the
 next command in the developer's shell without line editing or signal handling.
@@ -839,34 +951,52 @@ the same failure mode as a terminal without paste delimiters, arriving by a
 different route, and it is documented alongside that degradation rather than
 detected.
 
-**The prompt now touches disk above the threshold, and the claim this section
-used to make is retired.** The shipped design stated that the prompt is never
-written to disk, and handled SIGQUIT specifically so a core dump could not
-carry the payload. The amendment gives that up: a spilled prompt exists as a
-file for the life of the instance. This is a real reduction, not a
-reclassification. A large pasted secret that previously lived only in process
-memory now has a path someone can read.
+**niwa now writes the prompt to disk above the threshold, and the claim this
+section used to make is retired -- though it was always narrower than it
+sounded.** The shipped design stated the prompt is never written to disk. That
+was true of niwa's own process and false of the system: the worker's transcript
+persists the opening prompt on every path, outside the instance, and outlives
+it. See "Where the spilled prompt is not the only copy" for both that and the
+`/proc` exposure, which together dominate the file's own mode.
 
-What holds it down: the file is owner-only, in a directory niwa creates
-owner-only, inside an instance directory that already holds dispatch state at
-the same mode; it is never copied, synced, or logged; and it is removed when
-the instance is. The SIGQUIT handling stays and is still worth having, because
-below the threshold the payload is still memory-only and a core dump would
-still carry it.
+What the amendment genuinely adds is a copy niwa controls: owner-only, in a
+directory niwa creates owner-only, named so the instance's own ignore rules
+cover it, removed when the instance is, and never copied, synced, or logged by
+any code in this repository. That last clause is scoped to niwa deliberately --
+a host backup or sync agent traversing the home directory is outside anything
+this design can claim, and `0600` is a weak control on a networked filesystem
+without strong authentication.
 
-For calibration rather than comfort: the positional path was always worse, since
-the whole prompt lands in shell history. What changes is that the capture path
-used to be strictly better than that and is now better only below the
-threshold.
+Set against that, the spill removes the whole prompt from argv, which is the
+exposure that is actually world-readable. Above the threshold the trade is
+favourable on a shared host and roughly neutral on a single-user one.
+
+**The SIGQUIT rationale was wrong and the handler is still right.** The shipped
+comment says SIGQUIT is handled because its default action dumps core carrying
+the payload. For a Go binary it does not: the runtime installs its own handler,
+prints goroutine stacks to stderr, and exits with status 2, producing a core
+only under an explicit traceback setting. Probed and confirmed. The handler
+stays, justified on terminal restoration like the rest of the signal set, and
+the code comment is corrected with it. What the default disposition actually
+leaks is goroutine stacks onto the developer's terminal, which is smaller and
+worth one line rather than a paragraph. Worth noting too that the handler only
+covers the capture window, while the prompt sits in memory through provisioning
+-- the slowest part of the command -- with the default disposition restored.
 
 **A NUL byte in the prompt breaks exec, and did before this change.** An argv
 element cannot contain a NUL -- verified by probe. The capture preserves raw
 control bytes in the payload by design, so a binary-contaminated log is one
 paste away from a launch that fails with an opaque operating-system error, with
-neither the size check nor the pre-exec assertion catching it. The assertion
-grows a NUL clause so the failure names its cause. Above the threshold the
-problem disappears, since the bytes travel in a file and only the neutralized
-excerpt reaches argv.
+neither the size check nor the pre-exec assertion catching it. A NUL therefore
+triggers the spill at any size, and the assertion grows a NUL clause as a
+backstop for one arriving by another route.
+
+Worth being precise about what that implies for the neutralizer, since the
+causal chain reads stronger than it is: a byte sweep found NUL to be the *only*
+value that breaks exec. Escape, carriage return, delete, and invalid UTF-8 all
+pass through cleanly. Neutralizing the excerpt is a legibility and
+display-safety choice consistent with the transcript path, not a precondition
+for the launch succeeding. Only NUL removal is that.
 
 **The excerpt is untrusted text inside a niwa-authored instruction.** The
 protection is not that the argv element is free of untrusted content -- the
