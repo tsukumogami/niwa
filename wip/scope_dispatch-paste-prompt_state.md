@@ -23,11 +23,31 @@ chain_ran:
       the chain lands as one commit. Round-two non-blocking findings on
       frontmatter length, tense drift, and navigational scaffolding were
       taken.
+  - name: prd
+    outcome: amended-in-place
+    jury_rounds: 2
+    status_transition: Done -> In Progress
+    note: |
+      Round one returned FAIL from all three reviewers with substantive
+      findings. The load-bearing ones: the keep-alive prepend had no
+      defined home once the prompt spills (now R58); "recognizable from
+      outside" was bound to no niwa-owned surface, since the session
+      mapping stores no prompt text (goal rescoped to the worker's
+      opening instruction); `niwa watch`'s continuation path launches
+      repeatedly into an instance it did not create, so spill filenames
+      must be unique (now R59); and a sibling artifact at terminal
+      status, PRD-instance-dispatch R43, mandates the exact refusal this
+      PRD's R43 forbids (now D2 and R56).
+
+      One reviewer proposal was rejected on the evidence: deleting the
+      spill file after exec returns would race the worker's read, since
+      `claude --bg` returns before the worker has read anything.
+      Instance reclamation is the disposal mechanism instead (R53).
 parent_orchestration:
   parent: scope
   topic: dispatch-paste-prompt
-  child: prd
-  invoked_at: 2026-08-01T23:20:00Z
+  child: design
+  invoked_at: 2026-08-02T00:15:00Z
 child_snapshots:
   brief:
     status: Done
