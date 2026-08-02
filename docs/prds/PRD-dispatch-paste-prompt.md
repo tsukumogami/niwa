@@ -1,21 +1,26 @@
 ---
 schema: prd/v1
-status: Done
+status: In Progress
 problem: |
   A developer who hits a failure in the terminal cannot hand that failure to a
   dispatched worker. `niwa dispatch` takes its prompt as a single positional
   argument, so the error text on screen has to be retyped, summarized down to a
   guess, or wrapped in shell quoting that must be right on the first try. The
   known workaround takes two undiscoverable pieces of knowledge and runs blind,
-  since nothing echoes back what was captured before it is sent.
+  since nothing echoes back what was captured before it is sent. And because a
+  single argument is all the transport there is, text past the size one holds
+  was refused outright, with the developer told to park it in a file and point
+  at it -- a chore with no judgment in it that niwa is better placed to do.
 goals: |
   Running `niwa dispatch` with no prompt opens an interactive capture in the
   terminal the developer is already in. Pasting a failure and sending it takes
   one gesture, whether or not the developer adds context of their own, and
   lands them attached to a session already working on it. The capture shows
-  what it has taken, states its size limit while the input is still
-  recoverable, restores the terminal on every exit path, and never blocks a
-  scripted or hooked invocation.
+  what it has taken, restores the terminal on every exit path, and never
+  blocks a scripted or hooked invocation. A prompt too large to travel as one
+  command argument still dispatches: niwa writes it to a file inside the
+  instance and hands the worker a pointer plus a leading excerpt, so no size
+  limit is ever surfaced to the developer.
 upstream: docs/briefs/BRIEF-dispatch-paste-prompt.md
 motivating_context: |
   The recurring pattern is that the material most worth handing to a worker --
@@ -26,7 +31,7 @@ motivating_context: |
 
 ## Status
 
-Done
+In Progress
 
 Requirements for interactive prompt capture on `niwa dispatch`, downstream of
 the Accepted BRIEF. The Decisions and Trade-offs section closes the four
@@ -40,6 +45,34 @@ between the oversized refusal and the exit-path enumeration, states three
 behaviors that had been assumed rather than required (rendering of captured
 input, deletion of entered text, responsiveness), and rewrites six criteria that
 a violating implementation could have passed.
+
+Amended after the feature shipped, in place rather than superseded. The
+amendment reverses one decision -- that the command commits to failure-shaped
+pastes and refuses whole-log ones -- and everything that hung off it. The
+problem, the goals, the user stories, and roughly four fifths of the
+requirements are unchanged, which is why this is an amendment and not a new
+PRD: the feature's identity did not change, one of its answers did. R17, R18,
+and the original R14 through R16 are retired rather than reused, following the
+same numbering discipline as the earlier rounds, and the replacements begin at
+R43. R10 was consumed by the earlier revisions and is not reused; the
+amendment's fidelity requirement is R51.
+
+The status moved back from Done to In Progress, which is the honest reading:
+the capture shipped and its criteria hold, but every criterion covering R43
+through R60 describes work that has not been built. Leaving the document at
+Done would assert that acceptance criteria are met when roughly a third of them
+have never run.
+
+The reversal came from using the shipped command. The refusal message told the
+developer to write the text to a file and dispatch a prompt referencing that
+path -- a sequence of steps containing no judgment the developer has that niwa
+lacks. From where the developer stands there is no difference between a prompt
+niwa passes along and a prompt niwa parks in a file and points at, so the
+ceiling was an internal transport property surfaced as a user-facing wall. The
+upstream BRIEF was re-opened by the same amendment.
+
+This section records requirements only. The DESIGN owns where the file is
+written, how the excerpt is bounded, and which layer makes the decision.
 
 ## Problem Statement
 
@@ -59,14 +92,36 @@ was taken before it is sent. Its obvious variation is worse: piping into the
 substitution leaves standard input an exhausted pipe, so the default attach has
 nothing to read and the flow only works once detachment is added.
 
-Two facts sharpen the timing. The command's prompt size cap is currently
-mis-set (issue #225): it sits exactly on Linux's per-argument `execve` limit
+Two facts sharpened the original timing. The command's prompt size cap was
+mis-set (issue #225): it sat exactly on Linux's per-argument `execve` limit
 rather than below it, and the keep-alive instruction is prepended after the
-check, so a prompt can pass validation and then die at exec after an instance
-has been provisioned. Today that band is nearly unreachable, because a caller's
-own exec caps what they can pass in. Interactive capture removes that outer
-guard -- niwa would be building the string itself -- which turns a latent defect
-into a reachable one.
+check, so a prompt could pass validation and then die at exec after an instance
+had been provisioned. That band was nearly unreachable while a caller's own
+exec capped what they could pass in. Interactive capture removed that outer
+guard -- niwa builds the string itself -- which turned a latent defect into a
+reachable one. Both were corrected before capture shipped.
+
+Correcting the cap made it enforceable, and enforcing it exposed the second
+problem this PRD now answers. The rest of this section describes the shipped
+behavior the amendment supersedes.
+
+A prompt reached the worker only as one argv element, so a prompt larger than
+one argv element was refused. The refusal named the remedy -- write the text to
+a file, dispatch a prompt referencing the path -- and the remedy was a sequence
+of mechanical steps: choose a filename, write the bytes, compose the pointer
+sentence. Nothing in it required knowledge the developer has and niwa does not.
+The limit belonged to a transport niwa chose, and asking the developer to route
+around it asked them to compensate for a decision they never made and could not
+see.
+
+The cost concentrates where the feature is most useful. Measured payloads: a Go
+panic is about 5.6 KB, a failing `go test ./...` about 7.7 KB, a CI failure
+excerpt about 9.2 KB -- all comfortably inside the argv limit. A whole run is
+not: `go test -v ./...` measures about 326 KB and a full CI log about 582 KB.
+Those are exactly the cases where the developer does not know which part
+matters, which is why they wanted to hand over all of it. So the refusal fired
+hardest on the pastes the feature exists to carry, and to the developer it read
+as a wall rather than as a constraint.
 
 ## Goals
 
@@ -77,11 +132,17 @@ into a reachable one.
 - The developer sees what has been captured before it is sent.
 - The developer stays attached to the session they just started, as they would
   with a prompt passed as an argument.
-- Oversized input is refused while it is still recoverable, with a message that
-  names what to do instead.
+- A prompt too large to travel as one argv element dispatches anyway, by a
+  route the developer neither chooses, configures, nor learns about.
+- A worker started from a spilled prompt opens on text that says what it is
+  about, rather than on a bare path the developer never picked. This is scoped
+  to the worker's opening instruction, which is the surface this PRD owns.
+  niwa's own listing shows instance names and has never shown prompt text, so
+  `--name` remains the way to label a dispatch on niwa's surfaces.
 - The terminal is left in working order on every exit path, including
   interruption.
-- No scripted, hooked, or piped invocation blocks or changes behavior.
+- No scripted, hooked, or piped invocation blocks or changes behavior, except
+  that an oversized argument now succeeds where it previously failed.
 
 ## User Stories
 
@@ -91,9 +152,17 @@ into a reachable one.
 - As a developer picking up a CI failure I did not cause, I want to add what I
   already know alongside the pasted log, so that the worker does not re-derive
   paths I have eliminated.
-- As a developer triaging a failure I cannot localize, I want to be told my
-  paste is too large while my input is still on screen and removable, so that I
-  can cut it down and send a slice instead of starting over.
+- As a developer triaging a failure I cannot localize, I want to paste the
+  whole run and have it dispatch, so that I do not have to guess which slice
+  matters before I have understood the failure.
+- As a developer who comes back to a morning's worth of dispatched workers, I
+  want the one I handed a whole build log to open on text from that log rather
+  than on a filename, so that reading its first message tells me which handoff
+  it was.
+- As an automation author whose assembled prompt has outgrown a single
+  argument, I want the dispatch to keep working with no flag to add and no new
+  failure to handle, so that a prompt that grew over time does not become an
+  outage.
 - As a developer who changes their mind mid-capture, I want to back out and
   find my terminal working normally, so that the next command behaves.
 - As a developer who opens the capture and then realizes I have nothing to
@@ -103,25 +172,39 @@ into a reachable one.
   want the command to fail immediately rather than wait forever on input that
   will never arrive, so that a scheduled job fails visibly instead of hanging.
 - As an operator whose cron job calls `niwa dispatch` with a prompt argument, I
-  want that path to behave exactly as it does today, so that nothing I have
-  automated starts waiting on input.
+  want that path never to wait on input, so that nothing I have automated
+  starts hanging. Whether an oversized prompt of mine now dispatches instead of
+  erroring is a change I welcome; blocking on a terminal read is not.
 
 ## Dependencies
 
-- **D1.** This PRD's size requirements are stated over the baseline established
-  by issue #225, which corrects the prompt cap and adds a check immediately
-  before exec. R14's derivation names terms introduced there. Interactive
-  capture removes the outer guard that currently makes the defect nearly
-  unreachable, so shipping capture on the uncorrected cap is not an option.
-  **Satisfied:** the correction merged before implementation began, so R34's
-  conditional does not fire and this work applies the existing ceiling rather
-  than establishing it.
-- **R34.** If the #225 baseline is absent, this work SHALL itself establish it:
-  the prompt SHALL be validated against R14's derived ceiling before any
-  instance is created, and the final argument SHALL be re-checked immediately
-  before the worker process is started, so that a prepend which fails to declare
-  itself in the reserve is reported against niwa's own named limit rather than
-  surfacing as an operating-system exec failure after provisioning.
+- **D1.** The capture requirements were stated over the baseline established by
+  issue #225, which corrected the prompt cap and added a check immediately
+  before exec. **Satisfied, and partly superseded:** the correction merged
+  before implementation began, and two of its three parts survive. The
+  corrected `maxArgStringBytes` derivation becomes R44's spill threshold, and
+  the pre-exec check becomes R55's assertion. Only the reserve is retired: R45
+  moves the decision after the prepend, which is what the reserve existed to
+  compensate for.
+- **R34.** Retired. It required this work to establish the #225 baseline if
+  that issue had not landed first. It landed, the conditional never fired, and
+  the requirement it would have created is superseded by R45.
+
+- **D2.** This amendment supersedes a requirement in a sibling artifact that is
+  already at status Done. `docs/prds/PRD-instance-dispatch.md` R43 requires the
+  command to "fail clearly when a prompt exceeds the operating system's
+  argument-length limit rather than truncating it silently", restated in
+  `docs/designs/current/DESIGN-instance-dispatch.md`. The collision is literal
+  and needs stating plainly: that requirement mandates the refusal this PRD's
+  R43 forbids. Both halves of its intent survive here -- the prompt is still
+  never silently truncated (R51), and an over-limit argv string is still
+  refused rather than surfacing as an exec error (R55). What changes is that
+  the developer no longer reaches that refusal, because the spill happens
+  first. R56 covers correcting those two artifacts along with the user-facing
+  documentation.
+
+The one normative requirement D1 leaves behind is **R55**, which is stated with
+the other size requirements rather than here.
 
 ## Requirements
 
@@ -160,8 +243,9 @@ into a reachable one.
   by R35 SHALL neutralize control sequences so that pasted content cannot alter
   the display. What is rendered SHALL NOT determine what is sent.
 - **R36.** The capture SHALL allow the developer to remove text they have
-  entered. The gesture is DESIGN's; the capability is required, because R17's
-  refusal promises the developer can reduce their input.
+  entered. The gesture is DESIGN's; the capability is required because a
+  capture the developer can see (R35) but cannot correct is worse than no
+  rendering at all. It no longer serves a size refusal, since there is none.
 - **R5.** The developer SHALL be able to type text alongside pasted text and
   send both together, using the same submit gesture as a bare paste. No flag,
   mode, or prior decision SHALL be required to reach either case. On terminals
@@ -177,10 +261,11 @@ into a reachable one.
   command without dispatching.
 - **R29.** Submitting an empty or whitespace-only capture SHALL fail with the
   existing empty-prompt error rather than dispatching.
-- **R37.** Input up to the R14 ceiling SHALL be accepted without perceptible
-  stall, including when it arrives as a single line. Accepting a payload the
-  ceiling admits SHALL NOT take materially longer than accepting the same number
-  of bytes spread across many lines.
+- **R37.** Input SHALL be accepted without perceptible stall, including when it
+  arrives as a single line, at every size up to and including a whole
+  continuous-integration log. Accepting a payload SHALL NOT take materially
+  longer than accepting the same number of bytes spread across many lines, and
+  the per-byte cost SHALL NOT grow with how much has already been entered.
 
 ### Cancellation, exit paths, and terminal state
 
@@ -190,10 +275,11 @@ into a reachable one.
   result, so the command reports a cancelled capture rather than dispatching or
   reporting an empty prompt.
 - **R9.** On every path that ends the command -- submit, abandonment, the
-  empty-capture refusal, and receipt of SIGINT, SIGTERM, or SIGHUP -- the
-  terminal's mode SHALL be restored to its state before the capture began. The
-  oversized refusal is not on this list because it does not end the command
-  (R17).
+  empty-capture refusal, and receipt of SIGINT, SIGQUIT, SIGTERM, or SIGHUP --
+  the terminal's mode SHALL be restored to its state before the capture began.
+  With the oversized refusal retired, this list is exhaustive over the paths
+  that can end a command with a capture open. The R49 backstop is not on it,
+  because it reports and leaves the capture running.
 - **R38.** If the capture is suspended and resumed, the terminal's mode SHALL be
   re-established on resume, so a suspended capture does not leave the terminal
   altered for a foregrounded shell.
@@ -203,9 +289,9 @@ into a reachable one.
   choice; the observable outcome does not.
 - **R31.** The non-TTY refusal (R20), the empty-capture refusal (R29), and
   abandonment SHALL each exit non-zero with the command's ordinary error exit
-  status. No new exit code is introduced. The oversized refusal has no exit
-  status of its own, because the developer's next action determines how the
-  command ends.
+  status. No new exit code is introduced. The R49 backstop has no exit status of
+  its own, because it does not end the command -- the developer's next action
+  does.
 
 ### Reachability
 
@@ -213,46 +299,110 @@ into a reachable one.
   command path -- including `niwa watch`, which invokes the launcher directly --
   SHALL never open a capture, under any argument or flag combination.
 
-### Size ceiling
+### Size and transport
 
-- **R14.** The prompt size ceiling SHALL be `maxArgStringBytes -
-  dispatchPromptReserve`, where `maxArgStringBytes` is the largest single argv
-  string the operating system accepts on the tightest supported platform and
-  `dispatchPromptReserve` is the length of everything niwa may prepend to the
-  prompt after validation. It SHALL be expressed as that derivation, not as a
-  literal, so a change to either term visibly moves it. On the current baseline
-  it evaluates to 130,433 bytes (roughly 127 KB).
-- **R15.** A single ceiling SHALL apply on every supported platform. No
+Requirements R14 through R18 in earlier revisions defined a refusal ceiling and
+the message that carried it. They are retired, not renumbered: R14, R15, and
+R16 are replaced by R43 through R46 below, and R17 and R18 have no successor
+because there is no refusal for them to describe. R42's retention bound is
+replaced by R49's memory backstop, which is a different thing at a different
+magnitude.
+
+- **R43.** No size limit SHALL be surfaced to the developer on any path. There
+  SHALL be no refusal, no warning, and no prompt to reduce input, at any size
+  the command accepts.
+- **R44.** When the argv string the worker would receive -- the submitted
+  prompt plus everything niwa prepends to it -- would exceed
+  `maxArgStringBytes`, the largest single argv string the operating system
+  accepts on the tightest supported platform, the submitted prompt SHALL be
+  written to a file and the worker SHALL receive a pointer to that file in
+  place of the prompt. The threshold SHALL be expressed as that derivation, not
+  as a literal.
+- **R45.** The decision required by R44 SHALL be made against the FINAL argv
+  string, after every prepend, rather than against the submitted prompt alone.
+  Consequently no reserve SHALL be held back from the developer's input, and
+  no user-facing prompt ceiling SHALL remain reachable through the CLI.
+- **R58.** Everything niwa prepends to a prompt SHALL ride the argv element on
+  both paths. When a prompt spills, the pointer element SHALL carry the
+  prepends, so a spilled dispatch with keep-alive resolved on still reaches the
+  worker with the arming instruction. Only the developer's own submitted text
+  moves into the file. Without this, a session recorded and reported as kept
+  alive would launch without ever having been armed.
+- **R46.** A single threshold SHALL apply on every supported platform. No
   platform-conditional definition SHALL exist.
-- **R16.** The ceiling SHALL be enforced against text captured interactively,
-  not only against a positional argument, and the reserve SHALL be subtracted on
-  both paths.
-- **R17.** Input SHALL be refused at the moment it crosses the ceiling, before
-  any instance is created. The capture SHALL remain open and SHALL retain the
-  entire buffer including the input that crossed the ceiling, so the developer
-  can delete down to a submittable size (R36) rather than lose what they pasted.
-  A buffer above the ceiling SHALL NOT be submittable.
-- **R42.** Retention under R17 SHALL be bounded. An append that would take the
-  buffer beyond a stated retention bound SHALL be refused in full and retained
-  not at all, and the refusal SHALL say so, because a partially retained paste is
-  worse than none: it looks complete and is not. The bound SHALL be a stated
-  multiple of the ceiling, and it narrows R17 deliberately -- deleting by hand
-  down from several times the ceiling is not a recovery path a developer would
-  use, so for input that far over, the refusal message's file-and-reference
-  guidance (R18) is the real remedy and the clipboard still holds the original.
-- **R18.** The refusal message SHALL state the size of the input and the limit,
-  both in bytes, and SHALL direct the developer to write the text to a file and
-  dispatch a prompt referencing that path. It SHALL NOT instruct the developer
-  to shorten or re-select the text.
+- **R47.** The spill SHALL apply identically to a prompt supplied as a
+  positional argument and to one captured interactively. The two paths SHALL
+  NOT differ in threshold, in file format, or in the pointer they produce.
+- **R48.** The spill SHALL apply on every path that launches a worker,
+  including the launcher path `niwa watch` drives directly. No launch path
+  SHALL be able to reach `execve` with an argv string over
+  `maxArgStringBytes`. On the `niwa watch` path the spill is a structural
+  guarantee rather than a live behavior: watch builds its prompts from fixed
+  templates far below the threshold, so it SHALL NOT spill in practice, and a
+  test SHALL pin that so a template grown past the threshold is caught as a
+  change rather than discovered as a spilled file.
+- **R49.** The capture SHALL hold a memory backstop, expressed as a multiple of
+  `maxArgStringBytes` and at least 64 times it -- roughly 8 MB on the current
+  baseline, more than an order of magnitude above the largest log the Problem
+  Statement measures. Stating it as a derivation with a floor keeps it from
+  being quietly tuned down into the wall this amendment removes. Crossing it
+  SHALL refuse the append in full, retain none of it, and say the input was not
+  retained -- a partially retained paste is worse than none, because it looks
+  complete and is not. The backstop is a process-safety bound, not a product
+  limit: it exists so an unbounded buffer cannot exhaust memory, and it SHALL
+  NOT be described to the developer as a size limit on prompts.
+- **R50.** No flag, configuration setting, environment variable, or interactive
+  prompt SHALL control whether a prompt spills, where it is written, or how
+  large the excerpt is. The decision SHALL be derived from the final argv
+  string's length and nothing else, so that the same prompt in the same
+  workspace always takes the same route.
+- **R55.** The pre-exec check the #225 baseline added SHALL survive: no argv
+  string over `maxArgStringBytes` SHALL reach `execve`, and a violation SHALL
+  be reported with a message naming that limit rather than surfacing as an
+  operating-system exec failure. Under R44 it becomes unreachable in normal
+  operation, which is the point -- it guards against a future prepend that
+  forgets the spill decision, exactly as it once guarded against one that
+  forgot the reserve.
+- **R57.** The spill SHALL be reachable through a seam a test can replace, so
+  that R55's assertion remains constructible after R48 makes it otherwise
+  unreachable.
+- **R59.** A spilled prompt's filename SHALL be unique within its instance, so
+  that two launches into the same instance cannot collide. This is not
+  hypothetical: `niwa watch`'s continuation path launches repeatedly into an
+  instance it did not create and does not replace, so an instance can host more
+  than one launch over its life.
+- **R51.** The bytes the developer submitted SHALL reach the worker
+  byte-for-byte -- in the argv element when they fit, and in the spill file
+  when they do not -- subject only to three stated exceptions: the single line
+  feed R5 may insert at a paste boundary, the line-break normalization required
+  by R41, and the prepends R58 keeps in argv. No other trimming, normalization,
+  or re-encoding SHALL be applied, and the spill file SHALL carry no header,
+  footer, or wrapper around the submitted bytes.
+- **R52.** The pointer the worker receives SHALL name the file by a path the
+  worker can resolve regardless of its working directory, SHALL instruct the
+  worker to read that file as its task, and SHALL carry a leading excerpt of
+  the submitted text. The excerpt SHALL be bounded above so the pointer stays
+  small, and bounded BELOW so it does its job: two dispatches whose submitted
+  prompts differ SHALL produce different argv elements whenever their texts
+  differ within the excerpt's length, and the lower bound SHALL be large enough
+  that ordinary failure output -- a first stack frame, a first assertion line --
+  fits inside it. The excerpt SHALL be truncated on a character boundary and
+  SHALL be labelled as a prefix, so a worker cannot mistake a truncated stack
+  trace for a whole one.
+- **R53.** A spilled prompt SHALL be written inside the instance the worker is
+  launched into, so that the existing rollback-on-failure and reclamation
+  lifecycle removes it. No spilled prompt SHALL outlive its instance, and a
+  dispatch that fails after the spill SHALL leave no spilled prompt behind.
+  The file SHALL NOT be deleted once the worker has been launched: the worker
+  is daemon-backed and the launch call returns before it has read anything, so
+  a post-launch delete would race the read it exists to serve. Instance
+  reclamation is the disposal mechanism, and it is the only one.
+- **R54.** The spilled file SHALL be created readable and writable by its owner
+  only, and by no group or other, matching the mode the existing in-instance
+  dispatch marker uses. The directory holding it SHALL be no more permissive.
 - **R19.** No per-line length limit SHALL apply to captured input. A single line
   longer than the terminal's line-discipline buffer SHALL be captured intact,
   without truncation and without hanging.
-- **R10.** The bytes the developer submitted SHALL appear byte-for-byte in the
-  worker's argv, in the same single argv element the positional path produces,
-  subject only to three stated exceptions: the prepend accounted for in R14, the
-  single line feed R5 may insert at a paste boundary, and the line-break
-  normalization required by R41. No other trimming, normalization, or re-encoding
-  SHALL be applied.
 - **R41.** Line breaks inside a pasted block SHALL be normalized to a single line
   feed: a lone carriage return, and a carriage return followed by a line feed,
   each become one line feed. This is required because terminals differ in which
@@ -280,18 +430,40 @@ into a reachable one.
 
 ### Preservation
 
-- **R25.** Relative to the baseline established by issue #225, no behavior on
-  the positional-argument path SHALL change: same exit codes, same messages,
-  same argv construction. The R14 ceiling applies to both paths, which is part
-  of that baseline rather than a change this feature introduces.
+- **R25.** On the positional-argument path, the only behavior that SHALL change
+  is that a prompt which previously produced the oversized error now
+  dispatches. For every prompt that dispatched before, exit codes, messages,
+  and argv construction SHALL be unchanged. No invocation that succeeded SHALL
+  begin to fail, and no invocation SHALL begin to spill that would previously
+  have fit.
 - **R26.** Failures reachable before provisioning SHALL be raised before
-  provisioning, so a rejected capture never leaves an instance to reclaim.
+  provisioning, so a rejected capture never leaves an instance to reclaim. The
+  spill is not such a failure: it happens after provisioning by necessity,
+  since the file lives inside the instance (R53), and a spill that fails SHALL
+  roll the dispatch back like any other post-provisioning failure.
 
 ### Supporting changes
 
 - **R32.** Documentation stating or implying that the prompt argument is
   mandatory SHALL be updated: the command's own usage and long help, and the
   repository README.
+- **R56.** Every artifact stating or implying that a large prompt will be
+  refused, or that a caller must write a file to avoid the argument limit,
+  SHALL be corrected. Five are known: the command's long help, the repository
+  README, the `/dispatch` skill niwa installs (whose guidance warns that long
+  prompts risk the argument-length limit), `docs/prds/PRD-instance-dispatch.md`
+  R43, and `docs/designs/current/DESIGN-instance-dispatch.md` where it restates
+  that requirement. The two upstream artifacts are at terminal status and SHALL
+  be annotated in place rather than rewritten, naming this PRD as the
+  superseding requirement. Writing a brief file remains the recommended
+  practice for agents, for reasons that have nothing to do with size; the
+  correction is to stop citing a limit that no longer refuses anything.
+- **R60.** Code comments citing requirement numbers from
+  `docs/prds/PRD-instance-dispatch.md` SHALL be disambiguated where this PRD
+  reuses the same number for a different meaning. `dispatch_launcher.go` cites
+  "R43" for the empty-prompt rejection and `dispatch.go` cites "R16, R13";
+  under this PRD those numbers mean unrelated things, and a reader following
+  either lands on the wrong requirement.
 - **R33.** Every functional-test step that hands the binary a standard input the
   step does not control SHALL carry a bounded timeout, so a scenario that fails
   to terminate fails as a step rather than exhausting the suite's global
@@ -317,21 +489,33 @@ whose harness can make it fail.
       string equals the pasted bytes, one line feed, then the typed bytes --
       compared exactly (R5).
 - [ ] The manual-newline gesture inserts a newline and does not submit (R6).
-- [ ] Input accepted so far appears on the render target as it is entered (R35).
+- [ ] Typed input is echoed to the render target as it is entered; a pasted
+      block is represented by a bounded record naming its extent rather than by
+      its bytes (R35).
 - [ ] End-of-input on a non-empty buffer returns the accumulated text; on an
       empty buffer it returns the end-of-input outcome (R28).
 - [ ] Abandonment returns a sentinel distinct from both end-of-input and a
       successful submit (R8).
-- [ ] Deleting entered text reduces the buffer, and a buffer reduced from above
-      the ceiling to below it becomes submittable (R36, R17).
-- [ ] Typing A, then pasting B where A+B crosses the ceiling but stays within the
-      retention bound: the refusal fires, the buffer still contains A and B, and a
-      submit attempt is refused until the buffer is reduced (R17).
-- [ ] An append that would take the buffer past the retention bound is refused in
-      full, the buffer is unchanged, and the refusal says the input was not
-      retained (R42).
-- [ ] The refusal message contains both byte counts and directs the developer to
-      a file-and-reference approach; it does not contain "shorten" (R18).
+- [ ] Deleting entered text reduces the buffer (R36).
+- [ ] Over the sample {0, 1, 131,070, 131,071, 131,072, 614,400} bytes, every
+      input is accepted, is submittable, and is returned byte-for-byte (R43).
+- [ ] Over that same sample, and over the bytes written before the first read,
+      nothing on the render target names a byte ceiling, states a maximum, or
+      asks the developer to remove or shorten input. Checked as a substantive
+      property, with a secondary lint for the substrings "limit", "too long",
+      and "too large". The R49 refusal is the one message exempt from the lint,
+      and it is covered by its own criterion below (R43, R49).
+- [ ] Six appends of 614,400 bytes each -- 3.6 MB cumulative, well past the
+      point where any earlier retention bound would have fired -- are all
+      accepted, so the backstop is genuinely far above what a developer
+      produces rather than reachable by pasting twice (R43, R49).
+- [ ] The backstop constant is at least 64 times `maxArgStringBytes`, asserted
+      against the derivation rather than a copied literal, the way the existing
+      exec-limit constants are pinned (R49).
+- [ ] An append crossing the backstop is refused in full, the buffer is
+      unchanged, and the refusal says the input was not retained. The refusal
+      text names no byte ceiling and gives no size advice: it does not tell the
+      developer to write a file, reference a path, shorten, or re-select (R49).
 - [ ] Submitted text containing terminal control sequences is returned
       unmodified, while the bytes written to the render target contain no
       executable control sequence from the input (R30).
@@ -339,23 +523,88 @@ whose harness can make it fail.
       capability warning text is emitted (R23).
 - [ ] The bytes written before the first read contain non-empty human-readable
       text once escape sequences are stripped (R27).
-- [ ] A single line of 130,433 bytes is accepted, and accepting it takes no more
-      than a small constant multiple of the time taken to accept the same byte
-      count split across many lines (R19, R37).
+- [ ] A single line of 614,400 bytes is accepted whole, without truncation and
+      without hanging (R19).
+- [ ] Total bytes copied while accepting 614,400 bytes is within 4x the byte
+      count, and accepting 614,400 bytes allocates within 4x what accepting
+      61,440 bytes allocates per byte. Gating on a work counter rather than on
+      wall time, because this document already records one bogus superlinear
+      measurement produced by timing a harness rather than the code (R37).
+- [ ] As a wall-clock backstop that will not flake: 614,400 bytes are accepted
+      in under two seconds on the in-memory reader (R37).
+- [ ] Any ratio-of-timings comparison between input shapes is a benchmark that
+      does not gate continuous integration (R37).
 
 ### Command-level unit tests over a capture seam
 
-- [ ] The ceiling constant equals 130,433 on the current baseline, stated
-      independently of the implementation's own derivation (R14, R15).
-- [ ] A prompt one byte over the ceiling is refused and a prompt at the ceiling
-      is accepted (R14).
-- [ ] A prompt sized between the ceiling and the ceiling plus the reserve is
-      refused before provisioning, on both the capture path and the argument
-      path (R16, R26, R34).
+- [ ] The spill threshold equals `maxArgStringBytes` (131,071 on the current
+      baseline), asserted against the derivation rather than a copied literal,
+      and no user-facing prompt ceiling is reachable through the CLI (R44,
+      R45).
+- [ ] The threshold constant is declared exactly once, in a file carrying no
+      build constraints, and `GOOS=darwin` and `GOOS=linux` builds both vet
+      clean -- so a platform-conditional definition fails rather than passing
+      on whichever platform continuous integration happens to run (R46).
+- [ ] A prompt whose final argv string is exactly `maxArgStringBytes` does not
+      spill; one byte more does (R44).
+- [ ] A prompt just under the threshold that crosses it once the keep-alive
+      instruction is prepended DOES spill, and the same prompt with keep-alive
+      unarmed does not -- so the decision is made against the final string, not
+      the submitted one (R45).
+- [ ] With keep-alive armed and the prompt spilled, the worker's argv element
+      still begins with the arming instruction, and the session mapping's
+      keep-alive flag matches what was actually sent (R58).
+- [ ] The same oversized payload supplied as a positional argument and returned
+      from the capture seam produces byte-identical spill file contents, and
+      pointer text that is identical once each run's instance directory is
+      replaced by a placeholder -- same instruction wording, same in-instance
+      filename shape, same excerpt bytes (R47).
+- [ ] An oversized prompt produces a spill file whose bytes equal the submitted
+      bytes exactly, with no header, footer, or trailing newline added (R51).
+- [ ] The worker's argv element for an oversized prompt contains the spill
+      file's path, an instruction to read it, a fixed marker constant
+      delimiting the excerpt, and at most N bytes of excerpt with N asserted
+      against its derivation. The path satisfies `filepath.IsAbs`. The whole
+      argv element stays under `maxArgStringBytes`. A cut falling mid-character
+      moves back to a character boundary (R52).
+- [ ] Two dispatches whose submitted prompts differ within the excerpt's length
+      produce different argv elements, so the excerpt cannot be degraded to a
+      single byte while still passing (R52).
+- [ ] The spill file's mode is 0600 and the directory holding it is no more
+      permissive than 0700 (R54).
+- [ ] The spill file lives under the instance the worker is launched into, and
+      destroying that instance removes it (R53).
+- [ ] Two launches into the SAME instance produce two spill files, neither
+      overwriting the other (R59).
+- [ ] The spill file still exists after the launch call returns, so a worker
+      that reads it later finds it (R53).
+- [ ] A dispatch that fails after the spill leaves no instance and no spill file
+      (R53, R26).
+- [ ] With the spill write forced to fail, the dispatch reports the failure and
+      leaves no instance behind (R26).
+- [ ] With the spill seam stubbed to a no-op, an over-ceiling argv string is
+      refused before exec with an error naming `maxArgStringBytes`, not an
+      opaque exec error (R55, R57).
+- [ ] The prompts `niwa watch` builds from its review and resume templates are
+      below the threshold and do not spill, pinned so a template grown past it
+      is caught as a change (R48).
+- [ ] Driving the launcher path used by `niwa watch` with an oversized prompt
+      spills rather than failing, and no argv element handed to exec exceeds
+      `maxArgStringBytes` on any launch path (R48, R55).
+- [ ] The command's registered flag set matches a golden list, so a new flag
+      fails the golden and has to be justified (R50).
+- [ ] The spill decision's call graph contains no environment or configuration
+      lookup, asserted by source inspection (R50).
+- [ ] Running the spill decision under a clean environment, and again with every
+      documented niwa environment variable set and a config file setting every
+      known key, produces the same decision, the same path shape, and the same
+      excerpt length (R50).
+- [ ] A positional prompt of 614,400 bytes dispatches, writes nothing
+      size-related to standard error, and exits zero (R43, R47).
 - [ ] With no argument and an interactive session, the capture is invoked and its
-      text becomes the launcher's final argv element (R1, R10).
+      text becomes the launcher's final argv element (R1, R51).
 - [ ] A submitted payload containing quotes, backslashes, and dollar signs
-      arrives byte-for-byte as one argv element (R10).
+      arrives byte-for-byte as one argv element (R51).
 - [ ] A pasted block whose line breaks are carriage returns, and one whose line
       breaks are carriage-return line-feed pairs, each arrive with single line
       feeds; every other byte in the block is unaltered (R41).
@@ -378,13 +627,22 @@ whose harness can make it fail.
       stubbed to fail on call never invokes the stub (R11).
 - [ ] The non-TTY refusal, the empty refusal, and abandonment each return a
       non-zero status (R31).
-- [ ] On the positional path, exit codes, messages, and argv construction match
-      goldens recorded from the issue #225 baseline before this change (R25).
+- [ ] On the positional path, for every prompt that dispatched before this
+      change, exit codes, messages, and argv construction match goldens
+      recorded beforehand; the only golden that changes is the oversized one,
+      which moves from an error to a dispatch (R25).
 
 ### `@critical` functional scenarios
 
 - [ ] A pasted multiline block dispatches, and the launched worker's argv
-      contains the pasted text verbatim (R1, R4, R10).
+      contains the pasted text verbatim (R1, R4, R51).
+- [ ] A positional prompt larger than `maxArgStringBytes` dispatches; the
+      worker's argv names a file inside the instance; that file's contents
+      equal the prompt byte-for-byte; and the fake worker resolves the path
+      from a working directory other than the instance, so an instance-relative
+      path fails the scenario (R44, R51, R52, R53).
+- [ ] Reclaiming the instance behind a spilled dispatch removes the spill file
+      along with it (R53).
 - [ ] `niwa dispatch` with no argument and standard input attached to a pipe that
       is never written to and never closed exits within a bounded time rather
       than blocking (R20, R33).
@@ -399,8 +657,8 @@ whose harness can make it fail.
       mode before (R38).
 - [ ] The terminal's mode after an empty-capture refusal matches its mode before
       (R9).
-- [ ] An oversized paste followed by abandonment exits non-zero and leaves no
-      instance (R17, R26).
+- [ ] A capture followed by abandonment exits non-zero and leaves no instance,
+      at any input size (R26, R43).
 - [ ] A single line longer than the line-discipline buffer, fed after the capture
       has started, is captured without hanging (R19).
 
@@ -409,6 +667,16 @@ whose harness can make it fail.
 - [ ] No documentation states or implies that the prompt argument is mandatory:
       the command's usage string, its long help, and the README all describe the
       argument as optional (R32).
+- [ ] A grep over a fixed file list -- the long help in `internal/cli/`, the
+      README, `internal/workspace/rootskills/dispatch/SKILL.md`,
+      `docs/prds/PRD-instance-dispatch.md`, and
+      `docs/designs/current/DESIGN-instance-dispatch.md` -- finds no surviving
+      claim that a large prompt is refused or that a caller must write a file
+      to stay under an argument limit, and finds a superseding annotation on
+      the two upstream artifacts (R56).
+- [ ] No code comment cites a requirement number whose meaning differs between
+      this PRD and `docs/prds/PRD-instance-dispatch.md` without naming which
+      document it means (R60).
 - [ ] Every functional step that supplies the binary a standard input it does not
       control carries a bounded timeout (R33).
 
@@ -427,39 +695,89 @@ tmux:
 This section closes the four open questions carried forward from
 `docs/briefs/BRIEF-dispatch-paste-prompt.md`.
 
-### The size ceiling is derived, and commits to failure-shaped pastes
+### The ceiling became a route, not a wall
 
-The BRIEF required the PRD to state the ceiling rather than inherit today's,
-because today's is wrong in both value and coverage. The ceiling is stated as a
-derivation (R14) so that a change to either term moves it visibly, with the
-computed value given so a reader can tell whether the limit is 130 KB or 130
-bytes.
+**Superseded, and the reasoning is kept because it shows why the reversal was
+available.** The original decision stated the ceiling as a derivation and
+committed the command to failure-shaped pastes: a Go panic at about 5.6 KB, a
+failing `go test ./...` at about 7.7 KB, a CI failure excerpt at about 9.2 KB,
+all comfortably inside it, against `go test -v ./...` at about 326 KB and a full
+CI log at about 582 KB, which were rejected with an actionable message. The
+rejected alternative was named at the time: "serving those would mean changing
+how the prompt reaches the worker."
 
-The trade-off is which payloads this commits to serve. Measured: a Go panic is
-about 5.6 KB, a failing `go test ./...` about 7.7 KB, a CI failure excerpt about
-9.2 KB -- all far under. A whole run is not: `go test -v ./...` measures about
-326 KB and a full CI log about 582 KB. Serving those would mean changing how the
-prompt reaches the worker, which touches the guarantee that the prompt is a
-single argv element never passed through a shell. This PRD commits to
-failure-shaped pastes and rejects whole-log pastes with an actionable message.
+That alternative is now taken. What made the reversal cheap is the shape of the
+message the old decision leaned on: it told the developer to write the text to a
+file and dispatch a prompt referencing that path. Everything in that instruction
+is mechanical. Choosing a filename, writing the bytes, composing the pointer
+sentence -- none of it needs anything the developer knows and niwa doesn't. A
+remedy that a program can carry out on the user's behalf, in full, is not a
+remedy; it is a deferred implementation.
 
-That makes R18's wording load-bearing, because essentially everyone who sees the
-error will be someone who pasted an entire run. The named alternative is to
-write the text to a file and dispatch a prompt referencing that path. This is
-ordinary prompt text pointing at a file, not the `--prompt-file` flag the BRIEF
-excluded, so it survives the scope boundary -- and it is what the dispatch skill
-already tells agents to do with large context.
+So R44 keeps the derivation and changes what crossing it means. Above the
+threshold, niwa performs the remedy itself: the text goes to a file inside the
+instance and the worker receives a pointer plus a leading excerpt. Below it,
+nothing changes. The guarantee the old decision protected -- one argv element,
+never through a shell -- is preserved in both branches, because the pointer is
+also a single argv element built from discrete parts rather than concatenated
+into a command line.
 
-### The oversized refusal is not an exit
+That guarantee is worth stating precisely, because the pointer does embed
+developer-supplied bytes: R52's excerpt is untrusted text inside a
+niwa-authored instruction. The protection is not that the element is free of
+untrusted content -- the whole prompt always was untrusted -- but that it is
+never handed to a shell, so nothing inside it can become command structure.
+DESIGN owns how the excerpt is delimited within the instruction so a worker
+can tell where niwa's words end and the developer's text begins.
 
-An earlier revision listed the oversized refusal both as a state the capture
-survives and as a path that ends the command, which cannot both be true. R17
-settles it: crossing the ceiling refuses the input and leaves the capture open,
-holding the whole buffer, including the text that crossed. The developer deletes
-down to a submittable size (R36) or abandons. Discarding the overflowing paste
-instead would satisfy the letter of "retain the text already entered" while
-losing exactly what the requirement exists to save, since in the central case
-the paste is the entire input.
+The alternative of raising the transport rather than routing around it was
+checked and is not available. `claude --bg` accepts a task prompt as an argv
+element and by no other route; its stdin and file input modes are all gated
+behind `--print`, which is a different, non-background mode. There is no
+larger-argument path to reach for, so a file plus a pointer is the transport,
+not a preference among several.
+
+### The excerpt exists because a pointer alone loses the session's identity
+
+R52 carries a bounded prefix of the text alongside the pointer. Without it, a
+dispatched session's opening instruction is a path the developer never chose,
+and a morning of fanned-out workers becomes a list of indistinguishable rows.
+With it, the session still announces what it is about.
+
+The excerpt is deliberately not a summary. Having niwa describe the text would
+mean dispatch starts interpreting a prompt it currently only carries, which is a
+different and much larger commitment -- and a wrong summary is worse than a
+literal prefix, because it is confidently wrong. A prefix has one failure mode,
+truncation, and R52 addresses it by labelling the excerpt as a prefix so a
+worker cannot mistake a cut stack trace for a whole one.
+
+### The reserve disappears because the decision moved after the prepend
+
+The old design held back `dispatchPromptReserve` from the developer's input so
+that a single early check could cover a prepend applied much later, whose
+outcome was not knowable before the instance existed. That is a real constraint
+while the check is a refusal: refusing must happen before provisioning, and the
+prepend is decided after, so the only sound answer is to reserve the worst case
+up front and charge it to the developer.
+
+Making the transport decision instead of a refusal dissolves the constraint. The
+decision no longer has to be early, because nothing is being denied -- and once
+it can be late, it can be made against the final argv string, after every
+prepend, where no estimate is needed (R45). The developer stops paying for a
+prepend that may not happen. The pre-exec check survives as R55, no longer as a
+backstop against a forgotten reserve but as one against a forgotten spill.
+
+### No knob
+
+R50 forbids a flag, setting, or prompt controlling the spill. The reasoning is
+the same one that motivates the whole amendment: a decision the developer can
+influence is a decision they have to understand, and the point is to stop
+requiring them to understand it. A `--prompt-file`-shaped escape hatch would
+also reintroduce the BRIEF's excluded shape by the back door.
+
+The cost is that a developer who wants their prompt inline for some reason
+cannot force it. No such reason has come up, and the behavior is derivable from
+size alone, so a developer who needs to know can compute it.
 
 ### A non-interactive session refuses; a limited terminal degrades
 
@@ -507,15 +825,22 @@ is independent of how the prompt was obtained. "Paste a prompt, then fan out
 without attaching" is coherent, and the command's own help already describes
 detach as the mode for fan-out and scripting.
 
-### The non-interactive path is unchanged, and structurally so
+### A non-interactive invocation never reads, and structurally so
 
 The BRIEF asked what a non-interactive invocation does beyond not hanging. It
-does exactly what it does today, and the requirements are written so this is
-structural rather than careful: the interactivity check lives only in the
+never opens a capture and never reads from a terminal, and the requirements are
+written so this is structural rather than careful: the interactivity check
+lives only in the
 zero-argument branch (R2, R20), and capture is unreachable from any caller that
 does not go through the interactive command path (R11). That second constraint
 is load-bearing -- `niwa watch` calls the launcher directly, so capture logic
 placed there would give a cron-driven review sweep an interactive read.
+
+What a non-interactive invocation does with the prompt it was given is a
+separate question, and there the answer did change: an oversized positional
+argument now spills rather than erroring (R44, R47, R48). The invariant that
+survives is about reading, not about outcomes -- no path that lacks a terminal
+acquires one.
 
 The argument contract widens from exactly one positional argument to at most one
 (R3), matching the shape `niwa destroy` already uses. Two alternatives were
@@ -552,9 +877,28 @@ would go to the redirect target.
 
 ## Known Limitations
 
-- The ceiling is unreachable for the payloads this feature exists to serve and
-  reachable only by pasting a whole run. The refusal is a real path for a real
-  user, not a defensive check, and its wording carries the weight.
+- **A spilled prompt is written to disk, and the earlier design's claim that the
+  prompt never touches disk no longer holds.** That property was load-bearing
+  enough that SIGQUIT is handled specifically to keep a core dump from carrying
+  the payload. The amendment gives it up for prompts above the threshold. The
+  mitigations are that the file is owner-only (R54), lives inside an instance
+  directory that already holds dispatch state at the same permissions, and is
+  removed when the instance is (R53). It remains a genuine reduction: a large
+  pasted secret now exists as a file for the life of the session, where before
+  it existed only in process memory. The positional path was already worse --
+  the whole prompt lands in shell history -- but the capture path was better,
+  and is now better only below the threshold.
+- **A spilled prompt is not the worker's literal opening message.** The worker
+  receives an instruction to read a file. It must spend a tool call to get the
+  text, and a worker that ignores the instruction proceeds on the excerpt
+  alone. Nothing in this PRD can guarantee the read happens.
+- **Removing niwa's limit does not remove the worker's.** A 582 KB log fits in
+  the file and may not fit usefully in the worker's context. The handoff is
+  what this feature owns; comprehension is not.
+- **A reclaimed instance takes the spilled prompt with it.** A developer who
+  wants the text after `niwa reap` has run has their clipboard and their
+  scrollback and nothing from niwa. This follows from R53 and is the accepted
+  cost of not accumulating unreclaimed files.
 - An earlier revision recorded an echo cost that appeared superlinear on a
   single long line. Instrumented re-measurement retired that: the child received
   4095, 4095, 2, 1 bytes and then nothing, because the test harness does a short
@@ -576,9 +920,10 @@ would go to the redirect target.
 - Behavior inside multiplexers and the rendering quality of a large paste cannot
   be checked by any harness in this repository. They are manual criteria, which
   means they are checked at release time by a person or not at all.
-- The reserve costs headroom on invocations where nothing is prepended.
-  Recovering it would require resolving whether the prepend applies before
-  provisioning, which this PRD does not require.
+- The R49 backstop is a real bound, just an unreachable one. A pathological
+  producer feeding the capture from something other than a human paste can
+  still hit it, and gets a refusal that names no product limit because there
+  isn't one.
 - The terminal-driven scenarios depend on a terminal utility whose behavior
   differs between platforms. Continuous integration runs on one of them, so the
   criteria are enforced there; a developer running the suite on another platform
@@ -592,19 +937,32 @@ would go to the redirect target.
 - Scripted piping as a design driver. Non-blocking behavior is required (R20);
   optimizing for `command | niwa dispatch` is not.
 - Reading standard input as the prompt, whether implicitly or behind a new flag.
-- Changing how the prompt reaches the worker after capture, including any
-  transport change that would raise the ceiling.
-- Prompt synthesis, which the dispatch skill owns.
+- Any user-facing control over the spill: no flag, no configuration key, no
+  threshold to tune, no path to supply (R50).
+- Prompt synthesis, which the dispatch skill owns. The excerpt R52 carries is a
+  literal prefix, not a description; having niwa characterize the text is a
+  different commitment and stays out.
+- Any promise about what the worker does with a large prompt, including whether
+  it reads the spilled file at all and how well it reasons over that much text.
+- Retaining a spilled prompt beyond its instance, and any archive, log, or
+  audit trail of dispatched prompts.
+- Compressing, chunking, or splitting a large prompt, and any change to how the
+  worker process is started.
 - The capture mechanism, the specific submit, newline, deletion, and
-  cancellation gestures, the choice of terminal API, and where the reader lives
-  in the tree. These are DESIGN decisions; the requirements above constrain them
-  without making them.
+  cancellation gestures, the choice of terminal API, where the reader lives in
+  the tree, the spilled file's name and location within the instance, the
+  excerpt's size, and which layer of the command makes the spill decision.
+  These are DESIGN decisions; the requirements above constrain them without
+  making them.
 - A global no-input flag. If niwa wants one it belongs on the root command.
-- Changing what the generated workspace context or the dispatch skill tell
-  agents. Both instruct agents to pass a positional prompt, which remains
-  correct; capture is a human-facing affordance and adding it there would invite
-  agents to reach for an interactive path they cannot use.
+- Teaching agents to use the interactive capture. The generated workspace
+  context and the dispatch skill instruct agents to pass a positional prompt,
+  which remains correct; capture is a human-facing affordance and adding it
+  there would invite agents to reach for an interactive path they cannot use.
+  R56 corrects only the stale claim that a long prompt risks refusal, and
+  leaves the brief-file recommendation standing on its own merits.
 
-Correcting the prompt size cap is tracked separately as issue #225. The
-correction is not excluded from this work: R34 requires it here if that issue
-has not landed first.
+Correcting the prompt size cap was tracked separately as issue #225 and landed
+before capture shipped. Most of that correction survives: its threshold becomes
+R44's and its pre-exec check becomes R55's. Only the reserve it introduced is
+retired, by R45.
