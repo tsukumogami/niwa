@@ -31,7 +31,7 @@ func TestLauncherCannotReachTheCapture(t *testing.T) {
 
 	// Drive the real launcher seam the way watch.go does: a prompt built by the
 	// caller, passed positionally, with no terminal involved.
-	err := dispatchLaunch(context.Background(), root, "resume the review", nil, nil)
+	err := dispatchLaunch(context.Background(), root, "", "resume the review", nil, nil)
 	if err != nil {
 		t.Fatalf("launcher returned %v", err)
 	}
@@ -49,7 +49,7 @@ func TestLauncherRejectsEmptyPromptRatherThanCapturing(t *testing.T) {
 		return "", nil
 	})
 
-	err := realDispatchLaunch(context.Background(), t.TempDir(), "", nil, nil)
+	err := realDispatchLaunch(context.Background(), t.TempDir(), "", "", nil, nil)
 	if err == nil {
 		t.Fatal("expected the launcher to reject an empty prompt")
 	}

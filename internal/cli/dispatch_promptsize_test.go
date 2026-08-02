@@ -121,7 +121,7 @@ func TestDispatch_PromptAtLimit_KeepAliveArmed_Dispatches(t *testing.T) {
 // claude lookup, so this never spawns anything.
 func TestDispatchLaunch_OverCeilingPrompt_RefusedBeforeExec(t *testing.T) {
 	over := strings.Repeat("a", maxArgStringBytes+1)
-	err := realDispatchLaunch(context.Background(), t.TempDir(), over, nil, []string{})
+	err := realDispatchLaunch(context.Background(), t.TempDir(), "", over, nil, []string{})
 	if err == nil {
 		t.Fatal("expected the launcher to refuse a prompt over the exec ceiling")
 	}

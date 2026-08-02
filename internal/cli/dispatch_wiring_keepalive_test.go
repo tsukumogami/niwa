@@ -11,12 +11,16 @@ import (
 )
 
 // captureLaunchPrompt overrides the launch seam to record the final prompt the
-// worker is launched with (the arming instruction, when injected, is prepended
-// to it) alongside the passthrough argv.
+// worker is launched with, alongside the passthrough argv.
+//
+// The prompt arrives in two pieces and the real launcher is what joins them, so
+// this stub joins them the same way. Recording only the body would silently
+// drop the keep-alive arming instruction and make every assertion below pass
+// against a worker that was never armed.
 func captureLaunchPrompt(f *dispatchFakes, gotPrompt *string, gotPass *[]string) {
-	dispatchLaunch = func(_ context.Context, _, prompt string, passthrough, _ []string) error {
+	dispatchLaunch = func(_ context.Context, _, prefix, body string, passthrough, _ []string) error {
 		f.launchCalled++
-		*gotPrompt = prompt
+		*gotPrompt = prefix + body
 		if gotPass != nil {
 			*gotPass = passthrough
 		}

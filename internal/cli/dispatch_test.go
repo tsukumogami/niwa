@@ -121,7 +121,7 @@ func installDispatchFakes(t *testing.T, workspaceRoot string) *dispatchFakes {
 		return provisionResult{Name: name, Path: dir}, nil
 	}
 
-	dispatchLaunch = func(_ context.Context, _, _ string, _ []string, _ []string) error {
+	dispatchLaunch = func(_ context.Context, _, _, _ string, _ []string, _ []string) error {
 		f.launchCalled++
 		return nil
 	}
@@ -333,7 +333,7 @@ func TestDispatch_Rollback_LaunchFailure(t *testing.T) {
 	root := setupDispatchWorkspace(t)
 	chdir(t, root)
 	f := installDispatchFakes(t, root)
-	dispatchLaunch = func(_ context.Context, _, _ string, _ []string, _ []string) error {
+	dispatchLaunch = func(_ context.Context, _, _, _ string, _ []string, _ []string) error {
 		f.launchCalled++
 		return errors.New("launch boom")
 	}
@@ -476,7 +476,7 @@ func TestDispatch_Concurrent_DistinctMappings(t *testing.T) {
 	// installDispatchFakes mutates shared dispatchFakes counters without
 	// synchronization, which would be a data race under concurrent dispatch; this
 	// test asserts on the durable mappings instead of those counters.
-	dispatchLaunch = func(_ context.Context, _, _ string, _ []string, _ []string) error { return nil }
+	dispatchLaunch = func(_ context.Context, _, _, _ string, _ []string, _ []string) error { return nil }
 	destroyInstanceFunc = func(_ string) error { return nil }
 
 	// A goroutine-safe provision: each call mints a distinct instance dir under
@@ -573,7 +573,7 @@ func TestDispatch_PassthroughFlags_DiscreteArgv(t *testing.T) {
 	dispatchDetach = true
 
 	var gotPass []string
-	dispatchLaunch = func(_ context.Context, _, _ string, passthrough []string, _ []string) error {
+	dispatchLaunch = func(_ context.Context, _, _, _ string, passthrough []string, _ []string) error {
 		gotPass = passthrough
 		return nil
 	}
@@ -687,7 +687,7 @@ func TestDispatch_Name_SlugInInstanceAndSession(t *testing.T) {
 	}
 
 	var gotPass []string
-	dispatchLaunch = func(_ context.Context, _, _ string, passthrough []string, _ []string) error {
+	dispatchLaunch = func(_ context.Context, _, _, _ string, passthrough []string, _ []string) error {
 		f.launchCalled++
 		gotPass = passthrough
 		return nil
@@ -757,7 +757,7 @@ func TestDispatch_NoName_NoSlugNoNameFlag(t *testing.T) {
 	}
 
 	var gotPass []string
-	dispatchLaunch = func(_ context.Context, _, _ string, passthrough []string, _ []string) error {
+	dispatchLaunch = func(_ context.Context, _, _, _ string, passthrough []string, _ []string) error {
 		f.launchCalled++
 		gotPass = passthrough
 		return nil
@@ -799,7 +799,7 @@ func TestDispatch_NameSanitizesEmpty_FallsBack(t *testing.T) {
 	}
 
 	var gotPass []string
-	dispatchLaunch = func(_ context.Context, _, _ string, passthrough []string, _ []string) error {
+	dispatchLaunch = func(_ context.Context, _, _, _ string, passthrough []string, _ []string) error {
 		f.launchCalled++
 		gotPass = passthrough
 		return nil

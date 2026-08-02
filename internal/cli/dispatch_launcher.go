@@ -27,11 +27,22 @@ var dispatchLaunch = realDispatchLaunch
 // an allowlisted, credential-scrubbed environment. Passing an explicit env is
 // the ONLY way the worker's environment differs from the supervisor's.
 //
-// An empty prompt is rejected before any exec (R43).
-func realDispatchLaunch(ctx context.Context, instanceDir, prompt string, passthrough, env []string) error {
-	if prompt == "" {
+// The prompt arrives in two pieces. body is the developer's text and is the
+// only part a spill may move to a file; prefix is niwa-authored text (today,
+// the keep-alive arming instruction) that always rides the argv element. They
+// are kept apart all the way down to here because the caller cannot know
+// whether a spill will happen -- that depends on the composed length -- and
+// once concatenated the distinction cannot be recovered without the exec layer
+// knowing about the keep-alive feature.
+//
+// An empty prompt is rejected before any exec. The check binds to body, NOT to
+// the composed string: prefix is a long constant whenever keep-alive is armed,
+// so testing the pair would silently stop rejecting an empty task.
+func realDispatchLaunch(ctx context.Context, instanceDir, prefix, body string, passthrough, env []string) error {
+	if body == "" {
 		return fmt.Errorf("dispatch: empty prompt")
 	}
+	prompt := prefix + body
 	// Backstop, not the user-facing check: runDispatch step (1) is where an
 	// oversized prompt is supposed to be rejected, early and with advice. This
 	// guard sits on the string that actually reaches execve, so if something is

@@ -414,17 +414,24 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	// keepAliveArmed records that the arming actually happened (resolved on AND
 	// remote control on); it is what the durable mapping carries in step (11),
 	// so `niwa list` reports sessions genuinely kept alive, not mere requests.
+	// promptPrefix is niwa-authored text that always rides the argv element.
+	// Keeping it separate from the developer's prompt is what lets the launcher
+	// spill only the latter: once the two are concatenated the distinction is
+	// gone, and a spill would write niwa's arming instruction into the file
+	// where the developer's text belongs -- producing a session recorded and
+	// reported as kept alive that was never actually armed.
+	promptPrefix := ""
 	keepAliveArmed := false
 	if resolveDispatchKeepAlive(dispatchKeepAlive, hostGlobal, inst) {
 		if remoteControlEnabled(rcInjected, inst) {
-			prompt = keepAliveArmingInstruction + prompt
+			promptPrefix = keepAliveArmingInstruction
 			keepAliveArmed = true
 		} else {
 			fmt.Fprintf(cmd.ErrOrStderr(), "niwa dispatch: %s\n", keepAliveNonRCWarning)
 		}
 	}
 
-	if err := dispatchLaunch(cmd.Context(), instancePath, prompt, passthrough, nil); err != nil {
+	if err := dispatchLaunch(cmd.Context(), instancePath, promptPrefix, prompt, passthrough, nil); err != nil {
 		return fmt.Errorf("niwa: error: launching dispatch worker: %w", err)
 	}
 
