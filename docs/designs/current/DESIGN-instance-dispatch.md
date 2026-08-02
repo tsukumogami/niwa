@@ -313,6 +313,13 @@ before any instance is created; a prompt that would exceed the operating system'
 argument-length limit fails with a clear error rather than being truncated (R43).
 Rejected: any shell path would reintroduce injection and quoting hazards.
 
+**Superseded in part by `docs/designs/current/DESIGN-dispatch-paste-prompt.md`.**
+A prompt past the argument-length limit no longer fails: the launcher writes it
+to a file inside the instance and hands the worker a pointer plus an excerpt.
+The single-argv-element property this decision protects is unchanged -- the
+pointer is also one element and is never passed through a shell -- and the
+clear-error path survives as an assertion that a future prepend cannot bypass.
+
 ### D9 -- Test seams
 
 Options: integration-only testing against a real `claude` and a live daemon; injectable

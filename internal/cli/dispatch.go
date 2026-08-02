@@ -165,8 +165,10 @@ so dispatch never leaves an unreclaimable instance DIRECTORY. One caveat: if the
 worker launch succeeds but session-id capture then fails, the rollback deletes
 the instance directory, but the detached background process keeps running -- we
 never captured its session id, so we cannot stop it. That process has no mapping
-and is harmless, but it is yours to 'claude stop' once you find it in 'claude
-list'.`,
+and it is yours to 'claude stop' once you find it in 'claude list'. It is mostly
+harmless, with one caveat: a prompt too large to pass as a command argument is
+written into the instance, so a worker in that window may find its task file
+already deleted and proceed on the excerpt it was given.`,
 	Args:          cobra.MaximumNArgs(1),
 	SilenceErrors: true,
 	SilenceUsage:  true,
@@ -236,7 +238,9 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	}
 
 	// (3) Preflight claude on PATH BEFORE creating any instance, so an absent
-	// claude fails with no instance dir and no mapping on disk (R16, R13).
+	// claude fails with no instance dir and no mapping on disk
+	// (PRD-instance-dispatch R16, R13 -- both numbers mean something unrelated
+	// in PRD-dispatch-paste-prompt, so the document is named).
 	if _, err := lookClaude(); err != nil {
 		return fmt.Errorf("niwa: error: claude binary not found in PATH; install Claude Code before dispatching")
 	}

@@ -280,6 +280,16 @@ command (working name `niwa dispatch`; final verb owned by the DESIGN).
   element, not through a shell), SHALL reject an empty prompt with a clear error, and SHALL
   fail clearly when a prompt exceeds the operating system's argument-length limit rather
   than truncating it silently.
+
+  **Superseded in part by `docs/prds/PRD-dispatch-paste-prompt.md` (R43, R44, R51).**
+  The prompt is no longer argv-only: text past the operating system's
+  argument-length limit is written to a file inside the instance and the worker
+  receives a pointer to it, so the developer never reaches a failure. Both
+  halves of this requirement's intent survive there -- the prompt is still never
+  silently truncated, and an over-limit argv string is still refused rather than
+  surfacing as an opaque exec error -- but the developer no longer reaches that
+  refusal, because the spill happens first. This text is left in place rather
+  than rewritten because the artifact is at a terminal status.
 - **R44.** The command SHALL add no new system dependency beyond what `niwa create` and a
   local `claude` already require; it SHALL run on the same host as the workspace.
 - **R45.** The command SHALL NOT add an unbounded wait: the identity-capture wait (R20)

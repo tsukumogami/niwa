@@ -57,9 +57,15 @@ func enterRaw() (func(), error) {
 	fmt.Fprint(os.Stderr, enableBracketedPaste)
 
 	ch := make(chan os.Signal, 1)
-	// SIGQUIT is handled for a specific reason: its default action dumps core,
-	// and the core would contain the captured prompt. Nothing else in this path
-	// puts the prompt on disk.
+	// SIGQUIT is in the set for terminal restoration, like the rest.
+	//
+	// An earlier comment here justified it on the grounds that its default
+	// action dumps core carrying the captured prompt. That is not what happens
+	// to a Go binary: the runtime installs its own SIGQUIT handler, prints
+	// goroutine stacks to stderr, and exits with status 2. A core appears only
+	// under GOTRACEBACK=crash. What the default disposition actually leaks is
+	// those stacks onto the developer's terminal -- smaller, and still a reason
+	// to handle it, just not the reason previously given.
 	signal.Notify(ch, syscall.SIGINT, syscall.SIGQUIT, syscall.SIGTERM,
 		syscall.SIGHUP, syscall.SIGTSTP, syscall.SIGCONT)
 
