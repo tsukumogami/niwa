@@ -1,6 +1,6 @@
 ---
 schema: prd/v1
-status: In Progress
+status: Done
 problem: |
   A developer who hits a failure in the terminal cannot hand that failure to a
   dispatched worker. `niwa dispatch` takes its prompt as a single positional
@@ -31,7 +31,7 @@ motivating_context: |
 
 ## Status
 
-In Progress
+Done
 
 Requirements for interactive prompt capture on `niwa dispatch`, downstream of
 the Accepted BRIEF. The Decisions and Trade-offs section closes the four
@@ -525,68 +525,73 @@ magnitude.
 Each criterion names the requirements it verifies, and is filed at the level
 whose harness can make it fail.
 
-Every box is unchecked. Criteria naming R43 through R60 are new and describe
-unbuilt work. The rest were satisfied by the shipped capture, but the amendment
-changes the code underneath most of them -- the capture loses its limit
-parameter, the launcher's signature changes, and the argv element is composed
-one layer deeper -- so they are re-run rather than carried over as ticked. A
-criterion that survives untouched and still passes can be ticked as the work
-lands; none is assumed.
+Every automated criterion is ticked and was re-run against the amended code
+rather than carried over -- the capture lost its limit parameter, the launcher's
+signature changed, and the argv element is composed one layer deeper, so nothing
+was assumed to still hold. The manual terminal-matrix criteria below stay
+unchecked: no harness in this repository can reach them, and they are checked at
+release time by a person or not at all.
+
+One criterion moved level during implementation. The oversized-prompt functional
+scenario cannot be driven positionally: the harness would have to exec the
+binary with an argument past the very limit under test, which fails before niwa
+runs. It is driven through the capture instead, and the positional spill is
+covered at the command level.
 
 ### Unit tests over an injectable capture core
 
-- [ ] A delimited paste whose line breaks are line feeds does not return after
+- [x] A delimited paste whose line breaks are line feeds does not return after
       the first line; the same delimited paste with carriage-return breaks also
       does not (R4).
-- [ ] Undelimited input containing a line break returns at that break, pinning
+- [x] Undelimited input containing a line break returns at that break, pinning
       the documented degradation so a future change to it is deliberate (R40).
-- [ ] Input arriving across multiple reads, split at an arbitrary boundary, is
+- [x] Input arriving across multiple reads, split at an arbitrary boundary, is
       captured whole (R4).
-- [ ] One submit gesture returns the captured text for a bare paste (R4).
-- [ ] For a delimited paste ending mid-line followed by typed text, the returned
+- [x] One submit gesture returns the captured text for a bare paste (R4).
+- [x] For a delimited paste ending mid-line followed by typed text, the returned
       string equals the pasted bytes, one line feed, then the typed bytes --
       compared exactly (R5).
-- [ ] The manual-newline gesture inserts a newline and does not submit (R6).
-- [ ] Typed input is echoed to the render target as it is entered; a pasted
+- [x] The manual-newline gesture inserts a newline and does not submit (R6).
+- [x] Typed input is echoed to the render target as it is entered; a pasted
       block is represented by a bounded record naming its extent rather than by
       its bytes (R35).
-- [ ] End-of-input on a non-empty buffer returns the accumulated text; on an
+- [x] End-of-input on a non-empty buffer returns the accumulated text; on an
       empty buffer it returns the end-of-input outcome (R28).
-- [ ] Abandonment returns a sentinel distinct from both end-of-input and a
+- [x] Abandonment returns a sentinel distinct from both end-of-input and a
       successful submit (R8).
-- [ ] Deleting entered text reduces the buffer (R36).
-- [ ] Over the sample {0, 1, 131,070, 131,071, 131,072, 614,400} bytes, the
+- [x] Deleting entered text reduces the buffer (R36).
+- [x] Over the sample {0, 1, 131,070, 131,071, 131,072, 614,400} bytes, the
       capture accepts every input and returns it byte-for-byte. Size never
       blocks a return; the zero-byte case still returns empty and is rejected
       downstream by R29, which is a content rule, not a size one (R43).
-- [ ] Over that same sample, and over the bytes written before the first read,
+- [x] Over that same sample, and over the bytes written before the first read,
       nothing on the render target contains the substrings "limit", "too long",
       or "too large", case-insensitively. The R49 backstop refusal is the one
       message exempt, and it has its own criterion below (R43, R49).
-- [ ] Six appends of 614,400 bytes each -- 3.6 MB cumulative, well past the
+- [x] Six appends of 614,400 bytes each -- 3.6 MB cumulative, well past the
       point where any earlier retention bound would have fired -- are all
       accepted, so the backstop is genuinely far above what a developer
       produces rather than reachable by pasting twice (R43, R49).
-- [ ] The backstop constant is at least 64 times `maxArgStringBytes`, asserted
+- [x] The backstop constant is at least 64 times `maxArgStringBytes`, asserted
       against the derivation rather than a copied literal, the way the existing
       exec-limit constants are pinned (R49).
-- [ ] An append crossing the backstop is refused in full, the buffer is
+- [x] An append crossing the backstop is refused in full, the buffer is
       unchanged, and the refusal says the input was not retained. The refusal
       text names no byte ceiling and gives no size advice: it does not tell the
       developer to write a file, reference a path, shorten, or re-select (R49).
-- [ ] Feeding bytes past the backstop as typed input -- the path a terminal
+- [x] Feeding bytes past the backstop as typed input -- the path a terminal
       without paste delimiters takes -- emits exactly one refusal, not one per
       byte, and a deletion that brings the buffer back under re-arms it (R49).
-- [ ] Submitted text containing terminal control sequences is returned
+- [x] Submitted text containing terminal control sequences is returned
       unmodified, while the bytes written to the render target contain no
       executable control sequence from the input (R30).
-- [ ] Nothing written to the render target is a capability query sequence, and no
+- [x] Nothing written to the render target is a capability query sequence, and no
       capability warning text is emitted (R23).
-- [ ] The bytes written before the first read contain non-empty human-readable
+- [x] The bytes written before the first read contain non-empty human-readable
       text once escape sequences are stripped (R27).
-- [ ] A single line of 614,400 bytes is accepted whole, without truncation and
+- [x] A single line of 614,400 bytes is accepted whole, without truncation and
       without hanging (R19).
-- [ ] Allocation per input byte does not GROW by more than 1.5x between 61,440
+- [x] Allocation per input byte does not GROW by more than 1.5x between 61,440
       and 614,400 bytes, for each of a single-line paste, a multi-line paste,
       and typed input. An upper bound only: coming in cheaper at scale is
       amortized buffer growth working, not a regression. This is the requirement's
@@ -596,48 +601,48 @@ lands; none is assumed.
       work counter rather than on wall time, because this document already
       records one bogus superlinear measurement produced by timing a harness
       (R37).
-- [ ] Accepting a 614,400-byte pasted block issues fewer than one write to the
+- [x] Accepting a 614,400-byte pasted block issues fewer than one write to the
       render target per hundred input bytes. The shipped code writes once per
       byte on the path where a paste is indistinguishable from typing, which on
       a terminal without paste delimiters turns a 582 KB paste into roughly
       582,000 write syscalls -- a perceptible stall of exactly the kind R37
       forbids (R37).
-- [ ] Rendering a pasted block does work proportional to the terminal width,
+- [x] Rendering a pasted block does work proportional to the terminal width,
       not to the block. Neither the full block nor a full line is converted to
       a rune slice to produce a bounded summary (R37).
-- [ ] As a wall-clock backstop that will not flake: 614,400 bytes are accepted
+- [x] As a wall-clock backstop that will not flake: 614,400 bytes are accepted
       in under two seconds on the in-memory reader (R37).
-- [ ] Any ratio-of-timings comparison between input shapes is a benchmark that
+- [x] Any ratio-of-timings comparison between input shapes is a benchmark that
       does not gate continuous integration (R37).
 
 ### Command-level unit tests over a capture seam
 
-- [ ] The spill threshold equals `maxArgStringBytes` (131,071 on the current
+- [x] The spill threshold equals `maxArgStringBytes` (131,071 on the current
       baseline), asserted against the derivation rather than a copied literal,
       and no user-facing prompt ceiling is reachable through the CLI (R44,
       R45).
-- [ ] The threshold constant is declared exactly once, in a file carrying no
+- [x] The threshold constant is declared exactly once, in a file carrying no
       build constraints, and `GOOS=darwin` and `GOOS=linux` builds both vet
       clean -- so a platform-conditional definition fails rather than passing
       on whichever platform continuous integration happens to run (R46).
-- [ ] A prompt whose final argv string is exactly `maxArgStringBytes` does not
+- [x] A prompt whose final argv string is exactly `maxArgStringBytes` does not
       spill; one byte more does (R44).
-- [ ] A prompt just under the threshold that crosses it once the keep-alive
+- [x] A prompt just under the threshold that crosses it once the keep-alive
       instruction is prepended DOES spill, and the same prompt with keep-alive
       unarmed does not -- so the decision is made against the final string, not
       the submitted one (R45).
-- [ ] With keep-alive armed and the prompt spilled, the worker's argv element
+- [x] With keep-alive armed and the prompt spilled, the worker's argv element
       still begins with the arming instruction, and the session mapping's
       keep-alive flag matches what was actually sent (R58).
-- [ ] The same oversized payload supplied as a positional argument and returned
+- [x] The same oversized payload supplied as a positional argument and returned
       from the capture seam produces byte-identical spill file contents.
       Compared as separate assertions from the path: identical instruction
       wording and identical excerpt bytes. The two paths' spill paths differ
       only in the instance directory and the uniqueness token, and are equal
       once both are normalized (R47, R59).
-- [ ] An oversized prompt produces a spill file whose bytes equal the submitted
+- [x] An oversized prompt produces a spill file whose bytes equal the submitted
       bytes exactly, with no header, footer, or trailing newline added (R51).
-- [ ] The worker's argv element for an oversized prompt contains the spill
+- [x] The worker's argv element for an oversized prompt contains the spill
       file's path, an instruction to read it, a fixed marker constant
       delimiting the excerpt -- built from a fixed prefix constant plus the
       launch's unique token, and asserted absent from the excerpt bytes -- a
@@ -646,93 +651,93 @@ lands; none is assumed.
       satisfies `filepath.IsAbs`. The whole argv element stays under
       `maxArgStringBytes`. A cut falling mid-character moves back to a character
       boundary (R52).
-- [ ] Two prompts identical for their first 512 bytes and differing at byte 513
+- [x] Two prompts identical for their first 512 bytes and differing at byte 513
       produce different argv elements. The differing position is fixed by the
       criterion rather than by the excerpt's own length, so an excerpt shrunk
       below the floor fails (R52).
-- [ ] The spill file's mode is 0600 and the directory holding it is no more
+- [x] The spill file's mode is 0600 and the directory holding it is no more
       permissive than 0700 (R54).
-- [ ] The spill filename matches the pattern the instance's own `.gitignore`
+- [x] The spill filename matches the pattern the instance's own `.gitignore`
       carries, so a workspace nested inside a larger tracked working tree
       cannot stage a spilled prompt with `git add -A` (R54).
-- [ ] A second launch into an instance whose spill directory already exists
+- [x] A second launch into an instance whose spill directory already exists
       succeeds; the same launch against a path that is a symlink, a
       non-directory, or a directory more permissive than 0700 fails and
       provisions nothing (R54, R59).
-- [ ] With keep-alive armed and an empty task, the launch is refused -- the
+- [x] With keep-alive armed and an empty task, the launch is refused -- the
       emptiness check binds to the developer's text, not to the composed string
       (R29, R58).
-- [ ] A prompt containing a NUL byte spills at any size, the spill file
+- [x] A prompt containing a NUL byte spills at any size, the spill file
       contains the NUL where the developer put it, and no argv element carries
       one (R61).
-- [ ] The excerpt is asserted not to contain the launch token rather than
+- [x] The excerpt is asserted not to contain the launch token rather than
       scrubbed of it, and the token is not derived from the instance name's
       random suffix (R52, R59).
-- [ ] The spill file lives under the instance the worker is launched into, and
+- [x] The spill file lives under the instance the worker is launched into, and
       destroying that instance removes it (R53).
-- [ ] Two launches into the SAME instance produce two spill files, neither
+- [x] Two launches into the SAME instance produce two spill files, neither
       overwriting the other (R59).
-- [ ] The spill file still exists after the launch call returns, so a worker
+- [x] The spill file still exists after the launch call returns, so a worker
       that reads it later finds it (R53).
-- [ ] A dispatch that fails after the spill leaves no instance and no spill file
+- [x] A dispatch that fails after the spill leaves no instance and no spill file
       (R53, R26).
-- [ ] With the spill write forced to fail, the dispatch reports the failure and
+- [x] With the spill write forced to fail, the dispatch reports the failure and
       leaves no instance behind (R26).
-- [ ] With the spill seam stubbed to a no-op, an over-ceiling argv string is
+- [x] With the spill seam stubbed to a no-op, an over-ceiling argv string is
       refused before exec with an error naming `maxArgStringBytes`, not an
       opaque exec error (R55, R57).
-- [ ] The prompts `niwa watch` builds from its review and resume templates are
+- [x] The prompts `niwa watch` builds from its review and resume templates are
       below the threshold and do not spill, pinned so a template grown past it
       is caught as a change (R48).
-- [ ] Driving the launcher path used by `niwa watch` with an oversized prompt
+- [x] Driving the launcher path used by `niwa watch` with an oversized prompt
       spills rather than failing, and no argv element handed to exec exceeds
       `maxArgStringBytes` on any launch path (R48, R55).
-- [ ] The command's registered flag set matches a golden list, so a new flag
+- [x] The command's registered flag set matches a golden list, so a new flag
       fails the golden and has to be justified (R50).
-- [ ] The spill decision's call graph contains no environment or configuration
+- [x] The spill decision's call graph contains no environment or configuration
       lookup, asserted by source inspection (R50).
-- [ ] Running the spill decision under a clean environment, and again with every
+- [x] Running the spill decision under a clean environment, and again with every
       documented niwa environment variable set and a config file setting every
       known key, produces the same decision, the same path shape, and the same
       excerpt length (R50).
-- [ ] A positional prompt of 614,400 bytes dispatches, writes nothing
+- [x] A positional prompt of 614,400 bytes dispatches, writes nothing
       size-related to standard error, and exits zero (R43, R47).
-- [ ] With no argument and an interactive session, the capture is invoked and its
+- [x] With no argument and an interactive session, the capture is invoked and its
       text becomes the launcher's final argv element (R1, R51).
-- [ ] A submitted payload containing quotes, backslashes, and dollar signs
+- [x] A submitted payload containing quotes, backslashes, and dollar signs
       arrives byte-for-byte as one argv element (R51).
-- [ ] A pasted block whose line breaks are carriage returns, and one whose line
+- [x] A pasted block whose line breaks are carriage returns, and one whose line
       breaks are carriage-return line-feed pairs, each arrive with single line
       feeds; every other byte in the block is unaltered (R41).
-- [ ] Over the four combinations of (stdin is a terminal, stderr is a terminal),
+- [x] Over the four combinations of (stdin is a terminal, stderr is a terminal),
       the capture runs only when both are true; the other three refuse without
       reading, and the refusal names the positional-argument form (R20, R21).
-- [ ] With both terminal checks true and a non-terminal standard output, the
+- [x] With both terminal checks true and a non-terminal standard output, the
       capture still runs and its rendering goes to the error stream (R22).
-- [ ] With a positional argument, the capture seam is never invoked and the
+- [x] With a positional argument, the capture seam is never invoked and the
       terminal state is never consulted (R2).
-- [ ] Two or more positional arguments produce an argument error, not a capture
+- [x] Two or more positional arguments produce an argument error, not a capture
       (R3).
-- [ ] An abandoned capture provisions nothing (R7, R26).
-- [ ] An empty or whitespace-only submission fails with the empty-prompt error
+- [x] An abandoned capture provisions nothing (R7, R26).
+- [x] An empty or whitespace-only submission fails with the empty-prompt error
       and provisions nothing (R29).
-- [ ] `niwa dispatch ""` fails with the existing empty-prompt error (R12).
-- [ ] `--detach` with a capture returns without attaching; without `--detach`,
+- [x] `niwa dispatch ""` fails with the existing empty-prompt error (R12).
+- [x] `--detach` with a capture returns without attaching; without `--detach`,
       the attach path runs (R13).
-- [ ] Driving the launcher path used by `niwa watch` with the capture seam
+- [x] Driving the launcher path used by `niwa watch` with the capture seam
       stubbed to fail on call never invokes the stub (R11).
-- [ ] The non-TTY refusal, the empty refusal, and abandonment each return a
+- [x] The non-TTY refusal, the empty refusal, and abandonment each return a
       non-zero status (R31).
-- [ ] On the positional path, for every prompt that dispatched before this
+- [x] On the positional path, for every prompt that dispatched before this
       change, exit codes, messages, and argv construction match goldens
       recorded beforehand; the only golden that changes is the oversized one,
       which moves from an error to a dispatch (R25).
 
 ### `@critical` functional scenarios
 
-- [ ] A pasted multiline block dispatches, and the launched worker's argv
+- [x] A pasted multiline block dispatches, and the launched worker's argv
       contains the pasted text verbatim (R1, R4, R51).
-- [ ] A captured paste larger than `maxArgStringBytes` dispatches; the worker's
+- [x] A captured paste larger than `maxArgStringBytes` dispatches; the worker's
       argv names a file inside the instance; that file's contents equal the
       prompt byte-for-byte; and the fake worker resolves the path from a working
       directory other than the instance, so an instance-relative path fails the
@@ -746,43 +751,43 @@ lands; none is assumed.
       the reachable path -- niwa builds the oversized string itself rather than
       receiving it through an exec. The positional spill is covered at the
       command level instead, where no exec intervenes.
-- [ ] Reclaiming the instance behind a spilled dispatch removes the spill file
+- [x] Reclaiming the instance behind a spilled dispatch removes the spill file
       along with it (R53).
-- [ ] `niwa dispatch` with no argument and standard input attached to a pipe that
+- [x] `niwa dispatch` with no argument and standard input attached to a pipe that
       is never written to and never closed exits within a bounded time rather
       than blocking (R20, R33).
-- [ ] The terminal's mode after an abandoned capture matches its mode before
+- [x] The terminal's mode after an abandoned capture matches its mode before
       (R9).
-- [ ] The terminal's mode after a normal submit matches its mode before (R9).
-- [ ] The terminal's mode after the capture receives SIGTERM matches its mode
+- [x] The terminal's mode after a normal submit matches its mode before (R9).
+- [x] The terminal's mode after the capture receives SIGTERM matches its mode
       before; likewise for SIGHUP and SIGQUIT (R9).
-- [ ] The terminal's mode after an interrupt during capture matches its mode
+- [x] The terminal's mode after an interrupt during capture matches its mode
       before, and no instance is created (R39, R7).
-- [ ] The terminal's mode after the capture is suspended and resumed matches its
+- [x] The terminal's mode after the capture is suspended and resumed matches its
       mode before (R38).
-- [ ] The terminal's mode after an empty-capture refusal matches its mode before
+- [x] The terminal's mode after an empty-capture refusal matches its mode before
       (R9).
-- [ ] A capture followed by abandonment exits non-zero and leaves no instance,
+- [x] A capture followed by abandonment exits non-zero and leaves no instance,
       at any input size (R26, R43).
-- [ ] A single line longer than the line-discipline buffer, fed after the capture
+- [x] A single line longer than the line-discipline buffer, fed after the capture
       has started, is captured without hanging (R19).
 
 ### Verified by inspection
 
-- [ ] No documentation states or implies that the prompt argument is mandatory:
+- [x] No documentation states or implies that the prompt argument is mandatory:
       the command's usage string, its long help, and the README all describe the
       argument as optional (R32).
-- [ ] A grep over a fixed file list -- the long help in `internal/cli/`, the
+- [x] A grep over a fixed file list -- the long help in `internal/cli/`, the
       README, `internal/workspace/rootskills/dispatch/SKILL.md`,
       `docs/prds/PRD-instance-dispatch.md`, and
       `docs/designs/current/DESIGN-instance-dispatch.md` -- finds no surviving
       claim that a large prompt is refused or that a caller must write a file
       to stay under an argument limit, and finds a superseding annotation on
       the two upstream artifacts (R56).
-- [ ] No code comment cites a requirement number whose meaning differs between
+- [x] No code comment cites a requirement number whose meaning differs between
       this PRD and `docs/prds/PRD-instance-dispatch.md` without naming which
       document it means (R60).
-- [ ] Every functional step that supplies the binary a standard input it does not
+- [x] Every functional step that supplies the binary a standard input it does not
       control carries a bounded timeout (R33).
 
 ### Verified manually before release
