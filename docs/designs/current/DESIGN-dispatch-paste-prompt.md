@@ -18,6 +18,10 @@ decision: |
   `runDispatch` gains an arity-selected branch and a capture seam sited after
   every preflight check and before the first instance is created, so abandonment
   costs nothing and the launcher stays unreachable from any interactive path.
+  A prompt too large to travel as one argv element is not refused: the launcher
+  splits its prompt parameter into a niwa-authored prefix and the developer's
+  body, writes the body to a per-launch file inside the instance, and hands the
+  worker a pointer plus a fenced excerpt in place of it.
 rationale: |
   The reader was chosen on fidelity rather than speed: measured against pasted
   colour codes, invalid UTF-8, NUL bytes, and a 130,433-byte single line, the
@@ -36,6 +40,19 @@ Current
 Downstream of `docs/prds/PRD-dispatch-paste-prompt.md` (In Progress). Five
 decision questions were investigated independently; the cross-validation that
 reconciled them is summarized under Decision Outcome.
+
+Amended after the feature shipped, alongside the PRD amendment that reverses
+the size ceiling into a spill route. Four further decision questions were
+investigated for the amendment -- where the spill decision lives, what the
+pointer element contains, where the file goes, and what becomes of the
+capture's limit machinery -- and two of them returned conflicting answers that
+Cross-Validation reconciles.
+
+Three claims in the shipped design are retired by the amendment and are called
+out where they appear rather than deleted: that the prompt is never written to
+disk, that the reader's `limit` parameter belongs to the caller, and that the
+size ceiling is a refusal. The Security Considerations section carries the
+first of those as a stated reduction rather than a preserved property.
 
 ## Context and Problem Statement
 
@@ -149,6 +166,87 @@ requirements do not ask for.
 backspace, bell, and 8-bit control sequences intact, and it lives in the synced
 package. A stronger neutralizer belongs in the new package.
 
+### Where the spill decision lives
+
+**Chosen: `realDispatchLaunch`, with its prompt parameter split into a
+niwa-authored `prefix` and the developer's `body`.** The launcher is the single
+function that hands a string to `execve`, and three call sites reach it, so the
+guarantee that no launch path exceeds the argument limit becomes a property of
+one function rather than a rule three callers must remember. Splitting the
+parameter is what lets that depth coexist with keeping niwa's prepends in argv:
+`runDispatch` currently concatenates the keep-alive instruction onto the prompt
+before calling the launcher, which destroys the distinction the spill needs.
+
+**Rejected: the decision in `runDispatch` only.** Cheapest by a wide margin and
+touches no existing test, but the `niwa watch` paths would then refuse rather
+than spill, the filename-uniqueness requirement loses its motivation entirely
+(a fresh instance per dispatch can never host two spills), and the test seam
+that keeps the pre-exec assertion constructible becomes decorative.
+
+**Rejected: the launcher without splitting the parameter.** Cannot be built. By
+the time the launcher sees the string it is `keepAliveArmingInstruction +
+userText`, so it would write the arming instruction into the file and hand the
+worker a pointer that arms nothing. Prefix-matching the constant to strip it
+back off would couple the exec layer to the keep-alive feature and break
+silently the day a second prepend is added.
+
+**Rejected: a helper called by all three callers.** Preserves the existing test
+surface and does reach the watch paths, but leaves the coverage guarantee as a
+discipline: a fourth caller that forgets the helper does not spill, it refuses,
+which is what the requirements forbid.
+
+### Uniqueness token
+
+**Chosen: one 16-hex-character `crypto/rand` token per launch, naming both the
+spill file and the excerpt's fence.** This is where two decisions collided. The
+pointer investigation wanted an unpredictable fence, because the excerpt is
+arbitrary developer text and a fixed marker constant is forgeable by the very
+content it delimits -- and the whole point of the feature is carrying whole CI
+logs, so "no realistic payload contains our marker" is not a claim worth
+making. The placement investigation wanted an instance-scoped counter, because
+it read the cross-path criterion as demanding byte-identical pointer text.
+
+The counter loses because its only advantage was satisfying that reading, and
+the criterion now normalizes the uniqueness token as well as the instance
+directory. The nonce's advantage cannot be recovered any other way: the token
+is minted after the prompt bytes are read, so no submitted text can contain it
+regardless of who wrote it. One source of unpredictability does both jobs.
+
+**Rejected: a content hash.** Satisfies the cross-path criterion perfectly and
+fails uniqueness outright -- `niwa watch`'s continuation prompts are fixed
+templates that hash identically on every pass, so the second launch overwrites
+the first.
+
+**Rejected: `os.CreateTemp`.** Audited `O_EXCL` loop, correct mode, fewer
+lines. It loses only because its names are not normalizable to a stable shape
+in the cross-path comparison, which is a thinner reason than it looks; if that
+criterion is ever relaxed to compare shape, this becomes the answer.
+
+### The capture's limit machinery
+
+**Chosen: delete the concept. `Read` loses its parameter; the memory backstop
+becomes a package constant.** The shipped comment justifying the parameter --
+"the ceiling is derived in `internal/cli` from the argument-length maximum
+minus the reserve, and the core has no business re-deriving it" -- is void in
+every clause. The reserve is retired, the caller no longer has a ceiling, and a
+memory backstop is not caller policy about the prompt but a statement about how
+much the reader will hold in its own address space.
+
+The decisive argument is enforceability. A constant can be asserted by a test
+against its derivation; a call-site argument cannot. A future caller passing a
+small number would compile, pass every test, and silently reinstate the wall
+the amendment removes.
+
+**Rejected: keep the parameter and pass the backstop from `internal/cli`.**
+Smallest diff and no new package, but it leaves a public API whose only
+parameter is a number no caller has an opinion about, and it preserves exactly
+the knob the requirement was written to prevent.
+
+**Rejected: a round literal.** `8 << 20` is not more principled than
+`64 * maxArgStringBytes`, only less tamper-evident -- and a round number is
+precisely how the cap regressed before, when a bound that "reads like a
+conservative bound" turned out to be exactly the operating system's limit.
+
 ### Cancellation and terminal mode
 
 **Chosen: clear ISIG via `term.MakeRaw`, handle the interrupt as a byte, and also
@@ -193,11 +291,42 @@ recorded as settled: no new dependency is needed; the payload and the rendering
 must be produced by separate code paths; and `internal/tui` is the wrong home for
 new code because of its sync obligation.
 
+### The spill, added by the amendment
+
+Above the argument limit the prompt does not fail, it changes vehicle. The
+launcher receives the developer's text and niwa's prefix separately, and when
+their combined length would exceed what `execve` accepts for one argument it
+writes the text to a per-launch file inside the instance and composes a pointer
+in its place. Below the limit nothing changes at all.
+
+The payload-versus-display split the shipped design established turns out to
+carry the amendment too, and this is the load-bearing conclusion of the
+cross-validation. The **file** gets the developer's bytes raw, because carrying
+the error verbatim is the whole point. The **excerpt** in the pointer goes
+through the same neutralizer the transcript uses, because an argv element
+cannot contain a NUL byte -- verified by probe, `exec.Command` with an embedded
+NUL returns `invalid argument` -- so an unsanitized excerpt would carry a
+launch failure into the one path whose purpose is that a large prompt always
+dispatches. The neutralizer needs one widening for this use: line feed must
+pass through, or a stack trace arrives as a single line of `^J`. A line feed
+cannot introduce an escape sequence, so the neutralizer's stated property
+survives verbatim and only its layout set widens.
+
+That probe also exposed a defect the amendment does not cause and should not
+leave standing: a below-threshold prompt containing a NUL dies at exec today
+with an opaque message, and neither the size check nor the pre-exec assertion
+catches it. It is one paste away, since the capture preserves raw control bytes
+by design. The amendment fixes it where the bytes still travel in argv; above
+the threshold it disappears on its own.
+
 ## Solution Architecture
 
 ### Components
 
 ```
+internal/execlimit/
+  execlimit.go           MaxArgString, the one declaration of the per-string
+                         exec cap, in a file with no build constraints
 internal/promptcapture/
   promptcapture.go       Read (binds os.Stdin/os.Stderr) + read (injectable core)
   neutralize.go          byte-level display neutralization
@@ -205,24 +334,58 @@ internal/promptcapture/
 internal/cli/
   prompt.go              + IsStderrTTY, beside the existing IsStdinTTY
   dispatch.go            + dispatchPromptCapture seam, arity branch, gate
+  dispatch_launcher.go   + split prompt parameter, spill seam, pre-exec assertion
+  dispatch_spill.go      + spill write, pointer composition, excerpt rendering
 ```
+
+`internal/execlimit` exists so the exec cap has one declaration that both
+`internal/cli` and `internal/promptcapture` can reach. It is real ceremony for
+one constant, and it drags a package whose doc comment makes a point of its
+stdlib-only isolation into a niwa-internal dependency. The honest defence is
+that the reader does not need to know about `execve`; it needs a number, and
+the requirement chose to express that number as a multiple of an `execve` fact
+so it cannot be quietly tuned down. If a reviewer prefers the smaller diff, the
+fallback is to duplicate the page arithmetic in `promptcapture` and assert the
+floor from a cross-package test -- same tamper-evidence, one duplicated
+expression, no new package. That is a live option, not a strawman.
 
 ### Core interface
 
 ```go
 // Read runs the capture against the real terminal.
-func Read(ctx context.Context, limit int) (string, error)
+func Read() (string, error)
 
-// read is the testable core: tests inject a reader and a writer.
-func read(ctx context.Context, stdin io.Reader, stderr io.Writer, limit int) (string, error)
+// read is the testable core: tests inject a reader and a writer, and a
+// backstop small enough to drive the refusal path without allocating 8 MB.
+func read(stdin io.Reader, stderr io.Writer, backstop int) (string, error)
+
+// maxBufferBytes is the memory backstop, not a prompt ceiling. Stated as a
+// derivation with a floor so it cannot be quietly tuned down into the wall
+// this feature exists to remove.
+const backstopMultiple = 64
+const maxBufferBytes = backstopMultiple * execlimit.MaxArgString
 
 var ErrCanceled    = errors.New("promptcapture: canceled")
 var ErrEndOfInput  = errors.New("promptcapture: end of input on an empty buffer")
 ```
 
-`limit` is a parameter rather than a package constant: the ceiling is derived in
-`internal/cli` from the argument-length maximum minus the reserve, and the core
-has no business re-deriving it.
+The shipped signature took a `limit` parameter, justified on the grounds that
+the ceiling was derived in `internal/cli` and the core had no business
+re-deriving it. That reasoning is void: the reserve is retired, the caller no
+longer has a ceiling to pass, and what remains is a memory bound that belongs
+to the reader rather than to its caller. The parameter survives only on the
+unexported core, where it is a test seam.
+
+```go
+// dispatchLaunch's prompt is split so the spill can move only the developer's
+// bytes. prefix is niwa-authored text that always rides argv.
+func realDispatchLaunch(ctx context.Context, instanceDir, prefix, body string,
+    passthrough, env []string) error
+
+// spillPrompt is the seam that keeps the pre-exec assertion constructible:
+// a test stubs it to a no-op and drives an over-limit string at the guard.
+var spillPrompt = writeSpillFile
+```
 
 ### Data flow
 
@@ -259,42 +422,78 @@ Two outputs leave the loop and never mix: the payload buffer, which grows and
 truncates only at its end, and the transcript, which appends bounded neutralized
 records to standard error.
 
-### The size ceiling in the loop
+### The memory backstop in the loop
 
-Crossing the ceiling is loop state, never an outcome, which is how a core with a
-single return value satisfies a refusal that leaves the capture open.
+The shipped loop carried a transport ceiling and a retention bound derived from
+it. The ceiling is gone; what remains is one bound, and it is about memory
+rather than about prompts.
 
-The order matters and is the opposite of the obvious one. The input **is
-appended**, and then the buffer is checked: if it now exceeds `limit`, the loop
-sets an over-ceiling mark and emits a refusal record to the transcript naming the
-buffer's actual size and the limit in bytes, and directing the developer to write
-the text to a file and dispatch a prompt referencing that path. Reading
-continues. The mark makes the capture unsubmittable -- the submit gesture
-re-emits the refusal instead of returning -- and deletion clears it once the
-buffer fits. Appending nothing would be simpler and wrong: the buffer could never
-be over the ceiling, so the mark could never be set, the deletion path would be
-unreachable, and the message could not name a size larger than the limit. It
-would also lose exactly what the requirement exists to save.
+Crossing it refuses the append in full and retains none of it: a partially
+retained paste is worse than none, because it looks complete and is not.
+Reading continues -- the backstop reports and does not end the command. The
+refusal names no byte ceiling and gives no size advice, because under the spill
+there is nothing for the developer to do about size. It tells them their state
+instead: that nothing from this input survived, that what they entered before is
+unchanged, and that the capture is still open.
 
-Retention is bounded, and the bound narrows the delete-down promise honestly. The
-buffer holds up to a stated multiple of the ceiling. An append that would take it
-beyond that bound is refused **in full** -- the buffer is left untouched, nothing
-partial is kept -- and the refusal says the input was not retained. Keeping a
-prefix instead would be worse than keeping nothing, because a truncated log looks
-complete.
+Two properties of the shipped check survive the change in magnitude and one
+does not.
 
-This case is not the edge; it is the common one. A full continuous-integration
-log measures several times the ceiling, so it exceeds any reasonable retention
-bound in a single append from an empty buffer. Deleting by hand down from several
-times the ceiling is not a recovery a developer would attempt, so for input that
-far over the real remedy is the message's file-and-reference guidance, and the
-developer's clipboard still holds the original. The delete-down path serves the
-case it can actually serve: a buffer modestly over the limit.
+The check stays **cumulative**, measured over the live payload the process is
+holding. A per-append bound would bound nothing, since many appends just under
+it are unbounded in total.
+
+The **unit of refusal** is now stated, because at 8 MB the distinction becomes
+reachable. For a pasted block the unit is the block. For typed input it is one
+byte -- and on a terminal without paste delimiters every byte of a paste
+arrives as typed input, so a per-byte refusal would emit millions of lines and
+stall the capture. The refusal is therefore edge-triggered: a flag set on the
+crossing and cleared when a deletion brings the buffer back under. That is the
+same edge-trigger the shipped over-ceiling mark used, repurposed to the bound
+that survives.
+
+The **over-ceiling mark itself** goes, and nothing replaces it. Re-pointing it
+at the backstop would be dead code by construction: the append that would cross
+the backstop is refused, so the buffer can never exceed it, so the mark could
+never be set. If it somehow did fire it would be exactly the wall the amendment
+removes, at a size the requirements say must not be described as a product
+limit.
+
+The neutral size *reports* survive and should: the byte count after a delete
+and the extent line after a paste state what the developer has, not what they
+are allowed.
 
 Whitespace-only input is refused at submit with the command's existing
 empty-prompt error. The existing check runs before the capture and compares
 against the empty string, so it does not cover this; the capture path validates
-its own result.
+its own result. This is a content rule, not a size one, and is unaffected.
+
+### Where the transcript costs real time
+
+Two costs in the shipped rendering are invisible at 130 KB and are not at 8 MB.
+Both are fixed here because they are what a developer actually feels, not
+because a benchmark asks.
+
+The transcript writes to bare standard error, so every echo is an unbuffered
+write syscall. On the path where a paste is indistinguishable from typing, a
+582 KB paste becomes roughly 582,000 syscalls. Wrapping the transcript writer
+and flushing once per read chunk fixes it, and costs nothing in latency: a read
+boundary is where the terminal delivers input anyway.
+
+Rendering a pasted block converts the whole block to a string and, for a long
+single line, converts the entire line to a rune slice before slicing it to
+terminal width. A 614 KB single line allocates 2.4 MB to display 100
+characters. Finding the first and last line by byte scan, and neutralizing only
+as much as the display can hold, makes the cost proportional to the terminal
+width, which is what the shipped design claimed for it in the first place.
+
+Two further optimizations -- collapsing the paste buffer into the payload
+buffer with a mark-and-rollback, and hand-rolling the growth curve -- were
+considered and are **not** taken. They touch the paste-boundary state machine,
+which is the most delicate code in the package, and they exist to move an
+allocation multiple rather than to fix anything a developer experiences. The
+per-byte cost is already independent of what has been entered, which is the
+property the requirement is actually about.
 
 ### Neutralization rule
 
@@ -355,32 +554,121 @@ The interactivity gate requires both standard input and standard error to be
 terminals. It is evaluated only in the zero-argument branch, so the
 positional-argument path never consults terminal state.
 
-### The size ceiling outside the loop
+### The spill, outside the loop
 
-The upstream dependency has landed. The corrected cap, its derivation, and the
-check immediately before the worker starts are all on the main branch, so the
-conditional the requirements carried does not apply and this work does not
-rebuild them. What remains for this feature is the third piece: applying the
-existing ceiling to the capture path.
+The corrected cap and the pre-exec check are both on the main branch. The
+amendment keeps them and retires the third piece the same change introduced.
 
-The ceiling is already derived rather than chosen -- the largest single argument
-the operating system accepts, minus a reserve equal to everything niwa may
-prepend after validation -- and it is already one value on every supported
-platform. The existing rejection message already states both sizes and directs
-the developer to write the detail to a file and reference its path, which is what
-the requirements ask of it.
+**The reserve is gone, and the reason is worth stating because it explains why
+the change is small.** The reserve existed because a *refusal* has to happen
+before provisioning while the keep-alive prepend is decided after -- so the only
+sound answer was to reserve the worst case up front and charge it to the
+developer. Making the decision a route rather than a refusal dissolves that
+constraint: nothing is being denied, so the decision no longer has to be early,
+and once it can be late it can be made against the final argv string where no
+estimate is needed. The developer stops paying for a prepend that may not
+happen.
 
-Validation already runs before any instance is created, and a second check
-already runs immediately before the worker process starts. That late check is not
-redundant: the keep-alive instruction is prepended after validation, and whether
-it arms depends on settings that do not exist until the instance has been
-provisioned, so the late check is what turns a future prepend that forgets to
-declare itself into a failure naming niwa's own limit rather than an opaque exec
-error after an instance already exists.
+**Where the decision sits.** The keep-alive prepend depends on instance
+settings that do not exist until the instance does, so the decision cannot move
+earlier than that point. It lands between the prepend and the launch, inside
+the rollback window: a failed spill write returns an error, the deferred
+destroy fires, and the instance takes any partial file with it.
 
-The capture path passes the same derived ceiling into the reader and reuses the
-same message text for the in-capture refusal, so the two paths cannot drift into
-quoting different limits or offering different advice.
+**What the file is.** `<instance>/.niwa/dispatch-prompts/prompt-<token>.txt`,
+the directory created at `0700` and the file opened `O_CREATE|O_EXCL|O_WRONLY`
+at `0600`.
+
+The subdirectory is not decoration. The instance's own state directory is
+created world-readable and a later create call does not lower an existing
+directory's mode, so the requirement that the containing directory be no more
+permissive than the file is unsatisfiable without a directory niwa creates
+itself. There is precedent: the instance's sessions and worktrees directories
+are both created at `0700`. It must not be named `worktrees`, because the
+worktree classifier walks up looking for exactly that shape and would
+misclassify a worker whose working directory landed inside.
+
+The extension is `.txt` and specifically not `.md`: the content is a pasted log
+carried verbatim, and calling it markdown invites the reading agent to
+interpret backtick fences that are just log output.
+
+**The workspace root's state directory would have destroyed the file.** The
+config snapshot is rotated wholesale on every apply, carrying only two things
+into staging -- and the code comment there records that this was found the hard
+way, on precisely this failure: the dispatch skill writes a brief, then `niwa
+dispatch` refreshes the same directory before the worker can read it. The
+instance's state directory is structurally clear of that machinery, and every
+other walker in the tree skips it explicitly.
+
+**Disposal is instance reclamation and nothing else.** The file is never
+deleted after a successful launch, because the worker is daemon-backed: the
+launch call returns long before the worker registers -- the command then polls
+the jobs directory for up to thirty seconds just to discover the session exists
+-- so a post-launch delete would race the read it exists to serve.
+
+The one path that launches repeatedly into an instance it did not create
+accumulates at most one file per pass, in an instance the reaper backstop
+already owns. No sweep: a pre-launch sweep would race the read of a
+still-running prior worker, and the shared launcher cannot know whether its
+caller has quiesced anything. Bounded accumulation inside a doomed directory
+beats a race against a read. In practice the case does not arise, because that
+path builds its prompts from fixed templates far below the threshold -- which a
+test pins, so a template grown past it is caught as a change rather than
+discovered as a spilled file.
+
+**Create the directory with a single-level create, not a recursive one.** A
+recursive create under a deleted instance root would rebuild the chain and
+leave a directory matching the dispatch-name signature but carrying no instance
+metadata -- which the destroy validator then refuses to act on, making it
+unreclaimable by both the rollback and the reaper. That is the exact failure
+the dispatch design works hardest to prevent.
+
+### What the worker receives
+
+The pointer element is niwa's prepends first, unchanged, then: a sentence
+saying the text was too large to pass as an argument; a numbered instruction to
+read the file in full, stating that it is the complete task and nothing else in
+the message is; the absolute path on its own line; a sentence framing what
+follows as a quoted prefix rather than instructions; the fenced excerpt; and a
+closing line saying how many bytes of how many were quoted.
+
+The prepends stay first because the keep-alive instruction opens "before
+starting the task below" and closes "then proceed with the task" -- a forward
+reference a reordering would dangle. It also keeps the message's first bytes
+niwa's own fixed text on every path, which matters for the next paragraph.
+
+The excerpt is 4096 bytes. The floor is measured rather than guessed: a real Go
+panic with its first frame is 126 bytes and a `go test` first-failure block is
+55, so 4096 clears the required 512-byte floor by a wide margin and real output
+by more. At the top it is 3.1% of the argument limit, so the pointer stays
+small with room to spare. Bytes only, with no line cap -- a line cap would let
+two prompts differing at byte 3000 but after the fortieth line produce
+identical argv elements, which is the distinguishability failure the floor
+exists to forbid.
+
+The fence is a fixed prefix plus the launch's random token, on its own line at
+each end, and the token is redacted from the excerpt as a belt. A fixed marker
+constant is forgeable by the very text it delimits, and "no realistic payload
+contains our marker" is not a claim worth making about whole CI logs. The token
+is minted after the bytes are read, so no submitted text can contain it. The
+ordering above is the other half of the defence: even a worker that treats
+forged post-fence text as instructions has already read niwa's framing.
+
+The path is absolute, because a relative path stops resolving the moment the
+worker or one of its subagents changes directory. The cost is that the instance
+path embeds the home directory and lands in the worker's transcript -- minor,
+and already true of the guard binary path baked into settings hooks.
+
+Cutting the excerpt walks back to a character boundary rather than converting
+the string to runes, which for a 614 KB line would allocate 2.4 MB to produce
+4 KB. Invalid UTF-8 is handled by the neutralizer rather than by the cut: the
+capture preserves invalid bytes in the payload deliberately, so the excerpt
+renders them as hex escapes while the file keeps them raw.
+
+The wording mirrors what niwa already tells agents to do for exactly this
+pattern in the dispatch skill, and takes its numbered-list shape from the
+review prompt builder. niwa recommending one phrasing to agents and using a
+different one itself would be indefensible.
 
 ## Implementation Approach
 
@@ -402,6 +690,36 @@ quoting different limits or offering different advice.
    `niwa watch` with the capture seam stubbed to fail on call.
 6. **Documentation.** Usage and long help, the README, and the degradation on
    terminals without paste delimiters.
+
+### Added by the amendment
+
+7. **The exec-limit constant moves** into its own package so the reader and the
+   command can both reach it, and the reader's `limit` parameter is deleted
+   from the exported entry point. Mechanical but wide: it touches every stub of
+   the capture seam.
+8. **The capture's ceiling machinery comes out.** The over-ceiling mark, the
+   submit block, the recovery message, and the two ceiling-flavoured refusals
+   go; the cumulative bound stays with its magnitude changed and its refusal
+   edge-triggered. The banner loses its size clause. This is the step that
+   deletes tests rather than rewriting them, and the deletions should land in
+   the same commit as the behavior they describe.
+9. **The transcript's per-byte costs.** Buffer the writer, flush per read
+   chunk, and bound the paste-summary rendering to the display width. Ahead of
+   the spill because it is independently correct and because the spill's tests
+   feed payloads large enough to make the current costs hurt.
+10. **The launcher's prompt parameter splits** into prefix and body, the spill
+    seam is introduced behind it, and the pre-exec assertion grows a NUL
+    clause. Every call site updates, including the two in `niwa watch`.
+11. **The spill itself.** The directory create, the `O_EXCL` write, the token,
+    the pointer composition, and the excerpt rendering.
+12. **The upstream annotations.** The two instance-dispatch artifacts at
+    terminal status, the dispatch skill's stale caution, and the code comments
+    citing requirement numbers that now mean something else.
+
+Steps 7 through 9 are independently shippable and leave the command's behavior
+unchanged; 10 and 11 are the behavior change and belong together, because the
+split parameter without the spill is a refactor with no purpose and the spill
+without the split writes the keep-alive instruction into the file.
 
 ## Security Considerations
 
@@ -453,12 +771,47 @@ the same failure mode as a terminal without paste delimiters, arriving by a
 different route, and it is documented alongside that degradation rather than
 detected.
 
-**No new external input, no new privilege, no new persistence.** The capture
-reads a terminal the process already owns, writes to a stream it already writes
-to, and adds no file, socket, or credential surface. The prompt is still never
-written to disk -- which is why SIGQUIT is handled rather than left to dump core,
-and it is an improvement on the positional path, where the whole prompt lands in
-the developer's shell history.
+**The prompt now touches disk above the threshold, and the claim this section
+used to make is retired.** The shipped design stated that the prompt is never
+written to disk, and handled SIGQUIT specifically so a core dump could not
+carry the payload. The amendment gives that up: a spilled prompt exists as a
+file for the life of the instance. This is a real reduction, not a
+reclassification. A large pasted secret that previously lived only in process
+memory now has a path someone can read.
+
+What holds it down: the file is owner-only, in a directory niwa creates
+owner-only, inside an instance directory that already holds dispatch state at
+the same mode; it is never copied, synced, or logged; and it is removed when
+the instance is. The SIGQUIT handling stays and is still worth having, because
+below the threshold the payload is still memory-only and a core dump would
+still carry it.
+
+For calibration rather than comfort: the positional path was always worse, since
+the whole prompt lands in shell history. What changes is that the capture path
+used to be strictly better than that and is now better only below the
+threshold.
+
+**A NUL byte in the prompt breaks exec, and did before this change.** An argv
+element cannot contain a NUL -- verified by probe. The capture preserves raw
+control bytes in the payload by design, so a binary-contaminated log is one
+paste away from a launch that fails with an opaque operating-system error, with
+neither the size check nor the pre-exec assertion catching it. The assertion
+grows a NUL clause so the failure names its cause. Above the threshold the
+problem disappears, since the bytes travel in a file and only the neutralized
+excerpt reaches argv.
+
+**The excerpt is untrusted text inside a niwa-authored instruction.** The
+protection is not that the argv element is free of untrusted content -- the
+whole prompt always was untrusted -- but that it is never handed to a shell, so
+nothing inside it can become command structure. What the fence adds is a
+different property: that the developer's text cannot appear to *end* the
+quotation and continue as instructions. A fixed marker constant would not
+provide it, since the pasted text can contain any byte sequence; the per-launch
+random token does, because it is minted after the bytes are read.
+
+**No new external input, no new privilege.** The capture reads a terminal the
+process already owns and writes to a stream it already writes to. The spill
+adds a file surface and nothing else: no socket, no credential, no network.
 
 ## Consequences
 
@@ -487,6 +840,21 @@ the developer's shell history.
   line back.
 - niwa acquires its first signal-handling code, which is a new class of thing to
   maintain.
+- The prompt reaches disk above the threshold, retiring a property the shipped
+  design named and defended.
+- A spilled worker must spend a tool call to reach its task, and one that
+  ignores the instruction proceeds on a 4 KB excerpt. The excerpt's own safety
+  measures make that worse rather than better: fencing it and rendering escapes
+  as caret notation are exactly what stop it reading as the task.
+- A developer who pastes a colourized test run gets an opening message littered
+  with `^[[0;31m`, which looks like corruption. Stripping the sequences instead
+  would read better and would break the neutralizer's stated property, since it
+  requires recognizing escape sequences and a malformed one then survives.
+- The exec-limit constant moves into a package created for it, pulling a
+  stdlib-only reader into a niwa-internal dependency for the sake of one
+  number.
+- 4096 is a judgment call. It is justified against measured payloads and clears
+  the floor widely, but nothing derives it.
 
 ### Mitigations
 
@@ -497,3 +865,13 @@ the developer's shell history.
   test so a future change to it is deliberate.
 - Terminal restoration is asserted by comparing terminal state before and after
   across submit, abandonment, interrupt, termination, and suspend/resume.
+- The spill's failure modes all route to the existing rollback: a write that
+  fails for any reason returns an error inside the window, and the deferred
+  destroy takes the instance and any partial file. No write-then-rename dance,
+  which would buy nothing here -- one writer, one reader, no concurrent
+  observer -- and would cost the `O_EXCL` guarantee the filename uniqueness
+  leans on. The close error is checked rather than deferred and swallowed,
+  since a delayed out-of-space surfaces there on networked filesystems.
+- The keep-alive prepend surviving a spill is asserted directly, because the
+  failure it guards against is silent: a session recorded and reported as kept
+  alive that was never armed.

@@ -359,9 +359,17 @@ magnitude.
   being quietly tuned down into the wall this amendment removes. Crossing it
   SHALL refuse the append in full, retain none of it, and say the input was not
   retained -- a partially retained paste is worse than none, because it looks
-  complete and is not. The backstop is a process-safety bound, not a product
-  limit: it exists so an unbounded buffer cannot exhaust memory, and it SHALL
-  NOT be described to the developer as a size limit on prompts.
+  complete and is not. "The append" is a whole pasted block where the terminal
+  delimits one, and a single byte otherwise; the refusal SHALL be reported once
+  per crossing rather than once per refused byte. That distinction is
+  load-bearing, not pedantry: on a terminal without paste delimiters every byte
+  arrives as typed input, so a per-byte report would emit millions of lines and
+  stall the capture, colliding with R37. The backstop is a process-safety
+  bound, not a product limit: it exists so an unbounded buffer cannot exhaust
+  memory, and it SHALL NOT be described to the developer as a size limit on
+  prompts. The bound SHALL be measured over the live payload the process is
+  holding, cumulatively; a per-append bound would bound nothing, since many
+  appends just under it are unbounded in total.
 - **R50.** No flag, configuration setting, environment variable, or interactive
   prompt SHALL control whether a prompt spills, where it is written, or how
   large the excerpt is. The decision SHALL be derived from the final argv
@@ -557,6 +565,9 @@ lands; none is assumed.
       unchanged, and the refusal says the input was not retained. The refusal
       text names no byte ceiling and gives no size advice: it does not tell the
       developer to write a file, reference a path, shorten, or re-select (R49).
+- [ ] Feeding bytes past the backstop as typed input -- the path a terminal
+      without paste delimiters takes -- emits exactly one refusal, not one per
+      byte, and a deletion that brings the buffer back under re-arms it (R49).
 - [ ] Submitted text containing terminal control sequences is returned
       unmodified, while the bytes written to the render target contain no
       executable control sequence from the input (R30).
@@ -566,11 +577,24 @@ lands; none is assumed.
       text once escape sequences are stripped (R27).
 - [ ] A single line of 614,400 bytes is accepted whole, without truncation and
       without hanging (R19).
-- [ ] Total bytes copied while accepting 614,400 bytes is within 4x the byte
-      count, and accepting 614,400 bytes allocates within 4x what accepting
-      61,440 bytes allocates per byte. Gating on a work counter rather than on
-      wall time, because this document already records one bogus superlinear
-      measurement produced by timing a harness rather than the code (R37).
+- [ ] Allocation per input byte at 61,440, 614,400, and 3,686,400 bytes stays
+      within 1.5x of itself across that 60x range, for each of a single-line
+      paste, a multi-line paste, and typed input. This is the requirement's
+      actual invariant -- per-byte cost independent of what is already entered
+      -- and it holds on the shipped code, measured at 13.09x/13.31x/13.73x,
+      8.24x/8.50x/8.93x, and 32.00x/33.76x/33.02x respectively. Gating on a
+      work counter rather than on wall time, because this document already
+      records one bogus superlinear measurement produced by timing a harness
+      (R37).
+- [ ] Accepting a 614,400-byte pasted block issues fewer than one write to the
+      render target per hundred input bytes. The shipped code writes once per
+      byte on the path where a paste is indistinguishable from typing, which on
+      a terminal without paste delimiters turns a 582 KB paste into roughly
+      582,000 write syscalls -- a perceptible stall of exactly the kind R37
+      forbids (R37).
+- [ ] Rendering a pasted block does work proportional to the terminal width,
+      not to the block. Neither the full block nor a full line is converted to
+      a rune slice to produce a bounded summary (R37).
 - [ ] As a wall-clock backstop that will not flake: 614,400 bytes are accepted
       in under two seconds on the in-memory reader (R37).
 - [ ] Any ratio-of-timings comparison between input shapes is a benchmark that
