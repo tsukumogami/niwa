@@ -436,6 +436,12 @@ magnitude.
   launched into, so that the existing rollback-on-failure and reclamation
   lifecycle removes it. No spilled prompt SHALL outlive its instance, and a
   dispatch that fails after the spill SHALL leave no spilled prompt behind.
+  On a launch into an instance the caller did not create -- `niwa watch`'s
+  continuation path, which holds no rollback of its own -- the guarantee is
+  deliberately weaker: a failed spill leaves the partial file until the
+  instance is reclaimed. Deleting it there would mean the launcher removing a
+  file from an instance it does not own, on an error path, unable to tell
+  whether another worker is reading a different one.
   The file SHALL NOT be deleted once the worker has been launched: the worker
   is daemon-backed and the launch call returns before it has read anything, so
   a post-launch delete would race the read it exists to serve. Instance
