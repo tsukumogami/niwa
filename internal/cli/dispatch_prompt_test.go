@@ -25,7 +25,7 @@ func runDispatchArgs(t *testing.T, args []string) (stdout, stderr string, err er
 }
 
 // stubCapture replaces the capture seam for the duration of a test.
-func stubCapture(t *testing.T, fn func(limit int) (string, error)) {
+func stubCapture(t *testing.T, fn func() (string, error)) {
 	t.Helper()
 	prev := dispatchPromptCapture
 	dispatchPromptCapture = fn
@@ -57,7 +57,7 @@ func workspaceForDispatch(t *testing.T) (*dispatchFakes, *string) {
 func TestDispatchCapture_TextReachesTheLauncher(t *testing.T) {
 	_, launched := workspaceForDispatch(t)
 	stubCaptureTTY(t, true, true)
-	stubCapture(t, func(int) (string, error) { return "pasted failure text", nil })
+	stubCapture(t, func() (string, error) { return "pasted failure text", nil })
 
 	if _, _, err := runDispatchArgs(t, nil); err != nil {
 		t.Fatalf("dispatch with a captured prompt: %v", err)
@@ -71,7 +71,7 @@ func TestDispatchCapture_MetacharacterPayloadSurvivesVerbatim(t *testing.T) {
 	_, launched := workspaceForDispatch(t)
 	stubCaptureTTY(t, true, true)
 	payload := `a "quoted" $VAR \back\slash 'single' ` + "`tick`" + " \n second line"
-	stubCapture(t, func(int) (string, error) { return payload, nil })
+	stubCapture(t, func() (string, error) { return payload, nil })
 
 	if _, _, err := runDispatchArgs(t, nil); err != nil {
 		t.Fatalf("dispatch: %v", err)
@@ -97,7 +97,7 @@ func TestDispatchCapture_GateRequiresBothStreams(t *testing.T) {
 			stubCaptureTTY(t, tc.stdin, tc.stderrT)
 
 			called := false
-			stubCapture(t, func(int) (string, error) {
+			stubCapture(t, func() (string, error) {
 				called = true
 				return "captured", nil
 			})
@@ -128,7 +128,7 @@ func TestDispatchCapture_PositionalArgumentNeverConsultsTheTerminal(t *testing.T
 	IsStderrTTY = func() bool { consulted = true; return true }
 	t.Cleanup(func() { IsStdinTTY, IsStderrTTY = prevIn, prevErr })
 
-	stubCapture(t, func(int) (string, error) {
+	stubCapture(t, func() (string, error) {
 		t.Fatal("capture was invoked on the positional-argument path")
 		return "", nil
 	})
@@ -144,7 +144,7 @@ func TestDispatchCapture_PositionalArgumentNeverConsultsTheTerminal(t *testing.T
 func TestDispatchCapture_AbandonmentProvisionsNothing(t *testing.T) {
 	f, _ := workspaceForDispatch(t)
 	stubCaptureTTY(t, true, true)
-	stubCapture(t, func(int) (string, error) { return "", promptcapture.ErrCanceled })
+	stubCapture(t, func() (string, error) { return "", promptcapture.ErrCanceled })
 
 	_, _, err := runDispatchArgs(t, nil)
 	if err == nil {
@@ -158,7 +158,7 @@ func TestDispatchCapture_AbandonmentProvisionsNothing(t *testing.T) {
 func TestDispatchCapture_EndOfInputOnEmptyBufferIsEmptyPromptError(t *testing.T) {
 	f, _ := workspaceForDispatch(t)
 	stubCaptureTTY(t, true, true)
-	stubCapture(t, func(int) (string, error) { return "", promptcapture.ErrEndOfInput })
+	stubCapture(t, func() (string, error) { return "", promptcapture.ErrEndOfInput })
 
 	_, _, err := runDispatchArgs(t, nil)
 	if err == nil || !strings.Contains(err.Error(), "must not be empty") {
@@ -172,7 +172,7 @@ func TestDispatchCapture_EndOfInputOnEmptyBufferIsEmptyPromptError(t *testing.T)
 func TestDispatchCapture_WhitespaceOnlySubmissionIsRefused(t *testing.T) {
 	f, _ := workspaceForDispatch(t)
 	stubCaptureTTY(t, true, true)
-	stubCapture(t, func(int) (string, error) { return "  \n\t  \n", nil })
+	stubCapture(t, func() (string, error) { return "  \n\t  \n", nil })
 
 	_, _, err := runDispatchArgs(t, nil)
 	if err == nil || !strings.Contains(err.Error(), "must not be empty") {
@@ -186,7 +186,7 @@ func TestDispatchCapture_WhitespaceOnlySubmissionIsRefused(t *testing.T) {
 func TestDispatchCapture_OversizedCaptureIsRefusedBeforeProvisioning(t *testing.T) {
 	f, _ := workspaceForDispatch(t)
 	stubCaptureTTY(t, true, true)
-	stubCapture(t, func(int) (string, error) {
+	stubCapture(t, func() (string, error) {
 		return strings.Repeat("x", maxPromptBytes+1), nil
 	})
 
@@ -210,7 +210,7 @@ func TestDispatchCapture_BothPathsShareOneRejection(t *testing.T) {
 
 	_, _ = workspaceForDispatch(t)
 	stubCaptureTTY(t, true, true)
-	stubCapture(t, func(int) (string, error) { return oversized, nil })
+	stubCapture(t, func() (string, error) { return oversized, nil })
 	_, _, capErr := runDispatchArgs(t, nil)
 
 	if argErr == nil || capErr == nil {
@@ -226,7 +226,7 @@ func TestDispatchCapture_BothPathsShareOneRejection(t *testing.T) {
 
 func TestDispatchCapture_ExplicitEmptyArgumentStillErrors(t *testing.T) {
 	_, _ = workspaceForDispatch(t)
-	stubCapture(t, func(int) (string, error) {
+	stubCapture(t, func() (string, error) {
 		t.Fatal("an explicit empty argument must not trigger a capture")
 		return "", nil
 	})

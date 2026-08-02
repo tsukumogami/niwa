@@ -65,8 +65,8 @@ func TestPasteRenderingIsBoundedByDisplayWidth(t *testing.T) {
 	large := bytes.Repeat([]byte("a"), 614400)
 
 	var smallOut, largeOut bytes.Buffer
-	(&capture{w: &smallOut, limit: bigLimit, retention: bigLimit}).renderPaste(small)
-	(&capture{w: &largeOut, limit: bigLimit, retention: bigLimit}).renderPaste(large)
+	(&capture{w: &smallOut, backstop: bigLimit}).renderPaste(small)
+	(&capture{w: &largeOut, backstop: bigLimit}).renderPaste(large)
 
 	// The rendered record for a 3000x larger payload differs only in the byte
 	// count it reports, so its length must stay within a few bytes.

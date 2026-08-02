@@ -35,11 +35,20 @@ const (
 	pasteStart = "\x1b[200~"
 	pasteEnd   = "\x1b[201~"
 
-	// retentionMultiple bounds how far above the ceiling the buffer may grow so
-	// the developer can delete down to a submittable size. An append that would
-	// exceed it is refused in full rather than truncated: a partially retained
-	// log looks complete and is not.
-	retentionMultiple = 2
+	// maxBufferBytes is a memory backstop, NOT a prompt ceiling. There is no
+	// prompt ceiling: a prompt too large to travel as one argv element is
+	// written to a file by the launcher and the worker gets a pointer, so the
+	// capture never refuses on size the developer could care about.
+	//
+	// It is stated as a derivation with a floor rather than a round literal so
+	// it cannot be quietly tuned back down into the wall this feature removed.
+	// The multiplicand is the largest single argv string Linux accepts
+	// (MAX_ARG_STRLEN, 32 pages, minus the NUL); internal/cli owns that number
+	// for its own purposes and a test there asserts this constant still clears
+	// 64x it. Duplicating one arithmetic expression is the price of not giving
+	// a terminal reader a dependency on an exec fact.
+	backstopMultiple = 64
+	maxBufferBytes   = backstopMultiple * (32*4096 - 1)
 
 	displayWidth = 100
 )
@@ -48,21 +57,22 @@ const (
 // rendering to standard error. Standard output is left alone so a caller can
 // redirect it.
 //
-// limit is the largest prompt the caller will accept, in bytes. It is a
-// parameter rather than a package constant because the ceiling is derived by the
-// caller from the platform's argument limit and the caller's own reserve.
-func Read(limit int) (string, error) {
+// No size is surfaced to the developer at any point. The only bound is
+// maxBufferBytes, a memory backstop far above anything a paste produces.
+func Read() (string, error) {
 	restore, err := enterRaw()
 	if err != nil {
 		return "", err
 	}
 	defer restore()
-	return read(stdin(), stderr(), limit)
+	return read(stdin(), stderr(), maxBufferBytes)
 }
 
 // read is the capture core. Tests drive it with an ordinary reader and writer,
 // at any chunk size, without a terminal.
-func read(r io.Reader, w io.Writer, limit int) (string, error) {
+// backstop is a parameter only so tests can drive the refusal path without
+// allocating eight megabytes. Production always passes maxBufferBytes.
+func read(r io.Reader, w io.Writer, backstop int) (string, error) {
 	// The transcript is buffered and flushed once per read chunk. Unbuffered,
 	// every echoed byte is its own write syscall -- and on a terminal that does
 	// not delimit pastes, every byte of a paste arrives as typed input, so a
@@ -70,11 +80,7 @@ func read(r io.Reader, w io.Writer, limit int) (string, error) {
 	// costs nothing in latency: that is where the terminal hands us input
 	// anyway.
 	bw := bufio.NewWriter(w)
-	c := &capture{
-		w:         bw,
-		limit:     limit,
-		retention: limit * retentionMultiple,
-	}
+	c := &capture{w: bw, backstop: backstop}
 	c.banner()
 	bw.Flush()
 
@@ -101,9 +107,8 @@ func read(r io.Reader, w io.Writer, limit int) (string, error) {
 }
 
 type capture struct {
-	w         io.Writer
-	limit     int
-	retention int
+	w        io.Writer
+	backstop int
 
 	buf []byte // the payload
 
@@ -116,9 +121,13 @@ type capture struct {
 
 	inPaste     bool
 	pasteBuf    []byte
-	pasteDenied bool // this paste exceeded the retention bound; retain none of it
+	pasteDenied bool // this paste crossed the backstop; retain none of it
 
-	overCeiling bool
+	// backstopHit is edge-triggered so the refusal is reported once per
+	// crossing rather than once per refused byte. On a terminal without paste
+	// delimiters every byte of a paste arrives as typed input, so a per-byte
+	// report would emit millions of lines and stall the capture.
+	backstopHit bool
 
 	// echoedOnLine counts characters echoed since the last thing that moved the
 	// cursor to a fresh line. A single-character delete can only be erased in
@@ -323,20 +332,12 @@ func (c *capture) ordinary(b byte) (bool, string, error) {
 }
 
 func (c *capture) submit() (bool, string, error) {
-	if c.overCeiling {
-		c.refuse()
-		return false, "", nil
-	}
 	return true, string(c.buf), nil
 }
 
 func (c *capture) endOfInput() (string, error) {
 	if len(c.buf) == 0 {
 		return "", ErrEndOfInput
-	}
-	if c.overCeiling {
-		// A stream that ends while the buffer is unsubmittable is not a submit.
-		return "", ErrCanceled
 	}
 	return string(c.buf), nil
 }
@@ -364,7 +365,7 @@ func (c *capture) appendPasted(b byte) {
 		c.pasteBuf = append(c.pasteBuf, b)
 		c.lastWasCR = false
 	}
-	if len(c.buf)+len(c.pasteBuf) > c.retention {
+	if len(c.buf)+len(c.pasteBuf) > c.backstop {
 		c.pasteDenied = true
 		c.pasteBuf = nil
 	}
@@ -377,7 +378,7 @@ func (c *capture) closePaste() {
 	if c.pasteDenied {
 		c.pasteDenied = false
 		c.pasteBuf = nil
-		fmt.Fprintf(c.w, "\r\n[input too large to hold; nothing was kept. Limit is %d bytes. Write the detail to a file and reference its path from a shorter prompt.]\r\n", c.limit)
+		c.refuseUnretained()
 		return
 	}
 
@@ -399,14 +400,14 @@ func (c *capture) closePaste() {
 
 	c.renderPaste(pasted)
 	c.echoedOnLine = 0
-	c.checkCeiling()
 }
 
 func (c *capture) appendTyped(b byte) {
-	if len(c.buf)+1 > c.retention {
+	if len(c.buf)+1 > c.backstop {
 		c.refuseUnretained()
 		return
 	}
+	c.backstopHit = false
 	c.flushPendingBreak()
 	c.buf = append(c.buf, b)
 
@@ -423,14 +424,12 @@ func (c *capture) appendTyped(b byte) {
 	if b == '\n' {
 		fmt.Fprint(c.w, "\r\n")
 		c.echoedOnLine = 0
-		c.checkCeiling()
 		return
 	}
 
 	rendered := neutralize([]byte{b})
 	fmt.Fprint(c.w, rendered)
 	c.echoedOnLine += len(rendered)
-	c.checkCeiling()
 }
 
 func (c *capture) flushPendingBreak() {
@@ -442,27 +441,21 @@ func (c *capture) flushPendingBreak() {
 	}
 }
 
-// checkCeiling runs after the append, never before it. Appending nothing would
-// be simpler and wrong: the buffer could never exceed the limit, so the
-// unsubmittable mark could never be set, deletion could never clear it, and the
-// message could not name a size larger than the limit. It would also discard
-// exactly what the developer needs to keep.
-func (c *capture) checkCeiling() {
-	over := len(c.buf) > c.limit
-	if over && !c.overCeiling {
-		c.overCeiling = true
-		c.refuse()
+// refuseUnretained reports a backstop crossing. It names no byte ceiling and
+// gives no size advice, because under the spill there is nothing for the
+// developer to do about size: what they get instead is their state -- nothing
+// from this input survived, what came before is intact, and the capture is
+// still open.
+//
+// Edge-triggered: repeated crossings while already over report nothing.
+func (c *capture) refuseUnretained() {
+	if c.backstopHit {
 		return
 	}
-	c.overCeiling = over
-}
-
-func (c *capture) refuse() {
-	fmt.Fprintf(c.w, "\r\n[%d bytes entered, limit is %d. Delete some, or write the detail to a file and reference its path from a shorter prompt.]\r\n", len(c.buf), c.limit)
-}
-
-func (c *capture) refuseUnretained() {
-	fmt.Fprintf(c.w, "\r\n[input too large to hold; nothing was kept. Limit is %d bytes. Write the detail to a file and reference its path from a shorter prompt.]\r\n", c.limit)
+	c.backstopHit = true
+	fmt.Fprint(c.w, "\r\n[not retained: the capture ran out of room to hold this input in memory. "+
+		"Nothing from it was kept, and what you entered before is unchanged. The capture is still open.]\r\n")
+	c.echoedOnLine = 0
 }
 
 func (c *capture) deleteRune() {
@@ -530,19 +523,17 @@ func (c *capture) afterDelete(erasable int) {
 		c.echoedOnLine = 0
 	}
 
-	was := c.overCeiling
-	c.overCeiling = len(c.buf) > c.limit
-	if was && !c.overCeiling {
-		fmt.Fprint(c.w, "[within the limit again]\r\n")
-		c.echoedOnLine = 0
+	// A deletion that brings the buffer back under re-arms the backstop, so a
+	// later crossing reports again.
+	if len(c.buf) <= c.backstop {
+		c.backstopHit = false
 	}
 }
 
 func (c *capture) banner() {
-	fmt.Fprintf(c.w,
+	fmt.Fprint(c.w,
 		"Paste or type the task, then press Enter to dispatch.\r\n"+
-			"Ctrl-J for a newline, Ctrl-C to cancel. Limit %d bytes.\r\n",
-		c.limit)
+			"Ctrl-J for a newline, Ctrl-C to cancel.\r\n")
 }
 
 // renderPaste emits a bounded record rather than replaying the payload. The
@@ -581,3 +572,9 @@ func (c *capture) renderPaste(pasted []byte) {
 func renderLine(line []byte) string {
 	return truncateForDisplay(neutralize(truncateBytesForNeutralize(line, displayWidth)), displayWidth)
 }
+
+// MaxBufferBytes exposes the memory backstop so a test in the package that owns
+// the exec cap can assert this constant still clears its floor. It is not a
+// prompt limit and no caller should treat it as one: nothing about a prompt's
+// size is the caller's decision any more.
+func MaxBufferBytes() int { return maxBufferBytes }

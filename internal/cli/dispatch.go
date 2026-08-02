@@ -260,7 +260,7 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 		if !dispatchInteractive() {
 			return fmt.Errorf("niwa: error: no prompt given and this is not an interactive terminal; pass the prompt as an argument: niwa dispatch \"<task>\"")
 		}
-		captured, err := dispatchPromptCapture(maxPromptBytes)
+		captured, err := dispatchPromptCapture()
 		if err != nil {
 			switch {
 			case errors.Is(err, promptcapture.ErrCanceled):
