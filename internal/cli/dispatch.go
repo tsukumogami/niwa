@@ -97,24 +97,13 @@ const (
 	// behavior, and no platform-conditional cap to keep honest.
 	maxArgStringBytes = 32*4096 - 1
 
-	// dispatchPromptReserve is the byte allowance held back at validation time
-	// for text niwa itself prepends to the prompt AFTER the check. Today that is
-	// exactly keepAliveArmingInstruction, prepended in step (9d) -- long after
-	// the step (1) check, and only when keep-alive resolves on, which cannot be
-	// known before the instance exists. Reserving its full length up front makes
-	// the single early check sound for BOTH outcomes: whatever (9d) decides, the
-	// string that reaches execve still fits maxArgStringBytes, and the rejection
-	// still lands before anything is provisioned.
-	//
-	// Anything else that starts prepending to the prompt must be added here.
-	dispatchPromptReserve = len(keepAliveArmingInstruction)
-
-	// maxPromptBytes is the largest user-supplied prompt dispatch accepts: the
-	// exec ceiling minus everything niwa may later prepend. Exceeding it fails
-	// clearly and early rather than letting exec reject the call with an opaque
-	// E2BIG after an instance has already been provisioned (DESIGN Decision 8,
-	// R43).
-	maxPromptBytes = maxArgStringBytes - dispatchPromptReserve
+	// There is deliberately no reserve here any more. One existed because a
+	// REFUSAL has to happen before provisioning while the keep-alive prepend is
+	// decided after, so the only sound answer was to reserve the worst case up
+	// front and charge it to the developer. Making the decision a route rather
+	// than a refusal dissolves that: nothing is denied, so the decision need not
+	// be early, and once it can be late it is made against the final argv string
+	// in the launcher, where no estimate is needed.
 )
 
 // lookClaude reports the path to the claude binary or an error if it is not on
@@ -657,11 +646,9 @@ func validateDispatchPrompt(prompt string) error {
 	if strings.TrimSpace(prompt) == "" {
 		return fmt.Errorf("niwa: error: dispatch prompt must not be empty")
 	}
-	// The limit already excludes dispatchPromptReserve, so a prompt that passes
-	// here still fits after step (9d) may prepend the keep-alive instruction --
-	// there is one check, it is early, and it covers the final string.
-	if len(prompt) > maxPromptBytes {
-		return fmt.Errorf("niwa: error: dispatch prompt is too long (%d bytes, limit %d); it is passed to claude as a single exec argument, so it cannot be truncated or split. Write the detail to a file and reference its path from a shorter prompt", len(prompt), maxPromptBytes)
-	}
+	// No size check. A prompt too large to travel as one argv element is not
+	// refused: the launcher writes it to a file inside the instance and hands
+	// the worker a pointer instead. Nothing about a prompt's size is the
+	// developer's problem any more, so nothing here has an opinion about it.
 	return nil
 }

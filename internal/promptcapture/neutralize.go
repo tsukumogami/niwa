@@ -21,13 +21,26 @@ import (
 // The rule also protects the payload: a terminal only answers sequences it
 // renders, so an embedded device query cannot provoke a reply that would arrive
 // back on standard input and land inside the capture.
-func neutralize(b []byte) string {
+func neutralize(b []byte) string { return render(b, false) }
+
+// NeutralizeForDisplay is neutralize with line feed added to the pass-through
+// set, for callers rendering a multi-line excerpt rather than a single
+// transcript line.
+//
+// The stated property is unchanged: no byte that can introduce an escape
+// sequence survives. A line feed cannot introduce one, so only the layout set
+// widens from {tab} to {tab, line feed}. Without it a stack trace renders as
+// one long line of "^J" and stops being readable, which defeats the point of
+// showing an excerpt at all.
+func NeutralizeForDisplay(s string) string { return render([]byte(s), true) }
+
+func render(b []byte, keepLF bool) string {
 	var sb strings.Builder
 	sb.Grow(len(b))
 	for i := 0; i < len(b); {
 		c := b[i]
 		switch {
-		case c == '\t':
+		case c == '\t' || (keepLF && c == '\n'):
 			sb.WriteByte(c)
 			i++
 		case c < 0x20:

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -183,45 +184,56 @@ func TestDispatchCapture_WhitespaceOnlySubmissionIsRefused(t *testing.T) {
 	}
 }
 
-func TestDispatchCapture_OversizedCaptureIsRefusedBeforeProvisioning(t *testing.T) {
-	f, _ := workspaceForDispatch(t)
-	stubCaptureTTY(t, true, true)
-	stubCapture(t, func() (string, error) {
-		return strings.Repeat("x", maxPromptBytes+1), nil
-	})
+// Both paths must behave identically on an oversized prompt: same spill file
+// contents, same pointer wording, same excerpt. This replaces the pair of tests
+// that asserted both paths quote the same REFUSAL -- there is no refusal now,
+// and "both paths agree" is still the property worth holding.
+func TestDispatchCapture_BothPathsSpillIdentically(t *testing.T) {
+	oversized := strings.Repeat("x", maxArgStringBytes+1)
 
-	_, _, err := runDispatchArgs(t, nil)
-	if err == nil || !strings.Contains(err.Error(), "too long") {
-		t.Fatalf("got %v, want the too-long error", err)
+	argPrompt := launchedPromptFor(t, oversized, false)
+	capPrompt := launchedPromptFor(t, oversized, true)
+
+	argNorm := normalizeSpillPointer(argPrompt)
+	capNorm := normalizeSpillPointer(capPrompt)
+	if argNorm != capNorm {
+		t.Fatalf("paths produced different pointers once the instance dir and token are normalized:\n arg: %s\n cap: %s",
+			argNorm, capNorm)
 	}
-	if f.provisionCalled != 0 {
-		t.Fatalf("provisioned %d instances; want 0", f.provisionCalled)
+	if strings.Contains(strings.ToLower(argPrompt), "too long") {
+		t.Fatalf("an oversized prompt still surfaces a size refusal: %s", argPrompt)
 	}
 }
 
-// The capture path and the argument path must quote the same limit and offer
-// the same advice, because both come from one validator rather than two
-// literals.
-func TestDispatchCapture_BothPathsShareOneRejection(t *testing.T) {
-	oversized := strings.Repeat("x", maxPromptBytes+1)
-
-	_, _ = workspaceForDispatch(t)
-	_, _, argErr := runDispatchArgs(t, []string{oversized})
-
-	_, _ = workspaceForDispatch(t)
-	stubCaptureTTY(t, true, true)
-	stubCapture(t, func() (string, error) { return oversized, nil })
-	_, _, capErr := runDispatchArgs(t, nil)
-
-	if argErr == nil || capErr == nil {
-		t.Fatalf("expected both paths to reject: arg=%v capture=%v", argErr, capErr)
+// launchedPromptFor dispatches oversized text by one of the two paths and
+// returns the argv element the worker would have received.
+func launchedPromptFor(t *testing.T, body string, viaCapture bool) string {
+	t.Helper()
+	f, _ := workspaceForDispatch(t)
+	var got string
+	captureLaunchPrompt(f, &got, nil)
+	if viaCapture {
+		stubCaptureTTY(t, true, true)
+		stubCapture(t, func() (string, error) { return body, nil })
+		if _, _, err := runDispatchArgs(t, nil); err != nil {
+			t.Fatalf("capture path: %v", err)
+		}
+		return got
 	}
-	if argErr.Error() != capErr.Error() {
-		t.Fatalf("paths disagree:\n arg: %v\n cap: %v", argErr, capErr)
+	if _, _, err := runDispatchArgs(t, []string{body}); err != nil {
+		t.Fatalf("argument path: %v", err)
 	}
-	if strings.Contains(strings.ToLower(argErr.Error()), "shorten") {
-		t.Fatalf("rejection tells the developer to shorten: %v", argErr)
-	}
+	return got
+}
+
+// normalizeSpillPointer replaces the two things that legitimately differ
+// between runs -- the instance directory and the per-launch token -- so the
+// rest of the pointer can be compared byte for byte.
+func normalizeSpillPointer(s string) string {
+	s = regexp.MustCompile(`prompt-[0-9a-f]{16}`).ReplaceAllString(s, "prompt-<token>")
+	s = regexp.MustCompile(`NIWA-PROMPT-EXCERPT-[0-9a-f]{16}`).ReplaceAllString(s, "NIWA-PROMPT-EXCERPT-<token>")
+	s = regexp.MustCompile(`file: \S+`).ReplaceAllString(s, "file: <path>")
+	return s
 }
 
 func TestDispatchCapture_ExplicitEmptyArgumentStillErrors(t *testing.T) {
