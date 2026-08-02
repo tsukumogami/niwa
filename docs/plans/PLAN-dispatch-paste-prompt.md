@@ -213,10 +213,13 @@ existing runner splits its command string on whitespace and cannot express a
 
 **Acceptance Criteria**:
 
-- A positional prompt larger than the exec cap dispatches; the worker's argv
-  names a file inside the instance; the file's contents equal the prompt
+- A captured paste larger than the exec cap dispatches; the worker's argv names
+  a file inside the instance; the file's contents equal the prompt
   byte-for-byte; and the fake worker resolves the path from a working directory
   other than the instance, so an instance-relative path fails the scenario.
+  Through the capture, not a positional argument: the harness cannot exec the
+  binary with an argument past the limit under test, which is the same wall a
+  developer's shell hits.
 - Reclaiming the instance behind a spilled dispatch removes the spill file.
 - A pasted multiline block still dispatches with its text verbatim.
 - Every step supplying the binary a standard input it does not control carries a

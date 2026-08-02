@@ -732,11 +732,20 @@ lands; none is assumed.
 
 - [ ] A pasted multiline block dispatches, and the launched worker's argv
       contains the pasted text verbatim (R1, R4, R51).
-- [ ] A positional prompt larger than `maxArgStringBytes` dispatches; the
-      worker's argv names a file inside the instance; that file's contents
-      equal the prompt byte-for-byte; and the fake worker resolves the path
-      from a working directory other than the instance, so an instance-relative
-      path fails the scenario (R44, R51, R52, R53).
+- [ ] A captured paste larger than `maxArgStringBytes` dispatches; the worker's
+      argv names a file inside the instance; that file's contents equal the
+      prompt byte-for-byte; and the fake worker resolves the path from a working
+      directory other than the instance, so an instance-relative path fails the
+      scenario (R44, R51, R52, R53).
+
+      Driven through the capture rather than a positional argument, and it has
+      to be: delivering an oversized prompt positionally would require the
+      harness to exec the binary with an argument past the very limit under
+      test, which fails with "argument list too long" before niwa runs. That is
+      the same wall a developer's own shell hits, and it is why the capture is
+      the reachable path -- niwa builds the oversized string itself rather than
+      receiving it through an exec. The positional spill is covered at the
+      command level instead, where no exec intervenes.
 - [ ] Reclaiming the instance behind a spilled dispatch removes the spill file
       along with it (R53).
 - [ ] `niwa dispatch` with no argument and standard input attached to a pipe that
