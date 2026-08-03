@@ -1,5 +1,5 @@
 ---
-status: Planned
+status: Current
 problem: |
   niwa's shell integration emits cobra's static completion today, so subcommand
   names (niwa cre<tab> -> niwa create) already complete. What it does not do is
@@ -38,7 +38,7 @@ rationale: |
 
 ## Status
 
-Planned
+Current
 
 ## Context and Problem Statement
 
