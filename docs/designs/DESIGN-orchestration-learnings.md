@@ -1,5 +1,5 @@
 ---
-status: Proposed
+status: Accepted
 problem: |
   niwa can launch a background worker but teaches nothing about running several. The
   decisions that determine whether a fleet finishes unattended -- how much framing the
@@ -31,7 +31,7 @@ rationale: |
 
 ## Status
 
-Proposed
+Accepted
 
 ## Context and Problem Statement
 
