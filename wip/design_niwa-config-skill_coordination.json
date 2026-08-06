@@ -4,8 +4,10 @@
     {
       "id": 1,
       "question": "What mechanism delivers the workspace.toml config-editing skill into rank-1 single-repo workspaces, covering both new and already-adopted repos?",
-      "status": "pending",
-      "complexity": "critical"
+      "status": "complete",
+      "complexity": "critical",
+      "chosen": "Extend the embedded-plugin auto-install gate to rank-1",
+      "report_file": "wip/design_niwa-config-skill_decision_1_report.md"
     },
     {
       "id": 2,
