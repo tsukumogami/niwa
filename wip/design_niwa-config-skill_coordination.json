@@ -1,0 +1,25 @@
+{
+  "topic": "niwa-config-skill",
+  "decisions": [
+    {
+      "id": 1,
+      "question": "What mechanism delivers the workspace.toml config-editing skill into rank-1 single-repo workspaces, covering both new and already-adopted repos?",
+      "status": "pending",
+      "complexity": "critical"
+    },
+    {
+      "id": 2,
+      "question": "What should the skill's content be sourced from so its schema/edit guidance doesn't drift the way DESIGN-workspace-config.md did?",
+      "status": "pending",
+      "complexity": "standard"
+    },
+    {
+      "id": 3,
+      "question": "Should niwa init --bootstrap's scaffold template change to seed the chosen mechanism for brand-new adopters?",
+      "status": "pending",
+      "complexity": "standard"
+    }
+  ],
+  "cross_validation": "pending",
+  "round": 0
+}
