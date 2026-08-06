@@ -107,3 +107,281 @@ fact.
   the mechanism without waiting on a niwa release, if the chosen approach
   allows it (relevant to `[instance.files]`, which is workspace.toml-authored
   and needs no niwa binary change to take effect in a given repo).
+
+## Considered Options
+
+### Decision 1: Delivery mechanism for the rank-1 config-editing skill
+
+niwa ships an embedded Claude Code plugin (`internal/plugin/files/niwa/`,
+installed to `~/.claude/plugins/marketplaces/niwa/`) with one skill,
+`migrate-config`, whose install is triggered exclusively by rank-2
+(deprecated whole-repo config) detection, at four duplicated call sites in
+`internal/workspace/apply.go` (~443, ~595, ~927, ~956). Rank-1 single-repo
+workspaces -- the normal, non-deprecated layout, and the population that
+needs in-session guidance for editing `.niwa/workspace.toml` -- trigger
+nothing today. A new config-editing skill needs a delivery path that
+reaches these workspaces, covering both new adopters and repos that already
+have a `.niwa/workspace.toml` today.
+
+Two already-shipped niwa mechanisms compete for this role: the embedded-plugin
+install (already runs unconditionally on every `niwa apply`/`niwa create`,
+with rank already computed at all four call sites), and `[instance.files]`
+(verbatim-copies files from an adopting repo's own `.niwa/` into its
+instance root on every apply, already shipped in v0.21.1, no new niwa
+release required).
+
+**Key assumptions:**
+- Workspace owners run `niwa apply`/`niwa create` as part of ordinary,
+  routine usage, so wiring into that path constitutes genuine passive reach.
+- The manifest version-bump discipline (`manifest.json`'s `version` field)
+  must be enforced by a functional test asserting the new skill's file
+  exists in HOME after install, not merely that the plugin installed --
+  `plugin.Install`'s idempotence check silently withholds updates from
+  already-installed users if this discipline lapses.
+- The sibling content-sourcing decision (Decision 2: "live-source-grounded
+  content") is compatible with this delivery mechanism without
+  modification -- the skill ships as a `SKILL.md` file under
+  `internal/plugin/files/niwa/skills/<name>/`, exactly like `migrate-config`
+  does today.
+
+#### Chosen: Extend the embedded-plugin auto-install gate to rank-1
+
+Add a new, rank-1-gated branch alongside each of the four existing rank-2
+branches in `internal/workspace/apply.go` (~443, ~595, ~927, ~956). Each
+site already computes rank as a plain `int` before these blocks run, so the
+new branch mirrors the existing one structurally: guard on a new notice-ID
+constant via `sliceContains(disclosedNotices, ID)`, emit a notice, append to
+`disclosedNotices`, call `a.InstallNiwaPlugin(nil, a.Reporter,
+a.SkipPluginInstall)`. No line inside any existing rank-2 `if` block
+changes. The new config-editing skill ships as a second entry in
+`internal/plugin/files/niwa/manifest.json`'s `skills` array, alongside
+`migrate-config`, with a `version` bump so already-installed users' on-disk
+plugin actually picks up the addition. The outcome-reporting notice requires
+no new code -- `plugin.Install` already calls `EmitPluginNotice` internally,
+unconditional on rank.
+
+This is the only candidate that satisfies "must reach already-adopted
+single-repo workspaces" as a passive, automatic guarantee rather than a
+best-effort or opt-in one. The mechanism it extends already runs
+unconditionally on every `apply`/`create`; adding a rank-1 branch requires
+no adopting repo to edit or commit anything. It also best satisfies the
+preference for reusing an already-shipped mechanism built for exactly this
+job (installing a skill into `~/.claude/`), rather than repurposing a
+general-purpose file-materialization mechanism built for a different job
+(`.mcp.json` distribution). The change is verified, by direct source
+reading, to be fully additive -- it shares no mutated state with the rank-2
+branches beyond an append-only notices slice.
+
+The trade-off knowingly accepted: this mechanism cannot, on its own, satisfy
+the soft preference that a workspace owner adopt "without waiting on a niwa
+release," since the skill's content ships via `go:embed` inside the niwa
+binary regardless of which trigger delivers it.
+
+#### Alternatives Considered
+
+- **`[instance.files]` self-declared per adopting repo**: mechanically real
+  (already shipped in v0.21.1, destination containment is checked only
+  against escaping the instance root, not nesting depth). Rejected because
+  it is fundamentally a pull -- nothing in niwa rewrites an already-committed
+  `workspace.toml`, so reach depends on a human or agent editing and
+  committing that specific repo's file -- and because the exact
+  nested-destination pattern it depends on is explicitly disclaimed by the
+  project's own `docs/guides/file-distribution.md` ("destinations stay at
+  the project root... not for niwa-internal directories," with `[files]`
+  named as the intended per-repo tool instead). No test in the current suite
+  covers this usage. Retained as candidate future work, gated on first
+  reconciling that guide with what the code actually enforces.
+- **Notify-only, pointing at `niwa plugins install`**: cheapest and
+  lowest-risk by construction, but rejected because it duplicates, rather
+  than adds to, what the chosen mechanism already provides for free --
+  `plugin.Install`'s existing `EmitPluginNotice` call already fires the same
+  disclosure unconditional on rank. Taken alone it also cannot satisfy "must
+  reach," since an unread notice delivers zero bits to disk.
+- **Hybrid (plugin-gate extension + documented `[instance.files]` escape
+  hatch)**: reconsidered after the `[instance.files]` doc-contradiction
+  finding surfaced. What began as an apparently free pairing turned out to
+  depend on documenting a pattern the project's own guide disclaims, with a
+  separate, independently-disqualifying content-availability gap (Decision
+  2's "live-source-grounded content" answer means there is no frozen
+  artifact for an early adopter to copy before a release merges).
+  Rejected as scope creep for this design; noted as a candidate follow-up
+  once the prerequisite doc/mechanism questions are resolved on their own
+  track.
+
+### Decision 2: Config-editing skill content sourcing strategy
+
+The new config-editing skill needs to teach an agent how to extend an
+already-adopted repo's `.niwa/workspace.toml` (add a hook, wire a secret,
+add a plugin, add instance files) covering `claude.*` (including
+`claude.hooks` and `claude.settings`, which have no dedicated guide today),
+`env.*`, `vault.*`, `files`, and `instance` blocks. The failure mode to
+avoid is concrete and already in the repo:
+`docs/designs/current/DESIGN-workspace-config.md`, despite `status:
+Current`, is confirmed 2+ months stale -- it documents a removed
+`[channels]` block, misplaces `[hooks]`/`[settings]` nesting, and omits
+`[vault]`, `[claude.marketplaces]`, `env_output`, `[instance]`, and `[root]`
+entirely. Nothing in the repo would have caught this: the doc-validation CI
+workflow checks artifact-doc format, not content accuracy, and skips docs
+lacking a `schema:` frontmatter key, which this doc lacks.
+`internal/config/config.go` changed 27 times in under 4 months, concentrated
+in the `[claude]` block and file-distribution blocks; `vault.go` changed
+only twice in the same window.
+
+**Key assumptions:**
+- `config.go`'s doc comments remain prose-quality; if they degrade, the
+  strategy still works (struct tags remain readable) but loses explanatory
+  value.
+- `vault.go`'s low change rate continues; if vault gains the same churn as
+  the claude block, its guide-pointer carve-out should be revisited.
+- No `niwa config validate`/`lint`/`check` command exists today (confirmed
+  by grep); if one is added later, the skill should invoke it as a closing
+  step, but that's separate, additive future work.
+
+#### Chosen: Live-source-grounded content, with a narrow guide carve-out for vault
+
+The skill's own `SKILL.md` prose stays short and procedural: it never
+restates field names, defaults, or section shapes as text the skill owns.
+Instead it teaches the agent how to find and interpret the ground truth at
+invocation time: (1) read `internal/config/config.go` (and
+`internal/config/vault.go`) to find the relevant struct and read its doc
+comment and `toml` tags directly; (2) use `scaffold.go`'s `scaffoldTemplate`
+as an illustrative starting shape, but explicitly cross-check every field
+name against `config.go` before using it -- research found `scaffoldTemplate`
+has already drifted on a real field name (`project_id` vs. the actual
+`project`), and its pinning test only does loose substring/parse checks; (3)
+write each common-edit walkthrough (add a hook, wire a secret, add a
+plugin, add instance files, add a marketplace) as a short numbered
+procedure describing where to look and what shape to expect, not a worked
+TOML snippet frozen in skill prose; (4) one exception -- for `vault.*`
+specifically, point the agent to `docs/guides/vault-integration.md` as the
+primary reference, because every spot-checked field in that guide matches
+`vault.go` today and the underlying code is empirically stable (2 changes
+in 4 months, versus 27 for the rest of the schema).
+
+This directly satisfies the ruled-out-alternative constraint (no
+hand-copied schema baked into skill prose) while being honest that
+`scaffoldTemplate` is not the rot-proof artifact the original constraints
+assumed -- it's commented-out, loosely tested, and has already drifted.
+Treating it as "cross-check before trusting" rather than "authoritative
+worked example" closes that gap without discarding its value as the
+richest single illustration of the schema.
+
+#### Alternatives Considered
+
+- **Hand-written schema, hand-maintained**: identical in structure to
+  `DESIGN-workspace-config.md`, already proven to drift within months on a
+  repo where `config.go` changes roughly weekly. Rejected by this decision's
+  own constraints.
+- **Guides-first with config.go fallback for gaps (full version)**: reuses
+  more existing prose, less to write up front. Rejected because two of the
+  three guides (`workspace-config-sources.md`, `file-distribution.md`) map
+  to the fastest-changing parts of the schema, so trusting them as primary
+  reference reintroduces the same unmonitored-drift risk this decision
+  exists to avoid. The vault-mapped third survives as a carve-out in the
+  chosen option.
+- **Generation/sync mechanism (go:generate or CI content-diff)**: would most
+  durably close the drift loop if it worked, but requires building
+  infrastructure that doesn't exist in this repo today, and doesn't fully
+  solve the curation problem even once built. Reasonable future work, out
+  of scope here.
+
+### Decision 3: Should niwa init --bootstrap's scaffold template change to seed discoverability for brand-new adopters?
+
+Decision 1 extended the embedded-plugin auto-install gate to fire on rank-1
+detection, so every rank-1 workspace picks up the plugin automatically the
+next time its owner runs `niwa apply`/`niwa create`. The working hypothesis
+was that this already covers brand-new `niwa init --bootstrap` adopters for
+free, since bootstrap's own `Create` call goes through the identical
+`runPipeline` that Decision 1's new branch lives in -- narrowing this
+decision to, at most, a cosmetic doc-pointer fix.
+
+Direct verification against the current source confirmed half of that
+premise and falsified the other half. `defaultRunBootstrap` does call
+`applier.Create`, the identical method `niwa create` calls, and
+`runPipeline` does compute rank the normal way (always rank 1 for a
+freshly-bootstrapped workspace). But `defaultRunBootstrap` constructs its
+own `Applier` and wires only `Reporter`, `ConfigSourceURL`,
+`GlobalConfigDir`, and `Agent` onto it -- it never calls
+`configurePluginAutoInstall`, the one function that wires the
+`Applier.InstallNiwaPlugin` seam to the real implementation. Every other
+Applier-constructing call site in the CLI calls it; `defaultRunBootstrap` is
+the sole exception. Consequence: a freshly-bootstrapped rank-1 workspace's
+own `Create` call silently skips the auto-install, both today and after
+Decision 1's rank-1 branch lands, since that branch only alters the trigger
+condition guarding the check, not the wiring behind it. This matters
+concretely because the very first Claude Code session in a brand-new
+bootstrap adopter's worktree -- precisely the "first contact" moment
+`--bootstrap` exists to optimize -- is guaranteed to lack the plugin.
+
+**Key assumptions:**
+- None required for the core finding -- resolved by direct source reading
+  with no residual ambiguity (status: confirmed).
+- Decision 1's rank-1 branch is assumed to land as described in its own
+  report; this fix is additive to and dependent on that landing.
+
+#### Chosen: No scaffold-template content change; fix the CLI wiring gap in internal/cli/init.go instead
+
+Do not modify `scaffoldFromSourceTemplate` -- its TOML content is not the
+blocking factor, and its trailing doc-pointer comment is already accurate.
+Instead, add one line to `defaultRunBootstrap`, immediately after
+`applier := workspace.NewApplier(gh)` and before `applier.Create` is
+invoked: `configurePluginAutoInstall(applier, initNoInstallPlugins)`. This
+mirrors, verbatim, the pattern already used at the other four
+Applier-constructing call sites. `initCmd` already declares the
+`--no-install-plugins` flag for a different code path (rank-2 handling
+inside `runInit`'s non-bootstrap `modeClone` branch); this change makes the
+bootstrap path honor the same, already-documented flag, at no cost of a new
+flag or new user-facing surface.
+
+This is the only candidate that closes the actual, source-verified gap: the
+premise ("bootstrap already goes through the same runPipeline that calls
+InstallNiwaPlugin the same way niwa create does") is true for the call
+graph but false for the wiring. No amount of scaffold-template editing can
+fix a Go wiring omission. The fix is a one-line, additive change matching
+an existing four-times-repeated pattern exactly, touches zero bytes of the
+PRD Appendix A-pinned template string, and reuses a flag that already
+exists on the same command.
+
+#### Alternatives Considered
+
+- **No change at all** (decision 1 already covers this for free): rejected
+  -- the premise it rests on is false, verified by direct source reading.
+- **Scaffold-template doc-pointer fix**: the plain (non-bootstrap)
+  `Scaffold()` template does have a genuinely stale doc pointer
+  (`scaffold.go:45`), but that lives in a different template used by a
+  different init mode, not `scaffoldFromSourceTemplate`. Bundling it here
+  would be scope creep onto an unrelated file and would do nothing to close
+  the real gap. Noted as a low-priority, out-of-scope finding.
+- **Substantive scaffold-template content change**: rejected on the same
+  grounds Decision 1 already used against a related alternative -- this is
+  a byte-equality-pinned string requiring PRD Appendix A-level rigor to
+  touch, and by construction the scaffold path never re-fires for an
+  already-bootstrapped repo, so it only helps future runs and does nothing
+  for the mechanism-not-firing gap found here.
+
+## Decision Outcome
+
+Three decisions compose into one coherent change, with no conflicts between
+them: (1) extend `internal/workspace/apply.go`'s embedded-plugin
+auto-install trigger to also fire on rank-1 source detection, additive to
+the four existing rank-2 branches; (2) author the new config-editing
+skill's `SKILL.md` as procedural guidance that teaches an agent to read
+`internal/config/config.go` live rather than owning static schema prose,
+with a narrow doc-pointer carve-out for the empirically stable `vault.*`
+block; (3) fix a real, independently-discovered wiring gap in
+`internal/cli/init.go`'s bootstrap path so the rank-1 trigger from (1)
+actually reaches a workspace's first session, not just its second `apply`
+onward.
+
+Decision 3 is a direct dependency correction surfaced by researching
+Decision 1's own scope, not a competing or contradictory choice --
+Decision 1's report correctly deferred the bootstrap-scaffold *content*
+question, but its Consequences section implicitly assumed bootstrap's
+*install trigger* already worked, which Decision 3's research falsified.
+Together, all three land in a single PR: two changes to
+`internal/workspace/apply.go` and `internal/cli/init.go` (small, additive,
+mirroring existing patterns four times over), one new `manifest.json` entry
+plus `SKILL.md`, and no changes to any byte-equality-pinned template
+string. The `[instance.files]` early-access escape hatch and the plain
+`Scaffold()` template's stale doc pointer are both explicitly deferred as
+separate, lower-priority follow-up work, not silently dropped.

@@ -26,6 +26,6 @@
       "report_file": "wip/design_niwa-config-skill_decision_3_report.md"
     }
   ],
-  "cross_validation": "pending",
+  "cross_validation": "passed",
   "round": 0
 }
