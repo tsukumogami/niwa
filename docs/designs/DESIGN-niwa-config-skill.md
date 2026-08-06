@@ -497,10 +497,18 @@ Deliverables:
 
 Write `internal/plugin/files/niwa/skills/edit-config/SKILL.md` per
 Decision 2's content strategy. Add the `skills[]` entry and bump `version`
-in `internal/plugin/files/niwa/manifest.json`.
+in `internal/plugin/files/niwa/manifest.json`. Per Security Considerations,
+the `claude.settings` and `vault.*` walkthroughs must include explicit
+guardrail language against writing plaintext secrets into those blocks
+(prefer `vault://` references; provider config carries only non-secret
+fields, credentials handled out-of-band via the provider's own CLI) --
+niwa's automated public-repo secret guardrail does not walk either of these
+struct paths, so the skill is the only backstop here.
 
 Deliverables:
-- `internal/plugin/files/niwa/skills/edit-config/SKILL.md`
+- `internal/plugin/files/niwa/skills/edit-config/SKILL.md`, including
+  explicit secret-handling guardrail language for `claude.settings` and
+  `vault.*`
 - `internal/plugin/files/niwa/manifest.json` changes
 
 ### Phase 4: Functional test coverage
@@ -522,6 +530,91 @@ CLI behavior:
 Deliverables:
 - New/extended `.feature` files under `test/functional/features/`
 - CI green on the full functional suite
+
+## Security Considerations
+
+**External artifact handling.** This design introduces no new download,
+fetch, or execution path. The plugin content written to
+`~/.claude/plugins/marketplaces/niwa/` is compiled into the niwa binary via
+`go:embed` (`internal/plugin/embed.go`) and is identical regardless of
+which trigger (rank-1 or rank-2) fires the install -- `plugin.Install` never
+reads from the network or from the adopting repo's own source.
+
+**Permission scope.** No new permission type is introduced.
+`InstallNiwaPlugin` already writes to `~/.claude/plugins/marketplaces/niwa/`
+on every `apply`/`create`; this design changes which condition (rank-1 in
+addition to rank-2) triggers that existing, unchanged write. The existing
+opt-outs (`--no-install-plugins`, `auto_install_plugins = false`) apply
+identically to the new rank-1 branches -- verified all four new call sites
+pass the same `a.SkipPluginInstall` field used by the four existing rank-2
+sites. The practical effect of this design is a scale/frequency change: the
+same trusted, idempotent write now happens for the common case (rank-1)
+instead of only the rare, deprecated case (rank-2). `teamConfigRank` is a
+structural property of the config source's own directory layout
+(marker-file presence), not an attacker-settable flag independent of that
+layout; a malicious config source can only "claim" the rank its actual file
+layout implies, and controlling that rank yields no leverage beyond
+toggling installation of niwa's own fixed, embedded, already-trusted
+plugin -- a source repo an operator already trusts enough to point a
+workspace at already has far larger avenues of impact (arbitrary hooks,
+arbitrary `claude.settings`, arbitrary `env.*` wiring) than this toggle.
+
+**Supply chain / dependency trust.** Decision 2's live-source-grounded
+content strategy has the `edit-config` skill read
+`internal/config/config.go`/`vault.go` from the niwa repo checkout the
+skill is invoked in -- not the adopting workspace's own source -- to learn
+the schema before editing that workspace's `.niwa/workspace.toml`. This
+bounds the trust question to the niwa checkout on disk at invocation time,
+which is normally the same trust level as the niwa binary/build already in
+use. A compromised niwa fork or an attacker-modified local niwa checkout
+could in principle steer the skill's live-read step toward bad advice
+(stale field names, misleading doc comments), but this requires an
+attacker who already has write access to a checkout the agent trusts -- a
+position from which far more direct compromise (editing the Go source that
+actually executes) is already available. The installed `SKILL.md` prose
+itself remains the release-pinned, `go:embed`'d text; only the
+schema-learning step is "live." This is an accepted, intentional trade-off
+(drift-resistance over release-pinned staleness) and should be treated as
+such by future maintainers, not rediscovered.
+
+**Data exposure.** No new telemetry, network call, or external transmission
+is introduced. The new `EmitRank1Notice` mirrors `EmitRank2Notice`'s
+existing shape: a plain informational stderr line naming the config source
+identifier and a fixed instructional string, no secret material or file
+contents.
+
+**Secret-handling guardrails in skill guidance.** niwa already enforces a
+public-repo plaintext-secret guardrail
+(`internal/guardrail/githubpublic.go`), but it walks a specific, narrow set
+of struct paths: `env.secrets` and `claude.env.secrets` (workspace-, repo-,
+and instance-level). It does not walk `claude.settings` (`SettingsConfig`,
+typed `map[string]MaybeSecret` precisely because it can carry vault-backed
+values) or `vault.provider`/`vault.providers.*` config
+(`VaultProviderConfig.Config`, untyped `map[string]any`). Both are blocks
+the `edit-config` skill's Decision 2 walkthroughs explicitly cover ("wire a
+secret," "add a plugin," provider setup). This means the codebase's
+automated safety net does not reach two of the exact blocks this skill
+teaches an agent to edit. `SKILL.md`'s procedures for `claude.settings` and
+`vault.*` edits must therefore carry their own explicit guardrail language:
+never write a literal secret value into those blocks; always use a
+`vault://` reference for anything secret-shaped in `claude.settings`; and
+for `vault.provider`/`vault.providers.*` config, only non-secret fields
+(e.g., a project identifier) belong in `workspace.toml` at all -- actual
+credentials are handled out-of-band by the provider's own CLI (e.g.
+`infisical login`), matching the existing pattern documented in
+`docs/guides/vault-integration.md`. This is a content requirement on Phase
+3's `SKILL.md` deliverable, not a code or architecture change.
+
+**Install-mechanism integrity.** `plugin.Install`'s `stageAndRename`
+(`internal/plugin/installer.go`) writes the full embedded tree to a `.next`
+staging directory first, then promotes it into place via `os.Rename`
+(atomic on POSIX), moving any existing install aside to `.prev` first and
+rolling back on a failed promote. There is no window in which a
+partially-written tree is visible at the install path. The manifest
+version-bump discipline required for `edit-config` to reach
+already-installed users is enforced by the functional test already planned
+in Implementation Approach Phase 4 (asserting the `edit-config` skill file
+exists in HOME post-install).
 
 ## Consequences
 

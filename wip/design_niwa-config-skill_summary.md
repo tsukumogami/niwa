@@ -14,6 +14,13 @@ for the rank-1 workspaces that need this guidance.
 - wip-hygiene applies: no committed references to wip/... paths
 - niwa conventions apply: gofmt, go vet only, conventional commits, functional-test coverage for user-facing CLI changes
 
+## Security Review (Phase 5)
+**Outcome:** Option 2 -- document considerations
+**Summary:** No design changes needed. One actionable finding: niwa's
+public-repo plaintext-secret guardrail doesn't walk `claude.settings` or
+`vault.provider` config, both blocks the new skill teaches editing, so
+`SKILL.md` needs its own explicit anti-plaintext-secret guardrail language.
+
 ## Current Status
-**Phase:** 0 - Setup (Explore Handoff)
-**Last Updated:** 2026-08-05
+**Phase:** 6 - Final Review
+**Last Updated:** 2026-08-06
