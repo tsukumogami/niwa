@@ -385,3 +385,197 @@ plus `SKILL.md`, and no changes to any byte-equality-pinned template
 string. The `[instance.files]` early-access escape hatch and the plain
 `Scaffold()` template's stale doc pointer are both explicitly deferred as
 separate, lower-priority follow-up work, not silently dropped.
+
+## Solution Architecture
+
+### Overview
+
+Three coordinated, individually-small changes land in one PR, each reusing
+an existing, already-tested pattern rather than introducing new machinery:
+a new rank-1 branch in the install pipeline, a new skill shipped inside the
+existing embedded plugin, and a one-line wiring fix so the bootstrap path
+picks up the same install trigger every other CLI entry point already has.
+
+### Components
+
+- **`internal/workspace/disclosure.go`**: two new notice-ID constants,
+  `NoticeIDRank1TeamConfig` / `NoticeIDRank1Overlay` (string values
+  `"rank1-plugin-install:team-config"` / `"rank1-plugin-install:overlay"`,
+  following the existing `rank2-deprecation:*` naming shape), and a new
+  `EmitRank1Notice(identifier string, reporter *Reporter)` function
+  mirroring `EmitRank2Notice`'s shape -- logs why a rank-1 source triggered
+  an install, distinct from `EmitPluginNotice`'s installed/skipped outcome
+  report (both fire; they answer different questions -- "why" vs. "what
+  happened").
+- **`internal/workspace/apply.go`**: four new `if teamConfigRank == 1 &&
+  !sliceContains(disclosedNotices, NoticeIDRank1...)` blocks, one adjacent
+  to each existing rank-2 block (~443, ~595, ~927, ~956), each calling
+  `EmitRank1Notice`, appending the notice ID, and calling
+  `a.InstallNiwaPlugin(nil, a.Reporter, a.SkipPluginInstall)` -- structurally
+  identical to the rank-2 blocks, sharing no mutated state beyond the
+  append-only `disclosedNotices` slice.
+- **`internal/cli/init.go`**: one new line in `defaultRunBootstrap`,
+  immediately after `applier := workspace.NewApplier(gh)` and before
+  `applier.Create` is invoked: `configurePluginAutoInstall(applier,
+  initNoInstallPlugins)`.
+- **`internal/plugin/files/niwa/manifest.json`**: a new `skills[]` entry
+  (name `edit-config`, matching the existing `migrate-config` naming
+  convention -- verb-noun, kebab-case) and a `version` bump so
+  already-installed users' on-disk plugin picks up the addition per
+  `plugin.Install`'s string-equality idempotence check.
+- **`internal/plugin/files/niwa/skills/edit-config/SKILL.md`** (new file):
+  procedural content per Decision 2 -- teaches an agent to read
+  `internal/config/config.go` live, cross-check `scaffold.go`'s
+  `scaffoldTemplate` before trusting it, and defer to
+  `docs/guides/vault-integration.md` for the `vault.*` block specifically.
+- **`internal/workspace/disclosure.go`'s existing `NoticeIDPluginInstalled`
+  log line** (line 41) needs a wording update: it currently hardcodes "Use
+  /niwa:migrate-config to invoke the migration skill," which becomes
+  misleading once a rank-1 install brings in a plugin whose relevant skill
+  is `/niwa:edit-config`, not `/niwa:migrate-config`. The line should name
+  both skills or drop the specific skill name and point at `niwa plugins
+  install --help` / the plugin's own skill list instead.
+
+### Key Interfaces
+
+- `Applier.InstallNiwaPlugin func(state *InstanceState, reporter *Reporter,
+  skipInstall bool)` (`apply.go:92`) -- unchanged function-field seam, now
+  invoked from four additional call sites.
+- `configurePluginAutoInstall(applier *workspace.Applier, optOut bool)`
+  (`internal/cli/plugin_adapter.go`) -- unchanged, called from a fifth site
+  (`defaultRunBootstrap`) in addition to its existing four.
+- `plugin.Install(state *InstanceState, reporter *Reporter, opts
+  InstallOpts)` (`internal/plugin/installer.go`) -- unchanged; rank-1 and
+  rank-2 branches both funnel into the same idempotent install.
+- `manifest.json`'s `skills[]` array shape -- unchanged schema, one
+  additional entry.
+
+### Data Flow
+
+**Existing/already-adopted rank-1 workspace:** `niwa apply` or `niwa
+create` -> `runPipeline` computes `teamConfigRank` (== 1) -> new rank-1
+branch fires (once per workspace, per `DisclosedNotices` bookkeeping) ->
+`EmitRank1Notice` logs why -> `a.InstallNiwaPlugin` -> `plugin.Install` ->
+`EmitPluginNotice` logs the outcome -> plugin tree written to
+`~/.claude/plugins/marketplaces/niwa/` -> both `migrate-config` and
+`edit-config` skills available starting the next Claude Code session in
+that workspace.
+
+**Brand-new `niwa init --bootstrap` adopter:** `defaultRunBootstrap` builds
+an `Applier`, now wired via `configurePluginAutoInstall` -> calls
+`applier.Create` -> same `runPipeline` as above, `teamConfigRank` is always
+1 for a freshly-bootstrapped workspace -> rank-1 branch fires on this very
+first `Create` call -> plugin installed before `RunBootstrap` prints its
+landing instructions and hands the user into their first worktree session.
+
+## Implementation Approach
+
+### Phase 1: Wire the rank-1 install trigger
+
+Add `NoticeIDRank1TeamConfig`/`NoticeIDRank1Overlay` and `EmitRank1Notice`
+to `internal/workspace/disclosure.go`. Add the four new rank-1 branches to
+`internal/workspace/apply.go`, adjacent to the existing rank-2 ones. Update
+`NoticeIDPluginInstalled`'s log line to not hardcode a single skill name.
+
+Deliverables:
+- `internal/workspace/disclosure.go` changes
+- `internal/workspace/apply.go` changes (4 new blocks)
+- Corresponding unit tests in `internal/workspace/apply_test.go` /
+  `disclosure_test.go`
+
+### Phase 2: Fix the bootstrap wiring gap
+
+Add the single `configurePluginAutoInstall(applier, initNoInstallPlugins)`
+line to `defaultRunBootstrap` in `internal/cli/init.go`.
+
+Deliverables:
+- `internal/cli/init.go` one-line change
+- Unit test asserting `Applier.InstallNiwaPlugin` is non-nil after
+  `defaultRunBootstrap` constructs its `Applier`
+
+### Phase 3: Author the config-editing skill content
+
+Write `internal/plugin/files/niwa/skills/edit-config/SKILL.md` per
+Decision 2's content strategy. Add the `skills[]` entry and bump `version`
+in `internal/plugin/files/niwa/manifest.json`.
+
+Deliverables:
+- `internal/plugin/files/niwa/skills/edit-config/SKILL.md`
+- `internal/plugin/files/niwa/manifest.json` changes
+
+### Phase 4: Functional test coverage
+
+Per `docs/guides/functional-testing.md`, add scenarios covering user-facing
+CLI behavior:
+- Rank-1 source triggers plugin install on `niwa apply`/`niwa create`
+  (adapted from `test/functional/features/config-source-rank2.feature`'s
+  existing `@critical` scenarios: swap the rank-2 fixture for rank-1,
+  assert stderr contains the new notice text, assert `manifest.json` and
+  the `edit-config` skill file exist in HOME).
+- `--no-install-plugins` opt-out variant for the rank-1 trigger.
+- `niwa init --bootstrap` installs the plugin/skill on the first `Create`
+  call, not only on a subsequent `apply` -- this is the scenario that
+  specifically proves Phase 2's fix, since it must fail before that fix
+  lands and pass after.
+- `--no-install-plugins` opt-out variant for the bootstrap path.
+
+Deliverables:
+- New/extended `.feature` files under `test/functional/features/`
+- CI green on the full functional suite
+
+## Consequences
+
+### Positive
+- Every rank-1 workspace -- new or already-adopted -- gets in-session
+  config-editing guidance automatically, with no edit required to that
+  repo's own files, the first time its owner upgrades niwa and runs
+  `apply`/`create`/`init --bootstrap`.
+- The fix is fully additive: zero lines change inside any existing rank-2
+  branch, and `plugin.Install`'s own idempotence makes a same-apply
+  double-install (e.g. a rank-2 team-config hit plus a rank-1 overlay hit)
+  a harmless no-op re-check.
+- The skill's content can never go stale the way
+  `docs/designs/current/DESIGN-workspace-config.md` did, because it never
+  owns a copy of the schema -- it teaches an agent to read the live source.
+- Decision 3's bootstrap-wiring fix closes a real gap that existed
+  independent of this design (any future rank-1-triggered install would
+  have hit the same silent no-op on the bootstrap path) -- a byproduct
+  correctness win, not just a means to this design's end.
+
+### Negative
+- Rank-1 users now also receive the `migrate-config` skill bundled
+  alongside `edit-config`, whose description is entirely about a rank-2
+  scenario that doesn't apply to them -- a minor plugin-browsing conceptual
+  mismatch, not a functional problem, since nothing forces its invocation.
+- The manifest version-bump discipline becomes a required, easy-to-silently-
+  skip step for every future skill addition to this plugin, not just this
+  one -- if skipped, `plugin.Install`'s bare string-equality version check
+  silently withholds the update from already-installed users with no error
+  surfaced.
+- The `edit-config` skill's guidance costs a live read of `config.go` (and
+  sometimes `scaffold.go`) per invocation, making it slightly slower and
+  more verbose per-use than a skill that could just quote a static
+  reference. Its quality also depends on `config.go`'s doc comments staying
+  prose-quality -- a soft dependency, not an enforced one.
+- The `vault.*` content carve-out means the skill has two different
+  content-sourcing behaviors depending on which block is being edited; a
+  future maintainer could "simplify" this into one mode without
+  understanding why vault gets different treatment.
+- The soft preference for pre-release, before-a-niwa-upgrade self-service
+  adoption is left unresolved by this design -- deferred, not solved.
+
+### Mitigations
+- A new functional-test scenario asserts the `edit-config` skill's file
+  (not just "plugin installed") exists in HOME after a rank-1 install and
+  after a bootstrap `Create` call, catching both a dropped version bump and
+  a re-broken bootstrap wiring path before it reaches users.
+- The `edit-config` `SKILL.md` states its two-mode content strategy
+  explicitly (live-read for everything except `vault.*`, doc-pointer for
+  `vault.*`) so a future maintainer sees the rationale in the same file
+  they'd be editing, rather than needing to rediscover it from this design
+  doc.
+- The `[instance.files]` early-access escape hatch and the plain
+  `Scaffold()` template's stale doc pointer are recorded here as explicit,
+  named follow-up work (see Considered Options, Decision 1 and Decision 3
+  Alternatives) rather than silently dropped, so they're discoverable by a
+  future contributor without re-deriving them from scratch.
