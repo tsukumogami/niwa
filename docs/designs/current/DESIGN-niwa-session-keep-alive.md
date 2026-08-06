@@ -397,3 +397,55 @@ non-configurable sub-hourly cadence bounds cost by construction; the non-visible
 (D2) keeps the session's conversation and context clean; the SessionStart nudge keeps the task
 prompt clean; the
 7-day bound is documented as a Known Limitation carried from the PRD.
+
+## Addendum (2026-08-06): re-investigated, no deterministic seam found
+
+Decision B's "no programmatic seam" finding was re-investigated end to end, prompted by a
+developer's direct experience receiving the arming nudge on a `niwa dispatch` session and
+asking whether it could be replaced with something deterministic. The re-investigation reached
+the same conclusion, by a more direct path than "confirmed from docs and by inspecting the
+host":
+
+- **CronCreate re-verified as agent-mediated only.** Independent verification against current
+  Claude Code behavior (CLI help, hook documentation) found no CLI flag, settings key, or hook
+  capability to trigger a tool call externally. The informally-observed `session_cron` primitive
+  from the original spike is now a named, documented tool (`CronCreate`) with published
+  guarantees matching what the design already assumed — a naming change, not a new seam.
+- **The schedule is disk-backed, not purely in-memory — confirmed, and exploited.** A session's
+  own transcript (`~/.claude/projects/<project-hash>/<session-id>.jsonl`) records every
+  `CronCreate` tool call verbatim. A live experiment confirmed this is load-bearing, not just a
+  history log: stopping a session, hand-appending a forged `CronCreate` tool-call/result pair to
+  its transcript (one the agent never actually made), and resuming it armed the forged cron —
+  `state.json` showed `selfWake: true` and `inFlight.kinds: ["session_cron"]` — even though the
+  resume prompt explicitly instructed the agent not to schedule anything. Claude Code's daemon
+  replays `CronCreate` calls found in the transcript at process start and cannot distinguish a
+  genuine tool call from a hand-written one.
+- **This does not help `niwa dispatch`, and was not pursued further.** The trick only reaches a
+  session that already exists with a known id and prior history. `claude --bg` — what
+  `niwa dispatch` uses for every worker — refuses a caller-supplied session id
+  ("`--bg` manages the session id; ignoring `--session-id`"), so there is no point before a
+  dispatched worker's process exists at which niwa could know its future transcript path to
+  pre-seed it. A fresh session's real preamble (hook outputs, file-history snapshots, etc.) is
+  also generated live by the starting process, not content known in advance. A considered
+  variant — let `--bg` mint a session normally, stop it after a cheap first turn, splice in the
+  forged cron, then resume with the real task — is technically buildable on the above, but adds
+  a process start/stop/resume cycle to every dispatch for no proven reliability gain over the
+  already-demonstrated nudge, and was rejected.
+- **The forged-history pattern reads as adversarial to the platform itself.** The one resumed
+  test session that carried the forged history was auto-named `"user instruction override
+  attempt"` by Claude Code's own (unrelated) session-naming classifier — an incidental signal,
+  not a deliberate integrity check, but still evidence this pattern structurally resembles the
+  failure mode the platform's own systems are tuned to notice, even though niwa's intent here
+  (keep-alive) is benign. Both throwaway test sessions were removed immediately after
+  observation.
+
+**Outcome.** Decision B stands: arming remains necessarily agent-mediated, and B2 (task-prompt
+augmentation) remains the shipped channel. The re-investigation did surface one concrete,
+scoped follow-up, filed separately rather than folded into this design: `state.json` already
+exposes whether a session's cron actually armed (`selfWake`, `inFlight.kinds`), and
+`internal/cli/job_state.go` already reads this file — so niwa could cross-check the recorded
+opt-in against the live signal in `niwa list`, turning a silent nudge failure into an observable
+one, without touching the arming mechanism itself. See
+[tsukumogami/niwa#235](https://github.com/tsukumogami/niwa/issues/235) (filed
+`needs-triage` — an observability nice-to-have against a mechanism already proven reliable, not
+a correctness bug, so whether it's worth building is left to triage).
