@@ -1,129 +1,202 @@
-<!-- decision:start id="config-skill-content-strategy" status="confirmed" -->
-### Decision: Config-editing skill content sourcing strategy
+<!-- decision:start id="config-skill-content-strategy" status="assumed" -->
+### Decision: Config-editing skill content sourcing strategy (RESTART)
 
 **Context**
-The new config-editing skill needs to teach an agent how to extend an
-already-adopted repo's `.niwa/workspace.toml` (add a hook, wire a secret, add
-a plugin, add instance files) covering claude.* (including claude.hooks and
-claude.settings, which have no dedicated guide today), env.*, vault.*, files,
-and instance blocks. The failure mode to avoid is concrete and already in the
-repo: `docs/designs/current/DESIGN-workspace-config.md`, despite `status:
-Current`, is confirmed 2+ months stale (last content commit 2026-05-02,
-today 2026-08-05) -- it documents a removed `[channels]` block, misplaces
-`[hooks]`/`[settings]` nesting, and omits `[vault]`, `[claude.marketplaces]`,
-`env_output`, `[instance]`, and `[root]` entirely. Nothing in the repo would
-have caught this: the one doc-validation CI workflow checks artifact-doc
-*format*, not content accuracy, and explicitly skips docs lacking a `schema:`
-frontmatter key, which this doc lacks. `internal/config/config.go` changed 27
-times in under 4 months, concentrated in the `[claude]` block and
-file-distribution blocks; `vault.go` changed only twice in the same window.
+The config-editing skill must teach an agent how to extend an
+already-adopted repo's `.niwa/workspace.toml` (add a hook, wire a secret,
+add a plugin, add instance files) covering `claude.*` (including
+`claude.hooks` and `claude.settings`), `env.*`, `vault.*`, `files`, and
+`instance` blocks. The previous decision chose to have the skill instruct
+an agent to read `internal/config/config.go` and `internal/config/
+vault.go` live at invocation time, on the reasoning that reading the
+actual source can never be stale the way a hand-copied schema (like
+`docs/designs/current/DESIGN-workspace-config.md`, confirmed 2+ months
+stale) inevitably becomes. A Phase 6 security-verification review found
+this breaks for the population the skill exists to serve: per
+`docs/guides/workspace-config-sources.md`'s "Single-repo workspace"
+section (verified directly, lines ~516-555), `niwa init --from owner/repo`
+materializes ONLY the `.niwa/` subtree of the *adopting* repo (commuter,
+equity-planner, etc.) into the workspace snapshot -- "the rest of the
+repo ... is never fetched." niwa's own source code lives in a completely
+separate repository that is never checked out inside a rank-1 adopter's
+niwa instance. "Read config.go live" has nothing to read there.
+
+Direct verification during this restart surfaced a second instance of the
+same bug the original decision didn't catch: its own vault carve-out,
+which pointed the skill at `docs/guides/vault-integration.md` as the
+primary reference for `vault.*`, has the identical flaw -- that guide also
+lives in the niwa repo's `docs/guides/`, equally absent from a rank-1
+adopter's instance. Any content-sourcing strategy that assumes a niwa
+checkout is on disk is broken for the target population, not just the
+config.go-specific one the reviewer flagged.
 
 **Assumptions**
-- config.go's doc comments remain prose-quality (verified today: e.g.
-  `ClaudeConfig` at config.go:22-27, `RootConfig` at config.go:265-271 explain
-  rationale, not just restate field names) -- if a future contributor starts
-  landing terse or missing comments, the "read config.go live" strategy
-  degrades gracefully (an agent can still read struct tags) but loses some of
-  its explanatory value.
-- vault.go's low change rate (2 commits/4mo) continues -- if vault gains the
-  same churn as the claude block, the carved-out guide-pointer for
-  `vault-integration.md` should be revisited using the same live-read
-  treatment as everything else.
-- No `niwa config validate`/`lint`/`check` command exists today (confirmed by
-  grep of internal/cli/*.go) -- if one is added later, the skill should be
-  updated to invoke it as a closing step after edits, but that's a separate,
-  additive change, not a blocker to this decision.
+- config.go's and vault.go's doc comments remain prose-quality going
+  forward, since a generator's output quality depends on it. If comments
+  degrade to terse/absent, the generated reference degrades to
+  field/tag-only listings (still structurally accurate, just less
+  explanatory) rather than becoming wrong.
+- A new CI job that re-runs the generator and diffs its output against
+  git is in scope for this design, since it's what turns "generated once"
+  into "enforced never-stale," mirroring the existing gofmt/go vet
+  enforcement pattern already in `.github/workflows/test.yml`. Even
+  without this job, the generated file starts accurate and only degrades
+  if a later config.go change ships unregenerated -- strictly better than
+  a hand-copy from day one, but materially better with the CI gate.
+- This decision was reached in --auto mode without user confirmation
+  (per the decision-block-format status rule, this alone is sufficient to
+  mark status `assumed` even though the evidence itself was conclusive,
+  not contested).
 
-**Chosen: Live-source-grounded content, with a narrow guide carve-out for vault**
-The skill's own SKILL.md prose stays short and procedural: it never restates
-field names, defaults, or section shapes as text the skill owns. Instead it
-teaches the agent *how to find and interpret* the ground truth at
-invocation time:
-1. Read `internal/config/config.go` (and `internal/config/vault.go`) to find
-   the relevant struct (`WorkspaceConfig`, `ClaudeConfig`, `EnvConfig`,
-   `VaultRegistry`, `InstanceConfig`, `RootConfig`) and read its doc comment
-   and `toml` tags directly -- this can never be stale because it's not a
-   copy, it's the thing itself.
-2. Use `internal/workspace/scaffold.go`'s `scaffoldTemplate` as an
-   illustrative starting shape for a new block, but explicitly instruct the
-   agent to cross-check every field name it copies from there against
-   config.go before using it -- because research found scaffoldTemplate has
-   already drifted on a real field name (`project_id` at scaffold.go:93 vs.
-   the actual `project` field), and its pinning test only does loose
-   substring/parse checks, not byte-equality or field validation. Treat it as
-   inspiration, never as verified truth.
-3. For the five common-edit walkthroughs the constraints require (add a
-   hook, wire a secret, add a plugin, add instance files, add a marketplace),
-   write each as a short numbered procedure ("open struct X, append an entry
-   shaped like Y, following the pattern at scaffold.go line Z") rather than
-   as a worked TOML snippet frozen in skill prose -- the procedure describes
-   *where to look and what shape to expect*, and the agent fills in exact
-   current field spelling from its live config.go read in step 1.
-4. One exception: for the `vault.*` block specifically, point the agent to
-   `docs/guides/vault-integration.md` as the primary reference rather than
-   requiring a full config.go read, because research independently verified
-   every spot-checked field in that guide against `vault.go` today and the
-   underlying code is empirically stable (2 changes in 4 months, versus the
-   claude/file-distribution blocks' 27). This is the one place in the schema
-   where a doc-pointer is lower-risk than round-tripping through source on
-   every invocation.
+**Chosen: Build-time-generated reference, embedded via go:embed, CI-freshness-enforced**
+The skill's authoritative schema content is no longer "read niwa-repo
+files live" in any form -- neither source nor guides. Instead:
+
+1. A new small internal generator (e.g.
+   `internal/configschema/gen/main.go`, wired via a `//go:generate`
+   directive near `internal/config/config.go`) walks the config package's
+   AST using the Go standard library's `go/ast` and `go/doc` packages (no
+   new external dependency -- verified nothing like this is imported
+   anywhere in the repo today, so this is genuinely new but minimal
+   infrastructure) and emits a structured markdown reference covering
+   every struct the skill needs to teach: `WorkspaceConfig`,
+   `ClaudeConfig`, `ClaudeOverride`, `HooksConfig`, `SettingsConfig`,
+   `ClaudeEnvConfig`, `EnvConfig`, `VaultRegistry`,
+   `VaultProviderConfig`, `InstanceConfig`, `RootConfig`, and the
+   file-distribution blocks -- field name, `toml` tag, and doc comment,
+   verbatim from source. Doc comments in this codebase are already
+   prose-quality (verified directly: `ClaudeConfig`, `WorkSummaryHooks`,
+   `PrBodyHook` all explain rationale, not just restate field names), so
+   the generated output carries real explanatory value, not a bare field
+   list.
+2. The generated output is committed to git at
+   `internal/plugin/files/niwa/skills/edit-config/reference/schema.md`
+   (exact path TBD in implementation), which ships to every niwa
+   instance via the identical `go:embed` mechanism `SKILL.md` already
+   uses today (verified: `internal/plugin/embed.go` embeds the whole
+   `internal/plugin/files/niwa/` tree with no per-file allowlist, so
+   adding a second file requires zero delivery-mechanism change and
+   stays entirely inside Decision 1's already-finalized scope).
+3. A new CI job re-runs the generator and does a `git diff --exit-code`
+   against the committed file, run alongside the existing `go vet ./...`
+   and `go test ./...` jobs in `.github/workflows/test.yml`. Any PR that
+   changes `config.go` or `vault.go` without regenerating the reference
+   fails CI -- the same enforcement discipline this repo already applies
+   to `gofmt`. This bounds drift to zero at merge time, tighter than the
+   "at most one release cycle" the investigation prompt initially
+   floated, because the check runs on every PR, not just at release cut.
+4. The generated file must be committed to git, not produced fresh at
+   release-build time: `.goreleaser.yaml` runs a plain `go build` with no
+   `before.hooks` codegen step, and `go build ./cmd/niwa` /
+   `go test ./...` (every ordinary build and CI entry point, not just
+   releases) would break if the embedded file weren't present in a plain
+   checkout. Committing it keeps every existing build path working
+   unmodified.
+5. `vault.*` folds into this same generated reference instead of keeping
+   a special-cased guide pointer -- the original decision's carve-out is
+   no longer needed once the sourcing mechanism itself is
+   checkout-independent; there's no reason to treat vault differently
+   from claude/env/instance now that all of them are equally
+   bundle-embedded.
+6. SKILL.md's own prose stays exactly as procedural as the original
+   decision intended: short numbered walkthroughs ("add a hook", "wire a
+   secret", "add a plugin", "add instance files", "add a marketplace")
+   that point into the generated reference for the authoritative current
+   field names, rather than restating schema facts as text the skill
+   owns or reading source live.
+7. Optional enhancement, not required for correctness: SKILL.md may
+   additionally instruct that if a niwa checkout happens to be
+   detectable on disk (e.g. running the skill while developing niwa
+   itself), the agent may cross-check the bundled reference against live
+   `config.go` for the freshest possible view. This covers the narrower
+   niwa-contributor population without weakening the guarantee for the
+   universal rank-1 population, which never depends on this branch
+   firing.
 
 **Rationale**
-This directly satisfies the ruled-out-alternative constraint (no hand-copied
-schema baked into skill prose) while being honest about the two things
-research surfaced that the original constraints didn't fully account for.
-First, scaffoldTemplate is not the safe, rot-proof artifact the constraints
-assumed -- it's commented-out and loosely tested, and it has already drifted
-on a real field name. Treating it as "cross-check before trusting" rather
-than "authoritative worked example" closes that gap without discarding its
-genuine value as the richest single illustration of the schema. Second,
-two of the three existing guides (workspace-config-sources.md,
-file-distribution.md) sit on top of exactly the code that changes fastest
-(the `[claude]` block and file-distribution blocks) -- trusting them as the
-skill's primary reference would just relocate the DESIGN-workspace-config.md
-failure mode one level, since nothing prevents *those* docs from going stale
-either. Only vault-integration.md sits on genuinely calm code, which is why
-it alone earns a carve-out. Building a generation/sync mechanism (go:generate
-or a CI content-diff check) was considered and rejected as out of scope: it
-requires new infrastructure this repo doesn't have today (confirmed: no
-go:generate anywhere, the one doc CI check validates format not content and
-skips schema-less docs like the one that went stale), and even if built it
-wouldn't fully solve the problem, since curating which comments become
-walkthrough prose still needs a human or agent in the loop.
+Only two kinds of content are actually guaranteed present inside an
+arbitrary rank-1 adopter's niwa instance: whatever ships bundled inside
+the plugin via the already-finalized go:embed delivery, and whatever the
+`niwa` binary itself can produce at runtime. Every alternative that reads
+a niwa-repo file live -- source or guide -- fails the first test, which is
+exactly the bug this restart exists to fix; it doesn't matter whether the
+file in question is `config.go` or `vault-integration.md`, since both are
+equally absent from the target population's checkout. A CLI-introspection
+command (`niwa config schema --json`) does satisfy the availability
+requirement, since the binary is always present, but Go reflection cannot
+recover doc comments -- only AST-level parsing at a time source is
+available (build/generate time) can, and this codebase's doc comments are
+exactly what makes the guidance more than a bare field list. Building new
+CLI surface to get a strictly worse (comment-free) result than a
+generator already gives for less delivery risk isn't a good trade.
+Extending the guides with new content-accuracy CI tooling was reconsidered
+under the restart's premise and doesn't survive it: `docs/guides/` is as
+unavailable to the target population as `config.go` is, so no amount of
+CI enforcement on guide content fixes the fact that the skill can't reach
+the guide from inside a rank-1 instance in the first place. The generated
+committed reference is the one candidate that satisfies drift-resistance
+(CI-diffed, tighter than the original decision's live-read guarantee,
+which had zero staleness by construction but only worked for a narrower
+population), availability (ships identically to SKILL.md, zero new
+delivery mechanism), and content quality (keeps the prose value config.go
+already carries) all at once.
 
 **Alternatives Considered**
-- **Hand-written schema, hand-maintained**: identical in structure to
-  DESIGN-workspace-config.md, which is already proven to drift within months
-  on a repo where config.go changes roughly weekly. Rejected by the decision's
-  own constraints.
-- **Guides-first with config.go fallback for gaps (full version)**: reuses
-  more existing prose (three guides instead of one), less to write up front.
-  Rejected because two of the three guides map to the fastest-changing parts
-  of the schema (`[claude]` and file-distribution), so trusting them as
-  primary reference reintroduces the same unmonitored-drift risk this
-  decision exists to avoid -- confirmed accurate today doesn't mean confirmed
-  accurate in three months, and nothing in the repo checks that. The
-  vault-mapped third of this alternative survives as a carve-out in the
-  chosen option.
-- **Generation/sync mechanism (go:generate or CI content-diff)**: would most
-  durably close the drift loop if it worked, but requires building
-  infrastructure that doesn't exist in this repo today (no go:generate
-  anywhere; the existing doc-format CI check explicitly skips docs without a
-  `schema:` key) and doesn't fully solve the curation problem even once
-  built. Reasonable future work, out of scope for "what should the skill's
-  content be sourced from."
+- **New `niwa` CLI introspection command** (e.g. `niwa config schema
+  --json` via reflection over the live struct types): satisfies
+  availability -- the binary is always present -- but reflection cannot
+  recover Go doc comments, so it would regress guidance quality below
+  what config.go's comments already provide, and requires new
+  user-facing CLI surface (flags, output format, tests, docs) to do
+  strictly less than the chosen generator does for less risk. Rejected;
+  noted as reasonable future work if a runtime-introspection need
+  independent of this skill emerges later.
+- **Context-branching (live read if a checkout is detectable, else
+  fallback)**: not rejected outright -- folded into the chosen option as
+  an optional enhancement (step 7) for the narrower niwa-contributor
+  population, since it costs nothing and the fallback it needs is the
+  chosen generated reference anyway. Not viable as a standalone strategy,
+  because the universal rank-1 population never has the checkout branch
+  fire, so a working fallback is mandatory regardless.
+- **Extend existing guides + new CI content-accuracy tooling** (the
+  vault-integration.md carve-out pattern, generalized and enforced): this
+  is what the original decision effectively already did for `vault.*`,
+  and the restart's own trigger finding shows it fails the identical
+  checkout-availability test config.go failed. Adding content-accuracy CI
+  enforcement would close the *drift* gap the guides have always had, but
+  does nothing about the more fundamental *reachability* gap -- the skill
+  running inside a rank-1 adopter's instance has no path to
+  `docs/guides/workspace-config-sources.md` at all, accurate or not.
+  Rejected; the guides remain useful as source material a human or the
+  new generator's author reads once, and as general documentation for
+  people browsing the niwa repo directly, just not as the skill's live
+  reference target.
+- **Hand-written schema, hand-maintained** (carried forward from the
+  original decision, still rejected on the same grounds): identical in
+  structure to `DESIGN-workspace-config.md`, already proven to drift
+  within months on a repo where config.go changes roughly weekly.
 
 **Consequences**
-The skill becomes cheaper to keep correct -- there's no schema prose to
-update when config.go changes, because the skill never states schema facts
-as its own claims. The trade-off: each invocation costs a live read of
-config.go (and sometimes scaffold.go), so the skill is slightly slower and
-more verbose per-use than a skill that could just quote a static reference,
-and the quality of its guidance depends on config.go's doc comments staying
-prose-quality, which is a soft dependency rather than an enforced one. The
-vault carve-out means the skill has two different content-sourcing behaviors
-depending on which block is being edited -- this needs to be stated
-explicitly in the skill so a future maintainer doesn't "clean it up" into a
-single mode without understanding why vault gets different treatment. If
-vault.go's change rate increases later, that carve-out should be revisited.
+The skill gains a genuinely new build artifact and a new CI job that
+didn't exist before this decision -- a small generator package
+(`go/ast`/`go/doc`-based, stdlib only) and a freshness-diff check
+alongside the existing `go vet`/`go test` gates. This is real, if modest,
+new infrastructure the original decision explicitly avoided building; the
+restart's finding that live-read is non-viable for the target population
+changes that calculus, since the alternative to "build a small generator"
+is no longer "read source live" (which doesn't work here) but "ship
+something hand-copied and already-proven-to-drift" or "ship nothing and
+regress to a worse-quality reflection-based command." The generated
+reference file becomes a second embedded artifact reviewers see diffs for
+in every PR that touches the config schema, which is a net legibility
+win -- schema changes become visible in the same PR that causes them,
+rather than requiring a separate doc-sync pass. The vault-specific
+carve-out from the original decision is removed as unnecessary complexity
+now that all schema areas share one sourcing mechanism, simplifying the
+skill's own prose (no more "except for vault, which works differently").
+The optional live-checkout-detection enhancement means niwa's own
+contributors get marginally fresher guidance than the bundled reference
+in the rare case they're editing config.go and the skill in the same
+session, at no cost to the correctness guarantee for the universal
+population, which the enhancement never gates on.
 <!-- decision:end -->

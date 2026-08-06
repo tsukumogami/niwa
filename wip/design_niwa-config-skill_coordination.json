@@ -14,7 +14,7 @@
       "question": "What should the skill's content be sourced from so its schema/edit guidance doesn't drift the way DESIGN-workspace-config.md did?",
       "status": "complete",
       "complexity": "standard",
-      "chosen": "Live-source-grounded content, with a narrow guide carve-out for vault",
+      "chosen": "Build-time-generated reference, embedded via go:embed, CI-freshness-enforced (restarted from Phase 6 security-verification finding)",
       "report_file": "wip/design_niwa-config-skill_decision_2_report.md"
     },
     {
