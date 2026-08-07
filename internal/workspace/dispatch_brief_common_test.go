@@ -11,7 +11,7 @@ import (
 
 // commonPath is where writeDispatchBriefCommon lands under a workspace root.
 func commonPath(workspaceRoot string) string {
-	return filepath.Join(workspaceRoot, config.ConfigDir, dispatchBriefsTargetDir, dispatchBriefCommonFile)
+	return filepath.Join(workspaceRoot, config.ConfigDir, dispatchBriefsDirName, dispatchBriefCommonFile)
 }
 
 func readCommon(t *testing.T, workspaceRoot string) string {
@@ -151,19 +151,75 @@ func TestWriteDispatchBriefCommon_IsIdempotent(t *testing.T) {
 // block — start marker present, end marker gone. Guessing at the bounds could
 // eat arbitrary workspace prose; appending is recoverable, so that is the
 // deliberate choice.
+//
+// The second call is the load-bearing half. Append leaves an orphaned start
+// marker sitting above the block it just wrote, so the NEXT materialization
+// sees orphan-then-block — and every `niwa apply` and `niwa create` is a next
+// materialization. A merge that pairs the orphan's start with the real block's
+// end deletes everything between them, which is exactly the workspace prose
+// this function exists to protect.
 func TestMergeDispatchBriefCommon_MalformedSentinelAppends(t *testing.T) {
-	existing := "# Ours\n\n" + dispatchBriefCommonStartMarker + "\nhalf a block, no end marker\n"
+	const ownSection = "## Our own testing constraints\nNever run the suite against prod.\n"
+	existing := "# House rules\n\n" +
+		dispatchBriefCommonStartMarker + "\nhalf a block, no end marker\n\n" +
+		ownSection
 
-	got := mergeDispatchBriefCommon(existing, "fresh block body")
+	first := mergeDispatchBriefCommon(existing, "AGREEMENT V1")
 
-	if !strings.HasPrefix(got, existing) {
-		t.Errorf("pre-existing content was modified:\n%q", got)
+	if !strings.HasPrefix(first, existing) {
+		t.Errorf("run 1 modified pre-existing content:\n%q", first)
 	}
-	if !strings.Contains(got, "half a block, no end marker") {
-		t.Error("truncated block content was destroyed")
+	if !strings.Contains(first, "half a block, no end marker") {
+		t.Error("run 1 destroyed the truncated block's content")
 	}
-	if !strings.Contains(got, "fresh block body") {
-		t.Error("fresh block was not appended")
+	if !strings.Contains(first, "AGREEMENT V1") {
+		t.Error("run 1 did not append the fresh block")
+	}
+
+	second := mergeDispatchBriefCommon(first, "AGREEMENT V2")
+
+	if !strings.Contains(second, ownSection) {
+		t.Errorf("run 2 destroyed the workspace's own section:\n%q", second)
+	}
+	if !strings.Contains(second, "half a block, no end marker") {
+		t.Errorf("run 2 destroyed the orphaned block's content:\n%q", second)
+	}
+	if !strings.HasPrefix(second, "# House rules") {
+		t.Errorf("run 2 destroyed the file's head:\n%q", second)
+	}
+	if !strings.Contains(second, "AGREEMENT V2") {
+		t.Error("run 2 did not write the fresh block")
+	}
+	if strings.Contains(second, "AGREEMENT V1") {
+		t.Errorf("run 2 left the stale block behind instead of replacing it:\n%q", second)
+	}
+
+	third := mergeDispatchBriefCommon(second, "AGREEMENT V2")
+	if third != second {
+		t.Errorf("run 3 was not byte-identical to run 2:\nrun2:\n%q\n\nrun3:\n%q", second, third)
+	}
+}
+
+// TestMergeDispatchBriefCommon_OrphanBelowTheBlock is the mirror of the case
+// above: a stray start marker AFTER a well-formed block. The block must still be
+// the one replaced, and the stray marker must survive untouched.
+func TestMergeDispatchBriefCommon_OrphanBelowTheBlock(t *testing.T) {
+	existing := mergeDispatchBriefCommon("", "AGREEMENT V1") +
+		"\n## Later section\n" + dispatchBriefCommonStartMarker + "\npasted by hand\n"
+
+	got := mergeDispatchBriefCommon(existing, "AGREEMENT V2")
+
+	if !strings.Contains(got, "## Later section") {
+		t.Errorf("workspace section below the block was destroyed:\n%q", got)
+	}
+	if !strings.Contains(got, "pasted by hand") {
+		t.Errorf("stray marker's content was destroyed:\n%q", got)
+	}
+	if !strings.Contains(got, "AGREEMENT V2") {
+		t.Error("fresh block was not written")
+	}
+	if strings.Contains(got, "AGREEMENT V1") {
+		t.Errorf("stale block survived:\n%q", got)
 	}
 }
 

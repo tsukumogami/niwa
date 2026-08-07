@@ -23,6 +23,11 @@ import (
 // invoking `niwa dispatch`. It is niwa-written local state, not upstream
 // source content, so the snapshot swap must carry it across the swap the
 // same way it carries instance.json. See preserveDispatchBriefs.
+//
+// writeDispatchBriefCommon writes the shared agreement into this same
+// directory, and the coupling is load-bearing in one direction: the
+// preservation keyed on this constant is what carries _common.md across a
+// config swap. One constant, so the two cannot drift apart silently.
 const dispatchBriefsDirName = "dispatch-briefs"
 
 // driftCheckBackoff is the wait schedule used by headCommitWithRetry.

@@ -30,11 +30,10 @@ var dispatchBriefsFS embed.FS
 // dispatchBriefsEmbedPath is the embedded agreement source.
 const dispatchBriefsEmbedPath = "dispatchbriefs/_common.md"
 
-// dispatchBriefsTargetDir is the directory under the workspace config dir where
-// the /dispatch skill writes task briefs and where the shared agreement lives.
-// It is preserved across config-snapshot swaps (see preserveDispatchBriefs), so
-// a file written here survives every later refresh.
-const dispatchBriefsTargetDir = "dispatch-briefs"
+// The target directory is dispatchBriefsDirName, declared in snapshotwriter.go
+// beside the preservation that carries this file across a config swap. Sharing
+// the constant is deliberate: if the directory ever moves and only one side
+// follows, the agreement stops surviving refreshes and nothing says so.
 
 // dispatchBriefCommonFile is the shared agreement every brief references.
 const dispatchBriefCommonFile = "_common.md"
@@ -74,7 +73,7 @@ func writeDispatchBriefCommon(workspaceRoot string) (string, error) {
 		return "", fmt.Errorf("reading embedded dispatch-brief agreement: %w", err)
 	}
 
-	dir := filepath.Join(workspaceRoot, config.ConfigDir, dispatchBriefsTargetDir)
+	dir := filepath.Join(workspaceRoot, config.ConfigDir, dispatchBriefsDirName)
 	if mkErr := os.MkdirAll(dir, 0o755); mkErr != nil {
 		return "", fmt.Errorf("creating dispatch-briefs directory %q: %w", dir, mkErr)
 	}
@@ -95,9 +94,18 @@ func writeDispatchBriefCommon(workspaceRoot string) (string, error) {
 // mergeDispatchBriefCommon replaces niwa's sentinel-delimited block in existing
 // with block, or appends it when no well-formed block is present.
 //
-// A start marker with no matching end marker is treated as "no niwa block":
-// appending is recoverable and guessing at the block's bounds is not, and the
-// failure mode being guarded against is destroying prose someone wrote.
+// A start marker with no matching end marker is an ORPHAN, not a block: it is
+// left exactly where it is and the fresh block is appended. Guessing at the
+// bounds of something we cannot parse is how prose someone wrote gets deleted,
+// and appending is recoverable.
+//
+// The orphan case is why the search is for a well-formed PAIR rather than for
+// the first start marker. An orphan followed by a real block is a state this
+// function itself produces — append leaves the orphan in place above the block
+// it just wrote — so it recurs on the very next materialization, and every
+// `niwa apply` and `niwa create` runs one. Pairing the orphan's start with the
+// real block's end would open a replacement span across everything between
+// them, which is precisely the workspace content the merge exists to protect.
 func mergeDispatchBriefCommon(existing, block string) string {
 	wrapped := dispatchBriefCommonStartMarker + "\n" + strings.TrimRight(block, "\n") + "\n" + dispatchBriefCommonEndMarker + "\n"
 
@@ -105,18 +113,8 @@ func mergeDispatchBriefCommon(existing, block string) string {
 		return wrapped
 	}
 
-	start := strings.Index(existing, dispatchBriefCommonStartMarker)
-	if start >= 0 {
-		rest := existing[start+len(dispatchBriefCommonStartMarker):]
-		if endRel := strings.Index(rest, dispatchBriefCommonEndMarker); endRel >= 0 {
-			end := start + len(dispatchBriefCommonStartMarker) + endRel + len(dispatchBriefCommonEndMarker)
-			// Absorb the newline that terminated the end marker's line so a
-			// re-run reproduces byte-identical output.
-			if end < len(existing) && existing[end] == '\n' {
-				end++
-			}
-			return existing[:start] + wrapped + existing[end:]
-		}
+	if start, end, ok := findDispatchBriefCommonBlock(existing); ok {
+		return existing[:start] + wrapped + existing[end:]
 	}
 
 	prefix := existing
@@ -124,4 +122,48 @@ func mergeDispatchBriefCommon(existing, block string) string {
 		prefix += "\n"
 	}
 	return prefix + "\n" + wrapped
+}
+
+// findDispatchBriefCommonBlock locates the first well-formed niwa block in s and
+// returns its half-open byte range.
+//
+// Well-formed means the end marker follows the start marker with no second
+// start marker in between. That bound is what makes an orphaned start marker
+// inert: the orphan's own end-marker search runs past the next start marker, so
+// the orphan is skipped and the real block below it is found instead. Without
+// the bound, an orphan silently extends the span over everything down to the
+// real block's end marker.
+func findDispatchBriefCommonBlock(s string) (start, end int, ok bool) {
+	offset := 0
+	for {
+		rel := strings.Index(s[offset:], dispatchBriefCommonStartMarker)
+		if rel < 0 {
+			return 0, 0, false
+		}
+		start = offset + rel
+		bodyAt := start + len(dispatchBriefCommonStartMarker)
+
+		endRel := strings.Index(s[bodyAt:], dispatchBriefCommonEndMarker)
+		if endRel < 0 {
+			// No end marker anywhere after this start: nothing below is
+			// well-formed either, so stop rather than scanning further.
+			return 0, 0, false
+		}
+
+		nextStartRel := strings.Index(s[bodyAt:], dispatchBriefCommonStartMarker)
+		if nextStartRel >= 0 && nextStartRel < endRel {
+			// This start is an orphan — another block opens before this one
+			// closes. Skip it and try the next start marker.
+			offset = bodyAt + nextStartRel
+			continue
+		}
+
+		end = bodyAt + endRel + len(dispatchBriefCommonEndMarker)
+		// Absorb the newline that terminated the end marker's line so a re-run
+		// reproduces byte-identical output.
+		if end < len(s) && s[end] == '\n' {
+			end++
+		}
+		return start, end, true
+	}
 }

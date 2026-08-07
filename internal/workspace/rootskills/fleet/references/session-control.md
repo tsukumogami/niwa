@@ -14,18 +14,45 @@ rather than guess.
 claude agents --json --all | jq -c '.[] | select(.id=="<short-id>")'
 ```
 
-Read `state`, not `pid`:
+Three fields matter, and they answer two different questions. `pid` tells you whether
+`--resume` will be accepted. `status` and `state` tell you what stopping it would cost.
 
-| `state` | `pid` | What it means |
-|---------|-------|---------------|
-| `working` | present | Genuinely busy. Leave it alone. |
-| `done` | present | Live and idle, registered as a background agent. |
-| `working` | **absent** | **Stale.** The process is gone; the registration outlived it. |
-| `done` or `stopped` | absent | Finished. Resumable. |
+**A `pid` is present — the session is registered, and `--resume` is refused no matter what
+else the row says.** To message it you must `claude stop` first, which ends the background
+agent but keeps the conversation:
+
+| Row | What it means | What stopping costs |
+|-----|---------------|---------------------|
+| `status: busy` | Genuinely working right now | A turn in flight. Leave it alone unless you mean to interrupt. |
+| `status: idle` | Live, between turns | Nothing. This is the cheap one to stop and resume. |
+| `state: blocked`, `waitingFor` set | Stuck on a prompt nothing is going to answer | Nothing — it is not progressing. Stop it, then resume passing the permission flags it was launched with. |
+| no `status` at all | Still live | Unknown. `ps -p <pid>` before assuming. |
+
+**No `pid` — now `state` decides:**
+
+| `state` | What it means | Resume |
+|---------|---------------|--------|
+| `done` or `stopped` | Finished cleanly | Succeeds |
+| `working` or `blocked` | **Stale.** The process is gone; the registration outlived it | **Refused.** `claude stop` clears it, then resume |
+
+Two traps in that pair of tables.
 
 **`pid` absence is not a safe-to-resume signal.** A session killed by a signal loses its
-`pid` and keeps `state: working`, and a resume against it is refused. Check the process
-too, with `ps -p <pid>`, when a `pid` is present.
+`pid` and keeps a non-terminal `state`, and a resume against it is refused. When a `pid` is
+present, `ps -p <pid>` tells you whether it is real.
+
+**`status: idle` does not mean reachable.** The refusal keys on the registration, not on
+whether the session is doing anything, so a live-idle session refuses exactly like a busy
+one. What `status` buys you is knowing that stopping it interrupts nothing — which is the
+decision that actually differs between the rows.
+
+On one machine at one moment, 16 sessions split as: `working`+`busy`+pid 4,
+`working`+`idle`+pid 4, `blocked` without pid 4, `blocked`+`idle`+pid 1, `done` without pid
+1, `stopped` without pid 1, and one live row carrying a `pid` and no `state` at all. Two
+things worth taking from that spread rather than from the counts: `blocked` is common
+enough that a table omitting it is a table that fails on the canonical stuck session, and a
+row can carry a `pid` with no `state` or `status`, so treat `pid` as the primary key and the
+rest as detail.
 
 ## The recipe
 

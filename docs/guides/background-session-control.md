@@ -182,16 +182,35 @@ $ claude --resume fd4e4a87-... --print --output-format json "This is message two
 ### This supersedes the `pid`-absence rule
 
 An earlier version of these findings said a row without a `pid` is safe to resume. **That
-is wrong**, and the stale row above is the counter-example: no `pid`, and refused. Use
-`state`:
+is wrong**, and the stale row above is the counter-example: no `pid`, and refused.
 
-| `state` | `pid` | Resume behaviour |
-|---|---|---|
-| `done` | present | refused — live and idle |
-| `working` | present | refused — live and busy |
-| `working` | **absent** | **refused — stale registration, process is dead** |
-| `done` | absent | succeeds |
-| `stopped` | absent | succeeds |
+The predicate that actually holds across everything observed is **`pid` present, or a
+non-terminal `state`** — either one means the session is still registered as a background
+agent, which is what the guard checks:
+
+| `pid` | `state` | `status` | Resume behaviour |
+|---|---|---|---|
+| present | `working` | `busy` | refused — live, turn in flight |
+| present | `working` | `idle` | refused — live, between turns |
+| present | `blocked` | `idle`, or `waiting` with `waitingFor` | refused — live, parked on a prompt |
+| present | `done` | `idle` | refused — live, observed on the probe right after launch |
+| present | absent | absent | refused — live; `ps -p <pid>` to confirm |
+| **absent** | `working` or `blocked` | absent | **refused — stale registration, process is dead** |
+| absent | `done` | absent | succeeds |
+| absent | `stopped` | absent | succeeds |
+
+`status` never changes the resume answer. It is present exactly when `pid` is, and it
+distinguishes a session with a turn in flight from one sitting between turns — which
+matters for whether stopping it costs anything, not for whether the resume is accepted.
+
+The `blocked` rows were missing from the first version of this table and are not rare: a
+snapshot of 16 sessions on one machine had five of them, four without a `pid`. `blocked`
+with `waitingFor` set is the state section 9 describes — a session parked on a permission
+prompt, alive and making no progress, which is the canonical stuck worker.
+
+Also observed in that snapshot: one row carrying a `pid` and no `state` or `status` at all.
+Key on `pid` first and treat the rest as detail; a table that assumes every field is
+populated will mis-classify that row.
 
 When a `pid` is present, `ps -p <pid>` tells you whether it is real.
 

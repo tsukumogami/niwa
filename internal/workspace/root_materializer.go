@@ -207,6 +207,16 @@ func MaterializeWorkspaceRoot(cfg *config.WorkspaceConfig, workspaceRoot string,
 // skill without it, so shipping one silently would install a directory that
 // does nothing. That is a programming error in this repo's embedded tree rather
 // than a runtime condition, so it fails loudly.
+//
+// Known limitation: this writes but never removes. Plain overwrite was already
+// the model when the unit was a single manifest, but a directory unit widens
+// the surface — renaming or deleting an embedded references/ file leaves an
+// orphan in every workspace that installed the old one. Pruning is deliberately
+// not done here: workspace-root writes are untracked by design, so there is no
+// record of which files niwa put there, and deleting everything under a skill
+// directory that is not in the embedded tree would take any file the workspace
+// added alongside it. An orphaned reference is inert (nothing links it once the
+// SKILL.md stops naming it), which is the cheaper failure of the two.
 func writeRootSkills(workspaceRoot string) ([]string, error) {
 	skillsRoot := filepath.Join(workspaceRoot, rootClaudeDir, rootSkillsTargetDir)
 
