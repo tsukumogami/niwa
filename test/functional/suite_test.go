@@ -223,6 +223,7 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 	ctx.Step(`^the workspace root "([^"]*)" has a workspace\.toml$`, theWorkspaceRootHasWorkspaceTOML)
 	ctx.Step(`^the file "([^"]*)" exists under workspace root "([^"]*)"$`, theFileExistsUnderWorkspaceRoot)
 	ctx.Step(`^the file "([^"]*)" does not exist under workspace root "([^"]*)"$`, theFileDoesNotExistUnderWorkspaceRoot)
+	ctx.Step(`^I delete "([^"]*)" under workspace root "([^"]*)"$`, iDeleteUnderWorkspaceRoot)
 	ctx.Step(`^the file "([^"]*)" under workspace root "([^"]*)" contains "([^"]*)"$`, theFileUnderWorkspaceRootContains)
 	ctx.Step(`^the registry has workspace "([^"]*)" rooted at "([^"]*)"$`, theRegistryHasWorkspaceRootedAt)
 	ctx.Step(`^the registry entry "([^"]*)" still points at "([^"]*)"$`, theRegistryHasWorkspaceRootedAt)

@@ -21,6 +21,67 @@ no decisions, no constraints, no "we agreed not to touch X." The task brief you 
 the worker's ONLY context. So your real job here is synthesis: turn the conversation into a
 brief a competent stranger could execute cold.
 
+## Two decisions before you write anything
+
+These determine whether the worker finishes without the author, which is the whole point
+of dispatching. Both get made every time; neither is usually written down. Say your answer
+and your reason in the brief, so the next person can tell a good call from a lucky one.
+
+### Launch mode: autonomous, or settle the framing first?
+
+**Autonomous** when what "done" looks like is unambiguous. The goal is stated, the
+acceptance criteria are checkable, and the author's absence costs nothing. This is the
+common case and the default.
+
+**Interactive first** when the framing itself is the uncertain part -- when a reasonable
+agent could answer "what is this actually for?" several ways and pick differently from the
+author. Say so explicitly in the brief: tell the worker to ask its framing questions, wait
+for answers, and only then continue autonomously.
+
+The failure this prevents is specific and expensive. An autonomous agent handed an
+uncertain framing does not stall -- it resolves the question confidently, builds
+everything downstream on that answer, and the author discovers the divergence when the
+pull request arrives. By then the work is done and the rework is total. A brief that
+inverts the default costs one round trip; getting it wrong costs the whole task.
+
+Signal that you are in the second case: you cannot write the acceptance criteria without
+first deciding something you would rather the author decided.
+
+### Framing level: how much investigation before implementation?
+
+| Level | Take it when | Signal the property holds |
+|-------|--------------|---------------------------|
+| **None** | The mechanism already exists in the codebase and this work is applying it | You can name the file and the existing pattern being copied |
+| **One question** | Everything is settled except one choice, and that choice has a real cost either way | You can state the question in a sentence and both answers are defensible |
+| **Full investigation** | The option set is genuinely larger than the problem statement suggests, or the change alters something persisted with no version field to gate reads on | You cannot enumerate the options without reading code first |
+
+At the **one question** level, name the question in the brief. A worker told "decide the
+marker's cost before writing code" produces a recorded decision; a worker told "use your
+judgment" produces an unexamined default.
+
+Two things that look like criteria and are not:
+
+- **A full investigation is not what catches a wrong direction.** Workers at the lightest
+  level rejected their issue's proposed approach on evidence just as often. What the full
+  chain uniquely produces is a durable design document -- which matters because
+  squash-merge deletes everything else, so reasoning recorded only in a pull request body
+  is gone the moment it lands. Choose the level by whether the reasoning needs to outlive
+  the pull request, not by whether you expect the direction to change.
+- **Size does not predict the level.** Diffs from the light and heavy levels overlap in
+  both lines and files. Do not back-fit a threshold.
+
+**Where this comes from, and how far to trust it.** These criteria are drawn from a batch
+of 16 dispatches in one repository over three days. The level chosen is almost perfectly
+confounded with the date -- every full-investigation dispatch is from the first two days,
+every third-day dispatch is the lightest level -- so a "the coordinator got more
+confident" explanation fits the data as well as the criteria do. Treat them as a starting
+heuristic worth recording your disagreement with, not as a settled rule.
+
+If the workspace uses a workflow plugin, the levels map onto its skills: none is a direct
+implementation run, one question is an implementation run with a mandated decision step,
+and full investigation is that plugin's explore-then-plan chain. The levels are the
+decision; the skill names are one tool's spelling of it.
+
 ## Procedure
 
 ### 1. Synthesize a complete task brief
@@ -124,3 +185,28 @@ running in its own instance. If they want to fan out more, repeat from step 1.
   the user actually wants the work done in this session, that's a normal task, not a dispatch.
 - **One brief, one worker.** For parallel work, write a separate brief and dispatch per unit so
   each gets its own isolated instance.
+
+## Dispatching several at once
+
+Two things make parallel dispatch work, and both go in each brief.
+
+**Name the siblings and their file surfaces.** Tell each worker which other work is
+in flight right now and which files those workers are touching -- not just "don't fix
+issue X", but "issue X is running in its own session against these three files; if your
+change reaches them, stop and say so rather than editing them." Workers respect this and
+will decline to widen scope when they hit a neighbour's file, which is what keeps ten
+concurrent sessions from colliding.
+
+**Point every brief at the shared agreement.** `<workspace-root>/.niwa/dispatch-briefs/_common.md`
+carries what does not change between tasks -- autonomy, verification discipline, scope
+rules, how to report. niwa ships it and updates its own block on every workspace-root
+materialization; anything the workspace adds outside the sentinel markers is preserved.
+Every brief should open by naming it as required reading. Factoring it out cuts each brief
+to roughly a third and stops the boilerplate drifting between workers.
+
+## After they are running
+
+Dispatching is half the job. Once workers are in flight, use `/fleet`: what is in flight,
+what is stranded, what needs review, and whether to wake a session or fix the thing
+yourself. That skill also carries the recipe for reaching a session that has gone quiet,
+which has several traps that each look like success.
