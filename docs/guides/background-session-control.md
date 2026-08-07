@@ -188,16 +188,23 @@ The predicate that actually holds across everything observed is **`pid` present,
 non-terminal `state`** — either one means the session is still registered as a background
 agent, which is what the guard checks:
 
-| `pid` | `state` | `status` | Resume behaviour |
-|---|---|---|---|
-| present | `working` | `busy` | refused — live, turn in flight |
-| present | `working` | `idle` | refused — live, between turns |
-| present | `blocked` | `idle`, or `waiting` with `waitingFor` | refused — live, parked on a prompt |
-| present | `done` | `idle` | refused — live, observed on the probe right after launch |
-| present | absent | absent | refused — live; `ps -p <pid>` to confirm |
-| **absent** | `working` or `blocked` | absent | **refused — stale registration, process is dead** |
-| absent | `done` | absent | succeeds |
-| absent | `stopped` | absent | succeeds |
+| `pid` | `state` | `status` | Resume behaviour | Evidence |
+|---|---|---|---|---|
+| present | `done` | `idle` | refused — live, right after launch | **observed** (section 2) |
+| present | `working` | `busy` | refused — live, turn in flight | inferred |
+| present | `working` | `idle` | refused — live, between turns | inferred |
+| present | `blocked` | `idle`, or `waiting` with `waitingFor` | refused — live, parked on a prompt | inferred |
+| present | absent | absent | refused — live; `ps -p <pid>` to confirm | inferred |
+| **absent** | `working` | absent | **refused — stale registration, process is dead** | **observed** (section 5) |
+| absent | `blocked` | absent | refused — same stale shape | inferred |
+| absent | `done` | absent | succeeds | **observed** (sections 3-4) |
+| absent | `stopped` | absent | succeeds | **observed** (section 5) |
+
+The inferred rows are inferred from the governing predicate, not guessed: the guard fires
+on whether the session is still registered, and every row that was directly tested behaved
+that way. They are marked because testing them means resuming somebody's real session, and
+that is not a thing to do casually — if you find yourself in one of these states with a
+throwaway session, record what happened and promote the row.
 
 `status` never changes the resume answer. It is present exactly when `pid` is, and it
 distinguishes a session with a turn in flight from one sitting between turns — which
