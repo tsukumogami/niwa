@@ -1145,6 +1145,27 @@ func iWriteFileBodyToRepoInInstance(ctx context.Context, relFilePath, groupRepo,
 	return iWriteFileToRepoInInstance(ctx, body.Content, relFilePath, groupRepo, instanceName)
 }
 
+// iWriteExecutableFileToRepoInInstance is the executable-mode variant of
+// iWriteFileBodyToRepoInInstance, and it creates intermediate directories.
+// Setup scripts need both: the setup runner correctly skips anything without
+// the executable bit, and the scripts live in a subdirectory the cloned repo
+// does not have.
+func iWriteExecutableFileToRepoInInstance(ctx context.Context, relFilePath, groupRepo, instanceName string, body *godog.DocString) (context.Context, error) {
+	s := getState(ctx)
+	if s == nil {
+		return ctx, fmt.Errorf("no test state")
+	}
+	repoDir := filepath.Join(s.workspaceRoot, instanceName, filepath.FromSlash(groupRepo))
+	dst := filepath.Join(repoDir, filepath.FromSlash(relFilePath))
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return ctx, fmt.Errorf("creating %s: %w", filepath.Dir(dst), err)
+	}
+	if err := os.WriteFile(dst, []byte(body.Content), 0o755); err != nil {
+		return ctx, fmt.Errorf("writing %s: %w", dst, err)
+	}
+	return ctx, nil
+}
+
 // noNiwaTempFilesRemain scans the scenario's scoped TMPDIR for wrapper
 // leftovers. TMPDIR is set to s.tmpDir in buildEnv, so the wrapper's
 // `mktemp` creates files there; its `rm -f` should clean them up. Any
