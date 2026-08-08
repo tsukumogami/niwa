@@ -336,10 +336,38 @@ type pipelineResult struct {
 	// into InstanceState.AuthSources by Create/Apply so `niwa status
 	// --audit-auth` can render fully offline. nil/empty when no
 	// vault providers were referenced (e.g., single-org setups).
-	authSources      map[string]AuthSourceRecord
+	authSources map[string]AuthSourceRecord
+	// setupIncomplete names the repos whose setup scripts did not all
+	// finish, in classification order. A sibling of warnings: the pipeline
+	// carries the outcome out as data rather than as an error, so that
+	// Create and Apply can attach a verdict line to their summary without
+	// the failure reaching the pipeline's error path — which on create runs
+	// os.RemoveAll over the instance root.
+	setupIncomplete  []string
 	overlayURL       string   // set when convention discovery succeeds; empty otherwise
 	overlayCommit    string   // HEAD SHA when overlayURL was set; empty otherwise
 	disclosedNotices []string // one-time notices emitted during this run
+}
+
+// logSetupIncomplete prints the counted verdict line naming the repos whose
+// setup did not finish, or nothing at all when every repo's setup completed.
+//
+// Callers place this directly below their summary line and above the deferred
+// warning block. That placement is the substance of the fix rather than the
+// wording: deferred messages print below the summary by contract, so a setup
+// failure that surfaced only there read as trailing noise under a verdict that
+// said the apply succeeded. It is a plain Log rather than a Warn and is not
+// deferred, so it stays attached to the verdict; the per-script warnings still
+// carry the detail below it.
+func (a *Applier) logSetupIncomplete(repos []string) {
+	switch len(repos) {
+	case 0:
+		return
+	case 1:
+		a.Reporter.Log("setup incomplete for 1 repo: %s", repos[0])
+	default:
+		a.Reporter.Log("setup incomplete for %d repos: %s", len(repos), strings.Join(repos, ", "))
+	}
 }
 
 // Create creates a new workspace instance under workspaceRoot, runs the full
@@ -496,6 +524,7 @@ func (a *Applier) Create(ctx context.Context, cfg *config.WorkspaceConfig, confi
 	} else {
 		a.Reporter.Log("created %s (%d repos) → %s", instanceName, n, instanceRoot)
 	}
+	a.logSetupIncomplete(result.setupIncomplete)
 	for _, w := range result.warnings {
 		a.Reporter.DeferWarn("%s", w)
 	}
@@ -688,6 +717,7 @@ func (a *Applier) Apply(ctx context.Context, cfg *config.WorkspaceConfig, config
 	} else {
 		a.Reporter.Log("applied %s (%d repos)", filepath.Base(instanceRoot), n)
 	}
+	a.logSetupIncomplete(result.setupIncomplete)
 	for _, w := range result.warnings {
 		a.Reporter.DeferWarn("%s", w)
 	}
@@ -1592,7 +1622,11 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		return nil, err
 	}
 
-	// Step 6.75: Run repo-provided setup scripts.
+	// Step 6.75: Run repo-provided setup scripts. A script failure is
+	// carried out as data (setupIncomplete) and never returned as an error:
+	// every repo gets its turn, and the pipeline's error path must not be
+	// reached, since on create it deletes the instance root.
+	var setupIncomplete []string
 	for _, cr := range classified {
 		setupDir := ResolveSetupDir(effectiveCfg, cr.Repo.Name)
 		repoDir := filepath.Join(instanceRoot, cr.Group, cr.Repo.Name)
@@ -1602,11 +1636,19 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 			continue
 		}
 
+		repoFailed := false
 		for _, sr := range result.Scripts {
 			if sr.Error != nil {
+				repoFailed = true
 				a.Reporter.DeferWarn("setup script %s/%s failed for %s: %v",
 					setupDir, sr.Name, cr.Repo.Name, sr.Error)
 			}
+		}
+		// Count the repo once however many of its scripts errored. A
+		// non-executable script is skipped rather than stopping the
+		// repo, so a repo with several errors is a real case.
+		if repoFailed {
+			setupIncomplete = append(setupIncomplete, cr.Repo.Name)
 		}
 	}
 
@@ -1663,6 +1705,7 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		repoStates:       repoStates,
 		managedFiles:     managedFiles,
 		warnings:         allWarnings,
+		setupIncomplete:  setupIncomplete,
 		shadows:          pipelineShadows,
 		authSources:      credentialPool.AuditLog().AsMap(),
 		overlayURL:       pipelineOverlayURL,
