@@ -1,10 +1,14 @@
 ```yaml
 topic: setup-script-visibility
 chain_started: 2026-08-08T16:39:09-04:00
-last_updated: 2026-08-08T16:39:09-04:00
-phase_pointer: phase-2
-exit: UNSET
-exit_artifacts: []
+last_updated: 2026-08-08T17:26:00-04:00
+chain_completed: 2026-08-08T17:26:00-04:00
+phase_pointer: phase-3
+exit: full-run
+exit_artifacts:
+  - docs/plans/PLAN-setup-script-visibility.md
+  - docs/designs/current/DESIGN-post-clone-scripts.md
+plan_execution_mode: single-pr
 visibility: Public
 execution_mode: auto
 max_rounds: 5
@@ -14,6 +18,7 @@ planned_chain:
   - plan
 chain_ran:
   - design
+  - plan
 child_snapshots:
   design:
     artifact: docs/designs/current/DESIGN-post-clone-scripts.md
@@ -48,11 +53,6 @@ chain_skipped:
       by the repo owner before exploration started. A PRD here would restate them
       verbatim and add no decision. The requirements are carried into the DESIGN
       amendment's Context section by reference to the issue.
-parent_orchestration:
-  invoking_child: plan
-  suppress_status_aware_prompt: true
-  rationale: fresh-chain
-  pre_invocation_sha: 981904b
 ```
 
 ## Phase 1 — Discovery and Chain Proposal
