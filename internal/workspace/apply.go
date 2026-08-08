@@ -700,6 +700,24 @@ func (a *Applier) Apply(ctx context.Context, cfg *config.WorkspaceConfig, config
 // clone, and install content. It returns the pipeline results without writing
 // state.
 func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, configDir, instanceRoot string, now time.Time, opts *pipelineOpts) (*pipelineResult, error) {
+	// Build a redactor for this apply invocation and attach it to ctx so
+	// every secret.Errorf / Wrap call downstream scrubs resolved values
+	// automatically.
+	//
+	// This is the first statement of the pipeline for a reason. It used to
+	// sit next to the resolver stage, which is after the personal-overlay
+	// pre-pass has already resolved the overlay's env — and those values
+	// were therefore never registered. They merge into the effective config,
+	// the later resolution pass skips them because they are already marked
+	// resolved, and they are then materialized into the very working
+	// directory setup scripts run in. So on any workspace using an overlay,
+	// a class of secrets reached the script's cwd having never been seen by
+	// the redactor. Constructing it here closes that: by the time setup
+	// scripts run, the fragment set is the set of values materialized into
+	// the repo working trees.
+	redactor := secret.NewRedactor()
+	ctx = secret.WithRedactor(ctx, redactor)
+
 	// overlayDir is the local clone path of the overlay repo when one is active.
 	// It is local to this pipeline run; downstream steps that need it receive it
 	// as a function argument rather than reading it from the Applier.
@@ -1099,11 +1117,8 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 	// carries the merge.
 	effectiveCfg := cfg
 
-	// Build a redactor for this apply invocation and attach it to
-	// ctx so every secret.Errorf / Wrap call downstream scrubs
-	// resolved values automatically.
-	redactor := secret.NewRedactor()
-	ctx = secret.WithRedactor(ctx, redactor)
+	// (The redactor is built at the top of runPipeline — see the comment
+	// there for why it cannot be built here.)
 
 	// R5 enforcement: a workspace with more than one [[sources]] block
 	// AND an active personal overlay must declare [workspace].vault_scope
