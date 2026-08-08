@@ -88,6 +88,76 @@ func TestStripEscapes(t *testing.T) {
 			input: "",
 			want:  "",
 		},
+		{
+			name:  "private-parameter CSI (hide cursor)",
+			input: "before\x1b[?25lafter",
+			want:  "beforeafter",
+		},
+		{
+			name:  "CSI with intermediate bytes",
+			input: "a\x1b[0 qb",
+			want:  "ab",
+		},
+		{
+			name:  "ST-terminated OSC",
+			input: "\x1b]0;title\x1b\\plain",
+			want:  "plain",
+		},
+		{
+			name:  "bare ESC c terminal reset",
+			input: "before\x1bcafter",
+			want:  "beforeafter",
+		},
+		{
+			name:  "DCS sequence",
+			input: "a\x1bP1;2|payload\x1b\\b",
+			want:  "ab",
+		},
+		{
+			name:  "APC sequence",
+			input: "a\x1b_command\x1b\\b",
+			want:  "ab",
+		},
+		{
+			name:  "PM sequence",
+			input: "a\x1b^message\x1b\\b",
+			want:  "ab",
+		},
+		{
+			name:  "lone trailing ESC",
+			input: "text\x1b",
+			want:  "text",
+		},
+		{
+			name:  "carriage return",
+			input: "safe\rforged",
+			want:  "safeforged",
+		},
+		{
+			name:  "backspace",
+			input: "safe\b\b\b\bfake",
+			want:  "safefake",
+		},
+		{
+			name:  "BEL",
+			input: "ding\x07dong",
+			want:  "dingdong",
+		},
+		{
+			name:  "NUL",
+			input: "a\x00b",
+			want:  "ab",
+		},
+		{
+			name:  "DEL",
+			input: "a\x7fb",
+			want:  "ab",
+		},
+		{
+			name:  "tab survives",
+			input: "col1\tcol2",
+			want:  "col1\tcol2",
+		},
 	}
 
 	for _, tt := range tests {
