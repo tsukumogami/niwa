@@ -9,8 +9,12 @@ problem: |
 decision: |
   Scan a configurable setup directory (default: scripts/setup/) in each repo for
   executable scripts and run them in lexical order. Workspace-level config changes
-  the directory name; per-repo override changes or disables. Non-zero exit codes
-  produce warnings, not fatal errors.
+  the directory name; per-repo override changes or disables. Script stdout and
+  stderr stream to niwa's output prefixed with the repo and script name, in both
+  TTY and non-TTY runs, scrubbed through the apply's secret redactor. Non-zero exit
+  codes produce warnings, not fatal errors, and the apply still exits 0 -- but the
+  count of repos whose setup did not finish is printed as a verdict line directly
+  below the created/applied summary.
 rationale: |
   A directory convention is more extensible than a single file -- repos can split
   setup across multiple scripts without merge conflicts or monolithic files. The
@@ -23,7 +27,13 @@ rationale: |
 
 ## Status
 
-Proposed
+Current
+
+Amended 2026-08-08 -- see "Amendment 2026-08-08: setup-script visibility" at the end
+of this document. The amendment corrects two claims in Decision 2 and Security
+Considerations that the implementation never satisfied, and narrows Decision 2's
+failure handling. (This section previously read "Proposed" while the frontmatter
+said `status: Current`; the frontmatter was right.)
 
 ## Context and Problem Statement
 
@@ -125,23 +135,47 @@ handled.
 
 #### Chosen: Run from repo root, warn on failure, stop on first script error
 
+> **Update 2026-08-08 -- output and failure reporting.** The stdout/stderr bullet
+> below described behavior the implementation never had: script output was routed
+> through `Reporter.Status`, which is a no-op off a TTY and transient-then-erased on
+> one, so nothing a script wrote ever reached the operator in either mode. The
+> sample output below was likewise aspirational. Both are corrected here to what
+> the code now does. Decision 2's *failure policy* is unchanged in substance --
+> stop-on-first-error within a repo, continue to the next repo, warn rather than
+> abort -- but it is narrowed: the outcome is now also counted in a verdict line
+> below the summary, so a failure is discoverable without reading the warning
+> stream. The exit code deliberately stays 0. See the Amendment section at the end
+> of this document for the reasoning and for the deferred `setup_policy` mechanism.
+
 Scripts are executed with:
 - Working directory: the repo root
 - Invocation: direct execution (script's shebang determines interpreter)
 - Environment: inherits the niwa process environment
-- Stdout/stderr: printed to niwa's output, prefixed with the repo name
+- Stdout/stderr: streamed line by line to niwa's output, prefixed
+  `[<repo>/<script>]`, in both TTY and non-TTY runs. Each line has escape sequences
+  and C0 control bytes stripped (tab survives) and is then scrubbed through the
+  apply's secret redactor
+- Announcement: `running setup script <repo>/<script>` is printed before each
+  script executes
 - Exit code 0: success
 - Exit code non-zero: warning printed, **remaining scripts for that repo are
-  skipped**, pipeline continues with next repo
+  skipped**, pipeline continues with next repo, and the repo is counted in the
+  verdict line below the apply summary
 
 ```
-Running setup for tsuku...
-  [01-git-hooks.sh] Installing git hooks... done.
-  [02-install-deps.sh] Installing dependencies... done.
-Running setup for koto...
-  [01-git-hooks.sh] Warning: failed (exit code 1). Skipping remaining scripts.
-Running setup for niwa... (no setup directory)
+running setup script tsuku/01-git-hooks.sh
+[tsuku/01-git-hooks.sh] Installing git hooks... done.
+running setup script tsuku/02-install-deps.sh
+[tsuku/02-install-deps.sh] added 4 packages in 1s
+running setup script koto/01-git-hooks.sh
+[koto/01-git-hooks.sh] error: .githooks not found
+applied ws (3 repos)
+setup incomplete for 1 repo: koto
+warning: setup script scripts/setup/01-git-hooks.sh failed for koto: exit status 1
 ```
+
+Repos with no setup directory produce no output at all; a missing or empty
+directory is still silently skipped.
 
 **Why stop-on-error per repo:** If `01-git-hooks.sh` fails, running
 `02-install-deps.sh` may not make sense (scripts often have implicit ordering).
@@ -284,7 +318,113 @@ user with the current environment.
 Mitigations:
 - Only executable files are run (non-executable are warned, not silently executed)
 - No recursive descent into subdirectories (limits discovery scope)
-- Script paths are validated to stay within the repo directory
+- Script paths are joined against the repo directory, and the setup directory is
+  resolved from workspace config rather than from anything the repo controls
+
+> **Correction 2026-08-08.** The third bullet previously claimed script paths "are
+> validated to stay within the repo directory." No containment check exists:
+> `RunSetupScripts` joins the configured setup directory to the repo directory and
+> stats the entries, and `os.Stat` follows symlinks, so a symlinked entry inside the
+> setup directory resolves outside the repo. This sits inside the trust boundary this
+> design already draws -- a repo whose contents you cloned can run arbitrary code
+> regardless -- so the correction is one of accuracy, not a vulnerability. It is
+> noted here because two other claims in this document are being corrected in the
+> same change.
+
+### Output forgery through unstripped control bytes
+
+Printing a setup script's output means printing attacker-influenced bytes into the
+operator's terminal, where previously niwa printed none of them. Two consequences
+make the sanitizing step load-bearing rather than cosmetic.
+
+An embedded carriage return overwrites the `[<repo>/<script>]` prefix as the line
+renders, so a script can produce output that reads as one of niwa's own lines -- a
+forged `setup incomplete for 0 repos` or `applied ws (3 repos)`. That would let a
+failing script hide the very failure this amendment exists to surface. The prefix is
+the control that distinguishes script output from niwa output, so anything that can
+erase it defeats the control.
+
+An escape sequence interleaved inside a secret defeats the redactor's substring match
+while the terminal still renders the secret contiguously. That turns Decision C's
+mitigation from limited into defeatable, which is a different and worse property.
+
+The mitigation is to strip all C0 control bytes except tab, plus DEL, in addition to
+the CSI and OSC sequences already removed -- the existing stripper handles only
+CSI-with-numeric-parameters and OSC-terminated-by-BEL, so private-parameter CSI,
+ST-terminated OSC, DCS, APC, PM, a bare `ESC c` terminal reset, and lone ESC all
+survive it today. Script *filenames* are sanitized the same way before they are used
+in the announcement or the prefix, because filenames are repo-controlled and
+currently reach output through no sanitizer at all.
+
+### Secret exposure through printed script output
+
+> **Update 2026-08-08.** The claim above that niwa "prints each script name before
+> execution" was not true when written; it is true now (`running setup script
+> <repo>/<script>`). This subsection is new, because printing a script's output is
+> a genuinely new exposure path rather than a widening of an existing one -- until
+> this amendment, everything a setup script wrote was discarded.
+
+Setup scripts run after the materializer stage, with the repo root as their working
+directory. That means `.env.local` (or whichever secret-output target the workspace
+declares) is sitting in the script's cwd, written by niwa one pipeline step earlier.
+A script that does `set -a; . ./.env.local` and then `set -x` -- an entirely ordinary
+thing for a setup script to do -- will echo secrets that niwa now prints to a
+terminal, a dispatch log, or a CI log.
+
+Secrets reach setup scripts through **files only**. niwa never sets `cmd.Env` for a
+setup script and exports nothing into its own process environment, so there is no
+`env`-borne route to a niwa-managed secret; the residual environment exposure is
+whatever the operator exported before invoking niwa.
+
+The mitigation is to scrub every emitted line through the redactor the apply already
+constructs, before the line is printed.
+
+For that to cover what a script can actually read, the redactor has to be constructed
+earlier than it is today. It is currently attached to the context partway through the
+pipeline, *after* the personal-overlay pre-pass has already resolved the overlay's
+env. Those overlay values are never registered, they merge into the effective config,
+the later resolution pass skips them because they are already marked resolved, and
+they are then materialized into the very working directory the script runs in. So on
+any workspace using an overlay, a class of secrets reaches the script's cwd having
+never been seen by the redactor. Moving the redactor's construction to the top of the
+pipeline closes this; it is purely additive and changes no signature. With that move,
+the fragment set when setup scripts run is the set of values materialized into the
+repo working trees, which is the best available alignment between what the redactor
+knows and what a script can read.
+
+Redaction is a mitigation, not a control. Four classes of leak survive it, and repo
+authors should not treat scrubbed output as safe to publish:
+
+1. **Only values niwa itself resolved are scrubbed.** A script that runs a
+   credential helper, reads a keychain, queries a cloud metadata endpoint, or sources
+   an unmanaged `.env` and echoes the result is covered by nothing -- the redactor has
+   never seen those bytes. Coverage is also limited to *this* apply's resolved values,
+   not to what is on disk: a secret-output file left by an earlier apply -- after a
+   rotation, or after a run in which nothing resolved -- still sits in the script's
+   working directory carrying plaintext the current redactor has never seen.
+2. **Only verbatim re-emission is caught.** Matching is plain substring against raw
+   plaintext, so base64, URL-encoding, JSON-escaping, and shell-quoting all defeat it.
+   Dotenv output is unquoted, so `cat .env.local` is caught; a JSON-format
+   secret-output target escapes its values and can emit a form that is not matched.
+   The shell output format single-quote-escapes values, so a secret containing a quote
+   is likewise emitted in a form the redactor does not match.
+3. **Multi-line secrets are not caught at all.** Scrubbing is per line, and dotenv
+   marshalling does no quoting, so a PEM or SSH private key lands in the file with
+   real newlines. No single emitted line contains the whole registered value, so
+   nothing is redacted. The shell format has the same property: single-quoted values
+   keep their real newlines. This is the sharpest limit, and it applies to precisely
+   the secret type an operator would most regret leaking.
+4. **Secrets shorter than the redactor's minimum fragment length are never
+   redacted.** The redactor's own documentation asserts such values are rejected at
+   resolution time with a hard error; the resolver states the opposite and implements
+   the permissive behavior. The gap predates this amendment, but printing script
+   output is what makes it reachable. Tracked separately against the secret
+   subsystem; not fixed here.
+
+A legitimate value that happens to match a registered secret renders as the
+redactor's placeholder. When that happens the fix is to move the value out of the
+secrets table rather than to disable scrubbing -- there is no opt-out, matching every
+other place niwa scrubs subprocess output.
 
 ## Consequences
 
@@ -307,3 +447,224 @@ Mitigations:
 - Numeric prefix convention is well-documented and widely understood
 - niwa prints each script name before execution, so changes are visible
 - Per-repo disable provides an escape hatch when auto-execution is unwanted
+
+## Amendment 2026-08-08: setup-script visibility
+
+A repo's setup script could fail on every `niwa create` and `niwa apply` for months
+without anyone finding out. Two things combined. The script's own explanation of why
+it failed was discarded before it reached the terminal, contrary to what Decision 2
+above already promised. And the failure surfaced only as one deferred warning line,
+printed below a summary that said the apply succeeded, with the command exiting 0.
+
+The output half was a plain implementation defect, and an unusually clear one:
+`DESIGN-clone-output-ux.md`, the design that introduced the helper setup scripts run
+through, specifies `reporter.Log` for setup-script output in four places and
+`r.Status` in exactly one -- a Go doc stub in its Key Interfaces block. The
+implementation copied that stub verbatim, comment and all, including the line
+asserting that script output is silent in piped and CI contexts. No rationale for
+`Status` is recorded anywhere in either design. Restoring `Log` finishes an
+implementation rather than reversing a decision. That stub has been corrected in
+`DESIGN-clone-output-ux.md` so the two documents stop disagreeing.
+
+The exit-code half was a real design question, and it is answered here rather than
+left in code.
+
+### Decision A: How setup-script output reaches the operator
+
+**Chosen: stream every line through `Reporter.Log`, prefixed `[<repo>/<script>]`,
+with a durable per-script announcement.**
+
+Nothing is buffered. `runCmdWithReporter` routes each scanned line through `Log`
+instead of `Status`; `RunSetupScripts` emits `running setup script <repo>/<script>`
+before each `exec.Command` and supplies the prefix. Off a TTY the rendering is
+identical minus the spinner. On a TTY the spinner is torn down once per script, not
+once per line, because `Log` stops it and the next `Status` call restarts it.
+
+The prefix carries the repo name rather than the group because repo names are unique
+within a workspace -- `ResolveSetupDir` looks repos up by bare name. If that ever
+stops holding, the prefix becomes `[<group>/<repo>/<script>]`; the group is already
+in scope at the call site.
+
+No cap or truncation is applied. Measured by script class, a real git-hooks installer
+emits 2 lines, `npm install` 4, `pip install` 20, and a deliberately verbose
+`go mod download -x` 139. Because the helper always attaches an `io.Pipe`, every tool
+that checks `isatty` is already in quiet mode before niwa routes a byte. If chatty
+successful scripts ever become a real complaint the answer is a `--quiet`/`--verbose`
+pair, which niwa does not have today -- not a return to discarding output.
+
+**Alternatives considered.** *Buffer per script and attach the captured tail to the
+returned error*, mirroring how the git helper embeds diagnostics: rejected because it
+delivers less than the design already promised (successful scripts stay silent, and
+the promise is unconditional), and because it holds script output -- potentially
+including secrets -- in a heap buffer for the script's lifetime. *Keep `Status` for
+the live TTY feel and additionally buffer and replay on failure*: rejected as the
+worst of both, duplicating every line's handling and leaving two places to audit for
+redaction. *Write output to a log file under the instance and print the path on
+failure*: rejected because niwa has no log-file concept, and it answers "where is the
+output" with a second command the operator must run.
+
+### Decision B: How a failed setup script becomes discoverable, and what happens to the exit code
+
+**Chosen: a counted verdict line placed directly below the summary; exit code
+unchanged at 0; a `setup_policy` config key specified and deliberately deferred.**
+
+The apply pipeline carries the outcome out as data -- a list of repos whose setup did
+not finish, a sibling of the warning list it already returns -- and `Create` and
+`Apply` print a counted line between the summary line and the deferred warning
+block:
+
+```
+created myws (2 repos) -> /path/to/myws
+setup incomplete for 1 repo: beta
+warning: setup script scripts/setup/20-deps.sh failed for beta: exit status 1
+```
+
+Placement is the substance here, not the wording. The old warning was invisible
+*structurally*: deferred messages print below the summary by contract, so the failure
+read as trailing noise after a success verdict. Putting the counted line above the
+summary -- inline in the pipeline, the way the plugin-record healing line does it --
+does not fix that, because the verdict would still be the last thing printed and it
+would still say `created myws (2 repos)`. And once Decision A streams up to a few
+hundred lines of script output, an inline line's distance from the verdict becomes
+unbounded and run-dependent, which is the exact failure mode being fixed.
+
+**The exit code stays 0, and this is a decision rather than an omission.** `create`'s
+exit code already carries a meaning that is written down and relied upon: whether a
+usable instance exists. A non-zero exit for an instance that *does* exist is a lie in
+the other direction, and it strips the operator of the recovery path. The shell
+wrapper's `cd` into a new instance is gated on exit 0, so a fatal setup failure would
+strand the operator outside the very instance they need to enter to fix the script.
+`--json` emits no path. The SessionStart hook must exit 0 or it loses the
+`additionalContext` injection that is its only channel to the agent. And a dispatched
+worker never launches at all: dispatch returns on a provisioning error before it even
+arms its rollback. niwa also already commits in writing, in
+`docs/guides/workspace-config-sources.md`, that a warning-emitting apply exits 0.
+
+**Alternatives considered.** *Non-zero exit by default*: mechanically expressible if
+the signal travels on the pipeline result and becomes a verdict only after the state
+write -- returning it as a pipeline error would delete the instance on create and
+leave `state.json` stale on apply -- but rejected on the consequences above. It also
+fails in the wrong direction in Go: it must be expressed as an error that four of
+five call sites are required *not* to treat as failure, so a site that forgets the
+sentinel propagates it unexamined and orphans a live instance, whereas a site that
+forgets an accessor merely exits 0, which is today's behavior and loud in the
+terminal. *Non-zero by default plus a run-scoped `--allow-setup-failures` flag*:
+materially stronger, and it would match the three existing `--allow-*` escape hatches
+on this command exactly, but the escape hatch fixes the migration problem and not the
+semantic one -- the exit-code bit is already spoken for. *A `--strict-setup` flag*:
+rejected on convention; niwa has no `--strict`-anything, and such a flag would be the
+first whose default is the lenient side, reading backwards against its three
+siblings.
+
+**The deferred mechanism.** Where a durable posture is wanted, the shape is config,
+not a flag: a `setup_policy = "warn" | "fail"` key on the workspace metadata and the
+per-repo override, resolved most-specific-wins, exactly like the `.env.example`
+failure policy that already ships on those same structs. It is specified here so that
+adding it later is additive rather than a re-litigation. It is deferred because no
+concrete scripted consumer can be named today, and because a key defaulting to `warn`
+does not actually give the reporter what they asked for -- it gives them a way to ask
+again, and asking requires already knowing that setup can fail silently, which is the
+knowledge the counted line now supplies. If a scripted consumer does appear, a
+`setup_failed` field on `niwa create --json` is probably the cheaper and more precise
+first response, since it hands the caller repo names rather than a single bit.
+
+Two gaps stay open and are stated rather than papered over. A dispatched worker still
+learns nothing: provisioning wires its reporter to the dispatching process's stderr,
+not the worker's context, and the `additionalContext` injection is built only on the
+SessionStart hook path. And `niwa create --json` still carries no partial-failure
+field. Both are the automated case, which is what the deferred half was for; neither
+is made worse by this amendment.
+
+The security shape of that gap is worth naming. Setup scripts are a natural home for
+security controls -- git hooks, pre-commit secret scanning, commit-signing config --
+and a control that fails to install is invisible to an automated consumer, which then
+proceeds against a repo that silently lacks it. This is unchanged from today rather
+than made worse, and it is the concrete case that would justify pulling the deferred
+`setup_failed` field and worker-context injection forward.
+
+### Decision C: Secret exposure once output is printed
+
+**Chosen: unconditional redaction at the line choke point, paired with documented
+limits.** Both halves ship; neither is sufficient alone. The mechanism and the four
+surviving leak classes are in Security Considerations above.
+
+Scrubbing happens inside the existing scanner loop, immediately after escapes are
+stripped. That order is load-bearing: a colorized `set -x` trace can interleave an
+escape sequence inside a token, and stripping first rejoins the fragment so the match
+succeeds. Placing it there also makes this decision orthogonal to Decision A --
+whatever the routing, it consumes an already-scrubbed line, and there is exactly one
+line to audit when someone asks whether setup-script output is redacted.
+
+The redactor is threaded as an explicit parameter rather than through the context.
+niwa's own redactor documentation calls context attachment a deliberate, narrowly
+scoped anti-pattern justified only inside the vault resolution pipeline, which this is
+not; the call site already holds the pointer. And setup scripts use `exec.Command`
+rather than `exec.CommandContext`, so a context parameter would advertise
+cancellation the function does not honor.
+
+**Alternatives considered.** *No redaction*: rejected -- it would make setup-script
+output the only subprocess output in niwa that is not scrubbed, and would ship a
+knowing new leak path in a change whose whole purpose is operator visibility. The
+"it's the operator's own repo" framing does not survive the fact that niwa itself
+wrote the secret file into that repo one step earlier. *Redact only on the failure
+path*: rejected -- not simpler, since it means either buffering unscrubbed plaintext
+or scrubbing twice, and there is no version of this where success-path output is safe
+and failure-path output is not. *A config opt-out*: rejected -- no precedent, and the
+problem it solves has a cheaper fix, since a value that mangles legitimate output does
+not belong in a secrets table and moving it fixes the mangling everywhere.
+
+### Solution Architecture
+
+Four files in two packages; no new types, no new config surface, no `Reporter`
+change.
+
+- **`internal/workspace/gitutil.go`** -- `runCmdWithReporter` gains a line prefix and
+  a redactor. Decisions A and C both touch this signature, so they land as one change:
+  `runCmdWithReporter(r *Reporter, cmd *exec.Cmd, prefix string, red *secret.Redactor) error`.
+  Inside the scanner loop the order is strip escapes and control bytes, scrub, prefix,
+  `Log`. The redactor is nil-tolerant so existing callers and tests can pass `nil`. The
+  function's doc comment, which currently asserts that script output is silent in
+  piped and CI contexts, is rewritten.
+
+  The scanner also needs two fixes that ride along, because both turn this change's
+  own goal against itself. It currently keeps `bufio.Scanner`'s default 64 KB token
+  limit and never checks `scanner.Err()`, so a single line longer than that ends the
+  scan, closes the pipe, SIGPIPEs the script, and loses every line from that point on
+  -- meaning a script that prints one long blob is reported as a broken pipe with no
+  output at all, which is exactly the failure mode being removed. Raise the buffer to
+  1 MB and surface `scanner.Err()` through `Warn`.
+- **`internal/workspace/setup.go`** -- `RunSetupScripts` gains the redactor, emits the
+  per-script announcement, and builds the prefix once per script. Script filenames are
+  sanitized with the same stripper before use, since they are repo-controlled.
+- **`internal/workspace/apply.go`** -- `pipelineResult` gains a list of repos whose
+  setup did not finish. Step 6.75 appends to it, counting a repo once even when
+  several of its scripts errored, since a non-executable script is skipped rather than
+  stopping the repo. `Create` and `Apply` each print the counted line between their
+  summary line and their deferred-warning loop. The pipeline still returns nil, so the
+  instance-removal path on create is never reached. The redactor's construction and
+  context attachment move to the top of the pipeline so the overlay pre-pass's
+  resolved values are registered too.
+- **`internal/workspace/gitutil_test.go`** -- the test asserting all lines route
+  through `Status` currently pins the defect and is rewritten.
+
+### Consequences
+
+**Positive.** A failed setup script now explains itself, in every run mode, and the
+failure is attached to the verdict rather than trailing below it. Two false claims in
+this document become true. Cross-repo resilience is untouched: every repo still gets
+its turn and stop-on-first-error stays scoped within a repo.
+
+**Negative.** Successful scripts are now audible where they were silent, which is a
+visible change to apply output for anyone with chatty setup scripts. A legitimate
+value matching a registered secret now renders as a placeholder, and an operator has
+to recognize that as redaction rather than as the script misbehaving. Script output is
+now durable and uncapped, so a runaway script consumes dispatch- and CI-log storage
+where it previously consumed none. The exit code
+still does not distinguish a fully-provisioned instance from a partially-provisioned
+one, so a scripted consumer that only checks `$?` learns nothing new.
+
+**Mitigations.** Volume was measured rather than assumed, and the escape hatch if it
+becomes a problem is a verbosity flag rather than a return to discarding output. The
+redactor's placeholder is documented here. The deferred `setup_policy` and the
+`--json` field are both specified, so the scripted case can be answered without
+re-opening this decision.

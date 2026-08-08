@@ -433,9 +433,10 @@ func (r *Reporter) Writer() io.Writer
 func runGitWithReporter(r *Reporter, cmd *exec.Cmd) error
 
 // runCmdWithReporter is the general-purpose variant for non-git subprocesses
-// (e.g., setup scripts). No line classification — all output through r.Status
-// (transient; silent in non-TTY/CI contexts).
-func runCmdWithReporter(r *Reporter, cmd *exec.Cmd) error
+// (e.g., setup scripts). No line classification — all output through r.Log
+// (durable in both TTY and non-TTY contexts), prefixed by the caller and
+// scrubbed through the apply's secret redactor.
+func runCmdWithReporter(r *Reporter, cmd *exec.Cmd, prefix string, red *secret.Redactor) error
 ```
 
 **Applier struct change** (`internal/workspace/apply.go`):
@@ -572,6 +573,12 @@ Add `internal/workspace/gitutil.go` with two helpers:
 - `runGitWithReporter`: for git subprocesses. Uses `isGitErrorLine` to
   classify lines by "fatal:", "error:", "warning:" prefixes; routes
   error-classified lines through `r.Warn`, others through `r.Log`.
+<!-- Corrected 2026-08-08: the Key Interfaces stub above previously said r.Status,
+     contradicting this document's three other statements that setup-script output
+     goes through reporter.Log. The implementation followed the stub, which is why
+     setup-script output was discarded. See DESIGN-post-clone-scripts.md, Amendment
+     2026-08-08. -->
+
 - `runCmdWithReporter`: for non-git subprocesses (setup scripts). No
   classifier — all lines route through `r.Log`.
 

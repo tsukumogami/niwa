@@ -270,6 +270,7 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 		return iWriteFileToRepoInInstance(ctx, content, relPath, groupRepo, instanceName)
 	})
 	ctx.Step(`^I write to file "([^"]*)" in repo "([^"]*)" of instance "([^"]*)" with body:$`, iWriteFileBodyToRepoInInstance)
+	ctx.Step(`^I write an executable file "([^"]*)" in repo "([^"]*)" of instance "([^"]*)" with body:$`, iWriteExecutableFileToRepoInInstance)
 	ctx.Step(`^the completion output contains "([^"]*)"$`, theCompletionOutputContains)
 	ctx.Step(`^the completion output does not contain "([^"]*)"$`, theCompletionOutputDoesNotContain)
 	ctx.Step(`^the completion description for "([^"]*)" is "([^"]*)"$`, theCompletionDescriptionMatches)
