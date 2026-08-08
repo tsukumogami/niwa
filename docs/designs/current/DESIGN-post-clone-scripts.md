@@ -152,8 +152,9 @@ Scripts are executed with:
 - Invocation: direct execution (script's shebang determines interpreter)
 - Environment: inherits the niwa process environment
 - Stdout/stderr: streamed line by line to niwa's output, prefixed
-  `[<repo>/<script>]`, in both TTY and non-TTY runs. Each line has ANSI and OSC
-  escapes stripped and is then scrubbed through the apply's secret redactor
+  `[<repo>/<script>]`, in both TTY and non-TTY runs. Each line has escape sequences
+  and C0 control bytes stripped (tab survives) and is then scrubbed through the
+  apply's secret redactor
 - Announcement: `running setup script <repo>/<script>` is printed before each
   script executes
 - Exit code 0: success
@@ -317,7 +318,43 @@ user with the current environment.
 Mitigations:
 - Only executable files are run (non-executable are warned, not silently executed)
 - No recursive descent into subdirectories (limits discovery scope)
-- Script paths are validated to stay within the repo directory
+- Script paths are joined against the repo directory, and the setup directory is
+  resolved from workspace config rather than from anything the repo controls
+
+> **Correction 2026-08-08.** The third bullet previously claimed script paths "are
+> validated to stay within the repo directory." No containment check exists:
+> `RunSetupScripts` joins the configured setup directory to the repo directory and
+> stats the entries, and `os.Stat` follows symlinks, so a symlinked entry inside the
+> setup directory resolves outside the repo. This sits inside the trust boundary this
+> design already draws -- a repo whose contents you cloned can run arbitrary code
+> regardless -- so the correction is one of accuracy, not a vulnerability. It is
+> noted here because two other claims in this document are being corrected in the
+> same change.
+
+### Output forgery through unstripped control bytes
+
+Printing a setup script's output means printing attacker-influenced bytes into the
+operator's terminal, where previously niwa printed none of them. Two consequences
+make the sanitizing step load-bearing rather than cosmetic.
+
+An embedded carriage return overwrites the `[<repo>/<script>]` prefix as the line
+renders, so a script can produce output that reads as one of niwa's own lines -- a
+forged `setup incomplete for 0 repos` or `applied ws (3 repos)`. That would let a
+failing script hide the very failure this amendment exists to surface. The prefix is
+the control that distinguishes script output from niwa output, so anything that can
+erase it defeats the control.
+
+An escape sequence interleaved inside a secret defeats the redactor's substring match
+while the terminal still renders the secret contiguously. That turns Decision C's
+mitigation from limited into defeatable, which is a different and worse property.
+
+The mitigation is to strip all C0 control bytes except tab, plus DEL, in addition to
+the CSI and OSC sequences already removed -- the existing stripper handles only
+CSI-with-numeric-parameters and OSC-terminated-by-BEL, so private-parameter CSI,
+ST-terminated OSC, DCS, APC, PM, a bare `ESC c` terminal reset, and lone ESC all
+survive it today. Script *filenames* are sanitized the same way before they are used
+in the announcement or the prefix, because filenames are repo-controlled and
+currently reach output through no sanitizer at all.
 
 ### Secret exposure through printed script output
 
@@ -340,10 +377,20 @@ setup script and exports nothing into its own process environment, so there is n
 whatever the operator exported before invoking niwa.
 
 The mitigation is to scrub every emitted line through the redactor the apply already
-constructs, before the line is printed. The fragment set at the time setup scripts
-run is exactly the set of values materialized into the repo working trees one step
-earlier, which is the best available alignment between what the redactor knows and
-what a script can read.
+constructs, before the line is printed.
+
+For that to cover what a script can actually read, the redactor has to be constructed
+earlier than it is today. It is currently attached to the context partway through the
+pipeline, *after* the personal-overlay pre-pass has already resolved the overlay's
+env. Those overlay values are never registered, they merge into the effective config,
+the later resolution pass skips them because they are already marked resolved, and
+they are then materialized into the very working directory the script runs in. So on
+any workspace using an overlay, a class of secrets reaches the script's cwd having
+never been seen by the redactor. Moving the redactor's construction to the top of the
+pipeline closes this; it is purely additive and changes no signature. With that move,
+the fragment set when setup scripts run is the set of values materialized into the
+repo working trees, which is the best available alignment between what the redactor
+knows and what a script can read.
 
 Redaction is a mitigation, not a control. Four classes of leak survive it, and repo
 authors should not treat scrubbed output as safe to publish:
@@ -351,16 +398,22 @@ authors should not treat scrubbed output as safe to publish:
 1. **Only values niwa itself resolved are scrubbed.** A script that runs a
    credential helper, reads a keychain, queries a cloud metadata endpoint, or sources
    an unmanaged `.env` and echoes the result is covered by nothing -- the redactor has
-   never seen those bytes.
+   never seen those bytes. Coverage is also limited to *this* apply's resolved values,
+   not to what is on disk: a secret-output file left by an earlier apply -- after a
+   rotation, or after a run in which nothing resolved -- still sits in the script's
+   working directory carrying plaintext the current redactor has never seen.
 2. **Only verbatim re-emission is caught.** Matching is plain substring against raw
    plaintext, so base64, URL-encoding, JSON-escaping, and shell-quoting all defeat it.
    Dotenv output is unquoted, so `cat .env.local` is caught; a JSON-format
    secret-output target escapes its values and can emit a form that is not matched.
+   The shell output format single-quote-escapes values, so a secret containing a quote
+   is likewise emitted in a form the redactor does not match.
 3. **Multi-line secrets are not caught at all.** Scrubbing is per line, and dotenv
    marshalling does no quoting, so a PEM or SSH private key lands in the file with
    real newlines. No single emitted line contains the whole registered value, so
-   nothing is redacted. This is the sharpest limit, and it applies to precisely the
-   secret type an operator would most regret leaking.
+   nothing is redacted. The shell format has the same property: single-quoted values
+   keep their real newlines. This is the sharpest limit, and it applies to precisely
+   the secret type an operator would most regret leaking.
 4. **Secrets shorter than the redactor's minimum fragment length are never
    redacted.** The redactor's own documentation asserts such values are rejected at
    resolution time with a hard error; the resolver states the opposite and implements
@@ -522,6 +575,13 @@ SessionStart hook path. And `niwa create --json` still carries no partial-failur
 field. Both are the automated case, which is what the deferred half was for; neither
 is made worse by this amendment.
 
+The security shape of that gap is worth naming. Setup scripts are a natural home for
+security controls -- git hooks, pre-commit secret scanning, commit-signing config --
+and a control that fails to install is invisible to an automated consumer, which then
+proceeds against a repo that silently lacks it. This is unchanged from today rather
+than made worse, and it is the concrete case that would justify pulling the deferred
+`setup_failed` field and worker-context injection forward.
+
 ### Decision C: Secret exposure once output is printed
 
 **Chosen: unconditional redaction at the line choke point, paired with documented
@@ -561,18 +621,29 @@ change.
 - **`internal/workspace/gitutil.go`** -- `runCmdWithReporter` gains a line prefix and
   a redactor. Decisions A and C both touch this signature, so they land as one change:
   `runCmdWithReporter(r *Reporter, cmd *exec.Cmd, prefix string, red *secret.Redactor) error`.
-  Inside the scanner loop the order is strip escapes, scrub, prefix, `Log`. The
-  redactor is nil-tolerant so existing callers and tests can pass `nil`. The
+  Inside the scanner loop the order is strip escapes and control bytes, scrub, prefix,
+  `Log`. The redactor is nil-tolerant so existing callers and tests can pass `nil`. The
   function's doc comment, which currently asserts that script output is silent in
   piped and CI contexts, is rewritten.
+
+  The scanner also needs two fixes that ride along, because both turn this change's
+  own goal against itself. It currently keeps `bufio.Scanner`'s default 64 KB token
+  limit and never checks `scanner.Err()`, so a single line longer than that ends the
+  scan, closes the pipe, SIGPIPEs the script, and loses every line from that point on
+  -- meaning a script that prints one long blob is reported as a broken pipe with no
+  output at all, which is exactly the failure mode being removed. Raise the buffer to
+  1 MB and surface `scanner.Err()` through `Warn`.
 - **`internal/workspace/setup.go`** -- `RunSetupScripts` gains the redactor, emits the
-  per-script announcement, and builds the prefix once per script.
+  per-script announcement, and builds the prefix once per script. Script filenames are
+  sanitized with the same stripper before use, since they are repo-controlled.
 - **`internal/workspace/apply.go`** -- `pipelineResult` gains a list of repos whose
   setup did not finish. Step 6.75 appends to it, counting a repo once even when
   several of its scripts errored, since a non-executable script is skipped rather than
   stopping the repo. `Create` and `Apply` each print the counted line between their
   summary line and their deferred-warning loop. The pipeline still returns nil, so the
-  instance-removal path on create is never reached.
+  instance-removal path on create is never reached. The redactor's construction and
+  context attachment move to the top of the pipeline so the overlay pre-pass's
+  resolved values are registered too.
 - **`internal/workspace/gitutil_test.go`** -- the test asserting all lines route
   through `Status` currently pins the defect and is rewritten.
 
@@ -586,7 +657,9 @@ its turn and stop-on-first-error stays scoped within a repo.
 **Negative.** Successful scripts are now audible where they were silent, which is a
 visible change to apply output for anyone with chatty setup scripts. A legitimate
 value matching a registered secret now renders as a placeholder, and an operator has
-to recognize that as redaction rather than as the script misbehaving. The exit code
+to recognize that as redaction rather than as the script misbehaving. Script output is
+now durable and uncapped, so a runaway script consumes dispatch- and CI-log storage
+where it previously consumed none. The exit code
 still does not distinguish a fully-provisioned instance from a partially-provisioned
 one, so a scripted consumer that only checks `$?` learns nothing new.
 
