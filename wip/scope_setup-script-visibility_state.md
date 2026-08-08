@@ -36,6 +36,11 @@ chain_skipped:
       verbatim and add no decision. The requirements are carried into the DESIGN
       amendment's Context section by reference to the issue.
 child_snapshots: {}
+parent_orchestration:
+  invoking_child: design
+  suppress_status_aware_prompt: true
+  rationale: fresh-chain
+  pre_invocation_sha: ef9d0df4995f88175bd44f2a04063c7f86a77d82
 ```
 
 ## Phase 1 — Discovery and Chain Proposal
