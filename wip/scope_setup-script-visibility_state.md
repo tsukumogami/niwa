@@ -12,7 +12,20 @@ coordination_intent: absent
 planned_chain:
   - design
   - plan
-chain_ran: []
+chain_ran:
+  - design
+child_snapshots:
+  design:
+    artifact: docs/designs/current/DESIGN-post-clone-scripts.md
+    status: Current
+    captured_at: 2026-08-08T17:12:00-04:00
+    note: >-
+      In-place amendment rather than a new DESIGN-<topic>.md, per the /explore
+      crystallize decision. Three decisions settled (output routing, discoverability
+      and exit code, secret redaction), plus a mandatory security review whose
+      findings were applied. A second doc, DESIGN-clone-output-ux.md, was corrected
+      in the same change because its Key Interfaces stub is what the defective
+      implementation followed.
 chain_skipped:
   - name: brief
     reason: >-
@@ -35,12 +48,11 @@ chain_skipped:
       by the repo owner before exploration started. A PRD here would restate them
       verbatim and add no decision. The requirements are carried into the DESIGN
       amendment's Context section by reference to the issue.
-child_snapshots: {}
 parent_orchestration:
-  invoking_child: design
+  invoking_child: plan
   suppress_status_aware_prompt: true
   rationale: fresh-chain
-  pre_invocation_sha: ef9d0df4995f88175bd44f2a04063c7f86a77d82
+  pre_invocation_sha: 981904b
 ```
 
 ## Phase 1 — Discovery and Chain Proposal
