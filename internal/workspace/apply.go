@@ -1581,7 +1581,7 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 	for _, cr := range classified {
 		setupDir := ResolveSetupDir(effectiveCfg, cr.Repo.Name)
 		repoDir := filepath.Join(instanceRoot, cr.Group, cr.Repo.Name)
-		result := RunSetupScripts(repoDir, setupDir, a.Reporter)
+		result := RunSetupScripts(repoDir, setupDir, a.Reporter, redactor)
 
 		if result.Disabled || result.Skipped {
 			continue

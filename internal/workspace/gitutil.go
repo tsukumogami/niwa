@@ -7,6 +7,8 @@ import (
 	"os/exec"
 	"regexp"
 	"strings"
+
+	"github.com/tsukumogami/niwa/internal/secret"
 )
 
 // csiPattern matches ANSI/VT100 CSI escape sequences: ESC [, parameter bytes
@@ -117,13 +119,25 @@ func runGitWithReporter(r *Reporter, cmd *exec.Cmd) error {
 	return runErr
 }
 
+// maxCmdLineLen is the largest single line runCmdWithReporter will read, 1 MB.
+// bufio.Scanner's 64 KB default is far too small here: exceeding it ends the
+// scan, which closes the pipe, SIGPIPEs the subprocess, and loses every line
+// from that point on — so one long blob would turn into a broken pipe with no
+// output at all, the exact failure this helper exists to prevent.
+const maxCmdLineLen = 1 << 20
+
 // runCmdWithReporter runs cmd and routes its combined stdout+stderr through
-// r.Status. ANSI and OSC escape sequences are stripped unconditionally.
-// Unlike runGitWithReporter there is no line classifier — all output is
-// treated as transient progress (used for setup scripts whose output format is
-// not predictable). On non-TTY output Status is a no-op, so script output is
-// silent in piped/CI contexts.
-func runCmdWithReporter(r *Reporter, cmd *exec.Cmd) error {
+// r.Log, one permanent line per line of output, each carrying prefix. Escape
+// sequences and control bytes are stripped and red (if non-nil) scrubs
+// registered secrets before anything is printed.
+//
+// Unlike runGitWithReporter there is no line classifier: a setup script's
+// output format is not predictable, so every line is passed through. Because
+// the routing is Log rather than Status, output is durable in both run modes —
+// visible under a spinner on a TTY and equally present in a piped or CI log.
+// On a TTY the spinner is torn down once per command rather than once per
+// line, since Log stops it and the next Status call restarts it.
+func runCmdWithReporter(r *Reporter, cmd *exec.Cmd, prefix string, red *secret.Redactor) error {
 	pr, pw := io.Pipe()
 	defer pw.Close()
 
@@ -134,9 +148,31 @@ func runCmdWithReporter(r *Reporter, cmd *exec.Cmd) error {
 	go func() {
 		defer close(done)
 		scanner := bufio.NewScanner(pr)
+		scanner.Buffer(make([]byte, 0, bufio.MaxScanTokenSize), maxCmdLineLen)
 		for scanner.Scan() {
+			// The order below is load-bearing: strip, then scrub, then
+			// prefix. Stripping first is what stops an escape sequence
+			// interleaved inside a secret from defeating the redactor —
+			// the redactor matches plain substrings, so a colorized
+			// `set -x` trace that splits a token with a color reset
+			// would slip past a scrub applied to the raw line while the
+			// terminal still renders the secret contiguously. Stripping
+			// rejoins the fragment before the match runs. The prefix is
+			// applied last because it is niwa's own text: feeding it
+			// through the sanitizer or the redactor would be pointless
+			// at best, and applying it before the strip would let a
+			// leading carriage return in the script's own output erase
+			// it.
 			line := stripEscapes(scanner.Text())
-			r.Status(line)
+			if red != nil {
+				line = red.Scrub(line)
+			}
+			r.Log("%s%s", prefix, line)
+		}
+		if err := scanner.Err(); err != nil {
+			// Surfaced rather than dropped: silently ending the scan is
+			// how output goes missing without anyone noticing.
+			r.Warn("%sreading output failed: %v", prefix, err)
 		}
 		pr.Close()
 	}()
