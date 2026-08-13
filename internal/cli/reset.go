@@ -95,6 +95,7 @@ func runReset(cmd *cobra.Command, args []string) error {
 	gh := github.NewAPIClient(token)
 
 	applier := workspace.NewApplier(gh)
+	defer wireKeyReport(applier, cmd.ErrOrStderr())()
 	// Reset runs runPipeline; wire the plugin auto-installer so the
 	// rank-2 overlay notice fired during the pipeline triggers
 	// /niwa:migrate-config install. Reset doesn't surface its own

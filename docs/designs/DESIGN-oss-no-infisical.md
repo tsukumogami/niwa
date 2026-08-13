@@ -377,11 +377,18 @@ untouched.
 ### Data flow
 
 Resolution marks a value. Merge carries the mark. The post-merge check reads it
-and decides fatality once. The collector accumulates every mark regardless of
-fatality. Materialization omits and records. Each command surface drains the
-collector and renders, after the run returns, on both paths. The hook renders
-into its structured output and exits 0, because that is the only channel that
-reaches the agent.
+and decides fatality once. Materialization omits and records. Each command
+surface drains the collector and renders, after the run returns, on both paths.
+The hook renders into its structured output and exits 0, because that is the
+only channel that reaches the agent.
+
+**Recording happens post-merge, never at mark time.** The collector field sits on
+the resolver's options for symmetry with the existing caller-supplied sink beside
+it, but the resolver does not write to it. Layers merge last-wins, so a key the
+team layer could not resolve may be supplied by a personal overlay — recording at
+mark time would report a key that ends up holding a value. There is one recording
+point, and it is the post-merge walk that already has both the marks and the
+declared-but-absent keys in hand.
 
 ## Implementation Approach
 

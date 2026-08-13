@@ -27,6 +27,7 @@ import (
 	"fmt"
 
 	"github.com/tsukumogami/niwa/internal/config"
+	"github.com/tsukumogami/niwa/internal/keyreport"
 	"github.com/tsukumogami/niwa/internal/secret"
 	"github.com/tsukumogami/niwa/internal/vault"
 )
@@ -67,6 +68,20 @@ type ResolveOptions struct {
 	// stays because that silence is a contract several tests assert
 	// against, not an accident.
 	Stderr interface{ Write(p []byte) (int, error) }
+
+	// Keys is the run's key-report collector, threaded here so the whole
+	// resolve stage holds the same sink the applier and the command
+	// surface hold.
+	//
+	// The resolver deliberately does not record into it. A shortfall it
+	// marks is a fact about one configuration layer, and layers merge
+	// last-wins: a key the team config could not resolve may be supplied
+	// by the personal overlay immediately afterwards. Recording at mark
+	// time would put that key in the report with a value sitting in the
+	// merged config beside it. The single recording point is the
+	// post-merge walk in internal/workspace, which reads the same marks
+	// off the config that survived the merge.
+	Keys *keyreport.Collector
 }
 
 // BuildBundle opens a vault.Bundle from a config.VaultRegistry. It

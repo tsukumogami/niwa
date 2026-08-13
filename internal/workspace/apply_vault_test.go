@@ -13,6 +13,7 @@ import (
 
 	"github.com/tsukumogami/niwa/internal/config"
 	"github.com/tsukumogami/niwa/internal/github"
+	"github.com/tsukumogami/niwa/internal/keyreport"
 	"github.com/tsukumogami/niwa/internal/vault"
 	"github.com/tsukumogami/niwa/internal/vault/fake"
 )
@@ -697,8 +698,12 @@ TOKEN = "vault://TOKEN"
 // environment. Failing would refuse to materialize an instance a
 // contributor can otherwise use.
 //
-// The key is still enumerated for the reader -- that reporting is not
-// yet wired up, so this test asserts only that the apply survives.
+// The key is still enumerated for the reader: the apply survives AND
+// the run's collector names the key, its declared level and its
+// description. This is the end-to-end proof that the report is not
+// assembled from marks alone -- there is no mark anywhere in this
+// scenario, because nothing referenced the key for the resolver to
+// visit.
 func TestApplyToleratesRequiredEnvSecretWithNoProvider(t *testing.T) {
 	withFakeVaultBackend(t)
 
@@ -745,9 +750,32 @@ GITHUB_TOKEN = "GitHub PAT with repo:read scope"
 
 	applier := NewApplier(mockClient)
 	applier.Cloner = &Cloner{}
+	keys := keyreport.New()
+	applier.Keys = keys
 
 	if _, err = applier.Create(context.Background(), parsed.Config, niwaDir, workspaceRoot, parsed.Config.Workspace.Name); err != nil {
 		t.Fatalf("apply must survive a required key no configured provider could supply, got: %v", err)
+	}
+
+	report := keys.Report()
+	if len(report) != 1 {
+		t.Fatalf("collector holds %d entries, want the one declared key: %v", len(report), report)
+	}
+	got := report[0]
+	if got.Key != "GITHUB_TOKEN" || got.Scope != "env.secrets" {
+		t.Errorf("entry = %s in %s, want GITHUB_TOKEN in env.secrets", got.Key, got.Scope)
+	}
+	if got.Cause != keyreport.CauseNoSource {
+		t.Errorf("cause = %q, want no-source: no provider was configured, so none was asked", got.Cause)
+	}
+	if got.Level != config.LevelRequired {
+		t.Errorf("level = %q, want required", got.Level)
+	}
+	if got.Description != "GitHub PAT with repo:read scope" {
+		t.Errorf("description = %q, want the declared text", got.Description)
+	}
+	if rendered := keyreport.RenderText(report); !strings.Contains(rendered, "GITHUB_TOKEN") {
+		t.Errorf("rendered report does not name the key:\n%s", rendered)
 	}
 }
 

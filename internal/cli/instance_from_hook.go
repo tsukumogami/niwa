@@ -12,6 +12,7 @@ import (
 	"github.com/tsukumogami/niwa/internal/agent"
 	"github.com/tsukumogami/niwa/internal/config"
 	"github.com/tsukumogami/niwa/internal/github"
+	"github.com/tsukumogami/niwa/internal/keyreport"
 	"github.com/tsukumogami/niwa/internal/workspace"
 )
 
@@ -91,6 +92,13 @@ const (
 type provisionResult struct {
 	Name string
 	Path string
+
+	// Keys are the declared keys the provisioning run could not supply. On the
+	// hook path they must travel inside the injected context: the hook's stderr
+	// is discarded rather than shown to the agent, and a hook that exits
+	// non-zero emits no structured output at all, so a report written anywhere
+	// else on a partial provision reaches nobody.
+	Keys []keyreport.Entry
 }
 
 // provisionInstanceFunc provisions an ephemeral instance for the given session
@@ -185,7 +193,7 @@ func runInstanceHookStart(cmd *cobra.Command, payload instanceHookPayload, jobsD
 		return fmt.Errorf("niwa: error: writing session mapping for %s: %w", payload.SessionID, err)
 	}
 
-	out, err := buildSessionStartInjection(res.Path)
+	out, err := buildSessionStartInjection(res.Path, res.Keys)
 	if err != nil {
 		return fmt.Errorf("niwa: error: assembling session context: %w", err)
 	}
@@ -292,12 +300,19 @@ type sessionStartInjection struct {
 }
 
 // buildSessionStartInjection assembles the SessionStart hook JSON carrying the
-// additionalContext payload: the instance path, the instance's CLAUDE.md
-// content (so the agent operates under the instance's guidance without a
-// re-root), and an explicit instruction to cd into the instance before any
-// work (DESIGN Decision 4). A missing instance CLAUDE.md is tolerated (the
-// path + cd instruction still inject); only the instance path is load-bearing.
-func buildSessionStartInjection(instancePath string) ([]byte, error) {
+// additionalContext payload: the instance path, the key report when the
+// provision was partial, the instance's CLAUDE.md content (so the agent
+// operates under the instance's guidance without a re-root), and an explicit
+// instruction to cd into the instance before any work (DESIGN Decision 4). A
+// missing instance CLAUDE.md is tolerated (the path + cd instruction still
+// inject); only the instance path is load-bearing.
+//
+// The key report goes above the CLAUDE.md content because it describes the
+// state of the instance the agent is about to work in, and below the cd
+// instruction because that instruction is what makes the instance reachable at
+// all. It is placed here rather than emitted as a warning because this JSON is
+// the only channel from this process that reaches the session.
+func buildSessionStartInjection(instancePath string, keys []keyreport.Entry) ([]byte, error) {
 	claudeMD := ""
 	if data, err := os.ReadFile(filepath.Join(instancePath, "CLAUDE.md")); err == nil {
 		claudeMD = string(data)
@@ -309,6 +324,10 @@ func buildSessionStartInjection(instancePath string) ([]byte, error) {
 	b = append(b, "\n\nBefore doing any work, run this first so all tools operate inside the instance:\n\n  cd "...)
 	b = append(b, instancePath...)
 	b = append(b, "\n\n"...)
+	if report := keyreport.RenderContext(keys); report != "" {
+		b = append(b, report...)
+		b = append(b, '\n')
+	}
 	if claudeMD != "" {
 		b = append(b, "The instance's CLAUDE.md follows; treat it as the authoritative guidance for this session:\n\n"...)
 		b = append(b, claudeMD...)
@@ -364,6 +383,11 @@ func realProvisionInstance(ctx context.Context, workspaceRoot, cwd, namePrefix, 
 
 	applier := workspace.NewApplier(gh)
 	applier.Reporter = workspace.NewReporter(os.Stderr)
+	// Collected rather than rendered: this path has no terminal. The caller
+	// decides where the report goes — into the hook's injected context, or onto
+	// dispatch's stderr.
+	keys := keyreport.New()
+	applier.Keys = keys
 
 	// Reconcile before the config drives materialization (issue #227). Every
 	// dispatched session's instance comes up through here, once, with no apply
@@ -419,7 +443,7 @@ func realProvisionInstance(ctx context.Context, workspaceRoot, cwd, namePrefix, 
 		return provisionResult{}, err
 	}
 
-	return provisionResult{Name: instanceName, Path: instancePath}, nil
+	return provisionResult{Name: instanceName, Path: instancePath, Keys: keys.Report()}, nil
 }
 
 // realDestroyInstance is the production teardown: it force-destroys the

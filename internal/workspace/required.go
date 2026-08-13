@@ -54,33 +54,9 @@ func checkRequiredKeys(cfg *config.WorkspaceConfig, stderrOut io.Writer) error {
 	}
 
 	var missing []missingRequired
-
-	// Top-level [env.vars] / [env.secrets].
-	missing = append(missing, collectMissing("env.vars", cfg.Env.Vars)...)
-	missing = append(missing, collectMissing("env.secrets", cfg.Env.Secrets)...)
-
-	// Top-level [claude.env.vars] / [claude.env.secrets].
-	missing = append(missing, collectMissing("claude.env.vars", cfg.Claude.Env.Vars)...)
-	missing = append(missing, collectMissing("claude.env.secrets", cfg.Claude.Env.Secrets)...)
-
-	// Per-repo overrides.
-	for name, ov := range cfg.Repos {
-		prefix := fmt.Sprintf("repos.%s", name)
-		missing = append(missing, collectMissing(prefix+".env.vars", ov.Env.Vars)...)
-		missing = append(missing, collectMissing(prefix+".env.secrets", ov.Env.Secrets)...)
-		if ov.Claude != nil {
-			missing = append(missing, collectMissing(prefix+".claude.env.vars", ov.Claude.Env.Vars)...)
-			missing = append(missing, collectMissing(prefix+".claude.env.secrets", ov.Claude.Env.Secrets)...)
-		}
-	}
-
-	// Instance-level overrides.
-	missing = append(missing, collectMissing("instance.env.vars", cfg.Instance.Env.Vars)...)
-	missing = append(missing, collectMissing("instance.env.secrets", cfg.Instance.Env.Secrets)...)
-	if cfg.Instance.Claude != nil {
-		missing = append(missing, collectMissing("instance.claude.env.vars", cfg.Instance.Claude.Env.Vars)...)
-		missing = append(missing, collectMissing("instance.claude.env.secrets", cfg.Instance.Claude.Env.Secrets)...)
-	}
+	forEachEnvTable(cfg, func(scope string, t config.EnvVarsTable) {
+		missing = append(missing, collectMissing(scope, t)...)
+	})
 
 	// Recommended: non-fatal, stderr warning line per miss.
 	warnRecommended(cfg, stderrOut)
@@ -163,7 +139,7 @@ func isEmptyMaybeSecret(ms config.MaybeSecret) bool {
 // (no verbose flag yet; when one lands the loop can emit an info line
 // under it).
 func warnRecommended(cfg *config.WorkspaceConfig, stderrOut io.Writer) {
-	emit := func(scope string, t config.EnvVarsTable) {
+	forEachEnvTable(cfg, func(scope string, t config.EnvVarsTable) {
 		for key, desc := range t.Recommended {
 			ms, ok := t.Values[key]
 			if ok && !isEmptyMaybeSecret(ms) {
@@ -173,26 +149,59 @@ func warnRecommended(cfg *config.WorkspaceConfig, stderrOut io.Writer) {
 				"warning: recommended env key %q not supplied: %s (scope %s)\n",
 				key, desc, scope)
 		}
-	}
+	})
+}
 
-	emit("env.vars", cfg.Env.Vars)
-	emit("env.secrets", cfg.Env.Secrets)
-	emit("claude.env.vars", cfg.Claude.Env.Vars)
-	emit("claude.env.secrets", cfg.Claude.Env.Secrets)
+// forEachEnvTable invokes fn once per env table in the config, passing the
+// dotted scope the table was declared at. Three walks need this enumeration —
+// the required-key check, the recommended warning, and the key report — and
+// keeping one copy is what stops a table added to the config from reaching two
+// of the three.
+//
+// Repo iteration follows map order, so callers that care about output order
+// sort afterwards rather than relying on the walk.
+func forEachEnvTable(cfg *config.WorkspaceConfig, fn func(scope string, t config.EnvVarsTable)) {
+	if cfg == nil {
+		return
+	}
+	fn("env.vars", cfg.Env.Vars)
+	fn("env.secrets", cfg.Env.Secrets)
+	fn("claude.env.vars", cfg.Claude.Env.Vars)
+	fn("claude.env.secrets", cfg.Claude.Env.Secrets)
 
 	for name, ov := range cfg.Repos {
 		prefix := fmt.Sprintf("repos.%s", name)
-		emit(prefix+".env.vars", ov.Env.Vars)
-		emit(prefix+".env.secrets", ov.Env.Secrets)
+		fn(prefix+".env.vars", ov.Env.Vars)
+		fn(prefix+".env.secrets", ov.Env.Secrets)
 		if ov.Claude != nil {
-			emit(prefix+".claude.env.vars", ov.Claude.Env.Vars)
-			emit(prefix+".claude.env.secrets", ov.Claude.Env.Secrets)
+			fn(prefix+".claude.env.vars", ov.Claude.Env.Vars)
+			fn(prefix+".claude.env.secrets", ov.Claude.Env.Secrets)
 		}
 	}
-	emit("instance.env.vars", cfg.Instance.Env.Vars)
-	emit("instance.env.secrets", cfg.Instance.Env.Secrets)
+
+	fn("instance.env.vars", cfg.Instance.Env.Vars)
+	fn("instance.env.secrets", cfg.Instance.Env.Secrets)
 	if cfg.Instance.Claude != nil {
-		emit("instance.claude.env.vars", cfg.Instance.Claude.Env.Vars)
-		emit("instance.claude.env.secrets", cfg.Instance.Claude.Env.Secrets)
+		fn("instance.claude.env.vars", cfg.Instance.Claude.Env.Vars)
+		fn("instance.claude.env.secrets", cfg.Instance.Claude.Env.Secrets)
+	}
+}
+
+// forEachSettingsTable is the same enumeration for [claude.settings] blocks.
+// Settings have no requirement sub-tables, so they contribute marks to the key
+// report and nothing to the required or recommended checks — which is why they
+// have their own walk rather than a widened EnvVarsTable one.
+func forEachSettingsTable(cfg *config.WorkspaceConfig, fn func(scope string, s config.SettingsConfig)) {
+	if cfg == nil {
+		return
+	}
+	fn("claude.settings", cfg.Claude.Settings)
+	for name, ov := range cfg.Repos {
+		if ov.Claude != nil {
+			fn(fmt.Sprintf("repos.%s.claude.settings", name), ov.Claude.Settings)
+		}
+	}
+	if cfg.Instance.Claude != nil {
+		fn("instance.claude.settings", cfg.Instance.Claude.Settings)
 	}
 }

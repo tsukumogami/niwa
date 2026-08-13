@@ -15,6 +15,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/tsukumogami/niwa/internal/agent"
 	"github.com/tsukumogami/niwa/internal/config"
+	"github.com/tsukumogami/niwa/internal/keyreport"
 	"github.com/tsukumogami/niwa/internal/promptcapture"
 	"github.com/tsukumogami/niwa/internal/workspace"
 )
@@ -301,6 +302,9 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("niwa: error: provisioning dispatch instance: %w", err)
 	}
+	// Dispatch has a terminal, unlike the hook that shares this provisioner, so
+	// the report goes to stderr here rather than into the worker's context.
+	fmt.Fprint(cmd.ErrOrStderr(), keyreport.RenderText(res.Keys))
 	instancePath := res.Path
 
 	// (7) Arm the deferred self-rollback IMMEDIATELY after create, before any

@@ -175,6 +175,7 @@ func defaultRunBootstrap(ctx context.Context, cmd *cobra.Command, workspaceRoot,
 	applier := workspace.NewApplier(gh)
 	applier.Reporter = workspace.NewReporter(cmd.ErrOrStderr())
 	applier.ConfigSourceURL = source
+	defer wireKeyReport(applier, cmd.ErrOrStderr())()
 	if globalCfg, gErr := config.LoadGlobalConfig(); gErr == nil {
 		if gDir, dErr := config.GlobalConfigDir(); dErr == nil {
 			applier.GlobalConfigDir = gDir

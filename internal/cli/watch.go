@@ -15,6 +15,7 @@ import (
 
 	"github.com/tsukumogami/niwa/internal/config"
 	"github.com/tsukumogami/niwa/internal/github"
+	"github.com/tsukumogami/niwa/internal/keyreport"
 	"github.com/tsukumogami/niwa/internal/watch"
 	"github.com/tsukumogami/niwa/internal/workspace"
 )
@@ -778,6 +779,10 @@ func stageReview(cmd *cobra.Command, root, cwd, token string, client *github.API
 	if err != nil {
 		return fmt.Errorf("provisioning contained instance: %w", err)
 	}
+	// Watch runs unattended, so this lands in whatever captures its stderr; the
+	// alternative is a review agent working in an instance whose missing keys
+	// nothing recorded.
+	fmt.Fprint(cmd.ErrOrStderr(), keyreport.RenderText(provRes.Keys))
 	instancePath := provRes.Path
 
 	success := false

@@ -17,6 +17,7 @@ import (
 	"github.com/tsukumogami/niwa/internal/gitexclude"
 	"github.com/tsukumogami/niwa/internal/github"
 	"github.com/tsukumogami/niwa/internal/guardrail"
+	"github.com/tsukumogami/niwa/internal/keyreport"
 	"github.com/tsukumogami/niwa/internal/pluginrecord"
 	"github.com/tsukumogami/niwa/internal/secret"
 	"github.com/tsukumogami/niwa/internal/vault"
@@ -46,6 +47,14 @@ type Applier struct {
 	// materializes exactly as it did before agent selection existed. The CLI
 	// entry points set it from agent.ResolveAgent before calling Apply/Create.
 	Agent agent.Agent
+
+	// Keys collects the declared keys this run could not supply, for the
+	// caller to render once the run returns. It is caller-supplied rather
+	// than returned because Create removes its instance directory and
+	// returns a bare error on failure: a report handed back up the call
+	// stack would be dropped on exactly the path where the user most
+	// needs every key enumerated. A nil collector disables collection.
+	Keys *keyreport.Collector
 
 	// Reporter receives all progress and diagnostic output for this applier.
 	// NewApplier initializes it with NewReporter(os.Stderr). Callers may
@@ -1307,6 +1316,7 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		EffectiveConfigOptions{
 			GlobalConfigDir: a.GlobalConfigDir,
 			Stderr:          a.Reporter.Writer(),
+			Keys:            a.Keys,
 		},
 	)
 	if err != nil {

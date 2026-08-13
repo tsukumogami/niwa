@@ -156,6 +156,11 @@ func runApply(cmd *cobra.Command, args []string) error {
 	// (resolved below when it loads) sets the default; otherwise the Applier
 	// falls back to its built-in default.
 	applier.CloneWorkers = applyParallel
+	// One collector for the whole command, drained once below: apply may
+	// converge several instances, and R6 asks for a single consolidated report
+	// rather than one per instance. The collector deduplicates, so a key
+	// missing in every instance is named once.
+	defer wireKeyReport(applier, cmd.ErrOrStderr())()
 	configurePluginAutoInstall(applier, applyNoInstallPlugins)
 	if applyAllowDirty {
 		// PRD R32: --allow-dirty is meaningless under the snapshot
@@ -256,6 +261,11 @@ func runApply(cmd *cobra.Command, args []string) error {
 	// failure. Each instance's live worktrees are refreshed inside the instance
 	// apply pipeline itself (Applier.refreshWorktreeEnvs), so there is no
 	// separate per-instance worktree cascade here.
+	//
+	// A failure is recorded and not printed here. combineInstanceErrors names
+	// every failing instance in the returned error, which Execute prints once;
+	// printing here as well rendered the same multi-line message twice under
+	// two different prefixes.
 	var applyErrors []instanceError
 	for _, instanceRoot := range scope.Instances {
 		if applyErr := applier.Apply(cmd.Context(), cfg, configDir, instanceRoot); applyErr != nil {
@@ -263,7 +273,6 @@ func runApply(cmd *cobra.Command, args []string) error {
 				instance: instanceRoot,
 				err:      applyErr,
 			})
-			fmt.Fprintf(os.Stderr, "error: applying to %s: %v\n", instanceRoot, applyErr)
 			// Skip an instance that failed to converge.
 			continue
 		}

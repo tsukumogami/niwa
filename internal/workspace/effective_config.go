@@ -5,6 +5,7 @@ import (
 	"io"
 
 	"github.com/tsukumogami/niwa/internal/config"
+	"github.com/tsukumogami/niwa/internal/keyreport"
 	"github.com/tsukumogami/niwa/internal/vault"
 	"github.com/tsukumogami/niwa/internal/vault/resolve"
 )
@@ -18,9 +19,16 @@ import (
 // Stderr is the resolver's diagnostic sink. The resolver writes nothing to it
 // today — an unresolved key is marked on the value and reported once, later —
 // so this exists to keep that silence testable rather than to carry output.
+//
+// Keys is the caller-supplied collector the run's unresolved keys accumulate
+// into. It is drained and rendered by the command surface after the run
+// returns, so a nil collector means "this caller does not report" rather than
+// "nothing went wrong": the worktree path passes nil because it re-materializes
+// from an already-written file rather than resolving.
 type EffectiveConfigOptions struct {
 	GlobalConfigDir string
 	Stderr          io.Writer
+	Keys            *keyreport.Collector
 }
 
 // ResolveAndMergeEffectiveConfig runs the vault resolve + personal-overlay
@@ -66,6 +74,7 @@ func ResolveAndMergeEffectiveConfig(
 	resolvedCfg, err := resolve.ResolveWorkspace(ctx, cfg, resolve.ResolveOptions{
 		TeamBundle: teamBundle,
 		Stderr:     opts.Stderr,
+		Keys:       opts.Keys,
 	})
 	if err != nil {
 		return nil, nil, nil, err
@@ -73,6 +82,7 @@ func ResolveAndMergeEffectiveConfig(
 
 	// No overlay registered: return the team-only resolved cfg unchanged.
 	if globalOverride == nil {
+		collectUnresolvedKeys(resolvedCfg, opts.Keys)
 		return resolvedCfg, nil, nil, nil
 	}
 
@@ -83,6 +93,7 @@ func ResolveAndMergeEffectiveConfig(
 	resolvedOverride, err := resolve.ResolveGlobalOverride(ctx, globalOverride, resolve.ResolveOptions{
 		PersonalBundle: personalBundle,
 		Stderr:         opts.Stderr,
+		Keys:           opts.Keys,
 	})
 	if err != nil {
 		return nil, nil, nil, err
@@ -92,5 +103,9 @@ func ResolveAndMergeEffectiveConfig(
 	if err != nil {
 		return nil, nil, nil, err
 	}
+	// After the merge, never before it: a key the team layer could not resolve
+	// may be supplied by the personal overlay, and only the merged config knows
+	// which layer won.
+	collectUnresolvedKeys(merged, opts.Keys)
 	return merged, flattened.EnvExamplePolicy, flattened.EnvOutput, nil
 }
