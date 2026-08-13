@@ -20,6 +20,20 @@ r6_predicates:
   p1_architectural_alternatives: fires
   p2_new_components: does-not-fire
   p3_complex_classification: fires
+worktree_rebases:
+  - phase: brief
+    upstream_commits: []
+    impact: none
+    rebased_at: 2026-08-13T00:00:00Z
+    notes: origin/main at 3403ee4f is the branch base; no upstream commits landed
+chain_ran_detail:
+  - brief
+child_snapshots:
+  brief:
+    status: Accepted
+    content_hash: 471c235f75109814316a72adec1c7d754843db67
+    captured_at: 2026-08-13T00:00:00Z
+consolidation_judgments: []
 ```
 
 ## Phase 1 Notes
