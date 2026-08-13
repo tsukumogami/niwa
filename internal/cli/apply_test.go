@@ -101,10 +101,10 @@ func TestApplyCmd_NoCascadeFlagParses(t *testing.T) {
 }
 
 // TestApplyCmd_HasAllowMissingSecretsFlag verifies the flag is still
-// registered and still defaults to false. It no longer reaches the
-// applier: the tolerance it used to request is what apply does by
-// default, so the flag is on its way to being a documented no-op. This
-// test covers the CLI wiring only.
+// registered and still defaults to false. It reaches nothing: the
+// tolerance it used to request is what apply does by default. The
+// deprecation contract it now carries is covered in
+// allow_missing_secrets_test.go.
 func TestApplyCmd_HasAllowMissingSecretsFlag(t *testing.T) {
 	flag := applyCmd.Flags().Lookup("allow-missing-secrets")
 	if flag == nil {
@@ -129,34 +129,29 @@ func TestApplyCmd_HasAllowPlaintextSecretsFlag(t *testing.T) {
 	}
 }
 
-// TestApplyCmd_AllowFlagsThreadToApplier verifies that parsing the
-// two flags populates the package-level vars that runApply copies
+// TestApplyCmd_AllowPlaintextSecretsThreadsToApplier verifies that
+// parsing the flag populates the package-level var that runApply copies
 // onto the Applier struct. The full pipeline integration (that the
-// Applier then honors these fields) lives in
-// internal/workspace/apply_vault_test.go and
+// Applier then honors the field) lives in
 // internal/guardrail/githubpublic_test.go; this test pins the CLI
 // wiring so a future refactor can't silently drop the plumbing.
-func TestApplyCmd_AllowFlagsThreadToApplier(t *testing.T) {
+//
+// --allow-missing-secrets has no counterpart here on purpose: it binds
+// to no variable and reaches no field.
+func TestApplyCmd_AllowPlaintextSecretsThreadsToApplier(t *testing.T) {
 	// Save and restore package-level state so the test is idempotent
-	// relative to other tests that inspect applyAllowMissingSecrets.
-	savedMissing := applyAllowMissingSecrets
+	// relative to other tests that inspect applyAllowPlaintextSecrets.
 	savedPlain := applyAllowPlaintextSecrets
 	t.Cleanup(func() {
-		applyAllowMissingSecrets = savedMissing
 		applyAllowPlaintextSecrets = savedPlain
 	})
 
-	// Reset to false to make sure the ParseFlags call actually sets
-	// them; start from true so a no-op parse wouldn't accidentally
-	// pass the assertions below.
-	applyAllowMissingSecrets = false
+	// Reset to false to make sure the ParseFlags call actually sets it;
+	// a no-op parse would otherwise pass the assertion below.
 	applyAllowPlaintextSecrets = false
 
-	if err := applyCmd.ParseFlags([]string{"--allow-missing-secrets", "--allow-plaintext-secrets"}); err != nil {
+	if err := applyCmd.ParseFlags([]string{"--allow-plaintext-secrets"}); err != nil {
 		t.Fatalf("ParseFlags: %v", err)
-	}
-	if !applyAllowMissingSecrets {
-		t.Error("expected applyAllowMissingSecrets to be true after --allow-missing-secrets")
 	}
 	if !applyAllowPlaintextSecrets {
 		t.Error("expected applyAllowPlaintextSecrets to be true after --allow-plaintext-secrets")

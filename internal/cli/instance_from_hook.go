@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -178,6 +179,28 @@ func runInstanceHookStart(cmd *cobra.Command, payload instanceHookPayload, jobsD
 	// stays "<config>-<sessionhex>", byte-identical to the pre-"+"-separator
 	// behavior. "+" is reserved for user-supplied dispatch slugs.
 	res, err := provisionInstanceFunc(cmd.Context(), workspaceRoot, payload.Cwd, namePrefix, "-")
+	if errors.Is(err, workspace.ErrStrictSecrets) {
+		// A strict refusal is the workspace working as configured, and the
+		// guarantee it buys -- no instance materializes holding a shortfall --
+		// is already upheld by Create, which removed the directory before
+		// returning. What is left to decide is only who hears about it, and a
+		// non-zero exit answers "nobody": this hook returns before it writes
+		// stdout, so a failing exit emits no payload at all and the session
+		// starts anyway, with the agent working at the root and no idea why it
+		// has no instance. That is the silence R14 exists to prevent, so the
+		// strict path takes the same delivery route as the partial one: emit
+		// the report as context, exit 0. No mapping is written, because there
+		// is no instance to map to. Every other provisioning failure is still
+		// a failure and still exits non-zero.
+		out, buildErr := buildStrictFailureInjection(res.Keys)
+		if buildErr != nil {
+			return fmt.Errorf("niwa: error: assembling session context: %w", buildErr)
+		}
+		if _, wErr := cmd.OutOrStdout().Write(out); wErr != nil {
+			return fmt.Errorf("niwa: error: writing session context: %w", wErr)
+		}
+		return nil
+	}
 	if err != nil {
 		return fmt.Errorf("niwa: error: provisioning instance for session %s: %w", payload.SessionID, err)
 	}
@@ -344,6 +367,39 @@ func buildSessionStartInjection(instancePath string, keys []keyreport.Entry) ([]
 	return append(encoded, '\n'), nil
 }
 
+// buildStrictFailureInjection assembles the SessionStart hook JSON for a
+// provision strict mode refused. It carries no instance path, because no
+// instance exists: the agent is told it is working without one, given the keys
+// that caused the refusal, and told to stop rather than improvise.
+//
+// It is a separate builder rather than a flag on buildSessionStartInjection
+// because almost nothing is shared. That function's payload is a cd
+// instruction and the instance's CLAUDE.md, and both would be wrong here.
+func buildStrictFailureInjection(keys []keyreport.Entry) ([]byte, error) {
+	const lead = "No niwa instance was provisioned for this session. The workspace runs with strict " +
+		"secret resolution, which refuses to create an instance missing any environment key it declares. " +
+		"You are working at the launch directory with no instance: report this and stop, rather than " +
+		"creating one by hand."
+
+	var b []byte
+	if report := keyreport.RenderContextLead(lead, keys); report != "" {
+		b = append(b, report...)
+	} else {
+		b = append(b, lead...)
+		b = append(b, '\n')
+	}
+
+	var inj sessionStartInjection
+	inj.HookSpecificOutput.HookEventName = hookEventSessionStart
+	inj.HookSpecificOutput.AdditionalContext = string(b)
+
+	encoded, err := json.Marshal(inj)
+	if err != nil {
+		return nil, fmt.Errorf("marshaling strict failure injection: %w", err)
+	}
+	return append(encoded, '\n'), nil
+}
+
 // resolveHookWorkspaceRoot resolves the workspace root from the hook's
 // reported cwd (the launch root). It returns ok=false when cwd is empty or
 // does not classify to a workspace root, so the caller no-ops rather than
@@ -438,9 +494,18 @@ func realProvisionInstance(ctx context.Context, workspaceRoot, cwd, namePrefix, 
 	// and a Codex SessionStart hook are later features that will carry their own
 	// agent here.
 	applier.Agent = agent.AgentClaude
+	// This path has no command line, which is exactly why strict mode is a
+	// workspace setting: `niwa dispatch`, the SessionStart hook, `niwa watch`
+	// and the reaper all provision through here and all read it with no flag.
+	// cfg is the reconciled config loaded above, so nothing further is needed
+	// to make the setting reach them.
+	applier.StrictSecrets = strictSecretsFor(nil, false, cfg)
 	instancePath, err := applier.Create(ctx, cfg, configDir, workspaceRoot, instanceName)
 	if err != nil {
-		return provisionResult{}, err
+		// The keys collected before the failure travel with it. A strict
+		// refusal is the one failure whose explanation is the report, and the
+		// hook caller cannot read it off disk: Create removed the instance.
+		return provisionResult{Keys: keys.Report()}, err
 	}
 
 	return provisionResult{Name: instanceName, Path: instancePath, Keys: keys.Report()}, nil

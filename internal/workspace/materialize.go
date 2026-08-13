@@ -161,6 +161,12 @@ type MaterializeContext struct {
 	// input — a repository can write its own env file — and are revalidated by
 	// envformat.ParseRecord before they land here.
 	InheritedUnresolved map[string]unresolvedEnvKey
+
+	// StrictSecrets is the run's resolved strictness. Only the promote branch
+	// reads it: promotion is the one enforcement point that runs per-repo,
+	// after the applier's post-merge gate has already let the run through.
+	// The worktree path never sets it (see repoMaterializeInputs).
+	StrictSecrets bool
 }
 
 // unresolvedEnvKey is one omitted env key: the record written into the
@@ -1000,6 +1006,16 @@ func resolveClaudeEnvVars(ctx *MaterializeContext) (map[string]string, []SourceE
 				continue
 			}
 			if omitted, ok := unresolved[key]; ok {
+				// The strict arm of the three-way branch. Omission is what
+				// tolerance does with a promoted key that has no value;
+				// under strict mode the same key is a refusal instead. It
+				// lives here rather than at the post-merge gate because
+				// promotion runs later and per-repo, so that gate has
+				// already passed by the time this key is looked up.
+				if ctx.StrictSecrets {
+					return nil, nil, fmt.Errorf("%w: claude.env promotes %q, which has no value",
+						ErrStrictSecrets, key)
+				}
 				reportPromoteOmission(ctx.Keys, key, omitted)
 				continue
 			}

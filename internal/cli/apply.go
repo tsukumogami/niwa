@@ -21,9 +21,6 @@ func init() {
 	applyCmd.Flags().StringVar(&applyInstance, "instance", "", "target a specific instance by name")
 	applyCmd.Flags().BoolVar(&applyAllowDirty, "allow-dirty", false, "apply even if config directory has uncommitted changes")
 	applyCmd.Flags().BoolVar(&applyNoPull, "no-pull", false, "skip pulling latest changes into existing repos")
-	applyCmd.Flags().BoolVar(&applyAllowMissingSecrets, "allow-missing-secrets", false,
-		"downgrade unresolved vault:// references to empty strings with stderr warnings. "+
-			"Does NOT override *.required misses. One-shot -- re-evaluated each invocation.")
 	applyCmd.Flags().BoolVar(&applyAllowPlaintextSecrets, "allow-plaintext-secrets", false,
 		"bypass the public-repo plaintext-secrets guardrail and downgrade all .env.example failure-policy failures to warnings. Strictly one-shot -- no state persistence.")
 	applyCmd.Flags().BoolVar(&applyForce, "force", false,
@@ -36,6 +33,9 @@ func init() {
 		"select the coding agent to prepare the workspace for (claude or codex) for this session, overriding the workspace default_agent; NIWA_AGENT sets it per shell.")
 	applyCmd.Flags().IntVar(&applyParallel, "parallel", 0,
 		"maximum repos to clone concurrently (>=1). Lower this on slow or flaky networks; 1 clones serially. Overrides the [global] clone_workers config. 0 (the default) uses clone_workers, else niwa's built-in default.")
+	registerStrictSecretsFlag(applyCmd, &strictSecretsApply)
+	// Last: it declares a mutual-exclusion group against --strict-secrets.
+	registerAllowMissingSecretsFlag(applyCmd)
 	applyCmd.ValidArgsFunction = completeWorkspaceNames
 	_ = applyCmd.RegisterFlagCompletionFunc("instance", completeInstanceNames)
 }
@@ -44,7 +44,6 @@ var (
 	applyInstance              string
 	applyAllowDirty            bool
 	applyNoPull                bool
-	applyAllowMissingSecrets   bool
 	applyAllowPlaintextSecrets bool
 	applyForce                 bool
 	applyNoInstallPlugins      bool
@@ -199,6 +198,10 @@ func runApply(cmd *cobra.Command, args []string) error {
 		return agErr
 	}
 	applier.Agent = resolvedAgent
+
+	// Resolved once for the whole command, against the post-reconcile config,
+	// so every instance in the cascade is converged under the same strictness.
+	applier.StrictSecrets = strictSecretsFor(cmd, strictSecretsApply, cfg)
 
 	// Resolve the effective workspace name for registry operations.
 	// configDir is `<workspaceRoot>/.niwa`, so its parent is where

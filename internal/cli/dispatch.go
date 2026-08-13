@@ -299,12 +299,15 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	// signature is fixed and shared with the hook/reap callers).
 	provisionCloneWorkers = dispatchParallel
 	res, err := provisionInstanceFunc(cmd.Context(), workspaceRoot, cwd, namePrefix, sep)
+	// Dispatch has a terminal, unlike the hook that shares this provisioner, so
+	// the report goes to stderr here rather than into the worker's context.
+	// Rendered before the error is returned, not after the success path begins:
+	// a strict refusal fails here carrying the keys that caused it, and those
+	// keys are the whole explanation of what just happened.
+	fmt.Fprint(cmd.ErrOrStderr(), keyreport.RenderText(res.Keys))
 	if err != nil {
 		return fmt.Errorf("niwa: error: provisioning dispatch instance: %w", err)
 	}
-	// Dispatch has a terminal, unlike the hook that shares this provisioner, so
-	// the report goes to stderr here rather than into the worker's context.
-	fmt.Fprint(cmd.ErrOrStderr(), keyreport.RenderText(res.Keys))
 	instancePath := res.Path
 
 	// (7) Arm the deferred self-rollback IMMEDIATELY after create, before any

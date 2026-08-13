@@ -4,12 +4,15 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/tsukumogami/niwa/internal/config"
+	"github.com/tsukumogami/niwa/internal/keyreport"
 	"github.com/tsukumogami/niwa/internal/workspace"
 )
 
@@ -445,5 +448,97 @@ func TestSessionEnd_NonEphemeralMapping_NotDestroyed(t *testing.T) {
 	// The mapping must survive (it is not ours to delete).
 	if _, err := workspace.ReadSessionMapping(root, testSessionID); err != nil {
 		t.Error("non-ephemeral mapping was deleted; want preserved")
+	}
+}
+
+// TestSessionStart_StrictRefusal_EmitsReportAndExitsZero pins the delivery
+// decision for a strict provisioning refusal. The refusal itself is upheld by
+// Create, which removed the instance before returning; the only remaining
+// question is who hears about it, and a non-zero exit answers "nobody" -- this
+// path returns before it writes stdout, so a failing exit emits no payload at
+// all and the agent starts at the launch root with no idea why it has no
+// instance. So the strict path takes the route the partial one takes: report
+// as context, exit 0, and no session mapping, because there is nothing to map.
+func TestSessionStart_StrictRefusal_EmitsReportAndExitsZero(t *testing.T) {
+	root := setupHookWorkspace(t, true)
+	jobsDir := t.TempDir()
+	writeJobState(t, jobsDir, testSessionID[:8], testSessionID, "bg")
+
+	prev := provisionInstanceFunc
+	provisionInstanceFunc = func(_ context.Context, _, _, _, _ string) (provisionResult, error) {
+		return provisionResult{
+				Keys: []keyreport.Entry{{
+					Scope:       "env.secrets",
+					Key:         "ANTHROPIC_API_KEY",
+					Cause:       config.CauseProviderUnreachable,
+					Level:       config.LevelRequired,
+					Description: "API key for Claude Code sessions",
+				}},
+			}, fmt.Errorf("%w: strict mode is enabled and 1 declared env key has no value",
+				workspace.ErrStrictSecrets)
+	}
+	t.Cleanup(func() { provisionInstanceFunc = prev })
+
+	out, _, err := runStart(t, instanceHookPayload{
+		HookEventName: hookEventSessionStart,
+		SessionID:     testSessionID,
+		Cwd:           root,
+	}, jobsDir)
+	if err != nil {
+		t.Fatalf("a strict refusal must exit 0, or its explanation reaches nobody; got: %v", err)
+	}
+
+	var inj sessionStartInjection
+	if err := json.Unmarshal([]byte(out), &inj); err != nil {
+		t.Fatalf("unmarshal injection JSON %q: %v", out, err)
+	}
+	ctx := inj.HookSpecificOutput.AdditionalContext
+	if !strings.Contains(ctx, "No niwa instance was provisioned") {
+		t.Errorf("context must say no instance exists, got:\n%s", ctx)
+	}
+	if !strings.Contains(ctx, "ANTHROPIC_API_KEY") {
+		t.Errorf("context must carry the keys that caused the refusal, got:\n%s", ctx)
+	}
+	if strings.Contains(ctx, "This instance was provisioned") {
+		t.Errorf("context must not claim an instance was provisioned, got:\n%s", ctx)
+	}
+	// The refusal text is a new rendered surface reaching an agent, so it is
+	// held to the report's vocabulary rule: it says what niwa would not do, not
+	// which backend was involved.
+	for _, banned := range []string{"vault", "infisical"} {
+		if strings.Contains(strings.ToLower(ctx), banned) {
+			t.Errorf("refusal context names a secret backend (%q):\n%s", banned, ctx)
+		}
+	}
+
+	if _, err := workspace.ReadSessionMapping(root, testSessionID); err == nil {
+		t.Error("a refused provision wrote a session mapping")
+	}
+}
+
+// TestSessionStart_OtherFailure_StillFails: only the strict refusal takes the
+// exit-0 route. An ordinary provisioning failure keeps failing, so a broken
+// clone is not silently reported as if it were a configuration choice.
+func TestSessionStart_OtherFailure_StillFails(t *testing.T) {
+	root := setupHookWorkspace(t, true)
+	jobsDir := t.TempDir()
+	writeJobState(t, jobsDir, testSessionID[:8], testSessionID, "bg")
+
+	prev := provisionInstanceFunc
+	provisionInstanceFunc = func(_ context.Context, _, _, _, _ string) (provisionResult, error) {
+		return provisionResult{}, errors.New("cloning testorg/app: exit status 128")
+	}
+	t.Cleanup(func() { provisionInstanceFunc = prev })
+
+	out, _, err := runStart(t, instanceHookPayload{
+		HookEventName: hookEventSessionStart,
+		SessionID:     testSessionID,
+		Cwd:           root,
+	}, jobsDir)
+	if err == nil {
+		t.Fatal("a provisioning failure that is not a strict refusal must still fail")
+	}
+	if out != "" {
+		t.Errorf("a failing hook must emit nothing on stdout, got: %q", out)
 	}
 }

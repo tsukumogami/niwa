@@ -56,6 +56,20 @@ type Applier struct {
 	// needs every key enumerated. A nil collector disables collection.
 	Keys *keyreport.Collector
 
+	// StrictSecrets is the run's resolved strictness: the --strict-secrets
+	// flag when it was explicitly present, else the workspace's
+	// strict_secrets setting, else false. The CLI resolves it once, through
+	// config.ResolveStrictSecrets, so every command surface answers the
+	// question the same way.
+	//
+	// It is read at two places for one decision. The gate beside the
+	// post-merge required-key check turns every collected shortfall fatal;
+	// the promote branch reads the same field because promotion runs later
+	// and per-repo, after that gate has already passed. Nothing threads it
+	// into worktree re-materialization: that path resolves no secrets, so it
+	// reaches neither consult site.
+	StrictSecrets bool
+
 	// Reporter receives all progress and diagnostic output for this applier.
 	// NewApplier initializes it with NewReporter(os.Stderr). Callers may
 	// replace it (e.g., with NewReporterWithTTY) before calling Apply or Create.
@@ -1034,6 +1048,14 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 			return nil, fmt.Errorf("parsing workspace overlay: %w", parseErr)
 		}
 
+		// Inert [workspace] settings the overlay declares are announced here
+		// rather than rejected: a stale overlay must keep applying, and the
+		// author who wrote the stanza is the one who needs to hear that it
+		// does nothing. Deferred so it survives the spinner.
+		for _, w := range overlay.TombstoneWarnings() {
+			a.Reporter.DeferWarn("%s", w)
+		}
+
 		// PRD R9 stage 2: post-overlay credential-sync chicken-and-egg
 		// check. Stage 1 (Step 0.4) couldn't see the workspace overlay's
 		// vault specs because the overlay wasn't parsed yet. Now that
@@ -1331,6 +1353,17 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		return nil, err
 	}
 
+	// Strict mode reads the same picture immediately afterwards: whatever
+	// checkRequiredKeys tolerated is fatal here when the operator asked for
+	// fail-on-shortfall. It runs after, not instead: the strict-when-reachable
+	// error above says which provider was asked and stays the better message
+	// when both would fire.
+	if a.StrictSecrets {
+		if err := strictShortfallError(a.Keys); err != nil {
+			return nil, err
+		}
+	}
+
 	// Step 3: Create group directories and clone repos concurrently.
 	//
 	// Group directory creation runs sequentially (fast local I/O; repos in the
@@ -1582,6 +1615,7 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 			GlobalEnvOutput:        globalEnvOutput,
 			WorktreeDelegation:     worktreeDelegation,
 			Keys:                   a.Keys,
+			StrictSecrets:          a.StrictSecrets,
 		})
 		if err != nil {
 			return nil, err

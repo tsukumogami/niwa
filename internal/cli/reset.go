@@ -149,6 +149,12 @@ func runReset(cmd *cobra.Command, args []string) error {
 		return agErr
 	}
 	applier.Agent = resolvedAgent
+	// Reset surfaces no flags of its own, so the workspace setting is the only
+	// speaker here. It is consulted deliberately: reset rebuilds the same
+	// instance the workspace's own create would have built, and an instance
+	// that came back weaker than the workspace asked for would be the more
+	// surprising outcome.
+	applier.StrictSecrets = strictSecretsFor(nil, false, cfg)
 	instancePath, err := applier.Create(cmd.Context(), cfg, configDir, workspaceRoot, state.InstanceName)
 	if err != nil {
 		return fmt.Errorf("recreating instance: %w", err)

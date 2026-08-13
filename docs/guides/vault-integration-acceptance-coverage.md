@@ -38,13 +38,14 @@ at behavior that's deferred to a future release.
 | `[env.required]` miss fails `niwa apply` with key + description | `internal/workspace/apply_vault_test.go` | `TestApplyFailsOnMissingRequiredEnvSecret` |
 | `[env.recommended]` miss emits stderr warning and continues | `internal/workspace/apply_vault_test.go` | `TestApplyMissingRecommendedEmitsStderrWarning` |
 | `[env.optional]` miss is silent in v1 (info log deferred to verbose flag) | `internal/workspace/apply_vault_test.go` | `TestApplyMissingOptionalSilent` |
-| `--allow-missing-secrets` does NOT downgrade `[env.required]` | `internal/workspace/apply_vault_test.go` | `TestApplyAllowMissingSecretsDoesNotDowngradeRequired` |
+| A required key the reachable provider does not hold still fails apply | `internal/workspace/apply_vault_test.go` | `TestApplyRequiredKeyOnReachableProviderStaysFatal` |
 | 2 sources with no `vault_scope` fails with ambiguity error | `internal/workspace/apply_vault_test.go` | `TestResolveMultiSourceWithoutVaultScopeFails` |
 | 2 sources with `vault_scope` resolves from matching block | `internal/vault/resolve/resolve_test.go` | `TestResolveGlobalOverridePerWorkspaceBlock` |
 | Personal wins over team on `[env.*]` key shadow | `internal/workspace/override_test.go` | `TestMergeGlobalOverrideEnvSecretsGlobalWins` |
 | Personal shadowing a `team_only` key fails with named error | `internal/workspace/override_test.go` | `TestMergeGlobalOverrideTeamOnlyBlocksOverride` |
 | `vault://` ref to nonexistent key fails apply (default) | `internal/vault/resolve/resolve_test.go` | `TestResolveWorkspaceMissingErrorsByDefault` |
-| `--allow-missing-secrets` downgrades misses to empty + warning | `internal/vault/resolve/resolve_test.go` | `TestResolveWorkspaceAllowMissingDowngradesWithWarning` |
+| A miss is recorded on the resolved value, not announced by the resolver | `internal/vault/resolve/resolve_test.go` | `TestResolveWorkspaceMissingKeyIsSilent` |
+| `--allow-missing-secrets` is a deprecated no-op, rejected with `--strict-secrets` | `internal/cli/allow_missing_secrets_test.go` | `TestAllowMissingSecretsIsADeprecatedNoOp` |
 | `?required=false` URI resolves empty with no warning | `internal/vault/resolve/resolve_test.go` | `TestResolveWorkspaceOptionalDowngradesSilently` |
 | Contributor w/o team access gets actionable error (US-9) | `internal/vault/resolve/resolve_test.go` | `TestResolveWorkspaceProviderUnreachable` |
 | Personal provider name collision with team fails (R12) | `internal/vault/resolve/resolve_test.go` | `TestCheckProviderNameCollisionNamed` |

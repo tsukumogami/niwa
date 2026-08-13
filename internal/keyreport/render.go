@@ -197,12 +197,25 @@ func RenderContext(entries []Entry) string {
 	if len(entries) == 0 {
 		return ""
 	}
-	var sb strings.Builder
+	lead := fmt.Sprintf("This instance was provisioned, but %d declared environment keys could not be supplied.", len(entries))
 	if len(entries) == 1 {
-		sb.WriteString("This instance was provisioned, but 1 declared environment key could not be supplied.\n")
-	} else {
-		fmt.Fprintf(&sb, "This instance was provisioned, but %d declared environment keys could not be supplied.\n", len(entries))
+		lead = "This instance was provisioned, but 1 declared environment key could not be supplied."
 	}
+	return RenderContextLead(lead, entries)
+}
+
+// RenderContextLead is RenderContext with the opening sentence supplied by the
+// caller. It exists for the one surface whose lead sentence RenderContext's
+// cannot cover: a run strict mode refused produced no instance at all, so
+// saying one was provisioned would be false in the first line of an agent's
+// instructions. Everything below the lead is identical, sanitization included.
+func RenderContextLead(lead string, entries []Entry) string {
+	if len(entries) == 0 {
+		return ""
+	}
+	var sb strings.Builder
+	sb.WriteString(sanitize(lead))
+	sb.WriteString("\n")
 	for _, b := range blocks(entries) {
 		fmt.Fprintf(&sb, "\n%s\n", capitalize(headline(b.g)))
 		for _, e := range b.entries {

@@ -19,9 +19,6 @@ func init() {
 	createCmd.Flags().StringVar(&createName, "name", "", "custom instance name suffix, sanitized into a lowercase slug of letters, digits, and underscores and joined to the config name with '+' (e.g., --name \"My Feature\" produces <config>+my_feature)")
 	createCmd.Flags().StringVarP(&createRepo, "repo", "r", "", "land in this repo after creation")
 	createCmd.Flags().BoolVar(&createNoInstallPlugins, "no-install-plugins", false, "skip auto-installing the embedded niwa Claude Code plugin (otherwise installed once when a rank-2 source is detected)")
-	createCmd.Flags().BoolVar(&createAllowMissingSecrets, "allow-missing-secrets", false,
-		"downgrade unresolved vault:// references to empty strings with stderr warnings. "+
-			"Does NOT override *.required misses. One-shot -- re-evaluated each invocation.")
 	createCmd.Flags().BoolVar(&createAllowPlaintextSecrets, "allow-plaintext-secrets", false,
 		"bypass the public-repo plaintext-secrets guardrail and downgrade all .env.example failure-policy failures to warnings. Strictly one-shot -- no state persistence.")
 	createCmd.Flags().BoolVar(&createJSON, "json", false,
@@ -30,6 +27,9 @@ func init() {
 		"select the coding agent to prepare the instance for (claude or codex) for this session, overriding the workspace default_agent; NIWA_AGENT sets it per shell.")
 	createCmd.Flags().IntVar(&createParallel, "parallel", 0,
 		"maximum repos to clone concurrently (>=1). Lower this on slow or flaky networks; 1 clones serially. Overrides the [global] clone_workers config. 0 (the default) uses clone_workers, else niwa's built-in default.")
+	registerStrictSecretsFlag(createCmd, &strictSecretsCreate)
+	// Last: it declares a mutual-exclusion group against --strict-secrets.
+	registerAllowMissingSecretsFlag(createCmd)
 	createCmd.ValidArgsFunction = completeWorkspaceNames
 }
 
@@ -37,7 +37,6 @@ var (
 	createName                  string
 	createRepo                  string
 	createNoInstallPlugins      bool
-	createAllowMissingSecrets   bool
 	createAllowPlaintextSecrets bool
 	createJSON                  bool
 	createAgent                 string
@@ -228,6 +227,10 @@ func runCreate(cmd *cobra.Command, args []string) error {
 		return agErr
 	}
 	applier.Agent = resolvedAgent
+
+	// Read from the reconciled config, so a workspace that turned strict mode
+	// on upstream is honored on the first create that sees the change.
+	applier.StrictSecrets = strictSecretsFor(cmd, strictSecretsCreate, cfg)
 
 	// Wire up the global config overlay so vault resolution and personal-wins
 	// merging work during create. ConfigSourceURL is a fallback for overlay

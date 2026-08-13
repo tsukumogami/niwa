@@ -175,9 +175,10 @@ DEBUG_WEBHOOK_URL = "Personal debug webhook"
 | `*.recommended` | Stderr warning per missing key; apply continues. |
 | `*.optional` | Silent in v1; apply continues. Info-log output will land when a verbose flag is added. |
 
-`--allow-missing-secrets` downgrades vault misses to empty strings
-but does NOT downgrade `*.required` misses. A required key remains
-a hard error even with the flag set.
+`--allow-missing-secrets` is a deprecated no-op. It is still accepted
+so existing scripts and CI invocations keep working, and using it
+prints a deprecation notice on stderr. Passing it alongside
+`--strict-secrets` is rejected, since the two ask for opposite things.
 
 ### `[workspace].vault_scope`
 
@@ -573,7 +574,7 @@ policy.
 
 | Surface | Purpose |
 |---------|---------|
-| `niwa apply --allow-missing-secrets` | Downgrade unresolved `vault://` references to empty strings with stderr warnings. Does NOT override `*.required` misses. |
+| `niwa apply --allow-missing-secrets` | Deprecated no-op, accepted for compatibility. Rejected together with `--strict-secrets`. |
 | `niwa apply --allow-plaintext-secrets` | Bypass the public-repo guardrail and downgrade all `.env.example` failure-policy failures to warnings, for one invocation. No state persistence. |
 | `niwa status` (default) | Fully offline. Reads `state.json`, reports per-file drift and a shadowed-count summary. No provider calls. |
 | `niwa status --audit-secrets` | Classify every `*.secrets` value as plaintext / vault-ref / empty. Exits non-zero when plaintext values AND a vault are present. |

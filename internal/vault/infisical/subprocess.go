@@ -254,11 +254,12 @@ func parseExportJSON(raw []byte) (map[string]string, error) {
 // The marker set is deliberately specific: broad tokens like "auth"
 // or "token" were removed in a v1 tightening because they
 // misclassified transient network errors (e.g., "token refresh
-// pending") as auth failures, which under --allow-missing-secrets
-// silently downgrades the result to empty. The current list focuses
-// on phrases that unambiguously signal a credential / session
-// problem. Expand with care when new Infisical CLI versions ship
-// additional error phrasing.
+// pending") as auth failures. A misclassification still costs: the
+// key is reported unresolved and omitted from the generated files
+// rather than retried, so a retriable fault reads as a permanent one.
+// The current list focuses on phrases that unambiguously signal a
+// credential / session problem. Expand with care when new Infisical
+// CLI versions ship additional error phrasing.
 //
 // The match runs AFTER scrubbing, so a stderr that happened to
 // contain a secret fragment matching one of these markers has

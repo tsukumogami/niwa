@@ -70,6 +70,12 @@ type repoMaterializeInputs struct {
 	// Keys collects the declared keys this repo could not supply. nil disables
 	// collection; the worktree path leaves it nil because it renders no report.
 	Keys *keyreport.Collector
+	// StrictSecrets is the run's resolved strictness, threaded here for the
+	// promote branch alone -- promotion happens per-repo, after the applier's
+	// post-merge gate has already passed. The worktree path leaves it false
+	// and must keep doing so: it re-materializes from an already-written file
+	// and resolves nothing, so there is nothing there to be strict about.
+	StrictSecrets bool
 }
 
 // runRepoMaterializers runs the given materializers for a single repo against
@@ -163,6 +169,7 @@ func runRepoMaterializers(materializers []Materializer, in repoMaterializeInputs
 		InheritedEnv:           in.InheritedEnv,
 		InheritedUnresolved:    in.InheritedUnresolved,
 		Keys:                   in.Keys,
+		StrictSecrets:          in.StrictSecrets,
 	}
 
 	var written []string
