@@ -97,6 +97,28 @@ failure should be loud, but not fatal.
    corrected base config looks like and whether "none should be required" is
    literally achievable.
 
+### Round 2 leads
+
+8. **What does Claude Code actually do with a non-zero SessionStart hook, and
+   what should a degraded `niwa dispatch` do?** (lead-sessionstart-semantics)
+   The launch-coupled paths pass no flags and today exit 1 with no JSON, booting
+   a worker uninstrumented at the workspace root with no explanation. This
+   decides what "loud but non-fatal" means where no human is watching.
+
+9. **Do the incidental findings hold up end to end?** (lead-incidental-verify)
+   Remote-control suppression when `ANTHROPIC_API_KEY` is set, whether
+   unauthenticated `ListRepos` suffices for tsukumogami, and whether `GH_TOKEN`
+   promotion is pure redundancy. Each is a candidate issue; none should be filed
+   on a single agent's read.
+
+10. **How do the `.local.env` annotation and the `--strict` flag actually land in
+    the code?** (lead-annotation-and-strict)
+    Where the env writer would carry comments, whether they survive rewrite and
+    stay idempotent, and what `--strict` must cover given four independent gates
+    and two commands that cannot pass flags.
+
+### Round 1 leads
+
 7. **What escape hatches and warning surfaces already exist, and are they
    reachable?** (lead-existing-surfaces)
    `--allow-missing-secrets` exists on `create` and `apply` but not `init`;
