@@ -1,0 +1,43 @@
+{
+  "topic": "oss-no-infisical",
+  "upstream": "docs/prds/PRD-oss-no-infisical.md",
+  "roster_shape": "larger",
+  "roster_reason": "P1 (architectural alternatives) and P3 (Complex) both fired at /scope Phase 1",
+  "decisions": [
+    {
+      "id": 1,
+      "title": "Unresolved-reason representation in the resolver data model",
+      "requirements": ["R2", "R2a", "R5", "R10"],
+      "status": "pending",
+      "report": "wip/design_oss-no-infisical_decision_1_report.md"
+    },
+    {
+      "id": 2,
+      "title": "Strict-mode configuration surface and merge semantics",
+      "requirements": ["R12", "R13", "R21"],
+      "status": "pending",
+      "report": "wip/design_oss-no-infisical_decision_2_report.md"
+    },
+    {
+      "id": 3,
+      "title": "Omitted-key record format per env output format",
+      "requirements": ["R3", "R3a", "R4"],
+      "status": "pending",
+      "report": "wip/design_oss-no-infisical_decision_3_report.md"
+    },
+    {
+      "id": 4,
+      "title": "Report emission across command surfaces and the hook channel",
+      "requirements": ["R6", "R7", "R8", "R9", "R14", "R20"],
+      "status": "pending",
+      "report": "wip/design_oss-no-infisical_decision_4_report.md"
+    },
+    {
+      "id": 5,
+      "title": "Flag deprecation, strict-flag registration, and precedence",
+      "requirements": ["R11", "R16", "R17", "R12"],
+      "status": "pending",
+      "report": "wip/design_oss-no-infisical_decision_5_report.md"
+    }
+  ]
+}

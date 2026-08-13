@@ -28,14 +28,20 @@ worktree_rebases:
     notes: origin/main at 3403ee4f is the branch base; no upstream commits landed
 chain_ran_detail:
   - brief
+  - prd
+  - design
 child_snapshots:
   brief:
     status: Accepted
     content_hash: 471c235f75109814316a72adec1c7d754843db67
     captured_at: 2026-08-13T00:00:00Z
   prd:
-    status: Accepted
+    status: In Progress
     content_hash: 75454da66c5b14ba87d6f15a3ed5779fb9e3db3b
+    captured_at: 2026-08-13T00:00:00Z
+  design:
+    status: Proposed
+    content_hash: 04d7a2712fd661f4b9a5ee079a539a5ff1ab284b
     captured_at: 2026-08-13T00:00:00Z
 consolidation_judgments:
   - hop: brief->prd
