@@ -356,9 +356,8 @@ func TestCreateResult_JSONShape(t *testing.T) {
 }
 
 // TestCreateCmd_HasAllowMissingSecretsFlag mirrors the apply-side check.
-// The flag plumbs into workspace.Applier.AllowMissingSecrets, which the
-// Applier honors uniformly for both Create and Apply (it routes through
-// the same runPipeline).
+// The flag no longer reaches the applier; create and apply share the
+// same runPipeline, and that pipeline is tolerant by default.
 func TestCreateCmd_HasAllowMissingSecretsFlag(t *testing.T) {
 	flag := createCmd.Flags().Lookup("allow-missing-secrets")
 	if flag == nil {

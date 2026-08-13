@@ -338,11 +338,17 @@ writer applies on write.
 ### Components
 
 **`config.MaybeSecret` gains `Unresolved *Unresolved`.** The `Unresolved` struct
-carries the cause (unsatisfiable declaration, provider unreachable, client not
-installed, required-key shortfall), the declared requirement level, the declared
-description, and the provider kind where one is configured. Nil means resolved.
-The per-reference opt-out never sets it, which is how the silent-downgrade
-contract survives untouched.
+carries the cause, the declared requirement level, the declared description, and
+the provider kind where one is configured. Nil means resolved. The per-reference
+opt-out never sets it, which is how the silent-downgrade contract survives
+untouched.
+
+The four causes a value can carry are the four the resolver marks: key not found
+on a reachable provider, provider unreachable, client not installed, and a
+reference naming an undeclared provider. The declared-but-absent shape of
+unsatisfiable declaration is deliberately not in this enum — it has no value to
+hang a mark on and is derived post-merge instead, as the Decision Outcome
+explains.
 
 **`internal/keyreport`** is a new package holding the collector and the
 renderers. It imports `config` for the mark types and nothing else from this

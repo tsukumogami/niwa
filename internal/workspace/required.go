@@ -26,24 +26,28 @@ type missingRequired struct {
 	Description string
 }
 
-// checkRequiredKeys enforces PRD R33/R34: every key listed under a
-// `*.required` sub-table in the effective (post-merge) workspace config
-// MUST have a non-empty value in the parent Values map. Recommended and
-// optional sub-tables emit warnings (to stderrOut) and stay non-fatal.
+// checkRequiredKeys is where fatality is decided, once, against the
+// post-merge picture. It implements the strict-when-reachable rule: a
+// key listed under a `*.required` sub-table is fatal only when a
+// provider was configured, was reachable, and reported that it does
+// not hold the key. Recommended and optional sub-tables emit warnings
+// (to stderrOut) and stay non-fatal.
 //
 // The check runs on the post-merge config so personal-overlay-supplied
-// values satisfy team-declared required keys (R33 example in the PRD:
-// team lists GITHUB_TOKEN in [env.secrets.required], personal overlay
+// values satisfy team-declared required keys (the PRD's example: team
+// lists GITHUB_TOKEN in [env.secrets.required], personal overlay
 // supplies the value under [env.secrets]).
 //
-// --allow-missing-secrets (a.AllowMissingSecrets in the caller) does
-// NOT downgrade required misses per R34. The resolver has already
-// downgraded vault-backed required keys to empty MaybeSecret values
-// when the flag is set; this check catches that downgrade by looking
-// at the post-resolve value and failing if it's empty. The key point:
-// the flag routes around a resolver miss, but *.required is about
-// whether the value is present at apply time — if the downgrade left
-// the value empty, the required check fires regardless of the flag.
+// Every other shortfall is tolerated here and reported instead. A
+// contributor with no vault backend configured, or with the client
+// binary absent, is not being told about a fault they can fix by
+// editing configuration — they are being told the environment cannot
+// supply the value, which is a different message and not a reason to
+// refuse to materialize the instance.
+//
+// The signature deliberately does not take vault state. The mark on
+// each value carries everything the decision needs, which keeps this
+// post-merge check from coupling to the resolver.
 func checkRequiredKeys(cfg *config.WorkspaceConfig, stderrOut io.Writer) error {
 	if cfg == nil {
 		return nil
@@ -97,17 +101,31 @@ func checkRequiredKeys(cfg *config.WorkspaceConfig, stderrOut io.Writer) error {
 	for _, m := range missing {
 		fmt.Fprintf(&sb, "  [%s] %s: %s\n", m.Scope, m.Key, m.Description)
 	}
-	sb.WriteString("declare each key under the matching table with a value, " +
-		"supply it via the personal overlay, or remove it from the required sub-table")
+	sb.WriteString("the provider was reached and does not hold these keys: " +
+		"add each key to the provider, supply it via the personal overlay, " +
+		"or remove it from the required sub-table")
 	return fmt.Errorf("%s", sb.String())
 }
 
-// collectMissing returns the ordered list of keys in t.Required that
-// have no corresponding non-empty value in t.Values. Non-empty means
-// either a resolved secret (IsSecret() == true) or a non-empty Plain.
-// The resolver may downgrade a missing vault-backed required key to an
-// empty MaybeSecret under --allow-missing-secrets; that's exactly the
-// R34 case this function catches.
+// collectMissing returns the keys in t.Required that are fatal: those
+// whose value is empty AND carries a mark saying a reachable provider
+// does not hold the key.
+//
+// Three shapes are deliberately NOT fatal here:
+//
+//   - No entry in t.Values at all. Nothing ever tried to resolve the
+//     key, so no provider capable of supplying it was configured. This
+//     is the no-vault contributor's exact case.
+//   - An empty value with no mark. Either an author wrote an empty
+//     literal, or a vault:// reference opted out of resolution failure
+//     with ?required=false. Both are deliberate empties, not
+//     shortfalls.
+//   - An empty value marked with any cause other than key-not-found:
+//     an unreachable provider, an absent client binary, or a reference
+//     naming a provider nothing declares. None of these establishes
+//     that a reachable backend lacks the key.
+//
+// All three are reported rather than enforced.
 func collectMissing(scope string, t config.EnvVarsTable) []missingRequired {
 	if len(t.Required) == 0 {
 		return nil
@@ -115,7 +133,10 @@ func collectMissing(scope string, t config.EnvVarsTable) []missingRequired {
 	var out []missingRequired
 	for key, desc := range t.Required {
 		ms, ok := t.Values[key]
-		if ok && !isEmptyMaybeSecret(ms) {
+		if !ok || !isEmptyMaybeSecret(ms) {
+			continue
+		}
+		if ms.Unresolved == nil || ms.Unresolved.Cause != config.CauseKeyNotFound {
 			continue
 		}
 		out = append(out, missingRequired{
@@ -128,10 +149,8 @@ func collectMissing(scope string, t config.EnvVarsTable) []missingRequired {
 }
 
 // isEmptyMaybeSecret reports whether a MaybeSecret carries neither a
-// resolved secret nor a non-empty Plain. A resolver-downgraded required
-// key under --allow-missing-secrets produces a fully-zero MaybeSecret
-// (both Secret and Plain empty), which is exactly what this function
-// rejects so R34 stays enforced.
+// resolved secret nor a non-empty Plain. A marked (unresolved) value is
+// empty by construction: the resolver clears Plain when it marks.
 func isEmptyMaybeSecret(ms config.MaybeSecret) bool {
 	if ms.IsSecret() {
 		return false

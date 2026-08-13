@@ -52,13 +52,6 @@ type Applier struct {
 	// replace it (e.g., with NewReporterWithTTY) before calling Apply or Create.
 	Reporter *Reporter
 
-	// AllowMissingSecrets threads through to the vault resolver's
-	// ResolveOptions.AllowMissing. When true, missing vault keys are
-	// downgraded to empty MaybeSecret values with a stderr warning.
-	// The CLI --allow-missing-secrets flag (Issue 10) populates this
-	// field; default false preserves the strict-apply behavior.
-	AllowMissingSecrets bool
-
 	// AllowPlaintextSecrets threads through to the public-repo
 	// plaintext-secrets guardrail
 	// (internal/guardrail.CheckGitHubPublicRemoteSecrets). When true,
@@ -1071,9 +1064,13 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 			Env:   overlay.Env,
 			Repos: overlay.Repos,
 		}
+		// Values that resolve here are secrets and pass through the
+		// second, whole-config resolve untouched; values that do not
+		// come back marked, and the marks are what stop that second
+		// pass re-asking with the wrong bundle. See resolveOne's
+		// already-marked guard.
 		resolvedTmp, resolveErr := resolve.ResolveWorkspace(ctx, tmpCfg, resolve.ResolveOptions{
-			AllowMissing: a.AllowMissingSecrets,
-			TeamBundle:   overlayVaultBundle,
+			TeamBundle: overlayVaultBundle,
 		})
 		if resolveErr != nil {
 			return nil, fmt.Errorf("resolving overlay vault references: %w", resolveErr)
@@ -1308,20 +1305,18 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 	effectiveCfg, globalEnvExamplePolicy, globalEnvOutput, err := ResolveAndMergeEffectiveConfig(
 		ctx, cfg, globalOverride, teamBundle, personalBundle,
 		EffectiveConfigOptions{
-			AllowMissingSecrets: a.AllowMissingSecrets,
-			GlobalConfigDir:     a.GlobalConfigDir,
-			Stderr:              a.Reporter.Writer(),
+			GlobalConfigDir: a.GlobalConfigDir,
+			Stderr:          a.Reporter.Writer(),
 		},
 	)
 	if err != nil {
 		return nil, err
 	}
 
-	// Post-merge required/recommended enforcement (PRD R33/R34). The
-	// required check is NOT downgraded by AllowMissingSecrets; the
-	// resolver already turned missing vault-backed keys into empty
-	// MaybeSecret values when the flag is set, and checkRequiredKeys
-	// catches those empty values via the required list.
+	// Post-merge required/recommended enforcement. This is the single
+	// place fatality is decided: the resolver marks shortfalls rather
+	// than failing, and only a required key that a reachable provider
+	// does not hold stops the apply here.
 	if err := checkRequiredKeys(effectiveCfg, a.Reporter.Writer()); err != nil {
 		return nil, err
 	}

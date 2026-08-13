@@ -86,9 +86,11 @@ func (defaultCommander) Run(ctx context.Context, name string, args []string) ([]
 // Error handling:
 //
 //   - A start failure (binary missing) maps to
+//     vault.ErrClientNotInstalled, which itself wraps
 //     vault.ErrProviderUnreachable.
 //   - A non-zero exit with recognisable auth markers in (scrubbed)
-//     stderr maps to vault.ErrProviderUnreachable.
+//     stderr maps to vault.ErrProviderUnreachable and NOT to
+//     vault.ErrClientNotInstalled: the client ran, so it is present.
 //   - A non-zero exit without auth markers is treated as a generic
 //     provider error (wrapped via secret.Errorf, stderr scrubbed).
 //   - Malformed JSON stdout is a generic provider error.
@@ -136,13 +138,19 @@ func runInfisicalExport(ctx context.Context, c commander, project, env, path, to
 	}
 	stdout, stderrBytes, exitCode, err := c.Run(ctx, "infisical", args)
 	if err != nil {
-		// Process failed to start (e.g., CLI not installed). We do
-		// not scrub err.Error() — an os/exec start-error string is
-		// a filesystem/syscall message that never carries secret
+		// Process failed to start: the binary is missing, or is
+		// present but not executable. Either way the client is not
+		// usable on this host, which is a different remedy from an
+		// auth or network failure — hence the narrower sentinel. It
+		// wraps ErrProviderUnreachable, so callers testing only for
+		// the broader one are unaffected.
+		//
+		// We do not scrub err.Error() — an os/exec start-error string
+		// is a filesystem/syscall message that never carries secret
 		// material.
 		return nil, vault.VersionToken{}, secret.Errorf(
 			"infisical: running export: %w: %w",
-			vault.ErrProviderUnreachable, err,
+			vault.ErrClientNotInstalled, err,
 		)
 	}
 	if exitCode != 0 {

@@ -163,7 +163,6 @@ func runApply(cmd *cobra.Command, args []string) error {
 		// notice once per process invocation.
 		fmt.Fprintln(os.Stderr, "warning: --allow-dirty is no longer meaningful under the snapshot model and will be removed in v1.1")
 	}
-	applier.AllowMissingSecrets = applyAllowMissingSecrets
 	applier.AllowPlaintextSecrets = applyAllowPlaintextSecrets
 
 	// Reconcile the workspace-root config snapshot from its source BEFORE the

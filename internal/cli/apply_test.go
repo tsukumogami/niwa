@@ -100,11 +100,11 @@ func TestApplyCmd_NoCascadeFlagParses(t *testing.T) {
 	}
 }
 
-// TestApplyCmd_HasAllowMissingSecretsFlag verifies the Issue 10 flag
-// is registered and defaults to false. The flag is plumbed into
-// workspace.Applier.AllowMissingSecrets, which is exercised in
-// internal/workspace/apply_vault_test.go; here we only check the CLI
-// wiring.
+// TestApplyCmd_HasAllowMissingSecretsFlag verifies the flag is still
+// registered and still defaults to false. It no longer reaches the
+// applier: the tolerance it used to request is what apply does by
+// default, so the flag is on its way to being a documented no-op. This
+// test covers the CLI wiring only.
 func TestApplyCmd_HasAllowMissingSecretsFlag(t *testing.T) {
 	flag := applyCmd.Flags().Lookup("allow-missing-secrets")
 	if flag == nil {

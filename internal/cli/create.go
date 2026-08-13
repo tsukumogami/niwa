@@ -215,7 +215,6 @@ func runCreate(cmd *cobra.Command, args []string) error {
 	// install. Without this seam the install is a silent no-op even
 	// when the rank-2 notice surfaces.
 	configurePluginAutoInstall(applier, createNoInstallPlugins)
-	applier.AllowMissingSecrets = createAllowMissingSecrets
 	applier.AllowPlaintextSecrets = createAllowPlaintextSecrets
 	// --parallel wins when > 0; otherwise the [global] clone_workers config
 	// (resolved below when it loads) applies; otherwise the Applier default.

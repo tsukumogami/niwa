@@ -322,6 +322,12 @@ func TestAuthFailureMapsToUnreachable(t *testing.T) {
 			if !errors.Is(err, vault.ErrProviderUnreachable) {
 				t.Fatalf("expected ErrProviderUnreachable, got: %v", err)
 			}
+			// The client ran and reported an auth problem, so it is
+			// present. Reporting an absent binary here would send the
+			// reader off to install something they already have.
+			if errors.Is(err, vault.ErrClientNotInstalled) {
+				t.Fatalf("an auth failure must NOT map to ErrClientNotInstalled: %v", err)
+			}
 		})
 	}
 }
@@ -349,9 +355,12 @@ func TestGenericFailureDoesNotMapToUnreachable(t *testing.T) {
 	}
 }
 
-// TestStartFailureMapsToUnreachable covers the case where the CLI
-// binary cannot be started (not installed / not on PATH).
-func TestStartFailureMapsToUnreachable(t *testing.T) {
+// TestStartFailureMapsToClientNotInstalled covers the case where the
+// CLI binary cannot be started (not installed / not on PATH). It must
+// satisfy both sentinels: the narrow one so reporting can offer the
+// right remedy, and the broad one so every pre-existing unreachability
+// check keeps matching.
+func TestStartFailureMapsToClientNotInstalled(t *testing.T) {
 	cmd := &fakeCommander{
 		exitCode: -1,
 		runErr:   errors.New("exec: \"infisical\": executable file not found in $PATH"),
@@ -360,8 +369,11 @@ func TestStartFailureMapsToUnreachable(t *testing.T) {
 	defer p.Close()
 
 	_, _, err := p.Resolve(context.Background(), vault.Ref{Key: "k"})
+	if !errors.Is(err, vault.ErrClientNotInstalled) {
+		t.Fatalf("expected ErrClientNotInstalled for start failure, got: %v", err)
+	}
 	if !errors.Is(err, vault.ErrProviderUnreachable) {
-		t.Fatalf("expected ErrProviderUnreachable for start failure, got: %v", err)
+		t.Fatalf("expected start failure to still satisfy ErrProviderUnreachable, got: %v", err)
 	}
 }
 

@@ -219,10 +219,15 @@ func TestResolveWorkspaceOptionalDowngradesSilently(t *testing.T) {
 	}
 }
 
-// TestResolveWorkspaceAllowMissingDowngradesWithWarning: when
-// opts.AllowMissing is true, a non-optional miss downgrades to empty
-// but emits a stderr warning naming the key and provider.
-func TestResolveWorkspaceAllowMissingDowngradesWithWarning(t *testing.T) {
+// TestResolveWorkspaceMissingKeyIsSilent: a non-optional miss is
+// recorded on the value, not announced. The resolver has no idea yet
+// whether the shortfall matters, so it says nothing; reporting happens
+// once, post-merge, where the whole picture is available.
+//
+// This replaces a test that asserted a stderr warning naming
+// --allow-missing-secrets. That flag no longer routes around anything,
+// so a warning telling the reader to pass it would be wrong twice.
+func TestResolveWorkspaceMissingKeyIsSilent(t *testing.T) {
 	cfg := &config.WorkspaceConfig{
 		Workspace: config.WorkspaceMeta{Name: "test"},
 		Vault: &config.VaultRegistry{
@@ -241,28 +246,32 @@ func TestResolveWorkspaceAllowMissingDowngradesWithWarning(t *testing.T) {
 	}
 	var stderr bytes.Buffer
 	out, err := resolve.ResolveWorkspace(context.Background(), cfg, resolve.ResolveOptions{
-		Registry:     newFakeRegistry(t),
-		AllowMissing: true,
-		Stderr:       &stderr,
+		Registry: newFakeRegistry(t),
+		Stderr:   &stderr,
 	})
 	if err != nil {
 		t.Fatalf("ResolveWorkspace: %v", err)
 	}
 	if out.Env.Secrets.Values["MISSING"].IsSecret() {
-		t.Error("expected downgrade to empty")
+		t.Error("expected an empty value, not a secret")
 	}
-	if !strings.Contains(stderr.String(), "MISSING") {
-		t.Errorf("expected warning to name the key, got %q", stderr.String())
+	if !out.Env.Secrets.Values["MISSING"].IsUnresolved() {
+		t.Error("expected the miss to be marked")
 	}
-	if !strings.Contains(stderr.String(), "--allow-missing-secrets") {
-		t.Errorf("expected warning to reference the flag, got %q", stderr.String())
+	if stderr.Len() != 0 {
+		t.Errorf("resolver must not write diagnostics, got %q", stderr.String())
 	}
 }
 
-// TestResolveWorkspaceMissingErrorsByDefault: without ?required=false
-// and without AllowMissing, a missing key returns an error wrapping
-// vault.ErrKeyNotFound with R9 remediation in the message.
-func TestResolveWorkspaceMissingErrorsByDefault(t *testing.T) {
+// TestResolveWorkspaceMissingMarksByDefault: a key a reachable provider
+// does not hold is marked rather than erroring, and the mark carries
+// the declared level, description, and provider kind so a report can be
+// assembled from it without re-reading the config.
+//
+// This inverts the old default, which failed resolution outright.
+// Fatality now lives post-merge, where a required key on a reachable
+// provider is still fatal but nothing else is.
+func TestResolveWorkspaceMissingMarksByDefault(t *testing.T) {
 	cfg := &config.WorkspaceConfig{
 		Workspace: config.WorkspaceMeta{Name: "test"},
 		Vault: &config.VaultRegistry{
@@ -276,31 +285,168 @@ func TestResolveWorkspaceMissingErrorsByDefault(t *testing.T) {
 				Values: map[string]config.MaybeSecret{
 					"MISSING": {Plain: "vault://MISSING"},
 				},
+				Required: map[string]string{
+					"MISSING": "token the pipeline needs",
+				},
 			},
 		},
 	}
-	_, err := resolve.ResolveWorkspace(context.Background(), cfg, resolve.ResolveOptions{
+	out, err := resolve.ResolveWorkspace(context.Background(), cfg, resolve.ResolveOptions{
 		Registry: newFakeRegistry(t),
 	})
-	if err == nil {
-		t.Fatal("expected error for missing key")
+	if err != nil {
+		t.Fatalf("ResolveWorkspace: %v", err)
 	}
-	if !errors.Is(err, vault.ErrKeyNotFound) {
-		t.Errorf("expected ErrKeyNotFound, got %v", err)
+	got := out.Env.Secrets.Values["MISSING"]
+	if !got.IsUnresolved() {
+		t.Fatal("expected a mark on the missing key")
 	}
-	msg := err.Error()
-	for _, want := range []string{"MISSING", "--allow-missing-secrets", "?required=false"} {
-		if !strings.Contains(msg, want) {
-			t.Errorf("error missing remediation phrase %q: %s", want, msg)
-		}
+	if got.Unresolved.Cause != config.CauseKeyNotFound {
+		t.Errorf("Cause = %q, want %q", got.Unresolved.Cause, config.CauseKeyNotFound)
+	}
+	if got.Unresolved.Level != config.LevelRequired {
+		t.Errorf("Level = %q, want %q", got.Unresolved.Level, config.LevelRequired)
+	}
+	if got.Unresolved.Description != "token the pipeline needs" {
+		t.Errorf("Description = %q, want the required-table text", got.Unresolved.Description)
+	}
+	if got.Unresolved.ProviderKind != "fake" {
+		t.Errorf("ProviderKind = %q, want fake", got.Unresolved.ProviderKind)
+	}
+	// The mark is metadata about an absence, never part of the value.
+	if got.String() != "" {
+		t.Errorf("String() = %q, want the zero rendering", got.String())
+	}
+	text, err := got.MarshalText()
+	if err != nil {
+		t.Fatalf("MarshalText: %v", err)
+	}
+	if len(text) != 0 {
+		t.Errorf("MarshalText() = %q, want the zero rendering", text)
+	}
+}
+
+// TestResolveWorkspaceClientNotInstalledMarksSeparately: an absent
+// client binary is marked distinctly from any other unreachability,
+// because the remedy differs -- install the client, versus repair
+// credentials or connectivity.
+func TestResolveWorkspaceClientNotInstalledMarksSeparately(t *testing.T) {
+	cfg := &config.WorkspaceConfig{
+		Workspace: config.WorkspaceMeta{Name: "test"},
+		Vault: &config.VaultRegistry{
+			Provider: &config.VaultProviderConfig{
+				Kind:   "fake",
+				Config: map[string]any{"no_client": true},
+			},
+		},
+		Env: config.EnvConfig{
+			Secrets: config.EnvVarsTable{
+				Values: map[string]config.MaybeSecret{
+					"K": {Plain: "vault://K"},
+				},
+			},
+		},
+	}
+	out, err := resolve.ResolveWorkspace(context.Background(), cfg, resolve.ResolveOptions{
+		Registry: newFakeRegistry(t),
+	})
+	if err != nil {
+		t.Fatalf("ResolveWorkspace: %v", err)
+	}
+	got := out.Env.Secrets.Values["K"]
+	if !got.IsUnresolved() {
+		t.Fatal("expected a mark for the absent client")
+	}
+	if got.Unresolved.Cause != config.CauseClientNotInstalled {
+		t.Errorf("Cause = %q, want %q", got.Unresolved.Cause, config.CauseClientNotInstalled)
+	}
+}
+
+// TestResolveWorkspaceCarriesMarkThroughDeepCopy: the resolver's
+// deep-copy path moves an existing mark into the output untouched, and
+// does not re-resolve an already-marked value.
+//
+// The second half is what protects the workspace-overlay layer: it is
+// resolved against its own provider bundle and then merged into the
+// base config, which the pipeline resolves again as a whole. Without
+// the guard, the second pass would overwrite a correct mark with one
+// derived from the wrong bundle.
+func TestResolveWorkspaceCarriesMarkThroughDeepCopy(t *testing.T) {
+	mark := &config.Unresolved{
+		Cause:        config.CauseProviderUnreachable,
+		Level:        config.LevelRecommended,
+		Description:  "set by an earlier layer",
+		ProviderKind: "infisical",
+	}
+	cfg := &config.WorkspaceConfig{
+		Workspace: config.WorkspaceMeta{Name: "test"},
+		Env: config.EnvConfig{
+			Secrets: config.EnvVarsTable{
+				Values: map[string]config.MaybeSecret{
+					"K": {Unresolved: mark},
+				},
+			},
+		},
+	}
+	out, err := resolve.ResolveWorkspace(context.Background(), cfg, resolve.ResolveOptions{
+		Registry: newFakeRegistry(t),
+	})
+	if err != nil {
+		t.Fatalf("ResolveWorkspace: %v", err)
+	}
+	got := out.Env.Secrets.Values["K"]
+	if !got.IsUnresolved() {
+		t.Fatal("deep copy dropped the mark")
+	}
+	if *got.Unresolved != *mark {
+		t.Errorf("mark changed across the copy: got %+v, want %+v", *got.Unresolved, *mark)
+	}
+}
+
+// TestResolveGlobalOverrideCarriesMarkThroughDeepCopy is the same
+// assertion for the personal-overlay deep-copy path, which is a
+// separate function over a separate struct shape.
+func TestResolveGlobalOverrideCarriesMarkThroughDeepCopy(t *testing.T) {
+	mark := &config.Unresolved{
+		Cause:       config.CauseUndeclaredProvider,
+		Level:       config.LevelOptional,
+		Description: "set by an earlier layer",
+	}
+	gco := &config.GlobalConfigOverride{
+		Global: config.GlobalOverride{
+			Env: config.EnvConfig{
+				Secrets: config.EnvVarsTable{
+					Values: map[string]config.MaybeSecret{
+						"K": {Unresolved: mark},
+					},
+				},
+			},
+		},
+	}
+	out, err := resolve.ResolveGlobalOverride(context.Background(), gco, resolve.ResolveOptions{
+		Registry: newFakeRegistry(t),
+	})
+	if err != nil {
+		t.Fatalf("ResolveGlobalOverride: %v", err)
+	}
+	got := out.Global.Env.Secrets.Values["K"]
+	if !got.IsUnresolved() {
+		t.Fatal("deep copy dropped the mark")
+	}
+	if *got.Unresolved != *mark {
+		t.Errorf("mark changed across the copy: got %+v, want %+v", *got.Unresolved, *mark)
 	}
 }
 
 // TestResolveWorkspaceUnknownProviderAtResolveTime: a vault:// URI
-// that names a provider not present in the bundle at resolve time
-// fails with ErrKeyNotFound and an actionable message. This is
-// distinct from the parse-time same-file check (which covers the
-// simpler typo case).
+// that names a provider not present in the bundle at resolve time is
+// marked as an undeclared provider, NOT as key-not-found. The
+// distinction matters because key-not-found is the one cause that keeps
+// a required key fatal, and nothing here established that a reachable
+// backend lacks the key -- no backend was found to ask.
+//
+// This is distinct from the parse-time same-file check (which covers
+// the simpler typo case).
 //
 // We set up this failure by pre-building a bundle with one named
 // provider ("other") and referencing a different named provider
@@ -330,17 +476,21 @@ func TestResolveWorkspaceUnknownProviderAtResolveTime(t *testing.T) {
 		t.Fatalf("Build bundle: %v", err)
 	}
 
-	_, err = resolve.ResolveWorkspace(context.Background(), cfg, resolve.ResolveOptions{
+	out, err := resolve.ResolveWorkspace(context.Background(), cfg, resolve.ResolveOptions{
 		TeamBundle: bundle,
 	})
-	if err == nil {
-		t.Fatal("expected error for unknown provider")
+	if err != nil {
+		t.Fatalf("ResolveWorkspace: %v", err)
 	}
-	if !errors.Is(err, vault.ErrKeyNotFound) {
-		t.Errorf("expected ErrKeyNotFound wrap, got %v", err)
+	got := out.Env.Secrets.Values["K"]
+	if !got.IsUnresolved() {
+		t.Fatal("expected a mark for the undeclared provider")
 	}
-	if !strings.Contains(err.Error(), "team-vault") {
-		t.Errorf("expected provider name in error, got %q", err.Error())
+	if got.Unresolved.Cause != config.CauseUndeclaredProvider {
+		t.Errorf("Cause = %q, want %q", got.Unresolved.Cause, config.CauseUndeclaredProvider)
+	}
+	if got.Unresolved.ProviderKind != "" {
+		t.Errorf("ProviderKind = %q, want empty: no provider was ever reached", got.Unresolved.ProviderKind)
 	}
 }
 
@@ -646,9 +796,9 @@ func TestResolveWorkspaceInvalidVaultURI(t *testing.T) {
 }
 
 // TestResolveWorkspaceProviderUnreachable: when the provider returns
-// ErrProviderUnreachable, the resolver wraps the error (always,
-// regardless of AllowMissing -- AllowMissing targets ErrKeyNotFound
-// only).
+// ErrProviderUnreachable, the resolver marks the value with that cause
+// and carries on. A backend that cannot be contacted is a property of
+// the host, not a defect in the configuration.
 func TestResolveWorkspaceProviderUnreachable(t *testing.T) {
 	cfg := &config.WorkspaceConfig{
 		Workspace: config.WorkspaceMeta{Name: "test"},
@@ -668,14 +818,20 @@ func TestResolveWorkspaceProviderUnreachable(t *testing.T) {
 			},
 		},
 	}
-	_, err := resolve.ResolveWorkspace(context.Background(), cfg, resolve.ResolveOptions{
-		Registry:     newFakeRegistry(t),
-		AllowMissing: true, // should not help -- unreachable != missing
+	out, err := resolve.ResolveWorkspace(context.Background(), cfg, resolve.ResolveOptions{
+		Registry: newFakeRegistry(t),
 	})
-	if err == nil {
-		t.Fatal("expected error for provider unreachable")
+	if err != nil {
+		t.Fatalf("ResolveWorkspace: %v", err)
 	}
-	if !errors.Is(err, vault.ErrProviderUnreachable) {
-		t.Errorf("expected ErrProviderUnreachable, got %v", err)
+	got := out.Env.Secrets.Values["K"]
+	if !got.IsUnresolved() {
+		t.Fatal("expected a mark for the unreachable provider")
+	}
+	if got.Unresolved.Cause != config.CauseProviderUnreachable {
+		t.Errorf("Cause = %q, want %q", got.Unresolved.Cause, config.CauseProviderUnreachable)
+	}
+	if got.Unresolved.ProviderKind != "fake" {
+		t.Errorf("ProviderKind = %q, want fake", got.Unresolved.ProviderKind)
 	}
 }
