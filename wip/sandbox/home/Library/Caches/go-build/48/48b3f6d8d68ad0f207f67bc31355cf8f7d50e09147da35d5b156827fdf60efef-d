@@ -1,0 +1,5 @@
+./client.go
+./errors.go
+./fetch.go
+./pulls.go
+./tar.go

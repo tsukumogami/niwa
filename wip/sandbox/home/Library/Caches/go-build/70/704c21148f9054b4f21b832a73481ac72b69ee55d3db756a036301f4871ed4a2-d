@@ -1,0 +1,3 @@
+./auth.go
+./infisical.go
+./subprocess.go
