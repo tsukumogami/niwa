@@ -171,9 +171,16 @@ DEBUG_WEBHOOK_URL = "Personal debug webhook"
 
 | Sub-table | Behavior on miss |
 |-----------|------------------|
-| `*.required` | Hard error; `niwa apply` fails. Error names the key, the scope (e.g. `env.secrets`), and the description string. |
+| `*.required` | Hard error only when a configured provider is reachable and does not hold the key. Otherwise the key is reported and omitted, and apply continues. |
 | `*.recommended` | Stderr warning per missing key; apply continues. |
-| `*.optional` | Silent in v1; apply continues. Info-log output will land when a verbose flag is added. |
+| `*.optional` | Reported alongside other unresolved keys; apply continues. |
+
+A required key is fatal when a provider that could have supplied it was
+reachable and simply did not hold it — a real fault with a known owner. When no
+provider is configured, or a configured one could not be reached, the key is
+omitted from the generated environment files, recorded there, listed in the run
+report, and apply exits 0. Set `strict_secrets = true` under `[workspace]`, or
+pass `--strict-secrets`, to make any shortfall fatal again.
 
 `--allow-missing-secrets` is a deprecated no-op. It is still accepted
 so existing scripts and CI invocations keep working, and using it
