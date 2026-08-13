@@ -177,6 +177,114 @@ into this exploration's artifact.
 
 Pending — narrowing question posed at end of round 1.
 
+## Round 2
+
+### Key Insights
+
+- **A non-zero exit does not suppress a SessionStart hook's output.** Verified
+  empirically against Claude Code 2.1.231 on exit 0, 1, and 2:
+  `hookSpecificOutput.additionalContext` reaches the model in every case, stderr
+  reaches it in none, and even `continue: false` fails to stop the session. So
+  "fail the session" is not an implementable option, and niwa's current
+  exit-1-with-no-JSON is the single shape that tells the worker nothing at all.
+  (lead-sessionstart-semantics)
+
+- **The hook-path remedy is an emit, not an exit-code change.** Always write the
+  JSON, exit 0, and render the unresolved-key inventory into the
+  `additionalContext` string itself. `Reporter.Warn` output is a black hole on
+  this path even when provisioning fully succeeds, so the warning has to travel
+  inside the context payload. `niwa dispatch` differs usefully: it provisions
+  before launching, so it never strands a worker, and its notice can ride the
+  existing niwa-authored prompt prefix. (lead-sessionstart-semantics)
+
+- **Strictness should be a config action, not primarily a flag — which dissolves
+  round 1's reachability problem.** A `config.Action` (`"warn"` / `"fail"`) on
+  `[workspace]` and `[global]` is already loadable by `realProvisionInstance`,
+  the very function round 1 identified as unable to receive a CLI flag. Better,
+  `WorkspaceOverlay` has no `Workspace` field, so a private overlay layer
+  *structurally cannot* change the strictness a public contributor sees. That
+  safety property falls out of the existing schema rather than needing design.
+  (lead-annotation-and-strict)
+
+- **The annotation cannot key off emptiness; the resolver needs an explicit
+  unresolved marker.** A deliberate `FOO = ""` and a downgraded vault miss
+  produce byte-identical zero `MaybeSecret` values. Carrying an explicit
+  `UnresolvedReason` also lets the required check implement strict-when-reachable
+  without plumbing vault bundles into it. (lead-annotation-and-strict)
+
+- **The `.local.env` annotation is load-bearing, not cosmetic.** Omitting a key
+  instead of writing `KEY=` converts a silent empty promote into a hard worktree
+  failure via `readCloneEnvOutput`, so the `# niwa: unset <KEY>` comment must be
+  machine-read on the way back in. This is gate 4's real cost.
+  (lead-annotation-and-strict)
+
+- **The env writer makes the annotation cheap.** It is a 106-line leaf package
+  with a single call site, and the file is already fully rewritten and key-sorted
+  on every apply — so idempotency, ordering, and clean removal once a key
+  resolves all come free. (lead-annotation-and-strict)
+
+- **Two of the three incidental findings were refuted on verification.**
+  (lead-incidental-verify)
+  - *Remote-control suppression: REFUTED.* The API-key gate is real and behaves
+    as described, but it is deliberate — specified in the PRD, design doc, and
+    user guide, covered by three tests including an end-to-end stderr assertion,
+    and it prints its own warning at `dispatch.go:376-379`. It is inactive on the
+    maintainer's host on two independent grounds: `remote_control_on_dispatch` is
+    not set at all, and the vault-bound `ANTHROPIC_API_KEY` lands only in
+    unsourced `.local.env` files, so it is never in the process environment.
+  - *`GH_TOKEN` promotion: REFUTED.* niwa itself reads `GH_TOKEN`
+    (`internal/cli/token.go:16`); the promoted value is the actual delivery path
+    into sessions rather than redundancy (no shell profile exports it, yet the
+    session value hash-matches `settings.local.json`); every settings file is
+    0600 by code with the 0644 case explicitly fixed at `materialize.go:25-27`;
+    the true workspace-root settings carries no `env` block at all; and the
+    promoted fine-grained PAT is *narrower* than the classic full-`repo` keyring
+    token that removal would fall back to. The round-1 credential-exposure claim
+    does not survive. Only the known `promote` intolerance
+    (`materialize.go:958-963`) remains a live concern.
+  - *Unauthenticated repo listing: CONFIRMED, with a sharper finding.* A live
+    unauthenticated call returned exactly the six public repos, well under
+    `DefaultMaxRepos = 10`. But a 403 collapses to `GitHub API returned status
+    403 for org "tsukumogami"` with no rate-limit wording, no typed error, and no
+    test coverage — in a package where `GetRepo` and the tarball fetchers all do
+    better. And the org now holds exactly 10 repos against a threshold of 10, so
+    the next repo created breaks `apply` for every maintainer.
+
+### Tensions
+
+- **Gate 4 pulls against the omit-don't-write-empty rule.** Omission is right for
+  downstream consumers but breaks `readCloneEnvOutput`, which parses these files
+  back. Resolved only by making the comment machine-readable — which means the
+  annotation format becomes a compatibility surface, not just human text.
+
+- **Round 1's flag framing was wrong, and the correction is load-bearing.** The
+  "escape hatch unreachable from dispatch and the hook" finding drove the
+  rejection of flag-shaped remedies. A config action reaches those paths, so the
+  argument for the largest remedy shape rests on placement and prior art, not on
+  reachability.
+
+### Gaps
+
+- What a *total* provisioning failure should say and do. A stranded worker lands
+  at a workspace root containing no repos of its own but other sessions'
+  instances plus a CLAUDE.md explaining how to enumerate them.
+- Whether an `ANTHROPIC_API_KEY` genuinely precludes Claude Code Remote. This
+  repo cannot settle it and no spike ever tested it; the gate rests on an
+  untested premise. Low stakes given the gate is documented and warns.
+
+### Decisions
+
+See `wip/explore_oss-no-infisical_decisions.md`. Round 2 added: the remedy shape
+(consumption-placed, strict-when-reachable), the `.local.env` comment annotation
+requirement, and the `--strict` enforcement switch.
+
+### User Focus
+
+Confirmed the consumption-placed remedy. Added two requirements: annotate
+unresolved keys as comments in the generated `.local.env` as a second loud-but-
+non-fatal channel, and provide a `--strict`-style switch that enforces resolution
+and fails the command.
+
 ## Accumulated Understanding
 
 The reported symptom is misattributed: `niwa init` works. What fails is every
@@ -197,10 +305,36 @@ all), *and* niwa's placement of the check is out of step with every comparable
 tool, none of which makes secret resolution a precondition for constructing the
 environment.
 
-The most defensible narrow fix — widening the resolver's unreachable-provider
-branch to honour the existing flag — is a small change with clear precedent, but
-it cannot stand alone: it does nothing for the OSS contributor, and the
-launch-coupled `dispatch` and SessionStart paths cannot pass a flag at all. That
-pushes the durable answer toward a config-level or default-level severity
-mechanism rather than a new CLI switch, with the `.env.example` failure-policy
-ladder as the in-repo template for how such a mechanism is already shaped.
+Round 2 settled the shape. The remedy is consumption-placed and
+strict-when-reachable: materialization proceeds with unresolved keys omitted from
+the generated `.local.env` rather than written empty, annotated there as comments
+naming the key and its declared description, reported loudly on the terminal, and
+exiting 0. `required` stays fatal only when a provider is configured and reachable
+and the key is simply absent — so the maintainer's steady state is exactly as
+strict as it is today. Strictness is restored on demand through a `config.Action`
+(`"warn"` / `"fail"`) on `[workspace]` and `[global]`, with a CLI flag as the
+interactive front door.
+
+Three mechanisms make it work. The resolver must carry an explicit
+`UnresolvedReason`, because a downgraded miss and a deliberate empty string are
+byte-identical today; that marker also lets the required check implement
+strict-when-reachable without plumbing vault bundles into it. The `.local.env`
+comment must be machine-readable, because `readCloneEnvOutput` parses these files
+back and a bare omission would convert a silent empty promote into a hard
+worktree failure. And on the SessionStart path the fix is an emit rather than an
+exit-code change: `additionalContext` reaches the model regardless of exit code
+while stderr never does, so the inventory has to travel inside the context
+payload.
+
+The config-action placement also dissolves round 1's reachability objection —
+`realProvisionInstance` already loads both rungs — and yields a safety property
+for free: `WorkspaceOverlay` has no `Workspace` field, so a private overlay
+cannot change the strictness a public contributor experiences.
+
+Separately, the tsukumogami base config is genuinely miscategorized. No declared
+secret is load-bearing for cloning or materializing, so the required list can be
+empty, and the `INFISICAL_*` keys — two of which nothing in the repository reads —
+do not belong in a public config at all. Because niwa cannot explain where the
+values were supposed to come from without disclosing a private repository's
+existence, the base config's own key descriptions and README carry the entire
+explanatory burden for a contributor.
