@@ -1,6 +1,6 @@
 ---
 schema: prd/v1
-status: In Progress
+status: Done
 problem: |
   niwa resolves a workspace's declared secrets before it will materialize an
   instance and treats any shortfall as fatal, so a contributor on a host with
@@ -27,7 +27,7 @@ motivating_context: |
 
 ## Status
 
-In Progress
+Done
 
 Requirements are drafted against a completed two-round investigation and
 revised against a three-reviewer jury. The downstream design owns where each

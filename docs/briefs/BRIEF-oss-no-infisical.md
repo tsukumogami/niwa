@@ -1,6 +1,6 @@
 ---
 schema: brief/v1
-status: Accepted
+status: Done
 problem: |
   niwa treats resolving a workspace's declared secrets as a precondition for
   materializing an instance, so a host with no vault backend cannot create one
@@ -20,7 +20,7 @@ motivating_context: |
 
 ## Status
 
-Accepted
+Done
 
 Framing is settled through the four required sections. The downstream PRD owns
 the requirements articulation.

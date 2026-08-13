@@ -1,6 +1,6 @@
 ---
 schema: design/v1
-status: Planned
+status: Current
 upstream: docs/prds/PRD-oss-no-infisical.md
 problem: |
   niwa resolves a workspace's declared secrets before it will materialize an
@@ -32,7 +32,7 @@ rationale: |
 
 ## Status
 
-Planned
+Current
 
 Five decision questions were evaluated independently against the accepted PRD,
 then cross-validated. The Implementation Approach below sequences the work.
