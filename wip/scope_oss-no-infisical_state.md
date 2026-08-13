@@ -33,8 +33,54 @@ child_snapshots:
     status: Accepted
     content_hash: 471c235f75109814316a72adec1c7d754843db67
     captured_at: 2026-08-13T00:00:00Z
-consolidation_judgments: []
+  prd:
+    status: Accepted
+    content_hash: 75454da66c5b14ba87d6f15a3ed5779fb9e3db3b
+    captured_at: 2026-08-13T00:00:00Z
+consolidation_judgments:
+  - hop: brief->prd
+    absorbable: true
+    carry_check:
+      Problem Statement: {target: Problem Statement, carried: true}
+      User Outcome:      {target: Goals, carried: true}
+      User Journeys:     {target: User Stories, carried: partial}
+      Scope Boundary:    {target: Requirements + Out of Scope, carried: false}
+    verdict: keep
+    finding: >-
+      The PRD's Out of Scope section cites the BRIEF's Scope Boundary rather
+      than restating it, on the format contract's citation-vs-restatement rule
+      and at a reviewer's recommendation. The BRIEF's OUT list therefore lives
+      only in the BRIEF, and absorbing it would delete content the PRD points
+      at. The User Journeys carry a today-versus-after narrative contrast that
+      the PRD's user stories do not reproduce. Both artifacts stay.
 ```
+
+## Phase 2 Notes — /prd
+
+Three-reviewer jury (completeness, clarity, testability) returned FAIL on the
+first pass from all three. Two substantive contradictions were found and fixed
+rather than reworded:
+
+- R1 mandated exit 0 for any unresolvable secret while R10 mandated non-zero
+  for a required key a reachable provider does not hold — a subset of the same
+  condition. Resolved by a closed exception list naming R10 and R12 and
+  stating that both retain today's failure semantics in full.
+- R6 would have broken the per-reference `?required=false` opt-out, whose whole
+  purpose is a silent downgrade, and which two existing tests assert. Resolved
+  by R2a: an explicit opt-out is a deliberate empty rather than a shortfall, so
+  neither R2's omission nor R6's report has a claim on it. A reviewer verified
+  both tests survive assertion by assertion.
+
+Other corrections: `--allow-missing-secrets` became a decided deprecated no-op
+rather than a deferred question; `niwa init`'s bootstrap branch was added to
+the affected set after a reviewer traced it into the create flow; the
+env-file recoverability criterion was narrowed to dotenv after a reviewer
+showed the original could never fail and collided with the document's own
+Known Limitations; and "gate" was replaced by a named four-member
+enforcement-point taxonomy enumerated in the document.
+
+All three reviewers returned PASS on re-review.
+
 
 ## Phase 1 Notes
 
