@@ -1,6 +1,0 @@
-./atomicid.go
-./attach_state.go
-./liveness.go
-./session_discovery.go
-./session_lifecycle.go
-./worktree.go

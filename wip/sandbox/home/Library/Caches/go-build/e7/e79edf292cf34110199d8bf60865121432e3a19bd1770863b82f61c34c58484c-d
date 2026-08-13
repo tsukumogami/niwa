@@ -1,5 +1,0 @@
-./attach.go
-./detach.go
-./preflight.go
-./supervise.go
-./worktree_warnings.go

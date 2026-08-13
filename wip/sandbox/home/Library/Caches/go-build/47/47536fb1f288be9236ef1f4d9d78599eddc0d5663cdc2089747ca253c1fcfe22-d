@@ -1,6 +1,0 @@
-./errors.go
-./provider.go
-./ref.go
-./registry.go
-./scrub.go
-./shadows.go
