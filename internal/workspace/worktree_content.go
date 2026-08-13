@@ -12,6 +12,7 @@ import (
 	"github.com/tsukumogami/niwa/internal/agent"
 	"github.com/tsukumogami/niwa/internal/config"
 	"github.com/tsukumogami/niwa/internal/gitexclude"
+	"github.com/tsukumogami/niwa/internal/keyreport"
 )
 
 // worktreeApplyEvent is the worktree-lifecycle event run by ApplyToWorktree on
@@ -62,6 +63,13 @@ type repoMaterializeInputs struct {
 	// of re-resolving secrets. The worktree path sets this (see ApplyToWorktree);
 	// the instance apply path leaves it nil so promotion resolves from config.
 	InheritedEnv map[string]string
+	// InheritedUnresolved is the worktree path's unresolved-key set, recovered
+	// from the records in the clone's materialized env file. It rides alongside
+	// InheritedEnv for the same reason: this path holds no marks to read.
+	InheritedUnresolved map[string]unresolvedEnvKey
+	// Keys collects the declared keys this repo could not supply. nil disables
+	// collection; the worktree path leaves it nil because it renders no report.
+	Keys *keyreport.Collector
 }
 
 // runRepoMaterializers runs the given materializers for a single repo against
@@ -153,6 +161,8 @@ func runRepoMaterializers(materializers []Materializer, in repoMaterializeInputs
 		GlobalEnvOutput:        in.GlobalEnvOutput,
 		WorktreeDelegation:     in.WorktreeDelegation,
 		InheritedEnv:           in.InheritedEnv,
+		InheritedUnresolved:    in.InheritedUnresolved,
+		Keys:                   in.Keys,
 	}
 
 	var written []string
@@ -331,39 +341,61 @@ func inheritEnvOutputs(cloneRepoDir, worktreeDir string, cfg *config.WorkspaceCo
 // owns the friendlier R8 "run niwa apply first" message for a missing clone. The
 // returned map is always non-nil so it can signal "worktree path" to the
 // SettingsMaterializer even when empty.
-func readCloneEnvOutput(cloneRepoDir string, cfg *config.WorkspaceConfig, repo string, globalEnvOutput config.OutputTargets) (map[string]string, error) {
+//
+// The second return is the unresolved-key set recovered from the file's
+// records. It is what lets the worktree half of the promote branch tell a key
+// the instance apply deliberately omitted from one that was never there — the
+// clone's file is the only evidence of that decision this path can see.
+//
+// That recovery is a trust boundary, and it is worth naming: a repository can
+// write its own environment file, so a crafted record can move a key out of the
+// promote branch's hard error and into its tolerated branch. The effect is
+// bounded to degradation — the key is dropped rather than promoted, no value is
+// invented — and envformat.ParseRecord revalidates the key and description
+// before either reaches this map.
+func readCloneEnvOutput(cloneRepoDir string, cfg *config.WorkspaceConfig, repo string, globalEnvOutput config.OutputTargets) (map[string]string, map[string]unresolvedEnvKey, error) {
 	out := map[string]string{}
+	unresolved := map[string]unresolvedEnvKey{}
 	if _, err := os.Stat(cloneRepoDir); err != nil {
 		if os.IsNotExist(err) {
-			return out, nil
+			return out, unresolved, nil
 		}
-		return nil, fmt.Errorf("repo %s: stating clone directory %s: %w", repo, cloneRepoDir, err)
+		return nil, nil, fmt.Errorf("repo %s: stating clone directory %s: %w", repo, cloneRepoDir, err)
 	}
 
 	for _, tgt := range config.EffectiveEnvOutput(globalEnvOutput, cfg, repo) {
 		srcAbs, err := safeTargetPath(cloneRepoDir, tgt.Path)
 		if err != nil {
-			return nil, fmt.Errorf("repo %s: clone env output %q: %w", repo, tgt.Path, err)
+			return nil, nil, fmt.Errorf("repo %s: clone env output %q: %w", repo, tgt.Path, err)
 		}
 		info, statErr := os.Stat(srcAbs)
 		if statErr != nil {
 			if os.IsNotExist(statErr) {
 				continue
 			}
-			return nil, fmt.Errorf("repo %s: stating clone env output %q: %w", repo, srcAbs, statErr)
+			return nil, nil, fmt.Errorf("repo %s: stating clone env output %q: %w", repo, srcAbs, statErr)
 		}
 		if info.IsDir() {
 			continue
 		}
-		parsed, err := parseEnvFile(srcAbs)
+		parsed, records, err := parseEnvFileWithRecords(srcAbs)
 		if err != nil {
-			return nil, fmt.Errorf("repo %s: parsing clone env output %q: %w", repo, srcAbs, err)
+			return nil, nil, fmt.Errorf("repo %s: parsing clone env output %q: %w", repo, srcAbs, err)
 		}
 		for k, v := range parsed {
 			out[k] = v
+			// A later target holding a real assignment for the key wins over an
+			// earlier target's record, mirroring how the values themselves merge.
+			delete(unresolved, k)
+		}
+		for k, rec := range records {
+			if _, ok := out[k]; ok {
+				continue
+			}
+			unresolved[k] = unresolvedEnvKey{Record: rec}
 		}
 	}
-	return out, nil
+	return out, unresolved, nil
 }
 
 // FindRepoGroup resolves the group a repo belongs to by scanning the instance
@@ -522,7 +554,7 @@ func ApplyToWorktree(cfg *config.WorkspaceConfig, configDir, instanceRoot, workt
 	// the promoted key rather than failing to resolve it. A non-nil (possibly
 	// empty) map signals the worktree path to the materializer.
 	cloneRepoDir := filepath.Join(instanceRoot, group, repo)
-	inheritedEnv, err := readCloneEnvOutput(cloneRepoDir, cfg, repo, opts.GlobalEnvOutput)
+	inheritedEnv, inheritedUnresolved, err := readCloneEnvOutput(cloneRepoDir, cfg, repo, opts.GlobalEnvOutput)
 	if err != nil {
 		return nil, fmt.Errorf("reading clone env for worktree promote inheritance: %w", err)
 	}
@@ -546,6 +578,7 @@ func ApplyToWorktree(cfg *config.WorkspaceConfig, configDir, instanceRoot, workt
 		GlobalEnvOutput:        opts.GlobalEnvOutput,
 		WorktreeDelegation:     opts.WorktreeDelegation,
 		InheritedEnv:           inheritedEnv,
+		InheritedUnresolved:    inheritedUnresolved,
 	})
 	if err != nil {
 		return nil, err

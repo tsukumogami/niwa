@@ -316,8 +316,16 @@ Four cross-decision dependencies are load-bearing:
   exists to remove.
 - Decision 3's blocker gates both: the materializer early-returns on an empty
   value map, so a repo whose keys are *all* unresolved writes no file and
-  therefore no record. That is the primary user's exact case, and both guards
-  must admit "records exist."
+  therefore no record. Both guards must admit "records exist."
+
+  Scope note, established during implementation: this reaches the case where a
+  workspace *binds* its keys with `vault://` references, since only a binding
+  produces a value that can carry a mark. A key declared in a requirement
+  sub-table with no binding has no value at all, so it gets no record and is
+  covered by the run report alone. That is the two-shapes distinction above
+  applied to files rather than to the report, and extending records to the
+  unbound shape would mean writing a record into every generated file for every
+  unbound optional key — which no requirement asks for.
 - Promotion records originate inside the per-repo clone worker pool, so several
   goroutines record into the collector concurrently. The collector guards its
   accumulation with a mutex, and sorts on read rather than on write — which is
@@ -413,10 +421,20 @@ Two pairs must land together. Landing either half alone leaves the suite red.
 
 3. **Files and promotion.** Omission, the record writers for all three formats,
    the records-aware reader, the two empty-map guards, and the three-way promote
-   branch across the instance and worktree halves. These are one unit:
-   introducing omission is exactly what starts firing the promote error, because
-   the lookup only fails once the key leaves the map, and the worktree path
-   breaks in the same commit. The promote fix is not a follow-up.
+   branch across the instance and worktree halves. These are one unit: omission
+   is what makes a promoted key absent rather than empty, so the promote branch
+   has to be taught about the new state in the same change.
+
+   Correction, established during implementation: an earlier draft claimed
+   omission alone would turn the suite red, on the strength of an existing
+   worktree promote test acting as a canary. It does not. That test's fixture
+   promotes a key that is absent from both the config and the clone env with no
+   mark and no record, so it lands on the hard-error arm in every version —
+   verified by reverting the omit-and-report arm and observing that only the new
+   tests failed. Nothing in the tree exercised promoting an *unresolved* key
+   before this work. The two changes still belong together, but for coherence
+   rather than because a red suite forces it, and the gap is now covered by new
+   tests.
 
 4. **Strict mode.** The setting, the flag registrar, the precedence function,
    the overlay tombstone, the consult site beside the required-key check, the

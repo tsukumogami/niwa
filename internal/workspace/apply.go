@@ -1581,6 +1581,7 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 			GlobalEnvExamplePolicy: globalEnvExamplePolicy,
 			GlobalEnvOutput:        globalEnvOutput,
 			WorktreeDelegation:     worktreeDelegation,
+			Keys:                   a.Keys,
 		})
 		if err != nil {
 			return nil, err
