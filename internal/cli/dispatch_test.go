@@ -33,13 +33,9 @@ const dispatchTestShortID = "shortid1"
 // ClassifyCwd resolves it to CwdAtWorkspaceRoot. It returns the root path.
 func setupDispatchWorkspace(t *testing.T) string {
 	t.Helper()
-	root := t.TempDir()
-	// t.TempDir can hand back a symlinked path (e.g. /var -> /private/var on
-	// macOS, or a symlinked TMPDIR on Linux). Resolve it so the workspace root
-	// ClassifyCwd derives matches the cwd we chdir into.
-	if resolved, err := filepath.EvalSymlinks(root); err == nil {
-		root = resolved
-	}
+	// Resolved so the workspace root ClassifyCwd derives matches the cwd we
+	// chdir into.
+	root := canonicalTempDir(t)
 	configDir := filepath.Join(root, config.ConfigDir)
 	if err := os.MkdirAll(configDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -110,7 +106,7 @@ func installDispatchFakes(t *testing.T, workspaceRoot string) *dispatchFakes {
 
 	lookClaude = func() (string, error) { return "/usr/bin/claude", nil }
 
-	provisionInstanceFunc = func(_ context.Context, root, _, namePrefix, sep string) (provisionResult, error) {
+	provisionInstanceFunc = func(_ context.Context, root, _, namePrefix, sep string, _ int) (provisionResult, error) {
 		f.provisionCalled++
 		name := "test-ws" + sep + namePrefix
 		dir := filepath.Join(root, name)
@@ -177,10 +173,7 @@ func runDispatchCmd(t *testing.T, prompt string) (stdout, stderr string, err err
 }
 
 func TestDispatch_OutsideWorkspace_Errors(t *testing.T) {
-	outside := t.TempDir()
-	if resolved, err := filepath.EvalSymlinks(outside); err == nil {
-		outside = resolved
-	}
+	outside := canonicalTempDir(t)
 	chdir(t, outside)
 	f := installDispatchFakes(t, outside)
 
@@ -404,9 +397,9 @@ func TestDispatch_SelfDispatch_ResolvesEnclosingWorkspaceRoot(t *testing.T) {
 
 	var gotRoot string
 	prev := provisionInstanceFunc
-	provisionInstanceFunc = func(ctx context.Context, r, cwd, namePrefix, sep string) (provisionResult, error) {
+	provisionInstanceFunc = func(ctx context.Context, r, cwd, namePrefix, sep string, cloneWorkers int) (provisionResult, error) {
 		gotRoot = r
-		return prev(ctx, r, cwd, namePrefix, sep)
+		return prev(ctx, r, cwd, namePrefix, sep, cloneWorkers)
 	}
 
 	_, _, err := runDispatchCmd(t, "do a thing")
@@ -482,7 +475,7 @@ func TestDispatch_Concurrent_DistinctMappings(t *testing.T) {
 	// A goroutine-safe provision: each call mints a distinct instance dir under
 	// the workspace root using the unique namePrefix dispatch generated.
 	var provisionCount int64
-	provisionInstanceFunc = func(_ context.Context, r, _, namePrefix, sep string) (provisionResult, error) {
+	provisionInstanceFunc = func(_ context.Context, r, _, namePrefix, sep string, _ int) (provisionResult, error) {
 		atomic.AddInt64(&provisionCount, 1)
 		name := "test-ws" + sep + namePrefix
 		dir := filepath.Join(r, name)
@@ -680,8 +673,8 @@ func TestDispatch_Name_SlugInInstanceAndSession(t *testing.T) {
 
 	var gotName string
 	prevProvision := provisionInstanceFunc
-	provisionInstanceFunc = func(ctx context.Context, r, cwd, namePrefix, sep string) (provisionResult, error) {
-		res, err := prevProvision(ctx, r, cwd, namePrefix, sep)
+	provisionInstanceFunc = func(ctx context.Context, r, cwd, namePrefix, sep string, cloneWorkers int) (provisionResult, error) {
+		res, err := prevProvision(ctx, r, cwd, namePrefix, sep, cloneWorkers)
 		gotName = res.Name
 		return res, err
 	}
@@ -750,8 +743,8 @@ func TestDispatch_NoName_NoSlugNoNameFlag(t *testing.T) {
 
 	var gotName string
 	prevProvision := provisionInstanceFunc
-	provisionInstanceFunc = func(ctx context.Context, r, cwd, namePrefix, sep string) (provisionResult, error) {
-		res, err := prevProvision(ctx, r, cwd, namePrefix, sep)
+	provisionInstanceFunc = func(ctx context.Context, r, cwd, namePrefix, sep string, cloneWorkers int) (provisionResult, error) {
+		res, err := prevProvision(ctx, r, cwd, namePrefix, sep, cloneWorkers)
 		gotName = res.Name
 		return res, err
 	}
@@ -792,8 +785,8 @@ func TestDispatch_NameSanitizesEmpty_FallsBack(t *testing.T) {
 
 	var gotName string
 	prevProvision := provisionInstanceFunc
-	provisionInstanceFunc = func(ctx context.Context, r, cwd, namePrefix, sep string) (provisionResult, error) {
-		res, err := prevProvision(ctx, r, cwd, namePrefix, sep)
+	provisionInstanceFunc = func(ctx context.Context, r, cwd, namePrefix, sep string, cloneWorkers int) (provisionResult, error) {
+		res, err := prevProvision(ctx, r, cwd, namePrefix, sep, cloneWorkers)
 		gotName = res.Name
 		return res, err
 	}

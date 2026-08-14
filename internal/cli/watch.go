@@ -775,7 +775,9 @@ func stageReview(cmd *cobra.Command, root, cwd, token string, client *github.API
 	}
 
 	reapOpportunistically(root)
-	provRes, err := provisionInstanceFunc(ctx, root, cwd, namePrefix, "+")
+	// cloneWorkers is 0: watch takes the [global] clone_workers config or the
+	// built-in default.
+	provRes, err := provisionInstanceFunc(ctx, root, cwd, namePrefix, "+", 0)
 	// Watch runs unattended, so this lands in whatever captures its stderr; the
 	// alternative is a review agent working in an instance whose missing keys
 	// nothing recorded. Rendered before the error returns, so a strict refusal

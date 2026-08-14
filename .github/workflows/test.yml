@@ -24,8 +24,25 @@ on:
 
 jobs:
   test:
+    # The unit suite runs on both platforms. niwa reads process state and
+    # compares filesystem paths, and both differ enough between Linux and
+    # Darwin that a Linux-only matrix let macOS-specific breakage sit
+    # undetected: /var is a symlink to /private/var on macOS, so paths the
+    # code resolves stopped matching paths it did not, and the /proc-only
+    # start-time probe silently degraded to "assume alive", disabling
+    # PID-recycle detection. Both were invisible to CI and loud on every
+    # macOS developer's machine.
+    #
+    # Steps below the unit suite stay Linux-only, each for its own reason --
+    # see the comment on each. fail-fast is off so one platform's failure
+    # does not hide the other's result, which is the whole point of testing
+    # two platforms.
     name: Test
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
 
     steps:
       - name: Checkout
@@ -37,7 +54,10 @@ jobs:
           go-version-file: 'go.mod'
           cache-dependency-path: go.sum
 
+      # Tidiness is a property of the checked-in go.mod, not of the runner, so
+      # one platform answers it for both.
       - name: Verify go.mod is tidy
+        if: matrix.os == 'ubuntu-latest'
         run: |
           go mod tidy
           if ! git diff --exit-code go.mod go.sum; then
@@ -45,17 +65,33 @@ jobs:
             exit 1
           fi
 
+      # Worth running on both: vet type-checks the files selected by the
+      # current GOOS, so the darwin build-tagged sources are only ever checked
+      # by the macOS job.
       - name: Vet
         run: go vet ./...
 
+      # -race on both platforms. The package-level state `niwa dispatch` used
+      # to mutate raced under concurrent dispatch and went unnoticed because
+      # nothing ran the detector; keeping it in the gate is what stops that
+      # recurring.
       - name: Test
-        run: go test ./...
+        run: go test -race ./...
 
+      # Linux-only until the godog harness is portable: it fakes a TTY with
+      # `script -c`, which is GNU-only syntax, and several scenarios assume an
+      # unresolved /tmp path. Tracked in tsukumogami/niwa#243.
       - name: Functional tests
+        if: matrix.os == 'ubuntu-latest'
         run: make test-functional
 
+      # Everything from here down is Linux-only: the Infisical CLI installs
+      # from a .deb, the Claude and tsuku integration steps consume shared
+      # credentials and rate limits that gain nothing from a second platform,
+      # and the shell-init check inspects Go string output that does not vary
+      # by OS.
       - name: Install Infisical CLI
-        if: env.INFISICAL_CLIENT_ID != ''
+        if: matrix.os == 'ubuntu-latest' && env.INFISICAL_CLIENT_ID != ''
         run: |
           curl -1sLf 'https://dl.cloudsmith.io/public/infisical/infisical-cli/setup.deb.sh' | sudo -E bash
           sudo apt-get install -y infisical
@@ -63,7 +99,7 @@ jobs:
           INFISICAL_CLIENT_ID: ${{ secrets.INFISICAL_CLIENT_ID }}
 
       - name: Vault integration tests
-        if: env.INFISICAL_CLIENT_ID != ''
+        if: matrix.os == 'ubuntu-latest' && env.INFISICAL_CLIENT_ID != ''
         run: |
           # Authenticate as machine identity; the --plain flag prints the JWT
           INFISICAL_TOKEN=$(infisical login \
@@ -80,21 +116,23 @@ jobs:
           INFISICAL_TEST_PROJECT_ID: ${{ secrets.INFISICAL_TEST_PROJECT_ID }}
 
       - name: Install Claude CLI
-        if: env.ANTHROPIC_API_KEY != ''
+        if: matrix.os == 'ubuntu-latest' && env.ANTHROPIC_API_KEY != ''
         run: npm install -g @anthropic-ai/claude-code
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
 
       - name: Claude integration tests
-        if: env.ANTHROPIC_API_KEY != ''
+        if: matrix.os == 'ubuntu-latest' && env.ANTHROPIC_API_KEY != ''
         run: make test-functional-claude-integration
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
 
       - name: Install tsuku
+        if: matrix.os == 'ubuntu-latest'
         run: curl -fsSL https://tsuku.dev/install.sh | bash
 
       - name: Verify shell-init output
+        if: matrix.os == 'ubuntu-latest'
         run: |
           go build -o niwa-test ./cmd/niwa
           for shell in bash zsh; do
@@ -116,6 +154,7 @@ jobs:
           rm niwa-test
 
       - name: Verify recipe installs via tsuku
+        if: matrix.os == 'ubuntu-latest'
         run: |
           export PATH="$HOME/.tsuku/bin:$PATH"
           eval "$(tsuku shellenv)"

@@ -294,11 +294,9 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	// way runCreate does, before creating the new instance (R12).
 	reapOpportunistically(workspaceRoot)
 
-	// (6) Create the instance through the existing provision path. --parallel
-	// rides into realProvisionInstance via provisionCloneWorkers (the provision
-	// signature is fixed and shared with the hook/reap callers).
-	provisionCloneWorkers = dispatchParallel
-	res, err := provisionInstanceFunc(cmd.Context(), workspaceRoot, cwd, namePrefix, sep)
+	// (6) Create the instance through the existing provision path, passing
+	// --parallel straight through as this call's clone concurrency.
+	res, err := provisionInstanceFunc(cmd.Context(), workspaceRoot, cwd, namePrefix, sep, dispatchParallel)
 	// Dispatch has a terminal, unlike the hook that shares this provisioner, so
 	// the report goes to stderr here rather than into the worker's context.
 	// Rendered before the error is returned, not after the success path begins:

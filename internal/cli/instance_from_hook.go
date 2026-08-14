@@ -110,13 +110,13 @@ type provisionResult struct {
 // the created instance's name and absolute path. It is a package variable so
 // tests can substitute a fake provisioner that does no clone, exercising the
 // guard + mapping + injection logic in isolation.
+//
+// cloneWorkers overrides clone concurrency: `niwa dispatch --parallel` passes
+// its flag value, while the SessionStart hook, watch, and reap paths pass 0,
+// meaning "use the [global] clone_workers config, else the built-in default".
+// It is a parameter rather than package state because concurrent dispatches
+// share the process and would otherwise overwrite each other's setting.
 var provisionInstanceFunc = realProvisionInstance
-
-// provisionCloneWorkers overrides clone concurrency for realProvisionInstance.
-// `niwa dispatch --parallel` sets it before provisioning; the SessionStart hook
-// and reap paths leave it 0, meaning "use the [global] clone_workers config,
-// else the built-in default". A positive value overrides the config.
-var provisionCloneWorkers int
 
 // destroyInstanceFunc force-destroys the instance at instancePath. It is a
 // package variable so SessionEnd teardown tests can substitute a fake that
@@ -178,7 +178,10 @@ func runInstanceHookStart(cmd *cobra.Command, payload instanceHookPayload, jobsD
 	// The hook joins the session-hex suffix with "-" so the provisioned name
 	// stays "<config>-<sessionhex>", byte-identical to the pre-"+"-separator
 	// behavior. "+" is reserved for user-supplied dispatch slugs.
-	res, err := provisionInstanceFunc(cmd.Context(), workspaceRoot, payload.Cwd, namePrefix, "-")
+	// cloneWorkers is 0 here: the hook path takes the [global] clone_workers
+	// config or the built-in default, the same as before this call gained the
+	// parameter.
+	res, err := provisionInstanceFunc(cmd.Context(), workspaceRoot, payload.Cwd, namePrefix, "-", 0)
 	if errors.Is(err, workspace.ErrStrictSecrets) {
 		// A strict refusal is the workspace working as configured, and the
 		// guarantee it buys -- no instance materializes holding a shortfall --
@@ -423,7 +426,7 @@ func resolveHookWorkspaceRoot(cwd string) (string, bool) {
 // instance under workspaceRoot named <config><sep><prefix>. sep is "-" for the
 // hook path and "+" for a user-supplied dispatch slug. It is wired into
 // provisionInstanceFunc; tests override that variable to avoid a real clone.
-func realProvisionInstance(ctx context.Context, workspaceRoot, cwd, namePrefix, sep string) (provisionResult, error) {
+func realProvisionInstance(ctx context.Context, workspaceRoot, cwd, namePrefix, sep string, cloneWorkers int) (provisionResult, error) {
 	configPath, configDir, err := config.Discover(cwd)
 	if err != nil {
 		return provisionResult{}, fmt.Errorf("discovering workspace config from %q: %w", cwd, err)
@@ -467,15 +470,15 @@ func realProvisionInstance(ctx context.Context, workspaceRoot, cwd, namePrefix, 
 	}
 
 	configurePluginAutoInstall(applier, false)
-	// provisionCloneWorkers is set by `niwa dispatch --parallel`; the hook and
-	// reap callers leave it 0 (auto). It wins over clone_workers when > 0.
-	applier.CloneWorkers = provisionCloneWorkers
+	// cloneWorkers comes from `niwa dispatch --parallel`; the hook, watch, and
+	// reap callers pass 0 (auto). It wins over clone_workers when > 0.
+	applier.CloneWorkers = cloneWorkers
 
 	if globalCfg, gErr := config.LoadGlobalConfig(); gErr == nil {
 		if gDir, gErr := config.GlobalConfigDir(); gErr == nil {
 			applier.GlobalConfigDir = gDir
 		}
-		if provisionCloneWorkers <= 0 {
+		if cloneWorkers <= 0 {
 			applier.CloneWorkers = globalCfg.CloneWorkers()
 		}
 		if entry := globalCfg.LookupWorkspace(configName); entry != nil {

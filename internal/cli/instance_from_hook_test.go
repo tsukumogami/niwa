@@ -92,7 +92,7 @@ func stubProvision(t *testing.T, claudeMD string) *struct {
 		result       provisionResult
 	}{}
 	prev := provisionInstanceFunc
-	provisionInstanceFunc = func(_ context.Context, workspaceRoot, _, namePrefix, sep string) (provisionResult, error) {
+	provisionInstanceFunc = func(_ context.Context, workspaceRoot, _, namePrefix, sep string, _ int) (provisionResult, error) {
 		rec.called = true
 		rec.gotName = namePrefix
 		rec.gotWorkspace = workspaceRoot
