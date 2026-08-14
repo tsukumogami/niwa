@@ -465,7 +465,7 @@ func TestSessionStart_StrictRefusal_EmitsReportAndExitsZero(t *testing.T) {
 	writeJobState(t, jobsDir, testSessionID[:8], testSessionID, "bg")
 
 	prev := provisionInstanceFunc
-	provisionInstanceFunc = func(_ context.Context, _, _, _, _ string) (provisionResult, error) {
+	provisionInstanceFunc = func(_ context.Context, _, _, _, _ string, _ int) (provisionResult, error) {
 		return provisionResult{
 				Keys: []keyreport.Entry{{
 					Scope:       "env.secrets",
@@ -525,7 +525,7 @@ func TestSessionStart_OtherFailure_StillFails(t *testing.T) {
 	writeJobState(t, jobsDir, testSessionID[:8], testSessionID, "bg")
 
 	prev := provisionInstanceFunc
-	provisionInstanceFunc = func(_ context.Context, _, _, _, _ string) (provisionResult, error) {
+	provisionInstanceFunc = func(_ context.Context, _, _, _, _ string, _ int) (provisionResult, error) {
 		return provisionResult{}, errors.New("cloning testorg/app: exit status 128")
 	}
 	t.Cleanup(func() { provisionInstanceFunc = prev })
