@@ -64,7 +64,7 @@ type claudeSessionFile struct {
 // discoverViaPPIDWalk tries two levels of the process tree:
 //
 //	Level 1 (direct parent):  os.Getppid() — cross-platform.
-//	Level 2 (grandparent):    readPPID(ppid1) — Linux only, 0 elsewhere.
+//	Level 2 (grandparent):    readPPID(ppid1) — 0 where unsupported.
 //
 // In production the chain is: Claude Code → hook script → niwa.
 // Level 1 is the hook script; level 2 is the Claude Code process whose

@@ -291,6 +291,68 @@ func TestScanInstance_Worktree(t *testing.T) {
 	}
 }
 
+// TestScanInstance_WorktreeUnderSymlinkedInstancePath reaches a real instance
+// through a symlinked ancestor directory, the shape a user gets whenever their
+// workspace sits under a symlinked home, mount point, or (on macOS, for
+// anything under /var) the OS's own layout.
+//
+// `git worktree list` reports worktree paths with symlinks already resolved,
+// so the instance dir and the worktree paths are spelled differently. A scan
+// that compares them unresolved calls every worktree inside the instance
+// external, which both invents an external-wt loss and skips the worktree when
+// looking for real uncommitted work -- so genuinely dirty state stops being
+// reported before a destroy.
+func TestScanInstance_WorktreeUnderSymlinkedInstancePath(t *testing.T) {
+	instanceDir, repoDir := setupInstanceWithRepo(t, "alpha", "myrepo")
+	wtDir := filepath.Join(instanceDir, ".niwa", "worktrees", "myrepo-session1")
+	if err := os.MkdirAll(filepath.Dir(wtDir), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	gitRun(t, repoDir, "worktree", "add", "-b", "session/abc", wtDir)
+	if err := os.WriteFile(filepath.Join(wtDir, "wt.txt"), []byte("hi\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Dirty the primary too: git lists it among the worktrees under its own
+	// resolved spelling, so a scan that fails to recognise it as the primary
+	// inspects the same tree twice and double-reports everything in it.
+	if err := os.WriteFile(filepath.Join(repoDir, "README.md"), []byte("modified\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Symlink the instance's parent, then scan through the symlinked spelling.
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(filepath.Dir(instanceDir), link); err != nil {
+		t.Fatal(err)
+	}
+
+	scan, err := ScanInstance(filepath.Join(link, "alpha"))
+	if err != nil {
+		t.Fatalf("ScanInstance: %v", err)
+	}
+
+	foundInside := false
+	dirtyPrimary := 0
+	for _, r := range scan.Repos {
+		for _, l := range r.Losses {
+			if l.Kind == LossExternalWorktree {
+				t.Errorf("worktree inside the instance reported as external: %+v", l)
+			}
+			if l.Path != "" && (l.Kind == LossUntracked || l.Kind == LossLocalOnlyBranch) {
+				foundInside = true
+			}
+			if l.Kind == LossWorkingTreeDirty {
+				dirtyPrimary++
+			}
+		}
+	}
+	if !foundInside {
+		t.Errorf("expected the worktree's own losses to be reported; got %+v", scan)
+	}
+	if dirtyPrimary != 1 {
+		t.Errorf("dirty primary reported %d times, want 1; got %+v", dirtyPrimary, scan)
+	}
+}
+
 func TestScanInstance_OrphanInstanceDir(t *testing.T) {
 	root := destroySetupWorkspace(t)
 	dir := filepath.Join(root, "orphan")

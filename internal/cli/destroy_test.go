@@ -37,7 +37,7 @@ func TestDestroyCmd_AcceptsOptionalPositionalArg(t *testing.T) {
 // chdir's into the requested location. Returns the workspace root path.
 func destroyTestSetup(t *testing.T, instanceNames []string) string {
 	t.Helper()
-	root := t.TempDir()
+	root := canonicalTempDir(t)
 
 	// .niwa/workspace.toml at root.
 	niwaDir := filepath.Join(root, ".niwa")

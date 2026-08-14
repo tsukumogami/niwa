@@ -32,7 +32,7 @@ func setHostConfig(t *testing.T, body string) {
 // Must be called AFTER installDispatchFakes so its restore wins.
 func provisionWithInstanceSettings(t *testing.T, f *dispatchFakes, settingsBody string) {
 	t.Helper()
-	provisionInstanceFunc = func(_ context.Context, root, _, namePrefix, sep string) (provisionResult, error) {
+	provisionInstanceFunc = func(_ context.Context, root, _, namePrefix, sep string, _ int) (provisionResult, error) {
 		f.provisionCalled++
 		name := "test-ws" + sep + namePrefix
 		dir := filepath.Join(root, name)

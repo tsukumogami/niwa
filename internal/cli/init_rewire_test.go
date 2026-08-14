@@ -17,7 +17,9 @@ import (
 // tests that exercise the global registry. Returns the temp dir.
 func chdirAndXDG(t *testing.T) string {
 	t.Helper()
-	dir := t.TempDir()
+	// Resolved: init records the workspace root in the registry after
+	// canonicalizing it, so an unresolved dir here would not compare equal.
+	dir := canonicalTempDir(t)
 	origDir, err := os.Getwd()
 	if err != nil {
 		t.Fatal(err)
