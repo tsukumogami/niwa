@@ -1055,8 +1055,19 @@ func resolveClaudeEnvVars(ctx *MaterializeContext) (map[string]string, []SourceE
 	return envResult, sources, nil
 }
 
-// promoteUnresolvedSet returns the keys this repo omitted, from whichever of
-// the two provenances applies.
+// promoteUnresolvedSet returns the keys this repo could not supply, from
+// whichever of the two provenances applies, unioned with the keys that were
+// declared in a requirement sub-table and never got a value at all.
+//
+// The union is what makes the set cover both shapes of unresolved key, the way
+// the run's report does. A mark describes a value that was tried and failed; a
+// key listed in a required/recommended/optional sub-table with no entry in the
+// values map was never visited by the resolver, so no mark exists for it. That
+// second shape is the no-provider contributor's exact case, and without it here
+// a promoted key of that shape falls through to the hard error meant to catch a
+// typo in the promote list. Whether the key is spelled anywhere in the
+// declarations is precisely what separates a shortfall from a typo, so a key
+// declared nowhere stays absent from this set and still hard-errors.
 //
 // The instance path reads the marks that ResolveEnvVars just consumed: the mark
 // stays on the value in the effective config, and only the materialized output
@@ -1064,12 +1075,55 @@ func resolveClaudeEnvVars(ctx *MaterializeContext) (map[string]string, []SourceE
 //
 // The worktree path has no marks at all — it reads an already-materialized file
 // rather than re-resolving — so its set was recovered from that file's records
-// by the caller. A non-nil InheritedEnv is what identifies that path.
+// by the caller. A non-nil InheritedEnv is what identifies that path. Those
+// records cover only the marked shape, because they were written from the
+// marks; the declaration walk below is what supplies the other shape there, and
+// it can run on that path because declarations live in the static config the
+// worktree apply reads, not in the resolution it skips.
 func promoteUnresolvedSet(ctx *MaterializeContext) map[string]unresolvedEnvKey {
+	base := ctx.UnresolvedEnv
 	if ctx.InheritedEnv != nil {
-		return ctx.InheritedUnresolved
+		base = ctx.InheritedUnresolved
 	}
-	return ctx.UnresolvedEnv
+
+	set := make(map[string]unresolvedEnvKey, len(base))
+	maps.Copy(set, base)
+
+	// Only the tables the promote pipeline actually draws from are walked. A
+	// promoted key resolves out of the [env] pipeline and is then overlaid by
+	// the inline [claude.env] tables, so a declaration anywhere else describes
+	// a key this branch was never going to look up.
+	// Fixed order, not a map range: a key declared in more than one of these
+	// tables would otherwise be attributed to a different scope run to run.
+	tables := []struct {
+		scope string
+		table config.EnvVarsTable
+	}{
+		{"env.vars", ctx.Effective.Env.Vars},
+		{"env.secrets", ctx.Effective.Env.Secrets},
+		{"claude.env.vars", ctx.Effective.Claude.Env.Vars},
+		{"claude.env.secrets", ctx.Effective.Claude.Env.Secrets},
+	}
+	for _, tbl := range tables {
+		scope := tbl.scope
+		forEachDeclaredWithNoValue(tbl.table, func(key string, level config.RequirementLevel, desc string) {
+			// An entry already in the set came from a mark or a record, which
+			// carries the true cause of the failure; this walk can only say
+			// that nothing was configured. First provenance wins.
+			if _, ok := set[key]; ok {
+				return
+			}
+			set[key] = unresolvedEnvKey{
+				Scope: scope,
+				Record: envformat.Record{
+					Level:       string(level),
+					Cause:       string(keyreport.CauseNoSource),
+					Description: desc,
+				},
+			}
+		})
+	}
+	return set
 }
 
 // reportPromoteOmission records a promoted key that was omitted rather than

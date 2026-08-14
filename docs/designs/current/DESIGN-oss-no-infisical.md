@@ -254,6 +254,17 @@ no value. The report is therefore assembled from two sources: the marks carried
 on values, and the declared-but-absent keys derived post-merge. Anything
 implementing only the first half satisfies no acceptance criterion that matters.
 
+**Every consumer of "is this key unresolved?" is subject to both shapes, not
+just the report.** An earlier revision of this document said the two-source rule
+here and then described the promote branch two paragraphs down purely in terms
+of marks and records. The implementation copied that omission exactly, and the
+result escaped every unit test and was caught only by running a first-run
+contributor scenario end to end: a promoted key declared with no binding has no
+mark, so it fell through to the arm meant to catch a typo in the promote list
+and failed the command — the precise failure this work exists to remove. The
+declared-but-absent derivation is one function with one definition, and any code
+asking whether a key is unresolved unions it in.
+
 The same post-merge walk must cover the optional sub-table as well as required
 and recommended. Today nothing walks optional, because nothing needed to; the
 report's declared-level column does.
@@ -265,8 +276,20 @@ omits it, so no additional field is threaded. This resolves a disagreement
 between two decision reports, one of which assumed the entry would be removed
 from the map entirely. On the worktree path the marks are not in memory, because
 that path reads an already-materialized file rather than re-resolving; there the
-unresolved set is recovered by the records-aware reader from the records written
-into the clone's own environment file.
+base set is recovered by the records-aware reader from the records written into
+the clone's own environment file.
+
+On every path that base set is then unioned with the declared-but-absent keys,
+per the two-shapes rule above. Records are written from marks, so shape 2 leaves
+no record either, and the worktree path needs the union as much as the others —
+safely, because declarations live in the static config that path already reads
+rather than in the resolution it skips. Where the two sources disagree the mark
+wins, since it carries a truer cause than "declared and missing".
+
+There are three promote paths sharing two call sites: the per-repo settings
+materializer, the workspace root, and the worktree. All three are subject to
+this. The workspace-root path is the one the original omission escaped through,
+which is worth naming because it is the least obvious of the three.
 
 **Which failures stay fatal inside the resolver.** Marking replaces erroring
 only for shortfalls. A malformed reference that fails to parse, an unsupported

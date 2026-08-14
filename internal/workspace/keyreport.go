@@ -37,13 +37,15 @@ func collectUnresolvedKeys(cfg *config.WorkspaceConfig, c *keyreport.Collector) 
 		for key, ms := range t.Values {
 			c.AddMark(scope, key, ms.Unresolved)
 		}
-		// Optional is walked alongside required and recommended even though
-		// nothing enforces it: the report carries each key's declared level,
-		// and a column that silently omitted one of the three levels would be
-		// wrong rather than merely incomplete.
-		collectDeclaredWithNoValue(scope, t, config.LevelRequired, t.Required, c)
-		collectDeclaredWithNoValue(scope, t, config.LevelRecommended, t.Recommended, c)
-		collectDeclaredWithNoValue(scope, t, config.LevelOptional, t.Optional, c)
+		forEachDeclaredWithNoValue(t, func(key string, level config.RequirementLevel, desc string) {
+			c.Add(keyreport.Entry{
+				Scope:       scope,
+				Key:         key,
+				Cause:       keyreport.CauseNoSource,
+				Level:       level,
+				Description: desc,
+			})
+		})
 	})
 
 	forEachSettingsTable(cfg, func(scope string, s config.SettingsConfig) {
@@ -53,32 +55,41 @@ func collectUnresolvedKeys(cfg *config.WorkspaceConfig, c *keyreport.Collector) 
 	})
 }
 
-// collectDeclaredWithNoValue records the keys of one requirement sub-table that
-// have no entry in the parent table's values map.
+// forEachDeclaredWithNoValue invokes fn for every key declared in one of the
+// table's requirement sub-tables that has no entry in the table's values map —
+// the second shape of unresolved key, the one no mark can describe.
 //
 // A key that HAS an entry is skipped whatever that entry holds. An entry with a
-// mark was already recorded from the mark, which carries a truer cause than
+// mark is already accounted for by the mark, which carries a truer cause than
 // this walk could infer. An empty entry with no mark is a deliberate empty —
 // an author's empty literal, or a reference whose ?required=false opted out of
 // resolution failure — and reporting it would break the silence that opt-out
 // exists to provide.
-func collectDeclaredWithNoValue(
-	scope string,
-	t config.EnvVarsTable,
-	level config.RequirementLevel,
-	sub map[string]string,
-	c *keyreport.Collector,
-) {
-	for key, desc := range sub {
-		if _, ok := t.Values[key]; ok {
-			continue
+//
+// Optional is walked alongside required and recommended even though nothing
+// enforces it: the report carries each key's declared level, and a column that
+// silently omitted one of the three levels would be wrong rather than merely
+// incomplete.
+//
+// This is the single derivation of the shape. The key report and the
+// [claude.env] promote branch both consume it, because a promoted key that was
+// declared and unsupplied is the same shortfall the report describes; two walks
+// would be two chances to disagree about which keys those are.
+func forEachDeclaredWithNoValue(t config.EnvVarsTable, fn func(key string, level config.RequirementLevel, desc string)) {
+	subs := []struct {
+		level config.RequirementLevel
+		keys  map[string]string
+	}{
+		{config.LevelRequired, t.Required},
+		{config.LevelRecommended, t.Recommended},
+		{config.LevelOptional, t.Optional},
+	}
+	for _, sub := range subs {
+		for key, desc := range sub.keys {
+			if _, ok := t.Values[key]; ok {
+				continue
+			}
+			fn(key, sub.level, desc)
 		}
-		c.Add(keyreport.Entry{
-			Scope:       scope,
-			Key:         key,
-			Cause:       keyreport.CauseNoSource,
-			Level:       level,
-			Description: desc,
-		})
 	}
 }
