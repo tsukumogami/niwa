@@ -16,6 +16,7 @@ import (
 	"github.com/tsukumogami/niwa/internal/config"
 	"github.com/tsukumogami/niwa/internal/envformat"
 	"github.com/tsukumogami/niwa/internal/gitexclude"
+	"github.com/tsukumogami/niwa/internal/keyreport"
 	"github.com/tsukumogami/niwa/internal/secret/reveal"
 )
 
@@ -139,6 +140,41 @@ type MaterializeContext struct {
 	// found. A non-nil but empty map means "worktree path, no inherited env",
 	// which is distinct from nil ("instance path, resolve from config").
 	InheritedEnv map[string]string
+
+	// Keys collects the declared keys this repo's materialization could not
+	// supply, for the command surface to render once the run returns. A nil
+	// collector disables collection, so a call site that was never wired with
+	// one needs no guard.
+	Keys *keyreport.Collector
+
+	// UnresolvedEnv is the per-repo set of env keys carrying an Unresolved
+	// mark, keyed by variable name. ResolveEnvVars populates it from the marks
+	// on the effective env tables; the EnvMaterializer writes a record for each
+	// entry in place of the assignment it omits, and the promote branch reads it
+	// to tell an omitted key from a genuinely misconfigured one.
+	UnresolvedEnv map[string]unresolvedEnvKey
+
+	// InheritedUnresolved is the worktree-path counterpart to UnresolvedEnv.
+	// That path never re-resolves secrets, so no mark is in memory for it; the
+	// set is recovered instead from the records in the clone's
+	// already-materialized env file. Records recovered that way are untrusted
+	// input — a repository can write its own env file — and are revalidated by
+	// envformat.ParseRecord before they land here.
+	InheritedUnresolved map[string]unresolvedEnvKey
+
+	// StrictSecrets is the run's resolved strictness. Only the promote branch
+	// reads it: promotion is the one enforcement point that runs per-repo,
+	// after the applier's post-merge gate has already let the run through.
+	// The worktree path never sets it (see repoMaterializeInputs).
+	StrictSecrets bool
+}
+
+// unresolvedEnvKey is one omitted env key: the record written into the
+// generated file, plus the table it was declared in when that is known. Scope
+// is empty for a record recovered from a file, which carries no table name.
+type unresolvedEnvKey struct {
+	Scope  string
+	Record envformat.Record
 }
 
 // recordSources appends the given SourceEntry slice to the context's
@@ -955,12 +991,35 @@ func resolveClaudeEnvVars(ctx *MaterializeContext) (map[string]string, []SourceE
 				resolvedEnv = map[string]string{}
 			}
 		}
+		// Promotion is three-way, not two-way. Before omission existed an
+		// unresolved key was still present in the resolved map holding an empty
+		// string, so promoting it silently produced "". Now it is absent, and
+		// absence alone no longer distinguishes "we could not supply this" from
+		// "you promoted a key that does not exist". The unresolved set makes
+		// that distinction; the hard error is kept for everything outside it,
+		// which is what still catches a typo in the promote list.
+		unresolved := promoteUnresolvedSet(ctx)
 		for _, key := range claudeEnv.Promote {
 			val, found := resolvedEnv[key]
-			if !found {
-				return nil, nil, fmt.Errorf("claude.env: promoted key %q not found in resolved env vars", key)
+			if found {
+				envResult[key] = val
+				continue
 			}
-			envResult[key] = val
+			if omitted, ok := unresolved[key]; ok {
+				// The strict arm of the three-way branch. Omission is what
+				// tolerance does with a promoted key that has no value;
+				// under strict mode the same key is a refusal instead. It
+				// lives here rather than at the post-merge gate because
+				// promotion runs later and per-repo, so that gate has
+				// already passed by the time this key is looked up.
+				if ctx.StrictSecrets {
+					return nil, nil, fmt.Errorf("%w: claude.env promotes %q, which has no value",
+						ErrStrictSecrets, key)
+				}
+				reportPromoteOmission(ctx.Keys, key, omitted)
+				continue
+			}
+			return nil, nil, fmt.Errorf("claude.env: promoted key %q not found in resolved env vars", key)
 		}
 		// Every env source contributes to the rollup because any
 		// plaintext-file rotation upstream can change promoted
@@ -979,14 +1038,122 @@ func resolveClaudeEnvVars(ctx *MaterializeContext) (map[string]string, []SourceE
 	// otherwise.
 	for _, k := range sortedKeys(claudeEnv.Vars.Values) {
 		v := claudeEnv.Vars.Values[k]
-		envResult[k] = maybeSecretString(v)
 		sources = append(sources, sourceForMaybeSecret("workspace.toml:claude.env.vars."+k, v))
+		// A marked value is omitted here too. The settings document has no
+		// record form (it is a Claude Code file, not a niwa one), so the key
+		// simply does not appear; the run's report is what accounts for it.
+		if v.IsUnresolved() {
+			delete(envResult, k)
+			continue
+		}
+		envResult[k] = maybeSecretString(v)
 	}
 
 	if len(envResult) == 0 {
 		return nil, nil, nil
 	}
 	return envResult, sources, nil
+}
+
+// promoteUnresolvedSet returns the keys this repo could not supply, from
+// whichever of the two provenances applies, unioned with the keys that were
+// declared in a requirement sub-table and never got a value at all.
+//
+// The union is what makes the set cover both shapes of unresolved key, the way
+// the run's report does. A mark describes a value that was tried and failed; a
+// key listed in a required/recommended/optional sub-table with no entry in the
+// values map was never visited by the resolver, so no mark exists for it. That
+// second shape is the no-provider contributor's exact case, and without it here
+// a promoted key of that shape falls through to the hard error meant to catch a
+// typo in the promote list. Whether the key is spelled anywhere in the
+// declarations is precisely what separates a shortfall from a typo, so a key
+// declared nowhere stays absent from this set and still hard-errors.
+//
+// The instance path reads the marks that ResolveEnvVars just consumed: the mark
+// stays on the value in the effective config, and only the materialized output
+// map omits the key, so nothing new has to be threaded to reach it.
+//
+// The worktree path has no marks at all — it reads an already-materialized file
+// rather than re-resolving — so its set was recovered from that file's records
+// by the caller. A non-nil InheritedEnv is what identifies that path. Those
+// records cover only the marked shape, because they were written from the
+// marks; the declaration walk below is what supplies the other shape there, and
+// it can run on that path because declarations live in the static config the
+// worktree apply reads, not in the resolution it skips.
+func promoteUnresolvedSet(ctx *MaterializeContext) map[string]unresolvedEnvKey {
+	base := ctx.UnresolvedEnv
+	if ctx.InheritedEnv != nil {
+		base = ctx.InheritedUnresolved
+	}
+
+	set := make(map[string]unresolvedEnvKey, len(base))
+	maps.Copy(set, base)
+
+	// Only the tables the promote pipeline actually draws from are walked. A
+	// promoted key resolves out of the [env] pipeline and is then overlaid by
+	// the inline [claude.env] tables, so a declaration anywhere else describes
+	// a key this branch was never going to look up.
+	// Fixed order, not a map range: a key declared in more than one of these
+	// tables would otherwise be attributed to a different scope run to run.
+	tables := []struct {
+		scope string
+		table config.EnvVarsTable
+	}{
+		{"env.vars", ctx.Effective.Env.Vars},
+		{"env.secrets", ctx.Effective.Env.Secrets},
+		{"claude.env.vars", ctx.Effective.Claude.Env.Vars},
+		{"claude.env.secrets", ctx.Effective.Claude.Env.Secrets},
+	}
+	for _, tbl := range tables {
+		scope := tbl.scope
+		forEachDeclaredWithNoValue(tbl.table, func(key string, level config.RequirementLevel, desc string) {
+			// An entry already in the set came from a mark or a record, which
+			// carries the true cause of the failure; this walk can only say
+			// that nothing was configured. First provenance wins.
+			if _, ok := set[key]; ok {
+				return
+			}
+			set[key] = unresolvedEnvKey{
+				Scope: scope,
+				Record: envformat.Record{
+					Level:       string(level),
+					Cause:       string(keyreport.CauseNoSource),
+					Description: desc,
+				},
+			}
+		})
+	}
+	return set
+}
+
+// reportPromoteOmission records a promoted key that was omitted rather than
+// promoted, unless the run already recorded the same key elsewhere.
+//
+// The dedup matters because the two producers see the same shortfall from
+// different angles: the post-merge walk records it under the table it was
+// declared in, which is the truer scope, and this records it again under the
+// promote list. R6 asks for one consolidated report, so the first one wins. On
+// the worktree path, where no post-merge walk runs, this is the only producer.
+func reportPromoteOmission(c *keyreport.Collector, key string, omitted unresolvedEnvKey) {
+	if c == nil {
+		return
+	}
+	for _, e := range c.Report() {
+		if e.Key == key {
+			return
+		}
+	}
+	scope := omitted.Scope
+	if scope == "" {
+		scope = "claude.env.promote"
+	}
+	c.Add(keyreport.Entry{
+		Scope:       scope,
+		Key:         key,
+		Cause:       config.UnresolvedCause(omitted.Record.Cause),
+		Level:       config.RequirementLevel(omitted.Record.Level),
+		Description: omitted.Record.Description,
+	})
 }
 
 // SettingsMaterializer generates the .claude/settings.local.json file from
@@ -1196,16 +1363,37 @@ func ResolveEnvVars(ctx *MaterializeContext) (map[string]string, []SourceEntry, 
 	// vault.VersionToken; plaintext entries synthesize a content-hash
 	// VersionToken from the materialized string so the rollup can
 	// tell inline-plaintext rotations from file-source rotations.
+	// A marked value is omitted rather than written as an empty string.
+	// Blanking is the more dangerous default: a downstream consumer cannot tell
+	// an unconfigured credential from a configured empty one, whereas absence
+	// fails closer to the cause. The key's record is carried on the context so
+	// the writer can put one in the assignment's place.
+	unresolved := make(map[string]unresolvedEnvKey)
 	for _, k := range sortedKeys(envCfg.Vars.Values) {
 		v := envCfg.Vars.Values[k]
-		vars[k] = maybeSecretString(v)
 		sources = append(sources, sourceForMaybeSecret("workspace.toml:env.vars."+k, v))
+		if u := v.Unresolved; u != nil {
+			// Delete rather than skip: a lower-priority layer (a .env.example
+			// seed, an env file) may already have put a placeholder here, and
+			// shipping that in place of the real secret would be a quieter
+			// version of the same confusion omission exists to prevent.
+			delete(vars, k)
+			unresolved[k] = unresolvedEnvKey{Scope: "env.vars", Record: recordForMark(u)}
+			continue
+		}
+		vars[k] = maybeSecretString(v)
 	}
 	for _, k := range sortedKeys(envCfg.Secrets.Values) {
 		v := envCfg.Secrets.Values[k]
-		vars[k] = maybeSecretString(v)
 		sources = append(sources, sourceForMaybeSecret("workspace.toml:env.secrets."+k, v))
+		if u := v.Unresolved; u != nil {
+			delete(vars, k)
+			unresolved[k] = unresolvedEnvKey{Scope: "env.secrets", Record: recordForMark(u)}
+			continue
+		}
+		vars[k] = maybeSecretString(v)
 	}
+	ctx.UnresolvedEnv = unresolved
 
 	if hasRepoFile {
 		repoEnvPath := discovered.RepoFiles[ctx.RepoName]
@@ -1227,11 +1415,36 @@ func ResolveEnvVars(ctx *MaterializeContext) (map[string]string, []SourceEntry, 
 		})
 	}
 
-	if len(vars) == 0 {
+	// A discovered repo env file is the highest-priority layer, so a key it
+	// supplies is resolved after all: drop the record rather than write one
+	// beside a real assignment for the same key.
+	for k := range unresolved {
+		if _, ok := vars[k]; ok {
+			delete(unresolved, k)
+		}
+	}
+
+	// "Nothing to write" now means no assignments AND no records. A repo whose
+	// keys are all unresolved reaches here with an empty map and a full record
+	// set, and that is the exact case this work exists to serve: it must still
+	// produce a file.
+	if len(vars) == 0 && len(unresolved) == 0 {
 		return nil, nil, nil
 	}
 
 	return vars, sources, nil
+}
+
+// recordForMark converts a resolver mark into the record shape written into a
+// generated file. It drops the provider kind: the record's audience is someone
+// reading the file for a specific variable, and the run-scoped report is where
+// the provider's identity and its remedy belong.
+func recordForMark(u *config.Unresolved) envformat.Record {
+	return envformat.Record{
+		Level:       string(u.Level),
+		Cause:       string(u.Cause),
+		Description: u.Description,
+	}
 }
 
 // sortedKeys returns the keys of a MaybeSecret map in lexical order.
@@ -1309,21 +1522,36 @@ func (e *EnvMaterializer) Materialize(ctx *MaterializeContext) ([]string, error)
 	if err != nil {
 		return nil, err
 	}
-	if len(vars) == 0 {
+	// Records alone are enough to require a file. A repo whose keys are ALL
+	// unresolved resolves to no assignments at all, and returning early there
+	// would leave the contributor this work serves with no file and no account
+	// of why.
+	if len(vars) == 0 && len(ctx.UnresolvedEnv) == 0 {
 		return nil, nil
 	}
 
-	// Build an ordered key-value slice (sorted keys) shared by every writer so
+	// Build an ordered item slice (sorted keys) shared by every writer so
 	// output is deterministic and the default dotenv target stays byte-identical
-	// to niwa's historical .local.env.
-	keys := make([]string, 0, len(vars))
+	// to niwa's historical .local.env. Records are sorted into the same stream
+	// as assignments, so a record sits exactly where the assignment it replaces
+	// would have been — which is where someone scanning the file for that
+	// variable is already looking.
+	keys := make([]string, 0, len(vars)+len(ctx.UnresolvedEnv))
 	for k := range vars {
 		keys = append(keys, k)
 	}
+	for k := range ctx.UnresolvedEnv {
+		keys = append(keys, k)
+	}
 	sort.Strings(keys)
-	kvs := make([]envformat.KV, 0, len(keys))
+	items := make([]envformat.Item, 0, len(keys))
 	for _, k := range keys {
-		kvs = append(kvs, envformat.KV{Key: k, Value: vars[k]})
+		if u, ok := ctx.UnresolvedEnv[k]; ok {
+			rec := u.Record
+			items = append(items, envformat.Item{Key: k, Record: &rec})
+			continue
+		}
+		items = append(items, envformat.Item{Key: k, Value: vars[k]})
 	}
 
 	targets := config.EffectiveEnvOutput(ctx.GlobalEnvOutput, ctx.Config, ctx.RepoName)
@@ -1358,7 +1586,7 @@ func (e *EnvMaterializer) Materialize(ctx *MaterializeContext) ([]string, error)
 		if err := os.MkdirAll(filepath.Dir(abs), 0o700); err != nil {
 			return nil, fmt.Errorf("creating parent dir for env output %q: %w", tgt.Path, err)
 		}
-		data, err := envformat.Marshal(string(tgt.Format), kvs)
+		data, err := envformat.MarshalItems(string(tgt.Format), items)
 		if err != nil {
 			return nil, fmt.Errorf("serializing env output %q for repo %s: %w", tgt.Path, ctx.RepoName, err)
 		}
@@ -1434,17 +1662,46 @@ func safeTargetPath(repoDir, target string) (string, error) {
 }
 
 // parseEnvFile reads a file and parses KEY=VALUE lines. Lines starting with #
-// and blank lines are skipped.
+// and blank lines are skipped. It is the assignments-only wrapper over
+// parseEnvFileWithRecords, kept so the several callers that have no use for
+// records are untouched.
 func parseEnvFile(path string) (map[string]string, error) {
+	vars, _, err := parseEnvFileWithRecords(path)
+	return vars, err
+}
+
+// parseEnvFileWithRecords reads a dotenv file and returns both its assignments
+// and any unresolved-key records it carries.
+//
+// The comment branch is what makes a record structurally incapable of
+// corrupting a neighbour: a '#' line is discarded before strings.Cut ever sees
+// it, so no assignment before or after a record can change by a byte, wherever
+// in the file the record sits.
+//
+// Records are recovered only from the dotenv form. The json and shell writers
+// emit a record in their own format, but niwa's reader has always been
+// dotenv-only and stays that way; a record in those files is for a person, not
+// for niwa.
+func parseEnvFileWithRecords(path string) (map[string]string, map[string]envformat.Record, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	vars := make(map[string]string)
+	records := make(map[string]envformat.Record)
 	for _, line := range strings.Split(string(data), "\n") {
 		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") {
+		if line == "" {
+			continue
+		}
+		if strings.HasPrefix(line, "#") {
+			// ParseRecord revalidates every field and rejects anything that is
+			// not a well-formed record, so an ordinary comment (including one
+			// that merely starts with the prefix) contributes nothing.
+			if key, rec, ok := envformat.ParseRecord(line); ok {
+				records[key] = rec
+			}
 			continue
 		}
 		key, value, ok := strings.Cut(line, "=")
@@ -1453,7 +1710,7 @@ func parseEnvFile(path string) (map[string]string, error) {
 		}
 		vars[key] = value
 	}
-	return vars, nil
+	return vars, records, nil
 }
 
 // localRename inserts ".local" before the file extension. Files without an

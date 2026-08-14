@@ -15,6 +15,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/tsukumogami/niwa/internal/agent"
 	"github.com/tsukumogami/niwa/internal/config"
+	"github.com/tsukumogami/niwa/internal/keyreport"
 	"github.com/tsukumogami/niwa/internal/promptcapture"
 	"github.com/tsukumogami/niwa/internal/workspace"
 )
@@ -296,6 +297,12 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	// (6) Create the instance through the existing provision path, passing
 	// --parallel straight through as this call's clone concurrency.
 	res, err := provisionInstanceFunc(cmd.Context(), workspaceRoot, cwd, namePrefix, sep, dispatchParallel)
+	// Dispatch has a terminal, unlike the hook that shares this provisioner, so
+	// the report goes to stderr here rather than into the worker's context.
+	// Rendered before the error is returned, not after the success path begins:
+	// a strict refusal fails here carrying the keys that caused it, and those
+	// keys are the whole explanation of what just happened.
+	fmt.Fprint(cmd.ErrOrStderr(), keyreport.RenderText(res.Keys))
 	if err != nil {
 		return fmt.Errorf("niwa: error: provisioning dispatch instance: %w", err)
 	}

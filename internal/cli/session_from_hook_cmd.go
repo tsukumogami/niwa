@@ -138,9 +138,9 @@ func runFromHookCreate(cmd *cobra.Command, payload hookPayload) error {
 
 	// Materialize secrets + CLAUDE context into the worktree, exactly as
 	// runSessionCreate does. Without this step the delegated worktree would be
-	// the degraded checkout this feature exists to eliminate. R10's missing-
-	// secret warnings surface on stderr inside this helper (AllowMissingSecrets
-	// warn-and-continue); a hard failure still fails creation.
+	// the degraded checkout this feature exists to eliminate. A key the vault
+	// cannot supply is marked and carried through rather than failing here; a
+	// hard failure still fails creation.
 	if _, err := applyContentToWorktree(instanceRoot, worktreePath, repo, purpose, branch); err != nil {
 		// Reconcile rather than strand (design Decision 8). CreateSession is
 		// already atomic — every failure after `git worktree add` cleans up after

@@ -3,7 +3,6 @@ package workspace
 import (
 	"bytes"
 	"context"
-	"strings"
 	"testing"
 
 	"github.com/tsukumogami/niwa/internal/config"
@@ -135,13 +134,17 @@ func TestResolveAndMergeEffectiveConfigMergesPersonalOverlayEnv(t *testing.T) {
 	}
 }
 
-// TestResolveAndMergeEffectiveConfigAllowMissingDowngrades confirms the
-// helper threads AllowMissingSecrets through to both resolver walks. With the
-// flag set a missing vault key downgrades to an empty MaybeSecret and emits a
-// stderr warning instead of returning an error. The worktree path sets this
-// flag so a transient vault outage during a worktree apply warns rather than
-// hard-failing.
-func TestResolveAndMergeEffectiveConfigAllowMissingDowngrades(t *testing.T) {
+// TestResolveAndMergeEffectiveConfigMarksMissing confirms a missing
+// vault key comes back through the helper as a marked empty value
+// rather than an error, and that nothing is written to the diagnostic
+// sink on the way. Both halves matter: the mark is what downstream
+// reporting reads, and the silence is what keeps the report a single
+// consolidated one rather than a scattering of warnings.
+//
+// This replaces a test that set an AllowMissingSecrets flag to get the
+// same tolerance. Tolerance is now the default, so there is no flag to
+// thread.
+func TestResolveAndMergeEffectiveConfigMarksMissing(t *testing.T) {
 	withFakeVaultBackend(t)
 
 	cfg := &config.WorkspaceConfig{
@@ -170,15 +173,22 @@ func TestResolveAndMergeEffectiveConfigAllowMissingDowngrades(t *testing.T) {
 	defer personalBundle.CloseAll()
 
 	var stderr bytes.Buffer
-	_, _, _, err = ResolveAndMergeEffectiveConfig(
+	merged, _, _, err := ResolveAndMergeEffectiveConfig(
 		ctx, cfg, nil, teamBundle, personalBundle,
-		EffectiveConfigOptions{AllowMissingSecrets: true, Stderr: &stderr},
+		EffectiveConfigOptions{Stderr: &stderr},
 	)
 	if err != nil {
-		t.Fatalf("AllowMissingSecrets must downgrade missing key, got error: %v", err)
+		t.Fatalf("a missing key must not fail the resolve, got error: %v", err)
 	}
-	if !strings.Contains(stderr.String(), "MISSING") {
-		t.Errorf("expected stderr warning naming MISSING key; got:\n%s", stderr.String())
+	got := merged.Env.Secrets.Values["MISSING"]
+	if !got.IsUnresolved() {
+		t.Fatal("expected the missing key to come back marked")
+	}
+	if got.Unresolved.Cause != config.CauseKeyNotFound {
+		t.Errorf("Cause = %q, want %q", got.Unresolved.Cause, config.CauseKeyNotFound)
+	}
+	if stderr.Len() != 0 {
+		t.Errorf("the resolve path must stay silent; got:\n%s", stderr.String())
 	}
 }
 

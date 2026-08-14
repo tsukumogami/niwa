@@ -356,9 +356,8 @@ func TestCreateResult_JSONShape(t *testing.T) {
 }
 
 // TestCreateCmd_HasAllowMissingSecretsFlag mirrors the apply-side check.
-// The flag plumbs into workspace.Applier.AllowMissingSecrets, which the
-// Applier honors uniformly for both Create and Apply (it routes through
-// the same runPipeline).
+// The flag reaches nothing; create and apply share the same pipeline,
+// and that pipeline is tolerant by default.
 func TestCreateCmd_HasAllowMissingSecretsFlag(t *testing.T) {
 	flag := createCmd.Flags().Lookup("allow-missing-secrets")
 	if flag == nil {
@@ -383,27 +382,21 @@ func TestCreateCmd_HasAllowPlaintextSecretsFlag(t *testing.T) {
 	}
 }
 
-// TestCreateCmd_AllowFlagsThreadToApplier mirrors the apply-side check
-// that the parsed flags populate package-level vars runCreate copies
-// onto the Applier struct. The pipeline integration that the Applier
-// then honors these fields is already covered by the workspace and
-// guardrail tests.
-func TestCreateCmd_AllowFlagsThreadToApplier(t *testing.T) {
-	savedMissing := createAllowMissingSecrets
+// TestCreateCmd_AllowPlaintextSecretsThreadsToApplier mirrors the
+// apply-side check that the parsed flag populates the package-level var
+// runCreate copies onto the Applier struct. The pipeline integration
+// that the Applier then honors the field is already covered by the
+// workspace and guardrail tests.
+func TestCreateCmd_AllowPlaintextSecretsThreadsToApplier(t *testing.T) {
 	savedPlain := createAllowPlaintextSecrets
 	t.Cleanup(func() {
-		createAllowMissingSecrets = savedMissing
 		createAllowPlaintextSecrets = savedPlain
 	})
 
-	createAllowMissingSecrets = false
 	createAllowPlaintextSecrets = false
 
-	if err := createCmd.ParseFlags([]string{"--allow-missing-secrets", "--allow-plaintext-secrets"}); err != nil {
+	if err := createCmd.ParseFlags([]string{"--allow-plaintext-secrets"}); err != nil {
 		t.Fatalf("ParseFlags: %v", err)
-	}
-	if !createAllowMissingSecrets {
-		t.Error("expected createAllowMissingSecrets to be true after --allow-missing-secrets")
 	}
 	if !createAllowPlaintextSecrets {
 		t.Error("expected createAllowPlaintextSecrets to be true after --allow-plaintext-secrets")

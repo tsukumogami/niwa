@@ -304,6 +304,42 @@ type WorkspaceMeta struct {
 	// Empty means inherit (from the global override, then the .local.env
 	// dotenv default). Per-repo EnvOutput overrides this.
 	EnvOutput OutputTargets `toml:"env_output,omitempty"`
+	// StrictSecrets opts the workspace into failing when a declared key
+	// could not be supplied, instead of materializing without it. It is
+	// tri-state on purpose: nil ("the workspace did not speak") has to be
+	// distinguishable from an explicit false, because the flag's precedence
+	// rule keys on whether a layer spoke, not on the value it carries.
+	//
+	// It lives on [workspace] for a security reason, not a taxonomic one.
+	// A visibility overlay carries no workspace stanza and the overlay merge
+	// never assigns this table, so an overlay cannot reach this field —
+	// which is what keeps a contributor's first run un-alterable by a
+	// configuration layer they cannot read. Moving it to [env] or [vault]
+	// would put it inside a table overlays do merge into, and the guarantee
+	// would then rest on a check someone could later forget.
+	StrictSecrets *bool `toml:"strict_secrets,omitempty"`
+}
+
+// ResolveStrictSecrets decides whether a run fails on a shortfall, from the
+// two layers allowed to speak.
+//
+// The arbiter for the flag is flagChanged, not flagValue: a bool flag's zero
+// value is indistinguishable from an explicit --strict-secrets=false, and
+// reading the value alone would make the de-escalating form a no-op against a
+// workspace that sets the setting. Cobra's Flags().Changed is the caller's
+// source for flagChanged.
+//
+// setting is the [workspace] strict_secrets value, nil when unset. Tolerant is
+// what neither layer speaking means, which is the default this work exists to
+// establish.
+func ResolveStrictSecrets(setting *bool, flagChanged, flagValue bool) bool {
+	if flagChanged {
+		return flagValue
+	}
+	if setting != nil {
+		return *setting
+	}
+	return false
 }
 
 // ParseResult holds the parsed config and any non-fatal warnings.

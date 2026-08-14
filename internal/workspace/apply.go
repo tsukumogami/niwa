@@ -17,6 +17,7 @@ import (
 	"github.com/tsukumogami/niwa/internal/gitexclude"
 	"github.com/tsukumogami/niwa/internal/github"
 	"github.com/tsukumogami/niwa/internal/guardrail"
+	"github.com/tsukumogami/niwa/internal/keyreport"
 	"github.com/tsukumogami/niwa/internal/pluginrecord"
 	"github.com/tsukumogami/niwa/internal/secret"
 	"github.com/tsukumogami/niwa/internal/vault"
@@ -47,17 +48,32 @@ type Applier struct {
 	// entry points set it from agent.ResolveAgent before calling Apply/Create.
 	Agent agent.Agent
 
+	// Keys collects the declared keys this run could not supply, for the
+	// caller to render once the run returns. It is caller-supplied rather
+	// than returned because Create removes its instance directory and
+	// returns a bare error on failure: a report handed back up the call
+	// stack would be dropped on exactly the path where the user most
+	// needs every key enumerated. A nil collector disables collection.
+	Keys *keyreport.Collector
+
+	// StrictSecrets is the run's resolved strictness: the --strict-secrets
+	// flag when it was explicitly present, else the workspace's
+	// strict_secrets setting, else false. The CLI resolves it once, through
+	// config.ResolveStrictSecrets, so every command surface answers the
+	// question the same way.
+	//
+	// It is read at two places for one decision. The gate beside the
+	// post-merge required-key check turns every collected shortfall fatal;
+	// the promote branch reads the same field because promotion runs later
+	// and per-repo, after that gate has already passed. Nothing threads it
+	// into worktree re-materialization: that path resolves no secrets, so it
+	// reaches neither consult site.
+	StrictSecrets bool
+
 	// Reporter receives all progress and diagnostic output for this applier.
 	// NewApplier initializes it with NewReporter(os.Stderr). Callers may
 	// replace it (e.g., with NewReporterWithTTY) before calling Apply or Create.
 	Reporter *Reporter
-
-	// AllowMissingSecrets threads through to the vault resolver's
-	// ResolveOptions.AllowMissing. When true, missing vault keys are
-	// downgraded to empty MaybeSecret values with a stderr warning.
-	// The CLI --allow-missing-secrets flag (Issue 10) populates this
-	// field; default false preserves the strict-apply behavior.
-	AllowMissingSecrets bool
 
 	// AllowPlaintextSecrets threads through to the public-repo
 	// plaintext-secrets guardrail
@@ -1032,6 +1048,14 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 			return nil, fmt.Errorf("parsing workspace overlay: %w", parseErr)
 		}
 
+		// Inert [workspace] settings the overlay declares are announced here
+		// rather than rejected: a stale overlay must keep applying, and the
+		// author who wrote the stanza is the one who needs to hear that it
+		// does nothing. Deferred so it survives the spinner.
+		for _, w := range overlay.TombstoneWarnings() {
+			a.Reporter.DeferWarn("%s", w)
+		}
+
 		// PRD R9 stage 2: post-overlay credential-sync chicken-and-egg
 		// check. Stage 1 (Step 0.4) couldn't see the workspace overlay's
 		// vault specs because the overlay wasn't parsed yet. Now that
@@ -1071,9 +1095,13 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 			Env:   overlay.Env,
 			Repos: overlay.Repos,
 		}
+		// Values that resolve here are secrets and pass through the
+		// second, whole-config resolve untouched; values that do not
+		// come back marked, and the marks are what stop that second
+		// pass re-asking with the wrong bundle. See resolveOne's
+		// already-marked guard.
 		resolvedTmp, resolveErr := resolve.ResolveWorkspace(ctx, tmpCfg, resolve.ResolveOptions{
-			AllowMissing: a.AllowMissingSecrets,
-			TeamBundle:   overlayVaultBundle,
+			TeamBundle: overlayVaultBundle,
 		})
 		if resolveErr != nil {
 			return nil, fmt.Errorf("resolving overlay vault references: %w", resolveErr)
@@ -1308,22 +1336,32 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 	effectiveCfg, globalEnvExamplePolicy, globalEnvOutput, err := ResolveAndMergeEffectiveConfig(
 		ctx, cfg, globalOverride, teamBundle, personalBundle,
 		EffectiveConfigOptions{
-			AllowMissingSecrets: a.AllowMissingSecrets,
-			GlobalConfigDir:     a.GlobalConfigDir,
-			Stderr:              a.Reporter.Writer(),
+			GlobalConfigDir: a.GlobalConfigDir,
+			Stderr:          a.Reporter.Writer(),
+			Keys:            a.Keys,
 		},
 	)
 	if err != nil {
 		return nil, err
 	}
 
-	// Post-merge required/recommended enforcement (PRD R33/R34). The
-	// required check is NOT downgraded by AllowMissingSecrets; the
-	// resolver already turned missing vault-backed keys into empty
-	// MaybeSecret values when the flag is set, and checkRequiredKeys
-	// catches those empty values via the required list.
+	// Post-merge required/recommended enforcement. This is the single
+	// place fatality is decided: the resolver marks shortfalls rather
+	// than failing, and only a required key that a reachable provider
+	// does not hold stops the apply here.
 	if err := checkRequiredKeys(effectiveCfg, a.Reporter.Writer()); err != nil {
 		return nil, err
+	}
+
+	// Strict mode reads the same picture immediately afterwards: whatever
+	// checkRequiredKeys tolerated is fatal here when the operator asked for
+	// fail-on-shortfall. It runs after, not instead: the strict-when-reachable
+	// error above says which provider was asked and stays the better message
+	// when both would fire.
+	if a.StrictSecrets {
+		if err := strictShortfallError(a.Keys); err != nil {
+			return nil, err
+		}
 	}
 
 	// Step 3: Create group directories and clone repos concurrently.
@@ -1576,6 +1614,8 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 			GlobalEnvExamplePolicy: globalEnvExamplePolicy,
 			GlobalEnvOutput:        globalEnvOutput,
 			WorktreeDelegation:     worktreeDelegation,
+			Keys:                   a.Keys,
+			StrictSecrets:          a.StrictSecrets,
 		})
 		if err != nil {
 			return nil, err

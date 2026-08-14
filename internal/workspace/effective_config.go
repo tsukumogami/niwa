@@ -5,30 +5,30 @@ import (
 	"io"
 
 	"github.com/tsukumogami/niwa/internal/config"
+	"github.com/tsukumogami/niwa/internal/keyreport"
 	"github.com/tsukumogami/niwa/internal/vault"
 	"github.com/tsukumogami/niwa/internal/vault/resolve"
 )
 
 // EffectiveConfigOptions tunes the resolve+merge helper for a single call site.
 //
-// AllowMissingSecrets threads through to resolve.ResolveOptions.AllowMissing on
-// both the team and personal-overlay walks; when true, missing vault keys
-// downgrade to empty MaybeSecret values with a stderr warning instead of an
-// error. The instance apply path threads its Applier.AllowMissingSecrets here;
-// the worktree apply path sets this true so a transient vault outage degrades
-// a worktree re-materialization to a warning rather than a hard failure (the
-// instance create gate already enforced strictness at bootstrap time).
-//
 // GlobalConfigDir is forwarded to MergeGlobalOverride so personal-overlay hook
 // scripts can be resolved to absolute paths. Empty when no global config is
 // registered (no override is being merged anyway, in that case).
 //
-// Stderr receives the resolver's AllowMissing warnings. Nil falls back to
-// os.Stderr inside the resolver.
+// Stderr is the resolver's diagnostic sink. The resolver writes nothing to it
+// today — an unresolved key is marked on the value and reported once, later —
+// so this exists to keep that silence testable rather than to carry output.
+//
+// Keys is the caller-supplied collector the run's unresolved keys accumulate
+// into. It is drained and rendered by the command surface after the run
+// returns, so a nil collector means "this caller does not report" rather than
+// "nothing went wrong": the worktree path passes nil because it re-materializes
+// from an already-written file rather than resolving.
 type EffectiveConfigOptions struct {
-	AllowMissingSecrets bool
-	GlobalConfigDir     string
-	Stderr              io.Writer
+	GlobalConfigDir string
+	Stderr          io.Writer
+	Keys            *keyreport.Collector
 }
 
 // ResolveAndMergeEffectiveConfig runs the vault resolve + personal-overlay
@@ -72,9 +72,9 @@ func ResolveAndMergeEffectiveConfig(
 ) (*config.WorkspaceConfig, *config.EnvExamplePolicy, config.OutputTargets, error) {
 	// Resolve the team workspace config first.
 	resolvedCfg, err := resolve.ResolveWorkspace(ctx, cfg, resolve.ResolveOptions{
-		AllowMissing: opts.AllowMissingSecrets,
-		TeamBundle:   teamBundle,
-		Stderr:       opts.Stderr,
+		TeamBundle: teamBundle,
+		Stderr:     opts.Stderr,
+		Keys:       opts.Keys,
 	})
 	if err != nil {
 		return nil, nil, nil, err
@@ -82,6 +82,7 @@ func ResolveAndMergeEffectiveConfig(
 
 	// No overlay registered: return the team-only resolved cfg unchanged.
 	if globalOverride == nil {
+		collectUnresolvedKeys(resolvedCfg, opts.Keys)
 		return resolvedCfg, nil, nil, nil
 	}
 
@@ -90,9 +91,9 @@ func ResolveAndMergeEffectiveConfig(
 	// in MergeGlobalOverride sees the overlay's resolved MaybeSecret values,
 	// not pre-resolve URIs.
 	resolvedOverride, err := resolve.ResolveGlobalOverride(ctx, globalOverride, resolve.ResolveOptions{
-		AllowMissing:   opts.AllowMissingSecrets,
 		PersonalBundle: personalBundle,
 		Stderr:         opts.Stderr,
+		Keys:           opts.Keys,
 	})
 	if err != nil {
 		return nil, nil, nil, err
@@ -102,5 +103,9 @@ func ResolveAndMergeEffectiveConfig(
 	if err != nil {
 		return nil, nil, nil, err
 	}
+	// After the merge, never before it: a key the team layer could not resolve
+	// may be supplied by the personal overlay, and only the merged config knows
+	// which layer won.
+	collectUnresolvedKeys(merged, opts.Keys)
 	return merged, flattened.EnvExamplePolicy, flattened.EnvOutput, nil
 }

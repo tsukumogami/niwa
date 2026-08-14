@@ -86,9 +86,11 @@ func (defaultCommander) Run(ctx context.Context, name string, args []string) ([]
 // Error handling:
 //
 //   - A start failure (binary missing) maps to
+//     vault.ErrClientNotInstalled, which itself wraps
 //     vault.ErrProviderUnreachable.
 //   - A non-zero exit with recognisable auth markers in (scrubbed)
-//     stderr maps to vault.ErrProviderUnreachable.
+//     stderr maps to vault.ErrProviderUnreachable and NOT to
+//     vault.ErrClientNotInstalled: the client ran, so it is present.
 //   - A non-zero exit without auth markers is treated as a generic
 //     provider error (wrapped via secret.Errorf, stderr scrubbed).
 //   - Malformed JSON stdout is a generic provider error.
@@ -136,13 +138,19 @@ func runInfisicalExport(ctx context.Context, c commander, project, env, path, to
 	}
 	stdout, stderrBytes, exitCode, err := c.Run(ctx, "infisical", args)
 	if err != nil {
-		// Process failed to start (e.g., CLI not installed). We do
-		// not scrub err.Error() — an os/exec start-error string is
-		// a filesystem/syscall message that never carries secret
+		// Process failed to start: the binary is missing, or is
+		// present but not executable. Either way the client is not
+		// usable on this host, which is a different remedy from an
+		// auth or network failure — hence the narrower sentinel. It
+		// wraps ErrProviderUnreachable, so callers testing only for
+		// the broader one are unaffected.
+		//
+		// We do not scrub err.Error() — an os/exec start-error string
+		// is a filesystem/syscall message that never carries secret
 		// material.
 		return nil, vault.VersionToken{}, secret.Errorf(
 			"infisical: running export: %w: %w",
-			vault.ErrProviderUnreachable, err,
+			vault.ErrClientNotInstalled, err,
 		)
 	}
 	if exitCode != 0 {
@@ -246,11 +254,12 @@ func parseExportJSON(raw []byte) (map[string]string, error) {
 // The marker set is deliberately specific: broad tokens like "auth"
 // or "token" were removed in a v1 tightening because they
 // misclassified transient network errors (e.g., "token refresh
-// pending") as auth failures, which under --allow-missing-secrets
-// silently downgrades the result to empty. The current list focuses
-// on phrases that unambiguously signal a credential / session
-// problem. Expand with care when new Infisical CLI versions ship
-// additional error phrasing.
+// pending") as auth failures. A misclassification still costs: the
+// key is reported unresolved and omitted from the generated files
+// rather than retried, so a retriable fault reads as a permanent one.
+// The current list focuses on phrases that unambiguously signal a
+// credential / session problem. Expand with care when new Infisical
+// CLI versions ship additional error phrasing.
 //
 // The match runs AFTER scrubbing, so a stderr that happened to
 // contain a secret fragment matching one of these markers has

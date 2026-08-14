@@ -52,6 +52,7 @@ func init() {
 	initCmd.Flags().BoolVar(&initNoInstallPlugins, "no-install-plugins", false, "skip auto-installing the embedded niwa Claude Code plugin (otherwise installed once when a rank-2 source is detected)")
 	initCmd.Flags().BoolVar(&initBootstrap, "bootstrap", false, "when the source repo has no .niwa/workspace.toml, scaffold a minimal config and stage it on a niwa-bootstrap branch")
 	initCmd.Flags().BoolVar(&initNoBootstrap, "no-bootstrap", false, "explicitly decline bootstrap; equivalent to answering N at the R13 prompt (mutually exclusive with --bootstrap)")
+	registerStrictSecretsFlag(initCmd, &strictSecretsInit)
 	initCmd.ValidArgsFunction = completeWorkspaceNames
 }
 
@@ -175,6 +176,7 @@ func defaultRunBootstrap(ctx context.Context, cmd *cobra.Command, workspaceRoot,
 	applier := workspace.NewApplier(gh)
 	applier.Reporter = workspace.NewReporter(cmd.ErrOrStderr())
 	applier.ConfigSourceURL = source
+	defer wireKeyReport(applier, cmd.ErrOrStderr())()
 	if globalCfg, gErr := config.LoadGlobalConfig(); gErr == nil {
 		if gDir, dErr := config.GlobalConfigDir(); dErr == nil {
 			applier.GlobalConfigDir = gDir
@@ -194,6 +196,10 @@ func defaultRunBootstrap(ctx context.Context, cmd *cobra.Command, workspaceRoot,
 			return "", agErr
 		}
 		applier.Agent = resolvedAgent
+		// The scaffold this reads was written moments ago at Step 2, so the
+		// setting is resolved here rather than at Step 4: before the scaffold
+		// exists there is no [workspace] table to read it from.
+		applier.StrictSecrets = strictSecretsFor(cmd, strictSecretsInit, result.Config)
 		return applier.Create(ctx, result.Config, configDir, wsRoot, instName)
 	}
 

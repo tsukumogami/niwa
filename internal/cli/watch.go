@@ -15,6 +15,7 @@ import (
 
 	"github.com/tsukumogami/niwa/internal/config"
 	"github.com/tsukumogami/niwa/internal/github"
+	"github.com/tsukumogami/niwa/internal/keyreport"
 	"github.com/tsukumogami/niwa/internal/watch"
 	"github.com/tsukumogami/niwa/internal/workspace"
 )
@@ -774,7 +775,14 @@ func stageReview(cmd *cobra.Command, root, cwd, token string, client *github.API
 	}
 
 	reapOpportunistically(root)
+	// cloneWorkers is 0: watch takes the [global] clone_workers config or the
+	// built-in default.
 	provRes, err := provisionInstanceFunc(ctx, root, cwd, namePrefix, "+", 0)
+	// Watch runs unattended, so this lands in whatever captures its stderr; the
+	// alternative is a review agent working in an instance whose missing keys
+	// nothing recorded. Rendered before the error returns, so a strict refusal
+	// leaves the same enumeration behind that a partial provision does.
+	fmt.Fprint(cmd.ErrOrStderr(), keyreport.RenderText(provRes.Keys))
 	if err != nil {
 		return fmt.Errorf("provisioning contained instance: %w", err)
 	}

@@ -25,20 +25,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 
 	"github.com/tsukumogami/niwa/internal/config"
+	"github.com/tsukumogami/niwa/internal/keyreport"
 	"github.com/tsukumogami/niwa/internal/secret"
 	"github.com/tsukumogami/niwa/internal/vault"
 )
 
 // ResolveOptions tune resolver behavior for a single niwa apply.
 type ResolveOptions struct {
-	// AllowMissing, when true, downgrades missing-key errors to an
-	// empty MaybeSecret and emits a stderr warning. The CLI flag
-	// --allow-missing-secrets threads through this field.
-	AllowMissing bool
-
 	// Registry, when non-nil, overrides vault.DefaultRegistry for
 	// opening providers. Tests use this to register the fake backend
 	// without mutating the process-wide default registry.
@@ -66,9 +61,27 @@ type ResolveOptions struct {
 	// in error messages for user orientation.
 	SourceFile string
 
-	// Stderr, when non-nil, receives AllowMissing warnings. Tests
-	// capture it to a *bytes.Buffer; the default is os.Stderr.
+	// Stderr is the resolver's diagnostic sink. The resolver currently
+	// writes nothing to it: a shortfall is recorded as a mark on the
+	// value rather than announced here, and reporting happens once,
+	// post-merge, where the whole picture is available. The field
+	// stays because that silence is a contract several tests assert
+	// against, not an accident.
 	Stderr interface{ Write(p []byte) (int, error) }
+
+	// Keys is the run's key-report collector, threaded here so the whole
+	// resolve stage holds the same sink the applier and the command
+	// surface hold.
+	//
+	// The resolver deliberately does not record into it. A shortfall it
+	// marks is a fact about one configuration layer, and layers merge
+	// last-wins: a key the team config could not resolve may be supplied
+	// by the personal overlay immediately afterwards. Recording at mark
+	// time would put that key in the report with a value sitting in the
+	// merged config beside it. The single recording point is the
+	// post-merge walk in internal/workspace, which reads the same marks
+	// off the config that survived the merge.
+	Keys *keyreport.Collector
 }
 
 // BuildBundle opens a vault.Bundle from a config.VaultRegistry. It
@@ -199,11 +212,16 @@ func CheckProviderNameCollision(team, personal *vault.Bundle) error {
 //     Secret/Token are populated. Values are registered on the
 //     ctx-attached Redactor for log scrubbing.
 //   - Missing keys with Optional (?required=false) silently downgrade
-//     to empty MaybeSecret{}.
-//   - Missing keys without Optional when opts.AllowMissing is true
-//     downgrade to empty MaybeSecret{} and emit a stderr warning
-//     naming the key and provider.
-//   - All other errors propagate.
+//     to empty MaybeSecret{}, unmarked. That is a deliberate empty,
+//     not a shortfall.
+//   - A shortfall — key not found on a reachable provider, provider
+//     unreachable, client not installed, or a reference naming a
+//     provider the active bundle does not declare — produces a marked
+//     empty MaybeSecret rather than an error. Fatality is decided
+//     later, post-merge, against the whole configuration.
+//   - Configuration defects still propagate as errors: a malformed
+//     reference, an unsupported reference version, an undecodable
+//     body, a missing required field.
 //
 // The caller owns the bundle: ResolveWorkspace does not call CloseAll.
 // When opts.TeamBundle is nil, ResolveWorkspace builds a bundle
@@ -242,10 +260,6 @@ func ResolveWorkspace(ctx context.Context, cfg *config.WorkspaceConfig, opts Res
 		ctx:    ctx,
 		bundle: bundle,
 		opts:   opts,
-		stderr: opts.Stderr,
-	}
-	if w.stderr == nil {
-		w.stderr = os.Stderr
 	}
 
 	if err := w.walkEnv("env", &out.Env); err != nil {
@@ -333,10 +347,6 @@ func ResolveGlobalOverride(ctx context.Context, gco *config.GlobalConfigOverride
 		ctx:    ctx,
 		bundle: bundle,
 		opts:   opts,
-		stderr: opts.Stderr,
-	}
-	if w.stderr == nil {
-		w.stderr = os.Stderr
 	}
 
 	if err := w.walkGlobalOverride("global", &out.Global); err != nil {
@@ -357,7 +367,34 @@ type walker struct {
 	ctx    context.Context
 	bundle *vault.Bundle
 	opts   ResolveOptions
-	stderr interface{ Write(p []byte) (int, error) }
+}
+
+// declaration is what the workspace config says about a key,
+// independent of whether a value was resolved for it. The walker
+// carries it alongside each value so a mark can record the declared
+// level and description at the point of failure — after the merge,
+// the requirement sub-tables are still available but the association
+// with a specific resolution attempt is not.
+type declaration struct {
+	Level       config.RequirementLevel
+	Description string
+}
+
+// declarationFor locates a key in the table's requirement sub-tables.
+// A key may legitimately appear in none of them, in which case the
+// zero declaration is returned. Sub-tables are checked strongest-first
+// so a key listed twice reports the level that governs it.
+func declarationFor(t config.EnvVarsTable, key string) declaration {
+	if desc, ok := t.Required[key]; ok {
+		return declaration{Level: config.LevelRequired, Description: desc}
+	}
+	if desc, ok := t.Recommended[key]; ok {
+		return declaration{Level: config.LevelRecommended, Description: desc}
+	}
+	if desc, ok := t.Optional[key]; ok {
+		return declaration{Level: config.LevelOptional, Description: desc}
+	}
+	return declaration{}
 }
 
 // walkEnv resolves an EnvConfig in place. Secrets sub-table values
@@ -367,31 +404,37 @@ func (w *walker) walkEnv(prefix string, env *config.EnvConfig) error {
 	if env == nil {
 		return nil
 	}
-	if err := w.walkTable(prefix+".vars", env.Vars.Values, false); err != nil {
+	if err := w.walkTable(prefix+".vars", env.Vars, false); err != nil {
 		return err
 	}
-	return w.walkTable(prefix+".secrets", env.Secrets.Values, true)
+	return w.walkTable(prefix+".secrets", env.Secrets, true)
 }
 
 func (w *walker) walkClaudeEnv(prefix string, env *config.ClaudeEnvConfig) error {
 	if env == nil {
 		return nil
 	}
-	if err := w.walkTable(prefix+".vars", env.Vars.Values, false); err != nil {
+	if err := w.walkTable(prefix+".vars", env.Vars, false); err != nil {
 		return err
 	}
-	return w.walkTable(prefix+".secrets", env.Secrets.Values, true)
+	return w.walkTable(prefix+".secrets", env.Secrets, true)
 }
 
-// walkTable iterates a MaybeSecret map, resolving vault:// URIs and
-// auto-wrapping plaintext when isSecretsTable is true.
-func (w *walker) walkTable(prefix string, values map[string]config.MaybeSecret, isSecretsTable bool) error {
-	for key, ms := range values {
-		resolved, err := w.resolveOne(prefix+"."+key, ms, isSecretsTable)
+// walkTable iterates a table's MaybeSecret map, resolving vault:// URIs
+// and auto-wrapping plaintext when isSecretsTable is true. The whole
+// table is passed rather than just its Values map so a shortfall can
+// pick up the key's declared level and description from the sibling
+// requirement sub-tables.
+//
+// t is taken by value; the maps inside it are shared, so writing back
+// into t.Values mutates the caller's table as before.
+func (w *walker) walkTable(prefix string, t config.EnvVarsTable, isSecretsTable bool) error {
+	for key, ms := range t.Values {
+		resolved, err := w.resolveOne(prefix+"."+key, ms, isSecretsTable, declarationFor(t, key))
 		if err != nil {
 			return err
 		}
-		values[key] = resolved
+		t.Values[key] = resolved
 	}
 	return nil
 }
@@ -399,9 +442,12 @@ func (w *walker) walkTable(prefix string, values map[string]config.MaybeSecret, 
 // walkSettings resolves a SettingsConfig in place. Settings keys are
 // treated as non-secrets-table: plaintext stays plaintext, vault://
 // values are resolved into Secret.
+//
+// Settings have no requirement sub-tables, so an unresolved settings
+// key is marked with the zero declaration.
 func (w *walker) walkSettings(prefix string, settings config.SettingsConfig) error {
 	for key, ms := range settings {
-		resolved, err := w.resolveOne(prefix+"."+key, ms, false)
+		resolved, err := w.resolveOne(prefix+"."+key, ms, false, declaration{})
 		if err != nil {
 			return err
 		}
@@ -456,21 +502,36 @@ func (w *walker) walkGlobalOverride(prefix string, g *config.GlobalOverride) err
 //   - Empty Plain: leave untouched (zero MaybeSecret is "empty
 //     non-secret"). Do not auto-wrap empty values.
 //   - Plain starts with vault://: parse, dispatch to provider, on
-//     success populate Secret/Token and clear Plain. On miss with
-//     Optional or AllowMissing, return empty MaybeSecret{}.
+//     success populate Secret/Token and clear Plain. On a shortfall,
+//     return an empty MaybeSecret carrying an Unresolved mark — except
+//     for an Optional (?required=false) miss, which returns a bare
+//     empty MaybeSecret and stays silent.
 //   - Plain is a plaintext literal in a secrets table: wrap into
 //     secret.Value, clear Plain.
 //   - Plain is a plaintext literal in a non-secrets table: leave
 //     untouched.
 //
 // location is the dotted TOML path used in error messages (e.g.,
-// "env.secrets.GH_TOKEN"). The resolver registers resolved values on
-// the ctx-attached Redactor so log scrubbing applies to any error the
-// caller raises afterward.
-func (w *walker) resolveOne(location string, ms config.MaybeSecret, isSecretsTable bool) (config.MaybeSecret, error) {
+// "env.secrets.GH_TOKEN"). decl carries the key's declared level and
+// description, which ride along on any mark this call produces. The
+// resolver registers resolved values on the ctx-attached Redactor so
+// log scrubbing applies to any error the caller raises afterward.
+func (w *walker) resolveOne(location string, ms config.MaybeSecret, isSecretsTable bool, decl declaration) (config.MaybeSecret, error) {
 	// A value already resolved by an earlier pass (shouldn't happen
 	// in practice but guard anyway) is left alone.
 	if ms.IsSecret() {
+		return ms, nil
+	}
+	// An already-marked value is left alone. This is not defensive
+	// tidiness: the workspace-overlay layer is resolved against its
+	// own provider bundle and then merged into the base config, which
+	// the pipeline resolves again as a whole. Without this guard the
+	// second pass would look at the overlay's marked values with the
+	// wrong bundle in hand, and a mark that correctly said "provider
+	// unreachable" would be overwritten by one saying "undeclared
+	// provider" — a worse answer produced by re-asking a question
+	// already answered.
+	if ms.IsUnresolved() {
 		return ms, nil
 	}
 	if ms.Plain == "" {
@@ -501,19 +562,18 @@ func (w *walker) resolveOne(location string, ms config.MaybeSecret, isSecretsTab
 
 	provider, err := w.bundle.Get(ref.ProviderName)
 	if err != nil {
-		// Unknown provider name at resolve time is actionable as a
-		// key-not-found problem from the user's perspective: they
-		// referenced a provider not declared in the active config.
-		// We return a wrapped ErrKeyNotFound so downstream
-		// diagnostics treat it as a missing reference.
-		label := ref.ProviderName
-		if label == "" {
-			label = "(anonymous)"
-		}
-		return config.MaybeSecret{}, fmt.Errorf(
-			"vault: %s references provider %q but it is not declared in the active bundle: %w",
-			location, label, vault.ErrKeyNotFound,
-		)
+		// The reference names a provider the merged configuration does
+		// not declare. This is emphatically NOT key-not-found: no
+		// provider was asked, so nothing establishes that a reachable
+		// backend lacks the key. Classifying it as key-not-found would
+		// make it fatal under the strict-when-reachable rule, which is
+		// exactly the case a contributor with no vault configuration
+		// hits on their first run.
+		return config.MaybeSecret{Unresolved: &config.Unresolved{
+			Cause:       config.CauseUndeclaredProvider,
+			Level:       decl.Level,
+			Description: decl.Description,
+		}}, nil
 	}
 
 	val, token, resolveErr := provider.Resolve(w.ctx, ref)
@@ -528,30 +588,36 @@ func (w *walker) resolveOne(location string, ms config.MaybeSecret, isSecretsTab
 			// ?required=false downgrades silently.
 			return config.MaybeSecret{}, nil
 		}
-		if w.opts.AllowMissing {
-			fmt.Fprintf(w.stderr,
-				"warning: vault: %s: key %q not found via provider %q; downgrading to empty (--allow-missing-secrets)\n",
-				location, ref.Key, providerLabel(ref.ProviderName))
-			return config.MaybeSecret{}, nil
-		}
-		// R9 remediation: name the provider and key, distinguish
-		// failure modes, and point to US-9 paths.
-		return config.MaybeSecret{}, fmt.Errorf(
-			"vault: %s: key %q not found via provider %q; "+
-				"declare it in the provider or mark the ref ?required=false "+
-				"(or re-run with --allow-missing-secrets to downgrade): %w",
-			location, ref.Key, providerLabel(ref.ProviderName), resolveErr,
-		)
+		// A reachable provider that does not hold the key. This is the
+		// one cause that keeps a required key fatal, decided later by
+		// the post-merge required-key check rather than here.
+		return config.MaybeSecret{Unresolved: &config.Unresolved{
+			Cause:        config.CauseKeyNotFound,
+			Level:        decl.Level,
+			Description:  decl.Description,
+			ProviderKind: provider.Kind(),
+		}}, nil
 	}
 
-	// Unreachable backend (auth failure, network, etc.). Wrap with
-	// secret.Errorf because the provider's error chain may already
-	// carry fragments registered on the redactor.
+	// Client binary absent from the host. Tested before the broader
+	// unreachable sentinel, which it wraps.
+	if errors.Is(resolveErr, vault.ErrClientNotInstalled) {
+		return config.MaybeSecret{Unresolved: &config.Unresolved{
+			Cause:        config.CauseClientNotInstalled,
+			Level:        decl.Level,
+			Description:  decl.Description,
+			ProviderKind: provider.Kind(),
+		}}, nil
+	}
+
+	// Unreachable backend (auth failure, network, etc.).
 	if errors.Is(resolveErr, vault.ErrProviderUnreachable) {
-		return config.MaybeSecret{}, secret.Errorf(
-			"vault: %s: provider %q unreachable while resolving key %q: %w",
-			location, providerLabel(ref.ProviderName), ref.Key, resolveErr,
-		)
+		return config.MaybeSecret{Unresolved: &config.Unresolved{
+			Cause:        config.CauseProviderUnreachable,
+			Level:        decl.Level,
+			Description:  decl.Description,
+			ProviderKind: provider.Kind(),
+		}}, nil
 	}
 
 	// Any other error path.
