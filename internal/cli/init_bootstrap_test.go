@@ -91,7 +91,9 @@ func stubTTY(t *testing.T, isTTY bool) {
 // stay isolated.
 func chdirTemp(t *testing.T) string {
 	t.Helper()
-	dir := t.TempDir()
+	// Resolved: runInit derives paths from os.Getwd, which reports the cwd
+	// with symlinks already resolved.
+	dir := canonicalTempDir(t)
 	origDir, err := os.Getwd()
 	if err != nil {
 		t.Fatal(err)

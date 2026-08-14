@@ -5,8 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"strconv"
-	"strings"
 	"syscall"
 )
 
@@ -78,43 +76,17 @@ func IsProcessAlive(pid int) bool {
 	return true
 }
 
-// pidStartTime reads the process start time (jiffies since boot) from
-// /proc/<pid>/stat on Linux. Returns an error on non-Linux platforms.
-func pidStartTime(pid int) (int64, error) {
-	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
-	if err != nil {
-		return 0, err
-	}
-	// /proc/<pid>/stat: "pid (comm) state ppid pgroup session ... starttime ..."
-	// starttime is field 22 (1-indexed). Find the closing ')' of the comm field
-	// first because it may contain spaces.
-	s := string(data)
-	idx := strings.LastIndex(s, ")")
-	if idx < 0 {
-		return 0, fmt.Errorf("unexpected /proc/stat format")
-	}
-	fields := strings.Fields(s[idx+1:])
-	// fields[0] is state, fields[19] is starttime (field 22 minus 2 already consumed).
-	if len(fields) < 20 {
-		return 0, fmt.Errorf("too few fields in /proc/stat")
-	}
-	v, err := strconv.ParseInt(fields[19], 10, 64)
-	if err != nil {
-		return 0, err
-	}
-	return v, nil
-}
-
 // PPIDChain returns up to n PPIDs walking upward from the current process.
-// The first element is os.Getppid(); the second (if n >= 2) is the PPID of
-// that PID read from /proc/<pid>/stat on Linux, and so on.
+// The first element is os.Getppid(); the second (if n >= 2) is that PID's
+// parent per readPPID, and so on.
 //
 // Walking stops as soon as a PID ≤ 1 is reached (init/kthreadd). A PID in
 // the chain that does not exist surfaces as a structured error so callers
 // can distinguish "no parent present" from "read failed".
 //
-// On non-Linux platforms, only level 1 (os.Getppid) can be resolved; deeper
-// walks return an error.
+// Levels beyond the first need platform process introspection (procfs on
+// Linux, the kern.proc.pid sysctl on Darwin). On a platform with neither,
+// only level 1 resolves and deeper walks return an error.
 func PPIDChain(n int) ([]int, error) {
 	if n <= 0 {
 		return nil, fmt.Errorf("PPIDChain: n must be >= 1, got %d", n)
@@ -128,12 +100,12 @@ func PPIDChain(n int) ([]int, error) {
 	}
 	chain = append(chain, ppid)
 
-	// Deeper levels: Linux /proc only.
+	// Deeper levels: platform process introspection.
 	for i := 1; i < n; i++ {
 		parent := readPPID(chain[i-1])
 		if parent == 0 {
 			return chain, fmt.Errorf(
-				"PPIDChain: cannot read /proc/%d/stat (level %d)", chain[i-1], i+1)
+				"PPIDChain: cannot read parent of PID %d (level %d)", chain[i-1], i+1)
 		}
 		if parent <= 1 {
 			return chain, fmt.Errorf(
@@ -144,32 +116,6 @@ func PPIDChain(n int) ([]int, error) {
 	return chain, nil
 }
 
-// readPPID (Linux) returns the PPID for a given PID from /proc/<pid>/stat,
-// or 0 on any read or parse error. Shared with session_discovery.go.
-func readPPID(pid int) int {
-	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
-	if err != nil {
-		return 0
-	}
-	s := string(data)
-	// /proc/<pid>/stat: "pid (comm) state ppid ..."
-	// Find the closing ')' of comm first; comm may contain spaces.
-	idx := strings.LastIndex(s, ")")
-	if idx < 0 {
-		return 0
-	}
-	fields := strings.Fields(s[idx+1:])
-	// fields[0] = state, fields[1] = ppid.
-	if len(fields) < 2 {
-		return 0
-	}
-	ppid, err := strconv.Atoi(fields[1])
-	if err != nil {
-		return 0
-	}
-	return ppid
-}
-
 // NewSessionID generates a random session UUID for use during registration.
 func NewSessionID() string { return newUUID() }
 
@@ -178,9 +124,11 @@ func NewSessionID() string { return newUUID() }
 // re-implementing the crypto/rand formatting.
 func NewUUID() string { return newUUID() }
 
-// PIDStartTime returns the process start time (jiffies since boot) for a PID.
-// Exported so callers outside the package can record a recycle-safe PID
-// fingerprint without re-reading /proc/<pid>/stat themselves.
+// PIDStartTime returns an opaque, platform-specific process start-time
+// fingerprint for a PID (jiffies since boot on Linux, microseconds since the
+// epoch on Darwin). Exported so callers outside the package can record a
+// recycle-safe PID fingerprint without doing the platform lookup themselves.
+// Compare values only against other values from the same machine and OS.
 func PIDStartTime(pid int) (int64, error) { return pidStartTime(pid) }
 
 // newUUID generates a random UUID v4 without external dependencies.

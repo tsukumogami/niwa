@@ -774,7 +774,7 @@ func stageReview(cmd *cobra.Command, root, cwd, token string, client *github.API
 	}
 
 	reapOpportunistically(root)
-	provRes, err := provisionInstanceFunc(ctx, root, cwd, namePrefix, "+")
+	provRes, err := provisionInstanceFunc(ctx, root, cwd, namePrefix, "+", 0)
 	if err != nil {
 		return fmt.Errorf("provisioning contained instance: %w", err)
 	}
