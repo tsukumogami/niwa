@@ -65,6 +65,22 @@ jobs:
             exit 1
           fi
 
+      # Same reasoning as the tidiness check above: gofmt's output is a property
+      # of the checked-in files and does not vary by GOOS, so one platform
+      # answers it for both. Nothing gated formatting before this, and twelve
+      # files had drifted by the time it was added -- which is the real cost of
+      # leaving it ungated, because the next `gofmt -w` sweeps every one of them
+      # into whatever PR happens to run it.
+      - name: Verify gofmt
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "::error::These files are not gofmt-clean. Run 'gofmt -w' and commit."
+            echo "$unformatted"
+            exit 1
+          fi
+
       # Worth running on both: vet type-checks the files selected by the
       # current GOOS, so the darwin build-tagged sources are only ever checked
       # by the macOS job.
