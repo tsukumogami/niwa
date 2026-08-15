@@ -157,17 +157,17 @@ func sanitizeTOMLError(err error) error {
 //
 //   - SourceLocalFile  — entry came from ~/.config/niwa/provider-auth.toml.
 //   - SourceVault      — entry came from the personal-overlay vault loader
-//                        (machine-identity-vault-sync; wired in by I7).
+//     (machine-identity-vault-sync; wired in by I7).
 //   - SourceCLISession — no pool entry was found; the backend will fall
-//                        through to its CLI-session credentials
-//                        (e.g., `infisical login`). Recorded as a
-//                        tentative classification while the pool is
-//                        building the audit log; I8 may upgrade the
-//                        record to SourceNone if backend auth
-//                        ultimately fails.
+//     through to its CLI-session credentials
+//     (e.g., `infisical login`). Recorded as a
+//     tentative classification while the pool is
+//     building the audit log; I8 may upgrade the
+//     record to SourceNone if backend auth
+//     ultimately fails.
 //   - SourceNone       — no source produced a usable credential.
-//                        Set by I8 after a failed auth call; never
-//                        produced by Lookup directly.
+//     Set by I8 after a failed auth call; never
+//     produced by Lookup directly.
 type Source string
 
 const (
@@ -227,7 +227,7 @@ func (e *vaultUnreachableError) Unwrap() error { return e.err }
 // either serialize Lookup calls or wrap them in a mutex.
 type CredentialPool struct {
 	fileEntries []ProviderAuthEntry
-	vaultLoader *vaultCredLoader            // nil in I2 (and whenever opt-in is off).
+	vaultLoader *vaultCredLoader             // nil in I2 (and whenever opt-in is off).
 	audit       []AuditRecord                // appended during Lookup calls; not goroutine-safe.
 	cache       map[string]vaultLookupResult // populated by I7's vault-fetch path; unused in I2.
 	// vaultUnreachable accumulates one observation per distinct
@@ -318,11 +318,11 @@ func NewCredentialPool(file []ProviderAuthEntry, loader *vaultCredLoader) *Crede
 //     Lookups for the same pair don't double-fetch within one
 //     apply — AC-31).
 //   - Decide:
-//     - File hit: SourceLocalFile, set Fallback when vault also had
-//       an entry.
-//     - File miss + vault hit: SourceVault.
-//     - File miss + vault miss: SourceCLISession (tentative; I8 may
-//       upgrade to SourceNone).
+//   - File hit: SourceLocalFile, set Fallback when vault also had
+//     an entry.
+//   - File miss + vault hit: SourceVault.
+//   - File miss + vault miss: SourceCLISession (tentative; I8 may
+//     upgrade to SourceNone).
 //
 // Errors from the vault path (provider unreachable, body parse
 // failure, body validation failure) are returned to the caller for

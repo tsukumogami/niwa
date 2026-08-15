@@ -148,4 +148,3 @@ func (s Source) DisplayRef() string {
 func (s Source) IsGitHub() bool {
 	return s.Host == "" || s.Host == DefaultHost
 }
-

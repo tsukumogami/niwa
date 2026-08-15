@@ -142,7 +142,7 @@ func TestEmitR12Lines_Sorted(t *testing.T) {
 func TestEmitR12Lines_LastWriteWins(t *testing.T) {
 	rep, buf := captureReporter()
 	trail := AuditTrail{
-		{Kind: "infisical", Project: "uuid-X", Source: SourceCLISession},        // earlier
+		{Kind: "infisical", Project: "uuid-X", Source: SourceCLISession},                  // earlier
 		{Kind: "infisical", Project: "uuid-X", Source: SourceVault, Provider: "personal"}, // later wins
 	}
 	trail.EmitR12Lines(rep)

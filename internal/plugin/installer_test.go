@@ -237,11 +237,11 @@ func TestPlugin_NoArchiveDeps(t *testing.T) {
 // file when the source is a directory, this is a portable trigger.
 //
 // Implementation note: stageAndRename's flow:
-//   1. RemoveAll(.next, .prev) (cleanup)
-//   2. writeEmbeddedTree(.next)
-//   3. If install exists: Rename(install, .prev) — moves aside
-//   4. Rename(.next, install) — promote
-//   5. On step-4 failure with move-aside: Rename(.prev, install) — rollback
+//  1. RemoveAll(.next, .prev) (cleanup)
+//  2. writeEmbeddedTree(.next)
+//  3. If install exists: Rename(install, .prev) — moves aside
+//  4. Rename(.next, install) — promote
+//  5. On step-4 failure with move-aside: Rename(.prev, install) — rollback
 //
 // To exercise step 5 we'd need to intercept between steps 3 and 4.
 // Lacking that hook, we instead verify the EQUIVALENT user-visible

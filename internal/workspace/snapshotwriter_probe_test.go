@@ -15,11 +15,11 @@ import (
 // .niwa/ contents into the snapshot root and reports rank=1.
 func TestMaterializeFromSource_GitHub_Rank1(t *testing.T) {
 	tarball := makeFakeTarball(t, map[string]string{
-		"wrap/":                    "",
-		"wrap/.niwa/":              "",
+		"wrap/":                     "",
+		"wrap/.niwa/":               "",
 		"wrap/.niwa/workspace.toml": "name = team",
-		"wrap/.niwa/CLAUDE.md":     "shared",
-		"wrap/README.md":           "ignored at rank-1",
+		"wrap/.niwa/CLAUDE.md":      "shared",
+		"wrap/README.md":            "ignored at rank-1",
 	})
 	fetcher := &fakeFetcher{tarball: tarball, commitOID: "abc"}
 
@@ -94,10 +94,10 @@ func TestMaterializeFromSource_GitHub_Rank2(t *testing.T) {
 // same source returns AmbiguousMarkersError and writes no provenance.
 func TestMaterializeFromSource_GitHub_Ambiguous(t *testing.T) {
 	tarball := makeFakeTarball(t, map[string]string{
-		"wrap/":                    "",
-		"wrap/.niwa/":              "",
+		"wrap/":                     "",
+		"wrap/.niwa/":               "",
 		"wrap/.niwa/workspace.toml": "name = rank1",
-		"wrap/workspace.toml":      "name = rank2",
+		"wrap/workspace.toml":       "name = rank2",
 	})
 	fetcher := &fakeFetcher{tarball: tarball, commitOID: "abc"}
 
@@ -215,8 +215,8 @@ func TestMaterializeFromSource_GitHub_NetworkErrorAborts(t *testing.T) {
 // the resolved subpath is ".niwa".
 func TestMaterializeFromSource_GitHub_ProvenanceRecordsResolvedSubpath(t *testing.T) {
 	tarball := makeFakeTarball(t, map[string]string{
-		"wrap/":                    "",
-		"wrap/.niwa/":              "",
+		"wrap/":                     "",
+		"wrap/.niwa/":               "",
 		"wrap/.niwa/workspace.toml": "name = team",
 	})
 	fetcher := &fakeFetcher{tarball: tarball, commitOID: "abc"}
@@ -335,8 +335,8 @@ func TestMaterializeFromSource_Overlay_NoMarker(t *testing.T) {
 // materialization fails with no-marker.
 func TestMaterializeFromSource_Overlay_TeamConfigMarkerDoesNotSatisfyOverlay(t *testing.T) {
 	tarball := makeFakeTarball(t, map[string]string{
-		"wrap/":                    "",
-		"wrap/.niwa/":              "",
+		"wrap/":                     "",
+		"wrap/.niwa/":               "",
 		"wrap/.niwa/workspace.toml": "team-config marker",
 	})
 	fetcher := &fakeFetcher{tarball: tarball, commitOID: "abc"}
