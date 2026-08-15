@@ -1,4 +1,5 @@
 ---
+schema: prd/v1
 status: Accepted
 problem: |
   niwa sets up workspace structure and CLAUDE.md files but doesn't distribute
@@ -18,8 +19,7 @@ goals: |
 
 Accepted
 
-## Problem statement
-
+## Problem Statement
 niwa manages workspace structure (repos, groups, directories) and CLAUDE.md context hierarchy. But Claude Code's operational configuration -- hooks that gate tool use, settings that control permissions, environment variables that configure integrations -- must still be set up manually in each repo.
 
 Today's workaround is a 700-line bash installer that copies hook scripts, generates settings.local.json, and merges .env files into each repo. This works for one org but is hardcoded and fragile. niwa's config schema already declares hooks, settings, and env sections, and the merge logic for per-repo overrides exists. But the apply pipeline doesn't write any of it to disk.
@@ -38,8 +38,7 @@ The gap is concrete: the tsukumogami project can't adopt niwa until this works. 
 
 5. **Extensibility.** The distribution mechanism should accommodate future types (plugins, scripts, extensions) without requiring changes to the core apply pipeline.
 
-## User stories
-
+## User Stories
 **US1: Developer setting up Claude Code hooks across repos.**
 I declare `pre_tool_use = ["hooks/gate-online.sh"]` once in workspace.toml. After `niwa apply`, every repo has the script at `.claude/hooks/pre_tool_use/gate-online.sh` and it's executable. I don't touch individual repos.
 
@@ -274,8 +273,7 @@ my-project/public/.github/
 
 **R17: Distribution ordering.** Hooks are installed before settings are generated, because settings.local.json references installed hook paths. Env distribution is independent of both.
 
-## Acceptance criteria
-
+## Acceptance Criteria
 ### Hooks
 - [ ] `[claude.hooks] pre_tool_use = ["hooks/gate.sh"]` copies the script to `.claude/hooks/pre_tool_use/gate.sh` in each repo
 - [ ] Installed hook scripts are executable (mode 0755)
@@ -304,8 +302,7 @@ my-project/public/.github/
 - [ ] Removing a hook from config and re-running apply deletes the installed script
 - [ ] Running apply twice with no changes produces no file modifications
 
-## Out of scope
-
+## Out of Scope
 - **Plugin installation** (`claude plugin install`). Separate feature (F11), different mechanism (external CLI calls).
 - **Channel/Telegram configuration.** Host-specific, involves secrets, out of scope for workspace-level config.
 - **Secret management.** No special handling for sensitive values beyond "put them in .env files, don't inline in TOML."

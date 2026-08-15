@@ -1,4 +1,5 @@
 ---
+schema: design/v1
 upstream: docs/prds/PRD-niwa-watch-pr-hardening.md
 status: Current
 problem: |

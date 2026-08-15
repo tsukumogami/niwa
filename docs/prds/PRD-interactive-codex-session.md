@@ -1,4 +1,5 @@
 ---
+schema: prd/v1
 status: Done
 problem: |
   niwa prepares a workspace for a single agent, Claude Code: it writes the

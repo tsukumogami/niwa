@@ -1,4 +1,5 @@
 ---
+schema: prd/v1
 status: Done
 problem: |
   Developers fanning out Claude Code background agents from a niwa workspace have no

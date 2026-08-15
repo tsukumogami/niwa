@@ -1,4 +1,5 @@
 ---
+schema: design/v1
 status: Superseded
 superseded_by: docs/designs/current/DESIGN-niwa-mesh-removal.md
 problem: |
@@ -33,6 +34,8 @@ rationale: |
 # DESIGN: Coordinator Loop Stall Recovery
 
 ## Status
+
+Superseded
 
 Superseded by [DESIGN-niwa-mesh-removal.md](docs/designs/current/DESIGN-niwa-mesh-removal.md)
 

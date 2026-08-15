@@ -1,4 +1,5 @@
 ---
+schema: design/v1
 status: Current
 problem: |
   After niwa create, users must manually cd into the workspace directory because

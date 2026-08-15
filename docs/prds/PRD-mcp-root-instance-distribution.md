@@ -1,4 +1,5 @@
 ---
+schema: prd/v1
 status: Done
 problem: |
   niwa cannot place a verbatim-named, non-gitignored file at the workspace root

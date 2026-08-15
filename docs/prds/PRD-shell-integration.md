@@ -1,4 +1,5 @@
 ---
+schema: prd/v1
 status: Done
 problem: |
   After niwa create, users must manually cd into the workspace directory because

@@ -1,4 +1,5 @@
 ---
+schema: prd/v1
 status: Done
 problem: |
   The shipped `niwa watch --once` PR-review wedge is not trustworthy across

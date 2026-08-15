@@ -1,4 +1,5 @@
 ---
+schema: design/v1
 status: Current
 problem: |
   niwa cannot materialize a verbatim-named, non-gitignored file at the two

@@ -1,4 +1,5 @@
 ---
+schema: design/v1
 status: Superseded
 superseded_by: docs/designs/current/DESIGN-niwa-mesh-removal.md
 problem: |
@@ -27,10 +28,11 @@ rationale: |
 
 ## Status
 
+Superseded
+
 Superseded by [DESIGN-niwa-mesh-removal.md](docs/designs/current/DESIGN-niwa-mesh-removal.md)
 
-## Context and problem statement
-
+## Context and Problem Statement
 When niwa's mesh daemon spawns a worker session to handle a delegated task, that
 session runs with `--permission-mode=acceptEdits`. This auto-approves file writes
 but requires interactive user approval for all shell tool calls — `gh`, `git push`,
@@ -43,8 +45,7 @@ all analytical and coding work, then hit the permission wall at the final execut
 step (creating a PR, running tests). The fix must target the final execution step
 without changing how coordinators behave.
 
-## Decision drivers
-
+## Decision Drivers
 - Workers run headless and unattended. Any permission model requiring interactive
   approval is a non-starter.
 - The coordinator's permission mode is already expressed via `settings.local.json`
@@ -60,8 +61,7 @@ without changing how coordinators behave.
 - The `--allowed-tools` flag supports fine-grained tool patterns (`Bash(gh *)`,
   `Bash(git *)`) as an alternative to a full permission mode bypass.
 
-## Considered options
-
+## Considered Options
 ### Decision 1: Worker session permission scope
 
 **Context**
@@ -194,8 +194,7 @@ with temp-dir fixtures.
   Rejected as over-engineered: workspace config, not task payloads, is the right
   owner for this value.
 
-## Decision outcome
-
+## Decision Outcome
 Workers inherit the coordinator's configured permission mode, resolved once at daemon
 startup from `settings.local.json` via a new `WorkerPermissionMode` helper in the
 workspace package. The result is stored in `spawnContext` and applied to every
@@ -204,8 +203,7 @@ workers get full bypass. When the coordinator has no explicit bypass configured,
 get `acceptEdits` plus curated Bash patterns for common dev tools. Startup-time
 resolution closes the TOCTOU escalation path that a per-spawn read would introduce.
 
-## Solution architecture
-
+## Solution Architecture
 ### Overview
 
 `spawnWorker` currently builds a fixed `exec.Command` with a hardcoded permission
@@ -318,8 +316,7 @@ per-spawn (spawnWorker)
 > `--allowed-tools` values are identical across both branches — resume semantics
 > do not change permission scope.
 
-## Implementation approach
-
+## Implementation Approach
 ### Phase 1: Workspace helper and fallback tool list
 
 Add `internal/workspace/permissions.go` with `WorkerPermissionMode`. Add
@@ -350,8 +347,7 @@ configured with bypass, delegated worker runs a shell command) and fallback path
 Deliverables:
 - `test/functional/features/mesh.feature` (new scenario)
 
-## Security considerations
-
+## Security Considerations
 This design expands worker execution rights, introducing several security dimensions
 worth documenting for implementers.
 

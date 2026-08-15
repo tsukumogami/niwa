@@ -1,4 +1,5 @@
 ---
+schema: prd/v1
 status: Done
 problem: |
   Developers who dispatch remote-control sessions with `niwa dispatch` to run

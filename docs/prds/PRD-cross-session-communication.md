@@ -1,4 +1,5 @@
 ---
+schema: prd/v1
 status: Done
 problem: |
   Developers use niwa to manage multi-repo workspaces where work often needs to
