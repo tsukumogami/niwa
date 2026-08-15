@@ -24,15 +24,15 @@ import (
 type tarballFakeServer struct {
 	srv *httptest.Server
 
-	mu          sync.Mutex
-	tarballs    map[string][]byte    // key: owner/repo/ref → tarball bytes
-	commits     map[string]string    // key: owner/repo/ref → commit oid
-	etags       map[string]string    // key: owner/repo/ref → ETag
-	statuses    map[string]int       // key: owner/repo/ref → status code override
-	renames     map[string]string    // key: owner/repo → "neworg/newrepo" target
-	repoMeta    map[string]string    // key: owner/repo → JSON body for GET /repos/{owner}/{repo}
-	metaStatus  map[string]int       // key: owner/repo → status code override for the bare repo metadata endpoint
-	requests    []tarballFakeRequest // request log
+	mu         sync.Mutex
+	tarballs   map[string][]byte    // key: owner/repo/ref → tarball bytes
+	commits    map[string]string    // key: owner/repo/ref → commit oid
+	etags      map[string]string    // key: owner/repo/ref → ETag
+	statuses   map[string]int       // key: owner/repo/ref → status code override
+	renames    map[string]string    // key: owner/repo → "neworg/newrepo" target
+	repoMeta   map[string]string    // key: owner/repo → JSON body for GET /repos/{owner}/{repo}
+	metaStatus map[string]int       // key: owner/repo → status code override for the bare repo metadata endpoint
+	requests   []tarballFakeRequest // request log
 }
 
 type tarballFakeRequest struct {

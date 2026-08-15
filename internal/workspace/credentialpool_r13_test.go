@@ -134,7 +134,6 @@ func TestPool_R13_FileMissUnreachableRecordsCLISession(t *testing.T) {
 	}
 }
 
-
 // TestPool_HasFileFallback exercises the fallback-detection helper
 // used by injectProviderTokens to soften vault-unreachable errors.
 func TestPool_HasFileFallback(t *testing.T) {

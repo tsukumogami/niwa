@@ -26,10 +26,10 @@ func readTarReaderFromTarball(t *testing.T, tarball []byte) *tar.Reader {
 
 func TestProbeMarkers_Rank1(t *testing.T) {
 	tarball := buildTarball(t, map[string]string{
-		"wrap/":                    "",
-		"wrap/.niwa/":              "",
+		"wrap/":                     "",
+		"wrap/.niwa/":               "",
 		"wrap/.niwa/workspace.toml": "name = team",
-		"wrap/README.md":           "ignored",
+		"wrap/README.md":            "ignored",
 	})
 	tr := readTarReaderFromTarball(t, tarball)
 
@@ -66,10 +66,10 @@ func TestProbeMarkers_Rank2(t *testing.T) {
 
 func TestProbeMarkers_Both(t *testing.T) {
 	tarball := buildTarball(t, map[string]string{
-		"wrap/":                    "",
-		"wrap/.niwa/":              "",
+		"wrap/":                     "",
+		"wrap/.niwa/":               "",
 		"wrap/.niwa/workspace.toml": "name = rank1",
-		"wrap/workspace.toml":      "name = rank2",
+		"wrap/workspace.toml":       "name = rank2",
 	})
 	tr := readTarReaderFromTarball(t, tarball)
 

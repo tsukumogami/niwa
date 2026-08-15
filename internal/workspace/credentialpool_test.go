@@ -77,9 +77,9 @@ func TestCredentialPool_AuditAccumulates(t *testing.T) {
 	pool := NewCredentialPool(entries, nil)
 	ctx := context.Background()
 
-	_, _, _ = pool.Lookup(ctx, "infisical", "uuid-1")        // hit
-	_, _, _ = pool.Lookup(ctx, "infisical", "uuid-missing")  // miss
-	_, _, _ = pool.Lookup(ctx, "infisical", "uuid-1")        // hit again
+	_, _, _ = pool.Lookup(ctx, "infisical", "uuid-1")       // hit
+	_, _, _ = pool.Lookup(ctx, "infisical", "uuid-missing") // miss
+	_, _, _ = pool.Lookup(ctx, "infisical", "uuid-1")       // hit again
 
 	log := pool.AuditLog()
 	if len(log) != 3 {

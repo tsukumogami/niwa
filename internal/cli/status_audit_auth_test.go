@@ -49,10 +49,10 @@ func TestBuildAuditAuthRows_KeySplit(t *testing.T) {
 // sort order: KIND ascending, then PROJECT-UUID ascending.
 func TestBuildAuditAuthRows_SortedByKindThenProject(t *testing.T) {
 	src := map[string]workspace.AuthSourceRecord{
-		"infisical/uuid-z":  {Source: "local-file"},
-		"infisical/uuid-a":  {Source: "vault:personal-overlay(personal)"},
-		"sops/whatever":     {Source: "cli-session"},
-		"infisical/uuid-m":  {Source: "vault:personal-overlay"},
+		"infisical/uuid-z": {Source: "local-file"},
+		"infisical/uuid-a": {Source: "vault:personal-overlay(personal)"},
+		"sops/whatever":    {Source: "cli-session"},
+		"infisical/uuid-m": {Source: "vault:personal-overlay"},
 	}
 	rows := buildAuditAuthRows(src)
 	if len(rows) != 4 {
