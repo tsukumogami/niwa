@@ -1,4 +1,5 @@
 ---
+schema: design/v1
 status: Superseded
 superseded_by: docs/designs/current/DESIGN-niwa-mesh-removal.md
 problem: |
@@ -82,6 +83,8 @@ rationale: |
 # DESIGN: niwa Change-as-Reviewable Primitive and Basic Web Render
 
 ## Status
+
+Superseded
 
 Superseded by [DESIGN-niwa-mesh-removal.md](docs/designs/current/DESIGN-niwa-mesh-removal.md)
 

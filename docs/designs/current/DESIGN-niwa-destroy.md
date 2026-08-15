@@ -1,4 +1,5 @@
 ---
+schema: design/v1
 status: Current
 problem: |
   `niwa destroy` today accepts an instance name from any cwd and refuses to

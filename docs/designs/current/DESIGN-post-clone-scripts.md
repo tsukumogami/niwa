@@ -1,4 +1,5 @@
 ---
+schema: design/v1
 status: Current
 problem: |
   niwa clones repos during create/apply but can't run repo-provided setup scripts

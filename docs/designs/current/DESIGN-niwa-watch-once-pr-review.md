@@ -1,4 +1,5 @@
 ---
+schema: design/v1
 status: Current
 upstream: docs/prds/PRD-niwa-watch-once-pr-review.md
 problem: |

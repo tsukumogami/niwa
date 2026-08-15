@@ -1,4 +1,5 @@
 ---
+schema: design/v1
 status: Current
 problem: |
   The shell wrapper's stdout-as-cd protocol assumes niwa's entire stdout is

@@ -1,4 +1,5 @@
 ---
+schema: design/v1
 status: Superseded
 superseded_by: docs/designs/current/DESIGN-niwa-mesh-removal.md
 upstream: docs/prds/PRD-mesh-session-lifecycle.md
@@ -30,6 +31,8 @@ rationale: |
 # DESIGN: Mesh Session Lifecycle
 
 ## Status
+
+Superseded
 
 Superseded by [DESIGN-niwa-mesh-removal.md](docs/designs/current/DESIGN-niwa-mesh-removal.md)
 

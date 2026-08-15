@@ -1,4 +1,5 @@
 ---
+schema: design/v1
 upstream: docs/prds/PRD-niwa-session-keep-alive.md
 status: Current
 problem: |

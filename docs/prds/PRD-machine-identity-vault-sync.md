@@ -1,4 +1,5 @@
 ---
+schema: prd/v1
 status: Done
 problem: |
   Developers using niwa across multiple Infisical organizations must
@@ -25,7 +26,7 @@ goals: |
 
 ## Status
 
-Done.
+Done
 
 **Last revised:** 2026-05 — amended to reflect two design changes
 adopted after the initial Done milestone:

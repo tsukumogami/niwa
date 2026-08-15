@@ -1,4 +1,5 @@
 ---
+schema: prd/v1
 status: Done
 problem: |
   niwa dispatch is a pull verb: a developer must notice a PR review is

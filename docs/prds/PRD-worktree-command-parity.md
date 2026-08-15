@@ -1,4 +1,5 @@
 ---
+schema: prd/v1
 status: Done
 problem: |
   niwa's worktree-level commands (`niwa worktree create|destroy|list|attach|detach`)

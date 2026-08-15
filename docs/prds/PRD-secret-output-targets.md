@@ -1,4 +1,5 @@
 ---
+schema: prd/v1
 status: Done
 problem: |
   Operators of niwa workspaces get every repo's resolved secrets in one

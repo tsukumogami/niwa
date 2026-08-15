@@ -1,4 +1,5 @@
 ---
+schema: design/v1
 status: Current
 problem: |
   niwa's .env.example pre-pass aborts apply on any probable-secret detection,

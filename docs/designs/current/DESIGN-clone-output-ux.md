@@ -1,4 +1,5 @@
 ---
+schema: design/v1
 status: Current
 problem: |
   Niwa's create and apply commands dump a linear log of git subprocess output

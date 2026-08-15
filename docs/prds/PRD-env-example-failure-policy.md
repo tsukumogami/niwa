@@ -1,4 +1,5 @@
 ---
+schema: prd/v1
 status: Done
 problem: |
   niwa's .env.example pre-pass has one response to a probable-secret

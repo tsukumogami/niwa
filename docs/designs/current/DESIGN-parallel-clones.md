@@ -1,4 +1,5 @@
 ---
+schema: design/v1
 status: Current
 problem: |
   The clone and sync loop in `niwa apply/create` runs sequentially. For workspaces

@@ -1,4 +1,5 @@
 ---
+schema: prd/v1
 status: Done
 problem: |
   niwa carries a pre-pivot agent-facing mesh (MCP server, task-delegation

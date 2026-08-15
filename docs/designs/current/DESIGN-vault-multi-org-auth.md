@@ -1,4 +1,5 @@
 ---
+schema: design/v1
 status: Current
 problem: |
   The Infisical backend relies on the CLI's global session for auth, but

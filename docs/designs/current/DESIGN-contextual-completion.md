@@ -1,4 +1,5 @@
 ---
+schema: design/v1
 status: Current
 problem: |
   niwa's shell integration emits cobra's static completion today, so subcommand

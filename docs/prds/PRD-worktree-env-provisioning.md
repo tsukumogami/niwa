@@ -1,4 +1,5 @@
 ---
+schema: prd/v1
 status: Done
 problem: |
   `niwa worktree create` materializes a worktree's environment through a

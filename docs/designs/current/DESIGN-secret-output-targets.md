@@ -1,4 +1,5 @@
 ---
+schema: design/v1
 status: Current
 upstream: docs/prds/PRD-secret-output-targets.md
 decision_provenance: inline-resolved

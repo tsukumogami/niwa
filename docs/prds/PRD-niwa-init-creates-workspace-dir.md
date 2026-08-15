@@ -1,4 +1,5 @@
 ---
+schema: prd/v1
 status: Done
 problem: |
   Users initializing a niwa workspace from a remote config must currently
