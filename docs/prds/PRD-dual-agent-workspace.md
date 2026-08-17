@@ -257,10 +257,11 @@ start, where a live check carries information nothing else can.
       file there on its first attempt, with no setup command run by the
       developer beforehand (live, gated) (R9).
 - [ ] After `niwa apply`, the developer's Codex config carries exactly one
-      per-project trust entry for each cloned repository and each
-      niwa-managed worktree, each keyed by a path that resolves to that
-      tree's actual root — a present-but-miskeyed entry fails — and after
-      three successive applies the count is unchanged (R9, R13).
+      per-project trust entry for each cloned repository, keyed by a path that
+      resolves to that repository's actual root — a present-but-miskeyed entry
+      fails — and after three successive applies the count is unchanged. A
+      session in a niwa-managed worktree of that repository is trusted by the
+      same entry, with no separate worktree entry written (R9, R13).
 - [ ] An interactive Codex session started in a prepared repository, from the
       repository root and from a nested directory, reaches its ready state
       under a PTY with no input supplied and shows no trust, review, or
