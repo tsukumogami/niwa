@@ -1,7 +1,7 @@
 ---
 topic: agent-capability-contract
 chain_started: 2026-08-17T21:25:44Z
-last_updated: 2026-08-17T21:48:00Z
+last_updated: 2026-08-17T22:20:00Z
 phase_pointer: phase-2-chain-orchestration
 visibility: Public
 execution_mode: auto
@@ -18,11 +18,13 @@ chain_ran:
     started_at: 2026-08-17T21:27:00Z
   - name: prd
     started_at: 2026-08-17T21:36:00Z
+  - name: design
+    started_at: 2026-08-17T21:48:00Z
 parent_orchestration:
   parent: scope
   topic: agent-capability-contract
-  child: design
-  invoked_at: 2026-08-17T21:48:00Z
+  child: plan
+  invoked_at: 2026-08-17T22:20:00Z
 chain_skipped: []
 worktree_rebases: []
 worktree_divergences: []
@@ -144,3 +146,51 @@ The four open questions the BRIEF deferred are closed. Two capability rows
 remain measurement-dependent by design, each with a settlement path and
 requirements covering both outcomes -- and both were subsequently settled
 affirmatively by the extended measurement, which `/design` must fold in.
+
+## Phase 2 — design
+
+The first `design` invocation, dispatched through the `/design` skill, produced
+no output in twenty-five minutes and answered neither of two progress pings. It
+was abandoned rather than waited on further, and the document was authored
+directly against the settled research corpus instead. The trade is defensible:
+the skill's value is its decision orchestration, and all seven decisions were
+already argued in the exploration -- the structural one adversarially, with its
+strongest objection stated and answered, and every Codex behavior measured.
+What remained was recording and justifying settlements against the repo's
+`design/v1` schema.
+
+Returned `docs/designs/current/DESIGN-agent-capability-contract.md`, 868 lines,
+status Current, upstream the PRD.
+
+Validator pass-through: envelope parsed, outcome `clean`, exit 0, zero errors
+and zero notices. Re-run independently by the parent. Hygiene and boundary
+greps clean.
+
+Parent verification beyond the validator: the eight source sites the design
+claims are red under the filename-literal half of the AST scan were re-grepped
+independently and all eight hold at the stated line numbers with the stated
+content -- `root_materializer.go:51`, `worktree_content.go:743`,
+`workspace_context.go:196/229/411`, `content.go:156/186/208`. The claim that
+the test is a deliverable rather than decoration is therefore verified, not
+accepted on report.
+
+Two design calls the PRD left open were settled by the design and reviewed here:
+
+- **The alias spelling is `[context]`/`context_dir`,** not a resurrected
+  `[content]`. Approved. Users who migrated to `[claude.content]` under the
+  earlier deprecation would otherwise be whipsawed back, and a key deprecated
+  in one release and canonical two releases later is a documentation hazard.
+  A fresh name keeps all three generations distinguishable and the both-set
+  error unambiguous.
+- **`claude.enabled` is restructured with a parallel `codex.enabled`,** with the
+  gate moved to plan production. Approved, and stronger than the rename it
+  replaces: the executor never sees a gate at all, only entries that survived
+  their own agent's filter, so no gate reaches across agents by construction
+  rather than by discipline. The acceptance criterion asserts both directions.
+
+Consolidation judgment, PRD -> DESIGN: **keep**. Citation preflight passes, but
+the PRD holds work the DESIGN does not -- the twenty-four-row capability matrix
+as a requirements table and the acceptance criteria the PLAN's issues will be
+written against. The DESIGN records decisions and architecture and cites those
+requirements by number rather than restating them. Folding would lose the layer
+the implementation is verified against.
