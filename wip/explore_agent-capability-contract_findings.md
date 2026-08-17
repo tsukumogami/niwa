@@ -144,6 +144,29 @@ capabilities out of twenty.
 5. What exactly do the MCP and environment additions look like in the payload
    config, and where does the `.mcp.json` niwa already distributes fit?
 
+### Orchestrator note: the rename precedent argues against its own premise
+
+`docs/designs/current/DESIGN-claude-key-consolidation.md` is worth reading in
+full before the design phase, because it is the precedent for the alias
+mechanism *and* a direct challenge to the rename this work proposes. That design
+moved `[content]` **into** `[claude]` on the stated grounds that content is
+"100% Claude-coupled -- every consumer writes to literal `CLAUDE.md` /
+`CLAUDE.local.md` destinations", citing the same three `content.go` functions
+this exploration is now looking at. It was correct when written.
+
+Dual-agent capability is exactly the thing that falsifies its premise. Content
+is the *first* capability to become agent-neutral, which means part of this work
+partially reverses a deliberate, documented decision from months earlier. The
+design must say so plainly and cite that doc, rather than renaming quietly and
+leaving a reader to discover the contradiction. It also inherits two useful
+details from it: the deprecation rides the existing `Parse` warnings machinery
+(two fields with different TOML tags, a post-parse check, one warning, one
+conflict error), and the `ClaudeConfig`/`ClaudeOverride` type split exists so the
+decoder rejects override-position `content` at parse time -- a pattern any new
+table has to preserve. It also left `workspace.content_dir` deliberately
+unrenamed, which is a cheap second test case for whatever alias mechanism this
+work builds.
+
 ## Decision: Explore further
 
 Round 1 established the terrain and produced four decision-relevant tensions,
