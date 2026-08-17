@@ -1,7 +1,7 @@
 ---
 topic: agent-capability-contract
 chain_started: 2026-08-17T21:25:44Z
-last_updated: 2026-08-17T21:25:44Z
+last_updated: 2026-08-17T21:36:00Z
 phase_pointer: phase-2-chain-orchestration
 visibility: Public
 execution_mode: auto
@@ -13,12 +13,14 @@ planned_chain:
   - prd
   - design
   - plan
-chain_ran: []
+chain_ran:
+  - name: brief
+    started_at: 2026-08-17T21:27:00Z
 parent_orchestration:
   parent: scope
   topic: agent-capability-contract
-  child: brief
-  invoked_at: 2026-08-17T21:27:00Z
+  child: prd
+  invoked_at: 2026-08-17T21:36:00Z
 chain_skipped: []
 worktree_rebases: []
 worktree_divergences: []
@@ -84,3 +86,27 @@ chain, none held back.
 Resolution: **Proceed**. Recorded under `--auto` per the decision protocol;
 the chain is the one the dispatch brief mandates and no adjustment signal
 surfaced during discovery.
+
+## Phase 2 — brief
+
+Invoked `/brief agent-capability-contract --auto`. Returned
+`docs/briefs/BRIEF-agent-capability-contract.md` at status Draft.
+
+Worktree-staleness check: no rebase needed, branch is current with its base.
+Impact classification: None.
+
+Validator pass-through: `shirabe validate --format json --visibility=Public`
+parsed a `shirabe-validate/v1` envelope, outcome `clean`, exit 0, zero errors
+and zero notices. Re-run independently by the parent with the same result.
+Boundary and hygiene greps clean: no private-repo references, no `wip/` paths
+in the artifact.
+
+Consolidation judgment: not applicable. The judgment fires only when both
+endpoints of a chain edge appear in `chain_ran`, and the BRIEF is the first
+artifact this run produced -- there is no upstream above it in this run to
+judge it against.
+
+Carried forward to `/prd` as open questions the PRD must resolve: how far the
+first PR's contract reaches, the MCP delivery shape, the unresolved capability
+matrix rows, and the mechanism for feeding new measurements into the standing
+spike.
