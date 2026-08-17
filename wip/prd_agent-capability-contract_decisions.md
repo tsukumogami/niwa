@@ -77,3 +77,25 @@ Codex failure; alias semantics), "the mandate" phrasing replaced with
 self-contained wording, and three ACs reworded for precision. Re-validated
 clean (exit 0) and re-grepped clean after fixes. PRD left at Draft per
 parent-delegated-approval.
+
+## Post-jury update: r3 sections F/G/H (parent notification)
+
+The r3 measurement file gained sections F, G, H after drafting began. Applied:
+- Row 4 (worktree marker): measured satisfied -> Implemented; R13 rewritten as
+  a settled requirement; scenario 10 stands as written.
+- Row 12 (approval/sandbox): measured settable and trust-gated -> Implemented
+  with Requires: DirectoryTrust; R21 rewritten to require delivery in PR 2,
+  with two safety properties (posture reported at apply; approvals and sandbox
+  stay separate decisions -- danger-full-access disables both sandboxes). This
+  extends the brief's PR 2 delivery list, recorded as a scope decision in
+  Decisions 3 for parent review.
+- Row 9 (env trust-gating): re-confirmed with trust as the only variable.
+- R15 validation property generalized: everything written to a Codex config
+  layer is validated; denylisted/ignored keys are still type-checked, so
+  "Codex ignores what it doesn't understand" is rejected as a safety
+  assumption.
+- R24 now carries the two spike corrections (project_root_markers accepted at
+  the project layer; denylist 8-measured vs 11-claimed) and notes corrections
+  settle the contribute-vs-fork question decisively.
+- Matrix totals now 11 implemented / 13 unavailable for Codex (also fixes an
+  arithmetic slip in the earlier totals line). Revalidated clean, exit 0.

@@ -239,16 +239,14 @@ answer.
   truncated. Discovery mechanics are consumed from the standing spike
   (docs/spikes/SPIKE-codex-discovery-mechanics.md, landing via
   tsukumogami/niwa#254), never re-derived.
-- **R13. The worktree-context row is fixed by measurement, not guessed.**
-  Whether a linked worktree's `.git` file satisfies Codex's project-root
-  marker is unmeasured. One live check settles it: a Codex session started
-  inside a niwa worktree with a composed context file present, asserting
-  that file is in the loaded context. The design must not fix this row's
-  state before the measurement lands. Both outcomes are acceptable: if the
-  marker matches, worktree context is implemented for Codex; if it does
-  not, the row is declared unavailable (the agent cannot receive it) with
-  that finding as the reason, and the corresponding acceptance scenario is
-  restructured in the open per R23.
+- **R13. Worktree context is delivered; the marker question is measured.**
+  A linked worktree's `.git` file -- a regular pointer file, not a
+  directory -- satisfies Codex's project-root marker. This is measured
+  against codex-cli 0.147.0 with a root-only context file read from two
+  levels deep and a passing negative control, so worktree-level context
+  is implemented for Codex (requiring directory trust for the budget
+  override) and the worktree acceptance scenario stands as written. The
+  measurement flows to the standing spike per R24.
 - **R14. Skills without a Claude Code dependency.** Workspace-declared
   plugin skills reach a Codex session whole and namespaced. Delivery must
   not depend on Claude Code being installed on the machine: content for
@@ -268,10 +266,14 @@ answer.
     interpolation (Codex performs none, anywhere).
   - Every value is fully resolved before writing; nothing niwa writes
     relies on expansion at load time.
-  - Generated entries are validated before writing. One malformed
-    `[mcp_servers.*]` entry makes Codex's entire configuration for the
-    directory unloadable -- including valid sibling servers -- so a
-    generated file must never be the thing that bricks a session.
+  - Everything niwa writes into a Codex configuration layer -- not only
+    MCP entries -- is validated before writing. One malformed entry makes
+    Codex's entire configuration for the directory unloadable, including
+    valid sibling servers, and even keys Codex ignores at the project
+    layer are still type-checked, so a malformed ignored key fails the
+    whole load too. "Codex will ignore what it doesn't understand" is
+    false as a safety assumption; a generated file must never be the
+    thing that bricks a session.
   - niwa never silently produces a hybrid server definition. Codex merges
     configuration layers recursively field by field, so a name collision
     with a server the developer already has yields a definition neither
@@ -315,16 +317,21 @@ answer.
   error-handling posture -- hard-failing where several Claude-side steps
   only warn -- is preserved, without changing the Claude-side posture in
   the first PR.
-- **R21. Approval and sandbox posture is measured before it is declared.**
-  Whether a workspace can set Codex's approval policy and sandbox mode
-  from the project layer is unmeasured, and the spike warns the
-  project-layer denylist must not be filled in by guessing. The
-  measurement (reading the denylist from codex source at the measured
-  tag, or a live probe in a trusted project layer) happens before the
-  design fixes this row. If it is still unmeasured when the second PR
-  lands, the capability ships declared unavailable (not built), with the
-  unmeasured status stated in its reason -- the two-state model absorbs an
-  open measurement without a third state.
+- **R21. Approval and sandbox posture reaches Codex sessions.** Codex's
+  `approval_policy` and `sandbox_mode` are not on the project-layer
+  denylist: both are measured to take effect from a trusted project
+  layer and to revert to defaults the moment the trust entry is removed,
+  putting them on the same side of the trust line as MCP servers and
+  environment delivery. The second PR therefore delivers
+  workspace-declared approval and sandbox posture to Codex sessions,
+  declared implemented with a requirement on directory trust (R3), from
+  an agent-neutral declaration source (R7). Two safety properties are
+  required: the posture niwa writes is reported at apply time, and
+  approval posture and sandbox posture stay separate decisions -- the
+  measured Codex setting that suppresses approval prompts most fully
+  also disables filesystem and network sandboxing together, and a
+  workspace declaration must never disable sandboxing as an unstated
+  side effect of relaxing approvals.
 
 ### Documentation
 
@@ -347,18 +354,28 @@ answer.
   declaration rather than the bare refusal, so the test and the gap list
   cannot drift apart -- but any restructuring is recorded in the PR that
   performs it, and the bar is never silently lowered. Scenario 10
-  (worktree context) takes the form R13's measurement dictates.
+  (worktree context) stands as written: the measurement behind R13
+  confirmed a worktree root is a Codex project root.
 - **R24. New measurements reach the standing spike, never a fork.** Every
-  measurement this work produces that extends the spike's findings -- the
-  MCP schema and environment-policy semantics already measured against
-  codex-cli 0.147.0, the trust-gating result, and the R13 and R21
-  measurements to come -- is contributed to
-  docs/spikes/SPIKE-codex-discovery-mechanics.md rather than to a second
-  spike document. While that spike lives on the unmerged
-  tsukumogami/niwa#254, contributions are posted as structured comments on
-  that pull request; once it merges, the pending contributions land as an
-  in-repo update to the spike file. This work creates no competing spike
-  document under any circumstances.
+  measurement this work produces that extends or corrects the spike's
+  findings is contributed to docs/spikes/SPIKE-codex-discovery-mechanics.md
+  rather than to a second spike document. That covers the MCP schema and
+  environment-policy semantics measured against codex-cli 0.147.0, the
+  trust-gating results, the worktree-marker result (R13), and the
+  approval/sandbox result (R21) -- and, importantly, two corrections to
+  the spike itself: `project_root_markers` is accepted at the project
+  layer (acceptance measured, effect untested), contradicting the
+  spike's claim that project-root marker configuration cannot be carried
+  there; and the measured project-layer denylist holds eight keys across
+  roughly fifty probed, against the spike's figure of eleven -- not a
+  claimed error, but an unresolved count with a stated completion
+  method. Corrections strengthen the case for contributing to the
+  standing document: a fork would leave two spikes disagreeing. While
+  the spike lives on the unmerged tsukumogami/niwa#254, contributions
+  are posted as structured comments on that pull request; once it
+  merges, pending contributions land as an in-repo update to the spike
+  file. This work creates no competing spike document under any
+  circumstances.
 
 ### Non-functional
 
@@ -382,15 +399,15 @@ mechanics put it out of reach), no-such-concept (the thing doesn't exist
 for this agent), not-built (a route exists that niwa hasn't built).
 Evidence for the Codex column is the standing spike's measured findings,
 the measured codex-cli 0.147.0 behavior R24 feeds back to it, and the
-retained prior-attempt branch. Rows 4 and 12 are measurement-dependent per
-R13 and R21.
+retained prior-attempt branch. Every row is now grounded in measurement or
+working prior-attempt code; none is inferred.
 
 | # | Capability | Claude | Codex | Codex reason / notes |
 |---|---|---|---|---|
 | 1 | Workspace/group orientation reaches a repo session | Implemented | Implemented | Composed into each repo's own context file rather than placed at the root |
 | 2 | A session at the workspace or instance root is oriented | Implemented | Unavailable (cannot-receive) | Codex reads context only from the nearest project-root marker downward; an instance root has none |
 | 3 | Repo-level orientation doc (requires trust for the budget override) | Implemented | Implemented | Requires: directory trust |
-| 4 | Worktree-level orientation doc | Implemented | Per R13 measurement | Implemented if a worktree's `.git` file satisfies the project-root marker; otherwise unavailable (cannot-receive) |
+| 4 | Worktree-level orientation doc | Implemented | Implemented | Requires: directory trust; a linked worktree's `.git` pointer file satisfies the project-root marker (measured, R13) |
 | 5 | Workspace-declared plugin skills usable in the session | Implemented | Implemented | Loads even untrusted; delivery must not depend on Claude Code's presence (R14) |
 | 6 | Marketplace/plugin registration with the agent's plugin system | Implemented | Unavailable (cannot-receive) | Registration lives in the developer's own configuration; skills are delivered directly instead |
 | 7 | Named subagent types | Implemented | Unavailable (no-such-concept) | Codex caches a plugin's agents directory and never surfaces it |
@@ -398,7 +415,7 @@ R13 and R21.
 | 9 | Environment variables present in the session | Implemented | Implemented | Via R16; requires directory trust (measured) |
 | 10 | Dotenv files written to declared paths | Implemented | Implemented | Agent-agnostic |
 | 11 | Arbitrary source-to-destination file distribution | Implemented | Implemented | Agent-agnostic |
-| 12 | Approval / sandbox posture | Implemented | Per R21 measurement | Implemented if settable from the project layer and built; otherwise unavailable (not-built) with the unmeasured status in the reason |
+| 12 | Approval / sandbox posture | Implemented | Implemented | Via R21; requires directory trust (measured: both keys honored from the project layer, reverting when trust is removed) |
 | 13 | Hooks (lifecycle commands) | Implemented | Unavailable (cannot-receive) | No demonstrated route installs a niwa-owned hook without a blocking review prompt |
 | 14 | Work-summary hooks | Implemented | Unavailable (cannot-receive) | Delivered as hooks; follows row 13 |
 | 15 | PR-body hook | Implemented | Unavailable (cannot-receive) | Delivered as a hook; follows row 13 |
@@ -412,8 +429,7 @@ R13 and R21.
 | 23 | Per-directory trust bootstrap | Unavailable (no-such-concept) | Implemented | Claude Code keeps no per-directory trust record; posture is settings-driven |
 | 24 | Git-exclude bookkeeping for niwa-written files | Implemented | Implemented | Agent-agnostic; covers Codex-side names exactly as Claude-side ones |
 
-Target totals for Codex, with rows 4 and 12 pending measurement: 11
-implemented, 11 unavailable, 2 measurement-dependent. For Claude: 23
+Target totals for Codex: 11 implemented, 13 unavailable. For Claude: 23
 implemented, 1 unavailable.
 
 ## Acceptance Criteria
@@ -453,9 +469,9 @@ Contract and structure:
 Codex delivery:
 
 - [ ] All 15 inherited scenarios pass in the second PR's tree, with
-  scenario 2 asserting dispatch's declared unavailability, scenario 10 in
-  the form R13's measurement dictates, and every restructuring named in
-  that PR's description.
+  scenario 2 asserting dispatch's declared unavailability, scenario 10
+  standing as written, and every restructuring named in that PR's
+  description.
 - [ ] A workspace with a github-sourced marketplace delivers its skills to
   a Codex session on a machine with no Claude Code installation.
 - [ ] Generating Codex MCP entries from a declaration containing an
@@ -478,6 +494,11 @@ Codex delivery:
 - [ ] With a Codex delivery target made unwritable, apply fails with a
   named error identifying the capability, rather than warning and
   continuing.
+- [ ] A workspace-declared approval and sandbox posture appears in the
+  generated Codex project-layer configuration, its delivery declares the
+  directory-trust requirement, the written posture is reported at apply
+  time, and no declaration that relaxes approvals changes the sandbox
+  setting unless the workspace declared that too.
 - [ ] Where the second PR renames a configuration key, the old key still
   parses with a deprecation warning, and setting both old and new keys
   fails with an error.
@@ -490,12 +511,12 @@ Documentation and process:
   matching declaration change fails CI.
 - [ ] Every unavailable declaration's reason appears in the generated gap
   list; the guide's safety list remains a distinct section.
-- [ ] The R13 and R21 measurements are performed before the design fixes
-  rows 4 and 12, and their findings -- plus the already-measured MCP
-  schema, environment-policy semantics, and trust-gating results -- are
-  posted to tsukumogami/niwa#254 or committed into
-  docs/spikes/SPIKE-codex-discovery-mechanics.md, and no new spike
-  document exists in this work's deliverables.
+- [ ] The measured findings this work produced -- the MCP schema,
+  environment-policy semantics, trust-gating, the worktree-marker result
+  (R13), the approval/sandbox result (R21), and the two spike
+  corrections named in R24 -- are posted to tsukumogami/niwa#254 or
+  committed into docs/spikes/SPIKE-codex-discovery-mechanics.md, and no
+  new spike document exists in this work's deliverables.
 
 ## Out of Scope
 
@@ -507,8 +528,8 @@ Documentation and process:
 - Re-measuring Codex discovery mechanics already recorded in the standing
   spike. Two attempts to reason about them from outside got them wrong in
   opposite directions; the spike's measured findings are consumed, not
-  re-derived. (New measurements the spike doesn't carry -- R13, R21 -- are
-  in scope and flow back to it per R24.)
+  re-derived. (The new measurements this work produced flow back to the
+  spike per R24.)
 - Building Codex dispatch (row 22) and Codex delivery of niwa's own plugin
   (row 19). Both are declared not-built and appear on the generated gap
   list; closing them is future work the declarations make visible.
@@ -571,26 +592,40 @@ the exploration the chain consumed.
    fields `.mcp.json` cannot express; and a Claude-format file as the
    source of Codex delivery would put one agent's format in front of
    another agent's delivery, against R7's spirit).
-3. **The capability matrix's unresolved rows.** Settled by measurement:
-   environment delivery is trust-gated (the requirement edge in row 9 is
-   measured, not inferred), and the Codex MCP schema is pinned. Still
-   open, stated with what settles them rather than guessed: the worktree
-   project-root marker (R13, one live check, both outcomes specified) and
-   approval/sandbox settability (R21, denylist read or live probe, with a
-   defined not-built fallback). The hooks reason kind could flip from
-   cannot-receive to not-built if a non-blocking route is demonstrated;
-   the state is unavailable either way, so nothing downstream blocks on
-   it. The skills github-marketplace question was settled as an
-   implementation obligation: build the niwa-owned fetch (R14) rather
-   than ship a capability whose truth depends on another vendor's CLI
-   having run.
+3. **The capability matrix's unresolved rows.** All settled by
+   measurement against codex-cli 0.147.0, none guessed: environment
+   delivery is trust-gated (the requirement edge in row 9 is measured,
+   toggled reversibly by the trust entry alone, not inferred by
+   grouping); the Codex MCP schema is pinned; a linked worktree's `.git`
+   pointer file satisfies the project-root marker, so row 4 stays
+   implemented and scenario 10 stands (R13); and approval and sandbox
+   posture is settable from a trusted project layer and reverts with
+   trust, so row 12 -- the matrix's only hard unresolved row -- lands
+   implemented (R21). That last result carries a scope decision: the
+   upstream brief's delivery list was written while the row was
+   unresolved and doesn't name approval posture; this PRD brings it into
+   the second PR because the route is now measured, the write is the
+   same trust-gated project layer the PR already produces for MCP and
+   environment, and it's the gap a developer notices first. The
+   alternative -- declare it not-built and defer -- was rejected as
+   declaring a gap the measurement just closed. The hooks reason kind
+   could still flip from cannot-receive to not-built if a non-blocking
+   route is demonstrated; the state is unavailable either way, so
+   nothing downstream blocks on it. The skills github-marketplace
+   question was settled as an implementation obligation: build the
+   niwa-owned fetch (R14) rather than ship a capability whose truth
+   depends on another vendor's CLI having run.
 4. **How measurements reach the standing spike (R24).** Decided:
    contribute, never fork -- comments on tsukumogami/niwa#254 while it is
    open, an in-repo spike update once it merges. Alternatives: a new
    spike document (rejected -- it would compete with the standing spike
    and split the measured record), or holding the findings in this chain's
    working notes (rejected -- working notes are non-durable and the
-   findings are load-bearing for rows 8, 9, and 12).
+   findings are load-bearing for rows 4, 8, 9, and 12). The question
+   turned out to be more than additive: two of the findings correct the
+   spike (the `project_root_markers` acceptance and the denylist count),
+   which settles the fork question decisively -- a fork would leave two
+   spike documents disagreeing about measured behavior.
 5. **Two states, not three.** A "conditional" state was rejected upstream
    and the rejection holds here: trust is a capability niwa delivers, so
    trust-dependent capabilities are implemented with a requirement edge a
