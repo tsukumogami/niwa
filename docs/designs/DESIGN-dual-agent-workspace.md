@@ -1,6 +1,6 @@
 ---
 schema: design/v1
-status: Accepted
+status: Planned
 problem: |
   niwa prepares a workspace instance for exactly one coding agent, chosen at
   creation time through an exclusive selector: preparing for Codex replaces the
@@ -59,7 +59,7 @@ user_visible_surface: true
 
 ## Status
 
-Accepted
+Planned
 
 Upstream PRD: docs/prds/PRD-dual-agent-workspace.md (Accepted). This design
 partially reverses docs/designs/current/DESIGN-interactive-codex-session.md,

@@ -1,8 +1,8 @@
 ---
 schema: plan/v1
-status: Draft
+status: Active
 execution_mode: single-pr
-upstream: docs/designs/current/DESIGN-dual-agent-workspace.md
+upstream: docs/designs/DESIGN-dual-agent-workspace.md
 milestone: "Dual-agent workspace"
 issue_count: 12
 ---
@@ -11,11 +11,11 @@ issue_count: 12
 
 ## Status
 
-Draft
+Active
 
 ## Scope Summary
 
-Implement docs/designs/current/DESIGN-dual-agent-workspace.md: every instance
+Implement docs/designs/DESIGN-dual-agent-workspace.md: every instance
 `niwa create` and `niwa apply` produce serves both Claude Code and Codex, with
 the Claude tree byte-for-byte unchanged. The Codex side is a payload directory
 at the instance root (`.codex/` with a budget-declaring `config.toml` and
