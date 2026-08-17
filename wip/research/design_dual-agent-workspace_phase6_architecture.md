@@ -816,3 +816,105 @@ Two smaller consequences of the record now being load-bearing, worth a clause ea
   record is the sole authority for what may be removed.
 - One clause making the safe direction of record-file disagreement explicit: a
   recorded-but-absent key is a no-op, an unrecorded-but-present key is left alone.
+
+# Round 5
+
+# Verdict: FAIL
+
+One sentence from PASS, and the first thing to say is a process fact: **the document
+on disk does not match the briefing.** It has moved again since. Finding 2 and both
+optionals are fully closed; finding 1's mechanism is now stated correctly, but the
+option it lands on is the one it argues against in the briefing, and it carries one
+consequence the design asserts it does not have.
+
+## The document changed mid-review
+
+The briefing describes drop-plus-exemption ("the apply hands its conflict verdicts to
+the managed-file cleanup, which skips every path the current apply declared
+conflicted"). I read that text on disk at the start of this round. Re-reading the same
+region minutes later, it had been replaced: the file is now 1230 lines (briefing said
+1225), and both sites — Decision 7 (lines 673-695) and the Conflicts section (line
+888) — now say **forward-carry**, consistently, with drop-plus-exemption named as the
+reading that "gets the machinery backwards".
+
+So the author appears to have reversed again after the briefing was written. I am
+adjudicating what is on disk. If the intent was drop-plus-exemption, the current text
+is not it, and someone should decide which one is meant before the plan is written —
+the two produce different state files and different `niwa status` output.
+
+## Finding 1, as it now stands: mechanism correct, one consequence mis-stated
+
+The mechanism is now precise and correct against the code. "Absence from the produced
+set is the deletion trigger, not an exemption from it" is exactly right
+(`internal/workspace/apply.go:1852-1858`), forward-carry is described as it actually
+works — retain the prior entries in the produced set so the cleanup sees the path as
+still produced — and it matches `forwardCarry` and its caller
+(`apply.go:1967-1970`, `2028-2036`). An implementer following this paragraph produces
+the right behavior, and the round-four error is corrected rather than papered over.
+The choice itself is defensible: it needs no cleanup change, and it is the idiom the
+codebase already uses for the same shape of problem.
+
+What is wrong is one claim inside the honesty paragraph. The design says the stale
+carried hash is tolerable because "the record is not the ownership authority" and
+"the carried record entry's only job is to keep the cleanup's hands off the path."
+The record has two other jobs, both user-facing, and both consume `ContentHash`:
+
+- Every `niwa apply` drift-checks each recorded managed file before the pipeline runs
+  and warns `managed file <path> has been modified outside niwa` when the hash
+  disagrees (`apply.go:597-607` via `CheckDrift`, `state.go:658-676`).
+- `niwa status` runs the same check and reports the path as a drifted managed file
+  (`internal/workspace/status.go:96`).
+
+A forward-carried entry keeps the hash of niwa's *old* override while a foreign file
+sits at the path. So a conflicted repository emits two warnings per apply — the
+conflict report and a drift report — and `niwa status` lists the repository's own
+committed file, in perpetuity, as a niwa-managed file that has been modified outside
+niwa. That is niwa asserting ownership of a path its own conflict rule just declared
+foreign, on the surface a developer consults to answer exactly that question. Not
+destructive, and not silent — but it is a statement the design elsewhere goes out of
+its way not to make, and it is precisely the "left to be discovered" item the
+paragraph claims to have eliminated.
+
+This is the answer to the question you asked, inverted by the flip: drop-plus-exemption
+would not produce it (no record, no drift check, no status entry), and forward-carry
+does. It is a sentence to fix, not a redesign.
+
+## Finding 2 and the optionals: closed
+
+**Trust removal.** Both gaps closed in one passage (lines 729-748), and closed well.
+The guarantee is restated exactly as needed — "removes the entry its record names,
+clears the record entry with the removal, and never re-adds an entry while the
+conflict stands... The guarantee is never-reinstated, not always-absent" — and the
+composition argument is spelled out, including that the developer's later answer to
+Codex's prompt "is theirs, sits in no niwa record, and later applies leave it alone",
+and that a record left in place "would license the next apply to delete the
+developer's answer at that key". The old always-absent phrasing greps to zero. The
+record-not-shape bound and the reason the two recognition mechanisms differ are
+intact.
+
+**Both optionals.** The destruction ordering constraint is in (lines 1058-1062: the
+record is the sole removal authority, so destruction must read it before the instance
+directory goes). The safe direction of record-file disagreement is stated in the same
+passage as finding 2 — recorded-but-absent is a no-op, unrecorded-but-present is left
+alone.
+
+## Required changes
+
+1. Correct the claim that the carried record entry's "only job is to keep the
+   cleanup's hands off the path". It also drives the apply-time drift warning
+   (`internal/workspace/apply.go:597-607`) and `niwa status`
+   (`internal/workspace/status.go:96`), both keyed on `ContentHash`, so a
+   forward-carried entry makes both surfaces report a conflicted repository's own
+   committed file as a drifted niwa-managed file on every apply, forever. Either
+   carry the entry with the current on-disk hash so the record describes what is
+   actually there and the drift check stays quiet, or state that conflicted paths are
+   excluded from the drift report so the conflict warning is the single account.
+   Whichever is chosen, the "only job" sentence has to go.
+
+2. Reconcile the document with the briefing. The text on disk is forward-carry; the
+   briefing describes drop-plus-exemption. Both are defensible and I would accept
+   either with change 1 applied — but the design should say which one it means, once.
+
+## Optional improvements
+
+- None.
