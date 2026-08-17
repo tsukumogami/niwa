@@ -248,18 +248,31 @@ in every repository (R6), including ones that commit their own `AGENTS.md`.
   symlink to a sensitive absolute path — the developer's own agent
   credentials being the obvious target — would get the target's content
   read by niwa and written into the instruction context of every Codex
-  session in that repository. niwa checks the file's own type (an lstat,
-  not a stat) before reading; anything other than a regular file is
-  treated as a conflict under the rule in Decision 7: niwa reads nothing,
-  inlines nothing, writes no override for that repository — so nothing
-  displaces the repository's own file in discovery (R6) — and reports the
-  refusal loudly (D4). Refusal was chosen over the alternative, resolving
-  the link and requiring the target to stay inside the working tree,
-  because refusal has no resolution edge cases — no chained links, no
-  post-resolution traversal, no window between the check and the read —
-  and the benign case it costs (a repository symlinking its `AGENTS.md`
-  to another in-tree file) is rare, loudly reported, and fixed by
-  committing a regular file. The R13 claim that niwa never reads the
+  session in that repository. The enforcement is the open itself, not a
+  check before it: niwa opens the file with `O_NOFOLLOW` and fails on a
+  symlink, so the refusal and the read are one syscall with no window in
+  between — a separate type check before the open would leave a gap in
+  which the path can be swapped, which is exactly the kind of
+  quietly-incomplete defense this design refuses elsewhere. The refusal
+  is scoped to the inline, no wider: when the committed file fails the
+  open or is anything other than a regular file, niwa reads nothing and
+  inlines nothing, but still writes the override carrying the workspace
+  layers, which need no repository read at all, and reports the refusal
+  loudly (D4). The narrow scope is load-bearing twice over. It preserves
+  the workspace half of R6 (the session keeps the instance, group, and
+  any worktree layers; only the repository's own content waits for a
+  regular file, and the report says so). And it is itself part of the
+  defense: `AGENTS.override.md` wins first-match, so the written
+  override displaces the symlinked `AGENTS.md` from the discovery slot
+  — without it, Codex's own native read would follow the symlink and
+  pull the target into the session's context, delivering through Codex
+  the disclosure niwa just refused to perform. Refusal was chosen over
+  the alternative, resolving the link and requiring the target to stay
+  inside the working tree, because refusal has no resolution edge cases
+  — no chained links, no post-resolution traversal — and the benign
+  case it costs (a repository symlinking its `AGENTS.md` to another
+  in-tree file) is rare, loudly reported, and fixed by committing a
+  regular file. The R13 claim that niwa never reads the
   developer's credentials is true only because of this rule; it is stated
   here so the claim cannot drift away from its enforcement.
 
@@ -395,18 +408,27 @@ vouch for itself.
   rules. *Atomic replacement:* the edited document is written to a
   temporary file in the same directory, synced, and renamed over the
   original, so an interrupted apply leaves the previous file intact,
-  never a truncated one. *Never rewrite what did not parse:* if the
-  pre-existing file fails to parse, niwa refuses the trust step, leaves
-  the file byte-untouched, and reports the parse failure loudly, naming
-  the file — a pipeline that "repairs" what it could not read is how
-  additivity guarantees get broken in practice. *Serialized concurrent
-  applies:* multiple instances share one developer config, and two
-  applies running at once must not drop each other's entries or
-  interleave the file into invalid TOML, so niwa's writers serialize
-  through an advisory lock held across the whole read-modify-write, with
-  the file re-read under the lock before editing. Writes by Codex itself
-  are outside niwa's control and are the same exposure Codex's own
-  concurrent sessions already carry.
+  never a truncated one. The staging file must sit beside the config —
+  an atomic rename requires the same filesystem — and is the one
+  transient artifact the "nothing else" claim carves out; it exists only
+  for the instant of the write. *Never rewrite what did not parse:* if
+  the pre-existing file fails to parse, niwa refuses the trust step,
+  leaves the file byte-untouched, and reports the failure as an error
+  that makes the apply exit non-zero after the rest of materialization
+  completes — an error rather than a warning, because the resulting
+  instance would otherwise look prepared while every repository in it
+  silently runs read-only at session time. A pipeline that "repairs"
+  what it could not read is how additivity guarantees get broken in
+  practice. *Serialized concurrent applies:* multiple instances share
+  one developer config, and two applies running at once must not drop
+  each other's entries or interleave the file into invalid TOML, so
+  niwa's writers serialize through an advisory lock held across the
+  whole read-modify-write, with the file re-read under the lock before
+  editing. The lock lives in niwa's own state directory, keyed by the
+  config path, so serialization adds no artifact to the developer's
+  config directory; it serializes niwa's writers only, and writes by
+  Codex itself are outside niwa's control — the same exposure Codex's
+  own concurrent sessions already carry.
 
 - **Option 4B: write nothing and let the developer trust each repository
   interactively.** The zero-touch alternative: the first `codex` run in
@@ -624,18 +646,57 @@ a different one:
   symlink — is a conflict: niwa writes nothing at that name, modifies and
   deletes nothing (R12, R11), and surfaces the conflict as a loud
   per-repository warning in the apply output. A quiet skip is exactly the
-  silent minority-case failure driver D4 excludes. niwa recognizes its
-  own writes the way the rest of materialization does: the `.codex`
-  symlink by its target (the instance payload), and copied or composed
-  files through the tracked-content records materialization already
-  keeps. For a conflicting `.codex` specifically, niwa also **withholds
-  that repository's trust entry**: with niwa's payload absent, a trust
-  entry would vouch for the repository's own committed `.codex/` —
-  third-party content impersonating the payload with niwa's signature on
-  it. The trust decision is left to Codex's own startup prompt, where the
-  developer sees exactly what they are being asked to trust. A conflicted
-  repository therefore degrades loudly — reported by apply, prompting at
-  session start — never silently.
+  silent minority-case failure driver D4 excludes.
+
+  Detection is per name, but the two names couple in one direction, and
+  the coupling is load-bearing. A `.codex` conflict suppresses the
+  override write too: the override's byte budget is declared in the
+  payload `config.toml` reached only through the link that was just
+  refused, so an override written anyway would run the composed chain
+  under Codex's 32768-byte default and silently truncate exactly the
+  repository layer R7 protects — a silent failure reached through the
+  rule written to prevent silent failures. A conflicted-`.codex`
+  repository therefore gets nothing from niwa — no link, no override, no
+  trust entry — and falls back to native discovery of its own content,
+  reported. The reverse does not couple: an `AGENTS.override.md`
+  conflict alone suppresses only the override, while the link, the
+  exclude patterns, and the trust entry still materialize — skills and
+  the payload config still reach sessions there, and the repository's
+  own committed override carries the context slot, reported.
+
+  niwa recognizes its own writes two ways, and the distinction matters
+  because the whole rule rests on it. The `.codex` symlink is recognized
+  by its target (the instance payload). Composed files are recognized by
+  content, not by records: every composed file niwa writes begins with a
+  generation marker, and a file at the name is niwa's exactly when it is
+  untracked and carries the marker — anything tracked is a conflict
+  regardless of content, and an untracked file without the marker is
+  foreign. The content test is deliberate: the standalone
+  `niwa worktree apply` path persists no managed-file records today, so
+  a record-based check would make that path unable to recognize its own
+  prior override on re-apply and refuse the refresh R3 requires. (An
+  untracked forgery carrying the marker at niwa's own name would be
+  overwritten on the next apply — it is niwa's name and nothing
+  committed is touched, so R12 is not in play.) For a conflicting
+  `.codex` specifically, niwa also **withholds
+  that repository's trust entry — and removes one it wrote earlier**:
+  with niwa's payload absent, a trust entry would vouch for the
+  repository's own committed `.codex/` — third-party content
+  impersonating the payload with niwa's signature on it. Withholding
+  alone covers only the first apply; a repository that was clean, got
+  its entry, and later acquires a `.codex` of its own would keep a stale
+  entry vouching for a payload niwa no longer writes — the same
+  impersonation path reopening on a repository niwa already trusted. So
+  the rule applies at every apply: a `.codex` conflict, whenever it is
+  detected, means no niwa-written trust entry for that repository
+  exists afterward. This removal touches only entries niwa itself wrote
+  (its per-repository keys, recognized the same way its file writes
+  are), so the additive-only property over the developer's own keys
+  stands — niwa retracts its own signature, never anyone else's. The
+  trust decision is left to Codex's own startup prompt, where the
+  developer sees exactly what they are being asked to trust. A
+  conflicted repository therefore degrades loudly — reported by apply,
+  prompting at session start — never silently.
 
 ## Decision Outcome
 
@@ -742,14 +803,24 @@ consistent ordering and sizes the budget accordingly.
 ### Conflicts with committed content
 
 The two names niwa writes into working trees are asserted free before
-writing. Anything already at `.codex` or `AGENTS.override.md` that niwa
-did not itself materialize is a conflict: the write is skipped, nothing is
-modified or deleted, and apply reports the conflict per repository; a
-conflicting `.codex` also withholds that repository's trust entry so
-niwa's signature never vouches for a payload it did not write (the full
-rule and its rationale are in Decision 7). A committed `AGENTS.md` that is
-not a regular file is the same family: the composer refuses to read it,
-writes no override for that repository, and reports (Decision 2). The
+writing; detection is per name, with one coupling (the full rule and its
+rationale are in Decision 7). A conflicting `.codex` degrades the whole
+repository: no link, no override (the override's budget declaration lives
+in the payload the refused link would have reached, so writing it anyway
+would silently truncate under the default budget), and no niwa-written
+trust entry — withheld, and removed if an earlier apply wrote one — so
+niwa's signature never vouches for a payload it did not write. A
+conflicting `AGENTS.override.md` alone suppresses only the override: the
+link, exclude patterns, and trust entry still materialize, and the
+repository's committed override carries the context slot. Both cases
+modify and delete nothing and are reported per repository. Ownership is
+recognized by the link's target for `.codex` and by the generation
+marker in untracked composed files — a content test, chosen so the
+standalone worktree-apply path, which keeps no managed-file records, can
+still recognize its own prior override. A committed `AGENTS.md` that is
+not a regular file is a narrower case: the composer refuses only the
+inline and still writes the override with the workspace layers, which
+also displaces the symlink from the discovery slot (Decision 2). The
 git-exclude patterns play no part in any of this — they suppress only
 untracked paths and are inert for names a repository tracks.
 
@@ -799,10 +870,12 @@ git-exclude blocks for newly cloned repositories; and upserts trust
 entries for new repositories while leaving existing entries untouched.
 `niwa worktree apply` does the same for a worktree. A dangling link is
 harmless to Codex in the interim — it skips the layer without error — and
-apply repairs any link whose target niwa owns. The one dangle apply
-cannot repair is a skills link whose plugin root never materialized
-(a skipped or failed plugin install), which is why Decision 3 reports
-that case loudly per plugin instead of letting it look repaired.
+apply repairs any link whose target niwa owns, including a skills link
+whose plugin root vanished after it was created. The gap apply cannot
+close on its own is a plugin root that is still missing (a skipped or
+failed install): there is no link then, because Decision 3 skips the
+write, and its per-plugin report is the signal that something is absent
+rather than repaired.
 
 ### What stays Claude-only
 
@@ -863,7 +936,8 @@ seam the previous one proved.
    and lock-serialized concurrent applies. Kept separate from batch 2
    because it is the only write outside the instance and deserves its
    own review focus; it consumes batch 2's per-repository conflict
-   verdicts to withhold trust for conflicted repositories, so that
+   verdicts to withhold — or remove, when a conflict arrives after an
+   entry was written — trust for conflicted repositories, so that
    behavior completes when both have landed.
 
 4. **Worktree parity and docs.** Extend the worktree lifecycle with the
@@ -890,9 +964,12 @@ skip-when-absent pattern for agent binaries.
   write is bounded three ways: *scope* — only `[projects."<path>"]` keys
   whose paths resolve inside niwa-managed instances, never a global key,
   never a marker, never anything on the denylist or off it that changes
-  behavior outside those paths; *additivity* — existing keys are never
-  removed, reordered, or altered, and the edit must preserve the file's
-  other content byte-wise (the PRD's criterion makes this testable);
+  behavior outside those paths; *additivity* — keys niwa did not write
+  are never removed, reordered, or altered, and the edit must preserve
+  the file's other content byte-wise (the PRD's criterion makes this
+  testable); the only removals niwa ever performs are of its own
+  entries, retracting a trust entry when its repository becomes
+  conflicted (Decision 7);
   *credentials* — the credential and login files are never read or
   written, and preparation succeeds even when they are unreadable (R13);
   *discipline* — atomic temp-file-and-rename replacement so interruption
@@ -934,13 +1011,17 @@ skip-when-absent pattern for agent binaries.
   design states where the writes happen. *Impersonation:* a repository
   arriving with its own `.codex/` at the name niwa symlinks could stand
   in for the payload while niwa's trust entry vouches for it; the
-  conflict rule (Decision 7) skips the write, withholds the trust entry,
-  and reports, so the repository's layer is never trusted on niwa's
-  signature. *Disclosure through a committed symlink:* a repository
-  committing its `AGENTS.md` as a symlink to a sensitive path could get
-  the target read by niwa's composer and inlined into agent-visible
-  context; the regular-file-only read rule (Decision 2) refuses it, and
-  the R13 never-reads-credentials claim rests on that refusal. Neither
+  conflict rule (Decision 7) skips the write, withholds the trust entry
+  — removing one written before the conflict existed — and reports, so
+  the repository's layer is never trusted on niwa's signature, not even
+  by a stale entry from an apply that predates the conflict.
+  *Disclosure through a committed symlink:* a repository committing its
+  `AGENTS.md` as a symlink to a sensitive path could get the target read
+  by niwa's composer and inlined into agent-visible context; the
+  `O_NOFOLLOW` read rule (Decision 2) refuses the inline, and the
+  override written without it displaces the symlink from the discovery
+  slot, so Codex's own native read does not ingest the target either.
+  The R13 never-reads-credentials claim rests on that refusal. Neither
   requires a hostile actor — a careless upstream adopting Codex's own
   project-layer convention triggers the first — which is why both are
   handled by detection and loud refusal rather than by assuming good
@@ -997,17 +1078,19 @@ skip-when-absent pattern for agent binaries.
   niwa-owned files must be recomposed on apply. Mitigation: the content
   is kilobytes of text, regeneration is already the apply model, and the
   duplication is forced by the walk boundary, not chosen.
-- **A repository occupying niwa's names opts itself out of Codex
-  delivery.** A committed `.codex` or `AGENTS.override.md` — or an
-  `AGENTS.md` that is not a regular file — means that repository gets no
-  payload link, no composed override, and for a `.codex` conflict no
-  trust entry: Codex sessions there fall back to the repository's own
-  content and Codex's own prompts. Mitigation: the degradation is loud
-  by design (a per-repository apply warning, and the trust prompt where
-  it applies), the failure is confined to the conflicted repository, and
-  the resolution is the developer's call — rename or remove the
-  conflicting content, or accept native-only discovery for that
-  repository.
+- **A repository occupying niwa's names loses Codex delivery in
+  proportion to what it occupies.** A committed `.codex` costs that
+  repository everything: no link, no override, no trust entry — sessions
+  there fall back to the repository's own content and Codex's own
+  prompts. A committed `AGENTS.override.md` alone costs only the
+  composed context: skills, payload config, and trust still arrive,
+  while the repository's own override holds the context slot. A
+  non-regular `AGENTS.md` costs only the inline: the override still
+  delivers the workspace layers. Mitigation: each degradation is loud by
+  design (a per-repository apply warning, and the trust prompt where it
+  applies), confined to the conflicted repository, and the resolution is
+  the developer's call — rename or remove the conflicting content, or
+  accept the reduced delivery.
 - **The inlined committed `AGENTS.md` goes stale between applies.** A
   repository editing its own `AGENTS.md` sees the change reach Codex
   sessions only after the next `niwa apply`, while a Claude session sees
