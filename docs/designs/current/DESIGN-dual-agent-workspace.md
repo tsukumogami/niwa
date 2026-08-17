@@ -266,15 +266,25 @@ in every repository (R6), including ones that commit their own `AGENTS.md`.
   override displaces the symlinked `AGENTS.md` from the discovery slot
   — without it, Codex's own native read would follow the symlink and
   pull the target into the session's context, delivering through Codex
-  the disclosure niwa just refused to perform. Refusal was chosen over
-  the alternative, resolving the link and requiring the target to stay
-  inside the working tree, because refusal has no resolution edge cases
-  — no chained links, no post-resolution traversal — and the benign
-  case it costs (a repository symlinking its `AGENTS.md` to another
-  in-tree file) is rare, loudly reported, and fixed by committing a
-  regular file. The R13 claim that niwa never reads the
-  developer's credentials is true only because of this rule; it is stated
-  here so the claim cannot drift away from its enforcement.
+  the disclosure niwa just refused to perform. Two boundary limits are
+  stated so nobody reads more protection into this than exists. The
+  displacement is per-slot: the override wins the repository root's
+  context slot only, and a context symlink committed in a subdirectory
+  occupies its own directory's slot, which nothing niwa writes contests
+  — Codex reads it natively there. And `O_NOFOLLOW` guards this read,
+  not a deeper one: it refuses a symlink at the final path component
+  only, so any future work that reads through a longer
+  repository-controlled path needs full no-symlink path resolution (an
+  `openat2`-style no-symlinks mode), not `O_NOFOLLOW` alone. Refusal
+  was chosen over the alternative, resolving the link and requiring the
+  target to stay inside the working tree, because refusal has no
+  resolution edge cases — no chained links, no post-resolution
+  traversal — and the benign case it costs (a repository symlinking its
+  `AGENTS.md` to another in-tree file) is rare, loudly reported, and
+  fixed by committing a regular file. The R13 claim that niwa never
+  reads the developer's credentials is true only because of this rule;
+  it is stated here so the claim cannot drift away from its
+  enforcement.
 
 - **Option 2B: `project_doc_fallback_filenames` pointed at the
   `CLAUDE.local.md` niwa already writes.** Add
@@ -1020,7 +1030,10 @@ skip-when-absent pattern for agent binaries.
   by niwa's composer and inlined into agent-visible context; the
   `O_NOFOLLOW` read rule (Decision 2) refuses the inline, and the
   override written without it displaces the symlink from the discovery
-  slot, so Codex's own native read does not ingest the target either.
+  slot, so Codex's own native read does not ingest the target either —
+  a per-slot protection: it covers the repository root's context slot,
+  while a context symlink committed in a subdirectory keeps its own
+  slot and stays Codex-native (Decision 2 states both boundary limits).
   The R13 never-reads-credentials claim rests on that refusal. Neither
   requires a hostile actor — a careless upstream adopting Codex's own
   project-layer convention triggers the first — which is why both are
