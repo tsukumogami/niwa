@@ -481,4 +481,33 @@ are broken.
 The hash algorithm derived earlier is confirmed correct from a second direction:
 Codex's own "Trust all and continue" wrote a hash identical to the computed one.
 
+## Round 5 addendum — worktrees need no special mechanism
+
+A PRD reviewer flagged an assumption nobody had actually measured: every earlier
+test used a real `git init` or a hand-written gitlink file, never a working tree
+produced by `git worktree add`, where `.git` is a file rather than a directory.
+The distinction could have mattered, because a real worktree's pointer targets a
+subdirectory inside the parent repository's git directory and git resolves a
+separate common directory for shared state.
+
+It holds. A real worktree's `.git` file satisfies the project-root marker check,
+and the config layer, the skills from a symlinked shared payload, and the
+instruction context were all discovered from the worktree root and from two
+levels below it, identically to a plain clone. A no-`.git` negative control
+loses all three at nested depth, which confirms the probe discriminates rather
+than passing everything.
+
+The reason is that the root-finding routine tests nothing but the success of a
+metadata stat on the candidate path — no directory-type check, no git awareness
+— and the one worktree-aware remap upstream carries is scoped by its own doc
+comment to hook declarations, leaving config and context alone.
+
+So the design needs no worktree-specific mechanism, and worktrees inherit the
+clone's arrangement unchanged. Residual risk is limited to upstream someday
+tightening that bare stat into a type check.
+
+One bonus finding worth folding into the design: **trust resolves through the
+main repository root**, so a single entry per repository covers all of that
+repository's worktrees. Per-worktree trust entries are unnecessary.
+
 ## Decision: Crystallize

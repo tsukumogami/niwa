@@ -15,7 +15,7 @@ execution_mode: auto
 max_rounds: 5
 coordinated: false
 consumed_handoff: wip/scope_dual-agent-workspace_handoff.md
-chain_ran: [brief]
+chain_ran: [brief, prd]
 chain_skipped: []
 child_snapshots:
   brief:
@@ -23,6 +23,15 @@ child_snapshots:
     status: Accepted
     validator: clean
     jury: content-quality PASS, structural-format PASS
+  prd:
+    path: docs/prds/PRD-dual-agent-workspace.md
+    status: Accepted
+    validator: clean
+    jury: round 1 all three FAIL (completeness, clarity, testability); 19
+      required changes applied in one revision pass; round 2 re-adjudication
+      pending
+    requirements: 14
+    acceptance_criteria: 19
 consolidation_judgments: []
 worktree_rebases: []
 worktree_divergences: []
