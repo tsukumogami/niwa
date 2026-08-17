@@ -507,3 +507,160 @@ already keeps" would not.
   "Refuses the trust step... and reports" reads as non-fatal, and the consequence —
   every repository in the instance silently read-only at session time — is severe
   enough that the choice should be explicit rather than inferred.
+
+# Round 3
+
+# Verdict: FAIL
+
+The three round-two findings landed with their properties, the per-name/repository-wide
+split is genuinely consistent across all three places, and both optionals are closed
+well. The failure is the thing I was asked to look for: the generation-marker rule
+does create a new problem on the clone path, and the trust-removal rule added
+alongside it has no way to recognize what it is removing.
+
+## Round-two items — closed
+
+**Finding 1, conflict scope.** Settled as per-name detection with one stated one-way
+coupling, and I checked all three sites say the same thing rather than sounding
+compatible: Decision 7 (lines 651-665), the Conflicts section (805-815), and
+Consequences (the "in proportion to what it occupies" bullet) each state the same
+three cases with the same outcomes — `.codex` costs the repository everything,
+`AGENTS.override.md` costs only the override with link/excludes/trust still
+materializing, non-regular `AGENTS.md` costs only the inline. No drift between them.
+
+The coupling argument holds on its merits, and it is the right shape: the override's
+budget declaration lives in the payload the refused link would have reached, so an
+override written into a `.codex`-conflicted repository runs under Codex's 32768
+default and truncates the tail, which under the design's own outermost-first ordering
+is the repository layer R7 protects. Suppressing the override there is not
+belt-and-braces caution, it is the only way to avoid converting a loudly-reported
+conflict into a silently truncated one. The asymmetry is also correctly reasoned: an
+`AGENTS.override.md` conflict does not touch the payload, so the budget declaration,
+the skills, and trust all remain sound, and there is no reason to withhold them.
+Turning the trap into the stated reason for the rule is the right outcome.
+
+**Finding 2, over-broad refusal.** Narrowed exactly as intended (lines 256-269), and
+improved beyond the narrowing: the enforcement moved from a check-then-read to a
+single `O_NOFOLLOW` open, which removes the TOCTOU window a separate lstat would
+have left. That is a better answer than the one I would have accepted.
+
+**Finding 3, worktree ownership.** The mechanism is right and the justification is
+correct as far as it goes. A content test is the only ownership signal available on
+the standalone `niwa worktree apply` path — I verified that path calls
+`ApplyToWorktree` and returns the written list without persisting it
+(`internal/cli/session_lifecycle_cmd.go:371`), while the instance-apply path hashes
+the same list into managed entries (`internal/workspace/apply.go:1976-2000`). So a
+record-based check really would make the standalone path refuse its own refresh and
+fail R3's worktree criterion. The "tracked is a conflict regardless of content" half
+is the right default, and the forgery carve-out is honest about why it does not
+matter. What the justification misses is that adopting a content test for the *write*
+decision does not retire the record path's power over the *delete* decision — see A.
+
+**Optionals.** All three closed: the lock now lives in niwa's own state directory
+keyed by config path, the same-filesystem staging file is carved out of the "nothing
+else" claim explicitly and bounded to the instant of the write, an unparseable config
+is an error that makes apply exit non-zero with the reason given (an instance that
+"looks prepared while every repository in it silently runs read-only"), and the
+missing-plugin-root noun is reconciled — there is no link, so there is no dangle.
+
+## New findings
+
+**A. The generation-marker rule collides with `cleanRemovedFiles` on the clone path,
+and the collision deletes the conflicting file.** The conflict rule promises twice
+that niwa "modifies and deletes nothing (R12, R11)" (lines 646-647, 815-816). On the
+clone path that promise is not niwa's to make, because an existing pipeline step
+already deletes by record: `cleanRemovedFiles` removes every path in
+`existingState.ManagedFiles` that the current apply did not produce, unconditionally
+(`internal/workspace/apply.go:1846-1859`, the bare `os.Remove` at :1854).
+
+A conflict makes niwa write nothing at that name, so the path drops out of
+`result.managedFiles`. The reachable sequence is the one the rule exists for: a clean
+repository gets `AGENTS.override.md` written and recorded; later a committed
+`AGENTS.override.md` arrives, or a committed `.codex` arrives and the coupling
+suppresses the override write; the next apply detects the conflict, reports it, writes
+nothing — and then `cleanRemovedFiles` deletes the file at that path. If what is now
+there is tracked, that is a deletion in `git status` (R11) and a repository-shipped
+file removed (R12) — the two requirements the rule cites while promising the
+opposite. The design now carries two ownership notions on the clone path, content for
+the write decision and records for the delete decision, with nothing reconciling
+them, and the record-based one is the destructive one.
+
+The fix has precedent in the codebase, which is also evidence the hazard is real: the
+worktree-refresh path already forward-carries prior managed entries verbatim
+specifically "so the next cleanRemovedFiles does not delete its live secret file"
+(`internal/workspace/apply.go:1900-1906`). Conflicted paths need the same treatment —
+forward-carried or explicitly excluded from reconciliation — and the design has to say
+so, because the rule as written reads like a guarantee that the pipeline will not
+honor.
+
+**B. The trust-removal rule cannot recognize what it removes.** The new
+remove-on-later-conflict behavior (lines 681-695) is well motivated — withholding
+alone would leave a stale entry vouching for a `.codex` a repository acquired after
+its entry was written, reopening the impersonation path on an already-trusted
+repository. But the recognition claim does not transfer: "This removal touches only
+entries niwa itself wrote (its per-repository keys, recognized the same way its file
+writes are)". File writes are recognized by a generation marker in the content and by
+untracked status. A TOML table has neither, and Codex writes a
+`[projects."<path>"] trust_level` entry of exactly the same shape when the developer
+answers the startup trust prompt — which is precisely the prompt this design routes
+conflicted repositories to. So niwa cannot distinguish its own entry from the
+developer's own answer by shape, and removing the latter breaks both the design's own
+additivity claim ("existing keys are never removed, reordered, or altered", Security
+Considerations) and the PRD criterion that no pre-existing key is removed.
+
+Records are the right answer here and, unlike the worktree file case, they are
+available: trust entries are written only by the instance-apply path, which has
+per-instance state. Recording the keys niwa wrote and bounding removal to that
+record closes it. The design should say that rather than pointing at the file rule,
+whose mechanism does not exist for TOML keys.
+
+**C. The displacement claim holds, but only for one directory, and is stated
+unbounded.** The claim (lines 264-269) is that the written override "displaces the
+symlinked `AGENTS.md` from the discovery slot — without it, Codex's own native read
+would follow the symlink". Checked against the design's own model of Codex: true, and
+a real benefit — `AGENTS.override.md` wins first-match, so the root `AGENTS.md` is
+never read. But the slot is per directory, and niwa writes the override at the
+repository root only (the on-disk shape). The walk contributes one file per directory
+from root to cwd, and the design relies elsewhere on subdirectory context files being
+read — the budget is sized "plus any committed context files in subdirectories below
+a repository root", and the PRD's own criterion exercises a context file in an
+intermediate directory. So a symlinked `AGENTS.md` one directory down is read
+natively and undisplaced. The degenerate case bounds it further: with no workspace
+content at any layer, the never-empty rule writes no override, so nothing displaces
+even the root file.
+
+This does not unmake the narrowing — the `O_NOFOLLOW` refusal is the defense and it
+holds unconditionally, and preserving R6's workspace half justifies writing the
+override on its own. But the text elevates displacement from a welcome side effect to
+"itself part of the defense", and a reader will take that as "niwa's write closes the
+disclosure path". It closes it at one directory, when there is workspace content to
+compose. Bound the claim to what it covers.
+
+## Required changes
+
+1. Reconcile the conflict rule with `cleanRemovedFiles`. A path that becomes a
+   conflict drops out of the produced set and is currently deleted by record
+   (`internal/workspace/apply.go:1854`), contradicting the rule's "deletes nothing
+   (R12, R11)". State that conflicted paths are forward-carried or excluded from
+   managed-file reconciliation, following the idiom the worktree-refresh path already
+   uses for the same hazard (`apply.go:1900-1906`).
+
+2. Give trust removal a real recognition mechanism. Shape is not identity — Codex
+   writes the same key when the developer answers the prompt this design sends
+   conflicted repositories to. Bound removal to keys niwa recorded writing (instance
+   state is available on the only path that writes them), rather than to keys
+   "recognized the same way its file writes are", which has no analogue for a TOML
+   table.
+
+3. Bound the displacement claim to the repository root directory and to the case
+   where workspace content exists to compose. As written it reads as a
+   repository-wide closure of the disclosure path; it is a per-directory,
+   content-conditional one, and the `O_NOFOLLOW` refusal is the part that holds
+   unconditionally.
+
+## Optional improvements
+
+- The generation marker lands inside agent-visible context and counts against the
+  byte budget. Both are trivial, but one clause saying the marker is part of the
+  composed document (rather than a sidecar or an xattr) would keep the budget-sizing
+  and never-empty rules unambiguous about what they are measuring.

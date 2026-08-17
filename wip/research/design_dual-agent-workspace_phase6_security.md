@@ -288,3 +288,93 @@ None.
   check and the read" with the implementation that makes it true:
   open with O_NOFOLLOW (or open-then-fstat) rather than lstat-then-open.
   One flag, and the design's claim becomes accurate as written.
+
+# Round 3
+
+# Verdict: PASS
+
+## The narrowed refusal and the displacement claim
+
+The narrowing is sound, and the author's stronger claim is correct as
+scoped. The disclosure vector I identified was niwa's read; the write
+never touched it. And the displacement argument holds on the measured
+facts already pinned in this document: `AGENTS.override.md` is
+hardcoded first in the per-directory precedence, each directory
+contributes exactly one context file, and the candidate probe is
+trust-independent — so a written override means Codex never opens
+`AGENTS.md` in that directory at all. Without the override, Codex's
+native read opens the committed file with an ordinary follow-the-link
+open and pulls the target into session context. The wide rule
+therefore left the symlink sitting in the very slot Codex reads,
+delivering through Codex the disclosure niwa refused to perform
+itself. The narrow rule is not merely as safe — it is strictly safer,
+and the round-two version was actively harmful in exactly the case it
+existed for. I confirm the reversal.
+
+Two boundary statements so the claim is not read wider than it holds,
+neither blocking because both describe vanilla Codex behavior niwa
+neither adds to nor can close: the displacement covers the directory
+slot niwa contests (the repository root, and a worktree root). A
+committed context-file symlink in a *subdirectory* is still read
+natively by Codex when the working directory is at or below it, and
+trust does not gate context reads, so niwa's entry does not enable it.
+And in the degenerate case where every workspace layer is empty, the
+never-empty rule means no override is written and the root slot falls
+back to native discovery — the refusal is still loudly reported, and
+the exposure is identical to the repository outside any niwa
+workspace.
+
+## O_NOFOLLOW enforcement
+
+Implemented better than I asked: the enforcement is the open itself,
+the design explicitly rejects a separate pre-check for the swap window
+it would leave, and the non-symlink non-regular cases (a committed
+directory is the only other shape git can produce) are still refused
+after the open. The predicate — content is inlined only from a regular
+file reached without following a link — survives the mechanism change
+intact. One forward-looking note: the rule's extension to "any other
+repository file the composer ever reads" is only fully enforced by
+O_NOFOLLOW for paths whose intermediate components are not repository
+content. That is true of every path the composer reads today
+(`<repo>/AGENTS.md`, `<worktree>/AGENTS.md` — the parent directories
+are niwa's clone, not committed content). If a future increment reads
+deeper repository paths, a committed symlinked *directory* on the way
+down defeats O_NOFOLLOW alone and needs openat2/RESOLVE_BENEATH-style
+resolution. Not a defect now; worth remembering then.
+
+## Full degradation on `.codex` conflict
+
+Confirmed safe, not merely degraded. The end state of a
+conflicted-`.codex` repository is byte-for-byte vanilla Codex: native
+discovery of the repository's own content, Codex's own trust prompt in
+the TUI, read-only sandbox under exec, and no niwa-written trust entry
+in existence afterward — including removal of an entry niwa wrote
+earlier, which closes the late-conflict window I named in round two as
+an optional. niwa adds nothing on top of what the repository would
+present to a developer who had never run niwa, and the step-back is
+loudly reported at apply. The internal reasoning is also right in two
+places I checked deliberately: suppressing the override along with the
+link is correct because an override without the payload's budget
+declaration would compose a chain into the 32768-byte default and
+silently truncate the repository layer — writing it would manufacture
+a silent failure; and the decoupled reverse case (override conflict
+alone) keeps the trust entry safely, because the thing the entry
+vouches for — the `.codex` layer — is still niwa's own payload, so the
+impersonation invariant "niwa's signature vouches only for what niwa
+wrote" holds in both branches. The marker-based self-recognition is
+acceptable: tracked content is a conflict regardless of marker, a
+forged untracked marker file at niwa's own name is simply overwritten
+at the next apply with nothing committed touched, and trust removal
+retracts only niwa's own keys.
+
+## Required changes
+
+None.
+
+## Optional improvements
+
+None beyond the two boundary notes above, recorded here so they are
+not rediscovered: the displacement defense is per-slot, not per-tree
+(subdirectory context symlinks remain Codex-native behavior), and
+deeper repository reads in a future increment need stronger path
+resolution than O_NOFOLLOW.
