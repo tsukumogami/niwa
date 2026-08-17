@@ -771,6 +771,11 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 
 	var writtenFiles []string
 	var allWarnings []string
+	// plans accumulates every plan applied during this run. It is what the
+	// bookkeeping steps read: Step 7 takes Managed and Sources off the applied
+	// entries, the per-repo git-exclude call takes the patterns entries in that
+	// repo implied, and the warnings join the pipeline's own.
+	plans := &planRun{}
 	// sourceTuples aggregates per-file source provenance across every
 	// materializer call. The key is the absolute on-disk path of the
 	// written file; the value is the ordered list of SourceEntry
@@ -1626,9 +1631,13 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		// files just materialized stay invisible to the repo's git status,
 		// independent of its committed .gitignore. Custom secret-output target
 		// names (not matched by the base *.local* pattern) are passed so they
-		// are covered too. Fail closed: a repo we cannot keep clean surfaces the
-		// error rather than leaking niwa-authored files.
-		if err := gitexclude.EnsureRepoExclude(repoDir, envOutputs...); err != nil {
+		// are covered too, along with the patterns plan entries written into
+		// this repo declared. Fail closed: a repo we cannot keep clean surfaces
+		// the error rather than leaking niwa-authored files.
+		excludeExtras := make([]string, 0, len(envOutputs))
+		excludeExtras = append(excludeExtras, envOutputs...)
+		excludeExtras = append(excludeExtras, plans.excludesUnder(repoDir)...)
+		if err := gitexclude.EnsureRepoExclude(repoDir, excludeExtras...); err != nil {
 			return nil, fmt.Errorf("recording git exclude coverage for repo %s: %w", cr.Repo.Name, err)
 		}
 	}
@@ -1692,27 +1701,31 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		}
 	}
 
+	// Plan warnings: what the applied plans said the user needs to hear.
+	// Reported alongside the pipeline's other deferred warnings.
+	allWarnings = append(allWarnings, plans.warnings()...)
+
 	// Step 7: Build managed files with hashes and per-source
-	// provenance. Sources are populated by materializers via
-	// MaterializeContext.SourceTuples; files written outside the
-	// materializer pipeline (content files, workspace CLAUDE.md,
-	// etc.) have no recorded sources, which is fine — their drift
-	// check falls back to the ContentHash-only path.
+	// provenance. Sources come from two places. Materializers report
+	// them out of band via MaterializeContext.SourceTuples, keyed by
+	// the path they wrote; plan entries carry Managed and Sources on
+	// the entry itself, so a plan-produced file needs no side map to
+	// say whether it is recorded or what fed it. Files in neither --
+	// content files, hook scripts -- have no recorded sources, which
+	// is fine: their drift check falls back to the ContentHash-only
+	// path.
 	managedFiles := make([]ManagedFile, 0, len(writtenFiles))
 	for _, path := range writtenFiles {
-		hash, err := HashFile(path)
+		mf, err := hashManagedFile(path, sourceTuples[path], now)
 		if err != nil {
-			return nil, fmt.Errorf("hashing managed file %s: %w", path, err)
+			return nil, err
 		}
-		sources := sourceTuples[path]
-		mf := ManagedFile{
-			Path:        path,
-			ContentHash: hash,
-			Generated:   now,
-			Sources:     sources,
-		}
-		if len(sources) > 0 {
-			mf.SourceFingerprint = ComputeSourceFingerprint(sources)
+		managedFiles = append(managedFiles, mf)
+	}
+	for _, e := range plans.managedEntries() {
+		mf, err := hashManagedFile(e.Path, e.Sources, now)
+		if err != nil {
+			return nil, err
 		}
 		managedFiles = append(managedFiles, mf)
 	}
@@ -1752,6 +1765,27 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		overlayCommit:    pipelineOverlayCommit,
 		disclosedNotices: newDisclosures,
 	}, nil
+}
+
+// hashManagedFile builds one managed-file record: the file's content hash, the
+// sources reported for it, and the fingerprint those sources reduce to. Both of
+// Step 7's inputs -- the materializers' path-keyed side map and the applied
+// plan entries -- go through here so the two cannot record a file differently.
+func hashManagedFile(path string, sources []SourceEntry, now time.Time) (ManagedFile, error) {
+	hash, err := HashFile(path)
+	if err != nil {
+		return ManagedFile{}, fmt.Errorf("hashing managed file %s: %w", path, err)
+	}
+	mf := ManagedFile{
+		Path:        path,
+		ContentHash: hash,
+		Generated:   now,
+		Sources:     sources,
+	}
+	if len(sources) > 0 {
+		mf.SourceFingerprint = ComputeSourceFingerprint(sources)
+	}
+	return mf, nil
 }
 
 // healDanglingPluginRecords prunes records from Claude Code's global plugin
