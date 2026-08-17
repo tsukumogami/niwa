@@ -1508,6 +1508,15 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 			return nil, fmt.Errorf("installing group content for %q: %w", cr.Group, err)
 		}
 		writtenFiles = append(writtenFiles, groupFiles...)
+
+		// The group's Codex file is composed, not the writer above re-run: a
+		// session started in a group directory reaches nothing above it, so the
+		// file carries the instance layer as well as the group's own.
+		groupCodexFiles, err := InstallGroupCodexContext(effectiveCfg, configDir, instanceRoot, cr.Group)
+		if err != nil {
+			return nil, fmt.Errorf("composing group Codex context for %q: %w", cr.Group, err)
+		}
+		writtenFiles = append(writtenFiles, groupCodexFiles...)
 	}
 
 	// Step 5c: Install global CLAUDE.md content if global config is active.
@@ -1536,6 +1545,24 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 			allWarnings = append(allWarnings, w.String())
 		}
 		writtenFiles = append(writtenFiles, result.WrittenFiles...)
+
+		// Step 6b: the repository's Codex context, composed into
+		// AGENTS.override.md -- the one name that outranks a repository's own
+		// AGENTS.md, carrying the instance and group layers the repository root
+		// cuts a Codex session off from. The same `claude = false` opt-out
+		// applies: a repository that asked for no niwa-written context must not
+		// get an override, which would claim its context slot and displace the
+		// committed file it does ship.
+		codexResult, err := InstallRepoCodexOverride(effectiveCfg, configDir, overlayDir, instanceRoot, cr.Group, cr.Repo.Name)
+		if err != nil {
+			return nil, fmt.Errorf("composing Codex context for %q: %w", cr.Repo.Name, err)
+		}
+		if codexResult.Refusal != nil {
+			// The workspace layers are in the override; only the repository's own
+			// committed content is missing, and this warning is the sole signal.
+			allWarnings = append(allWarnings, fmt.Sprintf("repo %q: %s", cr.Repo.Name, codexResult.Refusal))
+		}
+		writtenFiles = append(writtenFiles, codexResult.WrittenFiles...)
 	}
 
 	// Step 6.4: Decide the worktree-delegation integration ONCE per apply

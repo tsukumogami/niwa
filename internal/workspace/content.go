@@ -151,59 +151,24 @@ func InstallRepoContentTo(cfg *config.WorkspaceConfig, configDir, overlayDir, in
 		"{repo_name}":      repoName,
 	}
 
-	// Resolve source: explicit entry or auto-discovery.
-	entry, hasExplicit := cfg.Claude.Content.Repos[repoName]
-	source := ""
-	if hasExplicit {
-		source = entry.Source
-	} else {
-		source = autoDiscoverRepoSource(cfg, configDir, repoName)
+	// Source resolution (explicit entry, else auto-discovery) and the overlay
+	// append live in renderRepoContextLayer, which the Codex composer reads the
+	// repository layer from as well: one resolution, so the two agents cannot
+	// end up building a repository's context from different sources.
+	layer, err := renderRepoContextLayer(cfg, configDir, overlayDir, instanceRoot, groupName, repoName)
+	if err != nil {
+		return nil, err
 	}
-
-	if source != "" {
+	if layer.Configured {
 		target := filepath.Join(repoDir, "CLAUDE.local.md")
-		if err := installContentFile(contentDirRoot(cfg, configDir), source, target, vars); err != nil {
+		if err := writeContextFile(target, layer.Content); err != nil {
 			return nil, err
-		}
-		result.WrittenFiles = append(result.WrittenFiles, target)
-
-		// Append overlay content if present.
-		if hasExplicit && entry.OverlaySource != "" {
-			if overlayDir == "" {
-				return nil, fmt.Errorf("repo %q has OverlaySource %q but overlayDir is empty", repoName, entry.OverlaySource)
-			}
-			overlaySrcPath := filepath.Join(overlayDir, entry.OverlaySource)
-			overlayData, readErr := os.ReadFile(overlaySrcPath)
-			if readErr != nil {
-				return nil, fmt.Errorf("reading overlay content for repo %q: %w", repoName, readErr)
-			}
-			existing, readErr := os.ReadFile(target)
-			if readErr != nil {
-				return nil, fmt.Errorf("reading CLAUDE.local.md for overlay append for repo %q: %w", repoName, readErr)
-			}
-			combined := string(existing) + "\n" + string(overlayData)
-			if writeErr := os.WriteFile(target, []byte(combined), 0o644); writeErr != nil {
-				return nil, fmt.Errorf("writing overlay-appended CLAUDE.local.md for repo %q: %w", repoName, writeErr)
-			}
-		}
-	} else if hasExplicit && entry.OverlaySource != "" {
-		// No base source, but OverlaySource is set — write overlay content as CLAUDE.local.md.
-		if overlayDir == "" {
-			return nil, fmt.Errorf("repo %q has OverlaySource %q but overlayDir is empty", repoName, entry.OverlaySource)
-		}
-		target := filepath.Join(repoDir, "CLAUDE.local.md")
-		overlaySrcPath := filepath.Join(overlayDir, entry.OverlaySource)
-		overlayData, readErr := os.ReadFile(overlaySrcPath)
-		if readErr != nil {
-			return nil, fmt.Errorf("reading overlay content for repo %q: %w", repoName, readErr)
-		}
-		if writeErr := os.WriteFile(target, overlayData, 0o644); writeErr != nil {
-			return nil, fmt.Errorf("writing overlay CLAUDE.local.md for repo %q: %w", repoName, writeErr)
 		}
 		result.WrittenFiles = append(result.WrittenFiles, target)
 	}
 
 	// Install subdirectory content if present.
+	entry, hasExplicit := cfg.Claude.Content.Repos[repoName]
 	if hasExplicit {
 		for subdir, subdirSource := range entry.Subdirs {
 			if subdirSource == "" {
@@ -284,6 +249,13 @@ func installContentFile(contentRoot, source, target string, vars map[string]stri
 		return err
 	}
 
+	return writeContextFile(target, content)
+}
+
+// writeContextFile writes one context document, creating the parent directory
+// if it is missing. Every apply rewrites these files from the current sources
+// rather than appending to them, so nothing accumulates across applies.
+func writeContextFile(target, content string) error {
 	targetDir := filepath.Dir(target)
 	if err := os.MkdirAll(targetDir, 0o755); err != nil {
 		return fmt.Errorf("creating directory %s: %w", targetDir, err)
