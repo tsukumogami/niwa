@@ -96,6 +96,7 @@ func runReset(cmd *cobra.Command, args []string) error {
 
 	applier := workspace.NewApplier(gh)
 	defer wireKeyReport(applier, cmd.ErrOrStderr())()
+	configureCodexTrust(applier)
 	// Reset runs runPipeline; wire the plugin auto-installer so the
 	// rank-2 overlay notice fired during the pipeline triggers
 	// /niwa:migrate-config install. Reset doesn't surface its own

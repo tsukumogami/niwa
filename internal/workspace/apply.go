@@ -119,6 +119,22 @@ type Applier struct {
 	// callers; nil means no-op (tests, or a surface that didn't wire it).
 	PrewarmDeclaredPlugins func(instanceRoot string, reporter *Reporter, skipInstall bool)
 
+	// EnsureCodexTrust upserts one path-scoped trust entry per cloned
+	// repository in the developer's Codex config, the one write this
+	// pipeline makes outside the instance (DESIGN-dual-agent-workspace
+	// Decision 4A). Without it a Codex session in a prepared repository
+	// runs in a read-only sandbox and its interactive TUI blocks on a
+	// trust prompt.
+	//
+	// It is a seam for the same reason InstallNiwaPlugin and
+	// PrewarmDeclaredPlugins are: it edits a file in the developer's home,
+	// so the unit suite -- which builds Appliers by the dozen -- must not
+	// reach it by default. Every CLI surface that constructs an Applier
+	// wires it to workspace.EnsureCodexTrust (see cli.configureCodexTrust);
+	// nil means no trust entries are written and the record carried in
+	// instance state is passed through untouched.
+	EnsureCodexTrust func(CodexTrustRequest) (CodexTrustResult, error)
+
 	// cloneOrSync materializes or refreshes the overlay snapshot at dir.
 	// Returns wasFreshClone=true when no marker/.git was present (fresh
 	// materialization), so callers can distinguish "overlay doesn't
@@ -363,6 +379,17 @@ type pipelineResult struct {
 	overlayURL       string   // set when convention discovery succeeds; empty otherwise
 	overlayCommit    string   // HEAD SHA when overlayURL was set; empty otherwise
 	disclosedNotices []string // one-time notices emitted during this run
+	// codexTrustKeys is the record of trust entries niwa has written into
+	// the developer's Codex config, to persist in InstanceState. It carries
+	// the prior record forward when the trust step wrote nothing, or was not
+	// wired at all, so a run can never forget an entry it left behind.
+	codexTrustKeys []string
+	// codexTrustErr is a trust-step failure carried out as data, the same
+	// way setupIncomplete is: the rest of materialization must complete, and
+	// on create the pipeline's error path runs os.RemoveAll over the
+	// instance root. Create and Apply return it after their summary, so the
+	// command exits non-zero with the file named.
+	codexTrustErr error
 }
 
 // logSetupIncomplete prints the counted verdict line naming the repos whose
@@ -528,6 +555,7 @@ func (a *Applier) Create(ctx context.Context, cfg *config.WorkspaceConfig, confi
 		OverlayURL:     result.overlayURL,
 		OverlayCommit:  result.overlayCommit,
 		AuthSources:    result.authSources,
+		CodexTrustKeys: result.codexTrustKeys,
 	}
 
 	if err := SaveState(instanceRoot, state); err != nil {
@@ -545,6 +573,14 @@ func (a *Applier) Create(ctx context.Context, cfg *config.WorkspaceConfig, confi
 		a.Reporter.DeferWarn("%s", w)
 	}
 	a.Reporter.FlushDeferred()
+
+	// A trust-step failure is fatal to the command but not to the instance:
+	// everything else materialized, the state file records what was written,
+	// and the instance root stays. Returning here rather than from the
+	// pipeline is what keeps the create's os.RemoveAll off this path.
+	if result.codexTrustErr != nil {
+		return instanceRoot, result.codexTrustErr
+	}
 
 	return instanceRoot, nil
 }
@@ -721,6 +757,7 @@ func (a *Applier) Apply(ctx context.Context, cfg *config.WorkspaceConfig, config
 		Repos:                result.repoStates,
 		Shadows:              result.shadows,
 		AuthSources:          result.authSources,
+		CodexTrustKeys:       result.codexTrustKeys,
 	}
 
 	if err := SaveState(instanceRoot, state); err != nil {
@@ -739,7 +776,10 @@ func (a *Applier) Apply(ctx context.Context, cfg *config.WorkspaceConfig, config
 	}
 	a.Reporter.FlushDeferred()
 
-	return nil
+	// The trust step's failure is returned last, after the state file records
+	// what this apply wrote: the rest of materialization completes and the
+	// command still exits non-zero, naming the config it refused to touch.
+	return result.codexTrustErr
 }
 
 // runPipeline executes the shared pipeline steps: discover repos, classify,
@@ -1598,6 +1638,18 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 	}
 	allWarnings = append(allWarnings, payload.Warnings...)
 
+	// Step 6d: the trust bootstrap -- one [projects."<canonical repo root>"]
+	// entry per cloned repository in the developer's Codex config, and
+	// nothing else written there (Decision 4A). It is the only write this
+	// pipeline makes outside the instance, and the only one that cannot come
+	// from the payload: Codex reads trust from the layers it merges before a
+	// project layer exists, so the payload cannot vouch for itself.
+	//
+	// One entry per repository, not per worktree: trust resolves through a
+	// worktree's .git pointer to the main repository root, so the
+	// repository's entry already covers every worktree of it.
+	codexTrustKeys, codexTrustErr := a.ensureCodexTrust(repoDirs, opts.existingState, &allWarnings)
+
 	// Step 6.4: Decide the worktree-delegation integration ONCE per apply
 	// (design Decisions 4 & 6), then thread it into every repo's
 	// SettingsMaterializer below. Running the probe once — not per repo — keeps
@@ -1821,7 +1873,37 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		overlayURL:       pipelineOverlayURL,
 		overlayCommit:    pipelineOverlayCommit,
 		disclosedNotices: newDisclosures,
+		codexTrustKeys:   codexTrustKeys,
+		codexTrustErr:    codexTrustErr,
 	}, nil
+}
+
+// ensureCodexTrust runs the trust step for one apply and returns the record to
+// persist plus any failure to surface after materialization finishes.
+//
+// The record is returned on every path, failure included. It is the sole
+// authority for what niwa may later remove from the developer's config, so a
+// run that could not write must still carry forward what earlier runs did:
+// forgetting a key would strand the entry it names in the developer's file
+// with nothing left able to retract it.
+func (a *Applier) ensureCodexTrust(repoDirs []string, existing *InstanceState, warnings *[]string) ([]string, error) {
+	var recorded []string
+	if existing != nil {
+		recorded = existing.CodexTrustKeys
+	}
+	if a.EnsureCodexTrust == nil {
+		return recorded, nil
+	}
+
+	result, err := a.EnsureCodexTrust(CodexTrustRequest{
+		RepoRoots: repoDirs,
+		Recorded:  recorded,
+	})
+	*warnings = append(*warnings, result.Warnings...)
+	if result.Recorded != nil {
+		recorded = result.Recorded
+	}
+	return recorded, err
 }
 
 // healDanglingPluginRecords prunes records from Claude Code's global plugin

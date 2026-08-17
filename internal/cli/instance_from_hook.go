@@ -442,6 +442,7 @@ func realProvisionInstance(ctx context.Context, workspaceRoot, cwd, namePrefix, 
 
 	applier := workspace.NewApplier(gh)
 	applier.Reporter = workspace.NewReporter(os.Stderr)
+	configureCodexTrust(applier)
 	// Collected rather than rendered: this path has no terminal. The caller
 	// decides where the report goes — into the hook's injected context, or onto
 	// dispatch's stderr.

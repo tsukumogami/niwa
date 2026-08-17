@@ -175,6 +175,7 @@ func defaultRunBootstrap(ctx context.Context, cmd *cobra.Command, workspaceRoot,
 	// Step 4: build the applier and wire seam closures for RunBootstrap.
 	applier := workspace.NewApplier(gh)
 	applier.Reporter = workspace.NewReporter(cmd.ErrOrStderr())
+	configureCodexTrust(applier)
 	applier.ConfigSourceURL = source
 	defer wireKeyReport(applier, cmd.ErrOrStderr())()
 	if globalCfg, gErr := config.LoadGlobalConfig(); gErr == nil {

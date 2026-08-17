@@ -94,6 +94,11 @@ func (s *testState) buildEnv() []string {
 	for _, kv := range base {
 		if strings.HasPrefix(kv, "HOME=") ||
 			strings.HasPrefix(kv, "XDG_CONFIG_HOME=") ||
+			// Dropped rather than redirected: the trust writer falls back to
+			// $HOME/.codex, which is already the scenario's sandbox. Leaving
+			// the developer's own CODEX_HOME in place would point that write
+			// at their real Codex config.
+			strings.HasPrefix(kv, "CODEX_HOME=") ||
 			strings.HasPrefix(kv, "TMPDIR=") ||
 			(overridePath && strings.HasPrefix(kv, "PATH=")) {
 			continue

@@ -1127,8 +1127,8 @@ func TestSaveAndLoadStateAuthSources(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadState: %v", err)
 	}
-	if loaded.SchemaVersion != 4 {
-		t.Errorf("SchemaVersion = %d, want 4", loaded.SchemaVersion)
+	if loaded.SchemaVersion != SchemaVersion {
+		t.Errorf("SchemaVersion = %d, want %d", loaded.SchemaVersion, SchemaVersion)
 	}
 	if len(loaded.AuthSources) != len(state.AuthSources) {
 		t.Errorf("AuthSources size = %d, want %d", len(loaded.AuthSources), len(state.AuthSources))
@@ -1221,14 +1221,14 @@ func TestLoadStateV3WithoutAuthSources(t *testing.T) {
 	}
 	loaded.SchemaVersion = SchemaVersion
 	if err := SaveState(dir, loaded); err != nil {
-		t.Fatalf("SaveState (v3→v4 rewrite): %v", err)
+		t.Fatalf("SaveState (rewrite at the current schema version): %v", err)
 	}
 	reloaded, err := LoadState(dir)
 	if err != nil {
 		t.Fatalf("LoadState after rewrite: %v", err)
 	}
-	if reloaded.SchemaVersion != 4 {
-		t.Errorf("SchemaVersion after rewrite = %d, want 4", reloaded.SchemaVersion)
+	if reloaded.SchemaVersion != SchemaVersion {
+		t.Errorf("SchemaVersion after rewrite = %d, want %d", reloaded.SchemaVersion, SchemaVersion)
 	}
 	if reloaded.AuthSources != nil {
 		t.Errorf("AuthSources after rewrite should still be nil, got %+v", reloaded.AuthSources)

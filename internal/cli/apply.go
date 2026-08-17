@@ -149,6 +149,7 @@ func runApply(cmd *cobra.Command, args []string) error {
 	gh := github.NewAPIClient(token)
 	applier := workspace.NewApplier(gh)
 	applier.Reporter = workspace.NewReporterWithTTY(os.Stderr, !noProgress && term.IsTerminal(int(os.Stderr.Fd())))
+	configureCodexTrust(applier)
 	applier.NoPull = applyNoPull
 	applier.AllowDirty = applyAllowDirty
 	// --parallel wins when > 0; otherwise the [global] clone_workers config

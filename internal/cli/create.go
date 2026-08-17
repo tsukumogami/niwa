@@ -164,6 +164,7 @@ func runCreate(cmd *cobra.Command, args []string) error {
 	// comes from the config that reconcile returns.
 	applier := workspace.NewApplier(gh)
 	applier.Reporter = workspace.NewReporterWithTTY(os.Stderr, !noProgress && term.IsTerminal(int(os.Stderr.Fd())))
+	configureCodexTrust(applier)
 	// Rendered on every exit from here on, including the failure path where
 	// Create has already removed the instance directory.
 	defer wireKeyReport(applier, cmd.ErrOrStderr())()

@@ -43,12 +43,16 @@ const (
 	// v4 adds InstanceState.AuthSources, the credential-source audit
 	// map persisted at apply time so `niwa status --audit-auth` can
 	// render fully offline (machine-identity-vault-sync PRD R11).
-	// v1, v2, and v3 files load through migration shims in LoadState
-	// and are rewritten on the next SaveState. The v3→v4 migration is
-	// a no-op at the JSON level (auth_sources is omitempty), so v3
-	// files unmarshal cleanly with AuthSources == nil and a save
-	// rewrites them as v4.
-	SchemaVersion = 4
+	// v5 adds InstanceState.CodexTrustKeys, the record of the trust
+	// entries niwa has written into the developer's Codex config
+	// (DESIGN-dual-agent-workspace Decision 4A).
+	// v1 through v4 files load through migration shims in LoadState
+	// and are rewritten on the next SaveState. Each of those
+	// migrations is a no-op at the JSON level (every added field is
+	// omitempty), so an older file unmarshals cleanly with the new
+	// fields zero-valued and a save rewrites it at the current
+	// version.
+	SchemaVersion = 5
 )
 
 // SourceKind enumerates the provenance categories recognised by
@@ -131,6 +135,22 @@ type InstanceState struct {
 	DisclosedNotices   []string                    `json:"disclosed_notices,omitempty"`
 	ConfigSource       *ConfigSource               `json:"config_source,omitempty"`
 	AuthSources        map[string]AuthSourceRecord `json:"auth_sources,omitempty"`
+	// CodexTrustKeys records the per-project trust keys niwa has written
+	// into the developer's Codex config for this instance (schema v5;
+	// DESIGN-dual-agent-workspace Decision 4A). Each is a canonicalized
+	// repository root, the key of a [projects."<path>"] entry niwa
+	// appended.
+	//
+	// The record exists because removal must be bounded by what niwa
+	// wrote, never by shape: Codex writes identically-shaped entries when
+	// the developer answers its own trust prompt, so a shape-matching
+	// removal would retract the developer's own verdict. Only keys named
+	// here may ever be removed. It therefore carries entries forward
+	// across applies -- including for repositories that have since left
+	// the workspace, whose entries are still niwa's to clean up at
+	// destroy time. Empty for instances applied before the trust
+	// bootstrap existed; omitempty keeps it invisible to old binaries.
+	CodexTrustKeys []string `json:"codex_trust_keys,omitempty"`
 }
 
 // AuthSourceRecord is one row of the credential-source audit map
