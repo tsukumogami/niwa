@@ -1,6 +1,6 @@
 ---
 schema: prd/v1
-status: Accepted
+status: Done
 problem: |
   niwa prepares a workspace instance for exactly one coding agent, chosen at
   creation time. Preparing for Codex replaces the Claude context at the levels
@@ -31,7 +31,7 @@ motivating_context: |
 
 ## Status
 
-Accepted
+Done
 
 The upstream BRIEF (docs/briefs/BRIEF-dual-agent-workspace.md, Accepted) owns
 the framing: problem, outcome, journeys, and scope boundary. This PRD owns the

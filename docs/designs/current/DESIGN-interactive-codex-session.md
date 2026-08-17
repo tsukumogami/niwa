@@ -41,7 +41,7 @@ Upstream PRD: docs/prds/PRD-interactive-codex-session.md (Done). This design was
 implemented on the feat/interactive-codex-session branch; the PLAN that
 decomposed it into issues was finalized and removed on completion.
 
-Partially superseded by docs/designs/DESIGN-dual-agent-workspace.md.
+Partially superseded by docs/designs/current/DESIGN-dual-agent-workspace.md.
 Decision 3 (skipping repository and worktree context under Codex), Decision 4
 (binding a Codex API key through the secret table), and the exclusive
 one-agent-per-preparation model no longer describe the current direction: a

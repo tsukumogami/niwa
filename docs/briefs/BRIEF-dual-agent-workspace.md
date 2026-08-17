@@ -1,6 +1,6 @@
 ---
 schema: brief/v1
-status: Accepted
+status: Done
 problem: |
   niwa prepares a workspace instance for exactly one coding agent. The agent
   choice is exclusive and made at creation time: preparing for Codex replaces
@@ -23,7 +23,7 @@ motivating_context: |
 
 ## Status
 
-Accepted
+Done
 
 The downstream PRD owns the requirements, including the silent-failure cases
 the exploration flagged as acceptance-criterion material. The downstream
