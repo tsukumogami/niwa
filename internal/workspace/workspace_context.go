@@ -354,21 +354,22 @@ func InstallWorkspaceRootSettings(cfg *config.WorkspaceConfig, configDir, instan
 	}
 	emitReports(nil, reports)
 
-	data, err := json.MarshalIndent(doc, "", "  ")
+	// The document lands as a plan entry: the executor owns the directory, the
+	// marshalled bytes, and the file mode, and this function owns what the
+	// document says.
+	plan, err := agentplan.SettingsPlan(agentplan.SettingsInputs{
+		Scope: agentplan.SettingsAtInstanceRoot,
+		Dir:   instanceRoot,
+		Doc:   doc,
+	})
 	if err != nil {
-		return nil, fmt.Errorf("marshaling workspace root settings: %w", err)
+		return nil, fmt.Errorf("declaring workspace root settings: %w", err)
 	}
-	data = append(data, '\n')
 
-	claudeDir := filepath.Join(instanceRoot, ".claude")
-	os.MkdirAll(claudeDir, 0o755)
-	settingsPath := filepath.Join(claudeDir, "settings.json")
-	if err := os.WriteFile(settingsPath, data, secretFileMode); err != nil {
+	written, _, err := applyPlan(plan)
+	if err != nil {
 		return nil, fmt.Errorf("writing workspace root settings: %w", err)
 	}
-
-	var written []string
-	written = append(written, settingsPath)
 	// Track only the hook scripts this apply installed, not every file present
 	// in the output directory. Walking .claude/hooks/ here would re-adopt
 	// orphaned scripts left by removed features, marking them as produced and

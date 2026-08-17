@@ -3,7 +3,6 @@ package workspace
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"io"
 	"maps"
@@ -13,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/tsukumogami/niwa/internal/agentplan"
 	"github.com/tsukumogami/niwa/internal/config"
 	"github.com/tsukumogami/niwa/internal/envformat"
 	"github.com/tsukumogami/niwa/internal/gitexclude"
@@ -1222,20 +1222,20 @@ func (s *SettingsMaterializer) Materialize(ctx *MaterializeContext) ([]string, e
 	}
 	emitReports(ctx.Stderr, reports)
 
-	data, err := json.MarshalIndent(doc, "", "  ")
+	// The document is declared and written as a plan entry, so the file name,
+	// the marshalled bytes, and the file mode are the producer's; this
+	// materializer decides what the document says and what fed it.
+	plan, err := agentplan.SettingsPlan(agentplan.SettingsInputs{
+		Scope: agentplan.SettingsInRepo,
+		Dir:   ctx.RepoDir,
+		Doc:   doc,
+	})
 	if err != nil {
-		return nil, fmt.Errorf("marshaling settings: %w", err)
-	}
-	// Append trailing newline for clean file output.
-	data = append(data, '\n')
-
-	claudeDir := filepath.Join(ctx.RepoDir, ".claude")
-	if err := os.MkdirAll(claudeDir, 0o755); err != nil {
-		return nil, fmt.Errorf("creating .claude directory: %w", err)
+		return nil, fmt.Errorf("declaring settings: %w", err)
 	}
 
-	target := filepath.Join(claudeDir, "settings.local.json")
-	if err := os.WriteFile(target, data, secretFileMode); err != nil {
+	written, _, err := applyPlan(plan)
+	if err != nil {
 		return nil, fmt.Errorf("writing settings file: %w", err)
 	}
 
@@ -1248,9 +1248,11 @@ func (s *SettingsMaterializer) Materialize(ctx *MaterializeContext) ([]string, e
 		v := settings[k]
 		sources = append(sources, sourceForMaybeSecret("workspace.toml:claude.settings."+k, v))
 	}
-	ctx.recordSources(target, sources)
+	for _, target := range written {
+		ctx.recordSources(target, sources)
+	}
 
-	return []string{target}, nil
+	return written, nil
 }
 
 // sortedKeysSettings is the SettingsConfig counterpart to sortedKeys,
