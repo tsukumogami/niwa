@@ -14,6 +14,11 @@ planned_chain:
   - design
   - plan
 chain_ran: []
+parent_orchestration:
+  parent: scope
+  topic: agent-capability-contract
+  child: brief
+  invoked_at: 2026-08-17T21:27:00Z
 chain_skipped: []
 worktree_rebases: []
 worktree_divergences: []
