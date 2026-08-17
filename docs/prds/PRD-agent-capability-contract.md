@@ -325,13 +325,17 @@ answer.
   environment delivery. The second PR therefore delivers
   workspace-declared approval and sandbox posture to Codex sessions,
   declared implemented with a requirement on directory trust (R3), from
-  an agent-neutral declaration source (R7). Two safety properties are
-  required: the posture niwa writes is reported at apply time, and
-  approval posture and sandbox posture stay separate decisions -- the
-  measured Codex setting that suppresses approval prompts most fully
-  also disables filesystem and network sandboxing together, and a
-  workspace declaration must never disable sandboxing as an unstated
-  side effect of relaxing approvals.
+  an agent-neutral declaration source (R7). Three safety properties are
+  required. Delivery is opt-in and absent by default: when the workspace
+  config declares no posture, niwa writes neither key and Codex's own
+  defaults apply unchanged -- niwa is never the reason a session runs
+  with weaker guardrails than the developer chose for themselves. The
+  posture niwa does write is reported at apply time. And approval
+  posture and sandbox posture stay separate decisions -- the measured
+  Codex setting that suppresses approval prompts most fully also
+  disables filesystem and network sandboxing together, and a workspace
+  declaration must never disable sandboxing as an unstated side effect
+  of relaxing approvals.
 
 ### Documentation
 
@@ -494,6 +498,10 @@ Codex delivery:
 - [ ] With a Codex delivery target made unwritable, apply fails with a
   named error identifying the capability, rather than warning and
   continuing.
+- [ ] With no posture declared in workspace config, the generated Codex
+  project-layer configuration contains neither `approval_policy` nor
+  `sandbox_mode`, and apply reports no posture write -- the
+  absent-declaration case is asserted directly, not inferred.
 - [ ] A workspace-declared approval and sandbox posture appears in the
   generated Codex project-layer configuration, its delivery declares the
   directory-trust requirement, the written posture is reported at apply
