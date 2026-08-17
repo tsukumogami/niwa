@@ -261,19 +261,23 @@ in every repository (R6), including ones that commit their own `AGENTS.md`.
   loudly (D4). The narrow scope is load-bearing twice over. It preserves
   the workspace half of R6 (the session keeps the instance, group, and
   any worktree layers; only the repository's own content waits for a
-  regular file, and the report says so). And it is itself part of the
-  defense: `AGENTS.override.md` wins first-match, so the written
-  override displaces the symlinked `AGENTS.md` from the discovery slot
-  — without it, Codex's own native read would follow the symlink and
-  pull the target into the session's context, delivering through Codex
-  the disclosure niwa just refused to perform. Two boundary limits are
-  stated so nobody reads more protection into this than exists. The
-  displacement is per-slot: the override wins the repository root's
-  context slot only, and a context symlink committed in a subdirectory
-  occupies its own directory's slot, which nothing niwa writes contests
-  — Codex reads it natively there. And `O_NOFOLLOW` guards this read,
-  not a deeper one: it refuses a symlink at the final path component
-  only, so any future work that reads through a longer
+  regular file, and the report says so). And it reinforces the defense
+  where it applies: `AGENTS.override.md` wins first-match, so the
+  written override displaces the symlinked `AGENTS.md` from the
+  discovery slot — without it, Codex's own native read would follow the
+  symlink and pull the target into the session's context, delivering
+  through Codex the disclosure niwa just refused to perform. The
+  displacement must not be read as more than it is: **the `O_NOFOLLOW`
+  refusal is the part of the defense that holds unconditionally; the
+  displacement is a per-directory, content-conditional reinforcement.**
+  Per-directory, because the override wins only the repository root's
+  context slot — a context symlink committed in a subdirectory occupies
+  its own directory's slot, which nothing niwa writes contests, and
+  Codex reads it natively there. Content-conditional, because when no
+  layer has content the never-empty rule writes no override at all, so
+  nothing displaces even the root file. And `O_NOFOLLOW` itself guards
+  this read, not a deeper one: it refuses a symlink at the final path
+  component only, so any future work that reads through a longer
   repository-controlled path needs full no-symlink path resolution (an
   `openat2`-style no-symlinks mode), not `O_NOFOLLOW` alone. Refusal
   was chosen over the alternative, resolving the link and requiring the
@@ -658,6 +662,22 @@ a different one:
   per-repository warning in the apply output. A quiet skip is exactly the
   silent minority-case failure driver D4 excludes.
 
+  "Deletes nothing" is a promise the write rule alone cannot keep,
+  because the apply pipeline already deletes by record: its managed-file
+  reconciliation removes any recorded path the current apply did not
+  produce, unconditionally. A path that becomes a conflict drops out of
+  the produced set — a clean repository got its override written and
+  recorded, then a committed file arrived at the name (or a `.codex`
+  conflict suppressed the override through the coupling below) — and
+  record-driven cleanup would then delete whatever now sits there,
+  including tracked content. So the rule extends into reconciliation:
+  a conflicted path is retired from the managed-file record *without*
+  the deletion that retirement normally performs — the record entry is
+  dropped, the path untouched — following the idiom the worktree-refresh
+  path already uses to shield a live file from the same cleanup. One
+  ownership authority governs both the write and the delete decision;
+  the conflict verdict overrides the record for both.
+
   Detection is per name, but the two names couple in one direction, and
   the coupling is load-bearing. A `.codex` conflict suppresses the
   override write too: the override's byte budget is declared in the
@@ -678,10 +698,13 @@ a different one:
   because the whole rule rests on it. The `.codex` symlink is recognized
   by its target (the instance payload). Composed files are recognized by
   content, not by records: every composed file niwa writes begins with a
-  generation marker, and a file at the name is niwa's exactly when it is
-  untracked and carries the marker — anything tracked is a conflict
-  regardless of content, and an untracked file without the marker is
-  foreign. The content test is deliberate: the standalone
+  generation marker — a line of the document itself, not a sidecar or a
+  filesystem attribute, so it is agent-visible, counts against the byte
+  budget, and leaves the never-empty rule unambiguous (no content still
+  means no file, never a marker-only one) — and a file at the name is
+  niwa's exactly when it is untracked and carries the marker. Anything
+  tracked is a conflict regardless of content, and an untracked file
+  without the marker is foreign. The content test is deliberate: the standalone
   `niwa worktree apply` path persists no managed-file records today, so
   a record-based check would make that path unable to recognize its own
   prior override on re-apply and refuse the refresh R3 requires. (An
@@ -699,10 +722,19 @@ a different one:
   impersonation path reopening on a repository niwa already trusted. So
   the rule applies at every apply: a `.codex` conflict, whenever it is
   detected, means no niwa-written trust entry for that repository
-  exists afterward. This removal touches only entries niwa itself wrote
-  (its per-repository keys, recognized the same way its file writes
-  are), so the additive-only property over the developer's own keys
-  stands — niwa retracts its own signature, never anyone else's. The
+  exists afterward. Removal is bounded by **record, not shape**: niwa
+  records, in instance state, each trust key it writes — the recording
+  is available because the instance-apply path is the only path that
+  writes them — and removes only keys that record names. Shape cannot
+  be the test here: Codex writes an identically-shaped
+  `[projects."<path>"]` entry when the developer answers the startup
+  trust prompt, which is exactly the prompt this design routes
+  conflicted repositories to, so a shape-based removal would delete the
+  developer's own answer to a question niwa caused to be asked. The
+  file-side generation-marker test has no analogue for a TOML table,
+  which is why the two recognition mechanisms differ. Bounded this way,
+  the additive-only property over the developer's own keys stands —
+  niwa retracts its own signature, never anyone else's. The
   trust decision is left to Codex's own startup prompt, where the
   developer sees exactly what they are being asked to trust. A
   conflicted repository therefore degrades loudly — reported by apply,
@@ -823,7 +855,10 @@ niwa's signature never vouches for a payload it did not write. A
 conflicting `AGENTS.override.md` alone suppresses only the override: the
 link, exclude patterns, and trust entry still materialize, and the
 repository's committed override carries the context slot. Both cases
-modify and delete nothing and are reported per repository. Ownership is
+modify and delete nothing and are reported per repository — and
+"deletes nothing" extends into the pipeline's record-driven cleanup,
+from which conflicted paths are exempted by retiring their record
+entries without the delete (Decision 7). Ownership is
 recognized by the link's target for `.codex` and by the generation
 marker in untracked composed files — a content test, chosen so the
 standalone worktree-apply path, which keeps no managed-file records, can
@@ -979,7 +1014,9 @@ skip-when-absent pattern for agent binaries.
   the file's other content byte-wise (the PRD's criterion makes this
   testable); the only removals niwa ever performs are of its own
   entries, retracting a trust entry when its repository becomes
-  conflicted (Decision 7);
+  conflicted — identified by the record niwa keeps of what it wrote,
+  never by shape, since Codex writes identically-shaped entries when
+  the developer answers its trust prompt (Decision 7);
   *credentials* — the credential and login files are never read or
   written, and preparation succeeds even when they are unreadable (R13);
   *discipline* — atomic temp-file-and-rename replacement so interruption
@@ -1030,11 +1067,13 @@ skip-when-absent pattern for agent binaries.
   by niwa's composer and inlined into agent-visible context; the
   `O_NOFOLLOW` read rule (Decision 2) refuses the inline, and the
   override written without it displaces the symlink from the discovery
-  slot, so Codex's own native read does not ingest the target either —
-  a per-slot protection: it covers the repository root's context slot,
-  while a context symlink committed in a subdirectory keeps its own
-  slot and stays Codex-native (Decision 2 states both boundary limits).
-  The R13 never-reads-credentials claim rests on that refusal. Neither
+  slot, so Codex's own native read does not ingest the target either.
+  The refusal is the unconditional defense; the displacement is a
+  per-directory, content-conditional reinforcement — it covers the
+  repository root's slot only when workspace content exists to compose,
+  while a context symlink in a subdirectory keeps its own slot and
+  stays Codex-native (Decision 2 states the bounds). The R13
+  never-reads-credentials claim rests on the refusal. Neither
   requires a hostile actor — a careless upstream adopting Codex's own
   project-layer convention triggers the first — which is why both are
   handled by detection and loud refusal rather than by assuming good
