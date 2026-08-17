@@ -4,6 +4,7 @@ package functional
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -16,10 +17,70 @@ type stateKeyType struct{}
 
 var stateKey = stateKeyType{}
 
+// processSandboxRoot is the one directory this test process is allowed to
+// write in. TestMain allocates it under the system temp dir and every scenario
+// sandbox is a child of it, so nothing the suite does can touch the checkout
+// it was built from. The git fixture helpers refuse to run outside it; see
+// gitfixture_test.go.
+var processSandboxRoot string
+
+// TestMain allocates the process-wide sandbox before any scenario runs and
+// tears it down afterwards. A fresh MkdirTemp per process is what makes two
+// concurrent runs safe: neither can see, let alone delete, the other's files.
+func TestMain(m *testing.M) {
+	root, err := os.MkdirTemp("", "niwa-func-")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "allocating functional test sandbox: %v\n", err)
+		os.Exit(1)
+	}
+	// Resolve symlinks once, here. The sandbox bounds check compares paths
+	// textually and GIT_CEILING_DIRECTORIES needs a real path, and on some
+	// systems the temp dir is reached through a symlink.
+	if resolved, rerr := filepath.EvalSymlinks(root); rerr == nil {
+		root = resolved
+	}
+	if err := checkSandboxIsOutsideAnyRepo(root); err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
+		_ = os.RemoveAll(root)
+		os.Exit(1)
+	}
+	processSandboxRoot = root
+
+	code := m.Run()
+
+	if os.Getenv("NIWA_TEST_KEEP_SANDBOX") != "" {
+		fmt.Fprintf(os.Stderr, "NIWA_TEST_KEEP_SANDBOX set; sandbox kept at %s\n", root)
+	} else if err := os.RemoveAll(root); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: removing sandbox %s: %v\n", root, err)
+	}
+	os.Exit(code)
+}
+
+// checkSandboxIsOutsideAnyRepo fails the run if any ancestor of root is a git
+// repository. Nothing today can trip it -- MkdirTemp("") lands in the system
+// temp dir. It's here for the change that someday re-parents the sandbox back
+// under the checkout "just for debugging": the fixture runs real `git add` and
+// `git push`, so a sandbox inside a repository is how a test suite ends up
+// committing someone's working tree.
+func checkSandboxIsOutsideAnyRepo(root string) error {
+	for dir := root; ; {
+		if _, err := os.Lstat(filepath.Join(dir, ".git")); err == nil {
+			return fmt.Errorf("functional test sandbox %s sits inside the git repository at %s; "+
+				"the suite runs real git commands and must never be rooted in a repository", root, dir)
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return nil
+		}
+		dir = parent
+	}
+}
+
 // testState holds per-scenario state. The Before hook resets it so each
 // scenario starts from a clean sandbox (fresh $HOME, fresh workspace root).
 type testState struct {
 	binPath         string             // absolute path to the niwa test binary
+	sandbox         string             // this scenario's sandbox dir (parent of homeDir/tmpDir/workspaceRoot)
 	homeDir         string             // sandboxed $HOME for this scenario (holds .niwa/, .bashrc, etc.)
 	tmpDir          string             // scenario-scoped $TMPDIR (writes landed here stay isolated)
 	workspaceRoot   string             // sandboxed directory where workspaces live
@@ -110,14 +171,15 @@ func TestFeatures(t *testing.T) {
 
 func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 	ctx.Before(func(ctx context.Context, sc *godog.Scenario) (context.Context, error) {
-		// Each scenario gets its own sandbox under the binary's directory.
-		// Using t.TempDir() would work but placing it alongside the binary
-		// makes test artifacts easier to inspect on failure.
-		repoRoot := filepath.Dir(binPath)
-		sandbox := filepath.Join(repoRoot, ".niwa-test")
-		_ = os.RemoveAll(sandbox)
-		if err := os.MkdirAll(sandbox, 0o755); err != nil {
-			return ctx, err
+		// Each scenario gets a fresh, uniquely named sandbox under the
+		// process-wide root. MkdirTemp rather than wiping a fixed path: a
+		// fixed path is shared with every other process in the checkout, and
+		// wiping it deletes whatever a concurrent run has live there. Set
+		// NIWA_TEST_KEEP_SANDBOX to keep these around for inspection -- the
+		// After hook prints the path of any scenario that failed.
+		sandbox, err := os.MkdirTemp(processSandboxRoot, "scenario-*")
+		if err != nil {
+			return ctx, fmt.Errorf("allocating scenario sandbox: %w", err)
 		}
 		homeDir := filepath.Join(sandbox, "home")
 		tmpDir := filepath.Join(sandbox, "tmp")
@@ -140,14 +202,13 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 
 		// workspaceRoot must live outside any existing niwa instance tree so that
 		// niwa init's CheckInitConflicts check does not fire when the developer's
-		// machine has a niwa workspace ancestor covering the repo root. Using the
-		// system temp dir guarantees a clean parent regardless of repo location.
-		wsParent := filepath.Join(os.TempDir(), "niwa-test-workspaces")
-		_ = os.RemoveAll(wsParent)
-		if err := os.MkdirAll(wsParent, 0o755); err != nil {
+		// machine has a niwa workspace ancestor covering the repo root. The
+		// process-wide temp root already guarantees a clean parent, so this can
+		// just be a child of the scenario sandbox.
+		workspaceRoot := filepath.Join(sandbox, "workspace-root")
+		if err := os.MkdirAll(workspaceRoot, 0o755); err != nil {
 			return ctx, err
 		}
-		workspaceRoot := wsParent
 
 		gitServerDir := filepath.Join(sandbox, "gitserver")
 		gs, err := newLocalGitServer(gitServerDir)
@@ -157,6 +218,7 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 
 		state := &testState{
 			binPath:       binPath,
+			sandbox:       sandbox,
 			homeDir:       homeDir,
 			tmpDir:        tmpDir,
 			workspaceRoot: workspaceRoot,
@@ -173,6 +235,9 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 		s := getState(ctx)
 		if s == nil {
 			return ctx, nil
+		}
+		if scenarioErr != nil && os.Getenv("NIWA_TEST_KEEP_SANDBOX") != "" {
+			fmt.Fprintf(os.Stderr, "scenario %q failed; its sandbox is at %s\n", sc.Name, s.sandbox)
 		}
 		if s.githubFake != nil {
 			s.githubFake.Close()

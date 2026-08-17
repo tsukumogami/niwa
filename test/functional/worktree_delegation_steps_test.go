@@ -275,7 +275,7 @@ func noWorktreeIsRegisteredForRepo(ctx context.Context, groupRepo, instance stri
 		return ctx, fmt.Errorf("no test state")
 	}
 	repoPath := filepath.Join(s.workspaceRoot, instance, groupRepo)
-	out, err := exec.Command("git", "-C", repoPath, "worktree", "list").CombinedOutput()
+	out, err := fixtureGit(repoPath, "worktree", "list")
 	if err != nil {
 		return ctx, fmt.Errorf("git worktree list in %s: %w\n%s", repoPath, err, out)
 	}

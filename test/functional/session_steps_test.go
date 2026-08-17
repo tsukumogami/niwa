@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -692,10 +691,10 @@ func findRepoPathInInstance(instanceRoot, repoName string) (string, error) {
 }
 
 // runGitInDir runs a git command in dir and returns combined stdout/stderr.
+// It routes through fixtureGit so the call is bounded to the test sandbox --
+// see gitfixture_test.go for why that matters.
 func runGitInDir(dir string, args ...string) (string, error) {
-	cmd := exec.Command("git", args...)
-	cmd.Dir = dir
-	out, err := cmd.CombinedOutput()
+	out, err := fixtureGit(dir, args...)
 	return string(out), err
 }
 
