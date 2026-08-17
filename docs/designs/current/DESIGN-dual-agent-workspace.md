@@ -671,23 +671,30 @@ a different one:
   conflict suppressed the override through the coupling below) — and
   record-driven cleanup would then delete whatever now sits there,
   including tracked content. So the rule extends into reconciliation,
-  and the mechanism is an **explicit exemption the cleanup consults**:
-  the apply hands its conflict verdicts to the managed-file cleanup,
-  which skips every path the current apply declared conflicted before
-  removing recorded paths the apply did not produce. The conflicted
+  and the mechanism is **an explicit exemption, which requires a named
+  change to the cleanup**: the apply hands its per-run conflict
+  verdicts to the managed-file cleanup as an input, and the cleanup
+  consults that conflicted-path set and skips those paths before
+  removing recorded paths the apply did not produce. The cleanup change
+  is not optional decoration — today the cleanup tests only membership
+  in the produced set, so absence from that set is the deletion
+  trigger, and dropping a conflicted path's entry *without* teaching
+  the cleanup about conflicts is precisely the deletion this paragraph
+  exists to prevent. An implementer must build the consultation, not
+  assume reconciliation already knows. With it in place, the conflicted
   path leaves the record — the state stays truthful about what niwa no
-  longer owns — and the file on disk is untouched; if the conflict
+  longer owns — the file on disk is untouched, and if the conflict
   later clears, the marker test recognizes the fresh write. The
-  alternative was forward-carrying the prior entry into the produced
-  set, the idiom the worktree-refresh path uses to shield a
+  rejected alternative was forward-carrying the prior entry into the
+  produced set, the idiom the worktree-refresh path uses to shield a
   skipped-but-live worktree's files from this same cleanup (it retains
   the entries so the cleanup sees the path as still produced). That
-  needs no cleanup change, but it keeps recording niwa ownership of a
-  path niwa just declared foreign, under a content hash that no longer
-  describes what sits there; the exemption keeps the record honest at
-  the cost of one explicit input to the cleanup. Either way, one
-  ownership authority governs both the write and the delete decision:
-  the conflict verdict overrides the record for both.
+  needs no cleanup change, but it keeps the record claiming niwa
+  ownership of a path niwa just declared foreign, under a content hash
+  that no longer describes what sits there — a stale claim every later
+  reader of the state file must know to disbelieve. One ownership
+  authority governs both the write and the delete decision: the
+  conflict verdict, which the writers and the cleanup both consult.
 
   Detection is per name, but the two names couple in one direction, and
   the coupling is load-bearing. A `.codex` conflict suppresses the
@@ -880,9 +887,9 @@ link, exclude patterns, and trust entry still materialize, and the
 repository's committed override carries the context slot. Both cases
 modify and delete nothing and are reported per repository — and
 "deletes nothing" extends into the pipeline's record-driven cleanup,
-which consults the apply's conflict verdicts and skips conflicted paths
-before deleting; their record entries are dropped and the paths left
-untouched (Decision 7). Ownership is
+via a change the cleanup itself needs: it consults the apply's per-run
+conflicted-path set and skips those paths before deleting; the entries
+leave the record and the paths stay untouched (Decision 7). Ownership is
 recognized by the link's target for `.codex` and by the generation
 marker in untracked composed files — a content test, chosen so the
 standalone worktree-apply path, which keeps no managed-file records, can
