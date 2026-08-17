@@ -20,6 +20,10 @@ chain_skipped: []
 consolidation_judgments: []
 worktree_rebases: []
 worktree_divergences: []
+parent_orchestration:
+  child: brief
+  invoked_at: 2026-08-17T03:25:00Z
+  pre_invocation_sha: 0ebcec5
 ---
 
 # /scope state: dual-agent-workspace
