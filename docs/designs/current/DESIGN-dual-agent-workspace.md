@@ -670,12 +670,23 @@ a different one:
   recorded, then a committed file arrived at the name (or a `.codex`
   conflict suppressed the override through the coupling below) — and
   record-driven cleanup would then delete whatever now sits there,
-  including tracked content. So the rule extends into reconciliation:
-  a conflicted path is retired from the managed-file record *without*
-  the deletion that retirement normally performs — the record entry is
-  dropped, the path untouched — following the idiom the worktree-refresh
-  path already uses to shield a live file from the same cleanup. One
-  ownership authority governs both the write and the delete decision;
+  including tracked content. So the rule extends into reconciliation,
+  and the mechanism is an **explicit exemption the cleanup consults**:
+  the apply hands its conflict verdicts to the managed-file cleanup,
+  which skips every path the current apply declared conflicted before
+  removing recorded paths the apply did not produce. The conflicted
+  path leaves the record — the state stays truthful about what niwa no
+  longer owns — and the file on disk is untouched; if the conflict
+  later clears, the marker test recognizes the fresh write. The
+  alternative was forward-carrying the prior entry into the produced
+  set, the idiom the worktree-refresh path uses to shield a
+  skipped-but-live worktree's files from this same cleanup (it retains
+  the entries so the cleanup sees the path as still produced). That
+  needs no cleanup change, but it keeps recording niwa ownership of a
+  path niwa just declared foreign, under a content hash that no longer
+  describes what sits there; the exemption keeps the record honest at
+  the cost of one explicit input to the cleanup. Either way, one
+  ownership authority governs both the write and the delete decision:
   the conflict verdict overrides the record for both.
 
   Detection is per name, but the two names couple in one direction, and
@@ -720,9 +731,21 @@ a different one:
   its entry, and later acquires a `.codex` of its own would keep a stale
   entry vouching for a payload niwa no longer writes — the same
   impersonation path reopening on a repository niwa already trusted. So
-  the rule applies at every apply: a `.codex` conflict, whenever it is
-  detected, means no niwa-written trust entry for that repository
-  exists afterward. Removal is bounded by **record, not shape**: niwa
+  the retraction runs on every apply, and its guarantee is stated
+  carefully: niwa removes the entry its record names, **clears the
+  record entry with the removal**, and never re-adds an entry while the
+  conflict stands. The guarantee is never-reinstated, not
+  always-absent. After the removal, the developer may answer Codex's
+  own prompt, and Codex writes the same key back — that answer is
+  theirs, sits in no niwa record, and later applies leave it alone.
+  Clearing the record with the removal is what makes the two rules
+  compose: a record left in place would license the next apply to
+  delete the developer's answer at that key, the exact harm the record
+  test exists to prevent, arriving by another route. Record-file
+  disagreement is safe in the direction the mechanism can produce: a
+  recorded key already absent from the file is a no-op, and an
+  unrecorded key present in the file is left alone. Removal is bounded
+  by **record, not shape**: niwa
   records, in instance state, each trust key it writes — the recording
   is available because the instance-apply path is the only path that
   writes them — and removes only keys that record names. Shape cannot
@@ -857,8 +880,9 @@ link, exclude patterns, and trust entry still materialize, and the
 repository's committed override carries the context slot. Both cases
 modify and delete nothing and are reported per repository — and
 "deletes nothing" extends into the pipeline's record-driven cleanup,
-from which conflicted paths are exempted by retiring their record
-entries without the delete (Decision 7). Ownership is
+which consults the apply's conflict verdicts and skips conflicted paths
+before deleting; their record entries are dropped and the paths left
+untouched (Decision 7). Ownership is
 recognized by the link's target for `.codex` and by the generation
 marker in untracked composed files — a content test, chosen so the
 standalone worktree-apply path, which keeps no managed-file records, can
@@ -1027,7 +1051,11 @@ skip-when-absent pattern for agent binaries.
   instance is deleted is not fully inert: it trusts whatever later lands
   at that path. The paths are deep inside directories niwa manages, so
   the practical exposure is narrow, but removal on instance destruction
-  belongs in the lifecycle as planned work rather than being waved off.
+  belongs in the lifecycle as planned work rather than being waved off
+  — with one ordering constraint now that removal is record-bounded:
+  the trust-key record lives in instance state, the sole authority for
+  what may be removed, so destruction must read the record before the
+  instance directory goes.
 
 - **Trusting a repository is a real grant, and its blast radius should be
   understood.** A trust entry does not merely silence a prompt: it
