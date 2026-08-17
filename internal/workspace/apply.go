@@ -1440,6 +1440,12 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		}
 	}
 
+	// codexComposed collects every Codex-facing context document this apply
+	// writes. The payload's byte budget is sized from the largest of them
+	// (see InstallCodexPayload), so they are gathered as they are produced
+	// rather than filtered back out of writtenFiles by filename.
+	var codexComposed []string
+
 	// Step 4: Install the instance-level context file for every agent
 	// (Decision 7A). The same source lands as CLAUDE.md and AGENTS.md side by
 	// side; a.Agent does not gate it, because preparation is unconditional.
@@ -1449,6 +1455,9 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 			return nil, fmt.Errorf("installing workspace content for %s: %w", ag, wsErr)
 		}
 		writtenFiles = append(writtenFiles, wsFiles...)
+		if ag == agent.AgentCodex {
+			codexComposed = append(codexComposed, wsFiles...)
+		}
 	}
 
 	// Build repo name -> on-disk path index (used by marketplace resolution
@@ -1517,6 +1526,7 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 			return nil, fmt.Errorf("composing group Codex context for %q: %w", cr.Group, err)
 		}
 		writtenFiles = append(writtenFiles, groupCodexFiles...)
+		codexComposed = append(codexComposed, groupCodexFiles...)
 	}
 
 	// Step 5c: Install global CLAUDE.md content if global config is active.
@@ -1563,7 +1573,30 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 			allWarnings = append(allWarnings, fmt.Sprintf("repo %q: %s", cr.Repo.Name, codexResult.Refusal))
 		}
 		writtenFiles = append(writtenFiles, codexResult.WrittenFiles...)
+		codexComposed = append(codexComposed, codexResult.WrittenFiles...)
 	}
+
+	// Step 6c: the instance payload -- the general config declaring the context
+	// budget, and one symlink per configured plugin pointing at that plugin's
+	// whole installed tree. It runs after the composed documents above because
+	// their sizes are what the budget is derived from: the chain shares one
+	// counter and Codex truncates it in silence.
+	repoDirs := make([]string, 0, len(classified))
+	for _, cr := range classified {
+		repoDirs = append(repoDirs, filepath.Join(instanceRoot, cr.Group, cr.Repo.Name))
+	}
+	payload, err := InstallCodexPayload(effectiveCfg, instanceRoot, repoIndex, CodexBudgetInputs{
+		ComposedFiles: codexComposed,
+		RepoDirs:      repoDirs,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("writing Codex payload: %w", err)
+	}
+	writtenFiles = append(writtenFiles, payload.WrittenFiles...)
+	for _, m := range payload.MissingRoots {
+		allWarnings = append(allWarnings, m.String())
+	}
+	allWarnings = append(allWarnings, payload.Warnings...)
 
 	// Step 6.4: Decide the worktree-delegation integration ONCE per apply
 	// (design Decisions 4 & 6), then thread it into every repo's
