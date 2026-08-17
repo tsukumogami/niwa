@@ -2,9 +2,9 @@
 topic: dual-agent-workspace
 chain_started: 2026-08-17T03:20:00Z
 last_updated: 2026-08-17T03:20:00Z
-phase_pointer: phase-2
-exit: UNSET
-exit_artifacts: []
+phase_pointer: phase-4
+exit: full-run
+exit_artifacts: [docs/plans/PLAN-dual-agent-workspace.md]
 planned_chain: [brief, prd, design, plan]
 design_roster_shape:
   p1_architectural_alternatives: fires
@@ -15,7 +15,7 @@ execution_mode: auto
 max_rounds: 5
 coordinated: false
 consumed_handoff: wip/scope_dual-agent-workspace_handoff.md
-chain_ran: [brief, prd, design]
+chain_ran: [brief, prd, design, plan]
 chain_skipped: []
 child_snapshots:
   brief:
@@ -33,13 +33,9 @@ child_snapshots:
       widened; round 3 testability PASS. All three PASS.
     requirements: 14
     acceptance_criteria: 19
-consolidation_judgments: []
+consolidation_judgments: [brief-prd keep, prd-design keep, design-plan keep]
 worktree_rebases: []
 worktree_divergences: []
-parent_orchestration:
-  child: plan
-  invoked_at: 2026-08-17T04:40:00Z
-  pre_invocation_sha: bf05c5a
 ---
 
 # /scope state: dual-agent-workspace
@@ -106,3 +102,32 @@ argument and a third independent one showed drop-plus-exemption to be correct.
 
 The prior design at docs/designs/current/DESIGN-interactive-codex-session.md
 carries a forward pointer naming what this design supersedes.
+
+## Phase 2: consolidation judgments
+
+Three hops, three `keep` verdicts. The chain's cite-not-restate rules were
+enforced at each hop by the juries, so every upstream holds material its
+downstream does not carry:
+
+- **brief -> prd: keep.** The BRIEF holds the framing, four user journeys, and
+  the scope boundary. The PRD cites that framing and states its own problem, but
+  carries neither the journeys nor the in/out boundary; folding would lose both.
+- **prd -> design: keep.** The PRD holds 14 requirements and 19 acceptance
+  criteria, which the DESIGN cites by number rather than restating. The criteria
+  are the contract the implementation is judged against and outlive the design.
+- **design -> plan: keep.** The DESIGN holds seven decisions with their rejected
+  alternatives and the measured evidence that rejected them, several of which
+  were reversed mid-review. The PLAN cites decisions and does not re-argue them;
+  folding would discard the reasoning a future reader needs to know why a
+  rejected option is rejected.
+
+## Phase 3: exit
+
+exit: full-run
+exit_artifacts: docs/plans/PLAN-dual-agent-workspace.md
+
+The chain produced four durable artifacts, all validator-clean:
+docs/briefs/BRIEF-dual-agent-workspace.md (Accepted),
+docs/prds/PRD-dual-agent-workspace.md (Accepted),
+docs/designs/current/DESIGN-dual-agent-workspace.md (Accepted), and
+docs/plans/PLAN-dual-agent-workspace.md (Draft, single-pr, 12 issues).
