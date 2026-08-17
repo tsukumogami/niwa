@@ -1,6 +1,6 @@
 ---
 schema: prd/v1
-status: Draft
+status: Accepted
 problem: |
   niwa prepares a workspace instance for exactly one coding agent, chosen at
   creation time. Preparing for Codex replaces the Claude context at the levels
@@ -31,7 +31,7 @@ motivating_context: |
 
 ## Status
 
-Draft
+Accepted
 
 The upstream BRIEF (docs/briefs/BRIEF-dual-agent-workspace.md, Accepted) owns
 the framing: problem, outcome, journeys, and scope boundary. This PRD owns the
@@ -66,18 +66,20 @@ which agent gets used.
 
 ## Goals
 
-- A prepared instance serves both agents, always. There's no agent selection
-  at creation time and nothing to configure per instance; switching agents is
-  closing one and typing the other command in the same directory.
-- For Claude Code, nothing changes: the developer runs `claude` and gets
-  exactly the context and skills they get today.
-- For Codex, the instance stops being second-class: a session started anywhere
-  inside the instance sees the layered workspace context for where it's
-  standing, at every layer niwa composes for Claude, plus the same skills, and
-  can do real work immediately.
-- The instance stays safe to hold: cloned repositories stay git-clean, and the
-  developer's own Codex installation, configuration defaults, and credentials
-  are never touched.
+The upstream BRIEF's User Outcome section carries the full picture of what a
+developer experiences; the goals below state what this PRD holds the
+implementation to.
+
+- One preparation serves both agents: `niwa create` and `niwa apply` take no
+  agent choice and leave every instance ready for whichever agent the
+  developer launches.
+- The Claude side is a strict invariant, not a goal to approximate: what a
+  Claude session sees is byte-for-byte what it sees today.
+- The Codex side reaches parity where it was second-class: every context
+  layer niwa composes, the same skills, sessions that work from any directory
+  and can act immediately.
+- The safety properties hold throughout: cloned repositories stay git-clean,
+  and the developer's own Codex setup stays theirs.
 
 ## User Stories
 
@@ -119,7 +121,8 @@ carries the full narratives.
   Codex-facing materialization the same way they maintain Claude's: creating
   an instance, re-applying it, and creating or applying a worktree each leave
   both agents' materializations current, with no Codex-specific command or
-  extra step.
+  extra step. "Current" includes refresh: when the workspace's configured
+  content changes, a re-apply delivers the new content, not yesterday's.
 
 ### Functional: layered context for Codex
 
@@ -137,12 +140,15 @@ carries the full narratives.
 - **R6.** When a cloned repository ships its own agent-facing context file, a
   Codex session in that repository SHALL receive both the workspace's context
   and the repository's own content. niwa SHALL NOT modify, replace, or
-  suppress the repository's file.
+  suppress the repository's file. This holds in the degenerate case too: when
+  the workspace has nothing to say at a layer, the repository's own content
+  still reaches the session undiminished.
 
-- **R7.** The context for the repository or worktree the session is standing
-  in SHALL reach the session in full. Context delivered from an outer layer
-  (instance or group) SHALL NOT crowd out, truncate, or displace the innermost
-  layer's content.
+- **R7.** Every context layer present for a location SHALL reach the session
+  whole; no layer may arrive truncated. This requirement names the innermost
+  layer, the repository or worktree the session is standing in, because it is
+  the one at greatest risk: context delivered from an outer layer (instance or
+  group) SHALL NOT crowd out, truncate, or displace it.
 
 ### Functional: skills
 
@@ -155,9 +161,12 @@ carries the full narratives.
 - **R9.** A Codex session started in a prepared repository SHALL be able to
   write files immediately, with no per-repository setup step by the developer.
 
-- **R10.** An interactive Codex session SHALL start in a prepared instance
-  without prompting the developer for trust, review, or approval of anything
-  niwa materialized.
+- **R10.** An interactive Codex session SHALL start in a prepared repository
+  without any trust, review, or approval prompt: nothing niwa materializes
+  introduces one, and the preparation is sufficient that Codex raises none of
+  its own for the prepared directories. Prompts that belong to the developer's
+  own Codex setup, such as a first-run login, are outside niwa's reach (R13)
+  and outside this requirement.
 
 ### Functional: clean repositories
 
@@ -173,7 +182,10 @@ carries the full narratives.
   configuration defaults, SHALL NOT change how Codex behaves outside
   niwa-managed instances, and SHALL never read or write the developer's Codex
   credentials or login state. The developer authenticates Codex themselves,
-  once, however they choose.
+  once, however they choose. Scoped, additive entries whose effect is confined
+  to paths inside niwa-managed instances are consistent with this requirement;
+  anything global, destructive, or touching the developer's own settings is
+  not.
 
 ### Non-functional: compatibility
 
@@ -186,78 +198,127 @@ carries the full narratives.
 
 ## Acceptance Criteria
 
+Two conventions apply throughout. First, criteria phrased as what a session
+"sees" or "receives" are decided offline, against the single context file
+Codex's first-match rule selects for the working directory: it exists, is
+non-empty after stripping whitespace, carries a distinct sentinel from each
+layer that should be present, and is not shadowed by a higher-precedence
+candidate. Second, checks that need a live Codex session gate on `codex`
+being on PATH and skip rather than fail when it's absent, following the
+repo's existing pattern for `claude`-gated scenarios; a live check is never
+the sole coverage for a mechanism, except where noted for the interactive
+start, where a live check carries information nothing else can.
+
 - [ ] After `niwa create` and `niwa apply` on a workspace with no
-      agent-related configuration, a Codex session started at the instance
-      root sees the instance-level workspace context (R1, R4).
-- [ ] The files, content, and settings a Claude session sees in a prepared
-      instance are byte-for-byte identical before and after this change, and
-      the existing test suite passes unmodified except for tests that assert
-      the old exclusivity (R2).
-- [ ] A Codex session started in a directory nested at least three levels deep
-      inside a cloned repository sees the instance, group, and repository
-      context for that location, from a plain shell with no niwa-set
-      environment (R4, R5).
-- [ ] A Codex session started inside a worktree created by `niwa worktree`
-      sees the workspace context plus the worktree's framing: the repository
-      it belongs to and its branch (R3, R4, R5).
+      agent-related configuration, the context Codex selects at the instance
+      root carries the instance-level workspace content (R1, R4).
+- [ ] The set of paths niwa materializes for Claude today — the `CLAUDE.md`
+      tree, `.claude/`, the settings file, and the skills tree — is
+      content-identical between a pre-change and post-change apply of the
+      same workspace config. The only tests modified are the exclusivity
+      assertions in `test/functional/features/codex-agent.feature` and the
+      unit tests in `internal/workspace/content_test.go` and
+      `internal/workspace/root_materializer_test.go` that assert the other
+      agent's file is absent; no other test is modified or deleted (R2).
+- [ ] A Codex session started at least three directories deep inside a cloned
+      repository, from a shell with no `NIWA_*` variables and no `CODEX_HOME`
+      set, sees the instance, group, and repository context for that
+      location; with the fixture repository shipping a committed context file
+      in an intermediate directory, that file's content is delivered too, so
+      the check exercises per-directory selection rather than a repo-root
+      read (R4, R5).
+- [ ] A Codex session in a worktree created by `niwa worktree` receives a
+      sentinel that appears only in the instance-level content, plus the
+      worktree's own framing (its repository and branch) — so a collapse to
+      current-directory-only discovery fails the check (R3, R4, R5).
 - [ ] In a repository that ships its own committed agent-facing context file,
-      a Codex session receives both the workspace context and the
-      repository's own content, and the committed file is byte-identical
-      after `niwa apply` (R6, R12).
-- [ ] A marker placed at the end of the repository-level context content is
-      visible to a Codex session started in that repository, even when the
-      instance- and group-level context is large (R7).
-- [ ] Every skill available to a Claude session in the instance is available
-      to a Codex session under the same name, and a sampled skill's content
-      matches what the Claude session sees exactly (R8).
+      the single context file Codex selects for that directory carries both
+      the workspace context and the repository's own content, no
+      higher-precedence candidate shadows it, and the committed file is
+      byte-identical after `niwa apply` (R6, R12).
+- [ ] In a workspace that configures no repository-level context content, a
+      repository shipping its own committed context file still delivers that
+      file's content to a session: niwa writes no empty or whitespace-only
+      file that would claim the directory's single context slot and suppress
+      the repository's own (R6).
+- [ ] With instance- and group-level context together exceeding 32768 bytes
+      — the documented default of Codex's context budget, which is shared
+      across the whole chain and consumed outermost-first — a marker at the
+      end of the repository-level context still reaches the session. Offline:
+      the context budget niwa's materialization declares covers at least the
+      byte size of the full composed chain on disk. Live, gated: a session
+      started in that repository reports the marker (R7).
+- [ ] Every file niwa delivers for skills is byte-identical to its source,
+      with no file added or omitted; the delivered root carries the plugin
+      manifest and every `references/` and `scripts/` directory the source
+      has; and every skill a Claude session sees resolves for Codex under the
+      same namespace and name (R8).
 - [ ] A Codex session started in a freshly prepared repository can create a
       file there on its first attempt, with no setup command run by the
-      developer beforehand (R9).
-- [ ] An interactive Codex session starts in a prepared repository, from the
-      repository root and from a nested directory, without any trust or
-      review prompt (R10).
-- [ ] `git status` in every cloned repository of a prepared instance reports
-      a clean working tree, immediately after `niwa apply` and again after a
-      Codex session has run there (R11).
-- [ ] `niwa create` and `niwa apply` complete without reading or writing the
-      developer's Codex credential or login files, verified in a sandboxed
-      home with sentinel files in place (R13).
+      developer beforehand (live, gated) (R9).
+- [ ] After `niwa apply`, the developer's Codex config carries exactly one
+      per-project trust entry for each cloned repository and each
+      niwa-managed worktree, each keyed by a path that resolves to that
+      tree's actual root — a present-but-miskeyed entry fails — and after
+      three successive applies the count is unchanged (R9, R13).
+- [ ] An interactive Codex session started in a prepared repository, from the
+      repository root and from a nested directory, reaches its ready state
+      under a PTY with no input supplied and shows no trust, review, or
+      approval prompt (live, gated). Offline: niwa has written no hook
+      definitions and no hook-state entries anywhere (R10).
+- [ ] `git status` reports a clean working tree in every cloned repository
+      and every niwa-managed worktree of a prepared instance, immediately
+      after `niwa apply` and again, live and gated, after a Codex session has
+      run there (R11, R12).
+- [ ] The developer's Codex credential and login files are byte-identical and
+      mtime-unchanged after `niwa create` and `niwa apply`; and with the
+      credential file made unreadable (mode `000`) in a sandboxed home, both
+      commands still exit zero (R13).
+- [ ] Given a pre-existing developer Codex config carrying the developer's
+      own settings, after `niwa create` and `niwa apply` that file differs
+      from its prior content only by the addition of per-project entries
+      whose path keys all resolve inside a niwa instance; no pre-existing key
+      is removed, reordered, or altered, and no global key that changes Codex
+      behavior outside niwa instances is written — so a repository outside
+      any instance discovers its own context and trust state exactly as
+      before preparation (R13).
 - [ ] `niwa apply` on a workspace whose config declares the per-workspace
-      agent setting succeeds with no migration step, and the resulting
-      instance serves both agents per the criteria above (R14).
-- [ ] `niwa apply` on a workspace that has never declared any agent setting
-      also produces an instance serving both agents (R1, R14).
-- [ ] Re-running `niwa apply` on an already-prepared instance leaves all of
-      the above criteria still passing (R3).
+      agent setting succeeds with no migration step — exit zero, no prompt,
+      no error — and the resulting instance meets the criteria above (R14).
+- [ ] In a workspace declaring the per-workspace agent setting as Codex, a
+      niwa-launched session still selects Codex, and `niwa dispatch` still
+      refuses (R14).
+- [ ] `niwa apply` on a workspace whose config predates the agent setting
+      entirely also produces an instance serving both agents (R1, R14).
+- [ ] Re-running `niwa apply` on an already-prepared instance leaves every
+      criterion above still passing, and append-shaped state does not
+      accumulate: after three applies, niwa-managed blocks and per-project
+      entries each appear exactly once (R3, R13).
+- [ ] After changing the workspace's configured context content and
+      re-running `niwa apply`, the new content is present in the Codex-facing
+      context and the previous content is absent; the same holds for a
+      worktree after `niwa worktree apply` (R3).
 
 ## Out of Scope
 
-Each exclusion is settled in the upstream BRIEF's Scope Boundary; the reasons
-are summarized here and detailed there.
+All eight exclusions are settled in the upstream BRIEF's Scope Boundary,
+which carries the full reasoning. In one line each:
 
-- **Codex background dispatch.** `niwa dispatch` remains Claude-only and its
-  existing refusal for Codex stands. Making dispatch agent-agnostic is
-  separate downstream work.
+- **Codex background dispatch.** `niwa dispatch` stays Claude-only; its
+  existing refusal stands.
 - **Ephemeral session provisioning for Codex.** The per-session instance
-  lifecycle (provisioning hooks, the reaper and its liveness proxy) is not
-  extended to Codex sessions.
-- **Codex credentials and authentication.** niwa binds no API key for Codex
-  and never touches the developer's Codex login (see Decisions and
-  Trade-offs). Re-homing the existing secret-binding table is tracked
-  separately as niwa#228.
-- **Codex hook injection.** niwa injects hooks for Claude today; the Codex
-  side ships none (see Decisions and Trade-offs).
-- **Renaming or re-homing the existing config tables.** This feature changes
-  behavior, not the config schema's shape.
+  lifecycle isn't extended to Codex sessions.
+- **Codex credentials and authentication.** No API key bound, no login
+  touched (see Decisions and Trade-offs); the secret-binding table is tracked
+  as niwa#228.
+- **Codex hook injection.** None shipped (see Decisions and Trade-offs).
+- **Renaming or re-homing the existing config tables.** Behavior changes;
+  the schema's shape doesn't.
 - **Changes to the workflow-skills plugin or the orchestration engine.**
-  Skills are delivered as they exist; nothing is rewritten for Codex. Named
-  subagent types don't exist under Codex and this feature doesn't add them.
-- **Changes to how Claude Code sees the workspace.** Claude's context,
-  settings, and skills are untouched (R2).
-- **The cross-repo context gap.** An agent that starts in one repository and
-  crosses into another still doesn't pick up the second repo's context
-  mid-session; that's tracked separately as niwa#247. This feature improves
-  the Codex side incidentally but doesn't claim to close it.
+  Skills are delivered as they exist; no Codex subagent types.
+- **Changes to how Claude Code sees the workspace.** Untouched (R2).
+- **The cross-repo context gap.** Tracked as niwa#247; improved
+  incidentally, not closed.
 
 ## Decisions and Trade-offs
 
