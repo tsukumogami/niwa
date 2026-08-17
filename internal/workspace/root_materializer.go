@@ -150,6 +150,16 @@ func MaterializeWorkspaceRoot(cfg *config.WorkspaceConfig, workspaceRoot string,
 	}
 	written = append(written, skillPaths...)
 
+	// The standing agreement for dispatched workers. Written here rather than
+	// distributed through [root.files] because it must ship WITH niwa: a
+	// workspace-authored copy cannot receive a correction, and the agreement is
+	// the only artifact a dispatched worker is guaranteed to read.
+	commonPath, err := writeDispatchBriefCommon(workspaceRoot)
+	if err != nil {
+		return nil, err
+	}
+	written = append(written, commonPath)
+
 	// Distribute [root.files] verbatim (no .local) to the workspace root.
 	// Unlike the instance root, the workspace root has no managed-file state
 	// store, so these writes are overwrite-idempotent like the other
@@ -176,49 +186,100 @@ func MaterializeWorkspaceRoot(cfg *config.WorkspaceConfig, workspaceRoot string,
 }
 
 // writeRootSkills materializes the embedded rootskills tree as project skills
-// under <workspaceRoot>/.claude/skills/. For each rootskills/<name>/SKILL.md it
-// writes <workspaceRoot>/.claude/skills/<name>/SKILL.md. Project skills are
-// loaded by Claude Code from the cwd's .claude/skills tree regardless of plugin
-// enablement, so installing them here makes the skill available at the
-// workspace root without depending on plugin loading.
+// under <workspaceRoot>/.claude/skills/. Project skills are loaded by Claude
+// Code from the cwd's .claude/skills tree regardless of plugin enablement, so
+// installing them here makes the skill available at the workspace root without
+// depending on plugin loading.
 //
-// The walk is generic: every <name>/SKILL.md under the embedded tree is picked
-// up, so adding a new root skill needs no change here. The writes are plain
-// overwrites — the content is static, so re-running is idempotent. Returns the
-// list of written absolute paths.
+// The unit is the skill DIRECTORY, not a single manifest: every regular file
+// under rootskills/<name>/ is copied to
+// <workspaceRoot>/.claude/skills/<name>/ with its relative path preserved, so a
+// skill can ship SKILL.md plus references/ files it loads on demand. A skill
+// whose content does not fit one readable file would otherwise have to push its
+// detail into this repo's docs/, which a workspace that merely uses niwa does
+// not have on disk.
+//
+// The walk is generic: adding a new root skill (or a new file inside one) needs
+// no change here. The writes are plain overwrites — the content is static, so
+// re-running is idempotent. Returns the list of written absolute paths.
+//
+// Every skill directory MUST contain SKILL.md; Claude Code will not load a
+// skill without it, so shipping one silently would install a directory that
+// does nothing. That is a programming error in this repo's embedded tree rather
+// than a runtime condition, so it fails loudly.
+//
+// Known limitation: this writes but never removes. Plain overwrite was already
+// the model when the unit was a single manifest, but a directory unit widens
+// the surface — renaming or deleting an embedded references/ file leaves an
+// orphan in every workspace that installed the old one. Pruning is deliberately
+// not done here: workspace-root writes are untracked by design, so there is no
+// record of which files niwa put there, and deleting everything under a skill
+// directory that is not in the embedded tree would take any file the workspace
+// added alongside it. An orphaned reference is inert (nothing links it once the
+// SKILL.md stops naming it), which is the cheaper failure of the two.
 func writeRootSkills(workspaceRoot string) ([]string, error) {
 	skillsRoot := filepath.Join(workspaceRoot, rootClaudeDir, rootSkillsTargetDir)
 
 	var written []string
+	haveManifest := map[string]bool{}
+	seenSkill := map[string]bool{}
+
 	walkErr := fs.WalkDir(rootSkillsFS, rootSkillsDir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
-		if d.IsDir() || d.Name() != rootSkillFileName {
+		if d.IsDir() {
+			// rootskills/<name> is a skill directory; deeper dirs are its
+			// internals and are created implicitly by the file writes.
+			if rel, relErr := filepath.Rel(rootSkillsDir, path); relErr == nil && rel != "." && !strings.Contains(rel, "/") {
+				seenSkill[rel] = true
+			}
 			return nil
 		}
-		// path is rootskills/<name>/SKILL.md; the skill name is the parent dir.
-		name := filepath.Base(filepath.Dir(path))
+
+		// path is rootskills/<name>/<rel...>; the skill name is the first
+		// segment and everything after it is the in-skill relative path.
+		rel, relErr := filepath.Rel(rootSkillsDir, path)
+		if relErr != nil {
+			return fmt.Errorf("resolving embedded root skill path %q: %w", path, relErr)
+		}
+		name, inSkill, found := strings.Cut(rel, "/")
+		if !found {
+			// A loose file directly under rootskills/ belongs to no skill.
+			return nil
+		}
+		if inSkill == rootSkillFileName {
+			haveManifest[name] = true
+		}
 
 		data, readErr := rootSkillsFS.ReadFile(path)
 		if readErr != nil {
-			return fmt.Errorf("reading embedded root skill %q: %w", path, readErr)
+			return fmt.Errorf("reading embedded root skill file %q: %w", path, readErr)
 		}
 
-		skillDir := filepath.Join(skillsRoot, name)
-		if mkErr := os.MkdirAll(skillDir, 0o755); mkErr != nil {
-			return fmt.Errorf("creating workspace-root skill directory %q: %w", skillDir, mkErr)
+		// inSkill comes from the embedded tree, which is compiled into the
+		// binary from this repo — there is no external path component to
+		// sanitize here, and adding a cleaning step would imply otherwise.
+		destPath := filepath.Join(skillsRoot, name, filepath.FromSlash(inSkill))
+		if mkErr := os.MkdirAll(filepath.Dir(destPath), 0o755); mkErr != nil {
+			return fmt.Errorf("creating workspace-root skill directory %q: %w", filepath.Dir(destPath), mkErr)
 		}
-		skillPath := filepath.Join(skillDir, rootSkillFileName)
-		if wErr := os.WriteFile(skillPath, data, 0o644); wErr != nil {
-			return fmt.Errorf("writing workspace-root skill %q: %w", skillPath, wErr)
+		if wErr := os.WriteFile(destPath, data, 0o644); wErr != nil {
+			return fmt.Errorf("writing workspace-root skill file %q: %w", destPath, wErr)
 		}
-		written = append(written, skillPath)
+		written = append(written, destPath)
 		return nil
 	})
 	if walkErr != nil {
 		return nil, fmt.Errorf("installing workspace-root skills: %w", walkErr)
 	}
+
+	for name := range seenSkill {
+		if !haveManifest[name] {
+			return nil, fmt.Errorf("installing workspace-root skills: embedded skill %q has no %s", name, rootSkillFileName)
+		}
+	}
+
 	return written, nil
 }
 

@@ -249,6 +249,27 @@ func runCreate(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// Refresh the root-managed config before creating the instance.
+	//
+	// MaterializeWorkspaceRoot otherwise runs only on a root-scope `niwa apply`
+	// and on `niwa init` in named/clone mode, so a workspace whose owner only
+	// ever applies a single instance never receives niwa's shipped root skills
+	// or the dispatched-worker agreement — nor a correction to either. And
+	// `niwa dispatch` reaches an instance through Create, which makes this the
+	// moment before that content is about to be read.
+	//
+	// Non-fatal on failure, matching how init.go treats the same call: a create
+	// must not fail because a skill file could not be written.
+	if workspaceRoot != "" {
+		if _, mErr := workspace.MaterializeWorkspaceRoot(cfg, workspaceRoot, workspace.RootMaterializeOptions{
+			EphemeralSessionMode: workspace.EphemeralSessionMode(workspaceRoot),
+			ConfigDir:            configDir,
+			Agent:                resolvedAgent,
+		}); mErr != nil {
+			fmt.Fprintf(cmd.ErrOrStderr(), "warning: materializing workspace-root config: %v\n", mErr)
+		}
+	}
+
 	instancePath, err := applier.Create(cmd.Context(), cfg, configDir, workspaceRoot, instanceName)
 	if err != nil {
 		return err

@@ -33,6 +33,7 @@ init → create → apply workflow, add a `@critical` Gherkin scenario in
 
 ## Contributor Guides
 
+- `docs/guides/background-session-control.md` — reaching a dispatched background session after it is running: the resume recipe, the three traps that look like success, and the command that verifies each claim
 - `docs/guides/ephemeral-session-instances.md` — one ephemeral instance per Claude Code background session: SessionStart/SessionEnd hooks, mapping store, `niwa reap`, context-aware `niwa apply`, opt-out
 - `docs/guides/file-distribution.md` — the three file tables (`[files]`, `[instance.files]`, `[root.files]`): repo `.local` rewrite vs verbatim non-repo distribution, the `.mcp.json` use case, tracking/cleanup, and limitations
 - `docs/guides/functional-testing.md` — end-to-end test patterns and the `localGitServer` helper

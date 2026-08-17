@@ -279,3 +279,25 @@ func niwaGoFromOutsideLandsIn(ctx context.Context, name, expectedSubpath string)
 	}
 	return nil
 }
+
+// iDeleteUnderWorkspaceRoot removes `<workspaceRoot>/<name>/<relPath>`.
+//
+// It exists so a scenario can prove that a later command RE-materializes
+// root-managed content, rather than merely observing content an earlier command
+// in the same scenario already wrote. Without the delete, a scenario asserting
+// "niwa create installs the root skills" would pass identically whether or not
+// create materializes the root, because init already did.
+func iDeleteUnderWorkspaceRoot(ctx context.Context, relPath, name string) error {
+	s := getState(ctx)
+	if s == nil {
+		return fmt.Errorf("no test state")
+	}
+	path := filepath.Join(s.workspaceRoot, name, filepath.FromSlash(relPath))
+	if _, err := os.Stat(path); err != nil {
+		return fmt.Errorf("cannot delete %q under workspace root %q, it is not there: %w", relPath, name, err)
+	}
+	if err := os.RemoveAll(path); err != nil {
+		return fmt.Errorf("deleting %q under workspace root %q: %w", relPath, name, err)
+	}
+	return nil
+}
