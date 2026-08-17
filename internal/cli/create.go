@@ -24,7 +24,7 @@ func init() {
 	createCmd.Flags().BoolVar(&createJSON, "json", false,
 		"emit a single JSON object {name, number, path} for the created instance and nothing else on stdout")
 	createCmd.Flags().StringVar(&createAgent, "agent", "",
-		"select the coding agent to prepare the instance for (claude or codex) for this session, overriding the workspace default_agent; NIWA_AGENT sets it per shell.")
+		"select the coding agent a session launched into this instance runs (claude or codex) for this session, overriding the workspace default_agent; NIWA_AGENT sets it per shell. Both agents' context is always prepared -- this selects launch time only.")
 	createCmd.Flags().IntVar(&createParallel, "parallel", 0,
 		"maximum repos to clone concurrently (>=1). Lower this on slow or flaky networks; 1 clones serially. Overrides the [global] clone_workers config. 0 (the default) uses clone_workers, else niwa's built-in default.")
 	registerStrictSecretsFlag(createCmd, &strictSecretsCreate)

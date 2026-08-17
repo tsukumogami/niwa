@@ -176,35 +176,6 @@ func TestContentFilenameByAgent(t *testing.T) {
 	}
 }
 
-// TestRepoContentSkippedUnderCodex asserts that under Codex the repository-level
-// installer writes nothing (no CLAUDE.local.md, no in-repo AGENTS.md), while
-// under Claude it writes CLAUDE.local.md as before. PRD R6a.
-func TestRepoContentSkippedUnderCodex(t *testing.T) {
-	t.Run("claude writes CLAUDE.local.md", func(t *testing.T) {
-		cfg, configDir, instanceRoot := setupWorkspaceContentFixture(t)
-		result, err := InstallRepoContent(cfg, configDir, "", instanceRoot, "public", "myapp", agent.AgentClaude)
-		if err != nil {
-			t.Fatalf("InstallRepoContent: %v", err)
-		}
-		if len(result.WrittenFiles) != 1 || filepath.Base(result.WrittenFiles[0]) != "CLAUDE.local.md" {
-			t.Fatalf("claude repo files = %v, want one CLAUDE.local.md", result.WrittenFiles)
-		}
-	})
-	t.Run("codex writes nothing", func(t *testing.T) {
-		cfg, configDir, instanceRoot := setupWorkspaceContentFixture(t)
-		result, err := InstallRepoContent(cfg, configDir, "", instanceRoot, "public", "myapp", agent.AgentCodex)
-		if err != nil {
-			t.Fatalf("InstallRepoContent: %v", err)
-		}
-		if len(result.WrittenFiles) != 0 {
-			t.Fatalf("codex repo files = %v, want none", result.WrittenFiles)
-		}
-		repoDir := filepath.Join(instanceRoot, "public", "myapp")
-		assertNotExist(t, filepath.Join(repoDir, "CLAUDE.local.md"))
-		assertNotExist(t, filepath.Join(repoDir, "AGENTS.md"))
-	})
-}
-
 // TestContentTreesCoexist asserts a CLAUDE.md tree and an AGENTS.md tree may
 // coexist in one instance without error (each apply writes a fresh tree for the
 // selected agent, and distinct filenames do not clobber each other). PRD R8a.

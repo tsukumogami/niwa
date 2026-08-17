@@ -131,18 +131,13 @@ func InstallRepoContent(cfg *config.WorkspaceConfig, configDir, overlayDir, inst
 // worktree path so a worktree gets the same content a repo checkout does. Both
 // callers share this single function (no forked installer).
 //
-// When the selected agent does not write repository/worktree-level context
-// (WritesRepoLevelContext reports false, as it does for Codex), this is a no-op:
-// niwa writes no CLAUDE.local.md and no in-repo AGENTS.md, so it neither
-// clobbers a repository's own committed AGENTS.md nor dirties the git working
-// tree. Repository-level Codex context is deferred (see
-// DESIGN-interactive-codex-session).
+// This runs unconditionally on the Claude pass regardless of the workspace's
+// selected agent (Decision 7A): the Claude tree is materialized in full at
+// every level no matter what default_agent says. Codex's repository-level
+// context is a separate, net-new composition (AGENTS.override.md) written by
+// the Codex materializer, not through this installer.
 func InstallRepoContentTo(cfg *config.WorkspaceConfig, configDir, overlayDir, instanceRoot, repoDir, groupName, repoName string, ag agent.Agent) (*RepoContentResult, error) {
 	result := &RepoContentResult{}
-
-	if !ag.WritesRepoLevelContext() {
-		return result, nil
-	}
 
 	absInstance, err := filepath.Abs(instanceRoot)
 	if err != nil {

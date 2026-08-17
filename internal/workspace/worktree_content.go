@@ -733,12 +733,10 @@ func installWorktreeRulesImport(instanceRoot, worktreePath string) ([]string, er
 // worktree root) and verified to stay within the worktree via checkContainment,
 // matching the containment discipline of the other content installers.
 func installWorktreeContextLayer(cfg *config.WorkspaceConfig, configDir, instanceRoot, worktreePath, repo, purpose, branch string, ag agent.Agent) ([]string, error) {
-	// Under an agent that does not write repository/worktree-level context
-	// (Codex), the worktree-context layer is skipped: niwa writes no
-	// CLAUDE.local.md into the worktree, keeping the git working tree clean.
-	if !ag.WritesRepoLevelContext() {
-		return nil, nil
-	}
+	// Runs unconditionally on the Claude pass regardless of the workspace's
+	// selected agent (Decision 7A): the worktree's CLAUDE.local.md is always
+	// materialized. Codex's worktree-level context is a separate, net-new
+	// composed override written by the Codex materializer.
 	target := filepath.Join(worktreePath, "CLAUDE.local.md")
 	if err := checkContainment(target, worktreePath); err != nil {
 		return nil, fmt.Errorf("worktree context layer: %w", err)

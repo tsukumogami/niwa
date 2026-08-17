@@ -222,12 +222,14 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 
 	// (2b) niwa dispatch launches a Claude worker (it forwards Claude flags and
 	// spawns the claude binary), so it refuses when the workspace's resolved
-	// agent is not Claude -- otherwise the instance would be prepared for another
-	// agent whose context the launched Claude worker cannot read. The resolved
-	// agent comes from NIWA_AGENT and the workspace default_agent; dispatch's own
-	// --agent flag is Claude's subagent passthrough (a different thing), so the
-	// escape hatch from a Codex-default workspace is NIWA_AGENT=claude. A config
-	// that cannot be loaded is left to the provisioning path to report.
+	// launch-time agent is not Claude -- both agents' context is always
+	// materialized, but dispatch only knows how to launch a Claude worker, and
+	// running one against a Codex-selected workspace would run the wrong agent
+	// for what the developer chose. The resolved agent comes from NIWA_AGENT and
+	// the workspace default_agent; dispatch's own --agent flag is Claude's
+	// subagent passthrough (a different thing), so the escape hatch from a
+	// Codex-default workspace is NIWA_AGENT=claude. A config that cannot be
+	// loaded is left to the provisioning path to report.
 	if wsCfg, cfgErr := config.Load(filepath.Join(workspaceRoot, workspace.StateDir, workspace.WorkspaceConfigFile)); cfgErr == nil {
 		resolvedAgent, agErr := resolveSessionAgent("", wsCfg.Config)
 		if agErr != nil {

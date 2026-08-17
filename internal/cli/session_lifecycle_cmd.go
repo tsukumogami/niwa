@@ -327,9 +327,11 @@ func applyContentToWorktree(instanceRoot, worktreePath, repo, purpose, branch st
 	}
 
 	// Resolve the session-global agent from the workspace default (and the
-	// NIWA_AGENT env override) so a worktree is prepared for the same agent the
-	// instance is. DefaultAgent is a workspace-level field unaffected by the
-	// overlay merge below.
+	// NIWA_AGENT env override): the agent a session launched into this
+	// worktree runs, not a selection of what gets materialized -- worktree
+	// preparation is unconditional (WorktreeApplyOptions.Agent).
+	// DefaultAgent is a workspace-level field unaffected by the overlay merge
+	// below.
 	resolvedAgent, agErr := resolveSessionAgent("", cfg)
 	if agErr != nil {
 		return nil, agErr

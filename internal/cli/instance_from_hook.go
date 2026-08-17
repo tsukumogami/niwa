@@ -488,14 +488,15 @@ func realProvisionInstance(ctx context.Context, workspaceRoot, cwd, namePrefix, 
 
 	// This launch-coupled provisioning path (the Claude SessionStart hook,
 	// `niwa dispatch`, and `niwa watch`) always launches a Claude worker into the
-	// instance, so the instance is prepared for Claude regardless of the
-	// workspace's default_agent. Preparing it for a different agent here would
-	// materialize context the launched Claude worker cannot read. The
-	// interactive-Codex flow prepares its workspace through `niwa apply`/`create`
-	// (which honor default_agent), not through this path. `niwa dispatch` refuses
-	// up front when the resolved agent is not Claude; Codex background dispatch
-	// and a Codex SessionStart hook are later features that will carry their own
-	// agent here.
+	// instance. Materialization itself is unconditional regardless of this
+	// field -- both agents' context is always prepared -- so this assignment no
+	// longer selects what gets written; it only fixes the launch-time agent for
+	// this path, which is always Claude here. The interactive-Codex flow selects
+	// its own launch-time agent through `niwa apply`/`create` (which honor
+	// default_agent and --agent), not through this path. `niwa dispatch` refuses
+	// up front when the resolved launch-time agent is not Claude; Codex
+	// background dispatch and a Codex SessionStart hook are later features that
+	// will carry their own agent here.
 	applier.Agent = agent.AgentClaude
 	// This path has no command line, which is exactly why strict mode is a
 	// workspace setting: `niwa dispatch`, the SessionStart hook, `niwa watch`
