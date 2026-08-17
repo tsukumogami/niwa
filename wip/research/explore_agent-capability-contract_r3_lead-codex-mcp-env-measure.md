@@ -570,6 +570,232 @@ The structural mismatches beyond field names:
   of the same name in the same way, because Codex's field-level merge has no
   counterpart there.
 
+## F. Approval and Sandbox Posture at the Project Layer
+
+### Both keys work from the project layer, and both are trust-gated
+
+Fixture: `…/codexspike/f/proj`, a scratch `git init` directory, with a scratch
+`CODEX_HOME` whose only content is the trust entry (or nothing). Observable is
+`codex doctor --json`, which reports the resolved posture directly. Four runs,
+one variable changed at a time:
+
+```
+=== 1. no project config at all (baseline defaults), trusted ===
+  approvalpolicy:OnRequest, filesystemsandbox:restricted, networksandbox:restricted
+=== 2. project sets approval_policy=never sandbox_mode=danger-full-access, TRUSTED ===
+  approvalpolicy:Never,     filesystemsandbox:unrestricted, networksandbox:enabled
+=== 3. same project config, UNTRUSTED (no projects entry) ===
+  approvalpolicy:OnRequest, filesystemsandbox:restricted, networksandbox:restricted
+=== 4. trusted, plus notify/profile/openai_base_url alongside ===
+  approvalpolicy:Never,     filesystemsandbox:unrestricted, networksandbox:enabled
+```
+
+**Measured. `approval_policy` and `sandbox_mode` are NOT on the project-layer
+denylist.** Both take effect from `.codex/config.toml`, and both revert to the
+defaults (`on-request` / restricted) the moment the trust entry is removed. They
+sit on exactly the same side of the trust line as `mcp_servers` and
+`shell_environment_policy`.
+
+This settles the matrix's hard UNRESOLVED row affirmatively: a workspace **can**
+stop a Codex session prompting for approval on work it has already been trusted
+to do — by writing `approval_policy` into the project layer — but only for a
+directory that already carries a trust entry in the developer's own config. The
+capability and the trust bootstrap are the same dependency, not two.
+
+Worth stating plainly for whoever designs this: writing `approval_policy =
+"never"` and `sandbox_mode = "danger-full-access"` into a project layer removes
+the approval prompt *and* the filesystem and network sandbox together. Measured
+above: `filesystem sandbox` went `restricted` → `unrestricted` and `network
+sandbox` `restricted` → `enabled` from that one line. These are two independent
+keys and should be treated as two independent decisions.
+
+### The binary enumerates its own denylist
+
+Codex reports ignored project-local keys, and `codex doctor --json` surfaces the
+message as a `startup warning` row (it does **not** appear on `codex mcp list`,
+`codex features list`, `codex debug models`, or `codex doctor --summary` — I
+checked all four):
+
+```
+"startup warning": "Ignored unsupported project-local config keys in
+/home/…/f/proj/.codex/config.toml: openai_base_url, model_provider, notify,
+profile, experimental_realtime_ws_base_url. If you want these settings to apply,
+manually set them in your user-level config.toml."
+```
+
+This is the authoritative instrument, and it is self-service: put any key in a
+project config, run `codex doctor --json`, read whether it is named.
+
+I ran three batches of candidate keys through it. **Measured denylist, eight
+keys confirmed:**
+
+| Ignored project-local key | Category |
+|---|---|
+| `openai_base_url` | provider endpoint |
+| `chatgpt_base_url` | provider endpoint |
+| `model_provider` | provider selection |
+| `model_providers` | provider table |
+| `notify` | external command execution |
+| `profile` | config profile selection |
+| `experimental_realtime_ws_base_url` | provider endpoint |
+| `experimental_realtime_webrtc_call_base_url` | provider endpoint |
+
+Confirmed effective: `openai_base_url = "https://example.invalid"` in a trusted
+project layer left the resolved endpoint at `https://api.openai.com/v1`
+(`codex doctor --json`: `"openai API base URL": "https://api.openai.com/v1
+reachable (HTTP 404)"`). The denylist is real, not advisory.
+
+**Measured NOT on the denylist** — every one of these was accepted from the
+project layer with no warning: `approval_policy`, `sandbox_mode`,
+`project_doc_max_bytes`, `project_doc_fallback_filenames`, `project_root_markers`,
+`model`, `model_reasoning_effort`, `instructions`, `developer_instructions`,
+`model_instructions_file`, `compact_prompt`, `model_catalog_json`,
+`tool_output_token_limit`, `allow_login_shell`, `forced_chatgpt_workspace_id`,
+`forced_login_method`, `cli_auth_credentials_store`, `mcp_oauth_credentials_store`,
+`mcp_oauth_callback_port`, `mcp_oauth_callback_url`, `sqlite_home`, `log_dir`,
+`check_for_update_on_startup`, `experimental_thread_config_endpoint`,
+`experimental_realtime_ws_model`, `experimental_realtime_ws_backend_prompt`,
+`experimental_realtime_ws_startup_context`,
+`experimental_realtime_start_instructions`, `oss_provider`,
+`preferred_auth_method`, `history`, `analytics`, `service_tier`,
+`hide_agent_reasoning`, `suppress_unstable_features_warning`, `disable_paste_burst`,
+`projects`.
+
+Two of those deserve flagging rather than burying in a list:
+
+- **`model_instructions_file` and `model_catalog_json` are actively read from
+  the project layer.** Both produced real filesystem errors when pointed at
+  missing paths (`failed to read model instructions file /tmp/fake-instructions.md`;
+  `failed to parse model_catalog_json path … as JSON: missing field 'models'`),
+  which is proof the project layer drives a file read, not merely a parse.
+- **`project_root_markers` is not on the denylist**, which contradicts the
+  existing spike's claim that project-root marker configuration cannot be
+  carried at this layer. It is *accepted*. Whether it is *effective* is a
+  different question — the marker list is what finds the project root in the
+  first place, so a value declared inside the root it would have to find is
+  plausibly inert. I measured acceptance, not effect. **Untested: whether a
+  project-layer `project_root_markers` changes discovery.**
+
+### On the "eleven denylisted keys" figure
+
+The existing spike says eleven; I measured eight. I am not claiming the spike is
+wrong. My enumeration covered roughly fifty keys I chose, not the whole config
+surface, so three more may sit among keys I never submitted. **The count is
+unresolved; the mechanism to resolve it is not** — anyone can finish the list by
+feeding the remaining keys through the `codex doctor --json` startup warning.
+Note also that denylisted keys are still type-checked before being ignored:
+`forced_login_method = "apikey"` failed the whole config load with
+`unknown variant 'apikey', expected 'chatgpt' or 'api'`, and
+`experimental_thread_store_endpoint` is rejected outright with
+`is no longer supported; remove it from config.toml`. So a denylisted key is not
+inert — a malformed one still bricks the config per section A.
+
+## G. Does a Git Worktree's `.git` FILE Satisfy the Project-Root Marker?
+
+**Yes. Measured.**
+
+In a linked worktree `.git` is a regular file holding a pointer, confirmed on
+the fixture:
+
+```
+--- main repo .git ---
+drwxrwxr-x 9 dgazineu dgazineu 4096 … /codexspike/g/main/.git
+--- worktree .git ---
+-rw-rw-r-- 1 dgazineu dgazineu   85 … /codexspike/g/wt/.git
+--- worktree .git contents ---
+gitdir: /home/…/codexspike/g/main/.git/worktrees/wt
+```
+
+The obvious test — put `AGENTS.md` in the worktree and see if it is read — does
+**not** discriminate, for the exact reason the existing spike warns about: a
+directory with no marker anywhere above it yields a walk of one directory, which
+also reads the cwd's own file. So I placed `AGENTS.md` **only at the worktree
+root** and ran from `wt/sub/deeper`, two levels down. The file can only be
+reached if the walk found a root, and the only candidate root marker is the
+`.git` file.
+
+First, the confound check — no ancestor of the fixture carries a marker:
+
+```
+=== confound check: any .git ABOVE the worktree? ===
+  (nothing listed == no ancestor marker)
+```
+
+Then the three-way result:
+
+```
+=== A. run from $G/wt/sub/deeper -- root-only AGENTS.md via the .git FILE ===
+  hits for worktree-root marker: 1
+=== B. control: same depth inside the MAIN repo (real .git directory) ===
+  hits for main-repo-root marker: 1
+=== C. negative control: a deep dir with NO marker anywhere above ===
+  hits for no-marker-root file: 0
+```
+
+The negative control is what makes A trustworthy: an identical layout without a
+marker returns zero, so the hit in A is the marker working and not the walk
+picking the file up some other way. Raw evidence from A:
+
+```
+$ codex debug prompt-input          # cwd = .../g/wt/sub/deeper
+": "# AGENTS.md instructions for /home/…/codexspike/g/wt/sub/deeper\n\n
+<INSTRUCTIONS>\nWORKTREE_CONTEXT_MARKER_SPIKE\n\n</INSTRUCTIONS>"
+```
+
+**The matrix's worktree-context row stays Implemented.** Codex treats a `.git`
+file exactly as it treats a `.git` directory for project-root purposes, so a
+session rooted anywhere inside a linked worktree discovers context at that
+worktree's root. The acceptance scenario built on this is satisfiable.
+
+One thing I did not test: whether the *main* repository's context is also
+reachable from inside the worktree. It should not be — the worktree root is the
+project root and the walk never goes above it — but that follows from the
+existing spike's finding 1 rather than from anything I measured here.
+**Untested.**
+
+## H. Is `shell_environment_policy.set` Trust-Gated?
+
+**Yes. Measured, with the trust entry as the only variable, and reversibly.**
+
+Section C already established this alongside `mcp_servers`, but that fixture had
+a global config carrying its own servers and policy, so I re-ran it in isolation:
+a scratch project whose `.codex/config.toml` declares nothing but
+`shell_environment_policy.set`, and a scratch `CODEX_HOME` that is empty except
+for the trust entry being added and removed.
+
+```
+=== project .codex/config.toml ===
+[shell_environment_policy]
+set = { SPIKE_PROJECT_ENV = "from_project_layer" }
+
+=== 1. UNTRUSTED (CODEX_HOME config.toml is empty) ===
+  ABSENT
+=== 2. TRUSTED (only change: add the projects trust entry) ===
+SPIKE_PROJECT_ENV=from_project_layer
+=== 3. back to UNTRUSTED (revert the entry, nothing else) ===
+  ABSENT
+```
+
+Absent → present → absent, toggled by nothing but
+`[projects."<path>"] trust_level = "trusted"`. **The row carries a
+`Requires: DirectoryTrust` edge on measured grounds, not by analogy to the byte
+budget.**
+
+A further control shows the gating is coarser than "filter the keys": when the
+directory is untrusted the project config is **not parsed at all**. Adding a
+denylisted key (`notify`) to the untrusted project layer produced no startup
+warning, where the same key in a trusted layer always does:
+
+```
+=== control: does the project layer even get READ when untrusted? ===
+  (no warning -- project layer not parsed at all)
+```
+
+So an untrusted project layer is skipped wholesale rather than having its
+individual keys evaluated and dropped. That is worth knowing for diagnosis: the
+absence of a Codex warning about a project config is not evidence the file is
+well-formed, only that it was never read.
+
 ## Measured vs Documented vs Untested (explicit table)
 
 | Claim | Status |
@@ -597,6 +823,23 @@ The structural mismatches beyond field names:
 | `set` key collision resolves to the project layer | Measured |
 | Claude `.mcp.json` field set and `${VAR}` expansion | Documented (that product's contract); not measured here |
 | `TMPDIR`/`TMP`/`LC_ALL` appear near `core` in the binary but not in measured `core` output | Measured absent; cause untested |
+| **F** — `approval_policy` settable from the project layer, and trust-gated | Measured |
+| **F** — `sandbox_mode` settable from the project layer, and trust-gated | Measured |
+| **F** — `sandbox_mode = "danger-full-access"` disables filesystem *and* network sandboxing together | Measured |
+| **F** — `codex doctor --json` `startup warning` row enumerates ignored project-local keys | Measured |
+| **F** — the warning appears on no other cheap subcommand (`mcp list`, `features list`, `debug models`, `doctor --summary`) | Measured |
+| **F** — eight denylisted keys: `openai_base_url`, `chatgpt_base_url`, `model_provider`, `model_providers`, `notify`, `profile`, `experimental_realtime_ws_base_url`, `experimental_realtime_webrtc_call_base_url` | Measured |
+| **F** — `openai_base_url` from a trusted project layer does not move the resolved endpoint | Measured |
+| **F** — ~37 further keys accepted at the project layer (list in section F) | Measured (acceptance only) |
+| **F** — `model_instructions_file` / `model_catalog_json` drive a real file read from the project layer | Measured |
+| **F** — `project_root_markers` accepted at the project layer | Measured (acceptance); **effect untested** |
+| **F** — denylisted keys are still type-checked, and a malformed one still fails the whole load | Measured |
+| **F** — the denylist is exactly eleven keys | **Unresolved** — 8 measured across ~50 keys submitted; not an exhaustive sweep |
+| **G** — a linked worktree's `.git` is a regular file with a `gitdir:` pointer | Measured |
+| **G** — that `.git` FILE satisfies the project-root marker; root context found from 2 levels deep | Measured, with passing positive and negative controls |
+| **G** — whether the main repo's context is also reachable from inside the worktree | Untested (follows from prior spike's finding 1, not measured here) |
+| **H** — `shell_environment_policy.set` is trust-gated, toggled reversibly by the trust entry alone | Measured |
+| **H** — an untrusted project config is not parsed at all, not filtered key-by-key | Measured |
 
 ## Blocked Measurements
 
@@ -620,6 +863,21 @@ The structural mismatches beyond field names:
   silently defeat `set` delivery) or already own server names niwa might emit.
   `codex mcp list --json` run against their real `CODEX_HOME` would answer both;
   that is a read-only command and safe to run, but it is theirs to run.
+- **The complete project-layer denylist (F).** I measured eight keys across
+  roughly fifty submitted; the existing spike says eleven. Finishing the sweep
+  needs no new technique, only patience — feed each remaining top-level config
+  key through a trusted project layer and read the `startup warning` row of
+  `codex doctor --json`. The obstacle is that denylisted keys are still
+  type-checked, so each batch has to carry type-valid values and errors have to
+  be cleared one at a time.
+- **Whether `project_root_markers` is *effective* from the project layer (F).**
+  Measured accepted, but the marker list is what locates the project root, so a
+  value declared inside that root may be read too late to matter. Testing it
+  needs a fixture with a non-`.git` marker and a way to distinguish "root found
+  by the new marker" from "root found by `.git`".
+- **Whether the main repository's context is reachable from inside a linked
+  worktree (G).** Not measured. Expected no, from the prior spike's bounded
+  downward walk, but that is inference.
 - **`-c 'projects={}'` did not retract trust** in an attempted control, so the
   untrusted/trusted comparison rests on two separately-written config files
   rather than one toggled flag. The two measurements are clean; the toggle just
@@ -649,3 +907,20 @@ Two findings deserve to reach the design directly: Codex has no SSE transport
 and silently serves a `type = "sse"` server as streamable HTTP, and it performs
 no `${VAR}` interpolation anywhere, so any `.mcp.json` relying on either cannot
 be translated and must be reported rather than dropped.
+
+The three later measurements all resolve affirmatively. `approval_policy` and
+`sandbox_mode` are **not** denylisted — both take effect from a project layer and
+both revert when trust is removed, so a workspace can suppress approval prompts,
+though the same line that does it also disables the filesystem and network
+sandbox and those should be separate decisions; the denylist itself turns out to
+be self-enumerating through the `startup warning` row of `codex doctor --json`,
+which named eight keys (all provider endpoints, `notify`, and `profile`) across
+the ~50 I submitted, leaving the spike's "eleven" figure unresolved but trivially
+completable. A linked git worktree's `.git` **file** does satisfy the
+project-root marker — proven with a root-only context file read from two levels
+deep, against a passing negative control — so the worktree-context row stays
+Implemented. And `shell_environment_policy.set` is trust-gated on measured
+grounds rather than by analogy, toggling absent → present → absent with the trust
+entry as the only variable; the gate is wholesale, since an untrusted project
+config is never parsed at all, which means a missing Codex warning about such a
+file says nothing about whether it is well-formed.
