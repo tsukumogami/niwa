@@ -384,6 +384,16 @@ type pipelineResult struct {
 	// the prior record forward when the trust step wrote nothing, or was not
 	// wired at all, so a run can never forget an entry it left behind.
 	codexTrustKeys []string
+	// codexConflicts carries this run's per-repository Codex conflict verdicts
+	// (Decision 7). Two consumers, and they are why the set is a pipeline
+	// output rather than a local: the managed-file cleanup asks it which paths
+	// are exempt from record-driven deletion, and later stages read the
+	// verdicts to learn which repositories niwa declared foreign.
+	//
+	// nil is tolerated everywhere it is read, so a caller that assembles a
+	// result by hand behaves exactly as the pipeline did before conflicts
+	// existed.
+	codexConflicts *CodexConflictSet
 	// codexTrustErr is a trust-step failure carried out as data, the same
 	// way setupIncomplete is: the rest of materialization must complete, and
 	// on create the pipeline's error path runs os.RemoveAll over the
@@ -1578,6 +1588,31 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		writtenFiles = append(writtenFiles, globalFiles...)
 	}
 
+	// Step 5d: the conflict verdicts, decided in one pass before any Codex write
+	// (Decision 7). niwa writes two names into a repository working tree, and
+	// neither is a name it may assume is free: a committed `.codex/` is a real
+	// Codex convention any upstream can adopt. Anything at either name that niwa
+	// did not itself materialize is a conflict -- niwa writes nothing there,
+	// modifies nothing, deletes nothing, and reports it per repository.
+	//
+	// Detection runs here, ahead of both writers, because the coupling needs it
+	// to: a `.codex` conflict suppresses the composed override too, and the
+	// override is written first. The verdicts are also the input the managed-file
+	// cleanup consults for its exemption, and the seam through which the trust
+	// step learns which repositories it must not vouch for.
+	codexConflicts := &CodexConflictSet{}
+	for _, cr := range classified {
+		if !ClaudeEnabled(effectiveCfg, cr.Repo.Name) {
+			continue
+		}
+		verdict, err := DetectCodexConflicts(cr.Repo.Name, filepath.Join(instanceRoot, cr.Group, cr.Repo.Name))
+		if err != nil {
+			return nil, fmt.Errorf("checking Codex paths in %q: %w", cr.Repo.Name, err)
+		}
+		codexConflicts.Record(verdict)
+	}
+	allWarnings = append(allWarnings, codexConflicts.Warnings()...)
+
 	// Step 6: Install repo-level CLAUDE.local.md files (and subdirectories).
 	// Skip repos with claude = false. This runs as Claude whatever a.Agent
 	// says (Decision 7A): repository-level Codex delivery is a separate writer,
@@ -1603,6 +1638,14 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		// applies: a repository that asked for no niwa-written context must not
 		// get an override, which would claim its context slot and displace the
 		// committed file it does ship.
+		//
+		// The conflict verdict gates it as well, and it gates on two things at
+		// once: this repository's own override conflict, and a `.codex` conflict,
+		// which suppresses the override through it. The report already named
+		// both, above.
+		if codexConflicts.SuppressesOverride(cr.Repo.Name) {
+			continue
+		}
 		codexResult, err := InstallRepoCodexOverride(effectiveCfg, configDir, overlayDir, instanceRoot, cr.Group, cr.Repo.Name)
 		if err != nil {
 			return nil, fmt.Errorf("composing Codex context for %q: %w", cr.Repo.Name, err)
@@ -1649,12 +1692,21 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		if !ClaudeEnabled(effectiveCfg, cr.Repo.Name) {
 			continue
 		}
+		// A `.codex` conflict was reported by the detection pass and degrades the
+		// whole repository: nothing is delivered here, and the repository falls
+		// back to Codex's own discovery of the content it ships.
+		if codexConflicts.SuppressesPayload(cr.Repo.Name) {
+			continue
+		}
 		repoDir := filepath.Join(instanceRoot, cr.Group, cr.Repo.Name)
 		link, err := InstallRepoCodexLink(instanceRoot, repoDir)
 		if err != nil {
 			return nil, fmt.Errorf("linking the Codex payload into %q: %w", cr.Repo.Name, err)
 		}
 		if link.Foreign {
+			// Unreachable through the gate above unless something occupied the
+			// name during this apply. Report it the same way regardless: a quiet
+			// skip is the failure mode the whole rule exists to avoid.
 			allWarnings = append(allWarnings, fmt.Sprintf("repo %q: %s is occupied by something niwa did not write; no Codex payload delivered there, and nothing at that path was modified or removed", cr.Repo.Name, filepath.Join(repoDir, CodexPayloadDirName)))
 		}
 	}
@@ -1669,6 +1721,12 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 	// One entry per repository, not per worktree: trust resolves through a
 	// worktree's .git pointer to the main repository root, so the
 	// repository's entry already covers every worktree of it.
+	//
+	// The conflict verdicts reach this step through codexConflicts, whose
+	// PayloadConflicted answers, per repository root, whether niwa's payload was
+	// refused there. Wiring the withholding and the record-bounded retraction of
+	// an entry written before the conflict existed is a separate change; every
+	// repository root still goes in here.
 	codexTrustKeys, codexTrustErr := a.ensureCodexTrust(repoDirs, opts.existingState, &allWarnings)
 
 	// Step 6.4: Decide the worktree-delegation integration ONCE per apply
@@ -1894,6 +1952,7 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		overlayURL:       pipelineOverlayURL,
 		overlayCommit:    pipelineOverlayCommit,
 		disclosedNotices: newDisclosures,
+		codexConflicts:   codexConflicts,
 		codexTrustKeys:   codexTrustKeys,
 		codexTrustErr:    codexTrustErr,
 	}, nil
@@ -2015,7 +2074,23 @@ func affectedPlugins(report pluginrecord.PruneReport) []string {
 }
 
 // cleanRemovedFiles deletes managed files from the previous state that are
-// no longer present in the current pipeline result.
+// no longer present in the current pipeline result, except at paths this run
+// declared conflicted.
+//
+// The exemption is the second half of the conflict rule's "deletes nothing"
+// promise, and it cannot be left out. Absence from the produced set is this
+// function's deletion trigger, and a conflicted path is precisely a path the
+// apply did not produce: a repository that got its override written and
+// recorded, and then committed a file at that name, would have its own
+// committed file deleted here on the very apply that refused to touch it. So
+// the apply hands its per-run verdicts in and the cleanup consults them.
+//
+// The record entry still goes -- the conflicted path is not forward-carried
+// into the produced set. Keeping it would need no change here, but it would
+// leave the state asserting niwa owns a path niwa just declared foreign, under
+// a content hash that no longer describes what sits there. Dropping the entry
+// while skipping the delete is what keeps the state truthful and the file
+// intact.
 func (a *Applier) cleanRemovedFiles(existingState *InstanceState, result *pipelineResult) {
 	currentFiles := make(map[string]bool, len(result.managedFiles))
 	for _, mf := range result.managedFiles {
@@ -2023,10 +2098,14 @@ func (a *Applier) cleanRemovedFiles(existingState *InstanceState, result *pipeli
 	}
 
 	for _, mf := range existingState.ManagedFiles {
-		if !currentFiles[mf.Path] {
-			if err := os.Remove(mf.Path); err != nil && !os.IsNotExist(err) {
-				a.Reporter.DeferWarn("could not remove managed file %s: %v", mf.Path, err)
-			}
+		if currentFiles[mf.Path] {
+			continue
+		}
+		if result.codexConflicts.Conflicted(mf.Path) {
+			continue
+		}
+		if err := os.Remove(mf.Path); err != nil && !os.IsNotExist(err) {
+			a.Reporter.DeferWarn("could not remove managed file %s: %v", mf.Path, err)
 		}
 	}
 }

@@ -48,10 +48,12 @@ type CodexLinkResult struct {
 	// something niwa did not materialize, so nothing was written, modified, or
 	// deleted there.
 	//
-	// This is the seam issue 7's conflict rule extends: that rule adds the loud
-	// per-repository verdict, the coupling to the composed override, and the
-	// managed-file cleanup exemption. What this writer owns is the refusal
-	// itself -- niwa never writes over a name a repository already occupies.
+	// The classification behind it is codexPayloadPathOwnership, the same one
+	// the apply's detection pass runs to build its conflict verdicts -- which is
+	// what ties this refusal to the loud per-repository report, the coupled
+	// suppression of the composed override, and the managed-file cleanup
+	// exemption. Reached through the pipeline this flag is a backstop: the
+	// pipeline has already skipped conflicted repositories.
 	Foreign bool
 }
 
@@ -65,18 +67,33 @@ type CodexLinkResult struct {
 // any directory below it. The project-layer loader follows symlinks, which is
 // why a link works at all (Decision 1A).
 //
-// niwa recognizes its own delivery by what it points at: a symlink is niwa's
-// when it resolves to this instance's payload, and a real directory is niwa's
+// niwa recognizes its own delivery by shape and content: an untracked symlink
+// is niwa's (only niwa plants one at this name), and a real directory is niwa's
 // when it carries the payload config's generation marker. A delivery that is
-// niwa's is repaired in place (retargeted, or re-copied) so a deleted, dangling,
-// or stale entry heals on the next apply. Anything else at the name is left
-// exactly as it is, and reported through Foreign.
+// niwa's is repaired in place (retargeted when its payload moved, or re-copied)
+// so a deleted, dangling, or stale entry heals on the next apply. Anything else
+// at the name -- tracked content whatever its shape, an unmarked directory, a
+// regular file -- is left exactly as it is and reported through Foreign.
 func InstallRepoCodexLink(instanceRoot, repoDir string) (*CodexLinkResult, error) {
 	payloadDir, err := filepath.Abs(filepath.Join(instanceRoot, CodexPayloadDirName))
 	if err != nil {
 		return nil, fmt.Errorf("resolving Codex payload directory: %w", err)
 	}
 	linkPath := filepath.Join(repoDir, CodexPayloadDirName)
+
+	// One ownership authority governs the write and the delete decision alike:
+	// the pipeline runs this same classification once per repository before any
+	// Codex write, gates the composed override on it too, and hands its verdicts
+	// to the managed-file cleanup. Re-asking it here keeps the writer safe when
+	// it is called on its own -- and closes the window where a foreign entry
+	// appears between the detection pass and this write.
+	owner, err := codexPayloadPathOwnership(linkPath)
+	if err != nil {
+		return nil, err
+	}
+	if owner == codexPathForeign {
+		return &CodexLinkResult{Foreign: true}, nil
+	}
 
 	info, err := os.Lstat(linkPath)
 	switch {
@@ -95,20 +112,13 @@ func InstallRepoCodexLink(instanceRoot, repoDir string) (*CodexLinkResult, error
 			return nil, fmt.Errorf("replacing stale Codex link %s: %w", linkPath, rmErr)
 		}
 
-	case err == nil && info.IsDir():
-		if !codexPayloadCopyIsNiwas(linkPath) {
-			return &CodexLinkResult{Foreign: true}, nil
-		}
-		// niwa's own copy from a prior apply under the fallback. Re-deliver it
-		// wholesale so a de-configured plugin's skills leave the copy too.
+	case err == nil:
+		// niwa's own copy from a prior apply under the fallback -- the
+		// classification above refused every other non-symlink shape. Re-deliver
+		// it wholesale so a de-configured plugin's skills leave the copy too.
 		if rmErr := os.RemoveAll(linkPath); rmErr != nil {
 			return nil, fmt.Errorf("refreshing Codex payload copy %s: %w", linkPath, rmErr)
 		}
-
-	case err == nil:
-		// A regular file (or anything else) at the name is not a shape niwa ever
-		// writes, so it is not niwa's.
-		return &CodexLinkResult{Foreign: true}, nil
 	}
 
 	copied, err := deliverCodexPayload(linkPath, payloadDir)
