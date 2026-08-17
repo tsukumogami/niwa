@@ -249,27 +249,146 @@ Because composition happens at materialization time, the file goes stale when a
 cloned repo's own context changes. niwa has no live-refresh mechanism, so the
 composed file should carry a one-line note saying what produced it and when.
 
-## Round 2 (in flight)
+### Materialization is pure file-writing, and trust is mandatory
 
-Two round-1 discoveries contradicted premises the brief treated as settled, and
-both can change the design:
+A hand-written `config.toml` alone does nothing for plugins: Codex never
+populates its own plugin cache, and it skips an uncached plugin in total
+silence. But the cache it wants is just a recursive copy of the plugin tree
+under `plugins/cache/<marketplace>/<plugin>/<version>/` with a one-key
+`plugin.json`. So materialization stays pure file-writing — no CLI invocation,
+no interactive step — and it reads nothing from the network at session start,
+verified even with a GitHub-sourced marketplace whose host does not resolve.
+One rule to encode: the version directory must be a real directory; everything
+below it may be a symlink, and a symlinked version directory is silently
+skipped.
 
-1. **Codex does have a project-level config layer.** The brief states flatly
-   that a `.codex/config.toml` in a working directory is "ignored entirely". The
-   hook-trust spike found a project layer in the upstream loader, with its own
-   denylist, and fired a hook from a project-local `hooks.json`. If that layer
-   loads from an instance root, niwa could write config into the instance the
-   way it already writes Claude's settings — and the fragile environment-variable
-   delivery problem disappears. The caveats are real (the test directory was not
-   a git repo, and a trust precondition was not established), so this needs
-   settling before the design hardens.
+The `[marketplaces.*]` block turns out not to be load-bearing at all. Deleting
+it left every skill in the prompt; it buys `codex plugin list` and `upgrade`
+and nothing else. niwa's existing marketplace model maps onto Codex's two
+source types mechanically, names and all.
 
-2. **`project_doc_fallback_filenames` may deliver per-repo context** without
-   writing into a repo's git tree, by pointing Codex at the git-ignored
-   `CLAUDE.local.md` niwa already writes. Whether it is first-match or
-   concatenating is unverified, and that determines its behavior for the one
-   repo that ships its own `AGENTS.md`.
+**Project trust is as session-blocking as hook trust and must be pre-written**:
+one `[projects."<abs path>"] trust_level` entry per directory a session may
+start in. Absence drops the session to a read-only sandbox where the agent
+cannot write files. Curiously, the recorded *value* does not matter — both
+`"trusted"` and `"untrusted"` yield a writable sandbox, and only a missing
+entry degrades. An explicit distrust is quieter than saying nothing.
 
-A re-run of the config-materialization lead is also in flight, covering the
-minimal file set for marketplaces, plugins, skills, MCP servers, and project
-trust.
+One capability does not survive the port: a plugin-supplied MCP server invoked
+via `${CLAUDE_PLUGIN_ROOT}/...` never starts, and fails silently while
+`codex mcp list` reports it as enabled. Neither plugin this workspace actually
+uses ships an MCP server or a `hooks.json`, so this is a latent trap rather
+than a present one.
+
+## Round 2 — two premises overturned
+
+### Codex does have a project-level config layer
+
+The brief states flatly that a `.codex/config.toml` in a working directory is
+"ignored entirely". That is wrong. There is a real project layer, discovered by
+walking up from cwd, and it carries **instruction context, skills, config, MCP
+servers, and hooks**. It cannot carry marketplaces or plugins — those are
+filtered out separately, not via the documented denylist, so reading the
+denylist alone would give exactly the wrong answer.
+
+Two details shape everything downstream. First, the walk stops at the nearest
+directory holding a `project_root_markers` entry, and that defaults to `.git` —
+so an instance-root payload is invisible from inside a clone unless the marker
+is repointed, and repointing **replaces** `.git` rather than extending it.
+Second, **trust is checked twice by two rules that disagree**: config-layer
+loading falls back through the project root, while the interactive gate consults
+only cwd and the git repo root. A configuration that loads config correctly can
+still block on a trust prompt.
+
+The most useful discovery here: **skills load even from disabled, untrusted
+layers**, deliberately. That makes a loose skill directory the lowest-friction
+delivery channel Codex offers.
+
+### Codex does walk up for context, and the walk is configurable
+
+The round-1 "no upward walk" finding was an artifact of testing outside a git
+repository. The walk is the documented default; cwd-only is the degenerate
+branch when no marker is found. Discovery takes at most one file per directory
+by strict first-match over `AGENTS.override.md`, then `AGENTS.md`, then anything
+listed in `project_doc_fallback_filenames`, concatenated root-to-cwd.
+
+`AGENTS.override.md` outranks a repository's own committed `AGENTS.md`, which is
+the only lever that resolves the collision case — and it resolves it without
+writing a file the repo would notice.
+
+Three traps, each silent. The byte budget (`project_doc_max_bytes`, default
+32768) is **shared across the whole chain and drains root-first**, so an
+oversized upper layer starves exactly the per-repo layer this design exists to
+deliver; truncation is a raw byte cut with no marker and nothing on stderr. An
+empty or whitespace-only file claims its directory's single slot and suppresses
+every remaining candidate. And putting `AGENTS.md` into the fallback list is a
+silent no-op, because a dedup check drops it.
+
+## Round 3 — the architecture decision
+
+Two candidate architectures fell out of round 2, and one question decided
+between them.
+
+**Architecture A** puts the payload at the instance root and repoints
+`project_root_markers` at a niwa marker so the walk climbs past repo roots. It
+works, but the cost is global: `.git` stops being a project-root marker
+**machine-wide**, so every repository outside any niwa instance loses discovery
+of its own `.codex/` and `AGENTS.md` from subdirectories. niwa would be reaching
+outside its sandbox to degrade unrelated work. A badly chosen marker name fails
+even worse — `.niwa` silently hijacked an experiment by matching the user's real
+config directory and treating the entire home directory as the project root.
+
+**Architecture B** writes the payload per cloned repo, found by the default
+`.git` marker with no global change at all.
+
+**The verdict is B, with `<repo>/.codex` symlinked to a single
+`<instance>/.codex`.** The symlink works: config, skills, instruction context,
+and hooks all load, from the repo root and from directories several levels
+below. And `project_doc_max_bytes` — the finding most likely to sink B — can be
+raised from the payload's own config rather than the user's.
+
+A's only remaining advantage was collapsing hook-state entries, and it does not
+even save the trust entries, since the interactive gate keys on the git repo
+root either way. B needs no `CODEX_HOME`, no `project_root_markers`, and no
+denylisted keys. What niwa writes into the developer's personal config reduces
+to one trust line per cloned repo, plus one hook-state entry per repo per
+handler if niwa ships hooks — all scoped to paths inside the instance, all
+removable when the instance is reaped.
+
+Three details the design must get right, each a silent failure if missed:
+
+- The git-exclude pattern must be the bare `.codex`, **not** `.codex/`. niwa's
+  existing idiom for `.niwa/` uses the trailing-slash form, and copying it here
+  would leave permanent dirt in every repo's `git status`.
+- The per-repo context file must be `AGENTS.override.md`, written
+  unconditionally, inlining whatever `AGENTS.md` the repo already commits. Using
+  the `CLAUDE.local.md` fallback instead would work for most repos and silently
+  deliver nothing for any repo that ships its own `AGENTS.md`.
+- That file must carry instance + group + repo content composed together,
+  because the walk stops at the repo root and the upper layers are never
+  visited.
+
+This partially reopens something round 1 had closed. niwa now does write a file
+into each repository's working tree. `CLAUDE.local.md` would have needed no
+exclude work (it already matches the managed `*.local*` pattern), but
+`AGENTS.override.md` and `.codex` both do — so the git-exclude extension the
+brief expected to drop is needed after all, for different files and for a
+different reason than the collision guard, which remains unnecessary because
+`AGENTS.override.md` never overwrites a committed file.
+
+## Round 4 (in flight)
+
+One tension remains between round 1 and round 3. The config-materialization lead
+argued the plugin-cache route dominates loose skills, because loose skills lose
+namespacing and every `${CLAUDE_PLUGIN_ROOT}` reference — but the plugin cache
+lives in a Codex home, which is exactly what the chosen architecture avoids
+needing.
+
+Measuring the real content reframes it: neither plugin this workspace uses ships
+a `hooks.json` or an `.mcp.json`, so two of the three named losses are
+hypothetical. What remains is namespacing and `${CLAUDE_PLUGIN_ROOT}` (370
+occurrences across 90 files in one plugin, 62 across 33 in the other). And the
+same lead separately observed that the variable was **not** expanded even via
+the cache route, leaving "where is it honored" as an open question — so if the
+answer is "nowhere", both routes lose it equally and the argument collapses to
+namespacing alone. The final lead is settling that.
