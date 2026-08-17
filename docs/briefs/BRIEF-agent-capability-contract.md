@@ -1,6 +1,6 @@
 ---
 schema: brief/v1
-status: Draft
+status: Accepted
 problem: |
   niwa's workspace-preparation path is structurally Claude-shaped: the type
   meant to unify agents reaches two of roughly twenty capabilities. There
@@ -23,7 +23,7 @@ motivating_context: |
 
 ## Status
 
-Draft
+Accepted
 
 This brief frames the second attempt at dual-agent workspace preparation. It
 settles the framing: the contract lands first, against existing Claude

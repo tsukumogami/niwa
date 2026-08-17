@@ -1,7 +1,7 @@
 ---
 topic: agent-capability-contract
 chain_started: 2026-08-17T21:25:44Z
-last_updated: 2026-08-17T21:36:00Z
+last_updated: 2026-08-17T21:48:00Z
 phase_pointer: phase-2-chain-orchestration
 visibility: Public
 execution_mode: auto
@@ -16,11 +16,13 @@ planned_chain:
 chain_ran:
   - name: brief
     started_at: 2026-08-17T21:27:00Z
+  - name: prd
+    started_at: 2026-08-17T21:36:00Z
 parent_orchestration:
   parent: scope
   topic: agent-capability-contract
-  child: prd
-  invoked_at: 2026-08-17T21:36:00Z
+  child: design
+  invoked_at: 2026-08-17T21:48:00Z
 chain_skipped: []
 worktree_rebases: []
 worktree_divergences: []
@@ -110,3 +112,35 @@ Carried forward to `/prd` as open questions the PRD must resolve: how far the
 first PR's contract reaches, the MCP delivery shape, the unresolved capability
 matrix rows, and the mechanism for feeding new measurements into the standing
 spike.
+
+## Phase 2 — prd
+
+Invoked `/prd agent-capability-contract --auto`. Returned
+`docs/prds/PRD-agent-capability-contract.md` at Draft, upstream the BRIEF,
+which it transitioned Draft -> Accepted.
+
+Worktree-staleness check: no rebase needed. Impact classification: None.
+
+Validator pass-through: envelope parsed, outcome `clean`, exit 0, zero errors
+and zero notices. Re-run independently by the parent with the same result.
+Boundary and hygiene greps clean.
+
+Consolidation judgment, BRIEF -> PRD: **keep**. Both endpoints are in
+`chain_ran`, so the judgment fires. The citation preflight passes -- the PRD is
+the only citer -- but the BRIEF holds work the PRD does not: the framing that
+the contract repair is warranted on its own, because the dead-accessor defect
+is live on main independent of any Codex work. The PRD states requirements and
+does not carry that argument, and folding would lose the reason the first PR
+is justified without the second. Keep.
+
+Post-`/prd` re-evaluation of the R6 predicates against the real PRD body: all
+three still fire. P1 -- the PRD leaves architectural alternatives open by
+construction, naming settlement paths rather than settling them. P2 -- the PRD
+names a new leaf package and a new executor. P3 -- the PRD carries
+architectural complexity explicitly. No resize; `/design` keeps the maximum
+roster.
+
+The four open questions the BRIEF deferred are closed. Two capability rows
+remain measurement-dependent by design, each with a settlement path and
+requirements covering both outcomes -- and both were subsequently settled
+affirmatively by the extended measurement, which `/design` must fold in.
