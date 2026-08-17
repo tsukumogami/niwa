@@ -643,6 +643,18 @@ func ApplyToWorktree(cfg *config.WorkspaceConfig, configDir, instanceRoot, workt
 	}
 	written = append(written, layerFiles...)
 
+	// 4b. Codex materialization: the same two per-tree writes a clone gets, with
+	//     the framing appended to the composed chain rather than replacing it.
+	//     It runs after the exclude coverage above, which already carries the
+	//     bare ".codex" and "AGENTS.override.md" patterns, so neither write can
+	//     land git-visible -- and after the Claude layer, so the two agents'
+	//     files are written from the same rendered framing.
+	codexFiles, err := installWorktreeCodex(cfg, configDir, opts.OverlayDir, instanceRoot, worktreePath, group, repo, purpose, branch, opts.Stderr)
+	if err != nil {
+		return nil, err
+	}
+	written = append(written, codexFiles...)
+
 	// 5. Worktree-event hooks, run on create/apply. Analog of the instance
 	//    setup-script run: discovered from <configDir>/worktree-hooks/ and
 	//    executed against the worktree, with worktree context in the env.
@@ -742,11 +754,10 @@ func installWorktreeContextLayer(cfg *config.WorkspaceConfig, configDir, instanc
 		return nil, fmt.Errorf("worktree context layer: %w", err)
 	}
 
-	body, err := renderWorktreeLayerBody(cfg, configDir, instanceRoot, worktreePath, repo, purpose, branch)
+	section, err := worktreeContextSection(cfg, configDir, instanceRoot, worktreePath, repo, purpose, branch)
 	if err != nil {
 		return nil, err
 	}
-	section := worktreeContextHeading + "\n\n" + body
 
 	existing, err := os.ReadFile(target)
 	if err != nil && !os.IsNotExist(err) {
@@ -770,6 +781,22 @@ func installWorktreeContextLayer(cfg *config.WorkspaceConfig, configDir, instanc
 		return nil, fmt.Errorf("writing worktree CLAUDE.local.md: %w", err)
 	}
 	return []string{target}, nil
+}
+
+// worktreeContextSection renders the worktree framing -- the stable heading
+// plus the purpose/branch body (or the configured template) -- as one string.
+//
+// Both agents' worktree files are built from this one render: Claude's
+// CLAUDE.local.md splices it in under the heading, and Codex's composed
+// override appends it as the innermost layer of the chain. Rendering it once
+// is what keeps a worktree from telling the two agents different things about
+// what it is for.
+func worktreeContextSection(cfg *config.WorkspaceConfig, configDir, instanceRoot, worktreePath, repo, purpose, branch string) (string, error) {
+	body, err := renderWorktreeLayerBody(cfg, configDir, instanceRoot, worktreePath, repo, purpose, branch)
+	if err != nil {
+		return "", err
+	}
+	return worktreeContextHeading + "\n\n" + body, nil
 }
 
 // worktreeLayerVars builds the template variable map for the worktree layer.

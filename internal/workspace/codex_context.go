@@ -99,7 +99,39 @@ func InstallGroupCodexContext(cfg *config.WorkspaceConfig, configDir, instanceRo
 //     reports what was left out.
 func InstallRepoCodexOverride(cfg *config.WorkspaceConfig, configDir, overlayDir, instanceRoot, groupName, repoName string) (*CodexOverrideResult, error) {
 	repoDir := filepath.Join(instanceRoot, groupName, repoName)
+	return composeCodexOverride(cfg, configDir, overlayDir, instanceRoot, groupName, repoName, repoDir, "")
+}
 
+// InstallWorktreeCodexOverride composes and writes
+// {worktreePath}/AGENTS.override.md: the same instance, group, and repository
+// layers a clone's override carries, with the worktree's own framing appended
+// last and the worktree checkout's committed `AGENTS.md` inlined.
+//
+// The full chain is the point. A worktree root is where Codex's walk stops (a
+// linked worktree's `.git` is a regular file, and the project-root marker check
+// is a bare metadata stat that a file satisfies), so a worktree file carrying
+// the framing alone would leave a session there with no workspace context at
+// all -- the exact silent failure the composition rule exists to prevent. It
+// mirrors what a Claude worktree session already gets, where the lifecycle
+// installs the repository content first and then appends the framing.
+//
+// A worktree is a checkout like any other, so its copy of a committed
+// `AGENTS.md` is inlined under the same regular-file-only rule (see
+// readRegularFileNoFollow) -- read from the worktree, since a worktree on
+// another branch can hold different content than the clone.
+//
+// worktreeLayer is the framing (repository, purpose, branch). It is content
+// data only and is never interpolated into a path.
+func InstallWorktreeCodexOverride(cfg *config.WorkspaceConfig, configDir, overlayDir, instanceRoot, worktreePath, groupName, repoName, worktreeLayer string) (*CodexOverrideResult, error) {
+	return composeCodexOverride(cfg, configDir, overlayDir, instanceRoot, groupName, repoName, worktreePath, worktreeLayer)
+}
+
+// composeCodexOverride is the single composer behind both per-tree overrides.
+// targetDir is the working tree the override is written into -- a clone for
+// InstallRepoCodexOverride, a worktree for InstallWorktreeCodexOverride -- and
+// it is also where the committed context file is read from, so each tree
+// inlines its own checkout's content. worktreeLayer is empty for a clone.
+func composeCodexOverride(cfg *config.WorkspaceConfig, configDir, overlayDir, instanceRoot, groupName, repoName, targetDir, worktreeLayer string) (*CodexOverrideResult, error) {
 	instanceLayer, err := renderInstanceContextLayer(cfg, configDir, instanceRoot)
 	if err != nil {
 		return nil, err
@@ -117,13 +149,14 @@ func InstallRepoCodexOverride(cfg *config.WorkspaceConfig, configDir, overlayDir
 		Instance:   instanceLayer,
 		Group:      groupLayer,
 		Repository: repoLayer.Content,
+		Worktree:   worktreeLayer,
 	}
 
 	// The committed file joins the chain only when niwa has something of its own
 	// to deliver. Composing it alone would produce a file whose entire content is
 	// a copy of the file it displaces.
 	if !ComposeCodexContext(req).Empty() {
-		req.CommittedContextPath = filepath.Join(repoDir, agent.AgentCodex.RootContextFileName())
+		req.CommittedContextPath = filepath.Join(targetDir, agent.AgentCodex.RootContextFileName())
 	}
 
 	composed := ComposeCodexContext(req)
@@ -131,7 +164,7 @@ func InstallRepoCodexOverride(cfg *config.WorkspaceConfig, configDir, overlayDir
 		return &CodexOverrideResult{}, nil
 	}
 
-	target := filepath.Join(repoDir, CodexOverrideFileName)
+	target := filepath.Join(targetDir, CodexOverrideFileName)
 	if err := writeContextFile(target, composed.Content); err != nil {
 		return nil, err
 	}
