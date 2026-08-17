@@ -13,16 +13,17 @@ problem: |
   the mechanics of each enforcement test.
 decision: |
   A new leaf package, internal/agentplan, holds the closed capability set,
-  the per-agent declaration table (two states, reason kinds, Requires
-  edges), and per-agent plan producers that read inputs and declare outputs
-  as data. internal/workspace gains one agent-blind executor over a closed
-  four-op set (write-file, append-line, replace-section, deliver-tree).
-  Three structural tests (AST layout scan, exhaustiveness/plan-shape table
-  test, wiring test) plus a ManagedFiles-based characterization test
-  committed before the refactor enforce every claim. MCP delivery is
-  generated from a structured agent-neutral declaration, validated before
-  writing. The content config rename and the claude.enabled restructure
-  both land in PR 2.
+  the per-agent declaration table (two states, three reason kinds, Requires
+  edges, a delivery Route), and per-agent plan producers that read inputs
+  and declare outputs as data. internal/workspace gains one agent-blind
+  executor over a closed four-op set. Three structural test families -- an
+  AST layout scan, a pure declaration/plan-shape suite, and route-wise
+  wiring and binding checks -- plus a ManagedFiles-based characterization
+  test committed before the refactor enforce every claim. MCP and session
+  environment ride new agent-neutral config surfaces that generate both
+  agents' native formats, validated and fully resolved before writing. The
+  content table reverts to the agent-neutral [content] spelling openly;
+  claude.enabled is restructured, not renamed.
 rationale: |
   The codebase already separates "decide what to say" from "write it"
   almost everywhere; the plan model names that existing shape once instead
@@ -31,7 +32,9 @@ rationale: |
   tmpdir, which is what makes the prior attempt's failure -- a seam threaded
   everywhere and load-bearing nowhere -- structurally unrepeatable: bytes
   reach disk only through a plan, and plans only come from a function that
-  takes the agent.
+  takes the agent. Measured codex-cli 0.147.0 behavior dictates
+  validate-before-write, collision detection, and full value resolution
+  rather than leaving them to taste.
 ---
 
 # DESIGN: agent capability contract
@@ -42,8 +45,8 @@ Current
 
 This design owns the mechanism for the agent capability contract: the
 package layout, the plan types and closed operation set, the declaration
-model and its tests, the no-behavior-change proof, the MCP generation
-surface, the configuration rename and gate restructure, and the
+model and its tests, the no-behavior-change proof, the MCP and environment
+generation surfaces, the configuration rename and gate restructure, and the
 secret-hygiene obligations. The upstream PRD owns the requirements
 (R1-R24, N1-N3) and the 24-row capability matrix; this design cites them
 and does not re-open them. Codex discovery mechanics are consumed from the
@@ -54,16 +57,27 @@ them.
 
 ## Context and Problem Statement
 
-niwa's workspace-preparation path delivers roughly twenty-four
-capabilities -- context files, settings, hooks, plugins, skills,
-environment, trust, git-exclude bookkeeping -- and nearly all of it is
-Claude-shaped by construction. The `agent.Agent` type governs two of those
-capabilities; everything else takes no agent parameter and runs
-Claude-shaped unconditionally. The defect is live on main:
-`agent.LocalContextFileName()` has zero callers anywhere in the module,
-because the two functions that accept an agent parameter use it only as a
-run/skip gate and then hardcode `"CLAUDE.local.md"` inside the gated body
-(`internal/workspace/content.go:156`, `worktree_content.go:743`).
+When `niwa apply` prepares an instance, `runPipeline`
+(`internal/workspace/apply.go`) drives five materialization levels --
+workspace root, instance root, group directories, cloned repositories, live
+worktrees -- through writers that produce context files, settings
+documents, hook scripts, env files, and distributed files. The
+`agent.Agent` type (`internal/agent/agent.go`) was meant to make that path
+agent-aware. On main it governs almost nothing:
+
+- Three call sites route a filename through `ag.RootContextFileName()`
+  (`content.go:44`, `content.go:73`, `root_materializer.go:375`). That is
+  the whole of the working agent-awareness.
+- Two functions accept an agent parameter, use it only as a run/skip gate,
+  and then hardcode `"CLAUDE.local.md"` inside the gated body
+  (`InstallRepoContentTo`, `content.go:156/186/208`;
+  `installWorktreeContextLayer`, `worktree_content.go:743`).
+  `agent.LocalContextFileName()`, the accessor that was supposed to make
+  those writes agent-aware, has zero callers anywhere in the module.
+- Everything else takes no agent parameter and writes Claude-shaped output
+  unconditionally: `InstallWorkspaceContext`, the overlay and global
+  content installers, root and instance settings, and the hooks, env, and
+  files materializers.
 
 The first Codex attempt (tsukumogami/niwa#248, branch retained at
 `docs/dual-agent-workspace`) shipped exactly the failure its own design
@@ -85,32 +99,52 @@ mechanical proof that nothing observable changed.
   test that goes red on regression (R4, R5, R6). The prior attempt's
   lesson: a structure no test can fail on will not survive its first
   implementation.
+- **Assertability without a filesystem.** The cheaper a structural
+  property is to check, the more of them the design can afford. Properties
+  checkable in a pure table test are strongly preferred over properties
+  that need a provisioned instance and a tree walk.
 - **The first PR must be invisible.** No behavior change, no config
   surface change, provable mechanically rather than by diff audit (R9,
   R10, N2).
 - **Honesty over coverage.** Every (capability, agent) pair is implemented
-  or declared unavailable with a machine-readable reason; the user guide's
-  gap list is generated from those declarations (R2, R22).
+  or declared unavailable with a machine-readable reason; the guide's gap
+  list is generated from those declarations, and no third state exists for
+  a real gap to hide inside (R2, R3, R22).
 - **House style, not invention.** The repo's precedents govern:
   `internal/vault`'s fail-closed registry posture, leaf packages carved
   out with a stated caller and cycle (`internal/gitexclude`,
-  `internal/envformat`, `internal/keyreport`), the
-  `[content]` -> `[claude.content]` rename mechanism
-  (docs/designs/current/DESIGN-claude-key-consolidation.md, commit
-  81aae0b). There is no in-repo precedent for per-agent files
+  `internal/envformat`, `internal/keyreport`), and the recorded config
+  rename mechanism (docs/designs/current/DESIGN-claude-key-consolidation.md,
+  commit 81aae0b). There is no in-repo precedent for per-agent files
   (`foo_claude.go` / `foo_codex.go`); per-agent variation is always a
   method with branches or a map keyed by `agent.Agent`.
+- **No dead seams.** A type, op, field, or precondition is introduced in
+  the PR that first uses it. Shipping structure ahead of its consumer is
+  the prior attempt's failure in miniature.
 - **Standard toolchain only.** Structural and characterization tests use
-  `go/ast`, `go/parser`, `go/token`; no new module dependency (N1).
-- **Measured Codex behavior is authoritative.** Whole-config load failure
-  on one malformed entry, recursive field-level layer merge, no SSE
-  transport, no `${VAR}` interpolation, trust-gated project layer -- all
-  measured against codex-cli 0.147.0 and recorded in the PRD; the design
-  treats them as hard constraints, never as assumptions to revisit.
+  `go/ast`, `go/parser`, `go/token`; no new module dependency, and CI
+  stays `gofmt -l .`, `go vet ./...`, `go test -race ./...` (N1, N3).
+- **Measured Codex behavior is authoritative.** The merge, failure,
+  transport, and trust semantics of codex-cli 0.147.0 (spelled out in
+  Decision 5) are measured facts this design builds on, never assumptions
+  to revisit. Two attempts to reason about them from outside got them
+  wrong in opposite directions.
 
 ## Considered Options
 
 ### Decision 1 -- structural shape: plan-producing leaf package plus an agent-blind executor (R4, R5, R6, R11)
+
+The decisive observation is that the codebase has already separated
+"decide what to say" from "write it" almost everywhere, deliberately.
+`buildSettingsDoc` (`materialize.go:654-940`) builds the whole settings
+document and performs no write; `renderContentFile` (`content.go:255-268`)
+is documented as render-only, existing "so the write-path and
+render-to-string paths cannot drift"; the context generators, hook
+resolution helpers, and git-exclude block renderer are all pure. The 21
+write sites in scope are uniformly `os.MkdirAll` plus `os.WriteFile` with
+one of three permission values, and the bookkeeping afterwards consumes
+only a flat path list plus a provenance side map (`apply.go:1701-1718`,
+`state.go:184-190`).
 
 **Option A (chosen): a leaf package producing declarative plans, one
 generic executor in `internal/workspace`.**
@@ -118,14 +152,11 @@ generic executor in `internal/workspace`.**
 A new leaf package, `internal/agentplan` -- sibling to `internal/agent`,
 importing `internal/agent` and `internal/config` and nothing above them --
 holds three things: the closed capability enumeration with its per-agent
-declaration table (Decision 2), the plan types below, and per-agent plan
-producers, which are functions from narrow config inputs to a `Plan`.
+declaration table (Decision 2), the plan vocabulary below, and per-agent
+plan producers, which are functions from narrow config inputs to a `Plan`.
 `internal/workspace` gains one executor, `applyPlan`, that implements a
 closed operation set and contains no agent name and no agent context
 filename.
-
-The closed operation set, sized empirically from the write sites in scope
-on main:
 
 ```go
 // Op is the closed set of primitive operations an agent's plan may
@@ -137,7 +168,7 @@ const (
     OpWriteFile      Op = iota // write Content at Path, with Mode
     OpAppendLine               // append Content to Path unless already present
     OpReplaceSection           // replace the region delimited by Marker
-    OpDeliverTree              // symlink Source at Path; copy on failure
+    OpDeliverTree              // symlink Source at Path; copy on failure (PR 2)
 )
 
 // Precondition is the closed set of conditions gating an entry.
@@ -146,130 +177,169 @@ type Precondition uint8
 const (
     Always          Precondition = iota
     IfSourceExists               // stat Source first; absent means no-op
-    IfNotForeign                 // consult the ownership verdict at write time
+    IfNotForeign                 // consult the ownership verdict at write time (PR 2)
 )
 
 // Entry is one declared write.
 type Entry struct {
-    Op        Op
-    Path      string        // absolute target
-    Content   []byte        // OpWriteFile / OpAppendLine / OpReplaceSection
-    Source    string        // OpDeliverTree source; IfSourceExists probe path
-    Mode      os.FileMode   // 0o600, 0o644, or 0o755
-    Marker    string        // OpReplaceSection delimiter
-    Pre       Precondition
-    Managed   bool          // participates in ManagedFiles + cleanup
-    ExcludeAs string        // extra git-exclude pattern implied, "" for none
-    Sources   []SourceEntry // provenance, for SourceFingerprint
+    Capability Capability    // which declared capability this write delivers
+    Op         Op
+    Path       string        // absolute target
+    Content    []byte        // OpWriteFile / OpAppendLine / OpReplaceSection
+    Source     string        // OpDeliverTree source; IfSourceExists probe path
+    Mode       os.FileMode   // 0o600, 0o644, or 0o755
+    Marker     string        // OpReplaceSection delimiter
+    Pre        Precondition
+    Managed    bool          // participates in ManagedFiles + cleanup
+    ExcludeAs  string        // extra git-exclude pattern implied, "" for none
+    Sources    []SourceEntry // provenance, for SourceFingerprint
 }
 
 // Plan is one agent's whole declared output for one level.
 type Plan struct {
     Entries  []Entry
-    Exempt   []string // paths cleanup must not delete though not produced
     Warnings []string // conflicts, refusals, hoist omissions
+    // Exempt []string -- added in PR 2 with the Codex conflict rule:
+    // paths cleanup must not delete although this apply didn't produce them.
 }
 ```
 
 Four ops suffice because the evidence says so, not because the model hopes
-so: the write sites in the preparation path are `os.MkdirAll` plus
-`os.WriteFile` with one of three modes, and each site that isn't is
-already a single named helper with a documented closed rule -- the
+so: 21 of the write sites in scope are plain writes, and the three that
+aren't are each a single named helper with a documented closed rule -- the
 `@import` accumulation in `.claude/rules/workspace-imports.md`
-(append-unless-present, `workspace_context.go`), the worktree context
-layer's delimited-section replace (`worktree_content.go`), and the Codex
-payload's symlink-or-bounded-copy delivery on the prior branch
-(`OpDeliverTree`, the one op whose implementation is genuinely imperative
-and lives in the executor). If a fifth op is ever needed, that is a design
-conversation -- the correct price for adding a new way niwa touches a
-user's repository.
+(`workspace_context.go:137-155`, becomes `OpAppendLine`), the worktree
+context layer's delimited-section replace (`worktree_content.go:754-767`,
+becomes `OpReplaceSection`), and the Codex payload's
+symlink-or-bounded-copy delivery on the retained branch (`OpDeliverTree`,
+the one op whose implementation is genuinely imperative and lives in the
+executor). If a fifth op is ever needed, that is a design conversation --
+the correct price for a new way niwa touches a user's repository.
+
+**Nothing lands before its consumer.** PR 1 introduces the first three ops
+and the first two preconditions. `OpDeliverTree`, `IfNotForeign`, and
+`Plan.Exempt` land in PR 2 alongside the Codex payload delivery and the
+conflict verdict that need them. Introducing them unused in PR 1 would
+reproduce, in miniature, the exact defect this work exists to remove: a
+seam with no live consumer.
 
 The bookkeeping vocabulary is three fields (`Managed`, `ExcludeAs`,
 `Sources`) because niwa's managed-file machinery is a post-hoc pass over a
-flat path list, not something writers participate in: `runPipeline` Step 7
-walks written paths, hashes each, and builds
-`ManagedFile{Path, ContentHash, SourceFingerprint, Sources, Generated}`
-(`internal/workspace/apply.go:1695-1718`, `state.go:184-190`), cleanup
-deletes prior-state paths absent from the produced set, and git-exclude is
-one idempotent call per repo. `Exempt` is the one new concept, and it
-exists for a documented reason on the prior branch: the Codex conflict
-verdict needs "do not delete a path I refused to write." It is introduced
-in PR 2 with its first consumer, not in PR 1 as a dead field -- an unused
-seam is the exact smell this work exists to remove.
+flat path list, not something writers participate in. Pipeline integration
+is correspondingly small: Step 7 reads `Managed` and `Sources` off entries
+instead of a bare slice plus a side map, and the per-repo git-exclude call
+collects `ExcludeAs` patterns.
 
 The boundary is stated as **reads inputs, declares outputs** -- not
-"pure." The plan producers do read: niwa-owned content sources, overlay
-stat probes, and (in PR 2) a guarded `O_NOFOLLOW` read of a repository's
-own committed context file. What they never do is write or launch
-anything, and that line is mechanically checkable: an AST test asserts the
-leaf package never calls `os.WriteFile`, `os.MkdirAll`, `os.Symlink`,
-`os.Remove`, `os.Chmod`, or `exec.Command` (Decision 3, test 1). "Pure"
-would be a nicer word and a false claim; "reads inputs, declares outputs"
-is the honest boundary and it is just as enforceable.
+"pure." The producers do read: niwa-owned content sources, overlay stat
+probes, and (in PR 2) a guarded `O_NOFOLLOW` read of a repository's own
+committed context file. What they never do is write or launch anything,
+and that line is mechanically checkable (Decision 3, family 1). "Pure"
+would be a nicer word and a false claim.
 
-One supporting move: `SourceEntry` and `ComputeSourceFingerprint`
-(`internal/workspace/state.go:198-249`) migrate into the leaf so plan
-entries can carry provenance without an import cycle. They are pure
-metadata -- four strings and a sha256-plus-sort, documented as never
-carrying secret material -- and their JSON tags and the state schema do
-not change. `EffectiveConfig` (`internal/workspace/override.go:17-37`)
-does not move: the plan producers take narrow input structs that
-`internal/workspace` fills, matching the house idiom of call-site-sized
-inputs, rather than dragging a 31-reference workspace type down a layer.
+Two mechanics keep the boundary honest where the prior attempt's leaked:
+
+- **Probes are declared by the leaf, executed by the workspace, and fed
+  back as data.** Anything that must read foreign content in the target
+  tree or run a subprocess -- the Codex ownership and conflict detection
+  (Lstat, `git ls-files`, bounded marker probe), the harness version probe
+  -- stays out of the leaf. The leaf declares what to probe; the workspace
+  runs the probe in a pre-pass, exactly as `WorktreeDelegation` is computed
+  once and threaded today, and passes the verdict into the producer as
+  input. The leaf stays exec-free and write-free by construction, so the
+  AST scan stays exact rather than becoming a list of exceptions.
+- **`SourceEntry` and `ComputeSourceFingerprint` move down** from
+  `internal/workspace/state.go:198-249` into the leaf so plan entries can
+  carry provenance without an import cycle, with a type alias left behind
+  (`type SourceEntry = agentplan.SourceEntry`) so the state schema, the
+  JSON tags, and the existing references don't change. They are four
+  strings and a sha256-plus-sort, documented as pure metadata that never
+  carries secret material. `EffectiveConfig` (`override.go:17-37`) does
+  not move: producers take narrow input structs `internal/workspace`
+  fills, matching the house idiom of call-site-sized inputs.
+
+**Capabilities that aren't file deliveries aren't forced into a file
+shape.** Each capability carries a delivery `Route` (Decision 2):
+plan-borne rows flow through `applyPlan`; procedure-borne rows (directory
+trust, plugin installation, git-exclude bookkeeping) bind named procedures
+registered against the declaration table; launch-borne rows (dispatch,
+keep-alive) gate the launch path on a declaration lookup. Side effects
+outside the instance stay where they are architecturally and are bound to
+the table rather than rewritten as plan entries -- the contract governs
+them without pretending they are writes into the workspace.
 
 **Option B (rejected): an interface implemented inside
 `internal/workspace`, with per-agent files.**
 
 Define `AgentMaterializer` in `internal/workspace`, implement it in
-`materialize_claude.go` and (later) `materialize_codex.go`, and have the
-pipeline iterate implementations. Its real advantages deserve stating: it
-is the conventional Go answer; it needs no new package, no type moves, and
-no executor; each agent's logic sits in one file a reviewer can read
-top-to-bottom; and the diff for PR 1 would be smaller.
-
-It loses on the properties this feature exists for. Its only observable is
-the filesystem, so every contract assertion costs a tmpdir and a full
-apply -- there is no cheap way to ask "what would Codex get?" without
-provisioning an instance and walking the tree. The layout test (Decision
-3, test 1) survives, but the plan-shape and wiring tests do not exist in
-this shape at all: an interface method that writes directly can hardcode a
-filename three lines above its `return nil` and nothing but a filesystem
-diff notices. That is not hypothetical -- it is the mechanism by which
-tsukumogami/niwa#248 failed while compiling cleanly. And the
+`materialize_claude.go` and later `materialize_codex.go`, and have the
+pipeline iterate implementations. Its advantages deserve stating: it is
+the conventional Go answer, it needs no new package, no type moves, and no
+executor, each agent's logic sits in one readable file, and PR 1's diff
+would be smaller. It loses on the properties this feature exists for. Its
+only observable is the filesystem, so every contract assertion costs a
+tmpdir and a full apply, and the plan-shape and wiring tests don't exist
+in this shape at all: an interface method that writes directly can
+hardcode a filename three lines above its `return nil` and nothing but a
+filesystem diff notices. That is not hypothetical -- it is the mechanism
+by which tsukumogami/niwa#248 failed while compiling cleanly. And the
 `foo_claude.go` / `foo_codex.go` convention has no precedent anywhere in
-this repo; `internal/workspace` has never been split, and the repo's
-established shape for a closed agent set is branches or maps over
-`agent.Agent`, not per-implementation files.
+this repo.
+
+**Option C (rejected): more accessors on `internal/agent`.** Scale up the
+`RootContextFileName()` pattern. Accessors don't compose into a checkable
+completeness property -- `LocalContextFileName()` is the standing proof
+that an accessor can exist, be documented, and be dead. Two-of-twenty-four
+coverage on main is the result of this shape, not a partial adoption of
+it.
+
+**Option D (rejected): a `vault`-style registry of per-agent
+materializers.** vault's Factory/Registry shape serves an open, pluggable
+set where implementations self-register from separate packages; the agent
+set is closed and enumerated. Its fail-closed posture is adopted -- in the
+binding test and the table lookups -- without the open-set machinery, and
+a plain interface registry shares Option B's filesystem-only
+observability problem.
 
 **Chosen: Option A.** It is the generalization of a shape niwa has already
-built four separate times ad hoc -- `WorktreeDelegation` (a decision
-computed once, threaded as data to writers), the prior branch's
-`CodexRepoVerdict` (a detection pass consulted by writers and cleanup),
-`InstalledHooks` (one materializer's output consumed as another's input),
-and the rendered context layers. The plan is the fifth instance, named
-once. And it is the only option under which the agent parameter is
-load-bearing by construction: there is no path from config to bytes that
-bypasses `Plan(agent, inputs)`.
+built four times ad hoc -- `WorktreeDelegation` (a decision computed once,
+threaded as data to writers), the prior branch's `CodexRepoVerdict` (a
+detection pass consulted by writers and cleanup), `InstalledHooks` (one
+materializer's output consumed as another's input), and the rendered
+context layers. The plan is the fifth instance, named once. And it is the
+only option under which the agent parameter is load-bearing by
+construction: there is no path from config to bytes that bypasses
+`Plan(agent, inputs)`.
 
-### Decision 2 -- capability state model: two states, required reasons, requirement edges (R1, R2, R3)
+### Decision 2 -- capability state model and the settled matrix (R1, R2, R3, R21)
 
-**Chosen: two states, a required reason kind on unavailability, and
-`Requires []Capability` edges on implementation.**
+**Chosen: two states, a required reason kind on unavailability,
+`Requires []Capability` edges on implementation, and a delivery `Route`.**
 
 ```go
-type State int
+type Capability uint8 // closed enumeration; Capabilities() returns all 24
+
+type State uint8
 
 const (
     StateImplemented State = iota + 1
     StateUnavailable
 )
 
-type ReasonKind int
+type ReasonKind uint8
 
 const (
     ReasonAgentCannotReceive ReasonKind = iota + 1 // the agent's own mechanics put it out of reach
-    ReasonNoSuchConcept                            // the thing does not exist for this agent
-    ReasonNotBuilt                                 // a route exists that niwa has not built
+    ReasonNoSuchConcept                            // the concept doesn't exist for this agent
+    ReasonNotBuilt                                 // a route exists; niwa hasn't built it
+)
+
+type Route uint8
+
+const (
+    RoutePlan      Route = iota + 1 // delivered as plan entries via the executor
+    RouteProcedure                  // delivered by a named registered procedure
+    RouteLaunch                     // consulted by the session-launch path
 )
 
 type Declaration struct {
@@ -282,529 +352,777 @@ type Declaration struct {
 }
 ```
 
-The capability set is the PRD's 24 rows, exported and enumerable
-(`agentplan.All()`), with the two deliberate exclusions recorded beside it
-so the closure doesn't look arbitrary: vault-backed secret resolution (an
-upstream source feeding environment delivery, not something a session
-receives) and the `claude.enabled` gate (a gate over deliveries, not a
-delivery -- see Decision 6). `internal/agent` gains an exported
-`agent.All()`; today `known` is unexported and every "for each agent" test
-hand-lists the two constants.
+The table is a package-level slice, one `Declaration` per (capability,
+agent) pair, with the two deliberate exclusions recorded beside it so the
+closure doesn't look arbitrary (R1): vault-backed secret resolution (an
+upstream source feeding rows 9 and 10, not something a session receives)
+and the `claude.enabled` gate (a gate over deliveries, not a delivery --
+Decision 6). Two supporting exports the tests need and today's code lacks:
+`Capabilities()`, and `agent.All()` (today `agent.known` is unexported and
+every "for each agent" test hand-lists the two constants).
 
-**Why a third "conditional" state was rejected.** The tempting middle
-state -- "implemented, but only when the directory is trusted" -- rests on
-a misreading. Codex's project layer is inert without a trust entry in the
-developer's own configuration, but niwa is not a project layer: it is a
-tool the developer runs on their own machine, and the prior branch already
-built the trust write (`codex_trust.go` on `docs/dual-agent-workspace`:
-TOML-surgical, additive, lock-serialized, canonical paths, retracting only
-keys niwa itself wrote). Trust is therefore a capability niwa delivers --
-row 23 of the PRD's matrix -- not a precondition it waits on. Once named,
-everything "conditional" becomes plainly implemented with an edge:
+**Why no third state.** The tempting middle state -- "implemented, but
+only when the directory is trusted" -- dissolves once directory trust is
+named as a capability niwa itself delivers. It is: the prior branch's
+trust writer (`codex_trust.go` on `docs/dual-agent-workspace`) performs a
+TOML-surgical, additive, lock-serialized edit of the developer's own Codex
+config, retracting only keys niwa wrote, and four retained acceptance
+scenarios pin its behavior. So trust-dependent rows are plainly
+`StateImplemented` with `Requires: [DirectoryTrust]`, and the closure test
+makes that honest by construction -- declaring Codex MCP implemented while
+Codex trust is unavailable fails CI, the PRD's canonical failing case. A
+"conditional" state would have absorbed exactly that drift, and it would
+force the gap-list generator to judge rather than filter, which is the
+prior attempt's documentation failure in new clothes. A free-text
+precondition field fails the same way: it moves the honesty burden into
+prose nothing can check. `Requires` is the same idea with a closed domain
+-- a precondition is expressible only if it is itself a capability niwa
+implements or declares unavailable. Anything niwa can't own (an OS
+feature, a developer declining a prompt) isn't expressible, which forces
+the honest answer: `StateUnavailable` with a reason. The type system
+refuses "works, sort of, if."
 
-```
-MCPServers(codex).Requires      = [DirectoryTrust]
-SessionEnv(codex).Requires      = [DirectoryTrust]
-RepoContext(codex).Requires     = [DirectoryTrust]
-ApprovalPosture(codex).Requires = [DirectoryTrust]
-DirectoryTrust(codex).State     = StateImplemented
-```
+The accepted cost: a few rows read oddly for one agent out of context
+(`DirectoryTrust` is unavailable/no-such-concept for Claude). The guide
+renders no-such-concept rows as short "does not apply" notes and the other
+two kinds as the gap list proper -- a rendering rule over an enum, not a
+judgment call.
 
-and the closure test -- every capability named in `Requires` is itself
-implemented for the same agent, and the graph is acyclic -- enforces the
-honesty by construction. Declaring Codex MCP implemented while trust is
-unavailable is a test failure, the PRD's canonical failing case. A soft
-"conditional" state would have absorbed exactly that error instead of
-catching it, and it would have forced the guide's gap-list generator to
-make a judgment about which conditional rows count as gaps -- the precise
-failure mode of the prior attempt's scattered documentation. Two states
-keep the generator a filter (R22).
+**The settled matrix.** The PRD's 24 rows, with the delivery route each
+capability binds through:
 
-Preconditions niwa cannot own -- the developer declining a prompt, an OS
-feature -- are not expressible as requirements, because a requirement must
-name a capability. That forces the honest declaration: `StateUnavailable`
-with a reason. The type system refuses "works, sort of, if."
+| # | Capability | Route | Claude | Codex | Codex reason / notes |
+|---|---|---|---|---|---|
+| 1 | Workspace/group orientation reaches a repo session | Plan | I | I | Composed into each repo's own context file (the only placement Codex reads) |
+| 2 | Root-started session is oriented | Plan | I | U(cannot-receive) | Codex reads context only from the nearest project-root marker downward; an instance root has none |
+| 3 | Repo-level orientation doc | Plan | I | I | Requires: DirectoryTrust (byte-budget override) |
+| 4 | Worktree-level orientation doc | Plan | I | I | Requires: DirectoryTrust; a linked worktree's `.git` pointer file satisfies the project-root marker (measured, R13) |
+| 5 | Workspace-declared plugin skills | Plan | I | I | Loads even untrusted; must not depend on Claude Code's presence (R14) |
+| 6 | Marketplace/plugin registration | Procedure | I | U(cannot-receive) | Registration lives in the developer's own configuration; skills are delivered directly instead |
+| 7 | Named subagent types | Plan | I | U(no-such-concept) | Codex caches a plugin's agents directory and never surfaces it |
+| 8 | MCP servers available to the session | Plan | I | I | Via Decision 5; Requires: DirectoryTrust |
+| 9 | Environment variables in the session | Plan | I | I | Via Decision 5; Requires: DirectoryTrust (measured, not inferred) |
+| 10 | Dotenv files at declared paths | Plan | I | I | Agent-agnostic |
+| 11 | Arbitrary file distribution | Plan | I | I | Agent-agnostic |
+| 12 | Approval/sandbox posture | Plan | I | I | Via R21 and the discussion below; Requires: DirectoryTrust |
+| 13 | Hooks (lifecycle commands) | Plan | I | U(cannot-receive) | No demonstrated route installs a niwa-owned hook without a blocking review prompt |
+| 14 | Work-summary hooks | Plan | I (Requires: Hooks) | U(cannot-receive) | Delivered as hooks; follows row 13 |
+| 15 | PR-body hook | Plan | I (Requires: Hooks) | U(cannot-receive) | Delivered as a hook; follows row 13 |
+| 16 | Worktree-hook delegation / deny fallback | Plan | I | U(no-such-concept) | Claude Code harness surface; Codex has neither the events nor the tools |
+| 17 | Ephemeral-session provisioning | Plan | I (Requires: Hooks) | U(cannot-receive) | Rides a session-start hook and the harness job-state file |
+| 18 | Root-installed project skills | Plan | I | U(cannot-receive) | Serve root-started sessions, where Codex reads no configuration |
+| 19 | niwa's own plugin (migrate-config) | Procedure | I | U(not-built) | Codex accepts the identical manifest; wiring unbuilt, out of scope (PRD) |
+| 20 | Remote-control-at-startup | Plan | I | U(no-such-concept) | Names claude.ai's remote-control bridge |
+| 21 | Dispatch keep-alive | Launch | I (Requires: Dispatch) | U(no-such-concept) | No background-session bridge to keep warm |
+| 22 | Launching a background worker | Launch | I | U(not-built) | Launch path refuses non-Claude; the model table already carries Codex entries; out of scope (PRD) |
+| 23 | Per-directory trust bootstrap | Procedure | U(no-such-concept) | I | Claude Code keeps no per-directory trust record |
+| 24 | Git-exclude bookkeeping | Procedure | I | I | Agent-agnostic; covers Codex-side names exactly as Claude-side ones |
 
-The accepted cost: a few rows read oddly for one agent out of context.
-`DirectoryTrust` for Claude is `ReasonNoSuchConcept` (Claude Code keeps no
-per-directory trust record). The guide renders `ReasonNoSuchConcept` rows
-as short "does not apply" notes and the other two kinds as the gap list
-proper -- a rendering rule over an enum, not a judgment call.
+Totals once PR 2 lands: Codex 11 implemented, 13 unavailable (7
+cannot-receive, 4 no-such-concept, 2 not-built); Claude 23 implemented, 1
+unavailable. In PR 1 the Codex column states main's truth (R11): the seven
+cannot-receive and four no-such-concept rows already carry their inherent
+reasons, and every row PR 2 will implement is declared not-built until PR
+2 flips it.
 
-### Decision 3 -- the three structural tests (R5, R6, N1)
+**Row 12 is delivered, and the third safety property is why.** The
+measurement resolved settability affirmatively: `approval_policy` and
+`sandbox_mode` both take effect from a trusted project layer and both
+revert when the trust entry is removed. They are not on the project-layer
+denylist -- measured at eight denylisted keys (provider endpoints,
+`notify`, `profile`, and two realtime endpoints), which self-enumerates
+via the startup-warning row of `codex doctor --json`.
 
-All three use only `go/parser`, `go/ast`, and `go/token`; they run under
-the existing `go test -race ./...` with no new dependency.
+There is a real objection to delivering it: niwa writes the trust entries
+itself (row 23), so a workspace-declared posture takes effect on a
+developer's machine without a separate consent step from that developer.
+The objection doesn't survive contact with what niwa already ships for the
+first agent. `permissionsMapping`
+(`internal/workspace/materialize.go:295-298`) translates a workspace-level
+`permissions` declaration straight onto Claude Code's `bypassPermissions`,
+which `buildSettingsDoc` emits as `permissions.defaultMode`
+(`materialize.go:669`). A workspace author can already relax a developer's
+Claude Code approval posture through workspace config today. Declaring the
+second agent's equivalent unavailable on security grounds, while the first
+agent's ships, would build in exactly the asymmetry this work exists to
+remove -- and it would put a measured, working route on the generated gap
+list, which is a lie the gap list is designed not to tell.
 
-**Test 1: the layout scan (R5, R6).** An AST walk over non-test files
-asserting two things. In `internal/workspace`: no file names
-`agent.AgentClaude` or `agent.AgentCodex` in code, and no string literal
-in {`"CLAUDE.md"`, `"CLAUDE.local.md"`, `"AGENTS.md"`,
-`"AGENTS.override.md"`} appears. In `internal/agentplan`: no call to
-`os.WriteFile`, `os.MkdirAll`, `os.Symlink`, `os.Remove`, `os.Chmod`, or
-`exec.Command` -- the mechanical form of "reads inputs, declares outputs"
-(R6).
+So the capability is implemented, with R21's three safety properties:
 
-The agent-constant half passes on today's tree (the only occurrences are
-in comments). The filename-literal half is **red on main at eight sites**:
-`content.go:156`, `content.go:186`, `content.go:208`,
-`worktree_content.go:743`, `workspace_context.go:196`,
-`workspace_context.go:229`, `workspace_context.go:411`, and the dead
-`rootClaudeFile` constant at `root_materializer.go:51` (referenced only
-from its own test file). This is a feature, not a defect: a structural
-test that is red before the conversion and green after is itself a
-deliverable of PR 1, and it proves the test can fail -- the exact property
-the prior attempt's structure lacked. R5 requires precisely this
-meaningful-on-day-one behavior.
+1. **Opt-in and absent by default.** With no posture declared in workspace
+   config, niwa writes neither `approval_policy` nor `sandbox_mode`, and
+   Codex's own defaults apply unchanged. niwa is never the reason a session
+   runs with weaker guardrails than the developer chose for themselves. The
+   absent-declaration case is asserted directly, not inferred.
+2. **What niwa writes is reported at apply time.** A posture change is
+   never silent.
+3. **Approvals and sandbox stay separate decisions, and niwa never derives
+   one from the other.** This property exists because of a real asymmetry
+   between the two agents: Codex's most complete approval suppression,
+   `sandbox_mode = "danger-full-access"`, collapses approvals and *both*
+   sandboxes -- filesystem and network -- into a single setting. Claude
+   Code's `bypassPermissions` does not do that; it relaxes approvals
+   without a sandbox dimension to take with it. A generator that inferred
+   "the workspace wants fewer prompts" into a Codex sandbox setting would
+   therefore disable sandboxing as an unstated side effect of a
+   declaration that never mentioned it. niwa maps approval posture to
+   `approval_policy` and sandbox posture to `sandbox_mode`, each only from
+   its own declared source, and a test asserts that no approval-only
+   declaration produces a `sandbox_mode` key.
 
-**Test 2: the exhaustiveness and plan-shape table test (R2, R3, R4).** A
-pure table test over `agent.All() x agentplan.All()`, no tmpdir, no
-filesystem, no built binary:
+**Rejected alternatives to the state model.** A third "conditional" state
+(the soft word a real gap hides inside). An orthogonal free-text
+precondition field on implemented rows (two states nominally, prose
+nothing can check in practice). A level dimension
+(root/instance/repo/worktree) on every capability: rows were split where
+the per-agent answer genuinely differs by level (rows 2, 3, 4) and nowhere
+else, so a level dimension would multiply the matrix by four for one
+distinction already captured.
 
-- exactly one `Declaration` per pair; a missing or duplicate pair fails,
-  and deleting any single declaration makes it fail;
-- well-formedness: `StateUnavailable` implies non-empty `Reason` and an
-  in-range `Kind`; `StateImplemented` implies both zero; `Requires` empty
-  unless implemented;
-- closure: every required capability implemented for the same agent,
-  graph acyclic;
-- plan shape: for the Codex producer, no entry's `Path` ends in
-  `CLAUDE.md` or `CLAUDE.local.md`; for the Claude producer, none ends in
-  `AGENTS.override.md`; every entry's `Op` and `Pre` are members of the
-  closed sets; and each entry maps to a capability the table declares
-  implemented for that agent -- while every implemented declaration is
-  claimed by at least one producer path or registered delivery, closing
-  both drift directions of R4.
+### Decision 3 -- the three enforcement-test families (R4, R5, R6, R22, N1)
 
-This is the test that catches tsukumogami/niwa#248's exact regression.
-That PR iterated a hardcoded agent slice at every call site while the
-threaded agent value was read by nothing; under the plan model,
-`Plan(AgentCodex, ...)` returning any `CLAUDE.*` entry is a one-line
-assertion failure. Today the equivalent check requires provisioning an
-instance and walking the tree. An unlisted pair is a hard failure -- the
-`vault.Registry.Build` fail-closed posture, not the `agent.known`
-honor-system list.
+All are standard library only and run under the existing
+`go test -race ./...`.
 
-**Test 3: the wiring test (R4, R5).** The same AST machinery asserts that
-the executor's only entry point takes a `*Plan`, and that
-`internal/workspace` constructs no `agentplan.Plan` value except through
-`agentplan.Plan(ag, ...)` -- no composite literals of the plan types
-outside the leaf and the executor's own package. This is the structural
-answer to "threaded and read by nothing": if bytes can only reach disk via
-a plan, and plans only come from a function that takes the agent, then the
-agent parameter is load-bearing by construction rather than by review
-discipline.
+**Family 1 -- the layout scan** (`go/ast` over non-test files), two
+halves:
+
+- *Workspace half:* no non-test file in `internal/workspace` names
+  `agent.AgentClaude` or `agent.AgentCodex` in code, and no string literal
+  in {`CLAUDE.md`, `CLAUDE.local.md`, `AGENTS.md`, `AGENTS.override.md`}
+  appears. Status on today's tree: the constants half passes (the only
+  occurrences are comments, which the AST walk never sees); the filename
+  half **fails at eight sites** -- `content.go:156`, `:186`, `:208`,
+  `worktree_content.go:743`, `workspace_context.go:196`, `:229`, `:411`,
+  and the dead `rootClaudeFile` constant at `root_materializer.go:51`,
+  referenced only from its own test file. Red before the conversion and
+  green after is a feature, not a defect: it proves the scan detects the
+  real thing, and R5 names precisely this meaningful-on-day-one behavior.
+- *Leaf half (the R6 no-writes assertion):* no non-test file in
+  `internal/agentplan` calls `os.WriteFile`, `os.MkdirAll`, `os.Create`,
+  `os.Symlink`, `os.Link`, `os.Rename`, `os.Remove`, `os.RemoveAll`,
+  `os.Chmod`, or `os.Truncate`, or any `exec.` selector -- and none
+  references the write-mode open flags (`os.O_WRONLY`, `os.O_RDWR`,
+  `os.O_CREATE`, `os.O_APPEND`, `os.O_TRUNC`). Forbidding the write calls
+  alone would leave `os.OpenFile` as an unguarded hole; forbidding the
+  flags closes it while keeping read-only access legal -- `os.ReadFile`,
+  `os.Stat`, and the `O_NOFOLLOW` read-only open the PR-2 composer needs.
+  The boundary is "reads inputs, declares outputs," not "pure."
+
+**Family 2 -- the declaration and plan-shape suite.** Pure table tests, no
+tmpdir, no filesystem, no built binary:
+
+- *Exhaustive:* for every pair in `Capabilities() x agent.All()` there is
+  exactly one `Declaration`; a missing pair, a duplicate, or an unlisted
+  capability is a hard failure -- the fail-closed posture of
+  `vault.Registry.Build` (`internal/vault/registry.go:88-114`), not
+  `agent.known`'s comment-only honor system. Deleting any single
+  declaration makes it fail.
+- *Well-formed:* `StateUnavailable` implies a non-empty `Reason` and an
+  in-range `Kind`; `StateImplemented` implies both zero; `Requires` is
+  empty unless implemented.
+- *Closed:* every capability in `Requires` is implemented for the same
+  agent, and the graph is acyclic.
+- *Plan shape:* `Plan(agent, inputs)` over canonical fixture inputs
+  asserts that for Codex no entry's path ends in `CLAUDE.md` or
+  `CLAUDE.local.md`, for Claude none ends in `AGENTS.md` or
+  `AGENTS.override.md`, every entry's `Op` and `Pre` are members of the
+  closed sets, every mode is one of the three known values, and every
+  entry's `Capability` is declared implemented for that agent. This is the
+  test that catches tsukumogami/niwa#248's exact regression as a one-line
+  failure: under the plan model, `Plan(AgentCodex, ...)` returning any
+  `CLAUDE.*` entry is an assertion, where today the equivalent check needs
+  a provisioned tmpdir and a tree walk.
+
+**Family 3 -- wiring and binding.**
+
+- *Wiring:* the executor's only entry point takes a `*Plan`, and
+  `internal/workspace` constructs no `agentplan.Entry` and no
+  `agentplan.Plan` literal outside the executor -- plans reach it only
+  from producer calls. Same AST machinery as family 1. This is the
+  structural answer to "threaded and read by nothing": if bytes reach disk
+  only via a plan, and plans only come from functions taking the agent,
+  the agent is load-bearing by construction rather than by review
+  discipline.
+- *Binding, both drift directions (R4), per route:*
+  - `RoutePlan`: over a canonical maximal fixture exercising every
+    plan-borne capability, each implemented (capability, agent) yields at
+    least one entry tagged with that capability -- an implemented
+    declaration with nothing behind it fails; and, input-independently, no
+    producer may emit an entry tagged with a capability not declared
+    implemented for its agent -- a delivery without a declaration fails.
+  - `RouteProcedure`: `internal/workspace` keeps a registry
+    `map[Capability]map[agent.Agent]procedure`, and the test asserts its
+    key set equals exactly the implemented procedure-routed declarations
+    (trust binds `EnsureCodexTrust` under (DirectoryTrust, Codex) in PR 2;
+    plugin install binds the existing function-field seam).
+  - `RouteLaunch`: the dispatch path's agent gate becomes a declaration
+    lookup, so the inherited scenario 2 asserts the declaration rather
+    than a bare refusal (R23) and the gap list and the refusal can't drift
+    apart.
+
+**The gap-list drift test (R22)** rides family 2's data: an exported
+renderer filters `StateUnavailable` for the agent, groups by `Kind`, and
+renders each `Reason`; a test regenerates the guide's marked section and
+fails when the committed section differs. Regeneration is a test flag
+(`-update`), keeping the toolchain standard. The renderer and its
+machinery land in PR 1; the committed guide section lands in PR 2 with the
+guide.
+
+**Rejected alternatives.** Filesystem-based structural checks as the
+primary mechanism: an apply per assertion, no way to check declarations at
+all, and it reproduces the prior attempt's blind spot -- the structure
+isn't observable, only its output is. A vet-style analyzer or third-party
+lint: a module dependency or a CI surface against N1, for work `go/ast`
+does in an ordinary test. grep-based scans: string matching can't tell
+code from comments, so the comment-only agent-constant mentions become
+false positives.
 
 ### Decision 4 -- the no-behavior-change proof (R10, N2, N3)
 
 **Chosen: a ManagedFiles-based characterization test, committed on main
 before the first refactor commit.**
 
-niwa already builds a near-complete produced-file manifest with content
-hashes at apply time: every pipeline write lands in `writtenFiles`, and
-Step 7 (`internal/workspace/apply.go:1695-1718`) turns each path into a
-`ManagedFile{Path, ContentHash, ...}` persisted in
-`InstanceState.ManagedFiles`. The characterization test builds one or two
-representative fixture workspaces (reusing the existing
-`TestCreateIntegration`-style fixture idiom), runs `Create`, and asserts
-the sorted `(Path, ContentHash)` pairs from `state.ManagedFiles` against a
-checked-in expectation -- the apply path's own record of everything it
-wrote, not a hand-picked subset. Comparing path-plus-hash pairs is
-equivalent to comparing full contents without re-reading files, and it
-exercises the exact code path production uses to decide what is managed.
+niwa already builds the oracle: every pipeline write lands in
+`writtenFiles`, and Step 7 (`apply.go:1701-1718`) hashes each into
+`ManagedFile{Path, ContentHash, SourceFingerprint, Sources, Generated}`
+persisted in `InstanceState.ManagedFiles`. Comparing sorted (path, hash)
+pairs is equivalent to comparing full contents without re-reading files,
+and it exercises the exact code path production uses to decide what is
+managed.
 
-Why not the alternatives: the existing unit suite asserts on curated
-per-test path lists and has no completeness check -- the broadest
-integration test asserts on six named paths and never compares
-`ManagedFiles` as a set -- so a refactor that added a file, dropped an
-unasserted file, or changed unasserted content would pass it unchanged.
-The functional Gherkin suite is a real black-box signal, worth one manual
-run before merging PR 1, but as an automated before/after gate it is a
-slower, coarser version of the same tree diff. Commit-level discipline (a
-visibly mechanical diff) is kept as the review posture, paired with the
-characterization test rather than substituted for it.
+- **Fixture:** one maximal fixture workspace built with the package's
+  existing `t.TempDir()` idiom (the `TestCreateIntegration` pattern),
+  exercising every materializer PR 1 touches or binds -- workspace, group,
+  repo, and subdir content; overlay and global content; workspace context;
+  root and instance settings; hooks; env; files; and a live worktree so
+  the worktree layers and the delegation surface are pinned.
+- **Golden file:** a `testdata/` fixture of sorted
+  `relative-path <TAB> normalized-sha256` lines. Hashes only: on mismatch
+  the test re-reads the offending file from the tempdir and prints it, so
+  diagnosis doesn't require storing content in the repository.
+- **Completeness:** the path set comes from `state.ManagedFiles`, not a
+  hand-picked list, and the test asserts exact set equality of paths as
+  well as per-path hash equality.
+- **Normalization one -- the `{workspace}` template variable.** Content
+  installers bind it to the absolute instance root, which differs every
+  run under `t.TempDir()`. The fixture deliberately uses `{workspace}` so
+  the substitution path stays pinned, and the test replaces the known
+  instance root with a placeholder in each file's bytes before hashing.
+  Normalization, not avoidance.
+- **Normalization two -- the executable path in hook commands.**
+  `WorktreeDelegation.NiwaPath` is resolved via `os.Executable()`
+  (`apply.go:1547`) and embedded in generated hook commands; under
+  `go test` it points at a per-run test binary. The `Applier` threads it
+  as data, so the test injects a fixed path through that existing seam
+  rather than scrubbing output strings.
+- **Sequencing:** the test lands in its own commit, passing against main,
+  *before* the first refactor commit, so it pins current behavior rather
+  than being written to match new code, and it must pass unchanged at PR
+  1's head. `Generated` timestamps are excluded from comparison; the audit
+  found no other nondeterminism (no hostname, no randomness, and the
+  package sorts map keys before writing output everywhere it matters).
 
-Ordering is the point: the test lands in its own commit that predates the
-first refactor commit, so it pins current behavior rather than being
-written to match new code. PR 1 must leave it passing unchanged, and the
-acceptance criteria additionally require that no existing test is modified
-or deleted at PR 1's head.
+Why not the alternatives. The existing unit suite asserts on curated
+per-test path lists with no completeness check anywhere -- its broadest
+integration test names six paths -- so a refactor that added a file,
+dropped an unasserted one, or changed unasserted content passes it
+unchanged. The functional Gherkin suite is a real black-box signal, kept
+as a one-time manual run before merging PR 1, but as an automated gate
+it's a slower, coarser version of the same tree diff. Storing full file
+contents in the golden fixture buys the same guarantee for a bigger
+fixture; printing the live file on mismatch recovers the diagnostic
+benefit. Commit-level discipline stays the review posture, paired with the
+test rather than substituted for it.
 
-Two nondeterminism sources are normalized, and only these two exist -- the
-package already sorts every map before writing output, embeds no
-hostnames, and uses timestamps only in metadata:
+The manifest's known blind spots -- setup scripts' side effects and the
+Claude Code global-registry heals -- sit outside PR 1's
+delivery-restructuring scope (R11), so they don't weaken the proof for the
+PR it gates; the layout and wiring tests still cover those files' source.
 
-1. **The `{workspace}` template variable.** Content installers bind it to
-   the absolute instance root, so fixture content using it differs per
-   `t.TempDir()` run. The test normalizes by replacing the known fixture
-   root with a placeholder before comparing (or the fixture avoids the
-   variable; normalizing is preferred so the variable stays covered).
-2. **`os.Executable()` in worktree-delegation hook commands.** The
-   resolved niwa binary path is embedded into generated hook commands via
-   `WorktreeDelegation.NiwaPath` (`apply.go:1547`), and under `go test` it
-   points at a per-run temp build. The `Applier` threads it as data, so
-   the test injects a fixed path -- a seam that exists, not a rewrite.
+### Decision 5 -- the MCP and session-environment surfaces (R14, R15, R16)
 
-`ManagedFile.Generated` timestamps are stripped before comparison; they
-change every run by design. The manifest's known blind spots -- setup
-scripts' side effects and the Claude Code global-registry heals -- sit
-outside PR 1's delivery-restructuring scope (R11), so they do not weaken
-the proof for the PR it gates; the layout and wiring tests, which are not
-scoped to the manifest, still cover those files' source.
+R15 and R16 require agent-neutral declarations generating each agent's
+native format, constrained hard by measured codex-cli 0.147.0 behavior:
+recursive field-by-field layer merging (a name collision yields a hybrid
+server neither party wrote -- niwa's `command` running with the
+developer's `args` and `cwd`), whole-config failure on one malformed entry
+(valid siblings become unreachable too, and even keys Codex ignores at the
+project layer are type-checked first), no SSE transport (a declared
+`type = "sse"` is silently served as streamable HTTP, a live failure
+rather than a missing server), no `${VAR}` interpolation anywhere, and
+trust-gating of both `mcp_servers` and `shell_environment_policy` (an
+untrusted project layer isn't parsed at all).
 
-### Decision 5 -- the MCP surface (R15)
+**MCP.** A new workspace-level table:
 
-**Chosen: a structured, agent-neutral MCP server declaration in workspace
-configuration, from which niwa generates each agent's native format --
-Claude's `.mcp.json` and Codex's `[mcp_servers.*]` project-layer table.
-The existing verbatim `.mcp.json` distribution keeps working unchanged as
-a compatibility path that reaches Claude sessions only, and apply says so:
-a workspace distributing `.mcp.json` with no structured declaration gets
-an apply-time report that its MCP servers reach Claude sessions only.**
+```toml
+[mcp.servers.<name>]
+transport = "stdio" | "http" | "sse"   # optional; inferred from command/url
+command   = "..."                       # stdio; mutually exclusive with url
+args      = ["..."]
+env       = { KEY = "value-or-vault-ref" }
+url       = "https://..."               # http/sse
+headers   = { X-Header = "value-or-vault-ref" }
+agents    = ["claude"]                  # optional; restricts generation
+```
 
-The rejected alternative -- parse the `.mcp.json` niwa already distributes
-and translate it -- fails on measured evidence, not taste. Translation is
-lossy in both directions: Codex has exactly two transports (`stdio`,
-`streamable_http`) and no SSE, and it does not reject a declared
-`type = "sse"` server -- it silently serves the URL over streamable HTTP,
-a different wire protocol, which is a live failure rather than a missing
-server. Codex performs no `${VAR}` interpolation anywhere, so a
-`.mcp.json` relying on expansion cannot be copied through. And Codex
-carries fields no `.mcp.json` can express (`env_vars`, `cwd`, per-server
-timeouts, `bearer_token_env_var`, `env_http_headers`, OAuth fields). A
-Claude-format file as the source of Codex delivery would also put one
-agent's format in front of another agent's delivery, against R7's spirit.
+From it niwa generates Claude's `.mcp.json` and Codex's
+`[mcp_servers.<name>]` entries in the instance payload config that
+`OpDeliverTree` links into each repository. The four required properties,
+mechanized:
 
-Four measured codex-cli 0.147.0 behaviors are hard constraints on the
-generator (all recorded in the PRD and routed to the standing spike per
-R24):
+1. **Nothing unmappable is ever silent.** The declaration admits `sse`
+   because Claude supports it; Codex generation treats an SSE server as a
+   hard, named error, never a silent re-protocol, and the error states the
+   remedy: scope the server with `agents = ["claude"]`. That per-server
+   escape hatch is the deliberate, visible form of "this server is
+   Claude-only." A `${` surviving resolution is likewise a hard error
+   naming the server and field, for both agents: niwa writes only resolved
+   values (property 2), so interpolation syntax that survives resolution
+   is an authoring bug, not something to hand to an agent that would
+   (Claude) or wouldn't (Codex) expand it.
+2. **Full resolution before writing.** `env` and `headers` values are
+   `MaybeSecret` and resolve through the existing vault pipeline; what
+   lands on disk is literal. Nothing niwa writes relies on load-time
+   expansion.
+3. **Validation before writing, atomically.** Generated Codex entries are
+   checked against the measured schema (exactly one of `command`/`url`; no
+   HTTP-only fields on stdio entries and the reverse -- cross-transport
+   field misuse is itself a measured whole-config failure), then the
+   complete generated TOML document is re-decoded before any bytes reach
+   disk, and the payload config is written whole-or-not-at-all
+   (temp-then-rename). A generated file must never be the thing that
+   bricks a session; on any validation failure niwa reports and writes no
+   partial file. "Codex will ignore what it doesn't understand" is false
+   as a safety assumption, so everything niwa writes into a Codex layer is
+   validated, not only the MCP entries.
+4. **Collisions are detected, never left to the merge.** Before writing,
+   niwa reads the `[mcp_servers]` names from the developer's own Codex
+   configuration -- the same file and the same TOML machinery the trust
+   writer already handles -- and a name collision is a hard apply error
+   naming the server and both definition sources (loud per R20; the fix is
+   renaming one side). An absent developer config means no collision is
+   possible. An unreadable or malformed one degrades to a reported skip of
+   collision detection: that's consistent with R17's posture that a broken
+   developer config fails neither create nor apply, and it's safe on the
+   merits, because a config Codex itself cannot load runs no session that
+   could see a hybrid. Direct read beats shelling out to
+   `codex mcp list --json`, which fails wholesale on a malformed config --
+   exactly the case where niwa still needs an answer.
 
-1. **One malformed entry fails the whole config load.** A single bad
-   `[mcp_servers.*]` entry makes Codex's entire configuration for the
-   directory unloadable, valid sibling servers included -- and even
-   denylisted keys are type-checked before being ignored, so a malformed
-   ignored key bricks the load too. "Codex will ignore what it doesn't
-   understand" is false as a safety assumption. Therefore niwa validates
-   everything it writes into a Codex layer -- not only MCP entries --
-   before writing, and a generated file must never be the thing that
-   bricks a session. On validation failure, apply reports the error and
-   writes no partial file.
-2. **Name collision produces a hybrid, not an override.** Codex merges
-   configuration layers recursively field by field; a project-layer server
-   colliding with a developer's server of the same name yields a
-   definition neither party wrote -- niwa's `command` with the developer's
-   `args` and `cwd`. niwa therefore detects collisions before writing: it
-   reads the developer's own Codex configuration read-only for
-   `[mcp_servers.*]` names and reports any collision rather than writing
-   the entry. Direct read is chosen over shelling out to
-   `codex mcp list --json` because niwa already owns careful access to
-   that file for the trust write, the read must degrade gracefully when
-   the file is unreadable or malformed (R17 requires that posture
-   already), and the subcommand itself fails wholesale on a malformed
-   config -- exactly the case where niwa still needs an answer.
-3. **`type = "sse"` is silently accepted and served as streamable HTTP.**
-   So SSE in the neutral declaration is unmappable for Codex and is
-   reported, never silently dropped or silently altered.
-4. **No `${VAR}` interpolation, anywhere.** Every value niwa writes is
-   fully resolved first; nothing relies on expansion at load time. A
-   declaration using interpolation for a Codex-bound value is reported as
-   unmappable.
+The existing `.mcp.json` file-distribution route keeps working unchanged
+as a compatibility path. It is byte-opaque to niwa today (never parsed;
+the verbatim writers just copy) and it stays that way; when a workspace
+distributes an `.mcp.json` with no structured declaration, apply reports
+that its MCP servers reach Claude sessions only.
 
-The generator writes the Codex entries into the same trust-gated project
-layer as environment delivery, and the capability carries
-`Requires: DirectoryTrust` (Decision 2) on measured grounds: the project
-layer is not parsed at all in an untrusted directory.
+**Session environment.** A new agent-neutral table, `[session.env]`,
+mirroring the shape of the existing `[claude.env]` (inline `vars`,
+`promote` from the `[env]` pipeline, vault-resolved secrets). From it niwa
+generates Claude's settings `env` block and Codex's
+`shell_environment_policy.set` in the payload config, values fully
+resolved -- measured: `set` values are literal strings, additive over the
+inherited base, overriding on collision. `[claude.env]` stays as the
+Claude-specific surface: it writes into a Claude-owned file format and
+gates nothing for another agent (Decision 6), and for Claude the two merge
+with `[claude.env]` winning per key. Codex reads only the neutral table,
+so no Claude-named key gates Codex delivery (R7). Dotenv-file distribution
+(`[env]`, row 10) is untouched and stays agent-agnostic. Both delivery
+rows carry the measured `Requires: DirectoryTrust` edge.
+
+**Skills without a Claude Code dependency (R14)** is settled here because
+it's the same principle -- no other vendor's state in the delivery path.
+Github-sourced marketplace content is fetched into a niwa-owned,
+git-excluded instance directory
+(`<instanceRoot>/.niwa/marketplaces/<name>/`) using the existing
+`github.FetchTarball` plus `ExtractSubpath` machinery, and the Codex skill
+links resolve there always -- not only when Claude Code is absent -- so
+delivery is deterministic across machines. Repo-sourced marketplaces are
+already clean.
+
+**Rejected alternatives.** Parsing the `.mcp.json` niwa already
+distributes and translating it: lossy in both directions on measured
+evidence (SSE and `${VAR}` can't cross; Codex carries fields `.mcp.json`
+can't express -- `env_vars`, `cwd`, timeouts, tool allow/deny,
+bearer-token and OAuth fields), and it puts one agent's format in front of
+another agent's delivery, against R7's spirit. Namespace-prefixing
+generated server names instead of detecting collisions: a `niwa-` prefix
+changes every name users address, doesn't make collisions impossible, and
+hides the conflict rather than surfacing it. Skipping the compatibility
+route's report: a silent Claude-only file is the prior attempt's exact
+asymmetry, and the report costs one line at apply time.
 
 ### Decision 6 -- configuration rename and gate restructure (R7, R8)
 
-Both land in PR 2, never PR 1 -- a compatibility alias is
+Both land in PR 2, never PR 1: a compatibility alias is
 behavior-preserving but not diff-free (new warnings, regenerated example
 configuration), and PR 1's job is to be invisible. PR 2 is where a second
 agent first gives a Claude-named key something to mis-gate.
 
-**The content rename.** The `[claude.content]` table and the top-level
-`content_dir` key gain agent-neutral aliases, `[context]` and
-`context_dir`, following the repository's recorded rename precedent
-exactly (docs/designs/current/DESIGN-claude-key-consolidation.md, commit
-81aae0b, mechanism at `internal/config/config.go:513-528`): both keys
-accepted, a deprecation warning on the old name, a hard error when both
-are set, removal at the v1.0 line. The mechanism generalizes cleanly here
-because content is workspace-scoped -- one embedding site, one
-`isContentConfigZero`-style check, structurally identical to the shipped
-`[content]` -> `[claude.content]` move. Resurrecting the plain `[content]`
-name was rejected: users who dutifully migrated to `[claude.content]`
-under the earlier deprecation would be whipsawed back, and a key that was
-deprecated in one release and canonical two releases later is a
-documentation hazard; a fresh name keeps all three generations
-distinguishable and the both-set error unambiguous.
+**`[claude.content]` reverts to `[content]`.** The recorded precedent
+(docs/designs/current/DESIGN-claude-key-consolidation.md, commit 81aae0b)
+moved `[content]` under `[claude.content]` on the explicit grounds that
+content was entirely Claude-coupled -- every consumer wrote hardcoded
+`CLAUDE.md`/`CLAUDE.local.md` destinations. Dual-agent capability is
+precisely what falsifies that premise: under this design the same declared
+content feeds each agent's plan producer, which routes it to that agent's
+filenames. **Said plainly: this design partially reverses
+DESIGN-claude-key-consolidation.md**, and says so rather than renaming
+quietly. `[content]` returns as the canonical agent-neutral table and
+`[claude.content]` becomes the deprecated alias, using the same
+sibling-field, hand-written zero-check, hard-error-on-both,
+warn-on-the-old mechanism the consolidation itself shipped
+(`internal/config/config.go:513-528`, `isContentConfigZero` at `:552`)
+with its direction flipped.
 
-Said plainly: **this partially reverses
-DESIGN-claude-key-consolidation.md.** That design consolidated content
-configuration under the Claude namespace on the explicit grounds that
-content was entirely Claude-coupled -- a premise that was true then and
-that dual-agent capability is precisely what falsifies. The reversal is
-scoped: only `Content`/`content_dir` move. The other Claude-named fields
-(`plugins`, `marketplaces`, `hooks`, `settings`, `env`,
-`work_summary_hooks`, `pr_body_hook`) stay Claude-named, because each
-binds to a Claude Code file format or mechanism with no Codex analog
-today; renaming them would be speculative relabeling of
-genuinely-Claude-shaped surface. Codex's environment need, for instance,
-is a different config shape (`shell_environment_policy`) delivered from
-the agent-neutral declarations, not a rename target.
+The alternative considered and rejected was a third name, `[context]`,
+whose case is that users who dutifully migrated to `[claude.content]`
+would now be whipsawed back, and that a key deprecated in one release and
+canonical two releases later is a documentation hazard. The whipsaw is
+real but it's mispriced. Count the migrations per cohort. Workspaces that
+already moved to `[claude.content]` pay one alias hop either way -- to
+`[content]` or to `[context]`, identical cost. Workspaces still on
+`[content]`, which is accepted today with a deprecation warning, pay
+*nothing* under the reversal (their warning simply disappears) and pay a
+second migration under a third name, having already been told once to move
+to `[claude.content]`. The reversal is strictly cheaper for one cohort and
+equal for the other. It also keeps two live spellings instead of three,
+which keeps the both-set error a single unambiguous check rather than
+three pairwise ones, and it keeps the table's name consistent with the
+`content_dir` key that isn't moving. The documentation hazard is answered
+by writing it down: the deprecation message and the migration note name
+the reversal and its cause rather than presenting the new canonical name
+as though it had always been so.
 
-**The `claude.enabled` gate is restructured, not renamed.** On main the
-key is correctly named -- it gates only Claude-owned deliveries. The prior
-attempt's defect was that `claude = false` on a repository silently
-disabled all three Codex delivery steps: cross-agent mis-gating.
-Relabeling the key to something agent-neutral would reproduce the same
-mis-gating under a new spelling -- one boolean would still govern two
-agents' deliveries. The restructure instead moves the gate to plan
-production: `claude.enabled` filters the Claude plan and only the Claude
-plan, PR 2 introduces a parallel `codex.enabled` with identical semantics
-over the Codex plan, and no gate reaches across agents by construction --
-the executor never sees a gate at all, only entries that survived their
-own agent's filter. Disabling one agent's delivery for a repository leaves
-every other agent's delivery intact (R7), and the acceptance criterion
-that a Claude-disabled repository still receives full Codex delivery, and
-the reverse, asserts it.
+Migration story, concretely. A workspace on `[content]`: nothing to do;
+the deprecation warning stops appearing when PR 2 ships. A workspace on
+`[claude.content]`: keeps parsing, gets a deprecation warning pointing at
+`[content]`, and moves one table name at its convenience before the v1.0
+removal line. A workspace that sets both: a hard error naming both keys,
+as today, with the canonical/deprecated roles swapped.
 
-### Decision 7 -- secret safety lands with the first secret (R18)
+**`content_dir` stays put.** The top-level `workspace.content_dir` key
+(`WorkspaceMeta.ContentDir`, `internal/config/config.go:280`) is already
+agent-neutrally named -- it names a directory of content, and no agent
+name in it gates anything. R8 renames what has something to mis-gate;
+this doesn't. The consolidation design's deferred plan to move it under
+the Claude namespace is cancelled here rather than left pending.
 
-Two obligations, both landing in the same PR 2 increment that first writes
-secret material into a Codex-side file -- not after:
+**`claude.enabled` is restructured, not renamed.** Its documented meaning
+today is correct: it gates genuinely Claude-owned deliveries
+(`ClaudeEnabled()`, `override.go:1061`). The prior attempt's defect was
+wiring it across the boundary -- `claude = false` on a repository silently
+disabled all three Codex delivery steps. Relabeling the key
+agent-neutrally would reproduce that mis-gating under a new spelling: one
+boolean, two agents. Instead the gate becomes an input to the Claude plan
+producer only, zeroing Claude's plan-borne deliveries for that scope and
+never read by the Codex producer or any generic path. PR 2 adds the
+symmetric `[codex] enabled` (workspace and override positions, defaulting
+true), read only by the Codex producer, which is what makes the PRD's
+acceptance criterion meaningful in both directions. The layout scan plus
+the wiring test keep either gate from reaching across: gates live in
+producer inputs, and no `internal/workspace` code names an agent to
+consult them.
 
-1. **The Codex payload configuration is written at `secretFileMode`
-   (0o600, `internal/workspace/materialize.go:28`), never 0o644.** The
-   payload carries `shell_environment_policy.set` values -- fully resolved
-   per Decision 5, which means resolved secrets sit in that file. The
-   prior branch wrote it at 0o644 when it carried only the byte budget;
-   the mode flips in the commit that changes what the file can contain.
-   Under the plan model this is one `Mode` field on the entry, and a test
-   asserts the mode on any entry whose capability delivers resolved
-   environment values.
-2. **Git-exclude coverage for every niwa-written Codex-side name, at the
-   instance root as well as in repositories.** The existing exclude
-   machinery covers repository-level names; Codex-side files whose names
-   don't end in `.local` (the payload `.codex/` directory,
-   `AGENTS.override.md`) need explicit patterns, and the instance root
-   needs coverage it doesn't have today for names outside the existing
-   conventions. The plan model carries this as `ExcludeAs` on the entry,
-   so the exclusion is declared beside the write that makes it necessary
-   and the same test that checks the mode checks the pattern.
+**Everything else keeps its Claude name.** `plugins`, `marketplaces`,
+`hooks`, `settings`, `[claude.env]`, `work_summary_hooks`, `pr_body_hook`
+all bind to Claude Code's own file formats and mechanisms; no second agent
+reads them, so there is nothing for the name to mis-gate. A whole-table
+`[claude]` rename was measured and rejected: four Go types, six embedding
+sites, roughly 450 occurrences across nineteen production files,
+multiplying the alias machinery per embedding site, for six fields whose
+Claude names are correct. This design renames exactly what dual-agent
+capability makes wrong and nothing more. PR 1 ships zero configuration
+renames (R8), which the acceptance criterion on a byte-identical generated
+example config enforces.
 
-A third fact is recorded here because a reviewer of this surface needs it,
-while being clearly Codex's behavior rather than niwa's doing: codex-cli
-0.147.0's `ignore_default_excludes` defaults to `true`, so Codex's own
-default `*KEY*`/`*TOKEN*` environment excludes are **not applied** unless
-explicitly opted into -- secret-named variables in the parent environment
-reach sandboxed commands by default. Measured through the user-invoked
-`codex sandbox` entry point; the in-session shell tool is believed but not
-proven to resolve the same policy, and R24 carries the in-session
-confirmation to the spike when taken. niwa does not change this default --
-writing hardening keys into the developer's environment posture uninvited
-is out of scope -- but the user guide's safety section states it, and no
-security claim in niwa's docs may assume the excludes are active.
+### Decision 7 -- secret hygiene and the Codex environment defaults (R18)
+
+Two obligations land in the same PR 2 increment that first writes secret
+material into a Codex-side file -- not after -- plus one fact the guide
+must carry.
+
+- **File mode.** The prior branch wrote the Codex payload config at 0o644,
+  safe then (one non-secret integer) and a regression the moment
+  `shell_environment_policy.set` carries resolved secrets. Under this
+  design the payload config is written at `secretFileMode` (0o600,
+  `materialize.go:28`) from the same increment that adds session-env
+  generation. The executor makes this a data change -- `Mode: 0o600` on
+  the entry -- and the plan-shape test asserts the mode on any entry whose
+  capability delivers resolved environment values, so a regression to
+  0o644 fails in a pure test.
+- **Git-exclude coverage.** The instance root's `.gitignore` covers only
+  `*.local*` today; `.codex/config.toml` carries no `.local` infix, and
+  `gitexclude.EnsureRepoExclude` is never called for the instance root, so
+  a workspace nested inside an outer tracked tree could stage a
+  secret-bearing file. In the same increment, `EnsureInstanceGitignore`
+  gains an explicit `.codex/` entry at the instance root, and the per-repo
+  exclude block's union patterns gain the Codex-side names (`.codex/`,
+  `AGENTS.override.md`) exactly as the Claude-side names are covered (row
+  24). The plan model carries this as `ExcludeAs` on the entry, so the
+  exclusion is declared beside the write that makes it necessary.
+- **Codex's default excludes: niwa states the default, doesn't override
+  it.** Measured on codex-cli 0.147.0, `ignore_default_excludes` defaults
+  to `true`, so Codex's own `*KEY*`/`*TOKEN*` exclude patterns are **not**
+  applied -- a Codex session's commands inherit those variables from the
+  parent environment unless the developer opts in. niwa does not write
+  `ignore_default_excludes`. Setting it `false` would alter the
+  developer's session environment beyond what they declared, dropping
+  their own inherited key- and token-named variables, and it protects
+  nothing niwa delivers (niwa's values ride `set` and survive excludes
+  regardless, since the measured pipeline is inherit -> exclude -> set ->
+  include_only). The user guide's safety section -- distinct from the
+  generated gap list per R22 -- states the measured default plainly, notes
+  that it's Codex's behavior rather than niwa's doing, gives the one-line
+  opt-in, and carries the adjacent measured trap: a developer's own
+  `include_only` allowlist silently drops variables niwa delivers through
+  `set`, with no error from Codex. The measurement caveat -- taken through
+  Codex's user-invoked sandbox entry point, with the in-session shell tool
+  believed but not proven identical -- flows to the standing spike per R24
+  before any security-sensitive claim rests on the defaults.
+
+Deferring the mode and excludes to a later hardening pass is rejected
+flatly by R18: the window between "secret material lands" and "hygiene
+lands" is exactly the exposure.
 
 ## Decision Outcome
 
-A leaf `internal/agentplan` package owns what may be said -- the closed
-capability set, the two-state declaration table with reason kinds and
-`Requires` edges, and per-agent plan producers that read inputs and
+A leaf `internal/agentplan` owns what may be said -- the closed capability
+set, the two-state declaration table with reason kinds, `Requires` edges
+and delivery routes, and per-agent plan producers that read inputs and
 declare outputs over a closed four-op vocabulary. `internal/workspace`
-owns doing -- one agent-blind executor plus the existing managed-file,
-cleanup, and git-exclude bookkeeping, consuming three fields off plan
-entries. Three stdlib-only structural tests hold the boundary: the AST
-layout scan (red today at eight named sites, green after PR 1's
-conversion), the exhaustiveness/plan-shape table test over
-`agent.All() x agentplan.All()`, and the wiring test that makes the agent
-parameter the only route from config to bytes. A ManagedFiles-based
-characterization test, committed on main before the refactor and
-normalized for its two nondeterminism sources, proves PR 1 changed
-nothing observable. PR 2 delivers Codex through the contract: MCP and
-environment generated from agent-neutral declarations validated before
-writing, trust as a delivered capability the closure test enforces, the
-`[context]`/`context_dir` alias, the per-agent gate restructure, and
+owns doing -- one agent-blind executor, the probe pre-passes whose
+verdicts feed producers as data, and the existing managed-file, cleanup,
+and git-exclude bookkeeping now reading three fields off plan entries.
+Three stdlib-only test families hold the boundary (layout scan, pure
+declaration and plan-shape suite, wiring plus route-wise binding), and a
+ManagedFiles-based characterization test committed before the refactor
+proves PR 1 changed nothing observable. PR 2 delivers Codex through the
+contract: MCP and session environment generated from `[mcp.servers.*]` and
+`[session.env]`, validated and fully resolved before an atomic write;
+trust as a delivered capability the closure test enforces; approval and
+sandbox posture opt-in, reported, and never inferred one from the other;
+the `[content]` reinstatement and the per-agent gate restructure; and
 secret file mode plus git-exclude landing with the first secret.
 
 ## Solution Architecture
 
-Package layout and dependency direction (arrows point at imports):
+Package layout and dependency direction (`internal/cli` imports
+`internal/workspace`, which imports `internal/agentplan`, which imports
+`internal/agent` and `internal/config`; nothing in the leaf imports
+upward):
 
 ```
-internal/cli ──────────────► internal/workspace ──► internal/agentplan ──► internal/agent
-                                    │                        │                   
-                                    ▼                        ▼                   
-                             internal/gitexclude      internal/config            
+internal/agent          (unchanged leaf; gains exported All())
+internal/agentplan      (new leaf; imports internal/agent, internal/config, stdlib)
+    capability.go       Capability enum, Capabilities(), Route
+    declaration.go      Declaration, the 24x2 table, Lookup, validation helpers
+    plan.go             Op, Precondition, Entry, Plan
+    provenance.go       SourceEntry, ComputeSourceFingerprint (moved from workspace)
+    producer_claude.go  Claude plan producers (PR 1)
+    producer_codex.go   Codex plan producers (PR 2)
+    probespec.go        probe declarations the workspace pre-pass executes (PR 2)
+    gaplist.go          RenderGapList(agent) for the guide section
+internal/workspace      (executor + pipeline integration; loses agent literals)
+    planexec.go         applyPlan: ops, preconditions, containment, bookkeeping
+    (state.go keeps `type SourceEntry = agentplan.SourceEntry`)
 ```
 
-`internal/agentplan` sits at the leaf level beside `internal/agent`,
-`internal/keyreport`, and `internal/envformat` -- the layer
-`internal/workspace` may import without a cycle. Its package doc follows
+Like `internal/keyreport`, `internal/agentplan` is a leaf relative to
+workspace that may still import `internal/config`. Its package doc follows
 the house bar: first sentence says what it does, the rest names the
 specific callers and the cycle the boundary avoids.
 
-The package holds:
+Data flow, per apply:
 
-- **The capability enumeration and declaration table.** `Capability`
-  constants for the PRD's 24 rows, `All()` returning the closed set, the
-  `Declaration` table per agent, and the two recorded exclusions. The
-  fail-closed lookup mirrors `vault.Registry.Build`: an unknown
-  (capability, agent) pair is an error, never a silent default.
-- **The plan types.** `Op`, `Precondition`, `Entry`, `Plan`, plus the
-  migrated `SourceEntry` and `ComputeSourceFingerprint`.
-- **The plan producers.** `Plan(ag agent.Agent, in Inputs) (*Plan, error)`
-  per preparation level (root, instance, group, repo, worktree), where
-  `Inputs` is a narrow struct `internal/workspace` fills from
-  `EffectiveConfig`. Producers read niwa-owned sources and probe overlay
-  paths; they never write.
-- **The gap-list generator.** A filter over the declaration table --
-  `StateUnavailable` for the agent, grouped by `ReasonKind`, rendering
-  each `Reason` -- whose output a test compares against the committed
-  guide section (R22). `ReasonNoSuchConcept` rows render as "does not
-  apply" notes; the other kinds are the gap list proper.
+```
+EffectiveConfig ──narrow inputs──> agentplan producers ──Plan──> applyPlan ──> disk
+        │                              ▲                            │
+        │        probe verdicts        │                            ├─ writtenFiles/ManagedFiles (Step 7)
+        └──> workspace pre-passes ─────┘                            ├─ ExcludeAs -> gitexclude union
+             (ownership, harness)                                   └─ Warnings -> Reporter
+```
 
-`internal/workspace` gains `applyPlan(*Plan) (written []string,
-excludes []string, err error)`: MkdirAll-and-write for `OpWriteFile`,
-append-unless-present for `OpAppendLine`, delimited-section replace for
-`OpReplaceSection`, and the symlink-or-bounded-copy discipline for
-`OpDeliverTree` (its ~150 lines exist on the prior branch and move here as
-the implementation of that one op). Preconditions are executed generically:
-`IfSourceExists` stats the entry's `Source`; `IfNotForeign` re-checks the
-ownership verdict at write time, preserving the prior branch's deliberate
-belt-and-braces against the detect-to-write race, with the check in
-generic code. `runPipeline` Step 7 reads `Managed` and `Sources` off
-entries instead of a bare path list plus a side map; `cleanRemovedFiles`
-gains an `Exempt` consultation in PR 2.
+1. `internal/workspace` assembles `Inputs` per level from
+   `EffectiveConfig` and applies each agent's own gate
+   (`claude.enabled` / `codex.enabled`) to that agent's plan production
+   only.
+2. For each agent in `agent.All()`, `agentplan.Plan(ag, in)` produces the
+   declared entries, warnings, and exemptions. Both agents' plans are
+   produced on every apply -- no agent choice at creation or apply time
+   (R19).
+3. `applyPlan` applies entries: MkdirAll-and-write, append-unless-present,
+   delimited-section replace, and symlink-or-bounded-copy (the last op's
+   ~150 lines exist on the prior branch and move here as its meaning).
+   Preconditions execute generically -- `IfSourceExists` stats the entry's
+   `Source`, `IfNotForeign` re-checks the ownership verdict at write time,
+   preserving the prior branch's belt-and-braces against the
+   detect-to-write race in generic code -- and the existing containment
+   and symlink-escape checks apply uniformly to every entry.
+4. Written paths feed the managed-file record exactly as today;
+   `ExcludeAs` patterns feed the per-repo git-exclude call; warnings feed
+   the reporter. Where a declaration is implemented for Codex, a delivery
+   failure fails the apply loudly (R20).
+5. Procedure-routed capabilities (trust, plugin install, git-exclude
+   bookkeeping) run as today, behind the workspace-side binding registry
+   keyed by (capability, agent); launch-routed capabilities gate on
+   `agentplan.Lookup`. Implemented declarations resolve to a registered
+   delivery, unavailable ones to none (R4).
 
 What deliberately does not move: the pipeline's step ordering, the
 `Materializer` interface, the config-driven materializers with no
 agent-specific logic (dotenv files, arbitrary file distribution, hook
 installation -- declared and bound under the contract from PR 1 per R11,
-restructured only if and when agent-specific behavior ever lands in them,
-which R4 and R5 prevent happening outside the contract), `CheckDrift`, the
-state schema, `override.go`'s merge functions, the plugin-installer
-function-field seam, and the global-registry heals. Side effects outside
-the instance -- the plugin installer, registry reconciliation, the Codex
-trust write into the developer's own configuration -- stay outside the
-plan: they are not files delivered into the workspace, and the contract
-does not pretend otherwise. The trust write is nonetheless a declared
-capability (row 23); its delivery function is registered and bound like
-any other, it just isn't a plan entry.
+restructured only if agent-specific behavior ever lands in them, which R4
+and R5 prevent happening outside the contract), `CheckDrift`, the state
+schema, `override.go`'s merge functions, the plugin-installer
+function-field seam, and the global-registry heals.
 
-Delivery flow after PR 2, per apply:
-
-1. `internal/workspace` assembles `Inputs` per level from
-   `EffectiveConfig`, applies each agent's own gate
-   (`claude.enabled` / `codex.enabled`) to its own plan production only.
-2. For each agent in `agent.All()`, `agentplan.Plan(ag, in)` produces the
-   declared entries, warnings, and exemptions. Both agents' plans are
-   produced on every apply -- no agent choice at creation or apply time
-   (R19).
-3. The executor applies entries; written paths feed the managed-file
-   record exactly as today; `ExcludeAs` patterns feed the per-repo
-   git-exclude call; warnings feed the reporter. Where a declaration is
-   implemented for Codex, a delivery failure fails the apply loudly (R20).
-4. Registered non-plan deliveries (trust) run behind the same binding
-   check: implemented declarations resolve to a registered delivery,
-   unavailable ones to none (R4).
+Codex delivery composition in PR 2 follows the measured discovery rules
+(R12). The one piece worth naming here is how a conflict binds: when a
+repository commits its own file at one of niwa's names, the ownership
+verdict gates the entry via `IfNotForeign`, the refusal lands in
+`Plan.Warnings`, and the path lands in `Plan.Exempt` so cleanup leaves it
+alone. The payload directory at the instance root carries the generated
+Codex config -- budget, MCP servers, session env, posture when declared --
+and the skill trees, delivered into each repository by `OpDeliverTree`.
 
 ## Implementation Approach
 
-**PR 1 -- the contract, no behavior change (R9, R10, R11).**
+**PR 1 -- the contract, no behavior change (R9, R10, R11).** Increments
+ordered so every commit keeps the characterization test and the full suite
+green.
 
-1. Commit the characterization test on main first, in its own commit:
-   fixtures, the two normalizations, the checked-in
-   `(Path, ContentHash)` expectation, passing against current behavior.
-2. Add `internal/agentplan`: capability set, declaration table with
-   Claude's column complete and Codex's column stating main's truth
-   (nothing delivered), plan types, producers for the surfaces being
-   converted. Export `agent.All()`.
-3. Land the three structural tests. The layout scan's filename half is
-   red at the eight named sites at this point; the exhaustiveness,
-   well-formedness, closure, and binding tests are green against the new
-   table.
+1. Characterization test, its own commit, passing against main
+   (Decision 4).
+2. `internal/agentplan`: capability enumeration with routes, declaration
+   table (Claude's column complete; Codex's column stating main's truth),
+   plan vocabulary with the first three ops, `agent.All()`. Tests: the
+   exhaustive, well-formed, and closure suite; the gap-list renderer and
+   its drift machinery.
+3. Executor `applyPlan` in `internal/workspace`; pipeline Step 7 reads
+   entries; provenance types move down with the alias. Tests: executor
+   unit tests, characterization unchanged.
 4. Convert the agent-shaped surfaces to plan production: the eight
    context-writer sites and the settings-document builder
    (`buildSettingsDoc` already returns a document and writes nothing; its
-   three call sites each carry their own marshal-mkdir-write copy, and
-   conversion deletes two of the three). Delete the dead
-   `rootClaudeFile` constant and retire `LocalContextFileName()`'s
-   zero-caller state by making the producers consult the agent's
-   filenames. The layout scan goes green.
-5. Verify: characterization test passes unchanged, full suite passes with
-   no existing test modified or deleted, generated example configuration
-   byte-identical, no new warnings, `gofmt -l .`, `go vet ./...`,
-   `go test -race ./...`. One manual functional-suite run as a sanity
-   check.
+   three call sites each carry a marshal-mkdir-write copy, and conversion
+   deletes two of the three). Delete the dead `rootClaudeFile` constant
+   and retire `LocalContextFileName()`'s zero-caller state by having
+   producers consult the agent's filenames. Tests: the layout scan's
+   filename half flips red to green; plan-shape suite; wiring test;
+   characterization unchanged.
+5. Binding registry for the procedure and launch routes over existing
+   seams. Tests: the two-direction binding checks.
 
-The honest risk in step 4: the context writers carry accumulated boundary
+Exit criteria: every contract and structure acceptance criterion green; no
+configuration surface change (example config byte-identical, no new
+warnings); full suite passes with no existing test modified or deleted;
+`gofmt -l .`, `go vet ./...`, `go test -race ./...`; one manual functional
+run as a sanity check.
+
+The honest risk is step 4: the context writers carry accumulated boundary
 rules (overlay append, subdir content, `@import` migration removals) that
 a mechanical conversion can drop, and two of them are the half-broken
-functions where the hardcoded filenames live today. This is exactly where
-the characterization test is pointed: any dropped rule changes a produced
-path or hash and fails the pinned manifest.
+functions where the hardcoded filenames live today. That is exactly where
+the characterization test is pointed -- any dropped rule changes a
+produced path or hash and fails the pinned manifest.
 
-**PR 2 -- Codex through the contract (R12-R21).**
+**PR 2 -- Codex as the second implementation (R12-R24).**
 
-1. Flip the Codex column to its target declarations (11 implemented, 13
-   unavailable per the PRD's matrix); the exhaustiveness and closure
-   tests enforce the shape as it changes.
-2. Port the prior branch's sound composition mechanics as plan producers:
-   context layers composed within the spike's measured discovery rules
-   (R12), worktree context standing on the measured `.git`-pointer-file
-   result (R13), the conflict verdict feeding `Exempt` and `Warnings`,
-   `OpDeliverTree` for the payload. Skills delivery gains the niwa-owned
-   fetch for github-sourced marketplaces so nothing depends on Claude
-   Code's presence (R14).
-3. Build the agent-neutral MCP and environment declarations and the
-   validated generator (Decision 5), the trust delivery (R17), and
-   approval/sandbox posture delivery -- opt-in, absent by default,
-   reported when written, approvals and sandbox as separate decisions
-   (R21).
-4. Land the `[context]`/`context_dir` alias and the per-agent gate
-   restructure (Decision 6), the secret mode and git-exclude obligations
-   (Decision 7), the generated gap list with its drift test (R22), and
-   the inherited 15 functional scenarios with scenario 2 restructured to
-   assert dispatch's declared unavailability in the open (R23).
-5. Post the measured findings to tsukumogami/niwa#254, or commit them
-   into the spike file if it has merged (R24) -- including the two spike
-   corrections the PRD names. No new spike document.
+1. `OpDeliverTree`, `IfNotForeign`, `Plan.Exempt`, and the
+   ownership/harness probes as workspace pre-passes with leaf-declared
+   specs -- each arriving with its first consumer.
+2. Codex plan producers: context composition within the measured
+   discovery rules (lifting the retained branch's mechanics), the payload
+   tree, and the worktree layer standing on the measured `.git`-pointer
+   result (R12, R13).
+3. Trust writer bound under (DirectoryTrust, Codex); rows 3, 4, 8, 9, and
+   12 gain their measured `Requires` edges (R17).
+4. `[mcp.servers.*]`: generation of both formats, validation, atomic
+   write, collision detection, and the compatibility-route report
+   (Decision 5, R15).
+5. `[session.env]`: both formats, full resolution -- and in the same
+   increment, payload mode 0o600, the instance-root `.codex/` gitignore
+   entry, and repo exclude patterns for the Codex-side names (Decision 7,
+   R16, R18).
+6. Approval and sandbox posture from its own agent-neutral declaration:
+   absent by default, reported when written, approvals and sandbox mapped
+   from separate sources with a test that an approval-only declaration
+   emits no `sandbox_mode` (R21).
+7. Skills fetch into the niwa-owned marketplace directory (R14).
+8. Renames and gates: `[content]` reinstated as canonical with
+   `[claude.content]` as the deprecated alias, `claude.enabled` as a
+   Claude-producer input only, `[codex] enabled` added symmetrically
+   (Decision 6). Deprecation warning and both-set error tested.
+9. Declaration flips (eleven Codex rows to implemented), the generated
+   guide gap list plus the separate safety section, and the drift test now
+   asserting the committed section (R22).
+10. Functional scenarios: all 15 inherited pass, scenario 2 asserting the
+    dispatch declaration, scenario 10 in its original measured-valid form,
+    and every restructuring named in the PR description (R23).
+11. Measurements posted to tsukumogami/niwa#254 as structured comments, or
+    committed to the spike file if it has merged by then -- including the
+    two spike corrections the PRD names. No new spike document (R24).
 
 ## Security Considerations
 
-- **Resolved secrets on disk.** The Codex payload configuration carries
-  fully resolved environment values, so it is written at `secretFileMode`
+- **Resolved secrets on disk.** The Codex payload config carries fully
+  resolved environment values, so it is written at `secretFileMode`
   (0o600) and git-excluded in the same increment that first makes that
   true (Decision 7). Plan entries make both properties assertable in a
-  unit test rather than a review habit.
-- **Codex inherits secret-named variables by default.**
-  `ignore_default_excludes` defaults to `true` in codex-cli 0.147.0, so
-  the `*KEY*`/`*TOKEN*` excludes are inactive unless the developer opts
-  in -- Codex's own behavior, measured through `codex sandbox` and not yet
-  through a live session's shell tool. Recorded in the user guide's
-  safety section; never assumed active in any niwa claim.
+  unit test rather than a review habit. Provenance metadata carries
+  fingerprints, never secret values, preserving the existing redaction
+  contract.
+- **Writes to the developer's own configuration.** The trust writer stays
+  additive, canonical, lock-serialized, retracting only keys niwa itself
+  wrote, and tolerant of an unreadable config. MCP collision detection
+  reads that file and writes nothing to it; where the file can't be read,
+  detection is skipped with a report rather than guessed at, which is safe
+  because a config Codex can't load runs no session that could see a
+  hybrid. Elsewhere, the recursive field-level merge means a name
+  collision yields a definition neither party wrote, so detection plus a
+  hard error is what keeps niwa from corrupting a developer's setup by
+  name coincidence.
 - **A generated file must never brick a session.** One malformed entry --
-  including a malformed key Codex would ignore -- fails Codex's whole
-  config load for the directory. Everything niwa writes into a Codex
-  layer is validated before writing; failure reports and writes nothing
-  partial.
-- **No hybrid server definitions.** The recursive field-level layer merge
-  means a name collision yields a definition neither party wrote. niwa
-  reads the developer's configuration read-only, reports collisions, and
-  never writes a colliding entry. The trust write remains additive and
-  surgical, retracting only keys niwa itself wrote, and an unreadable or
-  malformed developer configuration fails neither create nor apply.
-- **Posture is never weakened uninvited.** With no declared posture, niwa
-  writes neither `approval_policy` nor `sandbox_mode` and Codex's own
-  defaults stand. The measured fact that `sandbox_mode =
-  "danger-full-access"` disables filesystem and network sandboxing
-  together is why approvals and sandbox stay separate declarations: no
-  approval relaxation ever changes the sandbox setting as a side effect.
+  including a malformed key Codex would otherwise ignore -- fails Codex's
+  whole config load for the directory. Everything niwa writes into a Codex
+  layer is validated and re-decoded before an atomic write; failure
+  reports and leaves nothing partial on disk.
+- **Posture is never weakened uninvited, and never by inference.** With no
+  declared posture, niwa writes neither `approval_policy` nor
+  `sandbox_mode`, and Codex's defaults stand; what niwa does write is
+  reported at apply time. Because `sandbox_mode = "danger-full-access"`
+  collapses approvals and both sandboxes into one setting -- an asymmetry
+  Claude Code's `bypassPermissions` does not have -- niwa never derives a
+  sandbox change from an approval declaration. The capability ships rather
+  than being withheld because the equivalent Claude-side escalation
+  already exists in shipped code (`materialize.go:295-298`, consumed at
+  `:669`), and a contract that declares one agent's route unavailable
+  while the other's ships is the asymmetry this work exists to remove.
+- **Environment inheritance.** Codex's `ignore_default_excludes` defaults
+  to true, so sessions inherit `*KEY*`/`*TOKEN*` variables -- Codex's
+  behavior, not niwa's write. niwa doesn't alter the developer's posture;
+  the guide's safety section states the default, the opt-in, and the
+  measured `include_only` trap. The in-session confirmation of the
+  sandbox-entry-point measurement is tracked to the standing spike (R24)
+  before any security claim rests on it.
+- **Path safety.** The executor applies the existing containment and
+  symlink-escape checks uniformly to every entry, centralizing what each
+  writer previously hand-rolled, and the PR-2 composer's `O_NOFOLLOW` read
+  of committed files is preserved with the `IfNotForeign` re-check keeping
+  the detection-to-write window as narrow as today's.
 - **The leaf cannot exfiltrate by construction.** The layout scan's
-  no-write/no-exec assertion over `internal/agentplan` means the layer
-  that decides what to say has no filesystem-write or process-launch
-  surface to misuse; every write funnels through one executor whose
-  operations are closed and reviewed once.
+  no-write/no-exec assertion -- write calls and write-mode open flags
+  alike -- means the layer that decides what agents get has no
+  filesystem-write or process-launch surface to misuse. Every write
+  funnels through one executor whose operations are closed and reviewed
+  once.
+- **Supply chain.** No new module dependencies (N1); the github
+  marketplace fetch reuses the existing tarball machinery and lands in a
+  git-excluded, instance-scoped directory.
 
 ## Consequences
 
@@ -812,37 +1130,47 @@ Positive:
 
 - The prior attempt's failure mode is structurally unrepeatable: bytes
   reach disk only through a plan, plans only come from a function taking
-  the agent, and a faked implementation fails a pure table test instead
-  of compiling quietly.
-- "What does a Codex session get?" has one answer, in code, that the
-  guide is generated from and a drift test guards -- code and doc cannot
+  the agent, and a faked implementation fails a pure table test instead of
+  compiling quietly.
+- "What does a Codex session get?" has one answer, in code, that the guide
+  is generated from and a drift test guards -- code and doc cannot
   disagree silently.
 - The first PR is reviewable mechanically: a reviewer checks that the
   characterization and structural tests exist and pass, rather than
   auditing the diff for behavior change.
-- A third agent has a defined job: fill a column of the declaration
-  table, supply producers, and let the existing tests confront it with
-  the whole capability set.
+- A third agent has a defined job: fill a column, supply producers, and
+  let the exhaustiveness test confront it with the whole capability set.
+- Two duplicated settings-write blocks are deleted, and the executor
+  centralizes containment checks and bookkeeping writers previously
+  hand-rolled.
 
 Negative, accepted:
 
-- An intermediate representation now stands between config and disk. The
-  growth risk is real; the mitigation is the closed `Op` enum, where
-  adding a member is a named design decision rather than a field slipped
-  into a struct.
-- `SourceEntry` moves down a package, a mechanical but real churn, and
-  the eight context writers are rewritten as producers -- the riskiest
-  part of PR 1, pinned by the characterization test.
-- A few declaration rows read oddly out of context (directory trust is
-  "no such concept" for Claude); the guide's rendering rule absorbs
-  this, at the cost of one more rendering distinction.
-- Two config names (`[claude.content]`, `content_dir`) enter a
-  deprecation cycle for users who already migrated once under the
-  earlier consolidation -- the cost of reversing a decision whose premise
-  dual-agent capability falsified, paid in PR 2 where the second agent
-  makes the old names actively misleading rather than merely inert.
+- An intermediate representation now stands between config and disk, and
+  one more indirection between a config value and the write it causes when
+  debugging. The growth risk is real; the mitigation is the closed `Op`
+  enum, where adding a member is a named design decision rather than a
+  field slipped into a struct -- the correct price for a new way niwa
+  touches a user's repository.
+- `SourceEntry` moves down a package (softened by the type alias, so the
+  state schema and existing references don't change), and the eight
+  context writers are rewritten as producers -- the riskiest part of PR 1,
+  pinned by the characterization test.
+- The declaration table is 48 rows of hand-maintained data, and a few rows
+  read oddly out of context (trust is "no such concept" for Claude). The
+  table's honesty is machine-enforced, so maintenance errors are loud, and
+  the guide's rendering rule absorbs the odd rows as "does not apply"
+  notes.
+- Workspaces that migrated to `[claude.content]` get a second, reversed
+  deprecation cycle -- the cost of reversing a decision whose premise
+  dual-agent capability falsified, paid in PR 2 where the old name becomes
+  actively misleading rather than merely inert. Workspaces still on
+  `[content]` pay nothing and simply stop seeing a warning.
 - The `codex.enabled` gate adds a second per-agent switch where one
   boolean used to (incorrectly) suffice.
+- The characterization test pins behavior aggressively: legitimate
+  intentional output changes in later work must update the golden file
+  knowingly, which the `-update` flag makes a visible, reviewable act.
 
 ## References
 
@@ -856,13 +1184,17 @@ Negative, accepted:
   re-derived; destination for this work's new measurements per R24.
 - docs/designs/current/DESIGN-claude-key-consolidation.md and commit
   81aae0b -- the config rename precedent this design follows, and the
-  consolidation decision it partially reverses (Decision 6).
+  consolidation decision it partially reverses (Decision 6); the alias
+  mechanism itself at `internal/config/config.go:513-528`.
 - tsukumogami/niwa#248 (branch retained at `docs/dual-agent-workspace`) --
   the closed prior attempt: sound Codex composition mechanics, the 15
   functional scenarios that set the acceptance bar, and the structural
   failure the tests in Decision 3 exist to make unrepeatable.
-- `internal/vault` (`provider.go`, `registry.go`) -- the house precedent
-  for a mandatory interface with fail-closed registry lookup, mirrored by
-  the declaration table's posture.
-- `internal/workspace/apply.go:1695-1718`, `state.go:184-190` -- the
+- `internal/vault` (`provider.go`, `registry.go:88-114`) -- the house
+  precedent for a mandatory interface with fail-closed registry lookup,
+  mirrored by the declaration table's posture.
+- `internal/workspace/apply.go:1701-1718`, `state.go:184-190` -- the
   managed-file record the characterization test pins.
+- `internal/workspace/materialize.go:295-298` and `:669` -- the shipped
+  Claude-side mapping from a workspace `permissions` declaration to
+  `permissions.defaultMode`, the parity precedent behind row 12.
