@@ -33,6 +33,7 @@ init → create → apply workflow, add a `@critical` Gherkin scenario in
 
 ## Contributor Guides
 
+- `docs/guides/dual-agent-workspace.md` — every instance serves Claude Code and Codex at once: the instance payload and byte budget, per-repo `.codex` link and composed `AGENTS.override.md`, trust entries, conflicts with committed content, worktree parity, deliberate exclusions
 - `docs/guides/ephemeral-session-instances.md` — one ephemeral instance per Claude Code background session: SessionStart/SessionEnd hooks, mapping store, `niwa reap`, context-aware `niwa apply`, opt-out
 - `docs/guides/file-distribution.md` — the three file tables (`[files]`, `[instance.files]`, `[root.files]`): repo `.local` rewrite vs verbatim non-repo distribution, the `.mcp.json` use case, tracking/cleanup, and limitations
 - `docs/guides/functional-testing.md` — end-to-end test patterns and the `localGitServer` helper
