@@ -211,3 +211,45 @@ is issue 9's on issue 8."
   conflict rule, which never applies outside working trees, so nothing breaks —
   but the inconsistency is worth a deliberate note in issue 1 rather than being
   discovered during implementation.
+
+# Round 2
+
+# Verdict: PASS
+
+Both required findings are closed, all five optionals are in, and nothing regressed.
+
+**Required change 1 — closed, and closed better than I asked.** Amending PRD criterion
+2 rather than having the plan admit an overrun is the right resolution: the amendment
+is narrow (it licenses only deletions entailed by retiring an accessor, in the exact
+three shapes at issue) rather than opening the bound generally, so R2 stays decidable
+and the plan claims conformance to a bound it actually meets. Issue 2's goal now says
+"`LocalContextFileName()` itself survives with its Claude and zero-value behavior",
+which forecloses the misreading, and its criterion names the three edits precisely:
+`TestWritesRepoLevelContext` deleted with its accessor, `TestLocalContextFileName`'s
+Codex row removed with the other rows standing, the repository-level-skip test deleted.
+That matches the amended PRD text word for word and matches the code — `agent.go:73`
+(branch retired, function stays) and `agent.go:85` (function retired).
+
+**Required change 2 — closed, and the added sentence is accurate.** The tally now reads
+1 + 1 + 1 + 3 and each edge checks out against the declarations. The addition ("The
+closing acceptance-test issue (11) draws on batches 2 through 4 (issues 7, 9, 10) and
+is left out of the tally") is correct on both halves: issue 7 is batch 2, issue 9 batch
+3, issue 10 batch 4, and declaring the issue out of the tally is what keeps the four
+counted numbers exact — 11→7 would otherwise raise the batch-2-into-batch-4 count to 4.
+Issue 12's dependency on issue 10 is intra-batch-4 and correctly absent. No miscount
+reintroduced.
+
+**Removed Dependency Graph section — no impact.** My round-1 sequencing assessment was
+built from the twelve per-issue **Dependencies**: declarations and the Implementation
+Sequence prose, never from the diagram; I re-read all twelve declarations and they are
+byte-identical to what I verified then. The graph is unchanged, still acyclic, and the
+stated critical path (1 → 4 → 5 → 6 → 7 → {9,10} → 11) still matches at depth 7.
+
+**Optionals verified in place.** Issue 1 carries both the untouched-remainder sentence
+on the R2 criterion and the deliberate no-marker note in its goal. Issue 5's budget
+criterion now reads "exceeds ... by a stated headroom margin — an exact-fit budget fails
+the test". Issue 7's third criterion is the plainer phrasing. Issue 11's criterion-3
+scenario names the no-`NIWA_*`/no-`CODEX_HOME` shell.
+
+**Mechanics re-checked.** No `wip/` reference (grep clean), 12 issue outlines, section
+structure intact. Nothing that passed in round 1 was disturbed.
