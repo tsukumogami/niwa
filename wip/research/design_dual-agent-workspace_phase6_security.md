@@ -182,3 +182,109 @@ seen, not because they were weighed.
 - Note that apply-time regeneration does not heal tampered plugin
   install roots (the symlink targets), which are shared across instances
   and both agents; plugin reconciliation is the healing mechanism there.
+
+# Round 2
+
+# Verdict: PASS
+
+## Required change 1 — conflicts (closed)
+
+The rule landed with the property, not just wording. Decision 7 defines
+the conflict predicate correctly (anything at either name that niwa did
+not itself materialize — tracked or untracked, file, directory, or
+symlink), specifies skip-modify-nothing-report-loudly, and the
+git-exclude discussion now states the pattern is inert for tracked
+paths, which was the half-truth I flagged. The trust-withholding does
+close the impersonation path I identified: with no entry, the
+repository's own `.codex/` config layer does not load trusted on niwa's
+signature — the decision is pushed back to Codex's own prompt, where
+the developer sees what they are trusting. The "Conflicts with
+committed content" subsection, the Security bullet naming the
+impersonation shape, and the honest opt-out negative in Consequences
+are all present and consistent with each other and with batch 2/3
+sequencing (batch 3 consumes batch 2's conflict verdicts).
+
+One residual is prospective-only, and I judged it non-blocking: apply
+"leaves existing entries untouched", so a repository that becomes
+conflicted *after* its entry was written (developer removes niwa's
+symlink to unblock a checkout that brings a committed `.codex/`) keeps
+a standing trust entry that now vouches for repository-authored
+content. Reaching it requires the developer to remove niwa's own
+symlink (git refuses to overwrite the untracked link on
+checkout/pull), every subsequent apply reports the conflict, and the
+underlying exposure — content of a trusted repository changing over
+time, branches included — is Codex's repo-granular sticky trust model,
+which niwa cannot fix and the trust bullet's residual already covers.
+Named below as optional.
+
+## Required change 2 — symlink-safe inlining (closed)
+
+The refusal rule is the right one and is stated where it binds:
+lstat-not-stat, regular-file-only, generalized to "any other repository
+file the composer ever reads", applied identically to worktree
+checkouts, and treated as a Decision 7 conflict (no override written,
+so nothing displaces native discovery; loud report). "Regular file" is
+the correct predicate — it excludes symlinks, directories, and special
+files in one check, with no resolution edge cases. The refusal-over-
+resolve rationale is sound, and tying the never-reads-credentials claim
+explicitly to this rule ("true only because of this rule") is exactly
+the drift-proofing I asked for. One overstatement, non-blocking: "no
+window between the check and the read" is not strictly true of
+lstat-then-open — see optional below. The racing actor for that window
+must already be executing in the working tree during apply, which is
+outside this design's threat model.
+
+## Required change 3 — write discipline (closed)
+
+All three properties landed as decision text, not aspiration: atomic
+same-directory temp-file + fsync + rename (interruption leaves the
+prior file intact), refuse-and-report on an unparseable pre-existing
+file with the file left byte-untouched, and an advisory lock across the
+whole read-modify-write with a re-read under the lock. Batch 3 carries
+them explicitly and the Security bullet's new *discipline* bound names
+all three. The honest caveat that Codex's own concurrent writes are
+outside the lock — the same exposure Codex's own sessions already carry
+— is correct and correctly scoped.
+
+## Regression check — architecture-batch text
+
+- **Trust-key canonicalization (Decision 4):** a security improvement,
+  not a regression. Resolving symlinks before keying prevents the
+  silently-miskeyed read-only-sandbox failure, and the canonical path
+  still resolves inside niwa-managed directories, so the scope claim
+  holds.
+- **Plugin install-root resolution (Decision 3):** the github-sourced
+  case makes Claude Code's user-global plugin cache a symlink target
+  reachable from every repository. The Security section handles this
+  honestly: regeneration heals the payload and links but not the
+  targets, tampering there persists until plugin reconciliation, and
+  the exposure is shared with (not added to) the Claude side, which
+  reads the same roots. That parity claim is correct — the symlink adds
+  an address, not a capability. Missing roots are skipped-and-reported
+  rather than left as silent dangling links, which is the right
+  anti-silent-failure shape.
+- **Worktree composition rework:** the regular-file-only rule is
+  explicitly extended to worktree checkouts; no gap introduced.
+- My round-one optional items also landed: stale entries are now "not
+  fully inert" with removal as planned lifecycle work, and the trust
+  bullet concretely names sandbox/approval settings as loadable from a
+  trusted project layer — the worst case, named.
+
+## Required changes
+
+None.
+
+## Optional improvements
+
+- **Remove, don't just withhold, on a `.codex` conflict.** When apply
+  detects a `.codex` conflict in a repository whose trust entry niwa
+  itself wrote earlier, remove that entry (it is niwa's own write, so
+  additivity is preserved) — or at minimum have the conflict report
+  state that a standing trust entry still vouches for the repository's
+  own content. The same report wording should cover the per-worktree
+  variant: a conflicted worktree still runs trusted through the main
+  repository root's entry, which cannot be withheld per-worktree.
+- **Tighten the check-to-read claim.** Replace "no window between the
+  check and the read" with the implementation that makes it true:
+  open with O_NOFOLLOW (or open-then-fstat) rather than lstat-then-open.
+  One flag, and the design's claim becomes accurate as written.

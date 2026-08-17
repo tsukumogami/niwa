@@ -326,3 +326,184 @@ with a drift-detection mitigation. What it asserts without establishing:
 - The budget sizing is computed at apply time but the inputs (committed context files
   in repository subdirectories) can grow between applies. One sentence acknowledging
   that window would match the honesty of the stale-inline limitation next to it.
+
+# Round 2
+
+# Verdict: FAIL
+
+All six round-one items are closed with the property intact, not just the wording,
+and the re-derived batch sequencing earns its conclusion. The failure is narrow and
+entirely in the new material: the conflict rule contradicts itself on scope, and one
+of its two refusals is over-broad in the direction that costs both delivery and
+safety.
+
+## Round-one items — all six closed
+
+**1. Plugin root resolution (was the deepest hole).** Decision 3 now owns it as part
+of the decision rather than assuming it (lines 305-327). It states the actual
+constraint — niwa's plugin model is name-based, resolving an on-disk directory only
+for repository-sourced marketplaces and even then only the marketplace root — and
+splits resolution by marketplace kind: parse the manifest niwa already opens for the
+name and join the plugin's declared source directory for repository-sourced ones, the
+Claude Code user-global cache for github-sourced ones. Crucially it does not hope the
+root away: a missing root at apply time is handled under D4 with a per-plugin loud
+report naming the plugin and the expected path, explicitly rejecting the silent
+dangling symlink, and explicitly because "where a Claude session self-heals by
+installing at startup, a Codex session has no equivalent" — the asymmetry I raised.
+The second external layout is now on the dependency list in Consequences (lines
+1025-1038) beside the codex-cli pins. Property intact.
+
+**2. `.codex` collision.** Closed and generalized beyond what I asked. The
+blind-overwrite guard stays retired *for `AGENTS.md`* with the correct reason (niwa
+never writes that name), and a conflict rule now covers the two names niwa does
+write (lines 613-638), with the honest framing that "a name repositories do not
+commit" is an assumption about third-party behavior. The git-exclude bullet now
+states the untracked-only limit and points at the conflict rule for tracked names
+(lines 607-612) — that is the connection I did not ask for and it is the right one.
+See the regressions below for what the rule does not settle.
+
+**3. Worktree composition.** Fixed correctly and against the code, not by adding a
+word: lines 695-701 and 721-724 now carry instance, group, the repository layer, and
+the framing appended last, and the parenthetical describes the real merge order
+(`internal/workspace/worktree_content.go:512` then `:641`). The worktree's committed
+`AGENTS.md` is now explicitly inlined under the same regular-file rule.
+
+**4. Blast radius.** Correct in every particular I verified: two of three scenarios
+affected with the dispatch scenario standing, three assertions changing, and
+`tools/app/AGENTS.md does not exist` explicitly called out as the one that must not
+be inverted with the reason attached (lines 554-567). The feature description prose
+and `Design:` pointer are included. `WritesRepoLevelContext()` is answered
+explicitly — **retired** (lines 530-536) — with the repo-level-skip test deleted
+alongside it, and the design says why it is stating the complete set. Decidable now.
+One residual for whoever writes the plan, not a blocker: that test asserts the
+repo-level skip rather than "the other agent's file is absent", so deleting it fits
+R2's criterion only on a file-scoped reading of it. The design takes that reading
+openly, which is the right way to carry it.
+
+**5. The re-derived seam and sequencing — judged fresh, it holds.** Decision 7A is
+now level-by-level (lines 500-523) and each level's claim matches the code: pure
+filename selector at root/instance, one-source writer at group, accessor-gated no-op
+at repository/worktree. The re-derivation changed a batch boundary rather than a
+sentence — group composition moved out of batch 1 into batch 2 with the reason
+stated ("new composition sharing this batch's composer, not a re-run of the existing
+group writer"), and batch 1 was retitled to what it actually is. That is the tell
+that the premise was rebuilt rather than patched. The gating claim is re-earned on
+new grounds and both grounds are real: batch 1 establishes the per-agent pass batch
+2's writers ride, and batch 1 alone is what flips `tools/app/CLAUDE.local.md does
+not exist` (the Claude pass becoming unconditional causes that, independent of any
+Codex write). The design is also candid that this is not reuse. The dependency is
+softer than "gates" implies — a net-new Codex materializer could be invoked from the
+pipeline without batch 1 — but the ordering is right for the stated reason
+(protecting the invariant first), and batch 3's new dependency on batch 2's conflict
+verdicts is correctly identified.
+
+**6. Trust-key canonicalization.** Closed at lines 362-373 with full component-wise
+symlink resolution, the concrete failure shape, and the PRD criterion named as the
+regression check.
+
+## Regressions from the security batch
+
+**A. The conflict rule contradicts itself on scope, and one reading reopens R7.**
+Decision 7 states it per-name — "Before writing either name, niwa checks the target
+path... niwa writes nothing at that name" (lines 621-625) — and the architecture
+section agrees ("Anything already at `.codex` or `AGENTS.override.md`... the write is
+skipped", lines 745-747). But Consequences states it repository-wide: a conflict at
+either name "means that repository gets no payload link, no composed override, and
+for a `.codex` conflict no trust entry" (lines 1000-1004). These are different
+designs, and the difference is load-bearing for the coherence question:
+
+- *Repository-wide reading:* a conflicted repository gets nothing from niwa, falls
+  back to native discovery, and is reported. Coherent, and the Consequences entry
+  describes it accurately.
+- *Per-name reading:* a `.codex` conflict skips only the link. The composed
+  `AGENTS.override.md` is still written, and Decision 2 established that the override
+  name is probed with no trust dependency — so it loads. But the budget is declared
+  in the payload's `config.toml`, which is reached only through the `.codex` link
+  that was just skipped. That repository therefore runs the composed chain under the
+  default 32768 with no declaration, and the design's own byte-budget section says
+  truncation eats the tail, which under the chosen outermost-first ordering is the
+  repository layer R7 protects. The conflict is reported; the truncation is not. That
+  is a silent minority-case failure reached through the rule written to prevent
+  silent minority-case failures, and it is the one thing the conflict path does *not*
+  degrade loudly about.
+
+The rule must pick one scope and say so in all three places. If per-name, the budget
+consequence has to be stated and handled (the honest options are to skip the override
+too when the payload link is skipped, or to accept the default budget and say what
+that costs).
+
+**B. The regular-file refusal is over-broad, and R6 is cited backwards for it.**
+Decision 2's new rule is right that the composer must lstat and refuse to read a
+non-regular `AGENTS.md`; the refusal-over-resolution argument (no chained links, no
+post-resolution traversal, no check-to-read window) is sound and I have no quarrel
+with it. What does not follow is the second half: "niwa reads nothing, inlines
+nothing, **writes no override for that repository** — so nothing displaces the
+repository's own file in discovery (R6)" (lines 252-256).
+
+R6 requires the session to receive *both* the workspace's context and the
+repository's own content. Under the refusal the session receives only the
+repository's own file — which is the symlink, which Codex will follow natively on
+its own read — and none of the workspace's. So the branch is justified by preserving
+R6 while failing R6's workspace half outright, and it leaves the symlink in the
+discovery slot rather than out of it. Composing the override from the instance,
+group, and repository layers *without* the inline requires reading nothing from the
+repository at all, so it costs the refusal nothing: it delivers the workspace layers
+(R6's first half, which is recoverable), and because `AGENTS.override.md` wins
+first-match it additionally displaces the symlinked `AGENTS.md` from discovery
+instead of leaving it as the only thing the session reads. The chosen branch is the
+strictly worse one on both axes the design cares about. Either take the composed-
+without-inline branch, or state plainly why leaving the symlink as the session's
+sole context source is preferable — the current text does not argue that, it asserts
+the opposite outcome.
+
+**C. Ownership recognition has no backing on the standalone worktree path.** The
+rule recognizes niwa's own writes "the `.codex` symlink by its target... and copied
+or composed files through the tracked-content records materialization already keeps"
+(lines 628-631). For `.codex` the target test works everywhere. For a worktree's
+`AGENTS.override.md` it needs a record, and the record exists on only one of the two
+paths that writes it: the instance-apply path hashes `ApplyToWorktree`'s returned
+files into managed entries (`internal/workspace/apply.go:1976-2000`), while the
+standalone `niwa worktree apply` path calls `ApplyToWorktree` directly and returns
+the list without persisting it (`internal/cli/session_lifecycle_cmd.go:371`). On
+that path the first re-apply meets its own prior override with no ownership record
+and, under the rule as written, must treat it as foreign and refuse to refresh it —
+which is R3's worktree-refresh criterion ("the same holds for a worktree after `niwa
+worktree apply`") failing by way of the conflict rule. Say what backs the check
+there. A content-derived test (niwa's own composed-file marker) or extending the
+worktree path's record-keeping would both do; leaving it to "records materialization
+already keeps" would not.
+
+## Required changes
+
+1. Settle the conflict rule's scope — per-name or repository-wide — consistently
+   across Decision 7 (lines 621-625), the Conflicts section (745-752), and
+   Consequences (1000-1004). If per-name, state and handle what a skipped `.codex`
+   link does to the budget declaration in that repository, since the composed
+   override still loads there and truncation of the R7 layer is silent.
+
+2. Narrow the non-regular-file refusal to the inline, or argue the wider refusal on
+   its own terms. As written it withholds the workspace layers — which need no
+   repository read — and cites R6 for an outcome that leaves the session with the
+   symlink as its only context.
+
+3. State what backs ownership recognition for a worktree's `AGENTS.override.md` on
+   the standalone `niwa worktree apply` path, which persists no managed-file record
+   today.
+
+## Optional improvements
+
+- Say where the trust writer's lock and same-directory temp file live. Decision 4
+  says "nothing else" is written into the developer's Codex config and the write is
+  bounded to `[projects.*]` keys; a lockfile and a rename staging file in
+  `~/.codex/` are new artifacts outside the instance that the claim does not cover.
+  One sentence (either "in niwa's own state directory" or an explicit carve-out)
+  keeps the claim exact.
+- Reconcile two sentences about the missing plugin root: Decision 3 skips the
+  symlink entirely, while the apply-refresh section calls it "a skills link whose
+  plugin root never materialized" and "the one dangle apply cannot repair" (lines
+  800-805). Under Decision 3 there is no link and so no dangle; the reporting
+  behavior agrees, only the noun does not.
+- Say whether an unparseable pre-existing Codex config fails the apply or warns.
+  "Refuses the trust step... and reports" reads as non-fatal, and the consequence —
+  every repository in the instance silently read-only at session time — is severe
+  enough that the choice should be explicit rather than inferred.
