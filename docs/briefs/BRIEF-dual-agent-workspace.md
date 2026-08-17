@@ -1,6 +1,6 @@
 ---
 schema: brief/v1
-status: Draft
+status: Accepted
 problem: |
   niwa prepares a workspace instance for exactly one coding agent. The agent
   choice is exclusive and made at creation time: preparing for Codex replaces
@@ -23,12 +23,20 @@ motivating_context: |
 
 ## Status
 
-Draft
+Accepted
 
 The downstream PRD owns the requirements, including the silent-failure cases
 the exploration flagged as acceptance-criterion material. The downstream
 DESIGN owns the delivery mechanism: where the Codex-readable context and
 skills live on disk and how they are kept in sync.
+
+Both framing questions this brief carried in Draft are now closed. An
+interactive Codex session was verified to start clean in a prepared repository
+-- no prompt, from the repository root and from directories beneath it -- so
+the outcome above is measured rather than assumed. Hook injection resolved the
+other way and moved to the scope boundary as an exclusion: an interactive
+session blocks on a review prompt for a hook it cannot verify, which is the one
+failure this feature cannot afford, and nothing niwa ships today needs one.
 
 ## Problem Statement
 
@@ -161,12 +169,11 @@ more, not a breakage.
   mid-session; that's tracked separately as niwa#247. This feature improves
   the Codex side incidentally but doesn't claim to close it.
 
-## Open Questions
-
-- Whether Codex hook delivery is part of this feature or deferred. Nothing
-  niwa ships today requires a Codex-side hook, so the PRD decides whether to
-  carry the capability now or leave it for the increment that first needs it.
-- Whether the interactive Codex TUI starts fully clean in a prepared
-  repository or shows a one-time prompt. Verification was still in flight
-  when framing closed; the PRD lands this as an acceptance criterion or, if a
-  prompt appears, as a stated limitation.
+- **Codex hook injection.** niwa injects hooks for Claude today, so a reader
+  could reasonably assume the Codex side comes with them. It doesn't. Nothing
+  niwa ships currently needs a Codex-side hook, and carrying them would put a
+  blocking prompt in the path of the very thing this feature delivers: an
+  interactive Codex session refuses to start until the developer reviews a hook
+  it can't verify, where a background run would simply skip it. The capability
+  is understood and can be added by the increment that first needs one; it buys
+  nothing here and costs the clean start.
