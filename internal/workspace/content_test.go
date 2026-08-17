@@ -101,9 +101,15 @@ func setupWorkspaceContentFixture(t *testing.T) (cfg *config.WorkspaceConfig, co
 }
 
 // TestContentFilenameByAgent asserts the output-filename-by-agent seam at the
-// niwa-owned (workspace-root and group) levels: Codex writes AGENTS.md where
+// niwa-owned (instance-root and group) levels: Codex writes AGENTS.md where
 // Claude (and the zero-value agent) write CLAUDE.md, and the materialized body
-// is identical across agents (only the filename differs). PRD R5, R6, R7, R8.
+// is identical across agents (only the filename differs).
+//
+// At the instance root the apply pipeline runs this writer once per agent
+// (DESIGN-dual-agent-workspace Decision 7A), so each case also installs the
+// other agent's file and asserts it lands beside this one instead of being
+// absent: preparation is unconditional and the two names never clobber each
+// other. PRD R1, R5, R6, R7, R8.
 func TestContentFilenameByAgent(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -129,8 +135,23 @@ func TestContentFilenameByAgent(t *testing.T) {
 				t.Fatalf("workspace file = %v, want base %q", wsFiles, tc.wsFile)
 			}
 			wsBody := readFile(t, filepath.Join(instanceRoot, tc.wsFile))
-			// The other agent's filename must NOT exist at this level.
-			assertNotExist(t, filepath.Join(instanceRoot, otherRootFile(tc.wsFile)))
+
+			// The pipeline runs this writer once per agent, so the other
+			// agent's filename lands beside this one, unclobbered.
+			other := agent.AgentCodex
+			if tc.wsFile == "AGENTS.md" {
+				other = agent.AgentClaude
+			}
+			if _, err := InstallWorkspaceContent(cfg, configDir, instanceRoot, other); err != nil {
+				t.Fatalf("InstallWorkspaceContent(%s): %v", other, err)
+			}
+			otherPath := filepath.Join(instanceRoot, otherRootFile(tc.wsFile))
+			if readFile(t, otherPath) != wsBody {
+				t.Errorf("%s body differs from %s", otherRootFile(tc.wsFile), tc.wsFile)
+			}
+			if readFile(t, filepath.Join(instanceRoot, tc.wsFile)) != wsBody {
+				t.Errorf("%s was clobbered by the second agent's install", tc.wsFile)
+			}
 
 			grpFiles, err := InstallGroupContent(cfg, configDir, instanceRoot, "public", tc.ag)
 			if err != nil {

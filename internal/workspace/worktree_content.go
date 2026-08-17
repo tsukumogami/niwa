@@ -436,11 +436,10 @@ func FindRepoGroup(instanceRoot, repoName string) (string, error) {
 // WorktreeApplyOptions carries the inputs ApplyToWorktree needs that are not
 // derivable from the worktree path alone.
 type WorktreeApplyOptions struct {
-	// Agent is the resolved session-global coding agent this worktree apply
-	// prepares for. The zero value behaves as Claude (agent.AgentClaude), so a
-	// caller that does not set it gets today's behavior. Under an agent that
-	// does not write repository/worktree-level context (Codex), the repo-content
-	// and worktree-context-layer writes are skipped.
+	// Agent is the resolved session-global coding agent the session launched
+	// into this worktree runs. It does not select what a worktree apply
+	// materializes: preparation is unconditional, and the Claude-facing writers
+	// below always run as Claude (DESIGN-dual-agent-workspace Decision 7A).
 	Agent agent.Agent
 	// OverlayDir is the local clone path of the overlay repo when one is
 	// active, used to append overlay content / resolve overlay-sourced repo
@@ -501,15 +500,15 @@ func ApplyToWorktree(cfg *config.WorkspaceConfig, configDir, instanceRoot, workt
 	if !ClaudeEnabled(cfg, repo) {
 		// Claude content is disabled for this repo; install only the
 		// worktree-context layer so the worktree still records its purpose.
-		return installWorktreeContextLayer(cfg, configDir, instanceRoot, worktreePath, repo, purpose, branch, opts.Agent)
+		return installWorktreeContextLayer(cfg, configDir, instanceRoot, worktreePath, repo, purpose, branch, agent.AgentClaude)
 	}
 
 	var written []string
 
 	// 1. Owning repo's content (CLAUDE.local.md + subdir content), targeted at
-	//    the worktree root. Same function the instance apply path calls. A no-op
-	//    under an agent that does not write repository-level context (Codex).
-	result, err := InstallRepoContentTo(cfg, configDir, opts.OverlayDir, instanceRoot, worktreePath, group, repo, opts.Agent)
+	//    the worktree root. Same function the instance apply path calls, and
+	//    like that path it runs as Claude whatever the session agent is.
+	result, err := InstallRepoContentTo(cfg, configDir, opts.OverlayDir, instanceRoot, worktreePath, group, repo, agent.AgentClaude)
 	if err != nil {
 		return nil, fmt.Errorf("installing repo content into worktree: %w", err)
 	}
@@ -638,7 +637,7 @@ func ApplyToWorktree(cfg *config.WorkspaceConfig, configDir, instanceRoot, workt
 
 	// 4. Worktree-specific layer naming the purpose and branch (or the
 	//    configured [claude.content.worktree] template, when set).
-	layerFiles, err := installWorktreeContextLayer(cfg, configDir, instanceRoot, worktreePath, repo, purpose, branch, opts.Agent)
+	layerFiles, err := installWorktreeContextLayer(cfg, configDir, instanceRoot, worktreePath, repo, purpose, branch, agent.AgentClaude)
 	if err != nil {
 		return nil, err
 	}

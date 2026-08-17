@@ -1,14 +1,15 @@
-Feature: select OpenAI Codex as the workspace agent
-  When a workspace declares default_agent = "codex" (or a session overrides with
-  --agent codex), niwa materializes its context as AGENTS.md at the niwa-owned
-  levels instead of CLAUDE.md, and skips writing repository-level context so a
-  repo's own committed AGENTS.md is never clobbered. The default (Claude) path is
-  unchanged.
+Feature: prepare every instance for both agents
+  Every instance niwa prepares serves Claude Code and Codex alike: the
+  niwa-owned levels carry CLAUDE.md and AGENTS.md side by side, and the Claude
+  tree is written in full whatever default_agent says. That setting selects
+  which agent a niwa-launched session runs, not what preparation produces.
+  niwa still writes no AGENTS.md inside a cloned repository, so a repo's own
+  committed AGENTS.md is never clobbered.
 
-  Design: docs/designs/current/DESIGN-interactive-codex-session.md
+  Design: docs/designs/current/DESIGN-dual-agent-workspace.md
 
   @critical
-  Scenario: a codex-default workspace materializes AGENTS.md at the instance root
+  Scenario: a codex-default workspace still materializes the whole Claude tree
     Given a clean niwa environment
     And a local git server is set up
     And a source repo "app" exists
@@ -23,6 +24,9 @@ Feature: select OpenAI Codex as the workspace agent
       [claude.content.workspace]
       source = "ws.md"
 
+      [claude.content.repos.app]
+      source = "ws.md"
+
       [repos.app]
       url = "{repo:app}"
       group = "tools"
@@ -34,9 +38,17 @@ Feature: select OpenAI Codex as the workspace agent
     And the instance "ws" exists
     And the file "AGENTS.md" exists in instance "ws"
     And the file "AGENTS.md" in instance "ws" contains "mcpServers"
-    And the file "CLAUDE.md" does not exist in instance "ws"
-    And the file "tools/app/CLAUDE.local.md" does not exist in instance "ws"
+    And the file "CLAUDE.md" exists in instance "ws"
+    And the file "CLAUDE.md" in instance "ws" contains "mcpServers"
+    And the file "tools/app/CLAUDE.local.md" exists in instance "ws"
+    # niwa writes AGENTS.override.md into repositories, never AGENTS.md: this
+    # assertion guards the repo's own committed file and must stay.
     And the file "tools/app/AGENTS.md" does not exist in instance "ws"
+    # A config declaring the agent setting re-applies with no migration step.
+    When I run "niwa apply ws"
+    Then the exit code is 0
+    And the file "CLAUDE.md" exists in instance "ws"
+    And the file "AGENTS.md" exists in instance "ws"
 
   @critical
   Scenario: niwa dispatch refuses in a codex-default workspace
@@ -59,7 +71,7 @@ Feature: select OpenAI Codex as the workspace agent
     And the error output contains "NIWA_AGENT=claude"
 
   @critical
-  Scenario: the default (Claude) workspace still materializes CLAUDE.md
+  Scenario: a claude-default workspace materializes both agents' context too
     Given a clean niwa environment
     And a local git server is set up
     And a source repo "app" exists
@@ -83,4 +95,11 @@ Feature: select OpenAI Codex as the workspace agent
     Then the exit code is 0
     And the instance "ws" exists
     And the file "CLAUDE.md" exists in instance "ws"
-    And the file "AGENTS.md" does not exist in instance "ws"
+    And the file "AGENTS.md" exists in instance "ws"
+    And the file "AGENTS.md" in instance "ws" contains "mcpServers"
+    # A config predating the agent setting re-applies unchanged, and still
+    # serves both agents.
+    When I run "niwa apply ws"
+    Then the exit code is 0
+    And the file "CLAUDE.md" exists in instance "ws"
+    And the file "AGENTS.md" exists in instance "ws"

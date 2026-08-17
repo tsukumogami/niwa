@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/tsukumogami/niwa/internal/agent"
 	"github.com/tsukumogami/niwa/internal/config"
 )
 
@@ -90,13 +89,6 @@ type RootMaterializeOptions struct {
 	// the hooks that act on it.
 	EphemeralSessionMode bool
 
-	// Agent is the resolved session-global coding agent this materialize
-	// prepares the workspace root for. The zero value behaves as Claude
-	// (agent.AgentClaude), so a caller that does not set it writes the
-	// workspace-root context file exactly as before (CLAUDE.md). Under Codex it
-	// selects AGENTS.md.
-	Agent agent.Agent
-
 	// ConfigDir is the workspace config source directory (typically
 	// <workspaceRoot>/.niwa). It is the source root for [root.files] verbatim
 	// file distribution; required only when [root.files] is non-empty.
@@ -111,8 +103,8 @@ type RootMaterializeOptions struct {
 //     SessionEnd entry -- teardown is reaper-driven, DESIGN Decision 6),
 //     the permission posture (permissions.defaultMode, sourced the same way
 //     instance materialization sources it), and the ephemeral-session-mode flag.
-//   - <workspaceRoot>/CLAUDE.md carrying workspace-context content at root
-//     altitude.
+//   - <workspaceRoot>/CLAUDE.md and <workspaceRoot>/AGENTS.md, one per agent
+//     niwa prepares, both carrying workspace-context content at root altitude.
 //
 // It is the workspace-root counterpart to InstallWorkspaceRootSettings (which,
 // despite its name, targets an INSTANCE root). The true workspace root -- the
@@ -138,11 +130,11 @@ func MaterializeWorkspaceRoot(cfg *config.WorkspaceConfig, workspaceRoot string,
 	}
 	written = append(written, settingsPath)
 
-	claudePath, err := writeRootClaudeMD(cfg, workspaceRoot, opts.Agent)
+	contextPaths, err := writeRootContextFiles(cfg, workspaceRoot)
 	if err != nil {
 		return nil, err
 	}
-	written = append(written, claudePath)
+	written = append(written, contextPaths...)
 
 	skillPaths, err := writeRootSkills(workspaceRoot)
 	if err != nil {
@@ -361,22 +353,32 @@ func pluginMarketplace(plugin string) string {
 	return plugin[at+1:]
 }
 
-// writeRootClaudeMD writes <workspaceRoot>/CLAUDE.md with workspace-context
-// content at root altitude. A session launched at the workspace root loads this
-// file at startup; without it the coordinator and any root session start with
-// no workspace orientation.
+// writeRootContextFiles writes the workspace-root context file for each agent
+// niwa prepares (CLAUDE.md and AGENTS.md), both carrying the same
+// workspace-context content at root altitude. A session launched at the
+// workspace root loads its agent's file at startup; without it the coordinator
+// and any root session start with no workspace orientation.
+//
+// Both names are written on every materialize, whatever the workspace's
+// default_agent says: the root level is niwa-owned and its writer is a pure
+// filename selector, so running it once per agent yields both files
+// (DESIGN-dual-agent-workspace Decision 7A).
 //
 // At init time the workspace has no cloned repos to enumerate, so this does not
 // reuse generateWorkspaceContext (which classifies discovered repos). It writes
-// a minimal workspace-root CLAUDE.md describing the workspace and the
+// a minimal workspace-root context file describing the workspace and the
 // ephemeral-session model instead.
-func writeRootClaudeMD(cfg *config.WorkspaceConfig, workspaceRoot string, ag agent.Agent) (string, error) {
+func writeRootContextFiles(cfg *config.WorkspaceConfig, workspaceRoot string) ([]string, error) {
 	content := generateRootClaudeContent(cfg)
-	claudePath := filepath.Join(workspaceRoot, ag.RootContextFileName())
-	if err := os.WriteFile(claudePath, []byte(content), 0o644); err != nil {
-		return "", fmt.Errorf("writing workspace-root context file: %w", err)
+	var written []string
+	for _, ag := range materializedAgents {
+		path := filepath.Join(workspaceRoot, ag.RootContextFileName())
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			return nil, fmt.Errorf("writing workspace-root context file: %w", err)
+		}
+		written = append(written, path)
 	}
-	return claudePath, nil
+	return written, nil
 }
 
 // generateRootClaudeContent produces the markdown for the workspace-root

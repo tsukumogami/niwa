@@ -245,7 +245,6 @@ func runApply(cmd *cobra.Command, args []string) error {
 		if _, mErr := workspace.MaterializeWorkspaceRoot(cfg, scope.WorkspaceRoot, workspace.RootMaterializeOptions{
 			EphemeralSessionMode: workspace.EphemeralSessionMode(scope.WorkspaceRoot),
 			ConfigDir:            configDir,
-			Agent:                resolvedAgent,
 		}); mErr != nil {
 			return fmt.Errorf("materializing workspace-root config: %w", mErr)
 		}

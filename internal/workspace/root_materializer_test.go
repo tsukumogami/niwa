@@ -149,44 +149,33 @@ func TestMaterializeWorkspaceRoot_ClaudeMD(t *testing.T) {
 	}
 }
 
-// TestMaterializeWorkspaceRoot_AgentFilename asserts the true-workspace-root
-// context file is named by the selected agent: AGENTS.md under Codex, CLAUDE.md
-// under Claude and the zero-value agent, with the same body. PRD R5, R6, R7.
+// TestMaterializeWorkspaceRoot_AgentFilename asserts the true workspace root
+// carries one context file per agent niwa prepares -- CLAUDE.md and AGENTS.md
+// side by side, same body -- on every materialize, with nothing to select
+// between them. Preparation is unconditional (PRD R1), so the file the other
+// agent reads is present beside this one rather than absent
+// (DESIGN-dual-agent-workspace Decision 7A).
 func TestMaterializeWorkspaceRoot_AgentFilename(t *testing.T) {
-	cases := []struct {
-		name       string
-		ag         agent.Agent
-		wantFile   string
-		absentFile string
-	}{
-		{"codex", agent.AgentCodex, "AGENTS.md", "CLAUDE.md"},
-		{"claude", agent.AgentClaude, "CLAUDE.md", "AGENTS.md"},
-		{"zero-value defaults to claude", agent.Agent(""), "CLAUDE.md", "AGENTS.md"},
-	}
-	var claudeBody string
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			cfg := &config.WorkspaceConfig{Workspace: config.WorkspaceMeta{Name: "my-workspace"}}
-			_, root := materializeRoot(t, cfg, RootMaterializeOptions{EphemeralSessionMode: true, Agent: tc.ag})
+	cfg := &config.WorkspaceConfig{Workspace: config.WorkspaceMeta{Name: "my-workspace"}}
+	_, root := materializeRoot(t, cfg, RootMaterializeOptions{EphemeralSessionMode: true})
 
-			data, err := os.ReadFile(filepath.Join(root, tc.wantFile))
-			if err != nil {
-				t.Fatalf("reading root %s: %v", tc.wantFile, err)
-			}
-			body := string(data)
-			if !strings.Contains(body, "my-workspace") {
-				t.Errorf("root %s missing workspace name; got:\n%s", tc.wantFile, body)
-			}
-			if _, err := os.Stat(filepath.Join(root, tc.absentFile)); !os.IsNotExist(err) {
-				t.Errorf("expected %s to be absent, stat err = %v", tc.absentFile, err)
-			}
-			if tc.ag == agent.AgentClaude {
-				claudeBody = body
-			}
-			if claudeBody != "" && body != claudeBody {
-				t.Errorf("root body differs across agents:\n got: %q\nwant: %q", body, claudeBody)
-			}
-		})
+	var claudeBody string
+	for _, ag := range materializedAgents {
+		name := ag.RootContextFileName()
+		data, err := os.ReadFile(filepath.Join(root, name))
+		if err != nil {
+			t.Fatalf("reading root %s: %v", name, err)
+		}
+		body := string(data)
+		if !strings.Contains(body, "my-workspace") {
+			t.Errorf("root %s missing workspace name; got:\n%s", name, body)
+		}
+		if ag == agent.AgentClaude {
+			claudeBody = body
+		}
+		if claudeBody != "" && body != claudeBody {
+			t.Errorf("root %s body differs from the Claude body:\n got: %q\nwant: %q", name, body, claudeBody)
+		}
 	}
 }
 

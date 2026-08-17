@@ -775,17 +775,13 @@ func runInit(cmd *cobra.Command, args []string) error {
 	// the workspace is fully usable without the root config, and `niwa apply`
 	// from the root re-converges it.
 	if !initNoEphemeralSessions && rootConfigInstalls(mode) {
-		// Resolve the workspace default agent (honoring NIWA_AGENT) so the
-		// workspace-root context file is written under the right filename at
-		// init time rather than only self-healing on the first apply.
-		rootAgent, agErr := resolveSessionAgent("", result.Config)
-		if agErr != nil {
-			return agErr
-		}
+		// The root context files are written for every agent niwa prepares, so
+		// there is no agent to resolve here: init lays down both names and the
+		// workspace's default_agent only decides which one a launched session
+		// reads.
 		if _, mErr := workspace.MaterializeWorkspaceRoot(result.Config, workspaceRoot, workspace.RootMaterializeOptions{
 			EphemeralSessionMode: true,
 			ConfigDir:            filepath.Join(workspaceRoot, workspace.StateDir),
-			Agent:                rootAgent,
 		}); mErr != nil {
 			fmt.Fprintf(cmd.ErrOrStderr(), "warning: could not install workspace-root session config: %v\n", mErr)
 		}

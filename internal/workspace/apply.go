@@ -1440,12 +1440,16 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		}
 	}
 
-	// Step 4: Install workspace-level CLAUDE.md.
-	wsFiles, err := InstallWorkspaceContent(effectiveCfg, configDir, instanceRoot, a.Agent)
-	if err != nil {
-		return nil, fmt.Errorf("installing workspace content: %w", err)
+	// Step 4: Install the instance-level context file for every agent
+	// (Decision 7A). The same source lands as CLAUDE.md and AGENTS.md side by
+	// side; a.Agent does not gate it, because preparation is unconditional.
+	for _, ag := range materializedAgents {
+		wsFiles, wsErr := InstallWorkspaceContent(effectiveCfg, configDir, instanceRoot, ag)
+		if wsErr != nil {
+			return nil, fmt.Errorf("installing workspace content for %s: %w", ag, wsErr)
+		}
+		writtenFiles = append(writtenFiles, wsFiles...)
 	}
-	writtenFiles = append(writtenFiles, wsFiles...)
 
 	// Build repo name -> on-disk path index (used by marketplace resolution
 	// and materializers).
@@ -1487,7 +1491,11 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 	}
 	writtenFiles = append(writtenFiles, rootSettingsFiles...)
 
-	// Step 5: Install group-level CLAUDE.md files.
+	// Step 5: Install group-level CLAUDE.md files. This writer runs as Claude
+	// whatever a.Agent says: it emits the group's own entry alone, and a
+	// group's Codex file must carry the instance layer too, so that file is
+	// composed separately rather than produced by re-running this writer under
+	// Codex (Decision 7A).
 	installedGroups := map[string]bool{}
 	for _, cr := range classified {
 		if installedGroups[cr.Group] {
@@ -1495,7 +1503,7 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		}
 		installedGroups[cr.Group] = true
 
-		groupFiles, err := InstallGroupContent(effectiveCfg, configDir, instanceRoot, cr.Group, a.Agent)
+		groupFiles, err := InstallGroupContent(effectiveCfg, configDir, instanceRoot, cr.Group, agent.AgentClaude)
 		if err != nil {
 			return nil, fmt.Errorf("installing group content for %q: %w", cr.Group, err)
 		}
@@ -1512,13 +1520,15 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 	}
 
 	// Step 6: Install repo-level CLAUDE.local.md files (and subdirectories).
-	// Skip repos with claude = false.
+	// Skip repos with claude = false. This runs as Claude whatever a.Agent
+	// says (Decision 7A): repository-level Codex delivery is a separate writer,
+	// so nothing here is conditional on the workspace's default agent.
 	for _, cr := range classified {
 		if !ClaudeEnabled(effectiveCfg, cr.Repo.Name) {
 			continue
 		}
 
-		result, err := InstallRepoContent(effectiveCfg, configDir, overlayDir, instanceRoot, cr.Group, cr.Repo.Name, a.Agent)
+		result, err := InstallRepoContent(effectiveCfg, configDir, overlayDir, instanceRoot, cr.Group, cr.Repo.Name, agent.AgentClaude)
 		if err != nil {
 			return nil, fmt.Errorf("installing repo content for %q: %w", cr.Repo.Name, err)
 		}

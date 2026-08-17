@@ -10,6 +10,15 @@ import (
 	"github.com/tsukumogami/niwa/internal/config"
 )
 
+// materializedAgents lists the agents every apply prepares context for at the
+// niwa-owned levels the existing writers cover: the workspace root and the
+// instance root. Preparation is unconditional (PRD R1) -- the writers run once
+// per agent, so CLAUDE.md and AGENTS.md land side by side whatever
+// `default_agent` says. That setting now selects only which agent a
+// niwa-launched session runs, not what preparation produces.
+// See DESIGN-dual-agent-workspace.md Decision 7A.
+var materializedAgents = []agent.Agent{agent.AgentClaude, agent.AgentCodex}
+
 // ContentWarning represents a non-fatal issue found during content installation.
 type ContentWarning struct {
 	RepoName string
@@ -22,8 +31,12 @@ func (w ContentWarning) String() string {
 
 // InstallWorkspaceContent reads the workspace content source file, expands
 // template variables, and writes it to {instanceRoot}/{agent context file}.
-// The output filename is chosen by the selected agent (CLAUDE.md for Claude,
-// AGENTS.md for Codex); the content source is unchanged by agent.
+// The output filename is chosen by ag (CLAUDE.md for Claude, AGENTS.md for
+// Codex); the content source is unchanged by agent.
+//
+// The apply pipeline calls this once per agent in materializedAgents, so an
+// instance root carries both names after every apply. ag names which file this
+// call writes, not which agent the instance is for.
 // Returns the list of files written.
 func InstallWorkspaceContent(cfg *config.WorkspaceConfig, configDir, instanceRoot string, ag agent.Agent) ([]string, error) {
 	if cfg.Claude.Content.Workspace.Source == "" {
