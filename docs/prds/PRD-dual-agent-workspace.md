@@ -219,7 +219,12 @@ start, where a live check carries information nothing else can.
       assertions in `test/functional/features/codex-agent.feature` and the
       unit tests in `internal/workspace/content_test.go` and
       `internal/workspace/root_materializer_test.go` that assert the other
-      agent's file is absent; no other test is modified or deleted (R2).
+      agent's file is absent, plus the deletions entailed by retiring an
+      accessor — a test cannot outlive the function it exercises — namely the
+      repository-level-skip test and the retired accessor's own test, and the
+      removal of the retired branch's row from a table-driven test whose other
+      rows still cover a surviving function. No test outside that set is
+      modified or deleted (R2).
 - [ ] A Codex session started at least three directories deep inside a cloned
       repository, from a shell with no `NIWA_*` variables and no `CODEX_HOME`
       set, sees the instance, group, and repository context for that
