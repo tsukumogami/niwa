@@ -15,7 +15,7 @@ execution_mode: auto
 max_rounds: 5
 coordinated: false
 consumed_handoff: wip/scope_dual-agent-workspace_handoff.md
-chain_ran: [brief, prd]
+chain_ran: [brief, prd, design]
 chain_skipped: []
 child_snapshots:
   brief:
@@ -37,9 +37,9 @@ consolidation_judgments: []
 worktree_rebases: []
 worktree_divergences: []
 parent_orchestration:
-  child: design
-  invoked_at: 2026-08-17T03:50:00Z
-  pre_invocation_sha: 23aeb79
+  child: plan
+  invoked_at: 2026-08-17T04:40:00Z
+  pre_invocation_sha: bf05c5a
 ---
 
 # /scope state: dual-agent-workspace
@@ -85,3 +85,24 @@ R6 predicate verdicts, sizing `/design`'s decision roster:
 All three fire, so `/design` runs with the full decision roster.
 
 Chain proposal confirmed: Proceed (auto mode).
+
+## Phase 2: design
+
+DESIGN accepted at docs/designs/current/DESIGN-dual-agent-workspace.md, 1232
+lines, 7 decisions. Jury: format PASS first round; security FAIL then PASS
+(round 3), architecture FAIL across four rounds then PASS (round 6). Fourteen
+required changes applied in total.
+
+Findings worth carrying into the plan: a credential-disclosure path through a
+committed context file that is a symlink (closed by opening with O_NOFOLLOW);
+an over-correction of that fix that would have stripped the workspace layers
+from every session in a repository with an unusual committed file; a
+contradiction with the existing managed-file cleanup, which deletes by record
+any path the current apply did not produce; and two flaws in changes the
+coordinator directed — trust-key removal recognized by shape rather than by
+record, which would have deleted a developer's own answer to the trust prompt,
+and a steer toward forward-carry that was reverted after the reviewer's own
+argument and a third independent one showed drop-plus-exemption to be correct.
+
+The prior design at docs/designs/current/DESIGN-interactive-codex-session.md
+carries a forward pointer naming what this design supersedes.
