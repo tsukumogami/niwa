@@ -7,10 +7,11 @@ problem: |
   the Claude context at the levels niwa owns and skips the repository and
   worktree levels entirely. A developer who wants both agents has to pick one.
 outcome: |
-  Every prepared instance is usable by both agents at once, with no choice
-  made at creation time. A developer runs `claude` exactly as today, and runs
-  `codex` in the same instance from any directory inside it and gets the same
-  workspace context and skills. The agent choice is which command they type.
+  Every prepared instance is built for both agents, so which one a developer
+  uses is never decided at creation time. They run `claude` exactly as today,
+  and run `codex` in the same instance from any directory inside it and get the
+  same workspace context and skills. The agent choice is which command they
+  type, made when they start a session and freely changed at the next one.
 motivating_context: |
   Exploration measured live against codex-cli 0.147.0 overturned the premise
   that serving both agents requires niwa to manage a per-instance Codex home.
@@ -65,11 +66,12 @@ that decides which agent gets used.
 
 ## User Outcome
 
-A prepared instance serves both agents, always. There's no agent selection at
-creation time and nothing to configure per instance: `niwa create` and
-`niwa apply` leave every instance ready for whichever agent the developer
+A prepared instance is ready for both agents, always. There's no agent
+selection at creation time and nothing to configure per instance: `niwa create`
+and `niwa apply` leave every instance ready for whichever agent the developer
 launches, and switching agents is closing one and typing the other command in
-the same directory.
+the same directory. Nothing here asks a developer to run both at the same time;
+the point is that the instance never makes them commit to one in advance.
 
 For Claude Code, nothing changes. The developer runs `claude` and gets exactly
 the context and skills they get today.

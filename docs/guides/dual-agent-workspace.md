@@ -7,6 +7,9 @@ alongside it, everything a Codex session needs. You run `claude` as before,
 and you run `codex` in the same instance — from the instance root, from a
 directory nested deep inside a cloned repo, or from a niwa-managed worktree —
 with no environment variable, no wrapper command, and no per-repo setup step.
+This is about deferring the choice rather than running the two side by side:
+you pick an agent when you start a session, and you can pick the other one next
+time without re-provisioning anything.
 
 The Claude side is untouched by construction: dual-agent preparation adds a
 second reader, it does not rework the first. What a Claude session sees is

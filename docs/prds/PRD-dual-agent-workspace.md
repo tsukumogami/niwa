@@ -10,12 +10,13 @@ problem: |
   means re-provisioning or hand-carrying context, and the choice is forced at
   the moment the developer knows least about which agent a task will need.
 goals: |
-  Every prepared instance serves both agents at once, with no agent choice at
-  creation time. A developer runs `claude` exactly as today and runs `codex` in
-  the same instance, from any directory inside it, and the session sees the
-  layered workspace context for where it's standing plus the workspace's
-  skills, and can write files immediately. Nothing niwa materializes for Codex
-  dirties a cloned repository or touches the developer's own Codex setup.
+  Every prepared instance is built for both agents, so no agent choice is
+  forced at creation time. A developer runs `claude` exactly as today and runs
+  `codex` in the same instance, from any directory inside it, and the session
+  sees the layered workspace context for where it's standing plus the
+  workspace's skills, and can write files immediately. Nothing niwa
+  materializes for Codex dirties a cloned repository or touches the
+  developer's own Codex setup.
 upstream: docs/briefs/BRIEF-dual-agent-workspace.md
 motivating_context: |
   Exploration measured live against codex-cli 0.147.0 overturned the premise
