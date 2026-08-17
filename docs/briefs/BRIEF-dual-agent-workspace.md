@@ -79,9 +79,14 @@ from any directory inside the instance -- the instance root, a directory deep
 inside a cloned repository, or a git worktree -- and the session sees the
 workspace context for where it's standing, at every layer niwa composes for
 Claude, plus the same skills. The session can do real work immediately: no
-per-repository setup ritual, no context files showing up as untracked noise in
-`git status`, and no risk to the developer's own Codex setup, which niwa never
-touches -- not its global configuration, not its login.
+per-repository setup ritual, and no context files showing up as untracked noise
+in `git status`.
+
+The developer's own Codex setup stays theirs. niwa records what it needs for
+the directories it manages, and nothing beyond them: Codex behaves exactly as
+before outside a niwa instance, its defaults are unchanged, and its credentials
+and login are never read or written. Authenticating Codex is something the
+developer does once, themselves, however they choose.
 
 ## User Journeys
 
