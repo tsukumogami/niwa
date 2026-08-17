@@ -376,19 +376,77 @@ brief expected to drop is needed after all, for different files and for a
 different reason than the collision guard, which remains unnecessary because
 `AGENTS.override.md` never overwrites a committed file.
 
-## Round 4 (in flight)
+## Round 4 — the last tension, resolved
 
-One tension remains between round 1 and round 3. The config-materialization lead
-argued the plugin-cache route dominates loose skills, because loose skills lose
-namespacing and every `${CLAUDE_PLUGIN_ROOT}` reference — but the plugin cache
-lives in a Codex home, which is exactly what the chosen architecture avoids
-needing.
+Round 1 argued the plugin-cache route dominates loose skills, because loose
+skills lose namespacing and every `${CLAUDE_PLUGIN_ROOT}` reference. But the
+plugin cache lives in a Codex home, which is exactly what the chosen
+architecture avoids needing. Both claimed advantages turned out to be false.
 
-Measuring the real content reframes it: neither plugin this workspace uses ships
-a `hooks.json` or an `.mcp.json`, so two of the three named losses are
-hypothetical. What remains is namespacing and `${CLAUDE_PLUGIN_ROOT}` (370
-occurrences across 90 files in one plugin, 62 across 33 in the other). And the
-same lead separately observed that the variable was **not** expanded even via
-the cache route, leaving "where is it honored" as an open question — so if the
-answer is "nowhere", both routes lose it equally and the argument collapses to
-namespacing alone. The final lead is settling that.
+**`${CLAUDE_PLUGIN_ROOT}` is never expanded textually by Codex, on any route.**
+The binary contains the string exactly once, as an environment variable handed
+only to plugin hook processes. The 370-and-62 occurrence counts are not a
+fidelity gap between routes — they are literal strings both routes deliver
+identically. Under Claude Code they expand; under Codex they are prose either
+way. The cache's advantage here was assumed rather than measured.
+
+**Namespacing does not come from the cache either.** It derives from the nearest
+`plugin.json` above a skill on disk, and Codex deliberately canonicalizes
+symlinked skill paths so that symlinked plugin content keeps its namespace —
+upstream names "canonical symlink root" as first precedence. Someone designed
+for exactly the delivery shape this architecture wants. Verified against a real
+plugin: all 20 skills loaded, correctly namespaced, from a project-layer payload
+with no Codex home and no content edits.
+
+So the architecture is complete as chosen. **niwa should perform no content
+transformation at all** — no frontmatter rewriting, no variable substitution.
+Substitution is wrong on its merits: it buys nothing, corrupts 11
+self-referential documentation sites (prose that *describes* the variable), and
+misses the `${CLAUDE_PLUGIN_ROOT:-...}` fallback form the plugin's own scripts
+already use to self-resolve.
+
+The one real constraint is the **delivery unit: ship whole plugin directories,
+not individual skill directories.** Every variable reference points at
+plugin-root `references/` and `scripts/` living above the skill, so a detached
+skill copy both loses its namespace and orphans its references.
+
+What genuinely degrades without a Codex home, and should be stated plainly
+rather than rediscovered: plugin-delivered hooks do not run (a project-layer
+`hooks.json` written by niwa does the same job with an absolute path), plugin
+`.mcp.json` is not delivered, and `codex plugin list` shows nothing because
+loose skills are not "installed plugins". All three cost nothing today — neither
+plugin this workspace uses ships hooks or MCP servers — and the first two would
+not have worked through the cache anyway.
+
+## What this means
+
+The exploration ends somewhere better than the brief anticipated. The brief's
+design direction assumed a per-instance Codex home plus a mechanism to get
+`CODEX_HOME` into the developer's environment, and treated that mechanism as the
+main open question. **The Codex home is not needed at all**, and with it the
+delivery problem, the share/isolate matrix, and the auth-symlink hazard all
+dissolve — niwa never touches the developer's credentials, because their own
+Codex home keeps serving auth exactly as it does today.
+
+What replaces it is closer to what niwa already does for Claude: write context
+files into the tree and let the agent's own discovery find them. Materialization
+stays additive, the `CLAUDE.md` tree is untouched, and the Codex payload sits
+beside it.
+
+Two of the brief's six open questions dissolved rather than being answered
+(`CODEX_HOME` delivery, and which home entries are shared versus isolated). Two
+were answered as asked (hook trust; whether to export the API key — no). One was
+answered with a different mechanism than expected (worktrees get their own
+composed context file and payload symlink rather than their own home). And the
+composition question was answered by discovering the walk exists after all, so
+the composed file covers instance, group, and repo for one repo rather than
+flattening the whole workspace.
+
+One thing the brief expected to drop comes back. Because niwa now writes
+`AGENTS.override.md` and a `.codex` symlink into each repository's working tree,
+the `internal/gitexclude` extension is needed after all — with the pattern
+written as bare `.codex`, not `.codex/`. The collision guard stays unnecessary:
+`AGENTS.override.md` is a distinct filename that never overwrites a repository's
+committed `AGENTS.md`, and inlines it instead.
+
+## Decision: Crystallize
