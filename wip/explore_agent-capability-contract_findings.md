@@ -167,6 +167,28 @@ table has to preserve. It also left `workspace.content_dir` deliberately
 unrenamed, which is a cheap second test case for whatever alias mechanism this
 work builds.
 
+### Orchestrator note: what the prior guide's gap section actually was
+
+The brief faults the prior attempt's user guide for spreading its gaps across a
+design's negative-space section and a scope note. Reading it makes the fault
+sharper than that. The guide does have a `## What is deliberately not written`
+section, but it answers a different question: it lists what niwa refuses to put
+into *the developer's own Codex configuration* -- no hooks, no API key, no
+global keys, no credentials. That is a safety-and-scope list, and a good one.
+
+It is not a capability-gap list. Nothing in it tells a developer that MCP
+servers do not reach their Codex session, that named subagents never surface,
+that skills for a GitHub-sourced marketplace need Claude Code installed, or that
+work-summary hooks, PR-body hooks, worktree-hook delegation, and
+ephemeral-session provisioning do not apply. The section closest to admitting a
+gap opens with "Two adjacent limits, so they don't read as gaps" -- which is the
+honesty problem stated in the document's own words.
+
+The fix is structural, not editorial: the guide's gap list has to be generated
+from the declared-unavailable capabilities, so a capability that gains a reason
+in code cannot fail to appear in the doc. Keeping the safety list as a separate
+section is right; it should just stop being mistaken for the gap list.
+
 ## Decision: Explore further
 
 Round 1 established the terrain and produced four decision-relevant tensions,
