@@ -222,7 +222,147 @@ proof restated behaviorally: they assert the Claude tree is complete regardless
 of which agent the workspace names, which is exactly the invariant the first PR
 must hold without any Codex code present.
 
-## Decision: Explore further
+## Decision: Explore further (round 1 -> round 2)
+
+Round 1 established the terrain and produced four decision-relevant tensions,
+none of which is answerable by design judgment alone -- each needs measurement.
+Round 2 targets exactly those.
+
+---
+
+## Round 2
+
+Five leads dispatched, five returned. All four round-1 tensions are resolved,
+and one produced a finding nobody was looking for.
+
+### The four tensions, resolved
+
+**1. The third state dissolves; there is no "conditional".** Round 1 read the
+spike as saying MCP, environment, and the byte budget are inert until the
+developer trusts the directory, which a workspace cannot self-grant. That is
+true of a *project config layer* and false of niwa. The spike scoped itself to
+what a project layer can carry without touching the developer's own Codex
+configuration -- and niwa is not a project layer, it is a tool the developer
+runs. The prior attempt already built the thing the spike says a project layer
+cannot do: `codex_trust.go` performs a lock-serialized, atomic, additive edit of
+`~/.codex/config.toml`, retracting only keys niwa itself wrote, with four
+acceptance scenarios pinning it.
+
+So trust is a capability niwa *delivers*, not a precondition it waits on. Name it
+`CapabilityDirectoryTrust` and the conditional cases become plainly implemented
+with a dependency edge: `Requires: [CapabilityDirectoryTrust]`. A closure test --
+every capability named in `Requires` is itself implemented for the same agent --
+makes it honest by construction: declare MCP implemented while trust is
+unavailable and the test fails. A soft "conditional" state could never catch
+that; it would absorb it. Two states, a required reason kind on the unavailable
+side, and a `Requires` edge. (`r2-support-matrix`)
+
+**2. The package boundary is real, via a plan.** A new leaf package
+(`internal/agentplan`, sibling to `internal/agent`) holds the capability
+enumeration, the support matrix, the plan types, and the per-agent plan
+producers. `internal/workspace` gains one generic executor implementing a closed
+set of four operations, containing no agent name and no context filename. The
+boundary is stated as **reads inputs, declares outputs** rather than "pure",
+because the producers do read niwa-owned inputs and, for the inline case, a
+guarded read of a repository's committed file. That line is mechanically
+checkable: an AST assertion that the leaf never calls `os.WriteFile`,
+`os.MkdirAll`, `os.Symlink`, `os.Remove`, or `exec.Command`.
+(`r2-plan-shaped-contract`)
+
+**3. PR 1 ships zero config renames.** Only two of nine `ClaudeConfig` fields
+warrant an agent-neutral name. `Content`/`content_dir` is a single-field,
+single-embedding-site change structurally identical to the proven `[content]`
+precedent. `Enabled` is not a rename at all -- relabelling it reproduces the same
+mis-gating under a new spelling, and the real fix is restructuring what the gate
+governs, which is a PR 2 decision that cannot be made until PR 2 defines Codex's
+delivery plan. Both belong to PR 2. The other six fields are correctly
+Claude-named and stay. A compatibility alias is behavior-preserving at parse time
+but not diff-free -- it adds warning text, changes the README, the config design
+doc, and `scaffold.go`'s generated example -- which is real user-facing surface
+for a PR whose whole job is to be invisible. (`r2-rename-blast-radius`)
+
+**4. PR 1's no-behavior-change claim gets a mechanism.** `InstanceState.ManagedFiles`
+(`apply.go:1695-1718`) already records `Path` + `ContentHash` for every written
+file; the code hashes every path in `writtenFiles`, and content files and the
+workspace `CLAUDE.md` are included (they simply carry no source tuples). Commit
+a characterization test on `main` **first** -- fixture workspaces, run `Create`,
+assert sorted path-and-hash pairs against a checked-in list -- so it characterizes
+current behavior rather than being written to match the refactor. Then do the
+refactor as a visibly mechanical diff gated by it. Two nondeterminism sources
+need normalizing: the `{workspace}` absolute-path template variable and
+`os.Executable()` in worktree-delegation hook commands. (`r2-no-behavior-change-proof`,
+verified independently against `apply.go`)
+
+### The finding nobody was looking for
+
+**A latent secret leak in the code the brief invites us to lift.** The prior
+attempt writes its payload config at `0o644` rather than the `secretFileMode`
+(0600) every other secret-bearing writer in the repo uses, and the instance root
+has no git-exclude coverage for files not named `.local`. This is harmless today
+because that file carries only a byte budget. It becomes a real leak the moment
+environment delivery puts resolved secrets there -- which is precisely what the
+brief names as the highest-value gap to close. Both fixes are mechanical and must
+land in the same change that first writes secret material to that file, not
+after. (`r2-mcp-env-shape`)
+
+### The test that is meaningful on the day it lands
+
+This is the direct answer to the brief's central complaint -- that the prior
+attempt's replacement structure was never something a test could fail on.
+
+The property-1 AST scan has two halves. The agent-constants half **passes today**:
+the only three occurrences in `internal/workspace` are comments
+(`root_materializer.go:95`, `apply.go:46`, `worktree_content.go:440`). The
+context-filename-literals half **fails today**, at `content.go:156`, `:186`,
+`:208`, `worktree_content.go:743`, `workspace_context.go:196`, `:229`, `:411`,
+and the dead `rootClaudeFile` const at `root_materializer.go:51`. A test that is
+red before the work and green after is a deliverable; a test that is vacuously
+green either way is the thing that let two hardcoded passes through review.
+
+The plan model additionally makes property 2 testable *without a filesystem*:
+`Plan(AgentCodex, ...)` returning any `CLAUDE.*` entry is a one-line assertion
+failure, where today the equivalent check needs a tmpdir and a full apply. And
+the wiring test closes the dead-plumbing hole directly -- if bytes can only reach
+disk through a plan, and plans only come from a function taking the agent, then
+the agent parameter is load-bearing by construction rather than by hope.
+
+### Tensions
+
+**One inconsistency between the two opus leads, resolved here in favor of the
+matrix.** `r2-plan-shaped-contract`'s sketch of the property-2 test says
+"Conditional/Unavailable with a non-empty reason", carrying forward round 1's
+three-state framing. `r2-support-matrix` argues at length for two states plus
+`Requires` edges and shows the third state cannot be caught by a test. The
+matrix's argument is the stronger one and the design should follow it; the plan
+lead's test sketch needs the state vocabulary swapped, which changes nothing
+structural about it.
+
+**The brief's MCP claim is only half-backed.** It states `[mcp_servers.*]` in the
+project layer "works, verified live". The spike confirms such a file parses and
+loads once trusted, but never pins down Codex's `mcp_servers` field schema or
+`shell_environment_policy.set` semantics. That is the difference between "the
+file is read" and "we know what to write in it". Measurable rather than
+guessable, since `codex-cli 0.147.0` -- the exact build the spike measured -- is
+installed here.
+
+**Where "no behavior change" is hardest to defend.** The eight context writers
+carry accumulated boundary rules (overlay append, subdir content, the `@import`
+migration removals) that a mechanical conversion can silently drop. Two of them,
+`InstallRepoContentTo` and `installWorktreeContextLayer`, are already half-broken
+on `main`. That is exactly where the characterization test has to be pointed.
+
+### Gaps
+
+Five rows of the 24-row matrix are flagged unresolved. Three are measurable with
+the installed binary and have been added to the running spike: whether
+`approval_policy`/`sandbox_mode` are settable from the project layer (the
+matrix's only hard unresolved row), whether a linked worktree's `.git` *file*
+satisfies the project-root marker (if not, the worktree-context row flips from
+implemented to unavailable and an acceptance scenario becomes unsatisfiable), and
+whether `shell_environment_policy.set` is trust-gated (asserted by analogy today,
+never measured).
+
+## Decision: pending the round-3 spike
 
 Round 1 established the terrain and produced four decision-relevant tensions,
 none of which is answerable by design judgment alone -- each needs measurement.
