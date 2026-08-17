@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/cucumber/godog"
 )
@@ -55,6 +56,34 @@ type testState struct {
 	// discovered after a `niwa dispatch` run, so later steps can assert its
 	// presence/absence without hardcoding the random name suffix.
 	lastDispatchInstancePath string
+
+	// Dual-agent (Codex) acceptance state. See codex_dual_agent_steps_test.go.
+
+	// stagedFiles and stagedSymlinks accumulate fixture content (repo-relative
+	// path → content / link target) that the next fixture-repo step commits and
+	// then drains, so a scenario can build up a repository's committed shape one
+	// readable step at a time.
+	stagedFiles    map[string]string
+	stagedSymlinks map[string]string
+
+	// codexConfigSeed is the developer Codex config exactly as the scenario
+	// seeded it, kept so the additivity check can compare what niwa left behind
+	// against what was there before.
+	codexConfigSeed []byte
+
+	// codexCredentialBytes and codexCredentialModTime snapshot the developer's
+	// Codex credential file at seed time; niwa must leave both untouched.
+	codexCredentialBytes   []byte
+	codexCredentialModTime time.Time
+
+	// workspaceRootAlias is the symlinked path the scenario drove niwa through
+	// when the workspace root is reached through a symlink. Empty otherwise.
+	// The trust keys niwa writes must name the resolved path, never this one.
+	workspaceRootAlias string
+
+	// codexSessionOutput holds the combined output of the last live Codex
+	// invocation, for the gated scenarios that inspect what a session printed.
+	codexSessionOutput string
 }
 
 func getState(ctx context.Context) *testState {
@@ -156,14 +185,16 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 		}
 
 		state := &testState{
-			binPath:       binPath,
-			homeDir:       homeDir,
-			tmpDir:        tmpDir,
-			workspaceRoot: workspaceRoot,
-			sharedBinDir:  sharedBinDir,
-			envOverrides:  make(map[string]string),
-			gitServer:     gs,
-			repoURLs:      make(map[string]string),
+			binPath:        binPath,
+			homeDir:        homeDir,
+			tmpDir:         tmpDir,
+			workspaceRoot:  workspaceRoot,
+			sharedBinDir:   sharedBinDir,
+			envOverrides:   make(map[string]string),
+			gitServer:      gs,
+			repoURLs:       make(map[string]string),
+			stagedFiles:    make(map[string]string),
+			stagedSymlinks: make(map[string]string),
 		}
 		return setState(ctx, state), nil
 	})
@@ -348,6 +379,10 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 	registerDispatchSteps(ctx)
 	registerDispatchSpillSteps(ctx)
 	registerKeepAliveSteps(ctx)
+
+	// --- dual-agent acceptance: the Codex-facing materialization every
+	// instance carries beside the Claude tree (PRD-dual-agent-workspace) ---
+	registerCodexDualAgentSteps(ctx)
 
 	// --- plugin pre-warm settings drift (#179): the pre-warm must not dirty
 	// niwa's managed settings.json while still resolving plugins to disk ---
