@@ -683,3 +683,27 @@ order to assert against it. If the measurement returns that a worktree's `.git`
 worse criterion; it becomes a criterion the design cannot satisfy without a
 worktree-specific answer, which is the design-altitude consequence the lead
 already named. Nothing to change here either way.
+
+---
+
+# Round 3
+
+# Verdict: PASS
+
+AC6 now reads "in a workspace that configures no context content at any layer",
+which puts the empty-or-whitespace-only file back within reach of the fixture
+and restores the criterion's ability to fail in the total-loss case — the
+correctly-composing implementation that writes the file unconditionally, claims
+the directory's single slot, and silently suppresses the repository's own
+committed context. That was my only outstanding round-two finding, and it is
+closed. The other thirteen required changes were verified in round two and are
+not re-examined here. The nineteen acceptance criteria are testable as written,
+each decidable by a stated procedure, and each would fail in the case it exists
+to prevent.
+
+Carried forward, unchanged and non-blocking: AC11's live gate should check for
+an authenticated Codex session rather than only `codex` on PATH, since R10 now
+places the developer's own first-run login outside the requirement; and AC4's
+offline procedure inherits the worktree project-root-marker assumption the
+separate spike is measuring, which is a design-altitude consequence rather than
+a criteria defect either way.
