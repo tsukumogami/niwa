@@ -45,11 +45,6 @@ const rootClaudeDir = ".claude"
 // rootSettingsFile is the workspace-root managed settings file name.
 const rootSettingsFile = "settings.json"
 
-// rootClaudeFile is the workspace-root CLAUDE.md file name. A session
-// launched at the workspace root loads this at startup; without it the
-// coordinator (and any root session) starts with no workspace orientation.
-const rootClaudeFile = "CLAUDE.md"
-
 // instanceFromHookCommandSuffix is the niwa subcommand the workspace-root
 // SessionStart hook invokes. The full command is
 // "<abs-niwa> " + this suffix; abs-niwa is resolved at materialize time via

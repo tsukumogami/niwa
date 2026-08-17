@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/tsukumogami/niwa/internal/agent"
+	"github.com/tsukumogami/niwa/internal/agentplan"
 	"github.com/tsukumogami/niwa/internal/config"
 	"github.com/tsukumogami/niwa/internal/gitexclude"
 	"github.com/tsukumogami/niwa/internal/keyreport"
@@ -498,10 +499,15 @@ type WorktreeApplyOptions struct {
 //
 // Returns the list of files written.
 func ApplyToWorktree(cfg *config.WorkspaceConfig, configDir, instanceRoot, worktreePath, group, repo, purpose, branch string, opts WorktreeApplyOptions) ([]string, error) {
+	// The producer is where the session's agent turns into declared writes. It
+	// is built once here and handed to both content installers, so neither of
+	// them sees the agent as anything it could branch on.
+	producer := agentplan.For(opts.Agent)
+
 	if !ClaudeEnabled(cfg, repo) {
 		// Claude content is disabled for this repo; install only the
 		// worktree-context layer so the worktree still records its purpose.
-		return installWorktreeContextLayer(cfg, configDir, instanceRoot, worktreePath, repo, purpose, branch, opts.Agent)
+		return installWorktreeContextLayer(cfg, configDir, instanceRoot, worktreePath, repo, purpose, branch, producer)
 	}
 
 	var written []string
@@ -509,7 +515,7 @@ func ApplyToWorktree(cfg *config.WorkspaceConfig, configDir, instanceRoot, workt
 	// 1. Owning repo's content (CLAUDE.local.md + subdir content), targeted at
 	//    the worktree root. Same function the instance apply path calls. A no-op
 	//    under an agent that does not write repository-level context (Codex).
-	result, err := InstallRepoContentTo(cfg, configDir, opts.OverlayDir, instanceRoot, worktreePath, group, repo, opts.Agent)
+	result, err := InstallRepoContentTo(cfg, configDir, opts.OverlayDir, instanceRoot, worktreePath, group, repo, producer)
 	if err != nil {
 		return nil, fmt.Errorf("installing repo content into worktree: %w", err)
 	}
@@ -638,7 +644,7 @@ func ApplyToWorktree(cfg *config.WorkspaceConfig, configDir, instanceRoot, workt
 
 	// 4. Worktree-specific layer naming the purpose and branch (or the
 	//    configured [claude.content.worktree] template, when set).
-	layerFiles, err := installWorktreeContextLayer(cfg, configDir, instanceRoot, worktreePath, repo, purpose, branch, opts.Agent)
+	layerFiles, err := installWorktreeContextLayer(cfg, configDir, instanceRoot, worktreePath, repo, purpose, branch, producer)
 	if err != nil {
 		return nil, err
 	}
@@ -718,10 +724,11 @@ func installWorktreeRulesImport(instanceRoot, worktreePath string) ([]string, er
 	return []string{rulesPath}, nil
 }
 
-// installWorktreeContextLayer writes the worktree-specific section to
-// <worktree>/CLAUDE.local.md. The section is delimited by a stable heading so a
-// re-apply replaces it in place rather than appending a duplicate (idempotent).
-// purpose is interpolated only into file content, never a filesystem path.
+// installWorktreeContextLayer writes the worktree-specific section to the
+// worktree's context document. The section is delimited by a stable heading so
+// a re-apply replaces it in place rather than appending a duplicate
+// (idempotent). purpose is interpolated only into file content, never a
+// filesystem path.
 //
 // When [claude.content.worktree].source is configured, the section body is
 // rendered from that template (expanded with the worktree variables) in-memory
@@ -730,49 +737,35 @@ func installWorktreeRulesImport(instanceRoot, worktreePath string) ([]string, er
 // When unset, the generated default purpose/branch body is used — the Stage-1
 // behavior, unchanged.
 //
-// The CLAUDE.local.md target is computed from worktreePath alone (at the
+// The target is the producer's, computed from worktreePath alone (at the
 // worktree root) and verified to stay within the worktree via checkContainment,
-// matching the containment discipline of the other content installers.
-func installWorktreeContextLayer(cfg *config.WorkspaceConfig, configDir, instanceRoot, worktreePath, repo, purpose, branch string, ag agent.Agent) ([]string, error) {
-	// Under an agent that does not write repository/worktree-level context
-	// (Codex), the worktree-context layer is skipped: niwa writes no
-	// CLAUDE.local.md into the worktree, keeping the git working tree clean.
-	if !ag.WritesRepoLevelContext() {
-		return nil, nil
-	}
-	target := filepath.Join(worktreePath, "CLAUDE.local.md")
-	if err := checkContainment(target, worktreePath); err != nil {
-		return nil, fmt.Errorf("worktree context layer: %w", err)
-	}
-
+// matching the containment discipline of the other content installers. Under an
+// agent that does not receive worktree-level context (Codex) the producer
+// declares nothing, so niwa writes no context file into the worktree and the
+// git working tree stays clean.
+func installWorktreeContextLayer(cfg *config.WorkspaceConfig, configDir, instanceRoot, worktreePath, repo, purpose, branch string, producer agentplan.Producer) ([]string, error) {
 	body, err := renderWorktreeLayerBody(cfg, configDir, instanceRoot, worktreePath, repo, purpose, branch)
 	if err != nil {
 		return nil, err
 	}
-	section := worktreeContextHeading + "\n\n" + body
 
-	existing, err := os.ReadFile(target)
-	if err != nil && !os.IsNotExist(err) {
-		return nil, fmt.Errorf("reading worktree CLAUDE.local.md: %w", err)
+	plan, err := producer.WorktreeContextPlan(agentplan.WorktreeContextInputs{
+		Dir:     worktreePath,
+		Heading: worktreeContextHeading,
+		Body:    []byte(body),
+	})
+	if err != nil {
+		return nil, err
+	}
+	if err := checkPlanContainment(plan, worktreePath); err != nil {
+		return nil, fmt.Errorf("worktree context layer: %w", err)
 	}
 
-	merged := stripWorktreeContextSection(string(existing))
-	if len(merged) > 0 {
-		// Separate prior content from the appended section with a blank line.
-		for len(merged) > 0 && (merged[len(merged)-1] == '\n') {
-			merged = merged[:len(merged)-1]
-		}
-		merged += "\n\n"
+	written, _, err := applyPlan(plan)
+	if err != nil {
+		return nil, err
 	}
-	merged += section
-
-	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
-		return nil, fmt.Errorf("creating worktree dir: %w", err)
-	}
-	if err := os.WriteFile(target, []byte(merged), 0o644); err != nil {
-		return nil, fmt.Errorf("writing worktree CLAUDE.local.md: %w", err)
-	}
-	return []string{target}, nil
+	return written, nil
 }
 
 // worktreeLayerVars builds the template variable map for the worktree layer.
@@ -901,15 +894,4 @@ func runWorktreeHooks(configDir, worktreePath, repo, purpose, branch string, std
 	}
 
 	return nil
-}
-
-// stripWorktreeContextSection removes a previously-appended worktree-context
-// section (from worktreeContextHeading to end of file) so a re-apply replaces
-// it rather than appending a duplicate. Content before the heading is preserved.
-func stripWorktreeContextSection(content string) string {
-	idx := strings.Index(content, worktreeContextHeading)
-	if idx < 0 {
-		return content
-	}
-	return content[:idx]
 }

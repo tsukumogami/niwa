@@ -116,6 +116,27 @@ func planEntryApplies(e agentplan.Entry) (bool, error) {
 	}
 }
 
+// checkPlanContainment verifies every path a plan targets resolves inside root.
+// It lives beside the executor because it reads the same field applyPlan does,
+// and a caller that wants the guarantee should not have to walk the entries
+// itself: the plan is interpreted here or not at all.
+//
+// It is the plan-shaped form of the containment discipline the content
+// installers have always applied to their targets, and it keeps that guarantee
+// on the caller's side of the boundary -- the producer decides the filename,
+// and the writer still refuses a path that escapes the tree it is writing into.
+func checkPlanContainment(p *agentplan.Plan, root string) error {
+	if p == nil {
+		return nil
+	}
+	for _, e := range p.Entries {
+		if err := checkContainment(e.Path, root); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // checkPlanEntry rejects entries the executor cannot act on safely.
 func checkPlanEntry(e agentplan.Entry) error {
 	if !filepath.IsAbs(e.Path) {
