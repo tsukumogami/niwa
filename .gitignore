@@ -31,8 +31,8 @@ go.work.sum
 /niwa-test
 /test/functional/worker_fake/worker-fake
 
-# Functional test sandbox (per-scenario scratch)
-/.niwa-test/
+# Functional test concurrency lock (see the Makefile's test-functional targets)
+/.functional-test.lock
 
 # niwa session-worktree scaffold (daemon pid/log, roles, sessions); never committed
 /.niwa/
