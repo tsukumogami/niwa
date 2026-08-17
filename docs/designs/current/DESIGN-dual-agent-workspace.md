@@ -26,10 +26,14 @@ decision: |
   committed `AGENTS.md`; a context budget declared in the payload's own
   config sized to the composed chain; one path-scoped `[projects.*]` trust
   entry per cloned repository in the developer's Codex config, and nothing
-  else there — no hooks, no API key, no global keys, no marker changes. The
-  existing agent discriminator survives as a launch-time selector; the
-  materialization callers that treated it as exclusive run once per agent
-  instead.
+  else there — no hooks, no API key, no global keys, no marker changes.
+  Committed repository content at either name niwa writes is a detected
+  conflict, reported loudly and never overwritten or trusted on niwa's
+  signature; the composer reads repository files only as regular files,
+  never through symlinks; and the trust write is atomic, lock-serialized,
+  and refuses an unparseable pre-existing file. The existing agent
+  discriminator survives as a launch-time selector; the materialization
+  callers that treated it as exclusive run once per agent instead.
 rationale: |
   The per-repository symlink under the default marker is the only discovery
   route that works from every directory with no environment preparation
@@ -127,30 +131,31 @@ Claude side byte-identical (R2).
 
 ## Decision Drivers
 
-- **No environment preparation, ever (R5).** The mechanism must work from a
+- **D1 — No environment preparation, ever (R5).** The mechanism must work from a
   manually opened terminal, a shell spawned deep inside a repository, a
   script, a Makefile, and non-interactive SSH. niwa's shell integration
   intercepts five `niwa` subcommands and never reacts to a plain `cd`, so
   any design that needs an exported environment variable fails in exactly
   the sessions R5 names.
-- **Nothing niwa does may degrade Codex outside its instances (R13).**
+- **D2 — Nothing niwa does may degrade Codex outside its instances (R13).**
   Scoped, additive entries confined to instance paths are acceptable;
   anything that changes discovery or behavior for unrelated repositories on
   the machine is not.
-- **The Claude side is an invariant, not a target (R2).** Every existing
+- **D3 — The Claude side is an invariant, not a target (R2).** Every existing
   output must be byte-for-byte unchanged; the change adds a second reader.
-- **Hostility to silent failure.** The measured failure modes — first-match
+- **D4 — Hostility to silent failure.** The measured failure modes — first-match
   displacement, budget truncation, missing trust under `exec` — are all
   silent. A mechanism that works in the majority case and delivers nothing
   in a minority case, with no error, is worse than one that never promised
   delivery. This driver decides more of the design than any other.
-- **Repositories stay clean and unclobbered (R11, R12).** Nothing untracked
+- **D5 — Repositories stay clean and unclobbered (R11, R12).** Nothing untracked
   in `git status`, nothing a repository ships overwritten.
-- **Verbatim delivery (R8).** Skills must arrive with the same content
+- **D6 — Verbatim delivery (R8).** Skills must arrive with the same content
   Claude sees. niwa should not become a content transformer: every rewrite
   is a fidelity risk and a maintenance obligation.
-- **Sessions must act immediately and start clean (R9, R10).** A read-only
-  sandbox or a blocking startup modal each fails the feature's core promise.
+- **D7 — Sessions must act immediately and start clean (R9, R10).** A
+  read-only sandbox or a blocking startup modal each fails the feature's
+  core promise.
 
 ## Considered Options
 
@@ -235,6 +240,29 @@ in every repository (R6), including ones that commit their own `AGENTS.md`.
   trust, so context delivery through this filename has no trust dependency
   at all.
 
+  One reading rule is load-bearing for safety: **the composer reads a
+  repository's committed `AGENTS.md` only as a regular file, never through
+  a symlink** — and the same holds for any other repository file the
+  composer ever reads. Git reproduces committed symlinks verbatim, so
+  without this rule a hostile repository committing its `AGENTS.md` as a
+  symlink to a sensitive absolute path — the developer's own agent
+  credentials being the obvious target — would get the target's content
+  read by niwa and written into the instruction context of every Codex
+  session in that repository. niwa checks the file's own type (an lstat,
+  not a stat) before reading; anything other than a regular file is
+  treated as a conflict under the rule in Decision 7: niwa reads nothing,
+  inlines nothing, writes no override for that repository — so nothing
+  displaces the repository's own file in discovery (R6) — and reports the
+  refusal loudly (D4). Refusal was chosen over the alternative, resolving
+  the link and requiring the target to stay inside the working tree,
+  because refusal has no resolution edge cases — no chained links, no
+  post-resolution traversal, no window between the check and the read —
+  and the benign case it costs (a repository symlinking its `AGENTS.md`
+  to another in-tree file) is rare, loudly reported, and fixed by
+  committing a regular file. The R13 claim that niwa never reads the
+  developer's credentials is true only because of this rule; it is stated
+  here so the claim cannot drift away from its enforcement.
+
 - **Option 2B: `project_doc_fallback_filenames` pointed at the
   `CLAUDE.local.md` niwa already writes.** Add
   `project_doc_fallback_filenames = ["CLAUDE.local.md"]` to the payload
@@ -274,6 +302,30 @@ in every repository (R6), including ones that commit their own `AGENTS.md`.
   `scripts/` file at a real path, which is what the skills' own references
   point at.
 
+  The one input this turns on is the plugin root itself, and resolving it
+  is part of the decision, because niwa's plugin model today is name-based
+  end to end: it registers marketplaces and enabled plugins in Claude's
+  settings and shells out to the Claude CLI for installation, resolving an
+  on-disk directory only for repository-sourced marketplaces — and even
+  there only the marketplace root, never the per-plugin subdirectory. The
+  payload writer therefore resolves the root per marketplace kind. For a
+  repository-sourced marketplace, niwa parses the marketplace manifest it
+  already opens for the name and joins the plugin's declared source
+  directory onto the marketplace root it already computes. For a
+  github-sourced marketplace, the tree lives in Claude Code's user-global
+  plugin cache, populated by a pre-warm that is explicitly best-effort:
+  skippable by flag and config, dependent on the `claude` binary being
+  present, and able to fail or time out — and where a Claude session
+  self-heals by installing at startup, a Codex session has no equivalent.
+  So a plugin root that is missing at apply time is handled under driver
+  D4, not hoped away: niwa skips that plugin's symlink and reports it
+  loudly, naming the plugin and the path it expected, and the next apply
+  materializes the link once the root exists. Leaving a silent dangling
+  symlink is not acceptable here, because when the cause is a skipped or
+  failed install nothing later repairs it. This also puts a second
+  external layout on the design's dependency list — Claude Code's plugin
+  cache — recorded in Consequences beside the codex-cli pins.
+
 - **Option 3B: copy individual skill directories loose.** Copy each
   `skills/<name>/` directory into the payload without its plugin. Rejected
   on two measured failures: a detached skill loses its namespace (it loads
@@ -308,7 +360,18 @@ vouch for itself.
   and nothing else.** `niwa create` and `niwa apply` upsert
   `[projects."<repo root>"] trust_level = "trusted"` in the developer's
   Codex config for each cloned repository, idempotently, touching no other
-  key. Trust is mandatory, not cosmetic: without the entry a session runs
+  key. The key's path form is part of the contract: niwa **canonicalizes
+  the repository root** — full symlink resolution of every path component
+  — before writing the key, rather than using whatever string the cloner
+  happened to hold. Codex resolves the working directory and the git root
+  when it looks trust up, so an entry keyed by an unresolved path through
+  a symlinked parent (a linked home directory, an automounted volume, a
+  symlinked workspace root — all common) would be silently miskeyed, and
+  the failure shape is the worst one available: a read-only sandbox with
+  no error. The PRD's miskeyed-entry criterion ("keyed by a path that
+  resolves to that tree's actual root — a present-but-miskeyed entry
+  fails") is the regression check for exactly this. Trust is mandatory,
+  not cosmetic: without the entry a session runs
   in a read-only sandbox where the agent cannot write files (failing R9),
   and the interactive TUI blocks on a trust prompt (failing R10). With it,
   the TUI was measured to start on a live composer with the project layer,
@@ -326,6 +389,24 @@ vouch for itself.
   behavior keys of any kind. The write is additive and confined to keys
   whose paths resolve inside niwa instances, which is the shape R13
   explicitly permits.
+
+  Because this is the one file niwa edits that it does not own, the write
+  discipline is part of the decision, not an implementation detail. Three
+  rules. *Atomic replacement:* the edited document is written to a
+  temporary file in the same directory, synced, and renamed over the
+  original, so an interrupted apply leaves the previous file intact,
+  never a truncated one. *Never rewrite what did not parse:* if the
+  pre-existing file fails to parse, niwa refuses the trust step, leaves
+  the file byte-untouched, and reports the parse failure loudly, naming
+  the file — a pipeline that "repairs" what it could not read is how
+  additivity guarantees get broken in practice. *Serialized concurrent
+  applies:* multiple instances share one developer config, and two
+  applies running at once must not drop each other's entries or
+  interleave the file into invalid TOML, so niwa's writers serialize
+  through an advisory lock held across the whole read-modify-write, with
+  the file re-read under the lock before editing. Writes by Codex itself
+  are outside niwa's control and are the same exposure Codex's own
+  concurrent sessions already carry.
 
 - **Option 4B: write nothing and let the developer trust each repository
   interactively.** The zero-touch alternative: the first `codex` run in
@@ -416,38 +497,81 @@ separately as niwa#228.
 The exclusivity must come out of the pipeline without disturbing the Claude
 byte-stream (R2) or the launch-time meaning of the agent setting (R14).
 
-- **Option 7A (chosen): callers run once per materialized agent; the agent
-  type survives as a launch-time selector.** The measured shape of the
-  existing code makes this the natural cut: the exclusivity lives in the
-  *callers*, not the accessors. Each write site — the workspace-root
-  materializer, the instance and group content installers, the repo and
-  worktree installers — takes one resolved `Agent` and writes for it; no
-  accessor needs to change meaning. Going additive means each preparation
-  runs the relevant writers once per agent: the Claude pass exactly as
-  today (byte-identical by construction), and a Codex pass that writes the
-  `AGENTS.md` files at the niwa-owned levels plus the net-new payload,
-  symlink, and override deliveries. The `Agent` field on the apply options
-  stops meaning "the agent this instance is for" and survives only where
-  launch-time selection is real: `niwa dispatch`'s refusal and the model
-  category resolver. The dispatch refusal likely needs no logic change —
-  it keys on the resolved launch selection, which stays coherent when
-  `default_agent` means "the agent a niwa-launched session runs" rather
-  than "the only agent prepared" — but its comments narrate the old
-  exclusive framing and must be re-worded, or they will mislead the next
-  reader. The prior design's provisional `LocalContextFileName()` Codex
-  branch (returning `AGENTS.md`, never called) is superseded: the
-  repository-level Codex filename is `AGENTS.override.md`, and the
-  accessor should be retired or corrected rather than left asserting a
-  contract this design abandons.
+- **Option 7A (chosen): the Claude pipeline untouched, a Codex pass beside
+  it, and the agent type surviving as a launch-time selector.** Where the
+  exclusivity actually lives differs by level, and the cut follows the
+  code rather than a slogan:
 
-  The blast radius is known and bounded. Three functional scenarios in
-  `test/functional/features/codex-agent.feature` assert exclusivity
-  directly; the two assertions of the form "and the other agent's file
-  does not exist" invert. The unit tests in
-  `internal/workspace/content_test.go` and
-  `internal/workspace/root_materializer_test.go` that assert the other
-  file's absence are the same inversion at unit scope. The PRD's R2
-  criterion pins that these are the *only* tests modified.
+  - *Workspace-root and instance levels:* the exclusivity is in the
+    callers and the accessor is a pure filename selector
+    (`RootContextFileName()` feeds a `filepath.Join` and nothing else is
+    agent-dependent), so running those writers once per agent genuinely
+    yields both files — an existing test already proves the two trees
+    coexist by calling the installer twice with different agents. This is
+    the only place where re-parameterization is the whole job.
+  - *Group level:* the existing installer writes exactly one source, the
+    group's own entry. Re-running it under Codex would produce a
+    group-only `AGENTS.md`, which violates this design's composition rule
+    (a group file must carry instance plus group). The group-level Codex
+    file is therefore net-new composition sharing the per-repository
+    composer, not the existing writer re-run with a different filename.
+  - *Repository and worktree levels:* the exclusivity sits in an
+    accessor, `WritesRepoLevelContext()` (`internal/agent/agent.go:85`),
+    which gates the two repo-level installers to a no-op under Codex.
+    Running those callers "once per agent" writes nothing on the Codex
+    pass; the Codex delivery here is a net-new writer beside them, not a
+    rework of them.
+
+  Going additive therefore means: the Claude pass runs exactly as today
+  (byte-identical by construction); the root- and instance-level writers
+  additionally run for Codex; and a net-new Codex materializer produces
+  the composed group files, the payload, the per-repository symlinks and
+  overrides, and the conflict handling. Both accessors the prior design
+  left as Codex seams are **retired**: `LocalContextFileName()`'s Codex
+  branch (never called, and wrong — the repository-level Codex filename
+  is `AGENTS.override.md`) and `WritesRepoLevelContext()` itself, whose
+  gate becomes vacuous once the Claude pass always runs as Claude and the
+  Codex pass never calls the repo-level installers. Retiring rather than
+  keeping them means the seam cannot silently assert a contract this
+  design abandons.
+
+  The `Agent` field on the apply options stops meaning "the agent this
+  instance is for" and survives only where launch-time selection is real:
+  `niwa dispatch`'s refusal and the model category resolver. The dispatch
+  refusal likely needs no logic change — it keys on the resolved launch
+  selection, which stays coherent when `default_agent` means "the agent a
+  niwa-launched session runs" rather than "the only agent prepared" — but
+  its comments narrate the old exclusive framing and must be re-worded,
+  as must the now-inert agent assignments on the launch-coupled
+  provisioning paths (`internal/cli/instance_from_hook.go:499`,
+  `internal/cli/session_lifecycle_cmd.go:337`), which no longer select
+  what gets materialized. The `--agent` flag on `niwa create` and
+  `niwa apply` likewise loses its materialization meaning: it stays
+  accepted so existing invocations keep working (R14), but it no longer
+  affects what preparation produces, and its help text is re-worded to
+  say so rather than left promising a selection R1 removed.
+
+  The blast radius, checked against the tests rather than remembered:
+  `test/functional/features/codex-agent.feature` has three scenarios, of
+  which **two** assert materialization exclusivity (the dispatch-refusal
+  scenario stands as-is). **Three** assertions change, not two: the
+  instance-root `CLAUDE.md does not exist` under a Codex default inverts;
+  the instance-root `AGENTS.md does not exist` under a Claude default
+  inverts; and `tools/app/CLAUDE.local.md does not exist` (a
+  repository-skip assertion, not an other-agent-file assertion) also
+  changes, because the Claude pass now writes repository content
+  regardless of `default_agent`. One assertion must **not** be touched:
+  `tools/app/AGENTS.md does not exist` stays true, because niwa writes
+  `AGENTS.override.md` into repositories, never `AGENTS.md` — inverting
+  it would delete a valid guarantee. The feature file's description prose
+  and its `Design:` pointer narrate the exclusive model and are updated
+  alongside. At unit scope, the "other file is absent" assertions in
+  `internal/workspace/root_materializer_test.go` and
+  `internal/workspace/content_test.go` invert, and the repo-level-skip
+  test in `content_test.go` is deleted with the retired
+  `WritesRepoLevelContext()` accessor it exercises. That is the complete
+  set of test edits, stated here so the PRD's R2 criterion — which
+  enumerates exactly these files — is decidable.
 
 - **Option 7B: generalize the settings builder into an agent-neutral
   config writer.** Extend `buildSettingsDoc` to emit either agent's
@@ -467,7 +591,8 @@ byte-stream (R2) or the launch-time meaning of the agent setting (R14).
   migration R14 rules out.
 
 Two deferred mechanisms from the prior design's repo-level analysis get
-their answer here, one returning and one staying out:
+their answer here, one returning in its expected form and one returning in
+a different one:
 
 - **The git-exclude extension is needed.** niwa now writes two
   non-`.local`-named entries into repository working trees (`.codex` and
@@ -479,15 +604,38 @@ their answer here, one returning and one staying out:
   every repository's `git status` forever — no error, just permanent dirt,
   which is why this is the highest-risk detail in the feature (R11). The
   bare form matches a symlink and a real directory alike, so it stays
-  correct under the copy fallback too.
-- **The collision guard stays unnecessary.** The prior design deferred a
-  guard against clobbering a repository's committed `AGENTS.md`; it does
-  not come back, because niwa never writes to that filename.
-  `AGENTS.override.md` is Codex's designated local-override slot — the
-  analogue of `CLAUDE.local.md`, a name repositories do not commit — and
-  the committed `AGENTS.md` is handled by inlining, never by overwriting
-  (R12). The guard was insurance against a write this design does not
-  perform.
+  correct under the copy fallback too. One limit of the mechanism must be
+  stated so it is not asked to do a job it cannot: exclude patterns act
+  only on *untracked* paths. For a name a repository already tracks, the
+  pattern is inert, and a niwa write at that name would show in `git
+  status` as a modification — which is why the conflict case below has
+  its own rule and is not handled by the pattern.
+- **The blind-overwrite guard does not come back, but a conflict rule
+  does.** The prior design deferred a guard against clobbering a
+  repository's committed `AGENTS.md`; that guard stays unnecessary in its
+  original form, because niwa never writes to that filename — the
+  committed `AGENTS.md` is handled by inlining (R12). What this design
+  adds instead is a rule for the two names niwa *does* write, because "a
+  name repositories do not commit" is an assumption about third-party
+  behavior, not a guarantee — a committed `.codex/` is a real Codex
+  convention any upstream can adopt. Before writing either name, niwa
+  checks the target path. A path already occupied by anything niwa did
+  not itself materialize — a tracked or untracked file, directory, or
+  symlink — is a conflict: niwa writes nothing at that name, modifies and
+  deletes nothing (R12, R11), and surfaces the conflict as a loud
+  per-repository warning in the apply output. A quiet skip is exactly the
+  silent minority-case failure driver D4 excludes. niwa recognizes its
+  own writes the way the rest of materialization does: the `.codex`
+  symlink by its target (the instance payload), and copied or composed
+  files through the tracked-content records materialization already
+  keeps. For a conflicting `.codex` specifically, niwa also **withholds
+  that repository's trust entry**: with niwa's payload absent, a trust
+  entry would vouch for the repository's own committed `.codex/` —
+  third-party content impersonating the payload with niwa's signature on
+  it. The trust decision is left to Codex's own startup prompt, where the
+  developer sees exactly what they are being asked to trust. A conflicted
+  repository therefore degrades loudly — reported by apply, prompting at
+  session start — never silently.
 
 ## Decision Outcome
 
@@ -502,14 +650,18 @@ the Claude tree exactly as today and, unconditionally alongside it:
   copy, where symlinks are unavailable) and a composed
   `AGENTS.override.md` in every cloned repository and worktree, plus bare
   `.codex` and `AGENTS.override.md` patterns in each repository's managed
-  git-exclude block (Decision 7).
+  git-exclude block; a repository already occupying either name is a
+  detected, loudly reported conflict that is never overwritten (Decision
+  7), and the composer reads committed files only as regular files
+  (Decision 2).
 - **Niwa-owned levels**: `AGENTS.md` at the instance root and group
   directories, now written alongside `CLAUDE.md` rather than instead of it,
   each composing the layers above it (architecture below).
 - **The trust bootstrap** (Decision 4): one
   `[projects."<repo root>"] trust_level = "trusted"` entry per cloned
-  repository in the developer's Codex config, upserted idempotently, and
-  nothing else written there.
+  repository in the developer's Codex config, keyed by the canonicalized
+  repository root, upserted idempotently under the stated write
+  discipline, and nothing else written there.
 - **Nothing for hooks** (Decision 5) and **nothing for credentials**
   (Decision 6).
 - **The agent discriminator** survives as a launch-time selector for
@@ -540,15 +692,19 @@ the Claude tree exactly as today and, unconditionally alongside it:
                                    # ".codex" and "AGENTS.override.md"
 ```
 
-Worktrees created by `niwa worktree` get the same two per-tree writes (the
+Worktrees created by `niwa worktree` get the same two per-tree writes: the
 `.codex` link with its target computed for the worktree's location, and a
-composed override carrying the worktree's own framing — repository, purpose,
-branch — in place of the repository layer).
+composed override carrying the repository layer plus the worktree's own
+framing — repository, purpose, branch — appended to it, matching the merge
+a Claude worktree session gets (the worktree lifecycle installs the
+repository content into the worktree first and then appends the framing,
+rather than replacing anything).
 
-In the developer's Codex config, per cloned repository:
+In the developer's Codex config, per cloned repository (the path
+canonicalized — symlinks fully resolved — per Decision 4):
 
 ```toml
-[projects."<absolute repo root>"]
+[projects."<canonical absolute repo root>"]
 trust_level = "trusted"
 ```
 
@@ -562,11 +718,40 @@ of layers from the instance root down to its own directory.** The instance
 root's `AGENTS.md` carries the instance layer; a group's carries instance
 plus group; a repository's `AGENTS.override.md` carries instance, group,
 and repository (with the repository's committed `AGENTS.md` inlined when
-one exists); a worktree's carries instance, group, and the worktree
-framing. This is duplication by design: the walk stops at the repository
-root, so the outer layers must travel inside the per-repository file. The
-same rule implies the never-empty constraint from Decision 2: a location
-with no content at any layer gets no file.
+one exists); a worktree's carries instance, group, the repository layer,
+and the worktree framing appended last — the full set R4 names, not the
+framing alone. A worktree is a checkout, so its copy of a committed
+`AGENTS.md` is inlined exactly as a clone's is, under the same
+regular-file-only rule. This is duplication by design: the walk stops at
+the repository root, so the outer layers must travel inside the
+per-repository file. The same rule implies the never-empty constraint
+from Decision 2: a location with no content at any layer gets no file.
+
+The layers are composed outermost-first, matching the direction Codex
+itself concatenates when a chain has several files (root first, working
+directory last), so a session that also picks up a committed context file
+in a subdirectory reads one consistent general-to-specific document. The
+choice has a cost worth stating: budget truncation eats the tail, which
+under this ordering is the innermost layer — the one R7 protects — so the
+declared budget is the sole defense rather than one of two. The reversed
+ordering would degrade more gracefully under truncation, but at the price
+of every composed file reading specific-before-general and disagreeing
+with the order of Codex's own native chain; the design keeps the
+consistent ordering and sizes the budget accordingly.
+
+### Conflicts with committed content
+
+The two names niwa writes into working trees are asserted free before
+writing. Anything already at `.codex` or `AGENTS.override.md` that niwa
+did not itself materialize is a conflict: the write is skipped, nothing is
+modified or deleted, and apply reports the conflict per repository; a
+conflicting `.codex` also withholds that repository's trust entry so
+niwa's signature never vouches for a payload it did not write (the full
+rule and its rationale are in Decision 7). A committed `AGENTS.md` that is
+not a regular file is the same family: the composer refuses to read it,
+writes no override for that repository, and reports (Decision 2). The
+git-exclude patterns play no part in any of this — they suppress only
+untracked paths and are inert for names a repository tracks.
 
 ### The byte budget
 
@@ -580,9 +765,12 @@ whole under a 65,536 limit). niwa therefore declares the budget in
 the largest composed file plus any committed context files in
 subdirectories below a repository root, with generous headroom rather than
 a tested-once number — the truncation gives no signal, so the margin is
-the only defense. Because the budget lives in the project config layer, it
-takes effect only where trust resolves; the trust entries of Decision 4
-are what make the declaration reliable inside repositories.
+the only defense. The sizing inputs are read at apply time, and committed
+context files in repository subdirectories can grow between applies with
+no signal; the headroom covers that window, and the next apply re-sizes.
+Because the budget lives in the project config layer, it takes effect
+only where trust resolves; the trust entries of Decision 4 are what make
+the declaration reliable inside repositories.
 
 ### Worktrees
 
@@ -609,17 +797,24 @@ reconciles the skills symlinks against the configured plugin set; repairs
 or re-creates the per-repository `.codex` links; extends managed
 git-exclude blocks for newly cloned repositories; and upserts trust
 entries for new repositories while leaving existing entries untouched.
-`niwa worktree apply` does the same for a worktree. A dangling payload
-symlink is harmless in the interim — Codex skips the layer without error —
-but apply repairs it.
+`niwa worktree apply` does the same for a worktree. A dangling link is
+harmless to Codex in the interim — it skips the layer without error — and
+apply repairs any link whose target niwa owns. The one dangle apply
+cannot repair is a skills link whose plugin root never materialized
+(a skipped or failed plugin install), which is why Decision 3 reports
+that case loudly per plugin instead of letting it look repaired.
 
 ### What stays Claude-only
 
 The `.claude/` settings tree, hooks, plugin/marketplace registration, and
 the env pipeline are untouched and gain no Codex analogue in this design:
 Codex reads none of those surfaces, and the payload writer is net-new
-rather than a generalization of them (Decision 7B). Sessions launched at
-the instance root or a group directory get that level's composed
+rather than a generalization of them (Decision 7B). The embedded
+workspace-root project skills niwa writes at the workspace root also get
+no Codex analogue — they drive niwa's Claude-only launch paths — so R8's
+same-set guarantee is scoped to the plugin-delivered skills inside
+instances, which is where the workspace's skills live. Sessions launched
+at the instance root or a group directory get that level's composed
 `AGENTS.md` and the skills (which load without trust), but no trust entry
 — the interactive clean-start guarantee is scoped to repositories (R10),
 and the consequence is recorded honestly below.
@@ -630,32 +825,46 @@ Four batches, each independently landable, sequenced so the invariant
 (Claude unchanged) is protected first and every later batch extends a
 seam the previous one proved.
 
-1. **Additive niwa-owned levels.** Rework the materialization callers to
-   run once per agent at the workspace-root, instance, and group levels,
-   writing both `CLAUDE.md` and the composed `AGENTS.md` unconditionally.
-   Invert the exclusivity assertions (the functional scenarios and the
-   "other file does not exist" unit tests — the only permitted test
-   changes per R2's criterion), re-narrate the dispatch refusal's
-   comments, and pin the R2 byte-identity check. This lands the
-   architectural pivot with the smallest new write surface and proves R14
-   (no migration, launch-time meaning intact) before any repository is
-   touched.
+1. **Additive writes where re-parameterization suffices.** Run the
+   workspace-root and instance-level writers once per agent — the two
+   levels where the exclusivity really is in the callers and the existing
+   writers produce both files unchanged (Decision 7A). Invert the
+   exclusivity assertions exactly as Decision 7A enumerates them
+   (including the one assertion that must not flip), retire the two dead
+   accessors and their tests, re-narrate the dispatch refusal's comments
+   and the inert launch-path agent assignments, adjust the `--agent`
+   help text, and pin the R2 byte-identity check. This lands the
+   architectural pivot with the smallest new write surface and proves
+   R14 before any repository is touched.
 
-2. **The payload and per-repository delivery.** The net-new Codex
-   materializer: payload directory with budget-bearing `config.toml` and
-   plugin symlinks, per-repository `.codex` link with the copy fallback,
-   composed `AGENTS.override.md` with committed-`AGENTS.md` inlining and
-   the never-empty rule, and the git-exclude extension with bare
-   patterns. This batch carries the feature's highest-risk details (the
-   bare pattern, the empty-file trap, the budget sizing), so its tests
-   are the silent-failure checks the PRD's criteria spell out.
+2. **The composition engine and per-tree delivery.** The net-new Codex
+   materializer: the layer composer and its three consumers (composed
+   group `AGENTS.md`, per-repository `AGENTS.override.md` with
+   committed-`AGENTS.md` inlining and the never-empty rule, and the
+   worktree variant carrying the repository layer plus framing), the
+   payload directory with budget-bearing `config.toml` and plugin
+   symlinks including the per-marketplace-kind root resolution and
+   missing-root reporting, the per-repository `.codex` link with the
+   copy fallback, the conflict detection and loud reporting for occupied
+   names, the regular-file-only read rule in the composer, and the
+   git-exclude extension with bare patterns. Group composition lives
+   here rather than in batch 1 because it is new composition sharing
+   this batch's composer, not a re-run of the existing group writer.
+   This batch carries the feature's highest-risk details (the bare
+   pattern, the empty-file trap, the budget sizing, the refusal rules),
+   so its tests are the silent-failure and hostile-content checks.
 
 3. **The trust writer.** Idempotent, additive editing of the developer's
    Codex config: upsert per-repository entries, preserve everything else
    byte-wise, tolerate an unreadable credential file, and prove the
-   no-accumulation and no-global-keys criteria. Kept separate from batch
-   2 because it is the only write outside the instance and deserves its
-   own review focus.
+   no-accumulation and no-global-keys criteria — plus the write
+   discipline Decision 4 states: atomic temp-file-and-rename
+   replacement, refuse-and-report on an unparseable pre-existing file,
+   and lock-serialized concurrent applies. Kept separate from batch 2
+   because it is the only write outside the instance and deserves its
+   own review focus; it consumes batch 2's per-repository conflict
+   verdicts to withhold trust for conflicted repositories, so that
+   behavior completes when both have landed.
 
 4. **Worktree parity and docs.** Extend the worktree lifecycle with the
    per-tree writes, verify the marker and trust-inheritance behavior
@@ -663,9 +872,13 @@ seam the previous one proved.
    warrants (a `docs/guides/*` page covering what dual-agent preparation
    produces and what it writes where).
 
-Batch 1 gates 2 (the per-agent caller seam is what the Codex materializer
-plugs into); 2 gates 4 (worktrees reuse the per-repository writers); 3 is
-independent of 2 and can land in parallel after 1. Live-gated checks
+Batch 1 gates 2 — not because batch 2 reuses batch 1's writers (it is
+net-new code beside them), but because batch 1 establishes the per-agent
+pass in the apply pipeline that batch 2's writers ride, and lands the
+test-suite inversions batch 2's assertions build on. 2 gates 4 (worktrees
+reuse the per-repository composer and writers); 3 can land in parallel
+after 1, with its conflict-driven withholding wired up once 2 is in.
+Live-gated checks
 (interactive start, first-write, post-session cleanliness) ride whichever
 batch delivers their mechanism, following the repo's existing
 skip-when-absent pattern for agent binaries.
@@ -681,12 +894,16 @@ skip-when-absent pattern for agent binaries.
   removed, reordered, or altered, and the edit must preserve the file's
   other content byte-wise (the PRD's criterion makes this testable);
   *credentials* — the credential and login files are never read or
-  written, and preparation succeeds even when they are unreadable (R13).
-  An entry whose path no longer exists grants nothing — trust keys are
-  consulted only when a session runs at that path — so the residual risk
-  of stale entries after an instance is deleted is clutter, not
-  capability. Removing them belongs to the instance-destruction lifecycle
-  and is not load-bearing for safety.
+  written, and preparation succeeds even when they are unreadable (R13);
+  *discipline* — atomic temp-file-and-rename replacement so interruption
+  never truncates the file, refusal (never a rewrite) when the
+  pre-existing file does not parse, and lock-serialized read-modify-write
+  so concurrent applies from multiple instances cannot drop each other's
+  entries or corrupt the document (Decision 4). A stale entry after an
+  instance is deleted is not fully inert: it trusts whatever later lands
+  at that path. The paths are deep inside directories niwa manages, so
+  the practical exposure is narrow, but removal on instance destruction
+  belongs in the lifecycle as planned work rather than being waved off.
 
 - **Trusting a repository is a real grant, and its blast radius should be
   understood.** A trust entry does not merely silence a prompt: it
@@ -695,15 +912,39 @@ skip-when-absent pattern for agent binaries.
   `.codex/` directory committed anywhere in the repository's tree, since
   trust resolves transitively down the walk chain and the nearer layer
   wins on precedence. Third-party repository content thereby gains a
-  voice in session configuration. The bound is Codex's own project-config
-  denylist (a project layer cannot redirect provider URLs, swap model
-  providers, or set notification commands) plus the fact that hook
-  execution still requires user-config hash state niwa never writes. This
-  grant is inherent to making sessions able to act (R9): the developer
-  who clones a repository into a niwa workspace is expressing the same
-  intent the trust prompt would have asked about, and the entry is scoped
-  to exactly those paths. The design accepts this residual risk and
-  states it rather than hiding it behind the word "trust".
+  voice in session configuration, and the worst case deserves a concrete
+  name: sandbox and approval settings are not on Codex's project-config
+  denylist and general config was measured to load from a trusted
+  project layer, so a trusted repository's own committed config can
+  loosen the sandbox or approval posture of sessions running inside it.
+  The bounds are the denylist (a project layer cannot redirect provider
+  URLs, swap model providers, or set notification commands), the fact
+  that hook execution still requires user-config hash state niwa never
+  writes, and the conflict rule above — which exists precisely so that
+  niwa never grants trust where its own payload is not the thing being
+  trusted. This grant is inherent to making sessions able to act (R9):
+  the developer who clones a repository into a niwa workspace is
+  expressing the same intent the trust prompt would have asked about,
+  and the entry is scoped to exactly those paths. The design accepts
+  this residual risk and states it rather than hiding it behind the word
+  "trust".
+
+- **Committed content at niwa's names is a conflict, never a
+  substrate.** Two attack shapes were considered and closed by rules the
+  design states where the writes happen. *Impersonation:* a repository
+  arriving with its own `.codex/` at the name niwa symlinks could stand
+  in for the payload while niwa's trust entry vouches for it; the
+  conflict rule (Decision 7) skips the write, withholds the trust entry,
+  and reports, so the repository's layer is never trusted on niwa's
+  signature. *Disclosure through a committed symlink:* a repository
+  committing its `AGENTS.md` as a symlink to a sensitive path could get
+  the target read by niwa's composer and inlined into agent-visible
+  context; the regular-file-only read rule (Decision 2) refuses it, and
+  the R13 never-reads-credentials claim rests on that refusal. Neither
+  requires a hostile actor — a careless upstream adopting Codex's own
+  project-layer convention triggers the first — which is why both are
+  handled by detection and loud refusal rather than by assuming good
+  behavior.
 
 - **The payload is reachable from inside repositories.** The `.codex`
   symlink makes the shared payload addressable from every repository
@@ -712,10 +953,17 @@ skip-when-absent pattern for agent binaries.
   construction (project config and skill content only — Decision 6 keeps
   credentials out of every Codex-readable location), and it is
   regenerated from configured sources on every apply, so a tampered
-  payload does not survive re-preparation. A session induced to write
-  through the symlink could modify skills mid-session; that exposure is
-  shared with the Claude side's materialized skill tree and is bounded by
-  the same fact that nothing in the payload is executed by niwa itself.
+  payload does not survive re-preparation. One refinement to that claim:
+  regeneration heals the payload and its symlinks, not the symlink
+  *targets* — the plugin install roots, which are shared across every
+  instance and both agents, so tampering there persists until plugin
+  content itself is reconciled. That healing belongs to plugin
+  installation, and the exposure is shared with, not added to, the
+  Claude side, which reads the same roots. A session induced to write
+  through the symlink could modify skills mid-session; that exposure too
+  is shared with the Claude side's materialized skill tree and is
+  bounded by the same fact that nothing in the payload is executed by
+  niwa itself.
 
 - **No new process execution and no credential handling.** niwa gains no
   code that launches an agent or touches an auth file; the design writes
@@ -749,6 +997,17 @@ skip-when-absent pattern for agent binaries.
   niwa-owned files must be recomposed on apply. Mitigation: the content
   is kilobytes of text, regeneration is already the apply model, and the
   duplication is forced by the walk boundary, not chosen.
+- **A repository occupying niwa's names opts itself out of Codex
+  delivery.** A committed `.codex` or `AGENTS.override.md` — or an
+  `AGENTS.md` that is not a regular file — means that repository gets no
+  payload link, no composed override, and for a `.codex` conflict no
+  trust entry: Codex sessions there fall back to the repository's own
+  content and Codex's own prompts. Mitigation: the degradation is loud
+  by design (a per-repository apply warning, and the trust prompt where
+  it applies), the failure is confined to the conflicted repository, and
+  the resolution is the developer's call — rename or remove the
+  conflicting content, or accept native-only discovery for that
+  repository.
 - **The inlined committed `AGENTS.md` goes stale between applies.** A
   repository editing its own `AGENTS.md` sees the change reach Codex
   sessions only after the next `niwa apply`, while a Claude session sees
@@ -763,16 +1022,28 @@ skip-when-absent pattern for agent binaries.
   to repositories, where work happens; the developer's one-time answer
   writes Codex's own entry; a later increment can add an instance-root
   entry if this bites in practice.
-- **The design leans on upstream discovery invariants.** The hardcoded
+- **The design leans on two external layouts, not one.** The hardcoded
   first-match precedence of `AGENTS.override.md`, the bare-stat marker
   check that admits a worktree's `.git` file, and symlink-following in
   the project-layer loader are all pinned to codex-cli 0.147.0 by
-  measurement. A future Codex release could reorder or tighten any of
-  them silently. Mitigation: every reliance is on documented, upstream-
-  tested behavior rather than accident; the acceptance criteria double as
-  a regression harness; and a cheap materialization-time smoke test
-  (render the prompt in one repository, assert niwa's sentinel) can catch
-  a drift the moment it ships.
+  measurement; a future Codex release could reorder or tighten any of
+  them silently. And the skills symlinks for github-sourced marketplaces
+  point into Claude Code's user-global plugin cache, making a second
+  external tool's directory layout load-bearing for R8 (Decision 3).
+  Mitigation: every Codex reliance is on documented, upstream-tested
+  behavior rather than accident; the acceptance criteria double as a
+  regression harness; a cheap materialization-time smoke test (render
+  the prompt in one repository, assert niwa's sentinel) can catch a
+  drift the moment it ships; and a missing or relocated plugin root is
+  reported loudly at apply rather than discovered as absent skills.
+- **The payload is visible to anything that walks a repository.** The
+  `.codex` symlink means a search, an indexer, or an agent's own grep
+  that follows symlinks now sees the whole plugin payload from inside
+  every repository, not just the security exposure already noted but a
+  day-to-day functional one (noisy search results, surprising matches).
+  Mitigation: the git-exclude entry keeps it out of git-aware tools,
+  most search tools skip symlinked directories or honor ignore files by
+  default, and the payload is plain text with nothing sensitive in it.
 - **niwa now edits a developer-owned file.** However bounded, this is a
   new category of write for niwa and a new way to surprise a developer
   reading their own config. Mitigation: the entries are few, legible,
