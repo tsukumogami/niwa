@@ -41,6 +41,16 @@ Upstream PRD: docs/prds/PRD-interactive-codex-session.md (Done). This design was
 implemented on the feat/interactive-codex-session branch; the PLAN that
 decomposed it into issues was finalized and removed on completion.
 
+Partially superseded by docs/designs/current/DESIGN-dual-agent-workspace.md.
+Decision 3 (skipping repository and worktree context under Codex), Decision 4
+(binding a Codex API key through the secret table), and the exclusive
+one-agent-per-preparation model no longer describe the current direction: a
+prepared instance now serves both agents at once, repository-level Codex context
+is delivered, and no API key is bound. The rest of this document — the agent
+discriminator, its resolution order, and the model-category mapping — still
+holds. Read it as the record of how the Codex path started rather than as a
+description of how it works now.
+
 ## Context and Problem Statement
 
 niwa's materialization pipeline assumes a single agent. Three surfaces encode

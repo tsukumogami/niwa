@@ -918,3 +918,161 @@ alone.
 ## Optional improvements
 
 - None.
+
+# Round 5 — final verdict (supersedes the round-5 section above)
+
+# Verdict: PASS
+
+The section above was written against the forward-carry text that was on disk when I
+read it. That text has been reverted to drop-plus-exemption. It is kept as the record
+of what was judged when; this section is the ruling on the current file
+(1232 lines, md5 `29ca443491c13fa46ca305b8bd6bd4d6`).
+
+## Finding 1 — closed, and my caveat is genuinely satisfied
+
+I set the condition, so I tested it rather than reading for reassurance. Three things
+had to be true, and all three are.
+
+*The cleanup change is named as a change.* Lines 674-678: "the mechanism is **an
+explicit exemption, which requires a named change to the cleanup**: the apply hands
+its per-run conflict verdicts to the managed-file cleanup as an input, and the cleanup
+consults that conflicted-path set and skips those paths before removing recorded paths
+the apply did not produce."
+
+*It is concrete enough to build without further discovery.* It names the data (the
+per-run conflict verdicts, as a conflicted-path set), the direction (apply into
+cleanup, as an input), and the semantics (skip those paths before removing recorded
+paths not produced). That maps one-to-one onto the real function: `cleanRemovedFiles`
+takes `(existingState, result)` and removes every prior path absent from the produced
+set (`internal/workspace/apply.go:1846-1858`), so the change is one input plus one
+skip before the `os.Remove` at :1854. An implementer reading this builds the right
+thing.
+
+*The half-implementation is called out by name.* Lines 678-684: "The cleanup change is
+not optional decoration — today the cleanup tests only membership in the produced set,
+so absence from that set is the deletion trigger, and dropping a conflicted path's
+entry *without* teaching the cleanup about conflicts is precisely the deletion this
+paragraph exists to prevent. An implementer must build the consultation, not assume
+reconciliation already knows." That is my caveat, in the design's own voice, including
+the failure it produces. The statement of today's behavior is accurate against the
+code.
+
+Forward-carry is now described correctly as the rejected alternative — "it retains the
+entries so the cleanup sees the path as still produced" — with its cost stated (a
+stale ownership claim under a hash that no longer describes what sits there). The
+round-four warning against the backwards formulation is preserved in the form that is
+correct for the chosen mechanism rather than kept as a sentence that would now
+contradict the decision, which is the right call. Decision 7 (674-697) and the
+Conflicts section (888-892) agree.
+
+The choice also retires my round-five finding rather than carrying it: with the record
+entry gone, `CheckDrift` never revisits the path, so neither the apply-time "modified
+outside niwa" warning (`apply.go:597-607`) nor `niwa status`
+(`internal/workspace/status.go:96`) goes on describing a conflicted repository's own
+committed file as a drifted niwa-managed file. One drift warning fires on the apply
+that first detects the conflict, from the prior state — accurate, one-shot, and
+alongside the conflict report. Nothing perpetual and nothing false.
+
+## Finding 2 and the optionals — closed, unchanged by the revert
+
+Verified in the current file. The trust guarantee reads "removes the entry its record
+names, **clears the record entry with the removal**, and never re-adds an entry while
+the conflict stands. The guarantee is never-reinstated, not always-absent" (742-745),
+with the composition argument intact — the developer's later answer "sits in no niwa
+record, and later applies leave it alone", and a record left in place "would license
+the next apply to delete the developer's answer at that key". Record-not-shape is
+bounded at 755. Record-file disagreement states the safe direction (753-755).
+Destruction ordering is at 1064. The displacement bounds hold at 264-272 and 1107.
+
+## Required changes
+
+None.
+
+## Optional improvements
+
+None.
+
+## Closing note on the architecture
+
+Across five rounds this design absorbed nine findings from me without once retreating
+into hedging: every fix moved a mechanism or a batch boundary rather than softening a
+sentence. The architecture I would now sign off on is the one it started with —
+payload at the instance root, per-repository `.codex` under the default marker,
+`AGENTS.override.md` composing the full chain, scoped canonicalized trust — with the
+edges that were assumed in round one now measured, bounded, or refused. The rejected
+alternatives were honest from the start. My remaining reservations are the ones the
+design already books as limitations: two external layouts are load-bearing, and the
+byte budget is a sized margin rather than a signal.
+
+# Round 6
+
+# Verdict: PASS
+
+One clarification on the record, then the two answers.
+
+## This file was already adjudicated
+
+The current file is 1232 lines, md5 `29ca443491c13fa46ca305b8bd6bd4d6` — byte-identical
+to the file my round-5 *final* section ruled on. The correction applies to the round-5
+draft, which was written against the forward-carry text; the superseding section below
+it already quoted lines 674-684 verbatim, judged the drop-plus-exemption mechanism
+against my caveat, and returned PASS. So the ruling is unchanged rather than
+re-derived, and nothing in the revert alters it.
+
+For completeness I re-verified rather than trusting my own earlier note: three
+mechanism sites and no fourth — line 674-678 states the exemption and the cleanup
+change, line 891 echoes it in the Conflicts section, line 688 names forward-carry as
+the rejected alternative with its cost. Consistent, once.
+
+## Question 1 — is the cleanup change concrete enough to build?
+
+Yes, and I tested it against the code rather than reading for reassurance. Three
+things had to hold and all three do: the change is labelled a change ("**an explicit
+exemption, which requires a named change to the cleanup**"); it names the data, the
+direction, and the semantics precisely enough to map onto the real function — the
+apply hands per-run conflict verdicts to the cleanup as an input, and the cleanup
+skips that set before removing recorded paths the apply did not produce, which is one
+input plus one skip before the `os.Remove` in `internal/workspace/apply.go:1846-1858`;
+and the half-implementation is named as the bug it would be ("dropping a conflicted
+path's entry *without* teaching the cleanup about conflicts is precisely the deletion
+this paragraph exists to prevent. An implementer must build the consultation, not
+assume reconciliation already knows"). The statement of today's behavior — the cleanup
+tests only membership in the produced set — is accurate. An implementer building from
+this paragraph builds the right thing, and one skipping the cleanup change has been
+told in advance exactly what they will have built instead.
+
+## Question 2 — should the design state that a conflicted path drops out of drift
+reporting?
+
+No. Leave it out.
+
+It follows from what is already written: the record is the set of files niwa manages,
+drift reporting is definitionally a report about managed files, and the design says
+plainly that a conflicted path leaves the record so the state stays truthful about
+what niwa no longer owns. A reader who wants the consequence can derive it in one
+step, and the design is not a catalogue of every downstream effect of an accurate
+record.
+
+There is also a reason beyond noise to omit it. Stating drift-exclusion as a property
+invites the next reader to treat it as a *goal* of the mechanism rather than a
+consequence of the record being honest — and a goal is the kind of thing someone
+later preserves artificially, by special-casing drift reporting, when the right
+invariant is simply that the record names what niwa owns. The design is stronger with
+one rule and derivable consequences than with the rule plus a list of its effects.
+
+My round-five finding was a defect of forward-carry, not a gap in this mechanism.
+Under drop-plus-exemption it does not exist to be documented.
+
+One observable behavior, noted for the plan rather than the design: on the single apply
+that first detects a conflict, the drift check runs over the *prior* state, which still
+holds the entry, so one "modified outside niwa" warning fires alongside the conflict
+report. That is accurate, one-shot, and self-consistent — worth a test author knowing,
+not worth design ink.
+
+## Required changes
+
+None.
+
+## Optional improvements
+
+None.
