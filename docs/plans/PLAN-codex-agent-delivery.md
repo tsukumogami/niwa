@@ -31,7 +31,7 @@ a delivered capability, context composition within Codex's measured
 discovery rules, skills without a Claude Code dependency, MCP servers and
 environment generated from agent-neutral declarations validated before
 writing, approval and sandbox posture opt-in and absent by default, the
-`[context]`/`context_dir` alias and the per-agent enabled gates, secret
+`[content]` reinstatement and the per-agent enabled gates, secret
 hygiene landing with the first secret write, and a generated gap list in a
 user guide at docs/guides/. The Codex column ends at its PRD target: 11
 implemented, 13 unavailable with reasons.
@@ -309,19 +309,21 @@ default, with approvals and sandbox as separate declarations.
 
 **Requirements**: R7, R8
 
-**Goal**: Give `[claude.content]` and `content_dir` their agent-neutral
-aliases `[context]` and `context_dir`, following the recorded rename
-precedent (docs/designs/current/DESIGN-claude-key-consolidation.md, the
-mechanism at `internal/config/config.go`): both keys accepted, deprecation
-warning on the old name, hard error when both are set, removal at the v1.0
-line. Restructure the `claude.enabled` gate so it filters Claude plan
+**Goal**: Reinstate `[content]` as the canonical table and demote
+`[claude.content]` to the deprecated alias, reversing the direction of the
+recorded rename precedent (docs/designs/current/DESIGN-claude-key-consolidation.md,
+the mechanism at `internal/config/config.go`) while reusing its machinery:
+both keys accepted, deprecation warning on the old name, hard error when
+both are set, removal at the v1.0 line. `content_dir` keeps its name; its
+deferred Claude-namespacing is cancelled. Restructure the `claude.enabled` gate so it filters Claude plan
 production only, and introduce `codex.enabled` with identical semantics
 over the Codex plan -- no gate reaches across agents, and the executor
 never sees a gate at all.
 
 **Acceptance Criteria**:
-- `[context]`/`context_dir` parse; the old keys parse with a deprecation
-  warning; setting both fails with an error
+- `[content]` parses as canonical and `[claude.content]` parses with a
+  deprecation warning; setting both fails with an error. A workspace
+  already on `[content]` needs no change and its warning stops appearing
 - `claude.enabled = false` on a repository leaves full Codex delivery
   intact, and `codex.enabled = false` leaves full Claude delivery intact --
   both directions asserted
