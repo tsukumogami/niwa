@@ -449,4 +449,36 @@ written as bare `.codex`, not `.codex/`. The collision guard stays unnecessary:
 `AGENTS.override.md` is a distinct filename that never overwrites a repository's
 committed `AGENTS.md`, and inlines it instead.
 
+## Round 4 addendum — the interactive path, verified
+
+The last open risk to the goal statement is closed. Every earlier measurement
+came from non-interactive entry points, none of which render the startup path a
+developer actually sees. Driven under a pty, the interactive session **starts
+completely clean** given exactly the configuration this design calls for — live
+composer, project config layer loaded, skills available, no question asked —
+from the repository root and from directories beneath it. The "run plain `codex`
+and it just works" goal is measured rather than assumed, and no limitation needs
+writing up for it.
+
+Hooks are the exception, and the result argues for leaving them out. The
+silent-skip behavior measured under background runs **does not transfer**: the
+same wrong-or-missing hash is a blocking "Hooks need review" modal
+interactively. That converts a tolerable degradation into a hard stop for the
+primary use case, and it means any operation that rewrites the hook payload
+without recomputing the entry would face every developer in the workspace with a
+modal on their next start.
+
+Two mechanical details worth keeping even though hooks are now out of scope,
+because the increment that first needs a hook will want them. Codex keys hook
+trust under the **path it discovered** rather than canonicalizing the symlink,
+so one physical payload shared by N repositories needs N identical entries
+differing only in their path prefix — a shape worth recording before someone
+simplifies it to one. And the `SessionStart` hook does not fire at startup
+despite the name; it fires after the first turn is submitted, so anyone
+verifying hook delivery from the first screen alone will wrongly conclude hooks
+are broken.
+
+The hash algorithm derived earlier is confirmed correct from a second direction:
+Codex's own "Trust all and continue" wrote a hash identical to the computed one.
+
 ## Decision: Crystallize

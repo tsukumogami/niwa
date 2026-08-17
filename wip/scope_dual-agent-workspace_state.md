@@ -15,15 +15,21 @@ execution_mode: auto
 max_rounds: 5
 coordinated: false
 consumed_handoff: wip/scope_dual-agent-workspace_handoff.md
-chain_ran: []
+chain_ran: [brief]
 chain_skipped: []
+child_snapshots:
+  brief:
+    path: docs/briefs/BRIEF-dual-agent-workspace.md
+    status: Accepted
+    validator: clean
+    jury: content-quality PASS, structural-format PASS
 consolidation_judgments: []
 worktree_rebases: []
 worktree_divergences: []
 parent_orchestration:
-  child: brief
-  invoked_at: 2026-08-17T03:25:00Z
-  pre_invocation_sha: 0ebcec5
+  child: prd
+  invoked_at: 2026-08-17T03:40:00Z
+  pre_invocation_sha: 4894b8b
 ---
 
 # /scope state: dual-agent-workspace
