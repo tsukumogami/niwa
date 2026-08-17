@@ -1,6 +1,7 @@
 package agentplan
 
 import (
+	"slices"
 	"testing"
 
 	"github.com/tsukumogami/niwa/internal/agent"
@@ -105,25 +106,97 @@ func TestLookupAnswersEachDeclaredPair(t *testing.T) {
 	}
 }
 
-// TestCodexColumnStatesMainsTruth pins the posture this contract lands with:
-// nothing is delivered for Codex today, so every Codex row is unavailable. The
-// rows that flip when Codex delivery lands are the ReasonNotBuilt ones, and
-// this test is what makes that flip a deliberate edit rather than a drift.
-func TestCodexColumnStatesMainsTruth(t *testing.T) {
-	notBuilt := 0
+// codexFinalGaps is the Codex column at its target, unavailable half: the
+// thirteen rows that stay unavailable once every Codex delivery has landed,
+// each with the reason kind the PRD's matrix gives it. Eleven are inherent to
+// the agent; the last two name a route that exists and is out of this work's
+// scope.
+//
+// Writing them out here is what makes an accidental flip fail with a name in
+// the message. A row missing from this map is one whose delivery is still
+// pending, and TestCodexColumnStatesWhatIsDelivered checks it is unavailable
+// with the not-built kind until it lands.
+var codexFinalGaps = map[Capability]ReasonKind{
+	RootSessionOrientation:  ReasonAgentCannotReceive,
+	MarketplaceRegistration: ReasonAgentCannotReceive,
+	SubagentTypes:           ReasonNoSuchConcept,
+	Hooks:                   ReasonAgentCannotReceive,
+	WorkSummaryHooks:        ReasonAgentCannotReceive,
+	PRBodyHook:              ReasonAgentCannotReceive,
+	WorktreeHookDelegation:  ReasonNoSuchConcept,
+	EphemeralSessions:       ReasonAgentCannotReceive,
+	RootProjectSkills:       ReasonAgentCannotReceive,
+	NiwaPlugin:              ReasonNotBuilt,
+	RemoteControl:           ReasonNoSuchConcept,
+	DispatchKeepAlive:       ReasonNoSuchConcept,
+	DispatchLaunch:          ReasonNotBuilt,
+}
+
+// codexDelivered is what niwa delivers to Codex today. Directory trust is the
+// first row, and it is deliberately the first: every trust-gated row downstream
+// names it in Requires, and the closure test refuses such an edge while it is
+// unavailable. The list grows one entry per delivery, in the change that lands
+// the delivery -- never before it.
+var codexDelivered = []Capability{
+	DirectoryTrust,
+}
+
+// TestCodexColumnStatesWhatIsDelivered pins the Codex column against two
+// things at once: what niwa delivers today, and what the column looks like when
+// it is finished. A row that flips without its delivery fails here, and so does
+// a row whose final reason kind is edited away from the one the matrix settled
+// on -- which is the drift the reason kinds exist to make visible.
+func TestCodexColumnStatesWhatIsDelivered(t *testing.T) {
 	for _, c := range All() {
 		d, err := Lookup(c, agent.AgentCodex)
 		if err != nil {
 			t.Fatalf("Lookup(%s, codex) unexpected error: %v", c, err)
 		}
-		if d.State != StateUnavailable {
-			t.Fatalf("capability %s is declared delivered for codex, but nothing delivers it yet", c)
+
+		if slices.Contains(codexDelivered, c) {
+			if d.State != StateImplemented {
+				t.Errorf("capability %s is delivered to codex but declared unavailable", c)
+			}
+			continue
 		}
-		if d.Kind == ReasonNotBuilt {
-			notBuilt++
+
+		if d.State == StateImplemented {
+			t.Errorf("capability %s is declared delivered for codex, but nothing here delivers it yet", c)
+			continue
+		}
+
+		want, final := codexFinalGaps[c]
+		if !final {
+			want = ReasonNotBuilt
+		}
+		if d.Kind != want {
+			if final {
+				t.Errorf("(%s, codex) is unavailable with reason kind %d, want %d: the matrix settled this row's reason", c, d.Kind, want)
+			} else {
+				t.Errorf("(%s, codex) is unavailable with reason kind %d, want %d: a row still awaiting its delivery is niwa's own debt", c, d.Kind, want)
+			}
 		}
 	}
-	if notBuilt != 13 {
-		t.Fatalf("%d codex rows are not-built, want 13 (the 11 that Codex delivery implements, plus the plugin wiring and the launch path)", notBuilt)
+}
+
+// TestDirectoryTrustIsCodexOnly pins row 23 in both columns. Trust is the one
+// row where Claude is the agent with the gap, and the reason is the shape of
+// the agent rather than anything niwa has left undone: Claude Code keeps no
+// per-directory trust record to write into.
+func TestDirectoryTrustIsCodexOnly(t *testing.T) {
+	codex, err := Lookup(DirectoryTrust, agent.AgentCodex)
+	if err != nil {
+		t.Fatalf("Lookup(directory-trust, codex) unexpected error: %v", err)
+	}
+	if codex.State != StateImplemented {
+		t.Errorf("directory trust is not implemented for codex; every trust-gated row downstream depends on it")
+	}
+
+	claude, err := Lookup(DirectoryTrust, agent.AgentClaude)
+	if err != nil {
+		t.Fatalf("Lookup(directory-trust, claude) unexpected error: %v", err)
+	}
+	if claude.State != StateUnavailable || claude.Kind != ReasonNoSuchConcept {
+		t.Errorf("directory trust for claude is state %d kind %d, want unavailable/no-such-concept", claude.State, claude.Kind)
 	}
 }

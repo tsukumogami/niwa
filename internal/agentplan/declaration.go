@@ -64,12 +64,16 @@ type Declaration struct {
 // declarations is the capability matrix as data: exactly one row per
 // (capability, agent) pair, in matrix order, Claude before Codex.
 //
-// The Codex column states what main delivers today, which is nothing. Eleven of
-// its unavailable rows are ReasonNotBuilt and flip to implemented -- with the
-// measured Requires edges on DirectoryTrust -- when Codex delivery lands; the
-// other rows carry inherent reasons that no amount of building changes. Writing
-// the future state down early would make the table a plan rather than a record,
-// which is the failure this contract exists to prevent.
+// The Codex column states what niwa delivers today and nothing more. Directory
+// trust is the first row it delivers: the entry that makes every later
+// trust-gated row possible arrives with the writer that produces it, in the
+// same change. Thirteen Codex rows are at their final unavailable state -- the
+// eleven whose reason is inherent to the agent plus the two whose route exists
+// and is out of this work's scope -- and the rows still reading "not yet" are
+// the ones whose delivery has not landed. Each flips in the change that
+// delivers it, never before: writing the future state down early would make
+// the table a plan rather than a record, which is the failure this contract
+// exists to prevent.
 var declarations = []Declaration{
 	// Row 1: workspace and group orientation reaching a repo session.
 	{Capability: WorkspaceOrientation, Agent: agent.AgentClaude, State: StateImplemented},
@@ -276,12 +280,12 @@ var declarations = []Declaration{
 		Kind:   ReasonNoSuchConcept,
 		Reason: "Claude Code keeps no per-directory trust record; its posture is settings-driven.",
 	},
-	{
-		Capability: DirectoryTrust, Agent: agent.AgentCodex,
-		State:  StateUnavailable,
-		Kind:   ReasonNotBuilt,
-		Reason: "niwa does not yet write trust entries into the developer's Codex configuration.",
-	},
+	// Codex reads trust from the layers it merges before any project layer
+	// exists, so the one entry that makes a prepared instance usable is
+	// written into the developer's own configuration rather than into the
+	// instance. That is why this row is delivered by a procedure and not by a
+	// plan the executor writes.
+	{Capability: DirectoryTrust, Agent: agent.AgentCodex, State: StateImplemented},
 
 	// Row 24: git-exclude bookkeeping.
 	{Capability: GitExcludeBookkeeping, Agent: agent.AgentClaude, State: StateImplemented},

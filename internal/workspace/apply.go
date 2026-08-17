@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/tsukumogami/niwa/internal/agent"
+	"github.com/tsukumogami/niwa/internal/agentplan"
 	"github.com/tsukumogami/niwa/internal/config"
 	"github.com/tsukumogami/niwa/internal/gitexclude"
 	"github.com/tsukumogami/niwa/internal/github"
@@ -47,6 +48,20 @@ type Applier struct {
 	// materializes exactly as it did before agent selection existed. The CLI
 	// entry points set it from agent.ResolveAgent before calling Apply/Create.
 	Agent agent.Agent
+
+	// DeveloperHome is the developer's own home directory, and the only thing
+	// that lets this apply write outside the instance it is preparing. The
+	// procedure-routed deliveries -- today, the directory-trust entry a Codex
+	// session needs before it can write anything at all -- resolve their
+	// targets under it.
+	//
+	// It is empty by default and every such delivery is skipped while it is.
+	// The unit suites build Appliers by the dozen against temp directories,
+	// and a default that resolved the real home would have each of them edit
+	// the developer's own files. Every CLI surface that constructs an Applier
+	// sets it (see cli.configureDeveloperHome), so a real create or apply
+	// delivers what a session needs.
+	DeveloperHome string
 
 	// Keys collects the declared keys this run could not supply, for the
 	// caller to render once the run returns. It is caller-supplied rather
@@ -363,6 +378,17 @@ type pipelineResult struct {
 	overlayURL       string   // set when convention discovery succeeds; empty otherwise
 	overlayCommit    string   // HEAD SHA when overlayURL was set; empty otherwise
 	disclosedNotices []string // one-time notices emitted during this run
+	// trustKeys is the record of directory-trust entries niwa has written
+	// into the developer's own agent configuration, this apply or an earlier
+	// one. Persisted into InstanceState.TrustKeys by Create/Apply; it is the
+	// sole authority for what a later apply may retract.
+	trustKeys []string
+	// procedureErr is a procedure-routed delivery's failure carried out as
+	// data rather than as the pipeline's error return. The record above has to
+	// reach the state file before the failure reaches the user: a run that
+	// wrote entries and then failed must not also forget which entries it
+	// wrote. Create and Apply save state, then surface this.
+	procedureErr error
 }
 
 // logSetupIncomplete prints the counted verdict line naming the repos whose
@@ -528,6 +554,7 @@ func (a *Applier) Create(ctx context.Context, cfg *config.WorkspaceConfig, confi
 		OverlayURL:     result.overlayURL,
 		OverlayCommit:  result.overlayCommit,
 		AuthSources:    result.authSources,
+		TrustKeys:      result.trustKeys,
 	}
 
 	if err := SaveState(instanceRoot, state); err != nil {
@@ -545,6 +572,16 @@ func (a *Applier) Create(ctx context.Context, cfg *config.WorkspaceConfig, confi
 		a.Reporter.DeferWarn("%s", w)
 	}
 	a.Reporter.FlushDeferred()
+
+	// A procedure-routed delivery that failed is surfaced here rather than
+	// from the pipeline's error return: the instance is prepared and stays on
+	// disk, the record of what niwa wrote outside it is already in the state
+	// file, and the failure still reaches the user as a named error (R20).
+	// Returning it from the pipeline instead would run this path's os.RemoveAll
+	// over an instance whose only problem is outside it.
+	if result.procedureErr != nil {
+		return instanceRoot, result.procedureErr
+	}
 
 	return instanceRoot, nil
 }
@@ -721,6 +758,7 @@ func (a *Applier) Apply(ctx context.Context, cfg *config.WorkspaceConfig, config
 		Repos:                result.repoStates,
 		Shadows:              result.shadows,
 		AuthSources:          result.authSources,
+		TrustKeys:            result.trustKeys,
 	}
 
 	if err := SaveState(instanceRoot, state); err != nil {
@@ -739,7 +777,9 @@ func (a *Applier) Apply(ctx context.Context, cfg *config.WorkspaceConfig, config
 	}
 	a.Reporter.FlushDeferred()
 
-	return nil
+	// Same posture as Create: the record reaches the state file first, then the
+	// failure reaches the user (R20).
+	return result.procedureErr
 }
 
 // runPipeline executes the shared pipeline steps: discover repos, classify,
@@ -1642,6 +1682,17 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		}
 	}
 
+	// Step 6.5: Deliver the procedure-routed capabilities -- today, directory
+	// trust. It runs here, after the repositories are on disk, because the
+	// entry is keyed by the canonical path of a directory that has to exist to
+	// be canonicalized. Which agent receives it is a lookup in the declaration
+	// table, not a branch here.
+	repoRoots := make([]string, 0, len(classified))
+	for _, cr := range classified {
+		repoRoots = append(repoRoots, filepath.Join(instanceRoot, cr.Group, cr.Repo.Name))
+	}
+	trustKeys, trustErr := a.deliverDirectoryTrust(repoRoots, opts.existingState, &allWarnings)
+
 	// Step 6.6: Refresh the env of the instance's existing worktrees, sourcing
 	// from the clones just materialized above. This is the apply-side fan-out of
 	// the inherit primitive (DESIGN decision B2): after an apply no live worktree
@@ -1764,7 +1815,65 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		overlayURL:       pipelineOverlayURL,
 		overlayCommit:    pipelineOverlayCommit,
 		disclosedNotices: newDisclosures,
+		trustKeys:        trustKeys,
+		procedureErr:     trustErr,
 	}, nil
+}
+
+// deliverDirectoryTrust runs the directory-trust delivery for whichever agents
+// the contract declares it implemented for, and returns the record to persist
+// plus the first failure to surface after materialization finishes.
+//
+// There is no agent named here on purpose. The loop asks the declaration table
+// which agents receive the capability and the binding which registered
+// procedure serves it, so delivering trust to a second agent -- or stopping
+// delivering it to this one -- is an edit to the table rather than to the
+// pipeline. That is the whole difference between a delivery under the contract
+// and a hardcoded second pass beside it (R4, R5).
+//
+// The record is returned on every path, failure included. It is the sole
+// authority for what niwa may later remove from the developer's configuration,
+// so a run that could not write must still carry forward what earlier runs did.
+// It is keyed by the capability rather than by the agent because what it holds
+// is the set of repository paths niwa vouched for; a second agent keeping its
+// own per-directory trust would vouch for the same paths in its own file, and
+// each writer only ever retracts what it finds in the file it owns.
+func (a *Applier) deliverDirectoryTrust(repoRoots []string, existing *InstanceState, warnings *[]string) ([]string, error) {
+	var recorded []string
+	if existing != nil {
+		recorded = existing.TrustKeys
+	}
+
+	// An Applier with no developer home has not been wired to write outside
+	// the instance, which is how every unit suite in this package is built: a
+	// default that resolved the real home would have each of them edit the
+	// developer's own files. The CLI sets the field on every surface that
+	// constructs an Applier.
+	if a.DeveloperHome == "" {
+		return recorded, nil
+	}
+
+	var firstErr error
+	for _, ag := range agent.All() {
+		p, ok := procedureFor(agentplan.DirectoryTrust, ag)
+		if !ok {
+			continue
+		}
+		res, err := p.Deliver(procedureInput{
+			DeveloperHome: a.DeveloperHome,
+			RepoRoots:     repoRoots,
+			Recorded:      recorded,
+		})
+		*warnings = append(*warnings, res.Warnings...)
+		// The returned record replaces the prior one outright, empty included:
+		// a retraction that cleared the last key must leave an empty record,
+		// not the stale one it just withdrew.
+		recorded = res.Recorded
+		if err != nil && firstErr == nil {
+			firstErr = fmt.Errorf("delivering %s to %s: %w", agentplan.DirectoryTrust, ag, err)
+		}
+	}
+	return recorded, firstErr
 }
 
 // hashManagedFile builds one managed-file record: the file's content hash, the
