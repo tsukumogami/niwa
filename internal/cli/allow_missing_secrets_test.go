@@ -301,13 +301,24 @@ func readTreeRelative(t *testing.T, root, tmpDir string) map[string]string {
 		if d.IsDir() {
 			return nil
 		}
-		data, readErr := os.ReadFile(path)
-		if readErr != nil {
-			return readErr
-		}
 		rel, relErr := filepath.Rel(root, path)
 		if relErr != nil {
 			return relErr
+		}
+		// A symlink (the per-repository Codex payload link, the payload's own
+		// skills links) is compared by target: reading one that points at a
+		// directory fails, and the target is the generated value anyway.
+		if d.Type()&fs.ModeSymlink != 0 {
+			target, linkErr := os.Readlink(path)
+			if linkErr != nil {
+				return linkErr
+			}
+			files[rel] = "-> " + strings.ReplaceAll(target, tmpDir, "<ROOT>")
+			return nil
+		}
+		data, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return readErr
 		}
 		// The state file is the one generated artifact that cannot be
 		// compared across runs: it stamps wall-clock times, and it records

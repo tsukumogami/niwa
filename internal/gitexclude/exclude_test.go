@@ -96,7 +96,7 @@ func TestUnionPatterns(t *testing.T) {
 	// Extras append after base, empties drop, and a duplicate of a base or a
 	// prior extra is removed.
 	got = unionPatterns([]string{".env", "", "*.local*", ".env", "secrets.json"})
-	want := []string{"*.local*", ".niwa/", ".env", "secrets.json"}
+	want := append(append([]string{}, niwaExcludePatterns...), ".env", "secrets.json")
 	if len(got) != len(want) {
 		t.Fatalf("union = %v, want %v", got, want)
 	}
@@ -215,6 +215,80 @@ func TestEnsureRepoExclude_CoversWorktree(t *testing.T) {
 	if out := gitStatusPorcelain(t, worktree); !strings.Contains(out, "leak.txt") {
 		t.Errorf("expected uncovered leak.txt to show in status, got:\n%s", out)
 	}
+}
+
+// TestNiwaExcludePatterns_CodexPatternsAreBare pins the exact pattern text for
+// the two Codex entries. A trailing slash makes a gitignore pattern
+// directory-only and git calls a symlink a file, so ".codex/" would leave
+// "?? .codex" in every managed repository's status with nothing else to show
+// for it.
+func TestNiwaExcludePatterns_CodexPatternsAreBare(t *testing.T) {
+	want := map[string]bool{".codex": false, "AGENTS.override.md": false}
+	for _, p := range niwaExcludePatterns {
+		if strings.HasPrefix(p, ".codex") || strings.HasPrefix(p, "AGENTS.override.md") {
+			if _, exact := want[p]; !exact {
+				t.Errorf("pattern %q is not the bare form; a trailing slash matches directories only", p)
+				continue
+			}
+			want[p] = true
+		}
+	}
+	for p, found := range want {
+		if !found {
+			t.Errorf("managed patterns are missing %q", p)
+		}
+	}
+}
+
+// TestEnsureRepoExclude_CoversCodexDelivery is the behavioral half: the two
+// shapes niwa plants for Codex -- a symlink to a directory, and a real
+// directory under the copy fallback -- must both be invisible to git.
+func TestEnsureRepoExclude_CoversCodexDelivery(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	payload := t.TempDir()
+	if err := os.WriteFile(filepath.Join(payload, "config.toml"), []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("symlink", func(t *testing.T) {
+		repo := t.TempDir()
+		runGit(t, repo, "init")
+		if err := EnsureRepoExclude(repo); err != nil {
+			t.Fatalf("EnsureRepoExclude: %v", err)
+		}
+		if err := os.Symlink(payload, filepath.Join(repo, ".codex")); err != nil {
+			t.Skipf("symlinks unavailable: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(repo, "AGENTS.override.md"), []byte("x\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if out := gitStatusPorcelain(t, repo); out != "" {
+			t.Errorf("expected a clean status with the .codex symlink present, got:\n%s", out)
+		}
+	})
+
+	t.Run("copy", func(t *testing.T) {
+		repo := t.TempDir()
+		runGit(t, repo, "init")
+		if err := EnsureRepoExclude(repo); err != nil {
+			t.Fatalf("EnsureRepoExclude: %v", err)
+		}
+		if err := os.MkdirAll(filepath.Join(repo, ".codex", "skills"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(repo, ".codex", "config.toml"), []byte("x\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(repo, "AGENTS.override.md"), []byte("x\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if out := gitStatusPorcelain(t, repo); out != "" {
+			t.Errorf("expected a clean status with a copied .codex directory, got:\n%s", out)
+		}
+	})
 }
 
 func gitStatusPorcelain(t *testing.T, dir string) string {

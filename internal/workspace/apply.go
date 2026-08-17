@@ -1638,6 +1638,27 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 	}
 	allWarnings = append(allWarnings, payload.Warnings...)
 
+	// Step 6c2: per-repository delivery of that payload -- a `.codex` entry
+	// beside each repository's `.git`, which is where Codex's walk stops. It runs
+	// after the payload above because the fallback copies it.
+	//
+	// The `claude = false` opt-out applies here as it does to the composed
+	// override: a repository that asked for none of niwa's agent configuration
+	// gets no payload delivery either.
+	for _, cr := range classified {
+		if !ClaudeEnabled(effectiveCfg, cr.Repo.Name) {
+			continue
+		}
+		repoDir := filepath.Join(instanceRoot, cr.Group, cr.Repo.Name)
+		link, err := InstallRepoCodexLink(instanceRoot, repoDir)
+		if err != nil {
+			return nil, fmt.Errorf("linking the Codex payload into %q: %w", cr.Repo.Name, err)
+		}
+		if link.Foreign {
+			allWarnings = append(allWarnings, fmt.Sprintf("repo %q: %s is occupied by something niwa did not write; no Codex payload delivered there, and nothing at that path was modified or removed", cr.Repo.Name, filepath.Join(repoDir, CodexPayloadDirName)))
+		}
+	}
+
 	// Step 6d: the trust bootstrap -- one [projects."<canonical repo root>"]
 	// entry per cloned repository in the developer's Codex config, and
 	// nothing else written there (Decision 4A). It is the only write this

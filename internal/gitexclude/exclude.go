@@ -31,8 +31,24 @@ const (
 // niwaExcludePatterns are the ignore patterns niwa writes so its output stays
 // invisible to a managed repository's git status. "*.local*" covers every
 // materialized managed-repo file (all carry the .local infix); ".niwa/" covers
-// the per-worktree scaffolding niwa writes into a worktree.
-var niwaExcludePatterns = []string{"*.local*", ".niwa/"}
+// the per-worktree scaffolding niwa writes into a worktree; ".codex" and
+// "AGENTS.override.md" cover the two entries niwa's Codex materialization plants
+// in a repository working tree -- the payload link and the composed context
+// override.
+//
+// The two Codex patterns are deliberately bare. A trailing slash makes a
+// gitignore pattern directory-only, and git classifies a symlink as a file
+// whatever it points at, so ".codex/" -- the form the ".niwa/" line above would
+// suggest -- would not match the payload symlink, leaving "?? .codex" in every
+// managed repository's git status forever: no error, no failure, just permanent
+// dirt. The bare form matches a symlink and a real directory alike, so it stays
+// correct under the copy fallback too. Do not add a trailing slash to either.
+//
+// One limit of the mechanism, so it is not asked to do a job it cannot: a
+// gitignore pattern acts only on untracked paths. For a name a repository
+// already tracks, the pattern is inert and niwa's own conflict rule -- not this
+// list -- is what keeps the file untouched.
+var niwaExcludePatterns = []string{"*.local*", ".niwa/", ".codex", "AGENTS.override.md"}
 
 // EnsureRepoExclude records niwa's ignore coverage in the git exclude file for
 // the working tree at tree. The exclude file (.git/info/exclude) is
