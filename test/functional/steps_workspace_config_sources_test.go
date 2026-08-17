@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 )
@@ -42,24 +41,15 @@ func theConfigRepoIsForcePushedTo(ctx context.Context, name string, body string)
 	}
 	defer os.RemoveAll(work)
 
-	gitEnv := append(os.Environ(),
-		"GIT_AUTHOR_NAME=niwa-test",
-		"GIT_AUTHOR_EMAIL=niwa-test@example.com",
-		"GIT_COMMITTER_NAME=niwa-test",
-		"GIT_COMMITTER_EMAIL=niwa-test@example.com",
-		"GIT_CONFIG_GLOBAL=/dev/null",
-		"GIT_CONFIG_SYSTEM=/dev/null",
-	)
-
 	// Initialize a fresh repo with no shared history.
+	if out, err := fixtureGit(work, "init", "--initial-branch=main", work); err != nil {
+		return ctx, fmt.Errorf("git init in %s: %w\n%s", work, err, out)
+	}
 	for _, args := range [][]string{
-		{"init", "--initial-branch=main", work},
-		{"-C", work, "config", "user.email", "test@test.com"},
-		{"-C", work, "config", "user.name", "Test"},
+		{"config", "user.email", "test@test.com"},
+		{"config", "user.name", "Test"},
 	} {
-		cmd := exec.Command("git", args...)
-		cmd.Env = gitEnv
-		if out, err := cmd.CombinedOutput(); err != nil {
+		if out, err := fixtureGitWorkTree(work, args...); err != nil {
 			return ctx, fmt.Errorf("git %v: %w\n%s", args, err, out)
 		}
 	}
@@ -76,13 +66,11 @@ func theConfigRepoIsForcePushedTo(ctx context.Context, name string, body string)
 	}
 
 	for _, args := range [][]string{
-		{"-C", work, "add", ".niwa/workspace.toml"},
-		{"-C", work, "commit", "-m", "force-pushed history"},
-		{"-C", work, "push", "--force", "file://" + bareDir, "main"},
+		{"add", ".niwa/workspace.toml"},
+		{"commit", "-m", "force-pushed history"},
+		{"push", "--force", "file://" + bareDir, "main"},
 	} {
-		cmd := exec.Command("git", args...)
-		cmd.Env = gitEnv
-		if out, err := cmd.CombinedOutput(); err != nil {
+		if out, err := fixtureGitCommit(work, args...); err != nil {
 			return ctx, fmt.Errorf("git %v: %w\n%s", args, err, out)
 		}
 	}
@@ -198,16 +186,10 @@ func theConfigDirIsAGitWorkingTree(ctx context.Context, configRepoName string) (
 	}
 	// We move .git out of clone, so don't defer RemoveAll until after the move.
 
-	gitEnv := append(os.Environ(),
-		"GIT_CONFIG_GLOBAL=/dev/null",
-		"GIT_CONFIG_SYSTEM=/dev/null",
-	)
 	// Clone needs an empty target — MkdirTemp creates one but git clone
 	// rejects non-empty dirs. Remove it first.
 	_ = os.Remove(clone)
-	cmd := exec.Command("git", "clone", url, clone)
-	cmd.Env = gitEnv
-	if out, err := cmd.CombinedOutput(); err != nil {
+	if out, err := fixtureGit(s.tmpDir, "clone", url, clone); err != nil {
 		return ctx, fmt.Errorf("git clone for working-tree setup: %w\n%s", err, out)
 	}
 
