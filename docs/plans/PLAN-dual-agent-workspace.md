@@ -47,10 +47,12 @@ batch 2's assertions build on. Batch 2 gates batch 4 (worktrees reuse the
 per-repository composer and writers); batch 3 can proceed in parallel after
 batch 1, with its conflict-driven withholding wired up once batch 2 is in.
 
-Cross-batch dependency edges: 4 (batch 1 into batch 2: issues 4, 8 depend on
-issue 1; issue 2 consumes issue 1), 2 (batch 2 into batch 3: issue 9 depends
-on issues 7 and 8), 3 (batch 2 into batch 4: issue 10 depends on issues 4, 6,
-7), and the closing test and docs issues depend on everything they exercise.
+Cross-batch dependency edges: 1 out of batch 1 into batch 2 (issue 4 depends
+on issue 1), 1 into batch 3 (issue 8 depends on issue 1), 1 from batch 2 into
+batch 3 (issue 9 depends on issue 7), and 3 from batch 2 into batch 4 (issue
+10 depends on issues 4, 6, 7); issue 2's dependency on issue 1 is intra-batch,
+as is issue 9's on issue 8. The closing acceptance-test issue (11) draws on
+batches 2 through 4 (issues 7, 9, 10) and is left out of the tally.
 
 The work lands as one pull request, so the authoritative ordering is each
 outline's own **Dependencies**: declaration, with the critical path and the
@@ -71,9 +73,14 @@ instance-level writers (`internal/workspace/root_materializer.go`,
 for Codex, producing `AGENTS.md` beside `CLAUDE.md`. This is the one place
 where re-parameterization is the whole job (DESIGN Decision 7A); the group
 Codex file and everything repository-level is net-new composition and lands in
-later issues, not here. Invert the exclusivity assertions exactly as Decision
-7A enumerates them, update the feature file's description prose and `Design:`
-pointer, and pin the R2 byte-identity check.
+later issues, not here. One deliberate consequence: the root- and
+instance-level `AGENTS.md` files this issue produces come from the
+re-parameterized existing writers and carry no generation marker — the marker serves the
+conflict rule (issue 7), which applies only inside repository working trees,
+so its absence at the niwa-owned levels is intended, not an oversight. Invert
+the exclusivity assertions exactly as Decision 7A enumerates them, update the
+feature file's description prose and `Design:` pointer, and pin the R2
+byte-identity check.
 
 **Acceptance Criteria**:
 
@@ -94,7 +101,11 @@ pointer, and pin the R2 byte-identity check.
   (PRD criterion 2)
 - A test pins R2: the set of paths materialized for Claude (`CLAUDE.md` tree,
   `.claude/`, settings, skills tree) is content-identical across applies with
-  `default_agent` set to claude, codex, and unset (PRD criterion 2)
+  `default_agent` set to claude, codex, and unset. The pre-change/post-change
+  half of PRD criterion 2 is carried by the untouched remainder of the
+  existing test suite, which the edit-set bound above preserves — this
+  cross-setting check alone would not catch a regression that changed the
+  Claude tree uniformly (PRD criterion 2)
 - `niwa apply` on a workspace declaring `default_agent` exits zero with no
   migration step, and on a config predating the setting entirely (PRD criteria
   15, 17; R14)
@@ -115,10 +126,13 @@ pointer, and pin the R2 byte-identity check.
 `WritesRepoLevelContext()` in `internal/agent/agent.go` (its gate is vacuous
 once the Claude pass always runs as Claude and the Codex pass never calls the
 repo-level installers) and `LocalContextFileName()`'s Codex branch (never
-called, and wrong). Drop the gates at their call sites in
-`internal/workspace/content.go` and `internal/workspace/worktree_content.go`,
-delete the repo-level-skip test in `internal/workspace/content_test.go` and
-the accessor tests in `internal/agent/agent_test.go`. Re-word the dispatch
+called, and wrong). `LocalContextFileName()` itself survives with its Claude
+and zero-value behavior. Drop the gates at their call sites in
+`internal/workspace/content.go` and `internal/workspace/worktree_content.go`.
+Make the test deletions PRD criterion 2 names as entailed by the retirement:
+the repo-level-skip test in `internal/workspace/content_test.go`,
+`TestWritesRepoLevelContext` in `internal/agent/agent_test.go`, and the Codex
+row of the table-driven `TestLocalContextFileName`. Re-word the dispatch
 refusal's comments (`internal/cli/dispatch.go`), the now-inert agent
 assignments on the launch-coupled provisioning paths
 (`internal/cli/instance_from_hook.go`, `internal/cli/session_lifecycle_cmd.go`),
@@ -131,8 +145,12 @@ materialization selection R1 removed.
 - `WritesRepoLevelContext` no longer exists anywhere in the tree; the
   repo-level installers run unconditionally on the Claude pass
 - `LocalContextFileName()` has no Codex branch
-- The repo-level-skip test and the retired accessors' tests are deleted; no
-  other test is removed (PRD criterion 2's edit-set bound)
+- `TestWritesRepoLevelContext` in `internal/agent/agent_test.go` is deleted
+  with the accessor it exercises; `TestLocalContextFileName`'s Codex row is
+  removed while its Claude and zero-value rows stand; and the
+  repo-level-skip test in `internal/workspace/content_test.go` is deleted.
+  These are exactly the deletions PRD criterion 2 permits as entailed by the
+  accessor retirement; no test outside that set is modified or removed
 - `--agent` remains accepted on `niwa create` and `niwa apply` (R14) and its
   help text describes launch-time selection only
 - Comments on the dispatch refusal and the launch-coupled provisioning paths
@@ -236,9 +254,10 @@ niwa owns.
 
 **Acceptance Criteria**:
 
-- `<instance>/.codex/config.toml` exists and its declared budget is at least
-  the byte size of the full composed chain on disk (PRD criterion 7, offline
-  half)
+- `<instance>/.codex/config.toml` exists and its declared budget exceeds the
+  byte size of the full composed chain on disk by a stated headroom margin —
+  an exact-fit budget fails the test, per the DESIGN's "generous headroom
+  rather than a tested-once number" (PRD criterion 7, offline half)
 - Each configured plugin resolves to a symlink whose target root carries the
   plugin manifest and every `references/` and `scripts/` directory the source
   has, with every file byte-identical to its source — both marketplace kinds
@@ -328,8 +347,8 @@ consume.
 - A repository whose override was written and recorded on a prior apply and
   that now ships a committed file at that name: the next apply deletes
   nothing at the path, and the path's entry leaves the managed-file record —
-  a test that removes only the record change (without the cleanup
-  consultation) must fail by deleting the committed file
+  an implementation that drops the record entry without teaching the cleanup
+  about conflicts must fail this test by deleting the committed file
 - An untracked file carrying the generation marker at niwa's name is
   recognized as niwa's own and overwritten normally
 - After a conflict clears, the next apply writes fresh files and re-records
@@ -480,7 +499,8 @@ coverage except for the interactive start.
   scenarios
 - Offline scenarios cover: instance-root selection (criterion 1); deep
   in-repo selection with a committed context file in an intermediate
-  directory (criterion 3); worktree sentinel plus framing (criterion 4);
+  directory, from a shell with no `NIWA_*` variables and no `CODEX_HOME` set
+  (criterion 3); worktree sentinel plus framing (criterion 4);
   committed-`AGENTS.md` coexistence and byte-identity (criterion 5); the
   no-content degenerate case (criterion 6); a >32768-byte instance+group
   fixture whose declared budget still covers the chain (criterion 7);
