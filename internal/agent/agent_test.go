@@ -41,10 +41,21 @@ func TestParseAgentUnknownNamesAcceptedSet(t *testing.T) {
 		t.Fatal("expected error for unknown agent")
 	}
 	msg := err.Error()
-	for _, want := range []string{"claude", "codex"} {
-		if !contains(msg, want) {
+	for _, want := range All() {
+		if !contains(msg, string(want)) {
 			t.Fatalf("error %q does not name accepted value %q", msg, want)
 		}
+	}
+}
+
+func TestAllReturnsAFreshSlice(t *testing.T) {
+	first := All()
+	if len(first) == 0 {
+		t.Fatal("All() returned no agents")
+	}
+	first[0] = Agent("mutated")
+	if got := All()[0]; got == Agent("mutated") {
+		t.Fatal("All() handed out the package's own slice; a caller can narrow the closed set")
 	}
 }
 

@@ -13,7 +13,10 @@
 // degrades to today's Claude behavior rather than to an empty, broken filename.
 package agent
 
-import "fmt"
+import (
+	"fmt"
+	"slices"
+)
 
 // Agent identifies the coding agent a workspace is prepared for.
 type Agent string
@@ -26,9 +29,17 @@ const (
 	AgentCodex Agent = "codex"
 )
 
-// known lists the accepted agent values for error messages. It is kept in sync
-// with the constants above.
+// known lists the accepted agent values. It is kept in sync with the constants
+// above and reached from outside the package through All.
 var known = []Agent{AgentClaude, AgentCodex}
+
+// All returns every accepted agent, in declaration order. Callers that must
+// cover the whole set -- the capability declaration table, and any test that
+// asserts something for each agent -- range over this instead of hand-listing
+// the constants, so adding a third agent shows up as a failure rather than as
+// silence. The result is a fresh slice: the closed set is not narrowable by a
+// caller that iterates it.
+func All() []Agent { return slices.Clone(known) }
 
 // ParseAgent validates s against the accepted set and returns the matching
 // Agent. An empty string resolves to AgentClaude (the default). Any value
