@@ -236,7 +236,7 @@ start, where a live check carries information nothing else can.
       the workspace context and the repository's own content, no
       higher-precedence candidate shadows it, and the committed file is
       byte-identical after `niwa apply` (R6, R12).
-- [ ] In a workspace that configures no repository-level context content, a
+- [ ] In a workspace that configures no context content at any layer, a
       repository shipping its own committed context file still delivers that
       file's content to a session: niwa writes no empty or whitespace-only
       file that would claim the directory's single context slot and suppress

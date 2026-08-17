@@ -150,3 +150,88 @@ attribution or co-author lines, prose is direct.
   the testability reviewer can pin down.
 - State collision behavior for R12: when a repository ships a file at a path
   niwa would otherwise write, does niwa skip, warn, or fail?
+
+# Round 2
+
+## Verdict: PASS
+
+## Required change 1: R10/R13 reconciliation
+
+Landed, and it is a genuine reconciliation, not paper. R10 now carries the
+strong claim — no trust, review, or approval prompt at all, with the
+sufficiency stated explicitly ("the preparation is sufficient that Codex
+raises none of its own for the prepared directories") — and the carve-out is
+bounded twice over: it names only prompts belonging to the developer's own
+setup (first-run login) and anchors that boundary to R13. A trust prompt
+about a prepared directory cannot slip through the carve-out, because the
+sufficiency clause covers prepared directories by name. The AC now asserts
+exactly what the requirement asserts.
+
+The R13 collision is resolved rather than hidden: the new sentence ("Scoped,
+additive entries whose effect is confined to paths inside niwa-managed
+instances are consistent with this requirement; anything global, destructive,
+or touching the developer's own settings is not") admits precisely the act
+the strong R10 needs. Does it license more than the design needs? It is
+broader than "trust entries" — it would admit any additive per-project entry
+— but pinning it to trust specifically would be the altitude violation, and
+the license is bounded on every axis that matters: additive only, path-scoped
+to instances only, pre-existing settings untouchable, nothing global. The
+R13 criterion (config differs only by per-project entries keyed inside
+instances, no pre-existing key removed, reordered, or altered, no global key)
+closes the loop. The broadest thing the sentence licenses is per-project
+behavior inside niwa instances, which is niwa's remit anyway. Acceptable.
+
+## Required change 2: R7
+
+Landed and unambiguous. "Every context layer present for a location SHALL
+reach the session whole; no layer may arrive truncated" settles the
+outer-layer question in one sentence; the innermost-layer language survives
+only as an explanation of risk, subordinate to the universal claim. The R4/R7
+fork from round one is gone.
+
+## Altitude re-check on the rewritten criteria
+
+The specific ruling requested — the 32768 threshold: **acceptable**, for two
+separable reasons. The number itself is a fact about the environment being
+guarded against — the external tool's documented default budget — exactly
+parallel to `git status` being a fact about git. A criterion for "no layer
+truncated" needs a test input past the truncation point, and the documented
+default is the only principled choice of that input. The subtler clause is
+the offline check, "the context budget niwa's materialization declares
+covers at least the byte size of the full composed chain" — that presumes
+niwa declares a budget, which looks like a design choice leaking upward. It
+survives the mechanism test on inspection: workspace content is user-authored
+and unbounded, so no design can guarantee R7 by keeping chains under the
+default, and R5 forbids the environment-variable escape hatch; raising the
+declared budget is the only mechanism the environment offers. When the
+environment forces a unique mechanism, an AC guarding its failure mode is
+guarding an external contract, not choosing among designs. Same reasoning
+covers the trust-entry criterion ("exactly one per-project trust entry ...
+keyed by a path that resolves to that tree's actual root"): given Codex's
+trust model and R5's no-env-prep rule, entries in the developer's config are
+the only route to R9/R10, and the criterion pins the silent-failure modes
+(accumulation across applies, miskeyed paths) the exploration flagged. The
+remaining named paths in the R2 criterion (`CLAUDE.md` tree, `.claude/`, the
+three test files) describe today's observable state — the invariant being
+preserved — not new structure.
+
+No new ambiguity in the rewritten text. The conventions paragraph defines
+"sees/receives" once and precisely; "no `NIWA_*` variables and no
+`CODEX_HOME` set", "mtime-unchanged", and "mode `000`" are exact where round
+one's criteria were loose. Round one's undefined "large" is now the defined
+threshold.
+
+## Non-blocking notes from round one
+
+Both handled without loss. Goals no longer reproduces the BRIEF's User
+Outcome: it cites the BRIEF for the full picture and states four goals in
+the PRD's own words ("a strict invariant, not a goal to approximate" is new
+content, not compression residue). Out of Scope is one line per exclusion
+with the reasoning explicitly delegated to the BRIEF and, where it exists,
+to Decisions and Trade-offs; nothing meaning-bearing was lost in the
+compression — the two exclusions with real argumentative weight (hooks, API
+key) retain their full reasoning in Decisions and Trade-offs.
+
+## Required changes
+
+None.

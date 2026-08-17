@@ -131,3 +131,71 @@ in their basic form; item 3 above is the uncovered variant of the first.
   instance root (outside any repo) are expected to work would prevent a
   future reader from testing the wrong thing. Not a gap in coverage of the
   BRIEF, which scopes the same way.
+
+# Round 2
+
+# Verdict: PASS
+
+Re-adjudicated the revised PRD (19 criteria, R1-R14 unchanged). All three
+required changes from round one landed, and the merges with testability's
+overlapping items preserved the properties rather than diluting them.
+
+## The three gaps, closed
+
+1. **Empty-layer suppression (R6).** R6 gained the degenerate-case sentence
+   ("when the workspace has nothing to say at a layer, the repository's own
+   content still reaches the session undiminished"), and criterion 6 tests
+   exactly the triggering scenario: a workspace configuring no
+   repository-level content, a repository shipping its own committed file,
+   and an explicit check that niwa writes no empty or whitespace-only file
+   claiming the directory's single slot. The merge with testability's
+   empty-slot criterion kept both halves — the delivered outcome and the
+   mechanism that would break it. Closed.
+
+2. **Re-apply after a workspace change (R3).** R3 now defines "current" to
+   include refresh, and criterion 19 changes the configured content, re-runs
+   `niwa apply`, and requires the new content present and the old content
+   absent — absence being what distinguishes refresh from append. It also
+   extends to `niwa worktree apply`, which incidentally closes the round-one
+   optional item about R3's worktree-apply sliver. Criterion 18 separately
+   pins idempotence (no accumulation over three applies), so the two
+   properties are no longer conflated. Closed.
+
+3. **R13's outside-instance clause.** R13 gained the scoped-additive
+   boundary sentence, and criterion 14 operationalizes it: the developer's
+   pre-existing config may differ only by per-project entries keyed inside
+   niwa instances, with no pre-existing key removed, reordered, or altered,
+   and no global key that changes Codex behavior outside instances — stating
+   the outside-instance consequence explicitly. This fails the rejected
+   global-marker design (a global `project_root_markers` key) that round one
+   showed would pass the old criteria list. Criterion 13 keeps the
+   credential/login half with a stronger check than before (byte-identical,
+   mtime-unchanged, unreadable-file probe). Closed.
+
+## Coverage re-check after the one-pass revision
+
+Forward, every requirement still has at least one criterion that fails if
+it is unmet: R1 (1, 17), R2 (2), R3 (4, 18, 19), R4 (1, 3, 4), R5 (3, 4),
+R6 (5, 6), R7 (7), R8 (8), R9 (9, 10), R10 (11), R11 (12), R12 (5, 12),
+R13 (10, 13, 14, 18), R14 (15, 16, 17). Reverse, every criterion cites a
+requirement and tests something one asks for; new criterion 16 (launch-time
+selection and the dispatch refusal survive) traces to R14's retained
+launch-time meaning.
+
+BRIEF IN items all remain traced (unconditional dual preparation, skills,
+sessions from anywhere, sessions that act, clean repositories, setting
+compatibility). All eight OUT items survive in the condensed Out of Scope
+list with none re-included. All four journeys remain exercised and
+reachable: Mara (1, 8), Theo (3), Iris (4), Noah (15-17). The revision
+strengthened rather than weakened silent-failure coverage: the
+byte-budget criterion (7) now names the 32768 default and adds an offline
+declared-budget check, and the trust criterion (10) now rejects miskeyed
+entries.
+
+## Required changes
+
+None.
+
+## Optional improvements
+
+None this round.

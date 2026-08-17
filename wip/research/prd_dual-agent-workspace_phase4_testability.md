@@ -547,3 +547,139 @@ Mostly constructible with what exists. What needs new support:
 - Consider stating explicitly that live-session criteria skip rather than fail
   when `codex` is absent. It is the established repo pattern, and leaving it
   implicit invites either a red CI or a quietly deleted scenario.
+
+---
+
+# Round 2
+
+# Verdict: FAIL
+
+Thirteen of my fourteen required changes landed, and landed with the property
+intact rather than just the wording. The revision is materially stronger than
+round one: the preamble's two conventions — that "sees"/"receives" is decided
+offline against the single file first-match selects, and that live checks gate
+and skip rather than fail — do in one paragraph what I had asked for criterion
+by criterion, and they do it better, because they bind future criteria too.
+
+One change landed in a form that no longer reaches the state it was written to
+forbid. That is the single required change below. Everything else in this
+section is verification or a non-blocking note.
+
+## Verification of round-one required changes
+
+| # | Change | Landed as | Verdict |
+|---|---|---|---|
+| 1 | AC6: pin the truncation threshold | AC7 (32768 named, "shared across the whole chain and consumed outermost-first", offline budget-covers-chain assertion + live gated check) | **Landed.** Fails correctly in both broken shapes: no declared budget, or a declared budget left at the default while the chain exceeds it. |
+| 2 | AC2: close the exemption, name the comparison set | AC2 (comparison set named; modified tests closed to `codex-agent.feature`, `content_test.go`, `root_materializer_test.go`) | **Landed.** Verified on disk — see below. |
+| 3 | AC5: make ordering observable | AC5 ("the single context file Codex selects for that directory", "no higher-precedence candidate shadows it") | **Landed.** The ordering failure is now the thing being asserted, not a side effect. |
+| 4 | AC7: whole-tree assertion for skills | AC8 (byte-identical, no file added or omitted, plugin manifest at the delivered root, every `references/` and `scripts/` the source has) | **Landed.** The orphaned-references shape now fails. "Plugin manifest" instead of the filename is correct de-mechanising for PRD altitude and loses nothing. |
+| 5 | New: developer's config changed only additively | AC14, plus R13's new "scoped, additive entries... are consistent" sentence | **Landed in full**, including the global-key clause and the outside-the-instance consequence. This was the largest hole in round one and it is now the most precisely worded criterion in the document. |
+| 6 | New: trust entries correctly keyed, no accumulation | AC10 ("a present-but-miskeyed entry fails", three-applies count) | **Landed.** The present-but-wrong mode is named explicitly. |
+| 7 | New: refresh, not just idempotence | AC19, plus R3's new "'Current' includes refresh" sentence | **Landed**, including the `niwa worktree apply` half I raised separately. |
+| 8 | AC10: extend git-status to worktrees | AC12 ("every cloned repository and every niwa-managed worktree"), now also citing R12 | **Landed.** |
+| 9 | AC4: distinguish outer layers from the worktree's own file | AC4 ("a sentinel that appears only in the instance-level content... so a collapse to current-directory-only discovery fails the check") | **Landed, unsoftened**, as instructed. See the note below on what the open measurement does and does not touch. |
+| 10 | AC11: make both credential halves decidable | AC13 (byte-identical **and** mtime-unchanged; mode `000` and both commands still exit zero) | **Landed exactly.** |
+| 11 | AC9: add the offline half for hook absence | AC11 ("niwa has written no hook definitions and no hook-state entries anywhere") | **Landed.** The Out of Scope hook exclusion is now enforced rather than assumed. |
+| 12 | New: R14's launch-time clause | AC16 (launch-time selection **and** the dispatch refusal) | **Landed.** |
+| 13 | AC3: name what is scrubbed; make the depth load-bearing | AC3 (`NIWA_*` and `CODEX_HOME` named; committed context file in an intermediate directory) | **Landed, and it discriminates correctly.** A current-directory-only implementation delivers nothing; a repo-root-only implementation delivers the outer layers but misses the intermediate file. Both fail. |
+| 14 | New: the empty-slot trap | AC6, plus R6's new degenerate-case sentence | **Weakened — see Required change.** |
+
+### AC2's named test set, verified on disk
+
+The author's deviation is correct and my round-one naming was incomplete.
+`internal/workspace/root_materializer_test.go:153-164` is a table-driven test
+whose cases carry a "the other agent's file is absent" column
+(`{"codex", AgentCodex, "AGENTS.md", "CLAUDE.md"}` and its inverse) — a genuine
+exclusivity assertion that must invert, and it is not in `content_test.go`.
+`content_test.go:183` carries the separate `assertNotExist(..., "AGENTS.md")`
+form. Both belong in the named set.
+
+Worth recording that the set is also correctly *exclusive*:
+`internal/agent/agent_test.go` asserts only that the name accessor maps
+`AgentCodex` to `AGENTS.md`. Per the exploration's finding that the exclusivity
+lives in the callers rather than the accessors, that test stays valid unmodified
+and correctly sits outside the exemption. The closed list is right in both
+directions, which is what makes it usable as a contract.
+
+## The core test, re-run on the new and rewritten criteria
+
+Every criterion added or rewritten in this pass implies a test that fails in its
+broken case, with the one exception below.
+
+Two are worth calling out as better than what I asked for. AC7's offline half —
+the declared budget covers the composed chain's byte size — now verifies R7's
+*broadened* claim ("every context layer present for a location SHALL reach the
+session whole"), not just the innermost-layer clause I had scoped it to, because
+a budget covering the whole chain truncates no layer at all. The rewritten
+requirement and the criterion moved together, which is the thing that usually
+goes wrong in a nineteen-change pass and did not here. And AC10 plus AC14
+together now make R13 enforceable across all three of its clauses, where round
+one had a detector for only the credential clause.
+
+## Required change
+
+**AC6's fixture cannot produce the file it forbids.** I asked for "a workspace
+with no configured context content"; the criterion narrowed it to "a workspace
+that configures no **repository-level** context content."
+
+Under the composition this feature requires, the per-repository context file
+carries the instance and group layers as well — a session standing in a repo
+reaches nothing above the repo root, so the outer layers have to be inlined
+there. With instance or group content configured, that file is non-empty
+regardless of whether repository-level content exists, so the narrowed fixture
+never constructs an empty or whitespace-only file, and the criterion's own
+assertion is checked against a file that was never at risk.
+
+The criterion is not inert — it still catches one broken shape, an
+implementation that writes the repo-root file from repository-level content
+alone and forgets to inline the outer layers. But it stops catching the shape it
+was written for: a correctly composing implementation, a workspace with nothing
+to say at any layer, an unconditional write, an empty file claiming the
+directory's single slot, and the repository's own committed context suppressed
+entirely. That is total loss, silent, and it is the case R6's newly added
+sentence now explicitly requires ("when the workspace has nothing to say at a
+layer, the repository's own content still reaches the session undiminished").
+
+It also is not an exotic fixture. A workspace declaring only
+`[workspace] name = "ws"` with no content tables at all is the most common shape
+in this repo's own functional suite — `git-invisibility.feature`'s Background is
+exactly that. The uncovered case is the default one.
+
+Suggested wording:
+
+> In a workspace that configures no context content at any layer, a repository
+> shipping its own committed context file still delivers that file's content to
+> a session: niwa writes no empty or whitespace-only file that would claim the
+> directory's single context slot and suppress the repository's own (R6).
+
+## Non-blocking notes
+
+Neither of these asks for a change; both are recorded because they arose from
+edits made in this pass.
+
+**AC11's gate is narrower than R10's carve-out.** R10 was rewritten to place
+prompts belonging to the developer's own Codex setup — a first-run login —
+outside the requirement. AC11 still reads "shows no trust, review, or approval
+prompt" and gates only on `codex` being on PATH. In a sandboxed home with no
+login, a login prompt would fail a criterion that R10 says is not about it. The
+existing `claudeIsAvailable` helper gates on the binary *and* the credential,
+which is the precedent that resolves it. I am not asking for a change because
+this direction of error is loud, not silent: it produces a red or flaky
+scenario, never a false pass.
+
+**AC10 and AC18 overlap on the three-applies count** for per-project entries.
+Benign — both are decidable, both fail in the same broken case, and AC18 covers
+niwa-managed blocks that AC10 does not. No action.
+
+## On the open worktree measurement
+
+AC4 is written unsoftened, as instructed, and I am not weakening it. One
+observation for the spike's readers rather than for the criteria: because the
+preamble decides "sees"/"receives" offline against the file first-match selects,
+AC4's offline half necessarily encodes an answer to the question the spike is
+measuring — a test has to know which file Codex would pick in a worktree in
+order to assert against it. If the measurement returns that a worktree's `.git`
+*file* does not satisfy the project-root marker check, AC4 does not become a
+worse criterion; it becomes a criterion the design cannot satisfy without a
+worktree-specific answer, which is the design-altitude consequence the lead
+already named. Nothing to change here either way.
