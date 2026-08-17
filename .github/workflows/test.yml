@@ -22,6 +22,14 @@ on:
       - '.github/workflows/test.yml'
       - '.tsuku-recipes/**'
 
+# Nothing in this workflow writes to the repository, so it gets no token that
+# could. The functional suite drives real git against its own sandboxes, and a
+# suite that escaped its sandbox once already reached a checkout that had push
+# credentials sitting in .git/config. Read-only here, and persist-credentials:
+# false on the checkout below, mean a future escape has nothing to push with.
+permissions:
+  contents: read
+
 jobs:
   test:
     # The unit suite runs on both platforms. niwa reads process state and
@@ -47,6 +55,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
 
       - name: Set up Go
         uses: actions/setup-go@7a3fe6cf4cb3a834922a1244abfce67bcef6a0c5  # v6.2.0
@@ -94,12 +104,44 @@ jobs:
       - name: Test
         run: go test -race ./...
 
+      # Record what the checkout looks like before the functional suite runs, so
+      # the check after it can prove the suite left it alone. rev-parse rather
+      # than symbolic-ref: actions/checkout leaves a detached HEAD, so a
+      # symbolic-ref guard would be red on every run for no reason.
+      - name: Snapshot repository state
+        if: matrix.os == 'ubuntu-latest'
+        id: repo-before
+        run: |
+          echo "head=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          git status --porcelain > /tmp/repo-status-before.txt
+
       # Linux-only until the godog harness is portable: it fakes a TTY with
       # `script -c`, which is GNU-only syntax, and several scenarios assume an
       # unresolved /tmp path. Tracked in tsukumogami/niwa#243.
       - name: Functional tests
         if: matrix.os == 'ubuntu-latest'
         run: make test-functional
+
+      # The tripwire. The suite allocates its sandboxes outside the checkout, so
+      # a run that moved HEAD or dirtied the working tree reached something it
+      # should not have. This catches the shape of tsukumogami/niwa#249 without
+      # needing to know how a future test might escape -- it only asks whether
+      # the checkout changed. `always()` so it still reports when the suite
+      # itself failed, which is exactly when an escape is most likely.
+      - name: Verify the suite left the checkout alone
+        if: always() && matrix.os == 'ubuntu-latest' && steps.repo-before.outcome == 'success'
+        run: |
+          after_head=$(git rev-parse HEAD)
+          if [ "$after_head" != "${{ steps.repo-before.outputs.head }}" ]; then
+            echo "::error::The test run moved HEAD from ${{ steps.repo-before.outputs.head }} to $after_head. A test reached the real repository."
+            exit 1
+          fi
+          git status --porcelain > /tmp/repo-status-after.txt
+          if ! diff -u /tmp/repo-status-before.txt /tmp/repo-status-after.txt; then
+            echo "::error::The test run modified the checkout. A test wrote outside its sandbox."
+            exit 1
+          fi
+          echo "OK: HEAD unchanged and the working tree is as the suite found it"
 
       # Everything from here down is Linux-only: the Infisical CLI installs
       # from a .deb, the Claude and tsuku integration steps consume shared
