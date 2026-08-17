@@ -664,3 +664,155 @@ compose. Bound the claim to what it covers.
   byte budget. Both are trivial, but one clause saying the marker is part of the
   composed document (rather than a sidecar or an xattr) would keep the budget-sizing
   and never-empty rules unambiguous about what they are measuring.
+
+# Round 4
+
+# Verdict: FAIL
+
+Findings 2 and 3 are closed cleanly and the marker optional is handled well.
+Finding 1's *conclusion* is right and its *mechanism* is stated backwards: the
+sentence an implementer would follow describes the operation that causes the
+deletion, and it cites an idiom that does the opposite of what the text says. One
+new failure mode falls out of the record-based trust removal.
+
+## What closed
+
+**Finding 3, displacement bounds.** Fully closed, in the stronger form. Lines
+262-280 now state the split explicitly — `O_NOFOLLOW` holds unconditionally, the
+displacement is a per-directory, content-conditional reinforcement — and spell out
+both bounds with their reasons (a subdirectory symlink occupies its own directory's
+slot, which nothing niwa writes contests; the never-empty rule writes no override
+when no layer has content). "Itself part of the defense" is gone, replaced by
+"reinforces the defense where it applies". Security's final-path-component note folds
+in without muddying it.
+
+**The generation-marker optional.** Handled coherently (lines 700-706): the marker is
+a line of the composed document, not a sidecar or an attribute, and the text draws
+the consequence for both rules it touches — it is agent-visible, it counts against
+the byte budget, and the never-empty rule is unambiguous because no content still
+means no file rather than a marker-only one. That is more than I asked for and it is
+the right resolution.
+
+**Finding 2, trust-removal recognition — the mechanism.** Closed. Removal is bounded
+by record, not shape (lines 725-738); the record lives in instance state; the
+availability argument is correct (the instance-apply path is the only writer); and
+the reasoning is stated in full, including that Codex writes an identically-shaped
+entry when the developer answers the very prompt this design routes conflicted
+repositories to. The asymmetry with the file-side marker test is explained rather
+than papered over. The Security additivity bullet carries the qualifier (line 1017).
+See B for what the record itself introduces.
+
+## A. The reconciliation exemption says the thing that causes the deletion
+
+The diagnosis in the new paragraph (lines 665-679) is exactly right: reconciliation
+deletes by record, a conflicted path drops out of the produced set, and both arrival
+sequences are named correctly. The conclusion — no delete — is right. The mechanism
+sentence is not:
+
+> a conflicted path is retired from the managed-file record *without* the deletion
+> that retirement normally performs — the record entry is dropped, the path untouched
+> — following the idiom the worktree-refresh path already uses to shield a live file
+> from the same cleanup.
+
+Two problems, and they compound.
+
+*"The record entry is dropped" is the delete trigger, not the exemption.*
+`cleanRemovedFiles` iterates `existingState.ManagedFiles` — the state loaded from the
+previous apply — and removes every path absent from `result.managedFiles`, the
+produced set (`internal/workspace/apply.go:1846-1858`). Dropping the entry from the
+produced set is precisely the condition that fires `os.Remove` at :1854. An
+implementer who follows this sentence literally writes the bug the paragraph exists
+to prevent, and it will look correct in review because the prose says "the path
+untouched" right next to it.
+
+*The cited idiom does the opposite.* The worktree-refresh path shields a live file by
+**keeping** its prior entries in the produced set: `forwardCarry` returns the prior
+`ManagedFile` entries and the caller appends them to `out`
+(`internal/workspace/apply.go:1967-1970`, `2028-2036`), so `currentFiles[mf.Path]` is
+true and the cleanup skips the path. That is retain-the-record. The design describes
+drop-the-record and attributes it to that idiom. Both cannot be true.
+
+This matters because the two viable implementations genuinely differ and the design
+lands between them:
+
+- *Forward-carry* (the cited idiom): keep the entry in the produced set. Works with
+  no change to `cleanRemovedFiles`, but niwa goes on recording ownership of a path it
+  just declared foreign, which is semantically wrong and will confuse the next reader
+  of the state file.
+- *Drop plus an explicit exemption:* omit the entry and have the reconciliation
+  consult a per-apply conflicted-path set before removing. This is the better
+  design — the path is genuinely disowned, and if the conflict later clears the marker
+  test recognizes a fresh write — but it requires a change to the cleanup that the
+  design does not mention, and without that change it is simply the bug.
+
+The Conflicts-section echo is closer, using the right word: conflicted paths are
+"exempted" from record-driven cleanup (lines 858-861). But neither passage says what
+the exemption is *against*, and the cleanup reads prior state rather than the produced
+set, so "exempt" has to name a mechanism to be actionable. Pick one of the two shapes,
+say it in terms of the produced set or an exemption the cleanup consults, and either
+drop the idiom citation or describe the idiom as it actually works.
+
+## B. Record-based trust removal needs the record cleared, and the "every apply"
+guarantee restated
+
+The record closes the shape problem, and I have no quarrel with the mechanism. It
+introduces one new failure mode, and it sits exactly where the design's two new
+sentences meet:
+
+> a `.codex` conflict, whenever it is detected, means no niwa-written trust entry for
+> that repository exists afterward
+
+> removes only keys that record names
+
+The trust namespace is one key per path, shared by two writers. The sequence the
+design itself sets up runs: apply writes the entry and records it → the repository
+acquires a `.codex` → the next apply detects the conflict and removes the entry → the
+developer starts `codex` there, meets the prompt this design deliberately routes them
+to, answers yes, and **Codex writes the same key back**. On the apply after that, the
+two sentences disagree. If removal cleared the record, there is nothing to remove and
+the developer's answer survives — correct, but then the guarantee is not "whenever it
+is detected"; it is "niwa never re-adds it while conflicted", which is the honest and
+sufficient claim. If removal left the record in place, the next apply removes the
+developer's answer at that key — the exact outcome the record test was introduced to
+prevent, arriving by a different route.
+
+The design does not say which. State that removal clears the record, and restate the
+guarantee as never-re-added rather than always-absent-after-apply.
+
+Two smaller consequences of the record now being load-bearing, worth a clause each:
+
+- *The record dies with the instance.* Instance state lives in the instance
+  directory, so destroying an instance destroys the only authority for removing the
+  trust keys it wrote. The Security section already books removal-on-destruction as
+  planned lifecycle work; that work now has a hard ordering constraint — read the
+  record before the instance goes — and it is worth saying so, because the natural
+  implementation order is the wrong one.
+- *Record-file disagreement is safe in one direction only, and that is worth
+  stating.* A recorded key already absent from the file is a harmless no-op; an
+  unrecorded key present in the file is correctly left alone. Saying this makes the
+  conservative direction of the failure explicit rather than something a reader has
+  to derive.
+
+## Required changes
+
+1. Restate the reconciliation exemption in terms an implementer can follow without
+   reproducing the bug: name whether a conflicted path is forward-carried into the
+   produced set (the idiom as it actually works,
+   `internal/workspace/apply.go:1967-1970`, `2028-2036`) or dropped with an explicit
+   exemption the cleanup consults. As written, "the record entry is dropped" is the
+   condition that fires `os.Remove` at `apply.go:1854`, and the idiom cited does the
+   opposite of what the sentence describes.
+
+2. State that removing a trust key also clears its record entry, and restate the
+   `.codex`-conflict guarantee as "niwa never re-adds the entry while the conflict
+   stands" rather than "no niwa-written entry exists after any apply" — otherwise the
+   two rules delete the developer's own answer to the prompt this design sends them
+   to.
+
+## Optional improvements
+
+- One clause in the Security section noting that removal-on-instance-destruction must
+  read the trust-key record before the instance directory is removed, now that the
+  record is the sole authority for what may be removed.
+- One clause making the safe direction of record-file disagreement explicit: a
+  recorded-but-absent key is a no-op, an unrecorded-but-present key is left alone.
