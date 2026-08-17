@@ -29,7 +29,17 @@ import (
 //     paths resolve inside a niwa instance are ever appended. No pre-existing
 //     key is removed, reordered, or rewritten -- the previous bytes are copied
 //     verbatim and the new blocks go after them -- and no global key is
-//     written at all.
+//     written at all. The one retraction below is bounded to niwa's own
+//     entries, so additivity over everyone else's keys still holds: niwa
+//     retracts its own signature, never anyone else's.
+//   - Record-bounded retraction. A repository whose `.codex` is occupied by
+//     content niwa did not write gets no entry, and an entry niwa wrote before
+//     that conflict existed is removed (Decision 7). What may be removed is
+//     decided by the record of keys niwa wrote, never by the entry's shape:
+//     Codex writes an identically-shaped [projects."<path>"] entry when the
+//     developer answers its own trust prompt -- the prompt a conflicted
+//     repository is routed to -- so a shape test would delete the developer's
+//     own answer to a question niwa caused to be asked.
 //   - Atomic replacement. The edited document goes to a temp file beside the
 //     config, is fsynced, and is renamed over the original, so an interrupted
 //     apply leaves the previous file whole rather than a truncated one.
@@ -115,6 +125,19 @@ type CodexTrustRequest struct {
 	// so, since Codex writes identically-shaped entries when the developer
 	// answers its own trust prompt.
 	Recorded []string
+
+	// Conflicted are the repository roots whose `.codex` name is occupied by
+	// content niwa did not materialize. They may also appear in RepoRoots --
+	// the caller hands over every repository it cloned and this list decides
+	// which of them are withheld, so the withholding and the retraction are
+	// read from one place.
+	//
+	// Each conflicted root is withheld (no entry is written for it) and, when
+	// the record names its key, retracted: with niwa's payload absent, an
+	// entry would vouch for the repository's own committed `.codex/` --
+	// third-party content impersonating the payload with niwa's signature on
+	// it.
+	Conflicted []string
 }
 
 // CodexTrustResult reports what one reconciliation produced.
@@ -129,7 +152,15 @@ type CodexTrustResult struct {
 	// Added are the keys this call appended.
 	Added []string
 
-	// Warnings are per-key anomalies that did not stop the write.
+	// Removed are the keys this call retracted: recorded keys whose repository
+	// is conflicted and whose block was found in the file. A recorded key the
+	// file no longer carries is not listed here -- nothing was removed -- but
+	// it still leaves the record, since niwa no longer owns anything at it.
+	Removed []string
+
+	// Warnings are the per-key lines the apply reports: anomalies that did not
+	// stop the write, and every retraction, since a trust entry disappearing
+	// from the developer's file is not something niwa does quietly.
 	Warnings []string
 }
 
@@ -155,8 +186,9 @@ func CanonicalTrustKey(root string) (string, error) {
 }
 
 // EnsureCodexTrust upserts one trust entry per requested repository root in
-// the developer's Codex config, adding nothing else and altering nothing that
-// was already there.
+// the developer's Codex config, retracts the entries the record names for
+// repositories that have become conflicted, and alters nothing else that was
+// already there.
 //
 // The returned record is meaningful even when the error is non-nil: callers
 // persist it and surface the error afterwards, so a refusal to touch an
@@ -174,6 +206,18 @@ func EnsureCodexTrust(req CodexTrustRequest) (CodexTrustResult, error) {
 		configPath = resolved
 	}
 
+	withheld := map[string]bool{}
+	for _, root := range req.Conflicted {
+		key, err := CanonicalTrustKey(root)
+		if err != nil {
+			result.Warnings = append(result.Warnings, fmt.Sprintf(
+				"could not resolve %s while withholding its Codex trust entry: %v; any entry niwa recorded for it stays until the next apply resolves the path",
+				root, err))
+			continue
+		}
+		withheld[key] = true
+	}
+
 	wanted := make([]string, 0, len(req.RepoRoots))
 	for _, root := range req.RepoRoots {
 		key, err := CanonicalTrustKey(root)
@@ -183,10 +227,28 @@ func EnsureCodexTrust(req CodexTrustRequest) (CodexTrustResult, error) {
 				root, err))
 			continue
 		}
+		if withheld[key] {
+			// The conflict is already reported per repository by the detection
+			// pass; this is the trust half of that same degradation, and the
+			// entry stays withheld on every apply while the conflict stands.
+			continue
+		}
 		wanted = append(wanted, key)
 	}
 	wanted = normalizeTrustKeys(wanted)
-	if len(wanted) == 0 {
+
+	// Removal is bounded by the record and nothing else: only a key niwa is
+	// recorded as having written may be retracted, so the developer's own
+	// answer to Codex's trust prompt -- identical in shape, absent from the
+	// record -- is never touched.
+	var retract []string
+	for _, key := range result.Recorded {
+		if withheld[key] {
+			retract = append(retract, key)
+		}
+	}
+
+	if len(wanted) == 0 && len(retract) == 0 {
 		return result, nil
 	}
 
@@ -232,17 +294,84 @@ func EnsureCodexTrust(req CodexTrustRequest) (CodexTrustResult, error) {
 		// what keeps a developer's own verdict from being overwritten.
 	}
 
-	if len(add) == 0 {
+	// Retract the recorded entries the file still carries. A recorded key the
+	// file no longer has is a no-op here -- the safe direction of record/file
+	// disagreement -- and so is an unrecorded key the file does carry, which
+	// never reaches this list at all.
+	edited := data
+	var removed, stranded []string
+	for _, key := range retract {
+		if _, present := existing[key]; !present {
+			continue
+		}
+		next, ok := removeTrustEntry(edited, key)
+		if !ok {
+			// The file carries the key in a shape niwa cannot retract by
+			// block -- an inline table under [projects], say. Leaving the
+			// record in place is what keeps the next apply trying rather than
+			// abandoning an entry with nothing left able to withdraw it.
+			stranded = append(stranded, key)
+			result.Warnings = append(result.Warnings, fmt.Sprintf(
+				"%s carries a [projects.%s] entry niwa recorded writing but could not retract in place; it was left untouched, so it still vouches for a repository niwa no longer materializes a Codex payload into",
+				configPath, quoteTOMLKey(key)))
+			continue
+		}
+		edited = next
+		removed = append(removed, key)
+		result.Warnings = append(result.Warnings, fmt.Sprintf(
+			"niwa withdrew its Codex trust entry for %s: that repository's %s is occupied by content niwa did not write, so niwa no longer vouches for what a session there would load; Codex asks at session start instead",
+			key, CodexPayloadDirName))
+	}
+
+	if len(add) == 0 && len(removed) == 0 {
+		// Nothing changed in the file, but a recorded key that the file no
+		// longer carries still leaves the record: niwa owns nothing at it.
+		result.Recorded = clearTrustKeys(result.Recorded, retract, stranded)
 		return result, nil
 	}
 
-	if err := writeCodexConfig(configPath, appendTrustEntries(data, add), mode); err != nil {
+	if err := writeCodexConfig(configPath, appendTrustEntries(edited, add), mode); err != nil {
 		return result, err
 	}
 
 	result.Added = add
+	result.Removed = removed
+
+	// The record moves with the file. Clearing the retracted keys is what
+	// makes withholding and removal compose: a record left behind would
+	// license the next apply to delete whatever sits at that key -- by then
+	// possibly the developer's own answer to Codex's prompt -- which is the
+	// exact harm the record test exists to prevent, arriving by another route.
+	// What niwa promises is that it never re-adds its entry while the conflict
+	// stands, not that no entry exists afterwards.
+	result.Recorded = clearTrustKeys(result.Recorded, retract, stranded)
 	result.Recorded = normalizeTrustKeys(append(result.Recorded, add...))
 	return result, nil
+}
+
+// clearTrustKeys removes every key in clear from keys, except those in keep.
+func clearTrustKeys(keys, clear, keep []string) []string {
+	if len(clear) == 0 {
+		return keys
+	}
+	drop := make(map[string]bool, len(clear))
+	for _, key := range clear {
+		drop[key] = true
+	}
+	for _, key := range keep {
+		drop[key] = false
+	}
+	out := make([]string, 0, len(keys))
+	for _, key := range keys {
+		if drop[key] {
+			continue
+		}
+		out = append(out, key)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // codexProjectEntry is what the parse needs to know about one pre-existing
@@ -330,6 +459,106 @@ func appendTrustEntries(data []byte, keys []string) []byte {
 		fmt.Fprintf(&buf, "[%s.%s]\n%s = %q\n", codexProjectsTable, quoteTOMLKey(key), codexTrustLevelKey, codexTrustLevel)
 	}
 	return buf.Bytes()
+}
+
+// removeTrustEntry returns data with the [projects."<key>"] block removed, and
+// reports whether it found one. Everything outside that block is copied through
+// byte for byte, the same discipline the append side keeps: the retraction is
+// of niwa's own entry, not a re-rendering of the developer's document.
+//
+// The block is the header line and every line up to the next table header, so
+// a sub-table of the key -- [projects."<key>".something], which niwa never
+// writes -- survives as content niwa did not put there. Only a key the record
+// names and the parse found reaches this function, so a false match would have
+// to be a table header niwa itself wrote appearing inside a multi-line string
+// somewhere else in the file.
+func removeTrustEntry(data []byte, key string) ([]byte, bool) {
+	var out bytes.Buffer
+	found := false
+	dropping := false
+
+	for _, line := range splitLinesKeepingEnds(data) {
+		if path, isHeader := tomlTableHeaderPath(line); isHeader {
+			dropping = len(path) == 2 && path[0] == codexProjectsTable && path[1] == key
+			if dropping {
+				found = true
+			}
+		}
+		if !dropping {
+			out.WriteString(line)
+		}
+	}
+	if !found {
+		return data, false
+	}
+	return out.Bytes(), true
+}
+
+// tomlHeaderProbeKey is the key appended to a candidate header line to find out
+// which table the header opens. It is never written to any file.
+const tomlHeaderProbeKey = "niwa_header_probe"
+
+// tomlTableHeaderPath reports whether line opens a TOML table, and if so the
+// dotted path of the table it opens.
+//
+// The path comes from the TOML decoder rather than from string surgery, so
+// quoting, escapes, literal-string keys, and a trailing comment are all handled
+// by the same rules that will read the file back. An array-of-tables header is
+// a header (it ends the previous table, which is what the caller needs to know)
+// with no path niwa can match, since niwa never writes that shape.
+func tomlTableHeaderPath(line string) ([]string, bool) {
+	trimmed := strings.TrimSpace(line)
+	if !strings.HasPrefix(trimmed, "[") {
+		return nil, false
+	}
+	var doc map[string]any
+	if _, err := toml.Decode(trimmed+"\n"+tomlHeaderProbeKey+" = true\n", &doc); err != nil {
+		return nil, false
+	}
+	path, ok := probedTablePath(doc, nil)
+	if !ok {
+		// A well-formed header whose table niwa cannot address by a plain
+		// dotted path: an array-of-tables. It still ends the preceding table.
+		return nil, true
+	}
+	return path, true
+}
+
+// probedTablePath walks doc for the probe key and returns the path of the table
+// holding it.
+func probedTablePath(doc map[string]any, prefix []string) ([]string, bool) {
+	if _, ok := doc[tomlHeaderProbeKey]; ok {
+		return prefix, true
+	}
+	for name, value := range doc {
+		table, isTable := value.(map[string]any)
+		if !isTable {
+			continue
+		}
+		child := append(append([]string{}, prefix...), name)
+		if path, ok := probedTablePath(table, child); ok {
+			return path, true
+		}
+	}
+	return nil, false
+}
+
+// splitLinesKeepingEnds splits data into lines with their terminators attached,
+// so a rebuild that drops some lines leaves the rest byte-identical -- including
+// a final line with no newline and CRLF endings.
+func splitLinesKeepingEnds(data []byte) []string {
+	var lines []string
+	start := 0
+	for i, b := range data {
+		if b == '\n' {
+			lines = append(lines, string(data[start:i+1]))
+			start = i + 1
+		}
+	}
+	if start < len(data) {
+		lines = append(lines, string(data[start:]))
+	}
+	return lines
 }
 
 // writeCodexConfig replaces the config atomically: a temp file beside it (an

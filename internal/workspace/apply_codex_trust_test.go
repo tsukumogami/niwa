@@ -1,11 +1,14 @@
 package workspace
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/tsukumogami/niwa/internal/config"
 )
 
 // trustApplier builds an Applier with the trust seam wired to the real writer
@@ -156,4 +159,169 @@ func TestApplyCarriesTheTrustRecordForwardWhenTheSeamIsUnwired(t *testing.T) {
 	if len(reloaded.CodexTrustKeys) != 1 || reloaded.CodexTrustKeys[0] != "/written/by/an/earlier/apply" {
 		t.Errorf("CodexTrustKeys = %v, want the prior record carried forward", reloaded.CodexTrustKeys)
 	}
+}
+
+// twoRepoTrustFixture builds a workspace with two cloned repositories, so a
+// conflict in one can be told apart from a workspace-wide failure to write
+// anything. It returns the fixture paths plus the two checkouts.
+func twoRepoTrustFixture(t *testing.T) (niwaDir, root string, cfg *config.WorkspaceConfig, appDir, libDir string) {
+	t.Helper()
+
+	root = t.TempDir()
+	niwaDir = filepath.Join(root, ".niwa")
+	if err := os.MkdirAll(niwaDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configTOML := `
+[workspace]
+name = "ws"
+
+[groups.tools]
+
+[repos.app]
+url = "https://example.invalid/app.git"
+group = "tools"
+
+[repos.lib]
+url = "https://example.invalid/lib.git"
+group = "tools"
+`
+	if err := os.WriteFile(filepath.Join(niwaDir, "workspace.toml"), []byte(configTOML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	appDir = filepath.Join(root, "ws", "tools", "app")
+	libDir = filepath.Join(root, "ws", "tools", "lib")
+	for _, dir := range []string{appDir, libDir} {
+		if err := os.MkdirAll(filepath.Join(dir, ".git"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	loaded, err := config.Load(filepath.Join(niwaDir, "workspace.toml"))
+	if err != nil {
+		t.Fatalf("loading config: %v", err)
+	}
+	return niwaDir, root, loaded.Config, appDir, libDir
+}
+
+// occupyCodexName puts a repository's own `.codex` directory where niwa's
+// delivery goes, replacing whatever is there. It carries no generation marker,
+// which is what makes it foreign.
+func occupyCodexName(t *testing.T, repoDir string) {
+	t.Helper()
+	link := filepath.Join(repoDir, CodexPayloadDirName)
+	if err := os.RemoveAll(link); err != nil {
+		t.Fatal(err)
+	}
+	writeFileT(t, filepath.Join(link, codexPayloadConfigName), "model = \"o3\"\napproval_policy = \"never\"\n")
+}
+
+func TestApplyWithholdsTrustFromARepositoryWhoseCodexNameIsOccupied(t *testing.T) {
+	configPath := codexTrustSandbox(t)
+	niwaDir, root, cfg, appDir, libDir := twoRepoTrustFixture(t)
+	occupyCodexName(t, appDir)
+
+	applier := trustApplier(t, configPath)
+	instanceRoot, err := applier.Create(context.Background(), cfg, niwaDir, root, "ws")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	appKey := trustKey(t, appDir)
+	libKey := trustKey(t, libDir)
+	levels := decodeTrustLevels(t, configPath)
+	if _, vouched := levels[appKey]; vouched {
+		t.Error("niwa vouched for a repository it delivered no payload into")
+	}
+	if levels[libKey] != codexTrustLevel {
+		t.Errorf("the clean repository lost its entry; levels = %v", levels)
+	}
+
+	state, err := LoadState(instanceRoot)
+	if err != nil {
+		t.Fatalf("LoadState: %v", err)
+	}
+	if len(state.CodexTrustKeys) != 1 || state.CodexTrustKeys[0] != libKey {
+		t.Errorf("CodexTrustKeys = %v, want only %s", state.CodexTrustKeys, libKey)
+	}
+}
+
+// TestApplyRetractsARecordedEntryWhenTheRepositoryBecomesConflicted runs the
+// whole sequence through the pipeline: a repository trusted on one apply,
+// conflicted on the next, and then answered for by the developer at the same
+// key. Only the middle step is niwa's to undo.
+func TestApplyRetractsARecordedEntryWhenTheRepositoryBecomesConflicted(t *testing.T) {
+	configPath := codexTrustSandbox(t)
+	niwaDir, root, cfg, appDir, libDir := twoRepoTrustFixture(t)
+
+	out := &bytes.Buffer{}
+	applier := trustApplier(t, configPath)
+	applier.Reporter = NewReporterWithTTY(out, false)
+	instanceRoot, err := applier.Create(context.Background(), cfg, niwaDir, root, "ws")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	appKey := trustKey(t, appDir)
+	libKey := trustKey(t, libDir)
+	if levels := decodeTrustLevels(t, configPath); levels[appKey] != codexTrustLevel {
+		t.Fatalf("the first apply did not trust the clean repository; levels = %v", levels)
+	}
+
+	occupyCodexName(t, appDir)
+	out.Reset()
+	if err := applier.Apply(context.Background(), cfg, niwaDir, instanceRoot); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if !strings.Contains(out.String(), appKey) {
+		t.Errorf("the apply did not report the withdrawn trust entry:\n%s", out.String())
+	}
+
+	levels := decodeTrustLevels(t, configPath)
+	if _, vouched := levels[appKey]; vouched {
+		t.Error("the entry survived the conflict that made niwa stop delivering the payload")
+	}
+	if levels[libKey] != codexTrustLevel {
+		t.Errorf("the clean repository's entry went with it; levels = %v", levels)
+	}
+	state, err := LoadState(instanceRoot)
+	if err != nil {
+		t.Fatalf("LoadState: %v", err)
+	}
+	if len(state.CodexTrustKeys) != 1 || state.CodexTrustKeys[0] != libKey {
+		t.Errorf("CodexTrustKeys = %v, want the retracted key cleared", state.CodexTrustKeys)
+	}
+
+	// The developer is prompted at session start and says yes; Codex writes the
+	// same key back. Nothing in the file distinguishes that entry from the one
+	// niwa just removed, and no later apply may touch it.
+	answered := readFile(t, configPath) + developerAnswer(appKey)
+	writeFileT(t, configPath, answered)
+
+	for i := 0; i < 2; i++ {
+		if err := applier.Apply(context.Background(), cfg, niwaDir, instanceRoot); err != nil {
+			t.Fatalf("apply %d after the developer answered: %v", i+1, err)
+		}
+	}
+	if got := readFile(t, configPath); got != answered {
+		t.Errorf("the developer's own answer did not survive later applies:\n got %q\nwant %q", got, answered)
+	}
+	if state, err = LoadState(instanceRoot); err != nil {
+		t.Fatalf("LoadState: %v", err)
+	}
+	for _, key := range state.CodexTrustKeys {
+		if key == appKey {
+			t.Error("niwa recorded the developer's own entry as its own")
+		}
+	}
+}
+
+// trustKey is CanonicalTrustKey with the test's error handling.
+func trustKey(t *testing.T, dir string) string {
+	t.Helper()
+	key, err := CanonicalTrustKey(dir)
+	if err != nil {
+		t.Fatalf("CanonicalTrustKey(%s): %v", dir, err)
+	}
+	return key
 }

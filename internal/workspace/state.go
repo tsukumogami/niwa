@@ -148,8 +148,14 @@ type InstanceState struct {
 	// here may ever be removed. It therefore carries entries forward
 	// across applies -- including for repositories that have since left
 	// the workspace, whose entries are still niwa's to clean up at
-	// destroy time. Empty for instances applied before the trust
-	// bootstrap existed; omitempty keeps it invisible to old binaries.
+	// destroy time. A key leaves this record exactly when niwa gives up
+	// the entry it names: a conflict-driven retraction removes both
+	// together (Decision 7), since a record outliving its entry would
+	// license the next apply to delete whatever landed at that key.
+	// Because it is the sole removal authority, destroy-time cleanup must
+	// read it before the instance directory goes. Empty for instances
+	// applied before the trust bootstrap existed; omitempty keeps it
+	// invisible to old binaries.
 	CodexTrustKeys []string `json:"codex_trust_keys,omitempty"`
 }
 

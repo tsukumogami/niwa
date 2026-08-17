@@ -124,7 +124,9 @@ type Applier struct {
 	// pipeline makes outside the instance (DESIGN-dual-agent-workspace
 	// Decision 4A). Without it a Codex session in a prepared repository
 	// runs in a read-only sandbox and its interactive TUI blocks on a
-	// trust prompt.
+	// trust prompt. It also retracts the entries niwa's record names for
+	// repositories whose `.codex` has since been occupied by content niwa
+	// did not write (Decision 7).
 	//
 	// It is a seam for the same reason InstallNiwaPlugin and
 	// PrewarmDeclaredPlugins are: it edits a file in the developer's home,
@@ -1724,10 +1726,10 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 	//
 	// The conflict verdicts reach this step through codexConflicts, whose
 	// PayloadConflicted answers, per repository root, whether niwa's payload was
-	// refused there. Wiring the withholding and the record-bounded retraction of
-	// an entry written before the conflict existed is a separate change; every
-	// repository root still goes in here.
-	codexTrustKeys, codexTrustErr := a.ensureCodexTrust(repoDirs, opts.existingState, &allWarnings)
+	// refused there. A repository it names gets no entry -- niwa does not vouch
+	// for a payload it did not write -- and an entry an earlier apply wrote,
+	// before the conflict existed, is retracted here (Decision 7).
+	codexTrustKeys, codexTrustErr := a.ensureCodexTrust(repoDirs, codexConflicts, opts.existingState, &allWarnings)
 
 	// Step 6.4: Decide the worktree-delegation integration ONCE per apply
 	// (design Decisions 4 & 6), then thread it into every repo's
@@ -1966,7 +1968,7 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 // run that could not write must still carry forward what earlier runs did:
 // forgetting a key would strand the entry it names in the developer's file
 // with nothing left able to retract it.
-func (a *Applier) ensureCodexTrust(repoDirs []string, existing *InstanceState, warnings *[]string) ([]string, error) {
+func (a *Applier) ensureCodexTrust(repoDirs []string, conflicts *CodexConflictSet, existing *InstanceState, warnings *[]string) ([]string, error) {
 	var recorded []string
 	if existing != nil {
 		recorded = existing.CodexTrustKeys
@@ -1975,15 +1977,27 @@ func (a *Applier) ensureCodexTrust(repoDirs []string, existing *InstanceState, w
 		return recorded, nil
 	}
 
+	// Every cloned repository goes in as a root, and the conflicted ones go in
+	// again as the withheld set: the writer subtracts them, so which
+	// repositories niwa refuses to vouch for is decided in one place rather
+	// than split between this caller and the write it makes.
+	var conflicted []string
+	for _, dir := range repoDirs {
+		if conflicts.PayloadConflicted(dir) {
+			conflicted = append(conflicted, dir)
+		}
+	}
+
 	result, err := a.EnsureCodexTrust(CodexTrustRequest{
-		RepoRoots: repoDirs,
-		Recorded:  recorded,
+		RepoRoots:  repoDirs,
+		Recorded:   recorded,
+		Conflicted: conflicted,
 	})
 	*warnings = append(*warnings, result.Warnings...)
-	if result.Recorded != nil {
-		recorded = result.Recorded
-	}
-	return recorded, err
+	// The returned record replaces the prior one outright, empty included: a
+	// retraction that cleared the last key must leave an empty record, not the
+	// stale one it just withdrew.
+	return result.Recorded, err
 }
 
 // healDanglingPluginRecords prunes records from Claude Code's global plugin
