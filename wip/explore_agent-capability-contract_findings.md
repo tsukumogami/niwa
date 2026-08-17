@@ -1,0 +1,151 @@
+# Exploration Findings: agent-capability-contract
+
+## Round 1
+
+Eight leads dispatched, eight returned. Sources are the per-lead files under
+`wip/research/explore_agent-capability-contract_r1_lead-*.md`.
+
+### Key insights
+
+**The discriminator reaches almost nothing.** The capability inventory found
+roughly twenty distinct capabilities the preparation path delivers, and
+`agent.Agent` governs two of them: which filename root/group context lands in,
+and whether repository-level context is written at all. Everything else --
+hooks, settings, permissions, plugins, marketplaces, env injection, worktree-hook
+delegation, ephemeral-session provisioning, root skills -- takes no `agent.Agent`
+parameter and runs Claude-shaped unconditionally. (`lead-capability-inventory`,
+`lead-prep-path-map`)
+
+**Two of the three existing accessors are already broken in the way the mandate
+describes.** `InstallRepoContentTo` (`content.go:130`) and
+`installWorktreeContextLayer` (`worktree_content.go:740`) accept `agent.Agent`
+and use it only as a run/skip gate, then hardcode `"CLAUDE.local.md"` inside the
+gated body instead of calling `LocalContextFileName()`. That accessor
+consequently has zero callers anywhere in the module -- on `main`, before the
+prior attempt. The dead-accessor problem is not something PR #248 introduced; it
+inherited it. (`lead-prep-path-map`)
+
+**The prior attempt's failure is reproducible from its source.** Every
+niwa-owned level writes both agents' files by iterating a hardcoded
+`materializedAgents` slice with `agent.AgentClaude`/`agent.AgentCodex` literals
+at each call site, while `Applier.Agent` -> `WorktreeApplyOptions.Agent` is
+threaded and read by nothing. The design predicted this exact dead plumbing and
+prescribed retiring it; the code kept it. (`lead-prior-attempt-audit`)
+
+**Both mandated property tests are buildable with the standard library and no
+new dependency.** `go/ast`, `go/parser`, `go/token` are stdlib;
+`golang.org/x/tools` is not currently a dependency and would have to clear
+`go mod tidy` review. CI runs exactly `gofmt -l .`, `go vet ./...`, and
+`go test -race ./...` -- no external linter anywhere. A source-scanning test for
+property 1 costs nothing and would pass today, because `internal/workspace`
+names the agent constants only in two comments. Property 2 needs type design
+first: a closed exported enumerable capability set plus an exported `agent.All()`
+(today `known` is unexported and every "for each agent" test hand-lists the two
+constants). (`lead-structural-test-precedent`)
+
+**niwa has a precise, citable rename precedent.** `[content]` -> `[claude.content]`,
+commit `81aae0b`, recorded in `DESIGN-claude-key-consolidation.md`: accept both
+keys, warn on the deprecated one, hard-error if both are set, remove at the v1.0
+line, and close override-position leakage with a type split rather than runtime
+checks. No JSON schema exists to keep in sync; only `DESIGN-workspace-config.md`,
+the README, and `scaffold.go`'s generated example move with a rename.
+(`lead-config-rename`)
+
+**`internal/vault` is the house precedent for capability negotiation,** and it
+is a close structural match for what this work needs: a mandatory `Provider`
+interface, an *optional* `BatchResolver` interface probed by type assertion, and
+a `Registry`/`Factory` pair whose lookup is fail-closed with no silent default.
+Implementations live in sub-packages (`internal/vault/infisical`,
+`internal/vault/fake`) that self-register via `init()`. (`lead-go-pattern-precedent`)
+
+**The skills defect is narrower than feared and has a ready fix.** On `main`,
+niwa never resolves plugin content out of a Claude-owned directory -- it writes
+`enabledPlugins`/`extraKnownMarketplaces` into `.claude/settings.json` and lets
+Claude Code's own startup consume them. The dependency was introduced entirely by
+the prior attempt's `codex_payload.go`, where `codexMarketplaceRoots` points the
+Codex skills symlink at `~/.claude/plugins/marketplaces/<name>/` for
+github-sourced marketplaces only. niwa already owns `github.FetchTarball` +
+`ExtractSubpath` (used for ordinary cloning in `snapshotwriter.go`), so fetching
+into a niwa-owned directory closes it without depending on Claude Code.
+(`lead-skill-resolution`)
+
+**The spike gives a concrete unavailable-list for Codex.** Named/typed subagents
+never surface (plugin `agents/` directories are copied and ignored). Hooks have
+no demonstrated route that avoids both solving the trust hash and presenting a
+blocking modal. Marketplace/plugin *registration* cannot come from the project
+layer. Project-root-marker configuration cannot be set from the project layer.
+And several capabilities -- budget override, MCP servers, environment variables --
+are *conditionally* available: they work only once the developer's own config
+carries a trust entry, which a workspace cannot self-grant.
+(`lead-spike-constraints`)
+
+### Tensions
+
+**Conditional availability is a third state the mandate's binary does not have.**
+Property 2 says every capability is either implemented or explicitly declared
+unavailable with a reason. The spike produces a real third case: MCP servers and
+environment delivery are implemented *and* inert until the developer trusts the
+directory. Declaring them "implemented" overstates; declaring them "unavailable"
+understates and would put them wrongly on the user guide's gap list. The contract
+has to model this honestly or the guide will lie in one direction or the other.
+
+**Property 4 pulls against the dependency graph.** `internal/workspace` imports
+every leaf package and is imported by `internal/plugin` and `internal/cli`; it
+has never been split. The precedent layout for a new concern is a fresh
+`internal/` package at or below `internal/agent`'s leaf level. But capability
+*delivery* needs the workspace's writing helpers, which sit above that line. A
+leaf package can hold declarations and a delivery *plan*; it cannot hold code
+that performs workspace writes. Whether the contract is "return a plan of writes
+the workspace executes" or "an interface implemented inside `internal/workspace`
+with per-agent files" is the load-bearing design decision, and only the first
+gives property 4 a package boundary rather than a filename convention.
+
+**`claude.enabled` is correctly named today and misnamed the moment PR 2 lands.**
+It currently gates only genuinely Claude-owned artifacts, so renaming it in PR 1
+would be a rename with no behavioral motive. But PR 2 makes it the mandate's
+exact cautionary example. The rename therefore belongs to whichever PR first
+gives it a second agent to mis-gate -- which argues for PR 2 -- while PR 1 is the
+one that is supposed to carry structure without behavior change.
+
+**PR 1's scope is genuinely ambiguous.** The brief says to scope the refactor to
+paths dual-agent capability actually touches. The inventory says that is most of
+the pipeline, because Codex has a defensible answer for hooks (declared
+unavailable), settings (approval/sandbox), env (`shell_environment_policy.set`),
+MCP, and skills. Bringing all of that under the contract in a no-behavior-change
+PR is a large diff; bringing only context files under it reproduces the prior
+attempt's mistake at smaller scale, because the contract would again govern two
+capabilities out of twenty.
+
+### Gaps
+
+- No mechanism yet for proving "PR 1 changes no behavior" beyond the existing
+  suite passing. There is no golden-file or snapshot precedent in the repo, and
+  the functional suite is black-box over the built binary.
+- The blast radius of renaming the `[claude]` table is unmeasured. `override.go`
+  alone carries `MergeOverrides`, `MergeInstanceOverrides`, `MergeGlobalOverride`,
+  `MergeWorkspaceOverlay`, `deepCopyRepoOverride`, and `copyClaudeConfigFull`,
+  all of which touch `ClaudeConfig`.
+- The exact per-capability Codex answer (implemented / conditional / unavailable,
+  with a reason) has not been assembled. The spike constrains it and the
+  inventory enumerates the capabilities, but nobody has joined the two.
+- The MCP and `shell_environment_policy.set` additions are named as high value
+  but their concrete config shape, and how a distributed `.mcp.json` maps into
+  `[mcp_servers.*]`, is unspecified.
+
+### Open questions
+
+1. Can the agent contract be expressed as a pure declarative plan that
+   `internal/workspace` executes, so per-agent implementations live in leaf
+   packages and property 4 gets a real package boundary?
+2. What is the honest state model for capabilities -- two states, or three with
+   conditional/trust-gated?
+3. What proves PR 1 changed no behavior, mechanically?
+4. How large is the `[claude]` rename, and does it belong to PR 1 or PR 2?
+5. What exactly do the MCP and environment additions look like in the payload
+   config, and where does the `.mcp.json` niwa already distributes fit?
+
+## Decision: Explore further
+
+Round 1 established the terrain and produced four decision-relevant tensions,
+none of which is answerable by design judgment alone -- each needs measurement.
+Round 2 targets exactly those.
