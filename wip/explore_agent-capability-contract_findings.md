@@ -189,6 +189,39 @@ from the declared-unavailable capabilities, so a capability that gains a reason
 in code cannot fail to appear in the doc. Keeping the safety list as a separate
 section is right; it should just stop being mistaken for the gap list.
 
+### The acceptance bar, verbatim
+
+The 15 scenarios in `test/functional/features/codex-agent.feature` on the closed
+branch, so the PRD can treat them as requirements rather than re-derive them.
+Thirteen are `@critical` and offline; two are `@codex-live` and skip when the
+`codex` binary is absent.
+
+1. A codex-default workspace still materializes the whole Claude tree.
+2. `niwa dispatch` refuses in a codex-default workspace.
+3. A claude-default workspace materializes both agents' context too.
+4. A prepared instance serves a Codex session from the instance root down.
+5. A workspace with nothing to say leaves the repository's own context in place.
+6. The declared budget covers a context chain past Codex's default.
+7. The workspace's skills reach Codex whole and namespaced.
+8. Trust entries are canonical, one per repository, and additive.
+9. An unreadable credential file fails neither create nor apply.
+10. A worktree carries the workspace context and its own framing.
+11. Re-applying three times adds nothing.
+12. Changed content replaces the previous content everywhere.
+13. Committed content at niwa's names degrades loudly and is never overwritten.
+14. (`@codex-live`) A live Codex session writes a file on its first attempt.
+15. (`@codex-live`) A live interactive Codex session starts clean from the root
+    and from a nested directory.
+
+Two observations for the design. Scenario 2 asserts a *limitation* as a passing
+test -- dispatch refusing under Codex. Under a capability contract that becomes a
+declared-unavailable capability with a reason, and the scenario should assert the
+declaration rather than the bare refusal, so the test and the guide's gap list
+cannot drift apart. And scenarios 1 and 3 together are the no-behavior-change
+proof restated behaviorally: they assert the Claude tree is complete regardless
+of which agent the workspace names, which is exactly the invariant the first PR
+must hold without any Codex code present.
+
 ## Decision: Explore further
 
 Round 1 established the terrain and produced four decision-relevant tensions,
