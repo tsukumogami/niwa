@@ -2,7 +2,6 @@ package workspace
 
 import (
 	"embed"
-	"encoding/json"
 	"fmt"
 	"io/fs"
 	"os"
@@ -10,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/tsukumogami/niwa/internal/agent"
+	"github.com/tsukumogami/niwa/internal/agentplan"
 	"github.com/tsukumogami/niwa/internal/config"
 )
 
@@ -42,13 +42,11 @@ const rootSkillFileName = "SKILL.md"
 // instance root uses), not settings.local.json.
 const rootClaudeDir = ".claude"
 
-// rootSettingsFile is the workspace-root managed settings file name.
+// rootSettingsFile is the workspace-root managed settings file name. The
+// materializer reaches the path through the settings producer rather than
+// joining this constant itself; it stays as the name the root-materializer
+// tests locate the written document by.
 const rootSettingsFile = "settings.json"
-
-// rootClaudeFile is the workspace-root CLAUDE.md file name. A session
-// launched at the workspace root loads this at startup; without it the
-// coordinator (and any root session) starts with no workspace orientation.
-const rootClaudeFile = "CLAUDE.md"
 
 // instanceFromHookCommandSuffix is the niwa subcommand the workspace-root
 // SessionStart hook invokes. The full command is
@@ -132,11 +130,11 @@ func MaterializeWorkspaceRoot(cfg *config.WorkspaceConfig, workspaceRoot string,
 
 	var written []string
 
-	settingsPath, err := writeRootSettings(cfg, workspaceRoot, niwaPath, opts.EphemeralSessionMode)
+	settingsPaths, err := writeRootSettings(cfg, workspaceRoot, niwaPath, opts.EphemeralSessionMode)
 	if err != nil {
 		return nil, err
 	}
-	written = append(written, settingsPath)
+	written = append(written, settingsPaths...)
 
 	claudePath, err := writeRootClaudeMD(cfg, workspaceRoot, opts.Agent)
 	if err != nil {
@@ -232,7 +230,11 @@ func writeRootSkills(workspaceRoot string) ([]string, error) {
 // root-launched session loads the workspace's plugins/skills. The
 // SessionStart hook entry and the ephemeral-mode flag are layered
 // on top via the SessionHooks injection.
-func writeRootSettings(cfg *config.WorkspaceConfig, workspaceRoot, niwaPath string, ephemeral bool) (string, error) {
+//
+// The document is declared as a plan entry and written by the executor, so the
+// path, the marshalled bytes, and the file mode are the producer's rather than
+// this function's; what remains here is deciding what the document says.
+func writeRootSettings(cfg *config.WorkspaceConfig, workspaceRoot, niwaPath string, ephemeral bool) ([]string, error) {
 	effective := MergeInstanceOverrides(cfg)
 
 	// Forward only the plugins/marketplaces that have a root-resolvable form.
@@ -264,7 +266,7 @@ func writeRootSettings(cfg *config.WorkspaceConfig, workspaceRoot, niwaPath stri
 		},
 	})
 	if err != nil {
-		return "", fmt.Errorf("building workspace-root settings: %w", err)
+		return nil, fmt.Errorf("building workspace-root settings: %w", err)
 	}
 	emitReports(nil, reports)
 
@@ -272,21 +274,20 @@ func writeRootSettings(cfg *config.WorkspaceConfig, workspaceRoot, niwaPath stri
 	// so the materialized config carries the workspace's ephemeral posture.
 	doc["ephemeralSessionMode"] = ephemeral
 
-	data, err := json.MarshalIndent(doc, "", "  ")
+	plan, err := agentplan.SettingsPlan(agentplan.SettingsInputs{
+		Scope: agentplan.SettingsAtWorkspaceRoot,
+		Dir:   workspaceRoot,
+		Doc:   doc,
+	})
 	if err != nil {
-		return "", fmt.Errorf("marshaling workspace-root settings: %w", err)
+		return nil, fmt.Errorf("declaring workspace-root settings: %w", err)
 	}
-	data = append(data, '\n')
 
-	claudeDir := filepath.Join(workspaceRoot, rootClaudeDir)
-	if err := os.MkdirAll(claudeDir, 0o755); err != nil {
-		return "", fmt.Errorf("creating workspace-root .claude directory: %w", err)
+	written, _, err := applyPlan(plan)
+	if err != nil {
+		return nil, fmt.Errorf("writing workspace-root settings: %w", err)
 	}
-	settingsPath := filepath.Join(claudeDir, rootSettingsFile)
-	if err := os.WriteFile(settingsPath, data, secretFileMode); err != nil {
-		return "", fmt.Errorf("writing workspace-root settings: %w", err)
-	}
-	return settingsPath, nil
+	return written, nil
 }
 
 // rootHoistableConfig partitions the effective workspace plugins and

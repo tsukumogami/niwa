@@ -132,7 +132,7 @@ func TestMaterializeWorkspaceRoot_ClaudeMD(t *testing.T) {
 	cfg := &config.WorkspaceConfig{Workspace: config.WorkspaceMeta{Name: "my-workspace"}}
 	_, root := materializeRoot(t, cfg, RootMaterializeOptions{EphemeralSessionMode: true})
 
-	claudePath := filepath.Join(root, rootClaudeFile)
+	claudePath := filepath.Join(root, "CLAUDE.md")
 	data, err := os.ReadFile(claudePath)
 	if err != nil {
 		t.Fatalf("reading root CLAUDE.md: %v", err)

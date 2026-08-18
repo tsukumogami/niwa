@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/tsukumogami/niwa/internal/agentplan"
 	"github.com/tsukumogami/niwa/internal/config"
 )
 
@@ -154,24 +155,29 @@ func appendToWorkspaceRulesFile(rulesPath, absPath string) error {
 	return os.WriteFile(rulesPath, []byte(content), 0o644)
 }
 
-// removeImportFromCLAUDE removes an old relative @import from CLAUDE.md
-// (migration support). No-op if not present or file does not exist.
-func removeImportFromCLAUDE(claudePath, importLine string) error {
-	data, err := os.ReadFile(claudePath)
-	if os.IsNotExist(err) {
-		return nil
+// removeLegacyImport removes an old relative @import from the instance-root
+// context document earlier niwa versions wrote (migration support). No-op if
+// not present or the document does not exist.
+//
+// Reading is this side's job and rewriting is the producer's: the file to clean
+// is a fact about what niwa used to write rather than about the agent this
+// session prepares for, so agentplan names it and the removal lands as a plan
+// entry the executor applies.
+func removeLegacyImport(instanceRoot, importLine string) error {
+	path := agentplan.LegacyRootContextPath(instanceRoot)
+	data, readErr := os.ReadFile(path)
+	if readErr != nil && !os.IsNotExist(readErr) {
+		return readErr
 	}
-	if err != nil {
-		return err
-	}
-	content := string(data)
-	if !strings.Contains(content, importLine) {
-		return nil
-	}
-	// ensureImportInCLAUDE always added "line\n\n"; try that form first.
-	content = strings.Replace(content, importLine+"\n\n", "", 1)
-	content = strings.Replace(content, importLine+"\n", "", 1)
-	return os.WriteFile(claudePath, []byte(content), 0o644)
+
+	plan := agentplan.LegacyImportPlan(agentplan.LegacyImportInputs{
+		Dir:      instanceRoot,
+		Existing: data,
+		Exists:   readErr == nil,
+		Import:   importLine,
+	})
+	_, _, err := applyPlan(plan)
+	return err
 }
 
 // InstallWorkspaceContext generates a workspace context file at the instance
@@ -192,9 +198,9 @@ func InstallWorkspaceContext(cfg *config.WorkspaceConfig, classified []Classifie
 		return nil, fmt.Errorf("writing workspace rules file: %w", err)
 	}
 
-	// Migrate: remove old relative import from CLAUDE.md if present.
-	claudePath := filepath.Join(instanceRoot, "CLAUDE.md")
-	if err := removeImportFromCLAUDE(claudePath, workspaceContextImport); err != nil {
+	// Migrate: remove the old relative import from the legacy root context
+	// document if present.
+	if err := removeLegacyImport(instanceRoot, workspaceContextImport); err != nil {
 		return nil, fmt.Errorf("removing old workspace context import: %w", err)
 	}
 
@@ -225,9 +231,9 @@ func InstallOverlayClaudeContent(overlayDir, instanceRoot string) (string, error
 		return "", fmt.Errorf("adding overlay to workspace rules file: %w", err)
 	}
 
-	// Migrate: remove old relative import from CLAUDE.md if present.
-	claudePath := filepath.Join(instanceRoot, "CLAUDE.md")
-	if err := removeImportFromCLAUDE(claudePath, overlayClaudeImport); err != nil {
+	// Migrate: remove the old relative import from the legacy root context
+	// document if present.
+	if err := removeLegacyImport(instanceRoot, overlayClaudeImport); err != nil {
 		return "", fmt.Errorf("removing old overlay import: %w", err)
 	}
 
@@ -348,21 +354,22 @@ func InstallWorkspaceRootSettings(cfg *config.WorkspaceConfig, configDir, instan
 	}
 	emitReports(nil, reports)
 
-	data, err := json.MarshalIndent(doc, "", "  ")
+	// The document lands as a plan entry: the executor owns the directory, the
+	// marshalled bytes, and the file mode, and this function owns what the
+	// document says.
+	plan, err := agentplan.SettingsPlan(agentplan.SettingsInputs{
+		Scope: agentplan.SettingsAtInstanceRoot,
+		Dir:   instanceRoot,
+		Doc:   doc,
+	})
 	if err != nil {
-		return nil, fmt.Errorf("marshaling workspace root settings: %w", err)
+		return nil, fmt.Errorf("declaring workspace root settings: %w", err)
 	}
-	data = append(data, '\n')
 
-	claudeDir := filepath.Join(instanceRoot, ".claude")
-	os.MkdirAll(claudeDir, 0o755)
-	settingsPath := filepath.Join(claudeDir, "settings.json")
-	if err := os.WriteFile(settingsPath, data, secretFileMode); err != nil {
+	written, _, err := applyPlan(plan)
+	if err != nil {
 		return nil, fmt.Errorf("writing workspace root settings: %w", err)
 	}
-
-	var written []string
-	written = append(written, settingsPath)
 	// Track only the hook scripts this apply installed, not every file present
 	// in the output directory. Walking .claude/hooks/ here would re-adopt
 	// orphaned scripts left by removed features, marking them as produced and
@@ -407,9 +414,9 @@ func InstallGlobalClaudeContent(globalConfigDir, instanceRoot string) ([]string,
 		return nil, fmt.Errorf("adding global to workspace rules file: %w", err)
 	}
 
-	// Migrate: remove old relative import from CLAUDE.md if present.
-	claudePath := filepath.Join(instanceRoot, "CLAUDE.md")
-	if err := removeImportFromCLAUDE(claudePath, globalClaudeImport); err != nil {
+	// Migrate: remove the old relative import from the legacy root context
+	// document if present.
+	if err := removeLegacyImport(instanceRoot, globalClaudeImport); err != nil {
 		return nil, fmt.Errorf("removing old global import: %w", err)
 	}
 
