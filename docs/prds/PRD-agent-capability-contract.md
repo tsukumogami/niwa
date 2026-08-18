@@ -1,6 +1,6 @@
 ---
 schema: prd/v1
-status: Draft
+status: Done
 problem: |
   niwa's workspace-preparation path is structurally Claude-shaped: the type
   meant to unify agents governs two of roughly twenty capabilities the path
@@ -32,7 +32,7 @@ motivating_context: |
 
 ## Status
 
-Draft
+Done
 
 This PRD owns the requirements for the capability contract and for Codex as
 its second implementation, delivered as two sequenced pull requests. It
