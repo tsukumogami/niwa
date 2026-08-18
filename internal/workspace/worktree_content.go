@@ -1,6 +1,7 @@
 package workspace
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -545,6 +546,31 @@ func ApplyToWorktree(cfg *config.WorkspaceConfig, configDir, instanceRoot, workt
 		reportWorktreeContentWarnings(opts.Stderr, worktreePath, result.Warnings)
 		collectExempt(opts.Exempt, result.Exempt)
 	}
+
+	// 1b. The workspace's declared plugin skills, delivered into the worktree
+	//     for the same reason the content above is: a session opened here finds
+	//     this directory first and reads nothing above it. Resolution passes no
+	//     fetcher -- the worktree path re-delivers what the instance apply
+	//     already fetched rather than reaching for the network on every worktree.
+	pluginTrees, missingPlugins := ResolvePluginTrees(context.Background(), PluginSkillsInputs{
+		InstanceRoot: instanceRoot,
+		Plugins:      MergeInstanceOverrides(cfg).Plugins,
+		Marketplaces: cfg.Claude.Marketplaces,
+		RepoIndex:    instanceRepoIndex(instanceRoot),
+	})
+	var skillReports []string
+	for _, m := range missingPlugins {
+		skillReports = append(skillReports, m.String())
+	}
+	for _, ag := range agent.All() {
+		skills, err := InstallRepoSkills(worktreePath, pluginTrees, agentplan.For(ag))
+		if err != nil {
+			return nil, fmt.Errorf("delivering plugin skills into worktree: %w", err)
+		}
+		skillReports = append(skillReports, skills.Warnings...)
+		contentExcludes = append(contentExcludes, skills.Excludes...)
+	}
+	reportWorktreeWarnings(opts.Stderr, worktreePath, skillReports)
 
 	// 2. Repo materializers (settings, files, hooks) targeted at the worktree.
 	//    Same shared loop the instance apply path uses, but with the

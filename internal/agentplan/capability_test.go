@@ -141,6 +141,7 @@ var codexDelivered = []Capability{
 	WorkspaceOrientation,
 	RepoOrientationDoc,
 	WorktreeOrientationDoc,
+	PluginSkills,
 	DirectoryTrust,
 	GitExcludeBookkeeping,
 }

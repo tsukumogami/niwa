@@ -3,9 +3,11 @@ package workspace
 import (
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/tsukumogami/niwa/internal/agentplan"
@@ -22,11 +24,16 @@ import (
 // else in the package; applyplan_wiring_test.go asserts that mechanically.
 
 // errNoExecutorArm reports an entry whose operation this executor does not
-// implement. It exists so an unimplemented op is a loud failure rather than a
-// silent skip: OpDeliverTree is a declared member of the vocabulary whose
-// implementation lands with its first consumer, and until then an entry
-// carrying it must stop the apply rather than quietly deliver nothing.
+// implement. Every member of the declared vocabulary now has an arm, so what it
+// guards is a value from outside it -- a producer bug that must stop the apply
+// rather than quietly deliver nothing.
 var errNoExecutorArm = errors.New("plan entry operation has no executor arm")
+
+// errForeignDeliveryTarget reports a tree delivery whose target is occupied by
+// something niwa did not deliver. Refreshing a delivered tree means replacing it
+// wholesale, so the executor has to be certain the tree is its own before it
+// removes anything; when it cannot be, it stops rather than guessing.
+var errForeignDeliveryTarget = errors.New("delivery target is not a niwa-delivered tree")
 
 // errUnknownPrecondition reports a gate this executor cannot evaluate. Same
 // reasoning as errNoExecutorArm: a precondition nobody implements must not
@@ -79,8 +86,9 @@ func applyPlan(p *agentplan.Plan) (written []string, excludes []string, err erro
 			err = appendPlanLine(e.Path, e.Content, e.Mode)
 		case agentplan.OpReplaceSection:
 			err = replacePlanSection(e.Path, e.Marker, e.Content, e.Mode)
+		case agentplan.OpDeliverTree:
+			err = deliverPlanTree(e.Path, e.Source, e.Owner, e.Mode)
 		default:
-			// OpDeliverTree lands here until its consumer arrives with it.
 			return nil, nil, fmt.Errorf("%w: op %d for capability %s at %s",
 				errNoExecutorArm, e.Op, e.Capability, e.Path)
 		}
@@ -168,6 +176,17 @@ func checkPlanEntry(e agentplan.Entry) error {
 	if e.Op == agentplan.OpReplaceSection && e.Marker == "" {
 		return fmt.Errorf("%w: section replace with no marker for %s", errMalformedPlanEntry, e.Path)
 	}
+	if e.Op == agentplan.OpDeliverTree {
+		if e.Source == "" {
+			return fmt.Errorf("%w: tree delivery with no source for %s", errMalformedPlanEntry, e.Path)
+		}
+		if e.Owner == "" {
+			// Without an owner line the copy fallback could not recognize its
+			// own delivery on the next apply, so it would either refuse to
+			// refresh forever or remove a directory it cannot vouch for.
+			return fmt.Errorf("%w: tree delivery with no owner line for %s", errMalformedPlanEntry, e.Path)
+		}
+	}
 	if e.Pre == agentplan.IfNotForeign && e.Owner == "" {
 		// Without an owner line the gate would answer "foreign" for every file
 		// that already exists, so a re-apply would silently stop refreshing its
@@ -241,6 +260,214 @@ func replacePlanSection(path, marker string, content []byte, mode fs.FileMode) e
 	merged += string(content)
 
 	return writePlanFile(path, []byte(merged), mode)
+}
+
+// treeCopyMaxLinkHops bounds how deep the copy fallback follows symlinks it
+// finds inside a delivered tree. A plugin tree's own shape needs none; the
+// allowance exists for links a tree carries internally, and the bound is what
+// keeps a link cycle from turning a fallback copy into an unbounded walk.
+const treeCopyMaxLinkHops = 4
+
+// treeDeliveryPrefersCopy decides, once per process, whether a tree delivery is
+// a symlink or a real copy. It is the single decision point for the fallback:
+// everything below it copies or links because this said so, rather than each
+// delivery re-deciding.
+//
+// Directory symlinks need elevated privileges on Windows, so a copy is the
+// default there. Everywhere else the symlink is preferred, because it leaves one
+// source of truth: the delivered tree tracks its source with no second copy to
+// go stale. A symlink write that fails anyway falls back to a copy at the call
+// site, which covers a filesystem that rejects links for its own reasons.
+//
+// It is a package variable so tests can exercise the fallback on a platform
+// where symlinks work.
+var treeDeliveryPrefersCopy = func() bool { return runtime.GOOS == "windows" }
+
+// deliverPlanTree is OpDeliverTree: make the tree at source readable at path,
+// as a symlink where that works and as a real copy where it does not.
+//
+// niwa recognizes its own delivery by shape and by content. A symlink is niwa's
+// -- only niwa plants one at a path it declared -- and is retargeted when its
+// source has moved, so a stale link heals on the next apply rather than serving
+// another instance's content. A directory is niwa's when it carries the sentinel
+// holding owner, and is then re-delivered wholesale, which is what makes a file
+// the source dropped leave the copy too. Anything else at the path is left
+// exactly as it is and fails the delivery, because replacing a tree means
+// removing it first and that is not a call to make on a guess.
+func deliverPlanTree(path, source, owner string, mode fs.FileMode) error {
+	source, err := filepath.Abs(source)
+	if err != nil {
+		return fmt.Errorf("resolving delivery source %s: %w", source, err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("creating directory for %s: %w", path, err)
+	}
+
+	info, err := os.Lstat(path)
+	switch {
+	case err != nil && !os.IsNotExist(err):
+		return fmt.Errorf("inspecting %s: %w", path, err)
+
+	case err == nil && info.Mode()&os.ModeSymlink != 0:
+		if treeLinkTargets(path, source) {
+			return nil
+		}
+		if rmErr := os.Remove(path); rmErr != nil {
+			return fmt.Errorf("replacing stale delivery link %s: %w", path, rmErr)
+		}
+
+	case err == nil && info.IsDir():
+		if !treeCopyIsNiwas(path, owner) {
+			return fmt.Errorf("%w: %s", errForeignDeliveryTarget, path)
+		}
+		if rmErr := os.RemoveAll(path); rmErr != nil {
+			return fmt.Errorf("refreshing delivered tree %s: %w", path, rmErr)
+		}
+
+	case err == nil:
+		return fmt.Errorf("%w: %s", errForeignDeliveryTarget, path)
+	}
+
+	if !treeDeliveryPrefersCopy() {
+		if linkErr := os.Symlink(source, path); linkErr == nil {
+			return nil
+		}
+		// The platform said symlinks were available and the write disagreed. A
+		// copy keeps the delivery usable rather than failing the apply.
+	}
+
+	if err := copyTree(source, path, mode, treeCopyMaxLinkHops); err != nil {
+		return fmt.Errorf("copying %s into %s: %w", source, path, err)
+	}
+	return writePlanFile(filepath.Join(path, agentplan.TreeMarkerFileName()), []byte(owner+"\n"), 0o644)
+}
+
+// treeLinkTargets reports whether the symlink at path resolves to source. A
+// relative target is resolved against the link's own directory, and a textual
+// mismatch is re-checked through fully resolved paths so a source reached by a
+// symlinked parent -- a linked home directory, an automounted volume -- is not
+// mistaken for a stale target.
+func treeLinkTargets(path, source string) bool {
+	target, err := os.Readlink(path)
+	if err != nil {
+		return false
+	}
+	if !filepath.IsAbs(target) {
+		target = filepath.Join(filepath.Dir(path), target)
+	}
+	if filepath.Clean(target) == filepath.Clean(source) {
+		return true
+	}
+
+	resolvedTarget, err := filepath.EvalSymlinks(target)
+	if err != nil {
+		return false
+	}
+	resolvedSource, err := filepath.EvalSymlinks(source)
+	if err != nil {
+		return false
+	}
+	return resolvedTarget == resolvedSource
+}
+
+// treeCopyIsNiwas reports whether the directory at path is a copy niwa
+// delivered, recognized by the owner line in the sentinel it wrote there.
+func treeCopyIsNiwas(path, owner string) bool {
+	data, err := os.ReadFile(filepath.Join(path, agentplan.TreeMarkerFileName()))
+	if err != nil {
+		return false
+	}
+	first, _, _ := strings.Cut(string(data), "\n")
+	return strings.TrimSpace(first) == strings.TrimSpace(owner)
+}
+
+// copyTree copies the tree at src to dst as real files and directories,
+// following symlinks rather than reproducing them: the fallback exists precisely
+// where links are unavailable, so a copy full of links would deliver nothing.
+// hops bounds how many symlinked directories deep the copy follows, so a link
+// cycle terminates.
+func copyTree(src, dst string, mode fs.FileMode, hops int) error {
+	if err := os.MkdirAll(dst, mode); err != nil {
+		return fmt.Errorf("creating %s: %w", dst, err)
+	}
+
+	entries, err := os.ReadDir(src)
+	if err != nil {
+		return fmt.Errorf("reading %s: %w", src, err)
+	}
+
+	for _, e := range entries {
+		srcPath := filepath.Join(src, e.Name())
+		dstPath := filepath.Join(dst, e.Name())
+
+		info, err := os.Lstat(srcPath)
+		if err != nil {
+			return fmt.Errorf("inspecting %s: %w", srcPath, err)
+		}
+
+		if info.Mode()&os.ModeSymlink != 0 {
+			if hops == 0 {
+				// Deeper than a delivered tree's own shape needs; a cycle is
+				// the likeliest cause, and stopping here bounds the copy.
+				continue
+			}
+			resolved, err := filepath.EvalSymlinks(srcPath)
+			if err != nil {
+				// A dangling link inside the source is the source's own gap;
+				// the copy carries it rather than failing the apply over it.
+				continue
+			}
+			resolvedInfo, err := os.Stat(resolved)
+			if err != nil {
+				continue
+			}
+			if resolvedInfo.IsDir() {
+				if err := copyTree(resolved, dstPath, mode, hops-1); err != nil {
+					return err
+				}
+				continue
+			}
+			if err := copyTreeFile(resolved, dstPath, resolvedInfo.Mode().Perm()); err != nil {
+				return err
+			}
+			continue
+		}
+
+		if info.IsDir() {
+			if err := copyTree(srcPath, dstPath, mode, hops); err != nil {
+				return err
+			}
+			continue
+		}
+
+		if !info.Mode().IsRegular() {
+			continue
+		}
+		if err := copyTreeFile(srcPath, dstPath, info.Mode().Perm()); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// copyTreeFile copies one regular file, preserving its permission bits.
+func copyTreeFile(src, dst string, perm fs.FileMode) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return fmt.Errorf("reading %s: %w", src, err)
+	}
+	defer in.Close()
+
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, perm)
+	if err != nil {
+		return fmt.Errorf("writing %s: %w", dst, err)
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
+		return fmt.Errorf("writing %s: %w", dst, err)
+	}
+	return out.Close()
 }
 
 // appendUniqueString appends s unless it is already present. The lists it

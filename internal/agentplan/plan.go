@@ -28,9 +28,9 @@ const (
 	OpReplaceSection
 
 	// OpDeliverTree links Source at Path, copying when the link cannot be
-	// made. It has no executor arm yet: the operation's implementation lands
-	// with the payload delivery that first needs it, and until then an entry
-	// carrying it is a named error rather than a silent skip.
+	// made. Owner is required: it is the line the executor writes into the
+	// delivered tree's sentinel file, and reads back to tell its own copy from
+	// a directory somebody else put at the name.
 	OpDeliverTree
 )
 
@@ -91,8 +91,9 @@ type Entry struct {
 	// Marker delimits the region OpReplaceSection rewrites.
 	Marker string
 
-	// Owner is the first line that identifies an existing file at Path as one
-	// niwa wrote. IfNotForeign reads it and nothing else does. It is a separate
+	// Owner is the line that identifies an existing path as one niwa wrote:
+	// the first line of the file for IfNotForeign, and the content of the
+	// sentinel inside a delivered tree for OpDeliverTree. It is a separate
 	// field from Marker because an entry can need both: a worktree's Codex
 	// document is a section replace delimited by the section heading, in a file
 	// whose ownership is decided by the generation marker on its first line.

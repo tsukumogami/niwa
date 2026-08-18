@@ -55,6 +55,33 @@ func applyToWorktreeFixture(t *testing.T) (*config.WorkspaceConfig, string, stri
 	return cfg, configDir, instanceRoot, worktreePath
 }
 
+// TestApplyToWorktreeDeliversPluginSkills covers the placement that matters
+// most: a session runs in a worktree, whose own root is the nearest project-root
+// marker, so a delivery that only reached the clone would reach no session at
+// all. Resolution here passes no fetcher, which is the property the assertion
+// really rests on -- the worktree re-delivers what the instance already fetched.
+func TestApplyToWorktreeDeliversPluginSkills(t *testing.T) {
+	cfg, configDir, instanceRoot, worktreePath := applyToWorktreeFixture(t)
+
+	marketplace := filepath.Join(instanceRoot, ".niwa", "marketplaces", "tools")
+	writeMarketplaceTree(t, marketplace)
+	plugins := []string{"shirabe@tools"}
+	cfg.Claude.Plugins = &plugins
+	cfg.Claude.Marketplaces = config.MarketplaceConfigs{{Source: "acme/tools"}}
+
+	if _, err := ApplyToWorktree(cfg, configDir, instanceRoot, worktreePath, "apps", "app", "ship-the-thing", "branch-xyz", WorktreeApplyOptions{}); err != nil {
+		t.Fatalf("ApplyToWorktree: %v", err)
+	}
+
+	delivered := filepath.Join(worktreePath, ".codex", "skills", "shirabe")
+	if _, err := os.Lstat(delivered); err != nil {
+		t.Fatalf("worktree received no skills delivery at %s: %v", delivered, err)
+	}
+	if _, err := os.Stat(filepath.Join(delivered, "skills", "review", "SKILL.md")); err != nil {
+		t.Errorf("delivered tree is missing its skill: %v", err)
+	}
+}
+
 func TestApplyToWorktreeInstallsContentRulesAndLayer(t *testing.T) {
 	cfg, configDir, instanceRoot, worktreePath := applyToWorktreeFixture(t)
 

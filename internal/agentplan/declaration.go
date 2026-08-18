@@ -120,12 +120,12 @@ var declarations = []Declaration{
 
 	// Row 5: workspace-declared plugin skills.
 	{Capability: PluginSkills, Agent: agent.AgentClaude, State: StateImplemented},
-	{
-		Capability: PluginSkills, Agent: agent.AgentCodex,
-		State:  StateUnavailable,
-		Kind:   ReasonNotBuilt,
-		Reason: "niwa does not yet deliver workspace-declared skills in a layout Codex loads.",
-	},
+	// The plugin tree is delivered whole into the project layer, where Codex
+	// resolves it to the same `<plugin>:<skill>` names Claude Code produces.
+	// There is deliberately no trust edge on this row: skills were measured to
+	// load from an untrusted layer, unlike every configuration key beside them,
+	// so requiring trust here would declare a dependency niwa does not have.
+	{Capability: PluginSkills, Agent: agent.AgentCodex, State: StateImplemented},
 
 	// Row 6: marketplace and plugin registration.
 	{Capability: MarketplaceRegistration, Agent: agent.AgentClaude, State: StateImplemented},

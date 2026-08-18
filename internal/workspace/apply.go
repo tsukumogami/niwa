@@ -1604,6 +1604,38 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		}
 	}
 
+	// Step 6.2: Deliver the workspace's declared plugin skills into each
+	// repository. The configured plugins are resolved to their trees once per
+	// apply -- resolution reads marketplace manifests and fetches a remote
+	// marketplace's content into this instance, neither of which belongs on a
+	// per-repository path -- and the resolved set is then delivered for every
+	// agent whose declaration says its skills arrive that way.
+	fetcher, _ := a.GitHubClient.(FetchClient)
+	pluginTrees, missingPlugins := ResolvePluginTrees(ctx, PluginSkillsInputs{
+		InstanceRoot: instanceRoot,
+		Plugins:      MergeInstanceOverrides(effectiveCfg).Plugins,
+		Marketplaces: effectiveCfg.Claude.Marketplaces,
+		RepoIndex:    repoIndex,
+		Fetcher:      fetcher,
+	})
+	for _, m := range missingPlugins {
+		allWarnings = append(allWarnings, m.String())
+	}
+	for _, cr := range classified {
+		if !ClaudeEnabled(effectiveCfg, cr.Repo.Name) {
+			continue
+		}
+		repoDir := filepath.Join(instanceRoot, cr.Group, cr.Repo.Name)
+		for _, ag := range agent.All() {
+			skills, err := InstallRepoSkills(repoDir, pluginTrees, agentplan.For(ag))
+			if err != nil {
+				return nil, fmt.Errorf("delivering plugin skills for %q: %w", cr.Repo.Name, err)
+			}
+			allWarnings = append(allWarnings, skills.Warnings...)
+			contentExcludes[repoDir] = append(contentExcludes[repoDir], skills.Excludes...)
+		}
+	}
+
 	// Step 6.4: Decide the worktree-delegation integration ONCE per apply
 	// (design Decisions 4 & 6), then thread it into every repo's
 	// SettingsMaterializer below. Running the probe once — not per repo — keeps
