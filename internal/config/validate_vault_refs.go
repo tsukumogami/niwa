@@ -362,6 +362,22 @@ func walkVaultRefsForUnknownProvider(cfg *WorkspaceConfig, known map[string]bool
 			}
 		}
 	}
+	// [mcp.servers.*] env and headers values are the two MaybeSecret slots
+	// in the agent-neutral MCP declaration. They take vault:// references
+	// like any other value slot, so the same-file provider rule applies.
+	for _, name := range cfg.MCP.MCPServerNames() {
+		srv := cfg.MCP.Servers[name]
+		for k, v := range srv.Env {
+			if err := check(fmt.Sprintf("mcp.servers.%s.env.%s", name, k), v.Plain); err != nil {
+				return err
+			}
+		}
+		for k, v := range srv.Headers {
+			if err := check(fmt.Sprintf("mcp.servers.%s.headers.%s", name, k), v.Plain); err != nil {
+				return err
+			}
+		}
+	}
 	// [files] source KEYS are plain strings; per R3 they may be
 	// vault:// references. Per the same-file rule we still validate
 	// that the referenced provider is declared here.

@@ -25,6 +25,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 
 	"github.com/tsukumogami/niwa/internal/config"
 	"github.com/tsukumogami/niwa/internal/keyreport"
@@ -274,6 +275,9 @@ func ResolveWorkspace(ctx context.Context, cfg *config.WorkspaceConfig, opts Res
 	if err := w.walkFilesKeys("files", out.Files); err != nil {
 		return nil, err
 	}
+	if err := w.walkMCP("mcp", out.MCP); err != nil {
+		return nil, err
+	}
 	for name, ov := range out.Repos {
 		if err := w.walkEnv(fmt.Sprintf("repos.%s.env", name), &ov.Env); err != nil {
 			return nil, err
@@ -437,6 +441,49 @@ func (w *walker) walkTable(prefix string, t config.EnvVarsTable, isSecretsTable 
 		t.Values[key] = resolved
 	}
 	return nil
+}
+
+// walkMCP resolves the env and headers values of every declared MCP server.
+//
+// The values are treated as the settings ones are: a vault:// reference
+// resolves to a secret, plaintext stays plaintext. Nothing niwa generates from
+// this declaration is allowed to rely on load-time expansion, so this walk is
+// what makes "everything written is already resolved" true rather than hoped
+// for -- a reference that got this far unresolved carries its mark into the
+// generator, which reports it instead of writing it.
+func (w *walker) walkMCP(prefix string, mcp config.MCPConfig) error {
+	for _, name := range mcp.MCPServerNames() {
+		srv := mcp.Servers[name]
+		for _, key := range sortedMaybeSecretKeys(srv.Env) {
+			resolved, err := w.resolveOne(fmt.Sprintf("%s.servers.%s.env.%s", prefix, name, key), srv.Env[key], false, declaration{})
+			if err != nil {
+				return err
+			}
+			srv.Env[key] = resolved
+		}
+		for _, key := range sortedMaybeSecretKeys(srv.Headers) {
+			resolved, err := w.resolveOne(fmt.Sprintf("%s.servers.%s.headers.%s", prefix, name, key), srv.Headers[key], false, declaration{})
+			if err != nil {
+				return err
+			}
+			srv.Headers[key] = resolved
+		}
+	}
+	return nil
+}
+
+// sortedMaybeSecretKeys orders a value map so resolution -- and any report it
+// produces -- is the same on every run.
+func sortedMaybeSecretKeys(m map[string]config.MaybeSecret) []string {
+	if len(m) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(m))
+	for key := range m {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // walkSettings resolves a SettingsConfig in place. Settings keys are

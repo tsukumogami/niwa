@@ -84,7 +84,7 @@ func TestLookupAnswersEachDeclaredPair(t *testing.T) {
 		{"implemented for claude", Hooks, agent.AgentClaude, StateImplemented, 0},
 		{"the empty agent is claude", Hooks, agent.Agent(""), StateImplemented, 0},
 		{"inherent gap for codex", RootSessionOrientation, agent.AgentCodex, StateUnavailable, ReasonAgentCannotReceive},
-		{"niwa's own debt for codex", MCPServers, agent.AgentCodex, StateUnavailable, ReasonNotBuilt},
+		{"niwa's own debt for codex", SessionEnvironment, agent.AgentCodex, StateUnavailable, ReasonNotBuilt},
 		{"claude's one gap", DirectoryTrust, agent.AgentClaude, StateUnavailable, ReasonNoSuchConcept},
 	}
 	for _, tt := range tests {
@@ -142,6 +142,7 @@ var codexDelivered = []Capability{
 	RepoOrientationDoc,
 	WorktreeOrientationDoc,
 	PluginSkills,
+	MCPServers,
 	DirectoryTrust,
 	GitExcludeBookkeeping,
 }

@@ -243,10 +243,14 @@ type WorkspaceConfig struct {
 	Repos     map[string]RepoOverride `toml:"repos"`
 	Content   ContentConfig           `toml:"content"`
 	Claude    ClaudeConfig            `toml:"claude"`
-	Env       EnvConfig               `toml:"env"`
-	Files     map[string]string       `toml:"files,omitempty"`
-	Instance  InstanceConfig          `toml:"instance,omitempty"`
-	Root      RootConfig              `toml:"root,omitempty"`
+	// MCP is the agent-neutral MCP server declaration under [mcp]. It is
+	// workspace-scoped, like [claude.marketplaces]: no override position
+	// merges it.
+	MCP      MCPConfig         `toml:"mcp,omitempty"`
+	Env      EnvConfig         `toml:"env"`
+	Files    map[string]string `toml:"files,omitempty"`
+	Instance InstanceConfig    `toml:"instance,omitempty"`
+	Root     RootConfig        `toml:"root,omitempty"`
 	// Vault carries the optional [vault] block (anonymous [vault.provider]
 	// or named [vault.providers.<name>] shape, plus [vault].team_only).
 	// nil when the config declares no vault providers.

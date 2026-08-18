@@ -147,11 +147,14 @@ var declarations = []Declaration{
 
 	// Row 8: MCP servers.
 	{Capability: MCPServers, Agent: agent.AgentClaude, State: StateImplemented},
+	// The workspace declares its servers once, agent-neutrally, and each
+	// agent's own format is generated from that declaration. The trust edge is
+	// the whole of what makes the Codex half work: an untrusted project layer
+	// is not parsed at all, so the generated entries would sit on disk unread.
 	{
 		Capability: MCPServers, Agent: agent.AgentCodex,
-		State:  StateUnavailable,
-		Kind:   ReasonNotBuilt,
-		Reason: "niwa does not yet generate Codex MCP server entries.",
+		State:    StateImplemented,
+		Requires: []Capability{DirectoryTrust},
 	},
 
 	// Row 9: environment variables in the session.

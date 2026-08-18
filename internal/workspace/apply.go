@@ -1636,6 +1636,58 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		}
 	}
 
+	// Step 6.3: Generate the workspace's declared MCP servers into each agent's
+	// own format. The declaration is agent-neutral and workspace-scoped, so it
+	// is resolved once and offered to every producer, each of which decides
+	// whether it takes a configuration at a given scope, where it goes, and
+	// whether the declaration can be expressed in its format at all.
+	//
+	// A declaration a producer cannot express fails the apply here rather than
+	// landing as a file: a generated configuration that an agent refuses to
+	// load takes every other server in it down with it, so the loud failure is
+	// the one that leaves a working session behind.
+	mcpServers, mcpWarnings := MCPServersFromConfig(effectiveCfg)
+	allWarnings = append(allWarnings, mcpWarnings...)
+	instanceOverrides := MergeInstanceOverrides(effectiveCfg)
+	mcpDestinations := mcpVerbatimDestinations(instanceOverrides.Files, instanceOverrides.InstanceFiles, instanceOverrides.RootFiles)
+	for _, ag := range agent.All() {
+		producer := agentplan.For(ag)
+
+		// One read of the developer's own configuration per agent, before any
+		// generation: a name it already defines merges with a generated one
+		// field by field rather than being overridden by it.
+		existingMCP, collisionWarning := ReadDeclaredMCPNames(a.DeveloperHome, producer.MCPCollisionSpec())
+		if collisionWarning != "" {
+			allWarnings = append(allWarnings, collisionWarning)
+		}
+		if report := producer.MCPVerbatimReport(mcpDestinations, len(mcpServers) > 0); report != "" {
+			allWarnings = append(allWarnings, report)
+		}
+
+		rootMCP, err := InstallMCPConfig(agentplan.MCPAtInstanceRoot, instanceRoot, mcpServers, existingMCP, producer)
+		if err != nil {
+			return nil, fmt.Errorf("generating the MCP configuration for the instance root: %w", err)
+		}
+		writtenFiles = append(writtenFiles, rootMCP.Written...)
+		exemptPaths = append(exemptPaths, rootMCP.Exempt...)
+		allWarnings = append(allWarnings, rootMCP.Warnings...)
+
+		for _, cr := range classified {
+			if !ClaudeEnabled(effectiveCfg, cr.Repo.Name) {
+				continue
+			}
+			repoDir := filepath.Join(instanceRoot, cr.Group, cr.Repo.Name)
+			repoMCP, err := InstallMCPConfig(agentplan.MCPInRepo, repoDir, mcpServers, existingMCP, producer)
+			if err != nil {
+				return nil, fmt.Errorf("generating the MCP configuration for %q: %w", cr.Repo.Name, err)
+			}
+			writtenFiles = append(writtenFiles, repoMCP.Written...)
+			exemptPaths = append(exemptPaths, repoMCP.Exempt...)
+			allWarnings = append(allWarnings, repoMCP.Warnings...)
+			contentExcludes[repoDir] = append(contentExcludes[repoDir], repoMCP.Excludes...)
+		}
+	}
+
 	// Step 6.4: Decide the worktree-delegation integration ONCE per apply
 	// (design Decisions 4 & 6), then thread it into every repo's
 	// SettingsMaterializer below. Running the probe once — not per repo — keeps
@@ -2209,6 +2261,7 @@ func (a *Applier) refreshWorktreeEnvs(in worktreeRefreshInputs) ([]ManagedFile, 
 				Stderr:                 a.Reporter.Writer(),
 				GlobalEnvExamplePolicy: in.globalEnvExamplePolicy,
 				GlobalEnvOutput:        in.globalEnvOutput,
+				DeveloperHome:          a.DeveloperHome,
 				// Decision 9: give the worktree the same delegation configuration
 				// the clone got on this apply, so the two do not drift.
 				WorktreeDelegation: in.worktreeDelegation,

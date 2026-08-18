@@ -472,6 +472,14 @@ type WorktreeApplyOptions struct {
 	// declaration, threaded so the worktree path resolves the same targets as
 	// the instance apply path. Empty when no global override is available.
 	GlobalEnvOutput config.OutputTargets
+	// DeveloperHome is the developer's own home directory, which is where a
+	// generated configuration's collision check resolves the developer's own
+	// agent configuration under. It arrives as data, exactly as
+	// Applier.DeveloperHome does: empty means the caller has not been wired to
+	// supply one, and the collision check is skipped rather than a home being
+	// resolved here -- which is what keeps the unit suites off a developer's
+	// files.
+	DeveloperHome string
 	// WorktreeDelegation carries the apply-time worktree-integration decision
 	// (probe result + niwa fallback path) so a worktree's settings record the
 	// same hook or deny entries as the clone it was made from. Without it the
@@ -571,6 +579,30 @@ func ApplyToWorktree(cfg *config.WorkspaceConfig, configDir, instanceRoot, workt
 		contentExcludes = append(contentExcludes, skills.Excludes...)
 	}
 	reportWorktreeWarnings(opts.Stderr, worktreePath, skillReports)
+
+	// 1c. The workspace's declared MCP servers, generated into the worktree for
+	//     the same reason: an agent that resolves a project root stops at the
+	//     worktree root, so a configuration written in the owning clone is never
+	//     read from here. A value this path could not resolve is left out with a
+	//     report rather than written as the reference it still is -- see the
+	//     unresolved note in step 2 for why cfg here can carry one.
+	mcpServers, mcpReports := MCPServersFromConfig(cfg)
+	for _, ag := range agent.All() {
+		producer := agentplan.For(ag)
+		existingMCP, collisionWarning := ReadDeclaredMCPNames(opts.DeveloperHome, producer.MCPCollisionSpec())
+		if collisionWarning != "" {
+			mcpReports = append(mcpReports, collisionWarning)
+		}
+		install, err := InstallMCPConfig(agentplan.MCPInRepo, worktreePath, mcpServers, existingMCP, producer)
+		if err != nil {
+			return nil, fmt.Errorf("generating the MCP configuration for worktree: %w", err)
+		}
+		written = append(written, install.Written...)
+		contentExcludes = append(contentExcludes, install.Excludes...)
+		collectExempt(opts.Exempt, install.Exempt)
+		mcpReports = append(mcpReports, install.Warnings...)
+	}
+	reportWorktreeWarnings(opts.Stderr, worktreePath, mcpReports)
 
 	// 2. Repo materializers (settings, files, hooks) targeted at the worktree.
 	//    Same shared loop the instance apply path uses, but with the
