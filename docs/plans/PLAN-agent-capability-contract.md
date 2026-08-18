@@ -1,6 +1,6 @@
 ---
 schema: plan/v1
-status: Draft
+status: Active
 execution_mode: single-pr
 upstream: docs/designs/current/DESIGN-agent-capability-contract.md
 milestone: "Agent Capability Contract"
@@ -11,7 +11,7 @@ issue_count: 7
 
 ## Status
 
-Draft
+Active
 
 This plan covers the first of two mandated pull requests (R9 of
 docs/prds/PRD-agent-capability-contract.md): the contract against existing
