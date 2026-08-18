@@ -144,6 +144,7 @@ var codexDelivered = []Capability{
 	PluginSkills,
 	MCPServers,
 	SessionEnvironment,
+	ApprovalPosture,
 	DirectoryTrust,
 	GitExcludeBookkeeping,
 }

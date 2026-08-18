@@ -23,6 +23,10 @@ promote = ["SHARED_TOKEN"]
 [session.env.vars]
 REGION = "eu-west-1"
 API_TOKEN = "vault://team/api-token"
+
+[session.posture]
+approvals = "on-request"
+sandbox = "workspace-write"
 `
 	result, err := Parse([]byte(input))
 	if err != nil {
@@ -43,6 +47,49 @@ API_TOKEN = "vault://team/api-token"
 	// pipeline's job and happens before anything is generated.
 	if got := env.Vars.Values["API_TOKEN"].Plain; got != "vault://team/api-token" {
 		t.Errorf("API_TOKEN = %q, want the reference carried through", got)
+	}
+
+	posture := result.Config.Session.Posture
+	if posture.Approvals != "on-request" {
+		t.Errorf("approvals = %q, want on-request", posture.Approvals)
+	}
+	if posture.Sandbox != "workspace-write" {
+		t.Errorf("sandbox = %q, want workspace-write", posture.Sandbox)
+	}
+}
+
+// TestPostureDeclarationsAreIndependentFields keeps the two posture keys apart
+// at the declaration surface, which is where the separation starts. A workspace
+// that declares one leaves the other empty, and empty is what every generator
+// reads as "write nothing" -- so relaxing approvals cannot reach the sandbox
+// even before a producer sees it.
+func TestPostureDeclarationsAreIndependentFields(t *testing.T) {
+	input := `
+[workspace]
+name = "test"
+
+[[sources]]
+org = "myorg"
+
+[session.posture]
+approvals = "never"
+`
+	result, err := Parse([]byte(input))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	posture := result.Config.Session.Posture
+	if posture.Approvals != "never" {
+		t.Errorf("approvals = %q, want never", posture.Approvals)
+	}
+	if posture.Sandbox != "" {
+		t.Errorf("declaring approvals set sandbox = %q; the two are separate decisions", posture.Sandbox)
+	}
+	if posture.IsEmpty() {
+		t.Error("a declaration with one posture key reports itself empty")
+	}
+	if !(SessionPostureConfig{}).IsEmpty() {
+		t.Error("a zero posture declaration does not report itself empty")
 	}
 }
 

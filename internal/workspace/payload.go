@@ -111,6 +111,24 @@ func MCPServersFromConfig(cfg *config.WorkspaceConfig) ([]agentplan.MCPServer, [
 	return servers, warnings
 }
 
+// SessionPostureFromConfig reads the workspace's declared approval and sandbox
+// posture into the form a producer takes.
+//
+// There is no resolution step and deliberately no default: a key the workspace
+// left unset arrives empty, and every producer treats an empty field as "write
+// nothing" rather than as a value to supply. That is what makes the delivery
+// opt-in end to end -- niwa has no posture of its own to fall back on, so it
+// cannot write one nobody asked for.
+func SessionPostureFromConfig(cfg *config.WorkspaceConfig) agentplan.SessionPosture {
+	if cfg == nil {
+		return agentplan.SessionPosture{}
+	}
+	return agentplan.SessionPosture{
+		Approvals: cfg.Session.Posture.Approvals,
+		Sandbox:   cfg.Session.Posture.Sandbox,
+	}
+}
+
 // ReadDeclaredMCPNames reads the server names the developer's own configuration
 // for one agent already defines, following the producer's spec.
 //
@@ -217,6 +235,11 @@ type PayloadRequest struct {
 	// Env is the workspace's declared session environment, resolved.
 	Env map[string]string
 
+	// Posture is the workspace's declared approval and sandbox posture. Its
+	// zero value means none was declared, and no producer turns that into a
+	// written key.
+	Posture agentplan.SessionPosture
+
 	// Existing are the server names the developer's own configuration for this
 	// agent already defines.
 	Existing []string
@@ -244,6 +267,7 @@ func InstallPayloadConfig(req PayloadRequest, producer agentplan.Producer) (*Pay
 		Dir:      req.Dir,
 		Servers:  req.Servers,
 		Env:      req.Env,
+		Posture:  req.Posture,
 		Existing: req.Existing,
 		Probe:    probe,
 	})

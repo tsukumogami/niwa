@@ -191,11 +191,18 @@ var declarations = []Declaration{
 
 	// Row 12: approval and sandbox posture.
 	{Capability: ApprovalPosture, Agent: agent.AgentClaude, State: StateImplemented},
+	// Opt-in and absent by default: a workspace that declares no posture has
+	// neither approval_policy nor sandbox_mode written, so the developer's own
+	// defaults stand. What is declared is written from its own key and reported
+	// at apply time, and neither key is ever derived from the other. The trust
+	// edge is the one rows 8 and 9 carry, measured the same way: both keys take
+	// effect from a trusted project layer and revert to their defaults when the
+	// trust entry is removed, so an untrusted layer would leave the posture on
+	// disk unread.
 	{
 		Capability: ApprovalPosture, Agent: agent.AgentCodex,
-		State:  StateUnavailable,
-		Kind:   ReasonNotBuilt,
-		Reason: "niwa writes neither a Codex approval policy nor a sandbox mode; the route is measured and unbuilt.",
+		State:    StateImplemented,
+		Requires: []Capability{DirectoryTrust},
 	},
 
 	// Row 13: hooks.

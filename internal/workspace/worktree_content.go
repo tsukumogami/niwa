@@ -604,17 +604,22 @@ func ApplyToWorktree(cfg *config.WorkspaceConfig, configDir, instanceRoot, workt
 	if err != nil {
 		return nil, err
 	}
+	sessionPosture := SessionPostureFromConfig(cfg)
 	for _, ag := range agent.All() {
 		producer := agentplan.For(ag)
 		existingMCP, collisionWarning := ReadDeclaredMCPNames(opts.DeveloperHome, producer.MCPCollisionSpec())
 		if collisionWarning != "" {
 			payloadReports = append(payloadReports, collisionWarning)
 		}
+		if report := producer.PostureReport(sessionPosture); report != "" {
+			payloadReports = append(payloadReports, report)
+		}
 		install, err := InstallPayloadConfig(PayloadRequest{
 			Scope:    agentplan.PayloadInRepo,
 			Dir:      worktreePath,
 			Servers:  mcpServers,
 			Env:      sessionEnv,
+			Posture:  sessionPosture,
 			Existing: existingMCP,
 		}, producer)
 		if err != nil {

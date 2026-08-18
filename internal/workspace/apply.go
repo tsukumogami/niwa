@@ -1661,8 +1661,22 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		return nil, err
 	}
 
+	// The declared posture, read once for the apply. Nothing resolves and
+	// nothing defaults: a workspace that declares none produces the zero value,
+	// which every producer writes nothing for.
+	sessionPosture := SessionPostureFromConfig(effectiveCfg)
+
 	for _, ag := range agent.All() {
 		producer := agentplan.For(ag)
+
+		// One posture line per agent per apply rather than one per generated
+		// file: what a workspace changed about a session is a fact about the
+		// workspace, and a developer who reads it once has read it. An agent
+		// whose posture this document does not carry, and a workspace that
+		// declared none, both report nothing.
+		if report := producer.PostureReport(sessionPosture); report != "" {
+			allWarnings = append(allWarnings, report)
+		}
 
 		// One read of the developer's own configuration per agent, before any
 		// generation: a name it already defines merges with a generated one
@@ -1680,6 +1694,7 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 			Dir:      instanceRoot,
 			Servers:  mcpServers,
 			Env:      sessionEnv,
+			Posture:  sessionPosture,
 			Existing: existingMCP,
 		}, producer)
 		if err != nil {
@@ -1701,6 +1716,7 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 				Dir:      repoDir,
 				Servers:  mcpServers,
 				Env:      sessionEnv,
+				Posture:  sessionPosture,
 				Existing: existingMCP,
 			}, producer)
 			if err != nil {

@@ -15,18 +15,20 @@ import (
 
 // This file is the producer side of the generated payload configuration: the
 // document niwa writes into a prepared tree carrying what a session reaches
-// out to and runs with. Two agent-neutral declarations feed it -- the MCP
-// servers (config.MCPConfig) and the session environment
-// (config.SessionEnvConfig) -- and this file turns each into whichever format
-// the agent it produces for actually reads.
+// out to and runs with. Three agent-neutral declarations feed it -- the MCP
+// servers (config.MCPConfig), the session environment
+// (config.SessionEnvConfig), and the approval and sandbox posture
+// (config.SessionPostureConfig) -- and this file turns each into whichever
+// format the agent it produces for actually reads.
 //
 // The two agents split the document differently, which is why one producer
-// method covers both declarations rather than one per declaration. Claude Code
-// reads project MCP servers from .mcp.json and its environment from the
-// settings document, so its payload here carries servers only. Codex reads
-// both out of a single project-layer configuration -- [mcp_servers.<name>] and
-// shell_environment_policy in the same file -- so a plan that wrote them
-// separately would have two entries racing for one path.
+// method covers every declaration rather than one method per declaration.
+// Claude Code reads project MCP servers from .mcp.json, and its environment and
+// its posture from the settings document, so its payload here carries servers
+// only. Codex reads all three out of a single project-layer configuration --
+// [mcp_servers.<name>], shell_environment_policy, approval_policy and
+// sandbox_mode in the same file -- so plans that wrote them separately would
+// have three entries racing for one path.
 //
 // Four measured properties of codex-cli 0.147.0 govern the generator, and each
 // one is mechanized below rather than left to care:
@@ -213,6 +215,13 @@ type PayloadInputs struct {
 	// it reach a file at all.
 	Env map[string]string
 
+	// Posture is the workspace's declared approval and sandbox posture, in
+	// niwa's neutral vocabulary. Its zero value means the workspace declared
+	// none, which every producer treats as "write nothing" rather than as a
+	// default to apply: an unset field here is how a session keeps the posture
+	// its developer chose.
+	Posture SessionPosture
+
 	// Existing are the server names the developer's own configuration for this
 	// agent already defines, read per MCPCollisionSpec. Empty means either that
 	// there are none or that the read could not be made -- which the caller
@@ -256,6 +265,13 @@ type payloadLayout struct {
 	// environment reaching this producer is simply not part of what it writes.
 	carriesEnv bool
 
+	// carriesPosture marks an agent that reads its approval and sandbox
+	// posture out of this same document. Claude Code leaves it false: its
+	// posture comes from the settings document, out of its own declaration,
+	// and the neutral posture table reaching this producer is not part of what
+	// it writes here.
+	carriesPosture bool
+
 	// owned marks a file that lands in a tree niwa does not own, putting it
 	// under the ownership rule: written only where the name is free or already
 	// carries niwa's marker.
@@ -293,12 +309,13 @@ var payloadLayouts = map[agent.Agent]payloadLayout{
 		verbatimFileName: claudeMCPFileName,
 	},
 	agent.AgentCodex: {
-		scope:       PayloadInRepo,
-		path:        []string{codexPayloadDirName, "config.toml"},
-		format:      payloadFormatCodexTOML,
-		carriesEnv:  true,
-		owned:       true,
-		unsupported: []MCPTransport{MCPTransportSSE},
+		scope:          PayloadInRepo,
+		path:           []string{codexPayloadDirName, "config.toml"},
+		format:         payloadFormatCodexTOML,
+		carriesEnv:     true,
+		carriesPosture: true,
+		owned:          true,
+		unsupported:    []MCPTransport{MCPTransportSSE},
 		collision: MCPCollisionSpec{
 			ConfigDirEnv: "CODEX_HOME",
 			ConfigDir:    []string{".codex"},
@@ -382,6 +399,10 @@ func (p Producer) PayloadPlan(in PayloadInputs) (*Plan, error) {
 	if err != nil {
 		return nil, err
 	}
+	deliversPosture, err := p.delivers(ApprovalPosture)
+	if err != nil {
+		return nil, err
+	}
 	layout, hasLayout := p.payloadLayout()
 	if !hasLayout || in.Dir == "" || layout.scope != in.Scope {
 		return &Plan{}, nil
@@ -395,7 +416,11 @@ func (p Producer) PayloadPlan(in PayloadInputs) (*Plan, error) {
 	if deliversEnv && layout.carriesEnv {
 		env = in.Env
 	}
-	if len(servers) == 0 && len(env) == 0 {
+	var posture SessionPosture
+	if deliversPosture && layout.carriesPosture {
+		posture = in.Posture
+	}
+	if len(servers) == 0 && len(env) == 0 && posture.IsZero() {
 		return &Plan{}, nil
 	}
 
@@ -408,15 +433,18 @@ func (p Producer) PayloadPlan(in PayloadInputs) (*Plan, error) {
 	if err := validateSessionEnv(env); err != nil {
 		return nil, err
 	}
+	if err := validateSessionPosture(posture); err != nil {
+		return nil, err
+	}
 
-	content, err := renderPayloadDocument(servers, env, layout)
+	content, err := renderPayloadDocument(servers, env, posture, layout)
 	if err != nil {
 		return nil, err
 	}
 
 	path := layout.payloadPath(in.Dir)
 	entry := Entry{
-		Capability: payloadCapability(env),
+		Capability: payloadCapability(servers, env),
 		Op:         OpWriteFile,
 		Path:       path,
 		Content:    content,
@@ -445,18 +473,23 @@ func (p Producer) PayloadPlan(in PayloadInputs) (*Plan, error) {
 // payloadCapability names which capability a generated payload document's write
 // is attributed to.
 //
-// One document, two declarations, one entry: the attribution names the
+// One document, three declarations, one entry: the attribution names the
 // capability that decides how the write is handled rather than trying to list
 // everything the file happens to contain. Resolved environment values are the
 // half that makes the document secret-bearing, so a document carrying them is
-// attributed to SessionEnvironment and a document carrying only servers to
-// MCPServers -- which is exactly the distinction the 0o600 mode assertion is
-// written against.
-func payloadCapability(env map[string]string) Capability {
-	if len(env) > 0 {
+// attributed to SessionEnvironment -- which is exactly the distinction the 0o600
+// mode assertion is written against. Below that, a document carrying servers is
+// the MCP delivery, and a document carrying neither exists only because a
+// posture was declared.
+func payloadCapability(servers []MCPServer, env map[string]string) Capability {
+	switch {
+	case len(env) > 0:
 		return SessionEnvironment
+	case len(servers) > 0:
+		return MCPServers
+	default:
+		return ApprovalPosture
 	}
-	return MCPServers
 }
 
 // excludePattern is the git-exclude pattern this agent's generated payload
@@ -689,12 +722,12 @@ func checkMCPCollisions(servers []MCPServer, existing []string, layout payloadLa
 // validates what niwa intended to write, and this validates what it actually
 // produced. It is what makes "a generated file never bricks a session" a
 // property of the bytes instead of a property of the code that built them.
-func renderPayloadDocument(servers []MCPServer, env map[string]string, layout payloadLayout) ([]byte, error) {
+func renderPayloadDocument(servers []MCPServer, env map[string]string, posture SessionPosture, layout payloadLayout) ([]byte, error) {
 	switch layout.format {
 	case payloadFormatClaudeJSON:
 		return renderClaudeMCP(servers)
 	case payloadFormatCodexTOML:
-		return renderCodexPayload(servers, env)
+		return renderCodexPayload(servers, env, posture)
 	default:
 		return nil, fmt.Errorf("agentplan: unknown payload document format %d", uint8(layout.format))
 	}
@@ -746,15 +779,15 @@ func renderClaudeMCP(servers []MCPServer) ([]byte, error) {
 }
 
 // renderCodexPayload builds the project-layer TOML: the ownership marker, one
-// [mcp_servers.<name>] table per server, and the shell environment policy when
-// the workspace declared one. The encoder does the quoting and the ordering, so
-// a name needing a quoted key cannot land as a differently-shaped document than
-// the one this function meant to write.
+// [mcp_servers.<name>] table per server, the shell environment policy when the
+// workspace declared one, and the posture keys it declared. The encoder does the
+// quoting and the ordering, so a name needing a quoted key cannot land as a
+// differently-shaped document than the one this function meant to write.
 //
-// Both halves are encoded in one pass because Codex loads the document whole:
-// one malformed table takes every valid sibling with it, so there is no
+// All three parts are encoded in one pass because Codex loads the document
+// whole: one malformed table takes every valid sibling with it, so there is no
 // "environment failed but the servers still work" outcome to design for.
-func renderCodexPayload(servers []MCPServer, env map[string]string) ([]byte, error) {
+func renderCodexPayload(servers []MCPServer, env map[string]string, posture SessionPosture) ([]byte, error) {
 	entries := make(map[string]any, len(servers))
 	for _, s := range servers {
 		transport, err := mcpTransport(s)
@@ -786,6 +819,17 @@ func renderCodexPayload(servers []MCPServer, env map[string]string) ([]byte, err
 	if len(entries) > 0 {
 		doc[codexMCPTable] = entries
 	}
+	// The posture keys, each from its own declared field. A field the
+	// workspace left empty contributes no key, so a document generated for a
+	// workspace that declared no posture is byte-identical to one generated
+	// before this delivery existed.
+	postureKeys, err := codexPostureKeys(posture)
+	if err != nil {
+		return nil, err
+	}
+	for key, value := range postureKeys {
+		doc[key] = value
+	}
 	if len(env) > 0 {
 		// Only the set sub-table. The policy's other keys decide what a
 		// session inherits from the developer's own environment, which is
@@ -803,7 +847,7 @@ func renderCodexPayload(servers []MCPServer, env map[string]string) ([]byte, err
 		return nil, fmt.Errorf("agentplan: rendering the payload document: %w", err)
 	}
 
-	if err := checkCodexPayloadDocument(buf.Bytes(), servers, env); err != nil {
+	if err := checkCodexPayloadDocument(buf.Bytes(), servers, env, posture); err != nil {
 		return nil, err
 	}
 	return buf.Bytes(), nil
@@ -812,18 +856,22 @@ func renderCodexPayload(servers []MCPServer, env map[string]string) ([]byte, err
 // checkCodexPayloadDocument decodes the complete generated document and checks
 // it against the measured schema: the servers that were meant to be there and
 // no others, exactly one of command and url on each, no field belonging to the
-// other transport, every value the type the schema expects, and an environment
-// policy carrying the declared variables and nothing else.
+// other transport, every value the type the schema expects, an environment
+// policy carrying the declared variables and nothing else, and the posture keys
+// the workspace declared and no posture key it did not.
 //
 // It runs over the decoded document rather than over the inputs on purpose.
 // What a session loads is these bytes, and the assertion worth making is about
 // them.
-func checkCodexPayloadDocument(data []byte, servers []MCPServer, env map[string]string) error {
+func checkCodexPayloadDocument(data []byte, servers []MCPServer, env map[string]string, posture SessionPosture) error {
 	var doc map[string]any
 	if _, err := toml.Decode(string(data), &doc); err != nil {
 		return fmt.Errorf("agentplan: the generated payload document is not valid TOML: %w", err)
 	}
 	if err := checkCodexEnvPolicy(doc, env); err != nil {
+		return err
+	}
+	if err := checkCodexPosture(doc, posture); err != nil {
 		return err
 	}
 
