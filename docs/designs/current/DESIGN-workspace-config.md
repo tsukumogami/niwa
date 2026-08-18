@@ -1,4 +1,5 @@
 ---
+schema: design/v1
 status: Current
 problem: |
   niwa needs a declarative TOML schema to replace a 700-line imperative bash
@@ -22,7 +23,7 @@ rationale: |
 
 ## Status
 
-Accepted
+Current
 
 ## Context and Problem Statement
 
@@ -589,6 +590,23 @@ type TelegramGroupConfig struct {
 11. Install repo CLAUDE.local.md files (expand variables, warn if `*.local*` missing from .gitignore)
 12. Install subdirectory CLAUDE.local.md files
 13. Copy hooks, generate settings.local.json, merge env files per repo
+
+## Implementation Approach
+
+The schema shipped as `internal/config`, which parses `workspace.toml` into the
+types this document describes, and `internal/workspace`, which materializes
+from them. Repo discovery, group classification, content placement, and the
+hooks, settings and environment tables each landed against the shapes named
+above.
+
+Two later changes moved keys this document defines, and both are recorded
+where they happened rather than rewritten into the history here.
+`docs/designs/current/DESIGN-claude-key-consolidation.md` moved the content
+hierarchy under the Claude namespace, and
+`docs/designs/current/DESIGN-agent-capability-contract.md` moved it back out
+once a second agent read the same declared content, adding the per-agent
+delivery gates in place of the single Claude-named one. The key names in this
+document reflect where they stand now.
 
 ## Scope
 
