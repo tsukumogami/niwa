@@ -28,10 +28,8 @@ func TestInstallWorkspaceContent(t *testing.T) {
 			Name:       "myws",
 			ContentDir: "claude",
 		},
-		Claude: config.ClaudeConfig{
-			Content: config.ContentConfig{
-				Workspace: config.ContentEntry{Source: "ws.md"},
-			},
+		Content: config.ContentConfig{
+			Workspace: config.ContentEntry{Source: "ws.md"},
 		},
 	}
 
@@ -85,12 +83,10 @@ func setupWorkspaceContentFixture(t *testing.T) (cfg *config.WorkspaceConfig, co
 
 	cfg = &config.WorkspaceConfig{
 		Workspace: config.WorkspaceMeta{Name: "myws", ContentDir: "claude"},
-		Claude: config.ClaudeConfig{
-			Content: config.ContentConfig{
-				Workspace: config.ContentEntry{Source: "ws.md"},
-				Groups:    map[string]config.ContentEntry{"public": {Source: "grp.md"}},
-				Repos:     map[string]config.RepoContentEntry{"myapp": {Source: "repos/myapp.md"}},
-			},
+		Content: config.ContentConfig{
+			Workspace: config.ContentEntry{Source: "ws.md"},
+			Groups:    map[string]config.ContentEntry{"public": {Source: "grp.md"}},
+			Repos:     map[string]config.RepoContentEntry{"myapp": {Source: "repos/myapp.md"}},
 		},
 	}
 	instanceRoot = filepath.Join(tmpDir, "instance")
@@ -424,11 +420,9 @@ func TestInstallGroupContent(t *testing.T) {
 			Name:       "myws",
 			ContentDir: "claude",
 		},
-		Claude: config.ClaudeConfig{
-			Content: config.ContentConfig{
-				Groups: map[string]config.ContentEntry{
-					"public": {Source: "public.md"},
-				},
+		Content: config.ContentConfig{
+			Groups: map[string]config.ContentEntry{
+				"public": {Source: "public.md"},
 			},
 		},
 	}
@@ -500,11 +494,9 @@ func TestInstallRepoContent(t *testing.T) {
 			Name:       "myws",
 			ContentDir: "claude",
 		},
-		Claude: config.ClaudeConfig{
-			Content: config.ContentConfig{
-				Repos: map[string]config.RepoContentEntry{
-					"myapp": {Source: "repos/myapp.md"},
-				},
+		Content: config.ContentConfig{
+			Repos: map[string]config.RepoContentEntry{
+				"myapp": {Source: "repos/myapp.md"},
 			},
 		},
 	}
@@ -575,14 +567,12 @@ func TestInstallRepoContentSubdirs(t *testing.T) {
 			Name:       "myws",
 			ContentDir: "claude",
 		},
-		Claude: config.ClaudeConfig{
-			Content: config.ContentConfig{
-				Repos: map[string]config.RepoContentEntry{
-					"tsuku": {
-						Source: "repos/tsuku.md",
-						Subdirs: map[string]string{
-							"website": "repos/tsuku-website.md",
-						},
+		Content: config.ContentConfig{
+			Repos: map[string]config.RepoContentEntry{
+				"tsuku": {
+					Source: "repos/tsuku.md",
+					Subdirs: map[string]string{
+						"website": "repos/tsuku-website.md",
 					},
 				},
 			},
@@ -652,10 +642,8 @@ func TestInstallRepoContentAutoDiscovery(t *testing.T) {
 			Name:       "myws",
 			ContentDir: "claude",
 		},
-		Claude: config.ClaudeConfig{
-			Content: config.ContentConfig{
-				// No explicit repos entries.
-			},
+		Content: config.ContentConfig{
+			// No explicit repos entries.
 		},
 	}
 
@@ -846,10 +834,8 @@ func TestInstallContentFileContainment(t *testing.T) {
 			Name:       "test",
 			ContentDir: "claude",
 		},
-		Claude: config.ClaudeConfig{
-			Content: config.ContentConfig{
-				Workspace: config.ContentEntry{Source: "../secret.md"},
-			},
+		Content: config.ContentConfig{
+			Workspace: config.ContentEntry{Source: "../secret.md"},
 		},
 	}
 
@@ -886,14 +872,12 @@ func TestInstallRepoContentSubdirContainment(t *testing.T) {
 			Name:       "test",
 			ContentDir: "claude",
 		},
-		Claude: config.ClaudeConfig{
-			Content: config.ContentConfig{
-				Repos: map[string]config.RepoContentEntry{
-					"myrepo": {
-						Source: "repos/myrepo.md",
-						Subdirs: map[string]string{
-							"../../escape": "repos/sub.md",
-						},
+		Content: config.ContentConfig{
+			Repos: map[string]config.RepoContentEntry{
+				"myrepo": {
+					Source: "repos/myrepo.md",
+					Subdirs: map[string]string{
+						"../../escape": "repos/sub.md",
 					},
 				},
 			},
@@ -964,13 +948,11 @@ func TestInstallRepoContentOverlayAppend(t *testing.T) {
 			Name:       "myws",
 			ContentDir: "claude",
 		},
-		Claude: config.ClaudeConfig{
-			Content: config.ContentConfig{
-				Repos: map[string]config.RepoContentEntry{
-					"myapp": {
-						Source:        "repos/myapp.md",
-						OverlaySource: "myapp-overlay.md",
-					},
+		Content: config.ContentConfig{
+			Repos: map[string]config.RepoContentEntry{
+				"myapp": {
+					Source:        "repos/myapp.md",
+					OverlaySource: "myapp-overlay.md",
 				},
 			},
 		},
@@ -1032,11 +1014,9 @@ func TestInstallRepoContentOverlayNoRegression(t *testing.T) {
 			Name:       "myws",
 			ContentDir: "claude",
 		},
-		Claude: config.ClaudeConfig{
-			Content: config.ContentConfig{
-				Repos: map[string]config.RepoContentEntry{
-					"myapp": {Source: "repos/myapp.md"},
-				},
+		Content: config.ContentConfig{
+			Repos: map[string]config.RepoContentEntry{
+				"myapp": {Source: "repos/myapp.md"},
 			},
 		},
 	}
@@ -1087,13 +1067,11 @@ func TestInstallRepoContentOverlaySourceEmptyOverlayDir(t *testing.T) {
 			Name:       "myws",
 			ContentDir: "claude",
 		},
-		Claude: config.ClaudeConfig{
-			Content: config.ContentConfig{
-				Repos: map[string]config.RepoContentEntry{
-					"myapp": {
-						Source:        "repos/myapp.md",
-						OverlaySource: "myapp-overlay.md",
-					},
+		Content: config.ContentConfig{
+			Repos: map[string]config.RepoContentEntry{
+				"myapp": {
+					Source:        "repos/myapp.md",
+					OverlaySource: "myapp-overlay.md",
 				},
 			},
 		},
@@ -1137,13 +1115,11 @@ func TestInstallRepoContentOverlayOnlyNoBase(t *testing.T) {
 			Name:       "myws",
 			ContentDir: "claude",
 		},
-		Claude: config.ClaudeConfig{
-			Content: config.ContentConfig{
-				Repos: map[string]config.RepoContentEntry{
-					"myapp": {
-						// Source is intentionally empty; OverlaySource only.
-						OverlaySource: "myapp-overlay.md",
-					},
+		Content: config.ContentConfig{
+			Repos: map[string]config.RepoContentEntry{
+				"myapp": {
+					// Source is intentionally empty; OverlaySource only.
+					OverlaySource: "myapp-overlay.md",
 				},
 			},
 		},
@@ -1183,11 +1159,9 @@ func TestInstallRepoContentOverlayOnlyNoBase(t *testing.T) {
 func TestInstallRepoContentOverlayOnlyNoBaseEmptyDir(t *testing.T) {
 	cfg := &config.WorkspaceConfig{
 		Workspace: config.WorkspaceMeta{Name: "myws", ContentDir: "claude"},
-		Claude: config.ClaudeConfig{
-			Content: config.ContentConfig{
-				Repos: map[string]config.RepoContentEntry{
-					"myapp": {OverlaySource: "myapp-overlay.md"},
-				},
+		Content: config.ContentConfig{
+			Repos: map[string]config.RepoContentEntry{
+				"myapp": {OverlaySource: "myapp-overlay.md"},
 			},
 		},
 	}

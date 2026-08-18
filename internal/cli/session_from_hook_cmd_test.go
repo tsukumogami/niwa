@@ -469,7 +469,7 @@ func TestFromHookCreate_ContentInstallFailureLeavesNoActiveSession(t *testing.T)
 
 	// Re-point the workspace config at a content source that is not on disk.
 	wsTOML := "[workspace]\nname = \"testws\"\ncontent_dir = \"claude\"\n\n" +
-		"[claude.content.repos." + f.repo + "]\nsource = \"repos/does-not-exist.md\"\n"
+		"[content.repos." + f.repo + "]\nsource = \"repos/does-not-exist.md\"\n"
 	if err := os.WriteFile(filepath.Join(f.root, ".niwa", "workspace.toml"), []byte(wsTOML), 0o644); err != nil {
 		t.Fatalf("rewrite workspace.toml: %v", err)
 	}

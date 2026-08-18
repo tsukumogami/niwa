@@ -187,10 +187,12 @@ func runRepoMaterializers(materializers []Materializer, in repoMaterializeInputs
 	}
 
 	var written []string
-	claudeOn := ClaudeEnabled(in.Cfg, in.RepoName)
+	hooksOn := hookOwningAgentsEnabled(in.Cfg, in.RepoName)
 	for _, m := range materializers {
-		// Skip hooks and settings materializers when claude is disabled.
-		if !claudeOn && (m.Name() == "hooks" || m.Name() == "settings") {
+		// The hooks and settings materializers write into the formats of
+		// whichever agent receives lifecycle hooks, so they follow that agent's
+		// gate and no other's. See hookOwningAgentsEnabled.
+		if !hooksOn && (m.Name() == "hooks" || m.Name() == "settings") {
 			continue
 		}
 
@@ -526,38 +528,32 @@ func ApplyToWorktree(cfg *config.WorkspaceConfig, configDir, instanceRoot, workt
 	// receives is the declaration table's answer rather than a caller's choice.
 	// A producer is what turns an agent into declared writes, so the installers
 	// below never see the agent as anything they could branch on.
-	if !ClaudeEnabled(cfg, repo) {
-		// Claude content is disabled for this repo; install only the
-		// worktree-context layer so the worktree still records its purpose.
-		var written, excludes []string
-		for _, ag := range agent.All() {
-			layerFiles, layerExcludes, err := installWorktreeContextLayer(cfg, configDir, instanceRoot, worktreePath, repo, purpose, branch, agentplan.For(ag), opts.Stderr, opts.Exempt)
-			if err != nil {
-				return nil, err
-			}
-			written = append(written, layerFiles...)
-			excludes = append(excludes, layerExcludes...)
-		}
-		// This branch takes none of the materialization below, so the coverage
-		// for what it did write is recorded here. A worktree that reads dirty
-		// is one the teardown refuses to reclaim, and the gate above is no
-		// reason to leave that behind.
-		if len(excludes) > 0 {
-			if err := gitexclude.EnsureRepoExclude(worktreePath, excludes...); err != nil {
-				return nil, fmt.Errorf("recording git exclude coverage for worktree %s: %w", repo, err)
-			}
-		}
-		return written, nil
+	// Each agent's gate, resolved once for this worktree's repository, and
+	// applied to that agent's producer alone. The shape this replaces read
+	// Claude's gate and, when it was off, returned early -- taking every Codex
+	// delivery in the worktree with it. Now a closed gate empties one agent's
+	// plans and leaves the other's untouched.
+	gated := func(ag agent.Agent) agentplan.Producer {
+		return agentplan.For(ag).Gated(AgentEnabled(cfg, repo, string(ag)))
 	}
+
+	// The materialization below (settings, hooks, the rules import) writes into
+	// one agent's own file formats and has no producer to carry a gate, so it
+	// asks the declaration table which agents receive hooks -- the mechanism
+	// those documents exist to register -- and then asks those agents' gates.
+	// Naming the agent here would put a delivery decision in a writer, and it
+	// would go stale the day a second agent grows a hook route.
+	materializeOwned := hookOwningAgentsEnabled(cfg, repo)
 
 	var written []string
 	var contentExcludes []string
+	var envOutputs []string
 
 	// 1. Owning repo's content, targeted at the worktree root. Same function the
 	//    instance apply path calls, so worktree and instance content cannot
 	//    drift on sources, composition, or the ownership rule.
 	for _, ag := range agent.All() {
-		result, err := InstallRepoContentTo(cfg, configDir, opts.OverlayDir, instanceRoot, worktreePath, group, repo, agentplan.For(ag))
+		result, err := InstallRepoContentTo(cfg, configDir, opts.OverlayDir, instanceRoot, worktreePath, group, repo, gated(ag))
 		if err != nil {
 			return nil, fmt.Errorf("installing repo content into worktree: %w", err)
 		}
@@ -583,7 +579,7 @@ func ApplyToWorktree(cfg *config.WorkspaceConfig, configDir, instanceRoot, workt
 		skillReports = append(skillReports, m.String())
 	}
 	for _, ag := range agent.All() {
-		skills, err := InstallRepoSkills(worktreePath, pluginTrees, agentplan.For(ag))
+		skills, err := InstallRepoSkills(worktreePath, pluginTrees, gated(ag))
 		if err != nil {
 			return nil, fmt.Errorf("delivering plugin skills into worktree: %w", err)
 		}
@@ -606,7 +602,7 @@ func ApplyToWorktree(cfg *config.WorkspaceConfig, configDir, instanceRoot, workt
 	}
 	sessionPosture := SessionPostureFromConfig(cfg)
 	for _, ag := range agent.All() {
-		producer := agentplan.For(ag)
+		producer := gated(ag)
 		existingMCP, collisionWarning := ReadDeclaredMCPNames(opts.DeveloperHome, producer.MCPCollisionSpec())
 		if collisionWarning != "" {
 			payloadReports = append(payloadReports, collisionWarning)
@@ -631,6 +627,97 @@ func ApplyToWorktree(cfg *config.WorkspaceConfig, configDir, instanceRoot, workt
 		payloadReports = append(payloadReports, install.Warnings...)
 	}
 	reportWorktreeWarnings(opts.Stderr, worktreePath, payloadReports)
+
+	// 2 and 2b. The materialization that writes into one agent's own formats,
+	//    behind that agent's gate. It is a separate function rather than an
+	//    indented block so the gate reads as one decision at one place.
+	if materializeOwned {
+		matFiles, matEnvOutputs, err := installWorktreeMaterialization(cfg, configDir, instanceRoot, worktreePath, group, repo, sessionEnv, opts)
+		if err != nil {
+			return nil, err
+		}
+		written = append(written, matFiles...)
+		envOutputs = append(envOutputs, matEnvOutputs...)
+	}
+
+	// 3. Worktree rules import: an absolute @import to the instance's
+	//    workspace-context.md, plus overlay/global where present. Reuses the
+	//    same write/append helpers the instance root uses. It is part of the
+	//    same agent's own configuration directory as the materialization above
+	//    and follows the same gate.
+	if materializeOwned {
+		rulesFiles, err := installWorktreeRulesImport(instanceRoot, worktreePath)
+		if err != nil {
+			return nil, err
+		}
+		written = append(written, rulesFiles...)
+	}
+
+	// 4. Worktree-specific layer naming the purpose and branch (or the
+	//    configured [content.worktree] template, when set).
+	//
+	//    Its exclude patterns join the set below rather than being dropped.
+	//    This layer can be the only thing that writes an agent's document into
+	//    the worktree -- when no content layer is configured, or when the
+	//    other agent's gate is closed -- so a discarded pattern here is a
+	//    worktree that reads dirty and a teardown that then refuses to reclaim
+	//    it.
+	for _, ag := range agent.All() {
+		layerFiles, layerExcludes, err := installWorktreeContextLayer(cfg, configDir, instanceRoot, worktreePath, repo, purpose, branch, gated(ag), opts.Stderr, opts.Exempt)
+		if err != nil {
+			return nil, err
+		}
+		written = append(written, layerFiles...)
+		contentExcludes = append(contentExcludes, layerExcludes...)
+	}
+
+	// Record git-ignore coverage for any custom secret-output target names so
+	// they stay invisible to the worktree's git status, matching the instance
+	// apply path's end state. The materializer already established coverage
+	// before writing; this re-asserts the full set idempotently.
+	//
+	// worktreeRulesFile (.claude/rules/worktree-imports.md) is the one
+	// niwa-authored worktree file under .claude/ whose name carries no ".local"
+	// infix, so the base "*.local*" pattern does not cover it. Without explicit
+	// coverage a freshly created worktree reads dirty to `git status
+	// --porcelain`, which makes the non-force from-hook teardown log-and-retain
+	// every delegated worktree (orphan accumulation). It is added here as an
+	// extra pattern — scoped to this exact path rather than widening the global
+	// niwaExcludePatterns — so genuine user-authored .claude/ files still show.
+	//
+	// The coverage is recorded whatever the gates said, and after every write
+	// rather than before the last of them: a worktree that reads dirty is one
+	// the teardown refuses to reclaim, and an agent being turned off is no
+	// reason to leave that behind.
+	excludeExtras := append([]string{worktreeRulesFile}, envOutputs...)
+	excludeExtras = append(excludeExtras, contentExcludes...)
+	if err := gitexclude.EnsureRepoExclude(worktreePath, excludeExtras...); err != nil {
+		return nil, fmt.Errorf("recording git exclude coverage for worktree %s: %w", repo, err)
+	}
+
+	// 5. Worktree-event hooks, run on create/apply. Analog of the instance
+	//    setup-script run: discovered from <configDir>/worktree-hooks/ and
+	//    executed against the worktree, with worktree context in the env.
+	//    These are the workspace's own lifecycle scripts, not an agent's, so
+	//    no agent's gate decides whether they run.
+	if err := runWorktreeHooks(configDir, worktreePath, repo, purpose, branch, opts.Stderr); err != nil {
+		return nil, err
+	}
+
+	return written, nil
+}
+
+// installWorktreeMaterialization runs the worktree's repo materializers and the
+// env inherit that follows them, returning the files written and the custom
+// secret-output target names the caller has to cover with a git exclude.
+//
+// It is the part of a worktree apply that writes into one agent's own settings
+// and hooks formats, which is why the caller runs it behind that agent's gate
+// rather than unconditionally. Everything in it was inline in ApplyToWorktree
+// before the gate restructure; the split is what keeps that gate a single
+// readable decision instead of a ninety-line indentation.
+func installWorktreeMaterialization(cfg *config.WorkspaceConfig, configDir, instanceRoot, worktreePath, group, repo string, sessionEnv map[string]string, opts WorktreeApplyOptions) ([]string, []string, error) {
+	var written []string
 
 	// 2. Repo materializers (settings, files, hooks) targeted at the worktree.
 	//    Same shared loop the instance apply path uses, but with the
@@ -680,7 +767,7 @@ func ApplyToWorktree(cfg *config.WorkspaceConfig, configDir, instanceRoot, workt
 	cloneRepoDir := filepath.Join(instanceRoot, group, repo)
 	inheritedEnv, inheritedUnresolved, err := readCloneEnvOutput(cloneRepoDir, cfg, repo, opts.GlobalEnvOutput)
 	if err != nil {
-		return nil, fmt.Errorf("reading clone env for worktree promote inheritance: %w", err)
+		return nil, nil, fmt.Errorf("reading clone env for worktree promote inheritance: %w", err)
 	}
 
 	matFiles, envOutputs, err := runRepoMaterializers(materializers, repoMaterializeInputs{
@@ -708,7 +795,7 @@ func ApplyToWorktree(cfg *config.WorkspaceConfig, configDir, instanceRoot, workt
 		SessionEnv: sessionEnv,
 	})
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	written = append(written, matFiles...)
 
@@ -724,57 +811,12 @@ func ApplyToWorktree(cfg *config.WorkspaceConfig, configDir, instanceRoot, workt
 		&DiscoveredEnv{WorkspaceFile: relWsEnv, RepoFiles: repoEnvFiles},
 	)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	written = append(written, envInherited...)
 	envOutputs = append(envOutputs, envCustomNames...)
 
-	// Record git-ignore coverage for any custom secret-output target names so
-	// they stay invisible to the worktree's git status, matching the instance
-	// apply path's end state. The materializer already established coverage
-	// before writing; this re-asserts the full set idempotently.
-	//
-	// worktreeRulesFile (.claude/rules/worktree-imports.md) is the one
-	// niwa-authored worktree file under .claude/ whose name carries no ".local"
-	// infix, so the base "*.local*" pattern does not cover it. Without explicit
-	// coverage a freshly created worktree reads dirty to `git status
-	// --porcelain`, which makes the non-force from-hook teardown log-and-retain
-	// every delegated worktree (orphan accumulation). It is added here as an
-	// extra pattern — scoped to this exact path rather than widening the global
-	// niwaExcludePatterns — so genuine user-authored .claude/ files still show.
-	excludeExtras := append([]string{worktreeRulesFile}, envOutputs...)
-	excludeExtras = append(excludeExtras, contentExcludes...)
-	if err := gitexclude.EnsureRepoExclude(worktreePath, excludeExtras...); err != nil {
-		return nil, fmt.Errorf("recording git exclude coverage for worktree %s: %w", repo, err)
-	}
-
-	// 3. Worktree rules import: an absolute @import to the instance's
-	//    workspace-context.md, plus overlay/global where present. Reuses the
-	//    same write/append helpers the instance root uses.
-	rulesFiles, err := installWorktreeRulesImport(instanceRoot, worktreePath)
-	if err != nil {
-		return nil, err
-	}
-	written = append(written, rulesFiles...)
-
-	// 4. Worktree-specific layer naming the purpose and branch (or the
-	//    configured [claude.content.worktree] template, when set).
-	for _, ag := range agent.All() {
-		layerFiles, _, err := installWorktreeContextLayer(cfg, configDir, instanceRoot, worktreePath, repo, purpose, branch, agentplan.For(ag), opts.Stderr, opts.Exempt)
-		if err != nil {
-			return nil, err
-		}
-		written = append(written, layerFiles...)
-	}
-
-	// 5. Worktree-event hooks, run on create/apply. Analog of the instance
-	//    setup-script run: discovered from <configDir>/worktree-hooks/ and
-	//    executed against the worktree, with worktree context in the env.
-	if err := runWorktreeHooks(configDir, worktreePath, repo, purpose, branch, opts.Stderr); err != nil {
-		return nil, err
-	}
-
-	return written, nil
+	return written, envOutputs, nil
 }
 
 // defaultRepoMaterializers returns the canonical repo-materializer set
@@ -847,7 +889,7 @@ func installWorktreeRulesImport(instanceRoot, worktreePath string) ([]string, er
 // (idempotent). purpose is interpolated only into file content, never a
 // filesystem path.
 //
-// When [claude.content.worktree].source is configured, the section body is
+// When [content.worktree].source is configured, the section body is
 // rendered from that template (expanded with the worktree variables) in-memory
 // via renderWorktreeLayerBody -> renderContentFile (the same containment-checked
 // read+expand core every other content layer resolves its source through).
@@ -957,7 +999,7 @@ func worktreeLayerVars(cfg *config.WorkspaceConfig, instanceRoot, worktreePath, 
 }
 
 // renderWorktreeLayerBody produces the body of the worktree-context section.
-// When [claude.content.worktree].source is set, the body is rendered from that
+// When [content.worktree].source is set, the body is rendered from that
 // template via the shared containment-checked renderContentFile (expandVars +
 // checkContainment on the SOURCE path) with the worktree variable map. When
 // unset, the generated default purpose/branch body is returned — the Stage-1
@@ -969,7 +1011,7 @@ func worktreeLayerVars(cfg *config.WorkspaceConfig, instanceRoot, worktreePath, 
 // its directory. No transient file is written into the worktree. purpose is
 // only ever expanded into content, never a path component.
 func renderWorktreeLayerBody(cfg *config.WorkspaceConfig, configDir, instanceRoot, worktreePath, repo, purpose, branch string) (string, error) {
-	source := cfg.Claude.Content.Worktree.Source
+	source := cfg.Content.Worktree.Source
 	if source == "" {
 		// Stage-1 default: generated purpose/branch section, unchanged.
 		return fmt.Sprintf("This is a niwa worktree of repo %q.\n\n- Purpose: %s\n- Branch: %s\n",

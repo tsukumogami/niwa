@@ -14,43 +14,105 @@ import (
 
 func boolPtr(b bool) *bool { return &b }
 
-func TestClaudeEnabledDefault(t *testing.T) {
-	ws := &config.WorkspaceConfig{}
-	if !ClaudeEnabled(ws, "myrepo") {
-		t.Error("claude should default to true when no override exists")
-	}
-}
+// TestAgentEnabledResolution covers both gates at both positions and the
+// default. The two gates share one resolver, so the table asserts each agent's
+// key is read for that agent and that the other agent's key never answers for
+// it -- the property the restructure exists for.
+func TestAgentEnabledResolution(t *testing.T) {
+	claudeOff := &config.ClaudeOverride{Enabled: boolPtr(false)}
+	codexOff := &config.CodexOverride{Enabled: boolPtr(false)}
 
-func TestClaudeEnabledTrue(t *testing.T) {
-	ws := &config.WorkspaceConfig{
-		Repos: map[string]config.RepoOverride{
-			"myrepo": {Claude: &config.ClaudeOverride{Enabled: boolPtr(true)}},
+	tests := []struct {
+		name       string
+		ws         *config.WorkspaceConfig
+		wantClaude bool
+		wantCodex  bool
+	}{
+		{
+			name:       "no configuration at all",
+			ws:         &config.WorkspaceConfig{},
+			wantClaude: true,
+			wantCodex:  true,
+		},
+		{
+			name: "repo override sets neither key",
+			ws: &config.WorkspaceConfig{
+				Repos: map[string]config.RepoOverride{"myrepo": {Scope: "tactical"}},
+			},
+			wantClaude: true,
+			wantCodex:  true,
+		},
+		{
+			name: "claude.enabled = true",
+			ws: &config.WorkspaceConfig{
+				Repos: map[string]config.RepoOverride{
+					"myrepo": {Claude: &config.ClaudeOverride{Enabled: boolPtr(true)}},
+				},
+			},
+			wantClaude: true,
+			wantCodex:  true,
+		},
+		{
+			name: "claude.enabled = false leaves codex enabled",
+			ws: &config.WorkspaceConfig{
+				Repos: map[string]config.RepoOverride{"myrepo": {Claude: claudeOff}},
+			},
+			wantClaude: false,
+			wantCodex:  true,
+		},
+		{
+			name: "codex.enabled = false leaves claude enabled",
+			ws: &config.WorkspaceConfig{
+				Repos: map[string]config.RepoOverride{"myrepo": {Codex: codexOff}},
+			},
+			wantClaude: true,
+			wantCodex:  false,
+		},
+		{
+			name: "workspace-level keys apply when no repo override sets them",
+			ws: &config.WorkspaceConfig{
+				Claude: config.ClaudeConfig{Enabled: boolPtr(false)},
+				Codex:  config.CodexConfig{Enabled: boolPtr(true)},
+			},
+			wantClaude: false,
+			wantCodex:  true,
+		},
+		{
+			name: "repo override wins over the workspace-level key",
+			ws: &config.WorkspaceConfig{
+				Codex: config.CodexConfig{Enabled: boolPtr(false)},
+				Repos: map[string]config.RepoOverride{
+					"myrepo": {Codex: &config.CodexOverride{Enabled: boolPtr(true)}},
+				},
+			},
+			wantClaude: true,
+			wantCodex:  true,
 		},
 	}
-	if !ClaudeEnabled(ws, "myrepo") {
-		t.Error("claude.enabled = true should return true")
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := AgentEnabled(tt.ws, "myrepo", "claude"); got != tt.wantClaude {
+				t.Errorf("AgentEnabled(claude) = %v, want %v", got, tt.wantClaude)
+			}
+			if got := AgentEnabled(tt.ws, "myrepo", "codex"); got != tt.wantCodex {
+				t.Errorf("AgentEnabled(codex) = %v, want %v", got, tt.wantCodex)
+			}
+		})
 	}
 }
 
-func TestClaudeEnabledFalse(t *testing.T) {
+// TestAgentEnabledUnknownAgentDefaultsOpen pins the fail-open direction for an
+// agent niwa declares no gate key for: a gate nobody wrote is not a reason to
+// withhold a delivery.
+func TestAgentEnabledUnknownAgentDefaultsOpen(t *testing.T) {
 	ws := &config.WorkspaceConfig{
 		Repos: map[string]config.RepoOverride{
 			"myrepo": {Claude: &config.ClaudeOverride{Enabled: boolPtr(false)}},
 		},
 	}
-	if ClaudeEnabled(ws, "myrepo") {
-		t.Error("claude.enabled = false should return false")
-	}
-}
-
-func TestClaudeEnabledNilPointer(t *testing.T) {
-	ws := &config.WorkspaceConfig{
-		Repos: map[string]config.RepoOverride{
-			"myrepo": {Scope: "tactical"}, // claude not set
-		},
-	}
-	if !ClaudeEnabled(ws, "myrepo") {
-		t.Error("claude = nil (unset) should default to true")
+	if !AgentEnabled(ws, "myrepo", "some-future-agent") {
+		t.Error("an agent with no gate key should be enabled")
 	}
 }
 
@@ -988,10 +1050,10 @@ func baseWS() *config.WorkspaceConfig {
 		Claude: config.ClaudeConfig{
 			Hooks:    config.HooksConfig{"pre_tool_use": {{Scripts: []string{"base.sh"}}}},
 			Settings: config.SettingsConfig{"permissions": config.MaybeSecret{Plain: "bypass"}},
-			Content: config.ContentConfig{
-				Repos: map[string]config.RepoContentEntry{
-					"repo-a": {Source: "repos/repo-a.md"},
-				},
+		},
+		Content: config.ContentConfig{
+			Repos: map[string]config.RepoContentEntry{
+				"repo-a": {Source: "repos/repo-a.md"},
 			},
 		},
 		Env: config.EnvConfig{
@@ -1007,13 +1069,13 @@ func emptyOverlay() *config.WorkspaceOverlay {
 }
 
 // TestMergeWorkspaceOverlay_WorktreeContentSurvives verifies that a base-config
-// [claude.content.worktree].source is preserved through the overlay merge. The
+// [content.worktree].source is preserved through the overlay merge. The
 // merge deep-copies ContentConfig via copyContentConfig; this guards that the
 // Worktree field is copied alongside Workspace/Groups/Repos, so the configured
 // worktree template still renders in overlay-active workspaces.
 func TestMergeWorkspaceOverlay_WorktreeContentSurvives(t *testing.T) {
 	ws := baseWS()
-	ws.Claude.Content.Worktree = config.ContentEntry{Source: "worktree.md"}
+	ws.Content.Worktree = config.ContentEntry{Source: "worktree.md"}
 
 	// Use a non-empty overlay so the full merge/deep-copy path runs.
 	overlay := &config.WorkspaceOverlay{
@@ -1024,7 +1086,7 @@ func TestMergeWorkspaceOverlay_WorktreeContentSurvives(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if got := merged.Claude.Content.Worktree.Source; got != "worktree.md" {
+	if got := merged.Content.Worktree.Source; got != "worktree.md" {
 		t.Errorf("base worktree content source dropped on overlay merge: got %q, want %q", got, "worktree.md")
 	}
 }
@@ -1289,7 +1351,7 @@ func TestMergeWorkspaceOverlay_ContentSourceAddsNewEntry(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	entry, ok := merged.Claude.Content.Repos["repo-new"]
+	entry, ok := merged.Content.Repos["repo-new"]
 	if !ok {
 		t.Fatal("repo-new not found in merged content repos")
 	}
@@ -1341,7 +1403,7 @@ func TestMergeWorkspaceOverlay_ContentOverlaySetsOverlaySource(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	entry := merged.Claude.Content.Repos["repo-a"]
+	entry := merged.Content.Repos["repo-a"]
 	if entry.OverlaySource != "overlay/repo-a-extra.md" {
 		t.Errorf("repo-a OverlaySource = %q, want overlay/repo-a-extra.md", entry.OverlaySource)
 	}

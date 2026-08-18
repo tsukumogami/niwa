@@ -30,11 +30,9 @@ func applyToWorktreeFixture(t *testing.T) (*config.WorkspaceConfig, string, stri
 
 	cfg := &config.WorkspaceConfig{
 		Workspace: config.WorkspaceMeta{Name: "myws", ContentDir: "claude"},
-		Claude: config.ClaudeConfig{
-			Content: config.ContentConfig{
-				Repos: map[string]config.RepoContentEntry{
-					"app": {Source: "repos/app.md"},
-				},
+		Content: config.ContentConfig{
+			Repos: map[string]config.RepoContentEntry{
+				"app": {Source: "repos/app.md"},
 			},
 		},
 	}
@@ -181,9 +179,9 @@ func TestApplyToWorktreeInstallsOverlayMergedContent(t *testing.T) {
 	// Simulate the post-merge config: the app entry has base Source plus the
 	// OverlaySource that MergeWorkspaceOverlay populates from an overlay=
 	// content entry.
-	entry := cfg.Claude.Content.Repos["app"]
+	entry := cfg.Content.Repos["app"]
 	entry.OverlaySource = "app-overlay.md"
-	cfg.Claude.Content.Repos["app"] = entry
+	cfg.Content.Repos["app"] = entry
 
 	written, err := ApplyToWorktree(cfg, configDir, instanceRoot, worktreePath, "apps", "app", "ship-the-thing", "branch-xyz",
 		WorktreeApplyOptions{OverlayDir: overlayDir})
@@ -214,9 +212,9 @@ func TestApplyToWorktreeInstallsOverlayMergedContent(t *testing.T) {
 func TestApplyToWorktreeOverlaySourceRequiresOverlayDir(t *testing.T) {
 	cfg, configDir, instanceRoot, worktreePath := applyToWorktreeFixture(t)
 
-	entry := cfg.Claude.Content.Repos["app"]
+	entry := cfg.Content.Repos["app"]
 	entry.OverlaySource = "app-overlay.md"
-	cfg.Claude.Content.Repos["app"] = entry
+	cfg.Content.Repos["app"] = entry
 
 	_, err := ApplyToWorktree(cfg, configDir, instanceRoot, worktreePath, "apps", "app", "ship-the-thing", "branch-xyz",
 		WorktreeApplyOptions{}) // OverlayDir left empty
@@ -229,7 +227,7 @@ func TestApplyToWorktreeOverlaySourceRequiresOverlayDir(t *testing.T) {
 }
 
 // TestApplyToWorktreeRendersConfiguredTemplate pins Stage-3: when
-// [claude.content.worktree].source is set, the worktree-context section is
+// [content.worktree].source is set, the worktree-context section is
 // rendered from that template with the worktree variables ({purpose}/{branch}/
 // {repo_name}/{worktree_path}) expanded, replacing the default body.
 func TestApplyToWorktreeRendersConfiguredTemplate(t *testing.T) {
@@ -240,7 +238,7 @@ func TestApplyToWorktreeRendersConfiguredTemplate(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(configDir, "claude", "worktree.md"), []byte(tmpl), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	cfg.Claude.Content.Worktree = config.ContentEntry{Source: "worktree.md"}
+	cfg.Content.Worktree = config.ContentEntry{Source: "worktree.md"}
 
 	if _, err := ApplyToWorktree(cfg, configDir, instanceRoot, worktreePath, "apps", "app", "ship-the-thing", "branch-xyz", WorktreeApplyOptions{}); err != nil {
 		t.Fatalf("ApplyToWorktree: %v", err)
@@ -276,7 +274,7 @@ func TestApplyToWorktreeRendersConfiguredTemplate(t *testing.T) {
 
 // TestApplyToWorktreeConfiguredTemplateIsIdempotent pins idempotency for the
 // CONFIGURED template path (not just the default-layer path): re-applying with a
-// [claude.content.worktree].source set must replace the worktree-context section
+// [content.worktree].source set must replace the worktree-context section
 // in place, so the sentinel heading and the template body each appear exactly
 // once after multiple applies.
 func TestApplyToWorktreeConfiguredTemplateIsIdempotent(t *testing.T) {
@@ -286,7 +284,7 @@ func TestApplyToWorktreeConfiguredTemplateIsIdempotent(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(configDir, "claude", "worktree.md"), []byte(tmpl), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	cfg.Claude.Content.Worktree = config.ContentEntry{Source: "worktree.md"}
+	cfg.Content.Worktree = config.ContentEntry{Source: "worktree.md"}
 
 	for i := 0; i < 3; i++ {
 		if _, err := ApplyToWorktree(cfg, configDir, instanceRoot, worktreePath, "apps", "app", "ship-the-thing", "branch-xyz", WorktreeApplyOptions{}); err != nil {
@@ -323,7 +321,7 @@ func TestApplyToWorktreeTemplateWritesNoTempFile(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(configDir, "claude", "worktree.md"), []byte(tmpl), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	cfg.Claude.Content.Worktree = config.ContentEntry{Source: "worktree.md"}
+	cfg.Content.Worktree = config.ContentEntry{Source: "worktree.md"}
 
 	if _, err := ApplyToWorktree(cfg, configDir, instanceRoot, worktreePath, "apps", "app", "ship-the-thing", "branch-xyz", WorktreeApplyOptions{}); err != nil {
 		t.Fatalf("ApplyToWorktree: %v", err)
@@ -336,11 +334,11 @@ func TestApplyToWorktreeTemplateWritesNoTempFile(t *testing.T) {
 }
 
 // TestApplyToWorktreeUnsetTemplateUsesDefaultLayer is the regression guard for
-// the additive contract: with no [claude.content.worktree] configured, the
+// the additive contract: with no [content.worktree] configured, the
 // Stage-1 default purpose/branch layer is produced unchanged.
 func TestApplyToWorktreeUnsetTemplateUsesDefaultLayer(t *testing.T) {
 	cfg, configDir, instanceRoot, worktreePath := applyToWorktreeFixture(t)
-	// cfg.Claude.Content.Worktree is the zero ContentEntry (unset).
+	// cfg.Content.Worktree is the zero ContentEntry (unset).
 
 	if _, err := ApplyToWorktree(cfg, configDir, instanceRoot, worktreePath, "apps", "app", "ship-the-thing", "branch-xyz", WorktreeApplyOptions{}); err != nil {
 		t.Fatalf("ApplyToWorktree: %v", err)
@@ -505,11 +503,9 @@ func TestApplyToWorktreeLeavesGitStatusClean(t *testing.T) {
 	}
 	cfg := &config.WorkspaceConfig{
 		Workspace: config.WorkspaceMeta{Name: "myws", ContentDir: "claude"},
-		Claude: config.ClaudeConfig{
-			Content: config.ContentConfig{
-				Repos: map[string]config.RepoContentEntry{
-					"app": {Source: "repos/app.md"},
-				},
+		Content: config.ContentConfig{
+			Repos: map[string]config.RepoContentEntry{
+				"app": {Source: "repos/app.md"},
 			},
 		},
 	}

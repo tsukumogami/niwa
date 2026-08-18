@@ -1582,15 +1582,15 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		writtenFiles = append(writtenFiles, globalFiles...)
 	}
 
-	// Step 6: Install repo-level CLAUDE.local.md files (and subdirectories).
-	// Skip repos with claude = false.
+	// Step 6: Install the repo-level orientation documents (and subdirectories).
+	// Each agent's plan is produced behind that agent's own enabled gate, so a
+	// repository that turns one agent off still receives the other's full
+	// delivery.
 	for _, cr := range classified {
-		if !ClaudeEnabled(effectiveCfg, cr.Repo.Name) {
-			continue
-		}
-
+		repoDir := filepath.Join(instanceRoot, cr.Group, cr.Repo.Name)
 		for _, ag := range agent.All() {
-			result, err := InstallRepoContent(effectiveCfg, configDir, overlayDir, instanceRoot, cr.Group, cr.Repo.Name, ag)
+			producer := agentplan.For(ag).Gated(AgentEnabled(effectiveCfg, cr.Repo.Name, string(ag)))
+			result, err := InstallRepoContentTo(effectiveCfg, configDir, overlayDir, instanceRoot, repoDir, cr.Group, cr.Repo.Name, producer)
 			if err != nil {
 				return nil, fmt.Errorf("installing repo content for %q: %w", cr.Repo.Name, err)
 			}
@@ -1599,7 +1599,6 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 			}
 			writtenFiles = append(writtenFiles, result.WrittenFiles...)
 			exemptPaths = append(exemptPaths, result.Exempt...)
-			repoDir := filepath.Join(instanceRoot, cr.Group, cr.Repo.Name)
 			contentExcludes[repoDir] = append(contentExcludes[repoDir], result.Excludes...)
 		}
 	}
@@ -1622,12 +1621,10 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		allWarnings = append(allWarnings, m.String())
 	}
 	for _, cr := range classified {
-		if !ClaudeEnabled(effectiveCfg, cr.Repo.Name) {
-			continue
-		}
 		repoDir := filepath.Join(instanceRoot, cr.Group, cr.Repo.Name)
 		for _, ag := range agent.All() {
-			skills, err := InstallRepoSkills(repoDir, pluginTrees, agentplan.For(ag))
+			producer := agentplan.For(ag).Gated(AgentEnabled(effectiveCfg, cr.Repo.Name, string(ag)))
+			skills, err := InstallRepoSkills(repoDir, pluginTrees, producer)
 			if err != nil {
 				return nil, fmt.Errorf("delivering plugin skills for %q: %w", cr.Repo.Name, err)
 			}
@@ -1667,7 +1664,10 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 	sessionPosture := SessionPostureFromConfig(effectiveCfg)
 
 	for _, ag := range agent.All() {
-		producer := agentplan.For(ag)
+		// The instance root belongs to no repository, so the gate that applies
+		// here is the workspace-level one -- the same lookup, asked with no
+		// repository name.
+		producer := agentplan.For(ag).Gated(AgentEnabled(effectiveCfg, "", string(ag)))
 
 		// One posture line per agent per apply rather than one per generated
 		// file: what a workspace changed about a session is a fact about the
@@ -1704,13 +1704,14 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		exemptPaths = append(exemptPaths, rootPayload.Exempt...)
 		allWarnings = append(allWarnings, rootPayload.Warnings...)
 
-		// No repository gate here. Which agent's payload is produced is the
-		// declaration table's answer, and a Claude-named per-repository switch
-		// in front of a loop that produces every agent's payload would decide
-		// for an agent that has never heard of it. The Claude gate belongs in
-		// the Claude producer's own inputs.
+		// The per-repository gate is this agent's own, applied to this agent's
+		// producer. A Claude-named switch in front of a loop that produces
+		// every agent's payload would decide for an agent that has never heard
+		// of it, which is why the gate arrives here as a producer input rather
+		// than as a skip around the loop.
 		for _, cr := range classified {
 			repoDir := filepath.Join(instanceRoot, cr.Group, cr.Repo.Name)
+			repoProducer := agentplan.For(ag).Gated(AgentEnabled(effectiveCfg, cr.Repo.Name, string(ag)))
 			repoPayload, err := InstallPayloadConfig(PayloadRequest{
 				Scope:    agentplan.PayloadInRepo,
 				Dir:      repoDir,
@@ -1718,7 +1719,7 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 				Env:      sessionEnv,
 				Posture:  sessionPosture,
 				Existing: existingMCP,
-			}, producer)
+			}, repoProducer)
 			if err != nil {
 				return nil, fmt.Errorf("generating the payload configuration for %q: %w", cr.Repo.Name, err)
 			}

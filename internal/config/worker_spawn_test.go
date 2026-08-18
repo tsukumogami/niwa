@@ -27,7 +27,7 @@ name = "ws"
 
 NIWA_WORKER_SPAWN_COMMAND = "/opt/bin/fake-claude"
 
-[claude.content.workspace]
+[content.workspace]
 source = "workspace.md"
 `,
 		},
@@ -40,7 +40,7 @@ name = "ws"
 [env.vars]
 NIWA_WORKER_SPAWN_COMMAND = "/opt/bin/fake-claude"
 
-[claude.content.workspace]
+[content.workspace]
 source = "workspace.md"
 `,
 		},
@@ -60,7 +60,7 @@ NIWA_WORKER_SPAWN_COMMAND = "/opt/bin/fake-claude"
 [groups.apps]
 visibility = "private"
 
-[claude.content.workspace]
+[content.workspace]
 source = "workspace.md"
 `,
 		},
@@ -73,7 +73,7 @@ name = "ws"
 [env.vars]
 NIWA_WORKER_SPAWN_COMMAND = "/opt/bin/fake-claude"
 
-[claude.content.workspace]
+[content.workspace]
 source = "workspace.md"
 `,
 		},
@@ -108,7 +108,7 @@ name = "ws"
 LOG_LEVEL = "debug"
 CLAUDE_CONFIG = "/some/path"
 
-[claude.content.workspace]
+[content.workspace]
 source = "workspace.md"
 `
 	result, err := Parse([]byte(input))

@@ -182,7 +182,10 @@ type SkillsReconcileSpec struct {
 // SkillsReconcileSpec returns what the caller must reconcile for one delivery.
 func (p Producer) SkillsReconcileSpec(in SkillsInputs) SkillsReconcileSpec {
 	skills := p.skillsDir(in.Dir)
-	if skills == "" {
+	// A closed gate reconciles nothing, for the reason Gated documents: it
+	// stops the delivery, and an empty Keep set here would turn that into a
+	// removal of what an earlier apply delivered.
+	if skills == "" || p.gateClosed {
 		return SkillsReconcileSpec{}
 	}
 

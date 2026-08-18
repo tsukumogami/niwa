@@ -20,7 +20,7 @@ func hasVaultPrefix(s string) bool {
 // validateNoVaultRefs performs the post-parse walk that rejects
 // vault:// URIs in contexts where PRD R3 forbids them:
 //
-//   - [claude.content.*] source paths (never a secret)
+//   - [content.*] source paths (never a secret)
 //   - [env.files] source paths (file references, not values)
 //   - [vault.providers.*] / [vault.provider] config field values (can't
 //     self-reference)
@@ -62,8 +62,8 @@ func validateNoVaultRefs(cfg *WorkspaceConfig) error {
 		}
 	}
 
-	// [claude.content.*] source paths.
-	if err := checkContentSourcesForVault(&cfg.Claude.Content); err != nil {
+	// [content.*] source paths.
+	if err := checkContentSourcesForVault(&cfg.Content); err != nil {
 		return err
 	}
 
@@ -138,27 +138,27 @@ func describeShape(cfg *WorkspaceConfig) vaultRegistryShape {
 	return shape
 }
 
-// checkContentSourcesForVault walks [claude.content.*] entries and
+// checkContentSourcesForVault walks [content.*] entries and
 // rejects any source that begins with vault://.
 func checkContentSourcesForVault(c *ContentConfig) error {
 	if c == nil {
 		return nil
 	}
 	if hasVaultPrefix(c.Workspace.Source) {
-		return fmt.Errorf("claude.content.workspace.source must not be a vault:// reference: %q", c.Workspace.Source)
+		return fmt.Errorf("content.workspace.source must not be a vault:// reference: %q", c.Workspace.Source)
 	}
 	for name, entry := range c.Groups {
 		if hasVaultPrefix(entry.Source) {
-			return fmt.Errorf("claude.content.groups.%s.source must not be a vault:// reference: %q", name, entry.Source)
+			return fmt.Errorf("content.groups.%s.source must not be a vault:// reference: %q", name, entry.Source)
 		}
 	}
 	for name, entry := range c.Repos {
 		if hasVaultPrefix(entry.Source) {
-			return fmt.Errorf("claude.content.repos.%s.source must not be a vault:// reference: %q", name, entry.Source)
+			return fmt.Errorf("content.repos.%s.source must not be a vault:// reference: %q", name, entry.Source)
 		}
 		for sub, src := range entry.Subdirs {
 			if hasVaultPrefix(src) {
-				return fmt.Errorf("claude.content.repos.%s.subdirs.%s must not be a vault:// reference: %q", name, sub, src)
+				return fmt.Errorf("content.repos.%s.subdirs.%s must not be a vault:// reference: %q", name, sub, src)
 			}
 		}
 	}

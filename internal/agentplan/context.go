@@ -34,19 +34,50 @@ const contextFileMode = 0o644
 // production, which is why For is the only way to make one.
 type Producer struct {
 	ag agent.Agent
+
+	// gateClosed is this agent's own enabled gate, turned off. It is a field
+	// on the producer rather than a check at each call site because that is
+	// what makes the gate structurally per-agent: a producer carries one
+	// agent, so a gate it carries cannot reach any other agent's plan, and the
+	// executor downstream sees only entries that already survived it.
+	gateClosed bool
 }
 
 // For returns the producer that declares plans for ag. The zero Agent resolves
-// to Claude, matching internal/agent's fail-safe contract.
+// to Claude, matching internal/agent's fail-safe contract. The producer it
+// returns is ungated; a caller that has a scope's gate applies it with Gated.
 func For(ag agent.Agent) Producer { return Producer{ag: ag} }
 
-// delivers reports whether the declaration table says this agent receives c.
-// The lookup is fail-closed: a pair the table cannot answer for is an error
-// rather than a silent "no".
+// Gated returns a copy of p whose plans are empty when enabled is false.
+//
+// This is where [claude] enabled and [codex] enabled land. Each one is read
+// for its own agent and handed to that agent's producer, so a gate filters the
+// plan it was set on and no other -- a repository with Claude disabled still
+// receives its full Codex delivery, and the reverse. The previous shape read
+// one agent's key in front of a loop over every agent, which is the same
+// boolean deciding two agents' deliveries; no spelling of the key would have
+// fixed that.
+//
+// The gate deliberately does not reach the reconciliation specs' removals:
+// turning a gate off is a request to stop delivering, not a request to delete
+// what an earlier apply delivered. What niwa tracks in the managed-file record
+// is still cleaned up by the record, exactly as it is for any other path a
+// current apply stops producing.
+func (p Producer) Gated(enabled bool) Producer {
+	p.gateClosed = !enabled
+	return p
+}
+
+// delivers reports whether the declaration table says this agent receives c and
+// this agent's gate is open. The lookup is fail-closed: a pair the table cannot
+// answer for is an error rather than a silent "no".
 func (p Producer) delivers(c Capability) (bool, error) {
 	d, err := Lookup(c, p.ag)
 	if err != nil {
 		return false, err
+	}
+	if p.gateClosed {
+		return false, nil
 	}
 	return d.State == StateImplemented, nil
 }

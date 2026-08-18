@@ -34,18 +34,24 @@ content_dir = "claude"
 # visibility = "private"
 
 # --- Per-repo overrides ---
-# [repos.my-repo]
-# claude = false
+# Each agent's enabled key gates that agent's delivery for the repo and
+# nothing else, so turning one off leaves the other's delivery whole.
+# [repos.my-repo.claude]
+# enabled = false
+# [repos.my-repo.codex]
+# enabled = false
 #
 # --- Explicit repos (from outside source orgs) ---
 # [repos.external-tool]
 # url = "git@github.com:other-org/tool.git"
 # group = "private"
 
-# --- Claude Code configuration, content hierarchy, environment ---
-# See docs/designs/DESIGN-workspace-config.md for full schema reference.
-# [claude.content.workspace]
+# --- Content hierarchy (agent-neutral: every agent's session reads it) ---
+# [content.workspace]
 # source = "workspace.md"
+
+# --- Claude Code configuration, environment ---
+# See docs/designs/DESIGN-workspace-config.md for full schema reference.
 # [claude]
 # marketplaces = ["my-org/my-plugins"]
 # plugins = ["my-tool@my-plugins"]
@@ -161,8 +167,9 @@ visibility = "<vis-value>"
 # no live visibility, so name membership is what places the repo in a group.
 repos = ["<bootstrap-repo>"]
 
-# CLAUDE.md content hierarchy: drop a workspace.md in .niwa/claude/ to populate.
-# [claude.content.workspace]
+# Content hierarchy: drop a workspace.md in .niwa/claude/ to populate. It is
+# agent-neutral -- each agent's session reads it under that agent's own filename.
+# [content.workspace]
 # source = "workspace.md"
 
 # See https://github.com/tsukumogami/niwa/blob/main/docs/guides/workspace-config-sources.md

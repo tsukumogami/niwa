@@ -367,7 +367,7 @@ vars = { EXTRA_FLAG = "claude-only" }
 	}
 }
 
-// TestParseRejectsVaultURIInContent covers the [claude.content.*]
+// TestParseRejectsVaultURIInContent covers the [content.*]
 // branch of the R3 deny list.
 func TestParseRejectsVaultURIInContent(t *testing.T) {
 	cases := []struct {
@@ -378,7 +378,7 @@ func TestParseRejectsVaultURIInContent(t *testing.T) {
 			name: "workspace source",
 			input: `[workspace]
 name = "ws"
-[claude.content.workspace]
+[content.workspace]
 source = "vault://secret-md"
 `,
 		},
@@ -386,7 +386,7 @@ source = "vault://secret-md"
 			name: "group source",
 			input: `[workspace]
 name = "ws"
-[claude.content.groups.public]
+[content.groups.public]
 source = "vault://secret-md"
 `,
 		},
@@ -394,7 +394,7 @@ source = "vault://secret-md"
 			name: "repo source",
 			input: `[workspace]
 name = "ws"
-[claude.content.repos.foo]
+[content.repos.foo]
 source = "vault://secret-md"
 `,
 		},

@@ -79,7 +79,7 @@ func InstallGroupContent(cfg *config.WorkspaceConfig, configDir, instanceRoot, g
 // so is the outermost layer of every composed repository document, so the two
 // cannot drift on which file the workspace layer comes from.
 func renderWorkspaceLayer(cfg *config.WorkspaceConfig, configDir, instanceRoot string) (string, bool, error) {
-	source := cfg.Claude.Content.Workspace.Source
+	source := cfg.Content.Workspace.Source
 	if source == "" {
 		return "", false, nil
 	}
@@ -104,7 +104,7 @@ func renderWorkspaceLayer(cfg *config.WorkspaceConfig, configDir, instanceRoot s
 // than from the workspace content_dir, because the overlay carries its own file
 // layout.
 func renderGroupLayer(cfg *config.WorkspaceConfig, configDir, instanceRoot, groupName string) (string, bool, error) {
-	entry, ok := cfg.Claude.Content.Groups[groupName]
+	entry, ok := cfg.Content.Groups[groupName]
 	if !ok || entry.Source == "" {
 		return "", false, nil
 	}
@@ -195,7 +195,7 @@ func InstallRepoContentTo(cfg *config.WorkspaceConfig, configDir, overlayDir, in
 	}
 
 	// Resolve source: explicit entry or auto-discovery.
-	entry, hasExplicit := cfg.Claude.Content.Repos[repoName]
+	entry, hasExplicit := cfg.Content.Repos[repoName]
 	source := ""
 	if hasExplicit {
 		source = entry.Source
