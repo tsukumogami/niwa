@@ -552,6 +552,13 @@ func ApplyToWorktree(cfg *config.WorkspaceConfig, configDir, instanceRoot, workt
 	// 1. Owning repo's content, targeted at the worktree root. Same function the
 	//    instance apply path calls, so worktree and instance content cannot
 	//    drift on sources, composition, or the ownership rule.
+	//
+	//    What each agent's chain came to travels to step 1c, which declares a
+	//    budget covering it. The worktree layer at step 4 adds its own section
+	//    to the same document afterwards; it is a heading and a line or two
+	//    about the purpose and branch, and the headroom the budget carries is
+	//    sized to absorb far more than that.
+	contextChains := map[agent.Agent]int{}
 	for _, ag := range agent.All() {
 		result, err := InstallRepoContentTo(cfg, configDir, opts.OverlayDir, instanceRoot, worktreePath, group, repo, gated(ag))
 		if err != nil {
@@ -561,6 +568,7 @@ func ApplyToWorktree(cfg *config.WorkspaceConfig, configDir, instanceRoot, workt
 		contentExcludes = append(contentExcludes, result.Excludes...)
 		reportWorktreeContentWarnings(opts.Stderr, worktreePath, result.Warnings)
 		collectExempt(opts.Exempt, result.Exempt)
+		contextChains[ag] = result.ChainBytes
 	}
 
 	// 1b. The workspace's declared plugin skills, delivered into the worktree
@@ -611,12 +619,13 @@ func ApplyToWorktree(cfg *config.WorkspaceConfig, configDir, instanceRoot, workt
 			payloadReports = append(payloadReports, report)
 		}
 		install, err := InstallPayloadConfig(PayloadRequest{
-			Scope:    agentplan.PayloadInRepo,
-			Dir:      worktreePath,
-			Servers:  mcpServers,
-			Env:      sessionEnv,
-			Posture:  sessionPosture,
-			Existing: existingMCP,
+			Scope:             agentplan.PayloadInRepo,
+			Dir:               worktreePath,
+			Servers:           mcpServers,
+			Env:               sessionEnv,
+			Posture:           sessionPosture,
+			Existing:          existingMCP,
+			ContextChainBytes: contextChains[ag],
 		}, producer)
 		if err != nil {
 			return nil, fmt.Errorf("generating the payload configuration for worktree: %w", err)

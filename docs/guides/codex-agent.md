@@ -23,9 +23,15 @@ each repository's own `AGENTS.md`, because Codex reads context from the nearest
 project-root marker downward and never visits the directories above a
 repository. A linked worktree gets its own `AGENTS.override.md` — a worktree
 root is a project root as far as Codex is concerned, since its `.git` pointer
-file satisfies the marker check. The composed chain has a budget: Codex's
-default is 32768 bytes, and niwa raises it through the project layer, which is
-one of several things that only work in a trusted directory (see below).
+file satisfies the marker check. The composed chain has a budget: Codex spends
+32768 bytes across the whole chain by default and cuts the overflow off the
+innermost layer with nothing in the text and nothing on stderr. niwa measures
+the chain as it composes it, and where that chain needs more than the default it
+declares a `project_doc_max_bytes` covering it — with headroom, so the bound
+doesn't start truncating the first time a context file grows. Where the chain
+fits, niwa writes no budget key at all and whatever you set for yourself stands.
+Raising the budget is one of several things that only work in a trusted
+directory (see below).
 
 **Skills.** Workspace-declared plugin skills are delivered whole into
 `.codex/skills/<plugin>`, where Codex resolves them to the same
@@ -36,8 +42,9 @@ reading it out of Claude Code's plugin directory.
 **MCP servers, environment, and posture.** The workspace declares each of these
 once, agent-neutrally, and niwa generates the format each agent reads. For
 Codex that's a single project-layer `.codex/config.toml` carrying
-`[mcp_servers.*]` entries, a `shell_environment_policy.set` table, and — only
-if the workspace declared them — `approval_policy` and `sandbox_mode`. Every
+`[mcp_servers.*]` entries, a `shell_environment_policy.set` table, the
+`project_doc_max_bytes` above where one is needed, and — only if the workspace
+declared them — `approval_policy` and `sandbox_mode`. Every
 value is fully resolved before it's written; Codex expands nothing at load
 time. The whole document is validated and re-decoded before any of it is
 written, because one malformed entry fails Codex's entire config load and takes

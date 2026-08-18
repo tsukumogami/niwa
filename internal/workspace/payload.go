@@ -243,6 +243,13 @@ type PayloadRequest struct {
 	// Existing are the server names the developer's own configuration for this
 	// agent already defines.
 	Existing []string
+
+	// ContextChainBytes is what the context install for this same tree and this
+	// same agent reported as the worst chain a session there reads. The
+	// producer sizes the budget it declares from it, so a caller that installs
+	// context before the payload passes what that install measured and a caller
+	// with no context install behind it passes zero.
+	ContextChainBytes int
 }
 
 // InstallPayloadConfig generates one tree's payload configuration for one agent.
@@ -263,13 +270,14 @@ func InstallPayloadConfig(req PayloadRequest, producer agentplan.Producer) (*Pay
 	}
 
 	plan, err := producer.PayloadPlan(agentplan.PayloadInputs{
-		Scope:    req.Scope,
-		Dir:      req.Dir,
-		Servers:  req.Servers,
-		Env:      req.Env,
-		Posture:  req.Posture,
-		Existing: req.Existing,
-		Probe:    probe,
+		Scope:             req.Scope,
+		Dir:               req.Dir,
+		Servers:           req.Servers,
+		Env:               req.Env,
+		Posture:           req.Posture,
+		Existing:          req.Existing,
+		ContextChainBytes: req.ContextChainBytes,
+		Probe:             probe,
 	})
 	if err != nil {
 		return nil, err

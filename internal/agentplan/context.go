@@ -318,10 +318,13 @@ func (p Producer) composedRepoContextPlan(in RepoContextInputs, comp composition
 		sizes[sub.Dir] = p.appendOwnedEntry(plan, RepoOrientationDoc, in.Dir, sub.Dir, doc, sub.Probe)
 	}
 
-	if comp.docBudget > 0 {
-		if dir, size := deepestChain(in.Dir, sizes); size > comp.docBudget {
-			plan.Warnings = append(plan.Warnings, budgetWarning(dir, size, comp.docBudget))
-		}
+	// The worst chain travels out on the plan, where the generated project-layer
+	// configuration for the same tree turns it into a declared budget that
+	// covers it. Reporting an overflow here instead would move Codex's silent
+	// cut to a line niwa prints and still leave the developer to raise the
+	// budget by hand in a file niwa already writes.
+	if comp.measuresChain {
+		plan.ChainBytes = deepestChain(in.Dir, sizes)
 	}
 
 	return plan
@@ -365,12 +368,12 @@ func excludePattern(root, path string) string {
 	return filepath.ToSlash(rel)
 }
 
-// deepestChain returns the directory whose chain from root down is the largest,
-// and that chain's size. A session's budget is spent on the documents between
-// the project root and its working directory, so the worst case is the deepest
-// path through the declared set rather than the sum of all of them.
-func deepestChain(root string, sizes map[string]int) (string, int) {
-	worstDir, worst := root, sizes[root]
+// deepestChain returns the size of the largest chain from root down. A
+// session's budget is spent on the documents between the project root and its
+// working directory, so the worst case is the deepest path through the declared
+// set rather than the sum of all of them.
+func deepestChain(root string, sizes map[string]int) int {
+	worst := sizes[root]
 	for dir := range sizes {
 		total := 0
 		for ancestor, size := range sizes {
@@ -379,10 +382,10 @@ func deepestChain(root string, sizes map[string]int) (string, int) {
 			}
 		}
 		if total > worst {
-			worstDir, worst = dir, total
+			worst = total
 		}
 	}
-	return worstDir, worst
+	return worst
 }
 
 // isAncestorDir reports whether dir contains other. Both are absolute and

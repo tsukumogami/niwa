@@ -140,4 +140,15 @@ type Plan struct {
 	// repository's own file -- the opposite of what the refusal promised. The
 	// record entry still goes; only the deletion is exempted.
 	Exempt []string
+
+	// ChainBytes is how many bytes the documents this plan writes occupy in the
+	// worst chain a session reads under the tree it wrote them in. It is zero
+	// for a plan whose agent spends no shared budget across its context
+	// documents, and zero for every plan that is not a context plan.
+	//
+	// It travels on the plan because the size is a by-product of composing the
+	// chain and the caller cannot recompute it: the executor sees the entries,
+	// not the layers they were folded from. The generated project-layer
+	// configuration declares a budget covering it -- see codexBudgetFor.
+	ChainBytes int
 }

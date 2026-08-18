@@ -490,7 +490,7 @@ func TestNoServersProducesNoDocument(t *testing.T) {
 // say what the producer meant is caught even if every input passed validation.
 func TestGeneratedDocumentCheckCatchesADamagedOne(t *testing.T) {
 	good := []byte(generatedConfigMarker + "\n\n[mcp_servers.files]\ncommand = \"npx\"\n")
-	if err := checkCodexPayloadDocument(good, []MCPServer{{Name: "files", Command: "npx"}}, nil, SessionPosture{}); err != nil {
+	if err := checkCodexPayloadDocument(good, []MCPServer{{Name: "files", Command: "npx"}}, nil, SessionPosture{}, 0); err != nil {
 		t.Fatalf("a well-formed document was rejected: %v", err)
 	}
 
@@ -503,7 +503,7 @@ func TestGeneratedDocumentCheckCatchesADamagedOne(t *testing.T) {
 		"not valid toml":   "[mcp_servers.files\ncommand = \"npx\"\n",
 	}
 	for name, doc := range damaged {
-		if err := checkCodexPayloadDocument([]byte(doc), []MCPServer{{Name: "files", Command: "npx"}}, nil, SessionPosture{}); err == nil {
+		if err := checkCodexPayloadDocument([]byte(doc), []MCPServer{{Name: "files", Command: "npx"}}, nil, SessionPosture{}, 0); err == nil {
 			t.Errorf("%s: the check accepted a document it should not have", name)
 		}
 	}

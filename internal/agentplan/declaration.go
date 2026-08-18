@@ -95,9 +95,10 @@ var declarations = []Declaration{
 	// Row 3: the repository-level orientation document.
 	{Capability: RepoOrientationDoc, Agent: agent.AgentClaude, State: StateImplemented},
 	// The trust edge is about the byte budget, not the document: the composed
-	// chain is read whatever the trust state, but the project-layer key that
-	// raises the budget above the 32768-byte default is honored only in a
-	// trusted directory, and an over-budget chain is cut without a word.
+	// chain is read whatever the trust state, but the project-layer
+	// project_doc_max_bytes niwa writes to cover a chain past the 32768-byte
+	// default is honored only in a trusted directory, and without it an
+	// over-budget chain is cut without a word.
 	{
 		Capability: RepoOrientationDoc, Agent: agent.AgentCodex,
 		State:    StateImplemented,

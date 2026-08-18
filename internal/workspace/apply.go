@@ -786,6 +786,16 @@ func (a *Applier) Apply(ctx context.Context, cfg *config.WorkspaceConfig, config
 	return result.procedureErr
 }
 
+// contextChainKey identifies one composed context chain inside an apply: one
+// agent's documents in one repository's working tree. It is keyed by both
+// because the chains are per-agent -- two agents compose different layers into
+// different filenames in the same directory -- and the budget one of them
+// declares must be sized from its own.
+type contextChainKey struct {
+	agent agent.Agent
+	dir   string
+}
+
 // runPipeline executes the shared pipeline steps: discover repos, classify,
 // clone, and install content. It returns the pipeline results without writing
 // state.
@@ -1586,6 +1596,12 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 	// Each agent's plan is produced behind that agent's own enabled gate, so a
 	// repository that turns one agent off still receives the other's full
 	// delivery.
+	// What each agent's composed chain came to, per repository. Step 6.3 sizes
+	// that agent's declared context budget from it, and the two steps are
+	// separate loops over the same pairs, so the measurement is carried rather
+	// than recomputed -- the payload producer sees the entries a plan declared,
+	// not the layers they were folded from.
+	contextChains := map[contextChainKey]int{}
 	for _, cr := range classified {
 		repoDir := filepath.Join(instanceRoot, cr.Group, cr.Repo.Name)
 		for _, ag := range agent.All() {
@@ -1600,6 +1616,7 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 			writtenFiles = append(writtenFiles, result.WrittenFiles...)
 			exemptPaths = append(exemptPaths, result.Exempt...)
 			contentExcludes[repoDir] = append(contentExcludes[repoDir], result.Excludes...)
+			contextChains[contextChainKey{agent: ag, dir: repoDir}] = result.ChainBytes
 		}
 	}
 
@@ -1713,12 +1730,13 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 			repoDir := filepath.Join(instanceRoot, cr.Group, cr.Repo.Name)
 			repoProducer := agentplan.For(ag).Gated(AgentEnabled(effectiveCfg, cr.Repo.Name, string(ag)))
 			repoPayload, err := InstallPayloadConfig(PayloadRequest{
-				Scope:    agentplan.PayloadInRepo,
-				Dir:      repoDir,
-				Servers:  mcpServers,
-				Env:      sessionEnv,
-				Posture:  sessionPosture,
-				Existing: existingMCP,
+				Scope:             agentplan.PayloadInRepo,
+				Dir:               repoDir,
+				Servers:           mcpServers,
+				Env:               sessionEnv,
+				Posture:           sessionPosture,
+				Existing:          existingMCP,
+				ContextChainBytes: contextChains[contextChainKey{agent: ag, dir: repoDir}],
 			}, repoProducer)
 			if err != nil {
 				return nil, fmt.Errorf("generating the payload configuration for %q: %w", cr.Repo.Name, err)

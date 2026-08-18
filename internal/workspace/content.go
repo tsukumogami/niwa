@@ -143,6 +143,12 @@ type RepoContentResult struct {
 	// write rather than being restated by the caller, so a document niwa adds
 	// cannot arrive without the coverage that keeps the tree clean.
 	Excludes []string
+	// ChainBytes is how many bytes the documents this install wrote occupy in
+	// the worst chain a session reads under the target directory, zero for an
+	// agent that spends no shared budget across them. It goes on to the same
+	// tree's generated payload configuration, which declares a budget covering
+	// it.
+	ChainBytes int
 }
 
 // InstallRepoContent reads the repo content source file, expands template
@@ -286,6 +292,7 @@ func InstallRepoContentTo(cfg *config.WorkspaceConfig, configDir, overlayDir, in
 	result.WrittenFiles = append(result.WrittenFiles, written...)
 	result.Exempt = append(result.Exempt, plan.Exempt...)
 	result.Excludes = append(result.Excludes, excludes...)
+	result.ChainBytes = plan.ChainBytes
 	for _, w := range plan.Warnings {
 		result.Warnings = append(result.Warnings, ContentWarning{RepoName: repoName, Message: w})
 	}

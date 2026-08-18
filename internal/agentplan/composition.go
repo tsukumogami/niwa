@@ -29,17 +29,54 @@ import (
 //     slot and suppresses everything behind it, which is why a chain that
 //     composes to nothing must produce no file at all rather than an empty one.
 //   - The byte budget is one counter spent across the whole chain,
-//     outermost-first, and truncation is a raw cut with nothing on stderr. So a
-//     chain that would exceed it is reported here rather than silently losing
-//     its innermost layer.
+//     outermost-first, and truncation is a raw cut with nothing on stderr. So
+//     the chain is measured as it is composed, and the size travels out on the
+//     plan to the project-layer configuration that declares a budget covering
+//     it.
 
 // codexDocBudget is the default `project_doc_max_bytes` in codex-cli 0.147.0:
 // the number of bytes a session spends across the whole composed chain before
-// it starts cutting, silently. Raising it takes a project-layer configuration
-// key, which takes a trust entry -- neither of which this level of the delivery
-// writes -- so the composed chain is measured against the default and a chain
-// that would not fit is reported instead of truncated.
+// it starts cutting, silently. It is both the value a chain is measured against
+// and the floor of anything niwa declares -- see codexBudgetFor.
 const codexDocBudget = 32768
+
+// codexBudgetHeadroom is how many times the composed chain the declared budget
+// covers. An exact-fit declaration passes an "it all fits" check today and
+// starts cutting the innermost layer the moment any file in the chain grows by
+// a byte, and the thing being cut is the repository's own content with nothing
+// anywhere saying so.
+const codexBudgetHeadroom = 2
+
+// codexBudgetFor sizes the `project_doc_max_bytes` niwa declares for a tree
+// whose composed chain occupies chain bytes, and returns zero for a chain niwa
+// declares nothing for.
+//
+// Zero is the answer whenever the chain and its headroom still fit the agent's
+// own default, which is the ordinary case. Writing the key there would restate
+// a default to no effect -- and worse, a project layer outranks the developer's
+// own configuration, so a workspace whose chain is a few kilobytes would quietly
+// pull a developer who raised their budget back down to whatever niwa picked.
+// Lowering a budget somebody chose is not niwa's business; raising one its own
+// composition overflowed is.
+//
+// Past that point the declared value is the chain times the headroom, rounded
+// up to a whole multiple of the default. The rounding is what keeps the number
+// from tracking the chain byte for byte: without it, editing a line of a context
+// file would rewrite the generated configuration with a slightly different
+// integer on every apply.
+func codexBudgetFor(chain int) int {
+	if chain <= 0 {
+		return 0
+	}
+	want := chain * codexBudgetHeadroom
+	if want <= codexDocBudget {
+		return 0
+	}
+	if rem := want % codexDocBudget; rem != 0 {
+		want += codexDocBudget - rem
+	}
+	return want
+}
 
 // generationMarker is the first line of every context document niwa composes
 // into a working tree it does not own.
@@ -77,9 +114,11 @@ type composition struct {
 	// to the session while leaving the committed file untouched.
 	inlinesCommitted string
 
-	// docBudget bounds the composed chain a session reads. Zero means the agent
-	// declares no bound.
-	docBudget int
+	// measuresChain marks an agent whose composed chain is spent against a byte
+	// budget, so the plan carries the chain's size out to the producer that
+	// declares a budget covering it. It is false for an agent that reads its
+	// context documents whole.
+	measuresChain bool
 }
 
 // compositions is the per-agent table. A pair the map does not answer for gets
@@ -92,7 +131,7 @@ var compositions = map[agent.Agent]composition{
 		owned:               true,
 		composesOuterLayers: true,
 		inlinesCommitted:    "AGENTS.md",
-		docBudget:           codexDocBudget,
+		measuresChain:       true,
 	},
 }
 
@@ -227,12 +266,4 @@ func composeDocument(layers ...[]byte) []byte {
 // the repository's own file is now the only context a session there gets.
 func conflictWarning(path string) string {
 	return fmt.Sprintf("%s is occupied by something niwa did not write, so no context document was composed there; nothing at that path was modified or removed, and the session falls back to the repository's own content", path)
-}
-
-// budgetWarning is the line reported for a composed chain that would not fit the
-// agent's declared budget. The chain is written whole and the warning says what
-// will be lost, because the alternative -- cutting the chain here -- would
-// reproduce the silent truncation this check exists to surface, just earlier.
-func budgetWarning(dir string, size, budget int) string {
-	return fmt.Sprintf("the context chain a session reads under %s composes to %d bytes, over the %d-byte budget; the agent cuts the overflow from the innermost layer without reporting it, so trim the configured content or raise the budget", dir, size, budget)
 }

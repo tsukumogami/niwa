@@ -52,8 +52,10 @@ const (
 	// codexNativeName is the context file a repository commits itself.
 	codexNativeName = "AGENTS.md"
 	// codexDefaultBudget is Codex's documented default project_doc_max_bytes.
-	// A chain larger than this is exactly the case the apply-time report exists
-	// to cover, so the oversized-context scenario asserts against it.
+	// A chain larger than this is exactly the case the generated project layer
+	// raises the bound for, so the oversized-context scenario asserts both
+	// halves against it: that the fixture really overflows the default, and that
+	// what niwa declared covers the chain it composed.
 	codexDefaultBudget = 32768
 	// codexCredentialName is the developer's Codex login state. niwa must never
 	// read or write it.
@@ -97,6 +99,7 @@ func registerCodexAgentSteps(ctx *godog.ScenarioContext) {
 	ctx.Step(`^the Codex payload at "([^"]*)" is niwa's own$`, theCodexPayloadAtIsNiwasOwn)
 	ctx.Step(`^the Codex payload at "([^"]*)" declares MCP server "([^"]*)"$`, theCodexPayloadAtDeclaresMCPServer)
 	ctx.Step(`^the Codex payload at "([^"]*)" declares no credentials$`, theCodexPayloadAtDeclaresNoCredentials)
+	ctx.Step(`^the Codex payload at "([^"]*)" declares a budget covering the composed chain$`, theCodexPayloadAtDeclaresACoveringBudget)
 	ctx.Step(`^"([^"]*)" holds exactly (\d+) Codex config files?$`, theLocationHoldsNCodexConfigFiles)
 	ctx.Step(`^"([^"]*)" holds exactly (\d+) Codex skills trees?$`, theLocationHoldsNCodexSkillsTrees)
 	ctx.Step(`^the Codex skills tree "([^"]*)" at "([^"]*)" mirrors "([^"]*)"$`, theCodexSkillsTreeMirrors)
@@ -526,22 +529,33 @@ func theCodexContextAtExceedsDefaultBudget(ctx context.Context, loc string) erro
 	if s == nil {
 		return fmt.Errorf("no test state")
 	}
-	chain, _, err := codexContextChainAt(s, loc)
+	total, err := codexChainBytesAt(s, loc)
 	if err != nil {
 		return err
-	}
-	total := 0
-	for _, path := range chain {
-		info, err := os.Stat(path)
-		if err != nil {
-			return fmt.Errorf("stating %s: %w", path, err)
-		}
-		total += int(info.Size())
 	}
 	if total <= codexDefaultBudget {
 		return fmt.Errorf("Codex context at %s is %d bytes, which the %d-byte default already covers; the fixture is not exercising the budget", loc, total, codexDefaultBudget)
 	}
 	return nil
+}
+
+// codexChainBytesAt is what a session standing at loc spends of its byte
+// budget: the size of every file in the chain its discovery selects, summed in
+// the order it reads them.
+func codexChainBytesAt(s *testState, loc string) (int, error) {
+	chain, _, err := codexContextChainAt(s, loc)
+	if err != nil {
+		return 0, err
+	}
+	total := 0
+	for _, path := range chain {
+		info, err := os.Stat(path)
+		if err != nil {
+			return 0, fmt.Errorf("stating %s: %w", path, err)
+		}
+		total += int(info.Size())
+	}
+	return total, nil
 }
 
 // --- payload, skills ---------------------------------------------------
@@ -657,6 +671,54 @@ func theCodexPayloadAtDeclaresNoCredentials(ctx context.Context, loc string) err
 				return fmt.Errorf("%s mentions %q; niwa binds no Codex credentials", path, key)
 			}
 		}
+	}
+	return nil
+}
+
+// theCodexPayloadAtDeclaresACoveringBudget asserts that the bound a session at
+// loc loads is large enough for the chain that session reads.
+//
+// Both halves are measured off disk rather than restated from niwa's own
+// arithmetic: the chain is what Codex's discovery selects in that tree, and the
+// budget is what the generated configuration actually declares. An exact fit
+// passes an "it all fits" check today and truncates the first time any file in
+// the chain grows, so the bar is double the chain -- and truncation is a raw cut
+// with nothing on stderr, so nothing downstream would notice.
+func theCodexPayloadAtDeclaresACoveringBudget(ctx context.Context, loc string) error {
+	s := getState(ctx)
+	if s == nil {
+		return fmt.Errorf("no test state")
+	}
+	chain, err := codexChainBytesAt(s, loc)
+	if err != nil {
+		return err
+	}
+	dir, err := s.resolveLocation(loc)
+	if err != nil {
+		return err
+	}
+	path := codexPayloadPath(dir)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("no Codex payload a session at %s would load: %w", loc, err)
+	}
+	var doc struct {
+		Budget int64 `toml:"project_doc_max_bytes"`
+	}
+	if err := toml.Unmarshal(data, &doc); err != nil {
+		return fmt.Errorf("%s does not parse as TOML: %w\n%s", path, err, data)
+	}
+	if doc.Budget == 0 {
+		return fmt.Errorf("%s declares no project_doc_max_bytes, so the %d-byte chain a session at %s reads is cut at the %d-byte default with nothing said:\n%s", path, chain, loc, codexDefaultBudget, data)
+	}
+	if doc.Budget < int64(chain) {
+		return fmt.Errorf("%s declares project_doc_max_bytes = %d for a %d-byte chain; the innermost layer is cut without a word", path, doc.Budget, chain)
+	}
+	if doc.Budget < int64(2*chain) {
+		return fmt.Errorf("%s declares project_doc_max_bytes = %d, under double the %d-byte chain; a bound that fits exactly starts truncating the moment any file in the chain grows", path, doc.Budget, chain)
+	}
+	if doc.Budget < codexDefaultBudget {
+		return fmt.Errorf("%s declares project_doc_max_bytes = %d, under Codex's own %d-byte default; niwa raises a budget, it does not lower one", path, doc.Budget, codexDefaultBudget)
 	}
 	return nil
 }

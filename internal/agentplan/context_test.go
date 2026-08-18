@@ -2,7 +2,6 @@ package agentplan
 
 import (
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/tsukumogami/niwa/internal/agent"
@@ -243,13 +242,15 @@ func TestComposedRepoPlanRefusesAForeignPath(t *testing.T) {
 	}
 }
 
-// TestComposedRepoPlanReportsAnOverBudgetChain covers the truncation the agent
-// performs without a word. The chain is still written whole -- cutting it here
-// would reproduce the same silent loss earlier -- and the warning names the
-// directory whose session pays for it.
-func TestComposedRepoPlanReportsAnOverBudgetChain(t *testing.T) {
+// TestComposedRepoPlanMeasuresTheDeepestChain covers the measurement the
+// declared budget is sized from. The chain is written whole -- cutting it here
+// would reproduce the silent loss the budget exists against -- and what travels
+// out is the worst chain a session reads, which is the deepest path through the
+// declared documents rather than the sum of all of them.
+func TestComposedRepoPlanMeasuresTheDeepestChain(t *testing.T) {
 	dir := filepath.FromSlash("/ws/public/app")
 	docs := filepath.Join(dir, "docs")
+	notes := filepath.Join(dir, "notes")
 
 	half := make([]byte, codexDocBudget/2+1)
 	for i := range half {
@@ -260,19 +261,43 @@ func TestComposedRepoPlanReportsAnOverBudgetChain(t *testing.T) {
 		Dir:     dir,
 		Body:    half,
 		HasBody: true,
-		Subdirs: []SubdirContext{{Dir: docs, Body: half}},
+		Subdirs: []SubdirContext{{Dir: docs, Body: half}, {Dir: notes, Body: half}},
 	})
 	if err != nil {
 		t.Fatalf("RepoContextPlan: %v", err)
 	}
-	if len(plan.Entries) != 2 {
-		t.Fatalf("plan has %d entries, want 2: an over-budget chain is reported, not trimmed", len(plan.Entries))
+	if len(plan.Entries) != 3 {
+		t.Fatalf("plan has %d entries, want 3: an over-budget chain is covered, not trimmed", len(plan.Entries))
 	}
-	if len(plan.Warnings) != 1 {
-		t.Fatalf("plan declares %d warnings, want 1 naming the over-budget chain", len(plan.Warnings))
+	if len(plan.Warnings) != 0 {
+		t.Fatalf("plan declares %v; niwa raises the budget in the project layer rather than reporting the overflow", plan.Warnings)
 	}
-	if !strings.Contains(plan.Warnings[0], docs) {
-		t.Errorf("budget warning names %q, want the deepest directory %q", plan.Warnings[0], docs)
+
+	// The two subdirectories are siblings, so no session reads both. The worst
+	// chain is the repository document plus one of them.
+	root, sub := len(plan.Entries[0].Content), len(plan.Entries[1].Content)
+	if plan.ChainBytes != root+sub {
+		t.Errorf("plan reports a %d-byte chain, want the %d-byte deepest path rather than every document added up", plan.ChainBytes, root+sub)
+	}
+	if plan.ChainBytes <= codexDocBudget {
+		t.Errorf("the fixture composes %d bytes, which the %d-byte default already covers; it is not exercising the budget", plan.ChainBytes, codexDocBudget)
+	}
+}
+
+// TestClaudeRepoPlanMeasuresNoChain is the other half: an agent that reads its
+// context documents whole spends no shared counter, so its plan reports no
+// chain and nothing downstream declares a bound for it.
+func TestClaudeRepoPlanMeasuresNoChain(t *testing.T) {
+	plan, err := For(agent.AgentClaude).RepoContextPlan(RepoContextInputs{
+		Dir:     filepath.FromSlash("/ws/public/app"),
+		Body:    []byte("body\n"),
+		HasBody: true,
+	})
+	if err != nil {
+		t.Fatalf("RepoContextPlan: %v", err)
+	}
+	if plan.ChainBytes != 0 {
+		t.Errorf("plan reports a %d-byte chain for an agent that spends no shared budget", plan.ChainBytes)
 	}
 }
 

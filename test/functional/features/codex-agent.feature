@@ -269,14 +269,15 @@ Feature: prepare every instance for both agents
   # ---------------------------------------------------------------------
   # The byte budget. Codex spends one counter across the whole chain,
   # outermost-first, and truncates with no marker and nothing on stderr, so an
-  # over-budget chain eats the innermost layer in silence. niwa cannot raise the
-  # budget from where this delivery writes, so it reports the overflow at apply
-  # time instead -- and the report has to name the directory and say what gets
-  # lost, or the silence is only moved from Codex to niwa.
+  # over-budget chain eats the innermost layer in silence. niwa composes that
+  # chain, so it measures it, and declares a project_doc_max_bytes covering it in
+  # the project-layer configuration it already writes -- a report telling the
+  # developer to raise the budget by hand would only move the silence from Codex
+  # to niwa.
   # ---------------------------------------------------------------------
 
   @critical
-  Scenario: a context chain past Codex's default budget is reported, never left silent
+  Scenario: a context chain past Codex's default budget is covered by a declared one
     Given a clean niwa environment
     And a local git server is set up
     And a source repo "app" exists
@@ -316,9 +317,13 @@ Feature: prepare every instance for both agents
     And the Codex context at "ws/tools/app" exceeds the default Codex budget
     # Nothing is dropped on niwa's side: the innermost layer is on disk whole.
     And the Codex context at "ws/tools/app" contains "SENTINEL-REPO-TAIL"
-    # And the overflow is reported rather than left for the session to lose.
-    And the error output contains "over the 32768-byte budget"
-    And the error output contains "without reporting it"
+    # And a session reads all of it, because the budget covering the chain is
+    # declared in the project layer rather than left to the developer.
+    And the Codex payload at "ws/tools/app" is niwa's own
+    And the Codex payload at "ws/tools/app" declares a budget covering the composed chain
+    # The configuration a chain this size brings with it is covered like every
+    # other name niwa writes into a working tree.
+    And the git status of every repo in instance "ws" is clean
 
   # ---------------------------------------------------------------------
   # The workspace's skills, delivered whole and under the same name Claude
