@@ -33,6 +33,7 @@ init → create → apply workflow, add a `@critical` Gherkin scenario in
 
 ## Contributor Guides
 
+- `docs/guides/codex-agent.md` — running Codex in a prepared workspace: what a Codex session gets, the generated gap list of what it doesn't, and what niwa writes into the developer's own Codex configuration
 - `docs/guides/ephemeral-session-instances.md` — one ephemeral instance per Claude Code background session: SessionStart/SessionEnd hooks, mapping store, `niwa reap`, context-aware `niwa apply`, opt-out
 - `docs/guides/file-distribution.md` — the three file tables (`[files]`, `[instance.files]`, `[root.files]`): repo `.local` rewrite vs verbatim non-repo distribution, the `.mcp.json` use case, tracking/cleanup, and limitations
 - `docs/guides/functional-testing.md` — end-to-end test patterns and the `localGitServer` helper

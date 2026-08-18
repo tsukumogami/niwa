@@ -74,8 +74,15 @@ var boundCapabilities = []Capability{
 // with no entry here is a declaration nobody delivers. The structural suite
 // checks both directions.
 var bindings = []Binding{
+	// Both agents bind to the same delivery for the two agent-agnostic
+	// materializers: one writer, one set of bytes, two sessions that read them.
+	// The pair of rows is not redundant -- it is what makes the binding test
+	// able to tell "delivered to both" from "delivered to Claude alone", which
+	// is a difference the gap list reports to developers.
 	{Capability: DotenvFiles, Agent: agent.AgentClaude, Delivery: DeliveryEnv},
+	{Capability: DotenvFiles, Agent: agent.AgentCodex, Delivery: DeliveryEnv},
 	{Capability: FileDistribution, Agent: agent.AgentClaude, Delivery: DeliveryFiles},
+	{Capability: FileDistribution, Agent: agent.AgentCodex, Delivery: DeliveryFiles},
 	{Capability: Hooks, Agent: agent.AgentClaude, Delivery: DeliveryHooks},
 	{Capability: DirectoryTrust, Agent: agent.AgentCodex, Delivery: DeliveryCodexTrust},
 }

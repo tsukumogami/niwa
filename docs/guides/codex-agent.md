@@ -52,6 +52,12 @@ which means no MCP servers, no environment, no posture, and no raised context
 budget. The next section of this guide covers exactly what that write does and
 doesn't touch.
 
+**Dotenv files and distributed files.** These land on disk whoever opens the
+session — the writers read no agent and have no agent-specific destination — so
+a declared `.env` and anything in the `[files]`, `[instance.files]`, and
+`[root.files]` tables are in front of a Codex session exactly as they are in
+front of a Claude Code one. See `docs/guides/file-distribution.md`.
+
 **Git-exclude coverage.** Every name niwa writes into a working tree is covered
 by the repository's exclude block, so a prepared tree doesn't read dirty.
 
@@ -93,12 +99,6 @@ the session would never read it, so these move only if the agent changes.
 A route exists on Codex's side and niwa hasn't wired it up. This is niwa's own
 debt, and it's the one group that can shrink without the agent changing.
 
-- **Dotenv files written to the paths the workspace declares.** Dotenv
-  delivery is agent-agnostic, but niwa has not yet bound it to Codex under
-  this contract.
-- **Arbitrary file distribution from a source path to a destination path.**
-  File distribution is agent-agnostic, but niwa has not yet bound it to Codex
-  under this contract.
 - **niwa's own plugin, which carries the migrate-config skill.** Codex accepts
   the identical plugin manifest; the wiring is unbuilt.
 - **Launching a background worker with `niwa dispatch`.** The launch path

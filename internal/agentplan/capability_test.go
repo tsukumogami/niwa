@@ -84,7 +84,7 @@ func TestLookupAnswersEachDeclaredPair(t *testing.T) {
 		{"implemented for claude", Hooks, agent.AgentClaude, StateImplemented, 0},
 		{"the empty agent is claude", Hooks, agent.Agent(""), StateImplemented, 0},
 		{"inherent gap for codex", RootSessionOrientation, agent.AgentCodex, StateUnavailable, ReasonAgentCannotReceive},
-		{"niwa's own debt for codex", DotenvFiles, agent.AgentCodex, StateUnavailable, ReasonNotBuilt},
+		{"niwa's own debt for codex", NiwaPlugin, agent.AgentCodex, StateUnavailable, ReasonNotBuilt},
 		{"claude's one gap", DirectoryTrust, agent.AgentClaude, StateUnavailable, ReasonNoSuchConcept},
 	}
 	for _, tt := range tests {
@@ -132,11 +132,17 @@ var codexFinalGaps = map[Capability]ReasonKind{
 	DispatchLaunch:          ReasonNotBuilt,
 }
 
-// codexDelivered is what niwa delivers to Codex today. Directory trust is the
-// first row, and it is deliberately the first: every trust-gated row downstream
-// names it in Requires, and the closure test refuses such an edge while it is
-// unavailable. The list grows one entry per delivery, in the change that lands
-// the delivery -- never before it.
+// codexDelivered is what niwa delivers to Codex today, and with this work
+// complete it is also the column's target: eleven rows against the thirteen in
+// codexFinalGaps. Directory trust is the first, and deliberately so -- every
+// trust-gated row downstream names it in Requires, and the closure test refuses
+// such an edge while it is unavailable. The list grew one entry per delivery,
+// in the change that landed the delivery, never before it.
+//
+// The two agent-agnostic rows at the end have no Codex-specific delivery at
+// all: the dotenv writer and the file distributor put the same bytes on disk
+// for whoever opens the session, so what changed for them was the declaration
+// and its binding, not the code that writes.
 var codexDelivered = []Capability{
 	WorkspaceOrientation,
 	RepoOrientationDoc,
@@ -147,6 +153,36 @@ var codexDelivered = []Capability{
 	ApprovalPosture,
 	DirectoryTrust,
 	GitExcludeBookkeeping,
+	DotenvFiles,
+	FileDistribution,
+}
+
+// TestCodexColumnTotals pins the shape of the finished column as a pair of
+// counts, which is the form the requirements state it in and the form a
+// reviewer checks it in. The row-by-row test below says which rows; this one
+// says how many, so a flip that swaps one row for another -- passing every
+// per-row check by moving a name from one list to the other -- still has to
+// face a number somebody wrote down on purpose.
+func TestCodexColumnTotals(t *testing.T) {
+	const wantImplemented, wantUnavailable = 11, 13
+
+	implemented, unavailable := 0, 0
+	for _, c := range All() {
+		d, err := Lookup(c, agent.AgentCodex)
+		if err != nil {
+			t.Fatalf("Lookup(%s, codex) unexpected error: %v", c, err)
+		}
+		switch d.State {
+		case StateImplemented:
+			implemented++
+		case StateUnavailable:
+			unavailable++
+		}
+	}
+	if implemented != wantImplemented || unavailable != wantUnavailable {
+		t.Errorf("the Codex column reads %d implemented / %d unavailable, want %d / %d",
+			implemented, unavailable, wantImplemented, wantUnavailable)
+	}
 }
 
 // TestCodexColumnStatesWhatIsDelivered pins the Codex column against two

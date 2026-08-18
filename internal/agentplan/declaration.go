@@ -67,13 +67,12 @@ type Declaration struct {
 // The Codex column states what niwa delivers today and nothing more. Directory
 // trust is the first row it delivers: the entry that makes every later
 // trust-gated row possible arrives with the writer that produces it, in the
-// same change. Thirteen Codex rows are at their final unavailable state -- the
-// eleven whose reason is inherent to the agent plus the two whose route exists
-// and is out of this work's scope -- and the rows still reading "not yet" are
-// the ones whose delivery has not landed. Each flips in the change that
-// delivers it, never before: writing the future state down early would make
-// the table a plan rather than a record, which is the failure this contract
-// exists to prevent.
+// same change. Eleven Codex rows are implemented and thirteen are unavailable
+// -- the eleven whose reason is inherent to the agent plus the two whose route
+// exists and is out of this work's scope. Every implemented row flipped in the
+// change that delivered it, never before: writing a future state down early
+// would make the table a plan rather than a record, which is the failure this
+// contract exists to prevent.
 var declarations = []Declaration{
 	// Row 1: workspace and group orientation reaching a repo session.
 	{Capability: WorkspaceOrientation, Agent: agent.AgentClaude, State: StateImplemented},
@@ -173,21 +172,19 @@ var declarations = []Declaration{
 
 	// Row 10: dotenv files at declared paths.
 	{Capability: DotenvFiles, Agent: agent.AgentClaude, State: StateImplemented},
-	{
-		Capability: DotenvFiles, Agent: agent.AgentCodex,
-		State:  StateUnavailable,
-		Kind:   ReasonNotBuilt,
-		Reason: "Dotenv delivery is agent-agnostic, but niwa has not yet bound it to Codex under this contract.",
-	},
+	// The dotenv writer reads no agent and writes the same bytes to the same
+	// declared paths whoever opens the session, so the files are already in
+	// front of a Codex session. Declaring this unavailable said niwa withheld
+	// something it delivers, which is the one direction a gap list must never
+	// be wrong in: a developer reading it would go build what they already had.
+	{Capability: DotenvFiles, Agent: agent.AgentCodex, State: StateImplemented},
 
 	// Row 11: arbitrary file distribution.
 	{Capability: FileDistribution, Agent: agent.AgentClaude, State: StateImplemented},
-	{
-		Capability: FileDistribution, Agent: agent.AgentCodex,
-		State:  StateUnavailable,
-		Kind:   ReasonNotBuilt,
-		Reason: "File distribution is agent-agnostic, but niwa has not yet bound it to Codex under this contract.",
-	},
+	// Same reasoning as row 10: the distribution copies a source path to a
+	// destination path with no agent anywhere in it, and the destination is on
+	// disk for either session.
+	{Capability: FileDistribution, Agent: agent.AgentCodex, State: StateImplemented},
 
 	// Row 12: approval and sandbox posture.
 	{Capability: ApprovalPosture, Agent: agent.AgentClaude, State: StateImplemented},
