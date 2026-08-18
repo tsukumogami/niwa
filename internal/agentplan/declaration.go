@@ -159,11 +159,16 @@ var declarations = []Declaration{
 
 	// Row 9: environment variables in the session.
 	{Capability: SessionEnvironment, Agent: agent.AgentClaude, State: StateImplemented},
+	// The workspace declares its variables once, agent-neutrally, and each
+	// agent's own destination is generated from that declaration: a settings
+	// env block for one, a shell environment policy for the other. The trust
+	// edge is the same one the MCP row carries and for the same measured
+	// reason -- an untrusted project layer is not parsed at all, so the
+	// generated policy would sit on disk unread.
 	{
 		Capability: SessionEnvironment, Agent: agent.AgentCodex,
-		State:  StateUnavailable,
-		Kind:   ReasonNotBuilt,
-		Reason: "niwa does not yet generate the Codex shell environment policy a session's variables ride.",
+		State:    StateImplemented,
+		Requires: []Capability{DirectoryTrust},
 	},
 
 	// Row 10: dotenv files at declared paths.

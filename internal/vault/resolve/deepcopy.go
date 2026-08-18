@@ -31,6 +31,7 @@ func deepCopyWorkspaceConfig(in *config.WorkspaceConfig) *config.WorkspaceConfig
 	out.Repos = deepCopyRepos(in.Repos)
 	out.Instance = deepCopyInstance(in.Instance)
 	out.MCP = deepCopyMCP(in.MCP)
+	out.Session = deepCopySession(in.Session)
 	// Vault is not mutated by the resolver: it is the source of
 	// truth for provider selection. Share by pointer.
 	return &out
@@ -127,6 +128,18 @@ func deepCopyMCP(in config.MCPConfig) config.MCPConfig {
 		out.Servers[name] = cp
 	}
 	return out
+}
+
+// deepCopySession clones the agent-neutral session declaration down to the
+// value map the walker resolves in place, for the same reason deepCopyMCP
+// does: the resolver returns a new config and never mutates the caller's.
+func deepCopySession(in config.SessionConfig) config.SessionConfig {
+	return config.SessionConfig{
+		Env: config.SessionEnvConfig{
+			Promote: slices.Clone(in.Env.Promote),
+			Vars:    cloneEnvVarsTable(in.Env.Vars),
+		},
+	}
 }
 
 func cloneMaybeSecretMap(in map[string]config.MaybeSecret) map[string]config.MaybeSecret {

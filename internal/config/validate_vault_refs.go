@@ -378,6 +378,14 @@ func walkVaultRefsForUnknownProvider(cfg *WorkspaceConfig, known map[string]bool
 			}
 		}
 	}
+	// [session.env.vars] is the MaybeSecret slot in the agent-neutral session
+	// declaration. It takes vault:// references like every other value slot,
+	// so the same-file provider rule applies here too.
+	for k, v := range cfg.Session.Env.Vars.Values {
+		if err := check(fmt.Sprintf("session.env.vars.%s", k), v.Plain); err != nil {
+			return err
+		}
+	}
 	// [files] source KEYS are plain strings; per R3 they may be
 	// vault:// references. Per the same-file rule we still validate
 	// that the referenced provider is declared here.

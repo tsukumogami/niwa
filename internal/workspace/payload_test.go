@@ -208,16 +208,16 @@ func TestInstallWritesTheGeneratedConfiguration(t *testing.T) {
 	repo := t.TempDir()
 	producer := agentplan.For(agent.AgentCodex)
 
-	install, err := InstallMCPConfig(agentplan.MCPInRepo, repo, codexServers(), nil, producer)
+	install, err := InstallPayloadConfig(PayloadRequest{Scope: agentplan.PayloadInRepo, Dir: repo, Servers: codexServers(), Existing: nil}, producer)
 	if err != nil {
-		t.Fatalf("InstallMCPConfig: %v", err)
+		t.Fatalf("InstallPayloadConfig: %v", err)
 	}
 	path := filepath.Join(repo, ".codex", "config.toml")
 	if len(install.Written) != 1 || install.Written[0] != path {
 		t.Fatalf("wrote %v, want [%s]", install.Written, path)
 	}
-	if len(install.Excludes) != 1 || install.Excludes[0] != ".codex/config.toml" {
-		t.Errorf("excludes = %v, want [.codex/config.toml]", install.Excludes)
+	if len(install.Excludes) != 1 || install.Excludes[0] != ".codex/" {
+		t.Errorf("excludes = %v, want [.codex/]", install.Excludes)
 	}
 
 	info, err := os.Stat(path)
@@ -235,7 +235,7 @@ func TestInstallWritesTheGeneratedConfiguration(t *testing.T) {
 		t.Errorf("the generated file does not define the declared server:\n%s", first)
 	}
 
-	if _, err := InstallMCPConfig(agentplan.MCPInRepo, repo, codexServers(), nil, producer); err != nil {
+	if _, err := InstallPayloadConfig(PayloadRequest{Scope: agentplan.PayloadInRepo, Dir: repo, Servers: codexServers(), Existing: nil}, producer); err != nil {
 		t.Fatalf("second install: %v", err)
 	}
 	second, err := os.ReadFile(path)
@@ -257,7 +257,7 @@ func TestValidationFailureWritesNoFile(t *testing.T) {
 		{Name: "streamed", Transport: agentplan.MCPTransportSSE, URL: "https://h/mcp"},
 	}
 
-	if _, err := InstallMCPConfig(agentplan.MCPInRepo, repo, servers, nil, agentplan.For(agent.AgentCodex)); err == nil {
+	if _, err := InstallPayloadConfig(PayloadRequest{Scope: agentplan.PayloadInRepo, Dir: repo, Servers: servers, Existing: nil}, agentplan.For(agent.AgentCodex)); err == nil {
 		t.Fatal("an unmappable declaration installed without an error")
 	}
 	if _, err := os.Stat(filepath.Join(repo, ".codex", "config.toml")); !os.IsNotExist(err) {
@@ -282,7 +282,7 @@ func TestCollisionFailsTheInstall(t *testing.T) {
 	}
 
 	repo := t.TempDir()
-	_, err := InstallMCPConfig(agentplan.MCPInRepo, repo, codexServers(), existing, producer)
+	_, err := InstallPayloadConfig(PayloadRequest{Scope: agentplan.PayloadInRepo, Dir: repo, Servers: codexServers(), Existing: existing}, producer)
 	if err == nil {
 		t.Fatal("a colliding name installed without an error")
 	}
@@ -310,9 +310,9 @@ func TestARepositorysOwnConfigurationIsLeftAlone(t *testing.T) {
 		t.Fatalf("writing %s: %v", path, err)
 	}
 
-	install, err := InstallMCPConfig(agentplan.MCPInRepo, repo, codexServers(), nil, agentplan.For(agent.AgentCodex))
+	install, err := InstallPayloadConfig(PayloadRequest{Scope: agentplan.PayloadInRepo, Dir: repo, Servers: codexServers(), Existing: nil}, agentplan.For(agent.AgentCodex))
 	if err != nil {
-		t.Fatalf("InstallMCPConfig: %v", err)
+		t.Fatalf("InstallPayloadConfig: %v", err)
 	}
 	if len(install.Written) != 0 {
 		t.Errorf("wrote %v over a file niwa did not write", install.Written)
@@ -335,13 +335,13 @@ func TestARepositorysOwnConfigurationIsLeftAlone(t *testing.T) {
 func TestGeneratedConfigurationIsRefreshedInPlace(t *testing.T) {
 	repo := t.TempDir()
 	producer := agentplan.For(agent.AgentCodex)
-	if _, err := InstallMCPConfig(agentplan.MCPInRepo, repo, codexServers(), nil, producer); err != nil {
+	if _, err := InstallPayloadConfig(PayloadRequest{Scope: agentplan.PayloadInRepo, Dir: repo, Servers: codexServers(), Existing: nil}, producer); err != nil {
 		t.Fatalf("first install: %v", err)
 	}
 
 	changed := codexServers()
 	changed[0].Command = "uvx"
-	if _, err := InstallMCPConfig(agentplan.MCPInRepo, repo, changed, nil, producer); err != nil {
+	if _, err := InstallPayloadConfig(PayloadRequest{Scope: agentplan.PayloadInRepo, Dir: repo, Servers: changed, Existing: nil}, producer); err != nil {
 		t.Fatalf("second install: %v", err)
 	}
 
@@ -360,9 +360,9 @@ func TestGeneratedConfigurationIsRefreshedInPlace(t *testing.T) {
 func TestInstanceRootTakesTheClaudeDocument(t *testing.T) {
 	root := t.TempDir()
 
-	install, err := InstallMCPConfig(agentplan.MCPAtInstanceRoot, root, codexServers(), nil, agentplan.For(agent.AgentClaude))
+	install, err := InstallPayloadConfig(PayloadRequest{Scope: agentplan.PayloadAtInstanceRoot, Dir: root, Servers: codexServers(), Existing: nil}, agentplan.For(agent.AgentClaude))
 	if err != nil {
-		t.Fatalf("InstallMCPConfig(claude): %v", err)
+		t.Fatalf("InstallPayloadConfig(claude): %v", err)
 	}
 	path := filepath.Join(root, ".mcp.json")
 	if len(install.Written) != 1 || install.Written[0] != path {
@@ -376,9 +376,9 @@ func TestInstanceRootTakesTheClaudeDocument(t *testing.T) {
 		t.Errorf("the generated document is not an .mcp.json:\n%s", data)
 	}
 
-	codex, err := InstallMCPConfig(agentplan.MCPAtInstanceRoot, root, codexServers(), nil, agentplan.For(agent.AgentCodex))
+	codex, err := InstallPayloadConfig(PayloadRequest{Scope: agentplan.PayloadAtInstanceRoot, Dir: root, Servers: codexServers(), Existing: nil}, agentplan.For(agent.AgentCodex))
 	if err != nil {
-		t.Fatalf("InstallMCPConfig(codex): %v", err)
+		t.Fatalf("InstallPayloadConfig(codex): %v", err)
 	}
 	if len(codex.Written) != 0 {
 		t.Errorf("the Codex producer wrote %v at an instance root, where it reads no configuration", codex.Written)

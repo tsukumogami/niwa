@@ -36,15 +36,15 @@ func httpServer() MCPServer {
 
 // codexPlan produces the Codex plan for one repository, failing the test on an
 // unexpected error.
-func codexPlan(t *testing.T, in MCPInputs) *Plan {
+func codexPlan(t *testing.T, in PayloadInputs) *Plan {
 	t.Helper()
-	in.Scope = MCPInRepo
+	in.Scope = PayloadInRepo
 	if in.Dir == "" {
 		in.Dir = "/repo"
 	}
-	plan, err := For(agent.AgentCodex).MCPPlan(in)
+	plan, err := For(agent.AgentCodex).PayloadPlan(in)
 	if err != nil {
-		t.Fatalf("MCPPlan: %v", err)
+		t.Fatalf("PayloadPlan: %v", err)
 	}
 	return plan
 }
@@ -72,13 +72,13 @@ func TestClaudeGenerationMatchesTheVerbatimRoute(t *testing.T) {
   }
 }`
 
-	plan, err := For(agent.AgentClaude).MCPPlan(MCPInputs{
-		Scope:   MCPAtInstanceRoot,
+	plan, err := For(agent.AgentClaude).PayloadPlan(PayloadInputs{
+		Scope:   PayloadAtInstanceRoot,
 		Dir:     "/instance",
 		Servers: []MCPServer{httpServer(), stdioServer()},
 	})
 	if err != nil {
-		t.Fatalf("MCPPlan: %v", err)
+		t.Fatalf("PayloadPlan: %v", err)
 	}
 	if len(plan.Entries) != 1 {
 		t.Fatalf("plan has %d entries, want 1", len(plan.Entries))
@@ -108,21 +108,21 @@ func TestEachAgentTakesOneScope(t *testing.T) {
 	servers := []MCPServer{stdioServer()}
 	cases := []struct {
 		agent     agent.Agent
-		scope     MCPScope
+		scope     PayloadScope
 		wantEntry bool
 	}{
-		{agent.AgentClaude, MCPAtInstanceRoot, true},
-		{agent.AgentClaude, MCPInRepo, false},
-		{agent.AgentCodex, MCPInRepo, true},
-		{agent.AgentCodex, MCPAtInstanceRoot, false},
+		{agent.AgentClaude, PayloadAtInstanceRoot, true},
+		{agent.AgentClaude, PayloadInRepo, false},
+		{agent.AgentCodex, PayloadInRepo, true},
+		{agent.AgentCodex, PayloadAtInstanceRoot, false},
 	}
 	for _, tc := range cases {
-		plan, err := For(tc.agent).MCPPlan(MCPInputs{Scope: tc.scope, Dir: "/tree", Servers: servers})
+		plan, err := For(tc.agent).PayloadPlan(PayloadInputs{Scope: tc.scope, Dir: "/tree", Servers: servers})
 		if err != nil {
-			t.Fatalf("MCPPlan(%s, scope %d): %v", tc.agent, tc.scope, err)
+			t.Fatalf("PayloadPlan(%s, scope %d): %v", tc.agent, tc.scope, err)
 		}
 		if got := len(plan.Entries) > 0; got != tc.wantEntry {
-			t.Errorf("MCPPlan(%s, scope %d) produced entries = %v, want %v", tc.agent, tc.scope, got, tc.wantEntry)
+			t.Errorf("PayloadPlan(%s, scope %d) produced entries = %v, want %v", tc.agent, tc.scope, got, tc.wantEntry)
 		}
 	}
 }
@@ -131,7 +131,7 @@ func TestEachAgentTakesOneScope(t *testing.T) {
 // the way Codex would: the marker line, then one [mcp_servers.<name>] table per
 // server, with the transport implied by which of command and url is present.
 func TestCodexDocumentCarriesTheMeasuredSchema(t *testing.T) {
-	plan := codexPlan(t, MCPInputs{Servers: []MCPServer{stdioServer(), httpServer()}})
+	plan := codexPlan(t, PayloadInputs{Servers: []MCPServer{stdioServer(), httpServer()}})
 	if len(plan.Entries) != 1 {
 		t.Fatalf("plan has %d entries, want 1", len(plan.Entries))
 	}
@@ -186,7 +186,7 @@ func TestSSEIsAHardErrorForCodex(t *testing.T) {
 	server := httpServer()
 	server.Transport = MCPTransportSSE
 
-	plan, err := For(agent.AgentCodex).MCPPlan(MCPInputs{Scope: MCPInRepo, Dir: "/repo", Servers: []MCPServer{server}})
+	plan, err := For(agent.AgentCodex).PayloadPlan(PayloadInputs{Scope: PayloadInRepo, Dir: "/repo", Servers: []MCPServer{server}})
 	if err == nil {
 		t.Fatalf("a declared sse server produced a plan with %d entries; it must be an error", len(plan.Entries))
 	}
@@ -200,7 +200,7 @@ func TestSSEIsAHardErrorForCodex(t *testing.T) {
 	}
 
 	// The same declaration is fine for the agent that implements it.
-	claude, err := For(agent.AgentClaude).MCPPlan(MCPInputs{Scope: MCPAtInstanceRoot, Dir: "/instance", Servers: []MCPServer{server}})
+	claude, err := For(agent.AgentClaude).PayloadPlan(PayloadInputs{Scope: PayloadAtInstanceRoot, Dir: "/instance", Servers: []MCPServer{server}})
 	if err != nil {
 		t.Fatalf("the sse server is unavailable to Claude too: %v", err)
 	}
@@ -217,7 +217,7 @@ func TestScopingToOneAgentIsTheEscapeHatch(t *testing.T) {
 	server.Transport = MCPTransportSSE
 	server.Agents = []string{string(agent.AgentClaude)}
 
-	plan, err := For(agent.AgentCodex).MCPPlan(MCPInputs{Scope: MCPInRepo, Dir: "/repo", Servers: []MCPServer{server}})
+	plan, err := For(agent.AgentCodex).PayloadPlan(PayloadInputs{Scope: PayloadInRepo, Dir: "/repo", Servers: []MCPServer{server}})
 	if err != nil {
 		t.Fatalf("a Claude-scoped sse server still failed the Codex plan: %v", err)
 	}
@@ -225,9 +225,9 @@ func TestScopingToOneAgentIsTheEscapeHatch(t *testing.T) {
 		t.Errorf("the Codex plan carries %d entries for a Claude-scoped server", len(plan.Entries))
 	}
 
-	claude, err := For(agent.AgentClaude).MCPPlan(MCPInputs{Scope: MCPAtInstanceRoot, Dir: "/instance", Servers: []MCPServer{server}})
+	claude, err := For(agent.AgentClaude).PayloadPlan(PayloadInputs{Scope: PayloadAtInstanceRoot, Dir: "/instance", Servers: []MCPServer{server}})
 	if err != nil {
-		t.Fatalf("MCPPlan(claude): %v", err)
+		t.Fatalf("PayloadPlan(claude): %v", err)
 	}
 	if len(claude.Entries) != 1 {
 		t.Fatalf("the Claude plan carries %d entries, want 1", len(claude.Entries))
@@ -249,11 +249,11 @@ func TestSurvivingInterpolationIsAnError(t *testing.T) {
 	}
 	for field, server := range cases {
 		for _, ag := range agent.All() {
-			scope := MCPAtInstanceRoot
+			scope := PayloadAtInstanceRoot
 			if ag == agent.AgentCodex {
-				scope = MCPInRepo
+				scope = PayloadInRepo
 			}
-			plan, err := For(ag).MCPPlan(MCPInputs{Scope: scope, Dir: "/tree", Servers: []MCPServer{server}})
+			plan, err := For(ag).PayloadPlan(PayloadInputs{Scope: scope, Dir: "/tree", Servers: []MCPServer{server}})
 			if err == nil {
 				t.Errorf("%s: an unresolved ${} in %s produced a plan for %s", field, field, ag)
 				continue
@@ -273,8 +273,8 @@ func TestSurvivingInterpolationIsAnError(t *testing.T) {
 // neither definition describes; the error names both sides because the fix is
 // renaming one of them.
 func TestNameCollisionIsRefusedNotWritten(t *testing.T) {
-	_, err := For(agent.AgentCodex).MCPPlan(MCPInputs{
-		Scope:    MCPInRepo,
+	_, err := For(agent.AgentCodex).PayloadPlan(PayloadInputs{
+		Scope:    PayloadInRepo,
 		Dir:      "/repo",
 		Servers:  []MCPServer{stdioServer()},
 		Existing: []string{"other", "files"},
@@ -289,7 +289,7 @@ func TestNameCollisionIsRefusedNotWritten(t *testing.T) {
 	}
 
 	// A name nobody else defines is written as usual.
-	plan := codexPlan(t, MCPInputs{Servers: []MCPServer{stdioServer()}, Existing: []string{"other"}})
+	plan := codexPlan(t, PayloadInputs{Servers: []MCPServer{stdioServer()}, Existing: []string{"other"}})
 	if len(plan.Entries) != 1 {
 		t.Errorf("a non-colliding declaration produced %d entries, want 1", len(plan.Entries))
 	}
@@ -324,7 +324,7 @@ func TestCrossTransportFieldsAreRejected(t *testing.T) {
 		"unknown transport":    {Name: "s", Transport: MCPTransport("grpc"), Command: "server"},
 	}
 	for name, server := range cases {
-		plan, err := For(agent.AgentCodex).MCPPlan(MCPInputs{Scope: MCPInRepo, Dir: "/repo", Servers: []MCPServer{server}})
+		plan, err := For(agent.AgentCodex).PayloadPlan(PayloadInputs{Scope: PayloadInRepo, Dir: "/repo", Servers: []MCPServer{server}})
 		if err == nil {
 			t.Errorf("%s: produced a plan with %d entries, want an error", name, len(plan.Entries))
 			continue
@@ -340,11 +340,11 @@ func TestCrossTransportFieldsAreRejected(t *testing.T) {
 // entry or an unaddressable one.
 func TestDuplicateAndEmptyNamesAreRejected(t *testing.T) {
 	dup := []MCPServer{stdioServer(), stdioServer()}
-	if _, err := For(agent.AgentCodex).MCPPlan(MCPInputs{Scope: MCPInRepo, Dir: "/repo", Servers: dup}); err == nil {
+	if _, err := For(agent.AgentCodex).PayloadPlan(PayloadInputs{Scope: PayloadInRepo, Dir: "/repo", Servers: dup}); err == nil {
 		t.Error("two declarations of one server name produced a plan")
 	}
 	empty := []MCPServer{{Command: "server"}}
-	if _, err := For(agent.AgentCodex).MCPPlan(MCPInputs{Scope: MCPInRepo, Dir: "/repo", Servers: empty}); err == nil {
+	if _, err := For(agent.AgentCodex).PayloadPlan(PayloadInputs{Scope: PayloadInRepo, Dir: "/repo", Servers: empty}); err == nil {
 		t.Error("a server with no name produced a plan")
 	}
 }
@@ -355,14 +355,14 @@ func TestDuplicateAndEmptyNamesAreRejected(t *testing.T) {
 // git-exclude pattern that keeps the file from making a working tree read
 // dirty.
 func TestGeneratedEntryCarriesItsBookkeeping(t *testing.T) {
-	plan := codexPlan(t, MCPInputs{Servers: []MCPServer{stdioServer()}})
+	plan := codexPlan(t, PayloadInputs{Servers: []MCPServer{stdioServer()}})
 	e := plan.Entries[0]
 
 	if e.Capability != MCPServers {
 		t.Errorf("entry capability = %s, want %s", e.Capability, MCPServers)
 	}
-	if e.Mode != mcpFileMode {
-		t.Errorf("entry mode = %o, want %o: the declaration's env and headers values resolve through the vault pipeline", e.Mode, mcpFileMode)
+	if e.Mode != payloadFileMode {
+		t.Errorf("entry mode = %o, want %o: the declaration's env and headers values resolve through the vault pipeline", e.Mode, payloadFileMode)
 	}
 	if !e.Managed {
 		t.Error("the generated configuration is not managed, so cleanup would never remove it")
@@ -370,15 +370,17 @@ func TestGeneratedEntryCarriesItsBookkeeping(t *testing.T) {
 	if e.Pre != IfNotForeign || e.Owner != generatedConfigMarker {
 		t.Errorf("entry gate = %d owner = %q, want the ownership rule", e.Pre, e.Owner)
 	}
-	if e.ExcludeAs != ".codex/config.toml" {
-		t.Errorf("entry ExcludeAs = %q, want .codex/config.toml", e.ExcludeAs)
+	// The directory rather than the file: everything niwa puts under that name
+	// is generated, so a second generated file cannot arrive uncovered.
+	if e.ExcludeAs != ".codex/" {
+		t.Errorf("entry ExcludeAs = %q, want .codex/", e.ExcludeAs)
 	}
 
 	// The instance-root document is niwa's own directory, so it carries no
 	// ownership gate and nothing to exclude.
-	root, err := For(agent.AgentClaude).MCPPlan(MCPInputs{Scope: MCPAtInstanceRoot, Dir: "/instance", Servers: []MCPServer{stdioServer()}})
+	root, err := For(agent.AgentClaude).PayloadPlan(PayloadInputs{Scope: PayloadAtInstanceRoot, Dir: "/instance", Servers: []MCPServer{stdioServer()}})
 	if err != nil {
-		t.Fatalf("MCPPlan(claude): %v", err)
+		t.Fatalf("PayloadPlan(claude): %v", err)
 	}
 	if root.Entries[0].Pre != Always || root.Entries[0].ExcludeAs != "" {
 		t.Errorf("the instance-root entry carries a gate (%d) or an exclude (%q) it does not need", root.Entries[0].Pre, root.Entries[0].ExcludeAs)
@@ -391,7 +393,7 @@ func TestGeneratedEntryCarriesItsBookkeeping(t *testing.T) {
 // refusal just promised to leave alone.
 func TestAForeignFileIsRefusedAndExempted(t *testing.T) {
 	const owned = "/repo/.codex/config.toml"
-	plan := codexPlan(t, MCPInputs{
+	plan := codexPlan(t, PayloadInputs{
 		Servers: []MCPServer{stdioServer()},
 		Probe:   ContextProbe{Dir: "/repo", OwnedPath: owned, Foreign: true},
 	})
@@ -410,17 +412,17 @@ func TestAForeignFileIsRefusedAndExempted(t *testing.T) {
 // asks about the path it would take in a tree it does not own, and asks nothing
 // about the instance root.
 func TestProbeSpecAsksOnlyWhereTheTreeIsNotNiwas(t *testing.T) {
-	spec := For(agent.AgentCodex).MCPProbeSpec(MCPInRepo, "/repo")
+	spec := For(agent.AgentCodex).PayloadProbeSpec(PayloadInRepo, "/repo")
 	if spec.OwnedPath == "" || spec.OwnerMarker != generatedConfigMarker {
 		t.Errorf("the Codex repo probe spec is %+v, want the generated-config marker", spec)
 	}
 	if spec.InlinePath != "" {
 		t.Errorf("the probe spec asks to inline %q; a configuration document inlines nothing", spec.InlinePath)
 	}
-	if got := For(agent.AgentCodex).MCPProbeSpec(MCPAtInstanceRoot, "/instance"); got.OwnedPath != "" {
+	if got := For(agent.AgentCodex).PayloadProbeSpec(PayloadAtInstanceRoot, "/instance"); got.OwnedPath != "" {
 		t.Errorf("the Codex producer probes the instance root, where it writes nothing: %+v", got)
 	}
-	if got := For(agent.AgentClaude).MCPProbeSpec(MCPAtInstanceRoot, "/instance"); got.OwnedPath != "" {
+	if got := For(agent.AgentClaude).PayloadProbeSpec(PayloadAtInstanceRoot, "/instance"); got.OwnedPath != "" {
 		t.Errorf("the Claude producer probes its own instance root: %+v", got)
 	}
 }
@@ -456,9 +458,9 @@ func TestGenerationIsDeterministic(t *testing.T) {
 		{Name: "b", Command: "b", Env: map[string]string{"A": "1", "B": "2", "C": "3"}},
 		{Name: "a", URL: "https://a/mcp", Headers: map[string]string{"X": "1", "Y": "2"}},
 	}
-	first := codexPlan(t, MCPInputs{Servers: servers}).Entries[0].Content
+	first := codexPlan(t, PayloadInputs{Servers: servers}).Entries[0].Content
 	for i := 0; i < 8; i++ {
-		next := codexPlan(t, MCPInputs{Servers: servers}).Entries[0].Content
+		next := codexPlan(t, PayloadInputs{Servers: servers}).Entries[0].Content
 		if string(next) != string(first) {
 			t.Fatalf("the generated document differs between runs:\n%s\n---\n%s", first, next)
 		}
@@ -471,13 +473,13 @@ func TestGenerationIsDeterministic(t *testing.T) {
 // for.
 func TestNoServersProducesNoDocument(t *testing.T) {
 	for _, ag := range agent.All() {
-		for _, scope := range []MCPScope{MCPAtInstanceRoot, MCPInRepo} {
-			plan, err := For(ag).MCPPlan(MCPInputs{Scope: scope, Dir: "/tree"})
+		for _, scope := range []PayloadScope{PayloadAtInstanceRoot, PayloadInRepo} {
+			plan, err := For(ag).PayloadPlan(PayloadInputs{Scope: scope, Dir: "/tree"})
 			if err != nil {
-				t.Fatalf("MCPPlan(%s, scope %d): %v", ag, scope, err)
+				t.Fatalf("PayloadPlan(%s, scope %d): %v", ag, scope, err)
 			}
 			if len(plan.Entries) != 0 {
-				t.Errorf("MCPPlan(%s, scope %d) wrote a document for a workspace declaring no servers", ag, scope)
+				t.Errorf("PayloadPlan(%s, scope %d) wrote a document for a workspace declaring no servers", ag, scope)
 			}
 		}
 	}
@@ -488,7 +490,7 @@ func TestNoServersProducesNoDocument(t *testing.T) {
 // say what the producer meant is caught even if every input passed validation.
 func TestGeneratedDocumentCheckCatchesADamagedOne(t *testing.T) {
 	good := []byte(generatedConfigMarker + "\n\n[mcp_servers.files]\ncommand = \"npx\"\n")
-	if err := checkCodexMCPDocument(good, []MCPServer{{Name: "files", Command: "npx"}}); err != nil {
+	if err := checkCodexPayloadDocument(good, []MCPServer{{Name: "files", Command: "npx"}}, nil); err != nil {
 		t.Fatalf("a well-formed document was rejected: %v", err)
 	}
 
@@ -501,7 +503,7 @@ func TestGeneratedDocumentCheckCatchesADamagedOne(t *testing.T) {
 		"not valid toml":   "[mcp_servers.files\ncommand = \"npx\"\n",
 	}
 	for name, doc := range damaged {
-		if err := checkCodexMCPDocument([]byte(doc), []MCPServer{{Name: "files", Command: "npx"}}); err == nil {
+		if err := checkCodexPayloadDocument([]byte(doc), []MCPServer{{Name: "files", Command: "npx"}}, nil); err == nil {
 			t.Errorf("%s: the check accepted a document it should not have", name)
 		}
 	}

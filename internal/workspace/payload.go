@@ -179,8 +179,8 @@ func declaredMCPConfigPath(home string, spec agentplan.MCPCollisionSpec) (string
 	return filepath.Join(append(append([]string{home}, spec.ConfigDir...), spec.ConfigFile)...), nil
 }
 
-// MCPInstall is what one generated MCP configuration produced.
-type MCPInstall struct {
+// PayloadInstall is what one generated payload configuration produced.
+type PayloadInstall struct {
 	// Written are the paths the plan wrote.
 	Written []string
 
@@ -196,32 +196,61 @@ type MCPInstall struct {
 	Warnings []string
 }
 
-// InstallMCPConfig generates one tree's MCP configuration for one agent.
+// PayloadRequest is one tree's generated payload configuration: which tree,
+// what the workspace declared, and what the developer's own configuration
+// already defines.
+//
+// It is a struct rather than a parameter list because both declarations feeding
+// the document are agent-neutral and resolved once per apply: every producer is
+// offered the same request, and which half of it that agent reads out of this
+// document is the producer's answer rather than the caller's.
+type PayloadRequest struct {
+	// Scope selects which tree this is.
+	Scope agentplan.PayloadScope
+
+	// Dir is the absolute root of that tree.
+	Dir string
+
+	// Servers are the workspace's declared MCP servers, resolved.
+	Servers []agentplan.MCPServer
+
+	// Env is the workspace's declared session environment, resolved.
+	Env map[string]string
+
+	// Existing are the server names the developer's own configuration for this
+	// agent already defines.
+	Existing []string
+}
+
+// InstallPayloadConfig generates one tree's payload configuration for one agent.
 //
 // The producer decides everything specific: whether this agent takes a
-// configuration at this scope, where it goes, what format it is in, and whether
-// the declaration can be expressed in it at all. A declaration this agent
-// cannot express -- a transport it would silently serve as a different one, a
-// value that never resolved, a name the developer's own configuration already
-// defines -- comes back as an error here, and the caller fails the apply with
-// it. That is deliberate: the alternative to a loud failure is a file that
-// takes the developer's whole session down when the agent tries to load it.
-func InstallMCPConfig(scope agentplan.MCPScope, dir string, servers []agentplan.MCPServer, existing []string, producer agentplan.Producer) (*MCPInstall, error) {
-	probe, err := probeContextTree(producer.MCPProbeSpec(scope, dir))
+// configuration at this scope, where it goes, what format it is in, which of
+// the declarations it carries, and whether they can be expressed in it at all.
+// A declaration this agent cannot express -- a transport it would silently
+// serve as a different one, a value that never resolved, an environment key no
+// shell could export, a name the developer's own configuration already defines
+// -- comes back as an error here, and the caller fails the apply with it. That
+// is deliberate: the alternative to a loud failure is a file that takes the
+// developer's whole session down when the agent tries to load it.
+func InstallPayloadConfig(req PayloadRequest, producer agentplan.Producer) (*PayloadInstall, error) {
+	probe, err := probeContextTree(producer.PayloadProbeSpec(req.Scope, req.Dir))
 	if err != nil {
 		return nil, err
 	}
 
-	plan, err := producer.MCPPlan(agentplan.MCPInputs{
-		Scope:    scope,
-		Dir:      dir,
-		Servers:  servers,
-		Existing: existing,
+	plan, err := producer.PayloadPlan(agentplan.PayloadInputs{
+		Scope:    req.Scope,
+		Dir:      req.Dir,
+		Servers:  req.Servers,
+		Env:      req.Env,
+		Existing: req.Existing,
 		Probe:    probe,
 	})
 	if err != nil {
 		return nil, err
 	}
+	dir := req.Dir
 	if err := checkPlanContainment(plan, dir); err != nil {
 		return nil, err
 	}
@@ -230,7 +259,7 @@ func InstallMCPConfig(scope agentplan.MCPScope, dir string, servers []agentplan.
 	if err != nil {
 		return nil, err
 	}
-	return &MCPInstall{
+	return &PayloadInstall{
 		Written:  written,
 		Excludes: excludes,
 		Exempt:   plan.Exempt,

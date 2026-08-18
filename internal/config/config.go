@@ -246,7 +246,12 @@ type WorkspaceConfig struct {
 	// MCP is the agent-neutral MCP server declaration under [mcp]. It is
 	// workspace-scoped, like [claude.marketplaces]: no override position
 	// merges it.
-	MCP      MCPConfig         `toml:"mcp,omitempty"`
+	MCP MCPConfig `toml:"mcp,omitempty"`
+	// Session is the agent-neutral session declaration under [session]. Like
+	// [mcp] it is workspace-scoped, and for the same reason: what a session
+	// runs with belongs to the prepared workspace rather than to one
+	// repository in it.
+	Session  SessionConfig     `toml:"session,omitempty"`
 	Env      EnvConfig         `toml:"env"`
 	Files    map[string]string `toml:"files,omitempty"`
 	Instance InstanceConfig    `toml:"instance,omitempty"`

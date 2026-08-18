@@ -439,11 +439,11 @@ func (a *Applier) Create(ctx context.Context, cfg *config.WorkspaceConfig, confi
 		return "", fmt.Errorf("creating instance directory: %w", err)
 	}
 
-	// Ensure the instance root's .gitignore covers *.local*. The
-	// materializers always emit files with the ".local" infix so
-	// this single pattern is sufficient; running create twice on
-	// the same instance is a no-op after the first run.
-	if err := EnsureInstanceGitignore(instanceRoot); err != nil {
+	// Ensure the instance root's .gitignore covers *.local* and the
+	// generated-configuration names that cannot carry the infix
+	// because they have to sit where their agent reads them; running
+	// create twice on the same instance is a no-op after the first run.
+	if err := EnsureInstanceGitignore(instanceRoot, agentplan.InstanceExcludePatterns()...); err != nil {
 		_ = os.RemoveAll(instanceRoot)
 		return "", fmt.Errorf("preparing instance .gitignore: %w", err)
 	}
@@ -614,12 +614,12 @@ func (a *Applier) Apply(ctx context.Context, cfg *config.WorkspaceConfig, config
 		return err
 	}
 
-	// Ensure the instance root's .gitignore covers *.local*. Applier.
-	// Create already runs this during initial scaffolding, but an
-	// instance created before this guard landed won't have the file;
-	// running it here closes the upgrade-path gap. The helper is
-	// idempotent, so no-op on subsequent applies.
-	if err := EnsureInstanceGitignore(instanceRoot); err != nil {
+	// Ensure the instance root's .gitignore covers *.local* and the
+	// generated-configuration names beside it. Applier.Create already runs
+	// this during initial scaffolding, but an instance created before a given
+	// pattern landed won't carry it; running it here closes the upgrade-path
+	// gap. The helper is idempotent, so no-op on subsequent applies.
+	if err := EnsureInstanceGitignore(instanceRoot, agentplan.InstanceExcludePatterns()...); err != nil {
 		return fmt.Errorf("preparing instance .gitignore: %w", err)
 	}
 
@@ -1636,11 +1636,12 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		}
 	}
 
-	// Step 6.3: Generate the workspace's declared MCP servers into each agent's
-	// own format. The declaration is agent-neutral and workspace-scoped, so it
-	// is resolved once and offered to every producer, each of which decides
-	// whether it takes a configuration at a given scope, where it goes, and
-	// whether the declaration can be expressed in its format at all.
+	// Step 6.3: Generate the workspace's declared MCP servers and session
+	// environment into each agent's own format. Both declarations are
+	// agent-neutral and workspace-scoped, so each is resolved once and offered
+	// to every producer, which decides whether it takes a configuration at a
+	// given scope, where it goes, which of the declarations it carries, and
+	// whether they can be expressed in its format at all.
 	//
 	// A declaration a producer cannot express fails the apply here rather than
 	// landing as a file: a generated configuration that an agent refuses to
@@ -1650,6 +1651,16 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 	allWarnings = append(allWarnings, mcpWarnings...)
 	instanceOverrides := MergeInstanceOverrides(effectiveCfg)
 	mcpDestinations := mcpVerbatimDestinations(instanceOverrides.Files, instanceOverrides.InstanceFiles, instanceOverrides.RootFiles)
+
+	// One resolution of the session environment for the whole apply. The values
+	// reach the generated payloads below and the settings documents at step
+	// 6.5 through the same map, so no agent's session can end up carrying a
+	// different value for a variable the workspace declared once.
+	sessionEnv, sessionEnvSources, err := SessionEnvVars(effectiveCfg, instanceOverrides, configDir)
+	if err != nil {
+		return nil, err
+	}
+
 	for _, ag := range agent.All() {
 		producer := agentplan.For(ag)
 
@@ -1664,27 +1675,41 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 			allWarnings = append(allWarnings, report)
 		}
 
-		rootMCP, err := InstallMCPConfig(agentplan.MCPAtInstanceRoot, instanceRoot, mcpServers, existingMCP, producer)
+		rootPayload, err := InstallPayloadConfig(PayloadRequest{
+			Scope:    agentplan.PayloadAtInstanceRoot,
+			Dir:      instanceRoot,
+			Servers:  mcpServers,
+			Env:      sessionEnv,
+			Existing: existingMCP,
+		}, producer)
 		if err != nil {
-			return nil, fmt.Errorf("generating the MCP configuration for the instance root: %w", err)
+			return nil, fmt.Errorf("generating the payload configuration for the instance root: %w", err)
 		}
-		writtenFiles = append(writtenFiles, rootMCP.Written...)
-		exemptPaths = append(exemptPaths, rootMCP.Exempt...)
-		allWarnings = append(allWarnings, rootMCP.Warnings...)
+		writtenFiles = append(writtenFiles, rootPayload.Written...)
+		exemptPaths = append(exemptPaths, rootPayload.Exempt...)
+		allWarnings = append(allWarnings, rootPayload.Warnings...)
 
+		// No repository gate here. Which agent's payload is produced is the
+		// declaration table's answer, and a Claude-named per-repository switch
+		// in front of a loop that produces every agent's payload would decide
+		// for an agent that has never heard of it. The Claude gate belongs in
+		// the Claude producer's own inputs.
 		for _, cr := range classified {
-			if !ClaudeEnabled(effectiveCfg, cr.Repo.Name) {
-				continue
-			}
 			repoDir := filepath.Join(instanceRoot, cr.Group, cr.Repo.Name)
-			repoMCP, err := InstallMCPConfig(agentplan.MCPInRepo, repoDir, mcpServers, existingMCP, producer)
+			repoPayload, err := InstallPayloadConfig(PayloadRequest{
+				Scope:    agentplan.PayloadInRepo,
+				Dir:      repoDir,
+				Servers:  mcpServers,
+				Env:      sessionEnv,
+				Existing: existingMCP,
+			}, producer)
 			if err != nil {
-				return nil, fmt.Errorf("generating the MCP configuration for %q: %w", cr.Repo.Name, err)
+				return nil, fmt.Errorf("generating the payload configuration for %q: %w", cr.Repo.Name, err)
 			}
-			writtenFiles = append(writtenFiles, repoMCP.Written...)
-			exemptPaths = append(exemptPaths, repoMCP.Exempt...)
-			allWarnings = append(allWarnings, repoMCP.Warnings...)
-			contentExcludes[repoDir] = append(contentExcludes[repoDir], repoMCP.Excludes...)
+			writtenFiles = append(writtenFiles, repoPayload.Written...)
+			exemptPaths = append(exemptPaths, repoPayload.Exempt...)
+			allWarnings = append(allWarnings, repoPayload.Warnings...)
+			contentExcludes[repoDir] = append(contentExcludes[repoDir], repoPayload.Excludes...)
 		}
 	}
 
@@ -1776,6 +1801,8 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 			WorktreeDelegation:     worktreeDelegation,
 			Keys:                   a.Keys,
 			StrictSecrets:          a.StrictSecrets,
+			SessionEnv:             sessionEnv,
+			SessionEnvSources:      sessionEnvSources,
 		})
 		if err != nil {
 			return nil, err

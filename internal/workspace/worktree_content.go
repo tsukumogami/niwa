@@ -78,6 +78,16 @@ type repoMaterializeInputs struct {
 	// and must keep doing so: it re-materializes from an already-written file
 	// and resolves nothing, so there is nothing there to be strict about.
 	StrictSecrets bool
+	// SessionEnv is the workspace's resolved [session.env] values, computed
+	// once per apply and threaded here so every agent's delivery is generated
+	// from the same map. The Claude settings document layers [claude.env] over
+	// it per key; nothing here consults it to decide whether another agent gets
+	// an environment at all.
+	SessionEnv map[string]string
+	// SessionEnvSources is the provenance of the inputs that produced
+	// SessionEnv, rolled into the settings document's fingerprint alongside
+	// the agent-specific declaration's own.
+	SessionEnvSources []SourceEntry
 }
 
 // runRepoMaterializers runs the given materializers for a single repo against
@@ -172,6 +182,8 @@ func runRepoMaterializers(materializers []Materializer, in repoMaterializeInputs
 		InheritedUnresolved:    in.InheritedUnresolved,
 		Keys:                   in.Keys,
 		StrictSecrets:          in.StrictSecrets,
+		SessionEnv:             in.SessionEnv,
+		SessionEnvSources:      in.SessionEnvSources,
 	}
 
 	var written []string
@@ -580,29 +592,40 @@ func ApplyToWorktree(cfg *config.WorkspaceConfig, configDir, instanceRoot, workt
 	}
 	reportWorktreeWarnings(opts.Stderr, worktreePath, skillReports)
 
-	// 1c. The workspace's declared MCP servers, generated into the worktree for
-	//     the same reason: an agent that resolves a project root stops at the
-	//     worktree root, so a configuration written in the owning clone is never
-	//     read from here. A value this path could not resolve is left out with a
-	//     report rather than written as the reference it still is -- see the
-	//     unresolved note in step 2 for why cfg here can carry one.
-	mcpServers, mcpReports := MCPServersFromConfig(cfg)
+	// 1c. The workspace's declared MCP servers and session environment,
+	//     generated into the worktree for the same reason: an agent that
+	//     resolves a project root stops at the worktree root, so a
+	//     configuration written in the owning clone is never read from here. A
+	//     value this path could not resolve is left out with a report rather
+	//     than written as the reference it still is -- see the unresolved note
+	//     in step 2 for why cfg here can carry one.
+	mcpServers, payloadReports := MCPServersFromConfig(cfg)
+	sessionEnv, _, err := SessionEnvVars(cfg, MergeInstanceOverrides(cfg), configDir)
+	if err != nil {
+		return nil, err
+	}
 	for _, ag := range agent.All() {
 		producer := agentplan.For(ag)
 		existingMCP, collisionWarning := ReadDeclaredMCPNames(opts.DeveloperHome, producer.MCPCollisionSpec())
 		if collisionWarning != "" {
-			mcpReports = append(mcpReports, collisionWarning)
+			payloadReports = append(payloadReports, collisionWarning)
 		}
-		install, err := InstallMCPConfig(agentplan.MCPInRepo, worktreePath, mcpServers, existingMCP, producer)
+		install, err := InstallPayloadConfig(PayloadRequest{
+			Scope:    agentplan.PayloadInRepo,
+			Dir:      worktreePath,
+			Servers:  mcpServers,
+			Env:      sessionEnv,
+			Existing: existingMCP,
+		}, producer)
 		if err != nil {
-			return nil, fmt.Errorf("generating the MCP configuration for worktree: %w", err)
+			return nil, fmt.Errorf("generating the payload configuration for worktree: %w", err)
 		}
 		written = append(written, install.Written...)
 		contentExcludes = append(contentExcludes, install.Excludes...)
 		collectExempt(opts.Exempt, install.Exempt)
-		mcpReports = append(mcpReports, install.Warnings...)
+		payloadReports = append(payloadReports, install.Warnings...)
 	}
-	reportWorktreeWarnings(opts.Stderr, worktreePath, mcpReports)
+	reportWorktreeWarnings(opts.Stderr, worktreePath, payloadReports)
 
 	// 2. Repo materializers (settings, files, hooks) targeted at the worktree.
 	//    Same shared loop the instance apply path uses, but with the
@@ -675,6 +698,9 @@ func ApplyToWorktree(cfg *config.WorkspaceConfig, configDir, instanceRoot, workt
 		WorktreeDelegation:     opts.WorktreeDelegation,
 		InheritedEnv:           inheritedEnv,
 		InheritedUnresolved:    inheritedUnresolved,
+		// The same resolution the generated payload above used, so a worktree
+		// session carries the declared environment whichever agent runs in it.
+		SessionEnv: sessionEnv,
 	})
 	if err != nil {
 		return nil, err

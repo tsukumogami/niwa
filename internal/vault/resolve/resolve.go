@@ -278,6 +278,9 @@ func ResolveWorkspace(ctx context.Context, cfg *config.WorkspaceConfig, opts Res
 	if err := w.walkMCP("mcp", out.MCP); err != nil {
 		return nil, err
 	}
+	if err := w.walkTable("session.env.vars", out.Session.Env.Vars, false); err != nil {
+		return nil, err
+	}
 	for name, ov := range out.Repos {
 		if err := w.walkEnv(fmt.Sprintf("repos.%s.env", name), &ov.Env); err != nil {
 			return nil, err
