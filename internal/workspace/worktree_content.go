@@ -437,12 +437,13 @@ func FindRepoGroup(instanceRoot, repoName string) (string, error) {
 // WorktreeApplyOptions carries the inputs ApplyToWorktree needs that are not
 // derivable from the worktree path alone.
 type WorktreeApplyOptions struct {
-	// Agent is the resolved session-global coding agent this worktree apply
-	// prepares for. The zero value behaves as Claude (agent.AgentClaude), so a
-	// caller that does not set it gets today's behavior. Under an agent that
-	// does not write repository/worktree-level context (Codex), the repo-content
-	// and worktree-context-layer writes are skipped.
-	Agent agent.Agent
+	// Exempt, when non-nil, receives the paths this apply refused to write
+	// because the worktree checkout commits its own file at one of niwa's
+	// names. The instance apply path passes one so its managed-file cleanup
+	// leaves those paths alone; the standalone `niwa worktree apply` path
+	// persists no managed-file record and passes none, so there is nothing for
+	// it to exempt from.
+	Exempt *[]string
 	// OverlayDir is the local clone path of the overlay repo when one is
 	// active, used to append overlay content / resolve overlay-sourced repo
 	// content. Empty when no overlay is active.
@@ -499,27 +500,51 @@ type WorktreeApplyOptions struct {
 //
 // Returns the list of files written.
 func ApplyToWorktree(cfg *config.WorkspaceConfig, configDir, instanceRoot, worktreePath, group, repo, purpose, branch string, opts WorktreeApplyOptions) ([]string, error) {
-	// The producer is where the session's agent turns into declared writes. It
-	// is built once here and handed to both content installers, so neither of
-	// them sees the agent as anything it could branch on.
-	producer := agentplan.For(opts.Agent)
-
+	// Every enumerated agent's plan is produced, exactly as on the instance
+	// path: a worktree is prepared for both, and which documents each one
+	// receives is the declaration table's answer rather than a caller's choice.
+	// A producer is what turns an agent into declared writes, so the installers
+	// below never see the agent as anything they could branch on.
 	if !ClaudeEnabled(cfg, repo) {
 		// Claude content is disabled for this repo; install only the
 		// worktree-context layer so the worktree still records its purpose.
-		return installWorktreeContextLayer(cfg, configDir, instanceRoot, worktreePath, repo, purpose, branch, producer)
+		var written, excludes []string
+		for _, ag := range agent.All() {
+			layerFiles, layerExcludes, err := installWorktreeContextLayer(cfg, configDir, instanceRoot, worktreePath, repo, purpose, branch, agentplan.For(ag), opts.Stderr, opts.Exempt)
+			if err != nil {
+				return nil, err
+			}
+			written = append(written, layerFiles...)
+			excludes = append(excludes, layerExcludes...)
+		}
+		// This branch takes none of the materialization below, so the coverage
+		// for what it did write is recorded here. A worktree that reads dirty
+		// is one the teardown refuses to reclaim, and the gate above is no
+		// reason to leave that behind.
+		if len(excludes) > 0 {
+			if err := gitexclude.EnsureRepoExclude(worktreePath, excludes...); err != nil {
+				return nil, fmt.Errorf("recording git exclude coverage for worktree %s: %w", repo, err)
+			}
+		}
+		return written, nil
 	}
 
 	var written []string
+	var contentExcludes []string
 
-	// 1. Owning repo's content (CLAUDE.local.md + subdir content), targeted at
-	//    the worktree root. Same function the instance apply path calls. A no-op
-	//    under an agent that does not write repository-level context (Codex).
-	result, err := InstallRepoContentTo(cfg, configDir, opts.OverlayDir, instanceRoot, worktreePath, group, repo, producer)
-	if err != nil {
-		return nil, fmt.Errorf("installing repo content into worktree: %w", err)
+	// 1. Owning repo's content, targeted at the worktree root. Same function the
+	//    instance apply path calls, so worktree and instance content cannot
+	//    drift on sources, composition, or the ownership rule.
+	for _, ag := range agent.All() {
+		result, err := InstallRepoContentTo(cfg, configDir, opts.OverlayDir, instanceRoot, worktreePath, group, repo, agentplan.For(ag))
+		if err != nil {
+			return nil, fmt.Errorf("installing repo content into worktree: %w", err)
+		}
+		written = append(written, result.WrittenFiles...)
+		contentExcludes = append(contentExcludes, result.Excludes...)
+		reportWorktreeContentWarnings(opts.Stderr, worktreePath, result.Warnings)
+		collectExempt(opts.Exempt, result.Exempt)
 	}
-	written = append(written, result.WrittenFiles...)
 
 	// 2. Repo materializers (settings, files, hooks) targeted at the worktree.
 	//    Same shared loop the instance apply path uses, but with the
@@ -629,6 +654,7 @@ func ApplyToWorktree(cfg *config.WorkspaceConfig, configDir, instanceRoot, workt
 	// extra pattern — scoped to this exact path rather than widening the global
 	// niwaExcludePatterns — so genuine user-authored .claude/ files still show.
 	excludeExtras := append([]string{worktreeRulesFile}, envOutputs...)
+	excludeExtras = append(excludeExtras, contentExcludes...)
 	if err := gitexclude.EnsureRepoExclude(worktreePath, excludeExtras...); err != nil {
 		return nil, fmt.Errorf("recording git exclude coverage for worktree %s: %w", repo, err)
 	}
@@ -644,11 +670,13 @@ func ApplyToWorktree(cfg *config.WorkspaceConfig, configDir, instanceRoot, workt
 
 	// 4. Worktree-specific layer naming the purpose and branch (or the
 	//    configured [claude.content.worktree] template, when set).
-	layerFiles, err := installWorktreeContextLayer(cfg, configDir, instanceRoot, worktreePath, repo, purpose, branch, producer)
-	if err != nil {
-		return nil, err
+	for _, ag := range agent.All() {
+		layerFiles, _, err := installWorktreeContextLayer(cfg, configDir, instanceRoot, worktreePath, repo, purpose, branch, agentplan.For(ag), opts.Stderr, opts.Exempt)
+		if err != nil {
+			return nil, err
+		}
+		written = append(written, layerFiles...)
 	}
-	written = append(written, layerFiles...)
 
 	// 5. Worktree-event hooks, run on create/apply. Analog of the instance
 	//    setup-script run: discovered from <configDir>/worktree-hooks/ and
@@ -733,7 +761,7 @@ func installWorktreeRulesImport(instanceRoot, worktreePath string) ([]string, er
 // When [claude.content.worktree].source is configured, the section body is
 // rendered from that template (expanded with the worktree variables) in-memory
 // via renderWorktreeLayerBody -> renderContentFile (the same containment-checked
-// read+expand core as installContentFile, but no transient file is written).
+// read+expand core every other content layer resolves its source through).
 // When unset, the generated default purpose/branch body is used — the Stage-1
 // behavior, unchanged.
 //
@@ -743,29 +771,77 @@ func installWorktreeRulesImport(instanceRoot, worktreePath string) ([]string, er
 // agent that does not receive worktree-level context (Codex) the producer
 // declares nothing, so niwa writes no context file into the worktree and the
 // git working tree stays clean.
-func installWorktreeContextLayer(cfg *config.WorkspaceConfig, configDir, instanceRoot, worktreePath, repo, purpose, branch string, producer agentplan.Producer) ([]string, error) {
+func installWorktreeContextLayer(cfg *config.WorkspaceConfig, configDir, instanceRoot, worktreePath, repo, purpose, branch string, producer agentplan.Producer, stderr io.Writer, exempt *[]string) ([]string, []string, error) {
 	body, err := renderWorktreeLayerBody(cfg, configDir, instanceRoot, worktreePath, repo, purpose, branch)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
+	}
+
+	// The probe is taken here, after the repository-level install for the same
+	// worktree has run, because whether this section joins a document that
+	// already exists or has to stand as one is decided by what that install
+	// wrote.
+	probe, err := probeContextTree(producer.ContextProbeSpec(worktreePath))
+	if err != nil {
+		return nil, nil, err
 	}
 
 	plan, err := producer.WorktreeContextPlan(agentplan.WorktreeContextInputs{
 		Dir:     worktreePath,
 		Heading: worktreeContextHeading,
 		Body:    []byte(body),
+		Probe:   probe,
 	})
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if err := checkPlanContainment(plan, worktreePath); err != nil {
-		return nil, fmt.Errorf("worktree context layer: %w", err)
+		return nil, nil, fmt.Errorf("worktree context layer: %w", err)
 	}
 
-	written, _, err := applyPlan(plan)
+	written, excludes, err := applyPlan(plan)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return written, nil
+	reportWorktreeWarnings(stderr, worktreePath, plan.Warnings)
+	collectExempt(exempt, plan.Exempt)
+	return written, excludes, nil
+}
+
+// collectExempt appends paths to a caller-supplied exemption list, if the
+// caller keeps one. A caller that persists no managed-file record has nothing
+// to exempt a path from, and passes nil.
+func collectExempt(sink *[]string, paths []string) {
+	if sink == nil {
+		return
+	}
+	*sink = append(*sink, paths...)
+}
+
+// reportWorktreeContentWarnings renders a content install's warnings for one
+// worktree. Every refusal names its path: the standalone worktree path has no
+// deferred-warning reporter, and a quiet skip is the silent failure the
+// ownership rule exists to prevent.
+func reportWorktreeContentWarnings(stderr io.Writer, worktreePath string, warnings []ContentWarning) {
+	messages := make([]string, 0, len(warnings))
+	for _, w := range warnings {
+		messages = append(messages, w.Message)
+	}
+	reportWorktreeWarnings(stderr, worktreePath, messages)
+}
+
+// reportWorktreeWarnings writes one line per warning, prefixed with the
+// worktree they are about.
+func reportWorktreeWarnings(stderr io.Writer, worktreePath string, warnings []string) {
+	if len(warnings) == 0 {
+		return
+	}
+	if stderr == nil {
+		stderr = os.Stderr
+	}
+	for _, w := range warnings {
+		fmt.Fprintf(stderr, "worktree %s: %s\n", worktreePath, w)
+	}
 }
 
 // worktreeLayerVars builds the template variable map for the worktree layer.

@@ -75,26 +75,21 @@ func (a Agent) RootContextFileName() string {
 }
 
 // LocalContextFileName is the filename for the repository and worktree levels:
-// CLAUDE.local.md for Claude (and the zero value), AGENTS.md for Codex.
+// CLAUDE.local.md for Claude (and the zero value), AGENTS.override.md for Codex.
 //
-// The Codex value is provisional seam-completeness: this slice skips all
-// repository/worktree-level writes under Codex (see WritesRepoLevelContext), so
-// this branch is currently unused. The deferred repository-level Codex work may
-// revisit the exact mechanism.
+// The Codex value is not a fallback keyed on what a repository happens to ship.
+// Codex takes at most one context file per directory by a hardcoded precedence
+// -- AGENTS.override.md, then AGENTS.md, then configured fallbacks -- with no
+// error and no warning when an earlier name wins. AGENTS.override.md is
+// therefore the only name that is read in every repository; writing AGENTS.md
+// would deliver nothing in any repository that commits its own. The repository's
+// committed file is not displaced in substance: niwa inlines it into the
+// document it writes.
 func (a Agent) LocalContextFileName() string {
 	if a.normalize() == AgentCodex {
-		return "AGENTS.md"
+		return "AGENTS.override.md"
 	}
 	return "CLAUDE.local.md"
-}
-
-// WritesRepoLevelContext reports whether this agent materializes
-// repository/worktree-level context in this slice. It is true for Claude (and
-// the zero value) and false for Codex: writing an AGENTS.md inside a cloned
-// repository would risk clobbering the repository's own committed AGENTS.md and
-// dirtying the git working tree, so that level is deferred.
-func (a Agent) WritesRepoLevelContext() bool {
-	return a.normalize() != AgentCodex
 }
 
 // ResolveAgent computes the session agent from its three sources, once, in

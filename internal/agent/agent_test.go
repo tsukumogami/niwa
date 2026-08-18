@@ -81,28 +81,15 @@ func TestLocalContextFileName(t *testing.T) {
 		want  string
 	}{
 		{AgentClaude, "CLAUDE.local.md"},
-		{AgentCodex, "AGENTS.md"},
+		// AGENTS.override.md, not AGENTS.md: it is first in Codex's hardcoded
+		// per-directory precedence, so it is the one name that is read in a
+		// repository that commits its own context file.
+		{AgentCodex, "AGENTS.override.md"},
 		{Agent(""), "CLAUDE.local.md"}, // zero value == claude (fail-safe)
 	}
 	for _, tt := range tests {
 		if got := tt.agent.LocalContextFileName(); got != tt.want {
 			t.Fatalf("Agent(%q).LocalContextFileName() = %q, want %q", tt.agent, got, tt.want)
-		}
-	}
-}
-
-func TestWritesRepoLevelContext(t *testing.T) {
-	tests := []struct {
-		agent Agent
-		want  bool
-	}{
-		{AgentClaude, true},
-		{AgentCodex, false},
-		{Agent(""), true}, // zero value == claude (fail-safe)
-	}
-	for _, tt := range tests {
-		if got := tt.agent.WritesRepoLevelContext(); got != tt.want {
-			t.Fatalf("Agent(%q).WritesRepoLevelContext() = %v, want %v", tt.agent, got, tt.want)
 		}
 	}
 }

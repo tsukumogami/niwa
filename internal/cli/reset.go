@@ -145,11 +145,6 @@ func runReset(cmd *cobra.Command, args []string) error {
 			applier.ConfigSourceURL = entry.SourceURL
 		}
 	}
-	resolvedAgent, agErr := resolveSessionAgent("", cfg)
-	if agErr != nil {
-		return agErr
-	}
-	applier.Agent = resolvedAgent
 	// Reset surfaces no flags of its own, so the workspace setting is the only
 	// speaker here. It is consulted deliberately: reset rebuilds the same
 	// instance the workspace's own create would have built, and an instance

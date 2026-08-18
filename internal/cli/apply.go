@@ -29,8 +29,6 @@ func init() {
 		"skip auto-installing the embedded niwa Claude Code plugin (otherwise installed once when a rank-2 source is detected).")
 	applyCmd.Flags().BoolVar(&applyNoCascade, "no-cascade", false,
 		"at the workspace root, refresh the root-managed config only and do not re-converge the instances beneath it. Has no effect at an instance (its worktrees refresh with it under the inherit model) or at a worktree (leaf scope).")
-	applyCmd.Flags().StringVar(&applyAgent, "agent", "",
-		"select the coding agent to prepare the workspace for (claude or codex) for this session, overriding the workspace default_agent; NIWA_AGENT sets it per shell.")
 	applyCmd.Flags().IntVar(&applyParallel, "parallel", 0,
 		"maximum repos to clone concurrently (>=1). Lower this on slow or flaky networks; 1 clones serially. Overrides the [global] clone_workers config. 0 (the default) uses clone_workers, else niwa's built-in default.")
 	registerStrictSecretsFlag(applyCmd, &strictSecretsApply)
@@ -48,7 +46,6 @@ var (
 	applyForce                 bool
 	applyNoInstallPlugins      bool
 	applyNoCascade             bool
-	applyAgent                 string
 	applyParallel              int
 )
 
@@ -190,15 +187,8 @@ func runApply(cmd *cobra.Command, args []string) error {
 		fmt.Fprintf(os.Stderr, "warning: %s\n", w)
 	}
 
-	// Resolve the session-global agent once (flag > NIWA_AGENT > workspace
-	// default_agent > claude) and thread it into materialization. An unknown
-	// value fails here with a clear error rather than materializing an unusable
-	// workspace.
-	resolvedAgent, agErr := resolveSessionAgent(applyAgent, cfg)
-	if agErr != nil {
-		return agErr
-	}
-	applier.Agent = resolvedAgent
+	// No agent is resolved here. Every apply prepares the workspace for every
+	// agent niwa enumerates, so there is nothing to select.
 
 	// Resolved once for the whole command, against the post-reconcile config,
 	// so every instance in the cascade is converged under the same strictness.
@@ -246,7 +236,6 @@ func runApply(cmd *cobra.Command, args []string) error {
 		if _, mErr := workspace.MaterializeWorkspaceRoot(cfg, scope.WorkspaceRoot, workspace.RootMaterializeOptions{
 			EphemeralSessionMode: workspace.EphemeralSessionMode(scope.WorkspaceRoot),
 			ConfigDir:            configDir,
-			Agent:                resolvedAgent,
 		}); mErr != nil {
 			return fmt.Errorf("materializing workspace-root config: %w", mErr)
 		}

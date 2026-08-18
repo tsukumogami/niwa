@@ -88,13 +88,6 @@ type RootMaterializeOptions struct {
 	// the hooks that act on it.
 	EphemeralSessionMode bool
 
-	// Agent is the resolved session-global coding agent this materialize
-	// prepares the workspace root for. The zero value behaves as Claude
-	// (agent.AgentClaude), so a caller that does not set it writes the
-	// workspace-root context file exactly as before (CLAUDE.md). Under Codex it
-	// selects AGENTS.md.
-	Agent agent.Agent
-
 	// ConfigDir is the workspace config source directory (typically
 	// <workspaceRoot>/.niwa). It is the source root for [root.files] verbatim
 	// file distribution; required only when [root.files] is non-empty.
@@ -136,11 +129,17 @@ func MaterializeWorkspaceRoot(cfg *config.WorkspaceConfig, workspaceRoot string,
 	}
 	written = append(written, settingsPaths...)
 
-	claudePath, err := writeRootClaudeMD(cfg, workspaceRoot, opts.Agent)
-	if err != nil {
-		return nil, err
+	// Every enumerated agent's plan is produced here too. The workspace root is
+	// not a repository and holds no project-root marker, so an agent whose
+	// discovery starts from one reads nothing here at all -- and its declaration
+	// says so, which is why this loop still produces one file rather than two.
+	for _, ag := range agent.All() {
+		rootContext, err := writeRootContext(cfg, workspaceRoot, ag)
+		if err != nil {
+			return nil, err
+		}
+		written = append(written, rootContext...)
 	}
-	written = append(written, claudePath)
 
 	skillPaths, err := writeRootSkills(workspaceRoot)
 	if err != nil {
@@ -362,22 +361,31 @@ func pluginMarketplace(plugin string) string {
 	return plugin[at+1:]
 }
 
-// writeRootClaudeMD writes <workspaceRoot>/CLAUDE.md with workspace-context
-// content at root altitude. A session launched at the workspace root loads this
-// file at startup; without it the coordinator and any root session start with
-// no workspace orientation.
+// writeRootContext writes the workspace-root context document for one agent. A
+// session launched at the workspace root loads it at startup; without it the
+// coordinator and any root session start with no workspace orientation. The
+// producer decides the filename and whether the document is written at all, so
+// an agent that would never read one here gets nothing rather than a file
+// nobody opens.
 //
 // At init time the workspace has no cloned repos to enumerate, so this does not
 // reuse generateWorkspaceContext (which classifies discovered repos). It writes
-// a minimal workspace-root CLAUDE.md describing the workspace and the
-// ephemeral-session model instead.
-func writeRootClaudeMD(cfg *config.WorkspaceConfig, workspaceRoot string, ag agent.Agent) (string, error) {
-	content := generateRootClaudeContent(cfg)
-	claudePath := filepath.Join(workspaceRoot, ag.RootContextFileName())
-	if err := os.WriteFile(claudePath, []byte(content), 0o644); err != nil {
-		return "", fmt.Errorf("writing workspace-root context file: %w", err)
+// a minimal document describing the workspace and the ephemeral-session model
+// instead.
+func writeRootContext(cfg *config.WorkspaceConfig, workspaceRoot string, ag agent.Agent) ([]string, error) {
+	plan, err := agentplan.For(ag).RootContextPlan(agentplan.RootContextInputs{
+		Dir:     workspaceRoot,
+		Body:    []byte(generateRootClaudeContent(cfg)),
+		HasBody: true,
+	})
+	if err != nil {
+		return nil, err
 	}
-	return claudePath, nil
+	written, _, err := applyPlan(plan)
+	if err != nil {
+		return nil, fmt.Errorf("writing workspace-root context file: %w", err)
+	}
+	return written, nil
 }
 
 // generateRootClaudeContent produces the markdown for the workspace-root

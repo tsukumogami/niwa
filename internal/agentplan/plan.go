@@ -48,6 +48,14 @@ const (
 	// IfSourceExists writes the entry only when Source is present. An absent
 	// Source is a no-op, not an error.
 	IfSourceExists
+
+	// IfNotForeign writes the entry only when Path is free for niwa to take:
+	// absent, or a regular file whose first line is Owner. It is the write-time
+	// half of the ownership rule, re-checked here because the producer's verdict
+	// was computed in a pre-pass and a repository's own file can appear in
+	// between. Anything else -- a symlink, a directory, a file niwa did not
+	// write -- is left exactly as it is.
+	IfNotForeign
 )
 
 // Entry is one declared write: what to put where, under which capability, and
@@ -83,6 +91,13 @@ type Entry struct {
 	// Marker delimits the region OpReplaceSection rewrites.
 	Marker string
 
+	// Owner is the first line that identifies an existing file at Path as one
+	// niwa wrote. IfNotForeign reads it and nothing else does. It is a separate
+	// field from Marker because an entry can need both: a worktree's Codex
+	// document is a section replace delimited by the section heading, in a file
+	// whose ownership is decided by the generation marker on its first line.
+	Owner string
+
 	// Pre gates the entry.
 	Pre Precondition
 
@@ -115,4 +130,13 @@ type Plan struct {
 	// Warnings are the things a user needs to hear about this plan: a
 	// declaration that could not be honored, a refusal, an omission.
 	Warnings []string
+
+	// Exempt lists paths the managed-file cleanup must not delete even though
+	// this plan produced nothing at them. There is exactly one reason a path
+	// lands here: the plan refused to write it because the repository commits
+	// its own file at one of niwa's names. Without the exemption, cleanup would
+	// see a recorded path the current apply did not produce and delete the
+	// repository's own file -- the opposite of what the refusal promised. The
+	// record entry still goes; only the deletion is exempted.
+	Exempt []string
 }

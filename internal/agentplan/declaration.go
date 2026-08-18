@@ -77,12 +77,12 @@ type Declaration struct {
 var declarations = []Declaration{
 	// Row 1: workspace and group orientation reaching a repo session.
 	{Capability: WorkspaceOrientation, Agent: agent.AgentClaude, State: StateImplemented},
-	{
-		Capability: WorkspaceOrientation, Agent: agent.AgentCodex,
-		State:  StateUnavailable,
-		Kind:   ReasonNotBuilt,
-		Reason: "niwa does not yet compose workspace and group orientation into the repository context files Codex reads.",
-	},
+	// Codex reads context from the nearest project-root marker downward, so the
+	// documents above a repository are never visited from a session inside it.
+	// The workspace and group layers are composed into the repository's own
+	// document instead -- the same document row 3 delivers, which is why this
+	// row carries no separate write of its own.
+	{Capability: WorkspaceOrientation, Agent: agent.AgentCodex, State: StateImplemented},
 
 	// Row 2: a session started at the workspace or instance root.
 	{Capability: RootSessionOrientation, Agent: agent.AgentClaude, State: StateImplemented},
@@ -95,20 +95,27 @@ var declarations = []Declaration{
 
 	// Row 3: the repository-level orientation document.
 	{Capability: RepoOrientationDoc, Agent: agent.AgentClaude, State: StateImplemented},
+	// The trust edge is about the byte budget, not the document: the composed
+	// chain is read whatever the trust state, but the project-layer key that
+	// raises the budget above the 32768-byte default is honored only in a
+	// trusted directory, and an over-budget chain is cut without a word.
 	{
 		Capability: RepoOrientationDoc, Agent: agent.AgentCodex,
-		State:  StateUnavailable,
-		Kind:   ReasonNotBuilt,
-		Reason: "niwa does not yet write a repository-level orientation document for Codex.",
+		State:    StateImplemented,
+		Requires: []Capability{DirectoryTrust},
 	},
 
 	// Row 4: the worktree-level orientation document.
 	{Capability: WorktreeOrientationDoc, Agent: agent.AgentClaude, State: StateImplemented},
+	// A linked worktree's `.git` is a regular pointer file, and Codex's
+	// project-root marker check is a bare metadata stat that a file satisfies,
+	// so the walk stops at a worktree root exactly as it stops at a clone's
+	// (measured against codex-cli 0.147.0, with a negative control). The same
+	// budget reasoning as row 3 puts the trust edge here too.
 	{
 		Capability: WorktreeOrientationDoc, Agent: agent.AgentCodex,
-		State:  StateUnavailable,
-		Kind:   ReasonNotBuilt,
-		Reason: "niwa does not yet write a worktree-level orientation document for Codex.",
+		State:    StateImplemented,
+		Requires: []Capability{DirectoryTrust},
 	},
 
 	// Row 5: workspace-declared plugin skills.
@@ -289,12 +296,13 @@ var declarations = []Declaration{
 
 	// Row 24: git-exclude bookkeeping.
 	{Capability: GitExcludeBookkeeping, Agent: agent.AgentClaude, State: StateImplemented},
-	{
-		Capability: GitExcludeBookkeeping, Agent: agent.AgentCodex,
-		State:  StateUnavailable,
-		Kind:   ReasonNotBuilt,
-		Reason: "Bookkeeping is agent-agnostic, but niwa writes no Codex-side names for it to cover yet.",
-	},
+	// This row flips with the first Codex-side name niwa writes into a working
+	// tree, not after it. The coverage is not cosmetic: an uncovered
+	// niwa-written file makes the tree read dirty, and a dirty tree is what
+	// stops the worktree teardown from reclaiming a session's worktree. Writing
+	// the name in one change and covering it in the next would ship that
+	// breakage as an intermediate state.
+	{Capability: GitExcludeBookkeeping, Agent: agent.AgentCodex, State: StateImplemented},
 }
 
 // Lookup returns the declaration for one (capability, agent) pair.

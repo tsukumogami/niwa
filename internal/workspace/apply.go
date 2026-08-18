@@ -42,12 +42,11 @@ type Applier struct {
 	// clone_workers config (flag > config > default).
 	CloneWorkers int
 
-	// Agent is the resolved session-global coding agent this apply prepares
-	// the workspace for. The zero value (agent.Agent("")) behaves as Claude
-	// (agent.AgentClaude), so an Applier constructed without setting this field
-	// materializes exactly as it did before agent selection existed. The CLI
-	// entry points set it from agent.ResolveAgent before calling Apply/Create.
-	Agent agent.Agent
+	// There is deliberately no agent field here. An apply prepares the
+	// workspace for every agent niwa enumerates, and which capabilities each
+	// one receives is the declaration table's answer rather than a caller's
+	// choice -- so there is nothing for an entry point to select between, and a
+	// field to select it with would be a way for one to try.
 
 	// DeveloperHome is the developer's own home directory, and the only thing
 	// that lets this apply write outside the instance it is preparing. The
@@ -389,6 +388,11 @@ type pipelineResult struct {
 	// wrote entries and then failed must not also forget which entries it
 	// wrote. Create and Apply save state, then surface this.
 	procedureErr error
+	// exemptPaths names the paths this run refused to write because something
+	// niwa did not write occupies them. They are deliberately not in
+	// managedFiles: the state must stop claiming niwa owns them. Only the
+	// deletion is exempted, which is what cleanRemovedFiles reads them for.
+	exemptPaths []string
 }
 
 // logSetupIncomplete prints the counted verdict line naming the repos whose
@@ -811,6 +815,17 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 
 	var writtenFiles []string
 	var allWarnings []string
+	// exemptPaths collects the paths this run refused to write because
+	// something niwa did not write occupies them. cleanRemovedFiles consults
+	// them: a refused path is by definition one this apply did not produce, so
+	// without the exemption the deletion pass would remove the very file the
+	// refusal promised to leave alone.
+	var exemptPaths []string
+	// contentExcludes collects, per repository working tree, the git-exclude
+	// patterns the context documents written into it imply. The exclude call
+	// runs in the materializer loop below, after every document has landed, so
+	// the patterns are held here rather than applied where they are produced.
+	contentExcludes := map[string][]string{}
 	// plans accumulates every plan applied during this run. It is what the
 	// bookkeeping steps read: Step 7 takes Managed and Sources off the applied
 	// entries, the per-repo git-exclude call takes the patterns entries in that
@@ -1485,12 +1500,21 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		}
 	}
 
-	// Step 4: Install workspace-level CLAUDE.md.
-	wsFiles, err := InstallWorkspaceContent(effectiveCfg, configDir, instanceRoot, a.Agent)
-	if err != nil {
-		return nil, fmt.Errorf("installing workspace content: %w", err)
+	// Step 4: Install the instance-root context document, for every agent.
+	//
+	// Every enumerated agent's plan is produced on every apply, here and at each
+	// level below. There is no agent choice at create or apply time: an agent
+	// that receives the document gets it, one that does not gets nothing, and
+	// which is which is the declaration table's answer rather than a flag's. A
+	// workspace prepared for one agent is prepared for the other at the same
+	// time, so switching between them needs no re-apply.
+	for _, ag := range agent.All() {
+		wsFiles, err := InstallWorkspaceContent(effectiveCfg, configDir, instanceRoot, ag)
+		if err != nil {
+			return nil, fmt.Errorf("installing workspace content: %w", err)
+		}
+		writtenFiles = append(writtenFiles, wsFiles...)
 	}
-	writtenFiles = append(writtenFiles, wsFiles...)
 
 	// Build repo name -> on-disk path index (used by marketplace resolution
 	// and materializers).
@@ -1540,11 +1564,13 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		}
 		installedGroups[cr.Group] = true
 
-		groupFiles, err := InstallGroupContent(effectiveCfg, configDir, instanceRoot, cr.Group, a.Agent)
-		if err != nil {
-			return nil, fmt.Errorf("installing group content for %q: %w", cr.Group, err)
+		for _, ag := range agent.All() {
+			groupFiles, err := InstallGroupContent(effectiveCfg, configDir, instanceRoot, cr.Group, ag)
+			if err != nil {
+				return nil, fmt.Errorf("installing group content for %q: %w", cr.Group, err)
+			}
+			writtenFiles = append(writtenFiles, groupFiles...)
 		}
-		writtenFiles = append(writtenFiles, groupFiles...)
 	}
 
 	// Step 5c: Install global CLAUDE.md content if global config is active.
@@ -1563,14 +1589,19 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 			continue
 		}
 
-		result, err := InstallRepoContent(effectiveCfg, configDir, overlayDir, instanceRoot, cr.Group, cr.Repo.Name, a.Agent)
-		if err != nil {
-			return nil, fmt.Errorf("installing repo content for %q: %w", cr.Repo.Name, err)
+		for _, ag := range agent.All() {
+			result, err := InstallRepoContent(effectiveCfg, configDir, overlayDir, instanceRoot, cr.Group, cr.Repo.Name, ag)
+			if err != nil {
+				return nil, fmt.Errorf("installing repo content for %q: %w", cr.Repo.Name, err)
+			}
+			for _, w := range result.Warnings {
+				allWarnings = append(allWarnings, w.String())
+			}
+			writtenFiles = append(writtenFiles, result.WrittenFiles...)
+			exemptPaths = append(exemptPaths, result.Exempt...)
+			repoDir := filepath.Join(instanceRoot, cr.Group, cr.Repo.Name)
+			contentExcludes[repoDir] = append(contentExcludes[repoDir], result.Excludes...)
 		}
-		for _, w := range result.Warnings {
-			allWarnings = append(allWarnings, w.String())
-		}
-		writtenFiles = append(writtenFiles, result.WrittenFiles...)
 	}
 
 	// Step 6.4: Decide the worktree-delegation integration ONCE per apply
@@ -1677,6 +1708,7 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		excludeExtras := make([]string, 0, len(envOutputs))
 		excludeExtras = append(excludeExtras, envOutputs...)
 		excludeExtras = append(excludeExtras, plans.excludesUnder(repoDir)...)
+		excludeExtras = append(excludeExtras, contentExcludes[repoDir]...)
 		if err := gitexclude.EnsureRepoExclude(repoDir, excludeExtras...); err != nil {
 			return nil, fmt.Errorf("recording git exclude coverage for repo %s: %w", cr.Repo.Name, err)
 		}
@@ -1717,6 +1749,7 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		now:                    now,
 		allowPlaintextSecrets:  a.AllowPlaintextSecrets,
 		worktreeDelegation:     worktreeDelegation,
+		exempt:                 &exemptPaths,
 	})
 	if err != nil {
 		return nil, err
@@ -1755,6 +1788,7 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 	// Plan warnings: what the applied plans said the user needs to hear.
 	// Reported alongside the pipeline's other deferred warnings.
 	allWarnings = append(allWarnings, plans.warnings()...)
+	exemptPaths = append(exemptPaths, plans.exempt()...)
 
 	// Step 7: Build managed files with hashes and per-source
 	// provenance. Sources come from two places. Materializers report
@@ -1817,6 +1851,7 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		disclosedNotices: newDisclosures,
 		trustKeys:        trustKeys,
 		procedureErr:     trustErr,
+		exemptPaths:      exemptPaths,
 	}, nil
 }
 
@@ -1992,11 +2027,22 @@ func (a *Applier) cleanRemovedFiles(existingState *InstanceState, result *pipeli
 		currentFiles[mf.Path] = true
 	}
 
+	// A path this run refused to write is a path this run did not produce, so
+	// the loop below would delete it. That is exactly backwards: the refusal
+	// happened because the file is the repository's own, and niwa promised to
+	// leave it untouched. The record entry still goes -- the state must stop
+	// claiming niwa owns the path -- and only the deletion is exempted.
+	exempt := make(map[string]bool, len(result.exemptPaths))
+	for _, path := range result.exemptPaths {
+		exempt[filepath.Clean(path)] = true
+	}
+
 	for _, mf := range existingState.ManagedFiles {
-		if !currentFiles[mf.Path] {
-			if err := os.Remove(mf.Path); err != nil && !os.IsNotExist(err) {
-				a.Reporter.DeferWarn("could not remove managed file %s: %v", mf.Path, err)
-			}
+		if currentFiles[mf.Path] || exempt[filepath.Clean(mf.Path)] {
+			continue
+		}
+		if err := os.Remove(mf.Path); err != nil && !os.IsNotExist(err) {
+			a.Reporter.DeferWarn("could not remove managed file %s: %v", mf.Path, err)
 		}
 	}
 }
@@ -2032,6 +2078,11 @@ type worktreeRefreshInputs struct {
 	// registers against cloneDir. nil defaults to gitRegistersWorktree (the real
 	// `git worktree list --porcelain` cross-check); injected in tests.
 	gitRegistered func(cloneDir, worktreePath string) bool
+	// exempt, when non-nil, collects the paths a refreshed worktree refused to
+	// write because the checkout commits its own file at one of niwa's names.
+	// The pipeline passes its own list so cleanRemovedFiles sees them; a test
+	// that only cares about env output may leave it nil.
+	exempt *[]string
 }
 
 // refreshWorktreeEnvs enumerates the instance's session-backed worktrees and, for
@@ -2120,7 +2171,7 @@ func (a *Applier) refreshWorktreeEnvs(in worktreeRefreshInputs) ([]ManagedFile, 
 			in.cfg, in.configDir, in.instanceRoot, wtPath, group, s.Repo,
 			s.Purpose, s.EffectiveBranchName(),
 			WorktreeApplyOptions{
-				Agent:                  a.Agent,
+				Exempt:                 in.exempt,
 				OverlayDir:             in.overlayDir,
 				AllowPlaintextSecrets:  in.allowPlaintextSecrets,
 				Stderr:                 a.Reporter.Writer(),

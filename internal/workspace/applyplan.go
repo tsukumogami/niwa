@@ -56,16 +56,20 @@ func applyPlan(p *agentplan.Plan) (written []string, excludes []string, err erro
 	}
 
 	for _, e := range p.Entries {
+		// Well-formedness is checked before the gate, not after it: an entry
+		// the executor could not act on is a producer bug whether or not its
+		// precondition happens to skip it today, and the gates themselves read
+		// fields the check validates.
+		if err := checkPlanEntry(e); err != nil {
+			return nil, nil, err
+		}
+
 		ok, err := planEntryApplies(e)
 		if err != nil {
 			return nil, nil, err
 		}
 		if !ok {
 			continue
-		}
-
-		if err := checkPlanEntry(e); err != nil {
-			return nil, nil, err
 		}
 
 		switch e.Op {
@@ -81,7 +85,11 @@ func applyPlan(p *agentplan.Plan) (written []string, excludes []string, err erro
 				errNoExecutorArm, e.Op, e.Capability, e.Path)
 		}
 		if err != nil {
-			return nil, nil, err
+			// Every failure names the capability it was delivering. A
+			// declaration the table calls implemented has to fail loudly and
+			// legibly when its delivery cannot land, rather than surfacing as a
+			// bare path the user has to trace back to a feature.
+			return nil, nil, fmt.Errorf("delivering %s: %w", e.Capability, err)
 		}
 
 		written = appendUniqueString(written, e.Path)
@@ -110,6 +118,18 @@ func planEntryApplies(e agentplan.Entry) (bool, error) {
 			return false, fmt.Errorf("probing plan source %s: %w", e.Source, err)
 		}
 		return true, nil
+	case agentplan.IfNotForeign:
+		// The write-time half of the ownership rule. The producer already
+		// declined to declare an entry for a path a pre-pass found foreign;
+		// this re-check closes the window between that pass and this write, in
+		// which a repository's own file can appear at the name. It is the same
+		// question asked with the same helper, so the two answers cannot
+		// disagree about what counts as niwa's own.
+		owned, err := probeOwnership(e.Path, e.Owner)
+		if err != nil {
+			return false, err
+		}
+		return owned != pathForeign, nil
 	default:
 		return false, fmt.Errorf("%w: precondition %d for capability %s at %s",
 			errUnknownPrecondition, e.Pre, e.Capability, e.Path)
@@ -147,6 +167,12 @@ func checkPlanEntry(e agentplan.Entry) error {
 	}
 	if e.Op == agentplan.OpReplaceSection && e.Marker == "" {
 		return fmt.Errorf("%w: section replace with no marker for %s", errMalformedPlanEntry, e.Path)
+	}
+	if e.Pre == agentplan.IfNotForeign && e.Owner == "" {
+		// Without an owner line the gate would answer "foreign" for every file
+		// that already exists, so a re-apply would silently stop refreshing its
+		// own document.
+		return fmt.Errorf("%w: ownership gate with no owner line for %s", errMalformedPlanEntry, e.Path)
 	}
 	return nil
 }
@@ -323,6 +349,21 @@ func (r *planRun) warnings() []string {
 	var out []string
 	for _, o := range r.outcomes {
 		out = append(out, o.plan.Warnings...)
+	}
+	return out
+}
+
+// exempt returns the paths the applied plans refused to write because something
+// niwa did not write occupies them. Cleanup consults this before deleting a
+// recorded path the current apply did not produce -- which a refused path
+// always is, so without the consultation the refusal would be undone by the
+// step that runs right after it.
+func (r *planRun) exempt() []string {
+	var out []string
+	for _, o := range r.outcomes {
+		for _, path := range o.plan.Exempt {
+			out = appendUniqueString(out, path)
+		}
 	}
 	return out
 }

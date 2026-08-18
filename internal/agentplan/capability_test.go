@@ -138,7 +138,11 @@ var codexFinalGaps = map[Capability]ReasonKind{
 // unavailable. The list grows one entry per delivery, in the change that lands
 // the delivery -- never before it.
 var codexDelivered = []Capability{
+	WorkspaceOrientation,
+	RepoOrientationDoc,
+	WorktreeOrientationDoc,
 	DirectoryTrust,
+	GitExcludeBookkeeping,
 }
 
 // TestCodexColumnStatesWhatIsDelivered pins the Codex column against two

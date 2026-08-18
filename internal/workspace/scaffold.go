@@ -14,9 +14,10 @@ name = "%s"
 # version = "0.1.0"
 default_branch = "main"
 content_dir = "claude"
-# default_agent selects the coding agent niwa prepares the workspace for.
-# Omit (or "claude") to materialize CLAUDE.md context; "codex" materializes
-# AGENTS.md instead. Override per session with --agent or the NIWA_AGENT env var.
+# default_agent names the coding agent this workspace's background workers are
+# launched as. It does not select what niwa prepares: every apply prepares the
+# workspace for every agent niwa supports, so a session can be opened as either
+# one without re-applying. NIWA_AGENT overrides it per shell.
 # default_agent = "codex"
 
 # --- Sources: GitHub orgs to discover repos from ---
@@ -59,7 +60,7 @@ content_dir = "claude"
 # [claude.env.secrets]
 # ANTHROPIC_API_KEY = "vault://team/ANTHROPIC_API_KEY"
 # # The secret table is agent-neutral -- bind any agent's key the same way. For a
-# # workspace prepared for OpenAI Codex (default_agent = "codex"), add:
+# # workspace whose sessions also run OpenAI Codex, add:
 # OPENAI_API_KEY = "vault://team/OPENAI_API_KEY"
 # --- Instance root overrides (workspace-level Claude Code session) ---
 # [instance.claude.settings]
