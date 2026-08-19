@@ -589,6 +589,18 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	// a warning and never roll back or delete the mapping (success is already
 	// true; DESIGN Decision 1).
 	if !dispatchDetach {
+		if !spec.ResumeDuringTurn {
+			// The worker is, by construction, mid-turn: it was started a moment
+			// ago. An agent that will not hand over a session in that state
+			// would answer with an error from its own session store, which
+			// reads like a broken dispatch rather than like a thing that
+			// resolves itself. Say what is true instead. The hint above is
+			// already the command to run, so this does not repeat it.
+			fmt.Fprintf(cmd.ErrOrStderr(),
+				"niwa: %s will not open a session while its turn is still running, so the terminal stays here. The worker is going; resume it with the command above once it finishes.\n",
+				spec.Binary)
+			return nil
+		}
 		if err := dispatchAttach(spec, handle, instancePath); err != nil {
 			fmt.Fprintf(cmd.ErrOrStderr(), "niwa: warning: could not attach to session %s: %v\n", sessionID, err)
 			fmt.Fprintf(cmd.ErrOrStderr(), "niwa: the session is running; attach later with: %s %s %s\n",

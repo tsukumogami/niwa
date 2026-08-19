@@ -74,10 +74,11 @@ it launches a Claude one, with the same command and no agent flag — the agent
 is whichever one `NIWA_AGENT` and your workspace's `default_agent` already
 resolve to. It provisions a fresh instance, starts `codex exec` detached inside
 it, recovers the session id from the session record Codex writes, and prints
-`codex resume <id>`. Without `--detach` it runs that same command for you as
-its last step, in the instance, with your terminal attached — while the worker
-is still going. If Codex won't hand you a session whose turn is still in
-flight, use `--detach` and resume once it's finished. The worker's own output is kept in the instance, at
+`codex resume <id>`. It doesn't run that command for you, even without
+`--detach`, and `--detach` makes no difference to a Codex dispatch: Codex won't
+open a session while its turn is still running, and the worker has just started
+one. So dispatch says the worker is going and leaves you the command, which
+works from the moment the turn ends. The worker's own output is kept in the instance, at
 `.niwa/dispatch-codex.out` and `.niwa/dispatch-codex.err`, which is where to
 look when a run does something you didn't expect.
 

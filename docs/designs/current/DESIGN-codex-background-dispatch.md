@@ -835,6 +835,30 @@ files unmerged.
   `--thread-id`; Codex mints the UUIDv7 and niwa learns it from the
   record. Any design premised on pre-assigning the id is dead, which is
   why capture exists at all.
+- **A session cannot be resumed while its turn is still running, so
+  dispatch does not try.** Measured: with a worker mid-turn, `codex exec
+  resume <id>` exits 1 with "thread-store conflict: thread `<id>`
+  already has an active writer", raised by `codex_core::session` --
+  the session store, not the terminal front end, so the interactive verb
+  refuses on the same grounds. It clears when the turn ends; the
+  end-to-end resume in this branch's evidence was against a finished
+  session, which is why this went unnoticed until it was asked about
+  directly. It matters because dispatch's last step without `--detach`
+  is to resume the session it just started, when the worker is mid-turn
+  by construction: every non-detached Codex dispatch would have ended in
+  a store-conflict error from a dispatch that in fact succeeded.
+
+  The fix is a declared field rather than a branch: `ResumeDuringTurn`
+  on the launch description, true for an agent that backgrounds its own
+  session and expects to be attached to, false for one that holds an
+  exclusive writer for the length of the turn. False is the default, so
+  an agent whose behavior here is unmeasured gets niwa's honest sentence
+  instead of an error from its own store. Neither alternative was
+  tenable: waiting for the turn would make dispatch block for as long as
+  the task, and forcing the resume would corrupt the record both sides
+  are writing. `TestDispatchDoesNotResumeAnAgentThatRefusesMidTurn`
+  binds it in both directions against a substituted spec, so it tests
+  the declaration and not one agent's row.
 
 Also ruled out by measurement: `--full-auto` and `-a/--ask-for-approval`
 do not exist on `codex exec` in 0.147.0 -- they are interactive-only,

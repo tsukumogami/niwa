@@ -227,6 +227,24 @@ type LaunchSpec struct {
 	// into a session interactively.
 	ResumeArgs []string
 
+	// ResumeDuringTurn reports whether the agent will hand over a session
+	// whose launched turn is still running.
+	//
+	// It exists because dispatch's last step, without --detach, is to resume
+	// the session it just started -- at which point the worker is by
+	// definition still working. An agent that backgrounds its own session
+	// expects exactly that and hands it over. An agent that holds an exclusive
+	// writer on the session for the length of the turn refuses, and the
+	// refusal is not niwa's to route around: waiting for the turn would make
+	// dispatch block for as long as the task, and forcing it would corrupt the
+	// record both sides are writing. So niwa declines to try, says the worker
+	// is still running, and leaves the developer the resume command.
+	//
+	// False is the conservative default: an agent whose behavior here has not
+	// been measured gets the honest message rather than an error from its own
+	// session store.
+	ResumeDuringTurn bool
+
 	// HintVerbs are the agent's own management verbs, printed after a
 	// successful dispatch as "<binary> <verb> <handle>" so a developer can
 	// reach the session without niwa in the way. They are the agent's
@@ -270,7 +288,10 @@ var launchSpecs = map[agent.Agent]LaunchSpec{
 			Liveness: LivenessRecordPresence,
 		},
 		ResumeArgs: []string{"attach"},
-		HintVerbs:  []string{"attach", "logs", "stop"},
+		// A backgrounded session is meant to be attached to while it works;
+		// that is what backgrounding it is for.
+		ResumeDuringTurn: true,
+		HintVerbs:        []string{"attach", "logs", "stop"},
 	},
 
 	agent.AgentCodex: {
@@ -335,7 +356,13 @@ var launchSpecs = map[agent.Agent]LaunchSpec{
 			Liveness: LivenessNone,
 		},
 		ResumeArgs: []string{"resume"},
-		HintVerbs:  []string{"resume"},
+		// Measured against 0.147.0: resuming a session whose turn is still
+		// running is refused by the session store itself, not by the terminal
+		// front end -- "thread-store conflict: thread <id> already has an
+		// active writer", exit 1, from codex_core::session. It clears when the
+		// turn ends.
+		ResumeDuringTurn: false,
+		HintVerbs:        []string{"resume"},
 	},
 }
 

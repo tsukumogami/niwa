@@ -98,6 +98,10 @@ func TestDispatchUsesTheResolvedAgentsSpec(t *testing.T) {
 		Flags:       agentplan.LaunchFlags{Model: "--pick"},
 		ResumeArgs:  []string{"reopen", "--by-id"},
 		HintVerbs:   []string{"reopen", "kill"},
+		// So the resume assertion below reaches resume at all; whether an agent
+		// hands over a running session is a different property with its own
+		// test.
+		ResumeDuringTurn: true,
 	}
 
 	var askedFor []agent.Agent
@@ -195,6 +199,20 @@ func TestDispatchSharedHalfRunsForEveryAgent(t *testing.T) {
 				return nil
 			}
 			t.Cleanup(func() { dispatchAttach = prev })
+
+			// Force the mid-turn resume flag on, for every agent, so the resume
+			// half runs and can be compared across them. Whether a given agent
+			// hands over a running session is a real difference between them
+			// and it has its own test; it is not this one's subject, and
+			// letting it decide which agents reach the resume assertions here
+			// would leave the shared half unchecked for exactly the agent whose
+			// declaration differs. Everything else about the spec is the
+			// agent's own, so the assertions below still read the real row.
+			resumable := spec
+			resumable.ResumeDuringTurn = true
+			prevSpec := dispatchLaunchSpec
+			dispatchLaunchSpec = func(agent.Agent) (agentplan.LaunchSpec, bool) { return resumable, true }
+			t.Cleanup(func() { dispatchLaunchSpec = prevSpec })
 
 			if _, _, err := runDispatchCmd(t, "do a thing"); err != nil {
 				t.Fatalf("dispatch: %v", err)
@@ -431,5 +449,73 @@ func TestDispatchResumeUsesTheDeclaredVerb(t *testing.T) {
 	}
 	if gotHandle == "" {
 		t.Error("resume was handed an empty handle")
+	}
+}
+
+// TestDispatchDoesNotResumeAnAgentThatRefusesMidTurn asserts the attach step is
+// skipped, not attempted and recovered from, for an agent whose declaration
+// says it will not hand over a session whose turn is still running.
+//
+// The distinction is the whole point. Attempting it and warning on the failure
+// leaves the developer reading the agent's own words for the situation --
+// against codex-cli 0.147.0, "thread-store conflict: thread <id> already has an
+// active writer" -- at the end of a dispatch that in fact succeeded. The worker
+// is running, the mapping is durable, the session is resumable in a minute. A
+// dispatch that ends in a store-conflict error reads as a broken dispatch.
+//
+// It runs against the declaration rather than against an agent name: whichever
+// agents declare false get this behavior, and an agent that later declares true
+// gets the attach without this test changing.
+func TestDispatchDoesNotResumeAnAgentThatRefusesMidTurn(t *testing.T) {
+	root := setupDispatchWorkspace(t)
+	chdir(t, root)
+	setHostConfig(t, "")
+	installDispatchFakes(t, root)
+	dispatchDetach = false
+
+	attached := false
+	prevAttach := dispatchAttach
+	dispatchAttach = func(agentplan.LaunchSpec, string, string) error {
+		attached = true
+		return nil
+	}
+	t.Cleanup(func() { dispatchAttach = prevAttach })
+
+	// The workspace's own agent declares true, so substitute a spec that
+	// declares false and change nothing else. Reading the flag from the spec
+	// the dispatch resolved is what makes this a contract test rather than a
+	// test of one agent's row.
+	base, ok := agentplan.For(agent.AgentClaude).LaunchSpec()
+	if !ok {
+		t.Fatal("no launch spec for the default agent")
+	}
+	refusing := base
+	refusing.ResumeDuringTurn = false
+	prevSpec := dispatchLaunchSpec
+	dispatchLaunchSpec = func(agent.Agent) (agentplan.LaunchSpec, bool) { return refusing, true }
+	t.Cleanup(func() { dispatchLaunchSpec = prevSpec })
+
+	_, stderr, err := runDispatchCmd(t, "do a thing")
+	if err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	if attached {
+		t.Error("dispatch resumed a session its agent will not hand over mid-turn; the developer gets a store-conflict error at the end of a dispatch that worked")
+	}
+	if !strings.Contains(stderr, "still running") {
+		t.Errorf("stderr = %q, want it to say the worker is still running; a terminal that silently stays put is indistinguishable from a failed attach", stderr)
+	}
+
+	// And the same dispatch with the flag set does attach, so the skip is
+	// keyed on the declaration rather than on anything else about this path.
+	attached = false
+	allowing := base
+	allowing.ResumeDuringTurn = true
+	dispatchLaunchSpec = func(agent.Agent) (agentplan.LaunchSpec, bool) { return allowing, true }
+	if _, _, err := runDispatchCmd(t, "do another thing"); err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	if !attached {
+		t.Error("dispatch skipped the attach for an agent that declares it hands over a running session")
 	}
 }
